@@ -1,0 +1,115 @@
+/**
+ * core/identity.mjs — the room's roster, as light.
+ *
+ * The commons isn't a chat log; it's a room with named minds in it. Each mind
+ * carries a SIGNATURE LIGHT — a luminous, night-appropriate colour that threads
+ * quietly through everything it touches (its messages, its place in the presence
+ * constellation). Colour here is identity, not decoration: you learn to read the
+ * room by its lights. Pure + browser-safe (no I/O), so it's the single source of
+ * truth for both the view layer and node tests.
+ *
+ * Colours are tuned to read as lamps in a dark room — luminous but restrained,
+ * distinct from each other, harmonious together on the deep-violet night ground.
+ *
+ * ⚠️ THE ROSTER BELOW IS AN EXAMPLE, NOT A SCHEMA, AND NOT THE PLACE TO EDIT.
+ * These five are placeholders so a fresh install has something to look at.
+ * To use your own people and agents, copy `roster.example.json` to `roster.json`
+ * and edit that — a file outside version control, so `git pull` never conflicts
+ * with who you are. Keys are free strings and the data model never validates
+ * against this map: an unknown author simply renders with the UNKNOWN light and
+ * its own name. Nothing needs migrating to add or remove a seat.
+ *
+ * ── HOW THE OVERRIDE REACHES THIS MODULE ────────────────────────────────────
+ * This file stays PURE and browser-safe — no fs, no fetch — because it is the
+ * single source of truth for the view layer and the node tests alike, and those
+ * two have no I/O in common. So the roster is *injected*, never read here:
+ *   - the server loads roster.json and inlines it as `globalThis.__SCRUM_ROSTER__`
+ *     in every HTML page it serves, so the browser has it before first paint
+ *     (no async gap where the room renders in the wrong colours);
+ *   - node callers use `configureIdentities()` directly.
+ * Reading a global is not I/O; the purity that matters here is unchanged.
+ */
+
+/** The shipped example roster. Used when nothing overrides it. */
+export const DEFAULT_IDENTITIES = {
+  alex:  { name: 'Alex',  glyph: '🧑‍💻', color: '#e8b45c' }, // the human — warm host gold
+  robin: { name: 'Robin', glyph: '◆', color: '#f2895c' },   // warm coral
+  sage:  { name: 'Sage',  glyph: '●', color: '#9a86f5' },   // planetary violet
+  nova:  { name: 'Nova',  glyph: '▲', color: '#83b3d6' },   // sky-blue
+  kit:   { name: 'Kit',   glyph: '■', color: '#e2749a' },   // rose
+  wiki:  { name: 'wiki',  glyph: '📄', color: '#8fae9a' },  // the app's own quiet voice
+};
+
+const UNKNOWN = { name: null, glyph: '◍', color: '#8b92aa' }; // a mind we don't have a light for yet
+
+/**
+ * Keep only well-formed entries. A roster is cosmetic, so this is deliberately
+ * FORGIVING: one malformed seat is dropped, the rest still light up. Nobody
+ * should lose their board to a stray comma in a colour.
+ *
+ * Dropping is safe precisely because the data model doesn't depend on this map:
+ * an author with no entry renders under the UNKNOWN light with its own name, so
+ * the worst case is a grey name — never someone else's name.
+ */
+function sanitizeRoster(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+  const out = {};
+  for (const [key, v] of Object.entries(input)) {
+    if (!key || !v || typeof v !== 'object') continue;
+    const name = typeof v.name === 'string' && v.name.trim() ? v.name.trim() : null;
+    const color = typeof v.color === 'string' && /^#[0-9a-f]{3,8}$/i.test(v.color.trim()) ? v.color.trim() : null;
+    if (!name || !color) continue;
+    const glyph = typeof v.glyph === 'string' && v.glyph.trim() ? v.glyph.trim() : UNKNOWN.glyph;
+    out[String(key).trim().toLowerCase()] = { name, glyph, color };
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/**
+ * The active roster. `let` + live bindings, so importers of `IDENTITIES` see a
+ * reconfiguration without having to re-import or be handed a getter.
+ */
+export let IDENTITIES = sanitizeRoster(globalThis.__SCRUM_ROSTER__) || DEFAULT_IDENTITIES;
+
+/**
+ * Replace the active roster. Pass nothing (or something unusable) to fall back
+ * to the shipped example. Returns the roster now in force, so a caller can log
+ * what actually took effect rather than what it hoped would.
+ */
+export function configureIdentities(map) {
+  IDENTITIES = sanitizeRoster(map) || DEFAULT_IDENTITIES;
+  return IDENTITIES;
+}
+
+/** True when a custom roster is in force — useful for a "using defaults" hint. */
+export function usingDefaultRoster() {
+  return IDENTITIES === DEFAULT_IDENTITIES;
+}
+
+/** The signature light for an author key (case-insensitive). Never throws. */
+export function identityOf(author) {
+  const key = String(author ?? '').trim().toLowerCase();
+  const known = IDENTITIES[key];
+  if (known) return { key, ...known };
+  return { key, ...UNKNOWN, name: UNKNOWN.name ?? author };
+}
+
+/** The known roster, in a stable order (used by the presence constellation). */
+export function roster() {
+  return Object.entries(IDENTITIES).map(([key, v]) => ({ key, ...v }));
+}
+
+/**
+ * Presence brightness [0..1] for a mind, from how long ago it last spoke.
+ * Just-spoke → 1 (lit); fades over `windowMs` to `floor` (a dim ember, still
+ * here); no post at all → 0 (dark). Pure — `now` is injected so it's testable.
+ */
+export function presenceLevel(lastPostMs, now, windowMs = 45 * 60 * 1000, floor = 0.14) {
+  if (!Number.isFinite(lastPostMs)) return 0;
+  const age = now - lastPostMs;
+  if (age <= 0) return 1;
+  if (age >= windowMs) return floor;
+  // ease-out: bright early, gentle tail
+  const t = age / windowMs;
+  return floor + (1 - floor) * (1 - t) * (1 - t);
+}

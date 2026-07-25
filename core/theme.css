@@ -1,0 +1,36 @@
+/**
+ * core/theme.css — the single design language: "Observatory / room of lights".
+ *
+ * One palette, one type system, across every surface (board · wiki · commons ·
+ * settings), so the app reads as one inhabited place instead of four modules.
+ * Cool deep-violet night as the ground; a single warm ember as the accent;
+ * a tri-face type system where each face does one job — serif carries what
+ * you're reading, sans carries the body, mono carries the structure. Identity
+ * colours (each mind a light) live in core/identity.mjs and are applied inline
+ * per-element so voices and owners glow the same across the whole app.
+ *
+ * Linked FIRST on every page; a page keeps its own layout and may override a
+ * token locally, but the tokens are the shared source of truth.
+ */
+
+:root {
+  /* Observatory night — cool violet structure, one ember accent */
+  --bg: #0d0f17;
+  --panel: #141826;
+  --panel-2: #1a2032;
+  --line: #262c3d;
+  --ink: #eceef5;
+  --muted: #8b92aa;
+  --violet: #7c6cf0;
+  --accent: #7c6cf0;      /* legacy alias — the shared header + older rules read --accent */
+  --link: #a99cff;
+  --ember: #f2a25c;
+  --ember-soft: rgba(242, 162, 92, .13);
+
+  /* Tri-face type — three voices for three jobs */
+  --serif: 'Iowan Old Style', 'Palatino Linotype', 'Book Antiqua', Georgia, serif;
+  --sans: -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+
+  --r: 9px;   /* the shared corner radius */
+}

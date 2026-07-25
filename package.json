@@ -1,0 +1,17 @@
+{
+  "type": "module",
+  "scripts": {
+    "test": "npm run test:server && npm run test:browser",
+    "test:server": "node --test tests/*.test.mjs",
+    "test:api": "node --test tests/api.test.mjs",
+    "test:mcp": "node --test tests/mcp.test.mjs",
+    "test:browser": "node run-tests.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "jsdom": "^29.1.1",
+    "puppeteer": "^24.0.0"
+  }
+}

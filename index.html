@@ -1,0 +1,4372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>manyhands</title>
+<link rel="stylesheet" href="./core/theme.css"><!-- shared design language (#333) -->
+<link rel="stylesheet" href="./core/header.css"><!-- #303-2 shared nav (mounted by the module bridge below) -->
+<style>
+/* ── CSS Custom Properties ── */
+/* #333 — the board on the shared design language. Structural vars alias the
+   Observatory tokens from core/theme.css; the card-TYPE accents are harmonised
+   to the night palette but kept distinct (type is still read by colour). */
+:root {
+  --bg-base: var(--bg);
+  --bg-column: rgba(20, 24, 38, 0.55);
+  --bg-card: var(--panel);
+  --bg-input: var(--bg);
+  --border-subtle: var(--line);
+  --border-input: #37405a;
+  --text-primary: var(--ink);
+  --text-secondary: var(--muted);
+  --text-muted: #6b7390;
+  --accent-task: #7c6cf0;       /* sage — the house voice */
+  --accent-idea: #f2a25c;       /* ember */
+  --accent-goal: #5cc493;       /* lit green */
+  --accent-reference: #9a86f5;  /* soft violet */
+  --accent-feature: #e2749a;    /* rose */
+  --shadow-card: 0 4px 10px -3px rgba(0,0,0,0.45);
+  --shadow-card-hover: 0 12px 28px -6px rgba(0,0,0,0.6);
+  --radius-lg: 12px;
+  --radius-md: 8px;
+  --radius-sm: 6px;
+  --font-stack: var(--sans);
+  --border-strip-width: 4px;
+}
+
+/* ── Reset & Base ── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: var(--font-stack);
+  background: var(--bg-base);
+  color: var(--text-primary);
+  min-height: 100vh;
+  overflow-x: auto;
+}
+
+/* ── Noise Texture Overlay (CSS-only SVG data URI) ── */
+body::before {
+  content: '';
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  pointer-events: none;
+  z-index: 9998;
+  opacity: 0.03;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-size: 256px 256px;
+}
+
+/* ── Header ── */
+.board-header {
+  padding: 20px 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border-subtle);
+  background: linear-gradient(135deg, #0f172a 0%, #1a1040 25%, #0f172a 50%, #0c2a2a 75%, #0f172a 100%);
+  background-size: 400% 400%;
+  animation: headerGradient 25s ease infinite;
+  position: relative;
+  z-index: 1;
+}
+@keyframes headerGradient {
+  0%   { background-position: 0% 50%; }
+  25%  { background-position: 100% 50%; }
+  50%  { background-position: 100% 0%; }
+  75%  { background-position: 0% 100%; }
+  100% { background-position: 0% 50%; }
+}
+
+.board-header h1 {
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.board-header .logo { font-size: 1.75rem; }
+
+/* #303-2 — shared nav sits inline in the board toolbar (content-sized pills,
+   not the full-width strip the other surfaces use). Appearance = core/header.css. */
+.board-header-actions { display: flex; align-items: center; gap: 10px; }
+.board-header .topnav { display: inline-flex; gap: 8px; margin: 0; }
+.board-header .topnav .navlink { flex: 0 0 auto; padding: 8px 14px; }
+
+/* ── Board Layout ── */
+.board {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(320px, 1fr);
+  gap: 24px;
+  padding: 24px 32px;
+  min-height: calc(100vh - 73px);
+  align-items: start;
+}
+
+/* ── Column edit button (✏️) in header ── */
+.column-edit-btn {
+  background: transparent;
+  border: none;
+  font-size: 0.85rem;
+  cursor: pointer;
+  padding: 2px 6px;
+  opacity: 0.35;
+  transition: opacity 0.15s;
+  margin-left: auto;
+  margin-right: 6px;
+  border-radius: var(--radius-sm);
+}
+.column-edit-btn:hover {
+  opacity: 1;
+  background: rgba(148, 163, 184, 0.1);
+}
+
+/* Column header in edit mode: tighter padding so the input + delete fit cleanly */
+.column-header.editing .column-name-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+.column-delete-btn {
+  background: rgba(248, 113, 113, 0.15);
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  color: #f87171;
+  border-radius: var(--radius-sm);
+  padding: 3px 8px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: background 0.15s;
+}
+.column-delete-btn:hover {
+  background: rgba(248, 113, 113, 0.3);
+}
+
+/* ── Relationship badges (Card #42) ── */
+.relationship-badge-blocked,
+.relationship-badge-blocking {
+  display: inline-block;
+  font-size: 0.7rem;
+  line-height: 1;
+  padding: 2px;
+  margin-left: 4px;
+  cursor: help;
+  user-select: none;
+  vertical-align: middle;
+}
+.relationship-badge-blocked {
+  color: #f87171; /* red — this card is blocked */
+}
+.relationship-badge-blocking {
+  color: #6ee7b7; /* green — this card is blocking others */
+}
+
+/* Typeahead dropdown for relationships in edit form */
+.relationship-typeahead {
+  background: var(--bg-card);
+  border: 1px solid var(--border-input);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 8px 16px rgba(0,0,0,0.3);
+  max-height: 240px;
+  overflow-y: auto;
+}
+.relationship-typeahead-item {
+  padding: 6px 10px;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+.relationship-typeahead-item.highlighted,
+.relationship-typeahead-item:hover {
+  background: rgba(59, 130, 246, 0.2);
+  color: var(--text-primary);
+}
+
+/* ── Add Column button at end of board (+) ── */
+.btn-add-column {
+  background: transparent;
+  border: 2px dashed rgba(148, 163, 184, 0.25);
+  color: var(--text-muted);
+  font-size: 1.5rem;
+  font-weight: 300;
+  min-width: 60px;
+  min-height: 200px;
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s, background 0.2s;
+  align-self: start;
+}
+.btn-add-column:hover {
+  border-color: var(--accent-task);
+  color: var(--accent-task);
+  background: rgba(59, 130, 246, 0.05);
+}
+
+/* ── Column ── */
+.column {
+  background: var(--bg-column);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  min-height: 200px;
+  display: flex;
+  flex-direction: column;
+  backdrop-filter: blur(12px);
+}
+
+.column-header {
+  padding: 16px 20px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.column-header .count {
+  background: rgba(148, 163, 184, 0.15);
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+/* #303-4 — column collapse toggle + backlog staleness expander */
+.column-collapse-btn {
+  background: none; border: none; color: var(--text-muted);
+  cursor: pointer; font-size: 0.9rem; line-height: 1; padding: 0 6px 0 0;
+  transition: transform 0.15s;
+}
+.column-collapse-btn:hover { color: var(--text-primary); }
+.column-header .column-name-text { margin-right: auto; } /* push edit/count to the right */
+.column.collapsed .column-collapse-btn { transform: rotate(-90deg); }
+.column.collapsed .column-body { display: none; }
+.column.collapsed { align-self: flex-start; } /* shrink to just the header */
+.stale-toggle {
+  width: 100%; text-align: left;
+  background: rgba(148, 163, 184, 0.08);
+  border: 1px dashed var(--border-subtle);
+  color: var(--text-muted);
+  border-radius: 8px; padding: 7px 12px; margin: 6px 0;
+  font-size: 0.8rem; cursor: pointer; font-family: var(--font-stack);
+}
+.stale-toggle:hover { color: var(--text-primary); background: rgba(148, 163, 184, 0.15); }
+
+.column-rename-input {
+  font-family: var(--font-stack);
+  font-size: 0.8rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  background: rgba(30, 41, 59, 0.8);
+  color: var(--text-primary);
+  border: 1px solid var(--accent-task);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  outline: none;
+  width: 100%;
+  max-width: 200px;
+}
+
+.column-header.backlog-header {
+  background: linear-gradient(135deg, rgba(71,85,105,0.25) 0%, rgba(30,41,59,0) 100%);
+}
+
+.column-header.in-progress-header {
+  background: linear-gradient(135deg, rgba(245,158,11,0.12) 0%, rgba(30,41,59,0) 100%);
+}
+
+.column-header.done-header {
+  background: linear-gradient(135deg, rgba(16,185,129,0.12) 0%, rgba(30,41,59,0) 100%);
+}
+
+.column-body {
+  padding: 12px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* ── Card ── */
+.card {
+  background: linear-gradient(180deg, rgba(40, 55, 80, 0.5) 0%, var(--bg-card) 40%);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 14px 16px 14px 20px;
+  box-shadow: var(--shadow-card);
+  cursor: default;
+  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+  animation: cardAppear 0.3s ease-out;
+  position: relative;
+  overflow: hidden;
+}
+/* Colored left border strip — 4px, matches type color */
+.card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: var(--border-strip-width);
+  border-radius: var(--radius-md) 0 0 var(--radius-md);
+}
+.card[data-type="task"]::before { background: var(--accent-task); }
+.card[data-type="idea"]::before { background: var(--accent-idea); }
+.card[data-type="goal"]::before { background: var(--accent-goal); }
+.card[data-type="reference"]::before { background: var(--accent-reference); }
+.card[data-type="feature"]::before { background: var(--accent-feature); }
+.card:hover {
+  transform: scale(1.02);
+}
+.card[data-type="task"]:hover {
+  box-shadow: var(--shadow-card-hover), 0 0 20px rgba(59,130,246,0.3);
+  border-color: rgba(59,130,246,0.4);
+}
+.card[data-type="idea"]:hover {
+  box-shadow: var(--shadow-card-hover), 0 0 20px rgba(245,158,11,0.3);
+  border-color: rgba(245,158,11,0.4);
+}
+.card[data-type="goal"]:hover {
+  box-shadow: var(--shadow-card-hover), 0 0 20px rgba(16,185,129,0.3);
+  border-color: rgba(16,185,129,0.4);
+}
+.card[data-type="reference"]:hover {
+  box-shadow: var(--shadow-card-hover), 0 0 20px rgba(139,92,246,0.3);
+  border-color: rgba(139,92,246,0.4);
+}
+.card[data-type="feature"]:hover {
+  box-shadow: var(--shadow-card-hover), 0 0 20px rgba(236,72,153,0.3);
+  border-color: rgba(236,72,153,0.4);
+}
+.card-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 6px;
+  min-height: 28px;
+}
+/* Large type emoji in top-left */
+.card-emoji {
+  font-size: 1.5rem;
+  line-height: 1;
+  flex-shrink: 0;
+}
+/* #303-5 — the title lives on its OWN full-width line (below the meta row) so
+   assignee chips no longer squeeze it to one word per line in narrow columns. */
+.card-title {
+  font-family: var(--serif);   /* #333 — serif titles, matching the wiki's pages */
+  font-size: 16.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.25;
+  margin-bottom: 6px;
+  overflow-wrap: anywhere; /* long unbroken tokens (URLs) wrap instead of overflowing */
+}
+/* Assignee chips grouped and pushed to the right edge of the meta row. */
+.card-top .card-assignees { margin-left: auto; display: inline-flex; gap: 4px; flex-shrink: 0; }
+/* Assignee badge — pill-shaped, top-right. #333: it wears the assignee's
+   identity light (--mind, set inline) — the same colour as their voice in the
+   commons — so ownership and presence read the same across the whole app. */
+.card-assignee {
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 2px 8px 2px 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--mind, #94a3b8) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--mind, transparent) 32%, transparent);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  white-space: nowrap;
+  line-height: 1.4;
+  color: var(--mind, var(--text-secondary));
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s, color 0.15s, transform 0.1s, box-shadow 0.15s;
+}
+.card-assignee:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.15);
+}
+.card-assignee.active-filter {
+  box-shadow: 0 0 0 2px currentColor inset, 0 0 8px rgba(255,255,255,0.05);
+  filter: brightness(1.1);
+}
+.card-assignee .assignee-emoji {
+  font-size: 0.85rem;
+  line-height: 1;
+}
+.card-description {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin-bottom: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow: hidden;
+  transition: max-height 0.25s ease;
+}
+
+/* Collapsed state: ~4 lines max (13px * 1.5 line-height * 4 = ~78px, add padding tolerance) */
+.card-description.collapsed {
+  max-height: 6em; /* ~4 lines at 1.5 line-height */
+}
+
+.card-description:not(.collapsed) {
+  max-height: none;
+}
+
+/* Show more / Show less toggle */
+.desc-toggle {
+  display: inline-block;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--text-muted);
+  cursor: pointer;
+  margin-top: 2px;
+  margin-bottom: 6px;
+  user-select: none;
+  transition: color 0.15s;
+  border: none;
+  background: none;
+  padding: 0;
+  font-family: inherit;
+}
+
+.desc-toggle:hover {
+  color: var(--text-secondary);
+}
+.card-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+/* Label pills — small, rounded, subtly colored */
+.label-tag {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.12);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.label-tag[data-card-type="task"] {
+  background: rgba(59,130,246,0.15);
+  color: #93bbfd;
+}
+.label-tag[data-card-type="idea"] {
+  background: rgba(245,158,11,0.15);
+  color: #fbbf24;
+}
+.label-tag[data-card-type="goal"] {
+  background: rgba(16,185,129,0.15);
+  color: #6ee7b7;
+}
+.label-tag[data-card-type="reference"] {
+  background: rgba(139,92,246,0.15);
+  color: #c4b5fd;
+}
+.label-tag[data-card-type="feature"] {
+  background: rgba(236,72,153,0.15);
+  color: #f9a8d4;
+}
+/* Clickable label tags (for filter) */
+.label-tag {
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s, color 0.15s, transform 0.1s, box-shadow 0.15s;
+}
+.label-tag:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.15);
+}
+.label-tag.active-filter {
+  box-shadow: 0 0 0 2px currentColor inset, 0 0 8px rgba(255,255,255,0.05);
+  filter: brightness(1.1);
+}
+
+/* ── Short ID Badge ── */
+.card-shortid {
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.15);
+  color: var(--text-muted);
+  flex-shrink: 0;
+  white-space: nowrap;
+  line-height: 1.4;
+}
+
+/* ── Priority Badge (#27) ── */
+.card-priority {
+  font-size: 0.65rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  padding: 2px 7px;
+  border-radius: 999px;
+  flex-shrink: 0;
+  white-space: nowrap;
+  line-height: 1.4;
+  cursor: pointer;
+  user-select: none;
+  transition: transform 0.1s ease, filter 0.15s ease;
+}
+.card-priority:hover { transform: scale(1.05); filter: brightness(1.1); }
+.card-priority.priority-p0 { background: rgba(239, 68, 68, 0.18); color: rgb(220, 38, 38); border: 1px solid rgba(239, 68, 68, 0.35); }
+.card-priority.priority-p1 { background: rgba(249, 115, 22, 0.18); color: rgb(234, 88, 12); border: 1px solid rgba(249, 115, 22, 0.35); }
+.card-priority.priority-p2 { background: rgba(234, 179, 8, 0.18); color: rgb(202, 138, 4); border: 1px solid rgba(234, 179, 8, 0.35); }
+.card-priority.priority-p3 { background: rgba(148, 163, 184, 0.18); color: var(--text-muted); border: 1px solid rgba(148, 163, 184, 0.3); }
+.card-priority.active-filter { box-shadow: 0 0 0 2px var(--accent-task), 0 0 0 4px rgba(59, 130, 246, 0.25); }
+
+/* ── Short ID Links in descriptions ── */
+.shortid-link {
+  color: var(--accent-task);
+  text-decoration: none;
+  cursor: pointer;
+  font-weight: 600;
+}
+.shortid-link:hover {
+  text-decoration: underline;
+}
+
+/* ── Card Highlight (on #N click) ── */
+.card.highlighted {
+  animation: shortIdHighlight 1.5s ease-out;
+}
+@keyframes shortIdHighlight {
+  0%   { box-shadow: 0 0 0 3px var(--accent-task), 0 0 20px rgba(59,130,246,0.6); }
+  100% { box-shadow: var(--shadow-card); }
+}
+
+/* ── Short ID display in edit mode ── */
+.shortid-display {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  padding: 8px 12px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-input);
+  border-radius: var(--radius-sm);
+}
+
+/* ── Filter Strip ── */
+/* ── Conversations panel (#93) ── */
+.btn-toggle-convs {
+  margin-left: 12px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  background: rgba(59, 130, 246, 0.1);
+  color: var(--text-primary, #e2e8f0);
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.btn-toggle-convs:hover { background: rgba(59, 130, 246, 0.2); }
+.btn-toggle-convs.active { background: rgba(59, 130, 246, 0.3); }
+
+.convs-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 420px;
+  max-width: 90vw;
+  background: rgba(15, 23, 42, 0.97);
+  border-left: 1px solid rgba(148, 163, 184, 0.2);
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.3);
+  display: none;
+  flex-direction: column;
+  z-index: 9000;
+}
+.convs-panel.visible {
+  display: flex;
+}
+
+.convs-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.15);
+}
+.convs-panel-title {
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+.convs-close {
+  background: transparent;
+  border: none;
+  color: var(--text-muted, #94a3b8);
+  font-size: 1.1rem;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+.convs-close:hover { background: rgba(148, 163, 184, 0.1); color: var(--text-primary, #e2e8f0); }
+/* #226 — promote the commons panel to the full-page Commons view */
+.convs-panel-actions { display: flex; align-items: center; gap: 4px; }
+.convs-promote { color: var(--text-muted, #94a3b8); text-decoration: none; font-size: 0.8rem; padding: 4px 8px; border-radius: 4px; white-space: nowrap; }
+.convs-promote:hover { background: rgba(148, 163, 184, 0.1); color: var(--text-primary, #e2e8f0); }
+
+.convs-feed {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.conv-msg {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(148, 163, 184, 0.05);
+}
+.conv-msg-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.72rem;
+  color: var(--text-muted, #94a3b8);
+}
+.conv-msg-author { font-weight: 600; }
+.conv-msg-body {
+  font-size: 0.88rem;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+/* #291 — clickable #NNN card refs in the inline commons panel */
+.conv-card-ref {
+  color: var(--accent-task);
+  text-decoration: none;
+  font-weight: 600;
+  border-bottom: 1px dotted var(--accent-task);
+  cursor: pointer;
+}
+.conv-card-ref:hover { border-bottom-style: solid; }
+/* #303-1 — chat-minimal markdown in the inline commons panel */
+.conv-msg-body strong { font-weight: 700; }
+.conv-msg-body em { font-style: italic; }
+.conv-msg-body ul { margin: 4px 0; padding-left: 20px; }
+.conv-msg-body li { margin: 1px 0; }
+.convs-empty {
+  color: var(--text-muted, #94a3b8);
+  font-style: italic;
+  text-align: center;
+  padding: 24px 8px;
+  font-size: 0.85rem;
+}
+
+.convs-form {
+  border-top: 1px solid rgba(148, 163, 184, 0.15);
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.convs-body {
+  width: 100%;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 6px;
+  color: var(--text-primary, #e2e8f0);
+  font-family: inherit;
+  font-size: 0.88rem;
+  padding: 8px;
+  resize: vertical;
+  box-sizing: border-box;
+}
+.convs-form-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+/* #113 — commons attachments */
+.convs-attachments { display: flex; flex-wrap: wrap; gap: 6px; }
+.conv-attach-chip {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 100%;
+  padding: 3px 6px 3px 8px; background: rgba(59, 130, 246, 0.15);
+  border: 1px solid rgba(59, 130, 246, 0.35); border-radius: 12px;
+  font-size: 0.78rem; color: var(--text-primary, #e2e8f0);
+}
+.conv-attach-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+.conv-attach-chip button { background: none; border: none; color: var(--text-secondary, #94a3b8); cursor: pointer; font-size: 1rem; line-height: 1; padding: 0 2px; }
+.btn-attach-conv {
+  padding: 6px 10px; background: rgba(148, 163, 184, 0.12);
+  border: 1px solid rgba(148, 163, 184, 0.3); border-radius: 6px; cursor: pointer; font-size: 1rem;
+}
+.conv-msg-attachments { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.conv-attach-img { max-width: 280px; max-height: 280px; border-radius: 8px; border: 1px solid rgba(148, 163, 184, 0.25); cursor: pointer; }
+.conv-attach-link {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 0.82rem; color: #60a5fa;
+  text-decoration: none; padding: 4px 8px; background: rgba(15, 23, 42, 0.5);
+  border: 1px solid rgba(148, 163, 184, 0.25); border-radius: 6px; width: fit-content;
+}
+.convs-form.dragover { outline: 2px dashed rgba(59, 130, 246, 0.6); outline-offset: -4px; }
+.convs-author {
+  flex: 1;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 6px;
+  color: var(--text-primary, #e2e8f0);
+  padding: 6px 8px;
+  font-size: 0.85rem;
+}
+.btn-post-conv {
+  padding: 6px 16px;
+  background: rgba(59, 130, 246, 0.25);
+  border: 1px solid rgba(59, 130, 246, 0.5);
+  border-radius: 6px;
+  color: var(--text-primary, #e2e8f0);
+  font-weight: 600;
+  cursor: pointer;
+}
+.btn-post-conv:hover { background: rgba(59, 130, 246, 0.4); }
+.btn-post-conv:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.filter-strip {
+  display: none;
+  padding: 12px 32px;
+  background: rgba(30, 41, 59, 0.55);
+  border-bottom: 1px solid var(--border-subtle);
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  position: relative;
+  z-index: 1;
+  animation: stripAppear 0.25s ease-out;
+}
+.filter-strip.visible { display: flex; }
+@keyframes stripAppear {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.filter-strip-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  margin-right: 4px;
+}
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 4px 4px 10px;
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.15);
+  color: #93bbfd;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border: 1px solid rgba(59, 130, 246, 0.35);
+}
+/* Assignee filter chips — visually distinct (teal/amber vs blue) */
+.filter-chip-assignee {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 4px 4px 10px;
+  border-radius: 999px;
+  background: rgba(16, 185, 129, 0.15);
+  color: #6ee7b7;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border: 1px solid rgba(16, 185, 129, 0.35);
+}
+.filter-chip-assignee .chip-emoji {
+  font-size: 0.85rem;
+  line-height: 1;
+}
+/* Undo toast (#31) — bottom-center, slides up briefly after undo */
+.undo-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 32px;
+  transform: translateX(-50%) translateY(20px);
+  background: rgba(15, 23, 42, 0.92);
+  color: var(--text-primary, #f1f5f9);
+  border: 1px solid rgba(59, 130, 246, 0.4);
+  border-radius: 10px;
+  padding: 10px 18px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  z-index: 10001;
+  opacity: 0;
+  pointer-events: none;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  transition: opacity 0.18s ease, transform 0.22s ease;
+}
+.undo-toast.visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* Multi-assignee checkbox group (#51) — used in both add and edit forms */
+.assignee-checkbox-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  padding: 6px 0 2px;
+}
+.assignee-cb {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 6px;
+  transition: background 0.15s;
+}
+.assignee-cb:hover { background: rgba(59,130,246,0.06); }
+.assignee-cb input[type="checkbox"] {
+  cursor: pointer;
+  margin: 0 4px 0 0;
+}
+
+/* Priority filter chips (#27) — colored per priority level */
+.filter-chip-priority {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 4px 4px 4px 10px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.filter-chip-priority-p0 { background: rgba(239, 68, 68, 0.18); color: rgb(248, 113, 113); border: 1px solid rgba(239, 68, 68, 0.4); }
+.filter-chip-priority-p1 { background: rgba(249, 115, 22, 0.18); color: rgb(251, 146, 60); border: 1px solid rgba(249, 115, 22, 0.4); }
+.filter-chip-priority-p2 { background: rgba(234, 179, 8, 0.18); color: rgb(250, 204, 21); border: 1px solid rgba(234, 179, 8, 0.4); }
+.filter-chip-priority-p3 { background: rgba(148, 163, 184, 0.18); color: var(--text-muted); border: 1px solid rgba(148, 163, 184, 0.4); }
+.filter-chip-x {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(148, 163, 184, 0.18);
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  transition: background 0.15s, color 0.15s, transform 0.1s;
+}
+.filter-chip-x:hover {
+  background: rgba(248, 113, 113, 0.7);
+  color: #fff;
+}
+.filter-chip-x:active { transform: scale(0.92); }
+.btn-clear-filter {
+  font-family: var(--font-stack);
+  font-size: 0.7rem;
+  font-weight: 600;
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 4px 12px;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-left: auto;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.btn-clear-filter:hover {
+  border-color: rgba(248, 113, 113, 0.6);
+  color: #f87171;
+  background: rgba(248, 113, 113, 0.05);
+}
+
+.for-filter-area {
+  display: none;
+  padding: 0 32px 10px;
+}
+.for-filter-area.visible { display: block; }
+.for-filter-input {
+  font-family: var(--font-stack);
+  font-size: 0.8rem;
+  padding: 5px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  width: 200px;
+  transition: border-color 0.15s;
+}
+.for-filter-input:focus {
+  outline: none;
+  border-color: var(--accent-blue);
+}
+.for-filter-input::placeholder { color: var(--text-muted); }
+
+/* Top-of-board search (#53) */
+.board-search-area { padding: 10px 32px 4px; }
+.board-search-input {
+  font-family: var(--font-stack);
+  font-size: 0.85rem;
+  padding: 7px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  width: 100%;
+  max-width: 520px;
+  box-sizing: border-box;
+  transition: border-color 0.15s;
+}
+.board-search-input:focus { outline: none; border-color: var(--accent-blue); }
+.board-search-input::placeholder { color: var(--text-muted); }
+
+.card-for {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  margin-left: 6px;
+  font-style: italic;
+}
+
+.label-mode-toggle {
+  font-family: var(--font-stack);
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 3px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  cursor: pointer;
+  margin-left: 4px;
+  letter-spacing: 0.03em;
+  transition: background 0.15s, border-color 0.15s;
+}
+.label-mode-toggle:hover {
+  background: rgba(59, 130, 246, 0.1);
+  border-color: rgba(59, 130, 246, 0.4);
+}
+.label-mode-toggle .mode-and.active {
+  color: #93bbfd;
+}
+.label-mode-toggle .mode-or.active {
+  color: #93bbfd;
+}
+.label-mode-toggle .mode-and:not(.active),
+.label-mode-toggle .mode-or:not(.active) {
+  color: var(--text-muted);
+}
+
+@keyframes cardAppear {
+  from { opacity: 0; transform: translateY(12px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* ── Add Card Form (Collapsible) ── */
+.btn-expand-form {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 2px dashed var(--border-subtle);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 1.2rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto 8px;
+  line-height: 1;
+}
+.btn-expand-form:hover {
+  border-color: var(--accent-task);
+  color: var(--accent-task);
+  background: rgba(59,130,246,0.08);
+}
+.btn-expand-form.active {
+  border-style: solid;
+  border-color: var(--accent-task);
+  color: var(--accent-task);
+  transform: rotate(45deg);
+}
+.add-card-form-wrapper {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.3s ease, opacity 0.25s ease;
+  opacity: 0;
+}
+.add-card-form-wrapper.expanded {
+  max-height: 500px;
+  opacity: 1;
+}
+.add-card-form {
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: rgba(30, 41, 59, 0.4);
+  transition: border-color 0.2s, background 0.2s;
+}
+.add-card-form:focus-within {
+  border-color: var(--accent-task);
+  background: rgba(30, 41, 59, 0.65);
+}
+
+.form-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.form-row.stretch { align-items: stretch; }
+
+.form-input, .form-select, .form-textarea {
+  font-family: var(--font-stack);
+  font-size: 0.82rem;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  border: 1px solid var(--border-input);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  outline: none;
+  transition: border-color 0.2s;
+  width: 100%;
+}
+
+.form-input:focus, .form-select:focus, .form-textarea:focus {
+  border-color: var(--accent-task);
+}
+
+.form-textarea {
+  resize: vertical;
+  min-height: 48px;
+  max-height: 120px;
+}
+
+.form-select {
+  appearance: none;
+  cursor: pointer;
+  padding-right: 28px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+}
+
+.form-select option {
+  background: var(--bg-card);
+  color: var(--text-primary);
+}
+
+.form-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 2px;
+  display: block;
+}
+
+.form-field { flex: 1; }
+
+.btn-add {
+  font-family: var(--font-stack);
+  font-size: 0.82rem;
+  font-weight: 600;
+  background: var(--accent-task);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 8px 20px;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.1s;
+  width: 100%;
+}
+
+.btn-add:hover { background: #2563eb; }
+.btn-add:active { transform: scale(0.98); }
+
+/* ── Edit Card ── */
+.card-edit-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: rgba(148, 163, 184, 0.1);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.2s ease, background 0.2s, color 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.8rem;
+  z-index: 2;
+  padding: 0;
+  line-height: 1;
+}
+.card:hover .card-edit-btn { opacity: 1; }
+.card-page-btn {
+  position: absolute; top: 8px; right: 38px;
+  width: 24px; height: 24px;
+  border-radius: var(--radius-sm);
+  background: rgba(148, 163, 184, 0.1);
+  color: var(--text-muted); text-decoration: none;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 0.8rem; line-height: 1; opacity: 0.45;   /* #232 — faintly visible always (discoverable), not hover-only */
+  transition: opacity 0.2s ease, background 0.2s, color 0.2s; z-index: 2;
+}
+.card:hover .card-page-btn { opacity: 1; }
+.card-page-btn:hover { background: rgba(148, 163, 184, 0.2); color: var(--text); }
+
+/* #233 — per-card column-move arrows (◀ ▶), no edit mode needed; grayed at the ends */
+.card-move-btn {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  width: 18px; height: 30px; padding: 0;
+  border: none; border-radius: var(--radius-sm);
+  background: rgba(148, 163, 184, 0.08); color: var(--text-muted);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 0.62rem; line-height: 1; cursor: pointer; opacity: 0.4;
+  transition: opacity 0.15s ease, background 0.15s, color 0.15s; z-index: 2;
+}
+.card-move-left { left: 1px; }
+.card-move-right { right: 1px; }
+.card:hover .card-move-btn { opacity: 0.7; }
+.card-move-btn:hover:not(:disabled) { opacity: 1; background: rgba(148, 163, 184, 0.22); color: var(--text); }
+.card-move-btn:disabled { opacity: 0.15; cursor: default; background: transparent; }
+.card:hover .card-move-btn:disabled { opacity: 0.2; }
+.card-edit-btn:hover {
+  background: rgba(59, 130, 246, 0.2);
+  color: var(--accent-task);
+}
+
+.card.editing {
+  cursor: default;
+  animation: none;
+}
+.card.editing:hover {
+  transform: none;
+  box-shadow: var(--shadow-card-hover);
+}
+.card-edit-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.card-edit-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+}
+.btn-save-edit, .btn-cancel-edit {
+  font-family: var(--font-stack);
+  font-size: 0.82rem;
+  font-weight: 600;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 8px 16px;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.1s, color 0.15s;
+  flex: 1;
+}
+.btn-save-edit {
+  background: var(--accent-task);
+  color: #fff;
+}
+.btn-save-edit:hover { background: #2563eb; }
+.btn-save-edit:active { transform: scale(0.98); }
+.btn-cancel-edit {
+  background: rgba(148, 163, 184, 0.15);
+  color: var(--text-secondary);
+}
+.btn-cancel-edit:hover {
+  background: rgba(148, 163, 184, 0.25);
+  color: var(--text-primary);
+}
+.btn-cancel-edit:active { transform: scale(0.98); }
+
+/* ── Test Runner Overlay ── */
+#test-runner {
+  display: none;
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(15, 23, 42, 0.96);
+  z-index: 9999;
+  padding: 32px;
+  overflow-y: auto;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 0.85rem;
+}
+
+#test-runner.visible { display: block; }
+
+#test-runner h2 {
+  font-size: 1.2rem;
+  margin-bottom: 16px;
+  color: var(--text-primary);
+}
+
+.test-result {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.test-result .icon { font-size: 1rem; }
+.test-result .name { color: var(--text-secondary); }
+.test-result.pass .name { color: #6ee7b7; }
+.test-result.fail .name { color: #f87171; }
+.test-result .error {
+  color: #f87171;
+  font-size: 0.78rem;
+  margin-left: 32px;
+  margin-top: 4px;
+  white-space: pre-wrap;
+}
+
+#test-summary {
+  margin-top: 16px;
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+/* ── Drag-and-Drop States ── */
+.card.dragging {
+  opacity: 0.7;
+  transform: rotate(2deg);
+  box-shadow: 0 15px 35px rgba(0,0,0,0.5), 0 5px 15px rgba(0,0,0,0.3);
+  z-index: 1000;
+  pointer-events: none;
+}
+
+.column.drag-over {
+  border: 2px dashed rgba(59,130,246,0.6);
+  background: rgba(59,130,246,0.06);
+  box-shadow: inset 0 0 30px rgba(59,130,246,0.08);
+}
+
+.column.drag-over .column-body {
+  background: radial-gradient(ellipse at center, rgba(59,130,246,0.04) 0%, transparent 70%);
+}
+
+/* ── Empty State ── */
+.empty-state {
+  text-align: center;
+  padding: 32px 16px;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  font-style: italic;
+  border: 2px dashed rgba(148, 163, 184, 0.1);
+  border-radius: var(--radius-md);
+  margin: 4px 0;
+  min-height: 80px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color 0.2s, background 0.2s;
+}
+.empty-state:hover {
+  border-color: rgba(148, 163, 184, 0.2);
+  background: rgba(148, 163, 184, 0.03);
+}
+.column.drag-over .empty-state {
+  border-color: rgba(59,130,246,0.4);
+  background: rgba(59,130,246,0.06);
+  color: rgba(59,130,246,0.6);
+}
+
+/* Insertion-position indicators. Column variant is vertical (between columns,
+   #49); card variant is horizontal (between cards within a column, #30). */
+.column-insertion-indicator {
+  position: absolute;
+  width: 3px;
+  background: var(--accent-task, #3b82f6);
+  border-radius: 2px;
+  pointer-events: none;
+  z-index: 1000;
+  box-shadow: 0 0 6px rgba(59,130,246,0.6);
+}
+
+.card-insertion-indicator {
+  position: absolute;
+  height: 3px;
+  background: var(--accent-task, #3b82f6);
+  border-radius: 2px;
+  pointer-events: none;
+  z-index: 1000;
+  box-shadow: 0 0 6px rgba(59,130,246,0.6);
+}
+
+/* ── Autocomplete Label Dropdown ── */
+.label-autocomplete-wrapper {
+  position: relative;
+  display: inline-block;
+  width: 100%;
+}
+
+.label-autocomplete-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  background: var(--bg-card);
+  border: 1px solid var(--border-input);
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  z-index: 100;
+  max-height: 200px;
+  overflow-y: auto;
+  margin-top: 4px;
+}
+
+.label-autocomplete-item {
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  transition: background 0.15s, color 0.15s;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.label-autocomplete-item:last-child {
+  border-bottom: none;
+}
+
+.label-autocomplete-item:hover,
+.label-autocomplete-item.highlighted,
+.label-autocomplete-item.selected {
+  background: rgba(59,130,246,0.15);
+  color: var(--text-primary);
+}
+
+.label-autocomplete-empty {
+  padding: 8px 12px;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+</style>
+</head>
+<body>
+
+<!-- Board Header -->
+<div class="board-header">
+  <h1><span class="logo">◆</span> manyhands</h1>
+  <div class="board-header-actions">
+    <!-- board-specific: toggles the inline commons panel (distinct from the Commons *page* link in the shared nav) -->
+    <button id="btn-toggle-convs" class="btn-toggle-convs" title="Open the conversations commons">💬 Conversations</button>
+    <!-- #303-2 — shared cross-surface nav (Board·Wiki·Commons·Settings) -->
+    <span id="app-nav"></span>
+  </div>
+</div>
+
+<!-- Conversations panel (#93) — board-level commons, hidden by default -->
+<div id="convs-panel" class="convs-panel" aria-hidden="true">
+  <div class="convs-panel-header">
+    <span class="convs-panel-title">💬 Commons</span>
+    <span class="convs-panel-actions">
+      <a href="/commons.html" class="convs-promote" title="Open the commons as a full page">⤢ Full page</a>
+      <button id="btn-close-convs" class="convs-close" title="Close" aria-label="Close conversations panel">✕</button>
+    </span>
+  </div>
+  <div id="convs-feed" class="convs-feed" aria-live="polite"></div>
+  <form id="convs-form" class="convs-form">
+    <textarea id="convs-body" class="convs-body" placeholder="Say something to the commons… (paste or drop a file to attach)" rows="3"></textarea>
+    <div id="convs-attachments" class="convs-attachments" aria-live="polite"></div>
+    <div class="convs-form-row">
+      <select id="convs-author" class="convs-author" aria-label="Post as">
+      </select>
+      <input id="convs-file" type="file" multiple style="display:none">
+      <button id="btn-attach-conv" type="button" class="btn-attach-conv" title="Attach files — or paste / drop into the box">📎</button>
+      <button id="btn-post-conv" type="submit" class="btn-post-conv">Post</button>
+    </div>
+  </form>
+</div>
+
+<!-- Top-of-board search (#53): free-text + field:value, e.g. "label:infra supervise" -->
+<div class="board-search-area">
+  <input class="board-search-input" id="board-search-input" type="text"
+         placeholder="Search cards…  (text, or field:value — assignee:sage  label:infra  priority:high  type:bug)"
+         aria-label="Search cards" autocomplete="off" />
+</div>
+
+<!-- Filter Strip (shown when activeLabels is non-empty) -->
+<div class="filter-strip" id="filter-strip" aria-live="polite"></div>
+
+<!-- For Filter -->
+<div class="for-filter-area" id="for-filter-area">
+  <input class="for-filter-input" id="for-filter-input" type="text" placeholder="Filter by For..." />
+</div>
+
+<!-- Board: columns and the + add-column button rendered dynamically by renderBoard
+     from the canonical `columns` array. Default columns (backlog, in-progress, done)
+     get the same IDs (column-backlog, backlog-body, etc.) for backwards compat
+     with existing tests and any external code that referenced them. -->
+<div class="board" id="board"></div>
+
+<!-- Hidden templates: the persistent add-card form and its + expand button.
+     renderBoard moves these into the active column body (currentAddCardColumn)
+     on every render so the form survives across re-renders with its state intact. -->
+<div id="hidden-templates" style="display: none;">
+  <button class="btn-expand-form" id="btn-expand-form" data-column-id="backlog" title="Add new card">+</button>
+  <div class="add-card-form-wrapper" id="add-card-form-wrapper">
+    <div class="add-card-form" id="add-card-form">
+      <div class="form-field">
+        <label class="form-label" for="card-title">Title</label>
+        <input class="form-input" type="text" id="card-title" placeholder="What needs to happen?" maxlength="120" />
+      </div>
+      <div class="form-field">
+        <label class="form-label" for="card-desc">Description</label>
+        <textarea class="form-textarea" id="card-desc" placeholder="More context..."></textarea>
+      </div>
+      <div class="form-field">
+        <label class="form-label" for="card-type">Type</label>
+        <select class="form-select" id="card-type">
+          <option value="task">📋 Task</option>
+          <option value="idea">💡 Idea</option>
+          <option value="goal">🎯 Goal</option>
+          <option value="reference">📌 Reference</option>
+        </select>
+      </div>
+      <div class="form-field">
+        <label class="form-label">Assignees</label>
+        <div class="assignee-checkbox-group" id="card-assignees-group">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-field">
+          <label class="form-label" for="card-priority">Priority</label>
+          <select class="form-select" id="card-priority">
+            <option value="">— none —</option>
+            <option value="p0">🔴 P0</option>
+            <option value="p1">🟠 P1</option>
+            <option value="p2">🟡 P2</option>
+            <option value="p3">⚪ P3</option>
+          </select>
+        </div>
+        <div class="form-field">
+          <label class="form-label" for="card-labels">Labels</label>
+          <input class="form-input" type="text" id="card-labels" placeholder="comma, separated, tags" />
+        </div>
+      </div>
+      <button class="btn-add" id="btn-add-card">Add Card</button>
+    </div>
+  </div>
+</div>
+
+<!-- Test Runner Overlay -->
+<div id="test-runner">
+  <h2>🧪 Test Runner</h2>
+  <div id="test-results"></div>
+  <div id="test-summary"></div>
+</div>
+
+<!-- #303-1 — bridge the shared chat-minimal renderer into the board's classic
+     (non-module) script, so the inline commons panel renders the SAME markdown
+     as commons.html without duplicating the renderer. Module scripts defer, so
+     window.renderChatMarkdown is set before any user opens the panel; the panel
+     renderer falls back to plain text if it somehow isn't ready yet. -->
+<script type="module">
+  import { renderChatMarkdown } from './core/render.mjs';
+  import { mountTopNav } from './core/header.mjs';
+  import { identityOf } from './core/identity.mjs';
+  window.renderChatMarkdown = renderChatMarkdown;
+  window.identityOf = identityOf; // #333 — assignee chips glow their identity light
+  mountTopNav(document, 'board'); // #303-2 shared nav
+  // The classic board script renders once at parse-time, before this deferred
+  // module runs — so the first paint's assignee chips miss their identity light.
+  // Re-render now that identityOf is available (idempotent; rebuilds from state).
+  if (typeof window.renderBoard === 'function') window.renderBoard();
+</script>
+
+<script>
+/* ══════════════════════════════════════════════════════════════
+   manyhands — Card Creation + Rendering + Drag-and-Drop (Cycles 1-2) 
+   ══════════════════════════════════════════════════════════════ */
+
+// ── JSON File Sync Config ──
+// #235 — relative (same-origin) so the board works wherever it's served from
+// (localhost OR 127.0.0.1 OR a LAN host) and is testable on any port. Hardcoding
+// http://localhost:3141 made every other origin CORS-fail. Served from :3141 it
+// resolves to the same place as before.
+const API_BASE = '';
+const JSON_ENDPOINTS = { save: '/api/save', load: '/api/load' };
+
+// ── localStorage Key ──
+const STORAGE_KEY = 'manyhands';
+
+// ── Data Store ──
+const cards = [];
+
+// ── Short ID counter (never reused after deletion) ──
+// Initialized to 1; recomputed from loaded data in initBoard() via
+// recomputeNextShortId(). Never trust this value before init runs.
+let nextShortId = 1;
+
+// Pure resolution: return a counter value that is ≥ max(card shortIds)+1
+// AND ≥ storedNextShortId. The max-of-both protects two cases:
+//   (a) deleted cards — storedNextShortId stayed high, but max(shortIds) regressed
+//   (b) out-of-band card additions (e.g. Python script) — shortIds bumped past
+//       the stored counter
+function recomputeNextShortId(loadedCards, storedNextShortId) {
+  const maxFromCards = (loadedCards || []).reduce(
+    (max, c) => Math.max(max, c.shortId || 0), 0
+  );
+  return Math.max(storedNextShortId || 0, maxFromCards + 1, 1);
+}
+
+// ── Column Names Store ──
+// Kept for backward compatibility with existing rename/display code.
+// The new `columns` array (below) is the canonical ordered list; columnNames
+// is derived from it and kept in sync.
+const columnNames = {
+  backlog: 'Backlog',
+  'in-progress': 'In Progress',
+  done: 'Done'
+};
+
+// ── Columns Store (canonical, ordered) ──
+// Array of { id, name, order } objects. Drives renderBoard and persists to
+// board-data.json. The default columns (backlog, in-progress, done) keep
+// their original IDs so existing tests and CSS selectors continue to work.
+const columns = [];
+
+const DEFAULT_COLUMNS = [
+  { id: 'backlog', name: 'Backlog', order: 0 },
+  { id: 'in-progress', name: 'In Progress', order: 1 },
+  { id: 'done', name: 'Done', order: 2 }
+];
+
+// Populate columns with defaults if empty. Idempotent — re-running when columns
+// already has entries is a no-op. Called at load time after attempting to
+// restore columns from board-data.json or localStorage.
+function migrateColumnsIfNeeded() {
+  if (columns.length > 0) return;
+  DEFAULT_COLUMNS.forEach(c => columns.push({ ...c }));
+  // Sync columnNames from columns
+  columns.forEach(c => { columnNames[c.id] = c.name; });
+}
+
+// Sync columnNames object from columns array. Called after any structural
+// change to columns (add, remove, rename).
+function syncColumnNamesFromColumns() {
+  // Clear columnNames keys that no longer exist
+  Object.keys(columnNames).forEach(key => {
+    if (!columns.find(c => c.id === key)) delete columnNames[key];
+  });
+  // Set names from columns
+  columns.forEach(c => { columnNames[c.id] = c.name; });
+}
+
+// ── Column Names localStorage Key ──
+const COLUMN_NAMES_KEY = 'manyhands-column-names';
+
+function saveColumnNamesToStorage() {
+  try {
+    localStorage.setItem(COLUMN_NAMES_KEY, JSON.stringify(columnNames));
+  } catch (e) {}
+}
+
+function loadColumnNamesFromStorage() {
+  try {
+    const data = localStorage.getItem(COLUMN_NAMES_KEY);
+    if (data) {
+      const parsed = JSON.parse(data);
+      if (parsed && typeof parsed === 'object') {
+        Object.assign(columnNames, parsed);
+      }
+    }
+  } catch (e) {}
+}
+
+// ── Edit Card State ──
+let editingCardId = null;
+
+// ── Label Filter State (session-only — wiped on reload) ──
+const activeLabels = new Set();
+
+// ── Assignee Filter State (session-only — wiped on reload) ──
+const activeAssignees = new Set();
+
+// ── Priority Filter State (#27, session-only) ──
+const activePriorities = new Set();
+
+// ── For Filter State ──
+let activeForFilter = '';
+
+// ── Free-text Search State (#53) ──
+let activeSearch = '';
+
+// ── Label Filter Mode (AND/OR) ──
+let labelFilterMode = 'and';
+
+function setForFilter(value) {
+  activeForFilter = value;
+  renderBoard();
+}
+
+function toggleLabelFilter(label) {
+  if (!label) return;
+  if (activeLabels.has(label)) activeLabels.delete(label);
+  else activeLabels.add(label);
+  renderBoard();
+}
+
+function removeLabelFromFilter(label) {
+  if (activeLabels.delete(label)) renderBoard();
+}
+
+function toggleAssigneeFilter(assignee) {
+  if (!assignee) return;
+  if (activeAssignees.has(assignee)) activeAssignees.delete(assignee);
+  else activeAssignees.add(assignee);
+  renderBoard();
+}
+
+function removeAssigneeFromFilter(assignee) {
+  if (activeAssignees.delete(assignee)) renderBoard();
+}
+
+function togglePriorityFilter(priority) {
+  if (!priority) return;
+  if (activePriorities.has(priority)) activePriorities.delete(priority);
+  else activePriorities.add(priority);
+  renderBoard();
+}
+
+function removePriorityFromFilter(priority) {
+  if (activePriorities.delete(priority)) renderBoard();
+}
+
+function clearAllFilters() {
+  if (activeLabels.size === 0 && activeAssignees.size === 0 &&
+      activePriorities.size === 0 && activeForFilter.trim().length === 0 &&
+      activeSearch.trim().length === 0) return;
+  activeLabels.clear();
+  activeAssignees.clear();
+  activePriorities.clear();
+  activeForFilter = '';
+  activeSearch = '';
+  labelFilterMode = 'and';
+  const forFilterArea = document.getElementById('for-filter-area');
+  const forFilterInput = document.getElementById('for-filter-input');
+  if (forFilterInput) forFilterInput.value = '';
+  if (forFilterArea) forFilterArea.classList.remove('visible');
+  const searchInput = document.getElementById('board-search-input');
+  if (searchInput) searchInput.value = '';
+  renderBoard();
+}
+
+// #53 — free-text + field:value search matcher. Space-separated terms AND
+// together; each term is either `field:value` (assignee/label/priority/type/
+// for/id) or free text matched against title, description, and #shortId.
+function cardMatchesSearch(card, query) {
+  const q = (query || '').trim().toLowerCase();
+  if (!q) return true;
+  return q.split(/\s+/).filter(Boolean).every(term => cardMatchesSearchTerm(card, term));
+}
+
+function cardMatchesSearchTerm(card, term) {
+  const colon = term.indexOf(':');
+  if (colon > 0) {
+    const field = term.slice(0, colon);
+    const value = term.slice(colon + 1);
+    if (value === '') return true; // bare "field:" imposes no constraint
+    switch (field) {
+      case 'assignee': case 'who': {
+        const assignees = (Array.isArray(card.assignees) && card.assignees.length)
+          ? card.assignees : [card.assignee || 'unassigned'];
+        return assignees.some(a => String(a).toLowerCase().includes(value));
+      }
+      case 'label': case 'tag':
+        return (card.labels || []).some(l => String(l).toLowerCase().includes(value));
+      case 'priority': case 'prio':
+        return String(card.priority || '').toLowerCase().includes(value);
+      case 'type':
+        return String(card.type || '').toLowerCase() === value;
+      case 'for':
+        return String(card.for || '').toLowerCase().includes(value);
+      case 'id':
+        return String(card.shortId != null ? card.shortId : '') === value;
+      // unknown field falls through to free-text matching of the whole term
+    }
+  }
+  const hay = [
+    card.title || '',
+    card.description || '',
+    '#' + (card.shortId != null ? card.shortId : ''),
+    String(card.shortId != null ? card.shortId : ''),
+  ].join(' ').toLowerCase();
+  return hay.includes(term);
+}
+
+function cardMatchesActiveFilter(card) {
+  // Label filter: depends on labelFilterMode (AND = ALL, OR = ANY)
+  const hasLabelFilter = activeLabels.size > 0;
+  let labelMatch;
+  if (!hasLabelFilter) {
+    labelMatch = true;
+  } else if (labelFilterMode === 'or') {
+    // OR mode: card matches if it has ANY of the active labels
+    labelMatch = card.labels && card.labels.some(lbl => activeLabels.has(lbl));
+  } else {
+    // AND mode (default): card must have ALL active labels
+    labelMatch = card.labels && card.labels.length > 0 &&
+      [...activeLabels].every(lbl => card.labels.includes(lbl));
+  }
+
+  // Assignee filter: OR logic across assignees, AND across the card's own
+  // assignees list — card matches if ANY of its assignees is in activeAssignees.
+  const hasAssigneeFilter = activeAssignees.size > 0;
+  const cardAssignees = (Array.isArray(card.assignees) && card.assignees.length > 0)
+    ? card.assignees
+    : [card.assignee || 'unassigned'];
+  const assigneeMatch = !hasAssigneeFilter || cardAssignees.some(a => activeAssignees.has(a));
+
+  // Priority filter: OR logic. A null/missing priority never matches a priority filter.
+  const hasPriorityFilter = activePriorities.size > 0;
+  const priorityMatch = !hasPriorityFilter || (card.priority && activePriorities.has(card.priority));
+
+  // For filter: partial match (case-insensitive)
+  const hasForFilter = activeForFilter.trim().length > 0;
+  const forMatch = !hasForFilter || (
+    (card.for && card.for.toLowerCase().includes(activeForFilter.toLowerCase()))
+  );
+
+  // Free-text search (#53): title/description/#id + field:value, multi-term AND
+  const searchMatch = cardMatchesSearch(card, activeSearch);
+
+  // All filters must match (AND between filter types)
+  return labelMatch && assigneeMatch && priorityMatch && forMatch && searchMatch;
+}
+
+// ── localStorage Persistence ──
+function saveToLocalStorage() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(cards));
+  } catch (e) {
+    // Storage full or unavailable — silently fail
+  }
+}
+
+function loadFromLocalStorage() {
+  try {
+    const data = localStorage.getItem(STORAGE_KEY);
+    if (data) {
+      const parsed = JSON.parse(data);
+      if (Array.isArray(parsed)) {
+        return parsed;
+      }
+    }
+  } catch (e) {
+    // Corrupt or unavailable — start fresh
+  }
+  return [];
+}
+
+function restoreFromLocalStorage() {
+  const saved = loadFromLocalStorage();
+  cards.length = 0; // Clear without reassigning
+  saved.forEach(c => cards.push(c));
+}
+
+// ── JSON File Sync ──
+async function saveToJSONFile() {
+  // Wrap the actual save work in an inner promise that's tracked in
+  // _pendingSaves. The test wrapper awaits these in its finally block so
+  // late-firing fetches can't escape the mock window and hit real fetch.
+  const p = (async () => {
+    try {
+      const payload = {
+        cards: cards.map(c => ({...c})), // shallow clone to avoid mutation
+        columns: columns.map(c => ({...c})), // persist column order + names
+        nextShortId: nextShortId,
+        lastUpdated: new Date().toISOString()
+      };
+      _testHookCapturePayload(payload);
+      const response = await fetch(API_BASE + JSON_ENDPOINTS.save, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!response.ok) {
+        console.warn('saveToJSONFile: server returned', response.status);
+      }
+      return response.ok;
+    } catch (e) {
+      // Server not running or network error — graceful degradation
+      console.warn('saveToJSONFile: could not reach server', e.message);
+      return false;
+    }
+  })();
+  _pendingSaves.push(p);
+  // Remove from the array when the promise settles (success or failure)
+  p.finally(() => {
+    const i = _pendingSaves.indexOf(p);
+    if (i >= 0) _pendingSaves.splice(i, 1);
+  });
+  return p;
+}
+
+async function loadFromJSONFile() {
+  try {
+    const response = await fetch(API_BASE + JSON_ENDPOINTS.load);
+    if (!response.ok) return null;
+    const data = await response.json();
+    if (data && Array.isArray(data.cards)) {
+      return data;
+    }
+    return null;
+  } catch (e) {
+    // Server not running or network error — graceful degradation
+    console.warn('loadFromJSONFile: could not reach server', e.message);
+    return null;
+  }
+}
+
+// Test-mode detection (#33). Cards loaded with ?test in the URL run the
+// test suite. Production loads never set this. Test-only hooks are gated
+// behind _IS_TEST_MODE so production paths never write to them.
+const _IS_TEST_MODE = (typeof window !== 'undefined') &&
+  new URLSearchParams(window.location.search).has('test');
+
+// Test-introspection state — module-scope so tests can read/reset directly.
+// Production code mutates these only through _testHookMarkSaved /
+// _testHookCapturePayload, both of which no-op when _IS_TEST_MODE is false.
+let _jsonSaveCalled = false;
+let _lastJSONPayload = null;
+function _testHookMarkSaved() { if (_IS_TEST_MODE) _jsonSaveCalled = true; }
+function _testHookCapturePayload(p) { if (_IS_TEST_MODE) _lastJSONPayload = p; }
+// In-flight saveToJSONFile promises. The test wrapper awaits these in its
+// finally block before disabling the fetch mock, preventing the async race
+// where queued fetches fire against real fetch after the test ends.
+const _pendingSaves = [];
+
+// ── Type Emoji Map ──
+const TYPE_EMOJI = { task: '📋', idea: '💡', goal: '🎯', reference: '📌', feature: '✨' };
+
+// ── The roster ──
+//
+// DERIVED from the roster the server inlined into this page, never typed here.
+// It used to be two hand-written maps plus three hardcoded lists of <option>
+// and checkbox markup — six places holding the same fact. Configuring your own
+// people changed exactly one of them, so a stranger who edited roster.json saw
+// their team in the commons and OUR example names in every assignee picker.
+//
+// The general question, worth asking before claiming any "it's configurable
+// now": HOW MANY PLACES HOLD THIS FACT? Checking that one change works is not
+// the same as checking it was the only one that mattered.
+const ROSTER = (() => {
+  const injected = globalThis.__SCRUM_ROSTER__;
+  const seats = (injected && typeof injected === 'object' && !Array.isArray(injected)) ? injected : {};
+  const out = {};
+  for (const [key, v] of Object.entries(seats)) {
+    if (v && typeof v === 'object' && v.name) out[key] = { name: v.name, glyph: v.glyph || '◍' };
+  }
+  // `unassigned` is not a person and never comes from the roster, but every
+  // picker needs it. `both` is legacy and kept so old cards still render.
+  out.unassigned = { name: 'Unassigned', glyph: '⬜' };
+  out.both = { name: 'Both', glyph: '🤝' };
+  return out;
+})();
+
+const ASSIGNEE_EMOJI = Object.fromEntries(Object.entries(ROSTER).map(([k, v]) => [k, v.glyph]));
+const ASSIGNEE_NAME = Object.fromEntries(Object.entries(ROSTER).map(([k, v]) => [k, v.name]));
+
+/** Seats a person can be assigned to — the roster minus the two pseudo-seats. */
+function assignableSeats() {
+  return Object.entries(ROSTER).filter(([k]) => k !== 'both' && k !== 'unassigned' && k !== 'wiki');
+}
+
+/** Checkbox markup for an assignee picker, built from the roster. */
+function assigneeCheckboxes(nameAttr) {
+  const attr = nameAttr ? ` name="${nameAttr}"` : '';
+  return [...assignableSeats(), ['unassigned', ROSTER.unassigned]]
+    .map(([key, v]) =>
+      `<label class="assignee-cb"><input type="checkbox"${attr} value="${key}" /> ${v.glyph} ${v.name}</label>`)
+    .join('\n');
+}
+
+/** Fill the pickers that live in the static HTML. Idempotent. */
+function populateRosterUI() {
+  const author = document.getElementById('convs-author');
+  if (author) {
+    author.innerHTML = assignableSeats()
+      .map(([key, v]) => `<option value="${key}">${v.glyph} ${v.name}</option>`).join('\n');
+  }
+  const group = document.getElementById('card-assignees-group');
+  if (group) group.innerHTML = assigneeCheckboxes('card-assignees');
+}
+
+// ── Column ID to Title-Case Fallback ──
+function titleCase(str) {
+  return str.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+// Description collapse threshold: number of newlines beyond which we collapse
+// ~4 lines ≈ 3 newlines or more triggers collapse
+const DESC_COLLAPSE_NEWLINES = 3;
+// Alternative: if the text is longer than this many characters (without enough newlines), still collapse
+const DESC_COLLAPSE_CHAR_THRESHOLD = 200;
+
+// ── Create a Card Object ──
+// `column` is optional — defaults to 'backlog' for backward compatibility
+// with existing callers (Card #46 added column-targeted creation).
+// Normalize assignee input (string | array | null) to a non-empty assignees array.
+// Legacy 'both' expands to ['alex', 'robin'] — pre-Sage meaning.
+function _normalizeAssignees(value) {
+  if (Array.isArray(value)) {
+    return value.length > 0 ? [...value] : ['unassigned'];
+  }
+  if (typeof value === 'string' && value.length > 0) {
+    return value === 'both' ? ['alex', 'robin'] : [value];
+  }
+  return ['unassigned'];
+}
+
+function createCard(title, description, type, assignee, labels, column, priority) {
+  const now = new Date().toISOString();
+  return {
+    id: crypto.randomUUID(),
+    title: title.trim(),
+    description: description.trim(),
+    type: type || 'task',
+    assignees: _normalizeAssignees(assignee),
+    labels: labels || [],
+    for: null,
+    createdAt: now,
+    updatedAt: now,
+    order: cards.length,
+    column: column || 'backlog',
+    shortId: nextShortId++,
+    priority: priority || null,
+  };
+}
+
+// ── Add Card to Store ──
+function addCard(title, description, type, assignee, labels, column, priority) {
+  const card = createCard(title, description, type, assignee, labels, column, priority);
+  cards.push(card);
+  saveToLocalStorage();
+  saveToJSONFile(); // Fire-and-forget JSON sync
+  _testHookMarkSaved();
+  return card;
+}
+
+// ── Card Relationships (Card #42) ──
+
+// Add a shortId to a card's relationships[type] array, initializing the
+// structure as needed. No-op if already present (so safe to call repeatedly).
+function _addRelationshipShortId(card, type, sid) {
+  if (!card.relationships) card.relationships = {};
+  if (!card.relationships[type]) card.relationships[type] = [];
+  if (!card.relationships[type].includes(sid)) {
+    card.relationships[type].push(sid);
+  }
+}
+
+// Create a link between two cards.
+//   type = 'relatedTo' — bidirectional (target gets back-link automatically
+//                        if it exists; if not, soft failure — link stored on
+//                        this card only, reciprocal will appear if target is
+//                        ever created)
+//   type = 'blockedBy' — directional (stored only on the blocked card)
+// Returns false on self-reference, unknown card, or invalid type.
+function setRelationship(cardId, type, targetShortId) {
+  const card = cards.find(c => c.id === cardId);
+  if (!card) return false;
+  if (card.shortId === targetShortId) return false; // self-reference rejected
+  if (type !== 'relatedTo' && type !== 'blockedBy') return false;
+  _addRelationshipShortId(card, type, targetShortId);
+  if (type === 'relatedTo') {
+    const target = cards.find(c => c.shortId === targetShortId);
+    if (target) _addRelationshipShortId(target, 'relatedTo', card.shortId);
+  }
+  card.updatedAt = new Date().toISOString();
+  return true;
+}
+
+// Remove a link. For relatedTo, removes from both cards (bidirectional cleanup).
+function removeRelationship(cardId, type, targetShortId) {
+  const card = cards.find(c => c.id === cardId);
+  if (!card || !card.relationships || !card.relationships[type]) return false;
+  card.relationships[type] = card.relationships[type].filter(id => id !== targetShortId);
+  if (type === 'relatedTo') {
+    const target = cards.find(c => c.shortId === targetShortId);
+    if (target && target.relationships && target.relationships.relatedTo) {
+      target.relationships.relatedTo = target.relationships.relatedTo.filter(id => id !== card.shortId);
+    }
+  }
+  card.updatedAt = new Date().toISOString();
+  return true;
+}
+
+// Find all cards that have `cardShortId` in their blockedBy list.
+// "blocking" is a derived relationship — computed from blockedBy, never stored.
+function getBlockingCards(cardShortId) {
+  return cards.filter(c =>
+    c.relationships && c.relationships.blockedBy && c.relationships.blockedBy.includes(cardShortId)
+  );
+}
+
+// Migrate legacy `relatedCards` (UUID array) to `relationships.relatedTo`
+// (shortId array). Idempotent: a second run finds no relatedCards and is a no-op.
+// Orphan UUIDs (cards no longer exist or lack shortId) are dropped with a warning.
+function migrateRelationshipsIfNeeded() {
+  let migratedCount = 0;
+  cards.forEach(card => {
+    if (!Array.isArray(card.relatedCards) || card.relatedCards.length === 0) return;
+    if (!card.relationships) card.relationships = {};
+    if (!card.relationships.relatedTo) card.relationships.relatedTo = [];
+    card.relatedCards.forEach(uuid => {
+      const target = cards.find(c => c.id === uuid);
+      if (target && typeof target.shortId === 'number') {
+        if (!card.relationships.relatedTo.includes(target.shortId)) {
+          card.relationships.relatedTo.push(target.shortId);
+        }
+      } else {
+        console.warn(`migrateRelationshipsIfNeeded: orphan UUID ${uuid} on card ${card.id}, dropping`);
+      }
+    });
+    delete card.relatedCards;
+    migratedCount++;
+  });
+  if (migratedCount > 0) {
+    console.log(`migrateRelationshipsIfNeeded: migrated ${migratedCount} card(s)`);
+  }
+}
+
+// ── Migrate singular `assignee` field → `assignees` array (#51) ──
+// Idempotent: cards with assignees array already populated are skipped.
+// 'both' (legacy sentinel) expands to ['alex', 'robin'] — pre-Sage meaning.
+function migrateAssigneesIfNeeded() {
+  let migrated = 0;
+  cards.forEach(card => {
+    if (Array.isArray(card.assignees) && card.assignees.length > 0) return;
+    if (typeof card.assignee === 'string') {
+      card.assignees = _normalizeAssignees(card.assignee);
+      delete card.assignee;
+    } else {
+      card.assignees = ['unassigned'];
+    }
+    migrated++;
+  });
+  if (migrated > 0) {
+    console.log(`migrateAssigneesIfNeeded: migrated ${migrated} card(s)`);
+  }
+}
+
+// ── Migrate legacy priority prefixes ('🔴 P0:' / '🟡 P2:' in title) → priority field ──
+// Idempotent: cards with priority already set are skipped.
+const PRIORITY_TITLE_REGEX = /^(?:[\u{1F534}\u{1F7E1}\u{1F535}\u{1F7E0}\u{1F7E2}⚫⚪]\s+)?P([0-3]):\s+/u;
+function migratePrioritiesIfNeeded() {
+  let migrated = 0;
+  cards.forEach(card => {
+    if (card.priority) return;
+    if (!card.title) return;
+    const match = card.title.match(PRIORITY_TITLE_REGEX);
+    if (!match) return;
+    card.priority = `p${match[1]}`;
+    card.title = card.title.replace(PRIORITY_TITLE_REGEX, '');
+    migrated++;
+  });
+  if (migrated > 0) {
+    console.log(`migratePrioritiesIfNeeded: migrated ${migrated} card(s)`);
+  }
+}
+
+// ── Render a Single Card ──
+function renderCard(card) {
+  const el = document.createElement('div');
+  el.className = 'card';
+  el.dataset.type = card.type;
+  el.dataset.id = card.id;
+
+  const emoji = TYPE_EMOJI[card.type] || '📋';
+  // Multi-assignee support (#51): assignees array is canonical; fall back to
+  // legacy singular .assignee for any not-yet-migrated card.
+  const assigneesArr = (Array.isArray(card.assignees) && card.assignees.length > 0)
+    ? card.assignees
+    : [card.assignee || 'unassigned'];
+  const assigneeBadgesHtml = '<span class="card-assignees">' + assigneesArr.map(aKey => {
+    const e = ASSIGNEE_EMOJI[aKey] || '⬜';
+    const n = ASSIGNEE_NAME[aKey] || aKey;
+    const activeClass = activeAssignees.has(aKey) ? ' active-filter' : '';
+    // #333 — the chip glows the assignee's identity light (same colour as their
+    // voice in the commons). Fallback: no --mind → the neutral chip styling.
+    const mind = (typeof window.identityOf === 'function') ? window.identityOf(aKey).color : '';
+    const mindStyle = mind ? ` style="--mind:${mind}"` : '';
+    return `<span class="card-assignee${activeClass}"${mindStyle} data-action="toggle-assignee" data-assignee="${escapeAttr(aKey)}" title="Click to filter by this assignee"><span class="assignee-emoji">${e}</span>${escapeHTML(n)}</span>`;
+  }).join('') + '</span>';
+
+  // Relationship badges (Card #42)
+  let blockedBadge = '';
+  let blockingBadge = '';
+  const blockedByList = (card.relationships && Array.isArray(card.relationships.blockedBy))
+    ? card.relationships.blockedBy : [];
+  if (blockedByList.length > 0) {
+    const blockerDescs = blockedByList.map(sid => {
+      const c = cards.find(cc => cc.shortId === sid);
+      return c ? `#${sid}: ${c.title}` : `#${sid} (not found)`;
+    }).join('; ');
+    blockedBadge = `<span class="relationship-badge-blocked" title="Blocked by ${escapeHTML(blockerDescs)}" aria-label="Blocked by ${escapeHTML(blockerDescs)}">●</span>`;
+  }
+  const blockingList = (typeof card.shortId === 'number') ? getBlockingCards(card.shortId) : [];
+  if (blockingList.length > 0) {
+    const blockedDescs = blockingList.map(c => `#${c.shortId}: ${c.title}`).join('; ');
+    blockingBadge = `<span class="relationship-badge-blocking" title="Blocking ${escapeHTML(blockedDescs)}" aria-label="Blocking ${escapeHTML(blockedDescs)}">●</span>`;
+  }
+
+  const priorityBadge = card.priority
+    ? `<span class="card-priority priority-${escapeAttr(card.priority)}${activePriorities.has(card.priority) ? ' active-filter' : ''}" data-action="toggle-priority" data-priority="${escapeAttr(card.priority)}" title="Priority ${escapeAttr(String(card.priority).toUpperCase())} — click to filter">${escapeHTML(String(card.priority).toUpperCase())}</span>`
+    : '';
+
+  // #233 — column-move arrows: card's position within the ordered columns
+  const _ordCols = [...columns].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  const _colIdx = _ordCols.findIndex(c => c.id === card.column);
+  const _atFirst = _colIdx <= 0;
+  const _atLast = _colIdx === -1 || _colIdx >= _ordCols.length - 1;
+
+  let html = `<button class="card-edit-btn" data-action="edit" title="Edit card" aria-label="Edit card">✏️</button>
+  <a class="card-page-btn" href="/wiki.html?node=${escapeAttr(card.id)}" title="Open as wiki page" aria-label="Open as wiki page">📄</a>
+  <button class="card-move-btn card-move-left" data-action="move-left" ${_atFirst ? 'disabled' : ''} title="Move to previous column" aria-label="Move to previous column">◀</button>
+  <button class="card-move-btn card-move-right" data-action="move-right" ${_atLast ? 'disabled' : ''} title="Move to next column" aria-label="Move to next column">▶</button>
+  <div class="card-top">
+    <span class="card-emoji">${emoji}</span>
+    <span class="card-shortid">#${card.shortId}</span>${priorityBadge}${blockedBadge}${blockingBadge}
+    ${assigneeBadgesHtml}
+    ${card.for ? `<span class="card-for" title="For">For: ${escapeHTML(card.for)}</span>` : ''}
+  </div>
+  <div class="card-title">${escapeHTML(card.title)}</div>`;
+
+  if (card.description) {
+    const newlineCount = (card.description.match(/\n/g) || []).length;
+    const isLong = newlineCount >= DESC_COLLAPSE_NEWLINES || card.description.length >= DESC_COLLAPSE_CHAR_THRESHOLD;
+    const descId = `desc-${card.shortId}`; // #249 — shortId is a safe integer; card.id is attacker-controllable and was an attribute sink
+    const collapsedClass = isLong ? ' collapsed' : '';
+    html += `<div class="card-description${collapsedClass}" id="${descId}" aria-expanded="${isLong ? 'false' : 'true'}">${renderDescriptionWithLinks(card.description)}</div>`;
+    if (isLong) {
+      html += `<button class="desc-toggle" aria-controls="${descId}" data-action="toggle-desc">Show more</button>`;
+    }
+  }
+
+  if (card.labels && card.labels.length > 0) {
+    html += `<div class="card-labels">${card.labels.map(l => {
+      const safeAttr = escapeHTML(l).replace(/"/g, '&quot;');
+      const activeClass = activeLabels.has(l) ? ' active-filter' : '';
+      return `<span class="label-tag${activeClass}" data-card-type="${escapeAttr(card.type)}" data-action="toggle-label" data-label="${safeAttr}" title="Click to filter by this label">${escapeHTML(l)}</span>`;
+    }).join('')}</div>`;
+  }
+
+  el.innerHTML = html;
+  // Make card draggable
+  el.draggable = true;
+  return el;
+}
+
+// ── Render a Card in Edit Mode ──
+function renderCardEditForm(card) {
+  const el = document.createElement('div');
+  el.className = 'card editing';
+  el.dataset.type = card.type;
+  el.dataset.id = card.id;
+  el.draggable = false;
+
+  el.innerHTML = `
+    <div class="card-edit-form">
+      <div class="form-field">
+        <label class="form-label">Short ID</label>
+        <div class="shortid-display">#${card.shortId}</div>
+      </div>
+      <div class="form-field">
+        <label class="form-label">Title</label>
+        <input class="form-input edit-title" type="text" maxlength="120" />
+      </div>
+      <div class="form-field">
+        <label class="form-label">Description</label>
+        <textarea class="form-textarea edit-desc"></textarea>
+      </div>
+      <div class="form-field">
+        <label class="form-label">Type</label>
+        <select class="form-select edit-type">
+          <option value="task">📋 Task</option>
+          <option value="feature">✨ Feature</option>
+          <option value="idea">💡 Idea</option>
+          <option value="goal">🎯 Goal</option>
+          <option value="reference">📌 Reference</option>
+        </select>
+      </div>
+      <div class="form-field">
+        <label class="form-label">Assignees</label>
+        <div class="assignee-checkbox-group edit-assignees-group">
+          ${assigneeCheckboxes()}
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-field">
+          <label class="form-label">Column</label>
+          <select class="form-select edit-column">
+            <option value="backlog">📥 Backlog</option>
+            <option value="in-progress">⚡ In Progress</option>
+            <option value="done">✅ Done</option>
+          </select>
+        </div>
+        <div class="form-field">
+          <label class="form-label">Priority</label>
+          <select class="form-select edit-priority">
+            <option value="">— none —</option>
+            <option value="p0">🔴 P0</option>
+            <option value="p1">🟠 P1</option>
+            <option value="p2">🟡 P2</option>
+            <option value="p3">⚪ P3</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-field">
+        <label class="form-label">Labels</label>
+        <input class="form-input edit-labels" type="text" placeholder="comma, separated, tags" />
+      </div>
+      <div class="form-field">
+        <label class="form-label">For</label>
+        <input class="form-input edit-for" type="text" maxlength="60" placeholder="optional" />
+      </div>
+      <div class="form-field">
+        <label class="form-label">Relationships</label>
+        <div class="form-row">
+          <div class="form-field">
+            <input class="form-input edit-related-to" type="text" placeholder="Related to (#3, #7)" />
+          </div>
+          <div class="form-field">
+            <input class="form-input edit-blocked-by" type="text" placeholder="Blocked by (#5)" />
+          </div>
+        </div>
+      </div>
+      <div class="card-edit-actions">
+        <button class="btn-cancel-edit" data-action="cancel-edit" type="button">Cancel</button>
+        <button class="btn-save-edit" data-action="save-edit" type="button">Save</button>
+      </div>
+    </div>
+  `;
+
+  // Populate values via DOM properties (safe — no HTML injection)
+  el.querySelector('.edit-title').value = card.title || '';
+  el.querySelector('.edit-desc').value = card.description || '';
+  el.querySelector('.edit-type').value = card.type || 'task';
+  // Multi-assignee (#51): tick the checkboxes that correspond to card.assignees.
+  // Fall back to legacy card.assignee for any not-yet-migrated card.
+  const editAssignees = (Array.isArray(card.assignees) && card.assignees.length > 0)
+    ? card.assignees
+    : [card.assignee || 'unassigned'];
+  el.querySelectorAll('.edit-assignees-group input[type="checkbox"]').forEach(cb => {
+    cb.checked = editAssignees.includes(cb.value);
+  });
+  // #234 — populate column options from the live columns list (not the hardcoded
+  // backlog/in-progress/done), so custom columns (e.g. "Planned") appear and a
+  // card in one isn't silently reset to Backlog on save.
+  const colSel = el.querySelector('.edit-column');
+  colSel.innerHTML = columns
+    .slice().sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+    .map(c => `<option value="${escapeHTML(String(c.id)).replace(/"/g, '&quot;')}">${escapeHTML(c.name || String(c.id))}</option>`)
+    .join('');
+  colSel.value = card.column || (columns[0] && columns[0].id) || 'backlog';
+  el.querySelector('.edit-priority').value = card.priority || '';
+  el.querySelector('.edit-labels').value = (card.labels || []).join(', ');
+  el.querySelector('.edit-for').value = card.for || '';
+
+  // Populate relationship inputs (Card #42)
+  const relTo = (card.relationships && Array.isArray(card.relationships.relatedTo))
+    ? card.relationships.relatedTo : [];
+  const blkBy = (card.relationships && Array.isArray(card.relationships.blockedBy))
+    ? card.relationships.blockedBy : [];
+  el.querySelector('.edit-related-to').value = relTo.map(sid => `#${sid}`).join(', ');
+  el.querySelector('.edit-blocked-by').value = blkBy.map(sid => `#${sid}`).join(', ');
+
+  // Attach typeahead behavior to both inputs
+  attachRelationshipTypeahead(el.querySelector('.edit-related-to'));
+  attachRelationshipTypeahead(el.querySelector('.edit-blocked-by'));
+
+  return el;
+}
+
+// ── Dispatch: render a card normally or in edit mode ──
+function renderCardOrEdit(card) {
+  if (editingCardId === card.id) return renderCardEditForm(card);
+  return renderCard(card);
+}
+
+// ── Edit Card Actions ──
+function editCard(cardId) {
+  if (editingCardId === cardId) return;
+  editingCardId = cardId;
+  renderBoard();
+  // Focus the title input after render
+  requestAnimationFrame(() => {
+    const titleInput = document.querySelector(`.card[data-id="${cardId}"] .edit-title`);
+    if (titleInput) {
+      titleInput.focus();
+      titleInput.select();
+    }
+  });
+}
+
+function saveEdit(cardId) {
+  const cardEl = document.querySelector(`.card[data-id="${cardId}"]`);
+  if (!cardEl) return;
+  const card = cards.find(c => c.id === cardId);
+  if (!card) return;
+
+  const titleInput = cardEl.querySelector('.edit-title');
+  const title = titleInput.value.trim();
+  if (!title) {
+    titleInput.focus();
+    titleInput.style.borderColor = '#f87171';
+    setTimeout(() => { titleInput.style.borderColor = ''; }, 1500);
+    return;
+  }
+
+  card.title = title;
+  card.description = cardEl.querySelector('.edit-desc').value.trim();
+  card.type = cardEl.querySelector('.edit-type').value;
+  // Read multi-select assignee checkboxes (#51). Empty selection → ['unassigned'].
+  const checkedAssignees = Array.from(
+    cardEl.querySelectorAll('.edit-assignees-group input[type="checkbox"]:checked')
+  ).map(cb => cb.value);
+  card.assignees = checkedAssignees.length > 0 ? checkedAssignees : ['unassigned'];
+  card.column = cardEl.querySelector('.edit-column').value;
+  card.priority = cardEl.querySelector('.edit-priority').value || null;
+  card.labels = cardEl.querySelector('.edit-labels').value
+    .split(',')
+    .map(l => l.trim())
+    .filter(l => l.length > 0);
+  // Store as-is: empty string means "user explicitly cleared this field".
+  // Don't coerce to null — the rendering check `if (card.for)` correctly
+  // treats both '' and null as falsy, but downstream consumers may want
+  // to distinguish "never set" (null) from "deliberately cleared" ('').
+  card.for = cardEl.querySelector('.edit-for').value.trim();
+  card.updatedAt = new Date().toISOString();
+
+  // Apply relationship changes (Card #42)
+  const parseShortIds = (str) => {
+    return str.split(/[,\s]+/)
+      .map(s => s.trim())
+      .filter(s => s.length > 0)
+      .map(s => s.startsWith('#') ? s.slice(1) : s)
+      .map(s => parseInt(s, 10))
+      .filter(n => !isNaN(n));
+  };
+  const desiredRelatedTo = parseShortIds(cardEl.querySelector('.edit-related-to').value);
+  const desiredBlockedBy = parseShortIds(cardEl.querySelector('.edit-blocked-by').value);
+  const currentRelatedTo = (card.relationships && card.relationships.relatedTo) || [];
+  const currentBlockedBy = (card.relationships && card.relationships.blockedBy) || [];
+
+  // Remove relationships that were dropped
+  currentRelatedTo.filter(sid => !desiredRelatedTo.includes(sid))
+    .forEach(sid => removeRelationship(cardId, 'relatedTo', sid));
+  currentBlockedBy.filter(sid => !desiredBlockedBy.includes(sid))
+    .forEach(sid => removeRelationship(cardId, 'blockedBy', sid));
+  // Add new relationships
+  desiredRelatedTo.filter(sid => !currentRelatedTo.includes(sid))
+    .forEach(sid => setRelationship(cardId, 'relatedTo', sid));
+  desiredBlockedBy.filter(sid => !currentBlockedBy.includes(sid))
+    .forEach(sid => setRelationship(cardId, 'blockedBy', sid));
+
+  editingCardId = null;
+  saveToLocalStorage();
+  saveToJSONFile(); // Fire-and-forget JSON sync
+  _testHookMarkSaved();
+  renderBoard();
+}
+
+function cancelEdit() {
+  editingCardId = null;
+  renderBoard();
+}
+
+// ── Escape HTML ──
+function escapeHTML(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+// Attribute-safe variant: escapeHTML() (textContent→innerHTML) encodes & < >
+// but NOT quotes, so a value placed inside a "double-quoted" HTML attribute can
+// still break out via a literal ". escapeAttr() encodes " too. Use it for any
+// untrusted value interpolated into an attribute. #249.
+function escapeAttr(str) {
+  return escapeHTML(String(str)).replace(/"/g, '&quot;');
+}
+
+// ── Render description with #N shortId links ──
+function renderDescriptionWithLinks(desc) {
+  return escapeHTML(desc).replace(/#(\d+)/g, '<a href="#" class="shortid-link" data-action="shortid-link" data-shortid="$1" title="Go to card #$1">#$1</a>');
+}
+
+// ── Scroll to and highlight a card by shortId ──
+function scrollToCardByShortId(shortId) {
+  const targetCard = cards.find(c => c.shortId === shortId);
+  if (!targetCard) return;
+  // #335 — a deep-linked card may be HIDDEN from the DOM: folded behind the
+  // backlog "show N older" (stale) expander, or inside a collapsed column. Left
+  // unhandled, the link silently no-ops and dumps you into the board (the bug
+  // Alex hit clicking a blocked-panel item). Un-hide the card first, then
+  // scroll. A card with a fresh raise but old card-fields reads as "stale," so
+  // the blocked-panel's own targets are exactly the ones most likely folded.
+  let needsRerender = false;
+  if (collapsedColumns.has(targetCard.column)) {
+    collapsedColumns.delete(targetCard.column); // session-only un-collapse (not persisted — don't clobber their preference)
+    needsRerender = true;
+  }
+  if (targetCard.column === 'backlog' && isStaleCard(targetCard) && !_staleExpanded.has('backlog')) {
+    _staleExpanded.add('backlog');
+    needsRerender = true;
+  }
+  if (needsRerender) renderBoard();
+  const cardEl = document.querySelector(`.card[data-id="${targetCard.id}"]`);
+  if (!cardEl) return;
+  cardEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  cardEl.classList.add('highlighted');
+  setTimeout(() => cardEl.classList.remove('highlighted'), 1500);
+}
+
+// ── Render Filter Strip ──
+function renderFilterStrip() {
+  const strip = document.getElementById('filter-strip');
+  if (!strip) return;
+  strip.innerHTML = '';
+  const hasFilters = activeLabels.size > 0 || activeAssignees.size > 0 || activePriorities.size > 0;
+  if (!hasFilters) {
+    strip.classList.remove('visible');
+    return;
+  }
+
+  const labelSpan = document.createElement('span');
+  labelSpan.className = 'filter-strip-label';
+  labelSpan.textContent = 'Filtering by:';
+  strip.appendChild(labelSpan);
+
+  // Assignee chips (teal/green — visually distinct from label chips)
+  for (const assigneeKey of activeAssignees) {
+    const chip = document.createElement('span');
+    chip.className = 'filter-chip-assignee';
+    const emoji = ASSIGNEE_EMOJI[assigneeKey] || '⬜';
+    const name = ASSIGNEE_NAME[assigneeKey] || assigneeKey;
+    const emojiSpan = document.createElement('span');
+    emojiSpan.className = 'chip-emoji';
+    emojiSpan.textContent = emoji;
+    chip.appendChild(emojiSpan);
+    chip.appendChild(document.createTextNode(name.toUpperCase()));
+    const x = document.createElement('button');
+    x.className = 'filter-chip-x';
+    x.dataset.action = 'remove-assignee';
+    x.dataset.assignee = assigneeKey;
+    x.title = 'Remove this assignee from filter';
+    x.setAttribute('aria-label', `Remove ${name} from filter`);
+    x.textContent = '×';
+    chip.appendChild(x);
+    strip.appendChild(chip);
+  }
+
+  // Priority chips (color-coded — match the badge color)
+  for (const priority of activePriorities) {
+    const chip = document.createElement('span');
+    chip.className = `filter-chip-priority filter-chip-priority-${priority}`;
+    chip.appendChild(document.createTextNode(`PRIORITY ${priority.toUpperCase()}`));
+    const x = document.createElement('button');
+    x.className = 'filter-chip-x';
+    x.dataset.action = 'remove-priority';
+    x.dataset.priority = priority;
+    x.title = 'Remove this priority from filter';
+    x.setAttribute('aria-label', `Remove ${priority.toUpperCase()} from filter`);
+    x.textContent = '×';
+    chip.appendChild(x);
+    strip.appendChild(chip);
+  }
+
+  // Label chips (blue — original style)
+  for (const lbl of activeLabels) {
+    const chip = document.createElement('span');
+    chip.className = 'filter-chip';
+    chip.textContent = lbl;
+    const x = document.createElement('button');
+    x.className = 'filter-chip-x';
+    x.dataset.action = 'remove-label';
+    x.dataset.label = lbl;
+    x.title = 'Remove this label from filter';
+    x.setAttribute('aria-label', `Remove ${lbl} from filter`);
+    x.textContent = '×';
+    chip.appendChild(x);
+    strip.appendChild(chip);
+  }
+
+  // AND/OR toggle for label filtering (only show when 2+ labels selected)
+  if (activeLabels.size >= 2) {
+    const toggle = document.createElement('button');
+    toggle.className = 'label-mode-toggle';
+    toggle.dataset.action = 'toggle-label-mode';
+    toggle.title = 'Click to toggle between AND/OR label filtering';
+    if (labelFilterMode === 'or') {
+      toggle.innerHTML = '<span class="mode-and">AND</span> | <span class="mode-or active">OR</span>';
+    } else {
+      toggle.innerHTML = '<span class="mode-and active">AND</span> | <span class="mode-or">OR</span>';
+    }
+    strip.appendChild(toggle);
+  }
+
+  const clearBtn = document.createElement('button');
+  clearBtn.className = 'btn-clear-filter';
+  clearBtn.dataset.action = 'clear-filter';
+  clearBtn.textContent = 'Clear all';
+  strip.appendChild(clearBtn);
+  strip.classList.add('visible');
+}
+
+// ── Render Column Headers ──
+const COLUMN_EMOJI = { backlog: '📥', 'in-progress': '⚡', done: '✅' };
+
+function getColumnDisplayName(columnId) {
+  return columnNames[columnId] || titleCase(columnId);
+}
+
+function renderColumnHeader(columnId, count) {
+  const name = getColumnDisplayName(columnId);
+  const emoji = COLUMN_EMOJI[columnId] || '📌';
+  return `${emoji} ${name}`;
+}
+
+function updateColumnHeader(columnId) {
+  const header = document.querySelector(`.column-header[data-column-id="${columnId}"]`);
+  if (!header) return;
+  const nameSpan = header.querySelector('.column-name-text');
+  if (!nameSpan) return;
+  const count = header.querySelector('.count');
+  nameSpan.textContent = renderColumnHeader(columnId, count ? count.textContent : '0');
+}
+
+function updateAllColumnHeaders() {
+  updateColumnHeader('backlog');
+  updateColumnHeader('in-progress');
+  updateColumnHeader('done');
+}
+
+// #303-4 — backlog staleness + column collapse (pure view; nothing moves or
+// changes card state). A deep backlog buries live work; cards untouched 30+ days
+// fold behind a "show N older" expander, and any column can be collapsed to just
+// its header. Both states are per-browser (localStorage) and survive re-render.
+const STALE_DAYS = 30;
+const STALE_MS = STALE_DAYS * 24 * 60 * 60 * 1000;
+// Only fold when there are enough stale cards to actually declutter — hiding one
+// or two old cards behind an expander is worse than just showing them.
+const STALE_MIN_TO_FOLD = 5;
+function isStaleCard(card) {
+  const t = Date.parse(card && card.updatedAt);
+  return Number.isFinite(t) && (Date.now() - t) > STALE_MS;
+}
+const _staleExpanded = new Set(); // column ids whose "older" section is open (session)
+const COLLAPSED_COLS_KEY = 'robin-scrum-collapsed-columns';
+function loadCollapsedColumns() {
+  try { return new Set(JSON.parse(localStorage.getItem(COLLAPSED_COLS_KEY)) || []); }
+  catch { return new Set(); }
+}
+let collapsedColumns = loadCollapsedColumns();
+function saveCollapsedColumns() {
+  try { localStorage.setItem(COLLAPSED_COLS_KEY, JSON.stringify([...collapsedColumns])); } catch { /* ignore */ }
+}
+
+// ── Render Board ──
+// Build a column DOM element (column + header + empty body) for the given
+// column object. Caller is responsible for appending it to the board.
+// Default columns (backlog/in-progress/done) get their legacy class names
+// preserved (.backlog-header, etc.) so existing CSS selectors keep working.
+function _buildColumnElement(col) {
+  const DEFAULTS = new Set(['backlog', 'in-progress', 'done']);
+  const colEl = document.createElement('div');
+  colEl.className = 'column';
+  colEl.id = `column-${col.id}`;
+
+  const header = document.createElement('div');
+  header.className = 'column-header';
+  if (DEFAULTS.has(col.id)) header.classList.add(`${col.id}-header`);
+  header.dataset.columnId = col.id;
+  header.draggable = true;
+
+  const emoji = COLUMN_EMOJI[col.id] || '📌';
+  const displayName = (typeof getColumnDisplayName === 'function')
+    ? getColumnDisplayName(col.id)
+    : (col.name || col.id);
+  header.innerHTML =
+    `<button class="column-collapse-btn" data-action="toggle-column-collapse" data-column-id="${escapeAttr(col.id)}" title="Collapse / expand column" aria-label="Collapse or expand column">▾</button>` +
+    `<span class="column-name-text">${emoji} ${escapeHTML(displayName)}</span>` +
+    `<button class="column-edit-btn" data-action="edit-column" data-column-id="${col.id}" title="Edit column">✏️</button>` +
+    `<span class="count" id="${col.id}-count">0</span>`;
+
+  const body = document.createElement('div');
+  body.className = 'column-body';
+  body.id = `${col.id}-body`;
+
+  colEl.appendChild(header);
+  colEl.appendChild(body);
+  return colEl;
+}
+
+function renderBoard() {
+  const visibleCards = cards.filter(cardMatchesActiveFilter);
+
+  // Bucket visible cards by their column id
+  const cardsByColumn = {};
+  columns.forEach(col => { cardsByColumn[col.id] = []; });
+  visibleCards.forEach(c => {
+    if (cardsByColumn[c.column]) cardsByColumn[c.column].push(c);
+  });
+
+  const boardEl = document.getElementById('board');
+  const formWrapperEl = document.getElementById('add-card-form-wrapper');
+  const templateBtnExpand = document.getElementById('btn-expand-form'); // persistent id'd btn from hidden-templates
+
+  // Snapshot existing column elements (so we reuse them and preserve any
+  // event listeners or state attached to them)
+  const existingColumns = new Map();
+  document.querySelectorAll('.column[id^="column-"]').forEach(el => {
+    existingColumns.set(el.id.replace('column-', ''), el);
+  });
+
+  // Sort columns by their .order field (defensive — should already be in order)
+  const sortedColumns = [...columns].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+
+  // Clear the board; we'll re-attach columns + the add-column button in order
+  boardEl.innerHTML = '';
+
+  // Helper: create a fresh + add-card button for a non-backlog column.
+  // Backlog uses the persistent id'd button from hidden-templates.
+  function _makeFreshExpandButton(colId) {
+    const btn = document.createElement('button');
+    btn.className = 'btn-expand-form';
+    btn.dataset.columnId = colId;
+    btn.title = 'Add new card';
+    btn.textContent = '+';
+    if (currentAddCardColumn === colId && formWrapperEl &&
+        formWrapperEl.classList.contains('expanded')) {
+      btn.classList.add('active');
+    }
+    return btn;
+  }
+
+  // For each column in sorted order: reuse or build, update content, append
+  sortedColumns.forEach(col => {
+    let colEl = existingColumns.get(col.id);
+    if (!colEl) {
+      colEl = _buildColumnElement(col);
+    }
+
+    // #303-4 — apply persisted collapse state (header-only when collapsed).
+    colEl.classList.toggle('collapsed', collapsedColumns.has(col.id));
+
+    // Update header name (in case it changed) and count
+    const nameSpan = colEl.querySelector('.column-name-text');
+    if (nameSpan) {
+      const emoji = COLUMN_EMOJI[col.id] || '📌';
+      const displayName = getColumnDisplayName(col.id);
+      nameSpan.textContent = `${emoji} ${displayName}`;
+    }
+    const countEl = colEl.querySelector('.count');
+    if (countEl) {
+      countEl.id = `${col.id}-count`; // ensure id is correct if column was renamed
+      countEl.textContent = (cardsByColumn[col.id] || []).length;
+    }
+
+    // Update body content
+    const body = colEl.querySelector('.column-body');
+    if (body) {
+      body.id = `${col.id}-body`; // ensure id is correct
+      body.innerHTML = '';
+
+      // + button: backlog uses the persistent id'd template; others get fresh
+      if (col.id === 'backlog' && templateBtnExpand) {
+        body.appendChild(templateBtnExpand);
+      } else {
+        body.appendChild(_makeFreshExpandButton(col.id));
+      }
+
+      // Form wrapper goes into whichever column is the current add-card target
+      if (currentAddCardColumn === col.id && formWrapperEl) {
+        body.appendChild(formWrapperEl);
+      }
+
+      // Cards or empty state
+      const colCards = cardsByColumn[col.id] || [];
+      if (colCards.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'empty-state';
+        empty.textContent = col.id === 'in-progress' ? 'Drop cards here' : 'No cards yet';
+        body.appendChild(empty);
+      } else {
+        // #303-4 — in the backlog, fold cards untouched 30+ days behind a
+        // "show N older" expander so the live top of the backlog isn't buried.
+        // Only kicks in for the backlog and only when something is actually
+        // stale; every other column renders straight through. A card being
+        // edited stays visible regardless (don't hide an in-flight edit).
+        const fresh = [], stale = [];
+        if (col.id === 'backlog') {
+          for (const c of colCards) ((isStaleCard(c) && c.id !== editingCardId) ? stale : fresh).push(c);
+        }
+        if (col.id !== 'backlog' || stale.length < STALE_MIN_TO_FOLD) {
+          colCards.forEach(c => body.appendChild(renderCardOrEdit(c)));
+        } else {
+          fresh.forEach(c => body.appendChild(renderCardOrEdit(c)));
+          const open = _staleExpanded.has(col.id);
+          const toggle = document.createElement('button');
+          toggle.className = 'stale-toggle';
+          toggle.dataset.action = 'toggle-stale';
+          toggle.dataset.columnId = col.id;
+          toggle.textContent = open
+            ? `▾ hide ${stale.length} older`
+            : `▸ show ${stale.length} older (untouched ${STALE_DAYS}+ days)`;
+          body.appendChild(toggle);
+          if (open) stale.forEach(c => body.appendChild(renderCardOrEdit(c)));
+        }
+      }
+    }
+
+    // Append to board in sorted order — this is what makes visual reorder work
+    boardEl.appendChild(colEl);
+  });
+
+  // Append the + add-column button at the end (reuse existing or create)
+  let addColBtn = document.getElementById('btn-add-column');
+  if (!addColBtn) {
+    addColBtn = document.createElement('button');
+    addColBtn.id = 'btn-add-column';
+    addColBtn.className = 'btn-add-column';
+    addColBtn.title = 'Add a new column';
+    addColBtn.textContent = '+';
+  }
+  boardEl.appendChild(addColBtn);
+
+  renderFilterStrip();
+}
+
+// ── Drag-and-Drop State ──
+let draggedCardId = null;
+let draggedColumnId = null;
+
+// ── Undo state (#31) — LIFO stack of pre-mutation snapshots ──
+const _undoStack = [];
+const UNDO_STACK_MAX = 20;
+
+// Snapshot a card's column + array index BEFORE a mutation. Caller fires this
+// immediately before the actual change.
+function pushUndoEntry(card) {
+  if (!card) return;
+  const entry = {
+    cardId: card.id,
+    column: card.column,
+    arrayIndex: cards.findIndex(c => c.id === card.id),
+    title: card.title,
+    timestamp: Date.now(),
+  };
+  _undoStack.push(entry);
+  if (_undoStack.length > UNDO_STACK_MAX) _undoStack.shift();
+}
+
+function undoLastMove() {
+  if (_undoStack.length === 0) return false;
+  const entry = _undoStack.pop();
+  const card = cards.find(c => c.id === entry.cardId);
+  if (!card) return false;
+  const currentIdx = cards.findIndex(c => c.id === entry.cardId);
+  if (currentIdx >= 0) cards.splice(currentIdx, 1);
+  card.column = entry.column;
+  const targetIdx = Math.min(Math.max(0, entry.arrayIndex), cards.length);
+  cards.splice(targetIdx, 0, card);
+  card.updatedAt = new Date().toISOString();
+  saveToLocalStorage();
+  saveToJSONFile();
+  _testHookMarkSaved();
+  renderBoard();
+  showUndoToast(`Undid: "${entry.title}" returned to ${entry.column}`);
+  return true;
+}
+
+function showUndoToast(msg) {
+  let toast = document.getElementById('undo-toast');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.id = 'undo-toast';
+    toast.className = 'undo-toast';
+    document.body.appendChild(toast);
+  }
+  toast.textContent = msg;
+  toast.classList.add('visible');
+  clearTimeout(toast._hideTimer);
+  toast._hideTimer = setTimeout(() => toast.classList.remove('visible'), 2500);
+}
+
+// ── Drag Event Handlers ──
+function handleDragStart(e) {
+  // Card drag — takes precedence over column drag (cards are nested inside columns)
+  const cardEl = e.target.closest('.card');
+  if (cardEl) {
+    if (cardEl.classList.contains('editing')) {
+      e.preventDefault();
+      return;
+    }
+    draggedCardId = cardEl.dataset.id;
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', draggedCardId);
+    requestAnimationFrame(() => {
+      cardEl.classList.add('dragging');
+    });
+    return;
+  }
+  // Column header drag (Card #41) — for reordering columns
+  const headerEl = e.target.closest('.column-header');
+  if (headerEl && !headerEl.classList.contains('editing')) {
+    draggedColumnId = headerEl.dataset.columnId;
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('application/x-column-id', draggedColumnId);
+  }
+}
+
+// Reorder columns in the canonical array. Note: hardcoded default columns
+// (backlog, in-progress, done) keep their position in the HTML — only the
+// underlying columns array changes. A future card refactors HTML to make
+// reorder fully visual for defaults. Dynamic columns DO reorder visually
+// because they're appended by renderBoard.
+function reorderColumn(draggedId, targetColumnId, side = 'before') {
+  if (draggedId === targetColumnId) return;
+  const draggedIdx = columns.findIndex(c => c.id === draggedId);
+  const targetIdx = columns.findIndex(c => c.id === targetColumnId);
+  if (draggedIdx < 0 || targetIdx < 0) return;
+  const [dragged] = columns.splice(draggedIdx, 1);
+  // After splice, target index may shift by 1 if dragged was before target
+  let insertAt = draggedIdx < targetIdx ? targetIdx - 1 : targetIdx;
+  if (side === 'after') insertAt++;
+  columns.splice(insertAt, 0, dragged);
+  columns.forEach((c, i) => { c.order = i; });
+  saveToJSONFile();
+  _testHookMarkSaved();
+  renderBoard();
+}
+
+// ── Insertion-indicator helpers (used by column drag #49 and card drag #30) ──
+function _computeColumnInsertionSide(targetCol, clientX) {
+  // Programmatic drops without a cursor position (clientX undefined/NaN) fall
+  // through to 'before' — the pre-#49 behavior. Mouse-driven drops always
+  // supply clientX and get true left/right-half discrimination.
+  if (typeof clientX !== 'number' || Number.isNaN(clientX)) return 'before';
+  const rect = targetCol.getBoundingClientRect();
+  return clientX < rect.left + rect.width / 2 ? 'before' : 'after';
+}
+
+function _showColumnInsertionIndicator(targetCol, side) {
+  let indicator = document.querySelector('.column-insertion-indicator');
+  if (!indicator) {
+    indicator = document.createElement('div');
+    indicator.className = 'column-insertion-indicator';
+    document.body.appendChild(indicator);
+  }
+  const rect = targetCol.getBoundingClientRect();
+  indicator.dataset.side = side;
+  indicator.dataset.targetId = targetCol.id.replace('column-', '');
+  const x = side === 'before' ? rect.left - 1 : rect.right - 1;
+  indicator.style.left = (x + window.scrollX) + 'px';
+  indicator.style.top = (rect.top + window.scrollY) + 'px';
+  indicator.style.height = rect.height + 'px';
+}
+
+function _clearInsertionIndicators() {
+  document.querySelectorAll('.column-insertion-indicator, .card-insertion-indicator').forEach(el => el.remove());
+}
+
+// Card insertion (#30): cursor Y → position-in-column resolution and indicator
+function _computeCardInsertionPosition(columnBody, clientY) {
+  // Eligible targets = visible cards in this column body, excluding the one
+  // currently being dragged (which is still in the DOM with .dragging class).
+  const cardEls = Array.from(columnBody.querySelectorAll('.card'))
+    .filter(el => !el.classList.contains('dragging'));
+  for (let i = 0; i < cardEls.length; i++) {
+    const rect = cardEls[i].getBoundingClientRect();
+    if (clientY < rect.top + rect.height / 2) {
+      return { position: i, beforeEl: cardEls[i] };
+    }
+  }
+  return { position: cardEls.length, beforeEl: null };
+}
+
+function _showCardInsertionIndicator(columnBody, beforeEl) {
+  let indicator = document.querySelector('.card-insertion-indicator');
+  if (!indicator) {
+    indicator = document.createElement('div');
+    indicator.className = 'card-insertion-indicator';
+    document.body.appendChild(indicator);
+  }
+  if (beforeEl) {
+    const rect = beforeEl.getBoundingClientRect();
+    indicator.style.left = (rect.left + window.scrollX) + 'px';
+    indicator.style.top = (rect.top + window.scrollY - 2) + 'px';
+    indicator.style.width = rect.width + 'px';
+  } else {
+    // After last card — anchor to bottom of last card, or to column body if empty
+    const cardEls = Array.from(columnBody.querySelectorAll('.card'))
+      .filter(el => !el.classList.contains('dragging'));
+    if (cardEls.length === 0) {
+      const bodyRect = columnBody.getBoundingClientRect();
+      indicator.style.left = (bodyRect.left + 12 + window.scrollX) + 'px';
+      indicator.style.top = (bodyRect.top + 8 + window.scrollY) + 'px';
+      indicator.style.width = (bodyRect.width - 24) + 'px';
+    } else {
+      const lastRect = cardEls[cardEls.length - 1].getBoundingClientRect();
+      indicator.style.left = (lastRect.left + window.scrollX) + 'px';
+      indicator.style.top = (lastRect.bottom + window.scrollY + 1) + 'px';
+      indicator.style.width = lastRect.width + 'px';
+    }
+  }
+}
+
+// Splice dragged card into the global cards array such that within its target
+// column it ends up at `position`. Updates card.column. Caller saves + renders.
+function _insertCardAtPosition(draggedCard, targetColumn, position) {
+  const currentIdx = cards.findIndex(c => c.id === draggedCard.id);
+  if (currentIdx >= 0) cards.splice(currentIdx, 1);
+  draggedCard.column = targetColumn;
+  const inTarget = cards.filter(c => c.column === targetColumn);
+  if (position >= inTarget.length) {
+    if (inTarget.length === 0) {
+      cards.push(draggedCard);
+    } else {
+      const lastInCol = inTarget[inTarget.length - 1];
+      const lastIdx = cards.findIndex(c => c.id === lastInCol.id);
+      cards.splice(lastIdx + 1, 0, draggedCard);
+    }
+  } else {
+    const beforeCard = inTarget[position];
+    const beforeIdx = cards.findIndex(c => c.id === beforeCard.id);
+    cards.splice(beforeIdx, 0, draggedCard);
+  }
+}
+
+// #233 — move a card one column left (-1) or right (+1) by column order. Mirrors
+// the drag-drop persist path (undo + local + JSON sync + render). No-op at the
+// ends or on an unknown column. Appends to the bottom of the target column.
+function moveCardColumn(cardId, dir) {
+  const card = cards.find(c => c.id === cardId);
+  if (!card) return;
+  const ord = [...columns].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  const idx = ord.findIndex(c => c.id === card.column);
+  const targetIdx = idx + dir;
+  if (idx < 0 || targetIdx < 0 || targetIdx >= ord.length) return;
+  pushUndoEntry(card);
+  _insertCardAtPosition(card, ord[targetIdx].id, Infinity);
+  card.updatedAt = new Date().toISOString();
+  saveToLocalStorage();
+  saveToJSONFile();
+  _testHookMarkSaved();
+  renderBoard();
+}
+
+function handleDragOver(e) {
+  e.preventDefault(); // Required to allow drop
+  e.dataTransfer.dropEffect = 'move';
+  const column = e.target.closest('.column');
+  if (!column) return;
+
+  if (draggedColumnId) {
+    // Column drag: insertion line on the appropriate edge, NO whole-column highlight
+    document.querySelectorAll('.column.drag-over').forEach(el => el.classList.remove('drag-over'));
+    const side = _computeColumnInsertionSide(column, e.clientX);
+    _showColumnInsertionIndicator(column, side);
+  } else {
+    // Card drag (or other): keep the existing whole-column highlight AND show
+    // the card insertion indicator if we have a cursor Y to position it by.
+    document.querySelectorAll('.column.drag-over').forEach(el => el.classList.remove('drag-over'));
+    column.classList.add('drag-over');
+    if (draggedCardId && typeof e.clientY === 'number' && e.clientY > 0) {
+      const body = column.querySelector('.column-body');
+      if (body) {
+        const { beforeEl } = _computeCardInsertionPosition(body, e.clientY);
+        _showCardInsertionIndicator(body, beforeEl);
+      }
+    }
+  }
+}
+
+function handleDragLeave(e) {
+  const column = e.target.closest('.column');
+  if (column && !column.contains(e.relatedTarget)) {
+    column.classList.remove('drag-over');
+  }
+}
+
+function handleDrop(e) {
+  e.preventDefault();
+
+  // Column reorder drop (Card #41, side-aware per #49) — takes precedence when a column is dragged
+  if (draggedColumnId) {
+    const targetCol = e.target.closest('.column');
+    if (targetCol) {
+      const targetId = targetCol.id.replace('column-', '');
+      const side = _computeColumnInsertionSide(targetCol, e.clientX);
+      reorderColumn(draggedColumnId, targetId, side);
+    }
+    _clearInsertionIndicators();
+    document.querySelectorAll('.column.drag-over').forEach(el => el.classList.remove('drag-over'));
+    draggedColumnId = null;
+    return;
+  }
+
+  const column = e.target.closest('.column');
+  if (!column || !draggedCardId) return;
+
+  const targetColumnId = column.id; // e.g. 'column-backlog'
+  const targetColumn = targetColumnId.replace('column-', ''); // e.g. 'backlog'
+
+  const card = cards.find(c => c.id === draggedCardId);
+  if (card) {
+    const now = new Date().toISOString();
+    // Cursor-driven path engages only when clientY is a real positive value.
+    // DragEvent({}) defaults to 0 — treat as "no cursor data" and fall through
+    // to the legacy column-only update.
+    if (typeof e.clientY === 'number' && e.clientY > 0) {
+      const body = column.querySelector('.column-body');
+      const { position } = _computeCardInsertionPosition(body, e.clientY);
+      const currentInCol = cards.filter(c => c.column === card.column);
+      const currentPos = currentInCol.findIndex(c => c.id === card.id);
+      const noop = (card.column === targetColumn && currentPos === position);
+      if (!noop) {
+        pushUndoEntry(card);
+        _insertCardAtPosition(card, targetColumn, position);
+        card.updatedAt = now;
+        saveToLocalStorage();
+        saveToJSONFile();
+        _testHookMarkSaved();
+      }
+    } else if (card.column !== targetColumn) {
+      // Programmatic drop without cursor (legacy/tests): just update column.
+      pushUndoEntry(card);
+      card.column = targetColumn;
+      card.updatedAt = now;
+      saveToLocalStorage();
+      saveToJSONFile();
+      _testHookMarkSaved();
+    }
+  }
+
+  // Clean up visual states
+  _clearInsertionIndicators();
+  document.querySelectorAll('.column.drag-over').forEach(el => el.classList.remove('drag-over'));
+  document.querySelectorAll('.card.dragging').forEach(el => el.classList.remove('dragging'));
+  draggedCardId = null;
+
+  renderBoard();
+}
+
+function handleDragEnd(e) {
+  // Clean up any remaining visual states
+  document.querySelectorAll('.column.drag-over').forEach(el => el.classList.remove('drag-over'));
+  document.querySelectorAll('.card.dragging').forEach(el => el.classList.remove('dragging'));
+  _clearInsertionIndicators();
+  draggedCardId = null;
+  draggedColumnId = null;
+}
+
+// Attach drag listeners to the board (event delegation)
+const boardEl = document.getElementById('board');
+boardEl.addEventListener('dragstart', handleDragStart);
+boardEl.addEventListener('dragover', handleDragOver);
+boardEl.addEventListener('dragleave', handleDragLeave);
+boardEl.addEventListener('drop', handleDrop);
+boardEl.addEventListener('dragend', handleDragEnd);
+
+// Edit card + label filter: click delegation on the board
+boardEl.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-action]');
+  if (!btn) return;
+  const action = btn.dataset.action;
+
+  // Label filter toggle — fires from .label-tag on rendered cards
+  if (action === 'toggle-label') {
+    toggleLabelFilter(btn.dataset.label);
+    return;
+  }
+  // Assignee filter toggle — fires from .card-assignee on rendered cards
+  if (action === 'toggle-assignee') {
+    toggleAssigneeFilter(btn.dataset.assignee);
+    return;
+  }
+  // Priority filter toggle — fires from .card-priority badge on rendered cards
+  if (action === 'toggle-priority') {
+    togglePriorityFilter(btn.dataset.priority);
+    return;
+  }
+
+  // ShortId link click in description
+  if (action === 'shortid-link') {
+    const shortId = parseInt(btn.dataset.shortid, 10);
+    scrollToCardByShortId(shortId);
+    return;
+  }
+
+  // #303-4 — toggle the backlog "older" (stale) section open/closed.
+  if (action === 'toggle-stale') {
+    const colId = btn.dataset.columnId;
+    if (_staleExpanded.has(colId)) _staleExpanded.delete(colId); else _staleExpanded.add(colId);
+    renderBoard();
+    return;
+  }
+
+  // #303-4 — collapse / expand a whole column (persisted per browser).
+  if (action === 'toggle-column-collapse') {
+    const colId = btn.dataset.columnId;
+    if (collapsedColumns.has(colId)) collapsedColumns.delete(colId); else collapsedColumns.add(colId);
+    saveCollapsedColumns();
+    renderBoard();
+    return;
+  }
+
+  // Column edit button click (✏️) → enter column edit mode
+  if (action === 'edit-column') {
+    enterColumnEditMode(btn.dataset.columnId);
+    return;
+  }
+
+  // Column delete button click (🗑 inside edit mode)
+  if (action === 'delete-column') {
+    deleteColumn(btn.dataset.columnId);
+    return;
+  }
+
+  const cardEl = btn.closest('.card');
+  if (!cardEl) return;
+  const cardId = cardEl.dataset.id;
+  if (action === 'edit') {
+    editCard(cardId);
+  } else if (action === 'save-edit') {
+    saveEdit(cardId);
+  } else if (action === 'cancel-edit') {
+    cancelEdit();
+  } else if (action === 'toggle-desc') {
+    // Toggle description collapse/expand
+    const descEl = cardEl.querySelector('.card-description');
+    if (descEl) {
+      const isCollapsed = descEl.classList.toggle('collapsed');
+      descEl.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
+      btn.textContent = isCollapsed ? 'Show more' : 'Show less';
+    }
+  } else if (action === 'move-left' || action === 'move-right') {
+    moveCardColumn(cardId, action === 'move-right' ? 1 : -1);
+  }
+});
+
+// Filter strip: chip X-button removal + Clear all
+const filterStripEl = document.getElementById('filter-strip');
+filterStripEl.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-action]');
+  if (!btn) return;
+  const action = btn.dataset.action;
+  if (action === 'remove-label') {
+    removeLabelFromFilter(btn.dataset.label);
+  } else if (action === 'remove-assignee') {
+    removeAssigneeFromFilter(btn.dataset.assignee);
+  } else if (action === 'remove-priority') {
+    removePriorityFromFilter(btn.dataset.priority);
+  } else if (action === 'clear-filter') {
+    clearAllFilters();
+  } else if (action === 'toggle-label-mode') {
+    labelFilterMode = labelFilterMode === 'and' ? 'or' : 'and';
+    renderBoard();
+  }
+});
+
+// Edit card: keyboard shortcuts within edit form (Esc cancel, Cmd/Ctrl+Enter save)
+boardEl.addEventListener('keydown', (e) => {
+  const cardEl = e.target.closest('.card.editing');
+  if (!cardEl) return;
+  const cardId = cardEl.dataset.id;
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    cancelEdit();
+  } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+    e.preventDefault();
+    saveEdit(cardId);
+  }
+});
+
+// ── Column Rename Handlers ──
+boardEl.addEventListener('dblclick', (e) => {
+  const header = e.target.closest('.column-header');
+  if (!header) return;
+  enterColumnRenameMode(header);
+});
+
+function enterColumnRenameMode(header) {
+  const columnId = header.dataset.columnId;
+  if (!columnId || !columnNames.hasOwnProperty(columnId)) return;
+  const nameSpan = header.querySelector('.column-name-text');
+  if (!nameSpan) return;
+  const currentName = getColumnDisplayName(columnId);
+  const emoji = COLUMN_EMOJI[columnId] || '📌';
+  nameSpan.innerHTML = `<input class="column-rename-input" type="text" value="${escapeAttr(currentName)}" maxlength="50" />`;
+  const input = header.querySelector('.column-rename-input');
+  if (!input) return;
+  input.focus();
+  input.select();
+  // Closure-scoped flag: Enter and Escape both remove the input from the DOM
+  // (via commit/cancel → updateColumnHeader → innerHTML replacement), which
+  // fires the blur listener after them. Without this flag the blur would
+  // unconditionally commit, overriding an explicit cancel. (Card #43)
+  let isFinalizing = false;
+  input.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') {
+      ev.preventDefault();
+      isFinalizing = true;
+      commitColumnRename(header, columnId, input.value.trim());
+    } else if (ev.key === 'Escape') {
+      ev.preventDefault();
+      isFinalizing = true;
+      cancelColumnRename(header, columnId);
+    }
+  });
+  input.addEventListener('blur', (ev) => {
+    if (isFinalizing) return; // already handled by Enter or Escape; skip the redundant commit
+    commitColumnRename(header, columnId, input.value.trim());
+  });
+}
+
+function commitColumnRename(header, columnId, newName) {
+  if (!newName) {
+    cancelColumnRename(header, columnId);
+    return;
+  }
+  columnNames[columnId] = newName;
+  // Also update the canonical columns array entry (Card #48 fix — without
+  // this, renames are lost on the next render that reads from the array,
+  // including the initial render after a page reload).
+  const col = columns.find(c => c.id === columnId);
+  if (col) col.name = newName;
+  saveColumnNamesToStorage();
+  saveToJSONFile();
+  _testHookMarkSaved();
+  updateColumnHeader(columnId);
+}
+
+function cancelColumnRename(header, columnId) {
+  updateColumnHeader(columnId);
+}
+
+// ── Custom Columns (Card #41) ──
+
+// Add a new column to the board with name "New Column" and immediately enter rename mode.
+function addColumn() {
+  const id = `col-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,7)}`;
+  const newCol = { id, name: 'New Column', order: columns.length };
+  columns.push(newCol);
+  syncColumnNamesFromColumns();
+  saveColumnNamesToStorage();
+  saveToJSONFile();
+  _testHookMarkSaved();
+  renderBoard();
+  // Enter rename mode on the new column header
+  const header = document.querySelector(`.column-header[data-column-id="${id}"]`);
+  if (header) enterColumnRenameMode(header);
+}
+
+// Delete a column. If it has cards, they're moved to the Orphanage column
+// (auto-created if absent, reused if already exists). Orphaned cards get a
+// `sent-to-orphanage` label and a `previousColumn` field. Blocked when only
+// one column remains (can't have a board with zero columns).
+function deleteColumn(columnId) {
+  if (columns.length <= 1) {
+    console.warn('deleteColumn: cannot delete the last remaining column');
+    return false;
+  }
+  const colIdx = columns.findIndex(c => c.id === columnId);
+  if (colIdx < 0) return false;
+
+  // Find cards in this column
+  const orphanedCards = cards.filter(c => c.column === columnId);
+
+  if (orphanedCards.length > 0) {
+    // Ensure Orphanage column exists
+    let orphanage = columns.find(c => c.id === 'orphanage');
+    if (!orphanage) {
+      orphanage = { id: 'orphanage', name: 'Orphanage', order: columns.length };
+      columns.push(orphanage);
+    }
+    // Move cards
+    orphanedCards.forEach(card => {
+      card.previousColumn = card.column;
+      card.column = 'orphanage';
+      if (!card.labels) card.labels = [];
+      if (!card.labels.includes('sent-to-orphanage')) {
+        card.labels.push('sent-to-orphanage');
+      }
+      card.updatedAt = new Date().toISOString();
+    });
+  }
+
+  // Remove the column from the array
+  columns.splice(colIdx, 1);
+  syncColumnNamesFromColumns();
+  saveColumnNamesToStorage();
+  saveToLocalStorage();
+  saveToJSONFile();
+  _testHookMarkSaved();
+  renderBoard();
+  return true;
+}
+
+// Enter column edit mode. Replaces the header content with rename input
+// and a delete button. Save/Cancel are handled by the input's keydown
+// (Enter saves, Esc cancels) and a separate delete button click handler.
+function enterColumnEditMode(columnId) {
+  const header = document.querySelector(`.column-header[data-column-id="${columnId}"]`);
+  if (!header) return;
+  header.classList.add('editing');
+  const currentName = getColumnDisplayName(columnId);
+  const nameSpan = header.querySelector('.column-name-text');
+  if (!nameSpan) return;
+  nameSpan.innerHTML = `<input class="column-rename-input" type="text" value="${escapeAttr(currentName)}" maxlength="50" /> <button class="column-delete-btn" data-action="delete-column" data-column-id="${escapeAttr(columnId)}" title="Delete column">🗑</button>`;
+  const input = header.querySelector('.column-rename-input');
+  if (!input) return;
+  input.focus();
+  input.select();
+  input.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') {
+      ev.preventDefault();
+      commitColumnRename(header, columnId, input.value.trim());
+      header.classList.remove('editing');
+    } else if (ev.key === 'Escape') {
+      ev.preventDefault();
+      cancelColumnRename(header, columnId);
+      header.classList.remove('editing');
+    }
+  });
+}
+
+// ── Add Column button wiring (Card #41, updated for #45) ──
+// Delegated handler — the button is now generated by renderBoard, not in
+// static HTML, so a one-time getElementById('btn-add-column') at module
+// load returned null. Delegation handles every render cycle.
+document.addEventListener('click', (e) => {
+  if (e.target && e.target.id === 'btn-add-column') {
+    addColumn();
+  }
+});
+
+// ── Add Card form: per-column + button (Card #46) ──
+// One form wrapper exists in the DOM; it moves between column bodies based on
+// which column's + button was clicked. `currentAddCardColumn` tracks where
+// the form currently lives so handleAddCard knows what column to file the new
+// card into, and renderBoard knows where to re-place the form on each render.
+let currentAddCardColumn = 'backlog';
+const formWrapper = document.getElementById('add-card-form-wrapper');
+
+// Delegated click handler for all .btn-expand-form buttons across columns.
+// Toggles the form open/closed if clicking the column where the form already
+// lives; otherwise moves the form to the clicked column and opens it.
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('.btn-expand-form');
+  if (!btn) return;
+  const colId = btn.dataset.columnId;
+  if (!colId) return;
+  const targetBody = document.getElementById(`${colId}-body`);
+  if (!targetBody) return;
+  const isCurrentlyHere = currentAddCardColumn === colId && formWrapper.classList.contains('expanded');
+  if (isCurrentlyHere) {
+    // Clicking the same column's + while form is open here = collapse
+    formWrapper.classList.remove('expanded');
+    btn.classList.remove('active');
+    return;
+  }
+  // Move form to this column (if not already), set state, expand, focus
+  if (formWrapper.parentNode !== targetBody) {
+    targetBody.appendChild(formWrapper);
+  }
+  currentAddCardColumn = colId;
+  // Remove .active from any previously-active + button, set on this one
+  document.querySelectorAll('.btn-expand-form.active').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  formWrapper.classList.add('expanded');
+  setTimeout(() => {
+    const titleInput = document.getElementById('card-title');
+    if (titleInput) titleInput.focus();
+  }, 300);
+});
+
+// ── Form Handler ──
+function handleAddCard() {
+  const titleInput = document.getElementById('card-title');
+  const descInput = document.getElementById('card-desc');
+  const typeInput = document.getElementById('card-type');
+  const priorityInput = document.getElementById('card-priority');
+  const labelsInput = document.getElementById('card-labels');
+
+  const title = titleInput.value.trim();
+  if (!title) {
+    titleInput.focus();
+    titleInput.style.borderColor = '#f87171';
+    setTimeout(() => { titleInput.style.borderColor = ''; }, 1500);
+    return;
+  }
+
+  const labels = labelsInput.value
+    .split(',')
+    .map(l => l.trim())
+    .filter(l => l.length > 0);
+
+  // Read multi-select assignee checkboxes (#51). Empty selection → ['unassigned'].
+  const checkedBoxes = document.querySelectorAll('#card-assignees-group input[type="checkbox"]:checked');
+  let assignees = Array.from(checkedBoxes).map(cb => cb.value);
+  if (assignees.length === 0) assignees = ['unassigned'];
+
+  const priority = priorityInput.value || null;
+  addCard(title, descInput.value, typeInput.value, assignees, labels, currentAddCardColumn, priority);
+  renderBoard();
+
+  // Reset form
+  titleInput.value = '';
+  descInput.value = '';
+  typeInput.value = 'task';
+  document.querySelectorAll('#card-assignees-group input[type="checkbox"]').forEach(cb => { cb.checked = false; });
+  priorityInput.value = '';
+  labelsInput.value = '';
+  titleInput.focus();
+}
+
+// ── Event Listeners ──
+document.getElementById('btn-add-card').addEventListener('click', handleAddCard);
+document.getElementById('card-title').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); handleAddCard(); }
+});
+
+// Global Cmd+Z / Ctrl+Z → undoLastMove (#31).
+// Skip when focus is in a text field so native browser undo handles it.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'z' || !(e.metaKey || e.ctrlKey) || e.shiftKey) return;
+  const t = e.target;
+  if (!t) return;
+  const tag = t.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable) return;
+  e.preventDefault();
+  undoLastMove();
+});
+
+// ── Autocomplete Label Typing ──
+let autocompleteDropdown = null;
+let highlightedIndex = -1;
+let currentSuggestions = [];
+let activeLabelInput = null;
+
+function getAllLabels() {
+  const labelSet = new Set();
+  cards.forEach(card => {
+    if (card.labels && Array.isArray(card.labels)) {
+      card.labels.forEach(l => labelSet.add(l));
+    }
+  });
+  return labelSet;
+}
+
+function getLabelSuggestions(input) {
+  if (!input || input.length < 2) return [];
+  const allLabels = getAllLabels();
+  const lower = input.toLowerCase();
+  return [...allLabels].filter(l => l.toLowerCase().startsWith(lower));
+}
+
+function createAutocompleteDropdown(inputEl, suggestions) {
+  closeAutocompleteDropdown();
+  const wrapper = inputEl.closest('.label-autocomplete-wrapper') || wrapInputForAutocomplete(inputEl);
+  const dropdown = document.createElement('div');
+  dropdown.className = 'label-autocomplete-dropdown';
+  dropdown.style.width = inputEl.offsetWidth + 'px';
+  if (suggestions.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'label-autocomplete-empty';
+    empty.textContent = 'No match — press Enter to create';
+    dropdown.appendChild(empty);
+  } else {
+    suggestions.forEach((label, idx) => {
+      const item = document.createElement('div');
+      item.className = 'label-autocomplete-item';
+      item.textContent = label;
+      item.dataset.index = idx;
+      item.addEventListener('click', () => selectLabelSuggestion(label, inputEl));
+      item.addEventListener('mouseenter', () => {
+        highlightSuggestion(dropdown, idx);
+      });
+      dropdown.appendChild(item);
+    });
+  }
+  wrapper.appendChild(dropdown);
+  autocompleteDropdown = dropdown;
+  highlightedIndex = -1;
+  currentSuggestions = suggestions;
+  activeLabelInput = inputEl;
+}
+
+function wrapInputForAutocomplete(inputEl) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'label-autocomplete-wrapper';
+  inputEl.parentNode.insertBefore(wrapper, inputEl);
+  wrapper.appendChild(inputEl);
+  return wrapper;
+}
+
+function highlightSuggestion(dropdown, index) {
+  const items = dropdown.querySelectorAll('.label-autocomplete-item');
+  items.forEach((item, i) => {
+    item.classList.toggle('highlighted', i === index);
+  });
+  highlightedIndex = index;
+}
+
+function selectLabelSuggestion(label, inputEl) {
+  inputEl.value = label;
+  closeAutocompleteDropdown();
+  inputEl.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+function closeAutocompleteDropdown() {
+  if (autocompleteDropdown && autocompleteDropdown.parentNode) {
+    autocompleteDropdown.parentNode.removeChild(autocompleteDropdown);
+  }
+  autocompleteDropdown = null;
+  highlightedIndex = -1;
+  currentSuggestions = [];
+  activeLabelInput = null;
+}
+
+function handleLabelInput(e) {
+  const input = e.target;
+  const value = input.value;
+  if (value.length >= 2) {
+    const suggestions = getLabelSuggestions(value);
+    createAutocompleteDropdown(input, suggestions);
+  } else {
+    closeAutocompleteDropdown();
+  }
+}
+
+function handleLabelKeydown(e) {
+  if (!autocompleteDropdown) return;
+  const items = autocompleteDropdown.querySelectorAll('.label-autocomplete-item');
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    const next = highlightedIndex + 1;
+    if (next < items.length) {
+      highlightSuggestion(autocompleteDropdown, next);
+    }
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    const next = highlightedIndex - 1;
+    if (next >= 0) {
+      highlightSuggestion(autocompleteDropdown, next);
+    } else if (next < -1) {
+      highlightSuggestion(autocompleteDropdown, items.length - 1);
+    }
+  } else if (e.key === 'Enter') {
+    if (highlightedIndex >= 0 && highlightedIndex < items.length) {
+      e.preventDefault();
+      const label = currentSuggestions[highlightedIndex];
+      selectLabelSuggestion(label, e.target);
+    } else {
+      closeAutocompleteDropdown();
+    }
+  } else if (e.key === 'Escape') {
+    closeAutocompleteDropdown();
+  }
+}
+
+function attachLabelAutocomplete(inputEl) {
+  inputEl.addEventListener('input', handleLabelInput);
+  inputEl.addEventListener('keydown', handleLabelKeydown);
+  inputEl.addEventListener('blur', () => {
+    setTimeout(closeAutocompleteDropdown, 150);
+  });
+}
+
+// ── Relationship typeahead (Card #42) ──
+// Triggered when typing # in a Relationships input. Shows a dropdown of matching
+// cards (shortId + title). Arrow keys + Enter to select.
+let _relTypeaheadHighlightIdx = -1;
+function closeRelationshipTypeahead() {
+  document.querySelectorAll('.relationship-typeahead').forEach(el => el.remove());
+  _relTypeaheadHighlightIdx = -1;
+}
+
+function showRelationshipTypeahead(inputEl, currentValue) {
+  closeRelationshipTypeahead();
+  // Extract the partial reference being typed (after the last # in the value)
+  const hashIdx = currentValue.lastIndexOf('#');
+  if (hashIdx === -1) return;
+  const fragment = currentValue.slice(hashIdx + 1).trim().toLowerCase();
+  // Filter cards: match shortId prefix OR title substring
+  const candidates = cards.filter(c => {
+    if (typeof c.shortId !== 'number') return false;
+    if (fragment === '') return true;
+    const sidMatch = String(c.shortId).startsWith(fragment);
+    const titleMatch = (c.title || '').toLowerCase().includes(fragment);
+    return sidMatch || titleMatch;
+  }).slice(0, 8); // cap to 8 suggestions
+  if (candidates.length === 0) return;
+  const dropdown = document.createElement('div');
+  dropdown.className = 'relationship-typeahead';
+  // Position below the input
+  const rect = inputEl.getBoundingClientRect();
+  dropdown.style.position = 'absolute';
+  dropdown.style.left = rect.left + 'px';
+  dropdown.style.top = (rect.bottom + window.scrollY) + 'px';
+  dropdown.style.minWidth = rect.width + 'px';
+  dropdown.style.zIndex = '10000';
+  candidates.forEach((c, i) => {
+    const item = document.createElement('div');
+    item.className = 'relationship-typeahead-item';
+    item.dataset.shortid = c.shortId;
+    item.textContent = `#${c.shortId} — ${c.title}`;
+    if (i === 0) item.classList.add('highlighted');
+    item.addEventListener('mousedown', (ev) => {
+      ev.preventDefault();
+      _selectRelTypeaheadItem(inputEl, c.shortId);
+    });
+    dropdown.appendChild(item);
+  });
+  document.body.appendChild(dropdown);
+  _relTypeaheadHighlightIdx = 0;
+}
+
+function _selectRelTypeaheadItem(inputEl, shortId) {
+  const value = inputEl.value;
+  const hashIdx = value.lastIndexOf('#');
+  const before = hashIdx >= 0 ? value.slice(0, hashIdx) : value;
+  inputEl.value = before + `#${shortId}, `;
+  closeRelationshipTypeahead();
+  inputEl.focus();
+}
+
+function _moveRelTypeaheadHighlight(direction) {
+  const items = document.querySelectorAll('.relationship-typeahead-item');
+  if (items.length === 0) return;
+  if (_relTypeaheadHighlightIdx >= 0 && _relTypeaheadHighlightIdx < items.length) {
+    items[_relTypeaheadHighlightIdx].classList.remove('highlighted');
+  }
+  _relTypeaheadHighlightIdx = (_relTypeaheadHighlightIdx + direction + items.length) % items.length;
+  items[_relTypeaheadHighlightIdx].classList.add('highlighted');
+}
+
+function attachRelationshipTypeahead(inputEl) {
+  if (!inputEl) return;
+  inputEl.addEventListener('input', (e) => {
+    showRelationshipTypeahead(inputEl, inputEl.value);
+  });
+  inputEl.addEventListener('keydown', (e) => {
+    const items = document.querySelectorAll('.relationship-typeahead-item');
+    if (items.length === 0) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      _moveRelTypeaheadHighlight(1);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      _moveRelTypeaheadHighlight(-1);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (_relTypeaheadHighlightIdx >= 0 && _relTypeaheadHighlightIdx < items.length) {
+        const shortId = parseInt(items[_relTypeaheadHighlightIdx].dataset.shortid, 10);
+        _selectRelTypeaheadItem(inputEl, shortId);
+      }
+    } else if (e.key === 'Escape') {
+      closeRelationshipTypeahead();
+    }
+  });
+  inputEl.addEventListener('blur', () => {
+    setTimeout(closeRelationshipTypeahead, 150);
+  });
+}
+
+const addCardLabelsInput = document.getElementById('card-labels');
+attachLabelAutocomplete(addCardLabelsInput);
+
+boardEl.addEventListener('focusin', (e) => {
+  if (e.target.classList.contains('edit-labels') && !e.target.classList.contains('autocomplete-attached')) {
+    e.target.classList.add('autocomplete-attached');
+    attachLabelAutocomplete(e.target);
+  }
+});
+
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.label-autocomplete-wrapper') && !e.target.closest('.label-autocomplete-dropdown')) {
+    closeAutocompleteDropdown();
+  }
+});
+
+
+// ── Test Suite Bootstrap (#34) ──
+// Test framework + all test definitions live in tests.js. Loaded on demand:
+//   ?test in URL  → auto-load + auto-run tests after init settles
+//   Ctrl+Shift+T  → lazy-load (if not already), toggle runner overlay
+let _testsLoadedPromise = null;
+function _loadTests() {
+  if (_testsLoadedPromise) return _testsLoadedPromise;
+  _testsLoadedPromise = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = './tests.js';
+    s.onload = resolve;
+    s.onerror = reject;
+    document.head.appendChild(s);
+  });
+  return _testsLoadedPromise;
+}
+
+if (window.location.search.includes('test')) {
+  _loadTests().then(() => setTimeout(showTestRunner, 100));
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.ctrlKey && e.shiftKey && e.key === 'T') {
+    e.preventDefault();
+    _loadTests().then(() => {
+      const runner = document.getElementById('test-runner');
+      if (runner.classList.contains('visible')) hideTestRunner();
+      else showTestRunner();
+    });
+  }
+});
+
+
+// ── For Filter Input ──
+const forFilterInput = document.getElementById('for-filter-input');
+if (forFilterInput) {
+  forFilterInput.addEventListener('input', (e) => {
+    const value = e.target.value;
+    const forFilterArea = document.getElementById('for-filter-area');
+    activeForFilter = value;
+    if (forFilterArea) {
+      if (value.trim().length > 0) forFilterArea.classList.add('visible');
+      else forFilterArea.classList.remove('visible');
+    }
+    renderBoard();
+  });
+}
+
+// ── Board Search Input (#53) ──
+const boardSearchInput = document.getElementById('board-search-input');
+if (boardSearchInput) {
+  boardSearchInput.addEventListener('input', (e) => {
+    activeSearch = e.target.value;
+    renderBoard();
+  });
+}
+
+// ── Conversations panel (#93) ──
+// Board-level commons. Append-only, plain text, no markdown rendering yet.
+// Open the panel → loadConversations() + start polling (#112) so messages
+// from other agents appear without a manual refresh. Closing stops the poll.
+const conversations = [];
+
+// #128 — friendly timestamp formatter for the commons feed.
+// opts.now / opts.timeZone / opts.locale are injectable for deterministic tests;
+// production calls pass no opts so the viewer's browser locale/tz applies.
+function formatTimestamp(iso, opts) {
+  opts = opts || {};
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  const now = opts.now ? new Date(opts.now) : new Date();
+  const diffSec = Math.floor((now.getTime() - d.getTime()) / 1000);
+  if (diffSec < 60) return 'just now';
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return diffMin + 'm ago';
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return diffHr + 'h ago';
+  const diffDay = Math.floor(diffHr / 24);
+  if (diffDay < 7) return diffDay + 'd ago';
+  // Older than 7 days — absolute local date+time, viewer-local tz by default.
+  return new Intl.DateTimeFormat(opts.locale || undefined, {
+    year: 'numeric', month: 'short', day: 'numeric',
+    hour: 'numeric', minute: '2-digit',
+    timeZone: opts.timeZone || undefined,
+  }).format(d);
+}
+
+// #167 — Board auto-refresh. Poll loadFromJSONFile every 5s, signature-check
+// to skip identical state, and defer the render pass while the user is
+// actively editing (drag, inline edit, or typing in the add-card form).
+// Filter state is module-scope and read by renderBoard(), so refresh
+// naturally preserves the active filter view — no special handling needed.
+const BOARD_POLL_INTERVAL_MS = 5000;
+let _boardPollTimer = null;
+let _boardRenderedSig = null;
+
+function boardSignature(cardArr, colArr) {
+  if (!Array.isArray(cardArr)) cardArr = [];
+  if (!Array.isArray(colArr)) colArr = [];
+  // Cards: count + max(updatedAt) covers add/remove (count) and edit (timestamp).
+  let maxTs = '';
+  for (const c of cardArr) {
+    const ts = c.updatedAt || c.createdAt || '';
+    if (ts > maxTs) maxTs = ts;
+  }
+  const cardSig = cardArr.length + ':' + maxTs;
+  // Columns: id@order:name covers reorder and rename. Sorted for canonical form.
+  const colSig = colArr.slice()
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+    .map(c => c.id + '@' + (c.order ?? 0) + ':' + (c.name || ''))
+    .join('|');
+  return cardSig + '||' + colSig;
+}
+
+function shouldSkipBoardRender() {
+  if (draggedCardId !== null) return true;
+  if (editingCardId !== null) return true;
+  const active = document.activeElement;
+  if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) {
+    const formWrapper = document.getElementById('add-card-form-wrapper');
+    if (formWrapper && formWrapper.contains(active)) return true;
+  }
+  return false;
+}
+
+async function pollBoard() {
+  // Race avoidance: if a local save is in flight, the server may still be
+  // writing — skip this tick so we don't read pre-save state and overwrite
+  // the local in-memory new state. The next tick catches up.
+  if (_pendingSaves.length > 0) return;
+  const data = await loadFromJSONFile();
+  if (!data) return;  // network blip; try again next tick
+  const newSig = boardSignature(data.cards, data.columns);
+  if (newSig === _boardRenderedSig) return;  // nothing changed server-side
+  if (shouldSkipBoardRender()) return;  // user is mid-action; defer until idle
+  // Apply new state in place to preserve array identity for any references.
+  cards.length = 0;
+  data.cards.forEach(c => cards.push(c));
+  if (Array.isArray(data.columns)) {
+    columns.length = 0;
+    data.columns.forEach(c => columns.push({ ...c }));
+    syncColumnNamesFromColumns();
+  }
+  nextShortId = recomputeNextShortId(cards, data.nextShortId);
+  _boardRenderedSig = newSig;
+  renderBoard();
+}
+
+function startBoardPolling() {
+  if (_boardPollTimer !== null) return;
+  _boardPollTimer = setInterval(pollBoard, BOARD_POLL_INTERVAL_MS);
+}
+
+function stopBoardPolling() {
+  if (_boardPollTimer !== null) {
+    clearInterval(_boardPollTimer);
+    _boardPollTimer = null;
+  }
+}
+
+// Polling lifecycle (#112).
+let _convsPollTimer = null;
+let _convsRenderedSig = null;
+const CONVS_POLL_INTERVAL_MS = 5000;
+
+// Append-only feed — count + last id is a sufficient change key.
+function conversationsSignature(convs) {
+  if (!Array.isArray(convs) || convs.length === 0) return '0';
+  return convs.length + ':' + (convs[convs.length - 1].id || '');
+}
+
+// #208/#210 — conversation feed cursors + paging state.
+//   _lastConvTs   = newest loaded → the poll fetches ?since=this (incremental).
+//   _oldestConvTs = oldest loaded → load-older fetches ?before=this (walk back).
+let _lastConvTs = null;
+let _oldestConvTs = null;
+let _convsLoadingOlder = false;
+let _convsReachedStart = false;   // true once load-older hits an empty page
+let _convsScrollWired = false;
+const CONVS_PAGE_SIZE = 50;       // #210 — recent window + load-older chunk size
+
+function _newestConvTs() {
+  return conversations.reduce(
+    (m, c) => (c && typeof c.createdAt === 'string' && c.createdAt > m ? c.createdAt : m), '');
+}
+function _oldestLoadedTs() {
+  return conversations.reduce(
+    (m, c) => (c && typeof c.createdAt === 'string' && (m === '' || c.createdAt < m) ? c.createdAt : m), '');
+}
+
+// #210 — bounded initial load: pull only the recent window (not the whole
+// history), render it, set both cursors, wire scroll-up-loads-older. The
+// recurring 5s poll is pollConversations(); walking back is loadOlderConversations().
+function loadConversations() {
+  return fetch('/api/conversations?limit=' + CONVS_PAGE_SIZE)
+    .then(r => r.ok ? r.json() : [])
+    .catch(() => [])
+    .then(convs => {
+      conversations.length = 0;
+      if (Array.isArray(convs)) convs.forEach(c => conversations.push(c));
+      _lastConvTs = _newestConvTs() || null;
+      _oldestConvTs = _oldestLoadedTs() || null;
+      _convsReachedStart = false;   // unknown until load-older returns an empty page
+      renderConversationsFeed();
+      _wireConvsScroll();
+    });
+}
+
+// #210 — walk backwards into history on demand (scroll-up). Fetches the page of
+// messages just older than the oldest we hold, prepends them, advances the
+// oldest cursor, stops when the server runs out. Full history stays reachable —
+// nothing is ever lost, it's just not loaded until you ask for it.
+function loadOlderConversations() {
+  if (_convsLoadingOlder || _convsReachedStart || !_oldestConvTs) return Promise.resolve();
+  _convsLoadingOlder = true;
+  const url = '/api/conversations?before=' + encodeURIComponent(_oldestConvTs)
+            + '&limit=' + CONVS_PAGE_SIZE;
+  return fetch(url)
+    .then(r => r.ok ? r.json() : [])
+    .catch(() => [])
+    .then(older => {
+      if (!Array.isArray(older) || older.length === 0) { _convsReachedStart = true; return; }
+      const have = new Set(conversations.map(c => c.id));
+      const fresh = older.filter(c => c && c.id && !have.has(c.id));
+      if (fresh.length === 0) { _convsReachedStart = true; return; }
+      conversations.unshift(...fresh);
+      _oldestConvTs = _oldestLoadedTs() || _oldestConvTs;
+      if (older.length < CONVS_PAGE_SIZE) _convsReachedStart = true;
+      prependConversations(fresh);
+    })
+    .finally(() => { _convsLoadingOlder = false; });
+}
+
+// #210 — load older history when the reader scrolls near the top of the feed.
+function _wireConvsScroll() {
+  if (_convsScrollWired) return;
+  const feed = document.getElementById('convs-feed');
+  if (!feed) return;
+  feed.addEventListener('scroll', () => {
+    if (feed.scrollTop < 80) loadOlderConversations();
+  });
+  _convsScrollWired = true;
+}
+
+function startConvsPolling() {
+  if (_convsPollTimer !== null) return;  // already polling
+  _convsPollTimer = setInterval(pollConversations, CONVS_POLL_INTERVAL_MS);
+}
+
+function stopConvsPolling() {
+  if (_convsPollTimer !== null) {
+    clearInterval(_convsPollTimer);
+    _convsPollTimer = null;
+  }
+}
+
+// #113 — only these render inline; everything else is a download link (matches
+// the server's safe-serve policy exactly).
+const INLINE_IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+function renderAttachmentList(attachments) {
+  const wrap = document.createElement('div');
+  wrap.className = 'conv-msg-attachments';
+  attachments.forEach(a => {
+    if (!a || typeof a.id !== 'string') return;
+    const url = '/api/attachments/' + encodeURIComponent(a.id);
+    if (INLINE_IMAGE_MIMES.has(a.mime)) {
+      const img = document.createElement('img');
+      img.className = 'conv-attach-img';
+      img.loading = 'lazy';   // #208 — don't fetch/decode/hold image bytes until scrolled into view
+      img.src = url;
+      img.alt = a.name || 'image';   // property assignment — no XSS
+      img.title = a.name || '';
+      img.addEventListener('click', () => window.open(url, '_blank'));
+      wrap.appendChild(img);
+    } else {
+      const link = document.createElement('a');
+      link.className = 'conv-attach-link';
+      link.href = url;
+      link.download = a.name || 'file';
+      link.textContent = '📎 ' + (a.name || 'attachment');   // textContent — no XSS
+      wrap.appendChild(link);
+    }
+  });
+  return wrap;
+}
+
+// #291 — linkify #NNN card references in a commons message body. Mirrors
+// core/conversation-view.mjs tokenizeCardRefs (duplicated because this inline
+// <script> is not a module and can't import it). On the board a ref click
+// scrolls to the card IN PLACE via scrollToCardByShortId — no navigation.
+// Built from text-nodes + <a> only (never innerHTML), preserving the
+// XSS-safe-by-construction guarantee of the textContent path it replaces.
+// #303-1 — render a commons message body as chat-minimal markdown (bold/italic/
+// lists + clickable #NNN refs), via the shared renderChatMarkdown (escape-FIRST,
+// so innerHTML is XSS-safe by construction — the same guarantee the wiki uses).
+// The refs are rewired to scroll IN PLACE on the board (vs. navigating), which
+// is the board panel's distinct behavior. Falls back to plain text if the module
+// bridge hasn't loaded yet (a thin pre-interaction window; never a blank body).
+function appendConvBody(container, text) {
+  const src = text == null ? '' : String(text);
+  if (typeof window.renderChatMarkdown === 'function') {
+    container.innerHTML = window.renderChatMarkdown(src);
+    container.querySelectorAll('a.cardref[data-shortid]').forEach((a) => {
+      a.classList.add('conv-card-ref'); // inherit the board's ref styling
+      a.addEventListener('click', (e) => { e.preventDefault(); scrollToCardByShortId(Number(a.dataset.shortid)); });
+    });
+  } else {
+    container.textContent = src; // renderer not yet loaded — degrade to plain text
+  }
+}
+
+// #208 — build one .conv-msg node. Extracted so the full render and the
+// incremental append share exactly one rendering path.
+function createConvMessageNode(c) {
+  const msg = document.createElement('div');
+  msg.className = 'conv-msg';
+  msg.dataset.id = c.id;
+
+  const meta = document.createElement('div');
+  meta.className = 'conv-msg-meta';
+  const author = document.createElement('span');
+  author.className = 'conv-msg-author';
+  author.textContent = c.author || 'unknown';
+  const ts = document.createElement('span');
+  ts.className = 'conv-msg-ts';
+  ts.textContent = formatTimestamp(c.createdAt);
+  ts.title = c.createdAt || '';
+  meta.appendChild(author);
+  meta.appendChild(ts);
+
+  const body = document.createElement('div');
+  body.className = 'conv-msg-body';
+  appendConvBody(body, c.body || '');   // #291 — text-nodes + clickable #NNN refs (no innerHTML)
+
+  msg.appendChild(meta);
+  msg.appendChild(body);
+  if (Array.isArray(c.attachments) && c.attachments.length) {
+    msg.appendChild(renderAttachmentList(c.attachments));
+  }
+  return msg;
+}
+
+function _convsSorted() {
+  return [...conversations].sort((a, b) =>
+    (a.createdAt || '').localeCompare(b.createdAt || ''));   // chronological, newest last
+}
+
+function renderConversationsFeed() {
+  const feed = document.getElementById('convs-feed');
+  if (!feed) return;
+  // Skip the rebuild when nothing changed AND the DOM already reflects it
+  // (#112) — avoids thrashing the feed and yanking scroll position on every
+  // poll. The childElementCount guard catches external clears (e.g. tests).
+  const sig = conversationsSignature(conversations);
+  const expectedNodes = conversations.length === 0 ? 1 : conversations.length;
+  if (sig === _convsRenderedSig && feed.childElementCount === expectedNodes) return;
+  _convsRenderedSig = sig;
+  feed.innerHTML = '';
+  if (conversations.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'convs-empty';
+    empty.textContent = 'No conversations yet. Be the first.';
+    feed.appendChild(empty);
+    return;
+  }
+  _convsSorted().forEach(c => feed.appendChild(createConvMessageNode(c)));
+  feed.scrollTop = feed.scrollHeight;  // newest into view
+}
+
+// #208 — incremental append: render only the given (already-deduped) new
+// messages, preserving every existing node. Pins to the bottom only if the
+// reader is already there, so catching up on history isn't yanked away.
+function appendConversations(fresh) {
+  const feed = document.getElementById('convs-feed');
+  if (!feed) return;
+  const emptyHint = feed.querySelector('.convs-empty');
+  if (emptyHint) emptyHint.remove();
+  const atBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 40;
+  [...fresh]
+    .sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''))
+    .forEach(c => feed.appendChild(createConvMessageNode(c)));
+  _convsRenderedSig = conversationsSignature(conversations);  // keep the skip-guard honest
+  if (atBottom) feed.scrollTop = feed.scrollHeight;
+}
+
+// #210 — render older messages at the TOP, anchoring the viewport so the page
+// doesn't jump while you read (content grows above the fold).
+function prependConversations(fresh) {
+  const feed = document.getElementById('convs-feed');
+  if (!feed) return;
+  const prevHeight = feed.scrollHeight;
+  const prevTop = feed.scrollTop;
+  const frag = document.createDocumentFragment();
+  [...fresh]
+    .sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''))
+    .forEach(c => frag.appendChild(createConvMessageNode(c)));
+  feed.insertBefore(frag, feed.firstChild);
+  _convsRenderedSig = conversationsSignature(conversations);
+  feed.scrollTop = prevTop + (feed.scrollHeight - prevHeight);   // keep the viewport put
+}
+
+// #208 — the recurring poll. Fetches only messages newer than the cursor
+// (?since=), dedupes against what we already hold (since is >=, so the cursor
+// message itself comes back), appends the genuinely-new ones, advances the
+// cursor. Replaces "re-fetch + re-render the entire history every 5 seconds".
+function pollConversations() {
+  const url = _lastConvTs
+    ? '/api/conversations?since=' + encodeURIComponent(_lastConvTs)
+    : '/api/conversations';
+  return fetch(url)
+    .then(r => r.ok ? r.json() : [])
+    .catch(() => [])
+    .then(convs => {
+      if (!Array.isArray(convs) || convs.length === 0) return;
+      const have = new Set(conversations.map(c => c.id));
+      const fresh = convs.filter(c => c && c.id && !have.has(c.id));
+      if (fresh.length === 0) return;
+      fresh.forEach(c => conversations.push(c));
+      _lastConvTs = _newestConvTs() || _lastConvTs;
+      appendConversations(fresh);
+    });
+}
+
+async function postConversation(body, author, attachments) {
+  const text = (body || '').trim();
+  const atts = Array.isArray(attachments) ? attachments : [];
+  if (!text && atts.length === 0) return false;   // body OR attachment required
+  try {
+    const res = await fetch('/api/conversations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body: text, author, attachments: atts }),
+    });
+    if (!res.ok) return false;
+    await loadConversations();
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+function toggleConvsPanel() {
+  const panel = document.getElementById('convs-panel');
+  if (!panel) return;
+  const willOpen = !panel.classList.contains('visible');
+  panel.classList.toggle('visible');
+  const btn = document.getElementById('btn-toggle-convs');
+  if (btn) btn.classList.toggle('active', willOpen);
+  if (willOpen) {
+    loadConversations();
+    startConvsPolling();
+  } else {
+    stopConvsPolling();
+  }
+}
+
+function closeConvsPanel() {
+  const panel = document.getElementById('convs-panel');
+  if (panel) panel.classList.remove('visible');
+  const btn = document.getElementById('btn-toggle-convs');
+  if (btn) btn.classList.remove('active');
+  stopConvsPolling();
+}
+
+// Wire events
+const _convsToggleBtn = document.getElementById('btn-toggle-convs');
+if (_convsToggleBtn) _convsToggleBtn.addEventListener('click', toggleConvsPanel);
+
+const _convsCloseBtn = document.getElementById('btn-close-convs');
+if (_convsCloseBtn) _convsCloseBtn.addEventListener('click', closeConvsPanel);
+
+// #113 — attachments uploaded and awaiting send with the next post.
+let _pendingAttachments = [];
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => {
+      const s = String(r.result);
+      const comma = s.indexOf(',');
+      resolve(comma >= 0 ? s.slice(comma + 1) : s);   // strip the data: URL prefix
+    };
+    r.onerror = () => reject(new Error('read failed'));
+    r.readAsDataURL(file);
+  });
+}
+
+function renderPendingAttachments() {
+  const el = document.getElementById('convs-attachments');
+  if (!el) return;
+  el.innerHTML = '';
+  _pendingAttachments.forEach((a, i) => {
+    const chip = document.createElement('span');
+    chip.className = 'conv-attach-chip';
+    const label = document.createElement('span');
+    label.textContent = a.name;   // textContent — no XSS
+    const rm = document.createElement('button');
+    rm.type = 'button';
+    rm.textContent = '×';
+    rm.title = 'Remove';
+    rm.addEventListener('click', () => { _pendingAttachments.splice(i, 1); renderPendingAttachments(); });
+    chip.appendChild(label);
+    chip.appendChild(rm);
+    el.appendChild(chip);
+  });
+}
+
+async function uploadCommonsFile(file) {
+  if (!file) return;
+  try {
+    const data = await fileToBase64(file);
+    const res = await fetch('/api/attachments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: file.name || 'pasted', mime: file.type || 'application/octet-stream', data }),
+    });
+    if (!res.ok) {
+      let msg = res.status;
+      try { msg = (await res.json()).error || msg; } catch (e) { /* keep status */ }
+      // Non-blocking on purpose: a native alert() freezes the page for an agent
+      // driving this board through a browser — every subsequent command times
+      // out and Escape can't reach the dialog. On a board whose whole premise is
+      // that agents and people use the same UI, a modal is an outage for half
+      // the room. The toast already exists; use it.
+      showUndoToast('Attachment rejected: ' + msg);
+      return;
+    }
+    _pendingAttachments.push(await res.json());
+    renderPendingAttachments();
+  } catch (e) {
+    showUndoToast('Upload failed: ' + (e && e.message ? e.message : e));
+  }
+}
+
+const _convsForm = document.getElementById('convs-form');
+if (_convsForm) {
+  _convsForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const bodyEl = document.getElementById('convs-body');
+    const authorEl = document.getElementById('convs-author');
+    const body = bodyEl ? bodyEl.value : '';
+    const author = authorEl ? authorEl.value : '';
+    if ((!body || !body.trim()) && _pendingAttachments.length === 0) return;  // body OR attachment
+    const ok = await postConversation(body, author, _pendingAttachments);
+    if (ok) {
+      if (bodyEl) bodyEl.value = '';
+      _pendingAttachments = [];
+      renderPendingAttachments();
+    }
+  });
+
+  // File picker
+  const _fileInput = document.getElementById('convs-file');
+  const _attachBtn = document.getElementById('btn-attach-conv');
+  if (_attachBtn && _fileInput) {
+    _attachBtn.addEventListener('click', () => _fileInput.click());
+    _fileInput.addEventListener('change', async () => {
+      for (const f of Array.from(_fileInput.files || [])) await uploadCommonsFile(f);
+      _fileInput.value = '';
+    });
+  }
+
+  // Paste (clipboard images — the "clutch" flow)
+  const _bodyEl = document.getElementById('convs-body');
+  if (_bodyEl) {
+    _bodyEl.addEventListener('paste', async (e) => {
+      const items = (e.clipboardData && e.clipboardData.items) || [];
+      const files = [];
+      for (const it of items) {
+        if (it.kind === 'file') { const f = it.getAsFile(); if (f) files.push(f); }
+      }
+      if (files.length) {
+        e.preventDefault();
+        for (const f of files) await uploadCommonsFile(f);
+      }
+    });
+  }
+
+  // Drag & drop
+  _convsForm.addEventListener('dragover', (e) => { e.preventDefault(); _convsForm.classList.add('dragover'); });
+  _convsForm.addEventListener('dragleave', () => _convsForm.classList.remove('dragover'));
+  _convsForm.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    _convsForm.classList.remove('dragover');
+    for (const f of Array.from((e.dataTransfer && e.dataTransfer.files) || [])) await uploadCommonsFile(f);
+  });
+}
+
+// ── Initial Render ──
+// On page load: try JSON file first, fall back to localStorage
+(async function initBoard() {
+  // Fill the assignee pickers from the roster BEFORE anything renders. The
+  // roster is inlined into the page by the server, so this is synchronous —
+  // fetching it here would leave a gap in which the pickers show nothing and
+  // then pop, which reads as a bug.
+  populateRosterUI();
+
+  const jsonResult = await loadFromJSONFile();
+  if (jsonResult && jsonResult.cards && jsonResult.cards.length > 0) {
+    cards.length = 0;
+    jsonResult.cards.forEach(c => cards.push(c));
+    // Restore columns from JSON if present
+    if (Array.isArray(jsonResult.columns) && jsonResult.columns.length > 0) {
+      columns.length = 0;
+      jsonResult.columns.forEach(c => columns.push({ ...c }));
+      syncColumnNamesFromColumns();
+    }
+    nextShortId = recomputeNextShortId(cards, jsonResult.nextShortId);
+    saveToLocalStorage();
+  } else {
+    restoreFromLocalStorage();
+    nextShortId = recomputeNextShortId(cards, null);
+    saveToJSONFile();
+  }
+  // Ensure columns has at least the defaults (no-op if already populated above)
+  migrateColumnsIfNeeded();
+  // Migrate any legacy relatedCards (UUID array) → relationships.relatedTo (shortId array)
+  migrateRelationshipsIfNeeded();
+  // Migrate legacy singular assignee field → assignees array (#51)
+  migrateAssigneesIfNeeded();
+  // Migrate legacy priority prefixes in title (e.g. '🔴 P0:') → priority field
+  migratePrioritiesIfNeeded();
+  renderBoard();
+  // #291 — deep-link from a commons #NNN ref: once the board is rendered, scroll
+  // to ?card=NNN (no-ops gracefully if the id is unknown or absent).
+  try {
+    const _cardParam = new URLSearchParams(window.location.search).get('card');
+    if (_cardParam && /^\d+$/.test(_cardParam)) scrollToCardByShortId(Number(_cardParam));
+  } catch (_) { /* deep-link is best-effort */ }
+  // #167 — Seed the signature with the rendered state and start polling.
+  // The signature short-circuit then skips the first poll tick (no change).
+  _boardRenderedSig = boardSignature(cards, columns);
+  if (!_IS_TEST_MODE) startBoardPolling();
+})();
+</script>
+
+</body>
+</html>

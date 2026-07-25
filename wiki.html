@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wiki · manyhands</title>
+<link rel="stylesheet" href="./core/theme.css"><!-- shared design language (#333) -->
+<link rel="stylesheet" href="./core/conversation-view.css">
+<link rel="stylesheet" href="./core/header.css">
+<style>
+  /* #224 — "Observatory". Design tokens now live in the shared core/theme.css
+     (#333); this file keeps only the wiki's own layout. */
+  * { box-sizing:border-box; }
+  body { margin:0; font:15.5px/1.7 var(--sans); background:var(--bg); color:var(--ink); display:flex; height:100vh;
+    background-image:radial-gradient(1100px 480px at 82% -12%, rgba(124,108,240,.06), transparent 62%); }
+
+  /* Sidebar — the structure of the home, in the agents' mono register */
+  #sidebar { width:300px; min-width:300px; background:var(--panel); overflow:auto; padding:20px 16px; border-right:1px solid var(--line); }
+  #sidebar h2 { font:600 11px/1 var(--mono); text-transform:uppercase; letter-spacing:.16em; color:var(--muted); margin:20px 2px 12px; }
+  #tree { font:13px/1.55 var(--mono); }
+  #tree ul { list-style:none; margin:0; padding-left:14px; }
+  #tree > ul { padding-left:0; }
+  #tree li { margin:1px 0; }
+  #tree a { color:var(--muted); text-decoration:none; cursor:pointer; display:block; padding:3px 8px; border-radius:6px; transition:color .12s, background .12s, box-shadow .12s; }
+  #tree a:hover { color:var(--ink); background:var(--panel-2); }
+  #tree a.active { color:var(--ink); background:var(--ember-soft); box-shadow:inset 2px 0 0 var(--ember); }
+  /* #220 — drag-drop reparent: highlight a valid drop target */
+  #tree a.drop-into { background:rgba(124,108,240,.22); box-shadow:inset 0 0 0 1px var(--sage); color:var(--ink); }
+  #sidebar h2.drop-into { color:var(--sage); background:rgba(124,108,240,.14); border-radius:6px; }
+
+  /* Main — the room: eyebrow (mono) → title (serif) → ember rule → prose (sans) */
+  #main { flex:1; overflow:auto; padding:52px 60px; position:relative; }
+  #main::before { content:''; position:absolute; inset:0 0 auto 0; height:240px; pointer-events:none;
+    background:radial-gradient(640px 220px at 30% 0, var(--ember-soft), transparent 72%); }
+  #main article, #main .head, #main .section { max-width:760px; position:relative; }
+  @keyframes pageRise { from { opacity:0; transform:translateY(9px); } to { opacity:1; transform:none; } }
+  .page-rise { animation:pageRise .3s cubic-bezier(.2,.7,.3,1) both; }
+  .page-eyebrow { font:600 12px/1 var(--mono); letter-spacing:.09em; text-transform:uppercase; color:var(--ember); margin:0 0 13px; }
+  h1.page-title { font:600 34px/1.15 var(--serif); letter-spacing:-.01em; margin:0 0 14px; max-width:760px; }
+  h1.page-title::after { content:''; display:block; width:54px; height:2px; margin-top:16px; background:var(--ember); border-radius:2px; }
+  .meta { font:12px/1.5 var(--mono); color:var(--muted); margin:0 0 30px; }
+  .wikilink { color:var(--link); text-decoration:none; border-bottom:1px dashed rgba(169,156,255,.5); cursor:pointer; }
+  .wikilink:hover { border-bottom-style:solid; }
+  .wikilink.broken { opacity:.5; border-bottom-style:dotted; cursor:help; }
+  .section { margin-top:38px; }
+  .section h3 { font:600 11px/1 var(--mono); text-transform:uppercase; letter-spacing:.14em; color:var(--muted); border-bottom:1px solid var(--line); padding-bottom:8px; margin:0 0 6px; }
+  .section a { color:var(--link); text-decoration:none; cursor:pointer; display:block; padding:5px 0; font-size:14px; }
+  .section a:hover { color:var(--ink); }
+  .empty { color:var(--muted); font-style:italic; }
+  article { font-size:15.5px; color:#dfe2ee; }
+  article :where(h1,h2,h3,h4) { font-family:var(--serif); font-weight:600; line-height:1.3; margin:26px 0 9px; color:var(--ink); }
+  article h1 { font-size:25px; } article h2 { font-size:21px; } article h3 { font-size:17px; }
+  article p { margin:0 0 15px; }
+  article ul { margin:0 0 15px; padding-left:22px; } article li { margin:3px 0; }
+  article strong { color:#fff; font-weight:700; } article em { color:#f4f0ff; }
+  article code { font:13px var(--mono); background:var(--panel-2); border:1px solid var(--line); border-radius:5px; padding:1px 5px; }
+  .toolbar { margin-top:32px; display:flex; gap:10px; flex-wrap:wrap; }
+  .btn { background:var(--panel-2); color:var(--ink); border:1px solid var(--line); border-radius:var(--r); padding:8px 15px; font:500 14px var(--sans); cursor:pointer; transition:transform .1s, background .12s, border-color .12s; text-decoration:none; display:inline-block; }
+  .btn:hover { background:#232b40; border-color:#39425c; transform:translateY(-1px); }
+  .btn.primary { background:var(--sage); border-color:var(--sage); color:#fff; }
+  .btn.primary:hover { filter:brightness(1.08); }
+  .edit-title { width:100%; font:600 24px var(--serif); padding:9px 12px; margin-bottom:12px; background:var(--bg); color:var(--ink); border:1px solid var(--line); border-radius:var(--r); }
+  .edit-title:focus, .edit-body:focus { outline:none; border-color:var(--sage); }
+  .edit-body { width:100%; min-height:340px; padding:14px; font:14px/1.65 var(--mono); background:var(--bg); color:var(--ink); border:1px solid var(--line); border-radius:var(--r); resize:vertical; }
+  #new-root { width:100%; margin-bottom:14px; text-align:left; }
+  /* #222 — page attachments */
+  .attach-grid { display:flex; flex-wrap:wrap; gap:10px; margin-top:4px; align-items:flex-start; }
+  .attach-img { max-width:230px; max-height:190px; border-radius:8px; border:1px solid var(--line); cursor:pointer; display:block; }
+  .attach-img:hover { border-color:var(--sage); }
+  .attach-file { display:inline-flex; align-items:center; gap:6px; color:var(--link); text-decoration:none; border:1px solid var(--line); border-radius:8px; padding:7px 12px; font-size:13px; }
+  .attach-file:hover { background:var(--panel-2); color:var(--ink); }
+  .attach-edit-item { display:inline-flex; align-items:center; gap:7px; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:5px 7px 5px 11px; font:12px var(--mono); }
+  .attach-rm { background:none; border:none; color:var(--muted); cursor:pointer; font-size:15px; line-height:1; padding:0; }
+  .attach-rm:hover { color:var(--ink); }
+  .attach-file-input { font:12px var(--mono); color:var(--muted); }
+  @media (prefers-reduced-motion:reduce) { .page-rise { animation:none; } #tree a, .btn { transition:none; } }
+  /* nav appearance in core/header.css (#303-2) */
+  .edit-row { display:flex; align-items:center; gap:10px; margin-bottom:12px; }
+  .edit-label { font:600 11px var(--mono); text-transform:uppercase; letter-spacing:.12em; color:var(--muted); }
+  .edit-parent { background:var(--bg); color:var(--ink); border:1px solid var(--line); border-radius:var(--r); padding:8px 10px; font:inherit; }
+  .edit-parent:focus { outline:none; border-color:var(--sage); }
+  /* #226 — homed-thread section header (the inline render is the shared cv component) */
+  .conv-head { display:flex; align-items:baseline; gap:12px; }
+  .conv-head h3 { flex:1; }
+  .conv-promote { color:var(--link); text-decoration:none; font-size:12px; white-space:nowrap; }
+  .conv-promote:hover { text-decoration:underline; }
+  /* #226 — slide-in commons panel (quick-peek at the global room, parity with the board) */
+  .cv-toggle { position:fixed; bottom:20px; right:20px; z-index:40; background:var(--accent); color:#fff; border:none; border-radius:24px; padding:11px 18px; font:inherit; cursor:pointer; box-shadow:0 4px 16px rgba(0,0,0,.4); }
+  .cv-toggle:hover { filter:brightness(1.1); }
+  .cv-panel { position:fixed; top:0; right:0; width:380px; max-width:92vw; height:100vh; background:var(--panel); border-left:1px solid var(--line); box-shadow:-8px 0 30px rgba(0,0,0,.4); transform:translateX(100%); transition:transform .18s ease; z-index:50; display:flex; flex-direction:column; padding:16px 16px 18px; }
+  .cv-panel.visible { transform:translateX(0); }
+  .cv-panel-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }
+  .cv-panel-title { font-weight:600; }
+  .cv-panel-actions a, .cv-panel-actions button { color:var(--muted); text-decoration:none; background:none; border:none; cursor:pointer; font:inherit; padding:2px 6px; }
+  .cv-panel-actions a:hover, .cv-panel-actions button:hover { color:var(--ink); }
+  .cv-panel #cv-mount { flex:1; min-height:0; display:flex; }
+  .cv-panel .cv-root { width:100%; }
+  /* #229 — nav filter + sort + collapsible tree; #231 — show-done toggle */
+  .nav-controls { display:flex; flex-direction:column; gap:6px; margin-bottom:10px; }
+  .nav-controls-row { display:flex; gap:8px; align-items:center; }
+  .nav-filter { flex:1; min-width:0; background:var(--bg); color:var(--ink); border:1px solid var(--line); border-radius:7px; padding:7px 10px; font:12.5px var(--mono); }
+  .nav-filter:focus { outline:none; border-color:var(--sage); }
+  .nav-sort { background:var(--bg); color:var(--muted); border:1px solid var(--line); border-radius:7px; padding:6px 4px; font:11px var(--mono); }
+  .nav-done { display:flex; align-items:center; gap:4px; margin-left:auto; font-size:11px; color:var(--muted); white-space:nowrap; cursor:pointer; user-select:none; }
+  .nav-done input { margin:0; cursor:pointer; }
+  .tree-row { display:flex; align-items:center; gap:2px; }
+  .tree-toggle { width:14px; flex:none; text-align:center; cursor:pointer; color:var(--muted); font-size:10px; user-select:none; }
+  .tree-toggle.tree-spacer { cursor:default; }
+  .tree-toggle:not(.tree-spacer):hover { color:var(--ink); }
+  .tree-row a { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #tree ul { border-left:1px solid var(--line); }     /* indent guide on nested levels */
+  #tree > ul { border-left:none; }
+  /* Inline "new page" field — replaces a native prompt(), which froze the tab
+     for anyone driving this board through an automated browser. */
+  .new-page-row { padding: 4px 0 8px; }
+  .new-page-input {
+    width: 100%; box-sizing: border-box;
+    background: var(--panel-2); color: var(--ink);
+    border: 1px solid var(--accent); border-radius: var(--r);
+    padding: 6px 8px; font: inherit; font-size: 13px;
+  }
+  .new-page-input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+  /* Non-blocking notice — same reason: never alert() on a shared UI. */
+  #wiki-notice {
+    position: fixed; left: 50%; bottom: 24px; transform: translate(-50%, 16px);
+    background: var(--panel-2); color: var(--ink);
+    border: 1px solid var(--line); border-radius: var(--r);
+    padding: 10px 16px; font-size: 13px; max-width: min(90vw, 520px);
+    box-shadow: 0 6px 24px rgba(0,0,0,.45);
+    opacity: 0; pointer-events: none; transition: opacity .18s ease, transform .18s ease;
+    z-index: 50;
+  }
+  #wiki-notice.visible { opacity: 1; transform: translate(-50%, 0); }
+  @media (prefers-reduced-motion: reduce) { #wiki-notice { transition: none; } }
+</style>
+</head>
+<body>
+  <nav id="sidebar"><div id="app-nav"></div><h2 id="pages-heading" title="Drop a page here to make it top-level">Pages</h2><button id="new-root" class="btn">+ New page</button>
+    <div class="nav-controls">
+      <input id="nav-filter" class="nav-filter" type="text" placeholder="Filter…  text or field:value" autocomplete="off" spellcheck="false">
+      <div class="nav-controls-row">
+        <select id="nav-sort" class="nav-sort" title="Sort pages"><option value="alpha">A–Z</option><option value="edited">Recent</option><option value="created">Newest</option></select>
+        <label class="nav-done" title="Done cards are hidden by default"><input type="checkbox" id="nav-showdone"> show done</label>
+      </div>
+    </div>
+    <div id="tree"><p class="empty">Loading…</p></div></nav>
+  <main id="main"><p class="empty">Select a page from the tree.</p></main>
+
+  <button id="cv-toggle" class="cv-toggle" title="Open the commons">💬 Commons</button>
+  <aside id="cv-panel" class="cv-panel" aria-hidden="true">
+    <div class="cv-panel-header">
+      <span class="cv-panel-title">💬 Commons</span>
+      <span class="cv-panel-actions"><a href="/commons.html" title="Open as full page">⤢ Full page</a><button id="cv-close" title="Close">✕</button></span>
+    </div>
+    <div id="cv-mount"></div>
+  </aside>
+
+  <script type="module">
+    import { renderMarkdown } from './core/render.mjs';
+    import { mountConversationView } from './core/conversation-view.mjs';
+    import { matchesNodeQuery, nodeComparator, filterTree, sortTree } from './core/nav.mjs';
+    import { mountTopNav } from './core/header.mjs';
+    mountTopNav(document, 'wiki'); // #303-2 shared nav
+
+    let nodesByName = new Map();   // lowercase name → node, for wikilink resolution
+    let allNodes = [];             // for the parent-picker in edit mode
+    let currentNodeId = null;      // guards async conversation render against fast navigation
+    let treeData = [];             // #229 — the loaded tree, re-rendered on filter/sort/collapse
+    let filterQuery = '';
+    let sortMode = 'alpha';
+    let showDone = false;          // #231 — Done cards hidden by default
+    const collapsed = new Set();   // branch ids the user has collapsed
+
+    async function loadTree() {
+      const res = await fetch('/api/nodes');
+      const { nodes, tree } = await res.json();
+      nodesByName = new Map(nodes.filter((n) => n.name).map((n) => [n.name.toLowerCase(), n]));
+      allNodes = nodes;
+      treeData = tree;
+      renderNav();
+    }
+
+    // #231 — a node is visible if it matches the query AND isn't a hidden Done
+    // card. Done is hidden by default; revealed by the "show done" checkbox or an
+    // explicit `column:done` term (so a column-targeted filter isn't silently empty).
+    function isVisible(node) {
+      if (!matchesNodeQuery(node, filterQuery)) return false;
+      if (showDone) return true;
+      if ((node.board?.column ?? '') !== 'done') return true;
+      return /\bcol(?:umn)?:/i.test(filterQuery);
+    }
+
+    // #229 — apply sort + visibility, then render. filterTree keeps a match's
+    // ancestors so the path stays visible; sort orders every level.
+    function renderNav() {
+      let branches = sortTree(treeData, nodeComparator(sortMode));
+      branches = filterTree(branches, isVisible);
+      const root = document.getElementById('tree');
+      root.innerHTML = '';
+      if (!branches.length) { root.innerHTML = '<p class="empty">No pages match.</p>'; return; }
+      root.appendChild(renderTree(branches));
+    }
+
+    function toggleCollapse(id) {
+      if (collapsed.has(id)) collapsed.delete(id); else collapsed.add(id);
+      renderNav();
+    }
+
+    // #220 — drag-drop reparent. Dragging a page onto another makes it that
+    // page's child; dropping on "PAGES" makes it top-level. Descendants (and
+    // self) are invalid drop targets — that would create a cycle (the server
+    // rejects it too, #220 guard, but we never offer an invalid drop).
+    let draggedNodeId = null;
+    function findBranch(branches, id) {
+      for (const b of branches) {
+        if (b.id === id) return b;
+        const f = findBranch(b.children || [], id);
+        if (f) return f;
+      }
+      return null;
+    }
+    function descendantIds(branch) {
+      const out = new Set();
+      const walk = (b) => { for (const c of b.children || []) { out.add(c.id); walk(c); } };
+      if (branch) walk(branch);
+      return out;
+    }
+    function isValidDropTarget(targetId) {
+      if (!draggedNodeId || targetId === draggedNodeId) return false;
+      return !descendantIds(findBranch(treeData, draggedNodeId)).has(targetId);
+    }
+    async function reparentNode(childId, newParentId) {
+      const res = await fetch('/api/nodes/' + encodeURIComponent(childId), {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parent: newParentId }),
+      });
+      if (!res.ok) return; // 409 cycle guard etc. — tree unchanged, no-op
+      await loadTree();
+      if (currentNodeId) openNode(currentNodeId, false);
+    }
+
+    function renderTree(branches) {
+      const ul = document.createElement('ul');
+      for (const b of branches) {
+        const li = document.createElement('li');
+        const row = document.createElement('div');
+        row.className = 'tree-row';
+        const hasKids = b.children?.length > 0;
+        const isCollapsed = hasKids && collapsed.has(b.id) && !filterQuery.trim();
+        const tog = document.createElement('span');
+        tog.className = 'tree-toggle' + (hasKids ? '' : ' tree-spacer');
+        tog.textContent = hasKids ? (isCollapsed ? '▸' : '▾') : '';
+        if (hasKids) tog.onclick = (e) => { e.stopPropagation(); toggleCollapse(b.id); };
+        const a = document.createElement('a');
+        a.textContent = b.node?.name || '(untitled)';
+        a.dataset.id = b.id;
+        a.title = b.node?.name || '';
+        if (b.id === currentNodeId) a.classList.add('active');
+        a.onclick = () => openNode(b.id);
+        // #220 — drag to reparent
+        a.draggable = true;
+        a.ondragstart = (e) => { draggedNodeId = b.id; e.dataTransfer.effectAllowed = 'move'; };
+        a.ondragend = () => { draggedNodeId = null; document.querySelectorAll('.drop-into').forEach((x) => x.classList.remove('drop-into')); };
+        a.ondragover = (e) => { if (isValidDropTarget(b.id)) { e.preventDefault(); a.classList.add('drop-into'); } };
+        a.ondragleave = () => a.classList.remove('drop-into');
+        a.ondrop = (e) => { e.preventDefault(); a.classList.remove('drop-into'); if (isValidDropTarget(b.id)) reparentNode(draggedNodeId, b.id); };
+        row.append(tog, a);
+        li.appendChild(row);
+        if (hasKids && !isCollapsed) li.appendChild(renderTree(b.children));
+        ul.appendChild(li);
+      }
+      return ul;
+    }
+
+    // #240 — push=true writes the page to the URL (shareable + back/forward).
+    // popstate + the initial deep-link load pass push=false (URL already set).
+    async function openNode(id, push = true) {
+      const res = await fetch('/api/nodes/' + encodeURIComponent(id));
+      const main = document.getElementById('main');
+      if (!res.ok) { main.innerHTML = '<p class="empty">Page not found.</p>'; return; }
+      const { node, children, backlinks } = await res.json();
+      main.innerHTML = '';
+      // #224 — mono eyebrow (type · #id) → serif title → ember rule → prose.
+      const type = node.additionalType ? node.additionalType.replace('scrum:', '') : 'page';
+      const eyebrow = el('div', 'page-eyebrow', type + ' · #' + (node.identifier ?? '—'));
+      const h1 = el('h1', 'page-title', node.name || '(untitled)');
+      const article = document.createElement('article');
+      article.innerHTML = renderMarkdown(node.text || '');
+      wireWikilinks(article);
+      currentNodeId = node['@id'];
+      const rise = el('div', 'page-rise');   // #224 — the page arrives (fade-up)
+      rise.append(eyebrow, h1, article);
+      const attachSec = attachmentsSection(node);   // #222
+      if (attachSec) rise.append(attachSec);
+      rise.append(linkSection('Children', children), linkSection('Backlinks', backlinks), toolbar(node));
+      main.append(rise);
+      renderConversations(node['@id'], main);
+      document.querySelectorAll('#tree a').forEach((a) => a.classList.toggle('active', a.dataset.id === node['@id']));
+      // #240 — give the page a shareable URL and bring its nav entry into view
+      // (in a long alpha-sorted nav the active page is usually below the fold).
+      if (push) history.pushState({ node: node['@id'] }, '', '?node=' + encodeURIComponent(node['@id']));
+      document.querySelector('#tree a.active')?.scrollIntoView({ block: 'nearest' });
+    }
+
+    function linkSection(title, items) {
+      const sec = el('div', 'section');
+      sec.appendChild(el('h3', '', title));
+      if (!items || !items.length) { sec.appendChild(el('div', 'empty', 'None')); return sec; }
+      for (const n of items) {
+        const a = el('a', '', n.name || '(untitled)');
+        a.onclick = () => openNode(n['@id']);
+        sec.appendChild(a);
+      }
+      return sec;
+    }
+
+    // #226 — a page's homed discussion, rendered by the shared conversation-view
+    // component (the same projection the full-page Commons uses), scoped to this
+    // node. The header carries a "⤢ open full" link that promotes the thread to
+    // a full page (commons.html?node=<id>).
+    function renderConversations(nodeId, main) {
+      const sec = el('div', 'section');
+      const head = el('div', 'conv-head');
+      head.appendChild(el('h3', '', 'Conversations'));
+      const full = el('a', 'conv-promote', '⤢ open full');
+      full.href = '/commons.html?node=' + encodeURIComponent(nodeId);
+      full.title = 'Promote this discussion to a full page';
+      head.appendChild(full);
+      sec.appendChild(head);
+      const mount = el('div', 'conv-mount');
+      sec.appendChild(mount);
+      main.appendChild(sec);
+      if (currentNodeId !== nodeId || !main.isConnected) return;   // navigated away
+      mountConversationView({ mount, attachedTo: nodeId, placeholder: 'Add to the discussion on this page…' });
+    }
+
+    // #226 — slide-in commons panel: a quick peek at the global room from any
+    // page, parity with the board's panel. The poll keeps it live while open;
+    // closing tears it down (stops the poll).
+    let _panelView = null;
+    function openCommonsPanel() {
+      document.getElementById('cv-panel').classList.add('visible');
+      if (!_panelView) _panelView = mountConversationView({ mount: document.getElementById('cv-mount'), poll: true });
+    }
+    function closeCommonsPanel() {
+      document.getElementById('cv-panel').classList.remove('visible');
+      if (_panelView) { _panelView.destroy(); _panelView = null; }
+    }
+    document.getElementById('cv-toggle').onclick = () =>
+      document.getElementById('cv-panel').classList.contains('visible') ? closeCommonsPanel() : openCommonsPanel();
+    document.getElementById('cv-close').onclick = closeCommonsPanel;
+
+    function wireWikilinks(root) {
+      root.querySelectorAll('a.wikilink').forEach((a) => {
+        const node = nodesByName.get((a.dataset.target || '').toLowerCase());
+        if (node) { a.onclick = () => openNode(node['@id']); a.title = '→ ' + node.name; }
+        else { a.classList.add('broken'); a.title = 'No page named "' + a.dataset.target + '"'; }
+      });
+    }
+
+    /**
+     * Non-blocking notice. Deliberately NOT alert().
+     *
+     * A native modal freezes the whole page for an agent driving this board
+     * through a browser: every subsequent command times out and Escape cannot
+     * reach the dialog. On a board whose premise is that agents and people work
+     * the same UI, a modal is an outage for half the room — and worst of all on
+     * an ERROR path, where the party who most needs to read the message is the
+     * one who can no longer interact with anything.
+     */
+    function notify(msg) {
+      let n = document.getElementById('wiki-notice');
+      if (!n) {
+        n = document.createElement('div');
+        n.id = 'wiki-notice';
+        document.body.appendChild(n);
+      }
+      n.textContent = msg;
+      n.classList.add('visible');
+      clearTimeout(n._t);
+      n._t = setTimeout(() => n.classList.remove('visible'), 4000);
+    }
+
+    function el(tag, cls, text) {
+      const e = document.createElement(tag);
+      if (cls) e.className = cls;
+      if (text != null) e.textContent = text;
+      return e;
+    }
+
+    // #222 — page attachments. Reuses the commons attachment store + safe-serve
+    // (#113): images render inline, everything else is a download link; the
+    // server forces non-images to download (stored-XSS guard), so this is safe.
+    function attachmentEl(a) {
+      const url = '/api/attachments/' + encodeURIComponent(a.id);
+      if (typeof a.mime === 'string' && a.mime.startsWith('image/')) {
+        const img = el('img', 'attach-img'); img.src = url; img.alt = a.name || 'image'; img.title = a.name || '';
+        img.onclick = () => window.open(url, '_blank');
+        return img;
+      }
+      const link = el('a', 'attach-file', '📎 ' + (a.name || 'attachment'));
+      link.href = url; link.download = a.name || 'file';
+      return link;
+    }
+    function attachmentsSection(node) {
+      if (!Array.isArray(node.attachments) || !node.attachments.length) return null;
+      const sec = el('div', 'section');
+      sec.appendChild(el('h3', '', 'Attachments'));
+      const grid = el('div', 'attach-grid');
+      node.attachments.forEach((a) => { if (a && typeof a.id === 'string') grid.appendChild(attachmentEl(a)); });
+      sec.appendChild(grid);
+      return sec;
+    }
+    function fileToBase64(file) {
+      return new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => { const s = String(r.result); const c = s.indexOf(','); resolve(c >= 0 ? s.slice(c + 1) : s); };
+        r.onerror = () => reject(new Error('read failed'));
+        r.readAsDataURL(file);
+      });
+    }
+
+    function toolbar(node) {
+      const bar = el('div', 'toolbar');
+      const edit = el('button', 'btn', '✎ Edit'); edit.onclick = () => editMode(node);
+      const add = el('button', 'btn', '+ New child'); add.onclick = () => createChild(node['@id']);
+      const asCard = el('a', 'btn', '▦ Open as card'); asCard.href = '/?focus=' + encodeURIComponent(node['@id']);
+      bar.append(edit, add, asCard);
+      return bar;
+    }
+
+    function editMode(node) {
+      const main = document.getElementById('main');
+      main.innerHTML = '';
+      const title = el('input', 'edit-title'); title.value = node.name || ''; title.placeholder = 'Title';
+      const body = el('textarea', 'edit-body'); body.value = node.text || '';
+      body.placeholder = 'Markdown body…  [[Page Name]] to link';
+      const parentSel = el('select', 'edit-parent');
+      const none = el('option', '', '— top level —'); none.value = ''; parentSel.appendChild(none);
+      for (const n of allNodes) {
+        if (n['@id'] === node['@id']) continue;   // a page can't be its own parent
+        const opt = el('option', '', n.name || '(untitled)'); opt.value = n['@id'];
+        if (n['@id'] === node.isPartOf) opt.selected = true;
+        parentSel.appendChild(opt);
+      }
+      const parentRow = el('div', 'edit-row');
+      parentRow.append(el('span', 'edit-label', 'Parent'), parentSel);
+
+      // #222 — attachments editor: a working copy, add via upload, remove per item.
+      let workingAttachments = Array.isArray(node.attachments) ? [...node.attachments] : [];
+      const attachRow = el('div', 'edit-row');
+      const attachList = el('div', 'attach-grid');
+      const fileInput = el('input', 'attach-file-input'); fileInput.type = 'file';
+      function renderAttachList() {
+        attachList.innerHTML = '';
+        workingAttachments.forEach((a, i) => {
+          const item = el('div', 'attach-edit-item');
+          item.append(el('span', '', (a.mime || '').startsWith('image/') ? '🖼' : '📎'), el('span', '', a.name || 'file'));
+          const rm = el('button', 'attach-rm', '×'); rm.type = 'button';
+          rm.onclick = () => { workingAttachments.splice(i, 1); renderAttachList(); };
+          item.appendChild(rm); attachList.appendChild(item);
+        });
+      }
+      fileInput.onchange = async () => {
+        const f = fileInput.files && fileInput.files[0]; if (!f) return;
+        try {
+          const data = await fileToBase64(f);
+          const res = await fetch('/api/attachments', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: f.name, mime: f.type || 'application/octet-stream', data }),
+          });
+          if (res.ok) { workingAttachments.push(await res.json()); renderAttachList(); }
+          else { const e = await res.json().catch(() => ({})); notify('Attachment rejected: ' + (e.error || res.status)); }
+        } catch (e) { notify('Upload failed: ' + (e && e.message ? e.message : e)); }
+        fileInput.value = '';
+      };
+      renderAttachList();
+      attachRow.append(el('span', 'edit-label', 'Files'), fileInput);
+
+      const save = el('button', 'btn primary', 'Save');
+      save.onclick = async () => {
+        await fetch('/api/nodes/' + encodeURIComponent(node['@id']), {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: title.value, body: body.value, parent: parentSel.value || null, attachments: workingAttachments }),
+        });
+        await loadTree();
+        openNode(node['@id']);
+      };
+      const cancel = el('button', 'btn', 'Cancel'); cancel.onclick = () => openNode(node['@id']);
+      const bar = el('div', 'toolbar'); bar.append(save, cancel);
+      main.append(el('div', 'meta', 'Editing'), title, parentRow, attachRow, attachList, body, bar);
+    }
+
+    /**
+     * Create a page, asking for the title with an INLINE input.
+     *
+     * This used to call prompt(). A native prompt hard-freezes the tab for an
+     * agent driving the board through a browser — no command lands, Escape
+     * can't reach it, and the only recovery is navigating away. That made the
+     * wiki's primary create action unusable by half the audience this board
+     * exists for. An inline field is also the pattern the column-title editor
+     * already uses, so this is one less way for the UI to behave.
+     */
+    async function createPageNamed(title, parentId) {
+      const res = await fetch('/api/nodes', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, body: '', parent: parentId }),
+      });
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        return notify('Could not create the page: ' + (e.error || res.status));
+      }
+      const node = await res.json();
+      await loadTree();
+      openNode(node['@id']);
+    }
+
+    function createChild(parentId) {
+      // If a previous prompt row is still open, replace it rather than stacking.
+      document.querySelectorAll('.new-page-row').forEach((n) => n.remove());
+
+      const row = el('div', 'new-page-row');
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'new-page-input';
+      input.placeholder = 'New page title…';
+      input.setAttribute('aria-label', 'New page title');
+
+      const done = () => row.remove();
+      const submit = () => {
+        const t = input.value.trim();
+        if (!t) return done();      // empty is a cancel, same as the old prompt
+        done();
+        createPageNamed(t, parentId);
+      };
+
+      input.onkeydown = (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); submit(); }
+        if (e.key === 'Escape') { e.preventDefault(); done(); }
+      };
+      input.onblur = submit;       // clicking away commits what you typed
+
+      row.append(input);
+      const tree = document.getElementById('tree') || document.getElementById('pages-heading').parentNode;
+      tree.prepend(row);
+      input.focus();
+    }
+
+    document.getElementById('new-root').onclick = () => createChild(null);
+
+    // #220 — drop a page on the "PAGES" heading to move it to the top level.
+    const pagesHeading = document.getElementById('pages-heading');
+    pagesHeading.ondragover = (e) => { if (draggedNodeId) { e.preventDefault(); pagesHeading.classList.add('drop-into'); } };
+    pagesHeading.ondragleave = () => pagesHeading.classList.remove('drop-into');
+    pagesHeading.ondrop = (e) => { e.preventDefault(); pagesHeading.classList.remove('drop-into'); if (draggedNodeId) reparentNode(draggedNodeId, null); };
+
+    // #229 — filter (live) + sort (re-render the nav, never refetch).
+    document.getElementById('nav-filter').addEventListener('input', (e) => {
+      filterQuery = e.target.value;
+      renderNav();
+    });
+    document.getElementById('nav-sort').addEventListener('change', (e) => {
+      sortMode = e.target.value;
+      renderNav();
+    });
+    document.getElementById('nav-showdone').addEventListener('change', (e) => {
+      showDone = e.target.checked;
+      renderNav();
+    });
+
+    // #240 — back/forward moves between pages (read the node from the URL, don't re-push).
+    window.addEventListener('popstate', (e) => {
+      const n = (e.state && e.state.node) || new URLSearchParams(location.search).get('node');
+      if (n) openNode(n, false);
+    });
+
+    loadTree().then(() => {
+      const n = new URLSearchParams(location.search).get('node');
+      if (n) openNode(n, false);   // deep-link load: URL already has ?node=, don't double-push
+    });
+  </script>
+</body>
+</html>

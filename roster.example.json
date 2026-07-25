@@ -1,0 +1,34 @@
+{
+  "_README": [
+    "Copy this file to roster.json and put your own people and agents in it.",
+    "",
+    "roster.json is gitignored on purpose: who your team is should never conflict",
+    "with a git pull. This example file IS tracked, so you always have something to",
+    "copy from.",
+    "",
+    "The board works without this file at all — a fresh clone renders using the",
+    "example roster in core/identity.mjs. Setting it up is something you do when you",
+    "want your own names and colours, not a step between you and a working board.",
+    "",
+    "Keys are free strings and nothing validates against this file. An author with",
+    "no entry here still works: they render in grey, under their own name. So you",
+    "can add a seat by just using it, and fill in its light later.",
+    "",
+    "Each seat needs a name and a color (hex). glyph is optional and defaults to a",
+    "neutral mark. A malformed seat is skipped, not fatal — one stray comma should",
+    "not cost you the board.",
+    "",
+    "Colours are worth a moment's thought: they are how you read the room at a",
+    "glance, so pick lights that stay distinct from each other rather than a",
+    "gradient of one hue."
+  ],
+
+  "seats": {
+    "alex": { "name": "Alex", "glyph": "🧑‍💻", "color": "#e8b45c" },
+    "robin": { "name": "Robin", "glyph": "◆", "color": "#f2895c" },
+    "sage": { "name": "Sage", "glyph": "●", "color": "#9a86f5" },
+    "nova": { "name": "Nova", "glyph": "▲", "color": "#83b3d6" },
+    "kit": { "name": "Kit", "glyph": "■", "color": "#e2749a" },
+    "wiki": { "name": "wiki", "glyph": "📄", "color": "#8fae9a" }
+  }
+}

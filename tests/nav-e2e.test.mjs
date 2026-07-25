@@ -1,0 +1,53 @@
+/**
+ * #303-2 — end-to-end nav parity. Each of the four surfaces must render the
+ * shared header with all four links and its own tab marked active. This is the
+ * regression guard for the "I can't see Settings from the commons" finding.
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import puppeteer from 'puppeteer';
+import { startRestServer } from './helpers/harness.mjs';
+
+const ts = '2026-05-01T00:00:00.000Z';
+const board = {
+  cards: [{
+    id: 'c1', shortId: 1, title: 'Anchor', description: 'a page', type: 'reference',
+    assignees: ['sage'], labels: [], for: '', priority: null, column: 'backlog',
+    order: 0, createdAt: ts, updatedAt: ts, relationships: { relatedTo: [], blockedBy: [] },
+  }],
+  columns: [{ id: 'backlog', name: 'Backlog', order: 0 }],
+  conversations: [],
+  nextShortId: 2,
+};
+
+const EXPECTED_LABELS = ['▦ Board', '📖 Wiki', '💬 Commons', '⚙️ Settings'];
+const SURFACES = [
+  { path: '/', active: '▦ Board' },
+  { path: '/wiki.html', active: '📖 Wiki' },
+  { path: '/commons.html', active: '💬 Commons' },
+  { path: '/settings.html', active: '⚙️ Settings' },
+];
+
+for (const s of SURFACES) {
+  test(`#303-2 ${s.path} shows all four nav links, with "${s.active}" active`, async () => {
+    const server = await startRestServer({ board });
+    const browser = await puppeteer.launch({ headless: 'new' });
+    try {
+      const page = await browser.newPage();
+      await page.goto(`${server.baseUrl}${s.path}`, { waitUntil: 'networkidle0' });
+      await page.waitForSelector('.topnav .navlink', { timeout: 5000 });
+
+      const labels = await page.$$eval('.topnav .navlink', (els) => els.map((e) => e.textContent.trim()));
+      for (const want of EXPECTED_LABELS) {
+        assert.ok(labels.includes(want), `${s.path} nav includes ${want} (saw: ${labels.join(', ')})`);
+      }
+
+      const active = await page.$$eval('.topnav .navlink.active', (els) => els.map((e) => e.textContent.trim()));
+      assert.deepEqual(active, [s.active], `${s.path} marks exactly "${s.active}" active`);
+    } finally {
+      await browser.close();
+      await server.stop();
+    }
+  });
+}

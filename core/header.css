@@ -1,0 +1,26 @@
+/* core/header.css — #303-2. Canonical styling for the shared cross-surface nav
+   (core/header.mjs). Linked by all four surfaces; uses CSS vars with fallbacks
+   so it inherits whatever palette the host page defines (board/wiki/commons/
+   settings each set their own :root). Replaces four near-identical per-page
+   .navlink blocks. */
+
+.topnav { display: flex; gap: 8px; margin-bottom: 14px; }
+.topnav .navlink {
+  flex: 1;
+  text-align: center;
+  text-decoration: none;
+  color: var(--muted, #94a3b8);
+  background: var(--panel, #1a2030);
+  border: 1px solid var(--line, #2a3345);
+  border-radius: 7px;
+  padding: 8px 0;
+  font-size: 13px;
+  cursor: pointer;
+}
+.topnav .navlink:hover { color: var(--ink, #e2e8f0); }
+.topnav .navlink.active {
+  color: #fff;
+  background: var(--accent, #6366f1);
+  border-color: var(--accent, #6366f1);
+  cursor: default;
+}

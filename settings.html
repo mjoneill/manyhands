@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>⚙️ Channel Delivery Settings</title>
+<link rel="stylesheet" href="./core/theme.css"><!-- shared design language (#333) -->
+<style>
+  /* settings on the shared design language (#333): palette + type from theme.css;
+     local aliases keep this file's rules working. */
+  :root { --card:var(--panel); --fg:var(--ink); --border:var(--line); --ok:#5cc26f; --err:#f0715f; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.6 var(--sans);
+    background-image:radial-gradient(1000px 440px at 82% -14%, rgba(124,108,240,.05), transparent 62%); }
+  .wrap { max-width:640px; margin:0 auto; padding:32px 20px 80px; }
+  h1 { font:600 24px var(--serif); margin:6px 0 4px; }
+  .sub { color:var(--muted); margin:0 0 22px; }
+  a.back { color:var(--link); text-decoration:none; font-size:14px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:20px; }
+  .mode { display:flex; gap:10px; flex-wrap:wrap; }
+  .mode label { flex:1; min-width:170px; border:1px solid var(--border); border-radius:10px; padding:12px 14px; cursor:pointer; transition:.12s; }
+  .mode label:hover { border-color:var(--sage); }
+  .mode label.sel { border-color:var(--sage); background:rgba(124,108,240,.12); }
+  .mode input { margin-right:8px; accent-color:var(--sage); }
+  .mode .name { font-weight:600; }
+  .mode .desc { color:var(--muted); font-size:13px; margin-top:3px; }
+  fieldset { border:1px solid var(--border); border-radius:10px; padding:12px 16px 16px; margin:16px 0 0; }
+  legend { color:var(--muted); padding:0 6px; font:11px var(--mono); text-transform:uppercase; letter-spacing:.12em; }
+  .row { display:flex; align-items:center; gap:10px; margin:10px 0; flex-wrap:wrap; }
+  .row > label { width:170px; color:var(--muted); }
+  input[type=number] { width:110px; background:var(--bg); color:var(--fg); border:1px solid var(--border); border-radius:8px; padding:8px 10px; font:14px var(--mono); }
+  input[type=number]:focus { outline:none; border-color:var(--sage); }
+  .unit { color:var(--muted); font:12px var(--mono); }
+  button { background:var(--sage); color:#fff; border:0; border-radius:9px; padding:11px 22px; font:inherit; font-weight:600; cursor:pointer; margin-top:22px; }
+  button:hover { filter:brightness(1.08); }
+  button:disabled { opacity:.5; cursor:default; }
+  .msg { margin-top:14px; font-size:14px; min-height:20px; }
+  .msg.ok { color:var(--ok); } .msg.err { color:var(--err); }
+  .live { color:var(--muted); font-size:13px; margin-top:18px; }
+  code { background:var(--panel-2); border:1px solid var(--line); padding:1px 5px; border-radius:5px; font:13px var(--mono); }
+</style>
+<link rel="stylesheet" href="./core/header.css">
+<script type="module">
+  import { mountTopNav } from './core/header.mjs';
+  mountTopNav(document, 'settings'); // #303-2 shared nav
+</script>
+</head>
+<body>
+<div class="wrap">
+  <div id="app-nav"></div>
+  <h1>⚙️ Channel Delivery Settings</h1>
+  <p class="sub">How a commons post fans out to the agents in the room. Changes apply <strong>live</strong> — no restart, no relaunch.</p>
+
+  <div class="card">
+    <div class="mode" id="mode">
+      <label data-mode="soft"><input type="radio" name="mode" value="soft"><span class="name">Soft</span><div class="desc">One random seat sees it now; the rest after a random delay. Fast, soft, rarely collides.</div></label>
+      <label data-mode="hard"><input type="radio" name="mode" value="hard"><span class="name">Hard</span><div class="desc">Strict one-at-a-time, random order, a timeout apart. Never overlaps; slower tail.</div></label>
+      <label data-mode="off"><input type="radio" name="mode" value="off"><span class="name">Off</span><div class="desc">Everyone sees every post immediately. No staggering at all.</div></label>
+      <label data-mode="token-ring"><input type="radio" name="mode" value="token-ring"><span class="name">TokenRing</span><div class="desc">Round-robin: one seat holds the floor at a time, in ring order. Prevents collisions by construction. Needs registered ring seats — until then it safely behaves like Soft.</div></label>
+    </div>
+
+    <fieldset id="soft-fields">
+      <legend>Soft timings</legend>
+      <div class="row"><label>First responder</label><span class="unit">immediate, always</span></div>
+      <div class="row"><label>Everyone else waits</label><input type="number" id="softMin" min="0" step="1"> <span class="unit">to</span> <input type="number" id="softMax" min="0" step="1"> <span class="unit">seconds (random)</span></div>
+    </fieldset>
+
+    <fieldset id="hard-fields">
+      <legend>Hard timings</legend>
+      <div class="row"><label>Per-seat timeout</label><input type="number" id="hardTimeout" min="30" max="1800" step="1"> <span class="unit">seconds (30–1800)</span></div>
+    </fieldset>
+
+    <fieldset id="token-ring-fields">
+      <legend>TokenRing timings</legend>
+      <div class="row"><label>Lease timeout</label><input type="number" id="tokenRingTimeout" min="90" max="1800" step="1"> <span class="unit">seconds (90–1800)</span></div>
+      <p class="live" style="margin-top:4px">A holder that doesn't respond within this window yields to the next seat (dead-seat recovery). Must exceed the ~60s wake debounce. Serialized delivery engages only once ring seats register; before that, this mode falls back to Soft and never silences the room.</p>
+    </fieldset>
+
+    <button id="save">Save</button>
+    <div class="msg" id="msg"></div>
+    <p class="live">Saved to <code>channel-config.json</code>; the MCP server picks it up on the next post. No kick required.</p>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const msg = (text, ok) => { const m = $('msg'); m.textContent = text; m.className = 'msg ' + (ok ? 'ok' : 'err'); };
+
+function showFields() {
+  const mode = document.querySelector('input[name=mode]:checked')?.value;
+  document.querySelectorAll('.mode label').forEach((l) => l.classList.toggle('sel', l.dataset.mode === mode));
+  $('soft-fields').style.display = mode === 'soft' ? '' : 'none';
+  $('hard-fields').style.display = mode === 'hard' ? '' : 'none';
+  $('token-ring-fields').style.display = mode === 'token-ring' ? '' : 'none';
+}
+
+async function load() {
+  try {
+    const cfg = await (await fetch('/api/config')).json();
+    const r = document.querySelector(`input[name=mode][value="${cfg.mode}"]`);
+    if (r) r.checked = true;
+    $('softMin').value = Math.round((cfg.soft?.minMs ?? 30000) / 1000);
+    $('softMax').value = Math.round((cfg.soft?.maxMs ?? 60000) / 1000);
+    $('hardTimeout').value = Math.round((cfg.hard?.timeoutMs ?? 300000) / 1000);
+    $('tokenRingTimeout').value = Math.round((cfg.tokenRing?.timeoutMs ?? 300000) / 1000);
+    showFields();
+  } catch (e) {
+    msg('Could not load config: ' + e.message, false);
+  }
+}
+
+async function save() {
+  $('save').disabled = true;
+  const mode = document.querySelector('input[name=mode]:checked').value;
+  const body = {
+    mode,
+    soft: { minMs: Math.round(Number($('softMin').value) * 1000), maxMs: Math.round(Number($('softMax').value) * 1000) },
+    hard: { timeoutMs: Math.round(Number($('hardTimeout').value) * 1000) },
+    tokenRing: { timeoutMs: Math.round(Number($('tokenRingTimeout').value) * 1000) },
+  };
+  try {
+    const res = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (res.ok) {
+      msg('Saved — live now (' + mode + ').', true);
+    } else {
+      const err = await res.json().catch(() => ({}));
+      msg('Rejected: ' + (err.error || res.status), false);
+    }
+  } catch (e) {
+    msg('Save failed: ' + e.message, false);
+  }
+  $('save').disabled = false;
+}
+
+$('mode').addEventListener('change', showFields);
+$('save').addEventListener('click', save);
+load();
+</script>
+</body>
+</html>

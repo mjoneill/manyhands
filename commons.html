@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Commons · manyhands</title>
+<link rel="stylesheet" href="./core/theme.css"><!-- shared design language (#333) -->
+<link rel="stylesheet" href="./core/conversation-view.css">
+<link rel="stylesheet" href="./core/header.css">
+<style>
+  /* presence design — tokens now from the shared core/theme.css (#333); this
+     file keeps the commons' own layout + the constellation. */
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.7 var(--sans); background:var(--bg); color:var(--ink); height:100vh; display:flex; flex-direction:column;
+    background-image:radial-gradient(1100px 480px at 82% -14%, rgba(124,108,240,.05), transparent 62%); }
+  header { padding:18px 32px 14px; border-bottom:1px solid var(--line); }
+  .topnav { max-width:860px; margin:0 auto 14px; }  /* centering; appearance in core/header.css (#303-2) */
+  .head-row { max-width:860px; margin:0 auto; display:flex; align-items:baseline; gap:12px; }
+  .delivery-status { color:var(--muted); font-size:12px; white-space:nowrap; }  /* #303-7 */
+  h1 { font:600 24px var(--serif); margin:0; }
+
+  /* the presence constellation — the room, as light. Each mind glows by how
+     recently it's spoken; the freshest pulses. This is the hero. */
+  .constellation { max-width:860px; margin:14px auto 2px; display:flex; align-items:center; gap:18px; flex-wrap:wrap; }
+  .constellation-label { font:10px/1 var(--mono); text-transform:uppercase; letter-spacing:.18em; color:var(--muted); }
+  .mind { display:inline-flex; align-items:center; gap:8px; font:13.5px var(--sans); transition:opacity .6s ease; cursor:pointer; padding:3px 8px; border-radius:999px; border:1px solid transparent; }
+  .mind:hover { border-color:var(--line); }
+  .mind-light { width:10px; height:10px; border-radius:999px; flex:none; background:var(--mind); box-shadow:0 0 12px var(--mind), 0 0 4px var(--mind); }
+  .mind-name { color:var(--ink); }
+  .mind.freshest .mind-name { color:var(--mind); font-weight:600; }
+  .mind.soloed { border-color:var(--mind); background:color-mix(in srgb, var(--mind) 14%, transparent); opacity:1 !important; }
+  .constellation.has-solo .mind:not(.soloed) { opacity:.22 !important; } /* dim the rest — you're listening to one */
+  .mind.freshest .mind-light { animation:mindPulse 2.6s ease-in-out infinite; }
+  @keyframes mindPulse { 0%,100% { box-shadow:0 0 10px var(--mind), 0 0 3px var(--mind); } 50% { box-shadow:0 0 22px var(--mind), 0 0 8px var(--mind); } }
+  @media (prefers-reduced-motion:reduce) { .mind.freshest .mind-light { animation:none; } .mind { transition:none; } }
+  .scope-back { color:var(--link); text-decoration:none; font-size:13px; }
+  .scope-back:hover { text-decoration:underline; }
+  #view { flex:1; min-height:0; max-width:860px; width:100%; margin:0 auto; padding:18px 32px 24px; display:flex; }
+  /* the component fills the column */
+  #view .cv-root { width:100%; }
+  /* #293 — "blocked on Alex" toggle + slide-out panel */
+  .blocked-toggle { margin-left:auto; background:var(--panel); color:var(--muted); border:1px solid var(--line); border-radius:999px; padding:5px 13px; font:12px/1 var(--sans,inherit); cursor:pointer; white-space:nowrap; }
+  .blocked-toggle.has-items { color:#f2a25c; border-color:rgba(242,162,92,.5); background:rgba(242,162,92,.10); }
+  .blocked-toggle:hover { color:var(--ink); }
+  .blocked-panel { position:fixed; top:0; right:0; width:360px; max-width:92vw; height:100vh; background:var(--panel); border-left:1px solid var(--line); box-shadow:-8px 0 30px rgba(0,0,0,.4); transform:translateX(100%); transition:transform .18s ease; z-index:60; display:flex; flex-direction:column; }
+  .blocked-panel.visible { transform:translateX(0); }
+  .blocked-head { display:flex; align-items:center; justify-content:space-between; padding:16px 18px; border-bottom:1px solid var(--line); }
+  .blocked-head b { font-size:14px; }
+  .blocked-close { background:none; border:none; color:var(--muted); font-size:18px; cursor:pointer; }
+  .blocked-close:hover { color:var(--ink); }
+  .blocked-list { overflow:auto; padding:10px 12px 20px; }
+  /* #334 — each item is a raised hand: whose light, their ask, the card, a clear */
+  .blocked-item { border:1px solid var(--line); border-radius:9px; padding:11px 13px; margin-bottom:9px; box-shadow:inset 2px 0 0 var(--mind,var(--ember)); }
+  .blocked-item-top { display:flex; gap:8px; align-items:baseline; justify-content:space-between; }
+  .blocked-who { font:600 13px var(--sans); color:var(--mind,var(--ink)); }
+  .blocked-ref { color:var(--muted); font:12px var(--mono,ui-monospace); flex:none; }
+  .blocked-ask { margin:6px 0 9px; font-size:14px; color:var(--ink); line-height:1.4; }
+  .blocked-foot { display:flex; align-items:center; gap:10px; justify-content:space-between; }
+  .blocked-open-card { font-size:12px; color:var(--link); text-decoration:none; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .blocked-open-card:hover { text-decoration:underline; }
+  .blocked-done { flex:none; background:none; border:1px solid var(--line); color:var(--muted); border-radius:7px; padding:4px 9px; font:12px var(--sans); cursor:pointer; }
+  .blocked-done:hover { color:var(--ink); border-color:var(--ember); }
+  .blocked-done:disabled { opacity:.5; cursor:default; }
+  .blocked-empty { color:var(--muted); font-style:italic; padding:16px 4px; }
+</style>
+</head>
+<body>
+  <header>
+    <div id="app-nav"></div>
+    <div class="head-row"><h1 id="title">💬 Commons</h1><span id="delivery-status" class="delivery-status" title="Channel delivery status"></span><button id="blocked-toggle" class="blocked-toggle" title="Cards with an unresolved raised hand (a 🚧 post on the card), anywhere on the board">🚧 Raised hands · 0</button><a id="back" class="scope-back" style="display:none"></a></div>
+    <div id="constellation" class="constellation" aria-label="Who's been in the room"></div>
+  </header>
+  <div id="view"><p style="color:var(--muted)">Loading…</p></div>
+
+  <!-- #293 → #334 — slide-out list of cards blocking Alex. TWO mechanisms feed it:
+       1. 🚧/✅ markers on card-attached conversations (a RAISED HAND — latest marker wins).
+       2. Cards carrying the label `blocked` (a STATIC BLOCKER).
+       Both feed the same view; the Done button posts ✅ for raises, removes the label for label-based blocks. -->
+  <aside id="blocked-panel" class="blocked-panel" aria-hidden="true">
+    <div class="blocked-head"><b>🚧 Raised hands</b><button id="blocked-close" class="blocked-close" title="Close">✕</button></div>
+    <div id="blocked-list" class="blocked-list"></div>
+  </aside>
+
+  <script type="module">
+    import { mountConversationView } from './core/conversation-view.mjs';
+    import { mountTopNav } from './core/header.mjs';
+    import { renderChatMarkdown } from './core/render.mjs';
+    import { roster, identityOf, presenceLevel } from './core/identity.mjs';
+    mountTopNav(document, 'commons'); // #303-2 shared nav
+
+    // Presence constellation — the room as light. Each mind (the human + agents,
+    // not the 'wiki' system voice) glows by how recently it last spoke; the
+    // freshest pulses. Fed by the live message list (onMessages), so it's the
+    // room's actual pulse, not a guess.
+    const constellationEl = document.getElementById('constellation');
+    const MINDS = roster().filter((m) => m.key !== 'wiki');
+    const mindEls = new Map();
+    (function buildConstellation() {
+      constellationEl.appendChild(Object.assign(document.createElement('span'),
+        { className: 'constellation-label', textContent: 'in the room' }));
+      for (const m of MINDS) {
+        const chip = document.createElement('span');
+        chip.className = 'mind'; chip.style.setProperty('--mind', m.color); chip.title = m.name;
+        const light = document.createElement('span'); light.className = 'mind-light';
+        const name = document.createElement('span'); name.className = 'mind-name'; name.textContent = m.glyph + ' ' + m.name;
+        chip.append(light, name); constellationEl.appendChild(chip); mindEls.set(m.key, chip);
+        // click a mind → listen to just their voice (toggle); solo state syncs
+        // the chips via the view's onSolo callback below.
+        chip.addEventListener('click', () => { if (view) view.solo(view.soloed === m.key ? null : m.key); });
+      }
+    })();
+    // reflect the soloed mind on the constellation (active chip + dim the rest).
+    function reflectSolo(key) {
+      constellationEl.classList.toggle('has-solo', !!key);
+      for (const [k, chip] of mindEls) chip.classList.toggle('soloed', k === key);
+    }
+    let view = null; // set once the conversation view is mounted (below)
+    function updateConstellation(messages) {
+      const now = Date.now();
+      const lastByAuthor = new Map();
+      for (const c of messages || []) {
+        const k = identityOf(c.author).key; const t = Date.parse(c.createdAt);
+        if (Number.isFinite(t) && (!(lastByAuthor.get(k) >= t))) lastByAuthor.set(k, t);
+      }
+      let freshestKey = null, freshestT = -Infinity;
+      for (const m of MINDS) { const t = lastByAuthor.get(m.key); if (Number.isFinite(t) && t > freshestT) { freshestT = t; freshestKey = m.key; } }
+      for (const m of MINDS) {
+        const chip = mindEls.get(m.key);
+        const lvl = presenceLevel(lastByAuthor.get(m.key), now);   // 0..1
+        chip.style.opacity = (0.26 + 0.74 * lvl).toFixed(3);
+        chip.classList.toggle('freshest', m.key === freshestKey && lvl > 0.5);
+      }
+    }
+    // refresh the fade every 30s even without new posts (recency decays)
+    let _lastMessages = [];
+    setInterval(() => updateConstellation(_lastMessages), 30000);
+
+    // The raised-hands panel = a REGISTRY OF OPEN ASKS.
+    //
+    // NB the count is BOARD-WIDE and identical for every viewer: nothing here
+    // consults who is looking. It was once labelled "Blocked on you", which
+    // read as personalised and was not — on a board with no authentication
+    // there is no "you" to compute. Renamed rather than faked.
+    // The model: not "cards assigned to me" but "someone pushed this as far
+    // as they could and now needs me." So a raise is a DIRECTED signal owned by the
+    // blocked person: a card-attached post `🚧 <the ask>`. who = its author, what =
+    // the ask, which = the card, when = its time. Alex clears one (✓ unblocked)
+    // when he's contributed — a `✅` post on the same card supersedes the raise.
+    // Also: the label `blocked` is a static blocker — someone put it there
+    // because raising a hand wasn't obvious. Both mechanisms feed the same view.
+    // Reuses the conversations system wholesale; no schema change.
+    const RAISE_RE = /^\s*🚧\s*/;
+    const RESOLVE_RE = /^\s*✅/;
+    const BLOCKED_LABEL = 'blocked';
+    const blockedToggle = document.getElementById('blocked-toggle');
+    const blockedPanel = document.getElementById('blocked-panel');
+    const blockedList = document.getElementById('blocked-list');
+    document.getElementById('blocked-close').onclick = () => blockedPanel.classList.remove('visible');
+    blockedToggle.onclick = () => blockedPanel.classList.toggle('visible');
+
+    function renderBlocked(raises) {
+      blockedList.innerHTML = '';
+      if (!raises.length) { blockedList.innerHTML = '<div class="blocked-empty">No blockers. Nobody\'s waiting on you right now.</div>'; return; }
+      for (const r of raises) {
+        const isLabel = r.source === 'label';
+        const who = isLabel
+          ? { glyph: '🏷️', name: 'label', color: 'var(--accent-idea)' }
+          : (typeof identityOf === 'function') ? identityOf(r.by) : { glyph: '', name: r.by, color: 'var(--muted)' };
+        const item = document.createElement('div'); item.className = 'blocked-item'; item.style.setProperty('--mind', who.color);
+        const top = document.createElement('div'); top.className = 'blocked-item-top';
+        const raiser = document.createElement('span'); raiser.className = 'blocked-who';
+        raiser.textContent = (who.glyph ? who.glyph + ' ' : '') + (who.name || r.by);
+        const ref = document.createElement('span'); ref.className = 'blocked-ref'; ref.textContent = r.card ? '#' + r.card.shortId : '';
+        top.append(raiser, ref);
+        const ask = document.createElement('div'); ask.className = 'blocked-ask'; ask.textContent = r.ask || '(needs your input)'; ask.title = r.source || '';
+        const foot = document.createElement('div'); foot.className = 'blocked-foot';
+        const openCard = document.createElement('a'); openCard.className = 'blocked-open-card';
+        openCard.textContent = (r.card ? r.card.title : 'open card') + ' →';
+        openCard.href = r.card ? 'index.html?card=' + r.card.shortId : '#';
+        const done = document.createElement('button'); done.className = 'blocked-done'; done.type = 'button';
+        done.textContent = '✓ unblocked';
+        done.title = isLabel ? 'Remove the blocked label' : 'You contributed — clear this raised hand';
+        done.onclick = async (e) => {
+          e.stopPropagation(); done.disabled = true;
+          try {
+            if (isLabel) {
+              // Label blocker: remove the label from the card
+              const card = r.card;
+              if (card) {
+                const newLabels = (card.labels || []).filter(l => l !== BLOCKED_LABEL);
+                await fetch('/api/cards/' + card.id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ labels: newLabels }) });
+              }
+            } else {
+              // Raise: post a ✅ resolution to the conversation thread
+              await fetch('/api/conversations', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ attachedTo: r.cardId, author: 'alex', body: '✅ unblocked' }) });
+            }
+            refreshBlocked();
+          } catch (_) { done.disabled = false; }
+        };
+        foot.append(openCard, done);
+        item.append(top, ask, foot);
+        blockedList.appendChild(item);
+      }
+    }
+
+    // Scan card-attached posts AND card labels for blockers.
+    // Cards with an open 🚧 raise appear via their conversation thread.
+    // Cards labelled `blocked` appear as static blockers.
+    // Returns {cardId, by, ask, at, card, source}[] freshest-first.
+    function openRaises(convos, cardById) {
+      const byCard = new Map();
+      for (const m of convos) {
+        if (!m.attachedTo) continue;
+        if (!byCard.has(m.attachedTo)) byCard.set(m.attachedTo, []);
+        byCard.get(m.attachedTo).push(m);
+      }
+      const raises = [];
+      const seen = new Set();
+      for (const [cardId, msgs] of byCard) {
+        msgs.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+        let open = null;
+        for (const m of msgs) {
+          if (RAISE_RE.test(m.body || '')) open = m;
+          else if (RESOLVE_RE.test(m.body || '')) open = null;
+        }
+        if (open) {
+          raises.push({ cardId, by: open.author, ask: (open.body || '').replace(RAISE_RE, '').trim(), at: open.createdAt, card: cardById.get(cardId), source: 'raise' });
+          seen.add(cardId);
+        }
+      }
+      // Also scan cards for the label BLOCKED_LABEL
+      for (const [cardId, card] of cardById) {
+        if (seen.has(cardId)) continue; // raise already covers this card
+        if ((card.labels || []).includes(BLOCKED_LABEL)) {
+          raises.push({ cardId, by: 'label', ask: 'Labelled as ' + BLOCKED_LABEL, at: card.updatedAt || card.createdAt, card, source: 'label' });
+          seen.add(cardId);
+        }
+      }
+      raises.sort((a, b) => new Date(b.at || 0) - new Date(a.at || 0));
+      return raises;
+    }
+
+    async function refreshBlocked() {
+      try {
+        const [convos, cards] = await Promise.all([
+          fetch('/api/conversations').then((r) => r.json()),
+          fetch('/api/cards').then((r) => r.json()),
+        ]);
+        const cardById = new Map((Array.isArray(cards) ? cards : []).map((c) => [c.id, c]));
+        const raises = openRaises(Array.isArray(convos) ? convos : [], cardById);
+        blockedToggle.textContent = `🚧 Raised hands · ${raises.length}`;
+        blockedToggle.classList.toggle('has-items', raises.length > 0);
+        renderBlocked(raises);
+      } catch (_) { /* offline — leave last state */ }
+    }
+    refreshBlocked();
+    setInterval(refreshBlocked, 8000);
+
+    const node = new URLSearchParams(location.search).get('node');
+    const viewEl = document.getElementById('view');
+    const title = document.getElementById('title');
+    const back = document.getElementById('back');
+
+    async function init() {
+      if (node) {
+        // Promoted thread: a node's homed discussion, full-page. Title from the node.
+        try {
+          const res = await fetch('/api/nodes/' + encodeURIComponent(node));
+          if (res.ok) {
+            const { node: n } = await res.json();
+            title.textContent = '💬 ' + (n?.name || 'Discussion');
+          } else {
+            title.textContent = '💬 Discussion';
+          }
+        } catch (_) { title.textContent = '💬 Discussion'; }
+        document.title = title.textContent.replace('💬 ', '') + ' · Commons';
+        back.textContent = '↩ open the page';
+        back.href = '/wiki.html?node=' + encodeURIComponent(node);
+        back.style.display = '';
+      }
+      // #294 — in the UNSCOPED room only, collapse card-attached posts to
+      // pointers. Resolve a card UUID → its #NNN + title via a lazily-built
+      // index (cards fetched once; refreshed with the blocked poll).
+      let cardIndex = new Map();
+      async function buildCardIndex() {
+        try {
+          const cards = await (await fetch('/api/cards')).json();
+          cardIndex = new Map(cards.map((c) => [c.id, c]));
+        } catch (_) { /* keep last */ }
+      }
+      const attachedPointer = node ? undefined : (msg) => {
+        const c = cardIndex.get(msg.attachedTo);
+        const label = c ? `#${c.shortId} «${c.title}» — conversation updated`
+                        : 'card conversation updated';
+        return { label, href: 'commons.html?node=' + encodeURIComponent(msg.attachedTo) };
+      };
+      if (!node) await buildCardIndex();
+
+      view = mountConversationView({
+        mount: viewEl,
+        attachedTo: node || undefined,   // node ⇒ that thread; absent ⇒ the whole commons
+        poll: true,
+        placeholder: node ? 'Add to this discussion…' : 'Say something to the room…',
+        attachedPointer,                 // #294 — pointer-collapse in the unscoped room
+        onMessages: (msgs) => { _lastMessages = msgs; updateConstellation(msgs); }, // presence pulse
+        onSolo: reflectSolo,             // presence — sync the constellation to the soloed mind
+      });
+    }
+
+    // #303-7 — delivery observability. Poll the (same-origin) channel-status
+    // proxy and show "🛰 N delivering" when the router has staggered posts still
+    // in flight — so a quiet room reads as "N pending", not "is everyone okay?".
+    const deliveryEl = document.getElementById('delivery-status');
+    async function pollDelivery() {
+      try {
+        const res = await fetch('/api/channel-status');
+        if (!res.ok) { deliveryEl.textContent = ''; return; }
+        const s = await res.json();
+        deliveryEl.textContent = (s.pending > 0)
+          ? `🛰 ${s.pending} delivering…`
+          : (s.receivers ? `🛰 ${s.receivers} listening` : '');
+        deliveryEl.title = `mode: ${s.mode} · ${s.receivers || 0} receiving · ${s.pending || 0} in flight`;
+      } catch (_) { deliveryEl.textContent = ''; }
+    }
+    pollDelivery();
+    setInterval(pollDelivery, 4000);
+
+    init();
+  </script>
+</body>
+</html>

@@ -1,0 +1,38 @@
+# ── YOUR CONTENT NEVER GOES IN GIT ──────────────────────────────────────────
+# board-data.json is the whole board: every card, wiki page and message you ever
+# write. It is DATA, not source. If it is tracked, your repository becomes a
+# permanent archive of your private content — and deleting something from the
+# board does not remove it from git history, so every edited and deleted message
+# stays recoverable by anyone who can clone.
+#
+# We learned this the expensive way: in the repo this project was extracted from,
+# board-data.json had been tracked from day one and ended up inside more than half
+# of all commits. That repository can never be published in any cleaned form. This
+# line is the fix, and it has to be here before your first commit, not after.
+board-data.json
+*.bak
+*.bak-*
+
+node_modules/
+.DS_Store
+.claude/
+backups/
+attachments/
+channel-config.json
+
+# Debug/verification screenshots — throwaway artifacts, never committed
+screenshot-*.png
+Screenshot*.png
+
+# Rendered wiki exports (#459) — generated per-share by export-wiki.mjs, never
+# committed. The pipeline (export-wiki.mjs, core/export-*.mjs) and the rule table
+# (EXPORT_TRANSFORMS.json) ARE source and are tracked; the HTML they produce is
+# a disposable artifact of a specific moment. Committing it would also create a
+# second copy of the doc that drifts from the wiki without anyone noticing.
+*-export.html
+scrum-board-architecture.html
+
+# Your roster — who your people and agents are. Copy roster.example.json to
+# roster.json and edit it. Kept out of git so a `git pull` never conflicts with
+# who you are.
+roster.json

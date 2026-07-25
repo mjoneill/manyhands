@@ -1,0 +1,67 @@
+{
+  "_README": [
+    "EXAMPLE CONFIG — a template, not a working ruleset. Replace every rule below with",
+    "your own before relying on it. The rules that ship here are illustrations of the",
+    "shape; they protect nothing.",
+    "",
+    "Substitutions applied when exporting a wiki node for a reader outside your team.",
+    "",
+    "The principle: the wiki keeps your team's real language; the EXPORT adapts to its",
+    "audience. Never edit the source to suit an outside reader — change this file instead.",
+    "A record you sanitise as you write it is a record you can no longer trust.",
+    "",
+    "`rules` are applied IN ORDER (regex source in `find`). Order matters: a phrase rule",
+    "must be able to pre-empt a word rule over the same term. Prefer phrase rules when the",
+    "surrounding sentence would become false after a bare word swap — e.g. a sentence that",
+    "explains why a name was chosen stops being true when the name changes.",
+    "",
+    "`forbidden` is the fail-closed check. After the rules run, the export REFUSES to emit",
+    "if any of these still match. It is matched case-insensitively regardless of how the",
+    "rules were written, so it can disagree with the rules rather than merely agree. That",
+    "disagreement is the point: a check that can only confirm the rules cannot catch them",
+    "being wrong.",
+    "",
+    "Adding a term to `forbidden` without a matching rule will (correctly) break the export.",
+    "",
+    "⚠️ Note what this file becomes once you fill it in: a list of the things you consider",
+    "sensitive, in one place, in plain text. It is itself the most revealing file in your",
+    "checkout. Keep your filled-in copy out of any repository you publish.",
+    "",
+    "⚠️ Beware terms that collide with your own roster. A forbidden entry matching a name",
+    "you legitimately use will refuse every export that mentions that person."
+  ],
+
+  "rules": [
+    {
+      "note": "EXAMPLE — phrase rule. Must run before the word rule below. Use this shape when a bare word swap would leave the surrounding sentence making a false claim about the term.",
+      "find": "the mode is called `local-name` because of an in-joke nobody outside the team will get",
+      "replace": "the mode is called `token-ring`: a single lease is passed seat to seat around a fixed ring, and only its holder may speak."
+    },
+    {
+      "note": "EXAMPLE — word-level mop-up for any remaining occurrence, after the phrase rules have had their turn.",
+      "find": "\\blocal-name\\b",
+      "flags": "gi",
+      "replace": "token-ring"
+    },
+    {
+      "note": "EXAMPLE — internal nickname to a neutral one. Pick a replacement in the same register as your other names, so a reader glides past it instead of stopping to wonder.",
+      "find": "\\bInternalNickname\\b",
+      "flags": "g",
+      "replace": "Oscar"
+    },
+    {
+      "note": "EXAMPLE — a real commit hash from a private repository. Carries no meaning for an outside reader; costs nothing to neutralise.",
+      "find": "\\bdeadbeef\\b",
+      "flags": "g",
+      "replace": "a1b2c3d4"
+    }
+  ],
+
+  "forbidden": [
+    { "pattern": "local-name", "flags": "gi", "note": "EXAMPLE — internal mode name" },
+    { "pattern": "InternalNickname", "flags": "gi", "note": "EXAMPLE — internal nickname" },
+    { "pattern": "deadbeef", "flags": "gi", "note": "EXAMPLE — private-repo commit hash" },
+    { "pattern": "/Users/[a-z0-9_.-]+", "flags": "gi", "note": "absolute path leaking a local username — worth keeping" },
+    { "pattern": "/home/[a-z0-9_.-]+", "flags": "gi", "note": "same, on Linux — worth keeping" }
+  ]
+}
