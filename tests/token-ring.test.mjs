@@ -190,8 +190,8 @@ test('self-echo (c): multi-seat rotation delivers other seats responses but neve
     'a sees b-reply, NOT its own a-reply echoed back');
 });
 
-// The load-bearing property Robin needs for the two-endpoint case (robin.sb +
-// robin.cs, same author): self-echo authority is BOARD-side, so a delivered
+// The load-bearing property required for the two-endpoint case (two seat ids,
+// e.g. robin.sb + robin.cs, same author): self-echo authority is BOARD-side, so a delivered
 // envelope never carries the recipient seat's own scheduled POST — presence must
 // NOT filter by author (author is non-injective). Proven across a real rotation.
 test('self-echo INVARIANT: no delivered envelope ever carries the recipient seat own scheduled POST', () => {

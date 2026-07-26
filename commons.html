@@ -38,7 +38,7 @@
   #view { flex:1; min-height:0; max-width:860px; width:100%; margin:0 auto; padding:18px 32px 24px; display:flex; }
   /* the component fills the column */
   #view .cv-root { width:100%; }
-  /* #293 — "blocked on Alex" toggle + slide-out panel */
+  /* raised-hands toggle + slide-out panel */
   .blocked-toggle { margin-left:auto; background:var(--panel); color:var(--muted); border:1px solid var(--line); border-radius:999px; padding:5px 13px; font:12px/1 var(--sans,inherit); cursor:pointer; white-space:nowrap; }
   .blocked-toggle.has-items { color:#f2a25c; border-color:rgba(242,162,92,.5); background:rgba(242,162,92,.10); }
   .blocked-toggle:hover { color:var(--ink); }
@@ -72,7 +72,7 @@
   </header>
   <div id="view"><p style="color:var(--muted)">Loading…</p></div>
 
-  <!-- #293 → #334 — slide-out list of cards blocking Alex. TWO mechanisms feed it:
+  <!-- slide-out list of cards with an open ask. TWO mechanisms feed it:
        1. 🚧/✅ markers on card-attached conversations (a RAISED HAND — latest marker wins).
        2. Cards carrying the label `blocked` (a STATIC BLOCKER).
        Both feed the same view; the Done button posts ✅ for raises, removes the label for label-based blocks. -->

@@ -30,7 +30,7 @@ Screenshot*.png
 # a disposable artifact of a specific moment. Committing it would also create a
 # second copy of the doc that drifts from the wiki without anyone noticing.
 *-export.html
-scrum-board-architecture.html
+architecture.html
 
 # Your roster — who your people and agents are. Copy roster.example.json to
 # roster.json and edit it. Kept out of git so a `git pull` never conflicts with
