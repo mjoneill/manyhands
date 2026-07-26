@@ -767,6 +767,37 @@ body::before {
   color: var(--text-muted);
   margin-right: 4px;
 }
+/* #498 — the filter entry point. Persistent and visible in the unfiltered
+   default state: filtering that can only be discovered by misclicking a card
+   is not discoverable at all. */
+.filter-control { position: relative; display: inline-block; }
+.btn-filter {
+  background: var(--panel-2, #1a2032); color: var(--text-muted, #8b92aa);
+  border: 1px solid var(--line, #262c3d); border-radius: 999px;
+  padding: 5px 13px; font: inherit; font-size: 0.8125rem; cursor: pointer; white-space: nowrap;
+}
+.btn-filter:hover { color: var(--ink, #eceef5); border-color: var(--accent, #7c6cf0); }
+.btn-filter[aria-expanded="true"] { color: var(--ink, #eceef5); border-color: var(--accent, #7c6cf0); }
+.filter-menu {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 40;
+  min-width: 210px; max-height: 60vh; overflow: auto;
+  background: var(--panel, #141826); border: 1px solid var(--line, #262c3d);
+  border-radius: 10px; padding: 8px; box-shadow: 0 10px 30px rgba(0,0,0,.45);
+}
+.filter-menu[hidden] { display: none; }
+.filter-menu-group {
+  font: 10px/1 var(--mono, monospace); text-transform: uppercase; letter-spacing: .14em;
+  color: var(--text-muted, #8b92aa); padding: 9px 8px 5px;
+}
+.filter-menu-item {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  background: none; border: 0; border-radius: 7px; padding: 6px 8px;
+  color: var(--ink, #eceef5); font: inherit; font-size: 0.8125rem; text-align: left; cursor: pointer;
+}
+.filter-menu-item:hover { background: var(--panel-2, #1a2032); }
+.filter-menu-item[aria-pressed="true"] { color: var(--accent, #7c6cf0); font-weight: 600; }
+.filter-menu-empty { color: var(--text-muted, #8b92aa); padding: 8px; font-size: 0.8125rem; }
+
 .filter-chip {
   display: inline-flex;
   align-items: center;
@@ -1388,6 +1419,15 @@ body::before {
   <div class="board-header-actions">
     <!-- board-specific: toggles the inline commons panel (distinct from the Commons *page* link in the shared nav) -->
     <button id="btn-toggle-convs" class="btn-toggle-convs" title="Open the conversations commons">💬 Conversations</button>
+    <!-- #498: filtering's entry point. Before this, the ONLY way to add a filter
+         was clicking a chip on a card, and the filter strip stayed hidden until
+         one existed — so the only way to discover the board filtered at all was
+         to misclick. The affordance being missing WAS the bug; the misclick was
+         its symptom. This is visible in the default unfiltered state by design. -->
+    <div class="filter-control">
+      <button id="btn-filter" class="btn-filter" data-filter-add data-action="toggle-filter-menu" aria-haspopup="true" aria-expanded="false" title="Filter the board">⚗ Filter</button>
+      <div id="filter-menu" class="filter-menu" hidden></div>
+    </div>
   </div>
 </div>
 
@@ -2169,7 +2209,11 @@ function renderCard(card) {
     // voice in the commons). Fallback: no --mind → the neutral chip styling.
     const mind = (typeof window.identityOf === 'function') ? window.identityOf(aKey).color : '';
     const mindStyle = mind ? ` style="--mind:${mind}"` : '';
-    return `<span class="card-assignee${activeClass}"${mindStyle} data-action="toggle-assignee" data-assignee="${escapeAttr(aKey)}" title="Click to filter by this assignee"><span class="assignee-emoji">${e}</span>${escapeHTML(n)}</span>`;
+    // #498: was data-action="toggle-assignee" — a click here re-filtered the
+    // whole board. A chip on THIS card changing what you can see of OTHER cards
+    // is a state-changing affordance disguised as an indicator. It is an
+    // indicator now; filtering lives in the header control.
+    return `<span class="card-assignee${activeClass}"${mindStyle} data-assignee="${escapeAttr(aKey)}" title="${escapeAttr(n)}"><span class="assignee-emoji">${e}</span>${escapeHTML(n)}</span>`;
   }).join('') + '</span>';
 
   // Relationship badges (Card #42)
@@ -2191,7 +2235,7 @@ function renderCard(card) {
   }
 
   const priorityBadge = card.priority
-    ? `<span class="card-priority priority-${escapeAttr(card.priority)}${activePriorities.has(card.priority) ? ' active-filter' : ''}" data-action="toggle-priority" data-priority="${escapeAttr(card.priority)}" title="Priority ${escapeAttr(String(card.priority).toUpperCase())} — click to filter">${escapeHTML(String(card.priority).toUpperCase())}</span>`
+    ? `<span class="card-priority priority-${escapeAttr(card.priority)}${activePriorities.has(card.priority) ? ' active-filter' : ''}" data-priority="${escapeAttr(card.priority)}" title="Priority ${escapeAttr(String(card.priority).toUpperCase())}">${escapeHTML(String(card.priority).toUpperCase())}</span>`
     : '';
 
   // #233 — column-move arrows: card's position within the ordered columns
@@ -2227,7 +2271,7 @@ function renderCard(card) {
     html += `<div class="card-labels">${card.labels.map(l => {
       const safeAttr = escapeHTML(l).replace(/"/g, '&quot;');
       const activeClass = activeLabels.has(l) ? ' active-filter' : '';
-      return `<span class="label-tag${activeClass}" data-card-type="${escapeAttr(card.type)}" data-action="toggle-label" data-label="${safeAttr}" title="Click to filter by this label">${escapeHTML(l)}</span>`;
+      return `<span class="label-tag${activeClass}" data-card-type="${escapeAttr(card.type)}" data-label="${safeAttr}" title="${safeAttr}">${escapeHTML(l)}</span>`;
     }).join('')}</div>`;
   }
 
@@ -2502,6 +2546,48 @@ function scrollToCardByShortId(shortId) {
   setTimeout(() => cardEl.classList.remove('highlighted'), 1500);
 }
 
+// ── #498 — Filter menu ───────────────────────────────────────────────────
+// Built from the values PRESENT on the board, so it never offers a filter that
+// would return nothing. Each option carries data-filter-add (the #498 contract
+// selector) and reuses the same toggle* functions the card chips used to call —
+// the filtering logic was never the defect; its only entry point being a
+// misclick target on a card was.
+function renderFilterMenu() {
+  const menu = document.getElementById('filter-menu');
+  if (!menu) return;
+  const assignees = new Set(), priorities = new Set(), labels = new Set();
+  for (const c of cards) {
+    for (const a of (c.assignees || [])) if (a && a !== 'unassigned') assignees.add(a);
+    if (c.priority) priorities.add(c.priority);
+    for (const l of (c.labels || [])) if (l) labels.add(l);
+  }
+  const groups = [
+    ['Assignee', [...assignees].sort(), 'toggle-assignee', 'assignee', activeAssignees,
+      (k) => `${ASSIGNEE_EMOJI[k] || '⬜'} ${ASSIGNEE_NAME[k] || k}`],
+    ['Priority', [...priorities].sort(), 'toggle-priority', 'priority', activePriorities,
+      (k) => String(k).toUpperCase()],
+    ['Label', [...labels].sort(), 'toggle-label', 'label', activeLabels, (k) => k],
+  ];
+  let html = '';
+  for (const [title, values, action, attr, activeSet, render] of groups) {
+    if (!values.length) continue;
+    html += `<div class="filter-menu-group">${escapeHTML(title)}</div>`;
+    for (const v of values) {
+      html += `<button type="button" class="filter-menu-item" data-filter-add data-action="${action}" data-${attr}="${escapeAttr(v)}" aria-pressed="${activeSet.has(v) ? 'true' : 'false'}">${escapeHTML(render(v))}</button>`;
+    }
+  }
+  menu.innerHTML = html || '<div class="filter-menu-empty">No cards to filter yet.</div>';
+}
+
+function setFilterMenuOpen(open) {
+  const menu = document.getElementById('filter-menu');
+  const btn = document.getElementById('btn-filter');
+  if (!menu || !btn) return;
+  if (open) renderFilterMenu();
+  menu.hidden = !open;
+  btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
 // ── Render Filter Strip ──
 function renderFilterStrip() {
   const strip = document.getElementById('filter-strip');
@@ -2589,6 +2675,7 @@ function renderFilterStrip() {
   const clearBtn = document.createElement('button');
   clearBtn.className = 'btn-clear-filter';
   clearBtn.dataset.action = 'clear-filter';
+  clearBtn.dataset.filterClear = '';   // #498 contract selector
   clearBtn.textContent = 'Clear all';
   strip.appendChild(clearBtn);
   strip.classList.add('visible');
@@ -3157,20 +3244,11 @@ boardEl.addEventListener('click', (e) => {
   const action = btn.dataset.action;
 
   // Label filter toggle — fires from .label-tag on rendered cards
-  if (action === 'toggle-label') {
-    toggleLabelFilter(btn.dataset.label);
-    return;
-  }
-  // Assignee filter toggle — fires from .card-assignee on rendered cards
-  if (action === 'toggle-assignee') {
-    toggleAssigneeFilter(btn.dataset.assignee);
-    return;
-  }
-  // Priority filter toggle — fires from .card-priority badge on rendered cards
-  if (action === 'toggle-priority') {
-    togglePriorityFilter(btn.dataset.priority);
-    return;
-  }
+  // #498: the toggle-assignee / toggle-priority / toggle-label branches used to
+  // live here, fired by chips on rendered cards. No element inside the board
+  // carries those actions now — filtering is entered from the header control,
+  // whose listener is below (this delegation is scoped to boardEl and would
+  // never have seen it).
 
   // ShortId link click in description
   if (action === 'shortid-link') {
@@ -3232,6 +3310,30 @@ boardEl.addEventListener('click', (e) => {
 
 // Filter strip: chip X-button removal + Clear all
 const filterStripEl = document.getElementById('filter-strip');
+// #498 — the filter control sits in the page header, OUTSIDE boardEl, so it
+// needs its own delegation. This is the whole add-path for filtering.
+const filterControlEl = document.querySelector('.filter-control');
+if (filterControlEl) {
+  filterControlEl.addEventListener('click', (e) => {
+    const item = e.target.closest('[data-action]');
+    if (!item) return;
+    const act = item.dataset.action;
+    if (act === 'toggle-filter-menu') {
+      setFilterMenuOpen(document.getElementById('filter-menu').hidden);
+    } else if (act === 'toggle-assignee') {
+      toggleAssigneeFilter(item.dataset.assignee); renderFilterMenu();
+    } else if (act === 'toggle-priority') {
+      togglePriorityFilter(item.dataset.priority); renderFilterMenu();
+    } else if (act === 'toggle-label') {
+      toggleLabelFilter(item.dataset.label); renderFilterMenu();
+    }
+  });
+  // click anywhere else closes the menu
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.filter-control')) setFilterMenuOpen(false);
+  });
+}
+
 filterStripEl.addEventListener('click', (e) => {
   const btn = e.target.closest('[data-action]');
   if (!btn) return;

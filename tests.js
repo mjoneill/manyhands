@@ -1709,7 +1709,10 @@ test('noise texture overlay exists on body', () => {
 
 /* ════════════════════════════════════════════════ TESTS - TDD Cycle 6: Assignee Filtering ════════════════════════════════════════════════ */
 
-test('clicking assignee name on card toggles assignee filter', () => {
+// #498: was 'clicking assignee name on card toggles assignee filter'. The chip
+// is an inert indicator now; the toggle function it used to reach is still
+// exercised below, via the header control's path rather than a card click.
+test('#498: the card assignee chip is an inert indicator, and the filter still toggles', () => {
   cards.length = 0;
   activeLabels.clear();
   activeAssignees.clear();
@@ -1718,8 +1721,8 @@ test('clicking assignee name on card toggles assignee filter', () => {
   let cardEl = document.querySelector('.card[data-id="' + card.id + '"]');
   let assigneeBadge = cardEl.querySelector('.card-assignee');
   assert(assigneeBadge !== null, 'assignee badge should exist');
-  assertEqual(assigneeBadge.dataset.action, 'toggle-assignee', 'assignee badge should have toggle-assignee action');
-  assertEqual(assigneeBadge.dataset.assignee, 'alex', 'assignee badge should have correct assignee data');
+  assert(!assigneeBadge.dataset.action, `assignee chip must carry no click action, got "${assigneeBadge.dataset.action}"`);
+  assertEqual(assigneeBadge.dataset.assignee, 'alex', 'chip still carries its value for styling/reading');
   // Simulate click to toggle on
   toggleAssigneeFilter('alex');
   assert(activeAssignees.has('alex'), 'alex should be in activeAssignees after toggle on');
@@ -3920,18 +3923,24 @@ test('#27 AC-filter: cards filtered by priority — only matching priority visib
   renderBoard();
 });
 
-test('#27 AC-filter: clicking card-priority badge triggers togglePriorityFilter (via data-action)', () => {
+// #498 SUPERSEDES this one clause of #27's ACs (recorded on #27 first).
+// Priority filtering is untouched and still guarded by the other four
+// #27 AC-filter tests; what is retired is the badge being the click target.
+// A chip on card A that re-filters the whole board is a state-changing
+// affordance disguised as an indicator. Guarding the retirement rather than
+// deleting the test, so the old behaviour cannot quietly return.
+test('#498 (supersedes one #27 AC-filter clause): the card priority badge is an inert indicator', () => {
   cards.length = 0;
   activePriorities.clear();
   const card = addCard('Click Test', '', 'task', 'unassigned', []);
   card.priority = 'p3';
   renderBoard();
   const badge = document.querySelector(`.card[data-id="${card.id}"] .card-priority`);
-  assert(badge !== null, 'priority badge should be in DOM');
-  assertEqual(badge.dataset.action, 'toggle-priority', 'badge should have data-action');
-  assertEqual(badge.dataset.priority, 'p3', 'badge should have data-priority');
+  assert(badge !== null, 'priority badge should still be in DOM — it is an indicator, not gone');
+  assert(!badge.dataset.action, `badge must carry no click action, got "${badge.dataset.action}"`);
+  assertEqual(badge.dataset.priority, 'p3', 'badge still carries its value for styling/reading');
   badge.click();
-  assert(activePriorities.has('p3'), 'p3 should be in activePriorities after badge click');
+  assert(!activePriorities.has('p3'), 'clicking a card badge must NOT filter the board');
   // Cleanup
   activePriorities.clear();
   const idx = cards.findIndex(c => c.id === card.id);
