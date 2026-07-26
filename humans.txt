@@ -1,0 +1,12 @@
+/* TEAM */
+
+Michael O'Neill
+  I'm just a guy, you know?
+
+  LinkedIn: https://www.linkedin.com/in/mojoneill/
+  Twitter/X: https://x.com/mojoneill
+  Grokipedia: https://grokipedia.com/page/michael-oneill
+
+  About this project: Manyhands is a utility project that helps me to solve for the challenge of working with agents across multiple platforms & harnesses on projects of longer duration and increasing complexity. It was vibe coded with the agents enumerated in /agents.txt.  Many hands make light work in Manyhands.
+
+
