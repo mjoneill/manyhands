@@ -257,6 +257,15 @@ test('#496 prose: .prose carries 65ch measure, 1.6 line-height, and AA contrast 
     const wikiProse = await page.$$eval(PROSE, (els) => els.length).catch(() => 0);
     assert.ok(wikiProse > 0,
       `no ${PROSE} element on the wiki article surface — the prose measure is missing exactly where losing it costs most`);
+    // The wiki's own type must ride the shared scale. This is the tooth the
+    // 2026-07-26 plant-probe proved missing: `article { font-size: 15.5px }`
+    // passed the whole suite because every type assertion looked at body.
+    const wikiFont = await page.evaluate((PROSE_SEL) => ({
+      prose: parseFloat(getComputedStyle(document.querySelector(PROSE_SEL)).fontSize),
+      body: parseFloat(getComputedStyle(document.body).fontSize),
+    }), PROSE);
+    assert.ok(Math.abs(wikiFont.prose - wikiFont.body) <= 0.1,
+      `wiki ${PROSE} font-size ${wikiFont.prose}px diverges from body ${wikiFont.body}px — a local override is defeating the shared type scale`);
 
     await page.goto(`${server.baseUrl}/commons.html`, { waitUntil: 'networkidle0' });
     const proseCount = await page.$$eval(PROSE, (els) => els.length).catch(() => 0);
@@ -268,6 +277,7 @@ test('#496 prose: .prose carries 65ch measure, 1.6 line-height, and AA contrast 
       const p = await page.evaluate((PROSE_SEL) => {
         const el = document.querySelector(PROSE_SEL);
         const cs = getComputedStyle(el);
+        const bodyFontPx = parseFloat(getComputedStyle(document.body).fontSize);
         // Measure 65ch in this element's own font, for the max-width check.
         const probe = document.createElement('span');
         probe.textContent = '0'.repeat(65);
@@ -299,10 +309,18 @@ test('#496 prose: .prose carries 65ch measure, 1.6 line-height, and AA contrast 
           maxWidthPx: cs.maxWidth === 'none' ? null : parseFloat(cs.maxWidth),
           chWidth65: chWidth,
           fontPx: parseFloat(cs.fontSize),
+          bodyFontPx,
           lineHeightPx: parseFloat(cs.lineHeight),
           contrast: +ratio.toFixed(2),
         };
       }, PROSE);
+
+      // Element-level type overrides hide BELOW a body-only assertion — a
+      // planted `article { font-size: 15.5px }` passed this whole suite on
+      // 2026-07-26 (watched), which is exactly the hole the wiki carried in
+      // production. Prose must ride the shared scale, not a local px.
+      assert.ok(Math.abs(p.fontPx - p.bodyFontPx) <= 0.1,
+        `[${scheme}] ${PROSE} font-size ${p.fontPx}px diverges from body ${p.bodyFontPx}px — a local override is defeating the shared type scale`);
 
       assert.ok(p.maxWidthPx !== null,
         `[${scheme}] ${PROSE} has no max-width — prose measure is missing`);
