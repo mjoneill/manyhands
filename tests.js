@@ -826,9 +826,11 @@ test('form submission does nothing with empty title', () => {
 });
 
 test('reference type card renders with correct emoji and type color', () => {
-  // Note: post-#51, 'both' assignee expands to ['alex', 'robin'] —
-  // two badges, not one 🤝 badge.
-  const card = addCard('Ref Doc', 'A link', 'reference', 'both', ['docs']);
+  // #508: this used to pass 'both' and rely on the retired sentinel expanding
+  // to two seats. The test is about reference-card RENDERING, not the sentinel,
+  // so it now names two seats explicitly — same two badges, no dependency on a
+  // legacy expansion.
+  const card = addCard('Ref Doc', 'A link', 'reference', ['alex', 'robin'], ['docs']);
   renderBoard();
 
   const cardEl = document.querySelector(`.card[data-id="${card.id}"]`);
@@ -1755,10 +1757,10 @@ test('multiple assignee filters use OR logic — shows cards for ANY selected as
   activeAssignees.clear();
   addCard('Card A', '', 'task', 'alex', []);
   addCard('Card B', '', 'task', 'robin', []);
-  // Card C uses 'both' which post-#51 expands to ['alex', 'robin'] — so
-  // it matches BOTH filters (intentional; previously 'both' was an opaque
-  // sentinel that didn't match either individually).
-  addCard('Card C', '', 'task', 'both', []);
+  // #508: Card C used to rely on the retired 'both' sentinel expanding to two
+  // seats. The subject here is OR logic across a multi-assignee card, so it now
+  // names both seats directly.
+  addCard('Card C', '', 'task', ['alex', 'robin'], []);
   addCard('Card D', '', 'task', 'unassigned', []);
   activeAssignees.add('alex');
   activeAssignees.add('robin');
@@ -3977,14 +3979,17 @@ test('#51 AC1: createCard with array assignee preserves the array', () => {
     'both values preserved');
 });
 
-test('#51 AC1: createCard with "both" expands to [alex, robin] (pre-Sage meaning)', () => {
+// #508 SUPERSEDES #51 AC1. The original asserted that createCard('both')
+// expands to [alex, robin]. That expansion minted two hardcoded example seats,
+// so on any configured board it assigned work to two people who do not exist.
+// The contract is retired; this test now guards the retirement rather than
+// being deleted, so the old behaviour cannot quietly return.
+test('#508 (supersedes #51 AC1): createCard no longer expands "both" into example seats', () => {
   cards.length = 0;
   const card = createCard('Legacy Both', '', 'task', 'both', []);
-  assertEqual(card.assignees.length, 2, 'both → 2-element array');
-  assert(card.assignees.includes('alex') && card.assignees.includes('robin'),
-    'both expands to [alex, robin]');
-  assert(!card.assignees.includes('sage'),
-    'both does NOT include sage — it predates sage');
+  assert(!card.assignees.includes('alex') && !card.assignees.includes('robin'),
+    `'both' must never mint example seats, got ${JSON.stringify(card.assignees)}`);
+  assert(card.assignees.length > 0, 'assignees must not be silently emptied');
 });
 
 test('#51 AC1: createCard with empty/null assignee defaults to ["unassigned"]', () => {
@@ -4008,14 +4013,25 @@ test('#51 AC2: migrateAssigneesIfNeeded converts singular assignee → assignees
   assert(cards[0].assignee === undefined, 'old assignee field should be removed');
 });
 
-test('#51 AC2: migrateAssigneesIfNeeded expands "both" → [alex, robin]', () => {
+// #508 SUPERSEDES #51 AC2. A restored pre-#51 backup can still carry
+// assignee:'both'. Unlike live input it cannot be refused, so it converts —
+// loudly, to 'unassigned', with a console warning naming the card. Who 'both'
+// meant was never recorded, only implied by a two-seat roster that is gone;
+// minting two roster keys would re-run the bug and silently emptying would hide
+// a real assignment.
+test('#508 (supersedes #51 AC2): migrateAssigneesIfNeeded converts "both" loudly, not to example seats', () => {
   cards.length = 0;
-  cards.push({ id: 'mig-both', title: 'Both Card', assignee: 'both', column: 'backlog' });
-  migrateAssigneesIfNeeded();
+  cards.push({ id: 'mig-both', shortId: 7, title: 'Both Card', assignee: 'both', column: 'backlog' });
+  const warnings = [];
+  const realWarn = console.warn;
+  console.warn = (...a) => { warnings.push(a.join(' ')); realWarn.apply(console, a); };
+  try { migrateAssigneesIfNeeded(); } finally { console.warn = realWarn; }
   const c = cards[0];
-  assertEqual(c.assignees.length, 2, 'both expands to 2 entries');
-  assert(c.assignees.includes('alex') && c.assignees.includes('robin'),
-    'both → [alex, robin]');
+  assert(!c.assignees.includes('alex') && !c.assignees.includes('robin'),
+    `migration must not mint example seats, got ${JSON.stringify(c.assignees)}`);
+  assert(c.assignees.length > 0, 'migration must not silently empty the assignment');
+  assert(warnings.some(w => w.includes('7')),
+    `the conversion must name the card it changed; warnings were ${JSON.stringify(warnings)}`);
 });
 
 test('#51 AC2: migrateAssigneesIfNeeded is idempotent', () => {

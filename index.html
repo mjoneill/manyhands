@@ -1923,7 +1923,10 @@ const ASSIGNEE_NAME = Object.fromEntries(Object.entries(ROSTER).map(([k, v]) => 
 
 /** Seats a person can be assigned to — the roster minus the two pseudo-seats. */
 function assignableSeats() {
-  return Object.entries(ROSTER).filter(([k]) => k !== 'both' && k !== 'unassigned' && k !== 'wiki');
+  // #508: 'both' was filtered here too, but it is not a roster key and never
+  // was — the guard defended against a value the roster cannot contain while
+  // reading as though 'both' were a live pseudo-seat.
+  return Object.entries(ROSTER).filter(([k]) => k !== 'unassigned' && k !== 'wiki');
 }
 
 /** Checkbox markup for an assignee picker, built from the roster. */
@@ -1961,13 +1964,15 @@ const DESC_COLLAPSE_CHAR_THRESHOLD = 200;
 // `column` is optional — defaults to 'backlog' for backward compatibility
 // with existing callers (Card #46 added column-targeted creation).
 // Normalize assignee input (string | array | null) to a non-empty assignees array.
-// Legacy 'both' expands to ['alex', 'robin'] — pre-Sage meaning.
+// #508: the legacy 'both' sentinel no longer expands here. It minted two
+// hardcoded example seats, so on a configured board it assigned work to two
+// people who do not exist.
 function _normalizeAssignees(value) {
   if (Array.isArray(value)) {
     return value.length > 0 ? [...value] : ['unassigned'];
   }
   if (typeof value === 'string' && value.length > 0) {
-    return value === 'both' ? ['alex', 'robin'] : [value];
+    return [value];
   }
   return ['unassigned'];
 }
@@ -2086,19 +2091,39 @@ function migrateRelationshipsIfNeeded() {
 
 // ── Migrate singular `assignee` field → `assignees` array (#51) ──
 // Idempotent: cards with assignees array already populated are skipped.
-// 'both' (legacy sentinel) expands to ['alex', 'robin'] — pre-Sage meaning.
+// #508: a pre-#51 card can still carry 'both' — today's live count is 0, but
+// loadDomain reads legacy backups, so a restore makes it non-zero. 'both' meant
+// "the two people working on this" on a two-seat roster that no longer exists;
+// WHO it meant was never recorded, only implied. So this is the one site that
+// converts rather than deletes: minting two roster keys would re-run the bug,
+// and silently emptying would lose an assignment someone really made.
+// It converts to 'unassigned' and SAYS SO, naming the card, so the operator can
+// set it deliberately instead of discovering the loss later.
 function migrateAssigneesIfNeeded() {
   let migrated = 0;
+  const legacyBoth = [];
   cards.forEach(card => {
     if (Array.isArray(card.assignees) && card.assignees.length > 0) return;
     if (typeof card.assignee === 'string') {
-      card.assignees = _normalizeAssignees(card.assignee);
+      if (card.assignee === 'both') {
+        card.assignees = ['unassigned'];
+        legacyBoth.push(card.shortId ?? card.id);
+      } else {
+        card.assignees = _normalizeAssignees(card.assignee);
+      }
       delete card.assignee;
     } else {
       card.assignees = ['unassigned'];
     }
     migrated++;
   });
+  if (legacyBoth.length > 0) {
+    console.warn(
+      `migrateAssigneesIfNeeded: ${legacyBoth.length} card(s) carried the legacy 'both' assignee ` +
+      `and were set to 'unassigned' — who 'both' meant was never recorded, only implied by a ` +
+      `two-seat roster that no longer exists. Reassign deliberately: #${legacyBoth.join(', #')}`,
+    );
+  }
   if (migrated > 0) {
     console.log(`migrateAssigneesIfNeeded: migrated ${migrated} card(s)`);
   }

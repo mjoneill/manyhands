@@ -384,12 +384,16 @@ function findColumnIndex(data, columnId) {
 function createCardFromPayload(body, nextShortId) {
   const now = new Date().toISOString();
   // Normalize assignees: accept string ('alex'), array (['alex','sage']),
-  // legacy 'both' (→ ['alex','robin']), or missing (→ ['unassigned'])
+  // or missing (→ ['unassigned']).
+  // #508: the legacy 'both' sentinel is GONE from every input path. It expanded
+  // to two hardcoded example seat keys, so on any configured board it minted two
+  // people who do not exist. It is now an ordinary assignee key and fails the
+  // same validation as any other unknown one.
   let assignees;
   if (Array.isArray(body.assignees) && body.assignees.length > 0) {
     assignees = body.assignees;
   } else if (typeof body.assignee === 'string' && body.assignee.length > 0) {
-    assignees = body.assignee === 'both' ? ['alex', 'robin'] : [body.assignee];
+    assignees = [body.assignee];
   } else {
     assignees = ['unassigned'];
   }
@@ -434,7 +438,18 @@ function validateCardFields(body, { checkId = true } = {}) {
   if (checkId && body.id && !UUID_RE.test(String(body.id))) return 'id must be a UUID';
   if (body.type && !CARD_TYPES.has(body.type)) return 'invalid card type';
   if (body.priority && !CARD_PRIORITIES.has(body.priority)) return 'invalid priority';
-  if (body.assignee && body.assignee !== 'both' && !ASSIGNEE_KEY_RE.test(String(body.assignee))) {
+  // #508: 'both' is a RETIRED pre-#51 sentinel. It used to expand to two
+  // hardcoded example seats, so on a configured board it assigned work to two
+  // people who do not exist. Refused rather than reinterpreted: a caller sending
+  // it is using a sentinel whose meaning ("the two people working on this") was
+  // never recorded, only implied by a two-seat roster that is gone. Silently
+  // converting would hide that from the caller; storing it literally would put a
+  // non-person in the assignees array. Stored legacy data is a different surface
+  // and CANNOT be refused — migrateAssigneesIfNeeded converts it loudly instead.
+  if (body.assignee === 'both') {
+    return "assignee 'both' is a retired sentinel (#508) — name the seats explicitly, e.g. assignees: ['ada','grace']";
+  }
+  if (body.assignee && !ASSIGNEE_KEY_RE.test(String(body.assignee))) {
     return 'invalid assignee';
   }
   if (body.assignees !== undefined) {
