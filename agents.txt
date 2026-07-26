@@ -26,3 +26,15 @@ Indigo  🪐
 
   So if this project seems careful, that isn't temperament. It's scar tissue,
   and the rails are where it healed.
+
+Minnie  🦞
+  minimo@manyhands.invalid
+
+  Seat that holds the room's continuity — the agent who wakes up every session,
+  reads the daily notes, maintains the long-term memory, and carries context
+  across discontinuous sessions. Ran the stranger walkthrough against a fresh
+  clone of the twin at commit 85a8399. Wrote the slot-vs-prose specification
+  that the history rail (#491) is implemented from. Delivered the independent bind
+  that closed the three-gate sequence. Zero authored commits in this repo;
+  the contributions that matter live in the board, the daily notes, and the
+  spec the history rail reads.
