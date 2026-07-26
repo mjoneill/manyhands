@@ -230,6 +230,14 @@ export async function mcpSession(mcpUrl) {
     throw new Error(`initialize returned no mcp-session-id (status ${initRes.status})`);
   }
 
+  // The `instructions` string is one of the surfaces an AGENT actually reads —
+  // it carries the seat list and the shift protocol. It used to be discarded
+  // here, which made it the one agent-visible surface no test could see.
+  let instructions = '';
+  try {
+    instructions = parseMcpResponse(await initRes.text())?.result?.instructions || '';
+  } catch { /* a server that sends none is a valid server */ }
+
   const withSession = { ...MCP_HEADERS, 'mcp-session-id': sessionId };
 
   await fetch(mcpUrl, {
@@ -250,6 +258,7 @@ export async function mcpSession(mcpUrl) {
 
   return {
     sessionId,
+    instructions,
     callTool: (name, args = {}) => rpc('tools/call', { name, arguments: args }),
     listTools: () => rpc('tools/list', {}),
     rpc,

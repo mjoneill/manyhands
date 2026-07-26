@@ -71,9 +71,29 @@ const REST_API_BASE = process.env.SCRUM_BOARD_API || 'http://127.0.0.1:3141';
  * and their agent would still be told OUR example seats existed.
  */
 function rosterLine() {
-  const seats = Object.entries(ROSTER_SEATS).filter(([k]) => k !== 'wiki');
-  const listed = seats.map(([k, v]) => `${k} (${v.glyph || '◍'})`).join(', ');
+  const listed = seatKeys().map((k) => `${k} (${ROSTER_SEATS[k].glyph || '◍'})`).join(', ');
   return `${listed}, unassigned (⬜).`;
+}
+
+/**
+ * Configured seat keys, for the tool SCHEMAS an agent reads.
+ *
+ * #483: `rosterLine()` above derived correctly while four `.describe()` strings
+ * a few hundred lines down still spelled the example seats out by hand. The
+ * aggregate looked right — one working derivation masked the hardcoded ones —
+ * which is the same "healthy total hiding a dead source" shape three times over.
+ * So every seat list an agent can see comes through here, and there is a test
+ * that boots with an unmistakable roster and asserts none of the example names
+ * survive in any tool description.
+ */
+function seatKeys() {
+  return Object.keys(ROSTER_SEATS).filter((k) => k !== 'wiki');
+}
+
+/** Two configured keys for an illustrative example, whatever the roster holds. */
+function exampleAssignees() {
+  const keys = seatKeys();
+  return `['${keys[0] ?? 'a-seat'}', '${keys[1] ?? keys[0] ?? 'another-seat'}']`;
 }
 
 const MCP_PORT = process.env.MCP_PORT ? parseInt(process.env.MCP_PORT, 10) : 3001;
@@ -273,7 +293,7 @@ function buildMcpServer() {
       title: z.string().min(1).describe('Card title (required, non-empty)'),
       description: z.string().optional().describe('Markdown body for the card'),
       type: z.enum(['task', 'idea', 'goal', 'reference', 'feature']).optional().describe('Card type — defaults to task'),
-      assignees: z.array(z.string()).optional().describe('Array of assignee keys (alex, robin, sage, nova, unassigned). Defaults to [unassigned].'),
+      assignees: z.array(z.string()).optional().describe(`Array of assignee keys (${seatKeys().join(', ')}, unassigned). Defaults to [unassigned].`),
       labels: z.array(z.string()).optional(),
       priority: z.enum(['p0', 'p1', 'p2', 'p3']).optional().nullable(),
       column: z.string().optional().describe('Column id — defaults to "backlog"'),
@@ -335,7 +355,7 @@ function buildMcpServer() {
     description: 'Atomically claim a card before driving multi-step work on it (protocol #346). First write wins: returns {claimed:true, holder, claimedAt} on success, or {claimed:false, status:409, holder, claimedAt} naming the incumbent if someone already holds it. A 409 means yield, not retry.',
     inputSchema: {
       id: z.string().describe('Card UUID or shortId'),
-      by: z.string().describe('Your agent key (alex, robin, sage, nova, kit)'),
+      by: z.string().describe(`Your agent key (${seatKeys().join(', ')})`),
     },
   }, async ({ id, by }) =>
     jsonResult(await claimApiCall('POST', `/api/cards/${encodeURIComponent(id)}/claim`, { by }))
@@ -373,7 +393,7 @@ function buildMcpServer() {
     description: 'Post a new conversation to the board commons. Body and author required. attachedTo is optional (UUID of a card to attach the conversation to, or omitted/null for the board-level chat — which is the v1 default surface).',
     inputSchema: {
       body: z.string().min(1).describe('Message body (plain text; markdown not rendered in v1)'),
-      author: z.string().min(1).describe('Author key — alex, robin, sage, nova, kit, or any other agent name. Free string, not an enum.'),
+      author: z.string().min(1).describe(`Author key — ${seatKeys().join(', ')}, or any other agent name. Free string, not an enum.`),
       attachedTo: z.string().optional().describe('Optional UUID of a card to attach to. Omit for board-level (v1 default).'),
     },
   }, async (args) => jsonResult(await apiCall('POST', '/api/conversations', args)));
@@ -472,7 +492,7 @@ Cards have an \`assignees\` array. Known seats: ${rosterLine()}
 
 **Don't pick up another agent's card.** If the card's \`assignees\` contains only agents that are not you, leave it alone.
 
-**Multi-assigned cards** that include YOU (e.g. \`['alex', 'sage']\`): first-come-first-served while on shift. The other co-assignee treats it as already in flight.
+**Multi-assigned cards** that include YOU (e.g. \`${exampleAssignees()}\`): first-come-first-served while on shift. The other co-assignee treats it as already in flight.
 
 **Stale in-progress cards** assigned to another agent: leave them alone. Moving them back to backlog is the owner's call (or a human's), not yours.
 
