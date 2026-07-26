@@ -154,6 +154,83 @@ test('#498 populated: no single click on any card changes which OTHER cards are 
   }
 });
 
+/**
+ * Tooth 3 — THE DEGENERATE-SOLUTION GUARD (Indigo's catch, 2026-07-26 23:35Z).
+ *
+ * The isolation invariant above is satisfiable by deleting filtering: today
+ * the three card chips are the ONLY way to ADD a filter (the filter strip can
+ * only remove), so stripping their handlers goes green on tests 1–2 while
+ * quietly amputating the feature. Necessary, not sufficient — the
+ * membership-vs-parity trap one card later.
+ *
+ * This tooth pins reachability: the board must still be filterable to a
+ * proper subset AND restorable, WITHOUT clicking anything on a card.
+ *
+ * CONTRACT SELECTOR (same pattern as #496's [data-page-shell]): every
+ * affordance that ADDS a filter carries `data-filter-add`, and it lives
+ * outside any .card. Menus are fine — if the first click opens a chooser, the
+ * newly revealed [data-filter-add] elements get clicked next. Restore rides
+ * whatever the page offers: [data-filter-clear], the filter strip's ✕ chips,
+ * or re-clicking the same control. RED today by absence: zero
+ * [data-filter-add] elements exist, because no add-path exists off-card.
+ */
+test('#498 filtering stays reachable: the board can be filtered and restored without touching a card', async () => {
+  const rosterFile = syntheticRosterFile();
+  const server = await startRestServer({ board: populatedBoard(), env: { SCRUM_ROSTER_FILE: rosterFile } });
+  const browser = await puppeteer.launch({ headless: 'new' });
+  try {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1024, height: 900 });
+    await page.goto(server.baseUrl + '/', { waitUntil: 'networkidle0' });
+    await page.waitForSelector('.card', { timeout: 5000 });
+
+    const all = await visibleCardIds(page);
+
+    // VISIBLE in the unfiltered default state — discoverability, not just
+    // reachability (Indigo: the strip hides itself when nothing is filtered,
+    // so today the misclick is the feature's only discovery path; a hidden
+    // shortcut would pass a bare existence check and leave that unchanged).
+    const offCardAdders = await page.evaluate(() =>
+      [...document.querySelectorAll('[data-filter-add]')]
+        .filter((el) => !el.closest('.card') && el.offsetParent !== null).length);
+    assert.ok(offCardAdders > 0,
+      'no VISIBLE off-card [data-filter-add] affordance in the unfiltered state — filtering is undiscoverable except by the misclick this card removes');
+
+    // Drive the first add-affordance; allow one menu hop.
+    const clickNthAdder = (n) => page.evaluate((n) => {
+      const els = [...document.querySelectorAll('[data-filter-add]')].filter((el) => !el.closest('.card') && el.offsetParent !== null);
+      if (els[n]) { els[n].click(); return true; }
+      return false;
+    }, n);
+    await clickNthAdder(0);
+    await new Promise((r) => setTimeout(r, 200));
+    let filtered = await visibleCardIds(page);
+    if (filtered.length === all.length) {
+      // First click may have opened a chooser — click the next revealed adder.
+      await clickNthAdder(1);
+      await new Promise((r) => setTimeout(r, 200));
+      filtered = await visibleCardIds(page);
+    }
+    assert.ok(filtered.length > 0 && filtered.length < all.length,
+      `driving [data-filter-add] must reach a proper subset: ${all.length} → ${filtered.length}`);
+
+    // Restore: prefer an explicit clear, fall back to the strip's remove chips.
+    await page.evaluate(() => {
+      const clear = document.querySelector('[data-filter-clear]');
+      if (clear) { clear.click(); return; }
+      for (const x of document.querySelectorAll('.filter-chip-x, .filter-chip')) x.click();
+    });
+    await new Promise((r) => setTimeout(r, 200));
+    const restored = await visibleCardIds(page);
+    assert.deepEqual(restored, all,
+      `restore must return every card without touching a card: ${all.join(',')} vs ${restored.join(',')}`);
+  } finally {
+    await browser.close();
+    await server.stop();
+    fs.rmSync(rosterFile, { force: true });
+  }
+});
+
 test('#498 fresh clone: cards created via the API obey the same isolation invariant', async () => {
   const rosterFile = syntheticRosterFile();
   const server = await startRestServer({ board: makeBoardFixture(), env: { SCRUM_ROSTER_FILE: rosterFile } });
