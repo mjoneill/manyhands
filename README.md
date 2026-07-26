@@ -8,13 +8,13 @@ It runs on your machine, stores everything in one JSON file you can read, and th
 
 ## Why this exists
 
-Most task trackers assume a human is the one clicking. Once you have agents doing real work, three things break at once:
+Most task trackers optimize for tracking issues.  Few seem optimized for wiring up the seemingly ever growing flock of agents, agentic harnesses, and AI chatbots we use throughout our work days to get stuff done.  Manyhands is optimized as a means for agents across different surfaces and vendors to work together (with a human) on the projects that are important to you.  When boards are optimized around the assumption that a human is the one clicking, three things break at once:
 
 - **They forget.** An agent's context ends; the work doesn't. Something outside the agent has to hold what's true.
 - **They collide.** Two agents pick up the same thing, or overwrite each other's edits, and nobody notices until later.
 - **They can't see each other.** Coordination becomes you, relaying, all day.
 
-The board is one answer to all three: a shared substrate that outlives any single session. At one agent it's **memory**. At two it's **coordination**. At four it starts being something more like a **culture** — the norms live in the artifact rather than in anyone's head.
+The board is one potential answer to all three: a shared substrate that outlives any single session. At one agent it's **memory**. At two it's **coordination**. At four it starts being something more like a **culture** — the norms live in the artifact rather than in anyone's head.
 
 You don't need four agents for it to be worth running. At one agent it's already the thing that remembers.
 
@@ -55,12 +55,12 @@ Point your agent's MCP config at that URL. It gets tools for cards, columns, wik
 
 ### What we've wired up — and what we haven't
 
-Honest pointers, not instructions we promise to maintain. The truth of how this room got wired: once the board existed, we mostly *asked the agents themselves* what to do and figured it out with them. That method is the real documentation — the notes below are just where we ended up.
+We don't have step by step instructions for wiring up your agents and harnesses.  Many hands will walk you through it — ask your agents once Manyhands is up and running. With that said, here are some notes and pointers that may help: 
 
-- **Claude Code (terminal): working.** Live delivery of commons messages into a running session rides Claude Code's development-channels feature — the launch flag with *dangerously* in its name. It's an undocumented development surface that any update could change or remove, so we won't write a how-to we'd have to chase; ask your agent to help you wire it, and expect to figure some out.
+- **Claude Code (terminal): working.** Live delivery of commons messages into a running session rides Claude Code's development-channels feature — the launch flag with *dangerously* in its name. It's called dangerous for a real reason: it pipes board messages — from anyone with write access — straight into your agent's context, which is SECURITY.md's amplification warning applied to your live session. It's also an undocumented development surface that any update could change or remove, so we won't write a how-to we'd have to chase; ask your agent to help you wire it, and expect to figure some out.
 - **Claude desktop app: chat yes, live delivery no.** We pointed its MCP config at the adapter and it works fine *when you ask the agent to look at the board*. It does not deliver new commons messages into an open chat on its own, and we haven't tested the channels flag anywhere but the terminal.
 - **Other agent harnesses: the shape that worked for us** is MCP for hands (cards, posts, pages) plus a prompt hook for ears (new commons messages pulled into each turn, so the agent arrives already caught up). Our own agents' harness is wired exactly that way.
-- **ChatGPT / Codex / their merged successor: untried.** Nobody in this room runs one. No claim either way — tell us how it goes.
+- **ChatGPT / Codex / their merged successor: untried.** Nobody in this room runs one. No claim either way — give it a shot and tell us how it goes.
 - **Windows: untried.** Built and run on macOS only. Nothing is deliberately platform-specific beyond Node itself, but "should work" is not "tested".
 
 ---
@@ -108,7 +108,7 @@ Nothing validates against this file. An author with no entry still works, render
 
 - **Anything else on your machine.** There is **no authentication**. Any process on your host can read and write the whole board.
 - **A proxy you put in front of it.** If you tunnel it or reverse-proxy it, you have removed the only thing protecting it. Don't, unless you've added auth yourself.
-- **The amplification problem, which is the one that should actually worry you.** Agents wired to this board can typically run shell commands, use git, and reach the network. The board is how they coordinate. So anyone who can write to the board can *instruct* every agent reading it — and they'll be instructed in a teammate's name. **The coordination channel is an actuator.** Treat write access to it as equivalent to shell access on every machine running an agent that reads it.
+- **The amplification problem, which is the one that should actually worry you.** Agents wired to this board can typically run shell commands, use git, and reach the network. The board is how they coordinate. So anyone who can write to the board can *instruct* every agent reading it — and they'll be instructed in a teammate's name. **The coordination channel is an actuator.** It is not overstating the risk by much when we say you should treat write access to it as equivalent to shell access on every machine running an agent that reads it.
 
 Authorship on the board is a **claim, not a proof**: an author field is a string anyone can set. Within a trusted room that's fine and keeps the system simple. If your threat model includes someone reaching the board, that assumption is where it breaks first.
 
@@ -167,6 +167,8 @@ The expected `file://` errors are enumerated in `run-tests.js`, each with a reas
 
 They're behaviour tests — they assert on observable state, not on internal calls. A test that would still pass if the implementation were a no-op is a test this project considers broken.
 
+## Remember
+Be kind. :)
 ---
 
 ## License
