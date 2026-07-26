@@ -20,7 +20,7 @@
  */
 
 import { renderChatMarkdown } from './render.mjs';
-import { identityOf } from './identity.mjs';
+import { identityOf, roster } from './identity.mjs';
 
 // ── pure helpers (node-testable) ───────────────────────────────────────────
 
@@ -95,7 +95,28 @@ export function cardRefHref(shortId, boardPath = 'index.html') {
 // ── safe-serve policy (mirrors index.html #113) ─────────────────────────────
 
 const INLINE_IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
-const DEFAULT_ACTORS = ['alex', 'robin', 'sage', 'nova', 'kit'];
+/**
+ * Who the author picker offers when the caller doesn't name them explicitly.
+ *
+ * DERIVED from the roster, never a literal. It used to be a hardcoded list of
+ * the shipped example seats, which is a bug with an unusually good disguise:
+ * every page that forgot to pass `actors` silently offered five people who do
+ * not exist, and the picker then WROTE one of those names into the record as
+ * the author of a real message. Not a rendering fault — manufactured history.
+ *
+ * It hid because the fallback used to be right. While a deployment hardcoded
+ * its own seats as the default, a path that never consulted the roster looked
+ * identical to one that did. A fallback that happens to be correct is
+ * indistinguishable from a lookup that works, and stays that way until someone
+ * configures a roster and finds strangers in their own room.
+ *
+ * Computed per call, not once at module load, so a roster configured after this
+ * module is imported is still honoured. `wiki` is excluded: it is the app's own
+ * voice, not a person, and nobody should be able to post as it.
+ */
+function defaultActors() {
+  return roster().map((m) => m.key).filter((k) => k !== 'wiki');
+}
 
 // ── DOM component ───────────────────────────────────────────────────────────
 
@@ -121,7 +142,7 @@ export function mountConversationView(opts = {}) {
     mount,
     attachedTo,
     baseUrl = '',
-    actors = DEFAULT_ACTORS,
+    actors = defaultActors(),
     author,
     placeholder = 'Say something to the room…',
     limit = 50,

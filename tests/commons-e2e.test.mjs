@@ -540,3 +540,70 @@ test('clearing a raised hand does NOT invent an author', async () => {
     await server.stop();
   }
 });
+
+/**
+ * #504 — the author picker must offer the CONFIGURED roster, never the shipped
+ * examples.
+ *
+ * This defect wrote fictional authorship into a real board: `commons.html`
+ * mounts the conversation view without naming `actors`, the default was a
+ * hardcoded list of example seats, and a human's post was recorded under a seat
+ * that does not exist. A rendering bug that forges the record.
+ *
+ * It survived because the fallback used to be correct — while a deployment
+ * hardcoded its own seats as the default, a path that never consulted the
+ * roster was indistinguishable from one that did. So the test asserts the
+ * options EQUAL the configured roster, and a mirror test pins the fallback, or
+ * a derivation returning nothing would "pass" both ways.
+ */
+test('#504 commons author picker offers the CONFIGURED roster, not the example seats', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scrum-roster-504-'));
+  const rosterFile = path.join(dir, 'roster.json');
+  // Unmistakable names: if these appear, the roster was genuinely consulted.
+  fs.writeFileSync(rosterFile, JSON.stringify({
+    seats: {
+      zzquux: { name: 'Zzquux', glyph: '◆', color: '#112233' },
+      vlorbo: { name: 'Vlorbo', glyph: '●', color: '#445566' },
+      wiki:   { name: 'wiki',   glyph: '📄', color: '#778899' },
+    },
+  }));
+  const server = await startRestServer({ board, env: { SCRUM_ROSTER_FILE: rosterFile } });
+  const browser = await puppeteer.launch({ headless: 'new' });
+  try {
+    const page = await browser.newPage();
+    await page.goto(`${server.baseUrl}/commons.html`, { waitUntil: 'networkidle0' });
+    await page.waitForSelector('select', { timeout: 5000 });
+    const opts = await page.evaluate(() =>
+      [...document.querySelector('select').options].map((o) => o.value));
+
+    assert.deepEqual(opts.sort(), ['vlorbo', 'zzquux'],
+      `picker must offer exactly the configured seats (wiki is not a person); got ${opts.join(', ')}`);
+    for (const example of ['alex', 'robin', 'sage', 'nova', 'kit']) {
+      assert.ok(!opts.includes(example),
+        `example seat "${example}" leaked into a configured board's author picker`);
+    }
+  } finally {
+    await browser.close();
+    await server.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('#504 mirror: with NO roster configured, the shipped example seats DO return', async () => {
+  // Without this, a defaultActors() that returned [] would satisfy the test
+  // above while offering nobody at all — a green that means nothing.
+  const server = await startRestServer({ board });
+  const browser = await puppeteer.launch({ headless: 'new' });
+  try {
+    const page = await browser.newPage();
+    await page.goto(`${server.baseUrl}/commons.html`, { waitUntil: 'networkidle0' });
+    await page.waitForSelector('select', { timeout: 5000 });
+    const opts = await page.evaluate(() =>
+      [...document.querySelector('select').options].map((o) => o.value));
+    assert.ok(opts.length > 0, 'a fresh install must still offer someone to post as');
+    assert.ok(opts.includes('alex'), `expected the shipped examples; got ${opts.join(', ')}`);
+  } finally {
+    await browser.close();
+    await server.stop();
+  }
+});
