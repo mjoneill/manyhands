@@ -88,11 +88,12 @@ body::before {
 
 .board-header .logo { font-size: 1.75rem; }
 
-/* #303-2 — shared nav sits inline in the board toolbar (content-sized pills,
-   not the full-width strip the other surfaces use). Appearance = core/header.css. */
+/* #496 — the board no longer overrides the shared nav. It used to sit inline in
+   the toolbar as content-sized pills (inline-flex, flex:0 0 auto, 8px 14px) while
+   the other three surfaces ran a full-width strip: same component, four mount
+   points, three local overrides. The shell owns placement now; appearance stays
+   in core/header.css. */
 .board-header-actions { display: flex; align-items: center; gap: 10px; }
-.board-header .topnav { display: inline-flex; gap: 8px; margin: 0; }
-.board-header .topnav .navlink { flex: 0 0 auto; padding: 8px 14px; }
 
 /* ── Board Layout ── */
 .board {
@@ -1380,13 +1381,13 @@ body::before {
 <body>
 
 <!-- Board Header -->
+<div data-page-shell>
+<div class="shell-head"><span id="app-nav"></span></div>
 <div class="board-header">
   <h1><span class="logo">◆</span> manyhands</h1>
   <div class="board-header-actions">
     <!-- board-specific: toggles the inline commons panel (distinct from the Commons *page* link in the shared nav) -->
     <button id="btn-toggle-convs" class="btn-toggle-convs" title="Open the conversations commons">💬 Conversations</button>
-    <!-- #303-2 — shared cross-surface nav (Board·Wiki·Commons·Settings) -->
-    <span id="app-nav"></span>
   </div>
 </div>
 
@@ -1433,6 +1434,7 @@ body::before {
      get the same IDs (column-backlog, backlog-body, etc.) for backwards compat
      with existing tests and any external code that referenced them. -->
 <div class="board" id="board"></div>
+</div><!-- /[data-page-shell] -->
 
 <!-- Hidden templates: the persistent add-card form and its + expand button.
      renderBoard moves these into the active column body (currentAddCardColumn)
@@ -2190,7 +2192,7 @@ function renderCard(card) {
     const isLong = newlineCount >= DESC_COLLAPSE_NEWLINES || card.description.length >= DESC_COLLAPSE_CHAR_THRESHOLD;
     const descId = `desc-${card.shortId}`; // #249 — shortId is a safe integer; card.id is attacker-controllable and was an attribute sink
     const collapsedClass = isLong ? ' collapsed' : '';
-    html += `<div class="card-description${collapsedClass}" id="${descId}" aria-expanded="${isLong ? 'false' : 'true'}">${renderDescriptionWithLinks(card.description)}</div>`;
+    html += `<div class="card-description prose${collapsedClass}" id="${descId}" aria-expanded="${isLong ? 'false' : 'true'}">${renderDescriptionWithLinks(card.description)}</div>`;
     if (isLong) {
       html += `<button class="desc-toggle" aria-controls="${descId}" data-action="toggle-desc">Show more</button>`;
     }

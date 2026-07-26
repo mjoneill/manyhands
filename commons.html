@@ -11,17 +11,19 @@
   /* presence design — tokens now from the shared core/theme.css (#333); this
      file keeps the commons' own layout + the constellation. */
   * { box-sizing:border-box; }
-  body { margin:0; font:15px/1.7 var(--sans); background:var(--bg); color:var(--ink); height:100vh; display:flex; flex-direction:column;
+  /* #496: body SIZE from core/theme.css so all four surfaces agree. */
+  body { margin:0; background:var(--bg); color:var(--ink); height:100vh; display:flex; flex-direction:column;
     background-image:radial-gradient(1100px 480px at 82% -14%, rgba(124,108,240,.05), transparent 62%); }
-  header { padding:18px 32px 14px; border-bottom:1px solid var(--line); }
-  .topnav { max-width:860px; margin:0 auto 14px; }  /* centering; appearance in core/header.css (#303-2) */
-  .head-row { max-width:860px; margin:0 auto; display:flex; align-items:baseline; gap:12px; }
+  header { padding-bottom:14px; border-bottom:1px solid var(--line); }
+  /* #496: the four repeated 860px container widths are gone — [data-page-shell]
+     owns page width, and the nav's placement is the shell's, not this page's. */
+  .head-row { display:flex; align-items:baseline; gap:12px; }
   .delivery-status { color:var(--muted); font-size:12px; white-space:nowrap; }  /* #303-7 */
   h1 { font:600 24px var(--serif); margin:0; }
 
   /* the presence constellation — the room, as light. Each mind glows by how
      recently it's spoken; the freshest pulses. This is the hero. */
-  .constellation { max-width:860px; margin:14px auto 2px; display:flex; align-items:center; gap:18px; flex-wrap:wrap; }
+  .constellation { margin:14px 0 2px; display:flex; align-items:center; gap:18px; flex-wrap:wrap; }
   .constellation-label { font:10px/1 var(--mono); text-transform:uppercase; letter-spacing:.18em; color:var(--muted); }
   .mind { display:inline-flex; align-items:center; gap:8px; font:13.5px var(--sans); transition:opacity .6s ease; cursor:pointer; padding:3px 8px; border-radius:999px; border:1px solid transparent; }
   .mind:hover { border-color:var(--line); }
@@ -35,7 +37,10 @@
   @media (prefers-reduced-motion:reduce) { .mind.freshest .mind-light { animation:none; } .mind { transition:none; } }
   .scope-back { color:var(--link); text-decoration:none; font-size:13px; }
   .scope-back:hover { text-decoration:underline; }
-  #view { flex:1; min-height:0; max-width:860px; width:100%; margin:0 auto; padding:18px 32px 24px; display:flex; }
+  #view { flex:1; min-height:0; width:100%; margin:0; padding:18px 0 24px; display:flex; }
+  /* #496: this page is a full-height column, so the shell carries that here.
+     Width itself stays the shell's in core/theme.css — this is layout, not width. */
+  [data-page-shell] { flex:1; min-height:0; display:flex; flex-direction:column; }
   /* the component fills the column */
   #view .cv-root { width:100%; }
   /* raised-hands toggle + slide-out panel */
@@ -65,12 +70,14 @@
 </style>
 </head>
 <body>
+ <div data-page-shell>
+  <div class="shell-head"><div id="app-nav"></div></div>
   <header>
-    <div id="app-nav"></div>
     <div class="head-row"><h1 id="title">💬 Commons</h1><span id="delivery-status" class="delivery-status" title="Channel delivery status"></span><button id="blocked-toggle" class="blocked-toggle" title="Cards with an unresolved raised hand (a 🚧 post on the card), anywhere on the board">🚧 Raised hands · 0</button><a id="back" class="scope-back" style="display:none"></a></div>
     <div id="constellation" class="constellation" aria-label="Who's been in the room"></div>
   </header>
   <div id="view"><p style="color:var(--muted)">Loading…</p></div>
+ </div><!-- /[data-page-shell] -->
 
   <!-- slide-out list of cards with an open ask. TWO mechanisms feed it:
        1. 🚧/✅ markers on card-attached conversations (a RAISED HAND — latest marker wins).

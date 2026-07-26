@@ -11,10 +11,14 @@
   /* #224 — "Observatory". Design tokens now live in the shared core/theme.css
      (#333); this file keeps only the wiki's own layout. */
   * { box-sizing:border-box; }
-  body { margin:0; font:15.5px/1.7 var(--sans); background:var(--bg); color:var(--ink); display:flex; height:100vh;
+  /* #496: body SIZE from core/theme.css; the shell owns the column layout. */
+  body { margin:0; background:var(--bg); color:var(--ink); height:100vh;
     background-image:radial-gradient(1100px 480px at 82% -12%, rgba(124,108,240,.06), transparent 62%); }
 
   /* Sidebar — the structure of the home, in the agents' mono register */
+  /* #496: shell = full-height column (head + the two wiki columns). */
+  [data-page-shell] { height:100vh; display:flex; flex-direction:column; }
+  .wiki-cols { flex:1; min-height:0; display:flex; }
   #sidebar { width:300px; min-width:300px; background:var(--panel); overflow:auto; padding:20px 16px; border-right:1px solid var(--line); }
   #sidebar h2 { font:600 11px/1 var(--mono); text-transform:uppercase; letter-spacing:.16em; color:var(--muted); margin:20px 2px 12px; }
   #tree { font:13px/1.55 var(--mono); }
@@ -32,11 +36,14 @@
   #main { flex:1; overflow:auto; padding:52px 60px; position:relative; }
   #main::before { content:''; position:absolute; inset:0 0 auto 0; height:240px; pointer-events:none;
     background:radial-gradient(640px 220px at 30% 0, var(--ember-soft), transparent 72%); }
-  #main article, #main .head, #main .section { max-width:760px; position:relative; }
+  /* #496: the 760px here was a prose measure in disguise (~88ch, above the
+     45-75 canon). Relocated to .prose in core/theme.css, in ch so it scales
+     with the type. Deleting it outright would have made the wiki worse. */
+  #main article, #main .head, #main .section { position:relative; }
   @keyframes pageRise { from { opacity:0; transform:translateY(9px); } to { opacity:1; transform:none; } }
   .page-rise { animation:pageRise .3s cubic-bezier(.2,.7,.3,1) both; }
   .page-eyebrow { font:600 12px/1 var(--mono); letter-spacing:.09em; text-transform:uppercase; color:var(--ember); margin:0 0 13px; }
-  h1.page-title { font:600 34px/1.15 var(--serif); letter-spacing:-.01em; margin:0 0 14px; max-width:760px; }
+  h1.page-title { font:600 34px/1.15 var(--serif); letter-spacing:-.01em; margin:0 0 14px; max-width:var(--measure); }
   h1.page-title::after { content:''; display:block; width:54px; height:2px; margin-top:16px; background:var(--ember); border-radius:2px; }
   .meta { font:12px/1.5 var(--mono); color:var(--muted); margin:0 0 30px; }
   .wikilink { color:var(--link); text-decoration:none; border-bottom:1px dashed rgba(169,156,255,.5); cursor:pointer; }
@@ -47,7 +54,11 @@
   .section a { color:var(--link); text-decoration:none; cursor:pointer; display:block; padding:5px 0; font-size:14px; }
   .section a:hover { color:var(--ink); }
   .empty { color:var(--muted); font-style:italic; }
-  article { font-size:15.5px; color:#dfe2ee; }
+  /* #496: was `font-size:15.5px; color:#dfe2ee` — a px override on the wiki's
+     main reading surface. px defeats the rem anchor, so the one page built for
+     long-form reading was the one page that ignored the reader's font-size
+     preference. Size now inherits the fluid scale; colour uses the token. */
+  article { color:var(--ink); }
   article :where(h1,h2,h3,h4) { font-family:var(--serif); font-weight:600; line-height:1.3; margin:26px 0 9px; color:var(--ink); }
   article h1 { font-size:25px; } article h2 { font-size:21px; } article h3 { font-size:17px; }
   article p { margin:0 0 15px; }
@@ -136,7 +147,10 @@
 </style>
 </head>
 <body>
-  <nav id="sidebar"><div id="app-nav"></div><h2 id="pages-heading" title="Drop a page here to make it top-level">Pages</h2><button id="new-root" class="btn">+ New page</button>
+ <div data-page-shell>
+  <div class="shell-head"><div id="app-nav"></div></div>
+  <div class="wiki-cols">
+  <nav id="sidebar"><h2 id="pages-heading" title="Drop a page here to make it top-level">Pages</h2><button id="new-root" class="btn">+ New page</button>
     <div class="nav-controls">
       <input id="nav-filter" class="nav-filter" type="text" placeholder="Filter…  text or field:value" autocomplete="off" spellcheck="false">
       <div class="nav-controls-row">
@@ -146,6 +160,8 @@
     </div>
     <div id="tree"><p class="empty">Loading…</p></div></nav>
   <main id="main"><p class="empty">Select a page from the tree.</p></main>
+  </div><!-- /.wiki-cols -->
+ </div><!-- /[data-page-shell] -->
 
   <button id="cv-toggle" class="cv-toggle" title="Open the commons">💬 Commons</button>
   <aside id="cv-panel" class="cv-panel" aria-hidden="true">
@@ -286,6 +302,7 @@
       const eyebrow = el('div', 'page-eyebrow', type + ' · #' + (node.identifier ?? '—'));
       const h1 = el('h1', 'page-title', node.name || '(untitled)');
       const article = document.createElement('article');
+      article.className = 'prose';   // #496 — running text carries the shared measure
       article.innerHTML = renderMarkdown(node.text || '');
       wireWikilinks(article);
       currentNodeId = node['@id'];

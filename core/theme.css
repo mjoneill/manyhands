@@ -33,4 +33,65 @@
   --mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace;
 
   --r: 9px;   /* the shared corner radius */
+
+  /* #496 — the page shell's one width rule and one type scale.
+     Fluid page, no cap: the gutter grows with the viewport instead, so content
+     never kisses the bezel on a large monitor and never wastes a phone's width. */
+  --shell-gutter: clamp(16px, 3vw, 48px);
+
+  /* Rem-anchored bounded fluid type. Every term is rem, never px: a px or
+     pure-vw scale ignores the browser/OS default-font-size preference, which is
+     the one accessibility lever tired eyes already know how to use. The floor
+     protects close-reading (a phone must not shrink), the ceiling protects
+     far-reading (4K must not grow absurd), the viewport term scales between. */
+  --body-size: clamp(0.9375rem, calc(0.35vw + 0.875rem), 1.1875rem);
+
+  /* The measure: running prose stops growing at 65ch even though the page does
+     not. Newspaper wide, columns narrow. 45–75ch is the canon range. */
+  --measure: 65ch;
+}
+
+/* ---------------------------------------------------------------------------
+   #496 — ONE body type rule for every surface. Before this, four pages set
+   four different body sizes (board 16px / wiki 15.5 / commons 15 / settings 15)
+   and nothing owned the difference. Pages may still set family or weight
+   locally; the SIZE lives here.
+   --------------------------------------------------------------------------- */
+body {
+  font-family: var(--sans);
+  font-size: var(--body-size);
+  line-height: 1.6;
+}
+
+/* ---------------------------------------------------------------------------
+   #496 — the page shell. One element owns header, nav placement and page width
+   on all four surfaces, mirroring how core/conversation-view.mjs is shared (and
+   correspondingly identical everywhere it appears). The nav itself was already
+   shared via core/header.mjs — what drifted was where each page MOUNTED it and
+   what each page overrode locally. This owns both, so nobody overrides it again.
+   --------------------------------------------------------------------------- */
+[data-page-shell] {
+  width: 100%;
+  max-width: none;      /* fluid, no cap — the decision, made once */
+  margin: 0;
+  padding-inline: var(--shell-gutter);
+}
+
+/* The header row every surface shares. The nav mount is a full-width block
+   inside it, so the nav's offset within its parent is identical on all four
+   surfaces by construction rather than by four agreeing overrides. */
+[data-page-shell] > .shell-head { padding-block: 14px 0; }
+[data-page-shell] > .shell-head > #app-nav { display: block; width: 100%; }
+
+/* ---------------------------------------------------------------------------
+   #496 — running text. Applied to the wiki article body, commons message
+   bodies and card descriptions; NEVER to tables, code blocks, or the board,
+   which genuinely want the full width. The wiki already had this measure as a
+   760px rule on #main article — that was a prose measure in disguise, above the
+   canon range at ~88ch. It is relocated here, in ch, so it scales with the type.
+   --------------------------------------------------------------------------- */
+.prose {
+  max-width: var(--measure);
+  line-height: 1.6;
+  color: var(--ink);
 }

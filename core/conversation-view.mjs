@@ -211,7 +211,11 @@ export function mountConversationView(opts = {}) {
   // the same guarantee the wiki relies on (core/render.mjs). #NNN links carry
   // href=index.html?card=NNN, which the board deep-links to on load.
   function cardBody(text) {
-    const div = el('div', 'cv-msg-body');
+    // #496: `prose` is the shared running-text class (core/theme.css) — it
+    // carries the 65ch measure and 1.6 leading. A message body is running text
+    // wherever this view is mounted, so the measure travels with the component
+    // rather than being re-declared by each host page.
+    const div = el('div', 'cv-msg-body prose');
     div.innerHTML = renderChatMarkdown(text || '');
     return div;
   }

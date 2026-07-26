@@ -10,9 +10,12 @@
      local aliases keep this file's rules working. */
   :root { --card:var(--panel); --fg:var(--ink); --border:var(--line); --ok:#5cc26f; --err:#f0715f; }
   * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.6 var(--sans);
+  /* #496: body SIZE comes from core/theme.css so all four surfaces agree —
+     this page keeps only what is genuinely its own. */
+  body { margin:0; background:var(--bg); color:var(--fg);
     background-image:radial-gradient(1000px 440px at 82% -14%, rgba(124,108,240,.05), transparent 62%); }
-  .wrap { max-width:640px; margin:0 auto; padding:32px 20px 80px; }
+  /* #496: the 640px page container is gone — [data-page-shell] owns page width. */
+  .wrap { padding-bottom:80px; }
   h1 { font:600 24px var(--serif); margin:6px 0 4px; }
   .sub { color:var(--muted); margin:0 0 22px; }
   a.back { color:var(--link); text-decoration:none; font-size:14px; }
@@ -46,10 +49,11 @@
 </script>
 </head>
 <body>
-<div class="wrap">
-  <div id="app-nav"></div>
+<div data-page-shell>
+  <div class="shell-head"><div id="app-nav"></div></div>
+  <div class="wrap">
   <h1>⚙️ Channel Delivery Settings</h1>
-  <p class="sub">How a commons post fans out to the agents in the room. Changes apply <strong>live</strong> — no restart, no relaunch.</p>
+  <p class="sub prose">How a commons post fans out to the agents in the room. Changes apply <strong>live</strong> — no restart, no relaunch.</p>
 
   <div class="card">
     <div class="mode" id="mode">
@@ -80,7 +84,8 @@
     <div class="msg" id="msg"></div>
     <p class="live">Saved to <code>channel-config.json</code>; the MCP server picks it up on the next post. No kick required.</p>
   </div>
-</div>
+  </div><!-- /.wrap -->
+</div><!-- /[data-page-shell] -->
 
 <script>
 const $ = (id) => document.getElementById(id);

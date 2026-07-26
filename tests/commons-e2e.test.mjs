@@ -109,9 +109,16 @@ test('the board surfaces the Commons nav peer + a "⤢ Full page" promote link',
     await page.goto(`${server.baseUrl}/`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('.board-header', { timeout: 5000 });
 
-    // Commons nav peer in the header (→ the full-page view).
-    const headerLinks = await page.$$eval('.board-header a', (els) => els.map((e) => e.getAttribute('href')));
-    assert.ok(headerLinks.includes('/commons.html'), 'board header links to commons.html: ' + headerLinks.join(', '));
+    // Commons nav peer in the page chrome (→ the full-page view).
+    // #496: the shared nav moved out of .board-header into the page shell's
+    // header row — the board used to mount it in its own toolbar with its own
+    // overrides, which was the drift this card removed. The property under test
+    // is unchanged (from the board, the chrome offers a link to the Commons
+    // page); only the element that holds the nav moved. `.shell-head a` is the
+    // nav's new home and contains nothing else, so this is as tight as the old
+    // `.board-header a` — it still fails if the nav goes missing.
+    const headerLinks = await page.$$eval('.shell-head a', (els) => els.map((e) => e.getAttribute('href')));
+    assert.ok(headerLinks.includes('/commons.html'), 'page shell header links to commons.html: ' + headerLinks.join(', '));
 
     // The existing panel still toggles, and now carries the promote link.
     await page.click('#btn-toggle-convs');
