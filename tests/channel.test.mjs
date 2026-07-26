@@ -3,7 +3,7 @@
  *
  * Mechanism: when a commons post lands, server.js fires a best-effort notify
  * to the MCP server, which emits a `notifications/claude/channel` JSON-RPC
- * notification to every live MCP session. A `claude --channels server:scrum-board`
+ * notification to every live MCP session. A `claude --channels server:manyhands`
  * session receives it as a <channel> block. These tests verify the
  * HTTP-transport path: REST post -> MCP -> notification on the session's
  * standalone SSE stream.

@@ -430,7 +430,7 @@ test('#294 unscoped commons collapses card-attached posts to pointers; the scope
   }
 });
 
-test('#334 commons.html: the "Blocked on Alex" panel is a registry of raised hands (who · ask · card), clearable', async () => {
+test('commons.html: the raised-hands panel is a registry of open asks (who · ask · card), clearable', async () => {
   const blockedBoard = {
     cards: [
       card('bk', 7, 'Vendor disclosure call'),
@@ -463,10 +463,10 @@ test('#334 commons.html: the "Blocked on Alex" panel is a registry of raised han
     assert.equal(await page.$eval('.blocked-open-card', (e) => e.getAttribute('href')), 'index.html?card=7', 'links to the board card');
     assert.equal((await page.$$('.blocked-item')).length, 1, 'exactly one open raise shows');
 
-    // Alex clears it (✓ unblocked posts a ✅ that supersedes) → panel empties.
+    // Clearing it (✓ unblocked posts a ✅ that supersedes) → panel empties.
     await page.evaluate(() => document.querySelector('.blocked-done').click());
     await page.waitForFunction(() => /· 0$/.test(document.getElementById('blocked-toggle').textContent), { timeout: 5000 });
-    assert.match(await page.$eval('.blocked-empty', (e) => e.textContent), /Nobody/, 'panel empty after clearing');
+    assert.match(await page.$eval('.blocked-empty', (e) => e.textContent), /No open asks/, 'panel empty after clearing');
   } finally {
     await browser.close();
     await server.stop();
@@ -491,6 +491,50 @@ test('#303-6 commons.html: "load older" hides when the whole history already fit
       return b && getComputedStyle(b).display === 'none';
     }, { timeout: 3000 });
     assert.equal((await page.$$('.cv-msg')).length, 8, 'all messages present, none lost');
+  } finally {
+    await browser.close();
+    await server.stop();
+  }
+});
+
+test('clearing a raised hand does NOT invent an author', async () => {
+  // The worst of the five findings from the independent sweep: this page has no
+  // identity picker, so the runtime cannot know who clicked. It answered anyway,
+  // hardcoding a seat name — which meant the software wrote a FICTIONAL PERSON
+  // into a real user's board history every time anyone cleared a raised hand.
+  //
+  // The rule: if the runtime cannot know who acted, it records that an action
+  // happened, never who did it. A board whose history is partly fabricated is
+  // worse than one that admits a gap.
+  const board = {
+    cards: [card('bk', 1, 'needs a decision')],
+    columns: [{ id: 'backlog', name: 'Backlog', order: 0 }],
+    conversations: [msg('r1', '🚧 which way do we go?', 'nova', 'bk', 1)],
+    nextShortId: 2,
+  };
+  const server = await startRestServer({ board, staticDir: path.resolve('.') });
+  const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'] });
+  try {
+    const page = await browser.newPage();
+    await page.goto(`${server.baseUrl}/commons.html`, { waitUntil: 'networkidle0' });
+    await page.evaluate(() => document.getElementById('blocked-toggle').click());
+    await page.waitForSelector('.blocked-done', { timeout: 5000 });
+    await page.evaluate(() => document.querySelector('.blocked-done').click());
+    await page.waitForFunction(
+      () => /· 0$/.test(document.getElementById('blocked-toggle').textContent), { timeout: 5000 });
+
+    const convos = await (await fetch(`${server.baseUrl}/api/conversations`)).json();
+    const resolution = convos.find((c) => /✅/.test(c.body));
+    assert.ok(resolution, 'precondition: a resolution was posted');
+    assert.equal(resolution.author, 'system', 'authored as a system event, not as a person');
+
+    // The real assertion: no seat name was invented. Any roster key appearing
+    // here would be a person the software decided had acted.
+    const roster = (await (await fetch(`${server.baseUrl}/api/roster`)).json()).seats;
+    assert.ok(
+      !Object.keys(roster).includes(resolution.author),
+      `the resolution must not be attributed to a roster seat (got "${resolution.author}")`,
+    );
   } finally {
     await browser.close();
     await server.stop();

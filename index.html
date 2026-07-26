@@ -2439,7 +2439,7 @@ function scrollToCardByShortId(shortId) {
   // #335 — a deep-linked card may be HIDDEN from the DOM: folded behind the
   // backlog "show N older" (stale) expander, or inside a collapsed column. Left
   // unhandled, the link silently no-ops and dumps you into the board (the bug
-  // Alex hit clicking a blocked-panel item). Un-hide the card first, then
+  // hit when clicking a raised-hands item). Un-hide the card first, then
   // scroll. A card with a fresh raise but old card-fields reads as "stale," so
   // the blocked-panel's own targets are exactly the ones most likely folded.
   let needsRerender = false;
@@ -2593,7 +2593,7 @@ function isStaleCard(card) {
   return Number.isFinite(t) && (Date.now() - t) > STALE_MS;
 }
 const _staleExpanded = new Set(); // column ids whose "older" section is open (session)
-const COLLAPSED_COLS_KEY = 'robin-scrum-collapsed-columns';
+const COLLAPSED_COLS_KEY = 'manyhands-collapsed-columns';
 function loadCollapsedColumns() {
   try { return new Set(JSON.parse(localStorage.getItem(COLLAPSED_COLS_KEY)) || []); }
   catch { return new Set(); }

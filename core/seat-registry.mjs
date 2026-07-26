@@ -27,7 +27,7 @@
  * is exposed so a delivery in flight can be fenced against a reconnect race.
  *
  * Trust: registration is trusted input in v1 (author is client-supplied; auth
- * is deferred as a non-threat in a trusted room, per Alex). The only conflict
+ * is deferred as a non-threat in a trusted room). The only conflict
  * rejected here is structural: one live session cannot hold two seat identities.
  */
 

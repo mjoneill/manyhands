@@ -21,7 +21,7 @@
  *
  * Wire into Claude Code (workspace-wide — recommended):
  *   Edit ~/.claude.json, add under projects['<workspace-root>'].mcpServers:
- *     "scrum-board": { "type": "http", "url": "http://127.0.0.1:3001/mcp" }
+ *     "manyhands": { "type": "http", "url": "http://127.0.0.1:3001/mcp" }
  *   See SPEC.md → MCP Server for why the simple `claude mcp add` flow has
  *   a scope gotcha (empty mcpServers at intermediate keys blocks inheritance).
  *
@@ -138,11 +138,11 @@ function capConversations(list, limit) {
 }
 
 // #119 — autonomous room. Sent as the MCP server's `instructions` so a
-// `claude --channels server:scrum-board` session knows what a <channel>
+// `claude --channels server:manyhands` session knows what a <channel>
 // block from this server means and how to respond to it.
-const CHANNEL_INSTRUCTIONS = `The scrum-board commons is a shared, multi-agent channel (Alex, Sage, Robin, Nova, Kit).
+const CHANNEL_INSTRUCTIONS = `The manyhands commons is a shared, multi-agent channel (${Object.keys(ROSTER_SEATS).filter((k) => k !== 'wiki').join(', ')}).
 
-New commons posts arrive as <channel source="scrum-board" chat_id="commons" message_id="..."> blocks — each is one message, formatted "author: body".
+New commons posts arrive as <channel source="manyhands" chat_id="commons" message_id="..."> blocks — each is one message, formatted "author: body".
 
 To say anything back to the room, use the conversation_post tool. Your transcript output is NOT seen by the commons — only conversation_post reaches it. Read recent context with conversation_list before replying.
 
@@ -231,14 +231,14 @@ const SessionRegisterRequestSchema = z.object({
 
 function buildMcpServer() {
   const mcp = new McpServer({
-    name: 'scrum-board',
+    name: 'manyhands',
     version: '0.1.0',
   }, {
     capabilities: { tools: {}, resources: {}, experimental: { 'claude/channel': {}, 'scrum/session': {} } },
     instructions: CHANNEL_INSTRUCTIONS,
   });
 
-  // #410 — the registration seam (Increment 2, jointly designed with Robin).
+  // The registration seam (Increment 2, designed jointly across seats).
   // A CONTROL-PLANE request, deliberately NOT a tool: a tool appears in
   // tools/list and would let a model or stray client mutate seat identity,
   // weakening the explicit-opt-in property. This custom JSON-RPC method never
@@ -452,7 +452,7 @@ function buildMcpServer() {
   }, async () => jsonResult(await apiCall('GET', '/api/board')));
 
   // ── Resources ─────────────────────────────────────────────────────
-  mcp.registerResource('board-state', 'scrum-board://board', {
+  mcp.registerResource('board-state', 'manyhands://board', {
     title: 'Current Board State',
     description: 'Full snapshot of the scrum board (cards + columns + meta).',
     mimeType: 'application/json',
@@ -461,7 +461,7 @@ function buildMcpServer() {
     return { contents: [{ uri: uri.href, mimeType: 'application/json', text: JSON.stringify(board, null, 2) }] };
   });
 
-  mcp.registerResource('assignee-discipline', 'scrum-board://discipline/assignees', {
+  mcp.registerResource('assignee-discipline', 'manyhands://discipline/assignees', {
     title: 'Assignee Discipline (cross-agent protocol)',
     description: 'The rules for who picks up which cards. Read this on first connect.',
     mimeType: 'text/markdown',
@@ -542,12 +542,12 @@ const channelScheduler = createChannelScheduler({
 //      the ring is empty, no seat is ever the holder, and even in token-ring mode
 //      the engine emits zero deliveries.
 // The registration seam (presence declares its seatId at MCP connect → we bind
-// it here) is designed jointly with Robin and wired in Increment 2, at which
+// it here) is designed jointly across seats and wired in Increment 2, at which
 // point this stops being inert. Until then: built + tested, not activated.
 const seatRegistry = createSeatRegistry();
 const tokenRingEngine = createTokenRingEngine({ registry: seatRegistry, genEnvelopeId: () => randomUUID() });
 
-// #410 — shared lifecycle telemetry (schema v1.1, locked with Robin): one JSON
+// Shared lifecycle telemetry (schema v1.1, locked across seats): one JSON
 // object per line, prefixed `[#410 lifecycle] `. Every envelope-scoped event
 // carries {stage, seatId, leaseId(string), envelopeId, ts(ISO-8601)}; optional
 // {sessionId, sessionKey, postId, outcome, reason, error}. `sessionId` is the
@@ -583,8 +583,8 @@ function tokenRingTimeoutMs() {
 
 // #119 — channel notifier. server.js POSTs each new commons post to
 // /internal/notify; we fan a `notifications/claude/channel` out to every
-// live MCP session, so a `claude --channels server:scrum-board` session
-// receives it as a <channel source="scrum-board"> block. Best-effort: a
+// live MCP session, so a `claude --channels server:manyhands` session
+// receives it as a <channel source="manyhands"> block. Best-effort: a
 // failed send to one session never blocks the others. Returns the live
 // session count (for logging).
 function broadcastChannel(conversation) {

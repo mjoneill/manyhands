@@ -30,7 +30,7 @@
  * accepted, not a bug.
  *
  * Runtime-layer constraints (enforced by the board integration, NOT here):
- *   - A NUDGE event must carry proof of an actual Alex-issued nudge; an
+ *   - A NUDGE event must carry proof of an actual human-issued nudge; an
  *     autonomous agent must not be able to self-label a post NUDGE to bypass ring
  *     serialization.
  *   - Nudging the CURRENT lease holder must not spawn a second concurrent run of

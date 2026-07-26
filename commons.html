@@ -144,7 +144,7 @@
     // The model: not "cards assigned to me" but "someone pushed this as far
     // as they could and now needs me." So a raise is a DIRECTED signal owned by the
     // blocked person: a card-attached post `🚧 <the ask>`. who = its author, what =
-    // the ask, which = the card, when = its time. Alex clears one (✓ unblocked)
+    // the ask, which = the card, when = its time. Clearing one (✓ unblocked)
     // when he's contributed — a `✅` post on the same card supersedes the raise.
     // Also: the label `blocked` is a static blocker — someone put it there
     // because raising a hand wasn't obvious. Both mechanisms feed the same view.
@@ -160,7 +160,7 @@
 
     function renderBlocked(raises) {
       blockedList.innerHTML = '';
-      if (!raises.length) { blockedList.innerHTML = '<div class="blocked-empty">No blockers. Nobody\'s waiting on you right now.</div>'; return; }
+      if (!raises.length) { blockedList.innerHTML = '<div class="blocked-empty">No open asks right now.</div>'; return; }
       for (const r of raises) {
         const isLabel = r.source === 'label';
         const who = isLabel
@@ -172,14 +172,14 @@
         raiser.textContent = (who.glyph ? who.glyph + ' ' : '') + (who.name || r.by);
         const ref = document.createElement('span'); ref.className = 'blocked-ref'; ref.textContent = r.card ? '#' + r.card.shortId : '';
         top.append(raiser, ref);
-        const ask = document.createElement('div'); ask.className = 'blocked-ask'; ask.textContent = r.ask || '(needs your input)'; ask.title = r.source || '';
+        const ask = document.createElement('div'); ask.className = 'blocked-ask'; ask.textContent = r.ask || '(no detail given)'; ask.title = r.source || '';
         const foot = document.createElement('div'); foot.className = 'blocked-foot';
         const openCard = document.createElement('a'); openCard.className = 'blocked-open-card';
         openCard.textContent = (r.card ? r.card.title : 'open card') + ' →';
         openCard.href = r.card ? 'index.html?card=' + r.card.shortId : '#';
         const done = document.createElement('button'); done.className = 'blocked-done'; done.type = 'button';
         done.textContent = '✓ unblocked';
-        done.title = isLabel ? 'Remove the blocked label' : 'You contributed — clear this raised hand';
+        done.title = isLabel ? 'Remove the blocked label' : 'Clear this raised hand';
         done.onclick = async (e) => {
           e.stopPropagation(); done.disabled = true;
           try {
@@ -192,9 +192,20 @@
                   body: JSON.stringify({ labels: newLabels }) });
               }
             } else {
-              // Raise: post a ✅ resolution to the conversation thread
+              // Raise: post a ✅ resolution to the conversation thread.
+              //
+              // Authored as `system`, NOT as a person. This page has no identity
+              // picker, so there is no trustworthy answer to "who clicked this" —
+              // and the previous code answered it anyway, hardcoding a seat name.
+              // That meant the software wrote a fictional person into a real
+              // user's board history every time anyone cleared a raised hand.
+              //
+              // The rule this encodes: if the runtime cannot know who acted, it
+              // records that an action happened, never who did it. An honest
+              // system event beats an invented author, because a board whose
+              // history is partly fabricated is worse than one that admits a gap.
               await fetch('/api/conversations', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ attachedTo: r.cardId, author: 'alex', body: '✅ unblocked' }) });
+                body: JSON.stringify({ attachedTo: r.cardId, author: 'system', body: '✅ unblocked (cleared from the raised-hands panel)' }) });
             }
             refreshBlocked();
           } catch (_) { done.disabled = false; }

@@ -60,7 +60,7 @@ test('#113: oversized upload is rejected (DoS guard)', async () => {
   });
 });
 
-test('#113: executable upload is rejected (Alex: non-executables)', async () => {
+test('#113: executable upload is rejected (non-executables only)', async () => {
   await withServer({}, async (rest) => {
     const res = await post(rest.baseUrl, '/api/attachments', {
       name: 'evil.exe',

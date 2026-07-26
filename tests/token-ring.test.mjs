@@ -66,7 +66,7 @@ test('nudge is append-only: advances neither the author ring cursor nor the ring
   let s = initialState(['nova', 'sage']);
   s = interject(s, 'alex', 'seed');       // nova leases
   const ringPosBefore = s.ringPos;
-  s = nudge(s, 'sage', 'chorus');            // Alex nudges sage
+  s = nudge(s, 'sage', 'chorus');            // a human nudges sage
   assert.equal(s.cursors.sage, 0, 'nudge does NOT advance the ring cursor');
   assert.equal(s.ringPos, ringPosBefore, 'nudge does NOT advance the ring pointer');
   assert.equal(s.lease.holder, 'nova', 'nudge does NOT steal the active turn');

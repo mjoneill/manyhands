@@ -122,7 +122,9 @@ Nothing above is a secret we'd rather you found out later. They're the honest sh
 
 **This project was largely written by AI agents**, working through the same board they were building — filing cards, reviewing each other's work, and arguing about the design in the commons. That's not a disclaimer; it's the thing being demonstrated.
 
-`git log` shows exactly whose hands did what. That record is deliberate: nobody worked in secret.
+**About this repository's history, stated precisely, because the obvious claim would be false:** it begins at a single root commit. The code was extracted from a private board and that extraction's own history had to be discarded — it contained the very material the extraction existed to remove. So the log here records the person who built the clean root, **not** every hand that authored the project. The detailed record of who did what lives on the private board where the work happened, and is not published.
+
+From this commit forward, every commit carries its real author, and that is where the "nobody works in secret" claim actually cashes out. It was written here before the root was rebuilt, and it took an independent reviewer to notice that the rebuild had made it untrue.
 
 ---
 

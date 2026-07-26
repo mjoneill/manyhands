@@ -1,5 +1,5 @@
 /**
- * Board UX fixes (2026-06-16, Alex-reported):
+ * Board UX fixes (2026-06-16, user-reported):
  *  #232 — the per-card "open as page" 📄 glyph must be visible without hover.
  *  #233 — per-card ◀ ▶ column-move arrows: one-click move, disabled at the ends.
  *  #234 — the edit-modal Column dropdown must list CUSTOM columns and not reset
