@@ -135,6 +135,8 @@ npm install     # test deps: jsdom + puppeteer
 npm test
 ```
 
+`npm audit` reports zero vulnerabilities. That required one deliberate `overrides` entry in `package.json`, because the MCP SDK's own dependency range carries an advisory it has no release for yet — see [SECURITY.md](SECURITY.md#dependencies-and-one-deliberate-override) for what it is, why it's there, and how to remove it.
+
 **661 tests in two suites**, and `npm test` runs both:
 
 - `npm run test:server` — **366** tests against a real spawned server on a throwaway port and data file, driving the actual HTTP API. This includes the **served-browser** tests, which drive real pages from the real server.

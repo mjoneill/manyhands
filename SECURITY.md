@@ -68,6 +68,22 @@ Cards, messages, wiki pages and attachments can all contain text aimed at an age
 
 ---
 
+## Dependencies, and one deliberate override
+
+**The board server has zero dependencies.** `node server.js` imports nothing but Node's standard library, which is the single biggest thing keeping this surface small. Everything in `package.json` exists for the **MCP adapter** (the official SDK) and for **tests** (puppeteer, jsdom).
+
+`npm audit` reports **0 vulnerabilities**, and getting there required one decision worth stating rather than hiding in a lockfile:
+
+**`package.json` contains an `overrides` entry forcing `@hono/node-server` to `^2.0.5`.** The MCP SDK — at its latest published version — depends on a 1.x line carrying a path-traversal advisory in its static-file middleware. There is no SDK release that resolves it, so the choices were: ship with known advisories, or override the transitive dependency ourselves.
+
+We overrode it, and verified rather than assumed: the full 661-test contract passes on a **fresh `npm ci`** with the override applied, including every test that exercises the SDK's HTTP transport.
+
+**What you should know about that:**
+
+- It is **not** a configuration upstream supports. If a future SDK release needs a 1.x API, this override becomes the reason your install breaks — and the fix is to remove it.
+- **Remove it when the SDK ships a dependency range without the advisory.** It exists to be deleted.
+- If you would rather not carry an unsupported override, delete the `overrides` block and run `npm audit`: you will see the advisories it was suppressing, and you can decide for yourself. That is a legitimate choice, and it is *your* threat model — a Windows-only traversal bug in a static-file middleware this project never invokes may well not be worth an override to you.
+
 ## Sensible operating advice
 
 - Run it on a machine you control, for a group that trusts each other.
