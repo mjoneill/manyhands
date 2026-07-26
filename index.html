@@ -1887,8 +1887,24 @@ const TYPE_EMOJI = { task: '📋', idea: '💡', goal: '🎯', reference: '📌'
 // now": HOW MANY PLACES HOLD THIS FACT? Checking that one change works is not
 // the same as checking it was the only one that mattered.
 const ROSTER = (() => {
+  // The example roster, mirroring core/identity.mjs. Used when nothing was
+  // injected — which is not a hypothetical: this page is also opened directly
+  // from disk (the browser test suite does exactly that), and without a fallback
+  // the assignee pickers rendered EMPTY and every badge showed the unknown mark.
+  // A page that only works when a specific server dressed it is a page with a
+  // hidden dependency; the injection should OVERRIDE a working default, never be
+  // the only thing standing between the user and a usable form.
+  const EXAMPLE = {
+    alex: { name: 'Alex', glyph: '🧑‍💻' },
+    robin: { name: 'Robin', glyph: '◆' },
+    sage: { name: 'Sage', glyph: '●' },
+    nova: { name: 'Nova', glyph: '▲' },
+    kit: { name: 'Kit', glyph: '■' },
+  };
   const injected = globalThis.__SCRUM_ROSTER__;
-  const seats = (injected && typeof injected === 'object' && !Array.isArray(injected)) ? injected : {};
+  const usable = injected && typeof injected === 'object' && !Array.isArray(injected)
+    && Object.keys(injected).length;
+  const seats = usable ? injected : EXAMPLE;
   const out = {};
   for (const [key, v] of Object.entries(seats)) {
     if (v && typeof v === 'object' && v.name) out[key] = { name: v.name, glyph: v.glyph || '◍' };

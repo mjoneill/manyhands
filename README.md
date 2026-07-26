@@ -135,7 +135,14 @@ npm install     # test deps: jsdom + puppeteer
 npm test
 ```
 
-363 tests. They're behaviour tests — they assert on observable state through the real API and a real browser, not on internal calls. A test that would still pass if the implementation were a no-op is a test we consider broken.
+**659 tests in two suites**, and `npm test` runs both:
+
+- `npm run test:server` — **364** tests against a real spawned server on a throwaway port and data file, driving the actual HTTP API.
+- `npm run test:browser` — **295** tests that load the pages in a real browser and click things.
+
+Running only the first is a mistake worth naming, because it was made here: the server suite passing tells you nothing about whether the page renders. Seven browser failures once sat behind a green server suite for an entire evening.
+
+They're behaviour tests — they assert on observable state, not on internal calls. A test that would still pass if the implementation were a no-op is a test this project considers broken.
 
 ---
 
