@@ -135,12 +135,23 @@ npm install     # test deps: jsdom + puppeteer
 npm test
 ```
 
-**659 tests in two suites**, and `npm test` runs both:
+**661 tests in two suites**, and `npm test` runs both:
 
-- `npm run test:server` — **364** tests against a real spawned server on a throwaway port and data file, driving the actual HTTP API.
-- `npm run test:browser` — **295** tests that load the pages in a real browser and click things.
+- `npm run test:server` — **366** tests against a real spawned server on a throwaway port and data file, driving the actual HTTP API. This includes the **served-browser** tests, which drive real pages from the real server.
+- `npm run test:browser` — **295** tests that load `index.html` directly over `file://`, with no server at all.
 
 Running only the first is a mistake worth naming, because it was made here: the server suite passing tells you nothing about whether the page renders. Seven browser failures once sat behind a green server suite for an entire evening.
+
+**The two browser lanes prove different things, and neither implies the other:**
+
+| Lane | What it loads | Page errors |
+|---|---|---|
+| **Served** | real pages from `node server.js` | **zero tolerated** — the served page is the product |
+| **Direct-file** | `index.html` over `file://` | a **named** set of sandbox CORS failures is expected; anything else fails |
+
+Under `file://`, Chromium refuses cross-origin module imports and `fetch`, so module-backed features genuinely cannot load there. That lane is not a claim that the app works without a server — it guards the narrow core workflow (the page renders from the fallback roster, a card can be created, it survives a reload) so that "renders" never quietly means "renders only when our server dressed it."
+
+The expected `file://` errors are enumerated in `run-tests.js`, each with a reason, and a bare `Failed to load resource` is allowed only up to the number of requests known to have been CORS-blocked. **An unexpected page error fails the run even when every test passes** — because for a while it didn't, and a runner that prints errors while exiting 0 is a runner that has taught you to ignore it.
 
 They're behaviour tests — they assert on observable state, not on internal calls. A test that would still pass if the implementation were a no-op is a test this project considers broken.
 

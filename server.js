@@ -1250,6 +1250,20 @@ function serveStaticFile(req, res) {
     return res.end('Not Found');
   }
 
+  // #488 — every browser asks for /favicon.ico unprompted, and this project ships
+  // none, so every first page load logged a console 404. Found by the served lane
+  // being made intolerant of page errors: the check's first act was to surface a
+  // real blemish on the surface we call the product.
+  //
+  // 204 rather than an allow-list entry in the test, because removing the error
+  // is stronger than agreeing to tolerate it — and it means the served lane keeps
+  // a zero-exception promise. 204 also tells the browser to stop asking. Shipping
+  // an actual icon is a separate, cosmetic choice; this only kills the error.
+  if (urlPath === '/favicon.ico' && !fs.existsSync(path.join(STATIC_DIR, 'favicon.ico'))) {
+    res.writeHead(204);
+    return res.end();
+  }
+
   const requestedPath = path.join(STATIC_DIR, urlPath);
 
   // Resolve symlinks and `..` to a canonical path BEFORE the boundary
