@@ -19,6 +19,15 @@
  * Vacuity guard: the sweep must FIND the known controls (edit, page,
  * move-left, move-right) — a selector drift that finds nothing must fail
  * loudly, not pass an empty list (#499's lesson, the empty-sweep variant).
+ *
+ * ⚠️ GEOMETRY-MEASUREMENT TRAP (Indigo's retraction, 2026-07-27): a HIDDEN
+ * tab freezes the document animation timeline, so a page with a transform
+ * entrance animation (cardAppear: scale .97) reads every box ~3% small,
+ * permanently, and it looks exactly like real data — her live sweep reported
+ * 23×23 for controls that are 24.0. This suite defends both directions: it
+ * runs in headless pages that report visible, AND it awaits animation-idle
+ * before measuring, so neither a frozen nor an in-flight animation can
+ * corrupt the numbers.
  */
 
 import { test } from 'node:test';
@@ -65,8 +74,26 @@ function populatedBoard() {
  * measure each button/a/[data-action] bounding box against 24×24.
  */
 async function sweepCard(page, cardSel) {
-  await page.hover(cardSel);
-  await new Promise((r) => setTimeout(r, 120));
+  // NO hover before measuring. The bar is the size a pointer must ACQUIRE,
+  // and you cannot hover a control you haven't reached — a hover-grown box
+  // is the size of the target after you already hit it.
+  // (Correction on the record, 2026-07-27: a mid-build green flip was first
+  // blamed on hover-enlargement in an earlier draft of this comment. The
+  // actual cause was the GRADER RUNNING AGAINST THE BUILDER'S UNCOMMITTED
+  // WORK-IN-PROGRESS — builder and grader share one checkout, and the fix
+  // had already landed in the working tree. Bar runs are only meaningful
+  // against a pinned commit; a wrong mechanism nearly shipped in this very
+  // comment, same shape as every other unqueried claim today.)
+  // Let entrance/hover animations settle before reading geometry — a box
+  // measured mid-flight is the same corrupt number as one measured frozen.
+  // BOUNDED: an infinite animation (a pulse, a spinner) has a `finished`
+  // promise that never resolves, and awaiting it unbounded hung this very
+  // suite for 300s on first try (watched, 2026-07-27). The race caps the
+  // wait; entrance transforms complete in well under a second.
+  await page.evaluate(() => Promise.race([
+    Promise.allSettled(document.getAnimations().map((a) => a.finished)),
+    new Promise((r) => setTimeout(r, 1200)),
+  ]));
   return page.evaluate(({ cardSel, MIN }) => {
     const card = document.querySelector(cardSel);
     const targets = [...card.querySelectorAll('button, a, [data-action], input, select')]
