@@ -2675,7 +2675,13 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeCardD
   if (!back) return;
   back.addEventListener('click', (e) => {
     // the backdrop itself, or anything carrying the close action
-    if (e.target === back || e.target.closest('[data-action="close-card-detail"]')) {
+    // NOTE the selector: `.card-detail-close`, NOT [data-action="close-card-detail"].
+    // The backdrop carries that action itself, so closest() walking up from any
+    // click inside the panel FOUND THE BACKDROP and closed it — every click on
+    // the title, the body, a citation, dismissed the reader. It also made the
+    // branch below unreachable, which is why Michael's citation click looked
+    // like a navigation bug rather than a dismissal bug.
+    if (e.target === back || e.target.closest('.card-detail-close')) {
       closeCardDetail();
       return;
     }
