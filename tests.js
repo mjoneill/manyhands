@@ -445,7 +445,15 @@ test('#N in description renders as clickable link', () => {
   } finally { _restoreNextShortId(); }
 });
 
-test('clicking #N link scrolls to and highlights that card', () => {
+// #510 SUPERSEDES the scroll-and-highlight contract for #N citations.
+// It asserted that clicking #N scrolled to the card and highlighted it. That
+// delivered a reader to a description clamped inside a ~300px column — the
+// citation arrived somewhere unreadable, which is why the pop-out replaced it.
+// The behaviour change was pre-registered on #510 before the build and ruled on
+// in the room: "opening the readable thing IS the citation working for the
+// first time." Scroll-to survives implicitly — close the overlay and you are
+// where you were. Rewritten to guard the new contract, not deleted.
+test('#510 (supersedes scroll-and-highlight): clicking a #N citation OPENS that card', () => {
   cards.length = 0;
   _resetNextShortId();
   try {
@@ -453,14 +461,15 @@ test('clicking #N link scrolls to and highlights that card', () => {
     const card2 = addCard('Link Card', 'Links to #1', 'task', 'unassigned', []);
     renderBoard();
     const cardEl2 = document.querySelector(`.card[data-id="${card2.id}"]`);
-    const descEl = cardEl2.querySelector('.card-description');
-    const link = descEl.querySelector('a.shortid-link');
-    assert(link !== null, 'link should exist');
+    const link = cardEl2.querySelector('.card-description a.shortid-link');
+    assert(link !== null, 'the citation still renders as a link');
     link.click();
-    const targetEl = document.querySelector(`.card[data-id="${card1.id}"]`);
-    assert(targetEl.classList.contains('highlighted') || document.querySelector('.card.highlighted') !== null,
-      'target card should be highlighted after clicking link');
-    [card1, card2].forEach(c => { const i = cards.findIndex(x => x.id === c.id); if (i > -1) cards.splice(i, 1); });
+    const back = document.getElementById('card-detail-backdrop');
+    assert(back && !back.hidden, 'the citation opens the card detail rather than scrolling to it');
+    const body = document.querySelector('.card-detail-body');
+    assert(body && body.textContent.includes('I am target'),
+      'and it is the CITED card that opened, with its text readable');
+    closeCardDetail(false);
     cards.length = 0;
     renderBoard();
   } finally { _restoreNextShortId(); }
@@ -590,21 +599,25 @@ test('#N in description renders as clickable link', () => {
   renderBoard();
 });
 
-test('clicking #N link scrolls to and highlights that card', () => {
+// #510 SUPERSEDES this duplicate of the scroll-and-highlight contract. Note it
+// existed TWICE, verbatim apart from a try/finally — two copies of one
+// assertion, which is its own small finding: a duplicated test is one test that
+// costs two edits and gives no extra coverage.
+test('#510: a citation opens the cited card, and only the cited one', () => {
   cards.length = 0;
   _resetNextShortId();
   const card1 = addCard('Target Card', 'I am target', 'task', 'unassigned', []);
   const card2 = addCard('Link Card', 'Links to #1', 'task', 'unassigned', []);
   renderBoard();
   const cardEl2 = document.querySelector(`.card[data-id="${card2.id}"]`);
-  const descEl = cardEl2.querySelector('.card-description');
-  const link = descEl.querySelector('a.shortid-link');
-  assert(link !== null, 'link should exist');
+  const link = cardEl2.querySelector('.card-description a.shortid-link');
+  assert(link !== null, 'the citation renders as a link');
   link.click();
-  const targetEl = document.querySelector(`.card[data-id="${card1.id}"]`);
-  assert(targetEl.classList.contains('highlighted') || document.querySelector('.card.highlighted') !== null,
-    'target card should be highlighted after clicking link');
-  // Clean up
+  const back = document.getElementById('card-detail-backdrop');
+  assert(back && !back.hidden, 'clicking the citation opens the detail');
+  const title = document.querySelector('.card-detail-title');
+  assertEqual(title.textContent, 'Target Card', 'the CITED card opened, not the one carrying the citation');
+  closeCardDetail(false);
   [card1, card2].forEach(c => { const i = cards.findIndex(x => x.id === c.id); if (i > -1) cards.splice(i, 1); });
   cards.length = 0;
   renderBoard();
@@ -1928,116 +1941,74 @@ function makeLongDescription(lines) {
   return Array.from({ length: lines }, () => line).join('\n');
 }
 
-test('long description is rendered with collapsed class and show-more toggle', () => {
-  const longDesc = makeLongDescription(10); // well over 4 lines
+// ── #510 SUPERSEDES the six "Collapse Long Descriptions" tests below this line ──
+// They asserted the in-column "Show more" expander: that it rendered, that
+// clicking it expanded, collapsed, toggled aria-expanded, kept per-card state,
+// and reset on re-render. All six described a control this card deletes.
+//
+// The ruling was pre-registered on #510 BEFORE the build ("the pop-out is THE
+// reading path; this card removes .desc-toggle in the same change"), so the
+// decision reached an artifact before it reached the tests — no card owns the
+// original feature, which arrived with the repo's first commit.
+//
+// Rewritten to guard the retirement rather than deleted, so the ribbon cannot
+// quietly return: a description that used to sprout a toggle now stays clamped
+// in the column, and its full text lives in the pop-out at a readable measure.
+
+test('#510 (supersedes the collapse tests): a long description clamps in-column with NO expander', () => {
+  cards.length = 0;
+  const longDesc = makeLongDescription(10);
   const card = addCard('Long Desc', longDesc, 'task', 'unassigned', []);
   renderBoard();
   const cardEl = document.querySelector(`.card[data-id="${card.id}"]`);
   const descEl = cardEl.querySelector('.card-description');
-  assert(descEl !== null, 'description element should exist');
-  assert(descEl.classList.contains('collapsed'), 'long description should have .collapsed class');
-  const toggle = cardEl.querySelector('.desc-toggle');
-  assert(toggle !== null, 'show more/less toggle should exist for long description');
-  assert(toggle.textContent.includes('more'), 'toggle should say "more" when collapsed');
-  // Clean up
-  const idx = cards.findIndex(c => c.id === card.id);
-  if (idx > -1) cards.splice(idx, 1);
-  renderBoard();
+  assert(descEl !== null, 'the description still renders on the card');
+  assert(descEl.classList.contains('collapsed'), 'a long description is still clamped in the column');
+  assert(cardEl.querySelector('.desc-toggle') === null,
+    'the in-column expander must be gone — it turned prose into a 300px ribbon');
+  cards.length = 0; renderBoard();
 });
 
-test('short description is rendered without collapsed class and no toggle', () => {
-  const shortDesc = 'Just a short description.';
-  const card = addCard('Short Desc', shortDesc, 'task', 'unassigned', []);
-  renderBoard();
-  const cardEl = document.querySelector(`.card[data-id="${card.id}"]`);
-  const descEl = cardEl.querySelector('.card-description');
-  assert(descEl !== null, 'description element should exist');
-  assert(!descEl.classList.contains('collapsed'), 'short description should NOT have .collapsed class');
-  const toggle = cardEl.querySelector('.desc-toggle');
-  assert(toggle === null, 'no toggle should exist for short description');
-  // Clean up
-  const idx = cards.findIndex(c => c.id === card.id);
-  if (idx > -1) cards.splice(idx, 1);
-  renderBoard();
-});
-
-test('clicking show-more expands the description and changes toggle text', () => {
+test('#510: the full description is reachable through the pop-out, at a readable measure', () => {
+  cards.length = 0;
   const longDesc = makeLongDescription(10);
-  const card = addCard('Expand Test', longDesc, 'task', 'unassigned', []);
+  const card = addCard('Popout Read', longDesc, 'task', 'unassigned', []);
   renderBoard();
-  const cardEl = document.querySelector(`.card[data-id="${card.id}"]`);
-  const descEl = cardEl.querySelector('.card-description');
-  const toggle = cardEl.querySelector('.desc-toggle');
-  assert(descEl.classList.contains('collapsed'), 'should start collapsed');
-  // Simulate click on "Show more"
-  toggle.click();
-  assert(!descEl.classList.contains('collapsed'), 'description should NOT have .collapsed class after expanding');
-  assert(toggle.textContent.includes('less'), 'toggle should say "less" when expanded');
-  // Clean up
-  const idx = cards.findIndex(c => c.id === card.id);
-  if (idx > -1) cards.splice(idx, 1);
-  renderBoard();
+  const opened = openCardDetail(card.shortId, false);
+  assert(opened, 'openCardDetail must find the card by shortId');
+  const back = document.getElementById('card-detail-backdrop');
+  assert(back && !back.hidden, 'the pop-out is visible — an off-screen or hidden panel is the cheat');
+  const body = document.querySelector('.card-detail-body');
+  assert(body !== null, 'the pop-out carries a body');
+  assert(body.textContent.includes('This is a line of description text'),
+    'the FULL description is present in the pop-out, not a truncation');
+  closeCardDetail(false);
+  assert(back.hidden, 'closeCardDetail hides it again');
+  cards.length = 0; renderBoard();
 });
 
-test('clicking show-less collapses the description back', () => {
-  const longDesc = makeLongDescription(10);
-  const card = addCard('Collapse Back', longDesc, 'task', 'unassigned', []);
+test('#510: every exit is reachable programmatically — Escape, close button, backdrop', () => {
+  cards.length = 0;
+  const card = addCard('Exits', makeLongDescription(6), 'task', 'unassigned', []);
   renderBoard();
-  const cardEl = document.querySelector(`.card[data-id="${card.id}"]`);
-  const descEl = cardEl.querySelector('.card-description');
-  const toggle = cardEl.querySelector('.desc-toggle');
-  // Expand first
-  toggle.click();
-  assert(!descEl.classList.contains('collapsed'), 'should be expanded');
-  // Now collapse
-  toggle.click();
-  assert(descEl.classList.contains('collapsed'), 'description should have .collapsed class after re-collapsing');
-  assert(toggle.textContent.includes('more'), 'toggle should say "more" when collapsed again');
-  // Clean up
-  const idx = cards.findIndex(c => c.id === card.id);
-  if (idx > -1) cards.splice(idx, 1);
-  renderBoard();
-});
+  const back = document.getElementById('card-detail-backdrop');
 
-test('multiple cards have independent collapse/expand state', () => {
-  const longDesc = makeLongDescription(10);
-  const card1 = addCard('Card 1', longDesc, 'task', 'unassigned', []);
-  const card2 = addCard('Card 2', longDesc, 'idea', 'alex', []);
-  renderBoard();
-  const el1 = document.querySelector(`.card[data-id="${card1.id}"]`);
-  const el2 = document.querySelector(`.card[data-id="${card2.id}"]`);
-  const desc1 = el1.querySelector('.card-description');
-  const desc2 = el2.querySelector('.card-description');
-  const toggle1 = el1.querySelector('.desc-toggle');
-  const toggle2 = el2.querySelector('.desc-toggle');
-  // Both start collapsed
-  assert(desc1.classList.contains('collapsed'), 'card1 should start collapsed');
-  assert(desc2.classList.contains('collapsed'), 'card2 should start collapsed');
-  // Expand only card1
-  toggle1.click();
-  assert(!desc1.classList.contains('collapsed'), 'card1 should be expanded');
-  assert(desc2.classList.contains('collapsed'), 'card2 should still be collapsed');
-  // Clean up
-  [card1, card2].forEach(c => { const i = cards.findIndex(x => x.id === c.id); if (i > -1) cards.splice(i, 1); });
-  renderBoard();
-});
+  // 1. the close button carries a data-action a scripted seat can find and click
+  openCardDetail(card.shortId, false);
+  const closeBtn = document.querySelector('.card-detail-close');
+  assert(closeBtn !== null, 'a close control exists');
+  assertEqual(closeBtn.dataset.action, 'close-card-detail', 'it carries a data-action');
+  closeCardDetail(false);
+  assert(back.hidden, 'close button path closes it');
 
-test('collapsed description has aria-expanded=false, expanded has aria-expanded=true', () => {
-  const longDesc = makeLongDescription(10);
-  const card = addCard('Aria Test', longDesc, 'task', 'unassigned', []);
-  renderBoard();
-  const cardEl = document.querySelector(`.card[data-id="${card.id}"]`);
-  const descEl = cardEl.querySelector('.card-description');
-  const toggle = cardEl.querySelector('.desc-toggle');
-  assertEqual(descEl.getAttribute('aria-expanded'), 'false', 'collapsed description should have aria-expanded=false');
-  assertEqual(toggle.getAttribute('aria-controls'), descEl.id, 'toggle should have aria-controls pointing to description id');
-  // Expand
-  toggle.click();
-  assertEqual(descEl.getAttribute('aria-expanded'), 'true', 'expanded description should have aria-expanded=true');
-  // Clean up
-  const idx = cards.findIndex(c => c.id === card.id);
-  if (idx > -1) cards.splice(idx, 1);
-  renderBoard();
+  // 2. Escape — dispatchable by any driver
+  openCardDetail(card.shortId, false);
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  assert(back.hidden, 'Escape closes it — a seat that cannot click can still leave');
+
+  // 3. the backdrop itself carries the same action
+  assertEqual(back.dataset.action, 'close-card-detail', 'the backdrop is an exit too');
+  cards.length = 0; renderBoard();
 });
 
 test('edit mode does not show collapsed description (full textarea)', () => {
@@ -2049,8 +2020,10 @@ test('edit mode does not show collapsed description (full textarea)', () => {
   assert(cardEl.classList.contains('editing'), 'card should be in edit mode');
   const descEl = cardEl.querySelector('.card-description.collapsed');
   assert(descEl === null, 'no collapsed description element in edit mode');
-  const toggle = cardEl.querySelector('.desc-toggle');
-  assert(toggle === null, 'no toggle in edit mode');
+  // #510: the 'no toggle in edit mode' assertion was removed here rather than
+  // kept — with .desc-toggle deleted everywhere it can never fail, and a check
+  // that cannot fail is the vanity shape this room keeps catching. The
+  // retirement is guarded by name in the #510 tests above.
   const textarea = cardEl.querySelector('.edit-desc');
   assert(textarea !== null, 'edit textarea should exist');
   assertEqual(textarea.value, longDesc, 'textarea should contain full description');
@@ -2061,26 +2034,22 @@ test('edit mode does not show collapsed description (full textarea)', () => {
   renderBoard();
 });
 
-test('collapse state resets on re-render (no persistence between renders)', () => {
+test('#510 (supersedes the reset test): a long description stays clamped across re-renders', () => {
+  // Was: expand via the toggle, re-render, assert it collapsed again. The
+  // toggle is gone, so the surviving property is simpler and still worth a
+  // guard — re-rendering must not leave a long description un-clamped in the
+  // column, which is the ribbon this card exists to end.
+  cards.length = 0;
   const longDesc = makeLongDescription(10);
   const card = addCard('Reset Test', longDesc, 'task', 'unassigned', []);
   renderBoard();
+  renderBoard();
   const cardEl = document.querySelector(`.card[data-id="${card.id}"]`);
-  const toggle = cardEl.querySelector('.desc-toggle');
-  // Expand
-  toggle.click();
-  // Re-render simulates page reload state
-  renderBoard();
-  const cardEl2 = document.querySelector(`.card[data-id="${card.id}"]`);
-  const descEl2 = cardEl2.querySelector('.card-description');
-  assert(descEl2.classList.contains('collapsed'), 'after re-render, description should be collapsed again');
-  // Clean up
-  const idx = cards.findIndex(c => c.id === card.id);
-  if (idx > -1) cards.splice(idx, 1);
-  renderBoard();
+  const descEl = cardEl.querySelector('.card-description');
+  assert(descEl.classList.contains('collapsed'), 'still clamped after a re-render');
+  assert(cardEl.querySelector('.desc-toggle') === null, 'and no expander has come back');
+  cards.length = 0; renderBoard();
 });
-
-/* ════════════════════════════════════════════════ TESTS - bug-001: localStorage overwrites JSON on load ════════════════════════════════════════════════ */
 
 test('AC1: on page load, JSON is source of truth and localStorage gets synced FROM JSON', async () => {
   swapToMockLocalStorage();

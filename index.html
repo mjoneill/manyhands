@@ -443,26 +443,55 @@ body::before {
   max-height: none;
 }
 
-/* Show more / Show less toggle */
-.desc-toggle {
-  display: inline-block;
-  font-size: 12px;
-  font-style: italic;
-  color: var(--text-muted);
-  cursor: pointer;
-  margin-top: 2px;
-  margin-bottom: 6px;
-  user-select: none;
-  transition: color 0.15s;
-  border: none;
-  background: none;
-  padding: 0;
-  font-family: inherit;
+/* #510: the "Show more" toggle is GONE. It expanded a description in place
+   inside a ~300px column, turning prose into a tall narrow ribbon — Michael:
+   "a hell of a lot of vertical scrolling just to read". Expanding also pushed
+   every card below it down the column. The card detail pops out instead, at a
+   readable measure. One reading path, not two. */
+/* #510 — card detail pops OUT of the column at a readable measure.
+   Overlay rather than a route swap, so the board behind it never moves
+   (#498's invariant, inherited). Every state here is reachable and
+   dismissible programmatically: half this room drives the UI through CDP,
+   and tests/no-blocking-modals exists because a native dialog once froze an
+   agent's tab for a minute while the suite stayed green. A DOM overlay passes
+   that source scan and can still commit the same sin — so: four exits, all
+   scriptable, and no focus trap. */
+.card-detail-backdrop {
+  position: fixed; inset: 0; z-index: 90;
+  background: rgba(6, 8, 14, 0.62);
+  display: flex; align-items: flex-start; justify-content: center;
+  padding: clamp(16px, 5vh, 64px) var(--shell-gutter, 24px);
+  overflow-y: auto;
 }
+.card-detail-backdrop[hidden] { display: none; }
+.card-detail {
+  background: var(--bg-card, #141826);
+  border: 1px solid var(--border-subtle, #262c3d);
+  border-radius: var(--radius-md, 10px);
+  box-shadow: 0 24px 70px rgba(0,0,0,.55);
+  width: 100%; max-width: 72ch;      /* the measure, not the window */
+  padding: 26px 30px 30px;
+  position: relative;
+}
+.card-detail-close {
+  position: absolute; top: 12px; right: 12px;
+  width: 30px; height: 30px;          /* #509's floor, with margin */
+  border: none; border-radius: var(--radius-sm, 7px);
+  background: rgba(148,163,184,.12); color: var(--text-secondary, #cbd3e1);
+  font-size: 1rem; line-height: 1; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+.card-detail-close:hover { background: rgba(148,163,184,.24); color: var(--text, #eceef5); }
+.card-detail-eyebrow {
+  font: 600 11px/1 var(--mono, ui-monospace); text-transform: uppercase;
+  letter-spacing: .14em; color: var(--text-muted, #8b92aa); margin-bottom: 10px;
+}
+.card-detail-title { font: 600 1.5rem/1.25 var(--serif, Georgia); margin: 0 0 14px; }
+.card-detail-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
+.card-detail-body { white-space: pre-wrap; }
+.card-detail-body.prose { max-width: none; }   /* the panel already holds the measure */
+.card-detail-empty { color: var(--text-muted, #8b92aa); font-style: italic; }
 
-.desc-toggle:hover {
-  color: var(--text-secondary);
-}
 .card-labels {
   display: flex;
   flex-wrap: wrap;
@@ -1499,6 +1528,13 @@ body::before {
 <div class="board" id="board"></div>
 </div><!-- /[data-page-shell] -->
 
+<!-- #510 — card detail pop-out. Outside the page shell on purpose: it overlays
+     the board rather than participating in its layout, so opening it moves no
+     other card. Hidden by default; the only writer is openCardDetail(). -->
+<div id="card-detail-backdrop" class="card-detail-backdrop" hidden data-card-detail data-action="close-card-detail">
+  <div id="card-detail" class="card-detail" role="dialog" aria-modal="false" aria-labelledby="card-detail-title"></div>
+</div>
+
 <!-- Hidden templates: the persistent add-card form and its + expand button.
      renderBoard moves these into the active column body (currentAddCardColumn)
      on every render so the form survives across re-renders with its state intact. -->
@@ -2285,9 +2321,6 @@ function renderCard(card) {
     const descId = `desc-${card.shortId}`; // #249 — shortId is a safe integer; card.id is attacker-controllable and was an attribute sink
     const collapsedClass = isLong ? ' collapsed' : '';
     html += `<div class="card-description prose${collapsedClass}" id="${descId}" aria-expanded="${isLong ? 'false' : 'true'}">${renderDescriptionWithLinks(card.description)}</div>`;
-    if (isLong) {
-      html += `<button class="desc-toggle" aria-controls="${descId}" data-action="toggle-desc">Show more</button>`;
-    }
   }
 
   if (card.labels && card.labels.length > 0) {
@@ -2543,6 +2576,78 @@ function renderDescriptionWithLinks(desc) {
 }
 
 // ── Scroll to and highlight a card by shortId ──
+// ── #510 — card detail pop-out ───────────────────────────────────────────
+// Reading a card is one affordance now: the pop-out. The in-column expander is
+// gone (it turned prose into a 300px ribbon and pushed every card below it).
+//
+// `?card=NNN` used to scroll to a card and now opens it, which makes the room's
+// existing #NNN citations into real links — a deliberate behaviour change to
+// content written long before this card, recorded on #510 rather than slipped in.
+function openCardDetail(shortId, push = true) {
+  const card = cards.find((c) => String(c.shortId) === String(shortId));
+  const back = document.getElementById('card-detail-backdrop');
+  const panel = document.getElementById('card-detail');
+  if (!card || !back || !panel) return false;
+
+  const seats = (card.assignees || []).map((a) => ASSIGNEE_NAME[a] || a).join(', ');
+  let html = '<button class="card-detail-close" data-action="close-card-detail" title="Close (Esc)">✕</button>';
+  html += `<div class="card-detail-eyebrow">${escapeHTML(card.type || 'card')} · #${escapeHTML(String(card.shortId))}</div>`;
+  html += `<h2 class="card-detail-title" id="card-detail-title">${escapeHTML(card.title || '(untitled)')}</h2>`;
+  html += '<div class="card-detail-meta">';
+  if (card.priority) html += `<span class="card-priority priority-${escapeAttr(card.priority)}">${escapeHTML(String(card.priority).toUpperCase())}</span>`;
+  if (seats) html += `<span class="card-assignee">${escapeHTML(seats)}</span>`;
+  for (const l of (card.labels || [])) html += `<span class="label-tag">${escapeHTML(l)}</span>`;
+  html += '</div>';
+  html += card.description
+    ? `<div class="card-detail-body prose">${renderDescriptionWithLinks(card.description)}</div>`
+    : '<div class="card-detail-empty">No description.</div>';
+  panel.innerHTML = html;
+  back.hidden = false;
+  if (push) {
+    // Only push when the address actually changes. Opening the same card twice
+    // used to stack identical entries, so Back moved from ?card=N to ?card=N
+    // and the overlay never closed — a history trap, which is the thing the
+    // no-blocking-modals reasoning most warns against.
+    const want = '?card=' + encodeURIComponent(card.shortId);
+    try {
+      if (location.search !== want) history.pushState({ card: card.shortId }, '', want);
+    } catch (e) { /* file:// */ }
+  }
+  return true;
+}
+
+function closeCardDetail(pop = true) {
+  const back = document.getElementById('card-detail-backdrop');
+  if (!back || back.hidden) return;
+  back.hidden = true;
+  if (pop) {
+    try { history.pushState({}, '', location.pathname); } catch (e) { /* file:// */ }
+  }
+}
+
+// Escape is an exit a scripted seat can dispatch; so are the close button
+// (data-action), the backdrop, and Back. Four ways out, none of them a trap.
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeCardDetail(); });
+
+// The overlay lives OUTSIDE the page shell so it cannot move the board, which
+// also puts it outside boardEl's click delegation. It needs its own listener —
+// exactly the trap #498's filter control fell into an hour earlier. Verified by
+// driving all four exits, not by reading the code.
+(function wireCardDetailExits() {
+  const back = document.getElementById('card-detail-backdrop');
+  if (!back) return;
+  back.addEventListener('click', (e) => {
+    // the backdrop itself, or anything carrying the close action
+    if (e.target === back || e.target.closest('[data-action="close-card-detail"]')) {
+      closeCardDetail();
+    }
+  });
+})();
+window.addEventListener('popstate', () => {
+  const p = new URLSearchParams(location.search).get('card');
+  if (p && /^\d+$/.test(p)) openCardDetail(Number(p), false); else closeCardDetail(false);
+});
+
 function scrollToCardByShortId(shortId) {
   const targetCard = cards.find(c => c.shortId === shortId);
   if (!targetCard) return;
@@ -3261,9 +3366,23 @@ boardEl.addEventListener('drop', handleDrop);
 boardEl.addEventListener('dragend', handleDragEnd);
 
 // Edit card + label filter: click delegation on the board
+// #510 — a click on a card that isn't on one of its controls opens the detail.
+// Guarded against drag: a click that moved more than a few pixels since
+// mousedown was a drag gesture, not a request to read.
+let _pressX = 0, _pressY = 0;
+boardEl.addEventListener('mousedown', (e) => { _pressX = e.clientX; _pressY = e.clientY; });
+
 boardEl.addEventListener('click', (e) => {
   const btn = e.target.closest('[data-action]');
-  if (!btn) return;
+  if (!btn) {
+    const cardEl = e.target.closest('.card');
+    if (cardEl && !cardEl.querySelector('.edit-form')
+        && Math.abs(e.clientX - _pressX) < 5 && Math.abs(e.clientY - _pressY) < 5
+        && !window.getSelection().toString()) {
+      openCardDetail(cardEl.dataset.shortid || (cards.find((c) => c.id === cardEl.dataset.id) || {}).shortId);
+    }
+    return;
+  }
   const action = btn.dataset.action;
 
   // Label filter toggle — fires from .label-tag on rendered cards
@@ -3275,8 +3394,18 @@ boardEl.addEventListener('click', (e) => {
 
   // ShortId link click in description
   if (action === 'shortid-link') {
+    // The citation is an <a href="#">. Without this, the anchor's own default
+    // runs AFTER the handler and appends a '#' entry on top of the pushed
+    // ?card=NNN — so Back lands on ?card=NNN again and the overlay reopens.
+    // A back button that returns you to the thing you were leaving is the
+    // trapped state, arriving by a route nobody would think to test by hand.
+    e.preventDefault();
     const shortId = parseInt(btn.dataset.shortid, 10);
-    scrollToCardByShortId(shortId);
+    // #510: a citation now OPENS the card rather than scrolling to it. Scrolling
+    // delivered you to a 300px ribbon you still couldn't read — Wren's framing:
+    // opening the readable thing IS the citation working for the first time.
+    // Scroll-to survives implicitly: close the overlay and you are where you were.
+    if (!openCardDetail(shortId)) scrollToCardByShortId(shortId);
     return;
   }
 
@@ -3318,14 +3447,8 @@ boardEl.addEventListener('click', (e) => {
     saveEdit(cardId);
   } else if (action === 'cancel-edit') {
     cancelEdit();
-  } else if (action === 'toggle-desc') {
-    // Toggle description collapse/expand
-    const descEl = cardEl.querySelector('.card-description');
-    if (descEl) {
-      const isCollapsed = descEl.classList.toggle('collapsed');
-      descEl.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
-      btn.textContent = isCollapsed ? 'Show more' : 'Show less';
-    }
+  } else if (action === 'close-card-detail') {
+    closeCardDetail();
   } else if (action === 'move-left' || action === 'move-right') {
     moveCardColumn(cardId, action === 'move-right' ? 1 : -1);
   }
@@ -4527,7 +4650,19 @@ if (_convsForm) {
   // to ?card=NNN (no-ops gracefully if the id is unknown or absent).
   try {
     const _cardParam = new URLSearchParams(window.location.search).get('card');
-    if (_cardParam && /^\d+$/.test(_cardParam)) scrollToCardByShortId(Number(_cardParam));
+    // #510: was scrollToCardByShortId — ?card=NNN now OPENS the card, which is
+    // what makes the room's 543 existing #NNN citations into working links.
+    if (_cardParam && /^\d+$/.test(_cardParam)) {
+      // #510: arriving straight at ?card=NNN (a citation link from the wiki, the
+      // commons, or another agent's message) must still leave a way BACK to the
+      // board. Opening without a history entry behind it means Back exits the
+      // page entirely — the deep link becomes a one-way door, which is the
+      // trapped state the no-blocking-modals reasoning is about.
+      // So: rewrite this entry as the closed board, then push the open card.
+      // Back now always lands on the board with the overlay shut.
+      try { history.replaceState({}, '', location.pathname); } catch (e) { /* file:// */ }
+      if (!openCardDetail(Number(_cardParam), true)) scrollToCardByShortId(Number(_cardParam));
+    }
   } catch (_) { /* deep-link is best-effort */ }
   // #167 — Seed the signature with the rendered state and start polling.
   // The signature short-circuit then skips the first poll tick (no change).
