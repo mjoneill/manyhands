@@ -61,6 +61,38 @@ test('#465 a record larger than the ceiling gets its own part and is flagged, ne
     'the oversized record was truncated — losing the tail of a long card is the loss nobody notices');
 });
 
+test('#465 the index states the variance spec AND the outcome, so "fine" is checkable', async () => {
+  const board = makeBoardFixture({
+    conversations: Array.from({ length: 60 }, (_, i) => ({
+      id: `m${i}`, body: `Message ${i} `.repeat(40), author: 'sage', attachedTo: null,
+      createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString(),
+    })),
+  });
+  const server = await startRestServer({ board, staticDir: PROJECT_DIR });
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'export-tol-'));
+  try {
+    execFileSync('node', [EXPORTER, '--out', outDir, '--base', server.baseUrl,
+      '--spaces', 'commons', '--max-bytes', '60000', '--tolerance', '5'], { encoding: 'utf8' });
+    const index = fs.readFileSync(path.join(outDir, '00-INDEX.md'), 'utf8');
+
+    assert.match(index, /target \*\*0\.06 MB ±5%\*\*/, 'the index must state the target and its tolerance');
+    assert.match(index, /ceiling 0\.06 MB/, 'the index must state the derived ceiling');
+    assert.match(index, /largest written/, 'the index must state what it actually produced');
+    assert.match(index, /all within tolerance/, 'a normal run must say so, not leave the reader to compare numbers');
+    assert.match(index, /--tolerance 5/, 'the reproduce command must carry the variance spec');
+
+    // and the claim is true of the bytes on disk
+    const ceiling = Math.round(60000 * 1.05);
+    for (const f of fs.readdirSync(outDir).filter((n) => n.startsWith('part-'))) {
+      const bytes = fs.statSync(path.join(outDir, f)).size;
+      assert.ok(bytes <= ceiling, `${f} is ${bytes} bytes, past the ${ceiling} ceiling the index claims`);
+    }
+  } finally {
+    fs.rmSync(outDir, { recursive: true, force: true });
+    await server.stop();
+  }
+});
+
 test('#465 sections do not share a part', () => {
   const parts = packRecords([
     { section: 'COMMONS', text: 'a' },

@@ -26,7 +26,8 @@
  *   node export-board.mjs                          # everything → ./board-export-<date>/
  *   node export-board.mjs --out ~/Downloads/x      # somewhere specific
  *   node export-board.mjs --spaces commons         # just the room
- *   node export-board.mjs --max-bytes 1500000      # part size ceiling
+ *   node export-board.mjs --max-bytes 1500000      # part size target
+ *   node export-board.mjs --tolerance 0            # make the target a hard ceiling
  *   node export-board.mjs --base http://host:port  # another instance
  *
  * Exit: 0 wrote the export · 1 refused (a count disagreed, or nothing to write)
@@ -34,9 +35,23 @@
 
 const DEFAULTS = {
   base: process.env.SCRUM_API_BASE || 'http://localhost:3141',
-  // 1.5 MB: the ceiling that made the 2026-07-22 export usable. Parts are
-  // packed UNDER it at record boundaries, so a part is never a torn message.
+  // 1.5 MB: the size that made the 2026-07-22 export usable. Parts are packed
+  // UNDER it at record boundaries, so a part is never a torn message.
   maxBytes: 1_500_000,
+  // ── Acceptable variance, not a hard limit ────────────────────────────────
+  // Michael's framing, 2026-07-27, and it is the right one: "goal: <1.5MB per
+  // segment with a tolerance of 5% or something."
+  //
+  // A target alone leaves "a little over is fine" to whoever is reading the
+  // output — which means the tool cannot tell an ordinary rounding overshoot
+  // from a genuine problem, and neither can the reader. A hard limit is worse:
+  // it refuses a finished archive over a few hundred bytes. Stating the
+  // tolerance makes "fine" checkable, and makes the one case that ISN'T fine
+  // (a single record too big to pack) visible as the exception it is.
+  //
+  // Some callers will want a real ceiling — an upload limit, an email
+  // attachment cap. `--tolerance 0` gives them one without a second concept.
+  tolerancePct: 5,
   spaces: ['commons', 'cards'],
   format: 'md',
 };
@@ -59,6 +74,7 @@ function parseArgs(argv) {
     if (flag === '--out') a.out = argv[++i];
     else if (flag === '--base') a.base = String(argv[++i]).replace(/\/+$/, '');
     else if (flag === '--max-bytes') a.maxBytes = Number(argv[++i]);
+    else if (flag === '--tolerance') a.tolerancePct = Number(argv[++i]);
     else if (flag === '--format') a.format = String(argv[++i]).toLowerCase();
     else if (flag === '--spaces') {
       a.spaces = String(argv[++i]).split(',').map((s) => {
@@ -67,7 +83,14 @@ function parseArgs(argv) {
       }).filter((s, idx, arr) => arr.indexOf(s) === idx);
     } else if (flag === '--help' || flag === '-h') {
       console.log(`usage: node export-board.mjs [--out DIR] [--spaces commons,cards] [--format md]
-                            [--max-bytes N] [--base URL]`);
+                            [--max-bytes N] [--tolerance PCT] [--base URL]
+
+  --max-bytes  part size TARGET in bytes (default 1500000)
+  --tolerance  acceptable variance above the target, percent (default 5).
+               Parts are packed to the target; the header lands on top, so a
+               small overshoot is normal. Beyond tolerance means one record is
+               larger than a whole part — reported, never truncated.
+               --tolerance 0 turns the target into a hard ceiling.`);
       process.exit(0);
     } else die(`unrecognised argument: ${flag}`);
   }
@@ -78,6 +101,10 @@ function parseArgs(argv) {
   if (bad.length) die(`unknown space(s): ${bad.join(', ')} — known: ${KNOWN_SPACES.join(', ')}, wiki (⇒ cards)`);
   if (!a.spaces.length) die('no spaces selected');
   if (!Number.isFinite(a.maxBytes) || a.maxBytes < 50_000) die('--max-bytes must be a number ≥ 50000');
+  if (!Number.isFinite(a.tolerancePct) || a.tolerancePct < 0 || a.tolerancePct > 100) {
+    die('--tolerance must be a percentage between 0 and 100');
+  }
+  a.ceiling = Math.round(a.maxBytes * (1 + a.tolerancePct / 100));
   return a;
 }
 
@@ -242,17 +269,21 @@ async function main() {
   // on disk. A record genuinely bigger than the ceiling gets its own part and is
   // reported as oversized — that's disclosed, not silent — but everything else
   // must come in under, or the claim doesn't get made.
-  // Part size is a TARGET, not a contract — Michael's call, 2026-07-27:
-  // "a little over 1.5mb per segment is fine… in some cases that is a hard
-  // limit. I suspect right now it's a-ok if something comes out 1.55 or 1.6MB."
-  // So an overshoot is reported, never fatal. Refusing to write a finished
-  // archive over a few hundred bytes would be a gate the user never asked for.
-  // What we DON'T do is claim a ceiling we didn't hold: the index reports the
-  // largest part it actually wrote.
-  const over = written.filter((w) => w.bytes > args.maxBytes);
-  if (over.length) {
-    console.log(`  note: ${over.length} part(s) over the ${(args.maxBytes / 1e6).toFixed(2)} MB target `
-      + `(largest ${(Math.max(...over.map((w) => w.bytes)) / 1e6).toFixed(2)} MB) — target, not a limit.`);
+  // Three outcomes, and the middle one is the point of having a tolerance:
+  //   under target      — nothing to say
+  //   within tolerance  — normal; packing aims at the target and the header
+  //                       lands on top, so small overshoot is expected
+  //   beyond tolerance  — only happens when a SINGLE record won't fit, which
+  //                       is a real thing to know about, not rounding
+  const overTarget = written.filter((w) => w.bytes > args.maxBytes);
+  const beyond = written.filter((w) => w.bytes > args.ceiling);
+  if (beyond.length) {
+    console.log(`  ⚠️  ${beyond.length} part(s) beyond the ${args.tolerancePct}% tolerance `
+      + `(ceiling ${(args.ceiling / 1e6).toFixed(2)} MB): `
+      + beyond.map((w) => `${w.name} ${(w.bytes / 1e6).toFixed(2)} MB`).join(', '));
+    console.log('      This means a single record is larger than a part — the index names it.');
+  } else if (overTarget.length) {
+    console.log(`  note: ${overTarget.length} part(s) over target but within ${args.tolerancePct}% tolerance.`);
   }
 
   const wroteRecords = written.reduce((n, w) => n + w.records, 0);
@@ -275,7 +306,9 @@ async function main() {
     `- **Cards / wiki nodes:** ${args.spaces.includes('cards') ? allCards.length : 0}`,
     `- **Card-attached comments:** ${homedCount}`,
     `- **Total messages on the board:** ${allMessages.length} _(commons + card-attached; all accounted for)_`,
-    `- **Parts:** ${parts.length} · target ${(args.maxBytes / 1e6).toFixed(2)} MB, largest actually written **${(Math.max(...written.map((w) => w.bytes)) / 1e6).toFixed(2)} MB** — split at message/card boundaries, never mid-record`,
+    `- **Parts:** ${parts.length} · target **${(args.maxBytes / 1e6).toFixed(2)} MB ±${args.tolerancePct}%** `
+      + `(ceiling ${(args.ceiling / 1e6).toFixed(2)} MB) · largest written **${(Math.max(...written.map((w) => w.bytes)) / 1e6).toFixed(2)} MB** `
+      + `— ${beyond.length ? `⚠️ ${beyond.length} beyond tolerance` : 'all within tolerance'}. Split at message/card boundaries, never mid-record.`,
     '',
     '> This board uses a unified model — the **wiki is the card bodies** (same nodes, different view).',
     '> Cards below carry their full text, metadata, and any thread homed on them.',
@@ -288,7 +321,7 @@ async function main() {
     '### Reproduce',
     '',
     '```',
-    `node export-board.mjs --out <dir> --spaces ${args.spaces.join(',')} --format ${args.format} --max-bytes ${args.maxBytes} --base ${args.base}`,
+    `node export-board.mjs --out <dir> --spaces ${args.spaces.join(',')} --format ${args.format} --max-bytes ${args.maxBytes} --tolerance ${args.tolerancePct} --base ${args.base}`,
     '```',
     '',
   ].join('\n');
