@@ -199,10 +199,19 @@ test('#510 exits: Escape, close control, backdrop, and browser Back all close it
 
 // ---------------------------------------------------------------------------
 // Pair tooth (#509+#510, pre-registered on both cards): the condemned control
-// is DELETED, verified by command, not assumed.
-// Command of record: rg 'desc-toggle' index.html core/ tests/ tests.js → 0
+// is DELETED from SHIPPED CODE, verified by command, not assumed.
+// Command of record: rg 'desc-toggle' index.html core/ → 0
+//
+// NARROWED from the original all-files zero-count (builder's catch, ruling
+// (a), 2026-07-27): a test that asserts a thing's ABSENCE has to name the
+// thing, so the original scope forbade the only guards that would catch the
+// ribbon coming back — passing it would have meant deleting the regression
+// protection to prove the deletion. Same shape as the #496 max-width
+// refinement: a mechanical zero-count satisfied by making the product worse
+// gets narrowed, with the reason in place. Tests may name desc-toggle in
+// absence assertions; shipped code may not carry it at all.
 // ---------------------------------------------------------------------------
-test('#510 pair tooth: rg desc-toggle returns zero — the condemned control is gone, not renamed', () => {
+test('#510 pair tooth: rg desc-toggle returns zero in shipped code — gone, not renamed', () => {
   const offenders = [];
   const scan = (file) => {
     const lines = fs.readFileSync(file, 'utf8').split('\n');
@@ -211,13 +220,10 @@ test('#510 pair tooth: rg desc-toggle returns zero — the condemned control is 
     });
   };
   scan(path.join(PROJECT_DIR, 'index.html'));
-  scan(path.join(PROJECT_DIR, 'tests.js'));
-  for (const dir of ['core', 'tests']) {
-    for (const f of fs.readdirSync(path.join(PROJECT_DIR, dir))) {
-      const full = path.join(PROJECT_DIR, dir, f);
-      if (fs.statSync(full).isFile() && full !== path.join(PROJECT_DIR, 'tests', 'card-detail-popout.test.mjs')) scan(full);
-    }
+  for (const f of fs.readdirSync(path.join(PROJECT_DIR, 'core'))) {
+    const full = path.join(PROJECT_DIR, 'core', f);
+    if (fs.statSync(full).isFile()) scan(full);
   }
   assert.deepEqual(offenders, [],
-    `desc-toggle survives (rg 'desc-toggle' should be empty outside this test):\n${offenders.join('\n')}`);
+    `desc-toggle survives in shipped code (rg 'desc-toggle' index.html core/ should be empty):\n${offenders.join('\n')}`);
 });
