@@ -95,17 +95,12 @@
   .conv-head h3 { flex:1; }
   .conv-promote { color:var(--link); text-decoration:none; font-size:12px; white-space:nowrap; }
   .conv-promote:hover { text-decoration:underline; }
-  /* #226 — slide-in commons panel (quick-peek at the global room, parity with the board) */
-  .cv-toggle { position:fixed; bottom:20px; right:20px; z-index:40; background:var(--accent); color:#fff; border:none; border-radius:24px; padding:11px 18px; font:inherit; cursor:pointer; box-shadow:0 4px 16px rgba(0,0,0,.4); }
-  .cv-toggle:hover { filter:brightness(1.1); }
-  .cv-panel { position:fixed; top:0; right:0; width:380px; max-width:92vw; height:100vh; background:var(--panel); border-left:1px solid var(--line); box-shadow:-8px 0 30px rgba(0,0,0,.4); transform:translateX(100%); transition:transform .18s ease; z-index:50; display:flex; flex-direction:column; padding:16px 16px 18px; }
-  .cv-panel.visible { transform:translateX(0); }
-  .cv-panel-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }
-  .cv-panel-title { font-weight:600; }
-  .cv-panel-actions a, .cv-panel-actions button { color:var(--muted); text-decoration:none; background:none; border:none; cursor:pointer; font:inherit; padding:2px 6px; }
-  .cv-panel-actions a:hover, .cv-panel-actions button:hover { color:var(--ink); }
-  .cv-panel #cv-mount { flex:1; min-height:0; display:flex; }
-  .cv-panel .cv-root { width:100%; }
+  /* #226/#497 — the slide-in commons panel and its entrance are now the shared
+     .commons-* shell in core/theme.css, mounted by core/commons-panel.mjs.
+     What was here: a floating bubble bottom-right — the exact placement #497's
+     options table rejected ("reads as a customer-support widget — wrong
+     connotation for a room of peers; covers board content") — plus a fourth
+     private copy of the panel chrome. Both gone. */
   /* #229 — nav filter + sort + collapsible tree; #231 — show-done toggle */
   .nav-controls { display:flex; flex-direction:column; gap:6px; margin-bottom:10px; }
   .nav-controls-row { display:flex; gap:8px; align-items:center; }
@@ -163,18 +158,12 @@
   </div><!-- /.wiki-cols -->
  </div><!-- /[data-page-shell] -->
 
-  <button id="cv-toggle" class="cv-toggle" title="Open the commons">💬 Commons</button>
-  <aside id="cv-panel" class="cv-panel" aria-hidden="true">
-    <div class="cv-panel-header">
-      <span class="cv-panel-title">💬 Commons</span>
-      <span class="cv-panel-actions"><a href="/commons.html" title="Open as full page">⤢ Full page</a><button id="cv-close" title="Close">✕</button></span>
-    </div>
-    <div id="cv-mount"></div>
-  </aside>
+<!-- #497: the commons entrance and panel are mounted by core/commons-panel.mjs. -->
 
   <script type="module">
     import { renderMarkdown } from './core/render.mjs';
     import { mountConversationView } from './core/conversation-view.mjs';
+    import { mountCommonsPanel } from './core/commons-panel.mjs';
     import { matchesNodeQuery, nodeComparator, filterTree, sortTree } from './core/nav.mjs';
     import { mountTopNav } from './core/header.mjs';
     mountTopNav(document, 'wiki'); // #303-2 shared nav
@@ -352,21 +341,18 @@
       mountConversationView({ mount, attachedTo: nodeId, placeholder: 'Add to the discussion on this page…' });
     }
 
-    // #226 — slide-in commons panel: a quick peek at the global room from any
-    // page, parity with the board's panel. The poll keeps it live while open;
-    // closing tears it down (stops the poll).
+    // #226/#497 — a quick peek at the global room from any page, through the
+    // shared entrance. The poll keeps it live while open; closing tears it
+    // down. The panel shows the ROOM; a wiki page's own thread is mounted
+    // inline further down — never the same content twice on one screen.
     let _panelView = null;
-    function openCommonsPanel() {
-      document.getElementById('cv-panel').classList.add('visible');
-      if (!_panelView) _panelView = mountConversationView({ mount: document.getElementById('cv-mount'), poll: true });
-    }
-    function closeCommonsPanel() {
-      document.getElementById('cv-panel').classList.remove('visible');
-      if (_panelView) { _panelView.destroy(); _panelView = null; }
-    }
-    document.getElementById('cv-toggle').onclick = () =>
-      document.getElementById('cv-panel').classList.contains('visible') ? closeCommonsPanel() : openCommonsPanel();
-    document.getElementById('cv-close').onclick = closeCommonsPanel;
+    mountCommonsPanel(document, {
+      activeId: 'wiki',
+      onOpen: (mount) => {
+        if (!_panelView) _panelView = mountConversationView({ mount, poll: true });
+      },
+      onClose: () => { if (_panelView) { _panelView.destroy(); _panelView = null; } },
+    });
 
     function wireWikilinks(root) {
       root.querySelectorAll('a.wikilink').forEach((a) => {

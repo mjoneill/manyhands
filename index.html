@@ -618,64 +618,18 @@ body::before {
 }
 
 /* ── Filter Strip ── */
-/* ── Conversations panel (#93) ── */
-.btn-toggle-convs {
-  margin-left: 12px;
-  padding: 6px 12px;
-  border-radius: 6px;
-  border: 1px solid rgba(148, 163, 184, 0.3);
-  background: rgba(59, 130, 246, 0.1);
-  color: var(--text-primary, #e2e8f0);
-  font-size: 0.85rem;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-.btn-toggle-convs:hover { background: rgba(59, 130, 246, 0.2); }
-.btn-toggle-convs.active { background: rgba(59, 130, 246, 0.3); }
+/* ── Conversations panel (#93) ──
+   #497: the panel's SHELL (position, width, overlay, header row, close and
+   full-page controls) and its entrance now live in core/theme.css under
+   .commons-* , shared with the wiki and settings. What stays here is the
+   board's own panel BODY — the mature feed and composer (#208/#210 pagination,
+   #113 attachment upload) that core/conversation-view.mjs deliberately does
+   not replace yet. One entrance, one shell, two bodies; the residual is on
+   the card, not hidden.
 
-.convs-panel {
-  position: fixed;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: 420px;
-  max-width: 90vw;
-  background: rgba(15, 23, 42, 0.97);
-  border-left: 1px solid rgba(148, 163, 184, 0.2);
-  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.3);
-  display: none;
-  flex-direction: column;
-  z-index: 9000;
-}
-.convs-panel.visible {
-  display: flex;
-}
-
-.convs-panel-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 12px 16px;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.15);
-}
-.convs-panel-title {
-  font-weight: 600;
-  font-size: 0.95rem;
-}
-.convs-close {
-  background: transparent;
-  border: none;
-  color: var(--text-muted, #94a3b8);
-  font-size: 1.1rem;
-  cursor: pointer;
-  padding: 4px 8px;
-  border-radius: 4px;
-}
-.convs-close:hover { background: rgba(148, 163, 184, 0.1); color: var(--text-primary, #e2e8f0); }
-/* #226 — promote the commons panel to the full-page Commons view */
-.convs-panel-actions { display: flex; align-items: center; gap: 4px; }
-.convs-promote { color: var(--text-muted, #94a3b8); text-decoration: none; font-size: 0.8rem; padding: 4px 8px; border-radius: 4px; white-space: nowrap; }
-.convs-promote:hover { background: rgba(148, 163, 184, 0.1); color: var(--text-primary, #e2e8f0); }
+   Gone from here on purpose: .btn-toggle-convs (a header button labelled
+   "Conversations" that opened a panel titled "Commons" — the card's problem 1)
+   and the .convs-panel shell rules that duplicated the wiki's. */
 
 .convs-feed {
   flex: 1;
@@ -1501,8 +1455,12 @@ body::before {
        nowhere else. It is now the shared product mark in the shell head, on all
        four surfaces — so this row carries only the board's own controls. -->
   <div class="board-header-actions">
-    <!-- board-specific: toggles the inline commons panel (distinct from the Commons *page* link in the shared nav) -->
-    <button id="btn-toggle-convs" class="btn-toggle-convs" title="Open the conversations commons">💬 Conversations</button>
+    <!-- #497: the commons toggle used to live here, labelled "Conversations",
+         in the row where board controls live — so the one control that opened
+         a panel sat next to the controls that filter a board, and was named
+         differently from the thing it opened. It is now the shared utility
+         control in the shell head, in the same pixel region on every surface.
+         This row carries only the board's own controls again. -->
     <!-- #498: filtering's entry point. Before this, the ONLY way to add a filter
          was clicking a chip on a card, and the filter strip stayed hidden until
          one existed — so the only way to discover the board filtered at all was
@@ -1515,13 +1473,15 @@ body::before {
   </div>
 </div>
 
-<!-- Conversations panel (#93) — board-level commons, hidden by default -->
-<div id="convs-panel" class="convs-panel" aria-hidden="true">
-  <div class="convs-panel-header">
-    <span class="convs-panel-title">💬 Commons</span>
-    <span class="convs-panel-actions">
-      <a href="/commons.html" class="convs-promote" title="Open the commons as a full page">⤢ Full page</a>
-      <button id="btn-close-convs" class="convs-close" title="Close" aria-label="Close conversations panel">✕</button>
+<!-- Commons panel (#93) — the room, seen from the board. #497: the shell is the
+     shared .commons-* one (core/theme.css), driven by core/commons-panel.mjs;
+     the feed and composer below are the board's own mature body. -->
+<aside id="convs-panel" class="commons-panel" data-commons-panel aria-label="Commons" aria-hidden="true">
+  <div class="commons-panel-head">
+    <span class="commons-panel-title" data-commons-panel-title>💬 Commons</span>
+    <span class="commons-panel-actions">
+      <a href="/commons.html" class="commons-promote" title="Open the Commons as a full page">⤢ Full page</a>
+      <button type="button" id="btn-close-convs" class="commons-panel-close" data-commons-close aria-label="Close the Commons panel">✕</button>
     </span>
   </div>
   <div id="convs-feed" class="convs-feed" aria-live="polite"></div>
@@ -1536,7 +1496,7 @@ body::before {
       <button id="btn-post-conv" type="submit" class="btn-post-conv">Post</button>
     </div>
   </form>
-</div>
+</aside>
 
 <!-- Top-of-board search (#53): free-text + field:value, e.g. "label:infra supervise" -->
 <div class="board-search-area">
@@ -1637,6 +1597,7 @@ body::before {
 <script type="module">
   import { renderChatMarkdown } from './core/render.mjs';
   import { mountTopNav } from './core/header.mjs';
+  import { mountCommonsPanel } from './core/commons-panel.mjs';
   import { identityOf } from './core/identity.mjs';
   window.renderChatMarkdown = renderChatMarkdown;
   window.identityOf = identityOf; // #333 — assignee chips glow their identity light
@@ -1645,6 +1606,18 @@ body::before {
   // module runs — so the first paint's assignee chips miss their identity light.
   // Re-render now that identityOf is available (idempotent; rebuilds from state).
   if (typeof window.renderBoard === 'function') window.renderBoard();
+
+  // #497 — the entrance, its open/closed state and the unread badge belong to
+  // the shared module; the board keeps what is genuinely its own (loading the
+  // feed, polling it while open). Mounted HERE, in the module block, because
+  // the classic script below runs at parse time and cannot import — the same
+  // reason renderChatMarkdown and identityOf are bridged through window above.
+  window._commonsPanel = mountCommonsPanel(document, {
+    activeId: 'board',
+    panel: document.getElementById('convs-panel'),
+    onOpen: () => window.openConvsPanelBody(),
+    onClose: () => window.closeConvsPanelBody(),
+  });
 </script>
 
 <script>
@@ -4528,35 +4501,19 @@ async function postConversation(body, author, attachments) {
   }
 }
 
-function toggleConvsPanel() {
-  const panel = document.getElementById('convs-panel');
-  if (!panel) return;
-  const willOpen = !panel.classList.contains('visible');
-  panel.classList.toggle('visible');
-  const btn = document.getElementById('btn-toggle-convs');
-  if (btn) btn.classList.toggle('active', willOpen);
-  if (willOpen) {
-    loadConversations();
-    startConvsPolling();
-  } else {
-    stopConvsPolling();
-  }
-}
+// (toggleConvsPanel / closeConvsPanel lived here. #497 moved open/close into
+//  core/commons-panel.mjs, mounted from the module block at the top of the
+//  file; nothing in this script called them, so they are gone rather than
+//  kept as wrappers around a variable this scope can no longer see.)
 
-function closeConvsPanel() {
-  const panel = document.getElementById('convs-panel');
-  if (panel) panel.classList.remove('visible');
-  const btn = document.getElementById('btn-toggle-convs');
-  if (btn) btn.classList.remove('active');
-  stopConvsPolling();
-}
-
-// Wire events
-const _convsToggleBtn = document.getElementById('btn-toggle-convs');
-if (_convsToggleBtn) _convsToggleBtn.addEventListener('click', toggleConvsPanel);
-
-const _convsCloseBtn = document.getElementById('btn-close-convs');
-if (_convsCloseBtn) _convsCloseBtn.addEventListener('click', closeConvsPanel);
+// #497 — the board's HALF of opening the panel: load the feed, poll it while
+// it's up. The module owns the control, the state and the badge; this owns the
+// content. Named functions rather than inline closures in the module block so
+// the direct-file test lane can still exercise the poll contract (#112) — that
+// lane has no modules at all (file:// blocks them), so a test that could only
+// reach this through the module's click handler would be untestable there.
+function openConvsPanelBody() { loadConversations(); startConvsPolling(); }
+function closeConvsPanelBody() { stopConvsPolling(); }
 
 // #113 — attachments uploaded and awaiting send with the next post.
 let _pendingAttachments = [];

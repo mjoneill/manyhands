@@ -108,6 +108,148 @@ body {
 [data-product-mark]:hover { color: var(--link); }
 
 /* ---------------------------------------------------------------------------
+   #497 — the commons entrance and panel shell. One control, one shell, in the
+   same pixel region on every surface that has it (board · wiki · settings;
+   never the Commons page, which IS the room).
+
+   The utility cluster is the third bracket of the shell head that #496's card
+   specified and never built: [ product mark ] [ destinations ] [ utility ].
+   It sits past a divider precisely so it cannot be read as a destination —
+   the divider is doing semantic work, not decoration.
+   --------------------------------------------------------------------------- */
+.commons-utility {
+  flex: 0 0 auto;
+  margin-left: 4px;
+  padding-left: 14px;
+  border-left: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+}
+
+.commons-toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* #509's floor: 26px keeps this above the 24×24 target minimum with the
+     surrounding gutter, without letting a utility control shout. */
+  width: 34px;
+  height: 30px;
+  /* A shared control cannot inherit a page's element defaults. settings.html
+     styles bare `button` with margin-top:22px (a form-submit convention), which
+     pushed this 22px down on that surface alone — the entrance landed in a
+     different pixel region than on the board and wiki, which is exactly the
+     drift rubric item 1 forbids. The class beats the element selector on
+     specificity regardless of link order, so stating the box here is the fix,
+     not a workaround. The bare selector itself is filed as its own card: it
+     will do this to the next shared component too. */
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r);
+  color: var(--muted);
+  cursor: pointer;
+  transition: color .12s, background .12s, border-color .12s;
+}
+.commons-toggle:hover { color: var(--ink); background: var(--panel-2); }
+.commons-toggle:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+/* Pressed state — the panel is open and this is what opened it. */
+.commons-toggle[aria-expanded="true"] {
+  color: var(--ink);
+  background: var(--panel-2);
+  border-color: var(--line);
+}
+.commons-glyph { display: block; }
+
+/* The badge earns the control its permanent real estate: it is doing work
+   even unclicked. Sits on the corner, never resizes the button. */
+.commons-unread {
+  position: absolute;
+  top: -3px;
+  right: -4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--ember);
+  color: #221202;
+  font: 600 10px/16px var(--sans);
+  text-align: center;
+  box-shadow: 0 0 0 2px var(--bg);
+}
+.commons-unread[hidden] { display: none; }
+
+/* ── the panel ───────────────────────────────────────────────────────────
+   Fixed, so it OVERLAYS. The card's problem 3 was a panel that displaced the
+   board until the backlog column slid off the left edge with no way to scroll
+   back. Overlay is also what makes "available on every surface" cheap: there
+   is no per-page layout accommodation to get wrong, which is how four
+   different headers happened in the first place. */
+.commons-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 420px;
+  max-width: 92vw;
+  z-index: 9000;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-left: 1px solid var(--line);
+  box-shadow: -8px 0 30px rgba(0, 0, 0, .45);
+  transform: translateX(100%);
+  visibility: hidden;
+  transition: transform .18s ease, visibility 0s linear .18s;
+}
+.commons-panel.visible {
+  transform: translateX(0);
+  visibility: visible;
+  transition: transform .18s ease, visibility 0s;
+}
+@media (prefers-reduced-motion: reduce) {
+  .commons-panel, .commons-panel.visible { transition: none; }
+}
+
+.commons-panel-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 13px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.commons-panel-title { font-weight: 600; }
+.commons-panel-actions { display: flex; align-items: center; gap: 4px; }
+.commons-promote,
+.commons-panel-close {
+  color: var(--muted);
+  background: none;
+  border: none;
+  text-decoration: none;
+  font: inherit;
+  font-size: 0.8125rem;
+  padding: 5px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.commons-promote:hover,
+.commons-panel-close:hover { background: var(--panel-2); color: var(--ink); }
+.commons-promote:focus-visible,
+.commons-panel-close:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
+
+.commons-panel-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: auto;
+}
+.commons-panel-body > .cv-root { width: 100%; }
+
+/* ---------------------------------------------------------------------------
    #496 — running text. Applied to the wiki article body, commons message
    bodies and card descriptions; NEVER to tables, code blocks, or the board,
    which genuinely want the full width. The wiki already had this measure as a

@@ -68,7 +68,16 @@
 <link rel="stylesheet" href="./core/header.css">
 <script type="module">
   import { mountTopNav } from './core/header.mjs';
+  import { mountCommonsPanel } from './core/commons-panel.mjs';
+  import { mountConversationView } from './core/conversation-view.mjs';
   mountTopNav(document, 'settings'); // #303-2 shared nav
+  // #497 — settings had no way into the room at all. Same control, same place.
+  let _panelView = null;
+  mountCommonsPanel(document, {
+    activeId: 'settings',
+    onOpen: (mount) => { if (!_panelView) _panelView = mountConversationView({ mount, poll: true }); },
+    onClose: () => { if (_panelView) { _panelView.destroy(); _panelView = null; } },
+  });
 </script>
 </head>
 <body>

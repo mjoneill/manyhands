@@ -121,9 +121,9 @@ test('the board surfaces the Commons nav peer + a "⤢ Full page" promote link',
     assert.ok(headerLinks.includes('/commons.html'), 'page shell header links to commons.html: ' + headerLinks.join(', '));
 
     // The existing panel still toggles, and now carries the promote link.
-    await page.click('#btn-toggle-convs');
+    await page.click('[data-commons-toggle]');   // #497: shared entrance
     await page.waitForSelector('#convs-panel.visible', { timeout: 5000 });
-    const promote = await page.$eval('.convs-promote', (e) => e.getAttribute('href'));
+    const promote = await page.$eval('.commons-promote', (e) => e.getAttribute('href'));
     assert.equal(promote, '/commons.html', 'panel promote link → commons.html');
 
     assert.deepEqual(errors, [], 'board booted without page errors: ' + errors.join(' | '));
@@ -233,8 +233,16 @@ test('#291/#303-1 board inline commons panel: #NNN refs (scroll in place) + chat
     await page.waitForSelector('.board-header', { timeout: 5000 });
 
     // Open the inline commons panel; wait for the seeded message to render.
-    await page.click('#btn-toggle-convs');
+    await page.click('[data-commons-toggle]');   // #497: shared entrance
     await page.waitForSelector('#convs-panel.visible .conv-msg-body', { timeout: 5000 });
+    // #497: the board panel slides in now (it used to appear instantly via
+    // display:none→flex). `.visible` lands when the transition STARTS, so a
+    // click here can be dispatched while the panel is still off-screen right —
+    // puppeteer reports "Node is either not clickable". Wait for it to arrive.
+    await page.waitForFunction(() => {
+      const p = document.querySelector('#convs-panel');
+      return !!p && p.getBoundingClientRect().left < window.innerWidth - 20;
+    }, { timeout: 3000 });
 
     // Both #NNN become links (card-list-agnostic: #999 unknown still linkifies).
     const refs = await page.$$eval('.conv-card-ref', (els) =>

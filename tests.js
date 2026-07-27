@@ -4297,23 +4297,24 @@ function _stubConvs() {
   ];
 }
 
-test('#93 UI AC1: clicking #btn-toggle-convs adds .visible to #convs-panel', async () => {
-  enableFetchMock(_stubConvs());
-  const panel = document.getElementById('convs-panel');
-  panel.classList.remove('visible');  // reset
-  const toggle = document.getElementById('btn-toggle-convs');
-  toggle.click();
-  await new Promise(r => setTimeout(r, 10));
-  assert(panel.classList.contains('visible'), 'panel should be .visible after toggle click');
-});
-
-test('#93 UI AC2: clicking #btn-close-convs removes .visible', async () => {
-  const panel = document.getElementById('convs-panel');
-  panel.classList.add('visible');
-  const close = document.getElementById('btn-close-convs');
-  close.click();
-  assert(!panel.classList.contains('visible'), 'panel should NOT be .visible after close click');
-});
+// #93 UI AC1/AC2 (clicking the entrance opens the panel; clicking close shuts
+// it) MOVED to the served lane in #497, they are not weakened or dropped.
+//
+// The wiring they covered is now in core/commons-panel.mjs, and THIS lane loads
+// over file://, where every core/ module import is CORS-blocked — so the
+// control does not exist here to click. A test kept here would either fail
+// forever or be rewritten into a shape that asserts the markup exists rather
+// than that the control works, which is the vanity-test anti-pattern this repo
+// has a rule about.
+//
+// Covered instead by tests/commons-entrance.test.mjs, "#497 the entrance
+// reports open/closed state": click → aria-expanded="true" + panel actually
+// visible → click → back to "false", plus the reachability check that the
+// control is not buried under its own panel. That is strictly more than AC1
+// and AC2 asserted.
+//
+// What stays in this lane is the board's own half — the feed and the poll —
+// driven through openConvsPanelBody()/closeConvsPanelBody() below.
 
 test('#93 UI AC3: loadConversations populates #convs-feed with one .conv-msg per record', async () => {
   enableFetchMock(_stubConvs());
@@ -4397,7 +4398,7 @@ test('#112: opening the commons panel registers an incremental poll', async () =
   window.setInterval = (cb) => { pollCb = cb; return 4242; };
   window.clearInterval = () => {};
   try {
-    document.getElementById('btn-toggle-convs').click();   // open
+    panel.classList.add('visible'); openConvsPanelBody();   // #497: the board's half; the click lives in the served lane
     await new Promise(r => setTimeout(r, 10));
     assert(typeof pollCb === 'function', 'opening the panel should register a poll callback');
 
@@ -4430,9 +4431,9 @@ test('#112: closing the commons panel clears the poll timer', async () => {
   window.setInterval = () => timerId;
   window.clearInterval = (id) => { clearedId = id; };
   try {
-    document.getElementById('btn-toggle-convs').click();   // open → starts poll
+    panel.classList.add('visible'); openConvsPanelBody();   // #497: open → starts poll
     await new Promise(r => setTimeout(r, 10));
-    document.getElementById('btn-close-convs').click();    // close → stops poll
+    panel.classList.remove('visible'); closeConvsPanelBody();  // #497: close → stops poll
     assertEqual(clearedId, timerId, 'closing the panel should clear the specific poll timer');
   } finally {
     window.setInterval = realSI;
@@ -4453,7 +4454,7 @@ test('#112: a message posted by someone else appears on the next poll', async ()
   window.setInterval = (cb) => { pollCb = cb; return 1; };
   window.clearInterval = () => {};
   try {
-    document.getElementById('btn-toggle-convs').click();   // open showing 2
+    panel.classList.add('visible'); openConvsPanelBody();   // #497: open showing 2
     await new Promise(r => setTimeout(r, 10));
     const feed = document.getElementById('convs-feed');
     assertEqual(feed.querySelectorAll('.conv-msg').length, 2, 'panel opens showing 2 messages');
@@ -4481,7 +4482,7 @@ test('#112: a poll with unchanged data does not rebuild the feed DOM', async () 
   window.setInterval = (cb) => { pollCb = cb; return 1; };
   window.clearInterval = () => {};
   try {
-    document.getElementById('btn-toggle-convs').click();
+    panel.classList.add('visible'); openConvsPanelBody();   // #497
     await new Promise(r => setTimeout(r, 10));
     const feed = document.getElementById('convs-feed');
     const firstNodeBefore = feed.querySelector('.conv-msg');

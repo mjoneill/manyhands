@@ -134,13 +134,13 @@ test('#226 wiki commons panel: nav peer + slide-in panel posts to the floating c
     const nav = await page.$$eval('.navlink', (els) => els.map((e) => ({ t: e.textContent, href: e.getAttribute('href') })));
     assert.ok(nav.some((n) => n.t.includes('Commons') && n.href === '/commons.html'), 'Commons nav peer: ' + JSON.stringify(nav));
 
-    // Open the slide-in panel and post — scoped to it via #cv-panel.
-    await page.click('#cv-toggle');
-    await page.waitForSelector('#cv-panel.visible .cv-input', { timeout: 5000 });
-    await page.evaluate(() => { document.querySelector('#cv-panel .cv-input').value = 'hello from the wiki panel'; });
-    await page.evaluate(() => document.querySelector('#cv-panel .cv-form').requestSubmit());
+    // Open the slide-in panel and post — scoped to it via #commons-panel.
+    await page.click('[data-commons-toggle]');
+    await page.waitForSelector('#commons-panel.visible .cv-input', { timeout: 5000 });
+    await page.evaluate(() => { document.querySelector('#commons-panel .cv-input').value = 'hello from the wiki panel'; });
+    await page.evaluate(() => document.querySelector('#commons-panel .cv-form').requestSubmit());
     await page.waitForFunction(
-      () => [...document.querySelectorAll('#cv-panel .cv-msg-body')].some((e) => e.textContent.includes('hello from the wiki panel')),
+      () => [...document.querySelectorAll('#commons-panel .cv-msg-body')].some((e) => e.textContent.includes('hello from the wiki panel')),
       { timeout: 5000 },
     );
 
