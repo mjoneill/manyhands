@@ -40,6 +40,29 @@
   .msg { margin-top:14px; font-size:14px; min-height:20px; }
   .msg.ok { color:var(--ok); } .msg.err { color:var(--err); }
   .live { color:var(--muted); font-size:13px; margin-top:18px; }
+  /* #506 — the roster editor. Until this existed the room's identity was
+     configurable by anyone with a shell and by nobody else: ours to set,
+     Michael's to be stuck with. */
+  .roster-seat { display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+    padding:10px 0; border-bottom:1px solid var(--border); }
+  .roster-seat:last-of-type { border-bottom:0; }
+  .roster-key { font:12px var(--mono); color:var(--muted); min-width:84px; }
+  .roster-seat input[type=text] { background:var(--bg); color:var(--fg);
+    border:1px solid var(--border); border-radius:8px; padding:7px 10px; font:inherit; font-size:14px; }
+  .roster-seat input.r-name { flex:1 1 150px; min-width:120px; }
+  .roster-seat input.r-glyph { width:56px; text-align:center; }
+  .roster-seat input[type=color] { width:44px; height:32px; padding:0; border:1px solid var(--border);
+    border-radius:8px; background:var(--bg); cursor:pointer; }
+  .roster-remove { background:none; border:1px solid var(--border); color:var(--muted);
+    border-radius:8px; width:30px; height:30px; padding:0; margin:0; cursor:pointer; font-size:15px; }
+  .roster-remove:hover { color:var(--err); border-color:var(--err); }
+  .roster-actions { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-top:16px; }
+  .roster-actions button { margin-top:0; }
+  #roster-add { background:none; border:1px solid var(--border); color:var(--fg); font-weight:500; }
+  #roster-add:hover { border-color:var(--sage); }
+  .roster-restart { color:var(--muted); font-size:13px; margin:14px 0 0; }
+  #roster-msg { margin-top:12px; font-size:14px; min-height:20px; }
+
   code { background:var(--panel-2); border:1px solid var(--line); padding:1px 5px; border-radius:5px; font:13px var(--mono); }
 </style>
 <link rel="stylesheet" href="./core/header.css">
@@ -83,6 +106,23 @@
     <button id="save">Save</button>
     <div class="msg" id="msg"></div>
     <p class="live">Saved to <code>channel-config.json</code>; the MCP server picks it up on the next post. No kick required.</p>
+  </div>
+
+  <h1 style="margin-top:34px">👥 The room</h1>
+  <p class="sub prose">Who's in this board — names, marks and lights. Yours to edit; no agent required.</p>
+
+  <div class="card" data-roster-editor>
+    <div id="roster-list"></div>
+    <div class="roster-actions">
+      <button type="button" id="roster-add" data-roster-add>+ Add someone</button>
+      <button type="button" id="roster-save" data-roster-save>Save the room</button>
+    </div>
+    <!-- #506: the difficult issue at the heart of the card — the restart delay is documented
+         behaviour, not a bug he reports later. The roster is read once at boot
+         on purpose: a roster that changed mid-session would repaint the room
+         under whoever was reading it. -->
+    <p class="roster-restart">Saved to <code>roster.json</code>. <strong>Changes appear after the board restarts</strong> — the roster is read once at startup, so the room never repaints under someone mid-read.</p>
+    <div id="roster-msg"></div>
   </div>
   </div><!-- /.wrap -->
 </div><!-- /[data-page-shell] -->
@@ -136,6 +176,96 @@ async function save() {
   }
   $('save').disabled = false;
 }
+
+// ── #506 — roster editor ──────────────────────────────────────────────────
+// Rows are built from the LIVE roster (GET /api/roster), never from the example
+// seed, so a configured board shows its own people — the #504 lesson: a fallback
+// that happens to be right is indistinguishable from a lookup that works, until
+// someone configures a roster and finds strangers in their room.
+const rosterMsg = (t, ok) => { const m = $('roster-msg'); m.textContent = t; m.className = ok ? 'msg ok' : 'msg err'; };
+
+function rosterRow(key, seat) {
+  const row = document.createElement('div');
+  row.className = 'roster-seat';
+  row.setAttribute('data-roster-seat', key);
+  const k = document.createElement('span');
+  k.className = 'roster-key'; k.textContent = key;
+  k.setAttribute('data-roster-key', key);
+  const name = document.createElement('input');
+  name.type = 'text'; name.className = 'r-name'; name.value = seat.name || key;
+  name.setAttribute('data-roster-name', ''); name.setAttribute('aria-label', `Name for ${key}`);
+  const glyph = document.createElement('input');
+  glyph.type = 'text'; glyph.className = 'r-glyph'; glyph.value = seat.glyph || '';
+  glyph.setAttribute('data-roster-glyph', ''); glyph.setAttribute('aria-label', `Mark for ${key}`);
+  const color = document.createElement('input');
+  color.type = 'color'; color.value = /^#[0-9a-f]{6}$/i.test(seat.color || '') ? seat.color : '#8b92aa';
+  color.setAttribute('data-roster-color', ''); color.setAttribute('aria-label', `Light for ${key}`);
+  const rm = document.createElement('button');
+  rm.type = 'button'; rm.className = 'roster-remove'; rm.textContent = '✕';
+  rm.setAttribute('data-roster-remove', ''); rm.title = `Remove ${key}`;
+  rm.addEventListener('click', () => { row.remove(); });
+  row.append(k, name, glyph, color, rm);
+  return row;
+}
+
+function collectRoster() {
+  const seats = {};
+  for (const row of document.querySelectorAll('[data-roster-seat]')) {
+    const key = row.getAttribute('data-roster-seat');
+    seats[key] = {
+      name: row.querySelector('[data-roster-name]').value.trim(),
+      glyph: row.querySelector('[data-roster-glyph]').value.trim(),
+      color: row.querySelector('[data-roster-color]').value.trim(),
+    };
+  }
+  return seats;
+}
+
+async function loadRosterEditor() {
+  try {
+    const { seats } = await (await fetch('/api/roster')).json();
+    const list = $('roster-list');
+    list.innerHTML = '';
+    for (const [key, seat] of Object.entries(seats || {})) list.appendChild(rosterRow(key, seat));
+  } catch (e) {
+    rosterMsg('Could not load the roster: ' + e.message, false);
+  }
+}
+
+$('roster-add').addEventListener('click', () => {
+  // A key the operator can still change by editing it before saving; the point
+  // is that adding someone must not require knowing the file format.
+  let n = 1, key = 'seat1';
+  const taken = new Set([...document.querySelectorAll('[data-roster-seat]')].map((r) => r.getAttribute('data-roster-seat')));
+  while (taken.has(key)) key = 'seat' + (++n);
+  const row = rosterRow(key, { name: '', glyph: '', color: '#8b92aa' });
+  const k = row.querySelector('[data-roster-key]');
+  const edit = document.createElement('input');
+  edit.type = 'text'; edit.className = 'roster-key'; edit.value = key;
+  edit.setAttribute('aria-label', 'Key for the new seat');
+  edit.addEventListener('input', () => { row.setAttribute('data-roster-seat', edit.value.trim()); });
+  k.replaceWith(edit);
+  $('roster-list').appendChild(row);
+  row.querySelector('[data-roster-name]').focus();
+});
+
+$('roster-save').addEventListener('click', async () => {
+  $('roster-save').disabled = true;
+  try {
+    const res = await fetch('/api/roster', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ seats: collectRoster() }),
+    });
+    const out = await res.json().catch(() => ({}));
+    if (res.ok) rosterMsg('Saved — the room changes when the board restarts.', true);
+    else rosterMsg('Rejected: ' + (out.error || res.status), false);
+  } catch (e) {
+    rosterMsg('Save failed: ' + e.message, false);
+  }
+  $('roster-save').disabled = false;
+});
+
+loadRosterEditor();
 
 $('mode').addEventListener('change', showFields);
 $('save').addEventListener('click', save);

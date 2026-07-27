@@ -61,3 +61,61 @@ export function loadRoster(file = rosterFilePath(), onWarn = () => {}) {
   }
   return seats;
 }
+
+/**
+ * #506 — write the roster back, so a human can edit their own room.
+ *
+ * Until this existed, the roster was configurable by anyone with filesystem
+ * access and by nobody else: the room's identity was ours to set and Michael's
+ * to be stuck with. That is the same class of defect as #504's picker — a
+ * deployment's own people unreachable through its own interface.
+ *
+ * Validation is deliberately narrow rather than clever. Keys become object keys
+ * and DOM attribute values; colours land in inline styles. Anything outside a
+ * conservative shape is refused with a reason the operator can act on, because
+ * a config that is quietly ignored is a config you will debug twice — the same
+ * reasoning loadRoster already applies in the other direction.
+ *
+ * Atomic tmp+rename, mirroring channel-config: a reader must never see a
+ * half-written roster, least of all the boot path that repaints the whole room.
+ */
+const SEAT_KEY_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/i;
+const HEX_COLOR_RE = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;
+
+export function validateRoster(input) {
+  const seats = input && typeof input === 'object' && input.seats ? input.seats : input;
+  if (!seats || typeof seats !== 'object' || Array.isArray(seats)) {
+    throw new Error('roster must be an object of seats');
+  }
+  const keys = Object.keys(seats);
+  if (keys.length === 0) throw new Error('a roster with no seats would empty the room — add at least one');
+  if (keys.length > 64) throw new Error('more than 64 seats is almost certainly a mistake');
+
+  const clean = {};
+  for (const key of keys) {
+    if (!SEAT_KEY_RE.test(key)) {
+      throw new Error(`seat key "${key}" must be letters, digits, dash or underscore (max 32)`);
+    }
+    const seat = seats[key];
+    if (!seat || typeof seat !== 'object') throw new Error(`seat "${key}" must be an object`);
+    const name = String(seat.name ?? '').trim();
+    if (!name) throw new Error(`seat "${key}" needs a name`);
+    if (name.length > 64) throw new Error(`seat "${key}" name is too long (max 64)`);
+    const color = String(seat.color ?? '').trim();
+    if (!HEX_COLOR_RE.test(color)) {
+      throw new Error(`seat "${key}" needs a hex colour like #7cc4a0 (got "${color}")`);
+    }
+    const glyph = String(seat.glyph ?? '').trim().slice(0, 8);
+    clean[key] = glyph ? { name, glyph, color } : { name, color };
+  }
+  return clean;
+}
+
+/** Validate, then write atomically. Returns the cleaned seats. */
+export function writeRoster(input, file = rosterFilePath()) {
+  const clean = validateRoster(input);
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify({ seats: clean }, null, 2));
+  fs.renameSync(tmp, file);
+  return clean;
+}

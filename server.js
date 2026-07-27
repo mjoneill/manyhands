@@ -38,7 +38,7 @@ import { boardToDomain, domainToBoard, cardToNode } from './core/mapping.mjs';
 import { buildTree, buildChildIndex } from './core/tree.mjs';
 import { buildLinkIndex } from './core/links.mjs';
 import { readConfig, writeConfig } from './channel-config.mjs';
-import { loadRoster } from './core/roster-config.mjs';
+import { loadRoster, writeRoster, rosterFilePath } from './core/roster-config.mjs';
 import { configureIdentities, usingDefaultRoster } from './core/identity.mjs';
 
 const PORT = process.env.SCRUM_PORT ? parseInt(process.env.SCRUM_PORT, 10) : 3141;
@@ -536,6 +536,33 @@ function handleGetBoard(req, res) {
 // matters when someone is trying to work out why their colours didn't take.
 function handleGetRoster(req, res) {
   sendJSON(res, 200, { seats: ROSTER, usingDefaults: usingDefaultRoster() });
+}
+
+// ── POST /api/roster (#506) — a human edits their own room, no agent required.
+//
+// The roster is read ONCE at boot, deliberately: a roster that changed
+// mid-session would repaint the room under whoever was reading it. So this
+// writes the file and says so; it does not hot-swap ROSTER. The settings page
+// carries that as one line of copy, which makes the delay documented behaviour
+// rather than a bug someone reports later.
+//
+// Same trust model as POST /api/config: loopback-only, and write access to this
+// board is already shell-equivalent (SECURITY.md). This adds no new authority —
+// it removes the requirement to have a shell to use a feature of your own board.
+async function handleSetRoster(req, res) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    let clean;
+    try {
+      clean = writeRoster(body);
+    } catch (ve) {
+      return sendJSON(res, 400, { error: ve.message });
+    }
+    sendJSON(res, 200, { seats: clean, file: rosterFilePath(), appliesOnRestart: true });
+  } catch (e) {
+    console.error('POST /api/roster:', e.message);
+    sendJSON(res, 500, { error: 'Failed to save roster' });
+  }
 }
 
 // ── /api/config — channel delivery settings (#263); read by the MCP scheduler
@@ -1233,6 +1260,7 @@ const API_ROUTES = [
   { method: 'GET',    re: /^\/api\/config$/,               fn: (req, res) => handleGetConfig(req, res) },
   { method: 'GET',    re: /^\/api\/channel-status$/,       fn: (req, res) => handleChannelStatus(req, res) },
   { method: 'POST',   re: /^\/api\/config$/,               fn: (req, res) => handleSetConfig(req, res) },
+  { method: 'POST',   re: /^\/api\/roster$/,               fn: (req, res) => handleSetRoster(req, res) },   // #506
   { method: 'GET',    re: /^\/api\/cards$/,                fn: (req, res) => handleListCards(req, res) },
   { method: 'POST',   re: /^\/api\/cards$/,                fn: (req, res) => handleCreateCard(req, res) },
   { method: 'POST',   re: /^\/api\/cards\/([^\/]+)\/claim$/, fn: (req, res, m) => handleClaimCard(req, res, m[1]) },
