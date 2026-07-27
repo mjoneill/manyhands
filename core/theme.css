@@ -80,8 +80,32 @@ body {
 /* The header row every surface shares. The nav mount is a full-width block
    inside it, so the nav's offset within its parent is identical on all four
    surfaces by construction rather than by four agreeing overrides. */
-[data-page-shell] > .shell-head { padding-block: 14px 0; }
-[data-page-shell] > .shell-head > #app-nav { display: block; width: 100%; }
+/* #496 reopen — the shell head is one row: the product mark, then the nav.
+   Michael's walk found the mark on the board only ("the first page has a
+   manyhands banner, but none of the others do") and asked for the nav in the
+   same row ("the nav tacos could be in there too"). Work item 2 of the card
+   said [ title ] [ destinations ] [ utility cluster ] all along; the first
+   bracket was never built. */
+[data-page-shell] > .shell-head {
+  padding-block: 14px 0;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+[data-page-shell] > .shell-head > #app-nav { flex: 1 1 auto; min-width: 0; }
+
+/* The product mark: identical text and treatment on every surface, so the app
+   reads as one place rather than four modules that happen to share a palette. */
+[data-product-mark] {
+  flex: 0 0 auto;
+  font: 600 1.0625rem/1 var(--serif);
+  letter-spacing: -0.01em;
+  color: var(--ink);
+  text-decoration: none;
+  white-space: nowrap;
+}
+[data-product-mark] .mark-glyph { color: var(--ember); margin-right: 0.3em; }
+[data-product-mark]:hover { color: var(--link); }
 
 /* ---------------------------------------------------------------------------
    #496 — running text. Applied to the wiki article body, commons message

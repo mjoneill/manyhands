@@ -43,7 +43,12 @@ body {
   background: var(--bg-base);
   color: var(--text-primary);
   min-height: 100vh;
-  overflow-x: auto;
+  /* #496 reopen: `overflow-x: auto` used to live here. With the document
+     scrolling sideways, a board wider than the window took the shell head with
+     it — Michael's "the header area is fixed width but the page is however many
+     columns wide… looks jarring." The board now pans inside its own container
+     (see .board) so the header cannot detach from the viewport. */
+  overflow-x: hidden;
 }
 
 /* ── Noise Texture Overlay (CSS-only SVG data URI) ── */
@@ -101,9 +106,14 @@ body::before {
   grid-auto-flow: column;
   grid-auto-columns: minmax(320px, 1fr);
   gap: 24px;
-  padding: 24px 32px;
+  /* #496 reopen: the shell owns the page gutter, so the board no longer adds
+     its own horizontal padding — that was the double inset. And the board is
+     what scrolls when the columns outrun the window, not the document. */
+  padding: 24px 0;
   min-height: calc(100vh - 73px);
   align-items: start;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
 }
 
 /* ── Column edit button (✏️) in header ── */
@@ -1413,9 +1423,11 @@ body::before {
 
 <!-- Board Header -->
 <div data-page-shell>
-<div class="shell-head"><span id="app-nav"></span></div>
+<div class="shell-head"><a href="/" data-product-mark title="manyhands — the board"><span class="mark-glyph">◆</span>manyhands</a><span id="app-nav"></span></div>
 <div class="board-header">
-  <h1><span class="logo">◆</span> manyhands</h1>
+  <!-- #496 reopen: the "◆ manyhands" banner used to live here, on the board and
+       nowhere else. It is now the shared product mark in the shell head, on all
+       four surfaces — so this row carries only the board's own controls. -->
   <div class="board-header-actions">
     <!-- board-specific: toggles the inline commons panel (distinct from the Commons *page* link in the shared nav) -->
     <button id="btn-toggle-convs" class="btn-toggle-convs" title="Open the conversations commons">💬 Conversations</button>
