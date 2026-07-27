@@ -182,3 +182,110 @@ test('#465 every message reaches the files — including past the API\'s 200-mes
     await server.stop();
   }
 });
+
+// ---------------------------------------------------------------------------
+// #523 — the export boundary.
+//
+// The first version of this tool had no scrub at all, while its sibling
+// export-wiki.mjs (#459) refuses to emit a single page on residue. The tool
+// with the largest blast radius had the weakest control, and the reason is the
+// finding worth keeping: the severance gate watches `git push`, this path never
+// goes near git, and nobody asked what guards it.
+//
+// Default safe, deliberate unsafe. The in-room archive is a real and frequent
+// need — it must stay possible, and it must be asked for by name.
+// ---------------------------------------------------------------------------
+
+/**
+ * A transforms config with one forbidden term and one rewrite rule.
+ *
+ * NB the two lists use different field names — rules are `{find, replace}`,
+ * forbidden entries are `{pattern}`. Writing `{pattern, replacement}` for a
+ * rule fails silently: `toRegExp(undefined)` compiles to /undefined/, matches
+ * nothing, and the export reports a clean pass having transformed nothing at
+ * all. This fixture got that wrong on the first run and the test caught it,
+ * which is the only reason the asymmetry is written down here.
+ */
+function synthTransforms(dir) {
+  const p = path.join(dir, 'EXPORT_TRANSFORMS.json');
+  fs.writeFileSync(p, JSON.stringify({
+    rules: [{ find: 'innerthing', flags: 'gi', replace: 'the component' }],
+    forbidden: [{ pattern: 'secretseat', note: 'an in-room seat name' }],
+  }, null, 2));
+  return p;
+}
+
+function boardWithResidue() {
+  return makeBoardFixture({
+    conversations: [
+      { id: 'm1', body: 'a message about innerthing, which the rules rewrite', author: 'sage', attachedTo: null, createdAt: '2026-01-01T00:00:00.000Z' },
+      { id: 'm2', body: 'a message naming secretseat, which nothing rewrites', author: 'sage', attachedTo: null, createdAt: '2026-01-01T00:00:01.000Z' },
+    ],
+  });
+}
+
+test('#523 default mode REFUSES on residue, names the term, and writes nothing', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'export-scrub-'));
+  const config = synthTransforms(dir);
+  const outDir = path.join(dir, 'out');
+  const server = await startRestServer({ board: boardWithResidue(), staticDir: PROJECT_DIR });
+  try {
+    let failed = false, stderr = '';
+    try {
+      execFileSync('node', [EXPORTER, '--out', outDir, '--base', server.baseUrl, '--config', config],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (err) { failed = true; stderr = String(err.stderr || ''); }
+
+    assert.equal(failed, true, 'an export carrying a forbidden term must refuse, not warn');
+    assert.match(stderr, /secretseat/, 'the refusal must name the surviving term');
+    assert.match(stderr, /--raw/, 'the refusal must name the in-room archive escape, or the operator will reach for something worse');
+    assert.equal(fs.existsSync(outDir), false,
+      'a refused export wrote files anyway — a partial scrub on disk is the artifact this is meant to prevent');
+  } finally {
+    await server.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('#523 default mode SCRUBS what the rules cover, and says so in the index', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'export-clean-'));
+  const config = synthTransforms(dir);
+  const outDir = path.join(dir, 'out');
+  // same board, minus the un-rewritable term
+  const board = makeBoardFixture({
+    conversations: [{ id: 'm1', body: 'a message about innerthing', author: 'sage', attachedTo: null, createdAt: '2026-01-01T00:00:00.000Z' }],
+  });
+  const server = await startRestServer({ board, staticDir: PROJECT_DIR });
+  try {
+    execFileSync('node', [EXPORTER, '--out', outDir, '--base', server.baseUrl, '--config', config], { encoding: 'utf8' });
+    const all = fs.readdirSync(outDir).filter((f) => f.startsWith('part-'))
+      .map((f) => fs.readFileSync(path.join(outDir, f), 'utf8')).join('\n');
+    assert.match(all, /the component/, 'the transform did not run');
+    assert.ok(!/innerthing/.test(all), 'the pre-transform term survived into the output');
+    assert.match(fs.readFileSync(path.join(outDir, '00-INDEX.md'), 'utf8'), /\*\*Scrub:\*\* Scrubbed via/,
+      'the index must record that this export went through the boundary');
+  } finally {
+    await server.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('#523 --raw writes the room verbatim and the index says plainly that it did not scrub', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'export-raw-'));
+  const outDir = path.join(dir, 'out');
+  const server = await startRestServer({ board: boardWithResidue(), staticDir: PROJECT_DIR });
+  try {
+    execFileSync('node', [EXPORTER, '--out', outDir, '--base', server.baseUrl, '--raw'], { encoding: 'utf8' });
+    const all = fs.readdirSync(outDir).filter((f) => f.startsWith('part-'))
+      .map((f) => fs.readFileSync(path.join(outDir, f), 'utf8')).join('\n');
+    assert.match(all, /secretseat/, '--raw must preserve the room verbatim — that is what it is for');
+    assert.match(all, /innerthing/, '--raw must not transform either');
+
+    const index = fs.readFileSync(path.join(outDir, '00-INDEX.md'), 'utf8');
+    assert.match(index, /NOT SCRUBBED/,
+      'a raw archive found on disk months later must say what it is — "I think that one was scrubbed" is not actionable');
+  } finally {
+    await server.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

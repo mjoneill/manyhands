@@ -29,12 +29,33 @@
  *   node export-board.mjs --max-bytes 1500000      # part size target
  *   node export-board.mjs --tolerance 0            # make the target a hard ceiling
  *   node export-board.mjs --base http://host:port  # another instance
+ *   node export-board.mjs --raw                    # in-room archive, NO scrub
  *
- * Exit: 0 wrote the export · 1 refused (a count disagreed, or nothing to write)
+ * ── The export boundary (#523) ───────────────────────────────────────────
+ * Scrubbed by DEFAULT, fail-closed, same contract as export-wiki.mjs: the
+ * output is transformed and then checked, and surviving residue refuses the
+ * export rather than warning about it. `--raw` is the loud opt-out for the
+ * in-room archive, and the INDEX records which one produced the files.
+ *
+ * Exit: 0 wrote the export · 1 refused (residue, a count disagreed, or nothing
+ * to write)
  */
+
+import { applyTransforms, findResidue } from './core/export-transforms.mjs';
 
 const DEFAULTS = {
   base: process.env.SCRUM_API_BASE || 'http://localhost:3141',
+  // ── #523: default safe, deliberate unsafe ────────────────────────────────
+  // The first version of this tool had NO scrub while its sibling
+  // export-wiki.mjs refuses to emit a single page on residue. The tool with the
+  // largest blast radius had the weakest control — 8,065 messages written to
+  // ~/Downloads, which is exactly where a file gets dragged into an upload.
+  //
+  // Nothing clever caused that. The gate watches `git push`, this path doesn't
+  // go near git, and nobody asked what guards it. So: scrubbed by default, and
+  // the in-room archive — which is a legitimate and frequent need — has to be
+  // asked for by name.
+  raw: false,
   // 1.5 MB: the size that made the 2026-07-22 export usable. Parts are packed
   // UNDER it at record boundaries, so a part is never a torn message.
   maxBytes: 1_500_000,
@@ -62,6 +83,21 @@ const KNOWN_SPACES = ['commons', 'cards'];
 // rejecting it, and the INDEX says so out loud so nobody thinks pages went missing.
 const SPACE_ALIASES = { wiki: 'cards', board: 'cards', conversations: 'commons', room: 'commons' };
 
+/**
+ * Where EXPORT_TRANSFORMS.json comes from — the same rule as export-wiki.mjs,
+ * and for the same reason: the rule list describes the ROOM whose data is being
+ * exported, not the code doing the exporting. Resolve it from the checkout and
+ * a separate-install export scrubs against the shipped EXAMPLE rules — whose own
+ * README says they protect nothing — and then reports PASS. A silent leak that
+ * certifies itself.
+ */
+function defaultConfigPath() {
+  const boardFile = process.env.SCRUM_BOARD_FILE;
+  if (!boardFile) return new URL('./EXPORT_TRANSFORMS.json', import.meta.url).pathname;
+  const dir = boardFile.slice(0, boardFile.lastIndexOf('/'));
+  return `${dir}/EXPORT_TRANSFORMS.json`;
+}
+
 function die(msg, code = 1) {
   console.error(`\nx export-board: ${msg}\n`);
   process.exit(code);
@@ -75,6 +111,8 @@ function parseArgs(argv) {
     else if (flag === '--base') a.base = String(argv[++i]).replace(/\/+$/, '');
     else if (flag === '--max-bytes') a.maxBytes = Number(argv[++i]);
     else if (flag === '--tolerance') a.tolerancePct = Number(argv[++i]);
+    else if (flag === '--raw') a.raw = true;
+    else if (flag === '--config') a.config = argv[++i];
     else if (flag === '--format') a.format = String(argv[++i]).toLowerCase();
     else if (flag === '--spaces') {
       a.spaces = String(argv[++i]).split(',').map((s) => {
@@ -84,7 +122,17 @@ function parseArgs(argv) {
     } else if (flag === '--help' || flag === '-h') {
       console.log(`usage: node export-board.mjs [--out DIR] [--spaces commons,cards] [--format md]
                             [--max-bytes N] [--tolerance PCT] [--base URL]
+                            [--raw] [--config FILE]
 
+  --raw        skip the export scrub and write the room verbatim. This is the
+               IN-ROOM ARCHIVE: it carries every name and every word exactly as
+               said. Default is scrubbed and fail-closed — residue refuses the
+               export rather than warning about it. The INDEX records which
+               mode produced the files.
+  --config     EXPORT_TRANSFORMS.json to scrub against. Defaults to the one
+               beside the board data, never the one beside this code — a config
+               from the wrong install scrubs against the wrong list and reports
+               a clean pass.
   --max-bytes  part size TARGET in bytes (default 1500000)
   --tolerance  acceptable variance above the target, percent (default 5).
                Parts are packed to the target; the header lands on top, so a
@@ -248,6 +296,52 @@ async function main() {
   }
   if (!records.length) die('nothing selected to export');
 
+  // ── #523: the export boundary ────────────────────────────────────────────
+  // Same fail-closed contract as export-wiki.mjs (#459): transform, then refuse
+  // if anything survived. Residue is collected across every record and reported
+  // once — 8,000 separate throws would bury the finding it exists to surface.
+  let scrubNote;
+  if (args.raw) {
+    scrubNote = 'RAW — NOT SCRUBBED. In-room archive; do not share outside the room.';
+    console.log(`  ⚠️  --raw: no scrub. This archive carries the room's language verbatim.`);
+  } else {
+    const configPath = args.config || defaultConfigPath();
+    let config;
+    try {
+      config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    } catch (err) {
+      die(`no export transform config at ${configPath}\n`
+        + `  The rules describe the BOARD being exported, so they are read from the data\n`
+        + `  root (beside board-data.json), never from this checkout — a config from the\n`
+        + `  wrong install would scrub against the wrong list and certify itself clean.\n`
+        + `  ${err.message}\n\n`
+        + `  If you want the unscrubbed in-room archive, say so explicitly:\n`
+        + `    node export-board.mjs --raw`);
+    }
+    const samples = [];
+    let residueTotal = 0;
+    for (const rec of records) {
+      rec.text = applyTransforms(rec.text, config);
+      const hits = findResidue(rec.text, config);
+      residueTotal += hits.length;
+      for (const h of hits) if (samples.length < 10) samples.push(h);
+    }
+    if (residueTotal) {
+      die(`export refused — ${residueTotal} un-transformed term(s) survived the scrub.\n\n`
+        + samples.map((r) => `      • ${JSON.stringify(r.match)}${r.note ? ` (${r.note})` : ''}\n          …${r.sample}…`).join('\n')
+        + (residueTotal > samples.length ? `\n      … and ${residueTotal - samples.length} more` : '')
+        + `\n\n  A full commons export usually CANNOT be scrubbed into a publishable artifact —\n`
+        + `  it is a record of a room talking, not a document about a product. That is not a\n`
+        + `  bug in the rules; it is what the rules are for.\n\n`
+        + `  If this is the in-room archive, ask for it by name:\n`
+        + `    node export-board.mjs --raw --out <dir>\n\n`
+        + `  If it is meant to leave, narrow the scope (--spaces cards) or add rules to\n`
+        + `  ${configPath}.`);
+    }
+    scrubNote = `Scrubbed via ${configPath.split('/').slice(-1)[0]} — fail-closed, zero residue.`;
+    console.log(`  scrub: clean (${records.length} records through ${(config.rules || []).length} rules)`);
+  }
+
   const parts = packRecords(records, args.maxBytes - HEADER_ALLOWANCE);
   fs.mkdirSync(outDir, { recursive: true });
 
@@ -302,6 +396,10 @@ async function main() {
     '',
     `- **Exported:** ${stamp(startedAt.toISOString())}`,
     `- **Source:** \`${args.base}\``,
+    // #523 — a file found on disk months from now must say whether it has been
+    // through the export boundary. "I think that one was scrubbed" is not a
+    // property anyone can act on.
+    `- **Scrub:** ${args.raw ? '⚠️ ' : ''}${scrubNote}`,
     `- **Commons messages:** ${expectedMessages}${orphaned ? ` (includes ${orphaned} orphaned — attached to a card that no longer exists)` : ''}`,
     `- **Cards / wiki nodes:** ${args.spaces.includes('cards') ? allCards.length : 0}`,
     `- **Card-attached comments:** ${homedCount}`,
