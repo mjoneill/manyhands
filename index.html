@@ -953,14 +953,14 @@ body::before {
   padding: 5px 12px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
-  background: var(--bg-tertiary);
+  background: var(--bg-input);
   color: var(--text-primary);
   width: 200px;
   transition: border-color 0.15s;
 }
 .for-filter-input:focus {
   outline: none;
-  border-color: var(--accent-blue);
+  border-color: var(--violet);
 }
 .for-filter-input::placeholder { color: var(--text-muted); }
 
@@ -974,7 +974,7 @@ body::before {
   padding: 7px 14px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
-  background: var(--bg-tertiary);
+  background: var(--bg-input);
   color: var(--text-primary);
   /* #499: was `max-width: 520px` — a fixed field inside a page #496 made fluid,
      which is the same disease one level down. The field spans what it is given;
@@ -1002,7 +1002,7 @@ body::before {
   background: rgba(148,163,184,.12);
   border-radius: 4px; padding: 1px 5px; color: var(--text-secondary);
 }
-.board-search-input:focus { outline: none; border-color: var(--accent-blue); }
+.board-search-input:focus { outline: none; border-color: var(--violet); }
 .board-search-input::placeholder { color: var(--text-muted); }
 
 .card-for {
@@ -1209,7 +1209,7 @@ body::before {
   transition: opacity 0.2s ease, background 0.2s, color 0.2s; z-index: 2;
 }
 .card:hover .card-page-btn { opacity: 1; }
-.card-page-btn:hover { background: rgba(148, 163, 184, 0.2); color: var(--text); }
+.card-page-btn:hover { background: rgba(148, 163, 184, 0.2); color: var(--text-primary); }
 
 /* #233 — per-card column-move arrows (◀ ▶), no edit mode needed; grayed at the ends */
 .card-move-btn {
@@ -1228,7 +1228,7 @@ body::before {
 .card-move-left { left: 0; }
 .card-move-right { right: 0; }
 .card:hover .card-move-btn { opacity: 0.7; }
-.card-move-btn:hover:not(:disabled) { opacity: 1; background: rgba(148, 163, 184, 0.22); color: var(--text); }
+.card-move-btn:hover:not(:disabled) { opacity: 1; background: rgba(148, 163, 184, 0.22); color: var(--text-primary); }
 .card-move-btn:disabled { opacity: 0.15; cursor: default; background: transparent; }
 .card:hover .card-move-btn:disabled { opacity: 0.2; }
 .card-edit-btn:hover {
