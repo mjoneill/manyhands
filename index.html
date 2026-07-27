@@ -388,7 +388,16 @@ body::before {
   overflow-wrap: anywhere; /* long unbroken tokens (URLs) wrap instead of overflowing */
 }
 /* Assignee chips grouped and pushed to the right edge of the meta row. */
-.card-top .card-assignees { margin-left: auto; display: inline-flex; gap: 4px; flex-shrink: 0; }
+/* #499: was `inline-flex … flex-shrink: 0` with no wrap, inside a card with
+   overflow:hidden — so a card with two assignees clipped the second chip mid
+   word, and three were worse. That is precisely the multi-agent case this board
+   exists for, and the assignees array has been multi-valued since #51 while the
+   layout never accommodated it. Chips wrap now; the title yields first. */
+.card-top .card-assignees {
+  margin-left: auto; display: flex; flex-wrap: wrap; justify-content: flex-end;
+  gap: 4px; min-width: 0; flex-shrink: 1;
+}
+.card-top .card-title { min-width: 0; }
 /* Assignee badge — pill-shaped, top-right. #333: it wears the assignee's
    identity light (--mind, set inline) — the same colour as their voice in the
    commons — so ownership and presence read the same across the whole app. */
@@ -1002,7 +1011,9 @@ body::before {
 .for-filter-input::placeholder { color: var(--text-muted); }
 
 /* Top-of-board search (#53) */
-.board-search-area { padding: 10px 32px 4px; }
+/* #499: horizontal padding dropped — the page shell (#496) owns the gutter,
+   so 32px here was a second inset on top of it. */
+.board-search-area { padding: 10px 0 8px; }
 .board-search-input {
   font-family: var(--font-stack);
   font-size: 0.85rem;
@@ -1011,10 +1022,31 @@ body::before {
   border-radius: var(--radius-sm);
   background: var(--bg-tertiary);
   color: var(--text-primary);
+  /* #499: was `max-width: 520px` — a fixed field inside a page #496 made fluid,
+     which is the same disease one level down. The field spans what it is given;
+     the syntax help below it is what has to fit, not the placeholder. */
   width: 100%;
-  max-width: 520px;
   box-sizing: border-box;
   transition: border-color 0.15s;
+}
+
+/* #499 — the search syntax lives HERE, not in the placeholder. A placeholder is
+   documentation that deletes itself the moment you type, so it is unreadable at
+   exactly the moment you need it: while composing a query. It also truncated
+   mid-word ("…priority:high  ty"), which made `type:` undiscoverable by the only
+   means provided to discover it. This line survives focus, typing, and every
+   viewport in the #499 set, because it wraps instead of clipping. */
+.board-search-hint {
+  margin-top: 5px;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--text-muted);
+  display: flex; flex-wrap: wrap; gap: 4px 12px;
+}
+.board-search-hint code {
+  font-family: var(--mono, ui-monospace);
+  background: rgba(148,163,184,.12);
+  border-radius: 4px; padding: 1px 5px; color: var(--text-secondary);
 }
 .board-search-input:focus { outline: none; border-color: var(--accent-blue); }
 .board-search-input::placeholder { color: var(--text-muted); }
@@ -1509,8 +1541,13 @@ body::before {
 <!-- Top-of-board search (#53): free-text + field:value, e.g. "label:infra supervise" -->
 <div class="board-search-area">
   <input class="board-search-input" id="board-search-input" type="text"
-         placeholder="Search cards…  (text, or field:value — assignee:sage  label:infra  priority:high  type:bug)"
-         aria-label="Search cards" autocomplete="off" />
+         placeholder="Search cards…"
+         aria-label="Search cards" aria-describedby="board-search-hint" autocomplete="off" />
+  <!-- #499: the operators moved out of the placeholder so they survive typing. -->
+  <div class="board-search-hint" id="board-search-hint">
+    <span>Free text, or <code>field:value</code> —</span>
+    <code>assignee:sage</code><code>label:infra</code><code>priority:high</code><code>type:bug</code>
+  </div>
 </div>
 
 <!-- Filter Strip (shown when activeLabels is non-empty) -->
