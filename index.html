@@ -4697,8 +4697,20 @@ if (_convsForm) {
       // trapped state the no-blocking-modals reasoning is about.
       // So: rewrite this entry as the closed board, then push the open card.
       // Back now always lands on the board with the overlay shut.
-      try { history.replaceState({}, '', location.pathname); } catch (e) { /* file:// */ }
-      if (!openCardDetail(Number(_cardParam), true)) scrollToCardByShortId(Number(_cardParam));
+      // #510 follow-up: check the card EXISTS before rewriting the address.
+      // The first version stripped ?card=NNN and then tried to open it, so a
+      // reference to a number with no card on this board dropped you on a bare
+      // board with nothing focused AND no trace in the URL of what you had
+      // asked for — you could not even tell what had failed. Michael hit this
+      // coming from a wiki citation. Now an unresolvable reference keeps its
+      // address and says so.
+      const _n = Number(_cardParam);
+      if (cards.some((c) => String(c.shortId) === String(_n))) {
+        try { history.replaceState({}, '', location.pathname); } catch (e) { /* file:// */ }
+        openCardDetail(_n, true);
+      } else {
+        showUndoToast(`No card #${_n} on this board — it may live in the wiki, or have been deleted.`);
+      }
     }
   } catch (_) { /* deep-link is best-effort */ }
   // #167 — Seed the signature with the rendered state and start polling.
