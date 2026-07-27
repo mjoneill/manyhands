@@ -313,7 +313,11 @@ body::before {
   background: linear-gradient(180deg, rgba(40, 55, 80, 0.5) 0%, var(--bg-card) 40%);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
-  padding: 14px 16px 14px 20px;
+  /* #509: left/right padding widened to 26px so the ◀ ▶ move controls can be
+     a real 26px target without sitting on top of the card's own text. The old
+     20/16 only fitted an 18px-wide arrow, which is how they ended up below the
+     24×24 minimum in the first place. */
+  padding: 14px 26px;
   box-shadow: var(--shadow-card);
   cursor: default;
   transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
@@ -1157,9 +1161,12 @@ body::before {
 .card-edit-btn {
   position: absolute;
   top: 8px;
-  right: 8px;
-  width: 24px;
-  height: 24px;
+  /* #509: 26px, not 24. These passed the minimum at EXACTLY 24.0 — zero margin,
+     which is a control sized by eye that happens to land on the line. Any DPR,
+     rounding regime or transform flips it under. */
+  right: 30px;
+  width: 26px;
+  height: 26px;
   border: none;
   background: rgba(148, 163, 184, 0.1);
   border-radius: var(--radius-sm);
@@ -1177,8 +1184,8 @@ body::before {
 }
 .card:hover .card-edit-btn { opacity: 1; }
 .card-page-btn {
-  position: absolute; top: 8px; right: 38px;
-  width: 24px; height: 24px;
+  position: absolute; top: 8px; right: 60px;   /* #509: clears the 26px edit button + gap */
+  width: 26px; height: 26px;
   border-radius: var(--radius-sm);
   background: rgba(148, 163, 184, 0.1);
   color: var(--text-muted); text-decoration: none;
@@ -1192,15 +1199,19 @@ body::before {
 /* #233 — per-card column-move arrows (◀ ▶), no edit mode needed; grayed at the ends */
 .card-move-btn {
   position: absolute; top: 50%; transform: translateY(-50%);
-  width: 18px; height: 30px; padding: 0;
+  /* #509: was 18×30 with 0.62rem glyphs — under the 24×24 minimum on width and
+     the smallest type anywhere on the page. Now 26×34: clears 24 with margin on
+     both axes rather than landing on it, because a control sized to exactly the
+     threshold flips under any rounding regime or transform. */
+  width: 26px; height: 34px; padding: 0;
   border: none; border-radius: var(--radius-sm);
   background: rgba(148, 163, 184, 0.08); color: var(--text-muted);
   display: flex; align-items: center; justify-content: center;
-  font-size: 0.62rem; line-height: 1; cursor: pointer; opacity: 0.4;
+  font-size: 0.8rem; line-height: 1; cursor: pointer; opacity: 0.4;
   transition: opacity 0.15s ease, background 0.15s, color 0.15s; z-index: 2;
 }
-.card-move-left { left: 1px; }
-.card-move-right { right: 1px; }
+.card-move-left { left: 0; }
+.card-move-right { right: 0; }
 .card:hover .card-move-btn { opacity: 0.7; }
 .card-move-btn:hover:not(:disabled) { opacity: 1; background: rgba(148, 163, 184, 0.22); color: var(--text); }
 .card-move-btn:disabled { opacity: 0.15; cursor: default; background: transparent; }
