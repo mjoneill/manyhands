@@ -278,6 +278,32 @@
 
     const node = new URLSearchParams(location.search).get('node');
     const viewEl = document.getElementById('view');
+
+    /**
+     * #517 — arrive where the reader was.
+     *
+     * `?at=<message id>` is stamped on the panel's "⤢ Full page" link at click
+     * time (core/commons-panel.mjs). You hit ⤢ because you want more room to
+     * read the thing you are reading; landing at the feed's default is the one
+     * outcome that makes the control useless for its purpose.
+     *
+     * Anchored to a message id rather than a scroll offset on purpose: the
+     * whole reason to promote is that the panel is too narrow, so the
+     * destination reflows and an offset means something different there.
+     *
+     * Called on every render because the message may not be in the first batch
+     * — it runs until it lands once, then stops.
+     */
+    const anchorAt = new URLSearchParams(location.search).get('at');
+    let _anchored = false;
+    function anchorToPlace() {
+      if (_anchored || !anchorAt) return;
+      const target = viewEl.querySelector(`[data-id="${CSS.escape(anchorAt)}"]`);
+      if (!target) return;                    // not rendered yet — try again next batch
+      _anchored = true;
+      target.scrollIntoView({ block: 'center' });
+      target.classList.add('cv-msg-arrived');
+    }
     const title = document.getElementById('title');
     const back = document.getElementById('back');
 
@@ -322,7 +348,7 @@
         poll: true,
         placeholder: node ? 'Add to this discussion…' : 'Say something to the room…',
         attachedPointer,                 // #294 — pointer-collapse in the unscoped room
-        onMessages: (msgs) => { _lastMessages = msgs; updateConstellation(msgs); }, // presence pulse
+        onMessages: (msgs) => { _lastMessages = msgs; updateConstellation(msgs); anchorToPlace(); }, // presence pulse · #517 arrive where the reader was
         onSolo: reflectSolo,             // presence — sync the constellation to the soloed mind
       });
     }

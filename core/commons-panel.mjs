@@ -242,6 +242,48 @@ export function mountCommonsPanel(doc, opts = {}) {
     panel.style.top = `${Math.max(0, Math.round(bottom))}px`;
   }
 
+  // ── #517: carry the reader's place through to the full page ──────────────
+  /**
+   * "Escapes to the full page WITHOUT LOSING POSITION" — the half of #497's
+   * rubric 5 that shipped unmet. You hit ⤢ because you want more room to read
+   * the thing you are reading; landing at the feed's default is the one
+   * outcome that makes the control useless for its actual purpose.
+   *
+   * Anchored to a message id, never a scroll offset: the whole reason someone
+   * promotes is that the panel is too narrow, so the destination reflows and
+   * an offset means something different there.
+   *
+   * Resolved at click time rather than tracked on scroll — no listener, no
+   * bookkeeping, and it cannot go stale.
+   */
+  function panelScroller() {
+    if (panel.scrollHeight > panel.clientHeight + 4) return panel;
+    return [...panel.querySelectorAll('*')].find((e) => e.scrollHeight > e.clientHeight + 4) || null;
+  }
+
+  function readerIsOn() {
+    const scroller = panelScroller();
+    if (!scroller) return null;
+    const top = scroller.getBoundingClientRect().top;
+    // The first message still showing below the scroller's top edge — what the
+    // reader's eye is on, not what happens to be first in the DOM.
+    for (const m of scroller.querySelectorAll('.cv-msg[data-id], .conv-msg[data-id]')) {
+      if (m.getBoundingClientRect().bottom > top + 4) return m.dataset.id;
+    }
+    return null;
+  }
+
+  /** Stamp `?at=<id>` on the promote link just before the browser follows it. */
+  function carryPlaceThrough(link) {
+    const id = readerIsOn();
+    if (!id) return;                       // empty feed, or nothing resolvable — plain link is correct
+    const href = link.getAttribute('href') || '/commons.html';
+    const base = (doc.defaultView && doc.defaultView.location.href) || 'http://localhost/';
+    const u = new URL(href, base);
+    u.searchParams.set('at', id);
+    link.setAttribute('href', u.pathname + u.search + u.hash);
+  }
+
   // ── open / close ─────────────────────────────────────────────────────────
   const isOpen = () => panel.classList.contains('visible');
 
@@ -269,7 +311,14 @@ export function mountCommonsPanel(doc, opts = {}) {
 
   // ── wiring ───────────────────────────────────────────────────────────────
   const onToggleClick = () => toggle();
-  const onPanelClick = (e) => { if (e.target.closest('[data-commons-close]')) close(); };
+  const onPanelClick = (e) => {
+    if (e.target.closest('[data-commons-close]')) { close(); return; }
+    // #517 — stamp the reader's place on the promote link before the browser
+    // follows it. A click handler on the panel runs before default navigation,
+    // so rewriting href here is enough; no preventDefault, no manual navigate.
+    const promote = e.target.closest('a[href*="commons.html"]');
+    if (promote) carryPlaceThrough(promote);
+  };
   const onKeydown = (e) => { if (e.key === 'Escape' && isOpen()) close(); };
   // Coming back to the tab is when a stale badge is most visible, and it is a
   // real user action — not a test hook. The interval is the floor, not the

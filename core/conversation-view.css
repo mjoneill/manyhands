@@ -76,3 +76,17 @@
 .cv-msg-body em { font-style: italic; }
 .cv-msg-body ul { margin: 4px 0; padding-left: 20px; }
 .cv-msg-body li { margin: 1px 0; }
+
+/* #517 — you were reading this one. A brief mark so the eye finds its place
+   after the page reflows, rather than landing in a wall of messages that all
+   look alike. Fades on its own; respects reduced-motion by simply not moving. */
+.cv-msg-arrived {
+  animation: cv-arrived 2.2s ease-out;
+}
+@keyframes cv-arrived {
+  0%   { background: var(--ember-soft, rgba(242,162,92,.13)); box-shadow: inset 2px 0 0 var(--ember, #f2a25c); }
+  100% { background: transparent; box-shadow: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cv-msg-arrived { animation: none; box-shadow: inset 2px 0 0 var(--ember, #f2a25c); }
+}

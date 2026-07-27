@@ -326,12 +326,14 @@ test('#497 the escape to the full page is a real navigation, and Back comes home
  * and fails the day pagination or a jump-to-message lands on one of them and
  * not the other.
  */
-test('#497 escaping to the full page keeps your place in the feed', {
-  todo: 'FAILS TODAY — filed as #517. Kept, not deleted: it is the acceptance ' +
-        'criterion and it already fails for the right reason. Un-todo it to work ' +
-        'that card. The fix is not a tweak — neither renderer emits a message id, ' +
-        'the promote link is static, and commons.html has no anchor handling.',
-}, async () => {
+// GREEN as of #517 (2026-07-27). Written red on 07-27 04:07 as #497's unmet
+// acceptance clause, carried as a `todo` pointing at the card rather than
+// deleted, and un-todo'd here by the change that satisfies it. The scope on the
+// card was wider than the truth — it claimed neither renderer emitted a message
+// id; both already did (`msg.dataset.id`), which a grep for the class name
+// rather than the attribute had hidden. What was actually missing was the link
+// stamp and the arrival handler.
+test('#497 escaping to the full page keeps your place in the feed', async () => {
   const many = makeBoardFixture({
     conversations: Array.from({ length: 40 }, (_, i) => ({
       id: `m${i}`,
