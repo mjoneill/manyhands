@@ -123,6 +123,65 @@ test('#506 rename + recolour through the UI persist to roster.json at the data r
   }
 });
 
+/**
+ * Regression, found in the wild 2026-07-27 by Michael reading a `git diff`:
+ * one save from this editor destroyed the roster file's `_README` block —
+ * nineteen lines explaining what the file is and why it lives outside version
+ * control. writeRoster rebuilt the file as `{ seats }` and nothing else, so
+ * every key it did not know about vanished, silently, with no error.
+ *
+ * The property under test is deliberately wider than that one block: a writer
+ * that round-trips a config file owns the WHOLE file, including the parts it
+ * does not understand. An unknown key is asserted alongside `_README` so the
+ * test cannot be satisfied by special-casing the name that happened to break.
+ */
+test('#506 saving a seat preserves the rest of roster.json, including keys the editor knows nothing about', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'roster-keep-'));
+  const rosterFile = path.join(dir, 'roster.json');
+  fs.writeFileSync(rosterFile, JSON.stringify({
+    _README: ['Why this file exists.', 'A second line, so truncation is visible too.'],
+    somethingWeHaveNotInventedYet: { keep: 'me' },
+    seats: {
+      zephyr: { name: 'Zephyrine', glyph: '◇', color: '#7cc4a0' },
+      quill: { name: 'Quillemette', glyph: '✒', color: '#c48ab0' },
+    },
+  }, null, 2));
+
+  const server = await startRestServer({ board: makeBoardFixture(), env: { SCRUM_ROSTER_FILE: rosterFile } });
+  const browser = await puppeteer.launch({ headless: 'new' });
+  try {
+    const page = await browser.newPage();
+    await page.goto(server.baseUrl + '/settings.html', { waitUntil: 'networkidle0' });
+
+    const drove = await page.evaluate((rowSel) => {
+      const row = document.querySelector(rowSel);
+      const name = row && row.querySelector('[data-roster-name]');
+      if (!name) return false;
+      name.value = 'Zephyr Edited';
+      name.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    }, seatRow('zephyr'));
+    assert.ok(drove, 'zephyr row is missing [data-roster-name]');
+    await saveIn(page, seatRow('zephyr'));
+
+    const onDisk = JSON.parse(fs.readFileSync(rosterFile, 'utf8'));
+    assert.equal(onDisk.seats.zephyr?.name, 'Zephyr Edited', 'the edit itself did not persist');
+    assert.deepEqual(
+      onDisk._README,
+      ['Why this file exists.', 'A second line, so truncation is visible too.'],
+      'saving a seat destroyed the file\'s _README block — the documentation that explains what this file is',
+    );
+    assert.deepEqual(
+      onDisk.somethingWeHaveNotInventedYet, { keep: 'me' },
+      'an unrelated top-level key was dropped: the writer rebuilt the file from only the fields it understands',
+    );
+  } finally {
+    await browser.close();
+    await server.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('#506 add + remove through the UI persist, and a restart makes the change live (the copy tells the truth)', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'roster-ed-'));
   const rosterFile = synthRoster(dir);

@@ -114,8 +114,28 @@ export function validateRoster(input) {
 /** Validate, then write atomically. Returns the cleaned seats. */
 export function writeRoster(input, file = rosterFilePath()) {
   const clean = validateRoster(input);
+
+  // Preserve everything in the file we did not come here to change.
+  //
+  // The first version wrote `{ seats: clean }` and nothing else, which silently
+  // destroyed the file's `_README` block — nineteen lines explaining what the
+  // file is, why it lives outside version control, and that an unlisted author
+  // still renders. One save from the settings UI and the documentation was gone,
+  // with no error and nothing in the diff to suggest it was unintentional.
+  //
+  // The general rule, which matters more than this one block: a writer that
+  // round-trips a config file owns the whole file, including the parts it does
+  // not understand. Rebuilding the file from only the fields you know about is
+  // indistinguishable from deleting the rest.
+  let existing = {};
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) existing = parsed;
+  } catch { /* no file yet, or unreadable — a fresh write is the right outcome */ }
+
+  const { seats: _dropped, ...carried } = existing;
   const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify({ seats: clean }, null, 2));
+  fs.writeFileSync(tmp, `${JSON.stringify({ ...carried, seats: clean }, null, 2)}\n`);
   fs.renameSync(tmp, file);
   return clean;
 }
