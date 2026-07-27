@@ -2677,6 +2677,27 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeCardD
     // the backdrop itself, or anything carrying the close action
     if (e.target === back || e.target.closest('[data-action="close-card-detail"]')) {
       closeCardDetail();
+      return;
+    }
+    // A citation INSIDE the pop-out. Michael's repro: open #330, click the #182
+    // in its description, land on a bare board. The links render with href="#"
+    // and rely on the board's delegation — which is bound to boardEl, and this
+    // overlay deliberately lives outside it. So no handler ran, the anchor's own
+    // default navigated to "#", that wiped ?card=330 from the address, and the
+    // popstate listener read "no card" and closed the overlay. Reading a chain
+    // of cards dropped you on the front page.
+    //
+    // Third time this shape has bitten tonight — the filter control, this
+    // panel's exits, and now its citations. Anything mounted outside boardEl
+    // gets no delegated handler and fails silently, which is why the symptom is
+    // always "the click did something unrelated" rather than an error.
+    const cite = e.target.closest('a.shortid-link[data-shortid]');
+    if (cite) {
+      e.preventDefault();
+      const n = parseInt(cite.dataset.shortid, 10);
+      if (!openCardDetail(n)) {
+        showUndoToast(`No card #${n} on this board — it may live in the wiki, or have been deleted.`);
+      }
     }
   });
 })();
