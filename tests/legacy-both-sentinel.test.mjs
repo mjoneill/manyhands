@@ -159,3 +159,56 @@ test('#508 mechanical: no ["alex","robin"] expansion literal survives in shipped
   assert.deepEqual(offenders, [],
     `expansion literals survive (rg -n "\\['alex', ?'robin'\\]" server.js index.html should be empty):\n${offenders.join('\n')}`);
 });
+
+// ---------------------------------------------------------------------------
+// Tooth 4 — THE READ PATH. Added by #520, 2026-07-27, after this suite's own
+// blind spot shipped a regression.
+//
+// The three teeth above all test the WRITE path: what the API accepts, what a
+// legacy board converts to, what literals survive in source. Every one passed.
+// Meanwhile #508's fix removed the picker filter — on a comment asserting
+// `both` "is not a roster key and never was", which this file's own subject
+// disproves — and `both` became a selectable option in the live "Post as"
+// author picker. A human could post to the commons as a seat that does not
+// exist: exactly the #504 defect, on the surface #504 called correct.
+//
+// Retiring a sentinel means it stops being OFFERED as well as stops being
+// ACCEPTED. A bar that only checks acceptance certifies half a retirement.
+//
+// Asserted against the RENDERED DOM on purpose: reading `assignableSeats()` is
+// how the wrong conclusion was reached the first time.
+// ---------------------------------------------------------------------------
+test('#520/#508 read path: no picker OFFERS the retired sentinel, on a synthetic roster', async () => {
+  const rosterFile = syntheticRosterFile();
+  const server = await startRestServer({
+    board: makeBoardFixture(),
+    env: { SCRUM_ROSTER_FILE: rosterFile },
+  });
+  const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'] });
+  try {
+    const page = await browser.newPage();
+    await page.goto(server.baseUrl, { waitUntil: 'networkidle0' });
+    await page.waitForSelector('#convs-author option', { timeout: 5000 });
+
+    const offered = await page.evaluate(() => ({
+      author: [...(document.getElementById('convs-author')?.options || [])].map((o) => o.value),
+      assignees: [...document.querySelectorAll('#card-assignees-group input[type=checkbox]')].map((i) => i.value),
+    }));
+
+    assert.ok(offered.author.length, 'the author picker rendered empty — the probe is broken, not the product');
+    assert.ok(!offered.author.includes('both'),
+      `"Post as" offers the retired sentinel: ${offered.author.join(', ')} — a human can author a commons post as a seat that does not exist`);
+    assert.ok(!offered.assignees.includes('both'),
+      `the assignee picker offers the retired sentinel: ${offered.assignees.join(', ')} — the API refuses it with 400, so the control is dead and the error is undeserved`);
+
+    // …and the real seats DID arrive, so this can't pass by rendering nothing.
+    assert.deepEqual(offered.author.slice().sort(), ['quill', 'zephyr'],
+      'the author picker should offer exactly the configured roster');
+    assert.ok(offered.assignees.includes('unassigned'),
+      'unassigned is a pseudo-seat the pickers DO need — over-filtering is its own bug');
+  } finally {
+    await browser.close();
+    await server.stop();
+    fs.rmSync(rosterFile, { force: true });
+  }
+});

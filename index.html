@@ -2030,12 +2030,32 @@ const ROSTER = (() => {
 const ASSIGNEE_EMOJI = Object.fromEntries(Object.entries(ROSTER).map(([k, v]) => [k, v.glyph]));
 const ASSIGNEE_NAME = Object.fromEntries(Object.entries(ROSTER).map(([k, v]) => [k, v.name]));
 
-/** Seats a person can be assigned to — the roster minus the two pseudo-seats. */
+/**
+ * Seats a person can pick — the roster minus every pseudo-seat.
+ *
+ * #520, correcting #508. That card retired the `both` sentinel and removed the
+ * filter here, on this reasoning, which I committed into the source:
+ *
+ *     "'both' … is not a roster key and never was — the guard defended
+ *      against a value the roster cannot contain"
+ *
+ * It is a roster key. Two dozen lines above, `out.both` is added on purpose so
+ * historical cards assigned to `both` still render a name and a glyph instead
+ * of the unknown mark. So the guard was load-bearing and the comment replacing
+ * it asserted the opposite of what this same file says.
+ *
+ * The result shipped: `both` became selectable in the "Post as" author picker,
+ * which means a human could post to the commons as a seat that does not exist —
+ * the exact defect #504 was raised as p0 for. The retirement was completed on
+ * the write path (the server still refuses it, 400) and reverted on the read
+ * path, in one commit.
+ *
+ * `both` therefore stays in ROSTER for RENDERING and is excluded from every
+ * PICKER. Those are different jobs and this function only does the second one.
+ */
+const PSEUDO_SEATS = new Set(['unassigned', 'wiki', 'both']);
 function assignableSeats() {
-  // #508: 'both' was filtered here too, but it is not a roster key and never
-  // was — the guard defended against a value the roster cannot contain while
-  // reading as though 'both' were a live pseudo-seat.
-  return Object.entries(ROSTER).filter(([k]) => k !== 'unassigned' && k !== 'wiki');
+  return Object.entries(ROSTER).filter(([k]) => !PSEUDO_SEATS.has(k));
 }
 
 /** Checkbox markup for an assignee picker, built from the roster. */
