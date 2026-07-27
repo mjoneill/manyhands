@@ -34,9 +34,18 @@
   input[type=number] { width:110px; background:var(--bg); color:var(--fg); border:1px solid var(--border); border-radius:8px; padding:8px 10px; font:14px var(--mono); }
   input[type=number]:focus { outline:none; border-color:var(--sage); }
   .unit { color:var(--muted); font:12px var(--mono); }
-  button { background:var(--sage); color:#fff; border:0; border-radius:9px; padding:11px 22px; font:inherit; font-weight:600; cursor:pointer; margin-top:22px; }
-  button:hover { filter:brightness(1.08); }
-  button:disabled { opacity:.5; cursor:default; }
+  /* #516 — this page's own action buttons, by CLASS, never by element.
+     It was `button { … margin-top:22px }`, which reached every button on the
+     page including ones this page did not author. #497's shared commons control
+     mounted into the header and landed 22px low on this surface alone; the fix
+     there was the component defending itself, which only ever defends one
+     component. Three local undos had already accreted here to fight the same
+     rule — `.roster-actions button{margin-top:0}`, `.roster-remove{margin:0}`,
+     and #roster-add's overrides — which is what a landmine looks like before
+     anyone names it. A page styles what it owns. */
+  .btn { background:var(--sage); color:#fff; border:0; border-radius:9px; padding:11px 22px; font:inherit; font-weight:600; cursor:pointer; margin-top:22px; }
+  .btn:hover { filter:brightness(1.08); }
+  .btn:disabled { opacity:.5; cursor:default; }
   .msg { margin-top:14px; font-size:14px; min-height:20px; }
   .msg.ok { color:var(--ok); } .msg.err { color:var(--err); }
   .live { color:var(--muted); font-size:13px; margin-top:18px; }
@@ -57,7 +66,7 @@
     border-radius:8px; width:30px; height:30px; padding:0; margin:0; cursor:pointer; font-size:15px; }
   .roster-remove:hover { color:var(--err); border-color:var(--err); }
   .roster-actions { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-top:16px; }
-  .roster-actions button { margin-top:0; }
+  .roster-actions .btn { margin-top:0; }
   #roster-add { background:none; border:1px solid var(--border); color:var(--fg); font-weight:500; }
   #roster-add:hover { border-color:var(--sage); }
   .roster-restart { color:var(--muted); font-size:13px; margin:14px 0 0; }
@@ -112,7 +121,7 @@
       <p class="live" style="margin-top:4px">A holder that doesn't respond within this window yields to the next seat (dead-seat recovery). Must exceed the ~60s wake debounce. Serialized delivery engages only once ring seats register; before that, this mode falls back to Soft and never silences the room.</p>
     </fieldset>
 
-    <button id="save">Save</button>
+    <button id="save" class="btn">Save</button>
     <div class="msg" id="msg"></div>
     <p class="live">Saved to <code>channel-config.json</code>; the MCP server picks it up on the next post. No kick required.</p>
   </div>
@@ -123,8 +132,8 @@
   <div class="card" data-roster-editor>
     <div id="roster-list"></div>
     <div class="roster-actions">
-      <button type="button" id="roster-add" data-roster-add>+ Add someone</button>
-      <button type="button" id="roster-save" data-roster-save>Save the room</button>
+      <button type="button" id="roster-add" class="btn" data-roster-add>+ Add someone</button>
+      <button type="button" id="roster-save" class="btn" data-roster-save>Save the room</button>
     </div>
     <!-- #506: the difficult issue at the heart of the card — the restart delay is documented
          behaviour, not a bug he reports later. The roster is read once at boot
