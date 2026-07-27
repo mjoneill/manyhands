@@ -49,3 +49,9 @@ receipts-*/
 *.jpeg
 *.gif
 *.webp
+
+# #503 scope item 1, corrected: images were ALREADY blanket-ignored above
+# (*.png et al — the "screenshot-*.png doesn't match" premise was false).
+# The genuinely unprotected receipts content is the NON-image files
+# (metrics.json carries board-derived data). This closes the directory.
+receipts-*/
