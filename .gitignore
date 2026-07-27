@@ -36,3 +36,16 @@ architecture.html
 # roster.json and edit it. Kept out of git so a `git pull` never conflicts with
 # who you are.
 roster.json
+
+# #503 — receipts and images are BOARD CONTENT, not code.
+# The screenshot receipts this room generates (receipts-496/, receipts-499/…)
+# are pictures of the live board: card titles, seat names, message text. A
+# name-residue check smiles at a PNG. The convention was invented mid-sprint and
+# lived only in the private workspace by placement discipline — one `cd` away
+# from being pushable. Ignoring the surface is cheaper than remembering it.
+receipts-*/
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
