@@ -86,6 +86,56 @@ const ROSTER_SCRIPT = `<script>globalThis.__SCRUM_ROSTER__=${
 const MCP_PORT = process.env.MCP_PORT ? parseInt(process.env.MCP_PORT, 10) : 3001;
 const MCP_NOTIFY_URL = process.env.SCRUM_MCP_NOTIFY_URL ?? `http://127.0.0.1:${MCP_PORT}/internal/notify`;
 
+// #513 — the rail the comment above could not be.
+//
+// That warning has sat here since #488 and it did not work: its own author read
+// it, then started a scratch instance without SCRUM_MCP_NOTIFY_URL hours later
+// and delivered a fixture message into another agent's live feed. A comment is
+// read by whoever opens this file; the person starting a dev server never does.
+// So the check moved to where the mistake is made — boot.
+//
+// The discriminator is the PORT, not the board file. A second instance on this
+// machine must take a non-default port, because the live one holds the default;
+// every observed incident (3199, 3272, 3979) did exactly that. Keying on the
+// board file instead would refuse the LIVE service, whose data path is
+// deliberately non-default — a gate that bricks the room it protects.
+//
+// Declared isolation always passes: SCRUM_MCP_NOTIFY_URL='' means "do not
+// notify", an explicit URL means "notify that room on purpose". Only silence
+// is refused, and only on a port that says you are not the main instance.
+//
+// KNOWN RESIDUAL, named rather than papered over: a dev instance started on the
+// DEFAULT port while the REST service is down but the MCP is up would still
+// reach the live room. Narrow — it requires deliberately taking the live port —
+// and closing it would need the plist migration this design exists to avoid.
+//
+// MCP_PORT counts as a declaration too. Saying "notify the MCP on port N" names
+// a target just as surely as giving the whole URL, and tests/instance-isolation
+// does exactly that to exercise the derivation. The phantom incidents declared
+// NEITHER — they inherited 3001 in silence. Silence is the fault, not brevity.
+const DEFAULT_PORT = 3141;
+const declaresTarget = process.env.SCRUM_MCP_NOTIFY_URL !== undefined
+  || process.env.MCP_PORT !== undefined;
+if (PORT !== DEFAULT_PORT && !declaresTarget) {
+  console.error(`
+✗ manyhands refuses to start.
+
+  This instance is on port ${PORT}, not the default ${DEFAULT_PORT}, so it is a
+  second board on this machine — but SCRUM_MCP_NOTIFY_URL is unset, so it would
+  post notifications to the MCP server at ${MCP_NOTIFY_URL}.
+
+  That is the live room. Its members would receive messages from this instance
+  that do not exist on their board, and cannot be found afterwards.
+
+  Setting one port does not isolate an instance. Declare what this one notifies:
+
+    SCRUM_MCP_NOTIFY_URL='' node server.js            # isolated: notify nobody
+    SCRUM_MCP_NOTIFY_URL=http://127.0.0.1:PORT/internal/notify node server.js
+                                                      # a second room, on purpose
+`);
+  process.exit(2);
+}
+
 // Fire-and-forget. A dropped nudge is acceptable — the agent's ?since poll is
 // the reliability backstop. Critically, a down/absent MCP server must NEVER
 // break posting, so the fetch is not awaited and every error is swallowed.
