@@ -69,15 +69,53 @@ test('#525 mechanical: every var(--x) in shipped CSS is defined, or carries a fa
 });
 
 /**
- * Read a computed property, then trigger an interaction, then read again —
- * each in its own evaluation, so the style pass runs in between.
- * This separation is the whole point; see the header.
+ * Read a computed property until it stops moving.
+ *
+ * THE THIRD TRAP, found by Wren grading this suite (2026-07-27): the first
+ * version of this helper slept a flat 120ms. `.board-search-input` carries
+ * `transition: border-color 0.15s`. So the read landed MID-FLIGHT, on an
+ * interpolated colour equal to neither endpoint — which meant
+ * `assert.notEqual(after, textColour)` passed **vacuously in the exact case it
+ * exists to catch**. Planting `border-color: currentColor` on the focus rule
+ * left the suite green. A 30ms gap defeated the discriminator the header spends
+ * two paragraphs explaining.
+ *
+ * This is the lesson already banked in #509's suite comment — *a box measured
+ * mid-flight is the same corrupt number as one measured frozen* — arriving in a
+ * new costume. Geometry there, colour here. **Lessons banked in one suite's
+ * comments do not propagate to the next suite by default.**
+ *
+ * Polling for a stable value rather than raising the sleep is deliberate: a
+ * bigger number is correct only until someone changes a transition duration,
+ * and it would fail silently again when they do. Three consecutive identical
+ * reads is not reachable mid-transition at this sample rate.
+ */
+async function settled(page, selector, prop, { interval = 30, stableReads = 3, maxMs = 2000 } = {}) {
+  const read = () => page.$eval(selector, (el, p) => getComputedStyle(el)[p], prop);
+  let last = null;
+  let same = 0;
+  const deadline = Date.now() + maxMs;
+  while (Date.now() < deadline) {
+    const v = await read();
+    same = v === last ? same + 1 : 0;
+    last = v;
+    if (same >= stableReads - 1) return v;
+    await new Promise((r) => setTimeout(r, interval));
+  }
+  throw new Error(`${selector} ${prop} never settled within ${maxMs}ms (last: ${last}) — `
+    + 'a value still moving after two seconds is a finding, not a timeout to raise');
+}
+
+/**
+ * Read a settled value, trigger an interaction, read the settled value again —
+ * each read in its own evaluation, so the style pass runs in between.
+ * Both properties matter: separate evaluations (trap one) and settled reads
+ * (trap three).
  */
 async function beforeAfter(page, selector, prop, interact) {
-  const before = await page.$eval(selector, (el, p) => getComputedStyle(el)[p], prop);
+  const before = await settled(page, selector, prop);
   await interact();
-  await new Promise((r) => setTimeout(r, 120));
-  const after = await page.$eval(selector, (el, p) => getComputedStyle(el)[p], prop);
+  const after = await settled(page, selector, prop);
   return { before, after, changed: before !== after };
 }
 
