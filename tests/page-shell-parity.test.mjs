@@ -236,6 +236,112 @@ for (const [stateName, makeBoard] of [['populated', populatedBoard], ['empty', e
 }
 
 // ---------------------------------------------------------------------------
+// REOPEN TEETH (2026-07-27, Michael's live walk — #496 reopened). Three
+// certified tiers passed a card that didn't meet its own written scope: work
+// item 2 reads `[ title ] [ destinations ] [ utility cluster ]` and the TITLE
+// half was never built, never asserted, never cold-waked — a correlated blind
+// spot, because every tier checked the same READING of the card instead of
+// enumerating what the card wrote. These two teeth are the missing half.
+// Contract selector: [data-product-mark] — the product title inside the
+// shell head, same mark on every surface.
+// ---------------------------------------------------------------------------
+test('#496 reopen: every surface carries the same product mark in the shell head', async () => {
+  const server = await startRestServer({ board: populatedBoard() });
+  const browser = await puppeteer.launch({ headless: 'new' });
+  try {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1442, height: 900 });
+    const marks = [];
+    for (const s of SURFACES) {
+      await page.goto(`${server.baseUrl}${s}`, { waitUntil: 'networkidle0' });
+      marks.push(await page.evaluate((SHELL_SEL) => {
+        const el = document.querySelector(`${SHELL_SEL} .shell-head [data-product-mark], ${SHELL_SEL} [data-product-mark]`);
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        return { text: el.textContent.trim(), left: +r.left.toFixed(0), top: +r.top.toFixed(0) };
+      }, SHELL));
+    }
+    const offenses = [];
+    marks.forEach((m, i) => {
+      if (!m) offenses.push(`${SURFACES[i]} has no [data-product-mark] in the shell — the title half of work item 2 is missing`);
+    });
+    const present = marks.filter(Boolean);
+    if (present.length > 1) {
+      const ref = present[0];
+      marks.forEach((m, i) => {
+        if (!m) return;
+        if (m.text !== ref.text) offenses.push(`${SURFACES[i]} product mark "${m.text}" differs from "${ref.text}"`);
+        if (Math.abs(m.left - ref.left) > 8 || Math.abs(m.top - ref.top) > 8) {
+          offenses.push(`${SURFACES[i]} product mark position (${m.left},${m.top}) differs from (${ref.left},${ref.top})`);
+        }
+      });
+    }
+    assert.deepEqual(offenses, [], `product-mark offenses (${offenses.length}):\n${offenses.join('\n')}`);
+  } finally {
+    await browser.close();
+    await server.stop();
+  }
+});
+
+/**
+ * The width claim fails on the board: at 1442 the board's columns overflow to
+ * ~1728, the shell header stays viewport-sized, and a horizontal scroll drags
+ * the header off-screen — "header area is fixed width but the page is however
+ * many columns wide… jarring" (Michael). "One width rule, applied everywhere"
+ * was underspecified for content wider than the window. Design-agnostic bar:
+ * EITHER the document does not scroll horizontally (the board pans inside its
+ * own container under a full-width header) OR, after scrolling the document
+ * fully right, the shell head still spans the visible viewport. Both accepted
+ * fixes pass; today's dangling header fails.
+ */
+test('#496 reopen: the shell head never detaches from the viewport on an overflowing board', async () => {
+  // Eight columns force horizontal overflow at 1024 in ANY column layout.
+  const wideBoard = makeBoardFixture({
+    columns: Array.from({ length: 8 }, (_, i) => ({ id: `col${i}`, name: `Column ${i}`, order: i })),
+    cards: [{
+      id: 'w1', shortId: 1, title: 'Wide anchor', description: 'x', type: 'task',
+      assignees: ['sage'], labels: [], for: '', priority: null, column: 'col0',
+      order: 0, createdAt: ts, updatedAt: ts, relationships: { relatedTo: [], blockedBy: [] },
+    }],
+    nextShortId: 2,
+  });
+  const server = await startRestServer({ board: wideBoard });
+  const browser = await puppeteer.launch({ headless: 'new' });
+  try {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1024, height: 900 });
+    await page.goto(`${server.baseUrl}/`, { waitUntil: 'networkidle0' });
+    await page.waitForSelector('.card', { timeout: 5000 });
+
+    const probe = await page.evaluate(() => {
+      const doc = document.scrollingElement;
+      const docScrolls = doc.scrollWidth > window.innerWidth + 1;
+      if (docScrolls) doc.scrollLeft = doc.scrollWidth; // far right
+      const head = document.querySelector('[data-page-shell] .shell-head');
+      const r = head ? head.getBoundingClientRect() : null;
+      return {
+        docScrolls,
+        scrollWidth: doc.scrollWidth,
+        innerWidth: window.innerWidth,
+        headRect: r ? { left: +r.left.toFixed(0), right: +r.right.toFixed(0) } : null,
+      };
+    });
+
+    assert.ok(probe.headRect, 'shell head must exist on the board');
+    if (probe.docScrolls) {
+      assert.ok(probe.headRect.left <= 0 && probe.headRect.right >= probe.innerWidth,
+        `scrolled fully right (scrollWidth ${probe.scrollWidth}, viewport ${probe.innerWidth}), ` +
+        `the shell head spans [${probe.headRect.left}, ${probe.headRect.right}] and has detached from the viewport`);
+    }
+    // If the document does not scroll horizontally, the board pans internally
+    // under a full-width header — the other accepted design; nothing to assert.
+  } finally {
+    await browser.close();
+    await server.stop();
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Prose contract (populated state only — empty state has no running text):
 // 65ch measure, 1.6 leading, AA contrast in both themes.
 // ---------------------------------------------------------------------------
