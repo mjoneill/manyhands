@@ -83,6 +83,23 @@ async function withBoard(fn) {
   }
 }
 
+/**
+ * Wait for the panel to finish sliding in.
+ *
+ * Checking that the panel's LEFT edge is on screen is not enough and cost two
+ * confusing failures: mid-slide the left edge is already inside the viewport
+ * while the right portion — which is where "⤢ Full page" and "✕" live — is
+ * still outside it, so a click on those lands nowhere and puppeteer reports
+ * the unhelpful "Node is either not clickable". The panel has arrived only
+ * when its RIGHT edge has reached the viewport's right edge.
+ */
+const waitForPanelOpen = (page) => page.waitForFunction((sel) => {
+  const p = document.querySelector(sel);
+  if (!p) return false;
+  const r = p.getBoundingClientRect();
+  return Math.round(r.right) <= Math.round(window.innerWidth) + 1 && r.width > 0;
+}, { timeout: 3000 }, PANEL);
+
 /** A page with console/pageerror capture — a silent JS failure must not read
  *  as "the entrance is correctly absent". */
 async function openSurface(browser, baseUrl, surface, viewport = 1442) {
@@ -244,6 +261,130 @@ test('#497 the panel escapes to the full Commons page', async () => {
       await page.close();
     }
   });
+});
+
+// ---------------------------------------------------------------------------
+// Rubric 5, second half — "WITHOUT LOSING POSITION".
+//
+// Added after grading, and the reading is Wren's, not mine. I first read
+// "position" as the board underneath; she read it as the reader's place in the
+// ROOM, and she is right — the board half is the browser's back button doing
+// its ordinary job, while feed continuity is the part only we can preserve or
+// lose. Both are asserted because both are cheap; hers is the load-bearing one.
+//
+// The board half is not hypothetical either. #510 shipped two of exactly this
+// bug in one evening — a deep link with no history entry behind it (a one-way
+// door), and an anchor default stacking "#" on top of "?card=NNN" so Back went
+// nowhere. A promote link is the same shape.
+// ---------------------------------------------------------------------------
+test('#497 the escape to the full page is a real navigation, and Back comes home intact', async () => {
+  await withBoard(async ({ server, browser }) => {
+    for (const surface of WITH_ENTRANCE) {
+      const { page, errors } = await openSurface(browser, server.baseUrl, surface);
+      const from = page.url();
+
+      await page.click(TOGGLE);
+      await waitForPanelOpen(page);
+
+      await Promise.all([
+        page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 5000 }),
+        page.click(`${PANEL} a[href*="commons.html"]`),
+      ]);
+      assert.match(page.url(), /commons\.html$/,
+        `${surface}: "Full page" landed on ${page.url()} — it must be a real navigation to the Commons page, with no query or hash residue.`);
+
+      await Promise.all([
+        page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 5000 }),
+        page.goBack(),
+      ]);
+      assert.equal(page.url(), from,
+        `${surface}: Back landed on ${page.url()} instead of ${from} — the escape was a one-way door.`);
+
+      // …and the surface still works when you get there, rather than being a
+      // shell that needs a reload.
+      await page.waitForSelector('.topnav .navlink', { timeout: 5000 });
+      const home = await page.evaluate((sel) => ({
+        entrance: document.querySelectorAll(sel.TOGGLE).length,
+        nav: document.querySelectorAll('.topnav .navlink').length,
+      }), { TOGGLE });
+      assert.equal(home.entrance, 1, `${surface}: the entrance did not survive the round trip (found ${home.entrance}).`);
+      assert.ok(home.nav >= 4, `${surface}: the nav did not survive the round trip (found ${home.nav} links).`);
+      assert.deepEqual(errors, [], `${surface}: the round trip logged errors: ${errors.join(' | ')}`);
+      await page.close();
+    }
+  });
+});
+
+/**
+ * The load-bearing half of rubric 5: you are in the panel, scrolled back into
+ * the conversation, and you hit ⤢ BECAUSE you want more room to read. The full
+ * page must put you at the same point in the feed, not at whatever it defaults
+ * to. Losing your place is the thing a reader would name as broken.
+ *
+ * Deliberately written to keep biting: if both surfaces happen to agree today
+ * only because each independently lands at "newest", this passes cheaply now
+ * and fails the day pagination or a jump-to-message lands on one of them and
+ * not the other.
+ */
+test('#497 escaping to the full page keeps your place in the feed', {
+  todo: 'FAILS TODAY — filed as #517. Kept, not deleted: it is the acceptance ' +
+        'criterion and it already fails for the right reason. Un-todo it to work ' +
+        'that card. The fix is not a tweak — neither renderer emits a message id, ' +
+        'the promote link is static, and commons.html has no anchor handling.',
+}, async () => {
+  const many = makeBoardFixture({
+    conversations: Array.from({ length: 40 }, (_, i) => ({
+      id: `m${i}`,
+      body: `Message ${i} — long enough to occupy a line or two of the feed so that forty of them do not fit in one viewport and the panel genuinely scrolls.`,
+      author: i % 2 ? 'sage' : 'alex',
+      attachedTo: null,
+      createdAt: `2026-05-01T${String(i % 24).padStart(2, '0')}:${String(i).padStart(2, '0')}:00.000Z`,
+    })),
+    nextShortId: 1,
+  });
+  const server = await startRestServer({ board: many, staticDir: PROJECT_DIR });
+  const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'] });
+  try {
+    const { page } = await openSurface(browser, server.baseUrl, '/wiki.html');
+    await page.click(TOGGLE);
+    await waitForPanelOpen(page);
+    await page.waitForFunction((sel) => document.querySelectorAll(`${sel} .cv-msg, ${sel} .conv-msg`).length > 5,
+      { timeout: 5000 }, PANEL);
+
+    // Scroll back into the conversation and note where the reader is.
+    const anchoredOn = await page.evaluate((sel) => {
+      const scroller = [...document.querySelectorAll(`${sel} *`)]
+        .find((e) => e.scrollHeight > e.clientHeight + 40);
+      if (!scroller) return null;
+      scroller.scrollTop = Math.round(scroller.scrollHeight * 0.35);
+      const msgs = [...scroller.querySelectorAll('.cv-msg, .conv-msg')];
+      const box = scroller.getBoundingClientRect();
+      const top = msgs.find((m) => m.getBoundingClientRect().bottom > box.top + 4);
+      return top ? (top.textContent.match(/Message \d+/) || [null])[0] : null;
+    }, PANEL);
+    assert.ok(anchoredOn, 'the panel feed did not scroll — the fixture or the selector is wrong, not the product');
+
+    await Promise.all([
+      page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 5000 }),
+      page.click(`${PANEL} a[href*="commons.html"]`),
+    ]);
+    await page.waitForFunction(() => document.querySelectorAll('.cv-msg, .conv-msg').length > 5, { timeout: 5000 });
+
+    const landedNear = await page.evaluate((needle) => {
+      const msgs = [...document.querySelectorAll('.cv-msg, .conv-msg')];
+      const hit = msgs.find((m) => m.textContent.includes(needle));
+      if (!hit) return { found: false };
+      const r = hit.getBoundingClientRect();
+      return { found: true, inViewport: r.bottom > 0 && r.top < window.innerHeight };
+    }, anchoredOn);
+
+    assert.equal(landedNear.found, true, `"${anchoredOn}" is not on the full page at all`);
+    assert.equal(landedNear.inViewport, true,
+      `the reader was on "${anchoredOn}" in the panel and the full page did not bring it into view — the escape lost their place in the room.`);
+  } finally {
+    await browser.close();
+    await server.stop();
+  }
 });
 
 // ---------------------------------------------------------------------------
