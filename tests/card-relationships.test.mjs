@@ -13,16 +13,40 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { startRestServer } from './helpers/harness.mjs';
+import { startRestServer, makeBoardFixture } from './helpers/harness.mjs';
 
-function apiTest(name, fn) {
+function apiTest(name, fn, { board } = {}) {
   test(name, async () => {
-    const server = await startRestServer();
+    const server = await startRestServer(board ? { board } : undefined);
     try {
       await fn(server);
     } finally {
       await server.stop();
     }
+  });
+}
+
+/** A board carrying a card whose stored `relationships` is already malformed. */
+function legacyBoard(relationships) {
+  const ts = '2026-01-01T00:00:00.000Z';
+  return makeBoardFixture({
+    nextShortId: 2,
+    cards: [{
+      id: '11111111-2222-3333-4444-555555555555',
+      shortId: 1,
+      title: 'legacy junk',
+      description: '',
+      type: 'task',
+      createdAt: ts,
+      updatedAt: ts,
+      assignees: ['unassigned'],
+      labels: [],
+      for: '',
+      priority: null,
+      column: 'backlog',
+      order: 0,
+      relationships,
+    }],
   });
 }
 
@@ -148,6 +172,42 @@ apiTest('unknown keys inside relationships are dropped, not merged in (#249 spir
   assert.deepEqual(patched.relationships.relatedTo, [7]);
   assert.deepEqual(patched.relationships.blockedBy, [466]);
 });
+
+// ── legacy state must be HEALED, not carried forward (#548, MiniMo's review) ──
+//
+// Validation only guards payloads arriving from now on. The endpoint used to
+// accept anything, so malformed state is already on disk — and the first merge
+// spread the existing object, which preserved it. A string spreads into indexed
+// character keys: {...'banana'} → {0:'b',1:'a',…}. The repair has to normalise
+// what it finds, or the fix is prospective only and the junk outlives it.
+
+apiTest('a stored relationships STRING is normalised away by the next partial patch', async ({ baseUrl }) => {
+  const patched = await (await fetch(`${baseUrl}/api/cards/1`, json({
+    method: 'PATCH', body: JSON.stringify({ relationships: { relatedTo: [5] } }),
+  }))).json();
+
+  assert.deepEqual(patched.relationships, { relatedTo: [5], blockedBy: [] },
+    'string did not survive as indexed character keys');
+}, { board: legacyBoard('banana') });
+
+apiTest('stored unknown inner keys and non-array lists are normalised away', async ({ baseUrl }) => {
+  const patched = await (await fetch(`${baseUrl}/api/cards/1`, json({
+    method: 'PATCH', body: JSON.stringify({ relationships: { relatedTo: [5] } }),
+  }))).json();
+
+  assert.deepEqual(Object.keys(patched.relationships).sort(), ['blockedBy', 'relatedTo']);
+  assert.deepEqual(patched.relationships.relatedTo, [5]);
+  assert.deepEqual(patched.relationships.blockedBy, [], 'a non-array stored list becomes []');
+}, { board: legacyBoard({ relatedTo: [1], blockedBy: 'nope', duplicateOf: [9] }) });
+
+apiTest('a VALID stored list is still preserved through a partial patch', async ({ baseUrl }) => {
+  // The healing must not become a reset — the sibling still has to survive.
+  const patched = await (await fetch(`${baseUrl}/api/cards/1`, json({
+    method: 'PATCH', body: JSON.stringify({ relationships: { relatedTo: [5] } }),
+  }))).json();
+
+  assert.deepEqual(patched.relationships, { relatedTo: [5], blockedBy: [466] });
+}, { board: legacyBoard({ relatedTo: [1], blockedBy: [466] }) });
 
 apiTest('a card created with no relationships can still be patched partially', async ({ baseUrl }) => {
   const created = await (await fetch(`${baseUrl}/api/cards`, json({

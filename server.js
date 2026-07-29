@@ -698,9 +698,18 @@ async function handleUpdateCard(req, res, idOrShortId) {
         // looked identical to a correct write. Merge key-wise instead; clearing
         // stays possible by sending an explicit [].
         if (k === 'relationships') {
-          const next = { relatedTo: [], blockedBy: [], ...(card.relationships || {}) };
+          // Build from the allowlist rather than spreading what's already there:
+          // validation only guards payloads from now on, and the endpoint used to
+          // accept anything, so malformed state is already on disk. Spreading it
+          // would carry it forward — a stored string spreads into indexed keys
+          // ({...'banana'} → {0:'b',…}). Normalise instead, so a partial patch
+          // HEALS a legacy card rather than preserving its junk.
+          const current = card.relationships;
+          const stored = current && typeof current === 'object' && !Array.isArray(current) ? current : {};
+          const next = {};
           for (const key of RELATIONSHIP_KEYS) {
-            if (v[key] !== undefined) next[key] = v[key];
+            if (Array.isArray(v[key])) next[key] = v[key];
+            else next[key] = Array.isArray(stored[key]) ? stored[key] : [];
           }
           card.relationships = next;
           continue;
