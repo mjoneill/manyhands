@@ -200,6 +200,19 @@ apiTest('stored unknown inner keys and non-array lists are normalised away', asy
   assert.deepEqual(patched.relationships.blockedBy, [], 'a non-array stored list becomes []');
 }, { board: legacyBoard({ relatedTo: [1], blockedBy: 'nope', duplicateOf: [9] }) });
 
+apiTest('a stored ARRAY is normalised away too', async ({ baseUrl }) => {
+  // Surfaced by mutation testing: dropping the object-guard in the merge is an
+  // EQUIVALENT mutant (the per-key Array.isArray check already handles every
+  // non-object shape), so no test could kill it. Pinning the behaviour anyway —
+  // an array is a legacy shape someone could have stored, and a later
+  // "simplification" of the merge should not be free to change what it does.
+  const patched = await (await fetch(`${baseUrl}/api/cards/1`, json({
+    method: 'PATCH', body: JSON.stringify({ relationships: { relatedTo: [5] } }),
+  }))).json();
+
+  assert.deepEqual(patched.relationships, { relatedTo: [5], blockedBy: [] });
+}, { board: legacyBoard([1, 2, 3]) });
+
 apiTest('a VALID stored list is still preserved through a partial patch', async ({ baseUrl }) => {
   // The healing must not become a reset — the sibling still has to survive.
   const patched = await (await fetch(`${baseUrl}/api/cards/1`, json({
