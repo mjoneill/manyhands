@@ -481,6 +481,9 @@ const CARD_TYPES = new Set(['task', 'idea', 'goal', 'reference', 'feature']);
 const CARD_PRIORITIES = new Set(['p0', 'p1', 'p2', 'p3']);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ASSIGNEE_KEY_RE = /^[A-Za-z0-9_-]+$/;
+// #548 — the only two keys `relationships` may hold. Named once so validation
+// and the key-wise merge in handleUpdateCard cannot drift apart.
+const RELATIONSHIP_KEYS = ['relatedTo', 'blockedBy'];
 
 // Returns an error string if any security-sensitive field is malformed, else
 // null. Presence-conditional — a field absent from the payload keeps its default.
@@ -506,6 +509,24 @@ function validateCardFields(body, { checkId = true } = {}) {
     if (!Array.isArray(body.assignees)) return 'assignees must be an array';
     for (const a of body.assignees) {
       if (typeof a !== 'string' || !ASSIGNEE_KEY_RE.test(a)) return 'invalid assignee';
+    }
+  }
+  // #548 — `relationships` had NO validation at all: `{relationships: "banana"}`
+  // stored a string and answered 200. Shape-check it here so the key-wise merge
+  // in handleUpdateCard can never fold junk into a card's link lists.
+  if (body.relationships !== undefined) {
+    const r = body.relationships;
+    if (r === null || typeof r !== 'object' || Array.isArray(r)) {
+      return 'relationships must be an object';
+    }
+    for (const key of RELATIONSHIP_KEYS) {
+      if (r[key] === undefined) continue;
+      if (!Array.isArray(r[key])) return `relationships.${key} must be an array`;
+      for (const n of r[key]) {
+        if (typeof n !== 'number' || !Number.isInteger(n) || n < 1) {
+          return `relationships.${key} must contain card numbers`;
+        }
+      }
     }
   }
   return null;
@@ -670,6 +691,20 @@ async function handleUpdateCard(req, res, idOrShortId) {
       for (const [k, v] of Object.entries(patch)) {
         if (IMMUTABLE_CARD_FIELDS.has(k)) continue;
         if (!PATCHABLE_CARD_FIELDS.has(k)) continue; // #249 — ignore unknown keys
+        // #548 — `relationships` is the only nested object here, so it was the
+        // only field where `card[k] = v` (a correct shallow merge, one level up)
+        // silently DELETED the sibling key. Callers naturally send just the list
+        // they're changing, so adding a relatedTo unblocked the card and the 200
+        // looked identical to a correct write. Merge key-wise instead; clearing
+        // stays possible by sending an explicit [].
+        if (k === 'relationships') {
+          const next = { relatedTo: [], blockedBy: [], ...(card.relationships || {}) };
+          for (const key of RELATIONSHIP_KEYS) {
+            if (v[key] !== undefined) next[key] = v[key];
+          }
+          card.relationships = next;
+          continue;
+        }
         card[k] = v;
       }
       card.updatedAt = new Date().toISOString();
