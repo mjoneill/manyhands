@@ -74,6 +74,47 @@ const SERVER_SRC = path.join(SERVER_DIR, 'server.js');
  */
 const PRE_LISTEN_EXCEPTIONS = ['migrateBoardIfNeeded'];
 
+/**
+ * Blank out comments and string bodies, preserving every offset and newline.
+ *
+ * Necessary, and found the hard way: the first version of this file matched
+ * `migrateBoardIfNeeded(` against the raw source and counted @indigo's new
+ * explanatory COMMENT as a second call — so the test failed on the tree with
+ * the good comment and passed on the tree without it. A source matcher that
+ * cannot tell code from prose grades documentation as behaviour.
+ *
+ * Strings are blanked too because server.js contains `http://127.0.0.1`, and a
+ * `//` inside a string would otherwise swallow the rest of the line as a
+ * comment. Length is preserved so line numbers and offsets stay meaningful.
+ */
+function codeOnly(src) {
+  const out = src.split('');
+  const blank = (i) => { if (out[i] !== '\n') out[i] = ' '; };
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    const d = src[i + 1];
+    if (c === '/' && d === '/') {
+      while (i < src.length && src[i] !== '\n') blank(i++);
+    } else if (c === '/' && d === '*') {
+      blank(i++); blank(i++);
+      while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) blank(i++);
+      blank(i++); blank(i++);
+    } else if (c === "'" || c === '"' || c === '`') {
+      const quote = c;
+      i++; // keep the opening quote so the token still parses as a string
+      while (i < src.length && src[i] !== quote) {
+        if (src[i] === '\\') blank(i++);
+        if (i < src.length) blank(i++);
+      }
+      i++;
+    } else {
+      i++;
+    }
+  }
+  return out.join('');
+}
+
 /** Byte ranges of every `withWriteLock(...)` callback body, by brace matching. */
 function lockedRanges(src) {
   const ranges = [];
@@ -102,7 +143,7 @@ function enclosingFunction(src, offset) {
 }
 
 test('#558 — every request-reachable writeBoard() runs inside withWriteLock', () => {
-  const src = fs.readFileSync(SERVER_SRC, 'utf8');
+  const src = codeOnly(fs.readFileSync(SERVER_SRC, 'utf8'));
   const ranges = lockedRanges(src);
 
   // Call sites only — skip the `function writeBoard(data) {` declaration.
@@ -141,6 +182,53 @@ test('#558 — every request-reachable writeBoard() runs inside withWriteLock', 
     [...PRE_LISTEN_EXCEPTIONS].sort(),
     'the set of unlocked writeBoard sites changed; re-derive PRE_LISTEN_EXCEPTIONS',
   );
+});
+
+/**
+ * The exception above is only safe because of an ORDERING, so the ordering has
+ * to be asserted rather than described.
+ *
+ * Caught by @minimo reviewing this file: as first written, the test named
+ * `migrateBoardIfNeeded` as safe "because it runs before listen()" and then
+ * checked no such thing. Move that call below `server.listen()` and the
+ * exception set is unchanged, the test stays green, and an unlocked
+ * read-modify-write becomes reachable while requests are in flight.
+ *
+ * ⇒ Which is this card's own defect, one level up: a safety claim asserted in
+ *   prose next to a check that does not cover it. The comment at server.js:410
+ *   cost us a wrong public conclusion for exactly this reason.
+ */
+test('#558 — the unlocked boot migration runs before listen(), which is why it is safe', () => {
+  const raw = fs.readFileSync(SERVER_SRC, 'utf8');
+  const src = codeOnly(raw);
+  assert.equal(src.length, raw.length, 'codeOnly() must preserve offsets');
+  assert.ok(src.includes('function handleSave'), 'codeOnly() blanked real code');
+
+  for (const fn of PRE_LISTEN_EXCEPTIONS) {
+    // Invocations, not the declaration: `migrateBoardIfNeeded();` at top level.
+    const calls = [...src.matchAll(new RegExp(`(^|[^\\w.])${fn}\\s*\\(`, 'gm'))]
+      .filter((m) => !/^\s*(async\s+)?function\s/.test(
+        src.slice(src.lastIndexOf('\n', m.index) + 1, src.indexOf('\n', m.index)),
+      ));
+
+    assert.equal(
+      calls.length, 1,
+      `${fn} is called ${calls.length} times; the pre-listen safety argument covers exactly one boot-time call`,
+    );
+
+    const listen = src.search(/\.listen\s*\(/);
+    assert.notEqual(listen, -1, 'could not find the server .listen() call');
+
+    const callLine = src.slice(0, calls[0].index).split('\n').length;
+    const listenLine = src.slice(0, listen).split('\n').length;
+
+    assert.ok(
+      calls[0].index < listen,
+      `${fn}() is invoked at server.js:${callLine}, AFTER .listen() at server.js:${listenLine} — `
+      + 'it is an unlocked read-modify-write and requests can now be in flight while it runs. '
+      + 'Either move it back above listen() or give it the lock like every other write path.',
+    );
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════════
