@@ -13,12 +13,15 @@
  *
  * ⚠️ Run it BOTH ways or don't believe either result:
  *
- *   node tests/tools/interleave-probe.mjs .          500   →  ⚪ 0 lost
- *   node tests/tools/interleave-probe.mjs <yielding> 60    →  🔴 60 lost
+ *   node tests/tools/interleave-probe.mjs . 500                  →  ⚪ 0 lost
+ *   node tests/tools/interleave-probe.mjs . 60 --inject-yield    →  🔴 60 lost
  *
- * The second needs a tree whose handleSave has one `await` between readBoard
- * and writeBoard — makeYieldingTree() in api-write-lock.test.mjs builds exactly
- * that, and the behavior test there is this probe's automated form.
+ * Both are copy-paste runnable from a clean checkout — that is the point, and
+ * @minimo had to say so: the first version documented a positive control whose
+ * yielding tree no committed command could build. `--inject-yield` now creates
+ * and cleans its own, using the same injector as the automated behavior test
+ * (tools/yielding-tree.mjs), so the one-round test and the many-round probe
+ * cannot drift apart.
  *
  * ⭐ The point of keeping the positive control attached: a null result from an
  *   unvalidated probe is indistinguishable from a probe that never overlapped
@@ -33,9 +36,23 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { makeYieldingTree } from './yielding-tree.mjs';
 
-const serverDir = path.resolve(process.argv[2]);
-const ROUNDS = Number(process.argv[3] || 200);
+const argv = process.argv.slice(2);
+const INJECT = argv.includes('--inject-yield');
+const positional = argv.filter((a) => !a.startsWith('--'));
+const TARGET_DIR = path.resolve(positional[0] || '.');
+const ROUNDS = Number(positional[1] || 200);
+
+// --inject-yield builds its own throwaway tree with ONE await inserted at the
+// real read→write seam, so the positive control is a committed command rather
+// than a scratchpad someone has to rebuild. Same injector the behavior test
+// uses (tools/yielding-tree.mjs), so the two cannot drift apart.
+const yielding = INJECT ? makeYieldingTree(TARGET_DIR) : null;
+const serverDir = yielding ? yielding.dir : TARGET_DIR;
+if (yielding) {
+  console.log(`fault injection ON — one ${yielding.pauseMs}ms yield after handleSave's readBoard()`);
+}
 
 const freePort = () => new Promise((res, rej) => {
   const s = net.createServer();
@@ -106,5 +123,7 @@ try {
   try { fs.rmSync(attachDir, { recursive: true, force: true }); } catch {}
 }
 
-console.log(JSON.stringify({ serverDir, ROUNDS, both, lostComments, lostSaves, rejected }, null, 2));
+if (yielding) yielding.cleanup();
+
+console.log(JSON.stringify({ target: TARGET_DIR, injectedYield: INJECT, ROUNDS, both, lostComments, lostSaves, rejected }, null, 2));
 console.log(lostComments || lostSaves ? '🔴 LOSS DETECTED' : '⚪ no loss');

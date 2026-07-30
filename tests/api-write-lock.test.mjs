@@ -51,6 +51,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { makeYieldingTree, SEAM, DEFAULT_PAUSE_MS } from './tools/yielding-tree.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SERVER_DIR = path.resolve(process.env.SCRUM_LOCK_TEST_SERVER_DIR || path.join(__dirname, '..'));
@@ -235,9 +236,7 @@ test('#558 — the unlocked boot migration runs before listen(), which is why it
 // 2 · PRIMARY BEHAVIOR TEST — one injected yield at the real seam
 // ═══════════════════════════════════════════════════════════════════
 
-/** The line present in both baseline and fixed `handleSave`; the seam itself. */
-const SEAM = 'const existing = readBoard();';
-const PAUSE_MS = 400;
+const PAUSE_MS = DEFAULT_PAUSE_MS;
 
 const freePort = () => new Promise((res, rej) => {
   const s = net.createServer();
@@ -247,34 +246,13 @@ const freePort = () => new Promise((res, rej) => {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/**
- * A throwaway copy of SERVER_DIR whose only difference from production is one
- * `await` immediately after handleSave's `readBoard()`. Everything else — core/,
- * node_modules, the static pages — is symlinked, so the server under test is
- * the real server.
- */
-function makeYieldingTree() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scrum-558-yield-'));
-  for (const entry of fs.readdirSync(SERVER_DIR)) {
-    if (entry === 'server.js' || entry === '.git') continue;
-    fs.symlinkSync(path.join(SERVER_DIR, entry), path.join(dir, entry));
-  }
-  const src = fs.readFileSync(SERVER_SRC, 'utf8');
-  const at = src.indexOf(SEAM);
-  assert.notEqual(at, -1, `could not find the read→write seam (${SEAM}) in ${SERVER_SRC}`);
-  assert.equal(src.indexOf(SEAM, at + 1), -1, 'the seam anchor is not unique; the patch would be ambiguous');
-  const cut = src.indexOf('\n', at) + 1;
-  const patched = src.slice(0, cut)
-    + `\n      // ── #558 FAULT INJECTION (test only): the one yield production\n`
-    + `      // code does not have yet, and will the moment the store goes async.\n`
-    + `      await new Promise((r) => setTimeout(r, ${PAUSE_MS}));\n\n`
-    + src.slice(cut);
-  fs.writeFileSync(path.join(dir, 'server.js'), patched);
-  return dir;
-}
+// The fault injector is shared with tests/tools/interleave-probe.mjs so the
+// automated one-round test and the many-round probe inject the SAME yield.
+// See tools/yielding-tree.mjs for why the seam is `SEAM` and nothing else.
+void SEAM;
 
 async function startYieldingServer() {
-  const dir = makeYieldingTree();
+  const { dir } = makeYieldingTree(SERVER_DIR);
   const port = await freePort();
   const boardFile = path.join(dir, 'board-under-test.json');
   const attachmentsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'scrum-558-attach-'));
