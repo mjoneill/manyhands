@@ -14,15 +14,24 @@
  * subtle once measured: `handleSave`'s read-modify-write contains no `await`,
  * and `core/store.mjs` is `readFileSync`/`writeFileSync`/`renameSync`. A
  * synchronous section on a single-threaded event loop cannot be preempted, so
- * step 2 can never land between steps 1 and 3. Measured, not assumed: 500
- * rounds of maximally-overlapped save-vs-comment lost nothing. 0 of 13
- * read→write spans in server.js contain an await.
+ * step 2 can never land between steps 1 and 3.
+ *
+ * Every number below names the command that reproduces it, because a durable
+ * comment citing a measurement whose instrument is not in the repository is a
+ * claim with an evaporated receipt — the defect this file exists to catch, one
+ * level up. Re-derivable facts first; counts second, with their instrument:
+ *
+ *   `handleSave` has no await; core/store.mjs is *Sync   read the code
+ *   0 of 13 read→write spans contain an await            the first test below
+ *                                                        computes it, and fails
+ *                                                        if it stops being true
+ *   500 overlapped rounds lost nothing                    node tests/tools/interleave-probe.mjs . 500
+ *   60 of 60 lost with one injected yield                 node tests/tools/interleave-probe.mjs . 60 --inject-yield
  *
  * ⇒ The defect is LATENT. What protects us today is synchrony, not the mutex,
  *   and that property was written down nowhere. The first `await` added to
  *   that stretch — or an async store, which #530 would produce — converts it
- *   to silent data loss. Injecting exactly one yield made the loss happen in
- *   60 of 60 rounds.
+ *   to silent data loss.
  *
  * So the behavior test below FAULT-INJECTS that single yield at the real
  * read→write seam and then runs the real choreography over real HTTP against
