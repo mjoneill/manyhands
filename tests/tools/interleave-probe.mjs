@@ -42,6 +42,19 @@
  * the automated behavior test uses (tools/yielding-tree.mjs), so the one-round
  * test and the many-round probe cannot drift apart in what they inject.
  *
+ * ── EXIT CODES — the verdict is machine-readable and fails closed ───────────
+ *
+ *   0  clean: every requested round was accepted, nothing lost
+ *   1  loss detected — mode 2's expected outcome, a finding rather than an error
+ *   2  usage error (unknown flag, bad rounds, no server.js in the target)
+ *   3  INCONCLUSIVE: some rounds were refused, so a null concludes nothing
+ *
+ * ⚠️ Code 3 exists because a run where every write was REFUSED used to print
+ *   `⚪ no loss` — identical to a clean 500-round null. Nothing lost and nothing
+ *   measured are not the same result, and only one of them is reassuring.
+ *   Rounds refused by the server are excluded from the denominator, never
+ *   silently counted as survivals.
+ *
  * Not a test — nothing here asserts. It is a measuring device, and it is slow
  * (500 rounds ≈ 40s), so it stays out of the suite deliberately.
  *
@@ -172,7 +185,11 @@ try {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   });
 
-  let lostComments = 0, lostSaves = 0, both = 0, rejected = 0;
+  // `accepted` is the ONLY denominator. A round whose write was refused was
+  // never measured, so it can neither survive nor be lost — and counting it as
+  // "not lost" is how a probe that measured nothing reports reassurance.
+  let lostComments = 0, lostSaves = 0, both = 0, rejected = 0, accepted = 0;
+  const rejections = [];
   for (let i = 0; i < ROUNDS; i++) {
     const sentinel = `sentinel-${i}-${Math.random().toString(36).slice(2)}`;
     const title = `renamed-${i}`;
@@ -182,7 +199,14 @@ try {
       }),
       post('/api/conversations', { author: 'probe', body: sentinel }),
     ]);
-    if (!saved.ok || !appended.ok) { rejected++; continue; }
+    if (!saved.ok || !appended.ok) {
+      rejected++;
+      if (rejections.length < 3) {
+        rejections.push(`round ${i}: /api/save ${saved.status} · /api/conversations ${appended.status}`);
+      }
+      continue;
+    }
+    accepted++;
 
     const disk = fs.readFileSync(boardFile, 'utf8');
     const commentSurvived = disk.includes(sentinel);
@@ -192,10 +216,48 @@ try {
     if (commentSurvived && saveSurvived) both++;
   }
 
-  result = { target: TARGET_DIR, injectedYield: INJECT, rounds: ROUNDS, both, lostComments, lostSaves, rejected };
+  result = {
+    target: TARGET_DIR,
+    injectedYield: INJECT,
+    roundsRequested: ROUNDS,
+    roundsAccepted: accepted,
+    rejected,
+    rejectionSamples: rejections,
+    bothSurvived: both,
+    lostComments,
+    lostSaves,
+  };
 } finally {
   cleanupAll();
 }
 
 console.log(JSON.stringify(result, null, 2));
-console.log(result.lostComments || result.lostSaves ? '🔴 LOSS DETECTED' : '⚪ no loss');
+
+// ── the verdict, and its exit code ──────────────────────────────────────────
+// Fail closed on the ambiguous case. `rejected > 0` with no losses used to print
+// ⚪ no loss, so a run where EVERY write was refused — nothing measured at all —
+// read identically to a clean 500-round null. That is the exact failure this
+// whole card is about: an instrument that cannot tell "nothing went wrong" from
+// "nothing happened". A detected loss is still a real finding regardless of
+// rejections, so only the reassuring outcome is gated.
+//
+//   0  clean: every requested round was accepted, nothing lost
+//   1  loss detected (mode 2's expected outcome — a finding, not an error)
+//   2  usage error
+//   3  INCONCLUSIVE: some rounds never ran, so a null means nothing
+const lost = result.lostComments + result.lostSaves;
+
+if (lost > 0) {
+  console.log(`🔴 LOSS DETECTED — ${lost} of ${result.roundsAccepted} accepted round(s) lost an accepted write.`);
+  if (result.rejected) console.log(`   (${result.rejected} round(s) were refused and are excluded from the denominator.)`);
+  process.exit(1);
+}
+
+if (result.rejected > 0) {
+  console.log(`⚠️  INCONCLUSIVE — ${result.rejected} of ${result.roundsRequested} round(s) were refused, so nothing`);
+  console.log(`    can be concluded from the ${result.roundsAccepted} that ran. A null here is not evidence of no loss.`);
+  for (const r of result.rejectionSamples) console.log(`      ${r}`);
+  process.exit(3);
+}
+
+console.log(`⚪ no loss — ${result.roundsAccepted} of ${result.roundsRequested} round(s) accepted and survived.`);
