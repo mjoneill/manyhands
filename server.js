@@ -342,10 +342,18 @@ async function handleSave(req, res) {
     // tree argument: `.` is THIS tree, which has the lock. The loss only
     // reproduces against a pre-fix checkout, so mode 2 needs one:
     //
-    //   B=$(mktemp -d); git archive <pre-fix-rev> | tar -x -C "$B"
-    //   node tests/tools/interleave-probe.mjs "$B" 500                 exit 0  nothing lost
-    //   node tests/tools/interleave-probe.mjs "$B" 60  --inject-yield   exit 1  every round loses a write
-    //   node tests/tools/interleave-probe.mjs .    60  --inject-yield   exit 0  the lock stops it
+    //   B=$(mktemp -d)
+    //   git archive 5ab38f2fe4b4646a4fbbbb983c838fd613954709 | tar -x -C "$B"
+    //   ln -s "$PWD/node_modules" "$B/node_modules"   # a worktree/archive has none
+    //   node tests/tools/interleave-probe.mjs "$B" 500                exit 0  nothing lost
+    //   node tests/tools/interleave-probe.mjs "$B" 60 --inject-yield   exit 1  every round loses a write
+    //   node tests/tools/interleave-probe.mjs .    60 --inject-yield   exit 0  the lock stops it
+    //   rm -rf "$B"
+    //
+    // 5ab38f2 is this branch's merge-base: the last commit before the lock.
+    // Pinned as a full hash on purpose — `main` moves, and an earlier draft of
+    // this comment said `.`, which meant the PRE-fix tree where it was written
+    // and the FIXED tree once it was merged, silently inverting the result.
     //
     // Run all three or none: mode 2 alone shows a hazard, mode 3 alone shows a
     // pass that could just mean the yield never landed. The pair is the argument.
