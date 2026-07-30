@@ -188,7 +188,7 @@ try {
   // `accepted` is the ONLY denominator. A round whose write was refused was
   // never measured, so it can neither survive nor be lost — and counting it as
   // "not lost" is how a probe that measured nothing reports reassurance.
-  let lostComments = 0, lostSaves = 0, both = 0, rejected = 0, accepted = 0;
+  let lostComments = 0, lostSaves = 0, lostRounds = 0, both = 0, rejected = 0, accepted = 0;
   const rejections = [];
   for (let i = 0; i < ROUNDS; i++) {
     const sentinel = `sentinel-${i}-${Math.random().toString(36).slice(2)}`;
@@ -211,8 +211,13 @@ try {
     const disk = fs.readFileSync(boardFile, 'utf8');
     const commentSurvived = disk.includes(sentinel);
     const saveSurvived = disk.includes(title);
+    // Two counters, because they answer different questions and mixing them
+    // produced a numerator that could exceed its denominator: lostWrites counts
+    // vanished WRITES (a round can lose both), lostRounds counts rounds that
+    // lost at least one. Only the second is commensurable with roundsAccepted.
     if (!commentSurvived) lostComments++;
     if (!saveSurvived) lostSaves++;
+    if (!commentSurvived || !saveSurvived) lostRounds++;
     if (commentSurvived && saveSurvived) both++;
   }
 
@@ -224,6 +229,8 @@ try {
     rejected,
     rejectionSamples: rejections,
     bothSurvived: both,
+    lostRounds,
+    lostWrites: lostComments + lostSaves,
     lostComments,
     lostSaves,
   };
@@ -245,10 +252,9 @@ console.log(JSON.stringify(result, null, 2));
 //   1  loss detected (mode 2's expected outcome — a finding, not an error)
 //   2  usage error
 //   3  INCONCLUSIVE: some rounds never ran, so a null means nothing
-const lost = result.lostComments + result.lostSaves;
-
-if (lost > 0) {
-  console.log(`🔴 LOSS DETECTED — ${lost} of ${result.roundsAccepted} accepted round(s) lost an accepted write.`);
+if (result.lostRounds > 0) {
+  console.log(`🔴 LOSS DETECTED — ${result.lostRounds} of ${result.roundsAccepted} accepted round(s) lost at least one`);
+  console.log(`   accepted write (${result.lostWrites} write(s) total: ${result.lostComments} comment(s), ${result.lostSaves} save(s)).`);
   if (result.rejected) console.log(`   (${result.rejected} round(s) were refused and are excluded from the denominator.)`);
   process.exit(1);
 }
