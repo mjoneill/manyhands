@@ -17,19 +17,19 @@
  * ── THE THREE MODES, AND ALL THREE ARE THE ARGUMENT ─────────────────────────
  * One mode alone proves nothing. Read them as a sequence:
  *
- *   1 · baseline — is it broken today?
- *       node tests/tools/interleave-probe.mjs . 500
+ *   1 · baseline — is it broken today?          [PRE-FIX checkout]
+ *       node tests/tools/interleave-probe.mjs <pre-fix-tree> 500
  *       →  ⚪ no loss.  The interleave CANNOT happen: handleSave's critical
  *          section has no `await` and core/store.mjs is *Sync, so it cannot be
  *          preempted. Atomic by accident, not by the mutex.
  *
  *   2 · positive control — is the probe even capable of seeing a loss?
- *       node tests/tools/interleave-probe.mjs . 60 --inject-yield
+ *       node tests/tools/interleave-probe.mjs <pre-fix-tree> 60 --inject-yield
  *       →  🔴 LOSS DETECTED, every round.  One inserted `await` is the whole
  *          difference, and it is the change #530's async-store direction makes.
  *
  *   3 · the fix — and is the lock what prevents it?
- *       node tests/tools/interleave-probe.mjs <fix-tree> 60 --inject-yield
+ *       node tests/tools/interleave-probe.mjs <fixed-tree> 60 --inject-yield
  *       →  ⚪ no loss.  Same injected yield, but inside withWriteLock, so the
  *          competing append waits instead of being discarded.
  *
@@ -37,6 +37,33 @@
  *   is indistinguishable from a probe that never overlapped the requests at all.
  *   Mode 2 without mode 3 shows the hazard but not the remedy. The set of three
  *   says: not broken today · one yield away · and here is what holds it.
+ *
+ * ⚠️ `<pre-fix-tree>` is NOT `.` once this file lives on a branch that has the
+ *   fix — and it is not a placeholder either. The pre-fix revision is pinned:
+ *
+ *       5ab38f2fe4b4646a4fbbbb983c838fd613954709
+ *
+ *   (`main` at the time #558 was built; verified pre-fix by inspection — zero
+ *   `withWriteLock` inside `handleSave` — and an ancestor of both branches.)
+ *
+ * ── THE WHOLE RECEIPT, copy-paste from a fixed checkout ─────────────────────
+ *
+ *     B=$(mktemp -d)
+ *     git archive 5ab38f2fe4b4646a4fbbbb983c838fd613954709 | tar -x -C "$B"
+ *     ln -s "$PWD/node_modules" "$B/node_modules"   # an archive carries none
+ *
+ *     node tests/tools/interleave-probe.mjs "$B" 500                 # exit 0
+ *     node tests/tools/interleave-probe.mjs "$B" 60  --inject-yield  # exit 1
+ *     node tests/tools/interleave-probe.mjs .   60  --inject-yield   # exit 0
+ *
+ *     rm -rf "$B"
+ *
+ * ⭐ Run all three or none. Mode 2 alone shows a hazard with no remedy; mode 3
+ *   alone shows a pass that is indistinguishable from an injection that never
+ *   applied. (@indigo, who nearly certified mode 3 by itself.)
+ *
+ * ⭐ And you do not have to trust any of these paths: every run prints which
+ *   kind of checkout it was actually pointed at, determined from the code.
  *
  * `--inject-yield` builds and removes its own patched tree via the same injector
  * the automated behavior test uses (tools/yielding-tree.mjs), so the one-round
@@ -68,6 +95,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { makeYieldingTree } from './yielding-tree.mjs';
+import { describeTarget } from './lock-coverage.mjs';
 
 const USAGE = 'usage: node tests/tools/interleave-probe.mjs [serverDir] [rounds] [--inject-yield]';
 
@@ -129,6 +157,21 @@ const COLUMNS = [
   { id: 'backlog', name: 'Backlog', order: 0 },
   { id: 'done', name: 'Done', order: 1 },
 ];
+
+// ── say which kind of tree this actually is, before measuring it ────────────
+// `.` is not an identifier. The documented mode-2 command was true on a pre-fix
+// checkout and silently false once the same file was cherry-picked onto the
+// branch that adds the lock — a confident `⚪ no loss` that reads as
+// reassurance. So the probe determines the property itself rather than
+// trusting the path it was handed. Caught by @indigo running her own
+// documented command and reading the output instead of the exit status.
+const TARGET = describeTarget(TARGET_DIR);
+console.log(`target: ${TARGET.reason}`);
+if (TARGET.locked === null) {
+  console.log('   ⚠️  cannot tell whether this checkout has the fix — interpret the result accordingly.');
+} else {
+  console.log(`   ⇒ with --inject-yield this is ${TARGET.locked ? 'MODE 3 (expect no loss: the lock holds)' : 'MODE 2 (expect loss: no lock)'}`);
+}
 
 let result;
 try {
@@ -223,6 +266,7 @@ try {
 
   result = {
     target: TARGET_DIR,
+    targetHasLock: TARGET.locked,
     injectedYield: INJECT,
     roundsRequested: ROUNDS,
     roundsAccepted: accepted,

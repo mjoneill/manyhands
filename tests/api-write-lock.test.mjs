@@ -25,8 +25,25 @@
  *   0 of 13 read→write spans contain an await            the first test below
  *                                                        computes it, and fails
  *                                                        if it stops being true
- *   500 overlapped rounds lost nothing                    node tests/tools/interleave-probe.mjs . 500
- *   60 of 60 lost with one injected yield                 node tests/tools/interleave-probe.mjs . 60 --inject-yield
+ *   500 overlapped rounds lost nothing                   probe, mode 1  (see below)
+ *   60 of 60 lost with one injected yield                probe, mode 2  (see below)
+ *
+ * ⚠️ Both counts are measured on the PRE-FIX tree, and `.` does not name it once
+ * this file is cherry-picked onto the branch that adds the lock — the command
+ * then runs against a fixed checkout and reports no loss, which is mode 3's
+ * correct answer to a different question. Caught by @indigo running the command
+ * this header used to give. The revision is therefore pinned, not relative:
+ *
+ *     B=$(mktemp -d)
+ *     git archive 5ab38f2fe4b4646a4fbbbb983c838fd613954709 | tar -x -C "$B"
+ *     ln -s "$PWD/node_modules" "$B/node_modules"   # an archive carries none
+ *     node tests/tools/interleave-probe.mjs "$B" 500                 # exit 0
+ *     node tests/tools/interleave-probe.mjs "$B" 60  --inject-yield  # exit 1
+ *     node tests/tools/interleave-probe.mjs .   60  --inject-yield   # exit 0
+ *     rm -rf "$B"
+ *
+ * The probe prints which kind of checkout each run actually used, so a wrong
+ * path announces itself instead of returning a confident wrong number.
  *
  * ⇒ The defect is LATENT. What protects us today is synchrony, not the mutex,
  *   and that property was written down nowhere. The first `await` added to
@@ -61,6 +78,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { makeYieldingTree, SEAM, DEFAULT_PAUSE_MS } from './tools/yielding-tree.mjs';
+import { codeOnly, writeBoardSites } from './tools/lock-coverage.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SERVER_DIR = path.resolve(process.env.SCRUM_LOCK_TEST_SERVER_DIR || path.join(__dirname, '..'));
@@ -84,93 +102,9 @@ const SERVER_SRC = path.join(SERVER_DIR, 'server.js');
  */
 const PRE_LISTEN_EXCEPTIONS = ['migrateBoardIfNeeded'];
 
-/**
- * Blank out comments and string bodies, preserving every offset and newline.
- *
- * Necessary, and found the hard way: the first version of this file matched
- * `migrateBoardIfNeeded(` against the raw source and counted @indigo's new
- * explanatory COMMENT as a second call — so the test failed on the tree with
- * the good comment and passed on the tree without it. A source matcher that
- * cannot tell code from prose grades documentation as behaviour.
- *
- * Strings are blanked too because server.js contains `http://127.0.0.1`, and a
- * `//` inside a string would otherwise swallow the rest of the line as a
- * comment. Length is preserved so line numbers and offsets stay meaningful.
- */
-function codeOnly(src) {
-  const out = src.split('');
-  const blank = (i) => { if (out[i] !== '\n') out[i] = ' '; };
-  let i = 0;
-  while (i < src.length) {
-    const c = src[i];
-    const d = src[i + 1];
-    if (c === '/' && d === '/') {
-      while (i < src.length && src[i] !== '\n') blank(i++);
-    } else if (c === '/' && d === '*') {
-      blank(i++); blank(i++);
-      while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) blank(i++);
-      blank(i++); blank(i++);
-    } else if (c === "'" || c === '"' || c === '`') {
-      const quote = c;
-      i++; // keep the opening quote so the token still parses as a string
-      while (i < src.length && src[i] !== quote) {
-        if (src[i] === '\\') blank(i++);
-        if (i < src.length) blank(i++);
-      }
-      i++;
-    } else {
-      i++;
-    }
-  }
-  return out.join('');
-}
-
-/** Byte ranges of every `withWriteLock(...)` callback body, by brace matching. */
-function lockedRanges(src) {
-  const ranges = [];
-  const re = /withWriteLock\(/g;
-  let m;
-  while ((m = re.exec(src))) {
-    let depth = 0;
-    let started = false;
-    for (let i = m.index; i < src.length; i++) {
-      const ch = src[i];
-      if (ch === '{') { depth++; started = true; }
-      else if (ch === '}') {
-        depth--;
-        if (started && depth === 0) { ranges.push([m.index, i]); break; }
-      }
-    }
-  }
-  return ranges;
-}
-
-/** The nearest preceding `function name(` — whose body a given offset sits in. */
-function enclosingFunction(src, offset) {
-  const head = src.slice(0, offset);
-  const matches = [...head.matchAll(/function\s+([A-Za-z0-9_$]+)\s*\(/g)];
-  return matches.length ? matches[matches.length - 1][1] : '(top level)';
-}
-
 test('#558 — every request-reachable writeBoard() runs inside withWriteLock', () => {
   const src = codeOnly(fs.readFileSync(SERVER_SRC, 'utf8'));
-  const ranges = lockedRanges(src);
-
-  // Call sites only — skip the `function writeBoard(data) {` declaration.
-  const sites = [];
-  const re = /writeBoard\(/g;
-  let m;
-  while ((m = re.exec(src))) {
-    const lineStart = src.lastIndexOf('\n', m.index) + 1;
-    const line = src.slice(lineStart, src.indexOf('\n', m.index));
-    if (/^\s*function\s+writeBoard/.test(line)) continue;
-    sites.push({
-      offset: m.index,
-      line: src.slice(0, m.index).split('\n').length,
-      fn: enclosingFunction(src, m.index),
-      locked: ranges.some(([a, b]) => m.index > a && m.index < b),
-    });
-  }
+  const sites = writeBoardSites(src);
 
   // A coverage claim is only established by enumerating the set — so fail loudly
   // if the enumeration itself came back empty rather than passing vacuously.
