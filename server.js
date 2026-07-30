@@ -338,10 +338,17 @@ async function handleSave(req, res) {
     // discarded — the save writes back the snapshot it read.
     //
     // Counts, each with the command that reproduces it, because a number whose
-    // instrument is not committed is persuasion rather than evidence:
-    //   500 rounds, nothing lost   node tests/tools/interleave-probe.mjs . 500
-    //   every round loses a write  node tests/tools/interleave-probe.mjs . 60 --inject-yield
-    //   and the lock is what stops it — same injected yield, this tree, no loss.
+    // instrument is not committed is persuasion rather than evidence. NOTE the
+    // tree argument: `.` is THIS tree, which has the lock. The loss only
+    // reproduces against a pre-fix checkout, so mode 2 needs one:
+    //
+    //   B=$(mktemp -d); git archive <pre-fix-rev> | tar -x -C "$B"
+    //   node tests/tools/interleave-probe.mjs "$B" 500                 exit 0  nothing lost
+    //   node tests/tools/interleave-probe.mjs "$B" 60  --inject-yield   exit 1  every round loses a write
+    //   node tests/tools/interleave-probe.mjs .    60  --inject-yield   exit 0  the lock stops it
+    //
+    // Run all three or none: mode 2 alone shows a hazard, mode 3 alone shows a
+    // pass that could just mean the yield never landed. The pair is the argument.
     //
     // The lock establishes the invariant now, before the change that would need
     // it. (#530's async-store direction is that change.)
