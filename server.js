@@ -316,36 +316,68 @@ async function handleSave(req, res) {
     const raw = await readBody(req);
     const incoming = JSON.parse(raw);
 
-    // Validate structure
+    // Validate structure. Deliberately OUTSIDE the lock: it reads no board
+    // state, and `readBody` above waits on the network — holding the global
+    // write mutex across a client's upload would stall every other writer for
+    // as long as that client takes (#558, and see #250 on the same surface).
     if (!incoming || !Array.isArray(incoming.cards)) {
       return sendJSON(res, 400, { error: 'Invalid payload: "cards" array is required' });
     }
 
-    const existing = readBoard();
+    // #558 — the read-modify-write below IS the critical section, and it used to
+    // run outside `withWriteLock` while every granular route ran inside it.
+    //
+    // It was not losing data. Measured 2026-07-30: 500 rounds of a real
+    // concurrent append against the unlocked version lost nothing, because this
+    // stretch contains no `await` and `core/store.mjs` is synchronous — a section
+    // that never yields cannot be preempted on one event loop. It was atomic by
+    // accident, not by design.
+    //
+    // The loss becomes real the moment it CAN yield: add one `await` here, or make
+    // storage async, and a concurrent append accepted with 201 is silently
+    // discarded — the save writes back the snapshot it read. That is 60/60 in the
+    // injected-yield test. The lock establishes the invariant now, before the
+    // change that would need it. (#530's async-store direction is that change.)
+    //
+    // Compute the outcome in here; send the response out there, so an early
+    // return never leaves the lock held by accident.
+    const result = await withWriteLock(async () => {
+      const existing = readBoard();
 
-    // #230 — clobber guard. The browser deletes ONE card per save, so a save
-    // that vanishes many cards is a stale client overwriting newer state with
-    // its old localStorage (the 2026-06-15 incident: 8 cards lost). Refuse it.
-    // Interim defense until /api/save is retired for the granular API (#118).
-    const incomingIds = new Set(incoming.cards.map((c) => c && c.id).filter(Boolean));
-    const removed = existing.cards.filter((c) => c && c.id && !incomingIds.has(c.id));
-    if (removed.length > MAX_CARDS_DROPPED_PER_SAVE) {
-      const which = removed.map((c) => '#' + (c.shortId ?? '?')).slice(0, 10).join(', ');
-      return sendJSON(res, 409, {
-        error: `Refused: this save would delete ${removed.length} cards (${which}). `
-          + 'That is the signature of a stale browser tab overwriting newer state. '
-          + 'Reload the page to resync, then retry.',
-      });
-    }
+      // #230 — clobber guard. The browser deletes ONE card per save, so a save
+      // that vanishes many cards is a stale client overwriting newer state with
+      // its old localStorage (the 2026-06-15 incident: 8 cards lost). Refuse it.
+      // Interim defense until /api/save is retired for the granular API (#118).
+      // NB this catches DELETIONS only — a stale tab that regresses a card's
+      // fields still passes, which is #466/#534's territory, not this lock's.
+      const incomingIds = new Set(incoming.cards.map((c) => c && c.id).filter(Boolean));
+      const removed = existing.cards.filter((c) => c && c.id && !incomingIds.has(c.id));
+      if (removed.length > MAX_CARDS_DROPPED_PER_SAVE) {
+        const which = removed.map((c) => '#' + (c.shortId ?? '?')).slice(0, 10).join(', ');
+        return {
+          status: 409,
+          payload: {
+            error: `Refused: this save would delete ${removed.length} cards (${which}). `
+              + 'That is the signature of a stale browser tab overwriting newer state. '
+              + 'Reload the page to resync, then retry.',
+          },
+        };
+      }
 
-    const merged = { ...existing };
-    for (const k of ['cards', 'columns', 'nextShortId', 'lastUpdated']) {
-      if (incoming[k] !== undefined) merged[k] = incoming[k];
-    }
+      const merged = { ...existing };
+      for (const k of ['cards', 'columns', 'nextShortId', 'lastUpdated']) {
+        if (incoming[k] !== undefined) merged[k] = incoming[k];
+      }
 
-    writeBoard(merged);
+      writeBoard(merged);
 
-    sendJSON(res, 200, { ok: true, cards: merged.cards.length, lastUpdated: merged.lastUpdated });
+      return {
+        status: 200,
+        payload: { ok: true, cards: merged.cards.length, lastUpdated: merged.lastUpdated },
+      };
+    });
+
+    sendJSON(res, result.status, result.payload);
   } catch (e) {
     console.error('Error in /api/save:', e.message);
     sendJSON(res, 500, { error: 'Failed to save board data' });
@@ -406,8 +438,32 @@ function writeBoard(data) {
   saveDomain(BOARD_DATA_FILE, boardToDomain(data), { now: data.lastUpdated });
 }
 
-// Promise-chain mutex. All write paths run under this lock so two
-// concurrent PATCH requests cannot interleave their read-modify-write.
+// Promise-chain mutex.
+//
+// INVARIANT: every read-modify-write of board state *reachable from a request*
+// runs inside this lock, so two concurrent requests cannot interleave their
+// read and write halves and silently drop one side's changes.
+//
+// ONE deliberate exception, and it is the only one: `migrateBoardIfNeeded()`
+// runs synchronously at module load, BEFORE `server.listen()`. No request can
+// be in flight, so no concurrent writer can exist. That is why it is safe —
+// not because migration is special. Anything moved after `listen()` needs the
+// lock. (Enumerated, 2026-07-30: 13 `writeBoard` call sites, 12 inside the
+// lock, that one outside. Re-count rather than trust this number.)
+//
+// Stated as the invariant on purpose. The previous wording claimed "all write
+// paths run under this lock" while `/api/save` did not, and that sentence cost
+// a reviewer a wrong conclusion in the commons: the mutex was real, the
+// coverage claim was not, and reading the docstring is what stopped them
+// enumerating the call sites (#558).
+//
+// So: do not describe the current set of callers here — that goes stale on the
+// next route added. Assert the rule and let the test enforce it. A coverage
+// claim ("all X do Y") is only established by enumerating X.
+//
+// The lock is NOT reentrant: `fn` must never call `withWriteLock` again, and
+// `readBoard`/`writeBoard` deliberately do not take it. If you move a critical
+// section, re-check that property — it is what makes the boundary safe.
 let _writeLock = Promise.resolve();
 function withWriteLock(fn) {
   const next = _writeLock.then(() => fn(), () => fn());
