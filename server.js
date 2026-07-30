@@ -327,17 +327,24 @@ async function handleSave(req, res) {
     // #558 — the read-modify-write below IS the critical section, and it used to
     // run outside `withWriteLock` while every granular route ran inside it.
     //
-    // It was not losing data. Measured 2026-07-30: 500 rounds of a real
-    // concurrent append against the unlocked version lost nothing, because this
-    // stretch contains no `await` and `core/store.mjs` is synchronous — a section
-    // that never yields cannot be preempted on one event loop. It was atomic by
-    // accident, not by design.
+    // It was not losing data, and the reason is re-derivable by reading: this
+    // stretch contains no `await` and `core/store.mjs` is synchronous, so a
+    // section that never yields cannot be preempted on one event loop. It was
+    // atomic by accident, not by design. `tests/api-write-lock.test.mjs`
+    // enumerates the 13 read→write spans and fails if that stops holding.
     //
     // The loss becomes real the moment it CAN yield: add one `await` here, or make
     // storage async, and a concurrent append accepted with 201 is silently
-    // discarded — the save writes back the snapshot it read. That is 60/60 in the
-    // injected-yield test. The lock establishes the invariant now, before the
-    // change that would need it. (#530's async-store direction is that change.)
+    // discarded — the save writes back the snapshot it read.
+    //
+    // Counts, each with the command that reproduces it, because a number whose
+    // instrument is not committed is persuasion rather than evidence:
+    //   500 rounds, nothing lost   node tests/tools/interleave-probe.mjs . 500
+    //   every round loses a write  node tests/tools/interleave-probe.mjs . 60 --inject-yield
+    //   and the lock is what stops it — same injected yield, this tree, no loss.
+    //
+    // The lock establishes the invariant now, before the change that would need
+    // it. (#530's async-store direction is that change.)
     //
     // Compute the outcome in here; send the response out there, so an early
     // return never leaves the lock held by accident.
