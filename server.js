@@ -148,6 +148,60 @@ function notifyMcpOfPost(conversation) {
   }).catch(() => { /* MCP down / no listener — posting still succeeded */ });
 }
 
+// ── #578 — announcing a claim transition ────────────────────────────────
+//
+// A claim is the ONLY card mutation this server can attribute: `POST
+// /api/cards/:id/claim` carries `by`. PATCH and the browser's whole-board
+// /api/save are anonymous, so they cannot say who did anything.
+//
+// ⚠️ Read this before extending it: announcing a claim does NOT cover the case
+// #576 was filed for — a seat writing to the DESCRIPTION of someone else's
+// card. That event has no identity on any write path today. This is a floor.
+//
+// The author key is `board`, deliberately not the actor's: a post signed with
+// a seat's own name that the seat did not write is impersonation, in a room
+// where authorship is identity. `board` needs a roster entry to get a colour;
+// until one is added it renders unstyled, which is a cosmetic cost, not a bug.
+const CLAIM_ANNOUNCER = 'board';
+
+/**
+ * Build the one-line announcement for a claim transition, or null if there is
+ * nothing truthful to say. Pure — the caller does the writing.
+ *
+ * Assignees other than the actor are @mentioned so the notification reaches the
+ * person it is about; the actor is not mentioned (they just acted), and
+ * `unassigned` is never mentioned because it names nobody.
+ */
+function claimAnnouncement(card, actor, action) {
+  if (!card || typeof actor !== 'string' || !actor) return null;
+  const others = (card.assignees || [])
+    .filter(a => a && a !== actor && a !== 'unassigned');
+  const who = others.length ? ` — assigned to ${others.map(a => `@${a}`).join(', ')}` : '';
+  const title = typeof card.title === 'string' && card.title ? ` “${card.title}”` : '';
+  return `🔔 ${actor} ${action} #${card.shortId}${title}${who}`;
+}
+
+/**
+ * Append the announcement to `data.conversations` so it rides the caller's
+ * write. Returns the conversation (for the post-lock notify) or null.
+ *
+ * Best-effort by construction: the claim is the coordination primitive and the
+ * announcement is decoration on top of it, so a throw here must never cost
+ * someone their claim.
+ */
+function appendClaimAnnouncement(data, card, actor, action) {
+  try {
+    const body = claimAnnouncement(card, actor, action);
+    if (!body) return null;
+    const conv = createConversationFromPayload({ body, author: CLAIM_ANNOUNCER });
+    data.conversations.push(conv);
+    return conv;
+  } catch (e) {
+    console.error('#578 claim announcement skipped:', e.message);
+    return null;
+  }
+}
+
 // README block injected into every write so the warning is the first thing
 // anyone opening board-data.json sees. Source of truth lives here; the file
 // is rewritten by every save (including the browser's whole-board save which
@@ -732,8 +786,16 @@ async function handleClaimCard(req, res, idOrShortId) {
         card.claimedBy = by;
         card.claimedAt = now;
         card.updatedAt = now;
+        // #578 — the announcement rides the SAME write as the claim. Appending
+        // it here rather than in a second write keeps the two atomic: there is
+        // no window in which the card is claimed and the room was never told.
+        const announced = appendClaimAnnouncement(data, card, by, 'claimed');
         writeBoard(data);
-        return { status: 200, payload: { claimed: true, holder: by, claimedAt: now } };
+        return {
+          status: 200,
+          payload: { claimed: true, holder: by, claimedAt: now },
+          announced,
+        };
       }
       // Already held — do NOT write; report the incumbent holder.
       return {
@@ -741,6 +803,9 @@ async function handleClaimCard(req, res, idOrShortId) {
         payload: { claimed: false, holder: card.claimedBy, claimedAt: card.claimedAt },
       };
     });
+    // Outside the lock, fire-and-forget — same contract as an ordinary commons
+    // post (#119): a down MCP server must never break claiming.
+    if (result.announced) notifyMcpOfPost(result.announced);
     sendJSON(res, result.status, result.payload);
   } catch (e) {
     console.error('POST /api/cards/:id/claim:', e.message);
@@ -765,12 +830,18 @@ async function handleReleaseCard(req, res, idOrShortId) {
       if (card.claimedBy && card.claimedBy !== by) {
         return { status: 409, payload: { error: 'held by other', holder: card.claimedBy } };
       }
+      // Releasing an already-unclaimed card is idempotent and is NOT a
+      // transition — announcing it would put a line in the room for an event
+      // that did not happen.
+      const wasHeld = Boolean(card.claimedBy);
       card.claimedBy = null;
       card.claimedAt = null;
       card.updatedAt = new Date().toISOString();
+      const announced = wasHeld ? appendClaimAnnouncement(data, card, by, 'released') : null;
       writeBoard(data);
-      return { status: 200, payload: { released: true } };
+      return { status: 200, payload: { released: true }, announced };
     });
+    if (result.announced) notifyMcpOfPost(result.announced);
     sendJSON(res, result.status, result.payload);
   } catch (e) {
     console.error('DELETE /api/cards/:id/claim:', e.message);
