@@ -778,10 +778,19 @@ function handleListPeople(req, res) {
 
 function handleGetPerson(req, res, key) {
   try {
-    const person = personByKey(readBoard(), { seats: ROSTER }, decodeURIComponent(key));
+    // #628 — backward-paging cursors; every list is bounded by default and
+    // the full history is one explicit call away.
+    const q = parseQuery(req.url);
+    const person = personByKey(readBoard(), { seats: ROSTER }, decodeURIComponent(key), {
+      assignedBefore: q.assignedBefore,
+      authoredBefore: q.authoredBefore,
+      claimingBefore: q.claimingBefore,
+      limit: q.limit,
+    });
     if (!person) return sendJSON(res, 404, { error: 'No such person' });
     sendJSON(res, 200, person);
   } catch (e) {
+    if (e.code === 'UNKNOWN_CURSOR') return sendJSON(res, 400, { error: e.message });
     console.error('GET /api/people/:key:', e.message);
     sendJSON(res, 500, { error: 'Failed to derive person' });
   }

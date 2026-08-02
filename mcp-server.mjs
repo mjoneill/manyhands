@@ -367,9 +367,22 @@ function buildMcpServer() {
 
   mcp.registerTool('person_get', {
     description: 'Get one person by seat key or alias, with their assigned cards, authored posts '
-      + 'and any cards they currently hold a claim on.',
-    inputSchema: { key: z.string().describe('Seat key (e.g. "pilot") or a roster alias') },
-  }, async ({ key }) => jsonResult(await apiCall('GET', `/api/people/${encodeURIComponent(key)}`)));
+      + 'and any cards they currently hold a claim on. Every list is bounded to its most recent '
+      + 'entries with a <list>Total carrying the true count (#628); page backward through full '
+      + 'history by passing an id from a previous page as <list>Before.',
+    inputSchema: {
+      key: z.string().describe('Seat key (e.g. "pilot") or a roster alias'),
+      assignedBefore: z.string().optional().describe('Page assigned: a card shortId from a previous page'),
+      authoredBefore: z.string().optional().describe('Page authored: a conversation id from a previous page'),
+      claimingBefore: z.string().optional().describe('Page claiming: a card shortId from a previous page'),
+      limit: z.number().int().min(1).optional().describe('Page size override (default 50, hard ceiling applies)'),
+    },
+  }, async ({ key, ...cursors }) => {
+    const q = new URLSearchParams(
+      Object.entries(cursors).filter(([, v]) => v != null && v !== ''),
+    ).toString();
+    return jsonResult(await apiCall('GET', `/api/people/${encodeURIComponent(key)}${q ? `?${q}` : ''}`));
+  });
 
   mcp.registerTool('card_delete', {
     description: 'Delete a card by id or shortId. Returns a confirmation message.',

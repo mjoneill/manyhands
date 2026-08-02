@@ -48,6 +48,38 @@ export const PERSON_SOURCE_FIELDS = Object.freeze(['assignees', 'author']);
  */
 export const EXCLUDED_IDENTITIES = Object.freeze(['board', 'wiki', 'dc-tripwire', 'unassigned']);
 
+/**
+ * #628 — the bounded default for EVERY edge list.
+ *
+ * The unbounded `authored` list shipped correct, tested and reviewed, and was
+ * unusable by the surface's primary beneficiary: 54KB for one person, over
+ * every agent tool-result limit. The bound lives HERE because REST and MCP are
+ * both projections of this module — capping either adapter alone would leave
+ * the other carrying the defect (the two-surface failure again).
+ *
+ * ONE limit, all three lists. The first fix bounded only `authored` because
+ * "assigned is naturally small" — which was a property of OUR corpus, not of
+ * the data (a triage board has thousands assigned to one owner on day one),
+ * and exactly the fixture-scale reasoning that shipped the bug. Every list
+ * returns its most recent tail; every `<list>Total` carries the true count;
+ * callers page backward with `<list>Before` (an id from a previous page).
+ */
+export const EDGE_RECENT_LIMIT = 50;
+
+/**
+ * The most a caller may raise the limit to. The customer's stated shape is a
+ * DEFAULT with an override, not a fixed cap — but the override stays a BOUND:
+ * nothing any caller sends may reopen the firehose this card exists to close.
+ */
+export const EDGE_LIMIT_CEILING = 500;
+
+/** A caller-supplied limit, clamped to [1, EDGE_LIMIT_CEILING]; default otherwise. */
+function clampLimit(limit) {
+  const n = Number(limit);
+  if (!Number.isInteger(n) || n < 1) return EDGE_RECENT_LIMIT;
+  return Math.min(n, EDGE_LIMIT_CEILING);
+}
+
 /** Seats keyed by lower-cased alias, so an alternate name resolves to its seat. */
 function aliasIndex(seats) {
   const index = new Map();
@@ -85,14 +117,15 @@ function canonicalise(raw, seats, aliases) {
 }
 
 /**
- * Derive the whole person graph from a board.
+ * Derive every person with FULL edge lists — internal only.
  *
- * Returns `{ people: [...] }` sorted by key. Every edge list here is produced
- * in this one pass; nothing downstream recomputes them from the source fields,
- * which is what makes "symmetric by construction" a fact about the code rather
- * than a property some fixture happens to have.
+ * Every edge list is produced in this one pass; nothing downstream recomputes
+ * them from the source fields, which is what makes "symmetric by construction"
+ * a fact about the code rather than a property some fixture happens to have.
+ * The public surfaces below apply the #628 bounding projection; nothing
+ * unbounded leaves this module.
  */
-export function deriveGraph(board, roster = {}) {
+function deriveFullPeople(board, roster = {}) {
   const seats = roster?.seats && typeof roster.seats === 'object' ? roster.seats : {};
   const aliases = aliasIndex(seats);
   const excluded = new Set(EXCLUDED_IDENTITIES);
@@ -121,13 +154,27 @@ export function deriveGraph(board, roster = {}) {
     return people.get(id.key);
   };
 
-  for (const card of board?.cards || []) {
+  // Cards sorted by shortId — ascending is chronological by construction
+  // (shortIds are minted monotonically), so every list's tail is its newest.
+  const cards = [...(board?.cards || [])].sort(
+    (a, b) => (a?.shortId ?? 0) - (b?.shortId ?? 0));
+
+  for (const card of cards) {
     for (const raw of card?.[ASSIGNEE_FIELD] || []) {
       upsert(raw)?.assigned.push(card.shortId);
     }
   }
 
-  for (const conv of board?.conversations || []) {
+  // Sorted by createdAt (id as tiebreak) so "most recent" is true BY
+  // CONSTRUCTION. The live file happens to be appended in chronological
+  // order, but that is an observed accident, not a guarantee — nothing
+  // sorts on write, and a restored backup or future migration owes us
+  // nothing. A recency claim, and cursor paging, need a stable order the
+  // CODE establishes.
+  const convs = [...(board?.conversations || [])].sort((a, b) =>
+    String(a?.createdAt ?? '').localeCompare(String(b?.createdAt ?? ''))
+    || String(a?.id ?? '').localeCompare(String(b?.id ?? '')));
+  for (const conv of convs) {
     upsert(conv?.[AUTHOR_FIELD])?.authored.push(conv.id);
   }
 
@@ -135,19 +182,76 @@ export function deriveGraph(board, roster = {}) {
   // is not a claim of authorship. It may DECORATE a person who already exists
   // for a legitimate reason; it may never bring one into being. Hence a second
   // pass that only looks people up.
-  for (const card of board?.cards || []) {
+  for (const card of cards) {
     const holder = card?.claimedBy;
     if (!holder) continue;
     const id = canonicalise(holder, seats, aliases);
     if (id && people.has(id.key)) people.get(id.key).claiming.push(card.shortId);
   }
 
-  return { people: [...people.values()].sort((a, b) => a.key.localeCompare(b.key)) };
+  return [...people.values()].sort((a, b) => a.key.localeCompare(b.key));
 }
 
-/** One person by key or alias, or null. A projection of the same derivation. */
-export function personByKey(board, roster, key) {
+/**
+ * #628 — bound one list for the wire: the most recent EDGE_RECENT_LIMIT
+ * entries, optionally the window strictly BEFORE a cursor id from a previous
+ * page. Bounding never loses information — the total rides alongside, and the
+ * rest is one explicit call away.
+ */
+function boundList(full, before, limit, cursorName) {
+  let end = full.length;
+  if (before != null) {
+    const at = full.findIndex((x) => String(x) === String(before));
+    if (at < 0) {
+      // An unknown cursor must REFUSE, never silently serve page one: an
+      // agent paging until it sees a short page would loop forever, every
+      // iteration looking like success — and a cursor goes stale the moment
+      // an entry is deleted mid-walk. Refusing beats guessing.
+      const err = new Error(`unknown ${cursorName} cursor: ${String(before)}`);
+      err.code = 'UNKNOWN_CURSOR';
+      throw err;
+    }
+    end = at;
+  }
+  return full.slice(Math.max(0, end - clampLimit(limit)), end);
+}
+
+/**
+ * #628 — one mechanism, every list. Cursors: assignedBefore / authoredBefore /
+ * claimingBefore; `limit` overrides the default page size up to the ceiling.
+ * Throws code UNKNOWN_CURSOR when a supplied cursor matches nothing.
+ */
+function boundPerson(person, { assignedBefore, authoredBefore, claimingBefore, limit } = {}) {
+  return {
+    ...person,
+    assigned: boundList(person.assigned, assignedBefore, limit, 'assignedBefore'),
+    assignedTotal: person.assigned.length,
+    authored: boundList(person.authored, authoredBefore, limit, 'authoredBefore'),
+    authoredTotal: person.authored.length,
+    claiming: boundList(person.claiming, claimingBefore, limit, 'claimingBefore'),
+    claimingTotal: person.claiming.length,
+  };
+}
+
+/**
+ * Derive the whole person graph, bounded for the wire.
+ *
+ * Returns `{ people: [...] }` sorted by key, every person passed through the
+ * same bounding projection the single-person surface uses — the room list was
+ * 435KB unbounded, which no agent tool-result budget carries.
+ */
+export function deriveGraph(board, roster = {}) {
+  return { people: deriveFullPeople(board, roster).map((p) => boundPerson(p)) };
+}
+
+/**
+ * One person by key or alias, or null — bounded, with backward paging via
+ * `opts.authoredBefore` (a conversation id from a previous page's `authored`).
+ * A projection of the same derivation; no second reader of the source fields.
+ */
+export function personByKey(board, roster, key, opts = {}) {
   const wanted = canonicalise(key, roster?.seats || {}, aliasIndex(roster?.seats || {}));
   if (!wanted) return null;
-  return deriveGraph(board, roster).people.find((p) => p.key === wanted.key) || null;
+  const found = deriveFullPeople(board, roster).find((p) => p.key === wanted.key);
+  return found ? boundPerson(found, opts) : null;
 }
