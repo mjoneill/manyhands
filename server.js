@@ -234,22 +234,30 @@ const BOARD_README = [
 ];
 
 // MIME types for static file serving
+// #605 — every TEXT type declares charset=utf-8. Without it the client guesses,
+// and the usual guess (latin-1/cp1252) renders UTF-8 bytes as mojibake: an em
+// dash becomes "â€”". HTML survived this for the life of the app only because
+// each page carries <meta charset> in its own <head> — an in-band fallback that
+// .txt and .md do not have and cannot have. robots.txt was the first file we
+// served with no second chance, and it broke visibly within the hour.
+// ⚠️ .json is deliberately EXEMPT: RFC 8259 mandates UTF-8 and a charset
+// parameter there is undefined. Do not "fix" it.
 const MIME_TYPES = {
-  '.html': 'text/html',
-  '.css': 'text/css',
-  '.js': 'application/javascript',
-  '.mjs': 'application/javascript',
+  '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.mjs': 'application/javascript; charset=utf-8',
   '.json': 'application/json',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.gif': 'image/gif',
   '.svg': 'image/svg+xml',
   '.ico': 'image/x-icon',
-  '.md': 'text/markdown',
+  '.md': 'text/markdown; charset=utf-8',
   // #588 — robots.txt is only honoured when served as text/plain. Without
   // this entry it falls through to application/octet-stream and the file
   // exists, looks installed, and does nothing. Verify with `curl -I`, never `ls`.
-  '.txt': 'text/plain',
+  '.txt': 'text/plain; charset=utf-8',
 };
 
 // ── Attachments (#113) ───────────────────────────────────────────────────

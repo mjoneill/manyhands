@@ -59,6 +59,41 @@ serverTest('robots.txt is served as text/plain — the silent-failure case', asy
   assert.equal(ct, 'text/plain', `robots.txt served as "${ct}", not text/plain`);
 });
 
+serverTest('robots.txt declares charset=utf-8 — the mojibake case', async ({ baseUrl }) => {
+  const res = await fetch(`${baseUrl}/robots.txt`);
+  const ct = res.headers.get('content-type') || '';
+
+  // #605: a text file has NO in-band way to declare its encoding. HTML has
+  // <meta charset> in its own <head>; .txt has nothing. Without this parameter
+  // the client guesses, and the usual guess renders an em dash as "â€”".
+  // This was live in production and reported by a human reading the file.
+  assert.match(ct, /charset=utf-8/i, `robots.txt served as "${ct}" — no charset`);
+});
+
+serverTest('robots.txt is pure ASCII, independent of any header', async ({ baseUrl }) => {
+  const res = await fetch(`${baseUrl}/robots.txt`);
+  const bytes = Buffer.from(await res.arrayBuffer());
+
+  // #605, belt and braces: the header above is the fix, but robots.txt is
+  // parsed by strangers' tooling we cannot inspect, and a control whose
+  // legibility depends on a header being honoured is what #588 said not to
+  // ship. If the file is pure ASCII the two decodings are identical — an
+  // assertion that cannot pass vacuously and does not consult the header.
+  assert.equal(
+    bytes.toString('utf8'),
+    bytes.toString('latin1'),
+    'robots.txt must be pure ASCII — the decodings differ, so it is not',
+  );
+});
+
+serverTest('HTML is served with charset=utf-8 too, not just <meta>', async ({ baseUrl }) => {
+  // #605: pages carry <meta charset> and so recover on their own. That
+  // fallback lives inside the document and does not travel with the response,
+  // so the header is asserted here rather than trusted.
+  const res = await fetch(`${baseUrl}/index.html`);
+  assert.match(res.headers.get('content-type') || '', /charset=utf-8/i);
+});
+
 // ── Layer 2: X-Robots-Tag on EVERY response, not an enumerated route list ──
 
 serverTest('X-Robots-Tag is set on an HTML route', async ({ baseUrl }) => {

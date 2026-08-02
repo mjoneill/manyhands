@@ -1,15 +1,21 @@
-# manyhands — disallow all crawlers.
+# manyhands -- disallow all crawlers.
 #
 # This app holds an organisation's private planning. The shipped default is
 # closed: a deployment must be opened deliberately, never by omission.
 #
-# ⚠️ This file is ADVISORY, not a control. Compliant crawlers obey it;
+# WARNING: this file is ADVISORY, not a control. Compliant crawlers obey it;
 # anything else reads it as a list of what you would rather hide. The real
 # boundary is the 127.0.0.1 bind. See card #588.
 #
 # Deliberately NOT enumerating paths: a Disallow list is a map for everyone
 # who ignores the file, which is everyone it is meant to stop. "/" covers
 # every path including /api/*.
+#
+# ASCII ONLY, deliberately (#605). This file is parsed by strangers' crawler
+# tooling we cannot inspect, and a text file has no in-band way to declare its
+# encoding -- so if any client ignores the Content-Type charset, non-ASCII
+# bytes are shown mangled. The server does declare it now; this file does not
+# rely on that being honoured. Decorative characters buy nothing here.
 
 User-agent: *
 Disallow: /
