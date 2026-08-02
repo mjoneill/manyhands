@@ -1,0 +1,15 @@
+# manyhands — disallow all crawlers.
+#
+# This app holds an organisation's private planning. The shipped default is
+# closed: a deployment must be opened deliberately, never by omission.
+#
+# ⚠️ This file is ADVISORY, not a control. Compliant crawlers obey it;
+# anything else reads it as a list of what you would rather hide. The real
+# boundary is the 127.0.0.1 bind. See card #588.
+#
+# Deliberately NOT enumerating paths: a Disallow list is a map for everyone
+# who ignores the file, which is everyone it is meant to stop. "/" covers
+# every path including /api/*.
+
+User-agent: *
+Disallow: /

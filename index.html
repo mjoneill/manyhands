@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex, nofollow">
 <title>manyhands</title>
 <link rel="stylesheet" href="./core/theme.css"><!-- shared design language (#333) -->
 <link rel="stylesheet" href="./core/header.css"><!-- #303-2 shared nav (mounted by the module bridge below) -->
@@ -453,8 +454,8 @@ body::before {
 }
 
 /* #510: the "Show more" toggle is GONE. It expanded a description in place
-   inside a ~300px column, turning prose into a tall narrow ribbon — Michael:
-   "a hell of a lot of vertical scrolling just to read". Expanding also pushed
+   inside a ~300px column, turning prose into a tall narrow ribbon: a hell of a
+   lot of vertical scrolling just to read. Expanding also pushed
    every card below it down the column. The card detail pops out instead, at a
    readable measure. One reading path, not two. */
 /* #510 — card detail pops OUT of the column at a readable measure.
@@ -2672,13 +2673,13 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeCardD
     // The backdrop carries that action itself, so closest() walking up from any
     // click inside the panel FOUND THE BACKDROP and closed it — every click on
     // the title, the body, a citation, dismissed the reader. It also made the
-    // branch below unreachable, which is why Michael's citation click looked
+    // branch below unreachable, which is why a citation click looked
     // like a navigation bug rather than a dismissal bug.
     if (e.target === back || e.target.closest('.card-detail-close')) {
       closeCardDetail();
       return;
     }
-    // A citation INSIDE the pop-out. Michael's repro: open #330, click the #182
+    // A citation INSIDE the pop-out. Repro: open #330, click the #182
     // in its description, land on a bare board. The links render with href="#"
     // and rely on the board's delegation — which is bound to boardEl, and this
     // overlay deliberately lives outside it. So no handler ran, the anchor's own
@@ -3459,8 +3460,8 @@ boardEl.addEventListener('click', (e) => {
     e.preventDefault();
     const shortId = parseInt(btn.dataset.shortid, 10);
     // #510: a citation now OPENS the card rather than scrolling to it. Scrolling
-    // delivered you to a 300px ribbon you still couldn't read — Wren's framing:
-    // opening the readable thing IS the citation working for the first time.
+    // delivered you to a 300px ribbon you still couldn't read. Opening the
+    // readable thing IS the citation working for the first time.
     // Scroll-to survives implicitly: close the overlay and you are where you were.
     if (!openCardDetail(shortId)) scrollToCardByShortId(shortId);
     return;
@@ -4705,7 +4706,7 @@ if (_convsForm) {
       // The first version stripped ?card=NNN and then tried to open it, so a
       // reference to a number with no card on this board dropped you on a bare
       // board with nothing focused AND no trace in the URL of what you had
-      // asked for — you could not even tell what had failed. Michael hit this
+      // asked for — you could not even tell what had failed. This showed up
       // coming from a wiki citation. Now an unresolvable reference keeps its
       // address and says so.
       const _n = Number(_cardParam);

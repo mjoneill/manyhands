@@ -246,6 +246,10 @@ const MIME_TYPES = {
   '.svg': 'image/svg+xml',
   '.ico': 'image/x-icon',
   '.md': 'text/markdown',
+  // #588 — robots.txt is only honoured when served as text/plain. Without
+  // this entry it falls through to application/octet-stream and the file
+  // exists, looks installed, and does nothing. Verify with `curl -I`, never `ls`.
+  '.txt': 'text/plain',
 };
 
 // ── Attachments (#113) ───────────────────────────────────────────────────
@@ -1488,6 +1492,17 @@ function serveStaticFile(req, res) {
 function handleRequest(req, res) {
   const method = req.method.toUpperCase();
   const urlPath = req.url.split('?')[0];
+
+  // #588 — noindex on EVERY response, set here at the single choke point
+  // rather than per-route. Deliberate: a route list has to be maintained and
+  // a grep for '/api/...' undercounts the real routes, so any enumeration
+  // ships a gap. Set once before routing and /api/*, static files, errors,
+  // and every future route are covered by construction rather than by memory.
+  //
+  // This is the layer that survives robots.txt being served from the wrong
+  // root or deleted later; it does NOT travel with copied HTML, which is what
+  // the per-page <meta robots> is for. Three layers, three failure modes.
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow');
 
   // #249 — CSRF hardening. A mutating /api request must declare Content-Type:
   // application/json. That media type is NOT a CORS "simple" content-type, so
