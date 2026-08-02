@@ -501,6 +501,8 @@ body::before {
 .card-detail-body { white-space: pre-wrap; }
 .card-detail-body.prose { max-width: none; }   /* the panel already holds the measure */
 .card-detail-empty { color: var(--text-muted, #8b92aa); font-style: italic; }
+.card-detail-relationships { margin: 8px 0 12px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.card-detail-rel-label { color: var(--text-muted, #8b92aa); }
 
 .card-labels {
   display: flex;
@@ -1578,6 +1580,28 @@ body::before {
           <input class="form-input" type="text" id="card-labels" placeholder="comma, separated, tags" />
         </div>
       </div>
+      <!-- #614 — the edge is offered where the writing happens. Closed cards
+           are valid targets (citation/supersession reference finished work). -->
+      <div class="form-row">
+        <div class="form-field">
+          <label class="form-label" for="card-related-to">Related to</label>
+          <input class="form-input" type="text" id="card-related-to" placeholder="#12, #34 — type # to search" autocomplete="off" />
+        </div>
+        <div class="form-field">
+          <label class="form-label" for="card-blocked-by">Blocked by</label>
+          <input class="form-input" type="text" id="card-blocked-by" placeholder="#12 — type # to search" autocomplete="off" />
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-field">
+          <label class="form-label" for="card-supersedes">Supersedes</label>
+          <input class="form-input" type="text" id="card-supersedes" placeholder="#12 — this card replaces it" autocomplete="off" />
+        </div>
+        <div class="form-field">
+          <label class="form-label" for="card-derived-from">Derived from</label>
+          <input class="form-input" type="text" id="card-derived-from" placeholder="#12 — this card builds on it" autocomplete="off" />
+        </div>
+      </div>
       <button class="btn-add" id="btn-add-card">Add Card</button>
     </div>
   </div>
@@ -2127,9 +2151,17 @@ function createCard(title, description, type, assignee, labels, column, priority
 }
 
 // ── Add Card to Store ──
-function addCard(title, description, type, assignee, labels, column, priority) {
+// relationships (#614): optional { relatedTo|blockedBy|supersedes|derivedFrom:
+// [shortId] } applied through setRelationship so maintained inverses land
+// before the save — the edge is offered where the writing happens.
+function addCard(title, description, type, assignee, labels, column, priority, relationships) {
   const card = createCard(title, description, type, assignee, labels, column, priority);
   cards.push(card);
+  if (relationships && typeof relationships === 'object') {
+    for (const relType of RELATIONSHIP_TYPES) {
+      (relationships[relType] || []).forEach(sid => setRelationship(card.id, relType, sid));
+    }
+  }
   saveToLocalStorage();
   saveToJSONFile(); // Fire-and-forget JSON sync
   _testHookMarkSaved();
@@ -2148,40 +2180,59 @@ function _addRelationshipShortId(card, type, sid) {
   }
 }
 
+// The writable edge vocabulary (#614) and the inverses this client maintains,
+// mirroring the server's INVERSE_OF so browser whole-board saves and API
+// writes produce the same shape. supersededBy is maintained-only: never
+// offered as an input type, written on the target of a supersedes edge.
+const RELATIONSHIP_TYPES = ['relatedTo', 'blockedBy', 'supersedes', 'derivedFrom'];
+const RELATIONSHIP_INVERSE_OF = { relatedTo: 'relatedTo', supersedes: 'supersededBy' };
+
 // Create a link between two cards.
-//   type = 'relatedTo' — bidirectional (target gets back-link automatically
-//                        if it exists; if not, soft failure — link stored on
-//                        this card only, reciprocal will appear if target is
-//                        ever created)
-//   type = 'blockedBy' — directional (stored only on the blocked card)
+//   relatedTo   — bidirectional (both ends maintained)
+//   blockedBy   — directional (stored only on the blocked card)
+//   supersedes  — directional; target gets maintained supersededBy back-link
+//   derivedFrom — directional (lineage reads from the descendant)
+// Missing targets are a soft failure — the link stores on this card only.
 // Returns false on self-reference, unknown card, or invalid type.
 function setRelationship(cardId, type, targetShortId) {
   const card = cards.find(c => c.id === cardId);
   if (!card) return false;
   if (card.shortId === targetShortId) return false; // self-reference rejected
-  if (type !== 'relatedTo' && type !== 'blockedBy') return false;
+  if (!RELATIONSHIP_TYPES.includes(type)) return false;
   _addRelationshipShortId(card, type, targetShortId);
-  if (type === 'relatedTo') {
+  const invType = RELATIONSHIP_INVERSE_OF[type];
+  if (invType) {
     const target = cards.find(c => c.shortId === targetShortId);
-    if (target) _addRelationshipShortId(target, 'relatedTo', card.shortId);
+    if (target) _addRelationshipShortId(target, invType, card.shortId);
   }
   card.updatedAt = new Date().toISOString();
   return true;
 }
 
-// Remove a link. For relatedTo, removes from both cards (bidirectional cleanup).
+// Remove a link, including its maintained inverse on the target.
 function removeRelationship(cardId, type, targetShortId) {
   const card = cards.find(c => c.id === cardId);
   if (!card || !card.relationships || !card.relationships[type]) return false;
   card.relationships[type] = card.relationships[type].filter(id => id !== targetShortId);
-  if (type === 'relatedTo') {
+  const invType = RELATIONSHIP_INVERSE_OF[type];
+  if (invType) {
     const target = cards.find(c => c.shortId === targetShortId);
-    if (target && target.relationships && target.relationships.relatedTo) {
-      target.relationships.relatedTo = target.relationships.relatedTo.filter(id => id !== card.shortId);
+    if (target && target.relationships && Array.isArray(target.relationships[invType])) {
+      target.relationships[invType] = target.relationships[invType].filter(id => id !== card.shortId);
     }
   }
   card.updatedAt = new Date().toISOString();
   return true;
+}
+
+// Parse "#12, #34 56" style input into an array of shortIds.
+function parseShortIdList(str) {
+  return String(str || '').split(/[,\s]+/)
+    .map(s => s.trim())
+    .filter(s => s.length > 0)
+    .map(s => s.startsWith('#') ? s.slice(1) : s)
+    .map(s => parseInt(s, 10))
+    .filter(n => !isNaN(n));
 }
 
 // Find all cards that have `cardShortId` in their blockedBy list.
@@ -2444,6 +2495,14 @@ function renderCardEditForm(card) {
             <input class="form-input edit-blocked-by" type="text" placeholder="Blocked by (#5)" />
           </div>
         </div>
+        <div class="form-row">
+          <div class="form-field">
+            <input class="form-input edit-supersedes" type="text" placeholder="Supersedes (#5 — replaces it)" />
+          </div>
+          <div class="form-field">
+            <input class="form-input edit-derived-from" type="text" placeholder="Derived from (#5 — builds on it)" />
+          </div>
+        </div>
       </div>
       <div class="card-edit-actions">
         <button class="btn-cancel-edit" data-action="cancel-edit" type="button">Cancel</button>
@@ -2484,10 +2543,18 @@ function renderCardEditForm(card) {
     ? card.relationships.blockedBy : [];
   el.querySelector('.edit-related-to').value = relTo.map(sid => `#${sid}`).join(', ');
   el.querySelector('.edit-blocked-by').value = blkBy.map(sid => `#${sid}`).join(', ');
+  const sup = (card.relationships && Array.isArray(card.relationships.supersedes))
+    ? card.relationships.supersedes : [];
+  const der = (card.relationships && Array.isArray(card.relationships.derivedFrom))
+    ? card.relationships.derivedFrom : [];
+  el.querySelector('.edit-supersedes').value = sup.map(sid => `#${sid}`).join(', ');
+  el.querySelector('.edit-derived-from').value = der.map(sid => `#${sid}`).join(', ');
 
-  // Attach typeahead behavior to both inputs
+  // Attach typeahead behavior to the edge inputs
   attachRelationshipTypeahead(el.querySelector('.edit-related-to'));
   attachRelationshipTypeahead(el.querySelector('.edit-blocked-by'));
+  attachRelationshipTypeahead(el.querySelector('.edit-supersedes'));
+  attachRelationshipTypeahead(el.querySelector('.edit-derived-from'));
 
   return el;
 }
@@ -2549,30 +2616,24 @@ function saveEdit(cardId) {
   card.for = cardEl.querySelector('.edit-for').value.trim();
   card.updatedAt = new Date().toISOString();
 
-  // Apply relationship changes (Card #42)
-  const parseShortIds = (str) => {
-    return str.split(/[,\s]+/)
-      .map(s => s.trim())
-      .filter(s => s.length > 0)
-      .map(s => s.startsWith('#') ? s.slice(1) : s)
-      .map(s => parseInt(s, 10))
-      .filter(n => !isNaN(n));
+  // Apply relationship changes (Card #42, verbs #614) — diff per type:
+  // dropped targets removed (with inverse cleanup), new ones added.
+  const relInputSelectors = {
+    relatedTo: '.edit-related-to',
+    blockedBy: '.edit-blocked-by',
+    supersedes: '.edit-supersedes',
+    derivedFrom: '.edit-derived-from',
   };
-  const desiredRelatedTo = parseShortIds(cardEl.querySelector('.edit-related-to').value);
-  const desiredBlockedBy = parseShortIds(cardEl.querySelector('.edit-blocked-by').value);
-  const currentRelatedTo = (card.relationships && card.relationships.relatedTo) || [];
-  const currentBlockedBy = (card.relationships && card.relationships.blockedBy) || [];
-
-  // Remove relationships that were dropped
-  currentRelatedTo.filter(sid => !desiredRelatedTo.includes(sid))
-    .forEach(sid => removeRelationship(cardId, 'relatedTo', sid));
-  currentBlockedBy.filter(sid => !desiredBlockedBy.includes(sid))
-    .forEach(sid => removeRelationship(cardId, 'blockedBy', sid));
-  // Add new relationships
-  desiredRelatedTo.filter(sid => !currentRelatedTo.includes(sid))
-    .forEach(sid => setRelationship(cardId, 'relatedTo', sid));
-  desiredBlockedBy.filter(sid => !currentBlockedBy.includes(sid))
-    .forEach(sid => setRelationship(cardId, 'blockedBy', sid));
+  for (const [relType, selector] of Object.entries(relInputSelectors)) {
+    const inputEl = cardEl.querySelector(selector);
+    if (!inputEl) continue;
+    const desired = parseShortIdList(inputEl.value);
+    const current = (card.relationships && card.relationships[relType]) || [];
+    current.filter(sid => !desired.includes(sid))
+      .forEach(sid => removeRelationship(cardId, relType, sid));
+    desired.filter(sid => !current.includes(sid))
+      .forEach(sid => setRelationship(cardId, relType, sid));
+  }
 
   editingCardId = null;
   saveToLocalStorage();
@@ -2629,6 +2690,27 @@ function openCardDetail(shortId, push = true) {
   if (seats) html += `<span class="card-assignee">${escapeHTML(seats)}</span>`;
   for (const l of (card.labels || [])) html += `<span class="label-tag">${escapeHTML(l)}</span>`;
   html += '</div>';
+  // #614 — edges render or authors can't tell they landed, and the
+  // measurement can't tell suppression from disinterest. supersededBy is
+  // maintained by the system, shown read-only like the rest.
+  const REL_DISPLAY = [
+    ['relatedTo', 'Related to'], ['blockedBy', 'Blocked by'],
+    ['supersedes', 'Supersedes'], ['derivedFrom', 'Derived from'],
+    ['supersededBy', 'Superseded by'],
+  ];
+  let relHtml = '';
+  for (const [relType, label] of REL_DISPLAY) {
+    const sids = (card.relationships && Array.isArray(card.relationships[relType]))
+      ? card.relationships[relType] : [];
+    if (sids.length === 0) continue;
+    const links = sids.map((sid) => {
+      const target = cards.find((c) => c.shortId === sid);
+      const t = target ? ` title="${escapeAttr(target.title)}"` : '';
+      return `<a href="#" class="shortid-link" data-action="shortid-link" data-shortid="${escapeAttr(String(sid))}"${t}>#${escapeHTML(String(sid))}</a>`;
+    }).join(', ');
+    relHtml += `<div class="card-detail-relationship"><span class="card-detail-rel-label">${label}:</span> ${links}</div>`;
+  }
+  if (relHtml) html += `<div class="card-detail-relationships">${relHtml}</div>`;
   html += card.description
     ? `<div class="card-detail-body prose">${renderDescriptionWithLinks(card.description)}</div>`
     : '<div class="card-detail-empty">No description.</div>';
@@ -3799,7 +3881,16 @@ function handleAddCard() {
   if (assignees.length === 0) assignees = ['unassigned'];
 
   const priority = priorityInput.value || null;
-  addCard(title, descInput.value, typeInput.value, assignees, labels, currentAddCardColumn, priority);
+
+  // #614 — edges offered at create. Empty inputs → no edges, exactly as before.
+  const relationships = {
+    relatedTo: parseShortIdList(document.getElementById('card-related-to').value),
+    blockedBy: parseShortIdList(document.getElementById('card-blocked-by').value),
+    supersedes: parseShortIdList(document.getElementById('card-supersedes').value),
+    derivedFrom: parseShortIdList(document.getElementById('card-derived-from').value),
+  };
+
+  addCard(title, descInput.value, typeInput.value, assignees, labels, currentAddCardColumn, priority, relationships);
   renderBoard();
 
   // Reset form
@@ -3809,6 +3900,8 @@ function handleAddCard() {
   document.querySelectorAll('#card-assignees-group input[type="checkbox"]').forEach(cb => { cb.checked = false; });
   priorityInput.value = '';
   labelsInput.value = '';
+  ['card-related-to', 'card-blocked-by', 'card-supersedes', 'card-derived-from']
+    .forEach(id => { document.getElementById(id).value = ''; });
   titleInput.focus();
 }
 
@@ -4064,6 +4157,10 @@ function attachRelationshipTypeahead(inputEl) {
 
 const addCardLabelsInput = document.getElementById('card-labels');
 attachLabelAutocomplete(addCardLabelsInput);
+
+// #614 — same typeahead as the edit form, on the create form's edge inputs.
+['card-related-to', 'card-blocked-by', 'card-supersedes', 'card-derived-from']
+  .forEach(id => attachRelationshipTypeahead(document.getElementById(id)));
 
 boardEl.addEventListener('focusin', (e) => {
   if (e.target.classList.contains('edit-labels') && !e.target.classList.contains('autocomplete-attached')) {

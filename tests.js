@@ -3146,6 +3146,112 @@ test('AC10: orphan UUID in relatedCards is dropped without crash', () => {
   assert(!hasOrphan, 'orphan UUIDs should be dropped (no shortId can be derived)');
 });
 
+/* ════════════════════════════════════════════════ TESTS - TDD Cycle: Edges at Create + Verb Vocabulary (Card #614) ════════════════════════════════════════════════ */
+
+test('#614: create form offers all four edge inputs', () => {
+  const ids = ['card-related-to', 'card-blocked-by', 'card-supersedes', 'card-derived-from'];
+  ids.forEach(id => {
+    assert(document.getElementById(id) !== null, `create form should have #${id}`);
+  });
+});
+
+test('#614: addCard with relationships applies edges at create', () => {
+  _setupRelationshipsTest();
+  const target = addCard('Old decision', '', 'task', 'unassigned', []);
+  const card = addCard('New decision', '', 'task', 'unassigned', [], 'backlog', null,
+    { supersedes: [target.shortId], relatedTo: [target.shortId] });
+  assert(card.relationships.supersedes.includes(target.shortId), 'supersedes stored at create');
+  assert(card.relationships.relatedTo.includes(target.shortId), 'relatedTo stored at create');
+});
+
+test('#614: A supersedes B maintains supersededBy on B', () => {
+  _setupRelationshipsTest();
+  const b = addCard('Old', '', 'task', 'unassigned', []);
+  const a = addCard('New', '', 'task', 'unassigned', [], 'backlog', null,
+    { supersedes: [b.shortId] });
+  assert(b.relationships && Array.isArray(b.relationships.supersededBy) &&
+    b.relationships.supersededBy.includes(a.shortId),
+    'target should carry maintained supersededBy back-link');
+});
+
+test('#614: removing a supersedes edge removes the maintained inverse', () => {
+  _setupRelationshipsTest();
+  const b = addCard('Old', '', 'task', 'unassigned', []);
+  const a = addCard('New', '', 'task', 'unassigned', [], 'backlog', null,
+    { supersedes: [b.shortId] });
+  removeRelationship(a.id, 'supersedes', b.shortId);
+  assert(!b.relationships.supersededBy.includes(a.shortId),
+    'inverse should be cleaned up when the edge is removed');
+});
+
+test('#614: derivedFrom is one-way — nothing maintained on the target', () => {
+  _setupRelationshipsTest();
+  const src = addCard('Source', '', 'task', 'unassigned', []);
+  const derived = addCard('Derived', '', 'task', 'unassigned', [], 'backlog', null,
+    { derivedFrom: [src.shortId] });
+  assert(derived.relationships.derivedFrom.includes(src.shortId), 'derivedFrom stored');
+  const gotInverse = src.relationships &&
+    ((src.relationships.derivedInto || []).length > 0 ||
+     (src.relationships.derivedFrom || []).includes(derived.shortId));
+  assert(!gotInverse, 'lineage reads from the descendant; no inverse maintained');
+});
+
+test('#614: handleAddCard reads the edge inputs and stores relationships', () => {
+  _setupRelationshipsTest();
+  const target = addCard('Edge target', '', 'task', 'unassigned', []);
+  renderBoard();
+  document.getElementById('card-title').value = 'Born with edges';
+  document.getElementById('card-supersedes').value = '#' + target.shortId;
+  const before = cards.length;
+  handleAddCard();
+  assert(cards.length === before + 1, 'card was created');
+  const created = cards.find(c => c.title === 'Born with edges');
+  assert(created.relationships && created.relationships.supersedes.includes(target.shortId),
+    'supersedes from the create form landed on the card');
+  assert(target.relationships.supersededBy.includes(created.shortId),
+    'inverse maintained from a create-form write');
+});
+
+test('#614: edit form offers supersedes and derivedFrom inputs', () => {
+  _setupRelationshipsTest();
+  const card = addCard('Editable', '', 'task', 'unassigned', []);
+  renderBoard();
+  editCard(card.id);
+  assert(document.querySelector('.edit-supersedes') !== null, 'edit form has .edit-supersedes');
+  assert(document.querySelector('.edit-derived-from') !== null, 'edit form has .edit-derived-from');
+});
+
+test('#614: card detail popout renders edges as links', () => {
+  _setupRelationshipsTest();
+  const target = addCard('Old way', '', 'task', 'unassigned', []);
+  const card = addCard('New way', '', 'task', 'unassigned', [], 'backlog', null,
+    { supersedes: [target.shortId] });
+  renderBoard();
+  openCardDetail(card.shortId, false);
+  const panel = document.getElementById('card-detail');
+  const relBlock = panel.querySelector('.card-detail-relationships');
+  assert(relBlock !== null, 'detail shows a relationships block');
+  assert(relBlock.textContent.includes('Supersedes'), 'supersedes labelled');
+  assert(relBlock.textContent.includes('#' + target.shortId), 'target linked by shortId');
+  closeCardDetail(false);
+});
+
+test('#614: closed-column cards appear in the typeahead (citation targets)', () => {
+  _setupRelationshipsTest();
+  const doneCard = addCard('Finished work', '', 'task', 'unassigned', [], 'done');
+  const editor = addCard('Citing card', '', 'task', 'unassigned', []);
+  renderBoard();
+  editCard(editor.id);
+  const input = document.querySelector('.edit-supersedes');
+  input.focus();
+  input.value = '#';
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  const dropdown = document.querySelector('.relationship-typeahead');
+  assert(dropdown !== null, 'typeahead appears');
+  assert(dropdown.textContent.includes('Finished work'),
+    'a done-column card is offered as an edge target');
+});
+
 /* ════════════════════════════════════════════════ TESTS - TDD Cycle: Test Wrapper Async Race Fix (Card #47) ════════════════════════════════════════════════ */
 
 test('#47 AC1: _pendingSaves array exists at module scope', () => {

@@ -527,13 +527,92 @@ function createCardFromPayload(body, nextShortId) {
     order: typeof body.order === 'number' ? body.order : 0,
     createdAt: now,
     updatedAt: now,
-    relationships: body.relationships || { relatedTo: [], blockedBy: [] },
+    relationships: normalizeRelationships(body.relationships),
     // #348 — coordination rail: first-write-wins claim, server-arbitrated.
     // Set only via POST /api/cards/:id/claim (never via PATCH), so a claim
     // is a compare-and-set under withWriteLock, not an unconditional overwrite.
     claimedBy: null,
     claimedAt: null,
   };
+}
+
+// #614 — the card-to-card edge vocabulary. Closed on purpose: a fixed verb
+// set needs no adjudication, so growing it is a design decision, not data
+// arriving. relatedTo is bidirectional; the other three are directional
+// (A blockedBy B, A supersedes B, A derivedFrom B).
+const RELATIONSHIP_TYPES = ['relatedTo', 'blockedBy', 'supersedes', 'derivedFrom'];
+
+// Returns an error string if the relationships object is malformed, else null.
+// Targets are shortIds (numbers). Stored legacy data mixes UUIDs in — that is
+// a migration surface, not a write surface; new writes are held to shortIds.
+function validateRelationships(rel) {
+  if (typeof rel !== 'object' || rel === null || Array.isArray(rel)) {
+    return 'relationships must be an object';
+  }
+  for (const [type, targets] of Object.entries(rel)) {
+    if (!RELATIONSHIP_TYPES.includes(type)) {
+      return `unknown relationship type '${type}' — valid: ${RELATIONSHIP_TYPES.join(', ')}`;
+    }
+    if (!Array.isArray(targets)) return `relationships.${type} must be an array`;
+    for (const t of targets) {
+      if (typeof t !== 'number' || !Number.isInteger(t)) {
+        return `relationships.${type} targets must be card shortIds (integers)`;
+      }
+    }
+  }
+  return null;
+}
+
+// Maintained-only inverse keys: written by the server, rejected as input.
+// supersededBy answers "what replaced this?" from the replaced card without
+// a scan — the question #530's traversal demo failed on.
+const MAINTAINED_RELATIONSHIP_KEYS = ['supersededBy'];
+
+// Which writable types the server mirrors, and under what key on the target.
+// relatedTo is symmetric (both ends carry relatedTo); supersedes writes the
+// maintained supersededBy. This lives HERE, not in the browser (#42 did it
+// client-side, so MCP-written edges were one-ended — 79% of live relatedTo).
+const INVERSE_OF = { relatedTo: 'relatedTo', supersedes: 'supersededBy' };
+
+// Every stored card carries every key so readers never branch on absence.
+// Given keys land over the empty defaults; validation has already run.
+function normalizeRelationships(rel) {
+  const keys = [...RELATIONSHIP_TYPES, ...MAINTAINED_RELATIONSHIP_KEYS];
+  const out = Object.fromEntries(keys.map((t) => [t, []]));
+  if (rel && typeof rel === 'object') {
+    for (const t of keys) {
+      if (Array.isArray(rel[t])) out[t] = rel[t];
+    }
+  }
+  return out;
+}
+
+// Reconcile inverse edges after `card`'s relationships changed from `before`
+// to `after`: targets added under a mirrored type gain the inverse entry,
+// targets removed lose it. Mutates sibling cards in `data`; caller holds the
+// write lock and persists. Missing targets are skipped, not errors — dangling
+// shortIds are a known corpus condition, and refusing the write here would
+// make old data block new edges.
+function syncInverseRelationships(data, card, before, after) {
+  for (const [type, invType] of Object.entries(INVERSE_OF)) {
+    const prev = new Set((before && before[type]) || []);
+    const next = new Set((after && after[type]) || []);
+    for (const sid of next) {
+      if (prev.has(sid)) continue;
+      const target = data.cards.find((c) => c.shortId === sid);
+      if (!target || target === card) continue;
+      target.relationships = normalizeRelationships(target.relationships);
+      if (!target.relationships[invType].includes(card.shortId)) {
+        target.relationships[invType].push(card.shortId);
+      }
+    }
+    for (const sid of prev) {
+      if (next.has(sid)) continue;
+      const target = data.cards.find((c) => c.shortId === sid);
+      if (!target || !target.relationships || !Array.isArray(target.relationships[invType])) continue;
+      target.relationships[invType] = target.relationships[invType].filter((x) => x !== card.shortId);
+    }
+  }
 }
 
 // Fields that PATCH must NOT change (preserve identity / history)
@@ -573,6 +652,10 @@ function validateCardFields(body, { checkId = true } = {}) {
     for (const a of body.assignees) {
       if (typeof a !== 'string' || !ASSIGNEE_KEY_RE.test(a)) return 'invalid assignee';
     }
+  }
+  if (body.relationships !== undefined) {
+    const rerr = validateRelationships(body.relationships); // #614
+    if (rerr) return rerr;
   }
   return null;
 }
@@ -712,6 +795,7 @@ async function handleCreateCard(req, res) {
       const card = createCardFromPayload(body, data.nextShortId);
       data.cards.push(card);
       data.nextShortId = (data.nextShortId || 1) + 1;
+      syncInverseRelationships(data, card, null, card.relationships); // #614
       writeBoard(data);
       return card;
     });
@@ -736,6 +820,20 @@ async function handleUpdateCard(req, res, idOrShortId) {
       for (const [k, v] of Object.entries(patch)) {
         if (IMMUTABLE_CARD_FIELDS.has(k)) continue;
         if (!PATCHABLE_CARD_FIELDS.has(k)) continue; // #249 — ignore unknown keys
+        if (k === 'relationships') {
+          // #614/#548 — a relationships patch is a MERGE at the type level:
+          // only the keys the caller sent change; siblings survive. Clearing
+          // a type takes an explicit empty array, never an omission. The
+          // wholesale `card[k] = v` here was #548's silent sibling-delete.
+          const before = normalizeRelationships(card.relationships);
+          const merged = { ...before };
+          for (const t of RELATIONSHIP_TYPES) {
+            if (Array.isArray(v[t])) merged[t] = v[t];
+          }
+          syncInverseRelationships(data, card, before, merged);
+          card.relationships = merged;
+          continue;
+        }
         card[k] = v;
       }
       card.updatedAt = new Date().toISOString();

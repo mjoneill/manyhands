@@ -298,6 +298,14 @@ function buildMcpServer() {
       priority: z.enum(['p0', 'p1', 'p2', 'p3']).optional().nullable(),
       column: z.string().optional().describe('Column id — defaults to "backlog"'),
       for: z.string().optional(),
+      // #614 — the edge is offered where the writing happens. Targets are
+      // shortIds; closed cards are valid targets (citation/supersession).
+      relationships: z.object({
+        relatedTo: z.array(z.number()).optional().describe('Bidirectional — the server maintains the other end'),
+        blockedBy: z.array(z.number()).optional(),
+        supersedes: z.array(z.number()).optional().describe('This card replaces the target(s); the server maintains supersededBy on them'),
+        derivedFrom: z.array(z.number()).optional().describe('This card builds on the target(s)'),
+      }).optional().describe('Card-to-card edges, settable at create'),
     },
   }, async (args) => jsonResult(await apiCall('POST', '/api/cards', args)));
 
@@ -316,7 +324,9 @@ function buildMcpServer() {
       relationships: z.object({
         relatedTo: z.array(z.number()).optional(),
         blockedBy: z.array(z.number()).optional(),
-      }).optional(),
+        supersedes: z.array(z.number()).optional(),
+        derivedFrom: z.array(z.number()).optional(),
+      }).optional().describe('Merged at the type level (#548): only the keys you send change; clear a type with an explicit empty array'),
     },
   }, async ({ id, ...patch }) =>
     jsonResult(await apiCall('PATCH', `/api/cards/${encodeURIComponent(id)}`, patch))
