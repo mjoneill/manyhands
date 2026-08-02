@@ -52,7 +52,7 @@
   .live { color:var(--muted); font-size:13px; margin-top:18px; }
   /* #506 — the roster editor. Until this existed the room's identity was
      configurable by anyone with a shell and by nobody else: ours to set,
-     Michael's to be stuck with. */
+     the deployment's own humans' to be stuck with. */
   .roster-seat { display:flex; align-items:center; gap:10px; flex-wrap:wrap;
     padding:10px 0; border-bottom:1px solid var(--border); }
   .roster-seat:last-of-type { border-bottom:0; }
@@ -227,11 +227,23 @@ function rosterRow(key, seat) {
   return row;
 }
 
+// #619 — what the editor loaded, so a save can carry fields the FORM has no
+// input for. Without this, opening settings and pressing save silently deletes
+// every seat property this page predates — `aliases` today, whatever comes next
+// tomorrow — with no error and nothing in the diff to suggest it was meant.
+//
+// It is the rule writeRoster already states for the file's `_README`, applied
+// one level down: a writer that round-trips an object owns the whole object,
+// including the parts it does not understand. The server-side guard alone is
+// not enough, because THIS is the second writer.
+const loadedSeats = new Map();
+
 function collectRoster() {
   const seats = {};
   for (const row of document.querySelectorAll('[data-roster-seat]')) {
     const key = row.getAttribute('data-roster-seat');
     seats[key] = {
+      ...(loadedSeats.get(key) || {}),
       name: row.querySelector('[data-roster-name]').value.trim(),
       glyph: row.querySelector('[data-roster-glyph]').value.trim(),
       color: row.querySelector('[data-roster-color]').value.trim(),
@@ -245,7 +257,11 @@ async function loadRosterEditor() {
     const { seats } = await (await fetch('/api/roster')).json();
     const list = $('roster-list');
     list.innerHTML = '';
-    for (const [key, seat] of Object.entries(seats || {})) list.appendChild(rosterRow(key, seat));
+    loadedSeats.clear();
+    for (const [key, seat] of Object.entries(seats || {})) {
+      loadedSeats.set(key, seat);   // #619 — remember fields the form cannot edit
+      list.appendChild(rosterRow(key, seat));
+    }
   } catch (e) {
     rosterMsg('Could not load the roster: ' + e.message, false);
   }

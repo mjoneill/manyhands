@@ -5,8 +5,12 @@
  * ports, each pointed at a throwaway board-data file. Because each test run
  * gets its own ports + data file, these tests do NOT touch the live :3141 /
  * :3001 servers or the real board-data.json — no need to stop them first.
- * (The browser suite still needs the live server stopped; that's a different
- * fetch-race. See SPEC.md → Build-run isolation.)
+ * (#619 — the old note here said the BROWSER suite still needs the live server
+ * stopped. That is stale and it cost real work: a seat declined to run 299
+ * passing tests and shipped "verified by reasoning, not by test" instead.
+ * run-tests.js loads index.html over `file://` with no server at all, and
+ * Chromium refuses fetch in that sandbox, so the race it warned about cannot
+ * occur. Read run-tests.js before believing otherwise.)
  */
 
 import { spawn } from 'node:child_process';

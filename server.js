@@ -39,6 +39,7 @@ import { buildTree, buildChildIndex } from './core/tree.mjs';
 import { buildLinkIndex } from './core/links.mjs';
 import { readConfig, writeConfig } from './channel-config.mjs';
 import { loadRoster, writeRoster, rosterFilePath } from './core/roster-config.mjs';
+import { deriveGraph, personByKey } from './core/people.mjs';
 import { configureIdentities, usingDefaultRoster } from './core/identity.mjs';
 
 const PORT = process.env.SCRUM_PORT ? parseInt(process.env.SCRUM_PORT, 10) : 3141;
@@ -759,6 +760,33 @@ async function handleChannelStatus(req, res) {
 }
 
 // ── /api/cards ──
+// ── /api/people — the derived person graph (#619) ───────────────────────────
+//
+// The first surface that lets an agent ask the board a question about a person
+// rather than fetch everything and filter. Both endpoints are projections of
+// ONE derivation (core/people.mjs deriveGraph) — there is no stored person
+// node and no maintained edge, so nothing here can fall out of sync with the
+// cards and conversations it is computed from.
+function handleListPeople(req, res) {
+  try {
+    sendJSON(res, 200, deriveGraph(readBoard(), { seats: ROSTER }));
+  } catch (e) {
+    console.error('GET /api/people:', e.message);
+    sendJSON(res, 500, { error: 'Failed to derive people' });
+  }
+}
+
+function handleGetPerson(req, res, key) {
+  try {
+    const person = personByKey(readBoard(), { seats: ROSTER }, decodeURIComponent(key));
+    if (!person) return sendJSON(res, 404, { error: 'No such person' });
+    sendJSON(res, 200, person);
+  } catch (e) {
+    console.error('GET /api/people/:key:', e.message);
+    sendJSON(res, 500, { error: 'Failed to derive person' });
+  }
+}
+
 function handleListCards(req, res) {
   try {
     const data = readBoard();
@@ -1442,6 +1470,8 @@ const API_ROUTES = [
   { method: 'GET',    re: /^\/api\/channel-status$/,       fn: (req, res) => handleChannelStatus(req, res) },
   { method: 'POST',   re: /^\/api\/config$/,               fn: (req, res) => handleSetConfig(req, res) },
   { method: 'POST',   re: /^\/api\/roster$/,               fn: (req, res) => handleSetRoster(req, res) },   // #506
+  { method: 'GET',    re: /^\/api\/people$/,               fn: (req, res) => handleListPeople(req, res) },       // #619
+  { method: 'GET',    re: /^\/api\/people\/([^\/]+)$/,     fn: (req, res, m) => handleGetPerson(req, res, m[1]) }, // #619
   { method: 'GET',    re: /^\/api\/cards$/,                fn: (req, res) => handleListCards(req, res) },
   { method: 'POST',   re: /^\/api\/cards$/,                fn: (req, res) => handleCreateCard(req, res) },
   { method: 'POST',   re: /^\/api\/cards\/([^\/]+)\/claim$/, fn: (req, res, m) => handleClaimCard(req, res, m[1]) },

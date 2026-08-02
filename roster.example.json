@@ -20,15 +20,46 @@
     "",
     "Colours are worth a moment's thought: they are how you read the room at a",
     "glance, so pick lights that stay distinct from each other rather than a",
-    "gradient of one hue."
+    "gradient of one hue.",
+    "",
+    "A seat may also carry \"aliases\": [\"othername\"] — alternate names that resolve",
+    "to this seat when they appear as a card assignee or a post author. Optional;",
+    "a roster without it works exactly as before. Aliases live on the seat so there",
+    "is one identity file and no second table to fall out of sync with it."
   ],
-
   "seats": {
-    "alex": { "name": "Alex", "glyph": "🧑‍💻", "color": "#e8b45c" },
-    "robin": { "name": "Robin", "glyph": "◆", "color": "#f2895c" },
-    "sage": { "name": "Sage", "glyph": "●", "color": "#9a86f5" },
-    "nova": { "name": "Nova", "glyph": "▲", "color": "#83b3d6" },
-    "kit": { "name": "Kit", "glyph": "■", "color": "#e2749a" },
-    "wiki": { "name": "wiki", "glyph": "📄", "color": "#8fae9a" }
+    "alex": {
+      "name": "Alex",
+      "glyph": "🧑‍💻",
+      "color": "#e8b45c",
+      "aliases": [
+        "nickname"
+      ]
+    },
+    "robin": {
+      "name": "Robin",
+      "glyph": "◆",
+      "color": "#f2895c"
+    },
+    "sage": {
+      "name": "Sage",
+      "glyph": "●",
+      "color": "#9a86f5"
+    },
+    "nova": {
+      "name": "Nova",
+      "glyph": "▲",
+      "color": "#83b3d6"
+    },
+    "kit": {
+      "name": "Kit",
+      "glyph": "■",
+      "color": "#e2749a"
+    },
+    "wiki": {
+      "name": "wiki",
+      "glyph": "📄",
+      "color": "#8fae9a"
+    }
   }
 }

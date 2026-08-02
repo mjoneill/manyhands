@@ -352,6 +352,25 @@ function buildMcpServer() {
     inputSchema: {},
   }, async () => jsonResult(await apiCall('GET', '/api/cards')));
 
+  // #619 — the person graph, for the beneficiary this slice was built for.
+  //
+  // Agents reach this board through MCP tools; a REST-only surface would have
+  // left the primary beneficiary standing at a door they cannot open, which is
+  // #581's finding one layer up. Both tools are thin wrappers over the same
+  // derivation the REST endpoints use — no second implementation to drift.
+  mcp.registerTool('person_list', {
+    description: 'List the people and agent seats on this board, derived from card assignees '
+      + 'and conversation authors, each with the cards they are assigned and the posts they wrote. '
+      + 'Unknown identities appear with resolved:false rather than being dropped.',
+    inputSchema: {},
+  }, async () => jsonResult(await apiCall('GET', '/api/people')));
+
+  mcp.registerTool('person_get', {
+    description: 'Get one person by seat key or alias, with their assigned cards, authored posts '
+      + 'and any cards they currently hold a claim on.',
+    inputSchema: { key: z.string().describe('Seat key (e.g. "pilot") or a roster alias') },
+  }, async ({ key }) => jsonResult(await apiCall('GET', `/api/people/${encodeURIComponent(key)}`)));
+
   mcp.registerTool('card_delete', {
     description: 'Delete a card by id or shortId. Returns a confirmation message.',
     inputSchema: { id: z.string().describe('Card UUID or shortId') },

@@ -60,7 +60,16 @@ function sanitizeRoster(input) {
     const color = typeof v.color === 'string' && /^#[0-9a-f]{3,8}$/i.test(v.color.trim()) ? v.color.trim() : null;
     if (!name || !color) continue;
     const glyph = typeof v.glyph === 'string' && v.glyph.trim() ? v.glyph.trim() : UNKNOWN.glyph;
-    out[String(key).trim().toLowerCase()] = { name, glyph, color };
+    // #619 — optional alternate names for a seat, so `alex` resolves to the
+    // person it belongs to without a sibling alias table beside the roster.
+    // Absent on almost every seat and absent from every roster written before
+    // this existed, hence optional: a roster without the key keeps working.
+    const aliases = Array.isArray(v.aliases)
+      ? [...new Set(v.aliases.filter((a) => typeof a === 'string' && a.trim()).map((a) => a.trim()))]
+      : [];
+    out[String(key).trim().toLowerCase()] = aliases.length
+      ? { name, glyph, color, aliases }
+      : { name, glyph, color };
   }
   return Object.keys(out).length ? out : null;
 }

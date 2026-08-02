@@ -66,8 +66,8 @@ export function loadRoster(file = rosterFilePath(), onWarn = () => {}) {
  * #506 — write the roster back, so a human can edit their own room.
  *
  * Until this existed, the roster was configurable by anyone with filesystem
- * access and by nobody else: the room's identity was ours to set and Michael's
- * to be stuck with. That is the same class of defect as #504's picker — a
+ * access and by nobody else: the room's identity was ours to set and the
+ * deployment's own humans' to be stuck with. That is the same class of defect as #504's picker — a
  * deployment's own people unreachable through its own interface.
  *
  * Validation is deliberately narrow rather than clever. Keys become object keys
@@ -106,7 +106,27 @@ export function validateRoster(input) {
       throw new Error(`seat "${key}" needs a hex colour like #7cc4a0 (got "${color}")`);
     }
     const glyph = String(seat.glyph ?? '').trim().slice(0, 8);
-    clean[key] = glyph ? { name, glyph, color } : { name, color };
+    // #619 — carry `aliases` through.
+    //
+    // Without this the field is destroyed by any settings-UI save, silently and
+    // with nothing in the diff to explain it: alias resolution would simply stop
+    // working one afternoon. That is precisely the lesson writeRoster records
+    // below about `_README` — "rebuilding the file from only the fields you know
+    // about is indistinguishable from deleting the rest" — which was learned at
+    // the FILE level while the same defect sat one level down, per SEAT, in the
+    // function that comment's own writer calls.
+    const aliases = Array.isArray(seat.aliases)
+      ? [...new Set(seat.aliases
+          .filter((a) => typeof a === 'string' && a.trim())
+          .map((a) => a.trim().slice(0, 64)))]
+      : [];
+    if (aliases.length > 16) throw new Error(`seat "${key}" has more than 16 aliases`);
+    clean[key] = {
+      name,
+      ...(glyph ? { glyph } : {}),
+      color,
+      ...(aliases.length ? { aliases } : {}),
+    };
   }
   return clean;
 }
