@@ -844,10 +844,13 @@ function handleListCards(req, res) {
       );
       if (q.bestEffort !== 'true') {
         return sendJSON(res, 400, {
+          // #659 verification finding: this string is the only place a seat
+          // learns what the door can do — a stale version teaches them to
+          // leave. Derive it from the param set so it cannot drift again.
           error: `unsupported param${unsupported.length > 1 ? 's' : ''}: `
-            + `${unsupported.join(', ')} (supported: limit, before, fields; `
-            + 'filters arrive in a later slice — pass bestEffort=true to be '
-            + 'served without them)',
+            + `${unsupported.join(', ')} (supported: `
+            + `${[...CARD_LIST_PARAMS].filter((p) => p !== 'as' && p !== 'bestEffort').join(', ')}`
+            + ' — free-text q not yet; pass bestEffort=true to be served without the rest)',
           unsupported,
         });
       }
