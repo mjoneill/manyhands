@@ -2092,12 +2092,51 @@ function assigneeCheckboxes(nameAttr) {
     .join('\n');
 }
 
+// #631 — "who am I" for authorship, and it must be a CHOICE, not a default.
+//
+// The Post-as <select> has no empty option (commons posting requires a real
+// author) and no persistence, so on a fresh load it sits on the FIRST roster
+// seat, who on any real board is a specific person. Reading the widget's value
+// would have silently credited them with every card anyone filed without touching the
+// picker: a fabricated author, which is exactly what this field exists to
+// prevent. "Absent is honest, guessed is fabricated" has to bind the
+// implementation, not only the card that says it.
+//
+// So authorship reads an explicit STORED CHOICE. Never chosen → null, and the
+// card records no author rather than the wrong one. Choosing persists, which is
+// the customer's "defaulted to whoever I've used last" — the half of the
+// stated shape that was otherwise missing.
+const IDENTITY_KEY = 'manyhands.identity';
+
+/** The identity the human has actually chosen, or null if they never have. */
+function chosenIdentity() {
+  try {
+    const v = (localStorage.getItem(IDENTITY_KEY) || '').trim();
+    return v || null;
+  } catch { return null; }   // storage disabled / private mode → honest null
+}
+
+/** Remember a chosen identity so later loads can restore it. */
+function rememberIdentity(key) {
+  try { if (key) localStorage.setItem(IDENTITY_KEY, key); } catch { /* non-fatal */ }
+}
+
 /** Fill the pickers that live in the static HTML. Idempotent. */
 function populateRosterUI() {
   const author = document.getElementById('convs-author');
   if (author) {
     author.innerHTML = assignableSeats()
       .map(([key, v]) => `<option value="${key}">${v.glyph} ${v.name}</option>`).join('\n');
+    // #631 — restore the last CHOSEN identity into the picker, and record every
+    // change. Without this the select sits on the first roster seat forever.
+    const remembered = chosenIdentity();
+    if (remembered && [...author.options].some((o) => o.value === remembered)) {
+      author.value = remembered;
+    }
+    if (!author.dataset.identityBound) {
+      author.addEventListener('change', () => rememberIdentity(author.value));
+      author.dataset.identityBound = '1';
+    }
   }
   const group = document.getElementById('card-assignees-group');
   if (group) group.innerHTML = assigneeCheckboxes('card-assignees');
@@ -2143,6 +2182,15 @@ function createCard(title, description, type, assignee, labels, column, priority
     for: null,
     createdAt: now,
     updatedAt: now,
+    // #631 — who wrote this card. The board has no login, so the honest source
+    // is the identity the person is already posting under in the room: the
+    // "Post as" picker. The customer's stated shape — "correlates to whoever
+    // I'm posting as in the conversation room" — and it needs no new UI.
+    //
+    // No picker (or nothing chosen) → null. NEVER the assignee and never the
+    // claimant: assigning a card to someone is not a claim that they wrote it,
+    // and inventing an author is worse than admitting we don't have one.
+    createdBy: chosenIdentity(),
     order: cards.length,
     column: column || 'backlog',
     shortId: nextShortId++,

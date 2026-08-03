@@ -22,6 +22,21 @@ const CONTENT_TO_NODE = {
   description: 'text',        // D3: text = body
   createdAt: 'dateCreated',
   updatedAt: 'dateModified',
+  // #631 — who wrote it, beside when it was written.
+  //
+  // `creator` rather than `author`: schema.org treats them as distinct relations,
+  // and creator accepts a Person OR an Organization — which is exactly the
+  // customer's point that the writer of a card is not always a person (a
+  // scheduler filing cards is Organization-shaped). Conversations already map their own `author`
+  // for a different record type; overloading the word across both would assert a
+  // sameness nobody has established.
+  //
+  // ⚠️ PROVISIONAL, and cheap to change: #632 researches which schema.org actor
+  // relation this really is. The mapping is one line here and the inverse is
+  // derived, so revisiting costs a line — which is why it was safe to pick one
+  // rather than leave the field sitting in `_extra` labelled "legacy/unknown"
+  // on the wiki surface.
+  createdBy: 'creator',
   parent: 'isPartOf',        // hierarchy — schema.org part-whole (the parent's @id)
 };
 const NODE_TO_CONTENT = Object.fromEntries(

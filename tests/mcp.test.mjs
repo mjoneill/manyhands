@@ -155,7 +155,7 @@ mcpTest('tools/list exposes the core tools with underscore names', async ({ mcpU
 
 mcpWithRestTest('card_create tool actually creates a card', async ({ rest, mcp }) => {
   const session = await mcpSession(mcp.mcpUrl);
-  const result = await session.callTool('card_create', { title: 'made via MCP' });
+  const result = await session.callTool('card_create', { createdBy: 'pilot', title: 'made via MCP' });
   assert.ok(!result.error, `tool call did not error: ${JSON.stringify(result.error)}`);
 
   const cards = await (await fetch(`${rest.baseUrl}/api/cards`)).json();
@@ -165,12 +165,13 @@ mcpWithRestTest('card_create tool actually creates a card', async ({ rest, mcp }
 
 mcpWithRestTest('card_create accepts relationships at create (#614) — no second call', async ({ rest, mcp }) => {
   const session = await mcpSession(mcp.mcpUrl);
-  const first = await session.callTool('card_create', { title: 'the old decision' });
+  const first = await session.callTool('card_create', { createdBy: 'pilot', title: 'the old decision' });
   assert.ok(!first.error, 'first create ok');
 
   const result = await session.callTool('card_create', {
     title: 'the new decision',
     relationships: { relatedTo: [1], supersedes: [1] },
+    createdBy: 'pilot',                          // #631 — required by the schema now
   });
   assert.ok(!result.error, `tool call did not error: ${JSON.stringify(result.error)}`);
 

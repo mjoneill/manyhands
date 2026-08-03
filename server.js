@@ -528,6 +528,18 @@ function createCardFromPayload(body, nextShortId) {
     order: typeof body.order === 'number' ? body.order : 0,
     createdAt: now,
     updatedAt: now,
+    // #631 — who WROTE this, recorded at write time.
+    //
+    // DECLARED, not authenticated: the writing surface asserts an identity and
+    // the server records it — the contract `conversation.author` has run on all
+    // along. Server-side resolution would need caller identity the MCP tool path
+    // does not have (17 tools, none read it), and that is a separate slice.
+    //
+    // Absent → null, never a guess. Not the assignee, not the claimant (that is
+    // the #348 lease, cleared on release: it records custody, not writing). A
+    // card whose author was never captured must READ as unknown, because
+    // inventing one is worse than lacking one.
+    createdBy: (typeof body.createdBy === 'string' && body.createdBy.trim()) ? body.createdBy.trim() : null,
     relationships: normalizeRelationships(body.relationships),
     // #348 — coordination rail: first-write-wins claim, server-arbitrated.
     // Set only via POST /api/cards/:id/claim (never via PATCH), so a claim
@@ -617,7 +629,7 @@ function syncInverseRelationships(data, card, before, after) {
 }
 
 // Fields that PATCH must NOT change (preserve identity / history)
-const IMMUTABLE_CARD_FIELDS = new Set(['id', 'shortId', 'createdAt']);
+const IMMUTABLE_CARD_FIELDS = new Set(['id', 'shortId', 'createdAt', 'createdBy']); // #631 — authorship is a fact about the past
 
 // #249 — id/type/priority/assignees are rendered into HTML attributes by the
 // board client and are the trust boundary between agents. Constrain them at the
@@ -1398,8 +1410,19 @@ async function handleCreateNode(req, res) {
     let notice = null;
     const created = await withWriteLock(async () => {
       const data = readBoard();
+      // #631 — createdBy MUST be forwarded explicitly. This route hand-builds
+      // its payload instead of passing `body` through, so teaching
+      // createCardFromPayload about a new field does NOT reach the wiki surface:
+      // a card made here would silently have no author. Same shape as
+      // settings.html's collectRoster() dropping roster fields its form had no
+      // input for. THE SHARED FUNCTION IS NEVER THE GUARANTEE — THE CALLERS ARE.
       const card = createCardFromPayload(
-        { title: body.title, description: body.body || '', type: body.type || 'reference' },
+        {
+          title: body.title,
+          description: body.body || '',
+          type: body.type || 'reference',
+          createdBy: body.createdBy,
+        },
         data.nextShortId,
       );
       if (typeof body.parent === 'string') card.parent = body.parent;

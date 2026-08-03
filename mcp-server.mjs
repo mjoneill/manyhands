@@ -291,6 +291,11 @@ function buildMcpServer() {
     description: 'Create a new card on the scrum board. Returns the created card (server assigns id, shortId, createdAt).',
     inputSchema: {
       title: z.string().min(1).describe('Card title (required, non-empty)'),
+      // #631 — REQUIRED, deliberately. An optional field is a field agents omit,
+      // and one surface quietly diverging from another is how #618 got 192
+      // one-ended edges. The schema is the guard: you cannot forget it.
+      createdBy: z.string().min(1).describe('REQUIRED — your seat key. Who is writing this card. '
+        + 'Declared, not authenticated: say who you actually are.'),
       description: z.string().optional().describe('Markdown body for the card'),
       type: z.enum(['task', 'idea', 'goal', 'reference', 'feature']).optional().describe('Card type — defaults to task'),
       assignees: z.array(z.string()).optional().describe(`Array of assignee keys (${seatKeys().join(', ')}, unassigned). Defaults to [unassigned].`),
