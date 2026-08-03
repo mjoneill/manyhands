@@ -40,6 +40,7 @@ import { buildLinkIndex } from './core/links.mjs';
 import { readConfig, writeConfig } from './channel-config.mjs';
 import { loadRoster, writeRoster, rosterFilePath } from './core/roster-config.mjs';
 import { deriveGraph, personByKey } from './core/people.mjs';
+import { queryCards } from './core/cards-query.mjs';
 import { configureIdentities, usingDefaultRoster } from './core/identity.mjs';
 
 const PORT = process.env.SCRUM_PORT ? parseInt(process.env.SCRUM_PORT, 10) : 3141;
@@ -808,11 +809,51 @@ function handleGetPerson(req, res, key) {
   }
 }
 
+// #657 — the params the card list understands TODAY. Filters (column, label,
+// q, …) are slice 2; until they exist, naming one must refuse, not silently
+// return the unfiltered world (#655: a wrong answer delivered fluently).
+const CARD_LIST_PARAMS = new Set(['limit', 'before', 'fields', 'as', 'bestEffort']);
+
 function handleListCards(req, res) {
   try {
     const data = readBoard();
-    sendJSON(res, 200, data.cards);
+    const q = parseQuery(req.url);
+    const keys = Object.keys(q);
+
+    // Legacy compat: the no-param call keeps the bare full array — same
+    // precedent as #202's no-param conversation list. The browser's own pages
+    // and unknown external consumers keep working; the AGENT default flips at
+    // the MCP layer, which always sends bounds.
+    if (keys.length === 0) {
+      return sendJSON(res, 200, data.cards);
+    }
+
+    const unsupported = keys.filter((k) => !CARD_LIST_PARAMS.has(k));
+    if (unsupported.length) {
+      // The miss log IS the roadmap: every unsupported param is a feature
+      // request captured at the moment of real need, with the seat that
+      // needed it. Logged on BOTH the refusal and the best-effort path.
+      console.warn(
+        `[card-query] seat=${q.as || 'unknown'} unsupported=${unsupported.join(',')} url=${req.url}`,
+      );
+      if (q.bestEffort !== 'true') {
+        return sendJSON(res, 400, {
+          error: `unsupported param${unsupported.length > 1 ? 's' : ''}: `
+            + `${unsupported.join(', ')} (supported: limit, before, fields; `
+            + 'filters arrive in a later slice — pass bestEffort=true to be '
+            + 'served without them)',
+          unsupported,
+        });
+      }
+    }
+
+    const result = queryCards(data.cards, { limit: q.limit, before: q.before, fields: q.fields });
+    if (unsupported.length) result.unsupported = unsupported; // best-effort confesses
+    sendJSON(res, 200, result);
   } catch (e) {
+    if (e.code === 'UNKNOWN_CURSOR' || e.code === 'UNKNOWN_FIELD') {
+      return sendJSON(res, 400, { error: e.message });
+    }
     console.error('GET /api/cards:', e.message);
     sendJSON(res, 500, { error: 'Failed to list cards' });
   }
@@ -1554,7 +1595,15 @@ function handleLoad(req, res) {
     // since #227 that's schema.org JSON-LD (@graph), which has no `cards` key, so
     // the board would fail to hydrate and fall back to (stale) localStorage.
     // readBoard() handles the missing-file case (empty domain → empty board).
-    sendJSON(res, 200, readBoard());
+    //
+    // #657 — conversations are omitted: 18.7MB of the 20.4MB payload was
+    // conversation history that index.html transfers, parses, and never reads
+    // (its commons panel is fed exclusively by bounded /api/conversations
+    // fetches; /api/save never writes conversations, so nothing can echo this
+    // empty list back to disk). The key stays present-but-empty with an
+    // explicit flag so a reader can tell "none exist" from "not sent".
+    const { conversations, ...rest } = readBoard();
+    sendJSON(res, 200, { ...rest, conversations: [], conversationsOmitted: true });
   } catch (e) {
     console.error('Error in /api/load:', e.message);
     sendJSON(res, 500, { error: 'Failed to load board data' });

@@ -352,10 +352,32 @@ function buildMcpServer() {
     inputSchema: { id: z.string().describe('Card UUID or shortId') },
   }, async ({ id }) => jsonResult(await apiCall('GET', `/api/cards/${encodeURIComponent(id)}`)));
 
+  // #657 — bounded + summary BY DEFAULT. The MCP tool is the agents' default
+  // surface, and agents pay for payload in context window: the unbounded list
+  // was 2.2MB of which 84% was `description` (#656). The tool always sends
+  // its bounds to REST, so no agent gets the firehose without paging for it;
+  // the REST no-param call keeps the legacy bare array for browser pages.
   mcp.registerTool('card_list', {
-    description: 'List all cards on the board. Returns an array.',
-    inputSchema: {},
-  }, async () => jsonResult(await apiCall('GET', '/api/cards')));
+    description: 'List cards — most-recent first page of summaries (no description) with '
+      + 'cardsTotal carrying the true count. Page backward by passing a shortId from a '
+      + 'previous page as `before`. `fields: "all"` restores full bodies; a comma list '
+      + '(e.g. "title,column") narrows further. Fetch one card\'s body with card_get.',
+    inputSchema: {
+      limit: z.number().int().min(1).optional()
+        .describe('Page size override (default 50, hard ceiling applies)'),
+      before: z.string().optional()
+        .describe('Backward cursor: a card shortId from a previous page'),
+      fields: z.string().optional()
+        .describe('"all" for complete cards, or a comma list of field names; default is summary (everything except description)'),
+    },
+  }, async ({ limit, before, fields } = {}) => {
+    const q = new URLSearchParams(
+      Object.entries({ limit: limit ?? 50, before, fields })
+        .filter(([, v]) => v != null && v !== '')
+        .map(([k, v]) => [k, String(v)]),
+    ).toString();
+    return jsonResult(await apiCall('GET', `/api/cards?${q}`));
+  });
 
   // #619 — the person graph, for the beneficiary this slice was built for.
   //

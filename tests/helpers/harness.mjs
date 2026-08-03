@@ -129,6 +129,17 @@ export async function startRestServer({ board, staticDir, port, mcpNotifyUrl = '
     configFile,
     /** Read the temp board file straight off disk (bypasses the API). */
     readBoardFile: () => JSON.parse(fs.readFileSync(boardFile, 'utf8')),
+    /** #657 — the card-query miss log is part of the wire contract; tests
+     * assert on it here rather than parsing raw process pipes themselves. */
+    stderr: () => stderr.join(''),
+    async waitForStderr(re, timeoutMs = 3000) {
+      const t0 = Date.now();
+      while (!re.test(stderr.join(''))) {
+        if (Date.now() - t0 > timeoutMs) break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      return re.test(stderr.join(''));
+    },
     async stop() {
       proc.kill('SIGKILL');
       try {
