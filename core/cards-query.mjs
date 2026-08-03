@@ -84,18 +84,70 @@ function makeProjector(fields) {
 }
 
 /**
- * Query the card list: sort → window → project.
+ * #659 — the card types a `type=` filter may name. Mirrors the create/update
+ * validation enum; closed set, so a typo refuses instead of silently returning
+ * an empty page that reads as "no such cards exist".
+ */
+const CARD_TYPES = new Set(['task', 'idea', 'goal', 'reference', 'feature']);
+
+function unknownValue(param, value, valid) {
+  const err = new Error(
+    `unknown ${param}: ${String(value)} (valid: ${[...valid].join(', ')})`);
+  err.code = 'UNKNOWN_FILTER_VALUE';
+  return err;
+}
+
+/**
+ * #659 — exact-match filters, applied BEFORE bounding so a filtered ask
+ * reaches the whole board, not just the newest page. Two refusal policies:
+ *   - `column` / `type` are CLOSED vocabularies — an unknown value throws
+ *     (an empty page for a typo'd column reads as "no cards there", which is
+ *     a wrong answer delivered fluently).
+ *   - `label` / `assignee` are OPEN vocabularies — any string is a legitimate
+ *     ask and an empty result is the honest answer.
+ * `since` is a createdAt >= cutoff, same semantics as the conversation list.
+ */
+function applyFilters(cards, { column, label, assignee, type, since }, { validColumns } = {}) {
+  let out = cards;
+  if (column != null && column !== '') {
+    if (Array.isArray(validColumns) && !validColumns.includes(column)) {
+      throw unknownValue('column', column, validColumns);
+    }
+    out = out.filter((c) => c?.column === column);
+  }
+  if (type != null && type !== '') {
+    if (!CARD_TYPES.has(type)) throw unknownValue('type', type, CARD_TYPES);
+    out = out.filter((c) => c?.type === type);
+  }
+  if (label != null && label !== '') {
+    out = out.filter((c) => Array.isArray(c?.labels) && c.labels.includes(label));
+  }
+  if (assignee != null && assignee !== '') {
+    out = out.filter((c) => Array.isArray(c?.assignees) && c.assignees.includes(assignee));
+  }
+  if (since != null && since !== '') {
+    out = out.filter((c) => typeof c?.createdAt === 'string' && c.createdAt >= since);
+  }
+  return out;
+}
+
+/**
+ * Query the card list: filter → sort → window → project.
  *
  * Sorted by shortId ascending — shortIds mint monotonically, so ascending is
  * chronological BY CONSTRUCTION and "most recent" doesn't depend on the
  * accident of storage order (nothing sorts on write; a restored backup owes
  * us nothing).
  *
- * Returns { cards, cardsTotal }. Throws UNKNOWN_CURSOR / UNKNOWN_FIELD.
+ * Returns { cards, cardsTotal } where cardsTotal is the FILTERED count — the
+ * total answers the question that was asked, not the size of the board.
+ * Throws UNKNOWN_CURSOR / UNKNOWN_FIELD / UNKNOWN_FILTER_VALUE.
  */
-export function queryCards(cards, { limit, before, fields } = {}) {
+export function queryCards(cards, query = {}, opts = {}) {
+  const { limit, before, fields } = query;
   const project = makeProjector(fields);
-  const sorted = [...(cards || [])].sort((a, b) => (a?.shortId ?? 0) - (b?.shortId ?? 0));
+  const filtered = applyFilters(cards || [], query, opts);
+  const sorted = [...filtered].sort((a, b) => (a?.shortId ?? 0) - (b?.shortId ?? 0));
 
   let end = sorted.length;
   if (before != null && before !== '') {

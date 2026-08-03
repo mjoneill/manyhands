@@ -809,10 +809,16 @@ function handleGetPerson(req, res, key) {
   }
 }
 
-// #657 — the params the card list understands TODAY. Filters (column, label,
-// q, …) are slice 2; until they exist, naming one must refuse, not silently
-// return the unfiltered world (#655: a wrong answer delivered fluently).
-const CARD_LIST_PARAMS = new Set(['limit', 'before', 'fields', 'as', 'bestEffort']);
+// #657/#659 — the params the card list understands TODAY. Anything else must
+// refuse, not silently return the unfiltered world (#655: a wrong answer
+// delivered fluently) — and every refusal is logged as demand (#659 shipped
+// `column` because the miss log showed 3/5 day-one entries asking for it).
+// Ranked/free-text search (`q`) is deliberately absent: different mechanism,
+// waits for the log to demand it.
+const CARD_LIST_PARAMS = new Set([
+  'limit', 'before', 'fields', 'as', 'bestEffort',
+  'column', 'label', 'assignee', 'type', 'since',
+]);
 
 function handleListCards(req, res) {
   try {
@@ -847,11 +853,14 @@ function handleListCards(req, res) {
       }
     }
 
-    const result = queryCards(data.cards, { limit: q.limit, before: q.before, fields: q.fields });
+    const result = queryCards(data.cards, {
+      limit: q.limit, before: q.before, fields: q.fields,
+      column: q.column, label: q.label, assignee: q.assignee, type: q.type, since: q.since,
+    }, { validColumns: data.columns.map((c) => c.id) });
     if (unsupported.length) result.unsupported = unsupported; // best-effort confesses
     sendJSON(res, 200, result);
   } catch (e) {
-    if (e.code === 'UNKNOWN_CURSOR' || e.code === 'UNKNOWN_FIELD') {
+    if (e.code === 'UNKNOWN_CURSOR' || e.code === 'UNKNOWN_FIELD' || e.code === 'UNKNOWN_FILTER_VALUE') {
       return sendJSON(res, 400, { error: e.message });
     }
     console.error('GET /api/cards:', e.message);

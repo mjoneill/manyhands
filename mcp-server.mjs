@@ -359,20 +359,29 @@ function buildMcpServer() {
   // the REST no-param call keeps the legacy bare array for browser pages.
   mcp.registerTool('card_list', {
     description: 'List cards — most-recent first page of summaries (no description) with '
-      + 'cardsTotal carrying the true count. Page backward by passing a shortId from a '
-      + 'previous page as `before`. `fields: "all"` restores full bodies; a comma list '
-      + '(e.g. "title,column") narrows further. Fetch one card\'s body with card_get.',
+      + 'cardsTotal carrying the count of MATCHING cards. Filters: column, label, assignee, '
+      + 'type, since (#659) — exact match, applied before paging. Page backward by passing a '
+      + 'shortId from a previous page as `before`. `fields: "all"` restores full bodies; a '
+      + 'comma list (e.g. "title,column") narrows further — `id` and `shortId` always ship '
+      + 'regardless of the list (a page whose entries can\'t be addressed can\'t be paged or '
+      + 'followed up). Fetch one card\'s body with card_get.',
     inputSchema: {
       limit: z.number().int().min(1).optional()
         .describe('Page size override (default 50, hard ceiling applies)'),
       before: z.string().optional()
         .describe('Backward cursor: a card shortId from a previous page'),
       fields: z.string().optional()
-        .describe('"all" for complete cards, or a comma list of field names; default is summary (everything except description)'),
+        .describe('"all" for complete cards, or a comma list of field names; default is summary (everything except description). id+shortId always included.'),
+      column: z.string().optional()
+        .describe('Only cards in this column id (e.g. "in-progress"); unknown column refuses naming the valid ones'),
+      label: z.string().optional().describe('Only cards carrying this label (exact match)'),
+      assignee: z.string().optional().describe('Only cards assigned to this seat (exact match)'),
+      type: z.string().optional().describe('Only cards of this type: task, idea, goal, reference, feature'),
+      since: z.string().optional().describe('Only cards created at or after this ISO timestamp'),
     },
-  }, async ({ limit, before, fields } = {}) => {
+  }, async ({ limit, before, fields, column, label, assignee, type, since } = {}) => {
     const q = new URLSearchParams(
-      Object.entries({ limit: limit ?? 50, before, fields })
+      Object.entries({ limit: limit ?? 50, before, fields, column, label, assignee, type, since })
         .filter(([, v]) => v != null && v !== '')
         .map(([k, v]) => [k, String(v)]),
     ).toString();

@@ -170,3 +170,79 @@ test('the default page of a 600-card board with 1KB bodies stays under 100KB', (
   const bytes = JSON.stringify(queryCards(makeCards(600), {})).length;
   assert.ok(bytes < 100_000, `default page is ${bytes} bytes`);
 });
+
+// ── #659 filters: exact-match, compose with bounds/projection ──────────────
+
+const COLS = ['backlog', 'planned', 'in-progress', 'done'];
+
+test('column filter returns only that column, with the FILTERED total', () => {
+  const cards = makeCards(20).map((c, i) => ({ ...c, column: COLS[i % 4] }));
+  const result = queryCards(cards, { column: 'in-progress' }, { validColumns: COLS });
+  assert.equal(result.cards.length, 5);
+  assert.ok(result.cards.every((c) => c.column === 'in-progress'));
+  assert.equal(result.cardsTotal, 5, 'total answers the question ASKED, not the board size');
+});
+
+test('a typo’d column REFUSES naming valid values — an empty page would read as "no cards there"', () => {
+  assert.throws(
+    () => queryCards(makeCards(3), { column: 'in-progess' }, { validColumns: COLS }),
+    (e) => e.code === 'UNKNOWN_FILTER_VALUE' && /in-progess/.test(e.message) && /backlog/.test(e.message),
+  );
+});
+
+test('type filter validates against the card-type enum', () => {
+  const cards = makeCards(6).map((c, i) => ({ ...c, type: i % 2 ? 'idea' : 'task' }));
+  const result = queryCards(cards, { type: 'idea' });
+  assert.equal(result.cards.length, 3);
+  assert.throws(
+    () => queryCards(cards, { type: 'epic' }),
+    (e) => e.code === 'UNKNOWN_FILTER_VALUE',
+  );
+});
+
+test('label and assignee are open vocabularies: exact membership, empty result is honest', () => {
+  const cards = makeCards(6).map((c, i) => ({
+    ...c,
+    labels: i < 2 ? ['api', 'ux'] : ['other'],
+    assignees: i < 3 ? ['ada'] : ['grace'],
+  }));
+  assert.equal(queryCards(cards, { label: 'api' }).cards.length, 2);
+  assert.equal(queryCards(cards, { assignee: 'grace' }).cards.length, 3);
+  assert.equal(queryCards(cards, { label: 'nonexistent' }).cards.length, 0, 'no refusal — the vocabulary is open');
+});
+
+test('since filters by createdAt >= cutoff (conversation_list semantics)', () => {
+  const cards = makeCards(6).map((c, i) => ({ ...c, createdAt: `2026-08-0${i + 1}T00:00:00.000Z` }));
+  const result = queryCards(cards, { since: '2026-08-04T00:00:00.000Z' });
+  assert.equal(result.cards.length, 3);
+});
+
+test('filters compose with each other and with limit/fields/before', () => {
+  const cards = makeCards(40).map((c, i) => ({
+    ...c,
+    column: COLS[i % 4],
+    labels: ['api'],
+  }));
+  const page = queryCards(cards, { column: 'done', label: 'api', limit: '3', fields: 'title,column' },
+    { validColumns: COLS });
+  assert.equal(page.cards.length, 3);
+  assert.equal(page.cardsTotal, 10, 'filtered total, not page size, not board size');
+  assert.deepEqual(Object.keys(page.cards[0]).sort(), ['column', 'id', 'shortId', 'title']);
+  // Cursor pages within the FILTERED set.
+  const older = queryCards(cards, { column: 'done', label: 'api', limit: '3', before: String(page.cards[0].shortId) },
+    { validColumns: COLS });
+  assert.ok(older.cards.every((c) => c.column === 'done'));
+  assert.ok(older.cards.at(-1).shortId < page.cards[0].shortId);
+});
+
+test('filtering happens BEFORE bounding — a filtered ask reaches past the default page', () => {
+  // 60 backlog cards then 5 done cards older than all of them would be wrong;
+  // instead: the 5 'done' cards are the OLDEST. A post-bound filter would return
+  // zero of them; a pre-bound filter returns all 5.
+  const cards = [
+    ...makeCards(5).map((c) => ({ ...c, column: 'done' })),
+    ...makeCards(60).map((c) => ({ ...c, shortId: c.shortId + 5, id: `uuid-${c.shortId + 5}`, column: 'backlog' })),
+  ];
+  const result = queryCards(cards, { column: 'done' }, { validColumns: COLS });
+  assert.equal(result.cards.length, 5);
+});

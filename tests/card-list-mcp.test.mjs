@@ -83,3 +83,27 @@ test('card_list surfaces the server refusal for an unknown cursor', async () => 
     assert.match(text, /unknown before cursor|HTTP 400/, 'refusal reaches the agent, not page one');
   });
 });
+
+test('card_list filter args pass through: column narrows, typo refuses with the vocabulary', async () => {
+  const rest = await startRestServer({
+    board: makeBoardFixture({
+      cards: fixtureCards(8).map((c, i) => ({ ...c, column: i % 2 ? 'done' : 'backlog' })),
+      nextShortId: 9,
+    }),
+  });
+  const mcp = await startMcpServer({ restApiBase: rest.baseUrl });
+  try {
+    const session = await mcpSession(mcp.mcpUrl);
+    const done = parsePayload(await session.callTool('card_list', { column: 'done' }));
+    assert.equal(done.cardsTotal, 4);
+    assert.ok(done.cards.every((c) => c.column === 'done'));
+
+    const bad = await session.callTool('card_list', { column: 'in-progess' });
+    const text = (bad.result?.content ?? []).map((c) => c.text ?? '').join('\n');
+    assert.match(text, /in-progess/, 'refusal reaches the agent');
+    assert.match(text, /backlog/, 'and names the valid vocabulary');
+  } finally {
+    await mcp.stop();
+    await rest.stop();
+  }
+});

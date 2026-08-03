@@ -124,14 +124,14 @@ test('cursor paging works over the wire and an unknown cursor 400s', async () =>
 test('an unknown param fails closed with 400 + unsupported, and logs the seat key', async () => {
   const srv = await startRestServer({ board: board(5) });
   try {
-    const r = await fetch(`${srv.baseUrl}/api/cards?limit=5&column=backlog&as=pilot`);
-    assert.equal(r.status, 400, 'filters are slice 2; today they must refuse, not silently ignore');
+    const r = await fetch(`${srv.baseUrl}/api/cards?limit=5&sort=priority&as=pilot`);
+    assert.equal(r.status, 400, 'an unknown param must refuse, not silently ignore');
     const err = await r.json();
-    assert.deepEqual(err.unsupported, ['column']);
+    assert.deepEqual(err.unsupported, ['sort']);
 
     // The miss log is the roadmap: the server must record what was asked for,
     // by whom. (console.warn → the server process's stderr.)
-    const logged = await srv.waitForStderr(/card-query.*seat=pilot.*column/, 3000);
+    const logged = await srv.waitForStderr(/card-query.*seat=pilot.*sort/, 3000);
     assert.ok(logged, 'expected a [card-query] miss log naming seat and param');
   } finally {
     await srv.stop();
@@ -141,12 +141,12 @@ test('an unknown param fails closed with 400 + unsupported, and logs the seat ke
 test('bestEffort=true serves the known params and still logs the miss', async () => {
   const srv = await startRestServer({ board: board(5) });
   try {
-    const r = await fetch(`${srv.baseUrl}/api/cards?limit=5&column=backlog&as=pilot&bestEffort=true`);
+    const r = await fetch(`${srv.baseUrl}/api/cards?limit=5&sort=priority&as=pilot&bestEffort=true`);
     assert.equal(r.status, 200);
     const data = await r.json();
     assert.equal(data.cards.length, 5);
-    assert.deepEqual(data.unsupported, ['column'], 'best-effort must confess what it ignored');
-    const logged = await srv.waitForStderr(/card-query.*seat=pilot.*column/, 3000);
+    assert.deepEqual(data.unsupported, ['sort'], 'best-effort must confess what it ignored');
+    const logged = await srv.waitForStderr(/card-query.*seat=pilot.*sort/, 3000);
     assert.ok(logged);
   } finally {
     await srv.stop();
@@ -188,6 +188,49 @@ test('a browser load→save round-trip cannot wipe conversations off disk', asyn
       ? onDisk['@graph'].filter((n) => n['@type'] === 'Comment').length
       : (onDisk.conversations || []).length;
     assert.equal(convCount, 2, 'conversations survived the round-trip');
+  } finally {
+    await srv.stop();
+  }
+});
+
+// ── #659 filters over the wire ─────────────────────────────────────────────
+
+test('column filter works over the wire; typo refuses naming valid columns; composes with fields', async () => {
+  const cards = fixtureCards(20).map((c, i) => ({ ...c, column: i % 2 ? 'done' : 'backlog' }));
+  const srv = await startRestServer({ board: makeBoardFixture({ cards, nextShortId: 21 }) });
+  try {
+    const ok = await (await fetch(`${srv.baseUrl}/api/cards?column=done&fields=title,column`)).json();
+    assert.equal(ok.cards.length, 10);
+    assert.equal(ok.cardsTotal, 10, 'filtered total');
+    assert.ok(ok.cards.every((c) => c.column === 'done'));
+
+    const bad = await fetch(`${srv.baseUrl}/api/cards?column=in-progess`);
+    assert.equal(bad.status, 400);
+    const err = await bad.json();
+    assert.match(err.error, /in-progess/);
+    assert.match(err.error, /backlog/, 'refusal names the valid vocabulary');
+  } finally {
+    await srv.stop();
+  }
+});
+
+test('label, assignee, type, since filter over the wire; column stops appearing in the miss log', async () => {
+  const cards = fixtureCards(9).map((c, i) => ({
+    ...c,
+    type: i < 3 ? 'idea' : 'task',
+    labels: i < 4 ? ['api'] : [],
+    assignees: i < 5 ? ['pilot'] : [],
+    createdAt: `2026-08-0${(i % 9) + 1}T00:00:00.000Z`,
+  }));
+  const srv = await startRestServer({ board: makeBoardFixture({ cards, nextShortId: 10 }) });
+  try {
+    assert.equal((await (await fetch(`${srv.baseUrl}/api/cards?type=idea`)).json()).cardsTotal, 3);
+    assert.equal((await (await fetch(`${srv.baseUrl}/api/cards?label=api`)).json()).cardsTotal, 4);
+    assert.equal((await (await fetch(`${srv.baseUrl}/api/cards?assignee=pilot`)).json()).cardsTotal, 5);
+    assert.equal(
+      (await (await fetch(`${srv.baseUrl}/api/cards?since=2026-08-06T00:00:00.000Z`)).json()).cardsTotal, 4);
+    // The demanded param is now SUPPORTED — it must not hit the miss log.
+    assert.equal(/card-query.*column/.test(srv.stderr()), false, 'column no longer logs as a miss');
   } finally {
     await srv.stop();
   }
