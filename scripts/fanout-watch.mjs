@@ -101,7 +101,27 @@ if (st.pendingFrom != null && receivers >= st.pendingFrom) {
     st.warned = true;                                   // suppressed by cooldown — still gate once
   }
 } else if (receivers < st.r) {
-  st.pendingFrom = st.r;                                // first tick of a drop — arm, don't warn
+  // Settle-vs-drop (2026-08-04 17:15Z false positive): a deploy makes seats
+  // re-register in a burst, the count spikes above baseline, then settles —
+  // and the old logic took the spike as the floor, reporting the return to
+  // normal as a fault AT THE EXACT MOMENT the room watches hardest. A drop
+  // TO a level held for most of recent history is the spike receding, not
+  // seats lost: adopt it silently. A drop below every recently-held level
+  // (the real fault) still arms. Fix lives in what counts as a drop, never
+  // in floor or cooldown.
+  const hist = st.hist || [];
+  const heldCount = hist.filter((r) => r === receivers).length;
+  if (heldCount >= Math.ceil(hist.length / 2) && hist.length >= 4) {
+    st.r = receivers;                                   // settle: new (old) baseline
+  } else {
+    st.pendingFrom = st.r;                              // first tick of a drop — arm, don't warn
+  }
+}
+// Only HEALTHY readings enter the held-level memory: a level held during an
+// armed or warned incident is a fault's plateau, not a baseline — without
+// this, a real drop back to a previously-faulted level would settle silently.
+if (st.pendingFrom == null && !st.warned) {
+  st.hist = [...(st.hist || []), receivers].slice(-12);
 }
 // #668: the floor path shares the per-signature cooldown. Its old gate was
 // st.warned alone, which every recovery resets — so a bouncing collapse

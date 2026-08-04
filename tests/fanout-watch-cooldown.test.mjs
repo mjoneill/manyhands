@@ -126,3 +126,26 @@ test('#668: the floor alarm respects the same per-signature cooldown as the delt
     'same collapse depth inside the cooldown must be MUTED — the warned gate alone resets on every recovery');
   assert.equal(fired(await tick(state, 1)), true, 'a DEEPER collapse is a new floor signature and fires through the mute');
 });
+
+test('a deploy spike receding to a recently-held level is a SETTLE, not a drop (no warning)', async () => {
+  // The 2026-08-04 17:15Z false positive: baseline 5 all afternoon, deploy
+  // re-registration spike to 7, settle back to 5 → the watch took the spike
+  // as the floor and reported the return to normal as a fault, firing at the
+  // exact moment the room was watching hardest.
+  const state = tmpState();
+  for (const r of [5, 5, 5, 5]) assert.equal(fired(await tick(state, r)), false, 'steady baseline');
+  await tick(state, 7); // deploy spike
+  await tick(state, 7);
+  assert.equal(fired(await tick(state, 5)), false, 'first tick of the recede must not warn');
+  assert.equal(fired(await tick(state, 5)), false,
+    'a return to a level held for most of recent history is a settle, not a two-tick drop');
+});
+
+test('a genuine drop below any recently-held level still fires through the settle logic', async () => {
+  const state = tmpState();
+  for (const r of [5, 5, 5, 5]) await tick(state, r);
+  await tick(state, 7); // spike
+  await tick(state, 7);
+  await tick(state, 4); // NOT a recently-held level — arm
+  assert.equal(fired(await tick(state, 4)), true, '7→4 past the settle check must still fire');
+});
