@@ -51,19 +51,43 @@ const receivers = Number(status.receivers ?? NaN);
 const sessions = Number(status.sessions ?? NaN);
 console.log(`${now} receivers=${receivers} sessions=${sessions} floor=${FLOOR}`);
 
-const prev = fs.existsSync(STATE_FILE) ? fs.readFileSync(STATE_FILE, 'utf8').trim() : '';
-const state = `${receivers < FLOOR ? 'LOW' : 'OK'}:${receivers}`;
-fs.writeFileSync(STATE_FILE, state);
+// State across ticks. THE FAULT IS A DELTA, NOT A LEVEL (review's correction,
+// 02:33Z, pre-first-exam): the 48-minute deafening that motivated this watch
+// showed up as receivers 5 → 4 — a floor of 3 would never have fired, and a
+// restart taking 7 → 4 is three seats deafened while "4 > 3" reads healthy.
+// So the primary trigger is a DROP that persists two consecutive ticks
+// (one-tick dips are re-registration churn); the floor stays as the second
+// condition, catching total collapse. Warn once per incident; recovery to
+// the pre-drop level clears the gate.
+let st = { r: receivers, pendingFrom: null, warned: false };
+try { st = { ...st, ...JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) }; } catch { /* first run */ }
 
-// Warn on entering-or-changing a LOW state only — a persistent gap is one
-// warning, not one per tick; recovery quietly resets the gate.
-if (receivers >= FLOOR || state === prev) process.exit(0);
+let warnBody = null;
+if (st.pendingFrom != null && receivers >= st.pendingFrom) {
+  st.pendingFrom = null; st.warned = false;            // recovered
+} else if (st.pendingFrom != null && receivers < st.pendingFrom) {
+  if (!st.warned) {                                     // drop persisted a second tick
+    warnBody = `⚠️ fanout watch: receivers dropped ${st.pendingFrom} → ${receivers} and stayed there `
+      + `across two ticks (${st.pendingFrom - receivers} seat stream(s) gone; ${sessions} sessions live). `
+      + `Seats without a stream receive NOTHING — no queue, no replay (#624). If you can read this you're `
+      + `fine; a seat quiet since the last restart may be deaf — any single MCP tool call re-registers it. `
+      + `changes_since covers whatever was missed.`;
+    st.warned = true;
+  }
+} else if (receivers < st.r) {
+  st.pendingFrom = st.r;                                // first tick of a drop — arm, don't warn
+}
+if (receivers < FLOOR && !st.warned) {                  // total-collapse floor, secondary
+  warnBody = `⚠️ fanout watch: only ${receivers} of ${sessions} live sessions hold an open stream `
+    + `(floor: ${FLOOR}). Seats without a stream receive NOTHING — no queue, no replay (#624). `
+    + `Any single MCP tool call re-registers a deaf seat; changes_since covers whatever was missed.`;
+  st.warned = true;
+}
+st.r = receivers;
+fs.writeFileSync(STATE_FILE, JSON.stringify(st));
 
-const body = `⚠️ fanout watch: only ${receivers} of ${sessions} live sessions hold an open stream `
-  + `(floor: ${FLOOR}). Seats without a stream receive NOTHING — no queue, no replay (#624). `
-  + `If you can read this, you're fine; if a seat has been quiet since the last restart, it may be `
-  + `deaf — any single MCP tool call re-registers it (the one-call cure). `
-  + `changes_since covers whatever was missed.`;
+if (!warnBody) process.exit(0);
+const body = warnBody;
 
 if (DRYRUN) {
   console.log(`${now} DRYRUN would post: ${body}`);
