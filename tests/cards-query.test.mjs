@@ -246,3 +246,33 @@ test('filtering happens BEFORE bounding — a filtered ask reaches past the defa
   const result = queryCards(cards, { column: 'done' }, { validColumns: COLS });
   assert.equal(result.cards.length, 5);
 });
+
+// ── #643 updatedSince: "THAT changed", honestly scoped ─────────────────────
+
+test('updatedSince filters by updatedAt — an edited old card APPEARS', () => {
+  const cards = makeCards(6).map((c, i) => ({
+    ...c,
+    createdAt: '2026-08-01T00:00:00.000Z',
+    updatedAt: i === 0 ? '2026-08-09T00:00:00.000Z' : '2026-08-01T00:00:00.000Z',
+  }));
+  const result = queryCards(cards, { updatedSince: '2026-08-05T00:00:00.000Z' });
+  assert.equal(result.cards.length, 1, 'the edited card, and only it');
+  assert.equal(result.cards[0].shortId, 1);
+  // The exact case since= gets wrong: created long ago, touched recently.
+  const viaSince = queryCards(cards, { since: '2026-08-05T00:00:00.000Z' });
+  assert.equal(viaSince.cards.length, 0, 'since= misses it — the documented gap');
+});
+
+test('updatedSince composes with filters and falls back to createdAt when updatedAt is absent', () => {
+  const cards = makeCards(4).map((c, i) => ({
+    ...c,
+    column: 'done',
+    updatedAt: undefined,
+    createdAt: i < 2 ? '2026-08-09T00:00:00.000Z' : '2026-08-01T00:00:00.000Z',
+  }));
+  // A card never edited was "last changed" at creation; treating missing
+  // updatedAt as never-changed would silently hide legacy cards.
+  const result = queryCards(cards, { updatedSince: '2026-08-05T00:00:00.000Z', column: 'done' },
+    { validColumns: ['done'] });
+  assert.equal(result.cards.length, 2);
+});

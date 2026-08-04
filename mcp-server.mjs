@@ -378,10 +378,11 @@ function buildMcpServer() {
       assignee: z.string().optional().describe('Only cards assigned to this seat (exact match)'),
       type: z.string().optional().describe('Only cards of this type: task, idea, goal, reference, feature'),
       since: z.string().optional().describe('Only cards created at or after this ISO timestamp'),
+      updatedSince: z.string().optional().describe('Only cards CHANGED (edited or created) at or after this ISO timestamp — the returning-agent catch-up. Says THAT a card changed, not WHAT changed.'),
     },
-  }, async ({ limit, before, fields, column, label, assignee, type, since } = {}) => {
+  }, async ({ limit, before, fields, column, label, assignee, type, since, updatedSince } = {}) => {
     const q = new URLSearchParams(
-      Object.entries({ limit: limit ?? 50, before, fields, column, label, assignee, type, since })
+      Object.entries({ limit: limit ?? 50, before, fields, column, label, assignee, type, since, updatedSince })
         .filter(([, v]) => v != null && v !== '')
         .map(([k, v]) => [k, String(v)]),
     ).toString();

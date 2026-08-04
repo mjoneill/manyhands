@@ -106,8 +106,16 @@ function unknownValue(param, value, valid) {
  *   - `label` / `assignee` are OPEN vocabularies — any string is a legitimate
  *     ask and an empty result is the honest answer.
  * `since` is a createdAt >= cutoff, same semantics as the conversation list.
+ *
+ * #643 — `updatedSince` is the RETURNING-AGENT cutoff: updatedAt >= T, falling
+ * back to createdAt when a card has never been edited (a never-edited card was
+ * "last changed" at creation; treating missing updatedAt as never-changed
+ * would silently hide legacy cards). It answers "THAT a card changed", not
+ * "WHAT changed" — the latter needs the #642 event log. `since=` keeps its
+ * created-only semantics: the two questions are different and conflating them
+ * is how the gap went unnoticed (audit #661, finding 2).
  */
-function applyFilters(cards, { column, label, assignee, type, since }, { validColumns } = {}) {
+function applyFilters(cards, { column, label, assignee, type, since, updatedSince }, { validColumns } = {}) {
   let out = cards;
   if (column != null && column !== '') {
     if (Array.isArray(validColumns) && !validColumns.includes(column)) {
@@ -127,6 +135,12 @@ function applyFilters(cards, { column, label, assignee, type, since }, { validCo
   }
   if (since != null && since !== '') {
     out = out.filter((c) => typeof c?.createdAt === 'string' && c.createdAt >= since);
+  }
+  if (updatedSince != null && updatedSince !== '') {
+    out = out.filter((c) => {
+      const t = typeof c?.updatedAt === 'string' ? c.updatedAt : c?.createdAt;
+      return typeof t === 'string' && t >= updatedSince;
+    });
   }
   return out;
 }

@@ -874,7 +874,7 @@ function handleGetPerson(req, res, key) {
 // waits for the log to demand it.
 const CARD_LIST_PARAMS = new Set([
   'limit', 'before', 'fields', 'as', 'bestEffort',
-  'column', 'label', 'assignee', 'type', 'since',
+  'column', 'label', 'assignee', 'type', 'since', 'updatedSince',
 ]);
 
 function handleListCards(req, res) {
@@ -916,6 +916,7 @@ function handleListCards(req, res) {
     const result = queryCards(data.cards, {
       limit: q.limit, before: q.before, fields: q.fields,
       column: q.column, label: q.label, assignee: q.assignee, type: q.type, since: q.since,
+      updatedSince: q.updatedSince,
     }, { validColumns: data.columns.map((c) => c.id) });
     if (unsupported.length) result.unsupported = unsupported; // best-effort confesses
     sendJSON(res, 200, result);
