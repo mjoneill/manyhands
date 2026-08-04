@@ -106,9 +106,13 @@ if (st.pendingFrom != null && receivers >= st.pendingFrom) {
 // #668: the floor path shares the per-signature cooldown. Its old gate was
 // st.warned alone, which every recovery resets — so a bouncing collapse
 // re-fired on each dip, the #666 fatigue defect relocated to the branch that
-// handles the WORSE fault. A deeper collapse is a new signature and still
-// fires immediately.
-if (receivers < FLOOR && !st.warned) {                  // total-collapse floor, secondary
+// handles the WORSE fault. The warned flag is deliberately NOT a condition
+// here: it belongs to the delta incident, and gating on it muted a collapse
+// that DEEPENED mid-incident (and a total collapse following an ordinary
+// delta warning — escalation silenced by a lesser alarm). Per-depth
+// signatures carry the muting; escalation always fires. Only one post per
+// tick either way: floor's warnBody overwrites delta's.
+if (receivers < FLOOR) {                                // total-collapse floor, secondary
   const floorSig = `floor:${receivers}`;
   if (st.sigTimes[floorSig] == null) {
     warnBody = `⚠️ fanout watch: only ${receivers} of ${sessions} live sessions hold an open stream `
