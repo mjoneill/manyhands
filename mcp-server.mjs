@@ -332,6 +332,7 @@ function buildMcpServer() {
         supersedes: z.array(z.number()).optional(),
         derivedFrom: z.array(z.number()).optional(),
       }).optional().describe('Merged at the type level (#548): only the keys you send change; clear a type with an explicit empty array'),
+      by: z.string().optional().describe('#675 — your seat key: who is making this edit. Declared, not authenticated; recorded on the event log, never on the card.'),
     },
   }, async ({ id, ...patch }) =>
     jsonResult(await apiCall('PATCH', `/api/cards/${encodeURIComponent(id)}`, patch))
@@ -423,10 +424,15 @@ function buildMcpServer() {
   });
 
   mcp.registerTool('card_delete', {
-    description: 'Delete a card by id or shortId. Returns a confirmation message.',
-    inputSchema: { id: z.string().describe('Card UUID or shortId') },
-  }, async ({ id }) => {
-    await apiCall('DELETE', `/api/cards/${encodeURIComponent(id)}`);
+    description: 'Delete a card by id or shortId. Returns a confirmation message. The tombstone '
+      + 'keeps the card\'s last state in the event log; pass `by` so it also keeps who.',
+    inputSchema: {
+      id: z.string().describe('Card UUID or shortId'),
+      by: z.string().optional().describe('#675 — your seat key: who is deleting. Recorded on the tombstone event.'),
+    },
+  }, async ({ id, by }) => {
+    const q = by ? `?by=${encodeURIComponent(by)}` : '';
+    await apiCall('DELETE', `/api/cards/${encodeURIComponent(id)}${q}`);
     return textResult(`Card ${id} deleted.`);
   });
 

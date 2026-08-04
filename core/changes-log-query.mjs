@@ -118,8 +118,9 @@ export function queryChangesFromLog(events, {
     truncated,
     history,
     covers: { posts: 'exact', cards: 'creates+updates+deletes' },
-    // #675: PATCH/DELETE carry no declared actor yet — recording correctly
-    // still yields null, so the ledger keeps the one honest omission.
-    omits: { cards: ['edit-actor'] },
+    // #675 CLOSED: PATCH/DELETE now carry a declared `by` — the capability
+    // exists, so the omission ledger is empty. Historical nulls (and silent
+    // callers) are DATA — "unsaid" — not an omission of the surface.
+    omits: { cards: [] },
   };
 }

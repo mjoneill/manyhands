@@ -176,3 +176,43 @@ test('#669 writeBoard REFUSES a write that does not declare what it did', async 
   assert.match(src, /!Array\.isArray\(events\) \|\| events\.length === 0[\s\S]{0,120}throw new Error/,
     'writeBoard must THROW on a missing or empty events list, not default it away');
 });
+
+// —— #675: PATCH and DELETE declare their actor — the last omission closes ——
+// Additive and optional: a caller that sends nothing gets exactly the old
+// behaviour (actor null); `by` never lands on the card itself (the #249
+// unknown-key guard was already holding that door).
+
+withServer('#675 a PATCH with by records the actor; by never lands on the card', async (s) => {
+  const card = await (await fetch(`${s.baseUrl}/api/cards`, json({
+    method: 'POST', body: JSON.stringify({ title: 'edit me', createdBy: 'ada' }),
+  }))).json();
+  const before = logOf(s).length;
+  await fetch(`${s.baseUrl}/api/cards/${card.id}`, json({
+    method: 'PATCH', body: JSON.stringify({ title: 'edited', by: 'bex' }),
+  }));
+  const ev = logOf(s).slice(before).find((e) => e.op === 'update');
+  assert.equal(ev.actor, 'bex', 'the declared editor reaches the log');
+  const served = await (await fetch(`${s.baseUrl}/api/cards/${card.id}`)).json();
+  assert.equal(served.by, undefined, 'by is event metadata, never a card field');
+});
+
+withServer('#675 a DELETE with ?by= records the actor on the tombstone', async (s) => {
+  const card = await (await fetch(`${s.baseUrl}/api/cards`, json({
+    method: 'POST', body: JSON.stringify({ title: 'doomed', createdBy: 'ada' }),
+  }))).json();
+  const before = logOf(s).length;
+  await fetch(`${s.baseUrl}/api/cards/${card.id}?by=cyd`, { method: 'DELETE' });
+  const ev = logOf(s).slice(before).find((e) => e.op === 'delete');
+  assert.equal(ev.actor, 'cyd', 'the declared deleter reaches the tombstone');
+});
+
+withServer('#675 the omission stays honest for silent callers: no by → actor null', async (s) => {
+  const card = await (await fetch(`${s.baseUrl}/api/cards`, json({
+    method: 'POST', body: JSON.stringify({ title: 'silent edit', createdBy: 'ada' }),
+  }))).json();
+  const before = logOf(s).length;
+  await fetch(`${s.baseUrl}/api/cards/${card.id}`, json({
+    method: 'PATCH', body: JSON.stringify({ title: 'still silent' }),
+  }));
+  assert.equal(logOf(s).slice(before)[0].actor, null, 'no invented attribution — null means unsaid');
+});

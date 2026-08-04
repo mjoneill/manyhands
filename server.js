@@ -1210,9 +1210,13 @@ async function handleUpdateCard(req, res, idOrShortId) {
       }
       // #669 — the card, its #614 fan-out, and the done-nudge that rides this
       // same write all get their own seq, in the order they happened.
+      // #675 — the declared editor (patch.by) reaches the log; the #249
+      // unknown-key guard already keeps `by` off the card itself. Optional:
+      // a silent caller records null, never an invented attribution.
+      const by = typeof patch.by === 'string' && patch.by ? patch.by : null;
       writeBoard(data, [
-        cardEvent('update', card),
-        ...fanout.map((c) => cardEvent('update', c)),
+        cardEvent('update', card, by),
+        ...fanout.map((c) => cardEvent('update', c, by)),
         ...(nudge ? [convEvent(nudge)] : []),
       ]);
       return card;
@@ -1227,6 +1231,9 @@ async function handleUpdateCard(req, res, idOrShortId) {
 
 async function handleDeleteCard(req, res, idOrShortId) {
   try {
+    // #675 — a DELETE has no body by convention; the declared deleter rides
+    // the query string. Optional, same trust model as every actor here.
+    const by = parseQuery(req.url).by || null;
     const found = await withWriteLock(async () => {
       const data = readBoard();
       const idx = findCardIndex(data, idOrShortId);
@@ -1234,7 +1241,7 @@ async function handleDeleteCard(req, res, idOrShortId) {
       const [removedCard] = data.cards.splice(idx, 1);
       // #669 — the tombstone carries the last known body, so a delete is a state
       // the log can still answer questions about, not an absence.
-      writeBoard(data, [cardEvent('delete', removedCard)]);
+      writeBoard(data, [cardEvent('delete', removedCard, by)]);
       return true;
     });
     if (!found) return sendJSON(res, 404, { error: 'Card not found' });

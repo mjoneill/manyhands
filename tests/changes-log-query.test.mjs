@@ -31,7 +31,7 @@ test('deletes appear with tombstone state — the thing field-reads could never 
   const del = r.changes.find((c) => c.op === 'delete');
   assert.ok(del, 'the delete event is served');
   assert.equal(del.title, 'gone', 'tombstone summary comes from the last state');
-  assert.deepEqual(r.omits.cards, ['edit-actor'], 'deletes are REDEEMED from the omits ledger');
+  assert.deepEqual(r.omits.cards, [], 'the ledger is EMPTY: deletes redeemed by #679, edit-actor by #675');
 });
 
 test('quotas: 96 posts cannot starve 4 card events out of the window', () => {

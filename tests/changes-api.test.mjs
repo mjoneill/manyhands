@@ -25,7 +25,7 @@ test('GET /api/changes serves real events incl. a delete with tombstone state', 
     assert.deepEqual(ops, ['create', 'post', 'delete'], `seq order end-to-end, got ${ops}`);
     assert.equal(r.changes.at(-1).title, 'lived briefly', 'the delete row carries tombstone summary');
     assert.deepEqual(r.covers, { posts: 'exact', cards: 'creates+updates+deletes' });
-    assert.deepEqual(r.omits, { cards: ['edit-actor'] });
+    assert.deepEqual(r.omits, { cards: [] }, 'the omits ledger closed with #675');
     assert.equal(r.totals.cards, 2);
     assert.equal(r.totals.posts, 1);
 
