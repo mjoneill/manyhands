@@ -34,6 +34,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { loadDomain, saveDomain } from './core/store.mjs';
+import { appendEvent } from './core/event-log.mjs';
 import { boardToDomain, domainToBoard, cardToNode } from './core/mapping.mjs';
 import { buildTree, buildChildIndex } from './core/tree.mjs';
 import { buildLinkIndex } from './core/links.mjs';
@@ -47,6 +48,18 @@ import { configureIdentities, usingDefaultRoster } from './core/identity.mjs';
 const PORT = process.env.SCRUM_PORT ? parseInt(process.env.SCRUM_PORT, 10) : 3141;
 const PROJECT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const BOARD_DATA_FILE = process.env.SCRUM_BOARD_FILE || path.join(PROJECT_DIR, 'board-data.json');
+// #669 — the event log is named FOR ITS BOARD FILE, not merely placed beside it:
+//   board-data.json  →  board-data-events/
+//
+// ⚠️ The first cut used `dirname(BOARD_DATA_FILE)/events` and the comment claimed
+// each fixture "gets a throwaway log for free". That was FALSE and the wiring
+// tests caught it: every test board lives directly in os.tmpdir(), so all of them
+// shared ONE events dir and a fresh server saw 219 events from other test files.
+// Isolation has to follow the board file's IDENTITY, not its folder — otherwise
+// two stores in one directory silently share a log, which is the worst possible
+// failure for an append-only record. Day-segmented files land inside.
+const EVENT_LOG_DIR = process.env.SCRUM_EVENT_LOG_DIR
+  || `${BOARD_DATA_FILE.replace(/\.json$/, '')}-events`;
 // Root directory for static file serving. Defaults to the project dir;
 // overridable so tests can exercise the traversal guard in isolation.
 const STATIC_DIR = process.env.SCRUM_STATIC_DIR || PROJECT_DIR;
@@ -412,7 +425,12 @@ async function handleSave(req, res) {
       if (incoming[k] !== undefined) merged[k] = incoming[k];
     }
 
-    writeBoard(merged);
+    // #669 — the browser's whole-board save cannot say what it changed, so its
+    // events are derived. A save that changed nothing writes nothing: there is no
+    // event to record, and writeBoard refuses an empty list by design rather than
+    // letting a no-op mint a meaningless entry in the log.
+    const saveEvents = deriveEvents(existing, merged);
+    if (saveEvents.length) writeBoard(merged, saveEvents);
 
     sendJSON(res, 200, { ok: true, cards: merged.cards.length, lastUpdated: merged.lastUpdated });
   } catch (e) {
@@ -469,9 +487,88 @@ function readBoard() {
 // stamp data.lastUpdated here (callers read it back, e.g. handleSave) and force
 // the canonical _README so it's refreshed even on the browser's whole-board
 // save; saveDomain carries both through the domain unchanged.
-function writeBoard(data) {
+//
+// #669 — EVERY write declares what it did. `events` is REQUIRED and this throws
+// without it, which is the whole point: the spec said "append at the chokepoint"
+// and the chokepoint turned out to know nothing — it receives the whole board and
+// cannot tell op from entity from actor. Handlers know all three. Making the
+// parameter mandatory moves totality from a property we assert to one a forgotten
+// argument cannot bypass: a future handler that doesn't say what it did cannot
+// write at all.
+//
+// ⚠️ It is a LIST, not one event. Several handlers deliberately mutate more than
+// one entity per write — a claim rides with its announcement so there is no window
+// where the card is claimed and the room was never told (#578); a column delete
+// reassigns every card in it; a create fans out through syncInverseRelationships
+// into N other cards (#614). One event per write would have had to drop the
+// announcement, which is the half the room actually reads.
+//
+// The log is the AUTHORITY and the store is its projection, so the order is
+// validate → append → project: appendEvent validates and throws before writing a
+// byte, every event lands before the store save, and a store failure is repaired
+// by rebuild rather than by rolling back an append (which would mint a second
+// permitted rewrite beside redaction's — the spec holds exactly one).
+// #669 — event constructors. Kept next to writeBoard so a caller writing a new
+// handler sees the shape it must supply. `actor` is DECLARED, not authenticated
+// (the board's standing trust model): we record who the request said it was, and
+// null when it said nothing, rather than inventing an attribution.
+const cardEvent = (op, card, actor = null) => ({
+  op, actor, entity: { kind: 'card', id: card.id, shortId: card.shortId }, state: card,
+});
+const convEvent = (conv, actor = null) => ({
+  op: 'post', actor: actor ?? conv.author ?? null,
+  entity: { kind: 'conversation', id: conv.id }, state: conv,
+});
+const columnEvent = (op, col, actor = null) => ({
+  op, actor, entity: { kind: 'column', id: col.id }, state: col,
+});
+
+/**
+ * #669 — derive events by comparing two whole boards.
+ *
+ * ⚠️ THE ONLY place in the server that infers `op` from absence, and deliberately
+ * bounded to the two callers that genuinely cannot know what they changed: the
+ * browser's whole-board save (`handleSave` — it merges an entire cards array from
+ * a tab that may have touched anything) and the boot migration. Every other
+ * handler DECLARES, because a declaration carries the actor and a diff cannot.
+ * Deriving everywhere was the alternative and it loses `actor` permanently —
+ * the "materialize a guess" move the room rejected for prose obligations.
+ */
+function deriveEvents(before, after, actor = null) {
+  const out = [];
+  const mk = {
+    cards: (op, x) => cardEvent(op, x, actor),
+    columns: (op, x) => columnEvent(op, x, actor),
+    // A conversation's create op is `post`; only its removal is a `delete`.
+    conversations: (op, x) => ({
+      op: op === 'create' ? 'post' : op, actor: actor ?? x.author ?? null,
+      entity: { kind: 'conversation', id: x.id }, state: x,
+    }),
+  };
+  for (const key of ['cards', 'columns', 'conversations']) {
+    const prev = new Map((before?.[key] || []).filter((x) => x?.id).map((x) => [x.id, x]));
+    const next = new Map((after?.[key] || []).filter((x) => x?.id).map((x) => [x.id, x]));
+    for (const [id, x] of next) {
+      const was = prev.get(id);
+      if (!was) out.push(mk[key]('create', x));
+      else if (JSON.stringify(was) !== JSON.stringify(x)) out.push(mk[key]('update', x));
+    }
+    for (const [id, x] of prev) if (!next.has(id)) out.push(mk[key]('delete', x));
+  }
+  return out;
+}
+
+function writeBoard(data, events) {
+  if (!Array.isArray(events) || events.length === 0) {
+    throw new Error(
+      'writeBoard requires a non-empty events[] (#669): every write must declare '
+      + '{op, entity, actor, state}. If this is a bulk write that genuinely cannot '
+      + 'name its entities, derive the events by diffing — see handleSave.',
+    );
+  }
   data.lastUpdated = new Date().toISOString();
   data._README = BOARD_README;
+  for (const ev of events) appendEvent(EVENT_LOG_DIR, ev, { now: data.lastUpdated });
   saveDomain(BOARD_DATA_FILE, boardToDomain(data), { now: data.lastUpdated });
 }
 
@@ -608,7 +705,15 @@ function normalizeRelationships(rel) {
 // write lock and persists. Missing targets are skipped, not errors — dangling
 // shortIds are a known corpus condition, and refusing the write here would
 // make old data block new edges.
+// #669 — RETURNS the sibling cards it mutated, so the caller can log an event
+// for each. Without this, editing #669's `relatedTo` silently rewrites #455's
+// relationships and #455's own history shows nothing — which would violate
+// #642's "field-level change answerable" requirement while every test passed.
+// The function doing the fan-out is the only thing that knows its extent;
+// diffing for it afterwards would re-derive a guess where a precise answer is
+// free. Deduped: one event per touched card even if several types moved.
 function syncInverseRelationships(data, card, before, after) {
+  const touched = new Set();
   for (const [type, invType] of Object.entries(INVERSE_OF)) {
     const prev = new Set((before && before[type]) || []);
     const next = new Set((after && after[type]) || []);
@@ -619,15 +724,19 @@ function syncInverseRelationships(data, card, before, after) {
       target.relationships = normalizeRelationships(target.relationships);
       if (!target.relationships[invType].includes(card.shortId)) {
         target.relationships[invType].push(card.shortId);
+        touched.add(target);
       }
     }
     for (const sid of prev) {
       if (next.has(sid)) continue;
       const target = data.cards.find((c) => c.shortId === sid);
       if (!target || !target.relationships || !Array.isArray(target.relationships[invType])) continue;
+      const len = target.relationships[invType].length;
       target.relationships[invType] = target.relationships[invType].filter((x) => x !== card.shortId);
+      if (target.relationships[invType].length !== len) touched.add(target);
     }
   }
+  return [...touched];
 }
 
 // Fields that PATCH must NOT change (preserve identity / history)
@@ -996,8 +1105,12 @@ async function handleCreateCard(req, res) {
       const card = createCardFromPayload(body, data.nextShortId);
       data.cards.push(card);
       data.nextShortId = (data.nextShortId || 1) + 1;
-      syncInverseRelationships(data, card, null, card.relationships); // #614
-      writeBoard(data);
+      // #669 — the create AND every sibling its relationships rewrote (#614).
+      const fanout = syncInverseRelationships(data, card, null, card.relationships);
+      writeBoard(data, [
+        cardEvent('create', card, card.createdBy),
+        ...fanout.map((c) => cardEvent('update', c, card.createdBy)),
+      ]);
       return card;
     });
     sendJSON(res, 201, created);
@@ -1019,6 +1132,8 @@ async function handleUpdateCard(req, res, idOrShortId) {
       if (idx < 0) return null;
       const card = data.cards[idx];
       const wasDone = card.column === 'done';
+      let fanout = [];        // #669 — siblings this patch rewrites via #614
+      let nudge = null;       // #669 — the done-nudge post, if this write emits one
       for (const [k, v] of Object.entries(patch)) {
         if (IMMUTABLE_CARD_FIELDS.has(k)) continue;
         if (!PATCHABLE_CARD_FIELDS.has(k)) continue; // #249 — ignore unknown keys
@@ -1032,7 +1147,7 @@ async function handleUpdateCard(req, res, idOrShortId) {
           for (const t of RELATIONSHIP_TYPES) {
             if (Array.isArray(v[t])) merged[t] = v[t];
           }
-          syncInverseRelationships(data, card, before, merged);
+          fanout = syncInverseRelationships(data, card, before, merged); // #669
           card.relationships = merged;
           continue;
         }
@@ -1050,11 +1165,18 @@ async function handleUpdateCard(req, res, idOrShortId) {
             author: CLAIM_ANNOUNCER,
           });
           data.conversations.push(conv);
+          nudge = conv;
         } catch (e) {
           console.error('#665 done-nudge skipped:', e.message);
         }
       }
-      writeBoard(data);
+      // #669 — the card, its #614 fan-out, and the done-nudge that rides this
+      // same write all get their own seq, in the order they happened.
+      writeBoard(data, [
+        cardEvent('update', card),
+        ...fanout.map((c) => cardEvent('update', c)),
+        ...(nudge ? [convEvent(nudge)] : []),
+      ]);
       return card;
     });
     if (!updated) return sendJSON(res, 404, { error: 'Card not found' });
@@ -1071,8 +1193,10 @@ async function handleDeleteCard(req, res, idOrShortId) {
       const data = readBoard();
       const idx = findCardIndex(data, idOrShortId);
       if (idx < 0) return false;
-      data.cards.splice(idx, 1);
-      writeBoard(data);
+      const [removedCard] = data.cards.splice(idx, 1);
+      // #669 — the tombstone carries the last known body, so a delete is a state
+      // the log can still answer questions about, not an absence.
+      writeBoard(data, [cardEvent('delete', removedCard)]);
       return true;
     });
     if (!found) return sendJSON(res, 404, { error: 'Card not found' });
@@ -1117,7 +1241,9 @@ async function handleClaimCard(req, res, idOrShortId) {
         // it here rather than in a second write keeps the two atomic: there is
         // no window in which the card is claimed and the room was never told.
         const announced = appendClaimAnnouncement(data, card, by, 'claimed');
-        writeBoard(data);
+        // #669 — claim + its announcement, two events on ONE write (#578).
+        writeBoard(data, [cardEvent('update', card, by),
+          ...(announced ? [convEvent(announced, by)] : [])]);
         return {
           status: 200,
           payload: { claimed: true, holder: by, claimedAt: now },
@@ -1165,7 +1291,8 @@ async function handleReleaseCard(req, res, idOrShortId) {
       card.claimedAt = null;
       card.updatedAt = new Date().toISOString();
       const announced = wasHeld ? appendClaimAnnouncement(data, card, by, 'released') : null;
-      writeBoard(data);
+      writeBoard(data, [cardEvent('update', card, by),
+        ...(announced ? [convEvent(announced, by)] : [])]);
       return { status: 200, payload: { released: true }, announced };
     });
     if (result.announced) notifyMcpOfPost(result.announced);
@@ -1214,7 +1341,7 @@ async function handleCreateColumn(req, res) {
       const order = typeof body.order === 'number' ? body.order : data.columns.length;
       const col = { id, name: body.name.trim(), order };
       data.columns.push(col);
-      writeBoard(data);
+      writeBoard(data, [columnEvent('create', col)]);
       return col;
     });
     sendJSON(res, 201, created);
@@ -1258,7 +1385,7 @@ async function handleUpdateColumn(req, res, columnId) {
         if (!PATCHABLE_COLUMN_FIELDS.has(k)) continue; // #299 — ignore unknown keys
         col[k] = v;
       }
-      writeBoard(data);
+      writeBoard(data, [columnEvent('update', col)]);
       return col;
     });
     if (!updated) return sendJSON(res, 404, { error: 'Column not found' });
@@ -1289,10 +1416,15 @@ async function handleDeleteColumn(req, res, columnId) {
       const [removed] = data.columns.splice(idx, 1);
       const fallback = data.columns[0].id;
       let moved = 0;
+      const reassigned = [];
       for (const card of data.cards) {
-        if (card.column === removed.id) { card.column = fallback; moved++; }
+        if (card.column === removed.id) { card.column = fallback; moved++; reassigned.push(card); }
       }
-      writeBoard(data);
+      // #669 — deleting a column MOVES every card in it. Each move is a real
+      // change to that card and gets its own event; otherwise a card's history
+      // shows it in a column it was never put in.
+      writeBoard(data, [columnEvent('delete', removed),
+        ...reassigned.map((c) => cardEvent('update', c))]);
       return { moved, fallback };
     });
 
@@ -1433,7 +1565,7 @@ async function handleCreateConversation(req, res) {
       const data = readBoard();
       const conv = createConversationFromPayload(body);
       data.conversations.push(conv);
-      writeBoard(data);
+      writeBoard(data, [convEvent(conv)]);
       return conv;
     });
     notifyMcpOfPost(created);
@@ -1597,8 +1729,9 @@ async function handleCreateNode(req, res) {
       if (body.attachments !== undefined) card.attachments = sanitizeAttachments(body.attachments); // #222
       data.cards.push(card);
       data.nextShortId = (data.nextShortId || 1) + 1;
-      appendWikiNotice(data, 'created', card); // #223
-      writeBoard(data);
+      const notice = appendWikiNotice(data, 'created', card); // #223
+      writeBoard(data, [cardEvent('create', card, card.createdBy),
+        ...(notice ? [convEvent(notice)] : [])]);
       return card;
     });
     sendJSON(res, 201, cardToNode(created));
@@ -1649,8 +1782,9 @@ async function handleUpdateNode(req, res, idOrShortId) {
       if ('parent' in patch) card.parent = patch.parent;
       if ('attachments' in patch) card.attachments = sanitizeAttachments(patch.attachments); // #222
       card.updatedAt = new Date().toISOString();
-      if (contentChanged) appendWikiNotice(data, 'updated', card); // #223
-      writeBoard(data);
+      const notice = contentChanged ? appendWikiNotice(data, 'updated', card) : null; // #223
+      writeBoard(data, [cardEvent('update', card),
+        ...(notice ? [convEvent(notice)] : [])]);
       return card;
     });
     if (!updated) return sendJSON(res, 404, { error: 'Node not found' });
@@ -1919,6 +2053,13 @@ function migrateBoardIfNeeded() {
     console.error(`boot migration skipped (board unreadable): ${e.message}`);
     return;
   }
+  // #669 — the boot migration is the SECOND caller that cannot name its entities:
+  // it runs outside any request, has no actor, and may rewrite every card and
+  // column. Snapshot before mutating so its events can be derived. Consequence
+  // worth expecting: the log's first entries after a boot may be a migration.
+  const preMigration = JSON.parse(JSON.stringify({
+    cards: data.cards, columns: data.columns, conversations: data.conversations,
+  }));
   let changed = false;
 
   // (a) shortId backfill. Start the counter above the highest id in use AND the
@@ -1947,7 +2088,8 @@ function migrateBoardIfNeeded() {
   }
 
   if (changed) {
-    writeBoard(data);
+    const migEvents = deriveEvents(preMigration, data);
+    if (migEvents.length) writeBoard(data, migEvents);
     console.log(`boot migration: backfilled ${backfilled} shortId(s), normalized columns`);
   }
 }
