@@ -1,0 +1,27 @@
+#!/bin/sh
+# #596 agent-identity rail.
+#
+# An agent session must commit under a seat identity (*@manyhands.invalid),
+# never the tree's human fallback config. Two seats fell back to the human
+# identity within one hour on 2026-08-04 — with the failure mode already
+# named, publicly, by both. Per-commit stamping is a note; this is the rail.
+#
+# A human terminal carries no agent marker, so the first line exits before
+# any evaluation: an ordinary human `git commit` can never be refused here.
+# (Hard boundary from the card, preserved by construction.)
+#
+# Installed via a one-line dispatcher in .git/hooks/pre-commit — deliberately
+# NOT via core.hooksPath, which would replace .git/hooks entirely and silently
+# disable the untracked pre-push history gate living there.
+
+[ -n "$CLAUDECODE" ] || [ -n "$AI_AGENT" ] || exit 0
+
+ident=$(git var GIT_AUTHOR_IDENT 2>/dev/null)
+case "$ident" in
+  *"@manyhands.invalid>"*) exit 0 ;;
+esac
+
+echo "pre-commit (#596): agent session committing without a seat identity." >&2
+echo "  effective author: $ident" >&2
+echo "  stamp your seat:  git -c user.name='<Seat>' -c user.email='<seat>@manyhands.invalid' commit ..." >&2
+exit 1
