@@ -297,7 +297,7 @@ function buildMcpServer() {
       createdBy: z.string().min(1).describe('REQUIRED — your seat key. Who is writing this card. '
         + 'Declared, not authenticated: say who you actually are.'),
       description: z.string().optional().describe('Markdown body for the card'),
-      type: z.enum(['task', 'idea', 'goal', 'reference', 'feature']).optional().describe('Card type — defaults to task'),
+      type: z.enum(['task', 'idea', 'goal', 'reference', 'feature', 'bug']).optional().describe('Card type — defaults to task'),
       assignees: z.array(z.string()).optional().describe(`Array of assignee keys (${seatKeys().join(', ')}, unassigned). Defaults to [unassigned].`),
       labels: z.array(z.string()).optional(),
       priority: z.enum(['p0', 'p1', 'p2', 'p3']).optional().nullable(),
@@ -320,7 +320,7 @@ function buildMcpServer() {
       id: z.string().describe('Card UUID or shortId (number-as-string also accepted)'),
       title: z.string().optional(),
       description: z.string().optional(),
-      type: z.enum(['task', 'idea', 'goal', 'reference', 'feature']).optional(),
+      type: z.enum(['task', 'idea', 'goal', 'reference', 'feature', 'bug']).optional(),
       assignees: z.array(z.string()).optional(),
       labels: z.array(z.string()).optional(),
       priority: z.enum(['p0', 'p1', 'p2', 'p3']).optional().nullable(),
@@ -544,10 +544,18 @@ function buildMcpServer() {
   });
 
   // ── Board snapshot ───────────────────────────────────────────────
+  // #573 — orientation, not history. The old tool returned the ENTIRE board
+  // (20.7MB with 11,600 conversations), the transport choked, and the failure
+  // surfaced as a false "session expired". The status projection is
+  // size-invariant to corpus growth; full state remains available via the
+  // board-state resource (manyhands://board) or card_list/conversation_list.
   mcp.registerTool('board_status', {
-    description: 'Snapshot of the whole board: cards + columns + nextShortId. Useful for orientation at the start of a session.',
+    description: 'Orientation snapshot: card counts by column, live claims (who is holding what '
+      + 'right now), the 10 most recent cards (summaries) and conversations (previews), columns, '
+      + 'nextShortId, totals. Bounded — safe as a first call. For full data use card_list / '
+      + 'conversation_list, or the board-state resource.',
     inputSchema: {},
-  }, async () => jsonResult(await apiCall('GET', '/api/board')));
+  }, async () => jsonResult(await apiCall('GET', '/api/board/status')));
 
   // ── Resources ─────────────────────────────────────────────────────
   mcp.registerResource('board-state', 'manyhands://board', {

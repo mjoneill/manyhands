@@ -636,7 +636,9 @@ const IMMUTABLE_CARD_FIELDS = new Set(['id', 'shortId', 'createdAt', 'createdBy'
 // board client and are the trust boundary between agents. Constrain them at the
 // API (defense in depth alongside the client-side escaping): an out-of-shape
 // value must never be stored, whichever writer sent it.
-const CARD_TYPES = new Set(['task', 'idea', 'goal', 'reference', 'feature']);
+// #573 — 'bug' added: the store already held 5 bug-typed cards the write
+// path refused; a schema that cannot express existing data keeps surprising.
+const CARD_TYPES = new Set(['task', 'idea', 'goal', 'reference', 'feature', 'bug']);
 const CARD_PRIORITIES = new Set(['p0', 'p1', 'p2', 'p3']);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ASSIGNEE_KEY_RE = /^[A-Za-z0-9_-]+$/;
@@ -680,6 +682,61 @@ const PATCHABLE_CARD_FIELDS = new Set([
   'title', 'description', 'type', 'assignees', 'assignee', 'labels',
   'for', 'priority', 'column', 'order', 'relationships', 'parent',
 ]);
+
+// ── /api/board/status — the orientation projection (#573) ──
+//
+// board_status was "the first call a new agent makes"; it returned the whole
+// board including every conversation ever posted (20.7MB), the transport
+// choked, and the failure surfaced as a false "session expired" — sending
+// agents to restart servers that were fine. Orientation needs the SHAPE of
+// the board, not its history: counts, live claims, recent tails, meta. The
+// payload is size-invariant to corpus growth — the property whose absence
+// rotted the original tool (a control whose correctness depends on its input
+// staying small is a control with a timer on it — #561's lesson, again).
+//
+// /api/board itself is deliberately UNCHANGED: it is also the board-state
+// MCP resource (manyhands://board), a full-state contract something may
+// rely on. Split, don't mutate (option 3 on the card).
+function handleBoardStatus(req, res) {
+  try {
+    const data = readBoard();
+    const cardsByColumn = {};
+    for (const col of data.columns) cardsByColumn[col.id] = 0;
+    for (const c of data.cards) {
+      cardsByColumn[c.column] = (cardsByColumn[c.column] ?? 0) + 1;
+    }
+    // Live claims are orientation-critical — who is holding what right now —
+    // and (audit #661, finding 1) no other surface a human or arriving agent
+    // reads makes them visible.
+    const claims = data.cards
+      .filter((c) => c.claimedBy)
+      .map((c) => ({ shortId: c.shortId, title: c.title, claimedBy: c.claimedBy, claimedAt: c.claimedAt }));
+    const { cards: recentCards } = queryCards(data.cards, { limit: '10' });
+    const convs = [...data.conversations].sort((a, b) =>
+      String(a?.createdAt ?? '').localeCompare(String(b?.createdAt ?? '')));
+    const recentConversations = convs.slice(-10).map((c) => ({
+      id: c.id,
+      author: c.author,
+      attachedTo: c.attachedTo,
+      createdAt: c.createdAt,
+      body: typeof c.body === 'string' && c.body.length > 200 ? c.body.slice(0, 200) + '…' : c.body,
+    }));
+    sendJSON(res, 200, {
+      cardsTotal: data.cards.length,
+      cardsByColumn,
+      columns: data.columns,
+      nextShortId: data.nextShortId,
+      conversationsTotal: data.conversations.length,
+      claims,
+      recentCards,
+      recentConversations,
+      lastUpdated: data.lastUpdated,
+    });
+  } catch (e) {
+    console.error('GET /api/board/status:', e.message);
+    sendJSON(res, 500, { error: 'Failed to derive board status' });
+  }
+}
 
 // ── /api/board ──
 function handleGetBoard(req, res) {
@@ -1549,6 +1606,7 @@ async function handleUpdateNode(req, res, idOrShortId) {
 
 // ── Router: regex-based match against API_ROUTES ──
 const API_ROUTES = [
+  { method: 'GET',    re: /^\/api\/board\/status$/,         fn: (req, res) => handleBoardStatus(req, res) },
   { method: 'GET',    re: /^\/api\/board$/,                fn: (req, res) => handleGetBoard(req, res) },
   { method: 'GET',    re: /^\/api\/roster$/,               fn: (req, res) => handleGetRoster(req, res) },
   { method: 'GET',    re: /^\/api\/config$/,               fn: (req, res) => handleGetConfig(req, res) },

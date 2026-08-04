@@ -88,7 +88,7 @@ function makeProjector(fields) {
  * validation enum; closed set, so a typo refuses instead of silently returning
  * an empty page that reads as "no such cards exist".
  */
-const CARD_TYPES = new Set(['task', 'idea', 'goal', 'reference', 'feature']);
+const CARD_TYPES = new Set(['task', 'idea', 'goal', 'reference', 'feature', 'bug']);
 
 function unknownValue(param, value, valid) {
   const err = new Error(
