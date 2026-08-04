@@ -32,11 +32,13 @@
 /**
  * The ONLY fields a person may be derived from.
  *
- * Frozen, and asserted by test to be exactly these two with exactly one
- * consumer below — so adding a third is a deliberate, reviewed act rather than
- * a quiet import that nobody re-reads.
+ * Frozen, and asserted by test with exactly one consumer below — so adding
+ * another is a deliberate, reviewed act rather than a quiet import that
+ * nobody re-reads. `createdBy` joined 2026-08-04 (#653): #631 put the writer
+ * on every new card and the graph was blind to all of them — the audit's
+ * step-function finding, 100% of new cards, zero backfill.
  */
-export const PERSON_SOURCE_FIELDS = Object.freeze(['assignees', 'author']);
+export const PERSON_SOURCE_FIELDS = Object.freeze(['assignees', 'author', 'createdBy']);
 
 /**
  * Identity strings that are roles, services, or absences — never people.
@@ -133,7 +135,7 @@ function deriveFullPeople(board, roster = {}) {
 
   // The single site that consults the closed source list. Both fields are read
   // here and nowhere else; a second reader would be a second end that can drift.
-  const [ASSIGNEE_FIELD, AUTHOR_FIELD] = PERSON_SOURCE_FIELDS;
+  const [ASSIGNEE_FIELD, AUTHOR_FIELD, CREATOR_FIELD] = PERSON_SOURCE_FIELDS;
 
   const upsert = (raw) => {
     const id = canonicalise(raw, seats, aliases);
@@ -149,6 +151,7 @@ function deriveFullPeople(board, roster = {}) {
         assigned: [],
         authored: [],
         claiming: [],
+        created: [],
       });
     }
     return people.get(id.key);
@@ -162,6 +165,12 @@ function deriveFullPeople(board, roster = {}) {
   for (const card of cards) {
     for (const raw of card?.[ASSIGNEE_FIELD] || []) {
       upsert(raw)?.assigned.push(card.shortId);
+    }
+    // #653 — creator is AUTHORSHIP (like a post's author, unlike claimedBy's
+    // custody), so it may bring a person into being. Cards from before #631
+    // carry no creator and appear in nobody's list: absent is honest.
+    if (card?.[CREATOR_FIELD]) {
+      upsert(card[CREATOR_FIELD])?.created.push(card.shortId);
     }
   }
 
@@ -221,7 +230,7 @@ function boundList(full, before, limit, cursorName) {
  * claimingBefore; `limit` overrides the default page size up to the ceiling.
  * Throws code UNKNOWN_CURSOR when a supplied cursor matches nothing.
  */
-function boundPerson(person, { assignedBefore, authoredBefore, claimingBefore, limit } = {}) {
+function boundPerson(person, { assignedBefore, authoredBefore, claimingBefore, createdBefore, limit } = {}) {
   return {
     ...person,
     assigned: boundList(person.assigned, assignedBefore, limit, 'assignedBefore'),
@@ -230,6 +239,8 @@ function boundPerson(person, { assignedBefore, authoredBefore, claimingBefore, l
     authoredTotal: person.authored.length,
     claiming: boundList(person.claiming, claimingBefore, limit, 'claimingBefore'),
     claimingTotal: person.claiming.length,
+    created: boundList(person.created, createdBefore, limit, 'createdBefore'),
+    createdTotal: person.created.length,
   };
 }
 

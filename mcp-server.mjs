@@ -403,7 +403,7 @@ function buildMcpServer() {
   }, async () => jsonResult(await apiCall('GET', '/api/people')));
 
   mcp.registerTool('person_get', {
-    description: 'Get one person by seat key or alias, with their assigned cards, authored posts '
+    description: 'Get one person by seat key or alias, with their assigned cards, authored posts, created (filed) cards '
       + 'and any cards they currently hold a claim on. Every list is bounded to its most recent '
       + 'entries with a <list>Total carrying the true count (#628); page backward through full '
       + 'history by passing an id from a previous page as <list>Before.',
@@ -412,6 +412,7 @@ function buildMcpServer() {
       assignedBefore: z.string().optional().describe('Page assigned: a card shortId from a previous page'),
       authoredBefore: z.string().optional().describe('Page authored: a conversation id from a previous page'),
       claimingBefore: z.string().optional().describe('Page claiming: a card shortId from a previous page'),
+      createdBefore: z.string().optional().describe('Page created (cards this seat FILED, #653): a card shortId from a previous page'),
       limit: z.number().int().min(1).optional().describe('Page size override (default 50, hard ceiling applies)'),
     },
   }, async ({ key, ...cursors }) => {

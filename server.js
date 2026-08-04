@@ -895,6 +895,7 @@ function handleGetPerson(req, res, key) {
       assignedBefore: q.assignedBefore,
       authoredBefore: q.authoredBefore,
       claimingBefore: q.claimingBefore,
+      createdBefore: q.createdBefore,
       limit: q.limit,
     });
     if (!person) return sendJSON(res, 404, { error: 'No such person' });
@@ -1017,6 +1018,7 @@ async function handleUpdateCard(req, res, idOrShortId) {
       const idx = findCardIndex(data, idOrShortId);
       if (idx < 0) return null;
       const card = data.cards[idx];
+      const wasDone = card.column === 'done';
       for (const [k, v] of Object.entries(patch)) {
         if (IMMUTABLE_CARD_FIELDS.has(k)) continue;
         if (!PATCHABLE_CARD_FIELDS.has(k)) continue; // #249 — ignore unknown keys
@@ -1037,6 +1039,21 @@ async function handleUpdateCard(req, res, idOrShortId) {
         card[k] = v;
       }
       card.updatedAt = new Date().toISOString();
+      // #665 — the board is the ignition: a card ENTERING done asks the room
+      // for the next pull, riding the same write (#578's atomicity pattern).
+      // The queue-pop rule lived in seats' intentions; rules decay, hooks
+      // don't. Best-effort like every announcement — never costs the PATCH.
+      if (!wasDone && card.column === 'done') {
+        try {
+          const conv = createConversationFromPayload({
+            body: `✅ #${card.shortId} done — what's the next pull? (every done has a next: claim it, or name its gate)`,
+            author: CLAIM_ANNOUNCER,
+          });
+          data.conversations.push(conv);
+        } catch (e) {
+          console.error('#665 done-nudge skipped:', e.message);
+        }
+      }
       writeBoard(data);
       return card;
     });

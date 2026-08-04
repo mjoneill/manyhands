@@ -174,9 +174,13 @@ test('#619 GET /api/people/:key returns one person with their edges', async () =
 // declared inputs are EXACTLY the two legal fields, so a later "helpful"
 // addition of `mentions` fails by construction rather than by luck.
 
-test('#619 the declared source-field list is exactly assignees + author', async () => {
+test('#619/#653 the declared source-field list is exactly assignees + author + createdBy', async () => {
   const { PERSON_SOURCE_FIELDS } = await import('../core/people.mjs');
-  assert.deepEqual([...PERSON_SOURCE_FIELDS].sort(), ['assignees', 'author'],
+  // #653 (2026-08-04): createdBy admitted as the third source — the deliberate,
+  // reviewed act this tripwire exists to force. Rationale on the card: #631
+  // stamps the writer on every new card and the graph was blind to all of
+  // them. `for` and `mentions` remain excluded (the test below).
+  assert.deepEqual([...PERSON_SOURCE_FIELDS].sort(), ['assignees', 'author', 'createdBy'],
     'adding a source here must be a deliberate, reviewed act — not a quiet import');
   assert.ok(Object.isFrozen(PERSON_SOURCE_FIELDS), 'the list must not be mutable at runtime');
 });
