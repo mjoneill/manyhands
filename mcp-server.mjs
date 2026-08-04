@@ -563,22 +563,30 @@ function buildMcpServer() {
   // call: union of cards (creates+updates) and posts (exact — append-only by
   // construction), time-ordered, with per-kind coverage disclosed in the
   // envelope rather than left to inference.
+  // #679 — reads the EVENT LOG, not live-store fields: deletions arrive with
+  // their tombstone state, multi-edits are real history, and the total order
+  // answers "did the card change before or after the post about it".
   mcp.registerTool('changes_since', {
-    description: 'Catch up after an absence: everything that changed at or after `since` — '
-      + 'card creates/updates and new posts, one time-ordered list (oldest first; '
-      + 'order:"desc" for newest-first triage). Bounded: default 50, total/truncated in the '
-      + 'envelope, page backward with before=<an item\'s at>. The envelope\'s covers/omits '
-      + 'is the honest scope: posts are exact; card DELETIONS and edit details are not '
-      + 'recorded anywhere yet (#642).',
+    description: 'Catch up after an absence: everything that changed at or after `since`, read '
+      + 'from the event log in seq order — card creates/updates/DELETES (deletes carry their '
+      + 'last state) and posts. Per-kind quotas by default (50 cards + 50 posts: chat volume '
+      + 'cannot starve out card changes); latest-event-per-entity by default (history:true for '
+      + 'every event). Filters: entity=<shortId> (one card\'s history), actor=<seat> (one '
+      + 'seat\'s activity). A since older than the log\'s retention REFUSES with '
+      + 'oldest_retained rather than answering partially. Page backward with before=<seq>. '
+      + 'Remaining honest omission: edit-actor is null on updates/deletes until #675.',
     inputSchema: {
       since: z.string().describe('ISO timestamp cutoff — e.g. your last known activity'),
-      limit: z.number().int().min(1).optional().describe('Page size (default 50, ceiling applies)'),
-      order: z.enum(['asc', 'desc']).optional().describe('asc (default, replay order) or desc (triage)'),
-      before: z.string().optional().describe('Backward cursor: an `at` timestamp from a previous page'),
+      history: z.boolean().optional().describe('true = every event per entity (default: latest only)'),
+      entity: z.number().int().optional().describe('Filter to one card by shortId — its change history'),
+      actor: z.string().optional().describe('Filter to one seat\'s events'),
+      limitCards: z.number().int().min(1).optional().describe('Card-side quota (default 50)'),
+      limitPosts: z.number().int().min(1).optional().describe('Post-side quota (default 50)'),
+      before: z.number().int().optional().describe('Backward cursor: a seq from a previous page'),
     },
-  }, async ({ since, limit, order, before } = {}) => {
+  }, async ({ since, history, entity, actor, limitCards, limitPosts, before } = {}) => {
     const q = new URLSearchParams(
-      Object.entries({ since, limit, order, before })
+      Object.entries({ since, history, entity, actor, limitCards, limitPosts, before })
         .filter(([, v]) => v != null && v !== '')
         .map(([k, v]) => [k, String(v)]),
     ).toString();

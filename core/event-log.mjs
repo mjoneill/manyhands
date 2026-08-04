@@ -121,12 +121,32 @@ export function appendEvent(dir, event, opts = {}) {
 }
 
 /** Read events in seq order. `sinceSeq` is exclusive; `limit` bounds the count. */
-export function readEvents(dir, { sinceSeq = 0, limit = Infinity } = {}) {
+export function readEvents(dir, { sinceSeq = 0, limit = Infinity, sinceDate = null } = {}) {
   const all = [];
-  for (const f of segments(dir)) all.push(...parseSegment(dir, f));
+  // #679 (additive): segments are day-named (YYYY-MM-DD.jsonl), so a
+  // since-window read can skip whole files older than the window's day —
+  // the cheap half of bounding, ahead of real indexing.
+  const cutoff = typeof sinceDate === 'string' ? sinceDate.slice(0, 10) : null;
+  for (const f of segments(dir)) {
+    if (cutoff && f.slice(0, 10) < cutoff) continue;
+    all.push(...parseSegment(dir, f));
+  }
   all.sort((a, b) => a.seq - b.seq);
   const from = all.filter((e) => e.seq > sinceSeq);
   return Number.isFinite(limit) ? from.slice(0, limit) : from;
+}
+
+/**
+ * #679 (additive) — the log's retention boundary: the recorded_at of the
+ * earliest surviving event, or null for an empty/absent log. A since older
+ * than this must refuse (CURSOR_TOO_OLD), never answer partially.
+ */
+export function oldestRetainedAt(dir) {
+  for (const f of segments(dir)) {
+    const first = parseSegment(dir, f)[0];
+    if (first) return first.recorded_at ?? null;
+  }
+  return null;
 }
 
 /**

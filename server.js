@@ -42,7 +42,8 @@ import { readConfig, writeConfig } from './channel-config.mjs';
 import { loadRoster, writeRoster, rosterFilePath } from './core/roster-config.mjs';
 import { deriveGraph, personByKey } from './core/people.mjs';
 import { queryCards } from './core/cards-query.mjs';
-import { queryChanges } from './core/changes-query.mjs';
+import { queryChangesFromLog } from './core/changes-log-query.mjs';
+import { readEvents, oldestRetainedAt } from './core/event-log.mjs';
 import { configureIdentities, usingDefaultRoster } from './core/identity.mjs';
 
 const PORT = process.env.SCRUM_PORT ? parseInt(process.env.SCRUM_PORT, 10) : 3141;
@@ -798,7 +799,15 @@ const PATCHABLE_CARD_FIELDS = new Set([
 // and posts (exact — append-only by construction) behind a required since=.
 // Same fail-closed unknown-param contract as the card list (#655/#657):
 // the miss log is the roadmap, on this surface too.
-const CHANGES_PARAMS = new Set(['since', 'before', 'limit', 'order', 'as', 'bestEffort']);
+// #679: the changes surface reads the LOG, not live-store fields. Legacy
+// params (limit, order) stay accepted: `limit` maps onto both per-kind
+// quotas; `order` other than asc refuses as before (the log's total order
+// is the product). New params are the ruled contract + the principal's
+// hand-run views (entity, actor).
+const CHANGES_PARAMS = new Set([
+  'since', 'before', 'limit', 'order', 'as', 'bestEffort',
+  'history', 'entity', 'actor', 'limitCards', 'limitPosts',
+]);
 
 function handleChanges(req, res) {
   try {
@@ -820,13 +829,42 @@ function handleChanges(req, res) {
     if (q.order != null && q.order !== '' && q.order !== 'asc' && q.order !== 'desc') {
       return sendJSON(res, 400, { error: `unknown order: ${q.order} (valid: asc, desc)` });
     }
-    const result = queryChanges(readBoard(), {
-      since: q.since, before: q.before, limit: q.limit, order: q.order,
+    const events = readEvents(EVENT_LOG_DIR, { sinceDate: q.since });
+    // Coverage boundary (#679): refuse a pre-log `since` ONLY when unrecorded
+    // history actually exists — the live board predates its log (birth
+    // 2026-08-04), so pre-birth sinces would be silently partial there; a
+    // fresh board's whole history IS its log, so any since is answerable.
+    // The store is consulted for this boundary alone, never for envelope
+    // state (the purity rule guards WHAT is served, not what is refused).
+    const firstAt = oldestRetainedAt(EVENT_LOG_DIR);
+    let oldestRetained = null;
+    if (firstAt) {
+      const b = readBoard();
+      const preLog = (b?.cards || []).some((c) => typeof c?.createdAt === 'string' && c.createdAt < firstAt);
+      if (preLog) oldestRetained = firstAt;
+    }
+    const result = queryChangesFromLog(events, {
+      since: q.since,
+      before: q.before,
+      oldestRetained,
+      history: q.history === 'true',
+      entity: q.entity,
+      actor: q.actor,
+      limit: {
+        cards: q.limitCards ?? q.limit,
+        posts: q.limitPosts ?? q.limit,
+      },
     });
     if (unsupported.length) result.unsupported = unsupported;
     sendJSON(res, 200, result);
   } catch (e) {
     if (e.code === 'MISSING_SINCE') return sendJSON(res, 400, { error: e.message });
+    if (e.code === 'CURSOR_TOO_OLD') {
+      return sendJSON(res, 400, {
+        error: e.message, code: e.code, oldest_retained: e.oldest_retained, resync: true,
+      });
+    }
+    if (e.code === 'UNKNOWN_CURSOR') return sendJSON(res, 400, { error: e.message, code: e.code });
     console.error('GET /api/changes:', e.message);
     sendJSON(res, 500, { error: 'Failed to compute changes' });
   }
