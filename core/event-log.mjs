@@ -126,9 +126,16 @@ export function readEvents(dir, { sinceSeq = 0, limit = Infinity, sinceDate = nu
   // #679 (additive): segments are day-named (YYYY-MM-DD.jsonl), so a
   // since-window read can skip whole files older than the window's day —
   // the cheap half of bounding, ahead of real indexing.
+  // #679-fix: filenames are `events-YYYY-MM-DD.jsonl` — the first cut sliced
+  // (0,10) and compared "events-202" to a date, so the skip never fired: a
+  // no-op invisible to every correctness test, because its only failure mode
+  // was "does nothing". Date extracted by pattern, not offset; the positive
+  // control lives in the tests (a segment whose CONTENT lies about its date
+  // is visible exactly when the skip does not fire).
   const cutoff = typeof sinceDate === 'string' ? sinceDate.slice(0, 10) : null;
   for (const f of segments(dir)) {
-    if (cutoff && f.slice(0, 10) < cutoff) continue;
+    const day = f.match(/(\d{4}-\d{2}-\d{2})/)?.[1];
+    if (cutoff && day && day < cutoff) continue;
     all.push(...parseSegment(dir, f));
   }
   all.sort((a, b) => a.seq - b.seq);

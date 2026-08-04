@@ -99,3 +99,29 @@ test('backward paging by seq cursor; unknown cursor refuses', () => {
     (e) => e.code === 'UNKNOWN_CURSOR',
   );
 });
+
+// —— the segment-skip's positive control (found in #679 verification) ——
+// The first cut's skip NEVER fired ("events-202" < "2026-…" is false for all
+// inputs) and passed every correctness test, because a skip that does nothing
+// returns identical results. The discriminating input: an OLD-named segment
+// whose content claims a recent recorded_at — visible exactly when the skip
+// fails to fire, absent when it works.
+
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { readEvents } from '../core/event-log.mjs';
+
+test('the day-segment skip actually SKIPS: an old segment cannot leak content into a since-window read', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'seg679-'));
+  const lie = { seq: 1, recorded_at: '2026-08-04T12:00:00.000Z', actor: 'ada', op: 'post', entity: { kind: 'conversation', id: 'x' }, state: { body: 'liar' } };
+  fs.writeFileSync(path.join(dir, 'events-2020-01-01.jsonl'), JSON.stringify(lie) + '\n');
+  const honest = { seq: 2, recorded_at: '2026-08-04T12:00:01.000Z', actor: 'ada', op: 'post', entity: { kind: 'conversation', id: 'y' }, state: { body: 'ok' } };
+  fs.writeFileSync(path.join(dir, 'events-2026-08-04.jsonl'), JSON.stringify(honest) + '\n');
+
+  const unskipped = readEvents(dir);
+  assert.equal(unskipped.length, 2, 'without a window, everything is read');
+  const windowed = readEvents(dir, { sinceDate: '2026-08-04T00:00:00Z' });
+  assert.equal(windowed.length, 1, 'the old-named segment was actually skipped');
+  assert.equal(windowed[0].entity.id, 'y');
+});
