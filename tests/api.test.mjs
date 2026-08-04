@@ -363,6 +363,35 @@ apiTest('GET /api/load returns the legacy {cards} shape even when on-disk is JSO
   assert.ok(!('@graph' in data), '/api/load must not leak the raw JSON-LD document');
 });
 
+// #671 — BOTH directions of the /api/load conversations contract, in one test,
+// because breaking either one broke something real:
+//
+//   default lean   (#657) — 18.7MB the browser never reads. Re-fattening it is a
+//                           silent 20x payload regression nobody would notice.
+//   ?conversations=1 (#671) — bulk consumers (export-board.mjs) read the room
+//                           here. When #657 removed it unconditionally, the
+//                           export's data source went to zero for a full day.
+//
+// The honest `conversationsOmitted` flag was already there and nobody consumed
+// it — a flag is not a consumer enumeration. This test is the part that refuses.
+apiTest('GET /api/load omits conversations by default and returns them on opt-in (#657/#671)', async ({ baseUrl }) => {
+  await fetch(`${baseUrl}/api/conversations`, json({
+    method: 'POST', body: JSON.stringify({ body: 'a message the archive must be able to reach', author: 'ada' }),
+  }));
+
+  const lean = await (await fetch(`${baseUrl}/api/load`)).json();
+  assert.deepEqual(lean.conversations, [], 'the DEFAULT must stay lean — #657 is not to be reverted');
+  assert.equal(lean.conversationsOmitted, true, 'the omission must stay self-describing');
+
+  const full = await (await fetch(`${baseUrl}/api/load?conversations=1`)).json();
+  assert.ok(full.conversations.length >= 1,
+    'a bulk consumer opting in must receive the room — this is export-board.mjs\'s only data source (#671)');
+  assert.ok(!full.conversationsOmitted,
+    'the opt-in response must not claim an omission it did not make');
+  assert.ok(full.conversations.some((m) => m.body?.includes('the archive must be able to reach')),
+    'the opt-in must return the actual messages, not an empty array with a friendlier flag');
+});
+
 apiTest('every write re-injects the _README block', async ({ baseUrl, readBoardFile }) => {
   await fetch(`${baseUrl}/api/cards`, json({
     method: 'POST', body: JSON.stringify({ title: 'trigger a write' }),

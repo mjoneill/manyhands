@@ -1731,7 +1731,22 @@ function handleLoad(req, res) {
     // fetches; /api/save never writes conversations, so nothing can echo this
     // empty list back to disk). The key stays present-but-empty with an
     // explicit flag so a reader can tell "none exist" from "not sent".
-    const { conversations, ...rest } = readBoard();
+    //
+    // #671 — but BULK CONSUMERS still need the whole board, and #657 broke one
+    // silently: export-board.mjs reads the room from here, its source went to
+    // zero, and only its own fail-closed guard turned that into a visible break
+    // instead of five months of truncated archives. The honest flag was not
+    // enough — nothing consumed it. So the omission stays the DEFAULT (the
+    // browser keeps its lean payload) and bulk callers opt in explicitly.
+    //
+    // ⚠️ Do NOT "fix" such a consumer by pointing it at /api/conversations
+    // instead: that endpoint is capped server-side at 200 (#210) with no
+    // cursor, so it returns a silently truncated answer that looks complete.
+    // That trap is why export-board reads this endpoint at all, and it was
+    // proposed twice on 2026-08-04 by people who had both read the warning.
+    const board = readBoard();
+    if (parseQuery(req.url).conversations === '1') { sendJSON(res, 200, board); return; }
+    const { conversations, ...rest } = board;
     sendJSON(res, 200, { ...rest, conversations: [], conversationsOmitted: true });
   } catch (e) {
     console.error('Error in /api/load:', e.message);

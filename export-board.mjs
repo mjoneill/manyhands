@@ -252,13 +252,24 @@ async function main() {
   const outDir = path.resolve(args.out || `./board-export-${dateSlug}`);
 
   console.log(`\n  export-board → ${outDir}`);
-  console.log(`  source: ${args.base}/api/load`);
+  // #671 — `?conversations=1` is REQUIRED. Since #657 the default response omits
+  // conversation history (18.7MB the browser never reads), which silently emptied
+  // this tool's only data source. The opt-in says out loud that this is a bulk
+  // consumer; the lean default stays the default for everyone else.
+  const loadUrl = `${args.base}/api/load?conversations=1`;
+  console.log(`  source: ${loadUrl}`);
 
   let board;
   try {
-    const res = await fetch(`${args.base}/api/load`);
+    const res = await fetch(loadUrl);
     if (!res.ok) die(`the board API answered ${res.status} — is the server running at ${args.base}?`);
     board = await res.json();
+    // If the server is old enough to omit unconditionally, say so plainly rather
+    // than writing a room with no room in it.
+    if (board.conversationsOmitted) {
+      die('the board API omitted conversations even with ?conversations=1 — '
+        + 'this server predates #671; upgrade it rather than exporting a partial archive');
+    }
   } catch (err) {
     die(`could not reach ${args.base} — ${err.message}`);
   }
