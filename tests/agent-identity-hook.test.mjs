@@ -89,3 +89,56 @@ test('no agent env + any identity → PASSES (a human commit can never be refuse
   const r = tryCommit(repo, { env: baseEnv() });
   assert.equal(r.ok, true, 'the human-terminal boundary is absolute');
 });
+
+// —— Second detector: the commit ARTIFACT (commit-msg hook) ——
+// Covers the seat whose runtime provably carries no env marker and cannot
+// introspect its own env: author/trailer disagreement is toolchain-independent
+// and checkable by every affected party.
+
+function installMsgHook(dir) {
+  const HOOKMSG = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '.githooks', 'commit-msg');
+  fs.copyFileSync(HOOKMSG, path.join(dir, '.githooks', 'commit-msg'));
+  fs.chmodSync(path.join(dir, '.githooks', 'commit-msg'), 0o755);
+  fs.writeFileSync(path.join(dir, '.git', 'hooks', 'commit-msg'),
+    '#!/bin/sh\nexec "$(git rev-parse --show-toplevel)/.githooks/commit-msg" "$@"\n');
+  fs.chmodSync(path.join(dir, '.git', 'hooks', 'commit-msg'), 0o755);
+}
+
+function tryCommitMsg({ git, dir }, { message, stamp }) {
+  fs.appendFileSync(path.join(dir, 'f.txt'), 'x');
+  git(['add', 'f.txt'], baseEnv());
+  const idArgs = stamp
+    ? ['-c', `user.name=${stamp.name}`, '-c', `user.email=${stamp.email}`]
+    : [];
+  try {
+    git([...idArgs, 'commit', '-q', '-m', message], baseEnv()); // NO agent env — artifact key only
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, stderr: String(e.stderr) };
+  }
+}
+
+test('artifact key: human author + seat trailer → REFUSED, with no env marker at all', () => {
+  const repo = makeRepo();
+  installMsgHook(repo.dir);
+  const r = tryCommitMsg(repo, { message: 'work\n\nCo-Authored-By: Ada <ada@manyhands.invalid>' });
+  assert.equal(r.ok, false, 'author/trailer disagreement must refuse regardless of env');
+  assert.match(r.stderr, /author and trailer disagree/);
+});
+
+test('artifact key: seat author + seat trailer → PASSES (consistent stamp)', () => {
+  const repo = makeRepo();
+  installMsgHook(repo.dir);
+  const r = tryCommitMsg(repo, {
+    message: 'work\n\nCo-Authored-By: Ada <ada@manyhands.invalid>',
+    stamp: { name: 'Ada', email: 'ada@manyhands.invalid' },
+  });
+  assert.equal(r.ok, true, `consistent seat commit must pass: ${r.stderr ?? ''}`);
+});
+
+test('artifact key: human author + no trailer → PASSES (an ordinary human commit)', () => {
+  const repo = makeRepo();
+  installMsgHook(repo.dir);
+  const r = tryCommitMsg(repo, { message: 'ordinary human work' });
+  assert.equal(r.ok, true, 'the human boundary holds on the artifact key too');
+});

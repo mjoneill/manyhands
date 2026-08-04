@@ -1,0 +1,26 @@
+#!/bin/sh
+# #596 agent-identity rail, second detector: the commit ARTIFACT, not the env.
+#
+# The env-marker pre-commit covers seats whose runtime carries CLAUDECODE /
+# AI_AGENT — but one seat's gateway provably inherits neither, cannot verify
+# its own env from inside, and would sail through as the human fallback while
+# the covered seats report the rail working. This detector keys on what every
+# toolchain produces and every seat can check for itself: the commit message.
+#
+# Refuse when the author is NOT a seat identity but the message carries a
+# Co-Authored-By trailer naming one — author and trailer disagreeing is the
+# exact signature of a seat committing under the human fallback (cea6597).
+# A human commit carries no seat trailer, so it is never evaluated.
+
+ident=$(git var GIT_AUTHOR_IDENT 2>/dev/null)
+case "$ident" in
+  *"@manyhands.invalid>"*) exit 0 ;;   # seat-stamped: consistent, pass
+esac
+
+if grep -qi '^Co-Authored-By:.*@manyhands\.invalid' "$1"; then
+  echo "commit-msg (#596): author and trailer disagree — a seat trailer under a human author." >&2
+  echo "  effective author: $ident" >&2
+  echo "  stamp your seat:  git -c user.name='<Seat>' -c user.email='<seat>@manyhands.invalid' commit ..." >&2
+  exit 1
+fi
+exit 0
