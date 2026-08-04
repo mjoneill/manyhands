@@ -583,6 +583,21 @@ body::before {
   transition: transform 0.1s ease, filter 0.15s ease;
 }
 .card-priority:hover { transform: scale(1.05); filter: brightness(1.1); }
+/* #661 F1 — the claim chip: who has hands on the wheel right now. Amber =
+   held; red-leaning stale style past 24h (a claim outliving a working
+   session is a question, not a lock — #455). An indicator, not a control:
+   no pointer affordance, filtering never lives on a card (#498's lesson). */
+.card-claim {
+  display: inline-flex; align-items: center; gap: 2px;
+  font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 8px;
+  background: rgba(245, 158, 11, 0.16); color: rgb(217, 119, 6);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  white-space: nowrap;
+}
+.card-claim-stale {
+  background: rgba(239, 68, 68, 0.14); color: rgb(220, 38, 38);
+  border-color: rgba(239, 68, 68, 0.32);
+}
 .card-priority.priority-p0 { background: rgba(239, 68, 68, 0.18); color: rgb(220, 38, 38); border: 1px solid rgba(239, 68, 68, 0.35); }
 .card-priority.priority-p1 { background: rgba(249, 115, 22, 0.18); color: rgb(234, 88, 12); border: 1px solid rgba(249, 115, 22, 0.35); }
 .card-priority.priority-p2 { background: rgba(234, 179, 8, 0.18); color: rgb(202, 138, 4); border: 1px solid rgba(234, 179, 8, 0.35); }
@@ -2427,6 +2442,24 @@ function renderCard(card) {
     ? `<span class="card-priority priority-${escapeAttr(card.priority)}${activePriorities.has(card.priority) ? ' active-filter' : ''}" data-priority="${escapeAttr(card.priority)}" title="Priority ${escapeAttr(String(card.priority).toUpperCase())}">${escapeHTML(String(card.priority).toUpperCase())}</span>`
     : '';
 
+  // #661 F1 — the coordination rail, visible to humans at last. Agents have
+  // read claimedBy since #348; no HTML page ever showed it, and three stale
+  // claims sat unnoticed for weeks behind that invisibility (#647). The age
+  // rides on the chip (#455's observable): a claim older than a working
+  // session isn't stale, it's a claim being worn as an assignee — showing
+  // "336h" invites the right question on its own. claimedBy is
+  // caller-supplied (the #249 trust boundary) — escaped, never trusted.
+  let claimBadge = '';
+  if (card.claimedBy) {
+    const heldMs = card.claimedAt ? (Date.now() - Date.parse(card.claimedAt)) : NaN;
+    const heldTxt = !Number.isFinite(heldMs) ? ''
+      : heldMs < 3600000 ? '<1h'
+      : heldMs < 48 * 3600000 ? `${Math.round(heldMs / 3600000)}h`
+      : `${Math.round(heldMs / 86400000)}d`;
+    const stale = Number.isFinite(heldMs) && heldMs > 24 * 3600000;
+    claimBadge = `<span class="card-claim${stale ? ' card-claim-stale' : ''}" title="Claimed by ${escapeAttr(card.claimedBy)}${card.claimedAt ? ` since ${escapeAttr(card.claimedAt)}` : ''}">🔒${escapeHTML(card.claimedBy)}${heldTxt ? ` · ${heldTxt}` : ''}</span>`;
+  }
+
   // #233 — column-move arrows: card's position within the ordered columns
   const _ordCols = [...columns].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
   const _colIdx = _ordCols.findIndex(c => c.id === card.column);
@@ -2439,7 +2472,7 @@ function renderCard(card) {
   <button class="card-move-btn card-move-right" data-action="move-right" ${_atLast ? 'disabled' : ''} title="Move to next column" aria-label="Move to next column">▶</button>
   <div class="card-top">
     <span class="card-emoji">${emoji}</span>
-    <span class="card-shortid">#${card.shortId}</span>${priorityBadge}${blockedBadge}${blockingBadge}
+    <span class="card-shortid">#${card.shortId}</span>${priorityBadge}${claimBadge}${blockedBadge}${blockingBadge}
     ${assigneeBadgesHtml}
     ${card.for ? `<span class="card-for" title="For">For: ${escapeHTML(card.for)}</span>` : ''}
   </div>
