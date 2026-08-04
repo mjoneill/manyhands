@@ -103,10 +103,20 @@ if (st.pendingFrom != null && receivers >= st.pendingFrom) {
 } else if (receivers < st.r) {
   st.pendingFrom = st.r;                                // first tick of a drop — arm, don't warn
 }
+// #668: the floor path shares the per-signature cooldown. Its old gate was
+// st.warned alone, which every recovery resets — so a bouncing collapse
+// re-fired on each dip, the #666 fatigue defect relocated to the branch that
+// handles the WORSE fault. A deeper collapse is a new signature and still
+// fires immediately.
 if (receivers < FLOOR && !st.warned) {                  // total-collapse floor, secondary
-  warnBody = `⚠️ fanout watch: only ${receivers} of ${sessions} live sessions hold an open stream `
-    + `(floor: ${FLOOR}). Seats without a stream receive NOTHING — no queue, no replay (#624). `
-    + `Any single MCP tool call re-registers a deaf seat; changes_since covers whatever was missed.`;
+  const floorSig = `floor:${receivers}`;
+  if (st.sigTimes[floorSig] == null) {
+    warnBody = `⚠️ fanout watch: only ${receivers} of ${sessions} live sessions hold an open stream `
+      + `(floor: ${FLOOR}). Seats without a stream receive NOTHING — no queue, no replay (#624). `
+      + `Any single MCP tool call re-registers a deaf seat; changes_since covers whatever was missed. `
+      + `(This signature now mutes for ${Math.round(COOLDOWN_MS / 3600000)}h; a deeper collapse still fires immediately.)`;
+    st.sigTimes[floorSig] = Date.now();
+  }
   st.warned = true;
 }
 st.r = receivers;

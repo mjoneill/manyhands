@@ -115,3 +115,14 @@ test('TTL: an expired signature entry fires again and stale entries are evicted'
   assert.equal(st.sigTimes['9->2'], undefined, 'stale unrelated entry evicted');
   assert.ok(st.sigTimes['5->4'], 'the just-fired signature holds a fresh entry');
 });
+
+test('#668: the floor alarm respects the same per-signature cooldown as the delta alarm', async () => {
+  const state = tmpState();
+  await tick(state, 7); // baseline
+  assert.equal(fired(await tick(state, 2)), true, 'total collapse below floor fires immediately');
+  assert.equal(fired(await tick(state, 2)), false, 'still collapsed — warned gate holds');
+  await tick(state, 7); // recovery clears the warned gate
+  assert.equal(fired(await tick(state, 2)), false,
+    'same collapse depth inside the cooldown must be MUTED — the warned gate alone resets on every recovery');
+  assert.equal(fired(await tick(state, 1)), true, 'a DEEPER collapse is a new floor signature and fires through the mute');
+});
