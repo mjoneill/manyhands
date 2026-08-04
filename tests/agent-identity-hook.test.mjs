@@ -123,7 +123,7 @@ test('artifact key: human author + seat trailer → REFUSED, with no env marker 
   installMsgHook(repo.dir);
   const r = tryCommitMsg(repo, { message: 'work\n\nCo-Authored-By: Ada <ada@manyhands.invalid>' });
   assert.equal(r.ok, false, 'author/trailer disagreement must refuse regardless of env');
-  assert.match(r.stderr, /author and trailer disagree/);
+  assert.match(r.stderr, /identity and trailer disagree/);
 });
 
 test('artifact key: seat author + seat trailer → PASSES (consistent stamp)', () => {
@@ -159,4 +159,19 @@ test('committer slot is checked too: agent env + seat AUTHOR but default COMMITT
     });
   } catch { refused = true; }
   assert.equal(refused, true, 'seat author + human committer must refuse — the amend gap');
+});
+
+test('the --author escape is closed: agent env + --author seat flag + default committer → REFUSED', () => {
+  // git var GIT_AUTHOR_IDENT resolves --author inside pre-commit, so a
+  // single-slot rail sees a seat and passes while the committer stays human —
+  // demonstrated live before the both-slots fix. This pins the escape shut.
+  const repo = makeRepo();
+  fs.appendFileSync(path.join(repo.dir, 'f.txt'), 'x');
+  repo.git(['add', 'f.txt'], baseEnv());
+  let refused = false;
+  try {
+    repo.git(['commit', '-q', '--author=Ada <ada@manyhands.invalid>', '-m', 'probe'],
+      { ...baseEnv(), CLAUDECODE: '1' });
+  } catch { refused = true; }
+  assert.equal(refused, true, '--author alone must not satisfy the rail');
 });
