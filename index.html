@@ -370,6 +370,13 @@ body::before {
   gap: 10px;
   margin-bottom: 6px;
   min-height: 28px;
+  /* #663 — reserve the control corner. The resting ✏️/📄 buttons are
+     absolutely positioned top-right and were painted OVER whatever chip
+     happened to flow there (the customer's screencap: a gray smudge on top
+     of an assignee pill — "transparency layers", unreadable). Chips now
+     wrap before entering the controls' airspace instead of running under it. */
+  padding-right: 58px;
+  flex-wrap: wrap;
 }
 /* Large type emoji in top-left */
 .card-emoji {
