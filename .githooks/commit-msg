@@ -12,15 +12,19 @@
 # exact signature of a seat committing under the human fallback (cea6597).
 # A human commit carries no seat trailer, so it is never evaluated.
 
-ident=$(git var GIT_AUTHOR_IDENT 2>/dev/null)
-case "$ident" in
-  *"@manyhands.invalid>"*) exit 0 ;;   # seat-stamped: consistent, pass
-esac
-
-if grep -qi '^Co-Authored-By:.*@manyhands\.invalid' "$1"; then
-  echo "commit-msg (#596): author and trailer disagree — a seat trailer under a human author." >&2
-  echo "  effective author: $ident" >&2
-  echo "  stamp your seat:  git -c user.name='<Seat>' -c user.email='<seat>@manyhands.invalid' commit ..." >&2
-  exit 1
-fi
+# Both slots: an amend preserves the author but resets the committer from
+# config, so a half-stamped commit disagrees with its trailer in the
+# committer slot only.
+for slot in GIT_AUTHOR_IDENT GIT_COMMITTER_IDENT; do
+  ident=$(git var "$slot" 2>/dev/null)
+  case "$ident" in
+    *"@manyhands.invalid>"*) continue ;;
+  esac
+  if grep -qi '^Co-Authored-By:.*@manyhands\.invalid' "$1"; then
+    echo "commit-msg (#596): identity and trailer disagree — a seat trailer under a human identity." >&2
+    echo "  $slot: $ident" >&2
+    echo "  stamp your seat:  git -c user.name='<Seat>' -c user.email='<seat>@manyhands.invalid' commit ..." >&2
+    exit 1
+  fi
+done
 exit 0

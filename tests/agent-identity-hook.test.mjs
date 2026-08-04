@@ -142,3 +142,21 @@ test('artifact key: human author + no trailer → PASSES (an ordinary human comm
   const r = tryCommitMsg(repo, { message: 'ordinary human work' });
   assert.equal(r.ok, true, 'the human boundary holds on the artifact key too');
 });
+
+test('committer slot is checked too: agent env + seat AUTHOR but default COMMITTER → REFUSED', () => {
+  // The amend shape: --amend preserves the author and silently resets the
+  // committer from config — half the identity verified, the other half fallen
+  // back. Both slots must be seats.
+  const repo = makeRepo();
+  fs.appendFileSync(path.join(repo.dir, 'f.txt'), 'x');
+  repo.git(['add', 'f.txt'], baseEnv());
+  let refused = false;
+  try {
+    repo.git(['commit', '-q', '-m', 'probe'], {
+      ...baseEnv(), CLAUDECODE: '1',
+      GIT_AUTHOR_NAME: 'Ada', GIT_AUTHOR_EMAIL: 'ada@manyhands.invalid',
+      // committer falls back to the repo's default human config
+    });
+  } catch { refused = true; }
+  assert.equal(refused, true, 'seat author + human committer must refuse — the amend gap');
+});

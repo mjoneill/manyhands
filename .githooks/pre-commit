@@ -16,12 +16,19 @@
 
 [ -n "$CLAUDECODE" ] || [ -n "$AI_AGENT" ] || exit 0
 
-ident=$(git var GIT_AUTHOR_IDENT 2>/dev/null)
-case "$ident" in
-  *"@manyhands.invalid>"*) exit 0 ;;
-esac
-
-echo "pre-commit (#596): agent session committing without a seat identity." >&2
-echo "  effective author: $ident" >&2
-echo "  stamp your seat:  git -c user.name='<Seat>' -c user.email='<seat>@manyhands.invalid' commit ..." >&2
-exit 1
+# BOTH identity slots must be seats. An --amend preserves the author and
+# silently resets the committer from config — exactly the half-checked shape
+# that shipped as "amended clean" on 2026-08-04. -c user.* sets both, so a
+# correctly stamped commit passes untouched.
+for slot in GIT_AUTHOR_IDENT GIT_COMMITTER_IDENT; do
+  ident=$(git var "$slot" 2>/dev/null)
+  case "$ident" in
+    *"@manyhands.invalid>"*) ;;
+    *)
+      echo "pre-commit (#596): agent session committing without a seat identity." >&2
+      echo "  $slot: $ident" >&2
+      echo "  stamp your seat:  git -c user.name='<Seat>' -c user.email='<seat>@manyhands.invalid' commit ..." >&2
+      exit 1 ;;
+  esac
+done
+exit 0
