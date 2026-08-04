@@ -59,20 +59,34 @@ console.log(`${now} receivers=${receivers} sessions=${sessions} floor=${FLOOR}`)
 // (one-tick dips are re-registration churn); the floor stays as the second
 // condition, catching total collapse. Warn once per incident; recovery to
 // the pre-drop level clears the gate.
-let st = { r: receivers, pendingFrom: null, warned: false };
+// Overnight 2026-08-04 lesson: a ~20-minute PERIODIC process (a cron-driven
+// session holding a stream for half its cycle) produced 5,5,4,4 forever —
+// each dip passed the two-tick gate, each rise reset the warned flag, and
+// the watch posted ~17 identical warnings in one night. Alert fatigue is
+// the death of a panel (the room's own finding). So: a warning SIGNATURE
+// (from→to) may fire at most once per cooldown window. A DEEPER drop is a
+// new signature and fires immediately — the cooldown mutes repetition,
+// never escalation.
+const COOLDOWN_MS = Number(process.env.SCRUM_FANOUT_COOLDOWN_MS ?? 6 * 3600 * 1000);
+let st = { r: receivers, pendingFrom: null, warned: false, lastSig: null, lastWarnAt: 0 };
 try { st = { ...st, ...JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) }; } catch { /* first run */ }
 
 let warnBody = null;
 if (st.pendingFrom != null && receivers >= st.pendingFrom) {
   st.pendingFrom = null; st.warned = false;            // recovered
 } else if (st.pendingFrom != null && receivers < st.pendingFrom) {
-  if (!st.warned) {                                     // drop persisted a second tick
+  const sig = `${st.pendingFrom}->${receivers}`;
+  const inCooldown = st.lastSig === sig && (Date.now() - st.lastWarnAt) < COOLDOWN_MS;
+  if (!st.warned && !inCooldown) {                      // drop persisted a second tick
     warnBody = `⚠️ fanout watch: receivers dropped ${st.pendingFrom} → ${receivers} and stayed there `
       + `across two ticks (${st.pendingFrom - receivers} seat stream(s) gone; ${sessions} sessions live). `
       + `Seats without a stream receive NOTHING — no queue, no replay (#624). If you can read this you're `
       + `fine; a seat quiet since the last restart may be deaf — any single MCP tool call re-registers it. `
-      + `changes_since covers whatever was missed.`;
-    st.warned = true;
+      + `changes_since covers whatever was missed. (This signature now mutes for `
+      + `${Math.round(COOLDOWN_MS / 3600000)}h; a deeper drop still fires immediately.)`;
+    st.warned = true; st.lastSig = sig; st.lastWarnAt = Date.now();
+  } else if (!st.warned) {
+    st.warned = true;                                   // suppressed by cooldown — still gate once
   }
 } else if (receivers < st.r) {
   st.pendingFrom = st.r;                                // first tick of a drop — arm, don't warn
