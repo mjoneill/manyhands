@@ -67,16 +67,28 @@ console.log(`${now} receivers=${receivers} sessions=${sessions} floor=${FLOOR}`)
 // (from→to) may fire at most once per cooldown window. A DEEPER drop is a
 // new signature and fires immediately — the cooldown mutes repetition,
 // never escalation.
+// #666: the cooldown gate is PER SIGNATURE. The first cut kept a
+// single lastSig string, so an intervening signature (6→4) overwrote it and
+// RELEASED the previous one's (5→4) gate — and both signatures were live and
+// alternating the very morning it shipped. sigTimes maps signature →
+// lastWarnAt: "warned about X at T; mute X until T+cooldown." Entries past
+// the window are inert, so they're evicted on every run.
 const COOLDOWN_MS = Number(process.env.SCRUM_FANOUT_COOLDOWN_MS ?? 6 * 3600 * 1000);
-let st = { r: receivers, pendingFrom: null, warned: false, lastSig: null, lastWarnAt: 0 };
+let st = { r: receivers, pendingFrom: null, warned: false, sigTimes: {} };
 try { st = { ...st, ...JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) }; } catch { /* first run */ }
+if (st.lastSig && st.lastWarnAt) st.sigTimes = { [st.lastSig]: st.lastWarnAt, ...st.sigTimes };
+delete st.lastSig; delete st.lastWarnAt;
+st.sigTimes ??= {};
+for (const [sig, at] of Object.entries(st.sigTimes)) {
+  if (Date.now() - at >= COOLDOWN_MS) delete st.sigTimes[sig];
+}
 
 let warnBody = null;
 if (st.pendingFrom != null && receivers >= st.pendingFrom) {
   st.pendingFrom = null; st.warned = false;            // recovered
 } else if (st.pendingFrom != null && receivers < st.pendingFrom) {
   const sig = `${st.pendingFrom}->${receivers}`;
-  const inCooldown = st.lastSig === sig && (Date.now() - st.lastWarnAt) < COOLDOWN_MS;
+  const inCooldown = st.sigTimes[sig] != null;          // eviction above = expiry
   if (!st.warned && !inCooldown) {                      // drop persisted a second tick
     warnBody = `⚠️ fanout watch: receivers dropped ${st.pendingFrom} → ${receivers} and stayed there `
       + `across two ticks (${st.pendingFrom - receivers} seat stream(s) gone; ${sessions} sessions live). `
@@ -84,7 +96,7 @@ if (st.pendingFrom != null && receivers >= st.pendingFrom) {
       + `fine; a seat quiet since the last restart may be deaf — any single MCP tool call re-registers it. `
       + `changes_since covers whatever was missed. (This signature now mutes for `
       + `${Math.round(COOLDOWN_MS / 3600000)}h; a deeper drop still fires immediately.)`;
-    st.warned = true; st.lastSig = sig; st.lastWarnAt = Date.now();
+    st.warned = true; st.sigTimes[sig] = Date.now();
   } else if (!st.warned) {
     st.warned = true;                                   // suppressed by cooldown — still gate once
   }
