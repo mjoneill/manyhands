@@ -41,6 +41,7 @@ import { readConfig, writeConfig } from './channel-config.mjs';
 import { loadRoster, writeRoster, rosterFilePath } from './core/roster-config.mjs';
 import { deriveGraph, personByKey } from './core/people.mjs';
 import { queryCards } from './core/cards-query.mjs';
+import { queryChanges } from './core/changes-query.mjs';
 import { configureIdentities, usingDefaultRoster } from './core/identity.mjs';
 
 const PORT = process.env.SCRUM_PORT ? parseInt(process.env.SCRUM_PORT, 10) : 3141;
@@ -682,6 +683,45 @@ const PATCHABLE_CARD_FIELDS = new Set([
   'title', 'description', 'type', 'assignees', 'assignee', 'labels',
   'for', 'priority', 'column', 'order', 'relationships', 'parent',
 ]);
+
+// ── /api/changes — the returning-agent catch-up (#643) ──
+// "What did I miss?" as one bounded call. Union of cards (creates+updates)
+// and posts (exact — append-only by construction) behind a required since=.
+// Same fail-closed unknown-param contract as the card list (#655/#657):
+// the miss log is the roadmap, on this surface too.
+const CHANGES_PARAMS = new Set(['since', 'before', 'limit', 'order', 'as', 'bestEffort']);
+
+function handleChanges(req, res) {
+  try {
+    const q = parseQuery(req.url);
+    const unsupported = Object.keys(q).filter((k) => !CHANGES_PARAMS.has(k));
+    if (unsupported.length) {
+      console.warn(
+        `[changes-query] seat=${q.as || 'unknown'} unsupported=${unsupported.join(',')} url=${req.url}`,
+      );
+      if (q.bestEffort !== 'true') {
+        return sendJSON(res, 400, {
+          error: `unsupported param${unsupported.length > 1 ? 's' : ''}: `
+            + `${unsupported.join(', ')} (supported: `
+            + `${[...CHANGES_PARAMS].filter((p) => p !== 'as' && p !== 'bestEffort').join(', ')})`,
+          unsupported,
+        });
+      }
+    }
+    if (q.order != null && q.order !== '' && q.order !== 'asc' && q.order !== 'desc') {
+      return sendJSON(res, 400, { error: `unknown order: ${q.order} (valid: asc, desc)` });
+    }
+    const result = queryChanges(readBoard(), {
+      since: q.since, before: q.before, limit: q.limit, order: q.order,
+    });
+    if (unsupported.length) result.unsupported = unsupported;
+    sendJSON(res, 200, result);
+  } catch (e) {
+    if (e.code === 'MISSING_SINCE') return sendJSON(res, 400, { error: e.message });
+    console.error('GET /api/changes:', e.message);
+    sendJSON(res, 500, { error: 'Failed to compute changes' });
+  }
+}
 
 // ── /api/board/status — the orientation projection (#573) ──
 //
@@ -1607,6 +1647,7 @@ async function handleUpdateNode(req, res, idOrShortId) {
 
 // ── Router: regex-based match against API_ROUTES ──
 const API_ROUTES = [
+  { method: 'GET',    re: /^\/api\/changes$/,              fn: (req, res) => handleChanges(req, res) },
   { method: 'GET',    re: /^\/api\/board\/status$/,         fn: (req, res) => handleBoardStatus(req, res) },
   { method: 'GET',    re: /^\/api\/board$/,                fn: (req, res) => handleGetBoard(req, res) },
   { method: 'GET',    re: /^\/api\/roster$/,               fn: (req, res) => handleGetRoster(req, res) },
