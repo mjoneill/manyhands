@@ -1121,8 +1121,15 @@ const httpServer = http.createServer(async (req, res) => {
     // unbound and unknown-token connections are admitted; unknown tokens log
     // loudly because they are config drift wearing a working connection.
     const binding = bindFromAuthHeader(req.headers.authorization, seatTokens);
-    if (binding?.unknownToken && sessionId) {
-      console.error(`[#703] UNKNOWN token on sid=${sessionId} — admitted unbound (fail-open); check seat-tokens.json vs client config`);
+    // #707 — NOT gated on sessionId. An `initialize` carries no mcp-session-id
+    // (there is no session yet), so gating here silenced the warning on exactly
+    // the request where a stale token is FIRST presented. A client that connects
+    // once with a drifted token and then idles was invisible; the room read
+    // `unbound` and inferred "sends no header" when the truth was "sends the
+    // wrong one" — two failures, two cures, and this line is the only surface
+    // that tells them apart. Cost that confusion live on 2026-08-05.
+    if (binding?.unknownToken) {
+      console.error(`[#703] UNKNOWN token on sid=${sessionId ?? '(new session)'} — admitted unbound (fail-open); check seat-tokens.json vs client config`);
     }
 
     if (sessionId && transports.has(sessionId)) {
