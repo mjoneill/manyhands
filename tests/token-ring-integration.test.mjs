@@ -1,12 +1,18 @@
 /**
  * #410 — token-ring delivery WIRING guard (integration).
  *
- * Proves the live path AND its fail-safe: with the MCP server in `token-ring` mode
- * but no seats registered (no registration seam yet), a commons post routes
- * through broadcastTokenRing, which falls back to normal fan-out rather than
- * silencing the room. Flipping the mode before the seam ships is therefore
- * safe — it's a no-op, never a deafening. The serialized dormancy gate only
- * engages once real seats register (covered by the engine unit tests).
+ * Covers all three states of broadcastTokenRing:
+ *   never armed        → falls back to fan-out          (test 1)
+ *   armed + populated  → serialises; non-registrants dormant (test 2, test 3)
+ *   armed + emptied    → HOLDS delivery, fail-closed     (test 4, #712)
+ *
+ * ⚠️ This header previously said "no registration seam yet… flipping the mode
+ * before the seam ships is therefore safe — a no-op, never a deafening." That
+ * was the fifth copy of a claim that had stopped being true (#708/#711/#712):
+ * the seam ships, it is exercised by test 2 THIRTY LINES BELOW THIS COMMENT,
+ * and production has registered seats. Flipping the mode now arms the ring.
+ * Written in the present tense, it rotted silently; stated as the conditions
+ * above, it survives the next change.
  *
  * off/soft/hard are proven byte-for-byte unchanged by the existing
  * channel.test.mjs suite; this file only covers the new branch.
@@ -63,6 +69,20 @@ async function poll(fn, timeoutMs = 5000, stepMs = 100) {
   }
 }
 
+// ⚠️ WHAT THIS TEST DOES NOT ESTABLISH (#712 item 2).
+// It never calls the register method, so it MANUFACTURES the precondition it
+// tests under. Name the input that would make it fail and the answer is "a
+// populated ring" — which it cannot construct, because not-registering IS its
+// setup. It therefore passes forever, whatever production's ring looks like.
+//
+// That is not a bug in the test: the never-armed state genuinely has an empty
+// registry, so its precondition is inherently manufactured and cannot be made
+// falsifiable. The fix is to stop reading it as more than it says. It licenses
+// exactly one sentence — "a server that has never had a registration falls back
+// to fan-out" — and NOTHING about a board whose seats have registered. For a
+// whole afternoon a green tick here was read as proving the fail-safe held in
+// production, where the ring is populated. The gap was in the reading.
+// The state that actually silences a live room is test 4's.
 test('token-ring mode with no registered seats fails SAFE to fan-out (never deafens the room)', async () => {
   const pair = await startTokenRingPair();
   const session = await mcpSession(pair.mcp.mcpUrl);
