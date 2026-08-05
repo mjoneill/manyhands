@@ -49,7 +49,16 @@ try {
 
 const receivers = Number(status.receivers ?? NaN);
 const sessions = Number(status.sessions ?? NaN);
-console.log(`${now} receivers=${receivers} sessions=${sessions} floor=${FLOOR}`);
+// #703 — connection identity: name the bound seats and COUNT the unbound in
+// this watch's own output. Fail-open's counterweight is visibility HERE (the
+// room-vetted Q1 ruling) — an unbound connection in a log line nobody reads
+// is admit-silently, which nobody voted for.
+const seatNames = Object.keys(status.seats ?? {}).sort();
+const unbound = Number(status.unbound ?? 0);
+const seatPart = status.binding === 'active'
+  ? ` seats=[${seatNames.join(',')}] unbound=${unbound}`
+  : '';
+console.log(`${now} receivers=${receivers} sessions=${sessions} floor=${FLOOR}${seatPart}`);
 
 // State across ticks. THE FAULT IS A DELTA, NOT A LEVEL (review's correction,
 // 02:33Z, pre-first-exam): the 48-minute deafening that motivated this watch
@@ -184,7 +193,11 @@ st.r = receivers;
 fs.writeFileSync(STATE_FILE, JSON.stringify(st));
 
 if (!warnBody) process.exit(0);
-const body = warnBody;
+// #703 — an alarm that can name seats must name them: append who IS bound
+// (so the reader can infer who vanished) and the unbound count.
+const body = status.binding === 'active'
+  ? `${warnBody} [#703: bound=[${seatNames.join(',')}] unbound=${unbound}]`
+  : warnBody;
 
 if (DRYRUN) {
   console.log(`${now} DRYRUN would post: ${body}`);

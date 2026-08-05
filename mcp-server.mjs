@@ -38,6 +38,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { loadRoster } from './core/roster-config.mjs';
 import { configureIdentities } from './core/identity.mjs';
+import { loadSeatTokens, bindFromAuthHeader, DEFAULT_HEARTBEAT_S } from './core/seat-binding.mjs';
 
 // The same roster the board serves — read once at boot from the optional,
 // gitignored roster.json. Falls back to the shipped example when absent.
@@ -683,7 +684,48 @@ const transports = new Map();
 // never send — so it grew unbounded and OOM-crashed the server. We track
 // liveness per session and reap ones that are idle AND hold no open SSE stream.
 // A session with an OPEN stream is alive (receiving channels) and is NEVER reaped.
-const sessionMeta = new Map(); // sid -> { lastActivity:number, openStreamCount:number }
+const sessionMeta = new Map(); // sid -> { lastActivity:number, openStreamCount:number, seat?, heartbeatS?, lastBeatAt?, lastBeatOk? }
+
+// ── #703 — connection identity + per-seat heartbeats (room-vetted) ──────────
+// Tokens bind connections to seats at the door; FAIL-OPEN by unanimous ruling
+// ("a diagnostic that refuses converts a naming problem into an outage") — an
+// unbound connection is admitted and COUNTED in /channel/status, which the
+// fanout watch reads. Absent token file = DORMANT, zero behavior change.
+// Path convention: env-var-else-repo-relative (the same rule redact.mjs
+// learned at the same gate — a default naming the operator's private tree
+// layout is a publication). Deployments point SCRUM_SEAT_TOKENS at the data
+// tree in the launchd plist; the repo-relative default serves the harness.
+const SEAT_TOKENS_PATH = process.env.SCRUM_SEAT_TOKENS
+  || new URL('./seat-tokens.json', import.meta.url).pathname;
+const seatTokens = loadSeatTokens(SEAT_TOKENS_PATH);
+if (!seatTokens.dormant) console.log(`[#703] seat binding ACTIVE: ${seatTokens.byToken.size} token(s) from ${SEAT_TOKENS_PATH}`);
+
+// Heartbeats: a per-stream server-initiated notification on the seat's own
+// cadence. The method is one clients silently DROP (unknown JSON-RPC method) —
+// NEVER the channel method, which would inject context-burning noise into every
+// seat at every beat (#206's meta-invariant, one lesson over). The beat's value
+// is the WRITE: transport.send() failing against a dead stream is the detection
+// signal, no client cooperation required. Sweep default 5s; cadence per seat.
+const HEARTBEAT_SWEEP_MS = Number(process.env.SCRUM_HEARTBEAT_SWEEP_MS ?? 5000);
+function sweepHeartbeats() {
+  const now = Date.now();
+  for (const [sid, m] of sessionMeta) {
+    if ((m.openStreamCount ?? 0) <= 0) continue;
+    const cadenceMs = (m.heartbeatS ?? DEFAULT_HEARTBEAT_S) * 1000;
+    if (now - (m.lastBeatAt ?? 0) < cadenceMs) continue;
+    const transport = transports.get(sid);
+    if (!transport) continue;
+    m.lastBeatAt = now;
+    Promise.resolve()
+      .then(() => transport.send({ jsonrpc: '2.0', method: 'notifications/claude/heartbeat', params: { ts: new Date(now).toISOString() } }))
+      .then(() => { m.lastBeatOk = true; })
+      .catch((e) => {
+        m.lastBeatOk = false;
+        console.error(`[#703] heartbeat FAILED seat=${m.seat ?? 'unbound'} sid=${sid}: ${e?.message ?? e} — stream presumed dead`);
+      });
+  }
+}
+setInterval(sweepHeartbeats, HEARTBEAT_SWEEP_MS).unref();
 const REAP_IDLE_MS = Number(process.env.MCP_REAP_IDLE_MS ?? 300000); // 5 min default
 const REAP_SWEEP_MS = Number(process.env.MCP_REAP_SWEEP_MS ?? 30000); // 30 s default
 function reapIdleSessions() {
@@ -984,12 +1026,36 @@ const httpServer = http.createServer(async (req, res) => {
       const receivers = [...transports.keys()].filter(
         (sid) => (sessionMeta.get(sid)?.openStreamCount ?? 0) > 0,
       ).length;
+      // #703 — the per-seat table and the unbound count: the room-vetted
+      // fail-open counterweight. This is what the fanout watch reads; an
+      // unbound streamed session must be VISIBLE here, never only in a log.
+      // Every LIVE session counts, streamed or tool-only: a tool-only session
+      // still carries identity, and an unbound one is still config drift. The
+      // per-entry `streams` field answers RECEIVING; presence in the table
+      // answers BOUND. (First cut counted streamed-only and made a bound
+      // tool-only session invisible — caught by the fail-open wire test.)
+      const seats = {};
+      let unbound = 0;
+      for (const [sid, m] of sessionMeta) {
+        const streams = m.openStreamCount ?? 0;
+        if (!m.seat) { unbound += 1; continue; }
+        const s = seats[m.seat] ?? (seats[m.seat] = { streams: 0, sessions: 0, lastBeatAt: null, lastBeatOk: null });
+        s.streams += streams;
+        s.sessions += 1;
+        if (m.lastBeatAt && (!s.lastBeatAt || m.lastBeatAt > s.lastBeatAt)) {
+          s.lastBeatAt = new Date(m.lastBeatAt).toISOString();
+          s.lastBeatOk = m.lastBeatOk ?? null;
+        }
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({
         pending: channelScheduler.pending(),
         mode: CHANNEL_STAGGER_OFF ? 'off' : (readConfig().mode || 'off'),
         receivers,
         sessions: transports.size,
+        seats,
+        unbound,
+        binding: seatTokens.dormant ? 'dormant' : 'active',
       }));
     }
 
@@ -1050,16 +1116,38 @@ const httpServer = http.createServer(async (req, res) => {
     const sessionId = req.headers['mcp-session-id'];
     let transport;
 
+    // #703 — resolve the connection's seat binding from the Authorization
+    // header on EVERY request (a client may gain its token mid-life). Fail-open:
+    // unbound and unknown-token connections are admitted; unknown tokens log
+    // loudly because they are config drift wearing a working connection.
+    const binding = bindFromAuthHeader(req.headers.authorization, seatTokens);
+    if (binding?.unknownToken && sessionId) {
+      console.error(`[#703] UNKNOWN token on sid=${sessionId} — admitted unbound (fail-open); check seat-tokens.json vs client config`);
+    }
+
     if (sessionId && transports.has(sessionId)) {
       transport = transports.get(sessionId);
+      const m = sessionMeta.get(sessionId);
+      if (m && binding?.seat) {
+        if (m.seat && m.seat !== binding.seat) {
+          console.error(`[#703] binding CHANGED on sid=${sessionId}: ${m.seat} → ${binding.seat} (log-only per Q3)`);
+        }
+        m.seat = binding.seat;
+        m.heartbeatS = binding.heartbeat_s;
+      }
     } else if (!sessionId && body && isInitializeRequest(body)) {
       // New session: fresh transport + fresh McpServer
       transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (sid) => {
           transports.set(sid, transport);
-          sessionMeta.set(sid, { lastActivity: Date.now(), openStreamCount: 0 });
-          console.log(`Session initialized: ${sid}`);
+          sessionMeta.set(sid, {
+            lastActivity: Date.now(), openStreamCount: 0,
+            // #703 — bound at birth when the init carried a token
+            seat: binding?.seat ?? null,
+            heartbeatS: binding?.heartbeat_s,
+          });
+          console.log(`Session initialized: ${sid}${binding?.seat ? ` seat=${binding.seat}` : ''}`);
           // #410 registration seam (Increment 2): a seat is NOT bound here.
           // Presence declares its seatId by calling the `scrum/session/register`
           // control-plane request (handled in buildMcpServer) right after connect;
@@ -1120,14 +1208,14 @@ const httpServer = http.createServer(async (req, res) => {
           // ⇒ the timeout fix holds. resDestroyed/reqDestroyed/writableEnded
           // are the close-reason proxies (server-kill vs client-disconnect).
           const streamOpenedAt = Date.now();
-          console.log(`[#284] GET stream opened sid=${sessionId} connection=${req.headers['connection'] ?? '(none)'}`);
+          console.log(`[#284] GET stream opened sid=${sessionId} seat=${m.seat ?? 'unbound'} connection=${req.headers['connection'] ?? '(none)'}`);
           res.on('close', () => {
             // #289 — decrement, don't clear: a losing GET's close must not zero a
             // session that still holds another live stream.
             m.openStreamCount = Math.max(0, (m.openStreamCount ?? 0) - 1);
             m.lastActivity = Date.now();
             const heldMs = Date.now() - streamOpenedAt;
-            console.log(`[#284] GET stream closed sid=${sessionId} heldMs=${heldMs} resDestroyed=${res.destroyed} reqDestroyed=${req.destroyed} writableEnded=${res.writableEnded}`);
+            console.log(`[#284] GET stream closed sid=${sessionId} seat=${m.seat ?? 'unbound'} heldMs=${heldMs} resDestroyed=${res.destroyed} reqDestroyed=${req.destroyed} writableEnded=${res.writableEnded}`);
           });
         }
       }

@@ -225,10 +225,10 @@ const MCP_HEADERS = {
  * Run the MCP initialize handshake and return a session handle with
  * { sessionId, callTool(name, args), listTools(), raw(payload) }.
  */
-export async function mcpSession(mcpUrl) {
+export async function mcpSession(mcpUrl, { headers: extraHeaders = {} } = {}) {
   const initRes = await fetch(mcpUrl, {
     method: 'POST',
-    headers: MCP_HEADERS,
+    headers: { ...MCP_HEADERS, ...extraHeaders },
     body: JSON.stringify({
       jsonrpc: '2.0',
       id: 1,
@@ -253,7 +253,7 @@ export async function mcpSession(mcpUrl) {
     instructions = parseMcpResponse(await initRes.text())?.result?.instructions || '';
   } catch { /* a server that sends none is a valid server */ }
 
-  const withSession = { ...MCP_HEADERS, 'mcp-session-id': sessionId };
+  const withSession = { ...MCP_HEADERS, ...extraHeaders, 'mcp-session-id': sessionId };
 
   await fetch(mcpUrl, {
     method: 'POST',
