@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildGraphStore, queryGraph } from '../core/graph-replica.mjs';
+import { buildGraphStore, queryGraph, syncGraphStore, updateEntity } from '../core/graph-replica.mjs';
 import { domainToJsonLd } from '../core/jsonld.mjs';
 
 const doc = () => domainToJsonLd({
@@ -183,4 +183,69 @@ test('COMPLETENESS: no entity class in the document goes silently unprojected', 
   const subjects = new Set(queryGraph(store, `SELECT DISTINCT ?s WHERE { ?s ?p ?o . }`, { limit: 1000 }).rows.map((r) => r.s));
   assert.ok([...subjects].some((s) => s.endsWith('ft-1')),
     'an unknown entity class must still surface as a typed subject, not vanish');
+});
+
+// ── #714 — incremental replica maintenance ────────────────────────────────
+// The full rebuild is correct by construction: throw the store away, re-project,
+// it cannot drift. Incremental maintenance gives that up for speed, so the whole
+// bet rests on ONE guard — after N incremental updates the store must be
+// triple-for-triple what a full rebuild would have produced. Without that, this
+// makes the replica quietly WRONG instead of merely slow.
+
+const dumpSorted = (store) => store.dump({ format: 'application/n-quads' }).split('\n').filter(Boolean).sort().join('\n');
+
+test('#714 PARITY: a store maintained incrementally is triple-for-triple identical to a full rebuild', () => {
+  const doc = {
+    '@graph': [
+      { '@id': 'a1', '@type': 'CreativeWork', identifier: 1, name: 'first', creator: 'ada', relatedTo: ['b2'] },
+      { '@id': 'b2', '@type': 'CreativeWork', identifier: 2, name: 'second', 'scrum:priority': 'p2' },
+      { '@id': 'https://scrumboard.local/person/ada', '@type': 'Person', identifier: 'ada', name: 'Ada' },
+      { '@id': 'm1', '@type': 'Comment', author: 'ada', about: 'a1', text: 'hello' },
+    ],
+  };
+  const inc = buildGraphStore({ '@graph': [] });
+  let { hashes } = syncGraphStore(inc, doc, null);
+
+  // a sequence of realistic mutations, applied incrementally
+  doc['@graph'][0].name = 'first EDITED';                       // field change
+  doc['@graph'][1]['scrum:priority'] = 'p0';                    // another field
+  doc['@graph'][0].relatedTo = ['b2', 'm1'];                    // edge added
+  doc['@graph'].push({ '@id': 'c3', '@type': 'CreativeWork', identifier: 3, name: 'third' });  // new entity
+  ({ hashes } = syncGraphStore(inc, doc, hashes));
+
+  doc['@graph'] = doc['@graph'].filter((e) => e['@id'] !== 'm1');  // entity removed
+  const stats = syncGraphStore(inc, doc, hashes);
+  assert.equal(stats.removed, 1, 'the dropped entity was detected and its triples removed');
+
+  const full = buildGraphStore(doc);
+  assert.equal(dumpSorted(inc), dumpSorted(full),
+    'incremental store must equal a full rebuild exactly — otherwise this trades slow for wrong');
+});
+
+test('#714 an update touches only its own subject — arrows INTO an entity survive re-indexing it', () => {
+  const doc = { '@graph': [
+    { '@id': 'a1', '@type': 'CreativeWork', identifier: 1, name: 'a', relatedTo: ['b2'] },
+    { '@id': 'b2', '@type': 'CreativeWork', identifier: 2, name: 'b' },
+  ] };
+  const store = buildGraphStore({ '@graph': [] });
+  syncGraphStore(store, doc, null);
+  const before = store.match(null, null, null).length;
+
+  // re-index b2 — the target of a1's arrow. a1's triples must not move.
+  doc['@graph'][1].name = 'b EDITED';
+  updateEntity(store, doc['@graph'][1]);
+
+  assert.equal(store.match(null, null, null).length, before, 'no triples leaked or duplicated');
+  const edge = store.match(null, null, null).filter((q) => q.object.value.endsWith('/b2') && q.predicate.value.endsWith('relatedTo'));
+  assert.equal(edge.length, 1, 'the arrow a1→b2 survived re-indexing b2 — deletion is subject-scoped');
+});
+
+test('#714 a cold sync equals a full rebuild — the incremental path has no separate cold case', () => {
+  const doc = { '@graph': [
+    { '@id': 'x', '@type': 'CreativeWork', identifier: 9, name: 'x', labels: ['one', 'two'] },
+    { '@id': 'https://scrumboard.local/column/backlog', '@type': 'scrum:Column', identifier: 'backlog', name: 'Backlog', 'scrum:order': 0 },
+  ] };
+  const inc = buildGraphStore({ '@graph': [] });
+  syncGraphStore(inc, doc, null);
+  assert.equal(dumpSorted(inc), dumpSorted(buildGraphStore(doc)));
 });

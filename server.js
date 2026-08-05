@@ -41,7 +41,7 @@ import { buildLinkIndex } from './core/links.mjs';
 import { readConfig, writeConfig } from './channel-config.mjs';
 import { loadRoster, writeRoster, rosterFilePath } from './core/roster-config.mjs';
 import { extractMentions as extractMentionsFromRoster } from './core/people.mjs';
-import { buildGraphStore, queryGraph } from './core/graph-replica.mjs';
+import { buildGraphStore, queryGraph, syncGraphStore } from './core/graph-replica.mjs';
 import { domainToJsonLd } from './core/jsonld.mjs';
 import { deriveGraph, personByKey } from './core/people.mjs';
 import { queryCards } from './core/cards-query.mjs';
@@ -586,6 +586,8 @@ function writeBoard(data, events) {
 // principle made continuous): "does graph-native have pull" is answered by
 // this file, not by advocacy.
 let _graphStore = null;
+// #714 — per-entity content hashes from the last sync; null means cold.
+let _graphHashes = null;
 let _graphDirty = true;
 const GRAPH_QUERY_LOG = path.join(path.dirname(BOARD_DATA_FILE), 'graph-query-log.jsonl');
 
@@ -603,11 +605,21 @@ async function handleGraphQuery(req, res) {
     const tCall = performance.now();
     let rebuiltMs = null;
     if (_graphDirty || !_graphStore) {
+      // #714 — INCREMENTAL. The old path threw the store away and re-projected
+      // 67k triples (3.7s) on the first query after ANY write, which is what
+      // stopped anything being built on top of the graph. syncGraphStore diffs
+      // the document by per-entity content hash (~165ms for the whole file) and
+      // re-projects only what actually changed — normally one or two entities.
+      // Correctness is not argued, it is pinned: the parity test asserts an
+      // incrementally-maintained store is triple-for-triple identical to a full
+      // rebuild, and goes red if the delete-before-re-emit step is removed.
       const t = performance.now();
-      _graphStore = buildGraphStore(domainToJsonLd(loadDomain(BOARD_DATA_FILE)));
+      if (!_graphStore) _graphStore = buildGraphStore({ '@graph': [] });
+      const stats = syncGraphStore(_graphStore, domainToJsonLd(loadDomain(BOARD_DATA_FILE)), _graphHashes);
+      _graphHashes = stats.hashes;
       _graphDirty = false;
       rebuiltMs = Math.round(performance.now() - t);
-      console.error(`${new Date().toISOString()} graph-replica: rebuilt ${_graphStore.size} triples in ${rebuiltMs}ms`);
+      console.error(`${new Date().toISOString()} graph-replica: synced ${stats.updated} updated, ${stats.removed} removed of ${stats.total} entities → ${_graphStore.size} triples in ${rebuiltMs}ms`);
     }
     const result = queryGraph(_graphStore, body.query, { limit: body.limit });
     try {

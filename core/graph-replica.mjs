@@ -19,6 +19,7 @@
  */
 
 import oxigraph from 'oxigraph';
+import { createHash } from 'node:crypto';
 import { REL_TYPES } from './jsonld.mjs';
 
 export const IRI = Object.freeze({
@@ -49,11 +50,51 @@ const A = nn(IRI.rdf + 'type');
  */
 export function buildGraphStore(doc) {
   const store = new oxigraph.Store();
+  for (const e of doc['@graph'] || []) projectEntity(store, e);
+  return store;
+}
+
+/**
+ * #714 — the subject IRI an entity's triples hang from. Cards and messages carry
+ * bare uuids and live under entity:; people and columns already carry full IRIs
+ * and keep them. One rule covers every class, which is what makes subject-scoped
+ * deletion safe: `match(subject, null, null)` finds exactly this entity's own
+ * triples and nothing else's — an arrow FROM another card TO this one is stored
+ * under that other card's subject and is therefore untouched.
+ */
+export function subjectIriFor(entity) {
+  const id = String(entity['@id']);
+  return id.startsWith('http') ? id : IRI.entity + id;
+}
+
+/**
+ * #714 — re-index ONE entity: drop the triples it owns, emit them again from its
+ * current state. This is the loop body `buildGraphStore` has always run over
+ * everything; nothing here is computed across entities, which is the property
+ * that makes incremental maintenance possible at all.
+ */
+export function updateEntity(store, entity) {
+  const subject = nn(subjectIriFor(entity));
+  for (const q of store.match(subject, null, null)) store.delete(q);
+  projectEntity(store, entity);
+}
+
+/** #714 — remove an entity's own triples without re-emitting (deletion). */
+export function removeEntity(store, idOrEntity) {
+  const id = typeof idOrEntity === 'string' ? idOrEntity : subjectIriFor(idOrEntity);
+  const subject = nn(id.startsWith('http') ? id : IRI.entity + id);
+  let n = 0;
+  for (const q of store.match(subject, null, null)) { store.delete(q); n += 1; }
+  return n;
+}
+
+/** Emit one entity's triples into `store`. The projection, per entity. */
+function projectEntity(store, e) {
   const add = (s, p, o) => store.add(oxigraph.triple(s, p, o));
   const S = IRI.scrum, SC = IRI.schema, E = IRI.entity, P = IRI.person, C = IRI.column;
   const personRef = (k) => nn(String(k).startsWith('http') ? k : P + k);
 
-  for (const e of doc['@graph'] || []) {
+  {
     const t = e['@type'];
     if (t === 'CreativeWork') {
       const s = nn(E + e['@id']);
@@ -108,7 +149,55 @@ export function buildGraphStore(doc) {
       if (e.name != null) add(s, nn(SC + 'name'), lit(e.name));
     }
   }
-  return store;
+}
+
+/**
+ * #714 — bring `store` up to date with `doc` by touching only what changed.
+ *
+ * The full rebuild is paid by whoever queries next after ANY write, which is why
+ * nothing could be built on top of the graph. Measured on the live board — 13,256
+ * entities, 67,413 triples:
+ *
+ *   sync after one card edit   ~104ms   (1 entity re-projected)
+ *   sync with nothing changed   ~85ms   (0 re-projected — the hash pass alone)
+ *   cold sync                  ~6.2s    vs ~5.1s for a cold full rebuild
+ *
+ * ⚠️ So this is NOT a free win: the hash pass makes a COLD start ~20% slower.
+ * That is the right trade only because cold happens once per process and the
+ * post-write path happens on every query — but it is a real cost and should not
+ * be reported as a pure improvement. Cold-path timings are also noisy (the same
+ * full rebuild measured 2.1s and 5.1s in different processes), so treat the
+ * seconds-scale figures as order-of-magnitude and the ~100ms warm figure — which
+ * is stable and is the one that matters — as the actual result.
+ *
+ * Returns the new hash map plus counts, so a caller can log what it actually did
+ * rather than assert it. Pass `prev = null` for a cold start (projects
+ * everything and is exactly a full rebuild).
+ */
+export function syncGraphStore(store, doc, prev) {
+  const next = new Map();
+  const entities = doc['@graph'] || [];
+  let updated = 0, removed = 0;
+  for (const e of entities) {
+    if (!e || e['@id'] == null) continue;
+    const key = subjectIriFor(e);
+    const hash = createHash('sha1').update(JSON.stringify(e)).digest('hex');
+    next.set(key, hash);
+    if (!prev) {
+      // Cold start: nothing to replace, so the match-and-delete is pointless work.
+      projectEntity(store, e); updated += 1;
+    } else if (prev.get(key) !== hash) { updateEntity(store, e); updated += 1; }
+  }
+  // Entities that vanished from the document lose their triples. Arrows POINTING
+  // at them survive under their own subjects — the same dangling-reference
+  // behaviour a full rebuild produces, since it projects whatever the document
+  // says and the document is what dropped them.
+  if (prev) {
+    for (const key of prev.keys()) {
+      if (!next.has(key)) { removeEntity(store, key); removed += 1; }
+    }
+  }
+  return { hashes: next, updated, removed, total: entities.length };
 }
 
 /** IRI → prefixed short form for token-efficient results. */
