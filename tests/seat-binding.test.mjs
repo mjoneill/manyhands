@@ -135,6 +135,30 @@ test('an unknown token presented AT SESSION BIRTH is logged — the drift warnin
   }
 });
 
+test('/channel/status separates "sent no header" from "sent a stale one" — one number cannot mean both', async () => {
+  // #707: `unbound` covers two failures with two different cures — a client that
+  // never sends a header (config never resolved) and one that sends a drifted
+  // token (config resolved, value stale). On 2026-08-05 three seats read a single
+  // `unbound` count, inferred the first, and reasoned for hours from the wrong
+  // one; the truth was only recoverable by grepping the log. The discriminator
+  // has to be ON the surface the room actually reads.
+  const tokensFile = tmpTokens({ seats: { ada: { token: 'tok-ada' } } });
+  const rest = await startRestServer({ board: makeBoardFixture({ cards: [], conversations: [] }) });
+  const mcp = await startMcpServer({ restApiBase: rest.baseUrl, env: { SCRUM_SEAT_TOKENS: tokensFile } });
+  try {
+    await mcpSession(mcp.mcpUrl, { headers: { Authorization: 'Bearer tok-ada' } });   // bound
+    await mcpSession(mcp.mcpUrl);                                                      // no header
+    await mcpSession(mcp.mcpUrl, { headers: { Authorization: 'Bearer tok-STALE' } });  // drifted
+    const status = await (await fetch(`${new URL(mcp.mcpUrl).origin}/channel/status`)).json();
+    assert.equal(status.unknownToken, 1, 'exactly the drifted session is counted as a wrong header');
+    assert.ok(status.unbound >= 2, 'both header-less and drifted sessions remain unbound (fail-open unchanged)');
+    assert.ok(status.seats.ada, 'the correctly-tokened seat still binds');
+  } finally {
+    await mcp.stop();
+    await rest.stop();
+  }
+});
+
 test('SEAT-KEYED shape: listing keys is the safe operation — the incident-class error is unmakeable', () => {
   const t = loadSeatTokens(tmpTokens({ seats: {
     ada: { token: 'tok-ada-2', heartbeat_s: 15 },

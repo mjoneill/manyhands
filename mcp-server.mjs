@@ -1034,10 +1034,18 @@ const httpServer = http.createServer(async (req, res) => {
       // per-entry `streams` field answers RECEIVING; presence in the table
       // answers BOUND. (First cut counted streamed-only and made a bound
       // tool-only session invisible — caught by the fail-open wire test.)
+      // #707 — `unbound` alone covers TWO failures with two different cures:
+      // a client that sent no header at all (config never resolved) and one
+      // that sent a drifted token (config resolved, value stale). Reporting a
+      // single number let three seats read it as the first when it was the
+      // second, and the truth was only recoverable by grepping the log. The
+      // discriminator belongs on the surface the room actually reads.
       const seats = {};
       let unbound = 0;
+      let unknownToken = 0;
       for (const [sid, m] of sessionMeta) {
         const streams = m.openStreamCount ?? 0;
+        if (m.unknownToken) unknownToken += 1;
         if (!m.seat) { unbound += 1; continue; }
         const s = seats[m.seat] ?? (seats[m.seat] = { streams: 0, sessions: 0, lastBeatAt: null, lastBeatOk: null });
         s.streams += streams;
@@ -1055,6 +1063,7 @@ const httpServer = http.createServer(async (req, res) => {
         sessions: transports.size,
         seats,
         unbound,
+        unknownToken,   // #707 — of the unbound, how many sent a token we don't know
         binding: seatTokens.dormant ? 'dormant' : 'active',
       }));
     }
@@ -1135,12 +1144,16 @@ const httpServer = http.createServer(async (req, res) => {
     if (sessionId && transports.has(sessionId)) {
       transport = transports.get(sessionId);
       const m = sessionMeta.get(sessionId);
+      // #707 — sticky: a connection that has EVER presented a drifted token is
+      // config drift until it reconnects, even between requests.
+      if (m && binding?.unknownToken) m.unknownToken = true;
       if (m && binding?.seat) {
         if (m.seat && m.seat !== binding.seat) {
           console.error(`[#703] binding CHANGED on sid=${sessionId}: ${m.seat} → ${binding.seat} (log-only per Q3)`);
         }
         m.seat = binding.seat;
         m.heartbeatS = binding.heartbeat_s;
+        m.unknownToken = false;   // it produced a good token; the drift is over
       }
     } else if (!sessionId && body && isInitializeRequest(body)) {
       // New session: fresh transport + fresh McpServer
@@ -1153,6 +1166,9 @@ const httpServer = http.createServer(async (req, res) => {
             // #703 — bound at birth when the init carried a token
             seat: binding?.seat ?? null,
             heartbeatS: binding?.heartbeat_s,
+            // #707 — drifted-at-birth. The commonest real case: a client that
+            // resolved its config before a rotation connects once and idles.
+            unknownToken: !!binding?.unknownToken,
           });
           console.log(`Session initialized: ${sid}${binding?.seat ? ` seat=${binding.seat}` : ''}`);
           // #410 registration seam (Increment 2): a seat is NOT bound here.

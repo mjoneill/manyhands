@@ -26,6 +26,15 @@ import { readFileSync, existsSync } from 'node:fs';
 export const DEFAULT_HEARTBEAT_S = 60;
 
 /**
+ * #707 — `heartbeat_s` is read ONLY for seats that hold a stream: the sweep
+ * skips any session with no open stream before it looks at the cadence. For a
+ * STREAMLESS seat (a health probe that initializes and leaves) the value is
+ * inert whatever it says — and note there is no "off" here, since both 0 and an
+ * absent field fall through to DEFAULT_HEARTBEAT_S. So a number on a streamless
+ * seat documents intent and changes nothing; don't read one as a setting.
+ */
+
+/**
  * Load the token map. Absent file → dormant (empty map), by design.
  * A malformed file WARNS and goes dormant rather than crashing the server —
  * a broken token file must never take the room's channel down with it.
