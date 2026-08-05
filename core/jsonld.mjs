@@ -60,7 +60,71 @@ const CONTEXT = {
   // graph-complete claim holds, but values stay literals — no node minted per
   // label string.
   labels: 'scrum:label',
+  // #685 — relationships are @id EDGES. Values are the target nodes' own @ids
+  // (no @base: card @ids are in-document identifiers), converted from the
+  // domain's shortIds at serialization and back at load.
+  relatedTo: { '@id': 'scrum:relatedTo', '@type': '@id' },
+  blockedBy: { '@id': 'scrum:blockedBy', '@type': '@id' },
+  supersedes: { '@id': 'scrum:supersedes', '@type': '@id' },
+  derivedFrom: { '@id': 'scrum:derivedFrom', '@type': '@id' },
+  supersededBy: { '@id': 'scrum:supersededBy', '@type': '@id' },
 };
+
+// ── #685 — the board facet dissolves at the DOCUMENT boundary ───────────────
+//
+// The domain keeps its nested `board` facet (handlers, #614 inverse-sync, the
+// API contract and the event log all speak that shape); the DOCUMENT carries
+// the same facts as first-class properties and @id edges. Serialization is the
+// one place that holds the whole graph, so it is the one place a shortId↔@id
+// conversion can live without a second copy that drifts.
+const REL_TYPES = ['relatedTo', 'blockedBy', 'supersedes', 'derivedFrom', 'supersededBy'];
+const FACET_TO_PROP = {
+  column: 'column', assignees: 'assignees', labels: 'labels', claimedBy: 'claimedBy',
+  priority: 'scrum:priority', order: 'scrum:order', for: 'scrum:for',
+  claimedAt: 'scrum:claimedAt', _extra: 'scrum:extra',
+};
+const PROP_TO_FACET = Object.fromEntries(Object.entries(FACET_TO_PROP).map(([f, p]) => [p, f]));
+
+/** Card node (nested facet) → flat document entity. Lossless; pure. */
+function cardNodeToFlat(node, shortToId) {
+  const { board, ...flat } = node;
+  if (!board) return node;
+  for (const [k, v] of Object.entries(board)) {
+    if (k === 'relationships') {
+      // Presence-preserving: only the relationship types the facet actually
+      // held are emitted, so `{relatedTo: []}` and "no relationships at all"
+      // stay distinct through the round trip. A shortId naming no card rides
+      // VERBATIM — losslessness beats tidiness on dangling data.
+      for (const [rt, arr] of Object.entries(v || {})) {
+        flat[rt] = (arr || []).map((sid) => shortToId.get(sid) ?? sid);
+      }
+    } else {
+      flat[FACET_TO_PROP[k] ?? ('scrum:' + k)] = v;   // unknown facet keys ride prefixed
+    }
+  }
+  return flat;
+}
+
+/** Flat document entity → card node (nested facet). Exact inverse. */
+function flatToCardNode(entity, idToShort) {
+  if (entity.board) return entity;                     // legacy document — already nested
+  const node = {}; const board = {}; const rels = {};
+  for (const [k, v] of Object.entries(entity)) {
+    if (REL_TYPES.includes(k)) {
+      // Key-order preservation is load-bearing (the replay invariant compares
+      // BYTES): `relationships` re-enters the facet at the position of the
+      // first relationship key encountered — same slot it flattened out of —
+      // and later types land inside the same object, keeping their order.
+      if (!board.relationships) board.relationships = rels;
+      rels[k] = (v || []).map((ref) => idToShort.get(ref) ?? ref);
+    }
+    else if (k in PROP_TO_FACET) board[PROP_TO_FACET[k]] = v;
+    else if (k.startsWith('scrum:') && k !== 'scrum:meta') board[k.slice(6)] = v;  // unknown facet key, prefix stripped
+    else node[k] = v;
+  }
+  node.board = board;                                  // every card carries the facet, even empty
+  return node;
+}
 
 // Messages are schema.org Comment; people are Person; columns are scrum:Column;
 // everything else is a node (a card).
@@ -89,8 +153,15 @@ export function domainToJsonLd(domain) {
   const doc = {};
   if (_README !== undefined) doc._README = _README;   // first key — JSON.stringify keeps insertion order
   doc['@context'] = CONTEXT;
-  // #686/#687 — people and columns are graph citizens beside cards and messages.
-  doc['@graph'] = [...nodes, ...messages, ...people, ...columns.map(columnToNode)];
+  // #685 — the shortId→@id map for relationship edges lives here and only
+  // here: serialization holds the whole graph, so no second copy can drift.
+  const shortToId = new Map(nodes.map((n) => [n.identifier, n['@id']]));
+  // #685/#686/#687 — cards flatten their facet; people and columns are graph
+  // citizens beside cards and messages.
+  doc['@graph'] = [
+    ...nodes.map((n) => cardNodeToFlat(n, shortToId)),
+    ...messages, ...people, ...columns.map(columnToNode),
+  ];
   doc['scrum:meta'] = meta;                            // nextShortId, lastUpdated, …
   return doc;
 }
@@ -104,11 +175,14 @@ export function domainToJsonLd(domain) {
 export function jsonLdToDomain(doc) {
   const graph = Array.isArray(doc['@graph']) ? doc['@graph'] : [];
   const meta = (doc['scrum:meta'] && typeof doc['scrum:meta'] === 'object') ? doc['scrum:meta'] : {};
+  const cardEntities = graph.filter((e) => !isMessage(e) && !isPerson(e) && !isColumn(e));
+  // #685 — the inverse map (@id → shortId) rebuilt from the same single graph.
+  const idToShort = new Map(cardEntities.map((e) => [e['@id'], e.identifier]));
   const domain = {
     // #686/#687 — four entity classes. A Person or Column must never fall into
     // `nodes`: nodes round-trip through nodeToCard and would surface them as
-    // phantom cards in card_list.
-    nodes: graph.filter((e) => !isMessage(e) && !isPerson(e) && !isColumn(e)),
+    // phantom cards in card_list. #685 — flat card entities re-nest their facet.
+    nodes: cardEntities.map((e) => flatToCardNode(e, idToShort)),
     messages: graph.filter(isMessage),
     ...meta,
   };
