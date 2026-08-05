@@ -57,7 +57,7 @@ test('saveDomain persists schema.org JSON-LD: _README first, @graph, meta stampe
   assert.ok(card && card.name === 'A', 'the card persisted as a CreativeWork node');
   assert.ok(written['@graph'].some((e) => e['@type'] === 'Comment'), 'the message persisted as a Comment');
   assert.equal(written['scrum:meta'].lastUpdated, '2026-06-15T00:00:00.000Z', 'lastUpdated stamped in meta');
-  assert.ok(Array.isArray(written['scrum:meta'].columns), 'columns ride in meta');
+  assert.ok(written['@graph'].some((e) => e['@type'] === 'scrum:Column'), 'columns ride in @graph (#687)');
 });
 
 test('loadDomain reads back the JSON-LD it wrote (canonical format round-trips through disk)', () => {

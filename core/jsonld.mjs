@@ -28,6 +28,13 @@
  */
 export const PERSON_IRI_BASE = 'https://scrumboard.local/person/';
 
+/**
+ * #687 — the IRI space column references resolve into. `card.column: "backlog"`
+ * is, per the @context, the @id of a scrum:Column node in this same graph —
+ * the same strings-become-edges-by-declaration move as #686's people.
+ */
+export const COLUMN_IRI_BASE = 'https://scrumboard.local/column/';
+
 // A person-reference term: string values are @id-typed and resolve against the
 // person IRI space (JSON-LD 1.1 property-scoped context).
 const personRef = (iri) => ({
@@ -47,11 +54,29 @@ const CONTEXT = {
   author: personRef('https://schema.org/author'),
   assignees: personRef('scrum:assignees'),
   claimedBy: personRef('scrum:claimedBy'),
+  // #687 — a card's column string is a reference to a scrum:Column node.
+  column: { '@id': 'scrum:column', '@type': '@id', '@context': { '@base': COLUMN_IRI_BASE } },
+  // #687 — labels are concepts, not identities: the predicate is named so the
+  // graph-complete claim holds, but values stay literals — no node minted per
+  // label string.
+  labels: 'scrum:label',
 };
 
-// Messages are schema.org Comment; people are Person; everything else is a node.
+// Messages are schema.org Comment; people are Person; columns are scrum:Column;
+// everything else is a node (a card).
 const isMessage = (entity) => entity && entity['@type'] === 'Comment';
 const isPerson = (entity) => entity && entity['@type'] === 'Person';
+const isColumn = (entity) => entity && entity['@type'] === 'scrum:Column';
+
+// #687 — plain {id, name, order, …} ↔ typed graph node. Lossless both ways:
+// unmodelled fields ride through verbatim (the slice-1 keystone).
+const columnToNode = ({ id, name, order, ...rest }) => ({
+  '@type': 'scrum:Column', '@id': COLUMN_IRI_BASE + id,
+  identifier: id, name, 'scrum:order': order, ...rest,
+});
+const nodeToColumn = ({ '@type': _t, '@id': _i, identifier, name, 'scrum:order': order, ...rest }) => ({
+  id: identifier, name, order, ...rest,
+});
 
 /**
  * Domain → JSON-LD document. `_README` leads (convention); `@graph` holds the
@@ -60,12 +85,13 @@ const isPerson = (entity) => entity && entity['@type'] === 'Person';
  * `scrum:meta`. The exact inverse of jsonLdToDomain.
  */
 export function domainToJsonLd(domain) {
-  const { nodes = [], messages = [], people = [], _README, ...meta } = domain;
+  const { nodes = [], messages = [], people = [], columns = [], _README, ...meta } = domain;
   const doc = {};
   if (_README !== undefined) doc._README = _README;   // first key — JSON.stringify keeps insertion order
   doc['@context'] = CONTEXT;
-  doc['@graph'] = [...nodes, ...messages, ...people]; // #686 — people are graph citizens
-  doc['scrum:meta'] = meta;                            // columns, nextShortId, lastUpdated, …
+  // #686/#687 — people and columns are graph citizens beside cards and messages.
+  doc['@graph'] = [...nodes, ...messages, ...people, ...columns.map(columnToNode)];
+  doc['scrum:meta'] = meta;                            // nextShortId, lastUpdated, …
   return doc;
 }
 
@@ -79,13 +105,20 @@ export function jsonLdToDomain(doc) {
   const graph = Array.isArray(doc['@graph']) ? doc['@graph'] : [];
   const meta = (doc['scrum:meta'] && typeof doc['scrum:meta'] === 'object') ? doc['scrum:meta'] : {};
   const domain = {
-    // #686 — three entity classes. A Person must never fall into `nodes`:
-    // nodes round-trip through nodeToCard and would surface people as
+    // #686/#687 — four entity classes. A Person or Column must never fall into
+    // `nodes`: nodes round-trip through nodeToCard and would surface them as
     // phantom cards in card_list.
-    nodes: graph.filter((e) => !isMessage(e) && !isPerson(e)),
+    nodes: graph.filter((e) => !isMessage(e) && !isPerson(e) && !isColumn(e)),
     messages: graph.filter(isMessage),
     ...meta,
   };
+  // #687 — graph columns are the canonical location; a legacy document
+  // (columns still in scrum:meta) keeps working via the meta spread above and
+  // flips on its next save. When meta carried none, the graph's set — even an
+  // EMPTY one — is the answer: a fresh board's `columns: []` must round-trip,
+  // not vanish (found by the fresh-board pin, first run).
+  const cols = graph.filter(isColumn);
+  if (cols.length || !('columns' in domain)) domain.columns = cols.map(nodeToColumn);
   const people = graph.filter(isPerson);
   if (people.length) domain.people = people;          // absence preserved, not coerced to []
   if (doc._README !== undefined) domain._README = doc._README;

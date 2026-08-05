@@ -61,7 +61,7 @@ test('the document is genuinely schema.org-shaped', () => {
   const meta = doc['scrum:meta'];
   assert.equal(meta.nextShortId, 3);
   assert.equal(meta.lastUpdated, '2026-01-05T00:00:00.000Z');
-  assert.ok(Array.isArray(meta.columns) && meta.columns.length === 2, 'columns ride in meta');
+  assert.equal(doc['@graph'].filter((e) => e['@type'] === 'scrum:Column').length, 2, 'columns ride in @graph (#687)');
 });
 
 test('_README leads the file when present, omitted when absent', () => {
