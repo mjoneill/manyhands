@@ -79,16 +79,48 @@ try { st = { ...st, ...JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) }; } catc
 if (st.lastSig && st.lastWarnAt) st.sigTimes = { [st.lastSig]: st.lastWarnAt, ...st.sigTimes };
 delete st.lastSig; delete st.lastWarnAt;
 st.sigTimes ??= {};
+// #690 migration: pair-keyed entries (`7->4`) become destination-keyed
+// (`drop:4`). Dropping them instead would re-fire every muted signature the
+// instant this ships — the same mid-incident-deploy trap #666 hit.
+for (const [sig, at] of Object.entries(st.sigTimes)) {
+  const pair = sig.match(/^\d+->(\d+)$/);
+  if (!pair) continue;
+  const key = `drop:${pair[1]}`;
+  st.sigTimes[key] = Math.max(st.sigTimes[key] ?? 0, at);
+  delete st.sigTimes[sig];
+}
 for (const [sig, at] of Object.entries(st.sigTimes)) {
   if (Date.now() - at >= COOLDOWN_MS) delete st.sigTimes[sig];
 }
+
+// #690 — THE COOLDOWN'S AXIS IS SEVERITY, NOT IDENTITY.
+//
+// This file already declared the rule ("the cooldown mutes repetition, never
+// escalation") while keying on `${from}->${to}`, which is an IDENTITY. The two
+// diverge the moment the destination rises: 7→6 is a different key from 7→4
+// and fired, though 6 receivers is strictly better than the 4 already alarmed
+// about. Restart churn WALKS the key space rather than repeating a key, so the
+// mute was honest per-key and near-useless in aggregate — and every post still
+// promised "muted for 6h", so the message and the behaviour disagreed.
+//
+// Rule: an alarm fires only if its destination is BELOW every destination
+// currently muted in its own namespace. Repetition and improvement are silent;
+// a worsening state always speaks.
+const deepestMuted = (prefix) => {
+  const depths = Object.keys(st.sigTimes)
+    .filter((k) => k.startsWith(prefix))
+    .map((k) => Number(k.slice(prefix.length)))
+    .filter(Number.isFinite);
+  return depths.length ? Math.min(...depths) : null;
+};
 
 let warnBody = null;
 if (st.pendingFrom != null && receivers >= st.pendingFrom) {
   st.pendingFrom = null; st.warned = false;            // recovered
 } else if (st.pendingFrom != null && receivers < st.pendingFrom) {
-  const sig = `${st.pendingFrom}->${receivers}`;
-  const inCooldown = st.sigTimes[sig] != null;          // eviction above = expiry
+  const sig = `drop:${receivers}`;                      // #690: destination, not pair
+  const deepest = deepestMuted('drop:');
+  const inCooldown = deepest != null && receivers >= deepest;
   if (!st.warned && !inCooldown) {                      // drop persisted a second tick
     warnBody = `⚠️ fanout watch: receivers dropped ${st.pendingFrom} → ${receivers} and stayed there `
       + `across two ticks (${st.pendingFrom - receivers} seat stream(s) gone; ${sessions} sessions live). `
@@ -133,8 +165,13 @@ if (st.pendingFrom == null && !st.warned) {
 // signatures carry the muting; escalation always fires. Only one post per
 // tick either way: floor's warnBody overwrites delta's.
 if (receivers < FLOOR) {                                // total-collapse floor, secondary
+  // #690: floor had the SAME defect in milder form. Keying on destination
+  // alone is necessary and NOT sufficient — floor:2 after floor:0 was still a
+  // fresh key for a strictly better state. (The #690 card called this path
+  // "the right shape to copy"; reading it properly, it was half the shape.)
   const floorSig = `floor:${receivers}`;
-  if (st.sigTimes[floorSig] == null) {
+  const floorDeepest = deepestMuted('floor:');
+  if (floorDeepest == null || receivers < floorDeepest) {
     warnBody = `⚠️ fanout watch: only ${receivers} of ${sessions} live sessions hold an open stream `
       + `(floor: ${FLOOR}). Seats without a stream receive NOTHING — no queue, no replay (#624). `
       + `Any single MCP tool call re-registers a deaf seat; changes_since covers whatever was missed. `
