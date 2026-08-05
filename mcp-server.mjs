@@ -763,14 +763,31 @@ const channelScheduler = createChannelScheduler({
 
 // #410 — TokenRing / round-robin delivery. Off by default; a separate delivery
 // GEOMETRY, not a timing variant of the fan-out. The engine + registry are
-// board-owned singletons. Two independent gates keep this INERT today:
-//   1. mode !== 'token-ring' (default 'soft') — the branch is never entered.
-//   2. seatRegistry is UNPOPULATED — there is no register() call site yet, so
-//      the ring is empty, no seat is ever the holder, and even in token-ring mode
-//      the engine emits zero deliveries.
-// The registration seam (presence declares its seatId at MCP connect → we bind
-// it here) is designed jointly across seats and wired in Increment 2, at which
-// point this stops being inert. Until then: built + tested, not activated.
+// board-owned singletons.
+//
+// ⚠️ ONE gate keeps this off, not two (#708). This comment claimed two: the
+// second said seatRegistry is UNPOPULATED because "there is no register() call
+// site yet" — and Increment 2 shipped exactly that call site, unconditionally,
+// 500 lines above this line. Production has logged 153 registrations and a
+// non-empty `ring=[…]`, so the old clause "even in token-ring mode the engine
+// emits zero deliveries" is FALSE: with seats in the ring, flipping the mode
+// arms it on the next post (see broadcastTokenRing) and serializes delivery.
+//
+// What actually holds, written as an IMPLICATION so it cannot rot in silence:
+//   delivery enters the ring ONLY IF readConfig().mode === 'token-ring'.
+// DEFAULT_CONFIG.mode is 'soft' and tests/channel-config.test.mjs pins it —
+// but note WHAT that pins: the fallback used when the config file is absent or
+// unreadable. The LIVE mode is a value in channel-config.json, which is DATA
+// and outside every test's reach. So the gate holding production is one field
+// in one data file, guarded by nothing mechanical.
+// Below that gate there is a fail-safe, which is NOT a second gate: an empty
+// ring that has NEVER armed falls back to fan-out. It protects the never-armed
+// case only, and the ring is armable now.
+//
+// So flipping mode is a live cutover with a real blast radius, not a config
+// nudge. The old wording said otherwise and two seats relied on it in one
+// afternoon — a comment in the present tense is a measurement with no
+// timestamp; this one is phrased as a condition for that reason.
 const seatRegistry = createSeatRegistry();
 const tokenRingEngine = createTokenRingEngine({ registry: seatRegistry, genEnvelopeId: () => randomUUID() });
 
