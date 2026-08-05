@@ -498,3 +498,65 @@ test('#110 pre-existing conversations get mentions backfilled on read', async ()
     await server.stop();
   }
 });
+
+// ── #699 — mention extraction validates against the ROSTER ──────────────
+//
+// The naive @(\w+) scan recorded 86 distinct "people" for a 6-person room:
+// JSON-LD terms (@context, @id, @type), email domains (@gmail, @anthropic),
+// npm tags (@latest), handles, and dates (@2026). Inert while mentions are a
+// literal — and ~77 phantom Person nodes the moment they become IRIs, which
+// is the obvious next graph slice. Cheaper to clear before than after.
+
+apiTest('#699 an @token that is not a roster seat is NOT recorded as a mention', async ({ baseUrl }) => {
+  const conv = await (await fetch(`${baseUrl}/api/conversations`, json({
+    method: 'POST',
+    body: JSON.stringify({
+      body: 'the @context prefix, my @gmail address, tagged @latest, back in @2026',
+      author: 'alex',
+    }),
+  }))).json();
+  assert.deepEqual(conv.mentions, [],
+    'JSON-LD terms, email domains, npm tags and years are not colleagues');
+  assert.match(conv.body, /@context/,
+    'and the text is UNTOUCHED — this filters the mentions list, never the prose');
+});
+
+apiTest('#699 POSITIVE CONTROL: a real seat in the same body is still recorded', async ({ baseUrl }) => {
+  // Without this, the filter passes for an extractor that drops everything.
+  const conv = await (await fetch(`${baseUrl}/api/conversations`, json({
+    method: 'POST',
+    body: JSON.stringify({ body: '@context is a term but @sage is a person', author: 'alex' }),
+  }))).json();
+  assert.deepEqual(conv.mentions, ['sage'], 'the seat survives, the term does not');
+});
+
+apiTest('#699 a display name canonicalises to the seat key', async ({ baseUrl }) => {
+  // The live board carries one seat under four spellings, splitting ~1,850
+  // mentions. The roster already knows key -> display name, so the alias
+  // needs no new config: match either, record the key.
+  const conv = await (await fetch(`${baseUrl}/api/conversations`, json({
+    method: 'POST', body: JSON.stringify({ body: 'ping @Sage and @sage', author: 'kit' }),
+  }))).json();
+  assert.deepEqual(conv.mentions, ['sage'],
+    'display-name and key forms collapse to one canonical key, de-duplicated');
+});
+
+apiTest('#699 an unknown @token never mints a person, even mixed with real ones', async ({ baseUrl }) => {
+  const conv = await (await fetch(`${baseUrl}/api/conversations`, json({
+    method: 'POST',
+    body: JSON.stringify({ body: '@robin @notaseat @sage @vocab', author: 'nova' }),
+  }))).json();
+  assert.deepEqual([...conv.mentions].sort(), ['robin', 'sage'],
+    'exactly the roster seats, nothing else');
+});
+
+apiTest('#699 ?mentions_me still finds a post that used the display name', async ({ baseUrl }) => {
+  // The read path keys on the canonical form, so canonicalising on write is
+  // what makes the query answer correctly for either spelling.
+  await fetch(`${baseUrl}/api/conversations`, json({
+    method: 'POST', body: JSON.stringify({ body: 'over to @Sage', author: 'alex' }),
+  }));
+  const hits = await (await fetch(`${baseUrl}/api/conversations?mentions_me=sage`)).json();
+  assert.ok(hits.some((c) => /over to @Sage/.test(c.body)),
+    'a display-name mention is findable by the canonical key');
+});

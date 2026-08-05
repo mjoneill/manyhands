@@ -40,6 +40,7 @@ import { buildTree, buildChildIndex } from './core/tree.mjs';
 import { buildLinkIndex } from './core/links.mjs';
 import { readConfig, writeConfig } from './channel-config.mjs';
 import { loadRoster, writeRoster, rosterFilePath } from './core/roster-config.mjs';
+import { extractMentions as extractMentionsFromRoster } from './core/people.mjs';
 import { buildGraphStore, queryGraph } from './core/graph-replica.mjs';
 import { domainToJsonLd } from './core/jsonld.mjs';
 import { deriveGraph, personByKey } from './core/people.mjs';
@@ -1534,15 +1535,13 @@ async function handleDeleteColumn(req, res, columnId) {
 // no editing, no intent field. `attachedTo` is reserved for forward-compat
 // with the future card-attached threads feature (#39) — v1 only uses null.
 
-// Extract @mentions from a conversation body — lowercased, de-duplicated.
-// Light parser (#110): @(\w+) is good enough for the agent handles we use.
+// #699 — mention extraction now validates against the ROSTER and canonicalises
+// display names to seat keys. The #110 parser recorded any `@word`, which on
+// the live board meant 86 distinct "people" for a six-person room. The harm it
+// actually caused is narrow and real: `?mentions_me=<key>` missed posts that
+// spelled a seat by its display name. Implementation + tests: core/people.mjs.
 function extractMentions(text) {
-  if (typeof text !== 'string') return [];
-  const found = new Set();
-  for (const m of text.matchAll(/@(\w+)/g)) {
-    found.add(m[1].toLowerCase());
-  }
-  return [...found];
+  return extractMentionsFromRoster(text, ROSTER);
 }
 
 function createConversationFromPayload(body) {

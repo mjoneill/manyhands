@@ -41,6 +41,46 @@
 import { domainToBoard } from './mapping.mjs';
 import { PERSON_IRI_BASE } from './jsonld.mjs';
 
+/**
+ * #699 — extract @mentions, VALIDATED against the roster and CANONICALISED.
+ *
+ * The naive `@(\w+)` scan this replaces recorded 86 distinct "people" for a
+ * six-person room: JSON-LD terms (`@context`, `@id`), email domains
+ * (`@gmail`), npm tags (`@latest`), handles, and years (`@2026`).
+ *
+ * ⚠️ The harm is NOT phantom Person nodes — the frozen person-source list
+ * below deliberately excludes mentions, and a test pins it (#619's consent
+ * guard). Naming that constant here would trip its own one-copy guard, which
+ * is the guard working. The harm is smaller and live: `?mentions_me=<key>` MISSES posts that
+ * used a seat's display name, because one seat can be written two ways.
+ *
+ * The roster already knows `key → display name`, so canonicalisation needs no
+ * new config: match EITHER form, always record the KEY. An `@token` matching
+ * neither is not a mention — it stays in the prose and is simply not recorded
+ * as a person.
+ *
+ * @param {string} text   the message body
+ * @param {object} seats  roster map: key → { name, … }
+ */
+export function extractMentions(text, seats = {}) {
+  if (typeof text !== 'string') return [];
+  // key → key, and lowercased display name → key. Built per call because the
+  // roster is small and a cached index is one more thing to invalidate.
+  const canon = new Map();
+  for (const [key, v] of Object.entries(seats || {})) {
+    const k = String(key).toLowerCase();
+    canon.set(k, k);
+    const name = v && typeof v.name === 'string' ? v.name.toLowerCase() : null;
+    if (name) canon.set(name, k);
+  }
+  const found = new Set();
+  for (const m of text.matchAll(/@(\w+)/g)) {
+    const hit = canon.get(m[1].toLowerCase());
+    if (hit) found.add(hit);
+  }
+  return [...found];
+}
+
 export const PERSON_SOURCE_FIELDS = Object.freeze(['assignees', 'author', 'createdBy']);
 
 /**
