@@ -97,3 +97,14 @@ test('heartbeats arrive as notifications on a bound stream, and the status table
     await rest.stop();
   }
 });
+
+test('SEAT-KEYED shape: listing keys is the safe operation — the incident-class error is unmakeable', () => {
+  const t = loadSeatTokens(tmpTokens({ seats: {
+    ada: { token: 'tok-ada-2', heartbeat_s: 15 },
+    bex: { token: 'tok-bex-2' },
+  } }));
+  assert.equal(t.dormant, false);
+  assert.deepEqual(bindFromAuthHeader('Bearer tok-ada-2', t), { seat: 'ada', heartbeat_s: 15 });
+  assert.equal(bindFromAuthHeader('Bearer tok-bex-2', t).seat, 'bex');
+  // the property that matters: Object.keys of the seats map are NAMES, not secrets
+});

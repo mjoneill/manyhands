@@ -41,6 +41,19 @@ export function loadSeatTokens(filePath, warn = (m) => console.warn(m)) {
     return dormant;
   }
   const byToken = new Map();
+  // SEAT-KEYED shape (preferred): { seats: { ada: { token, heartbeat_s } } }.
+  // Chosen after a live incident: the token-keyed shape made the value-blind
+  // operation ("list the seat names") print the secrets, because the keys WERE
+  // the secrets. Here, listing keys IS the safe operation — the error becomes
+  // unmakeable rather than warned-against.
+  for (const [seat, entry] of Object.entries(parsed?.seats ?? {})) {
+    if (!seat || typeof entry?.token !== 'string' || !entry.token) continue;
+    byToken.set(entry.token, {
+      seat,
+      heartbeat_s: Number(entry.heartbeat_s) > 0 ? Number(entry.heartbeat_s) : DEFAULT_HEARTBEAT_S,
+    });
+  }
+  // token-keyed legacy shape, still read: { tokens: { <token>: { seat, … } } }
   for (const [token, entry] of Object.entries(parsed?.tokens ?? {})) {
     if (!token || typeof entry?.seat !== 'string' || !entry.seat) continue;
     byToken.set(token, {
