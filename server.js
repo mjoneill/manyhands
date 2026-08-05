@@ -1509,7 +1509,9 @@ function createConversationFromPayload(body) {
     id: crypto.randomUUID(),
     body: text,
     author: (typeof body.author === 'string' && body.author.length > 0) ? body.author : 'unassigned',
-    attachedTo: (typeof body.attachedTo === 'string' && body.attachedTo.length > 0) ? body.attachedTo : null,
+    // #688: the literal string "null" is a client's serialized absence, not a
+    // card ref — 42 live posts proved this write path stores it verbatim.
+    attachedTo: (typeof body.attachedTo === 'string' && body.attachedTo.length > 0 && body.attachedTo !== 'null') ? body.attachedTo : null,
     attachments: sanitizeAttachments(body.attachments),
     mentions: extractMentions(text),
     createdAt: now,

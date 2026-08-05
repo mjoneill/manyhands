@@ -117,3 +117,25 @@ test('cardRefHref: builds a board deep-link that scrollToCardByShortId can resol
   assert.equal(cardRefHref(207), 'index.html?card=207');
   assert.equal(cardRefHref(185, 'index.html'), 'index.html?card=185');
 });
+
+// ── #688 — the string "null" is an absence wearing quotes ──────────────────
+// 42 live posts carried attachedTo: "null" (a 4-char string) because one
+// client serialized its null. The write boundary must treat it as the null it
+// means: a post "attached to" the string "null" is attached to nothing, and
+// storing it verbatim makes it invisible to every attachedTo-is-null filter.
+import { startRestServer as srv688, makeBoardFixture as fix688 } from './helpers/harness.mjs';
+
+test('#688: attachedTo "null" (string) is stored as null, not as a phantom card ref', async () => {
+  const s = await srv688({ board: fix688({ cards: [], conversations: [] }) });
+  try {
+    const mk = (attachedTo) => fetch(`${s.baseUrl}/api/conversations`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body: 'x', author: 'ada', attachedTo }),
+    }).then((r) => r.json());
+    assert.equal((await mk('null')).attachedTo, null, 'the string "null" means null');
+    assert.equal((await mk(undefined)).attachedTo, null, 'absent stays null');
+    assert.equal((await mk('some-uuid')).attachedTo, 'some-uuid', 'real refs untouched');
+  } finally {
+    await s.stop();
+  }
+});
