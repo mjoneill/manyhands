@@ -619,7 +619,10 @@ function buildMcpServer() {
       + '· blocked work with blocker state: SELECT ?t ?bt ?col WHERE { ?c scrum:blockedBy ?b ; '
       + 'schema:name ?t . ?b schema:name ?bt ; scrum:column ?col } '
       + '· who discusses whose work: SELECT ?a ?o (COUNT(*) AS ?n) WHERE { ?m schema:author ?a ; '
-      + 'schema:about ?card . ?card schema:creator ?o } GROUP BY ?a ?o ORDER BY DESC(?n)',
+      + 'schema:about ?card . ?card schema:creator ?o } GROUP BY ?a ?o ORDER BY DESC(?n) '
+      + 'KNOWN BOUNDARY: schema:creator exists only on cards filed since 2026-08-04 (#631) — '
+      + '~9% of the board. An ABSENT creator means UNRECORDED, never "nobody": attribution '
+      + 'before that date lives in git only (the #676 no-go, extended by ruling on #653).',
     inputSchema: {
       query: z.string().describe('SPARQL SELECT or ASK. Prefixes are pre-declared; results return prefixed short IRIs.'),
       limit: z.number().int().min(1).optional().describe('Row bound (default 100, ceiling 1000); truncation is confessed'),
