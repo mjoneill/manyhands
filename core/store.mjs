@@ -21,6 +21,7 @@
 import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 import { boardToDomain } from './mapping.mjs';
 import { domainToJsonLd, jsonLdToDomain, isJsonLdDocument } from './jsonld.mjs';
+import { ensurePeople } from './people.mjs';
 
 /** Read the store → domain projection. Empty domain if the file is absent. */
 export function loadDomain(filePath) {
@@ -45,7 +46,13 @@ export function loadDomain(filePath) {
  * the timestamp (test determinism). Returns the written JSON-LD document.
  */
 export function saveDomain(filePath, domain, opts = {}) {
-  const stamped = { ...domain, lastUpdated: opts.now || new Date().toISOString() };
+  let stamped = { ...domain, lastUpdated: opts.now || new Date().toISOString() };
+  // #686 — a ROSTERED writer materializes Person nodes into the document
+  // (regenerated each save: one function, one authority, rebuilt not synced).
+  // A roster-less writer (scripts, the redact CLI) PRESERVES whatever people
+  // the last rostered save minted — write-granularity preservation, pinned
+  // by test. Materialization must not depend on which caller happens to save.
+  if (opts.roster) stamped = { ...ensurePeople(stamped, opts.roster), lastUpdated: stamped.lastUpdated };
   const doc = domainToJsonLd(stamped);
   const tmp = filePath + '.tmp';
   writeFileSync(tmp, JSON.stringify(doc, null, 2), 'utf8');

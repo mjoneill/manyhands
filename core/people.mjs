@@ -38,6 +38,9 @@
  * on every new card and the graph was blind to all of them — the audit's
  * step-function finding, 100% of new cards, zero backfill.
  */
+import { domainToBoard } from './mapping.mjs';
+import { PERSON_IRI_BASE } from './jsonld.mjs';
+
 export const PERSON_SOURCE_FIELDS = Object.freeze(['assignees', 'author', 'createdBy']);
 
 /**
@@ -232,6 +235,10 @@ function boundList(full, before, limit, cursorName) {
  */
 function boundPerson(person, { assignedBefore, authoredBefore, claimingBefore, createdBefore, limit } = {}) {
   return {
+    // #686 — the person's graph identity: this IRI is the @id of the Person
+    // node in the store document, and what @id-typed reference strings
+    // (creator/author/assignees/claimedBy) resolve to. One key, one IRI.
+    '@id': PERSON_IRI_BASE + person.key,
     ...person,
     assigned: boundList(person.assigned, assignedBefore, limit, 'assignedBefore'),
     assignedTotal: person.assigned.length,
@@ -265,4 +272,38 @@ export function personByKey(board, roster, key, opts = {}) {
   if (!wanted) return null;
   const found = deriveFullPeople(board, roster).find((p) => p.key === wanted.key);
   return found ? boundPerson(found, opts) : null;
+}
+
+/**
+ * #686 — materialize Person NODES into the domain, from the same single
+ * derivation the read surfaces use. The #686 reframe (principal-ruled, on the
+ * card): #619's derive-on-read was an interim step; the event log makes the
+ * store a rebuildable projection,
+ * and a node materialized here — one function, one authority, regenerated on
+ * every rostered write — is rebuilt, never synced. #618's drift class stays
+ * unrepresentable; the node becomes real.
+ *
+ * Prior people on the domain are DROPPED and re-derived, which is what makes
+ * this idempotent and rebuild-deterministic (sorted by key; no clock, no
+ * randomness). The #619 consent guard is inherited whole: identities come only
+ * from the closed source-field list via deriveFullPeople (its single consumer)
+ * — mentions can never mint a person, excluded identities never appear.
+ *
+ * Pure — no I/O. The caller supplies the roster (saveDomain's opts.roster).
+ */
+export function ensurePeople(domain, roster = {}) {
+  const { people: _prior, ...rest } = domain;
+  const derived = deriveFullPeople(domainToBoard(rest), roster);
+  const people = [...derived]
+    .sort((a, b) => a.key.localeCompare(b.key))
+    .map((p) => ({
+      '@type': 'Person',
+      '@id': PERSON_IRI_BASE + p.key,
+      identifier: p.key,
+      name: p.name,
+      'scrum:glyph': p.glyph,
+      'scrum:resolved': p.resolved,
+      'scrum:aliases': p.aliases,
+    }));
+  return { ...rest, people };
 }

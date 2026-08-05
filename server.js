@@ -570,7 +570,9 @@ function writeBoard(data, events) {
   data.lastUpdated = new Date().toISOString();
   data._README = BOARD_README;
   for (const ev of events) appendEvent(EVENT_LOG_DIR, ev, { now: data.lastUpdated });
-  saveDomain(BOARD_DATA_FILE, boardToDomain(data), { now: data.lastUpdated });
+  // #686 — every server write is a ROSTERED save: Person nodes are
+  // (re)materialized into @graph from this one authority on every write.
+  saveDomain(BOARD_DATA_FILE, boardToDomain(data), { now: data.lastUpdated, roster: { seats: ROSTER } });
 }
 
 // Promise-chain mutex. All write paths run under this lock so two

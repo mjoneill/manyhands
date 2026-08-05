@@ -19,14 +19,39 @@
  * and additionalType values like `scrum:task`). Nothing here expands to triples.
  */
 
+/**
+ * #686 — the IRI space person-reference strings resolve into. A stored value
+ * like `creator: "ada"` is, per the @context below, the IRI
+ * `https://scrumboard.local/person/ada` — the @id of a Person node in this
+ * same graph. The strings on 12K existing records became edges by DECLARATION,
+ * not by rewriting.
+ */
+export const PERSON_IRI_BASE = 'https://scrumboard.local/person/';
+
+// A person-reference term: string values are @id-typed and resolve against the
+// person IRI space (JSON-LD 1.1 property-scoped context).
+const personRef = (iri) => ({
+  '@id': iri, '@type': '@id', '@context': { '@base': PERSON_IRI_BASE },
+});
+
 const CONTEXT = {
   '@vocab': 'https://schema.org/',
   scrum: 'https://scrumboard.local/ns#',
   board: 'scrum:board',           // the kanban facet on a node
+  // #686 — the closed set of person-reference predicates, each an edge into
+  // the Person nodes. `mentions` is DELIBERATELY absent: it is regex-scraped
+  // prose holding real external people's handles, and an @id-typed mentions
+  // would mint IRIs for strangers who never touched this board (#619's
+  // consent guard, restated at the vocabulary level).
+  creator: personRef('https://schema.org/creator'),
+  author: personRef('https://schema.org/author'),
+  assignees: personRef('scrum:assignees'),
+  claimedBy: personRef('scrum:claimedBy'),
 };
 
-// Messages are schema.org Comment; everything else in the graph is a node.
+// Messages are schema.org Comment; people are Person; everything else is a node.
 const isMessage = (entity) => entity && entity['@type'] === 'Comment';
+const isPerson = (entity) => entity && entity['@type'] === 'Person';
 
 /**
  * Domain → JSON-LD document. `_README` leads (convention); `@graph` holds the
@@ -35,11 +60,11 @@ const isMessage = (entity) => entity && entity['@type'] === 'Comment';
  * `scrum:meta`. The exact inverse of jsonLdToDomain.
  */
 export function domainToJsonLd(domain) {
-  const { nodes = [], messages = [], _README, ...meta } = domain;
+  const { nodes = [], messages = [], people = [], _README, ...meta } = domain;
   const doc = {};
   if (_README !== undefined) doc._README = _README;   // first key — JSON.stringify keeps insertion order
   doc['@context'] = CONTEXT;
-  doc['@graph'] = [...nodes, ...messages];
+  doc['@graph'] = [...nodes, ...messages, ...people]; // #686 — people are graph citizens
   doc['scrum:meta'] = meta;                            // columns, nextShortId, lastUpdated, …
   return doc;
 }
@@ -54,10 +79,15 @@ export function jsonLdToDomain(doc) {
   const graph = Array.isArray(doc['@graph']) ? doc['@graph'] : [];
   const meta = (doc['scrum:meta'] && typeof doc['scrum:meta'] === 'object') ? doc['scrum:meta'] : {};
   const domain = {
-    nodes: graph.filter((e) => !isMessage(e)),
+    // #686 — three entity classes. A Person must never fall into `nodes`:
+    // nodes round-trip through nodeToCard and would surface people as
+    // phantom cards in card_list.
+    nodes: graph.filter((e) => !isMessage(e) && !isPerson(e)),
     messages: graph.filter(isMessage),
     ...meta,
   };
+  const people = graph.filter(isPerson);
+  if (people.length) domain.people = people;          // absence preserved, not coerced to []
   if (doc._README !== undefined) domain._README = doc._README;
   return domain;
 }
