@@ -595,17 +595,26 @@ async function handleGraphQuery(req, res) {
     if (typeof body.query !== 'string' || !body.query.trim()) {
       return sendJSON(res, 400, { error: 'body.query (SPARQL SELECT or ASK) is required' });
     }
+    // #654 — the caller's true cost is rebuild + engine, and only the engine half
+    // used to be recorded. Two seats read `ms` as the cost of a call on 2026-08-05
+    // (one reported 26ms for a call that took 3842ms) because the rebuild was
+    // invisible here and timestamp-less in the console line, so neither could
+    // correlate the two. Both halves are now measured and both are logged.
+    const tCall = performance.now();
+    let rebuiltMs = null;
     if (_graphDirty || !_graphStore) {
       const t = performance.now();
       _graphStore = buildGraphStore(domainToJsonLd(loadDomain(BOARD_DATA_FILE)));
       _graphDirty = false;
-      console.error(`graph-replica: rebuilt ${_graphStore.size} triples in ${Math.round(performance.now() - t)}ms`);
+      rebuiltMs = Math.round(performance.now() - t);
+      console.error(`${new Date().toISOString()} graph-replica: rebuilt ${_graphStore.size} triples in ${rebuiltMs}ms`);
     }
     const result = queryGraph(_graphStore, body.query, { limit: body.limit });
     try {
       fs.appendFileSync(GRAPH_QUERY_LOG, JSON.stringify({
         at: new Date().toISOString(), by: (typeof body.by === 'string' && body.by) || null,
-        ms: result.ms, returned: result.returned ?? 0, truncated: !!result.truncated,
+        ms: result.ms, rebuiltMs, totalMs: Math.round(performance.now() - tCall),
+        returned: result.returned ?? 0, truncated: !!result.truncated,
         query: body.query.slice(0, 2000),
       }) + '\n');
     } catch { /* the log is telemetry, never a gate on the answer */ }
