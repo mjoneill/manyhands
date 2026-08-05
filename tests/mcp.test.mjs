@@ -94,7 +94,34 @@ test('#182: a session holding an OPEN SSE stream is NOT reaped', async () => {
       headers: { 'mcp-session-id': sessionId, Accept: 'text/event-stream' },
       signal: ac.signal,
     }).catch(() => {});
-    await new Promise((r) => setTimeout(r, 550)); // well past idle threshold
+    // #709 — WAIT for the stream to be REGISTERED; don't assume the GET landed
+    // inside the idle window. The reaper spares a session only while
+    // openStreamCount > 0, and that fetch is deliberately not awaited — so under
+    // full-suite parallel load the GET can still be in flight when the 120ms
+    // window expires. The session is reaped, and this test fails with nothing
+    // wrong in the code it covers. Observed 1/12 at full scope, 0/32 in
+    // isolation and under hand-built contention: load-dependent, so the fix has
+    // to be a condition, not a longer sleep.
+    //
+    // The comment on REAP_ENV_SLOW above already diagnosed this exact race
+    // ("120ms lost that race under load") and fixed it for the sibling test
+    // twelve lines up. It stopped at one of the two tests sharing the window.
+    //
+    // Poll the quantity the reaper actually reads, rather than a proxy for it.
+    const statusUrl = mcp.healthUrl.replace(/\/health$/, '/channel/status');
+    const deadline = Date.now() + 5000;
+    let receivers = 0;
+    while (Date.now() < deadline) {
+      receivers = (await (await fetch(statusUrl)).json()).receivers ?? 0;
+      if (receivers >= 1) break;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    // Positive control: separates "the stream never registered" from "it
+    // registered and was then reaped". Without this, a harness that never
+    // observes a stream at all would fail identically to a real regression.
+    assert.ok(receivers >= 1,
+      'precondition: the SSE stream must be registered before the reap window means anything');
+    await new Promise((r) => setTimeout(r, 550)); // now past the idle threshold WITH the stream provably open
     const after = (await (await fetch(mcp.healthUrl)).json()).sessions;
     assert.ok(after - base >= 1, 'a session with an open SSE stream must survive the reaper');
     ac.abort();
