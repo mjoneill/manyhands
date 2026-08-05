@@ -603,8 +603,11 @@ function buildMcpServer() {
   // ── #694 — graph_query: native graph traversal ────────────────────
   mcp.registerTool('graph_query', {
     description: 'Traverse the board as a GRAPH — one SPARQL query where composing card_list/'
-      + 'card_get calls would take five round-trips. Answers in ~2-20ms from an in-process '
-      + 'replica that is rebuilt after every write (never stale). READ-ONLY (SELECT or ASK); '
+      + 'card_get calls would take five round-trips. Never stale: an in-process replica is '
+      + 'REBUILT IN FULL on the first query after any write, which currently costs 1-4s at '
+      + '~67k triples; queries against an already-warm replica are ~2-20ms. The `ms` field in '
+      + 'the result is ENGINE TIME ONLY and excludes that rebuild — do not quote it as the '
+      + 'cost of a call. READ-ONLY (SELECT or ASK); '
       + 'bounded by default (LIMIT 100 injected, ceiling 1000, cuts confessed via truncated). '
       + 'PREFIXES (pre-declared, never write them yourself): schema: (schema.org) · scrum: '
       + '(board vocabulary) · entity: (cards+posts by uuid) · person: (seats by key) · '
