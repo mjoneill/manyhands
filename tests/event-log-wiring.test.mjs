@@ -10,8 +10,22 @@
  * 219 events from other files. Isolation follows the store's identity, not its
  * folder; two stores in one directory must never share an append-only record.
  *
- * ⚠️ Fixture actors are synthetic (`ada`/`bex`/`cyd`) per repo convention — real
- * seat names in fixtures are a publication-gate finding (learned 2026-08-04).
+ * ⚠️ Fixture actors are synthetic (`ada`/`bex`/`cyd`). The rule this serves is
+ * WIDER than fixtures, and the narrow wording here caused two misses on
+ * 2026-08-04 — including by the person who wrote it:
+ *
+ *   NO SEAT OR PERSON NAME IN ANYTHING THAT GETS PUSHED.
+ *
+ * Not just fixtures — comments in production source count, commit messages
+ * count, and QUOTED SPEECH is its own class with NO baseline escape. Stated as
+ * a fixture convention, this line reads as satisfied the moment your test data
+ * is clean, which is how seat names reached `core/` comments and a principal's
+ * verbatim words reached a commit message the same evening. The gate's rule was
+ * always the wide one; only this comment was narrow.
+ *
+ * The repo is PUBLIC. Run the tree gate before staging, not at push:
+ * `node <workspace>/scripts/push-gate-check.mjs .` — cheap, and the difference
+ * between a find-and-replace and a history rewrite (#689).
  */
 
 import { test } from 'node:test';
