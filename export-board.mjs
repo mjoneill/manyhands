@@ -60,8 +60,8 @@ const DEFAULTS = {
   // UNDER it at record boundaries, so a part is never a torn message.
   maxBytes: 1_500_000,
   // ── Acceptable variance, not a hard limit ────────────────────────────────
-  // Michael's framing, 2026-07-27, and it is the right one: "goal: <1.5MB per
-  // segment with a tolerance of 5% or something."
+  // Ruled 2026-07-27, and it is the right framing: a goal of <1.5MB per
+  // segment with a tolerance of roughly 5%.
   //
   // A target alone leaves "a little over is fine" to whoever is reading the
   // output — which means the tool cannot tell an ordinary rounding overshoot

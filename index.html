@@ -46,8 +46,8 @@ body {
   min-height: 100vh;
   /* #496 reopen: `overflow-x: auto` used to live here. With the document
      scrolling sideways, a board wider than the window took the shell head with
-     it — Michael's "the header area is fixed width but the page is however many
-     columns wide… looks jarring." The board now pans inside its own container
+     it — a fixed-width header area against a page that is however many columns
+     wide reads as jarring. The board now pans inside its own container
      (see .board) so the header cannot detach from the viewport. */
   overflow-x: hidden;
 }
