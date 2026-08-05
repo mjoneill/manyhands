@@ -23,15 +23,33 @@
  * after the post discussing it" is the returning seat's actual question, and a
  * per-segment or per-kind counter cannot answer it.
  *
- * Slice 1 deliberately omits `redact` — it waits on the bytes ruling and does
- * not gate anything here.
+ * REDACTION (#681) is the log's SINGLE permitted rewrite, ruled on
+ * #642 R8: "if we have to respond to an emergency, let's have the tools we need.
+ * we will always be uneasy if we're just relying on a refusal." It replaces named
+ * fields of one event's `state` IN PLACE with a marker, and appends a `redact`
+ * event recording what/when/who — never the content. See `redactEvent`.
  */
 
 import { readFileSync, writeFileSync, appendFileSync, readdirSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 /** Closed vocabulary. An unknown op is a rejected write, not a logged curiosity. */
-export const EVENT_OPS = new Set(['create', 'update', 'delete', 'post']);
+export const EVENT_OPS = new Set(['create', 'update', 'delete', 'post', 'redact']);
+
+/**
+ * What replaces removed content. A MARKER, not a deletion — the redacted event
+ * must still project a body, or replay has nothing to write and falls back to
+ * the predecessor, resurrecting exactly what was removed (see `redactEvent`).
+ */
+export const REDACTION_MARKER = '[redacted]';
+
+/**
+ * What a redacted field must START with for `recordRedaction` to believe a
+ * removal actually happened. Deliberately a PREFIX rather than the exact
+ * marker: #680 was hand-redacted with a longer marker naming the direction and
+ * the date, and that text is strictly more informative than `[redacted]`.
+ */
+export const REDACTION_MARKER_PREFIX = '[redacted';
 export const ENTITY_KINDS = new Set(['card', 'conversation', 'column', 'wiki']);
 
 /** Which board collection a given entity kind projects into. */
@@ -91,8 +109,16 @@ export function validateEvent(ev) {
   if (ent.id === undefined || ent.id === null || ent.id === '') {
     throw new Error('event.entity.id is required');
   }
-  // `state` may legitimately be null only for ops that carry no body. In slice 1
-  // every op carries one (delete's is the tombstone), so require it.
+  // `redact` is the one op that carries NO body — that is its whole point. It
+  // must instead name its target, or the audit trail records a removal without
+  // saying what was removed.
+  if (ev.op === 'redact') {
+    if (!Number.isInteger(ev.redacts)) throw new Error('redact events must name a target seq (redacts)');
+    if (ev.state !== null) throw new Error('redact events must carry state:null — they describe a removal, not content');
+    return true;
+  }
+  // `state` may legitimately be null only for ops that carry no body. Every other
+  // op carries one (delete's is the tombstone), so require it.
   if (ev.state === undefined) throw new Error('event.state is required (full entity, not a diff)');
   return true;
 }
@@ -115,9 +141,238 @@ export function appendEvent(dir, event, opts = {}) {
     entity: event.entity,
     state: event.state,
   };
+  // Redaction's audit fields. Carried only on redact events so every other line
+  // stays byte-identical to what slice 1 wrote.
+  if (event.op === 'redact') {
+    stored.redacts = event.redacts;
+    stored.authority = event.authority;
+    stored.reason = event.reason ?? null;
+    stored.fields = event.fields;
+  }
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   appendFileSync(join(dir, segmentFor(recorded_at)), JSON.stringify(stored) + '\n', 'utf8');
   return stored;
+}
+
+/**
+ * #681 — THE LOG'S SINGLE PERMITTED REWRITE. Replace the named fields of event
+ * `targetSeq` with `REDACTION_MARKER`, in place, and append a `redact` event
+ * recording what/when/who. Ruled on #642 R8 (option b): a real tool,
+ * because "we will always be uneasy if we're just relying on a refusal."
+ *
+ * ⚠️ WHY A MARKER AND NOT `state: null`. The obvious reading of "null it out"
+ * breaks replay. A nulled event projects no body, so the entity falls back to
+ * its predecessor — which for a still-current entity is EXACTLY the content the
+ * redaction removed. The marker keeps the event projectable, which is what makes
+ * the invariant below true. `tests/…-redact.test.mjs` case 3 holds this shut.
+ *
+ * THE INVARIANT: genesis + replay reproduces the **POST**-redaction store. The
+ * pre-redaction board is not a reference — it is a state that no longer exists,
+ * and comparing against it manufactures a corruption finding out of nothing.
+ *
+ * ⚠️ ATOMICITY IS THE CALLER'S JOB. This function moves the LOG surface only.
+ * The store holds its own copy of the same content, and replay diverges from the
+ * store precisely when the two are updated separately — so the caller must move
+ * both under compare-and-swap. `redactEntity` (server) is that coordinator.
+ *
+ * Callers MUST hold the board write lock, as with any append.
+ */
+export function redactEvent(dir, targetSeq, { actor, authority, fields, reason = null, now = null } = {}) {
+  // Everywhere else in this system trust is DECLARED and never authenticated.
+  // This is the one op where declaration alone must not suffice: the invocation
+  // has to cite whose order it is carrying out, and that citation lands in the
+  // permanent record next to the removal.
+  if (typeof authority !== 'string' || !authority.trim()) {
+    throw new Error('redaction requires an explicit authority citation (who ordered it) — #642 R8');
+  }
+  if (typeof actor !== 'string' || !actor.trim()) throw new Error('redaction requires an actor');
+  if (!Array.isArray(fields) || fields.length === 0) {
+    throw new Error('redaction must name the fields it removes — a redaction that does not say what it took is not auditable');
+  }
+
+  // Locate the target's segment. Scanned rather than indexed: redaction is a
+  // rare, human-ordered act, and a correct linear scan beats an index that can
+  // silently point at the wrong line.
+  let file = null; let lines = null; let idx = -1; let target = null;
+  for (const f of segments(dir)) {
+    const raw = readFileSync(join(dir, f), 'utf8').split('\n');
+    const at = raw.findIndex((l) => {
+      if (!l.trim()) return false;
+      try { return JSON.parse(l)?.seq === targetSeq; } catch { return false; }
+    });
+    if (at >= 0) { file = f; lines = raw; idx = at; target = JSON.parse(raw[at]); break; }
+  }
+  if (!target) throw new Error(`cannot redact: no event with seq ${targetSeq}`);
+  if (target.op === 'redact') {
+    throw new Error(`cannot redact seq ${targetSeq}: it is already a redact event — it carries no content, and rewriting it would put the audit trail itself under the rewrite`);
+  }
+
+  // Surgery: only the named fields, only if present. Everything else — seq,
+  // actor, op, entity, timestamps, unnamed fields — survives byte-for-byte,
+  // because the event still HAPPENED and the record of that is not the secret.
+  const removed = [];
+  if (target.state && typeof target.state === 'object') {
+    for (const k of fields) {
+      if (Object.prototype.hasOwnProperty.call(target.state, k)) {
+        target.state[k] = REDACTION_MARKER;
+        removed.push(k);
+      }
+    }
+  }
+  lines[idx] = JSON.stringify(target);
+  writeFileSync(join(dir, file), lines.join('\n'), 'utf8');
+
+  return appendEvent(dir, {
+    op: 'redact',
+    entity: target.entity,
+    state: null,
+    actor,
+    redacts: targetSeq,
+    authority,
+    reason,
+    fields: removed,
+  }, now ? { now } : {});
+}
+
+/**
+ * #681 — redact an ENTITY's content across the whole log, not one event.
+ *
+ * ⚠️ THIS IS THE ONE THAT ACTUALLY REMOVES THE CONTENT, and the spec's
+ * per-seq `redactEvent` alone does NOT. Versions-not-diffs means every event
+ * carries the FULL entity state, so a card edited three times after a name
+ * landed in its title holds that name in THREE events. Redacting the latest
+ * reports success and leaves two copies on disk — a redaction that looks
+ * complete and is not, which for this op is the worst available failure.
+ * Measured on a fixture before it was written, not reasoned about.
+ *
+ * Returns { markers, seqs, scanned, removedValues } — `removedValues` being the
+ * distinct strings actually overwritten, so the caller can go looking for them
+ * ELSEWHERE. See `findCarriers`: this function is entity-scoped by design, and
+ * entity-scoped is narrower than "the string is gone".
+ */
+export function redactEntityEvents(dir, { kind, id, fields, actor, authority, reason = null }) {
+  if (!Array.isArray(fields) || fields.length === 0) {
+    throw new Error('redaction must name the fields it removes');
+  }
+  // Snapshot the targets FIRST: each redaction appends a marker, so scanning
+  // and rewriting in one pass would walk over a growing log.
+  const targets = readEvents(dir)
+    .filter((e) => e.op !== 'redact'
+      && e.entity?.kind === kind && String(e.entity?.id) === String(id)
+      && e.state && typeof e.state === 'object'
+      // "still CARRIES content", not "has the key". An already-redacted field
+      // keeps its key holding the marker, so a hasOwnProperty test re-targets
+      // events it has already cleaned — burning a seq and appending a marker
+      // per run. This predicate is what makes the sweep idempotent.
+      && fields.some((f) => Object.prototype.hasOwnProperty.call(e.state, f)
+        && e.state[f] !== REDACTION_MARKER))
+    .map((e) => e.seq);
+
+  // Capture what we are about to destroy, so the caller can hunt for copies of
+  // it in entities this sweep will never touch.
+  const removedValues = new Set();
+  const pre = readEvents(dir);
+  for (const seq of targets) {
+    const ev = pre.find((e) => e.seq === seq);
+    for (const f of fields) {
+      const v = ev?.state?.[f];
+      if (typeof v === 'string' && v && v !== REDACTION_MARKER) removedValues.add(v);
+    }
+  }
+
+  const markers = targets.map((seq) => redactEvent(dir, seq, { actor, authority, fields, reason }));
+  return {
+    markers, seqs: targets, scanned: readEvents(dir).length, removedValues: [...removedValues],
+  };
+}
+
+/**
+ * #681 (verification finding) — where ELSE do these strings live?
+ *
+ * ⚠️ THE SWEEP IS ENTITY-SCOPED AND "THE STRING IS GONE" IS NOT. In this room
+ * posts quote cards constantly, so a name in a card's title is very likely also
+ * in a commons post about that card. Redacting the card cleans the card, the
+ * entity-scoped verify reports CLEAN, and the string survives in the post. An
+ * emergency operator's actual goal is the second thing, not the first.
+ *
+ * This was caught in verification and not by the tests, because the sweep test
+ * asserts absence from the whole log but its fixture only ever plants the
+ * content in ONE entity — the assertion was true and vacuous. A plant measures
+ * recall of what you planted; it is blind to the carrier class you didn't.
+ *
+ * REPORTS ONLY — never redacts. A different entity is a different decision and
+ * a different invocation, so scoping stays explicit. Returns LOCATIONS ONLY and
+ * never the matched text: re-emitting the secret to announce the secret is the
+ * one thing this whole card exists to prevent.
+ */
+export function findCarriers(dir, values, { excludeSeqs = [] } = {}) {
+  const skip = new Set(excludeSeqs);
+  const needles = (values || []).filter((v) => typeof v === 'string' && v);
+  if (!needles.length) return [];
+  const out = [];
+  for (const ev of readEvents(dir)) {
+    if (skip.has(ev.seq) || ev.op === 'redact' || !ev.state) continue;
+    for (const [field, v] of Object.entries(ev.state)) {
+      if (typeof v === 'string' && needles.some((n) => v.includes(n))) {
+        out.push({ seq: ev.seq, kind: ev.entity?.kind, id: ev.entity?.id, field });
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * #681 item 5 — RECORD a redaction that was performed by other means, without
+ * rewriting anything. For #680: the removal was done by hand under principal
+ * direction before this tool existed, so the content is already gone and only
+ * the audit event is missing. Running the rewrite path over it would replace a
+ * hand-written marker naming the direction and date with a bare `[redacted]` —
+ * losing information in the name of recording it.
+ *
+ * ⚠️ THE REFUSAL IS THE WHOLE POINT. A mode that appends "content was removed"
+ * without checking is a way to put a LIE in the append-only record — and a
+ * confident one, since a redact event is exactly what a reader would trust. So
+ * this refuses unless the target's named fields already hold a redaction
+ * marker. You cannot use it to claim a removal that did not happen.
+ *
+ * That guard is why this is a separate function and not a flag on redactEvent:
+ * the two have OPPOSITE preconditions. The rewrite path requires the content to
+ * be PRESENT; this requires it to be GONE.
+ */
+export function recordRedaction(dir, targetSeq, { actor, authority, fields, reason = null, now = null } = {}) {
+  if (typeof authority !== 'string' || !authority.trim()) {
+    throw new Error('recording a redaction requires an explicit authority citation — #642 R8');
+  }
+  if (typeof actor !== 'string' || !actor.trim()) throw new Error('recording a redaction requires an actor');
+  if (!Array.isArray(fields) || fields.length === 0) {
+    throw new Error('recording a redaction must name the fields that were removed');
+  }
+
+  const target = readEvents(dir).find((e) => e.seq === targetSeq);
+  if (!target) throw new Error(`cannot record: no event with seq ${targetSeq}`);
+  if (target.op === 'redact') throw new Error(`cannot record against seq ${targetSeq}: it is already a redact event`);
+
+  for (const f of fields) {
+    const v = target.state?.[f];
+    if (typeof v !== 'string' || !v.startsWith(REDACTION_MARKER_PREFIX)) {
+      throw new Error(
+        `refusing to record a redaction of seq ${targetSeq}.${f}: that field does not hold a `
+        + 'redaction marker, so the content was NOT removed. Recording it would put a false '
+        + 'removal in the permanent record. Use redactEvent/redactEntityEvents to actually remove it.',
+      );
+    }
+  }
+
+  return appendEvent(dir, {
+    op: 'redact',
+    entity: target.entity,
+    state: null,
+    actor,
+    redacts: targetSeq,
+    authority,
+    reason,
+    fields,
+  }, now ? { now } : {});
 }
 
 /** Read events in seq order. `sinceSeq` is exclusive; `limit` bounds the count. */
@@ -165,6 +420,15 @@ export function oldestRetainedAt(dir) {
 export function replay(genesis, events) {
   const board = structuredClone(genesis);
   for (const ev of events) {
+    // #681: the redact MARKER is administrative — it describes a removal that
+    // has already been applied to the target event in place, and carries no body
+    // of its own. Projecting it would append a null-bodied phantom.
+    //
+    // ⚠️ This is NOT the forbidden "skip-based replay". That hazard is skipping
+    // the REDACTED TARGET (which resurrects its predecessor); this skips the
+    // MARKER. Two different events, and conflating them is how the resurrection
+    // bug gets reintroduced as a cleanup.
+    if (ev.op === 'redact') continue;
     const key = COLLECTION[ev.entity?.kind];
     if (!key) continue;                       // wiki has no board collection yet
     if (!Array.isArray(board[key])) board[key] = [];

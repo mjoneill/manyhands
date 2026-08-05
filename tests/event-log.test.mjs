@@ -81,8 +81,13 @@ test('#669 validation failure appends NOTHING — the log is untouched', () => {
   assert.equal(nextSeq(dir), 2, 'a rejected event must not burn a seq');
 });
 
-test('#669 the op vocabulary is CLOSED and redact is absent in slice 1', () => {
-  assert.deepEqual([...EVENT_OPS].sort(), ['create', 'delete', 'post', 'update']);
+test('#669 the op vocabulary is CLOSED — #681 added redact, and nothing else since', () => {
+  // Slice 1 asserted `redact` ABSENT, deliberately pinning its own boundary; the
+  // op arrived with #681 under the #642 R8 ruling, so this test failing was the
+  // intended signal, not a regression. The control that matters is unchanged: an
+  // op outside this set is a rejected write, so growing the list stays a decision
+  // someone makes on purpose rather than a thing that drifts.
+  assert.deepEqual([...EVENT_OPS].sort(), ['create', 'delete', 'post', 'redact', 'update']);
 });
 
 // ── 3. append-only, full state, one line per event ────────────────────────
