@@ -235,6 +235,93 @@ export function redactEvent(dir, targetSeq, { actor, authority, fields, reason =
 }
 
 /**
+ * #691 — SUBSTRING redaction. The op #681's first real request actually needed.
+ *
+ * #681 removes whole FIELDS. Its first live use was *"change the name"* — three
+ * characters inside a 4,326-character body. `redactEvent` would have destroyed
+ * the entire post to remove them, and `recordRedaction` refuses because a name
+ * swap leaves ordinary prose behind. So it was done BY HAND under CAS, which is
+ * the thing #681 existed to abolish.
+ *
+ * ⚠️ THE FIELD OP'S BLAST RADIUS RUNS BACKWARDS: the more surgical the request,
+ * the more collateral damage. That inversion is the defect this closes.
+ *
+ * ⚠️ THE RECEIPT ASSERTS THE SWAP COUNT, NEVER ABSENCE. A field redaction can
+ * honestly claim "the field no longer holds it" — the field is a marker. A
+ * substitution leaves prose, so absence is not establishable at this
+ * granularity, and claiming it would be the #681 vacuous-assertion failure one
+ * level down. The op returns what it did: N swaps, in this field, to this
+ * replacement.
+ *
+ * ⚠️ AND THE AUDIT EVENT NAMES WHAT IT PUT, NEVER WHAT IT TOOK. The design note
+ * for this card proposed recording `old→new` at character granularity. That
+ * would preserve the removed text inside the redact event — the precise thing
+ * the op exists to remove. `replacement` is recorded; the original never is.
+ */
+export function redactSubstring(dir, targetSeq, {
+  field, find, replace, actor, authority, reason = null, now = null,
+} = {}) {
+  if (typeof authority !== 'string' || !authority.trim()) {
+    throw new Error('substring redaction requires an explicit authority citation (who ordered it) — #642 R8');
+  }
+  if (typeof actor !== 'string' || !actor.trim()) throw new Error('substring redaction requires an actor');
+  if (typeof field !== 'string' || !field) throw new Error('substring redaction must name a field');
+  if (typeof replace !== 'string') throw new Error('substring redaction must name a replacement string');
+  // A non-global regex would silently replace only the first occurrence — a
+  // partial redaction reporting success, which is the failure this op is for.
+  const re = find instanceof RegExp
+    ? (find.flags.includes('g') ? find : new RegExp(find.source, `${find.flags}g`))
+    : new RegExp(String(find).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
+
+  let file = null; let lines = null; let idx = -1; let target = null;
+  for (const f of segments(dir)) {
+    const raw = readFileSync(join(dir, f), 'utf8').split('\n');
+    const at = raw.findIndex((l) => {
+      if (!l.trim()) return false;
+      try { return JSON.parse(l)?.seq === targetSeq; } catch { return false; }
+    });
+    if (at >= 0) { file = f; lines = raw; idx = at; target = JSON.parse(raw[at]); break; }
+  }
+  if (!target) throw new Error(`cannot redact: no event with seq ${targetSeq}`);
+  if (target.op === 'redact') {
+    throw new Error(`cannot redact seq ${targetSeq}: it is already a redact event — it carries no content to substitute`);
+  }
+
+  const before = target.state?.[field];
+  if (typeof before !== 'string') {
+    throw new Error(`cannot substitute in seq ${targetSeq}.${field}: it is not a string (${typeof before})`);
+  }
+
+  // COUNT FIRST, REFUSE ON ZERO. A substitution that matched nothing changed
+  // nothing — and reporting success would close an incident that is still open.
+  const swaps = (before.match(re) || []).length;
+  if (swaps === 0) {
+    throw new Error(`refusing to record a redaction of seq ${targetSeq}.${field}: the pattern matched nothing, so nothing was removed`);
+  }
+
+  target.state[field] = before.replace(re, replace);
+  lines[idx] = JSON.stringify(target);
+  writeFileSync(join(dir, file), lines.join('\n'), 'utf8');
+
+  const ev = appendEvent(dir, {
+    op: 'redact',
+    entity: target.entity,
+    state: null,
+    actor,
+    redacts: targetSeq,
+    authority,
+    reason,
+    fields: [field],
+  }, now ? { now } : {});
+  // Carried on the stored event by appendEvent's redact branch would require a
+  // wider contract; these two are the receipt's own assertions and belong with
+  // the returned value the caller reports from.
+  ev.swaps = swaps;
+  ev.replacement = replace;
+  return ev;
+}
+
+/**
  * #681 — redact an ENTITY's content across the whole log, not one event.
  *
  * ⚠️ THIS IS THE ONE THAT ACTUALLY REMOVES THE CONTENT, and the spec's

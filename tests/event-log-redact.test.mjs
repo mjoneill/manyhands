@@ -16,7 +16,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  appendEvent, readEvents, replay, redactEvent, redactEntityEvents, recordRedaction,
+  appendEvent, readEvents, replay, redactEvent, redactEntityEvents, recordRedaction, redactSubstring,
   findCarriers, REDACTION_MARKER,
 } from '../core/event-log.mjs';
 
@@ -365,4 +365,182 @@ test('#681 a since-cursor sees the FACT of the redaction, never its content', ()
     'a returning seat learns that seq 1 was redacted — enough to invalidate a cached copy');
   assert.ok(!JSON.stringify(served).includes('a real name'));
   assert.equal(marker.seq, 2);
+});
+
+// ── #691: SUBSTRING redaction — the op the first real request needed ──────
+//
+// #681 shipped FIELD-granular redaction. Its first live request was "change
+// the name" — three characters inside a 4,326-char body. redactEvent would
+// have replaced the whole body to remove them; recordRedaction refuses because
+// a name swap leaves ordinary prose. So the operation was done BY HAND under
+// CAS, which is what #681 existed to abolish.
+//
+// ⚠️ The blast radius runs BACKWARDS in the field-granular op: the more
+// surgical the request, the more collateral damage. That is the defect.
+
+test('#691 replaces every occurrence in the named field and leaves the rest byte-identical', () => {
+  const dir = tmp();
+  const body = 're the card: Ali said X, and Ali said Y. Unrelated tail stays.';
+  appendEvent(dir, {
+    op: 'post', entity: { kind: 'conversation', id: 'p1' },
+    state: { id: 'p1', body, author: 'bex', extra: 'untouched' }, actor: 'bex',
+  });
+
+  const r = redactSubstring(dir, 1, {
+    field: 'body', find: /\bAli\b/g, replace: 'Franklin Pomblerquest',
+    actor: 'ada', authority: 'the principal, direct instruction',
+  });
+
+  assert.equal(r.swaps, 2, 'both occurrences replaced, and the count is reported');
+  const ev = readEvents(dir).find((e) => e.seq === 1);
+  assert.ok(!/\bAli\b/.test(ev.state.body), 'the string is gone from the field');
+  assert.match(ev.state.body, /Franklin Pomblerquest said X, and Franklin Pomblerquest said Y/);
+  assert.match(ev.state.body, /Unrelated tail stays\.$/, 'the rest of the body survives verbatim');
+  assert.equal(ev.state.extra, 'untouched', 'unnamed fields are not touched — this is surgery');
+  assert.equal(ev.state.author, 'bex', 'authorship survives; the content was the secret');
+  assert.equal(ev.op, 'post', 'the original op stands');
+  assert.equal(ev.seq, 1, 'seq preserved — renumbering would break every live cursor');
+});
+
+test('#691 REFUSES on zero matches — a swap that matched nothing removed nothing', () => {
+  // The #681 sweep lesson one level down: an op that reports success while
+  // changing nothing is worse than an error, because it closes the incident.
+  const dir = tmp();
+  appendEvent(dir, card('c1', { id: 'c1', title: 'nothing to see' }));
+  assert.throws(
+    () => redactSubstring(dir, 1, {
+      field: 'title', find: /\bAbsent\b/g, replace: 'X',
+      actor: 'ada', authority: 'the principal',
+    }),
+    /matched nothing/i,
+    'zero matches must refuse, not silently succeed',
+  );
+  // POSITIVE CONTROL: a pattern that DOES match proceeds.
+  const ok = redactSubstring(dir, 1, {
+    field: 'title', find: /\bsee\b/g, replace: 'X',
+    actor: 'ada', authority: 'the principal',
+  });
+  assert.equal(ok.swaps, 1);
+});
+
+test('#691 the audit event records the COUNT and the replacement — never the removed text', () => {
+  // ⚠️ CORRECTION to the design note, which said the payload names "old→new".
+  // Recording OLD would preserve the secret inside the redact event — exactly
+  // what the op exists to remove. The event may name what it PUT, never what
+  // it TOOK.
+  const dir = tmp();
+  const secret = 'Ali';
+  appendEvent(dir, {
+    op: 'post', entity: { kind: 'conversation', id: 'p1' },
+    state: { id: 'p1', body: `x ${secret} y` }, actor: 'bex',
+  });
+
+  const r = redactSubstring(dir, 1, {
+    field: 'body', find: /\bAli\b/g, replace: 'PLACEHOLDER',
+    actor: 'ada', authority: 'the principal, direct instruction', reason: 'third-party name',
+  });
+
+  assert.equal(r.op, 'redact');
+  assert.equal(r.redacts, 1);
+  assert.equal(r.swaps, 1, 'the receipt asserts the SWAP COUNT');
+  assert.equal(r.replacement, 'PLACEHOLDER');
+  assert.equal(r.state, null, 'the audit event carries no body');
+  assert.equal(r.authority, 'the principal, direct instruction');
+
+  const whole = JSON.stringify(readEvents(dir));
+  assert.ok(!whole.includes(secret),
+    'THE LOAD-BEARING ASSERTION: the removed text must be absent from the ENTIRE log, '
+    + 'including the audit event that records its removal');
+});
+
+test('#691 a substitution CANNOT honestly assert absence — only the swap count', () => {
+  // The field op can claim "the field no longer holds it". A substitution
+  // leaves prose, so absence is not establishable at field granularity.
+  // The receipt must therefore claim exactly what the op established.
+  const dir = tmp();
+  appendEvent(dir, {
+    op: 'post', entity: { kind: 'conversation', id: 'p1' },
+    state: { id: 'p1', body: 'Ali and also alison' }, actor: 'bex',
+  });
+  const r = redactSubstring(dir, 1, {
+    field: 'body', find: /\bAli\b/g, replace: 'X',
+    actor: 'ada', authority: 'the principal',
+  });
+  assert.equal(r.swaps, 1, 'word-boundary match: "alison" is NOT a match');
+  const ev = readEvents(dir).find((e) => e.seq === 1);
+  assert.match(ev.state.body, /alison/, 'a substring that was not the target survives');
+  assert.equal(Object.prototype.hasOwnProperty.call(r, 'absent'), false,
+    'the receipt must NOT carry an absence claim it cannot support');
+});
+
+test('#691 replay reproduces the POST-substitution store, and the marker is inert', () => {
+  const dir = tmp();
+  appendEvent(dir, {
+    op: 'post', entity: { kind: 'conversation', id: 'p1' },
+    state: { id: 'p1', body: 'Ali was here', author: 'bex' }, actor: 'bex',
+  });
+  redactSubstring(dir, 1, {
+    field: 'body', find: /\bAli\b/g, replace: 'X',
+    actor: 'ada', authority: 'the principal',
+  });
+  const rebuilt = replay({ conversations: [] }, readEvents(dir));
+  assert.equal(rebuilt.conversations.length, 1, 'the redact marker must not append a phantom');
+  assert.equal(rebuilt.conversations[0].body, 'X was here');
+  assert.equal(rebuilt.conversations[0].author, 'bex');
+});
+
+test('#691 refuses the same guards as the field op: authority, absent target, redact target', () => {
+  const dir = tmp();
+  appendEvent(dir, card('c1', { id: 'c1', title: 'Ali' }));
+  const base = { field: 'title', find: /Ali/g, replace: 'X', actor: 'ada' };
+  assert.throws(() => redactSubstring(dir, 1, base), /authority/i,
+    'the one op where declaration alone must not suffice');
+  assert.throws(() => redactSubstring(dir, 99, { ...base, authority: 'p' }), /no event with seq 99/i);
+  const m = redactSubstring(dir, 1, { ...base, authority: 'the principal' });
+  assert.throws(() => redactSubstring(dir, m.seq, { ...base, authority: 'the principal' }),
+    /already a redact/i, 'a redact event carries no content to substitute');
+});
+
+test('#691 refuses a field that is absent or not a string', () => {
+  const dir = tmp();
+  appendEvent(dir, card('c1', { id: 'c1', title: 'Ali', count: 7 }));
+  const base = { find: /Ali/g, replace: 'X', actor: 'ada', authority: 'the principal' };
+  assert.throws(() => redactSubstring(dir, 1, { ...base, field: 'nope' }), /not a string/i);
+  assert.throws(() => redactSubstring(dir, 1, { ...base, field: 'count' }), /not a string/i);
+});
+
+test('#691 a NON-GLOBAL regex still replaces every occurrence — the guard, wired', () => {
+  // Caught by mutation: the `g`-flag normalisation had no failing case, so the
+  // guard could have been deleted with a green suite. A non-global regex makes
+  // String.replace stop after the first hit — a PARTIAL redaction reporting
+  // success, which is the exact failure this op exists to prevent.
+  const dir = tmp();
+  appendEvent(dir, {
+    op: 'post', entity: { kind: 'conversation', id: 'p1' },
+    state: { id: 'p1', body: 'Ali here and Ali there' }, actor: 'bex',
+  });
+  const r = redactSubstring(dir, 1, {
+    field: 'body', find: /\bAli\b/, replace: 'X',        // ← NO /g, deliberately
+    actor: 'ada', authority: 'the principal',
+  });
+  assert.equal(r.swaps, 2, 'both occurrences counted despite the missing /g');
+  const ev = readEvents(dir).find((e) => e.seq === 1);
+  assert.equal(ev.state.body, 'X here and X there', 'and both actually replaced');
+  assert.ok(!/Ali/.test(ev.state.body));
+});
+
+test('#691 a plain STRING pattern is escaped, not treated as a regex', () => {
+  // A caller passing "a.b" must not match "axb". Regex-injection through a
+  // redaction pattern would remove content nobody asked to remove.
+  const dir = tmp();
+  appendEvent(dir, {
+    op: 'post', entity: { kind: 'conversation', id: 'p1' },
+    state: { id: 'p1', body: 'keep axb, remove a.b' }, actor: 'bex',
+  });
+  const r = redactSubstring(dir, 1, {
+    field: 'body', find: 'a.b', replace: 'X',
+    actor: 'ada', authority: 'the principal',
+  });
+  assert.equal(r.swaps, 1, 'only the literal "a.b" matches');
+  assert.equal(readEvents(dir).find((e) => e.seq === 1).state.body, 'keep axb, remove X');
 });
