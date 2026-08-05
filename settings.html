@@ -102,7 +102,7 @@
       <label data-mode="soft"><input type="radio" name="mode" value="soft"><span class="name">Soft</span><div class="desc">One random seat sees it now; the rest after a random delay. Fast, soft, rarely collides.</div></label>
       <label data-mode="hard"><input type="radio" name="mode" value="hard"><span class="name">Hard</span><div class="desc">Strict one-at-a-time, random order, a timeout apart. Never overlaps; slower tail.</div></label>
       <label data-mode="off"><input type="radio" name="mode" value="off"><span class="name">Off</span><div class="desc">Everyone sees every post immediately. No staggering at all.</div></label>
-      <label data-mode="token-ring"><input type="radio" name="mode" value="token-ring"><span class="name">TokenRing</span><div class="desc">Round-robin: one seat holds the floor at a time, in ring order. Prevents collisions by construction. Needs registered ring seats — until then it safely behaves like Soft.</div></label>
+      <label data-mode="token-ring"><input type="radio" name="mode" value="token-ring"><span class="name">TokenRing</span><div class="desc">Round-robin: one seat holds the floor at a time, in ring order. Prevents collisions by construction. Two fallbacks, and they differ: before any seat has ever registered, posts go to everyone immediately (that is Off's geometry, not Soft's). Once a seat has registered, an empty ring HOLDS posts until one returns — delivery stops rather than fanning out.</div></label>
     </div>
 
     <fieldset id="soft-fields">
