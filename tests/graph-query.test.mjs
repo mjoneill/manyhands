@@ -110,6 +110,14 @@ test('POST /api/graph serves the replica and reflects a write made moments befor
     assert.equal(after.returned, 1, 'the replica rebuilt after the write');
     assert.equal(after.rows[0].who, 'person:ada');
 
+    // the experiment's instrument leaves a receipt: every query logged with its seat
+    const fsm = await import('node:fs');
+    const pm = await import('node:path');
+    const logFile = pm.join(pm.dirname(srv.boardFile), 'graph-query-log.jsonl');
+    const entries = fsm.readFileSync(logFile, 'utf8').trim().split('\n').map(JSON.parse);
+    assert.ok(entries.length >= 2, 'both queries logged');
+    assert.equal(entries[0].by, 'ada', 'the declared seat rides the log');
+
     const refused = await fetch(`${srv.baseUrl}/api/graph`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query: 'DELETE WHERE { ?s ?p ?o }' }),
@@ -142,4 +150,37 @@ test('MCP graph_query round-trips a traversal with prefixed results', async () =
     await mcp.stop();
     await rest.stop();
   }
+});
+
+// ── the replica must not lie: parity + completeness invariants ─────────────
+// The graph is now an INSTRUMENT other seats verify with. A projection bug
+// (a dropped predicate, a missed entity class) would serve confidently wrong
+// answers — a lying instrument is worse than none. These pin agreement with
+// the document it projects.
+
+test('PARITY: entity counts and spot fields agree between the document and the replica', () => {
+  const d = doc();
+  const store = buildGraphStore(d);
+  const count = (type) => queryGraph(store, `SELECT (COUNT(?s) AS ?n) WHERE { ?s a ${type} . }`).rows[0].n;
+  assert.equal(Number(count('schema:CreativeWork')), d['@graph'].filter((e) => e['@type'] === 'CreativeWork').length);
+  assert.equal(Number(count('schema:Comment')), d['@graph'].filter((e) => e['@type'] === 'Comment').length);
+  assert.equal(Number(count('schema:Person')), d['@graph'].filter((e) => e['@type'] === 'Person').length);
+  assert.equal(Number(count('scrum:Column')), d['@graph'].filter((e) => e['@type'] === 'scrum:Column').length);
+  // spot fields: every card's title round-trips into the graph
+  const titles = queryGraph(store, `SELECT ?t WHERE { ?c a schema:CreativeWork ; schema:name ?t . }`).rows.map((r) => r.t).sort();
+  assert.deepEqual(titles, ['alpha', 'beta', 'gamma']);
+  // every relationship edge in the doc exists as a triple
+  const edges = queryGraph(store, `SELECT ?s ?o WHERE { ?s scrum:relatedTo ?o . }`).rows.length;
+  assert.equal(edges, 2, 'both relatedTo edges projected');
+});
+
+test('COMPLETENESS: no entity class in the document goes silently unprojected', () => {
+  const d = doc();
+  d['@graph'].push({ '@type': 'scrum:FutureThing', '@id': 'ft-1', name: 'unmodelled' });
+  const store = buildGraphStore(d);
+  // every @graph entity must be a subject in the store, even if only minimally —
+  // an entity class the projection doesn't know may NOT simply vanish.
+  const subjects = new Set(queryGraph(store, `SELECT DISTINCT ?s WHERE { ?s ?p ?o . }`, { limit: 1000 }).rows.map((r) => r.s));
+  assert.ok([...subjects].some((s) => s.endsWith('ft-1')),
+    'an unknown entity class must still surface as a typed subject, not vanish');
 });

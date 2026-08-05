@@ -19,6 +19,7 @@
  */
 
 import oxigraph from 'oxigraph';
+import { REL_TYPES } from './jsonld.mjs';
 
 export const IRI = Object.freeze({
   entity: 'https://scrumboard.local/entity/',
@@ -70,7 +71,8 @@ export function buildGraphStore(doc) {
       if (e.claimedBy) add(s, nn(S + 'claimedBy'), personRef(e.claimedBy));
       for (const a of e.assignees || []) if (a && a !== 'unassigned') add(s, nn(S + 'assignee'), personRef(a));
       for (const l of e.labels || []) add(s, nn(S + 'label'), lit(l));
-      for (const rt of ['relatedTo', 'blockedBy', 'supersedes', 'derivedFrom', 'supersededBy']) {
+      // ONE list, imported — a second copy here is the #618 drift shape.
+      for (const rt of REL_TYPES) {
         for (const r of e[rt] || []) if (typeof r === 'string') add(s, nn(S + rt), nn(E + r));
       }
     } else if (t === 'Comment') {
@@ -93,6 +95,17 @@ export function buildGraphStore(doc) {
       if (e.identifier) add(s, nn(SC + 'identifier'), lit(e.identifier));
       if (e.name) add(s, nn(SC + 'name'), lit(e.name));
       if (e['scrum:order'] != null) add(s, nn(S + 'order'), lit(e['scrum:order']));
+    } else if (e && e['@id']) {
+      // An entity class this projection doesn't know yet (wiki pages are
+      // already in the event vocabulary; more will come). It must NOT vanish:
+      // a query that can't see an entity class serves silently partial answers,
+      // and nothing looks identical to "nothing exists". Surface it minimally —
+      // typed, named, findable — so its absence from richer queries is
+      // DISCOVERABLE rather than invisible. Pinned by the completeness test.
+      const s = nn(String(e['@id']).startsWith('http') ? e['@id'] : E + e['@id']);
+      add(s, A, nn(typeof t === 'string' && t.startsWith('scrum:') ? S + t.slice(6) : SC + (t || 'Thing')));
+      if (e.identifier != null) add(s, nn(SC + 'identifier'), lit(e.identifier));
+      if (e.name != null) add(s, nn(SC + 'name'), lit(e.name));
     }
   }
   return store;

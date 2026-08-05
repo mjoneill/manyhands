@@ -77,7 +77,7 @@ const CONTEXT = {
 // the same facts as first-class properties and @id edges. Serialization is the
 // one place that holds the whole graph, so it is the one place a shortId↔@id
 // conversion can live without a second copy that drifts.
-const REL_TYPES = ['relatedTo', 'blockedBy', 'supersedes', 'derivedFrom', 'supersededBy'];
+export const REL_TYPES = ['relatedTo', 'blockedBy', 'supersedes', 'derivedFrom', 'supersededBy'];
 const FACET_TO_PROP = {
   column: 'column', assignees: 'assignees', labels: 'labels', claimedBy: 'claimedBy',
   priority: 'scrum:priority', order: 'scrum:order', for: 'scrum:for',
