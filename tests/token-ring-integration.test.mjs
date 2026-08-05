@@ -186,3 +186,63 @@ test('fenced timer: a silent holder times out, the ring RECOVERS (no wedge), lif
     await pair.stop();
   }
 });
+
+// #712 — the third state, and the one with no coverage until now.
+//
+// broadcastTokenRing has three behaviours. Two were pinned; this one — armed,
+// then the ring empties — was not, and it is the one that STOPS DELIVERY
+// (mcp-server.mjs: R2 fail-closed, returns 0, nobody receives). Reconnect churn
+// empties a ring routinely, so this is not an exotic state.
+//
+// The trap this test is written against, recorded on #712: adding a test here
+// is easy, and adding a SECOND test that manufactures its own precondition is
+// just as easy. The file's :66 test asserts a fallback under a world where nothing
+// ever registers — it cannot fail. So this one carries a POSITIVE CONTROL: it
+// first proves a populated ring DOES deliver, through the same observation path,
+// before asserting that an emptied one does not. Without that, "nothing arrived"
+// is indistinguishable from "this harness never observes arrivals at all."
+test('armed, then the ring EMPTIES: delivery holds (fail-closed) — with a positive control that delivery is observable at all', async () => {
+  const pair = await startTokenRingPair();
+  const holder = await mcpSession(pair.mcp.mcpUrl);
+  const observer = await mcpSession(pair.mcp.mcpUrl);   // never registers — the fan-out detector
+  const holderStream = await openChannelStream(pair.mcp.mcpUrl, holder.sessionId);
+  const observerStream = await openChannelStream(pair.mcp.mcpUrl, observer.sessionId);
+  const post = (body) => fetch(`${pair.rest.baseUrl}/api/conversations`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ body, author: 'alex' }),
+  });
+  try {
+    const reg = await holder.rpc('scrum/session/register', { seatId: 'tester.sb', author: 'tester' });
+    assert.equal(reg.result.ok, true, `register succeeded: ${JSON.stringify(reg)}`);
+
+    // ── POSITIVE CONTROL ──────────────────────────────────────────────────
+    // Armed AND populated: a post must arrive. This is what makes the negative
+    // assertion below meaningful rather than vacuous.
+    assert.equal((await post('control post — the ring is populated')).status, 201);
+    const env = await holderStream.next('notifications/claude/channel');
+    assert.ok(env.params.content.includes('control post'),
+      'POSITIVE CONTROL: an armed, populated ring delivers — so this harness can observe delivery');
+
+    // ── empty the ring ────────────────────────────────────────────────────
+    // A DELETE closes the session, which fires transport.onclose, which releases
+    // the seat. Abandoning the stream would NOT do it — the session map only
+    // shrinks on a clean close.
+    await fetch(pair.mcp.mcpUrl, { method: 'DELETE', headers: { 'Mcp-Session-Id': holder.sessionId } });
+    assert.ok(await poll(() => /released on close/.test(pair.mcp.stdoutText())),
+      'the holder’s seat was released — the ring is now armed AND empty');
+
+    // ── the state under test ──────────────────────────────────────────────
+    assert.equal((await post('post into an emptied ring')).status, 201);
+    await new Promise((r) => setTimeout(r, 800));
+    const leaked = observerStream.messages.filter((m) => m.method === 'notifications/claude/channel');
+    assert.equal(leaked.length, 0,
+      'armed + empty ring must NOT fall back to fan-out — a transient empty ring would wake every seat during recovery');
+    assert.match(pair.mcp.stdoutText(), /R2 fail-closed/,
+      'and it took the fail-closed path specifically, not merely a silent drop');
+  } finally {
+    holderStream.close();
+    observerStream.close();
+    await pair.stop();
+  }
+});
