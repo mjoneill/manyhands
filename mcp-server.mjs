@@ -599,6 +599,36 @@ function buildMcpServer() {
     return jsonResult(await apiCall('GET', `/api/changes?${q}`));
   });
 
+  // ── #694 — graph_query: native graph traversal ────────────────────
+  mcp.registerTool('graph_query', {
+    description: 'Traverse the board as a GRAPH — one SPARQL query where composing card_list/'
+      + 'card_get calls would take five round-trips. Answers in ~2-20ms from an in-process '
+      + 'replica that is rebuilt after every write (never stale). READ-ONLY (SELECT or ASK); '
+      + 'bounded by default (LIMIT 100 injected, ceiling 1000, cuts confessed via truncated). '
+      + 'PREFIXES (pre-declared, never write them yourself): schema: (schema.org) · scrum: '
+      + '(board vocabulary) · entity: (cards+posts by uuid) · person: (seats by key) · '
+      + 'column: (columns by id). '
+      + 'SHAPES: cards are schema:CreativeWork with schema:identifier (shortId, quoted string), '
+      + 'schema:name, schema:text, schema:creator/scrum:assignee/scrum:claimedBy (person: IRIs), '
+      + 'scrum:column (column: IRI), scrum:priority/scrum:label/scrum:cardType (literals), and '
+      + 'edges scrum:relatedTo/blockedBy/supersedes/derivedFrom/supersededBy (entity: IRIs). '
+      + 'Posts are schema:Comment with schema:author, schema:about (the card), schema:text, '
+      + 'schema:dateCreated. People are schema:Person; columns are scrum:Column with scrum:order. '
+      + 'WORKED EXAMPLES — transitive neighborhood: SELECT DISTINCT ?n ?t WHERE { ?s '
+      + 'schema:identifier "642" . ?s (scrum:relatedTo|^scrum:relatedTo)+ ?n . ?n schema:name ?t } '
+      + '· blocked work with blocker state: SELECT ?t ?bt ?col WHERE { ?c scrum:blockedBy ?b ; '
+      + 'schema:name ?t . ?b schema:name ?bt ; scrum:column ?col } '
+      + '· who discusses whose work: SELECT ?a ?o (COUNT(*) AS ?n) WHERE { ?m schema:author ?a ; '
+      + 'schema:about ?card . ?card schema:creator ?o } GROUP BY ?a ?o ORDER BY DESC(?n)',
+    inputSchema: {
+      query: z.string().describe('SPARQL SELECT or ASK. Prefixes are pre-declared; results return prefixed short IRIs.'),
+      limit: z.number().int().min(1).optional().describe('Row bound (default 100, ceiling 1000); truncation is confessed'),
+      by: z.string().optional().describe('Your seat key — logged with the query (#654: usage is the experiment)'),
+    },
+  }, async ({ query, limit, by } = {}) => {
+    return jsonResult(await apiCall('POST', '/api/graph', { query, limit, by }));
+  });
+
   // ── Resources ─────────────────────────────────────────────────────
   mcp.registerResource('board-state', 'manyhands://board', {
     title: 'Current Board State',

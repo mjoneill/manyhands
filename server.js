@@ -40,6 +40,8 @@ import { buildTree, buildChildIndex } from './core/tree.mjs';
 import { buildLinkIndex } from './core/links.mjs';
 import { readConfig, writeConfig } from './channel-config.mjs';
 import { loadRoster, writeRoster, rosterFilePath } from './core/roster-config.mjs';
+import { buildGraphStore, queryGraph } from './core/graph-replica.mjs';
+import { domainToJsonLd } from './core/jsonld.mjs';
 import { deriveGraph, personByKey } from './core/people.mjs';
 import { queryCards } from './core/cards-query.mjs';
 import { queryChangesFromLog } from './core/changes-log-query.mjs';
@@ -573,6 +575,45 @@ function writeBoard(data, events) {
   // #686 — every server write is a ROSTERED save: Person nodes are
   // (re)materialized into @graph from this one authority on every write.
   saveDomain(BOARD_DATA_FILE, boardToDomain(data), { now: data.lastUpdated, roster: { seats: ROSTER } });
+  _graphDirty = true;   // #694 — the replica rebuilds lazily on next query
+}
+
+// ── #694 — the graph traversal replica ──────────────────────────────────────
+// In-process Oxigraph store projected from the DOCUMENT (the same bytes on
+// disk), rebuilt lazily after any write. Disposable by construction: nothing
+// writes through it, and boot starts dirty. Every query is LOGGED (#654's
+// principle made continuous): "does graph-native have pull" is answered by
+// this file, not by advocacy.
+let _graphStore = null;
+let _graphDirty = true;
+const GRAPH_QUERY_LOG = path.join(path.dirname(BOARD_DATA_FILE), 'graph-query-log.jsonl');
+
+async function handleGraphQuery(req, res) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    if (typeof body.query !== 'string' || !body.query.trim()) {
+      return sendJSON(res, 400, { error: 'body.query (SPARQL SELECT or ASK) is required' });
+    }
+    if (_graphDirty || !_graphStore) {
+      const t = performance.now();
+      _graphStore = buildGraphStore(domainToJsonLd(loadDomain(BOARD_DATA_FILE)));
+      _graphDirty = false;
+      console.error(`graph-replica: rebuilt ${_graphStore.size} triples in ${Math.round(performance.now() - t)}ms`);
+    }
+    const result = queryGraph(_graphStore, body.query, { limit: body.limit });
+    try {
+      fs.appendFileSync(GRAPH_QUERY_LOG, JSON.stringify({
+        at: new Date().toISOString(), by: (typeof body.by === 'string' && body.by) || null,
+        ms: result.ms, returned: result.returned ?? 0, truncated: !!result.truncated,
+        query: body.query.slice(0, 2000),
+      }) + '\n');
+    } catch { /* the log is telemetry, never a gate on the answer */ }
+    sendJSON(res, 200, result);
+  } catch (e) {
+    if (e.code === 'READ_ONLY' || e.code === 'EMPTY_QUERY') return sendJSON(res, 400, { error: e.message, code: e.code });
+    // a SPARQL parse error is the caller's to fix — teach, don't 500
+    return sendJSON(res, 400, { error: e.message, hint: 'SELECT/ASK SPARQL; prefixes schema:, scrum:, entity:, person:, column: are pre-declared' });
+  }
 }
 
 // Promise-chain mutex. All write paths run under this lock so two
@@ -1848,6 +1889,7 @@ async function handleUpdateNode(req, res, idOrShortId) {
 // ── Router: regex-based match against API_ROUTES ──
 const API_ROUTES = [
   { method: 'GET',    re: /^\/api\/changes$/,              fn: (req, res) => handleChanges(req, res) },
+  { method: 'POST',   re: /^\/api\/graph$/,                fn: (req, res) => handleGraphQuery(req, res) },
   { method: 'GET',    re: /^\/api\/board\/status$/,         fn: (req, res) => handleBoardStatus(req, res) },
   { method: 'GET',    re: /^\/api\/board$/,                fn: (req, res) => handleGetBoard(req, res) },
   { method: 'GET',    re: /^\/api\/roster$/,               fn: (req, res) => handleGetRoster(req, res) },
