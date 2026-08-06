@@ -119,7 +119,7 @@
     <fieldset id="token-ring-fields">
       <legend>TokenRing timings</legend>
       <div class="row"><label>Lease timeout</label><input type="number" id="tokenRingTimeout" min="90" max="1800" step="1"> <span class="unit">seconds (90–1800)</span></div>
-      <p class="live" style="margin-top:4px">A holder that doesn't respond within this window yields to the next seat (dead-seat recovery). Must exceed the ~60s wake debounce. Serialized delivery engages only once ring seats register; before that, this mode falls back to Soft and never silences the room.</p>
+      <p class="live" style="margin-top:4px">A holder that doesn't respond within this window yields to the next seat (dead-seat recovery). Must exceed the ~60s wake debounce. Serialized delivery engages once ring seats register. Before that, posts go to everyone immediately (Off's geometry, not Soft's). Once seats have registered, an empty ring HOLDS posts until one returns — delivery stops rather than fanning out.</p>
     </fieldset>
 
     <button id="save" class="btn">Save</button>
