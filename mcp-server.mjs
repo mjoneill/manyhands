@@ -846,13 +846,18 @@ function broadcastChannel(conversation) {
   //                                      Soft's; see broadcastTokenRing)
   //   nSeats === 0 &&  tokenRingArmed  → HOLD, return 0, NO fan-out — delivery stops
   // tokenRingArmed is a module-level latch, so its scope is ONE PROCESS: it starts
-  // false, is set true by the first registration (:1006), never clears while the
+  // false, is set true by the first registration (the `nSeats > 0` assignment in
+  // broadcastTokenRing — cited by symbol, not line: this comment's own insertion
+  // moved that write site from 1006 to 1012 in the commit that added this note,
+  // and a coordinate is a claim about a file's shape that any edit above it
+  // falsifies), never clears while the
   // process lives, and RESETS TO FALSE ON EVERY RESTART. So which branch you get is
   // not a property of the deployment, it is a property of the current run:
   //   after a restart, before any seat registers → never-armed → fan-out
   //   after the first registration               → armed → an empty ring HOLDS
   // Observed armed in production on 2026-08-06 (153 registrations logged, non-empty
-  // ring — see the block above :794); that is a dated observation, not a standing
+  // ring — see the #708 correction block above `const seatRegistry`); that is a
+  // dated observation, not a standing
   // state, and the restart window puts the process back in the other branch.
   // Once armed, flipping this mode CAN silence the room. That is deliberate: a
   // transient empty ring during reconnect churn must not wake every dormant seat.
