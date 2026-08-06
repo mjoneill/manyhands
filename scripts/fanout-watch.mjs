@@ -67,7 +67,13 @@ const unbound = Number(status.unbound ?? 0);
 const seatPart = status.binding === 'active'
   ? ` seats=[${seatNames.join(',')}] unbound=${unbound}`
   : '';
-console.log(`${now} receivers=${receivers} sessions=${sessions} floor=${FLOOR} mode=${mode} pending=${pending}${seatPart}`);
+// #713 — name the state file in the tick. Two seats independently mistook the
+// DEFAULT path (/tmp/…, a stale artifact of a hand-run three days earlier) for
+// the live one and read its mtime as a three-day monitoring outage; the plist
+// overrides SCRUM_FANOUT_STATE and the real file was seconds old. A default left
+// visible in source and never used in production is a booby-trap for whoever
+// finds it next. The tick now says which file it actually writes.
+console.log(`${now} receivers=${receivers} sessions=${sessions} floor=${FLOOR} mode=${mode} pending=${pending}${seatPart} state=${STATE_FILE}`);
 
 // State across ticks. THE FAULT IS A DELTA, NOT A LEVEL (review's correction,
 // 02:33Z, pre-first-exam): the 48-minute deafening that motivated this watch
