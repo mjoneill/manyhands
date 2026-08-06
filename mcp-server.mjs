@@ -845,10 +845,16 @@ function broadcastChannel(conversation) {
   //   nSeats === 0 && !tokenRingArmed  → fan-out to everyone (Off's geometry, not
   //                                      Soft's; see broadcastTokenRing)
   //   nSeats === 0 &&  tokenRingArmed  → HOLD, return 0, NO fan-out — delivery stops
-  // tokenRingArmed latches true the first time any seat registers and never clears
-  // for the life of the process. It is armed in production (153 registrations logged,
-  // non-empty ring — see the block above :794). So the fail-safe branch is the one we
-  // are NOT in, and flipping this mode CAN silence the room. That is deliberate: a
+  // tokenRingArmed is a module-level latch, so its scope is ONE PROCESS: it starts
+  // false, is set true by the first registration (:1006), never clears while the
+  // process lives, and RESETS TO FALSE ON EVERY RESTART. So which branch you get is
+  // not a property of the deployment, it is a property of the current run:
+  //   after a restart, before any seat registers → never-armed → fan-out
+  //   after the first registration               → armed → an empty ring HOLDS
+  // Observed armed in production on 2026-08-06 (153 registrations logged, non-empty
+  // ring — see the block above :794); that is a dated observation, not a standing
+  // state, and the restart window puts the process back in the other branch.
+  // Once armed, flipping this mode CAN silence the room. That is deliberate: a
   // transient empty ring during reconnect churn must not wake every dormant seat.
   //
   // The clause this replaces carried an expiry — "before the registration seam ships"
