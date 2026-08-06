@@ -836,9 +836,24 @@ function tokenRingTimeoutMs() {
 // session count (for logging).
 function broadcastChannel(conversation) {
   // #410 — token-ring mode serializes delivery through the ring; off/soft/hard use
-  // the unchanged fan-out. The token-ring path itself fails SAFE to fan-out when no
-  // seats are registered (see broadcastTokenRing), so flipping the mode can never
-  // silence the room before the registration seam ships.
+  // the unchanged fan-out.
+  //
+  // ⚠️ #721 — the empty-ring fallback is TWO behaviours, not one, and which you get
+  // depends on a latch. Written as conditions because the previous wording ("fails
+  // SAFE to fan-out when no seats are registered") stated only the first of them and
+  // read as a guarantee covering both:
+  //   nSeats === 0 && !tokenRingArmed  → fan-out to everyone (Off's geometry, not
+  //                                      Soft's; see broadcastTokenRing)
+  //   nSeats === 0 &&  tokenRingArmed  → HOLD, return 0, NO fan-out — delivery stops
+  // tokenRingArmed latches true the first time any seat registers and never clears
+  // for the life of the process. It is armed in production (153 registrations logged,
+  // non-empty ring — see the block above :794). So the fail-safe branch is the one we
+  // are NOT in, and flipping this mode CAN silence the room. That is deliberate: a
+  // transient empty ring during reconnect churn must not wake every dormant seat.
+  //
+  // The clause this replaces carried an expiry — "before the registration seam ships"
+  // — and the seam shipped. A comment in the present tense is a measurement with no
+  // timestamp; these are conditions so they cannot quietly expire the same way.
   const mode = CHANNEL_STAGGER_OFF ? 'off' : (readConfig().mode || 'off');
   return mode === 'token-ring' ? broadcastTokenRing(conversation) : broadcastFanout(conversation);
 }
