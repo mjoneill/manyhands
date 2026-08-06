@@ -49,6 +49,15 @@ try {
 
 const receivers = Number(status.receivers ?? NaN);
 const sessions = Number(status.sessions ?? NaN);
+// #713 — `mode` and `pending` are in the object this watch already fetches, and
+// it printed neither. Delivery being SLOW and delivery being BROKEN present to a
+// seat identically: messages don't arrive. Measured 2026-08-06 — two posts landed
+// ~12m17s and ~12m00s late with `mode=hard, pending=22`; nothing was lost, the
+// queue was draining under hard mode's serialized 120s lease. With these two
+// fields on screen that reads as a queue at a glance. Without them it reads as a
+// fault, and the seat escalates — which is the report this watch exists to prevent.
+const mode = String(status.mode ?? 'unknown');
+const pending = Number(status.pending ?? 0);
 // #703 — connection identity: name the bound seats and COUNT the unbound in
 // this watch's own output. Fail-open's counterweight is visibility HERE (the
 // room-vetted Q1 ruling) — an unbound connection in a log line nobody reads
@@ -58,7 +67,7 @@ const unbound = Number(status.unbound ?? 0);
 const seatPart = status.binding === 'active'
   ? ` seats=[${seatNames.join(',')}] unbound=${unbound}`
   : '';
-console.log(`${now} receivers=${receivers} sessions=${sessions} floor=${FLOOR}${seatPart}`);
+console.log(`${now} receivers=${receivers} sessions=${sessions} floor=${FLOOR} mode=${mode} pending=${pending}${seatPart}`);
 
 // State across ticks. THE FAULT IS A DELTA, NOT A LEVEL (review's correction,
 // 02:33Z, pre-first-exam): the 48-minute deafening that motivated this watch
@@ -132,7 +141,8 @@ if (st.pendingFrom != null && receivers >= st.pendingFrom) {
   const inCooldown = deepest != null && receivers >= deepest;
   if (!st.warned && !inCooldown) {                      // drop persisted a second tick
     warnBody = `⚠️ fanout watch: receivers dropped ${st.pendingFrom} → ${receivers} and stayed there `
-      + `across two ticks (${st.pendingFrom - receivers} seat stream(s) gone; ${sessions} sessions live). `
+      + `across two ticks (${st.pendingFrom - receivers} seat stream(s) gone; ${sessions} sessions live; `
+      + `mode=${mode}, pending=${pending}). `
       + `Seats without a stream receive NOTHING — no queue, no replay (#624). If you can read this you're `
       + `fine; a seat quiet since the last restart may be deaf — any single MCP tool call re-registers it. `
       + `changes_since covers whatever was missed. (This signature now mutes for `
