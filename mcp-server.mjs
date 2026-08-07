@@ -1266,12 +1266,43 @@ const httpServer = http.createServer(async (req, res) => {
       const m = sessionMeta.get(sessionId);
       if (m) {
         m.lastActivity = Date.now();
+        // #726 — DIRECT deafness detection, replacing two failed inferences.
+        //
+        // A non-GET request arriving on a session that HELD a stream and now
+        // holds none is a client that is provably ALIVE (it is asking for
+        // something right now) and provably NOT RECEIVING. No threshold, no
+        // sampling tick, no dependence on the reaper.
+        //
+        // WHY HERE AND NOT IN res.on('close'): at close, a DEPARTING client also
+        // has openStreamCount→0 and is also still in `transports`, for the 1–47ms
+        // before transport.onclose runs — so close-time detection has to win a
+        // race to tell a deaf seat from a goodbye. Here there is no race:
+        // onclose deletes sessionMeta, so a departed session 404s above and never
+        // reaches this line. Absence from the map is the discriminator.
+        //
+        // `everHadStream` is load-bearing, not defensive: `healthcheck` makes
+        // tool calls and never opens a GET stream at all (0 appearances across
+        // 512 stream-holding sessions in production). It is not deaf — it never
+        // asked to listen. Without this guard it alarms on every call forever.
+        //
+        // Latched: one episode logs once. The watch this replaces was read as
+        // noise because it repeated (#666, #690); a detector that cries every
+        // call inherits that death.
+        if (req.method !== 'GET' && m.everHadStream && (m.openStreamCount ?? 0) === 0 && !m.deafSince) {
+          m.deafSince = Date.now();
+          console.log(`[#726] DEAF seat=${m.seat ?? 'unbound'} sid=${sessionId} — request received with no open stream; this seat is not receiving broadcasts (#624: no queue, no replay)`);
+        }
         if (req.method === 'GET') {
           // #289 — count concurrent GETs; do NOT flag a shared boolean. A client
           // may open a second GET (e.g. the SDK auto-open + a forced resumeStream)
           // that the transport 409s and closes at once; a boolean would let that
           // close deafen the still-held GET. Regression: tests/channel.test.mjs.
           m.openStreamCount = (m.openStreamCount ?? 0) + 1;
+          // #726 — this session has asked to listen, so a later stream-less
+          // request from it means something. Clearing deafSince re-arms the
+          // latch: a SECOND deafening after a recovery is new news, not a repeat.
+          m.everHadStream = true;
+          m.deafSince = null;
           // #284 — instrument the held GET so we can name what closes it.
           // heldMs ≈ 300000 ⇒ the old Node timeout ceiling; surviving >10 min
           // ⇒ the timeout fix holds. resDestroyed/reqDestroyed/writableEnded
