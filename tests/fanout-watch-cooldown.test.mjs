@@ -30,11 +30,24 @@ import { fileURLToPath } from 'node:url';
 const run = promisify(execFile);
 const SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'fanout-watch.mjs');
 
-/** One watch tick: serve {receivers, sessions} once, run the script in DRYRUN, return stdout. */
-async function tick(stateFile, receivers) {
+/**
+ * One watch tick: serve {receivers, sessions} once, run the script in DRYRUN,
+ * return stdout.
+ *
+ * #726 — `sessions` was `receivers + 3`, pinning it to receivers 1:1 so every
+ * simulated drop also dropped a session. That was harmless scaffolding while
+ * the decision ignored sessions; it is now load-bearing, because a stream and
+ * its session vanishing together is a CLIENT LEAVING, not deafness — the exact
+ * conflation #726 removes. Every test in this file is about cooldown/settle
+ * behaviour and needs an alarm-worthy drop to exercise it, so sessions now hold
+ * FLAT by default: the deafness shape, streams dying under live sessions.
+ * Pass `sessions` explicitly to model a client genuinely disconnecting.
+ */
+const FLAT_SESSIONS = 12;
+async function tick(stateFile, receivers, sessions = FLAT_SESSIONS) {
   const srv = http.createServer((_, res) => {
     res.setHeader('Content-Type', 'application/json');
-    res.end(JSON.stringify({ receivers, sessions: receivers + 3 }));
+    res.end(JSON.stringify({ receivers, sessions }));
   });
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
   try {
@@ -256,4 +269,25 @@ test('#690 expiry re-arms: once the window passes, the same depth fires again', 
   await tick(state, 6);
   assert.equal(fired(await tick(state, 6)), true,
     'an expired entry pins nothing — 7→6 fires because no live mute is deeper');
+});
+
+// ── #726 — the session discriminator, at the INTEGRATION level ──────────────
+// The unit tests in fanout-decide.test.mjs pin the decision itself. These two
+// prove the `sessions` value actually flows status endpoint → script → decide,
+// which a pure-function test cannot see.
+
+test('#726 a client leaving (session and stream go together) does not alarm', async () => {
+  const state = tmpState();
+  await tick(state, 7, 12);                       // baseline
+  await tick(state, 6, 11);                       // arm — one client gone, took its stream
+  assert.equal(fired(await tick(state, 6, 11)), false,
+    'sessions fell with receivers: turnover, not deafness — the real 11:43Z false alarm');
+});
+
+test('#726 streams dying under live sessions still alarms (#624 preserved)', async () => {
+  const state = tmpState();
+  await tick(state, 7, 12);                       // baseline
+  await tick(state, 4, 5);                        // arm — restart drops both
+  assert.equal(fired(await tick(state, 4, 12)), true,
+    'sessions recovered, streams did not: this is the deafness the watch exists for');
 });
