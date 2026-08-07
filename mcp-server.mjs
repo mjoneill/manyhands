@@ -909,6 +909,33 @@ function broadcastFanout(conversation) {
   const targets = [...transports.entries()].filter(
     ([sid]) => (sessionMeta.get(sid)?.openStreamCount ?? 0) > 0,
   );
+  // #624 — ACCOUNT for the loss at the point of loss.
+  //
+  // The filter above already computes the answer and throws it away: its
+  // complement is every session that is registered and cannot be reached. #624
+  // means those messages are not queued and not replayed — they are simply
+  // never seen. Establishing that this happens at all took two seats a day of
+  // log archaeology (17 messages over ~11 weeks), and it could only ever be
+  // answered retrospectively. This makes the rate measurable going forward.
+  //
+  // A COUNT, NOT AN ALARM, and that distinction is the whole finding of #726.
+  // Every alarm-shaped design failed on BASE RATE rather than discrimination:
+  // `writableEnded=false` fires ~1,175/day, the conjunction with no-reopen still
+  // ~165/day, and the request-site detector fired 0 times in four weeks. Every
+  // threshold picked today was wrong. A count needs no threshold, no cooldown
+  // and no latch — if the rate matters, the rate will say so.
+  //
+  // Sessions are named, not just counted: `unbound=6` taught us that a scalar
+  // cannot be investigated (#727). Seat where known, sid otherwise.
+  const missed = [...transports.keys()].filter(
+    (sid) => (sessionMeta.get(sid)?.openStreamCount ?? 0) <= 0,
+  );
+  const name = (sid) => sessionMeta.get(sid)?.seat ?? sid;
+  console.log(
+    `[#624] fanout msg=${conversation.id} delivered=${targets.length} missed=${missed.length}`
+    + (missed.length ? ` unreachable=[${missed.map(name).join(',')}]` : ''),
+  );
+
   // #265 — hand all real receivers to the scheduler at once, so it can pick one
   // (fresh random) to deliver immediately and stagger the rest across [MIN,MAX].
   channelScheduler.dispatch(targets.map(([sid]) => sid), notification);
