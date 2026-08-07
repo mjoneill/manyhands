@@ -927,12 +927,31 @@ function broadcastFanout(conversation) {
   //
   // Sessions are named, not just counted: `unbound=6` taught us that a scalar
   // cannot be investigated (#727). Seat where known, sid otherwise.
-  const missed = [...transports.keys()].filter(
+  // ⚠️ THE FLOOR PROBLEM, caught in review and worth the extra field.
+  //
+  // A first cut counted every stream-less session as `missed`. Measured live at
+  // the time: 12 sessions, 7 receivers, and ALL FIVE of the "missed" were one
+  // tool-only healthcheck fleet holding 5 sessions and 0 streams. Every line
+  // would have read `missed=5` forever, ~350-500 times a day — so `missed=0`
+  // could never occur, and the healthy reading was indistinguishable from the
+  // unhealthy one. A floor made entirely of benign traffic destroys the
+  // denominator argument that justifies logging the healthy path at all.
+  //
+  // The comment above already said a tool-only client "never asked to listen".
+  // The NUMBER counted it as loss anyway. Prose and behaviour disagreeing is the
+  // defect class that cost the most today (#711, #721, everHadStream's comment,
+  // and this) — and here the prose was right and the code was wrong.
+  //
+  // `everHadStream` is the discriminator, already built for exactly this
+  // question one screen up: asked to listen, versus never asked.
+  const stale = [...transports.keys()].filter(
     (sid) => (sessionMeta.get(sid)?.openStreamCount ?? 0) <= 0,
   );
+  const missed = stale.filter((sid) => sessionMeta.get(sid)?.everHadStream);
+  const toolOnly = stale.length - missed.length;
   const name = (sid) => sessionMeta.get(sid)?.seat ?? sid;
   console.log(
-    `[#624] fanout msg=${conversation.id} delivered=${targets.length} missed=${missed.length}`
+    `[#624] fanout msg=${conversation.id} delivered=${targets.length} missed=${missed.length} toolOnly=${toolOnly}`
     + (missed.length ? ` unreachable=[${missed.map(name).join(',')}]` : ''),
   );
 

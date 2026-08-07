@@ -45,7 +45,12 @@ test('#624 a broadcast reports how many registered sessions it could NOT reach',
 
   const listening = await mcpSession(mcp.mcpUrl);
   const stream = await openChannelStream(mcp.mcpUrl, listening.sessionId);
-  const deaf = await mcpSession(mcp.mcpUrl);   // registered, no stream — the loss
+  // Must have HELD a stream to count as loss — a session that never asked to
+  // listen is toolOnly, not missed (see the floor-problem test below).
+  const deaf = await mcpSession(mcp.mcpUrl);
+  const deafStream = await openChannelStream(mcp.mcpUrl, deaf.sessionId);
+  await sleep(200);
+  deafStream.close();                          // asked to listen, then lost it
   await sleep(250);
 
   await post(rest.baseUrl, 'hello the room', 'test-author');
@@ -80,16 +85,25 @@ test('#624 a fully-reachable broadcast reports missed=0 and stays quiet about it
   assert.doesNotMatch(lines[0], /⚠️|WARN|DEAF/, 'accounting, not alarm');
 });
 
-test('#624 a tool-only client counts as missed — it is registered and unreachable', async (t) => {
+test('#624 a tool-only client is toolOnly, NOT missed — the floor problem', async (t) => {
   const { rest, mcp } = await startPair();
   t.after(async () => { await mcp.stop(); await rest.stop(); });
 
-  // healthcheck's shape: makes calls, never opens a stream. It is NOT deaf —
-  // it never asked to listen — but a broadcast genuinely does not reach it, and
-  // this line measures reach, not deafness. Conflating those two is what made
-  // three previous designs wrong; keeping them separate is why this one counts
-  // instead of warning.
-  await mcpSession(mcp.mcpUrl);
+  // ⚠️ THIS TEST ASSERTED THE OPPOSITE UNTIL A REVIEW CAUGHT IT, and the
+  // original was wrong in the way that has cost the most today: the code comment
+  // correctly said "a tool-only client is registered, unreachable, and perfectly
+  // healthy" — and the NUMBER counted it as loss anyway.
+  //
+  // Live measurement at review time: 12 sessions, 7 receivers, and all 5 of the
+  // "missed" were one tool-only healthcheck fleet holding 5 sessions and 0
+  // streams. Every fanout line would have read missed=5 forever, ~350-500 times
+  // a day, so `missed=0` could never occur and the healthy reading was
+  // indistinguishable from the unhealthy one. A floor of 100% benign traffic
+  // destroys the denominator argument that justifies logging the healthy path.
+  //
+  // The discriminator is `everHadStream`, already built one file over for
+  // exactly this: asked to listen vs never asked.
+  await mcpSession(mcp.mcpUrl);      // registers, never opens a stream
   await sleep(250);
 
   await post(rest.baseUrl, 'anyone?', 'test-author');
@@ -98,7 +112,8 @@ test('#624 a tool-only client counts as missed — it is registered and unreacha
   const lines = lossLines(mcp.stdoutText());
   assert.equal(lines.length, 1);
   assert.match(lines[0], /delivered=0/);
-  assert.match(lines[0], /missed=1/);
+  assert.match(lines[0], /missed=0/, 'never asked to listen is NOT loss');
+  assert.match(lines[0], /toolOnly=1/, 'but it is still real information about who is connected');
 });
 
 test('#624 ANTI-VACUITY: the harness can observe an accounting line at all', async (t) => {
