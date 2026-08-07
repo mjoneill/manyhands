@@ -57,7 +57,12 @@ const sessions = Number(status.sessions ?? NaN);
 // fields on screen that reads as a queue at a glance. Without them it reads as a
 // fault, and the seat escalates — which is the report this watch exists to prevent.
 const mode = String(status.mode ?? 'unknown');
-const pending = Number(status.pending ?? 0);
+// `?? 0` would have rendered an ABSENT pending as "there is no queue" — a
+// measurement that isn't there reading as a healthy one, which is the exact
+// failure this watch was extended to prevent. `mode` got this right and this
+// line did not. Absent stays absent; it is never used in arithmetic, only
+// printed, so a non-numeric sentinel is safe here.
+const pending = status.pending == null ? 'unknown' : Number(status.pending);
 // #703 — connection identity: name the bound seats and COUNT the unbound in
 // this watch's own output. Fail-open's counterweight is visibility HERE (the
 // room-vetted Q1 ruling) — an unbound connection in a log line nobody reads
