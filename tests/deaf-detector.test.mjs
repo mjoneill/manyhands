@@ -38,6 +38,21 @@ const DEAF = /\[#726\] DEAF/;
 const deafLines = (s) => s.split('\n').filter((l) => DEAF.test(l));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * #726 — the grace window, shortened for tests.
+ *
+ * ⚠️ THE ORIGINAL VERSION OF THIS FILE WAS WRONG IN A WAY 6 GREEN TESTS HID.
+ * It closed the stream, slept 300ms, then called a tool and asserted DEAF.
+ * Replaying the shipped predicate over four weeks of production log fired 5
+ * times and ALL FIVE were exactly that shape: a POST landing 0.14–0.43s into an
+ * ordinary reconnect whose stream returned ~1.0s later. The tests reproduced the
+ * bug and called it the feature. Positive cases must now wait LONGER than the
+ * grace; the reconnect-window case is a negative control below.
+ */
+const GRACE_MS = 400;
+const ENV = { mcpEnv: { MCP_DEAF_GRACE_MS: String(GRACE_MS) } };
+const PAST_GRACE = GRACE_MS + 300;
+
 /** Poll the captured stdout until `re` appears, or give up. */
 async function waitFor(mcp, re, timeoutMs = 3000) {
   const t0 = Date.now();
@@ -49,7 +64,7 @@ async function waitFor(mcp, re, timeoutMs = 3000) {
 }
 
 test('#726 a live session that LOST its stream is reported deaf on its next request', async (t) => {
-  const { rest, mcp } = await startPair();
+  const { rest, mcp } = await startPair(ENV);
   t.after(async () => { await mcp.stop(); await rest.stop(); });
 
   const s = await mcpSession(mcp.mcpUrl);
@@ -63,7 +78,7 @@ test('#726 a live session that LOST its stream is reported deaf on its next requ
 
   // Lose the stream, keep the session: this is exactly #624.
   stream.close();
-  await sleep(300);
+  await sleep(PAST_GRACE);
 
   await s.callTool('board_status', {});
   assert.ok(await waitFor(mcp, DEAF), 'a request on a stream-less live session must report deaf');
@@ -72,14 +87,14 @@ test('#726 a live session that LOST its stream is reported deaf on its next requ
 });
 
 test('#726 the report LATCHES — one episode logs once, not once per call', async (t) => {
-  const { rest, mcp } = await startPair();
+  const { rest, mcp } = await startPair(ENV);
   t.after(async () => { await mcp.stop(); await rest.stop(); });
 
   const s = await mcpSession(mcp.mcpUrl);
   const stream = await openChannelStream(mcp.mcpUrl, s.sessionId);
   await sleep(150);
   stream.close();
-  await sleep(300);
+  await sleep(PAST_GRACE);
 
   for (let i = 0; i < 4; i++) await s.callTool('board_status', {});
   await sleep(300);
@@ -88,19 +103,19 @@ test('#726 the report LATCHES — one episode logs once, not once per call', asy
 });
 
 test('#726 recovery clears the latch, so a SECOND deafening is reported', async (t) => {
-  const { rest, mcp } = await startPair();
+  const { rest, mcp } = await startPair(ENV);
   t.after(async () => { await mcp.stop(); await rest.stop(); });
 
   const s = await mcpSession(mcp.mcpUrl);
   const a = await openChannelStream(mcp.mcpUrl, s.sessionId);
   await sleep(150);
-  a.close(); await sleep(300);
+  a.close(); await sleep(PAST_GRACE);
   await s.callTool('board_status', {});          // episode 1
   await waitFor(mcp, DEAF);
 
   const b = await openChannelStream(mcp.mcpUrl, s.sessionId);   // recovered
   await sleep(200);
-  b.close(); await sleep(300);
+  b.close(); await sleep(PAST_GRACE);
   await s.callTool('board_status', {});          // episode 2
 
   const t0 = Date.now();
@@ -113,7 +128,7 @@ test('#726 recovery clears the latch, so a SECOND deafening is reported', async 
 // everything above.
 
 test('#726 NEGATIVE: a tool-only client that never opens a stream is NOT deaf', async (t) => {
-  const { rest, mcp } = await startPair();
+  const { rest, mcp } = await startPair(ENV);
   t.after(async () => { await mcp.stop(); await rest.stop(); });
 
   // This is `healthcheck`: it makes tool calls and never opens a GET stream —
@@ -129,7 +144,7 @@ test('#726 NEGATIVE: a tool-only client that never opens a stream is NOT deaf', 
 });
 
 test('#726 NEGATIVE: a client that disconnects cleanly is not reported', async (t) => {
-  const { rest, mcp } = await startPair();
+  const { rest, mcp } = await startPair(ENV);
   t.after(async () => { await mcp.stop(); await rest.stop(); });
 
   // The five events that fooled the log-forensics pass: session closed 1–47ms
@@ -146,14 +161,34 @@ test('#726 NEGATIVE: a client that disconnects cleanly is not reported', async (
 });
 
 test('#726 ANTI-VACUITY: the harness can actually observe a DEAF line', async (t) => {
-  const { rest, mcp } = await startPair();
+  const { rest, mcp } = await startPair(ENV);
   t.after(async () => { await mcp.stop(); await rest.stop(); });
 
   const s = await mcpSession(mcp.mcpUrl);
   const stream = await openChannelStream(mcp.mcpUrl, s.sessionId);
   await sleep(150);
-  stream.close(); await sleep(300);
+  stream.close(); await sleep(PAST_GRACE);
   await s.callTool('board_status', {});
   assert.ok(await waitFor(mcp, DEAF),
     'if this fails, every negative control above passes for the wrong reason');
+});
+
+test('#726 NEGATIVE: a request inside the reconnect window is NOT deaf', async (t) => {
+  const { rest, mcp } = await startPair(ENV);
+  t.after(async () => { await mcp.stop(); await rest.stop(); });
+
+  // THE PRODUCTION FALSE POSITIVE, as a test. Replaying the pre-grace predicate
+  // over 2026-07-09 → 2026-08-07 fired 5 times; every one was a POST arriving
+  // 0.14–0.43s into a reconnect that completed ~1.0s later. Clients cycle their
+  // streams constantly (20,383 same-session gaps; median 1.007s, max 1.6s).
+  const s = await mcpSession(mcp.mcpUrl);
+  const stream = await openChannelStream(mcp.mcpUrl, s.sessionId);
+  await sleep(150);
+  stream.close();
+  await sleep(Math.floor(GRACE_MS / 4));      // still reconnecting
+  await s.callTool('board_status', {});
+  await sleep(300);
+
+  assert.equal(deafLines(mcp.stdoutText()).length, 0,
+    'a stream that is merely between connections is not a deaf seat');
 });

@@ -287,12 +287,14 @@ export async function mcpSession(mcpUrl, { headers: extraHeaders = {} } = {}) {
  * post fires a channel notification); the MCP server is pointed at the REST
  * server. Returns { rest, mcp, stop }.
  */
-export async function startPair({ board } = {}) {
+export async function startPair({ board, mcpEnv } = {}) {
   const restPort = await freePort();
   const mcpPort = await freePort();
   const mcpNotifyUrl = `http://127.0.0.1:${mcpPort}/internal/notify`;
   const rest = await startRestServer({ board, port: restPort, mcpNotifyUrl });
-  const mcp = await startMcpServer({ port: mcpPort, restApiBase: rest.baseUrl });
+  // #726 — let a caller tune MCP env (e.g. MCP_DEAF_GRACE_MS) so a test can
+  // exercise a time-based threshold without sleeping the real interval.
+  const mcp = await startMcpServer({ port: mcpPort, restApiBase: rest.baseUrl, env: mcpEnv });
   return {
     rest,
     mcp,

@@ -730,6 +730,10 @@ function sweepHeartbeats() {
 }
 setInterval(sweepHeartbeats, HEARTBEAT_SWEEP_MS).unref();
 const REAP_IDLE_MS = Number(process.env.MCP_REAP_IDLE_MS ?? 300000); // 5 min default
+// #726 — how long a session must hold ZERO streams before a request from it counts
+// as deafness rather than an in-flight reconnect. See the detector below for the
+// derivation; env-overridable so tests can drive it without sleeping.
+const DEAF_GRACE_MS = Number(process.env.MCP_DEAF_GRACE_MS ?? 5000);
 const REAP_SWEEP_MS = Number(process.env.MCP_REAP_SWEEP_MS ?? 30000); // 30 s default
 function reapIdleSessions() {
   const now = Date.now();
@@ -1288,9 +1292,20 @@ const httpServer = http.createServer(async (req, res) => {
         // Latched: one episode logs once. The watch this replaces was read as
         // noise because it repeated (#666, #690); a detector that cries every
         // call inherits that death.
-        if (req.method !== 'GET' && m.everHadStream && (m.openStreamCount ?? 0) === 0 && !m.deafSince) {
+        // GRACE WINDOW, and it is derived from the corpus rather than picked.
+        // Replaying the shipped predicate over four weeks of production log
+        // (2026-07-09 → 2026-08-07) fired 5 times and ALL FIVE were false: a POST
+        // landing 0.14–0.43s into an ordinary SSE reconnect whose stream returned
+        // ~1.0s later. Clients cycle their stream constantly — 20,383 same-session
+        // gaps in that window, median 1.007s, p99 1.1s, MAX 1.6s, none over 5s.
+        // So 5s is ~3× the worst case ever recorded and excludes every benign
+        // reconnect in the corpus. It is falsifiable: if a legitimate reconnect
+        // ever exceeds it, this fires and the number was wrong.
+        const downMs = m.streamDownSince ? Date.now() - m.streamDownSince : 0;
+        if (req.method !== 'GET' && m.everHadStream && (m.openStreamCount ?? 0) === 0
+            && downMs > DEAF_GRACE_MS && !m.deafSince) {
           m.deafSince = Date.now();
-          console.log(`[#726] DEAF seat=${m.seat ?? 'unbound'} sid=${sessionId} — request received with no open stream; this seat is not receiving broadcasts (#624: no queue, no replay)`);
+          console.log(`[#726] DEAF seat=${m.seat ?? 'unbound'} sid=${sessionId} downMs=${downMs} — request received with no open stream; this seat is not receiving broadcasts (#624: no queue, no replay)`);
         }
         if (req.method === 'GET') {
           // #289 — count concurrent GETs; do NOT flag a shared boolean. A client
@@ -1303,6 +1318,7 @@ const httpServer = http.createServer(async (req, res) => {
           // latch: a SECOND deafening after a recovery is new news, not a repeat.
           m.everHadStream = true;
           m.deafSince = null;
+          m.streamDownSince = null;   // #726 — reconnected; grace clock stops
           // #284 — instrument the held GET so we can name what closes it.
           // heldMs ≈ 300000 ⇒ the old Node timeout ceiling; surviving >10 min
           // ⇒ the timeout fix holds. resDestroyed/reqDestroyed/writableEnded
@@ -1314,6 +1330,8 @@ const httpServer = http.createServer(async (req, res) => {
             // session that still holds another live stream.
             m.openStreamCount = Math.max(0, (m.openStreamCount ?? 0) - 1);
             m.lastActivity = Date.now();
+            // #726 — start the grace clock the moment the LAST stream goes.
+            if (m.openStreamCount === 0) m.streamDownSince = Date.now();
             const heldMs = Date.now() - streamOpenedAt;
             console.log(`[#284] GET stream closed sid=${sessionId} seat=${m.seat ?? 'unbound'} heldMs=${heldMs} resDestroyed=${res.destroyed} reqDestroyed=${req.destroyed} writableEnded=${res.writableEnded}`);
           });
