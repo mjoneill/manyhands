@@ -1091,12 +1091,36 @@ const httpServer = http.createServer(async (req, res) => {
       // second, and the truth was only recoverable by grepping the log. The
       // discriminator belongs on the surface the room actually reads.
       const seats = {};
+      // #727 — `unbound` was a bare count, so a nameless session's streams went
+      // on the floor at the `continue` below. `unbound=6` fits six sessions with
+      // one stream each, or one with six and five with none, and the surface
+      // could not tell them apart. That ambiguity is why the fanout watch could
+      // not name a seat in 40 consecutive alarms, and why "was seat X receiving
+      // when this went out" has no retrospective answer for 98% of the corpus.
+      //
+      // The scalar STAYS — fanout-watch reads it and this must not be a breaking
+      // change. The list is additive, and carries exactly what makes a nameless
+      // session investigable: which one, is it listening, is it alive.
+      //
+      // NOT authentication: the board is unauthenticated on loopback by design
+      // and the token is a name tag, not a lock (#716). The ask is that the
+      // board SAY it doesn't know, not that it start refusing.
+      const unboundSessions = [];
       let unbound = 0;
       let unknownToken = 0;
       for (const [sid, m] of sessionMeta) {
         const streams = m.openStreamCount ?? 0;
         if (m.unknownToken) unknownToken += 1;
-        if (!m.seat) { unbound += 1; continue; }
+        if (!m.seat) {
+          unbound += 1;
+          unboundSessions.push({
+            sid,
+            streams,
+            lastActivity: m.lastActivity ?? null,
+            unknownToken: !!m.unknownToken,   // #707's discriminator, per session
+          });
+          continue;
+        }
         const s = seats[m.seat] ?? (seats[m.seat] = { streams: 0, sessions: 0, lastBeatAt: null, lastBeatOk: null });
         s.streams += streams;
         s.sessions += 1;
@@ -1113,6 +1137,7 @@ const httpServer = http.createServer(async (req, res) => {
         sessions: transports.size,
         seats,
         unbound,
+        unboundSessions,  // #727 — itemised: {sid, streams, lastActivity, unknownToken}
         unknownToken,   // #707 — of the unbound, how many sent a token we don't know
         binding: seatTokens.dormant ? 'dormant' : 'active',
       }));
