@@ -127,20 +127,37 @@ test('#726 recovery clears the latch, so a SECOND deafening is reported', async 
 // Without these, an implementation that logs DEAF unconditionally passes
 // everything above.
 
-test('#726 NEGATIVE: a tool-only client that never opens a stream is NOT deaf', async (t) => {
+test('#726 NEGATIVE: the tool-only client stays silent well past the grace', async (t) => {
   const { rest, mcp } = await startPair(ENV);
   t.after(async () => { await mcp.stop(); await rest.stop(); });
 
-  // This is `healthcheck`: it makes tool calls and never opens a GET stream —
-  // 0 appearances across 512 stream-holding sessions in the production log. It
-  // is not deaf, it never asked to listen. A detector keyed only on "no stream
-  // + making requests" flags it on every single call, forever.
+  // This is `healthcheck`: it makes tool calls and never opens a GET stream at
+  // all (production: 0 appearances across the stream-holding sessions). It is
+  // not deaf — it never asked to listen.
+  //
+  // ⚠️ THIS TEST DELIBERATELY OUTLIVES THE GRACE WINDOW, and that is the whole
+  // point of it. a reviewing seat mutation-tested the detector and found that deleting
+  // `m.everHadStream` fails NO test: `streamDownSince` is set only when a stream
+  // CLOSES, so a never-streamed session has downMs === 0 and the grace term
+  // already excludes it. The guard is belt-and-braces, not load-bearing, and the
+  // source comment claimed the opposite until she caught it.
+  //
+  // Sleeping past the grace and calling repeatedly is what makes this bite: if
+  // downMs is ever re-derived from session age or lastActivity instead of
+  // streamDownSince, this session WOULD clear the grace, `everHadStream` would
+  // become genuinely load-bearing, and this test fails rather than the flag
+  // being silently promoted with nobody noticing.
   const s = await mcpSession(mcp.mcpUrl);
-  for (let i = 0; i < 3; i++) await s.callTool('board_status', {});
-  await sleep(400);
+  for (let i = 0; i < 3; i++) {
+    await s.callTool('board_status', {});
+    await sleep(Math.ceil(PAST_GRACE / 2));
+  }
+  await sleep(PAST_GRACE);
+  await s.callTool('board_status', {});
+  await sleep(200);
 
   assert.equal(deafLines(mcp.stdoutText()).length, 0,
-    'never having held a stream is not the same as having lost one');
+    'a client that never asked to listen is not deaf, however long it lives');
 });
 
 test('#726 NEGATIVE: a client that disconnects cleanly is not reported', async (t) => {
@@ -160,6 +177,34 @@ test('#726 NEGATIVE: a client that disconnects cleanly is not reported', async (
     'a departed client is silent; silence must not be reported as deafness');
 });
 
+/**
+ * ⚠️ COVERAGE NOTE on `m.everHadStream` — READ BEFORE "SIMPLIFYING" THE PREDICATE.
+ *
+ * A reviewing seat mutation-tested this detector and found the guard uncovered: delete it
+ * and every test still passes. That is TRUE and it is not a gap that can be
+ * closed by a better test, because the guard is REDUNDANT under the current
+ * predicate — `streamDownSince` is set only when a stream CLOSES, so a session
+ * that never opened one has downMs === 0 and the grace term already excludes it.
+ *
+ * A redundant defence is uncoverable in isolation: you can only exercise it by
+ * first breaking the primary. So the artifact is a procedure, not an assertion.
+ * Re-runnable, and measured 2026-08-07:
+ *
+ *   A  remove `m.everHadStream` only                            → 7 pass, 0 fail
+ *   B  `: 0` → `: 999999` in downMs only (guard intact)         → 7 pass, 0 fail
+ *   C  both                                                     → 1 pass, 6 FAIL
+ *
+ * B is the reason the guard stays. It shows the guard silently absorbs a change
+ * to how downMs is derived — a plausible refactor — with ZERO test failures. C
+ * shows what that refactor costs without it. Anyone deleting `everHadStream`
+ * because "no test covers it" should run B first and see what it is holding up.
+ *
+ * (The first mutation attempted here was invalid: deriving downMs from
+ * `m.lastActivity`, which is refreshed on the line above the check, so downMs
+ * stayed ~0 and behaviour never changed. A mutation that cannot reach the code
+ * reads exactly like a covered guard. the reviewing seat hit the same trap an hour earlier
+ * mutating the `?? 5000` default while the tests override it via env.)
+ */
 test('#726 ANTI-VACUITY: the harness can actually observe a DEAF line', async (t) => {
   const { rest, mcp } = await startPair(ENV);
   t.after(async () => { await mcp.stop(); await rest.stop(); });

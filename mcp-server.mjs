@@ -1309,10 +1309,24 @@ const httpServer = http.createServer(async (req, res) => {
         // onclose deletes sessionMeta, so a departed session 404s above and never
         // reaches this line. Absence from the map is the discriminator.
         //
-        // `everHadStream` is load-bearing, not defensive: `healthcheck` makes
-        // tool calls and never opens a GET stream at all (0 appearances across
-        // 512 stream-holding sessions in production). It is not deaf — it never
-        // asked to listen. Without this guard it alarms on every call forever.
+        // `everHadStream` is BELT-AND-BRACES, NOT load-bearing — an earlier
+        // version of this comment claimed the opposite ("without this guard it
+        // alarms on every call forever") and that was false. the reviewing seat caught it by
+        // mutation: deleting the guard fails no test, because `streamDownSince`
+        // is set only when a stream CLOSES, so a session that never opened one
+        // has downMs === 0 and the grace term below already excludes it. The
+        // tool-only healthcheck fleet is excluded by the grace clock, not by this.
+        //
+        // It stays, and the reason is measured rather than asserted: mutating
+        // downMs's null branch (`: 0` → `: 999999`) fails ZERO tests while this
+        // guard is present, and SIX once it is removed. It silently absorbs a
+        // plausible refactor. See the coverage note in tests/deaf-detector.test.mjs
+        // for the re-runnable procedure — a redundant defence cannot be covered in
+        // isolation, so the artifact is a procedure, not an assertion.
+        //
+        // ⚠️ A comment claiming protection the code does not provide is worse than
+        // no comment. This was the third such claim in this thread (#711, #721,
+        // and this one) — written while working on exactly that class of defect.
         //
         // Latched: one episode logs once. The watch this replaces was read as
         // noise because it repeated (#666, #690); a detector that cries every
