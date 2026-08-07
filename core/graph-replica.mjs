@@ -110,6 +110,31 @@ function projectEntity(store, e) {
       if (e['scrum:priority']) add(s, nn(S + 'priority'), lit(e['scrum:priority']));
       if (e['scrum:order'] != null) add(s, nn(S + 'order'), lit(e['scrum:order']));
       if (e.claimedBy) add(s, nn(S + 'claimedBy'), personRef(e.claimedBy));
+      // #723 — claimedAt sat beside claimedBy in the document and was never
+      // emitted, so a graph-backed card_get would have dropped it silently. It
+      // is load-bearing: the stall-watch keys on "claimed and unchanged across
+      // two checks", which needs the timestamp, not just the holder.
+      if (e['scrum:claimedAt']) add(s, nn(S + 'claimedAt'), lit(e['scrum:claimedAt']));
+      // #723 — `for` is free text, not a person. Measured across the corpus:
+      // 100 cards set it, 74 distinct values, and only a quarter resemble any
+      // kind of name. The rest are teams, systems, outcomes, and in several
+      // cases a full acceptance criterion in a sentence. One value names three
+      // different things at once, only one of which is a person.
+      //
+      // So: a LITERAL, not a personRef. Routing this through the person
+      // namespace would mint ~74 entities, most of which are not people — the
+      // same coercion that already put a bot, a wiki and a monitor in /person/
+      // (see the range-restriction card). It is also the only place a card's
+      // beneficiary is recorded, so projecting it makes that VISIBLE to the
+      // graph.
+      //
+      // Visible, not yet answerable: the values are unnormalised, so the most
+      // common beneficiary appears under two literals differing only in case
+      // and an exact-match query silently returns about three quarters of them.
+      // Normalising belongs at the write path or in a companion predicate, not
+      // here — coercing free text into entities is the defect this comment
+      // already declines to commit.
+      if (e['scrum:for']) add(s, nn(S + 'for'), lit(e['scrum:for']));
       for (const a of e.assignees || []) if (a && a !== 'unassigned') add(s, nn(S + 'assignee'), personRef(a));
       for (const l of e.labels || []) add(s, nn(S + 'label'), lit(l));
       // ONE list, imported — a second copy here is the #618 drift shape.
