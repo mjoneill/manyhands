@@ -29,6 +29,11 @@ export const IRI = Object.freeze({
   scrum: 'https://scrumboard.local/ns#',
   schema: 'https://schema.org/',
   rdf: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
+  // #725 — activities from the event log. PROV-O is the W3C vocabulary for
+  // "something happened, and someone was responsible", which is exactly what an
+  // event record is and exactly what a Comment is not.
+  activity: 'https://scrumboard.local/activity/',
+  prov: 'http://www.w3.org/ns/prov#',
 });
 
 /** Prepended to every query so agents never hand-declare a prefix. */
@@ -51,6 +56,73 @@ const A = nn(IRI.rdf + 'type');
 export function buildGraphStore(doc) {
   const store = new oxigraph.Store();
   for (const e of doc['@graph'] || []) projectEntity(store, e);
+  return store;
+}
+
+/**
+ * #725 — event log → prov:Activity triples.
+ *
+ * The board has written structured events for every mutation since 2026-08-04
+ * and the graph has never read them. `deriveEvents()` emits
+ * `{seq, actor, op, entity:{kind,id}, occurred_at}` and `appendEvent()`
+ * persists them. That record IS a PROV Activity — actor is who was responsible,
+ * op is what happened, entity is what it happened to.
+ *
+ * WHY THIS IS SEPARATE FROM THE DOCUMENT. The same fact is currently stored
+ * TWICE: once structurally in the log, and once as prose ("🔔 <seat> claimed
+ * #726") in a Comment authored by `person:board` — a node with 267 references
+ * and zero triples, because the board is not a person. Projecting the events
+ * gives the fact a home that does not require inventing a speaker, and leaves
+ * the prose alone.
+ *
+ * ⇒ Today "who moved cards, and when" CANNOT be asked (the mover is prose in a
+ * body) and "what did each person say this week" silently includes 267 machine
+ * events. Both stop being true once activities are distinct from speech.
+ *
+ * Idempotent by `seq`, which is the event's identity: replaying the log on a
+ * rebuild is not new history. Malformed records are skipped rather than thrown
+ * on — a real append-only log carries real junk, and a projection that dies on
+ * one bad line takes the whole query surface with it.
+ *
+ * Sizing measured before building, not after: 1,624 events over 4 days is
+ * ~8,120 triples against a store already holding ~70,748 — about 11%, so this
+ * is unfiltered. There was no decision to make.
+ */
+export function projectActivities(store, events) {
+  for (const ev of events || []) {
+    if (!ev || typeof ev !== 'object') continue;
+    const { seq, actor, op } = ev;
+    const ent = ev.entity;
+    // seq is identity (without it the activity doubles on every rebuild), op is
+    // what happened, entity is what it happened to. All three are required.
+    //
+    // ⚠️ ACTOR IS NOT REQUIRED, and that was a real defect caught on live data.
+    // A first cut dropped any event with `actor: null` — which turned out to be
+    // 23 genuine card updates whose actor simply was not recorded. Skipping them
+    // undercounted "who moved cards" by 23 and said nothing about it: silently
+    // discarding a population and reporting a clean number, which is the defect
+    // class this whole card exists to remove. An activity with an unknown actor
+    // still HAPPENED. It is projected without wasAssociatedWith, which makes
+    // "activities nobody is accountable for" a query rather than an absence.
+    if (seq == null || !op || !ent || !ent.id) continue;
+
+    const a = nn(IRI.activity + `seq-${seq}`);
+    // Identity check BEFORE writing: `store.add` is set-semantics per triple,
+    // but re-deriving the IRI each rebuild is what keeps that true. Guarding
+    // here also makes the idempotence explicit rather than incidental.
+    if (store.match(a, A, nn(IRI.prov + 'Activity')).length) continue;
+
+    store.add(oxigraph.triple(a, A, nn(IRI.prov + 'Activity')));
+    if (actor) store.add(oxigraph.triple(a, nn(IRI.prov + 'wasAssociatedWith'), nn(IRI.person + actor)));
+    store.add(oxigraph.triple(a, nn(IRI.scrum + 'op'), lit(op)));
+    store.add(oxigraph.triple(a, nn(IRI.prov + 'used'), nn(IRI.entity + ent.id)));
+    // `entityKind` is projected as its own literal so "card activity only" is a
+    // triple pattern rather than an IRI-prefix string match — the difference
+    // between a query anyone can write and one only its author can.
+    if (ent.kind) store.add(oxigraph.triple(a, nn(IRI.scrum + 'entityKind'), lit(ent.kind)));
+    const when = ev.occurred_at || ev.recorded_at;
+    if (when) store.add(oxigraph.triple(a, nn(IRI.prov + 'startedAtTime'), lit(when)));
+  }
   return store;
 }
 
