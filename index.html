@@ -1098,15 +1098,44 @@ body::before {
   color: var(--accent-task);
   transform: rotate(45deg);
 }
+/* #734 — collapse by GRID ROW, not by max-height.
+   The previous form was `max-height: 0` → `max-height: 500px`, which worked
+   until the form outgrew 500px: #614 added two rows of relationship fields on
+   top of the seven-seat assignee grid, and the Add Card button ended up 69px
+   below the clip. `overflow: hidden` hid it with no visual hint, so the form
+   looked complete and simply had no way to submit. Keyboard users never saw it
+   — focusing a clipped child makes the browser scroll it into view — which is
+   why it survived: the only people who could file the bug couldn't reproduce it.
+
+   A bigger constant would re-arm the same trap on the next field added. A grid
+   row of `1fr` resolves to the CONTENT height, so there is no number to outgrow.
+   Where `grid-template-rows` interpolation is unsupported the open/close snaps
+   instead of animating — the form stays fully usable, which is the right way
+   round for a fallback. */
 .add-card-form-wrapper {
-  max-height: 0;
+  display: grid;
+  grid-template-rows: 0fr;
   overflow: hidden;
-  transition: max-height 0.3s ease, opacity 0.25s ease;
+  transition: grid-template-rows 0.3s ease, opacity 0.25s ease;
   opacity: 0;
 }
 .add-card-form-wrapper.expanded {
-  max-height: 500px;
+  grid-template-rows: 1fr;
   opacity: 1;
+}
+/* The grid row can only collapse below its content if the child allows it.
+   A zero-height row still cannot absorb the child's own padding and border, so
+   those collapse too — otherwise every column carries a 30px empty dashed strip
+   when the form is shut. */
+.add-card-form-wrapper > .add-card-form {
+  min-height: 0;
+  overflow: hidden;
+}
+.add-card-form-wrapper:not(.expanded) > .add-card-form {
+  padding-top: 0;
+  padding-bottom: 0;
+  border-top-width: 0;
+  border-bottom-width: 0;
 }
 .add-card-form {
   border: 1px dashed var(--border-subtle);
@@ -1116,7 +1145,8 @@ body::before {
   flex-direction: column;
   gap: 10px;
   background: rgba(30, 41, 59, 0.4);
-  transition: border-color 0.2s, background 0.2s;
+  transition: border-color 0.2s, background 0.2s,
+              padding 0.3s ease, border-width 0.3s ease;
 }
 .add-card-form:focus-within {
   border-color: var(--accent-task);

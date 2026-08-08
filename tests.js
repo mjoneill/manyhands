@@ -1670,6 +1670,68 @@ test('form starts collapsed and expands on button click', () => {
   assert(!btn.classList.contains('active'), 'expand button should not have active class');
 });
 
+// #734 — the test above passes while the form is unusable, and that is the point
+// of this one. It asserts the `expanded` CLASS toggles; the class toggled
+// correctly the whole time the Save button was invisible. A wrapper with
+// `overflow: hidden` and a hard `max-height` clips its own submit control once
+// the form outgrows the constant, and NOTHING about the class tells you that.
+//
+// The owner hit this with a mouse and could only reach the button by tabbing —
+// browsers scroll an overflow:hidden container to bring a focused element into
+// view, which is why keyboard users never saw the bug and why it survived.
+//
+// The assertion is therefore geometric, not structural: with the form expanded,
+// the submit button's box must lie inside the wrapper's box. Anything that
+// clips it — a smaller max-height, another field row, a future redesign —
+// fails here regardless of how the collapse is implemented.
+test('#734: the expanded add-card form does not clip its own submit button', async () => {
+  const wrapper = document.getElementById('add-card-form-wrapper');
+  const expandBtn = document.getElementById('btn-expand-form');
+  const addBtn = document.getElementById('btn-add-card');
+
+  if (!wrapper.classList.contains('expanded')) expandBtn.click();
+  assert(wrapper.classList.contains('expanded'), 'precondition: form must be expanded');
+
+  // The wrapper animates open over 0.3s, so an immediate measurement reads
+  // mid-transition. Wait past the transition before trusting any geometry.
+  await new Promise((r) => setTimeout(r, 450));
+
+  // Guard against a vacuous pass: if the form ever renders at zero height the
+  // containment check below would be trivially satisfiable, so prove there is
+  // a real laid-out form before trusting the comparison.
+  const wrapRect = wrapper.getBoundingClientRect();
+  const btnRect = addBtn.getBoundingClientRect();
+  assert(wrapRect.height > 100,
+    `expanded form should have real height, got ${wrapRect.height} `
+    + `[offsetParent=${wrapper.offsetParent ? wrapper.offsetParent.id || wrapper.offsetParent.className : 'null'} `
+    + `parent=${wrapper.parentElement ? wrapper.parentElement.id || wrapper.parentElement.className : 'none'} `
+    + `maxH=${getComputedStyle(wrapper).maxHeight} `
+    + `formH=${document.getElementById('add-card-form').getBoundingClientRect().height}]`);
+  assert(btnRect.height > 0, `submit button should be laid out, got height ${btnRect.height}`);
+
+  assert(
+    btnRect.bottom <= wrapRect.bottom + 1,
+    `Add Card button is clipped: button bottom ${Math.round(btnRect.bottom)} `
+    + `exceeds wrapper bottom ${Math.round(wrapRect.bottom)} `
+    + `(${Math.round(btnRect.bottom - wrapRect.bottom)}px cut off)`,
+  );
+
+  // The same fact from the other side: nothing in the wrapper may overflow it.
+  assert(
+    wrapper.scrollHeight <= wrapper.clientHeight + 1,
+    `form content overflows its wrapper: scrollHeight ${wrapper.scrollHeight} `
+    + `vs clientHeight ${wrapper.clientHeight}`,
+  );
+
+  // The opposite failure is equally available to a careless fix: removing the
+  // clip entirely would satisfy everything above and leave the form permanently
+  // open. Collapsing must still actually collapse.
+  expandBtn.click();
+  await new Promise((r) => setTimeout(r, 450));
+  const collapsedH = wrapper.getBoundingClientRect().height;
+  assert(collapsedH < 5, `collapsed form should take no space, got ${collapsedH}px`);
+});
+
 test('column headers have gradient backgrounds matching their purpose', () => {
   assert(document.querySelector('.backlog-header') !== null, 'backlog header should exist');
   assert(document.querySelector('.in-progress-header') !== null, 'in-progress header should exist');
