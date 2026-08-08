@@ -79,3 +79,61 @@ test('the no-args invocation declares itself the full suite', async () => {
   assert.match(stdout, /FULL SUITE \(1 files\)/, 'no-args = full suite, declared');
   assert.doesNotMatch(stdout, /SUBSET/, 'a full run carries no subset banner');
 });
+
+// ── #735 — the runner must EMIT as it goes, not only at the end ───────────
+//
+// The 2026-08-08 09:45Z suite watch fired `RED (summary unparsed)` and the log
+// held no diagnostics. The run had produced 1,555 lines of perfectly good TAP;
+// they were thrown away. `run-tests.sh` buffered everything into a mktemp file
+// and printed greps of it only AFTER `node --test` returned, so a run killed by
+// the watcher's deadline emitted nothing at all — and the alarm reported the
+// blankness as "unparsed", which reads as "the output was garbled" and sends
+// the reader hunting a broken parser instead of the hang.
+//
+// Measured before the fix: killed run → 0 bytes captured, 158,338 bytes of real
+// TAP left in the temp file nobody reads.
+//
+// The fixture is two files chosen for ORDER: node --test emits per file in
+// sorted order, so `a-fast` must sort before `b-hang` for its result to be
+// released while the second file is still stuck. That is the whole discriminator
+// — with buffering, stdout is empty; with streaming, a-fast's `ok` is already
+// out. If both files hung, this test would pass for the wrong reason.
+test('#735 a run killed mid-flight has ALREADY emitted what it produced', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rt735-'));
+  fs.writeFileSync(path.join(dir, 'a-fast.test.mjs'),
+    'import { test } from "node:test"; test("fast one finishes", () => {});\n');
+  // The hang needs a live HANDLE, not just an unresolved promise: a bare
+  // `new Promise(() => {})` keeps nothing alive, the event loop drains, and
+  // node exits cleanly — which is not a hang at all. Caught by this test's own
+  // anti-vacuity assertion on the first run, which is the argument for having
+  // written it.
+  fs.writeFileSync(path.join(dir, 'b-hang.test.mjs'),
+    'import { test } from "node:test";\n'
+    + 'test("hangs forever", () => new Promise(() => { setInterval(() => {}, 1000); }));\n');
+
+  const { spawn } = await import('node:child_process');
+  const child = spawn('sh', [HELPER, path.join(dir, 'a-fast.test.mjs'), path.join(dir, 'b-hang.test.mjs')],
+    { env: cleanEnv(), detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+
+  let seen = '';
+  child.stdout.on('data', (d) => { seen += d.toString(); });
+  child.stderr.on('data', (d) => { seen += d.toString(); });
+
+  // Long enough for the fast file to finish and be released, far short of any
+  // chance the hanging one completes.
+  await new Promise((r) => setTimeout(r, 6000));
+  const streamedBeforeKill = seen;
+
+  try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
+  await new Promise((r) => setTimeout(r, 500));
+
+  assert.match(streamedBeforeKill, /ok 1|# Subtest|fast one finishes/,
+    'a killed run must have already emitted the results it had; got '
+    + `${Buffer.byteLength(streamedBeforeKill)} bytes: ${JSON.stringify(streamedBeforeKill.slice(0, 200))}`);
+
+  // Anti-vacuity: prove the hang was real, i.e. this run genuinely did not
+  // finish. If it had completed, "output was emitted" would be trivially true
+  // and would say nothing about streaming.
+  assert.doesNotMatch(streamedBeforeKill, /# fail \d+/,
+    'the run must NOT have completed — otherwise this asserts nothing about streaming');
+});

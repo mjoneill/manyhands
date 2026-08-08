@@ -108,3 +108,69 @@ test('a NEW failing file is a new signature and fires through the mute', async (
   assert.equal(posted(out), true, 'a deeper red must fire through the standing mute');
   assert.match(out, /red-b\.test\.mjs/, 'the new file is named');
 });
+
+// ── #735 — a timeout is not "unparsed", and a deadline must TERMINATE ─────
+//
+// Two defects from the 2026-08-08 09:45Z incident, both measured:
+//
+// 1. The watch reported `sig=[unparsed]` for a run it had KILLED. Those are
+//    different events with different responses — "the output was unreadable"
+//    sends you to the parser, "the run never finished" sends you to the hang —
+//    and collapsing them cost a morning.
+//
+// 2. `execFileSync(..., {timeout})` signals the SHELL. `node --test` is its
+//    child, is not killed, is reparented to init, and KEEPS RUNNING. Measured
+//    directly: 12s after the kill, the full 91-file runner was still going with
+//    seven orphaned `node server.js` children holding ports, and the suite went
+//    on to complete all 743 tests into a temp file nobody reads. The alarm
+//    stopped watching; it never stopped the run.
+//
+// A deadline that abandons rather than terminates is not a deadline.
+function makeHangingUniverse() {
+  const u = makeUniverse();
+  fs.writeFileSync(path.join(u.dir, 'tests', 'zz-hang.test.mjs'),
+    'import { test } from "node:test";\n'
+    // A live handle, not a bare unresolved promise: without something holding
+    // the event loop the process exits cleanly and there is no hang to test.
+    + 'test("hangs", () => new Promise(() => { setInterval(() => {}, 1000); }));\n');
+  return u;
+}
+
+test('#735 a killed run reports sig=[timeout], never [unparsed]', async () => {
+  const u = makeHangingUniverse();
+  const { stdout } = await run(process.execPath, [WATCH], {
+    env: cleanEnv({
+      SUITE_WATCH_REPO: u.dir, SUITE_WATCH_STATE: u.state,
+      SUITE_WATCH_DRYRUN: '1', SUITE_WATCH_NO_CLONE: '1',
+      SUITE_WATCH_RUN_TIMEOUT_MS: '4000',
+    }),
+  });
+
+  assert.match(stdout, /sig=\[timeout\]/,
+    `a run killed by the deadline must be signed as a timeout, not unparsed: ${stdout}`);
+  assert.doesNotMatch(stdout, /sig=\[unparsed\]/,
+    `"unparsed" claims the output was unreadable; the run simply never finished: ${stdout}`);
+  assert.ok(posted(stdout), 'a timeout is still a red worth posting');
+});
+
+test('#735 the deadline TERMINATES the run — no descendants survive it', async () => {
+  const u = makeHangingUniverse();
+  await run(process.execPath, [WATCH], {
+    env: cleanEnv({
+      SUITE_WATCH_REPO: u.dir, SUITE_WATCH_STATE: u.state,
+      SUITE_WATCH_DRYRUN: '1', SUITE_WATCH_NO_CLONE: '1',
+      SUITE_WATCH_RUN_TIMEOUT_MS: '4000',
+    }),
+  });
+
+  // Give anything that survived a moment to be visible, then look for it by the
+  // fixture path — narrow enough that it cannot match the real suite or another
+  // seat's work.
+  await new Promise((r) => setTimeout(r, 1500));
+  const { execSync } = await import('node:child_process');
+  let survivors = '';
+  try { survivors = execSync(`pgrep -fl ${JSON.stringify(u.dir)} || true`).toString().trim(); } catch { /* none */ }
+
+  assert.equal(survivors, '',
+    `the deadline must kill the process GROUP — these outlived it:\n${survivors}`);
+});

@@ -32,12 +32,35 @@ else
   scope="SUBSET: $# of $total files — NOT a full-suite verdict"
 fi
 
+# #735 — EMIT AS WE GO, don't buffer to the end.
+#
+# This used to be `node --test "$@" >"$out" 2>&1`, with every echo below running
+# only after node returned. So a run killed by the suite watch's deadline
+# emitted NOTHING: the watcher captured 0 bytes, found nothing to parse, and
+# posted `RED (summary unparsed)` — which reads as "the output was garbled" and
+# sends the reader hunting a broken parser. Measured on the 08-08 09:45Z
+# incident: 0 bytes captured, 158,338 bytes of real TAP sitting in $out, where
+# `rm -f` had not run either. The diagnosis was on disk the whole time and
+# nothing referenced it.
+#
+# `tee` puts the same bytes on stdout as they are produced, so a killed run has
+# already said what it knew. The temp file is still written for the greps below.
+#
+# ⚠️ The exit code is the point of this whole script (see pipe-masks-exit-code
+# in the header). In a pipeline `$?` is TEE's status, not node's, and `pipefail`
+# is not POSIX. So node's own code is carried out of the pipeline through a
+# file — portable, and it keeps the verdict the runner's own.
 out=$(mktemp "${TMPDIR:-/tmp}/run-tests.XXXXXX")
-node --test "$@" >"$out" 2>&1
-rc=$?
+rcfile=$(mktemp "${TMPDIR:-/tmp}/run-tests-rc.XXXXXX")
+{ node --test "$@" 2>&1; echo $? >"$rcfile"; } | tee "$out"
+rc=$(cat "$rcfile" 2>/dev/null || echo 1)
+rm -f "$rcfile"
 
+# The TAP above already carried the counts (we tee it now), so re-printing the
+# summary here would DOUBLE it — and the suite watch builds its summary by
+# matching every `# tests|pass|fail N` in the output, so a duplicate reads as
+# "# tests 749 · # pass 749 · # fail 0 · # tests 749 · ...". Banner only.
 echo "── $scope ──"
-grep -E "^(not ok|# (tests|pass|fail|cancelled))" "$out" | tail -20
 if [ "$rc" -ne 0 ]; then
   echo "── FAILURES ──"
   grep -B1 -A12 "^not ok" "$out" | head -80

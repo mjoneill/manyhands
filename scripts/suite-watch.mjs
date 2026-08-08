@@ -23,9 +23,11 @@
  *   SUITE_WATCH_STATE       default ~/.claude/scrum-suite-watch.state
  *   SUITE_WATCH_COOLDOWN_MS default 6h
  *   SUITE_WATCH_DRYRUN=1    print the would-be post instead of posting
+ *   SUITE_WATCH_RUN_TIMEOUT_MS  how long the suite may run before the group is
+ *                           KILLED and the red signed [timeout] (default 15m)
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -58,15 +60,51 @@ if (!NO_CLONE) {
 }
 const cleanup = () => { if (cloneDir) fs.rmSync(cloneDir, { recursive: true, force: true }); };
 
+/**
+ * #735 — run it so the deadline can actually STOP it, and keep what it said.
+ *
+ * This was `execFileSync(..., {timeout: 15min})`. Two defects, both measured on
+ * the 2026-08-08 09:45Z incident:
+ *
+ *  1. execFileSync's timeout signals the SHELL. `node --test` is its child, is
+ *     not killed, is reparented to init, and KEEPS RUNNING. Twelve seconds
+ *     after a kill: the full runner still going, seven orphaned `node server.js`
+ *     children holding ports, and the suite went on to complete all 743 tests
+ *     into a temp file nobody reads. The watch stopped WATCHING; it never
+ *     stopped the run. A deadline that abandons rather than terminates is not
+ *     a deadline — it is the #736 orphan mechanism with a different trigger.
+ *
+ *  2. A killed run was signed `unparsed`, which claims the output was
+ *     unreadable and sends the reader to hunt a broken parser. The run simply
+ *     never finished. Different events, different responses.
+ *
+ * `detached: true` makes the shell a process-group leader, so `kill(-pid)`
+ * reaps the group — shell, node --test, and every test server it spawned.
+ * Output is accumulated as it streams (run-tests.sh now tees), so whatever the
+ * run managed to say survives being killed.
+ */
+const RUN_TIMEOUT_MS = Number(process.env.SUITE_WATCH_RUN_TIMEOUT_MS ?? 15 * 60 * 1000);
+
 let out = '';
 let red = false;
-try {
-  out = String(execFileSync('sh', [path.join(suiteDir, 'scripts', 'run-tests.sh')], {
-    cwd: suiteDir, timeout: 15 * 60 * 1000,
-  }));
-} catch (e) {
-  red = true;
-  out = String(e.stdout || '') + String(e.stderr || '');
+let timedOut = false;
+{
+  const child = spawn('sh', [path.join(suiteDir, 'scripts', 'run-tests.sh')], {
+    cwd: suiteDir, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  child.stdout.on('data', (d) => { out += d.toString(); });
+  child.stderr.on('data', (d) => { out += d.toString(); });
+
+  const code = await new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      timedOut = true;
+      // The GROUP, not the shell. Killing the shell alone is defect 1 above.
+      try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
+    }, RUN_TIMEOUT_MS);
+    child.on('close', (c) => { clearTimeout(timer); resolve(c); });
+    child.on('error', () => { clearTimeout(timer); resolve(1); });
+  });
+  red = timedOut || code !== 0;
 }
 
 // The signature: which test FILES failed. Parsed from the runner's failure
@@ -84,7 +122,7 @@ const files = [...new Set([...out.matchAll(/location: '([^']*\/tests\/[^']+\.tes
  * that SURVIVES isolation posts. A flake is logged, never alarmed.
  */
 let flake = false;
-if (red && files.length) {
+if (red && !timedOut && files.length) {
   try {
     execFileSync('node', ['--test', ...files.map((f) => path.join('tests', f))], {
       cwd: suiteDir, timeout: 10 * 60 * 1000,
@@ -94,7 +132,10 @@ if (red && files.length) {
   } catch { /* still red in isolation — a real red */ }
 }
 cleanup();
-const sig = red ? (files.join(',') || 'unparsed') : null;
+// #735 — a killed run is a TIMEOUT, never 'unparsed'. 'unparsed' claims the
+// output was unreadable and aims the reader at the parser; the run never
+// finished, which aims them at the hang.
+const sig = red ? (timedOut ? 'timeout' : (files.join(',') || 'unparsed')) : null;
 if (flake) console.log(`${now} full-run red did NOT survive isolation — flake, silent: [${files.join(', ')}]`);
 
 let st = { sigTimes: {} };
@@ -117,8 +158,13 @@ console.log(`${now} suite RED sig=[${sig}] ${muted ? 'muted' : 'FIRING'} ${summa
 
 if (!muted) {
   st.sigTimes[sig] = Date.now();
-  const body = `🔴 suite watch: the FULL test suite is RED (${summary || 'summary unparsed'}). `
-    + `Failing file(s): ${files.length ? files.join(', ') : 'unparsed — read the log'}. `
+  const body = timedOut
+    ? `🔴 suite watch: the FULL suite did not FINISH — killed after ${Math.round(RUN_TIMEOUT_MS / 1000)}s `
+      + `and its process group terminated. This is a HANG, not a failing assertion: `
+      + `${summary || 'no summary — it never reached one'}. `
+      + `${files.length ? `Last files seen: ${files.join(', ')}. ` : ''}`
+    : `🔴 suite watch: the FULL test suite is RED (${summary || 'summary unparsed'}). `
+      + `Failing file(s): ${files.length ? files.join(', ') : 'unparsed — read the log'}. `
     + `A red suite invalidates every "no regressions" claim until it is green (the #465 lesson: `
     + `the rail worked and nobody read it — this post is the subscription). `
     + `Repro: scripts/run-tests.sh in the repo. (This signature now mutes for `
