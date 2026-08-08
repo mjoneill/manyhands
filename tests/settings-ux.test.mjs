@@ -53,19 +53,105 @@ test('#410 settings page: flip to TokenRing + set the lease timeout, save, confi
   }
 });
 
-test('#263 settings page: an invalid window (min > max) is rejected with the validation message', async () => {
+// #737 rewrote this assertion. It previously matched /Rejected/ — the prefix of
+// the passthrough of the server's message. That is wording, not behaviour: the
+// property the title claims is "an invalid window is REJECTED with a validation
+// message", and it survives the client now catching this case in seconds.
+//
+// Strengthened while here, because the old version never checked the half that
+// matters: it asserted a message appeared and never that the config was left
+// alone. A save that both complained AND persisted would have passed.
+test('#263/#737 settings page: an invalid window (min > max) is refused, explained, and not saved', async () => {
+  const server = await startRestServer();
+  const browser = await puppeteer.launch({ headless: 'new' });
+  try {
+    const page = await browser.newPage();
+    await page.goto(`${server.baseUrl}/settings.html`, { waitUntil: 'networkidle0' });
+    const before = await (await fetch(`${server.baseUrl}/api/config`)).json();
+
+    await page.click('input[name=mode][value="soft"]');
+    await page.$eval('#softMin', (el) => { el.value = '90'; });
+    await page.$eval('#softMax', (el) => { el.value = '10'; });
+    await page.click('#save');
+    await page.waitForFunction(() => document.getElementById('msg')?.classList.contains('err'), { timeout: 5000 });
+
+    const text = await page.$eval('#msg', (el) => el.textContent);
+    assert.match(text, /90.*10|backwards/i, `explains which way round it went wrong: ${text}`);
+    assert.doesNotMatch(text, /\d{4,}/, `states the problem in the seconds the field asked for, not raw ms: ${text}`);
+
+    const after = await (await fetch(`${server.baseUrl}/api/config`)).json();
+    assert.deepEqual(after.soft, before.soft, 'a refused window must not be persisted');
+  } finally {
+    await browser.close();
+    await server.stop();
+  }
+});
+
+// #737 — the owner's exact input. 120→360 is a genuine violation (360s > the 300s
+// ceiling), so the refusal is correct; the bug was that it was reported as
+// "0 <= minMs <= maxMs <= 300000" to someone typing into a field labelled
+// seconds, from which the real limit cannot be derived.
+test('#737 an over-ceiling window is refused in SECONDS, naming the field and the limit', async () => {
   const server = await startRestServer();
   const browser = await puppeteer.launch({ headless: 'new' });
   try {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/settings.html`, { waitUntil: 'networkidle0' });
     await page.click('input[name=mode][value="soft"]');
-    await page.$eval('#softMin', (el) => { el.value = '90'; });
-    await page.$eval('#softMax', (el) => { el.value = '10'; });
+
+    // The browser itself should now refuse the value before anyone clicks Save.
+    assert.equal(await page.$eval('#softMax', (el) => el.max), '300',
+      'the input must carry the server ceiling, converted to seconds');
+
+    await page.$eval('#softMin', (el) => { el.value = '120'; });
+    await page.$eval('#softMax', (el) => { el.value = '360'; });
     await page.click('#save');
     await page.waitForFunction(() => document.getElementById('msg')?.classList.contains('err'), { timeout: 5000 });
+
     const text = await page.$eval('#msg', (el) => el.textContent);
-    assert.match(text, /Rejected/, `shows the server rejection: ${text}`);
+    assert.match(text, /300 seconds/, `names the actual ceiling in seconds: ${text}`);
+    assert.match(text, /360/, `quotes back what was entered: ${text}`);
+    assert.doesNotMatch(text, /300000|minMs|maxMs/, `no raw-millisecond predicate leaks to the user: ${text}`);
+
+    // And the largest window that DOES fit must save, so the ceiling is usable
+    // rather than merely explained.
+    await page.$eval('#softMax', (el) => { el.value = '300'; });
+    await page.click('#save');
+    await page.waitForFunction(() => document.getElementById('msg')?.classList.contains('ok'), { timeout: 5000 });
+    const cfg = await (await fetch(`${server.baseUrl}/api/config`)).json();
+    assert.equal(cfg.soft.maxMs, 300000, '120s→300s sits exactly at the ceiling and must persist');
+  } finally {
+    await browser.close();
+    await server.stop();
+  }
+});
+
+// #737 — the guard the client-side check makes necessary. Pre-validating in the
+// page is a convenience layered ON the server's authority, and the danger of any
+// such layer is that it becomes the only check and then disagrees. If the bounds
+// never arrive, the editor must defer rather than invent a limit, and the
+// server's refusal must still reach the user instead of being swallowed.
+test('#737 with the bounds unavailable, the editor defers and the SERVER refusal still surfaces', async () => {
+  const server = await startRestServer();
+  const browser = await puppeteer.launch({ headless: 'new' });
+  try {
+    const page = await browser.newPage();
+    await page.goto(`${server.baseUrl}/settings.html`, { waitUntil: 'networkidle0' });
+    await page.click('input[name=mode][value="soft"]');
+
+    // Simulate a server that never told us its bounds.
+    await page.evaluate(() => { LIMITS_S = null; });
+
+    await page.$eval('#softMin', (el) => { el.value = '120'; });
+    await page.$eval('#softMax', (el) => { el.value = '360'; });
+    await page.click('#save');
+    await page.waitForFunction(() => document.getElementById('msg')?.classList.contains('err'), { timeout: 5000 });
+
+    const text = await page.$eval('#msg', (el) => el.textContent);
+    assert.match(text, /Rejected/, `the server's own rejection must still be shown: ${text}`);
+
+    const cfg = await (await fetch(`${server.baseUrl}/api/config`)).json();
+    assert.notEqual(cfg.soft.maxMs, 360000, 'and the out-of-range value must not persist');
   } finally {
     await browser.close();
     await server.stop();

@@ -158,9 +158,64 @@ function showFields() {
   $('token-ring-fields').style.display = mode === 'token-ring' ? '' : 'none';
 }
 
+// #737 — the server's bounds, in the seconds this page speaks. Populated from
+// GET /api/config so the ceiling is never a second copy of a number that lives
+// in channel-config.mjs. Null until load() succeeds; checkBounds() then says so
+// rather than silently passing an unchecked value to the server.
+let LIMITS_S = null;
+const toS = (ms) => Math.round(ms / 1000);
+
+/**
+ * Validate in the units the user typed, and name the offending field.
+ * Returns null when everything is in range, else a sentence to show.
+ *
+ * The server still enforces all of this — its rejection was correct; it was
+ * merely unreadable, quoting `maxMs <= 300000` at someone who had typed 360
+ * into a field labelled seconds. This does not replace that check, it makes the
+ * common case explicable before a round trip.
+ */
+function checkBounds(v) {
+  if (!LIMITS_S) return null; // bounds unknown — let the server decide
+  const L = LIMITS_S;
+  if (v.softMin < L.soft.min || v.softMin > L.soft.max) {
+    return `"Everyone else waits" start must be between ${L.soft.min} and ${L.soft.max} seconds — you entered ${v.softMin}.`;
+  }
+  if (v.softMax < L.soft.min || v.softMax > L.soft.max) {
+    return `"Everyone else waits" end must be between ${L.soft.min} and ${L.soft.max} seconds — you entered ${v.softMax}.`;
+  }
+  if (v.softMax < v.softMin) {
+    return `The wait window runs backwards: ${v.softMin}s to ${v.softMax}s. The second number must be the larger one.`;
+  }
+  if (v.hard < L.hard.min || v.hard > L.hard.max) {
+    return `Hard timeout must be between ${L.hard.min} and ${L.hard.max} seconds — you entered ${v.hard}.`;
+  }
+  if (v.ring < L.tokenRing.min || v.ring > L.tokenRing.max) {
+    return `Token-ring timeout must be between ${L.tokenRing.min} and ${L.tokenRing.max} seconds — you entered ${v.ring}.`;
+  }
+  return null;
+}
+
 async function load() {
   try {
     const cfg = await (await fetch('/api/config')).json();
+    // Bounds come from their own endpoint; if it fails we simply don't
+    // pre-validate, and the server stays the authority as before.
+    const lim = await fetch('/api/config/limits').then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    if (lim) {
+      LIMITS_S = {
+        soft: { min: toS(lim.soft.minMs), max: toS(lim.soft.maxMs) },
+        hard: { min: toS(lim.hard.minMs), max: toS(lim.hard.maxMs) },
+        tokenRing: { min: toS(lim.tokenRing.minMs), max: toS(lim.tokenRing.maxMs) },
+      };
+      // Let the number inputs carry the range too, so the browser's own spinner
+      // and validation refuse an out-of-range value before anyone clicks Save.
+      $('softMin').max = LIMITS_S.soft.max;
+      $('softMax').max = LIMITS_S.soft.max;
+      $('hardTimeout').min = LIMITS_S.hard.min;
+      $('hardTimeout').max = LIMITS_S.hard.max;
+      $('tokenRingTimeout').min = LIMITS_S.tokenRing.min;
+      $('tokenRingTimeout').max = LIMITS_S.tokenRing.max;
+    }
     const r = document.querySelector(`input[name=mode][value="${cfg.mode}"]`);
     if (r) r.checked = true;
     $('softMin').value = Math.round((cfg.soft?.minMs ?? 30000) / 1000);
@@ -176,11 +231,24 @@ async function load() {
 async function save() {
   $('save').disabled = true;
   const mode = document.querySelector('input[name=mode]:checked').value;
+  const secs = {
+    softMin: Number($('softMin').value),
+    softMax: Number($('softMax').value),
+    hard: Number($('hardTimeout').value),
+    ring: Number($('tokenRingTimeout').value),
+  };
+  // #737 — say it in seconds, before the round trip, naming the field.
+  const problem = checkBounds(secs);
+  if (problem) {
+    msg(problem, false);
+    $('save').disabled = false;
+    return;
+  }
   const body = {
     mode,
-    soft: { minMs: Math.round(Number($('softMin').value) * 1000), maxMs: Math.round(Number($('softMax').value) * 1000) },
-    hard: { timeoutMs: Math.round(Number($('hardTimeout').value) * 1000) },
-    tokenRing: { timeoutMs: Math.round(Number($('tokenRingTimeout').value) * 1000) },
+    soft: { minMs: Math.round(secs.softMin * 1000), maxMs: Math.round(secs.softMax * 1000) },
+    hard: { timeoutMs: Math.round(secs.hard * 1000) },
+    tokenRing: { timeoutMs: Math.round(secs.ring * 1000) },
   };
   try {
     const res = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });

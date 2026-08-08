@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { validateConfig, readConfig, writeConfig, DEFAULT_CONFIG } from '../channel-config.mjs';
+import { validateConfig, readConfig, writeConfig, DEFAULT_CONFIG, LIMITS } from '../channel-config.mjs';
 
 const tmpFile = () => path.join(os.tmpdir(), `scrum-chan-cfg-${process.pid}-${Math.random().toString(36).slice(2)}.json`);
 
@@ -80,4 +80,75 @@ test('writeConfig throws on invalid input and does NOT write the file', () => {
   const f = tmpFile();
   assert.throws(() => writeConfig({ mode: 'nope' }, f), /mode must be/);
   assert.equal(fs.existsSync(f), false, 'invalid config never hit disk');
+});
+
+// ── #737 — the advertised bound must BE the enforced bound ────────────────
+//
+// The owner typed 120 and 360 into fields labelled "seconds" and was told
+// "soft window must satisfy 0 <= minMs <= maxMs <= 300000". The rejection was
+// correct — 360s is 360000ms, over the 5-minute ceiling — but the sentence
+// quotes milliseconds at someone looking at a seconds field, so there is no way
+// to derive "the limit is 300" from it. The editor now states bounds in seconds,
+// which means it needs them from the server rather than as a copied constant.
+//
+// The hazard that copy would create is exactly what these tests close: LIMITS
+// is published for the UI, so a LIMITS that disagreed with validateConfig would
+// advertise a value the server refuses — a false assurance on the path of the
+// action, which is worse than the unreadable message it replaced.
+//
+// So these do not assert LIMITS equals 300000 (that passes trivially and would
+// pass just as well if both sides were wrong together). They assert the
+// advertised edge is ACCEPTED and one unit past it is REJECTED, i.e. that the
+// number the UI shows is the number the validator enforces.
+test('#737 the advertised soft ceiling is exactly the enforced one', () => {
+  const at = validateConfig({
+    mode: 'soft',
+    soft: { minMs: LIMITS.soft.minMs, maxMs: LIMITS.soft.maxMs },
+    hard: { timeoutMs: 300000 },
+    tokenRing: { timeoutMs: 300000 },
+  });
+  assert.equal(at.soft.maxMs, LIMITS.soft.maxMs, 'the advertised ceiling must be accepted');
+
+  assert.throws(() => validateConfig({
+    mode: 'soft',
+    soft: { minMs: LIMITS.soft.minMs, maxMs: LIMITS.soft.maxMs + 1 },
+    hard: { timeoutMs: 300000 },
+    tokenRing: { timeoutMs: 300000 },
+  }), /soft window/, 'one millisecond past the advertised ceiling must be refused');
+});
+
+test('#737 the advertised hard and token-ring bounds are the enforced ones', () => {
+  const edges = (timeoutMs, ringMs) => validateConfig({
+    mode: 'hard', soft: { minMs: 0, maxMs: 1000 },
+    hard: { timeoutMs }, tokenRing: { timeoutMs: ringMs },
+  });
+
+  assert.ok(edges(LIMITS.hard.minMs, LIMITS.tokenRing.minMs), 'advertised floors must be accepted');
+  assert.ok(edges(LIMITS.hard.maxMs, LIMITS.tokenRing.maxMs), 'advertised ceilings must be accepted');
+
+  assert.throws(() => edges(LIMITS.hard.minMs - 1, LIMITS.tokenRing.minMs), /hard\.timeoutMs/);
+  assert.throws(() => edges(LIMITS.hard.maxMs + 1, LIMITS.tokenRing.minMs), /hard\.timeoutMs/);
+  assert.throws(() => edges(LIMITS.hard.minMs, LIMITS.tokenRing.minMs - 1), /token-ring/);
+  assert.throws(() => edges(LIMITS.hard.minMs, LIMITS.tokenRing.maxMs + 1), /token-ring/);
+});
+
+// The owner's exact input, kept as a named case so the regression is legible:
+// 120→360 seconds is a REAL violation, not a false rejection. Whether the
+// ceiling should be 5 minutes at all is a product question (#737 does not
+// change it) — but if it is ever raised, this test is where the decision
+// becomes visible rather than silent.
+test('#737 120s→360s is genuinely out of range — the ceiling is 300s, not a UI bug', () => {
+  assert.throws(() => validateConfig({
+    mode: 'soft',
+    soft: { minMs: 120 * 1000, maxMs: 360 * 1000 },
+    hard: { timeoutMs: 300000 },
+    tokenRing: { timeoutMs: 300000 },
+  }), /soft window/);
+
+  assert.ok(validateConfig({
+    mode: 'soft',
+    soft: { minMs: 120 * 1000, maxMs: 300 * 1000 },
+    hard: { timeoutMs: 300000 },
+    tokenRing: { timeoutMs: 300000 },
+  }), '120s→300s sits exactly at the ceiling and must be accepted');
 });

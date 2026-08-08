@@ -33,6 +33,26 @@ const HARD_MAX_MS = 1800000; // 30 min
 const TOKEN_RING_MIN_MS = 90000; // 90 s
 const TOKEN_RING_MAX_MS = 1800000; // 30 min
 
+/**
+ * #737 — the bounds, published rather than private.
+ *
+ * The settings page presents every one of these fields in SECONDS and converts
+ * on save, so a rejection quoting raw milliseconds reads as nonsense: typing
+ * 360 into a seconds field and being told the limit is 300000 offers no way to
+ * work out that the ceiling is 300. The editor has to be able to say the bound
+ * in the units it asked for.
+ *
+ * Exported instead of duplicated in the UI, because a copied `300` is a second
+ * place holding one fact and it drifts the first time this ceiling moves. These
+ * are the SAME constants validateConfig enforces below — the advertised bound
+ * cannot disagree with the enforced one, and a test asserts exactly that.
+ */
+export const LIMITS = {
+  soft: { minMs: 0, maxMs: SOFT_CEIL_MS },
+  hard: { minMs: HARD_MIN_MS, maxMs: HARD_MAX_MS },
+  tokenRing: { minMs: TOKEN_RING_MIN_MS, maxMs: TOKEN_RING_MAX_MS },
+};
+
 /** The config file path, resolved per-call so SCRUM_CHANNEL_CONFIG_FILE (tests) works at runtime. */
 export function configFilePath() {
   return process.env.SCRUM_CHANNEL_CONFIG_FILE || path.join(__dirname, 'channel-config.json');

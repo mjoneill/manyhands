@@ -38,7 +38,7 @@ import { appendEvent } from './core/event-log.mjs';
 import { boardToDomain, domainToBoard, cardToNode } from './core/mapping.mjs';
 import { buildTree, buildChildIndex } from './core/tree.mjs';
 import { buildLinkIndex } from './core/links.mjs';
-import { readConfig, writeConfig } from './channel-config.mjs';
+import { readConfig, writeConfig, LIMITS } from './channel-config.mjs';
 import { loadRoster, writeRoster, rosterFilePath } from './core/roster-config.mjs';
 import { extractMentions as extractMentionsFromRoster } from './core/people.mjs';
 import { buildGraphStore, queryGraph, syncGraphStore } from './core/graph-replica.mjs';
@@ -1039,6 +1039,22 @@ async function handleSetRoster(req, res) {
 
 // ── /api/config — channel delivery settings (#263); read by the MCP scheduler
 // live, so changes apply with no restart. ──
+// #737 — the BOUNDS, served separately from the VALUES.
+//
+// The settings editor renders every timing in seconds and converts on save, so a
+// refusal quoting `maxMs <= 300000` at someone who typed 360 is unreadable: the
+// real limit (300) cannot be derived from it. The editor needs the ceiling to
+// say so in its own units — and taking it from the server rather than hardcoding
+// `300` keeps one fact in one place, so the message cannot outlive a change to
+// the constant.
+//
+// Deliberately NOT folded into GET /api/config. That response is pinned to the
+// exact config shape by a test that documents why each key is there, and that
+// contract is worth more than saving a round trip.
+function handleGetConfigLimits(req, res) {
+  sendJSON(res, 200, LIMITS);
+}
+
 function handleGetConfig(req, res) {
   try {
     sendJSON(res, 200, readConfig());
@@ -1913,6 +1929,7 @@ const API_ROUTES = [
   { method: 'GET',    re: /^\/api\/board\/status$/,         fn: (req, res) => handleBoardStatus(req, res) },
   { method: 'GET',    re: /^\/api\/board$/,                fn: (req, res) => handleGetBoard(req, res) },
   { method: 'GET',    re: /^\/api\/roster$/,               fn: (req, res) => handleGetRoster(req, res) },
+  { method: 'GET',    re: /^\/api\/config\/limits$/,       fn: (req, res) => handleGetConfigLimits(req, res) },
   { method: 'GET',    re: /^\/api\/config$/,               fn: (req, res) => handleGetConfig(req, res) },
   { method: 'GET',    re: /^\/api\/channel-status$/,       fn: (req, res) => handleChannelStatus(req, res) },
   { method: 'POST',   re: /^\/api\/config$/,               fn: (req, res) => handleSetConfig(req, res) },
