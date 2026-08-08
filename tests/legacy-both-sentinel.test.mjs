@@ -1,7 +1,7 @@
 /**
  * #508 — the legacy 'both' assignee sentinel must never mint example seats.
- * RED-first, non-author bar (Wren), written from the card's acceptance before
- * the builder touches anything; Indigo builds to green.
+ * RED-first, non-author bar (the reviewing seat), written from the card's acceptance before
+ * the builder touches anything; the builder builds to green.
  *
  * The disease (#504's 5th instance): `both` is a pre-#51 sentinel meaning "the
  * two people working on this," and shipped code expands it to the two
@@ -28,8 +28,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import puppeteer from 'puppeteer';
-import { startRestServer, makeBoardFixture, PROJECT_DIR } from './helpers/harness.mjs';
+import { startRestServer, makeBoardFixture, PROJECT_DIR, withBrowserServer } from './helpers/harness.mjs';
 
 const EXAMPLE_SEATS = ['alex', 'robin'];
 
@@ -103,39 +102,37 @@ test('#508 legacy reader: a restored board carrying assignee "both" converts lou
     }],
     nextShortId: 8,
   });
-  const server = await startRestServer({
-    board: legacyBoard,
-    env: { SCRUM_ROSTER_FILE: rosterFile },
-  });
-  const browser = await puppeteer.launch({ headless: 'new' });
   try {
-    const page = await browser.newPage();
-    const consoleMessages = [];
-    page.on('console', (msg) => consoleMessages.push(msg.text()));
+    await withBrowserServer(async ({ server, browser }) => {
+      const page = await browser.newPage();
+      const consoleMessages = [];
+      page.on('console', (msg) => consoleMessages.push(msg.text()));
 
-    await page.goto(`${server.baseUrl}/`, { waitUntil: 'networkidle0' });
-    await page.waitForSelector('.card-title, .card', { timeout: 5000 });
+      await page.goto(`${server.baseUrl}/`, { waitUntil: 'networkidle0' });
+      await page.waitForSelector('.card-title, .card', { timeout: 5000 });
 
-    // What the migrated card actually renders. Plain selector on purpose: a
-    // first draft walked the DOM with a clever fallback and matched the wrong
-    // container, passing vacuously while the page showed "alex robin" plain as
-    // day (watched, 2026-07-26 — the probe's convenience feature was the
-    // defect, same shape as Indigo's #main fallback the same afternoon).
-    const cardText = await page.$eval('.card', (el) => el.textContent.replace(/\s+/g, ' '));
-    assert.ok(cardText.includes('Pre-51 card'), `probe grabbed the wrong card: ${cardText.slice(0, 120)}`);
+      // What the migrated card actually renders. Plain selector on purpose: a
+      // first draft walked the DOM with a clever fallback and matched the wrong
+      // container, passing vacuously while the page showed "alex robin" plain as
+      // day (watched, 2026-07-26 — the probe's convenience feature was the
+      // defect, same shape as the builder's #main fallback the same afternoon).
+      const cardText = await page.$eval('.card', (el) => el.textContent.replace(/\s+/g, ' '));
+      assert.ok(cardText.includes('Pre-51 card'), `probe grabbed the wrong card: ${cardText.slice(0, 120)}`);
 
-    // Must not resolve to the example seats the roster does not contain —
-    // neither as keys nor as their rendered raw-grey names.
-    assert.ok(!/\balex\b/i.test(cardText) && !/\brobin\b/i.test(cardText),
-      `legacy 'both' card renders example seats on a zephyr/quill board: ${cardText.slice(0, 200)}`);
+      // Must not resolve to the example seats the roster does not contain —
+      // neither as keys nor as their rendered raw-grey names.
+      assert.ok(!/\balex\b/i.test(cardText) && !/\brobin\b/i.test(cardText),
+        `legacy 'both' card renders example seats on a zephyr/quill board: ${cardText.slice(0, 200)}`);
 
-    // The loud half of the mirror: a console warning naming shortId 7.
-    const warned = consoleMessages.some((m) => /both/i.test(m) && /\b7\b|#7/.test(m));
-    assert.ok(warned,
-      `no console warning names the converted card (shortId 7); console saw: ${consoleMessages.slice(0, 10).join(' | ') || '(nothing)'}`);
+      // The loud half of the mirror: a console warning naming shortId 7.
+      const warned = consoleMessages.some((m) => /both/i.test(m) && /\b7\b|#7/.test(m));
+      assert.ok(warned,
+        `no console warning names the converted card (shortId 7); console saw: ${consoleMessages.slice(0, 10).join(' | ') || '(nothing)'}`);
+    }, { server: {
+      board: legacyBoard,
+      env: { SCRUM_ROSTER_FILE: rosterFile },
+    }, launch: { headless: 'new' } });
   } finally {
-    await browser.close();
-    await server.stop();
     fs.rmSync(rosterFile, { force: true });
   }
 });
@@ -180,35 +177,33 @@ test('#508 mechanical: no ["alex","robin"] expansion literal survives in shipped
 // ---------------------------------------------------------------------------
 test('#520/#508 read path: no picker OFFERS the retired sentinel, on a synthetic roster', async () => {
   const rosterFile = syntheticRosterFile();
-  const server = await startRestServer({
-    board: makeBoardFixture(),
-    env: { SCRUM_ROSTER_FILE: rosterFile },
-  });
-  const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'] });
   try {
-    const page = await browser.newPage();
-    await page.goto(server.baseUrl, { waitUntil: 'networkidle0' });
-    await page.waitForSelector('#convs-author option', { timeout: 5000 });
+    await withBrowserServer(async ({ server, browser }) => {
+      const page = await browser.newPage();
+      await page.goto(server.baseUrl, { waitUntil: 'networkidle0' });
+      await page.waitForSelector('#convs-author option', { timeout: 5000 });
 
-    const offered = await page.evaluate(() => ({
-      author: [...(document.getElementById('convs-author')?.options || [])].map((o) => o.value),
-      assignees: [...document.querySelectorAll('#card-assignees-group input[type=checkbox]')].map((i) => i.value),
-    }));
+      const offered = await page.evaluate(() => ({
+        author: [...(document.getElementById('convs-author')?.options || [])].map((o) => o.value),
+        assignees: [...document.querySelectorAll('#card-assignees-group input[type=checkbox]')].map((i) => i.value),
+      }));
 
-    assert.ok(offered.author.length, 'the author picker rendered empty — the probe is broken, not the product');
-    assert.ok(!offered.author.includes('both'),
-      `"Post as" offers the retired sentinel: ${offered.author.join(', ')} — a human can author a commons post as a seat that does not exist`);
-    assert.ok(!offered.assignees.includes('both'),
-      `the assignee picker offers the retired sentinel: ${offered.assignees.join(', ')} — the API refuses it with 400, so the control is dead and the error is undeserved`);
+      assert.ok(offered.author.length, 'the author picker rendered empty — the probe is broken, not the product');
+      assert.ok(!offered.author.includes('both'),
+        `"Post as" offers the retired sentinel: ${offered.author.join(', ')} — a human can author a commons post as a seat that does not exist`);
+      assert.ok(!offered.assignees.includes('both'),
+        `the assignee picker offers the retired sentinel: ${offered.assignees.join(', ')} — the API refuses it with 400, so the control is dead and the error is undeserved`);
 
-    // …and the real seats DID arrive, so this can't pass by rendering nothing.
-    assert.deepEqual(offered.author.slice().sort(), ['quill', 'zephyr'],
-      'the author picker should offer exactly the configured roster');
-    assert.ok(offered.assignees.includes('unassigned'),
-      'unassigned is a pseudo-seat the pickers DO need — over-filtering is its own bug');
+      // …and the real seats DID arrive, so this can't pass by rendering nothing.
+      assert.deepEqual(offered.author.slice().sort(), ['quill', 'zephyr'],
+        'the author picker should offer exactly the configured roster');
+      assert.ok(offered.assignees.includes('unassigned'),
+        'unassigned is a pseudo-seat the pickers DO need — over-filtering is its own bug');
+    }, { server: {
+      board: makeBoardFixture(),
+      env: { SCRUM_ROSTER_FILE: rosterFile },
+    }, launch: { headless: 'new', args: ['--no-sandbox'] } });
   } finally {
-    await browser.close();
-    await server.stop();
     fs.rmSync(rosterFile, { force: true });
   }
 });

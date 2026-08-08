@@ -11,8 +11,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import puppeteer from 'puppeteer';
-import { startRestServer } from './helpers/harness.mjs';
+import { startRestServer, withBrowserServer } from './helpers/harness.mjs';
 
 const ts = '2026-05-01T00:00:00.000Z';
 const card = (id, shortId, title, column) => ({
@@ -49,24 +48,17 @@ async function pollColumn(baseUrl, shortId, want, ms = 4000) {
 }
 
 test('#232 the card "open as page" glyph is visible without hover', async () => {
-  const server = await startRestServer({ board });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('.card .card-page-btn', { timeout: 5000 });
     const opacity = await page.$eval('.card .card-page-btn', (el) => parseFloat(getComputedStyle(el).opacity));
     assert.ok(opacity > 0, `page glyph discoverable without hover (opacity ${opacity})`);
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board }, launch: { headless: 'new' } });
 });
 
 test('#233 column-move arrows: ▶ moves to the next column; ◀ disabled at the leftmost', async () => {
-  const server = await startRestServer({ board });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('.card[data-id="a"] .card-move-right', { timeout: 5000 });
@@ -78,16 +70,11 @@ test('#233 column-move arrows: ▶ moves to the next column; ◀ disabled at the
     // Click ▶ → Card A moves backlog → planned-x (the next column by order).
     await page.click('.card[data-id="a"] .card-move-right');
     assert.ok(await pollColumn(server.baseUrl, 1, 'planned-x'), 'Card A moved one column right via ▶');
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board }, launch: { headless: 'new' } });
 });
 
 test('#234 edit Column dropdown lists custom columns and preserves them on save', async () => {
-  const server = await startRestServer({ board });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('.card[data-id="p"] .card-edit-btn', { timeout: 5000 });
@@ -104,10 +91,7 @@ test('#234 edit Column dropdown lists custom columns and preserves them on save'
     // Save without changing the column → it must STAY planned-x (the old bug reset it).
     await page.click('.card[data-id="p"] .btn-save-edit');
     assert.ok(await pollColumn(server.baseUrl, 2, 'planned-x'), 'custom column preserved through an edit-save');
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board }, launch: { headless: 'new' } });
 });
 
 // ── #303-4: backlog staleness expander + column collapse ──
@@ -140,9 +124,7 @@ const staleBoard = {
 };
 
 test('#303-4 backlog folds 30+-day-stale cards behind a "show N older" expander', async () => {
-  const server = await startRestServer({ board: staleBoard });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('.card[data-id="fresh"]', { timeout: 5000 });
@@ -159,16 +141,11 @@ test('#303-4 backlog folds 30+-day-stale cards behind a "show N older" expander'
     await page.click('.stale-toggle');
     await page.waitForSelector('.card[data-id="old1"]', { timeout: 3000 });
     assert.ok(await page.$('.card[data-id="old2"]'), 'both stale cards revealed after expand');
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board: staleBoard }, launch: { headless: 'new' } });
 });
 
 test('#303-4 a column can be collapsed to just its header (persists across re-render)', async () => {
-  const server = await startRestServer({ board: staleBoard });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('.column[id="column-backlog"] .card', { timeout: 5000 });
@@ -184,8 +161,5 @@ test('#303-4 a column can be collapsed to just its header (persists across re-re
     await page.evaluate(() => window.renderBoard && window.renderBoard());
     const stillCollapsed = await page.$('.column[id="column-backlog"].collapsed');
     assert.ok(stillCollapsed, 'collapse state persists across re-render');
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board: staleBoard }, launch: { headless: 'new' } });
 });

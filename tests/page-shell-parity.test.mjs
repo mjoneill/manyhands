@@ -1,7 +1,7 @@
 /**
  * #496 — page-shell parity suite. RED-first, written from the card's
  * pre-registered acceptance BEFORE the first build commit (lane adopted
- * 2026-07-26: Wren authors the bar, Indigo builds to green).
+ * 2026-07-26: the reviewing seat authors the bar, the builder builds to green).
  *
  * The disease this suite exists to catch: four surfaces drifting from each
  * other — four headers, four width strategies, four type sizes — while a test
@@ -29,10 +29,10 @@
  * Probe scope note: the card names two anchor probes — 200% browser zoom and
  * 200% default-font-size preference. This suite ships the PREFERENCE probe
  * (the stricter of the two: a px type scale passes zoom and fails preference).
- * The zoom probe runs in Wren's live-Chrome path-walk with screenshot
+ * The zoom probe runs in the reviewing seat's live-Chrome path-walk with screenshot
  * receipts, because headless CDP has no true browser-zoom lever.
  *
- * "A recommendation is a direction; an assertion is a contract." — MiniMo,
+ * "A recommendation is a direction; an assertion is a contract." — a peer seat,
  * 2026-07-26. The assertions below are the contract.
  */
 
@@ -40,8 +40,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import puppeteer from 'puppeteer';
-import { startRestServer, makeBoardFixture, PROJECT_DIR } from './helpers/harness.mjs';
+import { startRestServer, makeBoardFixture, PROJECT_DIR, withBrowserServer } from './helpers/harness.mjs';
 
 const SHELL = '[data-page-shell]';
 const PROSE = '.prose';
@@ -125,7 +124,7 @@ async function collectSurfaceMetrics(page, baseUrl, surfacePath, viewport) {
       const linkStyle = firstLink ? getComputedStyle(firstLink) : null;
       return {
         navLabels: [...document.querySelectorAll('.topnav .navlink')].map((e) => e.textContent.trim()),
-        // Third divergence axis (Indigo's measured baseline, 2026-07-26):
+        // Third divergence axis (the builder's measured baseline, 2026-07-26):
         // the board ships fat links (padding 8px 14px, flex:0 0 auto) while
         // the other three ship thin ones (8px 0, flex:1 1 0%). A shell can
         // standardize position and width and still leave this.
@@ -153,9 +152,7 @@ async function collectSurfaceMetrics(page, baseUrl, surfacePath, viewport) {
 
 for (const [stateName, makeBoard] of [['populated', populatedBoard], ['empty', emptyBoard]]) {
   test(`#496 parity (${stateName} state): shell, nav order, alignment, width, and type agree on all four surfaces at every viewport`, async () => {
-    const server = await startRestServer({ board: makeBoard() });
-    const browser = await puppeteer.launch({ headless: 'new' });
-    try {
+    await withBrowserServer(async ({ server, browser }) => {
       const page = await browser.newPage();
       const byViewport = new Map();
       // One run reports the WHOLE punch list, not just the first miss —
@@ -176,7 +173,7 @@ for (const [stateName, makeBoard] of [['populated', populatedBoard], ['empty', e
           // Nav items: exact order equality. NOTE (watched run, 2026-07-26):
           // this is GREEN today — core/header.mjs already renders one shared
           // four-item nav on all four pages, and the board's fifth control is
-          // an adjacent button, not a nav entry (Indigo's read of the four
+          // an adjacent button, not a nav entry (the builder's read of the four
           // surfaces, confirmed by this suite's first run). It stays as the
           // regression guard the old membership test failed to be; it is not
           // one of the RED teeth.
@@ -228,15 +225,12 @@ for (const [stateName, makeBoard] of [['populated', populatedBoard], ['empty', e
 
       assert.deepEqual(offenses, [],
         `${stateName} state parity offenses (${offenses.length}):\n${offenses.join('\n')}`);
-    } finally {
-      await browser.close();
-      await server.stop();
-    }
+    }, { server: { board: makeBoard() }, launch: { headless: 'new' } });
   });
 }
 
 // ---------------------------------------------------------------------------
-// REOPEN TEETH (2026-07-27, Michael's live walk — #496 reopened). Three
+// REOPEN TEETH (2026-07-27, the owner's live walk — #496 reopened). Three
 // certified tiers passed a card that didn't meet its own written scope: work
 // item 2 reads `[ title ] [ destinations ] [ utility cluster ]` and the TITLE
 // half was never built, never asserted, never cold-waked — a correlated blind
@@ -246,9 +240,7 @@ for (const [stateName, makeBoard] of [['populated', populatedBoard], ['empty', e
 // shell head, same mark on every surface.
 // ---------------------------------------------------------------------------
 test('#496 reopen: every surface carries the same product mark in the shell head', async () => {
-  const server = await startRestServer({ board: populatedBoard() });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.setViewport({ width: 1442, height: 900 });
     const marks = [];
@@ -277,17 +269,14 @@ test('#496 reopen: every surface carries the same product mark in the shell head
       });
     }
     assert.deepEqual(offenses, [], `product-mark offenses (${offenses.length}):\n${offenses.join('\n')}`);
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board: populatedBoard() }, launch: { headless: 'new' } });
 });
 
 /**
  * The width claim fails on the board: at 1442 the board's columns overflow to
  * ~1728, the shell header stays viewport-sized, and a horizontal scroll drags
  * the header off-screen — "header area is fixed width but the page is however
- * many columns wide… jarring" (Michael). "One width rule, applied everywhere"
+ * many columns wide… jarring" (the owner). "One width rule, applied everywhere"
  * was underspecified for content wider than the window. Design-agnostic bar:
  * EITHER the document does not scroll horizontally (the board pans inside its
  * own container under a full-width header) OR, after scrolling the document
@@ -305,9 +294,7 @@ test('#496 reopen: the shell head never detaches from the viewport on an overflo
     }],
     nextShortId: 2,
   });
-  const server = await startRestServer({ board: wideBoard });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.setViewport({ width: 1024, height: 900 });
     await page.goto(`${server.baseUrl}/`, { waitUntil: 'networkidle0' });
@@ -335,10 +322,7 @@ test('#496 reopen: the shell head never detaches from the viewport on an overflo
     }
     // If the document does not scroll horizontally, the board pans internally
     // under a full-width header — the other accepted design; nothing to assert.
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board: wideBoard }, launch: { headless: 'new' } });
 });
 
 // ---------------------------------------------------------------------------
@@ -346,14 +330,12 @@ test('#496 reopen: the shell head never detaches from the viewport on an overflo
 // 65ch measure, 1.6 leading, AA contrast in both themes.
 // ---------------------------------------------------------------------------
 test('#496 prose: .prose carries 65ch measure, 1.6 line-height, and AA contrast in both themes', async () => {
-  const server = await startRestServer({ board: populatedBoard() });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.setViewport({ width: 1442, height: 900 });
 
     // WIKI FIRST — the surface where losing the measure hurts most. Its
-    // current 760px article rule IS a prose measure in disguise (Indigo's
+    // current 760px article rule IS a prose measure in disguise (the builder's
     // width-table correction, 2026-07-26): the fix RELOCATES it to the .prose
     // class in ch, it does not merely delete it. Without this assertion, the
     // mechanical zero-count could be satisfied by deletion — wiki text would
@@ -438,10 +420,7 @@ test('#496 prose: .prose carries 65ch measure, 1.6 line-height, and AA contrast 
       assert.ok(p.contrast >= 4.5,
         `[${scheme}] ${PROSE} contrast ${p.contrast}:1 is below WCAG AA (4.5:1)`);
     }
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board: populatedBoard() }, launch: { headless: 'new' } });
 });
 
 // ---------------------------------------------------------------------------
@@ -450,9 +429,7 @@ test('#496 prose: .prose carries 65ch measure, 1.6 line-height, and AA contrast 
 // probes — a px type scale passes 200% zoom and fails this.
 // ---------------------------------------------------------------------------
 test('#496 rem anchor: body font-size grows when the browser default font-size preference doubles', async () => {
-  const server = await startRestServer({ board: emptyBoard() });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.setViewport({ width: 1024, height: 900 });
     const cdp = await page.createCDPSession();
@@ -470,8 +447,5 @@ test('#496 rem anchor: body font-size grows when the browser default font-size p
 
     assert.ok(at32 > at16 * 1.2,
       `body font-size must answer the user's default-font-size preference (rem anchor): ${at16}px at 16, ${at32}px at 32 — a px scale ignores the one lever tired eyes already use`);
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board: emptyBoard() }, launch: { headless: 'new' } });
 });

@@ -1,6 +1,6 @@
 /**
  * #510 — the card detail pop-out: ONE reading affordance at reading width.
- * RED-first, non-author bar (Wren), from the card's acceptance + the builder's
+ * RED-first, non-author bar (the reviewing seat), from the card's acceptance + the builder's
  * posted design (overlay above the board · `?card=NNN` address via pushState ·
  * `.prose` measure · four scriptable exits · deletes `.desc-toggle` same
  * commit). The design is the builder's; these teeth are the contract.
@@ -23,8 +23,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import puppeteer from 'puppeteer';
-import { startRestServer, makeBoardFixture, PROJECT_DIR } from './helpers/harness.mjs';
+import { startRestServer, makeBoardFixture, PROJECT_DIR, withBrowserServer } from './helpers/harness.mjs';
 
 const DETAIL = '[data-card-detail]';
 const ts = '2026-05-01T00:00:00.000Z';
@@ -64,9 +63,7 @@ async function detailState(page) {
 }
 
 test('#510 address: loading ?card=NNN opens a visible, non-empty overlay carrying the FULL description at reading width', async () => {
-  const server = await startRestServer({ board: boardFixture() });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.setViewport({ width: 1442, height: 900 });
     await page.goto(`${server.baseUrl}/?card=1`, { waitUntil: 'networkidle0' });
@@ -93,16 +90,11 @@ test('#510 address: loading ?card=NNN opens a visible, non-empty overlay carryin
     }, DETAIL);
     assert.ok(measure.contentWidth <= measure.ch80,
       `overlay text runs ${measure.contentWidth.toFixed(0)}px, wider than 80ch (${measure.ch80.toFixed(0)}px) — the 300px-ribbon complaint answered with an unreadable slab`);
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board: boardFixture() }, launch: { headless: 'new' } });
 });
 
 test('#510 citation + board integrity: clicking a #NNN citation opens the overlay and moves no other card', async () => {
-  const server = await startRestServer({ board: boardFixture() });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.setViewport({ width: 1442, height: 900 });
     await page.goto(server.baseUrl + '/', { waitUntil: 'networkidle0' });
@@ -131,16 +123,11 @@ test('#510 citation + board integrity: clicking a #NNN citation opens the overla
       return `${e.dataset.id}@${r.left.toFixed(0)},${r.top.toFixed(0)}`;
     }));
     assert.deepEqual(after, before, 'opening the overlay moved cards behind it — acceptance #1 of the card');
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board: boardFixture() }, launch: { headless: 'new' } });
 });
 
 test('#510 exits: Escape, close control, backdrop, and browser Back all close it — every state scriptable', async () => {
-  const server = await startRestServer({ board: boardFixture() });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.setViewport({ width: 1442, height: 900 });
 
@@ -191,10 +178,7 @@ test('#510 exits: Escape, close control, backdrop, and browser Back all close it
     assert.ok((await detailState(page)).open, 'citation must open the overlay before Back can be tested');
     await page.goBack();
     await assertClosed('browser Back');
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board: boardFixture() }, launch: { headless: 'new' } });
 });
 
 // ---------------------------------------------------------------------------

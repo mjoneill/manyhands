@@ -13,8 +13,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import puppeteer from 'puppeteer';
-import { startRestServer } from './helpers/harness.mjs';
+import { startRestServer, withBrowserServer } from './helpers/harness.mjs';
 
 const ts = '2026-05-01T00:00:00.000Z';
 // Each payload tries to break out of a "…"-quoted attribute and inject an <img>
@@ -47,9 +46,7 @@ const board = {
 };
 
 test('#249 renderCard neutralizes XSS in id/type/assignee/priority — no attribute breakout, no script exec', async () => {
-  const server = await startRestServer({ board });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('.card', { timeout: 5000 });
@@ -65,10 +62,7 @@ test('#249 renderCard neutralizes XSS in id/type/assignee/priority — no attrib
     // The card itself still renders (escaped, not destroyed).
     const title = await page.$eval('.card .card-title', (el) => el.textContent);
     assert.equal(title, 'Safe Title', 'the legitimate card still renders');
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board }, launch: { headless: 'new' } });
 });
 
 // #299 — the column RENAME input interpolates the name into value="…" via an
@@ -98,9 +92,7 @@ test('#299 column rename neutralizes XSS in the column name — no attribute bre
     conversations: [],
     nextShortId: 2,
   };
-  const server = await startRestServer({ board });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('.column-header', { timeout: 5000 });
@@ -119,8 +111,5 @@ test('#299 column rename neutralizes XSS in the column name — no attribute bre
     // The rename input exists and carries the full name as its literal value.
     const val = await page.$eval('.column-rename-input', (el) => el.value);
     assert.equal(val, COL_PWN, 'the input holds the raw name as a value, not as parsed markup');
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board }, launch: { headless: 'new' } });
 });

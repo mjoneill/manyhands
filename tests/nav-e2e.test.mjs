@@ -13,8 +13,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import puppeteer from 'puppeteer';
-import { startRestServer } from './helpers/harness.mjs';
+import { startRestServer, withBrowserServer } from './helpers/harness.mjs';
 
 const ts = '2026-05-01T00:00:00.000Z';
 const board = {
@@ -38,9 +37,7 @@ const SURFACES = [
 
 for (const s of SURFACES) {
   test(`#303-2 ${s.path} shows all four nav links, with "${s.active}" active`, async () => {
-    const server = await startRestServer({ board });
-    const browser = await puppeteer.launch({ headless: 'new' });
-    try {
+    await withBrowserServer(async ({ server, browser }) => {
       const page = await browser.newPage();
       // #488 — the served lane is intolerant of page errors, full stop.
       const pageErrors = [];
@@ -66,9 +63,6 @@ for (const s of SURFACES) {
         pageErrors, [],
         `${s.path} served by the real server must produce no page errors; saw:\n  ${pageErrors.join('\n  ')}`,
       );
-    } finally {
-      await browser.close();
-      await server.stop();
-    }
+    }, { server: { board }, launch: { headless: 'new' } });
   });
 }

@@ -1,6 +1,6 @@
 /**
  * #506 — a human edits the roster from the UI: add, rename, recolour,
- * remove — no agent, no filesystem. RED-first, non-author bar (Wren).
+ * remove — no agent, no filesystem. RED-first, non-author bar (the reviewing seat).
  *
  * Work items enumerated (checklist item 10) and where each lives:
  *   1. settings-page section editing roster.json at the DATA ROOT, four
@@ -32,7 +32,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import puppeteer from 'puppeteer';
-import { startRestServer, makeBoardFixture } from './helpers/harness.mjs';
+import { startRestServer, makeBoardFixture, withBrowserServer } from './helpers/harness.mjs';
 
 const EDITOR = '[data-roster-editor]';
 const seatRow = (key) => `[data-roster-seat="${key}"]`;
@@ -64,26 +64,24 @@ async function saveIn(page, rowSel) {
 test('#506 the editor exists, lists the real roster, and says plainly that changes apply on restart', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'roster-ed-'));
   const rosterFile = synthRoster(dir);
-  const server = await startRestServer({ board: makeBoardFixture(), env: { SCRUM_ROSTER_FILE: rosterFile } });
-  const browser = await puppeteer.launch({ headless: 'new' });
   try {
-    const page = await browser.newPage();
-    await page.setViewport({ width: 1024, height: 900 });
-    await page.goto(server.baseUrl + '/settings.html', { waitUntil: 'networkidle0' });
+    await withBrowserServer(async ({ server, browser }) => {
+      const page = await browser.newPage();
+      await page.setViewport({ width: 1024, height: 900 });
+      await page.goto(server.baseUrl + '/settings.html', { waitUntil: 'networkidle0' });
 
-    const probe = await page.evaluate((EDITOR_SEL) => {
-      const ed = document.querySelector(EDITOR_SEL);
-      if (!ed || ed.offsetParent === null) return null;
-      return { text: ed.textContent, rows: [...ed.querySelectorAll('[data-roster-seat]')].map((r) => r.getAttribute('data-roster-seat')) };
-    }, EDITOR);
-    assert.ok(probe, `no visible ${EDITOR} on the settings page — the roster is still agents-and-filesystem only`);
-    assert.ok(probe.rows.includes('zephyr') && probe.rows.includes('quill'),
-      `editor lists ${JSON.stringify(probe.rows)} — must show the seats from roster.json, not an example`);
-    assert.match(probe.text, /restart|relaunch/i,
-      'the one line of UI copy is missing — the restart delay must be documented behaviour, not a bug Michael reports later');
+      const probe = await page.evaluate((EDITOR_SEL) => {
+        const ed = document.querySelector(EDITOR_SEL);
+        if (!ed || ed.offsetParent === null) return null;
+        return { text: ed.textContent, rows: [...ed.querySelectorAll('[data-roster-seat]')].map((r) => r.getAttribute('data-roster-seat')) };
+      }, EDITOR);
+      assert.ok(probe, `no visible ${EDITOR} on the settings page — the roster is still agents-and-filesystem only`);
+      assert.ok(probe.rows.includes('zephyr') && probe.rows.includes('quill'),
+        `editor lists ${JSON.stringify(probe.rows)} — must show the seats from roster.json, not an example`);
+      assert.match(probe.text, /restart|relaunch/i,
+        'the one line of UI copy is missing — the restart delay must be documented behaviour, not a bug the owner reports later');
+    }, { server: { board: makeBoardFixture(), env: { SCRUM_ROSTER_FILE: rosterFile } }, launch: { headless: 'new' } });
   } finally {
-    await browser.close();
-    await server.stop();
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -91,40 +89,38 @@ test('#506 the editor exists, lists the real roster, and says plainly that chang
 test('#506 rename + recolour through the UI persist to roster.json at the data root', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'roster-ed-'));
   const rosterFile = synthRoster(dir);
-  const server = await startRestServer({ board: makeBoardFixture(), env: { SCRUM_ROSTER_FILE: rosterFile } });
-  const browser = await puppeteer.launch({ headless: 'new' });
   try {
-    const page = await browser.newPage();
-    await page.goto(server.baseUrl + '/settings.html', { waitUntil: 'networkidle0' });
+    await withBrowserServer(async ({ server, browser }) => {
+      const page = await browser.newPage();
+      await page.goto(server.baseUrl + '/settings.html', { waitUntil: 'networkidle0' });
 
-    const drove = await page.evaluate((rowSel) => {
-      const row = document.querySelector(rowSel);
-      if (!row) return false;
-      const name = row.querySelector('[data-roster-name]');
-      const color = row.querySelector('[data-roster-color]');
-      if (!name || !color) return false;
-      name.value = 'Zephyr Renamed';
-      name.dispatchEvent(new Event('input', { bubbles: true }));
-      color.value = '#123456';
-      color.dispatchEvent(new Event('input', { bubbles: true }));
-      return true;
-    }, seatRow('zephyr'));
-    assert.ok(drove, 'zephyr row is missing [data-roster-name]/[data-roster-color] inputs');
-    await saveIn(page, seatRow('zephyr'));
+      const drove = await page.evaluate((rowSel) => {
+        const row = document.querySelector(rowSel);
+        if (!row) return false;
+        const name = row.querySelector('[data-roster-name]');
+        const color = row.querySelector('[data-roster-color]');
+        if (!name || !color) return false;
+        name.value = 'Zephyr Renamed';
+        name.dispatchEvent(new Event('input', { bubbles: true }));
+        color.value = '#123456';
+        color.dispatchEvent(new Event('input', { bubbles: true }));
+        return true;
+      }, seatRow('zephyr'));
+      assert.ok(drove, 'zephyr row is missing [data-roster-name]/[data-roster-color] inputs');
+      await saveIn(page, seatRow('zephyr'));
 
-    const onDisk = JSON.parse(fs.readFileSync(rosterFile, 'utf8'));
-    assert.equal(onDisk.seats.zephyr?.name, 'Zephyr Renamed', 'rename did not reach roster.json');
-    assert.equal(onDisk.seats.zephyr?.color?.toLowerCase(), '#123456', 'recolour did not reach roster.json');
-    assert.equal(onDisk.seats.quill?.name, 'Quillemette', 'editing one seat must not disturb another');
+      const onDisk = JSON.parse(fs.readFileSync(rosterFile, 'utf8'));
+      assert.equal(onDisk.seats.zephyr?.name, 'Zephyr Renamed', 'rename did not reach roster.json');
+      assert.equal(onDisk.seats.zephyr?.color?.toLowerCase(), '#123456', 'recolour did not reach roster.json');
+      assert.equal(onDisk.seats.quill?.name, 'Quillemette', 'editing one seat must not disturb another');
+    }, { server: { board: makeBoardFixture(), env: { SCRUM_ROSTER_FILE: rosterFile } }, launch: { headless: 'new' } });
   } finally {
-    await browser.close();
-    await server.stop();
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
 /**
- * Regression, found in the wild 2026-07-27 by Michael reading a `git diff`:
+ * Regression, found in the wild 2026-07-27 by the owner reading a `git diff`:
  * one save from this editor destroyed the roster file's `_README` block —
  * nineteen lines explaining what the file is and why it lives outside version
  * control. writeRoster rebuilt the file as `{ seats }` and nothing else, so
@@ -147,37 +143,35 @@ test('#506 saving a seat preserves the rest of roster.json, including keys the e
     },
   }, null, 2));
 
-  const server = await startRestServer({ board: makeBoardFixture(), env: { SCRUM_ROSTER_FILE: rosterFile } });
-  const browser = await puppeteer.launch({ headless: 'new' });
   try {
-    const page = await browser.newPage();
-    await page.goto(server.baseUrl + '/settings.html', { waitUntil: 'networkidle0' });
+    await withBrowserServer(async ({ server, browser }) => {
+      const page = await browser.newPage();
+      await page.goto(server.baseUrl + '/settings.html', { waitUntil: 'networkidle0' });
 
-    const drove = await page.evaluate((rowSel) => {
-      const row = document.querySelector(rowSel);
-      const name = row && row.querySelector('[data-roster-name]');
-      if (!name) return false;
-      name.value = 'Zephyr Edited';
-      name.dispatchEvent(new Event('input', { bubbles: true }));
-      return true;
-    }, seatRow('zephyr'));
-    assert.ok(drove, 'zephyr row is missing [data-roster-name]');
-    await saveIn(page, seatRow('zephyr'));
+      const drove = await page.evaluate((rowSel) => {
+        const row = document.querySelector(rowSel);
+        const name = row && row.querySelector('[data-roster-name]');
+        if (!name) return false;
+        name.value = 'Zephyr Edited';
+        name.dispatchEvent(new Event('input', { bubbles: true }));
+        return true;
+      }, seatRow('zephyr'));
+      assert.ok(drove, 'zephyr row is missing [data-roster-name]');
+      await saveIn(page, seatRow('zephyr'));
 
-    const onDisk = JSON.parse(fs.readFileSync(rosterFile, 'utf8'));
-    assert.equal(onDisk.seats.zephyr?.name, 'Zephyr Edited', 'the edit itself did not persist');
-    assert.deepEqual(
-      onDisk._README,
-      ['Why this file exists.', 'A second line, so truncation is visible too.'],
-      'saving a seat destroyed the file\'s _README block — the documentation that explains what this file is',
-    );
-    assert.deepEqual(
-      onDisk.somethingWeHaveNotInventedYet, { keep: 'me' },
-      'an unrelated top-level key was dropped: the writer rebuilt the file from only the fields it understands',
-    );
+      const onDisk = JSON.parse(fs.readFileSync(rosterFile, 'utf8'));
+      assert.equal(onDisk.seats.zephyr?.name, 'Zephyr Edited', 'the edit itself did not persist');
+      assert.deepEqual(
+        onDisk._README,
+        ['Why this file exists.', 'A second line, so truncation is visible too.'],
+        'saving a seat destroyed the file\'s _README block — the documentation that explains what this file is',
+      );
+      assert.deepEqual(
+        onDisk.somethingWeHaveNotInventedYet, { keep: 'me' },
+        'an unrelated top-level key was dropped: the writer rebuilt the file from only the fields it understands',
+      );
+    }, { server: { board: makeBoardFixture(), env: { SCRUM_ROSTER_FILE: rosterFile } }, launch: { headless: 'new' } });
   } finally {
-    await browser.close();
-    await server.stop();
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -246,36 +240,34 @@ test('#506 add + remove through the UI persist, and a restart makes the change l
 test("#506 stranger's first edit: on a fresh clone with NO roster.json, the editor works and CREATES it at the data root", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'roster-ed-fresh-'));
   const rosterFile = path.join(dir, 'roster.json'); // does not exist yet
-  const server = await startRestServer({ board: makeBoardFixture(), env: { SCRUM_ROSTER_FILE: rosterFile } });
-  const browser = await puppeteer.launch({ headless: 'new' });
   try {
-    const page = await browser.newPage();
-    await page.goto(server.baseUrl + '/settings.html', { waitUntil: 'networkidle0' });
+    await withBrowserServer(async ({ server, browser }) => {
+      const page = await browser.newPage();
+      await page.goto(server.baseUrl + '/settings.html', { waitUntil: 'networkidle0' });
 
-    const editorThere = await page.evaluate((EDITOR_SEL) => {
-      const ed = document.querySelector(EDITOR_SEL);
-      return !!ed && ed.offsetParent !== null;
-    }, EDITOR);
-    assert.ok(editorThere, 'the editor must exist on a fresh clone — the stranger\'s first roster edit IS this flow');
+      const editorThere = await page.evaluate((EDITOR_SEL) => {
+        const ed = document.querySelector(EDITOR_SEL);
+        return !!ed && ed.offsetParent !== null;
+      }, EDITOR);
+      assert.ok(editorThere, 'the editor must exist on a fresh clone — the stranger\'s first roster edit IS this flow');
 
-    const droveAny = await page.evaluate(() => {
-      const row = document.querySelector('[data-roster-seat]');
-      const name = row?.querySelector('[data-roster-name]');
-      if (!name) return false;
-      name.value = 'First Edit';
-      name.dispatchEvent(new Event('input', { bubbles: true }));
-      return true;
-    });
-    assert.ok(droveAny, 'no editable seat row on the fresh clone (the example roster should seed the editor)');
-    await saveIn(page, null);
+      const droveAny = await page.evaluate(() => {
+        const row = document.querySelector('[data-roster-seat]');
+        const name = row?.querySelector('[data-roster-name]');
+        if (!name) return false;
+        name.value = 'First Edit';
+        name.dispatchEvent(new Event('input', { bubbles: true }));
+        return true;
+      });
+      assert.ok(droveAny, 'no editable seat row on the fresh clone (the example roster should seed the editor)');
+      await saveIn(page, null);
 
-    assert.ok(fs.existsSync(rosterFile),
-      'saving on a fresh clone must CREATE roster.json at the data root — a stranger has no agent to create it for them');
-    const onDisk = JSON.parse(fs.readFileSync(rosterFile, 'utf8'));
-    assert.ok(JSON.stringify(onDisk).includes('First Edit'), 'the first edit must be in the created file');
+      assert.ok(fs.existsSync(rosterFile),
+        'saving on a fresh clone must CREATE roster.json at the data root — a stranger has no agent to create it for them');
+      const onDisk = JSON.parse(fs.readFileSync(rosterFile, 'utf8'));
+      assert.ok(JSON.stringify(onDisk).includes('First Edit'), 'the first edit must be in the created file');
+    }, { server: { board: makeBoardFixture(), env: { SCRUM_ROSTER_FILE: rosterFile } }, launch: { headless: 'new' } });
   } finally {
-    await browser.close();
-    await server.stop();
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

@@ -27,8 +27,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import puppeteer from 'puppeteer';
-import { startRestServer, makeBoardFixture } from './helpers/harness.mjs';
+import { startRestServer, makeBoardFixture, withBrowserServer } from './helpers/harness.mjs';
 
 const ts = '2026-05-01T00:00:00.000Z';
 
@@ -54,20 +53,7 @@ function card(shortId, extra = {}) {
 test('claim chip: holder + age on claimed cards, stale styling past 24h, absent when unclaimed, escaped', async () => {
   const freshAt = new Date(Date.now() - 10 * 60 * 1000).toISOString();      // 10 min
   const staleAt = new Date(Date.now() - 400 * 3600 * 1000).toISOString();   // ~16.7 days
-  const server = await startRestServer({
-    board: makeBoardFixture({
-      cards: [
-        card(1, { claimedBy: 'zephyr', claimedAt: freshAt }),
-        card(2, { claimedBy: 'zephyr', claimedAt: staleAt }),
-        card(3),
-        card(4, { claimedBy: '<img src=x onerror=window.__pwned=1>', claimedAt: freshAt }),
-      ],
-      nextShortId: 5,
-    }),
-    env: { SCRUM_ROSTER_FILE: rosterFile() },
-  });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(server.baseUrl + '/', { waitUntil: 'networkidle0' });
 
@@ -92,8 +78,16 @@ test('claim chip: holder + age on claimed cards, stale styling past 24h, absent 
 
     assert.ok(chips.c4, 'hostile holder still renders (as text)');
     assert.equal(chips.pwned, false, 'claimedBy is escaped — no markup execution');
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: {
+    board: makeBoardFixture({
+      cards: [
+        card(1, { claimedBy: 'zephyr', claimedAt: freshAt }),
+        card(2, { claimedBy: 'zephyr', claimedAt: staleAt }),
+        card(3),
+        card(4, { claimedBy: '<img src=x onerror=window.__pwned=1>', claimedAt: freshAt }),
+      ],
+      nextShortId: 5,
+    }),
+    env: { SCRUM_ROSTER_FILE: rosterFile() },
+  }, launch: { headless: 'new' } });
 });

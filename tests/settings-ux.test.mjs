@@ -6,13 +6,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import puppeteer from 'puppeteer';
-import { startRestServer } from './helpers/harness.mjs';
+import { startRestServer, withBrowserServer } from './helpers/harness.mjs';
 
 test('#263 settings page: flip to Hard + set a timeout, save, config persists live', async () => {
-  const server = await startRestServer();
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/settings.html`, { waitUntil: 'networkidle0' });
     // Defaults loaded as soft; flip to hard and set the timeout to 120s.
@@ -24,16 +21,11 @@ test('#263 settings page: flip to Hard + set a timeout, save, config persists li
     const cfg = await (await fetch(`${server.baseUrl}/api/config`)).json();
     assert.equal(cfg.mode, 'hard', 'mode persisted as hard');
     assert.equal(cfg.hard.timeoutMs, 120000, 'timeout persisted as 120s');
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: {}, launch: { headless: 'new' } });
 });
 
 test('#410 settings page: flip to TokenRing + set the lease timeout, save, config persists live', async () => {
-  const server = await startRestServer();
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/settings.html`, { waitUntil: 'networkidle0' });
     await page.click('input[name=mode][value="token-ring"]');
@@ -47,10 +39,7 @@ test('#410 settings page: flip to TokenRing + set the lease timeout, save, confi
     const cfg = await (await fetch(`${server.baseUrl}/api/config`)).json();
     assert.equal(cfg.mode, 'token-ring', 'mode persisted as token-ring');
     assert.equal(cfg.tokenRing.timeoutMs, 180000, 'lease timeout persisted as 180s');
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: {}, launch: { headless: 'new' } });
 });
 
 // #737 rewrote this assertion. It previously matched /Rejected/ — the prefix of
@@ -62,9 +51,7 @@ test('#410 settings page: flip to TokenRing + set the lease timeout, save, confi
 // matters: it asserted a message appeared and never that the config was left
 // alone. A save that both complained AND persisted would have passed.
 test('#263/#737 settings page: an invalid window (min > max) is refused, explained, and not saved', async () => {
-  const server = await startRestServer();
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/settings.html`, { waitUntil: 'networkidle0' });
     const before = await (await fetch(`${server.baseUrl}/api/config`)).json();
@@ -81,10 +68,7 @@ test('#263/#737 settings page: an invalid window (min > max) is refused, explain
 
     const after = await (await fetch(`${server.baseUrl}/api/config`)).json();
     assert.deepEqual(after.soft, before.soft, 'a refused window must not be persisted');
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: {}, launch: { headless: 'new' } });
 });
 
 // #737 — the owner's exact input. 120→360 is a genuine violation (360s > the 300s
@@ -92,9 +76,7 @@ test('#263/#737 settings page: an invalid window (min > max) is refused, explain
 // "0 <= minMs <= maxMs <= 300000" to someone typing into a field labelled
 // seconds, from which the real limit cannot be derived.
 test('#737 an over-ceiling window is refused in SECONDS, naming the field and the limit', async () => {
-  const server = await startRestServer();
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/settings.html`, { waitUntil: 'networkidle0' });
     await page.click('input[name=mode][value="soft"]');
@@ -120,10 +102,7 @@ test('#737 an over-ceiling window is refused in SECONDS, naming the field and th
     await page.waitForFunction(() => document.getElementById('msg')?.classList.contains('ok'), { timeout: 5000 });
     const cfg = await (await fetch(`${server.baseUrl}/api/config`)).json();
     assert.equal(cfg.soft.maxMs, 300000, '120s→300s sits exactly at the ceiling and must persist');
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: {}, launch: { headless: 'new' } });
 });
 
 // #737 — the guard the client-side check makes necessary. Pre-validating in the
@@ -132,9 +111,7 @@ test('#737 an over-ceiling window is refused in SECONDS, naming the field and th
 // never arrive, the editor must defer rather than invent a limit, and the
 // server's refusal must still reach the user instead of being swallowed.
 test('#737 with the bounds unavailable, the editor defers and the SERVER refusal still surfaces', async () => {
-  const server = await startRestServer();
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/settings.html`, { waitUntil: 'networkidle0' });
     await page.click('input[name=mode][value="soft"]');
@@ -152,8 +129,5 @@ test('#737 with the bounds unavailable, the editor defers and the SERVER refusal
 
     const cfg = await (await fetch(`${server.baseUrl}/api/config`)).json();
     assert.notEqual(cfg.soft.maxMs, 360000, 'and the out-of-range value must not persist');
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: {}, launch: { headless: 'new' } });
 });

@@ -1,9 +1,9 @@
 /**
  * #498 — a single click anywhere on a card must not change what OTHER cards
- * are visible. RED-first, non-author bar (Wren), from the card's
+ * are visible. RED-first, non-author bar (the reviewing seat), from the card's
  * pre-registered acceptance, before the first build commit.
  *
- * The disease (Michael's live walkthrough + MiniMo's diagnosis): three on-card
+ * The disease (the owner's live walkthrough + a peer seat's diagnosis): three on-card
  * chips — assignee, priority, label — are state-changing affordances disguised
  * as indicators. Aiming for "open this card" and catching a chip re-filters
  * the whole board: local gesture, global consequence, feedback only by
@@ -33,8 +33,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import puppeteer from 'puppeteer';
-import { startRestServer, makeBoardFixture } from './helpers/harness.mjs';
+import { startRestServer, makeBoardFixture, withBrowserServer } from './helpers/harness.mjs';
 
 const ts = '2026-05-01T00:00:00.000Z';
 
@@ -135,27 +134,25 @@ async function runIsolationChecks(page, offenses) {
 
 test('#498 populated: no single click on any card changes which OTHER cards are visible', async () => {
   const rosterFile = syntheticRosterFile();
-  const server = await startRestServer({ board: populatedBoard(), env: { SCRUM_ROSTER_FILE: rosterFile } });
-  const browser = await puppeteer.launch({ headless: 'new' });
   try {
-    const page = await browser.newPage();
-    await page.setViewport({ width: 1024, height: 900 });
-    await page.goto(server.baseUrl + '/', { waitUntil: 'networkidle0' });
-    await page.waitForSelector('.card', { timeout: 5000 });
+    await withBrowserServer(async ({ server, browser }) => {
+      const page = await browser.newPage();
+      await page.setViewport({ width: 1024, height: 900 });
+      await page.goto(server.baseUrl + '/', { waitUntil: 'networkidle0' });
+      await page.waitForSelector('.card', { timeout: 5000 });
 
-    const offenses = [];
-    await runIsolationChecks(page, offenses);
-    assert.deepEqual(offenses, [],
-      `misclick isolation offenses (${offenses.length}):\n${offenses.join('\n')}`);
+      const offenses = [];
+      await runIsolationChecks(page, offenses);
+      assert.deepEqual(offenses, [],
+        `misclick isolation offenses (${offenses.length}):\n${offenses.join('\n')}`);
+    }, { server: { board: populatedBoard(), env: { SCRUM_ROSTER_FILE: rosterFile } }, launch: { headless: 'new' } });
   } finally {
-    await browser.close();
-    await server.stop();
     fs.rmSync(rosterFile, { force: true });
   }
 });
 
 /**
- * Tooth 3 — THE DEGENERATE-SOLUTION GUARD (Indigo's catch, 2026-07-26 23:35Z).
+ * Tooth 3 — THE DEGENERATE-SOLUTION GUARD (the builder's catch, 2026-07-26 23:35Z).
  *
  * The isolation invariant above is satisfiable by deleting filtering: today
  * the three card chips are the ONLY way to ADD a filter (the filter strip can
@@ -176,92 +173,88 @@ test('#498 populated: no single click on any card changes which OTHER cards are 
  */
 test('#498 filtering stays reachable: the board can be filtered and restored without touching a card', async () => {
   const rosterFile = syntheticRosterFile();
-  const server = await startRestServer({ board: populatedBoard(), env: { SCRUM_ROSTER_FILE: rosterFile } });
-  const browser = await puppeteer.launch({ headless: 'new' });
   try {
-    const page = await browser.newPage();
-    await page.setViewport({ width: 1024, height: 900 });
-    await page.goto(server.baseUrl + '/', { waitUntil: 'networkidle0' });
-    await page.waitForSelector('.card', { timeout: 5000 });
+    await withBrowserServer(async ({ server, browser }) => {
+      const page = await browser.newPage();
+      await page.setViewport({ width: 1024, height: 900 });
+      await page.goto(server.baseUrl + '/', { waitUntil: 'networkidle0' });
+      await page.waitForSelector('.card', { timeout: 5000 });
 
-    const all = await visibleCardIds(page);
+      const all = await visibleCardIds(page);
 
-    // VISIBLE in the unfiltered default state — discoverability, not just
-    // reachability (Indigo: the strip hides itself when nothing is filtered,
-    // so today the misclick is the feature's only discovery path; a hidden
-    // shortcut would pass a bare existence check and leave that unchanged).
-    const offCardAdders = await page.evaluate(() =>
-      [...document.querySelectorAll('[data-filter-add]')]
-        .filter((el) => !el.closest('.card') && el.offsetParent !== null).length);
-    assert.ok(offCardAdders > 0,
-      'no VISIBLE off-card [data-filter-add] affordance in the unfiltered state — filtering is undiscoverable except by the misclick this card removes');
+      // VISIBLE in the unfiltered default state — discoverability, not just
+      // reachability (the builder: the strip hides itself when nothing is filtered,
+      // so today the misclick is the feature's only discovery path; a hidden
+      // shortcut would pass a bare existence check and leave that unchanged).
+      const offCardAdders = await page.evaluate(() =>
+        [...document.querySelectorAll('[data-filter-add]')]
+          .filter((el) => !el.closest('.card') && el.offsetParent !== null).length);
+      assert.ok(offCardAdders > 0,
+        'no VISIBLE off-card [data-filter-add] affordance in the unfiltered state — filtering is undiscoverable except by the misclick this card removes');
 
-    // Drive the first add-affordance; allow one menu hop.
-    const clickNthAdder = (n) => page.evaluate((n) => {
-      const els = [...document.querySelectorAll('[data-filter-add]')].filter((el) => !el.closest('.card') && el.offsetParent !== null);
-      if (els[n]) { els[n].click(); return true; }
-      return false;
-    }, n);
-    await clickNthAdder(0);
-    await new Promise((r) => setTimeout(r, 200));
-    let filtered = await visibleCardIds(page);
-    if (filtered.length === all.length) {
-      // First click may have opened a chooser — click the next revealed adder.
-      await clickNthAdder(1);
+      // Drive the first add-affordance; allow one menu hop.
+      const clickNthAdder = (n) => page.evaluate((n) => {
+        const els = [...document.querySelectorAll('[data-filter-add]')].filter((el) => !el.closest('.card') && el.offsetParent !== null);
+        if (els[n]) { els[n].click(); return true; }
+        return false;
+      }, n);
+      await clickNthAdder(0);
       await new Promise((r) => setTimeout(r, 200));
-      filtered = await visibleCardIds(page);
-    }
-    assert.ok(filtered.length > 0 && filtered.length < all.length,
-      `driving [data-filter-add] must reach a proper subset: ${all.length} → ${filtered.length}`);
+      let filtered = await visibleCardIds(page);
+      if (filtered.length === all.length) {
+        // First click may have opened a chooser — click the next revealed adder.
+        await clickNthAdder(1);
+        await new Promise((r) => setTimeout(r, 200));
+        filtered = await visibleCardIds(page);
+      }
+      assert.ok(filtered.length > 0 && filtered.length < all.length,
+        `driving [data-filter-add] must reach a proper subset: ${all.length} → ${filtered.length}`);
 
-    // Restore: prefer an explicit clear, fall back to the strip's remove chips.
-    await page.evaluate(() => {
-      const clear = document.querySelector('[data-filter-clear]');
-      if (clear) { clear.click(); return; }
-      for (const x of document.querySelectorAll('.filter-chip-x, .filter-chip')) x.click();
-    });
-    await new Promise((r) => setTimeout(r, 200));
-    const restored = await visibleCardIds(page);
-    assert.deepEqual(restored, all,
-      `restore must return every card without touching a card: ${all.join(',')} vs ${restored.join(',')}`);
+      // Restore: prefer an explicit clear, fall back to the strip's remove chips.
+      await page.evaluate(() => {
+        const clear = document.querySelector('[data-filter-clear]');
+        if (clear) { clear.click(); return; }
+        for (const x of document.querySelectorAll('.filter-chip-x, .filter-chip')) x.click();
+      });
+      await new Promise((r) => setTimeout(r, 200));
+      const restored = await visibleCardIds(page);
+      assert.deepEqual(restored, all,
+        `restore must return every card without touching a card: ${all.join(',')} vs ${restored.join(',')}`);
+    }, { server: { board: populatedBoard(), env: { SCRUM_ROSTER_FILE: rosterFile } }, launch: { headless: 'new' } });
   } finally {
-    await browser.close();
-    await server.stop();
     fs.rmSync(rosterFile, { force: true });
   }
 });
 
 test('#498 fresh clone: cards created via the API obey the same isolation invariant', async () => {
   const rosterFile = syntheticRosterFile();
-  const server = await startRestServer({ board: makeBoardFixture(), env: { SCRUM_ROSTER_FILE: rosterFile } });
-  const browser = await puppeteer.launch({ headless: 'new' });
   try {
-    // #499's lesson: the empty-state fixture CREATES its content — an
-    // empty-board pass with nothing to click verifies nothing.
-    for (const [title, assignee, labels, priority] of [
-      ['Fresh A', 'zephyr', ['infra'], 'p1'],
-      ['Fresh B', 'quill', ['docs'], 'p2'],
-    ]) {
-      const r = await fetch(`${server.baseUrl}/api/cards`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ title, assignee, labels, priority, column: 'backlog', type: 'task' }),
-      });
-      assert.ok(r.ok, `fixture card create failed: ${r.status}`);
-    }
+    await withBrowserServer(async ({ server, browser }) => {
+      // #499's lesson: the empty-state fixture CREATES its content — an
+      // empty-board pass with nothing to click verifies nothing.
+      for (const [title, assignee, labels, priority] of [
+        ['Fresh A', 'zephyr', ['infra'], 'p1'],
+        ['Fresh B', 'quill', ['docs'], 'p2'],
+      ]) {
+        const r = await fetch(`${server.baseUrl}/api/cards`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ title, assignee, labels, priority, column: 'backlog', type: 'task' }),
+        });
+        assert.ok(r.ok, `fixture card create failed: ${r.status}`);
+      }
 
-    const page = await browser.newPage();
-    await page.setViewport({ width: 1024, height: 900 });
-    await page.goto(server.baseUrl + '/', { waitUntil: 'networkidle0' });
-    await page.waitForSelector('.card', { timeout: 5000 });
+      const page = await browser.newPage();
+      await page.setViewport({ width: 1024, height: 900 });
+      await page.goto(server.baseUrl + '/', { waitUntil: 'networkidle0' });
+      await page.waitForSelector('.card', { timeout: 5000 });
 
-    const offenses = [];
-    await runIsolationChecks(page, offenses);
-    assert.deepEqual(offenses, [],
-      `fresh-clone misclick offenses (${offenses.length}):\n${offenses.join('\n')}`);
+      const offenses = [];
+      await runIsolationChecks(page, offenses);
+      assert.deepEqual(offenses, [],
+        `fresh-clone misclick offenses (${offenses.length}):\n${offenses.join('\n')}`);
+    }, { server: { board: makeBoardFixture(), env: { SCRUM_ROSTER_FILE: rosterFile } }, launch: { headless: 'new' } });
   } finally {
-    await browser.close();
-    await server.stop();
     fs.rmSync(rosterFile, { force: true });
   }
 });

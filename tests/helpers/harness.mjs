@@ -40,13 +40,22 @@ export async function waitForHttp(url, timeoutMs = 8000) {
   const deadline = Date.now() + timeoutMs;
   let lastErr;
   while (Date.now() < deadline) {
+    // ⚠️ The signal is what makes `timeoutMs` mean anything. The loop condition
+    // is only evaluated BETWEEN attempts, so an unbounded `await fetch(url)`
+    // against a peer that accepts the connection and never answers sits inside
+    // this try for undici's full header timeout — measured at 301.0s on
+    // node v22.23.1, against a stated bound of 8s. Bounding each attempt by the
+    // time actually left is the difference between a timeout and a comment.
+    // (A REFUSED connection was always fast and loud; only connect-and-hang
+    // defeated the old shape, which is why it never showed up as a failure.)
+    const remaining = Math.max(1, deadline - Date.now());
     try {
-      await fetch(url);
+      await fetch(url, { signal: AbortSignal.timeout(remaining) });
       return;
     } catch (e) {
       lastErr = e;
     }
-    await new Promise((r) => setTimeout(r, 50));
+    await new Promise((r) => setTimeout(r, Math.min(50, Math.max(0, deadline - Date.now()))));
   }
   throw new Error(`timed out waiting for ${url}: ${lastErr?.message ?? 'unknown'}`);
 }
@@ -375,4 +384,110 @@ export async function openChannelStream(mcpUrl, sessionId) {
     },
     close() { reader.cancel().catch(() => {}); },
   };
+}
+
+/**
+ * #736 — acquire a REST server + browser, run the body, and guarantee that BOTH
+ * are torn down on every settled path.
+ *
+ * Replaces the shape every puppeteer file used to carry:
+ *
+ *   const server  = await startRestServer({...});
+ *   const browser = await puppeteer.launch({...});   // outside the try
+ *   try { ... } finally { await browser.close(); await server.stop(); }
+ *
+ * where a launch that hung or threw skipped `finally` entirely and abandoned
+ * server.js — whose live handles then pinned the test file's process open, so the
+ * file never exited and `node --test` withheld every later file's output behind
+ * it. This helper exists rather than a convention because a convention did not
+ * survive: two fresh instances of the defect were written an hour after it was
+ * described, simply by matching the surrounding file.
+ *
+ * Three things it does that the obvious fix does not:
+ *   1. BOUNDS the acquisition (deadline + AbortSignal). Moving launch() inside a
+ *      try is not enough — `finally` waits for the promise to SETTLE, and a hang
+ *      never settles.
+ *   2. Kills the process GROUP on a close timeout (`-pid`), because puppeteer
+ *      spawns Chrome detached so the tree can be group-killed; a bare pid leaves
+ *      renderers and swaps one orphan class for another.
+ *   3. Stops the server on the TIMEOUT path too. A bare Promise.race turns a hang
+ *      into a failure while keeping the orphan the fix exists to prevent.
+ */
+export async function withBrowserServer(body, {
+  server: serverOpts = {},
+  launch: launchOpts = {},
+  launchTimeoutMs = 60_000,
+  closeTimeoutMs = 15_000,
+  _startServer = startRestServer,
+  _launch = null,
+  _kill = null,
+} = {}) {
+  const kill = _kill || ((target, sig) => { try { process.kill(target, sig); } catch { /* already gone */ } });
+
+  /** Race a promise against a deadline. Never leaves the timer holding the loop. */
+  const withDeadline = async (p, ms, label) => {
+    let timer;
+    try {
+      return await Promise.race([
+        p,
+        // ⚠️ NOT unref'd. An unref'd deadline does not hold the event loop, so
+        // when the awaited operation is the only thing running node resolves
+        // before the timer can fire and the bound silently does not apply —
+        // which is the same class of defect as waitForHttp's. Caught by the
+        // hanging-launch test, which is exactly the case it had to cover.
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`${label} exceeded ${ms}ms`)), ms);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  /** SIGKILL the browser's whole process group; -pid, never pid. */
+  const killBrowserGroup = (browser) => {
+    const pid = browser?.process?.()?.pid;
+    if (pid) kill(-pid, 'SIGKILL');
+  };
+
+  const server = await _startServer(serverOpts);
+
+  let browser;
+  try {
+    const launcher = _launch || (await import('puppeteer')).default.launch;
+    // AbortSignal so a bounded-out launch is told to stop, not merely abandoned.
+    const ac = new AbortController();
+    const launching = launcher({ ...launchOpts, signal: ac.signal });
+    try {
+      browser = await withDeadline(launching, launchTimeoutMs, 'puppeteer.launch()');
+    } catch (e) {
+      ac.abort();
+      // A launch that lands AFTER the deadline still spawned Chrome. Adopt the
+      // late result purely to kill its group, or it becomes the orphan class
+      // this helper exists to remove.
+      launching.then((late) => killBrowserGroup(late), () => {});
+      throw e;
+    }
+  } catch (e) {
+    // Acquisition failed. THIS is the path the old shape skipped.
+    try { await server.stop(); } catch { /* teardown must not mask acquisition */ }
+    throw e;
+  }
+
+  let bodyErr;
+  try {
+    return await body({ server, browser });
+  } catch (e) {
+    bodyErr = e;
+    throw e;
+  } finally {
+    try {
+      await withDeadline(Promise.resolve(browser.close()), closeTimeoutMs, 'browser.close()');
+    } catch {
+      killBrowserGroup(browser);
+    }
+    // Unconditional, and last: reachable from the clean path, the body-throw
+    // path, and the close-timeout path alike.
+    try { await server.stop(); } catch (e) { if (!bodyErr) throw e; }
+  }
 }

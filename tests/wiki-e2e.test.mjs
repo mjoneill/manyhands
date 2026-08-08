@@ -6,8 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import puppeteer from 'puppeteer';
-import { startRestServer } from './helpers/harness.mjs';
+import { startRestServer, withBrowserServer } from './helpers/harness.mjs';
 
 const ts = '2026-05-01T00:00:00.000Z';
 const card = (id, shortId, title, extra = {}) => ({
@@ -28,9 +27,7 @@ const board = {
 };
 
 test('wiki.html renders the tree and opens a page end-to-end', async () => {
-  const server = await startRestServer({ board });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/wiki.html`, { waitUntil: 'networkidle0' });
 
@@ -53,16 +50,11 @@ test('wiki.html renders the tree and opens a page end-to-end', async () => {
     assert.ok(bodyHtml.includes('<strong>parent</strong>'), 'markdown rendered');
     const backlinks = await page.$$eval('.section a', (els) => els.map((e) => e.textContent));
     assert.ok(backlinks.includes('Linker'), 'Linker shows as a backlink: ' + backlinks.join(', '));
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board }, launch: { headless: 'new' } });
 });
 
 test('wiki.html edits a page through the UI (Edit → change → Save)', async () => {
-  const server = await startRestServer({ board });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/wiki.html`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('#tree a', { timeout: 5000 });
@@ -75,16 +67,11 @@ test('wiki.html edits a page through the UI (Edit → change → Save)', async (
     await page.waitForFunction(() => document.querySelector('article')?.innerHTML.includes('edited via the'), { timeout: 5000 });
     const html = await page.$eval('article', (e) => e.innerHTML);
     assert.ok(html.includes('<strong>UI</strong>'), 'edited markdown re-rendered after save');
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board }, launch: { headless: 'new' } });
 });
 
 test('wiki.html deep-links via ?node= and shows the Board/Wiki nav (card→page jump)', async () => {
-  const server = await startRestServer({ board });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/wiki.html?node=c`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('h1.page-title', { timeout: 5000 });
@@ -93,16 +80,11 @@ test('wiki.html deep-links via ?node= and shows the Board/Wiki nav (card→page 
     assert.ok(nav.some((t) => t.includes('Board')) && nav.some((t) => t.includes('Wiki')), 'nav bar present: ' + nav.join(','));
     const asCard = await page.$eval('.toolbar a.btn', (e) => e.getAttribute('href'));
     assert.ok(asCard.startsWith('/?focus='), 'page has an "open as card" link: ' + asCard);
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board }, launch: { headless: 'new' } });
 });
 
 test('conversation-homing: post a comment on a page and it renders inline', async () => {
-  const server = await startRestServer({ board });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/wiki.html?node=p`, { waitUntil: 'networkidle0' });
     // #226 — the homed thread now renders via the shared conversation-view component (.cv-*).
@@ -117,16 +99,11 @@ test('conversation-homing: post a comment on a page and it renders inline', asyn
     );
     const bodies = await page.$$eval('.cv-msg-body', (els) => els.map((e) => e.textContent));
     assert.ok(bodies.some((b) => b.includes('homed comment')), 'comment homed on the page: ' + bodies.join(' | '));
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board }, launch: { headless: 'new' } });
 });
 
 test('#226 wiki commons panel: nav peer + slide-in panel posts to the floating commons', async () => {
-  const server = await startRestServer({ board });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/wiki.html`, { waitUntil: 'networkidle0' });
 
@@ -148,16 +125,11 @@ test('#226 wiki commons panel: nav peer + slide-in panel posts to the floating c
     const stored = await (await fetch(`${server.baseUrl}/api/conversations`)).json();
     const m = stored.find((c) => c.body === 'hello from the wiki panel');
     assert.ok(m && m.attachedTo === null, 'wiki panel post floats to the commons: ' + JSON.stringify(m));
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board }, launch: { headless: 'new' } });
 });
 
 test('#229 wiki nav: filter narrows + keeps ancestors, field:value works, collapse toggles', async () => {
-  const server = await startRestServer({ board });   // Parent → Child; Linker (root); #1/#2/#3
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/wiki.html`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('#tree .tree-row a', { timeout: 5000 });
@@ -195,10 +167,7 @@ test('#229 wiki nav: filter narrows + keeps ancestors, field:value works, collap
     await page.waitForFunction(() => ![...document.querySelectorAll('#tree .tree-row a')].some((e) => e.textContent === 'Child'), { timeout: 5000 });
     const collapsed = await names();
     assert.ok(!collapsed.includes('Child') && collapsed.includes('Parent'), 'Child hidden under collapsed Parent: ' + collapsed);
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board }, launch: { headless: 'new' } });
 });
 
 test('#229 wiki nav: sort toggle reorders (alpha / recent / newest)', async () => {
@@ -212,9 +181,7 @@ test('#229 wiki nav: sort toggle reorders (alpha / recent / newest)', async () =
     conversations: [],
     nextShortId: 13,
   };
-  const server = await startRestServer({ board: sortBoard });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/wiki.html`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('#tree .tree-row a', { timeout: 5000 });
@@ -229,10 +196,7 @@ test('#229 wiki nav: sort toggle reorders (alpha / recent / newest)', async () =
     await page.select('#nav-sort', 'created');
     await page.waitForFunction(() => document.querySelector('#tree > ul > li > .tree-row a')?.textContent === 'apple', { timeout: 5000 });
     assert.deepEqual(await order(), ['apple', 'Cherry', 'Banana'], 'newest-created first');
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board: sortBoard }, launch: { headless: 'new' } });
 });
 
 test('#231 wiki nav: Done hidden by default; revealed by checkbox or column:done', async () => {
@@ -245,9 +209,7 @@ test('#231 wiki nav: Done hidden by default; revealed by checkbox or column:done
     conversations: [],
     nextShortId: 22,
   };
-  const server = await startRestServer({ board: doneBoard });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/wiki.html`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('#tree .tree-row a', { timeout: 5000 });
@@ -276,16 +238,11 @@ test('#231 wiki nav: Done hidden by default; revealed by checkbox or column:done
       const ns = [...document.querySelectorAll('#tree .tree-row a')].map((e) => e.textContent);
       return ns.length === 1 && ns[0] === 'Done Page';
     }, { timeout: 5000 });
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board: doneBoard }, launch: { headless: 'new' } });
 });
 
 test('#240 wiki: opening a page sets a per-page URL, marks it active, and back navigates', async () => {
-  const server = await startRestServer({ board });   // Parent(p) → Child(c); Linker(l)
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/wiki.html`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('#tree .tree-row a', { timeout: 5000 });
@@ -304,10 +261,7 @@ test('#240 wiki: opening a page sets a per-page URL, marks it active, and back n
     await page.goBack();
     await page.waitForFunction(() => new URL(location.href).searchParams.get('node') === 'p', { timeout: 5000 });
     assert.equal(await page.$eval('h1.page-title', (e) => e.textContent), 'Parent', 'back button routed to Parent');
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board }, launch: { headless: 'new' } });
 });
 
 // #220 — drag-drop reparent. Synthetic HTML5 drag events (a shared DataTransfer)
@@ -325,9 +279,7 @@ function dragDrop(page, srcText, tgtSelector) {
 }
 
 test('#220 drag a page onto another reparents it (Child → under Linker)', async () => {
-  const server = await startRestServer({ board });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/wiki.html`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('#tree a', { timeout: 5000 });
@@ -345,16 +297,11 @@ test('#220 drag a page onto another reparents it (Child → under Linker)', asyn
       const linker = tree.find((t) => t.id === 'l');
       return linker && linker.children.some((k) => k.id === 'c');
     }, { timeout: 5000 });
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board }, launch: { headless: 'new' } });
 });
 
 test('#220 dropping a page onto its own descendant is refused (no cycle)', async () => {
-  const server = await startRestServer({ board });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/wiki.html`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('#tree a', { timeout: 5000 });
@@ -374,16 +321,11 @@ test('#220 dropping a page onto its own descendant is refused (no cycle)', async
       return !!(p && p.children.some((k) => k.id === 'c'));
     });
     assert.ok(intact, 'cycle drop refused — p→c hierarchy intact');
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board }, launch: { headless: 'new' } });
 });
 
 test('#220 dropping a page on the "PAGES" heading makes it top-level', async () => {
-  const server = await startRestServer({ board });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/wiki.html`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('#tree a', { timeout: 5000 });
@@ -394,10 +336,7 @@ test('#220 dropping a page on the "PAGES" heading makes it top-level', async () 
       const { tree } = await (await fetch('/api/nodes')).json();
       return tree.some((t) => t.id === 'c'); // c is now a top-level root
     }, { timeout: 5000 });
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board }, launch: { headless: 'new' } });
 });
 
 test('#222 a page with an image attachment renders it inline; edit mode shows the uploader', async () => {
@@ -412,9 +351,7 @@ test('#222 a page with an image attachment renders it inline; edit mode shows th
     columns: [{ id: 'backlog', name: 'Backlog', order: 0 }],
     conversations: [], nextShortId: 2,
   };
-  const server = await startRestServer({ board: attBoard });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/wiki.html?node=m`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('.page-title', { timeout: 5000 });
@@ -431,8 +368,5 @@ test('#222 a page with an image attachment renders it inline; edit mode shows th
     // The existing attachment shows in the edit list with a remove control.
     const editItem = await page.$eval('.attach-edit-item', (e) => e.textContent).catch(() => '');
     assert.ok(editItem.includes('demo.png'), 'existing attachment listed in edit mode: ' + editItem);
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board: attBoard }, launch: { headless: 'new' } });
 });

@@ -10,8 +10,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import puppeteer from 'puppeteer';
-import { startRestServer } from './helpers/harness.mjs';
+import { startRestServer, withBrowserServer } from './helpers/harness.mjs';
 
 const ts = (n) => `2026-05-0${n}T00:00:00.000Z`;
 const card = (id, shortId, title, extra = {}) => ({
@@ -34,9 +33,7 @@ const board = {
 };
 
 test('commons.html (unscoped) renders the whole feed and posts a message', async () => {
-  const server = await startRestServer({ board });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/commons.html`, { waitUntil: 'networkidle0' });
 
@@ -59,16 +56,11 @@ test('commons.html (unscoped) renders the whole feed and posts a message', async
     );
     const after = await page.$$eval('.cv-msg-body', (els) => els.map((e) => e.textContent));
     assert.ok(after.some((b) => b.includes('posted from the full page')), 'posted message rendered: ' + after.join(' | '));
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board }, launch: { headless: 'new' } });
 });
 
 test('commons.html?node= promotes a single thread to full page (scoped + titled + back-link)', async () => {
-  const server = await startRestServer({ board });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/commons.html?node=p`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('.cv-msg-body', { timeout: 5000 });
@@ -93,16 +85,11 @@ test('commons.html?node= promotes a single thread to full page (scoped + titled 
     const stored = await (await fetch(`${server.baseUrl}/api/conversations?attachedTo=p`)).json();
     assert.ok(stored.some((c) => c.body === 'reply in the thread' && c.attachedTo === 'p'),
       'posted message attached to the node, not floated');
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board }, launch: { headless: 'new' } });
 });
 
 test('the board surfaces the Commons nav peer + a "⤢ Full page" promote link', async () => {
-  const server = await startRestServer({ board });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     const errors = [];
     page.on('pageerror', (e) => errors.push(e.message));
@@ -127,48 +114,43 @@ test('the board surfaces the Commons nav peer + a "⤢ Full page" promote link',
     assert.equal(promote, '/commons.html', 'panel promote link → commons.html');
 
     assert.deepEqual(errors, [], 'board booted without page errors: ' + errors.join(' | '));
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board }, launch: { headless: 'new' } });
 });
 
 test('#238 commons.html: attach a file → it uploads, sends, and persists on the message', async () => {
-  const server = await startRestServer({ board });
-  const browser = await puppeteer.launch({ headless: 'new' });
   const tmpFile = path.join(os.tmpdir(), `cv-upload-${process.pid}-${Date.now()}.txt`);
   fs.writeFileSync(tmpFile, 'hello attachment');
   try {
-    const page = await browser.newPage();
-    page.on('dialog', (d) => d.dismiss()); // defuse any rejection alert
-    await page.goto(`${server.baseUrl}/commons.html`, { waitUntil: 'networkidle0' });
-    await page.waitForSelector('.cv-input', { timeout: 5000 });
+    await withBrowserServer(async ({ server, browser }) => {
+      const page = await browser.newPage();
+      page.on('dialog', (d) => d.dismiss()); // defuse any rejection alert
+      await page.goto(`${server.baseUrl}/commons.html`, { waitUntil: 'networkidle0' });
+      await page.waitForSelector('.cv-input', { timeout: 5000 });
 
-    // the new surface now HAS a file input + 📎 button (the #238 fix)
-    const input = await page.$('input[type=file]');
-    assert.ok(input, 'the shared component exposes a file input');
-    await input.uploadFile(tmpFile);
+      // the new surface now HAS a file input + 📎 button (the #238 fix)
+      const input = await page.$('input[type=file]');
+      assert.ok(input, 'the shared component exposes a file input');
+      await input.uploadFile(tmpFile);
 
-    // uploaded → a pending chip appears
-    await page.waitForSelector('.cv-attach-chip', { timeout: 5000 });
+      // uploaded → a pending chip appears
+      await page.waitForSelector('.cv-attach-chip', { timeout: 5000 });
 
-    // type a body and send
-    await page.evaluate(() => { document.querySelector('.cv-input').value = 'with an attachment'; });
-    await page.evaluate(() => document.querySelector('.cv-form').requestSubmit());
-    await page.waitForFunction(
-      () => [...document.querySelectorAll('.cv-msg-body')].some((e) => e.textContent.includes('with an attachment')),
-      { timeout: 5000 },
-    );
+      // type a body and send
+      await page.evaluate(() => { document.querySelector('.cv-input').value = 'with an attachment'; });
+      await page.evaluate(() => document.querySelector('.cv-form').requestSubmit());
+      await page.waitForFunction(
+        () => [...document.querySelectorAll('.cv-msg-body')].some((e) => e.textContent.includes('with an attachment')),
+        { timeout: 5000 },
+      );
 
-    // the attachment persisted on the posted message
-    const msgs = await (await fetch(`${server.baseUrl}/api/conversations?limit=10`)).json();
-    const m = msgs.find((c) => c.body === 'with an attachment');
-    assert.ok(m && Array.isArray(m.attachments) && m.attachments.length === 1,
-      'posted message carries the attachment: ' + JSON.stringify(m && m.attachments));
+      // the attachment persisted on the posted message
+      const msgs = await (await fetch(`${server.baseUrl}/api/conversations?limit=10`)).json();
+      const m = msgs.find((c) => c.body === 'with an attachment');
+      assert.ok(m && Array.isArray(m.attachments) && m.attachments.length === 1,
+        'posted message carries the attachment: ' + JSON.stringify(m && m.attachments));
+    }, { server: { board }, launch: { headless: 'new' } });
   } finally {
     fs.unlinkSync(tmpFile);
-    await browser.close();
-    await server.stop();
   }
 });
 
@@ -183,9 +165,7 @@ test('#291/#303-1 commons.html: #NNN refs clickable + chat markdown renders; HTM
     conversations: [msg('mx', xssBody, 'sage', null, 2)],
     nextShortId: 2,
   };
-  const server = await startRestServer({ board: refBoard });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/commons.html`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('.cv-msg-body', { timeout: 5000 });
@@ -211,10 +191,7 @@ test('#291/#303-1 commons.html: #NNN refs clickable + chat markdown renders; HTM
     assert.equal(probe.imgInBody, false, 'no <img> injected from the body');
     assert.equal(probe.xssFlag, false, 'onerror never executed');
     assert.ok(probe.bodyText.includes('<img src=x onerror='), 'markup survived as literal text');
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board: refBoard }, launch: { headless: 'new' } });
 });
 
 test('#291/#303-1 board inline commons panel: #NNN refs (scroll in place) + chat markdown + XSS-inert', async () => {
@@ -225,9 +202,7 @@ test('#291/#303-1 board inline commons panel: #NNN refs (scroll in place) + chat
     conversations: [msg('mx', xssBody, 'sage', null, 2)],
     nextShortId: 2,
   };
-  const server = await startRestServer({ board: refBoard });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('.board-header', { timeout: 5000 });
@@ -271,10 +246,7 @@ test('#291/#303-1 board inline commons panel: #NNN refs (scroll in place) + chat
       () => !!document.querySelector('.card[data-id="p"].highlighted'),
       { timeout: 3000 });
     assert.equal(page.url(), urlBefore, 'ref click scrolled in place — no page navigation');
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board: refBoard }, launch: { headless: 'new' } });
 });
 
 // #303-6 — full-page commons search + load-older.
@@ -289,9 +261,7 @@ test('#303-6 commons.html: search filters the feed; clearing restores it', async
     ],
     nextShortId: 1,
   };
-  const server = await startRestServer({ board: searchBoard });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/commons.html`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('.cv-msg-body', { timeout: 5000 });
@@ -314,10 +284,7 @@ test('#303-6 commons.html: search filters the feed; clearing restores it', async
     // Clear → all restored.
     await page.evaluate(() => { const s = document.querySelector('.cv-search'); s.value = ''; s.dispatchEvent(new Event('input', { bubbles: true })); });
     await page.waitForFunction(() => document.querySelectorAll('.cv-msg').length === 3, { timeout: 3000 });
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board: searchBoard }, launch: { headless: 'new' } });
 });
 
 test('presence: the constellation lights each mind + marks the most-recent speaker; messages carry their author light', async () => {
@@ -332,9 +299,7 @@ test('presence: the constellation lights each mind + marks the most-recent speak
     ],
     nextShortId: 1,
   };
-  const server = await startRestServer({ board: presBoard });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/commons.html`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('.constellation .mind', { timeout: 5000 });
@@ -362,10 +327,7 @@ test('presence: the constellation lights each mind + marks the most-recent speak
     // Each message carries its author's signature light (a --mind colour set).
     const hasMind = await page.$$eval('.cv-msg-lit', (els) => els.every((e) => e.style.getPropertyValue('--mind')));
     assert.ok(hasMind, 'every message has an identity light');
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board: presBoard }, launch: { headless: 'new' } });
 });
 
 test('presence: clicking a mind in the constellation solos its voice; clearing restores the room', async () => {
@@ -379,9 +341,7 @@ test('presence: clicking a mind in the constellation solos its voice; clearing r
     ],
     nextShortId: 1,
   };
-  const server = await startRestServer({ board: soloBoard });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/commons.html`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('.constellation .mind', { timeout: 5000 });
@@ -401,10 +361,7 @@ test('presence: clicking a mind in the constellation solos its voice; clearing r
     await page.waitForFunction(() => !document.querySelector('.cv-solo-banner'), { timeout: 3000 });
     assert.equal((await page.$$('.cv-msg')).length, 3, 'the whole room is back');
     assert.equal(await page.$('.mind.soloed'), null, 'no chip active after clear');
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board: soloBoard }, launch: { headless: 'new' } });
 });
 
 test('#294 unscoped commons collapses card-attached posts to pointers; the scoped thread shows them full', async () => {
@@ -417,9 +374,7 @@ test('#294 unscoped commons collapses card-attached posts to pointers; the scope
     ],
     nextShortId: 6,
   };
-  const server = await startRestServer({ board: threadBoard });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
 
     // Unscoped room: floating post is a full message; the card post is a pointer.
@@ -439,10 +394,7 @@ test('#294 unscoped commons collapses card-attached posts to pointers; the scope
     const scopedBold = await page.$eval('.cv-msg-body strong', (e) => e.textContent).catch(() => null);
     assert.equal(scopedBold, 'thread', 'scoped thread shows the full card post (markdown rendered)');
     assert.equal((await page.$$('.cv-pointer')).length, 0, 'no pointers inside the scoped thread');
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board: threadBoard }, launch: { headless: 'new' } });
 });
 
 test('commons.html: the raised-hands panel is a registry of open asks (who · ask · card), clearable', async () => {
@@ -461,9 +413,7 @@ test('commons.html: the raised-hands panel is a registry of open asks (who · as
     ],
     nextShortId: 10,
   };
-  const server = await startRestServer({ board: blockedBoard });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/commons.html`, { waitUntil: 'networkidle0' });
     // Only the ONE open raise counts (resolved + plain comment excluded).
@@ -482,19 +432,14 @@ test('commons.html: the raised-hands panel is a registry of open asks (who · as
     await page.evaluate(() => document.querySelector('.blocked-done').click());
     await page.waitForFunction(() => /· 0$/.test(document.getElementById('blocked-toggle').textContent), { timeout: 5000 });
     assert.match(await page.$eval('.blocked-empty', (e) => e.textContent), /No open asks/, 'panel empty after clearing');
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board: blockedBoard }, launch: { headless: 'new' } });
 });
 
 test('#303-6 commons.html: "load older" hides when the whole history already fits', async () => {
   const convs = [];
   for (let i = 1; i <= 8; i++) convs.push(msg('m' + i, 'message number ' + i, 'sage', null, 1));
   convs.forEach((c, i) => { c.createdAt = `2026-05-01T00:00:0${i}.000Z`; });
-  const server = await startRestServer({ board: { cards: [], columns: [{ id: 'backlog', name: 'Backlog', order: 0 }], conversations: convs, nextShortId: 1 } });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/commons.html`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('.cv-msg', { timeout: 5000 });
@@ -506,10 +451,7 @@ test('#303-6 commons.html: "load older" hides when the whole history already fit
       return b && getComputedStyle(b).display === 'none';
     }, { timeout: 3000 });
     assert.equal((await page.$$('.cv-msg')).length, 8, 'all messages present, none lost');
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board: { cards: [], columns: [{ id: 'backlog', name: 'Backlog', order: 0 }], conversations: convs, nextShortId: 1 } }, launch: { headless: 'new' } });
 });
 
 test('clearing a raised hand does NOT invent an author', async () => {
@@ -527,9 +469,7 @@ test('clearing a raised hand does NOT invent an author', async () => {
     conversations: [msg('r1', '🚧 which way do we go?', 'nova', 'bk', 1)],
     nextShortId: 2,
   };
-  const server = await startRestServer({ board, staticDir: path.resolve('.') });
-  const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'] });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/commons.html`, { waitUntil: 'networkidle0' });
     await page.evaluate(() => document.getElementById('blocked-toggle').click());
@@ -550,10 +490,7 @@ test('clearing a raised hand does NOT invent an author', async () => {
       !Object.keys(roster).includes(resolution.author),
       `the resolution must not be attributed to a roster seat (got "${resolution.author}")`,
     );
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board, staticDir: path.resolve('.') }, launch: { headless: 'new', args: ['--no-sandbox'] } });
 });
 
 /**
@@ -582,24 +519,22 @@ test('#504 commons author picker offers the CONFIGURED roster, not the example s
       wiki:   { name: 'wiki',   glyph: '📄', color: '#778899' },
     },
   }));
-  const server = await startRestServer({ board, env: { SCRUM_ROSTER_FILE: rosterFile } });
-  const browser = await puppeteer.launch({ headless: 'new' });
   try {
-    const page = await browser.newPage();
-    await page.goto(`${server.baseUrl}/commons.html`, { waitUntil: 'networkidle0' });
-    await page.waitForSelector('select', { timeout: 5000 });
-    const opts = await page.evaluate(() =>
-      [...document.querySelector('select').options].map((o) => o.value));
+    await withBrowserServer(async ({ server, browser }) => {
+      const page = await browser.newPage();
+      await page.goto(`${server.baseUrl}/commons.html`, { waitUntil: 'networkidle0' });
+      await page.waitForSelector('select', { timeout: 5000 });
+      const opts = await page.evaluate(() =>
+        [...document.querySelector('select').options].map((o) => o.value));
 
-    assert.deepEqual(opts.sort(), ['vlorbo', 'zzquux'],
-      `picker must offer exactly the configured seats (wiki is not a person); got ${opts.join(', ')}`);
-    for (const example of ['alex', 'robin', 'sage', 'nova', 'kit']) {
-      assert.ok(!opts.includes(example),
-        `example seat "${example}" leaked into a configured board's author picker`);
-    }
+      assert.deepEqual(opts.sort(), ['vlorbo', 'zzquux'],
+        `picker must offer exactly the configured seats (wiki is not a person); got ${opts.join(', ')}`);
+      for (const example of ['alex', 'robin', 'sage', 'nova', 'kit']) {
+        assert.ok(!opts.includes(example),
+          `example seat "${example}" leaked into a configured board's author picker`);
+      }
+    }, { server: { board, env: { SCRUM_ROSTER_FILE: rosterFile } }, launch: { headless: 'new' } });
   } finally {
-    await browser.close();
-    await server.stop();
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -607,9 +542,7 @@ test('#504 commons author picker offers the CONFIGURED roster, not the example s
 test('#504 mirror: with NO roster configured, the shipped example seats DO return', async () => {
   // Without this, a defaultActors() that returned [] would satisfy the test
   // above while offering nobody at all — a green that means nothing.
-  const server = await startRestServer({ board });
-  const browser = await puppeteer.launch({ headless: 'new' });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/commons.html`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('select', { timeout: 5000 });
@@ -617,8 +550,5 @@ test('#504 mirror: with NO roster configured, the shipped example seats DO retur
       [...document.querySelector('select').options].map((o) => o.value));
     assert.ok(opts.length > 0, 'a fresh install must still offer someone to post as');
     assert.ok(opts.includes('alex'), `expected the shipped examples; got ${opts.join(', ')}`);
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board }, launch: { headless: 'new' } });
 });

@@ -1,7 +1,7 @@
 /**
  * #499 — nothing on the board view silently truncates: the search affordance
  * documents its own syntax somewhere that survives typing, and assignee chips
- * never clip off their card. RED-first, non-author bar (Wren), from the
+ * never clip off their card. RED-first, non-author bar (the reviewing seat), from the
  * card's pre-registered acceptance (steward pass 2026-07-26) + the folded
  * #514 diagnosis (a fixed-width field inside a now-fluid page).
  *
@@ -16,8 +16,8 @@
  *      affordance inside the search control ([data-search-help] contract)
  *   3. both states; the empty-clone fixture CREATES its multi-assignee card
  *      (the board has none — build the artifact you then verify)
- *   4. beneficiary: Michael finds `type:` unaided — his tier, on the card
- *   5. path-walk screenshots — Wren's tier, at grade time
+ *   4. beneficiary: the owner finds `type:` unaided — his tier, on the card
+ *   5. path-walk screenshots — the reviewing seat's tier, at grade time
  */
 
 import { test } from 'node:test';
@@ -25,8 +25,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import puppeteer from 'puppeteer';
-import { startRestServer, makeBoardFixture } from './helpers/harness.mjs';
+import { startRestServer, makeBoardFixture, withBrowserServer } from './helpers/harness.mjs';
 
 const ts = '2026-05-01T00:00:00.000Z';
 const VIEWPORTS = [480, 768, 1024, 1442];
@@ -151,73 +150,69 @@ async function checkChips(page, vw, offenses) {
 
 test('#499 populated: no truncated search text, syntax reachable while composing, no clipped chips at any viewport', async () => {
   const rf = rosterFile();
-  const server = await startRestServer({ board: populatedBoard(), env: { SCRUM_ROSTER_FILE: rf } });
-  const browser = await puppeteer.launch({ headless: 'new' });
   try {
-    const page = await browser.newPage();
-    const offenses = [];
-    for (const vw of VIEWPORTS) {
-      await page.setViewport({ width: vw, height: 900 });
-      await page.goto(server.baseUrl + '/', { waitUntil: 'networkidle0' });
-      await page.waitForSelector('.card', { timeout: 5000 });
-      await page.evaluate(() => Promise.race([
-        Promise.allSettled(document.getAnimations().map((a) => a.finished)),
-        new Promise((r) => setTimeout(r, 1200)),
-      ]));
-      await checkSearch(page, vw, offenses);
-      await checkChips(page, vw, offenses);
-    }
-    assert.deepEqual(offenses, [], `clipping offenses (${offenses.length}):\n${offenses.join('\n')}`);
+    await withBrowserServer(async ({ server, browser }) => {
+      const page = await browser.newPage();
+      const offenses = [];
+      for (const vw of VIEWPORTS) {
+        await page.setViewport({ width: vw, height: 900 });
+        await page.goto(server.baseUrl + '/', { waitUntil: 'networkidle0' });
+        await page.waitForSelector('.card', { timeout: 5000 });
+        await page.evaluate(() => Promise.race([
+          Promise.allSettled(document.getAnimations().map((a) => a.finished)),
+          new Promise((r) => setTimeout(r, 1200)),
+        ]));
+        await checkSearch(page, vw, offenses);
+        await checkChips(page, vw, offenses);
+      }
+      assert.deepEqual(offenses, [], `clipping offenses (${offenses.length}):\n${offenses.join('\n')}`);
+    }, { server: { board: populatedBoard(), env: { SCRUM_ROSTER_FILE: rf } }, launch: { headless: 'new' } });
   } finally {
-    await browser.close();
-    await server.stop();
     fs.rmSync(rf, { force: true });
   }
 });
 
 test('#499 fresh clone: the fixture CREATES a 3-assignee card, then the same bars hold', async () => {
   const rf = rosterFile();
-  const server = await startRestServer({ board: makeBoardFixture(), env: { SCRUM_ROSTER_FILE: rf } });
-  const browser = await puppeteer.launch({ headless: 'new' });
   try {
-    const r = await fetch(`${server.baseUrl}/api/cards`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ title: 'Fresh multi', assignees: ['zephyr', 'quill', 'ember'], column: 'backlog', type: 'task', description: 'created by the fixture' }),
-    });
-    assert.ok(r.ok, `fixture create failed: ${r.status}`);
-    const created = await r.json();
-    const cardId = created.id ?? created.card?.id;
+    await withBrowserServer(async ({ server, browser }) => {
+      const r = await fetch(`${server.baseUrl}/api/cards`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ title: 'Fresh multi', assignees: ['zephyr', 'quill', 'ember'], column: 'backlog', type: 'task', description: 'created by the fixture' }),
+      });
+      assert.ok(r.ok, `fixture create failed: ${r.status}`);
+      const created = await r.json();
+      const cardId = created.id ?? created.card?.id;
 
-    const page = await browser.newPage();
-    const offenses = [];
-    for (const vw of VIEWPORTS) {
-      await page.setViewport({ width: vw, height: 900 });
-      await page.goto(server.baseUrl + '/', { waitUntil: 'networkidle0' });
-      await page.waitForSelector('.card', { timeout: 5000 });
-      await page.evaluate(() => Promise.race([
-        Promise.allSettled(document.getAnimations().map((a) => a.finished)),
-        new Promise((r) => setTimeout(r, 1200)),
-      ]));
-      await checkSearch(page, vw, offenses);
-      // The created card is the c3-equivalent here.
-      const probe = await page.evaluate((cid) => {
-        const cardEl = document.querySelector(`.card[data-id="${cid}"]`) || document.querySelector('.card');
-        const cr = cardEl.getBoundingClientRect();
-        const chips = [...cardEl.querySelectorAll('.card-assignee')];
-        return {
-          visible: chips.filter((ch) => ch.getBoundingClientRect().width > 0).length,
-          clipped: chips.filter((ch) => { const r2 = ch.getBoundingClientRect(); return r2.width > 0 && r2.right > cr.right + 2; }).length,
-          plusN: !!cardEl.querySelector('[data-assignee-overflow], .assignee-more') || /\+\d+/.test(cardEl.textContent),
-        };
-      }, cardId);
-      if (probe.clipped > 0) offenses.push(`@${vw}px fresh-clone card clips ${probe.clipped} chip(s)`);
-      if (probe.visible < 3 && !probe.plusN) offenses.push(`@${vw}px fresh-clone 3-assignee card shows ${probe.visible} chips, no +N`);
-    }
-    assert.deepEqual(offenses, [], `fresh-clone clipping offenses (${offenses.length}):\n${offenses.join('\n')}`);
+      const page = await browser.newPage();
+      const offenses = [];
+      for (const vw of VIEWPORTS) {
+        await page.setViewport({ width: vw, height: 900 });
+        await page.goto(server.baseUrl + '/', { waitUntil: 'networkidle0' });
+        await page.waitForSelector('.card', { timeout: 5000 });
+        await page.evaluate(() => Promise.race([
+          Promise.allSettled(document.getAnimations().map((a) => a.finished)),
+          new Promise((r) => setTimeout(r, 1200)),
+        ]));
+        await checkSearch(page, vw, offenses);
+        // The created card is the c3-equivalent here.
+        const probe = await page.evaluate((cid) => {
+          const cardEl = document.querySelector(`.card[data-id="${cid}"]`) || document.querySelector('.card');
+          const cr = cardEl.getBoundingClientRect();
+          const chips = [...cardEl.querySelectorAll('.card-assignee')];
+          return {
+            visible: chips.filter((ch) => ch.getBoundingClientRect().width > 0).length,
+            clipped: chips.filter((ch) => { const r2 = ch.getBoundingClientRect(); return r2.width > 0 && r2.right > cr.right + 2; }).length,
+            plusN: !!cardEl.querySelector('[data-assignee-overflow], .assignee-more') || /\+\d+/.test(cardEl.textContent),
+          };
+        }, cardId);
+        if (probe.clipped > 0) offenses.push(`@${vw}px fresh-clone card clips ${probe.clipped} chip(s)`);
+        if (probe.visible < 3 && !probe.plusN) offenses.push(`@${vw}px fresh-clone 3-assignee card shows ${probe.visible} chips, no +N`);
+      }
+      assert.deepEqual(offenses, [], `fresh-clone clipping offenses (${offenses.length}):\n${offenses.join('\n')}`);
+    }, { server: { board: makeBoardFixture(), env: { SCRUM_ROSTER_FILE: rf } }, launch: { headless: 'new' } });
   } finally {
-    await browser.close();
-    await server.stop();
     fs.rmSync(rf, { force: true });
   }
 });

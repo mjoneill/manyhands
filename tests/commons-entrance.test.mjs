@@ -2,9 +2,9 @@
  * #497 — the commons entrance suite. RED-first, written from the card's
  * pre-registered acceptance before the build commit.
  *
- * ⚠️ BAR AUTHORSHIP: written by Indigo, who also builds it. That breaks the
- * lane adopted 2026-07-26 (Wren authors the bar, Indigo builds to green) —
- * Wren was mid-battery on #503. Recorded rather than quietly skipped: a
+ * ⚠️ BAR AUTHORSHIP: written by the builder, who also builds it. That breaks the
+ * lane adopted 2026-07-26 (the reviewing seat authors the bar, the builder builds to green) —
+ * the reviewing seat was mid-battery on #503. Recorded rather than quietly skipped: a
  * builder-authored bar is worth less than a peer-authored one, and the way it
  * usually fails is by asserting the shape the builder happened to ship. The
  * mitigation available to a lone author is to derive every assertion from the
@@ -43,8 +43,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import puppeteer from 'puppeteer';
-import { startRestServer, makeBoardFixture, PROJECT_DIR } from './helpers/harness.mjs';
+import { startRestServer, makeBoardFixture, PROJECT_DIR, withBrowserServer } from './helpers/harness.mjs';
 
 const TOGGLE = '[data-commons-toggle]';
 const UNREAD = '[data-commons-unread]';
@@ -73,14 +72,9 @@ function boardWithRoom() {
 }
 
 async function withBoard(fn) {
-  const server = await startRestServer({ board: boardWithRoom(), staticDir: PROJECT_DIR });
-  const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'] });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     await fn({ server, browser });
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board: boardWithRoom(), staticDir: PROJECT_DIR }, launch: { headless: 'new', args: ['--no-sandbox'] } });
 }
 
 /**
@@ -266,7 +260,7 @@ test('#497 the panel escapes to the full Commons page', async () => {
 // ---------------------------------------------------------------------------
 // Rubric 5, second half — "WITHOUT LOSING POSITION".
 //
-// Added after grading, and the reading is Wren's, not mine. I first read
+// Added after grading, and the reading is the reviewing seat's, not mine. I first read
 // "position" as the board underneath; she read it as the reader's place in the
 // ROOM, and she is right — the board half is the browser's back button doing
 // its ordinary job, while feed continuity is the part only we can preserve or
@@ -344,9 +338,7 @@ test('#497 escaping to the full page keeps your place in the feed', async () => 
     })),
     nextShortId: 1,
   });
-  const server = await startRestServer({ board: many, staticDir: PROJECT_DIR });
-  const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'] });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const { page } = await openSurface(browser, server.baseUrl, '/wiki.html');
     await page.click(TOGGLE);
     await waitForPanelOpen(page);
@@ -383,10 +375,7 @@ test('#497 escaping to the full page keeps your place in the feed', async () => 
     assert.equal(landedNear.found, true, `"${anchoredOn}" is not on the full page at all`);
     assert.equal(landedNear.inViewport, true,
       `the reader was on "${anchoredOn}" in the panel and the full page did not bring it into view — the escape lost their place in the room.`);
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board: many, staticDir: PROJECT_DIR }, launch: { headless: 'new', args: ['--no-sandbox'] } });
 });
 
 // ---------------------------------------------------------------------------
@@ -505,7 +494,7 @@ test('#497 the badge counts what arrived while you were away, and clears when yo
     const res = await fetch(`${server.baseUrl}/api/conversations`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ body: 'Something new in the room.', author: 'wren' }),
+      body: JSON.stringify({ body: 'Something new in the room.', author: 'ada' }),
     });
     assert.equal(res.status < 300, true, `posting to the room failed: ${res.status}`);
 

@@ -1,17 +1,17 @@
 /**
  * #509 — every interactive target on a card (except the condemned
  * `.desc-toggle`) meets WCAG 2.5.8's 24×24 CSS-pixel minimum. RED-first,
- * non-author bar (Wren), from the card's pre-registered acceptance.
+ * non-author bar (the reviewing seat), from the card's pre-registered acceptance.
  *
  * Card work items, enumerated per checklist item 10, and where each lives:
  *   1. sweep other interactive targets vs 24×24, count with command → THIS
  *      FILE (the sweep is the test; the count is in the offense output)
- *   2. each reads as a control to a stranger → beneficiary tier, Michael's —
+ *   2. each reads as a control to a stranger → beneficiary tier, the owner's —
  *      not automatable, recorded on the card
  *   3. both states → the two tests below (populated / fresh clone creating
  *      its cards)
  *   4. pair-level bar with #510 (one affordance, rg desc-toggle → 0) → runs
- *      at PAIR close, Wren's verification, not this RED
+ *      at PAIR close, the reviewing seat's verification, not this RED
  *
  * `.desc-toggle` is EXCLUDED by steward ruling 21:22 — condemned, #510
  * deletes it; nobody enlarges a control whose death warrant is signed.
@@ -20,7 +20,7 @@
  * move-left, move-right) — a selector drift that finds nothing must fail
  * loudly, not pass an empty list (#499's lesson, the empty-sweep variant).
  *
- * ⚠️ GEOMETRY-MEASUREMENT TRAP (Indigo's retraction, 2026-07-27): a HIDDEN
+ * ⚠️ GEOMETRY-MEASUREMENT TRAP (the builder's retraction, 2026-07-27): a HIDDEN
  * tab freezes the document animation timeline, so a page with a transform
  * entrance animation (cardAppear: scale .97) reads every box ~3% small,
  * permanently, and it looks exactly like real data — her live sweep reported
@@ -35,8 +35,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import puppeteer from 'puppeteer';
-import { startRestServer, makeBoardFixture } from './helpers/harness.mjs';
+import { startRestServer, makeBoardFixture, withBrowserServer } from './helpers/harness.mjs';
 
 const ts = '2026-05-01T00:00:00.000Z';
 const MIN = 24; // WCAG 2.5.8 minimum target size, CSS px
@@ -102,7 +101,7 @@ async function sweepCard(page, cardSel) {
       // text" (e.g. #NNN shortid links inside descriptions) are exempt —
       // 24px click boxes inside running prose would damage the reading
       // surface #496 fixed. Excluded WITH the reason, not quietly dropped
-      // (Indigo's live-sweep categorization, 2026-07-27).
+      // (the builder's live-sweep categorization, 2026-07-27).
       .filter((el) => !el.closest('.card-description, .prose'))
       .filter((el) => el.offsetParent !== null);
     const cardRect = card.getBoundingClientRect();
@@ -114,7 +113,7 @@ async function sweepCard(page, cardSel) {
         w: +r.width.toFixed(1),
         h: +r.height.toFixed(1),
         ok: r.width >= MIN && r.height >= MIN,
-        // Anti-inflation guard (the degenerate solution Indigo named against
+        // Anti-inflation guard (the degenerate solution the builder named against
         // herself): a target padded past the card's own bounds is inflation,
         // not accessibility.
         inBounds: r.left >= cardRect.left - 2 && r.right <= cardRect.right + 2
@@ -162,47 +161,43 @@ async function runSweep(page, offenses, stateName) {
 
 test('#509 populated: every interactive card target except .desc-toggle meets 24×24', async () => {
   const rosterFile = syntheticRosterFile();
-  const server = await startRestServer({ board: populatedBoard(), env: { SCRUM_ROSTER_FILE: rosterFile } });
-  const browser = await puppeteer.launch({ headless: 'new' });
   try {
-    const page = await browser.newPage();
-    await page.setViewport({ width: 1024, height: 900 });
-    await page.goto(server.baseUrl + '/', { waitUntil: 'networkidle0' });
-    await page.waitForSelector('.card', { timeout: 5000 });
-    const offenses = [];
-    const count = await runSweep(page, offenses, 'populated');
-    assert.deepEqual(offenses, [],
-      `hit-target offenses (${offenses.length} of ${count} targets swept):\n${offenses.join('\n')}`);
+    await withBrowserServer(async ({ server, browser }) => {
+      const page = await browser.newPage();
+      await page.setViewport({ width: 1024, height: 900 });
+      await page.goto(server.baseUrl + '/', { waitUntil: 'networkidle0' });
+      await page.waitForSelector('.card', { timeout: 5000 });
+      const offenses = [];
+      const count = await runSweep(page, offenses, 'populated');
+      assert.deepEqual(offenses, [],
+        `hit-target offenses (${offenses.length} of ${count} targets swept):\n${offenses.join('\n')}`);
+    }, { server: { board: populatedBoard(), env: { SCRUM_ROSTER_FILE: rosterFile } }, launch: { headless: 'new' } });
   } finally {
-    await browser.close();
-    await server.stop();
     fs.rmSync(rosterFile, { force: true });
   }
 });
 
 test('#509 fresh clone: cards created via the API meet the same target minimum', async () => {
   const rosterFile = syntheticRosterFile();
-  const server = await startRestServer({ board: makeBoardFixture(), env: { SCRUM_ROSTER_FILE: rosterFile } });
-  const browser = await puppeteer.launch({ headless: 'new' });
   try {
-    const r = await fetch(`${server.baseUrl}/api/cards`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ title: 'Fresh', assignee: 'zephyr', column: 'backlog', type: 'task', description: 'created by the fixture — an empty sweep verifies nothing' }),
-    });
-    assert.ok(r.ok, `fixture create failed: ${r.status}`);
+    await withBrowserServer(async ({ server, browser }) => {
+      const r = await fetch(`${server.baseUrl}/api/cards`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ title: 'Fresh', assignee: 'zephyr', column: 'backlog', type: 'task', description: 'created by the fixture — an empty sweep verifies nothing' }),
+      });
+      assert.ok(r.ok, `fixture create failed: ${r.status}`);
 
-    const page = await browser.newPage();
-    await page.setViewport({ width: 1024, height: 900 });
-    await page.goto(server.baseUrl + '/', { waitUntil: 'networkidle0' });
-    await page.waitForSelector('.card', { timeout: 5000 });
-    const offenses = [];
-    const count = await runSweep(page, offenses, 'fresh-clone');
-    assert.deepEqual(offenses, [],
-      `hit-target offenses (${offenses.length} of ${count} targets swept):\n${offenses.join('\n')}`);
+      const page = await browser.newPage();
+      await page.setViewport({ width: 1024, height: 900 });
+      await page.goto(server.baseUrl + '/', { waitUntil: 'networkidle0' });
+      await page.waitForSelector('.card', { timeout: 5000 });
+      const offenses = [];
+      const count = await runSweep(page, offenses, 'fresh-clone');
+      assert.deepEqual(offenses, [],
+        `hit-target offenses (${offenses.length} of ${count} targets swept):\n${offenses.join('\n')}`);
+    }, { server: { board: makeBoardFixture(), env: { SCRUM_ROSTER_FILE: rosterFile } }, launch: { headless: 'new' } });
   } finally {
-    await browser.close();
-    await server.stop();
     fs.rmSync(rosterFile, { force: true });
   }
 });

@@ -36,8 +36,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import puppeteer from 'puppeteer';
-import { startRestServer, makeBoardFixture, PROJECT_DIR } from './helpers/harness.mjs';
+import { startRestServer, makeBoardFixture, PROJECT_DIR, withBrowserServer } from './helpers/harness.mjs';
 
 const FILES = [
   'index.html', 'wiki.html', 'commons.html', 'settings.html',
@@ -71,7 +70,7 @@ test('#525 mechanical: every var(--x) in shipped CSS is defined, or carries a fa
 /**
  * Read a computed property until it stops moving.
  *
- * THE THIRD TRAP, found by Wren grading this suite (2026-07-27): the first
+ * THE THIRD TRAP, found by the reviewing seat grading this suite (2026-07-27): the first
  * version of this helper slept a flat 120ms. `.board-search-input` carries
  * `transition: border-color 0.15s`. So the read landed MID-FLIGHT, on an
  * interpolated colour equal to neither endpoint — which meant
@@ -120,21 +119,8 @@ async function beforeAfter(page, selector, prop, interact) {
 }
 
 test('#525 the surfaces paint what they meant to: backgrounds present, focus and hover the intended colour', async () => {
-  const server = await startRestServer({
-    board: makeBoardFixture({
-      cards: [{
-        id: 'c1', shortId: 1, title: 'Anchor', description: 'Body.', type: 'task',
-        assignees: [], labels: [], for: '', priority: null, column: 'backlog', order: 0,
-        createdAt: '2026-05-01T00:00:00.000Z', updatedAt: '2026-05-01T00:00:00.000Z',
-        relationships: { relatedTo: [], blockedBy: [] },
-      }],
-      nextShortId: 2,
-    }),
-    staticDir: PROJECT_DIR,
-  });
-  const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'] });
   const TRANSPARENT = 'rgba(0, 0, 0, 0)';
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.setViewport({ width: 1442, height: 900 });
     await page.goto(server.baseUrl, { waitUntil: 'networkidle0' });
@@ -171,8 +157,16 @@ test('#525 the surfaces paint what they meant to: backgrounds present, focus and
     const saveBg = await page.$eval('#save', (el) => getComputedStyle(el).backgroundColor);
     assert.notEqual(saveBg, TRANSPARENT,
       'the Settings Save button has no background — the primary action on the page is unpainted');
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: {
+    board: makeBoardFixture({
+      cards: [{
+        id: 'c1', shortId: 1, title: 'Anchor', description: 'Body.', type: 'task',
+        assignees: [], labels: [], for: '', priority: null, column: 'backlog', order: 0,
+        createdAt: '2026-05-01T00:00:00.000Z', updatedAt: '2026-05-01T00:00:00.000Z',
+        relationships: { relatedTo: [], blockedBy: [] },
+      }],
+      nextShortId: 2,
+    }),
+    staticDir: PROJECT_DIR,
+  }, launch: { headless: 'new', args: ['--no-sandbox'] } });
 });

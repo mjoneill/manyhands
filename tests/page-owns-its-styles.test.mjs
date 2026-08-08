@@ -29,8 +29,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import puppeteer from 'puppeteer';
-import { startRestServer, makeBoardFixture, PROJECT_DIR } from './helpers/harness.mjs';
+import { startRestServer, makeBoardFixture, PROJECT_DIR, withBrowserServer } from './helpers/harness.mjs';
 
 const SURFACES = ['/', '/wiki.html', '/settings.html', '/commons.html'];
 
@@ -53,9 +52,7 @@ const SURFACES = ['/', '/wiki.html', '/settings.html', '/commons.html'];
 const LEAKY = ['marginTop', 'marginBottom', 'marginLeft', 'marginRight', 'fontWeight'];
 
 test('#516 a foreign element dropped into the shared header inherits nothing page-local', async () => {
-  const server = await startRestServer({ board: makeBoardFixture(), staticDir: PROJECT_DIR });
-  const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'] });
-  try {
+  await withBrowserServer(async ({ server, browser }) => {
     const seen = {};
     for (const surface of SURFACES) {
       const page = await browser.newPage();
@@ -86,10 +83,7 @@ test('#516 a foreign element dropped into the shared header inherits nothing pag
         + '  A component can defend itself, but only itself; the next one mounted here inherits this.',
       );
     }
-  } finally {
-    await browser.close();
-    await server.stop();
-  }
+  }, { server: { board: makeBoardFixture(), staticDir: PROJECT_DIR }, launch: { headless: 'new', args: ['--no-sandbox'] } });
 });
 
 test('#516 mechanical: no surface styles a bare interactive element in its inline stylesheet', () => {
