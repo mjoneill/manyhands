@@ -35,6 +35,7 @@
  * It is why the reader says "recorded runs" and never "runs".
  */
 
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -57,6 +58,39 @@ export function ledgerPath() {
  */
 export function ledgerScope() {
   return process.env.RUN_TESTS_LEDGER || null;
+}
+
+/**
+ * #746 — the tree the verdict is ABOUT, sampled at a boundary.
+ *
+ * Sampled at BOTH ends by the runner, not once. A one-boundary check declares a
+ * mid-run mutation clean: a seat edited this repo continuously across an
+ * eighteen-minute window while another ran a seventy-second suite inside it, and
+ * a start-only check would have called that result attributable. The steward who
+ * proposed the weaker check supplied the case against it.
+ *
+ * ⚠️ `null` means "could not tell" and is never the same as clean. An unknown
+ * reported as clean is the fail-open shape that #745 spent two review rounds on.
+ */
+export function treeState(cwd = process.cwd()) {
+  try {
+    const git = (args) => String(execFileSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'ignore'] })).trim();
+    return { commit: git(['rev-parse', '--short', 'HEAD']), dirty: git(['status', '--porcelain']).length > 0 };
+  } catch {
+    return { commit: null, dirty: null };
+  }
+}
+
+/**
+ * A verdict is attributable to an exact tree only if it did not move under the
+ * run and was clean at both ends. Everything else is still recorded — it is just
+ * never mixed into the clean denominator.
+ */
+export function isAttributable(entry) {
+  return Boolean(entry.startCommit)
+    && entry.startCommit === entry.endCommit
+    && entry.startDirty === false
+    && entry.endDirty === false;
 }
 
 export function newRunId() {
@@ -106,7 +140,11 @@ export function readVerdicts(file = ledgerPath()) {
  * reader assumes.
  */
 export function summarize(entries) {
-  const runs = entries.filter((e) => e.scope === 'full');
+  const all = entries.filter((e) => e.scope === 'full');
+  // Counted over ATTRIBUTABLE runs only. A dirty-tree verdict and a clean-tree
+  // verdict are different objects; averaging them yields a number describing
+  // neither, and the dirty ones describe a state that never shipped.
+  const runs = all.filter(isAttributable);
   const reds = new Map();
   for (const run of runs) {
     for (const file of run.failed || []) {
@@ -115,6 +153,7 @@ export function summarize(entries) {
   }
   return {
     recordedRuns: runs.length,
+    unattributableRuns: all.length - runs.length,
     redRuns: runs.filter((r) => r.verdict === 'red').length,
     files: [...reds.entries()]
       .map(([file, count]) => ({ file, count, ofRecordedRuns: runs.length }))

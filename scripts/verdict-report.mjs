@@ -25,7 +25,9 @@
 import { ledgerPath, readVerdicts, summarize } from './verdict-ledger.mjs';
 
 const entries = readVerdicts();
-const { recordedRuns, redRuns, files } = summarize(entries);
+const {
+  recordedRuns, unattributableRuns, redRuns, files,
+} = summarize(entries);
 const isolations = entries.filter((e) => e.scope === 'isolation');
 
 console.log(`ledger: ${ledgerPath()}`);
@@ -34,7 +36,13 @@ console.log('        the server phase of `npm test`, or the suite watch.');
 console.log('        NOT covered: bare `node --test`, and `npm run test:browser`.');
 console.log('');
 
-if (!recordedRuns) {
+// ⚠️ Gate on what the ledger HOLDS, not on what survived the attributability
+// filter. Written the other way round, this printed "No recorded server-suite
+// runs yet" while sitting on three real events — the reader would have hidden
+// the exact record it exists to surface, and the first person to read it would
+// have concluded the hook was not firing. Caught by running it against the live
+// file rather than a fixture.
+if (!recordedRuns && !unattributableRuns) {
   console.log('No recorded server-suite runs yet.');
   console.log('⚠️ That is not evidence the suite has not been run — only that it has');
   console.log('   not been run through an instrumented path since the ledger began.');
@@ -42,11 +50,21 @@ if (!recordedRuns) {
 }
 
 const first = entries[0]?.at ?? '?';
-console.log(`${recordedRuns} recorded server-suite run(s) since ${first} — ${redRuns} red.`);
+console.log(`${recordedRuns} recorded CLEAN server-suite run(s) since ${first} — ${redRuns} red.`);
+if (unattributableRuns) {
+  console.log(`⚠️ ${unattributableRuns} further run(s) recorded but NOT counted: the tree was dirty at a`);
+  console.log('   boundary, moved during the run, or was not a git checkout. A verdict over');
+  console.log('   uncommitted work describes a state that never shipped, and averaging it with');
+  console.log('   clean runs produces a number that describes neither.');
+}
 console.log('');
 
-if (!files.length) {
-  console.log('No file has failed in any recorded run.');
+if (!recordedRuns) {
+  console.log('No CLEAN run has been recorded yet, so there is no denominator to count against.');
+  console.log('The unattributable runs above are on record and readable, but a rate built');
+  console.log('from them would describe no particular tree.');
+} else if (!files.length) {
+  console.log('No file has failed in any recorded clean run.');
 } else {
   const width = Math.max(...files.map((f) => f.file.length));
   for (const { file, count, ofRecordedRuns } of files) {

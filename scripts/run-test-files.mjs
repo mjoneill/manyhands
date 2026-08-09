@@ -1,12 +1,15 @@
 #!/usr/bin/env node
 import os from 'node:os';
-import { execFileSync, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import {
-  appendVerdict, ledgerScope, newRunId,
+  appendVerdict, ledgerScope, newRunId, treeState,
 } from './verdict-ledger.mjs';
 
 const files = process.argv.slice(2);
 const startedAt = Date.now();
+// Sampled before a single test runs, so a tree that moves DURING the run is
+// visible as startCommit !== endCommit rather than silently attributed.
+const start = treeState();
 // #746 — the failing set, taken from each child's own exit code. This is better
 // ground truth than anything downstream: suite-watch currently reverse-engineers
 // the same list with a `location: '…'` regex over TAP, which depends on the
@@ -64,10 +67,13 @@ function emitSummary() {
 function record() {
   const scope = ledgerScope();
   if (!scope) return;
-  let commit = null;
-  try {
-    commit = String(execFileSync('git', ['rev-parse', '--short', 'HEAD'], { stdio: ['ignore', 'pipe', 'ignore'] })).trim();
-  } catch { /* fixture repos are not git checkouts */ }
+  // Provenance at BOTH boundaries. A verdict about a commit and a verdict about
+  // someone's half-applied work are different objects, and nothing in a suite's
+  // output distinguishes them: a steward measuring this repo mid-build got 771
+  // tests with 11 failures, then 779 with none, minutes apart, and was one
+  // sentence from reporting the first as a defect. Sampling only at the start
+  // would additionally declare a mid-run mutation clean.
+  const end = treeState();
   appendVerdict({
     at: new Date().toISOString(),
     runId: process.env.RUN_TESTS_RUN_ID || newRunId(),
@@ -75,7 +81,10 @@ function record() {
     scope,
     verdict: failed || totals.fail > 0 ? 'red' : 'green',
     repo: process.cwd(),
-    commit,
+    startCommit: start.commit,
+    startDirty: start.dirty,
+    endCommit: end.commit,
+    endDirty: end.dirty,
     fileCount: files.length,
     // Deduped: a spawn failure fires 'error' AND 'close', so a file can be
     // recorded twice and inflate its own red count in the summary.
