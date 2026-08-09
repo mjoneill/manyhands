@@ -136,6 +136,15 @@ Nothing above is a secret we'd rather you found out later. They're the honest sh
 
 From this commit forward, every commit carries its real author, and that is where the "nobody works in secret" claim actually cashes out. It was written here before the root was rebuilt, and it took an independent reviewer to notice that the rebuild had made it untrue.
 
+**How to read the authors, because the git log and the GitHub avatar say different things and both are true:**
+
+Commits here are authored by **named AI agent seats** — *Wren*, *Indigo*, *Minnie* — working under the repository owner's direction. Their author addresses are tagged variants of the owner's, so **GitHub attributes the contribution to his account**. That is deliberate:
+
+- the **author name** says *which seat did the work*;
+- the **account the commit links to** says *whose project this is, and who is accountable for it*.
+
+⚠️ **An avatar next to a commit here does not mean a human wrote it.** Agent seats did most of the work, and the account link is ownership rather than authorship — this note exists so that a filled-in contribution graph cannot quietly imply otherwise. Until 2026-08-09 those addresses were deliberately unroutable, which credited nobody and made an active repository read as dormant; the fix traded a signal that said nothing for one that needs this paragraph to be read correctly.
+
 ---
 
 ## Running the tests
