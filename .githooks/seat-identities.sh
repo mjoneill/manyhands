@@ -1,24 +1,16 @@
 #!/bin/sh
-# #751 phase 2 — THE SEAT LIST, named once and consulted by both rails.
+# #751 phase 2 — THE SEAT LIST, named once.
 #
-# Two detectors enforce agent identity and they must agree on what a seat IS:
+# ONE detector enforces agent identity: `.githooks/pre-commit`, keyed on the
+# env marker, refusing an agent session that commits under the tree's human
+# fallback config. A second detector existed and was retired the same day — the
+# tombstone below says why, and it is worth reading before anyone adds another.
 #
-#   .githooks/pre-commit   the ENV marker — refuses an agent session committing
-#                          under the tree's human fallback config.
-#   .githooks/commit-msg   the ARTIFACT — refuses an author/trailer disagreement,
-#                          for the seat whose runtime carries no env marker at
-#                          all and cannot introspect its own environment.
-#
-# ⚠️ THEY WERE KEYED TO DIFFERENT THINGS AND ONE HAD GONE INERT. commit-msg
-# matched a retired domain in the TRAILER rather than asking whether the AUTHOR
-# is a seat, so a human-authored commit carrying `Co-Authored-By: <Seat>
-# <noreply@anthropic.com>` — the trailer style actually in use — passed straight
-# through the case that rail exists to catch. Measured 2026-08-09 by driving the
-# hook directly, and true for as long as those trailers have been in use. A green
-# suite reported the guard healthy the whole time.
-#
-# ⇒ One list, one predicate, both hooks. Two rails that CAN disagree about what a
-#   seat is eventually do, and the disagreement is invisible from either side.
+# The list lives here rather than inside the hook so that any future rail
+# consults the same definition. Two rails that CAN disagree about what a seat
+# is eventually do, and the disagreement is invisible from either side: the one
+# retired below had been keyed to a retired domain and was inert for months
+# while a green suite reported it healthy.
 #
 # ⚠️ SHAPES, NOT ADDRESSES. The verified seat addresses are tagged variants of a
 # real person's address; writing them into tracked public content is what the
@@ -59,20 +51,29 @@ seat_ident_of() {
   printf '%s' "$1" | sed 's/ [0-9][0-9]* [-+][0-9][0-9]*$//'
 }
 
-# Does file "$1" carry a Co-Authored-By trailer naming one of our seats?
-# By NAME, so it holds for every address a seat has ever signed with — the old
-# per-seat addresses, the shared noreply, and the current tagged ones. Keying on
-# an ADDRESS is what let this detector go quiet when the address style changed.
-trailer_names_a_seat() {
-  IFS='
-'
-  for _seat in $SEAT_IDENTS; do
-    _name=${_seat%% <*}
-    if grep -qi "^Co-Authored-By:[[:space:]]*${_name}[[:space:]]*<" "$1"; then
-      unset IFS
-      return 0
-    fi
-  done
-  unset IFS
-  return 1
-}
+# ⚰️ RETIRED 2026-08-09 — `.githooks/commit-msg`, the ARTIFACT detector.
+#
+# It refused "author is not a seat, but the message carries a seat trailer."
+# Written for the seat whose runtime carries no env marker, so pre-commit skips
+# it entirely. Retired for two measured reasons, and a future implementer should
+# read both before rebuilding it here:
+#
+#   1. ITS INPUT IS AMBIGUOUS. `human author + seat trailer` is BOTH the defect
+#      (a seat falling back to the human identity) AND correct use (the owner
+#      committing his own work and crediting a seat). Three such commits exist
+#      in this history and all three are legitimate. No parsing distinguishes
+#      them without an external agent signal — so the rail refused the repo
+#      owner in his own repo, which pre-commit prevents by construction and
+#      this detector never could.
+#
+#   2. ITS TRIGGER IS VOLUNTARY AND UNSPECIFIED. Trailer emission measured at
+#      6% for one seat and 88% for another, and it had never been specified for
+#      the third at all. A rail whose trigger is improvised is not a protocol.
+#
+# ⚠️ It never covered the markerless seat it was written for. Retiring it
+# removes a FALSE CLAIM of coverage, not coverage — that gap is carded and open,
+# and nobody should describe all seats as guarded.
+#
+# ⚠️ It never inspected message CONTENT. Content is the #561 pre-push gate's
+# job, which is untouched — that is the rail that caught a model name in six
+# trailers when four diff sweeps missed it, because a trailer is not in a diff.
