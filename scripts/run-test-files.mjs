@@ -2,7 +2,7 @@
 import os from 'node:os';
 import { spawn } from 'node:child_process';
 import {
-  appendVerdict, ledgerScope, newRunId, treeState,
+  appendVerdict, ledgerPath, ledgerScope, newRunId, treeState,
 } from './verdict-ledger.mjs';
 
 const files = process.argv.slice(2);
@@ -74,7 +74,7 @@ function record() {
   // sentence from reporting the first as a defect. Sampling only at the start
   // would additionally declare a mid-run mutation clean.
   const end = treeState();
-  appendVerdict({
+  const written = appendVerdict({
     at: new Date().toISOString(),
     runId: process.env.RUN_TESTS_RUN_ID || newRunId(),
     parentRunId: process.env.RUN_TESTS_PARENT_RUN_ID || null,
@@ -92,6 +92,20 @@ function record() {
     totals: { ...totals },
     durationMs: Date.now() - startedAt,
   });
+
+  // ⚠️ A failed write must be LOUD without touching the verdict. The first cut
+  // swallowed the boolean this already returns: no record, no diagnostic,
+  // confident green — which is the exact silence #746 exists to remove, aimed by
+  // the ledger at itself. stderr, so it survives the tee into a local terminal
+  // and lands in the watcher's captured output on the unattended path; and
+  // deliberately NOT an exit-code change, because a suite's verdict must never
+  // depend on whether a home directory happened to be writable.
+  if (!written) {
+    process.stderr.write(
+      `# WARNING: verdict ledger write FAILED — this run is NOT recorded (${ledgerPath()}).\n`
+      + '# The suite verdict above is unaffected. Flake counts will under-report until this is fixed.\n',
+    );
+  }
 }
 
 function finish() {

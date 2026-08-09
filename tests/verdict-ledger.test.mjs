@@ -26,7 +26,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isAttributable, readVerdicts, summarize } from '../scripts/verdict-ledger.mjs';
+import {
+  isAttributable, readLedger, readVerdicts, summarize,
+} from '../scripts/verdict-ledger.mjs';
 
 const run = promisify(execFile);
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -196,7 +198,14 @@ test('#746 a dirty run is recorded but kept OUT of the clean denominator', () =>
  * A ledger that can fail a suite run would be a worse defect than the silence it
  * replaces: the verdict must never depend on whether a directory was writable.
  */
-test('#746 an unwritable ledger does not disturb the run\'s own verdict', async () => {
+/**
+ * ⚠️ A failed write must be LOUD as well as harmless. The first version asserted
+ * only that the suite stayed green — which a ledger that silently wrote nothing
+ * also satisfies. "No record, no diagnostic, confident green" is precisely the
+ * silence this card exists to remove, and the instrument had recreated it
+ * pointing at itself. Non-interference is necessary; visibility is the property.
+ */
+test('#746 a FAILED ledger write is announced, and still does not change the verdict', async () => {
   const u = universe({ 'a-green.test.mjs': GREEN });
   const blocked = path.join(u.dir, 'nope');
   fs.writeFileSync(blocked, 'I am a file, not a directory');
@@ -204,9 +213,94 @@ test('#746 an unwritable ledger does not disturb the run\'s own verdict', async 
   const { stdout } = await run('sh', [path.join(u.dir, 'scripts', 'run-tests.sh')], {
     env: baseEnv(path.join(blocked, 'ledger.jsonl')),
   });
-  assert.match(stdout, /# fail 0/, 'the green run is still green and still reports');
+  assert.match(stdout, /WARNING: verdict ledger write FAILED/,
+    'a write that did not happen must say so; otherwise the run reads as recorded');
+  assert.match(stdout, /NOT recorded/, 'and it must say what the consequence is');
+  assert.match(stdout, /# fail 0/, 'while the green run is still green and still reports');
   assert.equal(fs.readFileSync(blocked, 'utf8'), 'I am a file, not a directory',
     'and nothing was clobbered trying');
+});
+
+test('#746 a successful run says nothing about the ledger — the warning is not noise', async () => {
+  // Anti-vacuity for the test above: if the warning printed unconditionally it
+  // would match there and mean nothing.
+  const u = universe({ 'a-green.test.mjs': GREEN });
+  const { stdout } = await run('sh', [path.join(u.dir, 'scripts', 'run-tests.sh')], {
+    env: baseEnv(u.ledger),
+  });
+  assert.doesNotMatch(stdout, /WARNING: verdict ledger/,
+    'a warning that always fires cannot distinguish a failed write from a good one');
+});
+
+test('#746 malformed lines are REPORTED, and the valid ones are still read', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger746-bad-'));
+  const ledger = path.join(dir, 'ledger.jsonl');
+  const clean = { startCommit: 'aaaaaaa', startDirty: false, endCommit: 'aaaaaaa', endDirty: false };
+  fs.writeFileSync(ledger, [
+    'this line is not json',
+    JSON.stringify({
+      at: '2026-08-09T15:00:00.000Z', scope: 'full', verdict: 'red', failed: ['tests/x.test.mjs'], ...clean,
+    }),
+    '{"truncated":',
+  ].join('\n') + '\n');
+
+  const { entries, malformed } = readLedger(ledger);
+  assert.equal(entries.length, 1, 'a damaged file must not cost the readable lines');
+  assert.equal(malformed, 2, 'and the damage is counted, not swallowed');
+
+  const { stdout } = await run(process.execPath, [path.join(ROOT, 'scripts', 'verdict-report.mjs')], {
+    env: { ...process.env, SCRUM_VERDICT_LEDGER: ledger },
+  });
+  assert.match(stdout, /2 line\(s\) in the ledger could not be parsed/,
+    'the reader must surface the damage before any count built on top of it');
+  assert.match(stdout, /lower bound, not a measurement/, 'and say what that does to the number');
+  assert.match(stdout, /red in\s+1 of 1 recorded runs/, 'while still reporting what it could read');
+});
+
+test('#746 a malformed-ONLY ledger never claims to hold nothing', async () => {
+  // The exact input that produced "No recorded server-suite runs yet" while the
+  // file held two lines. Fixing the unattributable case had not fixed the class.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger746-allbad-'));
+  const ledger = path.join(dir, 'ledger.jsonl');
+  fs.writeFileSync(ledger, 'not json\n{"also not\n');
+
+  const { stdout } = await run(process.execPath, [path.join(ROOT, 'scripts', 'verdict-report.mjs')], {
+    env: { ...process.env, SCRUM_VERDICT_LEDGER: ledger },
+  });
+  assert.match(stdout, /2 line\(s\) in the ledger could not be parsed/);
+  assert.doesNotMatch(stdout, /The ledger is empty|No ledger file yet/,
+    'a file with unreadable content is not an empty one, and must not be reported as one');
+});
+
+test('#746 a missing ledger and an empty one are different claims', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger746-missing-'));
+  const absent = await run(process.execPath, [path.join(ROOT, 'scripts', 'verdict-report.mjs')], {
+    env: { ...process.env, SCRUM_VERDICT_LEDGER: path.join(dir, 'nothing-here.jsonl') },
+  });
+  assert.match(absent.stdout, /No ledger file yet/, 'nothing has ever been written');
+
+  const empty = path.join(dir, 'empty.jsonl');
+  fs.writeFileSync(empty, '');
+  const blank = await run(process.execPath, [path.join(ROOT, 'scripts', 'verdict-report.mjs')], {
+    env: { ...process.env, SCRUM_VERDICT_LEDGER: empty },
+  });
+  assert.match(blank.stdout, /The ledger is empty/,
+    'a file that exists and holds nothing is a different fact from no file at all');
+});
+
+test('#746 the reader states the TIMEOUT seam, not just the coverage boundary', async () => {
+  // The dependency on #735 is load-bearing and invisible: timed-out runs are
+  // absent here BECAUSE that alarm is loud. If it regresses, both instruments go
+  // quiet together, so the seam is written where a reader meets the number.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger746-seam-'));
+  const ledger = path.join(dir, 'ledger.jsonl');
+  fs.writeFileSync(ledger, '');
+  const { stdout } = await run(process.execPath, [path.join(ROOT, 'scripts', 'verdict-report.mjs')], {
+    env: { ...process.env, SCRUM_VERDICT_LEDGER: ledger },
+  });
+  assert.match(stdout, /COMPLETED/, 'the denominator names completion, not merely recording');
+  assert.match(stdout, /TIMED-OUT runs \(no event is written; #735's alarm owns those\)/,
+    'and the seam is stated, so a regression in #735 is not silently a hole here too');
 });
 
 /**
@@ -290,9 +384,12 @@ test('#746 the reader never reports "no runs" while holding unattributable ones'
   const { stdout } = await run(process.execPath, [path.join(ROOT, 'scripts', 'verdict-report.mjs')], {
     env: { ...process.env, SCRUM_VERDICT_LEDGER: ledger },
   });
-  assert.doesNotMatch(stdout, /No recorded server-suite runs yet/,
+  // Intent: it holds a run, so it must not claim emptiness, and must say what it
+  // has and why that run is excluded. Re-derived when the denominator gained the
+  // "completed" qualifier — the property is unchanged, the wording is not.
+  assert.doesNotMatch(stdout, /The ledger is empty|No ledger file yet/,
     'the ledger holds a run; saying otherwise sends the reader hunting a hook that works');
-  assert.match(stdout, /1 further run\(s\) recorded but NOT counted/,
+  assert.match(stdout, /1 further completed run\(s\) recorded but NOT counted/,
     'it must say what it has and why the count excludes it');
 });
 
@@ -307,7 +404,7 @@ test('#746 the reader states the boundary and never says a bare "runs"', async (
   const { stdout } = await run(process.execPath, [path.join(ROOT, 'scripts', 'verdict-report.mjs')], {
     env: { ...process.env, SCRUM_VERDICT_LEDGER: ledger },
   });
-  assert.match(stdout, /recorded CLEAN server-suite run/,
+  assert.match(stdout, /recorded CLEAN COMPLETED server-suite run/,
     'the denominator must name itself — "N runs" is a claim about a bigger world than the file describes');
   assert.match(stdout, /NOT covered: bare `node --test`/,
     'the coverage boundary is stated in the output, not only on the card');

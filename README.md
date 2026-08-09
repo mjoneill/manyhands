@@ -162,10 +162,17 @@ This exists because **a green rerun destroys the evidence.** The usual response 
 
 ⚠️ It records **verdicts, not flakes** — at write time you cannot know a red is a flake, since that needs a later green. Classification is left to whoever reads it.
 
-Two boundaries the reader states out loud, because a true number about a smaller world than you assume is the same defect as calling a subset-green a suite-green:
+Three boundaries the reader states out loud, because a true number about a smaller world than you assume is the same defect as calling a subset-green a suite-green:
 
-- a bare `node --test` is **not** recorded, and neither is `npm run test:browser` — hence "recorded server-suite runs", never "runs";
-- a run over a dirty tree is recorded but **not counted**, because a verdict about uncommitted work describes a state that never shipped.
+- a bare `node --test` is **not** recorded, and neither is `npm run test:browser`;
+- a run over a dirty tree is recorded but **not counted**, because a verdict about uncommitted work describes a state that never shipped;
+- a **timed-out** run produces no event at all — its process tree is killed before the runner can write one.
+
+Hence the denominator is *recorded clean completed server-suite runs*, never "runs". Each of those qualifiers was a false denominator until somebody named it.
+
+⚠️ **The timeout seam is a dependency, not a gap.** Timed-out runs are absent here because the suite watch already makes them loud — it posts, names the incomplete files, and terminates the tree. If that alarm ever regresses, timeouts become invisible in *both* instruments simultaneously and nothing will say so. Two instruments with a stated seam beat one instrument with an unstated hole, but only while the seam is written down.
+
+If a write fails, the run says so on stderr and its verdict is unchanged — a suite result must never depend on whether a log could be written, and an instrument that cannot report its own failure is the thing this was built to fix.
 
 **The two browser lanes prove different things, and neither implies the other:**
 

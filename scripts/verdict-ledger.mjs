@@ -117,16 +117,40 @@ export function appendVerdict(entry) {
   }
 }
 
-export function readVerdicts(file = ledgerPath()) {
+/**
+ * Read the ledger, reporting what could NOT be read alongside what could.
+ *
+ * ⚠️ THE RULE, generalised after getting it wrong twice in one afternoon: a
+ * reader must never print a negative claim it cannot support from the file's
+ * contents. "No runs yet" is a claim ABOUT THE FILE, and it is true only when
+ * the file is empty — not when its lines are unparsable, not when its runs are
+ * unattributable, not when the writer failed. The first version dropped
+ * malformed lines silently and a malformed-only ledger reported "No recorded
+ * server-suite runs yet" while holding evidence, which is the same defect the
+ * unattributable-run gate had just been fixed for. Fixing the instance and not
+ * the class is how it got in twice.
+ *
+ * `missing` distinguishes "no ledger file" from "an empty one" — also different
+ * claims, and only one of them means the hook never ran.
+ */
+export function readLedger(file = ledgerPath()) {
   let raw;
   try {
     raw = fs.readFileSync(file, 'utf8');
   } catch {
-    return [];
+    return { entries: [], malformed: 0, missing: true };
   }
-  return raw.split('\n').filter(Boolean).flatMap((line) => {
-    try { return [JSON.parse(line)]; } catch { return []; }
-  });
+  const entries = [];
+  let malformed = 0;
+  for (const line of raw.split('\n').filter(Boolean)) {
+    try { entries.push(JSON.parse(line)); } catch { malformed += 1; }
+  }
+  return { entries, malformed, missing: false };
+}
+
+/** Valid entries only. Callers that must not silently ignore damage use readLedger. */
+export function readVerdicts(file = ledgerPath()) {
+  return readLedger(file).entries;
 }
 
 /**
