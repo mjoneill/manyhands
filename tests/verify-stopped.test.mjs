@@ -61,7 +61,7 @@ test('#752 EVERY read fails → NOT verified', async () => {
   assert.ok(reads > 1, 'it must keep polling rather than concluding from one failure');
 });
 
-test('#752 first read fails, a LATER successful empty read → verified', async () => {
+test('#752 first read fails, a LATER successful observation with the captured PID absent → verified', async () => {
   // Failing closed must not mean failing permanently: a transient ps failure
   // followed by a real observation of absence is a genuine verification.
   let n = 0;
@@ -77,7 +77,7 @@ test('#752 a SUCCESSFUL read that still contains a captured pid → NOT verified
   assert.equal(ok, false, 'a pid still present is not termination');
 });
 
-test('#752 a successful read with our pid absent → verified (the fix must not disarm)', async () => {
+test('#752 a successful observation with the captured PID absent → verified (the fix must not disarm)', async () => {
   const ok = await verifyStopped(captured(4242), 2000, witnessOk);
   assert.equal(ok, true, 'the ordinary success path must still return true');
 });
