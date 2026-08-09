@@ -34,12 +34,57 @@ function merge(captured, rows) {
   }
 }
 
-function kill(captured) {
-  const current = table();
-  for (const pgid of captured.groups) {
-    if (!current.some((row) => row.pgid === pgid && captured.pids.has(row.pid))) continue;
-    try { process.kill(-pgid, 'SIGKILL'); } catch { /* already stopped */ }
+/**
+ * #745 — our own process group, read once. Node exposes no `process.pgid`, so it
+ * comes from ps. Resolved at module load rather than per call: it cannot change
+ * for a running process, and a failed read must not silently become "no group to
+ * protect" on every subsequent kill.
+ */
+const SELF_PGID = (() => {
+  try {
+    return Number(String(execFileSync('ps', ['-o', 'pgid=', '-p', String(process.pid)])).trim());
+  } catch {
+    return NaN;   // unknown: the pgid comparison below simply never matches
   }
+})();
+
+/**
+ * #745 — which captured groups may be signalled.
+ *
+ * Pure and exported so the guards are pinned by assertion rather than by the
+ * `detached: true` assumption twenty lines away. Two rules beyond the original
+ * liveness check:
+ *
+ *   pgid <= 1        `kill(-1, ...)` signals every process the user can signal.
+ *   pgid === SELF    the runner would SIGKILL itself mid-run. Safe today ONLY
+ *                    because the child is spawned detached and descendants
+ *                    inherit that fresh group — a property held elsewhere in the
+ *                    file, which a refactor can remove without failing anything.
+ */
+export function groupsToSignal(captured, current, selfPgid = SELF_PGID) {
+  return [...captured.groups].filter((pgid) => (
+    Number.isInteger(pgid)
+    && pgid > 1
+    && pgid !== selfPgid
+    && current.some((row) => row.pgid === pgid && captured.pids.has(row.pid))
+  ));
+}
+
+/**
+ * #745 — send SIGKILL to each group. Exported with an injectable killer because
+ * the MINUS SIGN is the entire mechanism and an outcome assertion cannot see it:
+ * the pid loop below covers the same processes for the current fixture, so
+ * deleting the group path leaves the suite green. A spy pins what redundancy
+ * hides.
+ */
+export function signalGroups(pgids, killFn = process.kill) {
+  for (const pgid of pgids) {
+    try { killFn(-pgid, 'SIGKILL'); } catch { /* already stopped */ }
+  }
+}
+
+function kill(captured) {
+  signalGroups(groupsToSignal(captured, table()));
   for (const pid of captured.pids) {
     try { process.kill(pid, 'SIGKILL'); } catch { /* already stopped */ }
   }
