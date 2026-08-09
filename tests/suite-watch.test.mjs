@@ -10,7 +10,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -33,6 +33,8 @@ function makeUniverse() {
   fs.mkdirSync(path.join(dir, 'tests'));
   fs.mkdirSync(path.join(dir, 'scripts'));
   fs.copyFileSync(path.join(ROOT, 'scripts', 'run-tests.sh'), path.join(dir, 'scripts', 'run-tests.sh'));
+  const fileRunner = path.join(ROOT, 'scripts', 'run-test-files.mjs');
+  if (fs.existsSync(fileRunner)) fs.copyFileSync(fileRunner, path.join(dir, 'scripts', 'run-test-files.mjs'));
   fs.chmodSync(path.join(dir, 'scripts', 'run-tests.sh'), 0o755);
   fs.writeFileSync(path.join(dir, 'tests', 'green.test.mjs'),
     'import { test } from "node:test"; test("g", () => {});\n');
@@ -54,6 +56,23 @@ async function tick({ dir, state }) {
     }),
   });
   return stdout;
+}
+
+function alive(pid) {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+async function waitFor(check, message, timeout = 3000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.fail(message);
+}
+
+function stop(pid) {
+  try { process.kill(pid, 'SIGKILL'); } catch { /* already stopped */ }
 }
 
 const posted = (out) => /DRYRUN would post/.test(out);
@@ -109,6 +128,24 @@ test('a NEW failing file is a new signature and fires through the mute', async (
   assert.match(out, /red-b\.test\.mjs/, 'the new file is named');
 });
 
+test('#735 watcher consumes one aggregate runner verdict for a multi-file red', async () => {
+  const u = makeUniverse();
+  goRed(u.dir, 'failing-file.test.mjs');
+
+  const out = await tick(u);
+  const summary = out.split('\n').find((line) => /suite RED sig=/.test(line));
+  assert.ok(summary, `the watcher must emit its parsed verdict:\n${out}`);
+  assert.match(summary, /sig=\[failing-file\.test\.mjs\]/,
+    `the watcher signature must name the failure, never unparsed:\n${out}`);
+  assert.match(summary, /# tests 2 · # pass 1 · # fail 1/,
+    `the watcher must parse exactly the combined totals:\n${out}`);
+  assert.equal((summary.match(/# (tests|pass|fail) \d+/g) || []).length, 3,
+    `the watcher summary must contain one tests/pass/fail triple:\n${out}`);
+  assert.match(out, /Failing file\(s\): failing-file\.test\.mjs/,
+    `the watcher consumer output must retain its parsed files list:\n${out}`);
+  assert.ok(posted(out), 'the hermetic dry-run watcher must alarm without contacting a board');
+});
+
 // ── #735 — a timeout is not "unparsed", and a deadline must TERMINATE ─────
 //
 // Two defects from the 2026-08-08 09:45Z incident, both measured:
@@ -126,13 +163,36 @@ test('a NEW failing file is a new signature and fires through the mute', async (
 //    stopped watching; it never stopped the run.
 //
 // A deadline that abandons rather than terminates is not a deadline.
-function makeHangingUniverse() {
+function makeHangingUniverse({ detached = false } = {}) {
   const u = makeUniverse();
+  const pidFile = path.join(u.dir, 'descendant.pid');
+  const runnerPidFile = path.join(u.dir, 'runner.pid');
   fs.writeFileSync(path.join(u.dir, 'tests', 'zz-hang.test.mjs'),
     'import { test } from "node:test";\n'
-    // A live handle, not a bare unresolved promise: without something holding
-    // the event loop the process exits cleanly and there is no hang to test.
+    + `import fs from "node:fs"; fs.writeFileSync(${JSON.stringify(runnerPidFile)}, String(process.pid));\n`
+    + (detached
+      ? `import { spawn } from "node:child_process";\n`
+        + `const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });\n`
+        + `child.unref(); fs.writeFileSync(${JSON.stringify(pidFile)}, String(child.pid));\n`
+      : '')
     + 'test("hangs", () => new Promise(() => { setInterval(() => {}, 1000); }));\n');
+  return { ...u, pidFile, runnerPidFile };
+}
+
+function makeMarkedHangingUniverse() {
+  const u = makeUniverse();
+  const passed = path.join(u.dir, 'green-finished');
+  fs.writeFileSync(path.join(u.dir, 'tests', 'green.test.mjs'),
+    'import fs from "node:fs"; import { test } from "node:test"; '
+    + `test("g", () => fs.writeFileSync(${JSON.stringify(passed)}, "done"));\n`);
+  fs.writeFileSync(path.join(u.dir, 'tests', 'zz-hang.test.mjs'),
+    'import fs from "node:fs"; import { test } from "node:test";\n'
+    + `const passed = ${JSON.stringify(passed)};\n`
+    + 'test("hangs", async () => {\n'
+    + '  while (!fs.existsSync(passed)) await new Promise((resolve) => setTimeout(resolve, 10));\n'
+    + '  await new Promise((resolve) => setTimeout(resolve, 250));\n'
+    + '  return new Promise(() => { setInterval(() => {}, 1000); });\n'
+    + '});\n');
   return u;
 }
 
@@ -153,24 +213,120 @@ test('#735 a killed run reports sig=[timeout], never [unparsed]', async () => {
   assert.ok(posted(stdout), 'a timeout is still a red worth posting');
 });
 
-test('#735 the deadline TERMINATES the run — no descendants survive it', async () => {
-  const u = makeHangingUniverse();
-  await run(process.execPath, [WATCH], {
+test('#735 timeout post names incomplete files, not completed markers', async () => {
+  const u = makeMarkedHangingUniverse();
+  const { stdout } = await run(process.execPath, [WATCH], {
     env: cleanEnv({
       SUITE_WATCH_REPO: u.dir, SUITE_WATCH_STATE: u.state,
       SUITE_WATCH_DRYRUN: '1', SUITE_WATCH_NO_CLONE: '1',
       SUITE_WATCH_RUN_TIMEOUT_MS: '4000',
+      RUN_TESTS_CONCURRENCY: '1',
+      TMPDIR: u.dir,
     }),
   });
 
-  // Give anything that survived a moment to be visible, then look for it by the
-  // fixture path — narrow enough that it cannot match the real suite or another
-  // seat's work.
-  await new Promise((r) => setTimeout(r, 1500));
-  const { execSync } = await import('node:child_process');
-  let survivors = '';
-  try { survivors = execSync(`pgrep -fl ${JSON.stringify(u.dir)} || true`).toString().trim(); } catch { /* none */ }
+  const runnerOut = fs.readdirSync(u.dir)
+    .filter((name) => name.startsWith('run-tests.'))
+    .map((name) => fs.readFileSync(path.join(u.dir, name), 'utf8'))
+    .join('\n');
+  const marker = runnerOut.match(/^# file: tests\/green\.test\.mjs complete$/m)?.[0];
+  assert.ok(marker, `the completed-file control must arrive before the deadline:\n${runnerOut}`);
+  assert.doesNotMatch(marker, /# (tests|pass|fail) \d+/,
+    `a completion marker must not match the aggregate summary shape: ${marker}`);
+  assert.doesNotMatch(marker, /location: '([^']*\/tests\/[^']+\.test\.mjs)/,
+    `a completion marker must not match the failure-location shape: ${marker}`);
+  const verdict = stdout.split('\n').find((line) => /suite RED sig=\[timeout\]/.test(line));
+  assert.ok(verdict, `the timeout must retain a watcher verdict:\n${stdout}`);
 
-  assert.equal(survivors, '',
-    `the deadline must kill the process GROUP — these outlived it:\n${survivors}`);
+  const alarm = stdout.split('\n').find((line) => /DRYRUN would post:/.test(line));
+  assert.ok(alarm, `the timeout must issue one dry-run alarm:\n${stdout}`);
+  assert.match(alarm, /Incomplete test file\(s\): zz-hang\.test\.mjs/,
+    `the primary timeout diagnostic must be expected files minus completed markers:\n${stdout}`);
+  assert.doesNotMatch(alarm, /Incomplete test file\(s\):[^\n]*green\.test\.mjs/,
+    `a completed marker must not be reported as incomplete:\n${stdout}`);
+  assert.doesNotMatch(alarm, /Last files seen: green\.test\.mjs/,
+    `a completed marker must not be parsed as a failure location:\n${stdout}`);
+  assert.doesNotMatch(alarm, /unparsed/i,
+    `a timeout with a completion marker is neither incomplete parsing nor unparsed output:\n${stdout}`);
+});
+
+test('#735 the deadline terminates ordinary and detached descendants', async () => {
+  const u = makeHangingUniverse({ detached: true });
+  const watcher = spawn(process.execPath, [WATCH], {
+    env: cleanEnv({
+      SUITE_WATCH_REPO: u.dir, SUITE_WATCH_STATE: u.state,
+      SUITE_WATCH_DRYRUN: '1', SUITE_WATCH_NO_CLONE: '1',
+      SUITE_WATCH_RUN_TIMEOUT_MS: '1500',
+    }),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let output = '';
+  watcher.stdout.on('data', (chunk) => { output += chunk; });
+  watcher.stderr.on('data', (chunk) => { output += chunk; });
+
+  let detachedPid;
+  let runnerPid;
+  try {
+    await waitFor(() => fs.existsSync(u.pidFile) && fs.existsSync(u.runnerPidFile), 'the detached descendant never started');
+    detachedPid = Number(fs.readFileSync(u.pidFile, 'utf8'));
+    runnerPid = Number(fs.readFileSync(u.runnerPidFile, 'utf8'));
+    assert.ok(alive(detachedPid), 'the detached descendant must be alive before the deadline');
+    assert.ok(alive(runnerPid), 'the ordinary descendant must be alive before the deadline');
+    await new Promise((resolve) => watcher.on('close', resolve));
+    await waitFor(() => !alive(detachedPid), `detached descendant ${detachedPid} survived:\n${output}`);
+    await waitFor(() => !alive(runnerPid), `ordinary descendant ${runnerPid} survived:\n${output}`);
+  } finally {
+    if (runnerPid) stop(runnerPid);
+    if (detachedPid) stop(detachedPid);
+    if (!watcher.killed) stop(watcher.pid);
+  }
+});
+
+test('#735 isolation deadlines terminate their detached descendants', async () => {
+  const u = makeUniverse();
+  const countFile = path.join(u.dir, 'isolation-count');
+  const pidFile = path.join(u.dir, 'isolation-descendant.pid');
+  const runnerPidFile = path.join(u.dir, 'isolation-runner.pid');
+  fs.writeFileSync(path.join(u.dir, 'tests', 'a-red-then-hang.test.mjs'), `
+    import assert from 'node:assert/strict';
+    import { spawn } from 'node:child_process';
+    import fs from 'node:fs';
+    import { test } from 'node:test';
+    const count = fs.existsSync(${JSON.stringify(countFile)}) ? Number(fs.readFileSync(${JSON.stringify(countFile)}, 'utf8')) : 0;
+    fs.writeFileSync(${JSON.stringify(countFile)}, String(count + 1));
+    test('red once, then hang', () => {
+      if (!count) assert.fail('the full run must be red first');
+      fs.writeFileSync(${JSON.stringify(runnerPidFile)}, String(process.pid));
+      const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
+      child.unref();
+      fs.writeFileSync(${JSON.stringify(pidFile)}, String(child.pid));
+      return new Promise(() => { setInterval(() => {}, 1000); });
+    });
+  `);
+  const watcher = spawn(process.execPath, [WATCH], {
+    env: cleanEnv({
+      SUITE_WATCH_REPO: u.dir, SUITE_WATCH_STATE: u.state,
+      SUITE_WATCH_DRYRUN: '1', SUITE_WATCH_NO_CLONE: '1',
+      SUITE_WATCH_ISOLATION_TIMEOUT_MS: '1000',
+      PATH: `/opt/homebrew/opt/node@22/bin:${process.env.PATH}`,
+    }),
+    stdio: 'ignore',
+  });
+  let closed = false;
+  watcher.on('close', () => { closed = true; });
+  let detachedPid;
+  let runnerPid;
+  try {
+    await waitFor(() => fs.existsSync(pidFile) && fs.existsSync(runnerPidFile), 'the isolation rerun never reached its detached child');
+    detachedPid = Number(fs.readFileSync(pidFile, 'utf8'));
+    runnerPid = Number(fs.readFileSync(runnerPidFile, 'utf8'));
+    assert.ok(alive(detachedPid), 'the isolation descendant must be alive before its deadline');
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    assert.ok(closed, 'the isolation deadline must return the watcher within its bound');
+    await waitFor(() => !alive(detachedPid), `isolation descendant ${detachedPid} survived its timeout`);
+  } finally {
+    if (runnerPid) stop(runnerPid);
+    if (detachedPid) stop(detachedPid);
+    if (!closed) stop(watcher.pid);
+  }
 });

@@ -43,8 +43,8 @@ fi
 # `rm -f` had not run either. The diagnosis was on disk the whole time and
 # nothing referenced it.
 #
-# `tee` puts the same bytes on stdout as they are produced, so a killed run has
-# already said what it knew. The temp file is still written for the greps below.
+# The per-file launcher keeps independent files parallel and puts each completed
+# file's TAP on stdout immediately. The temp file is still written for greps.
 #
 # ⚠️ The exit code is the point of this whole script (see pipe-masks-exit-code
 # in the header). In a pipeline `$?` is TEE's status, not node's, and `pipefail`
@@ -52,7 +52,7 @@ fi
 # file — portable, and it keeps the verdict the runner's own.
 out=$(mktemp "${TMPDIR:-/tmp}/run-tests.XXXXXX")
 rcfile=$(mktemp "${TMPDIR:-/tmp}/run-tests-rc.XXXXXX")
-{ node --test "$@" 2>&1; echo $? >"$rcfile"; } | tee "$out"
+{ node scripts/run-test-files.mjs "$@" 2>&1; echo $? >"$rcfile"; } | tee "$out"
 rc=$(cat "$rcfile" 2>/dev/null || echo 1)
 rm -f "$rcfile"
 

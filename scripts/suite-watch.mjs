@@ -23,14 +23,15 @@
  *   SUITE_WATCH_STATE       default ~/.claude/scrum-suite-watch.state
  *   SUITE_WATCH_COOLDOWN_MS default 6h
  *   SUITE_WATCH_DRYRUN=1    print the would-be post instead of posting
- *   SUITE_WATCH_RUN_TIMEOUT_MS  how long the suite may run before the group is
- *                           KILLED and the red signed [timeout] (default 15m)
+ *   SUITE_WATCH_RUN_TIMEOUT_MS  how long the suite may run before it is killed
+ *   SUITE_WATCH_ISOLATION_TIMEOUT_MS  isolation rerun deadline (default 10m)
  */
 
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { runBoundedProcessTree } from './run-process-tree.mjs';
 
 const REPO = process.env.SUITE_WATCH_REPO
   || path.join(path.dirname(new URL(import.meta.url).pathname), '..');
@@ -84,34 +85,31 @@ const cleanup = () => { if (cloneDir) fs.rmSync(cloneDir, { recursive: true, for
  * run managed to say survives being killed.
  */
 const RUN_TIMEOUT_MS = Number(process.env.SUITE_WATCH_RUN_TIMEOUT_MS ?? 15 * 60 * 1000);
+const ISOLATION_TIMEOUT_MS = Number(process.env.SUITE_WATCH_ISOLATION_TIMEOUT_MS ?? 10 * 60 * 1000);
 
-let out = '';
 let red = false;
-let timedOut = false;
-{
-  const child = spawn('sh', [path.join(suiteDir, 'scripts', 'run-tests.sh')], {
-    cwd: suiteDir, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  child.stdout.on('data', (d) => { out += d.toString(); });
-  child.stderr.on('data', (d) => { out += d.toString(); });
-
-  const code = await new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      timedOut = true;
-      // The GROUP, not the shell. Killing the shell alone is defect 1 above.
-      try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
-    }, RUN_TIMEOUT_MS);
-    child.on('close', (c) => { clearTimeout(timer); resolve(c); });
-    child.on('error', () => { clearTimeout(timer); resolve(1); });
-  });
-  red = timedOut || code !== 0;
-}
+const full = await runBoundedProcessTree({
+  file: 'sh', args: [path.join(suiteDir, 'scripts', 'run-tests.sh')], cwd: suiteDir, timeout: RUN_TIMEOUT_MS,
+});
+const out = full.stdout + full.stderr;
+const timedOut = full.timedOut;
+red = timedOut || full.code !== 0;
 
 // The signature: which test FILES failed. Parsed from the runner's failure
 // section; a parse that finds nothing on a red run still fires (sig 'unparsed')
 // — an unreadable red must not be a silent one.
 const files = [...new Set([...out.matchAll(/location: '([^']*\/tests\/[^']+\.test\.mjs)/g)]
   .map((m) => path.basename(m[1])))].sort();
+const completedFiles = timedOut
+  ? new Set([...out.matchAll(/^# file: (.+) complete$/gm)].map((m) => path.basename(m[1])))
+  : new Set();
+const incompleteFiles = timedOut
+  ? fs.readdirSync(path.join(suiteDir, 'tests'), { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.test.mjs'))
+    .map((entry) => entry.name)
+    .filter((file) => !completedFiles.has(file))
+    .sort()
+  : [];
 
 /**
  * FLAKE TRIAGE, mechanized. Three parallel-load flakes were hand-triaged the
@@ -123,13 +121,14 @@ const files = [...new Set([...out.matchAll(/location: '([^']*\/tests\/[^']+\.tes
  */
 let flake = false;
 if (red && !timedOut && files.length) {
-  try {
-    execFileSync('node', ['--test', ...files.map((f) => path.join('tests', f))], {
-      cwd: suiteDir, timeout: 10 * 60 * 1000,
-    });
+  const isolated = await runBoundedProcessTree({
+    file: 'node', args: ['scripts/run-test-files.mjs', ...files.map((f) => path.join('tests', f))],
+    cwd: suiteDir, timeout: ISOLATION_TIMEOUT_MS,
+  });
+  if (!isolated.timedOut && isolated.code === 0) {
     flake = true; // isolated re-run green: parallel-load flake, not a regression
     red = false;
-  } catch { /* still red in isolation — a real red */ }
+  }
 }
 cleanup();
 // #735 — a killed run is a TIMEOUT, never 'unparsed'. 'unparsed' claims the
@@ -160,9 +159,9 @@ if (!muted) {
   st.sigTimes[sig] = Date.now();
   const body = timedOut
     ? `🔴 suite watch: the FULL suite did not FINISH — killed after ${Math.round(RUN_TIMEOUT_MS / 1000)}s `
-      + `and its process group terminated. This is a HANG, not a failing assertion: `
+      + `${full.terminationVerified ? 'and its process tree terminated' : 'but cleanup could not be verified'}. This is a HANG, not a failing assertion: `
+      + `Incomplete test file(s): ${incompleteFiles.join(', ') || 'none'}. `
       + `${summary || 'no summary — it never reached one'}. `
-      + `${files.length ? `Last files seen: ${files.join(', ')}. ` : ''}`
     : `🔴 suite watch: the FULL test suite is RED (${summary || 'summary unparsed'}). `
       + `Failing file(s): ${files.length ? files.join(', ') : 'unparsed — read the log'}. `
     + `A red suite invalidates every "no regressions" claim until it is green (the #465 lesson: `

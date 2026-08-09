@@ -10,7 +10,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 const run = promisify(execFile);
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const HELPER = path.join(ROOT, 'scripts', 'run-tests.sh');
+const FILE_RUNNER = path.join(ROOT, 'scripts', 'run-test-files.mjs');
 
 // The inner `node --test` must not inherit the OUTER runner's context, or it
 // reports to our runner instead of exiting on its own verdict — the harness
@@ -38,6 +39,30 @@ async function helper(...args) {
   } catch (e) {
     return { code: e.code, out: String(e.stdout) + String(e.stderr) };
   }
+}
+
+async function waitFor(check, message, timeout = 5000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.fail(message);
+}
+
+function stopTree(child) {
+  if (!child || child.exitCode !== null) return;
+  try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
+}
+
+function summaryValues(out, name) {
+  return [...out.matchAll(new RegExp(`^# ${name} (\\d+)$`, 'gm'))].map((match) => Number(match[1]));
+}
+
+function copyHelper(dir) {
+  fs.mkdirSync(path.join(dir, 'scripts'), { recursive: true });
+  fs.copyFileSync(HELPER, path.join(dir, 'scripts', 'run-tests.sh'));
+  if (fs.existsSync(FILE_RUNNER)) fs.copyFileSync(FILE_RUNNER, path.join(dir, 'scripts', 'run-test-files.mjs'));
 }
 
 test('positive control: a deliberately failing fixture exits nonzero and shows the failure', async () => {
@@ -69,8 +94,7 @@ test('the no-args invocation declares itself the full suite', async () => {
   // single-file "full" universe: point it at a temp repo shaped like ours.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rt670full-'));
   fs.mkdirSync(path.join(dir, 'tests'));
-  fs.mkdirSync(path.join(dir, 'scripts'));
-  fs.copyFileSync(HELPER, path.join(dir, 'scripts', 'run-tests.sh'));
+  copyHelper(dir);
   fs.writeFileSync(path.join(dir, 'tests', 'only.test.mjs'), `
     import { test } from 'node:test';
     test('green', () => {});
@@ -78,6 +102,44 @@ test('the no-args invocation declares itself the full suite', async () => {
   const { stdout } = await run('sh', [path.join(dir, 'scripts', 'run-tests.sh')], { env: cleanEnv() });
   assert.match(stdout, /FULL SUITE \(1 files\)/, 'no-args = full suite, declared');
   assert.doesNotMatch(stdout, /SUBSET/, 'a full run carries no subset banner');
+});
+
+test('#735 multiple files produce one combined TAP summary', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rt735-summary-'));
+  const first = path.join(dir, 'a-two.test.mjs');
+  const second = path.join(dir, 'b-one.test.mjs');
+  fs.writeFileSync(first, `
+    import { test } from 'node:test';
+    test('a one', () => {});
+    test('a two', () => {});
+  `);
+  fs.writeFileSync(second, 'import { test } from "node:test"; test("b one", () => {});\n');
+
+  const result = await helper(first, second);
+  assert.equal(result.code, 0, result.out);
+  assert.deepEqual(summaryValues(result.out, 'tests'), [3], `one combined tests total required:\n${result.out}`);
+  assert.deepEqual(summaryValues(result.out, 'pass'), [3], `one combined pass total required:\n${result.out}`);
+  assert.deepEqual(summaryValues(result.out, 'fail'), [0], `one combined fail total required:\n${result.out}`);
+});
+
+test('#735 aggregate failure retains its file location and one verdict', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rt735-failure-'));
+  const failing = path.join(dir, 'a-failing.test.mjs');
+  const passing = path.join(dir, 'b-passing.test.mjs');
+  fs.writeFileSync(failing, `
+    import assert from 'node:assert/strict';
+    import { test } from 'node:test';
+    test('intentional failure', () => assert.equal(1, 2));
+  `);
+  fs.writeFileSync(passing, 'import { test } from "node:test"; test("later pass", () => {});\n');
+
+  const result = await helper(failing, passing);
+  assert.notEqual(result.code, 0, 'a failure in any completed file is the aggregate verdict');
+  assert.match(result.out, new RegExp(`location: '.*${path.basename(failing)}:`),
+    `the watcher needs the failing file location:\n${result.out}`);
+  assert.deepEqual(summaryValues(result.out, 'tests'), [2], `one aggregate verdict required:\n${result.out}`);
+  assert.deepEqual(summaryValues(result.out, 'pass'), [1], `combined passing total required:\n${result.out}`);
+  assert.deepEqual(summaryValues(result.out, 'fail'), [1], `combined failing total required:\n${result.out}`);
 });
 
 // ── #735 — the runner must EMIT as it goes, not only at the end ───────────
@@ -93,47 +155,91 @@ test('the no-args invocation declares itself the full suite', async () => {
 // Measured before the fix: killed run → 0 bytes captured, 158,338 bytes of real
 // TAP left in the temp file nobody reads.
 //
-// The fixture is two files chosen for ORDER: node --test emits per file in
-// sorted order, so `a-fast` must sort before `b-hang` for its result to be
-// released while the second file is still stuck. That is the whole discriminator
-// — with buffering, stdout is empty; with streaming, a-fast's `ok` is already
-// out. If both files hung, this test would pass for the wrong reason.
-test('#735 a run killed mid-flight has ALREADY emitted what it produced', async () => {
+test('#735 a later fast file is visible while an earlier file hangs', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rt735-'));
-  fs.writeFileSync(path.join(dir, 'a-fast.test.mjs'),
-    'import { test } from "node:test"; test("fast one finishes", () => {});\n');
-  // The hang needs a live HANDLE, not just an unresolved promise: a bare
-  // `new Promise(() => {})` keeps nothing alive, the event loop drains, and
-  // node exits cleanly — which is not a hang at all. Caught by this test's own
-  // anti-vacuity assertion on the first run, which is the argument for having
-  // written it.
-  fs.writeFileSync(path.join(dir, 'b-hang.test.mjs'),
+  fs.writeFileSync(path.join(dir, 'a-hang.test.mjs'),
     'import { test } from "node:test";\n'
     + 'test("hangs forever", () => new Promise(() => { setInterval(() => {}, 1000); }));\n');
+  fs.writeFileSync(path.join(dir, 'b-fast.test.mjs'),
+    'import { test } from "node:test"; test("LAYER_2_FAST_COMPLETE", () => {});\n');
 
-  const { spawn } = await import('node:child_process');
-  const child = spawn('sh', [HELPER, path.join(dir, 'a-fast.test.mjs'), path.join(dir, 'b-hang.test.mjs')],
-    { env: cleanEnv(), detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn('sh', [HELPER, path.join(dir, 'a-hang.test.mjs'), path.join(dir, 'b-fast.test.mjs')],
+    { env: { ...cleanEnv(), RUN_TESTS_CONCURRENCY: '2' }, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
 
   let seen = '';
   child.stdout.on('data', (d) => { seen += d.toString(); });
   child.stderr.on('data', (d) => { seen += d.toString(); });
 
-  // Long enough for the fast file to finish and be released, far short of any
-  // chance the hanging one completes.
-  await new Promise((r) => setTimeout(r, 6000));
+  await new Promise((r) => setTimeout(r, 3000));
   const streamedBeforeKill = seen;
+  const runningBeforeKill = child.exitCode === null && !child.killed;
 
-  try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
+  stopTree(child);
   await new Promise((r) => setTimeout(r, 500));
 
-  assert.match(streamedBeforeKill, /ok 1|# Subtest|fast one finishes/,
-    'a killed run must have already emitted the results it had; got '
+  assert.match(streamedBeforeKill, /LAYER_2_FAST_COMPLETE/,
+    'a later completed file must be visible before the earlier hanging file is killed; got '
     + `${Buffer.byteLength(streamedBeforeKill)} bytes: ${JSON.stringify(streamedBeforeKill.slice(0, 200))}`);
+  assert.match(streamedBeforeKill, /# file: .*b-fast\.test\.mjs complete/,
+    `progress must name the completed later file:\n${streamedBeforeKill}`);
 
   // Anti-vacuity: prove the hang was real, i.e. this run genuinely did not
   // finish. If it had completed, "output was emitted" would be trivially true
   // and would say nothing about streaming.
-  assert.doesNotMatch(streamedBeforeKill, /# fail \d+/,
+  assert.ok(runningBeforeKill,
     'the run must NOT have completed — otherwise this asserts nothing about streaming');
+});
+
+test('#735 the layer-2 probe observes early output from a fast control', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rt735-probe-'));
+  const fast = path.join(dir, 'fast-control.test.mjs');
+  fs.writeFileSync(fast,
+    'import { test } from "node:test"; test("PROBE_FAST_CONTROL", () => {});\n');
+
+  const child = spawn('sh', [HELPER, fast], {
+    env: cleanEnv(), detached: true, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let seen = '';
+  child.stdout.on('data', (chunk) => { seen += chunk; });
+  child.stderr.on('data', (chunk) => { seen += chunk; });
+  try {
+    await waitFor(() => /PROBE_FAST_CONTROL/.test(seen), `the output probe saw no fast control:\n${seen}`);
+  } finally {
+    stopTree(child);
+  }
+});
+
+test('#735 file execution is concurrently greater than one and bounded', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rt735-concurrency-'));
+  const gate = path.join(dir, 'release');
+  const started = (name) => path.join(dir, `${name}.started`);
+  for (const name of ['a', 'b', 'c']) {
+    fs.writeFileSync(path.join(dir, `${name}.test.mjs`), `
+      import fs from 'node:fs';
+      import { test } from 'node:test';
+      const gate = ${JSON.stringify(gate)};
+      const started = ${JSON.stringify(started(name))};
+      test('${name} blocks at the concurrency gate', async () => {
+        fs.writeFileSync(started, 'started');
+        while (!fs.existsSync(gate)) await new Promise((resolve) => setTimeout(resolve, 20));
+      });
+    `);
+  }
+
+  const child = spawn('sh', [HELPER,
+    path.join(dir, 'a.test.mjs'), path.join(dir, 'b.test.mjs'), path.join(dir, 'c.test.mjs')], {
+    env: { ...cleanEnv(), RUN_TESTS_CONCURRENCY: '2' }, detached: true, stdio: 'ignore',
+  });
+  try {
+    await waitFor(() => fs.existsSync(started('a')) && fs.existsSync(started('b')),
+      'two independent files must start before the gate opens');
+    assert.equal(fs.existsSync(started('c')), false,
+      'the third file must wait while the bounded two-worker pool is full');
+    fs.writeFileSync(gate, 'release');
+    const code = await new Promise((resolve) => child.on('close', resolve));
+    assert.equal(code, 0, 'the released bounded run should finish green');
+    assert.equal(fs.existsSync(started('c')), true, 'the queued file must run after capacity opens');
+  } finally {
+    stopTree(child);
+  }
 });
