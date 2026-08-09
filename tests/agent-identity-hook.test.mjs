@@ -175,3 +175,153 @@ test('the --author escape is closed: agent env + --author seat flag + default co
   } catch { refused = true; }
   assert.equal(refused, true, '--author alone must not satisfy the rail');
 });
+
+// ── #751 — the seat SHAPES, tested against the shipped configuration ─────────
+//
+// ⚠️ WHY THIS EXISTS. #751 added three plus-address shapes to the hook and the
+// suite did not notice: deleting all three left 9/9 green. A rail whose absence
+// no test can see is drafted, not shipped — the same defect as the group-kill
+// mutant (#745) and `verifyStopped`'s blind confirmation (#752), committed into
+// the very commit that adds a rail.
+//
+// ⚠️ AND WHY IT READS THE HOOK RATHER THAN LISTING IDENTITIES. The real seat
+// addresses are tagged variants of a person's address; writing them here would
+// put a real-world identity into a tracked file, which is what the export gate
+// exists to prevent and what killed the hashed-digest design. So the test
+// PARSES the shipped `SEAT_IDENTS` block and materialises each shape with a
+// SYNTHETIC local part. It therefore tests the configuration that ships,
+// cannot drift from it, and carries no identity of its own.
+
+/** The shipped SEAT_IDENTS entries, read from the production hook. */
+function seatIdents() {
+  const src = fs.readFileSync(HOOK, 'utf8');
+  const m = src.match(/SEAT_IDENTS='([^']*)'/);
+  assert.ok(m, 'the hook must define SEAT_IDENTS — if this fails the rail was renamed or removed');
+  return m[1].split('\n').filter(Boolean);
+}
+
+/** `Seat <*+seat@example.com>` → {name, tag, domain} — a synthetic example on
+ *  purpose: this file must carry no real identity of its own. */
+function parseShape(entry) {
+  const m = entry.match(/^(.+) <\*\+([^@]+)@(.+)>$/);
+  return m ? { name: m[1], tag: m[2], domain: m[3] } : null;
+}
+
+const SYNTHETIC = 'synthetic-owner';   // never a real local part
+
+test('#751 the shipped hook carries the legacy wildcard AND plus-address shapes', () => {
+  const entries = seatIdents();
+  const legacy = entries.filter((e) => e.includes('@manyhands.invalid'));
+  const shapes = entries.map(parseShape).filter(Boolean);
+  assert.equal(legacy.length, 1,
+    `phase 1 is additive: exactly one legacy wildcard entry, got ${JSON.stringify(legacy)}`);
+  // ⚠️ EXACTLY three, never `>= 3`. A lower bound makes exception growth
+  // SELF-APPROVING: add a fourth configured seat and every case below silently
+  // adopts it, so the inventory grows and nothing anywhere goes red. That is
+  // #753's failure mode — "nothing fails when an allowlist gets one entry
+  // longer" — reproduced inside the rail written to close it.
+  //
+  // ⇒ A new seat SHOULD break this line. The repair is to come here, read what
+  //   changed, and update the number deliberately — which is the only moment
+  //   anyone is forced to look at the total.
+  assert.equal(shapes.length, 3,
+    `the seat inventory changed. If that was deliberate, update this number and say why: ${JSON.stringify(entries)}`);
+  // Anti-vacuity, kept for the reader even though the equality above now
+  // subsumes it: with zero shapes configured every case below iterates an
+  // empty set and passes on nothing, which is how the shapes shipped untested.
+  assert.ok(shapes.length > 0, 'no shapes configured: every case below would be vacuous');
+});
+
+test('#751 every configured shape ACCEPTS a matching identity (both slots)', () => {
+  for (const shape of seatIdents().map(parseShape).filter(Boolean)) {
+    const repo = makeRepo();
+    const email = `${SYNTHETIC}+${shape.tag}@${shape.domain}`;
+    const r = tryCommit(repo, {
+      env: { ...baseEnv(), CLAUDECODE: '1' },
+      stamp: { name: shape.name, email },
+    });
+    assert.equal(r.ok, true,
+      `configured shape must pass: ${shape.name} <${email}> — ${r.stderr ?? ''}`);
+  }
+});
+
+test('#751 a CROSSED name/tag pair is refused — every part legitimate, the combination not', (t) => {
+  const shapes = seatIdents().map(parseShape).filter(Boolean);
+  // ⚠️ SKIP, not `return`, and not a failure either — the two obvious options
+  // are both wrong here and for opposite reasons.
+  //
+  //   bare `return`  the case passes green while testing nothing. A silent
+  //                  skip, in the file whose entire subject is silent skips.
+  //   assert         a second red for a root cause the inventory test above
+  //                  already reports — one defect, two failures, and the
+  //                  second one less informative than the first.
+  //
+  // ⇒ An explicit skip is neither: it CANNOT be read as a pass (TAP marks it
+  //   `# SKIP` with this reason), and it does not cascade. Cardinality is the
+  //   inventory test's job; this one declines to run rather than pretending.
+  if (shapes.length < 2) {
+    t.skip(`need ≥2 shapes to cross, found ${shapes.length} — see the inventory test, which owns this`);
+    return;
+  }
+  for (const [i, shape] of shapes.entries()) {
+    const other = shapes[(i + 1) % shapes.length];
+    const repo = makeRepo();
+    const email = `${SYNTHETIC}+${other.tag}@${other.domain}`;
+    const r = tryCommit(repo, {
+      env: { ...baseEnv(), CLAUDECODE: '1' },
+      stamp: { name: shape.name, email },
+    });
+    assert.equal(r.ok, false,
+      `crossed identity must refuse: ${shape.name} <${email}>`);
+  }
+});
+
+test('#751 an UNTAGGED address at the same domain is refused — the human-fallback shape', () => {
+  // The forbidden fallback and a required seat differ by one `+`. This is the
+  // case the whole narrowing turns on.
+  for (const shape of seatIdents().map(parseShape).filter(Boolean)) {
+    const repo = makeRepo();
+    const email = `${SYNTHETIC}@${shape.domain}`;
+    const r = tryCommit(repo, {
+      env: { ...baseEnv(), CLAUDECODE: '1' },
+      stamp: { name: shape.name, email },
+    });
+    assert.equal(r.ok, false, `untagged address must refuse: ${shape.name} <${email}>`);
+  }
+});
+
+test('#751 a mistyped tag and a foreign domain are both refused', () => {
+  for (const shape of seatIdents().map(parseShape).filter(Boolean)) {
+    const cases = [
+      `${SYNTHETIC}+${shape.tag.slice(0, -1)}@${shape.domain}`,  // typo: one char short
+      `${SYNTHETIC}+${shape.tag}@elsewhere.example`,             // right tag, wrong domain
+    ];
+    for (const email of cases) {
+      const repo = makeRepo();
+      const r = tryCommit(repo, {
+        env: { ...baseEnv(), CLAUDECODE: '1' },
+        stamp: { name: shape.name, email },
+      });
+      assert.equal(r.ok, false, `must refuse: ${shape.name} <${email}>`);
+    }
+  }
+});
+
+test('#751 the COMMITTER slot is checked against the shapes too, not just the author', () => {
+  // The --amend gap, at the new addresses: author stamped, committer falls back.
+  const shape = seatIdents().map(parseShape).filter(Boolean)[0];
+  const repo = makeRepo();
+  fs.appendFileSync(path.join(repo.dir, 'f.txt'), 'x');
+  repo.git(['add', 'f.txt'], baseEnv());
+  let refused = false;
+  try {
+    repo.git(['commit', '-q', '-m', 'probe'], {
+      ...baseEnv(),
+      CLAUDECODE: '1',
+      GIT_AUTHOR_NAME: shape.name,
+      GIT_AUTHOR_EMAIL: `${SYNTHETIC}+${shape.tag}@${shape.domain}`,
+      // committer left to the tree's human fallback
+    });
+  } catch { refused = true; }
+  assert.equal(refused, true, 'seat author + human committer must refuse at the new addresses');
+});
