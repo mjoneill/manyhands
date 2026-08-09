@@ -32,6 +32,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { runBoundedProcessTree } from './run-process-tree.mjs';
+import { newRunId } from './verdict-ledger.mjs';
 
 const REPO = process.env.SUITE_WATCH_REPO
   || path.join(path.dirname(new URL(import.meta.url).pathname), '..');
@@ -87,6 +88,15 @@ const cleanup = () => { if (cloneDir) fs.rmSync(cloneDir, { recursive: true, for
 const RUN_TIMEOUT_MS = Number(process.env.SUITE_WATCH_RUN_TIMEOUT_MS ?? 15 * 60 * 1000);
 const ISOLATION_TIMEOUT_MS = Number(process.env.SUITE_WATCH_ISOLATION_TIMEOUT_MS ?? 10 * 60 * 1000);
 
+/**
+ * #746 — the watcher mints the run id so the isolation rerun below can append a
+ * LINKED child event without parsing anything out of the run's own output. The
+ * id has to exist before the first verdict is written, or the link can only be
+ * reconstructed from mutable text.
+ */
+const runId = newRunId();
+process.env.RUN_TESTS_RUN_ID = runId;
+
 let red = false;
 const full = await runBoundedProcessTree({
   file: 'sh', args: [path.join(suiteDir, 'scripts', 'run-tests.sh')], cwd: suiteDir, timeout: RUN_TIMEOUT_MS,
@@ -121,6 +131,15 @@ const incompleteFiles = timedOut
  */
 let flake = false;
 if (red && !timedOut && files.length) {
+  // #746 — the isolation rerun is a SUBSET and calls run-test-files.mjs
+  // directly, so run-tests.sh's opt-in never runs. Opt it in explicitly: this is
+  // the one subset whose verdict is worth keeping, because it is the event that
+  // turns a red into a flake. Appended as its own immutable line carrying the
+  // parent's id — never as an edit to the red, which is the only irreplaceable
+  // part of the record.
+  process.env.RUN_TESTS_LEDGER = 'isolation';
+  process.env.RUN_TESTS_PARENT_RUN_ID = runId;
+  delete process.env.RUN_TESTS_RUN_ID; // the child mints its own
   const isolated = await runBoundedProcessTree({
     file: 'node', args: ['scripts/run-test-files.mjs', ...files.map((f) => path.join('tests', f))],
     cwd: suiteDir, timeout: ISOLATION_TIMEOUT_MS,

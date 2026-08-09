@@ -21,8 +21,14 @@ const run = promisify(execFile);
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const WATCH = path.join(ROOT, 'scripts', 'suite-watch.mjs');
 
+// #746 — fixture universes here are deliberately red; their verdicts belong in a
+// scratch ledger, never the live one. Same reasoning as run-tests-helper: a
+// positive control for an alarm must never touch the real instrument, and that
+// now includes the record as well as the state file.
+const SCRATCH_LEDGER = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ledger-sw-')), 'ledger.jsonl');
+
 function cleanEnv(extra) {
-  const env = { ...process.env, ...extra };
+  const env = { ...process.env, SCRUM_VERDICT_LEDGER: SCRATCH_LEDGER, ...extra };
   for (const k of Object.keys(env)) if (k.startsWith('NODE_TEST')) delete env[k];
   delete env.NODE_OPTIONS;
   return env;
@@ -35,6 +41,9 @@ function makeUniverse() {
   fs.copyFileSync(path.join(ROOT, 'scripts', 'run-tests.sh'), path.join(dir, 'scripts', 'run-tests.sh'));
   const fileRunner = path.join(ROOT, 'scripts', 'run-test-files.mjs');
   if (fs.existsSync(fileRunner)) fs.copyFileSync(fileRunner, path.join(dir, 'scripts', 'run-test-files.mjs'));
+  // The runner imports the ledger — a universe without it cannot start.
+  const ledger = path.join(ROOT, 'scripts', 'verdict-ledger.mjs');
+  if (fs.existsSync(ledger)) fs.copyFileSync(ledger, path.join(dir, 'scripts', 'verdict-ledger.mjs'));
   fs.chmodSync(path.join(dir, 'scripts', 'run-tests.sh'), 0o755);
   fs.writeFileSync(path.join(dir, 'tests', 'green.test.mjs'),
     'import { test } from "node:test"; test("g", () => {});\n');

@@ -2,10 +2,11 @@
   "type": "module",
   "scripts": {
     "test": "npm run test:server && npm run test:browser",
-    "test:server": "node --test tests/*.test.mjs",
-    "test:api": "node --test tests/api.test.mjs",
-    "test:mcp": "node --test tests/mcp.test.mjs",
-    "test:browser": "node run-tests.js"
+    "test:server": "sh scripts/run-tests.sh",
+    "test:api": "sh scripts/run-tests.sh tests/api.test.mjs",
+    "test:mcp": "sh scripts/run-tests.sh tests/mcp.test.mjs",
+    "test:browser": "node run-tests.js",
+    "test:ledger": "node scripts/verdict-report.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",

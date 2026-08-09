@@ -28,8 +28,21 @@ total=$(ls tests/*.test.mjs 2>/dev/null | wc -l | tr -d ' ')
 if [ "$#" -eq 0 ]; then
   scope="FULL SUITE ($total files)"
   set -- tests/*.test.mjs
+  # #746 — record the first verdict. Opt-IN, and only here: a subset is not a
+  # verdict about the suite, which is what the banner below already says.
+  RUN_TESTS_LEDGER=full
+  export RUN_TESTS_LEDGER
 else
   scope="SUBSET: $# of $total files — NOT a full-suite verdict"
+  # ⚠️ UNSET, not merely "don't set". `run-tests-helper.test.mjs` runs this
+  # script inside the suite, so a full run's environment is INHERITED by the
+  # fixture runs — and those fixtures are deliberately red. Without this line a
+  # full suite would record `deliberate-red.test.mjs` as a failing file every
+  # time the harness tested itself, and the ledger would libel a file that is
+  # doing its job. Found in review before it was written, not after.
+  unset RUN_TESTS_LEDGER
+  unset RUN_TESTS_RUN_ID
+  unset RUN_TESTS_PARENT_RUN_ID
 fi
 
 # #735 — EMIT AS WE GO, don't buffer to the end.

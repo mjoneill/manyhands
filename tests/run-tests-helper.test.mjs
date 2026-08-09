@@ -21,12 +21,24 @@ const run = promisify(execFile);
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const HELPER = path.join(ROOT, 'scripts', 'run-tests.sh');
 const FILE_RUNNER = path.join(ROOT, 'scripts', 'run-test-files.mjs');
+const LEDGER = path.join(ROOT, 'scripts', 'verdict-ledger.mjs');
+
+// #746 — every fixture run in this file goes to a scratch ledger, never the
+// real one. This file's whole job is running the helper against DELIBERATELY RED
+// fixtures, and one of its tests invokes it with NO ARGS — a full run by the
+// pipeline's own definition, which is exactly what opts a run into recording.
+// Without this redirect the suite's own harness would file `deliberate-red` and
+// `only.test.mjs` as failing files in the live ledger every time it ran, and the
+// first thing the flake counter ever said would be a libel of a file doing its
+// job. Set at the ENV level so it covers every invocation here, including ones
+// nobody has written yet.
+const SCRATCH_LEDGER = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ledger670-')), 'ledger.jsonl');
 
 // The inner `node --test` must not inherit the OUTER runner's context, or it
 // reports to our runner instead of exiting on its own verdict — the harness
 // itself would mask the exit code, which is this card's entire subject.
 function cleanEnv() {
-  const env = { ...process.env };
+  const env = { ...process.env, SCRUM_VERDICT_LEDGER: SCRATCH_LEDGER };
   for (const k of Object.keys(env)) if (k.startsWith('NODE_TEST')) delete env[k];
   delete env.NODE_OPTIONS;
   return env;
@@ -63,6 +75,10 @@ function copyHelper(dir) {
   fs.mkdirSync(path.join(dir, 'scripts'), { recursive: true });
   fs.copyFileSync(HELPER, path.join(dir, 'scripts', 'run-tests.sh'));
   if (fs.existsSync(FILE_RUNNER)) fs.copyFileSync(FILE_RUNNER, path.join(dir, 'scripts', 'run-test-files.mjs'));
+  // run-test-files.mjs imports the ledger; a fixture universe missing it would
+  // fail to start the runner at all, which reads as "the pipeline is broken"
+  // rather than "the fixture is incomplete".
+  if (fs.existsSync(LEDGER)) fs.copyFileSync(LEDGER, path.join(dir, 'scripts', 'verdict-ledger.mjs'));
 }
 
 test('positive control: a deliberately failing fixture exits nonzero and shows the failure', async () => {
