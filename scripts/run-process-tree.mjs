@@ -35,18 +35,19 @@ function merge(captured, rows) {
 }
 
 /**
- * #745 — our own process group, read once. Node exposes no `process.pgid`, so it
- * comes from ps. Resolved at module load rather than per call: it cannot change
- * for a running process, and a failed read must not silently become "no group to
- * protect" on every subsequent kill.
+ * #745 — our own process group, taken from a ps snapshot the caller already has.
+ * Node exposes no `process.pgid`.
+ *
+ * Returns `null` when our row is absent, and the caller MUST treat that as
+ * "cannot protect ⇒ signal nothing". Round one returned NaN and compared with
+ * `!==`, which is always true, so an unreadable value disabled the guard rather
+ * than engaging it. Re-reading from the current table is robustness; FAILING
+ * CLOSED is the safety property, and it lives in the consumer.
  */
-const SELF_PGID = (() => {
-  try {
-    return Number(String(execFileSync('ps', ['-o', 'pgid=', '-p', String(process.pid)])).trim());
-  } catch {
-    return NaN;   // unknown: the pgid comparison below simply never matches
-  }
-})();
+function selfGroup(rows) {
+  const row = rows.find((r) => r.pid === process.pid);
+  return row ? row.pgid : null;
+}
 
 /**
  * #745 — which captured groups may be signalled.
@@ -61,7 +62,13 @@ const SELF_PGID = (() => {
  *                    inherit that fresh group — a property held elsewhere in the
  *                    file, which a refactor can remove without failing anything.
  */
-export function groupsToSignal(captured, current, selfPgid = SELF_PGID) {
+export function groupsToSignal(captured, current, selfPgid) {
+  // ⚠️ FAIL CLOSED. Round one used NaN for "unknown" with `!==`, which is ALWAYS
+  // true — an unreadable pgid DISABLED the protection instead of engaging it.
+  // Found by two reviewers, reproduced against our own live group. A guard that
+  // cannot identify what it protects must not fire; the per-pid cleanup in
+  // kill() still runs, so nothing leaks.
+  if (!Number.isInteger(selfPgid) || selfPgid <= 1) return [];
   return [...captured.groups].filter((pgid) => (
     Number.isInteger(pgid)
     && pgid > 1
@@ -79,12 +86,22 @@ export function groupsToSignal(captured, current, selfPgid = SELF_PGID) {
  */
 export function signalGroups(pgids, killFn = process.kill) {
   for (const pgid of pgids) {
+    // ⚠️ Revalidated HERE, not only upstream. Reachable inputs and what they did:
+    //     1   → kill(-1)  every process the user owns
+    //     0   → kill(0)   our own group, by another name
+    //    -5   → kill(5)   ⚠️ a BARE POSITIVE PID — the group kill degraded into
+    //                     the single-pid kill the spy exists to catch, through
+    //                     ordinary input rather than a future refactor
+    if (!Number.isInteger(pgid) || pgid <= 1) continue;
     try { killFn(-pgid, 'SIGKILL'); } catch { /* already stopped */ }
   }
 }
 
 function kill(captured) {
-  signalGroups(groupsToSignal(captured, table()));
+  // One snapshot for both the liveness check and our own group. If our row is
+  // missing, selfGroup returns null and groupsToSignal signals nothing.
+  const current = table();
+  signalGroups(groupsToSignal(captured, current, selfGroup(current)));
   for (const pid of captured.pids) {
     try { process.kill(pid, 'SIGKILL'); } catch { /* already stopped */ }
   }

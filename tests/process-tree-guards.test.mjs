@@ -75,12 +75,16 @@ test('#745 SPY: the signal is sent to the NEGATIVE pgid, not the bare pgid', () 
 });
 
 test('#745 a kill that throws does not stop the remaining groups', () => {
+  // Re-derived after the floor moved INSIDE signalGroups: 1 is now rejected, so
+  // this case uses pgids that are all valid. Its intent is unchanged — a throw
+  // must not abandon the groups after it — and the expectation was recomputed
+  // from that intent rather than adjusted until it went green.
   const calls = [];
-  signalGroups([1, 2, 3], (target, sig) => {
+  signalGroups([2, 3, 4], (target, sig) => {
     calls.push(target);
-    if (target === -2) throw new Error('ESRCH — already gone');
+    if (target === -3) throw new Error('ESRCH — already gone');
   });
-  assert.deepEqual(calls, [-1, -2, -3],
+  assert.deepEqual(calls, [-2, -3, -4],
     'one already-dead group must not abandon the others still running');
 });
 
@@ -88,4 +92,34 @@ test('#745 ANTI-VACUITY: the spy records, so the assertions above are not empty'
   const calls = [];
   signalGroups([9], (t, s) => calls.push([t, s]));
   assert.equal(calls.length, 1, 'if this fails every deepEqual above passes on nothing');
+});
+
+/**
+ * #745 review round 2 — both guards must FAIL CLOSED at the destructive boundary.
+ *
+ * Round 1 failed open in two ways, found in review:
+ *
+ *   1. `SELF_PGID` was NaN when its ps lookup failed, and `pgid !== NaN` is
+ *      always true — so an unreadable pgid DISABLED the self guard instead of
+ *      engaging it. My own comment described this as "simply never matches",
+ *      which is true and is exactly the problem.
+ *   2. `signalGroups` did not revalidate. Production composition filtered pgid<=1
+ *      upstream, but the exported primitive would still issue kill(-1, ...) —
+ *      safety by caller invariant, which is the shape #745 exists to remove.
+ */
+test('#745 an UNKNOWN self pgid signals NOTHING — the guard fails closed', () => {
+  const cur = [{ pid: 1000, ppid: 1, pgid: 4242 }];
+  for (const unknown of [NaN, null, undefined, '4242', 1.5]) {
+    assert.deepEqual(
+      groupsToSignal(captured([1000], [4242]), cur, unknown), [],
+      `selfPgid=${String(unknown)} must suppress ALL group kills; a guard that ` +
+      'cannot identify what to protect must not fire at the thing it protects');
+  }
+});
+
+test('#745 signalGroups REVALIDATES — 1, 0, negatives and non-integers never reach the killer', () => {
+  const calls = [];
+  signalGroups([1, 0, -5, 1.5, NaN, '7', null, 4242], (t, s) => calls.push([t, s]));
+  assert.deepEqual(calls, [[-4242, 'SIGKILL']],
+    'the exported primitive must be safe on its own, not safe because of who calls it');
 });
