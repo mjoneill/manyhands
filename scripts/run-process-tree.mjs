@@ -1,15 +1,36 @@
 import { execFileSync, spawn } from 'node:child_process';
 
-function table() {
+/**
+ * #752 — the process table AND whether we actually managed to read it.
+ *
+ * The old `table()` caught every ps failure and returned `[]`, which is
+ * indistinguishable from "no matching processes". That turned a failure to
+ * observe into an observation of absence, and `verifyStopped` reported
+ * termination CONFIRMED on the one input where it knew nothing.
+ *
+ * `ok` is the whole fix: callers that need an OBSERVATION must check it.
+ */
+function readTable() {
   try {
-    return String(execFileSync('ps', ['-axo', 'pid=,ppid=,pgid=']))
+    const rows = String(execFileSync('ps', ['-axo', 'pid=,ppid=,pgid=']))
       .split('\n')
       .map((line) => line.trim().split(/\s+/).map(Number))
       .filter(([pid, ppid, pgid]) => Number.isInteger(pid) && Number.isInteger(ppid) && Number.isInteger(pgid))
       .map(([pid, ppid, pgid]) => ({ pid, ppid, pgid }));
+    return { ok: true, rows };
   } catch {
-    return [];
+    return { ok: false, rows: [] };   // could not look — NOT "nothing there"
   }
+}
+
+/**
+ * Rows only, for callers whose failure behaviour is already safe: `descendants`
+ * finds fewer processes to kill (the pid loop still runs), and `groupsToSignal`
+ * fails closed on an unknown self-pgid. Neither converts an empty table into a
+ * CLAIM, which is what made verifyStopped different.
+ */
+function table() {
+  return readTable().rows;
 }
 
 function descendants(rootPid) {
@@ -124,10 +145,22 @@ function kill(captured) {
   }
 }
 
-async function verifyStopped(captured, timeout = 2000) {
+/**
+ * #752 — "terminated" may be asserted ONLY after a successful read observes every
+ * captured pid absent. A failed read is not evidence of anything; we keep polling,
+ * and if every observation through the deadline was unavailable we return false so
+ * the alarm says "cleanup could not be verified" rather than manufacturing comfort.
+ *
+ * Exported with an injectable observer because the previous version could be READ
+ * but not MEASURED — the defect was confirmed by eye and could not be driven
+ * without replicating it, and a replica tests the reading rather than the code.
+ * Same unexported-therefore-unwitnessed shape as #747, one function along.
+ */
+export async function verifyStopped(captured, timeout = 2000, observe = readTable) {
   const deadline = Date.now() + timeout;
   do {
-    if (!table().some(({ pid }) => captured.pids.has(pid))) return true;
+    const { ok, rows } = observe();
+    if (ok && !rows.some(({ pid }) => captured.pids.has(pid))) return true;
     await new Promise((resolve) => setTimeout(resolve, 25));
   } while (Date.now() < deadline);
   return false;
