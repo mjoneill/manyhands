@@ -149,3 +149,117 @@ test('#752 a parse failure can no longer manufacture "terminated"', async () => 
   assert.equal(ok, false,
     'the whole point: comfort must not be manufacturable by a broken parser');
 });
+
+/**
+ * #752 round 4 — completeness held BY CONSTRUCTION, not inferred from rows.
+ *
+ * Rounds 1–3 all made the same move: pick a row we expect to see and treat its
+ * presence as evidence. ps exception → exit code → parse → self → self+init. Each
+ * closed the mutant in front of it; each left the class open one predicate along,
+ * because NO predicate over returned rows can distinguish a complete table from a
+ * scoped one that satisfies the predicate. `ps -p 1,<self>` satisfies every
+ * witness anyone proposed and still hides a live child.
+ *
+ * ⇒ So the question is not "does the output look complete?" but "did production
+ *   ASK for a complete table?" That is answerable, and it is pinned here the same
+ *   way #745 pins the group kill: with a spy on the invocation itself.
+ *
+ * ⚠️ Deliberately NOT tested: that some scoped output makes ok false. No consumer
+ * can distinguish scoped output from a genuinely small system without inventing
+ * another row predicate — which is the architecture that was stopped.
+ */
+const PS_BIN = '/bin/ps';
+const PS_ARGS = ['-axo', 'pid=,ppid=,pgid='];
+
+test('#752 production PINS the instrument: absolute /bin/ps, exact unscoped argv', async () => {
+  const { readTable } = await import('../scripts/run-process-tree.mjs');
+  const calls = [];
+  readTable((file, args) => { calls.push([file, args]); return `  ${process.pid}     1  ${process.pid}\n`; });
+  assert.equal(calls.length, 1, 'exactly one invocation');
+  assert.deepEqual(calls[0], [PS_BIN, PS_ARGS],
+    'ABSOLUTE path so a PATH shim cannot redefine the instrument, and the exact ' +
+    'unscoped argv so the request itself carries the completeness');
+});
+
+test('#752 a partial/malformed row invalidates the WHOLE observation, not just that row', async () => {
+  const { readTable } = await import('../scripts/run-process-tree.mjs');
+  const t = readTable(() => `  ${process.pid}     1  ${process.pid}\n  garbage here\n  4242  1  4242\n`);
+  assert.equal(t.ok, false,
+    'filtering a bad row turns "some of this is unreadable" into "this is what ' +
+    'there is" — the same act as discarding a failed read, one line up');
+});
+
+test('#752 a row with the wrong FIELD COUNT invalidates the observation', async () => {
+  const { readTable } = await import('../scripts/run-process-tree.mjs');
+  const t = readTable(() => `  ${process.pid}     1  ${process.pid}\n  4242  1\n`);
+  assert.equal(t.ok, false, 'two fields is not a pid/ppid/pgid row');
+});
+
+test('#752 executor failure → invalid, and no rows leak out', async () => {
+  const { readTable } = await import('../scripts/run-process-tree.mjs');
+  const t = readTable(() => { throw new Error('ENOENT: no ps'); });
+  assert.equal(t.ok, false);
+  assert.deepEqual(t.rows, []);
+});
+
+test('#752 well-formed output that does not contain the reader → invalid (anti-vacuity witness)', async () => {
+  const { readTable } = await import('../scripts/run-process-tree.mjs');
+  const t = readTable(() => '  4242     1  4242\n  4243     1  4243\n');
+  assert.equal(t.ok, false, 'we are always in a table we really read');
+});
+
+test('#752 the REAL pinned invocation succeeds and contains the reader', async () => {
+  // Anti-vacuity for every negative above: the pinned instrument must actually
+  // work, or the guard is permanently closed and verification is dead not careful.
+  const { readTable } = await import('../scripts/run-process-tree.mjs');
+  const t = readTable();
+  assert.equal(t.ok, true, `/bin/ps ${PS_ARGS.join(' ')} must succeed here`);
+  assert.ok(t.rows.some((r) => r.pid === process.pid));
+  assert.ok(t.rows.length > 10, 'a real system has many processes');
+});
+
+test('#752 a pinned, fully-parsed observation with the captured PID absent still verifies', async () => {
+  const { readTable } = await import('../scripts/run-process-tree.mjs');
+  const ok = await verifyStopped(captured(999999), 2000,
+    () => readTable(() => `  ${process.pid}     1  ${process.pid}\n  4242  1  4242\n`));
+  assert.equal(ok, true, 'the fix must not disarm real verification');
+});
+
+/**
+ * #752 — ruling B: pin /bin/ps, no discovery, no PATH fallback, and when the
+ * instrument is unavailable say WHICH instrument rather than failing anonymously.
+ *
+ * The repo declares no platform and /bin/ps is absent on NixOS and some minimal
+ * containers. That is a real compatibility gap and deliberately NOT solved here —
+ * a candidate resolver adds a branch to the very instrument whose trustworthiness
+ * we are making local. So it fails closed and names itself, and a beneficiary on
+ * such a system becomes evidence for a separate card rather than a silent mystery.
+ */
+test('#752 an unavailable /bin/ps fails closed AND names the instrument', async () => {
+  const { readTable } = await import('../scripts/run-process-tree.mjs');
+  const t = readTable(() => { const e = new Error('ENOENT'); e.code = 'ENOENT'; throw e; });
+  assert.equal(t.ok, false);
+  assert.match(t.reason, /\/bin\/ps/,
+    'a generic failure reads as a broken instrument; naming the path turns ten ' +
+    'minutes of mystery into one line of diagnosis');
+});
+
+test('#752 each failure mode carries its OWN reason — they need different responses', async () => {
+  const { readTable } = await import('../scripts/run-process-tree.mjs');
+  const unreadable = readTable(() => { throw new Error('nope'); });
+  const garbled = readTable(() => `  ${process.pid}   1  ${process.pid}\n  nonsense\n`);
+  const notUs = readTable(() => '  4242  1  4242\n');
+
+  assert.match(unreadable.reason, /unavailable/);
+  assert.match(garbled.reason, /pars/i);
+  assert.match(notUs.reason, /absent|self|reader/i);
+  assert.notEqual(unreadable.reason, garbled.reason);
+  assert.notEqual(garbled.reason, notUs.reason);
+});
+
+test('#752 a successful observation carries NO reason, and never fails the suite', async () => {
+  const { readTable } = await import('../scripts/run-process-tree.mjs');
+  const t = readTable();
+  assert.equal(t.ok, true);
+  assert.equal(t.reason, undefined, 'a reason on a success would read as a warning');
+});

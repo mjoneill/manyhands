@@ -1,36 +1,66 @@
 import { execFileSync, spawn } from 'node:child_process';
 
-/** The real ps invocation, isolated so the parser can be driven with any output. */
-const defaultPs = () => execFileSync('ps', ['-axo', 'pid=,ppid=,pgid=']);
+/**
+ * #752 — THE PINNED INSTRUMENT.
+ *
+ * Absolute path so a directory on PATH cannot redefine what "the process table"
+ * means, and the exact unscoped argv so COMPLETENESS IS CARRIED BY THE REQUEST
+ * rather than inferred from the answer.
+ *
+ * Rounds 1-3 all tried to infer it: ps-exception, then exit code, then parse,
+ * then a self row, then self + init. Each closed the mutant in front of it and
+ * left the class open, because no predicate over returned rows can tell a
+ * complete table from a scoped one that satisfies the predicate — `ps -p 1,<self>`
+ * defeats every witness anyone proposed while hiding a live child.
+ */
+const PS_BIN = '/bin/ps';
+const PS_ARGS = ['-axo', 'pid=,ppid=,pgid='];
 
 /**
- * #752 — the process table AND whether we actually managed to read it.
+ * The process table, and whether we actually observed it.
  *
- * The old `table()` caught every ps failure and returned `[]`, which is
- * indistinguishable from "no matching processes". That turned a failure to
- * observe into an observation of absence, and `verifyStopped` reported
- * termination CONFIRMED on the one input where it knew nothing.
- *
- * `ok` is the whole fix: callers that need an OBSERVATION must check it.
+ * `exec` is injectable so the pinned invocation can be SPIED — the executable and
+ * argv are asserted the same way #745 pins the group kill's negative pgid, because
+ * a mechanism nothing observes is a mechanism a refactor can silently remove.
  */
-export function readTable(runPs = defaultPs, selfPid = process.pid) {
-  let rows;
+export function readTable(exec = execFileSync, selfPid = process.pid) {
+  let out;
   try {
-    rows = String(runPs())
-      .split('\n')
-      .map((line) => line.trim().split(/\s+/).map(Number))
-      .filter(([pid, ppid, pgid]) => Number.isInteger(pid) && Number.isInteger(ppid) && Number.isInteger(pgid))
-      .map(([pid, ppid, pgid]) => ({ pid, ppid, pgid }));
+    out = String(exec(PS_BIN, PS_ARGS));
   } catch {
-    return { ok: false, rows: [] };          // could not run ps at all
+    // Ruling B: no discovery, no PATH fallback — but say WHICH instrument is
+    // missing. /bin/ps is absent on NixOS and some minimal containers, and the
+    // repo declares no platform, so an anonymous failure there reads as a broken
+    // verifier rather than an unmet precondition.
+    return { ok: false, rows: [], reason: `process-table reader unavailable: ${PS_BIN}` };
   }
-  // ⚠️ THE WITNESS. `ok` must not mean "ps exited zero". Malformed output, or any
-  // future change to the parse or filter above that drops every row, would yield
-  // {ok:true, rows:[]} — and a caller asking "are our pids absent?" would get YES
-  // from a PARSE failure rather than from an observation. A valid full process
-  // table always contains the reader's own process; if we cannot find ourselves in
-  // what we parsed, we did not read the process table, whatever ps's exit said.
-  return { ok: rows.some((r) => r.pid === selfPid), rows };
+
+  const rows = [];
+  for (const line of out.split('\n')) {
+    const text = line.trim();
+    if (text === '') continue;
+    const parts = text.split(/\s+/);
+    // ⚠️ ANY unparsable row invalidates the WHOLE observation. The previous
+    // version FILTERED them, which is how "some of this is unreadable" becomes
+    // "this is what there is" — the same act as discarding a failed read, one
+    // line up from where five rounds of review were looking.
+    if (parts.length !== 3) {
+      return { ok: false, rows: [], reason: `unparsable process-table row: ${JSON.stringify(text)}` };
+    }
+    const [pid, ppid, pgid] = parts.map(Number);
+    if (!Number.isInteger(pid) || !Number.isInteger(ppid) || !Number.isInteger(pgid)) {
+      return { ok: false, rows: [], reason: `unparsable process-table row: ${JSON.stringify(text)}` };
+    }
+    rows.push({ pid, ppid, pgid });
+  }
+
+  // Self is ANTI-VACUITY, not proof of completeness: it catches an instrument
+  // that returned something unrelated, and claims nothing about scope. Scope is
+  // held by PS_ARGS above.
+  if (!rows.some((r) => r.pid === selfPid)) {
+    return { ok: false, rows, reason: `reader (pid ${selfPid}) absent from its own process table` };
+  }
+  return { ok: true, rows };
 }
 
 /**
