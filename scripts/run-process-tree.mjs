@@ -1,5 +1,8 @@
 import { execFileSync, spawn } from 'node:child_process';
 
+/** The real ps invocation, isolated so the parser can be driven with any output. */
+const defaultPs = () => execFileSync('ps', ['-axo', 'pid=,ppid=,pgid=']);
+
 /**
  * #752 — the process table AND whether we actually managed to read it.
  *
@@ -10,17 +13,24 @@ import { execFileSync, spawn } from 'node:child_process';
  *
  * `ok` is the whole fix: callers that need an OBSERVATION must check it.
  */
-function readTable() {
+export function readTable(runPs = defaultPs, selfPid = process.pid) {
+  let rows;
   try {
-    const rows = String(execFileSync('ps', ['-axo', 'pid=,ppid=,pgid=']))
+    rows = String(runPs())
       .split('\n')
       .map((line) => line.trim().split(/\s+/).map(Number))
       .filter(([pid, ppid, pgid]) => Number.isInteger(pid) && Number.isInteger(ppid) && Number.isInteger(pgid))
       .map(([pid, ppid, pgid]) => ({ pid, ppid, pgid }));
-    return { ok: true, rows };
   } catch {
-    return { ok: false, rows: [] };   // could not look — NOT "nothing there"
+    return { ok: false, rows: [] };          // could not run ps at all
   }
+  // ⚠️ THE WITNESS. `ok` must not mean "ps exited zero". Malformed output, or any
+  // future change to the parse or filter above that drops every row, would yield
+  // {ok:true, rows:[]} — and a caller asking "are our pids absent?" would get YES
+  // from a PARSE failure rather than from an observation. A valid full process
+  // table always contains the reader's own process; if we cannot find ourselves in
+  // what we parsed, we did not read the process table, whatever ps's exit said.
+  return { ok: rows.some((r) => r.pid === selfPid), rows };
 }
 
 /**

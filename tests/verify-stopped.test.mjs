@@ -39,8 +39,15 @@ const captured = (...pids) => ({ pids: new Set(pids), groups: new Set() });
 
 /** An observer that fails: the ps read did not happen. */
 const failing = () => ({ ok: false, rows: [] });
-/** An observer that succeeds and sees nothing of ours. */
-const emptyOk = () => ({ ok: true, rows: [] });
+/**
+ * An observer that succeeds and sees none of OUR captured pids.
+ *
+ * ⚠️ It still carries a witness row — the reader's own process. Round one used
+ * `rows: []`, which is an IMPOSSIBLE process table: a real successful read always
+ * contains at least the reader itself. Encoding the impossible state as the
+ * success fixture is how a parse failure could pass for an observation.
+ */
+const witnessOk = () => ({ ok: true, rows: [{ pid: process.pid, ppid: 1, pgid: process.pid }] });
 /** An observer that succeeds and still sees one of our pids. */
 const stillThere = (pid) => () => ({ ok: true, rows: [{ pid, ppid: 1, pgid: pid }] });
 
@@ -58,7 +65,7 @@ test('#752 first read fails, a LATER successful empty read → verified', async 
   // Failing closed must not mean failing permanently: a transient ps failure
   // followed by a real observation of absence is a genuine verification.
   let n = 0;
-  const ok = await verifyStopped(captured(4242), 2000, () => (++n === 1 ? failing() : emptyOk()));
+  const ok = await verifyStopped(captured(4242), 2000, () => (++n === 1 ? failing() : witnessOk()));
   assert.equal(ok, true, 'a transient failure must not poison a later real observation');
   assert.equal(n >= 2, true);
 });
@@ -71,7 +78,7 @@ test('#752 a SUCCESSFUL read that still contains a captured pid → NOT verified
 });
 
 test('#752 a successful read with our pid absent → verified (the fix must not disarm)', async () => {
-  const ok = await verifyStopped(captured(4242), 2000, emptyOk);
+  const ok = await verifyStopped(captured(4242), 2000, witnessOk);
   assert.equal(ok, true, 'the ordinary success path must still return true');
 });
 
@@ -86,9 +93,59 @@ test('#752 the DEFAULT observer is the real one — the export is a seam, not a 
 });
 
 test('#752 ANTI-VACUITY: the observers actually differ, so the assertions above discriminate', async () => {
-  assert.deepEqual(failing(), { ok: false, rows: [] });
-  assert.deepEqual(emptyOk(), { ok: true, rows: [] });
-  // Identical `rows`, opposite `ok` — which is the entire point. If verifyStopped
-  // read only `rows`, every test above would pass for the wrong reason.
-  assert.notEqual(failing().ok, emptyOk().ok);
+  assert.equal(failing().ok, false);
+  assert.equal(witnessOk().ok, true);
+  assert.notEqual(failing().ok, witnessOk().ok);
+});
+
+/**
+ * #752 round 2 — "successful observation" was defined too weakly.
+ *
+ * `readTable().ok` meant only "ps exited zero". So malformed output, or any parser
+ * or filter change that dropped every row, produced `{ok: true, rows: []}` — and
+ * verifyStopped reported termination CONFIRMED from a PARSE failure rather than an
+ * observed absence. The original defect improved but was not closed: the comfort
+ * could still be manufactured, one layer down.
+ *
+ * The witness is the same one #747 exists to protect: A VALID FULL PROCESS TABLE
+ * CONTAINS THE READER'S OWN PID. If our own process is missing from what we parsed,
+ * we did not read the process table, whatever ps's exit code said.
+ */
+test('#752 ps exits ZERO but output is malformed → NOT a successful observation', async () => {
+  const { readTable } = await import('../scripts/run-process-tree.mjs');
+  const t = readTable(() => 'not a process table at all\n???\n');
+  assert.equal(t.ok, false,
+    'a clean exit code is not an observation — the parse produced no self row');
+});
+
+test('#752 ps output is well-formed but our OWN pid is absent → NOT successful', async () => {
+  const { readTable } = await import('../scripts/run-process-tree.mjs');
+  const t = readTable(() => '  4242     1  4242\n  4243     1  4243\n');
+  assert.equal(t.ok, false,
+    'a table without the reader in it is not the process table the reader is in');
+});
+
+test('#752 ps output containing our own pid → successful, and the rows survive', async () => {
+  const { readTable } = await import('../scripts/run-process-tree.mjs');
+  const t = readTable(() => `  4242     1  4242\n  ${process.pid}     1  ${process.pid}\n`);
+  assert.equal(t.ok, true, 'self present ⇒ we really did read the table');
+  assert.equal(t.rows.length, 2, 'and the parsed rows are still returned');
+});
+
+test('#752 the REAL ps read succeeds and contains us — the witness is satisfiable', async () => {
+  // Anti-vacuity for the three above: if the real reader could not satisfy the
+  // witness, the guard would be permanently closed and verification would be dead.
+  const { readTable } = await import('../scripts/run-process-tree.mjs');
+  const t = readTable();
+  assert.equal(t.ok, true, 'the real process table must contain this process');
+  assert.ok(t.rows.some((r) => r.pid === process.pid));
+});
+
+test('#752 a parse failure can no longer manufacture "terminated"', async () => {
+  // End to end through the real producer: ps "succeeds" with garbage, so no self
+  // row, so no observation, so no verification — however long we poll.
+  const { readTable } = await import('../scripts/run-process-tree.mjs');
+  const ok = await verifyStopped(captured(4242), 150, () => readTable(() => 'garbage\n'));
+  assert.equal(ok, false,
+    'the whole point: comfort must not be manufacturable by a broken parser');
 });
