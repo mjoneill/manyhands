@@ -40,9 +40,9 @@ function makeRepo() {
   fs.mkdirSync(path.join(dir, '.githooks'));
   fs.copyFileSync(HOOK, path.join(dir, '.githooks', 'pre-commit'));
   fs.chmodSync(path.join(dir, '.githooks', 'pre-commit'), 0o755);
-  // #751 phase 2 — both rails source their seat list from one file. A fixture
-  // without it exercises the FAIL-CLOSED path (which has its own test below),
-  // not the rule under test.
+  // #751 phase 2 — the rail sources its seat list from a separate file. A
+  // fixture without it exercises the FAIL-CLOSED path (which has its own test
+  // below), not the rule under test.
   fs.copyFileSync(SEATS, path.join(dir, '.githooks', 'seat-identities.sh'));
   fs.chmodSync(path.join(dir, '.githooks', 'seat-identities.sh'), 0o755);
   // The dispatcher shim, exactly as installed in the live tree.
@@ -304,13 +304,14 @@ test('#751 the COMMITTER slot is checked against the shapes too, not just the au
 });
 
 /**
- * #751 phase 2 — BOTH rails FAIL CLOSED when the shared seat list is missing.
+ * #751 phase 2 — the rail FAILS CLOSED when its seat list is missing.
  *
- * The list moved into one file so the two detectors cannot disagree about what
- * a seat is — they had disagreed, and one had been inert for months. But a
- * shared file is a new dependency, and the failure mode of a missing dependency
- * is the one this board keeps finding: a guard that cannot load its own rule
- * must not wave commits through.
+ * The list lives in its own file so that any future rail consults the same
+ * definition — two rails that can disagree about what a seat is eventually do,
+ * and one had been inert for months on exactly that. But a separate file is a
+ * new dependency, and the failure mode of a missing dependency is the one this
+ * board keeps finding: a guard that cannot load its own rule must not wave
+ * commits through.
  *
  * ⚠️ Discovered by accident and then pinned deliberately: the first version of
  * this suite's fixture copied only the hook, so every case exercised the
@@ -319,22 +320,22 @@ test('#751 the COMMITTER slot is checked against the shapes too, not just the au
  * the outside — so the fail-closed path gets its own test rather than being
  * something the suite hits by mistake.
  */
-for (const rail of ['pre-commit']) {
-  test(`#751 ${rail} FAILS CLOSED when seat-identities.sh is unreadable`, () => {
-    const repo = makeRepo();
-    // ⚠️ ISOLATE THE RAIL UNDER TEST. The first version installed BOTH hooks,
+test('#751 pre-commit FAILS CLOSED when seat-identities.sh is unreadable', () => {
+  const repo = makeRepo();
+  // ⚠️ ISOLATE THE RAIL UNDER TEST. The first version installed BOTH hooks,
     // so either one refusing satisfied "the commit was refused" — and a mutant
     // that disabled pre-commit's fail-closed passed, because commit-msg refused
     // instead. The assertion could not fail for the reason it claimed.
     // Measured: mutant applied, suite green, guard genuinely fail-OPEN.
     fs.rmSync(path.join(repo.dir, '.githooks', 'seat-identities.sh'));
     const r = tryCommit(repo, { env: { ...baseEnv(), CLAUDECODE: '1' }, stamp: aSeat() });
-    assert.equal(r.ok, false,
-      `${rail} must refuse when it cannot read the seat list — an unreadable list is not an empty one`);
-    // ⇒ WHICH rail refused, not merely THAT something did.
-    assert.match(r.stderr, new RegExp(`^${rail} \\(#596\\):`, 'm'),
-      `the refusal must come from ${rail} itself, not from a neighbouring hook: ${r.stderr}`);
-    assert.match(r.stderr, /seat-identities\.sh/,
-      'and it must name the file it could not read, not fail anonymously');
-  });
-}
+  assert.equal(r.ok, false,
+    'pre-commit must refuse when it cannot read the seat list — an unreadable list is not an empty one');
+  // ⇒ WHICH rail refused, not merely THAT something did. The original version
+  //   installed a second hook too, so its refusal satisfied this assertion and
+  //   a mutant that disabled THIS one passed. See the note below.
+  assert.match(r.stderr, /^pre-commit \(#596\):/m,
+    `the refusal must come from pre-commit itself, not from a neighbouring hook: ${r.stderr}`);
+  assert.match(r.stderr, /seat-identities\.sh/,
+    'and it must name the file it could not read, not fail anonymously');
+});
