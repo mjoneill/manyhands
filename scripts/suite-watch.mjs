@@ -105,6 +105,23 @@ const out = full.stdout + full.stderr;
 const timedOut = full.timedOut;
 red = timedOut || full.code !== 0;
 
+/**
+ * #746 — a ledger write that failed must be observable HERE, not merely
+ * captured. The runner writes its warning to stderr, which this process
+ * concatenates into `out` and then, on a green run, never prints: the whole
+ * output is discarded and the log says `suite green — silent`. Captured is not
+ * observable — the unattended path is exactly where nobody is watching, so a
+ * warning that only a local terminal sees does not exist for the run that most
+ * needs it.
+ *
+ * Re-emitted into the watch's own log, and deliberately NOT posted: a failed
+ * ledger write is not a red suite and must not spend the alarm's credibility
+ * (#670). It also does not touch the verdict.
+ */
+for (const line of out.split('\n')) {
+  if (line.startsWith('# WARNING: verdict ledger')) console.log(`${now} ${line.replace(/^# /, '')}`);
+}
+
 // The signature: which test FILES failed. Parsed from the runner's failure
 // section; a parse that finds nothing on a red run still fires (sig 'unparsed')
 // — an unreadable red must not be a silent one.

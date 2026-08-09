@@ -137,15 +137,26 @@ export function readLedger(file = ledgerPath()) {
   let raw;
   try {
     raw = fs.readFileSync(file, 'utf8');
-  } catch {
-    return { entries: [], malformed: 0, missing: true };
+  } catch (err) {
+    // ⚠️ Only ENOENT supports "missing". Every other read error was being
+    // reported as "No ledger file yet — nothing has been recorded", which is a
+    // confident claim about a path that exists and is simply unreadable: the
+    // reader would send someone to check whether the hook fires when the real
+    // answer is that the file cannot be opened. Same class as the three before
+    // it — a negative claim the file's contents do not support.
+    if (err?.code === 'ENOENT') return { entries: [], malformed: 0, missing: true, readError: null };
+    return {
+      entries: [], malformed: 0, missing: false, readError: err?.code || String(err),
+    };
   }
   const entries = [];
   let malformed = 0;
   for (const line of raw.split('\n').filter(Boolean)) {
     try { entries.push(JSON.parse(line)); } catch { malformed += 1; }
   }
-  return { entries, malformed, missing: false };
+  return {
+    entries, malformed, missing: false, readError: null,
+  };
 }
 
 /** Valid entries only. Callers that must not silently ignore damage use readLedger. */
@@ -175,9 +186,16 @@ export function summarize(entries) {
       reds.set(file, (reds.get(file) || 0) + 1);
     }
   }
+  const unattributable = all.filter((e) => !isAttributable(e));
   return {
     recordedRuns: runs.length,
-    unattributableRuns: all.length - runs.length,
+    unattributableRuns: unattributable.length,
+    // ⚠️ Reported, not merely excluded. Reporting the exclusion REASON while
+    // withholding the exclusion's CONTENTS let a reader see "0 red", a bucket
+    // explained purely by tree-state, and "No file has failed" — three
+    // individually true sentences composing into a false answer to "have we had
+    // any reds?", at a moment when every red the ledger held was in that bucket.
+    unattributableRedRuns: unattributable.filter((r) => r.verdict === 'red').length,
     redRuns: runs.filter((r) => r.verdict === 'red').length,
     files: [...reds.entries()]
       .map(([file, count]) => ({ file, count, ofRecordedRuns: runs.length }))

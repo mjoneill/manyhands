@@ -34,9 +34,11 @@
 
 import { ledgerPath, readLedger, summarize } from './verdict-ledger.mjs';
 
-const { entries, malformed, missing } = readLedger();
 const {
-  recordedRuns, unattributableRuns, redRuns, files,
+  entries, malformed, missing, readError,
+} = readLedger();
+const {
+  recordedRuns, unattributableRuns, unattributableRedRuns, redRuns, files,
 } = summarize(entries);
 
 console.log(`ledger: ${ledgerPath()}`);
@@ -45,6 +47,16 @@ console.log('        the server phase of `npm test`, or the suite watch.');
 console.log('        NOT covered: bare `node --test`, `npm run test:browser`, and');
 console.log('        TIMED-OUT runs (no event is written; #735\'s alarm owns those).');
 console.log('');
+
+// ⚠️ Unreadable is its own fact. Reported before anything else, and it never
+// borrows the words "missing" or "empty": the path exists, and the reader must
+// not send someone to check whether the hook fires when the real answer is that
+// the file cannot be opened.
+if (readError) {
+  console.log(`⚠️ The ledger could not be READ (${readError}). This is not "no runs" and not "no file" —`);
+  console.log('   the path exists and could not be opened, so nothing below can be counted.');
+  process.exit(0);
+}
 
 // ⚠️ Damage is reported before any count, so a number is never read against a
 // file that was partly unreadable without the reader knowing.
@@ -69,8 +81,16 @@ if (!entries.length && !malformed) {
 const first = entries[0]?.at ?? '?';
 console.log(`${recordedRuns} recorded CLEAN COMPLETED server-suite run(s) since ${first} — ${redRuns} red.`);
 if (unattributableRuns) {
-  console.log(`⚠️ ${unattributableRuns} further completed run(s) recorded but NOT counted: the tree was dirty`);
-  console.log('   at a boundary, moved during the run, or was not a git checkout.');
+  // ⚠️ The RED COUNT belongs on this line. Without it the reader reported the
+  // exclusion's reason but not its contents, so a person asking "have we had any
+  // reds?" saw `0 red`, a bucket explained entirely by tree-state, and "No file
+  // has failed" — every sentence true, the composite false, at a moment when
+  // every red on record was inside that bucket. Stated in both directions, so
+  // the line is informative when the answer is reassuring too.
+  const reds = unattributableRedRuns ? `${unattributableRedRuns} of them RED` : 'none of them red';
+  console.log(`⚠️ ${unattributableRuns} further completed run(s) recorded but NOT counted — ${reds}.`);
+  console.log('   Excluded because the tree was dirty at a boundary, moved during the run,');
+  console.log('   or was not a git checkout. Excluded from the count, not from the record.');
 }
 console.log('');
 

@@ -55,13 +55,16 @@ function goRed(dir, name = 'red.test.mjs') {
     'import { test } from "node:test"; import a from "node:assert/strict"; test("r", () => a.equal(1, 2));\n');
 }
 
-async function tick({ dir, state }) {
+async function tick({ dir, state }, extra = {}) {
   // NO_CLONE: fixture universes aren't git repos; the clone isolation is
   // covered by the live deployment, the logic under test here is the alarm's.
   const { stdout } = await run(process.execPath, [WATCH], {
     env: cleanEnv({
-      SUITE_WATCH_REPO: dir, SUITE_WATCH_STATE: state,
-      SUITE_WATCH_DRYRUN: '1', SUITE_WATCH_NO_CLONE: '1',
+      SUITE_WATCH_REPO: dir,
+      SUITE_WATCH_STATE: state,
+      SUITE_WATCH_DRYRUN: '1',
+      SUITE_WATCH_NO_CLONE: '1',
+      ...extra,
     }),
   });
   return stdout;
@@ -92,6 +95,37 @@ test('green universe: silent, and state is cleared', async () => {
   assert.equal(posted(out), false, 'green must not post');
   assert.match(out, /suite green — silent/);
   assert.deepEqual(JSON.parse(fs.readFileSync(u.state, 'utf8')).sigTimes, {});
+});
+
+/**
+ * #746 — CAPTURED IS NOT OBSERVABLE, and the unattended path is the one that
+ * matters. The runner writes its ledger warning to stderr; this process
+ * concatenates it into `out` and, on a green run, prints nothing but
+ * `suite green — silent`. So the warning existed, was read into memory, and was
+ * discarded — on the exact run where nobody is watching a terminal.
+ *
+ * The green case is the one under test on purpose: a red run prints its output
+ * anyway, so a warning would surface there by accident rather than by design.
+ */
+test('#746 a failed ledger write is re-emitted into the watch log on a GREEN run', async () => {
+  const u = makeUniverse();
+  const blocked = path.join(u.dir, 'not-a-dir');
+  fs.writeFileSync(blocked, 'a file where a directory would be needed');
+
+  const out = await tick(u, { SCRUM_VERDICT_LEDGER: path.join(blocked, 'ledger.jsonl') });
+
+  assert.match(out, /suite green — silent/, 'the verdict is untouched: a bad ledger is not a red suite');
+  assert.equal(posted(out), false, 'and it must NOT post — a failed write must not spend the alarm\'s credibility');
+  assert.match(out, /WARNING: verdict ledger write FAILED/,
+    'but the watch log must carry it, or the unattended run records nothing and says nothing');
+});
+
+test('#746 ANTI-VACUITY: a healthy ledger produces no watch-log warning', async () => {
+  const u = makeUniverse();
+  const out = await tick(u, { SCRUM_VERDICT_LEDGER: path.join(u.dir, 'ledger.jsonl') });
+  assert.match(out, /suite green — silent/);
+  assert.doesNotMatch(out, /WARNING: verdict ledger/,
+    'a warning that always fires cannot distinguish a failed write from a good one');
 });
 
 test('red posts once, repeat red is muted, recovery clears, next red is news again', async () => {

@@ -272,6 +272,78 @@ test('#746 a malformed-ONLY ledger never claims to hold nothing', async () => {
     'a file with unreadable content is not an empty one, and must not be reported as one');
 });
 
+/**
+ * ⚠️ EXCLUSION MUST NOT HIDE ITS OWN CONTENTS. Measured on the live ledger: one
+ * red on record, all of it unattributable, and the reader said
+ *
+ *     13 recorded CLEAN COMPLETED server-suite run(s) — 0 red.
+ *     ⚠️ 3 further completed run(s) recorded but NOT counted: the tree was dirty…
+ *     No file has failed in any recorded clean completed run.
+ *
+ * Every sentence individually true; the composite answers "have we had any
+ * reds?" with a confident no. The exclusion REASON was reported and the
+ * exclusion's CONTENTS were not — which is the same rule one remove out, because
+ * "No file has failed" is what a person reads and the qualifier is doing
+ * load-bearing work the eye skips.
+ */
+test('#746 when EVERY red is unattributable, the reader still reveals reds exist', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger746-hidden-'));
+  const ledger = path.join(dir, 'ledger.jsonl');
+  const clean = { startCommit: 'aaaaaaa', startDirty: false, endCommit: 'aaaaaaa', endDirty: false };
+  fs.writeFileSync(ledger, [
+    JSON.stringify({ at: '2026-08-09T14:00:00.000Z', scope: 'full', verdict: 'green', failed: [], ...clean }),
+    // the only red on record, and it is excluded from the count
+    JSON.stringify({
+      at: '2026-08-09T14:29:57.325Z', scope: 'full', verdict: 'red', failed: [], startCommit: null, startDirty: null, endCommit: null, endDirty: null,
+    }),
+  ].join('\n') + '\n');
+
+  const { stdout } = await run(process.execPath, [path.join(ROOT, 'scripts', 'verdict-report.mjs')], {
+    env: { ...process.env, SCRUM_VERDICT_LEDGER: ledger },
+  });
+  assert.match(stdout, /1 of them RED/,
+    'a red that exists must be visible even when it cannot be counted');
+  assert.match(stdout, /Excluded from the count, not from the record/,
+    'and the distinction must be stated, because exclusion is not deletion');
+});
+
+test('#746 the uncounted line is informative when there is NO bad news either', async () => {
+  // Anti-vacuity for the test above: a line that only appears when reds exist
+  // teaches the reader nothing about the case where none do.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger746-nored-'));
+  const ledger = path.join(dir, 'ledger.jsonl');
+  fs.writeFileSync(ledger, `${JSON.stringify({
+    at: '2026-08-09T14:00:00.000Z', scope: 'full', verdict: 'green', failed: [], startDirty: true,
+  })}\n`);
+  const { stdout } = await run(process.execPath, [path.join(ROOT, 'scripts', 'verdict-report.mjs')], {
+    env: { ...process.env, SCRUM_VERDICT_LEDGER: ledger },
+  });
+  assert.match(stdout, /none of them red/, 'silence about reds is not the same as saying there are none');
+});
+
+/**
+ * ⚠️ "Could not open" is not "does not exist". A directory at the ledger path
+ * produced "No ledger file yet — nothing has been recorded", which aims the
+ * reader at the hook when the answer is at the path. Only ENOENT supports the
+ * missing claim.
+ */
+test('#746 an unreadable ledger reports the READ ERROR, not "missing" or "empty"', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger746-unreadable-'));
+  const asDirectory = path.join(dir, 'ledger.jsonl');
+  fs.mkdirSync(asDirectory);
+
+  const { readError, missing } = readLedger(asDirectory);
+  assert.equal(missing, false, 'the path exists — it is simply not a readable file');
+  assert.ok(readError, `the error must be carried, got ${JSON.stringify(readError)}`);
+
+  const { stdout } = await run(process.execPath, [path.join(ROOT, 'scripts', 'verdict-report.mjs')], {
+    env: { ...process.env, SCRUM_VERDICT_LEDGER: asDirectory },
+  });
+  assert.match(stdout, /could not be READ/, 'the reader must say it could not read the file');
+  assert.doesNotMatch(stdout, /No ledger file yet|The ledger is empty/,
+    'and must not claim absence or emptiness for a path it simply could not open');
+});
+
 test('#746 a missing ledger and an empty one are different claims', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger746-missing-'));
   const absent = await run(process.execPath, [path.join(ROOT, 'scripts', 'verdict-report.mjs')], {
