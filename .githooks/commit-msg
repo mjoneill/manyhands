@@ -12,18 +12,39 @@
 # exact signature of a seat committing under the human fallback (cea6597).
 # A human commit carries no seat trailer, so it is never evaluated.
 
+# ⚠️ #751 phase 2 — THIS RAIL HAD GONE INERT AND NOTHING SAID SO.
+#
+# It asked two questions of the wrong thing — a retired DOMAIN, in both the
+# author ident and the trailer. Every seat trailer in this repository reads
+# `Co-Authored-By: <Seat> <noreply@anthropic.com>`, which never matched, so the
+# rail's own target case — human author, seat trailer — passed straight through.
+# Measured 2026-08-09; found only because a neighbouring change forced the file
+# open. A guard keyed to a SPELLING dies when the spelling changes; a guard
+# keyed to the PROPERTY survives it.
+#
+# ⇒ Now: is the AUTHOR a seat (shared list, same predicate as pre-commit), and
+#   does the trailer name a seat BY NAME, whatever address it carries?
+HOOKDIR=$(dirname "$0")
+if [ ! -r "$HOOKDIR/seat-identities.sh" ]; then
+  echo "commit-msg (#596): cannot read $HOOKDIR/seat-identities.sh — refusing rather" >&2
+  echo "  than guessing what a seat identity is." >&2
+  exit 1
+fi
+. "$HOOKDIR/seat-identities.sh"
+
+trailer_names_a_seat "$1" || exit 0   # no seat trailer — an ordinary commit
+
 # Both slots: an amend preserves the author but resets the committer from
 # config, so a half-stamped commit disagrees with its trailer in the
 # committer slot only.
 for slot in GIT_AUTHOR_IDENT GIT_COMMITTER_IDENT; do
-  ident=$(git var "$slot" 2>/dev/null)
-  case "$ident" in
-    *"@manyhands.invalid>"*) continue ;;
-  esac
-  if grep -qi '^Co-Authored-By:.*@manyhands\.invalid' "$1"; then
-    echo "commit-msg (#596): identity and trailer disagree — a seat trailer under a human identity." >&2
-    echo "  $slot: $ident" >&2
-    echo "  stamp your seat:  git -c user.name='<Seat>' -c user.email='<seat>@manyhands.invalid' commit ..." >&2
+  who=$(seat_ident_of "$(git var "$slot" 2>/dev/null)")
+  if ! seat_ident_matches "$who"; then
+    echo "commit-msg (#596): identity and trailer disagree — a seat trailer under a non-seat identity." >&2
+    echo "  $slot: $who" >&2
+    echo "  accepted seat identities:" >&2
+    printf '    %s\n' "$SEAT_IDENTS" >&2
+    echo "  stamp your seat:  git -c user.name='<Seat>' -c user.email='<seat address>' commit ..." >&2
     exit 1
   fi
 done

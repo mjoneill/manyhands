@@ -20,6 +20,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HOOK = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '.githooks', 'pre-commit');
+const SEATS = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '.githooks', 'seat-identities.sh');
 
 // A clean env with NO agent markers — the human-terminal baseline.
 function baseEnv() {
@@ -39,6 +40,11 @@ function makeRepo() {
   fs.mkdirSync(path.join(dir, '.githooks'));
   fs.copyFileSync(HOOK, path.join(dir, '.githooks', 'pre-commit'));
   fs.chmodSync(path.join(dir, '.githooks', 'pre-commit'), 0o755);
+  // #751 phase 2 — both rails source their seat list from one file. A fixture
+  // without it exercises the FAIL-CLOSED path (which has its own test below),
+  // not the rule under test.
+  fs.copyFileSync(SEATS, path.join(dir, '.githooks', 'seat-identities.sh'));
+  fs.chmodSync(path.join(dir, '.githooks', 'seat-identities.sh'), 0o755);
   // The dispatcher shim, exactly as installed in the live tree.
   fs.writeFileSync(path.join(dir, '.git', 'hooks', 'pre-commit'),
     '#!/bin/sh\nexec "$(git rev-parse --show-toplevel)/.githooks/pre-commit" "$@"\n');
@@ -61,6 +67,25 @@ function tryCommit({ git, dir }, { env, stamp }) {
   }
 }
 
+const SYNTHETIC = 'synthetic-owner';   // never a real local part
+
+// #751 phase 2 — a VALID identity, derived from the shipped hook.
+//
+// After tightening, only the configured seats are valid: a synthetic name like
+// `Ada` is refused no matter what address it carries, because the rule matches
+// whole (name, address) PAIRS. So these tests can no longer invent a seat.
+//
+// ⇒ They derive one instead. `seatIdents()`/`parseShape()` (below — function
+//   declarations, so hoisted) read the production hook, and the local part is
+//   synthetic. The file therefore carries NO literal seat name of its own,
+//   which is the property that kept real identities out of tracked content.
+function aSeat(index = 0) {
+  const shapes = seatIdents().map(parseShape).filter(Boolean);
+  assert.ok(shapes.length > index, 'the hook must configure a seat to derive from');
+  const s = shapes[index];
+  return { name: s.name, email: `${SYNTHETIC}+${s.tag}@${s.domain}` };
+}
+
 test('agent env + default human identity → REFUSED, naming the fix', () => {
   const repo = makeRepo();
   const r = tryCommit(repo, { env: { ...baseEnv(), CLAUDECODE: '1' } });
@@ -79,7 +104,7 @@ test('agent env + seat identity → PASSES (a correctly stamped commit is never 
   const repo = makeRepo();
   const r = tryCommit(repo, {
     env: { ...baseEnv(), CLAUDECODE: '1' },
-    stamp: { name: 'Ada', email: 'ada@manyhands.invalid' },
+    stamp: aSeat(),
   });
   assert.equal(r.ok, true, `stamped agent commit must pass: ${r.stderr ?? ''}`);
 });
@@ -121,7 +146,7 @@ function tryCommitMsg({ git, dir }, { message, stamp }) {
 test('artifact key: human author + seat trailer → REFUSED, with no env marker at all', () => {
   const repo = makeRepo();
   installMsgHook(repo.dir);
-  const r = tryCommitMsg(repo, { message: 'work\n\nCo-Authored-By: Ada <ada@manyhands.invalid>' });
+  const r = tryCommitMsg(repo, { message: `work\n\nCo-Authored-By: ${aSeat().name} <${aSeat().email}>` });
   assert.equal(r.ok, false, 'author/trailer disagreement must refuse regardless of env');
   assert.match(r.stderr, /identity and trailer disagree/);
 });
@@ -130,8 +155,8 @@ test('artifact key: seat author + seat trailer → PASSES (consistent stamp)', (
   const repo = makeRepo();
   installMsgHook(repo.dir);
   const r = tryCommitMsg(repo, {
-    message: 'work\n\nCo-Authored-By: Ada <ada@manyhands.invalid>',
-    stamp: { name: 'Ada', email: 'ada@manyhands.invalid' },
+    message: `work\n\nCo-Authored-By: ${aSeat().name} <${aSeat().email}>`,
+    stamp: aSeat(),
   });
   assert.equal(r.ok, true, `consistent seat commit must pass: ${r.stderr ?? ''}`);
 });
@@ -154,7 +179,7 @@ test('committer slot is checked too: agent env + seat AUTHOR but default COMMITT
   try {
     repo.git(['commit', '-q', '-m', 'probe'], {
       ...baseEnv(), CLAUDECODE: '1',
-      GIT_AUTHOR_NAME: 'Ada', GIT_AUTHOR_EMAIL: 'ada@manyhands.invalid',
+      GIT_AUTHOR_NAME: aSeat().name, GIT_AUTHOR_EMAIL: aSeat().email,
       // committer falls back to the repo's default human config
     });
   } catch { refused = true; }
@@ -170,7 +195,7 @@ test('the --author escape is closed: agent env + --author seat flag + default co
   repo.git(['add', 'f.txt'], baseEnv());
   let refused = false;
   try {
-    repo.git(['commit', '-q', '--author=Ada <ada@manyhands.invalid>', '-m', 'probe'],
+    repo.git(['commit', '-q', `--author=${aSeat().name} <${aSeat().email}>`, '-m', 'probe'],
       { ...baseEnv(), CLAUDECODE: '1' });
   } catch { refused = true; }
   assert.equal(refused, true, '--author alone must not satisfy the rail');
@@ -194,9 +219,9 @@ test('the --author escape is closed: agent env + --author seat flag + default co
 
 /** The shipped SEAT_IDENTS entries, read from the production hook. */
 function seatIdents() {
-  const src = fs.readFileSync(HOOK, 'utf8');
+  const src = fs.readFileSync(SEATS, 'utf8');
   const m = src.match(/SEAT_IDENTS='([^']*)'/);
-  assert.ok(m, 'the hook must define SEAT_IDENTS — if this fails the rail was renamed or removed');
+  assert.ok(m, 'seat-identities.sh must define SEAT_IDENTS — if this fails the rail was renamed or removed');
   return m[1].split('\n').filter(Boolean);
 }
 
@@ -207,14 +232,13 @@ function parseShape(entry) {
   return m ? { name: m[1], tag: m[2], domain: m[3] } : null;
 }
 
-const SYNTHETIC = 'synthetic-owner';   // never a real local part
 
-test('#751 the shipped hook carries the legacy wildcard AND plus-address shapes', () => {
+test('#751 the shipped hook carries ONLY the plus-address shapes — legacy is gone', () => {
   const entries = seatIdents();
   const legacy = entries.filter((e) => e.includes('@manyhands.invalid'));
   const shapes = entries.map(parseShape).filter(Boolean);
-  assert.equal(legacy.length, 1,
-    `phase 1 is additive: exactly one legacy wildcard entry, got ${JSON.stringify(legacy)}`);
+  assert.equal(legacy.length, 0,
+    `phase 2 tightened: the legacy wildcard is GONE, got ${JSON.stringify(legacy)}`);
   // ⚠️ EXACTLY three, never `>= 3`. A lower bound makes exception growth
   // SELF-APPROVING: add a fourth configured seat and every case below silently
   // adopts it, so the inventory grows and nothing anywhere goes red. That is
@@ -325,3 +349,37 @@ test('#751 the COMMITTER slot is checked against the shapes too, not just the au
   } catch { refused = true; }
   assert.equal(refused, true, 'seat author + human committer must refuse at the new addresses');
 });
+
+/**
+ * #751 phase 2 — BOTH rails FAIL CLOSED when the shared seat list is missing.
+ *
+ * The list moved into one file so the two detectors cannot disagree about what
+ * a seat is — they had disagreed, and one had been inert for months. But a
+ * shared file is a new dependency, and the failure mode of a missing dependency
+ * is the one this board keeps finding: a guard that cannot load its own rule
+ * must not wave commits through.
+ *
+ * ⚠️ Discovered by accident and then pinned deliberately: the first version of
+ * this suite's fixture copied only the hook, so every case exercised the
+ * fail-closed path instead of the rule. 11 tests went red and the CAUSE was the
+ * guard working. An incomplete fixture and a broken rail look identical from
+ * the outside — so the fail-closed path gets its own test rather than being
+ * something the suite hits by mistake.
+ */
+for (const rail of ['pre-commit', 'commit-msg']) {
+  test(`#751 ${rail} FAILS CLOSED when seat-identities.sh is unreadable`, () => {
+    const repo = makeRepo();
+    installMsgHook(repo.dir);
+    fs.rmSync(path.join(repo.dir, '.githooks', 'seat-identities.sh'));
+    const r = rail === 'pre-commit'
+      ? tryCommit(repo, { env: { ...baseEnv(), CLAUDECODE: '1' }, stamp: aSeat() })
+      : tryCommitMsg(repo, {
+        message: `work\n\nCo-Authored-By: ${aSeat().name} <${aSeat().email}>`,
+        stamp: aSeat(),
+      });
+    assert.equal(r.ok, false,
+      `${rail} must refuse when it cannot read the seat list — an unreadable list is not an empty one`);
+    assert.match(r.stderr, /seat-identities\.sh/,
+      'and it must name the file it could not read, not fail anonymously');
+  });
+}

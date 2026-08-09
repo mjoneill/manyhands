@@ -1,8 +1,8 @@
 #!/bin/sh
 # #596 agent-identity rail.
 #
-# An agent session must commit under a seat identity (*@manyhands.invalid),
-# never the tree's human fallback config. Two seats fell back to the human
+# An agent session must commit under a seat identity, never the tree's human
+# fallback config. Two seats fell back to the human
 # identity within one hour on 2026-08-04 — with the failure mode already
 # named, publicly, by both. Per-commit stamping is a note; this is the rail.
 #
@@ -39,26 +39,30 @@
 #   the push gate will still refuse. Cheap and early here; exact at the
 #   boundary that actually publishes.
 #
-# ⚠️ PHASE 1 IS STRICTLY ADDITIVE. The legacy rule is kept EXACTLY as it was —
-# any `*@manyhands.invalid` — rather than narrowed to the three real seats.
-# Two reasons, and the second is the one that would have bitten:
+# ⚠️ PHASE 2 — TIGHTENED 2026-08-09. The legacy `*@manyhands.invalid` entry is
+# GONE. All three seats stated their new identity in the commons before this
+# landed, so nothing is half-migrated: there is no per-seat config to switch,
+# and each seat's first tagged commit IS its switch.
 #
-#   1. the bootstrap commit (the one editing this file) must pass under a
-#      current `.invalid` identity, and so must every seat mid-migration;
-#   2. this rail's own suite stamps a SYNTHETIC seat, `Ada <ada@…invalid>`,
-#      precisely so the test file need not carry real seat names. An exact
-#      three-seat list refuses Ada — measured: `agent env + seat identity →
-#      PASSES` went red. Narrowing here would have forced real seat names into
-#      a tracked test file, which is the blast-radius objection that killed
-#      the hashed-digest option; it applies to narrowing just as much.
+# Phase 1 kept the legacy rule for two reasons, and both are now spent: the
+# bootstrap commit needed it, and this rail's suite stamped a synthetic seat
+# whose name the tightened list cannot accept. That suite now DERIVES a valid
+# identity from the list below rather than hardcoding one — so the test file
+# still carries no seat name of its own, and a fourth seat cannot be added
+# without the inventory assertion going red.
 #
-# ⇒ Phase 2 (tightening) removes the legacy line and updates that suite in the
-#   same commit, once every seat has switched. Until then this is exactly
-#   today's behaviour PLUS the new shapes — no regression, no new looseness.
-SEAT_IDENTS='* <*@manyhands.invalid>
-Wren <*+wren@gmail.com>
-Indigo <*+indigo@gmail.com>
-Minnie <*+minnie@gmail.com>'
+# ⇒ From here, a `.invalid` identity is REFUSED. That is the point: keeping both
+#   forever would leave the silent regression available permanently, with this
+#   hook still green.
+HOOKDIR=$(dirname "$0")
+if [ ! -r "$HOOKDIR/seat-identities.sh" ]; then
+  # Fail CLOSED. A rail that cannot load its own definition of a seat must not
+  # wave commits through: an unreadable list is not an empty one.
+  echo "pre-commit (#596): cannot read $HOOKDIR/seat-identities.sh — refusing rather" >&2
+  echo "  than guessing what a seat identity is." >&2
+  exit 1
+fi
+. "$HOOKDIR/seat-identities.sh"
 
 # BOTH identity slots must be seats. An --amend preserves the author and
 # silently resets the committer from config — exactly the half-checked shape
@@ -66,27 +70,12 @@ Minnie <*+minnie@gmail.com>'
 # correctly stamped commit passes untouched.
 for slot in GIT_AUTHOR_IDENT GIT_COMMITTER_IDENT; do
   # `git var`, never `git config user.*`: GIT_AUTHOR_* environment variables
-  # override config, so reading config would validate a value the commit is
-  # not going to use. This asks git what it will actually write.
-  ident=$(git var "$slot" 2>/dev/null)
-  # Strip ONLY the trailing " <unixtime> <tz>" git appends. Anchored on purpose:
-  # `s/> .*/>/` also works, but only because git guarantees an ident holds
-  # exactly one <...> group — a fact living in git's source rather than in the
-  # line you are reading.
-  who=$(printf '%s' "$ident" | sed 's/ [0-9][0-9]* [-+][0-9][0-9]*$//')
-  ok=0
-  IFS='
-'
-  for seat in $SEAT_IDENTS; do
-    # Glob match; entries without a wildcard compare exactly. WHOLE (name,
-    # address) pairs, so one seat's name against another seat's address — every
-    # part legitimate, the combination not — is refused here rather than at push.
-    case "$who" in $seat) ok=1 ;; esac
-  done
-  unset IFS
-  if [ "$ok" -ne 1 ]; then
+  # override config, so reading config would validate a value the commit is not
+  # going to use. This asks git what it will actually write.
+  who=$(seat_ident_of "$(git var "$slot" 2>/dev/null)")
+  if ! seat_ident_matches "$who"; then
     echo "pre-commit (#596): agent session committing without a seat identity." >&2
-    echo "  $slot: $ident" >&2
+    echo "  $slot: $who" >&2
     echo "  accepted seat identities:" >&2
     printf '    %s\n' "$SEAT_IDENTS" >&2
     echo "  stamp your seat:  git -c user.name='<Seat>' -c user.email='<seat address>' commit ..." >&2
