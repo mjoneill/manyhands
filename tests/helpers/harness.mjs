@@ -474,9 +474,25 @@ export async function withBrowserServer(body, {
     throw e;
   }
 
+  // #744 — a test that RESTARTS its server mid-body (roster-editor's #506 proves
+  // a roster edit goes live only after a restart). If the body reassigned its own
+  // `server` binding, teardown below would stop the ALREADY-STOPPED original and
+  // leave the replacement running — this helper's own defect, reintroduced by it.
+  // So the helper owns the generations: `ctx.server` is reassigned here, and the
+  // teardown stops whatever is CURRENT.
+  const ctx = {
+    browser,
+    server,
+    async restart(overrides) {
+      await ctx.server.stop();
+      ctx.server = await _startServer({ ...serverOpts, ...(overrides || {}) });
+      return ctx.server;
+    },
+  };
+
   let bodyErr;
   try {
-    return await body({ server, browser });
+    return await body(ctx);
   } catch (e) {
     bodyErr = e;
     throw e;
@@ -488,6 +504,7 @@ export async function withBrowserServer(body, {
     }
     // Unconditional, and last: reachable from the clean path, the body-throw
     // path, and the close-timeout path alike.
-    try { await server.stop(); } catch (e) { if (!bodyErr) throw e; }
+    // #744 — stop whatever generation is CURRENT, not the one we started with.
+    try { await ctx.server.stop(); } catch (e) { if (!bodyErr) throw e; }
   }
 }

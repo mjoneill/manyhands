@@ -183,3 +183,57 @@ test('#736 INTEGRATION: real puppeteer + real server.js — it works, and it lea
     `${baseUrl} still answers after teardown — the server.js child was orphaned, ` +
     'which is precisely the leak this helper exists to prevent');
 });
+
+/**
+ * #744 — a test that RESTARTS its server mid-body.
+ *
+ * roster-editor's #506 case stops the server and starts a replacement, to prove a
+ * roster edit is not live before a restart and is live after. Under the plain
+ * helper `server` is a callback parameter, so reassigning it inside the body
+ * rebinds a local and changes nothing about what teardown holds: the helper would
+ * stop the ALREADY-STOPPED original and leave the replacement running. That is
+ * #736's own defect reintroduced by #736's fix, in the file that produced the
+ * 6h40m hang.
+ *
+ * So the helper owns the restart. `ctx.server` is reassigned by the helper, and
+ * teardown stops whatever is CURRENT rather than whatever was first.
+ */
+test('#744 restart() replaces the server, and teardown stops the CURRENT one', async () => {
+  const made = [];
+  const mk = () => { const s = { id: made.length, stopped: 0, baseUrl: `http://127.0.0.1:${9000 + made.length}` }; s.stop = async () => { s.stopped += 1; }; made.push(s); return s; };
+  let seenAfter;
+
+  await withBrowserServer(async (ctx) => {
+    assert.equal(ctx.server.id, 0);
+    await ctx.restart();
+    assert.equal(ctx.server.id, 1, 'ctx.server must point at the REPLACEMENT after restart');
+    seenAfter = ctx.server.baseUrl;
+  }, { _startServer: async () => mk(), _launch: async () => fakeBrowser() });
+
+  assert.equal(made.length, 2, 'restart starts exactly one replacement');
+  assert.equal(made[0].stopped, 1, 'the original is stopped by restart()');
+  assert.equal(made[1].stopped, 1,
+    'THE #744 HAZARD: teardown must stop the REPLACEMENT, not re-stop the original');
+  assert.match(seenAfter, /9001/, 'the body sees the new baseUrl, so it can navigate to it');
+});
+
+test('#744 the original is stopped exactly once, not twice', async () => {
+  // A helper that tore down `first` at the end would show stopped===2 here while
+  // the replacement leaked — green-looking teardown, orphaned server.
+  const made = [];
+  const mk = () => { const s = { id: made.length, stopped: 0, baseUrl: 'http://127.0.0.1:0' }; s.stop = async () => { s.stopped += 1; }; made.push(s); return s; };
+  await withBrowserServer(async (ctx) => { await ctx.restart(); },
+    { _startServer: async () => mk(), _launch: async () => fakeBrowser() });
+  assert.deepEqual(made.map((s) => s.stopped), [1, 1],
+    'each generation stopped once — no double-stop, no orphan');
+});
+
+test('#744 a body that throws AFTER a restart still tears down the replacement', async () => {
+  const made = [];
+  const mk = () => { const s = { id: made.length, stopped: 0, baseUrl: 'http://127.0.0.1:0' }; s.stop = async () => { s.stopped += 1; }; made.push(s); return s; };
+  await assert.rejects(
+    withBrowserServer(async (ctx) => { await ctx.restart(); throw new Error('assertion failed'); },
+      { _startServer: async () => mk(), _launch: async () => fakeBrowser() }),
+    /assertion failed/);
+  assert.equal(made[1].stopped, 1, 'the failure path must not leak the replacement either');
+});

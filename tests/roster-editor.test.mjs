@@ -31,7 +31,6 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import puppeteer from 'puppeteer';
 import { startRestServer, makeBoardFixture, withBrowserServer } from './helpers/harness.mjs';
 
 const EDITOR = '[data-roster-editor]';
@@ -180,11 +179,10 @@ test('#506 add + remove through the UI persist, and a restart makes the change l
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'roster-ed-'));
   const rosterFile = synthRoster(dir);
   const env = { SCRUM_ROSTER_FILE: rosterFile };
-  let server = await startRestServer({ board: makeBoardFixture(), env });
-  const browser = await puppeteer.launch({ headless: 'new' });
   try {
-    const page = await browser.newPage();
-    await page.goto(server.baseUrl + '/settings.html', { waitUntil: 'networkidle0' });
+    await withBrowserServer(async (ctx) => {
+    const page = await ctx.browser.newPage();
+    await page.goto(ctx.server.baseUrl + '/settings.html', { waitUntil: 'networkidle0' });
 
     // ADD a seat "koru".
     const added = await page.evaluate(() => {
@@ -224,15 +222,16 @@ test('#506 add + remove through the UI persist, and a restart makes the change l
         'the new seat is live WITHOUT a restart — then the UI copy is wrong and the mid-session-reload card just got built by accident');
     }
     // …and live after one.
-    await server.stop();
-    server = await startRestServer({ board: makeBoardFixture(), env });
-    await page.goto(server.baseUrl + '/settings.html', { waitUntil: 'networkidle0' });
+    // #744 — the helper owns both generations. Reassigning a local `server`
+    // here would leave teardown holding the STOPPED original and orphan the
+    // replacement, which is #736's defect reintroduced by its own fix.
+    await ctx.restart();
+    await page.goto(ctx.server.baseUrl + '/settings.html', { waitUntil: 'networkidle0' });
     const liveAfter = await page.evaluate(() => JSON.stringify(globalThis.__SCRUM_ROSTER__ || {}));
     assert.ok(liveAfter.includes('Koru'), 'after restart the added seat must be live');
     assert.ok(!liveAfter.includes('Quillemette'), 'after restart the removed seat must be gone');
+    }, { server: { board: makeBoardFixture(), env }, launch: { headless: 'new' } });
   } finally {
-    await browser.close();
-    await server.stop();
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
