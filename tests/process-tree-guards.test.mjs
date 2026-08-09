@@ -30,7 +30,8 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { groupsToSignal, signalGroups } from '../scripts/run-process-tree.mjs';
+import { execFileSync } from 'node:child_process';
+import { groupsToSignal, signalGroups, currentSelfGroup } from '../scripts/run-process-tree.mjs';
 
 /** ps-style rows: the group is live and contains a captured pid. */
 const rows = (...pgids) => pgids.map((pgid, i) => ({ pid: 1000 + i, ppid: 1, pgid }));
@@ -122,4 +123,65 @@ test('#745 signalGroups REVALIDATES — 1, 0, negatives and non-integers never r
   signalGroups([1, 0, -5, 1.5, NaN, '7', null, 4242], (t, s) => calls.push([t, s]));
   assert.deepEqual(calls, [[-4242, 'SIGKILL']],
     'the exported primitive must be safe on its own, not safe because of who calls it');
+});
+
+/**
+ * #747 — the missing witness: nothing proved a GOOD self-pgid is ever produced.
+ *
+ * Every test above passes a synthetic selfPgid (9999, 5150, SELF). They prove the
+ * consumer behaves correctly GIVEN a value. `selfGroup(table())` — the thing that
+ * actually supplies it in production — was unexported and unasserted.
+ *
+ * ⚠️ That matters precisely BECAUSE the guard fails closed. If `selfGroup` ever
+ * returns null, `groupsToSignal` correctly signals nothing, the per-pid loop still
+ * runs, and the run still LOOKS terminated — right up until the case the group
+ * kill exists for: a process that appears between ps scans, inside the group,
+ * never captured in the pid list. And nothing would catch it:
+ *
+ *     group kill removed, pid kill kept → 17/17 PASS
+ *
+ * The named input that breaks it is ordinary — any edit to `table()`'s parse or
+ * filter that drops the caller's own row. So this asserts against the REAL process
+ * table and an independent reading of our own group, with no fixture anywhere.
+ */
+test('#747 selfGroup() on the REAL table returns our actual process group', () => {
+  const mine = currentSelfGroup();
+  // Independent instrument: ps directly, not the module's own table parse.
+  const viaPs = Number(String(
+    execFileSync('ps', ['-o', 'pgid=', '-p', String(process.pid)])).trim());
+
+  assert.ok(Number.isInteger(viaPs) && viaPs > 1, `ps gave no usable pgid: ${viaPs}`);
+  // Assert the production value directly, so a vanished row FAILS here loudly
+  // rather than being skipped or absorbed by the equality check below.
+  assert.ok(Number.isInteger(mine) && mine > 1,
+    `selfGroup(table()) returned ${String(mine)} — our own row is missing from the ` +
+    'process table, which silently disables the entire group-kill path');
+  assert.equal(mine, viaPs,
+    'the production path must produce the SAME group ps reports. If table() ever ' +
+    'stops including our own row this returns null, the guard fails closed, and ' +
+    'the entire group-kill path switches off while every existing test stays green');
+});
+
+test('#747 the value it produces is one the guard ACCEPTS, not one it rejects', () => {
+  // A witness that only checked "returns a number" would pass while returning
+  // something groupsToSignal discards — fail-closed for a bad reason, which is
+  // indistinguishable from working.
+  const mine = currentSelfGroup();
+  const other = mine + 1;                      // a group that is NOT ours
+  const cur = [{ pid: 1000, ppid: 1, pgid: other }];
+  assert.deepEqual(
+    groupsToSignal({ pids: new Set([1000]), groups: new Set([other]) }, cur, mine),
+    [other],
+    'a real self-pgid must still let OTHER live groups through — otherwise the ' +
+    'guard is disarming termination rather than protecting the runner');
+});
+
+test('#747 ANTI-VACUITY: the guard would reject a broken self-pgid', () => {
+  // If this passed for null too, the test above would prove nothing about the
+  // value's quality — only that groupsToSignal ran.
+  const cur = [{ pid: 1000, ppid: 1, pgid: 4242 }];
+  const capt = { pids: new Set([1000]), groups: new Set([4242]) };
+  assert.deepEqual(groupsToSignal(capt, cur, null), [], 'null must suppress');
+  assert.deepEqual(groupsToSignal(capt, cur, currentSelfGroup()), [4242],
+    'a real one must not');
 });

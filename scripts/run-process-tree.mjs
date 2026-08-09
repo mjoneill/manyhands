@@ -50,6 +50,23 @@ function selfGroup(rows) {
 }
 
 /**
+ * #747 — the production composition, exported so it can be WITNESSED.
+ *
+ * #745 proved the consumer fails closed given a bad value. It did not prove a
+ * good value is ever produced, because this line was unexported and unasserted.
+ * That gap is load-bearing precisely BECAUSE the guard fails closed: if this
+ * returns null the group kill switches off silently, the per-pid loop still runs,
+ * and the run still looks terminated — until a process appears between ps scans
+ * inside the group, which is the only case the group path exists for.
+ *
+ * The ordinary input that breaks it: any edit to `table()`'s parse or filter that
+ * drops the caller's own row.
+ */
+export function currentSelfGroup() {
+  return selfGroup(table());
+}
+
+/**
  * #745 — which captured groups may be signalled.
  *
  * Pure and exported so the guards are pinned by assertion rather than by the
