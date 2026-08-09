@@ -16,19 +16,81 @@
 
 [ -n "$CLAUDECODE" ] || [ -n "$AI_AGENT" ] || exit 0
 
+# #751 — seat identities that GitHub can actually attribute, matched by SHAPE.
+#
+# `*@manyhands.invalid` is RFC 2606 unroutable by design: it can never be
+# verified on any account, so the contribution graph credited nobody and the
+# public signal read "dormant" for a repo three seats ship into daily.
+#
+# ⚠️ SHAPES, NOT ADDRESSES, AND THE REASON IS PUBLICATION. The verified seat
+# addresses are tagged variants of the owner's personal address. Writing them
+# here would put a real-world identity into tracked public content — what the
+# export gate exists to keep out — and shipping it would mean ratifying that
+# into the gate's baseline permanently. The shape carries what this rail
+# actually needs (is this a seat, or a fallback to the human?) and publishes
+# nothing.
+#
+# ⇒ THE SEAM, stated rather than left to inference:
+#     #596 (here, public)   proves the identity is SEAT-SHAPED, at commit time.
+#     #561 (push, private)  proves the exact (name, verified email) PAIR.
+#   A deliberate narrowing of what this hook promises, authorized by the repo
+#   owner 2026-08-09. It is coarser than an exact list ON PURPOSE: a glob
+#   cannot constrain the local-part before the tag, so this accepts identities
+#   the push gate will still refuse. Cheap and early here; exact at the
+#   boundary that actually publishes.
+#
+# ⚠️ PHASE 1 IS STRICTLY ADDITIVE. The legacy rule is kept EXACTLY as it was —
+# any `*@manyhands.invalid` — rather than narrowed to the three real seats.
+# Two reasons, and the second is the one that would have bitten:
+#
+#   1. the bootstrap commit (the one editing this file) must pass under a
+#      current `.invalid` identity, and so must every seat mid-migration;
+#   2. this rail's own suite stamps a SYNTHETIC seat, `Ada <ada@…invalid>`,
+#      precisely so the test file need not carry real seat names. An exact
+#      three-seat list refuses Ada — measured: `agent env + seat identity →
+#      PASSES` went red. Narrowing here would have forced real seat names into
+#      a tracked test file, which is the blast-radius objection that killed
+#      the hashed-digest option; it applies to narrowing just as much.
+#
+# ⇒ Phase 2 (tightening) removes the legacy line and updates that suite in the
+#   same commit, once every seat has switched. Until then this is exactly
+#   today's behaviour PLUS the new shapes — no regression, no new looseness.
+SEAT_IDENTS='* <*@manyhands.invalid>
+Wren <*+wren@gmail.com>
+Indigo <*+indigo@gmail.com>
+Minnie <*+minnie@gmail.com>'
+
 # BOTH identity slots must be seats. An --amend preserves the author and
 # silently resets the committer from config — exactly the half-checked shape
 # that shipped as "amended clean" on 2026-08-04. -c user.* sets both, so a
 # correctly stamped commit passes untouched.
 for slot in GIT_AUTHOR_IDENT GIT_COMMITTER_IDENT; do
+  # `git var`, never `git config user.*`: GIT_AUTHOR_* environment variables
+  # override config, so reading config would validate a value the commit is
+  # not going to use. This asks git what it will actually write.
   ident=$(git var "$slot" 2>/dev/null)
-  case "$ident" in
-    *"@manyhands.invalid>"*) ;;
-    *)
-      echo "pre-commit (#596): agent session committing without a seat identity." >&2
-      echo "  $slot: $ident" >&2
-      echo "  stamp your seat:  git -c user.name='<Seat>' -c user.email='<seat>@manyhands.invalid' commit ..." >&2
-      exit 1 ;;
-  esac
+  # Strip ONLY the trailing " <unixtime> <tz>" git appends. Anchored on purpose:
+  # `s/> .*/>/` also works, but only because git guarantees an ident holds
+  # exactly one <...> group — a fact living in git's source rather than in the
+  # line you are reading.
+  who=$(printf '%s' "$ident" | sed 's/ [0-9][0-9]* [-+][0-9][0-9]*$//')
+  ok=0
+  IFS='
+'
+  for seat in $SEAT_IDENTS; do
+    # Glob match; entries without a wildcard compare exactly. WHOLE (name,
+    # address) pairs, so one seat's name against another seat's address — every
+    # part legitimate, the combination not — is refused here rather than at push.
+    case "$who" in $seat) ok=1 ;; esac
+  done
+  unset IFS
+  if [ "$ok" -ne 1 ]; then
+    echo "pre-commit (#596): agent session committing without a seat identity." >&2
+    echo "  $slot: $ident" >&2
+    echo "  accepted seat identities:" >&2
+    printf '    %s\n' "$SEAT_IDENTS" >&2
+    echo "  stamp your seat:  git -c user.name='<Seat>' -c user.email='<seat address>' commit ..." >&2
+    exit 1
+  fi
 done
 exit 0
