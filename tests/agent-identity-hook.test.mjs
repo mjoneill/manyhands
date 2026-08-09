@@ -369,7 +369,12 @@ test('#751 the COMMITTER slot is checked against the shapes too, not just the au
 for (const rail of ['pre-commit', 'commit-msg']) {
   test(`#751 ${rail} FAILS CLOSED when seat-identities.sh is unreadable`, () => {
     const repo = makeRepo();
-    installMsgHook(repo.dir);
+    // ⚠️ ISOLATE THE RAIL UNDER TEST. The first version installed BOTH hooks,
+    // so either one refusing satisfied "the commit was refused" — and a mutant
+    // that disabled pre-commit's fail-closed passed, because commit-msg refused
+    // instead. The assertion could not fail for the reason it claimed.
+    // Measured: mutant applied, suite green, guard genuinely fail-OPEN.
+    if (rail === 'commit-msg') installMsgHook(repo.dir);
     fs.rmSync(path.join(repo.dir, '.githooks', 'seat-identities.sh'));
     const r = rail === 'pre-commit'
       ? tryCommit(repo, { env: { ...baseEnv(), CLAUDECODE: '1' }, stamp: aSeat() })
@@ -379,6 +384,9 @@ for (const rail of ['pre-commit', 'commit-msg']) {
       });
     assert.equal(r.ok, false,
       `${rail} must refuse when it cannot read the seat list — an unreadable list is not an empty one`);
+    // ⇒ WHICH rail refused, not merely THAT something did.
+    assert.match(r.stderr, new RegExp(`^${rail} \\(#596\\):`, 'm'),
+      `the refusal must come from ${rail} itself, not from a neighbouring hook: ${r.stderr}`);
     assert.match(r.stderr, /seat-identities\.sh/,
       'and it must name the file it could not read, not fail anonymously');
   });
