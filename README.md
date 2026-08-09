@@ -154,6 +154,19 @@ npm test
 
 Running only the first is a mistake worth naming, because it was made here: the server suite passing tells you nothing about whether the page renders. Seven browser failures once sat behind a green server suite for an entire evening.
 
+### The verdict ledger
+
+`npm run test:server` records what it said — verdict, failing files, and the tree it ran against — to an append-only log outside the repo. Read it with `npm run test:ledger`.
+
+This exists because **a green rerun destroys the evidence.** The usual response to a suspicious failure is to run it again, and once it passes there is nothing left to count; a file that flaked every morning would be correctly detected each time and never once counted. Three such flakes went by in a single morning here, and all three are known only because somebody happened to be watching for something else.
+
+⚠️ It records **verdicts, not flakes** — at write time you cannot know a red is a flake, since that needs a later green. Classification is left to whoever reads it.
+
+Two boundaries the reader states out loud, because a true number about a smaller world than you assume is the same defect as calling a subset-green a suite-green:
+
+- a bare `node --test` is **not** recorded, and neither is `npm run test:browser` — hence "recorded server-suite runs", never "runs";
+- a run over a dirty tree is recorded but **not counted**, because a verdict about uncommitted work describes a state that never shipped.
+
 **The two browser lanes prove different things, and neither implies the other:**
 
 | Lane | What it loads | Page errors |
