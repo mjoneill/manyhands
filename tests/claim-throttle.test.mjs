@@ -38,7 +38,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decideThrottle, COOLDOWN_MS } from '../core/claim-throttle.mjs';
+import { decideThrottle, COOLDOWN_MS, THROTTLE_ENV, isThrottleArmed } from '../core/claim-throttle.mjs';
 
 const T = (s) => new Date(Date.parse('2026-08-10T12:00:00.000Z') + s * 1000).toISOString();
 const prev = (actor, s) => ({ actor, at: T(s) });
@@ -129,4 +129,25 @@ test('#755-E ⚠️ IT DOES NOT CLAIM THE TWO ACTIONS ARE THE SAME WORK', () => 
   const d = decideThrottle({ actor: 'bo', previous: prev('ada', 59), now: T(59.5) });
   assert.equal(d.allow, false);
   assert.ok(d.retryAfterSeconds >= 1, 'a refusal must always name a finite, positive wait');
+});
+
+// ── the flag: its own, and armed only on an exact "on" ──────────────────────
+
+test('#755-E ⛔ THE THROTTLE HAS ITS OWN FLAG — it must not ride the gate\'s', () => {
+  // The gate's flag already carries two consequences (its refusal AND the six
+  // work tools). The gate is a candidate for REMOVAL and this is a candidate
+  // for KEEPING, so sharing a flag would make "remove the gate, keep the
+  // throttle" unreachable without a code change — turning an option into a
+  // commitment.
+  assert.equal(THROTTLE_ENV, 'SCRUM_CLAIM_THROTTLE');
+  assert.notEqual(THROTTLE_ENV, 'SCRUM_WORK_GATE');
+});
+
+test('#755-E the flag is OFF unless explicitly "on" — no truthy-by-accident', () => {
+  // A config read that defaults truthy is how a rail arms itself because
+  // somebody exported an empty variable.
+  for (const v of ['true', '1', 'ON', 'On', 'yes', 'enabled', '', ' on', 'on ', undefined]) {
+    assert.equal(isThrottleArmed({ [THROTTLE_ENV]: v }), false, `armed on ${JSON.stringify(v)}`);
+  }
+  assert.equal(isThrottleArmed({ [THROTTLE_ENV]: 'on' }), true);
 });

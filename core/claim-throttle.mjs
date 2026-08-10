@@ -71,6 +71,41 @@ export const COOLDOWN_MS = 60_000;
 export const THROTTLE_REASON = '#755 claim cooldown';
 
 /**
+ * ⛔ ITS OWN FLAG. It must NOT ride the gate's flag.
+ *
+ * That flag already carries two consequences at once (mcp-server.mjs: one
+ * condition arms the gate's refusal AND registers the six work tools). Adding a
+ * third would couple this rail to a mechanism that is currently a candidate for
+ * REMOVAL while this one is a candidate for KEEPING:
+ *
+ *   shared flag ⇒ turning the throttle on also arms the gate
+ *               ⇒ turning the gate off also kills the throttle
+ *               ⇒ "remove the gate, keep the throttle" becomes unreachable
+ *                 without a code change
+ *
+ * ⇒ Separate flags keep every combination reachable by configuration alone,
+ *   which is what makes them decisions rather than commitments. It also keeps
+ *   the two arming acts separately dated and separately named.
+ */
+export const THROTTLE_ENV = 'SCRUM_CLAIM_THROTTLE';
+
+/**
+ * Is the throttle armed? Read ONCE at handler selection, never per request.
+ *
+ * Exact string match, for the same reason the gate uses one: a config read that
+ * defaults truthy — `!== 'off'`, or a bare `Boolean(env)` — is how a rail arms
+ * itself because somebody exported an empty variable.
+ *
+ * ⚠️ FLAG-OFF MEANS NOT INSTALLED. The caller selects the handler at
+ * registration time so that "off" is the ABSENCE of a wrapper, not a branch
+ * inside one. A branch would put the throttle permanently in the request path
+ * and make one boolean the whole story.
+ */
+export function isThrottleArmed(env = process.env) {
+  return env[THROTTLE_ENV] === 'on';
+}
+
+/**
  * May `actor` claim right now?
  *
  * @param {object}   arg
