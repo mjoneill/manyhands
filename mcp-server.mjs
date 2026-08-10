@@ -48,6 +48,10 @@ import { fileURLToPath } from 'node:url';
 import { createChannelScheduler } from './core/channel-scheduler.mjs';
 import { isGateArmed, decideCoveredAction } from './core/work-gate.mjs';
 import { openWorkObjectsAt } from './core/work-store.mjs';
+// #755 slice 2e — the INPUT PATH. Until this import existed, `core/work-tools.mjs`
+// had a green suite and zero callers, so no seat could create a work object and
+// signal 1 was unmeasurable BY CONSTRUCTION rather than merely unmeasured.
+import { workDeclare, workBid, workNobid, workContest, workGrant, workList } from './core/work-tools.mjs';
 import { readConfig } from './channel-config.mjs';
 import { createSeatRegistry } from './core/seat-registry.mjs';
 import { createTokenRingEngine } from './core/token-ring-engine.mjs';
@@ -340,6 +344,76 @@ function buildMcpServer() {
   };
 
   const cardCreateHandler = isGateArmed() ? gatedCardCreate : plainCardCreate;
+
+  // ── #755 slice 2e — Work tools: the INPUT PATH ───────────────────
+  //
+  // ⚠️ Registered ONLY when the gate is armed, and the condition is not a
+  // second read of the flag — it is the SAME selection card_create already
+  // made. `isGateArmed()` is called exactly once in this file (a test asserts
+  // the count), so the tools' presence and the gate's arming cannot drift
+  // apart the way ENFORCED_OPS and the wrapped tool did.
+  //
+  // ⇒ FLAG-OFF MEANS NOT INSTALLED here too: with the gate off there is no
+  //   SCRUM_WORK_STORE, so a declaration would have nowhere to go. A tool that
+  //   accepts a bid it cannot persist is worse than no tool.
+  //
+  // ⚠️ `now` is read HERE and nowhere below. work-auction, work-store and
+  // work-tools all refuse a missing clock on purpose — this adapter is the one
+  // boundary where the wall clock legitimately enters, which is what keeps
+  // DESIGN B (state derived at read time) from decaying back into DESIGN A (a
+  // live timer that a restart silently drops).
+  if (cardCreateHandler === gatedCardCreate) {
+    const withCtx = (fn) => async (args) => jsonResult(fn({ ...args, dir: WORK_STORE_DIR, now: new Date().toISOString() }));
+
+    // The seat key, declared not authenticated — same contract as createdBy.
+    const by = z.string().min(1).describe('REQUIRED — your seat key. Who is answering. Declared, not authenticated.');
+    const id = z.string().min(1).describe('Work object id — short, opaque, and yours to choose (e.g. "w-755-wiring")');
+
+    // ⛔ There is no title, description, or note field on this surface, in any
+    // tool, deliberately. The prose lives on the CARD, which is an
+    // already-guarded surface; a work object is a POINTER. That is what makes
+    // "no PII can reach the work-object log" a structural property rather than
+    // a habit — there is no field for it to arrive in. A test asserts it.
+    mcp.registerTool('work_declare', {
+      description: 'Declare that you intend to do a piece of work, and open a reply window on it. '
+        + 'The other required seats bid, nobid, or contest; silence at replyBy grants it to you. '
+        + 'While your window is open you may not take a covered action (see #755).',
+      inputSchema: {
+        id,
+        by,
+        card: z.number().int().describe('The card shortId this work is about — a pointer, not a description'),
+        required: z.array(z.string()).min(1).describe('Seat keys who should answer. Their silence at replyBy is what grants.'),
+        replyByMinutes: z.number().positive().describe('REQUIRED, no default — how long the window stays open. '
+          + 'A bid without a deadline is not a window, it is an intention that resolves when the bidder decides it has.'),
+      },
+    }, withCtx(workDeclare));
+
+    mcp.registerTool('work_bid', {
+      description: 'Contest by also bidding: you want this work too. Sends the window to arbitration at close.',
+      inputSchema: { id, by },
+    }, withCtx(workBid));
+
+    mcp.registerTool('work_nobid', {
+      description: 'Decline this work. Once every required seat has answered, the window closes early rather than waiting out the clock.',
+      inputSchema: { id, by },
+    }, withCtx(workNobid));
+
+    mcp.registerTool('work_contest', {
+      description: 'Object to the declaration — the work is wrong, already done, or not yours to take. Suspends the grant pending arbitration.',
+      inputSchema: { id, by },
+    }, withCtx(workContest));
+
+    mcp.registerTool('work_grant', {
+      description: 'Record an explicit grant, resolving a contested window.',
+      inputSchema: { id, by, to: z.string().min(1).describe('Seat key the work is granted to') },
+    }, withCtx(workGrant));
+
+    mcp.registerTool('work_list', {
+      description: 'What is in play and what has settled. Both DERIVED at read time from the transition log — '
+        + 'nothing is stored, so a restart changes nothing.',
+      inputSchema: {},
+    }, withCtx(workList));
+  }
 
   // ── Card tools ───────────────────────────────────────────────────
   mcp.registerTool('card_create', {
