@@ -41,7 +41,7 @@
  *    without a flipper, which the card names as a precondition.
  */
 
-import { resolve, dirname, relative, sep } from 'node:path';
+import { resolve, dirname, relative, sep, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stateAt, STATES } from './work-auction.mjs';
 
@@ -87,6 +87,21 @@ export function isGateArmed(env = process.env, root = REPO_ROOT) {
   // why sprint-review's --events has no default either.
   const store = env[STORE_ENV];
   if (!store) return false;
+
+  // ⛔ ABSOLUTE ONLY, and this closes a seam found in review.
+  //
+  //   isGateArmed        → insideRepo(p, REPO_ROOT)   resolves vs the REPO ROOT
+  //   openWorkObjectsAt  → join(dir, FILE)            resolves vs the process CWD
+  //
+  // For a RELATIVE path those are the same string meaning two different
+  // directories. They coincide today only because the launch agent's
+  // WorkingDirectory happens to equal the repo root — and "happens to" is the
+  // defect. It is #764's `+` vs `%20` shape: two correct conventions, one
+  // seam, invisible until the bases diverge.
+  //
+  // ⇒ Requiring an absolute path means no string can mean two places, so the
+  //   guard and the reader cannot disagree about what was checked.
+  if (!isAbsolute(store)) return false;
 
   // ⛔ And it may not live where we publish from. A .gitignore entry is a
   // check — one `git add -f` and it is back. This is the rail.

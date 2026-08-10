@@ -255,3 +255,25 @@ test('#755-2c ⚠️ defence in depth: work-objects/ is gitignored too', () => {
   const ignore = readFileSync(new URL('../.gitignore', import.meta.url), 'utf8');
   assert.match(ignore, /^work-objects\/?$/m);
 });
+
+test('#755-2c ⛔ a RELATIVE store path is refused — two resolvers, two bases, one string', () => {
+  // The seam, found in review:
+  //   isGateArmed → insideRepo(p, REPO_ROOT)      resolves against the REPO ROOT
+  //   openWorkObjectsAt → join(dir, FILE)         resolves against the process CWD
+  //
+  // For a relative SCRUM_WORK_STORE those are the same string meaning two
+  // different directories. They coincide today only because the launch agent's
+  // WorkingDirectory happens to equal the repo root — and "happens to" is the
+  // whole defect. Same shape as #764's `+` vs `%20`: two correct conventions,
+  // one seam, invisible until the bases diverge.
+  //
+  // ⇒ Refusing a non-absolute path means no string can mean two places.
+  for (const rel of ['work-objects', './work-objects', '../elsewhere/work', 'a/b/c']) {
+    assert.equal(
+      isGateArmed({ SCRUM_WORK_GATE: 'on', SCRUM_WORK_STORE: rel }),
+      false,
+      `armed on relative path ${rel}`,
+    );
+  }
+  assert.equal(isGateArmed({ SCRUM_WORK_GATE: 'on', SCRUM_WORK_STORE: '/var/data/work' }), true);
+});
