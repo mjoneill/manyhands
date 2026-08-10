@@ -72,6 +72,7 @@ function append(wo, entry) {
   return {
     id: wo.id,
     sourceMessageId: wo.sourceMessageId,
+    card: wo.card ?? null,
     declaredBy: wo.declaredBy,
     replyBy: wo.replyBy,
     required: wo.required,
@@ -171,8 +172,8 @@ function recordedPhase(wo) {
  * (#455 §3), and it is exactly the discretion the rail exists to remove.
  */
 export function declare(fields) {
-  only(fields, ['id', 'by', 'at', 'replyBy', 'required', 'sourceMessageId'], 'declare');
-  const { id, by = null, at, replyBy, required, sourceMessageId = null } = fields;
+  only(fields, ['id', 'by', 'at', 'replyBy', 'required', 'sourceMessageId', 'card'], 'declare');
+  const { id, by = null, at, replyBy, required, sourceMessageId = null, card = null } = fields;
   if (!id) throw new Error('declare: id is required');
   if (!at) throw new Error('declare: at is required');
   if (!replyBy) throw new Error('declare: replyBy is required');
@@ -181,6 +182,11 @@ export function declare(fields) {
   const wo = {
     id,
     sourceMessageId,
+    // #755 slice 2e — the POINTER, and the only thing a work object says about
+    // WHAT it is for. No title, no description: the prose lives on the card,
+    // which is already a guarded surface. Optional, because a bid may name a
+    // source message instead when no card exists yet.
+    card,
     declaredBy: by,
     replyBy,
     required: Object.freeze([...required]),

@@ -75,6 +75,7 @@ export function foldLines(text) {
       byId.set(rec.id, {
         id: rec.id,
         sourceMessageId: rec.sourceMessageId ?? null,
+        card: rec.card ?? null,
         declaredBy: rec.declaredBy ?? null,
         replyBy: rec.replyBy,
         required: rec.required ?? [],
@@ -114,6 +115,11 @@ export function appendTransitions(dir, wo) {
       required: wo.required,
       declaredBy: wo.declaredBy ?? null,
       sourceMessageId: wo.sourceMessageId ?? null,
+      // #755 slice 2e — the POINTER. A work object names the card it is about
+      // and carries no description of its own; the prose lives on the card,
+      // which is an already-guarded surface. Persisted here so the pointer
+      // survives a restart like everything else.
+      card: wo.card ?? null,
     }));
   }
   if (!lines.length) return 0;

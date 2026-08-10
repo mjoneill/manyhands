@@ -153,7 +153,7 @@ test('#755-2d ⛔ NO FREE TEXT REACHES DISK — the stored line has only known k
     const rec = JSON.parse(line);
     assert.deepEqual(
       Object.keys(rec).sort(),
-      ['declaredBy', 'id', 'replyBy', 'required', 'seq', 'sourceMessageId', 'transition'].sort(),
+      ['card', 'declaredBy', 'id', 'replyBy', 'required', 'seq', 'sourceMessageId', 'transition'].sort(),
     );
     assert.deepEqual(Object.keys(rec.transition).sort().filter((k) => !['type', 'by', 'at', 'to'].includes(k)), []);
   }
