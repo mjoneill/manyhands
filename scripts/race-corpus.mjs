@@ -198,6 +198,53 @@ if (!rows.length) {
   }
 }
 
+// ── ⭐⭐ PAIRS ARE NOT INCIDENTS ─────────────────────────────────────────────
+//
+// A cluster of n duplicated cards emits up to n(n−1)/2 pairs and is ONE
+// duplication event. #373·#374·#375·#376 is four cards, five pairs, one
+// incident; #717·#718·#719 is three cards, two pairs, one incident.
+//
+// ⚠️ Reporting pairs as if they were races inflates the count by cluster size,
+// and — worse — would give a four-card cluster FIVE votes in any downstream
+// keyed/unkeyed classification while a clean two-card race gets one. The ratio
+// would then be weighted by how big each pile was rather than by how often
+// piles happened.
+//
+// Connected components over the detected pairs. Mechanical, not judgement.
+const parent = new Map();
+const find = (x) => {
+  while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x))); x = parent.get(x); }
+  return x;
+};
+const union = (a, b) => {
+  if (!parent.has(a)) parent.set(a, a);
+  if (!parent.has(b)) parent.set(b, b);
+  const [ra, rb] = [find(a), find(b)];
+  if (ra !== rb) parent.set(ra, rb);
+};
+for (const r of rows) union(r.A.id, r.B.id);
+
+const components = new Map();
+for (const id of parent.keys()) {
+  const root = find(id);
+  if (!components.has(root)) components.set(root, []);
+  components.get(root).push(id);
+}
+const incidents = [...components.values()].map((ids) => ids.sort((a, b) => a - b));
+
+console.log('--- INCIDENTS (connected components; a cluster is ONE event) ---');
+console.log(`pairs: ${rows.length}   incidents: ${incidents.length}`);
+for (const ids of incidents.sort((a, b) => a[0] - b[0])) {
+  // ⚠️ COUNT the pairs actually detected in this component. The first version
+  // printed n(n−1)/2 — the combinatorial MAXIMUM — which is a number nobody
+  // measured. It disagreed with the total by 2 and would have been quoted.
+  const set = new Set(ids);
+  const emitted = rows.filter((r) => set.has(r.A.id) && set.has(r.B.id)).length;
+  const flag = ids.length > 2 ? `  ⚠️ cluster of ${ids.length}, emitted ${emitted} of a possible ${(ids.length * (ids.length - 1)) / 2} pairs` : '';
+  console.log(`  ${ids.map((i) => `#${i}`).join(' + ')}${flag}`);
+}
+console.log('');
+
 // ⚠️ Every count is printed with its members above. A count alone is a pointer
 // to evidence nobody can follow — which is how the number this script exists to
 // replace became unauditable in the first place.
