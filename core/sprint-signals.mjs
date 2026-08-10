@@ -37,6 +37,7 @@
  */
 
 import { stateAt, STATES } from './work-auction.mjs';
+import { ENFORCED_OPS } from './work-gate.mjs';
 
 /**
  * The board-mediated actions a work gate can reach (#755's railable list).
@@ -45,7 +46,7 @@ import { stateAt, STATES } from './work-auction.mjs';
  * a protocol that covered speech would deadlock its own negotiation, since
  * answering a bid would breach the window the bid opened.
  */
-export const COVERED_OPS = Object.freeze(['create', 'update', 'move', 'claim', 'release']);
+export const COVERED_OPS = ENFORCED_OPS;
 
 const unmeasurable = (missingInput, extra = {}) => ({ status: 'unmeasurable', missingInput, fires: false, ...extra });
 
@@ -102,7 +103,7 @@ export function signalOneContestedBids({ bidRecords }) {
  * The excluded count is returned so the filter is auditable rather than a
  * silent narrowing — an instrument's reach must be visible in its output.
  */
-export function signalTwoUngrantedActions({ events, workObjects, seats }) {
+export function signalTwoUngrantedActions({ events, workObjects, seats, enforcedOps = ENFORCED_OPS }) {
   // ⚠️ NULL AND EMPTY ARE DIFFERENT FACTS, and they mean opposite things about
   // the evidence:
   //   null → no store is configured. The instrument does not exist and the
@@ -118,12 +119,12 @@ export function signalTwoUngrantedActions({ events, workObjects, seats }) {
   const storeConfigured = Array.isArray(workObjects);
   const objects = storeConfigured ? workObjects : [];
   const seatSet = new Set(seats);
-  const covered = events.filter((e) => COVERED_OPS.includes(e.op));
+  const covered = events.filter((e) => enforcedOps.includes(e.op));
   const bySeat = covered.filter((e) => e.actor && seatSet.has(e.actor));
   const excludedNonSeat = covered.length - bySeat.length;
 
   if (bySeat.length === 0) {
-    return unmeasurable('no covered actions by a known seat in this period', { excludedNonSeat });
+    return unmeasurable('no covered actions by a known seat in this period', { excludedNonSeat, countedOps: [...enforcedOps] });
   }
 
   const numerator = bySeat.filter((e) => {
@@ -145,7 +146,7 @@ export function signalTwoUngrantedActions({ events, workObjects, seats }) {
     caveat = 'STRUCTURAL ZERO: the work-object store is configured and EMPTY — nothing has been recorded, which is expected while the gate is unarmed. This is not evidence of compliance.';
   }
 
-  return scored(numerator, bySeat.length, { excludedNonSeat, caveat });
+  return scored(numerator, bySeat.length, { excludedNonSeat, caveat, countedOps: [...enforcedOps] });
 }
 
 /**
@@ -178,6 +179,7 @@ export function renderSignal(label, s) {
   }
   const verdict = s.fires ? 'FIRES' : 'does not fire';
   const bits = [`${label}: ${s.numerator} / ${s.denominator}`, verdict];
+  if (s.countedOps) bits.push(`[enforced ops counted: ${s.countedOps.join(', ')}]`);
   if (s.excludedNonSeat) bits.push(`(${s.excludedNonSeat} non-seat action(s) excluded)`);
   if (s.caveat) bits.push(`⚠️ ${s.caveat}`);
   if (s.note) bits.push(s.note);

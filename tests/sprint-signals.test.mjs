@@ -35,6 +35,7 @@ import {
   COVERED_OPS,
   renderSignal,
 } from '../core/sprint-signals.mjs';
+import { ENFORCED_OPS } from '../core/work-gate.mjs';
 
 const ev = (actor, op, kind = 'card', at = '2026-08-10T02:00:00.000Z') => ({
   actor,
@@ -75,7 +76,9 @@ test('#755-signals ⭐⭐ ZERO OVER AN EMPTY DENOMINATOR IS UNMEASURABLE, NOT ZE
 });
 
 test('#755-signals a REAL zero requires a populated denominator', () => {
-  const events = [ev('ada', 'create'), ev('bo', 'update')];
+  // Was create+update expecting 2. `update` is not enforced by the gate, so
+  // counting it WAS the mismatch — corrected to the truth, not loosened.
+  const events = [ev('ada', 'create'), ev('bo', 'create')];
   const s = signalTwoUngrantedActions({ events, workObjects: [], seats: SEATS });
   assert.equal(s.status, 'zero');
   assert.equal(s.numerator, 0);
@@ -90,24 +93,29 @@ test('#755-signals renderSignal NEVER prints a bare number for an unmeasurable s
 
 // ── signal 2: the denominator is real today; the numerator is not ───────────
 
-test('#755-signals signal 2 counts ONLY covered ops in the denominator', () => {
+test('#755-signals signal 2 counts ONLY ENFORCED ops in the denominator', () => {
   const events = [
     ev('ada', 'create'),
-    ev('ada', 'update'),
-    ev('ada', 'post', 'conversation'), // speech is not covered — #646
+    ev('ada', 'update'), // board-mutating, and NOT enforced by the gate
+    ev('ada', 'claim'), // the scenario that exposed the gap — also not enforced
+    ev('ada', 'post', 'conversation'), // speech is never covered — #646
     ev('ada', 'read'),
   ];
   const s = signalTwoUngrantedActions({ events, workObjects: [], seats: SEATS });
-  assert.equal(s.denominator, 2);
+  assert.equal(s.denominator, 1, 'only the enforced op counts');
   assert.ok(COVERED_OPS.includes('create'));
   assert.equal(COVERED_OPS.includes('post'), false, 'you cannot mutex a conversation (#646)');
+  // Claims are already a compare-and-set under a write lock — a second claimant
+  // gets an immediate 409 naming the holder, verified live. A bid window on top
+  // of that would be strictly weaker and about twenty minutes slower.
+  assert.equal(COVERED_OPS.includes('claim'), false, 'claims are atomic already');
 });
 
 test('#755-signals ⚠️ HUMAN ACTIONS ARE EXCLUDED FROM THE DENOMINATOR, and the exclusion is printed', () => {
   // The gate measures SEATS. A human's card edits would dilute the rate and
   // make the rail look better-obeyed than it is. The excluded count is
   // reported so the filter itself is auditable.
-  const events = [ev('ada', 'create'), ev(null, 'create'), ev(undefined, 'update'), ev('stranger', 'create')];
+  const events = [ev('ada', 'create'), ev(null, 'create'), ev(undefined, 'create'), ev('stranger', 'create')];
   const s = signalTwoUngrantedActions({ events, workObjects: [], seats: SEATS });
   assert.equal(s.denominator, 1, 'only the known seat counts');
   assert.equal(s.excludedNonSeat, 3);
@@ -255,4 +263,57 @@ test('#755-signals a POPULATED store carries no caveat at all', () => {
   const s = signalTwoUngrantedActions({ events, workObjects, seats: SEATS });
   assert.equal(s.caveat, undefined);
   assert.equal(s.numerator, 1);
+});
+
+// ── ⛔ THE DENOMINATOR MUST BE DERIVED FROM WHAT IS ENFORCED ─────────────────
+//
+// Found when the board owner asked the obvious question: "how did we scope it to only
+// creating a card? What if I said 'take on card nnn, coordinate'?"
+//
+//   the gate ENFORCES : card_create
+//   the denominator COUNTED : create · update · move · claim · release
+//
+// So `0 / 65` read as "65 actions, zero violations" and MEANT "65 actions, 64
+// of which the rail cannot see." The mismatch flattered us, on the first
+// number the experiment ever produced.
+//
+// ⇒ The fix is not to correct the list. It is to stop having TWO lists. The
+//   enforced set lives in the gate — the only place that knows what it wraps —
+//   and the signal imports it. They cannot drift because there is nothing to
+//   drift from.
+//
+// ⚠️ This is the MEASUREMENT half only. Whether the rail should be widened to
+//    claim/move is a live question for the room and touches a running service.
+//    Narrowing the denominator to the truth needs no restart and no permission.
+
+test('#755-signals ⭐⭐ the denominator counts ONLY what the gate actually enforces', () => {
+  assert.deepEqual([...COVERED_OPS], [...ENFORCED_OPS], 'two lists means they can disagree');
+});
+
+test('#755-signals ⛔ an action the rail cannot see is NOT in the denominator', () => {
+  // A claim is the shape of "I am taking this card" — the exact scenario that
+  // exposed the gap — and the gate does not wrap it today. Counting it would
+  // credit us with compliance on an action nothing checks.
+  const events = [ev('ada', 'create'), ev('ada', 'claim'), ev('ada', 'move'), ev('ada', 'update')];
+  const s = signalTwoUngrantedActions({ events, workObjects: [], seats: SEATS });
+  assert.equal(s.denominator, 1, 'counted actions the gate does not enforce');
+});
+
+test('#755-signals the report NAMES the ops it counted, so the reach is visible', () => {
+  // An instrument whose scope is invisible in its output is the defect this
+  // whole card is a catalogue of.
+  const events = [ev('ada', 'create')];
+  const s = signalTwoUngrantedActions({ events, workObjects: [], seats: SEATS });
+  assert.deepEqual(s.countedOps, [...ENFORCED_OPS]);
+  assert.match(renderSignal('signal 2', s), /create/);
+});
+
+test('#755-signals widening the gate widens the denominator automatically', () => {
+  // The property that makes this a fix rather than a patch: if the room later
+  // gates card_claim, the measurement follows without anyone remembering to
+  // update a second list.
+  const events = [ev('ada', 'create'), ev('ada', 'claim')];
+  const widened = signalTwoUngrantedActions({ events, workObjects: [], seats: SEATS, enforcedOps: ['create', 'claim'] });
+  assert.equal(widened.denominator, 2);
+  assert.deepEqual(widened.countedOps, ['create', 'claim']);
 });

@@ -45,6 +45,26 @@ import { resolve, dirname, relative, sep, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stateAt, STATES } from './work-auction.mjs';
 
+/**
+ * ⭐⭐ THE OPS THIS GATE ACTUALLY WRAPS. The single source of truth.
+ *
+ * It lives HERE, in the module that does the enforcing, because the failure it
+ * prevents is two lists drifting apart. The review instrument imports it for
+ * signal 2's denominator rather than keeping its own copy.
+ *
+ * ⚠️ The defect that produced this: the instrument counted create · update ·
+ * move · claim · release while the adapter wrapped only card_create. So the
+ * first number the sprint ever produced — 0/65 — read as "65 actions, zero
+ * violations" and meant "65 actions, 64 of which the rail cannot see." The
+ * mismatch flattered us, and it was found by the owner asking the obvious
+ * question: "what if I say 'take on card nnn, coordinate'?"
+ *
+ * ⛔ ADDING AN OP HERE IS NOT ENOUGH — the tool must actually be wrapped in
+ * mcp-server.mjs. This list is what the instrument believes; wrapping is what
+ * makes it true. A test asserts the two agree.
+ */
+export const ENFORCED_OPS = Object.freeze(['create']);
+
 /** The one environment variable that can arm this. Named here so the test can assert on it. */
 export const GATE_ENV = 'SCRUM_WORK_GATE';
 

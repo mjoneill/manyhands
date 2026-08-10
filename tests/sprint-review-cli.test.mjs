@@ -68,10 +68,15 @@ test('#755-cli the run is REPRODUCIBLE — same inputs, byte-identical report', 
 });
 
 test('#755-cli it reports the DENOMINATOR and the exclusions, so the filter is auditable', () => {
-  const dir = fixtureDir([ev('ada', 'create'), ev(null, 'create'), ev('stranger', 'update')]);
+  // ⚠️ `stranger` was doing an `update` here. Once the denominator was bound to
+  // what the gate actually ENFORCES, `update` stopped counting at all — so the
+  // exclusion count changed for a reason that had nothing to do with the filter
+  // this test is about. Both non-seat actors now do the enforced op.
+  const dir = fixtureDir([ev('ada', 'create'), ev(null, 'create'), ev('stranger', 'create')]);
   const out = run(['--since', '2026-08-10T02:00:00Z', '--events', dir, ...SEATS_ARG]);
   assert.match(out, /1 \/ 1|0 \/ 1/);
   assert.match(out, /2 non-seat action\(s\) excluded/);
+  assert.match(out, /enforced ops counted: create/);
 });
 
 test('#755-cli ⚠️ it says an UNMEASURABLE signal is not a passing signal — every run, not just bad ones', () => {
