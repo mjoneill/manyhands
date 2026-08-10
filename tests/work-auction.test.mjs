@@ -37,6 +37,7 @@ import {
   complete,
   release,
   withdraw,
+  contest,
   stateAt,
   STATES,
 } from '../core/work-auction.mjs';
@@ -285,4 +286,94 @@ test('#755 every transition records actor and time, and the log reads in order',
 
 test('#755 an out-of-order timestamp is refused — the log must not lie about sequence', () => {
   assert.throws(() => bid(open(), { by: 'bo', at: '2026-08-10T01:00:00.000Z' }), /before the previous transition/);
+});
+
+// ── SLICE 2a — contest(): the transition for pure dissent ────────────────────
+//
+// Found by USING slice 1, not by designing it. A live window carried two items;
+// a steward's honest answer was "I don't want to build this, and it should not
+// proceed" — and there was no way to say it. `bid` means you want the work,
+// `nobid` means you don't care. The one shape that is pure dissent had no token,
+// so dissent read as consent and the module would have auto-granted over the
+// only objection on record.
+//
+// ⚠️ THE SEMANTIC IS WHAT MAKES IT A RAIL RATHER THAN A FIELD:
+//    contests.length > 0  →  ARBITRATION_DUE, regardless of bidder count.
+//    Without that, contest() is a token nobody's arithmetic reads — the same
+//    defect one layer in: a refusal the instrument can see but does not act on.
+//
+// ⛔ EVIDENCE VALUE TOWARD #755's FOUR DEMONSTRATIONS: ZERO, exactly as slice 1.
+//    A contest() that nothing loads discharges a design defect. It is not
+//    progress toward a rail.
+
+test('#755-2a a contest is recorded, and a contester is NOT a bidder', () => {
+  const wo = contest(open(), { by: 'bo', at: BEFORE });
+  const s = stateAt(wo, BEFORE);
+  assert.deepEqual(s.bidders, ['ada']);
+  assert.deepEqual(s.contesters, ['bo']);
+});
+
+test('#755-2a ⭐⭐ ONE contest suspends the automatic grant — one bidder, past replyBy, ARBITRATION_DUE', () => {
+  // The deciding test. Without the contest check this returns GRANTED-by-timeout,
+  // which is the module silently overriding the only objection on record.
+  const wo = contest(open(), { by: 'bo', at: BEFORE });
+  const s = stateAt(wo, AFTER);
+  assert.equal(s.state, STATES.ARBITRATION_DUE);
+  assert.equal(s.grantedTo, null);
+  assert.equal(s.grantedBy, null);
+});
+
+test('#755-2a a contest suspends EARLY-CLOSE too, not just the timeout path', () => {
+  let wo = contest(open(), { by: 'bo', at: BEFORE });
+  wo = nobid(wo, { by: 'cy', at: BEFORE });
+  const s = stateAt(wo, BEFORE);
+  assert.deepEqual(s.pending, [], 'every required seat has answered');
+  assert.equal(s.state, STATES.ARBITRATION_DUE);
+});
+
+test('#755-2a ⭐ a QUIET room still grants — the anti-deadlock property survives contest()', () => {
+  // #755 rests on "timeout defaults to ACT". contest() must suspend the grant
+  // only when someone actually objected, never merely by existing.
+  const s = stateAt(open(), AFTER);
+  assert.equal(s.state, STATES.GRANTED);
+  assert.equal(s.grantedBy, 'timeout');
+});
+
+test('#755-2a a contest COUNTS AS ANSWERING — it must not hold the window open too', () => {
+  // Otherwise a contester both blocks the grant and keeps the window pending,
+  // which is two penalties for one objection and makes dissent expensive.
+  let wo = contest(open(), { by: 'bo', at: BEFORE });
+  assert.deepEqual(stateAt(wo, BEFORE).pending, ['cy']);
+});
+
+test('#755-2a an explicit grant OVERRIDES a contest — the room can still rule', () => {
+  // ARBITRATION_DUE means "a human decision is required", not "blocked forever".
+  const wo = grant(contest(open(), { by: 'bo', at: BEFORE }), { by: 'cy', to: 'ada', at: BEFORE });
+  assert.equal(stateAt(wo, AFTER).state, STATES.GRANTED);
+  assert.equal(stateAt(wo, AFTER).grantedTo, 'ada');
+  assert.equal(stateAt(wo, AFTER).grantedBy, 'cy');
+});
+
+test('#755-2a a seat may not contest twice, nor contest after answering', () => {
+  const wo = contest(open(), { by: 'bo', at: BEFORE });
+  assert.throws(() => contest(wo, { by: 'bo', at: BEFORE }), /bo has already answered/);
+  assert.throws(() => bid(wo, { by: 'bo', at: BEFORE }), /bo has already answered/);
+  assert.throws(() => contest(nobid(open(), { by: 'bo', at: BEFORE }), { by: 'bo', at: BEFORE }), /bo has already answered/);
+});
+
+test('#755-2a contest() refuses unknown fields — the free-text guard is on every writer', () => {
+  assert.throws(() => contest(open(), { by: 'bo', at: BEFORE, because: 'freeform' }), /unknown field: because/);
+});
+
+test('#755-2a a contest cannot be recorded after the work is granted or running', () => {
+  const granted = grant(open(), { by: 'cy', to: 'ada', at: BEFORE });
+  assert.throws(() => contest(granted, { by: 'bo', at: BEFORE }), /cannot contest from granted/);
+  assert.throws(() => contest(start(granted, { by: 'ada', at: BEFORE }), { by: 'bo', at: AFTER }), /cannot contest from running/);
+});
+
+test('#755-2a contests survive the JSON round-trip like everything else', () => {
+  const wo = contest(open(), { by: 'bo', at: BEFORE });
+  const rehydrated = JSON.parse(JSON.stringify(wo));
+  assert.deepEqual(stateAt(rehydrated, AFTER), stateAt(wo, AFTER));
+  assert.equal(stateAt(rehydrated, AFTER).state, STATES.ARBITRATION_DUE);
 });

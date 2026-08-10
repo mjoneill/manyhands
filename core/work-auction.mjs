@@ -32,7 +32,7 @@ export const STATES = Object.freeze({
   OPEN: 'open',                       // declared, nobody has bid
   BIDDING: 'bidding',                 // window live, at least one bidder
   GRANTED: 'granted',                 // one actor holds it
-  ARBITRATION_DUE: 'arbitration_due', // window closed, >1 bidder — see below
+  ARBITRATION_DUE: 'arbitration_due', // window closed, >1 bidder OR a contest
   RUNNING: 'running',
   COMPLETE: 'complete',
   RELEASED: 'released',
@@ -86,6 +86,7 @@ function append(wo, entry) {
  */
 function recorded(wo) {
   const bidders = [];
+  const contesters = [];
   const answered = [];
   let granted = null;
   let running = false;
@@ -100,6 +101,10 @@ function recorded(wo) {
         answered.push(t.by);
         break;
       case 'nobid':
+        answered.push(t.by);
+        break;
+      case 'contest':
+        contesters.push(t.by);
         answered.push(t.by);
         break;
       case 'grant':
@@ -121,7 +126,7 @@ function recorded(wo) {
         throw new Error(`unknown transition type: ${t.type}`);
     }
   }
-  return { bidders, answered, granted, running, terminal };
+  return { bidders, contesters, answered, granted, running, terminal };
 }
 
 /** The coarse phase a WRITER guards on — no clock, so no expiry in here. */
@@ -202,6 +207,32 @@ export function nobid(wo, fields) {
   return append(wo, { type: 'nobid', by: fields.by, at: fields.at });
 }
 
+/**
+ * A CONTEST: "this work should not proceed" — recorded, and it BITES.
+ *
+ * ⚠️ The gap this closes was found by USING the module, not designing it. A
+ * live window carried two items; a steward's honest answer was "I don't want
+ * to build this, and it should not proceed" — and there was no way to say it.
+ * `bid` means you want the work; `nobid` means you don't care. The one shape
+ * that is pure dissent had no token, so dissent read as CONSENT and the module
+ * would have auto-granted over the only objection on record.
+ *
+ * ⭐ The semantic in stateAt is what makes this a rail rather than a field:
+ * one recorded contest suspends the automatic grant, regardless of bidder
+ * count. Without that, contest() would be a token nobody's arithmetic reads —
+ * the same defect one layer in.
+ *
+ * A contest COUNTS AS ANSWERING. It must not both block the grant and hold the
+ * window open: that is two penalties for one objection, and it makes dissent
+ * expensive at exactly the moment we want it cheap.
+ */
+export function contest(wo, fields) {
+  only(fields, ['by', 'at'], 'contest');
+  assertWindowLive(wo, 'contest');
+  assertNotAnswered(wo, fields.by);
+  return append(wo, { type: 'contest', by: fields.by, at: fields.at });
+}
+
 export function grant(wo, fields) {
   only(fields, ['by', 'to', 'at'], 'grant');
   assertWindowLive(wo, 'grant');
@@ -264,12 +295,13 @@ export function withdraw(wo, fields) {
  */
 export function stateAt(wo, now) {
   if (!now) throw new Error('stateAt: now is required — this module never reads the wall clock');
-  const { bidders, answered, granted, running, terminal } = recorded(wo);
+  const { bidders, contesters, answered, granted, running, terminal } = recorded(wo);
   const pending = wo.required.filter((seat) => !answered.includes(seat));
 
   const view = (state, extra = {}) => ({
     state,
     bidders: [...bidders],
+    contesters: [...contesters],
     pending: [...pending],
     grantedTo: null,
     grantedBy: null,
@@ -289,6 +321,12 @@ export function stateAt(wo, now) {
   // Nobody wanted it. Expiry here is not a failure of the protocol — it is the
   // protocol reporting that the work has no taker.
   if (bidders.length === 0) return view(STATES.EXPIRED);
+
+  // ⭐ ONE RECORDED CONTEST SUSPENDS THE AUTOMATIC GRANT, regardless of bidder
+  // count. The anti-deadlock property is that a QUIET room grants — and a room
+  // with a recorded objection is not quiet. Without this line contest() would
+  // be a token nobody's arithmetic reads, which is the defect it exists to fix.
+  if (contesters.length > 0) return view(STATES.ARBITRATION_DUE);
 
   // The uncontested case, which is #755's anti-deadlock property: a quiet room
   // GRANTS rather than hanging, and nothing had to fire for it to happen.
