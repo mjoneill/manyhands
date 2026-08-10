@@ -46,6 +46,7 @@ const ROSTER_SEATS = configureIdentities(loadRoster());
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createChannelScheduler } from './core/channel-scheduler.mjs';
+import { isGateArmed, decideCoveredAction } from './core/work-gate.mjs';
 import { readConfig } from './channel-config.mjs';
 import { createSeatRegistry } from './core/seat-registry.mjs';
 import { createTokenRingEngine } from './core/token-ring-engine.mjs';
@@ -287,6 +288,48 @@ function buildMcpServer() {
     return { ok: true, seatId: result.seatId, epoch: result.epoch, supersededSession: result.supersededSession };
   });
 
+  // ── #755 slice 2b — the enforced adapter, chosen ONCE at registration ──
+  //
+  // FLAG-OFF MEANS NOT INSTALLED. isGateArmed() is read HERE, outside every
+  // request, to decide WHICH FUNCTION IS REGISTERED. The alternative — a
+  // flag check inside the handler that returns early — would put the gate
+  // permanently in card_create's path and make one inverted boolean the
+  // entire safety story, while the suite stayed green because tests run with
+  // the flag ON.
+  //
+  // It matters more than it looks: neither prod service has restarted since
+  // Aug 7/8, so an UNRELATED restart is when this code first loads in
+  // production. With absence, that restart is a non-event. With a branch, it
+  // is a live arming nobody scheduled and nobody witnessed.
+  //
+  // ⚠️⚠️ HONEST LIMITATION, stated here rather than discovered later: there is
+  // NO WORK-OBJECT STORE YET. openWorkObjects() returns an empty list, so
+  // arming this flag today refuses NOBODY. The decision and the wiring are
+  // real and tested; the rail cannot fire until the persistence slice lands.
+  // Do not read a green suite here as "the rail works."
+  const openWorkObjects = () => [];
+
+  const plainCardCreate = async (args) => jsonResult(await apiCall('POST', '/api/cards', args));
+
+  const gatedCardCreate = async (args) => {
+    const decision = decideCoveredAction({
+      actor: args.createdBy,
+      workObjects: openWorkObjects(),
+      now: new Date().toISOString(),
+    });
+    if (!decision.allow) {
+      return jsonResult({
+        refused: true,
+        rule: '#755 work gate',
+        reason: decision.reason,
+        workObjectId: decision.workObjectId,
+      });
+    }
+    return plainCardCreate(args);
+  };
+
+  const cardCreateHandler = isGateArmed() ? gatedCardCreate : plainCardCreate;
+
   // ── Card tools ───────────────────────────────────────────────────
   mcp.registerTool('card_create', {
     description: 'Create a new card on the scrum board. Returns the created card (server assigns id, shortId, createdAt).',
@@ -313,7 +356,7 @@ function buildMcpServer() {
         derivedFrom: z.array(z.number()).optional().describe('This card builds on the target(s)'),
       }).optional().describe('Card-to-card edges, settable at create'),
     },
-  }, async (args) => jsonResult(await apiCall('POST', '/api/cards', args)));
+  }, cardCreateHandler);
 
   mcp.registerTool('card_update', {
     description: 'Partial update of a card. Supply any subset of fields. Immutable: id, shortId, createdAt.',
