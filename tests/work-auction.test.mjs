@@ -377,3 +377,64 @@ test('#755-2a contests survive the JSON round-trip like everything else', () => 
   assert.deepEqual(stateAt(rehydrated, AFTER), stateAt(wo, AFTER));
   assert.equal(stateAt(rehydrated, AFTER).state, STATES.ARBITRATION_DUE);
 });
+
+// ── ⛔ stateAt MUST NOT SEE THE FUTURE ───────────────────────────────────────
+//
+// Found by running the review instrument on real data the morning the gate
+// went live. It reported its first non-zero signal-2 numerator — 2/64 — and
+// both "bypasses" were false: the two actions PRECEDED the work object's
+// declaration by twenty seconds.
+//
+// `recorded()` folded EVERY transition regardless of its `at`, and stateAt used
+// `now` only for the expiry comparison. So at any PAST timestamp a work object
+// reported its FINAL bidder set, and anyone who ever bid appeared to hold an
+// open window before the object existed.
+//
+// ⚠️ The live gate was unaffected — it always asks at the real present, where
+// every transition is genuinely <= now. The defect manifests ONLY on
+// retrospective queries, which is exactly and only what the instrument does.
+// A bug that cannot fire in production and fires every time you measure
+// production is the worst kind to have in a card about measurement.
+
+test('#755 ⛔ stateAt at a time BEFORE the declaration sees nothing — no future transitions', () => {
+  const wo = open();
+  const s = stateAt(wo, '2026-08-10T01:00:00.000Z'); // before T0
+  assert.deepEqual(s.bidders, [], 'a bidder appeared before they bid');
+  assert.equal(s.state, STATES.OPEN);
+});
+
+test('#755 ⛔⛔ THE REGRESSION — the real events that produced a false 2/64', () => {
+  // Verbatim from the event log and the live store, 2026-08-10.
+  const wo = declare({
+    id: '2c-demo-1',
+    by: 'bo',
+    at: '2026-08-10T12:47:53.772Z',
+    replyBy: '2026-08-10T12:49:53.773Z',
+    required: ['bo', 'ada'],
+  });
+  // Two covered actions by that same seat, TWENTY SECONDS EARLIER.
+  const s = stateAt(wo, '2026-08-10T12:47:33.212Z');
+  assert.equal(s.bidders.includes('bo'), false, 'the actor held a window that did not exist yet');
+  assert.equal(s.state, STATES.OPEN);
+});
+
+test('#755 a transition is visible from the instant it happens, not one tick later', () => {
+  const wo = open();
+  assert.deepEqual(stateAt(wo, T0).bidders, ['ada'], 'the declaring bid must count AT its own timestamp');
+});
+
+test('#755 later transitions stay invisible until their own time arrives', () => {
+  const wo = nobid(bid(open(), { by: 'bo', at: BEFORE }), { by: 'cy', at: AFTER });
+  // At BEFORE: ada + bo have bid, cy has not yet answered.
+  const mid = stateAt(wo, BEFORE);
+  assert.deepEqual(mid.bidders.slice().sort(), ['ada', 'bo']);
+  assert.deepEqual(mid.pending, ['cy']);
+  // At AFTER: cy's nobid is visible, so nobody is pending.
+  assert.deepEqual(stateAt(wo, AFTER).pending, []);
+});
+
+test('#755 a GRANT is invisible before it is given', () => {
+  const wo = grant(open(), { by: 'cy', to: 'ada', at: AFTER });
+  assert.equal(stateAt(wo, BEFORE).grantedTo, null, 'granted before the grant happened');
+  assert.equal(stateAt(wo, AFTER).grantedTo, 'ada');
+});

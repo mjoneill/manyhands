@@ -84,7 +84,26 @@ function append(wo, entry) {
  * writers guard on recorded facts only, so no transition function needs a
  * `now` either. Time enters the system in exactly one place — stateAt().
  */
-function recorded(wo) {
+function recorded(wo, asOf = null) {
+  // ⛔ NEVER SEE THE FUTURE.
+  //
+  // This folded EVERY transition regardless of its `at`, and stateAt used
+  // `now` only for the expiry comparison. So at any PAST timestamp a work
+  // object reported its FINAL bidder set — and anyone who ever bid appeared to
+  // hold an open window before the object existed.
+  //
+  // ⚠️ The live gate never saw it: it always asks at the real present, where
+  // every transition is genuinely <= now. The defect fired ONLY on
+  // retrospective queries — which is exactly and only what the review
+  // instrument does. A bug that cannot occur in production and occurs every
+  // time you MEASURE production is the worst kind to have on a card about
+  // measurement, and it produced this sprint's first non-zero signal-2
+  // numerator: 2/64, both false, both twenty seconds before the window opened.
+  //
+  // `asOf === null` means "everything recorded" and is what the WRITERS use —
+  // they guard on recorded facts and have no clock.
+  const visible = asOf === null ? wo.transitions : wo.transitions.filter((t) => t.at <= asOf);
+
   const bidders = [];
   const contesters = [];
   const answered = [];
@@ -92,7 +111,7 @@ function recorded(wo) {
   let running = false;
   let terminal = null; // complete | released | withdrawn
 
-  for (const t of wo.transitions) {
+  for (const t of visible) {
     switch (t.type) {
       case 'declare':
         break;
@@ -295,7 +314,7 @@ export function withdraw(wo, fields) {
  */
 export function stateAt(wo, now) {
   if (!now) throw new Error('stateAt: now is required — this module never reads the wall clock');
-  const { bidders, contesters, answered, granted, running, terminal } = recorded(wo);
+  const { bidders, contesters, answered, granted, running, terminal } = recorded(wo, now);
   const pending = wo.required.filter((seat) => !answered.includes(seat));
 
   const view = (state, extra = {}) => ({

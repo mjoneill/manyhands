@@ -162,3 +162,30 @@ test('#755-2d ⛔ NO FREE TEXT REACHES DISK — the stored line has only known k
   // asserts that property survives all the way to the bytes on disk — the
   // place where "we'll scrub it later" stops being available.
 });
+
+// ── ⛔ AN OBJECT THAT DID NOT EXIST YET IS NOT AN OPEN WINDOW ────────────────
+//
+// The adjacent edge to the stateAt time-filter fix, found in review before it
+// could be quoted: `replyBy` and `required` are OBJECT-level, not transition
+// level. So once transitions are filtered to `at <= now`, a query BEFORE the
+// declaration leaves zero transitions but a fully-formed object — and stateAt
+// computes OPEN with empty bidders.
+//
+// ⭐ Harmless for signal 2: empty bidders means nobody matches, so no actor is
+//    falsely counted.
+// ⚠️ NOT harmless for any retrospective count of open windows, which is exactly
+//    the kind of number that gets quoted later.
+
+test('#755-2d ⛔ a work object is not "open" at a time before it was declared', () => {
+  const d = dir();
+  appendTransitions(d, wo('w1'));
+  const beforeItExisted = '2026-08-10T01:00:00.000Z'; // an hour before T0
+  assert.deepEqual(openWorkObjectsAt(d, beforeItExisted), [], 'a phantom open window');
+  assert.equal(openWorkObjectsAt(d, DURING).length, 1, 'and it IS open once it exists');
+});
+
+test('#755-2d an object is in play from the instant of its declaration, not later', () => {
+  const d = dir();
+  appendTransitions(d, wo('w1'));
+  assert.equal(openWorkObjectsAt(d, T0).length, 1, 'must count AT its own declaration timestamp');
+});

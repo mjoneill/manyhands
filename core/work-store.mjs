@@ -144,5 +144,22 @@ export function readWorkObjects(dir) {
  */
 export function openWorkObjectsAt(dir, now) {
   if (!now) throw new Error('openWorkObjectsAt: now is required — this store never reads the wall clock');
-  return readWorkObjects(dir).filter((wo) => IN_PLAY.includes(stateAt(wo, now).state));
+  return readWorkObjects(dir).filter((wo) => existsAt(wo, now) && IN_PLAY.includes(stateAt(wo, now).state));
+}
+
+/**
+ * Did this work object EXIST at `now`?
+ *
+ * ⚠️ `replyBy` and `required` are OBJECT-level, not transition-level. Once
+ * stateAt filters transitions to `at <= now`, a query BEFORE the declaration
+ * leaves zero transitions but a fully-formed object — and stateAt then computes
+ * OPEN with empty bidders. That is a PHANTOM OPEN WINDOW at a time when the
+ * object did not exist.
+ *
+ * ⭐ Harmless for signal 2 (empty bidders match nobody), but NOT harmless for
+ * any retrospective count of open windows — which is exactly the kind of number
+ * that gets quoted later. Caught in review before it could be.
+ */
+function existsAt(wo, now) {
+  return wo.transitions.length > 0 && wo.transitions[0].at <= now;
 }
