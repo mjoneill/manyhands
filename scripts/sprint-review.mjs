@@ -102,7 +102,9 @@ for (const f of readdirSync(eventsDir).filter((n) => n.endsWith('.jsonl')).sort(
 // no --work-store the numerator stays a STRUCTURAL ZERO and the report SAYS
 // so, which is the honest reading when the store isn't wired for this run.
 const workStore = arg('work-store');
-const workObjects = workStore ? readWorkObjects(workStore) : [];
+// null, NOT [] — "no store configured" and "store is empty" are different
+// facts and the signal reports them differently.
+const workObjects = workStore ? readWorkObjects(workStore) : null;
 
 const humanRaces = arg('human-races');
 
@@ -120,7 +122,7 @@ const signals = [
 console.log(`SPRINT REVIEW — events since ${since}: ${events.length}`);
 console.log(`events dir: ${eventsDir}`);
 console.log(`seats counted: ${SEATS.join(', ')}`);
-console.log(`work objects: ${workStore ? `${workObjects.length} from ${workStore}` : 'NONE — no --work-store given, signal 2 numerator is structurally 0'}`);
+console.log(`work objects: ${workStore ? `${workObjects.length} from ${workStore}` : 'NO STORE CONFIGURED — pass --work-store; signal 2 numerator is structurally 0'}`);
 if (malformed) console.log(`⚠️ ${malformed} unparseable line(s) skipped`);
 console.log('');
 

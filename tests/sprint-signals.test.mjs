@@ -114,10 +114,18 @@ test('#755-signals ⚠️ HUMAN ACTIONS ARE EXCLUDED FROM THE DENOMINATOR, and t
 });
 
 test('#755-signals signal 2 numerator is structurally 0 while no work objects exist — and says so', () => {
+  // ⚠️ This test used to assert /no work-object store/ for an EMPTY array,
+  // which is the conflation the two tests further down split apart: an empty
+  // store and an absent one are different facts. It now checks the property it
+  // was always about — the numerator is structurally 0 and the output says so —
+  // without caring which of the two reasons applies.
   const events = [ev('ada', 'create')];
-  const s = signalTwoUngrantedActions({ events, workObjects: [], seats: SEATS });
-  assert.equal(s.numerator, 0);
-  assert.match(s.caveat, /no work-object store/i);
+  for (const workObjects of [null, []]) {
+    const s = signalTwoUngrantedActions({ events, workObjects, seats: SEATS });
+    assert.equal(s.numerator, 0);
+    assert.match(s.caveat, /STRUCTURAL ZERO/);
+    assert.match(s.caveat, /not evidence of compliance/i);
+  }
 });
 
 test('#755-signals with work objects present, an action inside an open window IS counted', () => {
@@ -199,4 +207,52 @@ test('#755-signals signal 3 accepts a human ZERO — "we looked and found none" 
   const s = signalThreeOutOfBand({ humanSuppliedCount: 0 });
   assert.equal(s.status, 'zero');
   assert.equal(s.source, 'human');
+});
+
+// ── ⚠️ "NO STORE" AND "EMPTY STORE" ARE DIFFERENT FACTS ─────────────────────
+//
+// Caught by running the instrument against the real log the morning after the
+// store landed. It printed "there is no work-object store" — and there WAS one;
+// it was empty, because the gate has never been armed.
+//
+// ⇒ signalTwoUngrantedActions branched on `workObjects.length === 0`, which
+//   conflates two states that mean opposite things about the evidence:
+//     no store      → no instrument. The zero is meaningless.
+//     empty store   → the instrument exists and has recorded nothing, which is
+//                     expected while the flag is off, and is a real zero over a
+//                     real denominator once it is armed.
+//
+// ⇒ The instrument built to stop a plausible zero was printing a stale caveat
+//   about a condition that had ended six hours earlier. Same defect class, in
+//   the tool written against it.
+
+test('#755-signals ⛔ NO STORE (null) says so — the zero means "no instrument"', () => {
+  const events = [ev('ada', 'create')];
+  const s = signalTwoUngrantedActions({ events, workObjects: null, seats: SEATS });
+  assert.match(s.caveat, /no work-object store/i);
+  assert.match(s.caveat, /not evidence of compliance/i);
+});
+
+test('#755-signals ⚠️ AN EMPTY STORE IS A DIFFERENT CAVEAT — the store exists and is empty', () => {
+  const events = [ev('ada', 'create')];
+  const s = signalTwoUngrantedActions({ events, workObjects: [], seats: SEATS });
+  assert.equal(/no work-object store/i.test(s.caveat || ''), false, 'still claiming there is no store');
+  assert.match(s.caveat, /empty/i);
+  // ⚠️ It is STILL not evidence of compliance — nothing can be counted as
+  // ungranted when nothing was ever recorded. But it is a different reason.
+  assert.match(s.caveat, /not evidence of compliance/i);
+});
+
+test('#755-signals a POPULATED store carries no caveat at all', () => {
+  const events = [ev('ada', 'create', 'card', '2026-08-10T02:10:00.000Z')];
+  const workObjects = [{
+    id: 'wo-1', declaredBy: 'ada', replyBy: '2026-08-10T02:20:00.000Z', required: ['ada', 'bo'],
+    transitions: [
+      { type: 'declare', by: 'ada', at: '2026-08-10T02:00:00.000Z' },
+      { type: 'bid', by: 'ada', at: '2026-08-10T02:00:00.000Z' },
+    ],
+  }];
+  const s = signalTwoUngrantedActions({ events, workObjects, seats: SEATS });
+  assert.equal(s.caveat, undefined);
+  assert.equal(s.numerator, 1);
 });

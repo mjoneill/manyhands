@@ -103,6 +103,20 @@ export function signalOneContestedBids({ bidRecords }) {
  * silent narrowing — an instrument's reach must be visible in its output.
  */
 export function signalTwoUngrantedActions({ events, workObjects, seats }) {
+  // ⚠️ NULL AND EMPTY ARE DIFFERENT FACTS, and they mean opposite things about
+  // the evidence:
+  //   null → no store is configured. The instrument does not exist and the
+  //          zero is meaningless.
+  //   []   → the store exists and has recorded nothing, which is expected
+  //          while the flag is off, and becomes a REAL zero over a real
+  //          denominator once it is armed.
+  //
+  // The first version branched on `length === 0` and printed "there is no
+  // work-object store" for both. It said that the morning AFTER the store
+  // landed — a stale caveat about a condition that had ended, inside the
+  // instrument built to stop exactly that.
+  const storeConfigured = Array.isArray(workObjects);
+  const objects = storeConfigured ? workObjects : [];
   const seatSet = new Set(seats);
   const covered = events.filter((e) => COVERED_OPS.includes(e.op));
   const bySeat = covered.filter((e) => e.actor && seatSet.has(e.actor));
@@ -114,7 +128,7 @@ export function signalTwoUngrantedActions({ events, workObjects, seats }) {
 
   const numerator = bySeat.filter((e) => {
     // Did this actor hold an OPEN window at the moment they acted?
-    return workObjects.some((wo) => {
+    return objects.some((wo) => {
       const s = stateAt(wo, e.occurred_at);
       if (!s.bidders.includes(e.actor)) return false;
       return s.state === STATES.OPEN || s.state === STATES.BIDDING || s.state === STATES.ARBITRATION_DUE;
@@ -122,10 +136,14 @@ export function signalTwoUngrantedActions({ events, workObjects, seats }) {
   }).length;
 
   // ⚠️ A structural zero is the worst cell on this report: it looks like "no
-  // bypasses" and means "no instrument". Say which one it is, in the output.
-  const caveat = workObjects.length === 0
-    ? 'STRUCTURAL ZERO: there is no work-object store, so no action CAN be counted as ungranted. This is not evidence of compliance.'
-    : undefined;
+  // bypasses" and means "no instrument". Say WHICH one it is, in the output —
+  // and there are two different ones.
+  let caveat;
+  if (!storeConfigured) {
+    caveat = 'STRUCTURAL ZERO: no work-object store is configured, so no action CAN be counted as ungranted. This is not evidence of compliance.';
+  } else if (objects.length === 0) {
+    caveat = 'STRUCTURAL ZERO: the work-object store is configured and EMPTY — nothing has been recorded, which is expected while the gate is unarmed. This is not evidence of compliance.';
+  }
 
   return scored(numerator, bySeat.length, { excludedNonSeat, caveat });
 }
