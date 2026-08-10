@@ -32,13 +32,31 @@
  *   That is why the message matters as much as the delay.
  *
  * ── COST, MEASURED BEFORE IT WAS BUILT ──────────────────────────────────────
- *   60s  ⇒ 16 of 21 historical incidents intercepted, 5 delays across the
- *          board's entire history. 0.3 delays per incident caught.
- *   Table produced by scripts/race-corpus.mjs by a seat who argued against
- *   this branch; every error in the first pass ran against it.
+ *   60s ⇒ 16 of 21 historical incidents intercepted, for 5 delays.
  *
- * ⚠️ The 5 is a LOWER BOUND: `createdBy` postdates #631, so pre-#631 agent
- * cards are indistinguishable from human ones and were exempted from the count.
+ * ⚠️⚠️ REPORT THE REACHABLE DENOMINATOR, NOT THE TOTAL:
+ *        5 of 125 reachable  = 4.0 %   ⇐ the cost anyone actually feels
+ *        5 of 702 total      = 0.71 %  ⇐ true, and six-fold flattering
+ *
+ *   375 of 500 sampled cards carry `createdBy: null` and are exempt BY
+ *   CONSTRUCTION — the rule cannot fire on them, ever. Counting them in the
+ *   denominator makes cases the rule can never reach look like cases it passed.
+ *
+ * ⛔ This is the SAME defect as ENFORCED_OPS: a denominator counting five ops
+ *    while the gate enforced one, "0/65" that was really "0/6". That fix
+ *    shipped the same morning this table was published with the identical
+ *    error in it. The exempt population is invisible in the output, which is
+ *    why it recurs — a rule that cannot fire leaves no trace on what it skipped.
+ *
+ * ⚠️ AND BOTH KNOWN ERRORS POINT THE SAME WAY, in this branch's favour:
+ *    `createdBy` postdates #631, so pre-#631 AGENT cards are exempted as if
+ *    they were human. Some of the 375 are therefore collisions the rule SHOULD
+ *    have caught, counted as passes.
+ *      ⇒ 5 delays is a LOWER bound.  ⇒ 76 % coverage is an UPPER bound.
+ *
+ *   Table produced by scripts/race-corpus.mjs by a seat who argued for stopping
+ *   instead; every error found so far has run against this branch, and it has
+ *   been corrected in its favour three times by its own opponent.
  *
  * ── FAIL OPEN ───────────────────────────────────────────────────────────────
  * Throttling requires establishing that two DIFFERENT NAMED seats acted inside
