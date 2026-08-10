@@ -47,6 +47,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createChannelScheduler } from './core/channel-scheduler.mjs';
 import { isGateArmed, decideCoveredAction } from './core/work-gate.mjs';
+import { openWorkObjectsAt } from './core/work-store.mjs';
 import { readConfig } from './channel-config.mjs';
 import { createSeatRegistry } from './core/seat-registry.mjs';
 import { createTokenRingEngine } from './core/token-ring-engine.mjs';
@@ -302,12 +303,18 @@ function buildMcpServer() {
   // production. With absence, that restart is a non-event. With a branch, it
   // is a live arming nobody scheduled and nobody witnessed.
   //
-  // ⚠️⚠️ HONEST LIMITATION, stated here rather than discovered later: there is
-  // NO WORK-OBJECT STORE YET. openWorkObjects() returns an empty list, so
-  // arming this flag today refuses NOBODY. The decision and the wiring are
-  // real and tested; the rail cannot fire until the persistence slice lands.
-  // Do not read a green suite here as "the rail works."
-  const openWorkObjects = () => [];
+  // #755 slice 2d — the store is LIVE. This is the line that turned the
+  // adapter from tested-and-inert into live-when-armed.
+  //
+  // ⚠️ It is still gated by the flag: with the flag off, gatedCardCreate is
+  // never registered, so none of this is in the request path at all.
+  //
+  // ⚠️ A missing store directory reads as ZERO open work objects rather than
+  // throwing. A rail whose failure mode is "card_create stops working" is
+  // worse than the problem it solves.
+  const WORK_STORE_DIR = process.env.SCRUM_WORK_STORE
+    || path.join(PROJECT_DIR, 'work-objects');
+  const openWorkObjects = () => openWorkObjectsAt(WORK_STORE_DIR, new Date().toISOString());
 
   const plainCardCreate = async (args) => jsonResult(await apiCall('POST', '/api/cards', args));
 

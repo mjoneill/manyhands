@@ -178,3 +178,21 @@ test('#755-2b the flag is OFF unless explicitly set to "on" — no truthy-by-acc
   const src = readFileSync(new URL('../core/work-gate.mjs', import.meta.url), 'utf8');
   assert.ok(src.includes("=== 'on'"), 'the flag must be an exact-match against "on"');
 });
+
+test('#755-2d ⭐⭐ THE GATE IS WIRED TO A REAL STORE — openWorkObjects is no longer a stub', () => {
+  // The one line that turned the adapter from tested-and-inert into
+  // live-when-armed. A green gate suite says nothing about whether the gate
+  // has any data to gate on; this asserts the seam.
+  const mcpSrc = readFileSync(new URL('../mcp-server.mjs', import.meta.url), 'utf8');
+  const code = mcpSrc.replace(/^\s*\/\/.*$/gm, '');
+  assert.match(code, /import \{ openWorkObjectsAt \} from '\.\/core\/work-store\.mjs'/);
+  assert.match(code, /const openWorkObjects = \(\) => openWorkObjectsAt\(/);
+  assert.equal(code.includes('const openWorkObjects = () => [];'), false, 'the stub is still there');
+});
+
+test('#755-2d ⛔ a missing store must not take card_create down with it', () => {
+  // A rail whose failure mode is "the board stops working" is worse than the
+  // problem it solves. The gate must decide ALLOW when it cannot see a store.
+  const d = decideCoveredAction({ actor: 'ada', workObjects: [], now: DURING });
+  assert.equal(d.allow, true);
+});
