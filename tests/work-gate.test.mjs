@@ -38,7 +38,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { decideCoveredAction, GATE_ENV } from '../core/work-gate.mjs';
+import { fileURLToPath } from 'node:url';
+import { dirname } from 'node:path';
+import { decideCoveredAction, GATE_ENV, isGateArmed } from '../core/work-gate.mjs';
+const repoRootForTest = () => dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
 import { declare, nobid, grant, start, contest } from '../core/work-auction.mjs';
 
 const T0 = '2026-08-10T02:00:00.000Z';
@@ -173,10 +176,18 @@ test('#755-2b ⭐⭐ FLAG-OFF MEANS NOT INSTALLED — the gated handler is chose
 });
 
 test('#755-2b the flag is OFF unless explicitly set to "on" — no truthy-by-accident', () => {
-  // A config read that defaults truthy is exactly how a rail arms itself at
-  // 3am. Only the literal string arms it.
-  const src = readFileSync(new URL('../core/work-gate.mjs', import.meta.url), 'utf8');
-  assert.ok(src.includes("=== 'on'"), 'the flag must be an exact-match against "on"');
+  // A config read that defaults truthy is exactly how a rail arms itself at 3am.
+  //
+  // ⚠️ This assertion used to GREP THE SOURCE for "=== 'on'". It went red when
+  // the check was rewritten as an early-return guard — the behaviour was
+  // unchanged and correct, and the test failed anyway. A check matching a
+  // different SURFACE than the property it claims to measure, which is the
+  // defect class this whole card is a catalogue of. Now it asks the function.
+  const store = '/var/data/work';
+  for (const v of ['true', '1', 'ON', 'On', 'yes', 'enabled', '', ' on', 'on ', undefined]) {
+    assert.equal(isGateArmed({ SCRUM_WORK_GATE: v, SCRUM_WORK_STORE: store }), false, `armed on ${JSON.stringify(v)}`);
+  }
+  assert.equal(isGateArmed({ SCRUM_WORK_GATE: 'on', SCRUM_WORK_STORE: store }), true);
 });
 
 test('#755-2d ⭐⭐ THE GATE IS WIRED TO A REAL STORE — openWorkObjects is no longer a stub', () => {
@@ -195,4 +206,52 @@ test('#755-2d ⛔ a missing store must not take card_create down with it', () =>
   // problem it solves. The gate must decide ALLOW when it cannot see a store.
   const d = decideCoveredAction({ actor: 'ada', workObjects: [], now: DURING });
   assert.equal(d.allow, true);
+});
+
+// ── ⛔ THE STORE PATH: arming must not write into the published repo ─────────
+//
+// The blocker the steward raised before the flip, and it was real:
+// WORK_STORE_DIR defaulted to `path.join(PROJECT_DIR, 'work-objects')` — inside
+// the working tree of the PUBLIC repo, and not gitignored. It didn't exist only
+// because the gate had never been armed, so arming was the act that would have
+// created it.
+//
+// ⇒ It also inverts the topology this room pays for: CODE in the clone, DATA in
+//   the private workspace. `board-data-events/` lives in the workspace, which is
+//   exactly why sprint-review's --events had to be required.
+//
+// ⇒ The fix is structural, not a check: you cannot arm the gate without saying
+//   where its data lives, and it may not live where we publish from.
+
+test('#755-2c ⛔ the gate REFUSES to arm without a store path — no default, no guessing', () => {
+  assert.equal(isGateArmed({ SCRUM_WORK_GATE: 'on' }), false, 'armed with nowhere to put its data');
+  assert.equal(isGateArmed({ SCRUM_WORK_GATE: 'on', SCRUM_WORK_STORE: '/var/data/work' }), true);
+});
+
+test('#755-2c ⛔⛔ the gate REFUSES to arm when the store is inside the repo', () => {
+  // A store path under the code clone puts a new data stream in the tree we
+  // push. Refusing is the rail; .gitignore is only defence in depth.
+  const inside = fileURLToPath(new URL('../work-objects', import.meta.url));
+  assert.equal(isGateArmed({ SCRUM_WORK_GATE: 'on', SCRUM_WORK_STORE: inside }), false);
+  const nested = fileURLToPath(new URL('../core/deeper/work-objects', import.meta.url));
+  assert.equal(isGateArmed({ SCRUM_WORK_GATE: 'on', SCRUM_WORK_STORE: nested }), false);
+});
+
+test('#755-2c a relative path that resolves inside the repo is also refused', () => {
+  // `./work-objects` and `work-objects` are the same directory as the absolute
+  // form. A string comparison would miss it; resolution does not.
+  assert.equal(isGateArmed({ SCRUM_WORK_GATE: 'on', SCRUM_WORK_STORE: './work-objects' }, repoRootForTest()), false);
+});
+
+test('#755-2c the flag still arms ONLY on an exact "on" — the store path did not loosen it', () => {
+  const store = '/var/data/work';
+  for (const v of ['true', '1', 'ON', 'yes', '', undefined]) {
+    assert.equal(isGateArmed({ SCRUM_WORK_GATE: v, SCRUM_WORK_STORE: store }), false, `armed on ${JSON.stringify(v)}`);
+  }
+});
+
+test('#755-2c ⚠️ defence in depth: work-objects/ is gitignored too', () => {
+  // Free, and it catches the case where someone bypasses the env entirely.
+  const ignore = readFileSync(new URL('../.gitignore', import.meta.url), 'utf8');
+  assert.match(ignore, /^work-objects\/?$/m);
 });

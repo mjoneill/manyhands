@@ -312,8 +312,12 @@ function buildMcpServer() {
   // ⚠️ A missing store directory reads as ZERO open work objects rather than
   // throwing. A rail whose failure mode is "card_create stops working" is
   // worse than the problem it solves.
-  const WORK_STORE_DIR = process.env.SCRUM_WORK_STORE
-    || path.join(PROJECT_DIR, 'work-objects');
+  // ⛔ NO DEFAULT. isGateArmed() refuses to arm without SCRUM_WORK_STORE and
+  // refuses a path inside the repo, so if we are here the value exists and is
+  // outside the tree we publish. The first version defaulted to
+  // <repo>/work-objects — a new data stream in the public clone, inert only
+  // because the gate had never been armed. Arming would have created it.
+  const WORK_STORE_DIR = process.env.SCRUM_WORK_STORE;
   const openWorkObjects = () => openWorkObjectsAt(WORK_STORE_DIR, new Date().toISOString());
 
   const plainCardCreate = async (args) => jsonResult(await apiCall('POST', '/api/cards', args));

@@ -41,10 +41,30 @@
  *    without a flipper, which the card names as a precondition.
  */
 
+import { resolve, dirname, relative, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { stateAt, STATES } from './work-auction.mjs';
 
 /** The one environment variable that can arm this. Named here so the test can assert on it. */
 export const GATE_ENV = 'SCRUM_WORK_GATE';
+
+/** Where the work-object log lives. Required to arm — there is no default. */
+export const STORE_ENV = 'SCRUM_WORK_STORE';
+
+/** The repo root, so "is this path inside the tree we publish?" is computable. */
+const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+
+/**
+ * Is `p` inside the repo working tree?
+ *
+ * Resolved, not string-compared: `./work-objects`, `work-objects` and the
+ * absolute form are the same directory, and a prefix test on the raw string
+ * misses two of the three.
+ */
+function insideRepo(p, root = REPO_ROOT) {
+  const rel = relative(root, resolve(root, p));
+  return rel === '' || (!rel.startsWith('..') && !rel.startsWith(sep) && !/^[A-Za-z]:/.test(rel));
+}
 
 /**
  * Is the rail armed? Read ONCE at registration, never per request.
@@ -53,8 +73,26 @@ export const GATE_ENV = 'SCRUM_WORK_GATE';
  * or a bare `Boolean(env)` — is precisely how a rail arms itself at 3am because
  * someone exported an empty variable.
  */
-export function isGateArmed(env = process.env) {
-  return env[GATE_ENV] === 'on';
+export function isGateArmed(env = process.env, root = REPO_ROOT) {
+  if (env[GATE_ENV] !== 'on') return false;
+
+  // ⛔ You cannot arm the gate without saying where its data lives.
+  //
+  // The first version defaulted the store to <repo>/work-objects — inside the
+  // working tree of the PUBLIC repo, ungitignored, and inert only because the
+  // gate had never been armed. Arming would have been the act that created it.
+  //
+  // It also inverts the topology this room pays for: CODE in the clone, DATA in
+  // the private workspace. board-data-events/ lives in the workspace, which is
+  // why sprint-review's --events has no default either.
+  const store = env[STORE_ENV];
+  if (!store) return false;
+
+  // ⛔ And it may not live where we publish from. A .gitignore entry is a
+  // check — one `git add -f` and it is back. This is the rail.
+  if (insideRepo(store, root)) return false;
+
+  return true;
 }
 
 /**

@@ -55,3 +55,8 @@ receipts-*/
 # The genuinely unprotected receipts content is the NON-image files
 # (metrics.json carries board-derived data). This closes the directory.
 receipts-*/
+
+# #755 — the work-object log is DATA. It lives in the private workspace,
+# never in the tree we publish. The rail is isGateArmed() refusing a store
+# path inside the repo; this line is defence in depth.
+work-objects/
