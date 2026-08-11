@@ -40,6 +40,14 @@ const POST_URL = process.env.SUITE_WATCH_POST_URL || 'http://127.0.0.1:3141/api/
 const STATE_FILE = process.env.SUITE_WATCH_STATE || path.join(os.homedir(), '.claude', 'scrum-suite-watch.state');
 const COOLDOWN_MS = Number(process.env.SUITE_WATCH_COOLDOWN_MS ?? 6 * 3600 * 1000);
 const DRYRUN = process.env.SUITE_WATCH_DRYRUN === '1';
+/**
+ * #746 — where a red's raw TAP is kept. Defaults ON: the failure this fixes is
+ * that evidence was discarded by default, so opt-in retention would ship the
+ * same hole behind a flag nobody sets. Set to '' to disable deliberately.
+ */
+const ARTIFACT_DIR = process.env.SUITE_WATCH_ARTIFACTS
+  ?? path.join(os.homedir(), '.claude', 'scrum-suite-watch-artifacts');
+const ARTIFACT_KEEP = Number(process.env.SUITE_WATCH_ARTIFACT_KEEP ?? 20);
 const NO_CLONE = process.env.SUITE_WATCH_NO_CLONE === '1'; // tests: fixture repos aren't git
 
 const now = new Date().toISOString();
@@ -147,6 +155,14 @@ const incompleteFiles = timedOut
  * that SURVIVES isolation posts. A flake is logged, never alarmed.
  */
 let flake = false;
+let isolationOut = null;
+/**
+ * #746 — snapshot BEFORE the flake branch can flip it. `red` is the verdict;
+ * this is the EVENT. A flake is a red that resolved, and it is precisely the
+ * evidence this card exists to stop losing, so it must not be excluded by the
+ * variable that records the alarm decision.
+ */
+const fullRunRed = red;
 if (red && !timedOut && files.length) {
   // #746 — the isolation rerun is a SUBSET and calls run-test-files.mjs
   // directly, so run-tests.sh's opt-in never runs. Opt it in explicitly: this is
@@ -161,9 +177,56 @@ if (red && !timedOut && files.length) {
     file: 'node', args: ['scripts/run-test-files.mjs', ...files.map((f) => path.join('tests', f))],
     cwd: suiteDir, timeout: ISOLATION_TIMEOUT_MS,
   });
+  isolationOut = isolated.stdout + isolated.stderr;
   if (!isolated.timedOut && isolated.code === 0) {
     flake = true; // isolated re-run green: parallel-load flake, not a regression
     red = false;
+  }
+}
+
+/**
+ * #746 — PRESERVE THE EVIDENCE BEFORE DESTROYING THE TREE.
+ *
+ * On 2026-08-11 this card got the real red it had been gated on for two days:
+ * `css-custom-properties.test.mjs`, fourth sighting (Aug 5, 6, 9, 11), and it
+ * SURVIVED isolation — the watcher reproduced an intermittent failure in a
+ * clean single-file run, which is the most valuable event this instrument can
+ * produce. Nothing was learned from it, because:
+ *
+ *   - the full run's TAP lived only in `out`, a local variable
+ *   - the isolation run's output was captured into `isolated` and NEVER READ —
+ *     only `.timedOut` and `.code` were consulted
+ *   - `cleanup()` then deleted the clone
+ *
+ * ⚠️ The card's own warning was aimed at the wrong actor: "if you see a red,
+ * read the ledger before you RERUN it — the rerun is what destroys the
+ * evidence." The rerun was not the destroyer. The instrument was.
+ *
+ * Written for ANY red full run, flake or not: a flake is a red that resolved,
+ * and it is exactly the case the ledger reduces to a verdict and a filename.
+ * Ordering is load-bearing — this runs BEFORE cleanup(), because the isolation
+ * TAP is only reconstructible from a tree that is about to stop existing.
+ */
+if (fullRunRed && ARTIFACT_DIR) {
+  try {
+    const runDir = path.join(ARTIFACT_DIR, runId);
+    fs.mkdirSync(runDir, { recursive: true });
+    fs.writeFileSync(path.join(runDir, 'full.tap'), out);
+    if (isolationOut !== null) fs.writeFileSync(path.join(runDir, 'isolation.tap'), isolationOut);
+    fs.writeFileSync(path.join(runDir, 'meta.json'), `${JSON.stringify({
+      runId, at: now, files, timedOut, flake, survivedIsolation: !flake && isolationOut !== null,
+    }, null, 2)}\n`);
+    // Bounded: newest-first by name, since run ids sort chronologically.
+    const kept = fs.readdirSync(ARTIFACT_DIR).sort().reverse();
+    for (const stale of kept.slice(ARTIFACT_KEEP)) {
+      fs.rmSync(path.join(ARTIFACT_DIR, stale), { recursive: true, force: true });
+    }
+    console.log(`${now} artifacts preserved: ${runDir}`);
+  } catch (e) {
+    // ⚠️ Never let evidence-keeping break the alarm. A watcher that dies while
+    // saving a log is worse than one that loses the log — #670's whole point is
+    // that the subscription must fire.
+    console.log(`${now} WARNING: could not preserve artifacts: ${e.message}`);
   }
 }
 cleanup();

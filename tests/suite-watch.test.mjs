@@ -27,8 +27,27 @@ const WATCH = path.join(ROOT, 'scripts', 'suite-watch.mjs');
 // now includes the record as well as the state file.
 const SCRATCH_LEDGER = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ledger-sw-')), 'ledger.jsonl');
 
+/**
+ * #746 — the artifact directory is the THIRD live surface these fixtures can
+ * reach, after the state file and the ledger. It defaults ON in the watcher
+ * (opt-in retention would ship the very hole this fixes), so every deliberately
+ * red fixture universe here writes real TAP somewhere.
+ *
+ * ⚠️ Caught by the change that introduced it: the first run of these tests wrote
+ * ELEVEN run directories into ~/.claude/scrum-suite-watch-artifacts. The rule
+ * was already on this file — "a positive control for an alarm must never touch
+ * the real instrument, and that now includes the record as well as the state
+ * file" — and adding a new record surface did not carry it across.
+ */
+const SCRATCH_ARTIFACTS = fs.mkdtempSync(path.join(os.tmpdir(), 'artifacts-sw-'));
+
 function cleanEnv(extra) {
-  const env = { ...process.env, SCRUM_VERDICT_LEDGER: SCRATCH_LEDGER, ...extra };
+  const env = {
+    ...process.env,
+    SCRUM_VERDICT_LEDGER: SCRATCH_LEDGER,
+    SUITE_WATCH_ARTIFACTS: SCRATCH_ARTIFACTS,
+    ...extra,
+  };
   for (const k of Object.keys(env)) if (k.startsWith('NODE_TEST')) delete env[k];
   delete env.NODE_OPTIONS;
   return env;
@@ -372,4 +391,87 @@ test('#735 isolation deadlines terminate their detached descendants', async () =
     if (detachedPid) stop(detachedPid);
     if (!closed) stop(watcher.pid);
   }
+});
+
+/**
+ * #746 — THE EVIDENCE THE WATCHER DESTROYS ITSELF.
+ *
+ * The card's thesis was aimed at humans: "if you see a red, read the ledger
+ * before you rerun it — the rerun is what destroys the evidence." On
+ * 2026-08-11 the card got its long-awaited real red, and the evidence was
+ * destroyed anyway — not by a human rerunning, but by the watcher:
+ *
+ *   09:45:05Z  suite RED sig=[css-custom-properties.test.mjs] FIRING
+ *              # tests 1013 · # pass 1012 · # fail 1
+ *
+ * The failure SURVIVED isolation (a flake would have logged "did not survive
+ * isolation — flake, silent"), so the watcher reproduced it in a clean tree —
+ * the single most valuable event this instrument can produce. Then:
+ *
+ *   - the full run's TAP lived only in `out`, a local variable
+ *   - the isolation run's TAP was captured into `isolated` and NEVER READ:
+ *     only `.timedOut` and `.code` are consulted
+ *   - `cleanup()` deleted the clone
+ *
+ * ⇒ Fourth sighting of this flake (Aug 5, 6, 9, 11) and still no assertion,
+ *   no diff, no stack — because the one run that reproduced it threw its
+ *   output away. The ledger keeps the verdict and the filename; neither
+ *   explains occurrence five.
+ *
+ * These assert the artifacts EXIST and CARRY THE FAILURE TEXT. A test that
+ * only checked "a file was written" would pass on an empty file, which is the
+ * same defect one layer up.
+ */
+test('#746 a RED preserves BOTH the full-run and isolation TAP, with the failure text', async () => {
+  const u = makeUniverse();
+  goRed(u.dir);
+  const artifacts = fs.mkdtempSync(path.join(os.tmpdir(), 'sw-art-'));
+  const out = await tick(u, { SUITE_WATCH_ARTIFACTS: artifacts });
+  assert.equal(posted(out), true, 'a red that survives isolation must post');
+
+  const runs = fs.readdirSync(artifacts);
+  assert.equal(runs.length, 1, `expected one run directory, got ${JSON.stringify(runs)}`);
+  const runDir = path.join(artifacts, runs[0]);
+
+  const full = path.join(runDir, 'full.tap');
+  const iso = path.join(runDir, 'isolation.tap');
+  assert.ok(fs.existsSync(full), 'the full-run TAP must be preserved');
+  assert.ok(fs.existsSync(iso), 'the ISOLATION TAP must be preserved — it is the irreplaceable half');
+
+  // ⚠️ Not "a file exists" — the file must carry the assertion that explains
+  // the failure. An empty artifact is the same silence with a filename.
+  const fullText = fs.readFileSync(full, 'utf8');
+  const isoText = fs.readFileSync(iso, 'utf8');
+  assert.match(fullText, /red\.test\.mjs/, 'full TAP must name the failing file');
+  assert.match(isoText, /red\.test\.mjs/, 'isolation TAP must name the failing file');
+  assert.match(isoText, /not ok|Expected values to be strictly equal|AssertionError/,
+    'isolation TAP must carry the actual failure, not just a verdict');
+
+  // The run id links the artifact to the ledger line, so a reader who finds
+  // one can reach the other.
+  const meta = JSON.parse(fs.readFileSync(path.join(runDir, 'meta.json'), 'utf8'));
+  assert.equal(typeof meta.runId, 'string');
+  assert.deepEqual(meta.files, ['red.test.mjs']);
+});
+
+test('#746 a GREEN run writes NO artifacts — evidence retention is for reds only', async () => {
+  const u = makeUniverse();
+  const artifacts = fs.mkdtempSync(path.join(os.tmpdir(), 'sw-art-'));
+  await tick(u, { SUITE_WATCH_ARTIFACTS: artifacts });
+  assert.deepEqual(fs.readdirSync(artifacts), [],
+    'a green run must not accumulate artifacts — unbounded growth is its own defect');
+});
+
+test('#746 artifact retention is BOUNDED — oldest runs are pruned', async () => {
+  const u = makeUniverse();
+  goRed(u.dir);
+  const artifacts = fs.mkdtempSync(path.join(os.tmpdir(), 'sw-art-'));
+  // Pre-seed more run dirs than the cap so pruning has something to do.
+  for (const n of ['aaa', 'bbb', 'ccc']) {
+    fs.mkdirSync(path.join(artifacts, n));
+    fs.writeFileSync(path.join(artifacts, n, 'full.tap'), 'old\n');
+  }
+  await tick(u, { SUITE_WATCH_ARTIFACTS: artifacts, SUITE_WATCH_ARTIFACT_KEEP: '2' });
+  const runs = fs.readdirSync(artifacts);
+  assert.equal(runs.length, 2, `retention cap not applied: ${JSON.stringify(runs)}`);
 });
