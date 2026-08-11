@@ -1628,10 +1628,34 @@ function parseQuery(reqUrl) {
 // list stays uncapped (#202: the browser's full-history fetch).
 const MAX_CONV_LIST_LIMIT = Number(process.env.SCRUM_MAX_CONV_LIST_LIMIT) || 200;
 
+/**
+ * #777 — the SUPPORTED set. An unknown param is REFUSED, not ignored.
+ *
+ * This endpoint used to drop unrecognised params silently and answer with its
+ * entire corpus — 14,468 conversations the day this shipped — under a 200. So
+ * `?athor=wren` (one keystroke from `author`) and `?` with no filter at all
+ * returned byte-identical responses, and the typo read exactly like a filter
+ * that matched everything.
+ *
+ * ⚠️ The pattern that refuses already existed one endpoint over: `/api/changes`
+ * and `/api/cards` both 400 with the offending param AND the supported set, and
+ * #683's `/api/cursors/*` shipped with `queryGuard` from birth citing this very
+ * card. Nothing here is a new idea — it is the same guard, finally applied.
+ *
+ * ⚠️ Keep this list in step with the filters below. A param that is read but
+ * missing from the set becomes a 400 for a caller who was doing nothing wrong,
+ * which is a worse defect than the one being fixed — hence a positive control
+ * per param in tests/conversations-params.test.mjs.
+ */
+const CONVERSATION_PARAMS = new Set([
+  'attachedTo', 'author', 'since', 'mentions_me', 'before', 'limit',
+]);
+
 function handleListConversations(req, res) {
   try {
+    const q = queryGuard(req, res, CONVERSATION_PARAMS);
+    if (!q) return;                       // guard already sent the 400
     const data = readBoard();
-    const q = parseQuery(req.url);
     let convs = data.conversations;
     if (typeof q.attachedTo === 'string') {
       // Allow "null" string to filter to board-level conversations
@@ -1974,7 +1998,7 @@ async function handleUpdateNode(req, res, idOrShortId) {
 // was simply never applied. A new surface starts with it.
 const CURSOR_PARAMS = new Set(['identity', 'limit', 'via', 'as']);
 
-function cursorQueryGuard(req, res, extra = CURSOR_PARAMS) {
+function queryGuard(req, res, extra = CURSOR_PARAMS) {
   const q = parseQuery(req.url);
   const unsupported = Object.keys(q).filter((k) => !extra.has(k));
   if (unsupported.length) {
@@ -1990,7 +2014,7 @@ function cursorQueryGuard(req, res, extra = CURSOR_PARAMS) {
 
 /** GET /api/cursors — the reachability projection, inbound-evidence only. */
 function handleCursorReport(req, res) {
-  const q = cursorQueryGuard(req, res, new Set(['as', 'inputs', 'streamOpen']));
+  const q = queryGuard(req, res, new Set(['as', 'inputs', 'streamOpen']));
   if (!q) return;
   try {
     // `inputs=stream_open` is the card's POSITIVE CONTROL and nothing else: the
@@ -2036,7 +2060,7 @@ async function handleCursorRegister(req, res) {
  * cure: a response that dies in flight would still advance the cursor.
  */
 function handleCursorPull(req, res) {
-  const q = cursorQueryGuard(req, res);
+  const q = queryGuard(req, res);
   if (!q) return;
   if (!q.identity) {
     return sendJSON(res, 400, { error: 'identity is required (e.g. registry:minimo.sb)' });
