@@ -31,7 +31,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { startRestServer, startMcpServer, mcpSession, openChannelStream } from './helpers/harness.mjs';
+import http from 'node:http';
+import { startRestServer, startMcpServer, mcpSession, openChannelStream, freePort } from './helpers/harness.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -225,4 +226,155 @@ test('#787 POSITIVE CONTROL — an IDLE server exits before the grace, not throu
   assert.ok(exit.ms < 2000,
     `idle exit took ${exit.ms}ms with a 3000ms grace — it waited out the grace `
     + 'instead of returning through the close() callback, taxing every restart');
+});
+
+/**
+ * #787 — THE TWO POST DISCRIMINATORS. @minimo's review of the first grace tests.
+ *
+ * ⇒ ⭐⭐ The held-SSE timing test proves that the grace starts and ends. It does
+ *   NOT prove that an in-flight POST can complete and deliver its ACK. That gap
+ *   is exactly the shape this card keeps producing: I tested the MECHANISM (a
+ *   timer ran for the stated duration) and called it a test of the BENEFIT (a
+ *   write's acknowledgement survives). Those
+ *   are different claims and only the second one is why the grace exists. A
+ *   grace that runs its full duration while destroying every response in flight
+ *   would pass GRACE IS HONOURED and fail the users of this server.
+ *
+ * ── What the grace is actually for ──────────────────────────────────────────
+ * The upstream write LANDS on the REST peer and the ACK travels back over the
+ * MCP connection. Destroy that connection between those two events and the
+ * caller cannot tell whether their post happened — the side-effect-landed /
+ * ACK-lost ambiguity, arriving through the shutdown path.
+ *
+ * ⚠️ THE STUB IS THE INSTRUMENT. A real REST server answers in single-digit
+ * milliseconds, so "in flight when the signal arrives" is not a state a test
+ * can reliably enter against one. The stub below records the write the instant
+ * the request body ends — unconditionally, before any delay — and only THEN
+ * waits before answering. So `writes` is ground truth about the side effect,
+ * independent of whether the ACK ever came back, which is the whole distinction
+ * under test. Both tests below assert on `writes` for exactly that reason:
+ * without it, a truncated POST is indistinguishable from one that never ran,
+ * and "the write landed" would be an assumption rather than a measurement.
+ */
+
+/** A REST peer that lands the write immediately and answers `delayMs` later. */
+async function slowRest(delayMs) {
+  const writes = [];
+  const port = await freePort();
+  const srv = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      writes.push({ method: req.method, url: req.url, body });   // ⭐ the side effect, committed
+      setTimeout(() => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          id: 'stub-conversation', body: 'stub', author: 'wren',
+          attachedTo: null, attachments: [], mentions: [],
+          createdAt: '2026-08-11T00:00:00.000Z',
+        }));
+      }, delayMs).unref();
+    });
+  });
+  await new Promise((r) => srv.listen(port, '127.0.0.1', r));
+  return {
+    baseUrl: `http://127.0.0.1:${port}`,
+    writes,
+    /** Count only the POSTs under test — the MCP server may talk to REST for its own reasons. */
+    posts: () => writes.filter((w) => w.method === 'POST' && w.url.startsWith('/api/conversations')),
+    async close() {
+      srv.closeAllConnections?.();
+      await new Promise((r) => srv.close(r));
+    },
+  };
+}
+
+/**
+ * Bound any promise so a hang fails as a VALUE, never as a stalled test.
+ *
+ * ⚠️ CALL THIS AT LAUNCH, NOT AT ASSERTION TIME. These POSTs are *expected* to
+ * be destroyed mid-flight, and a rejection with no handler yet attached is an
+ * unhandledRejection — which node's test runner reports as a suite failure with
+ * a stack pointing into undici. Observed exactly that: the truncation worked,
+ * and the test failed anyway with `TypeError: terminated`. Attaching the
+ * observer when the request STARTS is what makes the rejection an outcome
+ * instead of a crash.
+ */
+function settled(p, ms) {
+  return Promise.race([
+    p.then((value) => ({ ok: true, value }), (error) => ({ ok: false, error })),
+    new Promise((r) => setTimeout(() => r({ ok: false, timedOut: true }), ms)),
+  ]);
+}
+
+test('#787 ⭐ a POST that FITS the grace still gets its ACK — the write is not orphaned', async (t) => {
+  // The benefit itself. A post lands upstream, SIGTERM arrives while the ACK is
+  // still in flight, and the caller must still learn that it happened.
+  const rest = await slowRest(400);
+  const mcp = await startMcpServer({
+    restApiBase: rest.baseUrl,
+    env: { MCP_SHUTDOWN_GRACE_MS: '2500', MCP_SHUTDOWN_FLOOR_MS: '9000' },
+  });
+  t.after(async () => { await mcp.stop(); await rest.close(); });
+
+  const s = await mcpSession(mcp.mcpUrl);
+  const inFlight = settled(s.callTool('conversation_post', { body: 'fits the grace', author: 'wren' }), 6000);
+  await sleep(150);                        // genuinely in flight; the write has landed
+
+  assert.equal(rest.posts().length, 1,
+    'precondition: the write must already be upstream when the signal arrives, '
+    + 'otherwise this test is about connection setup and not about the grace');
+
+  mcp.signal('SIGTERM');
+  const res = await inFlight;
+
+  assert.equal(res.ok, true,
+    `the in-flight POST did not deliver its ACK (${res.timedOut ? 'timed out' : res.error?.message}) — `
+    + 'its write LANDED upstream, so the caller is left unable to tell whether it happened');
+  assert.ok(res.value?.result && !res.value.result.isError,
+    `expected a tool result, got ${JSON.stringify(res.value)}`);
+
+  const exit = await mcp.waitExit(9000);
+  assert.ok(exit, 'and it must still exit afterwards');
+});
+
+test('#787 ⭐ a POST that OUTLIVES the grace is truncated, and the floor is not what saves it', async (t) => {
+  // The other side. The grace is BOUNDED: a request that will not finish in
+  // time gets cut, and the cut comes from closeAllConnections() at the grace —
+  // not from the hard floor underneath it. If the floor were doing the work,
+  // every hung upstream would tax every restart by the full floor.
+  const GRACE = 800, FLOOR = 4000;
+  const rest = await slowRest(15000);      // will not finish, by construction
+  const mcp = await startMcpServer({
+    restApiBase: rest.baseUrl,
+    env: { MCP_SHUTDOWN_GRACE_MS: String(GRACE), MCP_SHUTDOWN_FLOOR_MS: String(FLOOR) },
+  });
+  t.after(async () => { await mcp.stop(); await rest.close(); });
+
+  const s = await mcpSession(mcp.mcpUrl);
+  const inFlight = settled(s.callTool('conversation_post', { body: 'outlives the grace', author: 'wren' }), 20000);
+  await sleep(150);
+  assert.equal(rest.posts().length, 1, 'precondition: the write is upstream');
+
+  mcp.signal('SIGTERM');
+  const exit = await mcp.waitExit(FLOOR + 4000);
+
+  assert.ok(exit, 'a stuck upstream must not keep the process alive');
+  assert.ok(exit.ms >= GRACE - 100,
+    `exited in ${exit.ms}ms — before the ${GRACE}ms grace, so the grace was skipped entirely`);
+  assert.ok(exit.ms < FLOOR - 500,
+    `exited in ${exit.ms}ms, at the ${FLOOR}ms FLOOR — closeAllConnections() never fired at the `
+    + 'grace and the floor did the work, which would tax every restart with a slow upstream');
+
+  const res = await inFlight;
+  assert.equal(res.ok, false,
+    'a POST that cannot finish inside the grace must be truncated, not waited out');
+
+  // ⚠️ AND THIS IS THE COST, stated rather than hidden: the write LANDED and the
+  // caller will never know. That ambiguity is unavoidable at some deadline —
+  // the grace only makes it rare instead of universal, which is precisely the
+  // argument that beat my "truncate immediately" proposal.
+  assert.equal(rest.posts().length, 1,
+    'the side effect is upstream even though the ACK was destroyed — this is the '
+    + 'at-least-once boundary, and the grace bounds how often it is reached');
 });
