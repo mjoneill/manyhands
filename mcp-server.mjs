@@ -1863,9 +1863,49 @@ httpServer.on('error', (e) => {
   throw e;
 });
 
+/**
+ * #787 — SIGTERM MUST ACTUALLY END THIS PROCESS.
+ *
+ * The old body was `httpServer.close(() => process.exit(0))` and nothing else.
+ * `close()` stops accepting NEW connections and then waits for EXISTING ones to
+ * finish — and this server's whole purpose is held-open SSE streams, which
+ * never finish. The callback never fired, `process.exit(0)` never ran, and the
+ * process survived in a state our logs have no name for: listening socket
+ * closed, process alive, reaping idle sessions every 60s for nobody.
+ *
+ * ⚠️ AND IT DEFEATED THE SUPERVISION. launchd's KeepAlive restarts a job when
+ * its process EXITS. This one did not, so launchd saw a healthy job and did
+ * nothing. Observed live 2026-08-11: ~7 minutes of no MCP, no auto-recovery,
+ * found only because an unrelated post failed and someone checked.
+ *
+ * ⚠️ Every successful restart we have ever done was rescued by `kickstart -k`
+ * sending SIGKILL after SIGTERM. A bare SIGTERM — a script, a supervisor, a
+ * crossed operator — hung forever.
+ *
+ * ── ORDER IS LOAD-BEARING, and my first draft had it backwards ──────────────
+ * Destroying connections BEFORE close() leaves the listener open in between: a
+ * client reconnects into that window and `close()` waits on the NEW stream,
+ * re-arming the identical hang. Our seats reconnect within seconds, so that
+ * window is not theoretical. ⇒ STOP ACCEPTING FIRST, then destroy. (@minimo)
+ *
+ * ── AND THE TIMER IS THE LOAD-BEARING HALF, not closeAllConnections ─────────
+ * A cleanup path that CAN hang must never be the only route to exit. Same
+ * discipline as the claim throttle and the cursor commit: fail open, never
+ * wedge. `unref()` so the floor is a backstop and never a reason to linger.
+ */
+const SHUTDOWN_FLOOR_MS = Number(process.env.MCP_SHUTDOWN_FLOOR_MS ?? 5000);
+let shuttingDown = false;
 function shutdown() {
+  // #787 — REENTRANT BY DESIGN. Crossed operators are real: two seats
+  // restarted this service within minutes of each other on 2026-08-11 without
+  // knowing. A second signal must not throw, must not announce twice, and must
+  // not arm a competing deadline that could outlive the first.
+  if (shuttingDown) return;
+  shuttingDown = true;
   console.log('\nMCP server shutting down…');
-  httpServer.close(() => process.exit(0));
+  httpServer.close(() => process.exit(0));            // 1. stop ACCEPTING
+  httpServer.closeAllConnections?.();                 // 2. destroy held streams
+  setTimeout(() => process.exit(0), SHUTDOWN_FLOOR_MS).unref();   // 3. hard floor
 }
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);

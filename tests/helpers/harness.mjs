@@ -203,11 +203,37 @@ export async function startMcpServer({ restApiBase, port, env: extraEnv } = {}) 
     throw new Error(`MCP server failed to start: ${e.message}\nstderr: ${stderr.join('')}`);
   }
 
+  // #787 — exit bookkeeping. `stop()` below SIGKILLs, which is why no test ever
+  // exercised the SIGTERM path and why a shutdown that could never complete
+  // survived in production unnoticed: the suite skipped the signal that hangs.
+  let exited = null;                       // { code, signal } once it ends
+  proc.on('exit', (code, signal) => { exited = { code, signal }; });
+
   return {
     mcpUrl: `${baseUrl}/mcp`,
     healthUrl: `${baseUrl}/health`,
+    baseUrl,
+    pid: proc.pid,
     stdoutText: () => stdout.join(''),
     stderrText: () => stderr.join(''),
+    /** #787 — send a real signal. SIGTERM is the one production actually uses. */
+    signal(sig) { try { proc.kill(sig); } catch { /* already gone */ } },
+    /**
+     * #787 — resolve when the process exits, or null at the deadline.
+     * Returning null rather than throwing keeps "it hung" a VALUE a test can
+     * assert on, instead of an error that reads like a broken test.
+     */
+    waitExit(ms = 8000) {
+      const started = Date.now();
+      return new Promise((resolve) => {
+        if (exited) return resolve({ ...exited, ms: 0 });
+        const timer = setTimeout(() => resolve(null), ms);
+        proc.once('exit', (code, signal) => {
+          clearTimeout(timer);
+          resolve({ code, signal, ms: Date.now() - started });
+        });
+      });
+    },
     async stop() {
       proc.kill('SIGKILL');
     },
