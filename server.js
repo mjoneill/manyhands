@@ -1636,7 +1636,35 @@ function handleListConversations(req, res) {
     if (typeof q.attachedTo === 'string') {
       // Allow "null" string to filter to board-level conversations
       if (q.attachedTo === 'null') convs = convs.filter(c => c.attachedTo === null);
-      else convs = convs.filter(c => c.attachedTo === q.attachedTo);
+      else {
+        // #778 — RESOLVE THE CARD, or refuse. `attachedTo` is not free text: it
+        // names a card, and this server holds the card list, so "does this id
+        // resolve?" is a question it can answer and used not to ask.
+        //
+        // Without this, a card id that resolves to nothing returned 200 and an
+        // empty list — byte-identical to a real card with no discussion. On
+        // 2026-08-10 that cost a reader a wrong conclusion: the number printed
+        // on every card is its shortId, `attachedTo=755` matches no UUID, and
+        // the answer was a well-formed empty thread that read as "never
+        // discussed". This is the reader-facing half of #761; the join fix
+        // (accepting both key formats) is separate and larger.
+        //
+        // ⚠️ The check asks the CARD list, not the post list. Refusing when the
+        // RESULT is empty would collapse the same two states in the other
+        // direction — a real, quiet card would refuse too.
+        if (!data.cards.some((c) => c.id === q.attachedTo)) {
+          const looksLikeShortId = /^\d+$/.test(q.attachedTo);
+          return sendJSON(res, 404, {
+            error: `no card with id ${q.attachedTo}`
+              + (looksLikeShortId
+                ? ' — that looks like a shortId (the number printed on the card); pass the card\'s UUID instead'
+                : ''),
+            code: 'NO_SUCH_CARD',
+            attachedTo: q.attachedTo,
+          });
+        }
+        convs = convs.filter(c => c.attachedTo === q.attachedTo);
+      }
     }
     if (typeof q.author === 'string') {
       convs = convs.filter(c => c.author === q.author);
