@@ -993,6 +993,64 @@ const REAP_IDLE_MS = Number(process.env.MCP_REAP_IDLE_MS ?? 300000); // 5 min de
 // #726 — how long a session must hold ZERO streams before a request from it counts
 // as deafness rather than an in-flight reconnect. See the detector below for the
 // derivation; env-overridable so tests can drive it without sleeping.
+/**
+ * #784 — THE DEPARTURE LEDGER. `missed` cannot see a session that is GONE.
+ *
+ * `missed` is computed from `[...transports.keys()]` — sessions that still
+ * exist holding no stream. But both teardown paths (`transport.onclose` and
+ * `reapIdleSessions`) delete a session from `transports` before any later
+ * fanout can classify it:
+ *
+ *   stream dies, session survives   → counted as missed      ✅ visible
+ *   session dies entirely           → counted as NOTHING     ⛔ invisible
+ *
+ * ⚠️ And the destroyed-session case is the ORDINARY one — every gateway
+ * restart, every MCP restart, every client reconnect, every spec DELETE.
+ * Measured 2026-08-11: a session held a stream, was DELETEd, and the four
+ * following fanouts each printed `missed=0`. The instrument named for the loss
+ * is blind to its largest cause, and reads HEALTHY while being so.
+ *
+ * ⭐ NO WINDOW, NO THRESHOLD. Each fanout drains the ledger, so a departure is
+ * reported exactly once — on the next message, which is precisely the message
+ * that seat missed. Every threshold this room picked for #624 was wrong (#726);
+ * an accounting that needs none cannot be wrong that way. Bounded only against
+ * unbounded growth if the room goes silent for a long time.
+ *
+ * ⛔ `everHadStream` gates it, for the same reason it gates `missed`: a client
+ * that never asked to listen is not loss when it leaves, exactly as it is not
+ * loss when it stays. Without this every healthcheck reconnect inflates the
+ * number and it becomes as useless as `missed=5` was before the floor problem
+ * was fixed.
+ *
+ * ⚠️ KNOWN AND DELIBERATE LIMITATION, stated rather than half-guessed:
+ * a RECONNECTING seat counts here. Its old session closes (→ a departure) while
+ * its new session is already live, so `departed=1` can name a seat that is
+ * present. That reading is not false — the departed SESSION genuinely missed
+ * this message — but it is not the same as "a seat is missing messages."
+ *
+ * Suppressing it needs "does this seat have a live session now," which is only
+ * answerable for TOKEN-BOUND seats; the registry-only and anonymous populations
+ * cannot answer it (#779). ⇒ Rather than compute it for the population we can
+ * see and quietly guess for the rest — the exact defect #784 is fixing — the
+ * count stays raw and honest, and the annotation waits until it can be computed
+ * for everyone. If reconnect churn makes the number useless in practice, THAT
+ * is the evidence for adding it, and it will be visible in this very line.
+ */
+const DEPARTURES_CAP = 200;
+let departures = [];
+function recordDeparture(sid, why) {
+  const m = sessionMeta.get(sid);
+  if (!m?.everHadStream) return;   // never asked to listen — not loss
+  departures.push({ sid, seat: m.seat ?? null, at: Date.now(), why });
+  if (departures.length > DEPARTURES_CAP) departures = departures.slice(-DEPARTURES_CAP);
+}
+/** Drain: every departure is reported by exactly one fanout, then forgotten. */
+function takeDepartures() {
+  const out = departures;
+  departures = [];
+  return out;
+}
+
 const DEAF_GRACE_MS = Number(process.env.MCP_DEAF_GRACE_MS ?? 5000);
 const REAP_SWEEP_MS = Number(process.env.MCP_REAP_SWEEP_MS ?? 30000); // 30 s default
 function reapIdleSessions() {
@@ -1000,6 +1058,7 @@ function reapIdleSessions() {
   for (const [sid, m] of sessionMeta) {
     if ((m.openStreamCount ?? 0) <= 0 && now - m.lastActivity > REAP_IDLE_MS) {
       const t = transports.get(sid);
+      recordDeparture(sid, 'reaped');   // #784 — BEFORE the delete; after it there is nothing to read
       sessionMeta.delete(sid);
       transports.delete(sid);
       try { t?.close?.(); } catch { /* best-effort */ }
@@ -1235,9 +1294,18 @@ function broadcastFanout(conversation) {
   const missed = stale.filter((sid) => sessionMeta.get(sid)?.everHadStream);
   const toolOnly = stale.length - missed.length;
   const name = (sid) => sessionMeta.get(sid)?.seat ?? sid;
+  // #784 — the departed. Drained, so each is reported by exactly one fanout:
+  // the message it missed. These sessions are already gone from `transports`,
+  // so `missed` above cannot see them however it is filtered.
+  const gone = takeDepartures();
   console.log(
     `[#624] fanout msg=${conversation.id} delivered=${targets.length} missed=${missed.length} toolOnly=${toolOnly}`
-    + (missed.length ? ` unreachable=[${missed.map(name).join(',')}]` : ''),
+    + ` departed=${gone.length}`
+    + (missed.length ? ` unreachable=[${missed.map(name).join(',')}]` : '')
+    // ⚠️ A DISTINCT key for the list. `missed=N` pairs with `unreachable=[…]`
+    // for the same reason: one key appearing twice on a line is a parser trap,
+    // and this line is already parsed by the fanout watch.
+    + (gone.length ? ` left=[${gone.map((d) => `${d.seat ?? d.sid}:${d.why}`).join(',')}]` : ''),
   );
 
   // #265 — hand all real receivers to the scheduler at once, so it can pick one
@@ -1598,6 +1666,7 @@ const httpServer = http.createServer(async (req, res) => {
       transport.onclose = () => {
         const sid = transport.sessionId;
         if (sid && transports.has(sid)) {
+          recordDeparture(sid, 'closed'); // #784 — BEFORE the delete; after it there is nothing to read
           transports.delete(sid);
           sessionMeta.delete(sid);
           // #410 — drop this session's ring seat, if any. Fenced by sessionId:

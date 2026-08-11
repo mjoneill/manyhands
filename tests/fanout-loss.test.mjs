@@ -130,3 +130,91 @@ test('#624 ANTI-VACUITY: the harness can observe an accounting line at all', asy
     'if this fails, every assertion above passes over an empty array');
   stream.close();
 });
+
+/**
+ * #784 — THE COUNTER IS BLIND TO THE LARGEST CAUSE OF LOSS.
+ *
+ * `missed` is computed from `[...transports.keys()]` — sessions that STILL
+ * EXIST with no open stream. But `transport.onclose` deletes a departed session
+ * from `transports` before any later fanout classifies it:
+ *
+ *   stream dies, session survives   → counted as missed         ✅ visible
+ *   session dies entirely           → counted as NOTHING        ⛔ invisible
+ *
+ * And the destroyed-session case is the ORDINARY one: every gateway restart,
+ * every MCP restart, every client reconnect, every spec-DELETE. Measured live
+ * on 2026-08-11 — an anonymous session held a stream, was DELETEd, and the four
+ * following fanouts all printed `missed=0`.
+ *
+ * ⇒ So the instrument named for the loss cannot see the largest cause of it,
+ *   and reads HEALTHY while doing so. That is why the #624 accounting has
+ *   looked quiet through incidents the room knows happened.
+ *
+ * The discriminator is the same one `missed` already uses — `everHadStream`.
+ * A session that never asked to listen and then departed is not loss, exactly
+ * as a tool-only session that stays is not loss (the floor problem, #624).
+ */
+test('#784 a session that HELD a stream and then DEPARTED is counted, not vanished', async (t) => {
+  const { rest, mcp } = await startPair();
+  t.after(async () => { await mcp.stop(); await rest.stop(); });
+
+  const listening = await mcpSession(mcp.mcpUrl);
+  const stream = await openChannelStream(mcp.mcpUrl, listening.sessionId);
+
+  // A seat that asked to listen, then had its whole SESSION destroyed —
+  // a gateway restart, a reconnect, or the MCP spec's own DELETE.
+  const leaving = await mcpSession(mcp.mcpUrl);
+  const leavingStream = await openChannelStream(mcp.mcpUrl, leaving.sessionId);
+  await sleep(200);
+  leavingStream.close();
+  await fetch(mcp.mcpUrl, {
+    method: 'DELETE',
+    headers: { 'mcp-session-id': leaving.sessionId, 'MCP-Protocol-Version': '2025-06-18' },
+  });
+  await sleep(250);
+
+  await post(rest.baseUrl, 'who is still here', 'test-author');
+  await sleep(600);
+
+  const lines = lossLines(mcp.stdoutText());
+  assert.equal(lines.length, 1, 'every broadcast accounts for itself, exactly once');
+  assert.match(lines[0], /delivered=1/, 'one session held a stream');
+
+  // ⛔ The defect: today this reads missed=0 and says nothing else. A departed
+  // listener must not be silently absent from the accounting.
+  assert.match(lines[0], /departed=1/,
+    'a session that held a stream and was destroyed must be COUNTED');
+  assert.match(lines[0], new RegExp(leaving.sessionId),
+    'the departed session is NAMED, not merely counted — a scalar cannot be investigated (#727)');
+
+  stream.close();
+});
+
+test('#784 a session that NEVER held a stream and departs is NOT loss — the floor problem again', async (t) => {
+  const { rest, mcp } = await startPair();
+  t.after(async () => { await mcp.stop(); await rest.stop(); });
+
+  const listening = await mcpSession(mcp.mcpUrl);
+  const stream = await openChannelStream(mcp.mcpUrl, listening.sessionId);
+
+  // Tool-only: initialised, used, departed. It never asked to listen, so its
+  // departure is not a delivery failure — the same reasoning that keeps a
+  // resident tool-only client out of `missed`. Without this, every healthcheck
+  // reconnect would inflate `departed` forever and the number would be as
+  // useless as `missed=5` was before `everHadStream` existed.
+  const toolOnly = await mcpSession(mcp.mcpUrl);
+  await fetch(mcp.mcpUrl, {
+    method: 'DELETE',
+    headers: { 'mcp-session-id': toolOnly.sessionId, 'MCP-Protocol-Version': '2025-06-18' },
+  });
+  await sleep(250);
+
+  await post(rest.baseUrl, 'still only one listener', 'test-author');
+  await sleep(600);
+
+  const lines = lossLines(mcp.stdoutText());
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /departed=0/, 'never asked to listen is NOT loss, departed or not');
+
+  stream.close();
+});
