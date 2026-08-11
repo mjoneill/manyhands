@@ -1893,6 +1893,31 @@ httpServer.on('error', (e) => {
  * discipline as the claim throttle and the cursor commit: fail open, never
  * wedge. `unref()` so the floor is a backstop and never a reason to linger.
  */
+/**
+ * #787 — THE BOUNDED GRACE, and it is @minimo's, not mine.
+ *
+ * My first version destroyed every connection immediately. I defended that with
+ * "a grace period is one more thing that can hang." ⇒ ⛔ WRONG, and her
+ * refutation is the sentence worth keeping:
+ *
+ *   "A fixed timer is not a hangable step; it waits on DURATION, not on
+ *    cleanup success."
+ *
+ * My objection was valid about waiting on a CALLBACK and I applied it to
+ * waiting on a CLOCK. The hard floor below is itself a clock — the same
+ * argument would have condemned it.
+ *
+ * ⚠️ And the cost of instant truncation is not politeness, which is how I
+ * framed it. It is the ambiguity this codebase already fights elsewhere:
+ *
+ *   "Immediate closeAllConnections() guarantees the exact
+ *    side-effect-landed/ACK-lost ambiguity already documented in this server."
+ *
+ * ⇒ A POST whose write LANDED but whose response was destroyed leaves the
+ *   caller unable to tell whether it happened — the at-least-once problem #683
+ *   spent two days on, arriving through the shutdown path.
+ */
+const SHUTDOWN_GRACE_MS = Number(process.env.MCP_SHUTDOWN_GRACE_MS ?? 1000);
 const SHUTDOWN_FLOOR_MS = Number(process.env.MCP_SHUTDOWN_FLOOR_MS ?? 5000);
 let shuttingDown = false;
 function shutdown() {
@@ -1903,9 +1928,27 @@ function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log('\nMCP server shutting down…');
-  httpServer.close(() => process.exit(0));            // 1. stop ACCEPTING
-  httpServer.closeAllConnections?.();                 // 2. destroy held streams
-  setTimeout(() => process.exit(0), SHUTDOWN_FLOOR_MS).unref();   // 3. hard floor
+
+  // 1. STOP ACCEPTING, first and immediately. Ordering is load-bearing:
+  //    destroying connections while still listening leaves a window for a
+  //    client to reconnect and re-arm the identical hang, and our seats
+  //    reconnect within seconds. This callback is also the FAST PATH — with
+  //    nothing active it fires at once, so an idle restart pays no grace.
+  httpServer.close(() => process.exit(0));
+
+  // 2. Free idle keep-alives now; they are owed nothing.
+  //    ⚠️ This does NOT free the SSE streams — held streams are ACTIVE, not
+  //    idle, which is precisely why step 3 exists.
+  httpServer.closeIdleConnections?.();
+
+  // 3. Give ACTIVE requests a fixed grace to land their responses, then force.
+  //    A duration cannot wedge; the floor below bounds it regardless.
+  setTimeout(() => httpServer.closeAllConnections?.(), SHUTDOWN_GRACE_MS).unref();
+
+  // 4. INDEPENDENT hard floor. This is the load-bearing half: a cleanup path
+  //    that CAN hang must never be the only route to exit. Same discipline as
+  //    the claim throttle and the cursor commit — fail open, never wedge.
+  setTimeout(() => process.exit(0), SHUTDOWN_FLOOR_MS).unref();
 }
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);

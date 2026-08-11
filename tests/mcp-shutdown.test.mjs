@@ -151,3 +151,78 @@ test('#787 POSITIVE CONTROL — with NO connections it exits PROMPTLY, not at th
     `idle shutdown took ${exit.ms}ms — it must not wait for the ${FLOOR_MS}ms floor `
     + 'when there is nothing to wait for');
 });
+
+/**
+ * #787 — THE BOUNDED GRACE. @minimo's ruling, and her argument defeated mine.
+ *
+ * I argued for immediate `closeAllConnections()` on the grounds that a grace
+ * period is one more thing that can hang. ⇒ WRONG, and the reason is exact: a
+ * fixed timer is not a hangable step — it waits on DURATION, not on cleanup
+ * success.
+ *
+ * A `setTimeout` cannot wedge. My objection applied to waiting on a CALLBACK
+ * and I applied it to waiting on a CLOCK — two different things, and the whole
+ * point of the hard floor is that clocks are the safe kind of wait.
+ *
+ * And the cost of immediate truncation is not politeness, which is how I framed
+ * it. Immediate closeAllConnections() guarantees the exact side-effect-landed /
+ * ACK-lost ambiguity this server already documents elsewhere.
+ *
+ * ⇒ A POST whose write LANDED but whose response was destroyed leaves the
+ *   caller unable to tell whether it happened. That is the same at-least-once
+ *   problem #683 spent two days on, arriving through the shutdown path.
+ *
+ * ── The sequence, hers ──────────────────────────────────────────────────────
+ *   1  close() immediately — stop accepting
+ *   2  let existing active requests have a short FIXED grace
+ *   3  closeAllConnections() when that timer fires
+ *   4  an INDEPENDENT hard floor underneath all of it
+ *   5  exit promptly via the close() callback when nothing is active
+ */
+
+test('#787 GRACE IS HONOURED — a held stream is not killed instantly', async (t) => {
+  const rest = await startRestServer();
+  const mcp = await startMcpServer({
+    restApiBase: rest.baseUrl,
+    env: { MCP_SHUTDOWN_GRACE_MS: '1500', MCP_SHUTDOWN_FLOOR_MS: '5000' },
+  });
+  t.after(async () => { await mcp.stop(); await rest.stop(); });
+
+  const s = await mcpSession(mcp.mcpUrl);
+  await openChannelStream(mcp.mcpUrl, s.sessionId);
+  await sleep(200);
+
+  mcp.signal('SIGTERM');
+  const exit = await mcp.waitExit(9000);
+
+  assert.ok(exit, 'it must still exit');
+  // ⭐ BOTH SIDES. Too fast ⇒ the grace was skipped and in-flight work is
+  // truncated unconditionally. Too slow ⇒ the force never fired and only the
+  // floor saved it. The window proves the grace ran AND ended.
+  assert.ok(exit.ms >= 1200,
+    `exited in ${exit.ms}ms — faster than the 1500ms grace, so active requests `
+    + 'were truncated with no chance to finish');
+  assert.ok(exit.ms < 4500,
+    `exited in ${exit.ms}ms — that is the 5000ms FLOOR, not the grace. `
+    + 'closeAllConnections() never fired and the held stream was never forced');
+});
+
+test('#787 POSITIVE CONTROL — an IDLE server exits before the grace, not through it', async (t) => {
+  // Step 5 of the shutdown sequence: with no active connections, exit promptly
+  // through the close() callback. Without this test, a fix that simply always
+  // waits out the grace would pass every test above while taxing every restart.
+  const rest = await startRestServer();
+  const mcp = await startMcpServer({
+    restApiBase: rest.baseUrl,
+    env: { MCP_SHUTDOWN_GRACE_MS: '3000', MCP_SHUTDOWN_FLOOR_MS: '9000' },
+  });
+  t.after(async () => { await mcp.stop(); await rest.stop(); });
+
+  mcp.signal('SIGTERM');
+  const exit = await mcp.waitExit(9000);
+
+  assert.ok(exit, 'an idle server must exit on SIGTERM');
+  assert.ok(exit.ms < 2000,
+    `idle exit took ${exit.ms}ms with a 3000ms grace — it waited out the grace `
+    + 'instead of returning through the close() callback, taxing every restart');
+});
