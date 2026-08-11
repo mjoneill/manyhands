@@ -52,6 +52,8 @@ import { openWorkObjectsAt } from './core/work-store.mjs';
 // had a green suite and zero callers, so no seat could create a work object and
 // signal 1 was unmeasurable BY CONSTRUCTION rather than merely unmeasured.
 import { workDeclare, workBid, workNobid, workContest, workGrant, workList } from './core/work-tools.mjs';
+// #755 BRANCH E — the claim throttle. Its own flag; see core/claim-throttle.mjs.
+import { decideThrottle, isThrottleArmed, COOLDOWN_MS } from './core/claim-throttle.mjs';
 import { readConfig } from './channel-config.mjs';
 import { createSeatRegistry } from './core/seat-registry.mjs';
 import { createTokenRingEngine } from './core/token-ring-engine.mjs';
@@ -343,7 +345,82 @@ function buildMcpServer() {
     return plainCardCreate(args);
   };
 
-  const cardCreateHandler = isGateArmed() ? gatedCardCreate : plainCardCreate;
+  // ── #755 BRANCH E — the claim throttle ───────────────────────────────────
+  //
+  // ⛔ ITS OWN FLAG, never the gate's. The gate is a candidate for REMOVAL
+  // and the throttle is a candidate for KEEPING; a shared flag would make
+  // "remove the gate, keep the throttle" unreachable without a code change.
+  //
+  // ⚠️ THE PREVIOUS ACTION IS ASKED OF REST, NOT READ FROM DISK.
+  // mcp-server has no idea where the event log lives, and giving it one would
+  // be a new path precondition of exactly the #767 shape. `/api/changes` reads
+  // that log and takes a since-window — and "was there a covered action by
+  // someone else in the last 60s" IS a since-query. REST keeps owning its log;
+  // this asks a question it already knows how to answer.
+  //
+  // ⚠️ FAILS OPEN on any error. A rail whose failure mode is "the board stops
+  // accepting cards" is worse than the problem it solves, and a stale or absent
+  // answer can only ever cost one extra ALLOW.
+  const withThrottle = isThrottleArmed()
+    ? (inner) => async (args) => {
+      const now = new Date().toISOString();
+      let previous = null;
+      // ⇒ THREE STATES, not two. "no predecessor" and "could not look" must not
+      // collapse into the same silent ALLOW — a rail that disables itself
+      // without saying so reads identical to one that is simply quiet.
+      let lookedOk = false;
+      const ask = async (sinceIso) =>
+        apiCall('GET', `/api/changes?since=${encodeURIComponent(sinceIso)}&limit=100`);
+      try {
+        let res;
+        const since = new Date(Date.now() - COOLDOWN_MS).toISOString();
+        try {
+          res = await ask(since);
+        } catch (e) {
+          // ⛔ CURSOR_TOO_OLD: the log does not reach back a full cooldown, so
+          // the window we asked for cannot be answered — but the server names
+          // the earliest point it CAN answer. Asking again from there is not a
+          // fallback, it is the same question narrowed to what exists.
+          //
+          // ⚠️ This is why the throttle looked flaky: a young log (every fresh
+          // process, and every test fixture) has an `oldest` newer than
+          // now−60s, so the first ask 400s. The bare catch turned that into a
+          // silent ALLOW and the rail simply did not run.
+          // apiCall surfaces only `detail.error`, so the machine-readable
+          // `oldest_retained` field is gone by here — the ISO stamp survives
+          // inside the human sentence "(oldest: …)". Match both shapes.
+          const m = /"oldest_retained":"([^"]+)"/.exec(String(e.message))
+            || /\(oldest:\s*([^)\s]+)\)/.exec(String(e.message));
+          if (!m) throw e;
+          res = await ask(m[1]);
+        }
+        // The log's total order is ascending, so the last matching row is the
+        // most recent one. Only card CREATES count: an update or a post is not
+        // a claim on new work.
+        const creates = (res?.changes || []).filter((r) => r.kind === 'card' && r.op === 'create');
+        const last = creates[creates.length - 1];
+        if (last) previous = { actor: last.by ?? null, at: last.at };
+        lookedOk = true;
+      } catch (e) {
+        // COULD NOT LOOK — allow, but SAY SO. Silence here is the failure mode.
+        console.error(`[#755 throttle] could not read recent actions (${e.message}) — allowing`);
+        previous = null;
+      }
+      if (!lookedOk) return inner(args);
+      const decision = decideThrottle({ actor: args.createdBy, previous, now });
+      if (!decision.allow) {
+        return jsonResult({
+          refused: true,
+          rule: decision.reason,
+          retryAfterSeconds: decision.retryAfterSeconds,
+          message: decision.message,
+        });
+      }
+      return inner(args);
+    }
+    : (inner) => inner;
+
+  const cardCreateHandler = isGateArmed() ? withThrottle(gatedCardCreate) : withThrottle(plainCardCreate);
 
   // ── #755 slice 2e — Work tools: the INPUT PATH ───────────────────
   //
