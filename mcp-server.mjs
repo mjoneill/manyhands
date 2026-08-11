@@ -56,6 +56,10 @@ import { workDeclare, workBid, workNobid, workContest, workGrant, workList } fro
 import { decideThrottle, isThrottleArmed, COOLDOWN_MS } from './core/claim-throttle.mjs';
 import { readConfig } from './channel-config.mjs';
 import { createSeatRegistry } from './core/seat-registry.mjs';
+// #683 — only the KEY-BUILDING half is imported here. The cursor state lives
+// beside the event log, which REST owns; mcp-server owns identity and asks over
+// HTTP. Giving this process a log path would be #767's shape exactly.
+import { deliveryIdentity } from './core/cursor-service.mjs';
 import { createTokenRingEngine } from './core/token-ring-engine.mjs';
 
 // #359 — timestamp every log line. The 2026-07-09 empty-response incident could
@@ -292,7 +296,22 @@ function buildMcpServer() {
       console.warn(`[#410 register] seat ${seatId} SUPERSEDED session ${result.supersededSession} (reconnect or DUPLICATE config?) → now sid=${sessionId} epoch=${result.epoch}`);
     }
     console.log(`[#410 register] seat ${seatId} ↔ sid=${sessionId} epoch=${result.epoch} author=${author ?? '(none)'} ring=[${seatRegistry.seats().join(', ')}]`);
-    return { ok: true, seatId: result.seatId, epoch: result.epoch, supersededSession: result.supersededSession };
+    // #683 — a lane that registers gets a durable cursor. A lane we already
+    // know KEEPS its cursor: re-registration is exactly the case where NOT
+    // resetting is the whole point, because a seat re-registers precisely when
+    // its stream died. Fail-open: a cursor we could not create costs replay,
+    // never the registration itself.
+    let cursor = null;
+    try {
+      const reg = await apiCall('POST', '/api/cursors/register', { registrySeatId: seatId });
+      cursor = reg?.envelope ?? null;
+      if (reg && !reg.fresh && cursor?.lag > 0) {
+        console.log(`[#683] lane registry:${seatId} reconnected ${cursor.lag} event(s) behind — replay is owed`);
+      }
+    } catch (e) {
+      console.error(`[#683] could not register cursor for ${seatId} (${e.message}) — registration stands, replay may not`);
+    }
+    return { ok: true, seatId: result.seatId, epoch: result.epoch, supersededSession: result.supersededSession, cursor };
   });
 
   // ── #755 slice 2b — the enforced adapter, chosen ONCE at registration ──
@@ -805,6 +824,42 @@ function buildMcpServer() {
     return jsonResult(await apiCall('GET', `/api/changes?${q}`));
   });
 
+  // ── #683 — replay_pull: what this lane missed, from its server-side cursor ──
+  //
+  // The difference from changes_since is the whole slice: changes_since asks
+  // "what happened since a timestamp I chose", which is only as good as the
+  // caller's idea of when it went deaf — and a seat that was deaf does not know.
+  // This asks "what am I owed", and the server holds that number.
+  mcp.registerTool('replay_pull', {
+    description: 'Collect everything this lane missed, from its SERVER-SIDE cursor (#683). '
+      + 'Unlike changes_since you pass no timestamp: a seat that went deaf does not know when, '
+      + 'and the board has been tracking what it actually received. Delivery is at-least-once — '
+      + 'you may see an event twice, never zero times; dedup by seq. The cursor advances only on '
+      + 'your NEXT call, so a response lost in flight is re-served rather than skipped. Returns '
+      + 'the events plus an envelope: {last_acked_seq, last_served_seq, head_seq, lag, '
+      + 'oldest_unserved_at}. Lag>0 with a stale oldest_unserved_at means you are behind the room.',
+    inputSchema: {
+      limit: z.number().int().min(1).optional().describe('Max events this pull (default/ceiling 200)'),
+    },
+  }, async ({ limit } = {}, extra) => {
+    const lane = laneFor(extra?.sessionId);
+    if (!lane) {
+      // No durable identity ⇒ no cursor, and it says so rather than answering
+      // zero. A confident empty for a question we cannot answer is the defect
+      // class this board catalogued the night this shipped (#776/#777/#778).
+      return jsonResult({
+        replay: false,
+        code: 'NO_DELIVERY_IDENTITY',
+        message: 'This connection has no durable delivery identity: it neither registered a '
+          + 'lane (scrum/session/register) nor presented a seat token, so nothing durable can '
+          + 'name it and no cursor exists. Use changes_since with an explicit timestamp.',
+      });
+    }
+    const q = new URLSearchParams({ identity: lane.identity, via: lane.via });
+    if (limit) q.set('limit', String(limit));
+    return jsonResult(await apiCall('GET', `/api/cursors/pull?${q.toString()}`));
+  });
+
   // ── #694 — graph_query: native graph traversal ────────────────────
   mcp.registerTool('graph_query', {
     description: 'Traverse the board as a GRAPH — one SPARQL query where composing card_list/'
@@ -1000,6 +1055,31 @@ const channelScheduler = createChannelScheduler({
 // nudge. The old wording said otherwise and two seats relied on it in one
 // afternoon — a comment in the present tense is a measurement with no
 // timestamp; this one is phrased as a condition for that reason.
+/**
+ * #683 — this connection's DELIVERY LANE, or null if it has no durable name.
+ *
+ * The board has two identity maps and they are disjoint (measured 2026-08-11:
+ * the #410 registry holds only minimo.sb/minimo.cs; the bearer binding holds
+ * only healthcheck/wren/indigo). Keying on either alone covers half a room, so
+ * a lane names itself in precedence order — see core/cursor-service.mjs for why
+ * REGISTRY comes first, and why that ordering is what keeps @minimo's cursors
+ * alive through #779.
+ *
+ * `via` fences a served range against a reconnect race: epoch names the
+ * incarnation, sessionId names the connection. It is EPHEMERAL by design —
+ * epochs reset with the process, so a persisted fence could match by
+ * coincidence.
+ */
+function laneFor(sessionId) {
+  if (!sessionId) return null;
+  const registrySeatId = seatRegistry.seatForSession(sessionId);
+  const bearerSeat = sessionMeta.get(sessionId)?.seat ?? null;
+  const id = deliveryIdentity({ registrySeatId, bearerSeat });
+  if (!id) return null;
+  const epoch = registrySeatId ? seatRegistry.epochForSeat(registrySeatId) : null;
+  return { identity: id.key, kind: id.kind, via: `${epoch ?? 'none'}:${sessionId}` };
+}
+
 const seatRegistry = createSeatRegistry();
 const tokenRingEngine = createTokenRingEngine({ registry: seatRegistry, genEnvelopeId: () => randomUUID() });
 
@@ -1470,6 +1550,17 @@ const httpServer = http.createServer(async (req, res) => {
     if (sessionId && transports.has(sessionId)) {
       transport = transports.get(sessionId);
       const m = sessionMeta.get(sessionId);
+      // #683 — THE IMPLICIT ACK. The lane is calling us, which means it was
+      // alive AFTER we finished the last response, so we believe that response
+      // arrived. Fire-and-forget and fail-open: a cursor we could not advance
+      // costs a duplicate on the next pull, which the at-least-once contract
+      // already permits. A cursor call that could block a tool call would be a
+      // rail whose failure mode is worse than the problem it solves.
+      const lane = laneFor(sessionId);
+      if (lane) {
+        apiCall('POST', '/api/cursors/inbound', { identity: lane.identity, via: lane.via })
+          .catch((e) => console.error(`[#683] inbound ack failed for ${lane.identity}: ${e.message}`));
+      }
       // #707 — sticky: a connection that has EVER presented a drifted token is
       // config drift until it reconnects, even between requests.
       if (m && binding?.unknownToken) m.unknownToken = true;

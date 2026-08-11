@@ -47,6 +47,13 @@ import { deriveGraph, personByKey } from './core/people.mjs';
 import { queryCards } from './core/cards-query.mjs';
 import { queryChangesFromLog } from './core/changes-log-query.mjs';
 import { readEvents, oldestRetainedAt } from './core/event-log.mjs';
+// #683 — the deafness cure's server half. REST owns the event log, so it owns
+// the cursors that index it; mcp-server asks over HTTP rather than learning a
+// path it has no business knowing (#767).
+import {
+  deliveryIdentity, registerFor, serveFor, noteInbound, reachabilityReport,
+  discardPendingServes, headSeq, PULL_LIMIT,
+} from './core/cursor-service.mjs';
 import { configureIdentities, usingDefaultRoster } from './core/identity.mjs';
 
 const PORT = process.env.SCRUM_PORT ? parseInt(process.env.SCRUM_PORT, 10) : 3141;
@@ -1922,9 +1929,140 @@ async function handleUpdateNode(req, res, idOrShortId) {
   }
 }
 
+// ── /api/cursors — #683: the deafness cure's production path ──
+//
+// PUSH IS A DOORBELL, PULL IS THE GUARANTEE. Fan-out never advances anything;
+// what a lane has actually received is tracked here, server-side, because the
+// clients are measurably heterogeneous and a guarantee that depends on client
+// cooperation is not a guarantee.
+//
+// These endpoints live on REST rather than in mcp-server because REST owns the
+// event log — the same reason /api/changes lives here. mcp-server knows seat
+// identity and asks; it never learns a log path (#767's shape).
+//
+// ⚠️ FAIL-CLOSED ON UNKNOWN PARAMS from birth. `/api/conversations` silently
+// ignores them and returns its whole corpus with a 200 (#777, found the night
+// this shipped); the pattern that refuses already existed one endpoint over and
+// was simply never applied. A new surface starts with it.
+const CURSOR_PARAMS = new Set(['identity', 'limit', 'via', 'as']);
+
+function cursorQueryGuard(req, res, extra = CURSOR_PARAMS) {
+  const q = parseQuery(req.url);
+  const unsupported = Object.keys(q).filter((k) => !extra.has(k));
+  if (unsupported.length) {
+    sendJSON(res, 400, {
+      error: `unsupported param${unsupported.length > 1 ? 's' : ''}: ${unsupported.join(', ')} `
+        + `(supported: ${[...extra].join(', ')})`,
+      unsupported,
+    });
+    return null;
+  }
+  return q;
+}
+
+/** GET /api/cursors — the reachability projection, inbound-evidence only. */
+function handleCursorReport(req, res) {
+  const q = cursorQueryGuard(req, res, new Set(['as', 'inputs', 'streamOpen']));
+  if (!q) return;
+  try {
+    // `inputs=stream_open` is the card's POSITIVE CONTROL and nothing else: the
+    // banned instrument, kept runnable so its disagreement with the inbound
+    // projection can be demonstrated rather than argued. It scored a seat
+    // healthy for eight hours while it received nothing.
+    const report = reachabilityReport(EVENT_LOG_DIR, {
+      inputs: q.inputs === 'stream_open' ? 'stream_open' : 'inbound',
+    });
+    sendJSON(res, 200, { head_seq: headSeq(EVENT_LOG_DIR), lanes: report });
+  } catch (e) {
+    console.error('GET /api/cursors:', e.message);
+    sendJSON(res, 500, { error: 'Failed to compute reachability' });
+  }
+}
+
+/** POST /api/cursors/register — a lane announces itself. Known lanes KEEP their cursor. */
+async function handleCursorRegister(req, res) {
+  try {
+    const body = JSON.parse((await readBody(req)) || '{}');
+    const id = deliveryIdentity(body || {});
+    if (!id) {
+      // An anonymous connection gets NO cursor and is told so. Inventing a key
+      // would create replay state nothing can ever resume and pin retention.
+      return sendJSON(res, 400, {
+        error: 'no durable delivery identity: pass registrySeatId (a #410 lane) or bearerSeat',
+        code: 'NO_DELIVERY_IDENTITY',
+      });
+    }
+    const out = registerFor(EVENT_LOG_DIR, id.key);
+    sendJSON(res, 200, { identity: id, ...out });
+  } catch (e) {
+    console.error('POST /api/cursors/register:', e.message);
+    sendJSON(res, 500, { error: 'Failed to register cursor' });
+  }
+}
+
+/**
+ * GET /api/cursors/pull — what this lane missed.
+ *
+ * ⚠️ The commit happens AFTER the response is written, not before. Recording at
+ * the moment of deciding what to send is #624 reimplemented inside its own
+ * cure: a response that dies in flight would still advance the cursor.
+ */
+function handleCursorPull(req, res) {
+  const q = cursorQueryGuard(req, res);
+  if (!q) return;
+  if (!q.identity) {
+    return sendJSON(res, 400, { error: 'identity is required (e.g. registry:minimo.sb)' });
+  }
+  try {
+    const limit = q.limit ? Math.min(Number(q.limit) || PULL_LIMIT, PULL_LIMIT) : PULL_LIMIT;
+    const pull = serveFor(EVENT_LOG_DIR, q.identity, { limit, via: q.via || null });
+    if (!pull.known) {
+      return sendJSON(res, 404, {
+        error: `no cursor for ${q.identity} — register the lane first`,
+        code: 'LANE_NOT_REGISTERED', envelope: pull.envelope,
+      });
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ events: pull.events, envelope: pull.envelope }), () => {
+      // The response is on the wire. Only now is it honest to say it was served.
+      try { pull.commit(); } catch (e) { console.error('[#683] commit failed:', e.message); }
+    });
+  } catch (e) {
+    console.error('GET /api/cursors/pull:', e.message);
+    sendJSON(res, 500, { error: 'Failed to serve replay' });
+  }
+}
+
+/** POST /api/cursors/inbound — the implicit ack: the lane was alive AFTER the response. */
+async function handleCursorInbound(req, res) {
+  try {
+    const body = JSON.parse((await readBody(req)) || '{}');
+    const key = body.identity || deliveryIdentity(body)?.key;
+    if (!key) return sendJSON(res, 400, { error: 'identity is required', code: 'NO_DELIVERY_IDENTITY' });
+    const out = noteInbound(EVENT_LOG_DIR, key, { via: body.via ?? null });
+    if (out.fenced) {
+      // Named, because the symptom of duplicate lane config is THRASH, not
+      // loss, and thrash reads as "replay is broken" unless the log says
+      // otherwise. Identity only — no secrets.
+      console.warn(
+        `[#683] CURSOR_PENDING_INVALIDATED_BY_SUPERSESSION identity=${key} `
+        + `via=${body.via ?? 'null'} — a session acked a range served to another; re-serving`,
+      );
+    }
+    sendJSON(res, 200, out);
+  } catch (e) {
+    console.error('POST /api/cursors/inbound:', e.message);
+    sendJSON(res, 500, { error: 'Failed to record inbound' });
+  }
+}
+
 // ── Router: regex-based match against API_ROUTES ──
 const API_ROUTES = [
   { method: 'GET',    re: /^\/api\/changes$/,              fn: (req, res) => handleChanges(req, res) },
+  { method: 'GET',    re: /^\/api\/cursors$/,              fn: (req, res) => handleCursorReport(req, res) },
+  { method: 'POST',   re: /^\/api\/cursors\/register$/,    fn: (req, res) => handleCursorRegister(req, res) },
+  { method: 'GET',    re: /^\/api\/cursors\/pull$/,        fn: (req, res) => handleCursorPull(req, res) },
+  { method: 'POST',   re: /^\/api\/cursors\/inbound$/,     fn: (req, res) => handleCursorInbound(req, res) },
   { method: 'POST',   re: /^\/api\/graph$/,                fn: (req, res) => handleGraphQuery(req, res) },
   { method: 'GET',    re: /^\/api\/board\/status$/,         fn: (req, res) => handleBoardStatus(req, res) },
   { method: 'GET',    re: /^\/api\/board$/,                fn: (req, res) => handleGetBoard(req, res) },
@@ -2227,6 +2365,18 @@ migrateBoardIfNeeded();
 const server = http.createServer(handleRequest);
 
 server.listen(PORT, '127.0.0.1', () => {
+  // #683 — drop every served-but-unacked range at boot. NOT tidiness: the fence
+  // discriminates on the registry epoch, and seat-registry keeps its counter in
+  // a closure with no persistence, so epochs restart at 1 with the process
+  // (measured across three restarts: 3,4 → 5,6 → 1,2 — backwards). A fence that
+  // survived a restart could be satisfied by coincidence. The DURABLE cursor is
+  // untouched; the cost is at most a re-serve, which the contract permits.
+  try {
+    const dropped = discardPendingServes(EVENT_LOG_DIR);
+    if (dropped) console.log(`   [#683] discarded ${dropped} pending serve(s) — epochs do not survive a restart`);
+  } catch (e) {
+    console.error('[#683] could not clear pending serves:', e.message);
+  }
   console.log(`manyhands server running at http://localhost:${PORT}`);
   console.log(`   Static files served from: ${PROJECT_DIR}`);
   console.log(`   Granular API: /api/{board,cards,columns}  (#90)`);
