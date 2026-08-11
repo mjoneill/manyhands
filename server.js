@@ -2016,6 +2016,19 @@ function handleCursorPull(req, res) {
   try {
     const limit = q.limit ? Math.min(Number(q.limit) || PULL_LIMIT, PULL_LIMIT) : PULL_LIMIT;
     const pull = serveFor(EVENT_LOG_DIR, q.identity, { limit, via: q.via || null });
+    if (pull.refused === 'CURSOR_TOO_OLD') {
+      // Refuse, never answer partially — the same contract /api/changes has had
+      // since #679. Serving "whatever survived" would let the lane ack past
+      // events it can never receive, which is the silent loss this cures.
+      return sendJSON(res, 400, {
+        error: `this lane's cursor (${pull.envelope.last_acked_seq}) predates the log's `
+          + `retention (oldest surviving seq ${pull.gap.oldestSeq}) — events ${pull.gap.missingFrom}`
+          + `–${pull.gap.missingTo} are gone and cannot be replayed`,
+        code: 'CURSOR_TOO_OLD', resync: true, hint: pull.resync,
+        oldest_retained_seq: pull.gap.oldestSeq, oldest_retained_at: pull.gap.oldestAt,
+        envelope: pull.envelope,
+      });
+    }
     if (!pull.known) {
       return sendJSON(res, 404, {
         error: `no cursor for ${q.identity} — register the lane first`,

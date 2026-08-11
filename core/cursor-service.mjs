@@ -122,16 +122,43 @@ export function envelopeFor(eventDir, key, { state = null, head = null } = {}) {
     };
   }
   const lag = Math.max(0, h - s.acked);
+  const gap = retentionGap(eventDir, s.acked);
   return {
     ...base,
     known: true,
     last_acked_seq: s.acked,
     last_served_seq: s.served,
     lag,
-    oldest_unserved_at: lag > 0
+    // ⚠️ THREE STATES, not two, and the third is the reason this is not a bare
+    // timestamp. `readEvents(sinceSeq: acked)` returns the oldest SURVIVING
+    // event — which, once retention has trimmed the range, is NEWER than the
+    // oldest genuinely-unserved one. A badly-stale lane would report as fresher
+    // than it is, and this is the field a future age-based staleness guard keys
+    // on: it would clear exactly the three-day-stale harness it exists to catch.
+    // Failing toward "unknown" is the only safe direction for a freshness
+    // signal. (@wren, verifying slice 3b.)
+    oldest_unserved_state: lag === 0 ? 'none' : (gap ? 'trimmed' : 'known'),
+    oldest_unserved_at: lag > 0 && !gap
       ? (readEvents(eventDir, { sinceSeq: s.acked, limit: 1 })[0]?.recorded_at ?? null)
       : null,
+    ...(gap ? { oldest_retained_seq: gap.oldestSeq, oldest_retained_at: gap.oldestAt } : {}),
   };
+}
+
+/**
+ * Has retention eaten events this lane still needed? Returns the gap or null.
+ *
+ * The log's earliest surviving seq should be at most `acked + 1`. If it is
+ * higher, everything between is gone — and a pull that quietly served "whatever
+ * survives" would let the lane ack past events it can never receive. Permanent,
+ * silent, and `lag` would read 0 afterwards: #624 exactly, arriving through its
+ * own cure. `/api/changes` has refused this since #679; the card says to reuse
+ * that shape here and this is where it gets reused.
+ */
+export function retentionGap(eventDir, acked) {
+  const first = readEvents(eventDir, { limit: 1 })[0];
+  if (!first || first.seq <= acked + 1) return null;
+  return { oldestSeq: first.seq, oldestAt: first.recorded_at ?? null, missingFrom: acked + 1, missingTo: first.seq - 1 };
 }
 
 /** Register a lane. A lane we already know KEEPS its cursor — that is the cure. */
@@ -157,6 +184,22 @@ export function serveFor(eventDir, key, { limit = PULL_LIMIT, via = null } = {})
   const state = loadCursors(eventDir);
   const head = headSeq(eventDir);
   const s = state.seats[key];
+  // ⛔ REFUSE rather than answer partially. If retention has trimmed events this
+  // lane still needed, serving "whatever survives" lets it ack past events it
+  // can never receive — permanent, silent, and `lag` reads 0 afterwards. That is
+  // the #624 loss class arriving through the cure. Same contract as
+  // /api/changes' CURSOR_TOO_OLD, which the card told us to reuse.
+  const gap = s ? retentionGap(eventDir, s.acked) : null;
+  if (gap) {
+    return {
+      events: [], known: true, refused: 'CURSOR_TOO_OLD', gap,
+      envelope: envelopeFor(eventDir, key, { state, head }),
+      resync: 'Events this lane was owed are past the log\'s retention. Resync from the '
+        + 'live store (card_list / conversation_list), then call again — this cursor cannot '
+        + 'be advanced without skipping events it never received.',
+      commit() { return null; },
+    };
+  }
   const events = s ? readEvents(eventDir, { sinceSeq: s.acked, limit }) : [];
   const maxSeq = events.length ? events[events.length - 1].seq : null;
   return {

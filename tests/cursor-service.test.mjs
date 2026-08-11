@@ -19,7 +19,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { appendEvent } from '../core/event-log.mjs';
-import { loadCursors } from '../core/cursors.mjs';
+import { loadCursors, saveCursors } from '../core/cursors.mjs';
 import {
   deliveryIdentity, registerFor, serveFor, noteInbound, envelopeFor, reachabilityReport,
   discardPendingServes,
@@ -341,4 +341,66 @@ test('#683 a bearer lane ADOPTS a cursor on its first inbound call', () => {
   seed(dir, 2);
   assert.deepEqual(serveFor(dir, 'bearer:indigo').events.map((e) => e.seq), [5, 6],
     'and is owed everything after the moment we first saw it');
+});
+
+// ── retention: the defects @wren found at the verifier bar ────────────────
+
+/** Delete a day-segment, as a retention sweep eventually will. */
+function trimSegment(dir, day) {
+  fs.unlinkSync(path.join(dir, `events-${day}.jsonl`));
+}
+
+test('#683 RETENTION — a pull REFUSES rather than serving a partial range', () => {
+  // Serving "whatever survives" lets the lane ack past events it can never
+  // receive: permanent, silent, and `lag` reads 0 afterwards. That is #624
+  // arriving through its own cure. /api/changes has refused this since #679 and
+  // the card says to reuse the shape — this is the reuse.
+  const dir = tmp();
+  seed(dir, 3, { day: '2026-08-01' });
+  registerFor(dir, 'registry:minimo.sb');
+  loadCursors(dir).seats['registry:minimo.sb'].acked = 0;
+  saveCursors(dir, Object.assign(loadCursors(dir), {
+    seats: { 'registry:minimo.sb': { acked: 0, served: null, last_inbound_at: '2026-08-01T00:00:00.000Z', last_inbound_seq: 0, registered_at: '2026-08-01T00:00:00.000Z' } },
+  }));
+  seed(dir, 2, { day: '2026-08-11' });
+  trimSegment(dir, '2026-08-01');                 // retention eats what it was owed
+  const pull = serveFor(dir, 'registry:minimo.sb');
+  assert.equal(pull.refused, 'CURSOR_TOO_OLD');
+  assert.equal(pull.events.length, 0, 'a partial answer is worse than a refusal here');
+  assert.equal(pull.gap.missingFrom, 1);
+  assert.equal(pull.gap.missingTo, 3);
+  assert.equal(pull.commit(), null, 'a refused pull commits nothing');
+  assert.equal(loadCursors(dir).seats['registry:minimo.sb'].acked, 0, 'the cursor did not move');
+});
+
+test('#683 RETENTION — oldest_unserved_at goes UNKNOWN, never younger (it fails unsafe otherwise)', () => {
+  // readEvents(sinceSeq: acked) returns the oldest SURVIVING event, which after
+  // a trim is NEWER than the oldest genuinely-unserved one. A badly-stale lane
+  // would report as fresher than it is — and this is the field an age-based
+  // staleness guard keys on, so it would clear exactly the three-day-stale
+  // harness it exists to catch. Three states, not two.
+  const dir = tmp();
+  seed(dir, 2, { day: '2026-08-01' });
+  saveCursors(dir, { version: 1, seats: { 'bearer:indigo': { acked: 0, served: null, last_inbound_at: '2026-08-01T00:00:00.000Z', last_inbound_seq: 0, registered_at: '2026-08-01T00:00:00.000Z' } } });
+  seed(dir, 2, { day: '2026-08-11' });
+  const before = envelopeFor(dir, 'bearer:indigo');
+  assert.equal(before.oldest_unserved_state, 'known');
+  assert.equal(before.oldest_unserved_at, '2026-08-01T00:00:00.000Z');
+  trimSegment(dir, '2026-08-01');
+  const after = envelopeFor(dir, 'bearer:indigo');
+  assert.equal(after.oldest_unserved_state, 'trimmed');
+  assert.equal(after.oldest_unserved_at, null, 'never a younger timestamp — unknown is the safe direction');
+  assert.equal(after.oldest_retained_at, '2026-08-11T00:00:00.000Z', 'and it says what it CAN see');
+});
+
+test('#683 RETENTION — a contiguous log is not mistaken for a trimmed one', () => {
+  // The positive control: `oldestSeq <= acked + 1` is the healthy case and must
+  // not refuse, or every ordinary pull would 400.
+  const dir = tmp();
+  seed(dir, 4);
+  saveCursors(dir, { version: 1, seats: { 'bearer:indigo': { acked: 0, served: null, last_inbound_at: '2026-08-11T00:00:00.000Z', last_inbound_seq: 0, registered_at: '2026-08-11T00:00:00.000Z' } } });
+  const pull = serveFor(dir, 'bearer:indigo');
+  assert.equal(pull.refused, undefined);
+  assert.deepEqual(pull.events.map((e) => e.seq), [1, 2, 3, 4]);
+  assert.equal(envelopeFor(dir, 'bearer:indigo').oldest_unserved_state, 'known');
 });
