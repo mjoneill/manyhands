@@ -32,7 +32,25 @@ const comment = (n, attachedTo, body) => ({
 
 // ── ⭐⭐ THE BOUND THE WIRE TESTS CANNOT SEE ─────────────────────────────────
 
-test('#794 ⭐⭐ INTERNAL BOUND — the population is never accumulated or sorted', () => {
+test('#794/#796 MECHANISM PROXY — accumulate-then-sort is caught; O(cap) retention is NOT', () => {
+  // ⛔⛔ #796 — THIS TEST'S NAME USED TO CLAIM A PROPERTY IT CANNOT DETECT.
+  // It was called "the population is never accumulated or sorted." It
+  // instruments push() and sort(), so it detects two MECHANISMS, not the
+  // property: an implementation using `all[all.length] = c` and a linear scan
+  // retains all 200 and passes with both instruments silent.
+  //
+  // ⭐ The honest evidence stack for O(cap) retention is three things, and this
+  // test is ONE of them:
+  //     SOURCE INSPECTION   establishes fixed-size retention (read the buffer)
+  //     OUTPUT TESTS        establish behaviour (the wire-level file)
+  //     THIS TEST           catches the most plausible accumulate-and-sort
+  //                         regression — the one a real person would write
+  //
+  // ⚠️ Retention is genuinely hard to observe from outside a function in JS, and
+  // nobody has a better test. So the fix was the NAME, not the mechanism: a test
+  // whose name overclaims is how a future reader concludes a property is guarded
+  // when only a plausible shape is.
+  //
   // The discriminator, stated as the two operations an accumulate-then-trim
   // implementation cannot avoid:
   //   ACCUMULATE  it must push every match onto an array   ⇒ 200 pushes
