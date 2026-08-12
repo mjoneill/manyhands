@@ -5,15 +5,35 @@
  * The 2026-08-04 finding (corrected #624): an MCP service restart invalidates
  * every session; broadcastFanout skips closed streams with NO queue, NO
  * replay, NO error — so an idle seat goes deaf indefinitely and cannot know
- * it. A working seat self-heals on its next call; the fault selects for
- * exactly the seats that won't notice.
+ * it. ⛔ ~~A working seat self-heals on its next call~~ — FALSE, see below; the
+ * fault selects for exactly the seats that won't notice.
  *
  * This script is the mechanical half of the watch, deliberately dumb: read
  * receivers vs sessions from /channel/status; if receivers fall below the
  * configured floor, post ONE plain warning to the commons (as `board`) naming
  * the numbers. Deaf seats can't hear the post — but hearing seats and any
- * human reading the room can, and the one-call cure (any MCP tool call)
- * re-registers the deaf. No diagnosis, no recovery attempts, no LLM.
+ * human reading the room can. No diagnosis, no recovery attempts, no LLM.
+ *
+ * ⛔ 2026-08-12 — THE ONE-CALL CURE DOES NOT EXIST, and this header is where the
+ * belief came from. It generated the remedy sentences in BOTH warn bodies in
+ * fanout-decide.mjs, which have been removed.
+ *
+ *   openStreamCount is incremented in exactly ONE place — mcp-server.mjs:1779,
+ *   inside `if (req.method === 'GET')` — and fanout targets sessions with
+ *   openStreamCount > 0 (:1268). An MCP tool call is a POST. ⇒ No number of
+ *   tool calls can make a session a fanout target. A seat made dozens across two
+ *   hours and stayed push-dead; the mechanism forbids the cure, so that was not
+ *   bad luck.
+ *
+ * ⇒ What this script is FOR, restated honestly: it tells a HUMAN that the room
+ *   is degraded. It does not tell anyone how to repair it, because as of this
+ *   writing the only measured repair is a human re-establishing each seat's
+ *   client connection by hand, once per seat. Push readiness after any restart
+ *   should be read as UNKNOWN until a probe travels the real push path and gets
+ *   a sequence-linked acknowledgement back — which does not exist yet either.
+ *
+ * ⚠️ Three copies of one false claim: this header and two warn strings. Fixing
+ *   the first one found would have left the room still being told the cure.
  *
  * Designed to run under launchd on an interval (see the plist note on the
  * card). State-change gated so a persistent gap warns once, not every tick.

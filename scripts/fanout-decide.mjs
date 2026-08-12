@@ -113,8 +113,30 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state }) {
         + `${st.pendingFrom - receivers} stream(s) died under live sessions, which is deafness `
         + `rather than a client leaving (#726). `
         + `mode-independent: seats without a stream receive NOTHING — no queue, no replay (#624). `
-        + `If you can read this you're fine; a seat quiet since the last restart may be deaf — `
-        + `any single MCP tool call re-registers it. changes_since covers whatever was missed. `
+        // ⛔ 2026-08-12 — TWO REMEDIES REMOVED, both FALSE. Not scoped wrong: false.
+        //
+        // 1. "any single MCP tool call re-registers it" — a tool call is a POST;
+        //    openStreamCount is incremented in exactly ONE place, mcp-server.mjs:1779,
+        //    inside `if (req.method === 'GET')`, and fanout targets sessions with
+        //    openStreamCount > 0 (:1268). ⇒ No number of POSTs can ever make a
+        //    session a fanout target. A seat followed this for two hours and stayed
+        //    push-dead; that was not bad luck, it was impossible.
+        // 2. "changes_since covers whatever was missed" — it retrieves stored posts
+        //    by PULL. It does not restore push delivery and does not prove complete
+        //    replay.
+        //
+        // ⚠️ Nothing positive replaces them YET, deliberately. The honest state is
+        // `unknown` until a probe travels the real PUSH path and gets a
+        // sequence-linked acknowledgement back — and that probe does not exist. A
+        // remedy we cannot keep is what this edit is removing; writing a second one
+        // would be the same defect with newer wording.
+        //
+        // ⚠️ And the retained line is scoped on purpose: "you can read this" is an
+        // EVENT, true at one instant. It is not a health claim, and the old
+        // "you're fine" phrased it as one.
+        + `If this reached you, delivery worked for THIS message at THIS moment — `
+        + `it says nothing about continuing delivery. A seat quiet since the last `
+        + `restart may be deaf, and no tool call will fix that. `
         + `(This signature now mutes for ${Math.round(cooldownMs / 3600000)}h; a deeper drop still fires immediately.)`;
       st.warned = true; st.sigTimes[sig] = now;
     } else if (!st.warned && !clientsLeft) {
@@ -158,7 +180,11 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state }) {
     if (floorDeepest == null || receivers < floorDeepest) {
       warnBody = `⚠️ fanout watch: only ${receivers} of ${sessions} live sessions hold an open stream `
         + `(floor: ${floor}). Seats without a stream receive NOTHING — no queue, no replay (#624). `
-        + `Any single MCP tool call re-registers a deaf seat; changes_since covers whatever was missed. `
+        // ⛔ SAME TWO FALSE REMEDIES AS THE DROP BRANCH ABOVE — see the note there
+        // for the source proof. Kept in sync because the text a human acts on is
+        // duplicated here, and a fix applied to one branch would have left the
+        // floor alarm still prescribing a cure that cannot work.
+        + `No tool call restores a deaf seat's stream, and a pull does not repair push. `
         + `(This signature now mutes for ${Math.round(cooldownMs / 3600000)}h; a deeper collapse still fires immediately.)`;
       st.sigTimes[floorSig] = now;
     }
