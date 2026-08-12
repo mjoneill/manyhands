@@ -716,3 +716,24 @@ test('#797 early-close time is the LAST required seat to answer, chronologically
     'append() refuses out-of-order transitions, so array order cannot diverge from chronological order',
   );
 });
+
+test('#797 closure is deterministic even on an OUT-OF-ORDER legacy log', () => {
+  // append() enforces monotonicity, so this history is unreachable through the
+  // writers — but foldLines() does not re-check ordering when READING, so a
+  // hand-written or legacy log can contain it. Closure must not depend on array
+  // order. Built as a literal, deliberately bypassing the writers.
+  const shuffled = {
+    id: 'legacy', sourceMessageId: null, card: null, declaredBy: 'ada',
+    replyBy: REPLY_BY, required: ['ada', 'bo'],
+    transitions: [
+      { type: 'declare', by: 'ada', at: T0 },
+      { type: 'nobid', by: 'bo', at: '2026-08-10T02:15:00.000Z' },  // later, listed FIRST
+      { type: 'bid', by: 'ada', at: '2026-08-10T02:05:00.000Z' },   // earlier, listed SECOND
+    ],
+  };
+  const [s] = settle(shuffled, AFTER).transitions.filter((t) => t.type === 'settlement');
+  assert.equal(s.closureReason, 'early-close');
+  assert.equal(s.effectiveAt, '2026-08-10T02:15:00.000Z',
+    'closure is the EARLIEST INSTANT pending first empties — the later of the two answers, '
+    + 'regardless of the order they appear in the array');
+});

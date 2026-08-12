@@ -467,7 +467,13 @@ function closureOf(wo) {
     if (!['bid', 'nobid', 'contest'].includes(t.type)) continue;
     if (!wo.required.includes(t.by)) continue;
     if (t.at > wo.replyBy) continue; // ⇐ a late answer does not close anything
-    if (!firstAnswerAt.has(t.by)) firstAnswerAt.set(t.by, t.at);
+    // ⭐ MIN, not first-encountered. append() enforces monotonicity so array
+    // order IS chronological order for anything this system wrote — but
+    // foldLines() does not re-check ordering on READ, so a hand-written or
+    // legacy log could arrive out of order. Taking the minimum makes closure
+    // deterministic on those bytes instead of array-order dependent.
+    const prev = firstAnswerAt.get(t.by);
+    if (prev === undefined || t.at < prev) firstAnswerAt.set(t.by, t.at);
   }
   if (firstAnswerAt.size === wo.required.length) {
     const last = [...firstAnswerAt.values()].sort().pop();
