@@ -87,6 +87,35 @@ export function workDeclare(fields) {
   return persistAndDerive(dir, wo, now);
 }
 
+/**
+ * ⭐⭐ #797 — THE WRITE BOUNDARY. EVERY writer verb goes through here.
+ *
+ * A window that closed to a deterministic grant becomes a RECORDED fact before
+ * the caller's action is validated, so the auction's own guard refuses a late
+ * answer instead of letting it rewrite a settled outcome.
+ *
+ * ⛔ workGrant BYPASSED THIS in 34af4fa. The design said "on every writer verb"
+ * and the implementation wired only bid/nobid/contest, so a post-timeout human
+ * grant replaced the protocol's closure provenance (grantedBy: timeout became
+ * grantedBy: <person>) instead of being refused. Caught in review. The fix is
+ * this function existing at all — a boundary that one caller can skip is a
+ * convention, not a boundary.
+ *
+ * ⚠️ THE REJECTED COMMAND STILL SETTLES. If a caller's action throws and the
+ * settlement dies with it, the grant stays derived through exactly the traffic
+ * that proves the window is closed.
+ */
+function settleThenApply(dir, id, what, now, apply) {
+  const loaded = load(dir, id, what);
+  const settled = settle(loaded, now);
+  try {
+    return persistAndDerive(dir, apply(settled), now);
+  } catch (e) {
+    if (settled !== loaded) appendTransitions(dir, settled);
+    throw e;
+  }
+}
+
 const answer = (fn, what, allowed) => (fields) => {
   only(fields, allowed, what);
   const { dir, id, by, now } = fields;
@@ -109,24 +138,7 @@ const answer = (fn, what, allowed) => (fields) => {
   // over load → validate → assign identity → append; until then this comment is
   // the only thing standing between a refactor and a lost bid.
   // Property encoded as a `{ todo: true }` test at tests/work-store.test.mjs.
-  const loaded = load(dir, id, what);
-
-  // ⭐⭐ #797 — SETTLE BEFORE VALIDATING. A window that closed to a deterministic
-  // grant becomes a RECORDED fact here, so the guard below refuses a late answer
-  // instead of letting it rewrite a settled outcome.
-  const settled = settle(loaded, now);
-
-  try {
-    return persistAndDerive(dir, fn(settled, { by, at: now }), now);
-  } catch (e) {
-    // ⚠️ THE REJECTED COMMAND STILL SETTLES. If the caller's action throws and we
-    // let the settlement die with it, the grant stays derived and the defect
-    // survives every rejection — which is precisely the traffic that proves the
-    // window is closed. So a refused late bid legitimately materialises the grant
-    // as a side effect, and the caller still gets its error.
-    if (settled !== loaded) appendTransitions(dir, settled);
-    throw e;
-  }
+  return settleThenApply(dir, id, what, now, (wo) => fn(wo, { by, at: now }));
 };
 
 export const workBid = answer(bid, 'workBid', ['dir', 'id', 'by', 'now']);
@@ -137,8 +149,7 @@ export function workGrant(fields) {
   only(fields, ['dir', 'id', 'by', 'to', 'now'], 'workGrant');
   const { dir, id, by, to, now } = fields;
   requireNow(now, 'workGrant');
-  const wo = load(dir, id, 'workGrant');
-  return persistAndDerive(dir, grant(wo, { by, to, at: now }), now);
+  return settleThenApply(dir, id, 'workGrant', now, (wo) => grant(wo, { by, to, at: now }));
 }
 
 /**

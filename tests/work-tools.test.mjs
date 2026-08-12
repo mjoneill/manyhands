@@ -212,3 +212,62 @@ test('#797 an OPEN window is untouched by settlement — no transition is writte
   const log = readFileSync(join(d, 'work-objects.jsonl'), 'utf8');
   assert.equal(log.includes('"settlement"'), false, 'nothing closed, so nothing settles');
 });
+
+// ── #797 ⛔ THE BOUNDARY MUST COVER EVERY WRITER, NOT MOST OF THEM ───────────
+
+test('#797 ⭐⭐⭐ COVERAGE: every writer verb crosses the settlement boundary', () => {
+  // 34af4fa's design said "on every writer verb" and wired three of four:
+  // workGrant was a hand-written function beside the wrapper, not an instance of
+  // it. A post-timeout human grant therefore REPLACED the protocol's closure
+  // provenance instead of being refused.
+  //
+  // ⭐ Enumerated rather than sampled: a shared boundary being correct says
+  // nothing about which callers use it. This is the test that catches the NEXT
+  // hand-written writer.
+  const LATE = '2026-08-11T09:00:00.000Z';
+  const verbs = [
+    ['workBid', () => workBid({ dir: d, id: 'w1', by: 'bo', now: LATE })],
+    ['workNobid', () => workNobid({ dir: d, id: 'w1', by: 'bo', now: LATE })],
+    ['workContest', () => workContest({ dir: d, id: 'w1', by: 'bo', now: LATE })],
+    ['workGrant', () => workGrant({ dir: d, id: 'w1', by: 'bo', to: 'ada', now: LATE })],
+  ];
+  let d;
+  for (const [name, call] of verbs) {
+    d = dir();
+    declared(d); // ada declares, bo never answers ⇒ closes to a timeout grant
+    assert.throws(call, /from granted/, `${name} must be refused once the window has settled`);
+
+    const log = readFileSync(join(d, 'work-objects.jsonl'), 'utf8');
+    assert.ok(log.includes('"settlement"'),
+      `${name} did not cross the settlement boundary — it is outside the wrapper`);
+  }
+});
+
+test('#797 ⭐⭐ POSITIVE CONTROL: an ARBITRATION_DUE window still accepts an explicit human grant', () => {
+  // The control a naive fix breaks. Routing workGrant through the boundary must
+  // NOT make human resolution impossible — arbitration is the entire reason
+  // contest() exists, and settlement is deliberately a no-op there.
+  const d = dir();
+  declared(d);
+  workBid({ dir: d, id: 'w1', by: 'bo', now: DURING }); // two bidders ⇒ contested at close
+  // ⚠️ arbitration_due is IN PLAY, not settled — it is waiting for a human, which
+  // is exactly why settlement must not touch it.
+  assert.equal(workList({ dir: d, now: AFTER }).open[0].state, STATES.ARBITRATION_DUE, 'precondition');
+
+  const out = workGrant({ dir: d, id: 'w1', by: 'cy', to: 'bo', now: AFTER });
+  assert.equal(out.state, STATES.GRANTED);
+  assert.equal(out.grantedTo, 'bo');
+  assert.equal(out.grantedBy, 'cy', 'a HUMAN arbitration keeps human provenance');
+
+  const log = readFileSync(join(d, 'work-objects.jsonl'), 'utf8');
+  assert.equal(log.includes('"settlement"'), false, 'settlement must not arbitrate on the protocol\'s behalf');
+});
+
+test('#797 a late human grant does NOT overwrite the protocol\'s closure provenance', () => {
+  const d = dir();
+  declared(d);
+  assert.throws(() => workGrant({ dir: d, id: 'w1', by: 'cy', to: 'ada', now: '2026-08-11T09:00:00.000Z' }), /from granted/);
+  const after = workList({ dir: d, now: '2026-08-11T09:00:01.000Z' }).settled[0];
+  assert.equal(after.grantedBy, 'timeout', 'grantedBy must still be the protocol closure, not a person');
+  assert.equal(after.grantedTo, 'ada');
+});

@@ -30,7 +30,7 @@ import { mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { appendTransitions, readWorkObjects, openWorkObjectsAt, foldLines } from '../core/work-store.mjs';
-import { declare, bid, nobid, grant, stateAt, STATES } from '../core/work-auction.mjs';
+import { declare, bid, nobid, grant, stateAt, settle, STATES } from '../core/work-auction.mjs';
 
 const T0 = '2026-08-10T02:00:00.000Z';
 const REPLY_BY = '2026-08-10T02:20:00.000Z';
@@ -257,5 +257,58 @@ test('#797 two stale callers submitting different answers must BOTH survive', { 
     answered.includes('cy'),
     'the second answer was ACCEPTED by the API and is absent from the log — '
     + 'indistinguishable, from both ends, from never having answered at all',
+  );
+});
+
+// ── #797 ⭐⭐⭐ THE PRODUCTION-SHAPED FIXTURE — shapes nobody designed ─────────
+//
+// Copied from the live work store on 2026-08-12 and SANITISED: seat names
+// substituted, object ids replaced, card pointers and source message ids
+// removed. Only the transition structures remain, which is the whole point —
+// constructed fixtures test the cases the author thought of, and these five test
+// the cases the protocol actually produced.
+//
+// ⚠️ THIS EXISTS BECAUSE THE FIRST VERSION OF THIS CHECK WAS AN AD-HOC RUN.
+// Its result was posted as a table of ✅s, which reads exactly like a test
+// result and was a measurement that would never run again and that nobody else
+// could reproduce. A finding that lives only where nobody re-reads it is the
+// class this board has been carding all week.
+//
+// The date is in the FILENAME so the next reader can see how old these shapes
+// are rather than inheriting them as current.
+
+const FIXTURE = new URL('./fixtures/work-objects-2026-08-12.jsonl', import.meta.url);
+const FIXTURE_NOW = '2026-08-12T19:45:00.000Z';
+
+test('#797 ⭐⭐ settlement does not move ANY production-shaped object', () => {
+  const objects = foldLines(readFileSync(FIXTURE, 'utf8')).objects;
+  assert.equal(objects.length, 5, 'the fixture must carry all five shapes');
+
+  for (const wo of objects) {
+    const before = stateAt(wo, FIXTURE_NOW);
+    const after = stateAt(settle(wo, FIXTURE_NOW), FIXTURE_NOW);
+    assert.deepEqual(after, before,
+      `${wo.id} drifted under settlement — it must alter DURABILITY, never the ANSWER`);
+  }
+});
+
+test('#797 the fixture carries the three timeout-with-pending grants that make it worth having', () => {
+  // ⭐ These are the shapes no hand-written fixture would have included: grants
+  // the room has explicitly questioned, where a required seat never answered.
+  // They are why the settlement freezes `pendingAtClosure` onto the fact rather
+  // than recording a bare grant.
+  const objects = foldLines(readFileSync(FIXTURE, 'utf8')).objects;
+  const settlements = objects
+    .map((wo) => settle(wo, FIXTURE_NOW).transitions.find((t) => t.type === 'settlement'))
+    .filter(Boolean);
+
+  assert.equal(settlements.length, 5, 'every settled shape must materialise exactly once');
+  const withCaveat = settlements.filter((s) => s.pendingAtClosure.length > 0);
+  assert.equal(withCaveat.length, 3, 'three grants closed with a required seat still pending');
+  assert.deepEqual(withCaveat.map((s) => s.closureReason), ['timeout', 'timeout', 'timeout']);
+  assert.deepEqual(
+    settlements.filter((s) => s.pendingAtClosure.length === 0).map((s) => s.closureReason),
+    ['early-close', 'early-close'],
+    'and the two unambiguous ones closed because everyone answered',
   );
 });

@@ -1,0 +1,13 @@
+{"id":"w-shape-1","seq":0,"transition":{"type":"declare","by":"bo","at":"2026-08-10T12:47:53.772Z"},"replyBy":"2026-08-10T12:49:53.773Z","required":["bo","ada"],"declaredBy":"bo"}
+{"id":"w-shape-1","seq":1,"transition":{"type":"bid","by":"bo","at":"2026-08-10T12:47:53.772Z"},"replyBy":"2026-08-10T12:49:53.773Z","required":["bo","ada"],"declaredBy":"bo"}
+{"id":"w-shape-2","seq":0,"transition":{"type":"declare","by":"bo","at":"2026-08-10T18:42:51.004Z"},"replyBy":"2026-08-10T18:52:51.004Z","required":["bo","ada"],"declaredBy":"bo"}
+{"id":"w-shape-2","seq":1,"transition":{"type":"bid","by":"bo","at":"2026-08-10T18:42:51.004Z"},"replyBy":"2026-08-10T18:52:51.004Z","required":["bo","ada"],"declaredBy":"bo"}
+{"id":"w-shape-3","seq":0,"transition":{"type":"declare","by":"ada","at":"2026-08-10T20:06:53.937Z"},"replyBy":"2026-08-10T20:21:53.937Z","required":["bo"],"declaredBy":"ada"}
+{"id":"w-shape-3","seq":1,"transition":{"type":"bid","by":"ada","at":"2026-08-10T20:06:53.937Z"},"replyBy":"2026-08-10T20:21:53.937Z","required":["bo"],"declaredBy":"ada"}
+{"id":"w-shape-3","seq":2,"transition":{"type":"nobid","by":"bo","at":"2026-08-10T20:13:08.858Z"},"replyBy":"2026-08-10T20:21:53.937Z","required":["bo"],"declaredBy":"ada"}
+{"id":"w-shape-4","seq":0,"transition":{"type":"declare","by":"ada","at":"2026-08-12T03:32:30.635Z"},"replyBy":"2026-08-12T13:32:30.635Z","required":["bo","cy"],"declaredBy":"ada"}
+{"id":"w-shape-4","seq":1,"transition":{"type":"bid","by":"ada","at":"2026-08-12T03:32:30.635Z"},"replyBy":"2026-08-12T13:32:30.635Z","required":["bo","cy"],"declaredBy":"ada"}
+{"id":"w-shape-4","seq":2,"transition":{"type":"nobid","by":"bo","at":"2026-08-12T03:32:59.105Z"},"replyBy":"2026-08-12T13:32:30.635Z","required":["bo","cy"],"declaredBy":"ada"}
+{"id":"w-shape-5","seq":0,"transition":{"type":"declare","by":"ada","at":"2026-08-12T15:26:31.813Z"},"replyBy":"2026-08-12T15:56:31.813Z","required":["bo"],"declaredBy":"ada"}
+{"id":"w-shape-5","seq":1,"transition":{"type":"bid","by":"ada","at":"2026-08-12T15:26:31.813Z"},"replyBy":"2026-08-12T15:56:31.813Z","required":["bo"],"declaredBy":"ada"}
+{"id":"w-shape-5","seq":2,"transition":{"type":"nobid","by":"bo","at":"2026-08-12T15:27:19.297Z"},"replyBy":"2026-08-12T15:56:31.813Z","required":["bo"],"declaredBy":"ada"}
