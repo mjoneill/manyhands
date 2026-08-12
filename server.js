@@ -38,6 +38,7 @@ import { appendEvent } from './core/event-log.mjs';
 import { boardToDomain, domainToBoard, cardToNode } from './core/mapping.mjs';
 import { buildTree, buildChildIndex } from './core/tree.mjs';
 import { buildLinkIndex } from './core/links.mjs';
+import { commentMetadata } from './core/card-comments.mjs';
 import { readConfig, writeConfig, LIMITS } from './channel-config.mjs';
 import { loadRoster, writeRoster, rosterFilePath } from './core/roster-config.mjs';
 import { extractMentions as extractMentionsFromRoster } from './core/people.mjs';
@@ -1231,36 +1232,6 @@ function handleListCards(req, res) {
 // `nodeToCard` round-trip the domain object, and `domain.test.mjs:43,90` assert
 // that round-trip is lossless. A derived count has no business surviving it,
 // and those tests would break — correctly — if this moved onto the card.
-const COMMENT_RECENT_CAP = 3;
-const COMMENT_PREVIEW_CHARS = 140;
-
-function commentMetadata(data, cardId) {
-  let total = 0;
-  const recent = [];
-  // Single pass, newest-first insertion into a fixed-size buffer: the work is
-  // O(conversations) and the ALLOCATION is O(cap). Measured 0.19ms per read
-  // over 14,684 conversations — no index needed at this corpus size, and the
-  // number is dated because the next reader should re-measure rather than
-  // inherit it (2026-08-12).
-  for (const c of data.conversations) {
-    if (c.attachedTo !== cardId) continue;
-    total += 1;
-    recent.push(c);
-  }
-  recent.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
-  return {
-    total,
-    recent: recent.slice(0, COMMENT_RECENT_CAP).map((c) => ({
-      id: c.id,
-      author: c.author,
-      createdAt: c.createdAt,
-      // Capping the NUMBER of stubs does not bound the payload on its own —
-      // one 40KB comment defeats it alone.
-      preview: String(c.body || '').slice(0, COMMENT_PREVIEW_CHARS),
-    })),
-  };
-}
-
 function handleGetCard(req, res, idOrShortId) {
   try {
     const data = readBoard();
@@ -1269,7 +1240,7 @@ function handleGetCard(req, res, idOrShortId) {
     const card = data.cards[idx];
     // Spread rather than mutate: `data` came from readBoard() and the stored
     // object must not acquire a derived field.
-    sendJSON(res, 200, { ...card, comments: commentMetadata(data, card.id) });
+    sendJSON(res, 200, { ...card, comments: commentMetadata(data.conversations, card.id) });
   } catch (e) {
     console.error('GET /api/cards/:id:', e.message);
     sendJSON(res, 500, { error: 'Failed to read card' });

@@ -34,8 +34,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { startRestServer, startMcpServer, mcpSession, makeBoardFixture } from './helpers/harness.mjs';
 
-const RECENT_CAP = 3;        // must match server.js
-const PREVIEW_CHARS = 140;   // must match server.js
+// Imported rather than restated: a constant copied into a test drifts silently
+// from the one the code uses, and the test keeps passing while it does.
+import { COMMENT_RECENT_CAP as RECENT_CAP, COMMENT_PREVIEW_CHARS as PREVIEW_CHARS }
+  from '../core/card-comments.mjs';
 
 const card = (id, shortId) => ({
   id, shortId, title: `card ${shortId}`, description: 'body', type: 'task',
