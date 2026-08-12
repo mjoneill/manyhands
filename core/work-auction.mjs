@@ -170,15 +170,35 @@ function recorded(wo, asOf = null) {
  * a correct source reading, sourced to a run in which no transition was visible
  * at all. The only tell was an impossible value in a field nobody was examining.
  */
-const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
-
 export function assertInstant(now, fnName) {
   if (!now) throw new Error(`${fnName}: now is required — this module never reads the wall clock`);
-  if (typeof now !== 'string' || !ISO_INSTANT.test(now) || Number.isNaN(Date.parse(now))) {
+
+  // ⭐ Compare against the CANONICAL FORM rather than enumerating valid shapes.
+  // A regex here admitted a family when the requirement was one representation:
+  // it allowed an optional fraction and UTC offsets, both of which are valid
+  // ISO-8601 and neither of which is lexicographically comparable to the rest.
+  //
+  //   '…18:00:00.100Z' < '…18:00:00Z'  lexicographically  TRUE   ('.' < 'Z')
+  //   '…18:00:00.100Z' < '…18:00:00Z'  chronologically    FALSE
+  //   ⇒ a LATER instant sorting as EARLIER, which is the empty-world bug
+  //     wearing a subtler costume: not "no transitions" but "the wrong ones".
+  //
+  // This one check subsumes the shape, the offsets, the variable fraction, AND
+  // invalid calendar dates — '2026-02-30T…' normalises to March and so differs
+  // from its own canonical form. Production already writes toISOString().
+  let canonical = false;
+  try {
+    canonical = typeof now === 'string' && new Date(now).toISOString() === now;
+  } catch {
+    canonical = false; // an unparseable string throws inside toISOString
+  }
+
+  if (!canonical) {
     throw new Error(
-      `${fnName}: now must be an ISO-8601 instant string (e.g. 2026-08-12T18:00:00.000Z), `
-      + `received ${typeof now} ${JSON.stringify(String(now)).slice(0, 40)} — `
-      + 'comparisons here are lexicographic and anything else answers with an empty world',
+      `${fnName}: now must be a canonical UTC instant as produced by toISOString() `
+      + `(e.g. 2026-08-12T18:00:00.000Z), received ${typeof now} `
+      + `${JSON.stringify(String(now)).slice(0, 40)} — comparisons here are lexicographic, `
+      + 'and any other representation silently reads the wrong set of transitions',
     );
   }
 }

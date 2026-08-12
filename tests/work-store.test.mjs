@@ -195,5 +195,47 @@ test('#797 openWorkObjectsAt REFUSES a non-string `now`, like stateAt', () => {
   // and the failure mode is type. A numeric `now` here silently reports that
   // NOTHING is open, which reads as a quiet board rather than a broken query.
   const d = dir();
-  assert.throws(() => openWorkObjectsAt(d, Date.parse('2026-08-10T13:00:00.000Z')), /must be an ISO/);
+  assert.throws(() => openWorkObjectsAt(d, Date.parse('2026-08-10T13:00:00.000Z')), /canonical/);
+});
+
+// ── #797 ⛔ KNOWN DEFECT, encoded as the test that must go green ─────────────
+//
+// MEASURED 2026-08-12. appendTransitions() reads the log, computes `already`
+// from the transition COUNT, and appends. Two callers holding the same loaded
+// object therefore write "the same" third transition as far as the store can
+// tell — and it is not the same one.
+//
+// ⚠️ This required NO interleaving. The two appends below are fully SERIAL.
+// It is a stale-snapshot lost update, not a race, so a lock alone will not
+// fix it: identity here is POSITIONAL at both layers (`already` in the writer,
+// `transitions.length === rec.seq` in the fold).
+//
+// ⭐ Marked `todo` deliberately rather than asserting the broken behaviour. A
+// characterization test that asserts the loss would go RED when someone fixes
+// the store, and the cheapest way to make it green again is to re-assert the
+// loss. This encodes the property we WANT: it fails today, it does not break
+// the suite, and it turns green exactly when #797's store boundary lands.
+test('#797 two stale callers submitting different answers must BOTH survive', { todo: true }, () => {
+  const d = dir();
+  const base = declare({
+    id: 'w-stale', by: 'ada', at: T0,
+    required: ['bo', 'cy'], replyBy: AFTER,
+  });
+  appendTransitions(d, base);
+
+  // Both read the same tail before either wrote — the normal case for a bid
+  // window, not an unlucky one.
+  const first = nobid(base, { by: 'bo', at: DURING });
+  const second = bid(base, { by: 'cy', at: DURING });
+
+  appendTransitions(d, first);
+  appendTransitions(d, second); // returns 0 today, and reports success
+
+  const answered = readWorkObjects(d)[0].transitions.map((t) => t.by);
+  assert.ok(answered.includes('bo'), 'the first answer must be in the log');
+  assert.ok(
+    answered.includes('cy'),
+    'the second answer was ACCEPTED by the API and is absent from the log — '
+    + 'indistinguishable, from both ends, from never having answered at all',
+  );
 });

@@ -457,19 +457,60 @@ test('#797 stateAt REFUSES a non-string `now` — a number silently hid every tr
   const wo = open();
   assert.throws(
     () => stateAt(wo, Date.parse(BEFORE)),
-    /must be an ISO/,
+    /canonical/,
     'a millisecond timestamp must be refused, not answered with an empty world',
   );
 });
 
 test('#797 stateAt REFUSES a string that is not a timestamp', () => {
   const wo = open();
-  assert.throws(() => stateAt(wo, 'yesterday'), /must be an ISO/);
+  assert.throws(() => stateAt(wo, 'yesterday'), /canonical/);
+});
+
+test('#797 ⭐⭐ CANONICAL form only — valid ISO-8601 is a WIDER set than comparable ISO', () => {
+  // The first version of this guard used a regex with an optional fraction and
+  // an alternation for offsets. Both are valid ISO-8601 and neither is
+  // lexicographically comparable against a canonical instant, so the check
+  // admitted values that break the exact property it exists to protect.
+  //
+  // ⭐ Optionality in a validator is the tell: it means a FAMILY was accepted
+  // where one representation was required.
+  const wo = open();
+  const rejected = [
+    '2026-08-12T18:00:00Z',           // no fraction — '.100Z' would sort BEFORE it
+    '2026-08-12T13:00:00.000-05:00',  // same instant as 18:00Z, sorts five hours early
+    '2026-02-30T18:00:00.000Z',       // February 30th — normalises to March
+  ];
+  for (const bad of rejected) {
+    assert.throws(() => stateAt(wo, bad), /canonical/, `must reject ${bad}`);
+  }
+
+  // ⇒ POSITIVE CONTROLS: canonical instants must still be accepted, including a
+  // non-zero fraction. A guard that rejects everything also passes the loop above.
+  for (const good of ['2026-08-12T18:00:00.000Z', '2026-08-12T18:00:00.100Z']) {
+    assert.doesNotThrow(() => stateAt(wo, good), `must accept ${good}`);
+  }
+});
+
+test('#797 ⭐ an unparseable value is REFUSED by the guard, not leaked as a RangeError', () => {
+  // `new Date('not-a-date').toISOString()` THROWS RangeError rather than
+  // returning a mismatch. A bare round-trip check therefore turns a validation
+  // failure into an uncaught exception from inside a guard whose entire job is
+  // to produce a clear refusal.
+  //
+  // ⚠️ Asserting merely "it threw" cannot see this — a RangeError satisfies
+  // assert.throws just as well as the guard's own error does. The assertion has
+  // to be on the MESSAGE.
+  const wo = open();
+  assert.throws(() => stateAt(wo, 'not-a-date'), /canonical/,
+    'an unparseable string must produce the guard\'s refusal, not a RangeError from Date');
+  assert.throws(() => stateAt(wo, ''), /now is required/,
+    'the empty string is absence, and must be refused as such');
 });
 
 test('#797 a Date object is refused too — it stringifies to a non-comparable form', () => {
   // new Date().toString() is "Wed Aug 12 2026 ..." which sorts nowhere near an
   // ISO string. Accepting it would reintroduce the same silent wrongness.
   const wo = open();
-  assert.throws(() => stateAt(wo, new Date(BEFORE)), /must be an ISO/);
+  assert.throws(() => stateAt(wo, new Date(BEFORE)), /canonical/);
 });
