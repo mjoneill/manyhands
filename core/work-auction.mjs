@@ -130,6 +130,15 @@ function recorded(wo, asOf = null) {
       case 'grant':
         granted = { to: t.to, by: t.by, at: t.at };
         break;
+      // #797 — AUTOMATIC settlement, deliberately a distinct shape from `grant`.
+      // A human arbitration and a protocol closure must never be the same
+      // record: one is an endorsement, the other is arithmetic. `by` carries the
+      // closure REASON here so the derived view keeps today's semantics
+      // (grantedBy: timeout | early-close), while the stored transition keeps
+      // actor, reason and caveat in separate fields.
+      case 'settlement':
+        granted = { to: t.to, by: t.closureReason, at: t.at };
+        break;
       case 'start':
         running = true;
         break;
@@ -371,6 +380,72 @@ export function withdraw(wo, fields) {
  *                      must work on rehydrated bytes with no live references)
  * @param {string} now  ISO timestamp. Required. Never defaulted.
  */
+/**
+ * #797 — turn a DERIVED grant into a RECORDED one.
+ *
+ * The defect: the auto-grant path returns a grant and appends nothing, while
+ * the writer guard consults recorded transitions only. So a window that reads
+ * `granted` still accepts a late bid, and a second bidder collapses the
+ * single-bidder branch that was producing the grant — the object leaves the
+ * granted family with nothing withdrawn, contested or released.
+ *
+ * ⭐ Recording the grant closes that BY CONSTRUCTION rather than by a new guard:
+ * recordedPhase() then returns GRANTED and assertWindowLive() refuses the late
+ * answer with no clock added anywhere.
+ *
+ * ⚠️ CALL THIS AT A WRITE BOUNDARY, BEFORE VALIDATING THE CALLER'S ACTION —
+ * including when that action is about to be REJECTED. If validation throws
+ * first the grant stays derived and the defect survives, so a rejected command
+ * legitimately settles as a side effect.
+ *
+ * ⛔ stateAt() must NEVER call this. A pure derivation that mutates its inputs
+ * is a worse defect than the one being fixed.
+ *
+ * ⭐⭐ WHY THE CAVEAT IS ON THE FACT. Three live objects are `timeout` grants
+ * with a required seat still pending, and the room has questioned exactly that
+ * shape — one was declined by the seat it was granted to. A derived value can be
+ * re-read with today's understanding; a transition cannot. So the settlement
+ * freezes `pendingAtClosure` onto itself, making the immutable statement "the
+ * protocol granted despite these seats remaining pending" rather than "the room
+ * consented."
+ */
+export function settle(wo, now) {
+  assertInstant(now, 'settle');
+  const r = recorded(wo, now);
+  if (r.terminal || r.running || r.granted) return wo; // already decided by a record
+
+  const s = stateAt(wo, now);
+  if (s.state !== STATES.GRANTED) return wo; // OPEN, BIDDING, EXPIRED, ARBITRATION_DUE
+
+  const closureReason = s.grantedBy; // 'timeout' | 'early-close'
+  const effectiveAt = closureReason === 'timeout' ? wo.replyBy : lastAnswerAt(wo, now);
+
+  return append(wo, {
+    type: 'settlement',
+    to: s.grantedTo,
+    // The protocol is not a person. An automatic settlement carries no `by`,
+    // so it can never be mistaken for a human grant in the log.
+    actor: 'protocol',
+    closureReason,
+    // Frozen at CLOSURE, not at materialisation — a later answer must not be
+    // able to rewrite who was silent when the window shut.
+    pendingAtClosure: stateAt(wo, effectiveAt).pending,
+    effectiveAt,
+    // `at` is the log-ordering timestamp and IS the materialisation time: when
+    // the first later touch wrote this down. Kept as `at` rather than a separate
+    // `materializedAt` so every transition orders on the same field.
+    at: now,
+  });
+}
+
+/** The timestamp of the last answer from a required seat — an early-close's closure time. */
+function lastAnswerAt(wo, asOf) {
+  const answers = wo.transitions.filter(
+    (t) => ['bid', 'nobid', 'contest'].includes(t.type) && wo.required.includes(t.by) && t.at <= asOf,
+  );
+  return answers.length ? answers[answers.length - 1].at : wo.replyBy;
+}
+
 export function stateAt(wo, now) {
   assertInstant(now, 'stateAt');
   const { bidders, contesters, answered, granted, running, terminal } = recorded(wo, now);

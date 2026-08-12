@@ -39,6 +39,7 @@ import {
   withdraw,
   contest,
   stateAt,
+  settle,
   STATES,
 } from '../core/work-auction.mjs';
 
@@ -513,4 +514,130 @@ test('#797 a Date object is refused too — it stringifies to a non-comparable f
   // ISO string. Accepting it would reintroduce the same silent wrongness.
   const wo = open();
   assert.throws(() => stateAt(wo, new Date(BEFORE)), /canonical/);
+});
+
+// ── #797 ⭐⭐ SETTLEMENT — the derived grant becomes a recorded fact ──────────
+
+test('#797 settle() MATERIALISES a timeout grant as a recorded transition', () => {
+  const wo = open();
+  assert.equal(stateAt(wo, AFTER).state, STATES.GRANTED, 'precondition: derived grant');
+  assert.equal(wo.transitions.filter((t) => t.type === 'settlement').length, 0, 'precondition: none recorded');
+
+  const settled = settle(wo, AFTER);
+  const grants = settled.transitions.filter((t) => t.type === 'settlement');
+  assert.equal(grants.length, 1, 'settlement must record the grant, not merely compute it');
+  assert.equal(grants[0].to, 'ada');
+});
+
+test('#797 ⭐⭐ THE DEFECT: after settlement a LATE answer is REFUSED, so the grant cannot evaporate', () => {
+  // Before this fix: bid() saw recordedPhase BIDDING (no clock in the writer
+  // guard), accepted a day-late bid, and the object left the granted family
+  // entirely — granted → arbitration_due, with nothing withdrawn or contested.
+  const wo = settle(open(), AFTER);
+  assert.throws(
+    () => bid(wo, { by: 'cy', at: '2026-08-11T09:00:00.000Z' }),
+    /cannot bid from granted/,
+    'a late bid must be refused once the grant is a recorded fact',
+  );
+  assert.equal(stateAt(wo, '2026-08-11T09:00:01.000Z').state, STATES.GRANTED, 'and the grant still stands');
+  assert.equal(stateAt(wo, '2026-08-11T09:00:01.000Z').grantedTo, 'ada');
+});
+
+test('#797 ⭐ SETTLEMENT DOES NOT CHANGE THE ANSWER — only its durability', () => {
+  // The safety property. If settling altered what the object reports, every
+  // existing settled object would shift the moment someone touched it.
+  const wo = open();
+  assert.deepEqual(stateAt(settle(wo, AFTER), AFTER), stateAt(wo, AFTER),
+    'the settled object must derive to exactly what the unsettled one did');
+});
+
+test('#797 settle() PRESERVES PROVENANCE — closure reason is not an actor', () => {
+  // A recorded grant's `by` is an ACTOR; derived `grantedBy` is 'timeout' or
+  // 'early-close'. Collapsing them makes an automatic settlement indistinguishable
+  // from a human arbitration, which is the one thing the grant log exists to show.
+  const auto = settle(open(), AFTER);
+  const [g] = auto.transitions.filter((t) => t.type === 'settlement');
+  assert.equal(g.actor, 'protocol', 'the protocol settled this — not a person');
+  assert.equal(g.by, undefined, 'an automatic settlement has no human actor at all');
+  assert.equal(g.closureReason, 'timeout', 'the closure REASON belongs in its own field');
+  assert.equal(stateAt(auto, AFTER).grantedBy, 'timeout');
+
+  // …and an explicit human grant is still reported by its actor.
+  const human = grant(bid(open(), { by: 'bo', at: BEFORE }), { by: 'cy', to: 'bo', at: BEFORE });
+  assert.equal(stateAt(human, AFTER).grantedBy, 'cy', 'a human arbitration must not be relabelled');
+});
+
+test('#797 settle() records WHEN the grant became derivable, not just when it was written', () => {
+  const settled = settle(open(), AFTER);
+  const [g] = settled.transitions.filter((t) => t.type === 'settlement');
+  assert.equal(g.at, AFTER, 'the log-ordering timestamp IS the materialisation time');
+  assert.equal(g.effectiveAt, REPLY_BY, 'effective time — when the window actually closed');
+});
+
+test('#797 settle() is IDEMPOTENT — touching twice does not record two grants', () => {
+  const once = settle(open(), AFTER);
+  const twice = settle(once, '2026-08-10T03:00:00.000Z');
+  assert.equal(twice.transitions.filter((t) => t.type === 'settlement').length, 1);
+  assert.deepEqual(twice, once, 'a second settlement must be a no-op, not an append');
+});
+
+// ── ⭐ NEGATIVE CONTROLS: settlement must not fire where the outcome is undecided ──
+
+test('#797 settle() does NOT settle a window that is still OPEN', () => {
+  const wo = open();
+  assert.deepEqual(settle(wo, BEFORE), wo, 'the window has not closed — nothing is decided yet');
+});
+
+test('#797 ⛔ settle() does NOT settle a CONTESTED window — arbitration is not automatic', () => {
+  // Two bidders at close is ARBITRATION_DUE precisely because a derived function
+  // must not pick a winner. Settlement writing one would be worse: it would make
+  // the arbitrary choice PERMANENT.
+  const contested = bid(open(), { by: 'bo', at: BEFORE });
+  assert.equal(stateAt(contested, AFTER).state, STATES.ARBITRATION_DUE, 'precondition');
+  assert.deepEqual(settle(contested, AFTER), contested, 'settlement must refuse to arbitrate');
+});
+
+test('#797 settle() does NOT re-settle an object granted explicitly, or one already terminal', () => {
+  const human = grant(bid(open(), { by: 'bo', at: BEFORE }), { by: 'cy', to: 'bo', at: BEFORE });
+  assert.deepEqual(settle(human, AFTER), human);
+  const done = complete(start(settle(open(), AFTER), { by: 'ada', at: AFTER }), { by: 'ada', at: AFTER });
+  assert.deepEqual(settle(done, '2026-08-11T00:00:00.000Z'), done);
+});
+
+test('#797 ⭐⭐⭐ a settlement CARRIES ITS OWN CAVEAT — pendingAtClosure is frozen on the fact', () => {
+  // The room questioned three live grants of exactly this shape: grantedBy
+  // timeout with a required seat still pending. One of them was handed to me
+  // and I declined it — "a timeout grant produced by a rail that cannot hear
+  // one of three seats is not authority to act alone."
+  //
+  // ⛔ A derived value can be re-read with today's understanding. A transition
+  // cannot. So settling naively would convert a grant the room has explicitly
+  // questioned into an immutable endorsement.
+  //
+  // ⭐ Recording `pendingAtClosure` ON the fact means the immutable statement is
+  // "the protocol granted despite cy remaining pending" — NOT "the room
+  // consented." #795's fix can then read the caveat instead of arguing with it.
+  const wo = nobid(open(), { by: 'bo', at: BEFORE }); // ada declared, bo answered, cy silent
+  const settled = settle(wo, AFTER);
+  const [s] = settled.transitions.filter((t) => t.type === 'settlement');
+
+  assert.deepEqual(s.pendingAtClosure, ['cy'],
+    'the seats that never answered must be frozen onto the settlement itself');
+  assert.equal(s.closureReason, 'timeout');
+
+  // ⚠️ And a later answer must NOT rewrite history. The caveat is a fact about
+  // the moment of closure, not a live query.
+  assert.throws(() => bid(settled, { by: 'cy', at: '2026-08-11T00:00:00.000Z' }), /cannot bid from granted/);
+  const [after] = settled.transitions.filter((t) => t.type === 'settlement');
+  assert.deepEqual(after.pendingAtClosure, ['cy'], 'pendingAtClosure must be immutable');
+});
+
+test('#797 an unambiguous early-close settlement records an EMPTY caveat, not an absent one', () => {
+  // total:0 vs absent, again: "nobody was pending" and "we did not record who
+  // was pending" must not look alike on an immutable fact.
+  const all = nobid(nobid(open(), { by: 'bo', at: BEFORE }), { by: 'cy', at: BEFORE });
+  const settled = settle(all, BEFORE);
+  const [s] = settled.transitions.filter((t) => t.type === 'settlement');
+  assert.equal(s.closureReason, 'early-close');
+  assert.deepEqual(s.pendingAtClosure, [], 'an empty caveat is a claim; an absent one is silence');
 });

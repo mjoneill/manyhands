@@ -39,7 +39,7 @@
  *   That distinction is pre-registered on #755 before this shipped.
  */
 
-import { declare, bid, nobid, contest, grant, stateAt } from './work-auction.mjs';
+import { declare, bid, nobid, contest, grant, stateAt, settle } from './work-auction.mjs';
 import { appendTransitions, readWorkObjects, openWorkObjectsAt } from './work-store.mjs';
 
 /** Argument allowlist. There is no free-text field anywhere in this surface. */
@@ -109,8 +109,24 @@ const answer = (fn, what, allowed) => (fields) => {
   // over load → validate → assign identity → append; until then this comment is
   // the only thing standing between a refactor and a lost bid.
   // Property encoded as a `{ todo: true }` test at tests/work-store.test.mjs.
-  const wo = load(dir, id, what);
-  return persistAndDerive(dir, fn(wo, { by, at: now }), now);
+  const loaded = load(dir, id, what);
+
+  // ⭐⭐ #797 — SETTLE BEFORE VALIDATING. A window that closed to a deterministic
+  // grant becomes a RECORDED fact here, so the guard below refuses a late answer
+  // instead of letting it rewrite a settled outcome.
+  const settled = settle(loaded, now);
+
+  try {
+    return persistAndDerive(dir, fn(settled, { by, at: now }), now);
+  } catch (e) {
+    // ⚠️ THE REJECTED COMMAND STILL SETTLES. If the caller's action throws and we
+    // let the settlement die with it, the grant stays derived and the defect
+    // survives every rejection — which is precisely the traffic that proves the
+    // window is closed. So a refused late bid legitimately materialises the grant
+    // as a side effect, and the caller still gets its error.
+    if (settled !== loaded) appendTransitions(dir, settled);
+    throw e;
+  }
 };
 
 export const workBid = answer(bid, 'workBid', ['dir', 'id', 'by', 'now']);
