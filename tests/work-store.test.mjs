@@ -198,23 +198,43 @@ test('#797 openWorkObjectsAt REFUSES a non-string `now`, like stateAt', () => {
   assert.throws(() => openWorkObjectsAt(d, Date.parse('2026-08-10T13:00:00.000Z')), /canonical/);
 });
 
-// ── #797 ⛔ KNOWN DEFECT, encoded as the test that must go green ─────────────
+// ── #797 ⛔ A LATENT STORE DEFECT — reachable through this API, NOT through
+//           the tool path. Read the scope note before acting on it.
 //
-// MEASURED 2026-08-12. appendTransitions() reads the log, computes `already`
-// from the transition COUNT, and appends. Two callers holding the same loaded
-// object therefore write "the same" third transition as far as the store can
-// tell — and it is not the same one.
+// MEASURED 2026-08-12 against appendTransitions() DIRECTLY: it reads the log,
+// computes `already` from the transition COUNT, and appends. Two callers
+// holding the same loaded object therefore write "the same" next transition as
+// far as the store can tell — and it is not the same one. Identity is
+// POSITIONAL at both layers (`already` in the writer, `transitions.length ===
+// rec.seq` in the fold), so a retry and a conflict are indistinguishable.
 //
-// ⚠️ This required NO interleaving. The two appends below are fully SERIAL.
-// It is a stale-snapshot lost update, not a race, so a lock alone will not
-// fix it: identity here is POSITIONAL at both layers (`already` in the writer,
-// `transitions.length === rec.seq` in the fold).
+// ⛔⛔ SCOPE CORRECTION, same day, by the author. The first version of this
+// comment implied the running system loses answers. IT DOES NOT, via the tool
+// path:
 //
-// ⭐ Marked `todo` deliberately rather than asserting the broken behaviour. A
-// characterization test that asserts the loss would go RED when someone fixes
-// the store, and the cheapest way to make it green again is to re-assert the
-// loss. This encodes the property we WANT: it fails today, it does not break
-// the suite, and it turns green exactly when #797's store boundary lands.
+//   core/work-tools.mjs:94-95 is the ONLY production writer, and it runs
+//   load() [readFileSync] → verb → appendTransitions() [appendFileSync]
+//   with NO await between them. A single-threaded event loop cannot interleave
+//   two callers there, so the second caller re-reads AFTER the first appended.
+//
+// ⚠️ So the stale snapshot below is constructed BY THIS TEST and is not
+// currently produced by any caller. The mechanism is real; the claim that it
+// drops live answers was wrong and propagated because it arrived with a repro
+// attached.
+//
+// ⭐ WHY IT IS STILL WORTH FIXING: nothing DECLARES that critical section. The
+// invariant holds because two synchronous calls happen to be adjacent, and no
+// comment at the call site says so. One `await` inserted between those lines —
+// or one second writing process, against which in-process synchrony is not a
+// lock — makes it live and silent.
+//
+// ⭐ Marked `todo` rather than asserting the broken behaviour: a characterization
+// test that asserts the loss goes RED when someone fixes the store, and the
+// cheapest way to green it again is to re-assert the loss. A test that punishes
+// the fix is worse than no test.
+//
+// ⚠️ It does NOT self-announce. A `{ todo: true }` test reports todo forever;
+// the marker comes off by hand or not at all. See #797's card comment.
 test('#797 two stale callers submitting different answers must BOTH survive', { todo: true }, () => {
   const d = dir();
   const base = declare({

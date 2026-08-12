@@ -91,6 +91,24 @@ const answer = (fn, what, allowed) => (fields) => {
   only(fields, allowed, what);
   const { dir, id, by, now } = fields;
   requireNow(now, what);
+  // ⛔⛔ #797 — CRITICAL SECTION. DO NOT INSERT AN `await` BETWEEN THESE LINES.
+  //
+  // The store's transition identity is POSITIONAL: appendTransitions() computes
+  // how much is already persisted from the transition COUNT, and the fold keys
+  // on `transitions.length === rec.seq`. So two callers who both loaded before
+  // either appended write "the same" next transition as far as the store can
+  // tell, and one answer is dropped with success reported to its caller.
+  //
+  // That cannot happen today ONLY because load() and appendTransitions() are
+  // both synchronous and adjacent — a single-threaded event loop runs this pair
+  // to completion before another caller starts. The safety is a property of
+  // this line's shape, not of the store.
+  //
+  // ⚠️ Adding a yield point here, or introducing a second writing process,
+  // makes the loss live and silent. The durable fix is an atomic store boundary
+  // over load → validate → assign identity → append; until then this comment is
+  // the only thing standing between a refactor and a lost bid.
+  // Property encoded as a `{ todo: true }` test at tests/work-store.test.mjs.
   const wo = load(dir, id, what);
   return persistAndDerive(dir, fn(wo, { by, at: now }), now);
 };
