@@ -896,3 +896,36 @@ test('#797 a human grant recorded BEFORE closure is legitimate and is left alone
   const early = grant(contested, { by: 'cy', to: 'ada', at: BEFORE });
   assert.deepEqual(settle(early, AFTER), early, 'a grant that predates closure decided the window');
 });
+
+// ── #797 ⛔ EIGHTH — work advancing does not legitimise the grant behind it ──
+
+test('#797 ⭐⭐⭐ a late grant that was STARTED and COMPLETED still gets superseded', () => {
+  // settle() returned early on `r.running || r.terminal`, so a late human grant
+  // whose grantee then began work kept false provenance forever. Starting work
+  // is downstream of the grant; it says nothing about whether the grant was the
+  // protocol's decision.
+  const closed = open({ required: ['ada', 'bo'] });                     // timeout at REPLY_BY
+  const late = grant(closed, { by: 'cy', to: 'ada', at: AFTER });       // after closure
+  const done = complete(start(late, { by: 'ada', at: AFTER }), { by: 'ada', at: AFTER });
+  assert.equal(stateAt(done, AFTER).grantedBy, 'cy', 'precondition: false provenance, work finished');
+
+  const settled = settle(done, '2026-08-11T00:00:00.000Z');
+  const [s] = settled.transitions.filter((t) => t.type === 'settlement');
+  assert.ok(s, 'a completed lifecycle must not suppress settlement');
+  assert.equal(s.closureReason, 'timeout');
+  assert.deepEqual(s.pendingAtClosure, ['bo']);
+
+  // ⭐ LIFECYCLE UNCHANGED. Settlement corrects who granted it, not what happened
+  // to the work afterwards.
+  const view = stateAt(settled, '2026-08-11T00:00:01.000Z');
+  assert.equal(view.state, STATES.COMPLETE, 'the work is still finished');
+  assert.equal(view.grantedBy, 'timeout', 'and the provenance is the protocol closure');
+});
+
+test('#797 ⭐⭐ CONTROL: a LEGITIMATE arbitration grant that advanced stays human-granted', () => {
+  const contested = bid(open({ required: ['ada', 'bo'] }), { by: 'bo', at: BEFORE });
+  const resolved = grant(contested, { by: 'cy', to: 'bo', at: AFTER });
+  const running = start(resolved, { by: 'bo', at: AFTER });
+  assert.deepEqual(settle(running, '2026-08-11T00:00:00.000Z'), running,
+    'settlement must not overrule an arbitration just because work began');
+});

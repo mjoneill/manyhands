@@ -416,7 +416,15 @@ export function settle(wo, now) {
   if (wo.transitions.some((t) => t.type === 'settlement')) return wo;
 
   const r = recorded(wo, now);
-  if (r.terminal || r.running) return wo; // work already started or finished; do not rewrite it
+
+  // ⛔ NO EARLY RETURN ON running/terminal. A late grant whose grantee then began
+  // work kept false provenance forever, because settle() bailed out here before
+  // deriving closure at all. Starting work is DOWNSTREAM of the grant — it says
+  // nothing about whether the grant was the protocol's decision.
+  //
+  // ⭐ Settlement corrects WHO GRANTED IT, never what happened to the work
+  // afterwards: the settlement is appended after the lifecycle transitions, so
+  // `terminal`/`running` still win the state and only `grantedBy` changes.
 
   // ⛔⛔ A RECORDED GRANT DOES NOT MEAN THE WINDOW WAS DECIDED BY ONE.
   //
