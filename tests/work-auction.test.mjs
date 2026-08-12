@@ -641,3 +641,78 @@ test('#797 an unambiguous early-close settlement records an EMPTY caveat, not an
   assert.equal(s.closureReason, 'early-close');
   assert.deepEqual(s.pendingAtClosure, [], 'an empty caveat is a claim; an absent one is silence');
 });
+
+// ── #797 ⛔⛔ POLLUTED HISTORY — an object that ALREADY took a late answer ────
+
+test('#797 ⭐⭐⭐ settlement records the EARLIEST closure, not the state at first touch', () => {
+  // The case every pre-fix object can be in. Before settlement existed, a late
+  // answer was ACCEPTED — that is the defect this card is about. So when such an
+  // object is finally touched:
+  //
+  //   stateAt(now) says   every required seat has answered ⇒ early-close, pending []
+  //   the truth is        the window closed at replyBy as a TIMEOUT with bo pending
+  //
+  // ⛔ Settling from `now` would write the late answer INTO the historical fact
+  // and erase the caveat — an immutable record asserting a closure that never
+  // happened. A settlement is the one place a wrong derivation cannot be re-read
+  // later, so it must be derived AS OF CLOSURE, never as of the touch.
+  const polluted = nobid(open({ required: ['ada', 'bo'] }), { by: 'bo', at: AFTER }); // AFTER > REPLY_BY
+  const settled = settle(polluted, '2026-08-11T00:00:00.000Z');
+  const [s] = settled.transitions.filter((t) => t.type === 'settlement');
+
+  assert.equal(s.closureReason, 'timeout',
+    'an answer accepted AFTER the deadline cannot convert a timeout into an early-close');
+  assert.deepEqual(s.pendingAtClosure, ['bo'],
+    'bo was pending when the window actually shut — a later answer must not erase that');
+  assert.equal(s.effectiveAt, REPLY_BY, 'the window closed at its deadline, not when bo eventually spoke');
+});
+
+test('#797 a GENUINE pre-deadline early-close is still recorded as early-close', () => {
+  // The positive control: deriving as-of-closure must not turn every early-close
+  // into a timeout. An object where everyone genuinely answered in time closes
+  // when the last of them did.
+  const intime = nobid(open({ required: ['ada', 'bo'] }), { by: 'bo', at: BEFORE }); // BEFORE < REPLY_BY
+  const [s] = settle(intime, AFTER).transitions.filter((t) => t.type === 'settlement');
+  assert.equal(s.closureReason, 'early-close');
+  assert.equal(s.effectiveAt, BEFORE, 'closure is when the last required seat answered');
+  assert.deepEqual(s.pendingAtClosure, []);
+});
+
+test('#797 a late BID on a polluted object settles to the TRUE single-bidder grant', () => {
+  // Worse variant: the late answer was a BID, so `now` shows two bidders and
+  // reads ARBITRATION_DUE — a window that was never contested before it closed.
+  // Deriving as-of-closure restores the grant the protocol actually made.
+  const polluted = bid(open({ required: ['ada', 'bo'] }), { by: 'bo', at: AFTER });
+  assert.equal(stateAt(polluted, AFTER).state, STATES.ARBITRATION_DUE, 'precondition: it reads contested NOW');
+
+  const [s] = settle(polluted, '2026-08-11T00:00:00.000Z').transitions.filter((t) => t.type === 'settlement');
+  assert.equal(s.to, 'ada', 'the only seat that bid before the deadline');
+  assert.equal(s.closureReason, 'timeout');
+  assert.deepEqual(s.pendingAtClosure, ['bo']);
+});
+
+test('#797 early-close time is the LAST required seat to answer, chronologically', () => {
+  // A review edge: closure must be the moment the last pending required seat
+  // FIRST answered, not merely the last answer transition in array order.
+  //
+  // closureOf() keeps the FIRST answer per seat and takes the maximum of those,
+  // sorted as ISO strings. Three seats answering at staggered times pins it.
+  //
+  // ⭐ And the two orders cannot diverge in a well-formed log: append() refuses
+  // a transition whose `at` precedes the previous one, so array order IS
+  // chronological order. The property is enforced upstream rather than assumed
+  // here — which is worth knowing, because it means a hand-built object is the
+  // only way to violate it.
+  const t1 = '2026-08-10T02:02:00.000Z';
+  const t2 = '2026-08-10T02:07:00.000Z';
+  const wo = nobid(nobid(open(), { by: 'bo', at: t1 }), { by: 'cy', at: t2 });
+  const [s] = settle(wo, AFTER).transitions.filter((t) => t.type === 'settlement');
+  assert.equal(s.closureReason, 'early-close');
+  assert.equal(s.effectiveAt, t2, 'closure is when the LAST required seat answered, not the first');
+
+  assert.throws(
+    () => nobid(wo, { by: 'dee', at: '2026-08-10T02:03:00.000Z' }),
+    /before the previous transition/,
+    'append() refuses out-of-order transitions, so array order cannot diverge from chronological order',
+  );
+});

@@ -215,28 +215,46 @@ test('#797 an OPEN window is untouched by settlement — no transition is writte
 
 // ── #797 ⛔ THE BOUNDARY MUST COVER EVERY WRITER, NOT MOST OF THEM ───────────
 
-test('#797 ⭐⭐⭐ COVERAGE: every writer verb crosses the settlement boundary', () => {
-  // 34af4fa's design said "on every writer verb" and wired three of four:
-  // workGrant was a hand-written function beside the wrapper, not an instance of
-  // it. A post-timeout human grant therefore REPLACED the protocol's closure
+test('#797 ⭐⭐⭐ COVERAGE: every writer verb crosses the settlement boundary', async () => {
+  // 34af4fa wired three of four: workGrant was a hand-written function beside
+  // the wrapper, so a post-timeout human grant REPLACED the protocol's closure
   // provenance instead of being refused.
   //
-  // ⭐ Enumerated rather than sampled: a shared boundary being correct says
-  // nothing about which callers use it. This is the test that catches the NEXT
-  // hand-written writer.
+  // ⛔ The first version of this test enumerated a hardcoded list, which proves
+  // CURRENT coverage and cannot catch a future writer — #775 says workWithdraw
+  // is implemented and unexposed, and it would have bypassed settlement with
+  // this test still green.
+  //
+  // ⭐ So the list is DERIVED FROM THE MODULE'S EXPORTS, and an export nobody
+  // has classified FAILS. The next writer cannot be added silently: whoever adds
+  // it must declare here whether it crosses the boundary and why.
+  const mod = await import('../core/work-tools.mjs');
   const LATE = '2026-08-11T09:00:00.000Z';
-  const verbs = [
-    ['workBid', () => workBid({ dir: d, id: 'w1', by: 'bo', now: LATE })],
-    ['workNobid', () => workNobid({ dir: d, id: 'w1', by: 'bo', now: LATE })],
-    ['workContest', () => workContest({ dir: d, id: 'w1', by: 'bo', now: LATE })],
-    ['workGrant', () => workGrant({ dir: d, id: 'w1', by: 'bo', to: 'ada', now: LATE })],
-  ];
-  let d;
-  for (const [name, call] of verbs) {
-    d = dir();
-    declared(d); // ada declares, bo never answers ⇒ closes to a timeout grant
-    assert.throws(call, /from granted/, `${name} must be refused once the window has settled`);
 
+  const NOT_WRITERS = {
+    workList: 'a read',
+    workDeclare: 'creates a NEW object — there is no prior state to settle',
+  };
+  const drive = {
+    workBid: (d) => mod.workBid({ dir: d, id: 'w1', by: 'bo', now: LATE }),
+    workNobid: (d) => mod.workNobid({ dir: d, id: 'w1', by: 'bo', now: LATE }),
+    workContest: (d) => mod.workContest({ dir: d, id: 'w1', by: 'bo', now: LATE }),
+    workGrant: (d) => mod.workGrant({ dir: d, id: 'w1', by: 'bo', to: 'ada', now: LATE }),
+  };
+
+  const exported = Object.keys(mod).filter((k) => typeof mod[k] === 'function' && k.startsWith('work'));
+  const unclassified = exported.filter((k) => !(k in drive) && !(k in NOT_WRITERS));
+  assert.deepEqual(
+    unclassified, [],
+    `core/work-tools.mjs exports ${unclassified.join(', ')} and this test does not know whether it `
+    + 'crosses the settlement boundary. Classify it: add it to `drive` if it writes to an existing '
+    + 'object, or to NOT_WRITERS with a reason. An unclassified writer bypasses settlement silently.',
+  );
+
+  for (const [name, call] of Object.entries(drive)) {
+    const d = dir();
+    declared(d); // ada declares, bo never answers ⇒ closes to a timeout grant
+    assert.throws(() => call(d), /from granted/, `${name} must be refused once the window has settled`);
     const log = readFileSync(join(d, 'work-objects.jsonl'), 'utf8');
     assert.ok(log.includes('"settlement"'),
       `${name} did not cross the settlement boundary — it is outside the wrapper`);

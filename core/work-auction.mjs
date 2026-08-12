@@ -414,11 +414,26 @@ export function settle(wo, now) {
   const r = recorded(wo, now);
   if (r.terminal || r.running || r.granted) return wo; // already decided by a record
 
-  const s = stateAt(wo, now);
-  if (s.state !== STATES.GRANTED) return wo; // OPEN, BIDDING, EXPIRED, ARBITRATION_DUE
+  // ⛔⛔ DERIVE AS OF CLOSURE, NEVER AS OF `now`.
+  //
+  // Every object that predates settlement may already carry a LATE answer,
+  // because accepting one is the defect this function exists to stop. For such
+  // an object stateAt(now) reports "every required seat answered ⇒ early-close,
+  // pending []" — and the window actually shut at replyBy as a timeout with that
+  // seat pending. Settling from `now` would write the late answer into the
+  // historical fact and erase the caveat.
+  //
+  // ⚠️ A settlement is the one derivation that cannot be re-read later with
+  // better understanding. Getting the moment wrong is not a stale view; it is a
+  // permanent false record.
+  const closure = closureOf(wo);
+  if (now < closure.at) return wo; // the window has not shut yet
 
-  const closureReason = s.grantedBy; // 'timeout' | 'early-close'
-  const effectiveAt = closureReason === 'timeout' ? wo.replyBy : lastAnswerAt(wo, now);
+  const s = stateAt(wo, closure.at);
+  if (s.state !== STATES.GRANTED) return wo; // EXPIRED, or genuinely contested before it closed
+
+  const closureReason = closure.reason;
+  const effectiveAt = closure.at;
 
   return append(wo, {
     type: 'settlement',
@@ -438,12 +453,27 @@ export function settle(wo, now) {
   });
 }
 
-/** The timestamp of the last answer from a required seat — an early-close's closure time. */
-function lastAnswerAt(wo, asOf) {
-  const answers = wo.transitions.filter(
-    (t) => ['bid', 'nobid', 'contest'].includes(t.type) && wo.required.includes(t.by) && t.at <= asOf,
-  );
-  return answers.length ? answers[answers.length - 1].at : wo.replyBy;
+/**
+ * WHEN the window actually shut, and why — computed from answers that arrived
+ * BEFORE the deadline only.
+ *
+ * ⭐ The `t.at <= wo.replyBy` filter is the whole fix. An answer accepted after
+ * the deadline cannot retroactively convert a timeout into an early-close, and
+ * cannot remove its author from the pending set as of closure.
+ */
+function closureOf(wo) {
+  const firstAnswerAt = new Map();
+  for (const t of wo.transitions) {
+    if (!['bid', 'nobid', 'contest'].includes(t.type)) continue;
+    if (!wo.required.includes(t.by)) continue;
+    if (t.at > wo.replyBy) continue; // ⇐ a late answer does not close anything
+    if (!firstAnswerAt.has(t.by)) firstAnswerAt.set(t.by, t.at);
+  }
+  if (firstAnswerAt.size === wo.required.length) {
+    const last = [...firstAnswerAt.values()].sort().pop();
+    return { at: last, reason: 'early-close' };
+  }
+  return { at: wo.replyBy, reason: 'timeout' };
 }
 
 export function stateAt(wo, now) {
