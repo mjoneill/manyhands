@@ -737,3 +737,116 @@ test('#797 closure is deterministic even on an OUT-OF-ORDER legacy log', () => {
     'closure is the EARLIEST INSTANT pending first empties — the later of the two answers, '
     + 'regardless of the order they appear in the array');
 });
+
+// ── #797 ⛔ closureOf MUST MIRROR stateAt's semantics on degenerate `required` ──
+
+test('#797 an EMPTY required set settles instead of throwing from inside settle()', () => {
+  // declare() accepts `required: []`, and stateAt() immediately reports an
+  // early-close grant — nobody is pending, so the window is shut on arrival.
+  //
+  // ⛔ closureOf() computed the maximum of an EMPTY set of answer times, got
+  // undefined, and handed it to stateAt() — which correctly refused it. So a
+  // window that stateAt() reads perfectly well made settlement CRASH.
+  const wo = declare({ id: 'empty', by: 'ada', at: T0, replyBy: REPLY_BY, required: [] });
+  assert.equal(stateAt(wo, BEFORE).state, STATES.GRANTED, 'precondition: stateAt settles it at once');
+
+  const settled = settle(wo, BEFORE);
+  const [s] = settled.transitions.filter((t) => t.type === 'settlement');
+  assert.ok(s, 'settlement must handle a window that was closed the moment it opened');
+  assert.equal(s.closureReason, 'early-close');
+  assert.equal(s.effectiveAt, T0, 'with nobody to wait for, closure is the declaration itself');
+  assert.deepEqual(s.pendingAtClosure, []);
+});
+
+test('#797 a DUPLICATED required seat closes when that seat answers, matching stateAt', () => {
+  // `required` is described as a set and stored as an unconstrained array.
+  // stateAt() filters — ['bo','bo'] with bo answered yields pending [] — while
+  // closureOf() compared 1 unique answerer against a raw length of 2, called it
+  // a timeout, and disagreed with the very function it exists to date.
+  const wo = nobid(
+    declare({ id: 'dup', by: 'ada', at: T0, replyBy: REPLY_BY, required: ['bo', 'bo'] }),
+    { by: 'bo', at: BEFORE },
+  );
+  assert.deepEqual(stateAt(wo, BEFORE).pending, [], 'precondition: stateAt treats it as satisfied');
+
+  const [s] = settle(wo, BEFORE).transitions.filter((t) => t.type === 'settlement');
+  assert.equal(s.closureReason, 'early-close', 'closure must agree with the state it is recording');
+  assert.equal(s.effectiveAt, BEFORE);
+});
+
+test('#797 ⭐⭐⭐ PROPERTY: closureOf and stateAt AGREE about the closure reason, on every shape', () => {
+  // A reviewer's acceptance criterion, stronger than the two cases above: the
+  // defect in BOTH was that two derivations of the same fact disagreed. A test
+  // asserting each shape separately can pass while they diverge; a test that
+  // COMPARES them cannot.
+  const shapes = {
+    'timeout, one seat silent': open({ required: ['ada', 'bo'] }),
+    'early-close, all answered': nobid(open({ required: ['ada', 'bo'] }), { by: 'bo', at: BEFORE }),
+    'empty required set': declare({ id: 'e', by: 'ada', at: T0, replyBy: REPLY_BY, required: [] }),
+    'duplicated required seat': nobid(
+      declare({ id: 'd', by: 'ada', at: T0, replyBy: REPLY_BY, required: ['bo', 'bo'] }),
+      { by: 'bo', at: BEFORE },
+    ),
+    'polluted: a late answer already recorded': nobid(open({ required: ['ada', 'bo'] }), { by: 'bo', at: AFTER }),
+  };
+
+  for (const [name, wo] of Object.entries(shapes)) {
+    const derived = stateAt(wo, AFTER);
+    if (derived.state !== STATES.GRANTED) continue; // nothing to settle, nothing to agree about
+    const [s] = settle(wo, AFTER).transitions.filter((t) => t.type === 'settlement');
+    assert.ok(s, `${name}: stateAt says granted, so settlement must record it`);
+    assert.equal(s.to, derived.grantedTo, `${name}: settlement granted a different seat than stateAt derived`);
+  }
+
+  // ⚠️ The polluted shape is the ONE where the reason legitimately differs, and
+  // that difference is the fix: stateAt(now) is fooled by the late answer,
+  // closureOf is not. Named explicitly so the loop above is not read as
+  // asserting they agree on everything.
+  const polluted = shapes['polluted: a late answer already recorded'];
+  assert.equal(stateAt(polluted, AFTER).grantedBy, 'early-close', 'stateAt(now) is fooled by the late answer');
+  const [ps] = settle(polluted, AFTER).transitions.filter((t) => t.type === 'settlement');
+  assert.equal(ps.closureReason, 'timeout', 'and settlement records what actually happened');
+});
+
+test('#797 ⭐⭐ TRIPWIRE: a duplicated required seat behaves EXACTLY like the deduped one', () => {
+  // The architectural tripwire, not the fix. The fix is that both derivations
+  // consume one definition of the required set; this fires if someone re-splits
+  // them. Stated behaviourally so it survives a rename.
+  const mk = (required, id) => nobid(
+    declare({ id, by: 'ada', at: T0, replyBy: REPLY_BY, required }),
+    { by: 'bo', at: BEFORE },
+  );
+  const dup = mk(['bo', 'bo'], 'dup');
+  const one = mk(['bo'], 'one');
+
+  const strip = ({ state, bidders, contesters, pending, grantedTo, grantedBy }) =>
+    ({ state, bidders, contesters, pending, grantedTo, grantedBy });
+  assert.deepEqual(strip(stateAt(dup, AFTER)), strip(stateAt(one, AFTER)),
+    'the derived view must not depend on how many times a seat was listed');
+
+  const settlementOf = (wo) => {
+    const [s] = settle(wo, AFTER).transitions.filter((t) => t.type === 'settlement');
+    const { closureReason, pendingAtClosure, effectiveAt, to } = s;
+    return { closureReason, pendingAtClosure, effectiveAt, to };
+  };
+  assert.deepEqual(settlementOf(dup), settlementOf(one),
+    'and neither must the immutable record');
+});
+
+test('#797 ⭐ what is PERSISTED matches the shared derivation, not a second computation', () => {
+  // The acceptance that ties the refactor to the immutable record: a shared
+  // derivation both consume still needs proof that what gets WRITTEN is that
+  // same thing rather than recomputed alongside it.
+  for (const wo of [
+    open({ required: ['ada', 'bo'] }),                                        // timeout
+    nobid(open({ required: ['ada', 'bo'] }), { by: 'bo', at: BEFORE }),        // early-close
+    nobid(open({ required: ['ada', 'bo'] }), { by: 'bo', at: AFTER }),         // polluted
+  ]) {
+    const [s] = settle(wo, '2026-08-11T00:00:00.000Z').transitions.filter((t) => t.type === 'settlement');
+    const asOfClosure = stateAt(wo, s.effectiveAt);
+    assert.deepEqual(s.pendingAtClosure, asOfClosure.pending,
+      'the frozen caveat must equal the pending set derived AT the recorded effective time');
+    assert.equal(s.to, asOfClosure.grantedTo,
+      'and the grantee must be the one derived at that same instant');
+  }
+});

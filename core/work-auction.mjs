@@ -461,11 +461,50 @@ export function settle(wo, now) {
  * the deadline cannot retroactively convert a timeout into an early-close, and
  * cannot remove its author from the pending set as of closure.
  */
+/**
+ * ⭐⭐ #797 — THE ONE DEFINITION OF THE REQUIRED SET.
+ *
+ * `required` is described as a set and stored as an unconstrained array:
+ * declare() accepts duplicates, and nothing between the MCP schema and the
+ * store dedupes. stateAt() filtered it (so ['bo','bo'] with bo answered gave
+ * pending []) while closureOf() compared unique answerers against the raw
+ * length — two derivations of one fact, disagreeing.
+ *
+ * ⛔ Both now consume this. Not an agreement TEST but a shared CONSTRUCTION:
+ * a check proves they agree today, this makes disagreement unrepresentable.
+ *
+ * ⚠️ What is deliberately NOT unified is the as-of question. stateAt() asks
+ * "is this window closed at `now`"; closureOf() asks "when did it actually
+ * close, ignoring answers accepted after the deadline". On a polluted history
+ * those give different answers, and that difference is the fix — not a drift.
+ */
+const requiredSet = (wo) => [...new Set(wo.required)];
+
 function closureOf(wo) {
+  // ⛔ `required` is DESCRIBED as a set and STORED as an unconstrained array.
+  // declare() accepts duplicates, and the MCP schema's min(1) blocks an empty
+  // array there but nothing dedupes anywhere. stateAt() filters, so it treats
+  // ['bo','bo'] with bo answered as satisfied — and this function compared one
+  // unique answerer against a raw length of two and called it a timeout.
+  //
+  // ⚠️ Two derivations of the same fact disagreeing is the defect. Mirror
+  // stateAt() here rather than tightening declare(): tightening the writer
+  // leaves the direct API and legacy bytes unfixed, and foldLines() does not
+  // re-check on read.
+  const required = requiredSet(wo);
+
+  // Nobody to wait for ⇒ the window was shut the moment it opened. Without this
+  // the maximum of an empty set of answer times is `undefined`, which settle()
+  // then handed to stateAt() — a window stateAt() reads perfectly well made
+  // settlement CRASH.
+  if (required.length === 0) {
+    return { at: wo.transitions[0]?.at ?? wo.replyBy, reason: 'early-close' };
+  }
+
   const firstAnswerAt = new Map();
   for (const t of wo.transitions) {
     if (!['bid', 'nobid', 'contest'].includes(t.type)) continue;
-    if (!wo.required.includes(t.by)) continue;
+    if (!required.includes(t.by)) continue;
     if (t.at > wo.replyBy) continue; // ⇐ a late answer does not close anything
     // ⭐ MIN, not first-encountered. append() enforces monotonicity so array
     // order IS chronological order for anything this system wrote — but
@@ -475,7 +514,7 @@ function closureOf(wo) {
     const prev = firstAnswerAt.get(t.by);
     if (prev === undefined || t.at < prev) firstAnswerAt.set(t.by, t.at);
   }
-  if (firstAnswerAt.size === wo.required.length) {
+  if (firstAnswerAt.size === required.length) {
     const last = [...firstAnswerAt.values()].sort().pop();
     return { at: last, reason: 'early-close' };
   }
@@ -485,7 +524,7 @@ function closureOf(wo) {
 export function stateAt(wo, now) {
   assertInstant(now, 'stateAt');
   const { bidders, contesters, answered, granted, running, terminal } = recorded(wo, now);
-  const pending = wo.required.filter((seat) => !answered.includes(seat));
+  const pending = requiredSet(wo).filter((seat) => !answered.includes(seat));
 
   const view = (state, extra = {}) => ({
     state,
