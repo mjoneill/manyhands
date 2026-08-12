@@ -160,7 +160,16 @@ test('#755-2b ⭐⭐ FLAG-OFF MEANS NOT INSTALLED — the gated handler is chose
   assert.equal(mcpSrc.includes(GATE_ENV), false, 'the flag name leaked out of work-gate.mjs');
 
   // The handler is selected ONCE, at registration, outside any request.
-  assert.match(mcpSrc, /const cardCreateHandler = isGateArmed\(\) \?/);
+  //
+  // ⛔ #790 — this used to assert the literal `const cardCreateHandler =
+  // isGateArmed() ?`, and that over-specificity is how the defect survived:
+  // the expression it pinned is the one that broke. The property is "the flag
+  // is read once, at registration, and its ANSWER is what everything else
+  // uses" — so assert the single captured read, not the sentence it appeared
+  // in. Whether the work tools actually register under both flags is now a
+  // BEHAVIOUR test (the 2×2 in tests/work-tools-wiring.test.mjs), which is
+  // where a claim about what a server offers belongs.
+  assert.match(mcpSrc, /^\s*const \w+ = isGateArmed\(\);\s*$/m, 'the gate answer must be captured in a const at registration scope');
   assert.match(mcpSrc, /\}, cardCreateHandler\);/);
 
   // And `isGateArmed` is CALLED exactly once — a second call would mean

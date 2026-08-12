@@ -64,6 +64,76 @@ test('#755-2e ⭐⭐ THE WORK TOOLS ARE REACHABLE BY AN AGENT — the seam that 
   });
 });
 
+// ── #790 ⛔ THE ENVIRONMENT THE TEST BUILDS IS NOT THE ENVIRONMENT PROD RUNS ──
+//
+// The test above is a good end-to-end test — its own header argues at length
+// against source greps, and it is right. It still could not see this, because
+// `armed()` sets ONE flag and production sets TWO.
+//
+// The defect: `cardCreateHandler = isGateArmed() ? withThrottle(gated) : …`
+// and then `if (cardCreateHandler === gatedCardCreate)` to register the work
+// tools. With the throttle ARMED, `withThrottle` returns a WRAPPER, so that
+// identity is false by construction and all six tools silently vanish. Every
+// flag still reads `on`.
+//
+// ⚠️ The identity comparison was DELIBERATE — the comment beside it explains
+// that it avoids a second `isGateArmed()` read so the gate and the tools
+// "cannot drift apart," and a test asserts that single call. ⇒ The mechanism
+// built to prevent drift is the one that caused it, and the test written to
+// protect that mechanism asserts the exact expression that fails.
+//
+// ⭐ So the acceptance is a two-flag world, with a negative control: a build
+// that simply always registers the six would pass the positive half alone.
+
+const WORK_TOOLS = ['work_declare', 'work_bid', 'work_nobid', 'work_contest', 'work_grant', 'work_list'];
+
+// The full 2×2 (@minimo's ask): registration must depend on the GATE and on
+// nothing else. The two throttle-on rows are the ones nothing covered — and
+// the gate-off rows are the negative control, without which "always register
+// them" passes and quietly reintroduces the FLAG-OFF-MEANS-NOT-INSTALLED
+// violation the gate's own comment forbids (gate off ⇒ no SCRUM_WORK_STORE
+// ⇒ a bid would have nowhere to persist).
+const MATRIX = [
+  { gate: 'on', throttle: null, present: true },
+  { gate: 'on', throttle: 'on', present: true },
+  { gate: null, throttle: null, present: false },
+  { gate: null, throttle: 'on', present: false },
+];
+
+for (const { gate, throttle, present } of MATRIX) {
+  const label = `gate=${gate ?? 'off'} throttle=${throttle ?? 'off'}`;
+  test(`#790 2×2 — ${label} ⇒ work tools ${present ? 'PRESENT' : 'ABSENT'}`, async () => {
+    const env = {};
+    if (gate) Object.assign(env, armed(storeDir()));
+    if (throttle) env.SCRUM_CLAIM_THROTTLE = throttle;
+    await withServers(env, async ({ session }) => {
+      const names = (await session.listTools()).result.tools.map((t) => t.name);
+      for (const t of WORK_TOOLS) {
+        assert.equal(
+          names.includes(t), present,
+          `${label}: ${t} ${present ? 'vanished' : 'is registered'} — registration must track the GATE and nothing else`,
+        );
+      }
+    });
+  });
+}
+
+test('#790 ⭐⭐ BENEFICIARY — with BOTH flags armed a seat can actually USE the surface, not just see it', async () => {
+  // Raw tools/list proves construction, not beneficiary availability.
+  // Registration is necessary and not sufficient — a tool can be listed and
+  // still refuse every call. This is the two-flag world doing real work.
+  const store = storeDir();
+  await withServers({ ...armed(store), SCRUM_CLAIM_THROTTLE: 'on' }, async ({ session }) => {
+    const declared = payload(await session.callTool('work_declare', {
+      id: 'w-790-throttled', by: 'ada', card: 790, required: ['ada', 'bo'], replyByMinutes: 20,
+    }));
+    assert.equal(declared.state, 'bidding', `declare refused under the throttle: ${JSON.stringify(declared)}`);
+
+    const listed = payload(await session.callTool('work_list', {}));
+    assert.deepEqual(listed.open.map((o) => o.id), ['w-790-throttled']);
+  });
+});
+
 test('#755-2e a declared work object REACHES DISK and comes back as OPEN state', async () => {
   const store = storeDir();
   await withServers(armed(store), async ({ session }) => {

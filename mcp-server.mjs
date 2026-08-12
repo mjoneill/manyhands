@@ -439,15 +439,29 @@ function buildMcpServer() {
     }
     : (inner) => inner;
 
-  const cardCreateHandler = isGateArmed() ? withThrottle(gatedCardCreate) : withThrottle(plainCardCreate);
+  // #790 — read the flag ONCE and keep the ANSWER, not the artefact built from
+  // it. The old form asked `cardCreateHandler === gatedCardCreate` below to
+  // decide whether to register the work tools; `withThrottle` returns a WRAPPER
+  // when the throttle is armed, so that identity went false by construction and
+  // all six work tools silently vanished from a server whose every flag read
+  // `on`. Arming one flag deleted a different flag's entire tool surface.
+  const gateArmed = isGateArmed();
+  const cardCreateHandler = gateArmed ? withThrottle(gatedCardCreate) : withThrottle(plainCardCreate);
 
   // ── #755 slice 2e — Work tools: the INPUT PATH ───────────────────
   //
   // ⚠️ Registered ONLY when the gate is armed, and the condition is not a
-  // second read of the flag — it is the SAME selection card_create already
-  // made. `isGateArmed()` is called exactly once in this file (a test asserts
+  // second read of the flag — it is the SAME answer card_create's selection
+  // used. `isGateArmed()` is called exactly once in this file (a test asserts
   // the count), so the tools' presence and the gate's arming cannot drift
   // apart the way ENFORCED_OPS and the wrapped tool did.
+  //
+  // ⛔ #790 — this used to compare `cardCreateHandler === gatedCardCreate`,
+  // which is the same intent expressed over the wrong object: the HANDLER is
+  // built from the flag AND the throttle, so it stopped naming the flag the
+  // moment a second wrapper existed. Share the ANSWER, never an artefact
+  // downstream of it — an artefact acquires new dependencies and says nothing
+  // when it does.
   //
   // ⇒ FLAG-OFF MEANS NOT INSTALLED here too: with the gate off there is no
   //   SCRUM_WORK_STORE, so a declaration would have nowhere to go. A tool that
@@ -458,7 +472,7 @@ function buildMcpServer() {
   // boundary where the wall clock legitimately enters, which is what keeps
   // DESIGN B (state derived at read time) from decaying back into DESIGN A (a
   // live timer that a restart silently drops).
-  if (cardCreateHandler === gatedCardCreate) {
+  if (gateArmed) {
     const withCtx = (fn) => async (args) => jsonResult(fn({ ...args, dir: WORK_STORE_DIR, now: new Date().toISOString() }));
 
     // The seat key, declared not authenticated — same contract as createdBy.
