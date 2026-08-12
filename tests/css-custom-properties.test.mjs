@@ -106,16 +106,59 @@ async function settled(page, selector, prop, { interval = 30, stableReads = 3, m
 }
 
 /**
- * Read a settled value, trigger an interaction, read the settled value again —
- * each read in its own evaluation, so the style pass runs in between.
- * Both properties matter: separate evaluations (trap one) and settled reads
- * (trap three).
+ * Read a settled value, trigger an interaction, WAIT FOR IT TO CHANGE, then
+ * read the settled value — each read in its own evaluation, so the style pass
+ * runs in between.
+ *
+ * ⛔ 2026-08-12 — THE AFTER-READ USED TO BE A BARE `settled()` AND THAT IS A RACE.
+ *
+ * `page.click()` resolves when the click is DISPATCHED, not when `:focus` has
+ * been applied and the style recalculated. So the old code could start polling
+ * before the transition began, read three identical OLD values, and return them
+ * as "settled" — reporting `changed: false` on a border that was about to move.
+ *
+ * ⚠️ The helper could not distinguish STABLE BECAUSE IT FINISHED from STABLE
+ * BECAUSE IT NEVER STARTED. And the failure was CHEAPER than the success: the
+ * suite watch's red runs were ~1000ms FASTER on this very test than three green
+ * runs, because returning early is exactly what returning early costs.
+ *
+ * ⇒ The fix is to wait for the value to DIFFER (with a deadline), and only then
+ *   let it settle. A deadline expiry now means the thing genuinely never moved,
+ *   which is a real failure worth having rather than a silent false negative.
+ *
+ * ── THE MARGIN, MEASURED, so the next reader sees the cushion rather than
+ *    re-deriving it (dates and denominators, per the same day's lesson) ──────
+ *
+ *   settled() floor      66ms median (63–67 over 10 runs, 2026-08-12)
+ *                        NOT 90ms: the loop sleeps TWICE, not three times —
+ *                        read, 30ms, read, 30ms, read, return. Page-independent;
+ *                        it is the loop plus three CDP round-trips.
+ *   recalc on THIS page  ~43ms median (15 iterations, 2026-08-12, @wren)
+ *   cushion              ≈ 1.5×
+ *
+ * ⚠️ Do NOT re-derive the recalc number from a synthetic fixture. Measured
+ * against a 6-line stub page it is ~4ms, which would report a ~16× cushion —
+ * right mechanism, wrong population. The denominator has to come from the real
+ * board page, because that is what this test loads.
+ *
+ * ⇒ 1.5× is why this fired intermittently rather than never or always, and why
+ *   a comparatively small transient stall is enough to cross it.
  */
-async function beforeAfter(page, selector, prop, interact) {
+async function beforeAfter(page, selector, prop, interact, { changeDeadlineMs = 2000 } = {}) {
+  const read = () => page.$eval(selector, (el, p) => getComputedStyle(el)[p], prop);
   const before = await settled(page, selector, prop);
   await interact();
-  const after = await settled(page, selector, prop);
-  return { before, after, changed: before !== after };
+
+  const deadline = Date.now() + changeDeadlineMs;
+  let changed = false;
+  while (Date.now() < deadline) {
+    if (await read() !== before) { changed = true; break; }
+    await new Promise((r) => setTimeout(r, 15));
+  }
+  // No change within the deadline is a RESULT, not an exception: the caller
+  // asserts on `changed`, and its message is more useful than a throw here.
+  const after = changed ? await settled(page, selector, prop) : before;
+  return { before, after, changed };
 }
 
 test('#525 the surfaces paint what they meant to: backgrounds present, focus and hover the intended colour', async () => {
@@ -157,6 +200,65 @@ test('#525 the surfaces paint what they meant to: backgrounds present, focus and
     const saveBg = await page.$eval('#save', (el) => getComputedStyle(el).backgroundColor);
     assert.notEqual(saveBg, TRANSPARENT,
       'the Settings Save button has no background — the primary action on the page is unpainted');
+  }, { server: {
+    board: makeBoardFixture({
+      cards: [{
+        id: 'c1', shortId: 1, title: 'Anchor', description: 'Body.', type: 'task',
+        assignees: [], labels: [], for: '', priority: null, column: 'backlog', order: 0,
+        createdAt: '2026-05-01T00:00:00.000Z', updatedAt: '2026-05-01T00:00:00.000Z',
+        relationships: { relatedTo: [], blockedBy: [] },
+      }],
+      nextShortId: 2,
+    }),
+    staticDir: PROJECT_DIR,
+  }, launch: { headless: 'new', args: ['--no-sandbox'] } });
+});
+
+// ── #525's flake, made deterministic ────────────────────────────────────────
+//
+// The suite watch fired on css-custom-properties on 2026-08-11 and 08-12, and
+// flagged it as a flake on 08-05, 08-06 and 08-09. The failing assertion was
+// `focus.changed === true` — a border that did move, reported as unmoved.
+//
+// ⭐ This test does not reproduce the WILD failure; it reproduces the MECHANISM
+// that makes the wild failure possible, on demand, with no timing luck. It
+// widens the pre-recalc window past settled()'s measured ~66ms floor by giving
+// the border a transition-delay, which is the one lever that holds the computed
+// value at its OLD value while the poller runs.
+//
+// ⚠️ VERIFIED BEFORE RELYING ON IT (@minimo's pre-check, and it was not safe to
+// assume): during `transition-delay`, getComputedStyle().borderTopColor really
+// does report the pre-transition value — measured, with a no-delay control that
+// confirmed focus moves the value at all. Had the computed value jumped
+// immediately with only the PAINT deferred, this test would have gone green
+// while proving nothing, which is worse than not having it.
+//
+// ⛔ It fails against the pre-2026-08-12 `beforeAfter` (a bare `settled()` for
+// the after-read) and passes against the wait-for-change version. That red→green
+// is the whole point; a version of this test that passes both ways is decoration.
+test('#525 the change detector survives a DELAYED recalc — the mechanism behind the flake', async () => {
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1442, height: 900 });
+    await page.goto(server.baseUrl, { waitUntil: 'networkidle0' });
+    await page.waitForSelector('.board-search-input');
+
+    // 400ms >> the ~66ms floor, so the old helper polls three identical OLD
+    // values and returns them as settled. Deterministic, not load-dependent.
+    await page.addStyleTag({
+      content: '.board-search-input { transition: border-color 1ms !important;'
+        + ' transition-delay: 400ms !important; }',
+    });
+
+    const focus = await beforeAfter(page, '.board-search-input', 'borderTopColor',
+      () => page.click('.board-search-input'));
+
+    assert.equal(focus.changed, true,
+      'the border DID change and the helper reported it unchanged — it polled the pre-recalc '
+      + 'value three times and could not tell "stable because it finished" from "stable '
+      + 'because it never started"');
+    assert.notEqual(focus.after, focus.before,
+      'the after-read must be the settled NEW value, not the before value handed back');
   }, { server: {
     board: makeBoardFixture({
       cards: [{
