@@ -150,6 +150,39 @@ function recorded(wo, asOf = null) {
 }
 
 /** The coarse phase a WRITER guards on — no clock, so no expiry in here. */
+/**
+ * #797 — every timestamp comparison in this module is a STRING comparison.
+ *
+ * `recorded()` filters `t.at <= asOf`. That is correct and fast for ISO-8601 UTC
+ * instants, which sort lexicographically in chronological order. It is silently
+ * WRONG for anything else:
+ *
+ *   a number      string <= number coerces to NaN ⇒ FALSE for every transition
+ *                 ⇒ an object with a full history reports OPEN, no bidders,
+ *                   nobody having answered. A confident, fully-formed lie.
+ *   a Date        stringifies to "Wed Aug 12 2026 …" — sorts nowhere near ISO
+ *   a local ISO   no Z or offset ⇒ compares against UTC instants as text
+ *
+ * ⚠️ The previous guard was `if (!now)`. It tested for PRESENCE, and every one
+ * of the failures above is a TYPE. A number is truthy, so it passed.
+ *
+ * MEASURED 2026-08-12: a probe built on a numeric `now` produced a refutation of
+ * a correct source reading, sourced to a run in which no transition was visible
+ * at all. The only tell was an impossible value in a field nobody was examining.
+ */
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+export function assertInstant(now, fnName) {
+  if (!now) throw new Error(`${fnName}: now is required — this module never reads the wall clock`);
+  if (typeof now !== 'string' || !ISO_INSTANT.test(now) || Number.isNaN(Date.parse(now))) {
+    throw new Error(
+      `${fnName}: now must be an ISO-8601 instant string (e.g. 2026-08-12T18:00:00.000Z), `
+      + `received ${typeof now} ${JSON.stringify(String(now)).slice(0, 40)} — `
+      + 'comparisons here are lexicographic and anything else answers with an empty world',
+    );
+  }
+}
+
 function recordedPhase(wo) {
   const r = recorded(wo);
   if (r.terminal) return r.terminal;
@@ -319,7 +352,7 @@ export function withdraw(wo, fields) {
  * @param {string} now  ISO timestamp. Required. Never defaulted.
  */
 export function stateAt(wo, now) {
-  if (!now) throw new Error('stateAt: now is required — this module never reads the wall clock');
+  assertInstant(now, 'stateAt');
   const { bidders, contesters, answered, granted, running, terminal } = recorded(wo, now);
   const pending = wo.required.filter((seat) => !answered.includes(seat));
 

@@ -189,3 +189,11 @@ test('#755-2d an object is in play from the instant of its declaration, not late
   appendTransitions(d, wo('w1'));
   assert.equal(openWorkObjectsAt(d, T0).length, 1, 'must count AT its own declaration timestamp');
 });
+
+test('#797 openWorkObjectsAt REFUSES a non-string `now`, like stateAt', () => {
+  // The same defect lived at both clock boundaries: `if (!now)` tests presence,
+  // and the failure mode is type. A numeric `now` here silently reports that
+  // NOTHING is open, which reads as a quiet board rather than a broken query.
+  const d = dir();
+  assert.throws(() => openWorkObjectsAt(d, Date.parse('2026-08-10T13:00:00.000Z')), /must be an ISO/);
+});

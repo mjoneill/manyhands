@@ -438,3 +438,38 @@ test('#755 a GRANT is invisible before it is given', () => {
   assert.equal(stateAt(wo, BEFORE).grantedTo, null, 'granted before the grant happened');
   assert.equal(stateAt(wo, AFTER).grantedTo, 'ada');
 });
+
+// ── #797 ⛔ A NON-STRING `now` RETURNED A CONFIDENT EMPTY WORLD ──────────────
+
+test('#797 stateAt REFUSES a non-string `now` — a number silently hid every transition', () => {
+  // MEASURED 2026-08-12. recorded() filters `t.at <= asOf`, where `t.at` is an
+  // ISO string. Passing milliseconds makes every comparison string-vs-number,
+  // which coerces to NaN and is therefore FALSE for every transition.
+  //
+  // ⚠️ The function did not fail. It reported a work object with no bidders,
+  // nobody having answered, and state OPEN — a fully-formed, entirely wrong
+  // answer. A repro built on it produced a refutation of a correct source
+  // reading, and the only tell was `pending` listing a seat that had just
+  // recorded a nobid.
+  //
+  // ⭐ `if (!now)` accepted it because a number is truthy. The guard tested
+  // for PRESENCE and the failure was TYPE.
+  const wo = open();
+  assert.throws(
+    () => stateAt(wo, Date.parse(BEFORE)),
+    /must be an ISO/,
+    'a millisecond timestamp must be refused, not answered with an empty world',
+  );
+});
+
+test('#797 stateAt REFUSES a string that is not a timestamp', () => {
+  const wo = open();
+  assert.throws(() => stateAt(wo, 'yesterday'), /must be an ISO/);
+});
+
+test('#797 a Date object is refused too — it stringifies to a non-comparable form', () => {
+  // new Date().toString() is "Wed Aug 12 2026 ..." which sorts nowhere near an
+  // ISO string. Accepting it would reintroduce the same silent wrongness.
+  const wo = open();
+  assert.throws(() => stateAt(wo, new Date(BEFORE)), /must be an ISO/);
+});

@@ -38,7 +38,7 @@
 
 import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { stateAt, STATES } from './work-auction.mjs';
+import { stateAt, STATES, assertInstant } from './work-auction.mjs';
 
 const FILE = 'work-objects.jsonl';
 
@@ -149,7 +149,7 @@ export function readWorkObjects(dir) {
  * it: a defaulted clock is how design B decays back into design A.
  */
 export function openWorkObjectsAt(dir, now) {
-  if (!now) throw new Error('openWorkObjectsAt: now is required — this store never reads the wall clock');
+  assertInstant(now, 'openWorkObjectsAt');
   return readWorkObjects(dir).filter((wo) => existsAt(wo, now) && IN_PLAY.includes(stateAt(wo, now).state));
 }
 
