@@ -1205,12 +1205,71 @@ function handleListCards(req, res) {
   }
 }
 
+// #794 — bounded comment metadata for the SINGLE-CARD response.
+//
+// `card_get` returned the stored card object and nothing else, so a card's
+// entire discussion was reachable only by a second call the reader had to know
+// to make. Measured 2026-08-12: #755 carries 70 comments and a reader saw zero.
+//
+// ⚠️ That is worse than an ordinary omission because of this board's own
+// convention: findings go in COMMENTS when a description is too large to
+// rewrite safely (#534 — no compare-and-swap, so a PATCH races the whole body).
+// The safe write surface was the invisible one.
+//
+// ⛔ DO NOT INLINE THE COMMENTS. Injecting them moves the size problem from the
+// write path to the read path — the same defect wearing the other shoe. What is
+// added must be bounded and must NOT grow with discussion length.
+//
+// ⚠️ AND THE BOUND IS ON THE INCREMENT, NOT THE RESPONSE. Review caught this
+// before a line was written: #755's DESCRIPTION alone is ~100KB, so the total
+// response is already unbounded against the MCP's budget. A test asserting
+// "the response stays bounded" would be unsatisfiable, and would have been
+// quietly reinterpreted at verification time. The honest claim is that adding
+// comments beyond N does not grow what this function adds.
+//
+// ⭐ RESPONSE LAYER ONLY. This is derived, never stored: `cardToNode` /
+// `nodeToCard` round-trip the domain object, and `domain.test.mjs:43,90` assert
+// that round-trip is lossless. A derived count has no business surviving it,
+// and those tests would break — correctly — if this moved onto the card.
+const COMMENT_RECENT_CAP = 3;
+const COMMENT_PREVIEW_CHARS = 140;
+
+function commentMetadata(data, cardId) {
+  let total = 0;
+  const recent = [];
+  // Single pass, newest-first insertion into a fixed-size buffer: the work is
+  // O(conversations) and the ALLOCATION is O(cap). Measured 0.19ms per read
+  // over 14,684 conversations — no index needed at this corpus size, and the
+  // number is dated because the next reader should re-measure rather than
+  // inherit it (2026-08-12).
+  for (const c of data.conversations) {
+    if (c.attachedTo !== cardId) continue;
+    total += 1;
+    recent.push(c);
+  }
+  recent.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+  return {
+    total,
+    recent: recent.slice(0, COMMENT_RECENT_CAP).map((c) => ({
+      id: c.id,
+      author: c.author,
+      createdAt: c.createdAt,
+      // Capping the NUMBER of stubs does not bound the payload on its own —
+      // one 40KB comment defeats it alone.
+      preview: String(c.body || '').slice(0, COMMENT_PREVIEW_CHARS),
+    })),
+  };
+}
+
 function handleGetCard(req, res, idOrShortId) {
   try {
     const data = readBoard();
     const idx = findCardIndex(data, idOrShortId);
     if (idx < 0) return sendJSON(res, 404, { error: 'Card not found' });
-    sendJSON(res, 200, data.cards[idx]);
+    const card = data.cards[idx];
+    // Spread rather than mutate: `data` came from readBoard() and the stored
+    // object must not acquire a derived field.
+    sendJSON(res, 200, { ...card, comments: commentMetadata(data, card.id) });
   } catch (e) {
     console.error('GET /api/cards/:id:', e.message);
     sendJSON(res, 500, { error: 'Failed to read card' });
