@@ -120,11 +120,15 @@ async function settled(page, selector, prop, { interval = 30, stableReads = 3, m
  * ⚠️ The helper could not distinguish STABLE BECAUSE IT FINISHED from STABLE
  * BECAUSE IT NEVER STARTED. And the failure was CHEAPER than the success: the
  * suite watch's red runs were ~1000ms FASTER on this very test than three green
- * runs, because returning early is exactly what returning early costs.
+ * runs, because returning early is exactly what returning early costs. ⚠️ That
+ * refutes SUSTAINED suite-wide load (which predicts slower); a LOCALISED
+ * transient on this one page remains viable and is not refuted.
  *
  * ⇒ The fix is to wait for the value to DIFFER (with a deadline), and only then
- *   let it settle. A deadline expiry now means the thing genuinely never moved,
- *   which is a real failure worth having rather than a silent false negative.
+ *   let it settle. A deadline expiry means NO CHANGE WAS OBSERVED WITHIN
+ *   changeDeadlineMs — NOT that the value never moved. That is a reportable
+ *   result rather than a silent false negative, and the distinction is the
+ *   whole point of this fix.
  *
  * ── THE MARGIN, MEASURED, so the next reader sees the cushion rather than
  *    re-deriving it (dates and denominators, per the same day's lesson) ──────
@@ -133,16 +137,19 @@ async function settled(page, selector, prop, { interval = 30, stableReads = 3, m
  *                        NOT 90ms: the loop sleeps TWICE, not three times —
  *                        read, 30ms, read, 30ms, read, return. Page-independent;
  *                        it is the loop plus three CDP round-trips.
- *   recalc on THIS page  ~43ms median (15 iterations, 2026-08-12, @wren)
+ *   change onset, REAL page  ~43ms median (n=15, 2026-08-12, @wren)
  *   cushion              ≈ 1.5×
  *
- * ⚠️ Do NOT re-derive the recalc number from a synthetic fixture. Measured
+ * ⚠️ Do NOT re-derive the onset number from a synthetic fixture. Measured
  * against a 6-line stub page it is ~4ms, which would report a ~16× cushion —
  * right mechanism, wrong population. The denominator has to come from the real
  * board page, because that is what this test loads.
  *
- * ⇒ 1.5× is why this fired intermittently rather than never or always, and why
- *   a comparatively small transient stall is enough to cross it.
+ * ⇒ 1.5× is a MARGIN, not an explanation. It says a ~53% localised slowdown
+ *   would be enough to cross the floor — it does NOT establish that this is what
+ *   happens at 04:45. Attribution to the production failures stays PROVISIONAL
+ *   until a recurrence window passes clean, or a firing arrives without the
+ *   early-return signature and falsifies it.
  */
 async function beforeAfter(page, selector, prop, interact, { changeDeadlineMs = 2000 } = {}) {
   const read = () => page.$eval(selector, (el, p) => getComputedStyle(el)[p], prop);
@@ -222,9 +229,14 @@ test('#525 the surfaces paint what they meant to: backgrounds present, focus and
 //
 // ⭐ This test does not reproduce the WILD failure; it reproduces the MECHANISM
 // that makes the wild failure possible, on demand, with no timing luck. It
-// widens the pre-recalc window past settled()'s measured ~66ms floor by giving
-// the border a transition-delay, which is the one lever that holds the computed
-// value at its OLD value while the poller runs.
+// defers the CHANGE ONSET past settled()'s measured ~66ms floor by giving the
+// border a transition-delay, which holds the computed value at its OLD value
+// while the poller runs.
+//
+// ⚠️ TERMINOLOGY (@minimo): transition-delay defers the computed-value
+// TRANSITION, not necessarily style recalculation itself. What the poller sees
+// is a value that has not STARTED MOVING yet — which is the property this test
+// needs, and is a narrower claim than "recalc was delayed."
 //
 // ⚠️ VERIFIED BEFORE RELYING ON IT (@minimo's pre-check, and it was not safe to
 // assume): during `transition-delay`, getComputedStyle().borderTopColor really
@@ -236,7 +248,7 @@ test('#525 the surfaces paint what they meant to: backgrounds present, focus and
 // ⛔ It fails against the pre-2026-08-12 `beforeAfter` (a bare `settled()` for
 // the after-read) and passes against the wait-for-change version. That red→green
 // is the whole point; a version of this test that passes both ways is decoration.
-test('#525 the change detector survives a DELAYED recalc — the mechanism behind the flake', async () => {
+test('#525 the change detector survives a DELAYED CHANGE ONSET — the mechanism behind the flake', async () => {
   await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.setViewport({ width: 1442, height: 900 });
