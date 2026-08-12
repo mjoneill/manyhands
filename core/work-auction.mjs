@@ -411,8 +411,26 @@ export function withdraw(wo, fields) {
  */
 export function settle(wo, now) {
   assertInstant(now, 'settle');
+  // Idempotence keys on the SETTLEMENT itself, not on `granted`. A recorded
+  // grant is no longer proof the window was decided legitimately — see below.
+  if (wo.transitions.some((t) => t.type === 'settlement')) return wo;
+
   const r = recorded(wo, now);
-  if (r.terminal || r.running || r.granted) return wo; // already decided by a record
+  if (r.terminal || r.running) return wo; // work already started or finished; do not rewrite it
+
+  // ⛔⛔ A RECORDED GRANT DOES NOT MEAN THE WINDOW WAS DECIDED BY ONE.
+  //
+  // grant() guards on recordedPhase, which reads BIDDING while a grant is only
+  // DERIVED — so before this fix a human could grant a window the protocol had
+  // already closed by timeout, and settle() returning early on `r.granted` left
+  // grantedBy = that person permanently. Same post-closure pollution class as
+  // the workGrant bypass, arriving through history rather than a live call.
+  //
+  // ⭐ The discriminator is WHEN the grant was recorded, not that it exists:
+  //   at or before closure  ⇒ it decided the window. Legitimate. Leave it.
+  //   after closure         ⇒ the protocol had already decided. Settlement
+  //                           supersedes it — appended AFTER, so the log keeps
+  //                           both what someone did and what actually happened.
 
   // ⛔⛔ DERIVE AS OF CLOSURE, NEVER AS OF `now`.
   //
@@ -428,6 +446,7 @@ export function settle(wo, now) {
   // permanent false record.
   const closure = closureOf(wo);
   if (now < closure.at) return wo; // the window has not shut yet
+  if (r.granted && r.granted.at <= closure.at) return wo; // a grant that predates closure decided it
 
   const s = stateAt(wo, closure.at);
   if (s.state !== STATES.GRANTED) return wo; // EXPIRED, or genuinely contested before it closed

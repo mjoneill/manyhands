@@ -850,3 +850,49 @@ test('#797 ⭐ what is PERSISTED matches the shared derivation, not a second com
       'and the grantee must be the one derived at that same instant');
   }
 });
+
+// ── #797 ⛔ A LEGACY LATE HUMAN GRANT — the seventh, and it is reachable ─────
+
+test('#797 ⭐⭐⭐ settlement SUPERSEDES a human grant recorded AFTER the window closed', () => {
+  // Reachable through the domain writers before this fix: grant() guards on
+  // recordedPhase, which is BIDDING while the grant is only derived — so a human
+  // could grant a window the protocol had already closed by timeout.
+  //
+  // ⛔ settle() then returned early on `r.granted` and wrote nothing, leaving
+  // grantedBy = the person forever. Same post-closure pollution class as the
+  // workGrant bypass, arriving through history instead of through a live call.
+  const closed = open({ required: ['ada', 'bo'] });         // ada bids, bo silent ⇒ timeout at REPLY_BY
+  const polluted = grant(closed, { by: 'cy', to: 'ada', at: AFTER }); // AFTER > REPLY_BY
+  assert.equal(stateAt(polluted, AFTER).grantedBy, 'cy', 'precondition: history reads as a human grant');
+
+  const settled = settle(polluted, '2026-08-11T00:00:00.000Z');
+  const [s] = settled.transitions.filter((t) => t.type === 'settlement');
+  assert.ok(s, 'a late human grant must not suppress settlement');
+  assert.equal(s.closureReason, 'timeout');
+  assert.equal(s.effectiveAt, REPLY_BY);
+  assert.deepEqual(s.pendingAtClosure, ['bo'], 'the caveat the late grant erased');
+  assert.equal(stateAt(settled, '2026-08-11T00:00:01.000Z').grantedBy, 'timeout',
+    'the derived view must report the protocol closure, not the late human one');
+
+  // ⚠️ SUPERSEDED, NOT ERASED. The human grant stays in the log — settlement is
+  // appended after it, so the record shows both what someone did and what the
+  // protocol says actually happened.
+  assert.equal(settled.transitions.filter((t) => t.type === 'grant').length, 1);
+});
+
+test('#797 ⭐⭐ POSITIVE CONTROL: a GENUINE arbitration grant stays human-granted', () => {
+  // The control this must not break. A contested window is arbitration_due AT
+  // CLOSURE, so there is no deterministic outcome for settlement to assert — the
+  // human resolution is the only answer and must survive untouched.
+  const contested = bid(open({ required: ['ada', 'bo'] }), { by: 'bo', at: BEFORE });
+  const resolved = grant(contested, { by: 'cy', to: 'bo', at: AFTER });
+  const after = settle(resolved, '2026-08-11T00:00:00.000Z');
+  assert.deepEqual(after, resolved, 'settlement must not overrule a legitimate arbitration');
+  assert.equal(stateAt(after, AFTER).grantedBy, 'cy');
+});
+
+test('#797 a human grant recorded BEFORE closure is legitimate and is left alone', () => {
+  const contested = bid(open({ required: ['ada', 'bo'] }), { by: 'bo', at: BEFORE });
+  const early = grant(contested, { by: 'cy', to: 'ada', at: BEFORE });
+  assert.deepEqual(settle(early, AFTER), early, 'a grant that predates closure decided the window');
+});
