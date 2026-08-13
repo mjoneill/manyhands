@@ -2093,7 +2093,10 @@ function handleCursorPull(req, res) {
   const q = queryGuard(req, res);
   if (!q) return;
   if (!q.identity) {
-    return sendJSON(res, 400, { error: 'identity is required (e.g. registry:minimo.sb)' });
+    // #799 — the example must TEACH the format without naming a real seat. This
+    // is the only seat name that ever reached an API response body; every other
+    // occurrence in the tree is a comment or test-internal fixture.
+    return sendJSON(res, 400, { error: 'identity is required (e.g. registry:<seat>.<client>)' });
   }
   try {
     const limit = q.limit ? Math.min(Number(q.limit) || PULL_LIMIT, PULL_LIMIT) : PULL_LIMIT;
