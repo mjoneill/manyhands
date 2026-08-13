@@ -137,7 +137,19 @@ function recorded(wo, asOf = null) {
       // (grantedBy: timeout | early-close), while the stored transition keeps
       // actor, reason and caveat in separate fields.
       case 'settlement':
-        granted = { to: t.to, by: t.closureReason, at: t.at };
+        granted = {
+          to: t.to,
+          by: t.closureReason,
+          at: t.at,
+          // #795 — the caveat travels WITH the grant. Read off the FROZEN
+          // transition, never recomputed from current `pending`: a later answer
+          // must not be able to change what the window closed despite.
+          settlement: {
+            closureReason: t.closureReason,
+            pendingAtClosure: t.pendingAtClosure,
+            effectiveAt: t.effectiveAt,
+          },
+        };
         break;
       case 'start':
         running = true;
@@ -560,12 +572,18 @@ export function stateAt(wo, now) {
     pending: [...pending],
     grantedTo: null,
     grantedBy: null,
+    // #795 — null means NO PROTOCOL SETTLEMENT IS RECORDED, which covers a human
+    // grant AND a derived-but-untouched grant. An empty `pendingAtClosure`
+    // inside a settlement object means the protocol closed it with nobody
+    // pending — a different and stronger claim. Present on every view so a
+    // reader never has to distinguish absent from null.
+    settlement: null,
     ...extra,
   });
 
-  if (terminal) return view(terminal, granted ? { grantedTo: granted.to, grantedBy: granted.by } : {});
-  if (running) return view(STATES.RUNNING, { grantedTo: granted.to, grantedBy: granted.by });
-  if (granted) return view(STATES.GRANTED, { grantedTo: granted.to, grantedBy: granted.by });
+  if (terminal) return view(terminal, granted ? { grantedTo: granted.to, grantedBy: granted.by, settlement: granted.settlement ?? null } : {});
+  if (running) return view(STATES.RUNNING, { grantedTo: granted.to, grantedBy: granted.by, settlement: granted.settlement ?? null });
+  if (granted) return view(STATES.GRANTED, { grantedTo: granted.to, grantedBy: granted.by, settlement: granted.settlement ?? null });
 
   // The window. It closes for one of two reasons, and both are arithmetic:
   //   EARLY-CLOSE  every required seat has answered

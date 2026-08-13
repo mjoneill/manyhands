@@ -287,8 +287,15 @@ test('#797 ⭐⭐ settlement does not move ANY production-shaped object', () => 
   for (const wo of objects) {
     const before = stateAt(wo, FIXTURE_NOW);
     const after = stateAt(settle(wo, FIXTURE_NOW), FIXTURE_NOW);
-    assert.deepEqual(after, before,
+
+    // #795 added a `settlement` field whose whole purpose is to differ between a
+    // settled and an unsettled object, so the comparison is pinned to "nothing
+    // BUT that field moved" rather than relaxed.
+    assert.deepEqual({ ...after, settlement: null }, before,
       `${wo.id} drifted under settlement — it must alter DURABILITY, never the ANSWER`);
+    assert.ok(after.settlement, `${wo.id} produced no settlement record`);
+    assert.equal(after.settlement.closureReason, before.grantedBy,
+      `${wo.id}: the recorded closure reason must match the one the view already derived`);
   }
 });
 

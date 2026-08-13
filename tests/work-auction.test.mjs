@@ -547,8 +547,22 @@ test('#797 ⭐ SETTLEMENT DOES NOT CHANGE THE ANSWER — only its durability', (
   // The safety property. If settling altered what the object reports, every
   // existing settled object would shift the moment someone touched it.
   const wo = open();
-  assert.deepEqual(stateAt(settle(wo, AFTER), AFTER), stateAt(wo, AFTER),
-    'the settled object must derive to exactly what the unsettled one did');
+  const before = stateAt(wo, AFTER);
+  const after = stateAt(settle(wo, AFTER), AFTER);
+
+  // ⚠️ #795 NARROWED THIS, and narrowing an assertion deserves scrutiny. The
+  // property being protected is that settling changes no ANSWER: same state,
+  // same grantee, same closure reason. The view now also reports whether a
+  // settlement is RECORDED — a field whose entire purpose is to differ between
+  // a settled and an unsettled object.
+  //
+  // ⭐ So the assertion is pinned rather than loosened: everything except that
+  // one field must be identical, AND the field must be exactly what settling
+  // adds. A weaker version would have let a real drift through.
+  assert.deepEqual({ ...after, settlement: null }, before,
+    'settling must change nothing except the presence of the settlement record');
+  assert.equal(before.settlement, null, 'nothing recorded before');
+  assert.ok(after.settlement, 'and the recorded caveat is precisely what settling adds');
 });
 
 test('#797 settle() PRESERVES PROVENANCE — closure reason is not an actor', () => {
@@ -928,4 +942,45 @@ test('#797 ⭐⭐ CONTROL: a LEGITIMATE arbitration grant that advanced stays hu
   const running = start(resolved, { by: 'bo', at: AFTER });
   assert.deepEqual(settle(running, '2026-08-11T00:00:00.000Z'), running,
     'settlement must not overrule an arbitration just because work began');
+});
+
+// ── #795 ⭐ THE CAVEAT TRAVELS WITH THE GRANT ────────────────────────────────
+
+test('#795 a settled grant carries its closure caveat in the DERIVED VIEW', () => {
+  // #795's complaint: `grantedBy: timeout` collapses "everyone answered" and
+  // "a required seat never answered." Its own text noted the information was
+  // never MISSING — `pending` sat in the same object — it was never JOINED.
+  //
+  // ⭐ The refused fix was a second label. This is the accepted one: the frozen
+  // caveat travels WITH the grant, so a reader cannot see the grant without
+  // seeing what it was granted despite.
+  const settled = settle(nobid(open(), { by: 'bo', at: BEFORE }), AFTER); // cy never answers
+  const view = stateAt(settled, AFTER);
+
+  assert.equal(view.grantedBy, 'timeout');
+  assert.ok(view.settlement, 'a protocol settlement must be visible to a reader of the state');
+  assert.equal(view.settlement.closureReason, 'timeout');
+  assert.deepEqual(view.settlement.pendingAtClosure, ['cy']);
+  assert.equal(view.settlement.effectiveAt, REPLY_BY);
+
+  // ⚠️ and it must be the FROZEN value, not a live recomputation
+  const [s] = settled.transitions.filter((t) => t.type === 'settlement');
+  assert.deepEqual(view.settlement.pendingAtClosure, s.pendingAtClosure);
+});
+
+test('#795 a HUMAN grant reports settlement: null — not an empty caveat', () => {
+  // null says "no protocol settlement is recorded." An empty pendingAtClosure
+  // would say "the protocol settled this and nobody was pending", which is a
+  // different and false claim. Same distinction as total:0 vs absent.
+  const human = grant(bid(open(), { by: 'bo', at: BEFORE }), { by: 'cy', to: 'bo', at: BEFORE });
+  assert.equal(stateAt(human, AFTER).settlement, null);
+});
+
+test('#795 an UNSETTLED derived grant reports settlement: null, honestly', () => {
+  // A window nobody has touched since it closed has a derived grant and NO
+  // recorded settlement. Reporting a caveat here would assert a record that
+  // does not exist — the lazy-settlement limitation, surfaced rather than hidden.
+  assert.equal(stateAt(open(), AFTER).state, STATES.GRANTED);
+  assert.equal(stateAt(open(), AFTER).settlement, null,
+    'nothing has been recorded yet, and the view must not imply otherwise');
 });
