@@ -29,13 +29,26 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url)).replace(/\/tests$/, '');
 
-let portSeq = 0;
-function nextPort() { return 3960 + (portSeq++); }
+// ⚠️ Ports are picked at random from a wide range and the boot is RETRIED on
+// collision. A fixed base+counter was the first version, and it is fragile in
+// exactly the way that bit on 2026-08-14: a run killed mid-flight left an
+// orphaned server holding its port, and the next run's POSITIVE control failed
+// with "server exited early" — which reads identically to the feature
+// correctly refusing to expose its tools. A collision must never be
+// indistinguishable from a fail-closed result.
+const usedPorts = new Set();
+function nextPort() {
+  for (;;) {
+    const p = 3800 + Math.floor(Math.random() * 900);
+    if (!usedPorts.has(p)) { usedPorts.add(p); return p; }
+  }
+}
 
 /** Boot mcp-server with a given env, ask tools/list, kill it, return the names. */
-async function toolNamesWithEnv(extraEnv) {
+async function toolNamesWithEnv(extraEnv, configContents = undefined, attempt = 0) {
   const port = nextPort();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'flag-'));
+  if (configContents !== undefined) fs.writeFileSync(path.join(dir, 'tending.json'), configContents);
   const child = spawn(process.execPath, [path.join(ROOT, 'mcp-server.mjs')], {
     cwd: ROOT,
     env: {
@@ -44,6 +57,7 @@ async function toolNamesWithEnv(extraEnv) {
       SCRUM_BOARD_API: `http://127.0.0.1:${port + 500}`, // deliberately dead; we never post
       SCRUM_WHISPER_POOL_FILE: path.join(dir, 'pool.json'),
       SCRUM_WHISPER_STATE_FILE: path.join(dir, 'state.json'),
+      SCRUM_TENDING_CONFIG_FILE: path.join(dir, 'tending.json'),
       ...extraEnv,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -68,6 +82,14 @@ async function toolNamesWithEnv(extraEnv) {
     const text = await res.text();
     const payload = text.split('\n').filter((l) => l.startsWith('data: ')).map((l) => l.slice(6)).pop() ?? text;
     return JSON.parse(payload).result.tools.map((t) => t.name);
+  } catch (e) {
+    child.kill('SIGKILL');
+    // A port collision presents as an immediate non-zero exit. Retry on a
+    // fresh port rather than reporting it as a feature result.
+    if (attempt < 4 && /server exited early/.test(String(e?.message))) {
+      return toolNamesWithEnv(extraEnv, configContents, attempt + 1);
+    }
+    throw e;
   } finally {
     child.kill('SIGKILL');
   }
@@ -85,27 +107,25 @@ function waitForListening(child) {
   });
 }
 
-test('⛔ F3 — with the flag UNSET the whisper surface does not exist', async () => {
-  const names = await toolNamesWithEnv({ MCP_WHISPER_ENABLED: undefined });
+test('⛔ F3 — with NO config file the whisper surface does not exist', async () => {
+  const names = await toolNamesWithEnv({});
   assert.equal(names.includes('whisper_claim'), false);
   assert.equal(names.includes('whisper_pool'), false);
-  // ...and the rest of the server is unaffected — otherwise this test would
-  // pass on a server that simply failed to start properly.
   assert.equal(names.includes('board_status'), true, 'positive control: the server really is serving tools');
 });
 
-test('⛔ F3 — a NON-"1" value is also closed ("true"/"yes"/"0" do not enable)', async () => {
-  for (const v of ['true', 'yes', '0', '']) {
-    const names = await toolNamesWithEnv({ MCP_WHISPER_ENABLED: v });
-    assert.equal(names.includes('whisper_claim'), false, `MCP_WHISPER_ENABLED=${JSON.stringify(v)} must not enable`);
+test('⛔ F3 — a malformed or non-boolean config is CLOSED, never enabled by accident', async () => {
+  // `enabled: "true"` is the trap: a loose Boolean() would open on the string.
+  for (const body of ['{not json', '{}', '{"enabled":"true"}', '{"enabled":"1"}', '{"enabled":null}']) {
+    const names = await toolNamesWithEnv({}, body);
+    assert.equal(names.includes('whisper_claim'), false, `config ${body} must not enable`);
   }
 });
 
-test('✅ F3 POSITIVE CONTROL — with the flag set to "1" the surface IS present', async () => {
-  // ⭐ Without this case the two above would pass against a server where the
-  // tools had simply been deleted, and the flag would be proven to do nothing.
-  // The pair is what makes either meaningful.
-  const names = await toolNamesWithEnv({ MCP_WHISPER_ENABLED: '1' });
+test('✅ F3 POSITIVE CONTROL — enabled:true makes the surface present', async () => {
+  // Without this, the negatives would pass against a server whose tools were
+  // simply deleted, and the switch would be proven to do nothing.
+  const names = await toolNamesWithEnv({}, '{"enabled":true}');
   assert.equal(names.includes('whisper_claim'), true);
   assert.equal(names.includes('whisper_pool'), true);
 });

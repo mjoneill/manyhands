@@ -48,6 +48,7 @@ import { fileURLToPath } from 'node:url';
 import { createChannelScheduler } from './core/channel-scheduler.mjs';
 import { mintOnce, claimWindow, readPool, writePool, recentWhispers } from './whisper-store.mjs';
 import { tendingTick } from './core/tending-tick.mjs';
+import { tendingEnabled } from './tending-config.mjs';
 import { isGateArmed, decideCoveredAction } from './core/work-gate.mjs';
 import { openWorkObjectsAt } from './core/work-store.mjs';
 // #755 slice 2e — the INPUT PATH. Until this import existed, `core/work-tools.mjs`
@@ -113,24 +114,19 @@ function exampleAssignees() {
 
 const MCP_PORT = process.env.MCP_PORT ? parseInt(process.env.MCP_PORT, 10) : 3001;
 
-// ── #804 F2/F3 — the tending feature flag ─────────────────────────────────
+// ── #804 F2/F3 — the tending feature switch ───────────────────────────────
 //
-// ⚠️ DEFINED HERE, not beside the tick, because it now gates the TOOL SURFACE
-// too — and buildMcpServer() registers tools. It happens to be called after the
-// old definition site, so there was no live TDZ bug; relying on that ordering
-// is the kind of thing that breaks silently when someone moves a call.
+// ⛔ NOT a module-scope const. It was one, and freezing it at process start is
+// the ONLY reason enabling required a restart — a restart that on 2026-08-14
+// cut every seat's session and left the steward unreachable for ~35 minutes.
 //
-// ⛔ F2, found by @indigo: the flag previously gated ONLY the timer. Both
-// whisper tools registered unconditionally and BOTH WRITE TO DISK, and
-// whisper_claim's description instructs a seat to use a rail nobody enabled.
-// So "deploying this changes nothing until you turn it on" was true of the
-// room's RHYTHM and false of its SURFACE. Reading a guard tells you what it
-// covers, never what it does not.
+// `tendingEnabled()` re-reads its file on every call:
+//   TOOL SURFACE — buildMcpServer() runs per session, so a reconnect picks up
+//                  a change with no restart.
+//   THE TIMER    — armed ALWAYS; the tick asks per firing and no-ops when off.
+//                  (Same shape as channel-scheduler's getConfig() getter.)
 //
-// ⇒ Fail-CLOSED: anything other than the exact string '1' leaves the feature
-// entirely absent — no timer, no tools. F3 covers this with a regression,
-// because 1137 tests passed while zero of them referenced this flag.
-const WHISPER_ENABLED = process.env.MCP_WHISPER_ENABLED === '1';
+// Fail-closed: a missing or malformed config file leaves tending OFF.
 const WHISPER_TICK_MS = Number(process.env.MCP_WHISPER_TICK_MS ?? 60000);
 
 // #301 — bound request bodies (mirrors the REST server's #250 caps). :3001 is
@@ -749,7 +745,7 @@ function buildMcpServer() {
   // ⛔ F2: the ENTIRE surface is behind the flag, not just the timer. While
   // disabled these tools do not exist — they are absent from tools/list, so no
   // seat is told to use a rail that is not running, and neither writes to disk.
-  if (WHISPER_ENABLED) {
+  if (tendingEnabled()) {
   mcp.registerTool('whisper_claim', {
     description: 'Claim the right to post the hourly whisper for a tending window (#802). The '
       + 'board sends the prompt to every live seat, so three seats judge the room quiet at the '
@@ -1140,7 +1136,8 @@ const whisperTick = () => tendingTick({
   log: (line) => console.log(line),
   onError: (line) => console.error(line),
 });
-if (WHISPER_ENABLED) setInterval(whisperTick, WHISPER_TICK_MS).unref();
+// Armed unconditionally; the switch is asked per firing, not per process.
+setInterval(() => { if (tendingEnabled()) whisperTick(); }, WHISPER_TICK_MS).unref();
 
 const REAP_IDLE_MS = Number(process.env.MCP_REAP_IDLE_MS ?? 300000); // 5 min default
 // #726 — how long a session must hold ZERO streams before a request from it counts
