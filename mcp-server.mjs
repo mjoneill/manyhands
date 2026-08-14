@@ -46,6 +46,8 @@ const ROSTER_SEATS = configureIdentities(loadRoster());
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createChannelScheduler } from './core/channel-scheduler.mjs';
+import { mintOnce, claimWindow, readPool, writePool, recentWhispers } from './whisper-store.mjs';
+import { tendingTick } from './core/tending-tick.mjs';
 import { isGateArmed, decideCoveredAction } from './core/work-gate.mjs';
 import { openWorkObjectsAt } from './core/work-store.mjs';
 // #755 slice 2e — the INPUT PATH. Until this import existed, `core/work-tools.mjs`
@@ -110,6 +112,26 @@ function exampleAssignees() {
 }
 
 const MCP_PORT = process.env.MCP_PORT ? parseInt(process.env.MCP_PORT, 10) : 3001;
+
+// ── #804 F2/F3 — the tending feature flag ─────────────────────────────────
+//
+// ⚠️ DEFINED HERE, not beside the tick, because it now gates the TOOL SURFACE
+// too — and buildMcpServer() registers tools. It happens to be called after the
+// old definition site, so there was no live TDZ bug; relying on that ordering
+// is the kind of thing that breaks silently when someone moves a call.
+//
+// ⛔ F2, found by @indigo: the flag previously gated ONLY the timer. Both
+// whisper tools registered unconditionally and BOTH WRITE TO DISK, and
+// whisper_claim's description instructs a seat to use a rail nobody enabled.
+// So "deploying this changes nothing until you turn it on" was true of the
+// room's RHYTHM and false of its SURFACE. Reading a guard tells you what it
+// covers, never what it does not.
+//
+// ⇒ Fail-CLOSED: anything other than the exact string '1' leaves the feature
+// entirely absent — no timer, no tools. F3 covers this with a regression,
+// because 1137 tests passed while zero of them referenced this flag.
+const WHISPER_ENABLED = process.env.MCP_WHISPER_ENABLED === '1';
+const WHISPER_TICK_MS = Number(process.env.MCP_WHISPER_TICK_MS ?? 60000);
 
 // #301 — bound request bodies (mirrors the REST server's #250 caps). :3001 is
 // the channel-delivery host; an unbounded body reader let one giant POST OOM it
@@ -723,6 +745,74 @@ function buildMcpServer() {
     },
   }, async (args) => jsonResult(await apiCall('POST', '/api/conversations', args)));
 
+  // ── #802/#804 — the whisper, settled by the board rather than by three agreeing seats.
+  // ⛔ F2: the ENTIRE surface is behind the flag, not just the timer. While
+  // disabled these tools do not exist — they are absent from tools/list, so no
+  // seat is told to use a rail that is not running, and neither writes to disk.
+  if (WHISPER_ENABLED) {
+  mcp.registerTool('whisper_claim', {
+    description: 'Claim the right to post the hourly whisper for a tending window (#802). The '
+      + 'board sends the prompt to every live seat, so three seats judge the room quiet at the '
+      + 'same instant and AGREE — agreement is why they collide. Call this first: exactly one '
+      + 'seat per window is granted. On {granted:true} compose and post the whisper yourself '
+      + '(the words are the tending and they are not automated). On {granted:false} do the rest '
+      + 'of your checks and do not whisper. reason is one of: granted, '
+      + 'already-whispered-this-window (someone got there first), expired-window (this prompt is '
+      + 'not for the current window — you were away, and its moment has passed).',
+    inputSchema: {
+      seat: z.string().min(1).describe('Your seat key'),
+      window: z.string().min(1).describe('The window from the prompt — the [tending <window>] stamp on the board\'s message'),
+    },
+  }, async ({ seat, window }) => {
+    // #804 — ARRIVAL, stamped before anything else happens in this handler:
+    // before the state read, before settlement, before any early return, and
+    // before the report is emitted. The contention interval is computed from
+    // this and nothing else. Timing at completion instead would let a claim
+    // that ARRIVED on time but settled slowly read as late.
+    const receivedAt = new Date().toISOString();
+    try {
+      return jsonResult(claimWindow({
+        seat,
+        prompt: { window },
+        now: receivedAt,
+        receivedAt,
+        reached: liveSeats(),
+        // #804 — one structured line per attempt, refusals included, stamped by
+        // the SERVER's clock. This is the only clock in the room no seat can be
+        // wrong about, and the ≤10s contention criterion is computed from these
+        // and nothing else. Deliberately carries no prompt content and no
+        // session id.
+        onAttempt: (a) => console.log(
+          `[#804] event=tending.claim_attempt receivedAt=${a.receivedAt}`
+          + ` completedAt=${a.completedAt}`
+          + ` demoAttemptId=${process.env.MCP_DEMO_ATTEMPT_ID ?? 'none'}`
+          + ` seat=${a.seat} key=${a.key} outcome=${a.outcome}`
+          + ` reason=${a.reason} heldBy=${a.heldBy ?? 'null'}`,
+        ),
+      }));
+    } catch (e) {
+      return jsonResult({ granted: false, reason: 'invalid', error: String(e?.message ?? e) });
+    }
+  });
+
+  mcp.registerTool('whisper_pool', {
+    description: 'Read or rewrite the pool of hourly tending prompts (#802). Any seat may edit '
+      + 'it; changes apply on the next window with no restart and no deploy. Called with no '
+      + 'prompts it returns the current pool and the recent grant history (which windows were '
+      + 'whispered, by whom, and which seats the prompt reached).',
+    inputSchema: {
+      prompts: z.array(z.string()).optional().describe('The new pool, in playlist order. Omit to read.'),
+    },
+  }, async ({ prompts } = {}) => {
+    try {
+      const pool = prompts ? writePool(prompts) : readPool();
+      return jsonResult({ pool, history: recentWhispers().slice(-24) });
+    } catch (e) {
+      return jsonResult({ error: String(e?.message ?? e) });
+    }
+  });
+  } // ── end #804 F2 whisper-surface gate
+
   mcp.registerTool('conversation_list', {
     description: 'List conversations. Returns the most-recent messages by default, bounded to fit the tool-result budget so a catch-up call never dumps the whole board and buries you. Pass limit=all for full history, or limit=<n> for the n most-recent. Filterable by author, attachedTo (use "null" string for board-level only), mentions_me (only conversations whose body @mentions this name), and since (ISO timestamp). Returns array.',
     inputSchema: {
@@ -1008,6 +1098,50 @@ function sweepHeartbeats() {
   }
 }
 setInterval(sweepHeartbeats, HEARTBEAT_SWEEP_MS).unref();
+
+// ── #802 — the board owns the hourly tending ───────────────────────────────
+//
+// The rail that produces the room's hourly rhythm used to live inside @wren's
+// `/loop`. On 2026-08-13 both Claude seats were blocked 10h40m and the room
+// went untended; the seat on a different runtime never stopped. The schedule
+// moves here so it survives any one seat.
+//
+// MITIGATES runtime-scoped unavailability. Does NOT mitigate a board, gateway,
+// network or upstream failure — the schedule now lives in the thing that would
+// fail. (@minimo's caveat, kept verbatim at every layer so it cannot be lost.)
+//
+// The tick is deliberately FASTER than the window: minting is idempotent per
+// window (mintOnce), so a coarse tick is safe and a missed tick self-heals on
+// the next one. A tick exactly equal to the period would drift into the seam.
+/** Seat names currently holding an OPEN stream at SEND time.
+ *
+ * ⚠️ NOT "who received it" and NOT "who was awake." A blocked seat's transport
+ * is perfectly healthy — session alive, stream open, prompts enqueuing — while
+ * the seat itself is stuck for hours. So this reads at MAXIMUM confidence
+ * during exactly the multi-hour outage that motivated the whole feature.
+ * Transport telemetry only; never delivery, wakefulness, tending or health.
+ */
+function liveSeats() {
+  return [...transports.keys()]
+    .filter((sid) => (sessionMeta.get(sid)?.openStreamCount ?? 0) > 0)
+    .map((sid) => sessionMeta.get(sid)?.seat)
+    .filter(Boolean);
+}
+
+// The tick body lives in core/tending-tick.mjs so the FAIL-SILENT contract has
+// a surface a test can discriminate on. It previously lived here, inside a
+// module that exports nothing, and was described by a comment claiming "the
+// next tick re-tries" — which was false. See that module's header.
+const whisperTick = () => tendingTick({
+  now: new Date().toISOString(),
+  mint: mintOnce,
+  post: (body) => apiCall('POST', '/api/conversations', body),
+  reachedSeats: liveSeats,
+  log: (line) => console.log(line),
+  onError: (line) => console.error(line),
+});
+if (WHISPER_ENABLED) setInterval(whisperTick, WHISPER_TICK_MS).unref();
+
 const REAP_IDLE_MS = Number(process.env.MCP_REAP_IDLE_MS ?? 300000); // 5 min default
 // #726 — how long a session must hold ZERO streams before a request from it counts
 // as deafness rather than an in-flight reconnect. See the detector below for the
