@@ -63,6 +63,25 @@ const CONTEXT = {
   // #685 — relationships are @id EDGES. Values are the target nodes' own @ids
   // (no @base: card @ids are in-document identifiers), converted from the
   // domain's shortIds at serialization and back at load.
+  // #804 — playlist order is CONTENT, not metadata. A bare multi-value is a
+  // SET in JSON-LD, so the sequence would hold only by accident of JSON
+  // serialisation and any framing/compaction step could reorder it.
+  // @container: @list makes the order a DECLARATION.
+  'scrum:orderedPrompts': { '@id': 'scrum:orderedPrompts', '@type': '@id', '@container': '@list' },
+  // Provenance predicates that name a seat are typed @id against the Person
+  // base, so they JOIN to `author`. A provenance field that cannot reach a
+  // Person node is decoration.
+  'scrum:actor': { '@id': 'scrum:actor', '@type': '@id', '@context': { '@base': PERSON_IRI_BASE } },
+  'scrum:declaredSeat': { '@id': 'scrum:declaredSeat', '@type': '@id', '@context': { '@base': PERSON_IRI_BASE } },
+  'scrum:influencedBy': { '@id': 'scrum:influencedBy', '@type': '@id', '@context': { '@base': PERSON_IRI_BASE } },
+  'scrum:seatNamesWithOpenStreamsAtSend': { '@id': 'scrum:seatNamesWithOpenStreamsAtSend', '@type': '@id', '@context': { '@base': PERSON_IRI_BASE } },
+  'scrum:evidencedBy': { '@id': 'scrum:evidencedBy', '@type': '@id' },
+  // ⛔ heldByAttempt references the WINNING CLAIM ATTEMPT, never a Person.
+  // Pointing it at a Person would collapse the very distinction the 2026-08-14
+  // incident turned on: the record would say who held it and lose whether that
+  // was a bound actor, a declared proxy, or an unbound declaration. Derive any
+  // display holder from the attempt's actor / declaredSeat / declaredSeatRaw.
+  'scrum:heldByAttempt': { '@id': 'scrum:heldByAttempt', '@type': '@id' },
   relatedTo: { '@id': 'scrum:relatedTo', '@type': '@id' },
   blockedBy: { '@id': 'scrum:blockedBy', '@type': '@id' },
   supersedes: { '@id': 'scrum:supersedes', '@type': '@id' },
@@ -126,11 +145,93 @@ function flatToCardNode(entity, idToShort) {
   return node;
 }
 
-// Messages are schema.org Comment; people are Person; columns are scrum:Column;
-// everything else is a node (a card).
+// Messages are schema.org Comment; people are Person; columns are scrum:Column.
+//
+// ⛔⛔ #804 SLICE ZERO — THE FALLTHROUGH USED TO BE "everything else is a card".
+// That was fine while three classes were all that existed, and it became a
+// silent-corruption bug the moment anything else needed to live in the graph:
+// an unrecognised @type was not refused, it was RECLASSIFIED AS A CARD on the
+// next load and surfaced in card_list. No error, no log, a plausible-looking
+// card. This file already warned about it for Person and Column (#686/#687) —
+// the warning was right and the guard was a whitelist of three.
+//
+// The partition is now CLOSED: anything the projection does not recognise is
+// preserved verbatim in its own bucket and never becomes a card. "Graph first"
+// means a new class is a first-class citizen of @graph, not a sidecar file and
+// not a card facet.
 const isMessage = (entity) => entity && entity['@type'] === 'Comment';
 const isPerson = (entity) => entity && entity['@type'] === 'Person';
 const isColumn = (entity) => entity && entity['@type'] === 'scrum:Column';
+
+/**
+ * The board-owned tending system's graph classes (#804).
+ *
+ * Declared here rather than in the tending modules on purpose: the projection
+ * is the thing that must know them, and a type list that lives away from the
+ * partition it governs is the drift this slice exists to prevent.
+ */
+export const TENDING_TYPES = Object.freeze([
+  'scrum:TendingPrompt',         // the durable identity of a prompt
+  'scrum:TendingPromptVersion',  // immutable; author + timestamp ride HERE
+  'scrum:TendingPlaylist',       // ordered REFERENCES to prompts, not copies
+  'scrum:TendingPlaylistVersion',
+  'scrum:TendingState',          // enabled/paused, with actor provenance
+  'scrum:TendingSilence',        // the causal key a mint answers
+  'scrum:TendingMint',           // one offer, attached to its silence
+  'scrum:TendingClaimAttempt',   // EVERY attempt — grants and refusals alike
+  // Pause/resume as EVENTS, not only as current state. A mutable
+  // `paused:false` erases the interval it was true, and archaeology then
+  // cannot tell a deliberate suspension from an outage — which is the exact
+  // question this whole feature exists to make answerable.
+  'scrum:TendingControlEvent',
+]);
+const TENDING_TYPE_SET = new Set(TENDING_TYPES);
+const isTending = (entity) => entity && TENDING_TYPE_SET.has(entity['@type']);
+
+/**
+ * ⛔ ENFORCE the ordering contract rather than merely preserving it.
+ *
+ * This module uses JSON-LD as a pragmatic vocabulary — nothing here expands to
+ * triples — so declaring `@container: @list` in the context does NOT make a
+ * bare array illegal by itself. Preservation and enforcement are different
+ * properties, and only the second is a contract: without this check a playlist
+ * could be written with a plain array, round-trip perfectly, and carry an
+ * ordering guarantee that exists nowhere except in the writer's intention.
+ *
+ * A playlist version's sequence IS its content. So a malformed one is refused
+ * LOUDLY at load rather than silently accepted — which is the one disposition
+ * a fallthrough must never have.
+ */
+export function assertTendingShape(entity) {
+  if (entity?.['@type'] !== 'scrum:TendingPlaylistVersion') return entity;
+  const v = entity['scrum:orderedPrompts'];
+  if (v === undefined) return entity;                    // absent is allowed; malformed is not
+  if (Array.isArray(v)) {
+    throw new Error(
+      `TendingPlaylistVersion ${entity['@id']}: scrum:orderedPrompts is a bare array. `
+      + 'A bare array is an unordered SET in JSON-LD — wrap it as {"@list":[…]} so the order is declared.',
+    );
+  }
+  if (!v || !Array.isArray(v['@list'])) {
+    throw new Error(
+      `TendingPlaylistVersion ${entity['@id']}: scrum:orderedPrompts must be {"@list":[…]}.`,
+    );
+  }
+  return entity;
+}
+
+// A card is recognised POSITIVELY: it projects as schema.org CreativeWork.
+// Verified against the live board — 733 card entities, every one CreativeWork
+// with an identifier, zero exceptions.
+//
+// The untyped-with-identifier clause is legacy tolerance, not a second rule:
+// a hand-written or pre-#685 document may carry cards with no @type, and those
+// must keep loading as cards rather than becoming "unmodelled". Anything with
+// NEITHER a CreativeWork type NOR a shortId was never a card.
+const isCard = (entity) => !!entity && (
+  entity['@type'] === 'CreativeWork'
+  || (entity['@type'] === undefined && entity.identifier !== undefined)
+);
 
 // #687 — plain {id, name, order, …} ↔ typed graph node. Lossless both ways:
 // unmodelled fields ride through verbatim (the slice-1 keystone).
@@ -149,7 +250,10 @@ const nodeToColumn = ({ '@type': _t, '@id': _i, identifier, name, 'scrum:order':
  * `scrum:meta`. The exact inverse of jsonLdToDomain.
  */
 export function domainToJsonLd(domain) {
-  const { nodes = [], messages = [], people = [], columns = [], _README, ...meta } = domain;
+  const {
+    nodes = [], messages = [], people = [], columns = [],
+    tending = [], _unmodelled = [], _README, ...meta
+  } = domain;
   const doc = {};
   if (_README !== undefined) doc._README = _README;   // first key — JSON.stringify keeps insertion order
   doc['@context'] = CONTEXT;
@@ -161,6 +265,11 @@ export function domainToJsonLd(domain) {
   doc['@graph'] = [
     ...nodes.map((n) => cardNodeToFlat(n, shortToId)),
     ...messages, ...people, ...columns.map(columnToNode),
+    ...tending,
+    // #804 — entities of a class this projection does not model ride through
+    // verbatim rather than being dropped. Silent deletion is the other bad
+    // answer to the fallthrough bug: a phantom card is at least visible.
+    ..._unmodelled,
   ];
   doc['scrum:meta'] = meta;                            // nextShortId, lastUpdated, …
   return doc;
@@ -175,7 +284,7 @@ export function domainToJsonLd(domain) {
 export function jsonLdToDomain(doc) {
   const graph = Array.isArray(doc['@graph']) ? doc['@graph'] : [];
   const meta = (doc['scrum:meta'] && typeof doc['scrum:meta'] === 'object') ? doc['scrum:meta'] : {};
-  const cardEntities = graph.filter((e) => !isMessage(e) && !isPerson(e) && !isColumn(e));
+  const cardEntities = graph.filter(isCard);
   // #685 — the inverse map (@id → shortId) rebuilt from the same single graph.
   const idToShort = new Map(cardEntities.map((e) => [e['@id'], e.identifier]));
   const domain = {
@@ -195,6 +304,16 @@ export function jsonLdToDomain(doc) {
   if (cols.length || !('columns' in domain)) domain.columns = cols.map(nodeToColumn);
   const people = graph.filter(isPerson);
   if (people.length) domain.people = people;          // absence preserved, not coerced to []
+  // #804 — tending entities are their own class. Absence preserved, like people:
+  // an untouched board must not sprout an empty key and churn its file on save.
+  const tending = graph.filter(isTending);
+  if (tending.length) domain.tending = tending.map(assertTendingShape);
+  // Anything recognised by NO predicate is kept verbatim so the serializer
+  // stays lossless. It is never a card and never silently discarded.
+  const unmodelled = graph.filter(
+    (e) => !isCard(e) && !isMessage(e) && !isPerson(e) && !isColumn(e) && !isTending(e),
+  );
+  if (unmodelled.length) domain._unmodelled = unmodelled;
   if (doc._README !== undefined) domain._README = doc._README;
   return domain;
 }
