@@ -56,15 +56,23 @@ export const REDACTION_MARKER_PREFIX = '[redacted';
 // changes through card/column diffing (which loses what actually happened) or
 // to bypass the log entirely (which loses that anything happened at all).
 //
-// ⚠️ KNOWN GAP, inherited deliberately from `wiki`: there is no COLLECTION
-// mapping below, so `replayBoard` records these events and does not project
-// them. A replay-reconstructed board would come back WITHOUT its tending nodes.
-// That is the existing wiki behaviour rather than a new hole, and naming it
-// here is the difference between an accepted limit and a silent one.
+// The KNOWN GAP once named here — no COLLECTION mapping, replay dropping
+// tending — was #805 blocker 6, and is CLOSED by the mapping directly below
+// (same commit as this correction: a comment asserting a runtime property
+// must not outlive the property). `wiki` retains that gap, deliberately.
 export const ENTITY_KINDS = new Set(['card', 'conversation', 'column', 'wiki', 'tending']);
 
 /** Which board collection a given entity kind projects into. */
-const COLLECTION = { card: 'cards', conversation: 'conversations', column: 'columns' };
+// #805 blocker 6: tending rides the SAME door as every family — the ruling was
+// "fix at collection/replay, no tending-specific bypass", and the fix is one
+// map entry precisely because the door is shared. A kind absent from this map
+// silently drops at replay (`if (!key) continue`), which for an emitted family
+// falsifies this file's first sentence: the store would NOT be rebuildable
+// from the log. Emit a new kind ⇒ map it here, same commit.
+const COLLECTION = {
+  card: 'cards', conversation: 'conversations', column: 'columns',
+  tending: 'tending',
+};
 
 const SEGMENT_RE = /^events-\d{4}-\d{2}-\d{2}\.jsonl$/;
 const segmentFor = (iso) => `events-${iso.slice(0, 10)}.jsonl`;
@@ -531,7 +539,11 @@ export function replay(genesis, events) {
     if (!key) continue;                       // wiki has no board collection yet
     if (!Array.isArray(board[key])) board[key] = [];
     const list = board[key];
-    const i = list.findIndex((x) => x?.id === ev.entity.id);
+    // Identity lives at `id` for board rows and at `@id` for JSON-LD entities
+    // (tending). Matching `id` alone never finds a JSON-LD node, so an
+    // idempotent re-emit would APPEND instead of upsert — a duplicate the
+    // emitter cannot see and the store cannot explain.
+    const i = list.findIndex((x) => (x?.id ?? x?.['@id']) === ev.entity.id);
     if (ev.op === 'delete') {
       if (i >= 0) list.splice(i, 1);
     } else if (i >= 0) {
