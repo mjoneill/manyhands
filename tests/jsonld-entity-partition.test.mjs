@@ -98,7 +98,7 @@ test('tending entities round-trip losslessly, with their fields intact', () => {
     '@id': 'entity:prompt-1',
     '@type': 'scrum:TendingPromptVersion',
     'scrum:body': 'hello',
-    'schema:author': 'person:wren',
+    'schema:author': 'person:ada',
     'schema:dateCreated': '2026-08-14T23:00:00.000Z',
     'scrum:version': 1,
   });
@@ -107,7 +107,7 @@ test('tending entities round-trip losslessly, with their fields intact', () => {
   const p = again['@graph'].find((e) => e['@id'] === 'entity:prompt-1');
   assert.equal(p['@type'], 'scrum:TendingPromptVersion');
   assert.equal(p['scrum:body'], 'hello');
-  assert.equal(p['schema:author'], 'person:wren');
+  assert.equal(p['schema:author'], 'person:ada');
   assert.equal(p['scrum:version'], 1);
 });
 

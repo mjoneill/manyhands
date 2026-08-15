@@ -21,29 +21,29 @@ const PROMPTS = [
   {
     slug: 'hello-ladies',
     body: '*quietly* Shhhhh… hello ladies. Things have gone quiet.',
-    author: 'wren',
+    author: 'ada',
     evidencedBy: ['git:2a6f4d0', 'b2d746ab-e9eb-4641-82bd-5b86074d15b9'],
-    influencedBy: 'michael',
+    influencedBy: 'bo',
     provenanceNote:
-      'Greeting register attributed to michael, adopted room-wide from '
+      'Greeting register attributed to bo, adopted room-wide from '
       + '2026-05-19. Influence, explicitly not authorship or co-authorship.',
   },
   {
     slug: 'nobody-watching',
     body: "*quietly* Hello, you. The room's gone still.",
-    author: 'wren',
+    author: 'ada',
     evidencedBy: ['git:2a6f4d0', '266f5a67-da33-46f8-a6f3-82ff4bd03a43'],
     provenanceNote:
       'No seat utterance found in board-graph history searched 2026-08-15. '
       + 'Not evidence of never-sent.',
   },
-  { slug: 'quiet-hour', body: '*quietly* Shhhh. Quiet hour.', author: 'wren' },
+  { slug: 'quiet-hour', body: '*quietly* Shhhh. Quiet hour.', author: 'ada' },
 ];
 
 const STATE = {
   history: [{
     window: '2026-08-14T22:00:00.000Z',
-    seat: 'wren',
+    seat: 'ada',
     at: '2026-08-14T22:45:36.788Z',
     reached: [],
   }],
@@ -104,11 +104,11 @@ test('⭐ ABSENT author stays absent — it never defaults to anyone', () => {
 });
 
 test('influencedBy is carried and is NOT author', () => {
-  // DEFECT: collapsing register-influence into authorship would make michael a
+  // DEFECT: collapsing register-influence into authorship would make bo a
   // co-author of a prompt he did not write.
   const v = byId(build(), promptVersionId('hello-ladies', 1));
-  assert.equal(v.author, person('wren'));
-  assert.equal(v['scrum:influencedBy'], person('michael'));
+  assert.equal(v.author, person('ada'));
+  assert.equal(v['scrum:influencedBy'], person('bo'));
   assert.notEqual(v.author, v['scrum:influencedBy']);
 });
 
@@ -145,8 +145,8 @@ test('the legacy attempt records a declared seat and NO bound actor', () => {
   // DEFECT: promoting the sidecar's declared seat to `actor` would assert the
   // caller was authenticated. The flat store never knew that.
   const at = ofType(build(), 'scrum:TendingClaimAttempt')[0];
-  assert.equal(at['scrum:declaredSeatRaw'], 'wren');
-  assert.equal(at['scrum:declaredSeat'], person('wren'));
+  assert.equal(at['scrum:declaredSeatRaw'], 'ada');
+  assert.equal(at['scrum:declaredSeat'], person('ada'));
   assert.equal('scrum:actor' in at, false, 'bound actor is unknowable here and must be absent');
 });
 

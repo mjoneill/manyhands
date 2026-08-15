@@ -25,15 +25,15 @@ import { playlistVersionId, promptVersionId } from '../core/tending-ids.mjs';
 
 const PROMPTS = [
   {
-    slug: 'hello-ladies', body: 'A-first', author: 'wren', influencedBy: 'michael',
+    slug: 'hello-ladies', body: 'A-first', author: 'ada', influencedBy: 'bo',
     evidencedBy: ['git:2a6f4d0', 'b2d746ab-e9eb-4641-82bd-5b86074d15b9'],
   },
-  { slug: 'nobody-watching', body: 'B-second', author: 'wren' },
-  { slug: 'quiet-hour', body: 'C-third', author: 'wren' },
+  { slug: 'nobody-watching', body: 'B-second', author: 'ada' },
+  { slug: 'quiet-hour', body: 'C-third', author: 'ada' },
 ];
 const STATE = {
   history: [{
-    window: '2026-08-14T22:00:00.000Z', seat: 'wren',
+    window: '2026-08-14T22:00:00.000Z', seat: 'ada',
     at: '2026-08-14T22:45:36.788Z', reached: [],
   }],
 };
@@ -64,7 +64,7 @@ test('⭐ Q1 prompt text, author and evidence are all queryable', () => {
     OPTIONAL { ?v scrum:evidencedBy ?ev } } ORDER BY ?body`);
   assert.ok(rows.length >= 3, 'every prompt version must answer');
   const first = rows.find((r) => r.body === 'A-first');
-  assert.equal(first.author, 'person:wren');
+  assert.equal(first.author, 'person:ada');
   // Evidence pointing at a board Comment must be an EDGE, so it joins to the
   // real utterance. A literal would silently fail to join and return less.
   const evs = rows.filter((r) => r.body === 'A-first').map((r) => r.ev);
@@ -94,7 +94,7 @@ test('Q4 the legacy mint keeps its clock window and has NO silence edge', () => 
     ?c scrum:ofMint ?m ; scrum:outcome ?outcome ; scrum:declaredSeatRaw ?declared .
     FILTER NOT EXISTS { ?m scrum:ofSilence ?any } }`);
   assert.deepEqual(rows, [{
-    win: '2026-08-14T22:00:00.000Z', outcome: 'granted', declared: 'wren',
+    win: '2026-08-14T22:00:00.000Z', outcome: 'granted', declared: 'ada',
   }]);
 });
 
