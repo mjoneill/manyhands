@@ -134,6 +134,124 @@ export function projectActivities(store, events) {
  * triples and nothing else's — an arrow FROM another card TO this one is stored
  * under that other card's subject and is therefore untouched.
  */
+/**
+ * #805 — THE TENDING PREDICATE SEMANTICS REGISTRY.
+ *
+ * One explicit table, not nine per-type branches and not a heuristic. Every
+ * predicate the bootstrap or the runtime writers emit declares whether it is a
+ * literal, an edge to a Person, an edge to another entity, or an ordered list.
+ *
+ * ⛔ WHY NOT INFER IT. A first cut guessed: uuid-shaped values became edges and
+ * everything else became a literal. That is a rule which is right until the day
+ * a body text happens to look like a uuid, or an evidence ref stops doing so —
+ * and when it is wrong it is SILENTLY wrong, because a literal where an edge
+ * belonged simply fails to join and returns fewer rows. Declaring beats
+ * sniffing precisely where the failure is a quiet undercount.
+ *
+ * ⚠️ An unknown predicate on a tending entity THROWS rather than being dropped
+ * or guessed at. That is deliberate and it is the completeness property: adding
+ * a field to the bootstrap without teaching the projector cannot silently ship
+ * a fact that never reaches the graph — which is exactly how the whole tending
+ * system came to exist in the document and nowhere else.
+ */
+export const TENDING_PREDICATES = Object.freeze({
+  // identity / structure
+  identifier: 'literal',
+  'scrum:ofPrompt': 'iri',
+  'scrum:ofPlaylist': 'iri',
+  'scrum:ofMint': 'iri',
+  'scrum:ofSilence': 'iri',
+  'scrum:orderedPrompts': 'list',
+  'scrum:version': 'literal',
+  // prompt content + provenance
+  'scrum:body': 'literal',
+  author: 'person',
+  'scrum:influencedBy': 'person',
+  'scrum:evidencedBy': 'iri',
+  'scrum:provenanceNote': 'literal',
+  'scrum:importedAt': 'literal',
+  // state + control
+  'scrum:enabled': 'literal',
+  'scrum:paused': 'literal',
+  'scrum:pausedAt': 'literal',
+  'scrum:actor': 'person',
+  'scrum:occurredAt': 'literal',
+  // mint / settlement
+  'scrum:legacyClockWindow': 'literal',
+  'scrum:silenceSince': 'literal',
+  'scrum:mintedAt': 'literal',
+  'scrum:claimValidUntil': 'literal',
+  'scrum:promptVersion': 'iri',
+  'scrum:seatNamesWithOpenStreamsAtSend': 'person',
+  // claim attempts
+  'scrum:receivedAt': 'literal',
+  'scrum:completedAt': 'literal',
+  'scrum:outcome': 'literal',
+  'scrum:declaredSeat': 'person',
+  'scrum:declaredSeatRaw': 'literal',
+  'scrum:heldByAttempt': 'iri',
+  'scrum:reason': 'literal',
+});
+
+/**
+ * #805 — project one tending entity as FACTS.
+ *
+ * Before this existed these entities fell to the unknown-class fallback, which
+ * emits type + identifier and stops. Measured on the bootstrap output: nine
+ * entities, thirteen triples, every one rdf:type or identifier. `graph_query`
+ * could discover that a prompt version EXISTED and learn nothing about it — not
+ * its text, not its author, and not the playlist order we had just spent the
+ * evening declaring in the JSON-LD context.
+ */
+function projectTending(store, e) {
+  const add = (s, p, o) => store.add(oxigraph.triple(s, p, o));
+  const S = IRI.scrum, SC = IRI.schema, E = IRI.entity, P = IRI.person;
+  const s = nn(e['@id']);
+  add(s, A, nn(S + String(e['@type']).slice(6)));
+
+  const predIri = (k) => (k.startsWith('scrum:') ? nn(S + k.slice(6)) : nn(SC + k));
+  const asPerson = (v) => nn(String(v).startsWith('http') ? v : P + v);
+  // A bare uuid is a board entity (a Comment, usually — evidence points at the
+  // real utterance). Anything else already carries its own IRI, or is a source
+  // ref like `git:2a6f4d0` that names no node and stays a literal rather than
+  // minting an entity that does not exist.
+  const asRef = (v) => (/^[0-9a-f-]{36}$/i.test(String(v)) ? nn(E + v)
+    : String(v).startsWith('http') ? nn(String(v)) : lit(v));
+
+  for (const [k, v] of Object.entries(e)) {
+    if (k === '@id' || k === '@type' || v === undefined || v === null) continue;
+    const kind = TENDING_PREDICATES[k];
+    if (!kind) {
+      throw new Error(
+        `graph-replica: no projection semantics for tending predicate ${JSON.stringify(k)} `
+        + `on ${e['@type']}. Add it to TENDING_PREDICATES — a fact with no declared `
+        + 'kind would otherwise reach the document and never reach the graph.',
+      );
+    }
+    if (kind === 'list') {
+      const items = Array.isArray(v?.['@list']) ? v['@list'] : null;
+      if (!items) {
+        throw new Error(`graph-replica: ${k} must be {"@list":[…]} — a bare array is an unordered set`);
+      }
+      if (!items.length) { add(s, predIri(k), nn(IRI.rdf + 'nil')); continue; }
+      // Blank-node names derive from the OWNING subject, so two playlists cannot
+      // collide and re-projecting the same entity is stable.
+      const tag = createHash('sha256').update(e['@id']).digest('hex').slice(0, 12);
+      const cell = (i) => oxigraph.blankNode(`tl${tag}_${i}`);
+      add(s, predIri(k), cell(0));
+      items.forEach((item, i) => {
+        add(cell(i), nn(IRI.rdf + 'first'), asRef(item));
+        add(cell(i), nn(IRI.rdf + 'rest'), i + 1 < items.length ? cell(i + 1) : nn(IRI.rdf + 'nil'));
+      });
+      continue;
+    }
+    for (const one of (Array.isArray(v) ? v : [v])) {
+      if (one === undefined || one === null) continue;
+      add(s, predIri(k), kind === 'person' ? asPerson(one) : kind === 'iri' ? asRef(one) : lit(one));
+    }
+  }
+}
+
 export function subjectIriFor(entity) {
   const id = String(entity['@id']);
   return id.startsWith('http') ? id : IRI.entity + id;
@@ -147,13 +265,41 @@ export function subjectIriFor(entity) {
  */
 export function updateEntity(store, entity) {
   const subject = nn(subjectIriFor(entity));
+  // #805 — an RDF collection lives in BLANK NODES, which are their own subjects.
+  // Subject-scoped deletion alone would drop `<pv> orderedPrompts _:head` and
+  // orphan every `_:cell rdf:first/rdf:rest` triple behind it, forever, on
+  // every reorder. Walk and delete the chain FIRST, while the head edge that
+  // reaches it still exists.
+  dropListChains(store, subject);
   for (const q of store.match(subject, null, null)) store.delete(q);
   projectEntity(store, entity);
+}
+
+/**
+ * #805 — delete every RDF-list cell reachable from `subject`'s list-valued
+ * predicates. Walks rdf:rest to the end rather than assuming a length, so a
+ * list that SHRANK does not leave its old tail behind.
+ */
+function dropListChains(store, subject) {
+  const REST = nn(IRI.rdf + 'rest');
+  for (const q of store.match(subject, null, null)) {
+    if (q.object.termType !== 'BlankNode') continue;
+    let cell = q.object;
+    const seen = new Set();
+    while (cell && cell.termType === 'BlankNode' && !seen.has(cell.value)) {
+      seen.add(cell.value);
+      const rest = store.match(cell, REST, null)[0]?.object;
+      for (const c of store.match(cell, null, null)) store.delete(c);
+      cell = rest;
+    }
+  }
 }
 
 /** #714 — remove an entity's own triples without re-emitting (deletion). */
 export function removeEntity(store, idOrEntity) {
   const id = typeof idOrEntity === 'string' ? idOrEntity : subjectIriFor(idOrEntity);
+  // #805 — same reason as updateEntity: the list chain is not this subject's.
+  dropListChains(store, nn(id.startsWith('http') ? id : IRI.entity + id));
   const subject = nn(id.startsWith('http') ? id : IRI.entity + id);
   let n = 0;
   for (const q of store.match(subject, null, null)) { store.delete(q); n += 1; }
@@ -233,6 +379,8 @@ function projectEntity(store, e) {
       if (e.identifier) add(s, nn(SC + 'identifier'), lit(e.identifier));
       if (e.name) add(s, nn(SC + 'name'), lit(e.name));
       if (e['scrum:order'] != null) add(s, nn(S + 'order'), lit(e['scrum:order']));
+    } else if (typeof t === 'string' && t.startsWith('scrum:Tending')) {
+      projectTending(store, e);
     } else if (e && e['@id']) {
       // An entity class this projection doesn't know yet (wiki pages are
       // already in the event vocabulary; more will come). It must NOT vanish:
