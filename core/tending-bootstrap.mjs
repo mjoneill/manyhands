@@ -48,6 +48,30 @@ import {
 const PERSON_BASE = 'https://scrumboard.local/person/';
 export const person = (seat) => (seat ? `${PERSON_BASE}${seat}` : undefined);
 
+/**
+ * #805 — a legacy timestamp must be a CANONICAL instant before it becomes a
+ * fact in the graph.
+ *
+ * Found by trying to force a migration failure: a whisper-state carrying
+ * `at: "also-bad"` imported cleanly and produced a TendingMint asserting
+ * `scrum:mintedAt "also-bad"`. Nothing refused it. The graph would then answer
+ * "when was this granted?" with a string that is not a time — invented
+ * provenance of exactly the kind this module refuses everywhere else.
+ *
+ * Same round-trip check as core/whisper-window.mjs: parses AND re-serializes
+ * identically, so a value that merely looks date-ish cannot pass.
+ */
+function assertInstant(v, what) {
+  let ok = false;
+  try { ok = typeof v === 'string' && new Date(v).toISOString() === v; } catch { ok = false; }
+  if (!ok) {
+    throw new Error(
+      `buildTendingEntities: ${what} must be a canonical UTC instant, got ${JSON.stringify(v)}. `
+      + 'A legacy record with an unparseable time cannot become a dated fact in the graph.',
+    );
+  }
+}
+
 /** Drop undefined keys so ABSENT is genuinely absent, not `null` pretending. */
 const compact = (o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined));
 
@@ -87,6 +111,7 @@ export function buildTendingEntities({
       '@id': promptId(p.slug),
       '@type': 'scrum:TendingPrompt',
       identifier: p.slug,
+      'scrum:importedAt': importedAt,
     }));
 
     const vid = promptVersionId(p.slug, 1);
@@ -106,6 +131,17 @@ export function buildTendingEntities({
       // Real, and explicitly NOT authorship.
       'scrum:influencedBy': p.influencedBy ? person(p.influencedBy) : undefined,
       'scrum:provenanceNote': p.provenanceNote,
+      // CREATE-STAMPED, then FROZEN — see the module header. The caller passes a
+      // fresh clock every boot; writeTendingEntities preserves the stored value
+      // for any @id that already exists, so the bytes at this immutable @id are
+      // identical on run 2 and the immutability guard never sees a diff.
+      //
+      // ⚠️ The freeze is what makes this safe, and it lives at the WRITE SEAM,
+      // not here. An earlier cut emitted the fresh clock with no preservation:
+      // every boot recomputed different bytes at the same @id, the second boot
+      // hit the immutability guard, the caller swallowed the throw, and entity
+      // counts stayed flat — so a control asserting "counts did not grow"
+      // certified that FAILURE as idempotence. (#805 blocker 2.)
       'scrum:importedAt': importedAt,
     }));
   }
@@ -118,6 +154,7 @@ export function buildTendingEntities({
     '@id': playlistId(playlistSlug),
     '@type': 'scrum:TendingPlaylist',
     identifier: playlistSlug,
+    'scrum:importedAt': importedAt,
   }));
   entities.push(compact({
     '@id': playlistVersionId(playlistSlug, 1),
@@ -129,6 +166,7 @@ export function buildTendingEntities({
     // JSON-LD and would carry no ordering guarantee at all. This module emitted
     // one on its first draft and the enforcement caught it on first contact.
     'scrum:orderedPrompts': { '@list': versionIds },
+    // Create-stamped and frozen, same as the prompt version above.
     'scrum:importedAt': importedAt,
   }));
 
@@ -147,6 +185,11 @@ export function buildTendingEntities({
       'Imported from the flat tending-config.json sidecar, which carried only '
       + '{enabled}. No pausedAt/pausedBy existed in the source, so both are '
       + 'absent here rather than inferred.',
+    // ⚠️ This node is MUTABLE (enabled/paused change at runtime), so the freeze
+    // is doing real work here in a way it is not on the immutable versions:
+    // without it, a fresh clock made the state node differ on every boot, so it
+    // re-wrote and emitted a fresh event on each start — 9 entities producing
+    // 11 events over three boots. Frozen, the second boot writes nothing.
     'scrum:importedAt': importedAt,
   }));
 
@@ -155,6 +198,8 @@ export function buildTendingEntities({
   // window. It carries the window verbatim and no ofSilence edge.
   for (const h of (Array.isArray(state.history) ? state.history : [])) {
     if (!h?.window || !h?.at) continue;
+    assertInstant(h.window, 'legacy history window');
+    assertInstant(h.at, 'legacy history grant time');
     const mid = mintId(`legacy:${h.window}`, h.at);
     entities.push(compact({
       '@id': mid,
@@ -169,6 +214,11 @@ export function buildTendingEntities({
       'scrum:provenanceNote':
         'Legacy clock-window grant imported from whisper-state.json. The old '
         + 'window key is preserved verbatim and is NOT a silence key.',
+      // ⚠️ NOT a substitute for mintedAt, and it must never be read as one.
+      // mintedAt is when the grant HAPPENED (2026-08-14, in the world);
+      // importedAt is when this record ARRIVED in the graph (whenever the
+      // migration first ran). Both are true and they are years apart in
+      // principle. Collapsing them would date a historical fact to its import.
       'scrum:importedAt': importedAt,
     }));
 
@@ -206,6 +256,8 @@ export function buildTendingEntities({
         + 'flat store recorded a declared seat only. Refused attempts were '
         + 'never persisted by that implementation, so the absence of refusals '
         + 'here is not evidence that none occurred.',
+      // Same distinction as the mint above: receivedAt is when the attempt was
+      // made; importedAt is when this record entered the graph.
       'scrum:importedAt': importedAt,
     }));
   }

@@ -50,7 +50,18 @@ export const REDACTION_MARKER = '[redacted]';
  * the date, and that text is strictly more informative than `[redacted]`.
  */
 export const REDACTION_MARKER_PREFIX = '[redacted';
-export const ENTITY_KINDS = new Set(['card', 'conversation', 'column', 'wiki']);
+// #805 — `tending` joins the vocabulary so the board-owned tending system's
+// writes are declarable at the same chokepoint as everything else. Without it
+// `appendEvent` throws, and the only ways past that are to smuggle tending
+// changes through card/column diffing (which loses what actually happened) or
+// to bypass the log entirely (which loses that anything happened at all).
+//
+// ⚠️ KNOWN GAP, inherited deliberately from `wiki`: there is no COLLECTION
+// mapping below, so `replayBoard` records these events and does not project
+// them. A replay-reconstructed board would come back WITHOUT its tending nodes.
+// That is the existing wiki behaviour rather than a new hole, and naming it
+// here is the difference between an accepted limit and a silent one.
+export const ENTITY_KINDS = new Set(['card', 'conversation', 'column', 'wiki', 'tending']);
 
 /** Which board collection a given entity kind projects into. */
 const COLLECTION = { card: 'cards', conversation: 'conversations', column: 'columns' };

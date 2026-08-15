@@ -35,6 +35,10 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { loadDomain, saveDomain } from './core/store.mjs';
 import { appendEvent } from './core/event-log.mjs';
+// #805 — the boot migration's inputs (the live flat sources) and its builder.
+import { readPool, recentWhispers } from './whisper-store.mjs';
+import { readTendingConfig } from './tending-config.mjs';
+import { buildTendingEntities } from './core/tending-bootstrap.mjs';
 import { boardToDomain, domainToBoard, cardToNode } from './core/mapping.mjs';
 import { buildTree, buildChildIndex } from './core/tree.mjs';
 import { buildLinkIndex } from './core/links.mjs';
@@ -2457,7 +2461,183 @@ function migrateBoardIfNeeded() {
     console.log(`boot migration: backfilled ${backfilled} shortId(s), normalized columns`);
   }
 }
+/**
+ * #805 — THE INTERNAL TENDING-WRITE SEAM.
+ *
+ * The one primitive through which tending entities reach disk. Deliberately NOT
+ * a route, NOT an MCP tool, and NOT exported: a public surface whose only job is
+ * to run a one-time migration is a permanent mutation endpoint bought to solve a
+ * temporary problem, and it would still need a restart to load.
+ *
+ * Two callers, two DIFFERENT safety arguments, on purpose:
+ *   #805 boot     safe because `listen()` has not been called — no request can
+ *                 enter, so there is nothing to interleave with.
+ *   #804 runtime  will call this INSIDE `withWriteLock`, which is what orders it
+ *                 against concurrent mutations.
+ *
+ * ⚠️ Neither argument is "saveDomain is safe." It is not: atomic rename prevents
+ * corruption, not lost updates, and stale-basis/CAS remains open under #466.
+ *
+ * Returns the number of entities written; 0 means the graph already matched and
+ * NOTHING was written — no board save, no events, no `lastUpdated` churn.
+ */
+/**
+ * #805 — a prompt's durable slug, derived from its text. See the long note at
+ * the call site for why content and not position: position is unstable under
+ * reordering and would rewrite an immutable version; content at worst starts a
+ * lineage that should have been a version.
+ */
+function promptSlugFor(body) {
+  return 'p-' + crypto.createHash('sha256').update(String(body), 'utf8').digest('hex').slice(0, 12);
+}
+
+function writeTendingEntities(entities, { actor = null, op = 'update' } = {}) {
+  if (!Array.isArray(entities) || entities.length === 0) return 0;
+  const data = readBoard();
+  const prior = new Map((data.tending || []).map((e) => [e['@id'], e]));
+
+  // ⛔ CREATE-STAMPED, THEN FROZEN.
+  //
+  // `scrum:importedAt` answers "when did this node arrive in the graph" — a
+  // fact about the RECORD, not about the world (contrast mintedAt/receivedAt,
+  // which are facts about the world and are never touched here).
+  //
+  // The caller recomputes `new Date()` on every boot. If that value reached the
+  // diff below, every restart would rewrite every node, and for the two
+  // IMMUTABLE types it would trip the guard and fail the boot. So the stored
+  // value WINS over the incoming one, always, for any @id that already exists.
+  //
+  // This lives here and not in the builder because the builder is pure and
+  // cannot see what is already stored. This is the only seam that can — which
+  // is what makes "stamped once" a property of the system rather than a
+  // promise about how callers behave. (#805, at @minimo's requirement: the
+  // migration time must answer from graph_query directly, not from a join
+  // against a second API with an externally-supplied cutoff.)
+  const CREATE_STAMPED = ['scrum:importedAt'];
+  const stamped = entities.map((e) => {
+    const was = prior.get(e['@id']);
+    if (!was) return e;
+    const keep = {};
+    for (const k of CREATE_STAMPED) if (k in was) keep[k] = was[k];
+    return Object.keys(keep).length ? { ...e, ...keep } : e;
+  });
+
+  const before = new Map([...prior].map(([id, e]) => [id, JSON.stringify(e)]));
+  const changed = stamped.filter((e) => before.get(e['@id']) !== JSON.stringify(e));
+  if (changed.length === 0) return 0;          // idempotent: second run is a no-op
+
+  // ⛔ IMMUTABILITY, enforced rather than documented. A PromptVersion is
+  // immutable by contract, so "upsert" must never mean "silently redefine". If
+  // the same lineage/version @id arrives carrying different content, that is a
+  // slug collision or a rewrite — either way a bug — and it fails loudly here
+  // instead of replacing a node other entities already point at.
+  const IMMUTABLE = new Set(['scrum:TendingPromptVersion', 'scrum:TendingPlaylistVersion']);
+  for (const e of changed) {
+    if (IMMUTABLE.has(e['@type']) && before.has(e['@id'])) {
+      throw new Error(
+        `#805: refusing to overwrite immutable ${e['@type']} ${e['@id']} with different content. `
+        + 'A version is written once; a change is a NEW version.',
+      );
+    }
+  }
+
+  const merged = new Map(prior);
+  for (const e of stamped) merged.set(e['@id'], e);
+  data.tending = [...merged.values()];
+
+  // Explicit tending events — NOT derived by diffing cards/columns/conversations.
+  // Each names the entity it actually changed, so the log says what happened
+  // rather than that something did.
+  const events = changed.map((e) => ({
+    op: before.has(e['@id']) ? op : 'create',
+    entity: { kind: 'tending', id: e['@id'] },
+    actor,
+    state: e,
+  }));
+  writeBoard(data, events);
+  return changed.length;
+}
+
+/**
+ * #805 — bootstrap the live tending system into the graph, once, at boot.
+ *
+ * Runs BEFORE `listen()`. That ordering is the entire safety argument: the
+ * migration cannot race a request because no request can arrive yet, and the
+ * first request served therefore already sees the migrated graph. There is no
+ * "up but not yet migrated" window to observe.
+ *
+ * Idempotent through `writeTendingEntities`: a second boot computes identical
+ * @ids, finds no change, and writes nothing at all.
+ */
+function migrateTendingIfNeeded() {
+  try {
+    // ⛔ THERE IS NO EMPTY-POOL GUARD HERE, and its absence is a decision.
+    //
+    // A `if (!pool.length) return;` stood here and was UNREACHABLE. readPool()
+    // is total: every failure path — explicit [], corrupt JSON, missing file,
+    // non-array, array of empty strings — is swallowed by one catch that
+    // returns [...DEFAULT_POOL]. Measured, all six inputs: length 3.
+    //
+    // It survived because the control guarding it asserted `playlists <= 1`,
+    // which 0 and 1 both satisfy. Deleting the guard left all 7 tests green.
+    // A dead branch under a bound that admits both answers is invisible twice.
+    //
+    // Removing it does not weaken anything: buildTendingEntities REFUSES an
+    // empty prompts array with a tested throw, and the catch below turns that
+    // into exit 1. So the impossible case now fails loudly through a path that
+    // has coverage, instead of returning quietly through one that never ran.
+    //
+    // ⚠️ readPool's silent fallback is a REAL defect and is NOT mine to fix
+    // here: an operator who corrupts whisper-pool.json gets the defaults with
+    // no signal, and the tending system keeps sending. Filed separately.
+    const pool = readPool();
+    const entities = buildTendingEntities({
+      // ⚠️ SLUGS ARE CONTENT-DERIVED, and that is a deliberate trade.
+      //
+      // The flat pool is a bare array of strings: it carries NO identity beyond
+      // position, and position is not stable — reordering the pool would make
+      // prompt 1 become prompt 2, and a position-keyed bootstrap would then
+      // rewrite an IMMUTABLE v1 with different text. That is the failure with
+      // no recovery, so it is the one worth designing away.
+      //
+      // Hashing the body instead means a REWORD starts a new lineage where a
+      // new VERSION would have been better. That is a real loss of continuity
+      // and it is the safe direction: worst case the graph gains a prompt it
+      // should have gained a version of. It never silently redefines one.
+      //
+      // #804's graph-native pool retires this entirely — once prompts ARE
+      // nodes, identity stops being inferred from their text.
+      prompts: pool.map((body) => ({ slug: promptSlugFor(body), body })),
+      config: readTendingConfig(),
+      // ⚠️ readWhisperState() returns the SETTLEMENT fields only and carries no
+      // history. Passing it here would have imported zero legacy grants and
+      // reported success. recentWhispers() is the accessor that reads history.
+      state: { history: recentWhispers() },
+      importedAt: new Date().toISOString(),
+    });
+    const n = writeTendingEntities(entities, { actor: 'board', op: 'update' });
+    if (n) console.log(`boot migration (#805): ${n} tending entit${n === 1 ? 'y' : 'ies'} written to the graph`);
+  } catch (e) {
+    // ⛔ FAIL THE BOOT. Do not serve.
+    //
+    // A first cut logged and continued to listen(). That is worse than the
+    // crash it avoids: the locked condition for this migration is that the
+    // FIRST request already sees the tending graph, and a server that starts
+    // after a failed migration serves a board silently missing it — with a
+    // reassuring line in a log nobody reads at boot.
+    //
+    // The board itself is untouched either way: writeBoard is reached once, at
+    // the end, after every entity is built, so a throw above it writes neither
+    // data nor events. What changes here is that the OPERATOR finds out.
+    console.error(`boot migration (#805) FAILED — refusing to serve: ${e?.message ?? e}`);
+    console.error('The board on disk is unchanged. Fix the migration or revert the deploy;');
+    console.error('a server that starts here would answer queries about a system it never migrated.');
+    process.exit(1);
+  }
+}
+
 migrateBoardIfNeeded();
+migrateTendingIfNeeded();
 
 // ── Start Server ──
 const server = http.createServer(handleRequest);
