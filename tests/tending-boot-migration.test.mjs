@@ -13,8 +13,11 @@ import { mkdtempSync, writeFileSync, readFileSync, readdirSync, existsSync } fro
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startRestServer, makeBoardFixture } from './helpers/harness.mjs';
+import { DEFAULT_POOL } from '../whisper-store.mjs';
 
 const POOL = ['prompt alpha', 'prompt beta'];
+// The tracked example manifest covers exactly DEFAULT_POOL, with synthetic seats.
+const EXAMPLE_MANIFEST = new URL('../tending-provenance.example.json', import.meta.url).pathname;
 // ⚠️ FIXTURE SEATS ARE FICTIONAL ('ada'), never real room identities. A test
 // fixture naming a real seat asserts, in a file the publication gate reads, that
 // that person did the thing — and the gate then needs a baseline key to permit
@@ -41,6 +44,33 @@ const bootEnv = (dir) => ({
   SCRUM_WHISPER_STATE_FILE: join(dir, 'whisper-state.json'),
   SCRUM_EVENT_LOG_DIR: join(dir, 'events'),
 });
+
+/**
+ * Assert a server REFUSES to start — and release the child if it starts anyway.
+ *
+ * ⛔ THIS HELPER EXISTS BECAUSE ITS ABSENCE COST SEVEN HOURS. Written inline as
+ * `assert.rejects(() => startRestServer(...))`, the unexpected-success branch
+ * leaks the child: `node --test` then waits on the open handle forever and the
+ * whole file reports NOTHING. A control that leaks on the branch it is trying to
+ * prove impossible converts its own failure into a hang — strictly worse than a
+ * red test, because a red test reports.
+ *
+ * Returns null when the server correctly refused. Returns the (already stopped)
+ * handle when it started anyway, so the caller can assert on it — the release
+ * happens here regardless of what the caller does with the result.
+ */
+async function mustRefuseToStart(opts) {
+  let srv = null;
+  try {
+    srv = await startRestServer(opts);
+  } catch (e) {
+    if (!/failed to start/.test(String(e && e.message))) throw e;
+    return null;                                    // refused, as required
+  }
+  // Unexpected success: RELEASE THE CHILD BEFORE ANYTHING ELSE CAN THROW.
+  await srv.stop();
+  return srv;
+}
 
 const tendingOf = (boardFile) => {
   const doc = JSON.parse(readFileSync(boardFile, 'utf8'));
@@ -169,24 +199,143 @@ test('⛔ a DEGENERATE pool falls back to defaults — it never writes an empty 
   // the default system, fully formed. That is a defensible behaviour for a
   // sender that must not go silent — but it is a fallback, and it must be
   // VISIBLE as one rather than discovered by a reader three layers down.
+  // ⚠️ AND THE ANSWER CHANGED AGAIN once blockers 3+4 landed, which is the
+  // interesting part: because the fallback yields the KNOWN DEFAULTS, and known
+  // prompts now REQUIRE a provenance manifest, a degenerate pool with no
+  // manifest is refused outright. #809's silent substitution becomes a loud
+  // failure at migration time — the operator finds out.
   for (const pool of [[], 'not-an-array', ['', '']]) {
     const flat = flatSources({ pool });
-    const srv = await startRestServer({ board: makeBoardFixture({ cards: [], conversations: [] }), env: bootEnv(flat) });
-    try {
-      const ents = tendingOf(srv.boardFile);
-      const versions = ents.filter((e) => e['@type'] === 'scrum:TendingPromptVersion');
-      assert.ok(versions.length >= 1,
-        `pool ${JSON.stringify(pool)} produced NO prompt version — if readPool ever `
-        + 'gains a genuinely empty return, this migration writes an empty system '
-        + 'and buildTendingEntities throws, failing the boot. Decide which is wanted.');
-      const playlists = ents.filter((e) => e['@type'] === 'scrum:TendingPlaylistVersion');
-      assert.equal(playlists.length, 1, 'exactly one playlist, never zero and never two');
-      // A playlist whose order is empty would be the "empty system" the old
-      // control was named for, and it is the shape that must not exist.
-      assert.ok(playlists[0]['scrum:orderedPrompts']['@list'].length >= 1,
-        'a playlist with no prompts in it is the empty system, and must not be written');
-    } finally { await srv.stop(); }
+    await assert.rejects(
+      () => startRestServer({ board: makeBoardFixture({ cards: [], conversations: [] }), env: bootEnv(flat) }),
+      /failed to start/,
+      `pool ${JSON.stringify(pool)} fell back to the known defaults and migrated them `
+      + 'WITHOUT provenance — that mint is immutable and permanent',
+    );
   }
+});
+
+// ── ACTIVATION: absence buys a NO-OP, never a mint ────────────────────────
+// Ruled after the first cut refused to boot on the product's DEFAULT config.
+// The three controls below are the ruling's three cases, in its own order.
+
+/** An installation with NO legacy artifacts at all — a stranger's fresh clone. */
+const freshInstall = () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tending-fresh-'));
+  return {                                    // every path points at nothing
+    SCRUM_WHISPER_POOL_FILE: join(dir, 'whisper-pool.json'),
+    SCRUM_TENDING_CONFIG_FILE: join(dir, 'tending-config.json'),
+    SCRUM_WHISPER_STATE_FILE: join(dir, 'whisper-state.json'),
+    SCRUM_TENDING_PROVENANCE_FILE: join(dir, 'tending-provenance.json'),
+    SCRUM_EVENT_LOG_DIR: join(dir, 'events'),
+    _dir: dir,
+  };
+};
+
+test('⭐⭐ a FRESH CLONE boots, and writes ZERO tending entities and ZERO events', async () => {
+  // DEFECT: the first cut made this exact case fail to start. readPool is total,
+  // so a stranger with no config has the three known defaults by fallback, no
+  // manifest, and got a dead server citing provenance they never had — 55 red
+  // in api.test.mjs, which was the product's default configuration.
+  //
+  // ⚠️ And it must write NOTHING rather than explicit-unknown: an install that
+  // HAS a past but LOST its state file comes through this same door, and a mint
+  // there is immutable and permanent. A deferral is recoverable.
+  const env = freshInstall();
+  const srv = await startRestServer({ board: makeBoardFixture({ cards: [], conversations: [] }), env });
+  try {
+    assert.deepEqual(tendingOf(srv.boardFile), [], 'no tending entity may be written');
+    assert.deepEqual(tendingEvents(join(env._dir, 'events')), [], 'and no tending event');
+    // The server is genuinely SERVING — a no-op migration is not a dead boot.
+    const res = await fetch(`${srv.baseUrl}/api/board`);
+    assert.equal(res.status, 200, 'a fresh install must actually serve');
+  } finally { await srv.stop(); }
+});
+
+test('⛔⛔ PROD-SHAPED history with NO manifest refuses BEFORE any write', async () => {
+  // DEFECT: the prod-bricking case. Legacy history present means this machine
+  // has a tending past, so migrating the known defaults authorless would mint
+  // immutable nodes the correct author could never replace. It must refuse, and
+  // it must refuse with the board untouched — a partial mint is the failure.
+  // ⚠️ THE POOL MUST HOLD THE KNOWN DEFAULTS. A first draft used the file's
+  // custom POOL fixture ('prompt alpha'), which has no recorded provenance — so
+  // the migration correctly proceeded and the control failed with "missing
+  // expected rejection". Worse, the server it did not expect to start was never
+  // stopped, so `node --test` waited on the open handle and the whole file hung
+  // for seven hours with zero output. Both symptoms, one wrong fixture.
+  const flat = flatSources({ pool: [...DEFAULT_POOL] });       // known + history
+  const started = await mustRefuseToStart({
+    board: makeBoardFixture({ cards: [], conversations: [] }),
+    env: { ...bootEnv(flat), SCRUM_TENDING_PROVENANCE_FILE: join(flat, 'absent.json') },
+  });
+  assert.equal(started, null, 'the server must not have started at all');
+  assert.deepEqual(tendingEvents(join(flat, 'events')), [],
+    'refusal must precede every write — no event may survive a failed migration');
+});
+
+test('⭐⭐ the UNEXPECTED-SUCCESS branch releases its child — the anti-hang control', async () => {
+  // DEFECT, and it is not hypothetical: this exact branch, written inline without
+  // capturing the handle, hung the whole file for SEVEN HOURS at zero bytes while
+  // the room waited. The refusal assertion was correct; it simply had no way to
+  // report, because the leaked child kept `node --test` alive forever.
+  //
+  // So the branch is exercised DELIBERATELY here, against a config that starts
+  // cleanly (fresh install — no legacy artifacts, so the migration no-ops and the
+  // server serves). mustRefuseToStart must therefore return a handle AND have
+  // already stopped it.
+  const env = freshInstall();
+  const started = await mustRefuseToStart({
+    board: makeBoardFixture({ cards: [], conversations: [] }), env,
+  });
+  assert.ok(started, 'precondition: this config MUST start, or the branch is untested');
+
+  // ⛔ THE ACTUAL ASSERTION: the child is gone. Not "we called stop()" — that is
+  // the world-after-failure-looks-the-same trap. The port must refuse.
+  await assert.rejects(
+    () => fetch(`${started.baseUrl}/api/board`),
+    'the released child must no longer answer — a stop() that did not stop is the hang',
+  );
+});
+
+test('⭐⭐ a RESTORED install (state + manifest back) then migrates correctly', async () => {
+  // The third leg, and the one that makes the deferral honest: if a lost-state
+  // restore was misclassified as fresh, putting the artifacts back must ACTIVATE
+  // the migration rather than leave it permanently skipped.
+  const flat = flatSources({ pool: [] });                      // ⇒ DEFAULT_POOL
+  const srv = await startRestServer({
+    board: makeBoardFixture({ cards: [], conversations: [] }),
+    env: { ...bootEnv(flat), SCRUM_TENDING_PROVENANCE_FILE: EXAMPLE_MANIFEST },
+  });
+  try {
+    const versions = tendingOf(srv.boardFile).filter((e) => e['@type'] === 'scrum:TendingPromptVersion');
+    assert.equal(versions.length, 3, 'restoring the artifacts activates the migration');
+    assert.ok(versions.every((v) => v.author), 'and it migrates WITH provenance, not without');
+  } finally { await srv.stop(); }
+});
+
+test('⭐⭐ a degenerate pool WITH a covering manifest migrates fully provenanced', async () => {
+  // The success half of the control above. Without this, "it refused" would be
+  // satisfied by a migration that can never succeed at all — a refusal that
+  // fires on everything measures nothing.
+  const flat = flatSources({ pool: [] });                     // ⇒ DEFAULT_POOL
+  const srv = await startRestServer({
+    board: makeBoardFixture({ cards: [], conversations: [] }),
+    env: { ...bootEnv(flat), SCRUM_TENDING_PROVENANCE_FILE: EXAMPLE_MANIFEST },
+  });
+  try {
+    const versions = tendingOf(srv.boardFile).filter((e) => e['@type'] === 'scrum:TendingPromptVersion');
+    assert.equal(versions.length, 3, 'all three default prompts migrated');
+    for (const v of versions) {
+      assert.ok(v.author, 'every known prompt carries its author — blocker 3');
+      // ⛔ IDENTITY IS THE MANIFEST'S LINEAGE, NOT THE BODY HASH — blocker 4.
+      // The old call site produced `p-<12 hex>`; a hash-shaped slug here means
+      // identity regressed to content.
+      assert.doesNotMatch(v['@id'], /\/p-[0-9a-f]{12}\//,
+        'a hash-derived slug means identity came from the body again');
+    }
+    assert.ok(versions.some((v) => v['@id'].includes('hello-ladies')),
+      'the lineage slug the manifest assigned is the one in the graph');
+  } finally { await srv.stop(); }
 });
 
 // ── scrum:importedAt — CREATE-STAMPED, THEN FROZEN ─────────────────────────

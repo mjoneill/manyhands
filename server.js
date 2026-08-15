@@ -36,9 +36,10 @@ import { fileURLToPath } from 'node:url';
 import { loadDomain, saveDomain } from './core/store.mjs';
 import { appendEvent } from './core/event-log.mjs';
 // #805 — the boot migration's inputs (the live flat sources) and its builder.
-import { readPool, recentWhispers } from './whisper-store.mjs';
+import { readPool, recentWhispers, DEFAULT_POOL, poolFilePath } from './whisper-store.mjs';
 import { readTendingConfig } from './tending-config.mjs';
 import { buildTendingEntities } from './core/tending-bootstrap.mjs';
+import { resolveProvenance } from './core/tending-provenance.mjs';
 import { boardToDomain, domainToBoard, cardToNode } from './core/mapping.mjs';
 import { buildTree, buildChildIndex } from './core/tree.mjs';
 import { buildLinkIndex } from './core/links.mjs';
@@ -2482,13 +2483,39 @@ function migrateBoardIfNeeded() {
  * NOTHING was written — no board save, no events, no `lastUpdated` churn.
  */
 /**
- * #805 — a prompt's durable slug, derived from its text. See the long note at
- * the call site for why content and not position: position is unstable under
- * reordering and would rewrite an immutable version; content at worst starts a
- * lineage that should have been a version.
+ * #805 — read the provenance sidecar. Missing is a CASE; corrupt is an ERROR.
+ *
+ * ⛔ THE DISTINCTION IS THE WHOLE FUNCTION, and it is the one `readPool` gets
+ * wrong (#809): that function swallows corrupt, missing, non-array and empty
+ * alike into a silent default, so an operator with a trailing comma in their
+ * config gets substituted content and no signal.
+ *
+ * Here a missing file returns null, which resolveProvenance is entitled to
+ * handle — it refuses only if the pool contains prompts whose provenance we
+ * know. But an UNPARSEABLE file throws, because "I could not read your
+ * provenance" and "you have no provenance" are different facts, and collapsing
+ * them is precisely how known authorship gets silently downgraded to unknown —
+ * permanently, since the version it mints is immutable.
  */
-function promptSlugFor(body) {
-  return 'p-' + crypto.createHash('sha256').update(String(body), 'utf8').digest('hex').slice(0, 12);
+function readTendingProvenance(
+  file = process.env.SCRUM_TENDING_PROVENANCE_FILE || path.join(PROJECT_DIR, 'tending-provenance.json'),
+) {
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (e) {
+    if (e.code === 'ENOENT') return null;                    // absent: a case
+    throw new Error(`tending provenance: cannot read ${file} — ${e.message}`);
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    throw new Error(
+      `tending provenance: ${file} is present but unparseable — ${e.message}. `
+      + 'Refusing to treat a broken manifest as an absent one: that would mint the '
+      + 'known prompts as authorless, and a prompt version cannot be rewritten.',
+    );
+  }
 }
 
 function writeTendingEntities(entities, { actor = null, op = 'update' } = {}) {
@@ -2590,24 +2617,90 @@ function migrateTendingIfNeeded() {
     // ⚠️ readPool's silent fallback is a REAL defect and is NOT mine to fix
     // here: an operator who corrupts whisper-pool.json gets the defaults with
     // no signal, and the tending system keeps sending. Filed separately.
+    // ⛔ THE GRAPH IS AUTHORITATIVE ONCE MIGRATED — and this early return is
+    // what makes that true rather than aspirational.
+    //
+    // Without it, every boot re-resolves the sidecar, so a sidecar that is
+    // missing, renamed or rotated AFTER a successful migration would fail the
+    // boot of a server whose graph is already complete and correct. The sidecar
+    // is an input to a ONE-TIME import, not a runtime dependency, and a
+    // migration that keeps needing its source has not finished.
+    //
+    // It also makes the whole thing genuinely one-shot: the idempotence below
+    // (recompute, diff, write nothing) still holds, but it is no longer the
+    // only thing standing between a rotated sidecar and a dead server.
+    if ((readBoard().tending || []).length) return;
+
+    // ⛔ ACTIVATION, NOT AUTHORISATION. Absence buys a NO-OP, never a mint.
+    //
+    // The first cut of this refused to boot whenever the pool held known
+    // default prompts and no manifest covered them. That is correct for OUR
+    // deployment and catastrophic everywhere else: readPool is total (#809), so
+    // a stranger who clones manyhands and runs `node server.js` has the three
+    // known defaults by fallback, no manifest, and got a dead server citing
+    // provenance they have never had. Measured: 55 red in api.test.mjs, which
+    // was the product's default configuration failing to start.
+    //
+    // The predicate "is this body a known default" is true for every install on
+    // earth. The predicate that matters is "does THIS installation carry legacy
+    // migration artifacts" — and when it does not, the answer is to do NOTHING,
+    // not to invent an unknown-provenance mint.
+    //
+    // ⚠️ WHY NO-OP AND NOT explicit-unknown, which is the ruling's sharp edge:
+    // an install that HAS a past but LOST its state file (partial restore, moved
+    // workspace, hand-rebuilt prod) walks through this same door. Minting
+    // explicit-unknown there would poison immutable nodes for exactly the
+    // machine the rule most wants to protect. Writing nothing merely DEFERS the
+    // migration — restore the state and sidecar and it activates correctly.
+    // A deferral is recoverable; an immutable mint is not.
+    const hasHistory = recentWhispers().length > 0;
+    const hasPoolFile = fs.existsSync(poolFilePath());
+    const manifest = readTendingProvenance();
+
+    if (!hasHistory && !hasPoolFile && !manifest) {
+      // Observable, and deliberately NOT a claim about any prompt's provenance —
+      // it describes the INSTALLATION, so it goes to the log and nowhere near
+      // the graph.
+      console.log('boot migration (#805) no-op — fresh-install: no legacy migration artifacts');
+      return;
+    }
+
+    // Past this line the installation has at least one legacy artifact, so this
+    // is an intentional migration. Known defaults still require their manifest;
+    // genuinely custom prompts may record explicit unknown provenance.
     const pool = readPool();
+
+    // ⚠️ IDENTITY COMES FROM THE MANIFEST NOW, NOT FROM THE BODY.
+    //
+    // This call site used to be `pool.map((body) => ({ slug: promptSlugFor(body), body }))`
+    // — hashing the text for identity and passing NO provenance at all, while
+    // the bootstrap supported author, influencedBy, evidencedBy and a note, and
+    // the board carried the evidence for all of them. Two defects, one fix:
+    //
+    //   3  provenance we HELD was discarded at the last step before the graph
+    //   4  hash identity collapsed identical texts into one lineage, and made a
+    //      REWORD start a new one instead of a new version
+    //
+    // resolveProvenance assigns identity explicitly (lineage + occurrence) and
+    // demotes the hash to verification: it now only answers "is this still the
+    // text the provenance was written about?", which is the one question a
+    // content hash is actually good at.
+    //
+    // ⚠️⚠️ It resolves the WHOLE pool or throws. Not per-prompt, because a
+    // prompt version is IMMUTABLE: minting three good ones and then failing on
+    // the fourth leaves the fourth permanently wrong and unfixable, and the next
+    // boot carrying the correction exits 1 rather than serving. Measured on two
+    // real boots before this was written. All-or-nothing is not tidiness here —
+    // it is the only ordering where a failure is still recoverable.
     const entities = buildTendingEntities({
-      // ⚠️ SLUGS ARE CONTENT-DERIVED, and that is a deliberate trade.
-      //
-      // The flat pool is a bare array of strings: it carries NO identity beyond
-      // position, and position is not stable — reordering the pool would make
-      // prompt 1 become prompt 2, and a position-keyed bootstrap would then
-      // rewrite an IMMUTABLE v1 with different text. That is the failure with
-      // no recovery, so it is the one worth designing away.
-      //
-      // Hashing the body instead means a REWORD starts a new lineage where a
-      // new VERSION would have been better. That is a real loss of continuity
-      // and it is the safe direction: worst case the graph gains a prompt it
-      // should have gained a version of. It never silently redefines one.
-      //
-      // #804's graph-native pool retires this entirely — once prompts ARE
-      // nodes, identity stops being inferred from their text.
-      prompts: pool.map((body) => ({ slug: promptSlugFor(body), body })),
+      prompts: resolveProvenance({
+        pool,
+        manifest,
+        // The prompts we KNOW the provenance of. If one of these is in the pool
+        // and the manifest does not cover it, resolveProvenance refuses rather
+        // than minting it authorless — the silent downgrade that cannot be undone.
+        knownDefaults: [...DEFAULT_POOL],
+      }),
       config: readTendingConfig(),
       // ⚠️ readWhisperState() returns the SETTLEMENT fields only and carries no
       // history. Passing it here would have imported zero legacy grants and

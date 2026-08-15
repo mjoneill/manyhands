@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "_README": [
+    "tending-provenance.json — the #805 legacy provenance manifest.",
+    "THIS .example FILE IS TRACKED AND USES SYNTHETIC SEATS. The real file is",
+    "gitignored because it names real people, and source in this repo is public.",
+    "Copy to tending-provenance.json and replace the synthetic values.",
+    "",
+    "lineage    = IDENTITY. Stable, chosen by you, never derived from the text.",
+    "occurrence = discriminator for two prompts with identical bodies. Omit for 1.",
+    "bodySha256 = VERIFIES the text still matches; it does NOT define identity.",
+    "             If you reword a prompt, that is a NEW VERSION - do not repoint this.",
+    "author / influencedBy = seat keys. Influence is explicitly NOT authorship.",
+    "evidencedBy = durable refs: git:<sha>, or a board Comment @id.",
+    "",
+    "A known prompt missing from this file FAILS THE BOOT rather than migrating",
+    "authorless: a prompt version is immutable, so an authorless mint is permanent."
+  ],
+  "prompts": [
+    {
+      "lineage": "hello-ladies",
+      "bodySha256": "d264db931cf0677ee0a16210910042f2f06b4ebdd13b22e431971c3e9e0fc68d",
+      "author": "ada",
+      "influencedBy": "bo",
+      "provenanceNote": "Greeting register attributed to bo, adopted room-wide. Influence, explicitly not authorship.",
+      "evidencedBy": [
+        "git:0000000"
+      ]
+    },
+    {
+      "lineage": "nobody-watching",
+      "bodySha256": "fa2ef71526d2fdc7fecdf6ff463358fb28a816ba99b97efdfc2e6d3c0492407b",
+      "author": "ada",
+      "evidencedBy": [
+        "git:0000000"
+      ]
+    },
+    {
+      "lineage": "quiet-hour",
+      "bodySha256": "f8eb77be407f18a18868f16a1cef8bb93f8038c150f081c602d38b88bb6c1f38",
+      "author": "ada",
+      "evidencedBy": [
+        "git:0000000"
+      ]
+    }
+  ]
+}

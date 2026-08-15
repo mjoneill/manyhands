@@ -60,3 +60,10 @@ receipts-*/
 # never in the tree we publish. The rail is isGateArmed() refusing a store
 # path inside the repo; this line is defence in depth.
 work-objects/
+
+# #805 — the tending provenance manifest names real people (who authored which
+# prompt, who influenced its register). Source in this repo is public; the room's
+# real identities live only in untracked data, as roster.json and board-data.json
+# already do. tending-provenance.example.json IS tracked and carries synthetic
+# seats. #804's graph-native pool retires this file.
+tending-provenance.json
