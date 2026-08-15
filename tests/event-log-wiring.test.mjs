@@ -54,14 +54,16 @@ withServer('#669 creating a card appends ONE create event carrying its full stat
     method: 'POST', body: JSON.stringify({ title: 'logged on create', createdBy: 'ada' }),
   }))).json();
 
-  const evs = logOf(s);
-  assert.equal(evs.length, 1, `expected exactly one event, got ${JSON.stringify(evs.map((e) => e.op))}`);
+  // #805 falsified this test's founding assumption: "the only writer is me."
+  // Boot migration now legitimately appends tending creates before any request
+  // arrives, so the contract narrows to what it always meant — ONE event FOR
+  // THIS WRITE — asserted by scoping to the entity, not by counting the log.
+  const evs = logOf(s).filter((e) => e.entity.kind === 'card');
+  assert.equal(evs.length, 1, `expected exactly one card event, got ${JSON.stringify(evs.map((e) => e.op))}`);
   assert.equal(evs[0].op, 'create');
-  assert.equal(evs[0].entity.kind, 'card');
   assert.equal(evs[0].entity.id, card.id);
   assert.equal(evs[0].actor, 'ada', 'the declared actor reaches the log');
   assert.equal(evs[0].state.title, 'logged on create', 'state is the full entity, not a reference');
-  assert.equal(evs[0].seq, 1);
 });
 
 withServer('#669 a claim writes card-update AND its announcement — two events, one write, in order', async (s) => {
@@ -130,7 +132,8 @@ withServer('#669 a conversation post is logged as its own event', async (s) => {
   await fetch(`${s.baseUrl}/api/conversations`, json({
     method: 'POST', body: JSON.stringify({ body: 'into the log', author: 'cyd' }),
   }));
-  const evs = logOf(s);
+  // Scoped to the family for the same #805 reason as the card test above.
+  const evs = logOf(s).filter((e) => e.entity.kind === 'conversation');
   assert.equal(evs.length, 1);
   assert.equal(evs[0].op, 'post');
   assert.equal(evs[0].actor, 'cyd');
