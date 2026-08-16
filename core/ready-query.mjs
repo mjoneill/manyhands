@@ -81,19 +81,36 @@ const PRIORITY_RANK = { p0: 0, p1: 1, p2: 2, p3: 3 };
 const rank = (p) => (p in PRIORITY_RANK ? PRIORITY_RANK[p] : PRIORITY_RANK.p3 + 1);
 
 export const READY_DEFAULT_LIMIT = 20;
+/**
+ * A caller-supplied limit REFUSES when unparseable or non-positive instead of
+ * silently serving the default — `limit=abc` answered with 20 rows is the
+ * fail-silent substitution shape #809 just retired one file over. Absent
+ * means default; present means valid or 400.
+ */
 const clampLimit = (limit) => {
+  if (limit == null || limit === '') return READY_DEFAULT_LIMIT;
   const n = Number(limit);
-  if (!Number.isInteger(n) || n < 1) return READY_DEFAULT_LIMIT;
+  if (!Number.isInteger(n) || n < 1) {
+    const err = new Error(`invalid limit: ${String(limit)} (a positive integer, or omit for ${READY_DEFAULT_LIMIT})`);
+    err.code = 'READY_BAD_LIMIT';
+    throw err;
+  }
   return n;
 };
 
 /**
- * Pure fold: fact rows + blocker rows → the verdict for every card.
+ * Pure fold: fact rows + blocker rows → the verdict for EVERY card, unpaged.
  * All facts arrive from the two queries above; nothing here reads any other
  * authority. Exported separately so the ruleset is testable against
  * hand-built rows without a store.
+ *
+ * Returns { included, excluded } — both COMPLETE and ordered. Paging is
+ * presentation and lives in pageReady; verdicts and pages are different
+ * objects because conflating them made 95.6% of the live queue's ready cards
+ * 404 on explain (verifier finding, card thread bb2ccee6: explain searched
+ * the paged list, so ready-but-past-the-page read as does-not-exist).
  */
-export function computeReady(factRows, blockerRows, { limit } = {}) {
+export function computeReady(factRows, blockerRows) {
   const blockersByCard = new Map();
   for (const r of blockerRows || []) {
     const id = Number(r.id);
@@ -125,26 +142,39 @@ export function computeReady(factRows, blockerRows, { limit } = {}) {
   }
 
   const included = verdicts.filter((v) => v.ready)
-    .sort((a, b) => (rank(a.priority) - rank(b.priority)) || (a.shortId - b.shortId));
+    .sort((a, b) => (rank(a.priority) - rank(b.priority)) || (a.shortId - b.shortId))
+    .map(({ ready: _r, ...c }) => c);
   const excluded = verdicts.filter((v) => !v.ready)
     .map(({ shortId, title, reason }) => ({ shortId, title, reason }))
     .sort((a, b) => a.shortId - b.shortId);
 
+  return { included, excluded };
+}
+
+/**
+ * Verdicts → the wire page. BOTH lists are bounded by the same limit
+ * (verifier note: an unpaged excluded beside a paged ready returned 292
+ * exclusion rows per call on the live board); the totals always count the
+ * whole board, and per-card answers past either page are explain's job.
+ * Throws READY_BAD_LIMIT — refusal over silent defaulting.
+ */
+export function pageReady(verdicts, { limit } = {}) {
+  const n = clampLimit(limit);
   return {
-    ready: included.slice(0, clampLimit(limit)).map(({ ready: _r, ...c }) => c),
-    readyTotal: included.length,
-    excluded,
-    excludedTotal: excluded.length,
+    ready: verdicts.included.slice(0, n),
+    readyTotal: verdicts.included.length,
+    excluded: verdicts.excluded.slice(0, n),
+    excludedTotal: verdicts.excluded.length,
   };
 }
 
 /**
- * Run the queries against the replica and fold. Truncation REFUSES rather
- * than verdicts on a partial board: a queue computed from 1000 of 1200 cards
- * is a wrong answer delivered fluently. (Ceiling is graph-replica's
- * LIMIT_CEILING; today's board is ~a third of it.)
+ * Run the queries against the replica and fold to COMPLETE verdicts.
+ * Truncation REFUSES rather than verdicts on a partial board: a queue
+ * computed from 1000 of 1200 cards is a wrong answer delivered fluently.
+ * (Ceiling is graph-replica's LIMIT_CEILING; today's board is ~a third of it.)
  */
-export function readyFromStore(store, opts = {}) {
+export function readyFromStore(store) {
   const facts = queryGraph(store, readyFactsQuery(), { limit: 1000 });
   const blockers = queryGraph(store, readyBlockersQuery(), { limit: 1000 });
   if (facts.truncated || blockers.truncated) {
@@ -152,20 +182,21 @@ export function readyFromStore(store, opts = {}) {
     err.code = 'READY_TRUNCATED';
     throw err;
   }
-  return computeReady(facts.rows, blockers.rows, opts);
+  return computeReady(facts.rows, blockers.rows);
 }
 
 /**
- * The verdict for ONE card, included or excluded, from a readyFromStore
- * result. Unknown shortIds refuse (UNKNOWN_CARD): "not in the queue" and "no
- * such card" are different answers and conflating them is how a typo reads
- * as an empty board.
+ * The verdict for ONE card, included or excluded, from COMPLETE verdicts —
+ * never from a page, so a ready card past the window still answers ready
+ * (the bb2ccee6 regression). Unknown shortIds refuse (UNKNOWN_CARD): "not in
+ * the queue" and "no such card" are different answers and conflating them is
+ * how a typo reads as an empty board.
  */
-export function READY_EXPLAIN(result, shortId) {
+export function READY_EXPLAIN(verdicts, shortId) {
   const n = Number(shortId);
-  const hit = result.ready.find((c) => c.shortId === n);
+  const hit = verdicts.included.find((c) => c.shortId === n);
   if (hit) return { shortId: n, ready: true, reasons: hit.reasons };
-  const miss = result.excluded.find((c) => c.shortId === n);
+  const miss = verdicts.excluded.find((c) => c.shortId === n);
   if (miss) return { shortId: n, ready: false, reason: miss.reason };
   const err = new Error(`no such card in graph state: ${String(shortId)}`);
   err.code = 'UNKNOWN_CARD';

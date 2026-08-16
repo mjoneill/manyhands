@@ -54,7 +54,7 @@ import assert from 'node:assert/strict';
 
 import { domainToJsonLd } from '../core/jsonld.mjs';
 import { buildGraphStore } from '../core/graph-replica.mjs';
-import { readyFromStore, READY_EXPLAIN } from '../core/ready-query.mjs';
+import { readyFromStore, pageReady, READY_EXPLAIN } from '../core/ready-query.mjs';
 
 const card = (id, shortId, name, extra = {}) => ({
   '@id': id, '@type': 'CreativeWork', identifier: shortId, name, board: {}, ...extra,
@@ -78,7 +78,7 @@ const domain = () => ({
 const storeFor = (d = domain()) => buildGraphStore(domainToJsonLd(d));
 
 test('ready: the hand-derived truth table, inclusions AND exclusions', () => {
-  const { ready, excluded, readyTotal, excludedTotal } = readyFromStore(storeFor());
+  const { ready, excluded, readyTotal, excludedTotal } = pageReady(readyFromStore(storeFor()));
 
   // Inclusions, in the hand-derived order.
   assert.deepEqual(ready.map((c) => c.shortId), [1, 2, 8, 6]);
@@ -100,7 +100,7 @@ test('ready: the hand-derived truth table, inclusions AND exclusions', () => {
 });
 
 test('ready: entries carry the fields a chooser needs, and reasons for inclusion', () => {
-  const { ready } = readyFromStore(storeFor());
+  const { ready } = pageReady(readyFromStore(storeFor()));
   const first = ready[0];
   assert.equal(first.shortId, 1);
   assert.equal(first.title, 'a-solo');
@@ -116,33 +116,57 @@ test('ready: a card whose blocker closes enters the queue (blocker release)', ()
   // p1: #1, #4, #9 (shortId asc) · p2: #2 · p3: #8 · #6 leaves (column:done).
   const d = domain();
   d.nodes.find((n) => n['@id'] === 'f').column = 'done';
-  const { ready, excluded } = readyFromStore(storeFor(d));
+  const { ready, excluded } = pageReady(readyFromStore(storeFor(d)));
   assert.deepEqual(ready.map((c) => c.shortId), [1, 4, 9, 2, 8]);
   assert.equal(excluded.find((c) => c.shortId === 6)?.reason, 'column:done');
 });
 
 test('ready: explain answers for ANY card, included or excluded, and refuses unknowns', () => {
-  const store = storeFor();
-  const inQueue = READY_EXPLAIN(readyFromStore(store), 1);
+  const verdicts = readyFromStore(storeFor());
+  const inQueue = READY_EXPLAIN(verdicts, 1);
   assert.equal(inQueue.ready, true);
   assert.deepEqual(inQueue.reasons, ['column:backlog', 'unclaimed', 'no-open-blockers']);
 
-  const out = READY_EXPLAIN(readyFromStore(store), 9);
+  const out = READY_EXPLAIN(verdicts, 9);
   assert.equal(out.ready, false);
   assert.equal(out.reason, 'open-blocker:6');
 
-  assert.throws(() => READY_EXPLAIN(readyFromStore(store), 999), (e) => e.code === 'UNKNOWN_CARD');
+  assert.throws(() => READY_EXPLAIN(verdicts, 999), (e) => e.code === 'UNKNOWN_CARD');
 });
 
 test('ready: empty board is an honest empty, not an error', () => {
-  const { ready, excluded, readyTotal } = readyFromStore(storeFor({ nodes: [], messages: [], people: [], columns: [] }));
+  const { ready, excluded, readyTotal } = pageReady(readyFromStore(storeFor({ nodes: [], messages: [], people: [], columns: [] })));
   assert.deepEqual(ready, []);
   assert.deepEqual(excluded, []);
   assert.equal(readyTotal, 0);
 });
 
-test('ready: limit bounds the ready page; totals still count the whole board', () => {
-  const { ready, readyTotal } = readyFromStore(storeFor(), { limit: 2 });
+test('ready: limit bounds BOTH pages symmetrically; totals still count the whole board', () => {
+  const { ready, readyTotal, excluded, excludedTotal } = pageReady(readyFromStore(storeFor()), { limit: 2 });
   assert.deepEqual(ready.map((c) => c.shortId), [1, 2]);
   assert.equal(readyTotal, 4, 'total answers the question asked, not the page size');
+  assert.equal(excluded.length, 2, 'exclusions page by the same bound');
+  assert.equal(excludedTotal, 5);
+});
+
+test('ready: REGRESSION bb2ccee6 — explain is independent of pagination', () => {
+  // The verifier's live measurement: 431 of 451 ready cards 404'd on explain
+  // because explain searched the PAGED list. Hand-derived here: with limit 2
+  // the page is [1, 2]; #6 (f-noprio) is READY at position 4, past the page.
+  // Its verdict must be ready:true — never UNKNOWN_CARD.
+  const verdicts = readyFromStore(storeFor());
+  const page = pageReady(verdicts, { limit: 2 });
+  assert.ok(!page.ready.some((c) => c.shortId === 6), 'precondition: #6 is past the page');
+  const v = READY_EXPLAIN(verdicts, 6);
+  assert.equal(v.ready, true, 'ready-but-past-the-page must answer ready');
+  assert.deepEqual(v.reasons, ['column:backlog', 'unclaimed', 'no-open-blockers']);
+});
+
+test('ready: a malformed limit REFUSES instead of silently serving the default', () => {
+  const verdicts = readyFromStore(storeFor());
+  for (const bad of ['abc', 0, -5, 1.5]) {
+    assert.throws(() => pageReady(verdicts, { limit: bad }), (e) => e.code === 'READY_BAD_LIMIT', String(bad));
+  }
+  // absent still means default — refusal is for PRESENT-but-wrong only
+  assert.equal(pageReady(verdicts).readyTotal, 4);
 });

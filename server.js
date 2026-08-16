@@ -48,7 +48,7 @@ import { readConfig, writeConfig, LIMITS } from './channel-config.mjs';
 import { loadRoster, writeRoster, rosterFilePath } from './core/roster-config.mjs';
 import { extractMentions as extractMentionsFromRoster } from './core/people.mjs';
 import { buildGraphStore, queryGraph, syncGraphStore } from './core/graph-replica.mjs';
-import { readyFromStore, READY_EXPLAIN } from './core/ready-query.mjs';
+import { readyFromStore, pageReady, READY_EXPLAIN } from './core/ready-query.mjs';
 import { domainToJsonLd } from './core/jsonld.mjs';
 import { deriveGraph, personByKey } from './core/people.mjs';
 import { queryCards } from './core/cards-query.mjs';
@@ -674,14 +674,18 @@ async function handleReady(req, res) {
   try {
     const url = new URL(req.url, 'http://localhost');
     const { store } = warmGraphStore();
-    const result = readyFromStore(store, { limit: url.searchParams.get('limit') ?? undefined });
+    // Verdicts are computed COMPLETE; explain consults them unpaged (a ready
+    // card past the page window must answer ready, not 404 — bb2ccee6) and
+    // the queue response pages both lists.
+    const verdicts = readyFromStore(store);
     const explain = url.searchParams.get('explain');
     if (explain != null && explain !== '') {
-      return sendJSON(res, 200, READY_EXPLAIN(result, explain));
+      return sendJSON(res, 200, READY_EXPLAIN(verdicts, explain));
     }
-    sendJSON(res, 200, result);
+    sendJSON(res, 200, pageReady(verdicts, { limit: url.searchParams.get('limit') ?? undefined }));
   } catch (e) {
     if (e.code === 'UNKNOWN_CARD') return sendJSON(res, 404, { error: e.message, code: e.code });
+    if (e.code === 'READY_BAD_LIMIT') return sendJSON(res, 400, { error: e.message, code: e.code });
     if (e.code === 'READY_TRUNCATED') return sendJSON(res, 503, { error: e.message, code: e.code });
     console.error('GET /api/ready:', e.message);
     sendJSON(res, 500, { error: 'Failed to compute ready queue' });

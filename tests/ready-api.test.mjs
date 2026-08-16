@@ -98,6 +98,27 @@ test('?explain answers for one card either way; unknown shortIds 404, not empty'
   }
 });
 
+test('REGRESSION bb2ccee6 over the wire: explain ignores limit; bad limits 400', async () => {
+  const srv = await startRestServer({ board: board() });
+  try {
+    // Hand-derived: ready order is [1, 4]; with limit=1 the page is [1] and
+    // #4 is ready-but-past-the-page. It must still explain as ready.
+    const page = await (await fetch(`${srv.baseUrl}/api/ready?limit=1`)).json();
+    assert.deepEqual(page.ready.map((c) => c.shortId), [1], 'precondition: #4 is past the page');
+    assert.equal(page.readyTotal, 2);
+    assert.ok(page.excluded.length <= 1, 'exclusions page by the same bound');
+
+    const v = await (await fetch(`${srv.baseUrl}/api/ready?limit=1&explain=4`)).json();
+    assert.equal(v.ready, true, 'past-the-page must never read as UNKNOWN_CARD');
+
+    const bad = await fetch(`${srv.baseUrl}/api/ready?limit=abc`);
+    assert.equal(bad.status, 400, 'a malformed limit refuses instead of silently defaulting');
+    assert.equal((await bad.json()).code, 'READY_BAD_LIMIT');
+  } finally {
+    await srv.stop();
+  }
+});
+
 test('MCP board_ready rides the same surface and returns the same verdicts', async () => {
   const rest = await startRestServer({ board: board() });
   const mcp = await startMcpServer({ restApiBase: rest.baseUrl });
