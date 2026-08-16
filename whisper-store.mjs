@@ -59,24 +59,85 @@ function atomicWrite(file, value) {
   fs.renameSync(tmp, file);
 }
 
+/**
+ * The pool file's CONTENTS are unusable — i.e. someone configured something and
+ * got it wrong. Distinct from every other throw in here, which would be OUR bug.
+ * #809: the old single `catch` could not tell those apart, so a defect in this
+ * very function would have been reported to the operator as a broken file.
+ */
+class PoolConfigError extends Error {}
+
 /** Normalize an incoming pool: strings only, blanks dropped, at least one left. */
 function validatePool(input) {
-  if (!Array.isArray(input)) throw new Error('pool must be an array of strings');
+  if (!Array.isArray(input)) throw new PoolConfigError('pool must be an array of strings');
   const clean = input.filter((p) => typeof p === 'string' && p.trim()).map((p) => p.trim());
-  if (clean.length === 0) throw new Error('pool must contain at least one non-empty prompt');
+  if (clean.length === 0) throw new PoolConfigError('pool must contain at least one non-empty prompt');
   return clean;
 }
 
 /**
- * Read the pool. Missing or corrupt falls back to DEFAULT_POOL rather than to
+ * Read the pool. A file we cannot use falls back to DEFAULT_POOL rather than to
  * empty: a broken file should degrade to the words we already trust, not to a
  * silent room. (An empty pool mints nothing — see mintPrompt.)
+ *
+ * ⛔ #809 — THE FALLBACK IS NOW VISIBLE, AND ABSENCE IS NOT A FAULT.
+ *
+ * This function used to be TOTAL: six inputs — missing, corrupt, non-array,
+ * `[]`, all-blank, whitespace — all returned the three built-in defaults, and
+ * no caller could tell "the operator curated this" from "the operator broke
+ * this and I substituted my own words." The tending sender POSTS TO THE ROOM,
+ * so the failure looked exactly like success from every observable surface.
+ *
+ * ⚠️ The split is between ABSENT and BROKEN, not between missing and malformed:
+ *
+ *   no file            → SILENT. This deployment has no pool file at all and is
+ *                        not meant to (#805 asserted its absence at both paths
+ *                        as a release condition), so this branch runs on every
+ *                        tick forever. Warning here would emit ~8,760 lines a
+ *                        year describing the intended state, and a warning that
+ *                        fires when nothing is wrong destroys the warning.
+ *   unreadable/corrupt → WARN. Configuration EXISTS and cannot be used.
+ *   non-array, [],     → WARN. Someone deliberately emptied it and silently got
+ *   all blanks           our words back instead — intent inverted, the worst of
+ *                        the set, and the case a "malformed" test would miss.
+ *
+ * `warn` and `validate` are injected so both the quiet path and the our-bug
+ * path are reachable from a test — same reason core/tending-tick.mjs injects
+ * everything it touches.
  */
-export function readPool(file = poolFilePath()) {
+export function readPool(file = poolFilePath(), { warn = console.warn, validate = validatePool } = {}) {
+  const fallback = () => [...DEFAULT_POOL];
+  const substituted = (why) =>
+    `whisper-pool: ${file} ${why} — sending the ${DEFAULT_POOL.length} built-in default prompts instead`;
+
+  let raw;
   try {
-    return validatePool(JSON.parse(fs.readFileSync(file, 'utf8')));
-  } catch {
-    return [...DEFAULT_POOL];
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    // The ONLY silent branch, and it is silent on purpose. Anything else —
+    // EISDIR, EACCES — means the configured path exists and is wrong.
+    if (err?.code === 'ENOENT') return fallback();
+    warn(substituted(`could not be read (${err?.code ?? err?.message})`));
+    return fallback();
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    warn(substituted(`is not valid JSON (${err.message})`));
+    return fallback();
+  }
+
+  try {
+    return validate(parsed);
+  } catch (err) {
+    // ⛔ Only OUR OWN declared class means "their file is bad". Every other
+    // throw is a defect in this module and must not be dressed up as operator
+    // error — that is what made the original catch a fail-silent trap.
+    if (!(err instanceof PoolConfigError)) throw err;
+    warn(substituted(`is unusable (${err.message})`));
+    return fallback();
   }
 }
 

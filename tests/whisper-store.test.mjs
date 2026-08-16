@@ -41,7 +41,99 @@ test('a corrupt pool file falls back to the default rather than silencing the ro
   const d = tmpdir();
   const f = path.join(d, 'pool.json');
   fs.writeFileSync(f, '{not json');
-  assert.deepEqual(readPool(f), DEFAULT_POOL);
+  assert.deepEqual(readPool(f, { warn: () => {} }), DEFAULT_POOL);
+});
+
+// ── #809: the substitution must be VISIBLE, and only when something is wrong ──
+//
+// readPool was total: six different inputs — including a corrupt file and an
+// explicitly emptied one — all returned the three built-in defaults with no
+// signal of any kind. The room received well-formed prompts either way, so the
+// failure was indistinguishable from success at every observable surface.
+//
+// ⛔ THE HARD PART IS THE ABSENT CASE, and it is why "warn on missing OR
+// malformed" is the wrong fix. Production runs with NO pool file, permanently
+// and by design (#805 asserted its absence at both paths as a release
+// condition), so readPool takes the missing branch on every tick, every hour.
+// A warning there is ~8,760 lines a year describing the intended state — which
+// trains every reader to skip the line, so the corrupt case arrives in a
+// channel nobody reads. A warning that fires when nothing is wrong destroys
+// the warning.
+const spy = () => {
+  const lines = [];
+  const warn = (line) => lines.push(line);
+  return { warn, lines };
+};
+
+test('#809 an ABSENT pool file is SILENT — it is the documented production state, not a fault', () => {
+  const d = tmpdir();
+  const s = spy();
+  assert.deepEqual(readPool(path.join(d, 'nope.json'), { warn: s.warn }), DEFAULT_POOL);
+  assert.deepEqual(s.lines, [], 'absent must not warn: prod has no pool file, so this fires hourly forever');
+});
+
+test('#809 a VALID custom pool is silent and unchanged — the positive control', () => {
+  const d = tmpdir();
+  const f = path.join(d, 'pool.json');
+  writePool(['a real curated prompt'], f);
+  const s = spy();
+  assert.deepEqual(readPool(f, { warn: s.warn }), ['a real curated prompt']);
+  assert.deepEqual(s.lines, [], 'a working pool must never warn');
+});
+
+// Without the control above, a `warn` that fired unconditionally would pass
+// every case below. These four are the whole defect: configuration EXISTS and
+// is unusable, so the operator tried and failed.
+for (const [label, contents] of [
+  ['unparseable JSON', '["trailing", "comma",]'],
+  ['a non-array', '{"prompts": ["nope"]}'],
+  ['an explicitly emptied pool', '[]'],
+  ['a pool of only blanks', '["", "   "]'],
+]) {
+  test(`#809 ${label} WARNS once and falls back to the defaults`, () => {
+    const d = tmpdir();
+    const f = path.join(d, 'pool.json');
+    fs.writeFileSync(f, contents);
+    const s = spy();
+    assert.deepEqual(readPool(f, { warn: s.warn }), DEFAULT_POOL);
+    assert.equal(s.lines.length, 1, 'exactly one warning — not zero, not a flood');
+    assert.match(s.lines[0], /whisper-pool/, 'the warning must name what is broken');
+    assert.ok(s.lines[0].includes(f), 'and the path, so it is actionable without reading the source');
+  });
+}
+
+// Every test above INJECTS warn, so none of them touches the default sink — a
+// typo in that default would have shipped green. The operator wires nothing;
+// they read the server log. So assert the binding, not just the behaviour.
+test('#809 the DEFAULT sink is console.warn, so the operator sees this without wiring anything', () => {
+  const d = tmpdir();
+  const f = path.join(d, 'pool.json');
+  fs.writeFileSync(f, '{not json');
+  const original = console.warn;
+  const seen = [];
+  console.warn = (line) => seen.push(line);
+  try {
+    assert.deepEqual(readPool(f), DEFAULT_POOL);
+  } finally {
+    console.warn = original;
+  }
+  assert.equal(seen.length, 1, 'the default path must actually emit, not just the injected one');
+  assert.match(seen[0], /whisper-pool/);
+});
+
+test('#809 a bug INSIDE the validator propagates — it is not laundered into "the operator broke the file"', () => {
+  const d = tmpdir();
+  const f = path.join(d, 'pool.json');
+  writePool(['perfectly fine'], f);
+  const s = spy();
+  const boom = () => { throw new TypeError('a defect in our own code, not theirs'); };
+  // The old single catch swallowed this and returned the defaults with a
+  // message blaming the operator's file. Our bugs must not wear their clothes.
+  assert.throws(
+    () => readPool(f, { warn: s.warn, validate: boom }),
+    /a defect in our own code/,
+  );
+  assert.deepEqual(s.lines, [], 'and it must not have warned about the file first');
 });
 
 test('any seat can rewrite the pool, and the next read sees it — no restart, no deploy', () => {

@@ -2617,8 +2617,16 @@ function migrateTendingIfNeeded() {
     // ⚠️ readPool's silent fallback is a REAL defect and is NOT mine to fix
     // here: an operator who corrupts whisper-pool.json gets the defaults with
     // no signal, and the tending system keeps sending. Filed separately.
-    // ⛔ THE GRAPH IS AUTHORITATIVE ONCE MIGRATED — and this early return is
-    // what makes that true rather than aspirational.
+    // ⛔ THE GRAPH IS AUTHORITATIVE FOR MIGRATED BOOTSTRAP STATE — and this
+    // early return is what makes that true rather than aspirational.
+    //
+    // ⚠️ Read that scope exactly. It is a claim about BOOT, not about sending.
+    // The runtime send path does NOT consult the graph: the hourly tick still
+    // reads whisper-pool.json through readPool() (mcp-server.mjs → mintOnce →
+    // whisper-store.mjs). Wiring the sender to the graph is #804's slice, not
+    // this one. An earlier draft of this comment said only "authoritative once
+    // migrated", which a reader scanning for "does the sender use the graph
+    // yet?" could fairly have read as yes. (#809)
     //
     // Without it, every boot re-resolves the sidecar, so a sidecar that is
     // missing, renamed or rotated AFTER a successful migration would fail the
