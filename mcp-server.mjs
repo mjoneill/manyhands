@@ -1018,7 +1018,15 @@ function buildMcpServer() {
       + 'same live replica graph_query serves; the graph stays authoritative. `explain` '
       + 'returns the verdict for ONE card instead of the queue (unknown shortIds refuse with '
       + 'UNKNOWN_CARD rather than reading as "no such work"). Finding work here does NOT '
-      + 'skip the rails: claim before driving multi-step work, auction if contested.',
+      + 'skip the rails: claim before driving multi-step work, auction if contested. '
+      + 'CONTEXT (#816): each ready entry and every explain verdict also carries the '
+      + 'typed relationships that card holds — relatedTo, derivedFrom, supersedes, '
+      + 'supersededBy — capped at 5 members each with an exact total and a truncated '
+      + 'flag. It reports the relation TYPE the graph stores and characterises nothing: '
+      + 'a relatedTo edge means CONNECTED, never "spec" or "read this first" — that is '
+      + 'the reader\'s inference, not the graph\'s claim. A target naming no card appears '
+      + 'with title null rather than vanishing, and keeps its position. The paged '
+      + 'excluded list carries no context; ask explain for an excluded card.',
     inputSchema: {
       limit: z.number().int().min(1).optional().describe('Ready-page bound (default 20); readyTotal always counts the whole queue'),
       explain: z.union([z.number().int(), z.string()]).optional().describe('A shortId — return the verdict for this one card, included or excluded'),

@@ -86,6 +86,29 @@ export const anyBlockedCardWitness = () =>
   `SELECT ?id ?target WHERE { ?card a schema:CreativeWork ; ` +
   `schema:identifier ?id ; scrum:blockedBy ?target } LIMIT 1`;
 
+/**
+ * #816 — every coordination edge a card carries, target resolved via OPTIONAL
+ * so an unresolved reference (#818) arrives with no title rather than
+ * vanishing. `?sid` is the STORED identifier — the target's own shortId when
+ * it resolves, the UnresolvedReference's identifier when it doesn't — so
+ * ordering never depends on resolution.
+ */
+export const readyContextQuery = () =>
+  `SELECT ?id ?p ?sid ?title WHERE { ` +
+  `?card a schema:CreativeWork ; schema:identifier ?id ; ?p ?o . ` +
+  `FILTER(?p IN (scrum:relatedTo, scrum:derivedFrom, scrum:supersedes, scrum:supersededBy)) ` +
+  `OPTIONAL { ?o schema:identifier ?sid } ` +
+  `OPTIONAL { ?o a schema:CreativeWork ; schema:name ?title } }`;
+
+/**
+ * ⚠️ UNIFORM across all four types on purpose. `derivedFrom` holds 26 edges
+ * board-wide today and `relatedTo` 1,498 — but a census is not a cardinality,
+ * and nothing forbids a card carrying forty of either. Capping only the
+ * currently-large type would re-import census-as-guarantee in smaller print.
+ */
+export const CONTEXT_K = 5;
+const CONTEXT_TYPES = ['relatedTo', 'derivedFrom', 'supersedes', 'supersededBy'];
+
 /** 'column:done' → 'done'; 'person:ada' → 'ada'; full IRIs → last segment. */
 const tail = (v) => {
   if (v == null) return null;
@@ -127,7 +150,49 @@ const clampLimit = (limit) => {
  * 404 on explain (verifier finding, card thread bb2ccee6: explain searched
  * the paged list, so ready-but-past-the-page read as does-not-exist).
  */
-export function computeReady(factRows, blockerRows, supersededRows) {
+/**
+ * #816 — fold context rows into a per-card, per-type bounded summary.
+ *
+ * ORDER: stored identifier, numeric DESC, then non-numeric ASC. Arbitrary but
+ * total and stable — NOT recency (relationship edges carry no timestamp) and
+ * NOT relevance (nothing in the graph ranks a relation). ⚠️ Keyed on the
+ * STORED identifier so a target's deletion changes only metadata, never rank:
+ * "resolved first, dangling last" would reshuffle a list because something
+ * happened to a different card.
+ */
+function foldContext(contextRows) {
+  const byCard = new Map();
+  for (const r of contextRows || []) {
+    const id = Number(r.id);
+    const type = tail(r.p);
+    if (!CONTEXT_TYPES.includes(type)) continue;
+    if (!byCard.has(id)) byCard.set(id, new Map(CONTEXT_TYPES.map((t) => [t, []])));
+    byCard.get(id).get(type).push({
+      shortId: /^\d+$/.test(String(r.sid)) ? Number(r.sid) : r.sid,
+      title: r.title ?? null,
+    });
+  }
+  const out = new Map();
+  for (const [id, types] of byCard) {
+    const ctx = {};
+    for (const t of CONTEXT_TYPES) {
+      const all = (types.get(t) || []).sort((a, b) => {
+        const an = typeof a.shortId === 'number', bn = typeof b.shortId === 'number';
+        if (an && bn) return b.shortId - a.shortId;                 // numeric DESC
+        if (an !== bn) return an ? -1 : 1;                          // numerics first
+        return String(a.shortId).localeCompare(String(b.shortId));  // then ASC
+      });
+      ctx[t] = { members: all.slice(0, CONTEXT_K), total: all.length, truncated: all.length > CONTEXT_K };
+    }
+    out.set(id, ctx);
+  }
+  return out;
+}
+
+const emptyContext = () =>
+  Object.fromEntries(CONTEXT_TYPES.map((t) => [t, { members: [], total: 0, truncated: false }]));
+
+export function computeReady(factRows, blockerRows, supersededRows, contextRows) {
   const blockersByCard = new Map();
   for (const r of blockerRows || []) {
     const id = Number(r.id);
@@ -142,6 +207,7 @@ export function computeReady(factRows, blockerRows, supersededRows) {
     const prev = supersededBy.get(id);
     if (prev == null || label < prev) supersededBy.set(id, label);
   }
+  const contextByCard = foldContext(contextRows);   // #816
 
   const verdicts = [];
   for (const r of factRows || []) {
@@ -151,6 +217,10 @@ export function computeReady(factRows, blockerRows, supersededRows) {
     const base = {
       shortId, title: r.title, type: r.type ?? null,
       priority: r.prio ?? null, column,
+      // #816 — present on EVERY verdict, ready or excluded. pageReady strips it
+      // from the paged excluded[] list (294 rows nobody chooses work from);
+      // READY_EXPLAIN keeps it, which is the live failure this card closed.
+      context: contextByCard.get(shortId) ?? emptyContext(),
     };
 
     if (column === 'done') { verdicts.push({ ...base, ready: false, reason: 'column:done' }); continue; }
@@ -176,7 +246,7 @@ export function computeReady(factRows, blockerRows, supersededRows) {
     .sort((a, b) => (rank(a.priority) - rank(b.priority)) || (a.shortId - b.shortId))
     .map(({ ready: _r, ...c }) => c);
   const excluded = verdicts.filter((v) => !v.ready)
-    .map(({ shortId, title, reason }) => ({ shortId, title, reason }))
+    .map(({ shortId, title, reason, context }) => ({ shortId, title, reason, context }))
     .sort((a, b) => a.shortId - b.shortId);
 
   return { included, excluded };
@@ -194,7 +264,10 @@ export function pageReady(verdicts, { limit } = {}) {
   return {
     ready: verdicts.included.slice(0, n),
     readyTotal: verdicts.included.length,
-    excluded: verdicts.excluded.slice(0, n),
+    // #816 — the paged excluded list stays exactly #815's shape: 294 rows
+    // nobody chooses work from. A seat wanting an excluded card's context
+    // asks explain, which carries it.
+    excluded: verdicts.excluded.slice(0, n).map(({ shortId, title, reason }) => ({ shortId, title, reason })),
     excludedTotal: verdicts.excluded.length,
   };
 }
@@ -209,12 +282,29 @@ export function readyFromStore(store) {
   const facts = queryGraph(store, readyFactsQuery(), { limit: 1000 });
   const blockers = queryGraph(store, readyBlockersQuery(), { limit: 1000 });
   const superseded = queryGraph(store, readySupersededQuery(), { limit: 1000 });
-  if (facts.truncated || blockers.truncated || superseded.truncated) {
+  // ⚠️ #816 — this query returns ONE ROW PER EDGE, not per card. The board
+  // carries ~1,545 relationship members against graph-replica's LIMIT_CEILING
+  // of 1,000, so a single call truncates and the refusal below would take the
+  // whole queue down. Found by running against the live board; a fixture with
+  // ten edges cannot reach it. Paged rather than ceiling-raised: the ceiling
+  // protects every other caller and this is the one query that legitimately
+  // outgrows it.
+  const context = { rows: [], truncated: false };
+  const PAGE = 1000;
+  for (let offset = 0; ; offset += PAGE) {
+    const page = queryGraph(store, `${readyContextQuery()} LIMIT ${PAGE} OFFSET ${offset}`, { limit: PAGE });
+    context.rows.push(...page.rows);
+    if (page.rows.length < PAGE) break;
+    // A board large enough to need more pages than this is a different problem;
+    // refusing beats looping forever on a query that never shrinks.
+    if (offset > 200_000) { context.truncated = true; break; }
+  }
+  if (facts.truncated || blockers.truncated || superseded.truncated || context.truncated) {
     const err = new Error('board exceeds the ready computation bound; refusing a partial queue');
     err.code = 'READY_TRUNCATED';
     throw err;
   }
-  return computeReady(facts.rows, blockers.rows, superseded.rows);
+  return computeReady(facts.rows, blockers.rows, superseded.rows, context.rows);
 }
 
 /**
@@ -227,9 +317,9 @@ export function readyFromStore(store) {
 export function READY_EXPLAIN(verdicts, shortId) {
   const n = Number(shortId);
   const hit = verdicts.included.find((c) => c.shortId === n);
-  if (hit) return { shortId: n, ready: true, reasons: hit.reasons };
+  if (hit) return { shortId: n, ready: true, reasons: hit.reasons, context: hit.context };
   const miss = verdicts.excluded.find((c) => c.shortId === n);
-  if (miss) return { shortId: n, ready: false, reason: miss.reason };
+  if (miss) return { shortId: n, ready: false, reason: miss.reason, context: miss.context };
   const err = new Error(`no such card in graph state: ${String(shortId)}`);
   err.code = 'UNKNOWN_CARD';
   throw err;
