@@ -60,6 +60,23 @@ export const readyBlockersQuery = () =>
   `OPTIONAL { ?target scrum:column ?tcol } }`;
 
 /**
+ * #817 — supersession edges, target resolved via OPTIONAL so a dangling
+ * superseder still excludes rather than vanishing.
+ *
+ * ⚠️ `supersededBy` is SERVER-MAINTAINED from `supersedes` (server.js:807),
+ * which is why it can be trusted as a one-sided read: all four live edges were
+ * verified symmetric in both directions before this rule was accepted. That
+ * matters because 79% of `relatedTo` is one-ended — had supersession been
+ * maintained as loosely, this exclusion would fire on one side and miss the
+ * other, and the queue would answer differently depending on which card you
+ * asked about.
+ */
+export const readySupersededQuery = () =>
+  `SELECT ?id ?target ?tid WHERE { ` +
+  `?card a schema:CreativeWork ; schema:identifier ?id ; scrum:supersededBy ?target . ` +
+  `OPTIONAL { ?target schema:identifier ?tid } }`;
+
+/**
  * Witness partner for readyBlockersQuery: same predicates, any card. If this
  * returns a row, a 0-edge answer for a specific card is a measurement; if it
  * returns none on a board known to have blockers, the predicates are wrong
@@ -110,12 +127,20 @@ const clampLimit = (limit) => {
  * 404 on explain (verifier finding, card thread bb2ccee6: explain searched
  * the paged list, so ready-but-past-the-page read as does-not-exist).
  */
-export function computeReady(factRows, blockerRows) {
+export function computeReady(factRows, blockerRows, supersededRows) {
   const blockersByCard = new Map();
   for (const r of blockerRows || []) {
     const id = Number(r.id);
     if (!blockersByCard.has(id)) blockersByCard.set(id, []);
     blockersByCard.get(id).push(r);
+  }
+  // #817 — first superseder wins, ordered so the reason is deterministic.
+  const supersededBy = new Map();
+  for (const r of supersededRows || []) {
+    const id = Number(r.id);
+    const label = r.tid != null ? String(r.tid) : tail(r.target);
+    const prev = supersededBy.get(id);
+    if (prev == null || label < prev) supersededBy.set(id, label);
   }
 
   const verdicts = [];
@@ -130,6 +155,12 @@ export function computeReady(factRows, blockerRows) {
 
     if (column === 'done') { verdicts.push({ ...base, ready: false, reason: 'column:done' }); continue; }
     if (claimed) { verdicts.push({ ...base, ready: false, reason: `claimed-by:${claimed}` }); continue; }
+    // #817 — a REPLACED card is not available work. Flat rule: the superseder's
+    // own state is never consulted. "Unless the superseder was abandoned, in
+    // which case the original may be live again" is inference no edge asserts
+    // and nothing can test — a guess with a query attached.
+    const sup = supersededBy.get(shortId);
+    if (sup != null) { verdicts.push({ ...base, ready: false, reason: `superseded-by:${sup}` }); continue; }
 
     const edges = blockersByCard.get(shortId) || [];
     const open = edges.filter((e) => e.tid != null && tail(e.tcol) !== 'done')
@@ -177,12 +208,13 @@ export function pageReady(verdicts, { limit } = {}) {
 export function readyFromStore(store) {
   const facts = queryGraph(store, readyFactsQuery(), { limit: 1000 });
   const blockers = queryGraph(store, readyBlockersQuery(), { limit: 1000 });
-  if (facts.truncated || blockers.truncated) {
+  const superseded = queryGraph(store, readySupersededQuery(), { limit: 1000 });
+  if (facts.truncated || blockers.truncated || superseded.truncated) {
     const err = new Error('board exceeds the ready computation bound; refusing a partial queue');
     err.code = 'READY_TRUNCATED';
     throw err;
   }
-  return computeReady(facts.rows, blockers.rows);
+  return computeReady(facts.rows, blockers.rows, superseded.rows);
 }
 
 /**
