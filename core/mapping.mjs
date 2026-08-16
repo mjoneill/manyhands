@@ -47,7 +47,12 @@ const NODE_TO_CONTENT = Object.fromEntries(
 // #348 — claimedBy/claimedAt are the coordination-rail (first-write-wins) claim
 // fields; they're board mechanics, not content, so they ride the board facet
 // alongside priority/column/for (first-class, not the legacy `_extra` bag).
-const BOARD_KEYS = new Set(['column', 'order', 'assignees', 'priority', 'labels', 'for', 'relationships', 'claimedBy', 'claimedAt']);
+// parked* is an AUTHORED, EXPIRING disposition: "nobody should work on this
+// yet", said by someone, with an end date. It is not a claim — a claim says
+// "I am working on this" and is a mutex; a park says "not yet" and is a
+// deferral. They can coexist on one card and mean different things.
+const BOARD_KEYS = new Set(['column', 'order', 'assignees', 'priority', 'labels', 'for', 'relationships', 'claimedBy', 'claimedAt',
+  'parkedBy', 'parkedAt', 'parkedUntil', 'parkedReason']);
 // #222 — page attachments ride verbatim as a first-class node field (so the wiki
 // reads node.attachments directly, not from board._extra). schema.org would model
 // each as an associatedMedia ImageObject/MediaObject; that transform is deferred.

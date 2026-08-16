@@ -899,6 +899,24 @@ function validateCardFields(body, { checkId = true } = {}) {
       if (typeof a !== 'string' || !ASSIGNEE_KEY_RE.test(a)) return 'invalid assignee';
     }
   }
+  // A park is an AUTHORED, EXPIRING deferral. Both halves are enforced here
+  // because either alone is a different thing: an author with no end date is a
+  // permanent block nobody signed up for, and an end date with no author is a
+  // rule from nowhere.
+  const hasParker = body.parkedBy !== undefined && body.parkedBy !== null;
+  const hasUntil = body.parkedUntil !== undefined && body.parkedUntil !== null;
+  if (hasParker !== hasUntil) {
+    return 'parkedBy and parkedUntil must be set together — a park needs an author and an end date';
+  }
+  if (hasParker) {
+    if (typeof body.parkedBy !== 'string' || !ASSIGNEE_KEY_RE.test(body.parkedBy)) return 'invalid parkedBy';
+    if (typeof body.parkedUntil !== 'string' || Number.isNaN(Date.parse(body.parkedUntil))) {
+      return 'parkedUntil must be an ISO-8601 timestamp';
+    }
+    if (body.parkedReason !== undefined && body.parkedReason !== null && typeof body.parkedReason !== 'string') {
+      return 'parkedReason must be a string';
+    }
+  }
   if (body.relationships !== undefined) {
     const rerr = validateRelationships(body.relationships); // #614
     if (rerr) return rerr;
@@ -911,6 +929,13 @@ function validateCardFields(body, { checkId = true } = {}) {
 const PATCHABLE_CARD_FIELDS = new Set([
   'title', 'description', 'type', 'assignees', 'assignee', 'labels',
   'for', 'priority', 'column', 'order', 'relationships', 'parent',
+  // An authored, expiring deferral. ⚠️ Validation accepting a field and this
+  // allowlist carrying it are DIFFERENT gates: a field that passes the first
+  // and is missing from the second is accepted with a 200 and silently
+  // discarded — the caller cannot tell. Measured here by a wire test that
+  // failed on exactly that, the same day the MCP layer was found doing the
+  // same thing with zod's default key-stripping.
+  'parkedBy', 'parkedAt', 'parkedUntil', 'parkedReason',
 ]);
 
 // ── /api/changes — the returning-agent catch-up (#643) ──

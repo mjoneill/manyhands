@@ -560,6 +560,9 @@ function buildMcpServer() {
       priority: z.enum(['p0', 'p1', 'p2', 'p3']).optional().nullable(),
       column: z.string().optional().describe('Column id — defaults to "backlog"'),
       for: z.string().optional(),
+      parkedBy: z.string().optional().describe('seat/person key parking this card — REQUIRES parkedUntil. A park says "nobody yet", unlike a claim which says "I am on it".'),
+      parkedUntil: z.string().optional().describe('ISO-8601. REQUIRED with parkedBy: a park with no end date becomes permanent by forgetting. Once it lapses the card returns to board_ready on its own.'),
+      parkedReason: z.string().optional().describe('why it is deferred — free text, optional'),
       // #614 — the edge is offered where the writing happens. Targets are
       // shortIds; closed cards are valid targets (citation/supersession).
       relationships: z.object({
@@ -583,6 +586,9 @@ function buildMcpServer() {
       priority: z.enum(['p0', 'p1', 'p2', 'p3']).optional().nullable(),
       column: z.string().optional(),
       for: z.string().optional(),
+      parkedBy: z.string().optional().describe('seat/person key parking this card — REQUIRES parkedUntil. A park says "nobody yet", unlike a claim which says "I am on it".'),
+      parkedUntil: z.string().optional().describe('ISO-8601. REQUIRED with parkedBy: a park with no end date becomes permanent by forgetting. Once it lapses the card returns to board_ready on its own.'),
+      parkedReason: z.string().optional().describe('why it is deferred — free text, optional'),
       relationships: z.object({
         relatedTo: z.array(z.number()).optional(),
         blockedBy: z.array(z.number()).optional(),

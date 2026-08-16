@@ -338,6 +338,12 @@ function projectEntity(store, e) {
       // is load-bearing: the stall-watch keys on "claimed and unchanged across
       // two checks", which needs the timestamp, not just the holder.
       if (e['scrum:claimedAt']) add(s, nn(S + 'claimedAt'), lit(e['scrum:claimedAt']));
+      // an authored, expiring "not yet". parkedBy is an EDGE so "what has
+      // this person parked, and until when" is a traversal rather than a scan.
+      if (e.parkedBy) add(s, nn(S + 'parkedBy'), personRef(e.parkedBy));
+      if (e['scrum:parkedAt']) add(s, nn(S + 'parkedAt'), lit(e['scrum:parkedAt']));
+      if (e['scrum:parkedUntil']) add(s, nn(S + 'parkedUntil'), lit(e['scrum:parkedUntil']));
+      if (e['scrum:parkedReason']) add(s, nn(S + 'parkedReason'), lit(e['scrum:parkedReason']));
       // #723 — `for` is free text, not a person. Measured across the corpus:
       // 100 cards set it, 74 distinct values, and only a quarter resemble any
       // kind of name. The rest are teams, systems, outcomes, and in several

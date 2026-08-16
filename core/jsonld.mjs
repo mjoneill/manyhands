@@ -54,6 +54,7 @@ const CONTEXT = {
   author: personRef('https://schema.org/author'),
   assignees: personRef('scrum:assignees'),
   claimedBy: personRef('scrum:claimedBy'),
+  parkedBy: personRef('scrum:parkedBy'),   // an authored disposition JOINS to its author
   // #687 — a card's column string is a reference to a scrum:Column node.
   column: { '@id': 'scrum:column', '@type': '@id', '@context': { '@base': COLUMN_IRI_BASE } },
   // #687 — labels are concepts, not identities: the predicate is named so the
@@ -101,6 +102,8 @@ const FACET_TO_PROP = {
   column: 'column', assignees: 'assignees', labels: 'labels', claimedBy: 'claimedBy',
   priority: 'scrum:priority', order: 'scrum:order', for: 'scrum:for',
   claimedAt: 'scrum:claimedAt', _extra: 'scrum:extra',
+  parkedBy: 'parkedBy', parkedAt: 'scrum:parkedAt',
+  parkedUntil: 'scrum:parkedUntil', parkedReason: 'scrum:parkedReason',
 };
 const PROP_TO_FACET = Object.fromEntries(Object.entries(FACET_TO_PROP).map(([f, p]) => [p, f]));
 

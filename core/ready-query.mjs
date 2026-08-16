@@ -41,12 +41,14 @@ import { queryGraph } from './graph-replica.mjs';
  * a STRING literal; column and claimedBy arrive as prefixed IRIs.
  */
 export const readyFactsQuery = () =>
-  `SELECT ?card ?id ?title ?type ?col ?prio ?claimed WHERE { ` +
+  `SELECT ?card ?id ?title ?type ?col ?prio ?claimed ?parkedBy ?parkedUntil WHERE { ` +
   `?card a schema:CreativeWork ; schema:identifier ?id ; schema:name ?title . ` +
   `OPTIONAL { ?card scrum:cardType ?type } ` +
   `OPTIONAL { ?card scrum:column ?col } ` +
   `OPTIONAL { ?card scrum:priority ?prio } ` +
-  `OPTIONAL { ?card scrum:claimedBy ?claimed } }`;
+  `OPTIONAL { ?card scrum:claimedBy ?claimed } ` +
+  `OPTIONAL { ?card scrum:parkedBy ?parkedBy } ` +
+  `OPTIONAL { ?card scrum:parkedUntil ?parkedUntil } }`;
 
 /**
  * Every blockedBy edge, target resolved via OPTIONAL so a dangling edge
@@ -225,6 +227,15 @@ export function computeReady(factRows, blockerRows, supersededRows, contextRows)
 
     if (column === 'done') { verdicts.push({ ...base, ready: false, reason: 'column:done' }); continue; }
     if (claimed) { verdicts.push({ ...base, ready: false, reason: `claimed-by:${claimed}` }); continue; }
+    // An authored, EXPIRING "not yet". The expiry is why this is safe to
+    // honour: a park with no end date becomes permanent by forgetting, which
+    // is how a card carrying a human's "do not work on this" sat at queue
+    // position 1 for a month. A lapsed park returns the card on its own.
+    const parkedUntil = r.parkedUntil;
+    if (r.parkedBy && parkedUntil && parkedUntil > new Date().toISOString()) {
+      verdicts.push({ ...base, ready: false, reason: `parked-by:${tail(r.parkedBy)}-until:${parkedUntil}` });
+      continue;
+    }
     // #817 — a REPLACED card is not available work. Flat rule: the superseder's
     // own state is never consulted. "Unless the superseder was abandoned, in
     // which case the original may be live again" is inference no edge asserts
