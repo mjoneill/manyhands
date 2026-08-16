@@ -48,6 +48,7 @@ import { readConfig, writeConfig, LIMITS } from './channel-config.mjs';
 import { loadRoster, writeRoster, rosterFilePath } from './core/roster-config.mjs';
 import { extractMentions as extractMentionsFromRoster } from './core/people.mjs';
 import { buildGraphStore, queryGraph, syncGraphStore } from './core/graph-replica.mjs';
+import { readyFromStore, READY_EXPLAIN } from './core/ready-query.mjs';
 import { domainToJsonLd } from './core/jsonld.mjs';
 import { deriveGraph, personByKey } from './core/people.mjs';
 import { queryCards } from './core/cards-query.mjs';
@@ -604,6 +605,34 @@ let _graphHashes = null;
 let _graphDirty = true;
 const GRAPH_QUERY_LOG = path.join(path.dirname(BOARD_DATA_FILE), 'graph-query-log.jsonl');
 
+/**
+ * Warm (or incrementally sync) the replica and return it. Shared by every
+ * graph-derived read — /api/graph and /api/ready see the SAME store, so a
+ * ready verdict and a hand-run SPARQL check can never disagree about which
+ * world they measured.
+ */
+function warmGraphStore() {
+  let rebuiltMs = null;
+  if (_graphDirty || !_graphStore) {
+    // #714 — INCREMENTAL. The old path threw the store away and re-projected
+    // 67k triples (3.7s) on the first query after ANY write, which is what
+    // stopped anything being built on top of the graph. syncGraphStore diffs
+    // the document by per-entity content hash (~165ms for the whole file) and
+    // re-projects only what actually changed — normally one or two entities.
+    // Correctness is not argued, it is pinned: the parity test asserts an
+    // incrementally-maintained store is triple-for-triple identical to a full
+    // rebuild, and goes red if the delete-before-re-emit step is removed.
+    const t = performance.now();
+    if (!_graphStore) _graphStore = buildGraphStore({ '@graph': [] });
+    const stats = syncGraphStore(_graphStore, domainToJsonLd(loadDomain(BOARD_DATA_FILE)), _graphHashes);
+    _graphHashes = stats.hashes;
+    _graphDirty = false;
+    rebuiltMs = Math.round(performance.now() - t);
+    console.error(`${new Date().toISOString()} graph-replica: synced ${stats.updated} updated, ${stats.removed} removed of ${stats.total} entities → ${_graphStore.size} triples in ${rebuiltMs}ms`);
+  }
+  return { store: _graphStore, rebuiltMs };
+}
+
 async function handleGraphQuery(req, res) {
   try {
     const body = JSON.parse(await readBody(req));
@@ -616,25 +645,8 @@ async function handleGraphQuery(req, res) {
     // invisible here and timestamp-less in the console line, so neither could
     // correlate the two. Both halves are now measured and both are logged.
     const tCall = performance.now();
-    let rebuiltMs = null;
-    if (_graphDirty || !_graphStore) {
-      // #714 — INCREMENTAL. The old path threw the store away and re-projected
-      // 67k triples (3.7s) on the first query after ANY write, which is what
-      // stopped anything being built on top of the graph. syncGraphStore diffs
-      // the document by per-entity content hash (~165ms for the whole file) and
-      // re-projects only what actually changed — normally one or two entities.
-      // Correctness is not argued, it is pinned: the parity test asserts an
-      // incrementally-maintained store is triple-for-triple identical to a full
-      // rebuild, and goes red if the delete-before-re-emit step is removed.
-      const t = performance.now();
-      if (!_graphStore) _graphStore = buildGraphStore({ '@graph': [] });
-      const stats = syncGraphStore(_graphStore, domainToJsonLd(loadDomain(BOARD_DATA_FILE)), _graphHashes);
-      _graphHashes = stats.hashes;
-      _graphDirty = false;
-      rebuiltMs = Math.round(performance.now() - t);
-      console.error(`${new Date().toISOString()} graph-replica: synced ${stats.updated} updated, ${stats.removed} removed of ${stats.total} entities → ${_graphStore.size} triples in ${rebuiltMs}ms`);
-    }
-    const result = queryGraph(_graphStore, body.query, { limit: body.limit });
+    const { store, rebuiltMs } = warmGraphStore();
+    const result = queryGraph(store, body.query, { limit: body.limit });
     try {
       fs.appendFileSync(GRAPH_QUERY_LOG, JSON.stringify({
         at: new Date().toISOString(), by: (typeof body.by === 'string' && body.by) || null,
@@ -648,6 +660,31 @@ async function handleGraphQuery(req, res) {
     if (e.code === 'READ_ONLY' || e.code === 'EMPTY_QUERY') return sendJSON(res, 400, { error: e.message, code: e.code });
     // a SPARQL parse error is the caller's to fix — teach, don't 500
     return sendJSON(res, 400, { error: e.message, hint: 'SELECT/ASK SPARQL; prefixes schema:, scrum:, entity:, person:, column: are pre-declared' });
+  }
+}
+
+/**
+ * #815 — GET /api/ready: the computed work queue. Cards that are unblocked,
+ * unclaimed and actionable, ordered by priority, every inclusion and
+ * exclusion explainable from graph state. Derived from the SAME replica
+ * /api/graph serves — the graph stays authoritative, this is a projection.
+ * `?explain=<shortId>` returns the verdict for one card instead of the queue.
+ */
+async function handleReady(req, res) {
+  try {
+    const url = new URL(req.url, 'http://localhost');
+    const { store } = warmGraphStore();
+    const result = readyFromStore(store, { limit: url.searchParams.get('limit') ?? undefined });
+    const explain = url.searchParams.get('explain');
+    if (explain != null && explain !== '') {
+      return sendJSON(res, 200, READY_EXPLAIN(result, explain));
+    }
+    sendJSON(res, 200, result);
+  } catch (e) {
+    if (e.code === 'UNKNOWN_CARD') return sendJSON(res, 404, { error: e.message, code: e.code });
+    if (e.code === 'READY_TRUNCATED') return sendJSON(res, 503, { error: e.message, code: e.code });
+    console.error('GET /api/ready:', e.message);
+    sendJSON(res, 500, { error: 'Failed to compute ready queue' });
   }
 }
 
@@ -2167,6 +2204,7 @@ const API_ROUTES = [
   { method: 'GET',    re: /^\/api\/cursors\/pull$/,        fn: (req, res) => handleCursorPull(req, res) },
   { method: 'POST',   re: /^\/api\/cursors\/inbound$/,     fn: (req, res) => handleCursorInbound(req, res) },
   { method: 'POST',   re: /^\/api\/graph$/,                fn: (req, res) => handleGraphQuery(req, res) },
+  { method: 'GET',    re: /^\/api\/ready$/,                fn: (req, res) => handleReady(req, res) },       // #815
   { method: 'GET',    re: /^\/api\/board\/status$/,         fn: (req, res) => handleBoardStatus(req, res) },
   { method: 'GET',    re: /^\/api\/board$/,                fn: (req, res) => handleGetBoard(req, res) },
   { method: 'GET',    re: /^\/api\/roster$/,               fn: (req, res) => handleGetRoster(req, res) },

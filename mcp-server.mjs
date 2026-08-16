@@ -1005,6 +1005,32 @@ function buildMcpServer() {
     return jsonResult(await apiCall('POST', '/api/graph', { query, limit, by }));
   });
 
+  // ── #815 — board_ready: the computed work queue ───────────────────
+  mcp.registerTool('board_ready', {
+    description: 'The computed work queue — cards that are UNBLOCKED (no blockedBy edge to a '
+      + 'card outside done), UNCLAIMED, and actionable (not in done), ordered by priority '
+      + '(p0 first, unprioritized last, ties oldest-first). Call this FIRST when choosing what '
+      + 'to do next: it replaces reading card_list plus commons archaeology with one answer '
+      + 'computed from graph state. Every verdict is EXPLAINED: ready entries carry reasons; '
+      + 'the excluded list names each card\'s machine-readable reason (column:done · '
+      + 'claimed-by:<seat> · open-blocker:<n> · dangling-blocker:<id> — dangling excludes '
+      + 'conservatively and is a data defect worth fixing when you see it). Derived from the '
+      + 'same live replica graph_query serves; the graph stays authoritative. `explain` '
+      + 'returns the verdict for ONE card instead of the queue (unknown shortIds refuse with '
+      + 'UNKNOWN_CARD rather than reading as "no such work"). Finding work here does NOT '
+      + 'skip the rails: claim before driving multi-step work, auction if contested.',
+    inputSchema: {
+      limit: z.number().int().min(1).optional().describe('Ready-page bound (default 20); readyTotal always counts the whole queue'),
+      explain: z.union([z.number().int(), z.string()]).optional().describe('A shortId — return the verdict for this one card, included or excluded'),
+    },
+  }, async ({ limit, explain } = {}) => {
+    const q = new URLSearchParams();
+    if (limit != null) q.set('limit', String(limit));
+    if (explain != null && explain !== '') q.set('explain', String(explain));
+    const qs = q.toString();
+    return jsonResult(await apiCall('GET', `/api/ready${qs ? `?${qs}` : ''}`));
+  });
+
   // ── Resources ─────────────────────────────────────────────────────
   mcp.registerResource('board-state', 'manyhands://board', {
     title: 'Current Board State',
