@@ -34,6 +34,11 @@ export const IRI = Object.freeze({
   // event record is and exactly what a Comment is not.
   activity: 'https://scrumboard.local/activity/',
   prov: 'http://www.w3.org/ns/prov#',
+  // #818 — a relationship member naming no card. It gets its OWN namespace so
+  // it can never be mistaken for an entity: IRI that merely failed to resolve;
+  // the id in the document was a shortId, not an entity id, and pretending
+  // otherwise would invent a target. #530: "never drop or confidently invent."
+  unresolved: 'https://scrumboard.local/unresolved/',
 });
 
 /** Prepended to every query so agents never hand-declare a prefix. */
@@ -357,7 +362,21 @@ function projectEntity(store, e) {
       for (const l of e.labels || []) add(s, nn(S + 'label'), lit(l));
       // ONE list, imported — a second copy here is the #618 drift shape.
       for (const rt of REL_TYPES) {
-        for (const r of e[rt] || []) if (typeof r === 'string') add(s, nn(S + rt), nn(E + r));
+        for (const r of e[rt] || []) {
+          if (r == null) continue;
+          if (typeof r === 'string') { add(s, nn(S + rt), nn(E + r)); continue; }
+          // #818 — the member names no card, so serialization left the raw
+          // shortId as a NUMBER ("rides VERBATIM — losslessness beats tidiness
+          // on dangling data"). This branch used to skip it, and seven live
+          // edges existed in the document and in no query. Skipping also
+          // defeated cardEdgesResolved's OPTIONAL join, which exists so a
+          // dangling edge appears with an unbound target rather than vanishing
+          // — it never fired, because the edge was gone before the query ran.
+          const ref = nn(IRI.unresolved + String(r));
+          add(s, nn(S + rt), ref);
+          add(ref, A, nn(S + 'UnresolvedReference'));
+          add(ref, nn(SC + 'identifier'), lit(String(r)));
+        }
       }
     } else if (t === 'Comment') {
       const s = nn(E + e['@id']);
