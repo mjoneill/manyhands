@@ -17,20 +17,20 @@ import { domainToJsonLd } from '../core/jsonld.mjs';
 import { buildGraphStore, queryGraph, SPARQL_PREFIXES } from '../core/graph-replica.mjs';
 import {
   typedEntityCount, cardByShortId, anyCardWitness, cardsByNameContains,
-  tendingEntityCount, anyTypedEntityWitness, cardEdges,
+  tendingEntityCount, anyTypedEntityWitness, cardEdges, cardEdgesResolved,
 } from '../core/graph-queries.mjs';
 
 const domain = (tending = []) => ({
   nodes: [
     {
-      '@id': 'entity:c1', '@type': 'CreativeWork', identifier: 41,
+      '@id': 'c1', '@type': 'CreativeWork', identifier: 41,   // ⚠️ BARE id — the projector prepends entity/; a pre-prefixed @id double-namespaces and no edge can join it (measured)
       name: 'first fixture card', board: {},
       // ⚠️ stored-node shape: relationship arrays live at TOP LEVEL and hold
       // entity-id STRINGS — the nested relationships:{} object is the REST
       // API's shape, and the projector silently ignores it (measured).
       blockedBy: ['c2'],
     },
-    { '@id': 'entity:c2', '@type': 'CreativeWork', identifier: 42, name: 'second fixture card', board: {} },
+    { '@id': 'c2', '@type': 'CreativeWork', identifier: 42, name: 'second fixture card', board: {} },
   ],
   messages: [], people: [], columns: [],
   ...(tending.length ? { tending } : {}),
@@ -99,4 +99,24 @@ test('cardEdges surfaces blockedBy — recorded coordination is queryable', () =
   const rows = ask(storeFor(), cardEdges(41));
   const blocked = rows.filter((r) => String(r.p).includes('blockedBy'));
   assert.equal(blocked.length, 1, 'the blockedBy edge answers from the graph');
+});
+
+test('cardEdgesResolved resolves a live target — edge and shortId in one row', () => {
+  const rows = ask(storeFor(), cardEdgesResolved(41));
+  assert.deepEqual(rows.map((r) => [String(r.p), r.tid]), [['scrum:blockedBy', '42']],
+    'the edge answers WITH its target shortId — one read proves both project');
+});
+
+test('⭐ MUTATION: a DANGLING edge surfaces as an unbound-?tid row, never silently drops', () => {
+  // Review correction: the inner-join form erased exactly the broken edges
+  // the library exists to expose. This is the mutation that proves the
+  // OPTIONAL form catches a missing target — an edge pointing at an id with
+  // no projected node must still produce a row, with ?tid unbound.
+  const d = domain();
+  d.nodes[0].blockedBy = ['c2', 'ghost-card'];   // ⇐ second target does not exist
+  const rows = ask(storeFor(d), cardEdgesResolved(41));
+  assert.equal(rows.length, 2, 'BOTH edges answer — the dangling one included');
+  const dangling = rows.find((r) => r.tid === undefined || r.tid === null);
+  assert.ok(dangling, 'the broken edge is a visible row, not an absence');
+  assert.ok(String(dangling.o).includes('ghost-card'), 'and it names its dangling target');
 });

@@ -77,3 +77,21 @@ export const cardEdges = (shortId) =>
   `SELECT ?p ?o WHERE { ?card a schema:CreativeWork ; ` +
   `schema:identifier "${String(shortId).replace(/"/g, '')}" ; ?p ?o . ` +
   `FILTER(?p IN (scrum:blockedBy, scrum:relatedTo, scrum:derivedFrom, scrum:supersedes)) }`;
+
+/**
+ * cardEdges with targets resolved to shortIds — via OPTIONAL, so a DANGLING
+ * edge appears as a row with ?tid UNBOUND instead of vanishing.
+ *
+ * ⚠️ The first cut used an inner join and was called "strictly better"
+ * evidence. Review correction (commons 387248ca): the inner join silently
+ * DROPS dangling edges — the absence trap in a new coat. It was conclusive
+ * that day only because the expected edge set was enumerated beforehand and
+ * every row matched. The library's job is to EXPOSE broken edges, not erase
+ * them: a resolved row proves edge+target; an unbound-?tid row IS the
+ * finding.
+ */
+export const cardEdgesResolved = (shortId) =>
+  `SELECT ?p ?o ?tid WHERE { ?card a schema:CreativeWork ; ` +
+  `schema:identifier "${String(shortId).replace(/"/g, '')}" ; ?p ?o . ` +
+  `OPTIONAL { ?o schema:identifier ?tid } ` +
+  `FILTER(?p IN (scrum:blockedBy, scrum:relatedTo, scrum:derivedFrom, scrum:supersedes)) }`;
