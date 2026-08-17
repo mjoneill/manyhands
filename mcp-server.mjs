@@ -563,6 +563,7 @@ function buildMcpServer() {
       parkedBy: z.string().optional().describe('seat/person key parking this card — REQUIRES parkedUntil. A park says "nobody yet", unlike a claim which says "I am on it".'),
       parkedUntil: z.string().optional().describe('ISO-8601. REQUIRED with parkedBy: a park with no end date becomes permanent by forgetting. Once it lapses the card returns to board_ready on its own.'),
       parkedReason: z.string().optional().describe('why it is deferred — free text, optional'),
+      implementedBy: z.array(z.string()).optional().describe('FULL 40-char git shas of the commits implementing this card. Short shas are refused: the graph cannot expand an abbreviation, so both forms would become two nodes for one commit. Makes "what implements #N" and "what did this commit implement" one-hop queries instead of prose archaeology.'),
       // #614 — the edge is offered where the writing happens. Targets are
       // shortIds; closed cards are valid targets (citation/supersession).
       relationships: z.object({
@@ -589,6 +590,7 @@ function buildMcpServer() {
       parkedBy: z.string().optional().describe('seat/person key parking this card — REQUIRES parkedUntil. A park says "nobody yet", unlike a claim which says "I am on it".'),
       parkedUntil: z.string().optional().describe('ISO-8601. REQUIRED with parkedBy: a park with no end date becomes permanent by forgetting. Once it lapses the card returns to board_ready on its own.'),
       parkedReason: z.string().optional().describe('why it is deferred — free text, optional'),
+      implementedBy: z.array(z.string()).optional().describe('FULL 40-char git shas of the commits implementing this card. Short shas are refused: the graph cannot expand an abbreviation, so both forms would become two nodes for one commit. Makes "what implements #N" and "what did this commit implement" one-hop queries instead of prose archaeology.'),
       relationships: z.object({
         relatedTo: z.array(z.number()).optional(),
         blockedBy: z.array(z.number()).optional(),

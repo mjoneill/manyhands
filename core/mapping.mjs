@@ -52,7 +52,9 @@ const NODE_TO_CONTENT = Object.fromEntries(
 // "I am working on this" and is a mutex; a park says "not yet" and is a
 // deferral. They can coexist on one card and mean different things.
 const BOARD_KEYS = new Set(['column', 'order', 'assignees', 'priority', 'labels', 'for', 'relationships', 'claimedBy', 'claimedAt',
-  'parkedBy', 'parkedAt', 'parkedUntil', 'parkedReason']);
+  'parkedBy', 'parkedAt', 'parkedUntil', 'parkedReason',
+  // #814 — the commit that implements this card. A literal is not a node.
+  'implementedBy']);
 // #222 — page attachments ride verbatim as a first-class node field (so the wiki
 // reads node.attachments directly, not from board._extra). schema.org would model
 // each as an associatedMedia ImageObject/MediaObject; that transform is deferred.

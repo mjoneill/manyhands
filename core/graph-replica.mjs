@@ -39,6 +39,9 @@ export const IRI = Object.freeze({
   // the id in the document was a shortId, not an entity id, and pretending
   // otherwise would invent a target. #530: "never drop or confidently invent."
   unresolved: 'https://scrumboard.local/unresolved/',
+  // #814 — a commit is an ENTITY. It was a `git:<sha>` literal, and a literal
+  // cannot be traversed, joined or counted.
+  commit: 'https://scrumboard.local/commit/',
 });
 
 /** Prepended to every query so agents never hand-declare a prefix. */
@@ -344,6 +347,18 @@ function projectEntity(store, e) {
       if (e['scrum:parkedAt']) add(s, nn(S + 'parkedAt'), lit(e['scrum:parkedAt']));
       if (e['scrum:parkedUntil']) add(s, nn(S + 'parkedUntil'), lit(e['scrum:parkedUntil']));
       if (e['scrum:parkedReason']) add(s, nn(S + 'parkedReason'), lit(e['scrum:parkedReason']));
+      // #814 — mint one node per sha, however many cards cite it, so the
+      // inverse ("what did this commit implement") is a hop rather than a scan.
+      // The node carries the sha and nothing else: subject, author and date
+      // live in git, the board cannot verify them, and asserting them here
+      // would be inventing.
+      for (const sha of e.implementedBy || []) {
+        if (typeof sha !== 'string' || !sha) continue;
+        const c = nn(IRI.commit + sha);
+        add(s, nn(S + 'implementedBy'), c);
+        add(c, A, nn(S + 'Commit'));
+        add(c, nn(SC + 'identifier'), lit(sha));
+      }
       // #723 — `for` is free text, not a person. Measured across the corpus:
       // 100 cards set it, 74 distinct values, and only a quarter resemble any
       // kind of name. The rest are teams, systems, outcomes, and in several

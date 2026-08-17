@@ -899,6 +899,19 @@ function validateCardFields(body, { checkId = true } = {}) {
       if (typeof a !== 'string' || !ASSIGNEE_KEY_RE.test(a)) return 'invalid assignee';
     }
   }
+  // #814 — a commit reference must be a FULL 40-char sha. A short sha is an
+  // abbreviation whose expansion needs the repository; the graph cannot expand
+  // it, so accepting both forms would mint two nodes for one commit and never
+  // reconcile them. That is an aliasing bug shipped as a convenience.
+  if (body.implementedBy !== undefined && body.implementedBy !== null) {
+    if (!Array.isArray(body.implementedBy)) return 'implementedBy must be an array of commit shas';
+    for (const sha of body.implementedBy) {
+      if (typeof sha !== 'string' || !/^[0-9a-f]{40}$/.test(sha)) {
+        return `implementedBy entries must be full 40-character lowercase git shas (got ${JSON.stringify(sha)}) — `
+             + 'a short sha cannot be expanded by the graph and would create a second node for the same commit';
+      }
+    }
+  }
   // A park is an AUTHORED, EXPIRING deferral. Both halves are enforced here
   // because either alone is a different thing: an author with no end date is a
   // permanent block nobody signed up for, and an end date with no author is a
@@ -936,6 +949,7 @@ const PATCHABLE_CARD_FIELDS = new Set([
   // failed on exactly that, the same day the MCP layer was found doing the
   // same thing with zod's default key-stripping.
   'parkedBy', 'parkedAt', 'parkedUntil', 'parkedReason',
+  'implementedBy',
 ]);
 
 // ── /api/changes — the returning-agent catch-up (#643) ──

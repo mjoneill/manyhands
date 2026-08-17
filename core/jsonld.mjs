@@ -34,6 +34,9 @@ export const PERSON_IRI_BASE = 'https://scrumboard.local/person/';
  * the same strings-become-edges-by-declaration move as #686's people.
  */
 export const COLUMN_IRI_BASE = 'https://scrumboard.local/column/';
+// #814 — commits get their own namespace. They are not board entities and must
+// never be mistaken for one; the sha is the identity and git holds the rest.
+export const COMMIT_IRI_BASE = 'https://scrumboard.local/commit/';
 
 // A person-reference term: string values are @id-typed and resolve against the
 // person IRI space (JSON-LD 1.1 property-scoped context).
@@ -55,6 +58,9 @@ const CONTEXT = {
   assignees: personRef('scrum:assignees'),
   claimedBy: personRef('scrum:claimedBy'),
   parkedBy: personRef('scrum:parkedBy'),   // an authored disposition JOINS to its author
+  // #814 — commits are ENTITIES, not strings. A card links to them; the sha is
+  // their identity and the board asserts nothing else about them.
+  implementedBy: { '@id': 'scrum:implementedBy', '@type': '@id', '@context': { '@base': COMMIT_IRI_BASE } },
   // #687 — a card's column string is a reference to a scrum:Column node.
   column: { '@id': 'scrum:column', '@type': '@id', '@context': { '@base': COLUMN_IRI_BASE } },
   // #687 — labels are concepts, not identities: the predicate is named so the
@@ -102,6 +108,7 @@ const FACET_TO_PROP = {
   column: 'column', assignees: 'assignees', labels: 'labels', claimedBy: 'claimedBy',
   priority: 'scrum:priority', order: 'scrum:order', for: 'scrum:for',
   claimedAt: 'scrum:claimedAt', _extra: 'scrum:extra',
+  implementedBy: 'implementedBy',
   parkedBy: 'parkedBy', parkedAt: 'scrum:parkedAt',
   parkedUntil: 'scrum:parkedUntil', parkedReason: 'scrum:parkedReason',
 };
