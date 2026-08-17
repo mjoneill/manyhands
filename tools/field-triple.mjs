@@ -47,6 +47,44 @@ async function getFresh(baseUrl, shortId) {
 }
 
 /**
+ * ⛔ `reads` MUST COMPARE VALUES, NOT PRESENCE.
+ *
+ * The first version asked "is the field non-undefined after the write?" That is
+ * a false positive for every field the server gives a DEFAULT or that a fresh
+ * card already carries. Measured: `createdBy` reported reads=true on PATCH
+ * because the card was born with it — the patch was silently discarded and the
+ * pre-existing value answered for it. `labels`, `for`, `column`, `order` and
+ * `assignees` all have defaults and were exposed to the same error.
+ *
+ * ⇒ A presence check cannot distinguish "the write stored my value" from
+ *   "something else put a value here first", and those are the two states this
+ *   entire audit exists to tell apart. So the probe sends a value it can
+ *   RECOGNISE and requires that exact value back.
+ */
+function storedMatches(actual, expected) {
+  if (Array.isArray(expected) || (expected && typeof expected === 'object')) {
+    return JSON.stringify(actual) === JSON.stringify(expected);
+  }
+  return actual === expected;
+}
+
+/**
+ * ⚠️ SOME PROBE VALUES CANNOT BE CONSTANTS.
+ *
+ * `relationships: {relatedTo: []}` is indistinguishable from the default the
+ * server writes on every card — so a probe using it proves nothing, which is
+ * the same presence-weakness `storedMatches` was added to kill, wearing a
+ * different hat. A meaningful probe needs a REAL edge, and a real edge needs a
+ * target card that exists.
+ *
+ * So a probe may express wellFormed/malformed/expectStored as a function of a
+ * context carrying a freshly-created target's shortId.
+ */
+function resolveProbeValue(v, ctx) {
+  return typeof v === 'function' ? v(ctx) : v;
+}
+
+/**
  * Measure the triple for one field on the /api/cards CREATE surface.
  *
  * @param {string} baseUrl
@@ -59,8 +97,16 @@ async function getFresh(baseUrl, shortId) {
  * @returns {Promise<{field, declares, accepts, reads, agrees, evidence}>}
  */
 export async function auditCreateField(baseUrl, probe) {
-  const { name, wellFormed, malformed, storedAs = name, with: companions = {} } = probe;
+  const { name, storedAs = name, with: companions = {} } = probe;
   const evidence = {};
+
+  // A target exists for every probe, whether or not it is used: making it
+  // unconditional keeps shortId allocation identical across probes, so one
+  // probe's verdict can't depend on how many probes ran before it.
+  const targetCard = await post(baseUrl, {});
+  const ctx = { targetShortId: targetCard.body.shortId };
+  const wellFormed = resolveProbeValue(probe.wellFormed, ctx);
+  const malformed = resolveProbeValue(probe.malformed, ctx);
 
   // ── declares + reads: one well-formed write, two readings of it ──
   const good = await post(baseUrl, { ...companions, [name]: wellFormed });
@@ -88,11 +134,11 @@ export async function auditCreateField(baseUrl, probe) {
   evidence.ignoredFields = ignored;
   const declares = !ignored.includes(name);
 
-  const fresh = await getFresh(baseUrl, good.body.shortId);
-  evidence.storedValue = fresh.body?.[storedAs];
-  const reads = fresh.status === 200
-    && fresh.body?.[storedAs] !== undefined
-    && fresh.body?.[storedAs] !== null;
+  const freshCard = await getFresh(baseUrl, good.body.shortId);
+  const expected = probe.expectStored !== undefined ? resolveProbeValue(probe.expectStored, ctx) : wellFormed;
+  evidence.storedValue = freshCard.body?.[storedAs];
+  evidence.expectedValue = expected;
+  const reads = freshCard.status === 200 && storedMatches(freshCard.body?.[storedAs], expected);
 
   // ── accepts: a separate write carrying a deliberately invalid value ──
   // ⚠️ A field marked noRule has no validation rule BY DESIGN — a free-form
@@ -126,6 +172,88 @@ export async function auditCreateField(baseUrl, probe) {
   }
 
   const bad = await post(baseUrl, { ...companions, [name]: malformed });
+  evidence.malformedStatus = bad.status;
+  evidence.malformedError = bad.body?.error;
+  const accepts = bad.status === 400;
+
+  return { field: name, declares, accepts, reads, agrees: declares === accepts && accepts === reads, evidence };
+}
+
+/**
+ * Measure the triple for one field on the /api/cards PATCH surface.
+ *
+ * ⚠️ Same three questions, DIFFERENT answers, and that is the point of running
+ * both: `unknown` is route-relative. A field can be real on PATCH and unknown
+ * on create (the `parked*` trio), or real on /api/nodes and unknown on
+ * /api/cards (`body`). A single audit over "the card fields" would average two
+ * surfaces together and report a defect on neither.
+ *
+ * The patch target is created fresh per probe so a field left behind by an
+ * earlier probe cannot make a later one read as stored.
+ */
+export async function auditPatchField(baseUrl, probe) {
+  const { name, storedAs = name, with: companions = {} } = probe;
+  const evidence = {};
+
+  const targetCard = await post(baseUrl, {});
+  const ctx = { targetShortId: targetCard.body.shortId };
+  const wellFormed = resolveProbeValue(probe.wellFormed, ctx);
+  const malformed = resolveProbeValue(probe.malformed, ctx);
+
+  const patch = async (shortId, body) => {
+    const res = await fetch(`${baseUrl}/api/cards/${shortId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ by: 'ada', ...body }),
+    });
+    return { status: res.status, body: await res.json() };
+  };
+
+  const fresh = async () => {
+    const c = await post(baseUrl, {});
+    return c.body.shortId;
+  };
+
+  // ── declares + reads ──
+  const target = await fresh();
+  const good = await patch(target, { ...companions, [name]: wellFormed });
+  evidence.wellFormedStatus = good.status;
+  if (good.status !== 200) {
+    return {
+      field: name, declares: null, accepts: null, reads: null, agrees: null,
+      error: `well-formed patch did not apply (status ${good.status}): `
+           + JSON.stringify(good.body?.error ?? good.body).slice(0, 200),
+      evidence,
+    };
+  }
+  const ignored = good.body.ignoredFields ?? [];
+  evidence.ignoredFields = ignored;
+  const declares = !ignored.includes(name);
+
+  const after = await (await fetch(`${baseUrl}/api/cards/${target}`)).json();
+  const expected = probe.expectStored !== undefined ? resolveProbeValue(probe.expectStored, ctx) : wellFormed;
+  evidence.storedValue = after?.[storedAs];
+  evidence.expectedValue = expected;
+  const reads = storedMatches(after?.[storedAs], expected);
+
+  // ── accepts, with the same non-self-certifying exemption as create ──
+  if (probe.noRule) {
+    const t2 = await fresh();
+    const hostile = await patch(t2, { ...companions, [name]: { __noRuleProbe: true } });
+    evidence.noRuleProbeStatus = hostile.status;
+    evidence.noRuleProbeError = hostile.body?.error;
+    if (hostile.status === 400) {
+      return {
+        field: name, declares, accepts: true, reads, noRule: true, noRuleClaimRefuted: true,
+        agrees: false, evidence,
+        error: `marked noRule, but a validation rule fired: ${JSON.stringify(hostile.body?.error).slice(0, 160)}`,
+      };
+    }
+    return { field: name, declares, accepts: false, reads, noRule: true, agrees: declares === reads, evidence };
+  }
+
+  const t3 = await fresh();
+  const bad = await patch(t3, { ...companions, [name]: malformed });
   evidence.malformedStatus = bad.status;
   evidence.malformedError = bad.body?.error;
   const accepts = bad.status === 400;

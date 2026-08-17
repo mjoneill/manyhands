@@ -30,12 +30,21 @@ export const CARD_CREATE_PROBES = [
     note: 'CARD_PRIORITIES enum' },
   { name: 'assignees', wellFormed: ['ada'], malformed: 'not-an-array',
     note: 'must be an array of valid assignee keys' },
-  { name: 'assignee', wellFormed: 'ada', malformed: 'both', storedAs: 'assignees',
+  { name: 'assignee', wellFormed: 'ada', malformed: 'both', storedAs: 'assignees', expectStored: ['ada'],
     note: 'singular alias; normalized into assignees. `both` is the retired #508 sentinel' },
   { name: 'implementedBy', wellFormed: ['a'.repeat(40)], malformed: ['a75a247'],
     note: '#814 — full 40-char shas only; a short sha is an aliasing bug' },
-  { name: 'relationships', wellFormed: { relatedTo: [] }, malformed: { relatedTo: 'nope' },
-    note: '#614 — validateRelationships' },
+  // ⚠️ `{relatedTo: []}` is IDENTICAL to the default the server writes on every
+  // card, so a probe using it cannot tell "my write landed" from "the default
+  // was already there" — the presence-weakness in a new hat. Needs a real edge.
+  { name: 'relationships',
+    wellFormed: ({ targetShortId }) => ({ relatedTo: [targetShortId] }),
+    expectStored: ({ targetShortId }) => ({
+      relatedTo: [targetShortId], blockedBy: [], supersedes: [], derivedFrom: [], supersededBy: [],
+    }),
+    malformed: { relatedTo: 'nope' },
+    note: '#614 — validateRelationships. Stored form is NORMALIZED to carry every '
+        + 'relationship type, so expectStored spells out the normalized shape.' },
   { name: 'parkedBy', wellFormed: 'ada', malformed: 'not a valid seat key!!',
     with: { parkedUntil: '2026-12-01T00:00:00.000Z' },
     note: 'a park needs BOTH halves or the pair refuses' },
@@ -52,8 +61,14 @@ export const CARD_CREATE_PROBES = [
   { name: 'column', wellFormed: 'backlog', malformed: null, noRule: true,
     note: 'unvalidated at create — a nonexistent column id is accepted' },
   { name: 'order', wellFormed: 3, malformed: null, noRule: true },
-  { name: 'createdBy', wellFormed: 'ada', malformed: null, noRule: true,
-    note: 'REQUIRED by the MCP schema (#631) but unvalidated at the REST layer' },
+  // ⚠️ VALUE MUST DIFFER FROM WHAT CREATE WRITES. The probe helper creates every
+  // card with createdBy:'ada', so a probe sending 'ada' cannot tell "the write
+  // stored my value" from "it was already there" — which is exactly how the
+  // PATCH surface first reported a clean AGREE for a field it silently discards.
+  { name: 'createdBy', wellFormed: 'grace', malformed: null, noRule: true,
+    note: 'REQUIRED by the MCP schema (#631), unvalidated at REST, and IMMUTABLE on '
+        + 'PATCH (#631 — authorship is a fact about the past). Refusing it on PATCH is '
+        + 'correct; refusing it SILENTLY is the #823 violation.' },
   // ⛔ WAS MARKED noRule AND THAT WAS WRONG. The self-certification guard in
   // auditCreateField refuted it: a non-string parkedReason returns 400
   // "parkedReason must be a string". The bad marking had suppressed a third

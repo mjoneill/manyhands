@@ -16,7 +16,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { startRestServer } from './helpers/harness.mjs';
-import { auditCreateField, verdictFor, renderTable } from '../tools/field-triple.mjs';
+import { auditCreateField, auditPatchField, verdictFor, renderTable } from '../tools/field-triple.mjs';
 import { CARD_CREATE_PROBES } from '../tools/field-probes.mjs';
 
 /**
@@ -30,10 +30,33 @@ const KNOWN_DISAGREEMENTS = {
                                              // the noRule self-certification guard
 };
 
-async function sweep(baseUrl) {
+/**
+ * `id` is immutable on PATCH, so it is not a patchable field and is excluded
+ * there — written out rather than filtered inline, because a silent exclusion
+ * is how a surface stops being audited.
+ */
+const PATCH_EXCLUDED = new Set(['id']);
+
+/**
+ * The known, accepted disagreements on PATCH. Both are #823-class holes: the
+ * route reports unknown fields but two paths bypass that reporting.
+ */
+const KNOWN_PATCH_DISAGREEMENTS = {
+  // `assignee` is in PATCHABLE_CARD_FIELDS, so the loop does `card[k] = v` and
+  // writes a RAW `assignee` key instead of normalizing into `assignees` the way
+  // create does. Result: 200, no diagnostic, assignees unchanged, and a phantom
+  // key left on the card. This is how live cards acquired a stored `assignee`.
+  assignee: 'VALIDATED_THEN_DISCARDED',
+  // `createdBy` is in IMMUTABLE_CARD_FIELDS, which `continue`s BEFORE the
+  // ignoredFields push — so refusing it (correct, #631) happens silently
+  // (not correct, #823).
+  createdBy: 'DECLARED_NOT_CONSUMED',
+};
+
+async function sweep(baseUrl, fn = auditCreateField, probes = CARD_CREATE_PROBES) {
   const rows = [];
-  for (const probe of CARD_CREATE_PROBES) {
-    const r = await auditCreateField(baseUrl, probe);
+  for (const probe of probes) {
+    const r = await fn(baseUrl, probe);
     rows.push({ ...r, verdict: verdictFor(r) });
   }
   return rows;
@@ -110,6 +133,68 @@ test('#831 — a field with no rule genuinely has none (the exemption is earned)
       `description should have no validation rule, but the hostile probe got `
       + `${r.evidence.noRuleProbeStatus}: ${JSON.stringify(r.evidence.noRuleProbeError)}`);
     assert.equal(verdictFor(r), 'AGREE_SUPPORTED_NO_RULE');
+  } finally {
+    await server.stop();
+  }
+});
+
+test('#831 — the PATCH surface has exactly the known three-list disagreements', async () => {
+  // ⚠️ `unknown` is ROUTE-RELATIVE, so PATCH gets its own sweep rather than
+  // sharing create's verdicts. The parked* trio is broken on create and CORRECT
+  // here; assignee is correct on create and broken here. A single audit over
+  // "the card fields" would average the two and report a defect on neither.
+  const server = await startRestServer();
+  let rows;
+  try {
+    rows = await sweep(
+      server.baseUrl, auditPatchField,
+      CARD_CREATE_PROBES.filter((p) => !PATCH_EXCLUDED.has(p.name)),
+    );
+  } finally {
+    await server.stop();
+  }
+
+  console.log(`\n#831 sweep — /api/cards PATCH, ${rows.length} fields\n${renderTable(rows)}\n`);
+
+  for (const r of rows) {
+    assert.notEqual(r.verdict, 'UNMEASURED', `${r.field}: unmeasured — ${r.error}`);
+    assert.notEqual(r.verdict, 'NORULE_CLAIM_REFUTED',
+      `${r.field}: marked noRule but a rule fired — fix the marking. ${r.error}`);
+  }
+
+  const actual = Object.fromEntries(
+    rows.filter((r) => !r.verdict.startsWith('AGREE')).map((r) => [r.field, r.verdict]),
+  );
+  assert.deepEqual(
+    actual, KNOWN_PATCH_DISAGREEMENTS,
+    'the set of PATCH three-list disagreements changed.\n'
+    + `  expected: ${JSON.stringify(KNOWN_PATCH_DISAGREEMENTS, null, 2)}\n`
+    + `  actual  : ${JSON.stringify(actual, null, 2)}`,
+  );
+});
+
+test('#831 — a probe value equal to the surface DEFAULT cannot discriminate', async () => {
+  // The regression guard for the instrument bug this sweep was built on top of.
+  // `reads` used to ask "is the field present after the write?", which is true
+  // for every field the server defaults — so a silently-discarded PATCH read as
+  // a clean AGREE because the value was already there. Here the probe sends
+  // exactly what create writes; a presence-based predicate says "stored", and a
+  // value-comparing one must still say "stored" — the point is that the probe
+  // is UNABLE to tell, which is why field-probes.mjs sends 'grace' instead.
+  const server = await startRestServer();
+  try {
+    const blind = await auditPatchField(server.baseUrl, {
+      name: 'createdBy', wellFormed: 'ada', malformed: null, noRule: true,
+    });
+    assert.equal(blind.reads, true,
+      'sanity: a probe echoing the default cannot detect the discard — that is the trap');
+
+    const sighted = await auditPatchField(server.baseUrl, {
+      name: 'createdBy', wellFormed: 'grace', malformed: null, noRule: true,
+    });
+    assert.equal(sighted.reads, false,
+      'a probe whose value DIFFERS from the default must see that the patch was discarded');
+    assert.equal(verdictFor(sighted), 'DECLARED_NOT_CONSUMED');
   } finally {
     await server.stop();
   }
