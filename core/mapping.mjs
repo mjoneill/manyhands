@@ -143,24 +143,75 @@ export function messageToConversation(msg) {
 
 /** board-data.json object → domain { nodes, messages, ...passthrough }. */
 export function boardToDomain(board) {
+  // #530/#593 — non-card graph entities live in their own cohort. Without this,
+  // `nodes` is rebuilt from `cards` alone, so anything that is not a card is
+  // DELETED on the next save. See the round-trip tests in tests/domain.test.mjs.
+  const graphNodes = Array.isArray(board.graphNodes) ? board.graphNodes : [];
+  const graphOrder = Array.isArray(board.graphOrder) ? board.graphOrder : undefined;
   const domain = {
     nodes: (board.cards || []).map(cardToNode),
     messages: (board.conversations || []).map(conversationToMessage),
   };
+  if (graphNodes.length > 0 || graphOrder !== undefined) domain.graphNodes = graphNodes;
+  if (graphOrder !== undefined) domain.graphOrder = graphOrder;
   for (const [k, v] of Object.entries(board)) {
     if (k === 'cards' || k === 'conversations') continue;
+    if (k === 'graphNodes' || k === 'graphOrder') continue;   // #530 — cohorted above
     domain[k] = v;                           // columns, nextShortId, lastUpdated, _README
   }
   return domain;
 }
 
-/** domain → board-data.json object. Exact inverse of boardToDomain. */
+/**
+ * domain → board-data.json object. Exact inverse of boardToDomain.
+ *
+ * #530/#593 — Contract: on a well-formed cohorted domain, cards live in `nodes`
+ * and non-card graph entities in `graphNodes`. On a LEGACY MIXED domain — one
+ * whose `nodes` still holds non-card entities alongside cards, as a
+ * transitional store may carry — this NORMALIZES by splitting them:
+ * CreativeWork → `cards`, everything else → `graphNodes`.
+ *
+ * ⚠️ Without the split, a non-card node is not lost but CORRUPTED: nodeToCard
+ * collapses its `@type` to CreativeWork, drops namespaced fields, and ADDS an
+ * empty `board` block — which by ADR-001's own definition turns a page into a
+ * card. It then appears ON THE BOARD as a card. Silent type corruption is
+ * worse than deletion because nothing looks wrong.
+ *
+ * ⚠️ KEY ORDER IS LOAD-BEARING (#685: the replay invariant compares bytes), so
+ * `cards` is still emitted at the slot `nodes` occupied, and graphNodes/
+ * graphOrder ride at the slot they occupied — never hoisted to the front.
+ */
 export function domainToBoard(domain) {
   const board = {};
+  const sourceNodes = Array.isArray(domain.nodes) ? domain.nodes : [];
+  const cards = sourceNodes.filter((n) => n && n['@type'] === 'CreativeWork');
+  const mixedGraphNodes = sourceNodes.filter((n) => !n || n['@type'] !== 'CreativeWork');
+  const declared = Array.isArray(domain.graphNodes) ? domain.graphNodes : [];
+  const graphNodes = [...mixedGraphNodes, ...declared];
+  const hasGraph = graphNodes.length > 0 || Array.isArray(domain.graphOrder);
+  const graphOrder = Array.isArray(domain.graphOrder)
+    ? domain.graphOrder
+    : [...sourceNodes, ...(Array.isArray(domain.messages) ? domain.messages : []), ...declared]
+      .map((e) => e && e['@id'])
+      .filter((id) => id !== undefined);
+
+  let emittedGraph = false;
   for (const [k, v] of Object.entries(domain)) {
-    if (k === 'nodes') board.cards = v.map(nodeToCard);
-    else if (k === 'messages') board.conversations = v.map(messageToConversation);
+    if (k === 'nodes') {
+      board.cards = cards.map(nodeToCard);
+      // a mixed domain has no `graphNodes` key of its own — emit here so the
+      // split entities are not silently dropped.
+      if (hasGraph && !('graphNodes' in domain)) {
+        board.graphNodes = graphNodes;
+        board.graphOrder = graphOrder;
+        emittedGraph = true;
+      }
+    } else if (k === 'messages') board.conversations = v.map(messageToConversation);
+    else if (k === 'graphNodes') {
+      if (hasGraph) { board.graphNodes = graphNodes; board.graphOrder = graphOrder; emittedGraph = true; }
+    } else if (k === 'graphOrder') continue;   // emitted alongside graphNodes
     else board[k] = v;
   }
+  if (hasGraph && !emittedGraph) { board.graphNodes = graphNodes; board.graphOrder = graphOrder; }
   return board;
 }

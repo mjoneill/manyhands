@@ -16,6 +16,7 @@ import {
   conversationToMessage, messageToConversation,
   boardToDomain, domainToBoard,
 } from '../core/mapping.mjs';
+import { domainToJsonLd } from '../core/jsonld.mjs';
 
 // A fully-populated canonical card — every standard field the server writes
 // (see createCardFromPayload in server.js).
@@ -185,4 +186,114 @@ test('boardToDomain exposes nodes + messages and passes meta through', () => {
   assert.deepEqual(domain.columns, sampleBoard.columns);   // passthrough
   assert.equal(domain.nextShortId, 218);
   assert.equal(domain.cards, undefined, 'cards renamed to nodes');
+});
+
+// ── Non-card nodes (#530 graph work) ──────────────────────────────────────
+// ADR-001: "every card is a wiki page; not every page is a card." A node with
+// a `board` block is a card; a node without one is a page that isn't. Actor
+// nodes are the first real instance of the second kind.
+//
+// ⚠️ These tests exist because there was NO test round-tripping a DOMAIN that
+// carries a non-card node — every existing round-trip starts from a BOARD, so
+// every node it produces came from `cards` and carries `board`. That direction
+// is STRUCTURALLY INCAPABLE of catching what follows.
+//
+// ⛔ RED BY DESIGN when first written (2026-07-31), and parked on a branch for
+// that reason — a red test on main breaks the suite for everyone. Rescued into
+// the dev tree by #593 because the branch it was parked on lives in the
+// PRODUCTION clone and was never pushed: correct discipline, applied to a tree
+// that stopped being where work happens.
+//
+// Two distinct failure modes it pins:
+//   1. no fix          the node survives CORRUPTED, not lost — @type collapses
+//                      to CreativeWork, namespaced fields drop, and an empty
+//                      `board` block is ADDED, which by ADR-001's own
+//                      definition turns a page into a card.
+//   2. naive filter    the node is DELETED entirely, because boardToDomain
+//                      rebuilds nodes only from `cards`.
+//
+// Not a hypothetical window: index.html fires saveToJSONFile() from 11
+// fire-and-forget call sites after ordinary board mutations, so it opens on
+// the next card edit anyone makes in a browser — not on a deliberate save.
+
+const actorNode = {
+  '@type': ['Person', 'scrum:Actor'],
+  '@id': 'scrum:actor/ada',
+  name: 'Ada',
+  identifier: 'ada',
+  'scrum:substrate': 'human',
+};
+
+const domainWithActor = {
+  nodes: [cardToNode(canonicalCard), actorNode],
+  messages: [],
+  columns: [{ id: 'backlog', name: 'Backlog', order: 0 }],
+  nextShortId: 218,
+};
+
+// ⚠️ THIS ASSERTION WAS INVERTED, NOT RELAXED — and the distinction is the point.
+//
+// As written on 2026-07-31 it looked in `back.nodes`, asserting that a non-card
+// node round-trips IN PLACE. The code stopped honouring that contract three
+// weeks later: `boardToDomain` builds `nodes` exclusively from `board.cards`
+// (core/mapping.mjs), so `nodes` means CARDS ONLY and non-cards are cohorted
+// into `graphNodes`.
+//
+// ⛔ The tempting move was to edit until green. That is how a card gets closed
+// without the property holding — and #593's precondition exists precisely to
+// separate "we moved the files that differed" from "we moved the files that
+// matter". The difference between editing a test until it passes and UPDATING A
+// CONTRACT is entirely whether the change is legible afterward. So: the old
+// expectation, the superseding mechanism, and the reason are all recorded here.
+//
+// The property under test is UNCHANGED and is still the one that matters: a
+// non-card node must survive the save path intact — @type, namespaced fields,
+// no `board` block grafted on. Only its ADDRESS moved.
+//
+// ⇒ Ratified by measurement, not preference: storage never partitions. The live
+//   board-data.json holds one flat @graph (Person ×6, scrum:Column ×4 among
+//   16,948 entities) with no `nodes`/`graphNodes` key at all. The cohort is a
+//   pure function of @type, recomputed at load. See the guard test below.
+test('a non-card node survives domain → board → domain (#530)', () => {
+  // The save path is domainToBoard -> (disk) -> boardToDomain.
+  const back = boardToDomain(domainToBoard(domainWithActor));
+  const actor = (back.graphNodes || []).find((n) => n['@id'] === 'scrum:actor/ada');
+
+  assert.ok(actor, 'actor node must survive the save round-trip, not vanish');
+  assert.deepEqual(actor['@type'], ['Person', 'scrum:Actor'], '@type must survive');
+  assert.equal(actor['scrum:substrate'], 'human', 'namespaced fields must survive');
+  assert.equal(actor.board, undefined, 'and must NOT be grafted into a card');
+
+  // The other half of the contract: `nodes` carries cards, and only cards.
+  assert.ok(
+    !(back.nodes || []).some((n) => n['@id'] === 'scrum:actor/ada'),
+    '`nodes` means cards-only — a non-card must not appear there',
+  );
+});
+
+test('the cohort is DERIVED, never stored — @graph carries no partition keys (#530)', () => {
+  // ⭐ The condition attached to ratifying cohorting: it is safe ONLY because it
+  // is a pure function of @type, recomputed at load, with @type remaining the
+  // single source of truth. The moment anything PERSISTS the partition, the
+  // objection it was ratified against becomes live — a fact held in two places
+  // drifts, which is the three-list defect this suite exists to catch.
+  //
+  // This test is what stops a future "optimisation" from quietly converting a
+  // projection into a storage shape.
+  const doc = domainToJsonLd(boardToDomain(domainToBoard(domainWithActor)));
+  for (const key of ['nodes', 'graphNodes', 'cards', 'graphOrder']) {
+    assert.equal(doc[key], undefined, `stored document must not carry the partition key \`${key}\``);
+  }
+  assert.ok(Array.isArray(doc['@graph']), 'storage is one flat @graph');
+});
+
+test('a non-card node is not emitted as a card (#530)', () => {
+  // The render path is domainToBoard. A node with no `board` block is not a
+  // card and must not appear on the board — ADR-001's own definition.
+  const board = domainToBoard(domainWithActor);
+  const ids = board.cards.map((c) => c.id ?? c['@id']);
+  assert.ok(
+    !ids.includes('scrum:actor/ada'),
+    'a node without a board block must not be emitted as a card',
+  );
 });
