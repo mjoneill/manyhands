@@ -45,17 +45,20 @@ const PATCH_EXCLUDED = new Set(['id']);
  * The known, accepted disagreements on PATCH. Both are #823-class holes: the
  * route reports unknown fields but two paths bypass that reporting.
  */
-const KNOWN_PATCH_DISAGREEMENTS = {
-  // `assignee` is in PATCHABLE_CARD_FIELDS, so the loop does `card[k] = v` and
-  // writes a RAW `assignee` key instead of normalizing into `assignees` the way
-  // create does. Result: 200, no diagnostic, assignees unchanged, and a phantom
-  // key left on the card. This is how live cards acquired a stored `assignee`.
-  assignee: 'VALIDATED_THEN_DISCARDED',
-  // `createdBy` is in IMMUTABLE_CARD_FIELDS, which `continue`s BEFORE the
-  // ignoredFields push — so refusing it (correct, #631) happens silently
-  // (not correct, #823).
-  createdBy: 'DECLARED_NOT_CONSUMED',
-};
+// ⭐ EMPTY. Both PATCH defects the sweep found are fixed:
+//   assignee  was VALIDATED_THEN_DISCARDED — the loop did `card[k] = v`, writing
+//             a raw `assignee` key while `assignees` stayed untouched. Now
+//             normalized the way create always has.
+//   createdBy was DECLARED_NOT_CONSUMED — IMMUTABLE_CARD_FIELDS was skipped by a
+//             `continue` sitting ABOVE the ignoredFields push. Now reported in a
+//             separate `refusedFields`, because refused and ignored are
+//             different facts.
+//
+// ⚠️ Same rule as the create list: this going non-empty means a field was added
+// to a schema or validator without being added to the consumer. Do not edit
+// this object to make a red run green — it records what we have ACCEPTED, and
+// an exemption with no card number is how a defect becomes architecture.
+const KNOWN_PATCH_DISAGREEMENTS = {};
 
 async function sweep(baseUrl, fn = auditCreateField, probes = CARD_CREATE_PROBES) {
   const rows = [];
@@ -198,7 +201,12 @@ test('#831 — a probe value equal to the surface DEFAULT cannot discriminate', 
     });
     assert.equal(sighted.reads, false,
       'a probe whose value DIFFERS from the default must see that the patch was discarded');
-    assert.equal(verdictFor(sighted), 'DECLARED_NOT_CONSUMED');
+    // Verdict is AGREE_REFUSED rather than DECLARED_NOT_CONSUMED since #831
+    // taught the route to say `refusedFields` out loud: createdBy is immutable
+    // BY DESIGN (#631), and immutability that reports itself is a legitimate
+    // state. The discrimination this test exists for is unchanged — `reads`
+    // still flips on the probe value, which is the property under test.
+    assert.equal(verdictFor(sighted), 'AGREE_REFUSED');
   } finally {
     await server.stop();
   }

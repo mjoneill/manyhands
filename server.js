@@ -1414,6 +1414,11 @@ async function handleUpdateCard(req, res, idOrShortId) {
     const verr = validateCardFields(patch, { checkId: false }); // id is immutable on PATCH — ignored, not validated
     if (verr) return sendJSON(res, 400, { error: verr });
     const ignoredFields = [];   // #823 — declared back to the caller
+    // #831 — REFUSED is a different fact from IGNORED. "I did not recognise
+    // this" and "I recognised it and will not let you change it" call for
+    // different actions from the caller; one list would make a typo and a
+    // policy violation indistinguishable.
+    const refusedFields = [];
     const updated = await withWriteLock(async () => {
       const data = readBoard();
       const idx = findCardIndex(data, idOrShortId);
@@ -1422,8 +1427,19 @@ async function handleUpdateCard(req, res, idOrShortId) {
       const wasDone = card.column === 'done';
       let fanout = [];        // #669 — siblings this patch rewrites via #614
       let nudge = null;       // #669 — the done-nudge post, if this write emits one
+      // #831 — mirror create's precedence: `assignees` (plural) wins over the
+      // `assignee` alias when a caller sends both, so the result does not
+      // depend on JSON key order.
+      const pluralWins = Array.isArray(patch.assignees) && patch.assignees.length > 0;
       for (const [k, v] of Object.entries(patch)) {
-        if (IMMUTABLE_CARD_FIELDS.has(k)) continue;
+        if (IMMUTABLE_CARD_FIELDS.has(k)) {
+          // #831 — was a bare `continue`, which sat ABOVE the ignoredFields push
+          // and made an immutable field the one input that vanished with no
+          // diagnostic at all. Refusing it is correct (#631 — authorship is a
+          // fact about the past); refusing it silently is the #823 defect.
+          refusedFields.push(k);
+          continue;
+        }
         if (!PATCHABLE_CARD_FIELDS.has(k)) {
           // #823 — #249 keeps ignoring unknown keys (forward-compat), but it
           // must SAY SO. Silently skipping made a malformed write and a correct
@@ -1431,6 +1447,14 @@ async function handleUpdateCard(req, res, idOrShortId) {
           // nested under `relationships` returned 200 and stored no edge.
           // `by` is meta (the declared editor, #675), not a card field.
           if (k !== 'by') ignoredFields.push(k);
+          continue;
+        }
+        if (k === 'assignee') {
+          // #831 — was `card[k] = v`, which wrote a RAW `assignee` key and left
+          // `assignees` untouched: 200, nothing reported, intent voided, and a
+          // phantom field left behind that looks like it worked. create has
+          // always normalized the alias; PATCH now does the same.
+          if (!pluralWins) card.assignees = [v];
           continue;
         }
         if (k === 'relationships') {
@@ -1483,7 +1507,11 @@ async function handleUpdateCard(req, res, idOrShortId) {
     // #823 — present only when something WAS dropped, so a clean write never
     // claims it ignored something (an empty array on every response would be
     // noise the caller learns to skip).
-    sendJSON(res, 200, ignoredFields.length ? { ...updated, ignoredFields } : updated);
+    sendJSON(res, 200, {
+      ...updated,
+      ...(ignoredFields.length ? { ignoredFields } : {}),
+      ...(refusedFields.length ? { refusedFields } : {}),
+    });
   } catch (e) {
     console.error('PATCH /api/cards/:id:', e.message);
     sendJSON(res, 500, { error: 'Failed to update card' });

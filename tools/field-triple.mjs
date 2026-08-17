@@ -230,6 +230,13 @@ export async function auditPatchField(baseUrl, probe) {
   evidence.ignoredFields = ignored;
   const declares = !ignored.includes(name);
 
+  // #831 — a field the route DECLARES, deliberately does NOT consume, and
+  // SAYS SO is not a disagreement. Immutability reported out loud is a
+  // legitimate fourth state the three-list model had no room for; only
+  // SILENT immutability is a defect.
+  evidence.refusedFields = good.body.refusedFields;
+  const refused = (good.body.refusedFields ?? []).includes(name);
+
   const after = await (await fetch(`${baseUrl}/api/cards/${target}`)).json();
   const expected = probe.expectStored !== undefined ? resolveProbeValue(probe.expectStored, ctx) : wellFormed;
   evidence.storedValue = after?.[storedAs];
@@ -249,7 +256,7 @@ export async function auditPatchField(baseUrl, probe) {
         error: `marked noRule, but a validation rule fired: ${JSON.stringify(hostile.body?.error).slice(0, 160)}`,
       };
     }
-    return { field: name, declares, accepts: false, reads, noRule: true, agrees: declares === reads, evidence };
+    return { field: name, declares, accepts: false, reads, noRule: true, refused, agrees: declares === reads, evidence };
   }
 
   const t3 = await fresh();
@@ -258,7 +265,7 @@ export async function auditPatchField(baseUrl, probe) {
   evidence.malformedError = bad.body?.error;
   const accepts = bad.status === 400;
 
-  return { field: name, declares, accepts, reads, agrees: declares === accepts && accepts === reads, evidence };
+  return { field: name, declares, accepts, reads, refused, agrees: declares === accepts && accepts === reads, evidence };
 }
 
 /**
@@ -336,7 +343,11 @@ export async function auditNodeField(baseUrl, probe) {
  * disagreement shapes want different fixes and collapsing them to "FAIL" loses
  * the only information that tells you what to do.
  */
-export function verdictFor({ declares, accepts, reads, noRule, noRuleClaimRefuted, noDiagnostic }) {
+export function verdictFor({ declares, accepts, reads, noRule, noRuleClaimRefuted, noDiagnostic, refused }) {
+  // ⭐ A field DECLARED, deliberately not consumed, and REPORTED as refused is
+  // consistent — the caller can tell exactly what happened. Immutability is a
+  // legitimate answer; only SILENT immutability is a defect.
+  if (refused) return 'AGREE_REFUSED';
   // ⛔ A route with no diagnostic cannot answer `declares`. It must report
   // UNMEASURABLE — and the name must NOT begin with AGREE, because every
   // sweep filters findings with !verdict.startsWith('AGREE'). Naming this
