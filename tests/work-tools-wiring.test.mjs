@@ -276,31 +276,42 @@ test('#755-2e ⛔ NO FREE-TEXT FIELD EXISTS ON THE TOOL SURFACE — the guard is
   });
 });
 
-test('#755-2e ⭐⭐ AN UNKNOWN FIELD NEVER REACHES DISK — but it is STRIPPED, not refused', async () => {
-  // ⚠️ This test was written asserting a REFUSAL and went red. The measured
-  // behaviour is that the MCP SDK parses arguments against the declared shape
-  // and DROPS unknown keys before the handler runs — so `only()` inside
-  // work-tools, which does refuse them, is never reached from this surface.
-  // Two guards, and the outer one silently pre-empts the inner one.
+test('#755-2e ⭐⭐ AN UNKNOWN FIELD NEVER REACHES DISK — and since #823 it is REFUSED, not stripped', async () => {
+  // History, kept because the change of verdict is the point:
   //
-  // ⇒ The PII property still holds, and it holds where it matters: the field
-  //   does not reach the log, and is not echoed back. That is asserted below
-  //   against the BYTES, not the response.
+  // This test was originally written asserting a REFUSAL and went red. The
+  // measured behaviour was that the MCP SDK parsed arguments against the
+  // declared shape and DROPPED unknown keys before the handler ran, so
+  // `only()` inside work-tools — which does refuse them — was never reached.
+  // Two guards, and the outer one silently pre-empted the inner one. The
+  // author recorded the weaker property and carried the gap to #755:
   //
-  // ⚠️ What is NOT true is the stronger claim — a seat who puts context in a
-  //   `description` gets a SUCCESS with their intent discarded and no warning.
-  //   Recorded here as measured behaviour rather than fixed inside a wiring
-  //   commit, and carried to #755 as a known edge.
+  //   "a seat who puts context in a `description` gets a SUCCESS with their
+  //    intent discarded and no warning."
+  //
+  // ⇒ #823 closed exactly that edge by making the registration seam strict, so
+  //   the original assertion is now the correct one. The PII property still
+  //   holds and holds MORE strongly: the value is refused at the boundary
+  //   rather than silently dropped behind a success.
   const store = storeDir();
   await withServers(armed(store), async ({ session }) => {
     const res = await session.callTool('work_declare', {
       id: 'w-e2e-7', by: 'ada', card: 755, required: ['ada'], replyByMinutes: 20,
       description: 'a private detail that must never be logged',
     });
-    const text = JSON.stringify(res);
-    assert.equal(text.includes('private detail'), false, 'the dropped free text was echoed back');
 
-    const onDisk = readFileSync(join(store, 'work-objects.jsonl'), 'utf8');
+    const envelope = res?.result ?? res;
+    assert.equal(envelope.isError, true, 'an undeclared key must be refused, not silently dropped');
+
+    const text = JSON.stringify(res);
+    assert.match(text, /description/, 'the refusal must NAME the offending key');
+    assert.equal(text.includes('private detail'), false, '⛔ the free text was echoed back');
+
+    // The original property, unchanged: the value never reaches the log.
+    // The refusal means no work object is written at all, so an absent file
+    // is a pass — asserted explicitly rather than left to throw.
+    const logPath = join(store, 'work-objects.jsonl');
+    const onDisk = existsSync(logPath) ? readFileSync(logPath, 'utf8') : '';
     assert.equal(onDisk.includes('private detail'), false, '⛔ free text reached the work-object log');
     assert.equal(onDisk.includes('description'), false, '⛔ an undeclared key reached the work-object log');
   });

@@ -1367,6 +1367,7 @@ async function handleUpdateCard(req, res, idOrShortId) {
     const patch = JSON.parse(raw);
     const verr = validateCardFields(patch, { checkId: false }); // id is immutable on PATCH — ignored, not validated
     if (verr) return sendJSON(res, 400, { error: verr });
+    const ignoredFields = [];   // #823 — declared back to the caller
     const updated = await withWriteLock(async () => {
       const data = readBoard();
       const idx = findCardIndex(data, idOrShortId);
@@ -1377,7 +1378,15 @@ async function handleUpdateCard(req, res, idOrShortId) {
       let nudge = null;       // #669 — the done-nudge post, if this write emits one
       for (const [k, v] of Object.entries(patch)) {
         if (IMMUTABLE_CARD_FIELDS.has(k)) continue;
-        if (!PATCHABLE_CARD_FIELDS.has(k)) continue; // #249 — ignore unknown keys
+        if (!PATCHABLE_CARD_FIELDS.has(k)) {
+          // #823 — #249 keeps ignoring unknown keys (forward-compat), but it
+          // must SAY SO. Silently skipping made a malformed write and a correct
+          // one indistinguishable: `relatedTo` at the top level instead of
+          // nested under `relationships` returned 200 and stored no edge.
+          // `by` is meta (the declared editor, #675), not a card field.
+          if (k !== 'by') ignoredFields.push(k);
+          continue;
+        }
         if (k === 'relationships') {
           // #614/#548 — a relationships patch is a MERGE at the type level:
           // only the keys the caller sent change; siblings survive. Clearing
@@ -1425,7 +1434,10 @@ async function handleUpdateCard(req, res, idOrShortId) {
       return card;
     });
     if (!updated) return sendJSON(res, 404, { error: 'Card not found' });
-    sendJSON(res, 200, updated);
+    // #823 — present only when something WAS dropped, so a clean write never
+    // claims it ignored something (an empty array on every response would be
+    // noise the caller learns to skip).
+    sendJSON(res, 200, ignoredFields.length ? { ...updated, ignoredFields } : updated);
   } catch (e) {
     console.error('PATCH /api/cards/:id:', e.message);
     sendJSON(res, 500, { error: 'Failed to update card' });

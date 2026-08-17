@@ -289,6 +289,31 @@ function buildMcpServer() {
     instructions: CHANNEL_INSTRUCTIONS,
   });
 
+  // #823 — an unknown field must be REPORTED, never silently discarded.
+  // zod's z.object() strips keys the schema does not name, so a malformed
+  // write returned success and stored nothing. Measured 2026-08-17: three
+  // writes (card_create, card_update, REST PATCH) passing `relatedTo` at the
+  // top level instead of nested under `relationships` — all accepted, zero
+  // edges written, no diagnostic on any layer. A wrong call and a right one
+  // were indistinguishable to the caller.
+  //
+  // ⚠️ Wrapping the registration seam rather than editing 29 schemas is the
+  // point, not a shortcut: a tool added tomorrow inherits the guard instead
+  // of depending on its author to remember `.strict()`. The rail cannot be
+  // forgotten because nobody has to remember it.
+  const registerToolPermissive = mcp.registerTool.bind(mcp);
+  mcp.registerTool = (name, config, cb) => {
+    const shape = config?.inputSchema;
+    // A raw shape is a plain object of zod types; an already-built Zod schema
+    // carries _def/safeParse and is passed through untouched.
+    const isRawShape = shape && typeof shape === 'object'
+      && !shape._def && typeof shape.safeParse !== 'function';
+    const cfg = isRawShape
+      ? { ...config, inputSchema: z.object(shape).strict() }
+      : config;
+    return registerToolPermissive(name, cfg, cb);
+  };
+
   // The registration seam (Increment 2, designed jointly across seats).
   // A CONTROL-PLANE request, deliberately NOT a tool: a tool appears in
   // tools/list and would let a model or stray client mutate seat identity,
