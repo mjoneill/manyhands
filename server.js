@@ -1754,21 +1754,33 @@ async function handleUpdateColumn(req, res, columnId) {
     const patch = JSON.parse(raw);
     const verr = validateColumnFields(patch);
     if (verr) return sendJSON(res, 400, { error: verr });
+    // #843 — the discards this route already performed silently, now named.
+    // #844 — AN ECHO IS NOT AN ATTEMPT: a read-modify-write client GETs a
+    // column, changes `name`, and sends the whole object back. `id` comes along
+    // unchanged. Reporting it there would fire the diagnostic on the most
+    // ordinary client pattern in existence and train the room to skip the field.
+    const ignoredFields = [];
+    const refusedFields = [];
     const updated = await withWriteLock(async () => {
       const data = readBoard();
       const idx = findColumnIndex(data, columnId);
       if (idx < 0) return null;
       const col = data.columns[idx];
       for (const [k, v] of Object.entries(patch)) {
-        if (k === 'id') continue; // immutable
-        if (!PATCHABLE_COLUMN_FIELDS.has(k)) continue; // #299 — ignore unknown keys
+        if (isEchoOfStored(v, col[k])) continue;        // #844 — nothing was attempted
+        if (k === 'id') { refusedFields.push(k); continue; } // immutable, and now said so
+        if (!PATCHABLE_COLUMN_FIELDS.has(k)) { ignoredFields.push(k); continue; } // #299
         col[k] = v;
       }
       writeBoard(data, [columnEvent('update', col)]);
       return col;
     });
     if (!updated) return sendJSON(res, 404, { error: 'Column not found' });
-    sendJSON(res, 200, updated);
+    sendJSON(res, 200, {
+      ...updated,
+      ...(ignoredFields.length ? { ignoredFields: ignoredFields.sort() } : {}),
+      ...(refusedFields.length ? { refusedFields: refusedFields.sort() } : {}),
+    });
   } catch (e) {
     console.error('PATCH /api/columns/:id:', e.message);
     sendJSON(res, 500, { error: 'Failed to update column' });
@@ -1832,6 +1844,36 @@ async function handleDeleteColumn(req, res, columnId) {
 // spelled a seat by its display name. Implementation + tests: core/people.mjs.
 function extractMentions(text) {
   return extractMentionsFromRoster(text, ROSTER);
+}
+
+// #843 — the conversation route's OWN consumed-set, deliberately beside its own
+// constructor rather than shared with any other route.
+//
+// ⛔ DO NOT MERGE THIS WITH `CREATE_CONSUMED_FIELDS` OR THE COLUMN SET. "Unknown"
+// is route-relative and this family has proven it three times: `body` is real on
+// /api/nodes and unknown on /api/cards, `priority` is the reverse, and a
+// conversation has its own vocabulary again. A union would make every route
+// accept every key silently; an intersection would make each route report its
+// own real fields as ignored. `tests/conversation-column-diagnostics.test.mjs`
+// fails on that refactor on purpose.
+//
+// ⚠️ Derived from what the CONSTRUCTOR reads, not from the stored object's keys:
+// `id`, `mentions` and `createdAt` appear on the result but are computed here,
+// so a client that sends them is sending something the server will discard.
+const CONVERSATION_CONSUMED_FIELDS = new Set(['body', 'author', 'attachedTo', 'attachments']);
+
+/**
+ * Keys the caller sent that this route will silently drop. Empty when clean.
+ *
+ * Sorted, unlike the cards route's equivalent: the order is otherwise the
+ * caller's own key order, which makes the diagnostic vary between two requests
+ * that are wrong in exactly the same way. Nothing depends on the cards route's
+ * unsorted output, so this is a divergence worth having rather than a
+ * consistency worth keeping.
+ */
+function unconsumedConversationFields(body) {
+  if (typeof body !== 'object' || body === null) return [];
+  return Object.keys(body).filter((k) => !CONVERSATION_CONSUMED_FIELDS.has(k)).sort();
 }
 
 function createConversationFromPayload(body) {
@@ -2000,7 +2042,12 @@ async function handleCreateConversation(req, res) {
       return conv;
     });
     notifyMcpOfPost(created);
-    sendJSON(res, 201, created);
+    // #843 — say what was dropped. Present only when non-empty: an empty array
+    // on every post is noise every seat learns to skip, which is how the
+    // original silence went unnoticed. The stored record is NOT touched — the
+    // diagnostic rides the response only.
+    const ignoredFields = unconsumedConversationFields(body);
+    sendJSON(res, 201, ignoredFields.length ? { ...created, ignoredFields } : created);
   } catch (e) {
     console.error('POST /api/conversations:', e.message);
     sendJSON(res, 500, { error: 'Failed to create conversation' });

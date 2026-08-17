@@ -31,16 +31,25 @@ const JUNK = 'zzz_diagnostic_probe_not_a_real_field';
 /**
  * The expected map. `true` = the route reports what it discarded.
  *
- * ⇒ FOUR write surfaces exist and ONE reports. The #823 fix was applied where
- *   each incident happened rather than to the class, so three siblings still
- *   accept a field, return 2xx, discard it, and say nothing.
+ * ⇒ ⭐ ALL FIVE WRITE SURFACES NOW REPORT, as of #843. This map started as
+ *   ONE of five: the #823 fix was applied where each incident happened rather
+ *   than to the class, so four siblings accepted a field, returned 2xx,
+ *   discarded it, and said nothing.
+ *
+ * ⚠️ A SATURATED MAP IS THE MOMENT THIS FILE IS EASIEST TO MISREAD. All-true
+ *   now looks like "the class is closed" — it is not. It means every surface
+ *   that EXISTS TODAY reports. The assertion that still earns its keep is the
+ *   one about a NEW key appearing: this file cannot see a write surface nobody
+ *   added to `probe()`, and the census only ever covered the routes someone
+ *   thought to list. #831 D2's CI gate is what would close the class; this is
+ *   the manual instance of it.
  */
 const EXPECTED = {
   'POST /api/cards': true,      // #829 — the control, and the only one fixed
   'PATCH /api/cards': true,     // #823
   'PATCH /api/nodes': true,     // #841 — SHIPPED. flipped in the merge that landed it.
-  'POST /api/conversations': false, // unfixed — now carded as #843
-  'PATCH /api/columns': false,      // unfixed — now carded as #843
+  'POST /api/conversations': true,  // #843 — SHIPPED. flipped in the same commit as the fix.
+  'PATCH /api/columns': true,       // #843 — SHIPPED. flipped in the same commit as the fix.
 };
 
 async function probe(baseUrl) {
