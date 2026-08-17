@@ -732,6 +732,7 @@ function findColumnIndex(data, columnId) {
 const CREATE_CONSUMED_FIELDS = new Set([
   'id', 'title', 'description', 'type', 'assignees', 'assignee',
   'labels', 'for', 'priority', 'column', 'order', 'createdBy', 'relationships',
+  'implementedBy',   // #830
 ]);
 
 /** Keys the caller sent that create will silently drop. Empty when clean. */
@@ -783,6 +784,12 @@ function createCardFromPayload(body, nextShortId) {
     // inventing one is worse than lacking one.
     createdBy: (typeof body.createdBy === 'string' && body.createdBy.trim()) ? body.createdBy.trim() : null,
     relationships: normalizeRelationships(body.relationships),
+    // #830 — a card may be born knowing what implemented it. Retroactive cards
+    // (work shipped before it was filed) carry the sha at creation, and the
+    // two-call shape was friction with no benefit. The 40-char sha rule already
+    // runs in validateCardFields on this route — only the consume step was
+    // missing, which is why the field validated and then evaporated.
+    ...(Array.isArray(body.implementedBy) ? { implementedBy: body.implementedBy } : {}),
     // #348 — coordination rail: first-write-wins claim, server-arbitrated.
     // Set only via POST /api/cards/:id/claim (never via PATCH), so a claim
     // is a compare-and-set under withWriteLock, not an unconditional overwrite.

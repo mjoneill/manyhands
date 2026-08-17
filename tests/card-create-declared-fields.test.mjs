@@ -1,0 +1,125 @@
+/**
+ * #830 — card_create advertises four fields REST create could not store.
+ *
+ * `parkedBy · parkedUntil · parkedReason · implementedBy` are declared
+ * parameters on the MCP card_create tool, with descriptions, and are accepted
+ * by validateCardFields at create — then dropped by createCardFromPayload,
+ * which never read them. PATCH stored them the whole time. Same names, same
+ * resource, two routes, two meanings.
+ *
+ * Self-inflicted: 235a0d9 (parked) and fbbbc31 (implementedBy) each added the
+ * fields to the schema AND to PATCHABLE_CARD_FIELDS without wiring create.
+ *
+ * It slipped both of the night's guards by being KNOWN: #823 refuses unknown
+ * keys (these are declared, so it accepts them); #829 reports dropped keys (it
+ * did report them — and the write still evaporated). A declared-and-dropped
+ * field is worse than an absent one, because the tool schema is the only
+ * documentation and it reads as supported.
+ *
+ * Every assertion reads back from a FRESH GET: the 201 is not the evidence.
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { startRestServer } from './helpers/harness.mjs';
+
+function apiTest(name, fn) {
+  test(name, async () => {
+    const server = await startRestServer();
+    try { await fn(server); } finally { await server.stop(); }
+  });
+}
+
+const post = async (baseUrl, body) => {
+  const res = await fetch(`${baseUrl}/api/cards`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return { res, card: await res.json() };
+};
+const get = async (baseUrl, id) => (await fetch(`${baseUrl}/api/cards/${id}`)).json();
+
+const SHA = 'a75a2476fde51792f3566ea2e6d00df512498bc4';
+
+apiTest('#830 implementedBy is stored at create, not discarded', async ({ baseUrl }) => {
+  const { res, card } = await post(baseUrl, {
+    title: 'retroactive card', createdBy: 'ada', implementedBy: [SHA],
+  });
+  assert.equal(res.status, 201);
+  assert.equal(card.title, 'retroactive card');            // control
+  const stored = await get(baseUrl, card.shortId);          // the evidence
+  assert.deepEqual(stored.implementedBy, [SHA]);
+  assert.ok(
+    card.ignoredFields === undefined || !card.ignoredFields.includes('implementedBy'),
+    'a consumed field must not be reported as ignored',
+  );
+});
+
+// ── ⚠️ THE PARKED HALF IS NOT BUILT HERE. These assert CURRENT behaviour,
+//    and current behaviour is WRONG — recorded so the fix has a baseline.
+//
+//    There are THREE lists that disagree, not two:
+//      1 MCP card_create schema   advertises parkedBy/parkedUntil/parkedReason
+//      2 validateCardFields       VALIDATES them on create (shared with patch)
+//      3 createCardFromPayload    consumes NONE of them
+//
+//    Dropping them from the schema alone leaves them un-advertised, still
+//    validated, still discarded — the worst of the three states. Fixing it
+//    needs a create/patch distinction in the shared validator, which is a
+//    design question and not a deletion. Open half of #830.
+//
+//    ⭐ INVARIANT for that work: no field may be VALIDATED on a surface that
+//    does not CONSUME it. A validator running on a discarded field is a false
+//    signal generator — it teaches the caller the domain rule, then drops the
+//    corrected input.
+
+apiTest('#830 [current, wrong] a well-formed park is validated then discarded', async ({ baseUrl }) => {
+  const { res, card } = await post(baseUrl, {
+    title: 'deferred at birth', parkedBy: 'ada',
+    parkedUntil: '2026-09-16T00:00:00.000Z', parkedReason: 'waiting',
+  });
+  assert.equal(res.status, 201);
+  assert.equal(card.title, 'deferred at birth');   // control
+  const stored = await get(baseUrl, card.shortId);
+  assert.equal(stored.parkedBy, undefined, 'documents the defect, not the intent');
+  assert.ok(card.ignoredFields.includes('parkedBy'), 'at least it is reported now');
+});
+
+// ── The validators must hold at create, not only at PATCH ───────────────
+
+apiTest('#830 parkedBy without parkedUntil is REFUSED at create', async ({ baseUrl }) => {
+  const { res } = await post(baseUrl, { title: 'permanent by forgetting', parkedBy: 'ada' });
+  assert.equal(res.status, 400, 'a park with no end date must not be creatable');
+});
+
+apiTest('#830 parkedUntil without parkedBy is REFUSED at create', async ({ baseUrl }) => {
+  // The uncovered direction: an expiry with no author.
+  const { res } = await post(baseUrl, {
+    title: 'orphan expiry', parkedUntil: '2026-09-16T00:00:00.000Z',
+  });
+  assert.equal(res.status, 400);
+});
+
+apiTest('#830 a short sha is REFUSED at create', async ({ baseUrl }) => {
+  const { res } = await post(baseUrl, { title: 'abbrev', implementedBy: ['a75a247'] });
+  assert.equal(res.status, 400, 'the graph cannot expand an abbreviation');
+});
+
+// ── The #829 reporter must stay honest around the change ────────────────
+
+apiTest('#830 a genuinely unknown key is still reported', async ({ baseUrl }) => {
+  const { res, card } = await post(baseUrl, {
+    title: 'mixed', implementedBy: [SHA], bogusField: 1,
+  });
+  assert.equal(res.status, 201);
+  assert.deepEqual(card.ignoredFields, ['bogusField']);
+});
+
+apiTest('#830 `parent` remains ignored at create — not swept in by proximity', async ({ baseUrl }) => {
+  // parent is in PATCHABLE_CARD_FIELDS but is NOT a card_create schema
+  // parameter. This card fixes the four that are declared, not everything
+  // adjacent to them.
+  const { res, card } = await post(baseUrl, { title: 'p', parent: 42 });
+  assert.equal(res.status, 201);
+  assert.deepEqual(card.ignoredFields, ['parent']);
+});
