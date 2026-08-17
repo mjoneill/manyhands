@@ -807,12 +807,48 @@ const RELATIONSHIP_TYPES = ['relatedTo', 'blockedBy', 'supersedes', 'derivedFrom
 // Returns an error string if the relationships object is malformed, else null.
 // Targets are shortIds (numbers). Stored legacy data mixes UUIDs in — that is
 // a migration surface, not a write surface; new writes are held to shortIds.
-function validateRelationships(rel) {
+// #844 — AN ECHO IS NOT AN ATTEMPT.
+//
+// A caller that GETs a card, changes one field and PATCHes it back is sending
+// every immutable and every server-derived field verbatim. Reporting those as
+// refused/ignored means the diagnostic fires on EVERY read-modify-write — the
+// always-fires rule, living in the response body, which trains a caller to skip
+// the field entirely and makes the one that matters invisible.
+//
+// So the predicate is "did the caller try to CHANGE it?", not "was the key
+// present?". Deep-compares because relationships and arrays echo by value.
+function isEchoOfStored(submitted, stored) {
+  if (submitted === stored) return true;
+  if (submitted === undefined || stored === undefined) return false;
+  try { return JSON.stringify(submitted) === JSON.stringify(stored); } catch { return false; }
+}
+
+// #844 Class 4 — server-DERIVED relationship types. Emitted by GET on every
+// card, maintained by the server as the inverse of an authored type, and never
+// settable by a caller. Echoing one back must not 400; ASSERTING one still must.
+const DERIVED_RELATIONSHIP_TYPES = ['supersededBy'];
+
+// #844 — fields the API EMITS on read but never STORES on the card. A caller
+// echoing one back has nothing to compare against (the stored value is
+// undefined), so echo-suppression alone cannot see them. They are projections,
+// not card fields, and reporting them turns every read-modify-write noisy.
+// `by` is here for the same reason: it travels WITH a write (#675), it is not
+// a field OF the card.
+const READ_PROJECTION_FIELDS = new Set(['comments', 'by']);
+
+function validateRelationships(rel, current = undefined) {
   if (typeof rel !== 'object' || rel === null || Array.isArray(rel)) {
     return 'relationships must be an object';
   }
   for (const [type, targets] of Object.entries(rel)) {
     if (!RELATIONSHIP_TYPES.includes(type)) {
+      // #844 Class 4 — a DERIVED type echoed back unchanged is not a client
+      // error; it is the server's own output returning home. Calling it
+      // "unknown" sent a caller to check spelling that was already correct.
+      if (DERIVED_RELATIONSHIP_TYPES.includes(type)) {
+        if (current && isEchoOfStored(targets, current[type])) continue;
+        return `relationship type '${type}' is maintained by the server and cannot be set directly`;
+      }
       return `unknown relationship type '${type}' — valid: ${RELATIONSHIP_TYPES.join(', ')}`;
     }
     if (!Array.isArray(targets)) return `relationships.${type} must be an array`;
@@ -913,7 +949,7 @@ const ASSIGNEE_KEY_RE = /^[A-Za-z0-9_-]+$/;
 // got opposite answers out of one request.
 // Defaults to 'patch' so any future call site is validated rather than silently
 // exempted — an exemption must be asked for.
-function validateCardFields(body, { checkId = true, surface = 'patch' } = {}) {
+function validateCardFields(body, { checkId = true, surface = 'patch', current = undefined } = {}) {
   if (checkId && body.id && !UUID_RE.test(String(body.id))) return 'id must be a UUID';
   if (body.type && !CARD_TYPES.has(body.type)) return 'invalid card type';
   if (body.priority && !CARD_PRIORITIES.has(body.priority)) return 'invalid priority';
@@ -973,7 +1009,7 @@ function validateCardFields(body, { checkId = true, surface = 'patch' } = {}) {
     }
   }
   if (body.relationships !== undefined) {
-    const rerr = validateRelationships(body.relationships); // #614
+    const rerr = validateRelationships(body.relationships, current?.relationships); // #614/#844
     if (rerr) return rerr;
   }
   return null;
@@ -1411,7 +1447,13 @@ async function handleUpdateCard(req, res, idOrShortId) {
   try {
     const raw = await readBody(req);
     const patch = JSON.parse(raw);
-    const verr = validateCardFields(patch, { checkId: false }); // id is immutable on PATCH — ignored, not validated
+    // #844 — the stored relationships are needed to tell an ECHO of a derived
+    // type from an ASSERTION of one.
+    const _existing = (() => {
+      try { const d = readBoard(); const i = findCardIndex(d, idOrShortId);
+            return i < 0 ? null : d.cards[i]; } catch { return null; }
+    })();
+    const verr = validateCardFields(patch, { checkId: false, current: _existing }); // id is immutable on PATCH
     if (verr) return sendJSON(res, 400, { error: verr });
     const ignoredFields = [];   // #823 — declared back to the caller
     // #831 — REFUSED is a different fact from IGNORED. "I did not recognise
@@ -1432,6 +1474,8 @@ async function handleUpdateCard(req, res, idOrShortId) {
       // depend on JSON key order.
       const pluralWins = Array.isArray(patch.assignees) && patch.assignees.length > 0;
       for (const [k, v] of Object.entries(patch)) {
+        // #844 — an unchanged value was not an attempt. Silent.
+        if (isEchoOfStored(v, card[k])) continue;
         if (IMMUTABLE_CARD_FIELDS.has(k)) {
           // #831 — was a bare `continue`, which sat ABOVE the ignoredFields push
           // and made an immutable field the one input that vanished with no
@@ -1440,13 +1484,14 @@ async function handleUpdateCard(req, res, idOrShortId) {
           refusedFields.push(k);
           continue;
         }
+        if (READ_PROJECTION_FIELDS.has(k)) continue;   // #844 — a projection, not a field
         if (!PATCHABLE_CARD_FIELDS.has(k)) {
           // #823 — #249 keeps ignoring unknown keys (forward-compat), but it
           // must SAY SO. Silently skipping made a malformed write and a correct
           // one indistinguishable: `relatedTo` at the top level instead of
           // nested under `relationships` returned 200 and stored no edge.
           // `by` is meta (the declared editor, #675), not a card field.
-          if (k !== 'by') ignoredFields.push(k);
+          ignoredFields.push(k);
           continue;
         }
         if (k === 'assignee') {
