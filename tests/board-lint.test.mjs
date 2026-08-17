@@ -115,3 +115,70 @@ test('#824 — claimedShas flattens every card’s edges', () => {
     [sha(1), sha(2), sha(3)].sort(),
   );
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CHECK 2 — non-holder mutation.
+//
+// ⚠️ The card asked for "a card mutated with no active claim." Measurement over
+// the real event log refuted that predicate: 928 of 1,250 card updates (74%)
+// have no claim, because the rail requires a claim before driving multi-step
+// work, not before every edit. The always-fires rule this card warns about
+// would have been built straight from the card's own words.
+//
+// So the negative assertions below are the load-bearing ones again.
+
+import { lintNonHolderMutations, renderNonHolder } from '../tools/board-lint.mjs';
+
+const upd = (seq, actor, claimedBy, shortId = 1) => ({
+  seq, actor, op: 'update', occurred_at: '2026-08-17T12:29:08Z',
+  entity: { kind: 'card', id: 'x' },
+  state: { shortId, claimedBy, title: 'a card' },
+});
+
+test('#824 check2 — a write by a non-holder is a FINDING, naming both seats', () => {
+  const r = lintNonHolderMutations({ events: [upd(1, 'ada', 'grace', 831)] });
+  assert.equal(r.findings.length, 1);
+  assert.equal(r.findings[0].actor, 'ada');
+  assert.equal(r.findings[0].holder, 'grace');
+  assert.ok(r.findings[0].compared.notClaimed.includes('cannot see'),
+    'the finding must record what it is NOT claiming');
+});
+
+test('#824 check2 — ⛔ an UNCLAIMED card being edited is correct behaviour, not a finding', () => {
+  // This is the card's own proposed predicate, and building it would fire on
+  // three quarters of every write this board has ever taken.
+  const r = lintNonHolderMutations({ events: [upd(1, 'ada', null), upd(2, 'grace', null)] });
+  assert.equal(r.findings.length, 0);
+  assert.equal(r.unclaimedCount, 2, 'counted as aggregate signal, never itemised');
+});
+
+test('#824 check2 — ⛔ the holder editing their own card is silent', () => {
+  const r = lintNonHolderMutations({ events: [upd(1, 'ada', 'ada')] });
+  assert.equal(r.findings.length, 0);
+  assert.equal(r.byHolderCount, 1);
+});
+
+test('#824 check2 — non-card and non-update events are ignored entirely', () => {
+  const r = lintNonHolderMutations({ events: [
+    { seq: 1, actor: 'ada', op: 'post', entity: { kind: 'conversation' }, state: {} },
+    { seq: 2, actor: 'ada', op: 'create', entity: { kind: 'card' }, state: { claimedBy: 'grace' } },
+  ] });
+  assert.equal(r.findings.length, 0, 'a create is not a mutation of someone else’s held card');
+  assert.equal(r.scanned, 0);
+});
+
+test('#824 check2 — the report describes a coordination EVENT, never a breach', () => {
+  const out = renderNonHolder(lintNonHolderMutations({ events: [upd(1, 'ada', 'grace', 831)] }));
+  assert.match(out, /UNKNOWN/);
+  assert.match(out, /not a breach/);
+  assert.ok(!/violat|breach of|should not have|wrongly/i.test(out.replace('not a breach', '')),
+    'the log cannot see whether the write was welcome, so the report must not imply it');
+});
+
+test('#824 check2 — a finding can be silenced by seq, and the suppression is reported', () => {
+  const events = [upd(7, 'ada', 'grace')];
+  assert.equal(lintNonHolderMutations({ events }).findings.length, 1, 'control');
+  const quiet = lintNonHolderMutations({ events, ignores: new Set(['7']) });
+  assert.equal(quiet.findings.length, 0);
+  assert.equal(quiet.suppressed, 1);
+});
