@@ -262,11 +262,86 @@ export async function auditPatchField(baseUrl, probe) {
 }
 
 /**
+ * Does this route emit an `ignoredFields` diagnostic at all?
+ *
+ * ⚠️ `declares(f)` is measured as "f is absent from ignoredFields", which is
+ * VACUOUSLY TRUE on a route that never emits the field. Without this check the
+ * auditor reports every field on such a route as declared, and the surface
+ * comes back clean while being entirely unaudited.
+ *
+ * Self-calibrating rather than hardcoded per route: send a key that cannot be
+ * real and see whether the route says anything about it. A route silent about
+ * deliberate junk has no diagnostic, whatever it is called.
+ */
+const IMPOSSIBLE_KEY = 'zzz_field_triple_diagnostic_probe_not_a_real_field';
+
+export async function routeHasDiagnostic(baseUrl, route = 'cards') {
+  if (route === 'cards') {
+    const res = await post(baseUrl, { [IMPOSSIBLE_KEY]: 'x' });
+    return Array.isArray(res.body?.ignoredFields);
+  }
+  // nodes: needs an existing card to PATCH
+  const card = await post(baseUrl, {});
+  const res = await fetch(`${baseUrl}/api/nodes/${card.body.shortId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ [IMPOSSIBLE_KEY]: 'x' }),
+  });
+  const body = await res.json();
+  return Array.isArray(body?.ignoredFields);
+}
+
+/**
+ * Measure the triple on the /api/nodes surface.
+ *
+ * ⚠️ Route-relative vocabulary is the whole point of auditing this separately:
+ * `body` is REAL here (it maps to card.description) and unknown on /api/cards;
+ * `priority` is real on /api/cards and unknown here. An audit that treated
+ * "the card fields" as one set would report a defect on neither route.
+ */
+export async function auditNodeField(baseUrl, probe) {
+  const { name, storedAs = name } = probe;
+  const evidence = {};
+  const wellFormed = resolveProbeValue(probe.wellFormed, {});
+
+  const hasDiag = await routeHasDiagnostic(baseUrl, 'nodes');
+  const card = await post(baseUrl, {});
+  const res = await fetch(`${baseUrl}/api/nodes/${card.body.shortId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ [name]: wellFormed }),
+  });
+  const body = await res.json();
+  evidence.wellFormedStatus = res.status;
+  evidence.ignoredFields = body?.ignoredFields;
+
+  const fresh = await getFresh(baseUrl, card.body.shortId);
+  const expected = probe.expectStored !== undefined ? probe.expectStored : wellFormed;
+  evidence.storedValue = fresh.body?.[storedAs];
+  evidence.expectedValue = expected;
+  const reads = fresh.status === 200 && storedMatches(fresh.body?.[storedAs], expected);
+
+  // ⛔ declares is UNMEASURABLE without a diagnostic. null, never true.
+  const declares = hasDiag ? !(body?.ignoredFields ?? []).includes(name) : null;
+
+  return {
+    field: name, declares, accepts: false, reads,
+    noRule: probe.noRule === true, noDiagnostic: !hasDiag,
+    agrees: null, evidence,
+  };
+}
+
+/**
  * The invariant, stated as a verdict rather than a boolean, because the three
  * disagreement shapes want different fixes and collapsing them to "FAIL" loses
  * the only information that tells you what to do.
  */
-export function verdictFor({ declares, accepts, reads, noRule, noRuleClaimRefuted }) {
+export function verdictFor({ declares, accepts, reads, noRule, noRuleClaimRefuted, noDiagnostic }) {
+  // ⛔ A route with no diagnostic cannot answer `declares`. It must report
+  // UNMEASURABLE — and the name must NOT begin with AGREE, because every
+  // sweep filters findings with !verdict.startsWith('AGREE'). Naming this
+  // AGREE_UNKNOWN would make an entire unaudited surface report clean.
+  if (noDiagnostic) return 'UNMEASURABLE_NO_DIAGNOSTIC';
   if (declares === null) return 'UNMEASURED';
   // A field with no rule by design is judged on the two lists that apply to it.
   // Holding it to `accepts` would report every free-form string as a defect —
