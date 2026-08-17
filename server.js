@@ -905,7 +905,15 @@ const ASSIGNEE_KEY_RE = /^[A-Za-z0-9_-]+$/;
 
 // Returns an error string if any security-sensitive field is malformed, else
 // null. Presence-conditional — a field absent from the payload keeps its default.
-function validateCardFields(body, { checkId = true } = {}) {
+// #830 — `surface` exists because a field's rules are ROUTE-RELATIVE, exactly
+// like its vocabulary. The park trio is real on PATCH and absent on create, so
+// validating it on create produced the worst of the three states: the route
+// reported the field in `ignoredFields`, refused malformed values for it, and
+// stored nothing. A caller reading the diagnostic and a caller trusting the 400
+// got opposite answers out of one request.
+// Defaults to 'patch' so any future call site is validated rather than silently
+// exempted — an exemption must be asked for.
+function validateCardFields(body, { checkId = true, surface = 'patch' } = {}) {
   if (checkId && body.id && !UUID_RE.test(String(body.id))) return 'id must be a UUID';
   if (body.type && !CARD_TYPES.has(body.type)) return 'invalid card type';
   if (body.priority && !CARD_PRIORITIES.has(body.priority)) return 'invalid priority';
@@ -946,8 +954,12 @@ function validateCardFields(body, { checkId = true } = {}) {
   // because either alone is a different thing: an author with no end date is a
   // permanent block nobody signed up for, and an end date with no author is a
   // rule from nowhere.
-  const hasParker = body.parkedBy !== undefined && body.parkedBy !== null;
-  const hasUntil = body.parkedUntil !== undefined && body.parkedUntil !== null;
+  // #830 — NOT validated on create: create does not consume these, and a
+  // validator on a discarded field is a false-signal generator. PATCH is the
+  // parking surface. Do not "fix" this by consuming them at create — that
+  // invents a born-parked card, which is not a thing anyone asked for.
+  const hasParker = surface !== 'create' && body.parkedBy !== undefined && body.parkedBy !== null;
+  const hasUntil = surface !== 'create' && body.parkedUntil !== undefined && body.parkedUntil !== null;
   if (hasParker !== hasUntil) {
     return 'parkedBy and parkedUntil must be set together — a park needs an author and an end date';
   }
@@ -1369,7 +1381,7 @@ async function handleCreateCard(req, res) {
     if (!body.title || !body.title.trim()) {
       return sendJSON(res, 400, { error: 'title is required' });
     }
-    const verr = validateCardFields(body);
+    const verr = validateCardFields(body, { surface: 'create' }); // #830
     if (verr) return sendJSON(res, 400, { error: verr });
     const created = await withWriteLock(async () => {
       const data = readBoard();

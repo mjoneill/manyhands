@@ -64,16 +64,25 @@ apiTest('#830 implementedBy is stored at create, not discarded', async ({ baseUr
 //      3 createCardFromPayload    consumes NONE of them
 //
 //    Dropping them from the schema alone leaves them un-advertised, still
-//    validated, still discarded — the worst of the three states. Fixing it
-//    needs a create/patch distinction in the shared validator, which is a
-//    design question and not a deletion. Open half of #830.
+//    validated, still discarded — the worst of the three states.
+//
+//    ✅ RESOLVED. The open half of #830 shipped: validateCardFields takes a
+//    `surface` option and does not apply the park rules on create, and the MCP
+//    card_create schema no longer advertises them. All three lists now agree at
+//    ABSENT on create, while PATCH — where the field is genuinely consumed —
+//    keeps every rule. The assertions below were rewritten from documenting the
+//    defect to asserting the fix; the ORIGINAL expectations are preserved in
+//    each comment so the change of intent is legible rather than silent.
 //
 //    ⭐ INVARIANT for that work: no field may be VALIDATED on a surface that
 //    does not CONSUME it. A validator running on a discarded field is a false
 //    signal generator — it teaches the caller the domain rule, then drops the
 //    corrected input.
 
-apiTest('#830 [current, wrong] a well-formed park is validated then discarded', async ({ baseUrl }) => {
+apiTest('#830 a park sent to create is reported and dropped, and NOT validated', async ({ baseUrl }) => {
+  // WAS: '[current, wrong] a well-formed park is validated then discarded'.
+  // The drop is unchanged and correct — create is not the parking surface.
+  // What changed is that it is no longer VALIDATED on the way to being dropped.
   const { res, card } = await post(baseUrl, {
     title: 'deferred at birth', parkedBy: 'ada',
     parkedUntil: '2026-09-16T00:00:00.000Z', parkedReason: 'waiting',
@@ -81,23 +90,40 @@ apiTest('#830 [current, wrong] a well-formed park is validated then discarded', 
   assert.equal(res.status, 201);
   assert.equal(card.title, 'deferred at birth');   // control
   const stored = await get(baseUrl, card.shortId);
-  assert.equal(stored.parkedBy, undefined, 'documents the defect, not the intent');
-  assert.ok(card.ignoredFields.includes('parkedBy'), 'at least it is reported now');
+  assert.equal(stored.parkedBy, undefined, 'create does not consume a park');
+  assert.deepEqual([...card.ignoredFields].sort(), ['parkedBy', 'parkedReason', 'parkedUntil'],
+    'all three reported — a silent drop here would be the #823 defect');
 });
 
-// ── The validators must hold at create, not only at PATCH ───────────────
+// ── The park validators belong to PATCH ONLY ────────────────────────────
+//
+// ⚠️ THESE TWO ASSERTED 400 UNTIL #830's OPEN HALF SHIPPED, and that
+// expectation was the defect wearing a test's clothes: it demanded a validator
+// on a surface that discards the field. The rule "no field may be VALIDATED on
+// a surface that does not CONSUME it" applies to the test suite too — a test
+// can pin a false-signal generator in place just as firmly as code can.
 
-apiTest('#830 parkedBy without parkedUntil is REFUSED at create', async ({ baseUrl }) => {
-  const { res } = await post(baseUrl, { title: 'permanent by forgetting', parkedBy: 'ada' });
-  assert.equal(res.status, 400, 'a park with no end date must not be creatable');
+apiTest('#830 a half-park is ACCEPTED at create — the rule lives on PATCH', async ({ baseUrl }) => {
+  const { res, card } = await post(baseUrl, { title: 'permanent by forgetting', parkedBy: 'ada' });
+  assert.equal(res.status, 201, 'create does not adjudicate parks; it reports and drops');
+  assert.deepEqual(card.ignoredFields, ['parkedBy']);
 });
 
-apiTest('#830 parkedUntil without parkedBy is REFUSED at create', async ({ baseUrl }) => {
-  // The uncovered direction: an expiry with no author.
-  const { res } = await post(baseUrl, {
+apiTest('#830 an orphan expiry is ACCEPTED at create, and REFUSED on PATCH', async ({ baseUrl }) => {
+  // Paired on purpose: the rule did not disappear, it moved to the surface
+  // that actually stores the field. Deleting a validator and calling the
+  // disagreement fixed would delete a working feature.
+  const { res, card } = await post(baseUrl, {
     title: 'orphan expiry', parkedUntil: '2026-09-16T00:00:00.000Z',
   });
-  assert.equal(res.status, 400);
+  assert.equal(res.status, 201);
+  assert.deepEqual(card.ignoredFields, ['parkedUntil']);
+
+  const patched = await fetch(`${baseUrl}/api/cards/${card.shortId}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ by: 'ada', parkedUntil: '2026-09-16T00:00:00.000Z' }),
+  });
+  assert.equal(patched.status, 400, 'the pairing rule is alive where the field is real');
 });
 
 apiTest('#830 a short sha is REFUSED at create', async ({ baseUrl }) => {

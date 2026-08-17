@@ -23,12 +23,16 @@ import { CARD_CREATE_PROBES } from '../tools/field-probes.mjs';
  * The known, accepted disagreements. Every entry needs a card number: an
  * exemption with no ticket is how a defect becomes architecture.
  */
-const KNOWN_DISAGREEMENTS = {
-  parkedBy: 'VALIDATED_THEN_DISCARDED',      // #830 open half
-  parkedUntil: 'VALIDATED_THEN_DISCARDED',   // #830 open half
-  parkedReason: 'VALIDATED_THEN_DISCARDED',  // #830 open half — found only after
-                                             // the noRule self-certification guard
-};
+// ⭐ EMPTY, and it was not empty an hour ago. The park trio was
+// VALIDATED_THEN_DISCARDED here until #830's open half shipped: create no
+// longer validates fields it does not consume, and the MCP card_create schema
+// no longer advertises them. All three lists now agree at ABSENT.
+//
+// ⚠️ This going non-empty means a field was added to the schema or validator
+// without being added to the consumer. Do not "fix" that by editing this
+// object — the object records what we have ACCEPTED, and an exemption with no
+// card number is how a defect becomes architecture.
+const KNOWN_DISAGREEMENTS = {};
 
 /**
  * `id` is immutable on PATCH, so it is not a patchable field and is excluded

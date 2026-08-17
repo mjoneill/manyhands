@@ -11,23 +11,32 @@
  * That is the whole design constraint, and it is why the expected verdicts are
  * deliberately mixed rather than "these four should pass":
  *
- *   an auditor that always says AGREE        fails on parkedBy/parkedUntil
- *   an auditor that always says DISAGREE     fails on implementedBy and titel
+ *   an auditor that always says AGREE        fails the two noRule-refutation rows
+ *   an auditor that always says DISAGREE     fails implementedBy, priority, titel
  *   an auditor that never measures (null)    fails on every row
  *   an auditor that confuses declared/absent fails on titel vs implementedBy
+ *   an auditor that BELIEVES the probe table fails the noRule-refutation rows
  *
  * A fixture with no expected-PASS cannot tell a correct audit from one that
  * refuses everything. A fixture with no expected-FAIL cannot tell a correct
  * audit from one that accepts everything. This has both, in the same run.
  *
+ * ⛔ AND THE EXPECTED-FAIL ROWS ARE SYNTHETIC ON PURPOSE. They used to be the
+ * real #830 park defect, which meant the calibration depended on production
+ * staying broken — when that shipped, the control lost every expected-DISAGREE
+ * row at once. A fixture must manufacture its own disagreement, or fixing a bug
+ * blinds the instrument that found it.
+ *
  * The expected verdicts are NOT read off the implementation. Each is
  * independently established:
  *   implementedBy  — #830 (df83e34) made create consume it; verified by a fresh
  *                    GET in tests/card-create-declared-fields.test.mjs
- *   parked*        — the #830 OPEN half, measured by a probe recorded on #831:
- *                    `parkedBy+parkedUntil → 201, stored=undefined`
  *   priority       — long-standing; validated (invalid priority → 400) and stored
  *   titel          — a typo: consistently unknown on all three lists (#829)
+ *   parked*        — #830's open half: create no longer validates, advertises or
+ *                    consumes them; PATCH keeps every rule
+ *   type/priority  — as noRule rows: deliberately FALSE markings the guard must
+ *     marked noRule   refute rather than believe
  */
 
 import { test } from 'node:test';
@@ -78,29 +87,43 @@ const CONTROL = [
     why: 'a typo: no schema entry, no validation rule, no consumer — #829 reports '
        + 'it in ignoredFields, which is correct behaviour, not a finding',
   },
+  // ⛔⛔ A CONTROL KEYED TO A LIVE DEFECT EXPIRES WHEN THE DEFECT IS FIXED.
+  //
+  // These two rows used to be `parkedBy` and `parkedUntil`, both expected
+  // VALIDATED_THEN_DISCARDED — the real #830 defect. That made the calibration
+  // depend on the codebase staying broken. When #830's open half shipped, both
+  // rows flipped to AGREE_ABSENT, the control lost its only expected-DISAGREE
+  // entries, and this file went red for the best possible reason.
+  //
+  // ⇒ A calibration fixture must MANUFACTURE its own disagreement rather than
+  //   borrow one from production. The rows below are synthetic and permanent:
+  //   they disagree because the probe is deliberately wrong, not because the
+  //   server is. Fixing a bug must never blind the instrument that found it.
   {
-    // EXPECTED-FAIL #1 — the headline defect. Validated, then discarded.
-    probe: {
-      name: 'parkedBy',
-      wellFormed: 'ada',
-      malformed: 'not a valid seat key!!',
-      with: { parkedUntil: FUTURE },   // a park needs both halves or the PAIR refuses
-    },
-    expect: 'VALIDATED_THEN_DISCARDED',
-    why: 'the #830 OPEN half: validateCardFields enforces the park rules at create, '
-       + 'but parkedBy is absent from CREATE_CONSUMED_FIELDS and the constructor',
+    // EXPECTED-FAIL #1 — a field with a real rule, deliberately marked noRule.
+    // The self-certification guard must refute the marking.
+    probe: { name: 'type', wellFormed: 'bug', malformed: null, noRule: true },
+    expect: 'NORULE_CLAIM_REFUTED',
+    why: 'type is validated against CARD_TYPES; claiming it has no rule is false '
+       + 'and the auditor must measure that rather than believe the probe',
   },
   {
-    // EXPECTED-FAIL #2 — the same defect on the paired field, so the FAIL column
-    // is not carried by one row either.
+    // EXPECTED-FAIL #2 — a DIFFERENT field, same lie, so the FAIL column is not
+    // carried by one row.
+    probe: { name: 'priority', wellFormed: 'p1', malformed: null, noRule: true },
+    expect: 'NORULE_CLAIM_REFUTED',
+    why: 'same synthetic disagreement on a second validated field',
+  },
+  {
+    // And the park trio, now as expected-PASS — recording the #830 fix so a
+    // regression turns this red.
     probe: {
-      name: 'parkedUntil',
-      wellFormed: FUTURE,
-      malformed: 'not-a-timestamp',
-      with: { parkedBy: 'ada' },
+      name: 'parkedBy', wellFormed: 'ada', malformed: null, noRule: true,
+      with: { parkedUntil: FUTURE },
     },
-    expect: 'VALIDATED_THEN_DISCARDED',
-    why: 'same defect, the other half of the park pair',
+    expect: 'AGREE_ABSENT',
+    why: '#830 open half shipped: create no longer validates, advertises, or '
+       + 'consumes the park fields — all three lists agree at absent',
   },
 ];
 
