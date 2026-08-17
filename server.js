@@ -2146,10 +2146,28 @@ function reparentWouldCycle(cards, childId, newParentId) {
   return false;
 }
 
+// #841 — the keys this route actually consumes, kept HERE rather than beside
+// PATCHABLE_CARD_FIELDS on purpose.
+//
+// ⛔ DO NOT MERGE THIS WITH THE CARDS ALLOWLIST. The two routes have different
+// vocabularies over the same stored record: `body` is real here (it becomes
+// card.description) and unknown on /api/cards; `priority` is the reverse. A
+// shared set would either start reporting the wiki's own field as ignored or
+// stop reporting a genuinely dropped one — and the failure would be silent on
+// the surface where the lost data is hand-written prose. The physical distance
+// from the cards sets is the cheapest guard available against a future tidying
+// pass; tests/nodes-ignored-fields.test.mjs (RC3) is the one that actually bites.
+const NODE_PATCH_CONSUMED_FIELDS = new Set(['title', 'body', 'parent', 'attachments']);
+
 // Edit a node — title / body / parent (parent: null clears it → becomes a root).
 async function handleUpdateNode(req, res, idOrShortId) {
   try {
     const patch = JSON.parse(await readBody(req));
+    // #841 — computed from the REQUEST, before any write, so it describes what
+    // the caller sent rather than what survived. Reported only when non-empty:
+    // an empty array on every response is noise a caller learns to skip past,
+    // which is how the diagnostic stops being read at all.
+    const ignoredFields = Object.keys(patch).filter((k) => !NODE_PATCH_CONSUMED_FIELDS.has(k));
     let cycle = false;
     // #223 — notice only on CONTENT change (title/body); a parent-only reparent
     // (e.g. a drag) is silent so tree-reorg doesn't spam the room.
@@ -2175,7 +2193,8 @@ async function handleUpdateNode(req, res, idOrShortId) {
     });
     if (!updated) return sendJSON(res, 404, { error: 'Node not found' });
     if (cycle) return sendJSON(res, 409, { error: 'That move would make the page a descendant of itself.' });
-    sendJSON(res, 200, cardToNode(updated));
+    const node = cardToNode(updated);
+    sendJSON(res, 200, ignoredFields.length ? { ...node, ignoredFields } : node);
   } catch (e) {
     console.error('PATCH /api/nodes/:id:', e.message);
     sendJSON(res, 500, { error: 'Failed to update node' });

@@ -19,6 +19,23 @@
  * The detection is self-calibrating rather than hardcoded: send a key that
  * CANNOT be real, and see whether the route reports it. A route that stays
  * silent about deliberate junk has no diagnostic, whatever its name.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * ⭐ #841 — THE ROUTE WAS FIXED, AND THIS FILE IS THE REGRESSION TEST.
+ *
+ * The assertions below were INVERTED, not deleted. That distinction is the
+ * point: this file's original job was to prove `/api/nodes` had no diagnostic,
+ * and its new job is to prove it has one. Deleting it would have removed the
+ * only thing that fails if the diagnostic is ever taken away again — and the
+ * whole reason this surface went unfixed for three rounds is that nothing was
+ * watching it. The original assertion carried its own instruction for this
+ * moment — "if this flipped, the route was fixed." It flipped, on purpose, at
+ * #841, and the assertion was turned around rather than removed.
+ *
+ * ⚠️ The `UNMEASURABLE_NO_DIAGNOSTIC` machinery it exercises is NOT dead code —
+ * it is the auditor's answer for any FUTURE surface without a diagnostic, which
+ * is why the pure-unit test at the bottom is untouched and still guards the
+ * "never report agreement you did not establish" rule.
  */
 
 import { test } from 'node:test';
@@ -41,40 +58,58 @@ test('#831 — /api/cards HAS a diagnostic (the positive control)', async () => 
   }
 });
 
-test('#831 — /api/nodes has NO diagnostic, and the auditor must say so', async () => {
+test('#841 — /api/nodes NOW HAS a diagnostic, and the surface became measurable', async () => {
   const server = await startRestServer();
   try {
     const has = await routeHasDiagnostic(server.baseUrl, 'nodes');
-    assert.equal(has, false, 'PATCH /api/nodes emits no ignoredFields — if this flipped, the route was fixed');
+    assert.equal(has, true, 'PATCH /api/nodes emits ignoredFields since #841 — if this flipped back, the fix was lost');
 
     // `body` IS a real field on this route (it maps to card.description) — the
-    // route-relative vocabulary trap. So it is consumed, and the ONLY thing the
-    // auditor cannot establish here is `declares`.
+    // route-relative vocabulary trap. It is consumed AND, now, declared: a
+    // consumed field must never appear in ignoredFields.
     const r = await auditNodeField(server.baseUrl, {
       name: 'body', wellFormed: 'real on the nodes route', storedAs: 'description', noRule: true,
     });
     assert.equal(r.reads, true, 'body maps to description on this route — genuinely consumed');
-    assert.equal(r.declares, null, 'declares is UNMEASURABLE without a diagnostic — must not default to true');
-    assert.equal(verdictFor(r), 'UNMEASURABLE_NO_DIAGNOSTIC');
+    assert.equal(r.declares, true, 'and the route does NOT report its own real field as ignored');
+    assert.equal(verdictFor(r), 'AGREE_SUPPORTED_NO_RULE');
+
+    // ⚠️ The `declares` value that matters is the one that CHANGED. Before #841
+    // it was null — not false — because "the route said nothing" and "the route
+    // said this field is fine" are different facts, and only one of them is
+    // evidence. This assertion is what stops a future regression from being
+    // read as agreement.
+    assert.notEqual(r.declares, null, 'declares must be a measurement now, not an absence');
   } finally {
     await server.stop();
   }
 });
 
-test('#831 — an unknown field on /api/nodes is dropped SILENTLY (the #823 gap, third route)', async () => {
+test('#841 — an unknown field on /api/nodes is dropped and SAID SO (the #823 gap, closed)', async () => {
   const server = await startRestServer();
   try {
     const r = await auditNodeField(server.baseUrl, {
       name: 'priority',          // real on /api/cards, unknown on /api/nodes
       wellFormed: 'p0', noRule: true,
     });
-    assert.equal(r.reads, false, 'priority is not consumed by the nodes route');
-    assert.equal(r.declares, null, 'and the route says nothing about having dropped it');
-    assert.equal(verdictFor(r), 'UNMEASURABLE_NO_DIAGNOSTIC');
-    assert.equal(
-      r.evidence.ignoredFields, undefined,
-      'the whole point: 200, data discarded, no diagnostic whatsoever',
+    assert.equal(r.reads, false, 'priority is still not consumed by the nodes route — the fix stores nothing new');
+    assert.equal(r.declares, false, 'and the route now NAMES it as dropped');
+    assert.equal(verdictFor(r), 'AGREE_ABSENT', 'absent from both lists, and honestly reported as such');
+    assert.ok(
+      (r.evidence.ignoredFields || []).includes('priority'),
+      'the whole point, inverted: 200, data discarded, AND the caller is told which key',
     );
+
+    // ⚠️ The behaviour that must NOT have changed. #841 is a diagnostic, not a
+    // feature: a route that started *consuming* priority would also make the
+    // assertion above pass, and would be a different and much worse change.
+    //
+    // ⛔ Asserted against the PROBE VALUE, not against undefined. A fresh card
+    // is born carrying `priority: null`, so "is it absent?" is answered by the
+    // default rather than by the write — the exact presence-vs-value error this
+    // auditor's own `reads` predicate was fixed for. The only honest question
+    // is whether the value I sent came back.
+    assert.notEqual(r.evidence.storedValue, 'p0', 'the probe value must NOT have been stored by this route');
   } finally {
     await server.stop();
   }

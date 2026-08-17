@@ -38,9 +38,9 @@ const JUNK = 'zzz_diagnostic_probe_not_a_real_field';
 const EXPECTED = {
   'POST /api/cards': true,      // #829 — the control, and the only one fixed
   'PATCH /api/cards': true,     // #823
-  'PATCH /api/nodes': false,    // #841 — claimed. Flip to true when it ships.
-  'POST /api/conversations': false, // unfixed, uncarded at time of writing
-  'PATCH /api/columns': false,      // unfixed, uncarded at time of writing
+  'PATCH /api/nodes': true,     // #841 — SHIPPED. flipped in the merge that landed it.
+  'POST /api/conversations': false, // unfixed — now carded as #843
+  'PATCH /api/columns': false,      // unfixed — now carded as #843
 };
 
 async function probe(baseUrl) {
