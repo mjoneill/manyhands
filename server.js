@@ -717,6 +717,29 @@ function findColumnIndex(data, columnId) {
 }
 
 // Generate a server-side card from a request body, applying defaults.
+// #829 — the keys createCardFromPayload actually consumes. Its ONE home is
+// immediately below: add a field there, add it here, or the field takes effect
+// while the response reports it as ignored — a lie in the harder direction to
+// debug. `tests/card-create-unknown-fields.test.mjs` sends every key in this
+// set and asserts both that nothing is reported AND that each took effect, so
+// drift in either direction fails.
+//
+// ⚠️ Deliberately NOT derived from the created card's own keys: `assignee`
+// (singular alias) and `relationships` input shapes are consumed without ever
+// appearing under that name on the stored object.
+//
+// ⚠️ Route-relative. `body` is a real field on /api/nodes; here it is unknown.
+const CREATE_CONSUMED_FIELDS = new Set([
+  'id', 'title', 'description', 'type', 'assignees', 'assignee',
+  'labels', 'for', 'priority', 'column', 'order', 'createdBy', 'relationships',
+]);
+
+/** Keys the caller sent that create will silently drop. Empty when clean. */
+function unconsumedCreateFields(body) {
+  if (typeof body !== 'object' || body === null) return [];
+  return Object.keys(body).filter((k) => !CREATE_CONSUMED_FIELDS.has(k));
+}
+
 function createCardFromPayload(body, nextShortId) {
   const now = new Date().toISOString();
   // Normalize assignees: accept string ('alex'), array (['alex','sage']),
@@ -1354,7 +1377,11 @@ async function handleCreateCard(req, res) {
       ]);
       return card;
     });
-    sendJSON(res, 201, created);
+    // #829 — create reports what it dropped, matching PATCH. Present only when
+    // non-empty: an empty array on every response is noise a caller learns to
+    // skip, which is how the original silence went unnoticed.
+    const ignoredFields = unconsumedCreateFields(body);
+    sendJSON(res, 201, ignoredFields.length ? { ...created, ignoredFields } : created);
   } catch (e) {
     console.error('POST /api/cards:', e.message);
     sendJSON(res, 500, { error: 'Failed to create card' });
