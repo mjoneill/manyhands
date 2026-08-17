@@ -95,6 +95,36 @@ export async function auditCreateField(baseUrl, probe) {
     && fresh.body?.[storedAs] !== null;
 
   // ── accepts: a separate write carrying a deliberately invalid value ──
+  // ⚠️ A field marked noRule has no validation rule BY DESIGN — a free-form
+  // string cannot be malformed. Sending a probe anyway would measure nothing
+  // and report `accepts: false`, which is indistinguishable from "a rule exists
+  // and my probe failed to trip it". Those are different states and the audit
+  // must not collapse them, so the intent is recorded rather than inferred.
+  // ⛔ AND THE EXEMPTION MUST NOT SELF-CERTIFY. `noRule` is author-declared, so
+  // a wrong marking silently suppresses a real finding — which is this audit
+  // committing the exact failure class it exists to detect. Measured: marking
+  // `parkedReason` noRule hid a third VALIDATED_THEN_DISCARDED, because the
+  // field does have a rule (non-string → 400 "parkedReason must be a string").
+  // So the claim is TESTED: throw a type-hostile value at it and require that
+  // no rule fires. If one does, the marking is refuted and the audit fails
+  // loudly rather than reporting agreement it did not establish.
+  if (probe.noRule) {
+    const hostile = await post(baseUrl, { ...companions, [name]: { __noRuleProbe: true } });
+    evidence.noRuleProbeStatus = hostile.status;
+    evidence.noRuleProbeError = hostile.body?.error;
+    if (hostile.status === 400) {
+      return {
+        field: name, declares, accepts: true, reads, noRule: true, noRuleClaimRefuted: true,
+        agrees: false, evidence,
+        error: `marked noRule, but a validation rule fired: ${JSON.stringify(hostile.body?.error).slice(0, 160)}`,
+      };
+    }
+    return {
+      field: name, declares, accepts: false, reads, noRule: true,
+      agrees: declares === reads, evidence,
+    };
+  }
+
   const bad = await post(baseUrl, { ...companions, [name]: malformed });
   evidence.malformedStatus = bad.status;
   evidence.malformedError = bad.body?.error;
@@ -108,8 +138,20 @@ export async function auditCreateField(baseUrl, probe) {
  * disagreement shapes want different fixes and collapsing them to "FAIL" loses
  * the only information that tells you what to do.
  */
-export function verdictFor({ declares, accepts, reads }) {
+export function verdictFor({ declares, accepts, reads, noRule, noRuleClaimRefuted }) {
   if (declares === null) return 'UNMEASURED';
+  // A field with no rule by design is judged on the two lists that apply to it.
+  // Holding it to `accepts` would report every free-form string as a defect —
+  // an audit that flags correct code is worse than no audit, because the noise
+  // is what gets the real findings ignored.
+  if (noRule) {
+    // The marking was refuted by measurement — never report agreement.
+    if (noRuleClaimRefuted) return 'NORULE_CLAIM_REFUTED';
+    if (declares && reads) return 'AGREE_SUPPORTED_NO_RULE';
+    if (!declares && !reads) return 'AGREE_ABSENT';
+    if (reads && !declares) return 'CONSUMED_UNDECLARED';
+    return 'DECLARED_NOT_CONSUMED';
+  }
   if (declares && accepts && reads) return 'AGREE_SUPPORTED';
   if (!declares && !accepts && !reads) return 'AGREE_ABSENT';
   if (accepts && !reads) return 'VALIDATED_THEN_DISCARDED';   // the #831 headline
