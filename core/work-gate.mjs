@@ -144,6 +144,73 @@ export function isGateArmed(env = process.env, root = REPO_ROOT) {
 }
 
 /**
+ * ⭐⭐⭐ #890 — OPS THE GATE STRUCTURALLY CANNOT SCOPE.
+ *
+ * A `create` brings a card into existence and therefore names none at decision
+ * time, so a card-scoped gate can never match it. That is a fact about the OP,
+ * not about any particular request — which is why it is a constant an
+ * instrument can READ rather than a sentence only a human can act on.
+ *
+ * ⚠️ R4 (the room's taxonomy, extended): a rail whose covered population is
+ * empty must SAY SO. Zero refusals and zero refusable actions are byte-identical
+ * from outside the rail, and scoring compliance over a population that cannot
+ * contain a violation reports innocence where the honest answer is "no evidence".
+ * Same discipline `scored()` already applies by refusing an empty denominator.
+ */
+export const UNSCOPABLE_OPS = Object.freeze(['create']);
+
+/**
+ * ⭐⭐⭐ #890 — THE RULE, and its only home.
+ *
+ * Does `actor` hold an open window on `card` at `now`? Returns the WORK OBJECT
+ * it matched, or null — the object rather than a boolean, because every caller
+ * needs its id to say which window it means.
+ *
+ * ⛔ THE DEFECT THIS EXISTS TO KILL. `decideCoveredAction` (the rail) and
+ * `signalTwoUngrantedActions` (the instrument that measures the rail) each held
+ * their own copy of this rule. They agreed until #886 changed one of them, and
+ * then the instrument spent an afternoon reporting violations of a rule the gate
+ * no longer implemented — 10/10 "ungranted actions", every one of them permitted.
+ *
+ * ⚠️ AND THE TEST BUILT TO CATCH EXACTLY THAT PASSED THROUGHOUT. It asserted
+ * `COVERED_OPS deepEqual ENFORCED_OPS`, because the previous instance of this
+ * defect was two LISTS holding different strings. The single-source-of-truth fix
+ * unified the cheap half of the agreement and left the predicate duplicated, so
+ * the test asserting agreement passed over precisely the half that disagreed.
+ *
+ * ⇒ Sharing a constant is not sharing a rule. A copy cannot drift only if there
+ *   is no copy.
+ */
+export function holdsOpenWindow({ actor, card, workObjects = [], now }) {
+  if (!now) throw new Error('holdsOpenWindow: now is required — this module never reads the wall clock');
+  if (!actor) return null;
+
+  // Fail-open on both sides of the comparison. No card on the action, or none
+  // on the window, means no basis to say this IS the declared work — and
+  // guessing would rebuild the whole-seat mutex through the back door.
+  //
+  // ⚠️ This is also what makes a `post` event (kind: conversation, no card)
+  // read as MATCHING NO WINDOW rather than matching every one.
+  if (card === null || card === undefined) return null;
+
+  for (const wo of workObjects) {
+    if (wo.card === null || wo.card === undefined) continue;
+    if (Number(wo.card) !== Number(card)) continue;
+
+    const s = stateAt(wo, now);
+    if (!s.bidders.includes(actor)) continue;
+
+    // ⚠️ ARBITRATION_DUE BELONGS HERE. The instrument's own predicate counted
+    // it, and omitting it while unifying the two would have quietly NARROWED
+    // the measurement under cover of a pure refactor.
+    if (s.state === STATES.OPEN || s.state === STATES.BIDDING || s.state === STATES.ARBITRATION_DUE) {
+      return wo;
+    }
+  }
+  return null;
+}
+
+/**
  * May `actor` take a covered action right now?
  *
  * @param {object}   arg
@@ -177,23 +244,16 @@ export function decideCoveredAction({ actor, workObjects = [], now, card = null 
   // is worse than one that occasionally under-refuses an agent.
   if (!actor) return { allow: true };
 
-  // No card on the action ⇒ nothing to compare a window against. See the header.
-  if (card === null || card === undefined) return { allow: true };
+  // ⭐ #890 — THE RULE IS ASKED, NOT RE-EXPRESSED. Everything about who is
+  // bound by which window lives in holdsOpenWindow; what remains here is only
+  // how to SAY NO, which is this function's actual job. Re-implementing the
+  // match inline is what produced #890, and it would produce it again.
+  const wo = holdsOpenWindow({ actor, card, workObjects, now });
+  if (!wo) return { allow: true };
 
-  for (const wo of workObjects) {
-    const s = stateAt(wo, now);
+  const s = stateAt(wo, now);
 
-    // Not the actor's window ⇒ not the actor's problem. The window is a mutex
-    // on the WORK, not on a seat's whole existence.
-    const involved = s.bidders.includes(actor);
-    if (!involved) continue;
-
-    // ⭐ #886 — and not the window's CARD ⇒ still not the actor's problem. This
-    // line is the whole fix; the sentence above it was already true and already
-    // ignored.
-    if (wo.card === null || wo.card === undefined) continue;
-    if (Number(wo.card) !== Number(card)) continue;
-
+  {
     if (s.state === STATES.OPEN || s.state === STATES.BIDDING) {
       return {
         allow: false,

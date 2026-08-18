@@ -28,6 +28,15 @@
  *
  * ── WHAT IS ACTUALLY COMPUTABLE TODAY ───────────────────────────────────────
  *   ✅ signal 2's DENOMINATOR   the event log carries actor · op · occurred_at
+ *                              AND entity{kind, id, shortId} — measured 2014/2014
+ *                              card events carry shortId, 0 without. ⚠️ THAT OMISSION
+ *                              COST TWO SEATS SIX HOURS: both read this inventory as
+ *                              exhaustive and neither looked at `entity`, so one went
+ *                              off to build a uuid→shortId resolver for a value that
+ *                              was already in the parameter. An incomplete inventory
+ *                              of a surface is a CLAIM about what it does not have.
+ *                              (The replica is different: it drops entity.shortId and
+ *                              needs a join — same name, two surfaces, #891.)
  *   ⛔ signal 2's NUMERATOR     needs work objects; no store ⇒ structurally 0
  *   ⛔ signal 1's BID COUNT     bids are PROSE. See below.
  *   ⛔ signal 3                 human-supplied by construction
@@ -37,7 +46,7 @@
  */
 
 import { stateAt, STATES } from './work-auction.mjs';
-import { ENFORCED_OPS } from './work-gate.mjs';
+import { ENFORCED_OPS, UNSCOPABLE_OPS, holdsOpenWindow } from './work-gate.mjs';
 
 /**
  * The board-mediated actions a work gate can reach (#755's railable list).
@@ -127,13 +136,65 @@ export function signalTwoUngrantedActions({ events, workObjects, seats, enforced
     return unmeasurable('no covered actions by a known seat in this period', { excludedNonSeat, countedOps: [...enforcedOps] });
   }
 
+  // ⛔⛔ #890 R4 — AN INSTRUMENT THAT CANNOT REPRODUCE THE RULE MUST SAY SO.
+  //
+  // If every op we count is one the gate structurally cannot scope, then no
+  // action in this denominator CAN be a violation, and a 0/N here would read as
+  // compliance when it means "the population cannot contain a violation". That
+  // is the same defect `scored()` refuses one function up: an empty denominator
+  // is unmeasurable, not zero.
+  //
+  // ⚠️ Today ENFORCED_OPS is ['create'] and create is unscopable, so this fires
+  // in production. That is not a bug in this signal — it is #889 showing through
+  // the instrument, which is exactly what an instrument is for.
+  const scopable = [...enforcedOps].filter((op) => !UNSCOPABLE_OPS.includes(op));
+  if (scopable.length === 0) {
+    return unmeasurable(
+      `every enforced op (${[...enforcedOps].join(', ')}) is one the gate cannot scope to a card, `
+      + 'so no counted action can be a violation and a zero here would mean nothing. See #889.',
+      { excludedNonSeat, countedOps: [...enforcedOps], unscopableOps: [...UNSCOPABLE_OPS] },
+    );
+  }
+
   const numerator = bySeat.filter((e) => {
-    // Did this actor hold an OPEN window at the moment they acted?
-    return objects.some((wo) => {
-      const s = stateAt(wo, e.occurred_at);
-      if (!s.bidders.includes(e.actor)) return false;
-      return s.state === STATES.OPEN || s.state === STATES.BIDDING || s.state === STATES.ARBITRATION_DUE;
-    });
+    // ⛔⛔ #890 — AN UNSCOPABLE OP CANNOT BE A VIOLATION, PER EVENT.
+    //
+    // Caught by this card's own boundary test, and it is the whole defect in
+    // miniature. A `create` event RECORDS the shortId of the card it brought
+    // into existence, so after the fact it looks exactly like an action
+    // targeting that card — and if the actor held a window on it, the
+    // instrument would score a violation the gate COULD NOT HAVE REFUSED,
+    // because at decision time no card existed to compare.
+    //
+    // ⇒ The per-list R4 check above is not enough on its own: it only fires
+    //   when EVERY enforced op is unscopable. This is the same rule applied
+    //   where a single mixed event set would otherwise slip through.
+    //
+    // ⚠️ It stays in the DENOMINATOR. It was a real action by a real seat; it
+    // simply cannot be a bypass. Dropping it from both would flatter the rate.
+    if (UNSCOPABLE_OPS.includes(e.op)) return false;
+
+    // ⭐⭐⭐ #890 — THE RULE IS ASKED OF THE MODULE THAT ENFORCES IT.
+    //
+    // This used to be a hand-written copy that matched on the actor alone. It
+    // agreed with the gate until #886 scoped the gate to the declared card, and
+    // then this instrument spent an afternoon reporting 10/10 violations of a
+    // rule the gate no longer implemented — every one of them permitted.
+    //
+    // ⚠️ The test built to catch that divergence (COVERED_OPS deepEqual
+    // ENFORCED_OPS) was green the whole time, because the previous instance was
+    // two LISTS and this one was the PREDICATE. Sharing a constant is not
+    // sharing a rule.
+    //
+    // `e.entity?.shortId` is the raw log's own field, the same identifier space
+    // `wo.card` holds — no join, no resolution. A `post` event has no shortId
+    // and correctly matches NO window rather than every one.
+    return holdsOpenWindow({
+      actor: e.actor,
+      card: e.entity?.shortId ?? null,
+      workObjects: objects,
+      now: e.occurred_at,
+    }) !== null;
   }).length;
 
   // ⚠️ A structural zero is the worst cell on this report: it looks like "no
@@ -175,7 +236,19 @@ export function signalThreeOutOfBand({ humanSuppliedCount }) {
 /** One line per signal. An unmeasurable line carries no ratio to misread. */
 export function renderSignal(label, s) {
   if (s.status === 'unmeasurable') {
-    return `${label}: UNMEASURABLE — ${s.missingInput}`;
+    // ⚠️ #890 — THE DIAGNOSTICS SURVIVE UNMEASURABLE, the SCORE does not.
+    //
+    // The rule this file exists to enforce is "no number where there is no
+    // input", and a ratio is the number that misleads. But how many actions
+    // were counted and how many were excluded are not a score — they are what
+    // makes the FILTER auditable, and dropping them meant an unmeasurable
+    // signal could not be checked at all. R4's whole point is that a rail
+    // covering nothing must say so LOUDLY, and a one-line "UNMEASURABLE" that
+    // hides its own population is a quieter version of the same silence.
+    const bits = [`${label}: UNMEASURABLE — ${s.missingInput}`];
+    if (s.countedOps) bits.push(`[enforced ops counted: ${s.countedOps.join(', ')}]`);
+    if (s.excludedNonSeat) bits.push(`(${s.excludedNonSeat} non-seat action(s) excluded)`);
+    return bits.join(' · ');
   }
   const verdict = s.fires ? 'FIRES' : 'does not fire';
   const bits = [`${label}: ${s.numerator} / ${s.denominator}`, verdict];

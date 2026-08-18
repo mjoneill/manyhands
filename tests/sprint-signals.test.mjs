@@ -37,12 +37,38 @@ import {
 } from '../core/sprint-signals.mjs';
 import { ENFORCED_OPS } from '../core/work-gate.mjs';
 
-const ev = (actor, op, kind = 'card', at = '2026-08-10T02:00:00.000Z') => ({
+// ⚠️ #890 — `entity.shortId` IS PART OF THE REAL RECORD and was missing here.
+// The module's own docstring inventory said the log carries "actor · op ·
+// occurred_at", two seats read that as exhaustive, and neither looked at
+// `entity` for six hours. Measured on the production log: 2014/2014 card events
+// carry shortId, 0 without. A fixture thinner than the record is a fixture that
+// cannot discriminate.
+const ev = (actor, op, kind = 'card', at = '2026-08-10T02:00:00.000Z', shortId = 700) => ({
   actor,
   op,
-  entity: { kind, id: 'x' },
+  entity: kind === 'card' ? { kind, id: 'x', shortId } : { kind, id: 'x' },
   occurred_at: at,
 });
+
+/**
+ * ⛔⛔ #890 R4 — WHY THESE TESTS NAME AN OP INSTEAD OF TAKING THE DEFAULT.
+ *
+ * `ENFORCED_OPS` is ['create'], and a create brings a card into existence and
+ * so names none at decision time. The gate cannot scope it, therefore no create
+ * can ever BE a violation, therefore signal 2 over creates alone is
+ * unmeasurable — not zero. (That is the module's own contract, applied one
+ * function up: `scored()` refuses an empty denominator for the same reason.)
+ *
+ * ⇒ The tests below are about COUNTING — which ops enter the denominator, who
+ *   is excluded, which caveat fires — and counting is still worth pinning. They
+ *   name a SCOPABLE op so they measure counting rather than re-measuring R4.
+ *
+ * ⚠️ Deliberately NOT ['create']: if #889 lands and the enforced op becomes
+ * scopable, these keep testing exactly what they test today, and the R4 test
+ * below is the one that will need rewriting — which is the right place for the
+ * change to surface.
+ */
+const SCOPABLE = ['update'];
 
 const SEATS = ['ada', 'bo', 'cy'];
 
@@ -78,8 +104,8 @@ test('#755-signals ⭐⭐ ZERO OVER AN EMPTY DENOMINATOR IS UNMEASURABLE, NOT ZE
 test('#755-signals a REAL zero requires a populated denominator', () => {
   // Was create+update expecting 2. `update` is not enforced by the gate, so
   // counting it WAS the mismatch — corrected to the truth, not loosened.
-  const events = [ev('ada', 'create'), ev('bo', 'create')];
-  const s = signalTwoUngrantedActions({ events, workObjects: [], seats: SEATS });
+  const events = [ev('ada', 'update'), ev('bo', 'update')];
+  const s = signalTwoUngrantedActions({ events, workObjects: [], seats: SEATS, enforcedOps: SCOPABLE });
   assert.equal(s.status, 'zero');
   assert.equal(s.numerator, 0);
   assert.equal(s.denominator, 2);
@@ -101,7 +127,7 @@ test('#755-signals signal 2 counts ONLY ENFORCED ops in the denominator', () => 
     ev('ada', 'post', 'conversation'), // speech is never covered — #646
     ev('ada', 'read'),
   ];
-  const s = signalTwoUngrantedActions({ events, workObjects: [], seats: SEATS });
+  const s = signalTwoUngrantedActions({ events, workObjects: [], seats: SEATS, enforcedOps: SCOPABLE });
   assert.equal(s.denominator, 1, 'only the enforced op counts');
   assert.ok(COVERED_OPS.includes('create'));
   assert.equal(COVERED_OPS.includes('post'), false, 'you cannot mutex a conversation (#646)');
@@ -115,8 +141,8 @@ test('#755-signals ⚠️ HUMAN ACTIONS ARE EXCLUDED FROM THE DENOMINATOR, and t
   // The gate measures SEATS. A human's card edits would dilute the rate and
   // make the rail look better-obeyed than it is. The excluded count is
   // reported so the filter itself is auditable.
-  const events = [ev('ada', 'create'), ev(null, 'create'), ev(undefined, 'create'), ev('stranger', 'create')];
-  const s = signalTwoUngrantedActions({ events, workObjects: [], seats: SEATS });
+  const events = [ev('ada', 'update'), ev(null, 'update'), ev(undefined, 'update'), ev('stranger', 'update')];
+  const s = signalTwoUngrantedActions({ events, workObjects: [], seats: SEATS, enforcedOps: SCOPABLE });
   assert.equal(s.denominator, 1, 'only the known seat counts');
   assert.equal(s.excludedNonSeat, 3);
 });
@@ -127,9 +153,9 @@ test('#755-signals signal 2 numerator is structurally 0 while no work objects ex
   // store and an absent one are different facts. It now checks the property it
   // was always about — the numerator is structurally 0 and the output says so —
   // without caring which of the two reasons applies.
-  const events = [ev('ada', 'create')];
+  const events = [ev('ada', 'update')];
   for (const workObjects of [null, []]) {
-    const s = signalTwoUngrantedActions({ events, workObjects, seats: SEATS });
+    const s = signalTwoUngrantedActions({ events, workObjects, seats: SEATS, enforcedOps: SCOPABLE });
     assert.equal(s.numerator, 0);
     assert.match(s.caveat, /STRUCTURAL ZERO/);
     assert.match(s.caveat, /not evidence of compliance/i);
@@ -137,10 +163,11 @@ test('#755-signals signal 2 numerator is structurally 0 while no work objects ex
 });
 
 test('#755-signals with work objects present, an action inside an open window IS counted', () => {
-  const events = [ev('ada', 'create', 'card', '2026-08-10T02:10:00.000Z')];
+  const events = [ev('ada', 'update', 'card', '2026-08-10T02:10:00.000Z')];
   const workObjects = [
     {
       id: 'wo-1',
+      card: 700,
       declaredBy: 'ada',
       replyBy: '2026-08-10T02:20:00.000Z',
       required: ['ada', 'bo'],
@@ -150,7 +177,7 @@ test('#755-signals with work objects present, an action inside an open window IS
       ],
     },
   ];
-  const s = signalTwoUngrantedActions({ events, workObjects, seats: SEATS });
+  const s = signalTwoUngrantedActions({ events, workObjects, seats: SEATS, enforcedOps: SCOPABLE });
   assert.equal(s.status, 'measured');
   assert.equal(s.numerator, 1);
   assert.equal(s.denominator, 1);
@@ -235,15 +262,15 @@ test('#755-signals signal 3 accepts a human ZERO — "we looked and found none" 
 //   the tool written against it.
 
 test('#755-signals ⛔ NO STORE (null) says so — the zero means "no instrument"', () => {
-  const events = [ev('ada', 'create')];
-  const s = signalTwoUngrantedActions({ events, workObjects: null, seats: SEATS });
+  const events = [ev('ada', 'update')];
+  const s = signalTwoUngrantedActions({ events, workObjects: null, seats: SEATS, enforcedOps: SCOPABLE });
   assert.match(s.caveat, /no work-object store/i);
   assert.match(s.caveat, /not evidence of compliance/i);
 });
 
 test('#755-signals ⚠️ AN EMPTY STORE IS A DIFFERENT CAVEAT — the store exists and is empty', () => {
-  const events = [ev('ada', 'create')];
-  const s = signalTwoUngrantedActions({ events, workObjects: [], seats: SEATS });
+  const events = [ev('ada', 'update')];
+  const s = signalTwoUngrantedActions({ events, workObjects: [], seats: SEATS, enforcedOps: SCOPABLE });
   assert.equal(/no work-object store/i.test(s.caveat || ''), false, 'still claiming there is no store');
   assert.match(s.caveat, /empty/i);
   // ⚠️ It is STILL not evidence of compliance — nothing can be counted as
@@ -252,15 +279,15 @@ test('#755-signals ⚠️ AN EMPTY STORE IS A DIFFERENT CAVEAT — the store exi
 });
 
 test('#755-signals a POPULATED store carries no caveat at all', () => {
-  const events = [ev('ada', 'create', 'card', '2026-08-10T02:10:00.000Z')];
+  const events = [ev('ada', 'update', 'card', '2026-08-10T02:10:00.000Z')];
   const workObjects = [{
-    id: 'wo-1', declaredBy: 'ada', replyBy: '2026-08-10T02:20:00.000Z', required: ['ada', 'bo'],
+    id: 'wo-1', card: 700, declaredBy: 'ada', replyBy: '2026-08-10T02:20:00.000Z', required: ['ada', 'bo'],
     transitions: [
       { type: 'declare', by: 'ada', at: '2026-08-10T02:00:00.000Z' },
       { type: 'bid', by: 'ada', at: '2026-08-10T02:00:00.000Z' },
     ],
   }];
-  const s = signalTwoUngrantedActions({ events, workObjects, seats: SEATS });
+  const s = signalTwoUngrantedActions({ events, workObjects, seats: SEATS, enforcedOps: SCOPABLE });
   assert.equal(s.caveat, undefined);
   assert.equal(s.numerator, 1);
 });
@@ -295,7 +322,7 @@ test('#755-signals ⛔ an action the rail cannot see is NOT in the denominator',
   // exposed the gap — and the gate does not wrap it today. Counting it would
   // credit us with compliance on an action nothing checks.
   const events = [ev('ada', 'create'), ev('ada', 'claim'), ev('ada', 'move'), ev('ada', 'update')];
-  const s = signalTwoUngrantedActions({ events, workObjects: [], seats: SEATS });
+  const s = signalTwoUngrantedActions({ events, workObjects: [], seats: SEATS, enforcedOps: SCOPABLE });
   assert.equal(s.denominator, 1, 'counted actions the gate does not enforce');
 });
 
@@ -316,4 +343,89 @@ test('#755-signals widening the gate widens the denominator automatically', () =
   const widened = signalTwoUngrantedActions({ events, workObjects: [], seats: SEATS, enforcedOps: ['create', 'claim'] });
   assert.equal(widened.denominator, 2);
   assert.deepEqual(widened.countedOps, ['create', 'claim']);
+});
+
+// ── ⛔⛔ #890 R4 — A RAIL WHOSE COVERED POPULATION IS EMPTY MUST SAY SO ───────
+//
+// The room's taxonomy names denominator defects R1–R3: a check that cannot run
+// reports ERROR; an unwatched card reports UNWATCHED; the headline never counts
+// watched and unwatched together. R4 is the same shape with an ENFORCEMENT verb
+// instead of a reporting one:
+//
+//   ⇒ zero refusals and zero refusable actions are byte-identical from outside
+//     the rail, and only the rail can tell them apart.
+
+test('#890 R4 ⛔ every enforced op unscopable ⇒ UNMEASURABLE, never a zero', () => {
+  const events = [ev('ada', 'create'), ev('bo', 'create')];
+  const s = signalTwoUngrantedActions({ events, workObjects: [], seats: SEATS, enforcedOps: ['create'] });
+
+  assert.equal(s.status, 'unmeasurable',
+    'a 0/2 here would read as two compliant actions, and means two actions that '
+    + 'could not have been violations no matter what the seats did');
+  assert.equal('numerator' in s, false, 'the module contract: unmeasurable carries no number');
+  assert.equal('denominator' in s, false);
+  assert.match(s.missingInput, /cannot scope/i);
+  assert.match(s.missingInput, /#889/, 'name the card that would restore measurability');
+});
+
+test('#890 R4 the diagnostics SURVIVE unmeasurable — the filter stays auditable', () => {
+  // ⚠️ Dropping these was a real regression the CLI test caught: an unmeasurable
+  // signal that hides its own population cannot be checked at all, which is a
+  // quieter version of the silence R4 exists to break. The SCORE is what must
+  // not print; what was counted and who was excluded are diagnostics.
+  const events = [ev('ada', 'create'), ev('stranger', 'create')];
+  const s = signalTwoUngrantedActions({ events, workObjects: [], seats: SEATS, enforcedOps: ['create'] });
+  const line = renderSignal('signal 2', s);
+
+  assert.match(line, /enforced ops counted: create/);
+  assert.match(line, /1 non-seat action\(s\) excluded/);
+  assert.equal(/\d+ *\/ *\d+/.test(line), false, 'a ratio leaked into an unmeasurable line');
+});
+
+test('#890 R4 ONE scopable op among unscopable ones keeps the signal measurable', () => {
+  // ⭐ The boundary. R4 fires only when NOTHING counted can be a violation — not
+  // whenever an unscopable op appears. Otherwise gating update AND create would
+  // silently blind the instrument to the update violations it can see.
+  const events = [ev('ada', 'create'), ev('ada', 'update', 'card', '2026-08-10T02:10:00.000Z')];
+  const workObjects = [{
+    id: 'wo-1', card: 700, declaredBy: 'ada', replyBy: '2026-08-10T02:20:00.000Z', required: ['ada', 'bo'],
+    transitions: [
+      { type: 'declare', by: 'ada', at: '2026-08-10T02:00:00.000Z' },
+      { type: 'bid', by: 'ada', at: '2026-08-10T02:00:00.000Z' },
+    ],
+  }];
+  const s = signalTwoUngrantedActions({ events, workObjects, seats: SEATS, enforcedOps: ['create', 'update'] });
+  assert.equal(s.status, 'measured');
+  assert.equal(s.numerator, 1, 'the update inside the open window on #700 is a real violation');
+  assert.equal(s.denominator, 2, 'and the unscopable create still counts as an ACTION');
+});
+
+test('#890 ⭐⭐⭐ the instrument and the gate cannot disagree — they call the same function', async () => {
+  // ⛔ THE WHOLE CARD. Before this, each held its own copy of the rule; they
+  // agreed until #886 changed one, and then the instrument spent an afternoon
+  // reporting 10/10 violations the gate permitted.
+  //
+  // ⚠️ Asserting "signal 2 matches on the card" would NOT catch a recurrence —
+  // that is a third expression of the rule, correct on the day it is written.
+  // This asserts they produce the SAME ANSWER on cases chosen to straddle every
+  // boundary the rule has: right seat/wrong card, wrong seat/right card, both.
+  const { decideCoveredAction } = await import('../core/work-gate.mjs');
+  const wo = {
+    id: 'wo-1', card: 700, declaredBy: 'ada', replyBy: '2026-08-10T02:20:00.000Z', required: ['ada', 'bo'],
+    transitions: [
+      { type: 'declare', by: 'ada', at: '2026-08-10T02:00:00.000Z' },
+      { type: 'bid', by: 'ada', at: '2026-08-10T02:00:00.000Z' },
+    ],
+  };
+  const AT = '2026-08-10T02:10:00.000Z';
+
+  for (const [actor, card] of [['ada', 700], ['ada', 701], ['bo', 700], ['cy', 700]]) {
+    const s = signalTwoUngrantedActions({
+      events: [ev(actor, 'update', 'card', AT, card)],
+      workObjects: [wo], seats: SEATS, enforcedOps: ['update'],
+    });
+    const gateRefuses = decideCoveredAction({ actor, card, workObjects: [wo], now: AT }).allow === false;
+    assert.equal(s.numerator === 1, gateRefuses,
+      `instrument and gate disagree for ${actor} on #${card} — the predicate has forked again`);
+  }
 });
