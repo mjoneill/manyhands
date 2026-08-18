@@ -1222,6 +1222,42 @@ const transports = new Map();
 // A session with an OPEN stream is alive (receiving channels) and is NEVER reaped.
 const sessionMeta = new Map(); // sid -> { lastActivity:number, openStreamCount:number, seat?, heartbeatS?, lastBeatAt?, lastBeatOk? }
 
+// ── #894 — a client looping on a session the server has already reaped ──────
+//
+// A seat whose session dies at a restart is INVISIBLE to every field above.
+// `unbound` means connected-but-nameless; a client re-sending a dead session id
+// is not connected at all, so it appears in no seat row, in no unbound row, and
+// in no receiver count. On 2026-08-18 one seat spent ~25 minutes in this state,
+// posting "the board is down" to the board — which was up, and serving two
+// other seats the whole time. The only evidence was repeated 404 lines in a log
+// nobody was reading.
+//
+// ⭐ NO THRESHOLD, DELIBERATELY. The first instinct was `hits >= 2 ⇒ stuck`,
+// and this file already records why that is wrong: "every threshold this room
+// picked for #624 was wrong (#726); an accounting that needs none cannot be
+// wrong that way." A single 404 is the protocol WORKING — it is the re-init
+// signal. Repetition is the smell. So this reports the COUNT and the WINDOW and
+// renders no verdict; the reader decides what "stuck" means.
+//
+// ⚠️ Bounded for MEMORY, not for meaning — the distinction matters because this
+// file has OOM'd once already on an unbounded per-session Map (#182). The cap
+// evicts the oldest entry and is not a claim about significance.
+const STALE_SESSION_CAP = 64;
+const staleSessionHits = new Map(); // sid -> { hits:number, firstAt:number, lastAt:number }
+
+function recordStaleSession(sid) {
+  const now = Date.now();
+  const prev = staleSessionHits.get(sid);
+  if (prev) { prev.hits += 1; prev.lastAt = now; return; }
+  // Evict oldest by first-seen so the map cannot grow without bound.
+  if (staleSessionHits.size >= STALE_SESSION_CAP) {
+    let oldestKey = null, oldestAt = Infinity;
+    for (const [k, v] of staleSessionHits) if (v.firstAt < oldestAt) { oldestAt = v.firstAt; oldestKey = k; }
+    if (oldestKey !== null) staleSessionHits.delete(oldestKey);
+  }
+  staleSessionHits.set(sid, { hits: 1, firstAt: now, lastAt: now });
+}
+
 // ── #703 — connection identity + per-seat heartbeats (room-vetted) ──────────
 // Tokens bind connections to seats at the door; FAIL-OPEN by unanimous ruling
 // ("a diagnostic that refuses converts a naming problem into an outage") — an
@@ -1857,6 +1893,19 @@ const httpServer = http.createServer(async (req, res) => {
         unboundSessions,  // #727 — itemised: {sid, streams, lastActivity, unknownToken}
         unknownToken,   // #707 — of the unbound, how many sent a token we don't know
         binding: seatTokens.dormant ? 'dormant' : 'active',
+        // #894 — clients re-sending a session id this server has already reaped.
+        // Additive and itemised, for the same reason #727 itemised `unbound`: a
+        // scalar cannot tell one client looping thirty times from thirty clients
+        // reconnecting once, and those are opposite situations. `hits` is raw —
+        // no threshold, no verdict (see recordStaleSession).
+        staleSessions: [...staleSessionHits.entries()]
+          .map(([sid, v]) => ({
+            sid,
+            hits: v.hits,
+            firstAt: new Date(v.firstAt).toISOString(),
+            lastAt: new Date(v.lastAt).toISOString(),
+          }))
+          .sort((a, b) => b.hits - a.hits),
       }));
     }
 
@@ -2013,6 +2062,9 @@ const httpServer = http.createServer(async (req, res) => {
       // treats as re-initialize — a seat could stay wedged on a dead session
       // indefinitely, seeing only empty responses.
       console.error(`[#359] unknown session id: ${sessionId} → 404 (re-init signal; reaped or pre-restart session)`);
+      // #894 — count it, so "a seat is wedged on a dead session" is a query
+      // against /channel/status rather than archaeology in this log file.
+      recordStaleSession(sessionId);
       return jsonRpcError(res, 404, -32001, 'Session not found — re-initialize');
     } else {
       return jsonRpcError(res, 400, -32000, 'Bad Request: No valid session ID provided');
