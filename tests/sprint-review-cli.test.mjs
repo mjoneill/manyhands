@@ -72,21 +72,19 @@ test('#755-cli it reports the DENOMINATOR and the exclusions, so the filter is a
   // what the gate actually ENFORCES, `update` stopped counting at all — so the
   // exclusion count changed for a reason that had nothing to do with the filter
   // this test is about. Both non-seat actors now do the enforced op.
-  const dir = fixtureDir([ev('ada', 'create'), ev(null, 'create'), ev('stranger', 'create')]);
+  const dir = fixtureDir([ev('ada', 'update'), ev(null, 'update'), ev('stranger', 'update')]);
   const out = run(['--since', '2026-08-10T02:00:00Z', '--events', dir, ...SEATS_ARG]);
 
-  // ⛔ #890 R4 — THE RATIO IS GONE ON PURPOSE, AND THE FILTER IS NOT.
+  // ⭐ #889 — THE RATIO IS BACK, AND IT MEANS SOMETHING NOW.
   //
-  // `create` is the only enforced op and the gate cannot scope it to a card, so
-  // no counted action can be a violation and any ratio here would read as
-  // compliance over a population that cannot contain one. The signal now says
-  // UNMEASURABLE — but it must still show WHAT IT COUNTED AND WHO IT DROPPED,
-  // which is the property this test has always been about.
-  assert.match(out, /UNMEASURABLE/);
-  assert.equal(/\d+ *\/ *\d+/.test(out.split('\n').find((l) => /SIGNAL 2/.test(l)) || ''), false,
-    'a ratio leaked into an unmeasurable signal-2 line');
+  // Two revisions of this assertion in one evening, and the sequence is the
+  // point: it began as a ratio over `create`, became UNMEASURABLE when #890
+  // showed that no create could ever be a violation, and is a ratio again now
+  // that the enforced op is one the gate can actually scope. Same three lines
+  // of output, three different truth values, each correct for its own build.
+  assert.match(out, /1 \/ 1|0 \/ 1/);
   assert.match(out, /2 non-seat action\(s\) excluded/);
-  assert.match(out, /enforced ops counted: create/);
+  assert.match(out, /enforced ops counted: update/);
 });
 
 test('#755-cli ⚠️ it says an UNMEASURABLE signal is not a passing signal — every run, not just bad ones', () => {
@@ -97,25 +95,23 @@ test('#755-cli ⚠️ it says an UNMEASURABLE signal is not a passing signal —
   assert.match(out, /of 3 signals measurable/);
 });
 
-test('#755-cli ⛔ #890 R4 — the OUTPUT says the enforced op cannot be scoped, so a zero would mean nothing', () => {
-  // ⚠️ THIS TEST USED TO ASSERT /STRUCTURAL ZERO/ IN THE OUTPUT, and that
-  // caveat was correct for its own reason: no work-object store was configured,
-  // so no action COULD be counted as ungranted.
+test('#755-cli the structural-zero caveat reaches the OUTPUT, not just the return value', () => {
+  // ⚠️ RESTORED, and the history is worth keeping. This asserted STRUCTURAL
+  // ZERO originally; #890 replaced it with an R4 assertion because `create`
+  // could never be scoped, so the stronger statement ("this population can
+  // never produce evidence") superseded the weaker one ("we have no evidence
+  // yet"). #889 moved the enforced op to `update`, which the gate CAN scope —
+  // so R4 no longer fires here and the original caveat is the true one again.
   //
-  // R4 supersedes it here for a stronger reason that fires even with a fully
-  // populated store: `create` is the only enforced op, and the gate cannot
-  // scope a create to a card at all. The old caveat said "we have no evidence
-  // yet"; this one says "this population can never produce evidence".
-  //
-  // ⭐ Both are the same discipline — a zero that means "no instrument" must
-  // never print as a zero. The structural-zero caveats are still tested
-  // directly in tests/sprint-signals.test.mjs, against a scopable op.
-  const dir = fixtureDir([ev('ada', 'create'), ev('bo', 'create')]);
+  // ⇒ Both were correct for their own build. The discipline that survives all
+  //   three revisions: a zero that means "no instrument" must never print as a
+  //   zero, whichever reason makes it so.
+  const dir = fixtureDir([ev('ada', 'update'), ev('bo', 'update')]);
   const out = run(['--since', '2026-08-10T02:00:00Z', '--events', dir, ...SEATS_ARG]);
-  assert.match(out, /UNMEASURABLE/);
-  assert.match(out, /cannot scope to a card/i);
-  assert.match(out, /#889/, 'the output must name the card that would restore measurability');
+  assert.match(out, /STRUCTURAL ZERO/);
+  assert.match(out, /not evidence of compliance/i);
 });
+
 
 test('#755-cli ⛔ it REFUSES without --since rather than reviewing everything', () => {
   const out = run([], { expectFail: true });

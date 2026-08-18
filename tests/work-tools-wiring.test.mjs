@@ -173,17 +173,23 @@ test('#755-2e a declared work object REACHES DISK and comes back as OPEN state',
  *   so a card-scoped gate can never match it. The refusal this test pinned is
  *   now structurally unreachable.
  *
- * ⚠️ THE ASSERTION BELOW IS PINNED, NOT ENDORSED. Flipping it to `allow` and
- * saying nothing would be a green suite over a rail that covers nothing — so
- * the expectation carries the card number that will delete it. **#889** moves
- * ENFORCED_OPS onto a card-targeting op (update · move · claim); when it lands,
- * this test comes back as a refusal on THAT op and this comment goes away.
+ * ✅ #889 HAS LANDED, and this assertion is now permanent rather than pinned.
+ * ENFORCED_OPS is ['update', 'move'] — ops that name a card that already
+ * exists — and `card_create` is deliberately not among them. So "a create is
+ * not gated" stopped being an embarrassing residual and became the design:
+ * you cannot hold a window on a card that does not exist yet.
+ *
+ * ⇒ The refusal this test used to make lives in tests/work-gate-enforced-op.mjs
+ *   against `card_update`, where the gate can actually see what is being acted
+ *   on. That file also carries the AGREEMENT test — for every op in
+ *   ENFORCED_OPS, the tool performing it must really refuse — which work-gate's
+ *   comment claimed existed since #755 and which did not exist until #889.
  *
  * ⭐ What the flip actually revealed: every refusal the unscoped gate ever
  * issued was necessarily false, because it was gating the one op that cannot
  * be the declared work. The 0-true-positive record was not bad luck.
  */
-test('#755-2e ⛔ PINNED RESIDUAL — card_create is no longer gated, because create cannot carry a card (#889)', async () => {
+test('#755-2e ⛔ card_create is NOT gated — a create names no card, so no window can cover it (#889)', async () => {
   await withServers(armed(storeDir()), async ({ session, rest }) => {
     await session.callTool('work_declare', {
       id: 'w-e2e-2', by: 'ada', card: 755, required: ['ada', 'bo'], replyByMinutes: 20,
@@ -193,8 +199,8 @@ test('#755-2e ⛔ PINNED RESIDUAL — card_create is no longer gated, because cr
       createdBy: 'ada', title: 'acting inside my own open window',
     }));
     assert.equal(made.refused, undefined,
-      `the gate is inert for create — if this is now a refusal, #889 has landed and this test `
-      + `should be rewritten against the op it wraps, not deleted: ${JSON.stringify(made)}`);
+      `create is not an enforced op and must never be gated — a window cannot cover a card that `
+      + `does not exist yet: ${JSON.stringify(made)}`);
 
     // ⭐ THE HALF THAT STILL DISCRIMINATES: the rail is still in the request
     // path. If the gate were unwired rather than merely inert, the card would

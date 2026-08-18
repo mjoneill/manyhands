@@ -63,20 +63,31 @@ import { stateAt, STATES } from './work-auction.mjs';
  * mcp-server.mjs. This list is what the instrument believes; wrapping is what
  * makes it true. A test asserts the two agree.
  *
- * ⛔⛔ #886/#889 — AND TODAY THIS LIST MAKES THE GATE INERT. `decideCoveredAction`
- * is now scoped to the DECLARED CARD, and a `create` brings a card into
- * existence rather than targeting one, so the only enforced op can never match
- * a window. The rail is installed, wired, and refuses nothing.
+ * ⛔⛔ #889 — IT USED TO BE ['create'], AND THAT MADE THE RAIL INERT. A create
+ * brings a card into existence and so names none at decision time, which means a
+ * card-scoped gate could never match the only op it wrapped. Measured on the
+ * production log, same corpus, only the code differing:
  *
- * ⚠️ Which is the honest state, not a hidden one: unscoped it refused three
- * real actions in one afternoon and zero true positives — and it could only
- * ever have done that, because it was gating the one op that cannot BE the
- * declared work. #889 moves this list onto a card-targeting op (update · move ·
- * claim). Until then, read this constant as "the population this rail protects
- * is empty", and see the pinned assertions in tests/work-gate-scoped.test.mjs
- * and tests/work-tools-wiring.test.mjs.
+ *     0 / 39 · does not fire     ← read as "39 acts, zero bypasses"
+ *     UNMEASURABLE               ← not one of the 39 COULD have been a bypass
+ *
+ * ⇒ `update` is the smallest honest replacement: the declared work happens on a
+ *   card that ALREADY EXISTS, so editing that card is the action a window is a
+ *   mutex over. `move` joins it because moving the declared card to done is the
+ *   same act with a different verb.
+ *
+ * ⛔ `claim` is deliberately ABSENT. A claim is already a compare-and-set under
+ * a write lock — a second claimant gets an immediate 409 naming the holder — so
+ * a bid window on top would be strictly weaker and about twenty minutes slower.
+ *
+ * ⚠️ AND THE TEST THIS COMMENT PROMISED DID NOT EXIST. The line above has said
+ * "A test asserts the two agree" since #755; I grepped for it while moving the
+ * list and found the sentence and nothing else. It exists now, behaviourally —
+ * for every op here, the tool must actually REFUSE inside an open window — in
+ * tests/work-gate-enforced-op.test.mjs. A source grep would have passed against
+ * a tool that imports the gate and discards its answer.
  */
-export const ENFORCED_OPS = Object.freeze(['create']);
+export const ENFORCED_OPS = Object.freeze(['update', 'move']);
 
 /** The one environment variable that can arm this. Named here so the test can assert on it. */
 export const GATE_ENV = 'SCRUM_WORK_GATE';

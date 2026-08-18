@@ -129,7 +129,11 @@ test('#755-signals signal 2 counts ONLY ENFORCED ops in the denominator', () => 
   ];
   const s = signalTwoUngrantedActions({ events, workObjects: [], seats: SEATS, enforcedOps: SCOPABLE });
   assert.equal(s.denominator, 1, 'only the enforced op counts');
-  assert.ok(COVERED_OPS.includes('create'));
+  // #889 — `create` LEFT this list: it cannot be scoped to a card, so enforcing
+  // it produced a compliance number over a population that could not contain a
+  // violation. `update` is what the window is actually a mutex over.
+  assert.ok(COVERED_OPS.includes('update'));
+  assert.equal(COVERED_OPS.includes('create'), false, 'a create names no card at decision time (#889)');
   assert.equal(COVERED_OPS.includes('post'), false, 'you cannot mutex a conversation (#646)');
   // Claims are already a compare-and-set under a write lock — a second claimant
   // gets an immediate 409 naming the holder, verified live. A bid window on top
@@ -329,10 +333,10 @@ test('#755-signals ⛔ an action the rail cannot see is NOT in the denominator',
 test('#755-signals the report NAMES the ops it counted, so the reach is visible', () => {
   // An instrument whose scope is invisible in its output is the defect this
   // whole card is a catalogue of.
-  const events = [ev('ada', 'create')];
+  const events = [ev('ada', 'update')];
   const s = signalTwoUngrantedActions({ events, workObjects: [], seats: SEATS });
   assert.deepEqual(s.countedOps, [...ENFORCED_OPS]);
-  assert.match(renderSignal('signal 2', s), /create/);
+  assert.match(renderSignal('signal 2', s), /update/);
 });
 
 test('#755-signals widening the gate widens the denominator automatically', () => {

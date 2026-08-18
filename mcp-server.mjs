@@ -407,6 +407,62 @@ function buildMcpServer() {
     return plainCardCreate(args);
   };
 
+  // ── #889 — THE CARD-TARGETING GATE, which is the one that can actually refuse
+  //
+  // ⛔ card_create was the wrong tool to wrap. A create BRINGS a card into
+  // existence and so names none at decision time, which meant a card-scoped
+  // gate could never match it: production read `0 / 39 · does not fire` for a
+  // population that could not contain a violation. The declared work happens on
+  // a card that ALREADY EXISTS, so update and move are the acts a window is a
+  // mutex over.
+  //
+  // ⚠️ TWO PROPERTIES THIS SHAPE BUYS, both deliberate:
+  //
+  // 1. THE HOT PATH PAYS NOTHING. card_update is the board's most common write.
+  //    `openWorkObjects()` is a local file read and it short-circuits: with no
+  //    open windows — the normal state — nothing else happens, and in particular
+  //    no shortId resolution round-trip. A rail whose steady-state cost sits in
+  //    front of every edit is how a safety mechanism becomes the outage.
+  //
+  // 2. A UUID IS RESOLVED, NOT WAVED THROUGH. `id` is documented as "Card UUID
+  //    or shortId" and work objects store a shortId, so comparing the raw
+  //    argument would fail open on every UUID — a bypass one card_get wide,
+  //    while the rail went on reporting itself armed. We resolve, and only when
+  //    a refusal is actually possible.
+  const resolveShortId = async (id) => {
+    if (/^\d+$/.test(String(id))) return Number(id);
+    try {
+      const card = await apiCall('GET', `/api/cards/${encodeURIComponent(id)}`);
+      return typeof card?.shortId === 'number' ? card.shortId : null;
+    } catch {
+      // ⚠️ FAIL OPEN, and say why: a gate that refuses because a lookup failed
+      // turns every REST hiccup into "the board stops accepting edits". The
+      // window still binds the seat's OTHER ops; this one call goes through.
+      return null;
+    }
+  };
+
+  const gateCardTargeting = (plain) => async (args) => {
+    const objects = openWorkObjects();
+    if (objects.length === 0) return plain(args);
+
+    const decision = decideCoveredAction({
+      actor: args.by,
+      workObjects: objects,
+      now: new Date().toISOString(),
+      card: await resolveShortId(args.id),
+    });
+    if (!decision.allow) {
+      return jsonResult({
+        refused: true,
+        rule: '#755 work gate',
+        reason: decision.reason,
+        workObjectId: decision.workObjectId,
+      });
+    }
+    return plain(args);
+  };
+
   // ── #755 BRANCH E — the claim throttle ───────────────────────────────────
   //
   // ⛔ ITS OWN FLAG, never the gate's. The gate is a candidate for REMOVAL
@@ -490,6 +546,23 @@ function buildMcpServer() {
   // `on`. Arming one flag deleted a different flag's entire tool surface.
   const gateArmed = isGateArmed();
   const cardCreateHandler = gateArmed ? withThrottle(gatedCardCreate) : withThrottle(plainCardCreate);
+
+  // #889 — same FLAG-OFF-MEANS-NOT-INSTALLED shape as card_create: `gateArmed`
+  // is the one answer isGateArmed() produced, never a second read, and with the
+  // gate off the plain handler is what gets registered — the gate is not in the
+  // request path at all rather than being a branch inside it.
+  const plainCardUpdate = async ({ id, ...patch }) =>
+    jsonResult(await apiCall('PATCH', `/api/cards/${encodeURIComponent(id)}`, patch));
+  // ⚠️ `by` is FORWARDED, not just accepted. #889 added the field so the gate
+  // could see the actor; dropping it here would have made card_move the one
+  // write whose author the event log never learns — a field validated and then
+  // discarded, which is the defect this room keeps finding in other people's
+  // code. card_update has always passed it through.
+  const plainCardMove = async ({ id, column, by }) =>
+    jsonResult(await apiCall('PATCH', `/api/cards/${encodeURIComponent(id)}`, { column, ...(by ? { by } : {}) }));
+
+  const cardUpdateHandler = gateArmed ? gateCardTargeting(plainCardUpdate) : plainCardUpdate;
+  const cardMoveHandler = gateArmed ? gateCardTargeting(plainCardMove) : plainCardMove;
 
   // ── #755 slice 2e — Work tools: the INPUT PATH ───────────────────
   //
@@ -639,19 +712,23 @@ function buildMcpServer() {
       }).optional().describe('Merged at the type level (#548): only the keys you send change; clear a type with an explicit empty array'),
       by: z.string().optional().describe('#675 — your seat key: who is making this edit. Declared, not authenticated; recorded on the event log, never on the card.'),
     },
-  }, async ({ id, ...patch }) =>
-    jsonResult(await apiCall('PATCH', `/api/cards/${encodeURIComponent(id)}`, patch))
-  );
+  }, cardUpdateHandler);
 
   mcp.registerTool('card_move', {
     description: 'Move a card to a different column. Convenience wrapper around card.update.',
     inputSchema: {
       id: z.string().describe('Card UUID or shortId'),
       column: z.string().describe('Target column id (e.g. "backlog", "in-progress", "done")'),
+      // #889 — card_move had NO actor field at all, which the agreement test
+      // caught the moment `move` became an enforced op: the gate cannot refuse
+      // a seat it cannot see, so wrapping this tool without adding `by` would
+      // have registered a rail that fails open on every call while reporting
+      // itself armed. Optional, matching card_update — declared, not
+      // authenticated — and an absent actor reads as the human path.
+      by: z.string().optional().describe('#675 — your seat key: who is moving this card. '
+        + 'Declared, not authenticated; recorded on the event log, never on the card.'),
     },
-  }, async ({ id, column }) =>
-    jsonResult(await apiCall('PATCH', `/api/cards/${encodeURIComponent(id)}`, { column }))
-  );
+  }, cardMoveHandler);
 
   mcp.registerTool('card_get', {
     description: 'Get a single card by id or shortId.',

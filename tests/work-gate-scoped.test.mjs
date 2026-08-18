@@ -114,35 +114,24 @@ test('#886 the refusal no longer names a remedy that does not exist', async () =
 });
 
 /**
- * ⛔⛔ THE HOLE THIS FIX OPENS, pinned rather than left silent.
+ * ✅ THE HOLE THIS FIX OPENED IS CLOSED — #889, and the test that pinned it is
+ * gone rather than edited.
  *
- * The narrowing above is correct and it has a consequence I did not see until
- * after the suite went green: `ENFORCED_OPS` is `['create']`, and the only
- * wrapped tool is `card_create` — which BRINGS a card into existence and
- * therefore never targets one. A gate scoped to the declared card can never
- * match a create.
+ * It asserted that `ENFORCED_OPS` was ['create'] and that the scoped gate was
+ * therefore INERT: a create brings a card into existence and so names none at
+ * decision time, meaning the rail could never match its only wrapped op.
+ * Production read `0 / 39 · does not fire` over a population that could not
+ * contain a violation.
  *
- * ⇒ Scoped + create-only = a gate that refuses NOTHING in production.
+ * ⭐ It was written to FAIL the moment a card-targeting op was wrapped, and that
+ * is exactly how it ended: #889 moved the list to ['update', 'move'] and the
+ * assertion went red on the commit that fixed it. Deleting it is the intended
+ * outcome, not a loosening — the property it protected now lives as a positive
+ * assertion in tests/work-gate-enforced-op.test.mjs, where the gate is required
+ * to actually refuse rather than merely required to be honest about not doing so.
  *
- * ⚠️ Both halves of that are true and neither is the bug:
- *   unscoped  → 3 refusals in one afternoon, 0 of them the measured failure
- *   scoped    → 0 refusals, because the enforced op cannot carry a card
- * The real defect is UPSTREAM of both: `create` is the wrong op to enforce.
- * The declared work happens on a card that already exists, so the covered
- * actions that ARE the declared work are update · move · claim.
- *
- * ⭐ This test exists so the inertness is an ASSERTION with a card number on
- * it instead of a property nobody wrote down. If someone wraps a
- * card-targeting op, this test fails and points at the follow-up.
+ * ⚠️ Kept as a comment because the shape is the reusable part: a residual you
+ * cannot fix today belongs in the suite as an assertion with a card number on
+ * it, phrased so that fixing the card breaks the test. A residual recorded only
+ * in prose is one nobody is told about when it stops being true.
  */
-test('#886 RESIDUAL — with create as the only enforced op, the scoped gate is INERT', async () => {
-  const { ENFORCED_OPS } = await import('../core/work-gate.mjs');
-  assert.deepEqual([...ENFORCED_OPS], ['create'],
-    'if this changed, the residual below may no longer hold — re-read it');
-
-  // A create carries no target card. This is the production call shape.
-  const r = decideCoveredAction({ actor: 'ada', workObjects: [OPEN_WINDOW], now: NOW });
-  assert.equal(r.allow, true,
-    'PINNED, NOT ENDORSED: the gate cannot refuse the one op it wraps. '
-    + 'Fixing this means enforcing a card-targeting op, which is a separate card.');
-});
