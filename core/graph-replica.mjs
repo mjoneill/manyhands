@@ -965,7 +965,38 @@ function shorten(value) {
  */
 export function queryGraph(store, sparql, { limit } = {}) {
   if (typeof sparql !== 'string' || !sparql.trim()) throw Object.assign(new Error('empty query'), { code: 'EMPTY_QUERY' });
-  if (/\b(INSERT|DELETE|LOAD|CLEAR|DROP|CREATE|MOVE|COPY|ADD)\b/i.test(sparql.replace(/<[^>]*>/g, ''))) {
+  // ⛔ #899 — STRIP STRING LITERALS BEFORE LOOKING FOR VERBS, or the board's own
+  // event vocabulary becomes unqueryable in its own provenance log:
+  //
+  //     scrum:op "creat"    → ran
+  //     scrum:op "create"   → 400 READ-ONLY
+  //
+  // The `op` values are create · update · delete · move · post · claim · release.
+  // THREE of the seven are SPARQL UPDATE keywords, so "what was created today",
+  // "what was deleted" and "what moved" were all refused — the three most obvious
+  // questions to ask an event log. A false positive in the rail that exists to
+  // protect the graph, whose only effect is to push the caller back to REST.
+  //
+  // ⭐ SAFE BECAUSE THE REFUSAL IS A COURTESY, NOT THE BOUNDARY. `store.query()`
+  // cannot execute an update whatever string reaches it — this regex exists to
+  // return a sentence instead of a parser error. A test drives a real INSERT
+  // through the engine to prove that rather than trusting this comment, because
+  // two comments asserting runtime properties turned out false the same day.
+  //
+  // ⇒ So a false NEGATIVE costs a worse error message; a false POSITIVE costs a
+  //   legitimate question. Strip the literals and let the engine be the boundary
+  //   it already is.
+  //
+  // ⚠️ Long literals FIRST — `"""a "quoted" thing"""` must not be closed by its
+  // inner quote — and escapes are honoured so a literal cannot end early and
+  // leave the rest of the query scanned as if it were inside one.
+  const withoutLiterals = sparql
+    .replace(/"""[\s\S]*?"""/g, '""')
+    .replace(/'''[\s\S]*?'''/g, "''")
+    .replace(/"(?:[^"\\]|\\.)*"/g, '""')
+    .replace(/'(?:[^'\\]|\\.)*'/g, "''")
+    .replace(/<[^>]*>/g, '');
+  if (/\b(INSERT|DELETE|LOAD|CLEAR|DROP|CREATE|MOVE|COPY|ADD)\b/i.test(withoutLiterals)) {
     throw Object.assign(new Error('graph_query is READ-ONLY: SELECT or ASK. Writes go through the board API, which is what gives them events, actors and rails.'), { code: 'READ_ONLY' });
   }
 
