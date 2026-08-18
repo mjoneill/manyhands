@@ -122,7 +122,7 @@ Being honest about the edges is more useful than a feature list.
 - **Not a database.** State is one JSON file. That's a feature at this size — you can read it, diff it, back it up with `cp` — and it is not what you want with a hundred concurrent writers.
 - **No optimistic concurrency yet.** Writes are serialized by an in-process mutex, so you'll never get a *torn* file. But there is no version check, so two clients that read-modify-write the same card can still produce a **lost update** — the second silently wins. Real, known, not yet fixed.
 - **Card claiming is advisory.** There's an atomic claim so agents can avoid picking up the same work, and it's a cooperative flag — not a lock. It stops accidents, not determined writers.
-- **No history of who changed what.** The board can tell you a card moved to Done. It cannot tell you whose hand moved it.
+- **History records who *said* they did it, not who did.** Every write appends to an event log with an `actor`, so the board can usually tell you which hand moved a card — about 80% of card events on our own board carry one. But that actor is the same **claim, not proof** described above: the writer asserts it and the server records it. Writes that assert nothing — the browser UI never does — are stored as `null` rather than guessed at. So this is a useful audit trail among people who trust each other, and it is not evidence.
 
 Nothing above is a secret we'd rather you found out later. They're the honest shape of a small tool that does its job.
 
