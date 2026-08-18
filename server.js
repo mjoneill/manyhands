@@ -654,8 +654,25 @@ async function loadGraphModules() {
   }
 }
 
+/**
+ * #725 part 2 — the highest seq already projected as an activity.
+ *
+ * ⛔ WHY THIS COUNTER EXISTS RATHER THAN RE-READING THE LOG EVERY SYNC.
+ * `projectActivities` is idempotent by `seq`, so correctness does not need this.
+ * COST does: the log is append-only and unbounded (1,624 events over the first
+ * four days), and re-reading all of it on every write to discover one new record
+ * makes the replica's incremental sync — the whole point of #714 — pointless for
+ * activities. We read forward from where we stopped.
+ *
+ * ⚠️ Reset to 0 whenever the store is rebuilt from empty, because the store and
+ * this counter describe the same world and must be discarded together. A stale
+ * counter against a fresh store is how the graph would silently lose all history
+ * before the last write.
+ */
+let _activitySeq = 0;
+
 async function warmGraphStore() {
-  const { buildGraphStore, syncGraphStore } = await loadGraphModules();
+  const { buildGraphStore, syncGraphStore, projectActivities } = await loadGraphModules();
   let rebuiltMs = null;
   if (_graphDirty || !_graphStore) {
     // #714 — INCREMENTAL. The old path threw the store away and re-projected
@@ -667,12 +684,43 @@ async function warmGraphStore() {
     // incrementally-maintained store is triple-for-triple identical to a full
     // rebuild, and goes red if the delete-before-re-emit step is removed.
     const t = performance.now();
-    if (!_graphStore) _graphStore = buildGraphStore({ '@graph': [] });
+    if (!_graphStore) { _graphStore = buildGraphStore({ '@graph': [] }); _activitySeq = 0; }
     const stats = syncGraphStore(_graphStore, domainToJsonLd(loadDomain(BOARD_DATA_FILE)), _graphHashes);
     _graphHashes = stats.hashes;
+
+    // #725 part 2 — THE EVENT LOG IS PART OF THE GRAPH, and until now it was not.
+    //
+    // The board has written structured PROV-shaped events for every mutation
+    // since 2026-08-04, `projectActivities()` has existed and been unit-tested
+    // since #725 landed, and the two had never been introduced: the function's
+    // only callers were its own tests. So "who did what, and when" — the record
+    // this room's whole coordination protocol produces — was invisible to every
+    // query, while a green test suite reported the feature working.
+    //
+    // ⚠️ Failure here must NOT take the query surface with it. The document half
+    // of the replica is already synced and correct at this point; an unreadable
+    // or corrupt event log should cost the caller their ACTIVITIES, loudly, not
+    // their ability to traverse the board. The log is append-only and carries
+    // real junk by design — `projectActivities` already skips malformed records
+    // rather than throwing, and this guard covers the read itself.
+    let activities = 0;
+    try {
+      const fresh = readEvents(EVENT_LOG_DIR, { sinceSeq: _activitySeq });
+      if (fresh.length) {
+        projectActivities(_graphStore, fresh);
+        _activitySeq = fresh.reduce((m, e) => (e?.seq > m ? e.seq : m), _activitySeq);
+        activities = fresh.length;
+      }
+    } catch (e) {
+      // Named, not swallowed: a silent zero here is indistinguishable from a
+      // board where nothing has happened, which is the exact confusion #725 exists
+      // to remove.
+      console.error(`${new Date().toISOString()} graph-replica: ACTIVITIES NOT PROJECTED (${e?.message}) — traversal is unaffected, but prov:Activity is incomplete past seq ${_activitySeq}`);
+    }
+
     _graphDirty = false;
     rebuiltMs = Math.round(performance.now() - t);
-    console.error(`${new Date().toISOString()} graph-replica: synced ${stats.updated} updated, ${stats.removed} removed of ${stats.total} entities → ${_graphStore.size} triples in ${rebuiltMs}ms`);
+    console.error(`${new Date().toISOString()} graph-replica: synced ${stats.updated} updated, ${stats.removed} removed of ${stats.total} entities, +${activities} activities (through seq ${_activitySeq}) → ${_graphStore.size} triples in ${rebuiltMs}ms`);
   }
   return { store: _graphStore, rebuiltMs };
 }
