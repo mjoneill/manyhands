@@ -832,9 +832,57 @@ const DERIVED_RELATIONSHIP_TYPES = ['supersededBy'];
 // echoing one back has nothing to compare against (the stored value is
 // undefined), so echo-suppression alone cannot see them. They are projections,
 // not card fields, and reporting them turns every read-modify-write noisy.
-// `by` is here for the same reason: it travels WITH a write (#675), it is not
-// a field OF the card.
-const READ_PROJECTION_FIELDS = new Set(['comments', 'by']);
+//
+// ⛔ #856 — `by` USED TO LIVE HERE AND DOES NOT BELONG. The comment above it
+// already said so in prose — "it travels WITH a write (#675), it is not a field
+// OF the card" — while the code put both keys in one Set and treated them
+// identically. `by` is not dropped at all: it is CONSUMED, by the event log,
+// in this same request. Reporting it as ignored, refused, or redirected would
+// be false in all three directions. A comment asserting a runtime property is
+// a test case in prose; this split is that comment, encoded.
+const READ_PROJECTION_FIELDS = new Set(['comments']);
+
+// #856 — consumed by a DIFFERENT subsystem in the same request. Not stored on
+// the card, not discarded either, and therefore never reported.
+const CONSUMED_ELSEWHERE_FIELDS = new Set(['by']);
+
+// #856 — where a projection's caller should actually go. This is the whole
+// reason the class is a MAP and not a list: `ignoredFields` can be bare because
+// the key is the entire message ("I did not recognise `foo`"), but here the
+// caller CAN do what they tried — through a different door — and a redirect
+// that does not name the destination is a 404 wearing a signpost.
+//
+// ⚠️ The discriminator for this class is NOT "how real is the key". It is
+// WHETHER THE CALLER HAS ANYWHERE ELSE TO GO:
+//   id        REFUSED     you may not do this. There is no other door.
+//   comments  REDIRECTED  you CAN do this. Different door.
+// Folding a redirect into `refusedFields` tells a caller to STOP when the true
+// answer is TURN LEFT — actionable and wrong, which is worse than silent.
+const REDIRECT_DESTINATIONS = {
+  comments: 'POST /api/conversations with attachedTo (MCP: conversation_post attachedTo:) — comments are not a card field',
+};
+
+// ⭐ #856 — STRUCTURAL RAIL, not a comment. Adding a projection field without a
+// destination would silently degrade this class back to the bare-list behaviour
+// it exists to replace, and nothing downstream would report the gap. Fail at
+// boot instead, where it is one line to fix.
+for (const f of READ_PROJECTION_FIELDS) {
+  if (!REDIRECT_DESTINATIONS[f]) {
+    throw new Error(`#856: projection field '${f}' has no entry in REDIRECT_DESTINATIONS — `
+      + 'a redirect that cannot name its destination is a 404 wearing a signpost');
+  }
+}
+
+/**
+ * #856 — the value the API WOULD emit for a projection field, which is the
+ * comparand echo-suppression was missing. #844 compared against `card[field]`
+ * (undefined for every projection), so it could never distinguish an RMW echo
+ * from a real attempt. The route builds these; it knows what it emitted.
+ */
+function projectionValue(field, data, card) {
+  if (field === 'comments') return commentMetadata(data.conversations, card.id);
+  return undefined;
+}
 
 function validateRelationships(rel, current = undefined) {
   if (typeof rel !== 'object' || rel === null || Array.isArray(rel)) {
@@ -1461,6 +1509,10 @@ async function handleUpdateCard(req, res, idOrShortId) {
     // different actions from the caller; one list would make a typo and a
     // policy violation indistinguishable.
     const refusedFields = [];
+    // #856 — the third fact, and a MAP rather than a list because its whole
+    // value is the destination. Same test as #831's split: a name earns its own
+    // channel when it changes what the caller does next.
+    const redirectedFields = {};
     const updated = await withWriteLock(async () => {
       const data = readBoard();
       const idx = findCardIndex(data, idOrShortId);
@@ -1484,7 +1536,19 @@ async function handleUpdateCard(req, res, idOrShortId) {
           refusedFields.push(k);
           continue;
         }
-        if (READ_PROJECTION_FIELDS.has(k)) continue;   // #844 — a projection, not a field
+        // #856 — consumed by another subsystem in this same request (`by` ->
+        // the event log). Not stored, not discarded, so never reported.
+        if (CONSUMED_ELSEWHERE_FIELDS.has(k)) continue;
+        if (READ_PROJECTION_FIELDS.has(k)) {
+          // #856 — #844's rule with the comparand it was missing. Echoing the
+          // projection back is the ordinary GET/modify/PATCH cycle and must stay
+          // SILENT; sending something DIFFERENT is a caller who meant to do a
+          // real thing and needs to be told where that thing actually lives.
+          if (!isEchoOfStored(v, projectionValue(k, data, card))) {
+            redirectedFields[k] = REDIRECT_DESTINATIONS[k];
+          }
+          continue;
+        }
         if (!PATCHABLE_CARD_FIELDS.has(k)) {
           // #823 — #249 keeps ignoring unknown keys (forward-compat), but it
           // must SAY SO. Silently skipping made a malformed write and a correct
@@ -1556,6 +1620,9 @@ async function handleUpdateCard(req, res, idOrShortId) {
       ...updated,
       ...(ignoredFields.length ? { ignoredFields } : {}),
       ...(refusedFields.length ? { refusedFields } : {}),
+      // #856 — same discipline: present only when a caller actually tried
+      // something, absent on every read-modify-write echo.
+      ...(Object.keys(redirectedFields).length ? { redirectedFields } : {}),
     });
   } catch (e) {
     console.error('PATCH /api/cards/:id:', e.message);
