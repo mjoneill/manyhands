@@ -81,6 +81,19 @@ test('#885 the refusal TEACHES the query that works', async () => {
       r.body.hint || r.body.error, /enumerat|name the predicates|\|/i,
       `the refusal must show the alternative. got ${JSON.stringify(r.body).slice(0, 220)}`,
     );
+    // ⭐⭐ AND IT MUST NAME ANCHORING, WHICH IS THE HALF THAT ACTUALLY MATTERS.
+    // The first version of this hint said only "enumerate the predicates".
+    // Measured against an isolated copy of the live corpus (17,484 entities),
+    // the SAME 7-predicate path:
+    //     unbound at both ends   9.97s   ← still blocks the shared event loop
+    //     anchored at one end    0.015s  ← 660×
+    // A hint that teaches the cheap half of the fix sends the caller back with a
+    // query that no longer hangs and still costs the room ten seconds.
+    assert.match(
+      r.body.hint, /anchor/i,
+      `the refusal must tell the caller to ANCHOR the path — enumerating alone leaves a `
+      + `10s query. got ${JSON.stringify(r.body.hint)}`,
+    );
   } finally { await s.stop(); }
 });
 

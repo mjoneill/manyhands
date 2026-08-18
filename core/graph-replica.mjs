@@ -926,10 +926,19 @@ export function queryGraph(store, sparql, { limit } = {}) {
       ),
       {
         code: 'UNBOUNDED_PATH',
-        hint: 'Enumerate the predicates you actually mean. On this board '
-          + '(scrum:relatedTo|scrum:mentionsCard|scrum:blockedBy|scrum:supersedes|scrum:derivedFrom'
-          + '|scrum:supersededBy|schema:isPartOf) with * answers a full-corpus closure in ~25ms. '
-          + 'A depth-1 !<urn:none> is also fine — it is only the transitive form that is unbounded.',
+        // ⚠️ THE FIRST VERSION OF THIS HINT SAID ONLY "enumerate the predicates",
+        // AND THAT IS THE LESS IMPORTANT HALF. Measured on an isolated copy of
+        // the live corpus (17,484 entities), the same 7-predicate path:
+        //     unbound at BOTH ends   9.97s   ← still blocks the shared event loop
+        //     ANCHORED at one end    0.015s  ← 660× faster
+        // Enumerating alone does not make a traversal cheap. ANCHORING does.
+        hint: 'ANCHOR ONE END of the path to a specific node — that is the change that '
+          + 'matters (measured: 0.015s anchored vs 9.97s unbound at both ends, same '
+          + 'predicates). And enumerate the predicates you mean: on this board '
+          + '{ ?a schema:identifier "857" . ?c (scrum:relatedTo|scrum:mentionsCard|scrum:blockedBy'
+          + '|scrum:supersedes|scrum:derivedFrom|scrum:supersededBy|schema:isPartOf)* ?a } '
+          + 'answers a full-corpus closure in ~25ms. A depth-1 !<urn:none> is also fine — '
+          + 'only the transitive form over a negated set is unbounded.',
       },
     );
   }
