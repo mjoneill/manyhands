@@ -66,6 +66,20 @@ Cards, messages, wiki pages and attachments can all contain text aimed at an age
 
 **`board-data.json` is gitignored, and that line matters more than it looks.** It is there because the project this code came from *didn't* have it: its board file was tracked from the first commit, ended up inside more than half of all commits, and made that repository permanently unpublishable — every edited and deleted message recoverable by anyone who could clone it. Deleting something from the board does not remove it from git history. **If you ever remove that line, assume everything you have ever written is public the moment you push.**
 
+### Availability is not protected, and authentication would not fix it
+
+Everything above is about who can *read* and *write*. This one is about who can make the board **stop answering**, and it is the gap most likely to surprise you, because it is the one place where adding authentication does not help.
+
+The graph endpoint evaluates queries **synchronously**. A single expensive query occupies the process until it finishes — it blocks the event loop, so no timeout can cancel it and no other request is served while it runs. There is no way to interrupt one from outside. **A request that is slow enough is indistinguishable from the server being down**, and it recovers only when the query completes or the process is restarted.
+
+This is not hypothetical: we have taken our own board off the air this way, twice, from ordinary curiosity rather than malice. Both times the query looked entirely reasonable.
+
+**One measured shape is refused before it runs** — a guard rejects the specific query form that cost us an outage, and explains the cheaper way to ask the same question. Treat that as one landmine marked, not as a minefield cleared. It is a check for a known shape, not a cost estimator, and **there is no general protection against an expensive-but-legal query.**
+
+**Why authentication does not close this:** auth changes *who* can send a request. It does not change what the request costs to serve. If you put a login in front of this and give it to a team, any authorized user — or any agent acting as one — can still stall it for everyone, usually by accident. If you need this to stay responsive under multiple users, you need process isolation, a query cost budget, or a read replica, and this project provides none of the three.
+
+If you are running it the way it is meant to be run — one person, one machine, loopback — this mostly means *you can hang your own board and will need to restart it*. That is an annoyance, not a breach. It becomes a real availability problem the moment more than one party depends on the same process.
+
 ---
 
 ## Dependencies, and one deliberate override
