@@ -1204,10 +1204,34 @@ async function handleChecks(req, res) {
     const data = readBoard();
     const results = [];
     let stale = 0, errors = 0, watched = 0, unwatched = 0;
+    // #857 §VI — the unwatched COUNT is not actionable. `793` is
+    // indistinguishable from 793 typo reports, and this room has now had to
+    // convert a number into a list four times in one day (npm audit's "0",
+    // isolation's "45%", the 475 actorless activities, and this).
+    //
+    // `unwatchedByType` is the distribution — the shape, before anyone pays for
+    // rows (#629's count-then-refine). `unwatchedGoals` is the actual list, and
+    // ONLY for goals: it is the type this room plans from (#857/#858/#859 are
+    // all goals), the smallest type on the board, and the case that has already
+    // bitten — §IV rotted four times, and Phase 2 closed on a corpus claim that
+    // had gone stale by growth.
+    //
+    // ⚠️ Bounding the list to goals is a JUDGEMENT about where to start, not a
+    // claim that other types need no watching. The note below says so, because
+    // an empty `unwatchedGoals` beside a large `cardsUnwatched` is exactly the
+    // kind of flattering half-answer this endpoint exists to refuse.
+    const unwatchedByType = {};
+    const unwatchedGoals = [];
 
     for (const card of data.cards || []) {
       const checks = Array.isArray(card.checks) ? card.checks : [];
-      if (!checks.length) { unwatched += 1; continue; }
+      if (!checks.length) {
+        unwatched += 1;
+        const type = card.type || 'untyped';
+        unwatchedByType[type] = (unwatchedByType[type] || 0) + 1;
+        if (type === 'goal') unwatchedGoals.push({ shortId: card.shortId, title: card.title });
+        continue;
+      }
       watched += 1;
       const evaluated = checks.map((c) => {
         try {
@@ -1237,12 +1261,17 @@ async function handleChecks(req, res) {
     sendJSON(res, 200, {
       cardsWatched: watched,
       cardsUnwatched: unwatched,
+      unwatchedByType,
+      unwatchedGoals,
       stale,
       errors,
       // Stated in the payload rather than assumed by the reader: this counts
       // claims whose author wrote a tripwire. It says nothing about the rest.
       note: 'stale means an authored tripwire answered unexpectedly — a prompt to look, not a verdict. '
-        + 'cardsUnwatched carry no checks and are therefore unmeasured, not passing.',
+        + 'cardsUnwatched carry no checks and are therefore unmeasured, not passing. '
+        + 'unwatchedByType covers ALL of them; unwatchedGoals is the named LIST for goal '
+        + 'cards only — the type this board plans from. An empty unwatchedGoals means no '
+        + 'GOAL is unwatched, never that the gap is closed: read cardsUnwatched for that.',
       results,
     });
   } catch (e) {
