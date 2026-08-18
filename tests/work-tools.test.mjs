@@ -240,6 +240,15 @@ test('#797 ⭐⭐⭐ COVERAGE: every writer verb crosses the settlement boundary
     workNobid: (d) => mod.workNobid({ dir: d, id: 'w1', by: 'bo', now: LATE }),
     workContest: (d) => mod.workContest({ dir: d, id: 'w1', by: 'bo', now: LATE }),
     workGrant: (d) => mod.workGrant({ dir: d, id: 'w1', by: 'bo', to: 'ada', now: LATE }),
+    // #886 — the writer this test PREDICTED. Its comment above named
+    // workWithdraw as implemented-and-unexposed while #775 was open; exposing
+    // it is what made the prediction come due, and the test failed on the
+    // commit that exposed it rather than months later.
+    //
+    // ⚠️ `by: 'ada'` — withdraw guards on the DECLARER, not on a bidder, so
+    // driving it as 'bo' would throw for the wrong reason and prove nothing
+    // about the settlement boundary.
+    workWithdraw: (d) => mod.workWithdraw({ dir: d, id: 'w1', by: 'ada', now: LATE }),
   };
 
   const exported = Object.keys(mod).filter((k) => typeof mod[k] === 'function' && k.startsWith('work'));

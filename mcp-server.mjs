@@ -54,7 +54,7 @@ import { openWorkObjectsAt } from './core/work-store.mjs';
 // #755 slice 2e — the INPUT PATH. Until this import existed, `core/work-tools.mjs`
 // had a green suite and zero callers, so no seat could create a work object and
 // signal 1 was unmeasurable BY CONSTRUCTION rather than merely unmeasured.
-import { workDeclare, workBid, workNobid, workContest, workGrant, workList } from './core/work-tools.mjs';
+import { workDeclare, workBid, workNobid, workContest, workGrant, workWithdraw, workList } from './core/work-tools.mjs';
 // #755 BRANCH E — the claim throttle. Its own flag; see core/claim-throttle.mjs.
 import { decideThrottle, isThrottleArmed, COOLDOWN_MS } from './core/claim-throttle.mjs';
 import { readConfig } from './channel-config.mjs';
@@ -560,6 +560,17 @@ function buildMcpServer() {
       description: 'Record an explicit grant, resolving a contested window.',
       inputSchema: { id, by, to: z.string().min(1).describe('Seat key the work is granted to') },
     }, withCtx(workGrant));
+
+    // #886 — the remedy the gate's refusal already named. Until this line the
+    // message said "withdraw the bid" and no such tool existed, so a blocked
+    // seat's only reachable options were waiting out the clock or routing
+    // around the rail. One real seat chose to grant the work to herself, which
+    // recorded a settlement that never happened.
+    mcp.registerTool('work_withdraw', {
+      description: 'Close your OWN open window without taking the work. Only the seat that declared it may '
+        + 'withdraw it, and the record is kept — the window leaves `open`, it is not erased.',
+      inputSchema: { id, by },
+    }, withCtx(workWithdraw));
 
     mcp.registerTool('work_list', {
       description: 'What is in play and what has settled. Both DERIVED at read time from the transition log — '

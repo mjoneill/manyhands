@@ -39,7 +39,7 @@
  *   That distinction is pre-registered on #755 before this shipped.
  */
 
-import { declare, bid, nobid, contest, grant, stateAt, settle } from './work-auction.mjs';
+import { declare, bid, nobid, contest, grant, withdraw, stateAt, settle } from './work-auction.mjs';
 import { appendTransitions, readWorkObjects, openWorkObjectsAt } from './work-store.mjs';
 
 /** Argument allowlist. There is no free-text field anywhere in this surface. */
@@ -144,6 +144,20 @@ const answer = (fn, what, allowed) => (fields) => {
 export const workBid = answer(bid, 'workBid', ['dir', 'id', 'by', 'now']);
 export const workNobid = answer(nobid, 'workNobid', ['dir', 'id', 'by', 'now']);
 export const workContest = answer(contest, 'workContest', ['dir', 'id', 'by', 'now']);
+
+/**
+ * #886 — the declarer closes her own window.
+ *
+ * ⛔ IT SHARES `answer()` WITH BID/NOBID/CONTEST ON PURPOSE, because it shares
+ * their critical section: load → append with no yield between. A withdraw
+ * written as its own function would have been the second writer that comment
+ * warns about, and the loss would have been silent.
+ *
+ * ⚠️ Not an answer in the auction sense — `withdraw()` guards on
+ * `wo.declaredBy`, not on membership — but identical in SHAPE, and shape is
+ * what `answer` abstracts.
+ */
+export const workWithdraw = answer(withdraw, 'workWithdraw', ['dir', 'id', 'by', 'now']);
 
 export function workGrant(fields) {
   only(fields, ['dir', 'id', 'by', 'to', 'now'], 'workGrant');

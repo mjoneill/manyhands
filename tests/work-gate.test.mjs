@@ -49,68 +49,77 @@ const REPLY_BY = '2026-08-10T02:20:00.000Z';
 const DURING = '2026-08-10T02:10:00.000Z';
 const AFTER = '2026-08-10T02:30:00.000Z';
 
+// ⚠️ #886 — THE WINDOW NAMES A CARD, and every assertion below now names the
+// same one. The gate became a mutex on the WORK rather than on the seat, so a
+// window with no card and a decision with no card can no longer refuse
+// anything: these tests would have gone green against a gate that refuses
+// NOTHING AT ALL. The card is what keeps them discriminating.
+//
+// ⇒ The cross-card case — the one the narrowing exists for — lives in
+//   tests/work-gate-scoped.test.mjs, together with the residual it opens.
+const CARD = 700;
 const openWindow = (by = 'ada') =>
-  declare({ id: `wo-${by}`, by, at: T0, replyBy: REPLY_BY, required: ['ada', 'bo'] });
+  declare({ id: `wo-${by}`, by, at: T0, card: CARD, replyBy: REPLY_BY, required: ['ada', 'bo'] });
 
 test('#755-2b a seat with NO work objects at all is allowed — v1 does not require a bid to act', () => {
   // A gate that demanded a prior bid from everyone would break the board the
   // moment it armed, and it is a much larger claim than the evidence supports.
-  const d = decideCoveredAction({ actor: 'ada', workObjects: [], now: DURING });
+  const d = decideCoveredAction({ actor: 'ada', workObjects: [], now: DURING, card: CARD });
   assert.equal(d.allow, true);
 });
 
 test('#755-2b ⭐⭐ a seat acting INSIDE ITS OWN OPEN WINDOW is REFUSED — the observed failure', () => {
-  const d = decideCoveredAction({ actor: 'ada', workObjects: [openWindow('ada')], now: DURING });
+  const d = decideCoveredAction({ actor: 'ada', workObjects: [openWindow('ada')], now: DURING, card: CARD });
   assert.equal(d.allow, false);
   assert.match(d.reason, /open work object/);
   assert.equal(d.workObjectId, 'wo-ada');
 });
 
 test('#755-2b the refusal names the deadline, so the refused seat knows what to wait for', () => {
-  const d = decideCoveredAction({ actor: 'ada', workObjects: [openWindow('ada')], now: DURING });
+  const d = decideCoveredAction({ actor: 'ada', workObjects: [openWindow('ada')], now: DURING, card: CARD });
   assert.match(d.reason, /2026-08-10T02:20/);
 });
 
 test('#755-2b SOMEONE ELSE\'s open window does not refuse you', () => {
   // The window is a mutex on the WORK, not on the actor's whole existence.
-  const d = decideCoveredAction({ actor: 'bo', workObjects: [openWindow('ada')], now: DURING });
+  const d = decideCoveredAction({ actor: 'bo', workObjects: [openWindow('ada')], now: DURING, card: CARD });
   assert.equal(d.allow, true);
 });
 
 test('#755-2b once the window is GRANTED, the grantee may act', () => {
   const wo = grant(openWindow('ada'), { by: 'bo', to: 'ada', at: DURING });
-  assert.equal(decideCoveredAction({ actor: 'ada', workObjects: [wo], now: DURING }).allow, true);
+  assert.equal(decideCoveredAction({ actor: 'ada', workObjects: [wo], now: DURING, card: CARD }).allow, true);
 });
 
 test('#755-2b ⭐ a window that TIMED OUT to a grant lets the grantee act — no daemon had to run', () => {
   // The anti-deadlock property reaching the rail: a quiet room grants, and the
   // gate sees that purely by deriving state at `now`. Nothing wrote anything.
   const wo = openWindow('ada');
-  assert.equal(decideCoveredAction({ actor: 'ada', workObjects: [wo], now: DURING }).allow, false);
-  assert.equal(decideCoveredAction({ actor: 'ada', workObjects: [wo], now: AFTER }).allow, true);
+  assert.equal(decideCoveredAction({ actor: 'ada', workObjects: [wo], now: DURING, card: CARD }).allow, false);
+  assert.equal(decideCoveredAction({ actor: 'ada', workObjects: [wo], now: AFTER, card: CARD }).allow, true);
 });
 
 test('#755-2b ⛔ a CONTESTED window keeps refusing even after replyBy — ARBITRATION_DUE is not a grant', () => {
   const wo = contest(openWindow('ada'), { by: 'bo', at: DURING });
-  const d = decideCoveredAction({ actor: 'ada', workObjects: [wo], now: AFTER });
+  const d = decideCoveredAction({ actor: 'ada', workObjects: [wo], now: AFTER, card: CARD });
   assert.equal(d.allow, false);
   assert.match(d.reason, /contested/);
 });
 
 test('#755-2b a window closed by EARLY-CLOSE lets the grantee act before replyBy', () => {
   const wo = nobid(openWindow('ada'), { by: 'bo', at: DURING });
-  assert.equal(decideCoveredAction({ actor: 'ada', workObjects: [wo], now: DURING }).allow, true);
+  assert.equal(decideCoveredAction({ actor: 'ada', workObjects: [wo], now: DURING, card: CARD }).allow, true);
 });
 
 test('#755-2b work already RUNNING does not refuse its own runner', () => {
   const wo = start(grant(openWindow('ada'), { by: 'bo', to: 'ada', at: DURING }), { by: 'ada', at: DURING });
-  assert.equal(decideCoveredAction({ actor: 'ada', workObjects: [wo], now: DURING }).allow, true);
+  assert.equal(decideCoveredAction({ actor: 'ada', workObjects: [wo], now: DURING, card: CARD }).allow, true);
 });
 
 test('#755-2b ONE open window among many is enough to refuse', () => {
   const settled = grant(openWindow('ada'), { by: 'bo', to: 'ada', at: DURING });
-  const stillOpen = declare({ id: 'wo-2', by: 'ada', at: T0, replyBy: REPLY_BY, required: ['ada', 'bo'] });
-  const d = decideCoveredAction({ actor: 'ada', workObjects: [settled, stillOpen], now: DURING });
+  const stillOpen = declare({ id: 'wo-2', by: 'ada', at: T0, card: CARD, replyBy: REPLY_BY, required: ['ada', 'bo'] });
+  const d = decideCoveredAction({ actor: 'ada', workObjects: [settled, stillOpen], now: DURING, card: CARD });
   assert.equal(d.allow, false);
   assert.equal(d.workObjectId, 'wo-2');
 });
@@ -119,7 +128,7 @@ test('#755-2b ⛔ NO ACTOR ⇒ ALLOW. The human path can never be refused by thi
   // Belt: even if a browser request somehow reached this function, an absent
   // actor is allowed. Braces: the structural test below says it cannot.
   for (const actor of [null, undefined, '']) {
-    assert.equal(decideCoveredAction({ actor, workObjects: [openWindow('ada')], now: DURING }).allow, true);
+    assert.equal(decideCoveredAction({ actor, workObjects: [openWindow('ada')], now: DURING, card: CARD }).allow, true);
   }
 });
 
@@ -130,7 +139,7 @@ test('#755-2b the decision REFUSES to read the wall clock — `now` is required,
 test('#755-2b the decision is pure — no mutation of the work objects handed in', () => {
   const wo = openWindow('ada');
   const before = JSON.stringify(wo);
-  decideCoveredAction({ actor: 'ada', workObjects: [wo], now: DURING });
+  decideCoveredAction({ actor: 'ada', workObjects: [wo], now: DURING, card: CARD });
   assert.equal(JSON.stringify(wo), before);
 });
 
@@ -213,7 +222,7 @@ test('#755-2d ⭐⭐ THE GATE IS WIRED TO A REAL STORE — openWorkObjects is no
 test('#755-2d ⛔ a missing store must not take card_create down with it', () => {
   // A rail whose failure mode is "the board stops working" is worse than the
   // problem it solves. The gate must decide ALLOW when it cannot see a store.
-  const d = decideCoveredAction({ actor: 'ada', workObjects: [], now: DURING });
+  const d = decideCoveredAction({ actor: 'ada', workObjects: [], now: DURING, card: CARD });
   assert.equal(d.allow, true);
 });
 

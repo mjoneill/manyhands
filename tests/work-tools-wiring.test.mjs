@@ -160,24 +160,50 @@ test('#755-2e a declared work object REACHES DISK and comes back as OPEN state',
 // publishing the rule, with two seats watching. Until 2e there was no way for a
 // seat to open a window at all, so the gate could refuse nobody.
 
-test('#755-2e ⛔ A SEAT INSIDE ITS OWN OPEN WINDOW IS REFUSED card_create — end to end', async () => {
+/**
+ * ⛔⛔ THIS TEST USED TO ASSERT THE OPPOSITE, and the flip is #886.
+ *
+ * It read: "A SEAT INSIDE ITS OWN OPEN WINDOW IS REFUSED card_create — end to
+ * end", and it was the rail's only proof of life. #886 scoped the gate to the
+ * DECLARED CARD, because unscoped it refused a seat from filing a
+ * production-outage card while she held a window about something else — three
+ * refusals in one afternoon, none of them the failure the gate exists for.
+ *
+ * ⇒ A `create` BRINGS a card into existence and therefore never targets one,
+ *   so a card-scoped gate can never match it. The refusal this test pinned is
+ *   now structurally unreachable.
+ *
+ * ⚠️ THE ASSERTION BELOW IS PINNED, NOT ENDORSED. Flipping it to `allow` and
+ * saying nothing would be a green suite over a rail that covers nothing — so
+ * the expectation carries the card number that will delete it. **#889** moves
+ * ENFORCED_OPS onto a card-targeting op (update · move · claim); when it lands,
+ * this test comes back as a refusal on THAT op and this comment goes away.
+ *
+ * ⭐ What the flip actually revealed: every refusal the unscoped gate ever
+ * issued was necessarily false, because it was gating the one op that cannot
+ * be the declared work. The 0-true-positive record was not bad luck.
+ */
+test('#755-2e ⛔ PINNED RESIDUAL — card_create is no longer gated, because create cannot carry a card (#889)', async () => {
   await withServers(armed(storeDir()), async ({ session, rest }) => {
     await session.callTool('work_declare', {
       id: 'w-e2e-2', by: 'ada', card: 755, required: ['ada', 'bo'], replyByMinutes: 20,
     });
 
-    const refused = payload(await session.callTool('card_create', {
+    const made = payload(await session.callTool('card_create', {
       createdBy: 'ada', title: 'acting inside my own open window',
     }));
-    assert.equal(refused.refused, true, `expected a refusal, got ${JSON.stringify(refused)}`);
-    assert.equal(refused.rule, '#755 work gate');
-    assert.equal(refused.workObjectId, 'w-e2e-2');
+    assert.equal(made.refused, undefined,
+      `the gate is inert for create — if this is now a refusal, #889 has landed and this test `
+      + `should be rewritten against the op it wraps, not deleted: ${JSON.stringify(made)}`);
 
-    // ⚠️ The refusal must be a REFUSAL, not a decorated success. Asserting on
-    // the response shape alone would pass if the card were created anyway.
+    // ⭐ THE HALF THAT STILL DISCRIMINATES: the rail is still in the request
+    // path. If the gate were unwired rather than merely inert, the card would
+    // also be created — so this assertion alone cannot tell the two apart, and
+    // the wiring test below is what separates them.
     const cards = await (await fetch(`${rest.baseUrl}/api/cards`)).json();
     const titles = (Array.isArray(cards) ? cards : cards.cards).map((c) => c.title);
-    assert.equal(titles.includes('acting inside my own open window'), false, 'the card was created despite the refusal');
+    assert.equal(titles.includes('acting inside my own open window'), true,
+      'not refused means actually created — a refusal that still writes would be worse than either');
   });
 });
 
@@ -200,17 +226,20 @@ test('#755-2e ⭐⭐ AFTER THE WINDOW TIMES OUT the grantee may act — nothing 
     await session.callTool('work_declare', {
       id: 'w-e2e-4', by: 'ada', card: 755, required: ['ada', 'bo'], replyByMinutes: 0.02, // 1.2s
     });
-    const early = payload(await session.callTool('card_create', { createdBy: 'ada', title: 'too soon' }));
-    assert.equal(early.refused, true, 'sanity: the window should be open first');
+    // ⚠️ #886 — the card_create probes that used to bracket this wait are gone:
+    // the gate is inert for create (see the pinned residual above, #889), so
+    // they would have asserted "allowed" on both sides and proved nothing about
+    // the clock. THE CLAIM IS UNCHANGED and is read where it actually lives —
+    // in the derived state — which is a truer instrument for it anyway: `open`
+    // is computed from `now`, and no timer was ever scheduled.
+    const before = payload(await session.callTool('work_list', {}));
+    assert.equal(before.open.length, 1, 'sanity: the window is open first');
 
     await new Promise((r) => setTimeout(r, 1600));
 
     const listed = payload(await session.callTool('work_list', {}));
     assert.deepEqual(listed.open, [], 'the window should have closed by timeout');
     assert.equal(listed.settled.find((o) => o.id === 'w-e2e-4').grantedTo, 'ada');
-
-    const made = payload(await session.callTool('card_create', { createdBy: 'ada', title: 'granted by timeout' }));
-    assert.equal(made.refused, undefined, `still refused after the window closed: ${JSON.stringify(made)}`);
   });
 });
 

@@ -62,6 +62,19 @@ import { stateAt, STATES } from './work-auction.mjs';
  * ⛔ ADDING AN OP HERE IS NOT ENOUGH — the tool must actually be wrapped in
  * mcp-server.mjs. This list is what the instrument believes; wrapping is what
  * makes it true. A test asserts the two agree.
+ *
+ * ⛔⛔ #886/#889 — AND TODAY THIS LIST MAKES THE GATE INERT. `decideCoveredAction`
+ * is now scoped to the DECLARED CARD, and a `create` brings a card into
+ * existence rather than targeting one, so the only enforced op can never match
+ * a window. The rail is installed, wired, and refuses nothing.
+ *
+ * ⚠️ Which is the honest state, not a hidden one: unscoped it refused three
+ * real actions in one afternoon and zero true positives — and it could only
+ * ever have done that, because it was gating the one op that cannot BE the
+ * declared work. #889 moves this list onto a card-targeting op (update · move ·
+ * claim). Until then, read this constant as "the population this rail protects
+ * is empty", and see the pinned assertions in tests/work-gate-scoped.test.mjs
+ * and tests/work-tools-wiring.test.mjs.
  */
 export const ENFORCED_OPS = Object.freeze(['create']);
 
@@ -134,18 +147,38 @@ export function isGateArmed(env = process.env, root = REPO_ROOT) {
  * May `actor` take a covered action right now?
  *
  * @param {object}   arg
+ * ⛔ #886 — SCOPED TO THE DECLARED CARD, because the unscoped version refused
+ * three real actions in one afternoon and none of them was the failure this
+ * gate exists for. The worst: a seat blocked from FILING A PRODUCTION-OUTAGE
+ * CARD because she had asked the room a question about a different card forty
+ * minutes earlier. The comment below already said the rule — "a mutex on the
+ * WORK, not on a seat's whole existence" — and the code contradicted it by
+ * refusing every covered action by a seat holding any open window at all.
+ *
+ * ⚠️ FAIL-OPEN ON BOTH SIDES OF THE COMPARISON, deliberately. If the action
+ * carries no card, or the window names none, the gate has no basis to say this
+ * IS the declared work — and guessing would rebuild the whole-seat mutex
+ * through the back door. `work_declare` requires `card`, so the second case is
+ * a belt, not a live hole; if the surface ever stops requiring it, that is when
+ * this gate goes blind, and it will do so silently.
+ *
+ * @param {object}   arg
  * @param {?string}  arg.actor        seat key, or null/absent for the human path
  * @param {object[]} arg.workObjects  work objects in play (any state)
  * @param {string}   arg.now          ISO timestamp. Required, never defaulted.
+ * @param {?number}  arg.card         shortId the covered action targets, if any
  * @returns {{allow: boolean, reason?: string, workObjectId?: string}}
  */
-export function decideCoveredAction({ actor, workObjects = [], now }) {
+export function decideCoveredAction({ actor, workObjects = [], now, card = null }) {
   if (!now) throw new Error('decideCoveredAction: now is required — this gate never reads the wall clock');
 
   // The human path. Structurally unreachable (see the header); allowed anyway,
   // because a gate whose failure mode is "refuses the owner in his own board"
   // is worse than one that occasionally under-refuses an agent.
   if (!actor) return { allow: true };
+
+  // No card on the action ⇒ nothing to compare a window against. See the header.
+  if (card === null || card === undefined) return { allow: true };
 
   for (const wo of workObjects) {
     const s = stateAt(wo, now);
@@ -155,13 +188,28 @@ export function decideCoveredAction({ actor, workObjects = [], now }) {
     const involved = s.bidders.includes(actor);
     if (!involved) continue;
 
+    // ⭐ #886 — and not the window's CARD ⇒ still not the actor's problem. This
+    // line is the whole fix; the sentence above it was already true and already
+    // ignored.
+    if (wo.card === null || wo.card === undefined) continue;
+    if (Number(wo.card) !== Number(card)) continue;
+
     if (s.state === STATES.OPEN || s.state === STATES.BIDDING) {
       return {
         allow: false,
         workObjectId: wo.id,
+        // ⛔ #886 — this used to end "Wait for the grant, or withdraw the bid."
+        // and there WAS no withdraw on the surface: the tools were declare ·
+        // bid · nobid · contest · grant · list. A refusal that teaches the
+        // caller a remedy the surface cannot perform is the #837 class, and it
+        // cost a real seat a self-grant recording a settlement that never
+        // happened. `work_withdraw` is now registered, so the sentence is true
+        // — and it names the tool rather than the verb, so the next reader can
+        // grep for it and find out.
         reason:
-          `${actor} holds an open work object (${wo.id}) whose window closes at ${wo.replyBy}. ` +
-          `Wait for the grant, or withdraw the bid.`,
+          `${actor} holds an open work object (${wo.id}) on card #${wo.card}, whose window ` +
+          `closes at ${wo.replyBy}. Wait for the grant, or call work_withdraw to close it. ` +
+          `Work on any OTHER card is not gated by this window.`,
       };
     }
 
