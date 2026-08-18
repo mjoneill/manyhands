@@ -26,6 +26,10 @@
  * same graph. The strings on 12K existing records became edges by DECLARATION,
  * not by rewriting.
  */
+import { deriveCardReferences, MENTIONS_CARD } from './references.mjs';
+
+export { MENTIONS_CARD };
+
 export const PERSON_IRI_BASE = 'https://scrumboard.local/person/';
 
 /**
@@ -89,6 +93,9 @@ const CONTEXT = {
   // was a bound actor, a declared proxy, or an unbound declaration. Derive any
   // display holder from the attempt's actor / declaredSeat / declaredSeatRaw.
   'scrum:heldByAttempt': { '@id': 'scrum:heldByAttempt', '@type': '@id' },
+  // #656 — DERIVED, weak, and namespaced away from `mentions` on purpose (see
+  // core/references.mjs). "This card's text mentions that card" — nothing more.
+  [MENTIONS_CARD]: { '@id': MENTIONS_CARD, '@type': '@id' },
   relatedTo: { '@id': 'scrum:relatedTo', '@type': '@id' },
   blockedBy: { '@id': 'scrum:blockedBy', '@type': '@id' },
   supersedes: { '@id': 'scrum:supersedes', '@type': '@id' },
@@ -117,7 +124,12 @@ const PROP_TO_FACET = Object.fromEntries(Object.entries(FACET_TO_PROP).map(([f, 
 /** Card node (nested facet) → flat document entity. Lossless; pure. */
 function cardNodeToFlat(node, shortToId) {
   const { board, ...flat } = node;
-  if (!board) return node;
+  // #656 — the derived reference edge. Computed here, from the card text that
+  // is its only authority, and DROPPED in flatToCardNode below. It is the one
+  // property on this entity that is not a fact the domain holds.
+  const mentioned = deriveCardReferences(node, shortToId);
+  if (mentioned) flat[MENTIONS_CARD] = mentioned;
+  if (!board) return flat;
   for (const [k, v] of Object.entries(board)) {
     if (k === 'relationships') {
       // Presence-preserving: only the relationship types the facet actually
@@ -139,6 +151,12 @@ function flatToCardNode(entity, idToShort) {
   if (entity.board) return entity;                     // legacy document — already nested
   const node = {}; const board = {}; const rels = {};
   for (const [k, v] of Object.entries(entity)) {
+    // ⛔ #656 — the derived reference edge is DROPPED, explicitly and first.
+    // Without this line the `scrum:*` fallthrough below would route it into the
+    // board facet and it would be WRITTEN BACK on the next save: a second copy
+    // of a derived fact, which is the exact defect this predicate exists to
+    // avoid. It would then outlive the text that produced it.
+    if (k === MENTIONS_CARD) continue;
     if (REL_TYPES.includes(k)) {
       // Key-order preservation is load-bearing (the replay invariant compares
       // BYTES): `relationships` re-enters the facet at the position of the
