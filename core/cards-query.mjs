@@ -115,7 +115,7 @@ function unknownValue(param, value, valid) {
  * created-only semantics: the two questions are different and conflating them
  * is how the gap went unnoticed (audit #661, finding 2).
  */
-function applyFilters(cards, { column, label, assignee, type, since, updatedSince }, { validColumns } = {}) {
+function applyFilters(cards, { column, label, assignee, type, since, updatedSince, q }, { validColumns } = {}) {
   let out = cards;
   if (column != null && column !== '') {
     if (Array.isArray(validColumns) && !validColumns.includes(column)) {
@@ -135,6 +135,24 @@ function applyFilters(cards, { column, label, assignee, type, since, updatedSinc
   }
   if (since != null && since !== '') {
     out = out.filter((c) => typeof c?.createdAt === 'string' && c.createdAt >= since);
+  }
+  // #656 — free-text search. The warrant is the board's own miss log: `q` was
+  // the top unmet request, recorded at the moment seats wanted it and went
+  // elsewhere, and the refusal string said "free-text q not yet" out loud.
+  //
+  // ⚠️ DELIBERATE LIMITS, pinned by tests rather than described in prose:
+  // SUBSTRING and case-insensitive, over TITLE and DESCRIPTION only. Not
+  // tokenised, not stemmed, no ranking — "build" matches "rebuilding" and
+  // "built" matches neither. A richer search is a different slice with a
+  // different cost; quietly doing less than a caller assumes is the failure
+  // mode worth avoiding, so the limits are asserted where they can go red.
+  if (q != null && q !== '') {
+    const needle = String(q).toLowerCase();
+    out = out.filter((c) => {
+      const title = typeof c?.title === 'string' ? c.title.toLowerCase() : '';
+      const desc = typeof c?.description === 'string' ? c.description.toLowerCase() : '';
+      return title.includes(needle) || desc.includes(needle);
+    });
   }
   if (updatedSince != null && updatedSince !== '') {
     out = out.filter((c) => {

@@ -25,6 +25,11 @@
  * remember anything. Fourteen captures sit in the live log right now, and the
  * real signal in them is sharp: `q` (free-text search) wanted FOUR times.
  *
+ * ⭐ AND THAT SIGNAL WAS ACTED ON: #656 shipped `q` the same day, which is the
+ * log doing its whole job — a need recorded at the moment it was felt, ranked by
+ * demand, then built. The fixtures below moved to `sortBy` because `q` stopped
+ * being a miss. A roadmap that never converges was never a roadmap.
+ *
  * ⛔ SO WHY IT STILL NEEDED BUILDING: `console.warn` goes to a launchd stderr
  * file. It is not queryable, it is not in the graph, and it does not survive a
  * log rotation or a fresh deployment. The board's most honest signal about its
@@ -58,13 +63,17 @@ test('#801 an unsupported filter is captured as a durable, queryable miss', asyn
     const before = await misses(s.baseUrl);
     assert.equal(before.total, 0, 'control: a fresh board has recorded no misses');
 
-    // A seat asks for free-text search, which the door does not have. This is
-    // exactly the shape #801 wanted: a real need, at the moment it was felt.
-    await fetch(`${s.baseUrl}/api/cards?q=voiceprint&as=ada`);
+    // ⚠️ This test used `q` until #656 shipped free-text search, at which point
+    // `q` became SUPPORTED and the fixture silently stopped exercising a miss.
+    // ⭐ That is the loop working: the miss log named `q` as the top unmet need,
+    // it got built, and the test that assumed it missing went red. A fixture
+    // that assumes a capability is absent has a shelf life, and this one's
+    // expiry was the feature landing.
+    await fetch(`${s.baseUrl}/api/cards?sortBy=title&as=ada`);
 
     const after = await misses(s.baseUrl);
     assert.equal(after.total, 1, 'the miss was recorded');
-    assert.equal(after.misses[0].param, 'q');
+    assert.equal(after.misses[0].param, 'sortBy');
     assert.equal(after.misses[0].seat, 'ada', 'WITH the seat who needed it — #801\'s requirement');
     assert.ok(after.misses[0].at, 'and when');
   } finally { await s.stop(); }
@@ -73,8 +82,8 @@ test('#801 an unsupported filter is captured as a durable, queryable miss', asyn
 test('#801 misses are ranked by demand — the roadmap the comment already claimed', async () => {
   const s = await startRestServer({ board: makeBoardFixture({ cards: [], nextShortId: 1 }) });
   try {
-    for (let i = 0; i < 3; i++) await fetch(`${s.baseUrl}/api/cards?q=x&as=ada`);
-    await fetch(`${s.baseUrl}/api/cards?sortBy=title&as=grace`);
+    for (let i = 0; i < 3; i++) await fetch(`${s.baseUrl}/api/cards?sortBy=title&as=ada`);
+    await fetch(`${s.baseUrl}/api/cards?groupBy=column&as=grace`);
 
     const m = await misses(s.baseUrl);
     assert.equal(m.total, 4);
@@ -84,8 +93,8 @@ test('#801 misses are ranked by demand — the roadmap the comment already claim
     // vulnerabilities" versus the eight named ones, "45% isolated" versus the
     // 94 cards you could actually go and fix.
     assert.deepEqual(m.byParam, [
-      { param: 'q', count: 3, seats: ['ada'] },
-      { param: 'sortBy', count: 1, seats: ['grace'] },
+      { param: 'sortBy', count: 3, seats: ['ada'] },
+      { param: 'groupBy', count: 1, seats: ['grace'] },
     ], 'ranked by real demand, naming who wanted each');
   } finally { await s.stop(); }
 });
@@ -105,7 +114,7 @@ test('#801 a miss is written to DISK, so it outlives the process that saw it', a
   const s = await startRestServer({ board: makeBoardFixture({ cards: [], nextShortId: 1 }) });
   const boardFile = s.boardFile;
   try {
-    await fetch(`${s.baseUrl}/api/cards?q=persisted&as=ada`);
+    await fetch(`${s.baseUrl}/api/cards?sortBy=persisted&as=ada`);
     assert.equal((await misses(s.baseUrl)).total, 1, 'recorded while alive');
   } finally { await s.stop(); }
 
@@ -115,7 +124,7 @@ test('#801 a miss is written to DISK, so it outlives the process that saw it', a
   const lines = fs.readFileSync(missFile, 'utf8').trim().split('\n').filter(Boolean);
   const rows = lines.map((l) => JSON.parse(l));
   assert.equal(rows.length, 1);
-  assert.equal(rows[0].param, 'q');
+  assert.equal(rows[0].param, 'sortBy');
   assert.equal(rows[0].seat, 'ada');
   fs.rmSync(missFile, { force: true });
 });
@@ -141,6 +150,7 @@ test('#801 a supported query records NOTHING — the paired control', async () =
   try {
     await fetch(`${s.baseUrl}/api/cards?column=backlog&as=ada`);
     await fetch(`${s.baseUrl}/api/cards?label=x&as=ada`);
+    await fetch(`${s.baseUrl}/api/cards?q=now-supported&as=ada`);  // #656 — supported, must not record
     const m = await misses(s.baseUrl);
     assert.equal(m.total, 0,
       'a door that records a miss when it succeeded would make the roadmap noise');

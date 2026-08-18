@@ -1888,6 +1888,7 @@ function handleGetPerson(req, res, key) {
 const CARD_LIST_PARAMS = new Set([
   'limit', 'before', 'fields', 'as', 'bestEffort',
   'column', 'label', 'assignee', 'type', 'since', 'updatedSince',
+  'q',   // #656 — free-text over title+description. The miss log asked for it.
 ]);
 
 function handleListCards(req, res) {
@@ -1928,7 +1929,8 @@ function handleListCards(req, res) {
           error: `unsupported param${unsupported.length > 1 ? 's' : ''}: `
             + `${unsupported.join(', ')} (supported: `
             + `${[...CARD_LIST_PARAMS].filter((p) => p !== 'as' && p !== 'bestEffort').join(', ')}`
-            + ' — free-text q not yet; pass bestEffort=true to be served without the rest)',
+            + ' — q is substring over title+description, not stemmed; '
+            + 'pass bestEffort=true to be served without the rest)',
           unsupported,
         });
       }
@@ -1937,7 +1939,7 @@ function handleListCards(req, res) {
     const result = queryCards(data.cards, {
       limit: q.limit, before: q.before, fields: q.fields,
       column: q.column, label: q.label, assignee: q.assignee, type: q.type, since: q.since,
-      updatedSince: q.updatedSince,
+      updatedSince: q.updatedSince, q: q.q,
     }, { validColumns: data.columns.map((c) => c.id) });
     if (unsupported.length) result.unsupported = unsupported; // best-effort confesses
     sendJSON(res, 200, result);

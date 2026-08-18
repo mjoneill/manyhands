@@ -649,7 +649,7 @@ function buildMcpServer() {
   // the REST no-param call keeps the legacy bare array for browser pages.
   mcp.registerTool('card_list', {
     description: 'List cards — most-recent first page of summaries (no description) with '
-      + 'cardsTotal carrying the count of MATCHING cards. Filters: column, label, assignee, '
+      + 'cardsTotal carrying the count of MATCHING cards. Filters: q (free-text), column, label, assignee, '
       + 'type, since (#659) — exact match, applied before paging. Page backward by passing a '
       + 'shortId from a previous page as `before`. `fields: "all"` restores full bodies; a '
       + 'comma list (e.g. "title,column") narrows further — `id` and `shortId` always ship '
@@ -664,6 +664,8 @@ function buildMcpServer() {
         .describe('"all" for complete cards, or a comma list of field names; default is summary (everything except description). id+shortId always included.'),
       column: z.string().optional()
         .describe('Only cards in this column id (e.g. "in-progress"); unknown column refuses naming the valid ones'),
+      q: z.string().optional()
+        .describe('Free-text search over TITLE and DESCRIPTION. Case-insensitive SUBSTRING — not tokenised, not stemmed, no ranking: "build" matches "rebuilding", "built" matches neither. Combines with every other filter as AND. Does not search comments or labels.'),
       label: z.string().optional().describe('Only cards carrying this label (exact match)'),
       assignee: z.string().optional().describe('Only cards assigned to this seat (exact match)'),
       type: z.string().optional().describe('Only cards of this type: task, idea, goal, reference, feature'),
