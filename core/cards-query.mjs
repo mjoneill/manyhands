@@ -175,6 +175,63 @@ function applyFilters(cards, { column, label, assignee, type, since, updatedSinc
  * total answers the question that was asked, not the size of the board.
  * Throws UNKNOWN_CURSOR / UNKNOWN_FIELD / UNKNOWN_FILTER_VALUE.
  */
+/**
+ * #629's first thin slice — count → facet → refine.
+ *
+ * The card is an idea dump and says so, but it names this twice as the one
+ * capability the surface lacks: "query a Count that would return the number of
+ * objects and then choose to filter by a second dimension."
+ *
+ * ⇒ Today the only way to learn the SHAPE of a result set is to fetch it. An
+ *   agent asking "which columns hold my work" pays the full payload to learn a
+ *   distribution — on a board where one unpaged call measured 3.9 MB.
+ *
+ * ⚠️ MULTIVALUED FACETS ARE DECLARED, NOT ASSUMED. A card carries many labels
+ * and many assignees, so those counts sum to SLOTS rather than cards. A
+ * distribution whose parts silently fail to add up to the whole is the shape of
+ * every quietly-narrowed number this board has found, so the response carries
+ * `multivalued`, `cardsWithValue` and `unset` and a reader can always reconcile.
+ */
+export const FACETS = Object.freeze({
+  column:   { multivalued: false, of: (c) => (c?.column ? [c.column] : []) },
+  type:     { multivalued: false, of: (c) => (c?.type ? [c.type] : []) },
+  priority: { multivalued: false, of: (c) => (c?.priority ? [c.priority] : []) },
+  label:    { multivalued: true,  of: (c) => (Array.isArray(c?.labels) ? c.labels : []) },
+  assignee: { multivalued: true,
+    of: (c) => (Array.isArray(c?.assignees) ? c.assignees.filter((a) => a && a !== 'unassigned') : []) },
+});
+
+export function facetCards(cards, query = {}, opts = {}) {
+  const name = query.facet;
+  const spec = FACETS[name];
+  if (!spec) {
+    const err = new Error(`unknown facet: ${String(name)} (valid: ${Object.keys(FACETS).join(', ')})`);
+    err.code = 'UNKNOWN_FACET';
+    throw err;
+  }
+  // Computed over the FILTERED set — a facet that ignored filters would answer a
+  // different question than the one the caller is narrowing toward.
+  const filtered = applyFilters(cards || [], query, opts);
+  const counts = new Map();
+  let cardsWithValue = 0;
+  for (const c of filtered) {
+    const values = spec.of(c);
+    if (!values.length) continue;
+    cardsWithValue += 1;
+    for (const v of values) counts.set(v, (counts.get(v) || 0) + 1);
+  }
+  return {
+    facet: name,
+    multivalued: spec.multivalued,
+    total: filtered.length,
+    cardsWithValue,
+    unset: filtered.length - cardsWithValue,
+    counts: [...counts.entries()]
+      .map(([value, count]) => ({ value, count }))
+      .sort((a, b) => b.count - a.count || String(a.value).localeCompare(String(b.value))),
+  };
+}
+
 export function queryCards(cards, query = {}, opts = {}) {
   const { limit, before, fields } = query;
   const project = makeProjector(fields);

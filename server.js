@@ -55,7 +55,7 @@ import { extractMentions as extractMentionsFromRoster } from './core/people.mjs'
 // in order to serve a board, so boot must not require one.
 import { domainToJsonLd } from './core/jsonld.mjs';
 import { deriveGraph, personByKey } from './core/people.mjs';
-import { queryCards } from './core/cards-query.mjs';
+import { queryCards, facetCards } from './core/cards-query.mjs';
 import { queryChangesFromLog } from './core/changes-log-query.mjs';
 import { readEvents, oldestRetainedAt } from './core/event-log.mjs';
 // #683 — the deafness cure's server half. REST owns the event log, so it owns
@@ -2050,6 +2050,7 @@ const CARD_LIST_PARAMS = new Set([
   'limit', 'before', 'fields', 'as', 'bestEffort',
   'column', 'label', 'assignee', 'type', 'since', 'updatedSince',
   'q',   // #656 — free-text over title+description. The miss log asked for it.
+  'facet',  // #629 — count → facet → refine, before paying for rows
 ]);
 
 function handleListCards(req, res) {
@@ -2097,6 +2098,15 @@ function handleListCards(req, res) {
       }
     }
 
+    // #629 — a facet request answers with the SHAPE of the set and no rows.
+    if (q.facet != null && q.facet !== '') {
+      return sendJSON(res, 200, facetCards(data.cards, {
+        facet: q.facet,
+        column: q.column, label: q.label, assignee: q.assignee, type: q.type,
+        since: q.since, updatedSince: q.updatedSince, q: q.q,
+      }, { validColumns: data.columns.map((c) => c.id) }));
+    }
+
     const result = queryCards(data.cards, {
       limit: q.limit, before: q.before, fields: q.fields,
       column: q.column, label: q.label, assignee: q.assignee, type: q.type, since: q.since,
@@ -2105,7 +2115,8 @@ function handleListCards(req, res) {
     if (unsupported.length) result.unsupported = unsupported; // best-effort confesses
     sendJSON(res, 200, result);
   } catch (e) {
-    if (e.code === 'UNKNOWN_CURSOR' || e.code === 'UNKNOWN_FIELD' || e.code === 'UNKNOWN_FILTER_VALUE') {
+    if (e.code === 'UNKNOWN_CURSOR' || e.code === 'UNKNOWN_FIELD' || e.code === 'UNKNOWN_FILTER_VALUE'
+        || e.code === 'UNKNOWN_FACET') {
       return sendJSON(res, 400, { error: e.message });
     }
     console.error('GET /api/cards:', e.message);

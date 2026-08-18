@@ -666,6 +666,8 @@ function buildMcpServer() {
         .describe('Only cards in this column id (e.g. "in-progress"); unknown column refuses naming the valid ones'),
       q: z.string().optional()
         .describe('Free-text search over TITLE and DESCRIPTION. Case-insensitive SUBSTRING — not tokenised, not stemmed, no ranking: "build" matches "rebuilding", "built" matches neither. Combines with every other filter as AND. Does not search comments or labels.'),
+      facet: z.string().optional()
+        .describe('Return the SHAPE of the result set instead of rows: counts grouped by column, type, priority, label or assignee. Composes with every filter, so the flow is count → refine → count again before paying for a page. Response carries multivalued/cardsWithValue/unset so the parts always reconcile against the total.'),
       label: z.string().optional().describe('Only cards carrying this label (exact match)'),
       assignee: z.string().optional().describe('Only cards assigned to this seat (exact match)'),
       type: z.string().optional().describe('Only cards of this type: task, idea, goal, reference, feature'),
@@ -677,9 +679,9 @@ function buildMcpServer() {
     // forwarded it — declared, accepted, and silently dropped, which is #831's
     // three-list defect committed in the same hour it was being audited for.
     // Caught by the every-declared-param-is-forwarded test, not by review.
-  }, async ({ limit, before, fields, q: search, column, label, assignee, type, since, updatedSince } = {}) => {
+  }, async ({ limit, before, fields, q: search, facet, column, label, assignee, type, since, updatedSince } = {}) => {
     const q = new URLSearchParams(
-      Object.entries({ limit: limit ?? 50, before, fields, q: search, column, label, assignee, type, since, updatedSince })
+      Object.entries({ limit: limit ?? 50, before, fields, q: search, facet, column, label, assignee, type, since, updatedSince })
         .filter(([, v]) => v != null && v !== '')
         .map(([k, v]) => [k, String(v)]),
     ).toString();
