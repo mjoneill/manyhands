@@ -178,3 +178,77 @@ test('#881 DELETING the card removes its person-blocker node', async () => {
     assert.equal(q.body.rows[0].n, '0');
   } finally { await s.stop(); }
 });
+
+/**
+ * ⛔⛔ THE TRANSITION CASE — found in PRODUCTION, minutes after this card shipped.
+ *
+ * I cleared a person-blocker on a live card and the concierge query still
+ * returned it as OPEN. The graph held BOTH:
+ *
+ *     entity:<card>/blocker/person:ada  scrum:status "open"
+ *     entity:<card>/blocker/person:ada  scrum:status "cleared"
+ *
+ * ⇒ `updateEntity` deletes the subject's OWN triples and the prior CHECK nodes,
+ *   and never sweeps Blocker or ReleaseCondition nodes. Their subjects are
+ *   DERIVED (`<card>/blocker/…`), so subject-scoped deletion cannot reach them —
+ *   the #687 D5 shape, again, on the update path instead of the delete path.
+ *
+ * ⚠️ AND `sweepBlockerNodes` EXISTS AND IS CORRECT. It is called from
+ * removeEntity only, while a comment beside the projection says it "is called
+ * from both paths." A sentence asserting a runtime property, believed by every
+ * reader, checked by nobody — including me, who read that exact comment while
+ * building this feature and took it as coverage.
+ *
+ * ⭐ THE PRE-EXISTING TEST COULD NOT SEE THIS: it wrote a blocker as `cleared`
+ * from the start. Creating-as-cleared and transitioning open→cleared are
+ * different operations, and only the second one accumulates.
+ *
+ * ⛔ NOT MY BUG, AND I WIDENED IT: the CARD-blocker path has behaved this way
+ * since #814. Person-blockers inherited it and made it visible, because a
+ * standing "what is waiting on me" query reads the stale row every time.
+ */
+test('#881 ⛔ CLEARING a blocker REPLACES its status — it does not accumulate one', async () => {
+  const s = await startRestServer({ board: board() });
+  try {
+    await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+      blockers: [{ person: 'ada', status: 'open', note: 'waiting' }], by: 'ada',
+    });
+    const open = await api(s.baseUrl, 'POST', '/api/graph', {
+      query: 'SELECT ?st WHERE { ?b a scrum:Blocker ; scrum:blockedByPerson person:ada ; scrum:status ?st }',
+    });
+    assert.deepEqual(open.body.rows, [{ st: 'open' }], 'control: one status while open');
+
+    await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+      blockers: [{ person: 'ada', status: 'cleared', note: 'they answered' }], by: 'ada',
+    });
+    const after = await api(s.baseUrl, 'POST', '/api/graph', {
+      query: 'SELECT ?st WHERE { ?b a scrum:Blocker ; scrum:blockedByPerson person:ada ; scrum:status ?st }',
+    });
+    assert.deepEqual(after.body.rows, [{ st: 'cleared' }],
+      'the OLD status survived the update — the concierge query reads a cleared blocker as open');
+
+    // ⭐ The consequence, asserted where it is felt rather than where it is caused.
+    const waiting = await api(s.baseUrl, 'POST', '/api/graph', {
+      query: 'SELECT ?id WHERE { ?b a scrum:Blocker ; scrum:blockedByPerson person:ada ; '
+        + 'scrum:status "open" ; scrum:blocks ?c . ?c schema:identifier ?id }',
+    });
+    assert.equal(waiting.body.rows.length, 0, 'a cleared blocker must leave the queue');
+  } finally { await s.stop(); }
+});
+
+test('#881 the NOTE is replaced too, not appended alongside the old one', async () => {
+  const s = await startRestServer({ board: board() });
+  try {
+    await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+      blockers: [{ person: 'ada', status: 'open', note: 'first reason' }], by: 'ada',
+    });
+    await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+      blockers: [{ person: 'ada', status: 'open', note: 'second reason' }], by: 'ada',
+    });
+    const r = await api(s.baseUrl, 'POST', '/api/graph', {
+      query: 'SELECT ?n WHERE { ?b a scrum:Blocker ; scrum:blockedByPerson person:ada ; scrum:note ?n }',
+    });
+    assert.deepEqual(r.body.rows, [{ n: 'second reason' }],
+      'two notes on one blocker is a card that says two things about why it is blocked');
+  } finally { await s.stop(); }
+});

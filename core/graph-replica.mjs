@@ -426,6 +426,30 @@ export function updateEntity(store, entity) {
   // BEFORE re-projecting, unlike the concept sweep below: these nodes are owned
   // outright, so re-projection recreates exactly the ones that survive.
   for (const chk of priorChecks) for (const q of store.match(chk, null, null)) store.delete(q);
+  // ⛔⛔ #881 — AND THE OTHER TWO DERIVED FAMILIES, which were missing here and
+  // were found in PRODUCTION rather than by the suite.
+  //
+  // Blocker and ReleaseCondition nodes hang off DERIVED subjects
+  // (`<card>/blocker/…`, `<card>/rc/…`), so the subject-scoped delete above
+  // cannot reach them — the same #687 D5 shape the check sweep on the line above
+  // exists for. Without this, an UPDATE adds the new triples beside the old:
+  //
+  //     scrum:status "open"      ← survives
+  //     scrum:status "cleared"   ← added
+  //
+  // ⇒ A cleared blocker keeps answering the "what is waiting on me" query, which
+  //   is precisely the structured version of the prose rot #881 was built to end.
+  //
+  // ⚠️ `sweepBlockerNodes` ALREADY EXISTED AND WAS CORRECT — it was wired into
+  // removeEntity only, while a comment beside the projection said it "is called
+  // from both paths". A sentence asserting a runtime property, believed by every
+  // reader including the one who then built a feature on top of it.
+  // ⚠️ ONE CALL COVERS BOTH FAMILIES — sweepBlockerNodes already sweeps
+  // ReleaseCondition too (#814 generalised it rather than copying it). My first
+  // version of this fix invented a second `sweepReleaseConditionNodes(...)` that
+  // does not exist, which is the same reach-for-a-plausible-name reflex as the
+  // fabricated shas: the call SITE was right and the identifier was made up.
+  sweepBlockerNodes(store, subject.value);
   projectEntity(store, entity);
   // AFTER re-projecting: a concept the entity still carries has just been
   // re-added, so it will not be swept. Only genuinely dropped ones are.
@@ -667,7 +691,11 @@ function projectEntity(store, e) {
       // id and not equal to it, so subject-scoped deletion never reaches them.
       // Removing the EDGE drops them (they are re-projected from blockedBy);
       // DELETING THE CARD did not, and production proved it. See
-      // sweepBlockerNodes, which is called from both paths.
+      // sweepBlockerNodes. ⚠️ THAT SENTENCE USED TO SAY "which is called from
+      // both paths" AND IT WAS FALSE — it was wired into removeEntity only, so
+      // every UPDATE left the previous status and note behind. Found in
+      // production by a cleared blocker that kept answering the waiting-on-me
+      // query. Both paths call it now, and a test pins the transition.
       {
         const blockedBy = new Set((e.blockedBy || []).map(String));
         for (const b of e['scrum:blockers'] || []) {
