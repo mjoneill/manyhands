@@ -42,6 +42,10 @@ export const IRI = Object.freeze({
   // #814 — a commit is an ENTITY. It was a `git:<sha>` literal, and a literal
   // cannot be traversed, joined or counted.
   commit: 'https://scrumboard.local/commit/',
+  // #687 — a label is a CONCEPT. Its own namespace because a label is not a
+  // card, a person or a column, and folding it into entity: would make
+  // "is this id a card?" un-askable.
+  concept: 'https://scrumboard.local/concept/',
 });
 
 /** Prepended to every query so agents never hand-declare a prefix. */
@@ -271,8 +275,46 @@ export function subjectIriFor(entity) {
  * everything; nothing here is computed across entities, which is the property
  * that makes incremental maintenance possible at all.
  */
+/**
+ * #687 — collect the concept nodes this subject currently points at.
+ *
+ * Read BEFORE the subject's triples are deleted, because afterwards there is
+ * nothing left to say which concepts it used to carry — and a sweep with no
+ * candidate list would have to scan every concept on every write.
+ */
+function conceptsOf(store, subject) {
+  const K = nn(IRI.schema + 'keywords');
+  return store.match(subject, K, null).map((q) => q.object);
+}
+
+/**
+ * #687 — delete concepts nothing points at any more.
+ *
+ * ⛔ WHY THIS IS NOT OPTIONAL. Concept triples hang from the CONCEPT's subject,
+ * not from the card's, so subject-scoped deletion cannot reach them. The first
+ * implementation therefore left a typed, named concept alive after its last
+ * card dropped the label — present in an incrementally-synced store and absent
+ * from a rebuilt one, which is #714's parity invariant broken and the room's
+ * D-rule failing exactly as stated: a derived thing that needs keeping in step
+ * with its authority has left the pattern.
+ *
+ * ⚠️ ONLY sweeps candidates that just lost an edge, and only when NO card still
+ * references them — a concept two cards share must survive one of them dropping
+ * it. Over-collecting here would be the more damaging bug, since it would delete
+ * identities that are still in use and every query would silently narrow.
+ */
+function sweepOrphanConcepts(store, candidates) {
+  const K = nn(IRI.schema + 'keywords');
+  for (const t of candidates) {
+    if (store.match(null, K, t).length) continue;   // still referenced — leave it
+    for (const q of store.match(t, null, null)) store.delete(q);
+  }
+}
+
 export function updateEntity(store, entity) {
   const subject = nn(subjectIriFor(entity));
+  // #687 — read the old concept edges while they still exist.
+  const priorConcepts = conceptsOf(store, subject);
   // #805 — an RDF collection lives in BLANK NODES, which are their own subjects.
   // Subject-scoped deletion alone would drop `<pv> orderedPrompts _:head` and
   // orphan every `_:cell rdf:first/rdf:rest` triple behind it, forever, on
@@ -281,6 +323,9 @@ export function updateEntity(store, entity) {
   dropListChains(store, subject);
   for (const q of store.match(subject, null, null)) store.delete(q);
   projectEntity(store, entity);
+  // AFTER re-projecting: a concept the entity still carries has just been
+  // re-added, so it will not be swept. Only genuinely dropped ones are.
+  sweepOrphanConcepts(store, priorConcepts);
 }
 
 /**
@@ -309,8 +354,12 @@ export function removeEntity(store, idOrEntity) {
   // #805 — same reason as updateEntity: the list chain is not this subject's.
   dropListChains(store, nn(id.startsWith('http') ? id : IRI.entity + id));
   const subject = nn(id.startsWith('http') ? id : IRI.entity + id);
+  // #687 — a DELETED card releases its concepts too. Same reasoning as
+  // updateEntity: read the edges before the triples that carry them are gone.
+  const priorConcepts = conceptsOf(store, subject);
   let n = 0;
   for (const q of store.match(subject, null, null)) { store.delete(q); n += 1; }
+  sweepOrphanConcepts(store, priorConcepts);
   return n;
 }
 
@@ -380,7 +429,40 @@ function projectEntity(store, e) {
       // already declines to commit.
       if (e['scrum:for']) add(s, nn(S + 'for'), lit(e['scrum:for']));
       for (const a of e.assignees || []) if (a && a !== 'unassigned') add(s, nn(S + 'assignee'), personRef(a));
-      for (const l of e.labels || []) add(s, nn(S + 'label'), lit(l));
+      // #687 — BOTH HALVES, and the literal is not the compromise half.
+      //
+      // #857 §V: "Membership by label is cheap and bulk; structural children get
+      // real edges. Both, on purpose — THE STRING FOR SCALE, THE EDGE FOR
+      // TRAVERSAL." The literal is what 391 labels, every `card_list?label=`
+      // call and every existing consumer read; it stays, unchanged, forever.
+      //
+      // What was missing is the other half. #687 closed in 2026-08-05 having
+      // stated the exact trigger for building it: "mint concept nodes IF WE WANT
+      // LABEL→CARDS TRAVERSAL FROM THE GRAPH SIDE." A literal cannot be a
+      // subject, so today you can ask "which labels does this card carry" and
+      // you cannot start at a label and walk to its cards. That condition is now
+      // met and measured: traversal is one of the three graph-first gaps, and
+      // 47% of cards touch nothing.
+      //
+      // ⚠️ SHAPE, per the room's D-rule: materialized here at PROJECTION time
+      // from ONE authority — the card's own labels — and rebuilt every time.
+      // There is no second copy to keep in step, so drift stays unrepresentable.
+      //
+      // ⛔ NOT SYNONYMS. `building scrum board` and `building-scrum-board` get
+      // two nodes here and that is correct for this slice: merging them needs a
+      // mechanism nobody has designed yet, and identities are a prerequisite for
+      // every candidate design. Minting the identity does not decide the merge.
+      for (const l of e.labels || []) {
+        add(s, nn(S + 'label'), lit(l));
+        const t = nn(IRI.concept + encodeURIComponent(l));
+        add(s, nn(IRI.schema + 'keywords'), t);
+        // Set-semantics per triple, so N cards sharing a label converge on ONE
+        // node rather than minting N look-alikes. That convergence IS the
+        // identity: without it every query above would still pass while the
+        // graph held N unrelated things that happen to spell the same.
+        store.add(oxigraph.triple(t, A, nn(IRI.schema + 'DefinedTerm')));
+        store.add(oxigraph.triple(t, nn(IRI.schema + 'name'), lit(l)));
+      }
       // ONE list, imported — a second copy here is the #618 drift shape.
       for (const rt of REL_TYPES) {
         for (const r of e[rt] || []) {
