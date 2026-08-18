@@ -34,6 +34,16 @@ export const CARD_CREATE_PROBES = [
     note: 'singular alias; normalized into assignees. `both` is the retired #508 sentinel' },
   { name: 'implementedBy', wellFormed: ['a'.repeat(40)], malformed: ['a75a247'],
     note: '#814 — full 40-char shas only; a short sha is an aliasing bug' },
+  // #801/#792 — the falsifier tripwires. The malformed case is a SELECT rather
+  // than obvious junk on purpose: a SELECT is valid SPARQL and would be accepted
+  // by any "is this a query" check, but it returns rows instead of a boolean, so
+  // `expect` could never be compared and the check could never fail. An
+  // unfailable check is the defect this field exists to prevent, so refusing it
+  // is the rule most worth probing.
+  { name: 'checks',
+    wellFormed: [{ claim: 'nothing is typed scrum:Sasquatch', ask: 'ASK { ?x a scrum:Sasquatch }', expect: false }],
+    malformed: [{ claim: 'x', ask: 'SELECT ?s WHERE { ?s ?p ?o }', expect: false }],
+    note: '#792 — {claim, ask, expect}; ASK only, because a SELECT has no boolean to compare' },
   // ⚠️ `{relatedTo: []}` is IDENTICAL to the default the server writes on every
   // card, so a probe using it cannot tell "my write landed" from "the default
   // was already there" — the presence-weakness in a new hat. Needs a real edge.

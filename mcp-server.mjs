@@ -585,6 +585,7 @@ function buildMcpServer() {
       priority: z.enum(['p0', 'p1', 'p2', 'p3']).optional().nullable(),
       column: z.string().optional().describe('Column id — defaults to "backlog"'),
       for: z.string().optional(),
+      checks: z.array(z.object({ claim: z.string(), ask: z.string(), expect: z.boolean() })).optional().describe('Falsifier tripwires for this card\'s load-bearing claims. Each is {claim, ask, expect}: the sentence in your own words, a SPARQL ASK whose answer would falsify it, and the boolean it must return today. GET /api/checks runs them all and reports holds/stale/error. Attach one when you write a claim about what exists — that is the only moment you know what would make it false. ASK only: a SELECT returns rows, not a boolean, so the check could never fail.'),
       implementedBy: z.array(z.string()).optional().describe('FULL 40-char git shas of the commits implementing this card. Short shas are refused: the graph cannot expand an abbreviation, so both forms would become two nodes for one commit. Makes "what implements #N" and "what did this commit implement" one-hop queries instead of prose archaeology.'),
       // #614 — the edge is offered where the writing happens. Targets are
       // shortIds; closed cards are valid targets (citation/supersession).
@@ -612,6 +613,7 @@ function buildMcpServer() {
       parkedBy: z.string().optional().describe('seat/person key parking this card — REQUIRES parkedUntil. A park says "nobody yet", unlike a claim which says "I am on it".'),
       parkedUntil: z.string().optional().describe('ISO-8601. REQUIRED with parkedBy: a park with no end date becomes permanent by forgetting. Once it lapses the card returns to board_ready on its own.'),
       parkedReason: z.string().optional().describe('why it is deferred — free text, optional'),
+      checks: z.array(z.object({ claim: z.string(), ask: z.string(), expect: z.boolean() })).optional().describe('Falsifier tripwires for this card\'s load-bearing claims. Each is {claim, ask, expect}: the sentence in your own words, a SPARQL ASK whose answer would falsify it, and the boolean it must return today. GET /api/checks runs them all and reports holds/stale/error. Attach one when you write a claim about what exists — that is the only moment you know what would make it false. ASK only: a SELECT returns rows, not a boolean, so the check could never fail.'),
       implementedBy: z.array(z.string()).optional().describe('FULL 40-char git shas of the commits implementing this card. Short shas are refused: the graph cannot expand an abbreviation, so both forms would become two nodes for one commit. Makes "what implements #N" and "what did this commit implement" one-hop queries instead of prose archaeology.'),
       relationships: z.object({
         relatedTo: z.array(z.number()).optional(),

@@ -787,6 +787,81 @@ async function handleGraphQuery(req, res) {
  * is a vibes number. The response says how many cards carry checks and how many
  * do not, so "nothing is wrong" can never be confused with "nothing is watched".
  */
+// ── #801 — the retrieval miss log, made durable ──────────────────────────────
+//
+// #801 proposed a VOLUNTARY log (a card, comments, no code) because "automatic
+// capture is NOT available", and named its own falsification: "if this card has
+// zero entries in a week, the voluntary mechanism failed and THAT is the
+// finding." Measured 2026-08-18: twelve entries, ALL dated 2026-08-13, none in
+// the five days since. Not the zero it predicted — it fired once while everyone
+// was watching and never again, which is the rail-that-fires-on-remembering
+// class decaying exactly as that class does.
+//
+// ⭐ And the automatic capture it said was unavailable had already shipped one
+// endpoint over. This makes it durable and queryable instead of stderr-only.
+const MISS_LOG_FILE = BOARD_DATA_FILE.replace(/\.json$/, '') + '-misses.jsonl';
+
+function recordMisses(params, seat, url) {
+  const at = new Date().toISOString();
+  try {
+    const lines = params.map((param) => JSON.stringify({ at, seat, param, url })).join('\n') + '\n';
+    fs.appendFileSync(MISS_LOG_FILE, lines);
+  } catch (e) {
+    // ⚠️ NEVER let bookkeeping break the request that produced it. The caller
+    // asked for cards; failing their query because we could not write a note
+    // about it would be a strictly worse board. Named on stderr so a broken
+    // recorder is visible rather than silently producing an empty roadmap.
+    console.error(`${new Date().toISOString()} miss-log: could not record (${e.message})`);
+  }
+}
+
+/**
+ * #801 — GET /api/misses. What seats asked this board for and did not get.
+ *
+ * ⚠️ THE POPULATION IS NAMED IN THE PAYLOAD, not left to the reader. This sees
+ * only misses that ARRIVED AT THE DOOR. A seat who reaches for `grep` — which
+ * is the population #801's whole argument was about — is invisible here, so a
+ * low number must never be read as "few misses". It means "few misses of the
+ * kind we can see".
+ */
+function handleMisses(req, res) {
+  let rows = [];
+  try {
+    if (fs.existsSync(MISS_LOG_FILE)) {
+      rows = fs.readFileSync(MISS_LOG_FILE, 'utf8').split('\n').filter(Boolean)
+        .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+        .filter(Boolean);
+    }
+  } catch (e) {
+    return sendJSON(res, 500, { error: `miss log unreadable: ${e.message}` });
+  }
+
+  // ⭐ A LIST, NOT A NUMBER. A count of misses is a vibes number; the ranked
+  // params — with the seats who wanted each — are the actionable thing, and are
+  // literally the roadmap the emitting comment already claimed to be.
+  const by = new Map();
+  for (const r of rows) {
+    if (!by.has(r.param)) by.set(r.param, { param: r.param, count: 0, seats: new Set() });
+    const e = by.get(r.param);
+    e.count += 1;
+    if (r.seat) e.seats.add(r.seat);
+  }
+  const byParam = [...by.values()]
+    .map((e) => ({ param: e.param, count: e.count, seats: [...e.seats].sort() }))
+    .sort((a, b) => b.count - a.count || a.param.localeCompare(b.param));
+
+  sendJSON(res, 200, {
+    total: rows.length,
+    byParam,
+    covers: 'retrieval needs that ARRIVED AT THE DOOR — a seat asked this board for '
+      + 'something it could not serve, recorded at the moment of the ask',
+    blindTo: 'a seat who wanted something and reached for grep, git, a file read or another '
+      + 'tool without asking the board at all. That population is unmeasured here and is the '
+      + 'one #801 was originally about.',
+    misses: rows.slice(-200),
+  });
+}
+
 async function handleChecks(req, res) {
   try {
     const { store } = await warmGraphStore();
@@ -1663,6 +1738,14 @@ function handleListCards(req, res) {
       console.warn(
         `[card-query] seat=${q.as || 'unknown'} unsupported=${unsupported.join(',')} url=${req.url}`,
       );
+      // #801 — AND PERSIST IT. The line above has captured real retrieval needs
+      // since #656 step 2 shipped, which means #801's premise ("automatic
+      // capture is NOT available") was already false when the card was written.
+      // But stderr is not queryable and does not survive a deploy, so the
+      // board's most honest signal about its own gaps was being written where
+      // nobody reads and nothing keeps. Measured on the live log: `q` — free-text
+      // search — wanted four times, by seats who then went elsewhere.
+      recordMisses(unsupported, q.as || null, req.url);
       if (q.bestEffort !== 'true') {
         return sendJSON(res, 400, {
           // #659 verification finding: this string is the only place a seat
@@ -2806,6 +2889,7 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/graph$/,                fn: (req, res) => handleGraphQuery(req, res) },
   { method: 'GET',    re: /^\/api\/ready$/,                fn: (req, res) => handleReady(req, res) },       // #815
   { method: 'GET',    re: /^\/api\/checks$/,               fn: (req, res) => handleChecks(req, res) },      // #792
+  { method: 'GET',    re: /^\/api\/misses$/,               fn: (req, res) => handleMisses(req, res) },      // #801
   { method: 'GET',    re: /^\/api\/board\/status$/,         fn: (req, res) => handleBoardStatus(req, res) },
   { method: 'GET',    re: /^\/api\/board$/,                fn: (req, res) => handleGetBoard(req, res) },
   { method: 'GET',    re: /^\/api\/roster$/,               fn: (req, res) => handleGetRoster(req, res) },
