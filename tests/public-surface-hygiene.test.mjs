@@ -98,7 +98,7 @@ test('#837 POSITIVE CONTROL — a plain word IS detected as a literal', () => {
   assert.equal(isPlainWordLiteral('\\b\\w+@\\w+\\b'), false, 'a regex shape is not a literal');
 });
 
-test('#837 no test reaches for LIVE board, roster or home-directory data', () => {
+test('#837 no tracked source reaches for LIVE board, roster or home-directory data', () => {
   // A test pointed at the real board would render real card titles and real
   // message text into a public job log, and no name-residue scan would
   // recognise it as anything but test output. The suite currently points every
@@ -106,10 +106,48 @@ test('#837 no test reaches for LIVE board, roster or home-directory data', () =>
   const offenders = [];
   const selfName = path.basename(new URL(import.meta.url).pathname);
 
-  for (const entry of fs.readdirSync(TESTS, { withFileTypes: true })) {
-    if (!entry.isFile() || !/\.(mjs|js)$/.test(entry.name)) continue;
-    if (entry.name === selfName) continue;   // this file documents the patterns it forbids
-    const raw = fs.readFileSync(path.join(TESTS, entry.name), 'utf8');
+  // ⛔ #866 — THIS SCANNED `tests/` ONLY, AND THE FIRST REAL LEAK WAS IN `tools/`.
+  // A tool committed to this repo hardcoded an absolute path into the operator's
+  // private data tree; the push gate caught it and this guard did not, because
+  // this guard was not looking there. A guard whose title says "no tracked source"
+  // and whose loop reads one directory is the lying-label class applied to itself.
+  const SCAN_DIRS = ['tests', 'tools', 'scripts'];
+
+  // ⚠️ EXEMPTIONS ARE EXPLICIT, REASONED, AND TESTED (see the test below this one).
+  // An exemption that names a file which no longer exists is an exemption nobody
+  // reviews, and a silently-stale allowlist is how a guard stops guarding.
+  const ALLOWED_LIVE_READS = new Map([
+    ['tests/field-triple-coverage.test.mjs',
+      'RC0b deliberately enumerates keys from the LIVE board when one is reachable, '
+      + 'because that is the only source that can surface a field written by a path '
+      + 'nobody remembers. It degrades to PARTIAL and says so when no board answers.'],
+    ['tests/boot-gate.test.mjs',
+      'spawns its OWN server on the production port on purpose, to prove a second '
+      + 'instance refuses to start. The port number is the subject of the test, not '
+      + 'an attempt to read the operator board.'],
+  ]);
+
+  // ⚠️ THE LIVE-BOARD RULE APPLIES TO `tests/` ONLY, AND THE DISTINCTION IS REAL.
+  // An operator TOOL that talks to a running board is doing its job — board-lint,
+  // fanout-watch and suite-watch exist precisely to observe a live instance.
+  // A TEST that talks to a running board borrows the operator's data, pollutes a
+  // public CI log with it, and passes for a reason unrelated to the code under
+  // test. Same string, opposite meaning, decided by which directory it is in.
+  const LIVE_RULE_DIRS = new Set(['tests']);
+
+  const files = [];
+  for (const dir of SCAN_DIRS) {
+    const abs = path.join(REPO, dir);
+    if (!fs.existsSync(abs)) continue;
+    for (const entry of fs.readdirSync(abs, { withFileTypes: true })) {
+      if (!entry.isFile() || !/\.(mjs|js|cjs)$/.test(entry.name)) continue;
+      if (dir === 'tests' && entry.name === selfName) continue;  // documents its own patterns
+      files.push([`${dir}/${entry.name}`, path.join(abs, entry.name)]);
+    }
+  }
+
+  for (const [rel, absPath] of files) {
+    const raw = fs.readFileSync(absPath, 'utf8');
 
     // ⚠️ COMMENTS ARE STRIPPED FIRST, because the property is "does a test READ
     // live data", not "does a test MENTION a path". The first version matched
@@ -135,7 +173,17 @@ test('#837 no test reaches for LIVE board, roster or home-directory data', () =>
       /(^|['"`\s])~\//m,                 // tilde-relative
       /\/\.[a-z][a-z0-9-]*\/workspace\//, // a dotted config dir holding a workspace
     ]) {
-      if (re.test(src)) offenders.push(`${entry.name} — matches ${re}`);
+      if (re.test(src)) offenders.push(`${rel} — matches ${re}`);
+    }
+
+    // ⛔ #866 — THE SECOND MISSING THIRD. The title says "LIVE board" and nothing
+    // here looked for one. A test can reach the operator's real board over a
+    // LOOPBACK URL without any filesystem path at all — which is exactly how
+    // #831 RC0b passed for weeks on borrowed production data, invisible to this
+    // guard, until CI ran it on a machine with no board.
+    const LIVE_BOARD = /127\.0\.0\.1:31\d\d|localhost:31\d\d/;
+    if (LIVE_RULE_DIRS.has(rel.split('/')[0]) && LIVE_BOARD.test(src) && !ALLOWED_LIVE_READS.has(rel)) {
+      offenders.push(`${rel} — reaches the LIVE board over a loopback URL`);
     }
   }
 
@@ -144,6 +192,25 @@ test('#837 no test reaches for LIVE board, roster or home-directory data', () =>
     'a test hardcodes a home directory or the live data tree.\n'
     + '  Point it at os.tmpdir() with a fixture. A test that reads live board\n'
     + '  data prints live board data, and in CI that is a public, permanent log.',
+  );
+});
+
+test('#837 every live-read exemption names a file that still exists', () => {
+  // ⚠️ #866 — an exemption is a hole in a guard, and a hole nobody can see is
+  // worse than no guard. If an exempted file is renamed or deleted, the entry
+  // becomes an unreviewable permanent hole that reads as deliberate. This makes
+  // a stale exemption FAIL rather than linger.
+  const EXEMPT = ['tests/field-triple-coverage.test.mjs', 'tests/boot-gate.test.mjs'];
+  const missing = EXEMPT.filter((rel) => !fs.existsSync(path.join(REPO, rel)));
+  assert.deepEqual(missing, [], 'a live-read exemption names a file that no longer exists');
+
+  // And each exempted file must actually still contain the thing it is exempted
+  // FOR — an exemption for a pattern the file no longer has is equally stale.
+  const stillNeeded = EXEMPT.filter((rel) =>
+    /127\.0\.0\.1:31\d\d|localhost:31\d\d/.test(fs.readFileSync(path.join(REPO, rel), 'utf8')));
+  assert.deepEqual(
+    EXEMPT, stillNeeded,
+    'an exemption is no longer needed — the file no longer reaches a live board. Remove it.',
   );
 });
 
