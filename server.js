@@ -840,7 +840,28 @@ const DERIVED_RELATIONSHIP_TYPES = ['supersededBy'];
 // in this same request. Reporting it as ignored, refused, or redirected would
 // be false in all three directions. A comment asserting a runtime property is
 // a test case in prose; this split is that comment, encoded.
-const READ_PROJECTION_FIELDS = new Set(['comments']);
+// ⭐ #856 — ONE OBJECT, BOTH HALVES. A projection needs two things to behave:
+// the value the route WOULD EMIT (the comparand, without which every send
+// always-fires) and the destination to send the caller to. The first cut of
+// this kept them in two containers with a boot-time check on ONE of them —
+// which is worse than checking neither, because a contributor adds a field,
+// boots, gets told about the missing destination, adds it, boots clean, and
+// ships an always-fires diagnostic with a green start-up.
+//
+// ⇒ A RAIL THAT VALIDATES HALF OF A TWO-PART REQUIREMENT READS AS COMPLETENESS.
+// Keeping the halves in one entry makes the mismatch unrepresentable rather
+// than caught. (review finding, 2026-08-18)
+const CARD_PROJECTIONS = {
+  comments: {
+    // The comparand echo-suppression was missing. #844 compared against
+    // `card[field]` — undefined for every projection — so it could never tell
+    // an RMW echo from a real attempt. This is the SAME call GET makes.
+    value: (data, card) => commentMetadata(data.conversations, card.id),
+    destination: 'POST /api/conversations with attachedTo (MCP: conversation_post attachedTo:) — comments are not a card field',
+  },
+};
+
+const READ_PROJECTION_FIELDS = new Set(Object.keys(CARD_PROJECTIONS));
 
 // #856 — consumed by a DIFFERENT subsystem in the same request. Not stored on
 // the card, not discarded either, and therefore never reported.
@@ -858,30 +879,18 @@ const CONSUMED_ELSEWHERE_FIELDS = new Set(['by']);
 //   comments  REDIRECTED  you CAN do this. Different door.
 // Folding a redirect into `refusedFields` tells a caller to STOP when the true
 // answer is TURN LEFT — actionable and wrong, which is worse than silent.
-const REDIRECT_DESTINATIONS = {
-  comments: 'POST /api/conversations with attachedTo (MCP: conversation_post attachedTo:) — comments are not a card field',
-};
-
-// ⭐ #856 — STRUCTURAL RAIL, not a comment. Adding a projection field without a
-// destination would silently degrade this class back to the bare-list behaviour
-// it exists to replace, and nothing downstream would report the gap. Fail at
-// boot instead, where it is one line to fix.
-for (const f of READ_PROJECTION_FIELDS) {
-  if (!REDIRECT_DESTINATIONS[f]) {
-    throw new Error(`#856: projection field '${f}' has no entry in REDIRECT_DESTINATIONS — `
-      + 'a redirect that cannot name its destination is a 404 wearing a signpost');
+// #856 — the halves cannot drift apart above, so this checks the only thing
+// still expressible: an entry that omits one of them. It covers BOTH, because
+// a rail that covers one is a rail that certifies a bug.
+for (const [f, p] of Object.entries(CARD_PROJECTIONS)) {
+  if (typeof p?.value !== 'function') {
+    throw new Error(`#856: projection '${f}' has no value() — its comparand would be undefined, `
+      + 'and isEchoOfStored returns false against undefined, so it would report on EVERY write');
   }
-}
-
-/**
- * #856 — the value the API WOULD emit for a projection field, which is the
- * comparand echo-suppression was missing. #844 compared against `card[field]`
- * (undefined for every projection), so it could never distinguish an RMW echo
- * from a real attempt. The route builds these; it knows what it emitted.
- */
-function projectionValue(field, data, card) {
-  if (field === 'comments') return commentMetadata(data.conversations, card.id);
-  return undefined;
+  if (!p.destination) {
+    throw new Error(`#856: projection '${f}' has no destination — `
+      + 'a redirect that cannot name where to go is a 404 wearing a signpost');
+  }
 }
 
 function validateRelationships(rel, current = undefined) {
@@ -1539,13 +1548,14 @@ async function handleUpdateCard(req, res, idOrShortId) {
         // #856 — consumed by another subsystem in this same request (`by` ->
         // the event log). Not stored, not discarded, so never reported.
         if (CONSUMED_ELSEWHERE_FIELDS.has(k)) continue;
-        if (READ_PROJECTION_FIELDS.has(k)) {
+        const projection = CARD_PROJECTIONS[k];
+        if (projection) {
           // #856 — #844's rule with the comparand it was missing. Echoing the
           // projection back is the ordinary GET/modify/PATCH cycle and must stay
           // SILENT; sending something DIFFERENT is a caller who meant to do a
           // real thing and needs to be told where that thing actually lives.
-          if (!isEchoOfStored(v, projectionValue(k, data, card))) {
-            redirectedFields[k] = REDIRECT_DESTINATIONS[k];
+          if (!isEchoOfStored(v, projection.value(data, card))) {
+            redirectedFields[k] = projection.destination;
           }
           continue;
         }
