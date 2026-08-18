@@ -1244,9 +1244,31 @@ function handleMisses(req, res) {
 const STANDING_CHECKS = [
   {
     id: 'phantom-block',
-    claim: 'a card declares blockedBy a card that is already done — the block cannot block anything, '
-      + 'and nothing changed on the blocked card when the blocker shipped',
-    query: 'SELECT ?blocked ?blocker WHERE { ?a scrum:blockedBy ?b ; schema:identifier ?blocked . '
+    // ⛔⛔ #895 — THE CLAIM AND THE QUERY WERE TWO HALVES OF ONE RULE AND ONLY
+    // ONE HALF WAS IN CODE. (Found by a peer seat; landed here because this file
+    // was already open for #881, and the subject is the same: blockedBy semantics.)
+    //
+    // The claim said "nothing changed on the blocked card when the blocker
+    // shipped". The query never constrained the blocked card's column, so it
+    // could not possibly know that. Measured: all 5 rows it reported had a
+    // blocked card that was ALSO done — the blocked cards HAD changed, they
+    // shipped too. Zero of 5 were actionable, and the severity came entirely
+    // from the claim's framing rather than from the rows.
+    //
+    // ⚠️ THE FIX IS A FILTER, NOT A CLEANUP. A blockedBy edge between two
+    // finished cards is a true record of something that was once true; deleting
+    // those edges to quiet the instrument would destroy history to make a
+    // number look better. The instrument was wrong, not the data.
+    //
+    // ⭐ AND THE NARROWED POPULATION IS A REAL ZERO, checked before narrowing:
+    // 4 open cards currently carry blockedBy edges, so this can still fire. A
+    // filter that made the check unsatisfiable would be worse than the false
+    // positives it removed — see R4, and `scored()` refusing an empty
+    // denominator for the same reason.
+    claim: 'an OPEN card declares blockedBy a card that is already done — the block cannot block '
+      + 'anything, and the blocked card has not moved even though its blocker shipped',
+    query: 'SELECT ?blocked ?blocker WHERE { ?a scrum:blockedBy ?b ; schema:identifier ?blocked ; '
+      + 'scrum:column ?col . FILTER(?col != <https://scrumboard.local/column/done>) '
       + '?b schema:identifier ?blocker ; scrum:column <https://scrumboard.local/column/done> }',
   },
 ];
@@ -1603,9 +1625,43 @@ function validateBlockers(blockers, current, incoming) {
     ? incomingBlocked
     : (current?.relationships?.blockedBy || [])).map(String);
   for (const b of blockers) {
-    if (!b || typeof b !== 'object' || Array.isArray(b)) return 'each blocker must be an object {card, owner, status}';
-    if (b.card === undefined || b.card === null || b.card === '') return 'each blocker needs a `card` (the blocking card shortId)';
-    if (!blockedBy.includes(String(b.card))) {
+    if (!b || typeof b !== 'object' || Array.isArray(b)) return 'each blocker must be an object {card, owner, status} or {person, status}';
+
+    // ⭐⭐⭐ #881 — A BLOCKER MAY NAME A CARD OR A PERSON, AND THE TWO ARE NOT
+    // THE SAME RELATION.
+    //
+    //   card + owner  → another CARD blocks this one; `owner` is who is chasing it
+    //   person        → a person's own pending action IS the block
+    //
+    // ⛔ Conflating them would make "waiting on a person" indistinguishable from
+    // "that person is chasing the card that blocks this" — OPPOSITE states, and the
+    // concierge query must return only the first. That distinction is the whole
+    // design; a single `blockedBy: <person>` field would have been smaller and
+    // would have destroyed it.
+    const hasCard = !(b.card === undefined || b.card === null || b.card === '');
+    const hasPerson = !(b.person === undefined || b.person === null || b.person === '');
+
+    if (!hasCard && !hasPerson) {
+      return 'each blocker must name what blocks it: a `card` (the blocking card shortId) '
+        + 'or a `person` (whose pending action is itself the block)';
+    }
+    // ⚠️ EXACTLY ONE. A blocker naming both is not richer, it is ambiguous: the
+    // concierge query would have to guess which relation the entry means, and
+    // whichever it guessed would be wrong half the time.
+    if (hasCard && hasPerson) {
+      return 'a blocker names EITHER a card or a person, not both — `card` means another card '
+        + 'blocks this one (with `owner` chasing it), `person` means that person\'s own pending '
+        + 'action is the block. An entry naming both cannot be read as either.';
+    }
+
+    if (hasPerson) {
+      if (typeof b.person !== 'string') return 'blocker.person must be a seat or person key';
+      // ⛔ NO blockedBy REQUIREMENT HERE, deliberately. A card-blocker must
+      // describe an existing edge so ownership cannot become a second source of
+      // truth about what blocks what. A person-blocker has no edge to describe —
+      // the whole point is that the thing blocking this card is NOT a card, which
+      // is precisely why it was unrepresentable and lived in prose.
+    } else if (!blockedBy.includes(String(b.card))) {
       return `blocker names card ${JSON.stringify(b.card)}, which is not in this card's blockedBy `
         + `(${blockedBy.join(', ') || 'empty'}). Ownership must describe an edge that exists, or it becomes `
         + 'a second source of truth about what blocks what.';

@@ -76,6 +76,11 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:mentionsCard': 'scrum:mentionsCard',   // derived at projection (#656), stored in the document
   'scrum:blocks': 'blockers',
   'scrum:blockedByCard': 'blockers',
+  // #881 — the person whose own pending action IS the block. Deliberately a
+  // DIFFERENT predicate from scrum:owner: owner is who chases the blocking
+  // CARD, blockedByPerson is the person who is themselves the blocker. They
+  // are opposite states and a query for "waiting on me" must return only this one.
+  'scrum:blockedByPerson': 'blockers',
   'scrum:owner': 'blockers',
   'scrum:note': 'blockers',
   // #814 — acceptance evidence. `scrum:evidencedBy` is REUSED from the tending

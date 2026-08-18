@@ -671,7 +671,38 @@ function projectEntity(store, e) {
       {
         const blockedBy = new Set((e.blockedBy || []).map(String));
         for (const b of e['scrum:blockers'] || []) {
-          if (!b || b.card == null) continue;
+          if (!b) continue;
+
+          // ⭐⭐⭐ #881 — A PERSON-BLOCKER, projected so "what is waiting on me"
+          // is ONE query instead of a regex over sentences.
+          //
+          // ⛔ THE COST THAT PRODUCED THIS: the owner asked what he was owed and
+          // the only answer available was a text match — 29 hits narrowed to 14,
+          // most of them stale, one resolved hours earlier. A regex returns the
+          // union of "is gated on him" and "once mentioned him" and nothing
+          // separates them. #425 sat 24 DAYS on a ten-second decision and
+          // surfaced only because someone happened to grep.
+          //
+          // ⚠️ `blockedByPerson`, NOT `owner`. They are opposite states:
+          //   owner   — who is chasing the CARD that blocks this
+          //   person  — that person's own pending action IS the block
+          // A query for "waiting on me" must return only the second.
+          if (b.person != null && b.card == null) {
+            // The subject encodes the person, so two person-blockers on one card
+            // are two nodes rather than one overwriting the other — and it stays
+            // under `<card>/blocker/`, which is what sweepBlockerNodes matches,
+            // so deletion reaches it. (The card-blocker orphan bug was found in
+            // PRODUCTION, not by the suite; this shape is chosen to be swept.)
+            const bn = nn(`${IRI.entity}${e['@id']}/blocker/person:${encodeURIComponent(String(b.person))}`);
+            add(bn, A, nn(S + 'Blocker'));
+            add(bn, nn(S + 'blocks'), s);
+            add(bn, nn(S + 'blockedByPerson'), personRef(b.person));
+            if (b.status) add(bn, nn(S + 'status'), lit(b.status));
+            if (b.note) add(bn, nn(S + 'note'), lit(b.note));
+            continue;
+          }
+
+          if (b.card == null) continue;
           // Serialization already resolved `card` to the target's @id, so this
           // compares like with like. A blocker whose edge is gone emits NOTHING:
           // ownership without a live edge would be state outliving the fact it
