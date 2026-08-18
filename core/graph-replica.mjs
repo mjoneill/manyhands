@@ -345,6 +345,27 @@ function conceptsOf(store, subject) {
  * it. Over-collecting here would be the more damaging bug, since it would delete
  * identities that are still in use and every query would silently narrow.
  */
+/**
+ * #814 — drop every Blocker node hanging off this card.
+ *
+ * ⛔ A Blocker's subject is `entity:<card>/blocker/<target>` — DERIVED from the
+ * card's id and not equal to it, so `match(cardSubject, null, null)` never
+ * reaches it. The first cut relied on that match and I wrote a comment saying
+ * there was nothing to sweep. Deleting two scratch cards on production left a
+ * Blocker node behind, carrying an owner and a status and pointing at nothing.
+ *
+ * ⚠️ D5 again — a derived node on a foreign subject, invisible to subject-scoped
+ * deletion — committed in the same change whose comment cited D5 as the reason
+ * it could not happen. Knowing the failure class does not exempt you from it.
+ */
+function sweepBlockerNodes(store, cardSubjectIri) {
+  const prefix = `${cardSubjectIri}/blocker/`;
+  for (const q of store.match(null, A, nn(IRI.scrum + 'Blocker'))) {
+    if (!q.subject.value.startsWith(prefix)) continue;
+    for (const t of store.match(q.subject, null, null)) store.delete(t);
+  }
+}
+
 function sweepOrphanConcepts(store, candidates) {
   const K = nn(IRI.schema + 'keywords');
   for (const t of candidates) {
@@ -414,6 +435,7 @@ export function removeEntity(store, idOrEntity) {
   // #687 — a DELETED card releases its concepts too. Same reasoning as
   // updateEntity: read the edges before the triples that carry them are gone.
   const priorConcepts = conceptsOf(store, subject);
+  sweepBlockerNodes(store, subject.value);
   let n = 0;
   for (const q of store.match(subject, null, null)) { store.delete(q); n += 1; }
   sweepOrphanConcepts(store, priorConcepts);
@@ -613,9 +635,13 @@ function projectEntity(store, e) {
       // at design time rather than discovered after. #687's concepts hung off a
       // FOREIGN subject and orphaned when their last card dropped the label —
       // invisible to subject-scoped deletion, and 1,438 tests could not see it.
-      // These hang off THIS card's subject and are emitted only for a blockedBy
-      // member that is still present, so removing the edge removes the node by
-      // construction. There is nothing to sweep.
+      // ⛔ AND THE FIRST VERSION OF THIS COMMENT WAS WRONG. It said these hang
+      // off THIS card's subject so "there is nothing to sweep". They do not:
+      // the subject is `entity:<card>/blocker/<target>`, DERIVED from the card's
+      // id and not equal to it, so subject-scoped deletion never reaches them.
+      // Removing the EDGE drops them (they are re-projected from blockedBy);
+      // DELETING THE CARD did not, and production proved it. See
+      // sweepBlockerNodes, which is called from both paths.
       {
         const blockedBy = new Set((e.blockedBy || []).map(String));
         for (const b of e['scrum:blockers'] || []) {

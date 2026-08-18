@@ -181,3 +181,41 @@ test('#814 dropping the blockedBy edge drops its Blocker node — no orphan stat
     assert.equal(q.body.rows[0].n, '0', 'the ownership node did not outlive the edge it described');
   } finally { await s.stop(); }
 });
+
+test('#814 DELETING the card removes its Blocker nodes — the orphan I asserted away', async () => {
+  // ⛔ THIS IS THE TEST THAT CAUGHT ME, AND IT DID NOT EXIST UNTIL PROD DID.
+  //
+  // The test above covers removing the EDGE. It passes, and it let me write a
+  // comment claiming "the node is derived from the edge, so there is nothing to
+  // sweep." That was false for the case I did not test: DELETING the card.
+  //
+  // A Blocker's subject is `entity:<card>/blocker/<target>` — DERIVED from the
+  // card's id but not equal to it. `removeEntity` deletes triples whose subject
+  // IS the card, so these were never in range. The node outlived its card
+  // carrying an owner and a status, pointing at nothing.
+  //
+  // ⚠️ Which is D5 exactly — a derived node on a foreign subject, invisible to
+  // subject-scoped deletion — committed in the same change whose comment cited
+  // D5 as the reason it could not happen. Found by deleting two scratch cards on
+  // production and counting what was left, not by the suite.
+  const s = await startRestServer({ board: board() });
+  try {
+    await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+      blockers: [{ card: 2, owner: 'ada', status: 'open' }], by: 'ada',
+    });
+    const before = await api(s.baseUrl, 'POST', '/api/graph', {
+      query: 'SELECT (COUNT(?b) AS ?n) WHERE { ?b a scrum:Blocker }',
+    });
+    assert.equal(before.body.rows[0].n, '1', 'control: the node exists while the card does');
+
+    const del = await fetch(`${s.baseUrl}/api/cards/1`, { method: 'DELETE' });
+    assert.equal(del.status, 204);
+
+    const after = await api(s.baseUrl, 'POST', '/api/graph', {
+      query: 'SELECT (COUNT(?b) AS ?n) WHERE { ?b a scrum:Blocker }',
+    });
+    assert.equal(after.body.rows[0].n, '0',
+      'the ownership node must not outlive the card it hangs off — an orphan carrying '
+      + 'an owner and a status that points at nothing is worse than no record');
+  } finally { await s.stop(); }
+});
