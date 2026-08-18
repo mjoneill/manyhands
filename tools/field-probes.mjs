@@ -47,6 +47,13 @@ export const CARD_CREATE_PROBES = [
   // #814 — the malformed case names a card the fixture is NOT blocked by, because
   // that is the rule worth probing: ownership must describe an edge that exists,
   // or the record drifts free of the fact it describes.
+  // #814 — the malformed case is PROSE, because that is the rule: evidence must
+  // be a durable reference. A sentence is exactly what this field replaces, and
+  // accepting one would relocate the narration instead of modelling the fact.
+  { name: 'acceptance',
+    wellFormed: [{ condition: 'RC1 — the guard refuses', evidence: ['c'.repeat(40)] }],
+    malformed: [{ condition: 'RC1', evidence: ['the tests passed'] }],
+    note: '#814 — evidence is a 40-char sha or an entity uuid; never prose' },
   { name: 'blockers',
     wellFormed: ({ targetShortId }) => [{ card: targetShortId, owner: 'ada', status: 'open' }],
     expectStored: ({ targetShortId }) => [{ card: targetShortId, owner: 'ada', status: 'open' }],

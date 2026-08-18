@@ -70,7 +70,11 @@ const BOARD_KEYS = new Set(['column', 'order', 'assignees', 'priority', 'labels'
   // an API surface and a graph projection, so leaving it in the unmodelled bag
   // would be the lying-container shape AND would keep it out of the projection
   // that is the whole point of the field.
-  'blockers']);
+  'blockers',
+  // #814 — acceptance evidence. First-class for the same reason as blockers and
+  // checks: it has a validator, an API surface and a graph projection, and a
+  // modelled field left in the unmodelled bag is the lying-container shape.
+  'acceptance']);
 // #222 — page attachments ride verbatim as a first-class node field (so the wiki
 // reads node.attachments directly, not from board._extra). schema.org would model
 // each as an associatedMedia ImageObject/MediaObject; that transform is deferred.

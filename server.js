@@ -1355,6 +1355,7 @@ const CREATE_CONSUMED_FIELDS = new Set([
   // the #830/#856 shape. Both of my earlier edits landed in PATCHABLE_CARD_FIELDS
   // and neither reached here. Caught by #831's sweep, not by review.
   'blockers',
+  'acceptance',   // #814 — on BOTH lists in one edit, having got this wrong once already
   // #862 — `by` is the word every OTHER surface uses for "who is doing this":
   // PATCH takes it, and /api/changes emits the event log's `actor` under that
   // name. Create took only `createdBy`, so a caller who learned `by` from the
@@ -1449,12 +1450,54 @@ function createCardFromPayload(body, nextShortId) {
     // the validator already knew the field.
     ...(Array.isArray(body.checks) ? { checks: body.checks } : {}),
     ...(Array.isArray(body.blockers) ? { blockers: body.blockers } : {}),
+    ...(Array.isArray(body.acceptance) ? { acceptance: body.acceptance } : {}),
     // #348 — coordination rail: first-write-wins claim, server-arbitrated.
     // Set only via POST /api/cards/:id/claim (never via PATCH), so a claim
     // is a compare-and-set under withWriteLock, not an unconditional overwrite.
     claimedBy: null,
     claimedAt: null,
   };
+}
+
+/**
+ * #814 — ACCEPTANCE EVIDENCE: which durable result discharged which release
+ * condition.
+ *
+ * ⛔ EVIDENCE MUST BE DURABLE AND RESOLVABLE-SHAPED — a 40-char commit sha or an
+ * entity uuid, never a sentence. "The tests passed" is precisely the prose this
+ * field replaces, and accepting it would relocate the narration rather than
+ * model the fact.
+ *
+ * ⚠️ This rule is the BF4 lesson generalised. `implementedBy` validated LENGTH
+ * and not existence, so a real short sha padded to forty was accepted exactly as
+ * readily as a real one — three reached production, and the guard had SELECTED
+ * for the defect by refusing the honest short form. Evidence has the same
+ * failure mode and a worse consequence: it is the record that a condition
+ * was MET.
+ */
+const EVIDENCE_SHA = /^[0-9a-f]{40}$/;
+const EVIDENCE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function validateAcceptance(acceptance) {
+  if (!Array.isArray(acceptance)) return 'acceptance must be an array of {condition, evidence}';
+  for (const a of acceptance) {
+    if (!a || typeof a !== 'object' || Array.isArray(a)) return 'each acceptance entry must be an object {condition, evidence}';
+    if (typeof a.condition !== 'string' || !a.condition.trim()) {
+      return 'each acceptance entry needs a `condition`: evidence for nothing is not evidence';
+    }
+    if (a.evidence !== undefined && !Array.isArray(a.evidence)) {
+      return `acceptance ${JSON.stringify(a.condition)}: evidence must be an array of durable references`;
+    }
+    for (const e of a.evidence || []) {
+      if (typeof e !== 'string' || (!EVIDENCE_SHA.test(e) && !EVIDENCE_UUID.test(e))) {
+        return `acceptance ${JSON.stringify(a.condition)}: evidence ${JSON.stringify(e)} is not a durable `
+          + 'reference. Use a full 40-character commit sha or an entity uuid — a sentence is the prose '
+          + 'this field replaces, and a short sha cannot be expanded by the graph.';
+      }
+    }
+    if (a.note !== undefined && a.note !== null && typeof a.note !== 'string') return 'acceptance.note must be a string';
+  }
+  return null;
 }
 
 /**
@@ -1786,6 +1829,10 @@ function validateCardFields(body, { checkId = true, surface = 'patch', current =
   // abbreviation whose expansion needs the repository; the graph cannot expand
   // it, so accepting both forms would mint two nodes for one commit and never
   // reconcile them. That is an aliasing bug shipped as a convenience.
+  if (body.acceptance !== undefined && body.acceptance !== null) {
+    const aerr = validateAcceptance(body.acceptance);
+    if (aerr) return aerr;
+  }
   if (body.blockers !== undefined && body.blockers !== null) {
     const berr = validateBlockers(body.blockers, current, body);
     if (berr) return berr;
@@ -1847,6 +1894,7 @@ const PATCHABLE_CARD_FIELDS = new Set([
   'implementedBy',
   'checks',   // #792 — falsifier tripwires, editable as the claim they watch changes
   'blockers', // #814 — who owns clearing each blocker, and whether they still do
+  'acceptance', // #814 — which durable result discharged which release condition
 ]);
 
 // ── /api/changes — the returning-agent catch-up (#643) ──

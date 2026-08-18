@@ -359,8 +359,17 @@ function conceptsOf(store, subject) {
  * it could not happen. Knowing the failure class does not exempt you from it.
  */
 function sweepBlockerNodes(store, cardSubjectIri) {
-  const prefix = `${cardSubjectIri}/blocker/`;
-  for (const q of store.match(null, A, nn(IRI.scrum + 'Blocker'))) {
+  sweepDerivedNodes(store, cardSubjectIri, 'Blocker', 'blocker');
+  // #814 — the SECOND family on a derived subject. Generalised rather than
+  // copied: the first one cost a production orphan because its case was not
+  // written, and a second hand-rolled prefix walk would be two places to forget.
+  sweepDerivedNodes(store, cardSubjectIri, 'ReleaseCondition', 'rc');
+}
+
+/** Delete nodes of `type` whose subject is `<card>/<segment>/…`. */
+function sweepDerivedNodes(store, cardSubjectIri, type, segment) {
+  const prefix = `${cardSubjectIri}/${segment}/`;
+  for (const q of store.match(null, A, nn(IRI.scrum + type))) {
     if (!q.subject.value.startsWith(prefix)) continue;
     for (const t of store.match(q.subject, null, null)) store.delete(t);
   }
@@ -660,6 +669,50 @@ function projectEntity(store, e) {
           if (b.status) add(bn, nn(S + 'status'), lit(b.status));
           if (b.note) add(bn, nn(S + 'note'), lit(b.note));
         }
+      }
+      // #814 — ACCEPTANCE EVIDENCE. A release condition becomes a node so
+      // "which result discharged which condition" is a join rather than a
+      // careful read of two prose blocks in different places.
+      //
+      // ⭐ REUSES `scrum:evidencedBy`, which the tending vocabulary already
+      // declared @id-typed for durable sources. Minting a rival predicate would
+      // be the vocabulary-collision shape — two names for one relation, and
+      // every query then has to know which subsystem it is standing in.
+      //
+      // ⚠️ An UNDISCHARGED condition still projects, with no evidence edge, so
+      // "not yet met" is an unbound variable rather than a missing row. If only
+      // discharged conditions appeared, a card would look accepted precisely
+      // because nobody recorded the outstanding ones.
+      for (const [i, a] of (e['scrum:acceptance'] || []).entries()) {
+        if (!a || typeof a.condition !== 'string' || !a.condition.trim()) continue;
+        const rc = nn(`${IRI.entity}${e['@id']}/rc/${i}`);
+        add(rc, A, nn(S + 'ReleaseCondition'));
+        add(rc, nn(S + 'ofCard'), s);
+        add(rc, nn(SC + 'name'), lit(a.condition));
+        if (a.note) add(rc, nn(S + 'note'), lit(a.note));
+        for (const ref of a.evidence || []) {
+          // A sha is a commit; a uuid is a board entity. Both are NODES — the
+          // whole point, since a literal cannot be traversed or joined.
+          const iri = /^[0-9a-f]{40}$/.test(ref) ? IRI.commit + ref : IRI.entity + ref;
+          add(rc, nn(S + 'evidencedBy'), nn(iri));
+        }
+      }
+      // #858 — THE MEMBERSHIP SPINE. Phase 2 chose `parent`/`isPartOf` over
+      // `relatedTo` precisely so a membership edge would stay distinguishable
+      // from a relatedness edge forever, wrote nineteen of them (the
+      // agent-interface seam, the upgrade episode, the wiki-cron cluster, a
+      // conference hierarchy) — and the replica never emitted the predicate.
+      //
+      // ⛔ Nineteen edges, correct in the store, in zero queries. The structural
+      // half of Phase 2 was invisible to exactly the traversal it was built for,
+      // and #858's RC3 is stated in terms of reachability from the apex.
+      //
+      // ⚠️ Found by the INVERSE half of #875's guard — "nothing declared has
+      // vanished" — which fired while the forward half ("every emitted predicate
+      // is declared") passed clean. A guard that runs one direction certifies
+      // the other.
+      if (typeof e.isPartOf === 'string' && e.isPartOf) {
+        add(s, nn(SC + 'isPartOf'), nn(E + e.isPartOf));
       }
       // ONE list, imported — a second copy here is the #618 drift shape.
       for (const rt of REL_TYPES) {
