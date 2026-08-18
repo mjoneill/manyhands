@@ -112,6 +112,21 @@ export const CARD_CREATE_PROBES = [
   { name: 'attachments', wellFormed: [], malformed: null, noRule: true,
     note: 'present on 1 live card; not in either MCP card schema' },
 
+  // #864 — the byte-preserving append. A VERB, not a field: it is declared on
+  // the PATCH schema, consumed as an operation on the stored value, and
+  // deliberately never stored under its own key. So RC0b's "declared but never
+  // stored" line naming it is CORRECT and not a finding — the same shape as
+  // `by`, which is meta rather than content.
+  //
+  // ⚠️ The malformed case is a NUMBER rather than obvious junk, because the
+  // failure it guards is coercion: `String(42)` would append "42" to a long
+  // card, leave every original byte intact, and never trip anything downstream.
+  // A silently-successful wrong edit is the exact defect this field exists to
+  // remove, so refusing the coercion is the rule most worth probing.
+  { name: 'descriptionAppend', wellFormed: ' appended', malformed: 42, storedAs: 'description',
+    note: '#864 — an OPERATION on description, never stored under its own key. Not combinable '
+        + 'with `description`: two different edits to one field have no correct order.' },
+
   // ── the control: a typo, consistently absent everywhere ──
   { name: 'titel', wellFormed: 'misspelled', malformed: null, noRule: true,
     note: 'not a real field — the AGREE_ABSENT control' },

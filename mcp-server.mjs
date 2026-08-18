@@ -605,7 +605,8 @@ function buildMcpServer() {
     inputSchema: {
       id: z.string().describe('Card UUID or shortId (number-as-string also accepted)'),
       title: z.string().optional(),
-      description: z.string().optional(),
+      description: z.string().optional().describe('REPLACES the whole body. ⚠️ On a long card this means regenerating text you did not write — use descriptionAppend to add a section instead.'),
+      descriptionAppend: z.string().optional().describe('Text ADDED to the end of the existing description, byte-preserving. Use this instead of `description` when you are adding to a card rather than rewriting it: replacing means reproducing everything already there, and a re-composition damages quoting — SPARQL literals, code fences, JSON, regexes — while leaving the prose looking perfect. Cannot be combined with `description`.'),
       type: z.enum(['task', 'idea', 'goal', 'reference', 'feature', 'bug']).optional(),
       assignees: z.array(z.string()).optional(),
       labels: z.array(z.string()).optional(),

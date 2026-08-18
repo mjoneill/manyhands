@@ -1841,6 +1841,34 @@ function validateCardFields(body, { checkId = true, surface = 'patch', current =
     const cerr = validateChecks(body.checks);
     if (cerr) return cerr;
   }
+  // #864 — the byte-preserving append. PATCH-ONLY, per #830's route-relative
+  // rule: appending to a card that does not exist yet is not an operation, and
+  // create takes `description`. Validating it here on create would produce the
+  // exact three-state mess #830 was written about — the route refusing
+  // malformed values for a field it then silently discards, so a caller reading
+  // the 400 and a caller reading `ignoredFields` get opposite answers.
+  //
+  // ⚠️ Found by #831's own audit, which reported `descriptionAppend:
+  // VALIDATED_THEN_DISCARDED` on the create surface minutes after this field
+  // was added. Left unguarded it would have been the third instance of a class
+  // that already has two.
+  if (surface !== 'create' && body.descriptionAppend !== undefined) {
+    if (typeof body.descriptionAppend !== 'string') {
+      // Coercing would turn a caller's mistake into a permanent edit to a long
+      // card — `String({})` appends "[object Object]" and the original bytes are
+      // still fine, so nothing downstream would ever flag it.
+      return 'descriptionAppend must be a string (the text to add to the end of the description)';
+    }
+    if (body.description !== undefined) {
+      // ⛔ REFUSE rather than order them. These are two DIFFERENT edits to one
+      // field, so any precedence rule makes the result depend on a convention
+      // the caller cannot see. #831 and #862 pinned precedence where two
+      // spellings meant the SAME thing; "replace it" and "add to it" do not,
+      // and picking one silently discards an intent the caller stated.
+      return 'send either description (replace) or descriptionAppend (add to the end), not both — '
+        + 'they are different edits to the same field and there is no correct order for them';
+    }
+  }
   if (body.implementedBy !== undefined && body.implementedBy !== null) {
     if (!Array.isArray(body.implementedBy)) return 'implementedBy must be an array of commit shas';
     for (const sha of body.implementedBy) {
@@ -2365,7 +2393,36 @@ async function handleUpdateCard(req, res, idOrShortId) {
       // `assignee` alias when a caller sends both, so the result does not
       // depend on JSON key order.
       const pluralWins = Array.isArray(patch.assignees) && patch.assignees.length > 0;
+      // #864 — THE BYTE-PRESERVING EDIT. Applied here, as an OPERATION on the
+      // stored value, and deliberately not a member of PATCHABLE_CARD_FIELDS:
+      // it is a verb, and a verb in a field allowlist gets stored as a noun.
+      //
+      // ⚰️ Why it exists. `description` is all-or-nothing, so a seat whose only
+      // write path is MCP cannot add a paragraph without regenerating the whole
+      // field from context — a re-composition, not a copy. Measured on a live
+      // 9,770-byte card: 99.98% byte-identical, prose untouched, formatting
+      // untouched, and four backslashes inserted inside the SPARQL blocks,
+      // turning `"805"` into `\"805\"` and both example queries into syntax
+      // errors. Re-composition damages precisely the content that has a
+      // correctness property, because QUOTING is where a model diverges and
+      // quoting is where the runnable things live.
+      //
+      // ⇒ #857 §I calls this room "several minds working as PEERS". A seat that
+      // cannot edit a long card without corrupting it is not a peer, and the
+      // asymmetry ran along the central write path.
+      //
+      // The guarantee is structural rather than careful: the new value is the
+      // old value plus a suffix, so the original cannot be mangled by an edit
+      // that never retypes it.
+      if (patch.descriptionAppend !== undefined) {
+        card.description = `${card.description ?? ''}${patch.descriptionAppend}`;
+        card.updatedAt = new Date().toISOString();
+      }
       for (const [k, v] of Object.entries(patch)) {
+        // #864 — consumed immediately above. Listed here rather than in
+        // PATCHABLE_CARD_FIELDS so it is never written as a literal key, and
+        // reported as neither ignored (#823) nor refused: it was honoured.
+        if (k === 'descriptionAppend') continue;
         // #844 — an unchanged value was not an attempt. Silent.
         if (isEchoOfStored(v, card[k])) continue;
         if (IMMUTABLE_CARD_FIELDS.has(k)) {
