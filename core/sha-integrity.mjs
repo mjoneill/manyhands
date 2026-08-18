@@ -55,7 +55,17 @@ export function collectShas(board) {
     found.get(sha).add(shortId);
   };
 
-  for (const card of board?.nodes || []) {
+  // ⚠️ `cards`, and `nodes` as a fallback. THE FIRST VERSION READ ONLY `nodes` —
+  // the domain shape — while the server hands this function `readBoard()`, which
+  // returns `cards`. It found ZERO shas on a board carrying 264 of them.
+  //
+  // ⭐ AND THE INSTRUMENT CAUGHT ITS OWN WIRING BUG, because it refuses to call
+  // an empty population clean: it reported UNMEASURABLE / "this is an empty
+  // population, not a clean one" rather than "0 unresolved". A version that
+  // printed a zero would have looked like a passing audit of a board it had
+  // never actually read. That is the whole discipline of this file, arriving one
+  // minute after the file was written, aimed at its author.
+  for (const card of board?.cards || board?.nodes || []) {
     for (const s of card.implementedBy || []) note(s, card.shortId);
     for (const a of card.acceptance || []) {
       for (const e of a?.evidence || []) note(e, card.shortId);

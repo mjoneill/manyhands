@@ -39,8 +39,12 @@ const A = 'a'.repeat(40);
 const B = 'b'.repeat(40);
 const UUID = '11111111-2222-3333-4444-555555555555';
 
+// ⚠️ `cards` — the shape `readBoard()` actually returns. My first fixture said
+// `nodes` (the domain shape), so the pure half passed while the wired half read
+// zero shas from a board carrying 264. An invented fixture shape is an unchecked
+// claim about the caller, and it passes its own tests by construction.
 const board = () => ({
-  nodes: [
+  cards: [
     { shortId: 1, implementedBy: [A] },
     // ⚠️ BOTH FIELDS, because the fabrication landed in BOTH. The corrected card
     // carried the invented sha in `implementedBy` AND in five `acceptance[].evidence`
@@ -115,4 +119,19 @@ test('#896 one resolver call for the whole population, not one per sha', async (
     resolve: async (shas) => { calls += 1; assert.equal(shas.length, 2); return new Set(shas); },
   });
   assert.equal(calls, 1);
+});
+
+test('#896 ⛔ THE FIXTURE MATCHES THE CALLER — readBoard() returns `cards`', () => {
+  // ⭐ The regression that actually happened, pinned. The pure half of this
+  // module was green while the live endpoint read ZERO shas from a board with
+  // 264, because the fixture used a shape the caller does not produce.
+  //
+  // ⚠️ It was caught only because the check refuses to call an empty population
+  // clean — it said UNMEASURABLE, not "0 unresolved". Had it printed the zero,
+  // a wiring bug would have read as a passing audit.
+  const viaCards = collectShas({ cards: [{ shortId: 1, implementedBy: [A] }] });
+  assert.equal(viaCards.size, 1, 'the shape the server passes must be the shape this reads');
+
+  const viaNodes = collectShas({ nodes: [{ shortId: 1, implementedBy: [A] }] });
+  assert.equal(viaNodes.size, 1, 'the domain shape stays supported — other callers use it');
 });
