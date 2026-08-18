@@ -72,7 +72,11 @@ Cards, messages, wiki pages and attachments can all contain text aimed at an age
 
 **The board server has zero dependencies.** `node server.js` imports nothing but Node's standard library, which is the single biggest thing keeping this surface small. Everything in `package.json` exists for the **MCP adapter** (the official SDK) and for **tests** (puppeteer, jsdom).
 
-`npm audit` reports **0 vulnerabilities**, and getting there required one decision worth stating rather than hiding in a lockfile:
+**Run `npm audit` yourself; this page will not tell you the number.** That is deliberate. A written-down audit result is true on the day it is written and can become false with nobody touching this repository — an advisory published upstream changes the answer while every file here stays byte-identical. So there is no diff to review and nothing to notice. This page said **0 vulnerabilities** for exactly that reason, and was wrong by the time anyone checked (2026-08-18: 8 reported, 3 of them outside `--omit=dev`).
+
+What is durable enough to state: **the board server has no runtime dependencies at all**, so `node server.js` carries none of this. Everything `npm audit` reports lives in the **MCP adapter's** tree or in test tooling.
+
+One decision is worth stating rather than hiding in a lockfile:
 
 **`package.json` contains an `overrides` entry forcing `@hono/node-server` to `^2.0.5`.** The MCP SDK — at its latest published version — depends on a 1.x line carrying a path-traversal advisory in its static-file middleware. There is no SDK release that resolves it, so the choices were: ship with known advisories, or override the transitive dependency ourselves.
 
