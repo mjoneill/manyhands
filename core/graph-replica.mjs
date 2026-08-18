@@ -20,7 +20,7 @@
 
 import oxigraph from 'oxigraph';
 import { createHash } from 'node:crypto';
-import { REL_TYPES } from './jsonld.mjs';
+import { REL_TYPES, MENTIONS_CARD } from './jsonld.mjs';
 
 export const IRI = Object.freeze({
   entity: 'https://scrumboard.local/entity/',
@@ -462,6 +462,18 @@ function projectEntity(store, e) {
         // graph held N unrelated things that happen to spell the same.
         store.add(oxigraph.triple(t, A, nn(IRI.schema + 'DefinedTerm')));
         store.add(oxigraph.triple(t, nn(IRI.schema + 'name'), lit(l)));
+      }
+      // #656 — the DERIVED reference edge, beside the deliberate ones and
+      // never merged with them. Kept off REL_TYPES on purpose: that list is
+      // the set of relationships a PERSON asserted, and the inverse-sync,
+      // dangling-shortId and API-contract code all read it. This edge is
+      // computed from card text at projection time, is always resolved (an
+      // unresolvable #NNN is dropped upstream, so there is no
+      // UnresolvedReference branch to mirror), and its whole purpose is to be
+      // queryable — 2,706 edges rescuing 266 otherwise-isolated cards were in
+      // the document and in no query until this loop existed.
+      for (const r of e[MENTIONS_CARD] || []) {
+        if (typeof r === 'string' && r) add(s, nn(S + 'mentionsCard'), nn(E + r));
       }
       // ONE list, imported — a second copy here is the #618 drift shape.
       for (const rt of REL_TYPES) {
