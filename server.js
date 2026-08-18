@@ -41,6 +41,7 @@ import { readTendingConfig } from './tending-config.mjs';
 import { buildTendingEntities } from './core/tending-bootstrap.mjs';
 import { resolveProvenance } from './core/tending-provenance.mjs';
 import { boardToDomain, domainToBoard, cardToNode } from './core/mapping.mjs';
+import { verifyShaIntegrity } from './core/sha-integrity.mjs';
 import { buildTree, buildChildIndex } from './core/tree.mjs';
 import { buildLinkIndex } from './core/links.mjs';
 import { commentMetadata } from './core/card-comments.mjs';
@@ -1350,9 +1351,44 @@ async function handleChecks(req, res) {
       }
     });
 
+    // ⛔⛔ #896 — DOES EVERY SHA ON THE BOARD NAME A REAL COMMIT?
+    //
+    // Its own population and its own mechanism, so it sits beside `standing`
+    // rather than inside it: standing checks are SPARQL over the replica, this
+    // one shells out to git. Summing them would make one number mean two things,
+    // which is the confusion this endpoint exists to refuse.
+    //
+    // ⚠️ NOT A WRITE-PATH VALIDATOR, and the difference was measured: the server
+    // serves from the DEPLOY clone, and the real order is commit → push → write
+    // the card → then pull and deploy. At write time the serving clone does not
+    // have the object, so resolving on write would refuse legitimate shas for a
+    // reason their author cannot act on. A rail whose failure mode is "the board
+    // stops accepting truth" is worse than the defect it prevents.
+    const shaIntegrity = await verifyShaIntegrity(data, {
+      // ⭐ ONE process for the whole population. `--batch-check` reads every sha
+      // on stdin and answers per line, so a 264-sha board costs one spawn rather
+      // than 264 on an endpoint anyone can hit.
+      resolve: async (shas) => {
+        const { execFile } = await import('node:child_process');
+        const out = await new Promise((ok, bad) => {
+          const child = execFile('git', ['cat-file', '--batch-check'], { cwd: PROJECT_DIR, maxBuffer: 8 << 20 },
+            (err, stdout) => (err ? bad(err) : ok(stdout)));
+          child.stdin.end(shas.join('\n') + '\n');
+        });
+        const live = new Set();
+        for (const line of out.split('\n')) {
+          // "<sha> commit <size>" for a real object; "<sha> missing" otherwise.
+          const [sha, kind] = line.trim().split(/\s+/);
+          if (sha && kind === 'commit') live.add(sha);
+        }
+        return live;
+      },
+    });
+
     sendJSON(res, 200, {
       cardsWatched: watched,
       cardsUnwatched: unwatched,
+      shaIntegrity,
       unwatchedByType,
       unwatchedGoals,
       standing,
@@ -1368,7 +1404,12 @@ async function handleChecks(req, res) {
         + 'standing[] is a DIFFERENT population: corpus-scale claims the system checks '
         + 'because nobody authored a tripwire for them (an edge cannot author one). Its '
         + 'findings are public unknowns, not accusations — each publishes its query so you '
-        + 'can re-run it, and each is counted separately from stale.',
+        + 'can re-run it, and each is counted separately from stale. '
+        + 'shaIntegrity is a THIRD population and a different mechanism: it asks git whether '
+        + 'every commit sha on the board resolves. It reports UNMEASURABLE rather than zero '
+        + 'when the repository cannot be read, because "no fabrications found" and "I could '
+        + 'not look" are otherwise identical — and it names what it cannot see, since this '
+        + 'runs on the deploy clone and a freshly-pushed commit legitimately reads as missing.',
       results,
     });
   } catch (e) {
