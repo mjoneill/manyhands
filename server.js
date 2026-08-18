@@ -781,7 +781,30 @@ const CREATE_CONSUMED_FIELDS = new Set([
   'id', 'title', 'description', 'type', 'assignees', 'assignee',
   'labels', 'for', 'priority', 'column', 'order', 'createdBy', 'relationships',
   'implementedBy',   // #830
+  // #862 — `by` is the word every OTHER surface uses for "who is doing this":
+  // PATCH takes it, and /api/changes emits the event log's `actor` under that
+  // name. Create took only `createdBy`, so a caller who learned `by` from the
+  // update route was recorded as null here — and #631 makes `createdBy`
+  // immutable, so that was permanent rather than repairable. Three cards from
+  // 2026-08-18 carry it, including #857, the apex card arguing this board is
+  // the room's record. Accepting the alias costs nothing and closes the trap.
+  'by',
 ]);
+
+/**
+ * #862 — the author a create request DECLARES, under either spelling.
+ *
+ * `createdBy` first, then `by`. Neither is authenticated; both are the caller's
+ * claim about itself, recorded as given. A blank or non-string value declares
+ * nothing and yields null, which is the honest answer — see #631.
+ */
+function declaredAuthor(body) {
+  for (const k of ['createdBy', 'by']) {
+    const v = body?.[k];
+    if (typeof v === 'string' && v.trim()) return v.trim();
+  }
+  return null;
+}
 
 /** Keys the caller sent that create will silently drop. Empty when clean. */
 function unconsumedCreateFields(body) {
@@ -830,7 +853,16 @@ function createCardFromPayload(body, nextShortId) {
     // the #348 lease, cleared on release: it records custody, not writing). A
     // card whose author was never captured must READ as unknown, because
     // inventing one is worse than lacking one.
-    createdBy: (typeof body.createdBy === 'string' && body.createdBy.trim()) ? body.createdBy.trim() : null,
+    // #862 — `createdBy` OR `by`, and the precedence is pinned rather than
+    // incidental: `createdBy` is this route's native field and wins when both
+    // are sent, so the stored author cannot depend on JSON key order. (Same
+    // reasoning as #831's assignees/assignee precedence, and the same failure
+    // it prevents: a result that changes with the shape of the request.)
+    //
+    // ⚠️ Declaring NOTHING still stores null. This is an alias, not a backfill —
+    // the trust model is DECLARED, not authenticated, and inventing an
+    // attribution is worse than lacking one.
+    createdBy: declaredAuthor(body),
     relationships: normalizeRelationships(body.relationships),
     // #830 — a card may be born knowing what implemented it. Retroactive cards
     // (work shipped before it was filed) carry the sha at creation, and the
