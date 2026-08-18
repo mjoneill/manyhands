@@ -794,29 +794,79 @@ function projectEntity(store, e) {
  * rather than assert it. Pass `prev = null` for a cold start (projects
  * everything and is exactly a full rebuild).
  */
-export function syncGraphStore(store, doc, prev) {
-  const next = new Map();
-  const entities = doc['@graph'] || [];
-  let updated = 0, removed = 0;
-  for (const e of entities) {
-    if (!e || e['@id'] == null) continue;
-    const key = subjectIriFor(e);
-    const hash = createHash('sha1').update(JSON.stringify(e)).digest('hex');
-    next.set(key, hash);
-    if (!prev) {
-      // Cold start: nothing to replace, so the match-and-delete is pointless work.
-      projectEntity(store, e); updated += 1;
-    } else if (prev.get(key) !== hash) { updateEntity(store, e); updated += 1; }
+/**
+ * #884 — ONE entity's share of a sync. Extracted so the synchronous and chunked
+ * paths cannot drift: a second copy of this loop is the #618 shape, and the
+ * thing that would drift is #714's triple-for-triple parity invariant.
+ */
+function syncOneEntity(store, e, prev, next) {
+  if (!e || e['@id'] == null) return 0;
+  const key = subjectIriFor(e);
+  const hash = createHash('sha1').update(JSON.stringify(e)).digest('hex');
+  next.set(key, hash);
+  if (!prev) {
+    // Cold start: nothing to replace, so the match-and-delete is pointless work.
+    projectEntity(store, e); return 1;
   }
-  // Entities that vanished from the document lose their triples. Arrows POINTING
-  // at them survive under their own subjects — the same dangling-reference
-  // behaviour a full rebuild produces, since it projects whatever the document
-  // says and the document is what dropped them.
+  if (prev.get(key) !== hash) { updateEntity(store, e); return 1; }
+  return 0;
+}
+
+/** #884 — entities that vanished from the document lose their triples. */
+function sweepVanished(store, prev, next) {
+  let removed = 0;
   if (prev) {
     for (const key of prev.keys()) {
       if (!next.has(key)) { removeEntity(store, key); removed += 1; }
     }
   }
+  return removed;
+}
+
+/**
+ * #884 — the same sync, in batches, YIELDING to the event loop between them.
+ *
+ * ⛔ THE PROBLEM THIS EXISTS FOR, measured in production: every boot re-projects
+ * the whole store, and `oxigraph.store.add` is SYNCHRONOUS. 137,000 triples on
+ * the main thread blocked the server for 13–29 SECONDS per boot — and the room
+ * booted 85 times in one day. The board answered nothing during those windows:
+ * not /api/graph, not /api/cards, not the browser. "The board is down" turned
+ * out to mean "someone restarted it."
+ *
+ * ⭐ THE PROPERTY IS RESPONSIVENESS, NOT SPEED. This does the same total work and
+ * is very slightly slower. A faster projection that still blocks would be the
+ * same outage, shorter. What changes is that other requests get a turn.
+ *
+ * ⚠️ Parity is pinned by test, not argued: the chunked result must be
+ * triple-for-triple identical to the synchronous one, or this trades an outage
+ * for a correctness bug — a worse trade.
+ */
+export async function syncGraphStoreChunked(store, doc, prev, { batchSize = 250 } = {}) {
+  const next = new Map();
+  const entities = doc['@graph'] || [];
+  let updated = 0;
+  for (let i = 0; i < entities.length; i += batchSize) {
+    for (const e of entities.slice(i, i + batchSize)) {
+      updated += syncOneEntity(store, e, prev, next);
+    }
+    // Hand the loop back. `setImmediate` runs after I/O callbacks, so a pending
+    // request is served before the next batch rather than after the whole sync.
+    if (i + batchSize < entities.length) await new Promise(setImmediate);
+  }
+  const removed = sweepVanished(store, prev, next);
+  return { hashes: next, updated, removed, total: entities.length };
+}
+
+export function syncGraphStore(store, doc, prev) {
+  const next = new Map();
+  const entities = doc['@graph'] || [];
+  let updated = 0, removed = 0;
+  for (const e of entities) {
+    updated += syncOneEntity(store, e, prev, next);
+  }
+  // Arrows POINTING at a vanished entity survive under their own subjects — the
+  // same dangling-reference behaviour a full rebuild produces.
+  removed = sweepVanished(store, prev, next);
   return { hashes: next, updated, removed, total: entities.length };
 }
 

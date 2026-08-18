@@ -678,7 +678,7 @@ async function loadGraphModules() {
 let _activitySeq = 0;
 
 async function warmGraphStore() {
-  const { buildGraphStore, syncGraphStore, projectActivities, projectLabelAliases } = await loadGraphModules();
+  const { buildGraphStore, syncGraphStoreChunked, projectActivities, projectLabelAliases } = await loadGraphModules();
   let rebuiltMs = null;
   if (_graphDirty || !_graphStore) {
     // #714 — INCREMENTAL. The old path threw the store away and re-projected
@@ -692,7 +692,17 @@ async function warmGraphStore() {
     const t = performance.now();
     if (!_graphStore) { _graphStore = buildGraphStore({ '@graph': [] }); _activitySeq = 0; }
     const doc = domainToJsonLd(loadDomain(BOARD_DATA_FILE));
-    const stats = syncGraphStore(_graphStore, doc, _graphHashes);
+    // #884 — CHUNKED, so the projection yields to the event loop between batches.
+    //
+    // ⛔ Measured in production: a cold projection re-projects the whole store
+    // and `oxigraph.store.add` is synchronous, so a boot blocked the server for
+    // 13–29 SECONDS — /api/graph, /api/cards and the browser alike. The room
+    // booted 85 times in one day. "The board is down" meant "someone restarted it."
+    //
+    // ⭐ This does the SAME total work and is marginally slower. The property is
+    // that other requests get a turn, not that the sync is fast: a faster
+    // projection that still blocks is the same outage, shorter.
+    const stats = await syncGraphStoreChunked(_graphStore, doc, _graphHashes);
     _graphHashes = stats.hashes;
 
     // #857 §IV — declared label synonyms.
