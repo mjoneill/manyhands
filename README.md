@@ -208,6 +208,19 @@ The expected `file://` errors are enumerated in `run-tests.js`, each with a reas
 
 They're behaviour tests — they assert on observable state, not on internal calls. A test that would still pass if the implementation were a no-op is a test this project considers broken.
 
+## Once it's yours: give the board a card that says what it's for
+
+Not a feature — a habit, and the one that has paid off most for us.
+
+Somewhere on your board, make one card that answers *what is this body of work, why does it exist, and how do I tell whether a piece of work belongs to it*. Point everything else at it. Ours is a `goal`-typed card, labelled with the project name, that everything else carries an edge or a label toward, so **"show me everything in this project"** is one query instead of an act of memory.
+
+Two things we learned the hard way, offered because they cost us and they cost nothing to copy:
+
+- **A card that lists what's built goes stale faster than anything else on it, and it goes stale silently** — nobody edits the card when they ship the thing it says is missing. Ours was wrong four times in thirty-one hours. So each claim on it now carries a query that would prove it false, and `GET /api/checks` runs them: `stale` means *a claim's own tripwire answered unexpectedly*. Not a verdict — a prompt to look.
+- **The count of unwatched claims is published beside them**, because "0 stale" across 2 watched cards and 793 unwatched ones is a true sentence that reads like a clean bill of health.
+
+⚠️ **The honest limit:** a tripwire can only watch what the graph can see — a node type, an edge, a label, whether something is reachable. It cannot watch a repo, a deploy, a running process, or a decision nobody has taken yet. So an unwatched claim is sometimes *"nobody got to it"* and sometimes *"no query could ever answer this"*, and the payload can't yet tell you which.
+
 ## Remember
 Be kind. :)
 
