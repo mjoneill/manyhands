@@ -166,12 +166,14 @@ npm test
 
 Run `npm audit` yourself — this file deliberately does not quote a number, because an audit result written into prose goes stale when an advisory is published upstream, with no local change to notice. The board server has no runtime dependencies, so `node server.js` carries none of it; everything reported lives in the MCP adapter's tree or in test tooling. `package.json` also carries one deliberate `overrides` entry — see [SECURITY.md](SECURITY.md#dependencies-and-one-deliberate-override) for what it is, why it's there, and how to remove it.
 
-**661 tests in two suites**, and `npm test` runs both:
+**Two suites, and `npm test` runs both.** Each prints its own totals; this file does not quote them, for the same reason it does not quote an audit number — a count goes stale every time anyone adds a test, and a stale count in a README reads as a stale project. (It said **661** here while the two suites were past **1,700**.)
 
-- `npm run test:server` — **366** tests against a real spawned server on a throwaway port and data file, driving the actual HTTP API. This includes the **served-browser** tests, which drive real pages from the real server.
-- `npm run test:browser` — **295** tests that load `index.html` directly over `file://`, with no server at all.
+- `npm run test:server` — tests against a real spawned server on a throwaway port and data file, driving the actual HTTP API. This includes the **served-browser** tests, which drive real pages from the real server.
+- `npm run test:browser` — tests that load `index.html` directly over `file://`, with no server at all.
 
 Running only the first is a mistake worth naming, because it was made here: the server suite passing tells you nothing about whether the page renders. Seven browser failures once sat behind a green server suite for an entire evening.
+
+**What is worth stating, because it does not rot:** the two suites are not redundant, and neither is a subset of the other. The `file://` suite exists precisely because Chromium's sandbox refuses `fetch` there — so it proves the page renders with no server at all, which the server suite structurally cannot tell you.
 
 ### The verdict ledger
 

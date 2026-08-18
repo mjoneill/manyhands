@@ -80,7 +80,11 @@ One decision is worth stating rather than hiding in a lockfile:
 
 **`package.json` contains an `overrides` entry forcing `@hono/node-server` to `^2.0.5`.** The MCP SDK — at its latest published version — depends on a 1.x line carrying a path-traversal advisory in its static-file middleware. There is no SDK release that resolves it, so the choices were: ship with known advisories, or override the transitive dependency ourselves.
 
-We overrode it, and verified rather than assumed: the full 661-test contract passes on a **fresh `npm ci`** with the override applied, including every test that exercises the SDK's HTTP transport.
+We overrode it, and verified rather than assumed: the **full** suite passes on a **fresh `npm ci`** with the override applied, including every test that exercises the SDK's HTTP transport.
+
+Reproduce it yourself with `npm ci && npm test`. The word doing the work there is *full* — a subset passing tells you nothing about an override that changes a transitive dependency, which is why `scripts/run-tests.sh` prints an exclusion banner whenever it runs less than everything.
+
+⚠️ This sentence used to quote a test count. It said **661** and the suite was past 1,400 by the time anyone checked — a number that goes stale every time someone adds a test, in a document where a stale number reads as a stale *audit*. The count was doing real work (it said "everything ran, not a subset"), so it is replaced by the command that re-establishes that rather than deleted.
 
 **What you should know about that:**
 
