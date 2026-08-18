@@ -1197,6 +1197,44 @@ function handleMisses(req, res) {
   });
 }
 
+/**
+ * #880/#857 §VI — STANDING CHECKS: corpus-scale claims nobody authored.
+ *
+ * #792's tripwires are per-card and AUTHORED — a seat writes a claim and the
+ * query that would falsify it. That cannot see a claim held by an EDGE, and it
+ * cannot see a claim nobody thought to write down.
+ *
+ *   `#439 blockedBy #438`  and  `#438 is done`
+ *
+ * Both facts true, structural, stored. Together they say the board is asserting
+ * a block that cannot block anything — and NOTHING changed on #439 when #438
+ * shipped, so there is no diff for a reviewer to catch.
+ *
+ * ⛔ WHY A QUERY AND NOT A HABIT, measured 2026-08-18: a careful manual tidy
+ * pass, run by the room's most careful seat while specifically looking for this,
+ * found FOUR and missed FIVE. Nine pairs across 795 cards is not something a
+ * person reads their way to.
+ *
+ * ⚠️ EVERY STANDING CHECK MUST BE TIER-A SHAPED (#824): both facts structural,
+ * the finding unambiguous, actionable by one write. "This card looks stale" is
+ * not admissible; "this card declares a block on a card that is done" is —
+ * because #824's rule is that a check which always fires trains the room to
+ * dismiss the instrument inside a week, taking the working ones with it.
+ *
+ * ⚠️ AND IT IS A PUBLIC UNKNOWN, NEVER AN ACCUSATION. The edge was TRUE when it
+ * was written. The payload says what it found and publishes the query so the
+ * reader can re-run it; it does not say anyone was negligent.
+ */
+const STANDING_CHECKS = [
+  {
+    id: 'phantom-block',
+    claim: 'a card declares blockedBy a card that is already done — the block cannot block anything, '
+      + 'and nothing changed on the blocked card when the blocker shipped',
+    query: 'SELECT ?blocked ?blocker WHERE { ?a scrum:blockedBy ?b ; schema:identifier ?blocked . '
+      + '?b schema:identifier ?blocker ; scrum:column <https://scrumboard.local/column/done> }',
+  },
+];
+
 async function handleChecks(req, res) {
   try {
     const { store } = await warmGraphStore();
@@ -1258,11 +1296,28 @@ async function handleChecks(req, res) {
       results.push({ shortId: card.shortId, title: card.title, checks: evaluated });
     }
 
+    // #880 — the standing checks, run over the corpus rather than per card.
+    // Kept in their own array: `results` answers "which claims did a seat write a
+    // tripwire for?" and `standing` answers "which claims does the SYSTEM check
+    // because nobody would think to". Summing them would make `stale` mean two
+    // things at once, which is the confusion this endpoint exists to refuse.
+    const standing = STANDING_CHECKS.map((c) => {
+      try {
+        const r = queryGraph(store, c.query);
+        return { id: c.id, claim: c.claim, query: c.query, rows: r.rows ?? [] };
+      } catch (e) {
+        // An error is NOT an empty result. A standing check that cannot run must
+        // never read as "nothing found" — the #792 lesson, on a second surface.
+        return { id: c.id, claim: c.claim, query: c.query, error: e?.message || String(e) };
+      }
+    });
+
     sendJSON(res, 200, {
       cardsWatched: watched,
       cardsUnwatched: unwatched,
       unwatchedByType,
       unwatchedGoals,
+      standing,
       stale,
       errors,
       // Stated in the payload rather than assumed by the reader: this counts
@@ -1271,7 +1326,11 @@ async function handleChecks(req, res) {
         + 'cardsUnwatched carry no checks and are therefore unmeasured, not passing. '
         + 'unwatchedByType covers ALL of them; unwatchedGoals is the named LIST for goal '
         + 'cards only — the type this board plans from. An empty unwatchedGoals means no '
-        + 'GOAL is unwatched, never that the gap is closed: read cardsUnwatched for that.',
+        + 'GOAL is unwatched, never that the gap is closed: read cardsUnwatched for that. '
+        + 'standing[] is a DIFFERENT population: corpus-scale claims the system checks '
+        + 'because nobody authored a tripwire for them (an edge cannot author one). Its '
+        + 'findings are public unknowns, not accusations — each publishes its query so you '
+        + 'can re-run it, and each is counted separately from stale.',
       results,
     });
   } catch (e) {
