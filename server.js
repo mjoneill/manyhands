@@ -47,8 +47,12 @@ import { commentMetadata } from './core/card-comments.mjs';
 import { readConfig, writeConfig, LIMITS } from './channel-config.mjs';
 import { loadRoster, writeRoster, rosterFilePath } from './core/roster-config.mjs';
 import { extractMentions as extractMentionsFromRoster } from './core/people.mjs';
-import { buildGraphStore, queryGraph, syncGraphStore } from './core/graph-replica.mjs';
-import { readyFromStore, pageReady, READY_EXPLAIN } from './core/ready-query.mjs';
+// #868 — the graph modules are imported LAZILY, at the bottom of this file's
+// graph section, and deliberately NOT here. They reach `oxigraph`, an npm
+// dependency, and a static import of it made `node server.js` on a fresh clone
+// die with ERR_MODULE_NOT_FOUND before anything listened — under a README
+// heading that says "no install step". The board does not need a SPARQL replica
+// in order to serve a board, so boot must not require one.
 import { domainToJsonLd } from './core/jsonld.mjs';
 import { deriveGraph, personByKey } from './core/people.mjs';
 import { queryCards } from './core/cards-query.mjs';
@@ -611,7 +615,47 @@ const GRAPH_QUERY_LOG = path.join(path.dirname(BOARD_DATA_FILE), 'graph-query-lo
  * ready verdict and a hand-run SPARQL check can never disagree about which
  * world they measured.
  */
-function warmGraphStore() {
+/**
+ * #868 — load the graph modules on FIRST USE, not at boot.
+ *
+ * `core/graph-replica.mjs` imports `oxigraph`, and `core/ready-query.mjs`
+ * imports graph-replica — so a static import of either put an npm dependency on
+ * the boot path. Deferring both keeps `node server.js` working on a clone with
+ * no `node_modules`, which is what the README promises and what a stranger
+ * actually does first.
+ *
+ * ⚠️ The failure is REPORTED, not swallowed. If the dependency is genuinely
+ * absent, the graph endpoints must say so in a way a caller can act on — a
+ * board that silently returns an empty result set for every query would be a
+ * worse defect than the crash this replaces.
+ */
+let _graphModules = null;
+async function loadGraphModules() {
+  if (_graphModules) return _graphModules;
+  try {
+    const [replica, ready] = await Promise.all([
+      import('./core/graph-replica.mjs'),
+      import('./core/ready-query.mjs'),
+    ]);
+    _graphModules = { ...replica, ...ready };
+    return _graphModules;
+  } catch (e) {
+    if (e?.code === 'ERR_MODULE_NOT_FOUND') {
+      throw Object.assign(
+        new Error(
+          'The graph endpoints need the optional `oxigraph` dependency, which is not '
+          + 'installed. Run `npm install` to enable /api/graph and /api/ready. The rest '
+          + 'of the board works without it.',
+        ),
+        { code: 'GRAPH_DEPS_MISSING' },
+      );
+    }
+    throw e;
+  }
+}
+
+async function warmGraphStore() {
+  const { buildGraphStore, syncGraphStore } = await loadGraphModules();
   let rebuiltMs = null;
   if (_graphDirty || !_graphStore) {
     // #714 — INCREMENTAL. The old path threw the store away and re-projected
@@ -645,7 +689,8 @@ async function handleGraphQuery(req, res) {
     // invisible here and timestamp-less in the console line, so neither could
     // correlate the two. Both halves are now measured and both are logged.
     const tCall = performance.now();
-    const { store, rebuiltMs } = warmGraphStore();
+    const { queryGraph } = await loadGraphModules();
+    const { store, rebuiltMs } = await warmGraphStore();
     const result = queryGraph(store, body.query, { limit: body.limit });
     try {
       fs.appendFileSync(GRAPH_QUERY_LOG, JSON.stringify({
@@ -657,6 +702,7 @@ async function handleGraphQuery(req, res) {
     } catch { /* the log is telemetry, never a gate on the answer */ }
     sendJSON(res, 200, result);
   } catch (e) {
+    if (e.code === 'GRAPH_DEPS_MISSING') return sendJSON(res, 503, { error: e.message, code: e.code });
     if (e.code === 'READ_ONLY' || e.code === 'EMPTY_QUERY') return sendJSON(res, 400, { error: e.message, code: e.code });
     // a SPARQL parse error is the caller's to fix — teach, don't 500
     return sendJSON(res, 400, { error: e.message, hint: 'SELECT/ASK SPARQL; prefixes schema:, scrum:, entity:, person:, column: are pre-declared' });
@@ -673,7 +719,8 @@ async function handleGraphQuery(req, res) {
 async function handleReady(req, res) {
   try {
     const url = new URL(req.url, 'http://localhost');
-    const { store } = warmGraphStore();
+    const { readyFromStore, pageReady, READY_EXPLAIN } = await loadGraphModules();
+    const { store } = await warmGraphStore();
     // Verdicts are computed COMPLETE; explain consults them unpaged (a ready
     // card past the page window must answer ready, not 404 — bb2ccee6) and
     // the queue response pages both lists.
@@ -684,6 +731,7 @@ async function handleReady(req, res) {
     }
     sendJSON(res, 200, pageReady(verdicts, { limit: url.searchParams.get('limit') ?? undefined }));
   } catch (e) {
+    if (e.code === 'GRAPH_DEPS_MISSING') return sendJSON(res, 503, { error: e.message, code: e.code });
     if (e.code === 'UNKNOWN_CARD') return sendJSON(res, 404, { error: e.message, code: e.code });
     if (e.code === 'READY_BAD_LIMIT') return sendJSON(res, 400, { error: e.message, code: e.code });
     if (e.code === 'READY_TRUNCATED') return sendJSON(res, 503, { error: e.message, code: e.code });
