@@ -1974,18 +1974,34 @@ function findConversationIndex(data, id) {
 }
 
 // Parse query string from req.url. Returns a plain object.
+// #764 — USE URLSearchParams, NOT decodeURIComponent, and the difference is a
+// whole class of silent zero-result queries.
+//
+// The hand-rolled version split on & and ran each half through
+// decodeURIComponent. That decodes %20 but leaves `+` alone — and `+` is how
+// application/x-www-form-urlencoded (and therefore URLSearchParams, and
+// therefore the MCP adapter) encodes a space. So `label=building+scrum+board`
+// was searched for as the literal string "building+scrum+board", which no card
+// carries.
+//
+// ⛔ 200 OK. Zero cards. No error. The board's most-used label — 158 cards —
+// was unqueryable by any agent using the MCP tool, and the caller could not
+// distinguish "nothing matches" from "your query was mangled in transit".
+//
+// ⚠️ It was never label-specific. The parser is shared, so EVERY filter whose
+// value can contain a space had it: assignee, `for`, column ids, and any filter
+// added later. Renaming the data to suit a broken parser would have left the
+// parser broken for the next value.
+//
+// URLSearchParams implements the form-urlencoded rules exactly: `+` decodes to
+// a space, and a literal plus survives as %2B. Both directions are covered by
+// tests/query-plus-encoding.test.mjs, including the paired control that a
+// naive `.replace(/\+/g, ' ')` would fail.
 function parseQuery(reqUrl) {
   const qIdx = reqUrl.indexOf('?');
   if (qIdx < 0) return {};
-  const qs = reqUrl.slice(qIdx + 1);
   const out = {};
-  for (const pair of qs.split('&')) {
-    if (!pair) continue;
-    const eq = pair.indexOf('=');
-    const k = decodeURIComponent(eq < 0 ? pair : pair.slice(0, eq));
-    const v = decodeURIComponent(eq < 0 ? '' : pair.slice(eq + 1));
-    out[k] = v;
-  }
+  for (const [k, v] of new URLSearchParams(reqUrl.slice(qIdx + 1))) out[k] = v;
   return out;
 }
 
