@@ -93,9 +93,11 @@ test('#801 misses are ranked by demand — the roadmap the comment already claim
     // vulnerabilities" versus the eight named ones, "45% isolated" versus the
     // 94 cards you could actually go and fix.
     assert.deepEqual(m.byParam, [
-      { param: 'sortBy', count: 3, seats: ['ada'] },
-      { param: 'groupBy', count: 1, seats: ['grace'] },
-    ], 'ranked by real demand, naming who wanted each');
+      { param: 'sortBy', count: 3, seats: ['ada'], answered: false },
+      { param: 'groupBy', count: 1, seats: ['grace'], answered: false },
+    ], 'ranked by real demand, naming who wanted each — and whether it is still wanted');
+    assert.equal(m.open, 4, 'all four are still OPEN needs');
+    assert.equal(m.answered, 0);
   } finally { await s.stop(); }
 });
 
@@ -154,5 +156,41 @@ test('#801 a supported query records NOTHING — the paired control', async () =
     const m = await misses(s.baseUrl);
     assert.equal(m.total, 0,
       'a door that records a miss when it succeeded would make the roadmap noise');
+  } finally { await s.stop(); }
+});
+
+test('#801 an ANSWERED need is marked answered, not left asserting itself forever', async () => {
+  // ⛔ FOUND ON PROD MINUTES AFTER #656 SHIPPED. `q` was the top entry in the
+  // miss log; free-text search landed; the log went on listing `q` as a want,
+  // because it is append-only and history does not retract itself.
+  //
+  // ⇒ That makes the roadmap a PERISHABLE CLAIM — "seats want q" was true when
+  //   recorded and false the moment it was built, with nothing marking the
+  //   difference. A reader planning work from it would build q twice.
+  //
+  // ⚠️ Deleting the old rows would be the wrong fix: it destroys the evidence
+  // that the need was real and that answering it took N days. The record stays;
+  // its STATUS changes.
+  const s = await startRestServer({ board: makeBoardFixture({ cards: [], nextShortId: 1 }) });
+  try {
+    await fetch(`${s.baseUrl}/api/cards?sortBy=title&as=ada`);          // still unmet
+    const m = await misses(s.baseUrl);
+
+    const openOnes = m.byParam.filter((p) => !p.answered);
+    assert.deepEqual(openOnes.map((p) => p.param), ['sortBy'],
+      'an unmet need is OPEN');
+    assert.equal(m.open, 1, 'and the headline counts OPEN needs, not all history');
+
+    // Now simulate history: a row for a param that IS supported today.
+    // `q` is supported since #656, so a recorded q-miss must read as answered.
+    const missFile = missLogPathFor(s.boardFile);
+    fs.appendFileSync(missFile,
+      JSON.stringify({ at: '2026-08-01T00:00:00.000Z', seat: 'ada', param: 'q', url: '/api/cards?q=x' }) + '\n');
+
+    const after = await misses(s.baseUrl);
+    const q = after.byParam.find((p) => p.param === 'q');
+    assert.ok(q, 'the historical record SURVIVES — evidence the need was real');
+    assert.equal(q.answered, true, 'but it is marked answered, not still wanted');
+    assert.equal(after.open, 1, 'and it no longer inflates the open count');
   } finally { await s.stop(); }
 });

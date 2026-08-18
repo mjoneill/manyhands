@@ -1020,12 +1020,32 @@ function handleMisses(req, res) {
     e.count += 1;
     if (r.seat) e.seats.add(r.seat);
   }
+  // #801 — AN ANSWERED NEED MUST STOP ASSERTING ITSELF.
+  //
+  // Found on prod minutes after #656 shipped `q`: the log went on listing `q` as
+  // a want, because it is append-only and history does not retract itself. That
+  // turns the roadmap into a perishable claim — true when recorded, false once
+  // built, with nothing marking the difference — and a reader planning from it
+  // would build the same thing twice.
+  //
+  // ⚠️ Deleting those rows would be the wrong fix: it destroys the evidence that
+  // the need was real and that answering it took as long as it did. The RECORD
+  // stays; its STATUS changes, decided against the live param set rather than
+  // against a hand-maintained list that would rot the same way.
   const byParam = [...by.values()]
-    .map((e) => ({ param: e.param, count: e.count, seats: [...e.seats].sort() }))
-    .sort((a, b) => b.count - a.count || a.param.localeCompare(b.param));
+    .map((e) => ({
+      param: e.param, count: e.count, seats: [...e.seats].sort(),
+      answered: CARD_LIST_PARAMS.has(e.param),
+    }))
+    .sort((a, b) => Number(a.answered) - Number(b.answered)
+      || b.count - a.count || a.param.localeCompare(b.param));
 
   sendJSON(res, 200, {
     total: rows.length,
+    // The headline is OPEN needs. `total` counts all history, which is the
+    // number that quietly stops meaning anything as the log ages.
+    open: byParam.filter((p) => !p.answered).reduce((n, p) => n + p.count, 0),
+    answered: byParam.filter((p) => p.answered).reduce((n, p) => n + p.count, 0),
     byParam,
     covers: 'retrieval needs that ARRIVED AT THE DOOR — a seat asked this board for '
       + 'something it could not serve, recorded at the moment of the ask',
