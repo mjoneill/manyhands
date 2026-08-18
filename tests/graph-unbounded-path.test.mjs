@@ -94,6 +94,39 @@ test('#885 the refusal TEACHES the query that works', async () => {
       `the refusal must tell the caller to ANCHOR the path — enumerating alone leaves a `
       + `10s query. got ${JSON.stringify(r.body.hint)}`,
     );
+    // ⭐⭐⭐ #887 — AND THE THIRD HALF, WHICH IS THE ONE THAT ACTUALLY PREDICTS COST.
+    //
+    // This hint has now been wrong twice, each time by teaching a real but
+    // insufficient half. v1 said "enumerate" and left a 9.97s query. v2 said
+    // "anchor" and left a 28.6s one. The query log settled it: of seven
+    // anchored+enumerated+transitive queries actually run against this board,
+    // the six carrying a type constraint on the FAR end cost 14.8-148ms, and
+    // the one without cost 28,610ms — over TWO predicates, versus twelve in the
+    // fastest. Neither anchoring nor predicate count is the variable.
+    //
+    // ⚠️ The previous assertion (/anchor/i) passed against the hint that produced
+    // the 28.6s query, which is exactly why this one exists: a guard's teaching
+    // regresses silently unless each measured half is pinned separately.
+    // ⛔⛔ ASSERT ON THE WORKED EXAMPLE, NOT ON THE PROSE.
+    //
+    // The first version of this assertion was `/constrain|a schema:CreativeWork/i`
+    // against the whole hint, and a positive control proved it VACUOUS: deleting
+    // the constraint from the example still passed, because the phrase also
+    // appears in the surrounding prose. A live member of an OR masked the dead
+    // one — and the caller copies the EXAMPLE, not the prose.
+    const example = (r.body.hint.match(/\{[^}]*\}/) || [''])[0];
+    assert.ok(example, `the hint must contain a worked example in braces. got ${JSON.stringify(r.body.hint)}`);
+    assert.match(
+      example, /schema:identifier\s+"\d+"/,
+      `the worked EXAMPLE must anchor one end to a specific node. got ${JSON.stringify(example)}`,
+    );
+    assert.match(
+      example, /a\s+schema:CreativeWork/,
+      `the worked EXAMPLE must CONSTRAIN THE FAR END — an anchored path with a free far end `
+      + `still walks every node type and measured 28.6s on this board, versus 14-148ms with `
+      + `the constraint. A hint whose example omits it hands the caller the slow shape `
+      + `beside the fast shape's timing. got ${JSON.stringify(example)}`,
+    );
   } finally { await s.stop(); }
 });
 
