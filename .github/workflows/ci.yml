@@ -1,0 +1,84 @@
+# #837 — the suite runs without anyone remembering to run it.
+#
+# Until now every invariant this repo encodes as a test was enforced by memory:
+# 1393 server tests that execute only when a human types `npm run test:server`.
+# A test nobody runs automatically is a convention with extra steps, and the
+# room has repeatedly reasoned as though the suite were a gate — commit messages
+# ending "tests pass" read as "the suite is protecting this" when they only ever
+# meant "I ran it".
+#
+# ⛔ THE CONDITION THIS FILE SHIPS UNDER, from the repo owner:
+#     CI is welcome "provided that the tests don't leak the very things we're
+#     trying to catch in our release gates."
+#
+# A public job log publishes everything the suite prints, to anyone, for as long
+# as the repo exists — so this workflow is deliberately minimal about what it
+# emits. Measured before it was written: the full 8,605-line suite output
+# contains ZERO occurrences of the vocabulary the publication gate exists to
+# catch. The only home-directory paths in it are the local checkout path, which
+# on a runner is the runner's own.
+#
+# ⇒ Hygiene rules for anyone editing this file:
+#   · NO `env` dump, no `set -x`, no `printenv`, no `cat` of any data file.
+#   · NO artifact upload of board data, exports, fixtures or logs.
+#   · NO secrets. This workflow needs none, and adding one would make fork PRs
+#     a credential-exfiltration surface for a repo whose whole threat model is
+#     that the coordination channel is an actuator.
+#   · least-privilege token, declared below rather than inherited.
+#
+# ⚠️ The vocabulary guard is NOT here and must not be moved here. It lives in
+# the private pre-push gate, which holds the real list. Putting that list into
+# a public workflow to check that it stays out of the public repo is circular:
+# the check would publish exactly what it exists to protect. The two rails guard
+# different boundaries on purpose — the gate guards PUBLICATION, this guards
+# CORRECTNESS.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Least privilege, stated rather than inherited from repo defaults.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server:
+    name: server suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Puppeteer is a devDependency of the BROWSER job only. Skipping its
+    # Chromium download here keeps this job fast and keeps a browser-download
+    # failure from masking a server-suite result.
+    env:
+      PUPPETEER_SKIP_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Run the server suite
+        run: npm run test:server
+
+  browser:
+    name: browser suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Run the browser suite
+        run: npm run test:browser
