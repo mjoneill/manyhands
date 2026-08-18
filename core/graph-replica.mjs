@@ -174,6 +174,23 @@ export function projectActivities(store, events) {
     // triple pattern rather than an IRI-prefix string match — the difference
     // between a query anyone can write and one only its author can.
     if (ent.kind) store.add(oxigraph.triple(a, nn(IRI.scrum + 'entityKind'), lit(ent.kind)));
+    // ⭐⭐⭐ #891 — THE SHORTID IS THE ACTIVITY'S OWN PROPERTY, not a join.
+    //
+    // This line was missing, and the omission had a measured cost: 34 production
+    // activities whose target card had been deleted, so `prov:used entity:<uuid>`
+    // pointed at nothing and the graph could no longer say what those events were
+    // about. The raw log knew the whole time — `entity.shortId` is in every one
+    // of the 2,014 card events, and was simply never projected.
+    //
+    // ⚠️ "It is derivable in one hop" is true only while the card EXISTS, which
+    // is exactly the case where you most want the provenance: the record of what
+    // happened must outlive the thing it happened to. Deriving through a node
+    // that can vanish is not the same as keeping the fact.
+    //
+    // ⛔ ABSENT, NEVER ZERO, for an entity that has no shortId — 4,661 of the
+    // log's events are conversations. A placeholder would join to a card under
+    // any loose comparison; absence reads correctly in SPARQL as "no match".
+    if (ent.shortId != null) store.add(oxigraph.triple(a, nn(IRI.scrum + 'shortId'), lit(String(ent.shortId))));
     const when = ev.occurred_at || ev.recorded_at;
     if (when) store.add(oxigraph.triple(a, nn(IRI.prov + 'startedAtTime'), lit(when)));
   }
@@ -926,19 +943,44 @@ export function queryGraph(store, sparql, { limit } = {}) {
       ),
       {
         code: 'UNBOUNDED_PATH',
-        // ⚠️ THE FIRST VERSION OF THIS HINT SAID ONLY "enumerate the predicates",
-        // AND THAT IS THE LESS IMPORTANT HALF. Measured on an isolated copy of
-        // the live corpus (17,484 entities), the same 7-predicate path:
-        //     unbound at BOTH ends   9.97s   ← still blocks the shared event loop
-        //     ANCHORED at one end    0.015s  ← 660× faster
-        // Enumerating alone does not make a traversal cheap. ANCHORING does.
-        hint: 'ANCHOR ONE END of the path to a specific node — that is the change that '
-          + 'matters (measured: 0.015s anchored vs 9.97s unbound at both ends, same '
-          + 'predicates). And enumerate the predicates you mean: on this board '
-          + '{ ?a schema:identifier "857" . ?c (scrum:relatedTo|scrum:mentionsCard|scrum:blockedBy'
-          + '|scrum:supersedes|scrum:derivedFrom|scrum:supersededBy|schema:isPartOf)* ?a } '
-          + 'answers a full-corpus closure in ~25ms. A depth-1 !<urn:none> is also fine — '
-          + 'only the transitive form over a negated set is unbounded.',
+        // ⚠️ THIS HINT HAS BEEN WRONG TWICE, EACH TIME BY TEACHING A REAL BUT
+        // INSUFFICIENT HALF OF THE FIX (#887).
+        //
+        //   v1  "enumerate the predicates"   → left a 9.97s query
+        //   v2  "ANCHOR ONE END"             → left a 28.6s query
+        //
+        // ⛔ v2's rule was refuted by the query log itself. Of seven anchored,
+        // enumerated, transitive queries actually run against this board:
+        //
+        //     anchored + far end TYPE-CONSTRAINED   6 queries   14.8 – 148 ms
+        //     anchored + far end UNCONSTRAINED      1 query        28,610 ms
+        //
+        // The slow one uses TWO predicates; the 14.8ms one uses twelve. So neither
+        // anchoring nor predicate count is the variable that matters:
+        //
+        //   ⭐ WHAT PREDICTS COST IS WHETHER THE *FAR* END IS CONSTRAINED.
+        //
+        // An anchored path whose other end is a free variable ranges over every
+        // node in the graph — ~16.5k Comment nodes, wiki pages, people, columns —
+        // because a card can reach any of them. `?c a schema:CreativeWork` cuts
+        // the walk to cards and is the whole difference.
+        //
+        // ⚠️ AND THE v2 HINT QUOTED A NUMBER FROM A QUERY IT DID NOT SHOW: the
+        // "~25ms" is real (25.5ms, logged), but it was produced by a query
+        // carrying `?c a schema:CreativeWork`, which the example omitted. A caller
+        // copying that example got the unconstrained shape and the number of the
+        // constrained one. The example below is now the query that was measured.
+        hint: 'Two things, and the second is the one people miss. (1) ANCHOR one end of the '
+          + 'path to a specific node. (2) CONSTRAIN THE OTHER END — an anchored path whose far '
+          + 'end is a free variable still walks every node type in the graph. Measured on this '
+          + 'board: anchored with a free far end took 28.6 SECONDS over two predicates, while '
+          + 'anchored with `?c a schema:CreativeWork` took 14-148ms over twelve. Predicate count '
+          + 'is not the variable; the unconstrained end is. This is the measured form: '
+          + '{ ?a schema:identifier "857" . ?c a schema:CreativeWork ; '
+          + '(scrum:relatedTo|^scrum:relatedTo|scrum:mentionsCard|^scrum:mentionsCard'
+          + '|scrum:blockedBy|scrum:supersedes|scrum:derivedFrom|schema:isPartOf)* ?a } '
+          + '— a full-corpus closure in ~25ms. A depth-1 !<urn:none> is also fine; only the '
+          + 'transitive form over a negated set is refused outright.',
       },
     );
   }

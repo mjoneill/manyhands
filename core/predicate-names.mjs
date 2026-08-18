@@ -95,6 +95,10 @@ export const PREDICATE_SOURCE = Object.freeze({
 
   // ── MINTED BY THE PROJECTION. No store key exists. ─────────────────────
   'scrum:entityKind': null,     // from the event log's entity.kind (#725)
+  // #891 — from the event log's entity.shortId. NOT derived from the card node:
+  // the join through prov:used dies with the card, and 34 production activities
+  // were already in that state when this was added.
+  'scrum:shortId': null,
   'scrum:op': null,             // from the event log's op
   'prov:Activity': null,        // #725 — the event log projected as PROV
   'prov:used': null,
