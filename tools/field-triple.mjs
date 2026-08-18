@@ -97,7 +97,7 @@ function resolveProbeValue(v, ctx) {
  * @returns {Promise<{field, declares, accepts, reads, agrees, evidence}>}
  */
 export async function auditCreateField(baseUrl, probe) {
-  const { name, storedAs = name, with: companions = {} } = probe;
+  const { name, storedAs = name } = probe;
   const evidence = {};
 
   // A target exists for every probe, whether or not it is used: making it
@@ -105,6 +105,13 @@ export async function auditCreateField(baseUrl, probe) {
   // probe's verdict can't depend on how many probes ran before it.
   const targetCard = await post(baseUrl, {});
   const ctx = { targetShortId: targetCard.body.shortId };
+  // ⚠️ `with` is resolved through the SAME ctx as the values it accompanies.
+  // It used to be spread verbatim, so a companion that had to reference the
+  // probe's target card — a blocker naming the card it blocks, say — could not
+  // be expressed at all, and such a field read as UNMEASURED rather than as a
+  // gap in the harness. A probe option that silently cannot do its job is the
+  // instrument-shaped defect this audit exists to find.
+  const companions = resolveProbeValue(probe.with, ctx) ?? {};
   const wellFormed = resolveProbeValue(probe.wellFormed, ctx);
   const malformed = resolveProbeValue(probe.malformed, ctx);
 
@@ -192,11 +199,18 @@ export async function auditCreateField(baseUrl, probe) {
  * earlier probe cannot make a later one read as stored.
  */
 export async function auditPatchField(baseUrl, probe) {
-  const { name, storedAs = name, with: companions = {} } = probe;
+  const { name, storedAs = name } = probe;
   const evidence = {};
 
   const targetCard = await post(baseUrl, {});
   const ctx = { targetShortId: targetCard.body.shortId };
+  // ⚠️ `with` is resolved through the SAME ctx as the values it accompanies.
+  // It used to be spread verbatim, so a companion that had to reference the
+  // probe's target card — a blocker naming the card it blocks, say — could not
+  // be expressed at all, and such a field read as UNMEASURED rather than as a
+  // gap in the harness. A probe option that silently cannot do its job is the
+  // instrument-shaped defect this audit exists to find.
+  const companions = resolveProbeValue(probe.with, ctx) ?? {};
   const wellFormed = resolveProbeValue(probe.wellFormed, ctx);
   const malformed = resolveProbeValue(probe.malformed, ctx);
 

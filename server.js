@@ -1350,6 +1350,11 @@ const CREATE_CONSUMED_FIELDS = new Set([
   // as well as in the validator and the constructor because a field present in
   // only two of the three is accepted with a 201 and silently dropped (#831).
   'checks',
+  // #814 — blocker ownership. ⚠️ THIS LINE WAS MISSING and the field was
+  // validated, stored, and still reported in `ignoredFields`: CONSUMED_UNDECLARED,
+  // the #830/#856 shape. Both of my earlier edits landed in PATCHABLE_CARD_FIELDS
+  // and neither reached here. Caught by #831's sweep, not by review.
+  'blockers',
   // #862 — `by` is the word every OTHER surface uses for "who is doing this":
   // PATCH takes it, and /api/changes emits the event log's `actor` under that
   // name. Create took only `createdBy`, so a caller who learned `by` from the
@@ -1443,12 +1448,58 @@ function createCardFromPayload(body, nextShortId) {
     // evaporated" because exactly this line was missing while the schema and
     // the validator already knew the field.
     ...(Array.isArray(body.checks) ? { checks: body.checks } : {}),
+    ...(Array.isArray(body.blockers) ? { blockers: body.blockers } : {}),
     // #348 — coordination rail: first-write-wins claim, server-arbitrated.
     // Set only via POST /api/cards/:id/claim (never via PATCH), so a claim
     // is a compare-and-set under withWriteLock, not an unconditional overwrite.
     claimedBy: null,
     claimedAt: null,
   };
+}
+
+/**
+ * #814 — blocker OWNERSHIP. `blockedBy` says WHAT blocks this card and is silent
+ * on WHO is clearing it and WHETHER they still are, so that has lived in prose.
+ *
+ * ⛔ A BLOCKER MUST NAME A CARD THIS CARD IS ACTUALLY BLOCKED BY. Without that
+ * the ownership record drifts free of the edge it describes and becomes a SECOND
+ * source of truth about what blocks what — the drift the room has spent the day
+ * making unrepresentable rather than merely discouraged.
+ */
+const BLOCKER_STATUSES = new Set(['open', 'cleared']);
+
+function validateBlockers(blockers, current, incoming) {
+  if (!Array.isArray(blockers)) return 'blockers must be an array of {card, owner, status}';
+  // ⚠️ THE EFFECTIVE blockedBy AFTER THIS WRITE, not the one before it.
+  //
+  // The first cut read `current` only. On CREATE there is no current, so every
+  // blocker was refused and the field was silently PATCH-only — a caller could
+  // declare blockers and relationships in one payload and be told the edge did
+  // not exist, while the same two writes split across two calls worked.
+  //
+  // ⛔ Found by #831's three-list sweep, not by me: "well-formed probe did not
+  // create (status 400)". That audit exists for exactly this create/patch
+  // asymmetry, and it caught the field on its first run.
+  const incomingBlocked = incoming?.relationships?.blockedBy;
+  const blockedBy = (Array.isArray(incomingBlocked)
+    ? incomingBlocked
+    : (current?.relationships?.blockedBy || [])).map(String);
+  for (const b of blockers) {
+    if (!b || typeof b !== 'object' || Array.isArray(b)) return 'each blocker must be an object {card, owner, status}';
+    if (b.card === undefined || b.card === null || b.card === '') return 'each blocker needs a `card` (the blocking card shortId)';
+    if (!blockedBy.includes(String(b.card))) {
+      return `blocker names card ${JSON.stringify(b.card)}, which is not in this card's blockedBy `
+        + `(${blockedBy.join(', ') || 'empty'}). Ownership must describe an edge that exists, or it becomes `
+        + 'a second source of truth about what blocks what.';
+    }
+    if (b.owner !== undefined && b.owner !== null && typeof b.owner !== 'string') return 'blocker.owner must be a seat key';
+    if (!BLOCKER_STATUSES.has(b.status)) {
+      return `blocker for card ${b.card} has status ${JSON.stringify(b.status)} — must be one of `
+        + `${[...BLOCKER_STATUSES].join(', ')}`;
+    }
+    if (b.note !== undefined && b.note !== null && typeof b.note !== 'string') return 'blocker.note must be a string';
+  }
+  return null;
 }
 
 /**
@@ -1735,6 +1786,10 @@ function validateCardFields(body, { checkId = true, surface = 'patch', current =
   // abbreviation whose expansion needs the repository; the graph cannot expand
   // it, so accepting both forms would mint two nodes for one commit and never
   // reconcile them. That is an aliasing bug shipped as a convenience.
+  if (body.blockers !== undefined && body.blockers !== null) {
+    const berr = validateBlockers(body.blockers, current, body);
+    if (berr) return berr;
+  }
   if (body.checks !== undefined && body.checks !== null) {
     const cerr = validateChecks(body.checks);
     if (cerr) return cerr;
@@ -1791,6 +1846,7 @@ const PATCHABLE_CARD_FIELDS = new Set([
   'parkedBy', 'parkedAt', 'parkedUntil', 'parkedReason',
   'implementedBy',
   'checks',   // #792 — falsifier tripwires, editable as the claim they watch changes
+  'blockers', // #814 — who owns clearing each blocker, and whether they still do
 ]);
 
 // ── /api/changes — the returning-agent catch-up (#643) ──

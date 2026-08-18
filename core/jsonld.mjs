@@ -139,6 +139,13 @@ function cardNodeToFlat(node, shortToId) {
       for (const [rt, arr] of Object.entries(v || {})) {
         flat[rt] = (arr || []).map((sid) => shortToId.get(sid) ?? sid);
       }
+    } else if (k === 'blockers') {
+      // #814 — a blocker names its card by shortId; the projection must compare
+      // it against `blockedBy`, which is resolved to @ids two lines above. The
+      // mapping lives HERE and only here, because serialization holds the whole
+      // graph — a second copy in the replica is the #618 drift shape.
+      flat['scrum:blockers'] = (v || []).map((b) => (
+        b && b.card != null ? { ...b, card: shortToId.get(b.card) ?? b.card } : b));
     } else {
       flat[FACET_TO_PROP[k] ?? ('scrum:' + k)] = v;   // unknown facet keys ride prefixed
     }
@@ -164,6 +171,15 @@ function flatToCardNode(entity, idToShort) {
       // and later types land inside the same object, keeping their order.
       if (!board.relationships) board.relationships = rels;
       rels[k] = (v || []).map((ref) => idToShort.get(ref) ?? ref);
+    }
+    else if (k === 'scrum:blockers') {
+      // #814 — the inverse of the resolution in cardNodeToFlat. Serialization
+      // turned each blocker's shortId into the target's @id so the projection
+      // could match it against blockedBy; the domain speaks shortIds, so it
+      // turns back here. A reference naming no card rides VERBATIM, same as a
+      // dangling relationship member — losslessness beats tidiness.
+      board.blockers = (v || []).map((b) => (
+        b && b.card != null ? { ...b, card: idToShort.get(b.card) ?? b.card } : b));
     }
     else if (k in PROP_TO_FACET) board[PROP_TO_FACET[k]] = v;
     else if (k.startsWith('scrum:') && k !== 'scrum:meta') board[k.slice(6)] = v;  // unknown facet key, prefix stripped

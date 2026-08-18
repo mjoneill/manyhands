@@ -599,6 +599,42 @@ function projectEntity(store, e) {
       for (const r of e[MENTIONS_CARD] || []) {
         if (typeof r === 'string' && r) add(s, nn(S + 'mentionsCard'), nn(E + r));
       }
+      // #814 — BLOCKER OWNERSHIP as a typed node beside the edge.
+      //
+      // `blockedBy` says WHAT blocks this card; it cannot hold WHO is clearing
+      // it or WHETHER they still are, so that lived in prose and the graph could
+      // find the narration without answering from it.
+      //
+      // ⭐ KEEP THE EDGE, ADD THE NODE — the shape this room has now settled on
+      // twice (the label literal beside its concept, #687). Every existing
+      // consumer and traversal reads `blockedBy`, and it is untouched.
+      //
+      // ⚠️ THE NODE IS DERIVED FROM THE EDGE, and that is the D5 lesson applied
+      // at design time rather than discovered after. #687's concepts hung off a
+      // FOREIGN subject and orphaned when their last card dropped the label —
+      // invisible to subject-scoped deletion, and 1,438 tests could not see it.
+      // These hang off THIS card's subject and are emitted only for a blockedBy
+      // member that is still present, so removing the edge removes the node by
+      // construction. There is nothing to sweep.
+      {
+        const blockedBy = new Set((e.blockedBy || []).map(String));
+        for (const b of e['scrum:blockers'] || []) {
+          if (!b || b.card == null) continue;
+          // Serialization already resolved `card` to the target's @id, so this
+          // compares like with like. A blocker whose edge is gone emits NOTHING:
+          // ownership without a live edge would be state outliving the fact it
+          // describes, which is the orphan shape #687 hit.
+          const targetIri = blockedBy.has(String(b.card)) ? String(b.card) : null;
+          if (!targetIri) continue;
+          const bn = nn(`${IRI.entity}${e['@id']}/blocker/${encodeURIComponent(String(b.card))}`);
+          add(bn, A, nn(S + 'Blocker'));
+          add(bn, nn(S + 'blocks'), s);
+          add(bn, nn(S + 'blockedByCard'), nn(E + targetIri));
+          if (b.owner) add(bn, nn(S + 'owner'), personRef(b.owner));
+          if (b.status) add(bn, nn(S + 'status'), lit(b.status));
+          if (b.note) add(bn, nn(S + 'note'), lit(b.note));
+        }
+      }
       // ONE list, imported — a second copy here is the #618 drift shape.
       for (const rt of REL_TYPES) {
         for (const r of e[rt] || []) {

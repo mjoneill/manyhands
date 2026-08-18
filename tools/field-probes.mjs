@@ -44,6 +44,18 @@ export const CARD_CREATE_PROBES = [
     wellFormed: [{ claim: 'nothing is typed scrum:Sasquatch', ask: 'ASK { ?x a scrum:Sasquatch }', expect: false }],
     malformed: [{ claim: 'x', ask: 'SELECT ?s WHERE { ?s ?p ?o }', expect: false }],
     note: '#792 — {claim, ask, expect}; ASK only, because a SELECT has no boolean to compare' },
+  // #814 — the malformed case names a card the fixture is NOT blocked by, because
+  // that is the rule worth probing: ownership must describe an edge that exists,
+  // or the record drifts free of the fact it describes.
+  { name: 'blockers',
+    wellFormed: ({ targetShortId }) => [{ card: targetShortId, owner: 'ada', status: 'open' }],
+    expectStored: ({ targetShortId }) => [{ card: targetShortId, owner: 'ada', status: 'open' }],
+    malformed: [{ card: 999999, owner: 'ada', status: 'open' }],
+    // Ownership describes an EDGE, so the edge must travel with it — a blocker
+    // for a card this one is not blocked by is exactly what the malformed case
+    // probes, and the well-formed case would otherwise trip the same rule.
+    with: ({ targetShortId }) => ({ relationships: { blockedBy: [targetShortId] } }),
+    note: '#814 — must name a card already in blockedBy; status is open|cleared' },
   // ⚠️ `{relatedTo: []}` is IDENTICAL to the default the server writes on every
   // card, so a probe using it cannot tell "my write landed" from "the default
   // was already there" — the presence-weakness in a new hat. Needs a real edge.

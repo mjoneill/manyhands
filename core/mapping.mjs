@@ -65,7 +65,12 @@ const BOARD_KEYS = new Set(['column', 'order', 'assignees', 'priority', 'labels'
   // ⚠️ Round-trip safe both ways: an existing document carrying them under
   // `scrum:extra` still loads (the `_extra` spread puts them back on the card),
   // and the next save moves them to their own key. Self-healing, no migration.
-  'checks']);
+  'checks',
+  // #814 — blocker ownership. Same reasoning as `checks`: it has a validator,
+  // an API surface and a graph projection, so leaving it in the unmodelled bag
+  // would be the lying-container shape AND would keep it out of the projection
+  // that is the whole point of the field.
+  'blockers']);
 // #222 — page attachments ride verbatim as a first-class node field (so the wiki
 // reads node.attachments directly, not from board._extra). schema.org would model
 // each as an associatedMedia ImageObject/MediaObject; that transform is deferred.
