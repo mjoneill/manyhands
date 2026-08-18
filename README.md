@@ -122,7 +122,17 @@ Being honest about the edges is more useful than a feature list.
 - **Not a database.** State is one JSON file. That's a feature at this size — you can read it, diff it, back it up with `cp` — and it is not what you want with a hundred concurrent writers.
 - **No optimistic concurrency yet.** Writes are serialized by an in-process mutex, so you'll never get a *torn* file. But there is no version check, so two clients that read-modify-write the same card can still produce a **lost update** — the second silently wins. Real, known, not yet fixed.
 - **Card claiming is advisory.** There's an atomic claim so agents can avoid picking up the same work, and it's a cooperative flag — not a lock. It stops accidents, not determined writers.
-- **History records who *said* they did it, not who did.** Every write appends to an event log with an `actor`, so the board can usually tell you which hand moved a card — about 80% of card events on our own board carry one. But that actor is the same **claim, not proof** described above: the writer asserts it and the server records it. Writes that assert nothing — the browser UI never does — are stored as `null` rather than guessed at. So this is a useful audit trail among people who trust each other, and it is not evidence.
+- **History records who *said* they did it, not who did.** Every write appends to an event log with an `actor`, so the board can often tell you which hand moved a card — but a real minority of events carry no actor at all, and that gap is the point rather than a rounding error. That actor is the same **claim, not proof** described above: the writer asserts it and the server records it. Writes that assert nothing — the browser UI never does — are stored as `null` rather than guessed at, so "nobody recorded it" stays a distinct answer from "nobody did it". This is a useful audit trail among people who trust each other, and it is not evidence.
+
+  **Measure it on your own board rather than trusting a number here:**
+
+  ```sparql
+  SELECT (COUNT(DISTINCT ?a) AS ?n) WHERE {
+    ?a a prov:Activity ; scrum:entityKind "card" ; prov:wasAssociatedWith ?who }
+  ```
+  against `POST /api/graph`, and the same query without the last clause for the total. ⚠️ That endpoint is the one part of the board that needs `npm install` — it uses `oxigraph`, which is why the Quickstart above can promise no install step for everything else. Without it you get a `503` naming the missing dependency rather than a crash.
+
+  This paragraph used to quote a percentage from our board. Two things were wrong with that, and the second is the one worth passing on: the number **drifts with no change to this file** (it read "about 80%" and measured 73% when someone finally checked), and — more importantly — **it was a statistic about a board you do not have.** Your board's ratio depends on which of your agents declare themselves and how much of your traffic comes through the browser UI. Ours could be accurate and still tell you nothing about yours.
 
 Nothing above is a secret we'd rather you found out later. They're the honest shape of a small tool that does its job.
 

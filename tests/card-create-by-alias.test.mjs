@@ -103,6 +103,8 @@ test('#862 declaring nothing still records nothing — null is not backfilled wi
 test('#862 RC1 — the declared author reaches the EVENT LOG, not just the card', async () => {
   const s = await startRestServer();
   try {
+    // Captured BEFORE the write, so the window is guaranteed to contain it.
+    const before = new Date(Date.now() - 1000).toISOString();
     const r = await create(s.baseUrl, { by: 'ada' });
     // The card field is not the claim; the log is what #857 §II calls the record.
     //
@@ -112,9 +114,35 @@ test('#862 RC1 — the declared author reaches the EVENT LOG, not just the card'
     // field `actor`; this projection renames it — which is quietly the best
     // argument on this card, since `by` is already the wire word for "who did
     // this" on every surface except the one that refused it.
-    const res = await fetch(`${s.baseUrl}/api/changes?since=1970-01-01T00:00:00.000Z&limit=100`);
-    const body = await res.json();
-    assert.equal(res.status, 200, `setup: /api/changes must answer, got ${res.status}`);
+    // ⚰️ #872 — THIS LINE ASKED `since=1970` AND FAILED ~1 IN 6.
+    //
+    // The 400 was `CURSOR_TOO_OLD`, and it was CORRECT: a cursor predating the
+    // log's retention cannot be answered honestly, so /api/changes refuses
+    // rather than serving "whatever survived" (#679). The inversion is the part
+    // worth keeping — the question was never "why does this sometimes
+    // fail" but ⭐ "why does it usually NOT", and the answer is that the test
+    // passed six times in seven by taking a path where a correctness guard
+    // happened not to fire. A test whose green depends on a guard staying
+    // quiet is not testing the thing it names.
+    //
+    // ⇒ Ask from a cursor this run actually owns. `before` is captured above
+    // the write, so the window provably contains the create and provably
+    // predates nothing.
+    // ⇒ FOLLOW THE DOCUMENTED CONTRACT rather than dodging the guard. A 400
+    // CURSOR_TOO_OLD names `oldest_retained` and says "resync, then ask from
+    // there"; a client that cannot do that is not a client. Asking from a
+    // window the server will accept is what a returning agent actually does
+    // (#643), so the test now exercises the real protocol instead of a lucky
+    // path through it.
+    const ask = (s0) => fetch(`${s.baseUrl}/api/changes?since=${encodeURIComponent(s0)}&limit=100`);
+    let res = await ask(before);
+    let body = await res.json();
+    if (res.status === 400 && body.code === 'CURSOR_TOO_OLD') {
+      assert.ok(body.oldest_retained, 'a refusal must name the boundary it is refusing from, or it is unactionable');
+      res = await ask(body.oldest_retained);
+      body = await res.json();
+    }
+    assert.equal(res.status, 200, `setup: /api/changes must answer, got ${res.status} ${JSON.stringify(body).slice(0, 200)}`);
     const mine = (body.changes || []).filter((e) => e.shortId === r.body.shortId);
     assert.ok(mine.length > 0, `setup: expected an event for #${r.body.shortId}, got none`);
     assert.ok(
