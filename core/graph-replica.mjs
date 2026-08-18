@@ -843,6 +843,47 @@ export function queryGraph(store, sparql, { limit } = {}) {
     throw Object.assign(new Error('graph_query is READ-ONLY: SELECT or ASK. Writes go through the board API, which is what gives them events, actors and rails.'), { code: 'READ_ONLY' });
   }
 
+  // #885 — REFUSE AN UNBOUNDED PROPERTY PATH, BEFORE IT RUNS.
+  //
+  // ⚰️ Measured by doing it: `?a !<urn:none>* ?c` — "reachable by ANY predicate"
+  // — took /api/graph off the air. REST stayed up; the graph endpoint timed out
+  // at 20s and did not recover until the server was restarted, costing another
+  // 14s of cold sync. One seat's curiosity, a shared surface down.
+  //
+  // ⛔ AND IT CANNOT BE A TIMEOUT. `store.query()` below is SYNCHRONOUS: a
+  // runaway query blocks Node's event loop, so no timer fires and nothing can
+  // cancel it. The only place to stand is before the call.
+  //
+  // The shape is unbounded BY CONSTRUCTION: a transitive quantifier over a
+  // negated property set means "walk every edge in the graph, from everywhere".
+  // ⚠️ Precision is load-bearing — a false positive refuses a legal query for a
+  // hazard it does not have:
+  //     !<x>                depth-1, any predicate       ALLOWED (fast, useful)
+  //     (a|b)* / p*         enumerated                   ALLOWED (692 rows, 25ms)
+  //     !<x>* / !(a|b)+     unbounded, any predicate     REFUSED
+  //
+  // ⭐ The message names the alternative, because the enumerated form is the
+  // right answer and is not obvious. A guard that refuses without teaching is a
+  // guard people learn to route around.
+  const UNBOUNDED_ANY_PATH = /![\s]*(?:<[^>]*>|\([^)]*\))[\s]*[*+]/;
+  if (UNBOUNDED_ANY_PATH.test(sparql)) {
+    throw Object.assign(
+      new Error(
+        'unbounded property path: a transitive quantifier (* or +) over a negated property set '
+        + '(!<...>) walks every edge in the graph from every node. This query cannot be bounded or '
+        + 'cancelled once started — the engine is synchronous, so it would block every other caller '
+        + 'until the process is restarted. It has taken this endpoint down once.',
+      ),
+      {
+        code: 'UNBOUNDED_PATH',
+        hint: 'Enumerate the predicates you actually mean. On this board '
+          + '(scrum:relatedTo|scrum:mentionsCard|scrum:blockedBy|scrum:supersedes|scrum:derivedFrom'
+          + '|scrum:supersededBy|schema:isPartOf) with * answers a full-corpus closure in ~25ms. '
+          + 'A depth-1 !<urn:none> is also fine — it is only the transitive form that is unbounded.',
+      },
+    );
+  }
+
   const declared = sparql.match(/\bLIMIT\s+(\d+)/i);
   const wanted = Math.min(Number(limit ?? (declared ? declared[1] : DEFAULT_LIMIT)) || DEFAULT_LIMIT, LIMIT_CEILING);
   const probe = wanted + 1;

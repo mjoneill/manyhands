@@ -772,6 +772,12 @@ async function handleGraphQuery(req, res) {
   } catch (e) {
     if (e.code === 'GRAPH_DEPS_MISSING') return sendJSON(res, 503, { error: e.message, code: e.code });
     if (e.code === 'READ_ONLY' || e.code === 'EMPTY_QUERY') return sendJSON(res, 400, { error: e.message, code: e.code });
+    // #885 — an unbounded path refusal carries its OWN hint naming the query
+    // that works, and it must survive to the caller. The generic branch below
+    // would overwrite it with the prefix blurb, which is the three-list defect:
+    // the thrower declared a hint and the consumer read a different one. Caught
+    // by this card's own test, not by review.
+    if (e.code === 'UNBOUNDED_PATH') return sendJSON(res, 400, { error: e.message, code: e.code, hint: e.hint });
     // a SPARQL parse error is the caller's to fix — teach, don't 500
     return sendJSON(res, 400, { error: e.message, hint: 'SELECT/ASK SPARQL; prefixes schema:, scrum:, entity:, person:, column: are pre-declared' });
   }
