@@ -764,6 +764,84 @@ async function handleGraphQuery(req, res) {
  * /api/graph serves — the graph stays authoritative, this is a projection.
  * `?explain=<shortId>` returns the verdict for one card instead of the queue.
  */
+/**
+ * #792 / #857 §VI — GET /api/checks. Run every authored tripwire and report
+ * which claims the world has moved out from under.
+ *
+ * ⛔ WHY THIS EXISTS. #857 §IV listed three cards as NOT BUILT while they sat in
+ * `done`, twice in thirty hours, and both times a person had to notice. §VI had
+ * already specified the fix — "each load-bearing claim holds a pointer to the
+ * live measurement that would falsify it" — and it was never built, so the card
+ * that predicted its own rot rotted unobserved.
+ *
+ * ⚠️ THREE OUTCOMES, NOT TWO, and the third is the one that keeps this honest:
+ *
+ *   holds   the tripwire answered what its author expected
+ *   stale   it answered the other way ⇒ the claim's world moved. NOT "the claim
+ *           is false" — this surface cannot know that. Someone must look.
+ *   error   the check could not run ⇒ reported as its own state, NEVER as holds.
+ *           A broken watcher that reads green is a health signal blind to its
+ *           own failure, which is the defect class this board keeps finding.
+ *
+ * ⭐ AND UNWATCHED IS COUNTED. `0 stale` on a board where nobody wrote a check
+ * is a vibes number. The response says how many cards carry checks and how many
+ * do not, so "nothing is wrong" can never be confused with "nothing is watched".
+ */
+async function handleChecks(req, res) {
+  try {
+    const { store } = await warmGraphStore();
+    const { queryGraph } = await loadGraphModules();
+    const data = readBoard();
+    const results = [];
+    let stale = 0, errors = 0, watched = 0, unwatched = 0;
+
+    for (const card of data.cards || []) {
+      const checks = Array.isArray(card.checks) ? card.checks : [];
+      if (!checks.length) { unwatched += 1; continue; }
+      watched += 1;
+      const evaluated = checks.map((c) => {
+        try {
+          const r = queryGraph(store, c.ask);
+          // ⚠️ The ASK boolean arrives as `ask`, NOT `boolean` — read from
+          // core/graph-replica.mjs rather than assumed. The first version of
+          // this line guessed `.boolean`, which is always undefined, so every
+          // check would have reported `error` and the endpoint would have looked
+          // like it was working while measuring nothing. Anything non-boolean
+          // means the shape moved and must be an error, never a coerced guess.
+          const got = r.ask;
+          if (typeof got !== 'boolean') {
+            errors += 1;
+            return { claim: c.claim, status: 'error', error: 'ASK did not return a boolean' };
+          }
+          const holds = got === c.expect;
+          if (!holds) stale += 1;
+          return { claim: c.claim, status: holds ? 'holds' : 'stale', expected: c.expect, actual: got };
+        } catch (e) {
+          errors += 1;
+          return { claim: c.claim, status: 'error', error: e?.message || String(e) };
+        }
+      });
+      results.push({ shortId: card.shortId, title: card.title, checks: evaluated });
+    }
+
+    sendJSON(res, 200, {
+      cardsWatched: watched,
+      cardsUnwatched: unwatched,
+      stale,
+      errors,
+      // Stated in the payload rather than assumed by the reader: this counts
+      // claims whose author wrote a tripwire. It says nothing about the rest.
+      note: 'stale means an authored tripwire answered unexpectedly — a prompt to look, not a verdict. '
+        + 'cardsUnwatched carry no checks and are therefore unmeasured, not passing.',
+      results,
+    });
+  } catch (e) {
+    if (e?.code === 'GRAPH_DEPS_MISSING') return sendJSON(res, 503, { error: e.message, code: e.code });
+    console.error('GET /api/checks:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+
 async function handleReady(req, res) {
   try {
     const url = new URL(req.url, 'http://localhost');
@@ -829,6 +907,10 @@ const CREATE_CONSUMED_FIELDS = new Set([
   'id', 'title', 'description', 'type', 'assignees', 'assignee',
   'labels', 'for', 'priority', 'column', 'order', 'createdBy', 'relationships',
   'implementedBy',   // #830
+  // #792 — a claim can carry the measurement that would falsify it. Listed here
+  // as well as in the validator and the constructor because a field present in
+  // only two of the three is accepted with a 201 and silently dropped (#831).
+  'checks',
   // #862 — `by` is the word every OTHER surface uses for "who is doing this":
   // PATCH takes it, and /api/changes emits the event log's `actor` under that
   // name. Create took only `createdBy`, so a caller who learned `by` from the
@@ -918,12 +1000,64 @@ function createCardFromPayload(body, nextShortId) {
     // runs in validateCardFields on this route — only the consume step was
     // missing, which is why the field validated and then evaporated.
     ...(Array.isArray(body.implementedBy) ? { implementedBy: body.implementedBy } : {}),
+    // #792 — the CONSUME step. #830 and #856 were both "validated, then
+    // evaporated" because exactly this line was missing while the schema and
+    // the validator already knew the field.
+    ...(Array.isArray(body.checks) ? { checks: body.checks } : {}),
     // #348 — coordination rail: first-write-wins claim, server-arbitrated.
     // Set only via POST /api/cards/:id/claim (never via PATCH), so a claim
     // is a compare-and-set under withWriteLock, not an unconditional overwrite.
     claimedBy: null,
     claimedAt: null,
   };
+}
+
+/**
+ * #792 / #857 §VI — validate a card's falsifier checks.
+ *
+ * ⛔ THE PROBLEM #792 STATES AND THEN DECLARES UNSOLVED: "a bot that diffs card
+ * claims against the tree ⇒ needs claims to be machine-readable; THEY ARE PROSE,
+ * DELIBERATELY." Every candidate design it lists has the same weakness as the
+ * thing it fixes, and it closes with "nobody has found a way to make it happen
+ * without someone choosing to do it."
+ *
+ * ⭐ The way through is to stop trying to read the prose. The author writing a
+ * load-bearing claim is the one person who knows what would make it false, at
+ * the moment they know it — so they attach the tripwire THEN. The prose stays
+ * prose; the check is a separate, executable thing sitting beside it.
+ *
+ * ⚠️ ASK ONLY, and this is a correctness rule rather than a safety one. A SELECT
+ * has no boolean to compare against, so `expect` would be meaningless and the
+ * check could never fail — an unfailable check is worse than none, because it
+ * reports as watched. (Writes are already impossible: queryGraph refuses
+ * anything that is not SELECT or ASK. This refuses them EARLIER, at the door,
+ * so a caller learns immediately instead of at evaluation time.)
+ */
+function validateChecks(checks) {
+  if (!Array.isArray(checks)) return 'checks must be an array of {claim, ask, expect}';
+  for (const c of checks) {
+    if (!c || typeof c !== 'object' || Array.isArray(c)) return 'each check must be an object {claim, ask, expect}';
+    if (typeof c.claim !== 'string' || !c.claim.trim()) {
+      return 'each check needs a `claim`: the sentence in the author\'s own words that this check would falsify';
+    }
+    if (typeof c.ask !== 'string' || !c.ask.trim()) {
+      return `check ${JSON.stringify(c.claim)} needs an \`ask\`: a SPARQL ASK whose answer would falsify the claim`;
+    }
+    if (typeof c.expect !== 'boolean') {
+      return `check ${JSON.stringify(c.claim)} needs \`expect\` (true or false): without it the check can never fail, `
+        + 'and a check that cannot fail reports the claim as watched while watching nothing';
+    }
+    // Strip comments and leading PREFIX declarations, then require ASK.
+    const head = c.ask
+      .replace(/#[^\n]*/g, ' ')
+      .replace(/\bPREFIX\s+[^\s:]*:\s*<[^>]*>/gi, ' ')
+      .trim();
+    if (!/^ASK\b/i.test(head)) {
+      return `check ${JSON.stringify(c.claim)}: \`ask\` must be a SPARQL ASK (got ${JSON.stringify(head.slice(0, 24))}). `
+        + 'SELECT returns rows, not a boolean, so `expect` could never be compared and the check could never fail.';
+    }
+  }
+  return null;
 }
 
 // #614 — the card-to-card edge vocabulary. Closed on purpose: a fixed verb
@@ -1162,6 +1296,10 @@ function validateCardFields(body, { checkId = true, surface = 'patch', current =
   // abbreviation whose expansion needs the repository; the graph cannot expand
   // it, so accepting both forms would mint two nodes for one commit and never
   // reconcile them. That is an aliasing bug shipped as a convenience.
+  if (body.checks !== undefined && body.checks !== null) {
+    const cerr = validateChecks(body.checks);
+    if (cerr) return cerr;
+  }
   if (body.implementedBy !== undefined && body.implementedBy !== null) {
     if (!Array.isArray(body.implementedBy)) return 'implementedBy must be an array of commit shas';
     for (const sha of body.implementedBy) {
@@ -1213,6 +1351,7 @@ const PATCHABLE_CARD_FIELDS = new Set([
   // same thing with zod's default key-stripping.
   'parkedBy', 'parkedAt', 'parkedUntil', 'parkedReason',
   'implementedBy',
+  'checks',   // #792 — falsifier tripwires, editable as the claim they watch changes
 ]);
 
 // ── /api/changes — the returning-agent catch-up (#643) ──
@@ -2666,6 +2805,7 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/cursors\/inbound$/,     fn: (req, res) => handleCursorInbound(req, res) },
   { method: 'POST',   re: /^\/api\/graph$/,                fn: (req, res) => handleGraphQuery(req, res) },
   { method: 'GET',    re: /^\/api\/ready$/,                fn: (req, res) => handleReady(req, res) },       // #815
+  { method: 'GET',    re: /^\/api\/checks$/,               fn: (req, res) => handleChecks(req, res) },      // #792
   { method: 'GET',    re: /^\/api\/board\/status$/,         fn: (req, res) => handleBoardStatus(req, res) },
   { method: 'GET',    re: /^\/api\/board$/,                fn: (req, res) => handleGetBoard(req, res) },
   { method: 'GET',    re: /^\/api\/roster$/,               fn: (req, res) => handleGetRoster(req, res) },
