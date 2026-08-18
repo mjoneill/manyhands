@@ -46,6 +46,11 @@ export const IRI = Object.freeze({
   // card, a person or a column, and folding it into entity: would make
   // "is this id a card?" un-askable.
   concept: 'https://scrumboard.local/concept/',
+  // #792/#857 §VI — a falsifier check. Its own namespace, and its own NODE,
+  // because a check is a (claim, ask, expect) TRIPLE that must stay paired:
+  // flattened onto the card as literals, two checks give six values and no way
+  // to say which ask belongs to which claim.
+  check: 'https://scrumboard.local/check/',
 });
 
 /** Prepended to every query so agents never hand-declare a prefix. */
@@ -315,6 +320,18 @@ export function updateEntity(store, entity) {
   const subject = nn(subjectIriFor(entity));
   // #687 — read the old concept edges while they still exist.
   const priorConcepts = conceptsOf(store, subject);
+  // #792/#857 §VI — a check NODE is #687's D5 shape: a derived node on a
+  // foreign subject, which the subject-scoped deletion below cannot see. Drop a
+  // check from a card and its node would survive in the synced store while
+  // being absent from a rebuilt one — the running server reporting a claim as
+  // watched that no rebuild agrees with, and nobody rebuilds to check.
+  //
+  // ⭐ It CANNOT over-collect, which is the more damaging half of that bug
+  // (#687: over-collecting silently narrows every query): candidates are
+  // reached only through THIS subject's own hasCheck edges, and a check node is
+  // owned by exactly one card — unlike a concept, which is shared and therefore
+  // needs the still-referenced test sweepOrphanConcepts does.
+  const priorChecks = store.match(subject, nn(IRI.scrum + 'hasCheck'), null).map((q) => q.object);
   // #805 — an RDF collection lives in BLANK NODES, which are their own subjects.
   // Subject-scoped deletion alone would drop `<pv> orderedPrompts _:head` and
   // orphan every `_:cell rdf:first/rdf:rest` triple behind it, forever, on
@@ -322,6 +339,9 @@ export function updateEntity(store, entity) {
   // reaches it still exists.
   dropListChains(store, subject);
   for (const q of store.match(subject, null, null)) store.delete(q);
+  // BEFORE re-projecting, unlike the concept sweep below: these nodes are owned
+  // outright, so re-projection recreates exactly the ones that survive.
+  for (const chk of priorChecks) for (const q of store.match(chk, null, null)) store.delete(q);
   projectEntity(store, entity);
   // AFTER re-projecting: a concept the entity still carries has just been
   // re-added, so it will not be swept. Only genuinely dropped ones are.
@@ -361,6 +381,54 @@ export function removeEntity(store, idOrEntity) {
   for (const q of store.match(subject, null, null)) { store.delete(q); n += 1; }
   sweepOrphanConcepts(store, priorConcepts);
   return n;
+}
+
+/**
+ * #651 — MEMORY predicate semantics. One explicit table, same discipline as
+ * TENDING_PREDICATES: a predicate with no declared kind THROWS rather than
+ * reaching the document and never reaching the graph. That refusal is the whole
+ * reason the tending projection is trustworthy, and a silent drop here would be
+ * worse — the entity class exists precisely so a pruned memory stays findable.
+ */
+export const MEMORY_PREDICATES = Object.freeze({
+  identifier: 'literal',
+  name: 'literal',                 // the memory's title
+  'scrum:owner': 'person',         // whose memory it is — an EDGE, never a string
+  'scrum:tag': 'literal',          // repeatable
+  'scrum:currentVersion': 'ref',   // Memory → its newest MemoryVersion
+  'scrum:ofMemory': 'ref',         // MemoryVersion → its Memory
+  'scrum:version': 'literal',
+  'scrum:body': 'literal',         // the text. IMMUTABLE on a version.
+  author: 'person',
+  dateCreated: 'literal',
+});
+
+function projectMemory(store, e) {
+  const add = (s, p, o) => store.add(oxigraph.triple(s, p, o));
+  const S = IRI.scrum, SC = IRI.schema, P = IRI.person;
+  const s = nn(e['@id']);
+  add(s, A, nn(S + String(e['@type']).slice(6)));
+
+  const predIri = (k) => (k.startsWith('scrum:') ? nn(S + k.slice(6)) : nn(SC + k));
+  const asPerson = (v) => nn(String(v).startsWith('http') ? v : P + v);
+
+  for (const [k, v] of Object.entries(e)) {
+    if (k === '@id' || k === '@type' || v === undefined || v === null) continue;
+    const kind = MEMORY_PREDICATES[k];
+    if (!kind) {
+      throw new Error(
+        `graph-replica: no projection semantics for memory predicate ${JSON.stringify(k)} `
+        + `on ${e['@type']}. Add it to MEMORY_PREDICATES — a fact with no declared `
+        + 'kind would otherwise reach the document and never reach the graph.',
+      );
+    }
+    for (const one of Array.isArray(v) ? v : [v]) {
+      if (one === undefined || one === null) continue;
+      if (kind === 'person') add(s, predIri(k), asPerson(one));
+      else if (kind === 'ref') add(s, predIri(k), nn(String(one)));
+      else add(s, predIri(k), lit(one));
+    }
+  }
 }
 
 /** Emit one entity's triples into `store`. The projection, per entity. */
@@ -463,6 +531,25 @@ function projectEntity(store, e) {
         store.add(oxigraph.triple(t, A, nn(IRI.schema + 'DefinedTerm')));
         store.add(oxigraph.triple(t, nn(IRI.schema + 'name'), lit(l)));
       }
+      // #792/#857 §VI — the falsifier tripwires, as NODES so (claim, ask,
+      // expect) stays a paired triple rather than three loose literals.
+      //
+      // ⛔ THE `ask` TEXT IS EMITTED VERBATIM AND NOT CLASSIFIED HERE. Four of
+      // #857's nine checks are card-state PROXIES ("is #651 in done?") and five
+      // are real MEASUREMENTS ("does prov:Activity exist?"), and the output
+      // makes them indistinguishable — a proxy watches the same human judgement
+      // that rotted §IV three times in thirty-one hours. Deciding which is
+      // which belongs in a QUERY, where it can be argued with; baking the rule
+      // in here would put an unfalsifiable interpretation in the store.
+      (e['scrum:checks'] || []).forEach((c, i) => {
+        if (!c || typeof c !== 'object') return;
+        const chk = nn(IRI.check + e['@id'] + '-' + i);
+        add(s, nn(S + 'hasCheck'), chk);
+        add(chk, A, nn(S + 'Check'));
+        if (c.claim != null) add(chk, nn(S + 'claim'), lit(c.claim));
+        if (c.ask != null) add(chk, nn(S + 'ask'), lit(c.ask));
+        if (typeof c.expect === 'boolean') add(chk, nn(S + 'expect'), lit(c.expect));
+      });
       // #656 — the DERIVED reference edge, beside the deliberate ones and
       // never merged with them. Kept off REL_TYPES on purpose: that list is
       // the set of relationships a PERSON asserted, and the inverse-sync,
@@ -515,6 +602,8 @@ function projectEntity(store, e) {
       if (e['scrum:order'] != null) add(s, nn(S + 'order'), lit(e['scrum:order']));
     } else if (typeof t === 'string' && t.startsWith('scrum:Tending')) {
       projectTending(store, e);
+    } else if (t === 'scrum:Memory' || t === 'scrum:MemoryVersion') {
+      projectMemory(store, e);
     } else if (e && e['@id']) {
       // An entity class this projection doesn't know yet (wiki pages are
       // already in the event vocabulary; more will come). It must NOT vanish:

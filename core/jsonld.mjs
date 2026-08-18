@@ -217,6 +217,27 @@ const TENDING_TYPE_SET = new Set(TENDING_TYPES);
 const isTending = (entity) => entity && TENDING_TYPE_SET.has(entity['@type']);
 
 /**
+ * #651 — MEMORY's graph classes.
+ *
+ * Declared here for the same reason the tending list is: the projection is what
+ * must know them, and a type list living away from the partition it governs is
+ * the drift that arrangement exists to prevent.
+ *
+ * ⚠️ The split is deliberate and it IS the feature. `scrum:Memory` is the durable
+ * IDENTITY — retitle it, retag it, retire it. `scrum:MemoryVersion` is IMMUTABLE:
+ * text, author and timestamp ride there and are never rewritten. Without that
+ * split a prune overwrites the thing it prunes, which is the event this card
+ * exists to make survivable: one curation pass took an index from 64 KB to
+ * 6.5 KB with no record of what was cut.
+ */
+export const MEMORY_TYPES = Object.freeze([
+  'scrum:Memory',         // durable identity: owner, title, tags
+  'scrum:MemoryVersion',  // immutable text + author + timestamp
+]);
+const MEMORY_TYPE_SET = new Set(MEMORY_TYPES);
+const isMemory = (entity) => entity && MEMORY_TYPE_SET.has(entity['@type']);
+
+/**
  * ⛔ ENFORCE the ordering contract rather than merely preserving it.
  *
  * This module uses JSON-LD as a pragmatic vocabulary — nothing here expands to
@@ -280,7 +301,7 @@ const nodeToColumn = ({ '@type': _t, '@id': _i, identifier, name, 'scrum:order':
 export function domainToJsonLd(domain) {
   const {
     nodes = [], messages = [], people = [], columns = [],
-    tending = [], _unmodelled = [], _README, ...meta
+    tending = [], memories = [], _unmodelled = [], _README, ...meta
   } = domain;
   const doc = {};
   if (_README !== undefined) doc._README = _README;   // first key — JSON.stringify keeps insertion order
@@ -294,6 +315,7 @@ export function domainToJsonLd(domain) {
     ...nodes.map((n) => cardNodeToFlat(n, shortToId)),
     ...messages, ...people, ...columns.map(columnToNode),
     ...tending,
+    ...memories,
     // #804 — entities of a class this projection does not model ride through
     // verbatim rather than being dropped. Silent deletion is the other bad
     // answer to the fallthrough bug: a phantom card is at least visible.
@@ -336,10 +358,15 @@ export function jsonLdToDomain(doc) {
   // an untouched board must not sprout an empty key and churn its file on save.
   const tending = graph.filter(isTending);
   if (tending.length) domain.tending = tending.map(assertTendingShape);
+  // #651 — memories are their own class. Absence preserved, like people and
+  // tending: an untouched board must not sprout an empty key and churn its file.
+  const memories = graph.filter(isMemory);
+  if (memories.length) domain.memories = memories;
   // Anything recognised by NO predicate is kept verbatim so the serializer
   // stays lossless. It is never a card and never silently discarded.
   const unmodelled = graph.filter(
-    (e) => !isCard(e) && !isMessage(e) && !isPerson(e) && !isColumn(e) && !isTending(e),
+    (e) => !isCard(e) && !isMessage(e) && !isPerson(e) && !isColumn(e) && !isTending(e)
+      && !isMemory(e),
   );
   if (unmodelled.length) domain._unmodelled = unmodelled;
   if (doc._README !== undefined) domain._README = doc._README;

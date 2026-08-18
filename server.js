@@ -541,6 +541,12 @@ const convEvent = (conv, actor = null) => ({
   op: 'post', actor: actor ?? conv.author ?? null,
   entity: { kind: 'conversation', id: conv.id }, state: conv,
 });
+// #651 — a memory write is an event like any other. Emitted for the IDENTITY,
+// which is the entity whose id is stable across versions; the version entities
+// ride in its state, so replay reconstructs both halves from one record.
+const memoryEvent = (op, identity, actor = null) => ({
+  op, actor, entity: { kind: 'memory', id: identity['@id'] }, state: identity,
+});
 const columnEvent = (op, col, actor = null) => ({
   op, actor, entity: { kind: 'column', id: col.id }, state: col,
 });
@@ -787,6 +793,174 @@ async function handleGraphQuery(req, res) {
  * is a vibes number. The response says how many cards carry checks and how many
  * do not, so "nothing is wrong" can never be confused with "nothing is watched".
  */
+// ── #651 — MEMORY as a graph type: queryable, versioned, tagged ──────────────
+//
+// "a new type of 'thing' in the graph: 'memory'… it would give an agent the
+// ability to query, 'What are my important memories? what are the things I
+// thought to hold closely?'"
+//
+// ⭐ VERSIONING IS THE LOAD-BEARING HALF, and the card's own evidence is why: a
+// seat's index went 64 KB → 6.5 KB in ONE curation pass — a ~90% lossy event
+// with no record of what was cut. Versioned memories make pruning SAFE: cut
+// boldly, because the prior version is addressable. Today every prune is
+// irreversible and therefore conservative, which is exactly why the file grows
+// until it must be cut hard, which is when the loss happens.
+//
+// ⛔ WHAT IS DELIBERATELY ABSENT, on the card's own arguments:
+//   · ACCESS FREQUENCY — a write-per-read on a flat store, AND it would rank the
+//     auto-loaded index first forever, measuring the loading mechanism rather
+//     than the value. The card proves the trap twice; it is not built.
+//   · THE READ / CONSENT MODEL — put to the room, and correctly reframed there:
+//     not "are these secret" but "whose information is in here, and did they
+//     agree to how it is held?" A store can exist before that is answered; an
+//     aggregation surface cannot. So there is no cross-seat aggregation here.
+//   · ANY IMPORT — nothing reads an existing memory file. Every memory is one a
+//     seat chose to write. Importing would answer the consent question by
+//     default, which is the failure the card names.
+const MEMORY_ID = (id) => `https://scrumboard.local/memory/${id}`;
+const MEMORY_VERSION_ID = (id, v) => `https://scrumboard.local/memory/${id}/v${v}`;
+
+function memoriesOf(data) {
+  return Array.isArray(data.memories) ? data.memories : [];
+}
+
+/** The stored entities for one memory, newest version last. */
+function memoryParts(data, id) {
+  const all = memoriesOf(data);
+  const iri = MEMORY_ID(id);
+  const identity = all.find((e) => e['@type'] === 'scrum:Memory' && e['@id'] === iri) || null;
+  const versions = all
+    .filter((e) => e['@type'] === 'scrum:MemoryVersion' && e['scrum:ofMemory'] === iri)
+    .sort((a, b) => (a['scrum:version'] || 0) - (b['scrum:version'] || 0));
+  return { identity, versions };
+}
+
+function memoryToWire(identity, versions) {
+  const newest = versions[versions.length - 1];
+  return {
+    id: identity.identifier,
+    title: identity.name,
+    owner: identity['scrum:owner'] || null,
+    tags: [].concat(identity['scrum:tag'] || []),
+    body: newest ? newest['scrum:body'] : '',
+    version: newest ? newest['scrum:version'] : 0,
+    updatedAt: newest ? newest.dateCreated : null,
+  };
+}
+
+async function handleCreateMemory(req, res) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    if (!body.title || !String(body.title).trim()) return sendJSON(res, 400, { error: 'title is required' });
+    if (typeof body.body !== 'string' || !body.body.trim()) return sendJSON(res, 400, { error: 'body is required — a memory with no text is a title pretending to be a memory' });
+    const owner = body.owner || body.by || null;
+    if (!owner) return sendJSON(res, 400, { error: 'owner is required: a memory with no owner cannot answer "what are MY memories", which is the question this type exists for' });
+    if (body.tags !== undefined && !Array.isArray(body.tags)) return sendJSON(res, 400, { error: 'tags must be an array' });
+
+    const created = await withWriteLock(async () => {
+      const data = readBoard();
+      const id = crypto.randomUUID();
+      const now = new Date().toISOString();
+      const vIri = MEMORY_VERSION_ID(id, 1);
+      const identity = {
+        '@id': MEMORY_ID(id), '@type': 'scrum:Memory',
+        identifier: id, name: String(body.title),
+        'scrum:owner': owner,
+        ...(body.tags?.length ? { 'scrum:tag': [...body.tags] } : {}),
+        'scrum:currentVersion': vIri,
+      };
+      const version = {
+        '@id': vIri, '@type': 'scrum:MemoryVersion',
+        'scrum:ofMemory': MEMORY_ID(id), 'scrum:version': 1,
+        'scrum:body': body.body, author: owner, dateCreated: now,
+      };
+      data.memories = [...memoriesOf(data), identity, version];
+      writeBoard(data, [memoryEvent('create', identity, owner)]);
+      return memoryToWire(identity, [version]);
+    });
+    sendJSON(res, 201, created);
+  } catch (e) {
+    console.error('POST /api/memories:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+
+async function handleUpdateMemory(req, res, id) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const updated = await withWriteLock(async () => {
+      const data = readBoard();
+      const { identity, versions } = memoryParts(data, id);
+      if (!identity) return null;
+
+      // ⛔ APPEND-ONLY. A caller naming an older version does NOT get to rewrite
+      // it: the new text always becomes the NEXT version. History that can be
+      // edited answers "what did this say before?" with whatever someone most
+      // recently wished it had said, which is worse than no history at all.
+      if (typeof body.body === 'string' && body.body.length) {
+        const next = (versions[versions.length - 1]?.['scrum:version'] || 0) + 1;
+        const vIri = MEMORY_VERSION_ID(id, next);
+        data.memories = [...memoriesOf(data), {
+          '@id': vIri, '@type': 'scrum:MemoryVersion',
+          'scrum:ofMemory': MEMORY_ID(id), 'scrum:version': next,
+          'scrum:body': body.body,
+          author: body.by || identity['scrum:owner'] || null,
+          dateCreated: new Date().toISOString(),
+        }];
+        identity['scrum:currentVersion'] = vIri;
+      }
+      // The IDENTITY is mutable — that is the point of the split. Retitling or
+      // retagging a memory must not mint a version of unchanged text.
+      if (typeof body.title === 'string' && body.title.trim()) identity.name = body.title;
+      if (Array.isArray(body.tags)) identity['scrum:tag'] = [...body.tags];
+
+      writeBoard(data, [memoryEvent('update', identity, body.by || identity['scrum:owner'] || null)]);
+      const after = memoryParts(readBoard(), id);
+      return memoryToWire(after.identity, after.versions);
+    });
+    if (!updated) return sendJSON(res, 404, { error: `no memory ${id}` });
+    sendJSON(res, 200, updated);
+  } catch (e) {
+    console.error('PATCH /api/memories:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+
+function handleGetMemory(req, res, id) {
+  const { identity, versions } = memoryParts(readBoard(), id);
+  if (!identity) return sendJSON(res, 404, { error: `no memory ${id}` });
+  sendJSON(res, 200, memoryToWire(identity, versions));
+}
+
+function handleMemoryVersions(req, res, id) {
+  const { identity, versions } = memoryParts(readBoard(), id);
+  if (!identity) return sendJSON(res, 404, { error: `no memory ${id}` });
+  sendJSON(res, 200, {
+    id, title: identity.name, owner: identity['scrum:owner'] || null,
+    // ⭐ THE PRUNING GUARANTEE, as data: every prior text, in order, none of it
+    // rewritable. This is what makes cutting hard a safe act.
+    versions: versions.map((v) => ({
+      version: v['scrum:version'], body: v['scrum:body'],
+      author: v.author || null, at: v.dateCreated || null,
+    })),
+  });
+}
+
+function handleListMemories(req, res) {
+  const q = parseQuery(req.url);
+  const data = readBoard();
+  const ids = memoriesOf(data)
+    .filter((e) => e['@type'] === 'scrum:Memory')
+    .map((e) => e.identifier);
+  let out = ids.map((id) => {
+    const { identity, versions } = memoryParts(data, id);
+    return memoryToWire(identity, versions);
+  });
+  if (q.owner) out = out.filter((m) => m.owner === q.owner);
+  if (q.tag) out = out.filter((m) => m.tags.includes(q.tag));
+  sendJSON(res, 200, { total: out.length, memories: out });
+}
+
 // ── #801 — the retrieval miss log, made durable ──────────────────────────────
 //
 // #801 proposed a VOLUNTARY log (a card, comments, no code) because "automatic
@@ -2890,6 +3064,13 @@ const API_ROUTES = [
   { method: 'GET',    re: /^\/api\/ready$/,                fn: (req, res) => handleReady(req, res) },       // #815
   { method: 'GET',    re: /^\/api\/checks$/,               fn: (req, res) => handleChecks(req, res) },      // #792
   { method: 'GET',    re: /^\/api\/misses$/,               fn: (req, res) => handleMisses(req, res) },      // #801
+  // #651 — memories. The versions route is declared BEFORE the bare :id route
+  // so `/memories/<id>/versions` cannot be swallowed as an id containing a slash.
+  { method: 'GET',    re: /^\/api\/memories$/,             fn: (req, res) => handleListMemories(req, res) },
+  { method: 'POST',   re: /^\/api\/memories$/,             fn: (req, res) => handleCreateMemory(req, res) },
+  { method: 'GET',    re: /^\/api\/memories\/([^\/]+)\/versions$/, fn: (req, res, m) => handleMemoryVersions(req, res, m[1]) },
+  { method: 'GET',    re: /^\/api\/memories\/([^\/]+)$/,   fn: (req, res, m) => handleGetMemory(req, res, m[1]) },
+  { method: 'PATCH',  re: /^\/api\/memories\/([^\/]+)$/,   fn: (req, res, m) => handleUpdateMemory(req, res, m[1]) },
   { method: 'GET',    re: /^\/api\/board\/status$/,         fn: (req, res) => handleBoardStatus(req, res) },
   { method: 'GET',    re: /^\/api\/board$/,                fn: (req, res) => handleGetBoard(req, res) },
   { method: 'GET',    re: /^\/api\/roster$/,               fn: (req, res) => handleGetRoster(req, res) },

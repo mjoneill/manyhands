@@ -60,7 +60,7 @@ export const REDACTION_MARKER_PREFIX = '[redacted';
 // tending — was #805 blocker 6, and is CLOSED by the mapping directly below
 // (same commit as this correction: a comment asserting a runtime property
 // must not outlive the property). `wiki` retains that gap, deliberately.
-export const ENTITY_KINDS = new Set(['card', 'conversation', 'column', 'wiki', 'tending']);
+export const ENTITY_KINDS = new Set(['card', 'conversation', 'column', 'wiki', 'tending', 'memory']);
 
 /** Which board collection a given entity kind projects into. */
 // #805 blocker 6: tending rides the SAME door as every family — the ruling was
@@ -72,6 +72,10 @@ export const ENTITY_KINDS = new Set(['card', 'conversation', 'column', 'wiki', '
 const COLLECTION = {
   card: 'cards', conversation: 'conversations', column: 'columns',
   tending: 'tending',
+  // #651 — mapped in the SAME commit that emits the kind, per the warning above.
+  // A memory that could not be rebuilt from the log would be a memory store whose
+  // history is less durable than the cards it sits beside.
+  memory: 'memories',
 };
 
 const SEGMENT_RE = /^events-\d{4}-\d{2}-\d{2}\.jsonl$/;
