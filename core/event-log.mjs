@@ -60,7 +60,7 @@ export const REDACTION_MARKER_PREFIX = '[redacted';
 // tending — was #805 blocker 6, and is CLOSED by the mapping directly below
 // (same commit as this correction: a comment asserting a runtime property
 // must not outlive the property). `wiki` retains that gap, deliberately.
-export const ENTITY_KINDS = new Set(['card', 'conversation', 'column', 'wiki', 'tending', 'memory']);
+export const ENTITY_KINDS = new Set(['card', 'conversation', 'column', 'wiki', 'tending', 'memory', 'label']);
 
 /** Which board collection a given entity kind projects into. */
 // #805 blocker 6: tending rides the SAME door as every family — the ruling was
@@ -76,6 +76,12 @@ const COLLECTION = {
   // A memory that could not be rebuilt from the log would be a memory store whose
   // history is less durable than the cards it sits beside.
   memory: 'memories',
+  // #857 §IV — a declared label synonym. Mapped in the SAME commit that emits
+  // the kind: replay upserts into an ARRAY, which is why aliases are rows with
+  // ids rather than a bare {alias: canonical} map. A map could not be rebuilt
+  // from the log, and a vocabulary decision that cannot be replayed is a
+  // decision the store would silently forget.
+  label: 'labelAliases',
 };
 
 const SEGMENT_RE = /^events-\d{4}-\d{2}-\d{2}\.jsonl$/;

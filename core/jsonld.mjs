@@ -301,11 +301,16 @@ const nodeToColumn = ({ '@type': _t, '@id': _i, identifier, name, 'scrum:order':
 export function domainToJsonLd(domain) {
   const {
     nodes = [], messages = [], people = [], columns = [],
-    tending = [], memories = [], _unmodelled = [], _README, ...meta
+    tending = [], memories = [], labelAliases = [], _unmodelled = [], _README, ...meta
   } = domain;
   const doc = {};
   if (_README !== undefined) doc._README = _README;   // first key — JSON.stringify keeps insertion order
   doc['@context'] = CONTEXT;
+  // #857 §IV — declared label synonyms. A flat map because it IS one: the
+  // authority for "which spellings are one concept", read by the projection and
+  // by nothing else. Kept OUT of @graph because it is a decision ABOUT the
+  // graph's vocabulary rather than an entity in it.
+  if (Array.isArray(labelAliases) && labelAliases.length) doc._labelAliases = labelAliases;
   // #685 — the shortId→@id map for relationship edges lives here and only
   // here: serialization holds the whole graph, so no second copy can drift.
   const shortToId = new Map(nodes.map((n) => [n.identifier, n['@id']]));
@@ -369,6 +374,7 @@ export function jsonLdToDomain(doc) {
       && !isMemory(e),
   );
   if (unmodelled.length) domain._unmodelled = unmodelled;
+  if (Array.isArray(doc._labelAliases) && doc._labelAliases.length) domain.labelAliases = doc._labelAliases;
   if (doc._README !== undefined) domain._README = doc._README;
   return domain;
 }

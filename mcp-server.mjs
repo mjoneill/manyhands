@@ -672,9 +672,14 @@ function buildMcpServer() {
       since: z.string().optional().describe('Only cards created at or after this ISO timestamp'),
       updatedSince: z.string().optional().describe('Only cards CHANGED (edited or created) at or after this ISO timestamp — the returning-agent catch-up. Says THAT a card changed, not WHAT changed.'),
     },
-  }, async ({ limit, before, fields, column, label, assignee, type, since, updatedSince } = {}) => {
+    // ⚠️ `q` is destructured AS `search` because the query-string builder below
+    // already binds `q`. The first cut declared `q` in the inputSchema and never
+    // forwarded it — declared, accepted, and silently dropped, which is #831's
+    // three-list defect committed in the same hour it was being audited for.
+    // Caught by the every-declared-param-is-forwarded test, not by review.
+  }, async ({ limit, before, fields, q: search, column, label, assignee, type, since, updatedSince } = {}) => {
     const q = new URLSearchParams(
-      Object.entries({ limit: limit ?? 50, before, fields, column, label, assignee, type, since, updatedSince })
+      Object.entries({ limit: limit ?? 50, before, fields, q: search, column, label, assignee, type, since, updatedSince })
         .filter(([, v]) => v != null && v !== '')
         .map(([k, v]) => [k, String(v)]),
     ).toString();

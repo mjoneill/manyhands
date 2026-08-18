@@ -73,6 +73,43 @@ const A = nn(IRI.rdf + 'type');
 export function buildGraphStore(doc) {
   const store = new oxigraph.Store();
   for (const e of doc['@graph'] || []) projectEntity(store, e);
+  projectLabelAliases(store, doc._labelAliases);
+  return store;
+}
+
+/**
+ * #857 §IV — DECLARED label synonyms, as `schema:sameAs` edges.
+ *
+ * #687 minted one concept per distinct label string and deliberately stopped
+ * there. Measured after it shipped: 393 concepts, SEVEN normalised collisions —
+ * including a THREE-way one (`building scrum board` / `building-scrum-board` /
+ * `building-scrum board`) that every post that night described as two, because a
+ * bare-string vocabulary cannot be asked what it contains.
+ *
+ * ⛔ NOTHING IS MERGED AUTOMATICALLY. Normalisation SURFACES candidates; a seat
+ * DECLARES the merge. Two strings that normalise alike are not necessarily one
+ * concept, and fusing them at write time would bake an unfalsifiable judgement
+ * into the store — the same reason the replica emits facts and leaves
+ * interpretation to queries.
+ *
+ * ⚠️ Emitted from ONE authority (the declared map) and rebuilt every time, so
+ * there is no second copy to drift. Aliases whose concept no longer exists emit
+ * nothing rather than minting a node for a label no card carries.
+ */
+export function projectLabelAliases(store, aliases) {
+  if (!Array.isArray(aliases)) return store;
+  const SA = nn(IRI.schema + 'sameAs');
+  for (const row of Array.isArray(aliases) ? aliases : []) {
+    const alias = row?.alias, canonical = row?.canonical;
+    if (!alias || !canonical || alias === canonical) continue;
+    const a = nn(IRI.concept + encodeURIComponent(alias));
+    const c = nn(IRI.concept + encodeURIComponent(canonical));
+    // Only link concepts that actually exist — a declaration whose concept has
+    // since lost every card must not resurrect it as a bare node.
+    if (!store.match(a, A, nn(IRI.schema + 'DefinedTerm')).length) continue;
+    if (!store.match(c, A, nn(IRI.schema + 'DefinedTerm')).length) continue;
+    store.add(oxigraph.triple(a, SA, c));
+  }
   return store;
 }
 

@@ -678,7 +678,7 @@ async function loadGraphModules() {
 let _activitySeq = 0;
 
 async function warmGraphStore() {
-  const { buildGraphStore, syncGraphStore, projectActivities } = await loadGraphModules();
+  const { buildGraphStore, syncGraphStore, projectActivities, projectLabelAliases } = await loadGraphModules();
   let rebuiltMs = null;
   if (_graphDirty || !_graphStore) {
     // #714 — INCREMENTAL. The old path threw the store away and re-projected
@@ -691,8 +691,22 @@ async function warmGraphStore() {
     // rebuild, and goes red if the delete-before-re-emit step is removed.
     const t = performance.now();
     if (!_graphStore) { _graphStore = buildGraphStore({ '@graph': [] }); _activitySeq = 0; }
-    const stats = syncGraphStore(_graphStore, domainToJsonLd(loadDomain(BOARD_DATA_FILE)), _graphHashes);
+    const doc = domainToJsonLd(loadDomain(BOARD_DATA_FILE));
+    const stats = syncGraphStore(_graphStore, doc, _graphHashes);
     _graphHashes = stats.hashes;
+
+    // #857 §IV — declared label synonyms.
+    //
+    // ⛔ THE #725 DEFECT, COMMITTED AGAIN BY ME, HOURS AFTER NAMING IT.
+    // `projectLabelAliases` was called from `buildGraphStore` only — the COLD
+    // path. Every warm sync after a write skipped it, so a synonym declared at
+    // runtime never reached the graph while its unit tests stayed green.
+    // A projection wired to one of two paths is a projection that works exactly
+    // until someone uses it.
+    //
+    // ⚠️ Idempotent by triple (set semantics) and rebuilt from ONE authority —
+    // the declared rows — so re-projecting on every sync cannot drift.
+    projectLabelAliases(_graphStore, doc._labelAliases);
 
     // #725 part 2 — THE EVENT LOG IS PART OF THE GRAPH, and until now it was not.
     //
@@ -793,6 +807,133 @@ async function handleGraphQuery(req, res) {
  * is a vibes number. The response says how many cards carry checks and how many
  * do not, so "nothing is wrong" can never be confused with "nothing is watched".
  */
+// ── #857 §IV — labels as a CONTROLLED vocabulary: declared synonyms ──────────
+//
+// #687 minted one concept per distinct label string and stopped there, on
+// purpose: merging spellings needs a mechanism, and identities are a
+// prerequisite for every candidate mechanism.
+//
+// ⭐ MEASURED AFTER #687 SHIPPED — 393 concepts, SEVEN normalised collisions:
+//     #561/561 · autonomous room/autonomous-room · jsonld/json-ld
+//     schema.org/schema-org · MGMT:9230/mgmt:9230 · vtm/VTM
+//     building scrum board / building-scrum-board / building-scrum board  ⇐ THREE
+//
+// ⚠️ Every post that night called that last one "two spellings". It is three,
+// and nobody knew, because a bare-string vocabulary cannot be asked what it
+// contains. Finding it took one query AFTER the identities existed.
+//
+// ⛔ NOTHING MERGES AUTOMATICALLY. Normalisation SURFACES candidates; a seat
+// DECLARES the merge. Two strings that normalise alike are not necessarily one
+// concept — and fusing them at write time would bake an unfalsifiable judgement
+// into the store, which is the rule the room settled when it decided the replica
+// emits facts and queries do the interpreting.
+const normLabel = (s) => String(s).toLowerCase().replace(/[^a-z0-9]/g, '');
+
+function labelUniverse(data) {
+  const counts = new Map();
+  for (const c of data.cards || []) {
+    for (const l of c.labels || []) counts.set(l, (counts.get(l) || 0) + 1);
+  }
+  return counts;
+}
+
+function handleLabelCollisions(req, res) {
+  const data = readBoard();
+  const counts = labelUniverse(data);
+  const aliases = aliasMap(data);
+  const groups = new Map();
+  for (const label of counts.keys()) {
+    const k = normLabel(label);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(label);
+  }
+  const collisions = [...groups.values()]
+    .filter((members) => members.length > 1)
+    .map((members) => {
+      // ⚠️ DECLARED means every member but one points at a canonical. A group
+      // where only some are declared is still OPEN — a half-merged concept is
+      // the state that silently returns partial answers.
+      const undeclared = members.filter((m) => !aliases[m]);
+      return {
+        members: members.sort(),
+        cards: Object.fromEntries(members.map((m) => [m, counts.get(m) || 0])),
+        declared: undeclared.length <= 1,
+      };
+    })
+    .sort((a, b) => Number(a.declared) - Number(b.declared) || a.members[0].localeCompare(b.members[0]));
+
+  sendJSON(res, 200, {
+    concepts: counts.size,
+    // ⭐ OPEN is the headline. A total that includes settled collisions is the
+    // perishable-claim shape: true when written, false once decided, and a
+    // reader planning from it re-decides what was already decided.
+    open: collisions.filter((c) => !c.declared).length,
+    declared: collisions.filter((c) => c.declared).length,
+    note: 'collisions are CANDIDATES found by normalising case and punctuation. Two labels that '
+      + 'normalise alike are not necessarily one concept — a seat declares the merge via '
+      + 'POST /api/labels/aliases. Nothing is merged automatically.',
+    collisions,
+  });
+}
+
+/** Rows → the {alias: canonical} map callers actually want to read. */
+function aliasMap(data) {
+  return Object.fromEntries((data.labelAliases || []).map((r) => [r.alias, r.canonical]));
+}
+
+function handleGetLabelAliases(req, res) {
+  sendJSON(res, 200, { aliases: aliasMap(readBoard()) });
+}
+
+async function handleDeclareLabelAlias(req, res) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const { alias, canonical } = body;
+    if (!alias || !canonical) return sendJSON(res, 400, { error: 'alias and canonical are both required' });
+    if (alias === canonical) {
+      return sendJSON(res, 400, { error: 'a concept cannot be its own synonym — that is a cycle, not a merge' });
+    }
+    const saved = await withWriteLock(async () => {
+      const data = readBoard();
+      const counts = labelUniverse(data);
+      // ⚠️ The canonical must be a label some card actually carries. Without
+      // this a typo mints a canonical nothing uses and quietly orphans every
+      // alias pointed at it — a merge that makes the set SMALLER than before.
+      if (!counts.has(canonical)) {
+        return { error: `canonical ${JSON.stringify(canonical)} is not a label any card carries` };
+      }
+      if (!counts.has(alias)) {
+        return { error: `alias ${JSON.stringify(alias)} is not a label any card carries` };
+      }
+      // No chains: an alias pointing at another alias makes resolution depend on
+      // traversal order. Collapse to the ultimate canonical at declaration time.
+      const existing = aliasMap(data);
+      let target = canonical;
+      const seen = new Set([alias]);
+      while (existing[target] && !seen.has(target)) { seen.add(target); target = existing[target]; }
+
+      const rows = [...(data.labelAliases || [])];
+      const at = rows.findIndex((r) => r.alias === alias);
+      const row = {
+        id: at >= 0 ? rows[at].id : crypto.randomUUID(),
+        alias, canonical: target, by: body.by || null, at: new Date().toISOString(),
+      };
+      if (at >= 0) rows[at] = row; else rows.push(row);
+      data.labelAliases = rows;
+      writeBoard(data, [{
+        op: at >= 0 ? 'update' : 'create', actor: body.by || null,
+        entity: { kind: 'label', id: row.id }, state: row,
+      }]);
+      return { alias, canonical: target };
+    });
+    if (saved.error) return sendJSON(res, 400, { error: saved.error });
+    sendJSON(res, 200, saved);
+  } catch (e) {
+    console.error('POST /api/labels/aliases:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+
 // ── #651 — MEMORY as a graph type: queryable, versioned, tagged ──────────────
 //
 // "a new type of 'thing' in the graph: 'memory'… it would give an agent the
@@ -3086,6 +3227,12 @@ const API_ROUTES = [
   { method: 'GET',    re: /^\/api\/ready$/,                fn: (req, res) => handleReady(req, res) },       // #815
   { method: 'GET',    re: /^\/api\/checks$/,               fn: (req, res) => handleChecks(req, res) },      // #792
   { method: 'GET',    re: /^\/api\/misses$/,               fn: (req, res) => handleMisses(req, res) },      // #801
+  // #857 §IV — the controlled vocabulary. `collisions` is declared before the
+  // bare aliases routes for the same reason the memory versions route is:
+  // a static segment must not be swallowed as an id.
+  { method: 'GET',    re: /^\/api\/labels\/collisions$/,    fn: (req, res) => handleLabelCollisions(req, res) },
+  { method: 'GET',    re: /^\/api\/labels\/aliases$/,       fn: (req, res) => handleGetLabelAliases(req, res) },
+  { method: 'POST',   re: /^\/api\/labels\/aliases$/,       fn: (req, res) => handleDeclareLabelAlias(req, res) },
   // #651 — memories. The versions route is declared BEFORE the bare :id route
   // so `/memories/<id>/versions` cannot be swallowed as an id containing a slash.
   { method: 'GET',    re: /^\/api\/memories$/,             fn: (req, res) => handleListMemories(req, res) },
