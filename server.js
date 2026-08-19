@@ -2516,7 +2516,52 @@ const CARD_LIST_PARAMS = new Set([
   'column', 'label', 'assignee', 'type', 'since', 'updatedSince',
   'q',   // #656 — free-text over title+description. The miss log asked for it.
   'facet',  // #629 — count → facet → refine, before paying for rows
+  // #912 — "everything under apex X, containment only, depth ≤ N".
+  //
+  // ⭐ The capability already existed as a SPARQL property path and nobody used
+  // it, because using it meant hand-writing `?c schema:isPartOf+ ?apex`. That is
+  // the difference between a capability that exists and one anyone reaches for.
+  'under', 'depth',
 ]);
+
+/**
+ * #912 — the ids CONTAINED BY `apexId`, following `parent` and nothing else.
+ *
+ * ⛔ CONTAINMENT ONLY, and that is the whole point. The board's unbounded
+ * traversal returns ~87% of the cards because it follows association edges;
+ * a subtree that includes everything anyone ever mentioned is not a subtree.
+ * `relatedTo` and `mentionsCard` are not consulted here.
+ *
+ * ⚠️ `seen` is not an optimisation. #254 guards against CREATING a cycle, but a
+ * walk that trusts its input to be acyclic is one bad row away from spinning
+ * forever on an endpoint anyone can hit — and the guard and the walk protect
+ * different things. A cycle would be a data defect; an infinite loop would be
+ * an outage.
+ */
+function descendantIds(cards, apexId, maxDepth) {
+  const kids = new Map();          // parentId → [childId]
+  for (const c of cards) {
+    if (!c.parent) continue;
+    if (!kids.has(c.parent)) kids.set(c.parent, []);
+    kids.get(c.parent).push(c.id);
+  }
+  const out = new Set();
+  const seen = new Set([apexId]);
+  let frontier = [apexId];
+  for (let d = 1; d <= maxDepth && frontier.length; d += 1) {
+    const next = [];
+    for (const id of frontier) {
+      for (const kid of kids.get(id) || []) {
+        if (seen.has(kid)) continue;   // cycle or diamond: visit once
+        seen.add(kid);
+        out.add(kid);
+        next.push(kid);
+      }
+    }
+    frontier = next;
+  }
+  return out;
+}
 
 function handleListCards(req, res) {
   try {
@@ -2572,7 +2617,33 @@ function handleListCards(req, res) {
       }, { validColumns: data.columns.map((c) => c.id) }));
     }
 
-    const result = queryCards(data.cards, {
+    // #912 — narrow to a subtree BEFORE the ordinary filters, so `under`
+    // composes with them instead of competing. A caller asking for
+    // `under=X&label=y` means "in this subtree AND labelled", never "either".
+    let pool = data.cards;
+    if (q.under != null && q.under !== '') {
+      const apexIdx = findCardIndex(data, q.under);
+      if (apexIdx < 0) {
+        // ⛔ REFUSE rather than return an empty set. "No children" and "no such
+        // card" are different facts; sharing a response makes a typo'd id look
+        // like an empty subtree, and the caller concludes the question was
+        // answered when it was never asked. Every apex on this board has zero
+        // children today, so the empty case is the COMMON one — which is
+        // exactly why it must not also mean "not found".
+        return sendJSON(res, 400, {
+          error: `unknown apex for under=${q.under} — no card with that id or shortId. `
+               + 'An apex with no children returns an empty set; this is a different answer.',
+        });
+      }
+      const depth = q.depth == null || q.depth === '' ? Infinity : Number(q.depth);
+      if (!Number.isFinite(depth) ? q.depth != null && q.depth !== '' : !(Number.isInteger(depth) && depth >= 1)) {
+        return sendJSON(res, 400, { error: `depth must be a positive integer (got ${JSON.stringify(q.depth)})` });
+      }
+      const ids = descendantIds(data.cards, data.cards[apexIdx].id, depth);
+      pool = data.cards.filter((c) => ids.has(c.id));
+    }
+
+    const result = queryCards(pool, {
       limit: q.limit, before: q.before, fields: q.fields,
       column: q.column, label: q.label, assignee: q.assignee, type: q.type, since: q.since,
       updatedSince: q.updatedSince, q: q.q,

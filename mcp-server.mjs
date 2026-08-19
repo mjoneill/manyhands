@@ -758,6 +758,10 @@ function buildMcpServer() {
         .describe('Backward cursor: a card shortId from a previous page'),
       fields: z.string().optional()
         .describe('"all" for complete cards, or a comma list of field names; default is summary (everything except description). id+shortId always included.'),
+      under: z.string().optional()
+        .describe('#912 — only cards CONTAINED BY this apex (id or shortId), following `parent` and nothing else. Association edges (relatedTo, mentionsCard) are NOT followed: a subtree that includes everything anyone ever mentioned is not a subtree. An apex with no children returns an empty set; an apex that does not exist REFUSES, because those are different facts.'),
+      depth: z.number().int().min(1).optional()
+        .describe('#912 — with `under`, how many containment levels to descend. 1 = direct children only. Unset = unbounded. ⚠️ Nothing on this board is two levels deep yet, so a depth bug would be invisible here; it is pinned by a three-level fixture in the tests instead.'),
       column: z.string().optional()
         .describe('Only cards in this column id (e.g. "in-progress"); unknown column refuses naming the valid ones'),
       q: z.string().optional()
@@ -775,9 +779,14 @@ function buildMcpServer() {
     // forwarded it — declared, accepted, and silently dropped, which is #831's
     // three-list defect committed in the same hour it was being audited for.
     // Caught by the every-declared-param-is-forwarded test, not by review.
-  }, async ({ limit, before, fields, q: search, facet, column, label, assignee, type, since, updatedSince } = {}) => {
+  }, async ({ limit, before, fields, q: search, facet, column, label, assignee, type, since, updatedSince, under, depth } = {}) => {
+    // ⚠️ #912 — `under`/`depth` are listed in BOTH places on purpose. The comment
+    // above records the last time a param was declared here and not forwarded;
+    // I repeated it within the hour, and the same class of test caught it again
+    // rather than review. The destructure and the forwarded object are two lists
+    // and a field in one of them is silently dropped (#831).
     const q = new URLSearchParams(
-      Object.entries({ limit: limit ?? 50, before, fields, q: search, facet, column, label, assignee, type, since, updatedSince })
+      Object.entries({ limit: limit ?? 50, before, fields, q: search, facet, column, label, assignee, type, since, updatedSince, under, depth })
         .filter(([, v]) => v != null && v !== '')
         .map(([k, v]) => [k, String(v)]),
     ).toString();
