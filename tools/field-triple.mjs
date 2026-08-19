@@ -104,7 +104,10 @@ export async function auditCreateField(baseUrl, probe) {
   // unconditional keeps shortId allocation identical across probes, so one
   // probe's verdict can't depend on how many probes ran before it.
   const targetCard = await post(baseUrl, {});
-  const ctx = { targetShortId: targetCard.body.shortId };
+  // #917 — `targetId` as well as the shortId. A field whose write path RESOLVES
+  // its input (parent: shortId → card id) stores something different from what
+  // was sent, so its probe needs the resolved form to state expectStored.
+  const ctx = { targetShortId: targetCard.body.shortId, targetId: targetCard.body.id };
   // ⚠️ `with` is resolved through the SAME ctx as the values it accompanies.
   // It used to be spread verbatim, so a companion that had to reference the
   // probe's target card — a blocker naming the card it blocks, say — could not
@@ -203,7 +206,10 @@ export async function auditPatchField(baseUrl, probe) {
   const evidence = {};
 
   const targetCard = await post(baseUrl, {});
-  const ctx = { targetShortId: targetCard.body.shortId };
+  // #917 — `targetId` as well as the shortId. A field whose write path RESOLVES
+  // its input (parent: shortId → card id) stores something different from what
+  // was sent, so its probe needs the resolved form to state expectStored.
+  const ctx = { targetShortId: targetCard.body.shortId, targetId: targetCard.body.id };
   // ⚠️ `with` is resolved through the SAME ctx as the values it accompanies.
   // It used to be spread verbatim, so a companion that had to reference the
   // probe's target card — a blocker naming the card it blocks, say — could not

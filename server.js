@@ -1606,6 +1606,44 @@ function unconsumedCreateFields(body) {
   return Object.keys(body).filter((k) => !CREATE_CONSUMED_FIELDS.has(k));
 }
 
+/**
+ * #917 — RESOLVE the parent to a canonical card id, or refuse.
+ *
+ * ⛔ THE DEFECT THIS CLOSES, shipped in #254 and found by a colleague using the
+ * feature for its purpose twenty minutes later:
+ *
+ *     parent: "857"  →  stored verbatim  →  graph edge to `entity:857`
+ *     the real #857  →  `entity:e5c3ad70-…`, 104 triples
+ *     COUNT { <entity:857> ?p ?o }  →  0
+ *
+ * The write returned 200, `card_get` echoed the parent back, and only the
+ * traversal disagreed. ⇒ ***It fails in the direction that looks like success***:
+ * 120 membership assertions would give 120 green writes and a traversal still
+ * returning zero, and the natural conclusion would be that the TRAVERSAL is
+ * broken — the one part that is fine.
+ *
+ * ⚠️ Every other id-taking route in this API accepts id-or-shortId, so a seat
+ * reaching for a shortId is following the house convention, not misusing it.
+ * The fix is to honour that convention here rather than to forbid it.
+ *
+ * @returns {{ok: true, id: string|null} | {ok: false, error: string}}
+ */
+function resolveParentValue(data, value) {
+  // `null` means "make this a root" and must not be dragged into the resolver
+  // and refused as "a card that does not exist".
+  if (value == null || value === '') return { ok: true, id: null };
+  const idx = findCardIndex(data, value);
+  if (idx < 0) {
+    return {
+      ok: false,
+      error: `parent names no card: ${JSON.stringify(value)}. `
+           + 'Pass a card id or shortId that exists — an unresolvable parent used to be '
+           + 'stored verbatim and became a graph edge to a node with no triples (#917).',
+    };
+  }
+  return { ok: true, id: data.cards[idx].id };
+}
+
 function createCardFromPayload(body, nextShortId) {
   const now = new Date().toISOString();
   // Normalize assignees: accept string ('alex'), array (['alex','sage']),
@@ -2710,8 +2748,15 @@ async function handleCreateCard(req, res) {
     }
     const verr = validateCardFields(body, { surface: 'create' }); // #830
     if (verr) return sendJSON(res, 400, { error: verr });
+    let createErr = null;
     const created = await withWriteLock(async () => {
       const data = readBoard();
+      // #917 — resolve before constructing, so the card is never built with a
+      // value that would mint a dangling IRI. Inside the lock because it reads
+      // the board it is resolving against.
+      const rp = resolveParentValue(data, body.parent);
+      if (!rp.ok) { createErr = rp.error; return null; }
+      if (body.parent !== undefined) body.parent = rp.id;
       const card = createCardFromPayload(body, data.nextShortId);
       data.cards.push(card);
       data.nextShortId = (data.nextShortId || 1) + 1;
@@ -2723,6 +2768,16 @@ async function handleCreateCard(req, res) {
       ]);
       return card;
     });
+    // #917 — THE REFUSAL, read outside the lock because that is where the
+    // response is written.
+    //
+    // ⚠️ Left dangling for half an hour while I did something else: `createErr`
+    // was assigned inside the lock and never read, so an unresolvable parent
+    // would have returned null and fallen through to whatever the generic path
+    // does. That is the accepted-then-something-else shape — the exact class I
+    // had filed a card about the same afternoon. Naming it here rather than
+    // quietly closing it, because the near-miss is the useful part.
+    if (createErr) return sendJSON(res, 400, { error: createErr });
     // #829 — create reports what it dropped, matching PATCH. Present only when
     // non-empty: an empty array on every response is noise a caller learns to
     // skip, which is how the original silence went unnoticed.
@@ -2760,6 +2815,17 @@ async function handleUpdateCard(req, res, idOrShortId) {
     // Both routes already shared the field and the store; what they did not share
     // was the predicate deciding a write is legal. A second implementation here
     // would pass its own tests and drift on the first edit to either copy.
+    if ('parent' in patch && _existing) {
+      // #917 — RESOLVE FIRST, then guard. The cycle check compares ids, so a
+      // shortId would have been compared against uuids and matched nothing:
+      // the guard was intact and simply looking at the wrong values.
+      try {
+        const d0 = readBoard();
+        const rp = resolveParentValue(d0, patch.parent);
+        if (!rp.ok) return sendJSON(res, 400, { error: rp.error });
+        patch.parent = rp.id;
+      } catch { /* board unreadable: the write below fails on its own terms */ }
+    }
     if ('parent' in patch && patch.parent != null && _existing) {
       try {
         const d = readBoard();

@@ -113,7 +113,18 @@ export const CARD_CREATE_PROBES = [
   // ⚠️ `malformed` is a NUMBER, not null — `parent: null` is the LEGAL way to
   // make a card a root, so probing with null would test the happy path while
   // claiming to test refusal, and the exemption would look correct forever.
-  { name: 'parent', wellFormed: '11111111-2222-3333-4444-555555555555', malformed: 42,
+  // ⛔ WAS a bare uuid naming no card, and #917 made that MALFORMED: an
+  // unresolvable parent is now refused rather than stored verbatim, so the
+  // probe's "well-formed" value stopped being well-formed and the sweep
+  // correctly reported the field UNMEASURED rather than passing it.
+  //
+  // ⚠️ A probe is a claim about what a valid input looks like. When the rule
+  // changes, the probe is part of what has to change — and the sweep refusing
+  // to score an unmeasurable field is what made that visible in one run.
+  { name: 'parent',
+    wellFormed: ({ targetShortId }) => String(targetShortId),
+    expectStored: ({ targetId }) => targetId,
+    malformed: 42,
     note: '#254 — now declared on both MCP card schemas and consumed on both REST surfaces, '
         + 'with the cycle guard shared with /api/nodes. WAS: "STORED on 7 live cards and '
         + 'PATCHABLE, but absent from both MCP card schemas — the consumed-but-undeclared '
