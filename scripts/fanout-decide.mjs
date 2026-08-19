@@ -195,3 +195,64 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state }) {
   st.s = sessions;
   return { state: st, warnBody };
 }
+
+/**
+ * #903 — render the seat list with each seat's OPEN STREAM COUNT.
+ *
+ * ⛔ WHY. #703 added a bracket naming the bound seats so a reader could infer
+ * who vanished. When it was written, every seat in the map held a stream, so
+ * "bound" and "receiving" were the same set and the word was exact. #707 then
+ * bound the healthcheck as its own seat — a probe that mints a session every
+ * 60s and NEVER opens a stream — and the two sets came apart from a different
+ * file, with no edit here and nothing to trigger a re-read.
+ *
+ * The result, measured 2026-08-19T11:18:48Z (seat names generalised; every
+ * number is as it fired):
+ *
+ *   "only 2 of 10 live sessions hold an open stream (floor: 3) …
+ *    [#703: bound=[alpha,beta,healthcheck] unbound=3]"
+ *
+ * ⇒ The headline says 2. The bracket names 3. The floor IS 3. A reader who
+ *   takes the bracket as the answer sees a set that exactly meets the floor and
+ *   stands down — the alarm prints its own all-clear.
+ *
+ * ⭐ The fix is the number, not the word. `bound=[healthcheck:0,…]` is TRUE and
+ * unambiguous: healthcheck is bound, and it receives nothing. Renaming the key
+ * would break every log grep for no gain, and the ambiguity was never in the
+ * word alone — it was in a word standing where a measurement belonged.
+ *
+ * ⚠️ An ABSENT stream count renders `?`, never `0`. This file already learned
+ * that once at #713 — `?? 0` would have rendered a missing `pending` as "there
+ * is no queue", a measurement that isn't there reading as a healthy one. A seat
+ * whose streams we cannot read is not a seat with zero streams.
+ *
+ * @param {object} seats  status.seats — { [name]: { streams, sessions, … } }
+ * @returns {string[]}    e.g. ['healthcheck:0', 'alpha:1', 'beta:1']
+ */
+export function renderSeats(seats) {
+  return Object.keys(seats ?? {}).sort().map((name) => {
+    const streams = Number(seats[name]?.streams);
+    return `${name}:${Number.isFinite(streams) ? streams : '?'}`;
+  });
+}
+
+/**
+ * #713/#703 — the per-tick log suffix. Empty unless binding is active, because
+ * a seat list nobody is binding is noise rather than information.
+ */
+export function seatSuffix(status) {
+  if (status?.binding !== 'active') return '';
+  return ` seats=[${renderSeats(status.seats).join(',')}] unbound=${Number(status.unbound ?? 0)}`;
+}
+
+/**
+ * #703 — the bracket appended to a WARNING, so an alarm that can name seats
+ * does. This is the string a human acts on at 06:18 in the morning; #903's
+ * acceptance is deliberately written against THIS rendered line and not against
+ * the array above, because a test on the intermediate value passes happily
+ * while the printed text stays ambiguous.
+ */
+export function seatBracket(status) {
+  if (status?.binding !== 'active') return '';
+  return ` [#703: bound=[${renderSeats(status.seats).join(',')}] unbound=${Number(status.unbound ?? 0)}]`;
+}

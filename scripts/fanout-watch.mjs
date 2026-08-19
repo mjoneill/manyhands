@@ -50,7 +50,7 @@ import fs from 'node:fs';
 // #726 — the decision lives in a pure, tested module. See fanout-decide.mjs for
 // why: six production fixes, no test, and the seventh change had a failure mode
 // (a watch that stops warning) indistinguishable from a healthy room.
-import { decide } from './fanout-decide.mjs';
+import { decide, seatSuffix, seatBracket } from './fanout-decide.mjs';
 
 const STATUS_URL = process.env.SCRUM_STATUS_URL || 'http://127.0.0.1:3001/channel/status';
 const POST_URL = process.env.SCRUM_POST_URL || 'http://127.0.0.1:3141/api/conversations';
@@ -91,11 +91,11 @@ const pending = status.pending == null ? 'unknown' : Number(status.pending);
 // this watch's own output. Fail-open's counterweight is visibility HERE (the
 // room-vetted Q1 ruling) — an unbound connection in a log line nobody reads
 // is admit-silently, which nobody voted for.
-const seatNames = Object.keys(status.seats ?? {}).sort();
-const unbound = Number(status.unbound ?? 0);
-const seatPart = status.binding === 'active'
-  ? ` seats=[${seatNames.join(',')}] unbound=${unbound}`
-  : '';
+// #903 — each name now carries its OPEN STREAM COUNT. `healthcheck` binds as a
+// seat (#707) and never opens a stream, so a bare name list put a permanently
+// deaf member in the same column as two listening ones. Rendering lives in
+// fanout-decide.mjs so it can be tested against the printed line.
+const seatPart = seatSuffix(status);
 // #713 — name the state file in the tick. Two seats independently mistook the
 // DEFAULT path (/tmp/…, a stale artifact of a hand-run three days earlier) for
 // the live one and read its mtime as a three-day monitoring outage; the plist
@@ -130,9 +130,11 @@ fs.writeFileSync(STATE_FILE, JSON.stringify(st));
 if (!warnBody) process.exit(0);
 // #703 — an alarm that can name seats must name them: append who IS bound
 // (so the reader can infer who vanished) and the unbound count.
-const body = status.binding === 'active'
-  ? `${warnBody} [#703: bound=[${seatNames.join(',')}] unbound=${unbound}]`
-  : warnBody;
+// #903 — `bound=[healthcheck,alpha,beta]` under a headline reading "only 2 of
+// 10 hold an open stream (floor: 3)" gave the reader three names against a
+// floor of three, so the alarm printed its own all-clear. The stream count is
+// now in the bracket: bound=[alpha:1,beta:1,healthcheck:0].
+const body = `${warnBody}${seatBracket(status)}`;
 
 if (DRYRUN) {
   console.log(`${now} DRYRUN would post: ${body}`);
