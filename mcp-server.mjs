@@ -897,7 +897,42 @@ function buildMcpServer() {
     const sid = extra?.sessionId;
     const m = sid ? sessionMeta.get(sid) : null;
     if (m && typeof args?.author === 'string' && args.author) m.author = args.author;
-    return jsonResult(await apiCall('POST', '/api/conversations', args));
+    const created = await apiCall('POST', '/api/conversations', args);
+
+    // #909 — GIVE BACK THE INSTRUMENT #258 TOOK AWAY.
+    //
+    // The echo was a free liveness signal from inside a seat: "my post came
+    // back, so my receive path works." #258 removed it correctly and put
+    // nothing there. The tool return proves the WRITE landed — it travels the
+    // request/response path — and says nothing about whether this session can
+    // RECEIVE. #624 is exactly that gap: a deaf seat's writes all succeed.
+    //
+    // ⛔ NOT `delivered`, and the card said why before I built it: this is
+    // measured at POST TIME from the current receiver set, not carried back
+    // from the fanout this message triggered. The fanout runs later, when REST
+    // notifies us; reporting its count would mean making the write path wait on
+    // the read path, and coupling those is the thing #624 is about.
+    //
+    // ⇒ So the field is named for what it actually is — two point-in-time
+    // facts — rather than for the stronger thing a reader would like it to be.
+    // A label that promises per-message delivery while reporting stream state is
+    // the #593/#845 lying-label class, and this room has paid for it repeatedly.
+    //
+    // ⚠️ `yourStreamOpen: true` can be wrong one millisecond later. That is
+    // honest for a point-in-time reading and is precisely why it is not called
+    // `delivered`, which would be the same lie with a timestamp on it.
+    const streamsOf = (id) => sessionMeta.get(id)?.openStreamCount ?? 0;
+    const reach = {
+      yourStreamOpen: sid ? streamsOf(sid) > 0 : false,
+      // ⚠️ EXCLUDES THE CALLER, by session id rather than by author. A seat
+      // alone in an empty room must not read its own stream as company — and
+      // `author` is self-declared (#125), so two seats posting under one name
+      // would hide each other. The session is the thing that receives.
+      otherListeners: [...transports.keys()].filter((id) => id !== sid && streamsOf(id) > 0).length,
+    };
+    return jsonResult(created && typeof created === 'object' && !Array.isArray(created)
+      ? { ...created, reach }
+      : created);
   });
 
   // ── #802/#804 — the whisper, settled by the board rather than by three agreeing seats.
