@@ -1119,6 +1119,111 @@ function handleListMemories(req, res) {
   sendJSON(res, 200, { total: out.length, memories: out });
 }
 
+
+// ── #918 — DECISIONS ARE FIRST-CLASS ────────────────────────────────────────
+//
+// A card is WORK. A decision is a CONSTRAINT ON FUTURE WORK, and its whole
+// value is that it stops a conversation recurring. It has no column, no claim,
+// no done state — it has a statement, a decider, a date, what it CONSTRAINS,
+// and what would REOPEN it.
+//
+// ⭐ `reopensIf` is the field prose never carries and the reason this type is
+// worth building. A ruling is only safe to INHERIT if the next reader can see
+// what evidence would overturn it. Without it, a decision is either re-argued
+// from scratch or obeyed superstitiously — and this room did both, four times
+// in one day, with four rulings that lived only in commons posts.
+//
+// ⛔ `constrains` is a queryable TOPIC LIST, not a sentence, and that is the
+// acceptance test: a reader who has never heard of a ruling must be able to
+// find it by naming the thing they are about to do. If finding it requires
+// knowing which decision to look for, this is a filing cabinet.
+const DECISION_ID = (id) => `https://scrumboard.local/decision/${id}`;
+
+function decisionsOf(data) {
+  return Array.isArray(data.decisions) ? data.decisions : [];
+}
+
+const decisionEvent = (op, d, actor = null) => ({
+  op, actor, entity: { kind: 'decision', id: d['@id'] }, state: d,
+});
+
+function decisionToWire(e) {
+  return {
+    id: e.identifier,
+    statement: e['scrum:statement'],
+    decidedBy: e['scrum:decidedBy'],
+    constrains: [].concat(e['scrum:constrains'] || []),
+    reopensIf: e['scrum:reopensIf'],
+    decidedAt: e.dateCreated,
+  };
+}
+
+/** @returns {string|null} an error message, or null if the payload is sound. */
+function validateDecision(b) {
+  if (typeof b.statement !== 'string' || !b.statement.trim()) return 'statement is required';
+  const who = b.decidedBy || b.by;
+  if (typeof who !== 'string' || !who.trim()) {
+    return 'decidedBy is required — a ruling with no decider cannot be weighed by whoever inherits it';
+  }
+  if (!Array.isArray(b.constrains) || b.constrains.length === 0) {
+    return 'constrains must be a non-empty array of topics — a decision that constrains nothing is '
+         + 'invisible to the only query this type exists for, and would be found by nobody who needed it';
+  }
+  if (b.constrains.some((t) => typeof t !== 'string' || !t.trim())) {
+    return 'each entry in constrains must be a non-empty topic string';
+  }
+  // ⇒ REQUIRED, deliberately. An optional field on a write path this room uses
+  // will be omitted, and a decision nobody can overturn is an opinion with a
+  // timestamp on it.
+  if (typeof b.reopensIf !== 'string' || !b.reopensIf.trim()) {
+    return 'reopensIf is required — what evidence would overturn this? A ruling without one is '
+         + 'either re-argued from scratch later or obeyed superstitiously, and both have happened here';
+  }
+  return null;
+}
+
+async function handleCreateDecision(req, res) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const err = validateDecision(body);
+    if (err) return sendJSON(res, 400, { error: err });
+    const created = await withWriteLock(async () => {
+      const data = readBoard();
+      const id = crypto.randomUUID();
+      const entity = {
+        '@id': DECISION_ID(id), '@type': 'scrum:Decision',
+        identifier: id,
+        'scrum:statement': String(body.statement),
+        'scrum:decidedBy': body.decidedBy || body.by,
+        'scrum:constrains': [...body.constrains],
+        'scrum:reopensIf': String(body.reopensIf),
+        dateCreated: new Date().toISOString(),
+      };
+      data.decisions = [...decisionsOf(data), entity];
+      writeBoard(data, [decisionEvent('create', entity, body.decidedBy || body.by)]);
+      return decisionToWire(entity);
+    });
+    sendJSON(res, 201, created);
+  } catch (e) {
+    console.error('POST /api/decisions:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+
+function handleListDecisions(req, res) {
+  const q = parseQuery(req.url);
+  let out = decisionsOf(readBoard())
+    .filter((e) => e['@type'] === 'scrum:Decision')
+    .map(decisionToWire);
+  // ⚠️ An unknown topic returns an EMPTY LIST, never an error. "Nothing
+  // constrains this" is the common and correct answer for most topics, and a
+  // reader who meets a failure there learns to distrust the empty case and
+  // stops asking.
+  if (q.constrains) out = out.filter((d) => d.constrains.includes(q.constrains));
+  if (q.decidedBy) out = out.filter((d) => d.decidedBy === q.decidedBy);
+  sendJSON(res, 200, out);
+}
+
 // ── #801 — the retrieval miss log, made durable ──────────────────────────────
 //
 // #801 proposed a VOLUNTARY log (a card, comments, no code) because "automatic
@@ -3913,6 +4018,8 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/labels\/aliases$/,       fn: (req, res) => handleDeclareLabelAlias(req, res) },
   // #651 — memories. The versions route is declared BEFORE the bare :id route
   // so `/memories/<id>/versions` cannot be swallowed as an id containing a slash.
+  { method: 'GET',    re: /^\/api\/decisions$/,            fn: (req, res) => handleListDecisions(req, res) },
+  { method: 'POST',   re: /^\/api\/decisions$/,            fn: (req, res) => handleCreateDecision(req, res) },
   { method: 'GET',    re: /^\/api\/memories$/,             fn: (req, res) => handleListMemories(req, res) },
   { method: 'POST',   re: /^\/api\/memories$/,             fn: (req, res) => handleCreateMemory(req, res) },
   { method: 'GET',    re: /^\/api\/memories\/([^\/]+)\/versions$/, fn: (req, res, m) => handleMemoryVersions(req, res, m[1]) },

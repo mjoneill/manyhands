@@ -119,6 +119,15 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:Blocker': null,
   'scrum:ReleaseCondition': null,
   'scrum:UnresolvedReference': null,   // #818 — a relationship member naming no card
+  'scrum:Decision': null,              // #918 — rdf:type, minted by the projection
+
+  // ── #918 — DECISION predicates. A decision is a CONSTRAINT ON FUTURE WORK,
+  // and every field here answers a question prose could not: who ruled, what
+  // it binds, and — the one that matters — what would overturn it.
+  'scrum:statement': 'statement',       // the ruling itself, one sentence
+  'scrum:decidedBy': 'decidedBy',       // an EDGE to a person — "what has X ruled" is a traversal
+  'scrum:constrains': 'constrains',     // repeatable TOPIC; the retrieval key, one triple per topic
+  'scrum:reopensIf': 'reopensIf',       // ⭐ what evidence would overturn this. Required at the write path.
 });
 
 /**

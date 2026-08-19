@@ -252,6 +252,10 @@ export const MEMORY_TYPES = Object.freeze([
 ]);
 const MEMORY_TYPE_SET = new Set(MEMORY_TYPES);
 const isMemory = (entity) => entity && MEMORY_TYPE_SET.has(entity['@type']);
+// #918 — decisions are their own class, beside memories rather than inside
+// them: a decision has no versions and no owner, and folding it into the memory
+// collection would make "what has this room decided" a filter over the wrong set.
+const isDecision = (entity) => entity && entity['@type'] === 'scrum:Decision';
 
 /**
  * ⛔ ENFORCE the ordering contract rather than merely preserving it.
@@ -317,7 +321,7 @@ const nodeToColumn = ({ '@type': _t, '@id': _i, identifier, name, 'scrum:order':
 export function domainToJsonLd(domain) {
   const {
     nodes = [], messages = [], people = [], columns = [],
-    tending = [], memories = [], labelAliases = [], _unmodelled = [], _README, ...meta
+    tending = [], memories = [], decisions = [], labelAliases = [], _unmodelled = [], _README, ...meta
   } = domain;
   const doc = {};
   if (_README !== undefined) doc._README = _README;   // first key — JSON.stringify keeps insertion order
@@ -337,6 +341,7 @@ export function domainToJsonLd(domain) {
     ...messages, ...people, ...columns.map(columnToNode),
     ...tending,
     ...memories,
+    ...decisions,
     // #804 — entities of a class this projection does not model ride through
     // verbatim rather than being dropped. Silent deletion is the other bad
     // answer to the fallthrough bug: a phantom card is at least visible.
@@ -383,11 +388,14 @@ export function jsonLdToDomain(doc) {
   // tending: an untouched board must not sprout an empty key and churn its file.
   const memories = graph.filter(isMemory);
   if (memories.length) domain.memories = memories;
+  // #918 — same absence-preserving rule.
+  const decisions = graph.filter(isDecision);
+  if (decisions.length) domain.decisions = decisions;
   // Anything recognised by NO predicate is kept verbatim so the serializer
   // stays lossless. It is never a card and never silently discarded.
   const unmodelled = graph.filter(
     (e) => !isCard(e) && !isMessage(e) && !isPerson(e) && !isColumn(e) && !isTending(e)
-      && !isMemory(e),
+      && !isMemory(e) && !isDecision(e),
   );
   if (unmodelled.length) domain._unmodelled = unmodelled;
   if (Array.isArray(doc._labelAliases) && doc._labelAliases.length) domain.labelAliases = doc._labelAliases;

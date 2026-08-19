@@ -512,6 +512,40 @@ export const MEMORY_PREDICATES = Object.freeze({
   dateCreated: 'literal',
 });
 
+// #918 — DECISIONS.
+//
+// ⚠️ EACH PREDICATE IS WRITTEN OUT LITERALLY, and that is not verbosity for its
+// own sake. #875's guard reads THIS FILE'S SOURCE, matching the literal
+// prefix-plus-quoted-name construction, to census what the replica emits — then
+// checks every one is declared in core/predicate-names.mjs.
+//
+// ⚠️⚠️ AND DO NOT WRITE THAT CONSTRUCTION INSIDE A COMMENT. My first version of
+// this note spelled the pattern out as an example; the census scraped the
+// comment and reported a predicate that does not exist. A comment describing a
+// mechanism became an input to it. A projector that builds predicates from a key map —
+// which is what I wrote first, and what projectMemory does — is INVISIBLE to
+// that census: the guard passes because it can see nothing, not because
+// everything is declared.
+//
+// ⇒ So the clever loop defeats the rail that exists to catch exactly this. The
+// explicit form costs six lines and makes the guard real for this type.
+function projectDecision(store, e) {
+  const add_ = (p, o) => store.add(oxigraph.triple(nn(e['@id']), p, o));
+  const S = IRI.scrum, SC = IRI.schema, P = IRI.person;
+  add_(A, nn(S + 'Decision'));
+  if (e.identifier) add_(nn(SC + 'identifier'), lit(e.identifier));
+  if (e['scrum:statement']) add_(nn(S + 'statement'), lit(e['scrum:statement']));
+  // an EDGE, never a string: "what has this seat ruled" is then a traversal
+  if (e['scrum:decidedBy']) {
+    const who = String(e['scrum:decidedBy']);
+    add_(nn(S + 'decidedBy'), nn(who.startsWith('http') ? who : P + who));
+  }
+  // repeatable TOPIC — one triple each, because it is the retrieval key
+  for (const t of [].concat(e['scrum:constrains'] || [])) add_(nn(S + 'constrains'), lit(String(t)));
+  if (e['scrum:reopensIf']) add_(nn(S + 'reopensIf'), lit(e['scrum:reopensIf']));
+  if (e.dateCreated) add_(nn(SC + 'dateCreated'), lit(e.dateCreated));
+}
+
 function projectMemory(store, e) {
   const add = (s, p, o) => store.add(oxigraph.triple(s, p, o));
   const S = IRI.scrum, SC = IRI.schema, P = IRI.person;
@@ -832,6 +866,8 @@ function projectEntity(store, e) {
       projectTending(store, e);
     } else if (t === 'scrum:Memory' || t === 'scrum:MemoryVersion') {
       projectMemory(store, e);
+    } else if (t === 'scrum:Decision') {
+      projectDecision(store, e);
     } else if (e && e['@id']) {
       // An entity class this projection doesn't know yet (wiki pages are
       // already in the event vocabulary; more will come). It must NOT vanish:

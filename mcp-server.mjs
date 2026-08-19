@@ -1082,6 +1082,55 @@ function buildMcpServer() {
   // ── Memory tools (MCP interface to existing REST endpoints) ─────────────────
   // These tools provide MCP access to the memory store built in #651.
   // The REST endpoints already exist; this MCP surface makes them available to agents.
+  // #918 — DECISIONS. Shipped with their agent-reachable write path in the same
+  // commit, because #651 shipped a node type the seats it was built for could
+  // not write to for weeks (#904) and this card said explicitly: not done
+  // without this.
+  mcp.registerTool('decision_create', {
+    description: 'Record a DECISION — a constraint on future work, not a task. Use this when the room '
+      + 'settles something that should stop being re-argued: a rule, a scope call, a chosen approach. '
+      + 'It has no column, no claim and no done state. ⚠️ `reopensIf` is REQUIRED and is the whole point: '
+      + 'a ruling is only safe to inherit if the next reader can see what evidence would overturn it — '
+      + 'without one it gets re-argued from scratch or obeyed superstitiously. `constrains` is a list of '
+      + 'TOPICS, not prose: someone who has never heard of this decision must be able to find it by naming '
+      + 'the thing they are about to do.',
+    inputSchema: {
+      statement: z.string().min(1).describe('What was decided, in one sentence, as a rule rather than a narrative'),
+      decidedBy: z.string().min(1).describe('Who decided — a seat key or person. Declared, not authenticated.'),
+      constrains: z.array(z.string().min(1)).min(1)
+        .describe('TOPICS this constrains, e.g. ["membership","labels"]. The retrieval key — a decision '
+          + 'constraining nothing is invisible to the only query this type exists for.'),
+      reopensIf: z.string().min(1)
+        .describe('REQUIRED — what evidence would overturn this? The difference between a decision and an opinion.'),
+    },
+  }, async (args) => {
+    const { statement, decidedBy, constrains, reopensIf } = args;
+    return jsonResult(await apiCall('POST', '/api/decisions', { statement, decidedBy, constrains, reopensIf }));
+  });
+
+  mcp.registerTool('decision_list', {
+    description: 'List decisions, optionally filtered by the TOPIC they constrain. Ask this before '
+      + 'building in an area — "what constrains how membership is assigned" is answerable without knowing '
+      + 'which decision exists. An unknown topic returns an EMPTY LIST, never an error: "nothing constrains '
+      + 'this" is the common and correct answer for most topics.',
+    inputSchema: {
+      constrains: z.string().optional().describe('Only decisions constraining this topic (exact match)'),
+      decidedBy: z.string().optional().describe('Only decisions made by this seat/person'),
+    },
+    // ⚠️ DESTRUCTURED, not `args.constrains`. #831's forwarding guard reads the
+    // handler's parameter names to check every advertised param is actually
+    // used — a handler that reaches through an `args` object is invisible to it
+    // and passes while forwarding nothing. Third guard to catch me on this card,
+    // and the third one I would have shipped past.
+  }, async ({ constrains, decidedBy } = {}) => {
+    const q = new URLSearchParams(
+      Object.entries({ constrains, decidedBy })
+        .filter(([, v]) => v != null && v !== '')
+        .map(([k, v]) => [k, String(v)]),
+    ).toString();
+    return jsonResult(await apiCall('GET', `/api/decisions${q ? `?${q}` : ''}`));
+  });
+
   mcp.registerTool('memory_create', {
     description: 'Create a new memory in the store. Returns the created memory with version 1.',
     inputSchema: {

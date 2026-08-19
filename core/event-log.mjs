@@ -60,7 +60,10 @@ export const REDACTION_MARKER_PREFIX = '[redacted';
 // tending — was #805 blocker 6, and is CLOSED by the mapping directly below
 // (same commit as this correction: a comment asserting a runtime property
 // must not outlive the property). `wiki` retains that gap, deliberately.
-export const ENTITY_KINDS = new Set(['card', 'conversation', 'column', 'wiki', 'tending', 'memory', 'label']);
+// #918 — `decision` joins the set. ⚠️ An unmapped kind silently DROPS at
+// replay, so a decision whose history could not be rebuilt from the log would
+// be less durable than the cards beside it — which is the opposite of the point.
+export const ENTITY_KINDS = new Set(['card', 'conversation', 'column', 'wiki', 'tending', 'memory', 'label', 'decision']);
 
 /** Which board collection a given entity kind projects into. */
 // #805 blocker 6: tending rides the SAME door as every family — the ruling was
