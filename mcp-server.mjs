@@ -1011,6 +1011,65 @@ function buildMcpServer() {
     return { content: [{ type: 'text', text: `Attachment ${id} is a non-image (${ct}, ${buf.length} bytes). Not inlined, to protect the tool-result budget. If you have filesystem access, Read it at ${path.join(ATTACHMENTS_DIR, id)}.` }] };
   });
 
+  // ── Memory tools (MCP interface to existing REST endpoints) ─────────────────
+  // These tools provide MCP access to the memory store built in #651.
+  // The REST endpoints already exist; this MCP surface makes them available to agents.
+  mcp.registerTool('memory_create', {
+    description: 'Create a new memory in the store. Returns the created memory with version 1.',
+    inputSchema: {
+      owner: z.string().describe('REQUIRED — the seat key who owns this memory.'),
+      title: z.string().min(1).describe('Memory title (required, non-empty)'),
+      body: z.string().min(1).describe('Memory body (required — a memory with no text is a title pretending to be a memory)'),
+      tags: z.array(z.string()).optional().describe('Optional tags for categorization and query filtering'),
+    },
+  }, async (args) => {
+    const { owner, title, body, tags } = args;
+    return jsonResult(await apiCall('POST', '/api/memories', { owner, title, body, tags }));
+  });
+
+  mcp.registerTool('memory_update', {
+    description: 'Update a memory by appending a new version. The IDENTITY (title, owner, tags) can also be updated.',
+    inputSchema: {
+      id: z.string().describe('Memory UUID to update'),
+      body: z.string().optional().describe('New body text — appends as a new version (never rewrites existing)'),
+      title: z.string().optional().describe('New title — updates the identity without creating a version'),
+      tags: z.array(z.string()).optional().describe('New tags — updates the identity without creating a version'),
+    },
+  }, async (args) => {
+    const { id, body, title, tags } = args;
+    // Only send fields that are actually provided (PATCH behavior)
+    const updates = {};
+    if (body !== undefined) updates.body = body;
+    if (title !== undefined) updates.title = title;
+    if (tags !== undefined) updates.tags = tags;
+    return jsonResult(await apiCall('PATCH', `/api/memories/${encodeURIComponent(id)}`, updates));
+  });
+
+  mcp.registerTool('memory_list', {
+    description: 'List memories, with optional filtering by owner and/or tag.',
+    inputSchema: {
+      owner: z.string().optional().describe('Filter by memory owner (seat key)'),
+      tag: z.string().optional().describe('Filter by tag — only memories carrying this tag are returned'),
+    },
+  }, async (args) => {
+    const { owner, tag } = args;
+    const params = new URLSearchParams();
+    if (owner) params.set('owner', owner);
+    if (tag) params.set('tag', tag);
+    const qs = params.toString();
+    const path = '/api/memories' + (qs ? '?' + qs : '');
+    return jsonResult(await apiCall('GET', path));
+  });
+
+  mcp.registerTool('memory_versions', {
+    description: 'Get the version history of a memory — all versions that have ever been stored.',
+    inputSchema: {
+      id: z.string().describe('Memory UUID to inspect'),
+    },
+  }, async ({ id }) => {
+    return jsonResult(await apiCall('GET', `/api/memories/${encodeURIComponent(id)}/versions`));
+  });
+
   // ── Board snapshot ───────────────────────────────────────────────
   // #573 — orientation, not history. The old tool returned the ENTIRE board
   // (20.7MB with 11,600 conversations), the transport choked, and the failure
