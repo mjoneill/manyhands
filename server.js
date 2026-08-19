@@ -1274,6 +1274,65 @@ const STANDING_CHECKS = [
   },
 ];
 
+// ── #902 — WHAT A CHECK ACTUALLY LOOKS AT ────────────────────────────────────
+//
+// `stale: 0` reads identically whether a claim is watched by a real measurement
+// or by a proxy for someone's judgement, and the payload could not tell them
+// apart. Measured 2026-08-19 across the live board:
+//
+//   ASK { ?a a prov:Activity ; scrum:shortId ?s }     a capability, in the store
+//   ASK { ?c schema:identifier "858" ; scrum:column column:done }
+//                                                     a CARD's state — a proxy for
+//                                                     the same human judgement that
+//                                                     rotted #857 five times
+//   ASK { ?c schema:identifier "894" }                fires only if the card is DELETED
+//   ASK { ?c a schema:CreativeWork }                  ⛔ CANNOT FAIL while any card
+//                                                     exists. A green that is green
+//                                                     by construction.
+//
+// ⭐ THIS REPORTS EVIDENCE, NOT A VERDICT. It lists the predicates each ASK
+// references and derives nothing about whether the check is "good" — a classifier
+// invented here would be one more judgement smuggled into a mechanical-looking
+// half, which is the defect this room spent 2026-08-18 naming. The reader
+// classifies; the payload just stops hiding what there is to classify.
+//
+// ⚠️ SYNTACTIC, and therefore fallible: it reads the query text, so an ASK that
+// reaches card state through an unusual spelling will not be flagged. It raises
+// the floor and closes nothing.
+const CARD_IDENTITY_PREDICATES = new Set([
+  'schema:identifier', 'scrum:column', 'scrum:claimedBy', 'scrum:priority',
+  'scrum:cardType', 'scrum:assignee', 'rdf:type', 'a',
+]);
+
+function describeAsk(ask) {
+  const text = String(ask || '');
+  // Prefixed names (`scrum:column`) and the bare type shorthand `a`.
+  const prefixed = text.match(/\b[a-z]+:[A-Za-z][A-Za-z0-9_]*/g) || [];
+  // Full IRIs in angle brackets — column:done is often written out longhand.
+  const iris = (text.match(/<[^>]+>/g) || []).map((s) => s.replace(/^<|>$/g, ''));
+  const predicates = [...new Set(prefixed)].sort();
+  const looksLikeType = /\{\s*\?\w+\s+a\s+[a-z]+:[A-Za-z]/.test(text);
+  // ⛔ A WILDCARD PREDICATE IS THE OPPOSITE OF CARD-IDENTITY, and the first
+  // version of this got it exactly backwards. `ASK { ?s ?p ?o . FILTER(...) }`
+  // names NO predicates, so "everything it names is card identity" is VACUOUSLY
+  // true — and #901/#902's whisper checks, which scan the whole graph, were
+  // flagged as proxies. Caught by running against the live board; the fixture
+  // could never have shown it, because nobody writes a wildcard ASK in a fixture.
+  const wildcardPredicate = /\?\w+\s+\?\w+\s+\?\w+/.test(text);
+  // Does every prefixed name it uses belong to card identity? If so the check
+  // cannot see a capability — only whether a card exists or where it sits.
+  const nonIdentity = predicates.filter((p) => !CARD_IDENTITY_PREDICATES.has(p)
+    && !p.startsWith('column:') && !p.startsWith('entity:') && !p.startsWith('person:'));
+  return {
+    predicates,
+    iris: iris.length ? iris : undefined,
+    // TRUE when nothing outside card identity is referenced. Named for what was
+    // measured, not for a verdict about the check's worth.
+    referencesOnlyCardIdentity: !wildcardPredicate
+      && nonIdentity.length === 0 && (predicates.length > 0 || looksLikeType),
+  };
+}
+
 async function handleChecks(req, res) {
   try {
     const { store } = await warmGraphStore();
@@ -1281,6 +1340,8 @@ async function handleChecks(req, res) {
     const data = readBoard();
     const results = [];
     let stale = 0, errors = 0, watched = 0, unwatched = 0;
+    // #902 — how many armed checks can only see card identity, never a capability.
+    let identityOnly = 0, checksTotal = 0;
     // #857 §VI — the unwatched COUNT is not actionable. `793` is
     // indistinguishable from 793 typo reports, and this room has now had to
     // convert a number into a list four times in one day (npm audit's "0",
@@ -1311,6 +1372,7 @@ async function handleChecks(req, res) {
       }
       watched += 1;
       const evaluated = checks.map((c) => {
+        checksTotal += 1;
         try {
           const r = queryGraph(store, c.ask);
           // ⚠️ The ASK boolean arrives as `ask`, NOT `boolean` — read from
@@ -1326,7 +1388,13 @@ async function handleChecks(req, res) {
           }
           const holds = got === c.expect;
           if (!holds) stale += 1;
-          return { claim: c.claim, status: holds ? 'holds' : 'stale', expected: c.expect, actual: got };
+          // #902 — what this check LOOKS AT, beside what it answered.
+          const looks = describeAsk(c.ask);
+          if (looks.referencesOnlyCardIdentity) identityOnly += 1;
+          return {
+            claim: c.claim, status: holds ? 'holds' : 'stale', expected: c.expect, actual: got,
+            looksAt: looks,
+          };
         } catch (e) {
           errors += 1;
           return { claim: c.claim, status: 'error', error: e?.message || String(e) };
@@ -1388,6 +1456,12 @@ async function handleChecks(req, res) {
     sendJSON(res, 200, {
       cardsWatched: watched,
       cardsUnwatched: unwatched,
+      // #902 — of the checks that ARE armed, how many can only see card identity
+      // (does this card exist / where does it sit) rather than a capability in the
+      // store? A high ratio means `stale: 0` is mostly reporting on the same human
+      // judgement that authored the cards, not on the system.
+      checksTotal,
+      checksReferencingOnlyCardIdentity: identityOnly,
       shaIntegrity,
       unwatchedByType,
       unwatchedGoals,
