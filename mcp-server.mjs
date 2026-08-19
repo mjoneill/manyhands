@@ -690,6 +690,7 @@ function buildMcpServer() {
       id: z.string().describe('Card UUID or shortId (number-as-string also accepted)'),
       title: z.string().optional(),
       description: z.string().optional().describe('REPLACES the whole body. ⚠️ On a long card this means regenerating text you did not write — use descriptionAppend to add a section instead.'),
+      descriptionPrepend: z.string().optional().describe('Text added to the BEGINNING of the existing description, byte-preserving (#906). Use this for a CORRECTION or a current-state summary, so a reader meets it before the text it supersedes — appending a correction below the claim it corrects is the shape that made #857 unreadable. Same guarantees as descriptionAppend: the original survives byte-exact as a suffix. Cannot be combined with `description`; CAN be combined with `descriptionAppend` (they touch disjoint ends and compose as prepend + original + append).'),
       descriptionAppend: z.string().optional().describe('Text ADDED to the end of the existing description, byte-preserving. Use this instead of `description` when you are adding to a card rather than rewriting it: replacing means reproducing everything already there, and a re-composition damages quoting — SPARQL literals, code fences, JSON, regexes — while leaving the prose looking perfect. Cannot be combined with `description`.'),
       type: z.enum(['task', 'idea', 'goal', 'reference', 'feature', 'bug']).optional(),
       assignees: z.array(z.string()).optional(),

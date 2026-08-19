@@ -127,6 +127,19 @@ export const CARD_CREATE_PROBES = [
     note: '#864 — an OPERATION on description, never stored under its own key. Not combinable '
         + 'with `description`: two different edits to one field have no correct order.' },
 
+  // #906 — the mirror of the above, and it inherits every one of its rules.
+  //
+  // ⚠️ Registered here because #831's RC0b caught its absence within a minute of
+  // the field existing: I added a caller-settable field and the probe registry
+  // failed the build before the field ever reached a card. That rail worked
+  // exactly as designed, on its author's own commit, which is the argument for
+  // it — a probe registry that only covered the fields someone remembered to
+  // add would be measuring its own memory.
+  { name: 'descriptionPrepend', wellFormed: 'prepended ', malformed: 42, storedAs: 'description',
+    note: '#906 — an OPERATION on description, never stored under its own key. Not combinable '
+        + 'with `description` (no correct order); IS combinable with `descriptionAppend`, '
+        + 'which touches the opposite end.' },
+
   // ── the control: a typo, consistently absent everywhere ──
   { name: 'titel', wellFormed: 'misspelled', malformed: null, noRule: true,
     note: 'not a real field — the AGREE_ABSENT control' },

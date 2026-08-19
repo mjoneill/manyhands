@@ -2115,6 +2115,38 @@ function validateCardFields(body, { checkId = true, surface = 'patch', current =
         + 'they are different edits to the same field and there is no correct order for them';
     }
   }
+  // #906 — the mirror of the above, and it exists because the ABSENCE of it was
+  // shaping the room's writing. With only `description` (replace) and
+  // `descriptionAppend` (add to the end), the safe verb could only produce cards
+  // where corrections sit BELOW the text they correct, and the readable shape
+  // required resending the whole body. The result was named on #857 by the
+  // person this board is built for:
+  // "a willingness to read things that were appended at the bottom to correct
+  // for things at the top. that doesn't seem useful." Five cards had drifted
+  // into it, by five authors, none of whom chose it.
+  //
+  // PATCH-ONLY for the same reason as append (#830): prepending to a card that
+  // does not exist yet is not an operation, and create takes `description`.
+  if (surface !== 'create' && body.descriptionPrepend !== undefined) {
+    if (typeof body.descriptionPrepend !== 'string') {
+      // Coercing is worse here than on append: `String({})` would write
+      // "[object Object]" at the TOP of the card, where it is the first thing
+      // every reader sees and still nothing downstream would flag it.
+      return 'descriptionPrepend must be a string (the text to add to the beginning of the description)';
+    }
+    if (body.description !== undefined) {
+      // ⛔ Same rule as append, same reason: "replace it" and "add to the front
+      // of it" are two DIFFERENT edits to one field, so any precedence makes the
+      // result depend on a convention the caller cannot see.
+      return 'send either description (replace) or descriptionPrepend (add to the beginning), not both — '
+        + 'they are different edits to the same field and there is no correct order for them';
+    }
+    // ⚠️ DELIBERATELY NOT REFUSED: descriptionPrepend + descriptionAppend.
+    // Unlike the pairs above, these touch DISJOINT ends and compose to exactly
+    // one result — pre + old + post — with no ordering question to get wrong.
+    // Refusing it would be an over-refusal, and a rail whose failure mode is
+    // "the board stops accepting truth" is worse than the defect it prevents.
+  }
   if (body.implementedBy !== undefined && body.implementedBy !== null) {
     if (!Array.isArray(body.implementedBy)) return 'implementedBy must be an array of commit shas';
     for (const sha of body.implementedBy) {
@@ -2664,11 +2696,20 @@ async function handleUpdateCard(req, res, idOrShortId) {
         card.description = `${card.description ?? ''}${patch.descriptionAppend}`;
         card.updatedAt = new Date().toISOString();
       }
+      // #906 — the same structural guarantee at the other end: the new value is
+      // a prefix plus the old value, so the original cannot be mangled by an
+      // edit that never retypes it. Applied AFTER append so that sending both
+      // yields pre + old + post regardless of key order in the request body —
+      // the composition must not depend on JSON key ordering.
+      if (patch.descriptionPrepend !== undefined) {
+        card.description = `${patch.descriptionPrepend}${card.description ?? ''}`;
+        card.updatedAt = new Date().toISOString();
+      }
       for (const [k, v] of Object.entries(patch)) {
         // #864 — consumed immediately above. Listed here rather than in
         // PATCHABLE_CARD_FIELDS so it is never written as a literal key, and
         // reported as neither ignored (#823) nor refused: it was honoured.
-        if (k === 'descriptionAppend') continue;
+        if (k === 'descriptionAppend' || k === 'descriptionPrepend') continue;
         // #844 — an unchanged value was not an attempt. Silent.
         if (isEchoOfStored(v, card[k])) continue;
         if (IMMUTABLE_CARD_FIELDS.has(k)) {
