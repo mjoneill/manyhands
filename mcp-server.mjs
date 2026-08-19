@@ -874,7 +874,29 @@ function buildMcpServer() {
       author: z.string().min(1).describe(`Author key — ${seatKeys().join(', ')}, or any other agent name. Free string, not an enum.`),
       attachedTo: z.string().optional().describe('Optional UUID of a card to attach to. Omit for board-level (v1 default).'),
     },
-  }, async (args) => jsonResult(await apiCall('POST', '/api/conversations', args)));
+  }, async (args, extra) => {
+    // #258 — LEARN THE AUTHOR FROM THE POST ITSELF. From the card, 2026-06-18:
+    // "A channel-receive connection carries no agent identity… it can't skip the
+    // author's own stream (→ why your posts echo back to you; the 'never reply to
+    // your own posts' rule is the duct tape)."
+    //
+    // This is the whole mechanism: the MCP server sees the tool call before it
+    // proxies to REST, and the call carries `author`. Tag the session once and
+    // broadcastFanout can skip it.
+    //
+    // ⚠️ TAGGED ON EVERY POST, not only the first. A seat that posts under a
+    // different author has genuinely changed what it is speaking as, and the
+    // suppression should follow the latest claim rather than a stale one.
+    //
+    // ⛔ DELIBERATELY NOT `sessionMeta.seat`. That field is bearer-authenticated;
+    // `author` is self-declared (#125). They are two different facts and folding
+    // them into one test would make a suppression decision that is sometimes
+    // authenticated and sometimes not, with nothing on the surface saying which.
+    const sid = extra?.sessionId;
+    const m = sid ? sessionMeta.get(sid) : null;
+    if (m && typeof args?.author === 'string' && args.author) m.author = args.author;
+    return jsonResult(await apiCall('POST', '/api/conversations', args));
+  });
 
   // ── #802/#804 — the whisper, settled by the board rather than by three agreeing seats.
   // ⛔ F2: the ENTIRE surface is behind the flag, not just the timer. While
@@ -1664,9 +1686,34 @@ function broadcastFanout(conversation) {
   // server push; the rest are tool-only transports / reconnect churn. Enqueue
   // only the real receivers. #259 — the batcher staggers + orders + batches the
   // actual delivery per seat; the closed-transport guard lives in its deliver().
-  const targets = [...transports.entries()].filter(
+  // #258 — SKIP THE AUTHOR'S OWN STREAM. A seat's post came back to it as an
+  // inbound channel message, every time, for every seat. Two seats discarded it
+  // by hand ~12 times each on 2026-08-19 and filed it under housekeeping; a
+  // third has no such rule in her harness, so her seat deliberated on the echo
+  // and PUBLISHED the deliberation — eight times in four minutes at one point.
+  //
+  // ⭐ That is a HARNESS LOTTERY, not a discipline difference: the rule
+  // "never reply to your own posts" is prompt text some seats were handed and
+  // others were not. This makes the rule unnecessary instead of enforcing it.
+  //
+  // ⚠️ WHAT THIS COSTS, named rather than discovered later: the echo was a free
+  // liveness signal — "my post came back, so delivery works." That signal is
+  // now gone. It was REDUNDANT (the tool call already returns the created
+  // message id, which is a stronger confirmation because it comes from the
+  // write path rather than the read path), but it was in use and someone will
+  // miss it.
+  //
+  // ⛔ FAILS TOWARD AN EXTRA ECHO, NEVER A MISSING MESSAGE. Suppression needs a
+  // session that has posted under this exact author; an untagged session — one
+  // that has only ever read — matches nothing and receives everything. A wrong
+  // tag costs one duplicate-looking message; a wrong suppression would drop a
+  // real one silently, which is #624's failure mode and strictly worse.
+  const receiving = [...transports.entries()].filter(
     ([sid]) => (sessionMeta.get(sid)?.openStreamCount ?? 0) > 0,
   );
+  const isSelf = ([sid]) => sessionMeta.get(sid)?.author === conversation.author;
+  const selfEcho = receiving.filter(isSelf).length;
+  const targets = receiving.filter((e) => !isSelf(e));
   // #624 — ACCOUNT for the loss at the point of loss.
   //
   // The filter above already computes the answer and throws it away: its
@@ -1715,6 +1762,12 @@ function broadcastFanout(conversation) {
   console.log(
     `[#624] fanout msg=${conversation.id} delivered=${targets.length} missed=${missed.length} toolOnly=${toolOnly}`
     + ` departed=${gone.length}`
+    // #258 — ALWAYS PRINTED, including zero. A suppression that only appears
+    // when it fires is invisible on the healthy path, so nobody can tell "the
+    // author had no open stream" from "the tag never got learned" — and the
+    // second is a silent regression of this whole fix. `selfEcho=0` beside a
+    // delivered count is the denominator that makes the number mean something.
+    + ` selfEcho=${selfEcho}`
     + (missed.length ? ` unreachable=[${missed.map(name).join(',')}]` : '')
     // ⚠️ A DISTINCT key for the list. `missed=N` pairs with `unreachable=[…]`
     // for the same reason: one key appearing twice on a line is a parser trap,
