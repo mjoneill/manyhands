@@ -1568,6 +1568,13 @@ const CREATE_CONSUMED_FIELDS = new Set([
   // and neither reached here. Caught by #831's sweep, not by review.
   'blockers',
   'acceptance',   // #814 — on BOTH lists in one edit, having got this wrong once already
+  // #254 — containment at birth. ⚠️ AND THE SWEEP CAUGHT ME THE SAME WAY IT
+  // caught `blockers` above: I added the consume step in createCardFromPayload
+  // and not this line, so the field was stored AND reported in `ignoredFields`
+  // — CONSUMED_UNDECLARED, a caller told the opposite of what happened. Third
+  // recorded instance of one edit landing on one list; the note two entries up
+  // says "caught by #831's sweep, not by review", and that held again.
+  'parent',
   // #862 — `by` is the word every OTHER surface uses for "who is doing this":
   // PATCH takes it, and /api/changes emits the event log's `actor` under that
   // name. Create took only `createdBy`, so a caller who learned `by` from the
@@ -1650,6 +1657,16 @@ function createCardFromPayload(body, nextShortId) {
     // the trust model is DECLARED, not authenticated, and inventing an
     // attribution is worse than lacking one.
     createdBy: declaredAuthor(body),
+    // #254 — THE CONSUME STEP, and it is the same omission #830 and #856 both
+    // were. `parent` was writable on card PATCH and on the /api/nodes routes,
+    // and silently dropped here — so a card could be reparented after birth but
+    // never born nested. Exposing `parent` on the MCP create schema without this
+    // would have been validated-then-discarded on a third surface in one file.
+    //
+    // ⚠️ No cycle check is needed at CREATE and its absence is deliberate: a card
+    // that does not exist yet cannot be any card's ancestor, so the only edge it
+    // can add is a leaf. The guard belongs on PATCH, where a subtree can move.
+    ...(typeof body.parent === 'string' ? { parent: body.parent } : {}),
     relationships: normalizeRelationships(body.relationships),
     // #830 — a card may be born knowing what implemented it. Retroactive cards
     // (work shipped before it was filed) carry the sha at creation, and the
@@ -2146,6 +2163,15 @@ function validateCardFields(body, { checkId = true, surface = 'patch', current =
     // one result — pre + old + post — with no ordering question to get wrong.
     // Refusing it would be an over-refusal, and a rail whose failure mode is
     // "the board stops accepting truth" is worse than the defect it prevents.
+  }
+  // #254 — `parent` is now consumed on BOTH surfaces, so it must be validated on
+  // both. ⚠️ Added because the #830 scope test caught the gap the moment create
+  // started consuming it: my consume step took `typeof === 'string'`, so
+  // `parent: 42` was dropped AND — since the field had just joined
+  // CREATE_CONSUMED_FIELDS — no longer reported in ignoredFields. Silently
+  // discarded on both channels at once, which is worse than either alone.
+  if (body.parent !== undefined && body.parent !== null && typeof body.parent !== 'string') {
+    return 'parent must be a card id string, or null to make this card a root';
   }
   if (body.implementedBy !== undefined && body.implementedBy !== null) {
     if (!Array.isArray(body.implementedBy)) return 'implementedBy must be an array of commit shas';
@@ -2649,6 +2675,33 @@ async function handleUpdateCard(req, res, idOrShortId) {
     })();
     const verr = validateCardFields(patch, { checkId: false, current: _existing }); // id is immutable on PATCH
     if (verr) return sendJSON(res, 400, { error: verr });
+    // #254 — THE SAME PREDICATE, not a second copy of it.
+    //
+    // `parent` sits in PATCHABLE_CARD_FIELDS, so this route has always accepted
+    // it — while `reparentWouldCycle` had exactly ONE call site, in the /api/nodes
+    // handler. Two routes wrote one field and only one of them checked the write
+    // was legal, so a cycle could be created here with a 200 and a card that
+    // reads back exactly as sent. The damage is a property of the GRAPH, not of
+    // any record, so nothing downstream would ever report it.
+    //
+    // ⚠️ #890's lesson, and the reason this calls the node route's function
+    // instead of re-deriving the rule: sharing a CONSTANT is not sharing a RULE.
+    // Both routes already shared the field and the store; what they did not share
+    // was the predicate deciding a write is legal. A second implementation here
+    // would pass its own tests and drift on the first edit to either copy.
+    if ('parent' in patch && patch.parent != null && _existing) {
+      try {
+        const d = readBoard();
+        if (reparentWouldCycle(d.cards, _existing.id, patch.parent)) {
+          // 409, matching the /api/nodes route exactly. My first version answered
+          // 400 and the agreement test caught it: both routes REFUSED — they
+          // agreed on the decision — and disagreed on the code, which is the
+          // #890 defect surviving inside its own fix. The incumbent defines the
+          // contract; a caller must not have to know which route it came in on.
+          return sendJSON(res, 409, { error: 'That move would make the page a descendant of itself.' });
+        }
+      } catch { /* board unreadable: the write below will fail on its own terms */ }
+    }
     const ignoredFields = [];   // #823 — declared back to the caller
     // #831 — REFUSED is a different fact from IGNORED. "I did not recognise
     // this" and "I recognised it and will not let you change it" call for

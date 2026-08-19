@@ -106,9 +106,18 @@ export const CARD_CREATE_PROBES = [
     with: { parkedBy: 'ada', parkedUntil: '2026-12-01T00:00:00.000Z' } },
 
   // ── fields found by RC0b's falsifying direction, NOT by anyone's memory ──
-  { name: 'parent', wellFormed: '11111111-2222-3333-4444-555555555555', malformed: null, noRule: true,
-    note: 'STORED on 7 live cards and PATCHABLE, but absent from both MCP card schemas. '
-        + 'The consumed-but-undeclared mirror shape. Surfaced only by the consumer→schema direction.' },
+  // #254 — WAS `noRule: true`, and the sweep refused to let that stand the moment
+  // a rule existed: "a wrong exemption SUPPRESSES findings." The old note below
+  // is kept because it is the record of why this field was found at all.
+  //
+  // ⚠️ `malformed` is a NUMBER, not null — `parent: null` is the LEGAL way to
+  // make a card a root, so probing with null would test the happy path while
+  // claiming to test refusal, and the exemption would look correct forever.
+  { name: 'parent', wellFormed: '11111111-2222-3333-4444-555555555555', malformed: 42,
+    note: '#254 — now declared on both MCP card schemas and consumed on both REST surfaces, '
+        + 'with the cycle guard shared with /api/nodes. WAS: "STORED on 7 live cards and '
+        + 'PATCHABLE, but absent from both MCP card schemas — the consumed-but-undeclared '
+        + 'mirror shape, surfaced only by the consumer→schema direction."' },
   { name: 'attachments', wellFormed: [], malformed: null, noRule: true,
     note: 'present on 1 live card; not in either MCP card schema' },
 

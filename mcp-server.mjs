@@ -663,6 +663,7 @@ function buildMcpServer() {
       createdBy: z.string().min(1).describe('REQUIRED — your seat key. Who is writing this card. '
         + 'Declared, not authenticated: say who you actually are.'),
       description: z.string().optional().describe('Markdown body for the card'),
+      parent: z.string().optional().describe('The card this one is CONTAINED BY — its parent in the page/epic tree. A wiki page IS a card, so a nested page is created by naming its parent here. Absent from this schema since June (#254): every containment write an agent wanted to make had to go through REST.'),
       type: z.enum(['task', 'idea', 'goal', 'reference', 'feature', 'bug']).optional().describe('Card type — defaults to task'),
       assignees: z.array(z.string()).optional().describe(`Array of assignee keys (${seatKeys().join(', ')}, unassigned). Defaults to [unassigned].`),
       labels: z.array(z.string()).optional(),
@@ -689,6 +690,7 @@ function buildMcpServer() {
     inputSchema: {
       id: z.string().describe('Card UUID or shortId (number-as-string also accepted)'),
       title: z.string().optional(),
+      parent: z.string().nullable().optional().describe('The card this one is CONTAINED BY — its parent in the page/epic tree. A wiki page IS a card, so this is how an agent nests or reparents one; `null` clears it and makes the card a root. Refused if it would create a cycle (a card with no path to any root is invisible to every tree walk while still reading back correctly). Absent from this schema since June (#254), which is why containment could only be written by curling REST.'),
       description: z.string().optional().describe('REPLACES the whole body. ⚠️ On a long card this means regenerating text you did not write — use descriptionAppend to add a section instead.'),
       descriptionPrepend: z.string().optional().describe('Text added to the BEGINNING of the existing description, byte-preserving (#906). Use this for a CORRECTION or a current-state summary, so a reader meets it before the text it supersedes — appending a correction below the claim it corrects is the shape that made #857 unreadable. Same guarantees as descriptionAppend: the original survives byte-exact as a suffix. Cannot be combined with `description`; CAN be combined with `descriptionAppend` (they touch disjoint ends and compose as prepend + original + append).'),
       descriptionAppend: z.string().optional().describe('Text ADDED to the end of the existing description, byte-preserving. Use this instead of `description` when you are adding to a card rather than rewriting it: replacing means reproducing everything already there, and a re-composition damages quoting — SPARQL literals, code fences, JSON, regexes — while leaving the prose looking perfect. Cannot be combined with `description`.'),

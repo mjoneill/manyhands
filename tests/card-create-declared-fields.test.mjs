@@ -141,11 +141,28 @@ apiTest('#830 a genuinely unknown key is still reported', async ({ baseUrl }) =>
   assert.deepEqual(card.ignoredFields, ['bogusField']);
 });
 
-apiTest('#830 `parent` remains ignored at create — not swept in by proximity', async ({ baseUrl }) => {
-  // parent is in PATCHABLE_CARD_FIELDS but is NOT a card_create schema
-  // parameter. This card fixes the four that are declared, not everything
-  // adjacent to them.
-  const { res, card } = await post(baseUrl, { title: 'p', parent: 42 });
+apiTest('#254 supersedes #830 here: `parent` is now CONSUMED at create, and a malformed one is REFUSED', async ({ baseUrl }) => {
+  // ⚠️ THIS TEST'S EXPECTATION WAS DELIBERATELY REVERSED, so the reversal is
+  // recorded rather than discovered later.
+  //
+  // #830's version asserted `parent` stays ignored at create, and its stated
+  // reason was SCOPE — "this card fixes the four that are declared, not
+  // everything adjacent to them." That was a boundary on #830's work, not a
+  // finding that create must never nest. #254 is the card that moves the
+  // boundary: an MCP seat could not nest a page at all, which is why the
+  // DigiCol hierarchy had to be built by curling REST.
+  //
+  // ⭐ AND THIS TEST EARNED ITS KEEP ON THE WAY PAST. When create began
+  // consuming `parent`, the consume step took only strings — so `parent: 42`
+  // was dropped AND, having just joined CREATE_CONSUMED_FIELDS, no longer
+  // appeared in ignoredFields. Silently discarded on both channels at once.
+  // The refusal below is the fix; the old assertion is what found it.
+  const bad = await post(baseUrl, { title: 'p', parent: 42 });
+  assert.equal(bad.res.status, 400, 'a non-string parent must be refused, not coerced or dropped');
+
+  const parent = await post(baseUrl, { title: 'the epic' });
+  const { res, card } = await post(baseUrl, { title: 'nested', parent: parent.card.id });
   assert.equal(res.status, 201);
-  assert.deepEqual(card.ignoredFields, ['parent']);
+  assert.equal(card.parent, parent.card.id, 'and a well-formed parent is STORED');
+  assert.equal(card.ignoredFields, undefined, 'a consumed field is not reported as ignored (#831)');
 });
