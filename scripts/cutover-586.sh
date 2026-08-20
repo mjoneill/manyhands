@@ -145,6 +145,48 @@ do_verify() {  # $1 = dir, $2 = clone|export ; exits 1 naming EVERY bad field
   [ "$bad" = 0 ] || return 1
 }
 
+# ── #959 — THE FORWARD PATH. Same map, opposite column. ─────────────────────
+# ⭐ It drives off `field_rows()`, exactly like `verify` and `rollback`. A second
+# copy of the table would be a table that can disagree with itself, and the
+# disagreement would surface as a half-cut-over machine.
+do_apply() {  # $1 = dir, $2 = clone|export
+  local dir="$1" want="$2" label path clone_v export_v val
+  while IFS='|' read -r label path clone_v export_v; do
+    [ -n "$label" ] || continue
+    [ "$want" = "clone" ] && val="$clone_v" || val="$export_v"
+    $PB -c "Set $path $val" "$dir/$label.plist" \
+      || die "could not set $path in $label — STOP. The machine is now PARTIAL; roll back."
+    printf '  → %-28s %s = %s\n' "$label" "$path" "$val"
+  done < <(field_rows)
+}
+
+# ⛔⛔ THE PRECONDITIONS. Each one is a way this has already gone wrong, or a way
+# it demonstrably could. None of them is satisfiable by a value this script
+# supplies itself — a flag that defaults to "authorized" is a rail that
+# authorizes itself, which is the failure it was written to prevent.
+forward_preconditions() {
+  [ -n "${AUTH:-}" ] || die "forward requires --authorized-by \"<who authorized this, and for WHAT PLAN>\".
+
+⛔ This is not a formality. On 2026-08-20 a cutover was authorized, announced,
+and stopped inside its own window because measurement falsified the plan the
+room had consented to. Consent granted for one plan must not be spent on a
+different one, so the authorization is named at the point of use and appears
+in the snapshot beside the change it permitted."
+
+  case "$EXPORT_DIR" in *unset*) die "set CUTOVER_EXPORT to the export the jobs will run from";; esac
+  [ -d "$EXPORT_DIR" ] || die "the export does not exist: $EXPORT_DIR
+⇒ run \`deploy.sh export\` first. On 2026-08-20 DEPLOY_SERVE was set NOWHERE and
+  no export had ever been created — the destination was never chosen."
+  [ -r "$EXPORT_DIR/server.js" ] || die "no server.js under $EXPORT_DIR — that is not an export of this repo"
+
+  # ⚠️ You may not move production away from a state you have not saved.
+  [ -n "${BASELINE:-}" ] || die "forward requires --from-baseline <dir> — the snapshot \`baseline --live\` printed.
+Without it there is nothing to roll back TO, and an unexercised rollback is a
+rollback-shaped comment."
+  [ -f "$BASELINE/SHA256SUMS" ] || die "no SHA256SUMS in $BASELINE — that is not a snapshot this script made"
+  ( cd "$BASELINE" && shasum -a 256 -c SHA256SUMS >/dev/null ) || die "the baseline in $BASELINE is CORRUPT"
+}
+
 do_restore() {  # $1 = backup dir, $2 = target dir
   local from="$1" to="$2"
   [ -f "$from/SHA256SUMS" ] || die "no SHA256SUMS in $from — refusing to restore an unverified snapshot"
@@ -202,8 +244,46 @@ do_selftest() {
     cmp -s "$bkp/$j.plist" "$sbx/$j.plist" || die "rollback restored $j but NOT byte-identically"
   done
   say "   ✓ all ${#JOBS[@]} byte-identical"
+
+  # ── #959 — THE FORWARD PATH, exercised under the same discipline ──────────
+  # ⭐ Two REFUSAL controls first. A gate that has never been observed refusing
+  # is a gate nobody has evidence for, and both of these guard an irreversible
+  # act on shared infrastructure.
   say ""
-  say "✅ SELFTEST PASSED — the rollback was exercised, not asserted."
+  say "7. build a stand-in export in the sandbox"
+  local fake="$sbx/export"; mkdir -p "$fake/scripts"
+  : > "$fake/server.js"; : > "$fake/scripts/suite-watch.mjs"; : > "$fake/scripts/fanout-watch.mjs"
+  EXPORT_DIR="$fake"
+
+  say "8. forward WITHOUT --authorized-by must REFUSE  ← control"
+  set +e; ( AUTH=""; BASELINE="$bkp"; forward_preconditions ) >"$sbx/o1" 2>&1; rc=$?; set -e
+  [ "$rc" -ne 0 ] || die "CONTROL FAILED — forward accepted an unauthorized run"
+  grep -q "authorized-by" "$sbx/o1" || die "CONTROL FAILED — refused, but not for the authorization reason"
+  say "   ✓ refused, and named what is missing"
+
+  say "9. forward WITHOUT a baseline must REFUSE  ← control"
+  set +e; ( AUTH="selftest"; BASELINE=""; forward_preconditions ) >"$sbx/o2" 2>&1; rc=$?; set -e
+  [ "$rc" -ne 0 ] || die "CONTROL FAILED — forward accepted a run with nothing to roll back to"
+  grep -q "from-baseline" "$sbx/o2" || die "CONTROL FAILED — refused for the wrong reason"
+  say "   ✓ refused — you may not leave a state you have not saved"
+
+  say "10. forward WITH both, then verify EXPORT"
+  ( AUTH="selftest"; BASELINE="$bkp"; forward_preconditions )
+  do_apply "$sbx" export >/dev/null
+  do_verify "$sbx" export >/dev/null || die "forward ran but the fields do not match the export"
+  say "   ✓ every field moved, and SUITE_WATCH_REPO stayed on the clone"
+
+  say "11. and the round trip: rollback from the SAME snapshot"
+  do_restore "$bkp" "$sbx"
+  do_verify "$sbx" clone >/dev/null || die "rollback after a real forward did not restore"
+  for j in "${JOBS[@]}"; do
+    cmp -s "$bkp/$j.plist" "$sbx/$j.plist" || die "post-forward rollback restored $j but NOT byte-identically"
+  done
+  say "   ✓ byte-identical after a REAL cutover, not just after a broken field"
+
+  say ""
+  say "✅ SELFTEST PASSED — forward and rollback were both exercised, not asserted,"
+  say "   and both refusal controls were observed refusing."
 }
 
 # ── the two positive tests. Both already exist; neither needed building. ────
@@ -240,8 +320,18 @@ do_posttest() {
 }
 
 CMD="${1:-selftest}"; shift || true
-LIVE=0
-for a in "$@"; do [ "$a" = "--live" ] && LIVE=1; done
+LIVE=0; AUTH=""; BASELINE=""
+POS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --live)           LIVE=1 ;;
+    --authorized-by)  AUTH="${2:-}"; shift ;;
+    --from-baseline)  BASELINE="${2:-}"; shift ;;
+    *)                POS+=("$1") ;;
+  esac
+  shift
+done
+set -- "${POS[@]:-}"
 
 case "$CMD" in
   selftest) do_selftest ;;
@@ -255,18 +345,27 @@ case "$CMD" in
     [ "$LIVE" = 1 ] || die "verify needs --live, or use selftest"
     do_verify "$LIVE_DIR" "$want" && say "✅ all fields match: $want" ;;
   forward)
+    # ⚠️ #959, conceding a review: an earlier version of this file REFUSED to
+    # implement forward at all, reasoning that a path which could run the cutover
+    # could launder a stale authorization. That conflated "must not run without
+    # fresh consent" with "must not exist" — only the first is a safety property,
+    # and the omission was not safer, merely untestable. Worse, it pushed writing
+    # the risky half into a live window under time pressure, which is the exact
+    # condition the rollback card existed to avoid.
     [ "$LIVE" = 1 ] || die "forward needs --live"
-    die "forward is NOT IMPLEMENTED ON PURPOSE.
-
-Running the cutover requires a fresh authorization. The window that existed on
-2026-08-20 was opened for a SEVEN-JOB UNIFORM REPOINT that measurement falsified,
-and consent granted for one plan must not be spent on a different one. #958's
-scope is the rollback; #586 carries the cutover and is blocked on it.
-
-What a puller does instead:
-  1. scripts/cutover-586.sh selftest              (proves the rollback works)
-  2. scripts/cutover-586.sh baseline --live       (keep the printed path!)
-  3. get the authorization, THEN implement this arm from field_rows() above" ;;
+    forward_preconditions
+    say "⇢ cutover authorized by: $AUTH"
+    say "   baseline: $BASELINE"
+    do_apply "$LIVE_DIR" export
+    reload_live
+    do_verify "$LIVE_DIR" export || die "the fields did not land — ROLL BACK NOW:
+    scripts/cutover-586.sh rollback $BASELINE --live"
+    say "✅ cut over, and verified."
+    say ""
+    say "⛔ NOT DONE YET — a plist that loaded is not a job that WORKS:"
+    say "   scripts/cutover-586.sh posttest      ⇒ then wait ≤5 min for a NEW"
+    say "                                          fanoutwatch heartbeat line"
+    say "   rollback:  scripts/cutover-586.sh rollback $BASELINE --live" ;;
   rollback)
     from="${1:-}"
     [ -n "$from" ] || die "rollback needs the snapshot dir printed by \`baseline\`"
