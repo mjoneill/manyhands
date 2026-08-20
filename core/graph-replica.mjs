@@ -29,6 +29,11 @@ export const IRI = Object.freeze({
   scrum: 'https://scrumboard.local/ns#',
   schema: 'https://schema.org/',
   rdf: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
+  // #966 — needed to emit a TYPED boolean. SPARQL's bare `true` IS
+  // "true"^^xsd:boolean, so a plain string literal would not match the
+  // query shape a caller naturally writes. (#907 notes `xsd:` is not a
+  // bound PREFIX for queries; this is the datatype IRI, not a prefix.)
+  xsd: 'http://www.w3.org/2001/XMLSchema#',
   // #725 — activities from the event log. PROV-O is the W3C vocabulary for
   // "something happened, and someone was responsible", which is exactly what an
   // event record is and exactly what a Comment is not.
@@ -749,6 +754,33 @@ function projectEntity(store, e) {
           //   owner   — who is chasing the CARD that blocks this
           //   person  — that person's own pending action IS the block
           // A query for "waiting on me" must return only the second.
+          // ⭐⭐⭐ #966 — "ANY HUMAN", naming nobody. A BOOLEAN predicate, so a
+          // query for `blockedByPerson person:X` cannot match it BY CONSTRUCTION
+          // rather than by filtering. A sentinel identity or a nullable `person`
+          // would both put two meanings in one slot — which is the collapse this
+          // exists to remove, and would reintroduce it one level down.
+          //
+          // ⚠️ Checked BEFORE the person branch: `anyHuman` and `person` are
+          // mutually exclusive at validation, so order cannot mask a conflict —
+          // but reading it first keeps the exclusivity visible here too.
+          if (b.anyHuman === true) {
+            // One any-human blocker per card: the state is "anyone may clear
+            // this", which does not accumulate. Kept under `<card>/blocker/` so
+            // sweepBlockerNodes reaches it on delete.
+            const bn = nn(`${IRI.entity}${e['@id']}/blocker/any-human`);
+            add(bn, A, nn(S + 'Blocker'));
+            add(bn, nn(S + 'blocks'), s);
+            // ⚠️ A TYPED boolean, not the string "true". `lit()` stringifies,
+            // and a plain literal would not match the ruled query shape
+            // `?b scrum:blockedByAnyHuman true` — it would need quoting, which
+            // is exactly the kind of surface the caller cannot guess.
+            add(bn, nn(S + 'blockedByAnyHuman'),
+                oxigraph.literal('true', nn(IRI.xsd + 'boolean')));
+            if (b.status) add(bn, nn(S + 'status'), lit(b.status));
+            if (b.note) add(bn, nn(S + 'note'), lit(b.note));
+            continue;
+          }
+
           if (b.person != null && b.card == null) {
             // The subject encodes the person, so two person-blockers on one card
             // are two nodes rather than one overwriting the other — and it stays

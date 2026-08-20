@@ -81,6 +81,12 @@ export const PREDICATE_SOURCE = Object.freeze({
   // CARD, blockedByPerson is the person who is themselves the blocker. They
   // are opposite states and a query for "waiting on me" must return only this one.
   'scrum:blockedByPerson': 'blockers',
+  // #966 — "any human will do", naming nobody. A BOOLEAN predicate rather
+  // than a sentinel identity or a nullable `person`: both of those would put
+  // two meanings in one slot ("nobody recorded who" vs "anyone will do"), and
+  // keeping those apart is the entire point. A named-person query cannot match
+  // it BY CONSTRUCTION rather than by filtering.
+  'scrum:blockedByAnyHuman': 'blockers',
   'scrum:owner': 'blockers',
   'scrum:note': 'blockers',
   // #814 — acceptance evidence. `scrum:evidencedBy` is REUSED from the tending

@@ -2021,9 +2021,40 @@ function validateBlockers(blockers, current, incoming) {
     const hasCard = !(b.card === undefined || b.card === null || b.card === '');
     const hasPerson = !(b.person === undefined || b.person === null || b.person === '');
 
-    if (!hasCard && !hasPerson) {
-      return 'each blocker must name what blocks it: a `card` (the blocking card shortId) '
-        + 'or a `person` (whose pending action is itself the block)';
+    // ⭐⭐⭐ #966 — AND A THIRD TARGET: "any human will do", naming nobody.
+    //
+    // ⛔ THE COST: #881 offered one slot, `person`. Measured 2026-08-20 — EIGHT
+    // live person-blockers, all naming the same man, and one of them says in its
+    // own note "ANY HUMAN CAN SUPPLY IT". Naming someone converts "anyone could
+    // do this" into "X owes this", and the concierge query returns it as a clean
+    // list of things he apparently owes. The list handed to him overstated it.
+    //
+    // ⚠️ A BOOLEAN PREDICATE, deliberately — NOT a sentinel identity
+    // (`person: 'any-human'`) and NOT a nullable `person`. Both overload an
+    // existing slot: "nobody recorded who" and "anyone will do" would become the
+    // same triple, and separating them is the entire point of this rule. The fix
+    // must not reintroduce the collapse it exists to remove.
+    if (b.anyHuman !== undefined && b.anyHuman !== true) {
+      return 'a blocker\'s `anyHuman` is either true or absent. `false` is refused because '
+        + 'absence must not masquerade as a decision: a stored false would be a third state '
+        + '("someone judged this is not any-human") that nothing else can express, and it '
+        + 'would read identically to a blocker whose author never considered the question.';
+    }
+    const hasAnyHuman = b.anyHuman === true;
+
+    if (!hasCard && !hasPerson && !hasAnyHuman) {
+      return 'each blocker must name what blocks it: a `card` (the blocking card shortId), '
+        + 'a `person` (whose pending action is itself the block), or `anyHuman: true` '
+        + '(any human participant can clear it)';
+    }
+    // ⚠️ EXACTLY ONE TARGET, extended to three. `anyHuman` beside a named person
+    // is the same ambiguity as card-beside-person: the concierge query would have
+    // to guess whether the entry means "ada owes this" or "anyone does", and those
+    // are the two states this card exists to keep apart.
+    if (hasAnyHuman && (hasCard || hasPerson)) {
+      return 'a blocker names EXACTLY ONE of `card`, `person`, or `anyHuman: true`. '
+        + '`anyHuman` beside a named target cannot be read as either — and "anyone can '
+        + 'clear it" versus "this person must" is precisely the distinction being recorded.';
     }
     // ⚠️ EXACTLY ONE. A blocker naming both is not richer, it is ambiguous: the
     // concierge query would have to guess which relation the entry means, and
@@ -2034,7 +2065,14 @@ function validateBlockers(blockers, current, incoming) {
         + 'action is the block. An entry naming both cannot be read as either.';
     }
 
-    if (hasPerson) {
+    if (hasAnyHuman) {
+      // ⛔ NO blockedBy REQUIREMENT, for the same reason as a person-blocker and
+      // one step further: there is no edge to describe AND no identity to check.
+      // The whole content of the fact is "a human, unspecified, can clear this."
+      // ⚠️ And no `owner` — owner names who is chasing a blocking CARD; there is
+      // no card here, and attaching one would be the slot-overloading this card
+      // exists to prevent. (Pinned by the three-kinds test.)
+    } else if (hasPerson) {
       if (typeof b.person !== 'string') return 'blocker.person must be a seat or person key';
       // ⛔ NO blockedBy REQUIREMENT HERE, deliberately. A card-blocker must
       // describe an existing edge so ownership cannot become a second source of
