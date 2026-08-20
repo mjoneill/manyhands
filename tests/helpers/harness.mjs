@@ -322,14 +322,82 @@ export async function mcpSession(mcpUrl, { headers: extraHeaders = {} } = {}) {
  * post fires a channel notification); the MCP server is pointed at the REST
  * server. Returns { rest, mcp, stop }.
  */
-export async function startPair({ board, mcpEnv } = {}) {
+/**
+ * #730 — ACQUIRE BOTH, OR LEAVE NOTHING RUNNING.
+ *
+ * The old shape started REST, then awaited MCP with no deadline and no
+ * try/finally. A `startMcpServer` that threw or hung abandoned the REST server
+ * already running — and an abandoned child is not merely untidy: the parent
+ * holds its stdout/stderr (`stdio: ['ignore','pipe','pipe']`, needed for
+ * `stderr()` / `waitForStderr()`), and an open child-stdio stream is an ACTIVE
+ * HANDLE that keeps the test process's event loop alive with nothing left to do.
+ *
+ * Measured on a live 31-hour specimen (pgid 1337, forensics on #730):
+ *   3403 fd 15u unix …310 -> …643   the test file process
+ *   3527 fd  1u unix …643 -> …310   its abandoned server's STDOUT
+ *   ⇒ same socket pair. No IPv4 sockets on 3403 at all — not awaiting a read.
+ *
+ * ⚠️ That specimen is CONSISTENT WITH a failed second acquisition; it does not
+ * prove that history (MCP may have started and exited later). The cleanup hole
+ * below is provable on its own, and that is what the tests pin.
+ *
+ * ⛔ A plain try/finally is NOT enough, for the same reason #736 gives on the
+ * browser path: `finally` waits for the promise to SETTLE, and a hang never
+ * settles. So the acquisition is raced against a deadline, and the teardown
+ * runs on the timeout path too — a bare `Promise.race` turns a hang into a
+ * failure while KEEPING the orphan, which is the defect wearing the fix's
+ * clothes.
+ *
+ * `_startRest` / `_startMcp` are injection seams so the failure and hang paths
+ * are testable without waiting for a real wedge.
+ */
+export async function startPair({
+  board,
+  mcpEnv,
+  acquireTimeoutMs = 60_000,
+  _startRest = startRestServer,
+  _startMcp = startMcpServer,
+} = {}) {
   const restPort = await freePort();
   const mcpPort = await freePort();
   const mcpNotifyUrl = `http://127.0.0.1:${mcpPort}/internal/notify`;
-  const rest = await startRestServer({ board, port: restPort, mcpNotifyUrl });
-  // #726 — let a caller tune MCP env (e.g. MCP_DEAF_GRACE_MS) so a test can
-  // exercise a time-based threshold without sleeping the real interval.
-  const mcp = await startMcpServer({ port: mcpPort, restApiBase: rest.baseUrl, env: mcpEnv });
+
+  const withDeadline = async (p, ms, label) => {
+    let timer;
+    try {
+      return await Promise.race([
+        p,
+        // NOT unref'd: an unref'd deadline does not hold the event loop, so
+        // when the awaited operation is the only thing running the process can
+        // settle before the timer fires and the bound silently does not apply.
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`${label} exceeded ${ms}ms`)), ms);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  const rest = await withDeadline(
+    _startRest({ board, port: restPort, mcpNotifyUrl }), acquireTimeoutMs, 'REST acquisition',
+  );
+
+  let mcp;
+  try {
+    // #726 — let a caller tune MCP env (e.g. MCP_DEAF_GRACE_MS) so a test can
+    // exercise a time-based threshold without sleeping the real interval.
+    mcp = await withDeadline(
+      _startMcp({ port: mcpPort, restApiBase: rest.baseUrl, env: mcpEnv }),
+      acquireTimeoutMs, 'MCP acquisition',
+    );
+  } catch (e) {
+    // The sibling is already running. Stop it before surfacing the failure,
+    // and never let a teardown error mask the acquisition error that caused it.
+    try { await rest.stop(); } catch { /* the original failure is the one that matters */ }
+    throw e;
+  }
+
   return {
     rest,
     mcp,
