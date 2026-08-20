@@ -168,18 +168,39 @@
 
     function renderBlocked(raises) {
       blockedList.innerHTML = '';
-      if (!raises.length) { blockedList.innerHTML = '<div class="blocked-empty">No open asks right now.</div>'; return; }
+      // #485 — an empty state must name the POPULATION it checked. "Nothing is
+      // waiting" is a claim about the world; this is a claim about two named
+      // sources, and the difference is exactly what let a `· 1` sit beside
+      // eleven open directed asks without anybody noticing.
+      if (!raises.length) {
+        blockedList.innerHTML = '<div class="blocked-empty">No open asks right now.'
+          + '<br><small>Checked: directed blockers (open, naming a person) and 🚧 raises / <code>blocked</code> labels.</small></div>';
+        return;
+      }
       for (const r of raises) {
         const isLabel = r.source === 'label';
+        const isPerson = r.source === 'person';
         const who = isLabel
           ? { glyph: '🏷️', name: 'label', color: 'var(--accent-idea)' }
-          : (typeof identityOf === 'function') ? identityOf(r.by) : { glyph: '', name: r.by, color: 'var(--muted)' };
+          // Fall back rather than throw: a fixture or a stranger's board can
+          // name someone the roster has never heard of, and an unknown person
+          // must still be VISIBLE. Silently dropping them is the failure this
+          // card exists to remove.
+          : ((typeof identityOf === 'function' && identityOf(r.by)) || { glyph: '', name: r.by, color: 'var(--muted)' });
         const item = document.createElement('div'); item.className = 'blocked-item'; item.style.setProperty('--mind', who.color);
         const top = document.createElement('div'); top.className = 'blocked-item-top';
         const raiser = document.createElement('span'); raiser.className = 'blocked-who';
-        raiser.textContent = (who.glyph ? who.glyph + ' ' : '') + (who.name || r.by);
+        // #485 — a directed ask names WHO IS WAITED ON; a 🚧 raise names WHO
+        // RAISED IT. Same slot, opposite direction, so it must say which.
+        raiser.textContent = (isPerson ? '⏳ waiting on ' : '')
+          + (who.glyph ? who.glyph + ' ' : '') + (who.name || r.by);
+        const src = document.createElement('span'); src.className = 'blocked-src';
+        src.textContent = isPerson ? 'directed' : (isLabel ? 'label' : 'raise');
+        src.title = isPerson
+          ? 'A structured blocker (scrum:blockedByPerson) naming this person'
+          : 'A 🚧 post on the card, or the `blocked` label — undirected';
         const ref = document.createElement('span'); ref.className = 'blocked-ref'; ref.textContent = r.card ? '#' + r.card.shortId : '';
-        top.append(raiser, ref);
+        top.append(raiser, src, ref);
         const ask = document.createElement('div'); ask.className = 'blocked-ask'; ask.textContent = r.ask || '(no detail given)'; ask.title = r.source || '';
         const foot = document.createElement('div'); foot.className = 'blocked-foot';
         const openCard = document.createElement('a'); openCard.className = 'blocked-open-card';
@@ -218,7 +239,13 @@
             refreshBlocked();
           } catch (_) { done.disabled = false; }
         };
-        foot.append(openCard, done);
+        // ⛔ #485/#466 — NO clear control on a directed ask. `blockers` is a
+        // whole-array replace, so clearing one entry from a page that reloads
+        // every 8s can silently delete a sibling written seconds earlier. That
+        // race is measured (#466, two seats, 40s apart, one blocker lost). The
+        // read-only panel is the honest slice until per-entry writes exist.
+        if (isPerson) foot.append(openCard);
+        else foot.append(openCard, done);
         item.append(top, ask, foot);
         blockedList.appendChild(item);
       }
@@ -249,6 +276,45 @@
           seen.add(cardId);
         }
       }
+      // #485 — DIRECTED ASKS, from #881's structured `blockers` field.
+      //
+      // The two scans above read a registry the room stopped writing to. Every
+      // ask that actually names a human now lands in `blockers`, because that is
+      // what the MCP tooling and board_ready use. On 2026-08-20 the panel read
+      // `· 1` while eleven cards carried an open blocker naming @michael, and he
+      // said in the commons that he was reading that as "nothing is waiting on
+      // me". The panel was honest and pointed at the wrong shelf.
+      //
+      // ⚠️ NOT filtered to a viewer. #485's standing rule: on a board with no
+      // authentication there is no "you" to compute, and its reopening note
+      // forbids manufacturing one. So this shows every open directed ask and
+      // NAMES who each waits on — fail honest, not fail personalized.
+      //
+      // ⛔ NOT deduped against 🚧 raises: a card can carry both, and they are
+      // different asks by different people. Collapsing them would hide one.
+      //
+      // ⛔ NO CLEAR CONTROL, deliberately (renderBlocked omits the button for
+      // these). `blockers` is a whole-array replace — #466 measured two seats
+      // writing it 40s apart and one silently deleting the other's entry. A
+      // per-entry clear from a page that reloads every 8s would race exactly
+      // that way. Read-only until #466 lands.
+      for (const [cardId, card] of cardById) {
+        for (const b of (card.blockers || [])) {
+          if ((b.status || 'open') === 'cleared') continue;   // #881 built status so the queue CONVERGES
+          if (b.card !== undefined && b.person === undefined && b.anyHuman !== true) continue; // card-blocker: work waiting on work
+          const person = b.anyHuman === true ? 'any human' : b.person;
+          if (!person) continue;
+          raises.push({
+            cardId,
+            by: person,
+            ask: b.note || '(no detail given)',
+            at: card.updatedAt || card.createdAt,
+            card,
+            source: 'person',
+          });
+        }
+      }
+
       // Also scan cards for the label BLOCKED_LABEL
       for (const [cardId, card] of cardById) {
         if (seen.has(cardId)) continue; // raise already covers this card
