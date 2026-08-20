@@ -188,3 +188,66 @@ pairTest('REST PATCH with only known fields reports nothing ignored', async ({ r
     'a clean write must not claim it ignored something',
   );
 });
+
+// ── #823 REOPENED — the seam is strict at the TOP level ONLY ────────────────
+//
+// Measured 2026-08-20, by walking into it while folding #963 into #962:
+//
+//   card_update({ supersededBy: 962 })                    → REJECTED by name
+//   card_update({ relationships: { supersededBy: [962] } }) → ACCEPTED, dropped
+//
+// One tool, one call, two opposite outcomes depending on nesting depth. The
+// registration seam wraps `z.object(shape).strict()` around the OUTER object;
+// every nested `z.object({...})` inside it keeps zod's stripping default.
+//
+// ⚠️ The partial fix is worse than none here. `supersededBy` is a real field —
+// it appears in every card_get response — and the strict top level TEACHES a
+// caller that bad keys get refused, so silence one level down reads as
+// acceptance. A rail that fires in the obvious place trains you to trust the
+// place it does not fire.
+//
+// The fold nearly shipped with no edge. That operation's entire value IS the
+// edge, and only reading the field back caught it.
+
+pairTest('card_update rejects an unknown key NESTED inside relationships', async ({ rest, mcp }) => {
+  const card = await seedCard(rest.baseUrl);
+  const s = await mcpSession(mcp.mcpUrl);
+
+  const res = await s.callTool('card_update', {
+    id: String(card.shortId),
+    by: 'ada',
+    // `supersededBy` is DERIVED — the writable direction is `supersedes` on the
+    // superseding card. Nothing at the point of use says so, which is exactly
+    // why a caller reaches for it.
+    relationships: { supersededBy: [7] },
+  });
+
+  assert.equal(isErr(res), true, 'a nested unknown key must not succeed');
+  assert.match(textOf(res), /supersededBy/, 'the error must name the offending nested field');
+});
+
+pairTest('card_update still accepts every KNOWN key inside relationships', async ({ rest, mcp }) => {
+  const card = await seedCard(rest.baseUrl);
+  const other = await seedCard(rest.baseUrl, { title: 'target' });
+  const s = await mcpSession(mcp.mcpUrl);
+
+  // The discriminator: a guard that rejected the whole nested object would pass
+  // the test above and fail here. All four writable members in one call.
+  const res = await s.callTool('card_update', {
+    id: String(card.shortId),
+    by: 'ada',
+    relationships: {
+      relatedTo: [other.shortId],
+      supersedes: [other.shortId],
+      blockedBy: [other.shortId],
+      derivedFrom: [other.shortId],
+    },
+  });
+
+  assert.equal(isErr(res), false, textOf(res));
+  const after = await getCard(rest.baseUrl, card.shortId);
+  assert.deepEqual(after.relationships.relatedTo, [other.shortId], 'relatedTo must land');
+  assert.deepEqual(after.relationships.supersedes, [other.shortId], 'supersedes must land');
+  assert.deepEqual(after.relationships.blockedBy, [other.shortId], 'blockedBy must land');
+  assert.deepEqual(after.relationships.derivedFrom, [other.shortId], 'derivedFrom must land');
+});

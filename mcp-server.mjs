@@ -301,6 +301,45 @@ function buildMcpServer() {
   // point, not a shortcut: a tool added tomorrow inherits the guard instead
   // of depending on its author to remember `.strict()`. The rail cannot be
   // forgotten because nobody has to remember it.
+  // ⛔⛔ #823 REOPENED 2026-08-20 — STRICTNESS MUST BE RECURSIVE.
+  //
+  // The wrap above made the OUTER object strict and left every nested
+  // `z.object({...})` on zod's stripping default. Measured by walking into it:
+  //
+  //   card_update({ supersededBy: 962 })                    → REJECTED by name
+  //   card_update({ relationships: { supersededBy: [962] } }) → ACCEPTED, dropped
+  //
+  // One tool, one call, two opposite outcomes depending on nesting depth. And
+  // the partial fix is worse than none was: `supersededBy` is a real field, it
+  // appears in every card_get response, and a strict top level TEACHES callers
+  // that bad keys get refused — so silence one level down reads as acceptance.
+  // A rail that fires in the obvious place trains you to trust the place it
+  // does not fire. It nearly shipped a card fold with no edge, and the fold's
+  // entire value IS the edge.
+  //
+  // ⚠️ Rebuilds only the container types these schemas actually use. Anything
+  // else — refinements, pipes, effects — is returned UNTOUCHED rather than
+  // reconstructed, because silently dropping a `.refine()` while tightening a
+  // schema would be the same class of defect this guard exists to close.
+  const deepStrict = (s) => {
+    const d = s?._zod?.def;
+    if (!d) return s;
+    const desc = s.description;
+    const keep = (out) => (desc ? out.describe(desc) : out);
+    switch (d.type) {
+      case 'object': {
+        const shape = {};
+        for (const [k, v] of Object.entries(s.shape)) shape[k] = deepStrict(v);
+        return keep(z.object(shape).strict());
+      }
+      case 'array':    return keep(z.array(deepStrict(d.element)));
+      case 'optional': return keep(deepStrict(d.innerType).optional());
+      case 'nullable': return keep(deepStrict(d.innerType).nullable());
+      case 'union':    return keep(z.union(d.options.map(deepStrict)));
+      default:         return s;
+    }
+  };
+
   const registerToolPermissive = mcp.registerTool.bind(mcp);
   mcp.registerTool = (name, config, cb) => {
     const shape = config?.inputSchema;
@@ -309,7 +348,7 @@ function buildMcpServer() {
     const isRawShape = shape && typeof shape === 'object'
       && !shape._def && typeof shape.safeParse !== 'function';
     const cfg = isRawShape
-      ? { ...config, inputSchema: z.object(shape).strict() }
+      ? { ...config, inputSchema: deepStrict(z.object(shape)) }
       : config;
     return registerToolPermissive(name, cfg, cb);
   };
