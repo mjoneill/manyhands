@@ -1533,7 +1533,10 @@ function describeAsk(ask) {
 
 async function handleChecks(req, res) {
   try {
-    const { store } = await warmGraphStore();
+    // #949 (scope extension) — a VERDICT surface needs currency more than a
+    // query surface does. A seat reading /api/graph re-runs a surprising number;
+    // "this tripwire holds" and "this card is ready" get BELIEVED.
+    const { store, projectedThrough } = await warmGraphStore();
     const { queryGraph } = await loadGraphModules();
     const data = readBoard();
     const results = [];
@@ -1652,6 +1655,9 @@ async function handleChecks(req, res) {
     });
 
     sendJSON(res, 200, {
+      // #949 — WHICH STORE STATE THESE VERDICTS DESCRIBE. `stale: 0` computed
+      // from a lagging projection is a true statement about the wrong board.
+      watermark: graphWatermark(projectedThrough),
       cardsWatched: watched,
       cardsUnwatched: unwatched,
       // #902 — of the checks that ARE armed, how many can only see card identity
@@ -1695,16 +1701,22 @@ async function handleReady(req, res) {
   try {
     const url = new URL(req.url, 'http://localhost');
     const { readyFromStore, pageReady, READY_EXPLAIN } = await loadGraphModules();
-    const { store } = await warmGraphStore();
+    // #949 (scope extension) — see the note on /api/checks. A readiness verdict
+    // is acted on, not re-run.
+    const { store, projectedThrough } = await warmGraphStore();
     // Verdicts are computed COMPLETE; explain consults them unpaged (a ready
     // card past the page window must answer ready, not 404 — bb2ccee6) and
     // the queue response pages both lists.
     const verdicts = readyFromStore(store);
     const explain = url.searchParams.get('explain');
+    // #949 — BOTH exits carry it. A currency statement on one of two paths is
+    // the shape this board keeps finding: correct, and blind on the route
+    // nobody checked.
+    const watermark = graphWatermark(projectedThrough);
     if (explain != null && explain !== '') {
-      return sendJSON(res, 200, READY_EXPLAIN(verdicts, explain));
+      return sendJSON(res, 200, { ...READY_EXPLAIN(verdicts, explain), watermark });
     }
-    sendJSON(res, 200, pageReady(verdicts, { limit: url.searchParams.get('limit') ?? undefined }));
+    sendJSON(res, 200, { ...pageReady(verdicts, { limit: url.searchParams.get('limit') ?? undefined }), watermark });
   } catch (e) {
     if (e.code === 'GRAPH_DEPS_MISSING') return sendJSON(res, 503, { error: e.message, code: e.code });
     if (e.code === 'UNKNOWN_CARD') return sendJSON(res, 404, { error: e.message, code: e.code });
