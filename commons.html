@@ -188,7 +188,7 @@
     document.getElementById('blocked-close').onclick = () => blockedPanel.classList.remove('visible');
     blockedToggle.onclick = () => blockedPanel.classList.toggle('visible');
 
-    function renderBlocked(raises) {
+    function renderBlocked(raises, cardById = new Map()) {
       blockedList.innerHTML = '';
       // #485 — an empty state must name the POPULATION it checked. "Nothing is
       // waiting" is a claim about the world; this is a claim about two named
@@ -208,18 +208,55 @@
       // undirected raise is not an ask on anybody in particular, and filing it
       // under a person's heading would invent exactly the direction this card
       // was reopened for inventing.
+      // #485/#969 — READY FOR THEM vs WAITING ON PREREQUISITES.
+      //
+      // @minimo's Banana Test: "every item shown as waiting on Michael must be
+      // something he can act on NOW without another prerequisite first." A panel
+      // that lists human dependencies accurately but cannot tell 'now' from
+      // 'later' still hands him a FALSE DECISION QUEUE.
+      //
+      // ⛔ The live counterexample: #586's blocker asked him to authorise
+      // pointing jobs at an export that did not exist — and the card also
+      // carried a claim and a card-blocker. Every fact needed to know that was
+      // already on this page, and it showed the card identically anyway.
+      //
+      // ⚠️ Uses the SAME conditions the ready-queue does — done · claimed ·
+      // parked · unresolved card-blocker — deliberately, not a second opinion.
+      // Two surfaces answering "can this move?" differently is how the room
+      // ended up with two blocker registries to begin with.
+      const byShortId = new Map([...cardById.values()].map((c) => [String(c.shortId), c]));
+
+      const blockedBySomethingElse = (card) => {
+        if (!card) return false;
+        if (card.column === 'done') return true;
+        if (card.claimedBy) return true;
+        // An authored, EXPIRING "not yet". A lapsed park is not a blocker.
+        if (card.parkedBy && card.parkedUntil && card.parkedUntil > new Date().toISOString()) return true;
+        for (const t of ((card.relationships || {}).blockedBy || [])) {
+          const target = byShortId.get(String(t));
+          // A target that is missing or not done still stands in the way; only
+          // a resolved-and-finished one clears.
+          if (!target || target.column !== 'done') return true;
+        }
+        return false;
+      };
+
       const groups = new Map();
       for (const r of raises) {
-        const key = r.source === 'person' ? 'person:' + r.by : 'legacy';
+        const key = r.source === 'person'
+          ? (blockedBySomethingElse(r.card) ? 'later:' + r.by : 'person:' + r.by)
+          : 'legacy';
         if (!groups.has(key)) groups.set(key, []);
         groups.get(key).push(r);
       }
       // Busiest person first; the legacy group always last (its key sorts high
       // by construction rather than by a special case at render time).
+      // Actionable first, then waiting-on-prerequisites, then undirected. The
+      // order encodes the answer to "what is actually mine right now".
+      const rankOf = (k) => (k.startsWith('person:') ? 0 : k.startsWith('later:') ? 1 : 2);
       const ordered = [...groups.entries()].sort((a, b) => {
-        const aLegacy = a[0] === 'legacy', bLegacy = b[0] === 'legacy';
-        if (aLegacy !== bLegacy) return aLegacy ? 1 : -1;
-        return b[1].length - a[1].length;
+        const d = rankOf(a[0]) - rankOf(b[0]);
+        return d !== 0 ? d : b[1].length - a[1].length;
       });
 
       for (const [key, members] of ordered) {
@@ -231,9 +268,19 @@
         } else {
           const person = members[0].by;
           const ident = (typeof identityOf === 'function' && identityOf(person)) || null;
-          head.textContent = `⏳ waiting on ${(ident && ident.name) || person} · ${members.length}`;
-          head.title = 'Structured blockers (scrum:blockedByPerson) naming this person';
-          if (ident && ident.color) group.style.setProperty('--mind', ident.color);
+          const name = (ident && ident.name) || person;
+          const later = key.startsWith('later:');
+          // ⭐ The heading is the answer to "what is actually mine right now",
+          // so the COUNT belongs to the actionable set alone. A chip reading 4
+          // when one thing is his IS the false decision queue, in one number.
+          head.textContent = later
+            ? `⏸ waiting on a prerequisite first · ${members.length}`
+            : `⏳ waiting on ${name} · ${members.length}`;
+          head.title = later
+            ? 'These name a person, but something else must happen first — the card is claimed, '
+              + 'parked, or blocked by another card. Their authority is still needed, just not yet.'
+            : 'Structured blockers naming this person, with nothing else standing in the way';
+          if (!later && ident && ident.color) group.style.setProperty('--mind', ident.color);
         }
         group.appendChild(head);
         renderItems(members, group);
@@ -431,7 +478,7 @@
         const raises = openRaises(Array.isArray(convos) ? convos : [], cardById);
         blockedToggle.textContent = `🚧 Raised hands · ${raises.length}`;
         blockedToggle.classList.toggle('has-items', raises.length > 0);
-        renderBlocked(raises);
+        renderBlocked(raises, cardById);
       } catch (_) { /* offline — leave last state */ }
     }
     refreshBlocked();
