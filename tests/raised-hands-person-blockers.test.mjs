@@ -114,10 +114,16 @@ test('#485 the raised-hands panel counts OPEN PERSON-BLOCKERS, not just 🚧 pos
     // ⭐ It must say WHO is waited on. A panel that shows the ask without the
     // person is the "blocked on you where you is nobody" defect this card was
     // filed for, one level down.
-    const joined = JSON.stringify(items);
-    assert.match(joined, /michael/i, 'names the person the ask waits on');
+    //
+    // ⚠️ The name lives on the GROUP HEADING, not on each item — repeating it
+    // per row printed "waiting on michael" ten times under a heading reading
+    // WAITING ON MICHAEL. So this asserts on the headings, which is where a
+    // reader actually reads it.
+    const heads = await page.$$eval('.blocked-group-head', (els) => els.map((e) => e.textContent));
+    const joined = JSON.stringify(heads);
+    assert.match(joined, /michael/i, 'a heading names the person the ask waits on');
     assert.match(joined, /ada/i, 'names the OTHER person too — the panel is board-wide, not one-person');
-    assert.match(joined, /point launchd at the export/, 'shows the ask itself, from the blocker note');
+    assert.match(JSON.stringify(items), /point launchd at the export/, 'shows the ask itself, from the blocker note');
   }, { server: { board: blockerBoard }, launch: { headless: 'new' } });
 });
 
@@ -156,6 +162,69 @@ test('#485 an EMPTY panel means empty — a directed blocker with no 🚧 post m
     assert.equal(empty, null,
       'the panel rendered "no open asks" while a directed blocker was live — this is the silence that reads as safety');
   }, { server: { board: oneBlocker }, launch: { headless: 'new' } });
+});
+
+/**
+ * ⭐⭐ GROUPING — the Value Steward's outcome, in her words: "every structured
+ * ask grouped by the person it actually names, including a clearly labeled
+ * Michael section."
+ *
+ * ⇒ Why it is not cosmetic. A flat list of ten items, each individually
+ * labelled "waiting on michael", makes the reader do the counting. The question
+ * the panel exists to answer is "how much is on ME" — and a person cannot read
+ * their own load off a list they have to tally. The heading IS the answer.
+ *
+ * ⚠️ And legacy 🚧 raises must sit in their OWN group, not be folded in beside
+ * a named person. An undirected raise is not an ask on anybody in particular;
+ * putting it under someone's heading would invent the direction this card was
+ * filed to stop inventing.
+ */
+test('#485 asks are GROUPED by the person named, with legacy raises kept separate', async () => {
+  const grouped = {
+    cards: [
+      card('a', 41, 'First for michael', { blockers: [{ person: 'michael', status: 'open', note: 'decide A' }] }),
+      card('b', 42, 'Second for michael', { blockers: [{ person: 'michael', status: 'open', note: 'decide B' }] }),
+      card('c', 43, 'For ada', { blockers: [{ person: 'ada', status: 'open', note: 'decide C' }] }),
+      card('d', 44, 'Raised the old way'),
+    ],
+    columns: [{ id: 'backlog', name: 'Backlog', order: 0 }],
+    conversations: [
+      { id: 'r1', body: '🚧 undirected ask', author: 'ada', attachedTo: 'd', createdAt: ts(2), mentions: [] },
+    ],
+    nextShortId: 45,
+  };
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await browser.newPage();
+    await page.goto(`${server.baseUrl}/commons.html`, { waitUntil: 'networkidle0' });
+    await page.waitForFunction(
+      () => / · 4$/.test(document.getElementById('blocked-toggle').textContent),
+      { timeout: 5000 },
+    );
+    await page.evaluate(() => document.getElementById('blocked-toggle').click());
+    await page.waitForSelector('#blocked-panel.visible .blocked-group', { timeout: 3000 });
+
+    const groups = await page.$$eval('.blocked-group', (els) => els.map((e) => ({
+      head: (e.querySelector('.blocked-group-head')?.textContent || '').trim(),
+      n: e.querySelectorAll('.blocked-item').length,
+    })));
+
+    // Three groups: michael (2), ada (1), and the legacy raise on its own.
+    assert.equal(groups.length, 3, `expected 3 groups, got ${JSON.stringify(groups)}`);
+
+    const michael = groups.find((g) => /michael/i.test(g.head));
+    assert.ok(michael, `no group names michael: ${JSON.stringify(groups)}`);
+    assert.equal(michael.n, 2, 'michael\'s section holds both of his asks');
+    // ⭐ The heading must carry the COUNT — that is the whole point of grouping.
+    assert.match(michael.head, /2/, `michael's heading must state how many: "${michael.head}"`);
+
+    const ada = groups.find((g) => /ada/i.test(g.head) && !/michael/i.test(g.head));
+    assert.ok(ada && ada.n === 1, `ada's section is wrong: ${JSON.stringify(groups)}`);
+
+    // ⛔ The undirected raise must NOT be under a person's heading.
+    const legacy = groups.find((g) => !/waiting on/i.test(g.head));
+    assert.ok(legacy, `no separate group for undirected raises: ${JSON.stringify(groups)}`);
+    assert.equal(legacy.n, 1, 'the 🚧 raise sits alone in the undirected group');
+  }, { server: { board: grouped }, launch: { headless: 'new' } });
 });
 
 /**

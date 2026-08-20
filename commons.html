@@ -75,6 +75,20 @@
   .blocked-done { flex:none; background:none; border:1px solid var(--line); color:var(--muted); border-radius:7px; padding:4px 9px; font:12px var(--sans); cursor:pointer; }
   .blocked-done:hover { color:var(--ink); border-color:var(--ember); }
   .blocked-done:disabled { opacity:.5; cursor:default; }
+  /* #485 — per-person sections. The heading answers "how much is on me"; a
+     flat list makes the reader tally it themselves. */
+  .blocked-group { margin-bottom:16px; }
+  .blocked-group-head { font:600 12px var(--sans); letter-spacing:.04em; text-transform:uppercase;
+    color:var(--mind,var(--muted)); padding:2px 2px 7px; position:sticky; top:0; background:var(--bg,inherit); }
+  .blocked-src { font:11px var(--sans); color:var(--muted); border:1px solid var(--line);
+    border-radius:5px; padding:0 5px; flex:none; text-transform:uppercase; letter-spacing:.03em; }
+  /* The clamp is for scanning; this is how a keyboard or touch user reaches the
+     rest. `title` alone is a mouse-only affordance. */
+  .blocked-more { background:none; border:none; color:var(--link); font:12px var(--sans);
+    padding:0 0 7px; cursor:pointer; text-align:left; }
+  .blocked-more:hover { text-decoration:underline; }
+  .blocked-more:focus-visible { outline:2px solid var(--link); outline-offset:2px; border-radius:3px; }
+  .blocked-ask.expanded { -webkit-line-clamp:unset; line-clamp:unset; display:block; }
   .blocked-empty { color:var(--muted); font-style:italic; padding:16px 4px; }
 </style>
 </head>
@@ -185,6 +199,49 @@
           + '<br><small>Checked: directed blockers (open, naming a person) and 🚧 raises / <code>blocked</code> labels.</small></div>';
         return;
       }
+      // #485 — GROUP BY THE PERSON NAMED. A flat list of ten items each
+      // labelled "waiting on michael" makes the reader do the counting, and
+      // "how much is on me" is the question the panel exists to answer. The
+      // heading IS the answer.
+      //
+      // ⛔ Undirected 🚧 raises and `blocked` labels get their OWN group. An
+      // undirected raise is not an ask on anybody in particular, and filing it
+      // under a person's heading would invent exactly the direction this card
+      // was reopened for inventing.
+      const groups = new Map();
+      for (const r of raises) {
+        const key = r.source === 'person' ? 'person:' + r.by : 'legacy';
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(r);
+      }
+      // Busiest person first; the legacy group always last (its key sorts high
+      // by construction rather than by a special case at render time).
+      const ordered = [...groups.entries()].sort((a, b) => {
+        const aLegacy = a[0] === 'legacy', bLegacy = b[0] === 'legacy';
+        if (aLegacy !== bLegacy) return aLegacy ? 1 : -1;
+        return b[1].length - a[1].length;
+      });
+
+      for (const [key, members] of ordered) {
+        const group = document.createElement('div'); group.className = 'blocked-group';
+        const head = document.createElement('div'); head.className = 'blocked-group-head';
+        if (key === 'legacy') {
+          head.textContent = `🚧 Raised in the room · ${members.length}`;
+          head.title = 'Undirected: a 🚧 post on a card, or the `blocked` label. These name nobody.';
+        } else {
+          const person = members[0].by;
+          const ident = (typeof identityOf === 'function' && identityOf(person)) || null;
+          head.textContent = `⏳ waiting on ${(ident && ident.name) || person} · ${members.length}`;
+          head.title = 'Structured blockers (scrum:blockedByPerson) naming this person';
+          if (ident && ident.color) group.style.setProperty('--mind', ident.color);
+        }
+        group.appendChild(head);
+        renderItems(members, group);
+        blockedList.appendChild(group);
+      }
+    }
+
+    function renderItems(raises, container) {
       for (const r of raises) {
         const isLabel = r.source === 'label';
         const isPerson = r.source === 'person';
@@ -198,10 +255,17 @@
         const item = document.createElement('div'); item.className = 'blocked-item'; item.style.setProperty('--mind', who.color);
         const top = document.createElement('div'); top.className = 'blocked-item-top';
         const raiser = document.createElement('span'); raiser.className = 'blocked-who';
-        // #485 — a directed ask names WHO IS WAITED ON; a 🚧 raise names WHO
-        // RAISED IT. Same slot, opposite direction, so it must say which.
-        raiser.textContent = (isPerson ? '⏳ waiting on ' : '')
-          + (who.glyph ? who.glyph + ' ' : '') + (who.name || r.by);
+        // #485 — a 🚧 raise names WHO RAISED IT, so the slot shows the raiser.
+        //
+        // A directed ask names who is WAITED ON — and that now lives on the
+        // GROUP heading, so repeating it per item said "waiting on michael" ten
+        // times under a heading reading WAITING ON MICHAEL. Caught by looking at
+        // the render; the DOM assertions were all satisfied. So inside a person
+        // group the slot carries the CARD TITLE instead, which is the one thing
+        // that distinguishes one of his ten asks from another.
+        raiser.textContent = isPerson
+          ? (r.card ? r.card.title : '(card missing)')
+          : (who.glyph ? who.glyph + ' ' : '') + (who.name || r.by);
         const src = document.createElement('span'); src.className = 'blocked-src';
         src.textContent = isPerson ? 'directed' : (isLabel ? 'label' : 'raise');
         src.title = isPerson
@@ -212,7 +276,25 @@
         const ask = document.createElement('div'); ask.className = 'blocked-ask'; ask.textContent = r.ask || '(no detail given)';
         // The clamp hides the tail, so the full text has to stay reachable
         // without a navigation. The source now has its own chip.
+        // ⚠️ Hover is NOT an affordance for keyboard or touch users, so `title`
+        // is supplementary only. The real control is the button below.
         ask.title = r.ask || '';
+        // #485 — AN ACCESSIBLE EXPAND. The clamp is for scanning; the full note
+        // has to be reachable by click, Enter/Space and tap, not just by having
+        // a mouse. Rendered only when there is actually something hidden.
+        let more = null;
+        if ((r.ask || '').length > 180) {
+          more = document.createElement('button');
+          more.className = 'blocked-more'; more.type = 'button';
+          more.setAttribute('aria-expanded', 'false');
+          more.textContent = 'Show full ask';
+          more.onclick = (e) => {
+            e.stopPropagation();
+            const open = ask.classList.toggle('expanded');
+            more.setAttribute('aria-expanded', String(open));
+            more.textContent = open ? 'Show less' : 'Show full ask';
+          };
+        }
         const foot = document.createElement('div'); foot.className = 'blocked-foot';
         const openCard = document.createElement('a'); openCard.className = 'blocked-open-card';
         openCard.textContent = (r.card ? r.card.title : 'open card') + ' →';
@@ -257,8 +339,9 @@
         // read-only panel is the honest slice until per-entry writes exist.
         if (isPerson) foot.append(openCard);
         else foot.append(openCard, done);
-        item.append(top, ask, foot);
-        blockedList.appendChild(item);
+        if (more) item.append(top, ask, more, foot);
+        else item.append(top, ask, foot);
+        container.appendChild(item);
       }
     }
 
