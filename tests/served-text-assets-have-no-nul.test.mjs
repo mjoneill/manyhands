@@ -99,19 +99,22 @@ test('#485 no served text asset anywhere in the tree contains a NUL byte', () =>
     .map((f) => ({ f: path.relative(REPO, f), n: nulCount(f) }))
     .filter((r) => r.n > 0);
 
-  // ⚠️ ONE KNOWN, DELIBERATE USE — named here rather than filtered out of the
-  // sweep, because a silent exemption makes the check narrower than it reads.
+  // ⭐ ZERO EXEMPTIONS, and it did not start that way.
   //
-  //   core/export-html.mjs uses `\x00<n>\x00` as a placeholder for code spans
-  //   while converting markdown, on the reasoning that NUL cannot occur in the
-  //   input. That is a real technique, and it costs the same thing my accident
-  //   cost: `file core/export-html.mjs` reports `data`, and grep treats the
-  //   source as binary.
+  // This sweep first found `core/export-html.mjs` carrying four literal NULs —
+  // deliberate, as a placeholder for code spans during markdown conversion, on
+  // the sound reasoning that NUL cannot occur in the input. I recorded it as an
+  // expected value rather than an ignore-rule.
   //
-  // ⭐ Recorded as an EXPECTED value, not an ignore-rule: any NEW file, or a
-  // change in the count, fails this test. Whether that file should switch to a
-  // private-use code point is the room's call, not this test's.
-  const KNOWN = [{ f: 'core/export-html.mjs', n: 4 }];
+  // ⛔ The Value Steward refused that: "do not allowlist literal NUL bytes. If
+  // runtime logic needs a NUL delimiter, encode it TEXTUALLY as '\0' or '\x00';
+  // repository source must remain text." She is right, and the fix is free —
+  // the escape sequence produces the identical byte at runtime while leaving
+  // the source greppable, diffable and readable. 19 export tests unchanged.
+  //
+  // ⇒ So the exemption is gone rather than documented. A guard with no
+  // exceptions is the only kind whose empty result needs no footnote.
+  const KNOWN = [];
 
   assert.deepEqual(offenders, KNOWN,
     `NUL bytes in served text assets (${files.length} scanned).\n`
