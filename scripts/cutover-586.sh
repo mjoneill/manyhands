@@ -165,6 +165,16 @@ do_apply() {  # $1 = dir, $2 = clone|export
 # supplies itself — a flag that defaults to "authorized" is a rail that
 # authorizes itself, which is the failure it was written to prevent.
 forward_preconditions() {
+  # ⛔⛔ READ THIS BEFORE TRUSTING THE FLAG NAME. `--authorized-by` is an OPERATOR
+  # ATTESTATION, not authenticated authorization. Any caller can type any name.
+  # It does two real things — it prevents accidental invocation, and it records
+  # the claim beside the change — and it CANNOT prove the window was granted.
+  # Fresh authorization has to be established externally, through a channel that
+  # can authenticate the person granting it.
+  #
+  # ⚠️ Named here because the flag reads like proof, and this file already
+  # documents one flag whose helpful name concealed what it did (NO_CLONE).
+  # A gate that is trusted for more than it delivers is worse than no gate.
   [ -n "${AUTH:-}" ] || die "forward requires --authorized-by \"<who authorized this, and for WHAT PLAN>\".
 
 ⛔ This is not a formality. On 2026-08-20 a cutover was authorized, announced,
