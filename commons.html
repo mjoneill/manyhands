@@ -60,7 +60,15 @@
   .blocked-item-top { display:flex; gap:8px; align-items:baseline; justify-content:space-between; }
   .blocked-who { font:600 13px var(--sans); color:var(--mind,var(--ink)); }
   .blocked-ref { color:var(--muted); font:12px var(--mono,ui-monospace); flex:none; }
-  .blocked-ask { margin:6px 0 9px; font-size:14px; color:var(--ink); line-height:1.4; }
+  /* #485 — CLAMP THE ASK. A 🚧 raise is one sentence someone typed into a chat
+     box; a `blockers` note is written to be decided from, and the live ones run
+     to full paragraphs. Unclamped, ONE ask filled the entire panel and the
+     other nine were below the fold — a registry you cannot scan is not a
+     registry. Found by screenshotting the panel against a copy of the real
+     board; the DOM dump missed it because my own probe truncated to 64 chars. */
+  .blocked-ask { margin:6px 0 9px; font-size:14px; color:var(--ink); line-height:1.4;
+    display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:4; line-clamp:4;
+    overflow:hidden; overflow-wrap:anywhere; }
   .blocked-foot { display:flex; align-items:center; gap:10px; justify-content:space-between; }
   .blocked-open-card { font-size:12px; color:var(--link); text-decoration:none; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .blocked-open-card:hover { text-decoration:underline; }
@@ -201,7 +209,10 @@
           : 'A 🚧 post on the card, or the `blocked` label — undirected';
         const ref = document.createElement('span'); ref.className = 'blocked-ref'; ref.textContent = r.card ? '#' + r.card.shortId : '';
         top.append(raiser, src, ref);
-        const ask = document.createElement('div'); ask.className = 'blocked-ask'; ask.textContent = r.ask || '(no detail given)'; ask.title = r.source || '';
+        const ask = document.createElement('div'); ask.className = 'blocked-ask'; ask.textContent = r.ask || '(no detail given)';
+        // The clamp hides the tail, so the full text has to stay reachable
+        // without a navigation. The source now has its own chip.
+        ask.title = r.ask || '';
         const foot = document.createElement('div'); foot.className = 'blocked-foot';
         const openCard = document.createElement('a'); openCard.className = 'blocked-open-card';
         openCard.textContent = (r.card ? r.card.title : 'open card') + ' →';
