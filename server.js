@@ -602,6 +602,7 @@ function writeBoard(data, events) {
   // (re)materialized into @graph from this one authority on every write.
   saveDomain(BOARD_DATA_FILE, boardToDomain(data), { now: data.lastUpdated, roster: { seats: ROSTER } });
   _graphDirty = true;   // #694 — the replica rebuilds lazily on next query
+  _graphGeneration++;   // #931 — and SAYS SO, so a sync in flight cannot clear it
 }
 
 // ── #694 — the graph traversal replica ──────────────────────────────────────
@@ -620,6 +621,11 @@ let _graphDirty = true;
 // events are read after an awaited, yielding projection, so that cursor can be
 // newer than the bytes actually in the store.
 let _graphProjectedThrough = null;
+// #931 — HOW MANY WRITES HAVE HAPPENED. Monotonic, bumped beside every
+// `_graphDirty = true`. The sync compares it before and after: if a write
+// landed while the projection was yielding, the generation moved and the flag
+// must NOT be cleared, because that write is not in the store.
+let _graphGeneration = 0;
 const GRAPH_QUERY_LOG = path.join(path.dirname(BOARD_DATA_FILE), 'graph-query-log.jsonl');
 
 /**
@@ -697,6 +703,10 @@ async function warmGraphStore() {
     // incrementally-maintained store is triple-for-triple identical to a full
     // rebuild, and goes red if the delete-before-re-emit step is removed.
     const t = performance.now();
+    // #931 — THE GENERATION AT WHICH THIS PROJECTION BEGAN, captured before the
+    // document is read. Everything below describes the board as of this moment;
+    // if `_graphGeneration` has moved by the time we finish, it does not.
+    const genAtStart = _graphGeneration;
     if (!_graphStore) { _graphStore = buildGraphStore({ '@graph': [] }); _activitySeq = 0; }
     // #949 — the document and its stamp are read as ONE act. `writeBoard`
     // stamps the board and its events with the same instant, so this snapshot's
@@ -768,7 +778,27 @@ async function warmGraphStore() {
     // not in this number — so the pair reports a gap instead of a false green.
     _graphProjectedThrough = docStamp ? seqAsOf(EVENT_LOG_DIR, docStamp) : null;
 
-    _graphDirty = false;
+    // ⛔ #931 — THE RACE, AND WHY THIS IS A COMPARISON RATHER THAN AN ASSIGNMENT.
+    //
+    // `syncGraphStoreChunked` is AWAITED and yields to the event loop between
+    // batches (#884, which fixed a 13–29s outage and opened this window). So a
+    // write can land between the snapshot above and this line: it sets
+    // `_graphDirty = true`, and an unconditional `= false` here CLOBBERS that —
+    // the write is not in the store, nothing knows to re-sync, and the replica
+    // serves a confident wrong answer until something unrelated re-dirties it.
+    // Measured once: four minutes, against #857's own acceptance query, found by
+    // accident.
+    //
+    // ⚠️ NOT the literal "clear the flag before the snapshot" this card proposed.
+    // That closes the same window but breaks retry-on-failure: with the flag
+    // already clear, a sync that THROWS leaves a partial projection that nothing
+    // re-tries. The generation compare closes the window AND keeps a failed sync
+    // dirty, because it only ever clears a flag it can prove is still ours.
+    if (_graphGeneration === genAtStart) {
+      _graphDirty = false;
+    } else {
+      console.error(`${new Date().toISOString()} graph-replica: a write landed mid-sync (generation ${genAtStart} → ${_graphGeneration}); staying dirty so the next query re-projects`);
+    }
     rebuiltMs = Math.round(performance.now() - t);
     console.error(`${new Date().toISOString()} graph-replica: synced ${stats.updated} updated, ${stats.removed} removed of ${stats.total} entities, +${activities} activities (through seq ${_activitySeq}) → ${_graphStore.size} triples in ${rebuiltMs}ms`);
   }

@@ -166,6 +166,24 @@ export function nextSeq(dir) {
  * ⚠️ Comparison is lexicographic over ISO-8601 UTC, which is chronological only
  * while every writer stamps in that one format. `appendEvent` does; a caller
  * passing some other `opts.now` shape would break the ordering silently.
+ *
+ * ⛔ AND THE INVARIANT UNDERNEATH THAT ONE, WHICH NOTHING ENFORCES (a colleague, on
+ * review): correctness rests on `recorded_at` being MONOTONIC WITH `seq`, not
+ * merely well-formatted. `opts.now` is caller-supplied and unvalidated —
+ * `redactEvent`, `recordRedaction` and `redactSubstring` all accept one — so a
+ * stepped clock or a backdated `now` can put a HIGHER seq on an EARLIER stamp.
+ * Within one segment that makes `best` pick it up and this function returns a
+ * seq the document does not reflect: it OVERSTATES currency, reporting current
+ * while behind, which is the exact failure #949 exists to remove.
+ *
+ * ⭐ Bounded, and in the safe direction across files: `segmentFor(recorded_at)`
+ * files a backdated event into an OLDER segment, which this newest-first walk
+ * stops before reaching — so cross-segment skew UNDERSTATES (reports more
+ * behind) and only within-segment skew bites.
+ *
+ * ⚠️ Left as a named invariant rather than a guard, deliberately. Enforcing
+ * monotonicity is a change to the log's write contract and belongs to whoever
+ * owns that, not to a card that reports two integers.
  */
 export function seqAsOf(dir, stamp) {
   if (typeof stamp !== 'string' || !stamp) return 0;
