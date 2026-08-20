@@ -125,6 +125,62 @@ export function nextSeq(dir) {
 }
 
 /**
+ * ⛔ #949 — `headSeq` IS NOT DEFINED HERE, AND I WROTE IT HERE FIRST.
+ *
+ * It already exists in `core/cursor-service.mjs:91`, byte-identical
+ * (`nextSeq(dir) - 1`), and has since #683. I added a second copy without
+ * looking — the same failure this card's own watermark is meant to make
+ * unnecessary, committed while building it. The collision was caught by the
+ * parser, not by me: `Identifier 'headSeq' has already been declared`.
+ *
+ * ⚠️ Left as a note rather than moved. Its home is arguably this file — the head
+ * is a property of the LOG, not of cursors — but relocating an export that
+ * #683's surface depends on is a different card than "report two integers".
+ *
+ * ⇒ Import it from `cursor-service.mjs`.
+ */
+
+/**
+ * #949 — THE NEWEST SEQ RECORDED AT OR BEFORE `stamp`, or 0 if none is.
+ *
+ * ⭐ WHY THIS IS THE HONEST ANCHOR FOR THE REPLICA'S DOCUMENT HALF.
+ * `writeBoard` stamps the board and its events with the SAME instant, so a
+ * document's `lastUpdated` maps exactly onto a position in this log. The
+ * replica projects from those document bytes — so "which store state does this
+ * answer represent" is answerable without the replica recording anything new.
+ *
+ * ⛔ IT MUST NOT BE THE ACTIVITY CURSOR. The sync reads the document, awaits a
+ * yielding projection, and only then reads events — so the activity position
+ * can be NEWER than the bytes actually projected. Using it would overstate
+ * currency in precisely the window #931 lives in.
+ *
+ * ⚠️ INCLUSIVE of `stamp` on purpose: an exclusive comparison would report the
+ * replica one write behind on every sync forever — permanently, quietly, and in
+ * the reassuring direction, which is the failure mode this whole card exists to
+ * remove.
+ *
+ * Bounded the same way `nextSeq` is: newest segment first, walking back only
+ * while every event in a segment is newer than the anchor. A current document —
+ * the normal case — stops at the first file.
+ *
+ * ⚠️ Comparison is lexicographic over ISO-8601 UTC, which is chronological only
+ * while every writer stamps in that one format. `appendEvent` does; a caller
+ * passing some other `opts.now` shape would break the ordering silently.
+ */
+export function seqAsOf(dir, stamp) {
+  if (typeof stamp !== 'string' || !stamp) return 0;
+  const files = segments(dir);
+  for (let i = files.length - 1; i >= 0; i--) {
+    let best = 0;
+    for (const e of parseSegment(dir, files[i])) {
+      if (typeof e.recorded_at === 'string' && e.recorded_at <= stamp && e.seq > best) best = e.seq;
+    }
+    if (best) return best;
+  }
+  return 0;
+}
+
+/**
  * Reject anything that would put a lie in the record. Runs BEFORE the append, so
  * a rejected event burns no seq and leaves the log byte-identical.
  */

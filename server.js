@@ -58,7 +58,7 @@ import { domainToJsonLd } from './core/jsonld.mjs';
 import { deriveGraph, personByKey } from './core/people.mjs';
 import { queryCards, facetCards } from './core/cards-query.mjs';
 import { queryChangesFromLog } from './core/changes-log-query.mjs';
-import { readEvents, oldestRetainedAt } from './core/event-log.mjs';
+import { readEvents, oldestRetainedAt, seqAsOf } from './core/event-log.mjs';
 // #683 — the deafness cure's server half. REST owns the event log, so it owns
 // the cursors that index it; mcp-server asks over HTTP rather than learning a
 // path it has no business knowing (#767).
@@ -614,6 +614,12 @@ let _graphStore = null;
 // #714 — per-entity content hashes from the last sync; null means cold.
 let _graphHashes = null;
 let _graphDirty = true;
+// #949 — the seq the DOCUMENT half of the replica was projected from, derived
+// from the snapshot's own `lastUpdated`. null means cold: never synced, so the
+// replica cannot claim any position at all. ⛔ Deliberately NOT `_activitySeq`:
+// events are read after an awaited, yielding projection, so that cursor can be
+// newer than the bytes actually in the store.
+let _graphProjectedThrough = null;
 const GRAPH_QUERY_LOG = path.join(path.dirname(BOARD_DATA_FILE), 'graph-query-log.jsonl');
 
 /**
@@ -692,7 +698,14 @@ async function warmGraphStore() {
     // rebuild, and goes red if the delete-before-re-emit step is removed.
     const t = performance.now();
     if (!_graphStore) { _graphStore = buildGraphStore({ '@graph': [] }); _activitySeq = 0; }
-    const doc = domainToJsonLd(loadDomain(BOARD_DATA_FILE));
+    // #949 — the document and its stamp are read as ONE act. `writeBoard`
+    // stamps the board and its events with the same instant, so this snapshot's
+    // `lastUpdated` maps exactly onto a position in the event log. Capturing it
+    // here, beside the read, is the point: a stamp fetched later would describe
+    // a different file than the one we are about to project.
+    const domain = loadDomain(BOARD_DATA_FILE);
+    const docStamp = typeof domain?.lastUpdated === 'string' ? domain.lastUpdated : null;
+    const doc = domainToJsonLd(domain);
     // #884 — CHUNKED, so the projection yields to the event loop between batches.
     //
     // ⛔ Measured in production: a cold projection re-projects the whole store
@@ -749,11 +762,57 @@ async function warmGraphStore() {
       console.error(`${new Date().toISOString()} graph-replica: ACTIVITIES NOT PROJECTED (${e?.message}) — traversal is unaffected, but prov:Activity is incomplete past seq ${_activitySeq}`);
     }
 
+    // #949 — recorded from the stamp of the bytes we actually projected, NOT
+    // from the log's head at this instant. If a write landed during the awaited
+    // sync above (#931's window), that write is not in this store and its seq is
+    // not in this number — so the pair reports a gap instead of a false green.
+    _graphProjectedThrough = docStamp ? seqAsOf(EVENT_LOG_DIR, docStamp) : null;
+
     _graphDirty = false;
     rebuiltMs = Math.round(performance.now() - t);
     console.error(`${new Date().toISOString()} graph-replica: synced ${stats.updated} updated, ${stats.removed} removed of ${stats.total} entities, +${activities} activities (through seq ${_activitySeq}) → ${_graphStore.size} triples in ${rebuiltMs}ms`);
   }
-  return { store: _graphStore, rebuiltMs };
+  return { store: _graphStore, rebuiltMs, projectedThrough: _graphProjectedThrough };
+}
+
+/**
+ * #949 — WHAT STORE STATE DOES THIS ANSWER REPRESENT?
+ *
+ * Every consumer on this board tracks a position against the event sequence
+ * except the replica, whose answers the room treats as authoritative. So a
+ * caller could not tell "current" from "four minutes behind" — which is exactly
+ * what #931 produced against #857's own acceptance query, found by accident.
+ *
+ * ⭐ THE NAME IS DELIBERATELY NARROWER THAN THE THING (a warning raised on review, and
+ * the board has three instruments that got this wrong the other way: `seats{}`
+ * answers "who is BOUND" and reads as "who is online"; `cursors.json` measures
+ * PULL PARTICIPATION and reads as liveness; `board_ready` counts CARD blockers
+ * and says `no-open-blockers`). `projectedThrough` is not "the replica is
+ * current" — it is one seq, and the payload says so beside it.
+ *
+ * ⚠️ AND IT PUBLISHES ITS OWN BLIND SPOTS, because the only two surfaces on this
+ * board that have ever caught anything — /api/checks and /api/misses — are the
+ * two that print what they cannot see next to the number.
+ */
+function graphWatermark(projectedThrough) {
+  const storeHead = headSeq(EVENT_LOG_DIR);
+  const cold = projectedThrough === null;
+  return {
+    projectedThrough,
+    storeHead,
+    behindBy: cold ? null : Math.max(0, storeHead - projectedThrough),
+    current: cold ? false : projectedThrough >= storeHead,
+    means: 'projectedThrough is the newest event seq reflected in the DOCUMENT '
+      + 'bytes this replica was projected from, derived from that snapshot\'s lastUpdated.',
+    blindTo: [
+      'a change to the board file that produced NO event — writeBoard refuses '
+      + 'those, so this means out-of-band edits only, and they move nothing here',
+      'writes that land after storeHead was read — this is a point-in-time '
+      + 'claim, never a lock: current:true can go stale one millisecond later',
+      'whether the projection itself is CORRECT — the pair reports position, '
+      + 'not fidelity. A faithfully-projected wrong document reads current',
+    ],
+  };
 }
 
 async function handleGraphQuery(req, res) {
@@ -769,8 +828,12 @@ async function handleGraphQuery(req, res) {
     // correlate the two. Both halves are now measured and both are logged.
     const tCall = performance.now();
     const { queryGraph } = await loadGraphModules();
-    const { store, rebuiltMs } = await warmGraphStore();
+    const { store, rebuiltMs, projectedThrough } = await warmGraphStore();
     const result = queryGraph(store, body.query, { limit: body.limit });
+    // #949 — read AFTER the sync, so `storeHead` reflects anything that landed
+    // during it. That ordering is the whole point: a write arriving mid-sync is
+    // the #931 window, and it must widen the gap rather than disappear into it.
+    result.watermark = graphWatermark(projectedThrough);
     try {
       fs.appendFileSync(GRAPH_QUERY_LOG, JSON.stringify({
         at: new Date().toISOString(), by: (typeof body.by === 'string' && body.by) || null,
