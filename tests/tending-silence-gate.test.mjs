@@ -164,3 +164,56 @@ test('#953 with NO activity source supplied, behaviour is unchanged', async () =
     'an un-wired caller must keep emitting; a gate that fails CLOSED silences the feature');
   assert.equal(posted.length, 1);
 });
+
+// ────────────────────────────────────────────────────────────────────────────
+// #953 — THE ACTIVITY CLASSIFIER. The steward's item 6, as a named function
+// rather than a filter buried in a call site, because it is the semantic
+// choice she said a builder must not make invisibly.
+// ────────────────────────────────────────────────────────────────────────────
+
+import { lastQualifyingActivity, NON_ACTIVITY_AUTHORS } from '../core/tending-tick.mjs';
+
+const msg = (author, createdAt) => ({ author, createdAt, body: 'x' });
+
+test('#953 human and agent comments COUNT as activity', () => {
+  const at = '2026-08-20T14:00:00.000Z';
+  for (const who of ['michael', 'wren', 'indigo', 'minimo']) {
+    assert.equal(lastQualifyingActivity([msg(who, at)]), at,
+      `${who}'s comment must count — humans and seats are both the room being awake`);
+  }
+});
+
+test('#953 board and system posts DO NOT count', () => {
+  assert.equal(lastQualifyingActivity([
+    msg('board', '2026-08-20T14:00:00.000Z'),
+    msg('system', '2026-08-20T14:05:00.000Z'),
+  ]), null, 'a window containing only board/system notices is a QUIET room');
+  assert.deepEqual([...NON_ACTIVITY_AUTHORS].sort(), ['board', 'system']);
+});
+
+/**
+ * ⭐⭐⭐ THE ONE THAT MATTERS. A whisper is authored `board`. If it counted, it
+ * would reset the timer governing the next whisper, forever.
+ */
+test('#953 a whisper does not re-arm its own timer', () => {
+  const human = '2026-08-20T14:00:00.000Z';
+  const whisperAfter = '2026-08-20T14:30:00.000Z';
+  assert.equal(
+    lastQualifyingActivity([msg('michael', human), msg('board', whisperAfter)]),
+    human,
+    'the later BOARD post must not become the activity timestamp — otherwise silence-reset '
+    + 'degenerates into the fixed hourly clock this card exists to replace',
+  );
+});
+
+test('#953 the LATEST qualifying message wins, whatever the order', () => {
+  const late = '2026-08-20T14:20:00.000Z';
+  assert.equal(lastQualifyingActivity([
+    msg('wren', late), msg('indigo', '2026-08-20T14:01:00.000Z'), msg('board', '2026-08-20T14:59:00.000Z'),
+  ]), late, 'unsorted input must still yield the newest qualifying post');
+});
+
+test('#953 malformed rows are skipped, not crashed on', () => {
+  assert.equal(lastQualifyingActivity([null, {}, { author: 'wren' }, { createdAt: 'x' }]), null);
+  assert.equal(lastQualifyingActivity(undefined), null);
+});

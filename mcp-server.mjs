@@ -47,8 +47,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createChannelScheduler } from './core/channel-scheduler.mjs';
 import { mintOnce, claimWindow, readPool, writePool, recentWhispers } from './whisper-store.mjs';
-import { tendingTick } from './core/tending-tick.mjs';
-import { tendingEnabled } from './tending-config.mjs';
+import { tendingTick, lastQualifyingActivity } from './core/tending-tick.mjs';
+import { tendingEnabled, quietAfterMinutes } from './tending-config.mjs';
 import { isGateArmed, decideCoveredAction } from './core/work-gate.mjs';
 import { openWorkObjectsAt } from './core/work-store.mjs';
 // #755 slice 2e — the INPUT PATH. Until this import existed, `core/work-tools.mjs`
@@ -1548,14 +1548,46 @@ function liveSeats() {
 // a surface a test can discriminate on. It previously lived here, inside a
 // module that exports nothing, and was described by a comment claiming "the
 // next tick re-tries" — which was false. See that module's header.
-const whisperTick = () => tendingTick({
-  now: new Date().toISOString(),
-  mint: mintOnce,
-  post: (body) => apiCall('POST', '/api/conversations', body),
-  reachedSeats: liveSeats,
-  log: (line) => console.log(line),
-  onError: (line) => console.error(line),
-});
+// #953 — the room's last QUALIFYING activity, cached for the life of one tick.
+//
+// Bounded on purpose: `?limit=N` returns the N most-recent, so this is a small
+// read rather than the whole commons (1,100+ messages) on every tick. If that
+// window happens to contain only board/system posts the answer is null, which
+// the gate reads as QUIET — the safe direction, and true: a window with no
+// human or seat post in it IS a quiet room.
+//
+// ⚠️ Fails OPEN. If the read throws, this returns null and tending behaves as
+// it did before the gate existed. A REST hiccup must not silently switch the
+// room's tending off — that failure would look exactly like "it's quiet".
+const ACTIVITY_LOOKBACK = 25;
+async function lastRoomActivity() {
+  try {
+    const convs = await apiCall('GET', `/api/conversations?limit=${ACTIVITY_LOOKBACK}`);
+    return lastQualifyingActivity(Array.isArray(convs) ? convs : []);
+  } catch (e) {
+    console.error(`[#953] activity read failed, treating room as quiet: ${e?.message ?? e}`);
+    return null;
+  }
+}
+
+const whisperTick = async () => {
+  // Read once per tick, before the gate, so `lastActivityAt` is a pure getter
+  // over a value already in hand — tendingTick stays synchronous in its
+  // decision and fully testable without a network.
+  const activityAt = await lastRoomActivity();
+  return tendingTick({
+    now: new Date().toISOString(),
+    // Re-read per firing, exactly like `tendingEnabled` — so a change @michael
+    // makes in Settings applies to the very next tick, with no restart.
+    quietAfterMinutes: quietAfterMinutes(),
+    lastActivityAt: () => activityAt,
+    mint: mintOnce,
+    post: (body) => apiCall('POST', '/api/conversations', body),
+    reachedSeats: liveSeats,
+    log: (line) => console.log(line),
+    onError: (line) => console.error(line),
+  });
+};
 // Armed unconditionally; the switch is asked per firing, not per process.
 setInterval(() => { if (tendingEnabled()) whisperTick(); }, WHISPER_TICK_MS).unref();
 

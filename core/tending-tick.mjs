@@ -53,6 +53,43 @@
  * }} deps
  * @returns {Promise<{minted: boolean, delivered: boolean, key?: string, reason?: string}>}
  */
+/**
+ * #953 — WHO COUNTS AS THE ROOM BEING AWAKE.
+ *
+ * ⛔ THIS IS THE SEMANTIC CHOICE THE VALUE STEWARD SAID A BUILDER MUST NOT MAKE
+ * INVISIBLY, so it is one named, exported, tested function rather than a
+ * filter buried in a call site.
+ *
+ * Decided by @michael 2026-08-20 ("agree. proceed"):
+ *
+ *   COUNT      human comments · agent/seat comments
+ *   DO NOT     tending posts · board/system notices
+ *
+ * ⭐⭐⭐ The exclusion is the load-bearing half. THE WHISPER'S OWN POST IS A
+ * MESSAGE, authored `board`. If it counted, every whisper would reset the very
+ * timer that governs the next whisper — silence-reset would collapse back into
+ * a fixed hourly clock while still passing a casual demo, because at an hour
+ * boundary the two are indistinguishable.
+ *
+ * ⚠️ Returns null for "no qualifying activity in what I was shown", which the
+ * gate reads as QUIET. That is the safe direction: the caller passes a bounded
+ * recent slice, and a window containing only board posts genuinely is a quiet
+ * room.
+ */
+export const NON_ACTIVITY_AUTHORS = Object.freeze(['board', 'system']);
+
+export function lastQualifyingActivity(messages) {
+  let latest = null;
+  for (const m of messages || []) {
+    const author = String(m?.author ?? '').toLowerCase();
+    if (!author || NON_ACTIVITY_AUTHORS.includes(author)) continue;
+    const at = m?.createdAt;
+    if (typeof at !== 'string') continue;
+    if (latest == null || at > latest) latest = at;
+  }
+  return latest;
+}
+
 export async function tendingTick({
   now, mint, post, reachedSeats = () => [], log = () => {}, onError = () => {},
   quietAfterMinutes = null, lastActivityAt = null,
