@@ -3540,6 +3540,29 @@ function createConversationFromPayload(body) {
     attachedTo: (typeof body.attachedTo === 'string' && body.attachedTo.length > 0 && body.attachedTo !== 'null') ? body.attachedTo : null,
     attachments: sanitizeAttachments(body.attachments),
     mentions: extractMentions(text),
+    // #125 — the DECLARED name, kept when it differs from the authenticated one.
+    //
+    // The MCP layer resolves the caller's seat from its session and writes that
+    // into `author`; whatever the caller declared lands here instead of being
+    // discarded. Both facts survive, separately named — which is the shape the
+    // #258 comment in mcp-server.mjs insists on: folding an authenticated fact
+    // and a self-declared one into one field produces a value that is sometimes
+    // proven and sometimes not, with nothing on the surface saying which.
+    //
+    // ⚠️ THIS FIELD IS A RECORD, NOT A PROOF. It says "the caller asked to speak
+    // as X", never "X was verified". A relay is a legitimate act in this room —
+    // seats relay each other and @michael constantly — so it is preserved rather
+    // than refused.
+    //
+    // ⛔ AND THERE IS DELIBERATELY NO `authorAuthenticated` FLAG HERE, though
+    // #125's criterion 4 asks for one. `apiCall` in mcp-server.mjs sends NO auth
+    // header, so this endpoint cannot distinguish the MCP server from any other
+    // client that can reach the port. A proof flag accepted from the payload
+    // would be MINTABLE BY ANYONE — a badge that anyone can forge is worse than
+    // no badge, because it converts an open question into a false answer
+    // (#593/#845, the lying-label class). Criterion 4 needs a verifiable trust
+    // link between the two processes and that link does not exist yet.
+    onBehalfOf: (typeof body.onBehalfOf === 'string' && body.onBehalfOf.length > 0) ? body.onBehalfOf : null,
     createdAt: now,
   };
 }
