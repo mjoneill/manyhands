@@ -62,6 +62,31 @@ export const readyBlockersQuery = () =>
   `OPTIONAL { ?target scrum:column ?tcol } }`;
 
 /**
+ * #965 — HUMAN blockers: `scrum:Blocker` nodes carrying `blockedByPerson` or
+ * (#966) `blockedByAnyHuman`. These are a DIFFERENT SHAPE from the card→card
+ * `scrum:blockedBy` edges above — a separate node with its own status — which
+ * is exactly why the original ruleset never saw them: #881 shipped after
+ * `core/ready-query.mjs` pre-registered its five rules.
+ *
+ * ⚠️ The FILTER is what keeps card-blockers out of this result. A card-blocker
+ * is also a `scrum:Blocker` node, so without it this query would re-report
+ * every card→card edge under a person reason and relabel a rule that already
+ * works.
+ *
+ * ⚠️ `status` is OPTIONAL and absence means OPEN. A blocker written without a
+ * status is not a cleared one, and defaulting the other way would let the
+ * commonest hand-written shape silently stop gating.
+ */
+export const readyHumanBlockersQuery = () =>
+  `SELECT ?id ?person ?anyHuman ?status WHERE { ` +
+  `?card a schema:CreativeWork ; schema:identifier ?id . ` +
+  `?b a scrum:Blocker ; scrum:blocks ?card . ` +
+  `OPTIONAL { ?b scrum:blockedByPerson ?person } ` +
+  `OPTIONAL { ?b scrum:blockedByAnyHuman ?anyHuman } ` +
+  `OPTIONAL { ?b scrum:status ?status } ` +
+  `FILTER(BOUND(?person) || BOUND(?anyHuman)) }`;
+
+/**
  * #817 — supersession edges, target resolved via OPTIONAL so a dangling
  * superseder still excludes rather than vanishing.
  *
@@ -194,7 +219,24 @@ function foldContext(contextRows) {
 const emptyContext = () =>
   Object.fromEntries(CONTEXT_TYPES.map((t) => [t, { members: [], total: 0, truncated: false }]));
 
-export function computeReady(factRows, blockerRows, supersededRows, contextRows) {
+export function computeReady(factRows, blockerRows, supersededRows, contextRows, humanBlockerRows) {
+  // #965 — card shortId → sorted keys of its OPEN human blockers.
+  // `cleared` is the only status that does not gate: #881 built the field so
+  // the queue CONVERGES, and a rule ignoring it would hide a card forever once
+  // anyone had ever blocked it.
+  const humanBlockersByCard = new Map();
+  for (const r of humanBlockerRows || []) {
+    if (tail(r.status) === 'cleared') continue;
+    const id = Number(r.id);
+    if (!Number.isFinite(id)) continue;
+    // The any-human case gets a readable key rather than a fabricated person
+    // name — "who" is genuinely nobody, and inventing one would recreate the
+    // misattribution #966 exists to remove.
+    const key = r.person ? tail(r.person) : 'any-human';
+    const list = humanBlockersByCard.get(id) || [];
+    list.push(key);
+    humanBlockersByCard.set(id, list);
+  }
   const blockersByCard = new Map();
   for (const r of blockerRows || []) {
     const id = Number(r.id);
@@ -250,6 +292,22 @@ export function computeReady(factRows, blockerRows, supersededRows, contextRows)
     const dangling = edges.filter((e) => e.tid == null).map((e) => tail(e.target)).sort();
     if (dangling.length) { verdicts.push({ ...base, ready: false, reason: `dangling-blocker:${dangling[0]}` }); continue; }
 
+    // #965 — an open HUMAN blocker removes the card. PO decision 2026-08-20,
+    // GATING rather than advisory, after the owner declined to rule on queue
+    // semantics that were never his.
+    //
+    // ⛔ FLAT RULE, inherited from #817 and binding: present and open ⇒
+    // exclude, and do NOT look at WHO is named. "Unless the named person is
+    // the seat asking" is inference no edge asserts.
+    //
+    // ⭐ Covers `blockedByPerson` AND `blockedByAnyHuman` (#966) deliberately.
+    // Adding a blocker predicate without extending this is a regression: a
+    // card waiting on any human would become ready again, which is this rule's
+    // own defect arriving through its sibling, with a `reasons` array that
+    // reads correct.
+    const human = (humanBlockersByCard.get(shortId) || []).sort();
+    if (human.length) { verdicts.push({ ...base, ready: false, reason: `person-blocker:${human[0]}` }); continue; }
+
     verdicts.push({ ...base, ready: true, reasons: [`column:${column}`, 'unclaimed', 'no-open-blockers'] });
   }
 
@@ -293,6 +351,10 @@ export function readyFromStore(store) {
   const facts = queryGraph(store, readyFactsQuery(), { limit: 1000 });
   const blockers = queryGraph(store, readyBlockersQuery(), { limit: 1000 });
   const superseded = queryGraph(store, readySupersededQuery(), { limit: 1000 });
+  // #965 — one row per human blocker. Bounded and refused on truncation for
+  // the same reason as the others: a queue computed from part of the blocker
+  // set would silently offer gated work.
+  const humanBlockers = queryGraph(store, readyHumanBlockersQuery(), { limit: 1000 });
   // ⚠️ #816 — this query returns ONE ROW PER EDGE, not per card. The board
   // carries ~1,545 relationship members against graph-replica's LIMIT_CEILING
   // of 1,000, so a single call truncates and the refusal below would take the
@@ -310,12 +372,13 @@ export function readyFromStore(store) {
     // refusing beats looping forever on a query that never shrinks.
     if (offset > 200_000) { context.truncated = true; break; }
   }
-  if (facts.truncated || blockers.truncated || superseded.truncated || context.truncated) {
+  if (facts.truncated || blockers.truncated || superseded.truncated
+      || humanBlockers.truncated || context.truncated) {
     const err = new Error('board exceeds the ready computation bound; refusing a partial queue');
     err.code = 'READY_TRUNCATED';
     throw err;
   }
-  return computeReady(facts.rows, blockers.rows, superseded.rows, context.rows);
+  return computeReady(facts.rows, blockers.rows, superseded.rows, context.rows, humanBlockers.rows);
 }
 
 /**
