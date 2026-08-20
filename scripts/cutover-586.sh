@@ -50,7 +50,11 @@
 #   scripts/cutover-586.sh selftest              exercise rollback in a sandbox
 #   scripts/cutover-586.sh baseline   [--live]   snapshot the 4 plists
 #   scripts/cutover-586.sh verify clone|export [--live]
-#   scripts/cutover-586.sh forward    --live     repoint (needs a backup first)
+#   scripts/cutover-586.sh forward --live \
+#        --from-baseline <dir> --authorization-attested-by "<who, for WHAT plan>"
+#     ⚠️ that flag records an ATTESTATION, not proof. This tool authenticates
+#        nobody. It is named for what it does so the shell history and the run
+#        output cannot be quoted as evidence that anyone granted a window.
 #   scripts/cutover-586.sh rollback <dir> --live restore from a snapshot
 #   scripts/cutover-586.sh posttest              the two positive tests
 #
@@ -165,7 +169,8 @@ do_apply() {  # $1 = dir, $2 = clone|export
 # supplies itself — a flag that defaults to "authorized" is a rail that
 # authorizes itself, which is the failure it was written to prevent.
 forward_preconditions() {
-  # ⛔⛔ READ THIS BEFORE TRUSTING THE FLAG NAME. `--authorized-by` is an OPERATOR
+  # ⛔⛔ THE FLAG IS NAMED FOR WHAT IT ACTUALLY IS. `--authorization-attested-by`
+  # is an OPERATOR
   # ATTESTATION, not authenticated authorization. Any caller can type any name.
   # It does two real things — it prevents accidental invocation, and it records
   # the claim beside the change — and it CANNOT prove the window was granted.
@@ -175,7 +180,7 @@ forward_preconditions() {
   # ⚠️ Named here because the flag reads like proof, and this file already
   # documents one flag whose helpful name concealed what it did (NO_CLONE).
   # A gate that is trusted for more than it delivers is worse than no gate.
-  [ -n "${AUTH:-}" ] || die "forward requires --authorized-by \"<who authorized this, and for WHAT PLAN>\".
+  [ -n "${AUTH:-}" ] || die "forward requires --authorization-attested-by \"<who you ATTEST authorized this, and for WHAT PLAN>\".
 
 ⛔ This is not a formality. On 2026-08-20 a cutover was authorized, announced,
 and stopped inside its own window because measurement falsified the plan the
@@ -265,10 +270,10 @@ do_selftest() {
   : > "$fake/server.js"; : > "$fake/scripts/suite-watch.mjs"; : > "$fake/scripts/fanout-watch.mjs"
   EXPORT_DIR="$fake"
 
-  say "8. forward WITHOUT --authorized-by must REFUSE  ← control"
+  say "8. forward WITHOUT --authorization-attested-by must REFUSE  ← control"
   set +e; ( AUTH=""; BASELINE="$bkp"; forward_preconditions ) >"$sbx/o1" 2>&1; rc=$?; set -e
   [ "$rc" -ne 0 ] || die "CONTROL FAILED — forward accepted an unauthorized run"
-  grep -q "authorized-by" "$sbx/o1" || die "CONTROL FAILED — refused, but not for the authorization reason"
+  grep -q "authorization-attested-by" "$sbx/o1" || die "CONTROL FAILED — refused, but not for the authorization reason"
   say "   ✓ refused, and named what is missing"
 
   say "9. forward WITHOUT a baseline must REFUSE  ← control"
@@ -335,7 +340,12 @@ POS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --live)           LIVE=1 ;;
-    --authorized-by)  AUTH="${2:-}"; shift ;;
+    --authorization-attested-by) AUTH="${2:-}"; shift ;;
+    --authorized-by)  die "there is no --authorized-by. Use --authorization-attested-by.
+
+The flag was renamed deliberately and NO ALIAS EXISTS: an alias would preserve
+the exact misleading string the rename removes. This tool cannot authenticate
+anyone; it records that YOU ATTEST an authorization was granted." ;;
     --from-baseline)  BASELINE="${2:-}"; shift ;;
     *)                POS+=("$1") ;;
   esac
@@ -364,7 +374,10 @@ case "$CMD" in
     # condition the rollback card existed to avoid.
     [ "$LIVE" = 1 ] || die "forward needs --live"
     forward_preconditions
-    say "⇢ cutover authorized by: $AUTH"
+    # ⛔ Never "authorized by" — this line gets pasted into incident notes and
+    # must not be quotable as proof that anyone authorized anything.
+    say "⇢ authorization ATTESTED BY OPERATOR as: $AUTH"
+    say "   (an attestation, not authentication — this tool cannot verify it)"
     say "   baseline: $BASELINE"
     do_apply "$LIVE_DIR" export
     reload_live
