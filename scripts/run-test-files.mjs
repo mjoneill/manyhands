@@ -19,6 +19,13 @@ const requested = Number(process.env.RUN_TESTS_CONCURRENCY);
 const workers = Number.isInteger(requested) && requested > 0
   ? requested
   : Math.max(2, Math.min(os.availableParallelism(), 8));
+// #730 item 3 — per-file wall bound. 300s is >6× the slowest file ever measured
+// here (48.2s, commons-entrance, under this runner's own 8 workers), so it
+// cannot fail honest work at today's distribution. Override per run.
+const requestedFileTimeout = Number(process.env.RUN_TESTS_FILE_TIMEOUT_MS);
+const FILE_TIMEOUT_MS = Number.isFinite(requestedFileTimeout) && requestedFileTimeout > 0
+  ? requestedFileTimeout
+  : 300_000;
 const totals = { tests: 0, pass: 0, fail: 0, suites: 0, cancelled: 0, skipped: 0, todo: 0 };
 let next = 0;
 let active = 0;
@@ -118,17 +125,55 @@ function launch() {
   while (active < workers && next < files.length) {
     const file = files[next++];
     active += 1;
+    // #730 item 3 — DETACHED so the file gets its OWN process group. A hung
+    // file is not alone: it holds spawned servers, and a bare pid kill leaves
+    // them bound to their ports (#736's lesson, and the shape of every orphan
+    // this repo has measured). `-pid` takes the whole subtree.
     const child = spawn(process.execPath, ['--test', '--test-reporter=tap', file], {
       stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true,
     });
     let stdout = '';
+    let hung = false;
+
+    // #730 item 3 — BOUND THE RUN, NOT THE TEST.
+    //
+    // `--test-timeout` bounds a single test's execution. It cannot reach the
+    // failure this repo actually suffers: a file whose tests have FINISHED and
+    // whose process is pinned open by the live stdio handles of a server child
+    // it never stopped. There is no running test left to time out. Measured on
+    // a 31-hour specimen — see #730's forensic block.
+    //
+    // ⚠️ The default is deliberately far above the observed distribution
+    // (2026-08-20, 195 files, 8 workers: p50 1.4s · p90 8.6s · p99 38.6s ·
+    // max 48.2s), so it cannot fail honest work. A bound that fires on real
+    // work is an outage, not a guard.
+    const timer = setTimeout(() => {
+      hung = true;
+      try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
+    }, FILE_TIMEOUT_MS);
+
     child.stdout.on('data', (chunk) => { stdout += chunk; });
     // Node's test reporter writes TAP to stdout. Keep other diagnostics visible
     // without allowing them to become another TAP summary.
     child.stderr.on('data', (chunk) => { process.stderr.write(chunk); });
     child.on('error', () => { failed = true; failedFiles.push(file); });
     child.on('close', (code) => {
-      if (code !== 0) { failed = true; failedFiles.push(file); }
+      clearTimeout(timer);
+      if (hung) {
+        // Named as HUNG, not merely failed. A hang and a failing assertion need
+        // different responses from a reader, and the old behaviour offered
+        // neither — the run simply never returned.
+        failed = true;
+        failedFiles.push(file);
+        process.stdout.write(
+          `# ⛔ HUNG: ${file} exceeded ${FILE_TIMEOUT_MS}ms and was killed with its process group.\n`
+          + '#    This is NOT a failing test — the file never exited. The usual cause is a spawned\n'
+          + '#    child (a test server) that was never stopped: its stdio handles keep the file\n'
+          + `#    process alive after its tests finish. Raise RUN_TESTS_FILE_TIMEOUT_MS if ${FILE_TIMEOUT_MS}ms\n`
+          + '#    is genuinely too short for this file.\n',
+        );
+      } else if (code !== 0) { failed = true; failedFiles.push(file); }
       emitCompletedFile(file, stdout);
       active -= 1;
       if (next === files.length && active === 0) finish();
