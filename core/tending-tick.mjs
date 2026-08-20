@@ -53,7 +53,48 @@
  * }} deps
  * @returns {Promise<{minted: boolean, delivered: boolean, key?: string, reason?: string}>}
  */
-export async function tendingTick({ now, mint, post, reachedSeats = () => [], log = () => {}, onError = () => {} }) {
+export async function tendingTick({
+  now, mint, post, reachedSeats = () => [], log = () => {}, onError = () => {},
+  quietAfterMinutes = null, lastActivityAt = null,
+}) {
+  // #953 — THE SILENCE GATE. Before #953 this function took NO room-state
+  // input at all, so there was no parameter a policy could change: the whisper
+  // fired when the WINDOW opened, which is #802's clock design. The owner
+  // reported it as "it just emits regardless" and he was right — there was no
+  // gate to be broken.
+  //
+  // ⭐ ACTIVITY POLICY, decided by @michael 2026-08-20 ("agree. proceed") and
+  // NOT chosen here: human and agent/seat comments COUNT; tending posts and
+  // board/system notices DO NOT. That second half is load-bearing — the
+  // whisper's own post is a message, and if it counted the timer would re-arm
+  // forever and silence-reset would collapse back into the hourly clock while
+  // still passing a casual demo. This function does not classify: it asks its
+  // caller for the last QUALIFYING activity and trusts that contract.
+  //
+  // ⚠️ FAILS OPEN, deliberately. An un-wired caller passes neither argument and
+  // keeps its old behaviour. A gate that read "I was told nothing" as "the room
+  // is busy" would silence tending everywhere it had not yet been wired — the
+  // emitter-breaking failure the control test exists to catch, arriving through
+  // a default instead of through a bug.
+  if (quietAfterMinutes != null && typeof lastActivityAt === 'function') {
+    const last = lastActivityAt();
+    if (last) {
+      const quietMs = Date.parse(now) - Date.parse(last);
+      const thresholdMs = Number(quietAfterMinutes) * 60_000;
+      if (Number.isFinite(quietMs) && Number.isFinite(thresholdMs) && quietMs < thresholdMs) {
+        // ⛔ Return BEFORE mint. Minting is window-idempotent, so minting and
+        // then discarding would burn the offer for the whole window and the
+        // room would go untended once it fell quiet — suppressing exactly the
+        // whisper this gate exists to time correctly.
+        return {
+          minted: false,
+          delivered: false,
+          reason: `room-active:${Math.round(quietMs / 1000)}s-quiet-of-${quietAfterMinutes}m`,
+        };
+      }
+    }
+  }
+
   let prompt;
   try {
     prompt = mint({ now });
