@@ -124,6 +124,47 @@ test('#730 a HANGING second acquisition must be bounded, and must not strand the
 });
 
 /**
+ * ⛔⛔ ACCEPTANCE 2b — THE HOLE IN THE FIRST VERSION OF THIS FIX, found by the
+ * Value Steward within minutes of it landing:
+ *
+ *   "Promise.race does not cancel its losing acquisition. If _startMcp resolves
+ *    AFTER the deadline, that late-created server must be stopped rather than
+ *    orphaned after the test already failed."
+ *
+ * ⇒ She is right, and it is this card's own defect one level down: the remedy
+ * for an orphaned server, orphaning a server. A race abandons the loser, and an
+ * abandoned loser that later succeeds has spawned a real child nobody holds.
+ *
+ * ⭐ So the deadline path must ADOPT the late arrival rather than discard it.
+ */
+test('#730 a LATE-RESOLVING acquisition is adopted and stopped, not orphaned by the race', async () => {
+  let stopped = false;
+  let resolveLate;
+  const late = new Promise((res) => { resolveLate = res; });
+
+  await assert.rejects(
+    () => startPair({
+      board: makeBoardFixture(),
+      acquireTimeoutMs: 200,
+      _startMcp: () => late,
+    }),
+    /timed out|exceeded|deadline/i,
+    'the deadline must still fire',
+  );
+
+  // The acquisition succeeds AFTER the caller has already given up — a real
+  // spawn that won the race against nothing.
+  resolveLate({ mcpUrl: 'http://127.0.0.1:1/', stop: async () => { stopped = true; } });
+
+  // Give the adoption handler a turn.
+  await new Promise((r) => setTimeout(r, 200));
+
+  assert.equal(stopped, true,
+    'the late-resolving MCP server was never stopped — Promise.race discarded it, so its child process '
+    + 'is orphaned exactly like the one this card exists to remove');
+});
+
+/**
  * ⭐ ACCEPTANCE 4 — the happy path is unchanged. A fix that breaks normal
  * startup trades one outage for another; every pair test depends on this.
  */

@@ -362,8 +362,29 @@ export async function startPair({
   const mcpPort = await freePort();
   const mcpNotifyUrl = `http://127.0.0.1:${mcpPort}/internal/notify`;
 
+  /**
+   * ⛔⛔ A RACE DOES NOT CANCEL ITS LOSER, AND THE LOSER HERE SPAWNS PROCESSES.
+   *
+   * The first version of this fix used a bare `Promise.race`. A Value Steward
+   * review caught the hole within minutes: if the acquisition resolves AFTER
+   * the deadline, it has started a real server that nobody is holding — the
+   * remedy for an orphaned server, orphaning a server.
+   *
+   * ⇒ So the timeout path ADOPTS the late arrival instead of discarding it: if
+   * the promise eventually yields something with `stop()`, stop it. A rejection
+   * after the deadline is swallowed deliberately — the caller already has the
+   * timeout error, and an unhandled rejection here would crash a test process
+   * over a failure it has already been told about.
+   */
   const withDeadline = async (p, ms, label) => {
     let timer;
+    let timedOut = false;
+    // Attached BEFORE the race so a promise that settles between the deadline
+    // and this line cannot slip through unadopted.
+    p.then(
+      (value) => { if (timedOut) Promise.resolve(value?.stop?.()).catch(() => {}); },
+      () => { /* already reported via the deadline */ },
+    );
     try {
       return await Promise.race([
         p,
@@ -371,7 +392,10 @@ export async function startPair({
         // when the awaited operation is the only thing running the process can
         // settle before the timer fires and the bound silently does not apply.
         new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new Error(`${label} exceeded ${ms}ms`)), ms);
+          timer = setTimeout(() => {
+            timedOut = true;
+            reject(new Error(`${label} exceeded ${ms}ms`));
+          }, ms);
         }),
       ]);
     } finally {
