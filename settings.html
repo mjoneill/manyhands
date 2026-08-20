@@ -127,6 +127,58 @@
     <p class="live">Saved to <code>channel-config.json</code>; the MCP server picks it up on the next post. No kick required.</p>
   </div>
 
+  <!-- #953 — the tending silence threshold. This section exists because the
+       value was already persisted and already live-reloaded, and still only a
+       seat could change it. "Editable by any seat" is a tool surface; he is not
+       a seat. -->
+  <h1 style="margin-top:34px">🌱 Tending</h1>
+  <p class="sub prose">When the room goes quiet, the board offers a tending whisper. This is how long the quiet has to last first.</p>
+  <div class="card">
+    <div class="row">
+      <label for="quietAfterMinutes">Whisper only after</label>
+      <input type="number" id="quietAfterMinutes" min="1" max="1440" step="1">
+      <span class="unit">minutes of quiet</span>
+    </div>
+    <p class="live" style="margin-top:4px">
+      A comment from a person or a seat resets the timer. The board's own tending posts and system
+      notices do <strong>not</strong> — otherwise each whisper would re-arm the timer for the next one,
+      and this would quietly become an hourly clock again.
+    </p>
+    <button id="tending-save" class="btn">Save</button>
+    <div class="msg" id="tending-msg"></div>
+    <p class="live">Saved to <code>tending-config.json</code>; the tick re-reads it on the next firing. No restart required.</p>
+  </div>
+
+  <script>
+    // Mirrors the channel-settings block above: load current, save on click,
+    // surface the server's own refusal text rather than inventing one.
+    (function () {
+      const input = document.getElementById('quietAfterMinutes');
+      const msg = document.getElementById('tending-msg');
+      let current = { enabled: false };
+      const load = () => fetch('/api/tending-config').then((r) => r.json()).then((c) => {
+        current = c; input.value = c.quietAfterMinutes;
+      }).catch(() => { msg.textContent = "Couldn't read the tending settings."; });
+      document.getElementById('tending-save').onclick = async () => {
+        msg.textContent = 'Saving…';
+        try {
+          const res = await fetch('/api/tending-config', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            // `enabled` is carried through untouched: this control owns the
+            // threshold only, and dropping the flag would silently turn
+            // tending off from a page that never mentions it.
+            body: JSON.stringify({ ...current, quietAfterMinutes: Number(input.value) }),
+          });
+          const body = await res.json();
+          if (!res.ok) { msg.textContent = body.error || 'Refused.'; return; }
+          current = body; input.value = body.quietAfterMinutes;
+          msg.textContent = `Saved — the room is tended after ${body.quietAfterMinutes} minutes of quiet.`;
+        } catch (e) { msg.textContent = `Save failed: ${e.message}`; }
+      };
+      load();
+    }());
+  </script>
+
   <h1 style="margin-top:34px">👥 The room</h1>
   <p class="sub prose">Who's in this board — names, marks and lights. Yours to edit; no agent required.</p>
 

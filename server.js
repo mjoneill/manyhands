@@ -37,7 +37,7 @@ import { loadDomain, saveDomain } from './core/store.mjs';
 import { appendEvent } from './core/event-log.mjs';
 // #805 — the boot migration's inputs (the live flat sources) and its builder.
 import { readPool, recentWhispers, DEFAULT_POOL, poolFilePath } from './whisper-store.mjs';
-import { readTendingConfig } from './tending-config.mjs';
+import { readTendingConfig, writeTendingConfig } from './tending-config.mjs';
 import { buildTendingEntities } from './core/tending-bootstrap.mjs';
 import { resolveProvenance } from './core/tending-provenance.mjs';
 import { boardToDomain, domainToBoard, cardToNode } from './core/mapping.mjs';
@@ -2736,6 +2736,49 @@ async function handleSetConfig(req, res) {
   }
 }
 
+// ── /api/tending-config (#953) — the tending silence threshold, editable from
+// the Settings page. ──
+//
+// ⛔ WHY THIS EXISTS AT ALL, and it is the card's whole point. The value was
+// already persisted and already live-reloaded by the MCP tick — but only a seat
+// could change it. The Value Steward's disqualifier is explicit:
+//
+//   "A control @michael cannot reach. 'Editable by any seat' is a TOOL surface.
+//    He is not a seat."
+//
+// And his own words: "there was no way for me to set the time intervals… part of
+// the work was building administration so I could do that very thing."
+//
+// Deliberately mirrors /api/config (#263) rather than inventing a shape: same
+// loopback trust model, same validate-then-persist, same 400-with-the-
+// validator's-own-message. One pattern on one page beats two.
+function handleGetTendingConfig(req, res) {
+  try {
+    sendJSON(res, 200, readTendingConfig());
+  } catch (e) {
+    console.error('GET /api/tending-config:', e.message);
+    sendJSON(res, 500, { error: 'Failed to read tending config' });
+  }
+}
+
+async function handleSetTendingConfig(req, res) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    let clean;
+    try {
+      // Validates and refuses; a rejected write leaves the previous file
+      // untouched, so a typo cannot silently become the room's threshold.
+      clean = writeTendingConfig(body);
+    } catch (ve) {
+      return sendJSON(res, 400, { error: ve.message });
+    }
+    sendJSON(res, 200, clean);
+  } catch (e) {
+    console.error('POST /api/tending-config:', e.message);
+    sendJSON(res, 500, { error: 'Failed to save tending config' });
+  }
+}
+
 // ── /api/channel-status (#303-7) — proxy the MCP scheduler's delivery status
 // so the browser (same-origin on :3141) can show "N deliveries pending" without
 // a cross-origin fetch to :3001. Best-effort: if the MCP server is down, report
@@ -4175,6 +4218,9 @@ const API_ROUTES = [
   { method: 'GET',    re: /^\/api\/config$/,               fn: (req, res) => handleGetConfig(req, res) },
   { method: 'GET',    re: /^\/api\/channel-status$/,       fn: (req, res) => handleChannelStatus(req, res) },
   { method: 'POST',   re: /^\/api\/config$/,               fn: (req, res) => handleSetConfig(req, res) },
+  // #953 — the tending silence threshold, same trust model as /api/config.
+  { method: 'GET',    re: /^\/api\/tending-config$/,       fn: (req, res) => handleGetTendingConfig(req, res) },
+  { method: 'POST',   re: /^\/api\/tending-config$/,       fn: (req, res) => handleSetTendingConfig(req, res) },
   { method: 'POST',   re: /^\/api\/roster$/,               fn: (req, res) => handleSetRoster(req, res) },   // #506
   { method: 'GET',    re: /^\/api\/people$/,               fn: (req, res) => handleListPeople(req, res) },       // #619
   { method: 'GET',    re: /^\/api\/people\/([^\/]+)$/,     fn: (req, res, m) => handleGetPerson(req, res, m[1]) }, // #619
