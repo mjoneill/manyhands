@@ -42,8 +42,19 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+/**
+ * #953 — how many minutes of QUALIFYING silence must pass before the room is
+ * tended. @michael's stated default ("default was 20"), kept as a DEFAULT and
+ * not recorded as his choice: the card is explicit that the live cadence has
+ * uncertain provenance and we must not rewrite history around who picked it.
+ */
+export const DEFAULT_QUIET_AFTER_MINUTES = 20;
+
 /** Fail CLOSED. An unreadable, missing or malformed config leaves tending off. */
-export const DEFAULT_TENDING_CONFIG = Object.freeze({ enabled: false });
+export const DEFAULT_TENDING_CONFIG = Object.freeze({
+  enabled: false,
+  quietAfterMinutes: DEFAULT_QUIET_AFTER_MINUTES,
+});
 
 export function tendingConfigFilePath() {
   return process.env.SCRUM_TENDING_CONFIG_FILE || path.join(__dirname, 'tending-config.json');
@@ -57,7 +68,26 @@ export function tendingConfigFilePath() {
 export function validateTendingConfig(input) {
   if (!input || typeof input !== 'object') throw new Error('tending config must be an object');
   if (typeof input.enabled !== 'boolean') throw new Error('tending config: `enabled` must be a boolean');
-  return { enabled: input.enabled };
+
+  // #953 — REFUSE, never coerce. "20" or 0 or null quietly becoming a number
+  // would mean "never quiet enough" or "always quiet", and both are silent
+  // behaviour changes in the one setting this card exists to hand to a human.
+  // Absent is the only permitted non-number: it means "use the default".
+  let quiet = DEFAULT_QUIET_AFTER_MINUTES;
+  if (input.quietAfterMinutes !== undefined) {
+    const q = input.quietAfterMinutes;
+    if (typeof q !== 'number' || !Number.isFinite(q) || q <= 0) {
+      throw new Error('tending config: `quietAfterMinutes` must be a positive finite number of minutes');
+    }
+    quiet = q;
+  }
+
+  // ⚠️ THIS RETURN IS A WHITELIST, and that is the hazard the tests guard.
+  // Every field added here must be listed, or it is accepted by the validator,
+  // dropped by the write, and lost with no error at any layer — #823's shape
+  // (a write accepted and silently discarded) arriving in the config surface.
+  // The owner would experience it as "I set it and it didn't stick".
+  return { enabled: input.enabled, quietAfterMinutes: quiet };
 }
 
 /** Read fresh. Missing/corrupt → disabled, never enabled by accident. */
@@ -81,4 +111,14 @@ export function writeTendingConfig(input, file = tendingConfigFilePath()) {
 /** The single question the server asks. Re-reads every call, on purpose. */
 export function tendingEnabled(file = tendingConfigFilePath()) {
   return readTendingConfig(file).enabled === true;
+}
+
+/**
+ * #953 — the silence threshold, re-read every call like `tendingEnabled`, so a
+ * change @michael makes applies WITHOUT a restart. That live-reload property is
+ * this module's whole reason for existing (see the header), and it is what
+ * makes the setting reachable by a human rather than by a deploy.
+ */
+export function quietAfterMinutes(file = tendingConfigFilePath()) {
+  return readTendingConfig(file).quietAfterMinutes ?? DEFAULT_QUIET_AFTER_MINUTES;
 }
