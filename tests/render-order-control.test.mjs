@@ -17,8 +17,24 @@
  *
  * ⭐ THIS SUITE PASSES TODAY AND MUST FAIL ONCE SLICE 0 LANDS. A builder who
  * implements ordering and sees these tests still green has NOT implemented it
- * — the red is the deliverable. Delete this file in the same commit that makes
- * it fail, and say so in the message.
+ * — the red is the deliverable.
+ *
+ * ⛔⛔ BUT DO NOT DELETE THIS FILE WHEN IT GOES RED. INVERT IT.
+ * (@minimo's correction to my handoff, 2026-08-20T21:15Z — I had written
+ * "delete it in the commit that turns it red", and that is wrong: deleting it
+ * removes the ONLY regression test that ever proved array-order and
+ * order-order are distinguishable. The feature would ship having destroyed
+ * its own evidence.)
+ *
+ *   KEEP    test 1 exactly as it is — the fixture guard is orientation-free.
+ *           It must keep proving `order` disagrees with array position, or
+ *           the inverted assertions become as vacuous as the originals.
+ *   INVERT  tests 2 and 3 — flip them to assert rendering BY `order`
+ *           permanently, rather than removing them.
+ *   KEEP    whatever render paths these exercise. Today that is initial
+ *           render; if Slice 0 adds a rerender path, the inverted suite
+ *           covers both, because a sort applied on load and not on rerender
+ *           passes an initial-render-only test.
  *
  * ── WHY THE FIXTURE LOOKS PERVERSE ──────────────────────────────────────────
  * Three cards whose `order` values are the exact REVERSE of their array
