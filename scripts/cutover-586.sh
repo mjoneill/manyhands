@@ -209,13 +209,45 @@ do_restore() {  # $1 = backup dir, $2 = target dir
   for j in "${JOBS[@]}"; do cp "$from/$j.plist" "$to/$j.plist"; done
 }
 
-reload_live() {  # bootout → bootstrap, per the note above. Never kickstart.
+# ⛔ #978 — `bootout` IS ASYNCHRONOUS. It returns before launchd has finished
+# tearing the job down, and `bootstrap` against a service that still exists
+# fails with `Bootstrap failed: 5: Input/output error`. Reproduced on demand
+# 2026-08-21: bootstrapping an ALREADY-LOADED job gives exactly that error.
+#
+# On the first live run this aborted the loop under `set -e` at JOBS[0] —
+# com.scrumboard.rest — leaving production booted out and never re-bootstrapped.
+# Config applied, service stopped, script exited: a PARTIAL failure, which is
+# worse than a refusal in a tool built entirely around refusing.
+#
+# ⇒ assert the ABSENCE (never a fixed sleep — the defect IS assuming a
+#   duration), guard the bootstrap, and let the caller restore.
+wait_gone() {  # $1 = uid, $2 = label. Bounded poll until launchd no longer has it.
+  local uid="$1" j="$2" i=0
+  while launchctl print "gui/$uid/$j" >/dev/null 2>&1; do
+    i=$((i + 1))
+    [ "$i" -gt 150 ] && return 1   # ~15s, then give up rather than hang a window
+    sleep 0.1
+  done
+  return 0
+}
+
+RELOAD_FAILED=""
+reload_live() {  # bootout → WAIT → bootstrap. Never kickstart. Returns 1 on failure.
   local uid; uid="$(id -u)"
+  RELOAD_FAILED=""
   for j in "${JOBS[@]}"; do
     launchctl bootout "gui/$uid/$j" 2>/dev/null || true
-    launchctl bootstrap "gui/$uid" "$LIVE_DIR/$j.plist"
+    if ! wait_gone "$uid" "$j"; then
+      RELOAD_FAILED="$j — still present after bootout; teardown timed out"
+      return 1
+    fi
+    if ! launchctl bootstrap "gui/$uid" "$LIVE_DIR/$j.plist"; then
+      RELOAD_FAILED="$j — bootstrap failed"
+      return 1
+    fi
   done
   say "   reloaded ${#JOBS[@]} jobs; ${#UNTOUCHED[@]} untouched"
+  return 0
 }
 
 # ── SELFTEST — acceptance 4. A CONTROL THAT MUST FAIL BEFORE IT PASSES. ─────
@@ -380,7 +412,15 @@ case "$CMD" in
     say "   (an attestation, not authentication — this tool cannot verify it)"
     say "   baseline: $BASELINE"
     do_apply "$LIVE_DIR" export
-    reload_live
+    # ⛔ #978 — NO EXIT PATH MAY LEAVE A SERVICE DOWN.
+    reload_live || {
+      say "⛔ RELOAD FAILED: $RELOAD_FAILED"
+      say "   restoring the baseline and re-bootstrapping — the machine does not stay partial"
+      do_restore "$BASELINE" "$LIVE_DIR"
+      reload_live || say "⛔⛔ THE RESTORE RELOAD ALSO FAILED: $RELOAD_FAILED
+    CHECK NOW: launchctl list | grep scrumboard"
+      die "cutover ABORTED and rolled back. Nothing is cut over."
+    }
     do_verify "$LIVE_DIR" export || die "the fields did not land — ROLL BACK NOW:
     scripts/cutover-586.sh rollback $BASELINE --live"
     say "✅ cut over, and verified."
@@ -394,7 +434,8 @@ case "$CMD" in
     [ -n "$from" ] || die "rollback needs the snapshot dir printed by \`baseline\`"
     [ "$LIVE" = 1 ] || die "rollback needs --live"
     do_restore "$from" "$LIVE_DIR"
-    reload_live
+    reload_live || die "the baseline was restored on disk but reload FAILED: $RELOAD_FAILED
+    CHECK NOW: launchctl list | grep scrumboard"
     do_verify "$LIVE_DIR" clone && say "✅ rolled back to the clone, and verified" ;;
   *) die "unknown: $CMD — try selftest" ;;
 esac
