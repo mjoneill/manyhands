@@ -137,3 +137,79 @@ test('#237 a 2xx from /api/save means the write actually landed', async () => {
     await server.stop();
   }
 });
+
+/**
+ * #237 slice 3 — /api/conversations, the board's most-consumed endpoint.
+ *
+ * Five call sites, four distinct shapes: initial page (`?limit=`), the
+ * older-messages pager (`?before=&limit=`), the since-poll (`?since=`), and a
+ * bare call with no params. Prioritised by reference count and
+ * recency of contract change: most-referenced of the four, and #1010 changed
+ * its contract on 2026-08-23 by adding `?q=`.
+ *
+ * ⭐ WHY THE ARRAY SHAPE IS THE LOAD-BEARING ASSERTION. The consumer, verbatim:
+ *
+ *     .then(r => r.ok ? r.json() : [])
+ *     .then(convs => {
+ *       conversations.length = 0;                    // ← CLEARS FIRST
+ *       if (Array.isArray(convs)) convs.forEach(...) // ← then guards
+ *
+ * The feed is emptied BEFORE the shape is checked. So if this endpoint ever
+ * returns `{conversations: [...]}` instead of a bare array — the exact change
+ * #235 made to /api/load — the guard skips, the feed renders empty, and NOTHING
+ * throws. A silent blank commons with a 200 behind it.
+ */
+test('#237 /api/conversations returns a bare ARRAY for every shape the board requests', async () => {
+  const server = await startRestServer({
+    board: makeBoardFixture({
+      conversations: [
+        { id: 'm1', body: 'older', author: 'ada', attachedTo: null, attachments: [],
+          mentions: [], createdAt: '2026-05-01T00:00:00.000Z' },
+        { id: 'm2', body: 'newer', author: 'bex', attachedTo: null, attachments: [],
+          mentions: [], createdAt: '2026-05-02T00:00:00.000Z' },
+      ],
+    }),
+  });
+
+  try {
+    // The four call shapes, taken from index.html's five call sites.
+    const calls = {
+      'initial page': '?limit=10',
+      'no params (the poll before _lastConvTs is set)': '',
+      'since-poll': '?since=2026-05-01T12:00:00.000Z',
+      'older-pager': '?before=2026-05-02T00:00:00.000Z&limit=10',
+    };
+
+    for (const [label, qs] of Object.entries(calls)) {
+      const res = await fetch(`${server.baseUrl}/api/conversations${qs}`);
+      assert.ok(res.ok, `${label}: must answer 2xx, got ${res.status}`);
+      const body = await res.json();
+      assert.ok(Array.isArray(body),
+        `${label}: /api/conversations must return a BARE ARRAY. The board runs `
+        + '`conversations.length = 0` BEFORE `Array.isArray(convs)`, so any other shape '
+        + `empties the feed silently with no error. Got ${
+          Array.isArray(body) ? 'array' : typeof body} `
+        + `${body && !Array.isArray(body) ? `with keys: ${Object.keys(body).join(', ')}` : ''}`);
+    }
+
+    // The params must actually CONSTRAIN — a server that ignores them returns the
+    // full corpus and still satisfies every assertion above (#777's class).
+    const since = await (await fetch(
+      `${server.baseUrl}/api/conversations?since=2026-05-01T12:00:00.000Z`)).json();
+    assert.equal(since.length, 1, '`?since=` must filter, not be ignored (#777)');
+    assert.equal(since[0].id, 'm2', '`?since=` must return messages AFTER the timestamp');
+
+    const limited = await (await fetch(`${server.baseUrl}/api/conversations?limit=1`)).json();
+    assert.equal(limited.length, 1, '`?limit=` must cap the page, not be ignored');
+
+    // The fields the feed renders. A projection change that drops these produces
+    // blank rows rather than an error.
+    const all = await (await fetch(`${server.baseUrl}/api/conversations?limit=10`)).json();
+    for (const field of ['id', 'body', 'author', 'createdAt']) {
+      assert.ok(field in all[0],
+        `each message must carry \`${field}\` — the feed renders it. Got: ${Object.keys(all[0]).join(', ')}`);
+    }
+  } finally {
+    await server.stop();
+  }
+});
