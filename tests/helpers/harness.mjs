@@ -83,10 +83,17 @@ export function makeBoardFixture(overrides = {}) {
  */
 export async function startRestServer({ board, staticDir, port, mcpNotifyUrl = '', env: extraEnv } = {}) {
   port = port ?? (await freePort());
-  const boardFile = path.join(
-    os.tmpdir(),
-    `scrum-test-board-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
-  );
+  // #988 — the board file gets its OWN directory, not a bare file in the shared
+  // tmpdir. server.js derives sibling paths from `dirname(SCRUM_BOARD_FILE)`
+  // (`graph-query-log.jsonl` today), so a board file sitting directly in
+  // os.tmpdir() makes those siblings GLOBAL: one append-only log shared by every
+  // test, every worker, and every run this machine has ever done. Measured
+  // 2026-08-23: 400 entries, 318 of them from queries that declared no seat, and
+  // the oldest one is what `entries[0]` resolves to — so a per-test assertion
+  // about "the first query I made" silently read a stranger's query from an
+  // earlier run. Isolating the DIRECTORY fixes the whole class, not just the log.
+  const boardDir = fs.mkdtempSync(path.join(os.tmpdir(), 'scrum-test-board-'));
+  const boardFile = path.join(boardDir, 'board.json');
   fs.writeFileSync(boardFile, JSON.stringify(board ?? makeBoardFixture(), null, 2));
 
   // Isolated attachments dir so #113 uploads in tests never touch the real attachments/.
@@ -152,6 +159,14 @@ export async function startRestServer({ board, staticDir, port, mcpNotifyUrl = '
     async stop() {
       proc.kill('SIGKILL');
       try {
+        // ⛔ DO NOT rm the board DIRECTORY here. Tests legitimately read
+        // server-derived artifacts AFTER stop() — retrieval-miss-log's #801
+        // case kills the process and then asserts the miss log is still on
+        // disk, which is the whole point of that test. Removing the directory
+        // deletes the evidence before it is read, turning a real pass into a
+        // false failure. (Tried 2026-08-23 as part of #988; it broke exactly
+        // that test.) Reaping the directory needs stop() to separate KILL from
+        // CLEANUP first, which is #612/#998's ground, not this fix's.
         fs.unlinkSync(boardFile);
       } catch {
         /* already gone */
