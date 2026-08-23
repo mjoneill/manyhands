@@ -285,6 +285,36 @@ export function computeReady(factRows, blockerRows, supersededRows, contextRows,
     const sup = supersededBy.get(shortId);
     if (sup != null) { verdicts.push({ ...base, ready: false, reason: `superseded-by:${sup}` }); continue; }
 
+    // #910 — A DOCUMENT IS NOT WORK. A `reference` card is an artifact that
+    // already exists: an ADR, a plan, a runbook, a retro observation, a
+    // research read. There is no unit of work in it, so it can never be the
+    // answer to "what do I pull next" — and this queue exists to answer
+    // exactly that question.
+    //
+    // Measured 2026-08-23: 48 `reference` cards sat in the ready pool, ~9% of
+    // it. The seat actually pulling scanned 530 ready cards and could not
+    // identify one worth taking. "Nothing clearly pullable" is what a queue
+    // full of documents feels like from the pulling seat.
+    //
+    // ⚠️ EXCLUDED, NOT HIDDEN. The card appears in `excluded` with this reason,
+    // so a reader can see WHY it is absent. A silent filter would trade one
+    // unanswerable question ("why is there nothing to pull?") for another
+    // ("where did my card go?").
+    //
+    // ⛔ `goal` is DELIBERATELY NOT HERE. An epic is a legitimate queue member —
+    // someone can pull an epic and decompose it. Excluding goals was proposed
+    // and refused: it would drop #857 and #495 out of the queue, and demoting
+    // an apex is the room's call, not a filter's.
+    //
+    // ⭐ Placed AFTER the state guards (done/claimed/parked/superseded) so a
+    // finished reference card still reports `column:done` — the more specific
+    // and more actionable fact. Placed BEFORE the blocker guards because a
+    // document's blockers are irrelevant to a queue that will never offer it.
+    if (base.type === 'reference') {
+      verdicts.push({ ...base, ready: false, reason: 'context:reference' });
+      continue;
+    }
+
     const edges = blockersByCard.get(shortId) || [];
     const open = edges.filter((e) => e.tid != null && tail(e.tcol) !== 'done')
       .map((e) => Number(e.tid)).sort((a, b) => a - b);
