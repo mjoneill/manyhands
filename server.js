@@ -1144,6 +1144,25 @@ async function handleUpdateMemory(req, res, id) {
       const { identity, versions } = memoryParts(data, id);
       if (!identity) return null;
 
+      // #466 — OPTIONAL compare-and-swap. A caller that read version N and means
+      // to write on top of THAT text can say so; if the memory has moved on, the
+      // write is refused with the current version so it can re-read and retry.
+      //
+      // ⛔ OPT-IN BY CONSTRUCTION. A caller that sends no `ifVersion` is
+      // unaffected — that is every existing writer, and a precondition applied
+      // to callers who never asked for one is a worse defect than the one this
+      // fixes. Pinned by test 1 in memory-ifversion-cas.test.mjs.
+      //
+      // Inside withWriteLock and BEFORE the append, so the version it compares
+      // is the one the append is about to succeed. Outside the lock this is a
+      // check-then-act race and would read as CAS while providing none.
+      if (body.ifVersion !== undefined) {
+        const current = versions[versions.length - 1]?.['scrum:version'] || 0;
+        if (body.ifVersion !== current) {
+          return { conflict: true, currentVersion: current };
+        }
+      }
+
       // ⛔ APPEND-ONLY. A caller naming an older version does NOT get to rewrite
       // it: the new text always becomes the NEXT version. History that can be
       // edited answers "what did this say before?" with whatever someone most
@@ -1170,6 +1189,12 @@ async function handleUpdateMemory(req, res, id) {
       return memoryToWire(after.identity, after.versions);
     });
     if (!updated) return sendJSON(res, 404, { error: `no memory ${id}` });
+    if (updated.conflict) {
+      return sendJSON(res, 409, {
+        error: `memory ${id} has moved on: you declared ifVersion but the current version is ${updated.currentVersion}`,
+        currentVersion: updated.currentVersion,
+      });
+    }
     sendJSON(res, 200, updated);
   } catch (e) {
     console.error('PATCH /api/memories:', e.message);
