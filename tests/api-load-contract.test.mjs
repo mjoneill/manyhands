@@ -75,3 +75,65 @@ test('#237 /api/load returns the board-shaped payload the browser hydrates from'
     await server.stop();
   }
 });
+
+/**
+ * #237 slice 2 — the SAVE half of the same seam.
+ *
+ * The board's save contract is thinner than it looks and that is the hazard:
+ * `saveToJSONFile()` POSTs `{cards, columns, nextShortId, lastUpdated}` and then
+ * checks ONLY `response.ok`. It never reads the body. So the entire contract the
+ * browser relies on is:
+ *
+ *     a 2xx from /api/save MEANS THE WRITE LANDED.
+ *
+ * Nothing tests that. A handler that accepted the payload, returned 200, and
+ * dropped it would satisfy every existing test and every line of the browser —
+ * and the board would report a successful save while losing the card. That is
+ * the clobber/lost-card class #237 exists for, and it is why this test reads the
+ * data BACK rather than asserting on the status code.
+ *
+ * ⚠️ NOT tested here: concurrency, stale-client merge, or whole-board-save
+ * semantics (#237's third slice, and #118 intends to delete the endpoint
+ * entirely). This pins ACCEPTED ⇒ STORED, nothing wider.
+ */
+test('#237 a 2xx from /api/save means the write actually landed', async () => {
+  const server = await startRestServer({ board: makeBoardFixture() });
+
+  try {
+    const before = await (await fetch(`${server.baseUrl}/api/load`)).json();
+    assert.equal(before.cards.length, 0, 'fixture must start empty — otherwise this proves nothing');
+
+    const payload = {
+      cards: [{
+        id: 'save-1', shortId: 7, title: 'PERSISTED', description: '', type: 'task',
+        assignees: [], labels: [], for: '', priority: null, column: 'backlog',
+        order: 0, createdAt: '2026-05-01T00:00:00.000Z', updatedAt: '2026-05-01T00:00:00.000Z',
+        relationships: { relatedTo: [], blockedBy: [] },
+      }],
+      columns: before.columns,
+      nextShortId: 8,
+      lastUpdated: new Date().toISOString(),
+    };
+
+    const res = await fetch(`${server.baseUrl}/api/save`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    // This is all the browser checks.
+    assert.ok(res.ok, `/api/save must answer 2xx — the board treats !ok as a failed save. Got ${res.status}`);
+
+    // ⭐ THE ASSERTION THAT MATTERS. An accepted write is not a stored write:
+    // read it back through the endpoint the board hydrates from.
+    const after = await (await fetch(`${server.baseUrl}/api/load`)).json();
+    const stored = after.cards.find((c) => c.id === 'save-1');
+    assert.ok(stored,
+      '/api/save returned 2xx but the card is ABSENT from /api/load. '
+      + 'The board reports a successful save and has lost the data — the #237 clobber class. '
+      + `Cards present: ${after.cards.length}`);
+    assert.equal(stored.title, 'PERSISTED', 'the stored card must carry the payload it was sent, not a shell');
+    assert.equal(after.nextShortId, 8, 'scalar board state must persist too, not just the card array');
+  } finally {
+    await server.stop();
+  }
+});
