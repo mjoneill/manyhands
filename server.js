@@ -3685,7 +3685,7 @@ const MAX_CONV_LIST_LIMIT = Number(process.env.SCRUM_MAX_CONV_LIST_LIMIT) || 200
  * per param in tests/conversations-params.test.mjs.
  */
 const CONVERSATION_PARAMS = new Set([
-  'attachedTo', 'author', 'since', 'mentions_me', 'before', 'limit',
+  'attachedTo', 'author', 'since', 'mentions_me', 'before', 'limit', 'q',
 ]);
 
 function handleListConversations(req, res) {
@@ -3736,6 +3736,28 @@ function handleListConversations(req, res) {
     if (typeof q.mentions_me === 'string') {
       const who = q.mentions_me.toLowerCase();
       convs = convs.filter(c => Array.isArray(c.mentions) && c.mentions.includes(who));
+    }
+    // #1010 — FULL-TEXT SEARCH OVER THE WHOLE CORPUS, and it is 14ms.
+    //
+    // The commons UI has always had a search box. It filtered the messages the
+    // client had already LOADED — 50 by default (#210) plus whatever "Load
+    // older" had pulled in — and then rendered "No messages match your search."
+    // A corpus-wide negative, asserted from a buffer-local check. @michael read
+    // it the only way it can be read ("it routinely finds nothing even when I
+    // know those terms exist") and diagnosed it himself: "maybe search is
+    // intersecting that [load-older button]." It was.
+    //
+    // ⚠️ ORDER MATTERS: this filters BEFORE `limit`, so `?q=x&limit=50` means
+    // "the 50 most recent MATCHES", not "matches among the 50 most recent".
+    // The second is the bug this fixes, one layer down.
+    //
+    // Substring, case-insensitive, over the message body. Not an index, not a
+    // tokeniser, no ranking — measured at 11-14ms across 18,489 messages, which
+    // is why ADR-002's "JSON blob can't do full-text search" did not survive a
+    // stopwatch (#319).
+    if (typeof q.q === 'string' && q.q.trim() !== '') {
+      const needle = q.q.trim().toLowerCase();
+      convs = convs.filter((c) => typeof c.body === 'string' && c.body.toLowerCase().includes(needle));
     }
     // #210 — backward pagination for the browser's bounded load + load-older.
     // `before`: strictly older than the cursor (same safe string-compare as
