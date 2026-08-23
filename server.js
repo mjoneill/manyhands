@@ -2339,7 +2339,11 @@ const READ_PROJECTION_FIELDS = new Set(Object.keys(CARD_PROJECTIONS));
 
 // #856 — consumed by a DIFFERENT subsystem in the same request. Not stored on
 // the card, not discarded either, and therefore never reported.
-const CONSUMED_ELSEWHERE_FIELDS = new Set(['by']);
+// #534 — `ifVersion` is a PRECONDITION, consumed by the compare-and-swap check
+// before any field is applied. #864's lesson taken before it bites: a verb in a
+// field allowlist gets stored as a noun, and reporting a field that WAS consumed
+// tells the caller the opposite of what happened.
+const CONSUMED_ELSEWHERE_FIELDS = new Set(['by', 'ifVersion']);
 
 // #856 — where a projection's caller should actually go. This is the whole
 // reason the class is a MAP and not a list: `ignoredFields` can be bare because
@@ -3222,6 +3226,30 @@ async function handleUpdateCard(req, res, idOrShortId) {
     })();
     const verr = validateCardFields(patch, { checkId: false, current: _existing }); // id is immutable on PATCH
     if (verr) return sendJSON(res, 400, { error: verr });
+
+    // #534 — THE PRECONDITION'S SHAPE, checked OUTSIDE the write lock. It needs
+    // no board state, and a malformed request has no business acquiring a lock
+    // in order to be rejected.
+    //
+    // ⛔ 400, NOT 409, and the distinction is load-bearing. 409 means "you are
+    // behind, re-read and retry" and a client may legitimately LOOP on it. 400
+    // means "this request is malformed" and looping is futile. Answering a type
+    // error with 409 sends a retrying client into a loop with no exit — and the
+    // 409 would quote back the very version the caller sent, which is the
+    // confusing failure this shape was found by on the memory surface (7b4f909).
+    //
+    // ⚠️ REFUSE rather than COERCE: Number('2abc') is NaN and NaN !== current
+    // for EVERY current, so a coercion leaves the unclearable 409 fully intact
+    // on malformed input while newly and SILENTLY accepting null as 0 and true
+    // as 1. It fixes the example and not the class.
+    if (patch.ifVersion !== undefined
+        && !(Number.isInteger(patch.ifVersion) && patch.ifVersion >= 0)) {
+      return sendJSON(res, 400, {
+        error: 'ifVersion must be a non-negative integer (the version you read). '
+          + `Got ${JSON.stringify(patch.ifVersion)}. This is a malformed request, `
+          + 'not a version conflict — re-reading and retrying will not clear it.',
+      });
+    }
     // #254 — THE SAME PREDICATE, not a second copy of it.
     //
     // `parent` sits in PATCHABLE_CARD_FIELDS, so this route has always accepted
@@ -3275,6 +3303,25 @@ async function handleUpdateCard(req, res, idOrShortId) {
       const idx = findCardIndex(data, idOrShortId);
       if (idx < 0) return null;
       const card = data.cards[idx];
+
+      // #534 — THE COMPARE-AND-SWAP, inside the lock and BEFORE any field is
+      // applied, so the version it compares is the one the write is about to
+      // advance. Outside the lock this is a check-then-act race: it would read
+      // as CAS while providing none.
+      //
+      // ⭐ This is only honest because slice 1 made the version server-controlled
+      // on EVERY path including handleSave. While /api/save wrote back the
+      // client's copy, a save between a seat's read and its write could move the
+      // version BACKWARD and make this comparison pass against a card that had
+      // moved on twice — a precondition reporting "you are current" in exactly
+      // the case it exists to catch. Pinned by the COUPLING test.
+      if (patch.ifVersion !== undefined) {
+        const current = Number.isInteger(card.version) ? card.version : 0;
+        if (patch.ifVersion !== current) {
+          return { conflict: true, currentVersion: current };
+        }
+      }
+
       const wasDone = card.column === 'done';
       let fanout = [];        // #669 — siblings this patch rewrites via #614
       let nudge = null;       // #669 — the done-nudge post, if this write emits one
@@ -3410,6 +3457,16 @@ async function handleUpdateCard(req, res, idOrShortId) {
       return card;
     });
     if (!updated) return sendJSON(res, 404, { error: 'Card not found' });
+    // #534 — the CAS refusal, read outside the lock because that is where the
+    // response is written. 409 carries the CURRENT version: a refusal that says
+    // "no" without saying "no, and here is where we are" forces a blind retry.
+    if (updated.conflict) {
+      return sendJSON(res, 409, {
+        error: `Card has moved on: you declared ifVersion but the current version is ${updated.currentVersion}. `
+          + 'Re-read the card and reapply your edit — this is a yield, not a retry.',
+        currentVersion: updated.currentVersion,
+      });
+    }
     // #823 — present only when something WAS dropped, so a clean write never
     // claims it ignored something (an empty array on every response would be
     // noise the caller learns to skip).
