@@ -102,3 +102,50 @@ test('#466 a STALE ifVersion is REFUSED with 409, and nothing is written', async
       "the other writer's text must survive — a 409 that still wrote is the defect wearing a status code");
   } finally { await s.stop(); }
 });
+
+test('#466 a MALFORMED ifVersion is refused at the TYPE boundary with 400, never 409', async () => {
+  // ⚠️ Found in review by a second seat, on the first cut, which compared strictly
+  // against a number: `ifVersion: "2"` on a memory genuinely at version 2 got a
+  // 409 whose message read "the current version is 2" — a conflict that can
+  // NEVER clear, reported against the value the caller just sent.
+  //
+  // ⛔ WHY REFUSE RATHER THAN COERCE, which was the other candidate:
+  // `Number("2abc")` is NaN, and NaN !== current for EVERY current — so
+  // coercion leaves the unclearable 409 fully intact on the malformed input
+  // while newly, SILENTLY accepting `null` as 0 and `true` as 1. It fixes the
+  // example and not the class. A precondition exists to be unambiguous about
+  // what the caller believed; guessing is the one thing it must not do.
+  //
+  // 400 vs 409 is the load-bearing distinction: 409 means "you are behind, go
+  // re-read" and a client may legitimately loop on it. 400 means "this request
+  // is malformed" and looping is futile. Answering a type error with 409 sends
+  // the client into exactly the loop that cannot terminate.
+  const s = await startRestServer({ board: makeBoardFixture() });
+  try {
+    const c = await api(s.baseUrl, 'POST', '/api/memories', MEM);
+    const id = c.body.id;
+    assert.equal(c.body.version, 1);
+
+    // Every one of these is at or about the CORRECT version 1, so a 409 here
+    // could only be a type failure wearing a conflict's status code.
+    for (const bad of ['1', 1.5, null, true, Number.NaN, [], {}]) {
+      const r = await api(s.baseUrl, 'PATCH', `/api/memories/${id}`,
+        { body: `WRITE VIA ${JSON.stringify(bad)}`, by: 'ada', ifVersion: bad });
+      assert.equal(r.status, 400,
+        `ifVersion: ${JSON.stringify(bad)} must be 400 (malformed), not `
+        + `${r.status}. Got ${JSON.stringify(r.body)}`);
+    }
+
+    // ⭐ ANTI-VACUITY. A 400 must also mean NOTHING WAS WRITTEN — otherwise the
+    // refusal is cosmetic and the store moved anyway.
+    const after = await api(s.baseUrl, 'GET', `/api/memories/${id}`);
+    assert.equal(after.body.version, 1, 'a refused request must not advance the version');
+    assert.equal(after.body.body, 'ORIGINAL', 'a refused request must not change the text');
+
+    // And the guard must not have broken the thing it guards: 1 still works.
+    const ok = await api(s.baseUrl, 'PATCH', `/api/memories/${id}`,
+      { body: 'SECOND', by: 'bex', ifVersion: 1 });
+    assert.equal(ok.status, 200, 'a well-formed integer precondition still succeeds');
+    assert.equal(ok.body.version, 2);
+  } finally { await s.stop(); }
+});

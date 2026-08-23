@@ -1139,6 +1139,35 @@ async function handleCreateMemory(req, res) {
 async function handleUpdateMemory(req, res, id) {
   try {
     const body = JSON.parse(await readBody(req));
+
+    // #466 — validate the PRECONDITION'S SHAPE before taking the write lock. A
+    // malformed request has no business acquiring a lock to be rejected, and
+    // this needs no board state to decide.
+    //
+    // ⛔ 400, NOT 409, and the distinction is load-bearing. 409 means "you are
+    // behind, re-read and retry" — a client may legitimately loop on it. 400
+    // means "this request is malformed" and looping is futile. The first cut
+    // compared `body.ifVersion !== current` strictly, so `ifVersion: "2"` on a
+    // memory genuinely at version 2 returned a 409 reading "the current version
+    // is 2" — a conflict that can NEVER clear, quoting back the value the caller
+    // just sent, and sending a retrying client into a loop with no exit.
+    // Found in review by a second seat, on the same night this shipped.
+    //
+    // ⚠️ REFUSE rather than COERCE, which was the other candidate: Number('2abc')
+    // is NaN and NaN !== current for EVERY current, so coercion leaves the
+    // unclearable 409 fully intact on malformed input while newly and SILENTLY
+    // accepting null as 0 and true as 1. It fixes the example, not the class.
+    // A precondition exists to be unambiguous about what the caller believed;
+    // guessing is the one thing it must not do.
+    if (body.ifVersion !== undefined
+        && !(Number.isInteger(body.ifVersion) && body.ifVersion >= 0)) {
+      return sendJSON(res, 400, {
+        error: 'ifVersion must be a non-negative integer (the version you read). '
+          + `Got ${JSON.stringify(body.ifVersion)}. This is a malformed request, `
+          + 'not a version conflict — re-reading and retrying will not clear it.',
+      });
+    }
+
     const updated = await withWriteLock(async () => {
       const data = readBoard();
       const { identity, versions } = memoryParts(data, id);
