@@ -292,14 +292,14 @@ test('#683 an unknown lane gets an envelope that says UNKNOWN, not zero', () => 
 
 // ── reachability: inbound-only, with the positive control ──────────────────
 
-test('#683 DEAF — inbound recent, lag growing (the 8-hour incident, scored right)', () => {
+test('#683 UNCONFIRMED — inbound recent, lag growing (the 8-hour incident, scored right)', () => {
   const dir = tmp();
   seed(dir, 1);
   registerFor(dir, 'registry:minimo.sb', { now: '2026-08-11T02:00:00.000Z' });
   seed(dir, 5);   // the room moves on; she receives none of it
   const rep = reachabilityReport(dir, { now: Date.parse('2026-08-11T02:01:00.000Z') });
   const row = rep.find((r) => r.identity === 'registry:minimo.sb');
-  assert.equal(row.state, 'deaf');
+  assert.equal(row.state, 'unconfirmed');   // #992: renamed from 'deaf' — it measures unacked lag, not reception
   assert.equal(row.lag, 5);
 });
 
@@ -316,7 +316,7 @@ test('#683 POSITIVE CONTROL — the outbound-shaped question calls the same seat
   const inbound = reachabilityReport(dir, { now }).find((r) => r.identity === 'registry:minimo.sb');
   const outbound = reachabilityReport(dir, { now, inputs: 'stream_open', streamOpen: { 'registry:minimo.sb': true } })
     .find((r) => r.identity === 'registry:minimo.sb');
-  assert.equal(inbound.state, 'deaf');
+  assert.equal(inbound.state, 'unconfirmed');   // #992
   assert.equal(outbound.state, 'reachable',
     'the banned instrument disagrees — that disagreement IS the finding');
 });

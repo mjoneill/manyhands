@@ -16,7 +16,7 @@ import path from 'node:path';
 import {
   loadCursors, saveCursors, registerSeat, recordServed, recordInbound, cursorFor,
   reachability, oldestLiveCursor, retentionPlan,
-  REACHABLE, DEAF, UNREACHABLE,
+  REACHABLE, UNCONFIRMED, UNREACHABLE,
 } from '../core/cursors.mjs';
 
 let n = 0;
@@ -108,7 +108,7 @@ test('#683 recordServed never moves BACKWARD, and ignores seqs at or below the c
 
 // ── reachability: the 8-hour incident, scored ─────────────────────────────
 
-test('#683 THE 8-HOUR INCIDENT — a talking seat with growing lag is DEAF, not healthy', () => {
+test('#683 THE 8-HOUR INCIDENT — a talking seat with growing lag is UNCONFIRMED (was: "DEAF"), not healthy', () => {
   // The seat posts (inbound is recent) and receives nothing (lag grows). No
   // signal we had could name that state; "stream open" scored it HEALTHY for
   // eight hours, which is why stream_open is banned as an input.
@@ -118,7 +118,7 @@ test('#683 THE 8-HOUR INCIDENT — a talking seat with growing lag is DEAF, not 
   recordInbound(st, 'ada', 100, { now: '2026-08-05T00:59:30.000Z' }); // talking, 30s ago
   const r = reachability(st, 'ada', 180, { now });                    // head moved to 180
 
-  assert.equal(r.state, DEAF);
+  assert.equal(r.state, UNCONFIRMED);
   assert.equal(r.lag, 80, 'eighty events it has not acked while it is plainly alive');
 
   // THE CONTROL, and the reason this test is worth its length: the projection

@@ -45,7 +45,28 @@ import { join, dirname } from 'node:path';
 
 /** Reachability, from INBOUND evidence only. See `reachability`. */
 export const REACHABLE = 'reachable';
-export const DEAF = 'deaf';
+/**
+ * ⛔ NOT "deaf". #992.
+ *
+ * This state fires on UNACKED LAG — see `reachability()` — and lag measures
+ * PULL ADOPTION, not reception. A push-only seat that is receiving everything
+ * perfectly still accrues lag forever, because `acked` advances only through a
+ * pull. Calling that "deaf" asserts NOT RECEIVING, which the server has no
+ * evidence for either way.
+ *
+ * Measured 2026-08-23: /api/cursors reported deaf for 5 of 5 lanes, including
+ * two seats demonstrably reading the room. The oracle was not broken; the WORD
+ * was, and the word is what a human acts on at 06:00.
+ *
+ * ⚠️ AND THERE IS A SECOND, HONEST `deaf` ONE MODULE OVER — mcp-server.mjs's
+ * #726 detector, which fires when a seat HAD a stream, has NONE, and just made
+ * a request. That one measures actual unreachability and is CORRECTLY named.
+ * Renaming both would have deleted a working signal; only this one moves.
+ *
+ * Under "no smart clients" there is no server-side evidence of deafness
+ * available at all, so no state here may claim it.
+ */
+export const UNCONFIRMED = 'unconfirmed';
 export const UNREACHABLE = 'unreachable';
 
 const DEFAULTS = Object.freeze({
@@ -158,7 +179,7 @@ export function cursorFor(state, seat) {
  * try", which is not the question. Inbound answers "did anything come back".
  *
  *   unreachable — no inbound within `unreachableMs`. We cannot say it is fine.
- *   deaf        — inbound is RECENT but unacked events are piling up: the seat
+ *   unconfirmed — inbound is RECENT but unacked events are piling up: the seat
  *                 is alive and talking, and not receiving. This is the state
  *                 the 8-hour incident was actually in and nothing could name.
  *   reachable   — recent inbound, nothing meaningful outstanding.
@@ -175,7 +196,7 @@ export function reachability(state, seat, headSeq, { now = Date.now(), ...opts }
     return { state: UNREACHABLE, lag, last_inbound_at: s.last_inbound_at, reason: `no inbound for ${Math.round(age / 1000)}s` };
   }
   if (lag >= cfg.deafLagEvents) {
-    return { state: DEAF, lag, last_inbound_at: s.last_inbound_at, reason: `${lag} event(s) unacked while inbound is recent` };
+    return { state: UNCONFIRMED, lag, last_inbound_at: s.last_inbound_at, reason: `${lag} event(s) unacked while inbound is recent — the seat may be receiving them and simply not pulling` };
   }
   return { state: REACHABLE, lag, last_inbound_at: s.last_inbound_at, reason: 'current' };
 }
