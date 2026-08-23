@@ -277,3 +277,65 @@ test('#735 file execution is concurrently greater than one and bounded', async (
     await stopTree(child);
   }
 });
+
+// #998 — THE GUARD THIS FIX SHIPPED WITHOUT.
+//
+// The first attempt at this test passed three times WITH THE FIX REMOVED, so it
+// was pulled rather than shipped: a guard that cannot fail is worse than none,
+// because it reads as coverage. Two causes, both worth naming — `waitFor(async
+// () => …)` tests a PROMISE for truthiness and a promise is ALWAYS truthy, so
+// the positive control returned on its first tick; and nothing asserted the
+// grandchild had ever been alive, so a fixture that never started read green.
+//
+// This version was proven by paired A/B before landing: 4 runs against the real
+// runner (all REAPED) and 4 against a copy with only the signal handlers
+// stripped (all LEAKED). It discriminates 8/8.
+test('#998 the runner reaps its detached children when SIGTERMed', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rt998-'));
+  const pidFile = path.join(dir, 'grandchild.pid');
+
+  // The shape #998 describes: a file that spawns a long-lived process INSIDE
+  // its own group and then hangs. The grandchild is not detached, so it lives
+  // in the child's process group — which only the runner knows about.
+  fs.writeFileSync(path.join(dir, 'leaky.test.mjs'),
+    'import { test } from "node:test";\n'
+    + 'import { spawn } from "node:child_process";\n'
+    + 'import fs from "node:fs";\n'
+    + 'test("spawns a grandchild then hangs", () => {\n'
+    + '  const gc = spawn("sleep", ["300"], { stdio: "ignore" });\n'
+    + `  fs.writeFileSync(${JSON.stringify(pidFile)}, String(gc.pid));\n`
+    + '  return new Promise(() => { setInterval(() => {}, 1000); });\n'
+    + '});\n');
+
+  const runner = spawn(process.execPath, [FILE_RUNNER, path.join(dir, 'leaky.test.mjs')],
+    { stdio: 'ignore', detached: true, env: cleanEnv() });
+
+  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+
+  // Note the sync predicate: waitFor takes a PLAIN function here. An async one
+  // would hand it a promise, which is always truthy — the bug that made the
+  // first version of this test unable to fail.
+  await waitFor(() => fs.existsSync(pidFile), 'the fixture must spawn its grandchild', 10_000);
+  const gcPid = Number(fs.readFileSync(pidFile, 'utf8'));
+
+  // ANTI-VACUITY: if the grandchild was never alive, "it is dead now" is
+  // trivially true and this test asserts nothing about reaping.
+  const aliveBeforeSignal = alive(gcPid);
+
+  // SIGTERM reaches the RUNNER's process group ONLY. The children were spawned
+  // detached, so each leads its own group and this signal cannot touch them —
+  // if they die, it is because the runner reaped them on its way out.
+  try { process.kill(-runner.pid, 'SIGTERM'); } catch { runner.kill('SIGTERM'); }
+  await waitFor(() => !alive(gcPid), 'the grandchild must be reaped', 3000).catch(() => {});
+  const aliveAfterSignal = alive(gcPid);
+
+  if (aliveAfterSignal) { try { process.kill(gcPid, 'SIGKILL'); } catch { /* gone */ } }
+  await stopTree(runner);
+  fs.rmSync(dir, { recursive: true, force: true });
+
+  assert.ok(aliveBeforeSignal,
+    `the grandchild (pid ${gcPid}) must be running before the signal — otherwise this test asserts nothing`);
+  assert.equal(aliveAfterSignal, false,
+    `SIGTERM to the runner must reap its children's process groups; grandchild pid ${gcPid} survived. `
+    + 'This is the leak #998 fixed: one orphaned group per run, oldest specimen measured at 7h40m.');
+});
