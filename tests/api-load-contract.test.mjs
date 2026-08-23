@@ -213,3 +213,70 @@ test('#237 /api/conversations returns a bare ARRAY for every shape the board req
     await server.stop();
   }
 });
+
+/**
+ * #237 slice 4 — /api/attachments, the last of the four board-consumed endpoints.
+ *
+ * Two call sites, and the contract runs BETWEEN them, which is why neither is
+ * safe alone:
+ *
+ *   POST /api/attachments        → `_pendingAttachments.push(await res.json())`
+ *   GET  /api/attachments/{id}   → `'/api/attachments/' + encodeURIComponent(a.id)`
+ *
+ * ⭐ THE LOAD-BEARING LINK IS `id`. The board stores whatever the POST returns
+ * and later builds a URL from `.id`. If the success response ever stops carrying
+ * `id`, the upload SUCCEEDS, the attachment is stored, and every render produces
+ * `/api/attachments/undefined` — a broken image with a 201 behind it and no error
+ * anywhere in the chain.
+ *
+ * ⭐ AND THE ERROR SHAPE IS PART OF THE CONTRACT TOO. On !ok the board does
+ * `(await res.json()).error` inside a try. A rejection that answers plain text
+ * instead of JSON degrades the toast from a reason to a bare status code —
+ * the user is told "Attachment rejected: 413" instead of what to do about it.
+ */
+test('#237 /api/attachments returns an id on success and a JSON error on rejection', async () => {
+  const server = await startRestServer({ board: makeBoardFixture() });
+
+  try {
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      'base64',
+    );
+    const res = await fetch(`${server.baseUrl}/api/attachments`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'pixel.png', mime: 'image/png', data: png.toString('base64') }),
+    });
+    assert.ok(res.ok, `upload must answer 2xx — the board shows a rejection toast otherwise. Got ${res.status}`);
+    const meta = await res.json();
+
+    // The link the board depends on. Without `id` it renders /api/attachments/undefined.
+    assert.ok(meta && typeof meta.id === 'string' && meta.id.length > 0,
+      'the upload response MUST carry a string `id` — the board does '
+      + "`'/api/attachments/' + encodeURIComponent(a.id)`. Without it every render is "
+      + `/api/attachments/undefined with a 2xx behind it. Got: ${JSON.stringify(meta)}`);
+
+    // ...and that id must actually resolve, or the link is cosmetic.
+    const fetched = await fetch(`${server.baseUrl}/api/attachments/${encodeURIComponent(meta.id)}`);
+    assert.ok(fetched.ok,
+      `the id returned by POST must resolve on GET — got ${fetched.status} for ${meta.id}`);
+    const bytes = Buffer.from(await fetched.arrayBuffer());
+    assert.equal(bytes.length, png.length,
+      'the bytes served back must be the bytes uploaded, not a placeholder');
+
+    // The error shape. The board reads `.error` off a rejection inside a try/catch,
+    // so a plain-text 4xx silently degrades the toast to a bare status code.
+    const rejected = await fetch(`${server.baseUrl}/api/attachments`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'empty.png', mime: 'image/png', data: '' }),
+    });
+    assert.ok(!rejected.ok, 'an empty payload must be REJECTED — otherwise this asserts nothing');
+    const err = await rejected.json().catch(() => null);
+    assert.ok(err && typeof err.error === 'string',
+      'a rejection must answer JSON carrying `error` — the board reads `.error` to build its '
+      + 'toast, and a plain-text body degrades it to a bare status code the user cannot act on');
+  } finally {
+    await server.stop();
+  }
+});
