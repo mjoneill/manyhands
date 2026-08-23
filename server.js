@@ -448,6 +448,47 @@ async function handleSave(req, res) {
       if (incoming[k] !== undefined) merged[k] = incoming[k];
     }
 
+    // #534 — THE VERSION IS SERVER-COMPUTED HERE, NEVER ACCEPTED.
+    //
+    // The loop above takes the cards array WHOLESALE, so every per-card field
+    // arrives from the client. For content that is the contract. For the
+    // concurrency token it is fatal: a client that carries an old version
+    // writes it back, and a client that never had the field erases it. Either
+    // way the version moves BACKWARD, and a precondition built on a token that
+    // can regress passes in exactly the case it exists to catch:
+    //
+    //   1 card at v5  2 browser hydrates at v5  3 a seat PATCHes ⇒ v6
+    //   4 browser saves ⇒ v5 again  5 a writer holding v5 is told it is current
+    //
+    // So the server keeps its own value and advances it only when the incoming
+    // card genuinely differs. Bumping a card the client did not touch is NOT
+    // harmless — it would fail a legitimate holder's ifVersion, and a
+    // precondition that over-refuses breaks working writers, which is the worse
+    // of the two failures.
+    //
+    // ⚠️ This is the first per-card value /api/save COMPUTES rather than
+    // ACCEPTS. That is deliberate and it is a step toward #118's whole point;
+    // if #118 later deletes this endpoint, this block goes with it and nothing
+    // is stranded.
+    if (Array.isArray(merged.cards)) {
+      const priorById = new Map(
+        (existing.cards || []).filter((c) => c && c.id).map((c) => [c.id, c]),
+      );
+      merged.cards = merged.cards.map((incomingCard) => {
+        if (!incomingCard || !incomingCard.id) return incomingCard;
+        const prior = priorById.get(incomingCard.id);
+        if (!prior) {
+          // A card this save INTRODUCES. It has no server history, so it is
+          // born at 1 exactly as handleCreateCard mints it.
+          return { ...incomingCard, version: 1 };
+        }
+        const settled = { ...incomingCard, version: prior.version };
+        if (cardContentKey(prior) !== cardContentKey(incomingCard)) bumpCardVersion(settled);
+        else if (!Number.isInteger(settled.version)) bumpCardVersion(settled);
+        return settled;
+      });
+    }
+
     // #669 — the browser's whole-board save cannot say what it changed, so its
     // events are derived. A save that changed nothing writes nothing: there is no
     // event to record, and writeBoard refuses an empty list by design rather than
@@ -1908,6 +1949,38 @@ function resolveParentValue(data, value) {
   return { ok: true, id: data.cards[idx].id };
 }
 
+// #534 — THE card version rule, in ONE place. Six call sites share it, and they
+// must share the RULE and not merely the field name: a token maintained by only
+// some write paths is worse than no token, because the precondition built on it
+// then reports "guarded" while providing nothing.
+//
+// Monotonic, server-controlled, and never read from a caller. A card with no
+// version is treated as 0 ONLY here, at the moment it gains one — never as a
+// value a comparison may trust.
+function bumpCardVersion(card) {
+  const current = Number.isInteger(card.version) && card.version >= 0 ? card.version : 0;
+  card.version = current + 1;
+  return card.version;
+}
+
+// #534 — content identity, EXCLUDING the version itself. handleSave uses this to
+// decide whether an incoming card actually differs from the stored one, because
+// bumping a card the client did not touch is not harmless: it would fail a
+// legitimate holder's ifVersion in slice 2, and over-refusing is how a
+// precondition breaks working writers.
+function cardContentKey(card) {
+  const seen = new Set();
+  return JSON.stringify(card, (k, v) => {
+    if (k === 'version') return undefined;
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
+      if (seen.has(v)) return v;
+      seen.add(v);
+      return Object.fromEntries(Object.keys(v).sort().map((kk) => [kk, v[kk]]));
+    }
+    return v;
+  });
+}
+
 function createCardFromPayload(body, nextShortId) {
   const now = new Date().toISOString();
   // Normalize assignees: accept string ('alex'), array (['alex','sage']),
@@ -1925,6 +1998,9 @@ function createCardFromPayload(body, nextShortId) {
     assignees = ['unassigned'];
   }
   return {
+    // #534 — a card is born WITH a version, so no card is ever 'absent'
+    // and therefore never readable as 0 by a later comparison.
+    version: 1,
     id: body.id || crypto.randomUUID(),
     shortId: nextShortId,
     title: (body.title || '').trim(),
@@ -3303,6 +3379,7 @@ async function handleUpdateCard(req, res, idOrShortId) {
         card[k] = v;
       }
       card.updatedAt = new Date().toISOString();
+      bumpCardVersion(card);   // #534 — one bump per accepted PATCH, not per field
       // #665 — the board is the ignition: a card ENTERING done asks the room
       // for the next pull, riding the same write (#578's atomicity pattern).
       // The queue-pop rule lived in seats' intentions; rules decay, hooks
@@ -3403,6 +3480,7 @@ async function handleClaimCard(req, res, idOrShortId) {
         card.claimedBy = by;
         card.claimedAt = now;
         card.updatedAt = now;
+        bumpCardVersion(card);   // #534 — a claim is a card write
         // #578 — the announcement rides the SAME write as the claim. Appending
         // it here rather than in a second write keeps the two atomic: there is
         // no window in which the card is claimed and the room was never told.
@@ -3456,6 +3534,7 @@ async function handleReleaseCard(req, res, idOrShortId) {
       card.claimedBy = null;
       card.claimedAt = null;
       card.updatedAt = new Date().toISOString();
+      bumpCardVersion(card);   // #534 — a release is a card write
       const announced = wasHeld ? appendClaimAnnouncement(data, card, by, 'released') : null;
       writeBoard(data, [cardEvent('update', card, by),
         ...(announced ? [convEvent(announced, by)] : [])]);
@@ -4103,6 +4182,7 @@ async function handleUpdateNode(req, res, idOrShortId) {
       if ('parent' in patch) card.parent = patch.parent;
       if ('attachments' in patch) card.attachments = sanitizeAttachments(patch.attachments); // #222
       card.updatedAt = new Date().toISOString();
+      bumpCardVersion(card);   // #534 — a node update is a card write
       const notice = contentChanged ? appendWikiNotice(data, 'updated', card) : null; // #223
       writeBoard(data, [cardEvent('update', card),
         ...(notice ? [convEvent(notice)] : [])]);

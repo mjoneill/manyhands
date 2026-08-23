@@ -51,7 +51,14 @@ const NODE_TO_CONTENT = Object.fromEntries(
 // yet", said by someone, with an end date. It is not a claim — a claim says
 // "I am working on this" and is a mutex; a park says "not yet" and is a
 // deferral. They can coexist on one card and mean different things.
-const BOARD_KEYS = new Set(['column', 'order', 'assignees', 'priority', 'labels', 'for', 'relationships', 'claimedBy', 'claimedAt',
+// #534 — `version` is a COORDINATION-RAIL field, the same family as
+// claimedBy/claimedAt: it exists so concurrent writers can detect each other,
+// not to describe the card's content. Modelled here rather than left to
+// `_extra` for the reason `checks` and `blockers` were promoted — a modelled
+// field sitting in the unmodelled bag is the #593/#845 lying-container shape,
+// and it would keep the version out of the graph projection that makes
+// "which cards moved" answerable.
+const BOARD_KEYS = new Set(['column', 'order', 'assignees', 'priority', 'labels', 'for', 'relationships', 'claimedBy', 'claimedAt', 'version',
   'parkedBy', 'parkedAt', 'parkedUntil', 'parkedReason',
   // #814 — the commit that implements this card. A literal is not a node.
   'implementedBy',
