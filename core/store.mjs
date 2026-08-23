@@ -18,13 +18,67 @@
  * and is guaranteed to lead the file (domainToJsonLd places it first).
  */
 
-import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, existsSync, statSync } from 'node:fs';
 import { boardToDomain } from './mapping.mjs';
 import { domainToJsonLd, jsonLdToDomain, isJsonLdDocument } from './jsonld.mjs';
 import { ensurePeople } from './people.mjs';
 
+/**
+ * #1014 — parsed-domain cache, keyed on the file's identity, NOT on time.
+ *
+ * Every read re-read and re-parsed the whole store: ~100 ms of CPU (measured
+ * 45 ms read + 51 ms parse on 38.4 MiB) on Node's SINGLE event-loop thread. So
+ * reads did not merely cost 100 ms, they cost 100 ms EACH, IN SEQUENCE — 8
+ * concurrent readers measured 0.89 s wall against 0.10 s on a control route
+ * that reads nothing. That serialization is invisible to a single-user profile
+ * by construction, which is why it survived a clean browser profile of #209.
+ *
+ * ⛔ THE TRAP THIS AVOIDS: callers MUTATE what they are handed — server.js:489
+ * writes `c.mentions` onto conversations, :503 replaces `data.columns`. A cache
+ * returning one shared object leaks one request's mutations into the next: a
+ * corruption that returns 200 and passes every other test. So the cache holds a
+ * PRISTINE domain and every caller gets its own `structuredClone`.
+ *
+ * ⚠️ The clone is not free and the win is honest, not magic:
+ *     parse + project                 100 ms
+ *     structuredClone                  34 ms   ⇐ what a hit now costs
+ *     JSON.parse(JSON.stringify(…))   138 ms   ⛔ SLOWER than reparsing
+ *     statSync                          0.2 ms
+ *   ⇒ ~3× on a hit, not elimination. 8 readers: ~900 ms → ~300 ms.
+ *
+ * Keyed on nanosecond mtime + size via a bigint stat. Millisecond mtime alone
+ * would serve a stale parse for two writes landing inside the same millisecond;
+ * `saveDomain` is tmp+rename and stamps `lastUpdated`, so that window is already
+ * narrow, but ns resolution closes it rather than arguing about it.
+ */
+const CACHE_MAX = 4;
+const _cache = new Map();
+
+function _identity(filePath) {
+  const st = statSync(filePath, { bigint: true });
+  return `${st.mtimeNs}:${st.size}`;
+}
+
 /** Read the store → domain projection. Empty domain if the file is absent. */
 export function loadDomain(filePath) {
+  if (existsSync(filePath)) {
+    const key = _identity(filePath);
+    const hit = _cache.get(filePath);
+    // Clone on the way OUT, always — a hit and a miss must be indistinguishable
+    // to the caller, or the first reader after a write silently gets the only
+    // mutable copy and the bug comes back for exactly one request in N.
+    if (hit && hit.key === key) return structuredClone(hit.domain);
+    const fresh = _parseDomain(filePath);
+    // Bounded: tests load hundreds of throwaway paths in one process, and an
+    // unbounded Map of parsed 38 MiB domains is a leak wearing a cache's name.
+    if (_cache.size >= CACHE_MAX) _cache.delete(_cache.keys().next().value);
+    _cache.set(filePath, { key, domain: fresh });
+    return structuredClone(fresh);
+  }
+  return _parseDomain(filePath);
+}
+
+function _parseDomain(filePath) {
   if (!existsSync(filePath)) {
     return { nodes: [], messages: [], columns: [], nextShortId: 1, lastUpdated: null };
   }
