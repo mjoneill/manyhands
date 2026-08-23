@@ -62,8 +62,26 @@ async function waitFor(check, message, timeout = 5000) {
   assert.fail(message);
 }
 
-function stopTree(child) {
+// #998 — SIGTERM FIRST, then SIGKILL. This is not politeness; it is the only
+// way the runner can reap its own children.
+//
+// The helper spawns each test file `detached`, so every file is its own
+// process-group leader. Our `kill(-child.pid)` reaches the helper's group and
+// CANNOT reach theirs — only the runner knows those pgids. SIGKILL is
+// unhandleable, so a straight SIGKILL here left every file's group orphaned to
+// pid 1, forever, once per run. Measured 2026-08-23: 11 such groups alive,
+// oldest 7h40m, while this file's tests reported 8/8 green.
+//
+// SIGTERM gives run-test-files.mjs its one chance to reap. The SIGKILL below is
+// the backstop for a runner that ignores or outlives the grace period.
+async function stopTree(child, graceMs = 750) {
   if (!child || child.exitCode !== null) return;
+  try { process.kill(-child.pid, 'SIGTERM'); } catch { child.kill('SIGTERM'); }
+  const deadline = Date.now() + graceMs;
+  while (Date.now() < deadline && child.exitCode === null && !child.killed) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  if (child.exitCode !== null) return;
   try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
 }
 
@@ -190,7 +208,7 @@ test('#735 a later fast file is visible while an earlier file hangs', async () =
   const streamedBeforeKill = seen;
   const runningBeforeKill = child.exitCode === null && !child.killed;
 
-  stopTree(child);
+  await stopTree(child);
   await new Promise((r) => setTimeout(r, 500));
 
   assert.match(streamedBeforeKill, /LAYER_2_FAST_COMPLETE/,
@@ -221,7 +239,7 @@ test('#735 the layer-2 probe observes early output from a fast control', async (
   try {
     await waitFor(() => /PROBE_FAST_CONTROL/.test(seen), `the output probe saw no fast control:\n${seen}`);
   } finally {
-    stopTree(child);
+    await stopTree(child);
   }
 });
 
@@ -256,6 +274,6 @@ test('#735 file execution is concurrently greater than one and bounded', async (
     assert.equal(code, 0, 'the released bounded run should finish green');
     assert.equal(fs.existsSync(started('c')), true, 'the queued file must run after capacity opens');
   } finally {
-    stopTree(child);
+    await stopTree(child);
   }
 });

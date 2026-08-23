@@ -32,6 +32,35 @@ let active = 0;
 let failed = false;
 let testNumber = 0;
 
+// #998 — every child is spawned `detached`, so each is its OWN process-group
+// leader and our parent's group kill cannot reach it. That is deliberate (see
+// launch()), but it means WE are the only process that can reap them: nobody
+// above us knows their pgids. So we hold them, and we release them on a signal.
+//
+// ⚠️ SIGKILL cannot be handled. A parent that SIGKILLs us leaves every child
+// group orphaned to pid 1 — measured: 11 such groups on this machine, oldest
+// 7h40m, one per run of run-tests-helper.test.mjs. The remedy is not on this
+// side alone: whoever stops us must send SIGTERM FIRST and allow a grace
+// period. This handler is the half we can own.
+const live = new Set();
+
+function reapAll() {
+  for (const pid of live) {
+    try { process.kill(-pid, 'SIGKILL'); } catch { /* already gone */ }
+  }
+  live.clear();
+}
+
+for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
+  process.on(sig, () => {
+    reapAll();
+    // Exit non-zero and by signal convention: we did not complete the run.
+    process.exit(128 + (sig === 'SIGINT' ? 2 : sig === 'SIGHUP' ? 1 : 15));
+  });
+}
+// A clean exit for any other reason must not strand a group either.
+process.on('exit', reapAll);
+
 function count(raw, name) {
   const matches = [...raw.matchAll(new RegExp(`^# ${name} (\\d+)$`, 'gm'))];
   return matches.length ? Number(matches.at(-1)[1]) : 0;
@@ -133,6 +162,7 @@ function launch() {
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: true,
     });
+    live.add(child.pid); // #998 — we are the only process that knows this pgid
     let stdout = '';
     let hung = false;
 
@@ -160,6 +190,7 @@ function launch() {
     child.on('error', () => { failed = true; failedFiles.push(file); });
     child.on('close', (code) => {
       clearTimeout(timer);
+      live.delete(child.pid); // #998 — reaped or exited; no longer ours to kill
       if (hung) {
         // Named as HUNG, not merely failed. A hang and a failing assertion need
         // different responses from a reader, and the old behaviour offered
