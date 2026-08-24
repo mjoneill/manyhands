@@ -180,6 +180,24 @@ export const CARD_CREATE_PROBES = [
         + '400 — and a 400 rather than a 409, because 409 means "re-read and retry" and a '
         + 'client may legitimately loop on it, while a malformed request can never clear.' },
 
+  // #1032 — a RESPONSE-SHAPE parameter, consumed by the response writer and
+  // never stored under its own key. So a "declared but never stored" line
+  // naming it is CORRECT and not a finding, exactly as with ifVersion.
+  //
+  // ⚠️ The malformed case is a PLAUSIBLE-SOUNDING SHAPE NAME, chosen for the
+  // same reason ifVersion probes `'1'`: it is the value a lenient
+  // implementation waves through. The failure this guards is "accepts and
+  // ignores" — a caller asking for a shape we do not support is trying to spend
+  // LESS, and silently handing them the full body fails at the one thing they
+  // asked for while looking like success. It is unobservable from outside, so
+  // the rule is a REFUSAL, and it must refuse BEFORE the write so a rejected
+  // response shape is a pure no-op rather than a half-applied edit.
+  { name: 'return', wellFormed: 'id', malformed: 'summary',
+    note: '#1032 — OPTIONAL response shape, never stored. `"id"` returns id, shortId, '
+        + 'version, updatedAt and descriptionBytes instead of the whole card; omitting it is '
+        + 'unchanged, because some callers legitimately use the echoed version and changing '
+        + 'the DEFAULT would break them to save tokens. Unsupported value or 400.' },
+
   // ── the control: a typo, consistently absent everywhere ──
   { name: 'titel', wellFormed: 'misspelled', malformed: null, noRule: true,
     note: 'not a real field — the AGREE_ABSENT control' },

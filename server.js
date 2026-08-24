@@ -2343,7 +2343,13 @@ const READ_PROJECTION_FIELDS = new Set(Object.keys(CARD_PROJECTIONS));
 // before any field is applied. #864's lesson taken before it bites: a verb in a
 // field allowlist gets stored as a noun, and reporting a field that WAS consumed
 // tells the caller the opposite of what happened.
-const CONSUMED_ELSEWHERE_FIELDS = new Set(['by', 'ifVersion']);
+const CONSUMED_ELSEWHERE_FIELDS = new Set(['by', 'ifVersion', 'return']);
+
+// #1032 — the response shapes a caller may ask for. Opt-IN by construction:
+// some callers legitimately use the echoed `version`, so changing the DEFAULT
+// would break every existing consumer to save tokens — a worse trade than the
+// one being fixed.
+const RETURN_SHAPES = new Set(['id']);
 
 // #856 — where a projection's caller should actually go. This is the whole
 // reason the class is a MAP and not a list: `ignoredFields` can be bare because
@@ -3250,6 +3256,32 @@ async function handleUpdateCard(req, res, idOrShortId) {
           + 'not a version conflict — re-reading and retrying will not clear it.',
       });
     }
+    // #1032 — the response SHAPE, validated before the write.
+    //
+    // Every card write echoes the whole body back: a one-line append to the
+    // largest card costs ~35,000 tokens of response nobody requested. The
+    // gradient is perverse — this room writes long card bodies on purpose,
+    // because that is how findings survive compaction, so better
+    // record-keeping taxes every subsequent write.
+    //
+    // ⛔ REFUSED, not ignored. A caller asking for a shape we do not support is
+    // trying to spend less; silently handing them the full body fails at the
+    // one thing they asked for and they cannot tell. "Accepts and ignores" is
+    // unobservable from outside.
+    //
+    // ⚠️ And refused HERE, before the write, so a rejected response shape is a
+    // pure no-op rather than a half-applied edit.
+    if (patch.return !== undefined && !RETURN_SHAPES.has(patch.return)) {
+      return sendJSON(res, 400, {
+        error: `unsupported return shape ${JSON.stringify(patch.return)}. `
+          + `Supported: ${[...RETURN_SHAPES].map((v) => JSON.stringify(v)).join(', ')}, `
+          + 'or omit `return` for the full card. Nothing was written.',
+        code: 'UNSUPPORTED_RETURN_SHAPE',
+        hint: 'return:"id" answers what an append caller actually needs — id, '
+          + 'version and descriptionBytes — without shipping the body back. '
+          + 'Omitting `return` is unchanged, so existing callers are unaffected.',
+      });
+    }
     // #254 — THE SAME PREDICATE, not a second copy of it.
     //
     // `parent` sits in PATCHABLE_CARD_FIELDS, so this route has always accepted
@@ -3470,14 +3502,36 @@ async function handleUpdateCard(req, res, idOrShortId) {
     // #823 — present only when something WAS dropped, so a clean write never
     // claims it ignored something (an empty array on every response would be
     // noise the caller learns to skip).
-    sendJSON(res, 200, {
-      ...updated,
+    // #1032 — the disclosure fields ride BOTH shapes. A caller who opted into a
+    // small response must still learn that something was dropped; making the
+    // cheap shape also the quiet one would trade tokens for silent data loss.
+    const disclosures = {
       ...(ignoredFields.length ? { ignoredFields } : {}),
       ...(refusedFields.length ? { refusedFields } : {}),
       // #856 — same discipline: present only when a caller actually tried
       // something, absent on every read-modify-write echo.
       ...(Object.keys(redirectedFields).length ? { redirectedFields } : {}),
-    });
+    };
+    if (patch.return === 'id') {
+      // ⭐ Not merely cheaper — it answers the question an append caller
+      // actually has: "did my text land, and is the rest untouched?" They have
+      // been answering that with len(before)+len(added)==len(after) and paying
+      // for the whole body to do it.
+      //
+      // ⚠️ BYTES, in UTF-8, and the name says so. JS `.length` counts UTF-16
+      // units and Python `len()` counts code points; those disagree on every
+      // astral character, and this board's text is full of them. Bytes is the
+      // one unit a caller in any language can reproduce.
+      return sendJSON(res, 200, {
+        id: updated.id,
+        shortId: updated.shortId,
+        version: updated.version,
+        updatedAt: updated.updatedAt,
+        descriptionBytes: Buffer.byteLength(updated.description || '', 'utf8'),
+        ...disclosures,
+      });
+    }
+    sendJSON(res, 200, { ...updated, ...disclosures });
   } catch (e) {
     console.error('PATCH /api/cards/:id:', e.message);
     sendJSON(res, 500, { error: 'Failed to update card' });

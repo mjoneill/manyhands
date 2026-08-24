@@ -770,6 +770,20 @@ function buildMcpServer() {
         + 'concurrent write); `descriptionAppend`/`descriptionPrepend` need no precondition by '
         + 'construction and remain the safer path.',
       ),
+      // #1032 — opt-in SMALL response. Declared here because this inputSchema is
+      // an allowlist and zod strips what it omits: that is exactly how #534's
+      // ifVersion shipped at REST and was unreachable through this tool. A
+      // token-saving parameter the token-spending callers cannot reach saves
+      // nothing.
+      return: z.enum(['id']).optional().describe(
+        'OPTIONAL response shape. `"id"` returns id, shortId, version, updatedAt and '
+        + 'descriptionBytes INSTEAD of the whole card. Omit it for today\'s full echo. '
+        + '⚠️ Every write currently returns the entire body: a one-line descriptionAppend '
+        + 'to a 140 KB card costs ~35,000 tokens of response nobody asked for. '
+        + '`descriptionBytes` (UTF-8 bytes) is what an append caller actually needs — it '
+        + 'proves the text landed without shipping the body back. An unsupported value is '
+        + 'REFUSED with 400 and nothing is written.',
+      ),
       title: z.string().optional(),
       parent: z.string().nullable().optional().describe('The card this one is CONTAINED BY — its parent in the page/epic tree. A wiki page IS a card, so this is how an agent nests or reparents one; `null` clears it and makes the card a root. Refused if it would create a cycle (a card with no path to any root is invisible to every tree walk while still reading back correctly). Absent from this schema since June (#254), which is why containment could only be written by curling REST.'),
       description: z.string().optional().describe('REPLACES the whole body. ⚠️ On a long card this means regenerating text you did not write — use descriptionAppend to add a section instead.'),

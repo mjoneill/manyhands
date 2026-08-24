@@ -85,8 +85,31 @@ const PATCH_EXCLUDED = new Set(['id']);
 // taxonomy change deserves its own review rather than a ride on a feature
 // commit. Until #1023 lands, this entry is the record that someone looked at
 // this row and understood it.
+//
+// ⇒ `return` (#1032) is the SAME taxonomy gap arriving from a second direction,
+// and its presence here is evidence about #1023 rather than a new problem.
+//
+// It is a RESPONSE-SHAPE parameter: it decides what the reply CONTAINS, never
+// what the card holds. So `reads` ("did the value land in stored state?") is
+// honestly false, `accepts` is true, and the sweep reports
+// VALIDATED_THEN_DISCARDED — which again mischaracterises it. The value was not
+// discarded; it was consumed by the response writer, which is the only place it
+// could possibly have an effect.
+//
+// ⛔ Not `noRule`: a rule genuinely fires (an unsupported shape is refused with
+// 400 before the write), and NORULE_CLAIM_REFUTED would catch that lie.
+// ⛔ Not `storedAs`: there is no stored effect to point at, by design.
+//
+// ⭐ Worth noting for whoever takes #1023: the gap now has TWO members with
+// different flavours — a PRECONDITION (ifVersion, decides whether the write
+// happens) and a PRESENTATION parameter (return, decides what the reply says).
+// A single CONSUMED_CONTROL verdict may not fit both; "consumed by the write
+// decision" and "consumed by the response" are different enough that one label
+// could blur them. Two instances is when that becomes visible, which is the
+// argument for registering this here rather than quietly widening a set.
 const KNOWN_PATCH_DISAGREEMENTS = {
   ifVersion: 'VALIDATED_THEN_DISCARDED',
+  return: 'VALIDATED_THEN_DISCARDED',
 };
 
 async function sweep(baseUrl, fn = auditCreateField, probes = CARD_CREATE_PROBES) {
