@@ -1401,7 +1401,26 @@ function buildMcpServer() {
       + 'schema:about ?card . ?card schema:creator ?o } GROUP BY ?a ?o ORDER BY DESC(?n) '
       + 'KNOWN BOUNDARY: schema:creator exists only on cards filed since 2026-08-04 (#631) — '
       + '~9% of the board. An ABSENT creator means UNRECORDED, never "nobody": attribution '
-      + 'before that date lives in git only (the #676 no-go, extended by ruling on #653).',
+      + 'before that date lives in git only (the #676 no-go, extended by ruling on #653). '
+      + 'PRIOR-ART SEARCH — the two hazards below both bite hardest on the ONE query you '
+      + 'most need, so they are here rather than on a card. '
+      + 'NEVER PUT LCASE() IN A FILTER (#927): four OR\'d disjuncts WITH LCASE never returned '
+      + 'and were killed at 309s; the same four WITHOUT ran in 6ms. Disjunct count is free — '
+      + 'LCASE is the multiplier. The engine is SYNCHRONOUS and cannot be timed out (#885), so '
+      + 'a hung query takes the shared event loop with it. And LCASE is exactly what you reach '
+      + 'for when you do not know how a card was titled, which is what a prior-art search IS. '
+      + 'USE INSTEAD: spell the cases out — '
+      + 'FILTER(CONTAINS(?name,"needle") || CONTAINS(?name,"Needle")). '
+      + 'AND THE CARD TYPE NAME EVERYONE GUESSES — a "Card" type in the scrum namespace — '
+      + 'RETURNS ZERO ROWS AND NO ERROR (#962). Cards are schema:CreativeWork; there is no '
+      + 'scrum-namespaced card type at all. '
+      + '(That guessed spelling is not written out here: it is one of the board-data '
+      + 'signatures the #561 publication gate refuses in source, so this description can '
+      + 'warn about the trap but cannot quote it.) '
+      + 'The wrong spelling is the one a reasonable person guesses, and a silent 0 is '
+      + 'indistinguishable from an empty board — so PAIR ANY ZERO WITH A CONTROL you know '
+      + 'returns rows. That pairing is the general remedy here: this engine answers a '
+      + 'malformed question with a confident empty result far more often than with an error.',
     inputSchema: {
       query: z.string().describe('SPARQL SELECT or ASK. Prefixes are pre-declared; results return prefixed short IRIs.'),
       limit: z.number().int().min(1).optional().describe('Row bound (default 100, ceiling 1000); truncation is confessed'),
