@@ -161,6 +161,42 @@ test('red posts once, repeat red is muted, recovery clears, next red is news aga
   assert.equal(posted(await tick(u)), true, 'post-recovery red is a fresh signature');
 });
 
+test('#1042 the alarm NAMES the tree it measured — a reader must not guess which of four', async () => {
+  // ⛔ THE NIGHT THIS COMES FROM: this alarm posted "the FULL test suite is RED,
+  // 1782 tests, 6 fail" naming four files, and two seats spent forty minutes on
+  // it. One could not reproduce it and formed a specific, plausible, WRONG
+  // hypothesis; the other accused a correct tool of miscounting. Neither error
+  // was avoidable FROM THE MESSAGE, because it never said which of four trees it
+  // ran in — and the answer (a tree twelve commits behind) turned the red from a
+  // regression into a deploy-drift report.
+  const u = makeUniverse();
+  goRed(u.dir);
+  const out = await tick(u);
+  assert.equal(posted(out), true, 'precondition: a red must post, or there is no alarm to inspect');
+
+  const alarm = out.split('\n').find((l) => /DRYRUN would post:/.test(l));
+  assert.ok(alarm, `expected one dry-run alarm:\n${out}`);
+  assert.ok(alarm.includes(u.dir),
+    `the alarm must name the tree it measured. This room has FOUR, and the message is `
+    + `the only thing a reader has. Got:\n${alarm}`);
+});
+
+test('#1042 ⛔ NEGATIVE CONTROL — an unresolvable sha SAYS SO, it does not print a bare path', async () => {
+  // ⚠️ A path alone reads as though the sha were checked and matched. The
+  // read-only export has no `.git` BY DESIGN, so "cannot resolve" is a NORMAL
+  // state that must be stated rather than hidden — the same rule as
+  // deploy-drift's UNAVAILABLE and #1029's skipped-blob disclosure: "I could not
+  // find out" must never render as "there is nothing to report".
+  const u = makeUniverse();          // a temp dir: no .git, no DEPLOYED-SHA
+  goRed(u.dir);
+  const out = await tick(u);
+  const alarm = out.split('\n').find((l) => /DRYRUN would post:/.test(l));
+  assert.ok(alarm, `expected one dry-run alarm:\n${out}`);
+  assert.match(alarm, /UNRESOLVABLE/,
+    `with neither .git nor DEPLOYED-SHA the alarm must SAY the sha is unresolvable, `
+    + `rather than print a path that looks verified. Got:\n${alarm}`);
+});
+
 test('a flake — red in the full run, green in isolation — is logged, never posted', async () => {
   // Reproduces the day's three hand-triages mechanically: the fixture fails
   // on its first execution (no marker) and passes on the isolated re-run

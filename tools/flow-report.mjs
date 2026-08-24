@@ -206,6 +206,17 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     .map((p) => p.id || p.key || p.name).filter(Boolean);
 
   const r = flowReport({ cards, roster, now: Date.now(), windowHours });
+  // #1042 — SAY WHICH SOURCE THIS MEASURED. Three correct tools were wrongly
+  // accused in one night because their output named counts and files and never
+  // named what they had read. A number without its source cannot be checked by
+  // anyone except the person who ran it, and they are the one least likely to.
+  //
+  // ⚠️ Deliberately NOT extended to #1042's condition 2 (absence must refuse).
+  // That condition exists for TREE ambiguity — this room has four trees and a
+  // default is a guess about which. An API base is not that: there is one board,
+  // localhost is not a guess about it, and refusing without SCRUM_API_BASE would
+  // add friction to a read-only tool for a hazard it does not have.
+  console.log(`source: ${base}`);
   console.log(r.summary);
   for (const l of r.lines) console.log(l);
   if (!r.ok) console.log('  (roster and WIP unknown for the same reason)');

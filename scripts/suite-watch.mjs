@@ -37,6 +37,38 @@ import { newRunId } from './verdict-ledger.mjs';
 const REPO = process.env.SUITE_WATCH_REPO
   || path.join(path.dirname(new URL(import.meta.url).pathname), '..');
 const POST_URL = process.env.SUITE_WATCH_POST_URL || 'http://127.0.0.1:3141/api/conversations';
+
+/**
+ * #1042 — WHICH TREE DID THIS MEASURE?
+ *
+ * ⛔ THE COST, on 2026-08-24T09:49Z: this watch posted "the FULL test suite is
+ * RED · 1782 tests · 6 fail" and named four files. Two seats spent forty minutes
+ * on it. One could not reproduce it and formed a specific, plausible, wrong
+ * hypothesis; the other accused a correct tool of miscounting. Neither error was
+ * possible to avoid from the message, because the message never said which of
+ * this room's FOUR trees it ran in — and the answer (a tree twelve commits
+ * behind) made the red a deploy-drift report rather than a regression.
+ *
+ * ⭐ So the identity rides the alarm itself, unprompted. A reader must be able to
+ * tell WHICH tree went red without running anything.
+ *
+ * ⚠️ AND IT MUST NOT LIE WHEN IT CANNOT TELL. The read-only export has no `.git`
+ * BY DESIGN, so `rev-parse` fails there legitimately; DEPLOYED-SHA is the answer
+ * in that tree. When neither resolves, it SAYS so rather than printing a bare
+ * path that reads as though the sha were checked and matched.
+ */
+function treeIdentity(repo) {
+  try {
+    const sha = execFileSync('git', ['-C', repo, 'rev-parse', '--short', 'HEAD'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    if (sha) return `${repo} @ ${sha}`;
+  } catch { /* no .git — expected in the read-only export */ }
+  try {
+    const deployed = fs.readFileSync(path.join(repo, 'DEPLOYED-SHA'), 'utf8').trim();
+    if (deployed) return `${repo} @ ${deployed.slice(0, 7)} (DEPLOYED-SHA; no .git)`;
+  } catch { /* not a deployed export either */ }
+  return `${repo} (sha UNRESOLVABLE — no .git and no DEPLOYED-SHA)`;
+}
 const STATE_FILE = process.env.SUITE_WATCH_STATE || path.join(os.homedir(), '.claude', 'scrum-suite-watch.state');
 const COOLDOWN_MS = Number(process.env.SUITE_WATCH_COOLDOWN_MS ?? 6 * 3600 * 1000);
 const DRYRUN = process.env.SUITE_WATCH_DRYRUN === '1';
@@ -261,11 +293,13 @@ if (!muted) {
       + `${full.terminationVerified ? 'and its process tree terminated' : 'but cleanup could not be verified'}. This is a HANG, not a failing assertion: `
       + `Incomplete test file(s): ${incompleteFiles.join(', ') || 'none'}. `
       + `${summary || 'no summary — it never reached one'}. `
-    : `🔴 suite watch: the FULL test suite is RED (${summary || 'summary unparsed'}). `
+    : `🔴 suite watch: the FULL test suite is RED in ${treeIdentity(REPO)} `
+      + `(${summary || 'summary unparsed'}). `
       + `Failing file(s): ${files.length ? files.join(', ') : 'unparsed — read the log'}. `
     + `A red suite invalidates every "no regressions" claim until it is green (the #465 lesson: `
     + `the rail worked and nobody read it — this post is the subscription). `
-    + `Repro: scripts/run-tests.sh in the repo. (This signature now mutes for `
+    + `Repro: sh scripts/run-tests.sh in THAT tree — not in yours; they may differ. `
+    + `(This signature now mutes for `
     + `${Math.round(COOLDOWN_MS / 3600000)}h; a NEW failing file fires immediately.)`;
   if (DRYRUN) {
     console.log(`${now} DRYRUN would post: ${body}`);
