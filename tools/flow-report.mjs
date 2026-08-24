@@ -1,0 +1,150 @@
+/**
+ * tools/flow-report.mjs — #1027. Does work FINISH?
+ *
+ * The room has watches for liveness, delivery, integrity, durability and code
+ * quality, plus deploy-drift for published-vs-running. None of them asks
+ * whether work ARRIVES. On 2026-08-23 seven commits across four p1 cards
+ * produced ZERO completions and nobody noticed until the principal did, by eye.
+ *
+ * ⛔⛔ THE DEFECT THIS MUST NOT COMMIT, and it dictates the whole shape:
+ *
+ *     A report that derives its population FROM ACTIVITY CANNOT SEE INACTIVITY.
+ *
+ * Walk the claims to find the seats, and a seat holding nothing has no row —
+ * so the one signal that mattered (a teammate who pulled nothing for hours) is
+ * exactly the signal the natural implementation deletes. That is not a bug you
+ * find in review; it is invisible by construction, and it is how a colleague
+ * became invisible for an evening.
+ *
+ * ⇒ THE ROSTER IS AN INPUT, NOT AN INFERENCE. Absence needs somewhere to appear.
+ *
+ * Read-only, pure over its inputs, exits 0. It REPORTS; it does not gate —
+ * a report that fails its caller teaches the caller to stop calling it.
+ */
+
+const HOUR = 3600_000;
+
+/**
+ * @param {{cards:Array|null, roster:string[], now:number, windowHours?:number, staleClaimHours?:number}} opts
+ */
+export function flowReport({ cards, roster = [], now = Date.now(), windowHours = 24, staleClaimHours = 6, deployedShas = null } = {}) {
+  // ⛔ UNKNOWN ≠ ZERO. A failed read and an idle room produce identical counts,
+  // and only one of them is information. `null` is "I could not find out";
+  // `[]` is a genuine measurement of an empty board, and stays measurable.
+  if (!Array.isArray(cards)) {
+    const error = 'no cards available — could not read the board, so nothing about flow is known';
+    return {
+      ok: false, touched: null, finished: null, wip: [], staleClaims: [], hasUndeployedWork: null, lines: [],
+      summary: `flow: UNKNOWN — ${error}`, error,
+    };
+  }
+
+  const since = now - windowHours * HOUR;
+  const at = (c) => Date.parse(c.updatedAt || c.createdAt || 0) || 0;
+  const isDone = (c) => String(c.column || '').endsWith('done');
+
+  const inWindow = cards.filter((c) => at(c) >= since);
+  const touched = inWindow.length;
+  const finished = inWindow.filter(isDone).length;
+
+  // ⭐ Built from the ROSTER, so a seat with zero claims still gets a row.
+  const held = new Map(roster.map((s) => [s, []]));
+  for (const c of cards) {
+    if (!c.claimedBy) continue;
+    const seat = String(c.claimedBy).replace(/^person:/, '');
+    if (!held.has(seat)) held.set(seat, []);   // a holder off-roster is still real
+    held.get(seat).push(c);
+  }
+  const wip = [...held.entries()]
+    .map(([seat, cs]) => ({ seat, held: cs.length, cards: cs.map((c) => c.shortId) }))
+    .sort((a, b) => b.held - a.held || String(a.seat).localeCompare(String(b.seat)));
+
+  // A claim is a mutex, not a deed — and the holder is structurally the last to
+  // notice they are still holding it, which is why this is reported rather than
+  // left to whoever is holding.
+  const staleClaims = cards
+    .filter((c) => c.claimedBy && c.claimedAt)
+    .map((c) => ({
+      shortId: c.shortId,
+      seat: String(c.claimedBy).replace(/^person:/, ''),
+      hours: Math.round((now - Date.parse(c.claimedAt)) / HOUR),
+    }))
+    .filter((c) => c.hours >= staleClaimHours)
+    .sort((a, b) => b.hours - a.hours);
+
+  const lines = [];
+  for (const w of wip) {
+    lines.push(w.held === 0
+      // ⭐ Named explicitly rather than omitted. "Holding nothing" is the state
+      // this whole instrument exists to make sayable.
+      ? `  ${w.seat.padEnd(10)} holding nothing`
+      : `  ${w.seat.padEnd(10)} ${w.held} card(s): ${w.cards.map((s) => '#' + s).join(' ')}`);
+  }
+  for (const s of staleClaims) lines.push(`  ⚠️ #${s.shortId} claimed by ${s.seat} for ${s.hours}h`);
+
+  // #726 — always stated, including when the numbers are fine. A line that
+  // appears only on trouble is an alarm with extra steps, and zero-finished is
+  // precisely the state that is indistinguishable from a quiet healthy day
+  // unless it is printed.
+  // #1027 — the three-state correction from review, adopted with its honest limit.
+  // A card whose commits are not in production is a DIFFERENT fact from a card
+  // nobody has started, and conflating them made last night's zero unreadable.
+  //
+  // ⛔ But "finished" is NOT derivable and this must not pretend otherwise. A
+  // card can carry commits AND substantial remaining work — all four of last
+  // night's did, and each says so only in PROSE. So this reports the fact it
+  // can establish (commits not yet deployed) and refuses the one it cannot
+  // (whether the work is done). Calling such a card "finished, awaiting
+  // deploy" would be the overclaim this instrument exists to catch, committed
+  // by the instrument.
+  //
+  // No deployment facts in ⇒ no deployment claims out: null, not an empty list.
+  let hasUndeployedWork = null;
+  if (deployedShas instanceof Set) {
+    hasUndeployedWork = cards
+      .filter((c) => !isDone(c) && Array.isArray(c.implementedBy) && c.implementedBy.length)
+      .filter((c) => c.implementedBy.some((sha) => !deployedShas.has(sha)))
+      .map((c) => ({ shortId: c.shortId, commits: c.implementedBy.length }));
+  }
+
+  const summary = `flow (last ${windowHours}h): ${touched} touched · ${finished} finished`
+    + (hasUndeployedWork ? ` · ${hasUndeployedWork.length} with undeployed commits` : '');
+
+  if (hasUndeployedWork?.length) {
+    lines.push(`  ⚠️ open cards carrying commits NOT in production: `
+      + hasUndeployedWork.map((c) => '#' + c.shortId).join(' ')
+      + '  (undeployed ≠ finished — the card body is the only thing that knows)');
+  }
+
+  return { ok: true, touched, finished, wip, staleClaims, hasUndeployedWork, lines, summary, windowHours };
+}
+
+// ── CLI ────────────────────────────────────────────────────────────────────
+if (import.meta.url === `file://${process.argv[1]}`) {
+  const arg = (n, d) => { const i = process.argv.indexOf(`--${n}`); return i > -1 && process.argv[i + 1] ? process.argv[i + 1] : d; };
+  const base = arg('base', process.env.SCRUM_API_BASE || 'http://127.0.0.1:3141');
+  const windowHours = Number(arg('window', 24));
+
+  // ⚠️ Both fetches degrade to null, never to []. An unreachable board must
+  // report UNKNOWN; reporting "0 touched, 0 finished, everyone idle" from a
+  // failed request is the false all-clear this instrument exists to refuse.
+  const get = async (path) => {
+    try {
+      const res = await fetch(`${base}${path}`);
+      if (!res.ok) return null;
+      return await res.json();
+    } catch { return null; }
+  };
+
+  const cardsRaw = await get('/api/cards');
+  const peopleRaw = await get('/api/people');
+  const cards = Array.isArray(cardsRaw) ? cardsRaw : (cardsRaw?.cards ?? null);
+  const roster = (Array.isArray(peopleRaw) ? peopleRaw : peopleRaw?.people ?? [])
+    .map((p) => p.id || p.key || p.name).filter(Boolean);
+
+  const r = flowReport({ cards, roster, now: Date.now(), windowHours });
+  console.log(r.summary);
+  for (const l of r.lines) console.log(l);
+  if (!r.ok) console.log('  (roster and WIP unknown for the same reason)');
+  process.exit(0);
+}
