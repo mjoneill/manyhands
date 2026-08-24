@@ -46,6 +46,11 @@ function git(repoDir, args) {
   return execFileSync('git', ['-C', repoDir, ...args], { encoding: 'utf8' }).trim();
 }
 
+// #606 instance 6 — beyond this age the local ref is not evidence about the
+// remote. 15 minutes because that is already the age at which this tool warned;
+// the warning and the refusal now share one threshold rather than drifting apart.
+const STALE_REF_MINUTES = 15;
+
 /** How stale is the ref we are comparing against? Never inferred by the reader. */
 /**
  * ⭐ `short` is what rides the SUMMARY LINE. #606 instance 6: the freshness was
@@ -57,16 +62,20 @@ function git(repoDir, args) {
  */
 function refFreshness(repoDir, ref) {
   if (!/^origin\//.test(ref)) {
-    return { kind: 'local', short: `${ref} is a local ref`, text: `comparing against ${ref} (a local ref in this clone, not the remote)` };
+    return { kind: 'local', stale: false, short: `${ref} is a local ref`, text: `comparing against ${ref} (a local ref in this clone, not the remote)` };
   }
   const fetchHead = path.join(repoDir, '.git', 'FETCH_HEAD');
   if (!existsSync(fetchHead)) {
-    return { kind: 'never-fetched', short: `⚠️ ${ref} NEVER fetched`, text: `⚠️ ${ref} has NEVER been fetched in this clone — it may be arbitrarily stale` };
+    return { kind: 'never-fetched', stale: true, short: `⚠️ ${ref} NEVER fetched`, text: `⚠️ ${ref} has NEVER been fetched in this clone — it may be arbitrarily stale` };
   }
   const ageMs = Date.now() - statSync(fetchHead).mtimeMs;
   const mins = Math.round(ageMs / 60000);
-  const warn = mins > 15 ? '⚠️ ' : '';
-  return { kind: 'fetched', ageMinutes: mins, short: `${warn}ref fetched ${mins}m ago`, text: `${warn}${ref} last fetched ${mins} min ago — this comparison is only as fresh as that` };
+  // ⭐ ONE predicate, not a constant repeated at two sites (#890: sharing a
+  // constant is not sharing a rule). The glyph the reader sees and the verdict
+  // the tool reaches are the SAME judgement about the same ref.
+  const stale = mins > STALE_REF_MINUTES;
+  const warn = stale ? '⚠️ ' : '';
+  return { kind: 'fetched', ageMinutes: mins, stale, short: `${warn}ref fetched ${mins}m ago`, text: `${warn}${ref} last fetched ${mins} min ago — this comparison is only as fresh as that` };
 }
 
 /**
@@ -120,9 +129,41 @@ export function driftReport({ repoDir, servedDir, ref = 'origin/main' } = {}) {
   // #726 — the count is ALWAYS stated, including zero. A line that appears only
   // on trouble is an alarm with extra steps, and its absence is unreadable.
   // ⇒ The freshness rides the SUMMARY, not a neighbouring line. See refFreshness().
+  // ⛔⛔ INSTANCE 6, and it is this card's founding sentence occurring inside
+  // this card's own remedy. Measured live 2026-08-24T04:30Z: a 73-minute-old
+  // local ref, served == that ref, and the stamp read "0 — production is up to
+  // date" while production was behind by a commit the ref had never heard of.
+  //
+  // ⭐ THE ASYMMETRY THAT SHAPES THIS: a stale ref cannot INVENT commits, only
+  // MISS them. So staleness can only ever UNDERSTATE drift.
+  //
+  //   commits > 0 + stale ⇒ the ones found are REAL. Report them as a LOWER
+  //                         BOUND. The instrument still knows something, and
+  //                         going quiet here would mute it in precisely the
+  //                         situation it exists for.
+  //   commits = 0 + stale ⇒ ⛔ UNSAYABLE. Zero is the single value that
+  //                         staleness manufactures out of nothing, and it is
+  //                         the one that reads as health.
+  //
+  // ⇒ This is NOT "stale ⇒ refuse". A blanket refusal would be the alarm-fatigue
+  // trade — a report that cries UNKNOWN on a routine condition stops being read.
+  if (commits.length === 0 && refAge.stale) {
+    return {
+      ok: false, total: null, runtime: [], testOnly: [], lines: [], header, refAge, served,
+      error: `the comparison ref is too stale to distinguish "no drift" from "not looked recently"`,
+      // ⚠️ The wording avoids the phrase "up to date" DELIBERATELY, and a test
+      // enforces it. A consumer greps this stamp for reassurance; a refusal
+      // that contains the reassuring phrase inside its own explanation would
+      // match that grep. The all-clear must not be quotable from the refusal.
+      summary: `deploy drift: UNKNOWN — a stale ref cannot tell "no drift" from `
+        + `"not looked recently"; fetch ${ref} and re-run [${refAge.short}]`,
+    };
+  }
+
   const summary = (commits.length === 0
     ? `deploy drift: 0 — production is up to date with ${ref}`
-    : `deploy drift: ${commits.length} commit(s) behind ${ref} — ${runtime.length} runtime-affecting, ${testOnly.length} test-only`)
+    : `deploy drift: ${refAge.stale ? 'at least ' : ''}${commits.length} commit(s) behind ${ref} — `
+      + `${runtime.length} runtime-affecting, ${testOnly.length} test-only`)
     + ` [${refAge.short}]`;
 
   return { ok: true, total: commits.length, runtime, testOnly, lines, header, summary, refAge, served };

@@ -29,7 +29,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -185,5 +185,103 @@ test('#606 ⭐⭐ the SUMMARY LINE ITSELF carries the ref freshness — it must 
     assert.ok(selected.length > 0, 'the summary must still match the consumer pattern');
     assert.match(selected, /fetch|local ref|never fetched|as of/i,
       'and the SELECTED line must carry the caveat — otherwise the pipe drops it again');
+  } finally { rmSync(repo.dir, { recursive: true, force: true }); rmSync(served, { recursive: true, force: true }); }
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// INSTANCE 6 — a STALE comparand fabricates the zero.
+//
+// Measured live 2026-08-24T04:30Z: the local `origin/main` was 73 minutes old,
+// the served sha equalled it, and the stamp read "drift: 0 — production is up
+// to date with origin/main". Production was in fact behind by a real commit
+// that the local ref had never heard of.
+//
+// ⇒ This card's founding sentence, occurring inside this card's own remedy.
+//
+// ⭐ AND THE ASYMMETRY THAT SHAPES THE FIX: a stale ref can only ever
+// UNDERSTATE drift — it cannot invent commits, only miss them. So a NON-ZERO
+// count from a stale ref is still true as a LOWER BOUND and stays useful.
+// Zero is the single value staleness manufactures out of nothing.
+//
+// ⇒ So this is not "stale ⇒ refuse to answer". It is "stale ⇒ the ZERO is the
+// one answer you cannot give", which keeps the instrument useful in the case
+// where it still knows something. Blanket-UNKNOWN would be the alarm-fatigue
+// trade this room has made three times tonight.
+// ══════════════════════════════════════════════════════════════════════════
+
+/** A repo carrying a remote-tracking ref plus a FETCH_HEAD of a chosen age. */
+function makeRepoWithRemoteRef(ageMinutes, { atSha } = {}) {
+  const repo = makeRepo();
+  const target = atSha === 'base' ? repo.base : repo.head;
+  git(repo.dir, 'update-ref', 'refs/remotes/origin/main', target);
+  const fh = path.join(repo.dir, '.git', 'FETCH_HEAD');
+  writeFileSync(fh, `${target}\t\tbranch 'main' of example.invalid\n`);
+  const when = new Date(Date.now() - ageMinutes * 60000);
+  utimesSync(fh, when, when);
+  return repo;
+}
+
+test('#606 ⛔⛔ INSTANCE 6 — a STALE ref must not report "0, up to date". That zero is fabricated.', async () => {
+  // 73 minutes, the measured age of the live instance.
+  const repo = makeRepoWithRemoteRef(73);
+  const served = makeServed(repo.head);   // served == the stale ref ⇒ naive count is 0
+  try {
+    const r = driftReport({ repoDir: repo.dir, servedDir: served, ref: 'origin/main' });
+
+    assert.equal(r.total, null,
+      'a zero derived from a stale comparand is not a measurement — it must not be presented as one');
+    assert.doesNotMatch(r.summary, /up to date/,
+      `"up to date" is the exact false all-clear of instance 6. Got: ${r.summary}`);
+    assert.match(r.summary, /UNKNOWN/,
+      `the verdict must be UNKNOWN, not a number. Got: ${r.summary}`);
+    // #606's own rule: the caveat must ride the SUMMARY, because a consumer
+    // selects one line with sed and a separable warning WILL be separated.
+    assert.match(r.summary, /73m|stale/,
+      `the summary itself must say WHY it cannot answer. Got: ${r.summary}`);
+  } finally { rmSync(repo.dir, { recursive: true, force: true }); rmSync(served, { recursive: true, force: true }); }
+});
+
+test('#606 ⭐ NEGATIVE CONTROL — a stale ref with REAL drift still reports the count, as a lower bound', async () => {
+  // ⛔ THE OVER-REFUSAL THIS GUARDS. If staleness blanket-refuses, the instrument
+  // goes quiet in exactly the situation it exists for: production genuinely
+  // behind. A stale ref cannot invent commits, so the ones it DID find are real.
+  const repo = makeRepoWithRemoteRef(73);
+  const served = makeServed(repo.base);   // two real commits behind
+  try {
+    const r = driftReport({ repoDir: repo.dir, servedDir: served, ref: 'origin/main' });
+
+    assert.equal(r.ok, true, 'a stale ref that still found real drift produced a usable report');
+    assert.equal(r.total, 2, 'the commits it DID find are real — staleness understates, it does not invent');
+    assert.match(r.summary, /at least|behind/,
+      `the count must survive, framed as the lower bound it is. Got: ${r.summary}`);
+    assert.match(r.summary, /73m|stale/, 'and must still disclose the staleness');
+  } finally { rmSync(repo.dir, { recursive: true, force: true }); rmSync(served, { recursive: true, force: true }); }
+});
+
+test('#606 ⭐ NEGATIVE CONTROL — a FRESH ref with no drift still reports 0 EXPLICITLY', async () => {
+  // ⛔ The other over-refusal: if every zero became UNKNOWN, the report could
+  // never say "you are current", and #726's rule (the count is ALWAYS stated,
+  // including zero) would be dead. A fresh zero is a real measurement.
+  const repo = makeRepoWithRemoteRef(1);
+  const served = makeServed(repo.head);
+  try {
+    const r = driftReport({ repoDir: repo.dir, servedDir: served, ref: 'origin/main' });
+
+    assert.equal(r.ok, true, 'a fresh comparison is usable');
+    assert.equal(r.total, 0, 'and zero is a genuine answer when the ref is fresh');
+    assert.match(r.summary, /up to date/, `a fresh zero must still say so plainly. Got: ${r.summary}`);
+    assert.doesNotMatch(r.summary, /UNKNOWN/, `a fresh zero is NOT unknown. Got: ${r.summary}`);
+  } finally { rmSync(repo.dir, { recursive: true, force: true }); rmSync(served, { recursive: true, force: true }); }
+});
+
+test('#606 ⛔ a NEVER-FETCHED ref cannot report zero either — it is arbitrarily stale', async () => {
+  const repo = makeRepo();                       // no FETCH_HEAD at all
+  git(repo.dir, 'update-ref', 'refs/remotes/origin/main', repo.head);
+  const served = makeServed(repo.head);
+  try {
+    const r = driftReport({ repoDir: repo.dir, servedDir: served, ref: 'origin/main' });
+    assert.equal(r.total, null, 'never-fetched is the most stale a ref can be');
+    assert.doesNotMatch(r.summary, /up to date/, `Got: ${r.summary}`);
+    assert.match(r.summary, /UNKNOWN/, `Got: ${r.summary}`);
   } finally { rmSync(repo.dir, { recursive: true, force: true }); rmSync(served, { recursive: true, force: true }); }
 });
