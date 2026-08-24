@@ -1498,6 +1498,54 @@ body::before {
   color: var(--text-muted);
   font-style: italic;
 }
+
+/* #1025 — the save indicator. Reported by the board's owner: "another second
+   or two to save the card
+   (long enough for me to not be sure if it was going to save or not)".
+   Restrained on purpose: acceptance says a save that SUCCEEDS must not nag, so
+   success is a brief, quiet acknowledgement and only FAILURE persists. */
+.save-status {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 9000;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(420px, calc(100vw - 36px));
+  padding: 9px 13px;
+  border: 1px solid var(--border-subtle, #262c3d);
+  border-radius: var(--radius-md, 8px);
+  background: var(--bg-card, #141826);
+  box-shadow: var(--shadow-card, 0 4px 10px -3px rgba(0,0,0,.45));
+  color: var(--text-secondary, #8b92aa);
+  font: 400 13px/1.45 var(--font-stack, sans-serif);
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity .18s ease, transform .18s ease;
+  pointer-events: none;
+}
+.save-status[data-shown="1"] { opacity: 1; transform: translateY(0); }
+.save-status__dot {
+  flex: none;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.save-status[data-state="saving"] { color: var(--text-secondary, #8b92aa); }
+.save-status[data-state="saving"] .save-status__dot { animation: save-pulse 1s ease-in-out infinite; }
+.save-status[data-state="saved"]  { color: var(--accent-goal, #5cc493); }
+/* Failure is the one state that persists and the one the eye must find. */
+.save-status[data-state="failed"] {
+  color: var(--accent-feature, #e2749a);
+  border-color: currentColor;
+  pointer-events: auto;
+}
+@keyframes save-pulse { 0%,100% { opacity: .35 } 50% { opacity: 1 } }
+@media (prefers-reduced-motion: reduce) {
+  .save-status { transition: none }
+  .save-status[data-state="saving"] .save-status__dot { animation: none; opacity: .7 }
+}
 </style>
 </head>
 <body>
@@ -1989,39 +2037,135 @@ function restoreFromLocalStorage() {
 }
 
 // ── JSON File Sync ──
+// #1025 — SAVE FEEDBACK. Reported by the board's owner, 2026-08-24: "another
+// second or two to save the card (long enough for me to not be sure if it was
+// going to save or not)."
+//
+// The defect was never the latency. `saveToJSONFile` already computed
+// `response.ok` correctly on both paths and returned it, and all eleven call
+// sites called it bare — so the success signal was DEAD CODE. The failure was
+// epistemic: nothing on screen answered "did that work?", and the obvious human
+// response to that silence is to click again, which posts the WHOLE BOARD a
+// second time. That is #237/#534's clobber path, reached by a user doing the
+// reasonable thing.
+//
+// ⇒ So the reporting lives HERE, at the choke point, not at the call sites.
+//   Wiring eleven callers would fix eleven callers; call site twelve would be
+//   silent again the day it is written. Nothing above this function needs to
+//   know the feedback exists.
+const SAVE_PENDING_DELAY_MS = 350;   // below this, a save is not worth announcing
+const SAVE_SETTLED_LINGER_MS = 1400; // long enough to be seen, short enough not to nag
+
+let _saveStatusEl = null;
+let _saveStatusTimer = null;
+
+function _saveStatusNode() {
+  if (_saveStatusEl && _saveStatusEl.isConnected) return _saveStatusEl;
+  const el = document.createElement('div');
+  el.className = 'save-status';
+  // polite, not assertive: a save is not an emergency and must not interrupt
+  // whatever a screen-reader user is currently reading.
+  el.setAttribute('role', 'status');
+  el.setAttribute('aria-live', 'polite');
+  el.innerHTML = '<span class="save-status__dot"></span><span class="save-status__text"></span>';
+  document.body.appendChild(el);
+  _saveStatusEl = el;
+  return el;
+}
+
+/**
+ * @param {'saving'|'saved'|'failed'|'idle'} state
+ * ⭐ NEGATIVE CONTROL, in code: `saved` lingers briefly and leaves; only
+ * `failed` persists. "Reports failure" must not become "reports constantly".
+ */
+function _setSaveStatus(state, text) {
+  if (typeof document === 'undefined' || !document.body) return;
+  const el = _saveStatusNode();
+  clearTimeout(_saveStatusTimer);
+  if (state === 'idle') { el.dataset.shown = '0'; return; }
+  el.dataset.state = state;
+  el.querySelector('.save-status__text').textContent = text;
+  el.dataset.shown = '1';
+  if (state === 'saved') {
+    _saveStatusTimer = setTimeout(() => { el.dataset.shown = '0'; }, SAVE_SETTLED_LINGER_MS);
+  }
+}
+
+// The write currently on the wire, and the exact bytes it is writing.
+let _saveInFlight = null;
+let _saveInFlightBody = null;
+
 async function saveToJSONFile() {
-  // Wrap the actual save work in an inner promise that's tracked in
-  // _pendingSaves. The test wrapper awaits these in its finally block so
-  // late-firing fetches can't escape the mock window and hit real fetch.
+  const payload = {
+    cards: cards.map(c => ({...c})), // shallow clone to avoid mutation
+    columns: columns.map(c => ({...c})), // persist column order + names
+    nextShortId: nextShortId,
+    lastUpdated: new Date().toISOString()
+  };
+  _testHookCapturePayload(payload);
+
+  // ⭐ THE GUARD. `lastUpdated` is stamped per call, so it is excluded from the
+  // comparison — otherwise two clicks a millisecond apart would never look
+  // identical and the guard would never fire.
+  const body = JSON.stringify(payload);
+  const identity = JSON.stringify({ ...payload, lastUpdated: null });
+
+  // ⛔ A second click during an in-flight save must NOT produce a second
+  // whole-board write. It returns the write already going out.
+  //
+  // ⚠️ AND IT MUST COMPARE, NOT JUST DEDUPE. Blindly returning the in-flight
+  // promise would silently DROP a change made while that save was on the wire —
+  // trading a visible double-write for invisible data loss, which is this
+  // card's own defect wearing the fix's clothes.
+  if (_saveInFlight && _saveInFlightBody === identity) return _saveInFlight;
+
+  // A genuinely different board state still gets written — but AFTER the
+  // current one, never beside it. Two concurrent whole-board writes from
+  // different snapshots is the clobber this card exists downstream of.
+  const prior = _saveInFlight;
+
   const p = (async () => {
+    if (prior) { try { await prior; } catch { /* a failed prior must not cancel this write */ } }
+    const pendingTimer = setTimeout(
+      () => _setSaveStatus('saving', 'Saving…'),
+      SAVE_PENDING_DELAY_MS,
+    );
     try {
-      const payload = {
-        cards: cards.map(c => ({...c})), // shallow clone to avoid mutation
-        columns: columns.map(c => ({...c})), // persist column order + names
-        nextShortId: nextShortId,
-        lastUpdated: new Date().toISOString()
-      };
-      _testHookCapturePayload(payload);
       const response = await fetch(API_BASE + JSON_ENDPOINTS.save, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body
       });
+      clearTimeout(pendingTimer);
       if (!response.ok) {
         console.warn('saveToJSONFile: server returned', response.status);
+        // The three remedies differ, so the three messages differ: reload and
+        // reapply · retry · you are offline. A single "save failed" would make
+        // the user guess which, and guessing wrong costs the edit.
+        _setSaveStatus('failed', response.status === 409
+          ? 'Not saved — someone else changed the board. Reload before re-editing.'
+          : `Not saved — the server refused (${response.status}). Your edit is still on screen.`);
+        return false;
       }
-      return response.ok;
+      _setSaveStatus('saved', 'Saved');
+      return true;
     } catch (e) {
+      clearTimeout(pendingTimer);
       // Server not running or network error — graceful degradation
       console.warn('saveToJSONFile: could not reach server', e.message);
+      _setSaveStatus('failed', 'Not saved — cannot reach the server. Your edit is still on screen.');
       return false;
     }
   })();
+
+  _saveInFlight = p;
+  _saveInFlightBody = identity;
   _pendingSaves.push(p);
   // Remove from the array when the promise settles (success or failure)
   p.finally(() => {
     const i = _pendingSaves.indexOf(p);
     if (i >= 0) _pendingSaves.splice(i, 1);
+    if (_saveInFlight === p) { _saveInFlight = null; _saveInFlightBody = null; }
   });
   return p;
 }
