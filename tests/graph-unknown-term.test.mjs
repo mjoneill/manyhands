@@ -84,7 +84,12 @@ test('#1104 a term the projection can never emit is REFUSED, and the refusal NAM
   const s = await startRestServer({ board });
   try {
     for (const [q, term] of [
-      ['SELECT ?c WHERE { ?c a scrum:Card }', 'scrum:Card'],
+      // ⛔ `scrum:Card` USED TO LIVE HERE and no longer can: #962 landed and the
+      // projection now emits it, so it is a REAL term and this guard must not
+      // refuse it. Removed rather than reworded — a guard example that the
+      // projection emits would assert the opposite of what #1104 exists for.
+      // The positive half (`scrum:Card` ANSWERS) is asserted in
+      // tests/graph-query-prior-art-hazards.test.mjs, in #962's own commit.
       ['SELECT ?d WHERE { ?c schema:description ?d }', 'schema:description'],
       ['SELECT ?t WHERE { ?c schema:additionalType ?t }', 'schema:additionalType'],
     ]) {

@@ -168,6 +168,10 @@ export const PREDICATE_SOURCE = Object.freeze({
   'prov:wasAssociatedWith': null,
   'prov:startedAtTime': null,
   'schema:CreativeWork': null,  // rdf:type values, not properties
+  // #962 — the guessable alias, emitted BESIDE schema:CreativeWork so the query
+  // a reasonable person writes stops returning a silent zero. PROJECTION ONLY:
+  // no store field corresponds, which is what the `null` says.
+  'scrum:Card': null,
   'schema:Comment': null,
   'schema:Person': null,
   'schema:DefinedTerm': null,

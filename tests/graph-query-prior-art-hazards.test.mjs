@@ -81,44 +81,41 @@ test('#927 the tool description names the LCASE hazard AND the shape that works'
   } finally { await pair.stop(); }
 });
 
-test('#962 the tool description warns that `?c a scrum:Card` returns ZERO, silently', async () => {
+test('#962 the description says BOTH types match, and states the projection-only divergence', async () => {
+  // ✅ INVERTED 2026-08-24 when #962 landed. It read "warns that the guessed type
+  // returns ZERO, silently" — and it FAILED the moment the alias started
+  // resolving, which is what it was written to do. Not deleted: inverted, per
+  // the #923 precedent, because deleting removes the only test that ever tied
+  // this paragraph to the engine's actual behaviour.
   const pair = await startPair({ board: boardWithCards() });
   try {
     const session = await mcpSession(pair.mcp.mcpUrl);
     const d = await describeGraphQuery(session);
 
-    // ⚠️ The literal spelling is NOT asserted, and the reason is a live collision
-    // between two safety mechanisms: `scrum:Card` is one of the board-data
-    // signatures the #561 publication gate refuses in source, so the description
-    // CANNOT quote the trap it warns about. (This test file can — *.test.mjs is
-    // excluded from that scan — which is why the coupling test below still runs
-    // the real query.) The description must therefore identify the trap by
-    // DESCRIPTION rather than by string, and say why.
-    assert.match(d, /guess/i,
-      'the description must identify the trap as the spelling a seat would GUESS — '
-      + 'it cannot quote the literal, so it has to be recognisable from the reader\'s own typing');
-    assert.match(d, /scrum namespace/i,
-      'and it must name the namespace, or "the type everyone guesses" is unresolvable');
-    assert.match(d, /zero|0 rows|no error|silent/i,
-      'and it must say the failure is SILENT — a seat who sees an error investigates; '
-      + 'a seat who sees 0 rows concludes the board is empty');
-    assert.match(d, /schema:CreativeWork/,
-      'the correct type must sit beside the wrong one');
+    assert.match(d, /scrum:Card/, 'the working spelling must be quotable now that it works');
+    assert.match(d, /schema:CreativeWork/, 'and its sibling, since both match');
+
+    // ⛔ THE REVIEWER'S CONDITION, and it is the half most likely to be dropped.
+    // A reader who sees "scrum:Card now works" will assume the export changed
+    // too. It did not — the stored document types a card as CreativeWork alone.
+    assert.match(d, /PROJECTION-ONLY|projection-only/,
+      'the description MUST say the type is projection-only, or it invites exactly '
+      + 'the wrong inference about the stored document');
+    assert.match(d, /stored document|board-data/i,
+      'and it must name the surface that does NOT carry it');
   } finally { await pair.stop(); }
 });
 
-test('#927/#962 ⭐ THE COUPLING — the documented hazard is still TRUE of the live engine', async () => {
-  // ⛔ THE TEST THAT KEEPS THE PROSE HONEST. If #962 lands and `scrum:Card`
-  // starts resolving, this FAILS — which is the signal to correct the
-  // description rather than leave a warning about a hazard that no longer
-  // exists. A stale warning is worse than none: it spends a seat's trust on a
-  // paragraph whose other claims may still matter.
+test('#962 ⭐ THE COUPLING, INVERTED — the alias RESOLVES, and the DOCUMENT still does not carry it', async () => {
+  // ⛔ THE DIVERGENCE IS THE RISK, so it is the thing under test. Two surfaces,
+  // one name: if someone later dual-types the stored document (option 4a), this
+  // fails and forces the description's "projection-only" claim to be corrected
+  // in the same commit — the same mechanism that caught #962 itself.
   const pair = await startPair({ board: boardWithCards() });
   try {
     const ask = async (type) => {
       const r = await fetch(`${pair.rest.baseUrl}/api/graph`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: `SELECT (COUNT(?c) AS ?n) WHERE { ?c a ${type} }` }),
       });
       const b = await r.json();
@@ -127,33 +124,35 @@ test('#927/#962 ⭐ THE COUPLING — the documented hazard is still TRUE of the 
 
     // ⭐ ANTI-VACUITY FIRST. "0 vs 0" would prove nothing at all — the trap is
     // only a trap because the RIGHT query returns rows on the same board.
-    const right = await ask('schema:CreativeWork');
-    assert.equal(right.status, 200, `the control query must ANSWER, got ${right.status} ${right.error}`);
-    assert.ok(right.n > 0, `the control query must return rows, got ${right.n} — otherwise the fixture is empty and this test is meaningless`);
+    const creative = await ask('schema:CreativeWork');
+    assert.equal(creative.status, 200, `the control query must ANSWER, got ${creative.status} ${creative.error}`);
+    assert.ok(creative.n > 0, `the control query must return rows, got ${creative.n} — otherwise the fixture is empty and this test is meaningless`);
 
-    // ⭐⭐⭐ UPDATED BY #1104, AND THIS TEST IS WHY THE UPDATE IS HONEST.
+    // ⭐⭐⭐ #962 HAS LANDED, AND THIS IS THE ASSERTION #1104 ASKED FOR IN ADVANCE.
     //
-    // It used to assert `scrum:Card` returns 0 ROWS — the SILENT failure. That
-    // is no longer what happens: the unknown-term guard REFUSES it with a 400
-    // naming the term, which is this test's own stated wish ("a seat who sees
-    // an error investigates; a seat who sees 0 rows concludes the board is
-    // empty") arriving as behaviour instead of prose.
+    // The history is the point and is kept: this test once asserted `scrum:Card`
+    // returns 0 ROWS — the SILENT failure this card was filed about. #1104 replaced
+    // that with a LOUD refusal, a 400 naming the unknown term. Both were true of a
+    // graph where the alias did not exist. #1104's own comment left the instruction:
+    // "if some future change makes scrum:Card a real class, THIS assertion fails too
+    // ... correct the description in the same commit." THIS is that commit.
     //
-    // ⛔ WHAT HAS **NOT** CHANGED, and the distinction is the whole point:
-    // `scrum:Card` still does not exist. #962 has NOT landed. The hazard was
-    // MITIGATED, not retired — so the description must still warn about the
-    // guess, and the assertions above this one still hold it to that.
-    //
-    // ⚠️ If some future change makes `scrum:Card` a real class, THIS assertion
-    // fails too (a real term is answered, not refused) and the same instruction
-    // applies: correct the description in the same commit.
-    const wrong = await ask('scrum:Card');
-    assert.equal(wrong.status, 400,
-      `\`?c a scrum:Card\` returned ${wrong.status}/${wrong.n} rows — the documented hazard has CHANGED. `
-      + 'If #962 has landed this is good news and the graph_query description must be '
-      + 'corrected in the same commit; it currently warns seats away from a working query.');
-    assert.equal(wrong.code, 'UNKNOWN_TERM',
-      'and the refusal must be the #1104 guard, not an incidental parse failure — '
-      + `got ${JSON.stringify(wrong.error).slice(0, 160)}`);
+    // ⛔ THE HAZARD IS RETIRED, NOT MITIGATED: the guessable name now ANSWERS.
+    // The #1104 guard still protects every OTHER unminted term — `scrum:Card` is
+    // declared in GRAPH_VOCABULARY because it is emitted, and the undeclared-terms
+    // reconciliation at the foot of graph-replica.mjs is what keeps those in step.
+    const alias = await ask('scrum:Card');
+    assert.equal(alias.status, 200,
+      `\`?c a scrum:Card\` returned ${alias.status} — #962 has landed, so the guessable `
+      + `name must ANSWER rather than be refused. Got ${JSON.stringify(alias.error ?? null).slice(0, 160)}`);
+    assert.equal(alias.n, creative.n,
+      `the guessable type must match EVERY card, not some — got ${alias.n} vs ${creative.n}`);
+
+    // ⭐ AND THE OTHER HALF: the stored document is unchanged.
+    const load = await (await fetch(`${pair.rest.baseUrl}/api/load`)).json();
+    const types = new Set((load.cards || []).map((c) => JSON.stringify(c['@type'] ?? null)));
+    assert.equal(types.has('"scrum:Card"'), false,
+      'the STORED document must not carry the alias — this build is projection-only, '
+      + 'and if that changed, the description is now wrong');
   } finally { await pair.stop(); }
 });

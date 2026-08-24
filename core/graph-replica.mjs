@@ -130,6 +130,11 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:declaredBy', 'scrum:required', 'scrum:requiredRaw', 'scrum:replyBy',
   'scrum:to', 'scrum:closureReason', 'scrum:effectiveAt',
   // scrum: classes
+  // #962 — the GUESSABLE alias. Emitted beside schema:CreativeWork by
+  // projectEntity; declared here because the #1104 unknown-term guard
+  // refuses any term absent from this set, and the undeclared-terms
+  // reconciliation below fails on anything emitted but not declared.
+  'scrum:Card',
   'scrum:ReleaseCondition', 'scrum:Decision', 'scrum:MemoryVersion',
   'scrum:Memory', 'scrum:TendingClaimAttempt', 'scrum:TendingMint',
   'scrum:TendingState', 'scrum:TendingPlaylistVersion', 'scrum:TendingPlaylist',
@@ -854,6 +859,26 @@ function projectEntity(store, e) {
     if (t === 'CreativeWork') {
       const s = nn(E + e['@id']);
       add(s, A, nn(SC + 'CreativeWork'));
+      // #962 — THE GUESSABLE ALIAS. `?c a scrum:Card` returned ZERO ROWS and no
+      // error while 933 cards existed, on the tool this room is required to try
+      // first. The trap was baited with the obvious spelling: the seat doing the
+      // sensible thing got a confident, silent, well-formed lie, and the seat who
+      // knew the arcane spelling got the right answer.
+      //
+      // ⚠️ PROJECTION ONLY — THE STORED DOCUMENT IS UNCHANGED. A card is
+      // `CreativeWork` on disk and `CreativeWork + scrum:Card` in the graph. That
+      // divergence is deliberate and it is stated here, in the graph_query tool
+      // description, and on #962, because it is a TWO-SURFACES-ONE-NAME shape:
+      // a reader querying the export gets a different answer than the graph and
+      // has no reason to suspect either. The export-fidelity half (option 4a,
+      // dual-typing the document) is deferred to its own card, not smuggled in
+      // as the cost of a query fix.
+      //
+      // ⭐ Chosen over 4a on blast radius: 4a is a ~26-file atomic change to the
+      // LOAD PATH, where a mistake means cardEntities loads EMPTY — total data
+      // invisibility, traded for query ergonomics. This is one line, and a
+      // projection is rebuildable from the store by construction.
+      add(s, A, nn(S + 'Card'));
       if (e.identifier != null) add(s, nn(SC + 'identifier'), lit(e.identifier));
       if (e.name != null) add(s, nn(SC + 'name'), lit(e.name));
       if (e.text) add(s, nn(SC + 'text'), lit(e.text));
