@@ -62,15 +62,15 @@ test('#1027 WIP counts per seat, and long-held claims are surfaced with their ag
   assert.ok(r.staleClaims[0].hours >= 8, `expected ~9h, got ${r.staleClaims[0].hours}`);
 });
 
-test('#1027 ⭐ counts TOUCHED vs FINISHED — the pair whose gap was invisible', async () => {
+test('#1027 ⭐ counts TOUCHED vs TOUCHED-AND-DONE — the pair whose gap was invisible', async () => {
   // Seven commits, four cards, zero completions. Neither number alone shows it:
-  // "4 touched" reads as progress and "0 finished" reads as idle. The GAP is
+  // "4 touched" reads as progress and "0 done" reads as idle. The GAP is
   // the finding, so both are reported together or neither means anything.
   const r = flowReport({ cards: CARDS, roster: ['ada'], now: NOW, windowHours: 24 });
   assert.equal(r.touched, 4, 'four cards moved inside the window (the 30h-old one did not)');
-  assert.equal(r.finished, 1, 'one of them reached done');
+  assert.equal(r.touchedAndDone, 1, 'one of them is in done');
   assert.match(r.summary, /4 touched/);
-  assert.match(r.summary, /1 finished/);
+  assert.match(r.summary, /1 touched-and-done/);
 });
 
 test('#1027 ⛔ zero finished is STATED, never implied by silence', async () => {
@@ -79,8 +79,51 @@ test('#1027 ⛔ zero finished is STATED, never implied by silence', async () => 
   // it is indistinguishable from a quiet healthy day unless it is printed.
   const noneDone = CARDS.map((c) => ({ ...c, column: 'backlog' }));
   const r = flowReport({ cards: noneDone, roster: ['ada'], now: NOW, windowHours: 24 });
-  assert.equal(r.finished, 0);
-  assert.match(r.summary, /0 finished/, 'zero must be SAID');
+  assert.equal(r.touchedAndDone, 0);
+  assert.match(r.summary, /0 touched-and-done/, 'zero must be SAID');
+});
+
+test('#1027 ⛔⛔ A CARD DONE FOR DAYS AND MERELY EDITED MUST NOT READ AS FINISHING', async () => {
+  // ⇒ Found by review, running this tool against production data.
+  //
+  // `touched-in-window AND currently done` counts a card that was ALREADY done
+  // and simply got annotated. Two of tonight's were her own grooming — a
+  // blocker note on one card, a successor-gap append on another, both closed
+  // days earlier.
+  //
+  // ⭐⭐⭐ THE IRONY IS THE POINT: the more carefully a PO annotates COMPLETED
+  // cards, the more this report claims work is FINISHING. A metric built
+  // because completions were not happening rises when nothing completes and
+  // somebody tidies. That is the same defect #1027 exists to name — a signal
+  // that reads as health because nobody asked what it counts.
+  //
+  // ⛔ The honest count needs a TRANSITION into done inside the window, which
+  // `updatedAt` cannot express. So the number is not fixed here — it is RENAMED
+  // to what it actually measures, and the report says what it cannot establish.
+  const groomed = [
+    { shortId: 1, column: 'done', updatedAt: hoursAgo(1), createdAt: hoursAgo(300) },
+  ];
+  const r = flowReport({ cards: groomed, roster: ['ada'], now: NOW, windowHours: 24 });
+
+  assert.equal(r.touchedAndDone, 1, 'it IS touched-in-window and IS in done — both true');
+  assert.equal(r.finished, undefined,
+    'the field must not still be called `finished` — a caller reading r.finished '
+    + 'gets an inflated completion count with no way to know it is inflated');
+  assert.ok(!/\bfinished\b/.test(r.summary),
+    `the summary must not claim finishing it cannot establish. Got: ${r.summary}`);
+  assert.match(r.summary, /touched-and-done/,
+    'it must name what it actually counted');
+});
+
+test('#1027 the touched-and-done limit is STATED, not left for the reader to infer', async () => {
+  // ⭐ The same discipline this file already applies to deployment: report the
+  // fact you can establish, and NAME the one you cannot. A number whose caveat
+  // lives only in a card is a number that will be quoted without it.
+  const r = flowReport({ cards: CARDS, roster: ['ada'], now: NOW, windowHours: 24 });
+  const all = [r.summary, ...r.lines].join('\n');
+  assert.match(all, /already done|edited|transition/i,
+    'the report must say that an already-done card being edited lands in this '
+    + `count. Got: ${all}`);
 });
 
 test('#1027 ⛔ no cards is UNKNOWN, never "0 WIP, all healthy"', async () => {

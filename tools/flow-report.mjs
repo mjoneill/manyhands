@@ -34,7 +34,7 @@ export function flowReport({ cards, roster = [], now = Date.now(), windowHours =
   if (!Array.isArray(cards)) {
     const error = 'no cards available — could not read the board, so nothing about flow is known';
     return {
-      ok: false, touched: null, finished: null, wip: [], staleClaims: [], blockedClaims: [], hasUndeployedWork: null, lines: [],
+      ok: false, touched: null, touchedAndDone: null, wip: [], staleClaims: [], blockedClaims: [], hasUndeployedWork: null, lines: [],
       summary: `flow: UNKNOWN — ${error}`, error,
     };
   }
@@ -45,7 +45,27 @@ export function flowReport({ cards, roster = [], now = Date.now(), windowHours =
 
   const inWindow = cards.filter((c) => at(c) >= since);
   const touched = inWindow.length;
-  const finished = inWindow.filter(isDone).length;
+
+  // ⛔⛔ NOT `finished`. This is touched-in-window AND currently in done, which
+  // counts a card that was ALREADY done and merely got EDITED.
+  //
+  // Found by review against production, 2026-08-24: two of the cards inflating
+  // this number were a PO's own grooming — a blocker note and a successor-gap
+  // append, both on cards closed days earlier.
+  //
+  // ⭐⭐⭐ The irony is the point: the more carefully someone annotates COMPLETED
+  // cards, the more this report claims work is FINISHING. A metric built
+  // because completions were not happening rises when nothing completes and
+  // somebody tidies.
+  //
+  // A true finishing count needs a TRANSITION into done inside the window.
+  // `updatedAt` cannot express that; the event log can (`state` is the full
+  // entity after each write, so a column change is derivable) — but this is a
+  // pure function over CARDS and has no events to read. Rather than infer a
+  // transition from a timestamp that cannot carry one, it is named for what it
+  // measures. Renaming is not a workaround here: `touched-and-done` is a true
+  // number, and `finished` was a false one.
+  const touchedAndDone = inWindow.filter(isDone).length;
 
   // ⭐ Built from the ROSTER, so a seat with zero claims still gets a row.
   const held = new Map(roster.map((s) => [s, []]));
@@ -143,8 +163,15 @@ export function flowReport({ cards, roster = [], now = Date.now(), windowHours =
       .map((c) => ({ shortId: c.shortId, commits: c.implementedBy.length }));
   }
 
-  const summary = `flow (last ${windowHours}h): ${touched} touched · ${finished} finished`
+  const summary = `flow (last ${windowHours}h): ${touched} touched · ${touchedAndDone} touched-and-done`
     + (hasUndeployedWork ? ` · ${hasUndeployedWork.length} with undeployed commits` : '');
+
+  // ⭐ The caveat travels WITH the number. A limit recorded only on a card is a
+  // number that will be quoted without it — and this one reads as a completion
+  // count to anybody who does not already know better.
+  lines.push('  ⓘ touched-and-done counts cards in done that were EDITED in the window, '
+    + 'including ones finished long ago — it is not a count of work FINISHING '
+    + '(that needs a transition, which updatedAt cannot express)');
 
   if (hasUndeployedWork?.length) {
     lines.push(`  ⚠️ open cards carrying commits NOT in production: `
@@ -152,7 +179,7 @@ export function flowReport({ cards, roster = [], now = Date.now(), windowHours =
       + '  (undeployed ≠ finished — the card body is the only thing that knows)');
   }
 
-  return { ok: true, touched, finished, wip, staleClaims, blockedClaims, hasUndeployedWork, lines, summary, windowHours };
+  return { ok: true, touched, touchedAndDone, wip, staleClaims, blockedClaims, hasUndeployedWork, lines, summary, windowHours };
 }
 
 // ── CLI ────────────────────────────────────────────────────────────────────
