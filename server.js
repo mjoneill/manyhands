@@ -443,9 +443,42 @@ async function handleSave(req, res) {
       });
     }
 
+    // #1039 — AN OMITTED KEY MEANS "NO OPINION", NEVER "DELETE".
+    //
+    // The loop below takes the cards array WHOLESALE, and #230's guard above
+    // compares IDs. So a client that sends every id but omits a FIELD passes
+    // both: nothing disappears, the guard stays silent, and the field is
+    // erased on every card. #209 proposes exactly such a client — hydrating
+    // the board list from a lightweight projection instead of pulling 7.1 MB
+    // of descriptions on every load — and without this it would blank all 931
+    // card bodies on its first save.
+    //
+    // Measured 2026-08-24: /api/load emits 28 per-card keys, /api/cards emits
+    // 26; the two it drops are `description` (931 cards) and a legacy
+    // `assignee` (2). The rule is general rather than description-only so the
+    // projection can change shape later without re-opening this hazard.
+    //
+    // ⚠️ The distinction is already in the wire format, and JSON is what makes
+    // it reliable: JSON.parse never yields an `undefined` VALUE, only an
+    // ABSENT key. So spread order alone expresses the whole rule —
+    //     absent      ⇒ falls through to the stored value   (a projection)
+    //     "" / [] /   ⇒ overrides                           (a real clear;
+    //     null / "x"                                         index.html:2717
+    //                                                        sends "" for an
+    //                                                        emptied box)
+    // A card with no stored counterpart is new and passes through untouched.
+    // `version` rides along and is then recomputed server-side below (#534).
+    const storedById = new Map(
+      (existing.cards || []).filter((c) => c && c.id).map((c) => [c.id, c]),
+    );
+    const carryForward = (incomingCards) => incomingCards.map((c) => (
+      c && c.id && storedById.has(c.id) ? { ...storedById.get(c.id), ...c } : c
+    ));
+
     const merged = { ...existing };
     for (const k of ['cards', 'columns', 'nextShortId', 'lastUpdated']) {
-      if (incoming[k] !== undefined) merged[k] = incoming[k];
+      if (incoming[k] === undefined) continue;
+      merged[k] = k === 'cards' ? carryForward(incoming[k]) : incoming[k];
     }
 
     // #534 — THE VERSION IS SERVER-COMPUTED HERE, NEVER ACCEPTED.
