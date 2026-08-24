@@ -853,6 +853,30 @@ function projectEntity(store, e) {
           const iri = /^[0-9a-f]{40}$/.test(ref) ? IRI.commit + ref : IRI.entity + ref;
           add(rc, nn(S + 'evidencedBy'), nn(iri));
         }
+        // #1041 — A BLOCKER SCOPED TO ONE CONDITION, not to the whole card.
+        //
+        // ⛔ THE DEFECT: a constraint on ONE condition was only expressible as a
+        // card-level `blockedBy`, so the queue reported a card as parked behind
+        // an epic when most of it was deliverable. #125 sat four days that way —
+        // five of six conditions approved and gate-discharged, one correctly
+        // blocked, and the verdict read "open-blocker:310".
+        //
+        // ⭐ SAME PREDICATE, DIFFERENT SUBJECT — deliberately. `scrum:blockedBy`
+        // on a ReleaseCondition is the same relation as on a card, and this file
+        // already warns against "two names for one relation, and every query then
+        // has to know which subsystem it is standing in". A condition-scoped
+        // block is found by the SUBJECT being a ReleaseCondition, never by a
+        // second vocabulary.
+        //
+        // ⚠️ Defensive on shape: this field is not schema-validated server-side
+        // (validateAcceptance checks condition/evidence/note only), so a caller
+        // can write anything. A non-string ref is skipped rather than projected
+        // as a broken IRI — an unresolvable edge here would make a genuinely
+        // blocked card look scoped, which is the one direction that matters.
+        for (const ref of Array.isArray(a.blockedBy) ? a.blockedBy : []) {
+          if (typeof ref !== 'string' || !ref) continue;
+          add(rc, nn(S + 'blockedBy'), nn(IRI.entity + ref));
+        }
       }
       // #858 — THE MEMBERSHIP SPINE. Phase 2 chose `parent`/`isPartOf` over
       // `relatedTo` precisely so a membership edge would stay distinguishable

@@ -62,6 +62,25 @@ export const readyBlockersQuery = () =>
   `OPTIONAL { ?target scrum:column ?tcol } }`;
 
 /**
+ * #1041 — blockers scoped to ONE ACCEPTANCE CONDITION rather than to the card.
+ *
+ * ⛔ THE DEFECT THIS ANSWERS: a constraint on one condition could only be
+ * expressed as a card-level `blockedBy`, so the queue reported a card as parked
+ * behind an epic when most of it was deliverable. #125 sat four days that way —
+ * five of six conditions approved by the owner and gate-discharged, one
+ * correctly blocked, and the verdict read `open-blocker:310`.
+ *
+ * ⭐ It is the SAME predicate with a different SUBJECT: a condition-scoped block
+ * is a `scrum:blockedBy` whose subject is a ReleaseCondition. No second
+ * vocabulary, so no query has to know which subsystem it is standing in.
+ */
+export const readyConditionBlockersQuery = () =>
+  `SELECT ?id ?tid WHERE { ` +
+  `?rc a scrum:ReleaseCondition ; scrum:ofCard ?card ; scrum:blockedBy ?target . ` +
+  `?card schema:identifier ?id . ` +
+  `OPTIONAL { ?target schema:identifier ?tid } }`;
+
+/**
  * #965 — HUMAN blockers: `scrum:Blocker` nodes carrying `blockedByPerson` or
  * (#966) `blockedByAnyHuman`. These are a DIFFERENT SHAPE from the card→card
  * `scrum:blockedBy` edges above — a separate node with its own status — which
@@ -219,7 +238,7 @@ function foldContext(contextRows) {
 const emptyContext = () =>
   Object.fromEntries(CONTEXT_TYPES.map((t) => [t, { members: [], total: 0, truncated: false }]));
 
-export function computeReady(factRows, blockerRows, supersededRows, contextRows, humanBlockerRows) {
+export function computeReady(factRows, blockerRows, supersededRows, contextRows, humanBlockerRows, conditionBlockerRows) {
   // #965 — card shortId → sorted keys of its OPEN human blockers.
   // `cleared` is the only status that does not gate: #881 built the field so
   // the queue CONVERGES, and a rule ignoring it would hide a card forever once
@@ -242,6 +261,17 @@ export function computeReady(factRows, blockerRows, supersededRows, contextRows,
     const id = Number(r.id);
     if (!blockersByCard.has(id)) blockersByCard.set(id, []);
     blockersByCard.get(id).push(r);
+  }
+
+  // #1041 — card shortId → the set of blocker targets CLAIMED by one of its
+  // acceptance conditions. A target in this set is not a card-level block; it
+  // is a declared limit on one deliverable.
+  const scopedByCard = new Map();
+  for (const r of conditionBlockerRows || []) {
+    if (r?.tid == null) continue;   // an unresolvable target claims nothing
+    const id = Number(r.id);
+    if (!scopedByCard.has(id)) scopedByCard.set(id, new Set());
+    scopedByCard.get(id).add(Number(r.tid));
   }
   // #817 — first superseder wins, ordered so the reason is deterministic.
   const supersededBy = new Map();
@@ -318,7 +348,27 @@ export function computeReady(factRows, blockerRows, supersededRows, contextRows,
     const edges = blockersByCard.get(shortId) || [];
     const open = edges.filter((e) => e.tid != null && tail(e.tcol) !== 'done')
       .map((e) => Number(e.tid)).sort((a, b) => a - b);
-    if (open.length) { verdicts.push({ ...base, ready: false, reason: `open-blocker:${open[0]}` }); continue; }
+
+    // #1041 — RULED 2026-08-24, recorded on the card before this was written:
+    // OFFER THE CARD, AND NAME THE BLOCKED CONDITION. Neither hide it nor offer
+    // it silently.
+    //
+    // ⛔ PARTIAL ACCOUNTING IS NOT ENOUGH. Only blockers that a condition has
+    // CLAIMED are set aside; any blocker nobody claimed still removes the card,
+    // and the reason names the UNACCOUNTED one. A rule that offered a card as
+    // soon as ANY of its blockers was scoped would quietly offer genuinely
+    // blocked work — the failure direction this must not have.
+    const scoped = scopedByCard.get(shortId) || new Set();
+    const unaccounted = open.filter((t) => !scoped.has(t));
+    if (unaccounted.length) {
+      verdicts.push({ ...base, ready: false, reason: `open-blocker:${unaccounted[0]}` });
+      continue;
+    }
+    // ⇒ Every open blocker is condition-scoped. The card is offered, and the
+    // reason RIDES THE READY ENTRY rather than living only in the excluded list:
+    // a caller reading only the queue must still see it, or this trades an
+    // invisible block for an unread one.
+    const conditionScoped = open.length ? `blocked-condition:${open.join(',')}` : null;
     const dangling = edges.filter((e) => e.tid == null).map((e) => tail(e.target)).sort();
     if (dangling.length) { verdicts.push({ ...base, ready: false, reason: `dangling-blocker:${dangling[0]}` }); continue; }
 
@@ -338,7 +388,13 @@ export function computeReady(factRows, blockerRows, supersededRows, contextRows,
     const human = (humanBlockersByCard.get(shortId) || []).sort();
     if (human.length) { verdicts.push({ ...base, ready: false, reason: `person-blocker:${human[0]}` }); continue; }
 
-    verdicts.push({ ...base, ready: true, reasons: [`column:${column}`, 'unclaimed', 'no-open-blockers'] });
+    // ⛔ NEVER BOTH. Claiming `no-open-blockers` beside a scoped block would be
+    // the false reason #965 was filed for, in a `reasons` array that reads correct.
+    verdicts.push({
+      ...base,
+      ready: true,
+      reasons: [`column:${column}`, 'unclaimed', conditionScoped || 'no-open-blockers'],
+    });
   }
 
   const included = verdicts.filter((v) => v.ready)
@@ -402,13 +458,21 @@ export function readyFromStore(store) {
     // refusing beats looping forever on a query that never shrinks.
     if (offset > 200_000) { context.truncated = true; break; }
   }
+  // #1041 — fetched BEFORE the truncation refusal so it can be included in it.
+  // A queue computed from PART of the condition-blocker set would mistake an
+  // UNREAD scoping for an ABSENT one, and offer a card it should have withheld —
+  // the false-PASS direction, which is the one that costs.
+  const conditionBlockers = queryGraph(store, readyConditionBlockersQuery(), { limit: 1000 });
   if (facts.truncated || blockers.truncated || superseded.truncated
-      || humanBlockers.truncated || context.truncated) {
+      || humanBlockers.truncated || context.truncated || conditionBlockers.truncated) {
     const err = new Error('board exceeds the ready computation bound; refusing a partial queue');
     err.code = 'READY_TRUNCATED';
     throw err;
   }
-  return computeReady(facts.rows, blockers.rows, superseded.rows, context.rows, humanBlockers.rows);
+  return computeReady(
+    facts.rows, blockers.rows, superseded.rows, context.rows,
+    humanBlockers.rows, conditionBlockers.rows,
+  );
 }
 
 /**

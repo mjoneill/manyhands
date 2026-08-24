@@ -76,6 +76,17 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:mentionsCard': 'scrum:mentionsCard',   // derived at projection (#656), stored in the document
   'scrum:blocks': 'blockers',
   'scrum:blockedByCard': 'blockers',
+  // #1041 — the card→card edge itself, and (new) the SAME predicate emitted from
+  // a ReleaseCondition subject when a blocker is scoped to ONE acceptance
+  // condition rather than to the whole card.
+  //
+  // ⚠️ IT WAS EMITTED ALL ALONG AND NEVER DECLARED. The card-level edge is
+  // minted dynamically through predIri(), which the #875 scanner cannot see, so
+  // the gap was invisible until #1041 emitted the same predicate literally. The
+  // registry caught it on the first run — a pre-existing hole surfaced by an
+  // unrelated change, which is the argument for a scanner that reads the source
+  // rather than a list somebody maintains.
+  'scrum:blockedBy': 'relationships.blockedBy',
   // #881 — the person whose own pending action IS the block. Deliberately a
   // DIFFERENT predicate from scrum:owner: owner is who chases the blocking
   // CARD, blockedByPerson is the person who is themselves the blocker. They
