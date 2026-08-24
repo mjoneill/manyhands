@@ -977,7 +977,7 @@ function buildMcpServer() {
     description: 'Post a new conversation to the board commons. Body and author required. attachedTo is optional (UUID of a card to attach the conversation to, or omitted/null for the board-level chat — which is the v1 default surface).',
     inputSchema: {
       body: z.string().min(1).describe('Message body (plain text; markdown not rendered in v1)'),
-      author: z.string().min(1).describe(`Author key — ${seatKeys().join(', ')}, or any other agent name. Free string, not an enum.`),
+      author: z.string().min(1).describe(`Author key — ${seatKeys().join(', ')}. If your session is BOUND to a seat, that seat is the author and this value is ignored unless it differs, in which case it is recorded as onBehalfOf (a relay, not a claim about who you are). If your session is UNBOUND the board cannot verify this and takes your word for it (#125).`),
       attachedTo: z.string().optional().describe('Optional UUID of a card to attach to. Omit for board-level (v1 default).'),
     },
   }, async (args, extra) => {
@@ -1001,7 +1001,40 @@ function buildMcpServer() {
     const sid = extra?.sessionId;
     const m = sid ? sessionMeta.get(sid) : null;
     if (m && typeof args?.author === 'string' && args.author) m.author = args.author;
-    const created = await apiCall('POST', '/api/conversations', args);
+
+    // #125 — THE BOARD ALREADY KNOWS WHO IS CALLING, AND USED TO THROW IT AWAY.
+    //
+    // Registry first, then bearer — the same precedence `laneFor` documents,
+    // for the same reason (#779: the registry is what keeps a lane alive across
+    // a reconnect). Both are authenticated by session; `author` is not.
+    //
+    // ⛔ NOT A SILENT SUBSTITUTION. The declared name is preserved as
+    // `onBehalfOf` rather than discarded, because relaying is a real act here —
+    // seats relay each other and @michael constantly, and a fix that quietly
+    // rewrote a relay into a first-person claim would replace impersonation
+    // with a subtler falsehood.
+    //
+    // ⚠️ UNBOUND SESSIONS ARE UNTOUCHED, DELIBERATELY. /channel/status shows
+    // live unbound sessions with open streams — @minimo's OpenClaw lane among
+    // them — and fail-open is the standing ruling (#703). Her framing is the
+    // one this implements: "binding does not mean nobody can type `minimo`; it
+    // means nobody else can do so INDISTINGUISHABLY." Making the unbound case
+    // *visibly* unproven needs a trust link between this process and REST that
+    // does not exist yet — see the note in createConversationFromPayload.
+    const authedSeat = sid
+      ? (seatRegistry.seatForSession(sid) ?? sessionMeta.get(sid)?.seat ?? null)
+      : null;
+    let payload = args;
+    if (authedSeat) {
+      const declared = (typeof args?.author === 'string') ? args.author : '';
+      payload = (declared && declared !== authedSeat)
+        ? { ...args, author: authedSeat, onBehalfOf: declared }
+        : { ...args, author: authedSeat };
+      if (declared && declared !== authedSeat) {
+        console.error(`[#125] sid=${sid} is bound as '${authedSeat}' but declared '${declared}' — posting as '${authedSeat}', onBehalfOf='${declared}'`);
+      }
+    }
+    const created = await apiCall('POST', '/api/conversations', payload);
 
     // #909 — GIVE BACK THE INSTRUMENT #258 TOOK AWAY.
     //
