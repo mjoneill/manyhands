@@ -67,6 +67,21 @@ export const LIMIT_CEILING = 1000;
 
 const nn = (i) => oxigraph.namedNode(i);
 const lit = (v) => oxigraph.literal(String(v));
+// #1034 — a TYPED numeric literal. SPARQL's bare `0` IS "0"^^xsd:integer, so a
+// plain string never matches the shape a caller writes: FILTER(?o != 0) becomes
+// a type mismatch that is true for every row (removing nothing), and ORDER BY
+// sorts lexically ("100" < "20" < "9"). Same remedy as #966's typed boolean.
+//
+// ⚠️ Types only what IS an integer. A malformed order must not become an
+// ill-typed literal claiming to be one — that would trade a wrong datatype for
+// a lying datatype, which is worse: an ill-typed literal compares unequal to
+// everything and would silently vanish from the very filters this fixes.
+const intLit = (v) => {
+  const n = typeof v === 'number' ? v : (String(v).trim() === '' ? NaN : Number(v));
+  return Number.isInteger(n)
+    ? oxigraph.literal(String(n), nn(IRI.xsd + 'integer'))
+    : lit(v);
+};
 const A = nn(IRI.rdf + 'type');
 
 /**
@@ -599,7 +614,7 @@ function projectEntity(store, e) {
       if (e.creator) add(s, nn(SC + 'creator'), personRef(e.creator));
       if (e.column) add(s, nn(S + 'column'), nn(C + e.column));
       if (e['scrum:priority']) add(s, nn(S + 'priority'), lit(e['scrum:priority']));
-      if (e['scrum:order'] != null) add(s, nn(S + 'order'), lit(e['scrum:order']));
+      if (e['scrum:order'] != null) add(s, nn(S + 'order'), intLit(e['scrum:order']));
       if (e.claimedBy) add(s, nn(S + 'claimedBy'), personRef(e.claimedBy));
       // #723 — claimedAt sat beside claimedBy in the document and was never
       // emitted, so a graph-backed card_get would have dropped it silently. It
@@ -893,7 +908,7 @@ function projectEntity(store, e) {
       add(s, A, nn(S + 'Column'));
       if (e.identifier) add(s, nn(SC + 'identifier'), lit(e.identifier));
       if (e.name) add(s, nn(SC + 'name'), lit(e.name));
-      if (e['scrum:order'] != null) add(s, nn(S + 'order'), lit(e['scrum:order']));
+      if (e['scrum:order'] != null) add(s, nn(S + 'order'), intLit(e['scrum:order']));
     } else if (typeof t === 'string' && t.startsWith('scrum:Tending')) {
       projectTending(store, e);
     } else if (t === 'scrum:Memory' || t === 'scrum:MemoryVersion') {
