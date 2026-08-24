@@ -151,3 +151,39 @@ test('#606 zero drift reports ZERO EXPLICITLY, not silence', async () => {
     assert.match(r.summary, /0|up to date|current/i, 'zero must be SAID, not implied by silence');
   } finally { rmSync(repo.dir, { recursive: true, force: true }); rmSync(served, { recursive: true, force: true }); }
 });
+
+test('#606 ⭐⭐ the SUMMARY LINE ITSELF carries the ref freshness — it must not be separable', async () => {
+  // ⛔⛔ SIXTH INSTANCE OF THIS CARD, found in this card's own remedy.
+  //
+  // The report emitted the freshness caveat as its own line and the count as
+  // another. A downstream consumer (the healthcheck wiring) selected the count
+  // with `sed -n 's/^deploy drift: /…/p'` and the caveat — which does not match
+  // that pattern — was silently discarded. The stamp then asserted "production
+  // is up to date with origin/main" while the ref behind that claim was 23
+  // minutes old, and at six hours it would read IDENTICALLY.
+  //
+  // ⇒ That is instance 3 of #606 (origin/main is a LOCAL ref) arriving through
+  // the instrument built to detect instance 3. The confession existed; the
+  // transport dropped it.
+  //
+  // ⭐ So the caveat is folded INTO the summary rather than printed beside it.
+  // A separable warning WILL be separated — #216's lesson, third instance
+  // tonight: a warning on a different surface from the instrument is not a
+  // mitigation. This test exists so the two cannot be split again.
+  const repo = makeRepo();
+  const served = makeServed(repo.base);
+  try {
+    const r = driftReport({ repoDir: repo.dir, servedDir: served, ref: 'HEAD' });
+    assert.match(r.summary, /fetch|local ref|never fetched|as of/i,
+      'the SUMMARY must state what its comparand is, on its own line, because '
+      + 'that is the only line a consumer is guaranteed to keep');
+
+    // ⭐ ANTI-VACUITY: a consumer selecting ONLY the summary line must still
+    // receive the freshness. This is the exact pipeline that lost it.
+    const selected = r.summary.split('\n')
+      .filter((l) => /^deploy drift: /.test(l)).join('\n');
+    assert.ok(selected.length > 0, 'the summary must still match the consumer pattern');
+    assert.match(selected, /fetch|local ref|never fetched|as of/i,
+      'and the SELECTED line must carry the caveat — otherwise the pipe drops it again');
+  } finally { rmSync(repo.dir, { recursive: true, force: true }); rmSync(served, { recursive: true, force: true }); }
+});

@@ -47,18 +47,26 @@ function git(repoDir, args) {
 }
 
 /** How stale is the ref we are comparing against? Never inferred by the reader. */
+/**
+ * ⭐ `short` is what rides the SUMMARY LINE. #606 instance 6: the freshness was
+ * emitted as its own line, a consumer selected only the count line with a `sed`
+ * pattern the caveat did not match, and the stamp then asserted "up to date
+ * with origin/main" against a 23-minute-old ref — identical in appearance to a
+ * six-hour-old one. A separable warning WILL be separated. So it is not beside
+ * the verdict; it is INSIDE it.
+ */
 function refFreshness(repoDir, ref) {
   if (!/^origin\//.test(ref)) {
-    return { kind: 'local', text: `comparing against ${ref} (a local ref in this clone, not the remote)` };
+    return { kind: 'local', short: `${ref} is a local ref`, text: `comparing against ${ref} (a local ref in this clone, not the remote)` };
   }
   const fetchHead = path.join(repoDir, '.git', 'FETCH_HEAD');
   if (!existsSync(fetchHead)) {
-    return { kind: 'never-fetched', text: `⚠️ ${ref} has NEVER been fetched in this clone — it may be arbitrarily stale` };
+    return { kind: 'never-fetched', short: `⚠️ ${ref} NEVER fetched`, text: `⚠️ ${ref} has NEVER been fetched in this clone — it may be arbitrarily stale` };
   }
   const ageMs = Date.now() - statSync(fetchHead).mtimeMs;
   const mins = Math.round(ageMs / 60000);
   const warn = mins > 15 ? '⚠️ ' : '';
-  return { kind: 'fetched', ageMinutes: mins, text: `${warn}${ref} last fetched ${mins} min ago — this comparison is only as fresh as that` };
+  return { kind: 'fetched', ageMinutes: mins, short: `${warn}ref fetched ${mins}m ago`, text: `${warn}${ref} last fetched ${mins} min ago — this comparison is only as fresh as that` };
 }
 
 /**
@@ -69,7 +77,7 @@ export function driftReport({ repoDir, servedDir, ref = 'origin/main' } = {}) {
   const header = [refAge.text];
   const fail = (error) => ({
     ok: false, total: null, runtime: [], testOnly: [], lines: [], header,
-    summary: `deploy drift: UNKNOWN — ${error}`, refAge, error,
+    summary: `deploy drift: UNKNOWN — ${error} [${refAge.short}]`, refAge, error,
   });
 
   const shaFile = path.join(servedDir, 'DEPLOYED-SHA');
@@ -111,9 +119,11 @@ export function driftReport({ repoDir, servedDir, ref = 'origin/main' } = {}) {
 
   // #726 — the count is ALWAYS stated, including zero. A line that appears only
   // on trouble is an alarm with extra steps, and its absence is unreadable.
-  const summary = commits.length === 0
+  // ⇒ The freshness rides the SUMMARY, not a neighbouring line. See refFreshness().
+  const summary = (commits.length === 0
     ? `deploy drift: 0 — production is up to date with ${ref}`
-    : `deploy drift: ${commits.length} commit(s) behind ${ref} — ${runtime.length} runtime-affecting, ${testOnly.length} test-only`;
+    : `deploy drift: ${commits.length} commit(s) behind ${ref} — ${runtime.length} runtime-affecting, ${testOnly.length} test-only`)
+    + ` [${refAge.short}]`;
 
   return { ok: true, total: commits.length, runtime, testOnly, lines, header, summary, refAge, served };
 }

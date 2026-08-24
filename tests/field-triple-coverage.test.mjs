@@ -49,6 +49,15 @@ const SERVER_ASSIGNED = new Set([
   'shortId',      // minted by the server from nextShortId
   'createdAt',    // stamped at create
   'updatedAt',    // stamped on every write
+  // #534 — the compare-and-swap token. Server-stamped inside withWriteLock on
+  // EVERY mutating path (PATCH, claim, release, node-update) and COMPUTED rather
+  // than accepted in handleSave. Verified not caller-settable: absent from
+  // PATCHABLE_CARD_FIELDS, so a caller sending it changes nothing.
+  // ⚠️ It appeared in this universe only AFTER the deploy, because the field does
+  // not exist on a card until the server writes one — so this condition fired on
+  // production reality rather than on source, which is the point of enumerating
+  // from stored cards as well as from schemas.
+  'version',
   'claimedBy',    // set only via the claim endpoint, never a card write
   'claimedAt',    // ditto
   'ignoredFields', // the diagnostic itself, not a stored field
