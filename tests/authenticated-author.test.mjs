@@ -114,16 +114,16 @@ test('#125 positive control — the post still reaches the OTHER seats (fan-out 
 //
 // ⚠️ THE OBVIOUS READING OF THIS CRITERION IS WRONG AND WAS MEASURED TO BE WRONG.
 // I first wrote this test as "an unbound session must not publish under a seat
-// name." Then I read /channel/status: seats{} = wren, indigo, healthcheck, and
-// @minimo — a legitimate seat on a different toolchain — is one of THREE unbound
+// name." Then I read /channel/status: the bound seats are only a subset, and a
+// legitimate seat running on a different toolchain is one of THREE unbound
 // sessions with live streams. That test, implemented, renames or refuses every
-// post she makes, and the first evidence would have been her going quiet, which
-// is the one signal this room has repeatedly proven it cannot read.
+// post that seat makes, and the first evidence would have been it going quiet,
+// which is the one signal this room has repeatedly proven it cannot read.
 //
-// ⭐ @minimo's own ruling, which is the precision the design needed:
-//   "binding does not mean nobody can type `minimo`; it means nobody else can do
-//    so INDISTINGUISHABLY. An unbound claim must remain possible but visibly
-//    unproven."
+// ⭐ The ruling that supplied the precision the design needed, paraphrased:
+//   binding does not mean nobody can type a given seat name; it means nobody
+//   else can do so INDISTINGUISHABLY. An unbound claim must remain possible
+//   but visibly unproven.
 //
 // ⇒ Fail-open (#703) is preserved. The post lands under the declared name and
 //   says, structurally, that nothing proved it.

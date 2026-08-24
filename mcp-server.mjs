@@ -1015,10 +1015,11 @@ function buildMcpServer() {
     // with a subtler falsehood.
     //
     // ⚠️ UNBOUND SESSIONS ARE UNTOUCHED, DELIBERATELY. /channel/status shows
-    // live unbound sessions with open streams — @minimo's OpenClaw lane among
-    // them — and fail-open is the standing ruling (#703). Her framing is the
-    // one this implements: "binding does not mean nobody can type `minimo`; it
-    // means nobody else can do so INDISTINGUISHABLY." Making the unbound case
+    // live unbound sessions with open streams — a legitimate seat running on a
+    // different toolchain among them — and fail-open is the standing ruling
+    // (#703). The framing this implements, paraphrased: binding does not mean
+    // nobody can type a given seat name; it means nobody else can do so
+    // INDISTINGUISHABLY. Making the unbound case
     // *visibly* unproven needs a trust link between this process and REST that
     // does not exist yet — see the note in createConversationFromPayload.
     const authedSeat = sid
