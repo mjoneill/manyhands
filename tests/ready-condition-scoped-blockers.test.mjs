@@ -38,55 +38,55 @@ import { domainToJsonLd } from '../core/jsonld.mjs';
 import { buildGraphStore } from '../core/graph-replica.mjs';
 import { readyFromStore, pageReady } from '../core/ready-query.mjs';
 
-const card = (id, shortId, name, extra = {}) => ({
-  '@id': id, '@type': 'CreativeWork', identifier: shortId, name, board: {}, ...extra,
+/**
+ * ⚠️ THE FIXTURE IS IN THE **DOMAIN** SHAPE, ON PURPOSE — shortIds under `board`,
+ * exactly what the store holds. My first version used resolved `@id` strings and
+ * PASSED while the production path was broken: a real card writes
+ * `blockedBy: [310]`, and #814's resolution (shortId → @id, in jsonld.mjs and
+ * only there) had no branch for acceptance. A fixture in the post-resolution
+ * shape cannot see a missing resolution — it is the same impoverished-fixture
+ * trap as asserting on data you already normalised.
+ */
+const card = (id, shortId, name, board = {}) => ({
+  '@id': id, '@type': 'CreativeWork', identifier: shortId, name, board: { column: 'backlog', ...board },
 });
 
 /**
- * ⭐ THE DISCRIMINATING FIXTURE. Every blocked card here points at the SAME live
+ * ⭐ THE DISCRIMINATING FIXTURE. Every blocked card points at the SAME live
  * target, so "is it offered?" cannot be answered by looking at the target — only
- * by looking at whether the block is condition-scoped. A fixture where the two
- * cards blocked differently could pass while reading the wrong field.
+ * by whether the block is condition-scoped.
  */
 const domain = () => ({
   nodes: [
-    // ⇒ THE CASE. Card-level edge to `live`, and that edge is fully accounted
-    // for by ONE acceptance condition. This is #125's shape.
+    // ⇒ THE CASE: card-level edge fully accounted for by ONE condition. #125's shape.
     card('scoped', 10, 'five conditions deliverable, one blocked', {
-      column: 'backlog', 'scrum:priority': 'p1', blockedBy: ['live'],
-      'scrum:acceptance': [
+      'scrum:priority': 'p1', relationships: { blockedBy: [50] },
+      acceptance: [
         { condition: 'deliverable one', evidence: [] },
         { condition: 'deliverable two', evidence: [] },
-        { condition: 'the blocked half — needs the auth work first', evidence: [], blockedBy: ['live'] },
+        { condition: 'the blocked half — needs the auth work first', evidence: [], blockedBy: [50] },
       ],
     }),
-    // ⛔ CONTROL 1 (acceptance 2) — blocked in FULL. Same target, no condition
-    // claims it, so the card must STILL read blocked and must not leak into the
-    // queue as "partially blocked".
+    // ⛔ CONTROL 1 — blocked in FULL. Same target, no condition claims it.
     card('whole', 20, 'blocked entirely, no condition scoping', {
-      column: 'backlog', 'scrum:priority': 'p1', blockedBy: ['live'],
-      'scrum:acceptance': [{ condition: 'something', evidence: [] }],
+      'scrum:priority': 'p1', relationships: { blockedBy: [50] },
+      acceptance: [{ condition: 'something', evidence: [] }],
     }),
-    // ⛔ CONTROL 2 (acceptance 3) — MANY conditions, NONE blocked. The count of
-    // conditions must never be confused with the count of BLOCKED conditions.
+    // ⛔ CONTROL 2 — MANY conditions, NONE blocked.
     card('many', 30, 'many conditions, none blocked', {
-      column: 'backlog', 'scrum:priority': 'p1',
-      'scrum:acceptance': [
+      'scrum:priority': 'p1',
+      acceptance: [
         { condition: 'a', evidence: [] }, { condition: 'b', evidence: [] },
         { condition: 'c', evidence: [] }, { condition: 'd', evidence: [] },
       ],
     }),
-    // ⛔ CONTROL 3 — a card blocked by TWO targets where only ONE is
-    // condition-scoped. Partial accounting must NOT be enough: the unaccounted
-    // blocker still removes the card.
+    // ⛔ CONTROL 3 — two blockers, only one scoped. Partial accounting is not enough.
     card('partial', 40, 'two blockers, only one scoped', {
-      column: 'backlog', 'scrum:priority': 'p1', blockedBy: ['live', 'other'],
-      'scrum:acceptance': [
-        { condition: 'scoped to live only', evidence: [], blockedBy: ['live'] },
-      ],
+      'scrum:priority': 'p1', relationships: { blockedBy: [50, 60] },
+      acceptance: [{ condition: 'scoped to live only', evidence: [], blockedBy: [50] }],
     }),
-    card('live', 50, 'the blocking work', { column: 'backlog', 'scrum:priority': 'p1' }),
-    card('other', 60, 'a second blocking card', { column: 'backlog', 'scrum:priority': 'p1' }),
+    card('live', 50, 'the blocking work', { 'scrum:priority': 'p1' }),
+    card('other', 60, 'a second blocking card', { 'scrum:priority': 'p1' }),
   ],
   messages: [], people: [], columns: [],
 });

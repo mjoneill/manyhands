@@ -139,6 +139,20 @@ function cardNodeToFlat(node, shortToId) {
       for (const [rt, arr] of Object.entries(v || {})) {
         flat[rt] = (arr || []).map((sid) => shortToId.get(sid) ?? sid);
       }
+    } else if (k === 'acceptance') {
+      // #1041 — a condition-scoped blocker names its target by shortId, exactly
+      // as `blockedBy` and `blockers` do. It is resolved to an @id HERE for the
+      // same reason they are: the projection must be able to match it against
+      // the card-level edge, and #814's note applies verbatim — "the mapping
+      // lives HERE and only here, because serialization holds the whole graph;
+      // a second copy in the replica is the #618 drift shape."
+      //
+      // ⚠️ A reference naming no card rides VERBATIM, same as a dangling
+      // relationship member. Losslessness beats tidiness on dangling data.
+      flat['scrum:acceptance'] = (v || []).map((a) => (
+        a && Array.isArray(a.blockedBy)
+          ? { ...a, blockedBy: a.blockedBy.map((sid) => shortToId.get(sid) ?? sid) }
+          : a));
     } else if (k === 'blockers') {
       // #814 — a blocker names its card by shortId; the projection must compare
       // it against `blockedBy`, which is resolved to @ids two lines above. The
@@ -171,6 +185,14 @@ function flatToCardNode(entity, idToShort) {
       // and later types land inside the same object, keeping their order.
       if (!board.relationships) board.relationships = rels;
       rels[k] = (v || []).map((ref) => idToShort.get(ref) ?? ref);
+    }
+    else if (k === 'scrum:acceptance') {
+      // #1041 — the inverse of the resolution in cardNodeToFlat. The domain
+      // speaks shortIds, so a condition-scoped blocker turns back here.
+      board.acceptance = (v || []).map((a) => (
+        a && Array.isArray(a.blockedBy)
+          ? { ...a, blockedBy: a.blockedBy.map((ref) => idToShort.get(ref) ?? ref) }
+          : a));
     }
     else if (k === 'scrum:blockers') {
       // #814 — the inverse of the resolution in cardNodeToFlat. Serialization
