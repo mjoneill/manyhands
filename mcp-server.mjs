@@ -728,6 +728,25 @@ function buildMcpServer() {
     description: 'Partial update of a card. Supply any subset of fields. Immutable: id, shortId, createdAt.',
     inputSchema: {
       id: z.string().describe('Card UUID or shortId (number-as-string also accepted)'),
+      // #534 — OPTIONAL compare-and-swap. Send the `version` you read; if the
+      // card has moved on since, the write is REFUSED with 409 and the current
+      // version, so you can re-read and reapply instead of silently destroying
+      // the other writer's text. Omit it and nothing changes — the precondition
+      // is opt-in, and every existing caller is unaffected.
+      //
+      // ⚠️ This line is the whole reachability of the feature. Slice 2 shipped
+      // the precondition on the REST PATCH and it was UNREACHABLE from here,
+      // because this inputSchema is an allowlist and zod rejects an
+      // unrecognized key by failing the entire call. A capability the seats
+      // cannot call protects nobody, and the seats are the colliding writers.
+      ifVersion: z.number().int().nonnegative().optional().describe(
+        'OPTIONAL compare-and-swap (#534/#466). The card `version` you read. If the card has '
+        + 'moved on since, the write is refused with 409 carrying `currentVersion` — a YIELD, '
+        + 'not a retry: re-read the card and reapply your edit. Omit it for today\'s behaviour. '
+        + '⚠️ Most valuable with `description` (a full-body replace, which silently destroys a '
+        + 'concurrent write); `descriptionAppend`/`descriptionPrepend` need no precondition by '
+        + 'construction and remain the safer path.',
+      ),
       title: z.string().optional(),
       parent: z.string().nullable().optional().describe('The card this one is CONTAINED BY — its parent in the page/epic tree. A wiki page IS a card, so this is how an agent nests or reparents one; `null` clears it and makes the card a root. Refused if it would create a cycle (a card with no path to any root is invisible to every tree walk while still reading back correctly). Absent from this schema since June (#254), which is why containment could only be written by curling REST.'),
       description: z.string().optional().describe('REPLACES the whole body. ⚠️ On a long card this means regenerating text you did not write — use descriptionAppend to add a section instead.'),

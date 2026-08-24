@@ -160,6 +160,26 @@ export const CARD_CREATE_PROBES = [
         + 'with `description` (no correct order); IS combinable with `descriptionAppend`, '
         + 'which touches the opposite end.' },
 
+  // #534 — the compare-and-swap PRECONDITION. Same shape as `descriptionAppend`
+  // and `by`: declared on the PATCH schema, CONSUMED before any field is
+  // applied, and deliberately never stored under its own key. So RC0b's
+  // "declared but never stored" line naming it is CORRECT and not a finding.
+  //
+  // ⚠️ The malformed case is a STRING THAT LOOKS LIKE A NUMBER, and that is the
+  // exact mirror of descriptionAppend's reasoning. The failure this rule guards
+  // is COERCION: `Number('1')` would make `ifVersion: '1'` compare equal and the
+  // precondition would appear to work — while `Number('2abc')` is NaN, which
+  // !== every current version and yields a 409 that can NEVER clear, quoting
+  // back the value the caller just sent. Coercion fixes the example and not the
+  // class, and silently accepts `null` as 0 and `true` as 1 on the way. So the
+  // rule is a REFUSAL, and `'1'` is the value most worth probing because it is
+  // the one a lenient implementation would wave through.
+  { name: 'ifVersion', wellFormed: 1, malformed: '1',
+    note: '#534/#466 — an OPTIONAL precondition, never stored under its own key. PATCH only: '
+        + 'a card being created has no version to be stale against. Non-negative integer or '
+        + '400 — and a 400 rather than a 409, because 409 means "re-read and retry" and a '
+        + 'client may legitimately loop on it, while a malformed request can never clear.' },
+
   // ── the control: a typo, consistently absent everywhere ──
   { name: 'titel', wellFormed: 'misspelled', malformed: null, noRule: true,
     note: 'not a real field — the AGREE_ABSENT control' },

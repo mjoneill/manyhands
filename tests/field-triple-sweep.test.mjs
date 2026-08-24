@@ -58,7 +58,36 @@ const PATCH_EXCLUDED = new Set(['id']);
 // to a schema or validator without being added to the consumer. Do not edit
 // this object to make a red run green — it records what we have ACCEPTED, and
 // an exemption with no card number is how a defect becomes architecture.
-const KNOWN_PATCH_DISAGREEMENTS = {};
+//
+// ── #534 ifVersion — ACCEPTED, and the card number is the point ──────────
+//
+// ⚠️ This is the FIRST entry in this object since both original defects were
+// fixed, so it deserves more than a line. It is NOT a defect being waved
+// through; it is a limitation of the audit, recorded where the audit can see it.
+//
+// `ifVersion` is a compare-and-swap PRECONDITION: validated (400 on a
+// non-integer) and never stored, because a precondition is CONSUMED — it
+// decides whether the write happens at all. The audit's `reads` predicate asks
+// "did the value land in stored state?", and for a control parameter the honest
+// answer is always no. So `accepts && !reads` fires and reports
+// VALIDATED_THEN_DISCARDED, which mischaracterises it: the value is not
+// discarded, it is the thing the write was conditioned on.
+//
+// ⛔ It cannot be marked `noRule` — a rule genuinely fires, and this suite's own
+// NORULE_CLAIM_REFUTED check would catch that lie. Nor can `storedAs` point
+// anywhere, because there is no stored effect to point at.
+//
+// ⇒ The real gap is that the taxonomy has no CONSUMED_CONTROL verdict, and
+// closing it means changing an instrument other people's verdicts depend on.
+// ⇒ CARDED AS #1023, which is the card number this object's own contract
+// requires. Not done inline: a wrong exemption SUPPRESSES findings, which is
+// the failure this file already recorded once about `parkedReason`, and a
+// taxonomy change deserves its own review rather than a ride on a feature
+// commit. Until #1023 lands, this entry is the record that someone looked at
+// this row and understood it.
+const KNOWN_PATCH_DISAGREEMENTS = {
+  ifVersion: 'VALIDATED_THEN_DISCARDED',
+};
 
 async function sweep(baseUrl, fn = auditCreateField, probes = CARD_CREATE_PROBES) {
   const rows = [];
