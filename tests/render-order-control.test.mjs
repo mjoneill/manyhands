@@ -15,9 +15,12 @@
  *             and `order` is not consulted for cards at all.
  *     AFTER   cards sort by `order` within their column.
  *
- * ⭐ THIS SUITE PASSES TODAY AND MUST FAIL ONCE SLICE 0 LANDS. A builder who
- * implements ordering and sees these tests still green has NOT implemented it
- * — the red is the deliverable.
+ * ✅ SLICE 0 LANDED 2026-08-24. This suite DID go red first — tests 2 and 3
+ * failed the moment cards began sorting by `order` — and was then INVERTED
+ * rather than deleted, per the correction below. The paragraph above is kept
+ * in the past tense on purpose: it is the record of what this file proved, and
+ * a reader who finds the inverted assertions needs to know they were earned by
+ * a real red rather than written green.
  *
  * ⛔⛔ BUT DO NOT DELETE THIS FILE WHEN IT GOES RED. INVERT IT.
  * (@minimo's correction to my handoff, 2026-08-20T21:15Z — I had written
@@ -112,9 +115,17 @@ test('#923 control fixture actually discriminates — order DISAGREES with array
 });
 
 /**
- * ⛔ THE CONTROL. Passes today. MUST FAIL once cards render by `order`.
+ * ✅ INVERTED 2026-08-24, when Slice 0 landed. It read "TODAY cards render in
+ * ARRAY position — this must FAIL after Slice 0", and it did fail, which is
+ * what the control was for.
+ *
+ * ⛔ NOT DELETED. The handoff's original instruction was "delete the file in
+ * the commit that turns it red"; that was corrected on the card before anyone
+ * acted on it, because deleting removes the ONLY test that ever proved
+ * array-order and order-order are distinguishable — the feature would ship
+ * having destroyed its own evidence.
  */
-test('#923 TODAY cards render in ARRAY position, ignoring `order` — this must FAIL after Slice 0', async () => {
+test('#923 cards render by `order` within their column, NOT by array position', async () => {
   await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.setViewport({ width: 1024, height: 900 });
@@ -128,14 +139,14 @@ test('#923 TODAY cards render in ARRAY position, ignoring `order` — this must 
     assert.equal(dom.length, FIXTURE.length,
       `expected ${FIXTURE.length} rendered cards, found ${dom.length} — selector drift, not a passing test`);
 
-    assert.deepEqual(dom, FIXTURE.map((f) => f.key),
-      'cards no longer render in array position — if Slice 0 has landed, DELETE THIS FILE; if it has not, something else changed the render order');
-
-    // And say the other half out loud: the DOM is NOT the `order` sequence.
-    // Stated separately so the failure message names which hypothesis won.
     const byOrder = [...FIXTURE].sort((a, b) => a.order - b.order).map((f) => f.key);
-    assert.notDeepEqual(dom, byOrder,
-      'cards ARE rendering by `order` — Slice 0 is implemented and this control has done its job');
+    assert.deepEqual(dom, byOrder,
+      'cards must render in `order` sequence within the column');
+
+    // And say the other half out loud, so a failure names which hypothesis won
+    // rather than only that they differ.
+    assert.notDeepEqual(dom, FIXTURE.map((f) => f.key),
+      'cards have reverted to rendering in array position — Slice 0 has regressed');
   }, { server: { board: reversedOrderBoard() }, launch: { headless: 'new' } });
 });
 
@@ -148,7 +159,7 @@ test('#923 TODAY cards render in ARRAY position, ignoring `order` — this must 
  * above would go red (correctly), but for a reason that is a data-layer change
  * rather than a render-layer one. This one names where the ordering lives.
  */
-test('#923 TODAY the rendered sequence IS the global `cards[]` sequence', async () => {
+test('#923 the rendered sequence is DECOUPLED from the global `cards[]` sequence', async () => {
   await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.setViewport({ width: 1024, height: 900 });
@@ -162,7 +173,96 @@ test('#923 TODAY the rendered sequence IS the global `cards[]` sequence', async 
       'the page global `cards` no longer holds the fixture — the test lost its subject');
 
     const dom = await renderedIds(page, 'planned');
-    assert.deepEqual(dom, arrayIds,
-      'render order has decoupled from `cards[]` — that decoupling is exactly what Slice 0 is for');
+    assert.notDeepEqual(dom, arrayIds,
+      'render order still tracks `cards[]` — the ordering did not reach the render layer');
+
+    // ⭐ AND NAME WHERE THE ORDERING LIVES. A builder could have sorted
+    // `cards[]` itself at load time and left the renderer untouched: that
+    // passes "decoupled from array position" for a DATA-layer reason while the
+    // render layer is unchanged. Asserting the array is STILL in fixture order
+    // is what distinguishes the two.
+    assert.deepEqual(arrayIds, FIXTURE.map((f) => f.key),
+      'the global `cards[]` was itself re-sorted — Slice 0 belongs in the render '
+      + 'path, and a data-layer sort would silently change what a whole-board save writes');
   }, { server: { board: reversedOrderBoard() }, launch: { headless: 'new' } });
+});
+
+/**
+ * ⭐ THE RERENDER PATH — named by the handoff: "a sort applied on load and not
+ * on rerender passes an initial-render-only test." Both tests above measure the
+ * first paint only, so this drives a second render explicitly.
+ */
+test('#923 ordering survives a RERENDER, not just the initial paint', async () => {
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1024, height: 900 });
+    await page.goto(server.baseUrl + '/', { waitUntil: 'networkidle0' });
+    await page.waitForSelector('#column-planned .card', { timeout: 5000 });
+
+    await page.evaluate(() => renderBoard());
+    const dom = await renderedIds(page, 'planned');
+
+    assert.equal(dom.length, FIXTURE.length,
+      `expected ${FIXTURE.length} cards after rerender, found ${dom.length} — selector drift, not a passing test`);
+    const byOrder = [...FIXTURE].sort((a, b) => a.order - b.order).map((f) => f.key);
+    assert.deepEqual(dom, byOrder,
+      'a second render dropped the ordering — the sort is on the load path only');
+  }, { server: { board: reversedOrderBoard() }, launch: { headless: 'new' } });
+});
+
+/**
+ * ⭐⭐ THE PROPERTY THAT MAKES THIS SLICE SAFE TO DEPLOY, and it is the one the
+ * implementation comment claims: on a board where every `order` TIES, the sort
+ * is a NO-OP and rendering is unchanged.
+ *
+ * Every card on the live board currently carries order 0, so Slice 0 changes
+ * nothing a user sees until a backfill gives the field meaning — which is a
+ * separate decision (#923 acceptance 3), deliberately not taken here.
+ *
+ * ⛔ THIS IS ALSO THE TIEBREAK GUARD. Adding a `shortId` tiebreak to the sort
+ * would look tidier and would silently re-sequence all ~516 zero-order cards on
+ * the next load — a render slice becoming an unannounced board-wide reshuffle.
+ * This test fails if anyone adds one.
+ */
+test('#923 equal `order` preserves array position — the live board is unchanged until a backfill', async () => {
+  // ⛔⛔ THE shortId VALUES ARE DELIBERATELY OUT OF STEP WITH ARRAY POSITION.
+  // Caught by mutation: with shortIds 1,2,3 in array order, "stable sort" and
+  // "sort with a shortId tiebreak" predict the SAME DOM, so this test passed
+  // against the very mutant it exists to catch. A fixture whose two hypotheses
+  // agree is not a control — it is a green light with nothing behind it.
+  const FLAT = [
+    { key: 'delta', shortId: 3 },
+    { key: 'echo', shortId: 1 },
+    { key: 'foxtrot', shortId: 2 },
+  ];
+  // Asserted, not assumed — the same guard test 1 applies to `order`.
+  assert.notDeepEqual(
+    FLAT.map((f) => f.key),
+    [...FLAT].sort((a, b) => a.shortId - b.shortId).map((f) => f.key),
+    'the fixture no longer distinguishes a stable sort from a shortId tiebreak — this test is vacuous',
+  );
+
+  const flat = makeBoardFixture({
+    cards: FLAT.map((f) => ({
+      id: f.key, shortId: f.shortId, title: f.key, description: '', type: 'task',
+      assignees: [], labels: [], for: '', priority: null, column: 'planned',
+      order: 0,                       // ⇐ every card ties, exactly like production
+      createdAt: ts, updatedAt: ts,
+      relationships: { relatedTo: [], blockedBy: [], supersedes: [], derivedFrom: [], supersededBy: [] },
+    })),
+    nextShortId: 4,
+  });
+
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1024, height: 900 });
+    await page.goto(server.baseUrl + '/', { waitUntil: 'networkidle0' });
+    await page.waitForSelector('#column-planned .card', { timeout: 5000 });
+
+    const dom = await renderedIds(page, 'planned');
+    assert.equal(dom.length, 3, `expected 3 cards, found ${dom.length} — selector drift, not a passing test`);
+    assert.deepEqual(dom, ['delta', 'echo', 'foxtrot'],
+      'cards with equal `order` must keep their array position — a stable sort with '
+      + 'no tiebreak is what keeps this slice invisible on the live board');
+  }, { server: { board: flat }, launch: { headless: 'new' } });
 });

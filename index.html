@@ -3309,6 +3309,31 @@ function renderBoard() {
     if (cardsByColumn[c.column]) cardsByColumn[c.column].push(c);
   });
 
+  // #923 Slice 0 — a card's position is its `order` WITHIN its column, not its
+  // index in the global `cards[]` array. Per-column by ruling: nothing consumes
+  // `order` as a global rank, so per-column costs no live consumer, and a queue
+  // rank (#910) is a different fact that needs its own field.
+  //
+  // ⭐ SORTED HERE, at the bucketing stage, rather than at the render loop —
+  // the column count, the #303-4 stale fold and the render all read these same
+  // arrays, and sorting at the loop would leave the count and the fold reading
+  // an order the user never sees.
+  //
+  // ⚠️ STABLE, AND WITH NO TIEBREAK, DELIBERATELY. Array.prototype.sort is
+  // stable (ES2019+), so cards whose `order` ties keep their array position.
+  // Today every card on the live board carries order 0, which makes this sort
+  // a NO-OP on real data — the board renders byte-identically until a backfill
+  // gives the field meaning. Adding a shortId tiebreak would look tidier and
+  // would silently re-sequence all 516 of them on the next load, turning a
+  // render slice into an unannounced board-wide reshuffle.
+  for (const col of columns) {
+    const list = cardsByColumn[col.id];
+    // Non-numeric or absent `order` sorts as 0 rather than NaN: NaN comparisons
+    // are all false, which makes a sort silently order-preserving for that card
+    // and would hide a bad value instead of placing it.
+    if (list) list.sort((a, b) => (Number(a.order) || 0) - (Number(b.order) || 0));
+  }
+
   const boardEl = document.getElementById('board');
   const formWrapperEl = document.getElementById('add-card-form-wrapper');
   const templateBtnExpand = document.getElementById('btn-expand-form'); // persistent id'd btn from hidden-templates
