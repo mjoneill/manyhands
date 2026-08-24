@@ -4010,6 +4010,36 @@ function handleListConversations(req, res) {
     if (typeof q.before === 'string') {
       convs = convs.filter(c => typeof c.createdAt === 'string' && c.createdAt < q.before);
     }
+    // #1010 — THE MATCH COUNT, captured BEFORE the limit is applied.
+    //
+    // Measured 2026-08-24: `?q=deaf` returns all 671 matches (no-param stays
+    // uncapped, #202), while `?q=deaf&limit=1000` returns 200 and says nothing.
+    // So the defect is narrow and precise: a caller who asks for MORE than
+    // MAX_CONV_LIST_LIMIT is silently clamped -- #1028's class on a second
+    // endpoint ("returns fewer than asked without saying it clamped").
+    //
+    // ⭐ AND THE COST THIS REMOVES: obtaining the true count today means
+    // fetching the uncapped set -- 1,736,095 bytes for `deaf`, because there is
+    // no count-only mode. The header supplies the number for nothing, which is
+    // what makes a "671 matches" surface affordable at all.
+    //
+    // ⛔ A HEADER, NOT AN ENVELOPE. This body is a BARE ARRAY and several
+    // callers consume it as one; wrapping it in {messages, total} would break
+    // every one of them to add a number. The header is additive -- a caller
+    // that ignores it sees byte-identical output, and a test pins that.
+    //
+    // ⚠️ Counted after `q` AND `before`, i.e. over exactly the set `limit` is
+    // about to slice. That is the only count from which a caller can compute
+    // "I got N of M" without inference.
+    //
+    // ⚠️ Same-origin only, by omission: this server serves the board page, so
+    // browser JS can read this header. A CROSS-origin caller would additionally
+    // need Access-Control-Expose-Headers, and this endpoint sends no CORS
+    // headers at all (#234). Not added here -- an Expose-Headers without an
+    // Allow-Origin would be cargo, and the cross-origin case is #234's.
+    const matchTotal = convs.length;
+    res.setHeader('X-Total-Count', String(matchTotal));
+
     if (typeof q.limit === 'string' && q.limit !== '') {
       const n = parseInt(q.limit, 10);
       if (Number.isFinite(n) && n >= 0) {
