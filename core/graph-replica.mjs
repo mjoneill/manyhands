@@ -385,8 +385,9 @@ function conceptsOf(store, subject) {
 /**
  * #814 — drop every Blocker node hanging off this card.
  *
- * ⛔ A Blocker's subject is `entity:<card>/blocker/<target>` — DERIVED from the
- * card's id and not equal to it, so `match(cardSubject, null, null)` never
+ * ⛔ A Blocker's subject is `entity:<card>/blocker/<index>` (#1043 — was
+ * `/<target>`, which collided when two entries named the same subject) — DERIVED
+ * from the card's id and not equal to it, so `match(cardSubject, null, null)` never
  * reaches it. The first cut relied on that match and I wrote a comment saying
  * there was nothing to sweep. Deleting two scratch cards on production left a
  * Blocker node behind, carrying an owner and a status and pointing at nothing.
@@ -741,8 +742,8 @@ function projectEntity(store, e) {
       // invisible to subject-scoped deletion, and 1,438 tests could not see it.
       // ⛔ AND THE FIRST VERSION OF THIS COMMENT WAS WRONG. It said these hang
       // off THIS card's subject so "there is nothing to sweep". They do not:
-      // the subject is `entity:<card>/blocker/<target>`, DERIVED from the card's
-      // id and not equal to it, so subject-scoped deletion never reaches them.
+      // the subject is `entity:<card>/blocker/<index>` (#1043), DERIVED from the
+      // card's id and not equal to it, so subject-scoped deletion never reaches them.
       // Removing the EDGE drops them (they are re-projected from blockedBy);
       // DELETING THE CARD did not, and production proved it. See
       // sweepBlockerNodes. ⚠️ THAT SENTENCE USED TO SAY "which is called from
@@ -752,7 +753,26 @@ function projectEntity(store, e) {
       // query. Both paths call it now, and a test pins the transition.
       {
         const blockedBy = new Set((e.blockedBy || []).map(String));
-        for (const b of e['scrum:blockers'] || []) {
+        // #1043 — KEYED BY INDEX, NOT BY IDENTITY.
+        //
+        // ⛔ THE DEFECT THIS REPLACES: the subject was `<card>/blocker/<subject>`,
+        // so TWO entries naming the same person on one card became ONE node
+        // carrying BOTH statuses. Measured on a live card holding a `cleared`
+        // approval and a new `open` block: a query for status "open" matched the
+        // CLEARED one, and a query for "cleared" matched the OPEN one. Both
+        // directions wrong, neither errored, and the PATCH that produced it
+        // returned 200.
+        //
+        // ⭐ THE FIX WAS ALREADY IN THIS FILE, ONE FIELD FAMILY OVER. `acceptance`
+        // has the same multiplicity and solved it by INDEX — `<card>/rc/0`,
+        // `/rc/1`. Blockers are now keyed the same way, so N entries are N nodes
+        // whatever they name.
+        //
+        // ⚠️ THE `<card>/blocker/` PREFIX IS LOAD-BEARING AND IS PRESERVED:
+        // sweepBlockerNodes matches on it, and a derived node the sweep cannot
+        // reach is the production orphan this projection has already paid for
+        // twice (#687's D5 shape, on the delete path and then on the update path).
+        for (const [bi, b] of (e['scrum:blockers'] || []).entries()) {
           if (!b) continue;
 
           // ⭐⭐⭐ #881 — A PERSON-BLOCKER, projected so "what is waiting on me"
@@ -782,7 +802,7 @@ function projectEntity(store, e) {
             // One any-human blocker per card: the state is "anyone may clear
             // this", which does not accumulate. Kept under `<card>/blocker/` so
             // sweepBlockerNodes reaches it on delete.
-            const bn = nn(`${IRI.entity}${e['@id']}/blocker/any-human`);
+            const bn = nn(`${IRI.entity}${e['@id']}/blocker/${bi}`);
             add(bn, A, nn(S + 'Blocker'));
             add(bn, nn(S + 'blocks'), s);
             // ⚠️ A TYPED boolean, not the string "true". `lit()` stringifies,
@@ -802,7 +822,7 @@ function projectEntity(store, e) {
             // under `<card>/blocker/`, which is what sweepBlockerNodes matches,
             // so deletion reaches it. (The card-blocker orphan bug was found in
             // PRODUCTION, not by the suite; this shape is chosen to be swept.)
-            const bn = nn(`${IRI.entity}${e['@id']}/blocker/person:${encodeURIComponent(String(b.person))}`);
+            const bn = nn(`${IRI.entity}${e['@id']}/blocker/${bi}`);
             add(bn, A, nn(S + 'Blocker'));
             add(bn, nn(S + 'blocks'), s);
             add(bn, nn(S + 'blockedByPerson'), personRef(b.person));
@@ -818,7 +838,7 @@ function projectEntity(store, e) {
           // describes, which is the orphan shape #687 hit.
           const targetIri = blockedBy.has(String(b.card)) ? String(b.card) : null;
           if (!targetIri) continue;
-          const bn = nn(`${IRI.entity}${e['@id']}/blocker/${encodeURIComponent(String(b.card))}`);
+          const bn = nn(`${IRI.entity}${e['@id']}/blocker/${bi}`);
           add(bn, A, nn(S + 'Blocker'));
           add(bn, nn(S + 'blocks'), s);
           add(bn, nn(S + 'blockedByCard'), nn(E + targetIri));
