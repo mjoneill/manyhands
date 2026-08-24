@@ -136,3 +136,94 @@ test('#1027 without a deployed-sha set, the deploy split is ABSENT rather than g
     'no deployment facts in ⇒ no deployment claims out. Silence, not zero.');
   assert.ok(!/undeployed/.test(r.summary));
 });
+
+// ══════════════════════════════════════════════════════════════════════════
+// #1027 condition 6 — A HELD CLAIM WAITING ON A HUMAN IS BLOCKED, NOT STALE.
+//
+// Found on first contact with production data 2026-08-24T04:00Z: two cards had
+// been legitimately held for hours while their holder waited on a human review,
+// and the report warned both as long-held claims. That is an accusation where
+// the truth was patience.
+//
+// ⛔ I DECLINED TO BUILD THIS AT 04:00 FOR A GOOD REASON: I checked the two
+// cards first and NEITHER had `blockers` populated, so the cross-reference
+// would have matched nothing and "fixed" the warning by never firing. The
+// affordance existed and its population was empty.
+//
+// ✅ That changed. Blockers are now populated on real cards, so the
+// discriminator has something to read and the fix can be verified rather than
+// merely written.
+//
+// ⭐ AND THE SECOND HALF: where there IS no recorded blocker, the report must
+// ASK rather than ASSERT. "Claimed for 9h" is not evidence of neglect — the
+// holder may be blocked and simply have nowhere structured to say so. The
+// instrument cannot tell those apart, so it must not pick one.
+// ══════════════════════════════════════════════════════════════════════════
+
+
+// ⚠️ The per-seat WIP line also contains "#N", so selecting by id alone returns
+// the roster line and any assertion about wording is vacuous. My first cut of
+// the control below passed for exactly that reason. Select the CLAIM-STATUS
+// lines (⏸ blocked / ⚠️ asking) explicitly.
+const statusLineFor = (r, id) => r.lines
+  .filter((l) => /^\s*[⏸⚠️]/.test(l) && new RegExp(`#${id}\\b`).test(l))
+  .join(' | ');
+
+const BLOCKED_CARDS = [
+  // held 9h, and the reason is RECORDED: waiting on a human.
+  { shortId: 10, column: 'backlog', claimedBy: 'ada', claimedAt: hoursAgo(9), updatedAt: hoursAgo(9),
+    blockers: [{ person: 'babbage', owner: 'ada', status: 'open', note: 'redaction review' }] },
+  // held 9h with NO recorded blocker at all.
+  { shortId: 11, column: 'backlog', claimedBy: 'grace', claimedAt: hoursAgo(9), updatedAt: hoursAgo(9) },
+  // ⭐ held 9h with a blocker that is CLEARED — the discriminator must read
+  // STATUS, not merely the presence of the field.
+  { shortId: 12, column: 'backlog', claimedBy: 'hopper', claimedAt: hoursAgo(9), updatedAt: hoursAgo(9),
+    blockers: [{ person: 'babbage', owner: 'hopper', status: 'cleared', note: 'answered days ago' }] },
+];
+
+test('#1027 ⛔⛔ a claim with an OPEN blocker is reported as BLOCKED, not warned as stale', async () => {
+  const r = flowReport({ cards: BLOCKED_CARDS, roster: ['ada', 'grace', 'hopper'], now: NOW });
+  const text = r.lines.join('\n');
+
+  const line10 = statusLineFor(r, 10);
+  assert.ok(line10, `#10 must get a claim-status line: ${text}`);
+  assert.doesNotMatch(line10, /stale/i,
+    `#10's hold is EXPLAINED — calling it stale accuses a waiting colleague. Got: ${line10}`);
+  assert.match(line10, /blocked/i, `#10 must be reported as blocked. Got: ${line10}`);
+  assert.match(line10, /babbage/, `and must name WHO it waits on, or the reader cannot act. Got: ${line10}`);
+});
+
+test('#1027 ⭐ a long-held claim with NO recorded blocker ASKS, it does not assert neglect', async () => {
+  const r = flowReport({ cards: BLOCKED_CARDS, roster: ['ada', 'grace', 'hopper'], now: NOW });
+  const line11 = statusLineFor(r, 11);
+  assert.ok(line11, 'a genuinely unexplained long hold must still be surfaced');
+  assert.match(line11, /\?/,
+    `the report cannot distinguish neglect from an unrecorded blocker, so it must ASK. Got: ${line11}`);
+  assert.match(line11, /no recorded blocker|nothing recorded/i,
+    `and must say what it is missing, so the remedy is obvious. Got: ${line11}`);
+});
+
+test('#1027 ⭐ NEGATIVE CONTROL — a CLEARED blocker does not buy a card an excuse', async () => {
+  // The discriminator is `status`, not the presence of the field. A card whose
+  // blocker was answered days ago is a genuinely unexplained hold, and treating
+  // any non-empty blockers array as "blocked" would silence it forever.
+  const r = flowReport({ cards: BLOCKED_CARDS, roster: ['ada', 'grace', 'hopper'], now: NOW });
+  const line12 = statusLineFor(r, 12);
+  assert.ok(line12, `#12 must still be surfaced as an unexplained hold: ${r.lines.join('\n')}`);
+  assert.doesNotMatch(line12, /blocked/i,
+    `a CLEARED blocker is not a block — #12 is an unexplained hold. Got: ${line12}`);
+});
+
+test('#1027 ⭐ NEGATIVE CONTROL — a fresh claim appears in NEITHER list, blocker or not', async () => {
+  // Over-firing guard: the blocked/asking split must not turn every claim into
+  // a line. A claim inside the threshold is just work in progress.
+  const fresh = [
+    { shortId: 20, column: 'backlog', claimedBy: 'ada', claimedAt: hoursAgo(1), updatedAt: hoursAgo(1),
+      blockers: [{ person: 'babbage', status: 'open' }] },
+    { shortId: 21, column: 'backlog', claimedBy: 'ada', claimedAt: hoursAgo(1), updatedAt: hoursAgo(1) },
+  ];
+  const r = flowReport({ cards: fresh, roster: ['ada'], now: NOW });
+  const flagged = r.lines.filter((l) => /#2[01]\b/.test(l) && /blocked|\?/i.test(l));
+  assert.equal(flagged.length, 0,
+    `a 1-hour-old claim is ordinary WIP, not a finding. Got: ${flagged.join(' | ')}`);
+});

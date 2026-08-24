@@ -34,7 +34,7 @@ export function flowReport({ cards, roster = [], now = Date.now(), windowHours =
   if (!Array.isArray(cards)) {
     const error = 'no cards available — could not read the board, so nothing about flow is known';
     return {
-      ok: false, touched: null, finished: null, wip: [], staleClaims: [], hasUndeployedWork: null, lines: [],
+      ok: false, touched: null, finished: null, wip: [], staleClaims: [], blockedClaims: [], hasUndeployedWork: null, lines: [],
       summary: `flow: UNKNOWN — ${error}`, error,
     };
   }
@@ -62,15 +62,41 @@ export function flowReport({ cards, roster = [], now = Date.now(), windowHours =
   // A claim is a mutex, not a deed — and the holder is structurally the last to
   // notice they are still holding it, which is why this is reported rather than
   // left to whoever is holding.
-  const staleClaims = cards
+  // #1027 condition 6 — A HELD CLAIM WAITING ON A HUMAN IS BLOCKED, NOT STALE.
+  //
+  // Found on production data 2026-08-24T04:00Z: two cards had been legitimately
+  // held for hours while their holder waited on a human review, and this report
+  // warned both as long-held claims. That is an accusation where the truth was
+  // patience — and the holder had said so publicly, just not anywhere queryable.
+  //
+  // ⚠️ The discriminator is `status === 'open'`, NOT the presence of a blockers
+  // array. A blocker answered days ago is an unexplained hold; treating any
+  // non-empty array as "blocked" would silence such a card permanently.
+  const heldTooLong = cards
     .filter((c) => c.claimedBy && c.claimedAt)
-    .map((c) => ({
-      shortId: c.shortId,
-      seat: String(c.claimedBy).replace(/^person:/, ''),
-      hours: Math.round((now - Date.parse(c.claimedAt)) / HOUR),
-    }))
+    .map((c) => {
+      const open = (Array.isArray(c.blockers) ? c.blockers : [])
+        .filter((b) => b && b.status === 'open');
+      return {
+        shortId: c.shortId,
+        seat: String(c.claimedBy).replace(/^person:/, ''),
+        hours: Math.round((now - Date.parse(c.claimedAt)) / HOUR),
+        blockedOn: [...new Set(open.map((b) => b.person || b.owner).filter(Boolean))],
+        isBlocked: open.length > 0,
+      };
+    })
     .filter((c) => c.hours >= staleClaimHours)
     .sort((a, b) => b.hours - a.hours);
+
+  // A claim with a RECORDED open blocker is explained. It is reported so the
+  // reader can go clear it, never as a warning about the holder.
+  const blockedClaims = heldTooLong.filter((c) => c.isBlocked);
+
+  // ⭐ And the rest ASK rather than ASSERT. This instrument cannot distinguish
+  // neglect from a blocker nobody recorded, so it must not choose one: the
+  // holder may be waiting with nowhere structured to say so, which is the
+  // state that produced this condition in the first place.
+  const staleClaims = heldTooLong.filter((c) => !c.isBlocked);
 
   const lines = [];
   for (const w of wip) {
@@ -80,7 +106,17 @@ export function flowReport({ cards, roster = [], now = Date.now(), windowHours =
       ? `  ${w.seat.padEnd(10)} holding nothing`
       : `  ${w.seat.padEnd(10)} ${w.held} card(s): ${w.cards.map((s) => '#' + s).join(' ')}`);
   }
-  for (const s of staleClaims) lines.push(`  ⚠️ #${s.shortId} claimed by ${s.seat} for ${s.hours}h`);
+  for (const b of blockedClaims) {
+    lines.push(`  ⏸ #${b.shortId} held by ${b.seat} ${b.hours}h — BLOCKED on ${b.blockedOn.join(', ') || 'an unnamed party'} (recorded)`);
+  }
+  // ⚠️ The wording avoids the word "blocked" DELIBERATELY, and a test enforces
+  // it. A consumer greps these lines to find what is blocked; a question that
+  // contains the word would be collected as an answer. Same hazard as #606's
+  // "up to date" inside its own UNKNOWN: a negation is invisible to a matcher.
+  for (const s of staleClaims) {
+    lines.push(`  ⚠️ #${s.shortId} claimed by ${s.seat} ${s.hours}h — NO RECORDED BLOCKER: `
+      + `set aside, or waiting on something nobody wrote down?`);
+  }
 
   // #726 — always stated, including when the numbers are fine. A line that
   // appears only on trouble is an alarm with extra steps, and zero-finished is
@@ -116,7 +152,7 @@ export function flowReport({ cards, roster = [], now = Date.now(), windowHours =
       + '  (undeployed ≠ finished — the card body is the only thing that knows)');
   }
 
-  return { ok: true, touched, finished, wip, staleClaims, hasUndeployedWork, lines, summary, windowHours };
+  return { ok: true, touched, finished, wip, staleClaims, blockedClaims, hasUndeployedWork, lines, summary, windowHours };
 }
 
 // ── CLI ────────────────────────────────────────────────────────────────────
