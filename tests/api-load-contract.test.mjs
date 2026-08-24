@@ -280,3 +280,67 @@ test('#237 /api/attachments returns an id on success and a JSON error on rejecti
     await server.stop();
   }
 });
+
+// ── #237 · the SYNC gap the four contract tests above do NOT reach ──────────
+//
+// The tests above pin what each endpoint RETURNS. This one pins what happens
+// when the browser and a seat write the same card from different pictures —
+// the class named in this card's title, and the one behind #235 and the lost
+// card.
+//
+// ⛔ THE SIGNATURE #230's GUARD CANNOT SEE. That guard refuses a save that
+// REMOVES more than MAX_CARDS_DROPPED_PER_SAVE cards, which catches the stale
+// tab that DELETES. It is a count check, so it is structurally blind to the
+// stale tab that merely holds OLD FIELD VALUES: same card count, every field
+// reverted to whatever that tab loaded. The 2026-06-15 incident (8 cards lost)
+// is the deletion signature; this one leaves no trace at all.
+//
+// ⚠️ #534's `ifVersion` does NOT close this. That precondition is opt-in and
+// lives on the granular PATCH path; /api/save takes the cards array wholesale
+// and the browser sends no precondition. #534 slice 1 makes the VERSION
+// server-controlled here — so the token cannot regress — but the card's
+// CONTENT still comes from the client, which is exactly the revert below.
+//
+// ⭐ Marked `todo` rather than asserting the loss, following #797's reasoning
+// verbatim: a characterization test that asserts the broken behaviour goes RED
+// the moment someone fixes it, and the cheapest way to green it again is to
+// re-assert the loss. A test that punishes the fix is worse than no test.
+//
+// ⚠️ It does NOT self-announce. A `{ todo: true }` test reports todo forever;
+// the marker comes off by hand or not at all.
+test('#237 a stale whole-board save must not silently REVERT a concurrent write', { todo: true }, async () => {
+  const s = await startRestServer({ board: makeBoardFixture() });
+  try {
+    const created = await (await fetch(`${s.baseUrl}/api/cards`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'ORIGINAL', description: 'body', createdBy: 'ada' }),
+    })).json();
+
+    // The browser hydrates. Its picture of this card says "ORIGINAL".
+    const hydrated = await (await fetch(`${s.baseUrl}/api/board`)).json();
+
+    // A seat edits the card through the granular API, the way every agent does.
+    await fetch(`${s.baseUrl}/api/cards/${created.id}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'UPDATED BY SEAT' }),
+    });
+
+    // The browser saves its STALE picture. Note what this payload is NOT:
+    // it deletes nothing, so #230's count guard has nothing to refuse. Every
+    // card that existed still exists. Only the VALUES are old.
+    const save = await fetch(`${s.baseUrl}/api/save`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        cards: hydrated.cards, columns: hydrated.columns, nextShortId: hydrated.nextShortId,
+      }),
+    });
+    assert.ok(save.status < 400, 'the save is accepted today — that is the defect, not a setup error');
+
+    // ⭐ THE ASSERTION IS THE CORRECT BEHAVIOUR, NOT THE CURRENT ONE.
+    const after = await (await fetch(`${s.baseUrl}/api/cards/${created.id}`)).json();
+    assert.equal(after.title, 'UPDATED BY SEAT',
+      "the seat's write must survive a stale whole-board save. Today it does not: "
+      + `the title is "${after.title}", silently reverted to the browser's old copy, `
+      + 'with a 2xx and no warning to either writer.');
+  } finally { await s.stop(); }
+});
