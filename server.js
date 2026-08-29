@@ -3363,6 +3363,10 @@ async function handleUpdateCard(req, res, idOrShortId) {
     // value is the destination. Same test as #831's split: a name earns its own
     // channel when it changes what the caller does next.
     const redirectedFields = {};
+    // #1081 — declared OUT here, not inside the callback, so the handler's exit
+    // path can ring the doorbell for it. Reset per attempt inside the lock, so a
+    // retried write can never notify with a stale nudge from an earlier pass.
+    let nudge = null;
     const updated = await withWriteLock(async () => {
       const data = readBoard();
       const idx = findCardIndex(data, idOrShortId);
@@ -3389,7 +3393,7 @@ async function handleUpdateCard(req, res, idOrShortId) {
 
       const wasDone = card.column === 'done';
       let fanout = [];        // #669 — siblings this patch rewrites via #614
-      let nudge = null;       // #669 — the done-nudge post, if this write emits one
+      nudge = null;           // #1081 — reset per attempt; declared above the lock
       // #831 — mirror create's precedence: `assignees` (plural) wins over the
       // `assignee` alias when a caller sends both, so the result does not
       // depend on JSON key order.
@@ -3538,6 +3542,20 @@ async function handleUpdateCard(req, res, idOrShortId) {
     // #1032 — the disclosure fields ride BOTH shapes. A caller who opted into a
     // small response must still learn that something was dropped; making the
     // cheap shape also the quiet one would trade tokens for silent data loss.
+    // #1081 — ring the doorbell for the done-nudge, exactly as claim (:3649)
+    // and release (:3687) do for theirs. The nudge was persisted, versioned and
+    // event-logged and never notified, so a card entering `done` asked the room
+    // for the next pull and reached NO seat, awake or idle. Three seats across
+    // two toolchains confirmed zero live receipts before anyone noticed, and
+    // only because a human screenshotted the board.
+    //
+    // Placed HERE deliberately: outside the write lock, after persistence, and
+    // after the 404/409 guards — a refused write must never ring the bell. It
+    // sits above both response shapes so it fires exactly once either way, and
+    // notifyMcpOfPost stays fire-and-forget, so a down MCP server still cannot
+    // break a PATCH.
+    if (nudge) notifyMcpOfPost(nudge);
+
     const disclosures = {
       ...(ignoredFields.length ? { ignoredFields } : {}),
       ...(refusedFields.length ? { refusedFields } : {}),
