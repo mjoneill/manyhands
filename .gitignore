@@ -50,6 +50,18 @@ receipts-*/
 *.gif
 *.webp
 
+# #1069 — ONE NAMED EXCEPTION, and it must stay one.
+# The blanket image ignore above is a SAFETY RAIL, not tidiness. A screenshot
+# of the board carries card titles, participant names and message text, and no
+# text scan can read pixels — so the publication gate REFUSES a tracked image
+# rather than passing it unjudged. That refusal is correct behaviour: "cannot
+# judge" must never look like "passed".
+# This one file was reviewed by a person, who ruled its visible content
+# publishable on 2026-08-29. The exception IS that ruling, written down.
+# ⛔ Do NOT broaden this to `!docs/*.jpg`. A per-file exception forces a human
+#    ruling on every image; a directory exception forces none.
+!docs/manyhands-commons.jpg
+
 # #503 scope item 1, corrected: images were ALREADY blanket-ignored above
 # (*.png et al — the "screenshot-*.png doesn't match" premise was false).
 # The genuinely unprotected receipts content is the NON-image files
