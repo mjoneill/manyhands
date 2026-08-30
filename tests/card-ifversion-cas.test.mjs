@@ -153,7 +153,13 @@ test('#534 ⭐⭐ THE COUPLING: a whole-board SAVE between read and write cannot
     const save = await api(s.baseUrl, 'POST', '/api/save', {
       cards: staleBoard.cards, columns: staleBoard.columns, nextShortId: staleBoard.nextShortId,
     });
-    assert.ok(save.status < 400, `the save itself should not error: ${JSON.stringify(save.body)}`);
+    // #466 — since the whole-board save COMPARES the declared version, this
+    // stale save is refused at the door (409) instead of being accepted with a
+    // recomputed version. Either way the property under test holds: the stale
+    // seat's precondition below must still fail. Pinning the 409 here so a
+    // regression to "accepted and recomputed" is visible rather than silent.
+    assert.equal(save.status, 409,
+      `a stale whole-board save is refused under #466: ${JSON.stringify(save.body)}`);
 
     // 5 — the seat still holding the ORIGINAL version tries to write.
     const attempt = await api(s.baseUrl, 'PATCH', `/api/cards/${id}`,

@@ -34,6 +34,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { loadDomain, saveDomain } from './core/store.mjs';
+import { cardContentKey } from './core/card-content-key.mjs';
 import { appendEvent } from './core/event-log.mjs';
 // #805 — the boot migration's inputs (the live flat sources) and its builder.
 import { readPool, recentWhispers, DEFAULT_POOL, poolFilePath } from './whisper-store.mjs';
@@ -472,6 +473,12 @@ async function handleSave(req, res) {
     const storedById = new Map(
       (existing.cards || []).filter((c) => c && c.id).map((c) => [c.id, c]),
     );
+    // #466 — what the client DECLARED it had, captured BEFORE carryForward fills
+    // an absent `version` in from the store (which would make "never had the
+    // token" indistinguishable from "current"). Compared below, never accepted.
+    const declaredVersion = new Map(
+      incoming.cards.filter((c) => c && c.id).map((c) => [c.id, c.version]),
+    );
     const carryForward = (incomingCards) => incomingCards.map((c) => (
       c && c.id && storedById.has(c.id) ? { ...storedById.get(c.id), ...c } : c
     ));
@@ -504,6 +511,25 @@ async function handleSave(req, res) {
     // ACCEPTS. That is deliberate and it is a step toward #118's whole point;
     // if #118 later deletes this endpoint, this block goes with it and nothing
     // is stranded.
+    //
+    // #466 — AND IT IS COMPARED. The client's declared version is the one
+    // token that can tell a stale tab from a current one, and until this
+    // block it was discarded on arrival: a tab that loaded a card at v1 and
+    // saved after a seat PATCHed it to v2 got a 200 and put v1's content
+    // back. The rule, with its edges pinned in tests/save-stale-refused.test.mjs:
+    //
+    //   REFUSE iff  the server holds an integer version for the card
+    //           AND the client's declared version ≠ it (absent counts as ≠ —
+    //               a client that cannot prove currency does not get to revert)
+    //           AND the content differs (a stale NUMBER with identical content
+    //               is not a revert; refusing it would be refusing a number)
+    //
+    // A card with no server-side version cannot be compared and passes as
+    // before — vacuous on the unversioned share of the board (715 of 988 on
+    // 2026-08-30), closing as cards get written. And a refusal writes NOTHING:
+    // the save is one document, so "everything but the stale card" would be a
+    // partial apply nobody asked for.
+    const staleCards = [];
     if (Array.isArray(merged.cards)) {
       const priorById = new Map(
         (existing.cards || []).filter((c) => c && c.id).map((c) => [c.id, c]),
@@ -516,10 +542,32 @@ async function handleSave(req, res) {
           // born at 1 exactly as handleCreateCard mints it.
           return { ...incomingCard, version: 1 };
         }
+        const differs = cardContentKey(prior) !== cardContentKey(incomingCard);
+        if (differs && Number.isInteger(prior.version)) {
+          const declared = declaredVersion.get(incomingCard.id);
+          if (declared !== prior.version) {
+            staleCards.push({
+              id: incomingCard.id,
+              shortId: prior.shortId ?? null,
+              yourVersion: Number.isInteger(declared) ? declared : null,
+              currentVersion: prior.version,
+            });
+          }
+        }
         const settled = { ...incomingCard, version: prior.version };
-        if (cardContentKey(prior) !== cardContentKey(incomingCard)) bumpCardVersion(settled);
+        if (differs) bumpCardVersion(settled);
         else if (!Number.isInteger(settled.version)) bumpCardVersion(settled);
         return settled;
+      });
+    }
+    if (staleCards.length) {
+      const which = staleCards.slice(0, 10)
+        .map((s) => `#${s.shortId ?? '?'} v${s.yourVersion ?? '—'}→v${s.currentVersion}`).join(', ');
+      return sendJSON(res, 409, {
+        error: `Refused: ${staleCards.length} card(s) changed on the server since this board was loaded `
+          + `(${which}). Saving would silently revert those changes. `
+          + 'Reload the page to resync, then reapply your edit.',
+        staleCards,
       });
     }
 
@@ -530,7 +578,15 @@ async function handleSave(req, res) {
     const saveEvents = deriveEvents(existing, merged);
     if (saveEvents.length) writeBoard(merged, saveEvents);
 
-    sendJSON(res, 200, { ok: true, cards: merged.cards.length, lastUpdated: merged.lastUpdated });
+    // #466 — hand the settled versions back. The tab's copies are now BEHIND
+    // the server on every card this save changed; without this, the user's
+    // very next edit of the same card would be refused as stale (declared ≠
+    // current, content differs) by the comparison above. The client applies
+    // these by id and re-baselines.
+    const versions = Array.isArray(merged.cards)
+      ? merged.cards.filter((c) => c && c.id).map((c) => ({ id: c.id, version: c.version }))
+      : [];
+    sendJSON(res, 200, { ok: true, cards: merged.cards.length, lastUpdated: merged.lastUpdated, versions });
   } catch (e) {
     console.error('Error in /api/save:', e.message);
     sendJSON(res, 500, { error: 'Failed to save board data' });
@@ -1997,23 +2053,8 @@ function bumpCardVersion(card) {
   return card.version;
 }
 
-// #534 — content identity, EXCLUDING the version itself. handleSave uses this to
-// decide whether an incoming card actually differs from the stored one, because
-// bumping a card the client did not touch is not harmless: it would fail a
-// legitimate holder's ifVersion in slice 2, and over-refusing is how a
-// precondition breaks working writers.
-function cardContentKey(card) {
-  const seen = new Set();
-  return JSON.stringify(card, (k, v) => {
-    if (k === 'version') return undefined;
-    if (v && typeof v === 'object' && !Array.isArray(v)) {
-      if (seen.has(v)) return v;
-      seen.add(v);
-      return Object.fromEntries(Object.keys(v).sort().map((kk) => [kk, v[kk]]));
-    }
-    return v;
-  });
-}
+// #534/#466 — cardContentKey lives in core/card-content-key.mjs so the browser
+// and this handler answer "did this card change?" with ONE definition.
 
 function createCardFromPayload(body, nextShortId) {
   const now = new Date().toISOString();

@@ -308,7 +308,12 @@ test('#237 /api/attachments returns an id on success and a JSON error on rejecti
 //
 // ⚠️ It does NOT self-announce. A `{ todo: true }` test reports todo forever;
 // the marker comes off by hand or not at all.
-test('#237 a stale whole-board save must not silently REVERT a concurrent write', { todo: true }, async () => {
+//
+// ✅ MARKER OFF — #466 condition 2 (tests/save-stale-refused.test.mjs): handleSave
+// now COMPARES the version the browser carries instead of discarding it, and a
+// save that would revert a card that moved on is refused 409 with nothing
+// written. The block above describes the world before that; kept as the record.
+test('#237 a stale whole-board save must not silently REVERT a concurrent write', async () => {
   const s = await startRestServer({ board: makeBoardFixture() });
   try {
     const created = await (await fetch(`${s.baseUrl}/api/cards`, {
@@ -334,7 +339,7 @@ test('#237 a stale whole-board save must not silently REVERT a concurrent write'
         cards: hydrated.cards, columns: hydrated.columns, nextShortId: hydrated.nextShortId,
       }),
     });
-    assert.ok(save.status < 400, 'the save is accepted today — that is the defect, not a setup error');
+    assert.equal(save.status, 409, `#466: the stale save must be REFUSED, got ${save.status}`);
 
     // ⭐ THE ASSERTION IS THE CORRECT BEHAVIOUR, NOT THE CURRENT ONE.
     const after = await (await fetch(`${s.baseUrl}/api/cards/${created.id}`)).json();

@@ -1724,8 +1724,16 @@ body::before {
   import { mountTopNav } from './core/header.mjs';
   import { mountCommonsPanel } from './core/commons-panel.mjs';
   import { identityOf } from './core/identity.mjs';
+  import { cardContentKey } from './core/card-content-key.mjs';
   window.renderChatMarkdown = renderChatMarkdown;
   window.identityOf = identityOf; // #333 — assignee chips glow their identity light
+  // #466 — the SAME "did this card change?" the server uses, so a refused save
+  // can tell an untouched stale card from an edited one with the server's own
+  // definition. Bridged like the others: the classic script cannot import.
+  window.cardContentKey = cardContentKey;
+  // The classic script's first hydrate may have run before this module did, in
+  // which case its _rebaseline no-op'd. Take the baseline now that we can.
+  if (typeof _rebaseline === 'function' && typeof cards !== 'undefined') _rebaseline(cards);
   mountTopNav(document, 'board'); // #303-2 shared nav
   // The classic board script renders once at parse-time, before this deferred
   // module runs — so the first paint's assignee chips miss their identity light.
@@ -2095,6 +2103,65 @@ function _setSaveStatus(state, text) {
 let _saveInFlight = null;
 let _saveInFlightBody = null;
 
+// #466 — THE BASELINE. What each card looked like when this tab last agreed
+// with the server (hydrate, poll, or a save the server accepted), keyed by id.
+// Before this the page kept no such thing: `cards` is mutated in place by
+// every edit, and the only snapshot anywhere was the undo stack. Without a
+// baseline a refused save cannot be merged — every stale card looks the same,
+// touched or not, and the only remedy is reload, which discards the edit.
+const _hydratedKeys = new Map();
+function _rebaseline(cardArr) {
+  if (typeof window.cardContentKey !== 'function') return;   // module not up yet; no merge until it is
+  _hydratedKeys.clear();
+  for (const c of cardArr) if (c && c.id) _hydratedKeys.set(c.id, window.cardContentKey(c));
+}
+function _cardIsDirty(c) {
+  if (typeof window.cardContentKey !== 'function' || !_hydratedKeys.has(c.id)) return true;   // unknown ⇒ treat as edited: never silently drop
+  return _hydratedKeys.get(c.id) !== window.cardContentKey(c);
+}
+// After a 200, the server's versions are ahead of ours on every card it
+// changed; take them, and re-baseline from the cards the server ACCEPTED.
+//
+// ⛔ NOT from the live array. A queued save serializes its body before it
+// waits for the one in flight, so an edit made while a save is on the wire
+// is in `cards` but not in what the server has. Baselining from `cards` here
+// recorded that edit as "already saved"; the queued save then 409'd (stale
+// by construction), the merge saw "not dirty", took the server's copy, and
+// reported Saved — with the second edit gone. Found by review before it ran;
+// tests/save-stale-merge.test.mjs pins it.
+function _applySavedVersions(versions, sentCards) {
+  if (!Array.isArray(versions)) return;
+  const byId = new Map(versions.map((v) => [v.id, v.version]));
+  for (const c of cards) if (c && byId.has(c.id)) c.version = byId.get(c.id);
+  _rebaseline(sentCards);
+}
+// On a 409 naming stale cards: the ones this tab never touched take the
+// server's copy (they were only going to revert someone's work); the ones it
+// DID edit are a real conflict — name them, keep the edit on screen, do not
+// retry. Returns the conflict list; an empty list means "merged, retry once".
+async function _mergeStaleCards(staleCards) {
+  const conflicts = [];
+  const untouched = [];
+  for (const s of staleCards) {
+    const local = cards.find((c) => c && c.id === s.id);
+    if (!local) continue;
+    (_cardIsDirty(local) ? conflicts : untouched).push({ ...s, local });
+  }
+  if (conflicts.length) return conflicts;
+  const fresh = await loadFromJSONFile();
+  if (!fresh) return staleCards.map((s) => ({ ...s, unreachable: true }));
+  for (const u of untouched) {
+    const server = fresh.cards.find((c) => c && c.id === u.id);
+    const i = cards.indexOf(u.local);
+    if (!server || i < 0) continue;
+    cards[i] = server;
+    if (typeof window.cardContentKey === 'function') _hydratedKeys.set(server.id, window.cardContentKey(server));
+  }
+  if (typeof renderBoard === 'function') renderBoard();
+  return [];
+}
+const _nameCards = (list) => list.map((s) => `#${s.shortId ?? '?'}`).join(', ');
+
 async function saveToJSONFile() {
   const payload = {
     cards: cards.map(c => ({...c})), // shallow clone to avoid mutation
@@ -2131,11 +2198,42 @@ async function saveToJSONFile() {
       SAVE_PENDING_DELAY_MS,
     );
     try {
-      const response = await fetch(API_BASE + JSON_ENDPOINTS.save, {
+      const post = (b) => fetch(API_BASE + JSON_ENDPOINTS.save, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body
+        body: b,
       });
+      let response = await post(body);
+      let sentCards = payload.cards;   // what the server is judging — the baseline if it accepts
+      let refused = null;
+      if (response.status === 409) {
+        try { refused = await response.json(); } catch { refused = null; }
+        // #466 — the server refused because this save would REVERT cards that
+        // moved since the tab loaded. Merge the untouched ones and retry ONCE;
+        // a second 409 means the board moved again in the window, and it is
+        // reported rather than looped on.
+        if (refused && Array.isArray(refused.staleCards) && refused.staleCards.length) {
+          const conflicts = await _mergeStaleCards(refused.staleCards);
+          if (conflicts.length === 0) {
+            const retry = {
+              cards: cards.map(c => ({...c})), columns: columns.map(c => ({...c})),
+              nextShortId, lastUpdated: new Date().toISOString(),
+            };
+            _testHookCapturePayload(retry);
+            response = await post(JSON.stringify(retry));
+            sentCards = retry.cards;
+            if (response.status === 409) { try { refused = await response.json(); } catch { refused = null; } }
+          } else {
+            clearTimeout(pendingTimer);
+            const who = _nameCards(conflicts);
+            _setSaveStatus('failed', conflicts.some((c) => c.unreachable)
+              ? 'Not saved — the board changed and the server could not be re-read. Your edit is still on screen; try again.'
+              : `Not saved — ${who} changed on the server while you were editing ${conflicts.length === 1 ? 'it' : 'them'}. `
+                + 'Your edit is still on screen. Copy it, reload, and reapply.');
+            return false;
+          }
+        }
+      }
       clearTimeout(pendingTimer);
       if (!response.ok) {
         console.warn('saveToJSONFile: server returned', response.status);
@@ -2143,10 +2241,13 @@ async function saveToJSONFile() {
         // reapply · retry · you are offline. A single "save failed" would make
         // the user guess which, and guessing wrong costs the edit.
         _setSaveStatus('failed', response.status === 409
-          ? 'Not saved — someone else changed the board. Reload before re-editing.'
+          ? `Not saved — ${refused && Array.isArray(refused.staleCards) && refused.staleCards.length
+              ? _nameCards(refused.staleCards) + ' changed again while saving' : 'someone else changed the board'}. `
+            + 'Your edit is still on screen; try again, or reload.'
           : `Not saved — the server refused (${response.status}). Your edit is still on screen.`);
         return false;
       }
+      try { _applySavedVersions((await response.json()).versions, sentCards); } catch { /* an older server sends no versions */ }
       _setSaveStatus('saved', 'Saved');
       return true;
     } catch (e) {
@@ -4608,6 +4709,7 @@ async function pollBoard() {
     syncColumnNamesFromColumns();
   }
   nextShortId = recomputeNextShortId(cards, data.nextShortId);
+  _rebaseline(cards);   // #466 — the tab agrees with the server again
   _boardRenderedSig = newSig;
   renderBoard();
 }
@@ -5058,6 +5160,7 @@ if (_convsForm) {
     }
     nextShortId = recomputeNextShortId(cards, jsonResult.nextShortId);
     saveToLocalStorage();
+    _rebaseline(cards);   // #466 — the baseline a refused save is merged against
   } else {
     restoreFromLocalStorage();
     nextShortId = recomputeNextShortId(cards, null);
