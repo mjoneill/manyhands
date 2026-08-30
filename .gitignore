@@ -79,3 +79,6 @@ work-objects/
 # already do. tending-provenance.example.json IS tracked and carries synthetic
 # seats. #804's graph-native pool retires this file.
 tending-provenance.json
+
+# scratch repos made by tests when SCRATCHPAD is unset (tests/ci-verdict.test.mjs)
+.scratch-tests/
