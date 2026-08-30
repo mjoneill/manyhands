@@ -18,6 +18,7 @@
  *   · SUBSTRING, case-insensitive. Not tokenised, not stemmed, no ranking.
  *     "build" matches "rebuilding". "built" does NOT match "build".
  *   · Searches TITLE and DESCRIPTION only — not comments, not labels.
+ *     (this one was PROSE-ONLY until 2026-08-30; now asserted below)
  *   · Combines with every other filter as AND, never OR.
  *
  * Those limits are asserted below rather than described, so a future change
@@ -117,6 +118,35 @@ test('#656 the limits are REAL — substring, not tokenised or stemmed', async (
     assert.equal(stem.body.cards.length, 0,
       'NOT stemmed: "built" does not match "build". A limitation, pinned so a '
       + 'future change is a decision rather than a surprise.');
+  } finally { await s.stop(); }
+});
+
+test('#656 q does NOT reach LABELS — the one stated limit that was never asserted', async () => {
+  // ⚠️ FOUND 2026-08-30 BY READING THIS FILE'S OWN CLAIM AGAINST ITSELF.
+  // The header says the limits are "asserted below rather than described, so a
+  // future change that silently widens or narrows them turns a test red instead
+  // of surprising a caller." Seven tests pin substring-not-stemmed, AND-not-OR,
+  // empty-not-everything, the miss log, and the refusal string.
+  //
+  // ⛔ NOT ONE PINNED "not labels". The fixture even carries the card for it —
+  // card 3 has labels: ['other'] — and nothing ever searched for it. So the
+  // single limit most likely to be widened (labels are the obvious next field)
+  // was the only one a change could have crossed with the suite still green.
+  //
+  // ⭐ THIS TEST ASSERTS THE CURRENT BEHAVIOUR AND CHANGES NOTHING. It exists so
+  // that adding labels to the haystack becomes a DECISION with a red test
+  // attached, which is what the header promised and did not deliver.
+  const s = await startRestServer({ board: board() });
+  try {
+    const r = await q(s.baseUrl, 'q=other&as=ada');
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body.cards.map((c) => c.shortId), [],
+      'card 3 carries labels:["other"] and the string appears nowhere in its '
+      + 'title or description. q must NOT match it. If you are reading this '
+      + 'because the test went red: you widened free-text search to cover '
+      + 'labels. That may well be right — #656 chose title+description '
+      + 'deliberately — but it is a contract change, so update the header\'s '
+      + 'stated limits in the same commit rather than letting a caller find out.');
   } finally { await s.stop(); }
 });
 
