@@ -278,6 +278,10 @@ const isMemory = (entity) => entity && MEMORY_TYPE_SET.has(entity['@type']);
 // them: a decision has no versions and no owner, and folding it into the memory
 // collection would make "what has this room decided" a filter over the wrong set.
 const isDecision = (entity) => entity && entity['@type'] === 'scrum:Decision';
+// #945 — predicate definitions are their own class for the same reason:
+// "what does asserting X mean" must be a filter over the vocabulary, not over
+// memories or decisions it happens to resemble.
+const isPredicateDefinition = (entity) => entity && entity['@type'] === 'scrum:PredicateDefinition';
 
 /**
  * ⛔ ENFORCE the ordering contract rather than merely preserving it.
@@ -343,7 +347,7 @@ const nodeToColumn = ({ '@type': _t, '@id': _i, identifier, name, 'scrum:order':
 export function domainToJsonLd(domain) {
   const {
     nodes = [], messages = [], people = [], columns = [],
-    tending = [], memories = [], decisions = [], labelAliases = [], _unmodelled = [], _README, ...meta
+    tending = [], memories = [], decisions = [], predicates = [], labelAliases = [], _unmodelled = [], _README, ...meta
   } = domain;
   const doc = {};
   if (_README !== undefined) doc._README = _README;   // first key — JSON.stringify keeps insertion order
@@ -364,6 +368,7 @@ export function domainToJsonLd(domain) {
     ...tending,
     ...memories,
     ...decisions,
+    ...predicates,
     // #804 — entities of a class this projection does not model ride through
     // verbatim rather than being dropped. Silent deletion is the other bad
     // answer to the fallthrough bug: a phantom card is at least visible.
@@ -413,11 +418,14 @@ export function jsonLdToDomain(doc) {
   // #918 — same absence-preserving rule.
   const decisions = graph.filter(isDecision);
   if (decisions.length) domain.decisions = decisions;
+  // #945 — same rule again.
+  const predicates = graph.filter(isPredicateDefinition);
+  if (predicates.length) domain.predicates = predicates;
   // Anything recognised by NO predicate is kept verbatim so the serializer
   // stays lossless. It is never a card and never silently discarded.
   const unmodelled = graph.filter(
     (e) => !isCard(e) && !isMessage(e) && !isPerson(e) && !isColumn(e) && !isTending(e)
-      && !isMemory(e) && !isDecision(e),
+      && !isMemory(e) && !isDecision(e) && !isPredicateDefinition(e),
   );
   if (unmodelled.length) domain._unmodelled = unmodelled;
   if (Array.isArray(doc._labelAliases) && doc._labelAliases.length) domain.labelAliases = doc._labelAliases;

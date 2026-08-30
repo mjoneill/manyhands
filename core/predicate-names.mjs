@@ -43,6 +43,9 @@
  * "what does the graph call X?" for every X, not only the surprising ones.
  */
 export const PREDICATE_SOURCE = Object.freeze({
+  // ── #945 slice 1 — the predicate registry itself ──────────────────────────
+  'scrum:PredicateDefinition': null,        // the type; minted by the projection
+  'scrum:definition': 'scrum:definition',
   // ── #1112 item 3 — work ledger transitions (Decision 3956b66b; source is the
   // SCRUM_WORK_STORE jsonl, not the board document). ────────────────────────
   'schema:Action': null,                    // the type; minted by the projection

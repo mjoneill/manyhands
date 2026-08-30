@@ -1219,6 +1219,34 @@ function buildMcpServer() {
   // commit, because #651 shipped a node type the seats it was built for could
   // not write to for weeks (#904) and this card said explicitly: not done
   // without this.
+  // ── #945 slice 1 — the predicate registry, reachable from a seat ──────────
+  mcp.registerTool('predicate_register', {
+    description: 'Register (or revise) a PREDICATE DEFINITION — what asserting this term MEANS '
+      + '(#945, Decision aad42bf5). Observation only in this slice: the registry gates nothing yet; '
+      + 'it exists so the vocabulary can be read, argued with, and governed. One definition per name; '
+      + 're-registering revises it and the event log keeps every prior version. Name shape: '
+      + '"scrum:relatedTo", "schema:isPartOf" (prefixes: schema, scrum, prov, rdf).',
+    inputSchema: {
+      name: z.string().min(1).describe('The prefixed term, e.g. "scrum:relatedTo"'),
+      definition: z.string().min(1).describe('What asserting this predicate MEANS — a real definition, not a restatement of the name'),
+      by: z.string().min(1).describe('Who stands behind this definition. Declared, not authenticated.'),
+    },
+  }, async ({ name, definition, by }) => {
+    return jsonResult(await apiCall('POST', '/api/predicates', { name, definition, by }));
+  });
+
+  mcp.registerTool('predicate_list', {
+    description: 'List registered predicate definitions (#945), optionally by exact name. An '
+      + 'unregistered name returns an EMPTY LIST, never an error — while the registry is an '
+      + 'observation, "unregistered" is the common and correct answer.',
+    inputSchema: {
+      name: z.string().optional().describe('Only this exact prefixed term'),
+    },
+  }, async ({ name } = {}) => {
+    const q = name ? `?name=${encodeURIComponent(name)}` : '';
+    return jsonResult(await apiCall('GET', `/api/predicates${q}`));
+  });
+
   mcp.registerTool('decision_create', {
     description: 'Record a DECISION — a constraint on future work, not a task. Use this when the room '
       + 'settles something that should stop being re-argued: a rule, a scope call, a chosen approach. '

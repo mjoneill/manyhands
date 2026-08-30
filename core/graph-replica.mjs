@@ -135,6 +135,7 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:TendingPromptVersion', 'scrum:TendingPrompt', 'scrum:Column',
   'scrum:Blocker', 'scrum:Commit', 'scrum:UnresolvedReference', 'scrum:Check',
   'scrum:Tending', 'scrum:SeatDeclaration', 'scrum:WorkObject',
+  'scrum:PredicateDefinition', 'scrum:definition',
   // ⚠️ EMITTED BY THE PROJECTOR AND ABSENT FROM THIS BOARD'S DATA TODAY. Every
   // one of these was missing from the first, store-derived list; `scrum:ofSilence`
   // is the one the suite caught and the rest came from the same source scan.
@@ -1147,6 +1148,17 @@ function projectEntity(store, e) {
       projectMemory(store, e);
     } else if (t === 'scrum:Decision') {
       projectDecision(store, e);
+    } else if (t === 'scrum:PredicateDefinition') {
+      // #945 slice 1 — the registry is graph-queryable: "what does asserting X
+      // mean, and who stands behind that?" is one query, which is the whole
+      // point of a vocabulary being IN the graph it governs.
+      const s_ = nn(e['@id']);
+      add(s_, A, nn(S + 'PredicateDefinition'));
+      if (e.name) add(s_, nn(SC + 'name'), lit(e.name));
+      if (e['scrum:definition']) add(s_, nn(S + 'definition'), lit(e['scrum:definition']));
+      if (e['scrum:registeredBy']) add(s_, nn(SC + 'creator'), nn(P + e['scrum:registeredBy']));
+      if (e.dateCreated) add(s_, nn(SC + 'dateCreated'), lit(e.dateCreated));
+      if (e.dateModified) add(s_, nn(SC + 'dateModified'), lit(e.dateModified));
     } else if (e && e['@id']) {
       // An entity class this projection doesn't know yet (wiki pages are
       // already in the event vocabulary; more will come). It must NOT vanish:

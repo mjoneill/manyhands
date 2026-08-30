@@ -1785,6 +1785,103 @@ function handleListMemories(req, res) {
 // knowing which decision to look for, this is a filing cabinet.
 const DECISION_ID = (id) => `https://scrumboard.local/decision/${id}`;
 
+// ── #945 slice 1 — the PREDICATE REGISTRY, as observation (Decision aad42bf5) ──
+// Option D says a predicate must be registered with a definition before it can
+// be used. THIS SLICE GATES NOTHING: it registers and lists, so the decision's
+// own reopensIf experiment (can `relatedTo` be defined usably?) can run before
+// any write path grows a refusal. Born in the graph per Decision aaf1774b —
+// a PredicateDefinition is an entity with events, not a side-file.
+const PREDICATE_ID = (name) => `https://scrumboard.local/predicate/${encodeURIComponent(name)}`;
+const PREDICATE_NAME_RE = /^(schema|scrum|prov|rdf):[A-Za-z][A-Za-z0-9]*$/;
+
+function predicatesOf(data) {
+  return Array.isArray(data.predicates) ? data.predicates : [];
+}
+
+const predicateEvent = (op, e, actor) => ({
+  op, actor, entity: { kind: 'predicate', id: e['@id'] }, state: e,
+});
+
+function predicateToWire(e) {
+  return {
+    name: e.name,
+    definition: e['scrum:definition'],
+    registeredBy: e['scrum:registeredBy'],
+    registeredAt: e.dateCreated,
+    revisedAt: e.dateModified ?? null,
+  };
+}
+
+/** @returns {string|null} an error message, or null if sound. */
+function validatePredicate(b) {
+  if (typeof b.name !== 'string' || !PREDICATE_NAME_RE.test(b.name)) {
+    return 'name must be a prefixed term like "scrum:relatedTo" or "schema:isPartOf" '
+      + '(prefixes: schema, scrum, prov, rdf) — an unprefixed name cannot be matched '
+      + 'against what the graph actually emits';
+  }
+  if (typeof b.definition !== 'string' || !b.definition.trim()) {
+    return 'definition is required and must say what asserting this predicate MEANS — '
+      + 'a registry of names without definitions is a logbook, not a vocabulary';
+  }
+  const who = b.by || b.registeredBy;
+  if (typeof who !== 'string' || !who.trim()) {
+    return 'by is required — who stands behind this definition. Declared, not authenticated.';
+  }
+  return null;
+}
+
+async function handleRegisterPredicate(req, res) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const err = validatePredicate(body);
+    if (err) return sendJSON(res, 400, { error: err });
+    const who = body.by || body.registeredBy;
+    const result = await withWriteLock(async () => {
+      const data = readBoard();
+      const now = new Date().toISOString();
+      const existing = predicatesOf(data).find((e) => e.name === body.name);
+      if (existing) {
+        // ONE entity per name: a re-register is a REVISION. The event log keeps
+        // every prior definition; the entity carries the current one.
+        const revised = {
+          ...existing,
+          'scrum:definition': String(body.definition),
+          'scrum:registeredBy': who,
+          dateModified: now,
+        };
+        data.predicates = predicatesOf(data).map((e) => (e.name === body.name ? revised : e));
+        writeBoard(data, [predicateEvent('update', revised, who)]);
+        return { status: 200, wire: predicateToWire(revised) };
+      }
+      const entity = {
+        '@id': PREDICATE_ID(body.name), '@type': 'scrum:PredicateDefinition',
+        name: body.name,
+        'scrum:definition': String(body.definition),
+        'scrum:registeredBy': who,
+        dateCreated: now,
+      };
+      data.predicates = [...predicatesOf(data), entity];
+      writeBoard(data, [predicateEvent('create', entity, who)]);
+      return { status: 201, wire: predicateToWire(entity) };
+    });
+    sendJSON(res, result.status, result.wire);
+  } catch (e) {
+    console.error('POST /api/predicates:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+
+function handleListPredicates(req, res) {
+  const q = parseQuery(req.url);
+  let out = predicatesOf(readBoard())
+    .filter((e) => e['@type'] === 'scrum:PredicateDefinition')
+    .map(predicateToWire);
+  // An unknown name returns an EMPTY LIST, never an error: "unregistered" is
+  // the common and correct answer while the registry is an observation.
+  if (q.name) out = out.filter((p) => p.name === q.name);
+  sendJSON(res, 200, out);
+}
+
 function decisionsOf(data) {
   return Array.isArray(data.decisions) ? data.decisions : [];
 }
@@ -5044,6 +5141,8 @@ const API_ROUTES = [
   // #651 — memories. The versions route is declared BEFORE the bare :id route
   // so `/memories/<id>/versions` cannot be swallowed as an id containing a slash.
   { method: 'GET',    re: /^\/api\/decisions$/,            fn: (req, res) => handleListDecisions(req, res) },
+  { method: 'GET',    re: /^\/api\/predicates$/,           fn: (req, res) => handleListPredicates(req, res) },
+  { method: 'POST',   re: /^\/api\/predicates$/,           fn: (req, res) => handleRegisterPredicate(req, res) },
   { method: 'POST',   re: /^\/api\/decisions$/,            fn: (req, res) => handleCreateDecision(req, res) },
   { method: 'GET',    re: /^\/api\/memories$/,             fn: (req, res) => handleListMemories(req, res) },
   { method: 'POST',   re: /^\/api\/memories$/,             fn: (req, res) => handleCreateMemory(req, res) },
