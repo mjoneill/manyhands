@@ -35,6 +35,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { loadDomain, saveDomain } from './core/store.mjs';
 import { cardContentKey } from './core/card-content-key.mjs';
+import { applyApexLabels } from './core/apex-labels.mjs';
 import { appendEvent } from './core/event-log.mjs';
 // #805 — the boot migration's inputs (the live flat sources) and its builder.
 import { readPool, recentWhispers, DEFAULT_POOL, poolFilePath } from './whisper-store.mjs';
@@ -3271,6 +3272,7 @@ async function handleCreateCard(req, res) {
       similar = similarCards(data.cards, body.title);
       const card = createCardFromPayload(body, data.nextShortId);
       data.cards.push(card);
+      if (card.parent != null) applyApexLabels(data.cards, card.id);   // #902 item 4 — born labelled
       data.nextShortId = (data.nextShortId || 1) + 1;
       // #669 — the create AND every sibling its relationships rewrote (#614).
       const fanout = syncInverseRelationships(data, card, null, card.relationships);
@@ -3546,6 +3548,11 @@ async function handleUpdateCard(req, res, idOrShortId) {
         }
         card[k] = v;
       }
+      // #902 item 4 — THE WRITE-TIME GUARD. A card that gained a parent walks
+      // up; any ancestor carrying `apex:X` applies label X to it and to its
+      // descendants (they moved with it). Additive only; never strips. Runs
+      // AFTER the fields are applied so it sees the parent this write set.
+      if ('parent' in patch && patch.parent != null) applyApexLabels(data.cards, card.id);
       card.updatedAt = new Date().toISOString();
       bumpCardVersion(card);   // #534 — one bump per accepted PATCH, not per field
       // #665 — the board is the ignition: a card ENTERING done asks the room
@@ -4377,6 +4384,7 @@ async function handleCreateNode(req, res) {
       if (typeof body.parent === 'string') card.parent = body.parent;
       if (body.attachments !== undefined) card.attachments = sanitizeAttachments(body.attachments); // #222
       data.cards.push(card);
+      if (card.parent != null) applyApexLabels(data.cards, card.id);   // #902 item 4 — born labelled
       data.nextShortId = (data.nextShortId || 1) + 1;
       const notice = appendWikiNotice(data, 'created', card); // #223
       writeBoard(data, [cardEvent('create', card, card.createdBy),
@@ -4447,6 +4455,7 @@ async function handleUpdateNode(req, res, idOrShortId) {
       if ('title' in patch) card.title = patch.title;
       if ('body' in patch) card.description = patch.body;
       if ('parent' in patch) card.parent = patch.parent;
+      if ('parent' in patch && patch.parent != null) applyApexLabels(data.cards, card.id);   // #902 item 4
       if ('attachments' in patch) card.attachments = sanitizeAttachments(patch.attachments); // #222
       card.updatedAt = new Date().toISOString();
       bumpCardVersion(card);   // #534 — a node update is a card write
