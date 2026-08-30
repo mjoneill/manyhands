@@ -776,16 +776,30 @@ const numEnv = (name, dflt) => { const v = Number(process.env[name]); return Num
 const SEARCH_ABSTAIN_BELOW = numEnv('SEARCH_ABSTAIN_BELOW', 0.5);
 const SEARCH_ASK_WITHIN = numEnv('SEARCH_ASK_WITHIN', 0.03);
 const SEARCH_MAX_EMBED = Math.max(1, Math.floor(numEnv('SEARCH_MAX_EMBED', 50)));
+const SEARCH_MAX_EMBED_CHARS = Math.max(1, Math.floor(numEnv('SEARCH_MAX_EMBED_CHARS', 60000)));
+// Below undici's own 300 s so the failure is NAMED here rather than surfacing as "fetch failed".
+const SEARCH_EMBED_TIMEOUT_MS = Math.max(1, Math.floor(numEnv('SEARCH_EMBED_TIMEOUT_MS', 240000)));
 let _searchModule = null;
 async function loadSearchModule() {
   if (!_searchModule) _searchModule = await import('./core/semantic-search.mjs');
   return _searchModule;
 }
 async function embedTexts(texts) {
-  const r = await fetch(SEARCH_EMBED_URL, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: SEARCH_EMBED_MODEL, input: texts }),
-  });
+  let r;
+  try {
+    r = await fetch(SEARCH_EMBED_URL, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      // truncate:true is Ollama's default, said out loud: an over-context input
+      // is embedded from its head, never refused.
+      body: JSON.stringify({ model: SEARCH_EMBED_MODEL, input: texts, truncate: true }),
+      signal: AbortSignal.timeout(SEARCH_EMBED_TIMEOUT_MS),
+    });
+  } catch (e) {
+    if (e?.name === 'TimeoutError' || e?.name === 'AbortError') {
+      throw new Error(`embedder timed out after ${SEARCH_EMBED_TIMEOUT_MS} ms on a batch of ${texts.length} text(s), ${texts.reduce((n, t) => n + t.length, 0)} chars`);
+    }
+    throw e;
+  }
   if (!r.ok) throw new Error(`embedder answered ${r.status}`);
   const j = await r.json();
   if (!Array.isArray(j.embeddings) || j.embeddings.length !== texts.length) throw new Error('embedder returned the wrong number of vectors');
@@ -1063,7 +1077,7 @@ async function handleSearch(req, res) {
     } catch (e) {
       return sendJSON(res, 200, { available: false, reason: e.message, ...thresholds, k });
     }
-    const plan = S.planIndexUpdate(cards, index.rows, { maxEmbed: SEARCH_MAX_EMBED });
+    const plan = S.planIndexUpdate(cards, index.rows, { maxEmbed: SEARCH_MAX_EMBED, maxEmbedChars: SEARCH_MAX_EMBED_CHARS });
     // ONE embedder call: the query first, then this batch of changed cards.
     let vectors;
     try {

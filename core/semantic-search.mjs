@@ -40,9 +40,16 @@ import { createHash } from 'node:crypto';
 
 export const DEFAULTS = Object.freeze({ abstainBelow: 0.5, askWithin: 0.03, k: 8 });
 export const TEXT_SHAPE = '# title\n\nbody';
+// Measured 2026-08-30 on the serving embedder (qwen3-embedding:8b via Ollama):
+// ~5.4 ms/token, hard-truncated at 4096 tokens, so a 107k-char card costs 21 s
+// and a 25-card batch of them outlives node's 300 s fetch. 6000 chars ≈ 1700
+// tokens ≈ 9 s. A long card is embedded from its HEAD (title + opening);
+// 263 of 990 live cards were over 8000 chars when this was set.
+export const MAX_TEXT_CHARS = 6000;
+export const MAX_EMBED_CHARS = 60000;
 
-export function cardText(card) {
-  return `# ${card?.title ?? ''}\n\n${card?.description ?? ''}`;
+export function cardText(card, { maxChars = MAX_TEXT_CHARS } = {}) {
+  return `# ${card?.title ?? ''}\n\n${card?.description ?? ''}`.slice(0, maxChars);
 }
 
 export function contentHash(text) {
@@ -101,7 +108,7 @@ const round = (x) => Math.round(x * 1000) / 1000;
  * most maxEmbed), keep the unchanged, drop the deleted. `coverage` reports the
  * index as it IS — stale counts what is still stale, not what this batch fixes.
  */
-export function planIndexUpdate(cards, rows, { maxEmbed = 50 } = {}) {
+export function planIndexUpdate(cards, rows, { maxEmbed = 50, maxEmbedChars = MAX_EMBED_CHARS } = {}) {
   const byId = new Map((rows || []).map((r) => [r.id, r]));
   const live = new Set();
   const toEmbed = [];
@@ -118,8 +125,18 @@ export function planIndexUpdate(cards, rows, { maxEmbed = 50 } = {}) {
   const drop = [...byId.keys()].filter((id) => !live.has(id));
   const total = live.size;
   const stale = toEmbed.length;
+  // Bounded by count AND by characters (one embedder call must finish inside
+  // the fetch); a budget smaller than the first card still admits it, or the
+  // index could never progress past that card.
+  const batch = [];
+  let chars = 0;
+  for (const t of toEmbed) {
+    if (batch.length >= Math.max(0, maxEmbed)) break;
+    if (batch.length > 0 && chars + t.text.length > maxEmbedChars) break;
+    batch.push(t); chars += t.text.length;
+  }
   return {
-    toEmbed: toEmbed.slice(0, Math.max(0, maxEmbed)),
+    toEmbed: batch,
     keep, drop,
     coverage: { indexed: keep.length, total, stale },
   };

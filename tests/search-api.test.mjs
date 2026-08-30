@@ -81,6 +81,7 @@ test('a clear question ANSWERS with the right card, builds the index on first us
     assert.equal(r.abstainBelow, 0.5); assert.equal(r.askWithin, 0.03); assert.equal(r.k, 8);
     assert.equal(r.generation.model, 'fake'); assert.equal(r.generation.dims, 5);
     assert.equal(emb.calls.length, 1, 'ONE embedder call: query + the batch');
+    assert.equal(emb.calls[0].truncate, true, 'the request says out loud that over-context inputs are truncated, not refused');
     assert.equal(emb.calls[0].input.length, 5, 'the query and four cards');
     assert.equal(emb.calls[0].input[1], '# The deploy script asks CI before it exports\n\ndeploy deploy deploy', 'the measured text shape, byte for byte');
     // the index file and the verbatim log exist beside the board data
@@ -184,4 +185,18 @@ test('MCP board_search rides the same surface', async () => {
     assert.equal(r.verdict, 'answer');
     assert.equal(r.top.shortId, 4);
   } finally { await mcp.stop(); await rest.stop(); await emb.stop(); }
+});
+
+test('an embedder that never answers ⇒ available:false naming the timeout, not a hung request', async () => {
+  const calls = [];
+  const srv0 = http.createServer((req) => { calls.push(1); /* never respond */ });
+  await new Promise((r) => srv0.listen(0, '127.0.0.1', r));
+  const url = `http://127.0.0.1:${srv0.address().port}/api/embed`;
+  const srv = await startRestServer({ board: board(), env: { SEARCH_EMBED_URL: url, SEARCH_EMBED_MODEL: 'fake', SEARCH_EMBED_TIMEOUT_MS: '300' } });
+  try {
+    const r = await search(srv, { q: 'deploy' });
+    assert.equal(r.available, false);
+    assert.match(r.reason, /timed out after 300 ms/);
+    assert.equal(calls.length, 1);
+  } finally { await srv.stop(); srv0.closeAllConnections?.(); await new Promise((r) => srv0.close(r)); }
 });

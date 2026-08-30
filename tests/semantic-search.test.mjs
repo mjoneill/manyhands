@@ -19,7 +19,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  cosine, rank, decide, cardText, contentHash, planIndexUpdate, parseIndex, serializeIndex,
+  cosine, rank, decide, cardText, contentHash, planIndexUpdate, parseIndex, serializeIndex, MAX_TEXT_CHARS,
   DEFAULTS,
 } from '../core/semantic-search.mjs';
 
@@ -131,4 +131,28 @@ test('the index file: a generation header then rows; parse refuses a header that
   assert.throws(() => parseIndex(text, { model: 'other', dims: 2 }), /generation/);
   assert.throws(() => parseIndex(text, { model: 'm', dims: 3 }), /generation/);
   assert.deepEqual(parseIndex('', { model: 'm', dims: 2 }).rows, [], 'no file yet ⇒ empty index, not an error');
+});
+
+// Measured 2026-08-30 against qwen3-embedding:8b on the serving box: the embedder
+// costs ~5.4 ms per token, truncates at 4096 tokens (a 107k-char card ⇒ 21 s),
+// and a batch of 25 such cards runs past node's 300 s fetch limit ⇒ "fetch failed".
+test('cardText is capped at MAX_TEXT_CHARS — a long card is embedded from its head, the title always survives', () => {
+  assert.equal(MAX_TEXT_CHARS, 6000, 'the published cap (≈1700 tokens ≈ 9 s on the serving embedder)');
+  const long = 'x'.repeat(20000);
+  const t = cardText({ title: 'T', description: long });
+  assert.equal(t.length, MAX_TEXT_CHARS);
+  assert.ok(t.startsWith('# T\n\nxxx'));
+  assert.equal(cardText({ title: 'T', description: 'short' }), '# T\n\nshort', 'a short card is untouched');
+  assert.equal(contentHash(cardText({ title: 'T', description: long })), contentHash(cardText({ title: 'T', description: long + 'tail' })),
+    'two cards that differ only past the cap embed the same text, so an edit to the tail does not re-embed');
+});
+
+test('planIndexUpdate bounds a batch by CHARACTERS as well as by count — so one call cannot outlive the fetch', () => {
+  const big = (id) => ({ id, title: id, description: 'y'.repeat(5000) });
+  const cards = [big('a'), big('b'), big('c'), { id: 'd', title: 'd', description: 'tiny' }];
+  const plan = planIndexUpdate(cards, [], { maxEmbed: 50, maxEmbedChars: 11000 });
+  assert.deepEqual(plan.toEmbed.map((t) => t.id), ['a', 'b'], 'the third 5k card would push the batch past 11k chars');
+  assert.equal(plan.coverage.stale, 4, 'coverage still reports everything that is stale');
+  const one = planIndexUpdate(cards, [], { maxEmbed: 50, maxEmbedChars: 10 });
+  assert.deepEqual(one.toEmbed.map((t) => t.id), ['a'], 'a budget smaller than any card still embeds ONE — the index must be able to progress');
 });
