@@ -163,6 +163,7 @@ ci_gate() {
     1) die "CI is RED for $sha — fix it (or revert) and push; do not serve a red sha" ;;
     3) die "CI has NO RUN for $sha — push it and let the workflow run first" ;;
     4) die "CI is still RUNNING for $sha — wait for the verdict:  gh run watch" ;;
+    5) die "CI's verdict for $sha was CANCELLED, not earned (#1108: a later push to the same ref cancels re-runs of older shas) — re-run it (gh run rerun <id>), wait for green, then deploy. The code did not change; the record did." ;;
     *) die "could not ASK CI about $sha (UNKNOWN) — fix gh (gh auth status) and retry; a deploy that cannot ask does not guess" ;;
   esac
 }

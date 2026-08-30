@@ -17,6 +17,12 @@
  *                  the gate could not ask. Not "no news is good news".
  *     3  NO RUN    CI has no run for this sha (not pushed? workflow off?)
  *     4  PENDING   a run exists and has not completed — wait, don't guess
+ *     5  CANCELLED the verdict was DESTROYED, not earned: ci.yml's
+ *                  cancel-in-progress is keyed on the REF, so any push to
+ *                  main cancels a re-run of any OLDER sha, and a re-run
+ *                  OVERWRITES that sha's conclusion (#1108). The code did not
+ *                  change; the record did. Remedy: re-run, then deploy.
+ *                  (The original attempt survives: gh run view --attempt 1.)
  *
  * There is deliberately NO override flag. The 2026-08-30 history (#1085) is
  * what an override does within twelve hours of existing. If CI is down, the
@@ -29,7 +35,7 @@
 
 import { spawnSync } from 'node:child_process';
 
-export const EXIT = { GREEN: 0, RED: 1, UNKNOWN: 2, NO_RUN: 3, PENDING: 4 };
+export const EXIT = { GREEN: 0, RED: 1, UNKNOWN: 2, NO_RUN: 3, PENDING: 4, CANCELLED: 5 };
 
 /** Decide from the runs `gh run list --commit <sha>` returned. */
 export function verdict(runs) {
@@ -39,9 +45,13 @@ export function verdict(runs) {
   if (pending.length) {
     return { code: EXIT.PENDING, why: `${pending.length} run(s) not finished (${pending.map((r) => r.status).join(', ')}) — wait for the verdict`, runs: pending };
   }
-  const red = runs.filter((r) => r.conclusion !== 'success');
+  const red = runs.filter((r) => r.conclusion !== 'success' && r.conclusion !== 'cancelled');
   if (red.length) {
     return { code: EXIT.RED, why: `${red.length} run(s) concluded ${[...new Set(red.map((r) => r.conclusion))].join('/')}`, runs: red };
+  }
+  const cancelled = runs.filter((r) => r.conclusion === 'cancelled');
+  if (cancelled.length) {
+    return { code: EXIT.CANCELLED, why: `${cancelled.length} run(s) CANCELLED — the verdict was destroyed, not earned (a later push to the same ref cancels re-runs of older shas, #1108). Re-run it: gh run rerun ${cancelled[0].databaseId ?? '<id>'}`, runs: cancelled };
   }
   return { code: EXIT.GREEN, why: `${runs.length} run(s), all success`, runs };
 }
@@ -57,7 +67,7 @@ export function askGh(sha, { gh = process.env.CI_VERDICT_GH || 'gh' } = {}) {
   return verdict(runs);
 }
 
-const NAME = { 0: 'GREEN', 1: 'RED', 2: 'UNKNOWN', 3: 'NO RUN', 4: 'PENDING' };
+const NAME = { 0: 'GREEN', 1: 'RED', 2: 'UNKNOWN', 3: 'NO RUN', 4: 'PENDING', 5: 'CANCELLED' };
 
 function main(argv) {
   const sha = argv[2];

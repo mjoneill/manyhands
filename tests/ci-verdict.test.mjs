@@ -41,7 +41,21 @@ test('#837 GREEN only when every completed run concluded success', () => {
 test('#837 ⛔ RED on failure, and a second GREEN run does not launder it', () => {
   assert.equal(verdict([run('completed', 'failure')]).code, EXIT.RED);
   assert.equal(verdict([run('completed', 'success'), run('completed', 'failure')]).code, EXIT.RED);
-  assert.equal(verdict([run('completed', 'cancelled')]).code, EXIT.RED);
+  assert.equal(verdict([run('completed', 'timed_out')]).code, EXIT.RED);
+});
+
+test('#1108 ⛔ CANCELLED is its own outcome — a DESTROYED verdict, not a failed one — and still refuses', () => {
+  // ci.yml's cancel-in-progress is keyed on the REF, so any push to main cancels
+  // a re-run of any OLDER sha, and a re-run OVERWRITES that sha's conclusion.
+  // Composed with a gate that reads cancelled as RED, "re-run a green sha to
+  // count flakes" + "anyone pushes" = that sha is undeployable with no override.
+  // The code never changed; the RECORD did. Different fact, different remedy.
+  const v = verdict([run('completed', 'cancelled')]);
+  assert.equal(v.code, EXIT.CANCELLED);
+  assert.notEqual(v.code, EXIT.GREEN, 'a destroyed verdict is still not a pass');
+  assert.match(v.why, /re-run/i, 'the remedy is to re-run, not to fix tests');
+  // a real red beside a cancelled one is still RED — cancellation does not launder failure
+  assert.equal(verdict([run('completed', 'cancelled'), run('completed', 'failure')]).code, EXIT.RED);
 });
 
 test('#837 ⛔ PENDING is not GREEN — an unfinished run is refused with its own code', () => {
@@ -55,8 +69,8 @@ test('#837 ⛔ NO RUN and UNKNOWN are distinct from each other and from RED', ()
   assert.equal(verdict([]).code, EXIT.NO_RUN);
   assert.equal(verdict(null).code, EXIT.UNKNOWN);
   assert.equal(verdict('nope').code, EXIT.UNKNOWN);
-  const codes = new Set([EXIT.GREEN, EXIT.RED, EXIT.UNKNOWN, EXIT.NO_RUN, EXIT.PENDING]);
-  assert.equal(codes.size, 5, 'five outcomes, five codes — none may collapse into another');
+  const codes = new Set([EXIT.GREEN, EXIT.RED, EXIT.UNKNOWN, EXIT.NO_RUN, EXIT.PENDING, EXIT.CANCELLED]);
+  assert.equal(codes.size, 6, 'six outcomes, six codes — none may collapse into another');
 });
 
 test('#837 ⛔ askGh is fail-closed: a missing binary, a non-zero exit, non-JSON, or a short sha are all UNKNOWN', () => {
@@ -143,6 +157,16 @@ test('#837 ⛔ deploy.sh REFUSES a sha whose run is still PENDING — it waits f
   const r = deploy(sb, fakeGh({ stdout: JSON.stringify([run('in_progress', null)]) }));
   assert.notEqual(r.status, 0);
   assert.match(r.stdout + r.stderr, /PENDING/);
+  assert.equal(fs.existsSync(sb.serve), false);
+});
+
+test('#1108 ⛔ deploy.sh REFUSES a CANCELLED sha and says the verdict was DESTROYED, with the re-run remedy', () => {
+  const sb = sandbox();
+  const r = deploy(sb, fakeGh({ stdout: JSON.stringify([run('completed', 'cancelled')]) }));
+  assert.notEqual(r.status, 0);
+  assert.match(r.stdout + r.stderr, /CANCELLED/);
+  assert.match(r.stdout + r.stderr, /re-run/i);
+  assert.doesNotMatch(r.stdout + r.stderr, /CI is RED/, 'a destroyed verdict must not be reported as a failed one');
   assert.equal(fs.existsSync(sb.serve), false);
 });
 
