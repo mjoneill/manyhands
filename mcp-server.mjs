@@ -1326,6 +1326,22 @@ function buildMcpServer() {
   // surfaced as a false "session expired". The status projection is
   // size-invariant to corpus growth; full state remains available via the
   // board-state resource (manyhands://board) or card_list/conversation_list.
+  // ── #1086 item 13 — a seat types a question and reads cards ─────────────
+  mcp.registerTool('board_search', {
+    description: 'Semantic search over cards: type a question in your own words, get a VERDICT. '
+      + 'answer = one clear top card · ask = several candidates within askWithin of each other, returned '
+      + 'as the question · abstain = nothing close enough (top cosine below abstainBelow). Thresholds are '
+      + 'published on every response. `coverage` and `partial` say how much of the board was actually '
+      + 'indexed — a partial index answers partial, never "found nothing". `available:false` with a '
+      + 'reason when no embedder is configured on the server. Queries are logged verbatim; do not '
+      + 'phrase FOR the tool. Measured basis: #1095 (dense 9/9 vs BM25 1/9 at k=8).',
+    inputSchema: {
+      q: z.string().min(1).describe('The question, in your own words'),
+      k: z.number().int().min(1).max(50).optional().describe('How many results to rank (default 8, the measured k)'),
+      by: z.string().optional().describe('Your seat key — rides the verbatim query log'),
+    },
+  }, async ({ q, k, by } = {}) => jsonResult(await apiCall('POST', '/api/search', { q, k, by })));
+
   mcp.registerTool('board_status', {
     description: 'Orientation snapshot: card counts by column, live claims (who is holding what '
       + 'right now), the 10 most recent cards (summaries) and conversations (previews), columns, '

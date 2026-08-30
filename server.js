@@ -761,6 +761,36 @@ let _graphProjectedThrough = null;
 // must NOT be cleared, because that write is not in the store.
 let _graphGeneration = 0;
 const GRAPH_QUERY_LOG = path.join(path.dirname(BOARD_DATA_FILE), 'graph-query-log.jsonl');
+// ── #1086 item 13 — QUERY → CARD retrieval, as a feature ──────────────────────
+// The embedder is CONFIGURED, never assumed: an unset URL/model answers
+// {available:false, reason} — this week's silent-zero theme must not arrive in
+// a new surface. Ollama's /api/embed shape: POST {model, input:[…]} ⇒ {embeddings}.
+// The index and the verbatim query log live BESIDE the board data (both are
+// board content — .gitignored in the same commit that creates them).
+const SEARCH_EMBED_URL = process.env.SEARCH_EMBED_URL || '';
+const SEARCH_EMBED_MODEL = process.env.SEARCH_EMBED_MODEL || '';
+const SEARCH_INDEX_FILE = path.join(path.dirname(BOARD_DATA_FILE), 'search-index.jsonl');
+const SEARCH_LOG_FILE = path.join(path.dirname(BOARD_DATA_FILE), 'search-log.jsonl');
+const numEnv = (name, dflt) => { const v = Number(process.env[name]); return Number.isFinite(v) ? v : dflt; };
+const SEARCH_ABSTAIN_BELOW = numEnv('SEARCH_ABSTAIN_BELOW', 0.5);
+const SEARCH_ASK_WITHIN = numEnv('SEARCH_ASK_WITHIN', 0.03);
+const SEARCH_MAX_EMBED = Math.max(1, Math.floor(numEnv('SEARCH_MAX_EMBED', 50)));
+let _searchModule = null;
+async function loadSearchModule() {
+  if (!_searchModule) _searchModule = await import('./core/semantic-search.mjs');
+  return _searchModule;
+}
+async function embedTexts(texts) {
+  const r = await fetch(SEARCH_EMBED_URL, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: SEARCH_EMBED_MODEL, input: texts }),
+  });
+  if (!r.ok) throw new Error(`embedder answered ${r.status}`);
+  const j = await r.json();
+  if (!Array.isArray(j.embeddings) || j.embeddings.length !== texts.length) throw new Error('embedder returned the wrong number of vectors');
+  return j.embeddings;
+}
+
 // #898 — a graph call at or above this wall time records the process's state
 // beside its numbers. 2s is well above any warm query and well below the two
 // unexplained rows; overridable so a test can exercise the record's shape.
@@ -995,6 +1025,97 @@ function graphWatermark(projectedThrough) {
       + 'not fidelity. A faithfully-projected wrong document reads current',
     ],
   };
+}
+
+// ── POST /api/search — #1086 item 13: a seat types a question and reads cards ──
+//
+// What was measured first (#1095, frozen, k=8): dense embedding reproduces the
+// room's findable targets 9/9 where BM25 gets 1/9 and recency 3/9; and no raw
+// ranker abstains. So every answer here is one of answer | ask | abstain, with
+// the thresholds published beside the verdict. The index is incremental (a
+// card is re-embedded only when its text hash changes, at most SEARCH_MAX_EMBED
+// per call) and every answer carries `coverage`, so a partial index reads as
+// partial rather than as "found nothing".
+async function handleSearch(req, res) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const q = typeof body.q === 'string' ? body.q.trim() : '';
+    if (!q) return sendJSON(res, 400, { error: 'body.q (the question, in your own words) is required' });
+    const S = await loadSearchModule();
+    const k = Number.isInteger(body.k) && body.k > 0 ? Math.min(body.k, 50) : S.DEFAULTS.k;
+    const thresholds = { abstainBelow: SEARCH_ABSTAIN_BELOW, askWithin: SEARCH_ASK_WITHIN };
+    if (!SEARCH_EMBED_URL || !SEARCH_EMBED_MODEL) {
+      return sendJSON(res, 200, {
+        available: false,
+        reason: 'no embedder is configured on this server — set SEARCH_EMBED_URL (an Ollama-shaped /api/embed) and SEARCH_EMBED_MODEL. Nothing was searched.',
+        ...thresholds, k,
+      });
+    }
+    const data = readBoard();
+    const cards = data.cards.filter((c) => c && c.id);
+    // Load the index under the model this server runs; a different generation
+    // is refused with the remedy rather than silently mixed.
+    let index;
+    try {
+      const text = fs.existsSync(SEARCH_INDEX_FILE) ? fs.readFileSync(SEARCH_INDEX_FILE, 'utf8') : '';
+      index = S.parseIndex(text, { model: SEARCH_EMBED_MODEL, dims: null });
+    } catch (e) {
+      return sendJSON(res, 200, { available: false, reason: e.message, ...thresholds, k });
+    }
+    const plan = S.planIndexUpdate(cards, index.rows, { maxEmbed: SEARCH_MAX_EMBED });
+    // ONE embedder call: the query first, then this batch of changed cards.
+    let vectors;
+    try {
+      vectors = await embedTexts([q, ...plan.toEmbed.map((t) => t.text)]);
+    } catch (e) {
+      return sendJSON(res, 200, { available: false, reason: `embedder unavailable — ${e.message}. Nothing was searched.`, ...thresholds, k });
+    }
+    const [qv, ...cardVecs] = vectors;
+    const dims = qv.length;
+    const generation = index.generation ?? { model: SEARCH_EMBED_MODEL, dims, textShape: S.TEXT_SHAPE, builtAt: new Date().toISOString() };
+    if (generation.dims !== dims) {
+      return sendJSON(res, 200, { available: false, reason: `search index: generation mismatch — file is ${generation.model}/${generation.dims}, the embedder now returns ${dims} dimensions. Delete ${SEARCH_INDEX_FILE} to rebuild.`, ...thresholds, k });
+    }
+    const fresh = plan.toEmbed.map((t, i) => ({ id: t.id, hash: t.hash, vec: cardVecs[i] }));
+    const rows = [...plan.keep, ...fresh];
+    try {
+      fs.writeFileSync(SEARCH_INDEX_FILE, S.serializeIndex(generation, rows));
+    } catch { /* the index is a cache of the model; failing to persist it costs re-embedding, not correctness */ }
+    const coverage = { indexed: rows.length, total: plan.coverage.total, stale: plan.coverage.stale - fresh.length };
+    const partial = coverage.stale > 0 || coverage.indexed < coverage.total;
+    const ranked = S.rank(qv, rows, { k });
+    const byId = new Map(cards.map((c) => [c.id, c]));
+    const results = ranked.map((r) => {
+      const c = byId.get(r.id);
+      return { id: r.id, shortId: c?.shortId ?? null, title: c?.title ?? null, column: c?.column ?? null, score: Math.round(r.score * 1000) / 1000 };
+    });
+    const d = S.decide(ranked, thresholds);
+    const pick = (r) => (r ? results.find((x) => x.id === r.id) ?? null : null);
+    const out = {
+      available: true, model: SEARCH_EMBED_MODEL, k,
+      verdict: d.verdict, reason: d.reason,
+      top: pick(d.top), contenders: d.contenders.map(pick).filter(Boolean),
+      abstainBelow: d.abstainBelow, askWithin: d.askWithin,
+      results, coverage, partial,
+      generation: { model: generation.model, dims: generation.dims, builtAt: generation.builtAt },
+      means: {
+        verdict: 'answer = a clear top hit · ask = ≥2 candidates within askWithin of the top (they are the question) · abstain = top cosine below abstainBelow, or an empty index',
+        partial: 'true when cards remain un-embedded; the answer was computed over `coverage.indexed` of `coverage.total` cards — could-not-search-everything is not found-nothing',
+      },
+    };
+    // The verbatim query log — ask.py's guard 2: the first month's questions
+    // are the least tool-shaped the room will ever produce. Keep them raw.
+    try {
+      fs.appendFileSync(SEARCH_LOG_FILE, JSON.stringify({
+        at: new Date().toISOString(), by: (typeof body.by === 'string' && body.by) || null,
+        q, verdict: d.verdict, top: results.slice(0, k).map((r) => r.shortId ?? r.id), coverage, partial,
+      }) + '\n');
+    } catch { /* telemetry, never a gate on the answer */ }
+    sendJSON(res, 200, out);
+  } catch (e) {
+    console.error('POST /api/search:', e.message);
+    sendJSON(res, 500, { error: 'search failed', detail: e.message });
+  }
 }
 
 async function handleGraphQuery(req, res) {
@@ -4683,6 +4804,7 @@ const API_ROUTES = [
   { method: 'GET',    re: /^\/api\/cursors\/pull$/,        fn: (req, res) => handleCursorPull(req, res) },
   { method: 'POST',   re: /^\/api\/cursors\/inbound$/,     fn: (req, res) => handleCursorInbound(req, res) },
   { method: 'POST',   re: /^\/api\/graph$/,                fn: (req, res) => handleGraphQuery(req, res) },
+  { method: 'POST',   re: /^\/api\/search$/,               fn: (req, res) => handleSearch(req, res) },
   { method: 'GET',    re: /^\/api\/ready$/,                fn: (req, res) => handleReady(req, res) },       // #815
   { method: 'GET',    re: /^\/api\/checks$/,               fn: (req, res) => handleChecks(req, res) },      // #792
   { method: 'GET',    re: /^\/api\/misses$/,               fn: (req, res) => handleMisses(req, res) },      // #801

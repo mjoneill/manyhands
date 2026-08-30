@@ -82,3 +82,11 @@ tending-provenance.json
 
 # scratch repos made by tests when SCRATCHPAD is unset (tests/ci-verdict.test.mjs)
 .scratch-tests/
+
+# #1086 item 13 — semantic search writes TWO files beside board-data.json, and
+# both are BOARD CONTENT: the index carries every card's `# title\n\nbody`
+# (as a hash + vector, but the generation header and ids are the board's), and
+# the query log carries seats' questions verbatim, by design. Ignored in the
+# same commit that creates them — the #1085 lesson, applied before the incident.
+search-index.jsonl
+search-log.jsonl
