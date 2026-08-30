@@ -43,6 +43,16 @@
  * "what does the graph call X?" for every X, not only the surprising ones.
  */
 export const PREDICATE_SOURCE = Object.freeze({
+  // ── #1110 — seat declarations, projected from seat-state EVENTS (the log is
+  // the source; the document keeps one row per seat and loses history). ──────
+  'scrum:SeatDeclaration': null,            // the type; minted by the projection
+  'scrum:declaredSeat': 'seat',             // → person: IRI (also used by TendingClaimAttempt)
+  'scrum:mode': 'mode',
+  'scrum:acceptsRoutineWork': 'acceptsRoutineWork',
+  'scrum:declaredAt': 'declaredAt',
+  'scrum:expiresAt': 'expiresAt',
+  'scrum:constraint': 'constraints',        // plural field → one triple per value
+  'scrum:endedAt': null,                    // minted: the SUCCESSOR event's time ends the interval
   // ── RENAMED. These are the ones that cost someone an hour. ──────────────
   'scrum:cardType': 'additionalType',       // and the `scrum:` prefix is stripped off the VALUE
   'scrum:mentionsName': 'mentions',         // person handles; deliberately literals (#619 consent guard)

@@ -121,13 +121,16 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:hasCheck', 'scrum:supersededBy', 'scrum:supersedes',
   'scrum:blockedByCard', 'scrum:parkedReason', 'scrum:parkedUntil',
   'scrum:parkedBy',
+  // #1110 — seat declarations as intervals (projected from seat-state events)
+  'scrum:mode', 'scrum:acceptsRoutineWork', 'scrum:declaredAt',
+  'scrum:expiresAt', 'scrum:endedAt', 'scrum:constraint',
   // scrum: classes
   'scrum:ReleaseCondition', 'scrum:Decision', 'scrum:MemoryVersion',
   'scrum:Memory', 'scrum:TendingClaimAttempt', 'scrum:TendingMint',
   'scrum:TendingState', 'scrum:TendingPlaylistVersion', 'scrum:TendingPlaylist',
   'scrum:TendingPromptVersion', 'scrum:TendingPrompt', 'scrum:Column',
   'scrum:Blocker', 'scrum:Commit', 'scrum:UnresolvedReference', 'scrum:Check',
-  'scrum:Tending',
+  'scrum:Tending', 'scrum:SeatDeclaration',
   // ⚠️ EMITTED BY THE PROJECTOR AND ABSENT FROM THIS BOARD'S DATA TODAY. Every
   // one of these was missing from the first, store-derived list; `scrum:ofSilence`
   // is the one the suite caught and the rest came from the same source scan.
@@ -290,8 +293,57 @@ export function projectActivities(store, events) {
     if (ent.shortId != null) store.add(oxigraph.triple(a, nn(IRI.scrum + 'shortId'), lit(String(ent.shortId))));
     const when = ev.occurred_at || ev.recorded_at;
     if (when) store.add(oxigraph.triple(a, nn(IRI.prov + 'startedAtTime'), lit(when)));
+
+    // #1110 — a seat-state event ALSO projects the declaration itself, as an
+    // INTERVAL (the card's design constraint: a bare present-tense predicate
+    // would answer only the question the API already answers). The EVENT LOG is
+    // the source because the document keeps one row per seat — a re-declare or
+    // clear erases history there and must not erase it here. Runs only inside
+    // this not-yet-projected path, so it inherits the seq idempotency above:
+    // replaying the log is not new history, and the ending each event applies
+    // to its predecessor is re-derived identically on a rebuild.
+    if (ent.kind === 'seat-state' && when) projectSeatDeclarationEvent(store, ev, when);
   }
   return store;
+}
+
+/**
+ * #1110 — one seat-state event, applied to the declaration timeline.
+ *
+ * Any event for a seat ENDS that seat's open declaration (scrum:endedAt = the
+ * event's time): a re-declare supersedes, a clear ends. A create/update then
+ * opens a new immutable node keyed by seq. A clear opens nothing — UNKNOWN is
+ * the ABSENCE of a declaration, in the graph exactly as in the API, so "who
+ * was resting at T" is a FILTER over intervals, never a lookup of a stored
+ * unknown. Expiry needs no event and no end triple: the interval carries its
+ * own scrum:expiresAt and the question is asked with both bounds.
+ */
+function projectSeatDeclarationEvent(store, ev, when) {
+  const S = IRI.scrum;
+  const seat = String(ev.state?.seat ?? ev.entity.id ?? '');
+  if (!seat) return;
+  const seatIri = nn(IRI.person + seat);
+  // End every open declaration this seat holds (no endedAt yet). Deterministic
+  // on replay: events arrive in seq order, so the predecessor is always ended
+  // by the same successor.
+  for (const q of store.match(null, nn(S + 'declaredSeat'), seatIri)) {
+    if (!store.match(q.subject, A, nn(S + 'SeatDeclaration')).length) continue;
+    if (store.match(q.subject, nn(S + 'endedAt'), null).length) continue;
+    store.add(oxigraph.triple(q.subject, nn(S + 'endedAt'), lit(when)));
+  }
+  if (ev.op === 'delete') return;
+  const st = ev.state || {};
+  if (!st.mode) return;   // malformed declare: no mode, no interval to assert
+  const d = nn(`${IRI.entity}seat-state/${encodeURIComponent(seat)}/seq-${ev.seq}`);
+  const add = (p, o) => store.add(oxigraph.triple(d, p, o));
+  add(A, nn(S + 'SeatDeclaration'));
+  add(nn(S + 'declaredSeat'), seatIri);
+  add(nn(S + 'mode'), lit(st.mode));
+  if (typeof st.acceptsRoutineWork === 'boolean') add(nn(S + 'acceptsRoutineWork'), lit(st.acceptsRoutineWork));
+  for (const c of [].concat(st.constraints || [])) add(nn(S + 'constraint'), lit(String(c)));
+  if (st.note) add(nn(S + 'note'), lit(st.note));
+  add(nn(S + 'declaredAt'), lit(st.declaredAt || when));
+  if (st.expiresAt) add(nn(S + 'expiresAt'), lit(st.expiresAt));
 }
 
 /**
