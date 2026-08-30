@@ -860,7 +860,7 @@ function buildMcpServer() {
       column: z.string().optional()
         .describe('Only cards in this column id (e.g. "in-progress"); unknown column refuses naming the valid ones'),
       q: z.string().optional()
-        .describe('Free-text search over TITLE and DESCRIPTION. Case-insensitive SUBSTRING — not tokenised, not stemmed, no ranking: "build" matches "rebuilding", "built" matches neither. Combines with every other filter as AND. Does not search comments or labels.'),
+        .describe('Free-text search over TITLE, DESCRIPTION and LABELS (#656). Case-insensitive SUBSTRING — not tokenised, not stemmed, no ranking: "build" matches "rebuilding", "built" matches neither. Combines with every other filter as AND. Labels joined this haystack on 2026-08-30: 652 of 985 cards were reachable ONLY via a label and this search could not see any of them, so a term you are sure is on the board is now worth retrying. Does not search comments.'),
       facet: z.string().optional()
         .describe('Return the SHAPE of the result set instead of rows: counts grouped by column, type, priority, label or assignee. Composes with every filter, so the flow is count → refine → count again before paying for a page. Response carries multivalued/cardsWithValue/unset so the parts always reconcile against the total.'),
       label: z.string().optional().describe('Only cards carrying this label (exact match)'),

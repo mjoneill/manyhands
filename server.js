@@ -3016,7 +3016,7 @@ function handleGetPerson(req, res, key) {
 const CARD_LIST_PARAMS = new Set([
   'limit', 'before', 'fields', 'as', 'bestEffort',
   'column', 'label', 'assignee', 'type', 'since', 'updatedSince',
-  'q',   // #656 — free-text over title+description. The miss log asked for it.
+  'q',   // #656 — free-text over title+description+labels. The miss log asked for it.
   'facet',  // #629 — count → facet → refine, before paying for rows
   // #912 — "everything under apex X, containment only, depth ≤ N".
   //
@@ -3103,7 +3103,7 @@ function handleListCards(req, res) {
           error: `unsupported param${unsupported.length > 1 ? 's' : ''}: `
             + `${unsupported.join(', ')} (supported: `
             + `${[...CARD_LIST_PARAMS].filter((p) => p !== 'as' && p !== 'bestEffort').join(', ')}`
-            + ' — q is substring over title+description, not stemmed; '
+            + ' — q is substring over title+description+labels, not stemmed; '
             + 'pass bestEffort=true to be served without the rest)',
           unsupported,
         });

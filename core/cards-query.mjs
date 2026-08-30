@@ -141,7 +141,7 @@ function applyFilters(cards, { column, label, assignee, type, since, updatedSinc
   // elsewhere, and the refusal string said "free-text q not yet" out loud.
   //
   // ⚠️ DELIBERATE LIMITS, pinned by tests rather than described in prose:
-  // SUBSTRING and case-insensitive, over TITLE and DESCRIPTION only. Not
+  // SUBSTRING and case-insensitive, over TITLE, DESCRIPTION and LABELS. Not
   // tokenised, not stemmed, no ranking — "build" matches "rebuilding" and
   // "built" matches neither. A richer search is a different slice with a
   // different cost; quietly doing less than a caller assumes is the failure
