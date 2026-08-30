@@ -39,9 +39,9 @@
 # with "not a git repository" — a refusal that NAMES the problem for free.
 #
 # Usage:
-#   scripts/deploy.sh                pull, re-export, restart, verify
-#   scripts/deploy.sh --no-restart   pull + re-export only
-#   scripts/deploy.sh export         re-export from the current clone HEAD
+#   scripts/deploy.sh                pull, ASK CI (refuse unless green), re-export, restart, verify
+#   scripts/deploy.sh --no-restart   pull + ask CI + re-export only
+#   scripts/deploy.sh export         ask CI + re-export from the current clone HEAD
 #   scripts/deploy.sh unlock         open the serve dir — the escape hatch
 #   scripts/deploy.sh status         report without changing anything
 set -eu
@@ -141,6 +141,32 @@ Measured 2026-08-19. So there is no git here to check out.
 MD
 }
 
+# ⛓ #837 2b — CI IS A GATE, NOT A BADGE. Measured 2026-08-30, twice: CI ran RED
+# on cd919c4 at 04:22Z and this script served it at 04:31Z; CI ran RED on
+# 7a9a12e at 12:04Z and this script served it at 12:07Z. CI reported; nothing
+# asked. So the export asks — and refuses unless the answer is GREEN.
+#
+# FAIL-CLOSED. "Cannot ask" (gh missing, logged out, API down), "no run", and
+# "still running" are each refused with their own word and their own remedy;
+# none of them is "probably fine". There is NO override flag on purpose: an
+# override is `--no-verify` with a new door, and #1085 measured what that
+# costs within twelve hours of it existing. If CI is down, wait for CI.
+ci_gate() {
+  sha="$(git -C "$CLONE" rev-parse HEAD)"
+  say "⛓ asking CI about $(printf '%s' "$sha" | cut -c1-7)"
+  set +e
+  node "$CLONE/tools/ci-verdict.mjs" "$sha"
+  rc=$?
+  set -e
+  case "$rc" in
+    0) return 0 ;;
+    1) die "CI is RED for $sha — fix it (or revert) and push; do not serve a red sha" ;;
+    3) die "CI has NO RUN for $sha — push it and let the workflow run first" ;;
+    4) die "CI is still RUNNING for $sha — wait for the verdict:  gh run watch" ;;
+    *) die "could not ASK CI about $sha (UNKNOWN) — fix gh (gh auth status) and retry; a deploy that cannot ask does not guess" ;;
+  esac
+}
+
 case "${1:-deploy}" in
   status)
     if [ -d "$SERVE" ]; then
@@ -154,7 +180,7 @@ case "${1:-deploy}" in
   unlock)
     unlock; say "🔓 UNLOCKED $SERVE"; say "   re-lock with: scripts/deploy.sh export"; exit 0 ;;
   export)
-    export_tree; exit 0 ;;
+    ci_gate; export_tree; exit 0 ;;
   --no-restart) RESTART=0 ;;
   deploy) : ;;
   *) die "unknown command: $1" ;;
@@ -180,6 +206,8 @@ fi
 say "⇣ pulling main into the clone"
 git -C "$CLONE" pull --ff-only origin main
 say "   clone now at $(git -C "$CLONE" rev-parse --short HEAD)"
+
+ci_gate
 
 say "⇢ exporting to the serve directory"
 export_tree
