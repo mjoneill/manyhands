@@ -1159,6 +1159,50 @@ function shorten(value) {
 }
 
 /**
+ * #1104's open slice — THE GUARD'S OWN STALENESS, measured on the live store.
+ *
+ * The unknown-term guard refuses any schema:/scrum: term not in
+ * GRAPH_VOCABULARY. That set is hand-maintained, so a predicate the
+ * projection starts emitting and nobody adds to the set makes the guard
+ * REFUSE A WORKING QUERY — the one way it is worse than no guard. The suite's
+ * drift test walks a FIXTURE's projection; it passed clean while
+ * scrum:ofSilence was missing, because the fixture never projected a tending
+ * entity. This walks whatever store it is handed — in production, the replica
+ * — and reports the two directions of drift by name:
+ *   undeclared   emitted by the projection, missing from the set ⇒ the guard
+ *                is refusing working queries RIGHT NOW
+ *   unused       in the set, emitted by nothing ⇒ harmless, but a term whose
+ *                only home is the dictionary is the shape a stale entry takes
+ * Only schema:/scrum: terms are judged (rdf:, prov:, xsd: are not the guard's
+ * business). Pure over the store; O(quads), so call it on demand, not per query.
+ */
+export function vocabularyDrift(store) {
+  const judged = (t) => t.startsWith('schema:') || t.startsWith('scrum:');
+  const predicates = new Set();
+  const classes = new Set();
+  for (const q of store.match(null, null, null)) {
+    const p = shorten(q.predicate.value);
+    if (judged(p)) predicates.add(p);
+    if (q.predicate.equals(A) && q.object.termType === 'NamedNode') {
+      const t = shorten(q.object.value);
+      if (judged(t)) classes.add(t);
+    }
+  }
+  const emitted = new Set([...predicates, ...classes]);
+  const undeclared = [...emitted].filter((t) => !GRAPH_VOCABULARY.has(t)).sort();
+  const unused = [...GRAPH_VOCABULARY].filter((t) => !emitted.has(t)).sort();
+  return {
+    ok: undeclared.length === 0,
+    emitted: emitted.size, declared: GRAPH_VOCABULARY.size,
+    undeclared, unused,
+    means: {
+      undeclared: 'terms the projection EMITS that the guard does not know — a working query naming one is refused today',
+      unused: 'dictionary terms nothing emits on this board — not an error; the shape a stale entry takes',
+    },
+  };
+}
+
+/**
  * Run a read query. SELECT and ASK only — a shape the engine enforces
  * structurally (query(), never update()) and this wrapper enforces socially
  * with a clear refusal instead of a parser error.
