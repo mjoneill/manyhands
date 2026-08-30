@@ -1015,6 +1015,16 @@ async function handleGraphQuery(req, res) {
     // the thrower declared a hint and the consumer read a different one. Caught
     // by this card's own test, not by review.
     if (e.code === 'UNBOUNDED_PATH') return sendJSON(res, 400, { error: e.message, code: e.code, hint: e.hint });
+    // #1104 — SAME REASON, AND IT WAS CAUGHT THE SAME WAY: the guard threw
+    // UNKNOWN_TERM with a hint naming the term, the generic branch below
+    // replaced the hint with the prefix blurb and dropped `code` entirely, and
+    // the refusal arrived as an anonymous 400. The #885 comment above predicted
+    // exactly this ("the thrower declared a hint and the consumer read a
+    // different one") and it happened anyway, one branch down, to the seat who
+    // had just read the comment. Its own test caught it, not review.
+    if (e.code === 'UNKNOWN_TERM' || e.code === 'UNKNOWN_PREFIX') {
+      return sendJSON(res, 400, { error: e.message, code: e.code, hint: e.hint, terms: e.terms });
+    }
     // a SPARQL parse error is the caller's to fix — teach, don't 500
     return sendJSON(res, 400, { error: e.message, hint: 'SELECT/ASK SPARQL; prefixes schema:, scrum:, entity:, person:, column: are pre-declared' });
   }

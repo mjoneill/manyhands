@@ -42,9 +42,22 @@ import { startRestServer, makeBoardFixture } from './helpers/harness.mjs';
 // stale and the test failed for a reason that had nothing to do with the code.
 // Probed rather than reasoned about. The control now names a type nothing
 // mints, so it holds for a stated reason instead of an assumed one.
+// ⚠️ CHANGED BY #1104, and the reason matters more than the edit.
+//
+// This was `ASK { ?x a scrum:Sasquatch }` — a deliberately impossible type, so
+// the control could never trip. #1104's unknown-term guard now REFUSES a term
+// the projection can never emit, so that ask became an `error` rather than a
+// `holds` and this control failed.
+//
+// ⛔ THE FIX IS NOT TO EXEMPT /api/checks. A falsifier whose predicate is
+// misspelled holds FOREVER and can never fire — "a check that cannot fail" is
+// the exact failure this endpoint exists to prevent, so surfacing it as `error`
+// is the endpoint working better, not worse. `scrum:Decision` is REAL and this
+// fixture has none, which is what the control actually needs: a tripwire that
+// COULD trip and hasn't.
 const CHECK_HOLDS = {
-  claim: 'nothing on this board is typed scrum:Sasquatch',
-  ask: 'ASK { ?x a scrum:Sasquatch }',
+  claim: 'this board holds no Decisions',
+  ask: 'ASK { ?d a scrum:Decision }',
   expect: false,
 };
 const CHECK_STALE = {

@@ -122,18 +122,38 @@ test('#927/#962 ⭐ THE COUPLING — the documented hazard is still TRUE of the 
         body: JSON.stringify({ query: `SELECT (COUNT(?c) AS ?n) WHERE { ?c a ${type} }` }),
       });
       const b = await r.json();
-      return Number(b.rows?.[0]?.n ?? -1);
+      return { status: r.status, code: b.code, n: Number(b.rows?.[0]?.n ?? -1), error: b.error };
     };
 
     // ⭐ ANTI-VACUITY FIRST. "0 vs 0" would prove nothing at all — the trap is
     // only a trap because the RIGHT query returns rows on the same board.
     const right = await ask('schema:CreativeWork');
-    assert.ok(right > 0, `the control query must return rows, got ${right} — otherwise the fixture is empty and this test is meaningless`);
+    assert.equal(right.status, 200, `the control query must ANSWER, got ${right.status} ${right.error}`);
+    assert.ok(right.n > 0, `the control query must return rows, got ${right.n} — otherwise the fixture is empty and this test is meaningless`);
 
+    // ⭐⭐⭐ UPDATED BY #1104, AND THIS TEST IS WHY THE UPDATE IS HONEST.
+    //
+    // It used to assert `scrum:Card` returns 0 ROWS — the SILENT failure. That
+    // is no longer what happens: the unknown-term guard REFUSES it with a 400
+    // naming the term, which is this test's own stated wish ("a seat who sees
+    // an error investigates; a seat who sees 0 rows concludes the board is
+    // empty") arriving as behaviour instead of prose.
+    //
+    // ⛔ WHAT HAS **NOT** CHANGED, and the distinction is the whole point:
+    // `scrum:Card` still does not exist. #962 has NOT landed. The hazard was
+    // MITIGATED, not retired — so the description must still warn about the
+    // guess, and the assertions above this one still hold it to that.
+    //
+    // ⚠️ If some future change makes `scrum:Card` a real class, THIS assertion
+    // fails too (a real term is answered, not refused) and the same instruction
+    // applies: correct the description in the same commit.
     const wrong = await ask('scrum:Card');
-    assert.equal(wrong, 0,
-      `\`?c a scrum:Card\` returned ${wrong} rows — the documented hazard has CHANGED. `
+    assert.equal(wrong.status, 400,
+      `\`?c a scrum:Card\` returned ${wrong.status}/${wrong.n} rows — the documented hazard has CHANGED. `
       + 'If #962 has landed this is good news and the graph_query description must be '
       + 'corrected in the same commit; it currently warns seats away from a working query.');
+    assert.equal(wrong.code, 'UNKNOWN_TERM',
+      'and the refusal must be the #1104 guard, not an incidental parse failure — '
+      + `got ${JSON.stringify(wrong.error).slice(0, 160)}`);
   } finally { await pair.stop(); }
 });

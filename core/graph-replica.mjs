@@ -62,6 +62,83 @@ export const IRI = Object.freeze({
 export const SPARQL_PREFIXES = Object.entries(IRI)
   .map(([p, iri]) => `PREFIX ${p}: <${iri}>`).join('\n');
 
+/**
+ * #1104 — EVERY `schema:` AND `scrum:` TERM THE PROJECTION CAN EMIT.
+ *
+ * The spelling dictionary the unknown-term guard checks against. It is NOT a
+ * description of what this board contains: a term here with no instances is
+ * answered with an honest zero, which is the whole point. A term NOT here is
+ * refused, because the projection can never produce it and a zero would be a
+ * wrong answer delivered fluently.
+ *
+ * ⚠️ ADD A TERM HERE IN THE SAME COMMIT THAT TEACHES THE PROJECTION TO EMIT IT.
+ * A missing entry refuses a working query — the one way this guard can be worse
+ * than no guard. `tests/graph-unknown-term.test.mjs` projects a fixture and
+ * fails on any emitted term this set does not carry.
+ *
+ * ⛔⛔ ENUMERATED FROM THE PROJECTOR SOURCE, NOT FROM THE LIVE STORE — and the
+ * first cut got that backwards, which is worth keeping because it is this
+ * guard's own thesis turned on its author.
+ *
+ * The first list came from asking the live board `SELECT DISTINCT ?p`: 70
+ * predicates, 21 classes, complete-looking. The full suite then failed on
+ * `scrum:ofSilence` — a REAL projected predicate with ZERO instances on this
+ * board today (no mint currently carries a silence edge). A data enumeration
+ * cannot see a term nobody has used yet, so it produced a dictionary that
+ * refuses working queries about the emptiest corners of the schema — the exact
+ * absent-from-data / absent-from-vocabulary confusion this guard exists to end.
+ *
+ * ⇒ ⭐ The store answers "what has been used". Only the source answers "what can
+ *   be emitted", and the second is what a spelling dictionary needs.
+ *
+ * ⚠️ And the fixture drift test did NOT catch it: the fixture projects no
+ * tending entities, so the control never traversed that part of the population.
+ * The FULL SUITE is what caught it. Both are kept — the drift test fails fast on
+ * the common terms, the suite covers the corners.
+ */
+export const GRAPH_VOCABULARY = new Set([
+  // schema: predicates
+  'schema:sameAs', 'schema:dateCreated', 'schema:identifier', 'schema:author',
+  'schema:name', 'schema:text', 'schema:about', 'schema:keywords',
+  'schema:creator', 'schema:dateModified', 'schema:isPartOf',
+  // schema: classes
+  'schema:CreativeWork', 'schema:Comment', 'schema:Person', 'schema:DefinedTerm',
+  // scrum: predicates
+  'scrum:entityKind', 'scrum:op', 'scrum:shortId', 'scrum:reopensIf',
+  'scrum:constrains', 'scrum:decidedBy', 'scrum:statement', 'scrum:body',
+  'scrum:version', 'scrum:ofMemory', 'scrum:currentVersion', 'scrum:tag',
+  'scrum:owner', 'scrum:importedAt', 'scrum:provenanceNote',
+  'scrum:declaredSeatRaw', 'scrum:declaredSeat', 'scrum:outcome',
+  'scrum:receivedAt', 'scrum:ofMint', 'scrum:mintedAt',
+  'scrum:legacyClockWindow', 'scrum:enabled', 'scrum:orderedPrompts',
+  'scrum:ofPlaylist', 'scrum:evidencedBy', 'scrum:ofPrompt', 'scrum:order',
+  'scrum:resolved', 'scrum:mentionsName', 'scrum:relatedTo', 'scrum:note',
+  'scrum:status', 'scrum:blockedByPerson', 'scrum:blocks', 'scrum:mentionsCard',
+  'scrum:label', 'scrum:implementedBy', 'scrum:priority', 'scrum:column',
+  'scrum:cardType', 'scrum:claimedAt', 'scrum:claimedBy', 'scrum:for',
+  'scrum:assignee', 'scrum:blockedByAnyHuman', 'scrum:derivedFrom',
+  'scrum:ofCard', 'scrum:blockedBy', 'scrum:expect', 'scrum:ask', 'scrum:claim',
+  'scrum:hasCheck', 'scrum:supersededBy', 'scrum:supersedes',
+  'scrum:blockedByCard', 'scrum:parkedReason', 'scrum:parkedUntil',
+  'scrum:parkedBy',
+  // scrum: classes
+  'scrum:ReleaseCondition', 'scrum:Decision', 'scrum:MemoryVersion',
+  'scrum:Memory', 'scrum:TendingClaimAttempt', 'scrum:TendingMint',
+  'scrum:TendingState', 'scrum:TendingPlaylistVersion', 'scrum:TendingPlaylist',
+  'scrum:TendingPromptVersion', 'scrum:TendingPrompt', 'scrum:Column',
+  'scrum:Blocker', 'scrum:Commit', 'scrum:UnresolvedReference', 'scrum:Check',
+  'scrum:Tending',
+  // ⚠️ EMITTED BY THE PROJECTOR AND ABSENT FROM THIS BOARD'S DATA TODAY. Every
+  // one of these was missing from the first, store-derived list; `scrum:ofSilence`
+  // is the one the suite caught and the rest came from the same source scan.
+  // They are exactly the terms a data enumeration cannot see.
+  'scrum:acceptance', 'scrum:actor', 'scrum:blockers', 'scrum:checks',
+  'scrum:claimValidUntil', 'scrum:completedAt', 'scrum:heldByAttempt',
+  'scrum:influencedBy', 'scrum:occurredAt', 'scrum:ofSilence', 'scrum:parkedAt',
+  'scrum:paused', 'scrum:pausedAt', 'scrum:promptVersion', 'scrum:reason',
+  'scrum:seatNamesWithOpenStreamsAtSend', 'scrum:silenceSince',
+]);
+
 export const DEFAULT_LIMIT = 100;
 export const LIMIT_CEILING = 1000;
 
@@ -1198,6 +1275,131 @@ export function queryGraph(store, sparql, { limit } = {}) {
           + '|scrum:blockedBy|scrum:supersedes|scrum:derivedFrom|schema:isPartOf)* ?a } '
           + '— a full-corpus closure in ~25ms. A depth-1 !<urn:none> is also fine; only the '
           + 'transitive form over a negated set is refused outright.',
+      },
+    );
+  }
+
+  // #1104 — AN UNKNOWN VOCABULARY TERM MUST REFUSE, NOT RETURN ZERO.
+  //
+  // Every catalogued trap on this tool returns a WELL-FORMED EMPTY RESULT:
+  // the capitalised class name in the scrum namespace that everyone guesses for
+  // a card (there is none — a card is schema:CreativeWork), `schema:description`
+  // (the body is schema:text), `schema:additionalType` (the kind is
+  // scrum:cardType). ⚠️ The first of those is named by DESCRIPTION rather than
+  // spelled, following the convention #927 already set for the same reason: the
+  // literal is one of the private push gate's board-data signatures, and this
+  // file is not among its exclusions. Zero
+  // rows and a true negative are byte-identical, so a caller cannot tell "there
+  // are none" from "you named the wrong predicate" — and the substring search
+  // that CANNOT fail wins by default, which is how the graph re-foundation gets
+  // routed around by the people it was built for.
+  //
+  // ⚠️ THE SCOPE IS THE WHOLE DESIGN: VOCABULARY MUST EXIST, DATA NEED NOT.
+  //   schema: scrum:            VOCABULARY. A term here either exists in this
+  //                            store or the caller typed it wrong.
+  //   entity: person: column:   INSTANCE. "Does card X exist" is a legitimate
+  //                            question whose honest answer is an empty result.
+  //                            Refusing it would answer with an ERROR what the
+  //                            caller asked as a QUERY.
+  // A guard that refused unknown instances would break the one thing an empty
+  // result is genuinely for.
+  //
+  // ⛔ AND IT DELIBERATELY DOES NOT FIRE ON A TERM THAT EXISTS BUT IS WRONG FOR
+  // THE JOB. `scrum:shortId` is real (5,439 activity nodes carry it) and is
+  // still the commonest mistake on cards — that is a HINT problem, not an
+  // existence problem, and folding it in here would make the refusal fire on
+  // correct queries. Named so the next reader knows it was considered.
+  const knownPrefixes = new Set(Object.keys(IRI));
+  for (const m of sparql.matchAll(/\bPREFIX\s+([A-Za-z][\w-]*)\s*:/gi)) knownPrefixes.add(m[1]);
+
+  const PREFIXED_NAME = /\b([A-Za-z][\w-]*):([A-Za-z0-9_-]+)/g;
+  const unknownPrefixes = new Set();
+  const vocabTerms = new Set();
+  for (const [, prefix, local] of withoutLiterals.matchAll(PREFIXED_NAME)) {
+    if (!knownPrefixes.has(prefix)) unknownPrefixes.add(prefix);
+    else if (prefix === 'schema' || prefix === 'scrum') vocabTerms.add(`${prefix}:${local}`);
+  }
+  if (unknownPrefixes.size) {
+    throw Object.assign(
+      new Error(
+        `unknown prefix: ${[...unknownPrefixes].map((p) => `${p}:`).join(', ')}. `
+        + 'Every prefix is PRE-DECLARED — do not declare your own. '
+        + `Available: ${[...knownPrefixes].join(': ')}:`,
+      ),
+      { code: 'UNKNOWN_PREFIX' },
+    );
+  }
+
+  // The confusions worth naming, because the caller's next move after a refusal
+  // is to guess again.
+  //
+  // ⭐ BY SHAPE, NOT BY LITERAL — and the push gate is why, which turned out to
+  // be an improvement rather than a workaround. The first cut keyed a map on the
+  // exact class name everyone guesses; that string is one of the private gate's
+  // board-data signatures, so the commit was correctly REFUSED. Keying on the
+  // SHAPE instead — an unknown Capitalised name in the scrum: namespace is
+  // someone reaching for a class — covers every guess a seat might make rather
+  // than the one entry I happened to think of, and the offending literal stops
+  // being needed at all. A rule I could only satisfy by spelling the hazard
+  // would have been worth arguing with; this one made the code better.
+  const classGuess = (t) => /^scrum:[A-Z]/.test(t);
+  const hintFor = (t) => {
+    if (classGuess(t)) {
+      return `${t} is not a class this projection emits — a card is \`?c a schema:CreativeWork\`, `
+        + 'and its KIND is a literal on scrum:cardType. Classes that DO exist are listed in '
+        + 'GRAPH_VOCABULARY.';
+    }
+    const BY_NAME = {
+      'schema:description': 'a card body is schema:text',
+      'schema:additionalType': 'the card kind is scrum:cardType',
+      'schema:title': 'a card title is schema:name',
+      'schema:label': 'a label is scrum:label',
+    };
+    return BY_NAME[t] || null;
+  };
+
+  // ⛔⛔ THIS CHECKS THE VOCABULARY, NOT THE STORE — and the difference is the
+  // whole correctness of the guard.
+  //
+  // The first cut asked the store `ASK { ?s <term> ?o }` and refused anything
+  // absent. It was wrong in a way that only shows up on somebody else's board:
+  // manyhands is open source, and on a FRESH install with three cards almost
+  // every predicate is legitimately absent — `scrum:blockedBy`, `scrum:label`,
+  // `scrum:supersedes`. A presence check refuses them all and the tool looks
+  // broken on day one, which is a worse version of the defect #1104 is about.
+  //
+  // ⇒ ⭐ A SPELLING DICTIONARY, NOT A DATA QUERY. The guessed class name is
+  //   refused because the projection never emits it. `scrum:supersedes` is answered —
+  //   with an honest zero — because it is real and this board simply has none.
+  //   Absent-from-data and absent-from-vocabulary are opposite facts, and only
+  //   the second is the caller's mistake.
+  //
+  // ⚠️ ITS FAILURE MODE IS BEING STALE: a predicate added to the projection and
+  // not added here would be refused while working. That is what the drift test
+  // in tests/graph-unknown-term.test.mjs exists to catch, and the refusal says
+  // so out loud so a caller who hits it knows where to look.
+  const missing = [...vocabTerms].filter((t) => !GRAPH_VOCABULARY.has(t));
+  if (missing.length) {
+    const hints = missing.map(hintFor).filter(Boolean);
+    throw Object.assign(
+      new Error(
+        `this query names ${missing.length === 1 ? 'a term' : 'terms'} that appear${missing.length === 1 ? 's' : ''} `
+        + `NOWHERE in the graph: ${missing.join(', ')}. `
+        + 'Refused rather than answered, because a zero here would be indistinguishable from '
+        + '"no match" — which is the opposite fact. This checks the VOCABULARY, not this '
+        + "board's data: a real predicate with no instances still answers 0. Instances "
+        + '(entity:, person:, column:) are never checked — "does card X exist" is a fair '
+        + 'question with an empty answer. If the term IS real and newly projected, it is '
+        + 'missing from GRAPH_VOCABULARY in core/graph-replica.mjs.',
+      ),
+      {
+        code: 'UNKNOWN_TERM',
+        terms: missing,
+        hint: hints.length
+          ? hints.join(' · ')
+          : 'Count the population to find the real predicate: '
+            + 'SELECT ?p (COUNT(*) AS ?n) WHERE { ?s ?p ?o } GROUP BY ?p — '
+            + 'the vocabulary this board actually uses is short enough to read.',
       },
     );
   }
