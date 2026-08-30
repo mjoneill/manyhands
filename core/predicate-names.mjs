@@ -43,6 +43,20 @@
  * "what does the graph call X?" for every X, not only the surprising ones.
  */
 export const PREDICATE_SOURCE = Object.freeze({
+  // ── #1112 item 3 — work ledger transitions (Decision 3956b66b; source is the
+  // SCRUM_WORK_STORE jsonl, not the board document). ────────────────────────
+  'schema:Action': null,                    // the type; minted by the projection
+  'scrum:WorkObject': null,                 // the type; minted by the projection
+  'schema:agent': 'transition.by',
+  'scrum:transitionType': 'transition.type',
+  'scrum:ofWork': null,                     // minted edge: transition → its work object
+  'scrum:declaredBy': 'declaredBy',
+  'scrum:required': 'required',             // seat-shaped entries → person edges
+  'scrum:requiredRaw': 'required',          // non-seat entries kept as literals
+  'scrum:replyBy': 'replyBy',
+  'scrum:to': 'transition.to',
+  'scrum:closureReason': 'transition.closureReason',
+  'scrum:effectiveAt': 'transition.effectiveAt',
   // ── #1110 — seat declarations, projected from seat-state EVENTS (the log is
   // the source; the document keeps one row per seat and loses history). ──────
   'scrum:SeatDeclaration': null,            // the type; minted by the projection

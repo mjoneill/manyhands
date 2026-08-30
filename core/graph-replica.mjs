@@ -124,13 +124,17 @@ export const GRAPH_VOCABULARY = new Set([
   // #1110 — seat declarations as intervals (projected from seat-state events)
   'scrum:mode', 'scrum:acceptsRoutineWork', 'scrum:declaredAt',
   'scrum:expiresAt', 'scrum:endedAt', 'scrum:constraint',
+  // #1112 item 3 — the work ledger as typed nodes (Decision 3956b66b)
+  'schema:Action', 'schema:agent', 'scrum:transitionType', 'scrum:ofWork',
+  'scrum:declaredBy', 'scrum:required', 'scrum:requiredRaw', 'scrum:replyBy',
+  'scrum:to', 'scrum:closureReason', 'scrum:effectiveAt',
   // scrum: classes
   'scrum:ReleaseCondition', 'scrum:Decision', 'scrum:MemoryVersion',
   'scrum:Memory', 'scrum:TendingClaimAttempt', 'scrum:TendingMint',
   'scrum:TendingState', 'scrum:TendingPlaylistVersion', 'scrum:TendingPlaylist',
   'scrum:TendingPromptVersion', 'scrum:TendingPrompt', 'scrum:Column',
   'scrum:Blocker', 'scrum:Commit', 'scrum:UnresolvedReference', 'scrum:Check',
-  'scrum:Tending', 'scrum:SeatDeclaration',
+  'scrum:Tending', 'scrum:SeatDeclaration', 'scrum:WorkObject',
   // ⚠️ EMITTED BY THE PROJECTOR AND ABSENT FROM THIS BOARD'S DATA TODAY. Every
   // one of these was missing from the first, store-derived list; `scrum:ofSilence`
   // is the one the suite caught and the rest came from the same source scan.
@@ -344,6 +348,61 @@ function projectSeatDeclarationEvent(store, ev, when) {
   if (st.note) add(nn(S + 'note'), lit(st.note));
   add(nn(S + 'declaredAt'), lit(st.declaredAt || when));
   if (st.expiresAt) add(nn(S + 'expiresAt'), lit(st.expiresAt));
+}
+
+/**
+ * #1112 item 3 (#645/#1078/#755; #902 item 5) — the work ledger as typed nodes.
+ *
+ * One schema:Action per ledger transition (Decision 3956b66b), hanging off one
+ * scrum:WorkObject per work id. §I's claim is the point: a bid, a grant and a
+ * NO become records a query can reach, not sentences in a JSONL file only the
+ * MCP process could read.
+ *
+ * ⚠️ Two guards, both copied from REAL rows rather than imagined:
+ *   - a settlement's actor is "protocol" — a mechanism, not a seat. schema:agent
+ *     is emitted only for the transition's `by` (always a seat); settlements
+ *     carry scrum:to / scrum:closureReason / scrum:effectiveAt instead.
+ *   - one production row carries PROSE in `required`. A person IRI minted from
+ *     a paragraph is garbage that joins to nothing; an entry that does not
+ *     parse as a seat key becomes scrum:requiredRaw (a literal) — KEPT, never
+ *     silently dropped, never a node.
+ *
+ * Idempotent by (id, seq): the transition IRI is derived, and the action-typed
+ * guard makes replaying the ledger a no-op — same contract as activities.
+ */
+const SEAT_KEY = /^[a-z0-9][a-z0-9._-]{0,31}$/i;
+export function projectWorkLedger(store, rows) {
+  const S = IRI.scrum, SC = IRI.schema, P = IRI.person, E = IRI.entity;
+  for (const row of rows || []) {
+    if (!row || typeof row !== 'object' || row.id == null || row.seq == null) continue;
+    const t = row.transition;
+    if (!t || !t.type) continue;
+    const a = nn(`${E}work/${encodeURIComponent(String(row.id))}/seq-${row.seq}`);
+    if (store.match(a, A, nn(SC + 'Action')).length) continue;   // (id, seq) identity
+    const w = nn(`${E}work/${encodeURIComponent(String(row.id))}`);
+    const add = (subj, p, o) => store.add(oxigraph.triple(subj, p, o));
+    // the work object — set-semantics, so every transition re-asserting it is free
+    add(w, A, nn(S + 'WorkObject'));
+    add(w, nn(SC + 'identifier'), lit(String(row.id)));
+    if (row.declaredBy && SEAT_KEY.test(String(row.declaredBy))) add(w, nn(S + 'declaredBy'), nn(P + row.declaredBy));
+    if (row.replyBy) add(w, nn(S + 'replyBy'), lit(row.replyBy));
+    if (row.card != null) add(w, nn(S + 'shortId'), lit(String(row.card)));
+    for (const r of [].concat(row.required || [])) {
+      const v = String(r);
+      if (SEAT_KEY.test(v)) add(w, nn(S + 'required'), nn(P + v));
+      else add(w, nn(S + 'requiredRaw'), lit(v));
+    }
+    // the transition
+    add(a, A, nn(SC + 'Action'));
+    add(a, nn(S + 'transitionType'), lit(String(t.type)));
+    add(a, nn(S + 'ofWork'), w);
+    if (t.at) add(a, nn(SC + 'dateCreated'), lit(t.at));
+    if (t.by && SEAT_KEY.test(String(t.by))) add(a, nn(SC + 'agent'), nn(P + t.by));
+    if (t.to && SEAT_KEY.test(String(t.to))) add(a, nn(S + 'to'), nn(P + t.to));
+    if (t.closureReason) add(a, nn(S + 'closureReason'), lit(String(t.closureReason)));
+    if (t.effectiveAt) add(a, nn(S + 'effectiveAt'), lit(String(t.effectiveAt)));
+  }
+  return store;
 }
 
 /**

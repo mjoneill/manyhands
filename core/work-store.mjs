@@ -136,6 +136,30 @@ export function appendTransitions(dir, wo) {
  * directory would take `card_create` down with it — a rail whose failure mode
  * is "the board stops working" is worse than the problem it solves.
  */
+/**
+ * #1112 item 3 — the RAW transition rows, one per JSONL line, unfolded.
+ *
+ * `readWorkObjects` folds lines into per-id objects because the gate reasons
+ * about derived state. The graph projection wants the opposite: each line IS a
+ * transition (a schema:Action node), and folding would erase the (id, seq)
+ * identity the projection is idempotent by. Malformed lines are skipped the
+ * same way foldLines counts them — a projection that dies on one bad line
+ * takes the query surface with it.
+ */
+export function readWorkObjectRows(dir) {
+  const path = join(dir, FILE);
+  if (!existsSync(path)) return [];
+  const rows = [];
+  for (const line of readFileSync(path, 'utf8').split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      const rec = JSON.parse(line);
+      if (rec && typeof rec.id === 'string' && rec.transition) rows.push(rec);
+    } catch { /* counted by foldLines where the count matters; here we skip */ }
+  }
+  return rows;
+}
+
 export function readWorkObjects(dir) {
   const path = join(dir, FILE);
   if (!existsSync(path)) return [];
