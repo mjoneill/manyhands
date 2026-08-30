@@ -29,6 +29,7 @@
  */
 
 import http from 'node:http';
+import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -760,6 +761,24 @@ let _graphProjectedThrough = null;
 // must NOT be cleared, because that write is not in the store.
 let _graphGeneration = 0;
 const GRAPH_QUERY_LOG = path.join(path.dirname(BOARD_DATA_FILE), 'graph-query-log.jsonl');
+// #898 — a graph call at or above this wall time records the process's state
+// beside its numbers. 2s is well above any warm query and well below the two
+// unexplained rows; overridable so a test can exercise the record's shape.
+const GRAPH_SLOW_MS = (() => {
+  const v = Number(process.env.GRAPH_SLOW_MS);
+  return Number.isFinite(v) && v >= 0 ? v : 2000;
+})();
+function processContextForSlowQuery(eluStart) {
+  const mem = process.memoryUsage();
+  const elu = performance.eventLoopUtilization(eluStart);
+  return {
+    loadavg1: Math.round(os.loadavg()[0] * 100) / 100,
+    rssMb: Math.round(mem.rss / 1048576),
+    heapUsedMb: Math.round(mem.heapUsed / 1048576),
+    eventLoopUtilization: Math.round((Number.isFinite(elu.utilization) ? elu.utilization : 0) * 1000) / 1000,
+    uptimeS: Math.round(process.uptime()),
+  };
+}
 
 /**
  * Warm (or incrementally sync) the replica and return it. Shared by every
@@ -990,6 +1009,9 @@ async function handleGraphQuery(req, res) {
     // invisible here and timestamp-less in the console line, so neither could
     // correlate the two. Both halves are now measured and both are logged.
     const tCall = performance.now();
+    // #898 — event-loop utilization is sampled as a DELTA over this call, so a
+    // slow row can say whether the loop was busy or the store was.
+    const eluStart = performance.eventLoopUtilization();
     const { queryGraph } = await loadGraphModules();
     const { store, rebuiltMs, projectedThrough } = await warmGraphStore();
     const result = queryGraph(store, body.query, { limit: body.limit });
@@ -997,12 +1019,34 @@ async function handleGraphQuery(req, res) {
     // during it. That ordering is the whole point: a write arriving mid-sync is
     // the #931 window, and it must widen the gap rather than disappear into it.
     result.watermark = graphWatermark(projectedThrough);
+    const totalMs = Math.round(performance.now() - tCall);
+    // #898 — WHAT THESE NUMBERS MEASURE, said beside them. Two production rows
+    // (9,443ms and 28,610ms) reproduce in 1ms and 53ms and cannot be explained,
+    // because nothing recorded what else was true of the process at that
+    // moment; three shipped hints then quoted them as facts about query shape.
+    // `ms` is the synchronous store.query() region — nothing interleaves inside
+    // it — so a slow `ms` is time genuinely spent in the engine, and the only
+    // way to explain it later is to capture the process's state NOW. Above the
+    // threshold (published, env-overridable) the row carries that state.
+    const slowAfterMs = GRAPH_SLOW_MS;
+    const slow = totalMs >= slowAfterMs ? processContextForSlowQuery(eluStart) : undefined;
+    result.timing = {
+      ms: result.ms, rebuiltMs: rebuiltMs ?? null, totalMs, slowAfterMs,
+      means: {
+        ms: 'synchronous engine time inside store.query() — nothing interleaves; a slow ms was spent in the engine',
+        rebuiltMs: 'projection sync that ran BEFORE the query in this call; null means no sync ran',
+        totalMs: 'wall time of the whole call: module load + sync + engine',
+        slow: 'present only when totalMs >= slowAfterMs: the process at that moment (load, memory, event-loop utilization over the call)',
+      },
+      ...(slow ? { slow } : {}),
+    };
     try {
       fs.appendFileSync(GRAPH_QUERY_LOG, JSON.stringify({
         at: new Date().toISOString(), by: (typeof body.by === 'string' && body.by) || null,
-        ms: result.ms, rebuiltMs, totalMs: Math.round(performance.now() - tCall),
+        ms: result.ms, rebuiltMs, totalMs,
         returned: result.returned ?? 0, truncated: !!result.truncated,
         query: body.query.slice(0, 2000),
+        ...(slow ? { slow } : {}),
       }) + '\n');
     } catch { /* the log is telemetry, never a gate on the answer */ }
     sendJSON(res, 200, result);

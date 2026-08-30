@@ -1264,12 +1264,23 @@ export function queryGraph(store, sparql, { limit } = {}) {
         // carrying `?c a schema:CreativeWork`, which the example omitted. A caller
         // copying that example got the unconstrained shape and the number of the
         // constrained one. The example below is now the query that was measured.
+        //
+        // ⛔ v3's BASIS WAS REFUTED TOO (#898, 2026-08-30). The "28,610 ms" row
+        // above was re-run against the same corpus in an isolated store: 53ms.
+        // Twelve live runs of the other slow row: 2–5ms. rebuiltMs was null on
+        // both, so no projection hid inside them. The rows are TRANSIENT and
+        // unexplained — one uncharacterised instrument, three hints quoting it.
+        // The advice below is kept as REASONING (a free far end ranges over every
+        // node type, so constraining it shrinks the walk) and the ~25ms figure is
+        // kept because it was logged for exactly the query shown. No number from
+        // the unexplained rows is taught here any more; #898 now records the
+        // process state beside any call over its published threshold, so the
+        // next such row can be explained rather than quoted.
         hint: 'Two things, and the second is the one people miss. (1) ANCHOR one end of the '
           + 'path to a specific node. (2) CONSTRAIN THE OTHER END — an anchored path whose far '
-          + 'end is a free variable still walks every node type in the graph. Measured on this '
-          + 'board: anchored with a free far end took 28.6 SECONDS over two predicates, while '
-          + 'anchored with `?c a schema:CreativeWork` took 14-148ms over twelve. Predicate count '
-          + 'is not the variable; the unconstrained end is. This is the measured form: '
+          + 'end is a free variable ranges over every node type in the graph (comments, pages, '
+          + 'people, columns), while `?c a schema:CreativeWork` cuts the walk to cards. '
+          + 'Predicate count is not the variable; the unconstrained end is. This is the measured form: '
           + '{ ?a schema:identifier "857" . ?c a schema:CreativeWork ; '
           + '(scrum:relatedTo|^scrum:relatedTo|scrum:mentionsCard|^scrum:mentionsCard'
           + '|scrum:blockedBy|scrum:supersedes|scrum:derivedFrom|schema:isPartOf)* ?a } '
