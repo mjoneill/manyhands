@@ -36,6 +36,7 @@ import { fileURLToPath } from 'node:url';
 import { loadDomain, saveDomain } from './core/store.mjs';
 import { cardContentKey } from './core/card-content-key.mjs';
 import { applyApexLabels } from './core/apex-labels.mjs';
+import { inFlight } from './core/in-flight.mjs';
 import { appendEvent } from './core/event-log.mjs';
 // #805 — the boot migration's inputs (the live flat sources) and its builder.
 import { readPool, recentWhispers, DEFAULT_POOL, poolFilePath } from './whisper-store.mjs';
@@ -2852,6 +2853,9 @@ function handleBoardStatus(req, res) {
       nextShortId: data.nextShortId,
       conversationsTotal: data.conversations.length,
       claims,
+      // #1078 — ONE answer to "what is in flight": the claim is authoritative,
+      // the column is a derived stage, and every disagreement is named.
+      inFlight: inFlight(data.cards, { now: new Date().toISOString() }),
       recentCards,
       recentConversations,
       lastUpdated: data.lastUpdated,

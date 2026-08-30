@@ -55,6 +55,7 @@ import { openWorkObjectsAt } from './core/work-store.mjs';
 // had a green suite and zero callers, so no seat could create a work object and
 // signal 1 was unmeasurable BY CONSTRUCTION rather than merely unmeasured.
 import { workDeclare, workBid, workNobid, workContest, workGrant, workWithdraw, workList } from './core/work-tools.mjs';
+import { workLedgerSummary } from './core/in-flight.mjs';
 // #755 BRANCH E — the claim throttle. Its own flag; see core/claim-throttle.mjs.
 import { decideThrottle, isThrottleArmed, COOLDOWN_MS } from './core/claim-throttle.mjs';
 import { readConfig } from './channel-config.mjs';
@@ -1329,9 +1330,19 @@ function buildMcpServer() {
     description: 'Orientation snapshot: card counts by column, live claims (who is holding what '
       + 'right now), the 10 most recent cards (summaries) and conversations (previews), columns, '
       + 'nextShortId, totals. Bounded — safe as a first call. For full data use card_list / '
-      + 'conversation_list, or the board-state resource.',
+      + 'conversation_list, or the board-state resource. #1078: `inFlight` is THE answer to "what '
+      + 'is the room working on" — the claim is authoritative; the in-progress column and the '
+      + 'work-bid ledger are derived, and `inFlight.disagreements` names every card on which they '
+      + 'differ (stale leases, claimed-and-parked, in-progress-but-unclaimed). `workLedger` '
+      + 'summarises the bid/grant store work_list reads, with `dormant` computed rather than inferred.',
     inputSchema: {},
-  }, async () => jsonResult(await apiCall('GET', '/api/board/status')));
+  }, async () => {
+    const status = await apiCall('GET', '/api/board/status');
+    // #1078 — the ledger lives on this process (SCRUM_WORK_STORE), not the REST
+    // server, so the third surface is joined here. Absent store ⇒ says so.
+    const workLedger = workLedgerSummary(process.env.SCRUM_WORK_STORE, new Date().toISOString());
+    return jsonResult({ ...status, workLedger });
+  });
 
   // #643 — the returning-agent catch-up. "What did I miss?" as one bounded
   // call: union of cards (creates+updates) and posts (exact — append-only by
