@@ -17,8 +17,12 @@
  *
  *   · SUBSTRING, case-insensitive. Not tokenised, not stemmed, no ranking.
  *     "build" matches "rebuilding". "built" does NOT match "build".
- *   · Searches TITLE and DESCRIPTION only — not comments, not labels.
- *     (this one was PROSE-ONLY until 2026-08-30; now asserted below)
+ *   · Searches TITLE, DESCRIPTION and LABELS — not comments.
+ *     ⚠️ WIDENED 2026-08-30 to include labels (@michael's design: curated
+ *     taxonomy terms so a seat can find a card by a word its author chose).
+ *     Until that day this limit was PROSE-ONLY — the only one of the five
+ *     with no test behind it, which is how it could have been crossed in
+ *     silence. It is asserted below now, in its new form.
  *   · Combines with every other filter as AND, never OR.
  *
  * Those limits are asserted below rather than described, so a future change
@@ -121,32 +125,30 @@ test('#656 the limits are REAL — substring, not tokenised or stemmed', async (
   } finally { await s.stop(); }
 });
 
-test('#656 q does NOT reach LABELS — the one stated limit that was never asserted', async () => {
-  // ⚠️ FOUND 2026-08-30 BY READING THIS FILE'S OWN CLAIM AGAINST ITSELF.
-  // The header says the limits are "asserted below rather than described, so a
-  // future change that silently widens or narrows them turns a test red instead
-  // of surprising a caller." Seven tests pin substring-not-stemmed, AND-not-OR,
-  // empty-not-everything, the miss log, and the refusal string.
+test('#656 q REACHES LABELS — widened 2026-08-30, asserted so it cannot drift back', async () => {
+  // ⭐ THE WARRANT: 189 of the first 200 cards carry labels and none of that was
+  // reachable by free-text search. A curated label is the author's deliberate
+  // word for the thing; prose is whatever they happened to type. @michael's
+  // point: let a seat find the card by the chosen term.
   //
-  // ⛔ NOT ONE PINNED "not labels". The fixture even carries the card for it —
-  // card 3 has labels: ['other'] — and nothing ever searched for it. So the
-  // single limit most likely to be widened (labels are the obvious next field)
-  // was the only one a change could have crossed with the suite still green.
-  //
-  // ⭐ THIS TEST ASSERTS THE CURRENT BEHAVIOUR AND CHANGES NOTHING. It exists so
-  // that adding labels to the haystack becomes a DECISION with a red test
-  // attached, which is what the header promised and did not deliver.
+  // ⚠️ HISTORY, kept because it is the reason this test exists at all: until
+  // 2026-08-30 "not labels" was the ONE stated limit with no assertion behind
+  // it — five limits documented, four pinned. The gap was found by reading this
+  // file's own preamble against its own contents, and pinned BEFORE the change
+  // so that widening it would go red first. It did.
   const s = await startRestServer({ board: board() });
   try {
     const r = await q(s.baseUrl, 'q=other&as=ada');
     assert.equal(r.status, 200);
-    assert.deepEqual(r.body.cards.map((c) => c.shortId), [],
-      'card 3 carries labels:["other"] and the string appears nowhere in its '
-      + 'title or description. q must NOT match it. If you are reading this '
-      + 'because the test went red: you widened free-text search to cover '
-      + 'labels. That may well be right — #656 chose title+description '
-      + 'deliberately — but it is a contract change, so update the header\'s '
-      + 'stated limits in the same commit rather than letting a caller find out.');
+    assert.deepEqual(r.body.cards.map((c) => c.shortId), [3],
+      'card 3 carries labels:["other"] and the string appears NOWHERE in its '
+      + 'title or description — so a match proves the label itself was searched.');
+
+    // ⛔ AND THE LIMIT THAT DID NOT MOVE: still substring, still not stemmed.
+    // Widening one axis must not quietly widen another.
+    const stem = await q(s.baseUrl, 'q=othe&as=ada');
+    assert.deepEqual(stem.body.cards.map((c) => c.shortId), [3],
+      'substring still: "othe" matches inside the label "other"');
   } finally { await s.stop(); }
 });
 

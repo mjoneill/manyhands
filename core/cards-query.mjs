@@ -151,7 +151,19 @@ function applyFilters(cards, { column, label, assignee, type, since, updatedSinc
     out = out.filter((c) => {
       const title = typeof c?.title === 'string' ? c.title.toLowerCase() : '';
       const desc = typeof c?.description === 'string' ? c.description.toLowerCase() : '';
-      return title.includes(needle) || desc.includes(needle);
+      // #656 WIDENED 2026-08-30: labels join the haystack. @michael's design —
+      // curated taxonomy terms on an entity so a seat can find it by a word the
+      // author chose deliberately, rather than one that happens to appear in
+      // the prose. 189 of the first 200 cards carry labels and NONE of that was
+      // reachable by search before this line.
+      //
+      // ⚠️ THIS IS A CONTRACT CHANGE, made deliberately and asserted below —
+      // the header's stated limits and the "not labels" test moved in the same
+      // commit, which is what this file's own preamble demands.
+      const labs = Array.isArray(c?.labels)
+        ? c.labels.filter((l) => typeof l === 'string').join(' ').toLowerCase()
+        : '';
+      return title.includes(needle) || desc.includes(needle) || labs.includes(needle);
     });
   }
   if (updatedSince != null && updatedSince !== '') {
