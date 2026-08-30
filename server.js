@@ -1119,6 +1119,24 @@ async function handleSearch(req, res) {
   }
 }
 
+// ── GET /api/graph/vocabulary — #1104: is the unknown-term guard refusing a
+// WORKING query right now? Runs vocabularyDrift over the SERVED replica (after
+// the same sync every query gets), so the number is about production, not a
+// fixture. `undeclared` non-empty means the dictionary fell behind the
+// projection and the guard is worse than no guard until someone adds the term.
+async function handleGraphVocabulary(req, res) {
+  try {
+    const { vocabularyDrift } = await loadGraphModules();
+    const { store, rebuiltMs, projectedThrough } = await warmGraphStore();
+    const drift = vocabularyDrift(store);
+    sendJSON(res, 200, { ...drift, rebuiltMs: rebuiltMs ?? null, watermark: graphWatermark(projectedThrough) });
+  } catch (e) {
+    if (e.code === 'GRAPH_DEPS_MISSING') return sendJSON(res, 503, { error: e.message, code: e.code });
+    console.error('GET /api/graph/vocabulary:', e.message);
+    sendJSON(res, 500, { error: 'Failed to measure vocabulary drift' });
+  }
+}
+
 async function handleGraphQuery(req, res) {
   try {
     const body = JSON.parse(await readBody(req));
@@ -4941,6 +4959,7 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/cursors\/inbound$/,     fn: (req, res) => handleCursorInbound(req, res) },
   { method: 'POST',   re: /^\/api\/graph$/,                fn: (req, res) => handleGraphQuery(req, res) },
   { method: 'POST',   re: /^\/api\/search$/,               fn: (req, res) => handleSearch(req, res) },
+  { method: 'GET',    re: /^\/api\/graph\/vocabulary$/,    fn: (req, res) => handleGraphVocabulary(req, res) },   // #1104
   { method: 'GET',    re: /^\/api\/ready$/,                fn: (req, res) => handleReady(req, res) },       // #815
   { method: 'GET',    re: /^\/api\/checks$/,               fn: (req, res) => handleChecks(req, res) },      // #792
   { method: 'GET',    re: /^\/api\/misses$/,               fn: (req, res) => handleMisses(req, res) },      // #801
