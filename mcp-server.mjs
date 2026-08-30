@@ -716,7 +716,10 @@ function buildMcpServer() {
 
   // ── Card tools ───────────────────────────────────────────────────
   mcp.registerTool('card_create', {
-    description: 'Create a new card on the scrum board. Returns the created card (server assigns id, shortId, createdAt).',
+    description: 'Create a new card on the scrum board. Returns the created card (server assigns id, shortId, createdAt). '
+      + '#280: the response also carries `similarCards` — up to five EXISTING cards whose titles share the most distinctive words with yours, '
+      + 'ranked, present only when there are any. A list to glance at, not a refusal: the card is created regardless. Title words only, '
+      + 'so a card that says the same thing in other words will not appear — a short list is not evidence you are first.',
     inputSchema: {
       title: z.string().min(1).describe('Card title (required, non-empty)'),
       // #631 — REQUIRED, deliberately. An optional field is a field agents omit,

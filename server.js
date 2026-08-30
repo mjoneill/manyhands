@@ -57,6 +57,7 @@ import { extractMentions as extractMentionsFromRoster } from './core/people.mjs'
 import { domainToJsonLd } from './core/jsonld.mjs';
 import { deriveGraph, personByKey } from './core/people.mjs';
 import { queryCards, facetCards } from './core/cards-query.mjs';
+import { similarCards } from './core/similar-cards.mjs';
 import { queryChangesFromLog } from './core/changes-log-query.mjs';
 import { readEvents, oldestRetainedAt, seqAsOf } from './core/event-log.mjs';
 // #683 — the deafness cure's server half. REST owns the event log, so it owns
@@ -3213,6 +3214,11 @@ async function handleCreateCard(req, res) {
     const verr = validateCardFields(body, { surface: 'create' }); // #830
     if (verr) return sendJSON(res, 400, { error: verr });
     let createErr = null;
+    // #280 — the dup warning. Computed against the board AS READ inside the
+    // lock, so "a similar card was created a second ago" is inside the window
+    // it is meant to catch. Derived only: it rides on the 201 and is never
+    // stored — see core/similar-cards.mjs for the limits it declares.
+    let similar = [];
     const created = await withWriteLock(async () => {
       const data = readBoard();
       // #917 — resolve before constructing, so the card is never built with a
@@ -3221,6 +3227,7 @@ async function handleCreateCard(req, res) {
       const rp = resolveParentValue(data, body.parent);
       if (!rp.ok) { createErr = rp.error; return null; }
       if (body.parent !== undefined) body.parent = rp.id;
+      similar = similarCards(data.cards, body.title);
       const card = createCardFromPayload(body, data.nextShortId);
       data.cards.push(card);
       data.nextShortId = (data.nextShortId || 1) + 1;
@@ -3246,7 +3253,11 @@ async function handleCreateCard(req, res) {
     // non-empty: an empty array on every response is noise a caller learns to
     // skip, which is how the original silence went unnoticed.
     const ignoredFields = unconsumedCreateFields(body);
-    sendJSON(res, 201, ignoredFields.length ? { ...created, ignoredFields } : created);
+    sendJSON(res, 201, {
+      ...created,
+      ...(ignoredFields.length ? { ignoredFields } : {}),
+      ...(similar.length ? { similarCards: similar } : {}),
+    });
   } catch (e) {
     console.error('POST /api/cards:', e.message);
     sendJSON(res, 500, { error: 'Failed to create card' });
