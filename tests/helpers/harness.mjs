@@ -370,6 +370,13 @@ export async function startPair({
   board,
   mcpEnv,
   acquireTimeoutMs = 60_000,
+  // #730 / #837 2a — a test that wants a TIGHT deadline on the MCP acquisition
+  // (to exercise the timeout path) must not also put REST under it: REST
+  // startup is 85–111ms on a fast Mac and 170–360ms on the 2-core CI runner,
+  // so a shared 200ms deadline fired on REST about as often as not, `_startMcp`
+  // never ran, and the test failed with the PRODUCT's message. Defaults to the
+  // shared value, so every existing caller is unchanged.
+  restAcquireTimeoutMs = acquireTimeoutMs,
   _startRest = startRestServer,
   _startMcp = startMcpServer,
 } = {}) {
@@ -419,7 +426,7 @@ export async function startPair({
   };
 
   const rest = await withDeadline(
-    _startRest({ board, port: restPort, mcpNotifyUrl }), acquireTimeoutMs, 'REST acquisition',
+    _startRest({ board, port: restPort, mcpNotifyUrl }), restAcquireTimeoutMs, 'REST acquisition',
   );
 
   let mcp;

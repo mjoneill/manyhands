@@ -214,10 +214,15 @@ test('#291/#303-1 board inline commons panel: #NNN refs (scroll in place) + chat
     // display:none→flex). `.visible` lands when the transition STARTS, so a
     // click here can be dispatched while the panel is still off-screen right —
     // puppeteer reports "Node is either not clickable". Wait for it to arrive.
+    // #837 2a — was 3000ms and it was the OTHER intermittent in CI ("Waiting
+    // failed: 3000ms exceeded", 2-core runner, rAF-polled, in ~8 of the last 40
+    // runs). Budget raised to match its siblings in this file; this is a
+    // BUDGET, not a root cause — if it reds again at 5000, the transition is
+    // not finishing and the budget is not the problem.
     await page.waitForFunction(() => {
       const p = document.querySelector('#convs-panel');
       return !!p && p.getBoundingClientRect().left < window.innerWidth - 20;
-    }, { timeout: 3000 });
+    }, { timeout: 5000 });
 
     // Both #NNN become links (card-list-agnostic: #999 unknown still linkifies).
     const refs = await page.$$eval('.conv-card-ref', (els) =>

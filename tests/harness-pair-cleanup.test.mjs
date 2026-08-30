@@ -139,25 +139,43 @@ test('#730 a HANGING second acquisition must be bounded, and must not strand the
  */
 test('#730 a LATE-RESOLVING acquisition is adopted and stopped, not orphaned by the race', async () => {
   let stopped = false;
+  let mcpStarterRan = false;
   let resolveLate;
   const late = new Promise((res) => { resolveLate = res; });
 
+  // ⛔ #837 2a — THE INTERMITTENT, RESOLVED: TEST DEFECT, NOT A PRODUCT RACE.
+  // This test was the only real failure in CI runs on 08-24 and 08-30 (and in
+  // the run for 7a9a12e), always with the assertion message at the bottom —
+  // which names the PRODUCT's defect. The product was fine. The 200ms deadline
+  // bounded REST too, REST takes 170–360ms on the CI runner (85–111ms locally),
+  // the deadline fired on REST, the regex below accepted it, `_startMcp` never
+  // ran, and nothing could adopt `late`. Reproduced deterministically by
+  // injecting a 300ms `_startRest`: identical message. Three changes:
+  //   1  REST gets the harness's ordinary generous deadline; only MCP is tight
+  //   2  an anti-vacuity guard, like the HANGING test's: if the MCP starter
+  //      never ran, say THAT, not the product's message
+  //   3  the fixed 200ms "give the handler a turn" is a bounded poll — a second
+  //      fixed timer against a slow scheduler is the same defect again
   await assert.rejects(
     () => startPair({
       board: makeBoardFixture(),
       acquireTimeoutMs: 200,
-      _startMcp: () => late,
+      restAcquireTimeoutMs: 60_000,
+      _startMcp: () => { mcpStarterRan = true; return late; },
     }),
     /timed out|exceeded|deadline/i,
     'the deadline must still fire',
   );
+  assert.equal(mcpStarterRan, true,
+    'the injected MCP starter never ran — the deadline fired on REST, not MCP, and this test proves nothing about adoption');
 
   // The acquisition succeeds AFTER the caller has already given up — a real
   // spawn that won the race against nothing.
   resolveLate({ mcpUrl: 'http://127.0.0.1:1/', stop: async () => { stopped = true; } });
 
-  // Give the adoption handler a turn.
-  await new Promise((r) => setTimeout(r, 200));
+  // Give the adoption handler a turn — bounded, not fixed.
+  const deadline = Date.now() + 2000;
+  while (!stopped && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
 
   assert.equal(stopped, true,
     'the late-resolving MCP server was never stopped — Promise.race discarded it, so its child process '
