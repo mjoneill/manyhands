@@ -49,6 +49,7 @@ import { verifyShaIntegrity } from './core/sha-integrity.mjs';
 import { buildTree, buildChildIndex } from './core/tree.mjs';
 import { buildLinkIndex } from './core/links.mjs';
 import { commentMetadata } from './core/card-comments.mjs';
+import { validateDeclaration, seatState, tendingEligibility, UNKNOWN as SEAT_UNKNOWN } from './core/seat-state.mjs';
 import { readConfig, writeConfig, LIMITS } from './channel-config.mjs';
 import { loadRoster, writeRoster, rosterFilePath } from './core/roster-config.mjs';
 import { extractMentions as extractMentionsFromRoster } from './core/people.mjs';
@@ -1379,6 +1380,42 @@ async function handleDeclareLabelAlias(req, res) {
 const MEMORY_ID = (id) => `https://scrumboard.local/memory/${id}`;
 const MEMORY_VERSION_ID = (id, v) => `https://scrumboard.local/memory/${id}/v${v}`;
 
+// ── #613 — SEAT STATE: "I am here, and I am not taking this" ────────────────
+//
+// One row per seat, replaced on re-declaration. No version history: the card
+// asks whether a seat is declining NOW, and a log of past rests answers a
+// question nobody asked while making the live read a scan.
+//
+// ⛔ THE WRITE PATH TAKES THE SEAT FROM ITS CALLER, and the MCP tool takes it
+// from the BOUND SESSION rather than the payload. #1106 is today's card about a
+// tool that dropped `by` and silently signed every write with the owner's name;
+// a declaration is a statement about WHO IS SPEAKING, so getting the speaker
+// from the message is the one thing it must not do. At REST this is as
+// declared-not-authenticated as every other write here (#125) — no new hole,
+// and no pretence that there isn't an old one.
+const SEAT_STATE_ID = (seat) => `https://scrumboard.local/seat-state/${encodeURIComponent(seat)}`;
+
+function seatStatesOf(data) {
+  return Array.isArray(data.seatStates) ? data.seatStates : [];
+}
+/** Stored JSON-LD row → the plain shape core/seat-state.mjs reasons about. */
+function seatDeclFromNode(n) {
+  return {
+    seat: n['scrum:seat'], mode: n['scrum:mode'],
+    acceptsRoutineWork: n['scrum:acceptsRoutineWork'],
+    constraints: Array.isArray(n['scrum:constraint']) ? n['scrum:constraint'] : [],
+    note: n['scrum:note'] ?? null,
+    declaredAt: n['scrum:declaredAt'], expiresAt: n['scrum:expiresAt'],
+  };
+}
+function seatDeclsOf(data) { return seatStatesOf(data).map(seatDeclFromNode); }
+
+const seatStateEvent = (op, decl) => ({
+  op, actor: decl.seat,
+  entity: { kind: 'seat-state', id: decl.seat },
+  state: decl,
+});
+
 function memoriesOf(data) {
   return Array.isArray(data.memories) ? data.memories : [];
 }
@@ -1405,6 +1442,105 @@ function memoryToWire(identity, versions) {
     version: newest ? newest['scrum:version'] : 0,
     updatedAt: newest ? newest.dateCreated : null,
   };
+}
+
+/**
+ * #613 — GET /api/seats/state. Every roster seat, with UNKNOWN for the ones
+ * that have not spoken. ⇒ The roster is the population, matching #1078's
+ * inFlight: a second definition of "the seats" in a second payload is the
+ * two-surfaces defect this board keeps paying for.
+ */
+function handleSeatStates(req, res) {
+  const data = readBoard();
+  const decls = seatDeclsOf(data);
+  const now = new Date().toISOString();
+  // ⚠️ The population is ROSTER, plus any seat that has actually declared.
+  // Roster alone was the first cut and it hides a real declaration whenever the
+  // roster is misconfigured or a seat was removed from it — the state would be
+  // stored, honoured by the scheduler, and INVISIBLE on the surface that exists
+  // to show it. A declaration is evidence that a seat exists; the union is the
+  // honest population.
+  const keys = [...new Set([
+    ...Object.keys(ROSTER ?? {}),
+    ...decls.map((d) => d.seat).filter(Boolean),
+  ])];
+  const seats = keys.map((seat) => seatState(decls, seat, now));
+  const el = tendingEligibility(keys, decls, now);
+  sendJSON(res, 200, {
+    now, seats, eligible: el.eligible, declining: el.declining, anyEligible: el.anyEligible,
+    means: 'UNKNOWN is the ABSENCE of a declaration, never a stated no. An UNKNOWN seat is '
+      + 'ELIGIBLE and keeps its existing behaviour; only acceptsRoutineWork:false removes one.',
+  });
+}
+
+/**
+ * #613 — PUT /api/seats/:seat/state, and DELETE to clear.
+ *
+ * ⚠️ `seat` is the PATH, and the MCP tool fills it from the bound session. A
+ * mismatch between the path and a `seat` in the body is REFUSED rather than
+ * relayed: conversation_post records a mismatch as `onBehalfOf` because
+ * relaying someone's words is a real act, but "ada says bo is resting" is a
+ * THIRD-PARTY OBSERVATION, which is a different field with its own evidence
+ * requirements and does not exist yet. Silently accepting it would store an
+ * observation as a declaration.
+ */
+async function handleSeatDeclare(req, res, seat) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    if (body.seat && String(body.seat) !== seat) {
+      return sendJSON(res, 403, {
+        error: `this route declares state for '${seat}'; the body names '${body.seat}'. `
+          + 'A declaration is a statement about who is speaking — it is not relayable. '
+          + 'A third-party observation about another seat is a different thing and has no field yet.',
+        code: 'SEAT_MISMATCH',
+      });
+    }
+    let decl;
+    try {
+      decl = validateDeclaration(seat, body);
+    } catch (e) {
+      return sendJSON(res, 400, { error: e.message, code: e.code });
+    }
+    const saved = await withWriteLock(async () => {
+      const data = readBoard();
+      const node = {
+        '@id': SEAT_STATE_ID(seat), '@type': 'scrum:SeatDeclaration',
+        'scrum:seat': decl.seat, 'scrum:mode': decl.mode,
+        'scrum:acceptsRoutineWork': decl.acceptsRoutineWork,
+        ...(decl.constraints.length ? { 'scrum:constraint': [...decl.constraints] } : {}),
+        ...(decl.note ? { 'scrum:note': decl.note } : {}),
+        'scrum:declaredAt': decl.declaredAt, 'scrum:expiresAt': decl.expiresAt,
+      };
+      const prior = seatStatesOf(data).some((n) => n['scrum:seat'] === seat);
+      data.seatStates = [...seatStatesOf(data).filter((n) => n['scrum:seat'] !== seat), node];
+      // ⚠️ The event log has a CLOSED op vocabulary (create|update|delete|post|
+      // redact) and refused a `declare` op outright — the rail working. Mapped
+      // onto the existing verbs rather than widening them: a first declaration
+      // is a create, a re-declaration replaces the row, a clear is a delete.
+      // Widening the vocabulary is a protocol change and does not belong in a
+      // slice that needed a word.
+      writeBoard(data, [seatStateEvent(prior ? 'update' : 'create', decl)]);
+      return decl;
+    });
+    sendJSON(res, 200, saved);
+  } catch (e) {
+    console.error(`PUT /api/seats/${seat}/state:`, e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+
+async function handleSeatClear(req, res, seat) {
+  const cleared = await withWriteLock(async () => {
+    const data = readBoard();
+    const before = seatStatesOf(data);
+    const after = before.filter((n) => n['scrum:seat'] !== seat);
+    if (after.length === before.length) return false;
+    data.seatStates = after;
+    writeBoard(data, [seatStateEvent('delete', { seat })]);
+    return true;
+  });
+  // Idempotent: clearing an undeclared seat is already the desired end state.
+  sendJSON(res, 200, { seat, mode: SEAT_UNKNOWN, cleared });
 }
 
 async function handleCreateMemory(req, res) {
@@ -4825,6 +4961,9 @@ const API_ROUTES = [
   { method: 'PATCH',  re: /^\/api\/memories\/([^\/]+)$/,   fn: (req, res, m) => handleUpdateMemory(req, res, m[1]) },
   { method: 'GET',    re: /^\/api\/board\/status$/,         fn: (req, res) => handleBoardStatus(req, res) },
   { method: 'GET',    re: /^\/api\/board$/,                fn: (req, res) => handleGetBoard(req, res) },
+  { method: 'GET',    re: /^\/api\/seats\/state$/,          fn: (req, res) => handleSeatStates(req, res) },
+  { method: 'PUT',    re: /^\/api\/seats\/([^\/]+)\/state$/, fn: (req, res, m) => handleSeatDeclare(req, res, decodeURIComponent(m[1])) },
+  { method: 'DELETE', re: /^\/api\/seats\/([^\/]+)\/state$/, fn: (req, res, m) => handleSeatClear(req, res, decodeURIComponent(m[1])) },
   { method: 'GET',    re: /^\/api\/roster$/,               fn: (req, res) => handleGetRoster(req, res) },
   { method: 'GET',    re: /^\/api\/config\/limits$/,       fn: (req, res) => handleGetConfigLimits(req, res) },
   { method: 'GET',    re: /^\/api\/config$/,               fn: (req, res) => handleGetConfig(req, res) },

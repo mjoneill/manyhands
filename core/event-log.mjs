@@ -63,7 +63,11 @@ export const REDACTION_MARKER_PREFIX = '[redacted';
 // #918 — `decision` joins the set. ⚠️ An unmapped kind silently DROPS at
 // replay, so a decision whose history could not be rebuilt from the log would
 // be less durable than the cards beside it — which is the opposite of the point.
-export const ENTITY_KINDS = new Set(['card', 'conversation', 'column', 'wiki', 'tending', 'memory', 'label', 'decision']);
+// #613 — `seat-state` joins the set, and is MAPPED below in the same commit,
+// per the warning that follows: a declaration that could not be rebuilt from
+// the log would be less durable than the cards beside it, and the scheduler
+// reads it — so a dropped replay would silently restore a seat to eligible.
+export const ENTITY_KINDS = new Set(['card', 'conversation', 'column', 'wiki', 'tending', 'memory', 'label', 'decision', 'seat-state']);
 
 /** Which board collection a given entity kind projects into. */
 // #805 blocker 6: tending rides the SAME door as every family — the ruling was
@@ -85,6 +89,13 @@ const COLLECTION = {
   // from the log, and a vocabulary decision that cannot be replayed is a
   // decision the store would silently forget.
   label: 'labelAliases',
+  // #613 — one row per seat, replaced on re-declaration; replay upserts by
+  // the row's id, which is the seat key. ⚠️ Mapped HERE and not only added
+  // to the set above: the comment two blocks up says an unmapped kind
+  // silently drops at replay, and it was right — this mapping is the
+  // difference between a stored 'no' surviving a rebuild and a rested seat
+  // quietly becoming eligible again.
+  'seat-state': 'seatStates',
 };
 
 const SEGMENT_RE = /^events-\d{4}-\d{2}-\d{2}\.jsonl$/;

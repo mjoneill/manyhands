@@ -1264,6 +1264,70 @@ function buildMcpServer() {
     return jsonResult(await apiCall('GET', `/api/decisions${q ? `?${q}` : ''}`));
   });
 
+  // #613 — the bound seat, resolved exactly the way conversation_post resolves
+  // its author (line ~1029): the registry first, the session meta as fallback.
+  // ⚠️ Returns null for an UNBOUND session, and every caller here REFUSES on
+  // null rather than falling back to a declared name. That is stricter than
+  // #125's take-your-word default, deliberately: for a post, an unverified
+  // author is a byline; for a declaration, it is the entire content.
+  const boundSeatOf = (extra) => {
+    const sid = extra?.sessionId;
+    return sid ? (seatRegistry.seatForSession(sid) ?? sessionMeta.get(sid)?.seat ?? null) : null;
+  };
+
+  // ── #613 — seat state: "I am here, and I am not taking this" ──────────────
+  //
+  // ⛔ THE SEAT COMES FROM THE BOUND SESSION, NEVER FROM THE ARGUMENTS. There is
+  // deliberately no `seat` parameter: a declaration is a statement about who is
+  // speaking, so taking the speaker from the message is the one thing it must
+  // not do. #1106 is the card about a sibling tool that dropped `by` and
+  // silently signed every write with the owner's name.
+  mcp.registerTool('seat_declare', {
+    description: 'Declare YOUR OWN seat state, so the room can stop being told in prose. '
+      + 'available (willing to receive routine work) · resting (present, not taking it) · '
+      + 'degraded (present, with NAMED constraints, and you say explicitly whether routine '
+      + 'work is welcome). The declaration is finite and expires back to UNKNOWN; nothing '
+      + 'renews it but you. ⚠️ It is NOT authority: it never changes a claim, a lease or a '
+      + 'permission, and it never suppresses a direct mention or a safety notice. '
+      + 'UNKNOWN cannot be declared — it is the absence of a declaration; use seat_clear.',
+    inputSchema: {
+      mode: z.enum(['available', 'resting', 'degraded']),
+      acceptsRoutineWork: z.boolean().describe(
+        'REQUIRED and explicit. A scheduler must never infer willingness from the mode label — '
+        + '"degraded" says nothing about whether routine work is welcome.'),
+      expiresAt: z.string().describe('ISO timestamp, in the future, at most 168h away. A declaration with no end is a permanent opt-out.'),
+      constraints: z.array(z.enum(['reads-unreliable', 'no-writes', 'slow', 'low-context'])).optional()
+        .describe('REQUIRED for degraded — name what is constrained; schedulers do not guess from the word.'),
+      note: z.string().optional(),
+    },
+  }, async (args, extra) => {
+    const seat = boundSeatOf(extra);
+    if (!seat) {
+      return jsonResult({
+        error: 'this session is not bound to a seat, so it cannot declare one. A declaration '
+          + 'whose whole content is WHO IS SPEAKING cannot come from an unverifiable session.',
+        code: 'UNBOUND',
+      });
+    }
+    return jsonResult(await apiCall('PUT', `/api/seats/${encodeURIComponent(seat)}/state`, args));
+  });
+
+  mcp.registerTool('seat_clear', {
+    description: 'Clear YOUR OWN seat declaration, returning it to UNKNOWN. Idempotent.',
+    inputSchema: {},
+  }, async (_args, extra) => {
+    const seat = boundSeatOf(extra);
+    if (!seat) return jsonResult({ error: 'this session is not bound to a seat', code: 'UNBOUND' });
+    return jsonResult(await apiCall('DELETE', `/api/seats/${encodeURIComponent(seat)}/state`));
+  });
+
+  mcp.registerTool('seat_states', {
+    description: 'Who is available, resting or degraded — every roster seat, with UNKNOWN for '
+      + 'the ones that have not said. ⚠️ UNKNOWN is ABSENCE, never a stated no: an UNKNOWN seat '
+      + 'is ELIGIBLE for routine work and keeps its existing behaviour.',
+    inputSchema: {},
+  }, async () => jsonResult(await apiCall('GET', '/api/seats/state')));
+
   mcp.registerTool('memory_create', {
     description: 'Create a new memory in the store. Returns the created memory with version 1.',
     inputSchema: {
@@ -1728,6 +1792,18 @@ const whisperTick = async () => {
   // over a value already in hand — tendingTick stays synchronous in its
   // decision and fully testable without a network.
   const activityAt = await lastRoomActivity();
+  // Fetched here rather than inside the tick so tendingTick stays synchronous
+  // in its decision and testable without a network — the same contract
+  // `lastActivityAt` already has.
+  let seatEligibilitySnapshot = null;
+  try {
+    seatEligibilitySnapshot = await apiCall('GET', '/api/seats/state');
+  } catch (e) {
+    // ⛔ FAIL OPEN, and say so. If the state surface is unreachable we do NOT
+    // know that anyone declined, and treating "I could not ask" as "nobody is
+    // available" would silence the room on a transport error.
+    console.error(`[#613] seat-state unreadable, tending proceeds unfiltered: ${e?.message ?? e}`);
+  }
   return tendingTick({
     now: new Date().toISOString(),
     // Re-read per firing, exactly like `tendingEnabled` — so a change @michael
@@ -1737,6 +1813,9 @@ const whisperTick = async () => {
     mint: mintOnce,
     post: (body) => apiCall('POST', '/api/conversations', body),
     reachedSeats: liveSeats,
+    // #613 — the stored no. Read fresh per firing, like the switch above, so a
+    // seat that declares at 10:59 is honoured by the 11:00 window.
+    eligibility: () => seatEligibilitySnapshot,
     log: (line) => console.log(line),
     onError: (line) => console.error(line),
   });

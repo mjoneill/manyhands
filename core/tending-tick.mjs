@@ -92,7 +92,7 @@ export function lastQualifyingActivity(messages) {
 
 export async function tendingTick({
   now, mint, post, reachedSeats = () => [], log = () => {}, onError = () => {},
-  quietAfterMinutes = null, lastActivityAt = null,
+  quietAfterMinutes = null, lastActivityAt = null, eligibility = null,
 }) {
   // #953 — THE SILENCE GATE. Before #953 this function took NO room-state
   // input at all, so there was no parameter a policy could change: the whisper
@@ -129,6 +129,33 @@ export async function tendingTick({
           reason: `room-active:${Math.round(quietMs / 1000)}s-quiet-of-${quietAfterMinutes}m`,
         };
       }
+    }
+  }
+
+  // #613 — THE STORED NO, CONSULTED BEFORE THE OFFER IS MINTED.
+  //
+  // A seat may declare "present, not taking routine work". If NO seat on the
+  // roster is eligible, the room sends nothing and RECORDS that — it does not
+  // report a delivery that did not happen, and it does not replay the window
+  // later when the declarations expire.
+  //
+  // ⚠️ BEFORE MINT, for the reason the silence gate above already documents:
+  // minting is window-idempotent, so minting and then discarding burns the
+  // offer for the whole window and the room goes untended.
+  //
+  // ⛔ AND IT FAILS OPEN, like the gate above and for the same reason: a caller
+  // that passes no `eligibility` keeps today's behaviour exactly. A tick that
+  // read "I was told nothing" as "nobody is available" would silence tending
+  // everywhere it had not yet been wired — the emitter-breaking failure, this
+  // time arriving through a default rather than a bug.
+  if (typeof eligibility === 'function') {
+    const el = eligibility();
+    if (el && el.anyEligible === false) {
+      return {
+        minted: false, delivered: false,
+        reason: el.reason || 'no-eligible-seats',
+        declining: el.declining ?? [],
+      };
     }
   }
 
