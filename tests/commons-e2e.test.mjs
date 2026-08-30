@@ -214,11 +214,11 @@ test('#291/#303-1 board inline commons panel: #NNN refs (scroll in place) + chat
     // display:none→flex). `.visible` lands when the transition STARTS, so a
     // click here can be dispatched while the panel is still off-screen right —
     // puppeteer reports "Node is either not clickable". Wait for it to arrive.
-    // #837 2a — was 3000ms and it was the OTHER intermittent in CI ("Waiting
-    // failed: 3000ms exceeded", 2-core runner, rAF-polled, in ~8 of the last 40
-    // runs). Budget raised to match its siblings in this file; this is a
-    // BUDGET, not a root cause — if it reds again at 5000, the transition is
-    // not finishing and the budget is not the problem.
+    // #837 2a — this budget was raised 3000→5000 on the belief that THIS was
+    // the CI intermittent. It was not: the next red still said "3000ms
+    // exceeded", which this wait can no longer say. The failing wait is the
+    // highlight wait further down; the fix is there. Left at 5000 (harmless),
+    // kept as the record of a fix that never touched the failing line.
     await page.waitForFunction(() => {
       const p = document.querySelector('#convs-panel');
       return !!p && p.getBoundingClientRect().left < window.innerWidth - 20;
@@ -247,9 +247,17 @@ test('#291/#303-1 board inline commons panel: #NNN refs (scroll in place) + chat
     // Clicking #1 scrolls to card `p` IN PLACE (highlighted, no navigation).
     const urlBefore = page.url();
     await page.click('.conv-card-ref');
+    // ⛔ #837 2a — THE CI INTERMITTENT, resolved: `.highlighted` is TRANSIENT
+    // (scrollToCardByShortId removes it after 1500ms), and waitForFunction's
+    // default poll is requestAnimationFrame, which headless Chrome throttles
+    // on a starved 2-core runner — so the whole 1.5s window could fall between
+    // two polls and the wait reported "3000ms exceeded" with the highlight
+    // having happened. Three CI reds (6009 / 5103 / 5164ms) were this line.
+    // A MutationObserver poll fires on the class change itself, throttled or
+    // not. The budget was never the problem; the instrument was.
     await page.waitForFunction(
       () => !!document.querySelector('.card[data-id="p"].highlighted'),
-      { timeout: 3000 });
+      { timeout: 3000, polling: 'mutation' });
     assert.equal(page.url(), urlBefore, 'ref click scrolled in place — no page navigation');
   }, { server: { board: refBoard }, launch: { headless: 'new' } });
 });
