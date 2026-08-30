@@ -1787,6 +1787,38 @@ async function lastRoomActivity() {
   }
 }
 
+// #613 — the seats whose live declaration says acceptsRoutineWork:false.
+//
+// ⛔⛔ THE FIRST CUT CACHED THIS AND REFRESHED IT ONLY FROM THE TICK, with a
+// comment claiming that was sufficient "BY CONSTRUCTION rather than by luck:
+// the only producer of a tending post is the tick". It was luck. A tending
+// post arriving by ANY other path — a replay, a test, a second producer, or
+// the first post after a restart — met an EMPTY set and was delivered to a
+// resting seat with no error anywhere. Its own test caught it in one run.
+//
+// ⇒ So it is fetched at the moment it is used, and only for the post kind that
+//   uses it: one call per tending offer, which is hourly. A correctness
+//   argument that depends on nobody else ever doing something is a promise
+//   about the future of the codebase, not a property of the code.
+let decliningSeats = new Set();
+
+async function refreshDecliningSeats() {
+  try {
+    const snapshot = await apiCall('GET', '/api/seats/state');
+    decliningSeats = new Set(snapshot?.declining ?? []);
+  } catch (e) {
+    // FAIL OPEN and say so: "I could not ask" is not "nobody declined", and a
+    // stale set would keep silencing a seat whose declaration has expired.
+    decliningSeats = new Set();
+    console.error(`[#613] seat-state unreadable, tending offer goes out unfiltered: ${e?.message ?? e}`);
+  }
+  return decliningSeats;
+}
+
+/** The stamp the whisper itself writes. Nothing wider is ever suppressed. */
+const isTendingOffer = (conversation) => conversation?.author === 'board'
+  && /^\[tending /.test(String(conversation?.body ?? ''));
+
 const whisperTick = async () => {
   // Read once per tick, before the gate, so `lastActivityAt` is a pure getter
   // over a value already in hand — tendingTick stays synchronous in its
@@ -1804,6 +1836,7 @@ const whisperTick = async () => {
     // available" would silence the room on a transport error.
     console.error(`[#613] seat-state unreadable, tending proceeds unfiltered: ${e?.message ?? e}`);
   }
+
   return tendingTick({
     now: new Date().toISOString(),
     // Re-read per firing, exactly like `tendingEnabled` — so a change @michael
@@ -2111,7 +2144,28 @@ function broadcastFanout(conversation) {
   );
   const isSelf = ([sid]) => sessionMeta.get(sid)?.author === conversation.author;
   const selfEcho = receiving.filter(isSelf).length;
-  const targets = receiving.filter((e) => !isSelf(e));
+  // #613 — DO NOT WAKE A SEAT THAT SAID IT IS NOT TAKING ROUTINE WORK.
+  //
+  // ⚠️ SCOPE IS NARROW ON PURPOSE, and the card names it: seat state suppresses
+  // the ROUTINE OFFER and nothing else. A direct mention, a safety notice and
+  // every ordinary post still reach a resting seat — the promise is "present,
+  // not taking this", not "gone". So the test is the tending stamp the whisper
+  // itself writes, from the board, and nothing wider.
+  const tending = isTendingOffer(conversation);
+  const isDeclining = ([sid]) => {
+    if (!tending) return false;
+    const seat = sessionMeta.get(sid)?.seat;
+    return !!seat && decliningSeats.has(seat);
+  };
+  const suppressed = receiving.filter((e) => !isSelf(e) && isDeclining(e));
+  const targets = receiving.filter((e) => !isSelf(e) && !isDeclining(e));
+  // #624's rule, applied to a loss we CHOSE: account for it at the point of
+  // loss. A suppression nobody can see is indistinguishable from a delivery
+  // failure, and this room has spent days telling those two apart.
+  if (suppressed.length) {
+    console.log(`[#613] tending offer withheld from ${suppressed.length} session(s) by their own declaration: `
+      + `${[...new Set(suppressed.map(([sid]) => sessionMeta.get(sid)?.seat ?? sid))].join(',')}`);
+  }
   // #624 — ACCOUNT for the loss at the point of loss.
   //
   // The filter above already computes the answer and throws it away: its
@@ -2436,6 +2490,10 @@ const httpServer = http.createServer(async (req, res) => {
       let payload;
       try { payload = raw ? JSON.parse(raw) : {}; } catch { payload = {}; }
       if (payload && payload.conversation && payload.conversation.id) {
+        // #613 — read the declarations at the moment of use, for the one post
+        // kind that consults them. Hourly, and it removes the "only the tick
+        // produces these" assumption entirely.
+        if (isTendingOffer(payload.conversation)) await refreshDecliningSeats();
         const n = broadcastChannel(payload.conversation);
         console.log(`channel notify: fanned out to ${n} session(s)`);
       }
