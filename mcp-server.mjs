@@ -1405,7 +1405,21 @@ function buildMcpServer() {
 
   // ── #694 — graph_query: native graph traversal ────────────────────
   mcp.registerTool('graph_query', {
-    description: 'Traverse the board as a GRAPH — one SPARQL query where composing card_list/'
+    // #1104 — the trigger, FIRST, because a warning at the end of a long
+    // description is read after the query is already written. A POINTER, not a
+    // copy: two content copies of the trap list are what created #1104, and a
+    // third here would drift with every new trap at exactly the seam where
+    // probing happens. The COUNT is the freshness signal — a seat who finds a
+    // fourteenth knows this line is stale by one.
+    description: '⚠️ SILENT FAILURE IS THIS TOOL\'S DEFAULT FAILURE MODE: a wrong predicate, '
+      + 'class or prefix returns a well-formed ZERO — no error, no warning — which is '
+      + 'indistinguishable from a true negative. 13 traps measured as of 2026-08-30; read '
+      + 'canonical memory 76e1183e BEFORE probing an unfamiliar predicate — memory_list '
+      + 'returns bodies, so `memory_list(tag: "graph-query")` is the whole read. '
+      + 'The control that outlives every individual trap: on ZERO, count the population to '
+      + 'prove the predicate EXISTS; on a FULL result, check that your FILTER removes '
+      + 'anything at all — a filter that changes nothing did not run. '
+      + 'Traverse the board as a GRAPH — one SPARQL query where composing card_list/'
       + 'card_get calls would take five round-trips. Never stale: an in-process replica is '
       + 'SYNCED INCREMENTALLY on the first query after any write — only entities whose content '
       + 'hash changed are re-projected, and a burst of writes costs one sync, not one per write. '
