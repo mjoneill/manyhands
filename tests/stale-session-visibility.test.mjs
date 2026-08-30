@@ -34,6 +34,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { startPair, mcpSession } from './helpers/harness.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 const status = async (mcp) =>
   (await fetch(mcp.healthUrl.replace('/health', '/channel/status'))).json();
@@ -103,4 +106,29 @@ test('#894 the field is ADDITIVE — nothing the fanout watch reads may change s
   for (const k of ['pending', 'mode', 'receivers', 'sessions', 'seats', 'unbound', 'unboundSessions', 'unknownToken', 'binding']) {
     assert.ok(k in st, `#894 must not remove or rename \`${k}\` — the watch reads this surface`);
   }
+});
+
+test('#894 a wedged session that still presents its seat token is named by SEAT, not only by sid', async (t) => {
+  // The 404'd request carries the same Authorization header the live session
+  // did, so the server can say WHO is looping — "@who is wedged" instead of
+  // "someone is". Still no verdict: hits and window, and now a name.
+  const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'seat-tokens-')), 'tokens.json');
+  fs.writeFileSync(f, JSON.stringify({ tokens: { 'tok-ada': { seat: 'ada' } } }));
+  const { rest, mcp } = await startPair({ mcpEnv: { SCRUM_SEAT_TOKENS: f } });
+  t.after(async () => { await mcp.stop(); await rest.stop(); });
+
+  const dead = 'deadbeef-0000-4000-8000-000000000895';
+  const r = await fetch(mcp.mcpUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', 'Mcp-Session-Id': dead, Authorization: 'Bearer tok-ada' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+  });
+  assert.equal(r.status, 404);
+  await pokeWithDeadSession(mcp, 'deadbeef-0000-4000-8000-000000000896');   // no token: a nameless one
+
+  const st = await status(mcp);
+  const named = st.staleSessions.find((s) => s.sid === dead);
+  assert.equal(named.seat, 'ada', `the looping client is named: ${JSON.stringify(st.staleSessions)}`);
+  const nameless = st.staleSessions.find((s) => s.sid.endsWith('896'));
+  assert.equal(nameless.seat, null, 'and one without a token is honestly unnamed, not guessed');
 });

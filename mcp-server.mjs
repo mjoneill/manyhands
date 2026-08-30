@@ -1678,17 +1678,19 @@ const sessionMeta = new Map(); // sid -> { lastActivity:number, openStreamCount:
 const STALE_SESSION_CAP = 64;
 const staleSessionHits = new Map(); // sid -> { hits:number, firstAt:number, lastAt:number }
 
-function recordStaleSession(sid) {
+function recordStaleSession(sid, seat = null) {
   const now = Date.now();
   const prev = staleSessionHits.get(sid);
-  if (prev) { prev.hits += 1; prev.lastAt = now; return; }
+  if (prev) { prev.hits += 1; prev.lastAt = now; if (seat && !prev.seat) prev.seat = seat; return; }
   // Evict oldest by first-seen so the map cannot grow without bound.
   if (staleSessionHits.size >= STALE_SESSION_CAP) {
     let oldestKey = null, oldestAt = Infinity;
     for (const [k, v] of staleSessionHits) if (v.firstAt < oldestAt) { oldestAt = v.firstAt; oldestKey = k; }
     if (oldestKey !== null) staleSessionHits.delete(oldestKey);
   }
-  staleSessionHits.set(sid, { hits: 1, firstAt: now, lastAt: now });
+  // #894 — the seat, when the 404'd request still carries its token: "@who is
+  // wedged" instead of "someone is". Null when it carried none — unnamed, not guessed.
+  staleSessionHits.set(sid, { hits: 1, firstAt: now, lastAt: now, seat: seat ?? null });
 }
 
 // ── #703 — connection identity + per-seat heartbeats (room-vetted) ──────────
@@ -2480,6 +2482,7 @@ const httpServer = http.createServer(async (req, res) => {
         staleSessions: [...staleSessionHits.entries()]
           .map(([sid, v]) => ({
             sid,
+            seat: v.seat ?? null,   // #894 — named when the looping request carried a token
             hits: v.hits,
             firstAt: new Date(v.firstAt).toISOString(),
             lastAt: new Date(v.lastAt).toISOString(),
@@ -2647,7 +2650,7 @@ const httpServer = http.createServer(async (req, res) => {
       console.error(`[#359] unknown session id: ${sessionId} → 404 (re-init signal; reaped or pre-restart session)`);
       // #894 — count it, so "a seat is wedged on a dead session" is a query
       // against /channel/status rather than archaeology in this log file.
-      recordStaleSession(sessionId);
+      recordStaleSession(sessionId, binding?.seat ?? null);
       return jsonRpcError(res, 404, -32001, 'Session not found — re-initialize');
     } else {
       return jsonRpcError(res, 400, -32000, 'Bad Request: No valid session ID provided');
