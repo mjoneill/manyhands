@@ -246,18 +246,23 @@ test('#291/#303-1 board inline commons panel: #NNN refs (scroll in place) + chat
 
     // Clicking #1 scrolls to card `p` IN PLACE (highlighted, no navigation).
     const urlBefore = page.url();
-    await page.click('.conv-card-ref');
-    // ⛔ #837 2a — THE CI INTERMITTENT, resolved: `.highlighted` is TRANSIENT
-    // (scrollToCardByShortId removes it after 1500ms), and waitForFunction's
-    // default poll is requestAnimationFrame, which headless Chrome throttles
-    // on a starved 2-core runner — so the whole 1.5s window could fall between
-    // two polls and the wait reported "3000ms exceeded" with the highlight
-    // having happened. Three CI reds (6009 / 5103 / 5164ms) were this line.
-    // A MutationObserver poll fires on the class change itself, throttled or
-    // not. The budget was never the problem; the instrument was.
-    await page.waitForFunction(
+    // ⛔ #837 2a — THE CI INTERMITTENT, resolved in two halves, both on the
+    // INSTRUMENT and neither on the budget. `.highlighted` is TRANSIENT:
+    // scrollToCardByShortId adds it on the click and removes it 1500ms later.
+    //   1  the default poll is requestAnimationFrame, which headless Chrome
+    //      throttles on a starved 2-core runner, so the whole window could fall
+    //      between two polls  ⇒ polling: 'mutation' (fires on the change itself)
+    //   2  the observer was installed AFTER the click — one CDP round-trip
+    //      later — so a stall in that gap left nothing to observe  ⇒ register
+    //      the wait BEFORE the act, the way waitForNavigation is used
+    // Four CI reds (6009 / 5103 / 5164 / 4972ms) were this line; the third
+    // came after fixing only half 1. A transient observed after the fact is
+    // the same miss at a different layer.
+    const highlighted = page.waitForFunction(
       () => !!document.querySelector('.card[data-id="p"].highlighted'),
       { timeout: 3000, polling: 'mutation' });
+    await page.click('.conv-card-ref');
+    await highlighted;
     assert.equal(page.url(), urlBefore, 'ref click scrolled in place — no page navigation');
   }, { server: { board: refBoard }, launch: { headless: 'new' } });
 });
