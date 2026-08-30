@@ -52,8 +52,15 @@ on:
 permissions:
   contents: read
 
+# #1108 — keyed on the SHA, not the ref. Keyed on the ref, any push to main
+# cancelled an in-flight re-run of any OLDER sha, and a re-run overwrites that
+# sha's conclusion in `gh run list` — which is what the deploy gate reads. So
+# "re-run a green sha to count flakes" + "anyone pushes" made that sha read
+# `cancelled` and become undeployable, with no override by design. Per-sha
+# groups still coalesce repeated runs of the SAME commit; they just stop
+# treating a neighbour's re-run as collateral.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.sha }}
   cancel-in-progress: true
 
 jobs:
