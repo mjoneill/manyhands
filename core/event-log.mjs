@@ -210,6 +210,27 @@ export function seqAsOf(dir, stamp) {
 }
 
 /**
+ * #782 — the seq of ONE entity event, looked up by what it was ABOUT. A push
+ * delivery knows the conversation id it wrote and nothing else; this turns that
+ * into the log position `served` is recorded against. Newest segment first,
+ * newest event first, bounded to the two most recent segments: a pushed message
+ * is seconds old, and a miss past that boundary answers null rather than
+ * walking months of history for a seq that would not be served anyway.
+ */
+export function seqOfEntityEvent(dir, { kind, id, op = null } = {}) {
+  if (!kind || !id) return null;
+  const files = segments(dir);
+  for (let i = files.length - 1, seen = 0; i >= 0 && seen < 2; i--, seen++) {
+    const evs = parseSegment(dir, files[i]);
+    for (let j = evs.length - 1; j >= 0; j--) {
+      const e = evs[j];
+      if (e?.entity?.kind === kind && e?.entity?.id === id && (op == null || e.op === op)) return e.seq;
+    }
+  }
+  return null;
+}
+
+/**
  * Reject anything that would put a lie in the record. Runs BEFORE the append, so
  * a rejected event burns no seq and leaves the log byte-identical.
  */

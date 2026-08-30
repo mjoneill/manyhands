@@ -22,8 +22,9 @@ import { appendEvent } from '../core/event-log.mjs';
 import { loadCursors, saveCursors } from '../core/cursors.mjs';
 import {
   deliveryIdentity, registerFor, serveFor, noteInbound, envelopeFor, reachabilityReport,
-  discardPendingServes,
+  discardPendingServes, markServed,
 } from '../core/cursor-service.mjs';
+import { seqOfEntityEvent } from '../core/event-log.mjs';
 
 let n = 0;
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), `cursorsvc-${process.pid}-${n++}-`));
@@ -403,4 +404,50 @@ test('#683 RETENTION — a contiguous log is not mistaken for a trimmed one', ()
   assert.equal(pull.refused, undefined);
   assert.deepEqual(pull.events.map((e) => e.seq), [1, 2, 3, 4]);
   assert.equal(envelopeFor(dir, 'bearer:indigo').oldest_unserved_state, 'known');
+});
+
+// ── #782 / Decision 5b43edcd — served on PUSH write, acked on the next inbound ──
+
+test('#782 markServed records a pushed seq for a KNOWN lane; the same session acks it, a different session is fenced', () => {
+  const dir = tmp();
+  seed(dir, 3);
+  const key = 'bearer:ada';
+  noteInbound(dir, key, { via: 'none:s1' });                       // adopts at head (3)
+  const post = appendEvent(dir, { op: 'post', entity: { kind: 'conversation', id: 'msg-1' }, state: { body: 'x' }, actor: 'bo' }, { now: '2026-08-11T00:10:00.000Z' });
+  const r = markServed(dir, key, { seq: post.seq, via: 'none:s1' });
+  assert.equal(r.known, true);
+  assert.equal(r.served, post.seq);
+  assert.equal(envelopeFor(dir, key).last_acked_seq, 3, 'served is not acked');
+
+  // a DIFFERENT session acking is fenced: the range is dropped, not stolen
+  const other = noteInbound(dir, key, { via: 'none:s2' });
+  assert.equal(other.fenced, true);
+  assert.equal(envelopeFor(dir, key).last_acked_seq, 3);
+  assert.equal(envelopeFor(dir, key).last_served_seq, null);
+
+  // the same session acks
+  markServed(dir, key, { seq: post.seq, via: 'none:s1' });
+  const same = noteInbound(dir, key, { via: 'none:s1' });
+  assert.equal(same.acked, true);
+  assert.equal(envelopeFor(dir, key).last_acked_seq, post.seq);
+});
+
+test('#782 markServed on an UNKNOWN lane writes nothing and says so; a seq at or below acked is a no-op', () => {
+  const dir = tmp();
+  seed(dir, 2);
+  assert.deepEqual(markServed(dir, 'bearer:nobody', { seq: 2, via: 'none:s1' }), { known: false });
+  assert.equal(loadCursors(dir).seats['bearer:nobody'], undefined, 'no lane was created by a push');
+  noteInbound(dir, 'bearer:ada', { via: 'none:s1' });          // acked 2
+  const r = markServed(dir, 'bearer:ada', { seq: 1, via: 'none:s1' });
+  assert.equal(r.served, null, 'already past it — nothing outstanding');
+});
+
+test('#782 seqOfEntityEvent finds the seq of a conversation post by id, newest-first, and answers null for a stranger', () => {
+  const dir = tmp();
+  seed(dir, 2);
+  const a = appendEvent(dir, { op: 'post', entity: { kind: 'conversation', id: 'msg-a' }, state: {}, actor: 'bo' }, { now: '2026-08-11T00:10:00.000Z' });
+  const b = appendEvent(dir, { op: 'post', entity: { kind: 'conversation', id: 'msg-b' }, state: {}, actor: 'bo' }, { now: '2026-08-11T00:11:00.000Z' });
+  assert.equal(seqOfEntityEvent(dir, { kind: 'conversation', id: 'msg-a', op: 'post' }), a.seq);
+  assert.equal(seqOfEntityEvent(dir, { kind: 'conversation', id: 'msg-b', op: 'post' }), b.seq);
+  assert.equal(seqOfEntityEvent(dir, { kind: 'conversation', id: 'msg-zzz', op: 'post' }), null);
 });

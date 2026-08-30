@@ -1950,6 +1950,20 @@ const channelScheduler = createChannelScheduler({
     if (!transport) return;
     Promise.resolve()
       .then(() => transport.send(notification))
+      .then(() => {
+        // #782 / Decision 5b43edcd — the write RESOLVED, so this session's lane
+        // is SERVED this conversation. Acked only on the lane's next inbound
+        // call (the #683 hook), fenced if a different session acks. Fire-and-
+        // forget and fail-open, like the ack: a mark we could not record costs a
+        // re-serve on the next pull, which at-least-once already permits.
+        const messageId = notification?.params?.meta?.message_id;
+        if (notification?.method !== 'notifications/claude/channel' || !messageId) return;
+        const lane = laneFor(sessionId);
+        if (!lane) return;
+        return apiCall('POST', '/api/cursors/served', { identity: lane.identity, via: lane.via, conversationId: messageId })
+          .then((r) => { if (r && r.served === false) console.log(`[#782] served NOT recorded for ${lane.identity}: ${r.code}`); })
+          .catch((e) => console.error(`[#782] served mark failed for ${lane.identity}: ${e.message}`));
+      })
       .catch((e) => console.error(`channel send failed for a session: ${e.message}`));
   },
 });

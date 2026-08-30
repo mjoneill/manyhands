@@ -64,12 +64,12 @@ import { deriveGraph, personByKey } from './core/people.mjs';
 import { queryCards, facetCards } from './core/cards-query.mjs';
 import { similarCards } from './core/similar-cards.mjs';
 import { queryChangesFromLog } from './core/changes-log-query.mjs';
-import { readEvents, oldestRetainedAt, seqAsOf } from './core/event-log.mjs';
+import { readEvents, oldestRetainedAt, seqAsOf, seqOfEntityEvent } from './core/event-log.mjs';
 // #683 — the deafness cure's server half. REST owns the event log, so it owns
 // the cursors that index it; mcp-server asks over HTTP rather than learning a
 // path it has no business knowing (#767).
 import {
-  deliveryIdentity, registerFor, serveFor, noteInbound, reachabilityReport,
+  deliveryIdentity, registerFor, serveFor, noteInbound, reachabilityReport, markServed,
   discardPendingServes, headSeq, PULL_LIMIT,
 } from './core/cursor-service.mjs';
 import { configureIdentities, usingDefaultRoster } from './core/identity.mjs';
@@ -4964,6 +4964,30 @@ async function handleCursorInbound(req, res) {
   }
 }
 
+/**
+ * POST /api/cursors/served — #782 / Decision 5b43edcd. The MCP host reports that
+ * it has WRITTEN conversation `conversationId` to the stream of the session
+ * named by {identity, via}. Resolves the conversation's event seq here (the
+ * log is REST's) and records it as served. Unknown lane or unknown event answer
+ * `served:false` with a code — never a 200 that looks like success.
+ */
+async function handleCursorServed(req, res) {
+  try {
+    const body = JSON.parse((await readBody(req)) || '{}');
+    const key = body.identity || deliveryIdentity(body)?.key;
+    if (!key) return sendJSON(res, 400, { error: 'identity is required', code: 'NO_DELIVERY_IDENTITY' });
+    if (!body.conversationId) return sendJSON(res, 400, { error: 'conversationId is required', code: 'NO_CONVERSATION' });
+    const seq = seqOfEntityEvent(EVENT_LOG_DIR, { kind: 'conversation', id: String(body.conversationId), op: 'post' });
+    if (seq == null) return sendJSON(res, 200, { served: false, code: 'EVENT_NOT_FOUND', identity: key });
+    const out = markServed(EVENT_LOG_DIR, key, { seq, via: body.via ?? null });
+    if (!out.known) return sendJSON(res, 200, { served: false, code: 'UNKNOWN_LANE', identity: key, seq });
+    sendJSON(res, 200, { served: out.served === seq, identity: key, seq, last_served_seq: out.served, last_acked_seq: out.acked });
+  } catch (e) {
+    console.error('POST /api/cursors/served:', e.message);
+    sendJSON(res, 500, { error: 'Failed to record served' });
+  }
+}
+
 // ── Router: regex-based match against API_ROUTES ──
 const API_ROUTES = [
   { method: 'GET',    re: /^\/api\/changes$/,              fn: (req, res) => handleChanges(req, res) },
@@ -4971,6 +4995,7 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/cursors\/register$/,    fn: (req, res) => handleCursorRegister(req, res) },
   { method: 'GET',    re: /^\/api\/cursors\/pull$/,        fn: (req, res) => handleCursorPull(req, res) },
   { method: 'POST',   re: /^\/api\/cursors\/inbound$/,     fn: (req, res) => handleCursorInbound(req, res) },
+  { method: 'POST',   re: /^\/api\/cursors\/served$/,      fn: (req, res) => handleCursorServed(req, res) },
   { method: 'POST',   re: /^\/api\/graph$/,                fn: (req, res) => handleGraphQuery(req, res) },
   { method: 'POST',   re: /^\/api\/search$/,               fn: (req, res) => handleSearch(req, res) },
   { method: 'GET',    re: /^\/api\/graph\/vocabulary$/,    fn: (req, res) => handleGraphVocabulary(req, res) },   // #1104

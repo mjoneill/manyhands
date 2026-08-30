@@ -219,6 +219,32 @@ export function serveFor(eventDir, key, { limit = PULL_LIMIT, via = null } = {})
 }
 
 /**
+ * #782 / Decision 5b43edcd — a PUSH was actually written to this lane's session.
+ *
+ * Amends #642 for push delivery only: `served` records that the scheduler's
+ * deliver() completed `transport.send()` of a conversation to a session holding
+ * an open stream. Nothing here advances `acked` — that still happens only on
+ * the lane's NEXT inbound call, and only from the same `via`; any other session
+ * acking is fenced and the range re-served (see noteInbound). An UNKNOWN lane is
+ * not created by a push: a lane exists once the seat has spoken to us.
+ *
+ * ⚠️ Call this after the write RESOLVES, never at enqueue. The scheduler's
+ * closed-transport guard drops a message for a session that vanished between
+ * dispatch and delivery; marking at enqueue would serve what was never written —
+ * #624 arriving through its cure, which is the exact reading #642 refused.
+ */
+export function markServed(eventDir, key, { seq, via = null } = {}) {
+  const state = loadCursors(eventDir);
+  const s = state.seats[key];
+  if (!s) return { known: false };
+  const before = s.served ?? null;
+  recordServed(state, key, seq);
+  if ((s.served ?? null) !== before) s.served_via = via;
+  saveCursors(eventDir, state);
+  return { known: true, served: s.served ?? null, acked: s.acked };
+}
+
+/**
  * An inbound call from the lane. This is the implicit ack: the seat was alive
  * AFTER we finished the last response, so we believe it arrived.
  *
@@ -280,7 +306,8 @@ export function reachabilityReport(eventDir, { now = Date.now(), inputs = 'inbou
       };
     }
     const r = reachability(state, key, head, { now, ...opts });
-    return { identity: key, ...r, instrument: 'inbound' };
+    // #782 — additive: the two integers the cursor IS, beside the verdict about them.
+    return { identity: key, ...r, instrument: 'inbound', last_acked_seq: state.seats[key].acked, last_served_seq: state.seats[key].served ?? null };
   });
 }
 
