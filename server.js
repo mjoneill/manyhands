@@ -1996,9 +1996,19 @@ const STANDING_CHECKS = [
     // denominator for the same reason.
     claim: 'an OPEN card declares blockedBy a card that is already done — the block cannot block '
       + 'anything, and the blocked card has not moved even though its blocker shipped',
+    // #1112 item 1 — AND the room has not already HANDLED it. A blocker entry
+    // with status "cleared" is the card saying "this block is dealt with, here
+    // is the note" (#814 projects it as a scrum:Blocker node). Without this
+    // clause the check fired forever on handled blocks — measured 2026-08-30:
+    // five rows, every one carrying a cleared entry with a citation, still
+    // reported. #824's rule again: an instrument that keeps firing after the
+    // room acts gets dismissed, taking the real findings with it. The EDGE
+    // stays (history); the ENTRY is what records the handling; the check reads
+    // the entry.
     query: 'SELECT ?blocked ?blocker WHERE { ?a scrum:blockedBy ?b ; schema:identifier ?blocked ; '
       + 'scrum:column ?col . FILTER(?col != <https://scrumboard.local/column/done>) '
-      + '?b schema:identifier ?blocker ; scrum:column <https://scrumboard.local/column/done> }',
+      + '?b schema:identifier ?blocker ; scrum:column <https://scrumboard.local/column/done> '
+      + 'FILTER NOT EXISTS { ?bl scrum:blocks ?a ; scrum:blockedByCard ?b ; scrum:status "cleared" } }',
   },
 ];
 

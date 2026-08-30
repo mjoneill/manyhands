@@ -150,3 +150,27 @@ test('#880 a board with no blocks at all reports an empty finding, not a missing
     );
   } finally { await s.stop(); }
 });
+
+test('#1112 a phantom block that the room has HANDLED — blocker entry status cleared — stops firing; an open entry does not silence it', async () => {
+  const s = await startRestServer();
+  try {
+    const blocker = await mk(s.baseUrl, { title: 'shipped later' });
+    const blocked = await mk(s.baseUrl, { title: 'waiting', relationships: { blockedBy: [blocker.shortId] } });
+    await patch(s.baseUrl, blocker.id, { column: 'done' });
+
+    // ⭐ CONTROL FIRST: an entry that says the block is still OPEN must not
+    // silence the finding — otherwise annotating a block hides it.
+    await patch(s.baseUrl, blocked.id, { blockers: [{ card: blocker.shortId, status: 'open', note: 'still real' }] });
+    let f = phantom((await checks(s.baseUrl)).body);
+    assert.equal(f.rows.length, 1, `an OPEN entry is not a clearance. got ${JSON.stringify(f.rows)}`);
+
+    // The room handles it: the entry is CLEARED, with the note as the record.
+    // The blockedBy EDGE stays — deleting history to quiet an instrument is the
+    // cleanup the check's own comment forbids. The check consults the entry.
+    await patch(s.baseUrl, blocked.id, { blockers: [{ card: blocker.shortId, status: 'cleared', note: 'blocker shipped; handled' }] });
+    f = phantom((await checks(s.baseUrl)).body);
+    assert.deepEqual(f.rows, [],
+      'a cleared blocker entry IS the room saying "handled" — a check that keeps firing on it '
+      + `is a stuck alarm (#824: an instrument that always fires gets dismissed). got ${JSON.stringify(f.rows)}`);
+  } finally { await s.stop(); }
+});
