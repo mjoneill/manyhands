@@ -1882,6 +1882,179 @@ function handleListPredicates(req, res) {
   sendJSON(res, 200, out);
 }
 
+// ── #945 slice 2 — THE WRITE VERB (Decision aad42bf5, Option D) ─────────────
+// N assertions (subject, predicate, object), ONE atomic call, gated on the
+// registry: an unregistered predicate fails the write and names what to do.
+// NOT a second write path — each assertion maps to the store's canonical
+// shape (isPartOf→parent, blockedBy→relationships, implementedBy→sha array)
+// and rides the same lock, the same events, the same projection boundary as
+// every card write. NOT SPARQL Update on the replica: assertions land on the
+// store and project forward.
+//
+// The mapping table is deliberate code. A registered predicate whose store
+// mapping is unbuilt refuses honestly instead of inventing a parallel storage
+// shape — assertability grows by deliberate act, which is the governance
+// Option D bought. Derived predicates refuse with their own registered
+// definition quoted: the registry constrains use, not just spelling.
+
+const DERIVED_ASSERT_PREDICATES = new Set(['scrum:mentionsCard']);
+
+async function handleAssert(req, res) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const by = typeof body.by === 'string' && body.by.trim() ? body.by.trim() : null;
+    if (!by) {
+      return sendJSON(res, 400, {
+        error: 'by is required — who asserts. Declared, not authenticated (the board\'s standing trust model).',
+      });
+    }
+    const assertions = body.assertions;
+    if (!Array.isArray(assertions) || assertions.length === 0) {
+      return sendJSON(res, 400, { error: 'assertions must be a non-empty array of {subject, predicate, object}' });
+    }
+    // Shape checks OUTSIDE the lock — they need no board state (#534's rule).
+    for (let i = 0; i < assertions.length; i++) {
+      const a = assertions[i];
+      if (!a || typeof a !== 'object' || Array.isArray(a)) {
+        return sendJSON(res, 400, { error: `assertions[${i}] must be an object {subject, predicate, object}` });
+      }
+      if (typeof a.predicate !== 'string' || !PREDICATE_NAME_RE.test(a.predicate)) {
+        return sendJSON(res, 400, {
+          error: `assertions[${i}].predicate must be a prefixed term like "scrum:blockedBy" or "schema:isPartOf" `
+            + '(prefixes: schema, scrum, prov, rdf)',
+        });
+      }
+    }
+    const wire = (a, effect) => ({ subject: a.subject, predicate: a.predicate, object: a.object, effect });
+    const result = await withWriteLock(async () => {
+      const data = readBoard();
+      const registered = new Map(predicatesOf(data)
+        .filter((e) => e['@type'] === 'scrum:PredicateDefinition')
+        .map((e) => [e.name, e]));
+
+      // ── VALIDATE EVERYTHING before touching anything: the batch is ATOMIC.
+      const plan = [];
+      for (let i = 0; i < assertions.length; i++) {
+        const a = assertions[i];
+        const def = registered.get(a.predicate);
+        if (!def) {
+          return {
+            status: 400,
+            error: `assertions[${i}]: predicate ${a.predicate} is not registered — a predicate must be `
+              + 'registered with a definition before it can be used (Decision aad42bf5). Register it first '
+              + '(MCP predicate_register, or POST /api/predicates), then re-assert. Nothing in this batch was applied.',
+          };
+        }
+        if (DERIVED_ASSERT_PREDICATES.has(a.predicate)) {
+          return {
+            status: 400,
+            error: `assertions[${i}]: ${a.predicate} is derived and cannot be asserted — its registered `
+              + `definition: "${def['scrum:definition']}". Nothing in this batch was applied.`,
+          };
+        }
+        const subjIdx = findCardIndex(data, a.subject);
+        if (subjIdx < 0) {
+          return {
+            status: 400,
+            error: `assertions[${i}]: subject ${JSON.stringify(a.subject)} does not resolve to a card `
+              + '(shortId or uuid). Nothing in this batch was applied.',
+          };
+        }
+        const subject = data.cards[subjIdx];
+        if (a.predicate === 'scrum:implementedBy') {
+          if (typeof a.object !== 'string' || !/^[0-9a-f]{40}$/.test(a.object)) {
+            return {
+              status: 400,
+              error: `assertions[${i}]: scrum:implementedBy takes a full 40-character lowercase git sha as `
+                + `object (got ${JSON.stringify(a.object)}) — a short sha cannot be expanded by the graph. `
+                + 'Nothing in this batch was applied.',
+            };
+          }
+          plan.push({ kind: 'sha', subject, sha: a.object, a });
+          continue;
+        }
+        const objIdx = findCardIndex(data, a.object);
+        if (objIdx < 0) {
+          return {
+            status: 400,
+            error: `assertions[${i}]: object ${JSON.stringify(a.object)} does not resolve to a card `
+              + '(shortId or uuid). Nothing in this batch was applied.',
+          };
+        }
+        const object = data.cards[objIdx];
+        if (a.predicate === 'schema:isPartOf') plan.push({ kind: 'parent', subject, object, a });
+        else if (a.predicate === 'scrum:blockedBy') plan.push({ kind: 'blockedBy', subject, object, a });
+        else {
+          return {
+            status: 400,
+            error: `assertions[${i}]: ${a.predicate} is registered but has no store mapping in this verb yet — `
+              + 'assertability grows by deliberate act (see #945). Nothing in this batch was applied.',
+          };
+        }
+      }
+      // Cycle check sees the batch's OWN earlier parent assignments, in order —
+      // two individually-safe assertions can compose into a cycle.
+      const parentOverlay = new Map();
+      for (const p of plan) {
+        if (p.kind !== 'parent') continue;
+        const cards = data.cards.map((c) => (parentOverlay.has(c.id) ? { ...c, parent: parentOverlay.get(c.id) } : c));
+        if (reparentWouldCycle(cards, p.subject.id, p.object.id)) {
+          return {
+            status: 400,
+            error: `asserting schema:isPartOf(${p.subject.shortId}, ${p.object.shortId}) would create a cycle — `
+              + 'a card with no path to a root is invisible to every tree walk. Nothing in this batch was applied.',
+          };
+        }
+        parentOverlay.set(p.subject.id, p.object.id);
+      }
+
+      // ── APPLY — everything validated; one mutation pass, ONE event boundary.
+      const now = new Date().toISOString();
+      const touched = new Map(); // card.id → card
+      const results = [];
+      for (const p of plan) {
+        if (p.kind === 'parent') {
+          if (p.subject.parent === p.object.id) { results.push(wire(p.a, 'noop')); continue; }
+          p.subject.parent = p.object.id;
+          p.subject.updatedAt = now;
+          touched.set(p.subject.id, p.subject);
+          applyApexLabels(data.cards, p.subject.id); // #902 item 4 — reachable ⇒ labelled, by construction
+          results.push(wire(p.a, 'parent-set'));
+        } else if (p.kind === 'blockedBy') {
+          const before = normalizeRelationships(p.subject.relationships);
+          if (before.blockedBy.includes(p.object.shortId)) { results.push(wire(p.a, 'noop')); continue; }
+          const after = { ...before, blockedBy: [...before.blockedBy, p.object.shortId] };
+          p.subject.relationships = after;
+          p.subject.updatedAt = now;
+          touched.set(p.subject.id, p.subject);
+          for (const t of syncInverseRelationships(data, p.subject, before, after)) touched.set(t.id, t);
+          results.push(wire(p.a, 'edge-added'));
+        } else if (p.kind === 'sha') {
+          const list = Array.isArray(p.subject.implementedBy) ? p.subject.implementedBy : [];
+          if (list.includes(p.sha)) { results.push(wire(p.a, 'noop')); continue; }
+          p.subject.implementedBy = [...list, p.sha];
+          p.subject.updatedAt = now;
+          touched.set(p.subject.id, p.subject);
+          results.push(wire(p.a, 'sha-recorded'));
+        }
+      }
+      if (touched.size > 0) {
+        for (const c of touched.values()) bumpCardVersion(c); // #534 — the ONE version rule
+        writeBoard(data, [...touched.values()].map((c) => cardEvent('update', c, by)));
+      }
+      return {
+        status: 200,
+        wire: { applied: results.filter((r) => r.effect !== 'noop').length, results },
+      };
+    });
+    if (result.error) return sendJSON(res, result.status, { error: result.error });
+    sendJSON(res, result.status, result.wire);
+  } catch (e) {
+    console.error('POST /api/assert:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+
 function decisionsOf(data) {
   return Array.isArray(data.decisions) ? data.decisions : [];
 }
@@ -5143,6 +5316,7 @@ const API_ROUTES = [
   { method: 'GET',    re: /^\/api\/decisions$/,            fn: (req, res) => handleListDecisions(req, res) },
   { method: 'GET',    re: /^\/api\/predicates$/,           fn: (req, res) => handleListPredicates(req, res) },
   { method: 'POST',   re: /^\/api\/predicates$/,           fn: (req, res) => handleRegisterPredicate(req, res) },
+  { method: 'POST',   re: /^\/api\/assert$/,               fn: (req, res) => handleAssert(req, res) },
   { method: 'POST',   re: /^\/api\/decisions$/,            fn: (req, res) => handleCreateDecision(req, res) },
   { method: 'GET',    re: /^\/api\/memories$/,             fn: (req, res) => handleListMemories(req, res) },
   { method: 'POST',   re: /^\/api\/memories$/,             fn: (req, res) => handleCreateMemory(req, res) },

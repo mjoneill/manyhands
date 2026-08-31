@@ -1247,6 +1247,30 @@ function buildMcpServer() {
     return jsonResult(await apiCall('GET', `/api/predicates${q}`));
   });
 
+  // ── #945 slice 2 — THE WRITE VERB (Decision aad42bf5, Option D) ───────────
+  mcp.registerTool('graph_assert', {
+    description: 'Assert N (subject, predicate, object) relations in ONE ATOMIC call (#945, Decision '
+      + 'aad42bf5): "here is a set of assertions, make them true." Gated on the predicate registry — an '
+      + 'unregistered predicate fails the WHOLE batch and names what to do (register it first via '
+      + 'predicate_register). Not a second write path: each assertion lands in the store\'s canonical shape '
+      + '(schema:isPartOf → parent + apex labels, cycle-guarded · scrum:blockedBy → relationships edge · '
+      + 'scrum:implementedBy → full 40-char sha) and projects forward through the same event boundary as '
+      + 'every card write. Derived predicates (scrum:mentionsCard) refuse with their own definition quoted. '
+      + 'An assertion already true is a NOOP, not an error. One failure refuses everything — nothing '
+      + 'partial ever lands.',
+    inputSchema: {
+      by: z.string().min(1).describe('Who asserts. Declared, not authenticated.'),
+      assertions: z.array(z.object({
+        subject: z.union([z.number(), z.string()]).describe('Card shortId or uuid'),
+        predicate: z.string().min(1).describe('A REGISTERED prefixed predicate, e.g. "scrum:blockedBy"'),
+        object: z.union([z.number(), z.string()])
+          .describe('Card shortId/uuid — or, for scrum:implementedBy, a full 40-character git sha'),
+      })).min(1).describe('The assertions, applied atomically in order'),
+    },
+  }, async ({ by, assertions }) => {
+    return jsonResult(await apiCall('POST', '/api/assert', { by, assertions }));
+  });
+
   mcp.registerTool('decision_create', {
     description: 'Record a DECISION — a constraint on future work, not a task. Use this when the room '
       + 'settles something that should stop being re-argued: a rule, a scope call, a chosen approach. '
