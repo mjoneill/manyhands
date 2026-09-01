@@ -431,38 +431,75 @@ export function pageReady(verdicts, { limit } = {}) {
  * Run the queries against the replica and fold to COMPLETE verdicts.
  * Truncation REFUSES rather than verdicts on a partial board: a queue
  * computed from 1000 of 1200 cards is a wrong answer delivered fluently.
- * (Ceiling is graph-replica's LIMIT_CEILING; today's board is ~a third of it.)
+ *
+ * ⚠️ The refusal now fires only on a RUNAWAY (a query that never shrinks past
+ * 200k rows), not on ordinary board growth — every sub-query is read in full
+ * by `pagedRows`. #1121: the old note here said "today's board is ~a third of
+ * [LIMIT_CEILING]", which stayed true about that ceiling while five per-query
+ * `limit: 1000` caps quietly became the binding ones. A reassuring, accurate
+ * sentence about the NEIGHBOURING limit is what kept anyone from checking the
+ * one that mattered.
  */
-export function readyFromStore(store) {
-  const facts = queryGraph(store, readyFactsQuery(), { limit: 1000 });
-  const blockers = queryGraph(store, readyBlockersQuery(), { limit: 1000 });
-  const superseded = queryGraph(store, readySupersededQuery(), { limit: 1000 });
-  // #965 — one row per human blocker. Bounded and refused on truncation for
-  // the same reason as the others: a queue computed from part of the blocker
-  // set would silently offer gated work.
-  const humanBlockers = queryGraph(store, readyHumanBlockersQuery(), { limit: 1000 });
-  // ⚠️ #816 — this query returns ONE ROW PER EDGE, not per card. The board
-  // carries ~1,545 relationship members against graph-replica's LIMIT_CEILING
-  // of 1,000, so a single call truncates and the refusal below would take the
-  // whole queue down. Found by running against the live board; a fixture with
-  // ten edges cannot reach it. Paged rather than ceiling-raised: the ceiling
-  // protects every other caller and this is the one query that legitimately
-  // outgrows it.
-  const context = { rows: [], truncated: false };
-  const PAGE = 1000;
+const PAGE = 1000;
+
+/**
+ * Read EVERY row of a sub-query, a page at a time.
+ *
+ * ⚠️ #1121 — WHY NONE OF THESE MAY BE A SINGLE CAPPED CALL. A `{ limit: N }`
+ * call sets `truncated` the moment the result reaches N, and the refusal
+ * below then takes the WHOLE queue down. That is not hypothetical: on
+ * 2026-09-01 the board grew past 1000 cards, `readyFactsQuery` hit its 1000
+ * cap, and every call to /api/ready — including `explain` for one card —
+ * refused. The cap was reachable by the single most common action on the
+ * system (filing a card), it could not self-heal, and there was no signal on
+ * the way up: the bound could say `ok` or `REFUSED` and nothing in between.
+ *
+ * ⭐ Paged rather than ceiling-raised, which is what #816 already chose for
+ * the context query and is now simply applied to all of them: raising a
+ * number buys headroom until the board grows into it again, and picks a new
+ * number nobody can justify. graph-replica's LIMIT_CEILING still protects
+ * every other caller; these are the queries that legitimately outgrow it.
+ *
+ * ⚠️ `readyFactsQuery` has NO column filter — done cards count toward the
+ * bound too, so archiving work does not relieve it. Measured same-moment on
+ * the live board: 1005 solutions = COUNT(DISTINCT ?card) = /api/cards, one
+ * row per card. Reason about SOLUTIONS regardless: a future OPTIONAL that
+ * matches twice would multiply rows without changing the card count.
+ *
+ * The runaway guard survives: a query that never shrinks refuses rather than
+ * looping forever.
+ */
+function pagedRows(store, query) {
+  const out = { rows: [], truncated: false };
   for (let offset = 0; ; offset += PAGE) {
-    const page = queryGraph(store, `${readyContextQuery()} LIMIT ${PAGE} OFFSET ${offset}`, { limit: PAGE });
-    context.rows.push(...page.rows);
+    const page = queryGraph(store, `${query} LIMIT ${PAGE} OFFSET ${offset}`, { limit: PAGE });
+    out.rows.push(...page.rows);
     if (page.rows.length < PAGE) break;
     // A board large enough to need more pages than this is a different problem;
     // refusing beats looping forever on a query that never shrinks.
-    if (offset > 200_000) { context.truncated = true; break; }
+    if (offset > 200_000) { out.truncated = true; break; }
   }
+  return out;
+}
+
+export function readyFromStore(store) {
+  const facts = pagedRows(store, readyFactsQuery());
+  const blockers = pagedRows(store, readyBlockersQuery());
+  const superseded = pagedRows(store, readySupersededQuery());
+  // #965 — one row per human blocker. Read in full and refused only on a
+  // runaway, for the same reason as the others: a queue computed from part of
+  // the blocker set would silently offer gated work.
+  const humanBlockers = pagedRows(store, readyHumanBlockersQuery());
+  // ⚠️ #816 — this query returns ONE ROW PER EDGE, not per card. The board
+  // carries ~1,545 relationship members against graph-replica's LIMIT_CEILING
+  // of 1,000, so a single capped call truncates. Found by running against the
+  // live board; a fixture with ten edges cannot reach it.
+  const context = pagedRows(store, readyContextQuery());
   // #1041 — fetched BEFORE the truncation refusal so it can be included in it.
   // A queue computed from PART of the condition-blocker set would mistake an
   // UNREAD scoping for an ABSENT one, and offer a card it should have withheld —
   // the false-PASS direction, which is the one that costs.
-  const conditionBlockers = queryGraph(store, readyConditionBlockersQuery(), { limit: 1000 });
+  const conditionBlockers = pagedRows(store, readyConditionBlockersQuery());
   if (facts.truncated || blockers.truncated || superseded.truncated
       || humanBlockers.truncated || context.truncated || conditionBlockers.truncated) {
     const err = new Error('board exceeds the ready computation bound; refusing a partial queue');
