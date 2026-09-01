@@ -2826,6 +2826,22 @@ function validateAcceptance(acceptance) {
       }
     }
     if (a.note !== undefined && a.note !== null && typeof a.note !== 'string') return 'acceptance.note must be a string';
+    // #1041 — condition-scoped blockers. Validated HERE and not only in the MCP
+    // schema: the projection's guard was written defensively BECAUSE this
+    // function checked condition/evidence/note only, and a REST caller could
+    // write any shape at all. With both surfaces agreeing, a value that reaches
+    // the projection is one it can resolve.
+    if (a.blockedBy !== undefined) {
+      if (!Array.isArray(a.blockedBy)) {
+        return `acceptance ${JSON.stringify(a.condition)}: blockedBy must be an array of card shortIds`;
+      }
+      for (const b of a.blockedBy) {
+        if (typeof b !== 'number' || !Number.isInteger(b)) {
+          return `acceptance ${JSON.stringify(a.condition)}: blockedBy ${JSON.stringify(b)} must be a card `
+            + 'shortId number — the same vocabulary relationships.blockedBy uses.';
+        }
+      }
+    }
   }
   return null;
 }

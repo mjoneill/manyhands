@@ -1082,6 +1082,19 @@ function projectEntity(store, e) {
         // can write anything. A non-string ref is skipped rather than projected
         // as a broken IRI — an unresolvable edge here would make a genuinely
         // blocked card look scoped, which is the one direction that matters.
+        // ⚠️ STRING-ONLY IS CORRECT, AND IT IS NOT A TYPE-LAZINESS GUARD.
+        // `core/jsonld.mjs` resolves these shortIds to entity UUIDs on the way
+        // in (`blockedBy.map((sid) => shortToId.get(sid) ?? sid)`), so a ref
+        // arriving here as a NUMBER is precisely one that FAILED to resolve —
+        // it names a card that does not exist. Coercing it with String() would
+        // mint `entity:<shortId>`, a dangling IRI, and make a genuinely blocked
+        // card look condition-scoped: the one direction that matters.
+        //
+        // ⛔ Measured 2026-09-01 (#823/#1041): a mutation replacing this guard
+        // with a number-coercing one SURVIVED the feature test, because the
+        // resolution upstream means well-formed input never reaches here as a
+        // number. The surviving mutation is the evidence that the coercion is
+        // both dead AND harmful — it only ever fires on unresolvable input.
         for (const ref of Array.isArray(a.blockedBy) ? a.blockedBy : []) {
           if (typeof ref !== 'string' || !ref) continue;
           add(rc, nn(S + 'blockedBy'), nn(IRI.entity + ref));
