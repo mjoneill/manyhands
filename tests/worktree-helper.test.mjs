@@ -25,6 +25,7 @@ function makeRepo() {
   fs.mkdirSync(path.join(dir, 'scripts'));
   fs.copyFileSync(SCRIPT, path.join(dir, 'scripts', 'worktree.sh'));
   fs.writeFileSync(path.join(dir, 'a.txt'), 'a');
+  fs.writeFileSync(path.join(dir, '.gitignore'), '.scratch-tests/\n');   // as the real repo ignores it
   git(['add', '.']); git(['commit', '-q', '-m', 'seed']);
   return { base, dir, git };
 }

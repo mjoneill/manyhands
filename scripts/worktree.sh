@@ -66,8 +66,12 @@ case "${1:-}" in
     # deploy-*/serve, locked by the deploy-drift fixture), and `worktree remove`
     # dies on them with "Permission denied" after unregistering nothing. Unlock
     # first: this tree is clean (checked above) and about to be deleted.
-    chmod -R u+rwx "$found" 2>/dev/null || true
-    git -C "$REPO" worktree remove "$found"
+    # DIRECTORIES only: touching file modes flips the executable bit on tracked
+    # files and git then reads the clean tree as modified. --force is safe here
+    # and only here: our own porcelain check above already refused any real
+    # uncommitted work, so what --force deletes is gitignored residue.
+    find "$found" -type d -exec chmod u+rwx {} + 2>/dev/null || true
+    git -C "$REPO" worktree remove --force "$found"
     git -C "$REPO" worktree prune
     say "✓ removed $found (branch kept: $(git -C "$REPO" branch --list "card/$card-*" | tr -d ' *'))" ;;
   adopt)
