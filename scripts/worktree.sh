@@ -62,6 +62,11 @@ case "${1:-}" in
       say "   commit it, or save it: git -C $found diff > ~/wip-$card-$(date -u +%Y%m%dT%H%M%SZ).patch"; exit 1
     fi
     rm -f "$found/node_modules"
+    # The suite leaves READ-ONLY export dirs inside the tree (.scratch-tests/
+    # deploy-*/serve, locked by the deploy-drift fixture), and `worktree remove`
+    # dies on them with "Permission denied" after unregistering nothing. Unlock
+    # first: this tree is clean (checked above) and about to be deleted.
+    chmod -R u+rwx "$found" 2>/dev/null || true
     git -C "$REPO" worktree remove "$found"
     git -C "$REPO" worktree prune
     say "✓ removed $found (branch kept: $(git -C "$REPO" branch --list "card/$card-*" | tr -d ' *'))" ;;

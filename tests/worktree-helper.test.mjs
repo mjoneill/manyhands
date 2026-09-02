@@ -128,3 +128,17 @@ test('#877 adopt moves an OUTSIDE worktree into the home and re-links node_modul
   assert.match(list.out, /8-broken.*node_modules does not resolve/, 'broken link flagged');
   assert.doesNotMatch(list.out, /7-stray.*does not resolve/, 'the adopted one is not flagged');
 });
+
+test('#877 done removes a worktree that holds a READ-ONLY directory left by a test fixture', () => {
+  const { base, dir } = makeRepo();
+  const made = run(dir, ['new', '9', 'locked']);
+  assert.equal(made.status, 0, made.out);
+  const wt = path.join(base, 'repo.worktrees', '9-locked');
+  const locked = path.join(wt, '.scratch-tests', 'serve');
+  fs.mkdirSync(locked, { recursive: true });
+  fs.writeFileSync(path.join(locked, 'x'), 'x');
+  fs.chmodSync(locked, 0o555);            // the deploy-drift fixture's lock
+  const done = run(dir, ['done', '9']);
+  assert.equal(done.status, 0, done.out);
+  assert.ok(!fs.existsSync(wt), 'removed despite the read-only directory');
+});
