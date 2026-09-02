@@ -1481,18 +1481,22 @@ function buildMcpServer() {
   });
 
   mcp.registerTool('memory_update', {
-    description: 'Update a memory by appending a new version. The IDENTITY (title, owner, tags) can also be updated.',
+    description: 'Update a memory by appending a new version. The IDENTITY (title, owner, tags) can also be updated. To ADD text, use bodyAppend / bodyPrepend (#1022): they are byte-preserving, composed on the server, and never require sending the existing body back — `body` REPLACES the whole text as a new version and should be reserved for a genuine rewrite.',
     inputSchema: {
       id: z.string().describe('Memory UUID to update'),
-      body: z.string().optional().describe('New body text — appends as a new version (never rewrites existing)'),
+      body: z.string().optional().describe('New body text — REPLACES the current text as a new version (history is kept). ⚠️ For adding a section use bodyAppend/bodyPrepend instead: a full replace re-composes text you did not write, and a re-composition damages quoting (code fences, regexes, SPARQL literals) while the prose still reads fine.'),
+      bodyAppend: z.string().optional().describe('Text ADDED to the END of the current body, byte-preserving, as a new version (#1022). Send only the addition. Cannot be combined with `body`; composes with bodyPrepend (prepend + existing + append). Two seats appending concurrently both survive — the server composes under its write lock.'),
+      bodyPrepend: z.string().optional().describe('Text added to the BEGINNING of the current body, byte-preserving, as a new version (#1022). Use it for a CORRECTION, so a reader meets it before the text it supersedes — a memory is read top-first. Cannot be combined with `body`; composes with bodyAppend.'),
       title: z.string().optional().describe('New title — updates the identity without creating a version'),
       tags: z.array(z.string()).optional().describe('New tags — updates the identity without creating a version'),
     },
   }, async (args) => {
-    const { id, body, title, tags } = args;
+    const { id, body, bodyAppend, bodyPrepend, title, tags } = args;
     // Only send fields that are actually provided (PATCH behavior)
     const updates = {};
     if (body !== undefined) updates.body = body;
+    if (bodyAppend !== undefined) updates.bodyAppend = bodyAppend;
+    if (bodyPrepend !== undefined) updates.bodyPrepend = bodyPrepend;
     if (title !== undefined) updates.title = title;
     if (tags !== undefined) updates.tags = tags;
     return jsonResult(await apiCall('PATCH', `/api/memories/${encodeURIComponent(id)}`, updates));

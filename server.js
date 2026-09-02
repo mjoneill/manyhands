@@ -1667,6 +1667,41 @@ async function handleUpdateMemory(req, res, id) {
       });
     }
 
+    // #1022 — bodyAppend / bodyPrepend: the byte-preserving verbs cards got in
+    // #864/#906, on the store the room keeps its shared lessons in. Every
+    // memory edit used to be a full-body replace: read, concatenate locally,
+    // send the whole thing back — which is a read-modify-write, so two seats
+    // appending seconds apart meant the second silently deleted the first
+    // (#466's shape), and adding 1.7 KB cost 4.9 KB on the wire (measured on
+    // this card). Composed HERE, inside the write lock, against the version
+    // that is current at the moment of the write: neither caller sends the
+    // existing text, and neither can lose the other's.
+    //
+    // Refused alongside `body`: replace and add are two intentions and one
+    // write cannot mean both. Refused when empty: an append of nothing would
+    // mint a version of unchanged text. Prepend and append COMPOSE
+    // (prepend + existing + append) — #906 settled the ordering question and
+    // this copies its answer rather than reopening it.
+    const hasAppend = body.bodyAppend !== undefined;
+    const hasPrepend = body.bodyPrepend !== undefined;
+    if (hasAppend || hasPrepend) {
+      for (const k of ['bodyAppend', 'bodyPrepend']) {
+        if (body[k] === undefined) continue;
+        if (typeof body[k] !== 'string') {
+          return sendJSON(res, 400, { error: `${k} must be a string (the text to add)` });
+        }
+        if (!body[k].length) {
+          return sendJSON(res, 400, { error: `${k} is empty — nothing to add, and a version of unchanged text is not minted` });
+        }
+      }
+      if (body.body !== undefined) {
+        return sendJSON(res, 400, {
+          error: 'send either body (replace as a new version) or bodyAppend/bodyPrepend (add to the current text), not both — '
+            + 'a replace and an addition in one write are two intentions and the result would be neither',
+        });
+      }
+    }
+
     const updated = await withWriteLock(async () => {
       const data = readBoard();
       const { identity, versions } = memoryParts(data, id);
@@ -1695,13 +1730,23 @@ async function handleUpdateMemory(req, res, id) {
       // it: the new text always becomes the NEXT version. History that can be
       // edited answers "what did this say before?" with whatever someone most
       // recently wished it had said, which is worse than no history at all.
-      if (typeof body.body === 'string' && body.body.length) {
+      // #1022 — the addition is composed against the CURRENT version, read
+      // under this same lock. That is what makes two concurrent appends both
+      // survive: the second sees the first's text, not the snapshot it started
+      // from, because it never held a snapshot at all.
+      let nextBody = null;
+      if (typeof body.body === 'string' && body.body.length) nextBody = body.body;
+      else if (hasAppend || hasPrepend) {
+        const current = versions[versions.length - 1]?.['scrum:body'] ?? '';
+        nextBody = `${hasPrepend ? body.bodyPrepend : ''}${current}${hasAppend ? body.bodyAppend : ''}`;
+      }
+      if (nextBody !== null) {
         const next = (versions[versions.length - 1]?.['scrum:version'] || 0) + 1;
         const vIri = MEMORY_VERSION_ID(id, next);
         data.memories = [...memoriesOf(data), {
           '@id': vIri, '@type': 'scrum:MemoryVersion',
           'scrum:ofMemory': MEMORY_ID(id), 'scrum:version': next,
-          'scrum:body': body.body,
+          'scrum:body': nextBody,
           author: body.by || identity['scrum:owner'] || null,
           dateCreated: new Date().toISOString(),
         }];
