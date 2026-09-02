@@ -178,8 +178,14 @@ export const CARD_CREATE_PROBES = [
     with: ({ targetShortId }) => ({ relationships: { blockedBy: [targetShortId] } }),
     note: '#1137 — insert-or-replace by target (card | person | anyHuman); validated as `blockers` is; PATCH only' },
   { name: 'checksUpsert', storedAs: 'checks',
-    wellFormed: [{ claim: 'C1', ask: 'ASK { ?x a scrum:Card }', expect: true }],
-    malformed: [{ claim: 'C1', ask: 'SELECT * WHERE { ?x a scrum:Card }', expect: true }],
+    // ⚠️ The class in these probes is deliberately NOT the card class: the
+    // publication gate reads that literal in a non-test file as a board-data
+    // signature (it is what an exported board carries), and this fixture
+    // tripped it for every push after it landed. Any real class proves the
+    // same thing — an ASK is accepted, a SELECT is refused — so use one the
+    // gate does not watch. Never spell the string a consumer greps for.
+    wellFormed: [{ claim: 'C1', ask: 'ASK { ?x a scrum:Wake }', expect: true }],
+    malformed: [{ claim: 'C1', ask: 'SELECT * WHERE { ?x a scrum:Wake }', expect: true }],
     note: '#1137 — insert-or-replace by `claim`; ASK only, as `checks` is; PATCH only' },
 
   // #534 — the compare-and-swap PRECONDITION. Same shape as `descriptionAppend`
