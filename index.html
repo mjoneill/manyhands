@@ -2450,6 +2450,33 @@ const DESC_COLLAPSE_NEWLINES = 3;
 // Alternative: if the text is longer than this many characters (without enough newlines), still collapse
 const DESC_COLLAPSE_CHAR_THRESHOLD = 200;
 
+// #209 — how much of a description is BUILT INTO a card tile.
+//
+// A collapsed description is clipped by CSS to `max-height: 6em` (~4 lines at
+// 13px/1.5), but renderCard was rendering the WHOLE body first and letting the
+// clip hide it: 7.5 MB of markup across 1,009 tiles, ~95% of it invisible the
+// instant it landed (#755 alone is 107,155 characters in a four-line box).
+// Measured 2026-09-01: payload and JSON.parse are ~4% of the ~6 s board draw;
+// the rest is DOM construction from text nobody can see.
+//
+// Truncating the RENDER is safe here and nowhere else because #510 removed the
+// in-column expander: `collapsed` is set at render and never cleared, so text
+// past 6em can never be revealed in place. The full body is read through the
+// detail pop-out, which renders from `card.description` — the model, which
+// this cap must never touch (search reads it too, `cardMatchesSearchTerm`).
+//
+// ⚠️ The cap is deliberately several times what 6em can display at any card
+// width. Lowering it to maximise the saving would clip text the reader can
+// actually see, which is the regression, not the goal.
+const DESC_RENDER_CAP = 600;
+
+// Cap a description for the TILE only. Trailing partial `#12` is dropped
+// rather than left to become a link to the wrong card.
+function capDescriptionForTile(desc) {
+  if (desc.length <= DESC_RENDER_CAP) return desc;
+  return desc.slice(0, DESC_RENDER_CAP).replace(/#\d*$/, '') + '…';
+}
+
 // ── Create a Card Object ──
 // `column` is optional — defaults to 'backlog' for backward compatibility
 // with existing callers (Card #46 added column-targeted creation).
@@ -2765,7 +2792,7 @@ function renderCard(card) {
     const isLong = newlineCount >= DESC_COLLAPSE_NEWLINES || card.description.length >= DESC_COLLAPSE_CHAR_THRESHOLD;
     const descId = `desc-${card.shortId}`; // #249 — shortId is a safe integer; card.id is attacker-controllable and was an attribute sink
     const collapsedClass = isLong ? ' collapsed' : '';
-    html += `<div class="card-description prose${collapsedClass}" id="${descId}" aria-expanded="${isLong ? 'false' : 'true'}">${renderDescriptionWithLinks(card.description)}</div>`;
+    html += `<div class="card-description prose${collapsedClass}" id="${descId}" aria-expanded="${isLong ? 'false' : 'true'}">${renderDescriptionWithLinks(capDescriptionForTile(card.description))}</div>`;
   }
 
   if (card.labels && card.labels.length > 0) {
