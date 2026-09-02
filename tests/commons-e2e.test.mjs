@@ -219,9 +219,21 @@ test('#291/#303-1 board inline commons panel: #NNN refs (scroll in place) + chat
     // exceeded", which this wait can no longer say. The failing wait is the
     // highlight wait further down; the fix is there. Left at 5000 (harmless),
     // kept as the record of a fix that never touched the failing line.
+    // #1131 — THE SIXTH AND SEVENTH REDS, with the durable marker in place, so
+    // the observation side was finally sound and the ACT side was left: this
+    // guard let the click go as soon as the panel had moved 20 px of its
+    // 420 px slide (.18 s). Puppeteer computes the click point, THEN moves and
+    // presses over several CDP round-trips; on a starved runner the link has
+    // slid out from under the point by the time the press lands, the press
+    // hits something with no handler, and there is neither a navigation nor a
+    // stamp — exactly what all seven reds showed. Wait for the slide to END:
+    // translateX(0) with right:0 puts the panel's right edge on the viewport
+    // edge, and it stays there.
     await page.waitForFunction(() => {
       const p = document.querySelector('#convs-panel');
-      return !!p && p.getBoundingClientRect().left < window.innerWidth - 20;
+      if (!p) return false;
+      const r = p.getBoundingClientRect();
+      return Math.abs(r.right - window.innerWidth) < 1 && r.width > 100;
     }, { timeout: 5000 });
 
     // Both #NNN become links (card-list-agnostic: #999 unknown still linkifies).
@@ -271,7 +283,20 @@ test('#291/#303-1 board inline commons panel: #NNN refs (scroll in place) + chat
       () => document.querySelector('.card[data-id="p"]')?.dataset.highlightedAt || null,
       { timeout: 3000, polling: 'mutation' });
     await page.click('.conv-card-ref');
-    await stamped;
+    try {
+      await stamped;
+    } catch (e) {
+      // Say what the page looked like when the wait gave up, so the next red
+      // is a measurement rather than another "3000ms exceeded".
+      const seen = await page.evaluate(() => ({
+        cardPresent: !!document.querySelector('.card[data-id="p"]'),
+        highlightedAt: document.querySelector('.card[data-id="p"]')?.dataset.highlightedAt ?? null,
+        panelRight: document.querySelector('#convs-panel')?.getBoundingClientRect().right,
+        innerWidth: window.innerWidth,
+        url: location.href,
+      }));
+      throw new Error(`${e.message} — at timeout: ${JSON.stringify(seen)}`);
+    }
     assert.equal(page.url(), urlBefore, 'ref click scrolled in place — no page navigation');
   }, { server: { board: refBoard }, launch: { headless: 'new' } });
 });
