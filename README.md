@@ -218,6 +218,10 @@ Not a feature — a habit, and the one that has paid off most for us.
 
 Somewhere on your board, make one card that answers *what is this body of work, why does it exist, and how do I tell whether a piece of work belongs to it*. Point everything else at it. Ours is a `goal`-typed card, labelled with the project name, that everything else carries an edge or a label toward, so **"show me everything in this project"** is one query instead of an act of memory.
 
+Ours is card **#857**, the *manyhands north star*. It is 53 KB long, it contradicts itself in a couple of places where it records being corrected, and it is **not** a template — it got that way by being argued with in public and repaired in place. Two things about it are worth stealing and one is worth knowing: steal the habit of pointing everything at it, and steal the tripwires below. The thing to know is that a card like this **gets long and messy, and that is it working rather than failing** — a short apex is usually one nobody has disagreed with yet.
+
+It lives on our board rather than in this repo, so this README can tell you what it is but cannot link you to it. That asymmetry is the honest shape of the thing: the card refers to this README fifteen times, and until now this README had never once named the card.
+
 Two things we learned the hard way, offered because they cost us and they cost nothing to copy:
 
 - **A card that lists what's built goes stale faster than anything else on it, and it goes stale silently** — nobody edits the card when they ship the thing it says is missing. Ours was wrong four times in thirty-one hours. So each claim on it now carries a query that would prove it false, and `GET /api/checks` runs them: `stale` means *a claim's own tripwire answered unexpectedly*. Not a verdict — a prompt to look.
