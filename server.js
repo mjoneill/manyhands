@@ -4078,6 +4078,13 @@ const CARD_LIST_PARAMS = new Set([
   // it, because using it meant hand-writing `?c schema:isPartOf+ ?apex`. That is
   // the difference between a capability that exists and one anyone reaches for.
   'under', 'depth',
+  // #209 — the two the board's own list view needs, both OPT-IN so no other
+  // caller's shape changes: `excerpt=N` adds `descriptionExcerpt` (a CAP, never
+  // `description` — see core/cards-query.mjs for why that distinction is what
+  // keeps an editor from saving a truncation over a body), and `legacyIndex=1`
+  // adds `legacyArrayIndex`, the store position the board's tie-break already
+  // depends on. Retirement for the second: #923 slice 0.
+  'excerpt', 'legacyIndex',
 ]);
 
 /**
@@ -4200,10 +4207,13 @@ function handleListCards(req, res) {
     }
 
     const result = queryCards(pool, {
+      // #209 — opt-in projection extras; absent unless asked for, so no other
+      // caller's shape moves.
+      excerpt: q.excerpt, legacyIndex: q.legacyIndex,
       limit: q.limit, before: q.before, fields: q.fields,
       column: q.column, label: q.label, assignee: q.assignee, type: q.type, since: q.since,
       updatedSince: q.updatedSince, q: q.q,
-    }, { validColumns: data.columns.map((c) => c.id) });
+    }, { validColumns: data.columns.map((c) => c.id), storeCards: data.cards });
     if (unsupported.length) result.unsupported = unsupported; // best-effort confesses
     sendJSON(res, 200, result);
   } catch (e) {

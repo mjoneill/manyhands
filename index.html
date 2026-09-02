@@ -1028,6 +1028,14 @@ body::before {
   border-radius: 4px; padding: 1px 5px; color: var(--text-secondary);
 }
 .board-search-input:focus { outline: none; border-color: var(--violet); }
+/* #209 — the pending state for server-side body search. Reserved space is
+   deliberate: a line that appears and disappears must not reflow the board
+   under the cursor while someone is typing into it. */
+.board-search-status {
+  font-size: 0.78rem; color: var(--text-muted); margin-top: 0.25rem;
+  min-height: 1.1em;
+}
+.board-search-status[hidden] { display: block !important; visibility: hidden; }
 .board-search-input::placeholder { color: var(--text-muted); }
 
 .card-for {
@@ -1606,6 +1614,8 @@ body::before {
   <input class="board-search-input" id="board-search-input" type="text"
          placeholder="Search cards…"
          aria-label="Search cards" aria-describedby="board-search-hint" autocomplete="off" />
+  <!-- #209: the async half of search says so while it is out. -->
+  <div class="board-search-status" id="board-search-status" role="status" aria-live="polite" hidden></div>
   <!-- #499: the operators moved out of the placeholder so they survive typing. -->
   <div class="board-search-hint" id="board-search-hint">
     <span>Free text, or <code>field:value</code> —</span>
@@ -1928,6 +1938,10 @@ function clearAllFilters() {
   if (forFilterArea) forFilterArea.classList.remove('visible');
   const searchInput = document.getElementById('board-search-input');
   if (searchInput) searchInput.value = '';
+  _searchIdsByTerm.clear();
+  _searchInFlight.clear();
+  _searchSeq++;
+  _renderSearchStatus();
   renderBoard();
 }
 
@@ -1971,7 +1985,93 @@ function cardMatchesSearchTerm(card, term) {
     '#' + (card.shortId != null ? card.shortId : ''),
     String(card.shortId != null ? card.shortId : ''),
   ].join(' ').toLowerCase();
-  return hay.includes(term);
+  if (hay.includes(term)) return true;
+  // #209 — THE COUPLING THE PROJECTION BREAKS, ANSWERED BY THE SERVER.
+  //
+  // `card.description` is the 85% this board no longer downloads, so the
+  // haystack above can no longer see body text. Without this branch a search
+  // for a phrase that lives only in a body returns nothing — no error, no
+  // empty state, a box that quietly answers a narrower question than the one
+  // that was typed.
+  //
+  // ⚠️ UNION, NEVER REPLACEMENT. The local haystack still answers title and
+  // #id on the keystroke; the server only ADDS matches. So a slow or failed
+  // request costs recall for a moment and never costs a match the board could
+  // already make locally.
+  const served = _searchIdsByTerm.get(term);
+  return !!(served && card.id && served.has(card.id));
+}
+
+// #209 — server-delegated body search.
+//
+// One request per free-text term, intersected by construction: each term
+// keeps its OWN id set and `cardMatchesSearch` still requires every term to
+// match, so multi-term AND survives.
+//
+// /api/cards?q= searches title, description AND LABELS (substring,
+// case-insensitive; #656/#801, widened to labels 2026-08-30). ⚠️ That is
+// WIDER than the local haystack, which never matched labels. A label term
+// therefore starts matching cards it did not match before — a deliberate
+// widening, not an accident, and worth stating because "search finds more
+// than it used to" is indistinguishable from a bug if nobody wrote it down.
+const _searchIdsByTerm = new Map();   // term → Set(card id)
+const _searchInFlight = new Set();    // terms with a request out
+let _searchSeq = 0;
+
+function _freeTextTerms(query) {
+  return (query || '').trim().toLowerCase().split(/\s+/).filter(Boolean)
+    // field:value terms are answered locally and completely; only free text
+    // needs the server.
+    .filter((t) => t.indexOf(':') <= 0);
+}
+
+function _renderSearchStatus() {
+  const el = document.getElementById('board-search-status');
+  if (!el) return;
+  const pending = _searchInFlight.size > 0;
+  // ⚠️ A sync filter answers on the keystroke, so an async gap with no
+  // indicator reads as "no matches" to the person typing — the same shape as
+  // a well-formed empty result arriving before the real one. Raised in review
+  // as the condition on delegating search to the server, and it is the right
+  // one: the cost of omitting it lands on the most-used control on the page.
+  el.textContent = pending ? 'Searching card bodies…' : '';
+  el.hidden = !pending;
+}
+
+async function refreshServerSearch(query) {
+  const terms = _freeTextTerms(query);
+  const wanted = new Set(terms);
+  for (const t of [..._searchIdsByTerm.keys()]) if (!wanted.has(t)) _searchIdsByTerm.delete(t);
+  if (terms.length === 0) { _searchInFlight.clear(); _renderSearchStatus(); return; }
+
+  const seq = ++_searchSeq;
+  for (const term of terms) {
+    if (_searchIdsByTerm.has(term) || _searchInFlight.has(term)) continue;
+    _searchInFlight.add(term);
+    _renderSearchStatus();
+    try {
+      const res = await fetch(API_BASE + '/api/cards?fields=id&q=' + encodeURIComponent(term));
+      // A response for a query the user has already typed past is not an
+      // answer to anything on screen.
+      if (seq !== _searchSeq) return;
+      if (res.ok) {
+        const body = await res.json();
+        const ids = new Set();
+        for (const c of (body && Array.isArray(body.cards) ? body.cards : [])) if (c && c.id) ids.add(c.id);
+        _searchIdsByTerm.set(term, ids);
+      }
+      // A failed request leaves the term unset: local matches still show, and
+      // the status line stops claiming a search is running. Recall is reduced
+      // and nothing is silently asserted to be absent.
+    } catch (e) {
+      /* offline or file:// — local matching stands */
+    } finally {
+      _searchInFlight.delete(term);
+      _renderSearchStatus();
+    }
+    if (seq !== _searchSeq) return;
+    if (typeof renderBoard === 'function') renderBoard();
+  }
 }
 
 function cardMatchesActiveFilter(card) {
@@ -2162,9 +2262,30 @@ async function _mergeStaleCards(staleCards) {
 }
 const _nameCards = (list) => list.map((s) => `#${s.shortId ?? '?'}`).join(', ');
 
+// #209 — FIELDS THE PROJECTION ADDS THAT THE STORE MUST NEVER LEARN.
+//
+// The board hydrates from /api/cards, which (opt-in) decorates each row with
+// `descriptionExcerpt` and `legacyArrayIndex`. /api/save then takes the cards
+// array WHOLESALE and merges it over the stored card — so without this strip,
+// the first save after any load writes both derived fields into
+// board-data.json, permanently, on every card. A cap would become durable
+// state sitting one rename away from being read as a body, which is the exact
+// failure the excerpt's separate key exists to prevent.
+//
+// ⇒ Derived-on-read, never persisted. Review asked for a tripwire on the SAVE
+// path rather than only on the projection; this is the strip, and
+// tests/board-load-projection.test.mjs drives a save and re-reads the store.
+const PROJECTION_ONLY_FIELDS = ['descriptionExcerpt', 'legacyArrayIndex'];
+
+function _cardForSave(card) {
+  const out = { ...card };
+  for (const k of PROJECTION_ONLY_FIELDS) delete out[k];
+  return out;
+}
+
 async function saveToJSONFile() {
   const payload = {
-    cards: cards.map(c => ({...c})), // shallow clone to avoid mutation
+    cards: cards.map(_cardForSave), // shallow clone, minus derived fields
     columns: columns.map(c => ({...c})), // persist column order + names
     nextShortId: nextShortId,
     lastUpdated: new Date().toISOString()
@@ -2271,8 +2392,95 @@ async function saveToJSONFile() {
   return p;
 }
 
+// #209 — THE BOARD DRAWS ITS LIST FROM A PROJECTION THAT CARRIES NO BODIES.
+//
+// /api/load ships every description on every call: 6.9 MB, of which 5.9 MB
+// (85%) is description text, to render a list of titles. And this runs on the
+// 5s poll as well as the cold load, so the cost is per TICK, not per visit.
+//
+// /api/cards already omits `description` and `acceptance` in its default
+// shape, and /api/board/status carries columns + nextShortId + cardsTotal in
+// about a kilobyte. So the whole load is: one status call, then pages of
+// title-shaped rows.
+//
+// ⚠️ /api/cards CAPS AT 500 ROWS. A single-call swap renders 500 of 1,018
+// cards with no error and no empty state — #209 condition 5, and the reason
+// this pages and then CHECKS ITS COVERAGE against the server's own count.
+const CARD_PAGE_LIMIT = 500;
+// Bound on the paging loop. 500 rows a page against a board that would need
+// 25 pages is already a corpus far past anything measured here; the guard
+// exists so a cursor that stops advancing can never spin.
+const CARD_PAGE_MAX = 50;
+
+/**
+ * Fetch every card as a body-less projection, or return null.
+ *
+ * NULL MEANS "USE /api/load", never "there are no cards". Every early return
+ * here is a coverage failure, and a coverage failure must draw the CORRECT
+ * board slowly rather than a PARTIAL board quickly — a board silently missing
+ * 518 cards is the worst outcome available, worse than the 6.9 MB it replaces.
+ */
+async function loadCardProjection() {
+  const statusRes = await fetch(API_BASE + '/api/board/status');
+  if (!statusRes.ok) return null;
+  const status = await statusRes.json();
+  const total = status && status.cardsTotal;
+  if (!Number.isInteger(total) || !Array.isArray(status.columns)) return null;
+
+  // Keyed by id so an overlapping page cannot inflate the count into a false
+  // pass — #209's cursor note: paging backwards on the WRONG end of the page
+  // advances the window by one card and yields 505 distinct rows from 3,000.
+  const byId = new Map();
+  let before = null;
+  for (let page = 0; page < CARD_PAGE_MAX; page++) {
+    // excerpt: the tile's four-line preview, as its OWN key — never as
+    // `description`, which must stay ABSENT so the editor fetches before it
+    // opens. legacyIndex: the store position the board's tie-break depends
+    // on (909 of 1,018 cards share an `order`; #923 slice 0 retires it).
+    const q = 'limit=' + CARD_PAGE_LIMIT + '&excerpt=' + DESC_RENDER_CAP + '&legacyIndex=1'
+      + (before === null ? '' : '&before=' + encodeURIComponent(before));
+    const res = await fetch(API_BASE + '/api/cards?' + q);
+    if (!res.ok) return null;
+    const body = await res.json();
+    const rows = (body && Array.isArray(body.cards)) ? body.cards : [];
+    if (rows.length === 0) break;
+    for (const c of rows) if (c && c.id) byId.set(c.id, c);
+    if (byId.size >= total) break;
+    // Pages arrive ASCENDING and `before` takes a shortId, so the next window
+    // starts at the LOWEST id on this page — rows[0], never rows[rows.length-1].
+    const lowest = rows[0].shortId;
+    if (!Number.isInteger(lowest)) return null;
+    if (before !== null && lowest >= before) return null;   // cursor not advancing
+    before = lowest;
+  }
+
+  // ⇒ THE COVERAGE ASSERTION. Not "it returned rows" — the server's own count.
+  if (byId.size !== total) return null;
+  // #923 — pages arrive sorted by shortId; the board's visible order breaks
+  // `order` ties by ARRAY POSITION, so the store's own sequence has to be put
+  // back or 909 of 1,018 cards move. A card with no index sorts last rather
+  // than to the front, so a partial answer degrades quietly instead of
+  // shuffling the top of the board.
+  const projected = [...byId.values()].sort((a, b) => {
+    const ai = Number.isInteger(a.legacyArrayIndex) && a.legacyArrayIndex >= 0 ? a.legacyArrayIndex : Number.MAX_SAFE_INTEGER;
+    const bi = Number.isInteger(b.legacyArrayIndex) && b.legacyArrayIndex >= 0 ? b.legacyArrayIndex : Number.MAX_SAFE_INTEGER;
+    return ai - bi;
+  });
+  return {
+    cards: projected,
+    columns: status.columns,
+    nextShortId: status.nextShortId,
+    lastUpdated: status.lastUpdated || null,
+  };
+}
+
 async function loadFromJSONFile() {
   try {
+    const projected = await loadCardProjection();
+    if (projected) return projected;
+    // Coverage miss, or an endpoint that isn't there (a page opened over
+    // file://, an older server). Correct and slow.
+    console.warn('loadFromJSONFile: projection unavailable — falling back to /api/load');
     const response = await fetch(API_BASE + JSON_ENDPOINTS.load);
     if (!response.ok) return null;
     const data = await response.json();
@@ -2284,6 +2492,44 @@ async function loadFromJSONFile() {
     // Server not running or network error — graceful degradation
     console.warn('loadFromJSONFile: could not reach server', e.message);
     return null;
+  }
+}
+
+// #209 — THE BODY THE PROJECTION LEFT BEHIND.
+//
+// A projection-hydrated card has NO `description` key. Two surfaces read it
+// and both must fetch before they show anything:
+//
+//   the pop-out   renders `card.description`; without this it shows
+//                 "No description." for every card on the board.
+//   the EDITOR    fills its textarea from `card.description || ''` and writes
+//                 the textarea back on save. An unhydrated card therefore
+//                 opens an EMPTY box and saving it sends `description: ""` —
+//                 which is a REAL CLEAR under #1039's rule, walks through
+//                 every server guard, and destroys the body. That is the
+//                 data-loss path on this card, and it is why the editor
+//                 REFUSES TO OPEN rather than opening empty when the fetch
+//                 fails.
+//
+// The key is set only on success. An absent key means "no opinion" all the
+// way to the server; an empty string means the user cleared it.
+async function ensureCardDescription(card) {
+  if (!card || typeof card.description === 'string') return true;
+  try {
+    const res = await fetch(API_BASE + '/api/cards/' + encodeURIComponent(card.id));
+    if (!res.ok) return false;
+    const full = await res.json();
+    if (!full || typeof full.description !== 'string') return false;
+    card.description = full.description;
+    // #466 — the baseline must learn the hydrated shape, or a card that only
+    // GAINED its body reads as locally edited and a refused save calls it a
+    // conflict.
+    if (typeof window.cardContentKey === 'function' && card.id) {
+      _hydratedKeys.set(card.id, window.cardContentKey(card));
+    }
+    return true;
+  } catch (e) {
+    return false;
   }
 }
 
@@ -2481,6 +2727,16 @@ const DESC_RENDER_CAP = 600;
 //     this function states.
 //   - a trailing partial `#12`, or a cut mid-number becomes a live link to
 //     the WRONG card. Surrogate first: stripping one can expose the other.
+// #209 — what the TILE shows: the full body when this card has been hydrated
+// (the pop-out or the editor fetched it), otherwise the server's excerpt.
+// Reading `description` first matters: after an edit the local body is newer
+// than the excerpt the projection arrived with.
+function _tilePreviewOf(card) {
+  if (typeof card.description === 'string') return card.description;
+  if (typeof card.descriptionExcerpt === 'string') return card.descriptionExcerpt;
+  return '';
+}
+
 function capDescriptionForTile(desc) {
   if (desc.length <= DESC_RENDER_CAP) return desc;
   return desc.slice(0, DESC_RENDER_CAP)
@@ -2798,12 +3054,21 @@ function renderCard(card) {
   </div>
   <div class="card-title">${escapeHTML(card.title)}</div>`;
 
-  if (card.description) {
-    const newlineCount = (card.description.match(/\n/g) || []).length;
-    const isLong = newlineCount >= DESC_COLLAPSE_NEWLINES || card.description.length >= DESC_COLLAPSE_CHAR_THRESHOLD;
+  // #209 — the tile draws from the hydrated body when there is one and the
+  // server's excerpt otherwise. The GUARD had to move with it: keyed on
+  // `card.description` alone, a projection-hydrated board renders no
+  // description box at all and the #209(d) render-cap tests fail with
+  // "no description box on card #2" — which is what they are for.
+  const tilePreview = _tilePreviewOf(card);
+  if (tilePreview) {
+    const newlineCount = (tilePreview.match(/\n/g) || []).length;
+    // ⚠️ Collapse is decided on the PREVIEW, not on the full body. An excerpt
+    // capped at the render cap is exactly what gets built into the box, so the
+    // decision and the content are now measured on the same string.
+    const isLong = newlineCount >= DESC_COLLAPSE_NEWLINES || tilePreview.length >= DESC_COLLAPSE_CHAR_THRESHOLD;
     const descId = `desc-${card.shortId}`; // #249 — shortId is a safe integer; card.id is attacker-controllable and was an attribute sink
     const collapsedClass = isLong ? ' collapsed' : '';
-    html += `<div class="card-description prose${collapsedClass}" id="${descId}" aria-expanded="${isLong ? 'false' : 'true'}">${renderDescriptionWithLinks(capDescriptionForTile(card.description))}</div>`;
+    html += `<div class="card-description prose${collapsedClass}" id="${descId}" aria-expanded="${isLong ? 'false' : 'true'}">${renderDescriptionWithLinks(capDescriptionForTile(tilePreview))}</div>`;
   }
 
   if (card.labels && card.labels.length > 0) {
@@ -2967,7 +3232,21 @@ function renderCardOrEdit(card) {
 }
 
 // ── Edit Card Actions ──
-function editCard(cardId) {
+async function editCard(cardId) {
+  if (editingCardId === cardId) return;
+  // #209 — hydrate BEFORE the form exists. The textarea is filled from
+  // `card.description || ''`, and saveEdit writes it back unconditionally, so
+  // opening the editor on a body-less card is a delete with extra steps.
+  const target = cards.find((c) => c.id === cardId);
+  if (target && typeof target.description !== 'string') {
+    const ok = await ensureCardDescription(target);
+    if (!ok) {
+      // Refusing is the safe failure: an empty box the user might save is
+      // worse than no box. Nothing is mutated on this path.
+      _setSaveStatus('failed', 'Cannot edit — the card body could not be loaded. Reload and try again.');
+      return;
+    }
+  }
   if (editingCardId === cardId) return;
   editingCardId = cardId;
   renderBoard();
@@ -3112,11 +3391,42 @@ function openCardDetail(shortId, push = true) {
     relHtml += `<div class="card-detail-relationship"><span class="card-detail-rel-label">${label}:</span> ${links}</div>`;
   }
   if (relHtml) html += `<div class="card-detail-relationships">${relHtml}</div>`;
-  html += card.description
-    ? `<div class="card-detail-body prose">${renderDescriptionWithLinks(card.description)}</div>`
-    : '<div class="card-detail-empty">No description.</div>';
+  // #209 — three states, and the middle one is new: a projection-hydrated card
+  // has no `description` KEY at all, which is not the same as having an empty
+  // one. "No description." must stay reserved for a card that genuinely has
+  // none, or every card on the board reads as empty for a beat.
+  const bodyIsLoaded = typeof card.description === 'string';
+  if (bodyIsLoaded) {
+    html += card.description
+      ? `<div class="card-detail-body prose">${renderDescriptionWithLinks(card.description)}</div>`
+      : '<div class="card-detail-empty">No description.</div>';
+  } else {
+    html += '<div class="card-detail-body prose" data-body-pending="1">Loading the card body…</div>';
+  }
   panel.innerHTML = html;
   back.hidden = false;
+  if (!bodyIsLoaded) {
+    // Fetch, then patch the body in place. Re-checking the panel's card id
+    // afterwards matters: the reader can open #A, get bored, open #B, and the
+    // slower response for #A must not paint over #B.
+    ensureCardDescription(card).then((ok) => {
+      const still = document.getElementById('card-detail');
+      if (!still || back.hidden) return;
+      const slot = still.querySelector('[data-body-pending]');
+      if (!slot) return;
+      if (!ok) {
+        slot.textContent = 'The card body could not be loaded.';
+        slot.removeAttribute('data-body-pending');
+        return;
+      }
+      slot.removeAttribute('data-body-pending');
+      if (card.description) {
+        slot.innerHTML = renderDescriptionWithLinks(card.description);
+      } else {
+        slot.outerHTML = '<div class="card-detail-empty">No description.</div>';
+      }
+    });
+  }
   if (push) {
     // Only push when the address actually changes. Opening the same card twice
     // used to stack identical entries, so Back moved from ?card=N to ?card=N
@@ -4660,7 +4970,8 @@ const boardSearchInput = document.getElementById('board-search-input');
 if (boardSearchInput) {
   boardSearchInput.addEventListener('input', (e) => {
     activeSearch = e.target.value;
-    renderBoard();
+    renderBoard();                    // local matches, on the keystroke
+    refreshServerSearch(activeSearch); // body matches, when they arrive
   });
 }
 

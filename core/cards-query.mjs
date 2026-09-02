@@ -244,9 +244,68 @@ export function facetCards(cards, query = {}, opts = {}) {
   };
 }
 
+/**
+ * #209 — THE TILE'S PREVIEW, AND WHY IT IS NOT `description`.
+ *
+ * The board renders about four lines of body into each tile and caps what it
+ * builds at 600 characters. Shipping the whole body to draw that is 85% of a
+ * 6.9 MB payload; shipping nothing at all leaves every tile blank, which the
+ * #209(d) render-cap tests catch.
+ *
+ * ⛔ SO THE EXCERPT GETS ITS OWN KEY, AND `description` STAYS ABSENT. If a cap
+ * arrived AS `description`, the browser's card editor would see a string,
+ * believe the body was loaded, fill its textarea with the truncation and write
+ * that back on save — a silent 600-character amputation of every card anyone
+ * edits. The absent key is load-bearing: it is what tells the editor to fetch
+ * before it opens, and what makes #1039's "an omitted key means no opinion"
+ * protect a projection-hydrated save.
+ *
+ * ⚠️ Trailing surrogate trimmed: slicing mid-pair yields U+FFFD in the tile and
+ * nothing errors — the edge found in review of 077cfd1.
+ */
+function excerptOf(description, cap) {
+  if (typeof description !== 'string') return '';
+  if (description.length <= cap) return description;
+  return description.slice(0, cap).replace(/[\uD800-\uDBFF]$/, '') + '…';
+}
+
+/** Clamp an `excerpt=` request to something a tile could plausibly show. */
+const EXCERPT_CEILING = 2000;
+
 export function queryCards(cards, query = {}, opts = {}) {
-  const { limit, before, fields } = query;
+  const { limit, before, fields, excerpt, legacyIndex } = query;
   const project = makeProjector(fields);
+  const excerptCap = (() => {
+    if (excerpt == null || excerpt === '') return 0;
+    const n = Number(excerpt);
+    if (!Number.isInteger(n) || n < 1) return 0;
+    return Math.min(n, EXCERPT_CEILING);
+  })();
+  // #209 / #923 slice 0 — POSITION IN THE STORE'S ARRAY, captured BEFORE any
+  // filter or sort, because that is what it means.
+  //
+  // ⚠️ NAMED FOR WHAT IT IS. The board's visible order is `order` ASC with ties
+  // broken by array position, and 909 of 1,018 live cards sit in one tie group
+  // per column — so a principled `(order, shortId)` tie-break is not a tidy-up,
+  // it reorders 89% of the board. That is #923 slice 0's decision to make, with
+  // that number in front of it. Until then a projection-fed board needs the
+  // accident preserved, and a shim that says "legacy" is better than a coupling
+  // nobody can grep for. RETIREMENT: #923 slice 0.
+  const wantLegacyIndex = legacyIndex === '1' || legacyIndex === 'true' || legacyIndex === true;
+  // ⚠️ Indexed against the STORE, not against `cards` — a filtered pool
+  // (`under=`, `column=`) would otherwise hand back positions within the
+  // filter, which read as store positions and are not.
+  const legacyIndexById = wantLegacyIndex
+    ? new Map((opts.storeCards || cards || []).map((c, i) => [c?.id, i]))
+    : null;
+  const decorate = (excerptCap || wantLegacyIndex)
+    ? (card) => {
+      const out = project(card);
+      if (excerptCap) out.descriptionExcerpt = excerptOf(card?.description, excerptCap);
+      if (wantLegacyIndex) out.legacyArrayIndex = legacyIndexById.get(card?.id) ?? -1;
+      return out;
+    }
+    : project;
   const filtered = applyFilters(cards || [], query, opts);
   const sorted = [...filtered].sort((a, b) => (a?.shortId ?? 0) - (b?.shortId ?? 0));
 
@@ -265,5 +324,5 @@ export function queryCards(cards, query = {}, opts = {}) {
   }
 
   const page = sorted.slice(Math.max(0, end - clampLimit(limit)), end);
-  return { cards: page.map(project), cardsTotal: sorted.length };
+  return { cards: page.map(decorate), cardsTotal: sorted.length };
 }
