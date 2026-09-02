@@ -21,6 +21,7 @@
 import oxigraph from 'oxigraph';
 import { createHash } from 'node:crypto';
 import { REL_TYPES, MENTIONS_CARD } from './jsonld.mjs';
+import { APEX_PREFIX } from './apex-labels.mjs';
 
 export const IRI = Object.freeze({
   entity: 'https://scrumboard.local/entity/',
@@ -141,6 +142,10 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:dischargedBy', 'scrum:dischargedAt',
   // #1118 — wakes: the one time-shaped fact attached to a seat
   'scrum:Wake', 'scrum:wokeSeat', 'scrum:wokeAt',
+  // #1130 — an apex is a KIND, not a convention: a card carrying `apex:<X>`
+  // projects as scrum:Apex with scrum:apexLabel "X", so "what lives here" is
+  // one hop and needs no knowledge of the prefix.
+  'scrum:Apex', 'scrum:apexLabel',
   // ⚠️ EMITTED BY THE PROJECTOR AND ABSENT FROM THIS BOARD'S DATA TODAY. Every
   // one of these was missing from the first, store-derived list; `scrum:ofSilence`
   // is the one the suite caught and the rest came from the same source scan.
@@ -923,6 +928,15 @@ function projectEntity(store, e) {
       // every candidate design. Minting the identity does not decide the merge.
       for (const l of e.labels || []) {
         add(s, nn(S + 'label'), lit(l));
+        // #1130 — the apex declaration (core/apex-labels.mjs, `apex:<X>`) also
+        // projects as a CLASS. Measured 2026-09-02: 13 goal-typed roots, three
+        // apex cards carrying three spellings, and no structural property a
+        // stranger could filter on. The PREFIX is the declaration; a bare
+        // `apex` or `north-star` label is a convention and does not qualify.
+        if (typeof l === 'string' && l.startsWith(APEX_PREFIX) && l.length > APEX_PREFIX.length) {
+          add(s, A, nn(S + 'Apex'));
+          add(s, nn(S + 'apexLabel'), lit(l.slice(APEX_PREFIX.length)));
+        }
         const t = nn(IRI.concept + encodeURIComponent(l));
         add(s, nn(IRI.schema + 'keywords'), t);
         // Set-semantics per triple, so N cards sharing a label converge on ONE

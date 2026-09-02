@@ -1555,7 +1555,9 @@ function buildMcpServer() {
   mcp.registerTool('board_status', {
     description: 'Orientation snapshot: card counts by column, live claims (who is holding what '
       + 'right now), the 10 most recent cards (summaries) and conversations (previews), columns, '
-      + 'nextShortId, totals. Bounded — safe as a first call. For full data use card_list / '
+      + 'nextShortId, totals, and `apexes` (#1130: the cards that declare themselves the top of a body '
+      + 'of work via an `apex:<label>` label, with their containment counts — "what lives here", no '
+      + 'seat and no SPARQL needed). Bounded — safe as a first call. For full data use card_list / '
       + 'conversation_list, or the board-state resource. #1078: `inFlight` is THE answer to "what '
       + 'is the room working on" — the claim is authoritative; the in-progress column and the '
       + 'work-bid ledger are derived, and `inFlight.disagreements` names every card on which they '

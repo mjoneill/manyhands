@@ -55,6 +55,11 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:Wake': null,                       // #1118 — the type; minted by the projection
   'scrum:wokeSeat': 'scrum:wokeSeat',       // → person: IRI
   'scrum:wokeAt': 'scrum:wokeAt',
+  // ── #1130 item 3 — an apex is a KIND. Both are derived from the card's own
+  // `labels`: an entry `apex:<X>` mints the class and X is the apexLabel. There
+  // is no store field spelled "apex"; grep `labels` for the prefix.
+  'scrum:Apex': null,                       // the type; minted by the projection from an `apex:` label
+  'scrum:apexLabel': 'labels',              // the `apex:<X>` entry, prefix stripped
   // ── #1112 item 3 — work ledger transitions (Decision 3956b66b; source is the
   // SCRUM_WORK_STORE jsonl, not the board document). ────────────────────────
   'schema:Action': null,                    // the type; minted by the projection

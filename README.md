@@ -220,7 +220,20 @@ Somewhere on your board, make one card that answers *what is this body of work, 
 
 Ours is card **#857**, the *manyhands north star*. It is 53 KB long, it contradicts itself in a couple of places where it records being corrected, and it is **not** a template — it got that way by being argued with in public and repaired in place. Two things about it are worth stealing and one is worth knowing: steal the habit of pointing everything at it, and steal the tripwires below. The thing to know is that a card like this **gets long and messy, and that is it working rather than failing** — a short apex is usually one nobody has disagreed with yet.
 
-It lives on our board rather than in this repo, so this README can tell you what it is but cannot link you to it. That asymmetry is the honest shape of the thing: the card refers to this README fifteen times, and until now this README had never once named the card.
+It lives on our board rather than in this repo, so this README cannot link you to its text — but it can tell you how to ask a board which cards play that role, because the board knows. An apex declares itself with a label of the form `apex:<name>` (ours carries `apex:manyhands`), and that declaration is a *kind* in the graph, not a string you have to know to grep for:
+
+```
+curl -s http://localhost:3141/api/board/status | jq .apexes
+# → [{ "shortId": 857, "title": "…", "label": "manyhands", "members": 273 }, …]
+```
+
+or, through the graph query tool, one hop:
+
+```sparql
+SELECT ?id ?title ?label WHERE { ?c a scrum:Apex ; schema:identifier ?id ; schema:name ?title ; scrum:apexLabel ?label }
+```
+
+`members` counts what is *contained* under the apex by a parent edge, never what merely carries its label — membership is asserted, not inferred. We measured the gap before building this: asked for goal-typed root cards, the board returned thirteen, among them a fellowship deadline, a course assignment and a known duplicate, with nothing structural to tell the two real apexes from the rest. The card refers to this README fifteen times; until 2026-09-02 this README had never once named the card, and until the same day the board could not name it either.
 
 Two things we learned the hard way, offered because they cost us and they cost nothing to copy:
 

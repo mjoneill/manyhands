@@ -36,7 +36,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { loadDomain, saveDomain } from './core/store.mjs';
 import { cardContentKey } from './core/card-content-key.mjs';
-import { applyApexLabels } from './core/apex-labels.mjs';
+import { applyApexLabels, APEX_PREFIX, descendantIds as apexDescendantIds } from './core/apex-labels.mjs';
 import { inFlight } from './core/in-flight.mjs';
 import { appendEvent } from './core/event-log.mjs';
 // #805 — the boot migration's inputs (the live flat sources) and its builder.
@@ -3844,6 +3844,18 @@ function handleBoardStatus(req, res) {
       .filter((c) => c.claimedBy)
       .map((c) => ({ shortId: c.shortId, title: c.title, claimedBy: c.claimedBy, claimedAt: c.claimedAt }));
     const { cards: recentCards } = queryCards(data.cards, { limit: '10' });
+    // #1130 — "what lives here": the cards that DECLARE themselves the top of
+    // a body of work (`apex:<label>`, core/apex-labels.mjs), with how much is
+    // contained under each. Containment, never the label (the owner's ruling
+    // of 2026-08-19): an apex with nothing asserted under it reports 0.
+    const apexes = [];
+    for (const c of data.cards) {
+      for (const l of c.labels || []) {
+        if (typeof l !== 'string' || !l.startsWith(APEX_PREFIX) || l.length <= APEX_PREFIX.length) continue;
+        apexes.push({ shortId: c.shortId, title: c.title, label: l.slice(APEX_PREFIX.length),
+          members: apexDescendantIds(data.cards, c.id).length });
+      }
+    }
     const convs = [...data.conversations].sort((a, b) =>
       String(a?.createdAt ?? '').localeCompare(String(b?.createdAt ?? '')));
     const recentConversations = convs.slice(-10).map((c) => ({
@@ -3860,6 +3872,7 @@ function handleBoardStatus(req, res) {
       nextShortId: data.nextShortId,
       conversationsTotal: data.conversations.length,
       claims,
+      apexes,
       // #1078 — ONE answer to "what is in flight": the claim is authoritative,
       // the column is a derived stage, and every disagreement is named.
       inFlight: inFlight(data.cards, { now: new Date().toISOString() }),
