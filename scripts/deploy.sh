@@ -39,7 +39,8 @@
 # with "not a git repository" — a refusal that NAMES the problem for free.
 #
 # Usage:
-#   scripts/deploy.sh                pull, ASK CI (refuse unless green), re-export, restart, verify
+#   scripts/deploy.sh                pull, ASK CI (refuse unless green), re-export, restart ONLY the
+#                                    services whose inputs changed (#1138), verify
 #   scripts/deploy.sh --no-restart   pull + ask CI + re-export only
 #   scripts/deploy.sh export         ask CI + re-export from the current clone HEAD
 #   scripts/deploy.sh unlock         open the serve dir — the escape hatch
@@ -204,6 +205,10 @@ if [ -n "$dirty" ]; then
   exit 1
 fi
 
+# #1138 — remember what is SERVED before the export replaces it, so the restart
+# plan can diff served → new. Missing means UNKNOWN, and unknown restarts both.
+PREV_SHA="$(cat "$SERVE/DEPLOYED-SHA" 2>/dev/null || echo '-')"
+
 say "⇣ pulling main into the clone"
 git -C "$CLONE" pull --ff-only origin main
 say "   clone now at $(git -C "$CLONE" rev-parse --short HEAD)"
@@ -215,18 +220,44 @@ export_tree
 
 [ "$RESTART" = "0" ] && exit 0
 
-say "↻ restarting services"
+# #1138 — RESTART ONLY WHAT CHANGED. Every deploy used to kickstart both
+# services; a Claude Code MCP session does not reconnect after :3001 restarts
+# (#697), so a tests-only push muted every Claude Code seat in the room. The
+# plan is computed from each service's import closure between the served sha
+# and the new one (scripts/deploy-restart-plan.mjs, tested in node). A missing
+# plan script or an unknown previous sha restarts BOTH — unknown is not "nothing
+# changed". ⚠️ When MCP does restart, Claude Code seats need a human to run
+# /mcp reconnect: telegraph before, confirm each seat RECEIVING after.
+NEW_SHA="$(git -C "$CLONE" rev-parse HEAD)"
+PLAN_SCRIPT="$CLONE/scripts/deploy-restart-plan.mjs"
+if [ -f "$PLAN_SCRIPT" ]; then
+  PLAN="$(node "$PLAN_SCRIPT" "$CLONE" "$PREV_SHA" "$NEW_SHA")" || die "restart plan failed — refusing to guess"
+else
+  PLAN="rest=1 mcp=1 reason.rest=no-plan-script reason.mcp=no-plan-script prev=unknown"
+fi
+say "↻ restart plan: $PLAN"
+DO_REST=0; DO_MCP=0
+case "$PLAN" in *"rest=1"*) DO_REST=1 ;; esac
+case "$PLAN" in *"mcp=1"*) DO_MCP=1 ;; esac
 uid="$(id -u)"
-launchctl kickstart -k "gui/$uid/com.scrumboard.rest" || die "rest restart failed"
-launchctl kickstart -k "gui/$uid/com.scrumboard.mcp"  || die "mcp restart failed"
+if [ "$DO_REST" = 1 ]; then
+  say "   ↻ com.scrumboard.rest"
+  launchctl kickstart -k "gui/$uid/com.scrumboard.rest" || die "rest restart failed"
+fi
+if [ "$DO_MCP" = 1 ]; then
+  say "   ↻ com.scrumboard.mcp   ⚠️ Claude Code seats on :3001 will need /mcp reconnect"
+  launchctl kickstart -k "gui/$uid/com.scrumboard.mcp"  || die "mcp restart failed"
+fi
+[ "$DO_REST" = 1 ] || [ "$DO_MCP" = 1 ] || say "   nothing a running service loads changed — no restart, no seat muted"
 
 # ⇒ ACCEPTANCE 4: verified AT THE RUNNING SERVICE, not at the tree. A deploy is
 # not a pull — this room has twice reported a deploy done while the process was
-# still running the previous code.
+# still running the previous code. Both services are checked even when neither
+# restarted: a deploy that restarts nothing must still leave both answering.
 say "✓ verifying at the running service"
 i=0
 until curl -fsS --max-time 3 http://127.0.0.1:3001/health >/dev/null 2>&1; do
   i=$((i + 1)); [ "$i" -gt 40 ] && die "mcp did not return within 80s"; sleep 2
 done
 curl -fsS --max-time 8 http://127.0.0.1:3141/api/board >/dev/null || die "rest did not return"
-say "   mcp 200 · rest 200 · serving $(cat "$SERVE/DEPLOYED-SHA" | cut -c1-7)"
+say "   mcp 200 · rest 200 · serving $(cat "$SERVE/DEPLOYED-SHA" | cut -c1-7) · restarted: rest=$DO_REST mcp=$DO_MCP"
