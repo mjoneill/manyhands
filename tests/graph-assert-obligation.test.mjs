@@ -98,6 +98,19 @@ test('#1118-B ONE object kind per predicate: dischargedBy is a PERSON; the commi
     assert.match(String(q.body.rows[0].c), /^commit:a{40}$/, 'the commit is the SAME node kind implementedBy mints — one encoding of "a commit"');
     const short = await api(s.baseUrl, 'POST', '/api/assert', { by: 'bo', assertions: [{ subject: oid, predicate: 'scrum:evidencedBy', object: 'abc123' }] });
     assert.equal(short.status, 400, 'a short sha is refused — one commit is one node');
+    // The gate is on object KIND, not only on predicate NAME: evidencedBy permits
+    // entity uuids on ACCEPTANCE evidence (#814), but on an obligation subject the
+    // generic verb refuses anything that is not a full sha — so the silent-subset
+    // defect (`?x a scrum:Commit` dropping uuid-evidenced rows) cannot arrive by
+    // the route the verb exists to open.
+    const uuid = await api(s.baseUrl, 'POST', '/api/assert', { by: 'bo', assertions: [{ subject: oid, predicate: 'scrum:evidencedBy', object: 'u-1' }] });
+    assert.equal(uuid.status, 400, 'an entity/card uuid as obligation evidence is refused by the verb');
+    assert.match(uuid.body.error, /40-character/, 'and the refusal names the shape');
+    const onCard = await api(s.baseUrl, 'POST', '/api/assert', { by: 'bo', assertions: [{ subject: 2, predicate: 'scrum:evidencedBy', object: SHA }] });
+    assert.equal(onCard.status, 400, 'evidencedBy on a CARD subject has no verb mapping yet — refused honestly, not invented');
+    // the card path resolves the OBJECT as a card before it reaches the mapping
+    // check, so a sha object refuses there first; either refusal is the honest one
+    assert.match(onCard.body.error, /does not resolve to a card|no store mapping/);
   } finally { await s.stop(); }
 });
 
