@@ -50,6 +50,14 @@ const SHORT = 'A short body that is fully visible on the tile and must not chang
  *  a newline every 60 chars is validated against the easy case. */
 const UNBROKEN = 'unbroken '.repeat(560);
 
+/** @wren's edge, found reviewing 077cfd1: an astral character straddling the
+ *  cut. `slice(0, 600)` splits the surrogate pair, the parser substitutes
+ *  U+FFFD, and nothing errors. Invisible today — the cut lands at 600 and the
+ *  6em box shows ~250 — but the tile is text a person can select and copy, and
+ *  "invisible because of a CSS clip" is not a property the code states.
+ *  The emoji is placed to straddle EXACTLY: 599 chars, then the pair. */
+const ASTRAL = 'x'.repeat(599) + '\u{1FAB6}' + ' and a further tail past the cap.'.repeat(10);
+
 function card(id, shortId, title, description, column = 'backlog') {
   return {
     id, shortId, title, description, type: 'task',
@@ -63,8 +71,9 @@ const board = () => makeBoardFixture({
     card('c1', 1, 'Short body', SHORT),
     card('c2', 2, 'Long body', LONG),
     card('c3', 3, 'Unbroken body', UNBROKEN),
+    card('c4', 4, 'Astral at the cut', ASTRAL),
   ],
-  nextShortId: 4,
+  nextShortId: 5,
 });
 
 const descText = (page, shortId) => page.evaluate((sid) => {
@@ -108,6 +117,21 @@ test('#209(d): a long body does not reach the tile in full, a short body is unch
     // every assertion above and silently destroy data on the next save.
     const served = await (await fetch(`${server.baseUrl}/api/cards/2`)).json();
     assert.equal(served.description.length, LONG.length, 'the stored body is not shortened');
+    // @wren's edge: the cut must not mint a replacement character. Asserted on
+    // the RENDERED text, because that is where a split pair becomes U+FFFD —
+    // asserting on the JS string would test a stage the defect survives.
+    const astral = await descText(page, 4);
+    assert.ok(astral, 'the astral card rendered a description');
+    assert.ok(astral.text.length < 1200, `astral tile carries ${astral.text.length} chars — not capped`);
+    assert.ok(
+      !astral.text.includes('\uFFFD'),
+      'the cap split a surrogate pair — U+FFFD in the tile, and nothing errored',
+    );
+    assert.ok(
+      !/[\uD800-\uDFFF]/.test(astral.text),
+      'a lone surrogate survived the cap',
+    );
+
     // The client's OWN copy, asked through the surface that reads it: search
     // matches on `card.description` (index.html:1970 — the MODEL, not the DOM).
     // Searching for text that is no longer anywhere in the markup must still

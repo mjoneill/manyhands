@@ -2470,11 +2470,22 @@ const DESC_COLLAPSE_CHAR_THRESHOLD = 200;
 // actually see, which is the regression, not the goal.
 const DESC_RENDER_CAP = 600;
 
-// Cap a description for the TILE only. Trailing partial `#12` is dropped
-// rather than left to become a link to the wrong card.
+// Cap a description for the TILE only.
+//
+// Two things get stripped at the cut, in this order:
+//   - a trailing high surrogate, or the slice splits an astral character
+//     (emoji, and every non-BMP script) and leaves half of one in the DOM.
+//     Found by @wren reviewing 077cfd1. It is invisible today because the cut
+//     lands at 600 and the 6em box shows ~250 — but tile text is selectable
+//     and copyable, and "invisible because of a CSS clip" is not a property
+//     this function states.
+//   - a trailing partial `#12`, or a cut mid-number becomes a live link to
+//     the WRONG card. Surrogate first: stripping one can expose the other.
 function capDescriptionForTile(desc) {
   if (desc.length <= DESC_RENDER_CAP) return desc;
-  return desc.slice(0, DESC_RENDER_CAP).replace(/#\d*$/, '') + '…';
+  return desc.slice(0, DESC_RENDER_CAP)
+    .replace(/[\uD800-\uDBFF]$/, '')
+    .replace(/#\d*$/, '') + '…';
 }
 
 // ── Create a Card Object ──
