@@ -215,6 +215,21 @@ say "   clone now at $(git -C "$CLONE" rev-parse --short HEAD)"
 
 ci_gate
 
+# #1138 — REFUSE TO RUN A STALE COPY OF THIS SCRIPT. The deployer's shell may
+# be standing in a checkout on some other branch (the shared build tree was on
+# a peer's branch at 16:22Z on 2026-09-02, so the OLD deploy.sh ran while the
+# NEW one was being exported, and both services bounced for a change that
+# needed neither). The only copy that is guaranteed to match the sha being
+# deployed is the clone's own. Compare by content, not by path.
+this_sum="$(shasum -a 256 "$0" | cut -c1-64)"
+clone_sum="$(git -C "$CLONE" show HEAD:scripts/deploy.sh | shasum -a 256 | cut -c1-64)"
+if [ "$this_sum" != "$clone_sum" ]; then
+  die "this copy of deploy.sh is NOT the one at the sha being deployed ($(git -C "$CLONE" rev-parse --short HEAD)).
+   You are probably running it from a checkout on another branch. Run the clone's copy:
+     DEPLOY_CLONE=$CLONE DEPLOY_SERVE=$SERVE sh $CLONE/scripts/deploy.sh
+   Nothing was exported or restarted."
+fi
+
 say "⇢ exporting to the serve directory"
 export_tree
 
