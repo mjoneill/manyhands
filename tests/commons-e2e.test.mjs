@@ -339,6 +339,78 @@ test('#303-6 commons.html: search filters the feed; clearing restores it', async
   }, { server: { board: searchBoard }, launch: { headless: 'new' } });
 });
 
+// #1010 — the box promised the corpus and filtered the loaded window. Now it
+// asks the server (q filters BEFORE limit), states the true count from
+// X-Total-Count, and each result jumps to its place in the feed.
+test('#1010 commons search reaches OUTSIDE the loaded window, states the count, and results jump', async () => {
+  // Seven messages; the view loads the newest 3. The needle sits in the oldest —
+  // a buffer-local filter cannot see it, which is the defect.
+  const bigBoard = {
+    cards: [],
+    columns: [{ id: 'backlog', name: 'Backlog', order: 0 }],
+    conversations: [
+      msg('o1', 'the canary sang at dawn', 'alex', null, 1),   // OLDEST — outside the window
+      msg('o2', 'nothing to see', 'robin', null, 2),
+      msg('o3', 'nothing to see either', 'nova', null, 3),
+      msg('o4', 'still nothing', 'alex', null, 4),
+      msg('n1', 'recent one', 'robin', null, 5),
+      msg('n2', 'recent two', 'nova', null, 6),
+      msg('n3', 'recent three', 'alex', null, 7),
+    ],
+    nextShortId: 1,
+  };
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await browser.newPage();
+    // A 3-message window, like the board panel's bounded load (#210).
+    await page.goto(`${server.baseUrl}/commons.html?limit=3`, { waitUntil: 'networkidle0' });
+    await page.waitForSelector('.cv-msg-body', { timeout: 5000 });
+    const loaded = await page.$$eval('.cv-msg', (els) => els.map((e) => e.dataset.id));
+    assert.ok(!loaded.includes('o1'), 'precondition: the needle is NOT in the loaded window: ' + loaded.join(','));
+
+    await page.type('.cv-search', 'canary');
+    // The header is visible while the request is out, and then states the count.
+    await page.waitForFunction(() => document.querySelector('.cv-search-head')?.textContent.includes('match'), { timeout: 5000 });
+    const head = await page.$eval('.cv-search-head', (e) => e.textContent);
+    assert.match(head, /^1 match\. /, 'the count comes from the server, not the window: ' + head);
+    const results = await page.$$eval('.cv-result', (els) => els.map((a) => ({ href: a.getAttribute('href'), id: a.querySelector('.cv-msg')?.dataset.id })));
+    assert.deepEqual(results, [{ href: 'commons.html?at=o1', id: 'o1' }], 'the out-of-window message is found and is a jump link');
+
+    // NEGATIVE CONTROL — a term the corpus does not hold says so, as a corpus fact.
+    const nonce = 'zq' + Math.random().toString(36).slice(2, 10);   // generated, never written down (#1010's fixture lesson)
+    await page.evaluate(() => { const s = document.querySelector('.cv-search'); s.value = ''; s.dispatchEvent(new Event('input', { bubbles: true })); });
+    await page.type('.cv-search', nonce);
+    await page.waitForFunction(() => document.querySelector('.cv-search-head')?.textContent.startsWith('No matches in the commons'), { timeout: 5000 });
+    assert.equal((await page.$$('.cv-result')).length, 0);
+
+    // Clear → the feed is back, newest 3.
+    await page.evaluate(() => { const s = document.querySelector('.cv-search'); s.value = ''; s.dispatchEvent(new Event('input', { bubbles: true })); });
+    await page.waitForFunction(() => !document.querySelector('.cv-search-head') && document.querySelectorAll('.cv-msg').length === 3, { timeout: 3000 });
+  }, { server: { board: bigBoard }, launch: { headless: 'new' } });
+});
+
+test('#1010 a FAILED search is visibly failed — never "no matches"', async () => {
+  const board2 = {
+    cards: [], columns: [{ id: 'backlog', name: 'Backlog', order: 0 }],
+    conversations: [msg('a1', 'alpha here', 'alex', null, 1), msg('a2', 'beta here', 'robin', null, 2)],
+    nextShortId: 1,
+  };
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await browser.newPage();
+    await page.goto(`${server.baseUrl}/commons.html`, { waitUntil: 'networkidle0' });
+    await page.waitForSelector('.cv-msg-body', { timeout: 5000 });
+    // Cut the search endpoint from under the page: a request with `q` fails.
+    await page.setRequestInterception(true);
+    page.on('request', (r) => (r.url().includes('q=') ? r.abort() : r.continue()));
+    await page.type('.cv-search', 'alpha');
+    await page.waitForFunction(() => document.querySelector('.cv-search-failed'), { timeout: 5000 });
+    const head = await page.$eval('.cv-search-head', (e) => e.textContent);
+    assert.match(head, /unavailable/, head);
+    assert.doesNotMatch(head, /No matches in the commons/, 'a failed check must not read as a corpus-wide negative');
+    const ids = await page.$$eval('.cv-result .cv-msg', (els) => els.map((e) => e.dataset.id));
+    assert.deepEqual(ids, ['a1'], 'the loaded-window match still shows, labelled as such');
+  }, { server: { board: board2 }, launch: { headless: 'new' } });
+});
+
 test('presence: the constellation lights each mind + marks the most-recent speaker; messages carry their author light', async () => {
   const now = new Date();
   const iso = (minsAgo) => new Date(now.getTime() - minsAgo * 60000).toISOString();

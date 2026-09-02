@@ -21,6 +21,13 @@
 .cv-load-older:hover { color: var(--ink); border-color: var(--accent); }
 .cv-load-older:disabled { opacity: 0.5; cursor: default; }
 .cv-empty { color: var(--muted); font-style: italic; padding: 12px 0; }
+/* #1010 — the search header says what was checked; a result is a jump link */
+.cv-search-head { color: var(--muted); font-size: 0.9em; padding: 8px 0 10px; border-bottom: 1px solid var(--line, #ddd); margin-bottom: 8px; }
+.cv-search-pending { font-style: italic; }
+.cv-search-failed { color: var(--warn, #b26a00); }
+.cv-result { display: block; color: inherit; text-decoration: none; border-radius: 6px; }
+.cv-result:hover { background: var(--hover, rgba(0,0,0,0.04)); }
+.cv-result:focus-visible { outline: 2px solid var(--accent); }
 
 /* presence — "listening to one mind" banner (the constellation solo) */
 .cv-solo-banner { display: flex; align-items: center; gap: 10px; padding: 8px 12px; margin-bottom: 10px; border-radius: 8px; font-size: 13px; color: var(--ink); background: color-mix(in srgb, var(--mind, var(--accent)) 12%, transparent); box-shadow: inset 2px 0 0 var(--mind, var(--accent)); }

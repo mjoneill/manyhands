@@ -30,9 +30,12 @@ import { identityOf, roster } from './identity.mjs';
  *   (board-parity "commons" — the whole feed, homed and floating alike).
  * - since/before/limit: the #210 pagination + poll cursors, passed through.
  */
-export function conversationsUrl({ baseUrl = '', attachedTo, since, before, limit } = {}) {
+export function conversationsUrl({ baseUrl = '', attachedTo, since, before, limit, q } = {}) {
   const params = [];
   if (typeof attachedTo === 'string' && attachedTo) params.push('attachedTo=' + encodeURIComponent(attachedTo));
+  // #1010 — a corpus-wide search term. The server filters BEFORE `limit`, so
+  // `q` + `limit` is "the N most recent MATCHES", never "matches within N".
+  if (typeof q === 'string' && q.trim()) params.push('q=' + encodeURIComponent(q.trim()));
   if (typeof since === 'string' && since) params.push('since=' + encodeURIComponent(since));
   if (typeof before === 'string' && before) params.push('before=' + encodeURIComponent(before));
   if (limit != null) params.push('limit=' + encodeURIComponent(limit));
@@ -146,6 +149,7 @@ export function mountConversationView(opts = {}) {
     author,
     placeholder = 'Say something to the room…',
     limit = 50,
+    searchDebounceMs = 250,   // #1010 — wait for the typist before asking the corpus
     poll = false,
     pollMs = 5000,
     fetchImpl,
@@ -162,7 +166,19 @@ export function mountConversationView(opts = {}) {
   let lastTs = null;
   let timer = null;
   let pending = [];   // #238 — uploaded-but-not-yet-sent attachments
-  let query = '';     // #303-6 — client-side search filter over loaded messages
+  let query = '';     // #303-6 — the search term, lower-cased; local filter until the corpus answers
+  // #1010 — the corpus-wide search. The box promised "Search the commons" and
+  // filtered the loaded window, so a term in 654 messages read as absent and
+  // the empty state asserted a corpus-wide negative from a buffer-local check.
+  // Now: local matches render at once under a visible "searching…" line, the
+  // server's answer (q filters before limit; X-Total-Count is the true count)
+  // replaces them, and every result is a jump link to commons.html?at=<id>.
+  // `searchState` is one of: null (no search) · 'pending' · 'done' · 'failed'.
+  let searchState = null;
+  let searchResults = [];   // the server's rows for `query`
+  let searchTotal = null;   // X-Total-Count for `query`, or null if unknown
+  let searchSeq = 0;        // a stale response must not overwrite a newer term
+  let searchTimer = null;
   let authorSolo = null; // presence — "listen to one mind": solo an author's voice
   let exhaustedOlder = false; // #303-6 — no more history behind the oldest loaded
   const renderedIds = new Set();
@@ -192,7 +208,14 @@ export function mountConversationView(opts = {}) {
   const form = buildForm();
   root.append(toolbar, feed, form);
 
-  search.addEventListener('input', () => { query = search.value.trim().toLowerCase(); renderAll(); });
+  search.addEventListener('input', () => {
+    query = search.value.trim().toLowerCase();
+    searchState = query ? 'pending' : null;
+    searchResults = []; searchTotal = null;
+    renderAll();
+    if (searchTimer) clearTimeout(searchTimer);
+    if (query) searchTimer = setTimeout(() => runSearch(query), searchDebounceMs);
+  });
   olderBtn.addEventListener('click', () => loadOlder());
   mount.innerHTML = '';
   mount.appendChild(root);
@@ -317,7 +340,80 @@ export function mountConversationView(opts = {}) {
     return out;
   }
 
+  // #1010 — ask the corpus. Sequence-guarded: a slow answer for an earlier
+  // term must not land on top of a newer one. A failed request is FAILED,
+  // visibly — the local matches stay on screen and the header says the corpus
+  // was not searched, because "no matches" and "could not look" are opposite
+  // facts and the old empty state conflated them.
+  async function runSearch(term) {
+    const seq = ++searchSeq;
+    let rows = null; let total = null;
+    try {
+      const res = await f(conversationsUrl({ baseUrl, attachedTo, q: term, limit }));
+      if (res.ok) {
+        rows = await res.json();
+        const h = res.headers && typeof res.headers.get === 'function' ? res.headers.get('X-Total-Count') : null;
+        total = h != null && /^\d+$/.test(String(h)) ? Number(h) : null;
+      }
+    } catch (_) { rows = null; }
+    if (seq !== searchSeq || term !== query) return;   // superseded
+    if (Array.isArray(rows)) { searchResults = rows; searchTotal = total; searchState = 'done'; }
+    else { searchResults = []; searchTotal = null; searchState = 'failed'; }
+    renderAll();
+  }
+
+  // #1010 — a result row is the message, wrapped as a jump to its place in the
+  // feed (commons.html reads ?at=<id> and lands there, #517). Reading stays in
+  // the feed; searching becomes navigation.
+  function resultNode(c) {
+    const a = doc.createElement('a');
+    a.className = 'cv-result';
+    a.href = 'commons.html?at=' + encodeURIComponent(c.id);
+    a.setAttribute('aria-label', 'jump to this message');
+    a.appendChild(messageNode(c));
+    return a;
+  }
+
+  // #1010 — the header states exactly what was checked. Never a corpus-wide
+  // claim from a buffer-local check.
+  function searchHeader() {
+    const h = el('div', 'cv-search-head');
+    h.setAttribute('role', 'status');
+    if (searchState === 'pending') {
+      h.classList.add('cv-search-pending');
+      h.textContent = 'Searching the whole commons…';
+    } else if (searchState === 'failed') {
+      h.classList.add('cv-search-failed');
+      h.textContent = 'Search unavailable — showing matches among loaded messages only.';
+    } else if (searchState === 'done') {
+      const n = searchTotal != null ? searchTotal : searchResults.length;
+      const shown = searchResults.length;
+      h.textContent = n === 0 ? 'No matches in the commons.'
+        : shown < n ? `${n} matches — showing the ${shown} most recent. Click one to jump to it.`
+        : `${n} match${n === 1 ? '' : 'es'}. Click one to jump to it.`;
+    }
+    return h;
+  }
+
+  function renderSearch() {
+    feed.innerHTML = '';
+    renderedIds.clear();
+    feed.appendChild(searchHeader());
+    if (searchState === 'done') {
+      for (const c of searchResults) { feed.appendChild(resultNode(c)); renderedIds.add(c.id); }
+    } else {
+      // pending or failed: the local window's matches, which is what the box
+      // used to show silently — now labelled as exactly that.
+      const vis = visibleMessages();
+      for (const c of vis) { feed.appendChild(resultNode(c)); renderedIds.add(c.id); }
+      if (!vis.length && searchState === 'failed') feed.appendChild(el('div', 'cv-empty', 'No matches among the loaded messages.'));
+    }
+    feed.scrollTop = 0;
+    updateOlderBtn();
+  }
+
   function renderAll() {
+    if (query && !authorSolo) { renderSearch(); return; }
     feed.innerHTML = '';
     renderedIds.clear();
     // presence — a "listening to one mind" banner with a clear-back-to-the-room.

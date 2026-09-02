@@ -69,3 +69,17 @@ test('#1010 q composes with author rather than replacing it', async () => {
     assert.deepEqual(r.body.map((c) => c.id), ['c'], 'cy said canary once; ada said it too and is excluded');
   } finally { await s.stop(); }
 });
+
+test('#1010 q= matches the AUTHOR too — the corpus search must not find less than the window\'s local filter did', async () => {
+  const s = await startRestServer({ board: makeBoardFixture({ cards: [], conversations: [
+    { id: 'x1', body: 'no needle in this body', author: 'quill', attachedTo: null, createdAt: '2026-05-01T00:00:00.000Z', mentions: [] },
+    { id: 'x2', body: 'plain', author: 'sage', attachedTo: null, createdAt: '2026-05-02T00:00:00.000Z', mentions: [] },
+  ] }) });
+  try {
+    const r = await get(s.baseUrl, '?q=quill');
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body.map((c) => c.id), ['x1'], 'found by author name alone');
+    const miss = await get(s.baseUrl, '?q=quillx');
+    assert.deepEqual(miss.body, [], 'control: a near-miss on the author matches nothing');
+  } finally { await s.stop(); }
+});

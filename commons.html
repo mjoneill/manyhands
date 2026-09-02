@@ -584,8 +584,13 @@
       };
       if (!node) await buildCardIndex();
 
+      // #1010 — `?limit=N` bounds the initial window (default 50). Exists so a
+      // reader — or a test — can make the window small and see that search
+      // reaches past it; the corpus search is what makes a small window safe.
+      const limitParam = Number(new URLSearchParams(location.search).get('limit'));
       view = mountConversationView({
         mount: viewEl,
+        ...(Number.isInteger(limitParam) && limitParam > 0 ? { limit: limitParam } : {}),
         attachedTo: node || undefined,   // node ⇒ that thread; absent ⇒ the whole commons
         poll: true,
         placeholder: node ? 'Add to this discussion…' : 'Say something to the room…',

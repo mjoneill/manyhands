@@ -5155,7 +5155,11 @@ function handleListConversations(req, res) {
     // stopwatch (#319).
     if (typeof q.q === 'string' && q.q.trim() !== '') {
       const needle = q.q.trim().toLowerCase();
-      convs = convs.filter((c) => typeof c.body === 'string' && c.body.toLowerCase().includes(needle));
+      // #1010 — body OR author, because the box's local filter always matched
+      // both and the corpus search must not find LESS than the window did.
+      convs = convs.filter((c) =>
+        (typeof c.body === 'string' && c.body.toLowerCase().includes(needle))
+        || (typeof c.author === 'string' && c.author.toLowerCase().includes(needle)));
     }
     // #210 — backward pagination for the browser's bounded load + load-older.
     // `before`: strictly older than the cursor (same safe string-compare as

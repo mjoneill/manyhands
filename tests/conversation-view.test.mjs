@@ -23,6 +23,10 @@ test('conversationsUrl: a node id scopes to that thread', () => {
   );
   // ids are encoded (defends against odd characters in a uuid-shaped value)
   assert.ok(conversationsUrl({ attachedTo: 'a b' }).includes('attachedTo=a%20b'));
+  // #1010 — a search term travels as `q`, trimmed and encoded; blank is omitted
+  assert.ok(conversationsUrl({ q: ' deaf lane ' }).includes('q=deaf%20lane'));
+  assert.equal(conversationsUrl({ q: '   ' }), '/api/conversations');
+  assert.ok(conversationsUrl({ q: 'x', limit: 5 }).includes('q=x') && conversationsUrl({ q: 'x', limit: 5 }).includes('limit=5'));
 });
 
 test('conversationsUrl: since / before / limit ride along, baseUrl prefixes', () => {
