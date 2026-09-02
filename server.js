@@ -3567,6 +3567,31 @@ function validateCardFields(body, { checkId = true, surface = 'patch', current =
     const cerr = validateChecks(body.checks);
     if (cerr) return cerr;
   }
+  // #1137 — acceptanceUpsert / blockersUpsert / checksUpsert. PATCH-ONLY (an
+  // upsert into a card that does not exist yet is a create, and create takes
+  // the arrays). Each entry is validated by the SAME validator as the
+  // whole-array write, so a malformed upsert is refused in the same words and
+  // an upsert blocker must still name a card in blockedBy. Refused beside the
+  // whole-array field of the same name: replace and upsert in one write are
+  // two intentions. Refused when empty: nothing to upsert. Needs NO ifVersion —
+  // the write sends only what changed and the server composes under its lock,
+  // so there is nothing to clobber by construction (still honoured if sent).
+  if (surface !== 'create') {
+    for (const [verb, field] of Object.entries(ARRAY_UPSERT_VERBS)) {
+      if (body[verb] === undefined) continue;
+      if (!Array.isArray(body[verb])) return `${verb} must be an array of ${field} entries (each matched on its key, inserted or replaced)`;
+      if (!body[verb].length) return `${verb} is empty — nothing to upsert`;
+      if (body[field] !== undefined) {
+        return `send either ${field} (replace the whole array, with ifVersion) or ${verb} (insert-or-replace the entries `
+          + 'sent, matched on their key), not both — a replace and an upsert in one write are two intentions and the '
+          + 'result would be neither';
+      }
+      const err = field === 'acceptance' ? validateAcceptance(body[verb])
+        : field === 'blockers' ? validateBlockers(body[verb], current, body)
+        : validateChecks(body[verb]);
+      if (err) return err;
+    }
+  }
   // #864 — the byte-preserving append. PATCH-ONLY, per #830's route-relative
   // rule: appending to a card that does not exist yet is not an operation, and
   // create takes `description`. Validating it here on create would produce the
@@ -3676,6 +3701,28 @@ function validateCardFields(body, { checkId = true, surface = 'patch', current =
 
 // Fields a PATCH may set. Anything else (a crafted __proto__ or junk key) is
 // ignored rather than blindly copied onto the stored card. #249.
+// #1137 — the upsert verb for each whole-array field, and the KEY an entry is
+// matched on. A verb, so deliberately NOT in PATCHABLE_CARD_FIELDS: a verb in
+// a field allowlist gets stored as a noun (the #864 rule).
+const ARRAY_UPSERT_VERBS = { acceptanceUpsert: 'acceptance', blockersUpsert: 'blockers', checksUpsert: 'checks' };
+const ARRAY_UPSERT_KEY = {
+  acceptance: (a) => `condition:${a.condition}`,
+  blockers: (b) => (b.anyHuman === true ? 'anyHuman'
+    : (b.person !== undefined && b.person !== null && b.person !== '') ? `person:${b.person}`
+    : `card:${b.card}`),
+  checks: (c) => `claim:${c.claim}`,
+};
+function upsertArrayEntries(field, existing, entries) {
+  const keyOf = ARRAY_UPSERT_KEY[field];
+  const next = Array.isArray(existing) ? existing.map((e) => ({ ...e })) : [];
+  for (const entry of entries) {
+    const k = keyOf(entry);
+    const i = next.findIndex((e) => keyOf(e) === k);
+    if (i >= 0) next[i] = { ...entry }; else next.push({ ...entry });
+  }
+  return next;
+}
+
 const PATCHABLE_CARD_FIELDS = new Set([
   'title', 'description', 'type', 'assignees', 'assignee', 'labels',
   'for', 'priority', 'column', 'order', 'relationships', 'parent',
@@ -4450,11 +4497,21 @@ async function handleUpdateCard(req, res, idOrShortId) {
         card.description = `${patch.descriptionPrepend}${card.description ?? ''}`;
         card.updatedAt = new Date().toISOString();
       }
+      // #1137 — the same structural guarantee for the three arrays: composed
+      // HERE, inside the lock, against the array current at the write. Neither
+      // of two concurrent upserters holds a snapshot, so neither can delete the
+      // other's entry — the #466 clobber is impossible rather than detected.
+      for (const [verb, field] of Object.entries(ARRAY_UPSERT_VERBS)) {
+        if (patch[verb] === undefined) continue;
+        card[field] = upsertArrayEntries(field, card[field], patch[verb]);
+        card.updatedAt = new Date().toISOString();
+      }
       for (const [k, v] of Object.entries(patch)) {
         // #864 — consumed immediately above. Listed here rather than in
         // PATCHABLE_CARD_FIELDS so it is never written as a literal key, and
         // reported as neither ignored (#823) nor refused: it was honoured.
         if (k === 'descriptionAppend' || k === 'descriptionPrepend') continue;
+        if (k in ARRAY_UPSERT_VERBS) continue; // #1137 — consumed above, same reason
         // #844 — an unchanged value was not an attempt. Silent.
         if (isEchoOfStored(v, card[k])) continue;
         if (IMMUTABLE_CARD_FIELDS.has(k)) {

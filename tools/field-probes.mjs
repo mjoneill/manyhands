@@ -160,6 +160,28 @@ export const CARD_CREATE_PROBES = [
         + 'with `description` (no correct order); IS combinable with `descriptionAppend`, '
         + 'which touches the opposite end.' },
 
+  // #1137 — the three array UPSERT verbs. Same shape as descriptionAppend: an
+  // OPERATION on the array, consumed under the lock, never stored under its own
+  // key, so `storedAs` names the array it composes. On a fresh card the array
+  // is empty, so the composed value IS the entry sent. Malformed cases are the
+  // whole-array validators' own rules, because the upsert reuses them: prose
+  // evidence, a blocker naming a card not in blockedBy, a SELECT for a check.
+  // RC0b caught these three missing within one run of the verbs existing.
+  { name: 'acceptanceUpsert', storedAs: 'acceptance',
+    wellFormed: [{ condition: 'RC1 — the guard refuses', evidence: ['c'.repeat(40)] }],
+    malformed: [{ condition: 'RC1', evidence: ['the tests passed'] }],
+    note: '#1137 — insert-or-replace by `condition`; validated as `acceptance` is; PATCH only' },
+  { name: 'blockersUpsert', storedAs: 'blockers',
+    wellFormed: ({ targetShortId }) => [{ card: targetShortId, owner: 'ada', status: 'open' }],
+    expectStored: ({ targetShortId }) => [{ card: targetShortId, owner: 'ada', status: 'open' }],
+    malformed: [{ card: 999999, owner: 'ada', status: 'open' }],
+    with: ({ targetShortId }) => ({ relationships: { blockedBy: [targetShortId] } }),
+    note: '#1137 — insert-or-replace by target (card | person | anyHuman); validated as `blockers` is; PATCH only' },
+  { name: 'checksUpsert', storedAs: 'checks',
+    wellFormed: [{ claim: 'C1', ask: 'ASK { ?x a scrum:Card }', expect: true }],
+    malformed: [{ claim: 'C1', ask: 'SELECT * WHERE { ?x a scrum:Card }', expect: true }],
+    note: '#1137 — insert-or-replace by `claim`; ASK only, as `checks` is; PATCH only' },
+
   // #534 — the compare-and-swap PRECONDITION. Same shape as `descriptionAppend`
   // and `by`: declared on the PATCH schema, CONSUMED before any field is
   // applied, and deliberately never stored under its own key. So RC0b's
