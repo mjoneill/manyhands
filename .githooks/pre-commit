@@ -16,6 +16,32 @@
 
 [ -n "$CLAUDECODE" ] || [ -n "$AI_AGENT" ] || exit 0
 
+# #877 — A SEAT DOES NOT COMMIT IN THE SHARED DEV CHECKOUT. Fourteen instances
+# of two seats colliding in one working tree (staged each other's half-built
+# work, published each other's held commits, ran each other's stale scripts),
+# none of them careless. The remedy is a worktree per build, and this is the
+# rail that makes it structural rather than remembered: in the PRIMARY tree —
+# the one whose git-dir IS the common dir — an agent session's commit is
+# refused with the way out. A linked worktree (git-dir under .git/worktrees/)
+# passes untouched, and so does the owner's own terminal (no agent marker;
+# the exit above runs first).
+#
+# Keyed on a local config flag set ONCE in the shared checkout
+# (`git config manyhands.sharedTree true`), so a throwaway repo, a fresh clone
+# or a test fixture is not refused: the flag names the tree that is shared,
+# and config persists without anyone remembering.
+if [ "$(git config --get manyhands.sharedTree 2>/dev/null)" = "true" ]; then
+  gd=$(git rev-parse --absolute-git-dir 2>/dev/null)
+  cd_=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+  if [ -n "$gd" ] && [ "$gd" = "$cd_" ]; then
+    echo "pre-commit (#877): this is the SHARED dev checkout — seats build in a worktree, not here." >&2
+    echo "  make one:   scripts/worktree.sh new <card> [slug]" >&2
+    echo "  it lands in: $(dirname "$cd_" | sed 's|/\.git$||').worktrees/<card>-<slug>/" >&2
+    echo "  (your uncommitted changes are untouched; move them with 'git stash' → worktree → 'git stash pop')" >&2
+    exit 1
+  fi
+fi
+
 # #751 — seat identities that GitHub can actually attribute, matched by SHAPE.
 #
 # `*@manyhands.invalid` is RFC 2606 unroutable by design: it can never be

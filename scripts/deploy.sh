@@ -269,10 +269,38 @@ fi
 # not a pull — this room has twice reported a deploy done while the process was
 # still running the previous code. Both services are checked even when neither
 # restarted: a deploy that restarts nothing must still leave both answering.
+# #877 — WORKTREE INVENTORY, printed on every deploy so sprawl is seen daily by
+# whoever deploys, without anyone choosing to look. Flags: a worktree outside
+# the home · a branch naming no card · a card with no claim · older than 7 days
+# · a card already done. Plus any OTHER git checkout beside the repo that is
+# neither the clone nor a registered worktree — a `cp -r` or second clone is
+# invisible to git's registry, so this turns invisible into visible-and-
+# unexplained. Disclosure only: nothing here refuses a deploy.
+DEV_TREE="$(git -C "$CLONE" config --get manyhands.devTree 2>/dev/null || echo "$HOME/PublicProjects/manyhands")"
+if [ -d "$DEV_TREE/.git" ] && [ -x "$DEV_TREE/scripts/worktree.sh" ]; then
+  say "🌳 worktrees (scripts/worktree.sh list):"
+  sh "$DEV_TREE/scripts/worktree.sh" list 2>/dev/null | sed 's/^/   /' || say "   (list failed)"
+  for d in "$(dirname "$DEV_TREE")"/*/; do
+    d="${d%/}"
+    [ -e "$d/.git" ] || continue
+    [ "$d" = "$DEV_TREE" ] && continue
+    case "$d" in "$DEV_TREE.worktrees"*) continue ;; esac
+    if ! git -C "$DEV_TREE" worktree list --porcelain | grep -qx "worktree $d"; then
+      say "   ⚠️ UNREGISTERED git checkout beside the repo: $d  (not the dev tree, not a worktree — what is it for?)"
+    fi
+  done
+fi
+
 say "✓ verifying at the running service"
 i=0
 until curl -fsS --max-time 3 http://127.0.0.1:3001/health >/dev/null 2>&1; do
   i=$((i + 1)); [ "$i" -gt 40 ] && die "mcp did not return within 80s"; sleep 2
 done
-curl -fsS --max-time 8 http://127.0.0.1:3141/api/board >/dev/null || die "rest did not return"
+# REST rebuilds its graph replica on boot (~4 s at today's scale and growing),
+# so a single 8 s try read "did not return" on a service that was simply still
+# booting (2026-09-02 17:55Z). Wait the way MCP is waited for.
+i=0
+until curl -fsS --max-time 3 http://127.0.0.1:3141/api/board/status >/dev/null 2>&1; do
+  i=$((i + 1)); [ "$i" -gt 40 ] && die "rest did not return within 80s"; sleep 2
+done
 say "   mcp 200 · rest 200 · serving $(cat "$SERVE/DEPLOYED-SHA" | cut -c1-7) · restarted: rest=$DO_REST mcp=$DO_MCP"

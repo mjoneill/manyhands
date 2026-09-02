@@ -339,3 +339,52 @@ test('#751 pre-commit FAILS CLOSED when seat-identities.sh is unreadable', () =>
   assert.match(r.stderr, /seat-identities\.sh/,
     'and it must name the file it could not read, not fail anonymously');
 });
+
+// ── #877 — a seat does not commit in the SHARED dev checkout ──────────────────
+// Keyed on `git config manyhands.sharedTree true`, set once in that tree. A
+// fixture without the flag (every test above) is untouched; a flagged PRIMARY
+// tree refuses an agent's commit even when correctly stamped; a linked
+// WORKTREE of that same flagged repo passes; the owner's terminal passes.
+
+function flagShared({ git }) { git(['config', 'manyhands.sharedTree', 'true'], baseEnv()); }
+
+test('#877 flagged shared tree + agent + a correct seat stamp → REFUSED, naming the worktree way out', () => {
+  const repo = makeRepo();
+  flagShared(repo);
+  const r = tryCommit(repo, { env: { ...baseEnv(), CLAUDECODE: '1' }, stamp: aSeat() });
+  assert.equal(r.ok, false, 'a seat must not commit in the shared checkout even with a valid identity');
+  assert.match(r.stderr, /#877/, 'refusal names the card');
+  assert.match(r.stderr, /worktree\.sh new/, 'refusal names the way out');
+});
+
+test('#877 flagged shared tree + the OWNER\'s terminal (no agent marker) → passes untouched', () => {
+  const repo = makeRepo();
+  flagShared(repo);
+  const r = tryCommit(repo, { env: baseEnv() });
+  assert.equal(r.ok, true, `the owner commits in his own checkout: ${r.stderr}`);
+});
+
+test('#877 a LINKED WORKTREE of the flagged repo + agent + seat stamp → passes (that is where seats build)', () => {
+  const repo = makeRepo();
+  flagShared(repo);
+  // The worktree needs a commit to branch from: make one as the owner.
+  const seed = tryCommit(repo, { env: baseEnv() });
+  assert.equal(seed.ok, true, seed.stderr);
+  const wtDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hook-877-wt-'));
+  fs.rmSync(wtDir, { recursive: true });
+  repo.git(['worktree', 'add', '-q', '-b', 'card/1-probe', wtDir], baseEnv());
+  // The dispatcher resolves the hook through show-toplevel, so the worktree
+  // needs the same .githooks the primary has — a worktree checks out tracked
+  // files, and .githooks was never committed in this fixture. Copy it in.
+  fs.mkdirSync(path.join(wtDir, '.githooks'), { recursive: true });
+  for (const f of ['pre-commit', 'seat-identities.sh']) {
+    fs.copyFileSync(path.join(repo.dir, '.githooks', f), path.join(wtDir, '.githooks', f));
+    fs.chmodSync(path.join(wtDir, '.githooks', f), 0o755);
+  }
+  const wt = { dir: wtDir, git: (args, env) => execFileSync('git', args, { cwd: wtDir, env, stdio: 'pipe' }) };
+  const r = tryCommit(wt, { env: { ...baseEnv(), CLAUDECODE: '1' }, stamp: aSeat() });
+  assert.equal(r.ok, true, `a seat's stamped commit in a linked worktree must pass: ${r.stderr}`);
+  const unstamped = tryCommit(wt, { env: { ...baseEnv(), CLAUDECODE: '1' } });
+  assert.equal(unstamped.ok, false, 'and #596 still applies there: an unstamped seat commit is refused');
+  assert.match(unstamped.stderr, /#596/);
+});
