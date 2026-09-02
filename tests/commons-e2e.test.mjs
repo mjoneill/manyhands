@@ -258,11 +258,20 @@ test('#291/#303-1 board inline commons panel: #NNN refs (scroll in place) + chat
     // Four CI reds (6009 / 5103 / 5164 / 4972ms) were this line; the third
     // came after fixing only half 1. A transient observed after the fact is
     // the same miss at a different layer.
-    const highlighted = page.waitForFunction(
-      () => !!document.querySelector('.card[data-id="p"].highlighted'),
+    //
+    // #1131 — THE FIFTH RED, after both halves above were in the file. Two
+    // correct instrument fixes and it still failed means the instrument was
+    // never the problem: the ASSERTION targets a transient. `.highlighted` has
+    // a 1500 ms lifetime, so the window and the observation race by design on
+    // a starved runner, and no observer can win a race the target created.
+    // ⇒ Assert something that does not delete itself. scrollToCardByShortId
+    // now stamps `data-highlighted-at` on the card it scrolled to and never
+    // removes it; a late observer still sees it. The class stays for the eye.
+    const stamped = page.waitForFunction(
+      () => document.querySelector('.card[data-id="p"]')?.dataset.highlightedAt || null,
       { timeout: 3000, polling: 'mutation' });
     await page.click('.conv-card-ref');
-    await highlighted;
+    await stamped;
     assert.equal(page.url(), urlBefore, 'ref click scrolled in place — no page navigation');
   }, { server: { board: refBoard }, launch: { headless: 'new' } });
 });

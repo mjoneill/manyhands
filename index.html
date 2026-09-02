@@ -3211,6 +3211,11 @@ function scrollToCardByShortId(shortId) {
   const cardEl = document.querySelector(`.card[data-id="${targetCard.id}"]`);
   if (!cardEl) return;
   cardEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  // #1131 — a DURABLE marker beside the transient class: the class is for the
+  // eye and self-clears in 1500 ms; the attribute is for anything that needs
+  // to know this card was scrolled to, and is never removed. A test that
+  // waited on the class raced its own lifetime five times on CI.
+  cardEl.dataset.highlightedAt = new Date().toISOString();
   cardEl.classList.add('highlighted');
   setTimeout(() => cardEl.classList.remove('highlighted'), 1500);
 }
