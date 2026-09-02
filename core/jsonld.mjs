@@ -282,6 +282,9 @@ const isDecision = (entity) => entity && entity['@type'] === 'scrum:Decision';
 // "what does asserting X mean" must be a filter over the vocabulary, not over
 // memories or decisions it happens to resemble.
 const isPredicateDefinition = (entity) => entity && entity['@type'] === 'scrum:PredicateDefinition';
+// #1118 — obligations are their own class: "what did this seat promise" is a
+// filter over promises, not over memories or decisions that mention one.
+const isObligation = (entity) => entity && entity['@type'] === 'scrum:Obligation';
 
 /**
  * ⛔ ENFORCE the ordering contract rather than merely preserving it.
@@ -347,7 +350,7 @@ const nodeToColumn = ({ '@type': _t, '@id': _i, identifier, name, 'scrum:order':
 export function domainToJsonLd(domain) {
   const {
     nodes = [], messages = [], people = [], columns = [],
-    tending = [], memories = [], decisions = [], predicates = [], labelAliases = [], _unmodelled = [], _README, ...meta
+    tending = [], memories = [], decisions = [], predicates = [], obligations = [], labelAliases = [], _unmodelled = [], _README, ...meta
   } = domain;
   const doc = {};
   if (_README !== undefined) doc._README = _README;   // first key — JSON.stringify keeps insertion order
@@ -369,6 +372,7 @@ export function domainToJsonLd(domain) {
     ...memories,
     ...decisions,
     ...predicates,
+    ...obligations,
     // #804 — entities of a class this projection does not model ride through
     // verbatim rather than being dropped. Silent deletion is the other bad
     // answer to the fallthrough bug: a phantom card is at least visible.
@@ -421,11 +425,14 @@ export function jsonLdToDomain(doc) {
   // #945 — same rule again.
   const predicates = graph.filter(isPredicateDefinition);
   if (predicates.length) domain.predicates = predicates;
+  // #1118 — same rule again.
+  const obligations = graph.filter(isObligation);
+  if (obligations.length) domain.obligations = obligations;
   // Anything recognised by NO predicate is kept verbatim so the serializer
   // stays lossless. It is never a card and never silently discarded.
   const unmodelled = graph.filter(
     (e) => !isCard(e) && !isMessage(e) && !isPerson(e) && !isColumn(e) && !isTending(e)
-      && !isMemory(e) && !isDecision(e) && !isPredicateDefinition(e),
+      && !isMemory(e) && !isDecision(e) && !isPredicateDefinition(e) && !isObligation(e),
   );
   if (unmodelled.length) domain._unmodelled = unmodelled;
   if (Array.isArray(doc._labelAliases) && doc._labelAliases.length) domain.labelAliases = doc._labelAliases;

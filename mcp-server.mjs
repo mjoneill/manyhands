@@ -1271,6 +1271,63 @@ function buildMcpServer() {
     return jsonResult(await apiCall('POST', '/api/assert', { by, assertions }));
   });
 
+  // ── #1118 slice A — OBLIGATIONS: what a seat promised, as a node ──────────
+  mcp.registerTool('obligation_create', {
+    description: 'Record an OBLIGATION — what a seat PROMISED, as a queryable node (#1118, born in the '
+      + 'graph per Decision aaf1774b). A steward role, a review owed, a promise, a tripwire: things that '
+      + 'today live only in desk-stamp prose and commons posts, and that a waking seat cannot ask for. '
+      + '`about` may name ANY node — a card (shortId or uuid) or the @id of a memory, decision, predicate '
+      + 'or obligation; a subject naming nothing is REFUSED, because an obligation about nothing is prose '
+      + 'again. One holder per obligation: two holders is two obligations. Opens `open`; close it with '
+      + 'obligation_update (discharged | lapsed). "What do I hold open?" is then ONE query: '
+      + '`?o a scrum:Obligation ; scrum:holder person:<seat> ; scrum:status "open"`.',
+    inputSchema: {
+      by: z.string().min(1).describe('Who records this. Declared, not authenticated.'),
+      holder: z.string().min(1).describe('The seat that OWES this — one holder'),
+      about: z.union([z.number(), z.string()]).describe('The node it is about: card shortId/uuid, or any entity @id'),
+      kind: z.enum(['steward', 'review', 'promise', 'tripwire']).describe('What kind of promise'),
+      note: z.string().optional().describe('The promise in the holder\'s own words'),
+    },
+  }, async ({ by, holder, about, kind, note }) => {
+    return jsonResult(await apiCall('POST', '/api/obligations', { by, holder, about, kind, note }));
+  });
+
+  mcp.registerTool('obligation_list', {
+    description: 'List obligations (#1118), filterable by holder, status (open | discharged | lapsed), '
+      + 'about (a node id) and kind. Every filter is an exact match; a holder with nothing returns an '
+      + 'EMPTY LIST, never an error — "nothing owed" is a common and correct answer. For the graph shape '
+      + 'of the same question, query scrum:Obligation directly.',
+    inputSchema: {
+      holder: z.string().optional().describe('Only obligations this seat holds'),
+      status: z.enum(['open', 'discharged', 'lapsed']).optional().describe('Only this status'),
+      about: z.string().optional().describe('Only obligations about this node id (card uuid or entity @id)'),
+      kind: z.enum(['steward', 'review', 'promise', 'tripwire']).optional().describe('Only this kind'),
+    },
+  }, async ({ holder, status, about, kind } = {}) => {
+    const q = new URLSearchParams();
+    if (holder) q.set('holder', holder);
+    if (status) q.set('status', status);
+    if (about) q.set('about', about);
+    if (kind) q.set('kind', kind);
+    const qs = q.toString();
+    return jsonResult(await apiCall('GET', `/api/obligations${qs ? '?' + qs : ''}`));
+  });
+
+  mcp.registerTool('obligation_update', {
+    description: 'CLOSE an obligation (#1118): status `discharged` (it was met) or `lapsed` (it was not, '
+      + 'and is no longer live). Stamps who and when. An obligation closes; it does not reopen — record '
+      + 'a new one instead. Closing an already-closed obligation is a NOOP that returns the first closure: '
+      + 'the record of who discharged it is never overwritten.',
+    inputSchema: {
+      id: z.string().min(1).describe('The obligation @id from obligation_create / obligation_list'),
+      by: z.string().min(1).describe('Who closes it. Declared, not authenticated.'),
+      status: z.enum(['discharged', 'lapsed']).describe('How it closed'),
+      note: z.string().optional().describe('Appended to the obligation\'s note — what discharged it'),
+    },
+  }, async ({ id, by, status, note }) => {
+    return jsonResult(await apiCall('PATCH', `/api/obligations/${encodeURIComponent(id)}`, { by, status, note }));
+  });
+
   mcp.registerTool('decision_create', {
     description: 'Record a DECISION — a constraint on future work, not a task. Use this when the room '
       + 'settles something that should stop being re-argued: a rule, a scope call, a chosen approach. '

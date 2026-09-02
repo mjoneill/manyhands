@@ -2059,6 +2059,124 @@ function decisionsOf(data) {
   return Array.isArray(data.decisions) ? data.decisions : [];
 }
 
+// ── #1118 slice A — OBLIGATIONS: what a seat promised, as a node ────────────
+// "What did I PROMISE?" had no entity kind behind it: steward roles, review-
+// owed, tripwires lived in desk-stamp prose. Born in the graph (Decision
+// aaf1774b): event-logged, projected, and `about` may name ANY node — a
+// card, a memory, a decision, a predicate — the any-node-type shape Option D
+// (aad42bf5) promised and nothing had exercised.
+const OBLIGATION_ID = () => `https://scrumboard.local/obligation/${crypto.randomUUID()}`;
+const OBLIGATION_KINDS = new Set(['steward', 'review', 'promise', 'tripwire']);
+const OBLIGATION_CLOSES = new Set(['discharged', 'lapsed']);
+
+function obligationsOf(data) {
+  return Array.isArray(data.obligations) ? data.obligations : [];
+}
+
+const obligationEvent = (op, e, actor) => ({
+  op, actor, entity: { kind: 'obligation', id: e['@id'] }, state: e,
+});
+
+function obligationToWire(e) {
+  return {
+    id: e['@id'], holder: e['scrum:holder'], about: e.about, kind: e['scrum:kind'],
+    status: e['scrum:status'], note: e.text ?? '', createdBy: e.creator, createdAt: e.dateCreated,
+    dischargedBy: e['scrum:dischargedBy'] ?? null, dischargedAt: e['scrum:dischargedAt'] ?? null,
+  };
+}
+
+/**
+ * Resolve a reference to a node this store holds: a card (shortId or uuid) →
+ * its id; any other entity → its @id, if one exists. null means DANGLING,
+ * which is refused: an obligation about nothing is prose again.
+ */
+function resolveNodeId(data, ref) {
+  if (ref === undefined || ref === null || ref === '') return null;
+  const ci = findCardIndex(data, ref);
+  if (ci >= 0) return data.cards[ci].id;
+  const s = String(ref);
+  const pools = [decisionsOf(data), predicatesOf(data), obligationsOf(data),
+    Array.isArray(data.memories) ? data.memories : []];
+  for (const pool of pools) if (pool.some((e) => e && e['@id'] === s)) return s;
+  return null;
+}
+
+async function handleCreateObligation(req, res) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const by = typeof body.by === 'string' && body.by.trim() ? body.by.trim() : null;
+    if (!by) return sendJSON(res, 400, { error: 'by is required — who records this obligation. Declared, not authenticated.' });
+    const holder = typeof body.holder === 'string' && body.holder.trim() ? body.holder.trim() : null;
+    if (!holder) return sendJSON(res, 400, { error: 'holder is required — the seat that owes this. One holder per obligation; two holders is two obligations.' });
+    if (!OBLIGATION_KINDS.has(body.kind)) {
+      return sendJSON(res, 400, { error: `kind must be one of steward | review | promise | tripwire (got ${JSON.stringify(body.kind)})` });
+    }
+    const result = await withWriteLock(async () => {
+      const data = readBoard();
+      const about = resolveNodeId(data, body.about);
+      if (!about) {
+        return { status: 400, wire: { error: `about ${JSON.stringify(body.about)} does not resolve to a node this board holds (card shortId/uuid, or the @id of a memory, decision, predicate or obligation). An obligation about nothing is refused.` } };
+      }
+      const now = new Date().toISOString();
+      const entity = {
+        '@id': OBLIGATION_ID(), '@type': 'scrum:Obligation',
+        'scrum:holder': holder, about, 'scrum:kind': body.kind, 'scrum:status': 'open',
+        text: typeof body.note === 'string' ? body.note : '',
+        creator: by, dateCreated: now,
+      };
+      data.obligations = [...obligationsOf(data), entity];
+      writeBoard(data, [obligationEvent('create', entity, by)]);
+      return { status: 201, wire: obligationToWire(entity) };
+    });
+    sendJSON(res, result.status, result.wire);
+  } catch (e) {
+    console.error('POST /api/obligations:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+
+function handleListObligations(req, res) {
+  const q = parseQuery(req.url);
+  let out = obligationsOf(readBoard()).map(obligationToWire);
+  // Every filter is an exact match; a holder with nothing is an EMPTY LIST.
+  if (q.holder) out = out.filter((o) => o.holder === q.holder);
+  if (q.status) out = out.filter((o) => o.status === q.status);
+  if (q.about) out = out.filter((o) => o.about === q.about);
+  if (q.kind) out = out.filter((o) => o.kind === q.kind);
+  sendJSON(res, 200, out);
+}
+
+async function handleUpdateObligation(req, res, rawId) {
+  try {
+    const id = decodeURIComponent(rawId);
+    const body = JSON.parse(await readBody(req));
+    const by = typeof body.by === 'string' && body.by.trim() ? body.by.trim() : null;
+    if (!by) return sendJSON(res, 400, { error: 'by is required — who closes this obligation. Declared, not authenticated.' });
+    if (!OBLIGATION_CLOSES.has(body.status)) {
+      return sendJSON(res, 400, { error: `status must be discharged or lapsed (got ${JSON.stringify(body.status)}) — an obligation closes; it does not reopen. Record a new one instead.` });
+    }
+    const result = await withWriteLock(async () => {
+      const data = readBoard();
+      const existing = obligationsOf(data).find((e) => e['@id'] === id);
+      if (!existing) return { status: 404, wire: { error: `no obligation ${id}` } };
+      // Already closed: the FIRST closure stands. A second is a noop, not an overwrite.
+      if (existing['scrum:status'] !== 'open') return { status: 200, wire: obligationToWire(existing) };
+      const now = new Date().toISOString();
+      const closed = {
+        ...existing, 'scrum:status': body.status, 'scrum:dischargedBy': by, 'scrum:dischargedAt': now,
+        ...(typeof body.note === 'string' && body.note.trim() ? { text: `${existing.text ? existing.text + '\n' : ''}${body.note.trim()}` } : {}),
+      };
+      data.obligations = obligationsOf(data).map((e) => (e['@id'] === id ? closed : e));
+      writeBoard(data, [obligationEvent('update', closed, by)]);
+      return { status: 200, wire: obligationToWire(closed) };
+    });
+    sendJSON(res, result.status, result.wire);
+  } catch (e) {
+    console.error('PATCH /api/obligations:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+
 const decisionEvent = (op, d, actor = null) => ({
   op, actor, entity: { kind: 'decision', id: d['@id'] }, state: d,
 });
@@ -5334,6 +5452,9 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/predicates$/,           fn: (req, res) => handleRegisterPredicate(req, res) },
   { method: 'POST',   re: /^\/api\/assert$/,               fn: (req, res) => handleAssert(req, res) },
   { method: 'POST',   re: /^\/api\/decisions$/,            fn: (req, res) => handleCreateDecision(req, res) },
+  { method: 'GET',    re: /^\/api\/obligations$/,          fn: (req, res) => handleListObligations(req, res) },
+  { method: 'POST',   re: /^\/api\/obligations$/,          fn: (req, res) => handleCreateObligation(req, res) },
+  { method: 'PATCH',  re: /^\/api\/obligations\/([^\/]+)$/, fn: (req, res, m) => handleUpdateObligation(req, res, m[1]) },
   { method: 'GET',    re: /^\/api\/memories$/,             fn: (req, res) => handleListMemories(req, res) },
   { method: 'POST',   re: /^\/api\/memories$/,             fn: (req, res) => handleCreateMemory(req, res) },
   { method: 'GET',    re: /^\/api\/memories\/([^\/]+)\/versions$/, fn: (req, res, m) => handleMemoryVersions(req, res, m[1]) },

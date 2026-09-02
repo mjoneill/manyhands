@@ -67,7 +67,7 @@ export const REDACTION_MARKER_PREFIX = '[redacted';
 // per the warning that follows: a declaration that could not be rebuilt from
 // the log would be less durable than the cards beside it, and the scheduler
 // reads it — so a dropped replay would silently restore a seat to eligible.
-export const ENTITY_KINDS = new Set(['card', 'conversation', 'column', 'wiki', 'tending', 'memory', 'label', 'decision', 'seat-state', 'predicate']);
+export const ENTITY_KINDS = new Set(['card', 'conversation', 'column', 'wiki', 'tending', 'memory', 'label', 'decision', 'seat-state', 'predicate', 'obligation']);
 
 /** Which board collection a given entity kind projects into. */
 // #805 blocker 6: tending rides the SAME door as every family — the ruling was
@@ -96,6 +96,11 @@ const COLLECTION = {
   // difference between a stored 'no' surviving a rebuild and a rested seat
   // quietly becoming eligible again.
   'seat-state': 'seatStates',
+  // #1118 — obligations: what a seat PROMISED, as a node. Mapped in the same
+  // commit that emits the kind, per the warning above — a promise that could
+  // not be rebuilt from the log would be less durable than the desk-stamp
+  // prose it replaces.
+  obligation: 'obligations',
 };
 
 const SEGMENT_RE = /^events-\d{4}-\d{2}-\d{2}\.jsonl$/;

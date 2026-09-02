@@ -136,6 +136,9 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:Blocker', 'scrum:Commit', 'scrum:UnresolvedReference', 'scrum:Check',
   'scrum:Tending', 'scrum:SeatDeclaration', 'scrum:WorkObject',
   'scrum:PredicateDefinition', 'scrum:definition',
+  // #1118 — obligations: what a seat promised, born in the graph
+  'scrum:Obligation', 'scrum:holder', 'scrum:obligationKind',
+  'scrum:dischargedBy', 'scrum:dischargedAt',
   // ⚠️ EMITTED BY THE PROJECTOR AND ABSENT FROM THIS BOARD'S DATA TODAY. Every
   // one of these was missing from the first, store-derived list; `scrum:ofSilence`
   // is the one the suite caught and the rest came from the same source scan.
@@ -756,6 +759,30 @@ function projectDecision(store, e) {
   if (e.dateCreated) add_(nn(SC + 'dateCreated'), lit(e.dateCreated));
 }
 
+/**
+ * #1118 — an OBLIGATION: what a seat promised, as a node. `holder` and
+ * `dischargedBy` are person EDGES so "what does X hold open" and "who closed
+ * it" are traversals; `about` is an entity EDGE to ANY node — card, memory,
+ * decision, predicate — which is the any-node-type shape Option D promised.
+ */
+function projectObligation(store, e) {
+  const S = IRI.scrum, SC = IRI.schema, P = IRI.person, E = IRI.entity;
+  const s = nn(e['@id']);
+  const add = (p, o) => store.add(oxigraph.triple(s, p, o));
+  const person = (v) => nn(String(v).startsWith('http') ? String(v) : P + v);
+  const node = (v) => nn(String(v).startsWith('http') ? String(v) : E + v);
+  add(A, nn(S + 'Obligation'));
+  if (e['scrum:holder']) add(nn(S + 'holder'), person(e['scrum:holder']));
+  if (e.about) add(nn(SC + 'about'), node(e.about));
+  if (e['scrum:kind']) add(nn(S + 'obligationKind'), lit(e['scrum:kind']));
+  if (e['scrum:status']) add(nn(S + 'status'), lit(e['scrum:status']));
+  if (e.text) add(nn(SC + 'text'), lit(e.text));
+  if (e.creator) add(nn(SC + 'creator'), person(e.creator));
+  if (e.dateCreated) add(nn(SC + 'dateCreated'), lit(e.dateCreated));
+  if (e['scrum:dischargedBy']) add(nn(S + 'dischargedBy'), person(e['scrum:dischargedBy']));
+  if (e['scrum:dischargedAt']) add(nn(S + 'dischargedAt'), lit(e['scrum:dischargedAt']));
+}
+
 function projectMemory(store, e) {
   const add = (s, p, o) => store.add(oxigraph.triple(s, p, o));
   const S = IRI.scrum, SC = IRI.schema, P = IRI.person;
@@ -1161,6 +1188,8 @@ function projectEntity(store, e) {
       projectMemory(store, e);
     } else if (t === 'scrum:Decision') {
       projectDecision(store, e);
+    } else if (t === 'scrum:Obligation') {
+      projectObligation(store, e);
     } else if (t === 'scrum:PredicateDefinition') {
       // #945 slice 1 — the registry is graph-queryable: "what does asserting X
       // mean, and who stands behind that?" is one query, which is the whole

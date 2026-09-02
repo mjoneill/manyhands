@@ -46,6 +46,12 @@ export const PREDICATE_SOURCE = Object.freeze({
   // ── #945 slice 1 — the predicate registry itself ──────────────────────────
   'scrum:PredicateDefinition': null,        // the type; minted by the projection
   'scrum:definition': 'scrum:definition',
+  // ── #1118 — obligations (what a seat promised), born in the graph ────────
+  'scrum:Obligation': null,                 // the type; minted by the projection
+  'scrum:holder': 'scrum:holder',           // → person: IRI
+  'scrum:obligationKind': 'scrum:kind',     // steward | review | promise | tripwire
+  'scrum:dischargedBy': 'scrum:dischargedBy',   // → person: IRI
+  'scrum:dischargedAt': 'scrum:dischargedAt',
   // ── #1112 item 3 — work ledger transitions (Decision 3956b66b; source is the
   // SCRUM_WORK_STORE jsonl, not the board document). ────────────────────────
   'schema:Action': null,                    // the type; minted by the projection
