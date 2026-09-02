@@ -3494,6 +3494,22 @@ function validateCardFields(body, { checkId = true, surface = 'patch', current =
   // abbreviation whose expansion needs the repository; the graph cannot expand
   // it, so accepting both forms would mint two nodes for one commit and never
   // reconcile them. That is an aliasing bug shipped as a convenience.
+  // #1132 — a whole-array REPLACE without a precondition is REFUSED. These
+  // three fields have no append verb, so every write replaces the array, and
+  // the #534 compare-and-swap is their ONLY defence against a concurrent
+  // writer. It was optional — and a seat who fetched, mutated, wrote once and
+  // read back still could not detect an entry that arrived while she composed
+  // (measured 2026-09-02 05:18Z on #209). Absence must not masquerade as a
+  // decision. An EMPTY array is a CLEAR and clobbers the same way: not exempt.
+  {
+    const wholesale = ['acceptance', 'blockers', 'checks'].filter((k) => Array.isArray(body[k]));
+    // PATCH only: create has no prior version to compare, and nothing to clobber.
+    if (surface === 'patch' && wholesale.length && body.ifVersion === undefined) {
+      return `${wholesale.join(', ')} REPLACE the whole array and need ifVersion — the card version you read — `
+        + 'or a concurrent write is silently deleted (#1132). Read the card, pass its version, write once; '
+        + 'a moved version is refused with 409 so you can re-read and reapply.';
+    }
+  }
   if (body.acceptance !== undefined && body.acceptance !== null) {
     const aerr = validateAcceptance(body.acceptance);
     if (aerr) return aerr;
