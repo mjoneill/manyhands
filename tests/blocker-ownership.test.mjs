@@ -27,6 +27,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { startRestServer, makeBoardFixture } from './helpers/harness.mjs';
+import { patchWithVersion } from './helpers/versioned-patch.mjs';
 
 const card = (shortId, over = {}) => ({
   id: `u-${shortId}`, shortId, title: `card ${shortId}`, description: '',
@@ -56,7 +57,7 @@ const api = async (baseUrl, method, path, body) => {
 test('#814 a blocker can be given an OWNER and a STATUS', async () => {
   const s = await startRestServer({ board: board() });
   try {
-    const r = await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+    const r = await patchWithVersion(s.baseUrl, 1, {
       blockers: [{ card: 2, owner: 'ada', status: 'open', note: 'waiting on the schema call' }],
       by: 'ada',
     });
@@ -73,7 +74,7 @@ test('#814 a blocker can be given an OWNER and a STATUS', async () => {
 test('#814 THE BANANA TEST — each blocker\'s owner and status in ONE graph query', async () => {
   const s = await startRestServer({ board: board() });
   try {
-    await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+    await patchWithVersion(s.baseUrl, 1, {
       blockers: [
         { card: 2, owner: 'ada', status: 'open' },
         { card: 3, owner: 'grace', status: 'cleared' },
@@ -101,7 +102,7 @@ test('#814 the blockedBy EDGE is untouched — every existing traversal still wo
   // edge, this is a regression dressed as a feature.
   const s = await startRestServer({ board: board() });
   try {
-    await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+    await patchWithVersion(s.baseUrl, 1, {
       blockers: [{ card: 2, owner: 'ada', status: 'open' }], by: 'ada',
     });
     const fresh = await api(s.baseUrl, 'GET', '/api/cards/1');
@@ -121,7 +122,7 @@ test('#814 an UNOWNED blocker is visible AS unowned — never silently absent', 
   // row and said nothing, "blockers with owners" would read as "blockers".
   const s = await startRestServer({ board: board() });
   try {
-    await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+    await patchWithVersion(s.baseUrl, 1, {
       blockers: [{ card: 2, owner: 'ada', status: 'open' }], by: 'ada',
     });
     const q = await api(s.baseUrl, 'POST', '/api/graph', {
@@ -142,7 +143,7 @@ test('#814 a blocker naming a card that does not block is REFUSED', async () => 
   // becomes a second source of truth about what blocks what.
   const s = await startRestServer({ board: board() });
   try {
-    const r = await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+    const r = await patchWithVersion(s.baseUrl, 1, {
       blockers: [{ card: 99, owner: 'ada', status: 'open' }], by: 'ada',
     });
     assert.equal(r.status, 400, 'a blocker must name a card in this card\'s blockedBy');
@@ -153,7 +154,7 @@ test('#814 a blocker naming a card that does not block is REFUSED', async () => 
 test('#814 an unknown status is refused, naming the vocabulary', async () => {
   const s = await startRestServer({ board: board() });
   try {
-    const r = await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+    const r = await patchWithVersion(s.baseUrl, 1, {
       blockers: [{ card: 2, owner: 'ada', status: 'vibes' }], by: 'ada',
     });
     assert.equal(r.status, 400);
@@ -168,10 +169,10 @@ test('#814 dropping the blockedBy edge drops its Blocker node — no orphan stat
   // the edge, so removing the edge removes the node by construction.
   const s = await startRestServer({ board: board() });
   try {
-    await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+    await patchWithVersion(s.baseUrl, 1, {
       blockers: [{ card: 2, owner: 'ada', status: 'open' }], by: 'ada',
     });
-    await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+    await patchWithVersion(s.baseUrl, 1, {
       relationships: { relatedTo: [], blockedBy: [3], supersedes: [], derivedFrom: [], supersededBy: [] },
       blockers: [], by: 'ada',
     });
@@ -200,7 +201,7 @@ test('#814 DELETING the card removes its Blocker nodes — the orphan I asserted
   // production and counting what was left, not by the suite.
   const s = await startRestServer({ board: board() });
   try {
-    await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+    await patchWithVersion(s.baseUrl, 1, {
       blockers: [{ card: 2, owner: 'ada', status: 'open' }], by: 'ada',
     });
     const before = await api(s.baseUrl, 'POST', '/api/graph', {

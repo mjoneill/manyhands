@@ -51,6 +51,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { startRestServer, startMcpServer, mcpSession, makeBoardFixture } from './helpers/harness.mjs';
+import { mcpUpdateWithVersion } from './helpers/versioned-patch.mjs';
 
 const SHA = 'd'.repeat(40);
 
@@ -85,7 +86,7 @@ test('#1041 a condition-scoped blocker is WRITABLE THROUGH MCP and lands as an e
   const mcp = await startMcpServer({ restApiBase: rest.baseUrl });
   try {
     const session = await mcpSession(mcp.mcpUrl);
-    const call = await session.callTool('card_update', {
+    const call = await mcpUpdateWithVersion((n, a) => session.callTool(n, a), {
       id: '1', by: 'indigo',
       acceptance: [
         // The CONTROL, in the same call: an ordinary discharged condition.
@@ -155,7 +156,7 @@ test('#823 widening by ONE field must not loosen the object — an unknown key i
   const mcp = await startMcpServer({ restApiBase: rest.baseUrl });
   try {
     const session = await mcpSession(mcp.mcpUrl);
-    const bad = await session.callTool('card_update', {
+    const bad = await mcpUpdateWithVersion((n, a) => session.callTool(n, a), {
       id: '1', by: 'indigo',
       acceptance: [{ condition: 'RC1', evidence: [], blockedByCard: [2] }],
     });
@@ -180,7 +181,7 @@ test('#1041 a blockedBy naming a card that does NOT exist produces NO edge — n
   const mcp = await startMcpServer({ restApiBase: rest.baseUrl });
   try {
     const session = await mcpSession(mcp.mcpUrl);
-    const call = await session.callTool('card_update', {
+    const call = await mcpUpdateWithVersion((n, a) => session.callTool(n, a), {
       id: '1', by: 'indigo',
       acceptance: [
         { condition: 'RC1 — resolvable, the CONTROL', evidence: [], blockedBy: [2] },

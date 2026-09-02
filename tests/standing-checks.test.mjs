@@ -40,6 +40,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { startRestServer } from './helpers/harness.mjs';
+import { patchWithVersion } from './helpers/versioned-patch.mjs';
 
 const mk = (baseUrl, body) => fetch(`${baseUrl}/api/cards`, {
   method: 'POST',
@@ -47,11 +48,8 @@ const mk = (baseUrl, body) => fetch(`${baseUrl}/api/cards`, {
   body: JSON.stringify({ createdBy: 'ada', ...body }),
 }).then((r) => r.json());
 
-const patch = (baseUrl, id, body) => fetch(`${baseUrl}/api/cards/${id}`, {
-  method: 'PATCH',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify(body),
-}).then((r) => r.json());
+// #1132 — `blockers` is a whole-array replace; the write needs the version.
+const patch = (baseUrl, id, body) => patchWithVersion(baseUrl, id, body).then((r) => r.body);
 
 const checks = async (baseUrl) => {
   const r = await fetch(`${baseUrl}/api/checks`);

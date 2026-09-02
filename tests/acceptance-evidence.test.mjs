@@ -27,6 +27,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { startRestServer, makeBoardFixture } from './helpers/harness.mjs';
+import { patchWithVersion } from './helpers/versioned-patch.mjs';
 
 const SHA = 'c'.repeat(40);
 const UUID = '11111111-2222-3333-4444-555555555555';
@@ -52,7 +53,7 @@ const board = () => makeBoardFixture({
 test('#814 a release condition records what discharged it, and round-trips', async () => {
   const s = await startRestServer({ board: board() });
   try {
-    const r = await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+    const r = await patchWithVersion(s.baseUrl, 1, {
       acceptance: [
         { condition: 'a red test blocks the guarded action', evidence: [SHA], note: 'suite run at that commit' },
         { condition: 'the guarded population is named', evidence: [] },
@@ -70,7 +71,7 @@ test('#814 a release condition records what discharged it, and round-trips', asy
 test('#814 THE BANANA TEST — which evidence discharged which condition, in ONE query', async () => {
   const s = await startRestServer({ board: board() });
   try {
-    await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+    await patchWithVersion(s.baseUrl, 1, {
       acceptance: [{ condition: 'RC1 — a red test refuses the push', evidence: [SHA, UUID] }],
       by: 'ada',
     });
@@ -98,7 +99,7 @@ test('#814 an UNDISCHARGED condition is visible AS undischarged', async () => {
   // look accepted precisely because nobody had recorded the outstanding ones.
   const s = await startRestServer({ board: board() });
   try {
-    await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+    await patchWithVersion(s.baseUrl, 1, {
       acceptance: [
         { condition: 'RC1 met', evidence: [SHA] },
         { condition: 'RC2 outstanding', evidence: [] },
@@ -130,7 +131,7 @@ test('#814 evidence that cannot be resolved is REFUSED — the BF4 lesson genera
       [[''], 'an empty reference names nothing'],
       ['not-an-array', 'evidence must be a list'],
     ]) {
-      const r = await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+      const r = await patchWithVersion(s.baseUrl, 1, {
         acceptance: [{ condition: 'x', evidence: bad }], by: 'ada',
       });
       assert.equal(r.status, 400, `${why} — got ${r.status} ${JSON.stringify(r.body)}`);
@@ -141,7 +142,7 @@ test('#814 evidence that cannot be resolved is REFUSED — the BF4 lesson genera
 test('#814 a condition with no text is refused — evidence for nothing is not evidence', async () => {
   const s = await startRestServer({ board: board() });
   try {
-    const r = await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+    const r = await patchWithVersion(s.baseUrl, 1, {
       acceptance: [{ condition: '', evidence: [SHA] }], by: 'ada',
     });
     assert.equal(r.status, 400);
@@ -155,7 +156,7 @@ test('#814 DELETING the card removes its ReleaseCondition nodes', async () => {
   // subject shape, same sweep, and this time the case is pinned before the code.
   const s = await startRestServer({ board: board() });
   try {
-    await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+    await patchWithVersion(s.baseUrl, 1, {
       acceptance: [{ condition: 'RC1', evidence: [SHA] }], by: 'ada',
     });
     const before = await api(s.baseUrl, 'POST', '/api/graph', {
@@ -177,10 +178,10 @@ test('#814 DELETING the card removes its ReleaseCondition nodes', async () => {
 test('#814 dropping a condition drops its node — no stale acceptance', async () => {
   const s = await startRestServer({ board: board() });
   try {
-    await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+    await patchWithVersion(s.baseUrl, 1, {
       acceptance: [{ condition: 'RC1', evidence: [SHA] }, { condition: 'RC2', evidence: [] }], by: 'ada',
     });
-    await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+    await patchWithVersion(s.baseUrl, 1, {
       acceptance: [{ condition: 'RC1', evidence: [SHA] }], by: 'ada',
     });
     const q = await api(s.baseUrl, 'POST', '/api/graph', {

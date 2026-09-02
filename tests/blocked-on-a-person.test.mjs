@@ -27,6 +27,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { startRestServer, makeBoardFixture } from './helpers/harness.mjs';
+import { patchWithVersion } from './helpers/versioned-patch.mjs';
 
 const api = async (baseUrl, method, path, body) => {
   const res = await fetch(`${baseUrl}${path}`, {
@@ -53,7 +54,7 @@ const board = () => makeBoardFixture({
 test('#881 a card can be blocked on a PERSON, with no blocking card', async () => {
   const s = await startRestServer({ board: board() });
   try {
-    const r = await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+    const r = await patchWithVersion(s.baseUrl, 1, {
       blockers: [{ person: 'ada', status: 'open', note: 'edit-mode choice' }], by: 'ada',
     });
     assert.equal(r.status, 200, JSON.stringify(r.body));
@@ -69,7 +70,7 @@ test('#881 THE CONCIERGE QUERY — "what is waiting on me", in one query', async
   // ⭐ This is the question that had no answer. It is the whole card.
   const s = await startRestServer({ board: board() });
   try {
-    await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+    await patchWithVersion(s.baseUrl, 1, {
       blockers: [{ person: 'ada', status: 'open', note: 'edit-mode choice' }], by: 'ada',
     });
     const q = await api(s.baseUrl, 'POST', '/api/graph', {
@@ -92,7 +93,7 @@ test('#881 a CLEARED person-blocker drops out of "waiting on me"', async () => {
   // filter, or the standing query accumulates instead of converging.
   const s = await startRestServer({ board: board() });
   try {
-    await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+    await patchWithVersion(s.baseUrl, 1, {
       blockers: [{ person: 'ada', status: 'cleared', note: 'he chose' }], by: 'ada',
     });
     const q = await api(s.baseUrl, 'POST', '/api/graph', {
@@ -113,7 +114,7 @@ test('#881 a CLEARED person-blocker drops out of "waiting on me"', async () => {
 test('#881 person and card blockers COEXIST on one card and stay distinguishable', async () => {
   const s = await startRestServer({ board: board() });
   try {
-    await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+    await patchWithVersion(s.baseUrl, 1, {
       blockers: [
         { card: 2, owner: 'grace', status: 'open' },
         { person: 'ada', status: 'open' },
@@ -141,7 +142,7 @@ test('#881 owner and person are NOT the same thing', async () => {
   // only the second.
   const s = await startRestServer({ board: board() });
   try {
-    await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+    await patchWithVersion(s.baseUrl, 1, {
       blockers: [{ card: 2, owner: 'ada', status: 'open' }], by: 'ada',
     });
     const q = await api(s.baseUrl, 'POST', '/api/graph', {
@@ -157,7 +158,7 @@ test('#881 owner and person are NOT the same thing', async () => {
 test('#881 a blocker naming neither a card nor a person is refused', async () => {
   const s = await startRestServer({ board: board() });
   try {
-    const r = await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+    const r = await patchWithVersion(s.baseUrl, 1, {
       blockers: [{ status: 'open', note: 'something vague' }], by: 'ada',
     });
     assert.equal(r.status, 400, 'a blocker must name what blocks');
@@ -168,7 +169,7 @@ test('#881 DELETING the card removes its person-blocker node', async () => {
   // The orphan case, written before the code — twice burned, once shy.
   const s = await startRestServer({ board: board() });
   try {
-    await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+    await patchWithVersion(s.baseUrl, 1, {
       blockers: [{ person: 'ada', status: 'open' }], by: 'ada',
     });
     await fetch(`${s.baseUrl}/api/cards/1`, { method: 'DELETE' });
@@ -210,7 +211,7 @@ test('#881 DELETING the card removes its person-blocker node', async () => {
 test('#881 ⛔ CLEARING a blocker REPLACES its status — it does not accumulate one', async () => {
   const s = await startRestServer({ board: board() });
   try {
-    await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+    await patchWithVersion(s.baseUrl, 1, {
       blockers: [{ person: 'ada', status: 'open', note: 'waiting' }], by: 'ada',
     });
     const open = await api(s.baseUrl, 'POST', '/api/graph', {
@@ -218,7 +219,7 @@ test('#881 ⛔ CLEARING a blocker REPLACES its status — it does not accumulate
     });
     assert.deepEqual(open.body.rows, [{ st: 'open' }], 'control: one status while open');
 
-    await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+    await patchWithVersion(s.baseUrl, 1, {
       blockers: [{ person: 'ada', status: 'cleared', note: 'they answered' }], by: 'ada',
     });
     const after = await api(s.baseUrl, 'POST', '/api/graph', {
@@ -239,10 +240,10 @@ test('#881 ⛔ CLEARING a blocker REPLACES its status — it does not accumulate
 test('#881 the NOTE is replaced too, not appended alongside the old one', async () => {
   const s = await startRestServer({ board: board() });
   try {
-    await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+    await patchWithVersion(s.baseUrl, 1, {
       blockers: [{ person: 'ada', status: 'open', note: 'first reason' }], by: 'ada',
     });
-    await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+    await patchWithVersion(s.baseUrl, 1, {
       blockers: [{ person: 'ada', status: 'open', note: 'second reason' }], by: 'ada',
     });
     const r = await api(s.baseUrl, 'POST', '/api/graph', {

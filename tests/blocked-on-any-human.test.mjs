@@ -41,6 +41,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { startRestServer, makeBoardFixture } from './helpers/harness.mjs';
+import { patchWithVersion } from './helpers/versioned-patch.mjs';
 
 // Same shape the #881 suite defines locally — the harness exports the server,
 // not a client.
@@ -72,7 +73,7 @@ const board = () => makeBoardFixture({
 test('#966 a blocker can say ANY HUMAN, naming nobody', async () => {
   const s = await startRestServer({ board: board() });
   try {
-    const r = await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+    const r = await patchWithVersion(s.baseUrl, 1, {
       blockers: [{ anyHuman: true, status: 'open', note: 'one bounded round trip' }], by: 'ada',
     });
     assert.equal(r.status, 200, JSON.stringify(r.body));
@@ -92,10 +93,10 @@ test('#966 a blocker can say ANY HUMAN, naming nobody', async () => {
 test('#966 a NAMED-person query does NOT match the any-human blocker', async () => {
   const s = await startRestServer({ board: board() });
   try {
-    await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+    await patchWithVersion(s.baseUrl, 1, {
       blockers: [{ anyHuman: true, status: 'open', note: 'anyone' }], by: 'ada',
     });
-    await api(s.baseUrl, 'PATCH', '/api/cards/3', {
+    await patchWithVersion(s.baseUrl, 3, {
       blockers: [{ person: 'ada', status: 'open', note: 'genuinely hers' }], by: 'ada',
     });
 
@@ -117,10 +118,10 @@ test('#966 the ANY-HUMAN query returns the any-human set', async () => {
   // is a state nobody acts on.
   const s = await startRestServer({ board: board() });
   try {
-    await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+    await patchWithVersion(s.baseUrl, 1, {
       blockers: [{ anyHuman: true, status: 'open', note: 'anyone' }], by: 'ada',
     });
-    await api(s.baseUrl, 'PATCH', '/api/cards/3', {
+    await patchWithVersion(s.baseUrl, 3, {
       blockers: [{ person: 'ada', status: 'open', note: 'genuinely hers' }], by: 'ada',
     });
 
@@ -148,7 +149,7 @@ test('#966 the ANY-HUMAN query returns the any-human set', async () => {
 test('#966 anyHuman:false is REFUSED, so absence cannot masquerade as a decision', async () => {
   const s = await startRestServer({ board: board() });
   try {
-    const r = await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+    const r = await patchWithVersion(s.baseUrl, 1, {
       blockers: [{ anyHuman: false, status: 'open' }], by: 'ada',
     });
     assert.equal(r.status, 400, JSON.stringify(r.body));
@@ -160,7 +161,7 @@ test('#966 EXACTLY ONE target — naming a person AND anyHuman is refused', asyn
   // states and an entry meaning either cannot be read as one.
   const s = await startRestServer({ board: board() });
   try {
-    const r = await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+    const r = await patchWithVersion(s.baseUrl, 1, {
       blockers: [{ person: 'ada', anyHuman: true, status: 'open' }], by: 'ada',
     });
     assert.equal(r.status, 400, JSON.stringify(r.body));
@@ -181,13 +182,13 @@ test('#966 EXACTLY ONE target — naming a person AND anyHuman is refused', asyn
 test('#966 all THREE blocker kinds coexist without collapsing #881\'s distinction', async () => {
   const s = await startRestServer({ board: board() });
   try {
-    await api(s.baseUrl, 'PATCH', '/api/cards/1', {
+    await patchWithVersion(s.baseUrl, 1, {
       blockers: [
         { card: 2, owner: 'bo', status: 'open', note: 'bo is chasing #2' },
         { anyHuman: true, status: 'open', note: 'anyone' },
       ], by: 'ada',
     });
-    await api(s.baseUrl, 'PATCH', '/api/cards/3', {
+    await patchWithVersion(s.baseUrl, 3, {
       blockers: [{ person: 'ada', status: 'open', note: 'hers' }], by: 'ada',
     });
 

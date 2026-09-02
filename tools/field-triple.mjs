@@ -220,11 +220,17 @@ export async function auditPatchField(baseUrl, probe) {
   const wellFormed = resolveProbeValue(probe.wellFormed, ctx);
   const malformed = resolveProbeValue(probe.malformed, ctx);
 
+  // #1132 — the probe reads the card's version and sends `ifVersion`, because
+  // the whole-array fields refuse a write without one. The audit is GIVEN the
+  // precondition the way a seat is; it is not taught to expect the refusal.
+  // The probe's own body wins the spread, so the `ifVersion` probe row still
+  // measures what it sends rather than what this closure supplied.
   const patch = async (shortId, body) => {
+    const cur = await (await fetch(`${baseUrl}/api/cards/${shortId}`)).json();
     const res = await fetch(`${baseUrl}/api/cards/${shortId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ by: 'ada', ...body }),
+      body: JSON.stringify({ by: 'ada', ifVersion: cur.version, ...body }),
     });
     return { status: res.status, body: await res.json() };
   };
