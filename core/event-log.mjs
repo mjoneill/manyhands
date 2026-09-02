@@ -67,7 +67,7 @@ export const REDACTION_MARKER_PREFIX = '[redacted';
 // per the warning that follows: a declaration that could not be rebuilt from
 // the log would be less durable than the cards beside it, and the scheduler
 // reads it — so a dropped replay would silently restore a seat to eligible.
-export const ENTITY_KINDS = new Set(['card', 'conversation', 'column', 'wiki', 'tending', 'memory', 'label', 'decision', 'seat-state', 'predicate', 'obligation']);
+export const ENTITY_KINDS = new Set(['card', 'conversation', 'column', 'wiki', 'tending', 'memory', 'label', 'decision', 'seat-state', 'predicate', 'obligation', 'wake']);
 
 /** Which board collection a given entity kind projects into. */
 // #805 blocker 6: tending rides the SAME door as every family — the ruling was
@@ -101,6 +101,8 @@ const COLLECTION = {
   // not be rebuilt from the log would be less durable than the desk-stamp
   // prose it replaces.
   obligation: 'obligations',
+  // #1118 — wakes: append-only, never edited; replay only ever pushes.
+  wake: 'wakes',
 };
 
 const SEGMENT_RE = /^events-\d{4}-\d{2}-\d{2}\.jsonl$/;

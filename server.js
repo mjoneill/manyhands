@@ -1952,12 +1952,57 @@ async function handleAssert(req, res) {
               + `definition: "${def['scrum:definition']}". Nothing in this batch was applied.`,
           };
         }
+        // #1118 slice B — the subject may be a CARD or an OBLIGATION. The first
+        // non-card subject the verb resolves: Option D's "any node type" earning
+        // its keep without a parallel storage shape.
         const subjIdx = findCardIndex(data, a.subject);
-        if (subjIdx < 0) {
+        const subjObligation = subjIdx < 0
+          ? obligationsOf(data).find((e) => e['@id'] === String(a.subject)) ?? null
+          : null;
+        if (subjIdx < 0 && !subjObligation) {
           return {
             status: 400,
             error: `assertions[${i}]: subject ${JSON.stringify(a.subject)} does not resolve to a card `
-              + '(shortId or uuid). Nothing in this batch was applied.',
+              + '(shortId or uuid) or an obligation (@id). Nothing in this batch was applied.',
+          };
+        }
+        if (a.predicate === 'scrum:dischargedBy') {
+          if (!subjObligation) {
+            return {
+              status: 400,
+              error: `assertions[${i}]: scrum:dischargedBy takes an OBLIGATION subject (its @id); `
+                + `${JSON.stringify(a.subject)} is a card. Nothing in this batch was applied.`,
+            };
+          }
+          // ONE object kind per predicate (the registry's own convention): a person.
+          // The commit that met it is scrum:evidencedBy — the relation acceptance
+          // evidence already uses, so "a commit" has one encoding in this graph.
+          if (typeof a.object !== 'string' || !a.object.trim() || /^[0-9a-f]{40}$/.test(a.object)) {
+            return {
+              status: 400,
+              error: `assertions[${i}]: scrum:dischargedBy takes a PERSON key as object (got ${JSON.stringify(a.object)}); `
+                + 'a commit that met an obligation is scrum:evidencedBy with a full 40-character sha. Nothing in this batch was applied.',
+            };
+          }
+          plan.push({ kind: 'discharge', obligation: subjObligation, who: a.object.trim(), a });
+          continue;
+        }
+        if (a.predicate === 'scrum:evidencedBy' && subjObligation) {
+          if (typeof a.object !== 'string' || !/^[0-9a-f]{40}$/.test(a.object)) {
+            return {
+              status: 400,
+              error: `assertions[${i}]: scrum:evidencedBy on an obligation takes a full 40-character lowercase git sha `
+                + `as object (got ${JSON.stringify(a.object)}) — one commit is one node. Nothing in this batch was applied.`,
+            };
+          }
+          plan.push({ kind: 'evidence', obligation: subjObligation, sha: a.object, a });
+          continue;
+        }
+        if (subjObligation) {
+          return {
+            status: 400,
+            error: `assertions[${i}]: ${a.predicate} takes a card subject; ${JSON.stringify(a.subject)} is an `
+              + 'obligation. Nothing in this batch was applied.',
           };
         }
         const subject = data.cards[subjIdx];
@@ -2011,9 +2056,33 @@ async function handleAssert(req, res) {
       // ── APPLY — everything validated; one mutation pass, ONE event boundary.
       const now = new Date().toISOString();
       const touched = new Map(); // card.id → card
+      const obligationEvents = [];
       const results = [];
       for (const p of plan) {
-        if (p.kind === 'parent') {
+        if (p.kind === 'evidence') {
+          const cur = obligationsOf(data).find((e) => e['@id'] === p.obligation['@id']) ?? p.obligation;
+          const list = [].concat(cur['scrum:evidencedBy'] || []);
+          if (list.includes(p.sha)) { results.push(wire(p.a, 'noop')); continue; }
+          const next = { ...cur, 'scrum:evidencedBy': [...list, p.sha] };
+          data.obligations = obligationsOf(data).map((e) => (e['@id'] === next['@id'] ? next : e));
+          obligationEvents.push(obligationEvent('update', next, by));
+          results.push(wire(p.a, 'evidence-recorded'));
+        } else if (p.kind === 'discharge') {
+          // The FIRST closure stands. A re-closure is a noop — LOUD when it differs:
+          // the caller learns what stands instead of a silence indistinguishable
+          // from success (#1118 review, item 4).
+          if (p.obligation['scrum:status'] !== 'open') {
+            const same = p.obligation['scrum:dischargedBy'] === p.who;
+            results.push({ ...wire(p.a, same ? 'noop' : 'already-closed'),
+              ...(same ? {} : { existing: { dischargedBy: p.obligation['scrum:dischargedBy'], dischargedAt: p.obligation['scrum:dischargedAt'] } }) });
+            continue;
+          }
+          const closed = { ...p.obligation, 'scrum:status': 'discharged', 'scrum:dischargedBy': p.who, 'scrum:dischargedAt': now };
+          data.obligations = obligationsOf(data).map((e) => (e['@id'] === closed['@id'] ? closed : e));
+          p.obligation = closed;
+          obligationEvents.push(obligationEvent('update', closed, by));
+          results.push(wire(p.a, 'obligation-closed'));
+        } else if (p.kind === 'parent') {
           if (p.subject.parent === p.object.id) { results.push(wire(p.a, 'noop')); continue; }
           p.subject.parent = p.object.id;
           p.subject.updatedAt = now;
@@ -2038,13 +2107,14 @@ async function handleAssert(req, res) {
           results.push(wire(p.a, 'sha-recorded'));
         }
       }
-      if (touched.size > 0) {
+      if (touched.size > 0 || obligationEvents.length > 0) {
         for (const c of touched.values()) bumpCardVersion(c); // #534 — the ONE version rule
-        writeBoard(data, [...touched.values()].map((c) => cardEvent('update', c, by)));
+        // ONE writeBoard, ONE event boundary, across node kinds.
+        writeBoard(data, [...[...touched.values()].map((c) => cardEvent('update', c, by)), ...obligationEvents]);
       }
       return {
         status: 200,
-        wire: { applied: results.filter((r) => r.effect !== 'noop').length, results },
+        wire: { applied: results.filter((r) => r.effect !== 'noop' && r.effect !== 'already-closed').length, results },
       };
     });
     if (result.error) return sendJSON(res, result.status, { error: result.error });
@@ -2079,7 +2149,7 @@ const obligationEvent = (op, e, actor) => ({
 
 function obligationToWire(e) {
   return {
-    id: e['@id'], holder: e['scrum:holder'], about: e.about, kind: e['scrum:kind'],
+    id: e['@id'], owedBy: e['scrum:owedBy'], about: e.about, kind: e['scrum:kind'],
     status: e['scrum:status'], note: e.text ?? '', createdBy: e.creator, createdAt: e.dateCreated,
     dischargedBy: e['scrum:dischargedBy'] ?? null, dischargedAt: e['scrum:dischargedAt'] ?? null,
   };
@@ -2101,13 +2171,55 @@ function resolveNodeId(data, ref) {
   return null;
 }
 
+// ── #1118 slice C — WAKES: the one time-shaped fact attached to a seat ─────
+// Append-only: a wake is never edited or deleted, so "when did I last wake" is
+// the newest one, and "what changed since" is changes_since(its at).
+const WAKE_ID = () => `https://scrumboard.local/wake/${crypto.randomUUID()}`;
+function wakesOf(data) {
+  return Array.isArray(data.wakes) ? data.wakes : [];
+}
+const wakeEvent = (e, actor) => ({ op: 'create', actor, entity: { kind: 'wake', id: e['@id'] }, state: e });
+const wakeToWire = (e) => ({ id: e['@id'], seat: e['scrum:wokeSeat'], at: e['scrum:wokeAt'], note: e.text ?? '' });
+
+async function handleCreateWake(req, res) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const by = typeof body.by === 'string' && body.by.trim() ? body.by.trim() : null;
+    if (!by) return sendJSON(res, 400, { error: 'by is required — the seat that woke. Declared, not authenticated.' });
+    const result = await withWriteLock(async () => {
+      const data = readBoard();
+      const entity = {
+        '@id': WAKE_ID(), '@type': 'scrum:Wake',
+        'scrum:wokeSeat': by, 'scrum:wokeAt': new Date().toISOString(),
+        text: typeof body.note === 'string' ? body.note : '',
+      };
+      data.wakes = [...wakesOf(data), entity];
+      writeBoard(data, [wakeEvent(entity, by)]);
+      return { status: 201, wire: wakeToWire(entity) };
+    });
+    sendJSON(res, result.status, result.wire);
+  } catch (e) {
+    console.error('POST /api/wakes:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+
+function handleListWakes(req, res) {
+  const q = parseQuery(req.url);
+  let out = wakesOf(readBoard()).map(wakeToWire).sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0)); // newest first
+  if (q.seat) out = out.filter((w) => w.seat === q.seat);
+  const limit = Number.parseInt(q.limit, 10);
+  if (Number.isInteger(limit) && limit > 0) out = out.slice(0, limit);
+  sendJSON(res, 200, out);
+}
+
 async function handleCreateObligation(req, res) {
   try {
     const body = JSON.parse(await readBody(req));
     const by = typeof body.by === 'string' && body.by.trim() ? body.by.trim() : null;
     if (!by) return sendJSON(res, 400, { error: 'by is required — who records this obligation. Declared, not authenticated.' });
-    const holder = typeof body.holder === 'string' && body.holder.trim() ? body.holder.trim() : null;
-    if (!holder) return sendJSON(res, 400, { error: 'holder is required — the seat that owes this. One holder per obligation; two holders is two obligations.' });
+    const owedBy = typeof body.owedBy === 'string' && body.owedBy.trim() ? body.owedBy.trim() : null;
+    if (!owedBy) return sendJSON(res, 400, { error: 'owedBy is required — the seat that owes this. One debtor per obligation; joint obligations are N separate ones.' });
     if (!OBLIGATION_KINDS.has(body.kind)) {
       return sendJSON(res, 400, { error: `kind must be one of steward | review | promise | tripwire (got ${JSON.stringify(body.kind)})` });
     }
@@ -2120,7 +2232,7 @@ async function handleCreateObligation(req, res) {
       const now = new Date().toISOString();
       const entity = {
         '@id': OBLIGATION_ID(), '@type': 'scrum:Obligation',
-        'scrum:holder': holder, about, 'scrum:kind': body.kind, 'scrum:status': 'open',
+        'scrum:owedBy': owedBy, about, 'scrum:kind': body.kind, 'scrum:status': 'open',
         text: typeof body.note === 'string' ? body.note : '',
         creator: by, dateCreated: now,
       };
@@ -2139,7 +2251,7 @@ function handleListObligations(req, res) {
   const q = parseQuery(req.url);
   let out = obligationsOf(readBoard()).map(obligationToWire);
   // Every filter is an exact match; a holder with nothing is an EMPTY LIST.
-  if (q.holder) out = out.filter((o) => o.holder === q.holder);
+  if (q.owedBy) out = out.filter((o) => o.owedBy === q.owedBy);
   if (q.status) out = out.filter((o) => o.status === q.status);
   if (q.about) out = out.filter((o) => o.about === q.about);
   if (q.kind) out = out.filter((o) => o.kind === q.kind);
@@ -2161,9 +2273,16 @@ async function handleUpdateObligation(req, res, rawId) {
       if (!existing) return { status: 404, wire: { error: `no obligation ${id}` } };
       // Already closed: the FIRST closure stands. A second is a noop, not an overwrite.
       if (existing['scrum:status'] !== 'open') return { status: 200, wire: obligationToWire(existing) };
-      const now = new Date().toISOString();
+      // An explicit dischargedAt records a closure learned about LATER; without
+      // one, a backfilled row would carry a plausible, false "now" (#1118 review).
+      let when = new Date().toISOString();
+      if (body.dischargedAt !== undefined) {
+        const t = new Date(String(body.dischargedAt));
+        if (Number.isNaN(t.getTime())) return { status: 400, wire: { error: `dischargedAt must be an ISO-8601 timestamp (got ${JSON.stringify(body.dischargedAt)})` } };
+        when = t.toISOString();
+      }
       const closed = {
-        ...existing, 'scrum:status': body.status, 'scrum:dischargedBy': by, 'scrum:dischargedAt': now,
+        ...existing, 'scrum:status': body.status, 'scrum:dischargedBy': by, 'scrum:dischargedAt': when,
         ...(typeof body.note === 'string' && body.note.trim() ? { text: `${existing.text ? existing.text + '\n' : ''}${body.note.trim()}` } : {}),
       };
       data.obligations = obligationsOf(data).map((e) => (e['@id'] === id ? closed : e));
@@ -5452,6 +5571,8 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/predicates$/,           fn: (req, res) => handleRegisterPredicate(req, res) },
   { method: 'POST',   re: /^\/api\/assert$/,               fn: (req, res) => handleAssert(req, res) },
   { method: 'POST',   re: /^\/api\/decisions$/,            fn: (req, res) => handleCreateDecision(req, res) },
+  { method: 'GET',    re: /^\/api\/wakes$/,                fn: (req, res) => handleListWakes(req, res) },
+  { method: 'POST',   re: /^\/api\/wakes$/,                fn: (req, res) => handleCreateWake(req, res) },
   { method: 'GET',    re: /^\/api\/obligations$/,          fn: (req, res) => handleListObligations(req, res) },
   { method: 'POST',   re: /^\/api\/obligations$/,          fn: (req, res) => handleCreateObligation(req, res) },
   { method: 'PATCH',  re: /^\/api\/obligations\/([^\/]+)$/, fn: (req, res, m) => handleUpdateObligation(req, res, m[1]) },

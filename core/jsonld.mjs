@@ -285,6 +285,8 @@ const isPredicateDefinition = (entity) => entity && entity['@type'] === 'scrum:P
 // #1118 — obligations are their own class: "what did this seat promise" is a
 // filter over promises, not over memories or decisions that mention one.
 const isObligation = (entity) => entity && entity['@type'] === 'scrum:Obligation';
+// #1118 — a wake is the one time-shaped fact that attaches to a SEAT.
+const isWake = (entity) => entity && entity['@type'] === 'scrum:Wake';
 
 /**
  * ⛔ ENFORCE the ordering contract rather than merely preserving it.
@@ -350,7 +352,7 @@ const nodeToColumn = ({ '@type': _t, '@id': _i, identifier, name, 'scrum:order':
 export function domainToJsonLd(domain) {
   const {
     nodes = [], messages = [], people = [], columns = [],
-    tending = [], memories = [], decisions = [], predicates = [], obligations = [], labelAliases = [], _unmodelled = [], _README, ...meta
+    tending = [], memories = [], decisions = [], predicates = [], obligations = [], wakes = [], labelAliases = [], _unmodelled = [], _README, ...meta
   } = domain;
   const doc = {};
   if (_README !== undefined) doc._README = _README;   // first key — JSON.stringify keeps insertion order
@@ -373,6 +375,7 @@ export function domainToJsonLd(domain) {
     ...decisions,
     ...predicates,
     ...obligations,
+    ...wakes,
     // #804 — entities of a class this projection does not model ride through
     // verbatim rather than being dropped. Silent deletion is the other bad
     // answer to the fallthrough bug: a phantom card is at least visible.
@@ -428,11 +431,13 @@ export function jsonLdToDomain(doc) {
   // #1118 — same rule again.
   const obligations = graph.filter(isObligation);
   if (obligations.length) domain.obligations = obligations;
+  const wakes = graph.filter(isWake);
+  if (wakes.length) domain.wakes = wakes;
   // Anything recognised by NO predicate is kept verbatim so the serializer
   // stays lossless. It is never a card and never silently discarded.
   const unmodelled = graph.filter(
     (e) => !isCard(e) && !isMessage(e) && !isPerson(e) && !isColumn(e) && !isTending(e)
-      && !isMemory(e) && !isDecision(e) && !isPredicateDefinition(e) && !isObligation(e),
+      && !isMemory(e) && !isDecision(e) && !isPredicateDefinition(e) && !isObligation(e) && !isWake(e),
   );
   if (unmodelled.length) domain._unmodelled = unmodelled;
   if (Array.isArray(doc._labelAliases) && doc._labelAliases.length) domain.labelAliases = doc._labelAliases;

@@ -1254,17 +1254,18 @@ function buildMcpServer() {
       + 'unregistered predicate fails the WHOLE batch and names what to do (register it first via '
       + 'predicate_register). Not a second write path: each assertion lands in the store\'s canonical shape '
       + '(schema:isPartOf → parent + apex labels, cycle-guarded · scrum:blockedBy → relationships edge · '
-      + 'scrum:implementedBy → full 40-char sha) and projects forward through the same event boundary as '
-      + 'every card write. Derived predicates (scrum:mentionsCard) refuse with their own definition quoted. '
+      + 'scrum:implementedBy → full 40-char sha · scrum:dischargedBy(obligation, person) → the obligation closes · scrum:evidencedBy(obligation, sha) → the commit that met it) '
+      + 'and projects forward through the same event boundary as every card write. The subject may be a card '
+      + '(shortId/uuid) or an obligation (@id) — #1118. Derived predicates (scrum:mentionsCard) refuse with their own definition quoted. '
       + 'An assertion already true is a NOOP, not an error. One failure refuses everything — nothing '
       + 'partial ever lands.',
     inputSchema: {
       by: z.string().min(1).describe('Who asserts. Declared, not authenticated.'),
       assertions: z.array(z.object({
-        subject: z.union([z.number(), z.string()]).describe('Card shortId or uuid'),
+        subject: z.union([z.number(), z.string()]).describe('Card shortId or uuid — or an obligation @id (for scrum:dischargedBy)'),
         predicate: z.string().min(1).describe('A REGISTERED prefixed predicate, e.g. "scrum:blockedBy"'),
         object: z.union([z.number(), z.string()])
-          .describe('Card shortId/uuid — or, for scrum:implementedBy, a full 40-character git sha'),
+          .describe('Card shortId/uuid — or a full 40-character git sha (scrum:implementedBy), or a person key (scrum:dischargedBy on an obligation)'),
       })).min(1).describe('The assertions, applied atomically in order'),
     },
   }, async ({ by, assertions }) => {
@@ -1272,40 +1273,70 @@ function buildMcpServer() {
   });
 
   // ── #1118 slice A — OBLIGATIONS: what a seat promised, as a node ──────────
+  // ── #1118 slice C — WAKES ───────────────────────────────────────────────
+  mcp.registerTool('seat_wake', {
+    description: 'Record that this seat WOKE — after a compaction, a restart, a fresh context (#1118). '
+      + 'Append-only; never edited. It is the anchor for continuity: "what changed since MY last wake" is '
+      + 'wake_list(seat, limit 1) then changes_since(at). Replaces the 30 KB desk-stamp ritual with a delta. '
+      + 'Call it FIRST on a fresh context, before reading anything, so the anchor is honest about when you '
+      + 'started reading.',
+    inputSchema: {
+      by: z.string().min(1).describe('The seat that woke. Declared, not authenticated.'),
+      note: z.string().optional().describe('One line: why this wake (compaction, restart, new session)'),
+    },
+  }, async ({ by, note }) => {
+    return jsonResult(await apiCall('POST', '/api/wakes', { by, note }));
+  });
+
+  mcp.registerTool('wake_list', {
+    description: 'List wakes, newest first (#1118). `seat` + `limit: 1` is "when did I last wake" — the '
+      + 'timestamp to hand changes_since. A seat that never woke returns an EMPTY LIST, never an error.',
+    inputSchema: {
+      seat: z.string().optional().describe('Only this seat\'s wakes'),
+      limit: z.number().int().positive().optional().describe('Newest N'),
+    },
+  }, async ({ seat, limit } = {}) => {
+    const q = new URLSearchParams();
+    if (seat) q.set('seat', seat);
+    if (limit) q.set('limit', String(limit));
+    const qs = q.toString();
+    return jsonResult(await apiCall('GET', `/api/wakes${qs ? '?' + qs : ''}`));
+  });
+
   mcp.registerTool('obligation_create', {
     description: 'Record an OBLIGATION — what a seat PROMISED, as a queryable node (#1118, born in the '
       + 'graph per Decision aaf1774b). A steward role, a review owed, a promise, a tripwire: things that '
       + 'today live only in desk-stamp prose and commons posts, and that a waking seat cannot ask for. '
       + '`about` may name ANY node — a card (shortId or uuid) or the @id of a memory, decision, predicate '
       + 'or obligation; a subject naming nothing is REFUSED, because an obligation about nothing is prose '
-      + 'again. One holder per obligation: two holders is two obligations. Opens `open`; close it with '
+      + 'again. One debtor per obligation — joint obligations are deliberately not representable; encode them as N separate ones. Opens `open`; close it with '
       + 'obligation_update (discharged | lapsed). "What do I hold open?" is then ONE query: '
-      + '`?o a scrum:Obligation ; scrum:holder person:<seat> ; scrum:status "open"`.',
+      + '`?o a scrum:Obligation ; scrum:owedBy person:<seat> ; scrum:status "open"`.',
     inputSchema: {
       by: z.string().min(1).describe('Who records this. Declared, not authenticated.'),
-      holder: z.string().min(1).describe('The seat that OWES this — one holder'),
+      owedBy: z.string().min(1).describe('The seat that OWES this — one debtor'),
       about: z.union([z.number(), z.string()]).describe('The node it is about: card shortId/uuid, or any entity @id'),
       kind: z.enum(['steward', 'review', 'promise', 'tripwire']).describe('What kind of promise'),
       note: z.string().optional().describe('The promise in the holder\'s own words'),
     },
-  }, async ({ by, holder, about, kind, note }) => {
-    return jsonResult(await apiCall('POST', '/api/obligations', { by, holder, about, kind, note }));
+  }, async ({ by, owedBy, about, kind, note }) => {
+    return jsonResult(await apiCall('POST', '/api/obligations', { by, owedBy, about, kind, note }));
   });
 
   mcp.registerTool('obligation_list', {
-    description: 'List obligations (#1118), filterable by holder, status (open | discharged | lapsed), '
-      + 'about (a node id) and kind. Every filter is an exact match; a holder with nothing returns an '
+    description: 'List obligations (#1118), filterable by owedBy, status (open | discharged | lapsed), '
+      + 'about (a node id) and kind. Every filter is an exact match; a seat that owes nothing returns an '
       + 'EMPTY LIST, never an error — "nothing owed" is a common and correct answer. For the graph shape '
       + 'of the same question, query scrum:Obligation directly.',
     inputSchema: {
-      holder: z.string().optional().describe('Only obligations this seat holds'),
+      owedBy: z.string().optional().describe('Only obligations this seat owes'),
       status: z.enum(['open', 'discharged', 'lapsed']).optional().describe('Only this status'),
       about: z.string().optional().describe('Only obligations about this node id (card uuid or entity @id)'),
       kind: z.enum(['steward', 'review', 'promise', 'tripwire']).optional().describe('Only this kind'),
     },
-  }, async ({ holder, status, about, kind } = {}) => {
+  }, async ({ owedBy, status, about, kind } = {}) => {
     const q = new URLSearchParams();
-    if (holder) q.set('holder', holder);
+    if (owedBy) q.set('owedBy', owedBy);
     if (status) q.set('status', status);
     if (about) q.set('about', about);
     if (kind) q.set('kind', kind);
@@ -1323,9 +1354,10 @@ function buildMcpServer() {
       by: z.string().min(1).describe('Who closes it. Declared, not authenticated.'),
       status: z.enum(['discharged', 'lapsed']).describe('How it closed'),
       note: z.string().optional().describe('Appended to the obligation\'s note — what discharged it'),
+      dischargedAt: z.string().optional().describe('ISO-8601 — when it ACTUALLY closed, for a closure recorded after the fact; defaults to now'),
     },
-  }, async ({ id, by, status, note }) => {
-    return jsonResult(await apiCall('PATCH', `/api/obligations/${encodeURIComponent(id)}`, { by, status, note }));
+  }, async ({ id, by, status, note, dischargedAt }) => {
+    return jsonResult(await apiCall('PATCH', `/api/obligations/${encodeURIComponent(id)}`, { by, status, note, dischargedAt }));
   });
 
   mcp.registerTool('decision_create', {

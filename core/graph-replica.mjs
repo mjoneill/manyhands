@@ -137,8 +137,10 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:Tending', 'scrum:SeatDeclaration', 'scrum:WorkObject',
   'scrum:PredicateDefinition', 'scrum:definition',
   // #1118 — obligations: what a seat promised, born in the graph
-  'scrum:Obligation', 'scrum:holder', 'scrum:obligationKind',
+  'scrum:Obligation', 'scrum:owedBy', 'scrum:obligationKind',
   'scrum:dischargedBy', 'scrum:dischargedAt',
+  // #1118 — wakes: the one time-shaped fact attached to a seat
+  'scrum:Wake', 'scrum:wokeSeat', 'scrum:wokeAt',
   // ⚠️ EMITTED BY THE PROJECTOR AND ABSENT FROM THIS BOARD'S DATA TODAY. Every
   // one of these was missing from the first, store-derived list; `scrum:ofSilence`
   // is the one the suite caught and the rest came from the same source scan.
@@ -760,7 +762,7 @@ function projectDecision(store, e) {
 }
 
 /**
- * #1118 — an OBLIGATION: what a seat promised, as a node. `holder` and
+ * #1118 — an OBLIGATION: what a seat promised, as a node. `owedBy` and
  * `dischargedBy` are person EDGES so "what does X hold open" and "who closed
  * it" are traversals; `about` is an entity EDGE to ANY node — card, memory,
  * decision, predicate — which is the any-node-type shape Option D promised.
@@ -772,7 +774,7 @@ function projectObligation(store, e) {
   const person = (v) => nn(String(v).startsWith('http') ? String(v) : P + v);
   const node = (v) => nn(String(v).startsWith('http') ? String(v) : E + v);
   add(A, nn(S + 'Obligation'));
-  if (e['scrum:holder']) add(nn(S + 'holder'), person(e['scrum:holder']));
+  if (e['scrum:owedBy']) add(nn(S + 'owedBy'), person(e['scrum:owedBy']));
   if (e.about) add(nn(SC + 'about'), node(e.about));
   if (e['scrum:kind']) add(nn(S + 'obligationKind'), lit(e['scrum:kind']));
   if (e['scrum:status']) add(nn(S + 'status'), lit(e['scrum:status']));
@@ -780,7 +782,26 @@ function projectObligation(store, e) {
   if (e.creator) add(nn(SC + 'creator'), person(e.creator));
   if (e.dateCreated) add(nn(SC + 'dateCreated'), lit(e.dateCreated));
   if (e['scrum:dischargedBy']) add(nn(S + 'dischargedBy'), person(e['scrum:dischargedBy']));
+  // the commit(s) that met it — the SAME relation acceptance evidence uses, so
+  // "a commit" has one encoding in this graph and joins to the node
+  // implementedBy already mints
+  for (const sha of [].concat(e['scrum:evidencedBy'] || [])) add(nn(S + 'evidencedBy'), nn(IRI.commit + String(sha)));
   if (e['scrum:dischargedAt']) add(nn(S + 'dischargedAt'), lit(e['scrum:dischargedAt']));
+}
+
+/**
+ * #1118 — a WAKE: {seat, at, note}, append-only. `wokeSeat` is a person EDGE
+ * so "my last wake" is ORDER BY DESC(?at) LIMIT 1 on one seat, and the
+ * timestamp anchors changes_since — a delta instead of a 30 KB desk re-read.
+ */
+function projectWake(store, e) {
+  const S = IRI.scrum, SC = IRI.schema, P = IRI.person;
+  const s = nn(e['@id']);
+  const add = (p, o) => store.add(oxigraph.triple(s, p, o));
+  add(A, nn(S + 'Wake'));
+  if (e['scrum:wokeSeat']) add(nn(S + 'wokeSeat'), nn(String(e['scrum:wokeSeat']).startsWith('http') ? String(e['scrum:wokeSeat']) : P + e['scrum:wokeSeat']));
+  if (e['scrum:wokeAt']) add(nn(S + 'wokeAt'), lit(e['scrum:wokeAt']));
+  if (e.text) add(nn(SC + 'text'), lit(e.text));
 }
 
 function projectMemory(store, e) {
@@ -1190,6 +1211,8 @@ function projectEntity(store, e) {
       projectDecision(store, e);
     } else if (t === 'scrum:Obligation') {
       projectObligation(store, e);
+    } else if (t === 'scrum:Wake') {
+      projectWake(store, e);
     } else if (t === 'scrum:PredicateDefinition') {
       // #945 slice 1 — the registry is graph-queryable: "what does asserting X
       // mean, and who stands behind that?" is one query, which is the whole
