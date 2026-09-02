@@ -89,7 +89,10 @@ case "${1:-}" in
       [ "$wt" = "$REPO" ] && { say "PRIMARY  $wt  [$(git -C "$wt" branch --show-current)]  (the shared dev checkout — seats do not commit here)"; continue; }
       br=$(git -C "$wt" branch --show-current 2>/dev/null || echo '(detached)')
       card=$(printf '%s' "$br" | sed -n 's|^card/\([0-9][0-9]*\)-.*|\1|p')
-      age=$(( (now - $(stat -f %m "$wt" 2>/dev/null || echo "$now")) / 86400 ))
+      # mtime portably: GNU stat first (-c fails loudly on BSD), then BSD.
+      # BSD-first is wrong: GNU `stat -f` means FILESYSTEM and exits 0.
+      mt=$(stat -c %Y "$wt" 2>/dev/null || stat -f %m "$wt" 2>/dev/null || echo "$now")
+      age=$(( (now - mt) / 86400 ))
       dirty=$(git -C "$wt" status --porcelain 2>/dev/null | grep -vc '^?? node_modules' || true)
       case "$wt" in "$HOME_DIR"/*) where="home" ;; *) where="⚠️ OUTSIDE HOME" ;; esac
       # -e follows the link: a dangling symlink (or no node_modules at all) means
