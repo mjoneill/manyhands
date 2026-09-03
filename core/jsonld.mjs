@@ -349,6 +349,26 @@ const nodeToColumn = ({ '@type': _t, '@id': _i, identifier, name, 'scrum:order':
  * keys (columns, nextShortId, lastUpdated, any future passthrough) ride in
  * `scrum:meta`. The exact inverse of jsonLdToDomain.
  */
+/**
+ * #1084 — the RANGE the `@context` already declares, DERIVED from it.
+ *
+ * `@context` types a closed set of terms as `@id` against an IRI base (#686's
+ * person set, #814's commits, #687's columns), which is a range declaration in
+ * everything but name. A predicate declaration that also carries `range` puts
+ * one fact in two homes, and "a fact with two homes cannot contradict itself,
+ * so nothing detects that it did". So this is COMPUTED from CONTEXT rather than
+ * retyped — a second literal list would be that defect one level down — and
+ * core/predicate-declarations.mjs checks against it.
+ *
+ * Terms typed `@id` with no `@base` map to null: they are edges, but the
+ * context does not say into which namespace.
+ */
+export const CONTEXT_RANGE = Object.freeze(Object.fromEntries(
+  Object.entries(CONTEXT)
+    .filter(([, v]) => v && typeof v === 'object' && v['@type'] === '@id')
+    .map(([term, v]) => [term, v['@context']?.['@base'] ?? null]),
+));
+
 export function domainToJsonLd(domain) {
   const {
     nodes = [], messages = [], people = [], columns = [],
