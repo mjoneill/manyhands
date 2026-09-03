@@ -150,7 +150,7 @@ export const SHA_POPULATION = 'implementedBy ∪ acceptance[].evidence';
  * @param {object} board
  * @param {{ roots: Array<{ root: string, resolve: (shas: string[]) => Promise<Set<string>> }> }} opts
  */
-export async function verifyShaIntegrityAcrossRoots(board, { roots }) {
+export async function verifyShaIntegrityAcrossRoots(board, { roots, deployedSha = null }) {
   const found = collectShas(board);
   const shas = [...found.keys()];
   const cardsFor = (sha) => [...found.get(sha)].sort((a, b) => a - b);
@@ -165,12 +165,49 @@ export async function verifyShaIntegrityAcrossRoots(board, { roots }) {
   }
   const rootResults = [];
   const resolvedBy = {};
+  // #1020 — RESOLUTION IS NOT ANCESTRY, and conflating them would hide work.
+  //
+  // `resolvedBy` answers "does this commit EXIST in a root". The queue needs
+  // "is it in the history production is serving" — a different question.
+  // Measured on prod 2026-09-03 (deployedSha 18b28908a): of 381 resolved shas,
+  // TEN were not ancestors of it — branches, abandoned experiments, local
+  // integration candidates. Seven cards carry one, and #1029 was in backlog
+  // being offered as ready. A `shipped` mark keyed on resolvedBy would have
+  // taken it out of the queue: real unstarted work, hidden by the fix meant to
+  // reveal hidden work — strictly worse than the defect, because today's error
+  // is visible the moment you open the card.
+  //
+  // ⭐ Computed HERE because this is where the git roots are. Production serves
+  // an export with no `.git` beside it (#1008's whole reason this stamp
+  // exists), so a reader cannot answer it — a version that computed it in the
+  // reader would pass every test on a dev box and be blind exactly in prod.
+  //
+  // ⚠️ Per (sha, root): only the root that BOTH resolved it AND has it merged
+  // vouches. Two roots can hold the same object with one of them not having
+  // merged it; an "any root" answer would re-import the defect one level up.
+  const inDeployed = {};
+  const ancestryBlind = [];
   for (const r of roots) {
     try {
       const live = await r.resolve(shas);
       let n = 0;
       for (const s of shas) if (live.has(s)) { n += 1; (resolvedBy[s] ||= []).push(r.root); }
       rootResults.push({ root: r.root, status: 'read', resolved: n });
+      if (deployedSha) {
+        // FAIL CLOSED. A root that cannot answer — no `ancestors`, or a walk
+        // that throws — vouches for nothing and is NAMED. The failure that
+        // matters here is hiding work, so an unknown answer stays plain ready.
+        if (typeof r.ancestors !== 'function') {
+          ancestryBlind.push(`${r.root}: resolver has no ancestors() — nothing from it is marked in-deployed`);
+        } else {
+          try {
+            const anc = await r.ancestors(deployedSha);
+            for (const s of shas) if (live.has(s) && anc.has(s)) (inDeployed[s] ||= []).push(r.root);
+          } catch (e) {
+            ancestryBlind.push(`${r.root}: ${String(e?.message || e).trim().split('\n')[0]}`);
+          }
+        }
+      }
     } catch (e) {
       rootResults.push({ root: r.root, status: 'unreadable', resolved: 0, error: String(e?.message || e) });
     }
@@ -188,8 +225,20 @@ export async function verifyShaIntegrityAcrossRoots(board, { roots }) {
     ? `root(s) that could not be read this time — ${unreadable.map((r) => r.root).join(', ')} — so a commit living only there reads as unresolved here. `
     : '')
     + 'A real commit not yet fetched into a root resolves as MISSING there. Unresolvable means UNVERIFIABLE FROM THESE ROOTS, not fabricated — re-check after a fetch before treating a row as an invention.';
+  // #1020 — ABSENT, not empty, when no deployed sha was given. An empty map
+  // reads as "nothing is shipped" and would silently flip every card back to
+  // plain ready; absence says the question was never asked. Same reason the
+  // blind list is stated rather than implied (#1146).
+  const ancestryBlindTo = !deployedSha
+    ? 'ancestry was NOT computed: no deployed sha was given to resolve against, so no sha is marked in-deployed'
+    : (ancestryBlind.length
+      ? `root(s) that could not answer the ancestry question — ${ancestryBlind.join(' · ')} — so a commit merged only there is NOT marked in-deployed`
+      : null);
   return { status: 'measured', population: SHA_POPULATION, enumerated, checked: enumerated,
-    roots: rootResults, resolvedBy, unresolved, ...(partial ? { partial: true } : {}), blindTo };
+    roots: rootResults, resolvedBy, unresolved, ...(partial ? { partial: true } : {}),
+    ...(deployedSha ? { inDeployed } : {}),
+    ...(ancestryBlindTo ? { ancestryBlindTo } : {}),
+    blindTo };
 }
 
 /**
@@ -259,6 +308,29 @@ export function gitRootResolver(root) {
         if (sha && kind === 'commit') live.add(sha);
       }
       return live;
+    },
+    /**
+     * #1020 — the full ancestor set of `of`, in ONE `git rev-list` per root.
+     *
+     * The alternative is `merge-base --is-ancestor` per sha: 381 processes on
+     * today's board against one. This walk is the whole history once, and the
+     * caller does set membership.
+     *
+     * ⚠️ THROWS rather than returning an empty set when the sha is unknown to
+     * this root — `git rev-list <unknown>` exits non-zero, and the caller
+     * treats a throw as "this root vouches for nothing" and names it. An empty
+     * set would be indistinguishable from "the deployed commit has no history",
+     * which is the empty-versus-blind confusion this room keeps paying for.
+     */
+    ancestors: async (of) => {
+      const { execFile } = await import('node:child_process');
+      const out = await new Promise((ok, bad) => {
+        execFile('git', ['rev-list', of], { cwd: root, maxBuffer: 64 << 20 },
+          (err, stdout, stderr) => (err ? bad(new Error(String(stderr || err.message).trim().split('\n')[0])) : ok(stdout)));
+      });
+      const anc = new Set();
+      for (const line of out.split('\n')) { const s = line.trim(); if (s) anc.add(s); }
+      return anc;
     },
   };
 }

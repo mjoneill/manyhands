@@ -37,7 +37,12 @@ async function allCards() {
 }
 
 const cards = await allCards();
-const result = await verifyShaIntegrityAcrossRoots({ cards }, { roots: ROOTS.map(gitRootResolver) });
+// #1020 — the deployed sha goes INTO the verification, not only onto the stamp
+// wrapper. Ancestry ("is this commit in the history production serves") can only
+// be answered where the git roots are; the live endpoint reads an export with no
+// `.git` beside it. Without --deployed the stamp still measures resolution and
+// says, in `ancestryBlindTo`, that ancestry was not asked.
+const result = await verifyShaIntegrityAcrossRoots({ cards }, { roots: ROOTS.map(gitRootResolver), deployedSha: DEPLOYED });
 const stamp = { resolvedAt: new Date().toISOString(), deployedSha: DEPLOYED, ...result };
 fs.writeFileSync(OUT, JSON.stringify(stamp, null, 2) + '\n');
 const rootsLine = (stamp.roots || []).map((r) => `${r.root} ${r.status}${r.status === 'read' ? ` ${r.resolved}` : ` (${r.error})`}`).join(' · ');
