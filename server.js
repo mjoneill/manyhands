@@ -3311,7 +3311,21 @@ function createCardFromPayload(body, nextShortId, labelAliases = null) {
 const EVIDENCE_SHA = /^[0-9a-f]{40}$/;
 const EVIDENCE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-function validateAcceptance(acceptance) {
+// #1158 — how alike two conditions must be to count as a REWORDING rather
+// than a new condition: the same first twelve words, or ≥ 0.8 of their word
+// sets in common. Word sets, not prefixes, so a rewrite that changes the
+// OPENING is still caught (the case a prefix detector misses).
+function conditionsLookAlike(a, b) {
+  const words = (t) => String(t).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(/\s+/).filter(Boolean);
+  const wa = words(a), wb = words(b);
+  if (!wa.length || !wb.length) return false;
+  if (wa.length >= 12 && wb.length >= 12 && wa.slice(0, 12).join(' ') === wb.slice(0, 12).join(' ')) return true;
+  const sa = new Set(wa), sb = new Set(wb);
+  let inter = 0; for (const w of sa) if (sb.has(w)) inter++;
+  const union = sa.size + sb.size - inter;
+  return union > 0 && inter / union >= 0.8;
+}
+function validateAcceptance(acceptance, { upsert = false } = {}) {
   if (!Array.isArray(acceptance)) return 'acceptance must be an array of {condition, evidence}';
   for (const a of acceptance) {
     if (!a || typeof a !== 'object' || Array.isArray(a)) return 'each acceptance entry must be an object {condition, evidence}';
@@ -3329,6 +3343,7 @@ function validateAcceptance(acceptance) {
       }
     }
     if (a.note !== undefined && a.note !== null && typeof a.note !== 'string') return 'acceptance.note must be a string';
+    if (a.replaces !== undefined && !upsert) return 'acceptance: `replaces` is an acceptanceUpsert key (a rename in place); a whole-array write states the array it wants';
     // #1041 — condition-scoped blockers. Validated HERE and not only in the MCP
     // schema: the projection's guard was written defensively BECAUSE this
     // function checked condition/evidence/note only, and a REST caller could
@@ -3807,10 +3822,37 @@ function validateCardFields(body, { checkId = true, surface = 'patch', current =
           + 'sent, matched on their key), not both — a replace and an upsert in one write are two intentions and the '
           + 'result would be neither';
       }
-      const err = field === 'acceptance' ? validateAcceptance(body[verb])
+      const err = field === 'acceptance' ? validateAcceptance(body[verb], { upsert: true })
         : field === 'blockers' ? validateBlockers(body[verb], current, body)
         : validateChecks(body[verb]);
       if (err) return err;
+      // #1158 — a REWORDED condition must not fork. The key is exact text, so
+      // an upsert whose text is near-identical to an existing condition would
+      // insert a twin beside the original (which keeps its old, often empty,
+      // evidence) and the card would read as carrying open work it does not
+      // have. `replaces: <old exact text>` names the rename; without it, a
+      // near-duplicate is refused naming the twin. Measured 2026-09-03: one
+      // fork on the board, but the rail guards the OPERATION, which every seat
+      // performs — not the artefact count.
+      if (field === 'acceptance') {
+        const existing = Array.isArray(current?.acceptance) ? current.acceptance : [];
+        for (const entry of body[verb]) {
+          if (entry.replaces !== undefined) {
+            if (typeof entry.replaces !== 'string' || !entry.replaces.trim()) return 'acceptanceUpsert: `replaces` must be the exact text of the condition being reworded';
+            if (!existing.some((e) => e.condition === entry.replaces)) {
+              return `acceptanceUpsert: \`replaces\` names no existing condition ${JSON.stringify(entry.replaces)} — send the old text exactly as stored`;
+            }
+            continue;
+          }
+          if (existing.some((e) => e.condition === entry.condition)) continue;   // an exact match is the ordinary replace
+          const twin = existing.find((e) => conditionsLookAlike(e.condition, entry.condition));
+          if (twin) {
+            return `acceptanceUpsert: ${JSON.stringify(entry.condition)} reads like a REWORDING of the existing condition `
+              + `${JSON.stringify(twin.condition)} — upserting it would insert a twin and leave the original with its old evidence. `
+              + 'To reword, send `replaces` with the old text exactly; to add a genuinely new condition, make it read differently.';
+          }
+        }
+      }
     }
   }
   // #1066 — relationshipsAdd / relationshipsRemove. PATCH-ONLY, like the
@@ -3990,6 +4032,16 @@ function upsertArrayEntries(field, existing, entries) {
   const keyOf = ARRAY_UPSERT_KEY[field];
   const next = Array.isArray(existing) ? existing.map((e) => ({ ...e })) : [];
   for (const entry of entries) {
+    // #1158 — `replaces` is a RENAME IN PLACE: the old entry's slot, its
+    // evidence, note and blockedBy survive unless the new entry supplies its
+    // own. The key never stores `replaces`.
+    if (field === 'acceptance' && typeof entry.replaces === 'string') {
+      const { replaces, ...rest } = entry;
+      const i = next.findIndex((e) => e.condition === replaces);
+      if (i >= 0) next[i] = { ...next[i], ...rest, condition: rest.condition };
+      else next.push({ ...rest });
+      continue;
+    }
     const k = keyOf(entry);
     const i = next.findIndex((e) => keyOf(e) === k);
     if (i >= 0) next[i] = { ...entry }; else next.push({ ...entry });
