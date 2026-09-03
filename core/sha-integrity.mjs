@@ -324,6 +324,19 @@ export function gitRootResolver(root) {
         const child = execFile('git', ['cat-file', '--batch-check'], { cwd: root, maxBuffer: 8 << 20 },
           (err, stdout, stderr) => (err ? bad(new Error(String(stderr || err.message).trim().split('\n')[0])) : ok(stdout)));
         child.on('error', bad);
+        // #1154 — `child.on('error')` covers the CHILD (spawn failure), not its
+        // stdin. When git exits before reading a list larger than the pipe
+        // buffer (a root that is not a repository, a git that refuses), the
+        // write raises EPIPE on the stdin socket; with no listener that is an
+        // UNHANDLED 'error' event and the whole process dies — the stamper
+        // never lands a stamp. Seen twice in CI on 2026-09-03. The exec
+        // callback above already carries the right verdict (git's own
+        // stderr), so the stdin error is acknowledged and left to it; only if
+        // git somehow exited CLEAN after refusing input do we reject here, so
+        // a silent success cannot be minted from an unread list.
+        let stdinErr = null;
+        child.stdin.on('error', (e) => { stdinErr = e; });
+        child.on('close', (code) => { if (code === 0 && stdinErr) bad(new Error(`git cat-file exited 0 without reading its input (${stdinErr.code || stdinErr.message})`)); });
         child.stdin.end(shas.join('\n') + '\n');
       });
       const live = new Set();
