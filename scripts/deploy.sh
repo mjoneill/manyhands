@@ -233,6 +233,29 @@ fi
 say "⇢ exporting to the serve directory"
 export_tree
 
+# #1008 — RESOLVE THE BOARD'S SHAS HERE, where a clone exists. The served
+# directory has no `.git` by design, so the live shaIntegrity check was
+# structurally unmeasurable in production. The deploy stands beside the clone
+# (and the operator can name the private tree too), so it resolves every
+# implementedBy / acceptance-evidence sha against every root and writes a dated
+# stamp that the live endpoint reports (SCRUM_SHA_INTEGRITY_FILE on the REST
+# job). Env-gated, no paths baked in:
+#   DEPLOY_SHA_STAMP=/path/to/sha-integrity.json   where to write the stamp
+#   DEPLOY_GIT_ROOTS=/clone:/private/tree           roots to resolve against
+#                                                   (default: the clone alone)
+# The stamp is read per request, so it needs no restart — and a stamp that
+# could not resolve is written as UNMEASURABLE, never skipped: an honest
+# "could not look" beats an old stamp posing as current.
+if [ -n "${DEPLOY_SHA_STAMP:-}" ]; then
+  say "🔏 stamping sha integrity → $DEPLOY_SHA_STAMP"
+  node "$CLONE/tools/stamp-sha-integrity.mjs" --roots "${DEPLOY_GIT_ROOTS:-$CLONE}" \
+    --out "$DEPLOY_SHA_STAMP" --deployed "$(git -C "$CLONE" rev-parse HEAD)" \
+    --api "${DEPLOY_BOARD_API:-http://127.0.0.1:3141}" \
+    || say "   ⚠️ stamp NOT written (the stamper exited non-zero); the endpoint will say so"
+else
+  say "   (no DEPLOY_SHA_STAMP — sha integrity not stamped; the live endpoint stays unmeasurable in production)"
+fi
+
 [ "$RESTART" = "0" ] && exit 0
 
 # #1138 — RESTART ONLY WHAT CHANGED. Every deploy used to kickstart both

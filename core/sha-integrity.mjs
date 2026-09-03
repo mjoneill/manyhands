@@ -132,3 +132,112 @@ export async function verifyShaIntegrity(board, { resolve }) {
 
   return { status: 'measured', checked: shas.length, unresolved, blindTo };
 }
+
+// ── #1008 — resolve at DEPLOY time, across EVERY known root; read the STAMP live ──
+//
+// The live server runs from a read-only export with no `.git` BY DESIGN (#535,
+// #586), so `verifyShaIntegrity` above is structurally unmeasurable where it
+// runs (measured 2026-08-23 and 2026-09-02). The ruling (Option B on #1008):
+// keep the export git-free and move the resolving to the deploy, which stands
+// beside a clone. #1112 item 4 refined it after a real instance — the board
+// spans TWO repositories, and nine real commits resolve only in the private
+// ops tree — so the resolver takes N roots and says which one answered.
+
+/** The population, stated beside every number so "294 checked" cannot be read as "292 checked". */
+export const SHA_POPULATION = 'implementedBy ∪ acceptance[].evidence';
+
+/**
+ * @param {object} board
+ * @param {{ roots: Array<{ root: string, resolve: (shas: string[]) => Promise<Set<string>> }> }} opts
+ */
+export async function verifyShaIntegrityAcrossRoots(board, { roots }) {
+  const found = collectShas(board);
+  const shas = [...found.keys()];
+  const cardsFor = (sha) => [...found.get(sha)].sort((a, b) => a - b);
+  const enumerated = shas.length;
+  if (!Array.isArray(roots) || roots.length === 0) {
+    return { status: 'unmeasurable', population: SHA_POPULATION, enumerated,
+      missingInput: 'no root was configured to resolve against — set the roots explicitly; a resolver with nothing to ask is not a clean board' };
+  }
+  if (enumerated === 0) {
+    return { status: 'unmeasurable', population: SHA_POPULATION, enumerated,
+      missingInput: 'no card references a commit sha, so there is nothing to verify — this is an empty population, not a clean one' };
+  }
+  const rootResults = [];
+  const resolvedBy = {};
+  for (const r of roots) {
+    try {
+      const live = await r.resolve(shas);
+      let n = 0;
+      for (const s of shas) if (live.has(s)) { n += 1; (resolvedBy[s] ||= []).push(r.root); }
+      rootResults.push({ root: r.root, status: 'read', resolved: n });
+    } catch (e) {
+      rootResults.push({ root: r.root, status: 'unreadable', resolved: 0, error: String(e?.message || e) });
+    }
+  }
+  const unreadable = rootResults.filter((r) => r.status === 'unreadable');
+  if (unreadable.length === rootResults.length) {
+    // ⛔⛔ THE CELL THIS MODULE EXISTS TO NOT PRINT: every root failed, so nothing was looked at.
+    return { status: 'unmeasurable', population: SHA_POPULATION, enumerated, roots: rootResults,
+      missingInput: 'no root could be read, so no sha was resolved: '
+        + unreadable.map((r) => `${r.root}: ${r.error}`).join(' · ') };
+  }
+  const unresolved = shas.filter((s) => !resolvedBy[s]).sort().map((sha) => ({ sha, cards: cardsFor(sha) }));
+  const partial = unreadable.length > 0;
+  const blindTo = (partial
+    ? `root(s) that could not be read this time — ${unreadable.map((r) => r.root).join(', ')} — so a commit living only there reads as unresolved here. `
+    : '')
+    + 'A real commit not yet fetched into a root resolves as MISSING there. Unresolvable means UNVERIFIABLE FROM THESE ROOTS, not fabricated — re-check after a fetch before treating a row as an invention.';
+  return { status: 'measured', population: SHA_POPULATION, enumerated, checked: enumerated,
+    roots: rootResults, resolvedBy, unresolved, ...(partial ? { partial: true } : {}), blindTo };
+}
+
+/**
+ * Read a deploy-time stamp against the LIVE board. A stamp is a point-in-time
+ * claim, so the result carries its date, its roots and its population, and
+ * separates three things a reader would otherwise conflate:
+ *   unresolved            in NO root at the stamp, and still on the board
+ *   unverifiedSinceStamp  written after the stamp — the deploy never saw it.
+ *                         Never "missing": the serving tree lags the push by
+ *                         design, and "missing" is this room's word for invented.
+ *   (dropped)             a stamp finding whose sha has since left the board
+ */
+export function readShaStamp(stamp, board) {
+  const found = collectShas(board);
+  const cardsFor = (sha) => [...(found.get(sha) || [])].sort((a, b) => a - b);
+  const enumerated = found.size;
+  const base = { resolvedAt: stamp?.resolvedAt ?? null, deployedSha: stamp?.deployedSha ?? null,
+    population: stamp?.population ?? SHA_POPULATION, enumerated };
+  if (!stamp || stamp.status !== 'measured') {
+    return { ...base, status: 'unmeasurable', roots: stamp?.roots,
+      missingInput: `the last deploy stamp was itself unmeasurable: ${stamp?.missingInput ?? 'no stamp status'}` };
+  }
+  const seen = new Set([...Object.keys(stamp.resolvedBy || {}), ...(stamp.unresolved || []).map((u) => u.sha)]);
+  const unresolved = (stamp.unresolved || []).filter((u) => found.has(u.sha)).map((u) => ({ sha: u.sha, cards: cardsFor(u.sha) }));
+  const unverifiedSinceStamp = [...found.keys()].filter((s) => !seen.has(s)).sort().map((sha) => ({ sha, cards: cardsFor(sha) }));
+  return { ...base, status: 'stamped', checked: stamp.checked, roots: stamp.roots, ...(stamp.partial ? { partial: true } : {}),
+    unresolved, unverifiedSinceStamp,
+    blindTo: `resolved at deploy (${stamp.resolvedAt}), not now: a sha written since is listed under unverifiedSinceStamp, not accused. ${stamp.blindTo || ''}`.trim() };
+}
+
+/** `git cat-file --batch-check` in one root, one process for the whole population. */
+export function gitRootResolver(root) {
+  return {
+    root,
+    resolve: async (shas) => {
+      const { execFile } = await import('node:child_process');
+      const out = await new Promise((ok, bad) => {
+        const child = execFile('git', ['cat-file', '--batch-check'], { cwd: root, maxBuffer: 8 << 20 },
+          (err, stdout, stderr) => (err ? bad(new Error(String(stderr || err.message).trim().split('\n')[0])) : ok(stdout)));
+        child.on('error', bad);
+        child.stdin.end(shas.join('\n') + '\n');
+      });
+      const live = new Set();
+      for (const line of out.split('\n')) {
+        const [sha, kind] = line.trim().split(/\s+/);
+        if (sha && kind === 'commit') live.add(sha);
+      }
+      return live;
+    },
+  };
+}

@@ -45,7 +45,7 @@ import { readTendingConfig, writeTendingConfig } from './tending-config.mjs';
 import { buildTendingEntities } from './core/tending-bootstrap.mjs';
 import { resolveProvenance } from './core/tending-provenance.mjs';
 import { boardToDomain, domainToBoard, cardToNode } from './core/mapping.mjs';
-import { verifyShaIntegrity } from './core/sha-integrity.mjs';
+import { verifyShaIntegrity, readShaStamp, collectShas, SHA_POPULATION } from './core/sha-integrity.mjs';
 import { buildTree, buildChildIndex } from './core/tree.mjs';
 import { buildLinkIndex } from './core/links.mjs';
 import { commentMetadata } from './core/card-comments.mjs';
@@ -2748,7 +2748,21 @@ async function handleChecks(req, res) {
     // have the object, so resolving on write would refuse legitimate shas for a
     // reason their author cannot act on. A rail whose failure mode is "the board
     // stops accepting truth" is worse than the defect it prevents.
-    const shaIntegrity = await verifyShaIntegrity(data, {
+    // #1008 — in production the export has no `.git` beside it, so the live
+    // resolver below is structurally unmeasurable there. The DEPLOY resolves
+    // every sha against every known root and writes a stamp; when
+    // SCRUM_SHA_INTEGRITY_FILE names one, the endpoint reports THAT — dated,
+    // root-attributed, with post-stamp shas listed rather than accused.
+    const stampFile = process.env.SCRUM_SHA_INTEGRITY_FILE;
+    const shaIntegrity = stampFile ? (() => {
+      try {
+        return readShaStamp(JSON.parse(fs.readFileSync(stampFile, 'utf8')), data);
+      } catch (e) {
+        return { status: 'unmeasurable', population: SHA_POPULATION, enumerated: collectShas(data).size,
+          missingInput: `SCRUM_SHA_INTEGRITY_FILE is set but no stamp could be read from it (${stampFile}): ${e?.message || e} — the deploy writes it; a missing stamp means no deploy has resolved this board's shas yet`,
+          blindTo: 'nothing was resolved; this is a configured-but-unwritten stamp, not a verdict' };
+      }
+    })() : await verifyShaIntegrity(data, {
       // ⭐ ONE process for the whole population. `--batch-check` reads every sha
       // on stdin and answers per line, so a 264-sha board costs one spawn rather
       // than 264 on an endpoint anyone can hit.
