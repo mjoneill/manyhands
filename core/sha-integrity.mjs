@@ -215,8 +215,29 @@ export function readShaStamp(stamp, board) {
   const seen = new Set([...Object.keys(stamp.resolvedBy || {}), ...(stamp.unresolved || []).map((u) => u.sha)]);
   const unresolved = (stamp.unresolved || []).filter((u) => found.has(u.sha)).map((u) => ({ sha: u.sha, cards: cardsFor(u.sha) }));
   const unverifiedSinceStamp = [...found.keys()].filter((s) => !seen.has(s)).sort().map((sha) => ({ sha, cards: cardsFor(sha) }));
+  // #1146 — DEPARTURES, named with members. A sha the stamp checked that the
+  // live board no longer carries is the ONE way the unresolved count can fall
+  // without anything resolving: someone removed the evidence entry. That can
+  // be a correction (dead pre-rebase shas) or a tidy-up (swapping an orphan
+  // for a resolvable sha to make the check go green); the instrument cannot
+  // tell them apart, so it names the sha and the cards it was on at stamp
+  // time and lets a reader ask. A count would only say it happened.
+  const stampCards = new Map((stamp.unresolved || []).map((u) => [u.sha, [...(u.cards || [])].sort((a, b) => a - b)]));
+  const departedSinceStamp = [...seen].filter((s) => !found.has(s)).sort().map((sha) => ({ sha, cards: stampCards.get(sha) || [] }));
+  // The identity the three counters must satisfy, ASSERTED rather than only
+  // documented: a documented invariant is a claim, an asserted one is a rail.
+  // If it ever stops holding the payload says so instead of serving three
+  // numbers shaped like ones that reconcile.
+  const expectedChecked = enumerated + departedSinceStamp.length - unverifiedSinceStamp.length;
+  const reconciles = Number.isInteger(stamp.checked) && stamp.checked === expectedChecked;
   return { ...base, status: 'stamped', checked: stamp.checked, roots: stamp.roots, ...(stamp.partial ? { partial: true } : {}),
-    unresolved, unverifiedSinceStamp,
+    unresolved, unverifiedSinceStamp, departedSinceStamp,
+    ...(reconciles ? {} : { inconsistent: { checked: stamp.checked ?? null, expectedChecked,
+      means: 'checked (at stamp) should equal enumerated (live) + departures − arrivals and does not: the stamp and the board disagree about the population in a way these lists do not explain. Do not quote these counters until re-stamped.' } }),
+    means: 'enumerated is the LIVE population (the board now); checked is the population AT THE STAMP (resolvedAt). '
+      + 'They differ by arrivals (unverifiedSinceStamp) minus departures (departedSinceStamp). A departure is a sha the '
+      + 'stamp checked that no card carries any more — the only way unresolved can shrink without anything resolving — '
+      + 'so it is listed with the cards it left, for a reader to ask whether it was corrected or dropped.',
     blindTo: `resolved at deploy (${stamp.resolvedAt}), not now: a sha written since is listed under unverifiedSinceStamp, not accused. ${stamp.blindTo || ''}`.trim() };
 }
 

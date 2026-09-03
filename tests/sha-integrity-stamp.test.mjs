@@ -123,3 +123,51 @@ test('#1008 a stamp whose unresolved sha has since LEFT the board is not reporte
   const r = readShaStamp(stamp, board());
   assert.deepEqual(r.unresolved, []);
 });
+
+// #1146 — a sha that LEFT the board after the stamp is the only way the
+// unresolved count can fall without anything resolving, and the payload said
+// nothing about it: `enumerated` (live) drifted below `checked` (at-stamp)
+// with no word for the difference. Departures get a name, with members.
+test('#1146 ⭐ a sha that left the board since the stamp is NAMED under departedSinceStamp, with the cards it left, and the units are labelled', () => {
+  const D = 'd'.repeat(40);
+  const stamp = {
+    resolvedAt: '2026-09-03T00:00:00.000Z', status: 'measured', population: SHA_POPULATION,
+    enumerated: 4, checked: 4, roots: [{ root: '/pub', status: 'read', resolved: 3 }],
+    resolvedBy: { [A]: ['/pub'], [B]: ['/pub'], [C]: ['/pub'] }, unresolved: [{ sha: D, cards: [9] }],
+  };
+  const r = readShaStamp(stamp, board());
+  assert.deepEqual(r.unresolved, [], 'a departed sha is not accused');
+  assert.deepEqual(r.departedSinceStamp, [{ sha: D, cards: [9] }], 'but it is NAMED, with the cards it was on at stamp time');
+  assert.equal(r.checked, 4);
+  assert.equal(r.enumerated, 3);
+  assert.equal(r.checked, r.enumerated + r.departedSinceStamp.length - r.unverifiedSinceStamp.length,
+    'checked (at stamp) = enumerated (live) + departures − arrivals');
+  assert.match(r.means || '', /enumerated.*live/i);
+  assert.match(r.means || '', /checked.*stamp/i);
+});
+
+test('#1146 a RESOLVED sha that left the board is a departure too — the list is about the population, not about failures', () => {
+  const stamp = {
+    resolvedAt: '2026-09-03T00:00:00.000Z', status: 'measured', population: SHA_POPULATION,
+    enumerated: 4, checked: 4, roots: [{ root: '/pub', status: 'read', resolved: 4 }],
+    resolvedBy: { [A]: ['/pub'], [B]: ['/pub'], [C]: ['/pub'], ['e'.repeat(40)]: ['/pub'] }, unresolved: [],
+  };
+  const r = readShaStamp(stamp, board());
+  assert.deepEqual(r.departedSinceStamp.map((d) => d.sha), ['e'.repeat(40)]);
+  assert.deepEqual(r.departedSinceStamp[0].cards, [], 'the stamp does not record cards for resolved shas; an empty list is honest, not a guess');
+});
+
+test('#1146 ⛔ the counter identity is ASSERTED: a stamp whose checked count does not reconcile is flagged, not served as if it did', () => {
+  const good = {
+    resolvedAt: '2026-09-03T00:00:00.000Z', status: 'measured', population: SHA_POPULATION,
+    enumerated: 3, checked: 3, roots: [{ root: '/pub', status: 'read', resolved: 3 }],
+    resolvedBy: { [A]: ['/pub'], [B]: ['/pub'], [C]: ['/pub'] }, unresolved: [],
+  };
+  assert.equal(readShaStamp(good, board()).inconsistent, undefined, 'a reconciling stamp carries no inconsistency');
+  const bad = { ...good, checked: 7 };   // a stamp that claims to have checked more than it enumerated or that departed
+  const r = readShaStamp(bad, board());
+  assert.ok(r.inconsistent, 'the payload must SAY the numbers do not reconcile');
+  assert.equal(r.inconsistent.checked, 7);
+  assert.equal(r.inconsistent.expectedChecked, 3);
+  assert.match(r.inconsistent.means, /do not quote/i);
+});
