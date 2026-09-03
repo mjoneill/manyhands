@@ -34,6 +34,8 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export const EXIT = { GREEN: 0, RED: 1, UNKNOWN: 2, NO_RUN: 3, PENDING: 4, CANCELLED: 5 };
 
@@ -56,10 +58,17 @@ export function verdict(runs) {
   return { code: EXIT.GREEN, why: `${runs.length} run(s), all success`, runs };
 }
 
-/** Ask gh. Any failure to ask is UNKNOWN, never a pass. */
-export function askGh(sha, { gh = process.env.CI_VERDICT_GH || 'gh' } = {}) {
+// #1141 — gh resolves the REPOSITORY from its working directory, and deploy.sh
+// invoked this tool from wherever the operator stood. From any other checkout
+// gh answered "no git remotes found" and the deploy refused: a correct refusal
+// to the wrong question. So the question is asked from the repository this
+// tool lives in — tools/.. — never from the caller's cwd.
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+/** Ask gh, from the repository root. Any failure to ask is UNKNOWN, never a pass. */
+export function askGh(sha, { gh = process.env.CI_VERDICT_GH || 'gh', cwd = REPO_ROOT } = {}) {
   if (!/^[0-9a-f]{40}$/.test(sha)) return { code: EXIT.UNKNOWN, why: `not a full 40-char sha: ${JSON.stringify(sha)} — gh matches on the full sha only` };
-  const r = spawnSync(gh, ['run', 'list', '--commit', sha, '--limit', '10', '--json', 'databaseId,status,conclusion,workflowName,url'], { encoding: 'utf8' });
+  const r = spawnSync(gh, ['run', 'list', '--commit', sha, '--limit', '10', '--json', 'databaseId,status,conclusion,workflowName,url'], { encoding: 'utf8', cwd });
   if (r.error) return { code: EXIT.UNKNOWN, why: `could not run ${gh}: ${r.error.message}` };
   if (r.status !== 0) return { code: EXIT.UNKNOWN, why: `${gh} exited ${r.status}: ${(r.stderr || '').trim().split('\n')[0] || '(no stderr)'}` };
   let runs;
@@ -79,7 +88,6 @@ function main(argv) {
   return v.code;
 }
 
-import { fileURLToPath } from 'node:url';
 import { realpathSync } from 'node:fs';
 const isMain = (() => { try { return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch { return false; } })();
 if (isMain) process.exit(main(process.argv));

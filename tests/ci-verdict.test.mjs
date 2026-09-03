@@ -99,7 +99,7 @@ test('#837 askGh passes the sha through and reads the verdict from what gh retur
 function fakeGh({ stdout = '', stderr = '', exit = 0, record = false } = {}) {
   fs.mkdirSync(SCRATCH, { recursive: true });
   const p = fs.mkdtempSync(path.join(SCRATCH, 'fakegh-')) + '/gh';
-  const rec = record ? `printf '%s ' "$@" > "$0.argv"\n` : '';
+  const rec = record ? `printf '%s ' "$@" > "$0.argv"; pwd > "$0.cwd"\n` : '';
   fs.writeFileSync(p, `#!/bin/sh\n${rec}printf '%s' ${shq(stdout)}\nprintf '%s' ${shq(stderr)} >&2\nexit ${exit}\n`, { mode: 0o755 });
   return p;
 }
@@ -183,4 +183,23 @@ test('#837 the gate asks about the sha the clone is AT AFTER the pull, not befor
   const gh = fakeGh({ stdout: JSON.stringify([run('completed', 'success')]), record: true });
   assert.equal(deploy(sb, gh).status, 0);
   assert.match(fs.readFileSync(gh + '.argv', 'utf8'), new RegExp(sb.sha), 'the full HEAD sha must be what gh is asked about');
+});
+
+// #1141 — gh resolves the REPOSITORY from its working directory. deploy.sh ran
+// this tool from wherever the operator happened to be standing, so from any
+// other checkout gh answered "no git remotes found" and the deploy refused —
+// a correct refusal to the wrong question. The tool now asks from the
+// repository it lives in, whatever the caller's cwd.
+test('#1141 gh is asked from the repository the tool lives in, not from the caller\'s cwd', () => {
+  const sha = 'a'.repeat(40);
+  const fake = fakeGh({ stdout: '[]', record: true });
+  const elsewhere = fs.mkdtempSync(path.join(SCRATCH, 'elsewhere-'));
+  const before = process.cwd();
+  process.chdir(elsewhere);
+  try {
+    askGh(sha, { gh: fake });
+  } finally { process.chdir(before); }
+  const seen = fs.readFileSync(`${fake}.cwd`, 'utf8').trim();
+  assert.equal(fs.realpathSync(seen), fs.realpathSync(ROOT), `gh ran in ${seen}; it must run in the repository root`);
+  assert.notEqual(fs.realpathSync(seen), fs.realpathSync(elsewhere));
 });
