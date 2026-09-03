@@ -23,6 +23,19 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const PROJECT_DIR = path.resolve(__dirname, '..', '..');
 
+/**
+ * #1140 — the child already knows the port was taken. Both servers detect
+ * EADDRINUSE, print it, and exit 1 (server.js:6348, mcp-server.mjs:3007).
+ */
+const PORT_IN_USE = /already in use|EADDRINUSE/i;
+
+/**
+ * How many ports to try when WE picked the number. Four, because the window is
+ * microseconds wide and losing it twice in a row is already improbable; the
+ * bound exists so a genuinely wedged machine fails instead of looping.
+ */
+const START_ATTEMPTS = 4;
+
 /** Ask the OS for a free TCP port on the loopback interface. */
 export function freePort() {
   return new Promise((resolve, reject) => {
@@ -78,11 +91,71 @@ export function makeBoardFixture(overrides = {}) {
 }
 
 /**
+ * Resolve when the URL answers, or reject AS SOON AS the child dies.
+ *
+ * #1140 — the old code only awaited the URL, so a child that exited instantly
+ * with "Port N is already in use" still cost the full 8 s waitForHttp deadline
+ * and was then reported as a TIMEOUT. Measured in CI (run 33667372290, attempt
+ * 1): `duration_ms: 8006.9`, headline "timed out waiting for
+ * http://127.0.0.1:32985/api/board", with the real cause two lines down in
+ * stderr. The room read a starved runner off that headline for an evening.
+ */
+function waitForHttpOrExit(url, proc, timeoutMs = 8000) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (fn, v) => { if (!settled) { settled = true; fn(v); } };
+    proc.once('exit', (code, signal) =>
+      finish(reject, new Error(`process exited (code ${code}, signal ${signal}) before answering ${url}`)));
+    waitForHttp(url, timeoutMs).then(() => finish(resolve), (e) => finish(reject, e));
+  });
+}
+
+/**
+ * #1140 — start a child on a port, treating "the port was taken" as the
+ * distinct, RECOVERABLE outcome it is.
+ *
+ * ⚠️ THE RETRY IS SCOPED TO PORTS WE CHOSE. When the harness allocated the
+ * number, nobody asked for it — it is an implementation detail and losing the
+ * race should cost a retry, not a run. When the CALLER passed a port, they
+ * meant that port: stranger-second-instance asserts on WHICH board an adapter
+ * attaches to, and silently moving it would make that question untestable. So
+ * an explicit port gets exactly one attempt and a refusal that names the
+ * conflict.
+ */
+async function startOnPort({ port: explicitPort, allocatePort = freePort, readyPath, label, spawnOnce }) {
+  const attempts = explicitPort == null ? START_ATTEMPTS : 1;
+  let lastErr = null;
+  for (let i = 0; i < attempts; i++) {
+    const port = explicitPort ?? (await allocatePort());
+    const started = spawnOnce(port);
+    const { proc, stderr } = started;
+    const baseUrl = `http://127.0.0.1:${port}`;
+    try {
+      await waitForHttpOrExit(`${baseUrl}${readyPath}`, proc);
+      return { ...started, port, baseUrl };
+    } catch (e) {
+      proc.kill('SIGKILL');
+      const text = stderr.join('');
+      const contended = PORT_IN_USE.test(text);
+      lastErr = contended
+        ? new Error(
+            `${label} failed to start: port ${port} is already in use — lost the allocation race (#1140)`
+            + `${explicitPort == null ? `, attempt ${i + 1}/${attempts}` : ' (port was requested explicitly, so it is not retried)'}`
+            + `\nstderr: ${text}`)
+        : new Error(`${label} failed to start: ${e.message}\nstderr: ${text}`);
+      if (contended && explicitPort == null) continue;
+      throw lastErr;
+    }
+  }
+  throw lastErr;
+}
+
+/**
  * Start an isolated REST server (server.js) on a free port with a temp board
  * file. Returns { baseUrl, boardFile, readBoardFile, stop }.
  */
-export async function startRestServer({ board, staticDir, port, mcpNotifyUrl = '', env: extraEnv } = {}) {
-  port = port ?? (await freePort());
+export async function startRestServer({ board, staticDir, port, mcpNotifyUrl = '', env: extraEnv, allocatePort } = {}) {
+  const explicitPort = port;
   // #988 — the board file gets its OWN directory, not a bare file in the shared
   // tmpdir. server.js derives sibling paths from `dirname(SCRUM_BOARD_FILE)`
   // (`graph-query-log.jsonl` today), so a board file sitting directly in
@@ -110,7 +183,6 @@ export async function startRestServer({ board, staticDir, port, mcpNotifyUrl = '
   const env = {
     ...process.env,
     ...(extraEnv || {}),
-    SCRUM_PORT: String(port),
     SCRUM_BOARD_FILE: boardFile,
     SCRUM_ATTACHMENTS_DIR: attachmentsDir,
     SCRUM_CHANNEL_CONFIG_FILE: configFile,
@@ -122,21 +194,26 @@ export async function startRestServer({ board, staticDir, port, mcpNotifyUrl = '
   // mcpNotifyUrl explicitly (channel.test.mjs does, to test the notify path).
   env.SCRUM_MCP_NOTIFY_URL = mcpNotifyUrl;
 
-  const proc = spawn('node', ['server.js'], {
-    cwd: PROJECT_DIR,
-    env,
-    stdio: ['ignore', 'pipe', 'pipe'],
+  // #1140 — SCRUM_PORT is set per ATTEMPT, after the isolation vars, so a retry
+  // moves the port and nothing else. The isolation guarantee above is unchanged:
+  // a caller's extraEnv still cannot reach the board file or the attachments dir.
+  const { proc, stderr, baseUrl } = await startOnPort({
+    port: explicitPort,
+    allocatePort,
+    readyPath: '/api/board',
+    label: 'REST server',
+    spawnOnce(p) {
+      const child = spawn('node', ['server.js'], {
+        cwd: PROJECT_DIR,
+        env: { ...env, SCRUM_PORT: String(p) },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      const err = [];
+      child.stderr.on('data', (d) => err.push(d.toString()));
+      return { proc: child, stderr: err };
+    },
   });
-  const stderr = [];
-  proc.stderr.on('data', (d) => stderr.push(d.toString()));
-
-  const baseUrl = `http://127.0.0.1:${port}`;
-  try {
-    await waitForHttp(`${baseUrl}/api/board`);
-  } catch (e) {
-    proc.kill('SIGKILL');
-    throw new Error(`REST server failed to start: ${e.message}\nstderr: ${stderr.join('')}`);
-  }
+  void port;
 
   return {
     baseUrl,
@@ -190,37 +267,40 @@ export async function startRestServer({ board, staticDir, port, mcpNotifyUrl = '
  * Pass `restApiBase` to point it at a REST server started above.
  * Returns { mcpUrl, healthUrl, stop }.
  */
-export async function startMcpServer({ restApiBase, port, env: extraEnv } = {}) {
-  port = port ?? (await freePort());
-  const proc = spawn('node', ['mcp-server.mjs'], {
-    cwd: PROJECT_DIR,
-    env: {
-      ...process.env,
-      MCP_PORT: String(port),
-      SCRUM_CHANNEL_STAGGER: 'off', // #256/#265 — keep channel tests instant; scheduling logic is unit-tested in channel-scheduler.test.mjs
-      // #495 — an adapter must declare its board. With none given, point it at a
-      // port we just proved CLOSED, so a test that never meant to reach a board
-      // gets connection-refused instead of the live room on 3141 — which is
-      // where every undeclared adapter in this suite had been pointing.
-      SCRUM_BOARD_API: restApiBase || `http://127.0.0.1:${await freePort()}`,
-      ...(extraEnv || {}),
+export async function startMcpServer({ restApiBase, port, env: extraEnv, allocatePort } = {}) {
+  // #495 — an adapter must declare its board. With none given, point it at a
+  // port we just proved CLOSED, so a test that never meant to reach a board
+  // gets connection-refused instead of the live room on 3141 — which is where
+  // every undeclared adapter in this suite had been pointing.
+  // #1140 — resolved ONCE, outside the attempt loop: a retry is about the port
+  // this adapter listens on, and must not quietly re-point it at a new board.
+  const boardApi = restApiBase || `http://127.0.0.1:${await freePort()}`;
+  const { proc, stderr, stdout, baseUrl } = await startOnPort({
+    port,
+    allocatePort,
+    readyPath: '/health',
+    label: 'MCP server',
+    spawnOnce(p) {
+      const child = spawn('node', ['mcp-server.mjs'], {
+        cwd: PROJECT_DIR,
+        env: {
+          ...process.env,
+          MCP_PORT: String(p),
+          SCRUM_CHANNEL_STAGGER: 'off', // #256/#265 — keep channel tests instant; scheduling logic is unit-tested in channel-scheduler.test.mjs
+          SCRUM_BOARD_API: boardApi,
+          ...(extraEnv || {}),
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      const err = [];
+      child.stderr.on('data', (d) => err.push(d.toString()));
+      // #359 — capture stdout too: response-leg observability is a logged
+      // behavior, so tests need to assert on the server's own log lines.
+      const out = [];
+      child.stdout.on('data', (d) => out.push(d.toString()));
+      return { proc: child, stderr: err, stdout: out };
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
   });
-  const stderr = [];
-  proc.stderr.on('data', (d) => stderr.push(d.toString()));
-  // #359 — capture stdout too: response-leg observability is a logged behavior,
-  // so tests need to assert on the server's own log lines.
-  const stdout = [];
-  proc.stdout.on('data', (d) => stdout.push(d.toString()));
-
-  const baseUrl = `http://127.0.0.1:${port}`;
-  try {
-    await waitForHttp(`${baseUrl}/health`);
-  } catch (e) {
-    proc.kill('SIGKILL');
-    throw new Error(`MCP server failed to start: ${e.message}\nstderr: ${stderr.join('')}`);
-  }
 
   // #787 — exit bookkeeping. `stop()` below SIGKILLs, which is why no test ever
   // exercised the SIGTERM path and why a shutdown that could never complete
