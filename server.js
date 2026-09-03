@@ -2281,11 +2281,12 @@ function obligationToWire(e) {
  * its id; any other entity → its @id, if one exists. null means DANGLING,
  * which is refused: an obligation about nothing is prose again.
  */
-function resolveNodeId(data, ref) {
+function resolveNodeId(data, ref, extraIds = new Set()) {
   if (ref === undefined || ref === null || ref === '') return null;
   const ci = findCardIndex(data, ref);
   if (ci >= 0) return data.cards[ci].id;
   const s = String(ref);
+  if (extraIds.has(s)) return s;   // #1147 — a decision the graph holds and the document does not
   const pools = [decisionsOf(data), predicatesOf(data), obligationsOf(data),
     Array.isArray(data.memories) ? data.memories : []];
   for (const pool of pools) if (pool.some((e) => e && e['@id'] === s)) return s;
@@ -2344,9 +2345,14 @@ async function handleCreateObligation(req, res) {
     if (!OBLIGATION_KINDS.has(body.kind)) {
       return sendJSON(res, 400, { error: `kind must be one of steward | review | promise | tripwire (got ${JSON.stringify(body.kind)})` });
     }
+    // #1147 — decisions are read from the graph, so the pool a reference can
+    // resolve against includes the graph's decision ids, read BEFORE the lock.
+    let graphDecisionIds = new Set();
+    try { graphDecisionIds = new Set((await liveDecisions()).map((d) => d['@id'])); }
+    catch (e) { if (e?.code === 'GRAPH_DEPS_MISSING') return sendJSON(res, 503, { error: e.message, code: e.code }); throw e; }
     const result = await withWriteLock(async () => {
       const data = readBoard();
-      const about = resolveNodeId(data, body.about);
+      const about = resolveNodeId(data, body.about, graphDecisionIds);
       if (!about) {
         return { status: 400, wire: { error: `about ${JSON.stringify(body.about)} does not resolve to a node this board holds (card shortId/uuid, or the @id of a memory, decision, predicate or obligation). An obligation about nothing is refused.` } };
       }
@@ -2473,7 +2479,10 @@ async function handleCreateDecision(req, res) {
         'scrum:reopensIf': String(body.reopensIf),
         dateCreated: new Date().toISOString(),
       };
-      data.decisions = [...decisionsOf(data), entity];
+      // #1147 — BORN IN THE GRAPH: the event is the write. No document row;
+      // the replica projects the decision from this event (graph-replica
+      // projectActivities), and every reader asks the graph. The document
+      // keeps only rows an older version wrote — counted, never read.
       writeBoard(data, [decisionEvent('create', entity, body.decidedBy || body.by)]);
       return decisionToWire(entity);
     });
@@ -2484,11 +2493,53 @@ async function handleCreateDecision(req, res) {
   }
 }
 
-function handleListDecisions(req, res) {
+// #1147 — the live read of decisions is a graph query: every scrum:Decision
+// node, whether projected from a create event (born in the graph) or from a
+// row an older document still carries. Folded by node into the wire shape the
+// document path produced, so callers see no change. Same fail-closed doctrine
+// as #1143: no graph dependency ⇒ 503, never an empty list dressed as "none".
+const LIVE_DECISIONS_QUERY = 'SELECT ?d ?p ?o WHERE { ?d a scrum:Decision ; ?p ?o }';
+const LIVE_DECISIONS_ROW_CAP = 20000;   // triples; ~8 per decision, refused at the cap rather than cut
+function decisionsFromRows(rows, { limit } = {}) {
+  if (Number.isFinite(limit) && rows.length >= limit) {
+    throw Object.assign(new Error(`decision read returned ${rows.length} rows against a cap of ${limit}: the set may be cut mid-decision, so it is refused rather than answered short`), { code: 'DECISIONS_TRUNCATED' });
+  }
+  const local = (iri) => String(iri).replace(/^.*[#/:]/, '');
+  const nodes = new Map();
+  for (const r of rows) {
+    const n = nodes.get(r.d) || { '@id': r.d, '@type': 'scrum:Decision', 'scrum:constrains': [] };
+    nodes.set(r.d, n);
+    const p = local(r.p), o = r.o == null ? null : String(r.o);
+    if (p === 'identifier') n.identifier = o;
+    else if (p === 'statement') n['scrum:statement'] = o;
+    else if (p === 'decidedBy') n['scrum:decidedBy'] = local(o);
+    else if (p === 'constrains') n['scrum:constrains'].push(o);
+    else if (p === 'reopensIf') n['scrum:reopensIf'] = o;
+    else if (p === 'dateCreated') n.dateCreated = o;
+  }
+  // A graph is a SET: the order topics were typed in is not a fact it keeps.
+  // Sorted, so the wire order is deterministic and documented rather than
+  // whichever order the engine returned rows in. (The one property the
+  // document path had that this path does not; recorded on #1147.)
+  for (const n of nodes.values()) n['scrum:constrains'].sort();
+  return [...nodes.values()].sort((a, b) => String(a.dateCreated || '').localeCompare(String(b.dateCreated || '')));
+}
+async function liveDecisions() {
+  const { queryGraph } = await loadGraphModules();
+  const { store } = await warmGraphStore();
+  const { rows } = queryGraph(store, LIVE_DECISIONS_QUERY, { limit: LIVE_DECISIONS_ROW_CAP });
+  return decisionsFromRows(rows, { limit: LIVE_DECISIONS_ROW_CAP });
+}
+async function handleListDecisions(req, res) {
   const q = parseQuery(req.url);
-  let out = decisionsOf(readBoard())
-    .filter((e) => e['@type'] === 'scrum:Decision')
-    .map(decisionToWire);
+  let out;
+  try {
+    out = (await liveDecisions()).map(decisionToWire);
+  } catch (e) {
+    if (e?.code === 'GRAPH_DEPS_MISSING') return sendJSON(res, 503, { error: e.message, code: e.code });
+    console.error('GET /api/decisions:', e.message);
+    return sendJSON(res, 500, { error: e.message, code: e.code ?? 'DECISIONS_READ_FAILED' });
+  }
   // ⚠️ An unknown topic returns an EMPTY LIST, never an error. "Nothing
   // constrains this" is the common and correct answer for most topics, and a
   // reader who meets a failure there learns to distrust the empty case and

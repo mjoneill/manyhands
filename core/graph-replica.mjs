@@ -318,6 +318,12 @@ export function projectActivities(store, events) {
     // replaying the log is not new history, and the ending each event applies
     // to its predecessor is re-derived identically on a rebuild.
     if (ent.kind === 'seat-state' && when) projectSeatDeclarationEvent(store, ev, when);
+    // #1147 — a decision's CREATE event ALSO projects the decision itself. The
+    // EVENT LOG is the record for decisions born after #1147; the document no
+    // longer receives a row. Rows an older document still carries project from
+    // the document to the SAME IRI, and triples are a set, so the two sources
+    // cannot double a node. Immutable, so only `create` carries state.
+    if (ent.kind === 'decision' && ev.op === 'create' && ev.state && ev.state['@id']) projectDecision(store, ev.state);
   }
   return store;
 }
