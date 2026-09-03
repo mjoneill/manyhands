@@ -51,6 +51,16 @@ export const readyFactsQuery = () =>
   `OPTIONAL { ?card scrum:parkedUntil ?parkedUntil } }`;
 
 /**
+ * #1020 — every implementing commit, ONE ROW PER SHA (a card carries up to
+ * four on the live board). Read like the blocker queries: paged, because a
+ * capped single call would silently see part of a card's commits and could
+ * call a half-shipped card shipped.
+ */
+export const readyImplementedByQuery = () =>
+  `SELECT ?id ?sha WHERE { ` +
+  `?card a schema:CreativeWork ; schema:identifier ?id ; scrum:implementedBy ?sha }`;
+
+/**
  * Every blockedBy edge, target resolved via OPTIONAL so a dangling edge
  * arrives as a row with ?tid unbound instead of vanishing (the inner-join
  * trap, measured on cardEdgesResolved's first cut).
@@ -238,7 +248,38 @@ function foldContext(contextRows) {
 const emptyContext = () =>
   Object.fromEntries(CONTEXT_TYPES.map((t) => [t, { members: [], total: 0, truncated: false }]));
 
-export function computeReady(factRows, blockerRows, supersededRows, contextRows, humanBlockerRows, conditionBlockerRows) {
+export function computeReady(factRows, blockerRows, supersededRows, contextRows, humanBlockerRows, conditionBlockerRows, { implementedByRows = null, shippedShas = null } = {}) {
+  // #1020 — card shortId → its implementing commits. Only consulted when a
+  // caller supplies the shipped set, which comes from the deploy stamp's
+  // `inDeployed` (core/sha-integrity.mjs). Ancestry cannot be computed here:
+  // production serves an export with no `.git` beside it, which is why the
+  // stamp exists at all (#1008). No stamp ⇒ no input ⇒ this is a no-op and the
+  // queue is byte-identical to before.
+  const shasByCard = new Map();
+  for (const r of implementedByRows || []) {
+    const id = Number(r.id);
+    if (!Number.isFinite(id)) continue;
+    const sha = tail(r.sha);
+    if (!sha) continue;
+    if (!shasByCard.has(id)) shasByCard.set(id, []);
+    shasByCard.get(id).push(sha);
+  }
+  /**
+   * The shas of a card that is fully in the deployed history, or null.
+   *
+   * ⚠️ EVERY sha, never any: a card with one shipped and one unshipped commit
+   * is mid-flight, and calling it shipped would hide the unfinished half —
+   * this card's own defect arriving through an any/all confusion.
+   *
+   * ⚠️ And an EMPTY list is not "all shipped". `Array.every` over nothing is
+   * true, which would mark every unstarted card on the board.
+   */
+  const shippedFor = (shortId) => {
+    if (!shippedShas) return null;
+    const shas = shasByCard.get(shortId);
+    if (!shas || shas.length === 0) return null;
+    return shas.every((s) => shippedShas.has(s)) ? [...shas].sort() : null;
+  };
   // #965 — card shortId → sorted keys of its OPEN human blockers.
   // `cleared` is the only status that does not gate: #881 built the field so
   // the queue CONVERGES, and a rule ignoring it would hide a card forever once
@@ -390,10 +431,23 @@ export function computeReady(factRows, blockerRows, supersededRows, contextRows,
 
     // ⛔ NEVER BOTH. Claiming `no-open-blockers` beside a scoped block would be
     // the false reason #965 was filed for, in a `reasons` array that reads correct.
+    // #1020 — ALREADY IN PRODUCTION. The card STAYS in the queue and stays
+    // where its owner put it: nine deliberate leave-it-in-backlog decisions
+    // exist on the live board, and a card can carry commits AND real remaining
+    // work. What changes is what it is offered AS — "verify and close, or say
+    // why it is still open" instead of build work. Measured 2026-09-03: 23 of
+    // 200 offered cards were in this state, two of which cost a claim and a
+    // groom each that morning.
+    //
+    // ⛔ NEVER BESIDE `no-open-blockers`: a row claiming plain readiness next to
+    // this is the false-reason shape #965 was filed for.
+    const shippedNow = shippedFor(shortId);
     verdicts.push({
       ...base,
       ready: true,
-      reasons: [`column:${column}`, 'unclaimed', conditionScoped || 'no-open-blockers'],
+      reasons: shippedNow
+        ? [`column:${column}`, 'unclaimed', conditionScoped || `shipped-unverified:${shippedNow.join(',')}`]
+        : [`column:${column}`, 'unclaimed', conditionScoped || 'no-open-blockers'],
     });
   }
 
@@ -482,7 +536,7 @@ function pagedRows(store, query) {
   return out;
 }
 
-export function readyFromStore(store) {
+export function readyFromStore(store, { shippedShas = null } = {}) {
   const facts = pagedRows(store, readyFactsQuery());
   const blockers = pagedRows(store, readyBlockersQuery());
   const superseded = pagedRows(store, readySupersededQuery());
@@ -495,6 +549,11 @@ export function readyFromStore(store) {
   // of 1,000, so a single capped call truncates. Found by running against the
   // live board; a fixture with ten edges cannot reach it.
   const context = pagedRows(store, readyContextQuery());
+  // #1020 — paged like its siblings. A capped single call would see PART of a
+  // card's commits, and a card whose unshipped commit fell outside the cap
+  // would read as fully shipped — this card's defect, arriving through the
+  // truncation trap #816 already found on the edges query.
+  const implementedBy = shippedShas ? pagedRows(store, readyImplementedByQuery()) : null;
   // #1041 — fetched BEFORE the truncation refusal so it can be included in it.
   // A queue computed from PART of the condition-blocker set would mistake an
   // UNREAD scoping for an ABSENT one, and offer a card it should have withheld —
@@ -509,6 +568,10 @@ export function readyFromStore(store) {
   return computeReady(
     facts.rows, blockers.rows, superseded.rows, context.rows,
     humanBlockers.rows, conditionBlockers.rows,
+    // #1020 — the commits are queried ONLY when a caller has a shipped set to
+    // compare them against. No stamp, no query, no cost: the queue is exactly
+    // what it was before this card.
+    { implementedByRows: implementedBy?.rows ?? null, shippedShas },
   );
 }
 

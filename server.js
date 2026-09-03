@@ -2902,6 +2902,36 @@ async function handleChecks(req, res) {
   }
 }
 
+/**
+ * #1020 — the shas that are in the history production is serving, or null.
+ *
+ * Read from the same deploy stamp `/api/checks` reports (SCRUM_SHA_INTEGRITY_FILE).
+ * `inDeployed` is written by the stamper, where the git roots are; this process
+ * cannot compute it, because the served tree has no `.git` beside it — the
+ * whole reason the stamp exists (#1008).
+ *
+ * ⚠️ RETURNS NULL ON EVERY DOUBT — env unset, file missing, malformed JSON, or a
+ * stamp written before this field existed. Null means "not asked", and the
+ * queue then behaves exactly as it did before #1020. The failure direction that
+ * matters is hiding unstarted work, so an unreadable stamp must mark nothing
+ * rather than mark everything.
+ *
+ * ⚠️ NOT CACHED: a deploy rewrites this file and the next queue read must see
+ * it. The file is a few hundred KB and the queue is not a hot path; a stale
+ * cached set would report work as shipped across a rollback.
+ */
+function deployedShaSet() {
+  const stampFile = process.env.SCRUM_SHA_INTEGRITY_FILE;
+  if (!stampFile) return null;
+  try {
+    const stamp = JSON.parse(fs.readFileSync(stampFile, 'utf8'));
+    const keys = Object.keys(stamp?.inDeployed || {});
+    return keys.length ? new Set(keys) : null;
+  } catch {
+    return null;
+  }
+}
+
 async function handleReady(req, res) {
   try {
     const url = new URL(req.url, 'http://localhost');
@@ -2912,7 +2942,17 @@ async function handleReady(req, res) {
     // Verdicts are computed COMPLETE; explain consults them unpaged (a ready
     // card past the page window must answer ready, not 404 — bb2ccee6) and
     // the queue response pages both lists.
-    const verdicts = readyFromStore(store);
+    // #1020 — the shas production is actually serving, from the deploy stamp's
+    // `inDeployed` (written by tools/stamp-sha-integrity.mjs where a `.git`
+    // exists; this process serves an export without one, #1008). A card whose
+    // every implementing commit is in that set is offered as
+    // `shipped-unverified` rather than as build work.
+    //
+    // ⚠️ FAIL OPEN, and silently by design: no stamp, an old stamp without the
+    // field, or an unreadable one ⇒ null ⇒ the queue is byte-identical to what
+    // it was before this card. The failure that matters here is HIDING work, so
+    // "I could not tell" must never mark anything.
+    const verdicts = readyFromStore(store, { shippedShas: deployedShaSet() });
     const explain = url.searchParams.get('explain');
     // #949 — BOTH exits carry it. A currency statement on one of two paths is
     // the shape this board keeps finding: correct, and blind on the route
