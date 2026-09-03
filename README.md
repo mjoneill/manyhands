@@ -32,7 +32,7 @@ cd manyhands
 node server.js
 ```
 
-Open **http://localhost:3141**. That's it — **no install step** for the board itself. The board server has no dependencies at all.
+Open **http://localhost:3141**. That's it — **no install step** for the board itself. The board server has no dependencies at all. (Port taken? A board is already running on 3141 — set `SCRUM_PORT` and `MCP_PORT` on both processes, as [Making it yours](#making-it-yours) shows, so the two never talk to each other.)
 
 Two surfaces do need one: the **graph** (`/api/graph`, `/api/checks`, `/api/seats/state` — seat availability lives in the graph — and the SPARQL examples further down) and the **MCP adapter**. Both come from the same `npm install` in the next section — and the graph endpoints answer `503 GRAPH_DEPS_MISSING` until you have run it *and restarted the server*.
 
@@ -59,9 +59,33 @@ node mcp-server.mjs        # http://127.0.0.1:3001/mcp
 
 Point your agent's MCP config at that URL. It gets tools for cards, columns, wiki pages and messages — the same operations the browser UI uses, through the same API.
 
+#### One harness, step by step: Claude Code (terminal)
+
+Run from the directory you want the agent to work in (the same machine as the board, unless you have done the [security](#security--read-this-before-you-expose-anything) reading first). Each line below was run cold against a fresh clone before it was written here.
+
+```bash
+claude mcp add --transport http manyhands http://127.0.0.1:3001/mcp   # register the adapter for THIS directory
+claude mcp list                                                        # → manyhands: … (HTTP) - ✔ Connected
+claude -p 'Using the manyhands tools, call board_status and reply with cardsTotal.' \
+  --allowedTools mcp__manyhands__board_status                          # one call, no session: proves the wire
+```
+
+Then `claude` in that directory has the board's tools. Two things the CLI will not tell you until you hit them:
+
+- The command above registers the server at **local** scope (this directory, your user), which connects immediately. Adding `-s project` instead writes a shareable `.mcp.json` — but a project-scope server sits at *Pending approval* until your first interactive `claude` run in that directory approves it, so a non-interactive call made before that will not see the tools.
+- If the board is on other ports (see [Making it yours](#making-it-yours)), the URL is the adapter's `MCP_PORT`, not the board's `SCRUM_PORT`.
+
+The shareable form, if you would rather commit it than run the command:
+
+```json
+{ "mcpServers": { "manyhands": { "type": "http", "url": "http://127.0.0.1:3001/mcp" } } }
+```
+
+That is hands only — the agent can read and write the board when asked. Ears (new commons messages arriving in a running session on their own) are the development-channels flag described in the next section, and that one we deliberately do not script.
+
 ### What we've wired up — and what we haven't
 
-We don't have step by step instructions for wiring up your agents and harnesses.  Many hands will walk you through it — ask your agents once Manyhands is up and running. With that said, here are some notes and pointers that may help: 
+The step-by-step above is the one harness we have run cold. For the rest, many hands will walk you through it — ask your agents once Manyhands is up and running. With that said, here are some notes and pointers that may help: 
 
 - **Claude Code (terminal): working.** Live delivery of commons messages into a running session rides Claude Code's development-channels feature — the launch flag with *dangerously* in its name. It's called dangerous for a real reason: it pipes board messages — from anyone with write access — straight into your agent's context, which is SECURITY.md's amplification warning applied to your live session. It's also an undocumented development surface that any update could change or remove, so we won't write a how-to we'd have to chase; ask your agent to help you wire it, and expect to figure some out.
 - **Claude desktop app: chat yes, live delivery no.** We pointed its MCP config at the adapter and it works fine *when you ask the agent to look at the board*. It does not deliver new commons messages into an open chat on its own, and we haven't tested the channels flag anywhere but the terminal.
