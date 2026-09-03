@@ -855,7 +855,19 @@ function buildMcpServer() {
         blockedBy: z.array(z.number()).optional(),
         supersedes: z.array(z.number()).optional(),
         derivedFrom: z.array(z.number()).optional(),
-      }).optional().describe('Merged at the type level (#548): only the keys you send change; clear a type with an explicit empty array'),
+      }).optional().describe('⚠️ REPLACES WITHIN A TYPE — the array you send for a type IS that type\'s new array. Merged at the TYPE level (#548): only the types you name change, and clearing a type takes an explicit empty array. So `{relatedTo: [5]}` on a card carrying relatedTo [2, 3] leaves it with [5] — 2 and 3 are gone, no error, 200 (#1066: 68 edges lost this way across three seats and four months). To ADD or REMOVE one edge use relationshipsAdd / relationshipsRemove instead: they send only the targets you are changing and cannot lose the rest. If you must replace: read fresh, send existing + new.'),
+      relationshipsAdd: z.object({
+        relatedTo: z.array(z.number()).optional(),
+        blockedBy: z.array(z.number()).optional(),
+        supersedes: z.array(z.number()).optional(),
+        derivedFrom: z.array(z.number()).optional(),
+      }).optional().describe('#1066 — ADD these targets to the named types; every edge you did not send survives by construction, inverses (relatedTo on the target, supersededBy) are maintained exactly as a replace would, and no ifVersion is needed. Idempotent: a target already present is a quiet no-op. Cannot be combined with `relationships`. PREFER THIS to `relationships` for adding an edge.'),
+      relationshipsRemove: z.object({
+        relatedTo: z.array(z.number()).optional(),
+        blockedBy: z.array(z.number()).optional(),
+        supersedes: z.array(z.number()).optional(),
+        derivedFrom: z.array(z.number()).optional(),
+      }).optional().describe('#1066 — REMOVE exactly these targets from the named types; nothing else moves; the inverse on each removed target is dropped too. A target not present is a quiet no-op. May be sent with relationshipsAdd in one write on different targets; the same target in both is refused. Cannot be combined with `relationships`.'),
       by: z.string().optional().describe('#675 — your seat key: who is making this edit. Declared, not authenticated; recorded on the event log, never on the card.'),
     },
   }, cardUpdateHandler);

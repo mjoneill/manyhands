@@ -3668,6 +3668,44 @@ function validateCardFields(body, { checkId = true, surface = 'patch', current =
       if (err) return err;
     }
   }
+  // #1066 — relationshipsAdd / relationshipsRemove. PATCH-ONLY, like the
+  // #1137 verbs and for the same reason. `relationships` REPLACES within a
+  // type — the array you send IS the new array — and its doc read like "add",
+  // so callers sending only the targets they meant to add deleted the rest:
+  // 68 edges, three seats, four months, zero errors. These are the add and
+  // the remove spelled so they cannot be spelled as a destructive write.
+  // Validated by the SAME validator as the whole field, so the refusals use
+  // its words; refused beside `relationships` (a replace and an add in one
+  // write are two intentions); refused when empty; refused when one target
+  // sits in both add and remove for a type (a contradiction, not a no-op).
+  // Composed under the write lock, so no ifVersion is needed: nothing not
+  // sent can be lost.
+  if (surface !== 'create') {
+    for (const verb of RELATIONSHIP_VERBS) {
+      if (body[verb] === undefined) continue;
+      if (body.relationships !== undefined) {
+        return `send either relationships (replace within each type you name, with ifVersion) or ${verb} `
+          + '(change only the targets sent), not both — a replace and an add/remove in one write are two intentions '
+          + 'and the result would be neither';
+      }
+      if (typeof body[verb] !== 'object' || body[verb] === null || Array.isArray(body[verb])) {
+        return `${verb} must be an object of { type: [shortId, ...] } for the types to change`;
+      }
+      if (!Object.keys(body[verb]).length) return `${verb} is empty — nothing to change`;
+      const rerr = validateRelationships(body[verb], current?.relationships);
+      if (rerr) return rerr;
+    }
+    if (body.relationshipsAdd !== undefined && body.relationshipsRemove !== undefined) {
+      for (const [type, targets] of Object.entries(body.relationshipsAdd)) {
+        const removing = new Set(body.relationshipsRemove[type] || []);
+        const both = (targets || []).filter((t) => removing.has(t));
+        if (both.length) {
+          return `relationshipsAdd and relationshipsRemove both name ${type} ${both.join(', ')} — a target cannot be `
+            + 'added and removed in one write; send one or the other';
+        }
+      }
+    }
+  }
   // #864 — the byte-preserving append. PATCH-ONLY, per #830's route-relative
   // rule: appending to a card that does not exist yet is not an operation, and
   // create takes `description`. Validating it here on create would produce the
@@ -3781,6 +3819,21 @@ function validateCardFields(body, { checkId = true, surface = 'patch', current =
 // matched on. A verb, so deliberately NOT in PATCHABLE_CARD_FIELDS: a verb in
 // a field allowlist gets stored as a noun (the #864 rule).
 const ARRAY_UPSERT_VERBS = { acceptanceUpsert: 'acceptance', blockersUpsert: 'blockers', checksUpsert: 'checks' };
+// #1066 — the add/remove verbs for `relationships`. Verbs, so NOT in
+// PATCHABLE_CARD_FIELDS (the #864 rule: a verb in a field allowlist gets
+// stored as a noun). Applied to the writable types only; the maintained
+// inverses move through syncInverseRelationships exactly as a replace does.
+const RELATIONSHIP_VERBS = ['relationshipsAdd', 'relationshipsRemove'];
+function applyRelationshipVerbs(before, add, remove) {
+  const next = { ...before };
+  for (const t of RELATIONSHIP_TYPES) {
+    let arr = [...(before[t] || [])];
+    for (const sid of (add && add[t]) || []) if (!arr.includes(sid)) arr.push(sid);
+    if (remove && Array.isArray(remove[t])) { const gone = new Set(remove[t]); arr = arr.filter((x) => !gone.has(x)); }
+    next[t] = arr;
+  }
+  return next;
+}
 const ARRAY_UPSERT_KEY = {
   acceptance: (a) => `condition:${a.condition}`,
   blockers: (b) => (b.anyHuman === true ? 'anyHuman'
@@ -4605,12 +4658,23 @@ async function handleUpdateCard(req, res, idOrShortId) {
         card[field] = upsertArrayEntries(field, card[field], patch[verb]);
         card.updatedAt = new Date().toISOString();
       }
+      // #1066 — add/remove composed against the STORED arrays under the lock,
+      // never against a caller's snapshot; inverses reconciled by the same
+      // function a replace uses, so the two paths cannot disagree.
+      if (patch.relationshipsAdd !== undefined || patch.relationshipsRemove !== undefined) {
+        const before = normalizeRelationships(card.relationships);
+        const after = applyRelationshipVerbs(before, patch.relationshipsAdd, patch.relationshipsRemove);
+        fanout = syncInverseRelationships(data, card, before, after); // #669
+        card.relationships = after;
+        card.updatedAt = new Date().toISOString();
+      }
       for (const [k, v] of Object.entries(patch)) {
         // #864 — consumed immediately above. Listed here rather than in
         // PATCHABLE_CARD_FIELDS so it is never written as a literal key, and
         // reported as neither ignored (#823) nor refused: it was honoured.
         if (k === 'descriptionAppend' || k === 'descriptionPrepend') continue;
         if (k in ARRAY_UPSERT_VERBS) continue; // #1137 — consumed above, same reason
+        if (RELATIONSHIP_VERBS.includes(k)) continue; // #1066 — consumed above, same reason
         // #844 — an unchanged value was not an attempt. Silent.
         if (isEchoOfStored(v, card[k])) continue;
         if (IMMUTABLE_CARD_FIELDS.has(k)) {

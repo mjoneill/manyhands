@@ -188,6 +188,36 @@ export const CARD_CREATE_PROBES = [
     malformed: [{ claim: 'C1', ask: 'SELECT * WHERE { ?x a scrum:Wake }', expect: true }],
     note: '#1137 — insert-or-replace by `claim`; ASK only, as `checks` is; PATCH only' },
 
+  // #1066 — the two relationship verbs. Same shape as the #1137 upserts: an
+  // OPERATION on `relationships`, composed under the lock, never stored under
+  // its own key, so storedAs names the field it composes and expectStored is
+  // the NORMALIZED shape (every type present) exactly as the `relationships`
+  // probe spells it. Malformed cases are validateRelationships' own rules,
+  // because the verbs reuse it. RC0b caught both missing within one run.
+  { name: 'relationshipsAdd', storedAs: 'relationships',
+    wellFormed: ({ targetShortId }) => ({ relatedTo: [targetShortId] }),
+    expectStored: ({ targetShortId }) => ({
+      relatedTo: [targetShortId], blockedBy: [], supersedes: [], derivedFrom: [], supersededBy: [],
+    }),
+    malformed: { relatedTo: 'nope' },
+    note: '#1066 — ADD targets to the named types; everything not sent survives; PATCH only' },
+  { name: 'relationshipsRemove', storedAs: 'relationships',
+    // ⚠️ A remove on a fresh card stores the same bytes as an IGNORED remove
+    // (the normalized empty shape), so a bare probe read CONSUMED_UNDECLARED on
+    // the create surface — the expectation was satisfiable by doing nothing.
+    // The companion is an ADD on a different type, so the expected stored value
+    // is reachable only through the verbs: on PATCH both apply and match; on
+    // create both are ignored, the shape stays empty, and the mismatch is what
+    // lets the audit see the ignore. (`with: relationships` would not do —
+    // the verbs refuse to travel with a replace.)
+    wellFormed: ({ targetShortId }) => ({ relatedTo: [targetShortId] }),
+    with: ({ targetShortId }) => ({ relationshipsAdd: { blockedBy: [targetShortId] } }),
+    expectStored: ({ targetShortId }) => ({
+      relatedTo: [], blockedBy: [targetShortId], supersedes: [], derivedFrom: [], supersededBy: [],
+    }),
+    malformed: { relatedTo: 'nope' },
+    note: '#1066 — REMOVE exactly the targets named from the named types; PATCH only' },
+
   // #534 — the compare-and-swap PRECONDITION. Same shape as `descriptionAppend`
   // and `by`: declared on the PATCH schema, CONSUMED before any field is
   // applied, and deliberately never stored under its own key. So RC0b's
