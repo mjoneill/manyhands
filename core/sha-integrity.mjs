@@ -271,6 +271,26 @@ export function readShaStamp(stamp, board) {
   // for a resolvable sha to make the check go green); the instrument cannot
   // tell them apart, so it names the sha and the cards it was on at stamp
   // time and lets a reader ask. A count would only say it happened.
+  // #1020 condition 3 — THE PROXY IS RETIRED WHERE IT IS READ, not only where
+  // it is queued.
+  //
+  // ⛔ The first two commits of #1020 got `inDeployed` as far as `board_ready`
+  // and no further: this function did not pass it through, so `/api/checks` —
+  // where a reader actually looks at sha state — could not see it. The queue
+  // got smarter and every human and agent tally stayed wrong, which is exactly
+  // the failure the condition names. A seat counted `column != done` and
+  // published the wrong number twice on 2026-08-24.
+  //
+  // Shaped like `unresolved` (sha → the cards it is on) so a reader goes from
+  // "this shipped" to "so these cards can close" without a second query, and
+  // filtered to shas the LIVE board still carries — a stamp entry for a sha
+  // nobody references any more is a departure, not a finding (#1146).
+  const inDeployed = stamp.inDeployed
+    ? Object.entries(stamp.inDeployed)
+      .filter(([sha]) => found.has(sha))
+      .map(([sha, roots]) => ({ sha, cards: cardsFor(sha), roots: [...(roots || [])].sort() }))
+      .sort((a, b) => (a.sha < b.sha ? -1 : a.sha > b.sha ? 1 : 0))
+    : null;
   const stampCards = new Map((stamp.unresolved || []).map((u) => [u.sha, [...(u.cards || [])].sort((a, b) => a - b)]));
   const departedSinceStamp = [...seen].filter((s) => !found.has(s)).sort().map((sha) => ({ sha, cards: stampCards.get(sha) || [] }));
   // The identity the three counters must satisfy, ASSERTED rather than only
@@ -281,13 +301,17 @@ export function readShaStamp(stamp, board) {
   const reconciles = Number.isInteger(stamp.checked) && stamp.checked === expectedChecked;
   return { ...base, status: 'stamped', checked: stamp.checked, roots: stamp.roots, ...(stamp.partial ? { partial: true } : {}),
     unresolved, unverifiedSinceStamp, departedSinceStamp,
+    // ABSENT, never []. An empty list reads as "nothing has shipped", which
+    // would tell a reader every card is still open — a false negative on the
+    // exact question this field exists to answer.
+    ...(inDeployed ? { inDeployed } : {}),
     ...(reconciles ? {} : { inconsistent: { checked: stamp.checked ?? null, expectedChecked,
       means: 'checked (at stamp) should equal enumerated (live) + departures − arrivals and does not: the stamp and the board disagree about the population in a way these lists do not explain. Do not quote these counters until re-stamped.' } }),
-    means: 'enumerated is the LIVE population (the board now); checked is the population AT THE STAMP (resolvedAt). '
+    means: 'inDeployed lists the shas that are ANCESTORS of the deployed sha — in the history production serves, not merely resolvable in a clone (ten of 381 live shas resolve in a root and are NOT in the deployed history), so a card whose every sha is listed here is shipped and its remaining work is verification. enumerated is the LIVE population (the board now); checked is the population AT THE STAMP (resolvedAt). '
       + 'They differ by arrivals (unverifiedSinceStamp) minus departures (departedSinceStamp). A departure is a sha the '
       + 'stamp checked that no card carries any more — the only way unresolved can shrink without anything resolving — '
       + 'so it is listed with the cards it left, for a reader to ask whether it was corrected or dropped.',
-    blindTo: `resolved at deploy (${stamp.resolvedAt}), not now: a sha written since is listed under unverifiedSinceStamp, not accused. ${stamp.blindTo || ''}`.trim() };
+    blindTo: `${stamp.inDeployed ? '' : 'inDeployed is ABSENT: this stamp was written before ancestry was recorded, so nothing is claimed to be shipped — do NOT read resolvedBy as ancestry. '}resolved at deploy (${stamp.resolvedAt}), not now: a sha written since is listed under unverifiedSinceStamp, not accused. ${stamp.blindTo || ''}`.trim() };
 }
 
 /** `git cat-file --batch-check` in one root, one process for the whole population. */
