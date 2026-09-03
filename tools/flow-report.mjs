@@ -27,7 +27,64 @@ const HOUR = 3600_000;
 /**
  * @param {{cards:Array|null, roster:string[], now:number, windowHours?:number, staleClaimHours?:number}} opts
  */
-export function flowReport({ cards, roster = [], now = Date.now(), windowHours = 24, staleClaimHours = 6, deployedShas = null } = {}) {
+/**
+ * #1027 — FINISHED, derived from TRANSITIONS rather than from a snapshot.
+ *
+ * `touchedAndDone` (below) counts a card that was ALREADY done and merely
+ * edited — the PO grooming completed cards makes it rise. This counts a card
+ * ENTERING done inside the window, from the change rows /api/changes serves
+ * (history:true, with the #1027 `column` field). Per card, in seq order:
+ *   non-done → done inside the window          ⇒ finished (once per card)
+ *   created straight into done inside window    ⇒ finished
+ *   first row in window is already done, not a create ⇒ AMBIGUOUS: the
+ *     transition may have happened before the window; counted separately,
+ *     never folded into finished. Absence must stay visible, not zero.
+ * Rows without a column (an older server, posts) cannot be judged and are
+ * skipped; a run over such rows reports finished: null.
+ */
+export function finishedFromChanges(changes) {
+  if (!Array.isArray(changes)) return null;
+  const rows = changes.filter((r) => r && r.kind === 'card' && typeof r.seq === 'number');
+  if (rows.length && rows.every((r) => r.column === undefined)) return null;   // pre-#1027 server: no column field at all
+  const byCard = new Map();
+  for (const r of rows) {
+    const id = r.id ?? r.shortId;
+    if (!byCard.has(id)) byCard.set(id, []);
+    byCard.get(id).push(r);
+  }
+  const isDone = (col) => String(col || '').endsWith('done');
+  const finished = [], ambiguous = [];
+  for (const [, evs] of byCard) {
+    evs.sort((a, b) => a.seq - b.seq);
+    let prev = null, counted = false;
+    for (const r of evs) {
+      if (r.column == null) continue;
+      const done = isDone(r.column);
+      if (done && !counted) {
+        if (prev === null) {
+          if (r.op === 'create') { finished.push(r.shortId); counted = true; }
+          else { ambiguous.push(r.shortId); counted = true; }
+        } else if (!prev) { finished.push(r.shortId); counted = true; }
+      }
+      prev = done;
+    }
+  }
+  return { finished: finished.length, finishedShortIds: finished, ambiguous: ambiguous.length, ambiguousShortIds: ambiguous };
+}
+
+/**
+ * #1027 — the deployed-sha set, from the #1008/#1020 stamp the board serves at
+ * /api/checks (shaIntegrity.inDeployed: shas that are ANCESTORS of the deployed
+ * sha, not merely resolvable). null when the stamp or the field is absent —
+ * an older server, or no deploy yet — so the report says UNKNOWN, never 0.
+ */
+export function deployedShasFromChecks(checks) {
+  const list = checks?.shaIntegrity?.inDeployed;
+  if (!Array.isArray(list)) return null;
+  return new Set(list.map((e) => (typeof e === 'string' ? e : e?.sha)).filter(Boolean));
+}
+
+export function flowReport({ cards, roster = [], now = Date.now(), windowHours = 24, staleClaimHours = 6, deployedShas = null, finished = null } = {}) {
   // ⛔ UNKNOWN ≠ ZERO. A failed read and an idle room produce identical counts,
   // and only one of them is information. `null` is "I could not find out";
   // `[]` is a genuine measurement of an empty board, and stays measurable.
@@ -179,7 +236,17 @@ export function flowReport({ cards, roster = [], now = Date.now(), windowHours =
       + '  (undeployed ≠ finished — the card body is the only thing that knows)');
   }
 
-  return { ok: true, touched, touchedAndDone, wip, staleClaims, blockedClaims, hasUndeployedWork, lines, summary, windowHours };
+  // #1027 — the transition count, when the caller could derive one. Stated
+  // beside touched-and-done so the two numbers are never confused, and UNKNOWN
+  // (not 0) when the change rows were unavailable.
+  if (finished && typeof finished.finished === 'number') {
+    lines.push(`  finished (entered done in window): ${finished.finished}`
+      + (finished.finishedShortIds?.length ? ` — ${finished.finishedShortIds.map((s) => '#' + s).join(' ')}` : '')
+      + (finished.ambiguous ? ` · +${finished.ambiguous} already done at first sight (${finished.ambiguousShortIds.map((s) => '#' + s).join(' ')}) — prior state outside the window, NOT counted` : ''));
+  } else {
+    lines.push('  finished (entered done in window): UNKNOWN — change rows unavailable or carry no column');
+  }
+  return { ok: true, touched, touchedAndDone, wip, staleClaims, blockedClaims, hasUndeployedWork, finished, lines, summary, windowHours };
 }
 
 // ── CLI ────────────────────────────────────────────────────────────────────
@@ -205,7 +272,15 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const roster = (Array.isArray(peopleRaw) ? peopleRaw : peopleRaw?.people ?? [])
     .map((p) => p.id || p.key || p.name).filter(Boolean);
 
-  const r = flowReport({ cards, roster, now: Date.now(), windowHours });
+  // #1027 — the two inputs the report used to lack on every real run: the
+  // change rows (for a transition-based finished count) and the deployed-sha
+  // set (from the stamp). Both degrade to null ⇒ UNKNOWN, never to 0.
+  const sinceIso = new Date(Date.now() - windowHours * 3600_000).toISOString();
+  const changesRaw = await get(`/api/changes?since=${encodeURIComponent(sinceIso)}&history=true&limitCards=500&limitPosts=1`);
+  const finished = finishedFromChanges(Array.isArray(changesRaw?.changes) ? changesRaw.changes : null);
+  const deployedShas = deployedShasFromChecks(await get('/api/checks'));
+
+  const r = flowReport({ cards, roster, now: Date.now(), windowHours, deployedShas, finished });
   // #1042 — SAY WHICH SOURCE THIS MEASURED. Three correct tools were wrongly
   // accused in one night because their output named counts and files and never
   // named what they had read. A number without its source cannot be checked by

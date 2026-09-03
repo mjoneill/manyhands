@@ -125,3 +125,12 @@ test('the day-segment skip actually SKIPS: an old segment cannot leak content in
   assert.equal(windowed.length, 1, 'the old-named segment was actually skipped');
   assert.equal(windowed[0].entity.id, 'y');
 });
+
+test('#1027 a card row carries the COLUMN its state was in after the event; a post row carries null', () => {
+  const rows = queryChangesFromLog([
+    { seq: 1, recorded_at: '2026-09-01T00:00:01.000Z', op: 'update', actor: 'ada', entity: { kind: 'card', id: 'c1', shortId: 1 }, state: { id: 'c1', title: 't', column: 'done' } },
+    { seq: 2, recorded_at: '2026-09-01T00:00:02.000Z', op: 'post', actor: 'ada', entity: { kind: 'conversation', id: 'p1' }, state: { id: 'p1', body: 'hi' } },
+  ], { since: '2026-09-01T00:00:00.000Z', history: true }).changes;
+  assert.equal(rows.find((r) => r.kind === 'card').column, 'done');
+  assert.equal(rows.find((r) => r.kind === 'conversation').column, null);
+});

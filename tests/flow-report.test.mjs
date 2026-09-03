@@ -106,9 +106,9 @@ test('#1027 ⛔⛔ A CARD DONE FOR DAYS AND MERELY EDITED MUST NOT READ AS FINIS
   const r = flowReport({ cards: groomed, roster: ['ada'], now: NOW, windowHours: 24 });
 
   assert.equal(r.touchedAndDone, 1, 'it IS touched-in-window and IS in done — both true');
-  assert.equal(r.finished, undefined,
-    'the field must not still be called `finished` — a caller reading r.finished '
-    + 'gets an inflated completion count with no way to know it is inflated');
+  assert.equal(r.finished ?? null, null,
+    'a SNAPSHOT alone must never produce a `finished` — that number is derived only from change rows '
+    + '(transitions into done, #1027) and is null when the caller could not supply them');
   assert.ok(!/\bfinished\b/.test(r.summary),
     `the summary must not claim finishing it cannot establish. Got: ${r.summary}`);
   assert.match(r.summary, /touched-and-done/,
@@ -269,4 +269,49 @@ test('#1027 ⭐ NEGATIVE CONTROL — a fresh claim appears in NEITHER list, bloc
   const flagged = r.lines.filter((l) => /#2[01]\b/.test(l) && /blocked|\?/i.test(l));
   assert.equal(flagged.length, 0,
     `a 1-hour-old claim is ordinary WIP, not a finding. Got: ${flagged.join(' | ')}`);
+});
+
+// ── #1027 — FINISHED from transitions, and the deployed set from the stamp ──
+import { finishedFromChanges, deployedShasFromChecks } from '../tools/flow-report.mjs';
+const row = (seq, shortId, column, op = 'update') => ({ kind: 'card', op, seq, id: `c${shortId}`, shortId, column, by: 'ada', at: hoursAgo(1) });
+
+test('#1027 ⭐ FINISHED counts a card ENTERING done, once — and NOT a done card that was merely edited', () => {
+  const r = finishedFromChanges([
+    row(1, 1, 'backlog'), row(2, 1, 'done'),             // real completion
+    row(3, 2, 'done'), row(4, 2, 'done'),                // done before the window, groomed twice ⇒ ambiguous, not finished
+    row(5, 3, 'backlog'), row(6, 3, 'done'), row(7, 3, 'backlog'), row(8, 3, 'done'),   // bounced: once
+    row(9, 4, 'done', 'create'),                          // created straight into done
+    row(10, 5, 'backlog'), row(11, 5, 'planned'),         // moved, never done
+  ]);
+  assert.equal(r.finished, 3);
+  assert.deepEqual(r.finishedShortIds.sort(), [1, 3, 4]);
+  assert.equal(r.ambiguous, 1);
+  assert.deepEqual(r.ambiguousShortIds, [2]);
+});
+
+test('#1027 ⛔ rows with NO column (an older server) ⇒ finished is UNKNOWN, never 0', () => {
+  assert.equal(finishedFromChanges([{ kind: 'card', op: 'update', seq: 1, id: 'c1', shortId: 1 }]), null);
+  assert.equal(finishedFromChanges(null), null);
+  const r = flowReport({ cards: CARDS, roster: ['ada'], now: NOW, finished: null });
+  assert.ok(r.lines.some((l) => /finished .*UNKNOWN/.test(l)), r.lines.join('\n'));
+  assert.ok(!r.lines.some((l) => /finished \(entered done in window\): 0/.test(l)));
+});
+
+test('#1027 the report prints finished BESIDE touched-and-done and names the ambiguous ones as not counted', () => {
+  const finished = finishedFromChanges([row(1, 3, 'backlog'), row(2, 3, 'done'), row(3, 9, 'done')]);
+  const r = flowReport({ cards: CARDS, roster: ['ada'], now: NOW, finished });
+  const line = r.lines.find((l) => l.includes('finished (entered done in window)'));
+  assert.match(line, /: 1 — #3/);
+  assert.match(line, /\+1 already done at first sight \(#9\).*NOT counted/);
+});
+
+test('#1027 the deployed-sha set comes from the stamp the board serves; absent ⇒ null, never an empty set', () => {
+  const a = 'a'.repeat(40), b = 'b'.repeat(40);
+  const s = deployedShasFromChecks({ shaIntegrity: { inDeployed: [{ sha: a, cards: [1], roots: ['/x'] }, { sha: b, cards: [2], roots: ['/x'] }] } });
+  assert.deepEqual([...s].sort(), [a, b]);
+  assert.equal(deployedShasFromChecks({ shaIntegrity: { status: 'stamped' } }), null, 'a stamp without the field (pre-#1020) is UNKNOWN');
+  assert.equal(deployedShasFromChecks(null), null);
+  // and the report honours null as absence, not as "nothing deployed"
+  const r = flowReport({ cards: [{ shortId: 10, column: 'backlog', implementedBy: [a], updatedAt: hoursAgo(1) }], roster: ['ada'], now: NOW, deployedShas: null });
+  assert.equal(r.hasUndeployedWork, null);
 });

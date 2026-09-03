@@ -30,6 +30,12 @@ function toRow(ev) {
     id: ev.entity?.id ?? null,
     shortId: ev.entity?.shortId ?? s.shortId ?? null,
     title: s.title ?? (typeof s.body === 'string' ? s.body.slice(0, 120) : null),
+    // #1027 — the column the entity was in AFTER this event, for cards. The one
+    // field a flow reader needs to see a card ENTER done: without it "changed"
+    // and "finished" are the same row, and the flow report had to count a
+    // done card that was merely edited as a completion. null for posts and for
+    // events whose state carries no column (tombstones keep their last one).
+    column: ev.entity?.kind === 'card' ? (s.column ?? null) : null,
     by: ev.actor ?? null,
     at: ev.recorded_at,
   };
