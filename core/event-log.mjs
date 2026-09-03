@@ -607,6 +607,41 @@ export function recordRedaction(dir, targetSeq, { actor, authority, fields, reas
   }, now ? { now } : {});
 }
 
+/**
+ * #1150 — the warm activity read's window and cursor, as pure functions so the
+ * rule is testable without a server. The cursor is (seq, recorded_at) of the
+ * last projected event; the window hands readEvents both the exclusive seq
+ * and the DAY to skip from, so a sync that has nothing new parses one segment
+ * rather than the whole log. A cursor with no `at` (cold, or an older process)
+ * reads everything — the day-skip is an optimisation, never a filter.
+ */
+// ⚠️ The day is taken ONE DAY BEFORE the cursor's recorded_at, not at it. A
+// segment is chosen by the record's own recorded_at, so an event stamped
+// earlier than the cursor (clock skew, a writer passing an older `now`) lands
+// in an OLDER file; a zero-margin skip would never read it, and nothing
+// downstream could tell — a skip's only failure mode is silence. One day of
+// slack costs one extra file and turns "could drop an event" into "reads one
+// segment it did not need". Backdating by MORE than a day is outside the log's
+// own contract (recorded_at monotonic with seq) and is not defended here.
+export const ACTIVITY_WINDOW_MARGIN_MS = 24 * 60 * 60 * 1000;
+export function activityReadWindow(seq, at) {
+  const w = { sinceSeq: Number.isFinite(seq) ? seq : 0 };
+  if (typeof at === 'string' && Number.isFinite(Date.parse(at))) {
+    w.sinceDate = new Date(Date.parse(at) - ACTIVITY_WINDOW_MARGIN_MS).toISOString();
+  }
+  return w;
+}
+export function advanceActivityCursor(prev, fresh) {
+  let seq = Number.isFinite(prev?.seq) ? prev.seq : 0;
+  let at = typeof prev?.at === 'string' ? prev.at : null;
+  for (const e of fresh || []) {
+    if (!(e?.seq > seq)) continue;
+    seq = e.seq;
+    if (typeof e.recorded_at === 'string') at = e.recorded_at;
+  }
+  return { seq, at };
+}
+
 /** Read events in seq order. `sinceSeq` is exclusive; `limit` bounds the count. */
 export function readEvents(dir, { sinceSeq = 0, limit = Infinity, sinceDate = null } = {}) {
   const all = [];

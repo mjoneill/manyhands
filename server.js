@@ -64,7 +64,7 @@ import { deriveGraph, personByKey } from './core/people.mjs';
 import { queryCards, facetCards } from './core/cards-query.mjs';
 import { similarCards } from './core/similar-cards.mjs';
 import { queryChangesFromLog } from './core/changes-log-query.mjs';
-import { readEvents, oldestRetainedAt, seqAsOf, seqOfEntityEvent } from './core/event-log.mjs';
+import { readEvents, oldestRetainedAt, seqAsOf, seqOfEntityEvent, activityReadWindow, advanceActivityCursor } from './core/event-log.mjs';
 // #683 — the deafness cure's server half. REST owns the event log, so it owns
 // the cursors that index it; mcp-server asks over HTTP rather than learning a
 // path it has no business knowing (#767).
@@ -889,6 +889,14 @@ async function loadGraphModules() {
  * before the last write.
  */
 let _activitySeq = 0;
+// #1150 — the recorded_at of the last projected event, kept beside its seq so
+// the warm read can hand readEvents a DAY to skip from. Measured on a copy of
+// the live log (125 MB, 32 day files): a warm read that returned ZERO events
+// cost 400–580 ms per sync — the largest single term of the sync floor — because
+// `sinceSeq` is applied only after every segment is parsed and sorted. The #679
+// day-skip existed and this path never used it. Reset with the seq: the two
+// describe the same cursor.
+let _activityAt = null;
 
 async function warmGraphStore() {
   const { buildGraphStore, syncGraphStoreChunked, projectActivities, projectLabelAliases, projectWorkLedger } = await loadGraphModules();
@@ -907,7 +915,7 @@ async function warmGraphStore() {
     // document is read. Everything below describes the board as of this moment;
     // if `_graphGeneration` has moved by the time we finish, it does not.
     const genAtStart = _graphGeneration;
-    if (!_graphStore) { _graphStore = buildGraphStore({ '@graph': [] }); _activitySeq = 0; }
+    if (!_graphStore) { _graphStore = buildGraphStore({ '@graph': [] }); _activitySeq = 0; _activityAt = null; }
     // #949 — the document and its stamp are read as ONE act. `writeBoard`
     // stamps the board and its events with the same instant, so this snapshot's
     // `lastUpdated` maps exactly onto a position in the event log. Capturing it
@@ -959,10 +967,16 @@ async function warmGraphStore() {
     // rather than throwing, and this guard covers the read itself.
     let activities = 0;
     try {
-      const fresh = readEvents(EVENT_LOG_DIR, { sinceSeq: _activitySeq });
+      // #1150 — `sinceDate` lets readEvents skip whole day files older than the
+      // last projected event's day. Safe because recorded_at is monotonic with
+      // seq (event-log.mjs, seqAsOf's contract) and segments are named by
+      // recorded_at day: an event with seq > _activitySeq lives in that day's
+      // file or a later one, never in a skipped one.
+      const fresh = readEvents(EVENT_LOG_DIR, activityReadWindow(_activitySeq, _activityAt));
       if (fresh.length) {
         projectActivities(_graphStore, fresh);
-        _activitySeq = fresh.reduce((m, e) => (e?.seq > m ? e.seq : m), _activitySeq);
+        const cursor = advanceActivityCursor({ seq: _activitySeq, at: _activityAt }, fresh);
+        _activitySeq = cursor.seq; _activityAt = cursor.at;
         activities = fresh.length;
       }
     } catch (e) {
