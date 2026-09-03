@@ -1449,22 +1449,65 @@ const MEMORY_VERSION_ID = (id, v) => `https://scrumboard.local/memory/${id}/v${v
 // from the message is the one thing it must not do. At REST this is as
 // declared-not-authenticated as every other write here (#125) — no new hole,
 // and no pretence that there isn't an old one.
-const SEAT_STATE_ID = (seat) => `https://scrumboard.local/seat-state/${encodeURIComponent(seat)}`;
 
-function seatStatesOf(data) {
+// #1143 — SEAT STATE IS BORN IN THE GRAPH. The first D3 migration step (#1113).
+//
+// Before this slice the write appended an event AND kept one row per seat in
+// the document, and the only live read came from that row — while the replica
+// had projected the whole declaration TIMELINE from the event log since #1110.
+// Two representations of one fact, and the one the API read was the poorer.
+//
+// Now: the event is the write; the graph is the live read; the document
+// carries nothing about seat state. "Live" is a query — an open interval (no
+// scrum:endedAt) — and expiry is judged exactly as before, by
+// core/seat-state.mjs against scrum:expiresAt. A row the migration left in an
+// older document is COUNTED in the payload and never read: the graph is the
+// record, and a row nobody wrote an event for is not in it.
+//
+// ⚠️ The read now pays the replica sync (warmGraphStore) instead of a document
+// parse. The cost is measured on every call and returned as `graph.rebuiltMs`
+// — acceptance 4 on #1143 is a running number, not an estimate.
+const LIVE_SEAT_DECLS_QUERY =
+  'SELECT ?d ?p ?o WHERE { ?d a scrum:SeatDeclaration ; ?p ?o FILTER NOT EXISTS { ?d scrum:endedAt ?x } }';
+const PERSON_IRI = 'https://scrumboard.local/person/';
+const seatKeyOf = (v) => String(v).startsWith('person:') ? String(v).slice(7)
+  : String(v).startsWith(PERSON_IRI) ? decodeURIComponent(String(v).slice(PERSON_IRI.length)) : String(v);
+const localName = (p) => String(p).replace(/^scrum:/, '').replace(/^https?:\/\/[^#]*[#/]/, '');
+/** The OPEN declarations in the graph → the plain shape core/seat-state.mjs reasons about. */
+function seatDeclsFromGraph(queryGraph, store) {
+  const { rows } = queryGraph(store, LIVE_SEAT_DECLS_QUERY, { limit: 1000 });
+  const nodes = new Map();
+  for (const r of rows) {
+    const n = nodes.get(r.d) || { seat: null, mode: null, acceptsRoutineWork: null, constraints: [], note: null, declaredAt: null, expiresAt: null };
+    nodes.set(r.d, n);
+    switch (localName(r.p)) {
+      case 'declaredSeat': n.seat = seatKeyOf(r.o); break;
+      case 'mode': n.mode = r.o; break;
+      case 'acceptsRoutineWork': n.acceptsRoutineWork = r.o === 'true' || r.o === true; break;
+      case 'constraint': n.constraints.push(r.o); break;
+      case 'note': n.note = r.o; break;
+      case 'declaredAt': n.declaredAt = r.o; break;
+      case 'expiresAt': n.expiresAt = r.o; break;
+      default: break;
+    }
+  }
+  return [...nodes.values()].filter((n) => n.seat && n.mode);
+}
+async function liveSeatDecls() {
+  const { queryGraph } = await loadGraphModules();
+  const { store, rebuiltMs, projectedThrough } = await warmGraphStore();
+  return { decls: seatDeclsFromGraph(queryGraph, store), rebuiltMs: rebuiltMs ?? null, projectedThrough };
+}
+/** Rows an older document still carries. Counted, never read (#1143). */
+function legacySeatRows(data) {
   return Array.isArray(data.seatStates) ? data.seatStates : [];
 }
-/** Stored JSON-LD row → the plain shape core/seat-state.mjs reasons about. */
-function seatDeclFromNode(n) {
-  return {
-    seat: n['scrum:seat'], mode: n['scrum:mode'],
-    acceptsRoutineWork: n['scrum:acceptsRoutineWork'],
-    constraints: Array.isArray(n['scrum:constraint']) ? n['scrum:constraint'] : [],
-    note: n['scrum:note'] ?? null,
-    declaredAt: n['scrum:declaredAt'], expiresAt: n['scrum:expiresAt'],
-  };
+/** Migration by touch: a write for a seat removes that seat's legacy row, if any. */
+function dropLegacySeatRow(data, seat) {
+  if (!Array.isArray(data.seatStates)) return;
+  const after = data.seatStates.filter((n) => n['scrum:seat'] !== seat);
+  if (after.length) data.seatStates = after; else delete data.seatStates;
 }
-function seatDeclsOf(data) { return seatStatesOf(data).map(seatDeclFromNode); }
 
 const seatStateEvent = (op, decl) => ({
   op, actor: decl.seat,
@@ -1506,9 +1549,17 @@ function memoryToWire(identity, versions) {
  * inFlight: a second definition of "the seats" in a second payload is the
  * two-surfaces defect this board keeps paying for.
  */
-function handleSeatStates(req, res) {
+async function handleSeatStates(req, res) {
+  let live;
+  try {
+    live = await liveSeatDecls();
+  } catch (e) {
+    if (e?.code === 'GRAPH_DEPS_MISSING') return sendJSON(res, 503, { error: e.message, code: e.code });
+    console.error('GET /api/seats/state:', e.message);
+    return sendJSON(res, 500, { error: e.message });
+  }
+  const { decls, rebuiltMs, projectedThrough } = live;
   const data = readBoard();
-  const decls = seatDeclsOf(data);
   const now = new Date().toISOString();
   // ⚠️ The population is ROSTER, plus any seat that has actually declared.
   // Roster alone was the first cut and it hides a real declaration whenever the
@@ -1524,8 +1575,13 @@ function handleSeatStates(req, res) {
   const el = tendingEligibility(keys, decls, now);
   sendJSON(res, 200, {
     now, seats, eligible: el.eligible, declining: el.declining, anyEligible: el.anyEligible,
+    source: 'graph',
+    graph: { rebuiltMs, projectedThrough: projectedThrough ?? null },
+    legacyRows: legacySeatRows(data).length,
     means: 'UNKNOWN is the ABSENCE of a declaration, never a stated no. An UNKNOWN seat is '
-      + 'ELIGIBLE and keeps its existing behaviour; only acceptsRoutineWork:false removes one.',
+      + 'ELIGIBLE and keeps its existing behaviour; only acceptsRoutineWork:false removes one. '
+      + 'Read from the graph (#1143): the open scrum:SeatDeclaration intervals projected from the '
+      + 'event log. legacyRows counts document rows an older version left behind; they are not read.',
   });
 }
 
@@ -1557,24 +1613,28 @@ async function handleSeatDeclare(req, res, seat) {
     } catch (e) {
       return sendJSON(res, 400, { error: e.message, code: e.code });
     }
+    // #1143 — the prior state is read from the GRAPH, before the lock: it only
+    // chooses the event's op label (create vs update), and the projection
+    // treats both alike (end the open interval, open a new one), so a race
+    // here can mislabel an op and change nothing else.
+    let prior = false;
+    try {
+      prior = (await liveSeatDecls()).decls.some((d) => d.seat === seat);
+    } catch (e) {
+      if (e?.code === 'GRAPH_DEPS_MISSING') return sendJSON(res, 503, { error: e.message, code: e.code });
+      throw e;
+    }
     const saved = await withWriteLock(async () => {
       const data = readBoard();
-      const node = {
-        '@id': SEAT_STATE_ID(seat), '@type': 'scrum:SeatDeclaration',
-        'scrum:seat': decl.seat, 'scrum:mode': decl.mode,
-        'scrum:acceptsRoutineWork': decl.acceptsRoutineWork,
-        ...(decl.constraints.length ? { 'scrum:constraint': [...decl.constraints] } : {}),
-        ...(decl.note ? { 'scrum:note': decl.note } : {}),
-        'scrum:declaredAt': decl.declaredAt, 'scrum:expiresAt': decl.expiresAt,
-      };
-      const prior = seatStatesOf(data).some((n) => n['scrum:seat'] === seat);
-      data.seatStates = [...seatStatesOf(data).filter((n) => n['scrum:seat'] !== seat), node];
+      // #1143 — NO document row. The event IS the write; the replica projects
+      // the interval from it (#1110). A legacy row for this seat, if an older
+      // document still carries one, is dropped here so the migration completes
+      // by touch.
+      dropLegacySeatRow(data, seat);
       // ⚠️ The event log has a CLOSED op vocabulary (create|update|delete|post|
       // redact) and refused a `declare` op outright — the rail working. Mapped
       // onto the existing verbs rather than widening them: a first declaration
-      // is a create, a re-declaration replaces the row, a clear is a delete.
-      // Widening the vocabulary is a protocol change and does not belong in a
-      // slice that needed a word.
+      // is a create, a re-declaration is an update, a clear is a delete.
       writeBoard(data, [seatStateEvent(prior ? 'update' : 'create', decl)]);
       return decl;
     });
@@ -1586,14 +1646,21 @@ async function handleSeatDeclare(req, res, seat) {
 }
 
 async function handleSeatClear(req, res, seat) {
+  // #1143 — "was there something to clear" is a graph question now.
+  let open = false;
+  try {
+    open = (await liveSeatDecls()).decls.some((d) => d.seat === seat);
+  } catch (e) {
+    if (e?.code === 'GRAPH_DEPS_MISSING') return sendJSON(res, 503, { error: e.message, code: e.code });
+    return sendJSON(res, 500, { error: e.message });
+  }
   const cleared = await withWriteLock(async () => {
     const data = readBoard();
-    const before = seatStatesOf(data);
-    const after = before.filter((n) => n['scrum:seat'] !== seat);
-    if (after.length === before.length) return false;
-    data.seatStates = after;
+    const hadLegacy = legacySeatRows(data).some((n) => n['scrum:seat'] === seat);
+    dropLegacySeatRow(data, seat);
+    if (!open && !hadLegacy) return false;
     writeBoard(data, [seatStateEvent('delete', { seat })]);
-    return true;
+    return open;
   });
   // Idempotent: clearing an undeclared seat is already the desired end state.
   sendJSON(res, 200, { seat, mode: SEAT_UNKNOWN, cleared });
