@@ -3076,7 +3076,45 @@ function bumpCardVersion(card) {
 // #534/#466 — cardContentKey lives in core/card-content-key.mjs so the browser
 // and this handler answer "did this card change?" with ONE definition.
 
-function createCardFromPayload(body, nextShortId) {
+/**
+ * #1050 — resolve DECLARED label aliases at CREATE time, and nothing else.
+ *
+ * ⭐⭐⭐ THIS MAKES NO VOCABULARY JUDGEMENT. It applies the map a seat already
+ * declared via `POST /api/labels/aliases`. #857 built that mechanism and then
+ * deliberately refused to auto-merge — "normalisation SURFACES candidates; a
+ * seat DECLARES the merge... a system that silently fused them would be making
+ * an unfalsifiable judgement at write time, the thing the room refused." A
+ * create rule that normalised-and-merged would reverse that decision without
+ * anyone deciding to, so an UNDECLARED spelling is left exactly as sent even
+ * when it obviously normalises onto a canonical one. That refusal has its own
+ * negative control in tests/label-canonical-on-create.test.mjs; it is the
+ * property most likely to be "helpfully" removed by someone who reads this as
+ * a typo-fixer.
+ *
+ * ⇒ So the rule is DATA, not code. Today the declared map canonicalises the
+ * hyphen variants onto `building scrum board` — the DEPRECATED token, which
+ * contradicts @michael's ruling (decision 681628ca: the project is
+ * `manyhands`). Fixing the map is the owner half of #1050. When it is fixed
+ * this starts producing `manyhands` with no change here.
+ *
+ * ⚠️ De-duplicates, because the resolution itself is what creates the
+ * duplicate: a card sent `['manyhands', 'building-scrum-board']` resolves to
+ * the same token twice, and every count built on labels would then
+ * double-count it.
+ */
+function canonicaliseLabels(labels, aliases) {
+  if (!Array.isArray(labels)) return [];
+  const out = [];
+  for (const raw of labels) {
+    const l = typeof raw === 'string' && aliases && Object.prototype.hasOwnProperty.call(aliases, raw)
+      ? aliases[raw]
+      : raw;
+    if (!out.includes(l)) out.push(l);
+  }
+  return out;
+}
+
+function createCardFromPayload(body, nextShortId, labelAliases = null) {
   const now = new Date().toISOString();
   // Normalize assignees: accept string ('alex'), array (['alex','sage']),
   // or missing (→ ['unassigned']).
@@ -3102,7 +3140,9 @@ function createCardFromPayload(body, nextShortId) {
     description: (body.description || '').trim(),
     type: body.type || 'task',
     assignees,
-    labels: Array.isArray(body.labels) ? body.labels : [],
+    // #1050 — born canonical, per the DECLARED alias map only. See
+    // canonicaliseLabels: absent aliases means unchanged, by construction.
+    labels: canonicaliseLabels(body.labels, labelAliases),
     for: body.for || '',
     priority: body.priority || null,
     column: body.column || 'backlog',
@@ -4447,7 +4487,10 @@ async function handleCreateCard(req, res) {
       if (!rp.ok) { createErr = rp.error; return null; }
       if (body.parent !== undefined) body.parent = rp.id;
       similar = similarCards(data.cards, body.title);
-      const card = createCardFromPayload(body, data.nextShortId);
+      // #1050 — the alias map is read from the board INSIDE the lock, beside
+      // the card it is resolving, so a create cannot canonicalise against a
+      // map that was replaced while this request was in flight.
+      const card = createCardFromPayload(body, data.nextShortId, aliasMap(data));
       data.cards.push(card);
       if (card.parent != null) applyApexLabels(data.cards, card.id);   // #902 item 4 — born labelled
       data.nextShortId = (data.nextShortId || 1) + 1;
