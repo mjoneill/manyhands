@@ -198,7 +198,11 @@ export async function startMcpServer({ restApiBase, port, env: extraEnv } = {}) 
       ...process.env,
       MCP_PORT: String(port),
       SCRUM_CHANNEL_STAGGER: 'off', // #256/#265 — keep channel tests instant; scheduling logic is unit-tested in channel-scheduler.test.mjs
-      ...(restApiBase ? { SCRUM_BOARD_API: restApiBase } : {}),
+      // #495 — an adapter must declare its board. With none given, point it at a
+      // port we just proved CLOSED, so a test that never meant to reach a board
+      // gets connection-refused instead of the live room on 3141 — which is
+      // where every undeclared adapter in this suite had been pointing.
+      SCRUM_BOARD_API: restApiBase || `http://127.0.0.1:${await freePort()}`,
       ...(extraEnv || {}),
     },
     stdio: ['ignore', 'pipe', 'pipe'],

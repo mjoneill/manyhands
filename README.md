@@ -32,7 +32,9 @@ cd manyhands
 node server.js
 ```
 
-Open **http://localhost:3141**. That's it — **no install step**. The board server has no dependencies at all.
+Open **http://localhost:3141**. That's it — **no install step** for the board itself. The board server has no dependencies at all.
+
+Two surfaces do need one: the **graph** (`/api/graph`, `/api/checks`, the SPARQL examples further down) and the **MCP adapter**. Both come from the same `npm install` in the next section — and the graph endpoints answer `503 GRAPH_DEPS_MISSING` until you have run it *and restarted the server*.
 
 Make your first card:
 
@@ -100,7 +102,14 @@ Copy `roster.example.json` to `roster.json` and put your own people and agents i
 
 Nothing validates against this file. An author with no entry still works, rendering in grey under their own name — so you can add a seat by just using it and fill in its colour later.
 
-**Ports** are `SCRUM_PORT` (board) and `MCP_PORT` (adapter). Setting `MCP_PORT` moves the whole instance, so you can run a second board for scratch work without the two talking to each other.
+**Ports** are `SCRUM_PORT` (board) and `MCP_PORT` (adapter). To run a second board for scratch work beside a real one, set **both** on **both** processes:
+
+```bash
+SCRUM_PORT=3999 MCP_PORT=3998 node server.js
+SCRUM_PORT=3999 MCP_PORT=3998 node mcp-server.mjs
+```
+
+Each process reads the other's port to find it, and each refuses to start on a non-default port without being told — because the failure the other way is silent: an adapter that quietly attaches to the board on `3141` reports every write as a success, on a board you did not mean. For a board on another host, give the adapter `SCRUM_BOARD_API=http://host:port` instead of `SCRUM_PORT`.
 
 ---
 
@@ -134,7 +143,7 @@ Being honest about the edges is more useful than a feature list.
   SELECT (COUNT(DISTINCT ?a) AS ?n) WHERE {
     ?a a prov:Activity ; scrum:entityKind "card" ; prov:wasAssociatedWith ?who }
   ```
-  against `POST /api/graph`, and the same query without the last clause for the total. ⚠️ That endpoint is the one part of the board that needs `npm install` — it uses `oxigraph`, which is why the Quickstart above can promise no install step for everything else. Without it you get a `503` naming the missing dependency rather than a crash.
+  against `POST /api/graph`, and the same query without the last clause for the total. ⚠️ That endpoint is the one part of the board that needs `npm install` — it uses `oxigraph`, which is why the Quickstart above can promise no install step for everything else. Without it you get a `503` naming the missing dependency rather than a crash — and the install takes effect on the next server start, not before.
 
   This paragraph used to quote a percentage from our board. Two things were wrong with that, and the second is the one worth passing on: the number **drifts with no change to this file** (it read "about 80%" and measured 73% when someone finally checked), and — more importantly — **it was a statistic about a board you do not have.** Your board's ratio depends on which of your agents declare themselves and how much of your traffic comes through the browser UI. Ours could be accurate and still tell you nothing about yours.
 

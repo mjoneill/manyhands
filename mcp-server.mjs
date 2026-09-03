@@ -80,7 +80,52 @@ for (const level of ['log', 'error', 'warn']) {
 // change applies with NO restart. SCRUM_CHANNEL_STAGGER=off (harness) → immediate.
 const CHANNEL_STAGGER_OFF = process.env.SCRUM_CHANNEL_STAGGER === 'off';
 
-const REST_API_BASE = process.env.SCRUM_BOARD_API || 'http://127.0.0.1:3141';
+// ── #495 — which board this adapter is FOR ───────────────────────────────
+//
+// The mirror of #513 in server.js, and the same defect in the other direction.
+// The README promised that setting one port gives you "a second board for
+// scratch work without the two talking to each other". The server kept its
+// half: it derives its notify target from MCP_PORT and refuses to boot in
+// silence. This file did not — it read only SCRUM_BOARD_API, which the README
+// never named, and fell back to 3141 whatever SCRUM_PORT said.
+//
+// Measured 2026-09-03 on a fresh clone: `SCRUM_PORT=3999 MCP_PORT=3998` gave a
+// 1-card scratch board and an adapter whose board_status answered 1021 cards —
+// the live room on 3141. Every tool that writes (card_create, card_update,
+// card_move, card_delete) would have landed there, and every response would
+// have said it worked. On a clean machine the same mistake is loud (connection
+// refused); it is silent precisely on the machine the sentence is about.
+//
+// So: SCRUM_PORT is a declaration, exactly as MCP_PORT is for the server. An
+// explicit SCRUM_BOARD_API still wins (a board on another host). And an
+// adapter on a non-default port that declares NEITHER is refused at boot,
+// because the only thing it could mean is "attach to whatever holds 3141".
+const MCP_PORT = process.env.MCP_PORT ? parseInt(process.env.MCP_PORT, 10) : 3001;
+const DEFAULT_MCP_PORT = 3001;
+const DEFAULT_BOARD_PORT = 3141;
+const declaredBoardApi = process.env.SCRUM_BOARD_API || '';
+const declaredBoardPort = process.env.SCRUM_PORT || '';
+const REST_API_BASE = declaredBoardApi
+  || `http://127.0.0.1:${declaredBoardPort || DEFAULT_BOARD_PORT}`;
+if (MCP_PORT !== DEFAULT_MCP_PORT && !declaredBoardApi && !declaredBoardPort) {
+  console.error(`
+✗ manyhands MCP adapter refuses to start.
+
+  This adapter is on port ${MCP_PORT}, not the default ${DEFAULT_MCP_PORT}, so it is a
+  second instance on this machine — but neither SCRUM_PORT nor SCRUM_BOARD_API
+  is set, so it would attach to the board at ${REST_API_BASE}.
+
+  If a board is running there, that is the live room: every card this adapter's
+  agent creates, moves or deletes would land on it, and every reply would say
+  it worked.
+
+  Setting one port does not isolate an instance. Declare which board this is for:
+
+    SCRUM_PORT=3999 MCP_PORT=3998 node mcp-server.mjs         # the scratch board beside it
+    SCRUM_BOARD_API=http://host:3141 node mcp-server.mjs      # a board somewhere else
+`);
+  process.exit(2);
+}
 /**
  * The seat list an AGENT is told about, derived from the roster rather than
  * typed here. This was the third place holding the same fact and the worst of
@@ -112,8 +157,6 @@ function exampleAssignees() {
   const keys = seatKeys();
   return `['${keys[0] ?? 'a-seat'}', '${keys[1] ?? keys[0] ?? 'another-seat'}']`;
 }
-
-const MCP_PORT = process.env.MCP_PORT ? parseInt(process.env.MCP_PORT, 10) : 3001;
 
 // ── #804 F2/F3 — the tending feature switch ───────────────────────────────
 //

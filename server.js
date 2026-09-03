@@ -862,8 +862,9 @@ async function loadGraphModules() {
       throw Object.assign(
         new Error(
           'The graph endpoints need the optional `oxigraph` dependency, which is not '
-          + 'installed. Run `npm install` to enable /api/graph and /api/ready. The rest '
-          + 'of the board works without it.',
+          + 'installed. Run `npm install`, then RESTART the server, to enable /api/graph, '
+          + '/api/checks and /api/ready — the install alone changes nothing until the '
+          + 'server starts again. The rest of the board works without it.',
         ),
         { code: 'GRAPH_DEPS_MISSING' },
       );
