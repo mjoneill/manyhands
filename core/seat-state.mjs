@@ -205,3 +205,47 @@ export function tendingEligibility(roster, declarations, now = new Date().toISOS
     reason: eligible.length > 0 ? null : 'no-eligible-seats',
   };
 }
+
+/**
+ * #1143 — the OPEN declarations, folded from graph rows.
+ *
+ * Input is the row set of `SELECT ?d ?p ?o` over open scrum:SeatDeclaration
+ * intervals (one row per triple, ~8 per declaration). Output is the plain
+ * shape the functions above reason about. Pure: the caller runs the query.
+ *
+ * ⛔ REFUSES A TRUNCATED ROW SET. The query is bounded by a row cap, and the
+ * cap counts TRIPLES, not declarations — so a cut lands mid-declaration and
+ * the partial node would fail the seat-and-mode filter and vanish: a seat
+ * silently missing from state, under a clean 200. If the rows reached the
+ * cap, the answer is unknowable from them; say so, rather than answer short.
+ */
+export const PERSON_IRI = 'https://scrumboard.local/person/';
+const seatKeyOf = (v) => String(v).startsWith('person:') ? String(v).slice(7)
+  : String(v).startsWith(PERSON_IRI) ? decodeURIComponent(String(v).slice(PERSON_IRI.length)) : String(v);
+const localName = (p) => String(p).replace(/^scrum:/, '').replace(/^https?:\/\/[^#]*[#/]/, '');
+export function declarationsFromRows(rows, { limit } = {}) {
+  if (Number.isFinite(limit) && rows.length >= limit) {
+    throw Object.assign(
+      new Error(`seat-state read returned ${rows.length} rows against a cap of ${limit}: the set may be cut `
+        + 'mid-declaration, so it is refused rather than answered short. Raise the cap or find the '
+        + 'projection bug that is leaving intervals open.'),
+      { code: 'SEAT_STATE_TRUNCATED' },
+    );
+  }
+  const nodes = new Map();
+  for (const r of rows) {
+    const n = nodes.get(r.d) || { seat: null, mode: null, acceptsRoutineWork: null, constraints: [], note: null, declaredAt: null, expiresAt: null };
+    nodes.set(r.d, n);
+    switch (localName(r.p)) {
+      case 'declaredSeat': n.seat = seatKeyOf(r.o); break;
+      case 'mode': n.mode = r.o; break;
+      case 'acceptsRoutineWork': n.acceptsRoutineWork = r.o === 'true' || r.o === true; break;
+      case 'constraint': n.constraints.push(r.o); break;
+      case 'note': n.note = r.o; break;
+      case 'declaredAt': n.declaredAt = r.o; break;
+      case 'expiresAt': n.expiresAt = r.o; break;
+      default: break;
+    }
+  }
+  return [...nodes.values()].filter((n) => n.seat && n.mode);
+}

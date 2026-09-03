@@ -34,7 +34,7 @@ node server.js
 
 Open **http://localhost:3141**. That's it — **no install step** for the board itself. The board server has no dependencies at all.
 
-Two surfaces do need one: the **graph** (`/api/graph`, `/api/checks`, the SPARQL examples further down) and the **MCP adapter**. Both come from the same `npm install` in the next section — and the graph endpoints answer `503 GRAPH_DEPS_MISSING` until you have run it *and restarted the server*.
+Two surfaces do need one: the **graph** (`/api/graph`, `/api/checks`, `/api/seats/state` — seat availability lives in the graph — and the SPARQL examples further down) and the **MCP adapter**. Both come from the same `npm install` in the next section — and the graph endpoints answer `503 GRAPH_DEPS_MISSING` until you have run it *and restarted the server*.
 
 Make your first card:
 

@@ -49,7 +49,7 @@ import { verifyShaIntegrity, readShaStamp, collectShas, SHA_POPULATION } from '.
 import { buildTree, buildChildIndex } from './core/tree.mjs';
 import { buildLinkIndex } from './core/links.mjs';
 import { commentMetadata } from './core/card-comments.mjs';
-import { validateDeclaration, seatState, tendingEligibility, UNKNOWN as SEAT_UNKNOWN } from './core/seat-state.mjs';
+import { validateDeclaration, seatState, tendingEligibility, declarationsFromRows, UNKNOWN as SEAT_UNKNOWN } from './core/seat-state.mjs';
 import { readConfig, writeConfig, LIMITS } from './channel-config.mjs';
 import { loadRoster, writeRoster, rosterFilePath } from './core/roster-config.mjs';
 import { extractMentions as extractMentionsFromRoster } from './core/people.mjs';
@@ -863,8 +863,8 @@ async function loadGraphModules() {
         new Error(
           'The graph endpoints need the optional `oxigraph` dependency, which is not '
           + 'installed. Run `npm install`, then RESTART the server, to enable /api/graph, '
-          + '/api/checks and /api/ready — the install alone changes nothing until the '
-          + 'server starts again. The rest of the board works without it.',
+          + '/api/checks, /api/ready and /api/seats/state — the install alone changes nothing '
+          + 'until the server starts again. Cards, columns, pages and the commons work without it.',
         ),
         { code: 'GRAPH_DEPS_MISSING' },
       );
@@ -1467,31 +1467,23 @@ const MEMORY_VERSION_ID = (id, v) => `https://scrumboard.local/memory/${id}/v${v
 // ⚠️ The read now pays the replica sync (warmGraphStore) instead of a document
 // parse. The cost is measured on every call and returned as `graph.rebuiltMs`
 // — acceptance 4 on #1143 is a running number, not an estimate.
+//
+// ⛔ DECIDED, NOT DRIFTED INTO: a board without `oxigraph` (the no-install
+// Quickstart) answers 503 GRAPH_DEPS_MISSING on the seat-state routes, the
+// same as /api/graph. The doctrine "UNKNOWN is absence, and absence is
+// eligible" is about a declaration that was NEVER MADE; here the RECORD is
+// unreadable, which is a different fact, and answering "everyone UNKNOWN"
+// would dress "I could not look" as "nobody said". Fail-closed and visible.
+// Nothing is lost by it in practice: PUT needs the same graph, so no
+// declaration can exist on such a board, and the tending tick (the one
+// consumer that acts on this) needs the MCP adapter, which needs the install.
 const LIVE_SEAT_DECLS_QUERY =
   'SELECT ?d ?p ?o WHERE { ?d a scrum:SeatDeclaration ; ?p ?o FILTER NOT EXISTS { ?d scrum:endedAt ?x } }';
-const PERSON_IRI = 'https://scrumboard.local/person/';
-const seatKeyOf = (v) => String(v).startsWith('person:') ? String(v).slice(7)
-  : String(v).startsWith(PERSON_IRI) ? decodeURIComponent(String(v).slice(PERSON_IRI.length)) : String(v);
-const localName = (p) => String(p).replace(/^scrum:/, '').replace(/^https?:\/\/[^#]*[#/]/, '');
+const LIVE_SEAT_DECLS_ROW_CAP = 1000;   // triples, not declarations — see declarationsFromRows
 /** The OPEN declarations in the graph → the plain shape core/seat-state.mjs reasons about. */
 function seatDeclsFromGraph(queryGraph, store) {
-  const { rows } = queryGraph(store, LIVE_SEAT_DECLS_QUERY, { limit: 1000 });
-  const nodes = new Map();
-  for (const r of rows) {
-    const n = nodes.get(r.d) || { seat: null, mode: null, acceptsRoutineWork: null, constraints: [], note: null, declaredAt: null, expiresAt: null };
-    nodes.set(r.d, n);
-    switch (localName(r.p)) {
-      case 'declaredSeat': n.seat = seatKeyOf(r.o); break;
-      case 'mode': n.mode = r.o; break;
-      case 'acceptsRoutineWork': n.acceptsRoutineWork = r.o === 'true' || r.o === true; break;
-      case 'constraint': n.constraints.push(r.o); break;
-      case 'note': n.note = r.o; break;
-      case 'declaredAt': n.declaredAt = r.o; break;
-      case 'expiresAt': n.expiresAt = r.o; break;
-      default: break;
-    }
-  }
-  return [...nodes.values()].filter((n) => n.seat && n.mode);
+  const { rows } = queryGraph(store, LIVE_SEAT_DECLS_QUERY, { limit: LIVE_SEAT_DECLS_ROW_CAP });
+  return declarationsFromRows(rows, { limit: LIVE_SEAT_DECLS_ROW_CAP });
 }
 async function liveSeatDecls() {
   const { queryGraph } = await loadGraphModules();
@@ -1555,8 +1547,10 @@ async function handleSeatStates(req, res) {
     live = await liveSeatDecls();
   } catch (e) {
     if (e?.code === 'GRAPH_DEPS_MISSING') return sendJSON(res, 503, { error: e.message, code: e.code });
+    // SEAT_STATE_TRUNCATED — the row cap was reached; a short list would be a
+    // silently-missing seat, so the read refuses instead (declarationsFromRows).
     console.error('GET /api/seats/state:', e.message);
-    return sendJSON(res, 500, { error: e.message });
+    return sendJSON(res, 500, { error: e.message, code: e.code ?? 'SEAT_STATE_READ_FAILED' });
   }
   const { decls, rebuiltMs, projectedThrough } = live;
   const data = readBoard();

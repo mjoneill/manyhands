@@ -106,3 +106,19 @@ test('#1143 a legacy document row is REPORTED and not honoured — the graph is 
     assert.ok(st.eligible.includes('kit'));
   } finally { await s.stop(); }
 });
+
+test('#1143 a row set that reached the cap is REFUSED, never folded into a shorter seat list', async () => {
+  const { declarationsFromRows } = await import('../core/seat-state.mjs');
+  const rows = [];
+  for (let i = 0; i < 10; i++) {
+    const d = `entity:seat-state/s${i}/seq-${i}`;
+    rows.push({ d, p: 'scrum:declaredSeat', o: `person:s${i}` }, { d, p: 'scrum:mode', o: 'resting' }, { d, p: 'scrum:expiresAt', o: '2099-01-01T00:00:00.000Z' });
+  }
+  // Under the cap: ten declarations come back whole.
+  assert.equal(declarationsFromRows(rows, { limit: 31 }).length, 10);
+  // AT the cap: the set may be cut mid-declaration — refused with a code, not answered short.
+  assert.throws(() => declarationsFromRows(rows, { limit: 30 }), (e) => e.code === 'SEAT_STATE_TRUNCATED');
+  // The shape the refusal exists to prevent, shown on purpose: cut one triple off the last
+  // declaration and the fold would silently return nine.
+  assert.equal(declarationsFromRows(rows.slice(0, -2)).length, 9, 'the partial node (seat but no mode) vanishes — which is why the cap is a refusal');
+});
