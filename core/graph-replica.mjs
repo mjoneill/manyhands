@@ -1287,17 +1287,73 @@ function projectEntity(store, e) {
  * paths cannot drift: a second copy of this loop is the #618 shape, and the
  * thing that would drift is #714's triple-for-triple parity invariant.
  */
-function syncOneEntity(store, e, prev, next) {
+// #1157 — THE HASH PASS WAS THE FLOOR. Measured on the live board (23,776
+// entities, 48.9 MB stringified): JSON.stringify 134 ms + sha1 60 ms on EVERY
+// sync, whether one entity changed or none. 22,520 of those entities are
+// Comments, which have no update route — a Comment is written once and only
+// ever deleted. So a Comment's hash from the previous sync can be reused when
+// a CHEAP signal says the object is the same one: its dateCreated, its text
+// length, its key count, its attachment count. No stringify, no hash.
+//
+// ⚠️ THE HONEST LIMIT, stated here so nobody discovers it: a Comment mutated
+// OUT OF BAND (writeBoard refuses in-band edits) with the SAME text length and
+// key count would pass the signal and keep its old hash — stale until
+// `verifyHashCache` runs. That pass does the full hash for every cached entity,
+// REPAIRS any mismatch and reports it, and the server runs it on a cadence, so
+// staleness is bounded and LOUD, never silent. Cards and every other kind are
+// hashed on every sync as before: they have update routes and no proven
+// per-entity signal, and they are ~5% of the entities.
+export function cheapSignal(e) {
+  if (!e || e['@type'] !== 'Comment') return null;
+  const text = typeof e.text === 'string' ? e.text : '';
+  const att = Array.isArray(e.attachments) ? e.attachments.length : 0;
+  return `${e.dateCreated ?? ''}|${text.length}|${Object.keys(e).length}|${att}`;
+}
+
+const fullHash = (e) => createHash('sha1').update(JSON.stringify(e)).digest('hex');
+
+function syncOneEntity(store, e, prev, next, cache) {
   if (!e || e['@id'] == null) return 0;
   const key = subjectIriFor(e);
-  const hash = createHash('sha1').update(JSON.stringify(e)).digest('hex');
+  const sig = cheapSignal(e);
+  let hash;
+  if (sig !== null && prev && cache.prevSignals && cache.prevSignals.get(key) === sig && prev.has(key)) {
+    hash = prev.get(key); cache.reused += 1;
+  } else {
+    hash = fullHash(e); cache.hashed += 1;
+  }
   next.set(key, hash);
+  if (sig !== null) cache.nextSignals.set(key, sig);
   if (!prev) {
     // Cold start: nothing to replace, so the match-and-delete is pointless work.
     projectEntity(store, e); return 1;
   }
   if (prev.get(key) !== hash) { updateEntity(store, e); return 1; }
   return 0;
+}
+
+const newCache = (signals) => ({ prevSignals: signals instanceof Map ? signals : null, nextSignals: new Map(), reused: 0, hashed: 0 });
+
+/**
+ * #1157 — the bound on the cache's honesty. Full-hashes every entity whose
+ * hash was reused from a signal and compares; a mismatch is REPAIRED in the
+ * store and in `hashes`, and returned so the caller can log it as the defect
+ * it is (a Comment changed without its signal moving). Costs a full hash pass
+ * over the cached population — run it on a cadence, not on every sync.
+ */
+export function verifyHashCache(store, doc, hashes, signals) {
+  const mismatched = [];
+  let checked = 0;
+  if (!hashes || !signals) return { checked, mismatched };
+  for (const e of doc['@graph'] || []) {
+    if (!e || e['@id'] == null || cheapSignal(e) === null) continue;
+    const key = subjectIriFor(e);
+    if (!signals.has(key)) continue;
+    checked += 1;
+    const h = fullHash(e);
+    if (hashes.get(key) !== h) { mismatched.push(key); updateEntity(store, e); hashes.set(key, h); }
+  }
+  return { checked, mismatched };
 }
 
 /** #884 — entities that vanished from the document lose their triples. */
@@ -1329,33 +1385,35 @@ function sweepVanished(store, prev, next) {
  * triple-for-triple identical to the synchronous one, or this trades an outage
  * for a correctness bug — a worse trade.
  */
-export async function syncGraphStoreChunked(store, doc, prev, { batchSize = 250 } = {}) {
+export async function syncGraphStoreChunked(store, doc, prev, { batchSize = 250, signals = null } = {}) {
   const next = new Map();
+  const cache = newCache(signals);
   const entities = doc['@graph'] || [];
   let updated = 0;
   for (let i = 0; i < entities.length; i += batchSize) {
     for (const e of entities.slice(i, i + batchSize)) {
-      updated += syncOneEntity(store, e, prev, next);
+      updated += syncOneEntity(store, e, prev, next, cache);
     }
     // Hand the loop back. `setImmediate` runs after I/O callbacks, so a pending
     // request is served before the next batch rather than after the whole sync.
     if (i + batchSize < entities.length) await new Promise(setImmediate);
   }
   const removed = sweepVanished(store, prev, next);
-  return { hashes: next, updated, removed, total: entities.length };
+  return { hashes: next, signals: cache.nextSignals, reused: cache.reused, hashed: cache.hashed, updated, removed, total: entities.length };
 }
 
-export function syncGraphStore(store, doc, prev) {
+export function syncGraphStore(store, doc, prev, { signals = null } = {}) {
   const next = new Map();
+  const cache = newCache(signals);
   const entities = doc['@graph'] || [];
   let updated = 0, removed = 0;
   for (const e of entities) {
-    updated += syncOneEntity(store, e, prev, next);
+    updated += syncOneEntity(store, e, prev, next, cache);
   }
   // Arrows POINTING at a vanished entity survive under their own subjects — the
   // same dangling-reference behaviour a full rebuild produces.
   removed = sweepVanished(store, prev, next);
-  return { hashes: next, updated, removed, total: entities.length };
+  return { hashes: next, signals: cache.nextSignals, reused: cache.reused, hashed: cache.hashed, updated, removed, total: entities.length };
 }
 
 /** IRI → prefixed short form for token-efficient results. */

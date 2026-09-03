@@ -749,6 +749,11 @@ function writeBoard(data, events) {
 let _graphStore = null;
 // #714 — per-entity content hashes from the last sync; null means cold.
 let _graphHashes = null;
+// #1157 — per-entity cheap signals beside the hashes, so a sync hashes what
+// moved; and a counter for the verify cadence that bounds the cache's honesty.
+let _graphSignals = null;
+let _graphSyncCount = 0;
+const GRAPH_VERIFY_EVERY = Number(process.env.SCRUM_GRAPH_VERIFY_EVERY || 50);
 let _graphDirty = true;
 // #949 — the seq the DOCUMENT half of the replica was projected from, derived
 // from the snapshot's own `lastUpdated`. null means cold: never synced, so the
@@ -899,7 +904,7 @@ let _activitySeq = 0;
 let _activityAt = null;
 
 async function warmGraphStore() {
-  const { buildGraphStore, syncGraphStoreChunked, projectActivities, projectLabelAliases, projectWorkLedger } = await loadGraphModules();
+  const { buildGraphStore, syncGraphStoreChunked, verifyHashCache, projectActivities, projectLabelAliases, projectWorkLedger } = await loadGraphModules();
   let rebuiltMs = null;
   if (_graphDirty || !_graphStore) {
     // #714 — INCREMENTAL. The old path threw the store away and re-projected
@@ -934,8 +939,18 @@ async function warmGraphStore() {
     // ⭐ This does the SAME total work and is marginally slower. The property is
     // that other requests get a turn, not that the sync is fast: a faster
     // projection that still blocks is the same outage, shorter.
-    const stats = await syncGraphStoreChunked(_graphStore, doc, _graphHashes);
+    const stats = await syncGraphStoreChunked(_graphStore, doc, _graphHashes, { signals: _graphSignals });
     _graphHashes = stats.hashes;
+    _graphSignals = stats.signals;
+    // #1157 — every Nth sync, full-hash the cached population and REPAIR any
+    // entity whose signal did not move while its content did. Logged as a
+    // defect, never absorbed: the cache's honesty is bounded by this line.
+    _graphSyncCount += 1;
+    if (_graphSyncCount % GRAPH_VERIFY_EVERY === 0) {
+      const v = verifyHashCache(_graphStore, doc, _graphHashes, _graphSignals);
+      if (v.mismatched.length) console.error(`${new Date().toISOString()} ⛔ graph-replica: hash cache DEFECT (#1157) — ${v.mismatched.length} of ${v.checked} cached entities changed without their signal moving; repaired: ${v.mismatched.slice(0, 5).join(', ')}${v.mismatched.length > 5 ? ', …' : ''}`);
+      else console.error(`${new Date().toISOString()} graph-replica: hash cache verified — ${v.checked} cached entities, 0 mismatches`);
+    }
 
     // #857 §IV — declared label synonyms.
     //
@@ -1035,7 +1050,7 @@ async function warmGraphStore() {
       console.error(`${new Date().toISOString()} graph-replica: a write landed mid-sync (generation ${genAtStart} → ${_graphGeneration}); staying dirty so the next query re-projects`);
     }
     rebuiltMs = Math.round(performance.now() - t);
-    console.error(`${new Date().toISOString()} graph-replica: synced ${stats.updated} updated, ${stats.removed} removed of ${stats.total} entities, +${activities} activities (through seq ${_activitySeq}) → ${_graphStore.size} triples in ${rebuiltMs}ms`);
+    console.error(`${new Date().toISOString()} graph-replica: synced ${stats.updated} updated, ${stats.removed} removed of ${stats.total} entities (hashed ${stats.hashed}, reused ${stats.reused}), +${activities} activities (through seq ${_activitySeq}) → ${_graphStore.size} triples in ${rebuiltMs}ms`);
   }
   return { store: _graphStore, rebuiltMs, projectedThrough: _graphProjectedThrough };
 }
