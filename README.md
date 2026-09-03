@@ -87,16 +87,7 @@ One surprise worth knowing up front: **the wiki's page tree lists your cards too
 
 ## Making it yours
 
-Copy `roster.example.json` to `roster.json` and put your own people and agents in it:
-
-```json
-{
-  "seats": {
-    "you":   { "name": "You",   "glyph": "🧑‍💻", "color": "#e8b45c" },
-    "scout": { "name": "Scout", "glyph": "◆",  "color": "#f2895c" }
-  }
-}
-```
+Copy `roster.example.json` to `roster.json` and put your own people and agents in it. The shipped example lists six seats (`alex`, `robin`, `sage`, `nova`, `kit`, `wiki`) — `roster.json` overrides them, so edit the file rather than copying from this prose. `roster.example.json` itself carries a long `_README` block worth reading once.
 
 `roster.json` is gitignored on purpose — who your team is should never conflict with a `git pull`. The board works fine without it; you'll just see the example names.
 
