@@ -22,22 +22,18 @@ const ROOTS = (arg('--roots', '') || '').split(':').filter(Boolean);
 const DEPLOYED = arg('--deployed', null);
 if (!OUT) { console.error('stamp-sha-integrity: --out <file> is required'); process.exit(2); }
 
+// ⚠️ ONE call, the WHOLE board. The first version paged /api/cards with a
+// `before` cursor and got 1500 rows for 1021 cards — duplicates in, 519 cards
+// out — so the stamp saw 309 of 373 shas and reported 64 real, old shas as
+// "unverified since stamp". A population read through a pager is a claim about
+// the pager. /api/load is the full board in the `cards` shape the endpoint's
+// own readBoard() produces, so the two enumerations cannot drift.
 async function allCards() {
-  const cards = [];
-  let before = null;
-  for (;;) {
-    const u = new URL('/api/cards', API);
-    u.searchParams.set('limit', '500'); u.searchParams.set('fields', 'all');
-    if (before != null) u.searchParams.set('before', String(before));
-    const r = await fetch(u);
-    if (!r.ok) throw new Error(`GET ${u} → ${r.status}`);
-    const page = await r.json();
-    const rows = page.cards || [];
-    cards.push(...rows);
-    if (rows.length === 0 || (page.cardsTotal != null && cards.length >= page.cardsTotal)) break;
-    before = rows[rows.length - 1].shortId;
-  }
-  return cards;
+  const r = await fetch(new URL('/api/load', API));
+  if (!r.ok) throw new Error(`GET /api/load → ${r.status}`);
+  const board = await r.json();
+  if (!Array.isArray(board.cards)) throw new Error('/api/load returned no cards array');
+  return board.cards;
 }
 
 const cards = await allCards();
