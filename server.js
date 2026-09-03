@@ -1698,10 +1698,13 @@ async function handleCreateMemory(req, res) {
       const version = {
         '@id': vIri, '@type': 'scrum:MemoryVersion',
         'scrum:ofMemory': MEMORY_ID(id), 'scrum:version': 1,
-        'scrum:body': body.body, author: owner, dateCreated: now,
+        // #1106 — the writer, when named; the owner otherwise. Before this
+        // v1 was ALWAYS the owner, so a memory created on someone's behalf
+        // carried their byline from its first byte.
+        'scrum:body': body.body, author: (typeof body.by === 'string' && body.by) || owner, dateCreated: now,
       };
       data.memories = [...memoriesOf(data), identity, version];
-      writeBoard(data, [memoryEvent('create', identity, owner)]);
+      writeBoard(data, [memoryEvent('create', identity, (typeof body.by === 'string' && body.by) || owner)]);
       return memoryToWire(identity, [version]);
     });
     sendJSON(res, 201, created);

@@ -1532,10 +1532,13 @@ function buildMcpServer() {
       title: z.string().min(1).describe('Memory title (required, non-empty)'),
       body: z.string().min(1).describe('Memory body (required — a memory with no text is a title pretending to be a memory)'),
       tags: z.array(z.string()).optional().describe('Optional tags for categorization and query filtering'),
+      by: z.string().optional().describe('#1106 — your seat key when you create a memory OWNED BY SOMEONE ELSE; v1 is recorded as written by you. Omitted, v1 is attributed to the owner.'),
     },
   }, async (args) => {
-    const { owner, title, body, tags } = args;
-    return jsonResult(await apiCall('POST', '/api/memories', { owner, title, body, tags }));
+    const { owner, title, body, tags, by } = args;
+    // #1106 — `by` was not declared and not forwarded, so v1's author was
+    // always the owner even when someone else wrote it. Forward only when sent.
+    return jsonResult(await apiCall('POST', '/api/memories', { owner, title, body, tags, ...(by !== undefined ? { by } : {}) }));
   });
 
   mcp.registerTool('memory_update', {
@@ -1547,9 +1550,16 @@ function buildMcpServer() {
       bodyPrepend: z.string().optional().describe('Text added to the BEGINNING of the current body, byte-preserving, as a new version (#1022). Use it for a CORRECTION, so a reader meets it before the text it supersedes — a memory is read top-first. Cannot be combined with `body`; composes with bodyAppend.'),
       title: z.string().optional().describe('New title — updates the identity without creating a version'),
       tags: z.array(z.string()).optional().describe('New tags — updates the identity without creating a version'),
+      // #1106 — ⚠️ These two lines are the whole reachability of #466's memory
+      // CAS and of honest attribution. This inputSchema is an allowlist: a key
+      // not declared here is rejected by zod before the handler runs, and the
+      // handler below forwards only what it names. The sibling (card_update)
+      // learned this on #534 and this tool was never checked.
+      ifVersion: z.number().int().min(0).optional().describe('OPTIONAL compare-and-swap (#466): the memory `version` you read. If it has moved on, the write is refused with 409 and nothing is written — re-read and reapply. Omit for a plain append.'),
+      by: z.string().optional().describe('#675/#1106 — your seat key: who is writing this version. Declared, not authenticated. ⚠️ WITHOUT it the version is recorded as the memory OWNER\'s, and a laundered byline is byte-identical to an honest one — send it whenever you write a memory you do not own.'),
     },
   }, async (args) => {
-    const { id, body, bodyAppend, bodyPrepend, title, tags } = args;
+    const { id, body, bodyAppend, bodyPrepend, title, tags, ifVersion, by } = args;
     // Only send fields that are actually provided (PATCH behavior)
     const updates = {};
     if (body !== undefined) updates.body = body;
@@ -1557,6 +1567,8 @@ function buildMcpServer() {
     if (bodyPrepend !== undefined) updates.bodyPrepend = bodyPrepend;
     if (title !== undefined) updates.title = title;
     if (tags !== undefined) updates.tags = tags;
+    if (ifVersion !== undefined) updates.ifVersion = ifVersion;
+    if (by !== undefined) updates.by = by;
     return jsonResult(await apiCall('PATCH', `/api/memories/${encodeURIComponent(id)}`, updates));
   });
 
