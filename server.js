@@ -766,6 +766,51 @@ let _graphProjectedThrough = null;
 // landed while the projection was yielding, the generation moved and the flag
 // must NOT be cleared, because that write is not in the store.
 let _graphGeneration = 0;
+/**
+ * #1171 — THE WATERMARK A WRITE CAN HONESTLY REPORT, AND IT MUST NOT SYNC.
+ *
+ * A write to a graph-backed collection returns before the projection has run:
+ * `writeBoard` sets `_graphDirty = true` and returns, because #694 made the
+ * replica rebuild LAZILY on the next query. So the 200 describes the REQUEST,
+ * and the caller cannot tell "accepted" from "visible to the reader that
+ * schedules work" — which for seat state is the tending tick, reading the
+ * projection.
+ *
+ * ⚠️ DELIBERATELY DOES NOT CALL `liveSeatDecls()` OR ANY SYNC. Forcing a
+ * projection here to make the response truthful would move the sync cost onto
+ * every write and defeat #694 — buying honesty with the property that made the
+ * design good. Reporting the pending state is enough: a caller compares the
+ * `projectedThrough` here against the one `/api/seats/state` returns and knows
+ * whether the thing it wrote is visible yet. (⛔ NOT `generation` — that route
+ * answers `graph: { rebuiltMs, projectedThrough }` and carries no generation at
+ * all, so a comparison against it could never resolve. This sentence said
+ * `generation` while the sentence twenty lines down said `projectedThrough`;
+ * two descriptions of one comparison, disagreeing, and the grep for the RIGHT
+ * word found only the correct one.)
+ *
+ * ⛔ AN EARLIER CUT RETURNED `{ generation, dirty }` AND `dirty` WAS A CONSTANT.
+ * `writeBoard` sets `_graphDirty = true` unconditionally, so on a write response
+ * it is ALWAYS true — a field wired to nothing, which is the exact defect this
+ * card exists to fix, one level up. Review caught the reader-facing half: a
+ * caller cannot tell normal-pending from an hour of failed syncs, because
+ * both read dirty:true — and the constant is why.
+ *
+ * ⛔ AND IT DOES NOT USE `graphWatermark()`, THOUGH THAT HELPER COMPUTES THE
+ * `behindBy` A CALLER WANTS. It reads `headSeq(EVENT_LOG_DIR)` — a directory
+ * read. Putting a syscall on every seat-state write to DESCRIBE that write is
+ * the same trade as forcing a sync, one order of magnitude down, on the
+ * collection whose whole argument is that writes stay cheap.
+ *
+ * ⭐ SO: two numbers, both free, both MOVING.
+ *   generation        moves on every write   (#931)
+ *   projectedThrough  moves on every sync    (#949)
+ * A caller asking "is my write visible yet" compares `projectedThrough` here
+ * against the one `/api/seats/state` returns — the reader's own watermark. The
+ * comparison belongs to whoever cares, and it costs the write path nothing.
+ */
+function writeWatermark() {
+  return { generation: _graphGeneration, projectedThrough: _graphProjectedThrough };
+}
 // #1112 item 3 — one warning per boot when the ledger cannot be projected here.
 let _workStoreWarned = false;
 const GRAPH_QUERY_LOG = path.join(path.dirname(BOARD_DATA_FILE), 'graph-query-log.jsonl');
@@ -1661,7 +1706,9 @@ async function handleSeatDeclare(req, res, seat) {
       writeBoard(data, [seatStateEvent(prior ? 'update' : 'create', decl)]);
       return decl;
     });
-    sendJSON(res, 200, saved);
+    // #1171 — the declaration is the caller's own object; `graph` is the only
+    // part of this body that describes the SYSTEM rather than the request.
+    sendJSON(res, 200, { ...saved, graph: writeWatermark() });
   } catch (e) {
     console.error(`PUT /api/seats/${seat}/state:`, e.message);
     sendJSON(res, 500, { error: e.message });
@@ -1686,7 +1733,7 @@ async function handleSeatClear(req, res, seat) {
     return open;
   });
   // Idempotent: clearing an undeclared seat is already the desired end state.
-  sendJSON(res, 200, { seat, mode: SEAT_UNKNOWN, cleared });
+  sendJSON(res, 200, { seat, mode: SEAT_UNKNOWN, cleared, graph: writeWatermark() });
 }
 
 async function handleCreateMemory(req, res) {
