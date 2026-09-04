@@ -3844,6 +3844,37 @@ function validateCardFields(body, { checkId = true, surface = 'patch', current =
         : field === 'blockers' ? validateBlockers(body[verb], current, body)
         : validateChecks(body[verb]);
       if (err) return err;
+      // #1169 — AN AMBIGUOUS KEY MUST REFUSE, NOT GUESS.
+      //
+      // The key is not unique. A card may legitimately carry two blockers
+      // naming the same person: one cleared months ago, one open now — the
+      // normal shape of a long-running card where one human was asked two
+      // different questions. `upsertArrayEntries` resolves with findIndex, so
+      // it silently takes the FIRST, replaces it whole (losing that entry's
+      // note and owner), leaves the entry the caller meant untouched, and
+      // returns 200. Live specimen: a card read "blocked on <person>" for
+      // 1h45m after the block was answered, and a prior clearing note was
+      // destroyed — recovered only from a read taken 90 seconds earlier.
+      //
+      // Refusing is the whole remedy: the caller still has the whole-array
+      // write under ifVersion, which is the only safe spelling for this shape.
+      // Quoting BOTH notes is the part that makes the refusal actionable —
+      // "ambiguous key" alone leaves the caller where the silent write did.
+      {
+        const keyOf = ARRAY_UPSERT_KEY[field];
+        const existingEntries = Array.isArray(current?.[field]) ? current[field] : [];
+        for (const entry of body[verb]) {
+          if (field === 'acceptance' && entry.replaces !== undefined) continue; // targets old TEXT, not the key
+          const k = keyOf(entry);
+          const hits = existingEntries.filter((e) => keyOf(e) === k);
+          if (hits.length > 1) {
+            const shown = hits.map((h, n) => `  [${n}] status=${h.status} owner=${h.owner ?? '(none)'} note=${JSON.stringify((h.note ?? '').slice(0, 90))}`).join('\n');
+            return `${verb}: ${hits.length} existing ${field} entries share the key ${JSON.stringify(k)}, so this upsert cannot know which one you mean:\n${shown}\n`
+              + `Refused rather than guessing — resolving to the first would rewrite that entry whole and leave the other untouched, `
+              + `with a 200. Send the full \`${field}\` array with \`ifVersion\` to say exactly which entry changes.`;
+          }
+        }
+      }
       // #1158 — a REWORDED condition must not fork. The key is exact text, so
       // an upsert whose text is near-identical to an existing condition would
       // insert a twin beside the original (which keeps its old, often empty,
