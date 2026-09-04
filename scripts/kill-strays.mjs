@@ -99,7 +99,7 @@ const runtimeIsNode = (command) =>
  * rather than assumed; a missing env column would silently demote every fixture
  * server to "unmarked" and spare the exact processes we exist to clear.
  */
-function candidates() {
+function candidates(showSpared = false) {
   const out = sh('ps', ['-AE', '-o', 'pid=,ppid=,pgid=,command=']);
   return out.split('\n')
     .map((l) => l.trim()).filter(Boolean)
@@ -108,19 +108,32 @@ function candidates() {
       return m ? { pid: +m[1], ppid: +m[2], pgid: +m[3], command: m[4] } : null;
     })
     .filter(Boolean)
-    .filter((p) => p.pid !== process.pid && runtimeIsNode(p.command))
+    // ⛔ #490 requirement 5, found in the beneficiary review: this pre-filter is
+    // why the person whose work is at risk CANNOT SEE that they were spared.
+    // A non-node process never reaches the rail, so it never appears in REFUSED
+    // — and from outside, "refused" and "never considered" render identically,
+    // as absence. That is not a safety defect (the pre-filter can only narrow,
+    // and the selector re-proves isNode itself); it is an EVIDENCE defect, and
+    // requirement 5 is an evidence requirement.
+    //
+    // ⇒ --show-spared drops the pre-filter so every process on the box is put to
+    //   the rail and the refusals are printed by name. It costs one lsof per
+    //   process, which is exactly why it is not the default.
+    .filter((p) => p.pid !== process.pid && (showSpared || runtimeIsNode(p.command)))
     // `ps -E` glues argv and env into one string; the selector reads both, and
     // splitting them here would need a delimiter ps does not provide.
     .map((p) => ({ ...p, env: p.command, cwd: cwdOf(p.pid), ports: listeningPorts(p.pid) }));
 }
 
 const argv = process.argv.slice(2);
+// The beneficiary's flag: prove the refusal happened rather than asserting it.
+const showSpared = argv.includes('--show-spared');
 const killIdx = argv.indexOf('--kill');
 const asked = killIdx === -1 ? null : argv.slice(killIdx + 1).map(Number).filter(Boolean);
 let plan;
 try {
   plan = selectStrays({
-    candidates: candidates(),
+    candidates: candidates(showSpared),
     liveTrees: LIVE_TREES,
     devTrees: DEV_TREES,
     protectedPorts: PROTECTED_PORTS,
@@ -134,8 +147,21 @@ try {
 
 console.log(`\n  fence      ${LIVE_TREES.join('\n             ')}`);
 console.log(`  ports      ${PROTECTED_PORTS.join(', ')}`);
-console.log(`  owned      ${DEV_TREES.join('\n             ')}\n`);
+console.log(`  owned      ${DEV_TREES.join('\n             ')}`);
+console.log(`  scope      ${showSpared
+  ? 'EVERY process on this box, put to the rail (--show-spared)'
+  : 'node processes only — rerun with --show-spared to see what else would be refused'}\n`);
+// ⛔ #490 — WITH 420 ROWS, A FLAT LIST IS NOT EVIDENCE. The beneficiary review
+// asked that the person whose work is at risk can SEE they were spared; the
+// first cut printed every refusal in one column and buried 239 `not-node` rows
+// under 178 `unknown-cwd` ones. A finding you have to grep for is a finding the
+// reader does not have. So: the shape first, the rows after.
+const byReason = plan.refused.reduce((m, r) => m.set(r.reason, (m.get(r.reason) || 0) + 1), new Map());
 console.log(`  ⛔ REFUSED (${plan.refused.length})`);
+for (const [reason, n] of [...byReason].sort((a, b) => b[1] - a[1])) {
+  console.log(`     ${String(n).padStart(5)}  ${reason}`);
+}
+console.log('');
 for (const r of plan.refused) console.log(`     ${String(r.pid).padStart(7)}  ${r.reason.padEnd(15)} ${r.detail}`);
 console.log(`\n  ✅ ELIGIBLE (${plan.kill.length})`);
 // The plan states WHY each candidate is eligible. #813's incident was a
