@@ -117,3 +117,37 @@ test('#717 HOLE-SPECIFIC, structural: lastClientRequestAt is written at EXACTLY 
   assert.doesNotMatch(closeBody, /lastClientRequestAt/, 'the close handler must not touch the client clock — that is the hole this card records');
   assert.match(closeBody, /lastActivity = Date\.now\(\)/, 'and it still bumps the reaper clock, which is correct there');
 });
+
+// ── 2026-09-05 FALSE-POSITIVE SPECIMEN — a seat working through ANOTHER DOOR ──
+// 147 minutes with no MCP client request, while rebasing, running suites,
+// pushing and deploying: board writes attributed to the seat the whole time,
+// none of them through its MCP client. The alarm named it STOPPED and said
+// only a human at its terminal could help.
+import { lastWriteBySeatFrom } from '../scripts/fanout-decide.mjs';
+
+test('#717 a seat with a FRESH attributed board write is NOT named stopped, however stale its client request; a stale write does not rescue; absent is unknown and does not rescue', () => {
+  const CLAIMS = { alpha: [1208] };
+  const fresh = { alpha: iso(T0 - 5 * MIN) };
+  assert.deepEqual(stoppedSeats(STATUS_STALLED, { now: T0, staleMs: 20 * MIN, claimsBySeat: CLAIMS, lastWriteBySeat: fresh }), [], 'working through REST is working');
+  const stale = { alpha: iso(T0 - 147 * MIN) };
+  const named = stoppedSeats(STATUS_STALLED, { now: T0, staleMs: 20 * MIN, claimsBySeat: CLAIMS, lastWriteBySeat: stale });
+  assert.deepEqual(named.map((x) => x.seat), ['alpha'], 'a write older than the window is not evidence of execution now');
+  assert.equal(named[0].lastWriteAt, stale.alpha, 'the last write travels into the alarm so the reader can weigh it');
+  const unknown = stoppedSeats(STATUS_STALLED, { now: T0, staleMs: 20 * MIN, claimsBySeat: CLAIMS, lastWriteBySeat: {} });
+  assert.deepEqual(unknown.map((x) => x.seat), ['alpha'], 'no attributed-write reading → the client reading decides alone, as before');
+  assert.equal(unknown[0].lastWriteAt, null);
+  // The alarm text must claim only what was measured.
+  const { warnBody } = decide({ ...base, state: healthy, stoppedSeats: named, staleSeats: [] });
+  assert.match(warnBody, /no board write attributed|last attributed board write/);
+  assert.doesNotMatch(warnBody, /only instrument that can act/i, 'the over-claim that sent a human to a busy terminal');
+  assert.match(warnBody, /can say so here/, 'the seat is given the way to refute it');
+});
+
+test('#717 lastWriteBySeatFrom keeps the NEWEST `at` per `by` from a changes page, case-folded, ignoring rows without either', () => {
+  const rows = [
+    { by: 'alpha', at: '2026-09-05T20:50:12.279Z' }, { by: 'Alpha', at: '2026-09-05T23:16:00.000Z' }, { by: 'alpha', at: '2026-09-05T22:00:00.000Z' },
+    { by: 'beta' }, { at: '2026-09-05T23:00:00.000Z' }, { by: 'board', at: '2026-09-05T23:17:06.575Z' },
+  ];
+  assert.deepEqual(lastWriteBySeatFrom(rows), { alpha: '2026-09-05T23:16:00.000Z', board: '2026-09-05T23:17:06.575Z' });
+  assert.deepEqual(lastWriteBySeatFrom(undefined), {});
+});

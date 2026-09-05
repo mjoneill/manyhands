@@ -262,10 +262,12 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
   for (const key of Object.keys(st.stoppedEpisodes)) if (!stoppedNow.has(key)) delete st.stoppedEpisodes[key];
   if (stoppedNamed.length) {
     const lines = stoppedNamed.map((s) => `${s.seat} holds an open stream and ${s.claims?.length ? `claim${s.claims.length === 1 ? '' : 's'} on ${s.claims.map((c) => `#${c}`).join(', ')}` : 'a claim'} `
-      + `but has made no request since ${s.lastClientRequestAt} (${Math.round(s.staleMs / 60000)} min)`);
+      + `but has made no request since ${s.lastClientRequestAt} (${Math.round(s.staleMs / 60000)} min)`
+      + `${s.lastWriteAt ? ` and its last attributed board write was ${s.lastWriteAt}` : ' and no board write is attributed to it in the window read'}`);
     const stoppedBody = `⛔ fanout watch: SEAT STOPPED, not deaf (#717) — ${lines.join('; ')}. `
-      + `It can hear this and cannot act on it: a stopped seat executes nothing, so no self-report is possible during. `
-      + `The only instrument that can act is a human at that seat's terminal (a held permission prompt, a wedged turn). `
+      + `Measured: no request through its MCP client and no board write attributed to it in that window, while it holds a claim. `
+      + `If it is genuinely stopped it cannot self-report; a human at that seat's terminal (a held permission prompt, a wedged turn) is the one who can look. `
+      + `If it is working through another door that leaves no attributed write, it can say so here. `
       + `Heartbeat and stream fields read HEALTHY throughout — they measure the server's own writes, not the seat.`;
     warnBody = warnBody ? `${warnBody}\n${stoppedBody}` : stoppedBody;
   }
@@ -289,7 +291,23 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
  * third is bumped by any stream close. Reading any of them here is the
  * refuted shape #2 this card records.
  */
-export function stoppedSeats(status, { now = Date.now(), staleMs = 20 * 60 * 1000, claimsBySeat = {} } = {}) {
+/**
+ * ⛔ FALSE-POSITIVE SPECIMEN (2026-09-05, on the card with timings). A seat was
+ * named STOPPED after 147 minutes with no client request — while it rebased,
+ * ran four suites, pushed three commits and drove five deploys, writing to the
+ * board the whole time through REST and shell, which do not identify as the
+ * seat's MCP client. `lastClientRequestAt` measures "spoke through one door",
+ * not "is executing". The alarm said only a human at the terminal could help,
+ * and that nearly sent one to a terminal that was busy working.
+ *
+ * So the second reading is `lastWriteBySeat`: the newest board event whose
+ * `by` is the seat, whatever door it came through. A seat that is genuinely
+ * stopped writes NOTHING anywhere, so the true case still fires; a seat
+ * working through another door leaves an unbroken stream of attributed writes
+ * and is not named. Absent = UNKNOWN, and unknown does not rescue: the client
+ * reading alone then decides, as it did before this fix.
+ */
+export function stoppedSeats(status, { now = Date.now(), staleMs = 20 * 60 * 1000, claimsBySeat = {}, lastWriteBySeat = {} } = {}) {
   const out = [];
   for (const [seat, s] of Object.entries(status?.seats ?? {})) {
     const streams = Number(s?.streams);
@@ -297,11 +315,31 @@ export function stoppedSeats(status, { now = Date.now(), staleMs = 20 * 60 * 100
     if (typeof s?.lastClientRequestAt !== 'string') continue;
     const age = now - Date.parse(s.lastClientRequestAt);
     if (!Number.isFinite(age) || age < staleMs) continue;
+    const lastWrite = lastWriteBySeat?.[seat];
+    if (typeof lastWrite === 'string') {
+      const writeAge = now - Date.parse(lastWrite);
+      if (Number.isFinite(writeAge) && writeAge < staleMs) continue;   // executing through another door
+    }
     const claims = claimsBySeat[seat] || [];
     if (!claims.length) continue;                       // resting, not stopped — the rail case
-    out.push({ seat, lastClientRequestAt: s.lastClientRequestAt, staleMs: age, claims: [...claims] });
+    out.push({ seat, lastClientRequestAt: s.lastClientRequestAt, lastWriteAt: typeof lastWrite === 'string' ? lastWrite : null, staleMs: age, claims: [...claims] });
   }
   return out.sort((a, b) => a.seat.localeCompare(b.seat));
+}
+
+/**
+ * #717 — the newest attributed write per seat, from one /api/changes page.
+ * Rows carry `by` and `at`; the newest `at` per `by` is the reading.
+ */
+export function lastWriteBySeatFrom(changes) {
+  const out = {};
+  for (const c of Array.isArray(changes) ? changes : []) {
+    const by = typeof c?.by === 'string' ? c.by.toLowerCase() : null;
+    const at = typeof c?.at === 'string' ? c.at : null;
+    if (!by || !at) continue;
+    if (!out[by] || at > out[by]) out[by] = at;
+  }
+  return out;
 }
 
 /**

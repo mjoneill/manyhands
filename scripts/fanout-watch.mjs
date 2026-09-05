@@ -50,7 +50,7 @@ import fs from 'node:fs';
 // #726 — the decision lives in a pure, tested module. See fanout-decide.mjs for
 // why: six production fixes, no test, and the seventh change had a failure mode
 // (a watch that stops warning) indistinguishable from a healthy room.
-import { decide, seatSuffix, seatBracket, staleSeats, stoppedSeats } from './fanout-decide.mjs';
+import { decide, seatSuffix, seatBracket, staleSeats, stoppedSeats, lastWriteBySeatFrom } from './fanout-decide.mjs';
 
 const STATUS_URL = process.env.SCRUM_STATUS_URL || 'http://127.0.0.1:3001/channel/status';
 const POST_URL = process.env.SCRUM_POST_URL || 'http://127.0.0.1:3141/api/conversations';
@@ -131,7 +131,20 @@ try {
   const j = await r.json();
   for (const c of (Array.isArray(j) ? j : (j?.cards ?? []))) if (c?.claimedBy) (claimsBySeat[c.claimedBy] ??= []).push(c.shortId);
 } catch (e) { console.log(`${now} claims unreadable (${e.message}) — no seat can be named STOPPED this tick`); claimsBySeat = null; }
-const stopped = claimsBySeat ? stoppedSeats(status, { now: Date.now(), staleMs: STOPPED_AFTER_MS, claimsBySeat }) : [];
+// #717 false positive (2026-09-05): a seat working through REST and shell makes no
+// MCP client request and was named STOPPED for 147 minutes of continuous work.
+// The second reading is the newest board write ATTRIBUTED to each seat, from
+// one /api/changes page over the stale window. Unreadable → no rescue (the
+// client reading decides alone, as before), and the tick says so.
+const CHANGES_URL = CARDS_URL.replace(/\/api\/cards$/, '/api/changes');
+let lastWriteBySeat = {};
+try {
+  const since = new Date(Date.now() - STOPPED_AFTER_MS - 60_000).toISOString();
+  const r = await fetch(`${CHANGES_URL}?since=${encodeURIComponent(since)}&limit=500`, { signal: AbortSignal.timeout(5000) });
+  const j = await r.json();
+  lastWriteBySeat = lastWriteBySeatFrom(j?.changes);
+} catch (e) { console.log(`${now} attributed writes unreadable (${e.message}) — the client-request reading decides alone this tick`); lastWriteBySeat = {}; }
+const stopped = claimsBySeat ? stoppedSeats(status, { now: Date.now(), staleMs: STOPPED_AFTER_MS, claimsBySeat, lastWriteBySeat }) : [];
 if (stopped.length) console.log(`${now} stopped seats: ${stopped.map((s) => `${s.seat} since ${s.lastClientRequestAt} holding ${s.claims.map((c) => `#${c}`).join(',')}`).join('; ')}`);
 if (stale.length) console.log(`${now} stale seats: ${stale.map((s) => `${s.seat} since ${s.firstAt} (${s.hits} hits)`).join(', ')}`);
 
