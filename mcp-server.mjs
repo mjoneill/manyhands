@@ -2926,13 +2926,20 @@ const httpServer = http.createServer(async (req, res) => {
             sid,
             streams,
             lastActivity: m.lastActivity ?? null,
+            lastClientRequestAt: m.lastClientRequestAt ? new Date(m.lastClientRequestAt).toISOString() : null,   // #717
             unknownToken: !!m.unknownToken,   // #707's discriminator, per session
           });
           continue;
         }
-        const s = seats[m.seat] ?? (seats[m.seat] = { streams: 0, sessions: 0, lastBeatAt: null, lastBeatOk: null });
+        const s = seats[m.seat] ?? (seats[m.seat] = { streams: 0, sessions: 0, lastBeatAt: null, lastBeatOk: null, lastClientRequestAt: null });
         s.streams += streams;
         s.sessions += 1;
+        // #717 — the NEWEST request across the seat's sessions. Absent stays
+        // null (never "epoch"): a seat we have never heard a request from is
+        // unknown, not stale since 1970.
+        if (m.lastClientRequestAt && (!s.lastClientRequestAt || m.lastClientRequestAt > Date.parse(s.lastClientRequestAt))) {
+          s.lastClientRequestAt = new Date(m.lastClientRequestAt).toISOString();
+        }
         if (m.lastBeatAt && (!s.lastBeatAt || m.lastBeatAt > s.lastBeatAt)) {
           s.lastBeatAt = new Date(m.lastBeatAt).toISOString();
           s.lastBeatOk = m.lastBeatOk ?? null;
@@ -3137,6 +3144,17 @@ const httpServer = http.createServer(async (req, res) => {
       const m = sessionMeta.get(sessionId);
       if (m) {
         m.lastActivity = Date.now();
+        // #717 — THE CLIENT'S OWN CLOCK, and nothing else moves it. `lastActivity`
+        // is also bumped by the stream's close handler (any close: disconnect,
+        // server kill, timeout), so a stalled seat whose stream drops at T+3h
+        // reads as "just active" on exactly the transition an alarm exists to
+        // catch — and that field is the idle reaper's clock, which WANTS the
+        // close-bump. Same field, opposite requirements. So this is a NEW field,
+        // written only here, on an incoming request the client actually made.
+        //   stream open + request recent → healthy
+        //   stream open + request STALE  → STOPPED (the fanout watch names it)
+        //   stream closed                → deaf (#664 already catches that)
+        m.lastClientRequestAt = Date.now();
         // #726 — DIRECT deafness detection, replacing two failed inferences.
         //
         // A non-GET request arriving on a session that HELD a stream and now

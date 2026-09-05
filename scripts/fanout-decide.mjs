@@ -29,7 +29,7 @@
  * @param {object}  a.state       previous state (from the state file)
  * @returns {{state: object, warnBody: string|null}}
  */
-export function decide({ receivers, sessions, floor, cooldownMs, now, state, staleSeats: stale = [] }) {
+export function decide({ receivers, sessions, floor, cooldownMs, now, state, staleSeats: stale = [], stoppedSeats: stopped = [] }) {
   // Deep-copy the two containers. A spread alone leaves `sigTimes` and `hist`
   // ALIASED to the caller's objects, so decide() would edit state it was only
   // asked to read — invisible in production (each run reads fresh state off
@@ -47,6 +47,7 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
     sigTimes: { ...(state?.sigTimes ?? {}) },
     hist: [...(state?.hist ?? [])],
     staleEpisodes: { ...(state?.staleEpisodes ?? {}) },
+    stoppedEpisodes: { ...(state?.stoppedEpisodes ?? {}) },
   };
   // A state file written before #726 has no `s`. Treating that as 0 would make
   // the very first tick after deploy look like a total session collapse and
@@ -236,9 +237,71 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
     warnBody = warnBody ? `${warnBody}\n${staleBody}` : staleBody;
   }
 
+  // ── #717 — NAME THE STOPPED SEAT. A seat whose stream is OPEN and whose last
+  // client request is STALE is not deaf (it can hear) and not idle (it holds a
+  // claim — it was mid-work): it is STOPPED, and it cannot report that itself
+  // because a stopped seat executes nothing. The watcher must be external.
+  //
+  // `stopped` comes from stoppedSeats(): open stream + lastClientRequestAt older
+  // than the threshold + at least one card claim. The claim is the discriminator
+  // this card said it could not supply — "an idle seat and a gated seat both
+  // make zero requests" — and it is the builder's narrowing, stated on the card:
+  // a seat with NO claim and no requests is resting, and rest is not failure.
+  // Episode-gated per (seat, lastClientRequestAt): the same stall warns once;
+  // a request from the seat ends the episode; a later stall is a new fact.
+  const stoppedNow = new Set();
+  const stoppedNamed = [];
+  for (const s of stopped) {
+    if (!s?.seat || !s.lastClientRequestAt) continue;
+    const key = `${s.seat}@${s.lastClientRequestAt}`;
+    stoppedNow.add(key);
+    if (st.stoppedEpisodes[key]) continue;
+    st.stoppedEpisodes[key] = now;
+    stoppedNamed.push(s);
+  }
+  for (const key of Object.keys(st.stoppedEpisodes)) if (!stoppedNow.has(key)) delete st.stoppedEpisodes[key];
+  if (stoppedNamed.length) {
+    const lines = stoppedNamed.map((s) => `${s.seat} holds an open stream and ${s.claims?.length ? `claim${s.claims.length === 1 ? '' : 's'} on ${s.claims.map((c) => `#${c}`).join(', ')}` : 'a claim'} `
+      + `but has made no request since ${s.lastClientRequestAt} (${Math.round(s.staleMs / 60000)} min)`);
+    const stoppedBody = `⛔ fanout watch: SEAT STOPPED, not deaf (#717) — ${lines.join('; ')}. `
+      + `It can hear this and cannot act on it: a stopped seat executes nothing, so no self-report is possible during. `
+      + `The only instrument that can act is a human at that seat's terminal (a held permission prompt, a wedged turn). `
+      + `Heartbeat and stream fields read HEALTHY throughout — they measure the server's own writes, not the seat.`;
+    warnBody = warnBody ? `${warnBody}\n${stoppedBody}` : stoppedBody;
+  }
+
   st.r = receivers;
   st.s = sessions;
   return { state: st, warnBody };
+}
+
+/**
+ * #717 — which seats are STOPPED, by name, from one /channel/status payload
+ * plus the seat→claims map the watch fetched from REST.
+ *
+ * STOPPED = open stream (it can hear) AND lastClientRequestAt older than
+ * `staleMs` (it has not asked the server for anything) AND at least one card
+ * claim (it was mid-work, so silence is not rest). Absent lastClientRequestAt
+ * is UNKNOWN, never stale-since-1970, and is not named.
+ *
+ * ⛔ Deliberately ignores lastBeatAt / lastBeatOk / lastActivity: the first two
+ * are the server stamping its own writes and stay fresh through a stall; the
+ * third is bumped by any stream close. Reading any of them here is the
+ * refuted shape #2 this card records.
+ */
+export function stoppedSeats(status, { now = Date.now(), staleMs = 20 * 60 * 1000, claimsBySeat = {} } = {}) {
+  const out = [];
+  for (const [seat, s] of Object.entries(status?.seats ?? {})) {
+    const streams = Number(s?.streams);
+    if (!Number.isFinite(streams) || streams <= 0) continue;
+    if (typeof s?.lastClientRequestAt !== 'string') continue;
+    const age = now - Date.parse(s.lastClientRequestAt);
+    if (!Number.isFinite(age) || age < staleMs) continue;
+    const claims = claimsBySeat[seat] || [];
+    if (!claims.length) continue;                       // resting, not stopped — the rail case
+    out.push({ seat, lastClientRequestAt: s.lastClientRequestAt, staleMs: age, claims: [...claims] });
+  }
+  return out.sort((a, b) => a.seat.localeCompare(b.seat));
 }
 
 /**

@@ -50,7 +50,7 @@ import fs from 'node:fs';
 // #726 — the decision lives in a pure, tested module. See fanout-decide.mjs for
 // why: six production fixes, no test, and the seventh change had a failure mode
 // (a watch that stops warning) indistinguishable from a healthy room.
-import { decide, seatSuffix, seatBracket, staleSeats } from './fanout-decide.mjs';
+import { decide, seatSuffix, seatBracket, staleSeats, stoppedSeats } from './fanout-decide.mjs';
 
 const STATUS_URL = process.env.SCRUM_STATUS_URL || 'http://127.0.0.1:3001/channel/status';
 const POST_URL = process.env.SCRUM_POST_URL || 'http://127.0.0.1:3141/api/conversations';
@@ -119,6 +119,20 @@ delete prevState.lastSig; delete prevState.lastWarnAt;
 // #1195 — the seats that are deaf BY NAME, from the same payload. The counters
 // above cannot see one deaf seat among hearing ones; this can.
 const stale = staleSeats(status);
+// #717 — STOPPED seats need one more fact than /channel/status has: who holds a
+// claim. Fetched from REST once per tick; unreadable → no seat is named stopped
+// this tick (fail quiet, say so), because "I could not look" is not "nobody is
+// mid-work".
+const STOPPED_AFTER_MS = Number(process.env.SCRUM_STOPPED_AFTER_MS ?? 20 * 60 * 1000);
+const CARDS_URL = (process.env.SCRUM_POST_URL || 'http://127.0.0.1:3141/api/conversations').replace(/\/api\/conversations$/, '/api/cards');
+let claimsBySeat = {};
+try {
+  const r = await fetch(`${CARDS_URL}?limit=500&fields=claimedBy,shortId`, { signal: AbortSignal.timeout(5000) });
+  const j = await r.json();
+  for (const c of (Array.isArray(j) ? j : (j?.cards ?? []))) if (c?.claimedBy) (claimsBySeat[c.claimedBy] ??= []).push(c.shortId);
+} catch (e) { console.log(`${now} claims unreadable (${e.message}) — no seat can be named STOPPED this tick`); claimsBySeat = null; }
+const stopped = claimsBySeat ? stoppedSeats(status, { now: Date.now(), staleMs: STOPPED_AFTER_MS, claimsBySeat }) : [];
+if (stopped.length) console.log(`${now} stopped seats: ${stopped.map((s) => `${s.seat} since ${s.lastClientRequestAt} holding ${s.claims.map((c) => `#${c}`).join(',')}`).join('; ')}`);
 if (stale.length) console.log(`${now} stale seats: ${stale.map((s) => `${s.seat} since ${s.firstAt} (${s.hits} hits)`).join(', ')}`);
 
 const { state: st, warnBody } = decide({
@@ -129,6 +143,7 @@ const { state: st, warnBody } = decide({
   now: Date.now(),
   state: prevState,
   staleSeats: stale,
+  stoppedSeats: stopped,
 });
 
 fs.writeFileSync(STATE_FILE, JSON.stringify(st));
