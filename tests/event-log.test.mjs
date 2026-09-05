@@ -81,13 +81,37 @@ test('#669 validation failure appends NOTHING — the log is untouched', () => {
   assert.equal(nextSeq(dir), 2, 'a rejected event must not burn a seq');
 });
 
-test('#669 the op vocabulary is CLOSED — #681 added redact, and nothing else since', () => {
+test('#669 the op vocabulary is CLOSED — #681 added redact, #1217 added refused, nothing else since', () => {
   // Slice 1 asserted `redact` ABSENT, deliberately pinning its own boundary; the
   // op arrived with #681 under the #642 R8 ruling, so this test failing was the
   // intended signal, not a regression. The control that matters is unchanged: an
   // op outside this set is a rejected write, so growing the list stays a decision
   // someone makes on purpose rather than a thing that drifts.
-  assert.deepEqual([...EVENT_OPS].sort(), ['create', 'delete', 'post', 'redact', 'update']);
+  //
+  // #1217 added `refused` and this line going red is that tripwire working: the
+  // op is the first one that records something which did NOT happen, so it was
+  // worth being made to come back here and say so rather than being waved
+  // through by a test that matched loosely.
+  assert.deepEqual([...EVENT_OPS].sort(), ['create', 'delete', 'post', 'redact', 'refused', 'update']);
+});
+
+test('#1217 a refused event must carry its reason and its request, and never a state', () => {
+  const dir = tmpDir();
+  const ok = { op: 'refused', entity: { kind: 'card', id: '1' }, actor: 'ada', state: null,
+    reason: 'version conflict', request: { description: 'the composed text' } };
+  const stored = appendEvent(dir, ok, { now: '2026-08-04T10:00:00.000Z' });
+  assert.equal(stored.request.description, 'the composed text');
+  assert.equal(stored.reason, 'version conflict');
+  assert.equal(stored.state, null);
+
+  // A refusal that carries a state would read as a write in every query that
+  // filters on state, which is the one confusion this op must never create.
+  assert.throws(() => appendEvent(dir, { ...ok, state: { id: '1' } }), /state:null/);
+  // A refusal with no reason cannot be acted on by the seat it happened to.
+  assert.throws(() => appendEvent(dir, { ...ok, reason: '' }), /reason/);
+  // And a refusal with no request is the loss this op exists to prevent,
+  // recorded as if it were the fix.
+  assert.throws(() => appendEvent(dir, { ...ok, request: undefined }), /request/);
 });
 
 // ── 3. append-only, full state, one line per event ────────────────────────

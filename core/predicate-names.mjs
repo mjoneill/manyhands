@@ -163,6 +163,12 @@ export const PREDICATE_SOURCE = Object.freeze({
   // were already in that state when this was added.
   'scrum:shortId': null,
   'scrum:op': null,             // from the event log's op
+  // #1217 — a REFUSED activity's own two fields. Both come from the event log,
+  // never from a card: no store field holds them, because the write they
+  // describe never reached the store. `scrum:reason` is shared with the refusal
+  // text a caller saw; `scrum:httpStatus` is the status that carried it.
+  'scrum:reason': null,
+  'scrum:httpStatus': null,
   'prov:Activity': null,        // #725 — the event log projected as PROV
   'prov:used': null,
   'prov:wasAssociatedWith': null,

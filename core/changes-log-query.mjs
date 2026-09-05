@@ -38,6 +38,14 @@ function toRow(ev) {
     column: ev.entity?.kind === 'card' ? (s.column ?? null) : null,
     by: ev.actor ?? null,
     at: ev.recorded_at,
+    // #1217 — a REFUSED row carries what was refused and why. This is the
+    // recovery surface: a seat whose harness dropped the 409 asks
+    // changes_since(actor: me, history: true) and gets the body back. Present
+    // only on refused rows so every other row is byte-identical to before.
+    ...(ev.op === 'refused' ? {
+      reason: ev.reason ?? null, status: ev.status ?? null,
+      route: ev.route ?? null, request: ev.request ?? null,
+    } : {}),
   };
 }
 
@@ -91,11 +99,17 @@ export function queryChangesFromLog(events, {
     const kept = [];
     for (const ev of rows) {
       if (bucketOf(ev) !== 'cards') { kept.push(ev); continue; }
+      // #1217 — a refusal is NOT a state of the entity, so it must neither
+      // become "the latest thing that happened to card N" (hiding the real last
+      // write) nor be hidden by it (the refusal is the row the seat is looking
+      // for). It rides along as its own row, outside the last-write-wins map.
+      if (ev.op === 'refused') { kept.push(ev); continue; }
       const key = `${ev.entity?.kind}|${ev.entity?.id}`;
       latest.set(key, ev); // rows are seq-ascending: last write wins
     }
     const latestSet = new Set(latest.values());
-    rows = rows.filter((ev) => bucketOf(ev) !== 'cards' ? true : latestSet.has(ev));
+    const keptSet = new Set(kept);
+    rows = rows.filter((ev) => bucketOf(ev) !== 'cards' ? true : (latestSet.has(ev) || keptSet.has(ev)));
   }
 
   const buckets = { cards: [], posts: [] };

@@ -34,7 +34,22 @@ import { readFileSync, writeFileSync, appendFileSync, readdirSync, existsSync, m
 import { join } from 'node:path';
 
 /** Closed vocabulary. An unknown op is a rejected write, not a logged curiosity. */
-export const EVENT_OPS = new Set(['create', 'update', 'delete', 'post', 'redact']);
+export const EVENT_OPS = new Set(['create', 'update', 'delete', 'post', 'redact', 'refused']);
+
+/**
+ * #1217 — `refused` is the one op that records something that did NOT happen.
+ *
+ * Every other op says "the store changed, here is the new state". A refusal
+ * changed nothing, and that is exactly why it needs a line: the information the
+ * caller composed exists only in the request, and the clients this room has do
+ * lose responses (#359, #1212). So the event carries `request` — the body as
+ * received, verbatim — instead of `state`, and `state` is pinned to null so a
+ * reader can never mistake a refusal for a write.
+ *
+ * ⚠️ This is the ONLY write path that stores a body nobody validated. The
+ * redaction that guards it lives at the call site (server.js `logRefused`),
+ * because what counts as a secret is a property of the transport, not of the log.
+ */
 
 /**
  * What replaces removed content. A MARKER, not a deletion — the redacted event
@@ -67,7 +82,12 @@ export const REDACTION_MARKER_PREFIX = '[redacted';
 // per the warning that follows: a declaration that could not be rebuilt from
 // the log would be less durable than the cards beside it, and the scheduler
 // reads it — so a dropped replay would silently restore a seat to eligible.
-export const ENTITY_KINDS = new Set(['card', 'conversation', 'column', 'wiki', 'tending', 'memory', 'label', 'decision', 'seat-state', 'predicate', 'obligation', 'wake']);
+export const ENTITY_KINDS = new Set(['card', 'conversation', 'column', 'wiki', 'tending', 'memory', 'label', 'decision', 'seat-state', 'predicate', 'obligation', 'wake',
+  // #1217 — the kind a REFUSAL takes when its route maps to no entity kind. It
+  // never names a stored thing (nothing was stored), so it cannot collide with a
+  // real kind, and it keeps "a write was refused and we kept the body" sayable
+  // for routes this list has not learned about yet.
+  'request']);
 
 /** Which board collection a given entity kind projects into. */
 // #805 blocker 6: tending rides the SAME door as every family — the ruling was
@@ -262,6 +282,19 @@ export function validateEvent(ev) {
     if (ev.state !== null) throw new Error('redact events must carry state:null — they describe a removal, not content');
     return true;
   }
+  // #1217 — a refusal carries the REQUEST, never a state. The two are mutually
+  // exclusive on purpose: `state` means "this is what the store now holds", and
+  // a refused write left the store exactly as it was.
+  if (ev.op === 'refused') {
+    if (ev.state !== null) throw new Error('refused events must carry state:null — nothing was written');
+    if (typeof ev.reason !== 'string' || !ev.reason) {
+      throw new Error('refused events must carry the reason the caller saw — a refusal with no reason is unrecoverable by the seat it happened to');
+    }
+    if (ev.request === undefined) {
+      throw new Error('refused events must carry request (the body as received) — logging that a refusal happened without what was in it is the loss this op exists to prevent');
+    }
+    return true;
+  }
   // `state` may legitimately be null only for ops that carry no body. Every other
   // op carries one (delete's is the tombstone), so require it.
   if (ev.state === undefined) throw new Error('event.state is required (full entity, not a diff)');
@@ -288,6 +321,14 @@ export function appendEvent(dir, event, opts = {}) {
   };
   // Redaction's audit fields. Carried only on redact events so every other line
   // stays byte-identical to what slice 1 wrote.
+  // #1217 — a refusal's own fields. Carried only on refused events, so every
+  // other line stays byte-identical to what it was before this op existed.
+  if (event.op === 'refused') {
+    stored.reason = event.reason;
+    stored.request = event.request;
+    if (event.status != null) stored.status = event.status;
+    if (event.route) stored.route = event.route;
+  }
   if (event.op === 'redact') {
     stored.redacts = event.redacts;
     stored.authority = event.authority;

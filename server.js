@@ -392,16 +392,127 @@ function readBody(req, maxBytes = MAX_BODY_BYTES) {
     });
     req.on('end', () => {
       if (tooBig) reject(Object.assign(new Error('Request body too large'), { statusCode: 413 }));
-      else resolve(Buffer.concat(chunks).toString('utf8'));
+      else {
+        const raw = Buffer.concat(chunks).toString('utf8');
+        // #1217 — stash it on the request so a refusal can log what was sent.
+        // Here rather than at each handler because this is the ONE place a body
+        // is read: a per-handler stash would be correct at the sites someone
+        // remembered and silently absent everywhere else, which is how a rail
+        // becomes decoration.
+        req._rawBody = raw;
+        resolve(raw);
+      }
     });
     req.on('error', reject);
   });
+}
+
+// #1217 — SECRET SHAPES, redacted out of a refused body before it is stored.
+//
+// ⚠️ MEASURED FIRST, and the finding is worth more than the list: there is NO
+// existing redaction anywhere on this server's ingress — not on the commons, not
+// on card writes, not on conversations. Grepped 2026-09-05; #979 says the same
+// about the inference side. So this is not "the same redaction the rest of the
+// system applies"; it is the FIRST one, and it guards exactly one path.
+//
+// ⛔ It is a NET, NOT A GUARANTEE. A credential in a shape nobody listed here
+// lands in an append-only file. That is acceptable ONLY because this path is
+// strictly better than the alternative it replaces (the same body, in the same
+// process, with the same operator, minus any recoverability) — and it is stated
+// here rather than implied, because a scrubber trusted past its list is worse
+// than no scrubber at all.
+const SECRET_SHAPES = [
+  [/\bsk-ant-[A-Za-z0-9_-]{16,}/g, 'sk-ant-[REDACTED]'],            // Anthropic
+  [/\bsk-[A-Za-z0-9]{32,}/g, 'sk-[REDACTED]'],                      // OpenAI-shaped
+  [/\bgh[pousr]_[A-Za-z0-9]{16,}/g, 'gh_[REDACTED]'],               // GitHub
+  [/\bxox[baprs]-[A-Za-z0-9-]{10,}/g, 'xox-[REDACTED]'],            // Slack
+  [/\bAKIA[0-9A-Z]{16}\b/g, 'AKIA[REDACTED]'],                      // AWS key id
+  [/\bey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, '[REDACTED-JWT]'],
+  [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '[REDACTED-PRIVATE-KEY]'],
+];
+
+function redactSecrets(value) {
+  if (typeof value === 'string') {
+    let out = value;
+    for (const [re, sub] of SECRET_SHAPES) out = out.replace(re, sub);
+    return out;
+  }
+  if (Array.isArray(value)) return value.map(redactSecrets);
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) out[k] = redactSecrets(v);
+    return out;
+  }
+  return value;
+}
+
+// Which entity a route is about, so a refusal is queryable next to the writes
+// that succeeded on the same collection. Unknown write routes record `request`
+// — an honest "we refused something and kept it" beats inventing a kind.
+const ROUTE_KINDS = [
+  [/^\/api\/cards\b/, 'card'], [/^\/api\/conversations\b/, 'conversation'],
+  [/^\/api\/columns\b/, 'column'], [/^\/api\/wiki\b/, 'wiki'],
+  [/^\/api\/memories\b/, 'memory'], [/^\/api\/decisions\b/, 'decision'],
+  [/^\/api\/labels\b/, 'label'], [/^\/api\/tending\b/, 'tending'],
+  [/^\/api\/seats\b/, 'seat-state'], [/^\/api\/predicates\b/, 'predicate'],
+  [/^\/api\/obligations\b/, 'obligation'], [/^\/api\/wakes\b/, 'wake'],
+];
+const WRITE_METHODS = new Set(['POST', 'PATCH', 'PUT', 'DELETE']);
+
+/**
+ * #1217 — record one refusal, with the payload that would otherwise be lost.
+ *
+ * Wired at `sendJSON` rather than at each `return sendJSON(res, 4xx, …)` site.
+ * There are ~120 of those and the card's own plan said to visit every one; that
+ * plan produces a rail that is correct at the sites someone remembered. The
+ * response function is the only place EVERY refusal passes through, including
+ * the ones added next month by someone who never read this card.
+ *
+ * Never throws into a response path: a logging failure must not turn a clean
+ * 400 into a 500. It reports to stderr and lets the refusal go out.
+ */
+function logRefused(req, statusCode, data) {
+  try {
+    if (!req || !WRITE_METHODS.has(req.method)) return;      // a GET composed nothing
+    const url = (req.url || '').split('?')[0];
+    if (!url.startsWith('/api/')) return;
+    let request = null;
+    if (req._rawBody !== undefined) {
+      try { request = JSON.parse(req._rawBody); }
+      catch { request = { _unparsed: String(req._rawBody).slice(0, 20000) }; }
+    }
+    const kindEntry = ROUTE_KINDS.find(([re]) => re.test(url));
+    // The trailing path segment is the target for /api/cards/1 and is absent for
+    // a create — where the route itself is the only identity a refusal has.
+    const tail = url.split('/').filter(Boolean).slice(2).join('/');
+    const actor = (request && (request.by || request.author || request.createdBy || request.decidedBy)) || null;
+    appendEvent(EVENT_LOG_DIR, {
+      op: 'refused',
+      entity: { kind: kindEntry ? kindEntry[1] : 'request', id: tail || url },
+      actor: typeof actor === 'string' ? actor : null,
+      state: null,
+      reason: String((data && (data.error || data.message)) || `HTTP ${statusCode}`),
+      request: redactSecrets(request),
+      status: statusCode,
+      route: `${req.method} ${url}`,
+    });
+    // #1217 — a refusal writes NO board document, so nothing else marks the
+    // replica dirty and the activity stays invisible until some unrelated write
+    // happens to succeed. That is the #725-part-2 shape exactly: projected,
+    // tested, and unreachable through the front door. Mark it here.
+    _graphDirty = true;
+  } catch (e) {
+    console.error('[#1217] could not log a refusal:', e?.message);
+  }
 }
 
 /**
  * Send a JSON response
  */
 function sendJSON(res, statusCode, data) {
+  // #1217 — every refusal on a write route keeps its payload. Here, not at the
+  // call sites, so a refusal added later is covered without anyone remembering.
+  if (statusCode >= 400) logRefused(res.req, statusCode, data);
   const body = JSON.stringify(data);
   res.writeHead(statusCode, {
     'Content-Type': 'application/json',

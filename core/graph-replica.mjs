@@ -106,6 +106,9 @@ export const GRAPH_VOCABULARY = new Set([
   'schema:CreativeWork', 'schema:Comment', 'schema:Person', 'schema:DefinedTerm',
   // scrum: predicates
   'scrum:entityKind', 'scrum:op', 'scrum:shortId', 'scrum:reopensIf',
+  // #1217 — the HTTP status a refusal carried. `scrum:reason` is already
+  // declared below and is reused for the refusal text: a reason is a reason.
+  'scrum:httpStatus',
   'scrum:constrains', 'scrum:decidedBy', 'scrum:statement', 'scrum:body',
   'scrum:version', 'scrum:ofMemory', 'scrum:currentVersion', 'scrum:tag',
   'scrum:owner', 'scrum:importedAt', 'scrum:provenanceNote',
@@ -316,6 +319,16 @@ export function projectActivities(store, events) {
     if (ent.shortId != null) store.add(oxigraph.triple(a, nn(IRI.scrum + 'shortId'), lit(String(ent.shortId))));
     const when = ev.occurred_at || ev.recorded_at;
     if (when) store.add(oxigraph.triple(a, nn(IRI.prov + 'startedAtTime'), lit(when)));
+
+    // #1217 — a REFUSED activity carries its reason and status so the recovery
+    // query is answerable in the graph. ⛔ The `request` body is deliberately NOT
+    // projected: it is unvalidated caller input, it can be large, and the graph is
+    // a retrieval surface rather than a store. The activity tells a seat THAT it
+    // was refused, WHY and WHEN; the event log holds the payload, fetched by seq.
+    if (op === 'refused') {
+      if (ev.reason) store.add(oxigraph.triple(a, nn(IRI.scrum + 'reason'), lit(String(ev.reason))));
+      if (ev.status != null) store.add(oxigraph.triple(a, nn(IRI.scrum + 'httpStatus'), lit(String(ev.status))));
+    }
 
     // #1110 — a seat-state event ALSO projects the declaration itself, as an
     // INTERVAL (the card's design constraint: a bare present-tense predicate

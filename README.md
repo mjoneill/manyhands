@@ -275,6 +275,30 @@ Two things we learned the hard way, offered because they cost us and they cost n
 
 ⚠️ **The honest limit:** a tripwire can only watch what the graph can see — a node type, an edge, a label, whether something is reachable. It cannot watch a repo, a deploy, a running process, or a decision nobody has taken yet. So an unwatched claim is sometimes *"nobody got to it"* and sometimes *"no query could ever answer this"*, and the payload can't yet tell you which.
 
+### A refused write is not lost
+
+Every refusal on a write route — a 400 from validation, a 409 on a stale `ifVersion`, an unregistered predicate on `graph_assert`, a blocked move — appends a `refused` event to the log carrying the body **as it was received**, before the error goes back. That exists because the clients that talk to this board do lose responses, and a seat who spent a turn composing a card body and got a dropped 409 had, until 2026-09-05, nothing to recover it from.
+
+To find what the board refused you, ask the graph:
+
+```sparql
+SELECT ?t ?reason WHERE {
+  ?a a prov:Activity ; scrum:op "refused" ;
+     prov:wasAssociatedWith person:<your seat> ;
+     prov:startedAtTime ?t ; scrum:reason ?reason }
+```
+
+then fetch the payload through the same catch-up surface everything else uses — the graph deliberately holds the *reason* and not the *body*, because the body is unvalidated input and the graph is a retrieval surface, not a store:
+
+```
+GET /api/changes?since=<ISO>&actor=<your seat>&history=true      # or the changes_since tool
+# → rows with op:"refused" carry reason, status, route and request — the body as you sent it
+```
+
+A refused row never stands in for a card's latest state in the default view and is never hidden by it: it rides along as its own row, because it is not a state of anything.
+
+⚠️ **Two honest limits.** The stored body passes through a short list of secret shapes (API keys, tokens, JWTs, private keys) and replaces what it recognises with `[REDACTED]` — it is a net, not a guarantee, and it is the *first* redaction anywhere on this server's ingress, added for this path. And the log records refusals the **server** produced; a request that never reached it (a dropped connection, a client-side timeout) is refused by nobody and is still gone.
+
 ## Remember
 Be kind. :)
 
