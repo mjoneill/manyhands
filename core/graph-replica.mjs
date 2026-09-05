@@ -112,6 +112,9 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:declaredSeatRaw', 'scrum:declaredSeat', 'scrum:outcome',
   'scrum:receivedAt', 'scrum:ofMint', 'scrum:mintedAt',
   'scrum:legacyClockWindow', 'scrum:enabled', 'scrum:orderedPrompts',
+  // #1189 — the live tending writers. `clockWindow` is the CURRENT firing's
+  // window; `legacyClockWindow` above is #805's import and stays distinct.
+  'scrum:shuffle', 'scrum:clockWindow',
   'scrum:ofPlaylist', 'scrum:evidencedBy', 'scrum:ofPrompt', 'scrum:order',
   'scrum:resolved', 'scrum:mentionsName', 'scrum:relatedTo', 'scrum:note',
   'scrum:status', 'scrum:blockedByPerson', 'scrum:blocks', 'scrum:mentionsCard',
@@ -473,11 +476,20 @@ export const TENDING_PREDICATES = Object.freeze({
   'scrum:importedAt': 'literal',
   // state + control
   'scrum:enabled': 'literal',
+  // #1189 — shuffle is graph state on TendingState, so the playlist order the
+  // room is running is answerable from the graph rather than from a sidecar.
+  'scrum:shuffle': 'literal',
   'scrum:paused': 'literal',
   'scrum:pausedAt': 'literal',
   'scrum:actor': 'person',
   'scrum:occurredAt': 'literal',
   // mint / settlement
+  // #1189 — the LIVE clock window of a real firing. Deliberately distinct from
+  // legacyClockWindow, which #805 imported from whisper-state.json and marked
+  // legacy precisely so a historical key could never be mistaken for a current
+  // one. Same shape, different provenance, and collapsing them would date every
+  // new firing into the imported set.
+  'scrum:clockWindow': 'literal',
   'scrum:legacyClockWindow': 'literal',
   'scrum:silenceSince': 'literal',
   'scrum:mintedAt': 'literal',

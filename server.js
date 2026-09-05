@@ -4521,7 +4521,13 @@ async function handleCreateMint(req, res) {
         // The graph entity that produced these words. ABSENT rather than
         // guessed when the caller could not say — an invented edge here would
         // be worse than the gap it fills.
-        'scrum:ofPromptVersion': body.versionId || undefined,
+        //
+        // ⚠️ `scrum:promptVersion`, the predicate that ALREADY EXISTS, and not a
+        // new `ofPromptVersion`. A second term meaning the same thing splits
+        // every query over it: a reader who asks the obvious one gets a clean,
+        // wrong, well-formed answer — which is the exact failure this card's own
+        // line-stop was.
+        'scrum:promptVersion': body.versionId || undefined,
         'scrum:seatNamesWithOpenStreamsAtSend':
           Array.isArray(body.reached) && body.reached.length
             ? body.reached.map((k) => `person:${k}`) : undefined,
