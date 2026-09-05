@@ -110,6 +110,36 @@ const CONTEXT = {
 // the same facts as first-class properties and @id edges. Serialization is the
 // one place that holds the whole graph, so it is the one place a shortId↔@id
 // conversion can live without a second copy that drifts.
+/**
+ * #1214 — SHORTEN A FULL TYPE IRI to its prefixed name, DERIVED from CONTEXT
+ * above rather than retyped.
+ *
+ * ⛔ THIS EXISTS BECAUSE I RETYPED ONE. `board_status.kinds` hardcoded
+ * `https://scrumboard.local/vocab#` while the real base is `.../ns#`, so on
+ * production every declared kind reported ZERO instances — scrum:Card among
+ * them, with more than a thousand — and every real type was listed as
+ * "instantiated but not declared". Both lists were false, in opposite
+ * directions, from one mistyped constant. A census that cannot match anything
+ * reports a clean zero, which is exactly the failure the kind registry exists
+ * to make visible. Caught by reading production, not by a green suite.
+ *
+ * The prefixes come from CONTEXT and prov, so a namespace change moves one
+ * value and every reader follows.
+ */
+export const TYPE_PREFIXES = Object.freeze([
+  ['schema:', CONTEXT['@vocab']],
+  ['scrum:', CONTEXT.scrum],
+  ['prov:', 'http://www.w3.org/ns/prov#'],
+]);
+
+export function shortenTypeIri(iri) {
+  const s = String(iri ?? '');
+  for (const [prefix, base] of TYPE_PREFIXES) {
+    if (base && s.startsWith(base)) return prefix + s.slice(base.length);
+  }
+  return s;
+}
+
 export const REL_TYPES = ['relatedTo', 'blockedBy', 'supersedes', 'derivedFrom', 'supersededBy'];
 const FACET_TO_PROP = {
   column: 'column', assignees: 'assignees', labels: 'labels', claimedBy: 'claimedBy',
@@ -282,6 +312,7 @@ const isDecision = (entity) => entity && entity['@type'] === 'scrum:Decision';
 // "what does asserting X mean" must be a filter over the vocabulary, not over
 // memories or decisions it happens to resemble.
 const isPredicateDefinition = (entity) => entity && entity['@type'] === 'scrum:PredicateDefinition';
+const isKindDefinition = (entity) => entity && entity['@type'] === 'scrum:KindDefinition';
 // #1118 — obligations are their own class: "what did this seat promise" is a
 // filter over promises, not over memories or decisions that mention one.
 const isObligation = (entity) => entity && entity['@type'] === 'scrum:Obligation';
@@ -372,7 +403,7 @@ export const CONTEXT_RANGE = Object.freeze(Object.fromEntries(
 export function domainToJsonLd(domain) {
   const {
     nodes = [], messages = [], people = [], columns = [],
-    tending = [], memories = [], decisions = [], predicates = [], obligations = [], wakes = [], labelAliases = [], _unmodelled = [], _README, ...meta
+    tending = [], memories = [], decisions = [], predicates = [], kinds = [], obligations = [], wakes = [], labelAliases = [], _unmodelled = [], _README, ...meta
   } = domain;
   const doc = {};
   if (_README !== undefined) doc._README = _README;   // first key — JSON.stringify keeps insertion order
@@ -394,6 +425,12 @@ export function domainToJsonLd(domain) {
     ...memories,
     ...decisions,
     ...predicates,
+    // #1214 — kinds ride the @graph like every other entity class. Without this
+    // they stayed a top-level document key: readable over REST, invisible to the
+    // replica, so `?k a scrum:KindDefinition` returned zero on a board holding
+    // 33 of them. A registry nobody can query from the graph is a registry in
+    // name only.
+    ...kinds,
     ...obligations,
     ...wakes,
     // #804 — entities of a class this projection does not model ride through
@@ -448,6 +485,9 @@ export function jsonLdToDomain(doc) {
   // #945 — same rule again.
   const predicates = graph.filter(isPredicateDefinition);
   if (predicates.length) domain.predicates = predicates;
+  // #1214 — same rule again, and the same absence-preserving behaviour.
+  const kinds = graph.filter(isKindDefinition);
+  if (kinds.length) domain.kinds = kinds;
   // #1118 — same rule again.
   const obligations = graph.filter(isObligation);
   if (obligations.length) domain.obligations = obligations;
@@ -457,7 +497,8 @@ export function jsonLdToDomain(doc) {
   // stays lossless. It is never a card and never silently discarded.
   const unmodelled = graph.filter(
     (e) => !isCard(e) && !isMessage(e) && !isPerson(e) && !isColumn(e) && !isTending(e)
-      && !isMemory(e) && !isDecision(e) && !isPredicateDefinition(e) && !isObligation(e) && !isWake(e),
+      && !isMemory(e) && !isDecision(e) && !isPredicateDefinition(e) && !isKindDefinition(e)
+      && !isObligation(e) && !isWake(e),
   );
   if (unmodelled.length) domain._unmodelled = unmodelled;
   if (Array.isArray(doc._labelAliases) && doc._labelAliases.length) domain.labelAliases = doc._labelAliases;

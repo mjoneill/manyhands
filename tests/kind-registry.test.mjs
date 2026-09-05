@@ -161,3 +161,73 @@ test('#1214 a fully registered, fully instantiated board reports no divergence a
   assert.deepEqual(d.instantiatedNotDeclared, []);
   assert.deepEqual(d.declaredNotInstantiated, []);
 });
+
+// ── the boundary the first version of this suite did not cross ──────────────
+//
+// ⛔ BOTH DEFECTS BELOW SHIPPED TO PRODUCTION WITH A GREEN SUITE, and were
+// found by reading the live board sixty seconds after the deploy. Neither was
+// subtle; both were invisible from where the tests stood.
+//
+//   1. The census shortened type IRIs with a hand-typed namespace that was
+//      WRONG, so nothing matched: every declared kind reported ZERO instances
+//      (scrum:Card among them, >1,000 of them on the board) and every real type
+//      was reported "instantiated but not declared". Two confident, false,
+//      opposite lists from one mistyped constant.
+//   2. `kinds` was never added to the document builder's collection list, so
+//      the rows stayed a top-level key: fine over REST, absent from the graph.
+//      `?k a scrum:KindDefinition` returned 0 on a board holding 33.
+//
+// The old tests asserted against PROJECTED_TYPES strings and built graph stores
+// straight from fixtures. Both stopped short of domain → document → graph,
+// which is where both bugs lived. These go the whole way.
+
+import { domainToJsonLd, jsonLdToDomain, shortenTypeIri } from '../core/jsonld.mjs';
+
+test('#1214 a type IRI shortens using the REAL namespace, derived not retyped', () => {
+  assert.equal(shortenTypeIri('https://scrumboard.local/ns#Card'), 'scrum:Card');
+  assert.equal(shortenTypeIri('https://schema.org/Comment'), 'schema:Comment');
+  assert.equal(shortenTypeIri('http://www.w3.org/ns/prov#Activity'), 'prov:Activity');
+  // The shape of the production failure: the wrong base must NOT shorten, so a
+  // future mistyped namespace fails loudly here instead of reporting zeros.
+  assert.equal(shortenTypeIri('https://scrumboard.local/vocab#Card'),
+    'https://scrumboard.local/vocab#Card');
+  // And every declared kind must be reachable by shortening its own IRI back.
+  for (const name of ['scrum:Card', 'scrum:Obligation', 'scrum:KindDefinition']) {
+    const full = name.replace('scrum:', 'https://scrumboard.local/ns#');
+    assert.equal(shortenTypeIri(full), name,
+      `${name} must round-trip, or the census silently reports it as absent`);
+  }
+});
+
+test('#1214 a registered kind SURVIVES the document round trip and lands in @graph', () => {
+  const row = {
+    '@id': 'https://scrumboard.local/kind/scrum%3ACard',
+    '@type': 'scrum:KindDefinition',
+    name: 'scrum:Card',
+    'scrum:definition': 'A unit of work with a permanent short id.',
+    'scrum:createdByVerb': 'card_create',
+    dateCreated: '2026-09-05T19:00:00.000Z',
+  };
+  const doc = domainToJsonLd({ nodes: [], messages: [], people: [], columns: [], kinds: [row] });
+
+  // The defect: it used to ride as a top-level key and never reach the graph.
+  const inGraph = doc['@graph'].filter((e) => e['@type'] === 'scrum:KindDefinition');
+  assert.equal(inGraph.length, 1,
+    'a KindDefinition must be IN @graph — the replica projects from there, and a registry '
+    + 'the graph cannot be asked about is a registry in name only');
+  assert.equal(inGraph[0].name, 'scrum:Card');
+
+  // And back, without being swept into _unmodelled.
+  const back = jsonLdToDomain(doc);
+  assert.equal(back.kinds?.length, 1, 'and it must come back as its own collection');
+  assert.equal(back.kinds[0]['scrum:createdByVerb'], 'card_create');
+  assert.ok(!(back._unmodelled || []).some((e) => e['@type'] === 'scrum:KindDefinition'),
+    'a modelled class must never be swept into _unmodelled — that is how a collection '
+    + 'silently becomes untyped residue');
+});
+
+test('#1214 absence is preserved — a board with no kinds does not sprout an empty key', () => {
+  const back = jsonLdToDomain(domainToJsonLd({ nodes: [], messages: [], people: [], columns: [] }));
+  assert.equal(back.kinds, undefined,
+    'an untouched board must not grow a key and churn its file on every save');
+});

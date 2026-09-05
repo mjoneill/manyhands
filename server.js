@@ -40,6 +40,7 @@ import { applyApexLabels, APEX_PREFIX, descendantIds as apexDescendantIds } from
 import { inFlight } from './core/in-flight.mjs';
 import { appendEvent, ENTITY_KINDS } from './core/event-log.mjs';
 import { KIND_DECLARATIONS, PROJECTED_TYPES, divergence } from './core/kind-registry.mjs';
+import { shortenTypeIri } from './core/jsonld.mjs';
 // #805 — the boot migration's inputs (the live flat sources) and its builder.
 import { readPool, recentWhispers, DEFAULT_POOL, poolFilePath } from './whisper-store.mjs';
 import { readTendingConfig, writeTendingConfig } from './tending-config.mjs';
@@ -4552,10 +4553,14 @@ function kindsSummary(data) {
       for (const q of _graphStore.match(null, null, null)) {
         if (q.predicate.value !== 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type') continue;
         if (q.object.termType !== 'NamedNode') continue;
-        const t = q.object.value
-          .replace('https://schema.org/', 'schema:')
-          .replace('https://scrumboard.local/vocab#', 'scrum:')
-          .replace('http://www.w3.org/ns/prov#', 'prov:');
+        // ⛔ DERIVED, never retyped. This block used to shorten with a
+        // hand-written 'https://scrumboard.local/vocab#'. The real base is
+        // '.../ns#', so on production NOTHING matched: every declared kind
+        // reported zero instances (scrum:Card among them, with >1,000) and
+        // every real type was reported as undeclared. Two false lists,
+        // opposite directions, one mistyped constant — the exact clean-zero
+        // failure this feature exists to expose, shipped inside the feature.
+        const t = shortenTypeIri(q.object.value);
         counts[t] = (counts[t] ?? 0) + 1;
       }
       census = 'live';
