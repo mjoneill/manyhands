@@ -1321,6 +1321,46 @@ function buildMcpServer() {
     return jsonResult(await apiCall('GET', `/api/predicates${q}`));
   });
 
+  // ── #1214 — THE KIND REGISTRY ─────────────────────────────────────────────
+  mcp.registerTool('kind_register', {
+    description: 'Register (or revise) an ENTITY KIND — what this CLASS of thing is, and the verb '
+      + 'that makes one (#1214). The question that produced this registry was how an agent is '
+      + 'supposed to identify what entities exist in a graph; the answer was a census, which can '
+      + 'only show what has already been INSTANTIATED. A '
+      + 'kind with zero instances was invisible. Registering does NOT make the runtime accept the '
+      + 'kind — core/kind-registry.mjs does that — so a kind you register that this build does not '
+      + 'know is REPORTED as a divergence in board_status, never refused. That is deliberate: '
+      + 'refusing would make you lose a definition you took the trouble to write. One entity per '
+      + 'name; re-registering revises it and the event log keeps every prior version.',
+    inputSchema: {
+      name: z.string().min(1).describe('The prefixed CLASS name, e.g. "scrum:Procedure". The local part starts with a capital — that is what distinguishes a kind from a predicate.'),
+      definition: z.string().min(40).describe('What this kind IS, and where useful what it is NOT. The read this replaces is someone loading an instance to work out what it means.'),
+      createdBy: z.string().min(1).describe('The verb that makes one, e.g. "procedure_create". "How do I create this?" answered in the graph instead of in source.'),
+      eventKind: z.string().optional().describe('The entity.kind the event log writes it as, if it has one'),
+      by: z.string().min(1).describe('Who stands behind this definition. Declared, not authenticated.'),
+    },
+  }, async ({ name, definition, createdBy, eventKind, by }) => {
+    return jsonResult(await apiCall('POST', '/api/kinds', { name, definition, createdBy, eventKind, by }));
+  });
+
+  mcp.registerTool('kind_list', {
+    description: 'List entity kinds (#1214). ⭐ CALL THIS WITH declared:true TO LEARN WHAT KINDS OF '
+      + 'THING LIVE ON THIS BOARD — it returns everything the RUNTIME knows, with each kind\'s '
+      + 'definition and the verb that creates one, whether or not anyone has registered or '
+      + 'instantiated it. That is the question a census cannot answer: `SELECT ?t WHERE { ?s a ?t }` '
+      + 'shows only what already exists, so a real kind nobody has created yet is invisible to it. '
+      + 'Without declared:true you get only the kinds seats have explicitly registered.',
+    inputSchema: {
+      name: z.string().optional().describe('Only this exact prefixed class name'),
+      declared: z.boolean().optional().describe('Return what the runtime accepts (the full vocabulary), not only what has been registered'),
+    },
+  }, async ({ name, declared } = {}) => {
+    const q = [];
+    if (name) q.push(`name=${encodeURIComponent(name)}`);
+    if (declared) q.push('declared=1');
+    return jsonResult(await apiCall('GET', `/api/kinds${q.length ? `?${q.join('&')}` : ''}`));
+  });
+
   // ── #945 slice 2 — THE WRITE VERB (Decision aad42bf5, Option D) ───────────
   mcp.registerTool('graph_assert', {
     description: 'Assert N (subject, predicate, object) relations in ONE ATOMIC call (#945, Decision '

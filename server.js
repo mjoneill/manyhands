@@ -39,6 +39,7 @@ import { cardContentKey } from './core/card-content-key.mjs';
 import { applyApexLabels, APEX_PREFIX, descendantIds as apexDescendantIds } from './core/apex-labels.mjs';
 import { inFlight } from './core/in-flight.mjs';
 import { appendEvent, ENTITY_KINDS } from './core/event-log.mjs';
+import { KIND_DECLARATIONS, PROJECTED_TYPES, divergence } from './core/kind-registry.mjs';
 // #805 — the boot migration's inputs (the live flat sources) and its builder.
 import { readPool, recentWhispers, DEFAULT_POOL, poolFilePath } from './whisper-store.mjs';
 import { readTendingConfig, writeTendingConfig } from './tending-config.mjs';
@@ -2232,6 +2233,126 @@ function handleListPredicates(req, res) {
   sendJSON(res, 200, out);
 }
 
+// ── #1214 — THE KIND REGISTRY ───────────────────────────────────────────────
+// #1214 asked how an agent is supposed to identify what entities exist in a
+// graph, and whether a registry existed. There was not. There was a CENSUS —
+// `SELECT ?t (COUNT(?s)) WHERE { ?s a ?t }` — which answers what is
+// INSTANTIATED and can never answer what CAN exist. A kind with zero instances
+// was invisible.
+//
+// Shaped as a deliberate mirror of the predicate registry above, because that
+// one is used daily and works. Two differences, both on purpose:
+//   - the runtime's accepted vocabulary lives in core/kind-registry.mjs, NOT in
+//     these rows (see that file's header: coupling `validateEvent` to a board
+//     read is the failure coupling Decision 7b80418f forbids);
+//   - so a row here that the module does not know is a REPORTED DIVERGENCE
+//     rather than an error. Refusing it would make a seat lose a definition it
+//     took the trouble to write, and #1215's emitter exists to announce it.
+const KIND_ID = (name) => `https://scrumboard.local/kind/${encodeURIComponent(name)}`;
+const KIND_NAME_RE = /^(schema|scrum|prov|rdf):[A-Z][A-Za-z0-9]*$/;
+
+function kindsOf(data) {
+  return Array.isArray(data.kinds) ? data.kinds : [];
+}
+
+const kindEvent = (op, e, actor) => ({
+  op, actor, entity: { kind: 'kind', id: e['@id'] }, state: e,
+});
+
+function kindToWire(e) {
+  return {
+    name: e.name,
+    definition: e['scrum:definition'],
+    createdBy: e['scrum:createdByVerb'] ?? null,
+    eventKind: e['scrum:eventKind'] ?? null,
+    registeredBy: e['scrum:registeredBy'],
+    registeredAt: e.dateCreated,
+    revisedAt: e.dateModified ?? null,
+  };
+}
+
+/** @returns {string|null} an error message, or null if sound. */
+function validateKind(b) {
+  if (typeof b.name !== 'string' || !KIND_NAME_RE.test(b.name)) {
+    return 'name must be a prefixed CLASS name like "scrum:Procedure" or "schema:Person" '
+      + '(prefixes: schema, scrum, prov, rdf; the local part starts with a capital, which is '
+      + 'what distinguishes a kind from a predicate) — an unprefixed name cannot be matched '
+      + 'against what the graph actually emits';
+  }
+  if (typeof b.definition !== 'string' || b.definition.trim().length < 40) {
+    return 'definition is required and must say what this KIND is, and where useful what it is '
+      + 'NOT — a registry of names without definitions is a logbook, not a vocabulary, and the '
+      + 'read it exists to replace is someone loading an instance to work out what it means';
+  }
+  if (typeof b.createdBy !== 'string' || !b.createdBy.trim()) {
+    return 'createdBy is required — name the verb that makes one of these. "How do I create '
+      + 'this?" is the question the registry answers in the graph instead of in source.';
+  }
+  const who = b.by || b.registeredBy;
+  if (typeof who !== 'string' || !who.trim()) {
+    return 'by is required — who stands behind this definition. Declared, not authenticated.';
+  }
+  return null;
+}
+
+async function handleRegisterKind(req, res) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const err = validateKind(body);
+    if (err) return sendJSON(res, 400, { error: err });
+    const who = body.by || body.registeredBy;
+    const result = await withWriteLock(async () => {
+      const data = readBoard();
+      const now = new Date().toISOString();
+      const existing = kindsOf(data).find((e) => e.name === body.name);
+      const fields = {
+        'scrum:definition': String(body.definition),
+        'scrum:createdByVerb': String(body.createdBy),
+        'scrum:eventKind': body.eventKind ? String(body.eventKind) : null,
+        'scrum:registeredBy': who,
+      };
+      if (existing) {
+        // ONE entity per name; a re-register is a REVISION, exactly as for
+        // predicates. The event log keeps every prior definition.
+        const revised = { ...existing, ...fields, dateModified: now };
+        data.kinds = kindsOf(data).map((e) => (e.name === body.name ? revised : e));
+        writeBoard(data, [kindEvent('update', revised, who)]);
+        return { status: 200, wire: kindToWire(revised) };
+      }
+      const entity = {
+        '@id': KIND_ID(body.name), '@type': 'scrum:KindDefinition',
+        name: body.name, ...fields, dateCreated: now,
+      };
+      data.kinds = [...kindsOf(data), entity];
+      writeBoard(data, [kindEvent('create', entity, who)]);
+      return { status: 201, wire: kindToWire(entity) };
+    });
+    sendJSON(res, result.status, result.wire);
+  } catch (e) {
+    console.error('POST /api/kinds:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+
+function handleListKinds(req, res) {
+  const q = parseQuery(req.url);
+  const rows = kindsOf(readBoard()).filter((e) => e['@type'] === 'scrum:KindDefinition');
+  let out = rows.map(kindToWire);
+  if (q.name) out = out.filter((k) => k.name === q.name);
+  // `?declared=1` answers the question the census cannot: everything the
+  // RUNTIME knows about, whether or not anyone has instantiated or registered
+  // it. This is the surface a new seat should read first.
+  if (q.declared) {
+    out = KIND_DECLARATIONS.map((k) => ({
+      name: k.name, eventKind: k.eventKind, collection: k.collection,
+      createdBy: k.createdBy, definition: k.definition,
+      registered: rows.some((r) => r.name === k.name),
+    }));
+    if (q.name) out = out.filter((k) => k.name === q.name);
+  }
+  sendJSON(res, 200, out);
+}
+
 // ── #945 slice 2 — THE WRITE VERB (Decision aad42bf5, Option D) ─────────────
 // N assertions (subject, predicate, object), ONE atomic call, gated on the
 // registry: an unregistered predicate fails the write and names what to do.
@@ -4401,6 +4522,80 @@ function handleChanges(req, res) {
   }
 }
 
+/**
+ * #1214 — the three answers to "what kinds of thing live here", side by side.
+ *
+ *   declared      what the RUNTIME accepts (core/kind-registry.mjs) — the only
+ *                 one of the three that cannot fail to be computed
+ *   registered    what the GRAPH has been told, via kind_register
+ *   instantiated  the CENSUS: what something has actually created
+ *
+ * ⚠️ NAMED DEGRADED BEHAVIOUR (Decision 7b80418f, gate 1). The census needs the
+ * graph replica, which is built lazily and may be cold on the first call after
+ * a restart — exactly when a new seat is most likely to ask. A cold store is
+ * NOT an error and must not 500 orientation: `census` says `unavailable`, the
+ * counts are null, and `declared` and `registered` still answer in full. The
+ * failure is visible in the payload rather than inferred from a missing field.
+ */
+function kindsSummary(data) {
+  const registeredRows = (Array.isArray(data.kinds) ? data.kinds : [])
+    .filter((e) => e['@type'] === 'scrum:KindDefinition');
+  const registered = new Set(registeredRows.map((r) => r.name));
+
+  let counts = null;
+  let census = 'unavailable';
+  let censusNote = 'the graph replica is not warm yet — declared and registered are still exact, '
+    + 'and instantiated counts appear once the replica has been built';
+  try {
+    if (_graphStore) {
+      counts = {};
+      for (const q of _graphStore.match(null, null, null)) {
+        if (q.predicate.value !== 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type') continue;
+        if (q.object.termType !== 'NamedNode') continue;
+        const t = q.object.value
+          .replace('https://schema.org/', 'schema:')
+          .replace('https://scrumboard.local/vocab#', 'scrum:')
+          .replace('http://www.w3.org/ns/prov#', 'prov:');
+        counts[t] = (counts[t] ?? 0) + 1;
+      }
+      census = 'live';
+      censusNote = null;
+    }
+  } catch (e) {
+    // A census that throws is reported as one that did not run. It must never
+    // be reported as a board with no kinds in it — an empty result and a failed
+    // read are different facts and the caller has to be able to tell them apart.
+    counts = null;
+    census = 'failed';
+    censusNote = `census could not be taken: ${e.message}`;
+  }
+
+  const instantiated = counts ? Object.keys(counts) : [];
+  const d = divergence(registeredRows, instantiated);
+
+  return {
+    census,
+    ...(censusNote ? { censusNote } : {}),
+    declaredCount: KIND_DECLARATIONS.filter((k) => k.name).length,
+    registeredCount: registered.size,
+    kinds: KIND_DECLARATIONS.filter((k) => k.name).map((k) => ({
+      name: k.name,
+      createdBy: k.createdBy,
+      registered: registered.has(k.name),
+      // null (unknown) is NOT zero (none). Only a live census can say zero.
+      instances: counts ? (counts[k.name] ?? 0) : null,
+    })),
+    // ⭐ The census blind spot, made visible: declared, real, zero instances.
+    // `SELECT ?t WHERE { ?s a ?t }` cannot produce this list by construction.
+    declaredWithNoInstances: census === 'live' ? d.declaredNotInstantiated : null,
+    // Present in the data, declared nowhere — the defect that filed the card.
+    instantiatedNotDeclared: census === 'live' ? d.instantiatedNotDeclared : null,
+    // Registered by a seat, unknown to this build. Announced, never refused.
+    registeredNotDeclared: d.registeredNotDeclared,
+    declaredNotRegistered: d.declaredNotRegistered,
+  };
+}
+
 // ── /api/board/status — the orientation projection (#573) ──
 //
 // board_status was "the first call a new agent makes"; it returned the whole
@@ -4464,6 +4659,13 @@ function handleBoardStatus(req, res) {
       inFlight: inFlight(data.cards, { now: new Date().toISOString() }),
       recentCards,
       recentConversations,
+      // #1214 — WHAT KINDS OF THING LIVE HERE. Orientation used to answer
+      // "how much is there" and never "what is there", so a new seat learned
+      // the vocabulary by instantiating something and seeing what appeared.
+      // `declared` is what the runtime accepts; `registered` is what the graph
+      // has been told; `instantiated` is the census. A kind declared with ZERO
+      // instances is the one a census can never show, and it is visible here.
+      kinds: kindsSummary(data),
       lastUpdated: data.lastUpdated,
     });
   } catch (e) {
@@ -6445,6 +6647,8 @@ const API_ROUTES = [
   { method: 'GET',    re: /^\/api\/decisions$/,            fn: (req, res) => handleListDecisions(req, res) },
   { method: 'GET',    re: /^\/api\/predicates$/,           fn: (req, res) => handleListPredicates(req, res) },
   { method: 'POST',   re: /^\/api\/predicates$/,           fn: (req, res) => handleRegisterPredicate(req, res) },
+  { method: 'GET',    re: /^\/api\/kinds$/,                fn: (req, res) => handleListKinds(req, res) },
+  { method: 'POST',   re: /^\/api\/kinds$/,                fn: (req, res) => handleRegisterKind(req, res) },
   { method: 'POST',   re: /^\/api\/assert$/,               fn: (req, res) => handleAssert(req, res) },
   { method: 'POST',   re: /^\/api\/decisions$/,            fn: (req, res) => handleCreateDecision(req, res) },
   { method: 'GET',    re: /^\/api\/wakes$/,                fn: (req, res) => handleListWakes(req, res) },

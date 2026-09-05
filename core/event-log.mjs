@@ -82,12 +82,22 @@ export const REDACTION_MARKER_PREFIX = '[redacted';
 // per the warning that follows: a declaration that could not be rebuilt from
 // the log would be less durable than the cards beside it, and the scheduler
 // reads it — so a dropped replay would silently restore a seat to eligible.
-export const ENTITY_KINDS = new Set(['card', 'conversation', 'column', 'wiki', 'tending', 'memory', 'label', 'decision', 'seat-state', 'predicate', 'obligation', 'wake',
-  // #1217 — the kind a REFUSAL takes when its route maps to no entity kind. It
-  // never names a stored thing (nothing was stored), so it cannot collide with a
-  // real kind, and it keeps "a write was refused and we kept the body" sayable
-  // for routes this list has not learned about yet.
-  'request']);
+// #1214 — ⇒ THE LITERAL SET THAT STOOD HERE IS GONE, and that is the point of
+// the card: it was one of THREE disagreeing partial lists of what kinds exist,
+// and the only way to learn a kind was available was to instantiate one. Both
+// this vocabulary and the replica's projected types are now DERIVED from the
+// single declaration in core/kind-registry.mjs, so there is no list here to
+// fall out of sync with anything.
+//
+// ⚠️ Deliberately a PURE IMPORT and not a board read. `validateEvent` runs on
+// the write path; making its ability to REFUSE depend on a data read would
+// couple the log's correctness to a query succeeding, which Decision 7b80418f
+// (#1113, gate 1) forbids without a named degraded behaviour — and the
+// degraded behaviour here would be "accept any entity kind", i.e. the lie the
+// log exists to prevent. Kinds registered in the graph but absent from the
+// module are reported by `divergence()`, never silently accepted.
+export { ENTITY_KINDS } from './kind-registry.mjs';
+import { ENTITY_KINDS, COLLECTION_OF } from './kind-registry.mjs';
 
 /** Which board collection a given entity kind projects into. */
 // #805 blocker 6: tending rides the SAME door as every family — the ruling was
@@ -96,34 +106,17 @@ export const ENTITY_KINDS = new Set(['card', 'conversation', 'column', 'wiki', '
 // silently drops at replay (`if (!key) continue`), which for an emitted family
 // falsifies this file's first sentence: the store would NOT be rebuildable
 // from the log. Emit a new kind ⇒ map it here, same commit.
-const COLLECTION = {
-  card: 'cards', conversation: 'conversations', column: 'columns',
-  tending: 'tending',
-  // #651 — mapped in the SAME commit that emits the kind, per the warning above.
-  // A memory that could not be rebuilt from the log would be a memory store whose
-  // history is less durable than the cards it sits beside.
-  memory: 'memories',
-  // #857 §IV — a declared label synonym. Mapped in the SAME commit that emits
-  // the kind: replay upserts into an ARRAY, which is why aliases are rows with
-  // ids rather than a bare {alias: canonical} map. A map could not be rebuilt
-  // from the log, and a vocabulary decision that cannot be replayed is a
-  // decision the store would silently forget.
-  label: 'labelAliases',
-  // #613 — one row per seat, replaced on re-declaration; replay upserts by
-  // the row's id, which is the seat key. ⚠️ Mapped HERE and not only added
-  // to the set above: the comment two blocks up says an unmapped kind
-  // silently drops at replay, and it was right — this mapping is the
-  // difference between a stored 'no' surviving a rebuild and a rested seat
-  // quietly becoming eligible again.
-  'seat-state': 'seatStates',
-  // #1118 — obligations: what a seat PROMISED, as a node. Mapped in the same
-  // commit that emits the kind, per the warning above — a promise that could
-  // not be rebuilt from the log would be less durable than the desk-stamp
-  // prose it replaces.
-  obligation: 'obligations',
-  // #1118 — wakes: append-only, never edited; replay only ever pushes.
-  wake: 'wakes',
-};
+// #1214 — DERIVED, for the same reason the kind vocabulary above is. The
+// per-kind reasoning that used to live in this literal (why tending rides the
+// shared door, why seat-state must replay, why a memory rebuilds) now sits on
+// each declaration in core/kind-registry.mjs, beside the definition of the kind
+// it belongs to — one place a reader can find both what a kind IS and where it
+// lands. ⚠️ The warning that produced those comments still stands and is now
+// enforced by a test rather than by a comment: a kind absent from this map
+// silently DROPS at replay (`if (!key) continue`), so the store would stop
+// being rebuildable from the log. tests/kind-registry.test.mjs fails if any
+// pre-existing kind loses its collection.
+const COLLECTION = COLLECTION_OF;
 
 const SEGMENT_RE = /^events-\d{4}-\d{2}-\d{2}\.jsonl$/;
 const segmentFor = (iso) => `events-${iso.slice(0, 10)}.jsonl`;

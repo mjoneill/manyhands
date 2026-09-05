@@ -148,6 +148,11 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:Blocker', 'scrum:Commit', 'scrum:UnresolvedReference', 'scrum:Check',
   'scrum:Tending', 'scrum:SeatDeclaration', 'scrum:WorkObject',
   'scrum:PredicateDefinition', 'scrum:definition',
+  // #1214 — the KIND registry, mirroring the predicate registry directly above.
+  // Declared here so `?k a scrum:KindDefinition` is a legal query rather than a
+  // refusal: the guard rejects any term absent from this set, so a registry the
+  // graph cannot be asked about would be a registry nobody can find.
+  'scrum:KindDefinition', 'scrum:createdByVerb', 'scrum:eventKind',
   // #1118 — obligations: what a seat promised, born in the graph
   'scrum:Obligation', 'scrum:owedBy', 'scrum:obligationKind',
   'scrum:dischargedBy', 'scrum:dischargedAt',
@@ -1283,6 +1288,21 @@ function projectEntity(store, e) {
       projectObligation(store, e);
     } else if (t === 'scrum:Wake') {
       projectWake(store, e);
+    } else if (t === 'scrum:KindDefinition') {
+      // #1214 — "what kinds of thing live in this graph, and how do I make one"
+      // answered IN the graph. Deliberately the same shape as the predicate
+      // registry below it, plus the creating verb: a reader who finds a kind
+      // and cannot find its verb still has to go read source, which is the
+      // read this registry exists to remove.
+      const s_ = nn(e['@id']);
+      add(s_, A, nn(S + 'KindDefinition'));
+      if (e.name) add(s_, nn(SC + 'name'), lit(e.name));
+      if (e['scrum:definition']) add(s_, nn(S + 'definition'), lit(e['scrum:definition']));
+      if (e['scrum:createdByVerb']) add(s_, nn(S + 'createdByVerb'), lit(e['scrum:createdByVerb']));
+      if (e['scrum:eventKind']) add(s_, nn(S + 'eventKind'), lit(e['scrum:eventKind']));
+      if (e['scrum:registeredBy']) add(s_, nn(SC + 'creator'), nn(P + e['scrum:registeredBy']));
+      if (e.dateCreated) add(s_, nn(SC + 'dateCreated'), lit(e.dateCreated));
+      if (e.dateModified) add(s_, nn(SC + 'dateModified'), lit(e.dateModified));
     } else if (t === 'scrum:PredicateDefinition') {
       // #945 slice 1 — the registry is graph-queryable: "what does asserting X
       // mean, and who stands behind that?" is one query, which is the whole

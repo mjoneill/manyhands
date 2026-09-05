@@ -46,6 +46,10 @@ export const PREDICATE_SOURCE = Object.freeze({
   // ── #945 slice 1 — the predicate registry itself ──────────────────────────
   'scrum:PredicateDefinition': null,        // the type; minted by the projection
   'scrum:definition': 'scrum:definition',
+  // ── #1214 — the KIND registry: what CLASSES of thing live here ───────────
+  'scrum:KindDefinition': null,             // the type; minted by the projection
+  'scrum:createdByVerb': 'scrum:createdByVerb', // the verb that makes one
+  'scrum:eventKind': 'scrum:eventKind',     // the entity.kind the event log writes
   // ── #1118 — obligations (what a seat promised), born in the graph ────────
   'scrum:Obligation': null,                 // the type; minted by the projection
   'scrum:owedBy': 'scrum:owedBy',           // → person: IRI

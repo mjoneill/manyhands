@@ -1,0 +1,138 @@
+/**
+ * #1214 — THE KIND REGISTRY.
+ *
+ * These are behaviour tests, not shape tests. The behaviours that matter:
+ *
+ * 1. Deriving the event log's vocabulary from the registry must not LOSE a kind.
+ *    A dropped kind does not throw at import — it throws later, on a write, in
+ *    production, and the event that carried it is refused. So the regression
+ *    guard is an explicit literal of what the event log accepted BEFORE this
+ *    card, written out here rather than imported, because importing the thing
+ *    under test to test itself is a check that cannot fail.
+ *
+ * 2. The registry must answer the question a census cannot: which kinds exist
+ *    with ZERO instances. That blind spot is the reason the card was filed.
+ *
+ * 3. A registry of names without definitions is a logbook, not a vocabulary —
+ *    the sentence the predicate registry already enforces, held here too.
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  KIND_DECLARATIONS, ENTITY_KINDS, PROJECTED_TYPES, COLLECTION_OF,
+  kindByName, kindByEventKind, divergence,
+} from '../core/kind-registry.mjs';
+
+// The twelve entity kinds core/event-log.mjs accepted before #1214, retyped by
+// hand from the literal Set as it stood at commit 43cac95. NOT imported: a
+// control that reads the value under test certifies nothing.
+const ENTITY_KINDS_BEFORE_1214 = [
+  'card', 'conversation', 'column', 'wiki', 'tending', 'memory', 'label',
+  'decision', 'seat-state', 'predicate', 'obligation', 'wake',
+];
+
+// The collection mapping as it stood at the same commit, same reasoning.
+const COLLECTION_BEFORE_1214 = {
+  card: 'cards', conversation: 'conversations', column: 'columns',
+  tending: 'tending', memory: 'memories', label: 'labelAliases',
+  'seat-state': 'seatStates', obligation: 'obligations', wake: 'wakes',
+};
+
+test('#1214 deriving ENTITY_KINDS loses nothing the event log already accepted', () => {
+  for (const k of ENTITY_KINDS_BEFORE_1214) {
+    assert.ok(ENTITY_KINDS.has(k),
+      `entity kind "${k}" was accepted before #1214 and is missing from the derived set — `
+      + 'every event carrying it would now be refused at validateEvent');
+  }
+});
+
+test('#1214 the derived set adds only `kind` — a silent addition is as bad as a loss', () => {
+  const added = [...ENTITY_KINDS].filter((k) => !ENTITY_KINDS_BEFORE_1214.includes(k));
+  assert.deepEqual(added.sort(), ['kind', 'request'],
+    'the only new event kind this card introduces is the registry\'s own');
+});
+
+test('#1214 the replay mapping is unchanged for every pre-existing kind', () => {
+  for (const [kind, collection] of Object.entries(COLLECTION_BEFORE_1214)) {
+    assert.equal(COLLECTION_OF[kind], collection,
+      `"${kind}" replayed into "${collection}" before #1214; an unmapped or remapped kind `
+      + 'silently DROPS at replay, so the store stops being rebuildable from the log');
+  }
+});
+
+test('#1214 no kind is mapped to a collection the event log did not have', () => {
+  for (const [kind, collection] of Object.entries(COLLECTION_OF)) {
+    assert.equal(COLLECTION_BEFORE_1214[kind], collection,
+      `"${kind}" claims collection "${collection}" which replay does not know about`);
+  }
+});
+
+test('#1214 every declaration carries a definition and names its creating verb', () => {
+  for (const k of KIND_DECLARATIONS) {
+    const id = k.name || k.eventKind;
+    assert.ok(typeof k.definition === 'string' && k.definition.trim().length > 80,
+      `"${id}" has no real definition — a registry of names without definitions is a logbook. `
+      + 'This is the read a seat had to do on scrum:WorkObject, and the read this replaces.');
+    assert.ok(typeof k.createdBy === 'string' && k.createdBy.trim(),
+      `"${id}" does not say how one is made — "how do I create this" is the question the `
+      + 'registry exists to answer in the graph rather than in source');
+  }
+});
+
+test('#1214 a kind is declared exactly once — two homes for one fact cannot contradict visibly', () => {
+  const names = KIND_DECLARATIONS.map((k) => k.name).filter(Boolean);
+  assert.equal(new Set(names).size, names.length, 'duplicate rdf:type declaration');
+  const events = KIND_DECLARATIONS.map((k) => k.eventKind).filter(Boolean);
+  assert.equal(new Set(events).size, events.length, 'duplicate event kind declaration');
+});
+
+test('#1214 lookups resolve both ways', () => {
+  assert.equal(kindByName('scrum:Card').eventKind, 'card');
+  assert.equal(kindByEventKind('card').name, 'scrum:Card');
+  assert.equal(kindByName('scrum:Nonexistent'), null);
+  assert.equal(kindByEventKind('nope'), null);
+});
+
+test('#1214 the WorkObject read that motivated this card is now answerable without reading triples', () => {
+  const wo = kindByName('scrum:WorkObject');
+  assert.ok(wo, 'scrum:WorkObject is live in the graph and must be declared');
+  assert.match(wo.definition, /bid/i,
+    'the definition must say what it IS — a seat had to read its triples to learn it is a '
+    + 'bid/reply object, and that read is what this registry replaces');
+  assert.match(wo.definition, /NOT a claim/,
+    'and what it is NOT — a WorkObject is not a claim, and conflating them would put two '
+    + 'coordination mechanisms under one name');
+});
+
+test('#1214 divergence names a declared kind with ZERO instances — the census blind spot', () => {
+  // scrum:Obligation is declared. A census taken before the first obligation
+  // existed would not have contained it: that is the exact hole the card names.
+  const censusWithoutObligations = [...PROJECTED_TYPES].filter((t) => t !== 'scrum:Obligation');
+  const d = divergence([], censusWithoutObligations);
+  assert.ok(d.declaredNotInstantiated.includes('scrum:Obligation'),
+    'a kind that exists but has never been instantiated must be VISIBLE — this is the one '
+    + 'question `SELECT ?t WHERE { ?s a ?t }` can never answer');
+});
+
+test('#1214 divergence reports a graph-registered kind the runtime does not accept, and does not throw', () => {
+  const d = divergence([{ name: 'scrum:Procedure' }], [...PROJECTED_TYPES]);
+  assert.deepEqual(d.registeredNotDeclared, ['scrum:Procedure'],
+    'a seat registering a kind this build cannot project is a REAL state to announce (#1215), '
+    + 'not an error to refuse — refusing would make the seat lose the definition it wrote');
+});
+
+test('#1214 divergence reports an instantiated type nobody declared — the original defect', () => {
+  const d = divergence([], [...PROJECTED_TYPES, 'scrum:Surprise']);
+  assert.deepEqual(d.instantiatedNotDeclared, ['scrum:Surprise'],
+    'before this card, a kind existed the moment something instantiated it and nothing noticed');
+});
+
+test('#1214 a fully registered, fully instantiated board reports no divergence at all', () => {
+  const rows = [...PROJECTED_TYPES].map((name) => ({ name }));
+  const d = divergence(rows, [...PROJECTED_TYPES]);
+  assert.deepEqual(d.registeredNotDeclared, []);
+  assert.deepEqual(d.declaredNotRegistered, []);
+  assert.deepEqual(d.instantiatedNotDeclared, []);
+  assert.deepEqual(d.declaredNotInstantiated, []);
+});

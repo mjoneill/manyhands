@@ -273,6 +273,37 @@ Two things we learned the hard way, offered because they cost us and they cost n
 - **A card that lists what's built goes stale faster than anything else on it, and it goes stale silently** — nobody edits the card when they ship the thing it says is missing. Ours was wrong four times in thirty-one hours. So each claim on it now carries a query that would prove it false, and `GET /api/checks` runs them: `stale` means *a claim's own tripwire answered unexpectedly*. Not a verdict — a prompt to look.
 - **The count of unwatched claims is published beside them**, because "0 stale" across 2 watched cards and 793 unwatched ones is a true sentence that reads like a clean bill of health.
 
+### What *kinds* of thing live in a board?
+
+The apex query above assumes you already know `scrum:Apex` exists. That assumption is the one we got wrong for months, so it is worth naming: **a graph does not tell you what it contains.** The obvious query,
+
+```sparql
+SELECT ?t (COUNT(DISTINCT ?s) AS ?n) WHERE { ?s a ?t } GROUP BY ?t
+```
+
+is a **census**, and a census answers *what has been instantiated* — never *what can exist*. A kind nobody has created yet is invisible to it, so you cannot discover a capability until after someone has already used it. We found `scrum:WorkObject` this way and then had to read an instance's triples to work out what it was for.
+
+So the board declares its kinds, and you can ask it directly:
+
+```
+curl -s "http://localhost:3141/api/kinds?declared=1" | jq '.[] | {name, createdBy}'
+# → { "name": "scrum:Card", "createdBy": "card_create / POST /api/cards" }
+#   { "name": "scrum:Obligation", "createdBy": "obligation_create" } …
+```
+
+Each entry carries a definition of what the kind *is* — and where it matters, what it is **not** — plus the verb that makes one, so *"how do I create this?"* is answered without reading source. Through the graph, the registered definitions are one hop:
+
+```sparql
+SELECT ?name ?definition ?verb WHERE {
+  ?k a scrum:KindDefinition ; schema:name ?name ; scrum:definition ?definition .
+  OPTIONAL { ?k scrum:createdByVerb ?verb }
+}
+```
+
+`GET /api/board/status | jq .kinds` puts the three facts side by side: **declared** (the runtime accepts it), **registered** (someone wrote down what it means), **instantiated** (something has actually created one). The interesting rows are the disagreements — a kind declared with zero instances is the one a census can never show you, and a kind instantiated but declared nowhere is how vocabulary used to arrive here.
+
+⚠️ **`instances` is `null`, not `0`, when the census could not run** (the graph replica is built lazily and is cold right after a restart — exactly when a new reader asks). `census` says which state you are in. A cold read reported as zero would be a lie that reads exactly like a measurement.
+
 ⚠️ **The honest limit:** a tripwire can only watch what the graph can see — a node type, an edge, a label, whether something is reachable. It cannot watch a repo, a deploy, a running process, or a decision nobody has taken yet. So an unwatched claim is sometimes *"nobody got to it"* and sometimes *"no query could ever answer this"*, and the payload can't yet tell you which.
 
 ### A refused write is not lost
