@@ -3023,6 +3023,14 @@ function handleMisses(req, res) {
  * was written. The payload says what it found and publishes the query so the
  * reader can re-run it; it does not say anyone was negligent.
  */
+// #1215 — the scrum: vocabulary base, spelled ONCE here and tied to the
+// shortener the census uses, so the two cannot drift apart silently (#1214's
+// defect was exactly a second spelling of this string, typed from memory).
+const SCRUM_NS = 'https://scrumboard.local/ns#';
+if (shortenTypeIri(`${SCRUM_NS}Card`) !== 'scrum:Card') {
+  throw new Error(`SCRUM_NS (${SCRUM_NS}) disagrees with shortenTypeIri — two spellings of the vocabulary base`);
+}
+
 const STANDING_CHECKS = [
   {
     id: 'phantom-block',
@@ -3062,6 +3070,46 @@ const STANDING_CHECKS = [
       + 'scrum:column ?col . FILTER(?col != <https://scrumboard.local/column/done>) '
       + '?b schema:identifier ?blocker ; scrum:column <https://scrumboard.local/column/done> '
       + 'FILTER NOT EXISTS { ?bl scrum:blocks ?a ; scrum:blockedByCard ?b ; scrum:status "cleared" } }',
+  },
+  {
+    // #1215 — THE UNREGISTERED-THING CHECK. "Something hardcoded in manyhands
+    // that emits a message if someone adds a new thing (any entity, predicate,
+    // something) that doesn't have an entry in the registry… the mechanism to
+    // keep things in sync." — the owner, 2026-09-05.
+    //
+    // ACCEPT · MARK · SAY IT · KEEP SAYING IT · CLEAR. The write already landed
+    // (nothing is refused for a kind: the data is self-contained and refusing
+    // buys no integrity — and refusal is lossy exactly when the harness is the
+    // kind we already have, #359/#1212). This row is the MARK and the KEEP
+    // SAYING half: every scrum: type with live instances and no KindDefinition,
+    // with its count and one example, until someone registers it. Registering
+    // it CLEARS the row on the next query with no second act by the writer,
+    // because the row is a live query and not a stored flag. The SAY IT half
+    // (one commons post per newly-seen type) reads this row from the MCP
+    // server's tending interval; the digest (#1216) prints it every morning it
+    // is still true.
+    //
+    // ⚠️ The join is by NAME: a KindDefinition carries schema:name "scrum:Foo"
+    // while an instance carries rdf:type <…/ns#Foo>. Both spellings are
+    // derived from the same base in code (#1214's fix), so this string join is
+    // the one place they must agree — pinned by the test that registers a kind
+    // and watches its row vanish.
+    id: 'unregistered-kinds',
+    claim: 'an entity in the graph carries a scrum: type that neither the runtime nor a KindDefinition declares — '
+      + 'the room is using a kind of thing nobody has said the meaning of, and nothing will tell anyone until it is registered',
+    // ⚠️ "DECLARED" HAS TWO SOURCES and the first version of this check knew
+    // one. The runtime declares kinds in code (KIND_DECLARATIONS: Card, Column,
+    // …); the registry declares them as KindDefinition rows. On prod the rows
+    // are backfilled, so the two agree; on a FRESH board there are no rows, and
+    // a check that consulted rows alone reported scrum:Card and scrum:Column as
+    // unregistered on every new board — caught by the negative control the
+    // moment it was made able to fail. So: runtime-declared kinds are excluded
+    // by name here, and registry-declared kinds by the NOT EXISTS join.
+    query: 'SELECT ?type (COUNT(?x) AS ?n) (SAMPLE(?x) AS ?example) WHERE { ?x a ?type . '
+      + `FILTER(STRSTARTS(STR(?type), "${SCRUM_NS}")) `
+      + `FILTER(?type NOT IN (${KIND_DECLARATIONS.filter((k) => typeof k?.name === 'string' && k.name.startsWith('scrum:')).map((k) => `<${SCRUM_NS}${k.name.slice('scrum:'.length)}>`).join(', ')})) `
+      + 'FILTER NOT EXISTS { ?k a scrum:KindDefinition ; schema:name ?name . '
+      + 'FILTER(?name = CONCAT("scrum:", STRAFTER(STR(?type), "#"))) } } GROUP BY ?type ORDER BY DESC(?n)',
   },
 ];
 

@@ -52,6 +52,9 @@ import { tendingEnabled, quietAfterMinutes } from './tending-config.mjs';
 // #1216 — the daily digest: a whisper whose body is rendered from /api/checks
 // standing[] at fire time. Same quiet rule, same window discipline, same mint.
 import { digestTick } from './core/digest.mjs';
+// #1215 — the unregistered-thing emitter: the board announces a newly-seen
+// undeclared kind once, as itself. Reads the same standing[] the digest reads.
+import { emitterTick } from './core/unregistered-emitter.mjs';
 import { isGateArmed, decideCoveredAction } from './core/work-gate.mjs';
 import { openWorkObjectsAt } from './core/work-store.mjs';
 // #755 slice 2e — the INPUT PATH. Until this import existed, `core/work-tools.mjs`
@@ -2225,6 +2228,27 @@ const digestTickOnce = async () => {
   });
 };
 setInterval(() => { if (tendingEnabled()) digestTickOnce(); }, WHISPER_TICK_MS).unref();
+
+// ── #1215 — SAY IT, within one tick of the write rather than at the write:
+// the replica syncs on query, not on write, so "at the moment of the write"
+// is not a place this process can stand. One tick later is, and it is the
+// same interval the whisper and the digest already ride.
+const emitterTickOnce = async () => {
+  let rows = null;
+  try {
+    const checks = await apiCall('GET', '/api/checks');
+    const std = (checks?.standing || []).find((s) => s.id === 'unregistered-kinds');
+    if (!std || std.error) return null;              // unreadable or errored: say nothing, forget nothing
+    rows = Array.isArray(std.rows) ? std.rows : [];
+  } catch (e) { return null; }
+  return emitterTick({
+    now: new Date().toISOString(),
+    rows: () => rows,
+    post: (body) => apiCall('POST', '/api/conversations', body),
+    onError: (line) => console.error(line),
+  });
+};
+setInterval(() => { if (tendingEnabled()) emitterTickOnce(); }, WHISPER_TICK_MS).unref();
 
 const REAP_IDLE_MS = Number(process.env.MCP_REAP_IDLE_MS ?? 300000); // 5 min default
 // #726 — how long a session must hold ZERO streams before a request from it counts
