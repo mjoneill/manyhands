@@ -154,7 +154,7 @@ async function startOnPort({ port: explicitPort, allocatePort = freePort, readyP
  * Start an isolated REST server (server.js) on a free port with a temp board
  * file. Returns { baseUrl, boardFile, readBoardFile, stop }.
  */
-export async function startRestServer({ board, staticDir, port, mcpNotifyUrl = '', env: extraEnv, allocatePort } = {}) {
+export async function startRestServer({ board, boardFile: sharedBoardFile, staticDir, port, mcpNotifyUrl = '', env: extraEnv, allocatePort } = {}) {
   const explicitPort = port;
   // #988 — the board file gets its OWN directory, not a bare file in the shared
   // tmpdir. server.js derives sibling paths from `dirname(SCRUM_BOARD_FILE)`
@@ -165,9 +165,16 @@ export async function startRestServer({ board, staticDir, port, mcpNotifyUrl = '
   // the oldest one is what `entries[0]` resolves to — so a per-test assertion
   // about "the first query I made" silently read a stranger's query from an
   // earlier run. Isolating the DIRECTORY fixes the whole class, not just the log.
-  const boardDir = fs.mkdtempSync(path.join(os.tmpdir(), 'scrum-test-board-'));
-  const boardFile = path.join(boardDir, 'board.json');
-  fs.writeFileSync(boardFile, JSON.stringify(board ?? makeBoardFixture(), null, 2));
+  // #1200 — `boardFile` lets a SECOND server share a first one's board file
+  // (two boards up on one store: the roster-as-a-query acceptance). Only an
+  // explicit path from a previous startRestServer() is honoured; the default
+  // is still a fresh isolated directory.
+  let boardFile = sharedBoardFile;
+  if (!boardFile) {
+    const boardDir = fs.mkdtempSync(path.join(os.tmpdir(), 'scrum-test-board-'));
+    boardFile = path.join(boardDir, 'board.json');
+    fs.writeFileSync(boardFile, JSON.stringify(board ?? makeBoardFixture(), null, 2));
+  }
 
   // Isolated attachments dir so #113 uploads in tests never touch the real attachments/.
   const attachmentsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'scrum-test-attach-'));

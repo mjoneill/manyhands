@@ -70,6 +70,10 @@ function sanitizeRoster(input) {
     out[String(key).trim().toLowerCase()] = aliases.length
       ? { name, glyph, color, aliases }
       : { name, glyph, color };
+    // #1200 — a colleague defined on the board (scrum:Agent) rather than in
+    // the file. Optional and absent on every file seat; kept so a reader can
+    // tell the two apart without a second lookup.
+    if (v.agent === true) out[String(key).trim().toLowerCase()].agent = true;
   }
   return Object.keys(out).length ? out : null;
 }

@@ -1421,6 +1421,7 @@ function buildMcpServer() {
     inputSchema: {
       seatKey: z.string().min(2).max(32).describe('The author every post will carry. Lowercase, letters/digits/-/_'),
       name: z.string().optional(), emoji: z.string().optional(),
+      color: z.string().optional().describe('#1200 — the seat\'s roster colour (#rrggbb); derived from the seat key when absent'),
       prompt: z.string().min(1).describe('The system prompt text — becomes AgentPromptVersion 1'),
       modelKey: z.string().optional().describe('#1197 — the KEY of a registered scrum:Model (see model_register); the spec is derived from the node and scrum:usesModel links them'),
       model: z.object({ model: z.string(), protocol: z.string(), baseUrl: z.string().optional(), apiKeyRef: z.string().optional(), sampling: z.record(z.any()).optional() }).optional().describe('Inline model spec, accepted when no modelKey is given. NEVER a key.'),

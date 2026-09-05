@@ -103,10 +103,74 @@ const STATIC_DIR = process.env.SCRUM_STATIC_DIR || PROJECT_DIR;
 const REAL_STATIC_DIR = fs.realpathSync(STATIC_DIR);
 
 // ── Roster ──────────────────────────────────────────────────────────────────
-// Loaded once at boot from an optional, gitignored roster.json. Read at startup
-// rather than per-request so every page in a session agrees about who is who —
-// a roster that changed mid-session would repaint the room under you.
-const ROSTER = configureIdentities(loadRoster(undefined, (msg) => console.warn(`⚠️  roster: ${msg}`)));
+// #1200 — THE ROSTER IS A QUERY, not a boot-time read. Until 2026-09-05 this
+// was `const ROSTER = configureIdentities(loadRoster(...))`, read ONCE at boot
+// "so every page in a session agrees about who is who — a roster that changed
+// mid-session would repaint the room under you". The cost of that guarantee was
+// that inviting an agent meant editing roster.json AND restarting the server
+// (#1067 §6 — nobody knew this before 2026-08-25). The repaint concern is real
+// and is handled the way every other live change already is: the CLIENT
+// re-reads on its poll tick and updates in place; the server never repaints
+// anyone.
+//
+// The roster is now: the file's seats (humans and the seats they configured)
+// ∪ every scrum:Agent whose state is `invited`. Invite = set state; rest = set
+// state. Both are events. An agent seat carries `agent: true` so a reader can
+// tell a colleague defined on the board from one configured in the file.
+//
+// ⚠️ The file is re-read per call (it is tiny); the warning for an unreadable
+// file fires ONCE per distinct message, not per request.
+const _rosterWarned = new Set();
+function warnRosterOnce(msg) { if (_rosterWarned.has(msg)) return; _rosterWarned.add(msg); console.warn(`⚠️  roster: ${msg}`); }
+/** A stable colour for an agent seat that declared none: hue from the seat key. */
+function agentSeatColor(seat) {
+  let h = 0; for (const ch of String(seat)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  const hue = h % 360;
+  const f = (n) => { const k = (n + hue / 30) % 12; const c = 0.55 - 0.42 * 0.5 * Math.max(-1, Math.min(k - 3, 9 - k, 1)); return Math.round(c * 255).toString(16).padStart(2, '0'); };
+  return `#${f(0)}${f(8)}${f(4)}`;
+}
+function agentSeats(data) {
+  const out = {};
+  for (const a of (Array.isArray(data?.agents) ? data.agents : [])) {
+    if (a?.['scrum:state'] !== 'invited' || !a['scrum:seatKey']) continue;
+    out[a['scrum:seatKey']] = { name: a.name || a['scrum:seatKey'], glyph: a['scrum:emoji'] || '◍', color: a['scrum:color'] || agentSeatColor(a['scrum:seatKey']), agent: true };
+  }
+  return out;
+}
+/**
+ * The roster in force RIGHT NOW. `data` is the board when the caller already
+ * holds one (inside a write lock); otherwise it is read. The file's seats win
+ * on a key collision — a human configured in the file is not silently
+ * repainted by an agent that took the same key.
+ */
+// ⚠️ MEMOISED ON FILE IDENTITY, not on time. The first cut re-read the board on
+// every call and the boot-time mentions backfill (#110) calls extractMentions
+// once per stored conversation: a 300-message fixture took the server past the
+// harness's 8 s boot window. The key is (board file mtime+size, roster file
+// mtime+size): two stats per call, a re-read only when either file changed.
+// A caller holding `data` inside the write lock bypasses the cache — it has
+// the newer document by definition.
+let _rosterCache = { key: null, seats: null };
+let _rosterComputing = false;   // re-entrancy guard: readBoard → mentions → roster → readBoard
+function fileKey(file) { try { const st = fs.statSync(file); return `${st.mtimeMs}:${st.size}`; } catch { return 'absent'; } }
+function currentRoster(data = null) {
+  if (!data) {
+    const key = `${fileKey(BOARD_DATA_FILE)}|${fileKey(rosterFilePath())}`;
+    if (_rosterCache.key === key && _rosterCache.seats) return configureIdentities(_rosterCache.seats);
+    if (_rosterComputing) return configureIdentities(loadRoster(undefined, warnRosterOnce));   // never recurse into readBoard
+    let board = null;
+    _rosterComputing = true;
+    try { board = readBoard(); } catch (e) { warnRosterOnce(`board unreadable for agent seats: ${e.message}`); } finally { _rosterComputing = false; }
+    const fileSeats = loadRoster(undefined, warnRosterOnce) || {};
+    const merged = { ...agentSeats(board), ...fileSeats };
+    const seats = Object.keys(merged).length ? merged : null;
+    _rosterCache = { key, seats };
+    return configureIdentities(seats);
+  }
+  const fileSeats = loadRoster(undefined, warnRosterOnce) || {};
+  const merged = { ...agentSeats(data), ...fileSeats };
+  return configureIdentities(Object.keys(merged).length ? merged : null);
+}
 
 /**
  * The roster, inlined into every HTML page so the browser has it before first
@@ -116,8 +180,8 @@ const ROSTER = configureIdentities(loadRoster(undefined, (msg) => console.warn(`
  * `<` is escaped because a name containing `</script>` would otherwise close the
  * tag and turn a roster entry into markup.
  */
-const ROSTER_SCRIPT = `<script>globalThis.__SCRUM_ROSTER__=${
-  JSON.stringify(ROSTER).replace(/</g, '\\u003c')
+const rosterScript = () => `<script>globalThis.__SCRUM_ROSTER__=${
+  JSON.stringify(currentRoster()).replace(/</g, '\\u003c')
 };</script>`;
 
 // #119 — autonomous room. On a new commons post, fire a best-effort notify
@@ -788,8 +852,14 @@ const DEFAULT_COLUMNS = [
 function readBoard() {
   const data = domainToBoard(loadDomain(BOARD_DATA_FILE));
   // #110 — backfill mentions on conversations created before the field existed.
+  // #1200 — against the roster derived from THIS document: extractMentions()
+  // would call currentRoster(), which reads the board, which is this function.
+  // The first cut recursed until the harness's boot window closed.
+  let rosterForBackfill = null;
   for (const c of data.conversations) {
-    if (!Array.isArray(c.mentions)) c.mentions = extractMentions(c.body);
+    if (Array.isArray(c.mentions)) continue;
+    rosterForBackfill ??= currentRoster(data);
+    c.mentions = extractMentionsFromRoster(c.body, rosterForBackfill);
   }
 
   // A board with no columns is a brand-new install, and it used to be a trap.
@@ -903,7 +973,7 @@ function writeBoard(data, events) {
   for (const ev of events) appendEvent(EVENT_LOG_DIR, ev, { now: data.lastUpdated });
   // #686 — every server write is a ROSTERED save: Person nodes are
   // (re)materialized into @graph from this one authority on every write.
-  saveDomain(BOARD_DATA_FILE, boardToDomain(data), { now: data.lastUpdated, roster: { seats: ROSTER } });
+  saveDomain(BOARD_DATA_FILE, boardToDomain(data), { now: data.lastUpdated, roster: { seats: currentRoster(data) } });
   _graphDirty = true;   // #694 — the replica rebuilds lazily on next query
   _graphGeneration++;   // #931 — and SAYS SO, so a sync in flight cannot clear it
 }
@@ -1804,7 +1874,7 @@ async function handleSeatStates(req, res) {
   // to show it. A declaration is evidence that a seat exists; the union is the
   // honest population.
   const keys = [...new Set([
-    ...Object.keys(ROSTER ?? {}),
+    ...Object.keys(currentRoster(data) ?? {}),
     ...decls.map((d) => d.seat).filter(Boolean),
   ])];
   const seats = keys.map((seat) => seatState(decls, seat, now));
@@ -3172,7 +3242,8 @@ async function handleCreateAgent(req, res) {
       const promptId = AGENT_PROMPT_ID(seat); const v1 = AGENT_PROMPT_VERSION_ID(seat, 1);
       const agent = {
         '@id': AGENT_ID(seat), '@type': 'scrum:Agent', 'scrum:seatKey': seat, name: typeof body.name === 'string' && body.name.trim() ? body.name.trim() : seat,
-        'scrum:emoji': typeof body.emoji === 'string' ? body.emoji : null, 'scrum:model': spec.model, 'scrum:modelSpec': spec,
+        'scrum:emoji': typeof body.emoji === 'string' ? body.emoji : null, 'scrum:color': typeof body.color === 'string' && /^#[0-9a-f]{3,8}$/i.test(body.color) ? body.color : null,
+        'scrum:model': spec.model, 'scrum:modelSpec': spec,
         'scrum:usesModel': registered ? registered['@id'] : null,
         'scrum:contextPolicy': contextPolicy, 'scrum:toolGrant': toolGrants, 'scrum:budgetPerDay': budget,
         'scrum:residency': residency, 'scrum:state': 'invited', 'scrum:currentPrompt': v1, 'scrum:importedAt': now,
@@ -3233,6 +3304,26 @@ async function handlePatchAgent(req, res, seat) {
       if (!agent) return { status: 404, wire: { error: `no agent with seatKey "${seat}"` } };
       const updated = { ...agent, dateModified: new Date().toISOString() };
       if (body.state != null) updated['scrum:state'] = body.state;
+      // #1200 — REST RECONCILES CLAIMS. A resting or retired agent holding a
+      // card_claim is a stale lock with nobody to ask (#647 → #455: claims never
+      // expire). Rest releases every card it holds, each release is its own
+      // event with the actor set, and ONE commons post names them so the room
+      // knows who to pull. Memory and prompt versions are untouched: only the
+      // loop stops. (Retire is the destructive verb; it reconciles the same way.)
+      const releasedEvents = []; let releasedCards = [];
+      if (body.state === 'resting' || body.state === 'retired') {
+        const nowIso = updated.dateModified;
+        for (const card of data.cards ?? []) {
+          if (card.claimedBy !== seat) continue;
+          card.claimedBy = null; card.claimedAt = null; card.updatedAt = nowIso; bumpCardVersion(card);
+          releasedCards.push(card); releasedEvents.push(cardEvent('update', card, by));
+        }
+        if (releasedCards.length) {
+          const conv = createConversationFromPayload({ author: CLAIM_ANNOUNCER, body: `🔔 ${seat} is ${body.state} (set by ${by}) — released ${releasedCards.map((c) => `#${c.shortId}`).join(', ')}; ${releasedCards.length === 1 ? 'it is' : 'they are'} free to pull` });
+          data.conversations.push(conv); releasedEvents.push(convEvent(conv, by));
+          updated['scrum:releasedOnRest'] = releasedCards.map((c) => c.shortId);
+        }
+      }
       if (body.contextPolicy != null) updated['scrum:contextPolicy'] = body.contextPolicy;
       if (Array.isArray(body.toolGrants)) updated['scrum:toolGrant'] = body.toolGrants.map(String).filter(Boolean);
       if (body.budgetPerDay !== undefined) updated['scrum:budgetPerDay'] = body.budgetPerDay == null ? null : Number(body.budgetPerDay);
@@ -3244,9 +3335,10 @@ async function handlePatchAgent(req, res, seat) {
       }
       if (typeof body.name === 'string' && body.name.trim()) updated.name = body.name.trim();
       if (typeof body.emoji === 'string') updated['scrum:emoji'] = body.emoji;
+      if (typeof body.color === 'string' && /^#[0-9a-f]{3,8}$/i.test(body.color)) updated['scrum:color'] = body.color;
       data.agents = agentsOf(data).map((a) => (a['@id'] === agent['@id'] ? updated : a));
-      writeBoard(data, [agentEvent('update', updated, by)]);
-      return { status: 200, wire: agentToWire(data, updated) };
+      writeBoard(data, [agentEvent('update', updated, by), ...releasedEvents]);
+      return { status: 200, wire: { ...agentToWire(data, updated), released: releasedCards.map((c) => c.shortId) } };
     });
     sendJSON(res, result.status, result.wire);
   } catch (e) { console.error('PATCH /api/agents/:seat:', e.message); sendJSON(res, 500, { error: e.message }); }
@@ -5407,16 +5499,16 @@ function handleGetBoard(req, res) {
 // apart from "a roster that happens to match the example" — the difference
 // matters when someone is trying to work out why their colours didn't take.
 function handleGetRoster(req, res) {
-  sendJSON(res, 200, { seats: ROSTER, usingDefaults: usingDefaultRoster() });
+  const seats = currentRoster();
+  sendJSON(res, 200, { seats, usingDefaults: usingDefaultRoster() });
 }
 
 // ── POST /api/roster (#506) — a human edits their own room, no agent required.
 //
-// The roster is read ONCE at boot, deliberately: a roster that changed
-// mid-session would repaint the room under whoever was reading it. So this
-// writes the file and says so; it does not hot-swap ROSTER. The settings page
-// carries that as one line of copy, which makes the delay documented behaviour
-// rather than a bug someone reports later.
+// #1200 — the roster used to be read ONCE at boot, so this wrote the file and
+// the change waited for a restart. The roster is a query now (currentRoster):
+// the next request sees the file as written, and the board page re-reads it
+// on its poll tick. No restart, no repaint from the server.
 //
 // Same trust model as POST /api/config: loopback-only, and write access to this
 // board is already shell-equivalent (SECURITY.md). This adds no new authority —
@@ -5681,7 +5773,8 @@ async function handleChannelStatus(req, res) {
 // cards and conversations it is computed from.
 function handleListPeople(req, res) {
   try {
-    sendJSON(res, 200, deriveGraph(readBoard(), { seats: ROSTER }));
+    const data = readBoard();
+    sendJSON(res, 200, deriveGraph(data, { seats: currentRoster(data) }));
   } catch (e) {
     console.error('GET /api/people:', e.message);
     sendJSON(res, 500, { error: 'Failed to derive people' });
@@ -5693,7 +5786,8 @@ function handleGetPerson(req, res, key) {
     // #628 — backward-paging cursors; every list is bounded by default and
     // the full history is one explicit call away.
     const q = parseQuery(req.url);
-    const person = personByKey(readBoard(), { seats: ROSTER }, decodeURIComponent(key), {
+    const data = readBoard();
+    const person = personByKey(data, { seats: currentRoster(data) }, decodeURIComponent(key), {
       assignedBefore: q.assignedBefore,
       authoredBefore: q.authoredBefore,
       claimingBefore: q.claimingBefore,
@@ -6623,7 +6717,7 @@ async function handleDeleteColumn(req, res, columnId) {
 // actually caused is narrow and real: `?mentions_me=<key>` missed posts that
 // spelled a seat by its display name. Implementation + tests: core/people.mjs.
 function extractMentions(text) {
-  return extractMentionsFromRoster(text, ROSTER);
+  return extractMentionsFromRoster(text, currentRoster());
 }
 
 // #843 — the conversation route's OWN consumed-set, deliberately beside its own
@@ -7579,7 +7673,7 @@ function serveStaticFile(req, res) {
       const html = content.toString('utf8');
       const marker = html.includes('</head>') ? '</head>' : '<body>';
       content = Buffer.from(
-        html.includes(marker) ? html.replace(marker, `${ROSTER_SCRIPT}${marker}`) : ROSTER_SCRIPT + html,
+        html.includes(marker) ? html.replace(marker, `${rosterScript()}${marker}`) : rosterScript() + html,
         'utf8',
       );
     }

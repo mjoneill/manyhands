@@ -2598,6 +2598,34 @@ const ROSTER = (() => {
 const ASSIGNEE_EMOJI = Object.fromEntries(Object.entries(ROSTER).map(([k, v]) => [k, v.glyph]));
 const ASSIGNEE_NAME = Object.fromEntries(Object.entries(ROSTER).map(([k, v]) => [k, v.name]));
 
+// #1200 — THE ROSTER IS LIVE. The server no longer reads it once at boot, so an
+// agent invited from Settings (or a seat added to roster.json) exists the
+// moment it is written. This tab learns about it the way it learns about every
+// other change: on a poll tick, updating the three maps IN PLACE (their
+// identity is captured by every picker and renderer above) and re-rendering
+// only when a key actually appeared or vanished. The "repaint under you"
+// concern that justified the boot-time read is answered here, not by freezing
+// the roster: a row's colour and glyph change only when its seat did.
+let _rosterSig = JSON.stringify(Object.keys(ROSTER).sort());
+async function pollRoster() {
+  let seats;
+  try {
+    const r = await fetch('/api/roster', { cache: 'no-store' });
+    if (!r.ok) return;
+    seats = (await r.json()).seats;
+  } catch { return; }
+  if (!seats || typeof seats !== 'object') return;
+  const keep = { unassigned: ROSTER.unassigned, both: ROSTER.both };
+  const next = {};
+  for (const [key, v] of Object.entries(seats)) if (v && typeof v === 'object' && v.name) next[key] = { name: v.name, glyph: v.glyph || '◍' };
+  const sig = JSON.stringify(Object.keys(next).sort());
+  if (sig === _rosterSig) return;
+  _rosterSig = sig;
+  for (const k of Object.keys(ROSTER)) { delete ROSTER[k]; delete ASSIGNEE_EMOJI[k]; delete ASSIGNEE_NAME[k]; }
+  for (const [k, v] of Object.entries({ ...next, ...keep })) { ROSTER[k] = v; ASSIGNEE_EMOJI[k] = v.glyph; ASSIGNEE_NAME[k] = v.name; }
+  if (typeof renderBoard === 'function') renderBoard();
+}
+
 /**
  * Seats a person can pick — the roster minus every pseudo-seat.
  *
@@ -5071,6 +5099,9 @@ async function pollBoard() {
 function startBoardPolling() {
   if (_boardPollTimer !== null) return;
   _boardPollTimer = setInterval(pollBoard, BOARD_POLL_INTERVAL_MS);
+  // #1200 — the roster rides the same cadence; a second timer so a board poll
+  // skipped for a mid-action user still lets a new colleague appear.
+  setInterval(pollRoster, BOARD_POLL_INTERVAL_MS);
 }
 
 function stopBoardPolling() {
