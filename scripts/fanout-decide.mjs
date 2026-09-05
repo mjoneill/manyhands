@@ -29,7 +29,7 @@
  * @param {object}  a.state       previous state (from the state file)
  * @returns {{state: object, warnBody: string|null}}
  */
-export function decide({ receivers, sessions, floor, cooldownMs, now, state }) {
+export function decide({ receivers, sessions, floor, cooldownMs, now, state, staleSeats: stale = [] }) {
   // Deep-copy the two containers. A spread alone leaves `sigTimes` and `hist`
   // ALIASED to the caller's objects, so decide() would edit state it was only
   // asked to read — invisible in production (each run reads fresh state off
@@ -46,6 +46,7 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state }) {
     ...state,
     sigTimes: { ...(state?.sigTimes ?? {}) },
     hist: [...(state?.hist ?? [])],
+    staleEpisodes: { ...(state?.staleEpisodes ?? {}) },
   };
   // A state file written before #726 has no `s`. Treating that as 0 would make
   // the very first tick after deploy look like a total session collapse and
@@ -191,9 +192,83 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state }) {
     st.warned = true;
   }
 
+  // ── #1195 — NAME THE STALE SEAT. Counting streams cannot see one deaf seat
+  // among hearing ones. ──────────────────────────────────────────────────────
+  //
+  // Measured 2026-09-05: a deploy restarted the MCP server at 05:44Z. One
+  // seat's client kept re-sending a session id the server had already reaped
+  // (3 hits across 7.5 h) and held NO open stream; the other seat re-registered
+  // in 18 minutes and held streams all night. `receivers` never fell below the
+  // floor, no drop was ever armed, and this watch — built for exactly that
+  // night — said nothing, while /channel/status carried the deaf seat by NAME
+  // in `staleSessions[]` the whole time.
+  //
+  // `stale` is computed by staleSeats(status): a seat that loops on a reaped id
+  // AND holds no stream. A seat with stale hits but a live stream re-registered
+  // and can hear (that was the other seat); it is not accused. An unbound stale
+  // sid names nobody and cannot be a seat.
+  //
+  // Gated per (seat, firstAt) EPISODE, not per tick and not by the drop/floor
+  // cooldown: the same deafness warns once; a NEW episode for the same seat is
+  // a new fact and warns again; a seat that recovers clears its episode. This
+  // is independent of the counters on purpose — it fires in the exact case
+  // where they are silent.
+  const staleNow = new Set();
+  const named = [];
+  for (const s of stale) {
+    if (!s?.seat || !s.firstAt) continue;
+    const key = `${s.seat}@${s.firstAt}`;
+    staleNow.add(key);
+    if (st.staleEpisodes[key]) continue;           // already warned for this episode
+    st.staleEpisodes[key] = now;
+    named.push(s);
+  }
+  for (const key of Object.keys(st.staleEpisodes)) {
+    if (!staleNow.has(key)) delete st.staleEpisodes[key];   // recovered, or a new episode replaced it
+  }
+  if (named.length) {
+    const lines = named.map((s) => `${s.seat} has been re-sending a session id this server already reaped `
+      + `since ${s.firstAt} (${s.hits} hit${s.hits === 1 ? '' : 's'}) and holds no open stream`);
+    const staleBody = `⚠️ fanout watch: DEAF SEAT NAMED (#1195) — ${lines.join('; ')}. `
+      + `${named.map((s) => s.seat).join(', ')} cannot read this. The only measured repair is a human `
+      + `restarting that seat's client (the Claude Code TUI); no tool call and no pull restores push (#664). `
+      + `Stream counts were ${receivers}/${sessions} against floor ${floor} — which is why counting alone missed it.`;
+    warnBody = warnBody ? `${warnBody}\n${staleBody}` : staleBody;
+  }
+
   st.r = receivers;
   st.s = sessions;
   return { state: st, warnBody };
+}
+
+/**
+ * #1195 — which seats are DEAF, by name, from one /channel/status payload.
+ *
+ * A seat is stale when BOTH hold: a session that carried its token is looping on
+ * an id the server already reaped (`staleSessions[]`, #894), AND the seat holds
+ * no open stream (`seats[name].streams === 0`). The second condition is what
+ * separates "this client is deaf" from "this client re-registered and is also
+ * still retrying an old id for a while" — the latter can hear and is not named.
+ *
+ * ⚠️ An ABSENT stream count is UNKNOWN, not zero (#903's rule): a seat whose
+ * streams we cannot read is not named as deaf on that basis alone.
+ *
+ * @returns {Array<{seat:string, firstAt:string, lastAt:string|null, hits:number}>}
+ */
+export function staleSeats(status) {
+  const out = new Map();
+  for (const s of status?.staleSessions ?? []) {
+    if (!s?.seat) continue;
+    const streams = Number(status?.seats?.[s.seat]?.streams);
+    if (!Number.isFinite(streams) || streams > 0) continue;
+    const prev = out.get(s.seat);
+    // Several stale sids for one seat collapse to the earliest episode.
+    if (!prev || (s.firstAt && s.firstAt < prev.firstAt)) {
+      out.set(s.seat, { seat: s.seat, firstAt: s.firstAt ?? null, lastAt: s.lastAt ?? null,
+        hits: (prev?.hits ?? 0) + Number(s.hits ?? 0) });
+    } else prev.hits += Number(s.hits ?? 0);
+  }
+  return [...out.values()].sort((a, b) => a.seat.localeCompare(b.seat));
 }
 
 /**
