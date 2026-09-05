@@ -69,6 +69,22 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:Wake': null,                       // #1118 — the type; minted by the projection
   'scrum:wokeSeat': 'scrum:wokeSeat',       // → person: IRI
   'scrum:wokeAt': 'scrum:wokeAt',
+  // #1202 — scrum:ModelCall, the provenance ledger row (store key modelCalls[])
+  'scrum:ModelCall': null,          // rdf:type value
+  'scrum:agent': 'scrum:agent',     // → person: IRI
+  'scrum:model': 'scrum:model',
+  'scrum:provider': 'scrum:provider',
+  'scrum:protocol': 'scrum:protocol',
+  'scrum:promptVersion': 'scrum:promptVersion',
+  'scrum:tokensIn': 'scrum:tokensIn',
+  'scrum:tokensOut': 'scrum:tokensOut',
+  'scrum:cost': 'scrum:cost',
+  'scrum:stopReason': 'scrum:stopReason',
+  'scrum:latencyMs': 'scrum:latencyMs',
+  'scrum:contextHandedTo': 'scrum:contextHandedTo',   // → entity: IRIs
+  'scrum:producedPost': 'scrum:producedPost',         // → entity: IRI
+  'scrum:calledAt': 'scrum:calledAt',
+  'scrum:ok': 'scrum:ok',
   // ── #1130 item 3 — an apex is a KIND. Both are derived from the card's own
   // `labels`: an entry `apex:<X>` mints the class and X is the apexLabel. There
   // is no store field spelled "apex"; grep `labels` for the prefix.

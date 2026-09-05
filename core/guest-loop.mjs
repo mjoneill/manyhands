@@ -103,6 +103,40 @@ function appendLedger(file, row) {
 }
 
 /**
+ * #1202 — the ledger row as a NODE, not a log line. `sink` is a function that
+ * takes the row and records it on the board (POST /api/model-calls); the JSONL
+ * file stays as the fallback so a row is never lost when the board refuses or
+ * is down — and the row says which happened. Returns {recorded:'board'|'file', id}.
+ */
+export async function recordLedger({ sink = null, file, row, onError = () => {} }) {
+  if (typeof sink === 'function') {
+    try { const r = await sink(row); return { recorded: 'board', id: r?.id ?? null }; }
+    catch (e) { onError(`[#1202] ledger sink refused (${e?.message ?? e}) — row kept in ${file}`); appendLedger(file, { ...row, sinkError: String(e?.message ?? e) }); return { recorded: 'file', id: null }; }
+  }
+  appendLedger(file, row);
+  return { recorded: 'file', id: null };
+}
+
+/**
+ * #1202 / #987 — THE BUDGET HALT. Before a call: what has this agent spent
+ * today, against its budget? `spentToday` is injected (a GET on the ledger);
+ * if it cannot be read the loop FAILS CLOSED — a budget that cannot be checked
+ * is not a budget. On breach the loop STOPS and posts once; it does not
+ * warn-and-continue. A budget is breached when spent >= budget AND at least
+ * one call has been recorded, so a $0.00 budget allows exactly one run and
+ * halts the second — the card's own acceptance.
+ */
+export async function budgetCheck({ agent, spentToday }) {
+  const budget = agent?.budgetPerDay;
+  if (budget == null) return { allowed: true, reason: 'no-budget' };
+  let s;
+  try { s = await spentToday(agent.seatKey); } catch (e) { return { allowed: false, reason: `budget-unreadable: ${e?.message ?? e}`, spent: null, budget }; }
+  const spent = Number(s?.spent ?? 0); const calls = Number(s?.count ?? 0);
+  if (calls >= 1 && spent >= Number(budget)) return { allowed: false, reason: 'budget-breached', spent, budget, calls };
+  return { allowed: true, reason: 'within-budget', spent, budget, calls };
+}
+
+/**
  * One wake. Everything injected.
  *
  *   agent      {seatKey, name?, systemPrompt?, contextPolicy?, model: {model, protocol, baseUrl, sampling?}}
@@ -112,9 +146,20 @@ function appendLedger(file, row) {
  *   post       ({author, body}) => Promise<{id?}>
  *   ledgerFile where the pre-ledger row goes
  */
-export async function guestOnce({ agent, wake, changes = () => [], callModel, post, ledgerFile = ledgerFilePath(), now = () => new Date().toISOString(), log = () => {}, onError = () => {} }) {
+export async function guestOnce({ agent, wake, changes = () => [], callModel, post, ledgerFile = ledgerFilePath(), ledgerSink = null, spentToday = null, now = () => new Date().toISOString(), log = () => {}, onError = () => {} }) {
   if (!agent?.seatKey) throw new Error('guestOnce: agent.seatKey is required — a post with no seat is actor:null forever (#1193)');
   if (!agent?.model?.model || !agent?.model?.protocol) throw new Error('guestOnce: agent.model {model, protocol} is required');
+  // #1202 — the budget gate, BEFORE any context is fetched or any call is made.
+  if (agent.budgetPerDay != null) {
+    const b = await budgetCheck({ agent, spentToday: spentToday || (async () => { throw new Error('no ledger reader'); }) });
+    if (!b.allowed) {
+      const body = b.reason === 'budget-breached'
+        ? `⛔ ${agent.seatKey} HALTED (#987): daily budget ${b.budget} reached (spent ${b.spent} over ${b.calls} call${b.calls === 1 ? '' : 's'} today). Not answering; a human raises the budget or waits for tomorrow.`
+        : `⛔ ${agent.seatKey} HALTED: ${b.reason}. A budget that cannot be checked is not a budget.`;
+      try { await post({ author: agent.seatKey, body }); } catch (e) { onError(`[#1202] halt post failed: ${e?.message ?? e}`); }
+      return { posted: false, halted: true, reason: b.reason, budget: b };
+    }
+  }
   let rows = [];
   try { rows = changes() || []; } catch (e) { onError(`[#1201] bounded context unreadable — answering from the mention alone: ${e?.message ?? e}`); }
   const messages = buildMessages({ agent, wake, changes: rows });
@@ -124,6 +169,7 @@ export async function guestOnce({ agent, wake, changes = () => [], callModel, po
     provider: agent.model.baseUrl || null, promptVersion: agent.promptVersion ?? null,
     wake: { kind: 'mention', messageId: wake.id ?? null, author: wake.author ?? null },
     contextHanded: { policy: agent.contextPolicy || 'thread', changesRows: (agent.contextPolicy === 'artifact-only') ? 0 : rows.length },
+    contextHandedTo: [wake.id, ...((agent.contextPolicy === 'artifact-only') ? [] : rows.slice(-20).map((c) => c.id))].filter(Boolean),
     at: now(),
   };
   let result;
@@ -131,25 +177,26 @@ export async function guestOnce({ agent, wake, changes = () => [], callModel, po
     result = await callModel(agent.model, messages, { ...(agent.model.sampling || {}) });
   } catch (e) {
     const row = { ...base, ok: false, error: e?.message ?? String(e), latencyMs: Date.now() - started };
-    appendLedger(ledgerFile, row);
+    await recordLedger({ sink: ledgerSink, file: ledgerFile, row, onError });
     onError(`[#1201] model call failed for ${agent.seatKey}; NO post made: ${row.error}`);
     return { posted: false, reason: 'model-failed', ledger: row };
   }
   const text = String(result?.text ?? '').trim();
   if (!text) {
     const row = { ...base, ok: false, error: 'empty reply', stopReason: result?.stopReason ?? null, usage: result?.usage ?? null, latencyMs: Date.now() - started };
-    appendLedger(ledgerFile, row);
+    await recordLedger({ sink: ledgerSink, file: ledgerFile, row, onError });
     return { posted: false, reason: 'empty-reply', ledger: row };
   }
   let posted;
   try { posted = await post({ author: agent.seatKey, body: text }); }
   catch (e) {
     const row = { ...base, ok: false, error: `post failed: ${e?.message ?? e}`, stopReason: result.stopReason, usage: result.usage, latencyMs: Date.now() - started };
-    appendLedger(ledgerFile, row);
+    await recordLedger({ sink: ledgerSink, file: ledgerFile, row, onError });
     return { posted: false, reason: 'post-failed', ledger: row };
   }
   const row = { ...base, ok: true, stopReason: result.stopReason ?? null, usage: result.usage ?? null, attempts: result.attempts ?? null, latencyMs: Date.now() - started, postId: posted?.id ?? null };
-  appendLedger(ledgerFile, row);
+  const recorded = await recordLedger({ sink: ledgerSink, file: ledgerFile, row, onError });
+  row.recorded = recorded.recorded; row.ledgerId = recorded.id;
   log(`[#1201] ${agent.seatKey} answered ${wake.id ?? 'a mention'} via ${agent.model.model} (${row.usage?.completionTokens ?? '?'} tokens, ${row.stopReason})`);
   return { posted: true, postId: row.postId, ledger: row, text };
 }

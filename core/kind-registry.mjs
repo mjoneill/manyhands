@@ -150,6 +150,16 @@ export const KIND_DECLARATIONS = Object.freeze([
       + 'transport dropped is indistinguishable from an idle one, so the record is the evidence.',
   },
   {
+    name: 'scrum:ModelCall', eventKind: 'model-call', collection: 'modelCalls',
+    createdBy: 'POST /api/model-calls (the harness, after every model call)',
+    definition: 'ONE MODEL CALL, recorded as a node rather than a log line (#1202): which agent, '
+      + 'which model and provider, tokens in and out, cost, stop reason, latency, what context '
+      + 'was handed (cards and messages) and what it produced (the commons post). Append-only, '
+      + 'actor set, snapshotted like every write. The harness is the one place that can record '
+      + 'it because it is the one place the call is made (#979). Two consumers: the per-agent '
+      + 'daily budget halt (#987) and the egress question — what left this box for vendor X.',
+  },
+  {
     name: 'scrum:WorkObject', eventKind: null, collection: null,
     createdBy: 'work_declare / work_bid / work_grant',
     definition: 'A bid-and-reply object for coordinating who takes a piece of work: it carries '

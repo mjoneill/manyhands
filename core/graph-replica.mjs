@@ -172,6 +172,10 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:dischargedBy', 'scrum:dischargedAt',
   // #1118 — wakes: the one time-shaped fact attached to a seat
   'scrum:Wake', 'scrum:wokeSeat', 'scrum:wokeAt',
+  // #1202 — the provenance ledger row
+  'scrum:ModelCall', 'scrum:agent', 'scrum:model', 'scrum:provider', 'scrum:protocol',
+  'scrum:promptVersion', 'scrum:tokensIn', 'scrum:tokensOut', 'scrum:cost', 'scrum:stopReason',
+  'scrum:latencyMs', 'scrum:contextHandedTo', 'scrum:producedPost', 'scrum:calledAt', 'scrum:ok',
   // #1130 — an apex is a KIND, not a convention: a card carrying `apex:<X>`
   // projects as scrum:Apex with scrum:apexLabel "X", so "what lives here" is
   // one hop and needs no knowledge of the prefix.
@@ -864,6 +868,43 @@ function projectWake(store, e) {
   if (e.text) add(nn(SC + 'text'), lit(e.text));
 }
 
+/**
+ * #1202 — a MODEL CALL: the provenance ledger row as a node. `agent` is a person
+ * EDGE so "what did this seat spend today" is one traversal; `producedPost` and
+ * `contextHandedTo` are entity EDGES so "which call made this post" and "what
+ * left this box for vendor X" are one hop, not a log grep. Numbers are typed
+ * literals so SUM(?cost) works.
+ */
+function projectModelCall(store, e) {
+  const S = IRI.scrum, P = IRI.person, E = IRI.entity;
+  const s = nn(e['@id']);
+  const add = (p, o) => store.add(oxigraph.triple(s, p, o));
+  const num = (v) => oxigraph.literal(String(v), nn('http://www.w3.org/2001/XMLSchema#decimal'));
+  add(A, nn(S + 'ModelCall'));
+  // Each predicate spelled out in the literal form, one per line: the #875
+  // tripwire reads this file's SOURCE for the names it emits, so a name passed
+  // through a helper or a loop is a name the declaration census cannot see —
+  // and an example of the form written in a comment is read as an emission,
+  // which is how this comment's first draft declared a predicate that does
+  // not exist.
+  if (e['scrum:agent']) add(nn(S + 'agent'), nn(String(e['scrum:agent']).startsWith('http') ? String(e['scrum:agent']) : P + e['scrum:agent']));
+  if (e['scrum:model'] != null) add(nn(S + 'model'), lit(String(e['scrum:model'])));
+  if (e['scrum:provider'] != null) add(nn(S + 'provider'), lit(String(e['scrum:provider'])));
+  if (e['scrum:protocol'] != null) add(nn(S + 'protocol'), lit(String(e['scrum:protocol'])));
+  if (e['scrum:promptVersion'] != null) add(nn(S + 'promptVersion'), lit(String(e['scrum:promptVersion'])));
+  if (e['scrum:stopReason'] != null) add(nn(S + 'stopReason'), lit(String(e['scrum:stopReason'])));
+  if (e['scrum:calledAt'] != null) add(nn(S + 'calledAt'), lit(String(e['scrum:calledAt'])));
+  if (Number.isFinite(Number(e['scrum:tokensIn'])) && e['scrum:tokensIn'] != null) add(nn(S + 'tokensIn'), num(e['scrum:tokensIn']));
+  if (Number.isFinite(Number(e['scrum:tokensOut'])) && e['scrum:tokensOut'] != null) add(nn(S + 'tokensOut'), num(e['scrum:tokensOut']));
+  if (Number.isFinite(Number(e['scrum:cost'])) && e['scrum:cost'] != null) add(nn(S + 'cost'), num(e['scrum:cost']));
+  if (Number.isFinite(Number(e['scrum:latencyMs'])) && e['scrum:latencyMs'] != null) add(nn(S + 'latencyMs'), num(e['scrum:latencyMs']));
+  if (e['scrum:ok'] != null) add(nn(S + 'ok'), lit(String(!!e['scrum:ok'])));
+  if (e['scrum:producedPost']) add(nn(S + 'producedPost'), nn(String(e['scrum:producedPost']).startsWith('http') ? String(e['scrum:producedPost']) : E + e['scrum:producedPost']));
+  for (const c of (Array.isArray(e['scrum:contextHandedTo']) ? e['scrum:contextHandedTo'] : [])) {
+    if (c) add(nn(S + 'contextHandedTo'), nn(String(c).startsWith('http') ? String(c) : E + c));
+  }
+}
+
 function projectMemory(store, e) {
   const add = (s, p, o) => store.add(oxigraph.triple(s, p, o));
   const S = IRI.scrum, SC = IRI.schema, P = IRI.person;
@@ -1302,6 +1343,8 @@ function projectEntity(store, e) {
       projectObligation(store, e);
     } else if (t === 'scrum:Wake') {
       projectWake(store, e);
+    } else if (t === 'scrum:ModelCall') {
+      projectModelCall(store, e);
     } else if (t === 'schema:CreativeWork' && e['schema:contentUrl']) {
       // #1206 — AN ARTIFACT a run produced or consumed: a transcript, a notes
       // file, a report. ⛔ POINTER + HASH, NEVER PAYLOAD. The graph says where

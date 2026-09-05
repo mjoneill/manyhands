@@ -323,6 +323,7 @@ const isArtifact = (e) => e && e['@type'] === 'schema:CreativeWork' && typeof e[
 const isObligation = (entity) => entity && entity['@type'] === 'scrum:Obligation';
 // #1118 — a wake is the one time-shaped fact that attaches to a SEAT.
 const isWake = (entity) => entity && entity['@type'] === 'scrum:Wake';
+const isModelCall = (entity) => entity && entity['@type'] === 'scrum:ModelCall';   // #1202
 
 /**
  * ⛔ ENFORCE the ordering contract rather than merely preserving it.
@@ -408,7 +409,7 @@ export const CONTEXT_RANGE = Object.freeze(Object.fromEntries(
 export function domainToJsonLd(domain) {
   const {
     nodes = [], messages = [], people = [], columns = [],
-    tending = [], memories = [], decisions = [], predicates = [], kinds = [], procedures = [], runs = [], artifacts = [], obligations = [], wakes = [], labelAliases = [], _unmodelled = [], _README, ...meta
+    tending = [], memories = [], decisions = [], predicates = [], kinds = [], procedures = [], runs = [], artifacts = [], obligations = [], wakes = [], modelCalls = [], labelAliases = [], _unmodelled = [], _README, ...meta
   } = domain;
   const doc = {};
   if (_README !== undefined) doc._README = _README;   // first key — JSON.stringify keeps insertion order
@@ -445,6 +446,7 @@ export function domainToJsonLd(domain) {
     ...artifacts,
     ...obligations,
     ...wakes,
+    ...modelCalls,   // #1202 — same rule as kinds: a collection that stays a top-level key never reaches the replica
     // #804 — entities of a class this projection does not model ride through
     // verbatim rather than being dropped. Silent deletion is the other bad
     // answer to the fallthrough bug: a phantom card is at least visible.
@@ -512,13 +514,15 @@ export function jsonLdToDomain(doc) {
   if (obligations.length) domain.obligations = obligations;
   const wakes = graph.filter(isWake);
   if (wakes.length) domain.wakes = wakes;
+  const modelCalls = graph.filter(isModelCall);   // #1202
+  if (modelCalls.length) domain.modelCalls = modelCalls;
   // Anything recognised by NO predicate is kept verbatim so the serializer
   // stays lossless. It is never a card and never silently discarded.
   const unmodelled = graph.filter(
     (e) => !isCard(e) && !isMessage(e) && !isPerson(e) && !isColumn(e) && !isTending(e)
       && !isMemory(e) && !isDecision(e) && !isPredicateDefinition(e) && !isKindDefinition(e)
       && !isProcedure(e) && !isRun(e) && !isArtifact(e)
-      && !isObligation(e) && !isWake(e),
+      && !isObligation(e) && !isWake(e) && !isModelCall(e),
   );
   if (unmodelled.length) domain._unmodelled = unmodelled;
   if (Array.isArray(doc._labelAliases) && doc._labelAliases.length) domain.labelAliases = doc._labelAliases;

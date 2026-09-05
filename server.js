@@ -2955,6 +2955,65 @@ function wakesOf(data) {
 const wakeEvent = (e, actor) => ({ op: 'create', actor, entity: { kind: 'wake', id: e['@id'] }, state: e });
 const wakeToWire = (e) => ({ id: e['@id'], seat: e['scrum:wokeSeat'], at: e['scrum:wokeAt'], note: e.text ?? '' });
 
+// ── #1202 — THE PROVENANCE LEDGER: one row per model call, as a node ────────
+const MODEL_CALL_ID = () => `https://scrumboard.local/model-call/${crypto.randomUUID()}`;
+function modelCallsOf(data) { return Array.isArray(data.modelCalls) ? data.modelCalls : []; }
+const modelCallEvent = (e, actor) => ({ op: 'create', actor, entity: { kind: 'model-call', id: e['@id'] }, state: e });
+const modelCallToWire = (e) => ({
+  id: e['@id'], agent: e['scrum:agent'], model: e['scrum:model'], provider: e['scrum:provider'] ?? null,
+  protocol: e['scrum:protocol'] ?? null, promptVersion: e['scrum:promptVersion'] ?? null,
+  tokensIn: e['scrum:tokensIn'] ?? null, tokensOut: e['scrum:tokensOut'] ?? null, cost: e['scrum:cost'] ?? 0,
+  stopReason: e['scrum:stopReason'] ?? null, latencyMs: e['scrum:latencyMs'] ?? null, ok: e['scrum:ok'] !== false,
+  contextHandedTo: e['scrum:contextHandedTo'] ?? [], producedPost: e['scrum:producedPost'] ?? null,
+  at: e['scrum:calledAt'], error: e.text || null,
+});
+async function handleCreateModelCall(req, res) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const by = typeof body.by === 'string' && body.by.trim() ? body.by.trim() : null;
+    if (!by) return sendJSON(res, 400, { error: 'by is required — the seat that made the call. Declared, not authenticated (#1193: omit it and the row is actor:null forever).' });
+    const agent = typeof body.agent === 'string' && body.agent.trim() ? body.agent.trim() : by;
+    if (typeof body.model !== 'string' || !body.model.trim()) return sendJSON(res, 400, { error: 'model is required — the model id that was called' });
+    const n = (v) => (v == null || v === '' ? null : (Number.isFinite(Number(v)) ? Number(v) : null));
+    const result = await withWriteLock(async () => {
+      const data = readBoard();
+      const entity = {
+        '@id': MODEL_CALL_ID(), '@type': 'scrum:ModelCall',
+        'scrum:agent': agent, 'scrum:model': body.model.trim(),
+        'scrum:provider': typeof body.provider === 'string' ? body.provider : null,
+        'scrum:protocol': typeof body.protocol === 'string' ? body.protocol : null,
+        'scrum:promptVersion': typeof body.promptVersion === 'string' ? body.promptVersion : null,
+        'scrum:tokensIn': n(body.tokensIn), 'scrum:tokensOut': n(body.tokensOut),
+        'scrum:cost': n(body.cost) ?? 0, 'scrum:latencyMs': n(body.latencyMs),
+        'scrum:stopReason': typeof body.stopReason === 'string' ? body.stopReason : null,
+        'scrum:ok': body.ok !== false,
+        'scrum:contextHandedTo': Array.isArray(body.contextHandedTo) ? body.contextHandedTo.map(String).slice(0, 200) : [],
+        'scrum:producedPost': typeof body.producedPost === 'string' ? body.producedPost : null,
+        'scrum:calledAt': typeof body.at === 'string' ? body.at : new Date().toISOString(),
+        text: typeof body.error === 'string' ? body.error.slice(0, 2000) : '',
+      };
+      data.modelCalls = [...modelCallsOf(data), entity];
+      writeBoard(data, [modelCallEvent(entity, by)]);
+      return { status: 201, wire: modelCallToWire(entity) };
+    });
+    sendJSON(res, result.status, result.wire);
+  } catch (e) {
+    console.error('POST /api/model-calls:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+function handleListModelCalls(req, res) {
+  const q = parseQuery(req.url);
+  let out = modelCallsOf(readBoard()).map(modelCallToWire).sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+  if (q.agent) out = out.filter((c) => c.agent === q.agent);
+  if (q.since) out = out.filter((c) => typeof c.at === 'string' && c.at >= q.since);
+  const spent = out.reduce((n, c) => n + (Number(c.cost) || 0), 0);
+  const limit = Number.parseInt(q.limit, 10);
+  if (Number.isInteger(limit) && limit > 0) out = out.slice(0, limit);
+  // The SUM rides the response so a budget check is one GET, not a client-side fold over pages.
+  sendJSON(res, 200, { calls: out, count: out.length, spent });
+}
+
 async function handleCreateWake(req, res) {
   try {
     const body = JSON.parse(await readBody(req));
@@ -7005,6 +7064,8 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/kinds$/,                fn: (req, res) => handleRegisterKind(req, res) },
   { method: 'POST',   re: /^\/api\/assert$/,               fn: (req, res) => handleAssert(req, res) },
   { method: 'POST',   re: /^\/api\/decisions$/,            fn: (req, res) => handleCreateDecision(req, res) },
+  { method: 'GET',    re: /^\/api\/model-calls$/,          fn: (req, res) => handleListModelCalls(req, res) },   // #1202
+  { method: 'POST',   re: /^\/api\/model-calls$/,          fn: (req, res) => handleCreateModelCall(req, res) }, // #1202
   { method: 'GET',    re: /^\/api\/wakes$/,                fn: (req, res) => handleListWakes(req, res) },
   { method: 'POST',   re: /^\/api\/wakes$/,                fn: (req, res) => handleCreateWake(req, res) },
   // #1207 — the research write verbs. A card PATCH cannot say "this run

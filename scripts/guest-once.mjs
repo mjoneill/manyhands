@@ -55,8 +55,31 @@ const getRaw = async (p) => { const r = await fetch(`${BOARD}${p}`); let body = 
 let rows = [];
 try { rows = await fetchBoundedChanges(getRaw, sinceIso); }
 catch (e) { console.error(`[#1201] changes unreadable — answering from the mention alone: ${e.message}`); }
+// #1202 — the ledger row goes to the board as a scrum:ModelCall node; the JSONL
+// file is the fallback if the board refuses, and the row says which happened.
+const rowToBoard = (row) => ({
+  by: row.agent, agent: row.agent, model: row.model, provider: row.provider, protocol: row.protocol,
+  promptVersion: row.promptVersion, tokensIn: row.usage?.promptTokens ?? row.usage?.prompt_eval_count ?? null,
+  tokensOut: row.usage?.completionTokens ?? row.usage?.eval_count ?? null,
+  cost: (agent.model?.costIn != null || agent.model?.costOut != null)
+    ? ((row.usage?.promptTokens ?? 0) * (agent.model.costIn ?? 0) + (row.usage?.completionTokens ?? 0) * (agent.model.costOut ?? 0)) : 0,
+  stopReason: row.stopReason ?? null, latencyMs: row.latencyMs, ok: row.ok, error: row.error ?? null,
+  contextHandedTo: row.contextHandedTo ?? [], producedPost: row.postId ?? null, at: row.at,
+});
+const ledgerSink = dry ? null : async (row) => {
+  const r = await fetch(`${BOARD}/api/model-calls`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(rowToBoard(row)) });
+  if (!r.ok) throw new Error(`POST /api/model-calls → ${r.status}`);
+  return r.json();
+};
+const spentToday = async (seat) => {
+  const since = new Date(); since.setUTCHours(0, 0, 0, 0);
+  const r = await fetch(`${BOARD}/api/model-calls?agent=${encodeURIComponent(seat)}&since=${since.toISOString()}`);
+  if (!r.ok) throw new Error(`GET /api/model-calls → ${r.status}`);
+  return r.json();
+};
+
 const r = await guestOnce({
-  agent, wake, changes: () => rows,
+  agent, wake, changes: () => rows, ledgerSink, spentToday,
   callModel: (a, m, o) => callModel(a, m, { ...o, apiKey: a.apiKeyRef ? process.env[a.apiKeyRef] : undefined }),
   post,
   log: (l) => console.log(l), onError: (l) => console.error(l),
