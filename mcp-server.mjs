@@ -49,6 +49,9 @@ import { createChannelScheduler } from './core/channel-scheduler.mjs';
 import { mintOnce, claimWindow, readPool, writePool, recentWhispers } from './whisper-store.mjs';
 import { tendingTick, lastQualifyingActivity } from './core/tending-tick.mjs';
 import { tendingEnabled, quietAfterMinutes } from './tending-config.mjs';
+// #1216 — the daily digest: a whisper whose body is rendered from /api/checks
+// standing[] at fire time. Same quiet rule, same window discipline, same mint.
+import { digestTick } from './core/digest.mjs';
 import { isGateArmed, decideCoveredAction } from './core/work-gate.mjs';
 import { openWorkObjectsAt } from './core/work-store.mjs';
 // #755 slice 2e — the INPUT PATH. Until this import existed, `core/work-tools.mjs`
@@ -2179,6 +2182,49 @@ const whisperTick = async () => {
 };
 // Armed unconditionally; the switch is asked per firing, not per process.
 setInterval(() => { if (tendingEnabled()) whisperTick(); }, WHISPER_TICK_MS).unref();
+
+// ── #1216 — THE DAILY DIGEST TICK ─────────────────────────────────────────
+//
+// Rides the same interval and the same operator switch as the whisper: a room
+// that has turned tending off has turned the digest off. Its window is 24 h
+// anchored at 08:00Z (core/digest.mjs); this tick is deliberately faster than
+// that window, so a missed tick self-heals on the next one and "at the first
+// QUIET tick after 08:00Z" is what actually happens.
+//
+// ⛔ FAILS CLOSED on an unreadable checks surface — a skipped morning
+// self-heals tomorrow; a digest built from a partial or stale standing[] would
+// tell the room "nothing wrong" about the very things it exists to surface.
+const digestTickOnce = async () => {
+  let standing = null;
+  try {
+    const checks = await apiCall('GET', '/api/checks');
+    standing = Array.isArray(checks?.standing) ? checks.standing : null;
+  } catch (e) {
+    console.error(`[#1216] /api/checks unreadable — skipping this digest tick: ${e?.message ?? e}`);
+    return null;
+  }
+  if (!standing) return null;
+  let activityAt = null;
+  try {
+    const recent = await apiCall('GET', '/api/conversations?attachedTo=null&limit=40');
+    activityAt = lastQualifyingActivity(Array.isArray(recent) ? recent : (recent?.conversations ?? []));
+  } catch { activityAt = null; }   // fails OPEN, like the whisper's gate: "I could not ask" is not "the room is busy"
+  return digestTick({
+    now: new Date().toISOString(),
+    standing: () => standing,
+    quietAfterMinutes: quietAfterMinutes(),
+    lastActivityAt: () => activityAt,
+    post: (body) => apiCall('POST', '/api/conversations', body),
+    // Provenance: the firing is a TendingMint like every whisper's; the rendered
+    // body lives in the commons post it produced. Best-effort and after the post.
+    onMinted: (m) => apiCall('POST', '/api/tending/mints', {
+      window: m.window, mintedAt: m.mintedAt, versionId: null, reached: m.reached ?? [], by: 'board',
+    }).catch((e) => console.error(`[#1216] digest firing not recorded in the graph: ${e?.message ?? e}`)),
+    log: (line) => console.log(line.replace('[#804] tending', '[#1216] digest')),
+    onError: (line) => console.error(line),
+  });
+};
+setInterval(() => { if (tendingEnabled()) digestTickOnce(); }, WHISPER_TICK_MS).unref();
 
 const REAP_IDLE_MS = Number(process.env.MCP_REAP_IDLE_MS ?? 300000); // 5 min default
 // #726 — how long a session must hold ZERO streams before a request from it counts
