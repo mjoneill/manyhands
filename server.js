@@ -42,7 +42,7 @@ import { appendEvent } from './core/event-log.mjs';
 // #805 — the boot migration's inputs (the live flat sources) and its builder.
 import { readPool, recentWhispers, DEFAULT_POOL, poolFilePath } from './whisper-store.mjs';
 import { readTendingConfig, writeTendingConfig } from './tending-config.mjs';
-import { buildTendingEntities } from './core/tending-bootstrap.mjs';
+import { buildTendingEntities, person as personIri } from './core/tending-bootstrap.mjs';
 import { resolvePool as resolveWhisperPool } from './core/tending-pool.mjs';
 import { mintId } from './core/tending-ids.mjs';
 import { createPrompt, editPrompt, setEnabled, reorderPlaylist, removePrompt, setShuffle, readShuffle } from './core/tending-authoring.mjs';
@@ -4528,9 +4528,12 @@ async function handleCreateMint(req, res) {
         // wrong, well-formed answer — which is the exact failure this card's own
         // line-stop was.
         'scrum:promptVersion': body.versionId || undefined,
+        // personIri(), not a `person:` CURIE — the projector prepends the person
+        // base to anything non-http, so a CURIE here double-prefixes and the
+        // seat never joins to its own node.
         'scrum:seatNamesWithOpenStreamsAtSend':
           Array.isArray(body.reached) && body.reached.length
-            ? body.reached.map((k) => `person:${k}`) : undefined,
+            ? body.reached.map((k) => personIri(String(k).replace(/^person:/, ''))) : undefined,
         'scrum:importedAt': at,
       }], { actor: body.by || 'board', op: 'create' });
     });

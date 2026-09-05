@@ -17,6 +17,7 @@ import {
 } from '../core/tending-authoring.mjs';
 import { resolvePool } from '../core/tending-pool.mjs';
 import { promptId, promptVersionId, playlistId, playlistVersionId } from '../core/tending-ids.mjs';
+import { person as personIri } from '../core/tending-bootstrap.mjs';
 
 const AT = '2026-09-05T02:00:00.000Z';
 const LATER = '2026-09-05T03:00:00.000Z';
@@ -30,7 +31,7 @@ function seed() {
       'scrum:ofPrompt': promptId('alpha'),
       'scrum:version': 1,
       'scrum:body': 'A body',
-      author: 'person:ada',
+      author: personIri('ada'),
       'scrum:provenanceNote': 'authorship ruled 2026-08-15',
       'scrum:importedAt': AT,
     },
@@ -57,7 +58,7 @@ test('editing a prompt MINTS v2 and leaves v1 byte-intact, provenance included',
   const v2 = find(out, promptVersionId('alpha', 2));
 
   assert.equal(v1['scrum:body'], 'A body', 'v1 body was mutated');
-  assert.equal(v1.author, 'person:ada', 'v1 authorship was lost');
+  assert.equal(v1.author, personIri('ada'), 'v1 authorship was lost');
   assert.equal(v1['scrum:provenanceNote'], 'authorship ruled 2026-08-15', 'v1 provenance was lost');
   assert.ok(v2, 'no v2 was minted');
   assert.equal(v2['scrum:body'], 'A body, revised');
@@ -73,8 +74,8 @@ test('an edit is what the next firing reads', () => {
 test('the edit author is recorded on the NEW version and never backdated onto v1', () => {
   // DEFECT: attributing the original to whoever edited it — inventing provenance.
   const out = editPrompt(seed(), { slug: 'alpha', body: 'revised', by: 'bee', at: LATER });
-  assert.equal(find(out, promptVersionId('alpha', 2)).author, 'person:bee');
-  assert.equal(find(out, promptVersionId('alpha', 1)).author, 'person:ada');
+  assert.equal(find(out, promptVersionId('alpha', 2)).author, personIri('bee'));
+  assert.equal(find(out, promptVersionId('alpha', 1)).author, personIri('ada'));
 });
 
 test('creating a prompt appends it to the playlist as a NEW playlist version', () => {

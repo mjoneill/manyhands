@@ -30,6 +30,7 @@
  */
 
 import { promptId, promptVersionId, playlistId, playlistVersionId } from './tending-ids.mjs';
+import { person as personIri } from './tending-bootstrap.mjs';
 
 const PROMPT = 'scrum:TendingPrompt';
 const PROMPT_VERSION = 'scrum:TendingPromptVersion';
@@ -40,7 +41,22 @@ const STATE_ID = 'https://scrumboard.local/tending/state/current';
 const DEFAULT_PLAYLIST = 'room-tending';
 
 const clone = (entities) => entities.map((e) => ({ ...e }));
-const person = (key) => (key ? (String(key).startsWith('person:') ? String(key) : `person:${key}`) : undefined);
+
+/**
+ * ⛔ THE PERSON IRI IS NOT A CURIE, and getting this wrong is invisible.
+ *
+ * A first cut minted `person:<seat>`. The projector's asPerson() prepends the
+ * person base to any value that is not already an http IRI, so that stored
+ * CURIE became `…/person/person:<seat>` — a DOUBLE PREFIX. It projects
+ * cleanly, it renders, and it joins to nothing: every "who wrote this whisper"
+ * query returns a well-formed empty answer rather than an error.
+ *
+ * So this reuses the bootstrap's exported helper rather than reimplementing it.
+ * Two spellings of one identity is the same defect as two predicates for one
+ * fact, one layer down. A leading `person:` is stripped first, because callers
+ * reasonably pass either shape.
+ */
+const person = (key) => (key ? personIri(String(key).replace(/^person:/, '')) : undefined);
 
 function num(v) {
   const n = typeof v === 'string' ? Number(v) : v;

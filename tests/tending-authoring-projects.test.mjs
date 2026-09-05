@@ -126,3 +126,31 @@ test('every predicate any tending writer emits is declared in TENDING_PREDICATES
   assert.deepEqual([...undeclared], [],
     'a tending writer emits a predicate the projector cannot classify — it will reach the document and never the graph');
 });
+
+// ── person identity: the malformed-IRI class ───────────────────────────────
+
+import { person as personIri } from '../core/tending-bootstrap.mjs';
+
+test('an author IRI JOINS to the person node — a double prefix is not caught by existence', () => {
+  // DEFECT (shipped 2026-09-05): the authoring module minted `person:<seat>`
+  // while the projector prepends the person base to anything non-http, so the
+  // stored value became …/person/person:<seat>. It projects, it renders, and it
+  // joins to NOTHING — "who wrote this whisper" answers empty, not wrong.
+  //
+  // ⛔ ASSERTING THE TRIPLE EXISTS WOULD PASS UNDER THE DEFECT. The join is the
+  // only assertion that separates a real identity from a plausible string.
+  const e = createPrompt(seed(), { slug: 'delta', body: 'D body', by: 'ada', at: AT });
+  const store = project(e);
+  const { rows } = queryGraph(store, `${SPARQL_PREFIXES}
+    SELECT ?a WHERE { ?v a scrum:TendingPromptVersion ; scrum:ofPrompt <${promptId('delta')}> ; schema:author ?a }`);
+  assert.equal(rows.length, 1, 'the new version has no author at all');
+  assert.equal(rows[0].a, `person:ada`,
+    `author IRI is malformed — got ${rows[0].a}; a double-prefixed IRI joins to no person`);
+});
+
+test('an already-prefixed `by` does not double-prefix', () => {
+  // Callers reasonably pass either shape; only one of them can be stored.
+  const e = createPrompt(seed(), { slug: 'echo', body: 'E body', by: 'person:ada', at: AT });
+  const v = e.find((x) => x['@id'] === promptVersionId('echo', 1));
+  assert.equal(v.author, personIri('ada'), 'a person: prefix was carried into the IRI');
+});
