@@ -45,6 +45,7 @@ function toRow(ev) {
     ...(ev.op === 'refused' ? {
       reason: ev.reason ?? null, status: ev.status ?? null,
       route: ev.route ?? null, request: ev.request ?? null,
+      response: ev.response ?? null, rule: ev.rule ?? null,
     } : {}),
   };
 }

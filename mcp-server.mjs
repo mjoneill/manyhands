@@ -271,6 +271,18 @@ function restErrorMessage(status, method, path, detail) {
 }
 
 // ── REST API helper ──────────────────────────────────────────────────
+/**
+ * #1167 — make an adapter-side refusal DURABLE. The gates below refuse without
+ * ever reaching the server, so the server's own refusal log (#1217) cannot see
+ * them. Fire-and-forget on purpose: the refusal has already happened and been
+ * explained to the caller; a down server must not turn a clean refusal into an
+ * error. A failure to report is logged to stderr and nothing else.
+ */
+function reportRefusal({ actor, rule, reason, entity, request, route }) {
+  apiCall('POST', '/api/refusals', { actor, rule, reason, entity, request, route })
+    .catch((e) => console.error(`[#1167] could not record a refusal (${rule}): ${e.message}`));
+}
+
 async function apiCall(method, path, body) {
   const url = REST_API_BASE + path;
   let res;
@@ -503,6 +515,8 @@ function buildMcpServer() {
       now: new Date().toISOString(),
     });
     if (!decision.allow) {
+      reportRefusal({ actor: args.createdBy, rule: '#755 work gate', reason: decision.reason,
+        entity: { kind: 'card', id: decision.workObjectId || 'create' }, request: args, route: 'mcp card_create' });
       return jsonResult({
         refused: true,
         rule: '#755 work gate',
@@ -559,6 +573,8 @@ function buildMcpServer() {
       card: await resolveShortId(args.id),
     });
     if (!decision.allow) {
+      reportRefusal({ actor: args.by, rule: '#755 work gate', reason: decision.reason,
+        entity: { kind: 'card', id: args.id }, request: args, route: 'mcp card-targeting gate' });
       return jsonResult({
         refused: true,
         rule: '#755 work gate',
@@ -633,6 +649,8 @@ function buildMcpServer() {
       if (!lookedOk) return inner(args);
       const decision = decideThrottle({ actor: args.createdBy, previous, now });
       if (!decision.allow) {
+        reportRefusal({ actor: args.createdBy, rule: decision.reason, reason: decision.message,
+          entity: { kind: 'card', id: 'create' }, request: args, route: 'mcp card_create' });
         return jsonResult({
           refused: true,
           rule: decision.reason,

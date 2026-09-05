@@ -38,7 +38,7 @@ import { loadDomain, saveDomain } from './core/store.mjs';
 import { cardContentKey } from './core/card-content-key.mjs';
 import { applyApexLabels, APEX_PREFIX, descendantIds as apexDescendantIds } from './core/apex-labels.mjs';
 import { inFlight } from './core/in-flight.mjs';
-import { appendEvent } from './core/event-log.mjs';
+import { appendEvent, ENTITY_KINDS } from './core/event-log.mjs';
 // #805 — the boot migration's inputs (the live flat sources) and its builder.
 import { readPool, recentWhispers, DEFAULT_POOL, poolFilePath } from './whisper-store.mjs';
 import { readTendingConfig, writeTendingConfig } from './tending-config.mjs';
@@ -484,7 +484,10 @@ function logRefused(req, statusCode, data) {
     const kindEntry = ROUTE_KINDS.find(([re]) => re.test(url));
     // The trailing path segment is the target for /api/cards/1 and is absent for
     // a create — where the route itself is the only identity a refusal has.
-    const tail = url.split('/').filter(Boolean).slice(2).join('/');
+    // The entity is the first segment after the collection (`/api/cards/7/claim`
+    // is about card 7); the full path survives in `route`, so nothing is lost by
+    // keeping the id joinable to the card's other events.
+    const tail = url.split('/').filter(Boolean)[2] || '';
     const actor = (request && (request.by || request.author || request.createdBy || request.decidedBy)) || null;
     appendEvent(EVENT_LOG_DIR, {
       op: 'refused',
@@ -493,6 +496,11 @@ function logRefused(req, statusCode, data) {
       state: null,
       reason: String((data && (data.error || data.message)) || `HTTP ${statusCode}`),
       request: redactSecrets(request),
+      // #1167 — the refusal's RESPONSE too. A claim 409 names the incumbent
+      // holder and an ifVersion 409 names currentVersion only in the body that
+      // went back; without it the row says "refused" and not by whom or against
+      // what, which is the audit gap #1167 exists to close.
+      response: data ?? null,
       status: statusCode,
       route: `${req.method} ${url}`,
     });
@@ -503,6 +511,48 @@ function logRefused(req, statusCode, data) {
     _graphDirty = true;
   } catch (e) {
     console.error('[#1217] could not log a refusal:', e?.message);
+  }
+}
+
+/**
+ * #1167 — POST /api/refusals: record a refusal the SERVER did not produce.
+ *
+ * The coordination rails that #1167 exists to audit — the #755 work gate and
+ * claim throttle, the #889 card-targeting gate — refuse INSIDE the MCP adapter
+ * and never reach this process, so the sendJSON chokepoint above cannot see
+ * them. This route is how they get a row: the adapter reports the refusal it
+ * just made, fire-and-forget, and the log records it with `rule` set so "which
+ * rule denied which action, by whom, against what, when" is one query.
+ *
+ * It appends and returns 201. It does not re-decide anything: the adapter
+ * already refused, this only makes that refusal durable. A malformed report is
+ * itself refused with 400 — which, through sendJSON, is also logged, which is
+ * correct: a report that could not be recorded is a refusal too.
+ */
+async function handleReportRefusal(req, res) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const { actor, rule, reason, entity, request } = body || {};
+    if (typeof rule !== 'string' || !rule) return sendJSON(res, 400, { error: 'rule is required — the rail that refused, by name' });
+    if (typeof reason !== 'string' || !reason) return sendJSON(res, 400, { error: 'reason is required — what the caller was told' });
+    if (!entity || typeof entity !== 'object' || !entity.kind) return sendJSON(res, 400, { error: 'entity {kind, id} is required — what the refused action was about' });
+    if (!ENTITY_KINDS.has(entity.kind)) return sendJSON(res, 400, { error: `unknown entity.kind "${entity.kind}" — vocabulary is ${[...ENTITY_KINDS].join('|')}` });
+    const stored = appendEvent(EVENT_LOG_DIR, {
+      op: 'refused',
+      entity: { kind: entity.kind, id: entity.id != null && entity.id !== '' ? String(entity.id) : rule },
+      actor: typeof actor === 'string' && actor ? actor : null,
+      state: null,
+      reason,
+      rule,
+      request: redactSecrets(request === undefined ? null : request),
+      route: typeof body.route === 'string' ? body.route : null,
+    });
+    _graphDirty = true;
+    sendJSON(res, 201, { recorded: true, seq: stored.seq, recorded_at: stored.recorded_at });
+  } catch (e) {
+    if (e?.statusCode === 413) return sendJSON(res, 413, { error: 'Request body too large' });
+    console.error('POST /api/refusals:', e.message);
+    sendJSON(res, 500, { error: 'Failed to record refusal' });
   }
 }
 
@@ -6434,6 +6484,7 @@ const API_ROUTES = [
   { method: 'GET',    re: /^\/api\/people\/([^\/]+)$/,     fn: (req, res, m) => handleGetPerson(req, res, m[1]) }, // #619
   { method: 'GET',    re: /^\/api\/cards$/,                fn: (req, res) => handleListCards(req, res) },
   { method: 'POST',   re: /^\/api\/cards$/,                fn: (req, res) => handleCreateCard(req, res) },
+  { method: 'POST',   re: /^\/api\/refusals$/,             fn: (req, res) => handleReportRefusal(req, res) },   // #1167
   { method: 'POST',   re: /^\/api\/cards\/([^\/]+)\/claim$/, fn: (req, res, m) => handleClaimCard(req, res, m[1]) },
   { method: 'DELETE', re: /^\/api\/cards\/([^\/]+)\/claim$/, fn: (req, res, m) => handleReleaseCard(req, res, m[1]) },
   { method: 'GET',    re: /^\/api\/cards\/([^\/]+)$/,      fn: (req, res, m) => handleGetCard(req, res, m[1]) },

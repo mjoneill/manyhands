@@ -326,6 +326,8 @@ export function appendEvent(dir, event, opts = {}) {
   if (event.op === 'refused') {
     stored.reason = event.reason;
     stored.request = event.request;
+    if (event.response !== undefined) stored.response = event.response;
+    if (event.rule) stored.rule = event.rule;
     if (event.status != null) stored.status = event.status;
     if (event.route) stored.route = event.route;
   }
