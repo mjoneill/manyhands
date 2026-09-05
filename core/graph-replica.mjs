@@ -180,6 +180,10 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:Agent', 'scrum:AgentPrompt', 'scrum:AgentPromptVersion', 'scrum:seatKey', 'scrum:emoji',
   'scrum:contextPolicy', 'scrum:toolGrant', 'scrum:budgetPerDay', 'scrum:residency', 'scrum:state',
   'scrum:currentPrompt', 'scrum:ofAgent',
+  // #1197 — the model registry node
+  'scrum:Model', 'scrum:baseUrl', 'scrum:contextWindow', 'scrum:numCtx', 'scrum:thinking', 'scrum:maxOutputTokens',
+  'scrum:timeoutMs', 'scrum:costIn', 'scrum:costOut', 'scrum:freeTier', 'scrum:capability', 'scrum:apiKeyRef',
+  'scrum:deprecatesOn', 'scrum:lastProbeClass', 'scrum:lastProbeAt', 'scrum:lastProbeStatus', 'scrum:modelKey', 'scrum:usesModel',
   // #1130 — an apex is a KIND, not a convention: a card carrying `apex:<X>`
   // projects as scrum:Apex with scrum:apexLabel "X", so "what lives here" is
   // one hop and needs no knowledge of the prefix.
@@ -925,6 +929,7 @@ function projectAgent(store, e) {
   if (e.name) add(nn(SC + 'name'), lit(String(e.name)));
   if (e['scrum:emoji']) add(nn(S + 'emoji'), lit(String(e['scrum:emoji'])));
   if (e['scrum:model']) add(nn(S + 'model'), lit(String(e['scrum:model'])));
+  if (e['scrum:usesModel']) add(nn(S + 'usesModel'), nn(String(e['scrum:usesModel']))); // #1197 — the registered node
   if (e['scrum:contextPolicy']) add(nn(S + 'contextPolicy'), lit(String(e['scrum:contextPolicy'])));
   for (const g of (Array.isArray(e['scrum:toolGrant']) ? e['scrum:toolGrant'] : [])) add(nn(S + 'toolGrant'), lit(String(g)));
   if (e['scrum:budgetPerDay'] != null && Number.isFinite(Number(e['scrum:budgetPerDay']))) add(nn(S + 'budgetPerDay'), oxigraph.literal(String(e['scrum:budgetPerDay']), nn('http://www.w3.org/2001/XMLSchema#decimal')));
@@ -932,6 +937,41 @@ function projectAgent(store, e) {
   if (e['scrum:state']) add(nn(S + 'state'), lit(String(e['scrum:state'])));
   if (e['scrum:currentPrompt']) add(nn(S + 'currentPrompt'), nn(String(e['scrum:currentPrompt'])));
   if (e['scrum:importedAt']) add(nn(S + 'importedAt'), lit(String(e['scrum:importedAt'])));
+}
+
+/**
+ * #1197 — a MODEL as a node. Every literal spelled out for the #875 census.
+ * The probe's last result rides the node (class, status, time) so "which
+ * models answered last time anyone asked" is one query; the key is a
+ * REFERENCE (an env var name) and is projected as that name, never a value.
+ */
+function projectModel(store, e) {
+  const S = IRI.scrum, SC = IRI.schema;
+  const s = nn(e['@id']);
+  const add = (p, o) => store.add(oxigraph.triple(s, p, o));
+  const dec = (v) => oxigraph.literal(String(v), nn('http://www.w3.org/2001/XMLSchema#decimal'));
+  add(A, nn(S + 'Model'));
+  if (e.name) add(nn(SC + 'name'), lit(String(e.name)));
+  if (e['scrum:modelKey'] != null) add(nn(S + 'modelKey'), lit(String(e['scrum:modelKey'])));
+  if (e['scrum:model'] != null) add(nn(S + 'model'), lit(String(e['scrum:model'])));
+  if (e['scrum:provider'] != null) add(nn(S + 'provider'), lit(String(e['scrum:provider'])));
+  if (e['scrum:baseUrl'] != null) add(nn(S + 'baseUrl'), lit(String(e['scrum:baseUrl'])));
+  if (e['scrum:protocol'] != null) add(nn(S + 'protocol'), lit(String(e['scrum:protocol'])));
+  if (Number.isFinite(Number(e['scrum:contextWindow'])) && e['scrum:contextWindow'] != null) add(nn(S + 'contextWindow'), dec(e['scrum:contextWindow']));
+  if (Number.isFinite(Number(e['scrum:numCtx'])) && e['scrum:numCtx'] != null) add(nn(S + 'numCtx'), dec(e['scrum:numCtx']));
+  if (e['scrum:thinking'] != null) add(nn(S + 'thinking'), lit(String(!!e['scrum:thinking'])));
+  if (Number.isFinite(Number(e['scrum:maxOutputTokens'])) && e['scrum:maxOutputTokens'] != null) add(nn(S + 'maxOutputTokens'), dec(e['scrum:maxOutputTokens']));
+  if (Number.isFinite(Number(e['scrum:timeoutMs'])) && e['scrum:timeoutMs'] != null) add(nn(S + 'timeoutMs'), dec(e['scrum:timeoutMs']));
+  if (Number.isFinite(Number(e['scrum:costIn'])) && e['scrum:costIn'] != null) add(nn(S + 'costIn'), dec(e['scrum:costIn']));
+  if (Number.isFinite(Number(e['scrum:costOut'])) && e['scrum:costOut'] != null) add(nn(S + 'costOut'), dec(e['scrum:costOut']));
+  if (e['scrum:freeTier'] != null) add(nn(S + 'freeTier'), lit(String(!!e['scrum:freeTier'])));
+  for (const c of (Array.isArray(e['scrum:capability']) ? e['scrum:capability'] : [])) add(nn(S + 'capability'), lit(String(c)));
+  if (e['scrum:apiKeyRef'] != null) add(nn(S + 'apiKeyRef'), lit(String(e['scrum:apiKeyRef'])));
+  if (e['scrum:deprecatesOn'] != null) add(nn(S + 'deprecatesOn'), lit(String(e['scrum:deprecatesOn'])));
+  if (e['scrum:lastProbeClass'] != null) add(nn(S + 'lastProbeClass'), lit(String(e['scrum:lastProbeClass'])));
+  if (e['scrum:lastProbeAt'] != null) add(nn(S + 'lastProbeAt'), lit(String(e['scrum:lastProbeAt'])));
+  if (e['scrum:lastProbeStatus'] != null) add(nn(S + 'lastProbeStatus'), lit(String(e['scrum:lastProbeStatus'])));
+  if (e['scrum:importedAt'] != null) add(nn(S + 'importedAt'), lit(String(e['scrum:importedAt'])));
 }
 
 /** #1199 — the prompt identity and its versions, the #1189 shape. */
@@ -1394,6 +1434,8 @@ function projectEntity(store, e) {
       projectModelCall(store, e);
     } else if (t === 'scrum:Agent') {
       projectAgent(store, e);
+    } else if (t === 'scrum:Model') {
+      projectModel(store, e);
     } else if (t === 'scrum:AgentPrompt' || t === 'scrum:AgentPromptVersion') {
       projectAgentPrompt(store, e);
     } else if (t === 'schema:CreativeWork' && e['schema:contentUrl']) {

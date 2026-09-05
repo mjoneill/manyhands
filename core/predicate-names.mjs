@@ -102,6 +102,14 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:ofPrompt': 'scrum:ofPrompt',             // → the prompt identity IRI (tending and agent prompts)
   'scrum:importedAt': 'scrum:importedAt',
   'scrum:version': 'scrum:version',               // the version NUMBER on a prompt/memory version node
+  // #1197 — scrum:Model (store key models[])
+  'scrum:Model': null,
+  'scrum:baseUrl': 'scrum:baseUrl', 'scrum:contextWindow': 'scrum:contextWindow', 'scrum:numCtx': 'scrum:numCtx',
+  'scrum:thinking': 'scrum:thinking', 'scrum:maxOutputTokens': 'scrum:maxOutputTokens', 'scrum:timeoutMs': 'scrum:timeoutMs',
+  'scrum:costIn': 'scrum:costIn', 'scrum:costOut': 'scrum:costOut', 'scrum:freeTier': 'scrum:freeTier',
+  'scrum:capability': 'scrum:capability', 'scrum:apiKeyRef': 'scrum:apiKeyRef', 'scrum:deprecatesOn': 'scrum:deprecatesOn',
+  'scrum:modelKey': 'scrum:modelKey', 'scrum:usesModel': 'scrum:usesModel',
+  'scrum:lastProbeClass': 'scrum:lastProbeClass', 'scrum:lastProbeAt': 'scrum:lastProbeAt', 'scrum:lastProbeStatus': 'scrum:lastProbeStatus',
   // ── #1130 item 3 — an apex is a KIND. Both are derived from the card's own
   // `labels`: an entry `apex:<X>` mints the class and X is the apexLabel. There
   // is no store field spelled "apex"; grep `labels` for the prefix.

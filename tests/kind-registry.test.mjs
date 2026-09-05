@@ -63,6 +63,7 @@ const ENTITY_KINDS_ADDED_SINCE = [
   'model-call', // #1202 — one model call, the provenance ledger row
   'agent',        // #1199 — a colleague defined inside manyhands
   'agent-prompt', // #1199 — its versioned system prompt (identity + versions)
+  'model',        // #1197 — a model the board can call
 ];
 
 test('#1214 the derived set adds only DECLARED new kinds — a silent addition is as bad as a loss', () => {
@@ -89,6 +90,7 @@ const COLLECTIONS_ADDED_SINCE = {
   run: 'runs', artifact: 'artifacts', // #1207
   'model-call': 'modelCalls', // #1202
   agent: 'agents', 'agent-prompt': 'agentPrompts', // #1199
+  model: 'models', // #1197
 };
 
 test('#1214 a kind maps only to a collection replay knows, or one declared new here', () => {

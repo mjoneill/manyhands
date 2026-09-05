@@ -325,6 +325,7 @@ const isObligation = (entity) => entity && entity['@type'] === 'scrum:Obligation
 const isWake = (entity) => entity && entity['@type'] === 'scrum:Wake';
 const isModelCall = (entity) => entity && entity['@type'] === 'scrum:ModelCall';   // #1202
 const isAgent = (entity) => entity && entity['@type'] === 'scrum:Agent';           // #1199
+const isModel = (entity) => entity && entity['@type'] === 'scrum:Model';           // #1197
 const isAgentPrompt = (entity) => entity && (entity['@type'] === 'scrum:AgentPrompt' || entity['@type'] === 'scrum:AgentPromptVersion');
 
 /**
@@ -411,7 +412,7 @@ export const CONTEXT_RANGE = Object.freeze(Object.fromEntries(
 export function domainToJsonLd(domain) {
   const {
     nodes = [], messages = [], people = [], columns = [],
-    tending = [], memories = [], decisions = [], predicates = [], kinds = [], procedures = [], runs = [], artifacts = [], obligations = [], wakes = [], modelCalls = [], agents = [], agentPrompts = [], labelAliases = [], _unmodelled = [], _README, ...meta
+    tending = [], memories = [], decisions = [], predicates = [], kinds = [], procedures = [], runs = [], artifacts = [], obligations = [], wakes = [], modelCalls = [], agents = [], agentPrompts = [], models = [], labelAliases = [], _unmodelled = [], _README, ...meta
   } = domain;
   const doc = {};
   if (_README !== undefined) doc._README = _README;   // first key — JSON.stringify keeps insertion order
@@ -451,6 +452,7 @@ export function domainToJsonLd(domain) {
     ...modelCalls,   // #1202 — same rule as kinds: a collection that stays a top-level key never reaches the replica
     ...agents,       // #1199
     ...agentPrompts, // #1199
+    ...models,       // #1197
     // #804 — entities of a class this projection does not model ride through
     // verbatim rather than being dropped. Silent deletion is the other bad
     // answer to the fallthrough bug: a phantom card is at least visible.
@@ -524,13 +526,15 @@ export function jsonLdToDomain(doc) {
   if (agents.length) domain.agents = agents;
   const agentPrompts = graph.filter(isAgentPrompt);
   if (agentPrompts.length) domain.agentPrompts = agentPrompts;
+  const models = graph.filter(isModel);            // #1197
+  if (models.length) domain.models = models;
   // Anything recognised by NO predicate is kept verbatim so the serializer
   // stays lossless. It is never a card and never silently discarded.
   const unmodelled = graph.filter(
     (e) => !isCard(e) && !isMessage(e) && !isPerson(e) && !isColumn(e) && !isTending(e)
       && !isMemory(e) && !isDecision(e) && !isPredicateDefinition(e) && !isKindDefinition(e)
       && !isProcedure(e) && !isRun(e) && !isArtifact(e)
-      && !isObligation(e) && !isWake(e) && !isModelCall(e) && !isAgent(e) && !isAgentPrompt(e),
+      && !isObligation(e) && !isWake(e) && !isModelCall(e) && !isAgent(e) && !isAgentPrompt(e) && !isModel(e),
   );
   if (unmodelled.length) domain._unmodelled = unmodelled;
   if (Array.isArray(doc._labelAliases) && doc._labelAliases.length) domain.labelAliases = doc._labelAliases;

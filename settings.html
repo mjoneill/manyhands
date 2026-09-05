@@ -338,6 +338,36 @@
 </div><!-- /[data-page-shell] -->
 
 
+<!-- #1197 — MODELS. A model the board can call, as a node: every field is
+     sourced to a failure that happened. The key is a REFERENCE (an env var
+     name), never a value. The probe measures what the provider answers. -->
+<section id="models-panel">
+  <h2>Models</h2>
+  <p class="sub prose">A model the board can call. Register it once; agents name it by key. The API key is never stored here — only the name of the environment variable that holds it. <strong>Probe</strong> sends a one-token request and a deliberately fake id side by side, so a 404 can be read.</p>
+  <div id="models-list"></div>
+  <details><summary>Register a model</summary>
+    <label>Key <input id="model-key" placeholder="gemma3-12b" aria-label="Registry key"></label>
+    <label>Name <input id="model-name" placeholder="Gemma 3 12B" aria-label="Display name"></label>
+    <label>Provider model id <input id="model-model" placeholder="gemma3:12b" aria-label="Provider model id"></label>
+    <label>Provider <input id="model-provider" placeholder="ollama" aria-label="Provider"></label>
+    <label>Protocol <select id="model-protocol" aria-label="Protocol"><option>ollama-native</option><option>openai-completions</option><option>mlx</option></select></label>
+    <label>Base URL <input id="model-baseurl" placeholder="http://localhost:11434" aria-label="Base URL"></label>
+    <label>API key env var (name only) <input id="model-keyref" placeholder="OPENAI_API_KEY" aria-label="API key reference"></label>
+    <label>Context window <input id="model-ctx" type="number" min="0" aria-label="Context window"></label>
+    <label>Ollama num_ctx <input id="model-numctx" type="number" min="0" aria-label="num_ctx"></label>
+    <label>Max output tokens <input id="model-maxout" type="number" min="0" aria-label="Max output tokens"></label>
+    <label>Timeout ms <input id="model-timeout" type="number" min="0" aria-label="Timeout ms"></label>
+    <label>Cost in / 1M tokens <input id="model-costin" type="number" min="0" step="0.000001" aria-label="Cost in"></label>
+    <label>Cost out / 1M tokens <input id="model-costout" type="number" min="0" step="0.000001" aria-label="Cost out"></label>
+    <label><input id="model-free" type="checkbox"> Free tier</label>
+    <label><input id="model-thinking" type="checkbox"> Thinking model</label>
+    <label>Capabilities <label><input type="checkbox" data-model-cap value="jsonSchema"> jsonSchema</label> <label><input type="checkbox" data-model-cap value="tools"> tools</label> <label><input type="checkbox" data-model-cap value="images"> images</label></label>
+    <label>Deprecates on <input id="model-deprecates" type="date" aria-label="Deprecation date"></label>
+    <button id="model-create" class="btn">Register model</button>
+    <div class="msg" id="models-msg"></div>
+  </details>
+</section>
+
 <!-- #1199 — AGENTS. A colleague defined inside manyhands: seat key, model, a
      VERSIONED prompt, grants, budget, residency. Editing the prompt mints a
      version; it never overwrites. -->
@@ -348,6 +378,7 @@
   <details><summary>Define a new agent</summary>
     <label>Seat key <input id="agent-seat" placeholder="guest" aria-label="Seat key"></label>
     <label>Name <input id="agent-name" placeholder="Guest" aria-label="Name"></label>
+    <label>Registered model key <input id="agent-modelkey" placeholder="(from Models above; leaves the inline spec unused)" aria-label="Registered model key"></label>
     <label>Model <input id="agent-model" placeholder="gemma4:26b" aria-label="Model id"></label>
     <label>Protocol <select id="agent-protocol" aria-label="Protocol"><option>ollama-native</option><option>openai-completions</option><option>mlx</option></select></label>
     <label>Base URL <input id="agent-baseurl" placeholder="http://localhost:11434" aria-label="Base URL"></label>
@@ -584,6 +615,57 @@ $('roster-save').addEventListener('click', async () => {
 });
 
 
+// ── #1197 — models panel ──────────────────────────────────────────────────
+function modelsMsg(text, ok) { const m = $('models-msg'); m.textContent = text; m.className = 'msg ' + (ok ? 'ok' : 'err'); }
+function modelRow(m) {
+  const row = document.createElement('div'); row.className = 'agent-row'; row.setAttribute('data-model-key', m.key);
+  const probe = m.lastProbe ? `last probe: ${m.lastProbe.klass}${m.lastProbe.status != null ? ` (${m.lastProbe.status})` : ''} at ${m.lastProbe.at}` : 'never probed';
+  row.innerHTML = `<strong>${m.name}</strong> <code>${m.key}</code> · ${m.model} via ${m.protocol}${m.provider ? ` @ ${m.provider}` : ''}${m.apiKeyRef ? ` · key ref <code>${m.apiKeyRef}</code>` : ''}${m.contextWindow != null ? ` · ctx ${m.contextWindow}` : ''}${m.freeTier ? ' · free' : ''}${m.deprecatesOn ? ` · deprecates ${m.deprecatesOn}` : ''}
+    <div class="sub" data-model-probe>${probe}</div>
+    <button class="btn" data-model-probe-btn>Probe</button>`;
+  row.querySelector('[data-model-probe-btn]').addEventListener('click', async () => {
+    const btn = row.querySelector('[data-model-probe-btn]'); btn.disabled = true;
+    row.querySelector('[data-model-probe]').textContent = 'probing…';
+    try {
+      const res = await fetch(`/api/models/${encodeURIComponent(m.key)}/probe`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ by: 'michael' }) });
+      const out = await res.json().catch(() => ({}));
+      if (res.ok) {
+        row.querySelector('[data-model-probe]').textContent = `real: ${out.real.klass} (${out.real.status ?? out.real.reason}) · control ${out.control.model}: ${out.control.klass} (${out.control.status ?? out.control.reason})${out.controlReadable ? '' : ' · ⚠ control unreadable: this endpoint cannot be read for absence'}${out.real.bodyHead ? ` · body: ${out.real.bodyHead.slice(0, 160)}` : ''}`;
+      } else modelsMsg('Probe rejected: ' + (out.error || res.status), false);
+    } catch (e) { modelsMsg('Probe failed: ' + e.message, false); }
+    btn.disabled = false;
+  });
+  return row;
+}
+async function loadModels() {
+  try {
+    const models = await (await fetch('/api/models')).json();
+    const list = $('models-list'); list.innerHTML = '';
+    if (!models.length) { list.textContent = 'No models registered yet.'; return; }
+    for (const m of models) list.appendChild(modelRow(m));
+  } catch (e) { modelsMsg('Could not load models: ' + e.message, false); }
+}
+$('model-create').addEventListener('click', async () => {
+  $('model-create').disabled = true;
+  const num = (id) => ($(id).value === '' ? undefined : Number($(id).value));
+  try {
+    const res = await fetch('/api/models', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+      key: $('model-key').value.trim(), name: $('model-name').value.trim() || undefined, model: $('model-model').value.trim(),
+      provider: $('model-provider').value.trim() || undefined, protocol: $('model-protocol').value, baseUrl: $('model-baseurl').value.trim() || undefined,
+      apiKeyRef: $('model-keyref').value.trim() || undefined, contextWindow: num('model-ctx'), numCtx: num('model-numctx'),
+      maxOutputTokens: num('model-maxout'), timeoutMs: num('model-timeout'), costIn: num('model-costin'), costOut: num('model-costout'),
+      freeTier: $('model-free').checked, thinking: $('model-thinking').checked,
+      capabilities: [...document.querySelectorAll('[data-model-cap]:checked')].map((c) => c.value),
+      deprecatesOn: $('model-deprecates').value || undefined, by: 'michael',
+    }) });
+    const out = await res.json().catch(() => ({}));
+    if (res.ok) { modelsMsg(`Registered ${out.key}.`, true); loadModels(); }
+    else modelsMsg('Rejected: ' + (out.error || res.status), false);
+  } catch (e) { modelsMsg('Create failed: ' + e.message, false); }
+  $('model-create').disabled = false;
+});
+loadModels();
+
 // ── #1199 — agents panel ──────────────────────────────────────────────────
 function agentsMsg(text, ok) { const m = $('agents-msg'); m.textContent = text; m.className = 'msg ' + (ok ? 'ok' : 'err'); }
 function agentRow(a) {
@@ -614,7 +696,8 @@ $('agent-create').addEventListener('click', async () => {
     const budget = $('agent-budget').value;
     const res = await fetch('/api/agents', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
       seatKey: $('agent-seat').value.trim(), name: $('agent-name').value.trim(), prompt: $('agent-prompt').value,
-      model: { model: $('agent-model').value.trim(), protocol: $('agent-protocol').value, baseUrl: $('agent-baseurl').value.trim() || undefined },
+      modelKey: $('agent-modelkey').value.trim() || undefined,
+      model: $('agent-modelkey').value.trim() ? undefined : { model: $('agent-model').value.trim(), protocol: $('agent-protocol').value, baseUrl: $('agent-baseurl').value.trim() || undefined },
       residency: $('agent-residency').value, contextPolicy: $('agent-context').value,
       budgetPerDay: budget === '' ? undefined : Number(budget), by: 'michael',
     }) });

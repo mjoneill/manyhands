@@ -150,6 +150,16 @@ export const KIND_DECLARATIONS = Object.freeze([
       + 'transport dropped is indistinguishable from an idle one, so the record is the evidence.',
   },
   {
+    name: 'scrum:Model', eventKind: 'model', collection: 'models',
+    createdBy: 'model_register',
+    definition: 'A MODEL THE BOARD CAN CALL, as a node rather than a line in a JSON file (#1197): provider, '
+      + 'baseUrl, protocol (ollama-native | openai-completions | mlx), contextWindow, the Ollama num_ctx '
+      + 'separately, a thinking flag, maxOutputTokens, a per-model timeoutMs, cost in and out per token or a '
+      + 'freeTier flag, capabilities (jsonSchema, tools, images), a deprecatesOn date — every field sourced to '
+      + 'a failure that happened. The API key is a REFERENCE (an env var name), never a value: the board file '
+      + 'is snapshotted on every write. The probe measures what the provider actually answers for this id.',
+  },
+  {
     name: 'scrum:Agent', eventKind: 'agent', collection: 'agents',
     createdBy: 'agent_create',
     definition: 'A COLLEAGUE DEFINED INSIDE MANYHANDS (#1199): a seat key, a name, a model, a context '

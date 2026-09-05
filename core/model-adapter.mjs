@@ -293,6 +293,39 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * @param {object} opts    per-call sampling + {transport, retries, apiKey, now}
  * @returns {Promise<{text, stopReason, usage, raw, attempts}>}
  */
+/**
+ * #1197 — THE PROBE: does this model id answer, and with which status CLASS?
+ * Sends a one-token request through the same protocol shaping as a real call
+ * and returns the class without asserting on the body — a probe MEASURES; it
+ * does not decide. The body's head travels back because the gateway that
+ * discarded 410 bodies is how "retired" got read as "busy" thirteen times
+ * (#838). Semantics verified on #840: 401 = exists, auth is the gate · 410 =
+ * retired, body carries the EOL date · plain-text 404 = no such id ·
+ * problem+json 404 = entitlement. Run a deliberately fake id in the SAME
+ * probe run as a control, or a 404 cannot be read.
+ */
+export async function probeModel(agent, opts = {}) {
+  const protocol = PROTOCOLS[agent?.protocol];
+  if (!protocol) return { status: null, klass: 'unknown-protocol', reason: `unknown protocol ${JSON.stringify(agent?.protocol)}`, bodyHead: null };
+  const transport = opts.transport || defaultTransport;
+  const { path, body } = protocol.request(agent.model, [{ role: 'user', content: 'ping' }], { maxTokens: 1 });
+  const headers = { 'Content-Type': 'application/json' };
+  if (opts.apiKey) headers.Authorization = `Bearer ${opts.apiKey}`;
+  const base = String(agent.baseUrl || DEFAULT_OLLAMA_URL).replace(/\/+$/, '');
+  const started = Date.now();
+  let res;
+  try { res = await transport({ url: base + path, headers, body, signal: AbortSignal.timeout(opts.timeoutMs ?? 20_000) }); }
+  catch (e) { return { status: null, klass: 'unreachable', reason: e?.message ?? String(e), bodyHead: null, latencyMs: Date.now() - started }; }
+  const k = classifyStatus(res.status);
+  const bodyHead = (res.rawBody ?? '').slice(0, 400);
+  const contentType = /problem\+json/i.test(bodyHead) || (res.body && typeof res.body === 'object' && ('title' in res.body || 'detail' in res.body)) ? 'problem+json' : (res.body && typeof res.body === 'object' ? 'json' : 'text');
+  let klass = k.action === 'ok' ? 'answers' : k.reason;
+  if (res.status === 401 || res.status === 403) klass = 'exists-auth-gated';
+  else if (res.status === 410) klass = 'retired';
+  else if (res.status === 404) klass = contentType === 'problem+json' ? 'entitlement' : 'no-such-id';
+  return { status: res.status, klass, reason: k.reason, contentType, bodyHead, latencyMs: Date.now() - started };
+}
+
 export async function callModel(agent, messages, opts = {}) {
   const protocol = PROTOCOLS[agent?.protocol];
   if (!protocol) {

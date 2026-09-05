@@ -65,6 +65,7 @@ import { extractMentions as extractMentionsFromRoster } from './core/people.mjs'
 // heading that says "no install step". The board does not need a SPARQL replica
 // in order to serve a board, so boot must not require one.
 import { domainToJsonLd } from './core/jsonld.mjs';
+import { probeModel, PROTOCOL_NAMES as MODEL_PROTOCOLS } from './core/model-adapter.mjs'; // #1197
 import { deriveGraph, personByKey } from './core/people.mjs';
 import { queryCards, facetCards } from './core/cards-query.mjs';
 import { similarCards } from './core/similar-cards.mjs';
@@ -458,6 +459,7 @@ const ROUTE_KINDS = [
   [/^\/api\/labels\b/, 'label'], [/^\/api\/tending\b/, 'tending'],
   [/^\/api\/seats\b/, 'seat-state'], [/^\/api\/predicates\b/, 'predicate'],
   [/^\/api\/obligations\b/, 'obligation'], [/^\/api\/wakes\b/, 'wake'],
+  [/^\/api\/models\b/, 'model'], [/^\/api\/agents\b/, 'agent'], // #1197 / #1199
 ];
 const WRITE_METHODS = new Set(['POST', 'PATCH', 'PUT', 'DELETE']);
 
@@ -2955,6 +2957,166 @@ function wakesOf(data) {
 const wakeEvent = (e, actor) => ({ op: 'create', actor, entity: { kind: 'wake', id: e['@id'] }, state: e });
 const wakeToWire = (e) => ({ id: e['@id'], seat: e['scrum:wokeSeat'], at: e['scrum:wokeAt'], note: e.text ?? '' });
 
+// ── #1197 — THE MODEL REGISTRY: a model the board can call, as a NODE ────────
+// Every field below is sourced to a failure that happened (the card lists
+// them); the key is a REFERENCE (an env var name), never a value, because this
+// document is snapshotted on every write. The probe measures the status CLASS
+// the provider actually answers for the id — it does not decide.
+const MODEL_ID = (key) => `https://scrumboard.local/model/${encodeURIComponent(key)}`;
+function modelsOf(data) { return Array.isArray(data.models) ? data.models : []; }
+const modelEvent = (op, e, actor) => ({ op, actor, entity: { kind: 'model', id: e['@id'] }, state: e });
+const MODEL_CAPABILITIES = new Set(['jsonSchema', 'tools', 'images']);
+const MODEL_NUMERIC = ['contextWindow', 'numCtx', 'maxOutputTokens', 'timeoutMs', 'costIn', 'costOut'];
+function findModel(data, key) { return modelsOf(data).find((m) => m['scrum:modelKey'] === key) || null; }
+/** The inline spec shape the adapter and guest loop already consume, derived from the node. */
+function modelSpecOf(m) {
+  const spec = { model: m['scrum:model'], protocol: m['scrum:protocol'], baseUrl: m['scrum:baseUrl'] ?? undefined, apiKeyRef: m['scrum:apiKeyRef'] ?? undefined, modelKey: m['scrum:modelKey'] };
+  const sampling = {};
+  if (m['scrum:maxOutputTokens'] != null) sampling.maxTokens = m['scrum:maxOutputTokens'];
+  if (Object.keys(sampling).length) spec.sampling = sampling;
+  if (m['scrum:timeoutMs'] != null) spec.timeoutMs = m['scrum:timeoutMs'];
+  if (m['scrum:thinking'] != null) spec.thinking = m['scrum:thinking'];
+  return JSON.parse(JSON.stringify(spec));
+}
+function modelToWire(e) {
+  return {
+    id: e['@id'], key: e['scrum:modelKey'], name: e.name ?? e['scrum:modelKey'], model: e['scrum:model'] ?? null,
+    provider: e['scrum:provider'] ?? null, baseUrl: e['scrum:baseUrl'] ?? null, protocol: e['scrum:protocol'] ?? null,
+    apiKeyRef: e['scrum:apiKeyRef'] ?? null, contextWindow: e['scrum:contextWindow'] ?? null, numCtx: e['scrum:numCtx'] ?? null,
+    thinking: e['scrum:thinking'] ?? null, maxOutputTokens: e['scrum:maxOutputTokens'] ?? null, timeoutMs: e['scrum:timeoutMs'] ?? null,
+    costIn: e['scrum:costIn'] ?? null, costOut: e['scrum:costOut'] ?? null, freeTier: e['scrum:freeTier'] ?? null,
+    capabilities: e['scrum:capability'] ?? [], deprecatesOn: e['scrum:deprecatesOn'] ?? null,
+    lastProbe: e['scrum:lastProbeClass'] ? { klass: e['scrum:lastProbeClass'], status: e['scrum:lastProbeStatus'] ?? null, at: e['scrum:lastProbeAt'] ?? null } : null,
+    createdAt: e['scrum:importedAt'] ?? null, updatedAt: e.dateModified ?? null,
+  };
+}
+function modelFieldsFrom(body, into) {
+  // Returns an error string or null; mutates `into` with validated scrum:* fields.
+  // `key` is the REGISTRY key (how an agent names the model); `apiKeyRef` an env var NAME. Anything else key-shaped is a value in a hat.
+  const MODEL_SAFE_FIELDS = new Set(['key', 'apiKeyRef', 'maxOutputTokens']);
+  if (Object.keys(body).some((k) => /key|token|secret/i.test(k) && !MODEL_SAFE_FIELDS.has(k))) return 'a model must not carry a key — this document is snapshotted on every write. Use apiKeyRef (an env var NAME).';
+  if (body.apiKeyRef !== undefined) {
+    if (body.apiKeyRef != null && !/^[A-Z_][A-Z0-9_]{0,63}$/.test(String(body.apiKeyRef))) return 'apiKeyRef must look like an env var NAME (A-Z, 0-9, _), never a value';
+    into['scrum:apiKeyRef'] = body.apiKeyRef ?? null;
+  }
+  if (body.protocol !== undefined) {
+    if (!MODEL_PROTOCOLS.includes(body.protocol)) return `protocol must be one of ${MODEL_PROTOCOLS.join(', ')}`;
+    into['scrum:protocol'] = body.protocol;
+  }
+  for (const k of ['provider', 'baseUrl', 'model', 'deprecatesOn']) {
+    if (body[k] === undefined) continue;
+    if (body[k] != null && typeof body[k] !== 'string') return `${k} must be a string`;
+    if (k === 'deprecatesOn' && body[k] != null && Number.isNaN(Date.parse(body[k]))) return 'deprecatesOn must be a date';
+    into[`scrum:${k}`] = body[k] ?? null;
+  }
+  for (const k of MODEL_NUMERIC) {
+    if (body[k] === undefined) continue;
+    if (body[k] != null && !(Number.isFinite(Number(body[k])) && Number(body[k]) >= 0)) return `${k} must be a non-negative number`;
+    into[`scrum:${k}`] = body[k] == null ? null : Number(body[k]);
+  }
+  for (const k of ['thinking', 'freeTier']) { if (body[k] !== undefined) into[`scrum:${k}`] = body[k] == null ? null : !!body[k]; }
+  if (body.capabilities !== undefined) {
+    if (!Array.isArray(body.capabilities)) return 'capabilities must be an array';
+    const bad = body.capabilities.find((c) => !MODEL_CAPABILITIES.has(c));
+    if (bad) return `unknown capability ${JSON.stringify(bad)} — known: ${[...MODEL_CAPABILITIES].join(', ')}`;
+    into['scrum:capability'] = [...new Set(body.capabilities)];
+  }
+  if (typeof body.name === 'string' && body.name.trim()) into.name = body.name.trim();
+  return null;
+}
+async function handleCreateModel(req, res) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const by = typeof body.by === 'string' && body.by.trim() ? body.by.trim() : null;
+    if (!by) return sendJSON(res, 400, { error: 'by is required — who registers this model. Declared, not authenticated.' });
+    const key = typeof body.key === 'string' ? body.key.trim().toLowerCase() : '';
+    if (!/^[a-z0-9][a-z0-9_.:-]{0,63}$/.test(key)) return sendJSON(res, 400, { error: 'key is required: 1–64 chars of lowercase letters, digits, - _ . or :. It is how an agent names the model.' });
+    if (typeof body.model !== 'string' || !body.model.trim()) return sendJSON(res, 400, { error: 'model is required — the id the PROVIDER knows (e.g. gemma3:12b)' });
+    if (typeof body.protocol !== 'string') return sendJSON(res, 400, { error: `protocol is required — one of ${MODEL_PROTOCOLS.join(', ')}` });
+    const now = new Date().toISOString();
+    const node = { '@id': MODEL_ID(key), '@type': 'scrum:Model', 'scrum:modelKey': key, name: key, 'scrum:capability': [], 'scrum:importedAt': now };
+    const err = modelFieldsFrom(body, node);
+    if (err) return sendJSON(res, 400, { error: err });
+    const result = await withWriteLock(async () => {
+      const data = readBoard();
+      if (findModel(data, key)) return { status: 409, wire: { error: `a model with key "${key}" already exists — PATCH it; registering it again would fork its probe history` } };
+      data.models = [...modelsOf(data), node];
+      writeBoard(data, [modelEvent('create', node, by)]);
+      return { status: 201, wire: modelToWire(node) };
+    });
+    sendJSON(res, result.status, result.wire);
+  } catch (e) { console.error('POST /api/models:', e.message); sendJSON(res, 500, { error: e.message }); }
+}
+function handleListModels(req, res) {
+  const q = parseQuery(req.url);
+  let out = modelsOf(readBoard()).map(modelToWire);
+  if (q.provider) out = out.filter((m) => m.provider === q.provider);
+  if (q.key) out = out.filter((m) => m.key === q.key);
+  sendJSON(res, 200, out);
+}
+async function handlePatchModel(req, res, key) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const by = typeof body.by === 'string' && body.by.trim() ? body.by.trim() : null;
+    if (!by) return sendJSON(res, 400, { error: 'by is required' });
+    const patch = {};
+    const err = modelFieldsFrom(body, patch);
+    if (err) return sendJSON(res, 400, { error: err });
+    const result = await withWriteLock(async () => {
+      const data = readBoard();
+      const m = findModel(data, key);
+      if (!m) return { status: 404, wire: { error: `no model with key "${key}"` } };
+      const updated = { ...m, ...patch, dateModified: new Date().toISOString() };
+      data.models = modelsOf(data).map((x) => (x['@id'] === m['@id'] ? updated : x));
+      writeBoard(data, [modelEvent('update', updated, by)]);
+      return { status: 200, wire: modelToWire(updated) };
+    });
+    sendJSON(res, result.status, result.wire);
+  } catch (e) { console.error('PATCH /api/models/:key:', e.message); sendJSON(res, 500, { error: e.message }); }
+}
+/**
+ * POST /api/models/:key/probe — a one-token request to the live provider, and
+ * IN THE SAME OUTPUT a deliberately fake id against the same endpoint. Without
+ * the control a 404 cannot be read: "no such id" and "wrong base URL" are the
+ * same status. The result rides the node (last probe class/status/time) so the
+ * graph can answer "which models answered, last time anyone asked".
+ */
+async function handleProbeModel(req, res, key) {
+  try {
+    const body = JSON.parse((await readBody(req)) || '{}');
+    const by = typeof body.by === 'string' && body.by.trim() ? body.by.trim() : 'board';
+    const data = readBoard();
+    const m = findModel(data, key);
+    if (!m) return sendJSON(res, 404, { error: `no model with key "${key}"` });
+    const apiKey = m['scrum:apiKeyRef'] ? process.env[m['scrum:apiKeyRef']] : undefined;
+    const spec = { model: m['scrum:model'], protocol: m['scrum:protocol'], baseUrl: m['scrum:baseUrl'] };
+    const timeoutMs = Number(body.timeoutMs ?? m['scrum:timeoutMs'] ?? 20_000);
+    const fakeId = `no-such-model-${crypto.randomBytes(4).toString('hex')}`;
+    const [real, control] = await Promise.all([
+      probeModel(spec, { apiKey, timeoutMs }),
+      probeModel({ ...spec, model: fakeId }, { apiKey, timeoutMs }),
+    ]);
+    const at = new Date().toISOString();
+    const wire = {
+      key, model: spec.model, protocol: spec.protocol, baseUrl: spec.baseUrl, apiKeyRef: m['scrum:apiKeyRef'] ?? null, keyPresent: !!apiKey, at,
+      real: { ...real, model: spec.model },
+      control: { ...control, model: fakeId },
+      // A control that does NOT read as no-such-id means the endpoint cannot be
+      // read for absence, so a real "answers" is the only trustworthy class.
+      controlReadable: control.klass === 'no-such-id' || control.klass === 'entitlement',
+    };
+    await withWriteLock(async () => {
+      const d = readBoard();
+      const cur = findModel(d, key);
+      if (!cur) return;
+      const updated = { ...cur, 'scrum:lastProbeClass': real.klass, 'scrum:lastProbeStatus': real.status ?? null, 'scrum:lastProbeAt': at, dateModified: at };
+      d.models = modelsOf(d).map((x) => (x['@id'] === cur['@id'] ? updated : x));
+      writeBoard(d, [modelEvent('update', updated, by)]);
+    });
+    sendJSON(res, 200, wire);
+  } catch (e) { console.error('POST /api/models/:key/probe:', e.message); sendJSON(res, 500, { error: e.message }); }
+}
+
 // ── #1199 — THE AGENT PERSONA: a colleague defined inside manyhands ─────────
 const AGENT_ID = (seat) => `https://scrumboard.local/agent/${encodeURIComponent(seat)}`;
 const AGENT_PROMPT_ID = (seat) => `https://scrumboard.local/agent-prompt/${encodeURIComponent(seat)}`;
@@ -2971,7 +3133,7 @@ function agentToWire(data, e) {
   const current = versions.find((v) => v['@id'] === e['scrum:currentPrompt']) || null;
   return {
     id: e['@id'], seatKey: e['scrum:seatKey'], name: e.name ?? e['scrum:seatKey'], emoji: e['scrum:emoji'] ?? null,
-    model: e['scrum:modelSpec'] ?? null, modelId: e['scrum:model'] ?? null,
+    model: e['scrum:modelSpec'] ?? null, modelId: e['scrum:model'] ?? null, usesModel: e['scrum:usesModel'] ?? null,
     contextPolicy: e['scrum:contextPolicy'] ?? 'thread', toolGrants: e['scrum:toolGrant'] ?? [],
     budgetPerDay: e['scrum:budgetPerDay'] ?? null, residency: e['scrum:residency'] ?? 'guest', state: e['scrum:state'] ?? 'invited',
     prompt: current ? { id: current['@id'], version: current['scrum:version'], body: current['scrum:body'], by: current.author ?? null, at: current['scrum:importedAt'] ?? null } : null,
@@ -2987,9 +3149,12 @@ async function handleCreateAgent(req, res) {
     const seat = typeof body.seatKey === 'string' ? body.seatKey.trim().toLowerCase() : '';
     if (!/^[a-z][a-z0-9_-]{1,31}$/.test(seat)) return sendJSON(res, 400, { error: 'seatKey is required: 2–32 chars, lowercase letters, digits, - or _, starting with a letter. It is the author every post carries.' });
     if (typeof body.prompt !== 'string' || !body.prompt.trim()) return sendJSON(res, 400, { error: 'prompt is required — the system prompt text. Its job lives ONLY here and in toolGrants; the server does not know what a librarian is.' });
+    // #1197 — a registered model may be named by KEY; the inline spec stays
+    // accepted so an agent file written before the registry still loads.
+    const modelKey = typeof body.modelKey === 'string' ? body.modelKey.trim().toLowerCase() : null;
     const model = body.model && typeof body.model === 'object' ? body.model : null;
-    if (!model || typeof model.model !== 'string' || !model.model || typeof model.protocol !== 'string') return sendJSON(res, 400, { error: 'model {model, protocol, baseUrl?, apiKeyRef?, sampling?} is required (inline until P1 mints model nodes). NEVER a key: apiKeyRef names an env var.' });
-    if (Object.keys(model).some((k) => /key|token|secret/i.test(k) && k !== 'apiKeyRef')) return sendJSON(res, 400, { error: 'a model spec must not carry a key — this document is snapshotted on every write. Use apiKeyRef (an env var NAME).' });
+    if (!modelKey && (!model || typeof model.model !== 'string' || !model.model || typeof model.protocol !== 'string')) return sendJSON(res, 400, { error: 'modelKey (a registered scrum:Model) or model {model, protocol, baseUrl?, apiKeyRef?, sampling?} is required. NEVER a key: apiKeyRef names an env var.' });
+    if (model && Object.keys(model).some((k) => /key|token|secret/i.test(k) && k !== 'apiKeyRef')) return sendJSON(res, 400, { error: 'a model spec must not carry a key — this document is snapshotted on every write. Use apiKeyRef (an env var NAME).' });
     const contextPolicy = body.contextPolicy ?? 'thread';
     if (!AGENT_CONTEXT_POLICIES.has(contextPolicy)) return sendJSON(res, 400, { error: 'contextPolicy must be artifact-only or thread' });
     const residency = body.residency ?? 'guest';
@@ -3001,10 +3166,14 @@ async function handleCreateAgent(req, res) {
     const result = await withWriteLock(async () => {
       const data = readBoard();
       if (findAgent(data, seat)) return { status: 409, wire: { error: `an agent with seatKey "${seat}" already exists — PATCH it, or version its prompt; creating it again would fork the identity` } };
+      const registered = modelKey ? findModel(data, modelKey) : null;
+      if (modelKey && !registered) return { status: 400, wire: { error: `modelKey "${modelKey}" is not a registered model — POST /api/models first` } };
+      const spec = registered ? modelSpecOf(registered) : model;
       const promptId = AGENT_PROMPT_ID(seat); const v1 = AGENT_PROMPT_VERSION_ID(seat, 1);
       const agent = {
         '@id': AGENT_ID(seat), '@type': 'scrum:Agent', 'scrum:seatKey': seat, name: typeof body.name === 'string' && body.name.trim() ? body.name.trim() : seat,
-        'scrum:emoji': typeof body.emoji === 'string' ? body.emoji : null, 'scrum:model': model.model, 'scrum:modelSpec': model,
+        'scrum:emoji': typeof body.emoji === 'string' ? body.emoji : null, 'scrum:model': spec.model, 'scrum:modelSpec': spec,
+        'scrum:usesModel': registered ? registered['@id'] : null,
         'scrum:contextPolicy': contextPolicy, 'scrum:toolGrant': toolGrants, 'scrum:budgetPerDay': budget,
         'scrum:residency': residency, 'scrum:state': 'invited', 'scrum:currentPrompt': v1, 'scrum:importedAt': now,
       };
@@ -3067,7 +3236,12 @@ async function handlePatchAgent(req, res, seat) {
       if (body.contextPolicy != null) updated['scrum:contextPolicy'] = body.contextPolicy;
       if (Array.isArray(body.toolGrants)) updated['scrum:toolGrant'] = body.toolGrants.map(String).filter(Boolean);
       if (body.budgetPerDay !== undefined) updated['scrum:budgetPerDay'] = body.budgetPerDay == null ? null : Number(body.budgetPerDay);
-      if (body.model && typeof body.model === 'object' && typeof body.model.model === 'string') { updated['scrum:modelSpec'] = body.model; updated['scrum:model'] = body.model.model; }
+      if (body.model && typeof body.model === 'object' && typeof body.model.model === 'string') { updated['scrum:modelSpec'] = body.model; updated['scrum:model'] = body.model.model; updated['scrum:usesModel'] = null; }
+      if (typeof body.modelKey === 'string') { // #1197
+        const registered = findModel(data, body.modelKey.trim().toLowerCase());
+        if (!registered) return { status: 400, wire: { error: `modelKey "${body.modelKey}" is not a registered model — POST /api/models first` } };
+        updated['scrum:modelSpec'] = modelSpecOf(registered); updated['scrum:model'] = registered['scrum:model']; updated['scrum:usesModel'] = registered['@id'];
+      }
       if (typeof body.name === 'string' && body.name.trim()) updated.name = body.name.trim();
       if (typeof body.emoji === 'string') updated['scrum:emoji'] = body.emoji;
       data.agents = agentsOf(data).map((a) => (a['@id'] === agent['@id'] ? updated : a));
@@ -7193,6 +7367,10 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/kinds$/,                fn: (req, res) => handleRegisterKind(req, res) },
   { method: 'POST',   re: /^\/api\/assert$/,               fn: (req, res) => handleAssert(req, res) },
   { method: 'POST',   re: /^\/api\/decisions$/,            fn: (req, res) => handleCreateDecision(req, res) },
+  { method: 'GET',    re: /^\/api\/models$/,               fn: (req, res) => handleListModels(req, res) },                       // #1197
+  { method: 'POST',   re: /^\/api\/models$/,               fn: (req, res) => handleCreateModel(req, res) },                      // #1197
+  { method: 'PATCH',  re: /^\/api\/models\/([^\/]+)$/,      fn: (req, res, m) => handlePatchModel(req, res, decodeURIComponent(m[1])) },          // #1197
+  { method: 'POST',   re: /^\/api\/models\/([^\/]+)\/probe$/, fn: (req, res, m) => handleProbeModel(req, res, decodeURIComponent(m[1])) },        // #1197
   { method: 'GET',    re: /^\/api\/agents$/,               fn: (req, res) => handleListAgents(req, res) },                       // #1199
   { method: 'POST',   re: /^\/api\/agents$/,               fn: (req, res) => handleCreateAgent(req, res) },                      // #1199
   { method: 'PATCH',  re: /^\/api\/agents\/([^\/]+)$/,      fn: (req, res, m) => handlePatchAgent(req, res, decodeURIComponent(m[1])) },          // #1199

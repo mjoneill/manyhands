@@ -1422,7 +1422,8 @@ function buildMcpServer() {
       seatKey: z.string().min(2).max(32).describe('The author every post will carry. Lowercase, letters/digits/-/_'),
       name: z.string().optional(), emoji: z.string().optional(),
       prompt: z.string().min(1).describe('The system prompt text — becomes AgentPromptVersion 1'),
-      model: z.object({ model: z.string(), protocol: z.string(), baseUrl: z.string().optional(), apiKeyRef: z.string().optional(), sampling: z.record(z.any()).optional() }).describe('Inline model spec until P1 mints model nodes. NEVER a key.'),
+      modelKey: z.string().optional().describe('#1197 — the KEY of a registered scrum:Model (see model_register); the spec is derived from the node and scrum:usesModel links them'),
+      model: z.object({ model: z.string(), protocol: z.string(), baseUrl: z.string().optional(), apiKeyRef: z.string().optional(), sampling: z.record(z.any()).optional() }).optional().describe('Inline model spec, accepted when no modelKey is given. NEVER a key.'),
       contextPolicy: z.enum(['artifact-only', 'thread']).optional(),
       toolGrants: z.array(z.string()).optional().describe('Which verbs it may call — write authority by blast radius'),
       budgetPerDay: z.number().min(0).optional().describe('Halts loudly on breach (#987, via the #1202 ledger)'),
@@ -1448,6 +1449,41 @@ function buildMcpServer() {
   }, async ({ seat, state } = {}) => {
     const q = new URLSearchParams(Object.entries({ seat, state }).filter(([, v]) => v)).toString();
     return jsonResult(await apiCall('GET', `/api/agents${q ? `?${q}` : ''}`));
+  });
+
+  // ── #1197 — the model registry ──────────────────────────────────────────
+  mcp.registerTool('model_register', {
+    description: 'Register a MODEL the board can call, as a graph node (#1197): provider, baseUrl, protocol, '
+      + 'contextWindow, Ollama num_ctx, thinking flag, maxOutputTokens, timeoutMs, costIn/costOut or freeTier, '
+      + 'capabilities (jsonSchema, tools, images), deprecatesOn. Every field is sourced to a failure that happened. '
+      + 'The key is a REFERENCE — apiKeyRef names an env var; a value is refused. Agents then name it by key.',
+    inputSchema: {
+      key: z.string().min(1).max(64).describe('Registry key, e.g. gemma3-12b — how an agent names it'),
+      name: z.string().optional(), model: z.string().min(1).describe('The id the PROVIDER knows, e.g. gemma3:12b'),
+      provider: z.string().optional(), protocol: z.enum(['ollama-native', 'openai-completions', 'mlx']),
+      baseUrl: z.string().optional(), apiKeyRef: z.string().optional().describe('Env var NAME, never a value'),
+      contextWindow: z.number().min(0).optional(), numCtx: z.number().min(0).optional(), thinking: z.boolean().optional(),
+      maxOutputTokens: z.number().min(0).optional(), timeoutMs: z.number().min(0).optional(),
+      costIn: z.number().min(0).optional(), costOut: z.number().min(0).optional(), freeTier: z.boolean().optional(),
+      capabilities: z.array(z.enum(['jsonSchema', 'tools', 'images'])).optional(), deprecatesOn: z.string().optional(),
+      by: z.string().min(1).describe('Who registers it. Declared, not authenticated.'),
+    },
+  }, async (args) => jsonResult(await apiCall('POST', '/api/models', args)));
+
+  mcp.registerTool('model_probe', {
+    description: 'PROBE a registered model (#1197): a one-token request to the live provider, and in the SAME output a '
+      + 'deliberately fake id as the control. Classes: answers · exists-auth-gated (401/403) · retired (410, body '
+      + 'carries the EOL date) · no-such-id (plain 404) · entitlement (problem+json 404) · unreachable. The result '
+      + 'rides the node as lastProbeClass/Status/At, so "which models answered last time anyone asked" is one query.',
+    inputSchema: { key: z.string().min(1), timeoutMs: z.number().min(0).optional(), by: z.string().optional() },
+  }, async ({ key, timeoutMs, by }) => jsonResult(await apiCall('POST', `/api/models/${encodeURIComponent(key)}/probe`, { timeoutMs, by })));
+
+  mcp.registerTool('model_list', {
+    description: 'List the registered models (#1197) with their fields and last probe result. Filter by provider or key.',
+    inputSchema: { provider: z.string().optional(), key: z.string().optional() },
+  }, async ({ provider, key } = {}) => {
+    const q = new URLSearchParams(Object.entries({ provider, key }).filter(([, v]) => v)).toString();
+    return jsonResult(await apiCall('GET', `/api/models${q ? `?${q}` : ''}`));
   });
 
   mcp.registerTool('kind_register', {
