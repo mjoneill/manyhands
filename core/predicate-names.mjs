@@ -85,6 +85,23 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:producedPost': 'scrum:producedPost',         // → entity: IRI
   'scrum:calledAt': 'scrum:calledAt',
   'scrum:ok': 'scrum:ok',
+  // #1199 — scrum:Agent (store key agents[]) and its prompt (agentPrompts[])
+  'scrum:Agent': null, 'scrum:AgentPrompt': null, 'scrum:AgentPromptVersion': null,   // rdf:type values
+  'scrum:seatKey': 'scrum:seatKey',
+  'scrum:emoji': 'scrum:emoji',
+  'scrum:contextPolicy': 'scrum:contextPolicy',
+  'scrum:toolGrant': 'scrum:toolGrant',
+  'scrum:budgetPerDay': 'scrum:budgetPerDay',
+  'scrum:residency': 'scrum:residency',
+  'scrum:state': 'scrum:state',
+  'scrum:currentPrompt': 'scrum:currentPrompt',   // → the AgentPromptVersion IRI
+  'scrum:ofAgent': 'scrum:ofAgent',               // → the Agent IRI
+  // These two predate #1199 (the tending prompt/version shape, #1189) but were
+  // only ever emitted through the generic projector, so the source census never
+  // saw them until an explicit projector spelled them out.
+  'scrum:ofPrompt': 'scrum:ofPrompt',             // → the prompt identity IRI (tending and agent prompts)
+  'scrum:importedAt': 'scrum:importedAt',
+  'scrum:version': 'scrum:version',               // the version NUMBER on a prompt/memory version node
   // ── #1130 item 3 — an apex is a KIND. Both are derived from the card's own
   // `labels`: an entry `apex:<X>` mints the class and X is the apexLabel. There
   // is no store field spelled "apex"; grep `labels` for the prefix.

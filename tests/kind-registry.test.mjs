@@ -61,6 +61,8 @@ const ENTITY_KINDS_ADDED_SINCE = [
   'run',       // #1207 — one performance of a procedure (projects as prov:Activity)
   'artifact',  // #1207 — a file a run used or produced; pointer + hash, never payload
   'model-call', // #1202 — one model call, the provenance ledger row
+  'agent',        // #1199 — a colleague defined inside manyhands
+  'agent-prompt', // #1199 — its versioned system prompt (identity + versions)
 ];
 
 test('#1214 the derived set adds only DECLARED new kinds — a silent addition is as bad as a loss', () => {
@@ -86,6 +88,7 @@ const COLLECTIONS_ADDED_SINCE = {
   procedure: 'procedures', // #1206
   run: 'runs', artifact: 'artifacts', // #1207
   'model-call': 'modelCalls', // #1202
+  agent: 'agents', 'agent-prompt': 'agentPrompts', // #1199
 };
 
 test('#1214 a kind maps only to a collection replay knows, or one declared new here', () => {

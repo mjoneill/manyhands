@@ -1411,6 +1411,45 @@ function buildMcpServer() {
   }, async () => jsonResult(await apiCall('GET', '/api/procedures')));
 
   // ── #1214 — THE KIND REGISTRY ─────────────────────────────────────────────
+  // ── #1199 — the agent persona verbs ──────────────────────────────────────
+  mcp.registerTool('agent_create', {
+    description: 'Define a COLLEAGUE inside manyhands (#1199): a seat key, a model, a system prompt (stored as '
+      + 'VERSION 1 of a versioned document, never a string on the node), context policy, tool grants, a daily '
+      + 'budget, and residency. Its job lives only in the prompt and the grants — the server does not know what '
+      + 'a librarian is. Refused: a duplicate seat key (version the prompt instead), a model spec carrying a key '
+      + '(use apiKeyRef, an env var NAME), a missing prompt.',
+    inputSchema: {
+      seatKey: z.string().min(2).max(32).describe('The author every post will carry. Lowercase, letters/digits/-/_'),
+      name: z.string().optional(), emoji: z.string().optional(),
+      prompt: z.string().min(1).describe('The system prompt text — becomes AgentPromptVersion 1'),
+      model: z.object({ model: z.string(), protocol: z.string(), baseUrl: z.string().optional(), apiKeyRef: z.string().optional(), sampling: z.record(z.any()).optional() }).describe('Inline model spec until P1 mints model nodes. NEVER a key.'),
+      contextPolicy: z.enum(['artifact-only', 'thread']).optional(),
+      toolGrants: z.array(z.string()).optional().describe('Which verbs it may call — write authority by blast radius'),
+      budgetPerDay: z.number().min(0).optional().describe('Halts loudly on breach (#987, via the #1202 ledger)'),
+      residency: z.enum(['resident', 'guest']).optional(),
+      by: z.string().min(1).describe('Who defines this colleague. Declared, not authenticated.'),
+    },
+  }, async (args) => jsonResult(await apiCall('POST', '/api/agents', args)));
+
+  mcp.registerTool('agent_prompt_version_create', {
+    description: 'Mint a NEW VERSION of an agent\'s system prompt (#1199). Editing a colleague\'s prompt is an event, not '
+      + 'an overwrite: the old version stays, the agent\'s currentPrompt moves, and "which prompt wrote that post" '
+      + 'stays answerable through the model-call ledger.',
+    inputSchema: {
+      seatKey: z.string().min(1), body: z.string().min(1).describe('The new prompt text'),
+      by: z.string().min(1).describe('Who wrote it'),
+    },
+  }, async ({ seatKey, body, by }) => jsonResult(await apiCall('POST', `/api/agents/${encodeURIComponent(seatKey)}/prompt`, { body, by })));
+
+  mcp.registerTool('agent_list', {
+    description: 'List the agents defined on this board (#1199), each with its CURRENT prompt version, model, grants, '
+      + 'budget, residency and state. Filter by seat or state.',
+    inputSchema: { seat: z.string().optional(), state: z.enum(['invited', 'resting', 'retired']).optional() },
+  }, async ({ seat, state } = {}) => {
+    const q = new URLSearchParams(Object.entries({ seat, state }).filter(([, v]) => v)).toString();
+    return jsonResult(await apiCall('GET', `/api/agents${q ? `?${q}` : ''}`));
+  });
+
   mcp.registerTool('kind_register', {
     description: 'Register (or revise) an ENTITY KIND — what this CLASS of thing is, and the verb '
       + 'that makes one (#1214). The question that produced this registry was how an agent is '

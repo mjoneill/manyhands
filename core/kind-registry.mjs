@@ -150,6 +150,34 @@ export const KIND_DECLARATIONS = Object.freeze([
       + 'transport dropped is indistinguishable from an idle one, so the record is the evidence.',
   },
   {
+    name: 'scrum:Agent', eventKind: 'agent', collection: 'agents',
+    createdBy: 'agent_create',
+    definition: 'A COLLEAGUE DEFINED INSIDE MANYHANDS (#1199): a seat key, a name, a model, a context '
+      + 'policy, tool grants, a daily budget, a residency (resident or guest) and a state '
+      + '(invited, resting, retired). Its JOB lives only in its prompt and its tool grants — the '
+      + 'server does not know what a librarian or a reviewer is. The person node with the same '
+      + 'seat key is what the agent is sameAs; the first post makes that person. The prompt is a '
+      + 'separate versioned document (scrum:AgentPrompt / scrum:AgentPromptVersion), never a string on this node.',
+  },
+  {
+    name: 'scrum:AgentPrompt', eventKind: 'agent-prompt', collection: 'agentPrompts',
+    createdBy: 'agent_create (version 1) / agent_prompt_version_create (later versions)',
+    definition: 'THE IDENTITY of an agent\'s system prompt (#1199), the #1189 pattern: the identity node '
+      + 'carries the seat it belongs to and nothing else; the CONTENT lives on scrum:AgentPromptVersion '
+      + 'nodes that point back with scrum:ofPrompt. Editing a colleague\'s prompt is a new version and an '
+      + 'event, never an overwrite, so "which prompt was this agent running when it wrote that post" is one '
+      + 'hop from the post via the model-call ledger. ⚠️ Query the VERSION node for content; the identity '
+      + 'node is a clean zero one hop short (the trap that blocked #1189 for weeks).',
+  },
+  {
+    name: 'scrum:AgentPromptVersion', eventKind: null, collection: null,
+    createdBy: 'agent_create / agent_prompt_version_create',
+    definition: 'ONE VERSION of an agent\'s system prompt (#1199): scrum:ofPrompt → the identity, '
+      + 'scrum:version (1, 2, …), scrum:body (the text), author (who wrote it), importedAt. Immutable once '
+      + 'written; the agent\'s scrum:currentPrompt names the version it runs now. Lives in the agentPrompts '
+      + 'collection beside its identity, replayed as part of the agent-prompt event kind.',
+  },
+  {
     name: 'scrum:ModelCall', eventKind: 'model-call', collection: 'modelCalls',
     createdBy: 'POST /api/model-calls (the harness, after every model call)',
     definition: 'ONE MODEL CALL, recorded as a node rather than a log line (#1202): which agent, '

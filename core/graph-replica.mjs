@@ -176,6 +176,10 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:ModelCall', 'scrum:agent', 'scrum:model', 'scrum:provider', 'scrum:protocol',
   'scrum:promptVersion', 'scrum:tokensIn', 'scrum:tokensOut', 'scrum:cost', 'scrum:stopReason',
   'scrum:latencyMs', 'scrum:contextHandedTo', 'scrum:producedPost', 'scrum:calledAt', 'scrum:ok',
+  // #1199 — the agent persona and its versioned prompt
+  'scrum:Agent', 'scrum:AgentPrompt', 'scrum:AgentPromptVersion', 'scrum:seatKey', 'scrum:emoji',
+  'scrum:contextPolicy', 'scrum:toolGrant', 'scrum:budgetPerDay', 'scrum:residency', 'scrum:state',
+  'scrum:currentPrompt', 'scrum:ofAgent',
   // #1130 — an apex is a KIND, not a convention: a card carrying `apex:<X>`
   // projects as scrum:Apex with scrum:apexLabel "X", so "what lives here" is
   // one hop and needs no knowledge of the prefix.
@@ -905,6 +909,49 @@ function projectModelCall(store, e) {
   }
 }
 
+/**
+ * #1199 — an AGENT: a colleague defined inside manyhands. The person node with
+ * the same seat key is what it is sameAs; the job lives in the prompt (a
+ * separate versioned document) and the tool grants (one literal per grant so
+ * "which agents may call X" is a triple pattern). `currentPrompt` is an edge to
+ * the VERSION node — query it for content; the identity node is a clean zero.
+ */
+function projectAgent(store, e) {
+  const S = IRI.scrum, SC = IRI.schema, P = IRI.person;
+  const s = nn(e['@id']);
+  const add = (p, o) => store.add(oxigraph.triple(s, p, o));
+  add(A, nn(S + 'Agent'));
+  if (e['scrum:seatKey']) { add(nn(S + 'seatKey'), lit(String(e['scrum:seatKey']))); add(nn(SC + 'sameAs'), nn(P + e['scrum:seatKey'])); }
+  if (e.name) add(nn(SC + 'name'), lit(String(e.name)));
+  if (e['scrum:emoji']) add(nn(S + 'emoji'), lit(String(e['scrum:emoji'])));
+  if (e['scrum:model']) add(nn(S + 'model'), lit(String(e['scrum:model'])));
+  if (e['scrum:contextPolicy']) add(nn(S + 'contextPolicy'), lit(String(e['scrum:contextPolicy'])));
+  for (const g of (Array.isArray(e['scrum:toolGrant']) ? e['scrum:toolGrant'] : [])) add(nn(S + 'toolGrant'), lit(String(g)));
+  if (e['scrum:budgetPerDay'] != null && Number.isFinite(Number(e['scrum:budgetPerDay']))) add(nn(S + 'budgetPerDay'), oxigraph.literal(String(e['scrum:budgetPerDay']), nn('http://www.w3.org/2001/XMLSchema#decimal')));
+  if (e['scrum:residency']) add(nn(S + 'residency'), lit(String(e['scrum:residency'])));
+  if (e['scrum:state']) add(nn(S + 'state'), lit(String(e['scrum:state'])));
+  if (e['scrum:currentPrompt']) add(nn(S + 'currentPrompt'), nn(String(e['scrum:currentPrompt'])));
+  if (e['scrum:importedAt']) add(nn(S + 'importedAt'), lit(String(e['scrum:importedAt'])));
+}
+
+/** #1199 — the prompt identity and its versions, the #1189 shape. */
+function projectAgentPrompt(store, e) {
+  const S = IRI.scrum, SC = IRI.schema, P = IRI.person;
+  const s = nn(e['@id']);
+  const add = (p, o) => store.add(oxigraph.triple(s, p, o));
+  if (e['@type'] === 'scrum:AgentPrompt') {
+    add(A, nn(S + 'AgentPrompt'));
+    if (e['scrum:ofAgent']) add(nn(S + 'ofAgent'), nn(String(e['scrum:ofAgent'])));
+  } else {
+    add(A, nn(S + 'AgentPromptVersion'));
+    if (e['scrum:ofPrompt']) add(nn(S + 'ofPrompt'), nn(String(e['scrum:ofPrompt'])));
+    if (e['scrum:version'] != null) add(nn(S + 'version'), oxigraph.literal(String(e['scrum:version']), nn('http://www.w3.org/2001/XMLSchema#integer')));
+    if (e['scrum:body'] != null) add(nn(S + 'body'), lit(String(e['scrum:body'])));
+    if (e.author) add(nn(SC + 'author'), nn(String(e.author).startsWith('http') ? String(e.author) : P + String(e.author).replace(/^person:/, '')));
+  }
+  if (e['scrum:importedAt']) add(nn(S + 'importedAt'), lit(String(e['scrum:importedAt'])));
+}
+
 function projectMemory(store, e) {
   const add = (s, p, o) => store.add(oxigraph.triple(s, p, o));
   const S = IRI.scrum, SC = IRI.schema, P = IRI.person;
@@ -1345,6 +1392,10 @@ function projectEntity(store, e) {
       projectWake(store, e);
     } else if (t === 'scrum:ModelCall') {
       projectModelCall(store, e);
+    } else if (t === 'scrum:Agent') {
+      projectAgent(store, e);
+    } else if (t === 'scrum:AgentPrompt' || t === 'scrum:AgentPromptVersion') {
+      projectAgentPrompt(store, e);
     } else if (t === 'schema:CreativeWork' && e['schema:contentUrl']) {
       // #1206 — AN ARTIFACT a run produced or consumed: a transcript, a notes
       // file, a report. ⛔ POINTER + HASH, NEVER PAYLOAD. The graph says where

@@ -2955,6 +2955,129 @@ function wakesOf(data) {
 const wakeEvent = (e, actor) => ({ op: 'create', actor, entity: { kind: 'wake', id: e['@id'] }, state: e });
 const wakeToWire = (e) => ({ id: e['@id'], seat: e['scrum:wokeSeat'], at: e['scrum:wokeAt'], note: e.text ?? '' });
 
+// ── #1199 — THE AGENT PERSONA: a colleague defined inside manyhands ─────────
+const AGENT_ID = (seat) => `https://scrumboard.local/agent/${encodeURIComponent(seat)}`;
+const AGENT_PROMPT_ID = (seat) => `https://scrumboard.local/agent-prompt/${encodeURIComponent(seat)}`;
+const AGENT_PROMPT_VERSION_ID = (seat, v) => `https://scrumboard.local/agent-prompt/${encodeURIComponent(seat)}/v${v}`;
+function agentsOf(data) { return Array.isArray(data.agents) ? data.agents : []; }
+function agentPromptsOf(data) { return Array.isArray(data.agentPrompts) ? data.agentPrompts : []; }
+const agentEvent = (op, e, actor) => ({ op, actor, entity: { kind: 'agent', id: e['@id'] }, state: e });
+const agentPromptEvent = (op, e, actor) => ({ op, actor, entity: { kind: 'agent-prompt', id: e['@id'] }, state: e });
+const AGENT_CONTEXT_POLICIES = new Set(['artifact-only', 'thread']);
+const AGENT_RESIDENCIES = new Set(['resident', 'guest']);
+const AGENT_STATES = new Set(['invited', 'resting', 'retired']);
+function agentToWire(data, e) {
+  const versions = agentPromptsOf(data).filter((v) => v['@type'] === 'scrum:AgentPromptVersion' && v['scrum:ofPrompt'] === AGENT_PROMPT_ID(e['scrum:seatKey']));
+  const current = versions.find((v) => v['@id'] === e['scrum:currentPrompt']) || null;
+  return {
+    id: e['@id'], seatKey: e['scrum:seatKey'], name: e.name ?? e['scrum:seatKey'], emoji: e['scrum:emoji'] ?? null,
+    model: e['scrum:modelSpec'] ?? null, modelId: e['scrum:model'] ?? null,
+    contextPolicy: e['scrum:contextPolicy'] ?? 'thread', toolGrants: e['scrum:toolGrant'] ?? [],
+    budgetPerDay: e['scrum:budgetPerDay'] ?? null, residency: e['scrum:residency'] ?? 'guest', state: e['scrum:state'] ?? 'invited',
+    prompt: current ? { id: current['@id'], version: current['scrum:version'], body: current['scrum:body'], by: current.author ?? null, at: current['scrum:importedAt'] ?? null } : null,
+    promptVersions: versions.length, createdAt: e['scrum:importedAt'] ?? null, updatedAt: e.dateModified ?? null,
+  };
+}
+function findAgent(data, seat) { return agentsOf(data).find((a) => a['scrum:seatKey'] === seat) || null; }
+async function handleCreateAgent(req, res) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const by = typeof body.by === 'string' && body.by.trim() ? body.by.trim() : null;
+    if (!by) return sendJSON(res, 400, { error: 'by is required — who defines this colleague. Declared, not authenticated.' });
+    const seat = typeof body.seatKey === 'string' ? body.seatKey.trim().toLowerCase() : '';
+    if (!/^[a-z][a-z0-9_-]{1,31}$/.test(seat)) return sendJSON(res, 400, { error: 'seatKey is required: 2–32 chars, lowercase letters, digits, - or _, starting with a letter. It is the author every post carries.' });
+    if (typeof body.prompt !== 'string' || !body.prompt.trim()) return sendJSON(res, 400, { error: 'prompt is required — the system prompt text. Its job lives ONLY here and in toolGrants; the server does not know what a librarian is.' });
+    const model = body.model && typeof body.model === 'object' ? body.model : null;
+    if (!model || typeof model.model !== 'string' || !model.model || typeof model.protocol !== 'string') return sendJSON(res, 400, { error: 'model {model, protocol, baseUrl?, apiKeyRef?, sampling?} is required (inline until P1 mints model nodes). NEVER a key: apiKeyRef names an env var.' });
+    if (Object.keys(model).some((k) => /key|token|secret/i.test(k) && k !== 'apiKeyRef')) return sendJSON(res, 400, { error: 'a model spec must not carry a key — this document is snapshotted on every write. Use apiKeyRef (an env var NAME).' });
+    const contextPolicy = body.contextPolicy ?? 'thread';
+    if (!AGENT_CONTEXT_POLICIES.has(contextPolicy)) return sendJSON(res, 400, { error: 'contextPolicy must be artifact-only or thread' });
+    const residency = body.residency ?? 'guest';
+    if (!AGENT_RESIDENCIES.has(residency)) return sendJSON(res, 400, { error: 'residency must be resident or guest' });
+    const toolGrants = Array.isArray(body.toolGrants) ? body.toolGrants.map(String).filter(Boolean) : [];
+    const budget = body.budgetPerDay == null ? null : Number(body.budgetPerDay);
+    if (budget != null && !(Number.isFinite(budget) && budget >= 0)) return sendJSON(res, 400, { error: 'budgetPerDay must be a non-negative number' });
+    const now = new Date().toISOString();
+    const result = await withWriteLock(async () => {
+      const data = readBoard();
+      if (findAgent(data, seat)) return { status: 409, wire: { error: `an agent with seatKey "${seat}" already exists — PATCH it, or version its prompt; creating it again would fork the identity` } };
+      const promptId = AGENT_PROMPT_ID(seat); const v1 = AGENT_PROMPT_VERSION_ID(seat, 1);
+      const agent = {
+        '@id': AGENT_ID(seat), '@type': 'scrum:Agent', 'scrum:seatKey': seat, name: typeof body.name === 'string' && body.name.trim() ? body.name.trim() : seat,
+        'scrum:emoji': typeof body.emoji === 'string' ? body.emoji : null, 'scrum:model': model.model, 'scrum:modelSpec': model,
+        'scrum:contextPolicy': contextPolicy, 'scrum:toolGrant': toolGrants, 'scrum:budgetPerDay': budget,
+        'scrum:residency': residency, 'scrum:state': 'invited', 'scrum:currentPrompt': v1, 'scrum:importedAt': now,
+      };
+      const identity = { '@id': promptId, '@type': 'scrum:AgentPrompt', 'scrum:ofAgent': agent['@id'], 'scrum:importedAt': now };
+      const version = { '@id': v1, '@type': 'scrum:AgentPromptVersion', 'scrum:ofPrompt': promptId, 'scrum:version': 1, 'scrum:body': body.prompt, author: by, 'scrum:importedAt': now };
+      data.agents = [...agentsOf(data), agent];
+      data.agentPrompts = [...agentPromptsOf(data), identity, version];
+      writeBoard(data, [agentEvent('create', agent, by), agentPromptEvent('create', identity, by), agentPromptEvent('create', version, by)]);
+      return { status: 201, wire: agentToWire(data, agent) };
+    });
+    sendJSON(res, result.status, result.wire);
+  } catch (e) { console.error('POST /api/agents:', e.message); sendJSON(res, 500, { error: e.message }); }
+}
+function handleListAgents(req, res) {
+  const q = parseQuery(req.url);
+  const data = readBoard();
+  let out = agentsOf(data).map((a) => agentToWire(data, a));
+  if (q.seat) out = out.filter((a) => a.seatKey === q.seat);
+  if (q.state) out = out.filter((a) => a.state === q.state);
+  sendJSON(res, 200, out);
+}
+async function handleAgentPromptVersion(req, res, seat) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const by = typeof body.by === 'string' && body.by.trim() ? body.by.trim() : null;
+    if (!by) return sendJSON(res, 400, { error: 'by is required — who wrote this version' });
+    if (typeof body.body !== 'string' || !body.body.trim()) return sendJSON(res, 400, { error: 'body is required — the new prompt text' });
+    const result = await withWriteLock(async () => {
+      const data = readBoard();
+      const agent = findAgent(data, seat);
+      if (!agent) return { status: 404, wire: { error: `no agent with seatKey "${seat}"` } };
+      const promptId = AGENT_PROMPT_ID(seat);
+      const prior = agentPromptsOf(data).filter((v) => v['@type'] === 'scrum:AgentPromptVersion' && v['scrum:ofPrompt'] === promptId);
+      const n = prior.reduce((m, v) => Math.max(m, Number(v['scrum:version']) || 0), 0) + 1;
+      const now = new Date().toISOString();
+      const version = { '@id': AGENT_PROMPT_VERSION_ID(seat, n), '@type': 'scrum:AgentPromptVersion', 'scrum:ofPrompt': promptId, 'scrum:version': n, 'scrum:body': body.body, author: by, 'scrum:importedAt': now };
+      const updated = { ...agent, 'scrum:currentPrompt': version['@id'], dateModified: now };
+      data.agentPrompts = [...agentPromptsOf(data), version];
+      data.agents = agentsOf(data).map((a) => (a['@id'] === agent['@id'] ? updated : a));
+      writeBoard(data, [agentPromptEvent('create', version, by), agentEvent('update', updated, by)]);
+      return { status: 201, wire: agentToWire(data, updated) };
+    });
+    sendJSON(res, result.status, result.wire);
+  } catch (e) { console.error('POST /api/agents/:seat/prompt:', e.message); sendJSON(res, 500, { error: e.message }); }
+}
+async function handlePatchAgent(req, res, seat) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const by = typeof body.by === 'string' && body.by.trim() ? body.by.trim() : null;
+    if (!by) return sendJSON(res, 400, { error: 'by is required' });
+    if (body.state != null && !AGENT_STATES.has(body.state)) return sendJSON(res, 400, { error: 'state must be invited, resting or retired' });
+    if (body.contextPolicy != null && !AGENT_CONTEXT_POLICIES.has(body.contextPolicy)) return sendJSON(res, 400, { error: 'contextPolicy must be artifact-only or thread' });
+    if (body.prompt !== undefined) return sendJSON(res, 400, { error: 'the prompt is not a field of the agent — POST /api/agents/:seat/prompt mints a new VERSION; overwriting would lose which prompt wrote which post' });
+    const result = await withWriteLock(async () => {
+      const data = readBoard();
+      const agent = findAgent(data, seat);
+      if (!agent) return { status: 404, wire: { error: `no agent with seatKey "${seat}"` } };
+      const updated = { ...agent, dateModified: new Date().toISOString() };
+      if (body.state != null) updated['scrum:state'] = body.state;
+      if (body.contextPolicy != null) updated['scrum:contextPolicy'] = body.contextPolicy;
+      if (Array.isArray(body.toolGrants)) updated['scrum:toolGrant'] = body.toolGrants.map(String).filter(Boolean);
+      if (body.budgetPerDay !== undefined) updated['scrum:budgetPerDay'] = body.budgetPerDay == null ? null : Number(body.budgetPerDay);
+      if (body.model && typeof body.model === 'object' && typeof body.model.model === 'string') { updated['scrum:modelSpec'] = body.model; updated['scrum:model'] = body.model.model; }
+      if (typeof body.name === 'string' && body.name.trim()) updated.name = body.name.trim();
+      if (typeof body.emoji === 'string') updated['scrum:emoji'] = body.emoji;
+      data.agents = agentsOf(data).map((a) => (a['@id'] === agent['@id'] ? updated : a));
+      writeBoard(data, [agentEvent('update', updated, by)]);
+      return { status: 200, wire: agentToWire(data, updated) };
+    });
+    sendJSON(res, result.status, result.wire);
+  } catch (e) { console.error('PATCH /api/agents/:seat:', e.message); sendJSON(res, 500, { error: e.message }); }
+}
+
 // ── #1202 — THE PROVENANCE LEDGER: one row per model call, as a node ────────
 const MODEL_CALL_ID = () => `https://scrumboard.local/model-call/${crypto.randomUUID()}`;
 function modelCallsOf(data) { return Array.isArray(data.modelCalls) ? data.modelCalls : []; }
@@ -7064,6 +7187,10 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/kinds$/,                fn: (req, res) => handleRegisterKind(req, res) },
   { method: 'POST',   re: /^\/api\/assert$/,               fn: (req, res) => handleAssert(req, res) },
   { method: 'POST',   re: /^\/api\/decisions$/,            fn: (req, res) => handleCreateDecision(req, res) },
+  { method: 'GET',    re: /^\/api\/agents$/,               fn: (req, res) => handleListAgents(req, res) },                       // #1199
+  { method: 'POST',   re: /^\/api\/agents$/,               fn: (req, res) => handleCreateAgent(req, res) },                      // #1199
+  { method: 'PATCH',  re: /^\/api\/agents\/([^\/]+)$/,      fn: (req, res, m) => handlePatchAgent(req, res, decodeURIComponent(m[1])) },          // #1199
+  { method: 'POST',   re: /^\/api\/agents\/([^\/]+)\/prompt$/, fn: (req, res, m) => handleAgentPromptVersion(req, res, decodeURIComponent(m[1])) }, // #1199
   { method: 'GET',    re: /^\/api\/model-calls$/,          fn: (req, res) => handleListModelCalls(req, res) },   // #1202
   { method: 'POST',   re: /^\/api\/model-calls$/,          fn: (req, res) => handleCreateModelCall(req, res) }, // #1202
   { method: 'GET',    re: /^\/api\/wakes$/,                fn: (req, res) => handleListWakes(req, res) },

@@ -58,7 +58,13 @@ export function findMentions(messages = [], seatKey, { sinceId = null, since = n
 export function buildMessages({ agent, wake, changes = [] }) {
   const policy = agent.contextPolicy || 'thread';
   const lines = [];
-  lines.push(`You are ${agent.name || agent.seatKey}, a guest seat on the manyhands board. Your seat key is "${agent.seatKey}".`);
+  lines.push(`You are ${agent.name || agent.seatKey}, a ${agent.residency === 'resident' ? 'resident' : 'guest'} seat on the manyhands board. Your seat key is "${agent.seatKey}".`);
+  // #1199 — DISCLOSURE, mechanical rather than validated: a guest is told it
+  // will not persist; a resident is told it persists and where its memory
+  // lives. A truthfulness claim about the arrangement, not a welfare claim.
+  lines.push(agent.residency === 'resident'
+    ? 'You persist across wakes. Your memory lives in the shared memory store on this board (memory_create / memory_list); what you do not write there, you will not have next time.'
+    : 'You are invited for this question only and will not persist: nothing you say now will be handed back to you later unless someone writes it to the board.');
   if (agent.systemPrompt) lines.push(agent.systemPrompt);
   lines.push('Reply with the text of ONE commons post, plainly, no preamble. If you cannot answer from what you were handed, say what you would need.');
   const system = lines.join('\n\n');

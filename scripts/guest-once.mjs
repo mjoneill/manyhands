@@ -28,10 +28,25 @@ const opt = (k) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : nu
 const has = (k) => args.includes(k);
 const BOARD = process.env.SCRUM_BOARD_URL || 'http://127.0.0.1:3141';
 const agentFile = opt('--agent');
-if (!agentFile) { console.error('usage: guest-once.mjs --agent <file.json> [--dry-run] [--once-id <messageId>]'); process.exit(2); }
-const agent = JSON.parse(fs.readFileSync(agentFile, 'utf8'));
-const stateFile = process.env.SCRUM_GUEST_STATE_FILE || path.join(path.dirname(agentFile), `.${agent.seatKey}.guest-state.json`);
+const seatArg = opt('--seat');
+if (!agentFile && !seatArg) { console.error('usage: guest-once.mjs (--agent <file.json> | --seat <seatKey>) [--dry-run] [--once-id <messageId>]'); process.exit(2); }
 const dry = has('--dry-run');
+// #1199 — the agent can be a BOARD ENTITY rather than a file: `--seat gizmo`
+// reads /api/agents?seat=gizmo and runs its CURRENT prompt version, whose id
+// goes into the model-call ledger row so "which prompt wrote that post" holds.
+let agent;
+if (seatArg) {
+  const r = await fetch(`${BOARD}/api/agents?seat=${encodeURIComponent(seatArg)}`);
+  const list = r.ok ? await r.json() : [];
+  if (!list.length) { console.error(`no agent with seatKey "${seatArg}" on ${BOARD} — agent_create it, or pass --agent <file>`); process.exit(2); }
+  const a = list[0];
+  if (a.state === 'retired') { console.error(`${seatArg} is retired; not waking it`); process.exit(2); }
+  agent = { seatKey: a.seatKey, name: a.name, systemPrompt: a.prompt?.body ?? '', promptVersion: a.prompt?.id ?? null,
+    contextPolicy: a.contextPolicy, residency: a.residency, budgetPerDay: a.budgetPerDay ?? undefined, model: a.model };
+} else {
+  agent = JSON.parse(fs.readFileSync(agentFile, 'utf8'));
+}
+const stateFile = process.env.SCRUM_GUEST_STATE_FILE || (agentFile ? path.join(path.dirname(agentFile), `.${agent.seatKey}.guest-state.json`) : path.join(process.cwd(), `.${agent.seatKey}.guest-state.json`));
 
 const get = async (p) => { const r = await fetch(`${BOARD}${p}`); if (!r.ok) throw new Error(`GET ${p} → ${r.status}`); return r.json(); };
 const post = async (body) => {

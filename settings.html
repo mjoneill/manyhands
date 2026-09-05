@@ -337,6 +337,30 @@
   </div><!-- /.wrap -->
 </div><!-- /[data-page-shell] -->
 
+
+<!-- #1199 — AGENTS. A colleague defined inside manyhands: seat key, model, a
+     VERSIONED prompt, grants, budget, residency. Editing the prompt mints a
+     version; it never overwrites. -->
+<section id="agents-panel">
+  <h2>Agents</h2>
+  <p class="sub prose">A colleague defined on this board. Its job lives only in its prompt and its tool grants. Editing the prompt makes a new version; the old one stays, so the board can always say which prompt wrote which post.</p>
+  <div id="agents-list"></div>
+  <details><summary>Define a new agent</summary>
+    <label>Seat key <input id="agent-seat" placeholder="guest" aria-label="Seat key"></label>
+    <label>Name <input id="agent-name" placeholder="Guest" aria-label="Name"></label>
+    <label>Model <input id="agent-model" placeholder="gemma4:26b" aria-label="Model id"></label>
+    <label>Protocol <select id="agent-protocol" aria-label="Protocol"><option>ollama-native</option><option>openai-completions</option><option>mlx</option></select></label>
+    <label>Base URL <input id="agent-baseurl" placeholder="http://localhost:11434" aria-label="Base URL"></label>
+    <label>Residency <select id="agent-residency" aria-label="Residency"><option>guest</option><option>resident</option></select></label>
+    <label>Context <select id="agent-context" aria-label="Context policy"><option>thread</option><option>artifact-only</option></select></label>
+    <label>Budget per day <input id="agent-budget" type="number" min="0" step="0.01" placeholder="(none)" aria-label="Budget per day"></label>
+    <label>Prompt <textarea id="agent-prompt" rows="5" aria-label="System prompt"></textarea></label>
+    <button id="agent-create" class="btn">Create agent</button>
+    <div class="msg" id="agents-msg"></div>
+    <p class="live">Stored as <code>scrum:Agent</code> + <code>scrum:AgentPromptVersion 1</code>. No key is ever stored: name an env var in <code>apiKeyRef</code> if the provider needs one.</p>
+  </details>
+</section>
+
 <script>
 const $ = (id) => document.getElementById(id);
 const msg = (text, ok) => { const m = $('msg'); m.textContent = text; m.className = 'msg ' + (ok ? 'ok' : 'err'); };
@@ -558,6 +582,49 @@ $('roster-save').addEventListener('click', async () => {
   }
   $('roster-save').disabled = false;
 });
+
+
+// ── #1199 — agents panel ──────────────────────────────────────────────────
+function agentsMsg(text, ok) { const m = $('agents-msg'); m.textContent = text; m.className = 'msg ' + (ok ? 'ok' : 'err'); }
+function agentRow(a) {
+  const row = document.createElement('div'); row.className = 'agent-row'; row.setAttribute('data-agent-seat', a.seatKey);
+  row.innerHTML = `<strong>${a.emoji ? a.emoji + ' ' : ''}${a.name}</strong> <code>${a.seatKey}</code> · ${a.modelId || '?'} · ${a.residency} · ${a.state} · prompt v${a.prompt ? a.prompt.version : '?'} (${a.promptVersions} version${a.promptVersions === 1 ? '' : 's'})${a.budgetPerDay != null ? ` · budget ${a.budgetPerDay}/day` : ''}
+    <details><summary>Prompt</summary><textarea rows="5" aria-label="Prompt text for ${a.seatKey}" data-agent-prompt>${(a.prompt && a.prompt.body) || ''}</textarea>
+    <button class="btn" data-agent-version>Save as new version</button></details>`;
+  row.querySelector('[data-agent-version]').addEventListener('click', async () => {
+    const body = row.querySelector('[data-agent-prompt]').value;
+    const res = await fetch(`/api/agents/${encodeURIComponent(a.seatKey)}/prompt`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ body, by: 'michael' }) });
+    const out = await res.json().catch(() => ({}));
+    if (res.ok) { agentsMsg(`Saved as version ${out.prompt && out.prompt.version} for ${a.seatKey}.`, true); loadAgents(); }
+    else agentsMsg('Rejected: ' + (out.error || res.status), false);
+  });
+  return row;
+}
+async function loadAgents() {
+  try {
+    const agents = await (await fetch('/api/agents')).json();
+    const list = $('agents-list'); list.innerHTML = '';
+    if (!agents.length) { list.textContent = 'No agents defined yet.'; return; }
+    for (const a of agents) list.appendChild(agentRow(a));
+  } catch (e) { agentsMsg('Could not load agents: ' + e.message, false); }
+}
+$('agent-create').addEventListener('click', async () => {
+  $('agent-create').disabled = true;
+  try {
+    const budget = $('agent-budget').value;
+    const res = await fetch('/api/agents', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+      seatKey: $('agent-seat').value.trim(), name: $('agent-name').value.trim(), prompt: $('agent-prompt').value,
+      model: { model: $('agent-model').value.trim(), protocol: $('agent-protocol').value, baseUrl: $('agent-baseurl').value.trim() || undefined },
+      residency: $('agent-residency').value, contextPolicy: $('agent-context').value,
+      budgetPerDay: budget === '' ? undefined : Number(budget), by: 'michael',
+    }) });
+    const out = await res.json().catch(() => ({}));
+    if (res.ok) { agentsMsg(`Created ${out.seatKey} with prompt version 1.`, true); loadAgents(); }
+    else agentsMsg('Rejected: ' + (out.error || res.status), false);
+  } catch (e) { agentsMsg('Create failed: ' + e.message, false); }
+  $('agent-create').disabled = false;
+});
+loadAgents();
 
 loadRosterEditor();
 
