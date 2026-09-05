@@ -21,7 +21,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { callModel } from '../core/model-adapter.mjs';
-import { findMentions, guestOnce, fetchBoundedChanges } from '../core/guest-loop.mjs';
+import { findMentions, guestOnce, fetchBoundedChanges, shouldMarkAnswered } from '../core/guest-loop.mjs';
 
 const args = process.argv.slice(2);
 const opt = (k) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : null; };
@@ -86,11 +86,22 @@ const ledgerSink = dry ? null : async (row) => {
   if (!r.ok) throw new Error(`POST /api/model-calls → ${r.status}`);
   return r.json();
 };
+// The board's REST blocks for tens of seconds during a graph sync under load
+// (measured 20–66 s on 2026-09-05). A budget read that gives up at the first
+// stall halts the loop for a reason that has nothing to do with the budget, so:
+// a bounded wait, and one retry, before "unreadable" is allowed to mean halt.
 const spentToday = async (seat) => {
   const since = new Date(); since.setUTCHours(0, 0, 0, 0);
-  const r = await fetch(`${BOARD}/api/model-calls?agent=${encodeURIComponent(seat)}&since=${since.toISOString()}`);
-  if (!r.ok) throw new Error(`GET /api/model-calls → ${r.status}`);
-  return r.json();
+  const url = `${BOARD}/api/model-calls?agent=${encodeURIComponent(seat)}&since=${since.toISOString()}`;
+  let last;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const r = await fetch(url, { signal: AbortSignal.timeout(90_000) });
+      if (!r.ok) throw new Error(`GET /api/model-calls → ${r.status}`);
+      return r.json();
+    } catch (e) { last = e; if (attempt === 0) await new Promise((res) => setTimeout(res, 5_000)); }
+  }
+  throw last;
 };
 
 const r = await guestOnce({
@@ -99,5 +110,8 @@ const r = await guestOnce({
   post,
   log: (l) => console.log(l), onError: (l) => console.error(l),
 });
-if (!dry) fs.writeFileSync(stateFile, JSON.stringify({ lastAnsweredId: wake.id, at: new Date().toISOString(), posted: r.posted, reason: r.reason ?? null }, null, 2));
+// Advance the cursor only on an outcome that settles the mention; a halt leaves
+// it owed, so the next run finds it again (shouldMarkAnswered, tested).
+if (!dry && shouldMarkAnswered(r)) fs.writeFileSync(stateFile, JSON.stringify({ lastAnsweredId: wake.id, at: new Date().toISOString(), posted: r.posted, reason: r.reason ?? null }, null, 2));
+else if (!dry) console.log(`[#1201] ${agent.seatKey}: mention ${wake.id} still owed (${r.reason ?? 'halted'}) — cursor not advanced`);
 console.log(JSON.stringify({ posted: r.posted, reason: r.reason ?? 'delivered', postId: r.postId ?? null, wake: wake.id }));

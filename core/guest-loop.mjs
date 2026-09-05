@@ -103,6 +103,20 @@ export async function fetchBoundedChanges(get, since, { limit = 20 } = {}) {
   return Array.isArray(r.body?.changes) ? r.body.changes : [];
 }
 
+/**
+ * #1201 — which outcomes ADVANCE the wake cursor. A wake is "answered" when the
+ * agent posted, or when the model definitively failed on it (retrying the same
+ * prompt would fail the same way). A HALT is neither: the budget could not be
+ * read, or was breached — the mention is still owed, and the next run must
+ * find it again. Measured 2026-09-05 on prod: a halt on an unreadable ledger
+ * advanced the cursor and the guest never returned to the mention.
+ */
+export function shouldMarkAnswered(result) {
+  if (!result) return false;
+  if (result.halted) return false;
+  return result.posted === true || result.reason === 'model-failed' || result.reason === 'empty-reply';
+}
+
 function appendLedger(file, row) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.appendFileSync(file, JSON.stringify(row) + '\n');

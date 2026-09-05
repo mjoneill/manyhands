@@ -131,7 +131,7 @@ test('#1201 FRONT DOOR: a mention on a real board → the agent\'s post appears 
 
 test('#1201 the runnable form exists and uses the loop: scripts/guest-once.mjs imports guestOnce and findMentions', () => {
   const src = fs.readFileSync(new URL('../scripts/guest-once.mjs', import.meta.url), 'utf8');
-  assert.match(src, /import \{ findMentions, guestOnce, fetchBoundedChanges \} from '\.\.\/core\/guest-loop\.mjs'/);
+  assert.match(src, /import \{ findMentions, guestOnce, fetchBoundedChanges, shouldMarkAnswered \} from '\.\.\/core\/guest-loop\.mjs'/);
   assert.match(src, /guestOnce\(\{/);
   assert.match(src, /--dry-run/);
 });
@@ -147,4 +147,14 @@ test('#1201 fetchBoundedChanges honours CURSOR_TOO_OLD by asking again from the 
   const rows = await fetchBoundedChanges(get, '2026-01-01T00:00:00.000Z');
   assert.equal(rows.length, 1); assert.equal(calls.length, 2, 'exactly one retry');
   await assert.rejects(() => fetchBoundedChanges(get, '2027-01-01T00:00:00.000Z'), /changes 500/);
+});
+
+test('#1201 the wake cursor advances only on a settled outcome: posted or a definitive model failure — never on a HALT', async () => {
+  const { shouldMarkAnswered } = await import('../core/guest-loop.mjs');
+  assert.equal(shouldMarkAnswered({ posted: true }), true);
+  assert.equal(shouldMarkAnswered({ posted: false, reason: 'model-failed' }), true);
+  assert.equal(shouldMarkAnswered({ posted: false, reason: 'empty-reply' }), true);
+  assert.equal(shouldMarkAnswered({ posted: false, halted: true, reason: 'budget-unreadable: fetch failed' }), false, 'measured on prod: a halt advanced the cursor and the mention was never answered');
+  assert.equal(shouldMarkAnswered({ posted: false, halted: true, reason: 'budget-breached' }), false);
+  assert.equal(shouldMarkAnswered({ posted: false, reason: 'post-failed' }), false, 'a failed post is retryable');
 });
