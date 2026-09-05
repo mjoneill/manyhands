@@ -47,10 +47,24 @@ test('#1214 deriving ENTITY_KINDS loses nothing the event log already accepted',
   }
 });
 
-test('#1214 the derived set adds only `kind` — a silent addition is as bad as a loss', () => {
+// Every event kind added SINCE #1214, listed deliberately. This is the guard
+// that makes a new kind a decision rather than a side effect: adding one to the
+// registry fails this test until someone writes the kind's name here and, with
+// it, accepts that replay and the collection map now carry it.
+//
+// It fired for real on the first customer: #1206 added `procedure` and this
+// test went red the same minute, which is the behaviour it was written for.
+const ENTITY_KINDS_ADDED_SINCE = [
+  'kind',      // #1214 — the registry's own entry
+  'request',   // #1217 — a refusal whose route maps to no entity kind
+  'procedure', // #1206 — a repeatable method, versioned (slice 1 of #1205)
+];
+
+test('#1214 the derived set adds only DECLARED new kinds — a silent addition is as bad as a loss', () => {
   const added = [...ENTITY_KINDS].filter((k) => !ENTITY_KINDS_BEFORE_1214.includes(k));
-  assert.deepEqual(added.sort(), ['kind', 'request'],
-    'the only new event kind this card introduces is the registry\'s own');
+  assert.deepEqual(added.sort(), [...ENTITY_KINDS_ADDED_SINCE].sort(),
+    'a new event kind must be named here as well as declared in the registry — otherwise the '
+    + 'vocabulary the write path accepts can grow without anyone deciding that it should');
 });
 
 test('#1214 the replay mapping is unchanged for every pre-existing kind', () => {
@@ -61,9 +75,16 @@ test('#1214 the replay mapping is unchanged for every pre-existing kind', () => 
   }
 });
 
-test('#1214 no kind is mapped to a collection the event log did not have', () => {
+// A new collection is not free: replay upserts into `data[key]`, so a kind that
+// names a collection nobody initialises rebuilds into a store shape the rest of
+// the code does not expect. Same discipline as the kinds list — declare it here
+// on purpose, or the map grows without a decision.
+const COLLECTIONS_ADDED_SINCE = { procedure: 'procedures' }; // #1206
+
+test('#1214 a kind maps only to a collection replay knows, or one declared new here', () => {
   for (const [kind, collection] of Object.entries(COLLECTION_OF)) {
-    assert.equal(COLLECTION_BEFORE_1214[kind], collection,
+    const expected = COLLECTION_BEFORE_1214[kind] ?? COLLECTIONS_ADDED_SINCE[kind];
+    assert.equal(expected, collection,
       `"${kind}" claims collection "${collection}" which replay does not know about`);
   }
 });
@@ -116,8 +137,12 @@ test('#1214 divergence names a declared kind with ZERO instances — the census 
 });
 
 test('#1214 divergence reports a graph-registered kind the runtime does not accept, and does not throw', () => {
-  const d = divergence([{ name: 'scrum:Procedure' }], [...PROJECTED_TYPES]);
-  assert.deepEqual(d.registeredNotDeclared, ['scrum:Procedure'],
+  // ⚠️ This fixture must name a kind THIS BUILD GENUINELY DOES NOT HAVE. It
+  // said `scrum:Procedure` until #1206 declared that kind for real, at which
+  // point the test went red — correctly, because its premise had expired. A
+  // fixture that quietly becomes true is a check that stops checking.
+  const d = divergence([{ name: 'scrum:NotAThingThisBuildKnows' }], [...PROJECTED_TYPES]);
+  assert.deepEqual(d.registeredNotDeclared, ['scrum:NotAThingThisBuildKnows'],
     'a seat registering a kind this build cannot project is a REAL state to announce (#1215), '
     + 'not an error to refuse — refusing would make the seat lose the definition it wrote');
 });

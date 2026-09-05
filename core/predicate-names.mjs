@@ -50,6 +50,16 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:KindDefinition': null,             // the type; minted by the projection
   'scrum:createdByVerb': 'scrum:createdByVerb', // the verb that makes one
   'scrum:eventKind': 'scrum:eventKind',     // the entity.kind the event log writes
+  // ── #1206 — research: procedures, their versions, and the runs that use them
+  'scrum:Procedure': null,                  // the type; minted by the projection
+  'scrum:ProcedureVersion': null,           // the type; minted by the projection
+  'scrum:ofProcedure': 'scrum:ofProcedure', // version → procedure (the of<Thing> house shape)
+  'scrum:body': 'scrum:body',               // a procedure version's text
+  'scrum:performedUsing': 'scrum:performedUsing', // run → the VERSION it followed
+  'scrum:contentHash': 'scrum:contentHash', // artifact integrity; pointer + hash, never payload
+  'schema:contentUrl': 'schema:contentUrl', // where the artifact bytes live
+  'schema:encodingFormat': 'schema:encodingFormat',
+  'prov:generated': 'prov:generated',       // run → artifact. ⚠️ NOT emitted by projectActivities.
   // ── #1118 — obligations (what a seat promised), born in the graph ────────
   'scrum:Obligation': null,                 // the type; minted by the projection
   'scrum:owedBy': 'scrum:owedBy',           // → person: IRI

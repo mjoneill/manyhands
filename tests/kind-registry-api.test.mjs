@@ -37,12 +37,18 @@ const board = () => makeBoardFixture({
   nextShortId: 2,
 });
 
-const PROCEDURE = {
-  name: 'scrum:Procedure',
-  definition: 'A repeatable method a seat can follow, stored as text with versions — the skill '
-    + 'itself rather than a record of one run. NOT a Run: a Run is the prov:Activity that '
-    + 'performed a Procedure at a moment.',
-  createdBy: 'procedure_create',
+// A kind this build genuinely does NOT declare — the case these tests exist for.
+//
+// ⚠️ It named `scrum:Procedure` until #1206 declared that kind for real, and
+// these tests went red the same minute. Correct: the fixture's premise had
+// expired. Whatever name sits here must stay absent from KIND_DECLARATIONS, so
+// it is deliberately not a thing anyone would plausibly build.
+const FOREIGN_KIND = {
+  name: 'scrum:NotAThingThisBuildKnows',
+  definition: 'A kind registered by a seat that this build has no declaration for. It exists to '
+    + 'prove the board accepts and REPORTS such a registration rather than refusing it — refusing '
+    + 'would make the seat lose the definition it took the trouble to write.',
+  createdBy: 'kind_register',
   by: 'ada',
 };
 
@@ -71,24 +77,24 @@ test('#1214 registering a kind is a write with an author, and reads back', async
   const s = await startRestServer({ board: board() });
   t.after(() => s.stop());
 
-  const created = await api(s.baseUrl, 'POST', '/api/kinds', PROCEDURE);
+  const created = await api(s.baseUrl, 'POST', '/api/kinds', FOREIGN_KIND);
   assert.equal(created.status, 201, JSON.stringify(created.body));
-  assert.equal(created.body.name, 'scrum:Procedure');
-  assert.equal(created.body.createdBy, 'procedure_create');
+  assert.equal(created.body.name, 'scrum:NotAThingThisBuildKnows');
+  assert.equal(created.body.createdBy, FOREIGN_KIND.createdBy);
   assert.equal(created.body.registeredBy, 'ada');
 
-  const back = await api(s.baseUrl, 'GET', '/api/kinds?name=scrum:Procedure');
+  const back = await api(s.baseUrl, 'GET', '/api/kinds?name=scrum:NotAThingThisBuildKnows');
   assert.equal(back.body.length, 1, 'a successful response is not a write — read it back');
-  assert.equal(back.body[0].definition, PROCEDURE.definition);
+  assert.equal(back.body[0].definition, FOREIGN_KIND.definition);
 });
 
 test('#1214 re-registering REVISES one entity rather than minting a second row', async (t) => {
   const s = await startRestServer({ board: board() });
   t.after(() => s.stop());
 
-  await api(s.baseUrl, 'POST', '/api/kinds', PROCEDURE);
+  await api(s.baseUrl, 'POST', '/api/kinds', FOREIGN_KIND);
   const revised = await api(s.baseUrl, 'POST', '/api/kinds', {
-    ...PROCEDURE,
+    ...FOREIGN_KIND,
     definition: 'A repeatable method stored as text with versions. Revised: names the verb that '
       + 'runs it, so a reader need not guess which tool performs a Procedure.',
     by: 'bo',
@@ -140,7 +146,7 @@ test('#1214 board status reports declared, registered and instantiated as THREE 
   const s = await startRestServer({ board: board() });
   t.after(() => s.stop());
 
-  await api(s.baseUrl, 'POST', '/api/kinds', PROCEDURE);
+  await api(s.baseUrl, 'POST', '/api/kinds', FOREIGN_KIND);
   const st = await api(s.baseUrl, 'GET', '/api/board/status');
   assert.equal(st.status, 200);
   const k = st.body.kinds;
@@ -148,10 +154,10 @@ test('#1214 board status reports declared, registered and instantiated as THREE 
   assert.ok(k.declaredCount >= 25);
   assert.equal(k.registeredCount, 1);
 
-  // scrum:Procedure was registered by a seat and is NOT in this build's module.
+  // scrum:NotAThingThisBuildKnows was registered by a seat and is NOT in this build's module.
   // That is a real state to announce, never an error to refuse — refusing would
   // make the seat lose the definition it took the trouble to write.
-  assert.ok(k.registeredNotDeclared.includes('scrum:Procedure'),
+  assert.ok(k.registeredNotDeclared.includes('scrum:NotAThingThisBuildKnows'),
     'a kind the graph knows and the runtime does not must be VISIBLE');
 
   // And the inverse: everything the runtime knows that nobody has written down.

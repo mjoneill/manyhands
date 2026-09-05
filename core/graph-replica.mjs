@@ -153,6 +153,20 @@ export const GRAPH_VOCABULARY = new Set([
   // refusal: the guard rejects any term absent from this set, so a registry the
   // graph cannot be asked about would be a registry nobody can find.
   'scrum:KindDefinition', 'scrum:createdByVerb', 'scrum:eventKind',
+  // #1206 — research vocabulary (slice 1 of #1205). A Procedure is the method,
+  // a ProcedureVersion is its text at a moment, and a Run is a prov:Activity
+  // carrying scrum:op "research" — NOT a new class, because "everything that
+  // happened" must stay one query.
+  //
+  // ⇒ scrum:ofProcedure, NOT scrum:procedureOf as the card proposed. This board
+  // already has seven of<Thing> predicates (ofCard, ofMemory, ofMint, ofPlaylist,
+  // ofPrompt, ofSilence, ofWork) and zero of the reverse spelling. A second
+  // shape for one relationship is the defect the card itself warned about one
+  // line earlier ("do not invent a second versioning shape") — it just named
+  // the version link in the shape it was warning against.
+  'scrum:Procedure', 'scrum:ProcedureVersion', 'scrum:ofProcedure',
+  'scrum:performedUsing', 'scrum:body', 'scrum:contentHash',
+  'schema:contentUrl', 'schema:encodingFormat',
   // #1118 — obligations: what a seat promised, born in the graph
   'scrum:Obligation', 'scrum:owedBy', 'scrum:obligationKind',
   'scrum:dischargedBy', 'scrum:dischargedAt',
@@ -1288,6 +1302,81 @@ function projectEntity(store, e) {
       projectObligation(store, e);
     } else if (t === 'scrum:Wake') {
       projectWake(store, e);
+    } else if (t === 'schema:CreativeWork' && e['schema:contentUrl']) {
+      // #1206 — AN ARTIFACT a run produced or consumed: a transcript, a notes
+      // file, a report. ⛔ POINTER + HASH, NEVER PAYLOAD. The graph says where
+      // the bytes are and what they hashed to; the bytes stay on disk. Putting
+      // a 30 KB transcript in the store would make every query that touches an
+      // artifact pay for it, and the store is not a filesystem.
+      //
+      // Guarded on contentUrl so this does NOT capture the CreativeWork face
+      // that every card already projects — same class, different role, and
+      // swallowing cards here would be silent.
+      const s_ = nn(e['@id']);
+      add(s_, A, nn(SC + 'CreativeWork'));
+      add(s_, nn(SC + 'contentUrl'), lit(e['schema:contentUrl']));
+      if (e['schema:encodingFormat']) add(s_, nn(SC + 'encodingFormat'), lit(e['schema:encodingFormat']));
+      if (e['scrum:contentHash']) add(s_, nn(S + 'contentHash'), lit(e['scrum:contentHash']));
+      if (e.name) add(s_, nn(SC + 'name'), lit(e.name));
+      if (e.dateCreated) add(s_, nn(SC + 'dateCreated'), lit(e.dateCreated));
+    } else if (t === 'prov:Activity') {
+      // #1206 — A RUN. Deliberately the same class the event log already
+      // projects for every mutation (projectActivities), distinguished by
+      // scrum:op. Minting scrum:Run beside it would make "everything that
+      // happened here" two queries and guarantee one of them gets forgotten.
+      //
+      // ⚠️ The op values differ in KIND, and that is the point of the negative
+      // control in the tests: projectActivities writes the EVENT ops
+      // (create/update/delete/post/redact), a closed vocabulary validated on
+      // the write path. "research" is a DOMAIN op and can never come from the
+      // event log, so  selects runs
+      // and cannot accidentally select the ~19,900 write activities.
+      const s_ = nn(e['@id']);
+      const PR = IRI.prov;
+      add(s_, A, nn(PR + 'Activity'));
+      if (e['scrum:op']) add(s_, nn(S + 'op'), lit(e['scrum:op']));
+      if (e['prov:startedAtTime']) add(s_, nn(PR + 'startedAtTime'), lit(e['prov:startedAtTime']));
+      if (e['prov:endedAtTime']) add(s_, nn(PR + 'endedAtTime'), lit(e['prov:endedAtTime']));
+      for (const who of [].concat(e['prov:wasAssociatedWith'] ?? [])) {
+        add(s_, nn(PR + 'wasAssociatedWith'), nn(String(who).startsWith('http') ? who : P + who));
+      }
+      // SOURCES consumed and ARTIFACTS produced. Both are pointers — a URL and
+      // a hash — never payload: the graph says WHERE the bytes are and what
+      // they hashed to, and the bytes stay on disk.
+      for (const src of [].concat(e['prov:used'] ?? [])) {
+        add(s_, nn(PR + 'used'), nn(String(src).startsWith('http') ? src : E + src));
+      }
+      for (const out of [].concat(e['prov:generated'] ?? [])) {
+        add(s_, nn(PR + 'generated'), nn(String(out).startsWith('http') ? out : E + out));
+      }
+      // The VERSION followed, never the Procedure — so the run stays readable
+      // after the method is improved.
+      const used = e['scrum:performedUsing'];
+      if (used) add(s_, nn(S + 'performedUsing'), nn(String(used).startsWith('http') ? used : E + used));
+    } else if (t === 'scrum:Procedure' || t === 'scrum:ProcedureVersion') {
+      // #1206 — the method, and its text at a moment. Mirrors
+      // TendingPrompt/TendingPromptVersion rather than inventing a second
+      // versioning shape: identity is stable, wording is versioned beside it,
+      // and a Run names the VERSION it followed so the run stays readable after
+      // the method is improved.
+      const s_ = nn(e['@id']);
+      // Emitted by NAME rather than derived from the type string: the
+      // declaration test scans this source for what the replica emits, and a
+      // computed type is invisible to it. A term nothing can see emitted reads
+      // as a stale declaration, which is the drift that test exists to catch.
+      if (t === 'scrum:Procedure') add(s_, A, nn(S + 'Procedure'));
+      else add(s_, A, nn(S + 'ProcedureVersion'));
+      if (e.name) add(s_, nn(SC + 'name'), lit(e.name));
+      if (e['scrum:body']) add(s_, nn(S + 'body'), lit(e['scrum:body']));
+      // The version → identity link. An @id that is already an IRI is used as
+      // one; a bare uuid names a board entity.
+      const of = e['scrum:ofProcedure'];
+      if (of) add(s_, nn(S + 'ofProcedure'), nn(String(of).startsWith('http') ? of : E + of));
+      if (e['schema:creator'] || e['scrum:registeredBy']) {
+        add(s_, nn(SC + 'creator'), nn(P + (e['schema:creator'] ?? e['scrum:registeredBy'])));
+      }
+      if (e.dateCreated) add(s_, nn(SC + 'dateCreated'), lit(e.dateCreated));
+      if (e.dateModified) add(s_, nn(SC + 'dateModified'), lit(e.dateModified));
     } else if (t === 'scrum:KindDefinition') {
       // #1214 — "what kinds of thing live in this graph, and how do I make one"
       // answered IN the graph. Deliberately the same shape as the predicate

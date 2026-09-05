@@ -198,6 +198,29 @@ export const KIND_DECLARATIONS = Object.freeze([
       + 'not of kinds — the distinction that made this registry necessary: 470 DefinedTerms could '
       + 'not answer "what kinds of thing live here".',
   },
+  // ── research: procedures, their versions, and the runs that perform them ──
+  // #1206 (slice 1 of #1205). Registered THROUGH this file rather than beside
+  // it — the registry's first customer, which is the order #1214 hoped for.
+  {
+    name: 'scrum:Procedure', eventKind: 'procedure', collection: 'procedures',
+    createdBy: 'procedure_create',
+    definition: 'A repeatable method a seat can follow, named and stable — the SKILL itself. '
+      + 'NOT a record of doing it: that is a Run. NOT the text either, which is versioned beside '
+      + 'it as a ProcedureVersion, so improving the wording does not rewrite what past runs '
+      + 'actually followed. The identity/version split is the same one TendingPrompt uses.',
+  },
+  {
+    name: 'scrum:ProcedureVersion', eventKind: null, collection: null,
+    createdBy: 'procedure_version_create',
+    definition: 'One revision of a Procedure\'s text, linked to its Procedure by scrum:ofProcedure. '
+      + 'A Run names the VERSION it followed, never the Procedure, so a run stays readable after '
+      + 'the method is improved — the difference between "what we do now" and "what was done".',
+  },
+  // A Run is deliberately NOT a new class. It is a prov:Activity, the same kind
+  // the board already writes for every mutation, distinguished by scrum:op.
+  // Minting scrum:Run beside it would put two shapes under one idea and make
+  // "everything that happened" two queries instead of one.
+
   // ── apex and provenance ───────────────────────────────────────────────────
   {
     name: 'scrum:Apex', eventKind: null, collection: null,
