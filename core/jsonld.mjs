@@ -313,6 +313,11 @@ const isDecision = (entity) => entity && entity['@type'] === 'scrum:Decision';
 // memories or decisions it happens to resemble.
 const isPredicateDefinition = (entity) => entity && entity['@type'] === 'scrum:PredicateDefinition';
 const isKindDefinition = (entity) => entity && entity['@type'] === 'scrum:KindDefinition';
+const isProcedure = (e) => e && (e['@type'] === 'scrum:Procedure' || e['@type'] === 'scrum:ProcedureVersion');
+const isRun = (e) => e && e['@type'] === 'prov:Activity' && typeof e['scrum:op'] === 'string';
+// ⚠️ Guarded on contentUrl: every CARD also projects a schema:CreativeWork
+// face, and swallowing cards into `artifacts` would be silent and total.
+const isArtifact = (e) => e && e['@type'] === 'schema:CreativeWork' && typeof e['schema:contentUrl'] === 'string';
 // #1118 — obligations are their own class: "what did this seat promise" is a
 // filter over promises, not over memories or decisions that mention one.
 const isObligation = (entity) => entity && entity['@type'] === 'scrum:Obligation';
@@ -403,7 +408,7 @@ export const CONTEXT_RANGE = Object.freeze(Object.fromEntries(
 export function domainToJsonLd(domain) {
   const {
     nodes = [], messages = [], people = [], columns = [],
-    tending = [], memories = [], decisions = [], predicates = [], kinds = [], obligations = [], wakes = [], labelAliases = [], _unmodelled = [], _README, ...meta
+    tending = [], memories = [], decisions = [], predicates = [], kinds = [], procedures = [], runs = [], artifacts = [], obligations = [], wakes = [], labelAliases = [], _unmodelled = [], _README, ...meta
   } = domain;
   const doc = {};
   if (_README !== undefined) doc._README = _README;   // first key — JSON.stringify keeps insertion order
@@ -431,6 +436,13 @@ export function domainToJsonLd(domain) {
     // 33 of them. A registry nobody can query from the graph is a registry in
     // name only.
     ...kinds,
+    // #1207 — procedures, runs and the artifacts they point at. Learned from
+    // #1214: a collection absent from THIS list is readable over REST and
+    // invisible to the graph, which is a registry (or a provenance record)
+    // in name only.
+    ...procedures,
+    ...runs,
+    ...artifacts,
     ...obligations,
     ...wakes,
     // #804 — entities of a class this projection does not model ride through
@@ -488,6 +500,13 @@ export function jsonLdToDomain(doc) {
   // #1214 — same rule again, and the same absence-preserving behaviour.
   const kinds = graph.filter(isKindDefinition);
   if (kinds.length) domain.kinds = kinds;
+  // #1207 — same absence-preserving rule again.
+  const procedures = graph.filter(isProcedure);
+  if (procedures.length) domain.procedures = procedures;
+  const runs = graph.filter(isRun);
+  if (runs.length) domain.runs = runs;
+  const artifacts = graph.filter(isArtifact);
+  if (artifacts.length) domain.artifacts = artifacts;
   // #1118 — same rule again.
   const obligations = graph.filter(isObligation);
   if (obligations.length) domain.obligations = obligations;
@@ -498,6 +517,7 @@ export function jsonLdToDomain(doc) {
   const unmodelled = graph.filter(
     (e) => !isCard(e) && !isMessage(e) && !isPerson(e) && !isColumn(e) && !isTending(e)
       && !isMemory(e) && !isDecision(e) && !isPredicateDefinition(e) && !isKindDefinition(e)
+      && !isProcedure(e) && !isRun(e) && !isArtifact(e)
       && !isObligation(e) && !isWake(e),
   );
   if (unmodelled.length) domain._unmodelled = unmodelled;

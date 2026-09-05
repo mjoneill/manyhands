@@ -58,6 +58,8 @@ const ENTITY_KINDS_ADDED_SINCE = [
   'kind',      // #1214 — the registry's own entry
   'request',   // #1217 — a refusal whose route maps to no entity kind
   'procedure', // #1206 — a repeatable method, versioned (slice 1 of #1205)
+  'run',       // #1207 — one performance of a procedure (projects as prov:Activity)
+  'artifact',  // #1207 — a file a run used or produced; pointer + hash, never payload
 ];
 
 test('#1214 the derived set adds only DECLARED new kinds — a silent addition is as bad as a loss', () => {
@@ -79,7 +81,10 @@ test('#1214 the replay mapping is unchanged for every pre-existing kind', () => 
 // names a collection nobody initialises rebuilds into a store shape the rest of
 // the code does not expect. Same discipline as the kinds list — declare it here
 // on purpose, or the map grows without a decision.
-const COLLECTIONS_ADDED_SINCE = { procedure: 'procedures' }; // #1206
+const COLLECTIONS_ADDED_SINCE = {
+  procedure: 'procedures', // #1206
+  run: 'runs', artifact: 'artifacts', // #1207
+};
 
 test('#1214 a kind maps only to a collection replay knows, or one declared new here', () => {
   for (const [kind, collection] of Object.entries(COLLECTION_OF)) {

@@ -221,6 +221,25 @@ export const KIND_DECLARATIONS = Object.freeze([
   // Minting scrum:Run beside it would put two shapes under one idea and make
   // "everything that happened" two queries instead of one.
 
+  {
+    name: null, eventKind: 'run', collection: 'runs',
+    createdBy: 'run_create / POST /api/runs',
+    definition: 'A RUN: one performance of a Procedure at a moment. Projected as a prov:Activity '
+      + 'carrying scrum:op, NOT as a class of its own — "everything that happened here" must stay one '
+      + 'query. It names the VERSION it followed (scrum:performedUsing), what it consumed '
+      + '(prov:used, which may be a URL outside this board) and what it produced (prov:generated, '
+      + 'which must exist here). Its `by` is ONE initiating actor; participants are the many-seat '
+      + 'relation, and the two are deliberately not merged (#1193).',
+  },
+  {
+    name: null, eventKind: 'artifact', collection: 'artifacts',
+    createdBy: 'artifact_add / POST /api/artifacts',
+    definition: 'A file a run consumed or produced, held as a POINTER AND A HASH and never as a '
+      + 'payload: contentUrl says where the bytes are, contentHash says what they were when '
+      + 'recorded. Board state is snapshotted on every write, so bytes stored here would be paid '
+      + 'for again on every later write, forever. Projects as schema:CreativeWork.',
+  },
+
   // ── apex and provenance ───────────────────────────────────────────────────
   {
     name: 'scrum:Apex', eventKind: null, collection: null,

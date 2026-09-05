@@ -38,7 +38,7 @@ import { loadDomain, saveDomain } from './core/store.mjs';
 import { cardContentKey } from './core/card-content-key.mjs';
 import { applyApexLabels, APEX_PREFIX, descendantIds as apexDescendantIds } from './core/apex-labels.mjs';
 import { inFlight } from './core/in-flight.mjs';
-import { appendEvent, ENTITY_KINDS } from './core/event-log.mjs';
+import { appendEvent, ENTITY_KINDS, EVENT_OPS } from './core/event-log.mjs';
 import { KIND_DECLARATIONS, PROJECTED_TYPES, divergence } from './core/kind-registry.mjs';
 import { shortenTypeIri } from './core/jsonld.mjs';
 // #805 — the boot migration's inputs (the live flat sources) and its builder.
@@ -2642,6 +2642,307 @@ function resolveNodeId(data, ref, extraIds = new Set()) {
     Array.isArray(data.memories) ? data.memories : []];
   for (const pool of pools) if (pool.some((e) => e && e['@id'] === s)) return s;
   return null;
+}
+
+// ── #1207 (slice 2 of #1205) — THE RESEARCH WRITE VERBS ────────────────────
+//
+// A card PATCH cannot say "this run generated that file". These verbs can.
+// #1206 registered the words; this is the write path that uses them.
+//
+// ⚠️ THE ACTOR IS NOT THE PARTICIPANTS, and the verb must not merge them.
+// `by` is ONE declared initiating writer — the lesson of #1193, applied at
+// birth rather than retrofitted. `participants` is the many-seat relation and
+// projects as prov:wasAssociatedWith. The graph already keeps these apart;
+// collapsing them into one list would make "who ran this" and "who was in the
+// room" the same question, and they are not.
+const PROCEDURE_ID = () => `https://scrumboard.local/procedure/${crypto.randomUUID()}`;
+const PROCEDURE_VERSION_ID = () => `https://scrumboard.local/procedure-version/${crypto.randomUUID()}`;
+const RUN_ID = () => `https://scrumboard.local/activity/run-${crypto.randomUUID()}`;
+const ARTIFACT_ID = () => `https://scrumboard.local/artifact/${crypto.randomUUID()}`;
+
+// ⛔ A POINTER, NEVER A PAYLOAD. Board state is snapshotted on EVERY write
+// (board-data-events/), so a PDF pasted into a node is that PDF once per later
+// write, forever. 4 KB is generous for a note and refuses a file.
+const ARTIFACT_BODY_LIMIT = 4096;
+
+const proceduresOf = (data) => (Array.isArray(data.procedures) ? data.procedures : []);
+const runsOf = (data) => (Array.isArray(data.runs) ? data.runs : []);
+const artifactsOf = (data) => (Array.isArray(data.artifacts) ? data.artifacts : []);
+
+const procedureEvent = (op, e, actor) => ({
+  op, actor, entity: { kind: 'procedure', id: e['@id'] }, state: e,
+});
+const runEvent = (op, e, actor) => ({
+  op, actor, entity: { kind: 'run', id: e['@id'] }, state: e,
+});
+const artifactEvent = (e, actor) => ({
+  op: 'create', actor, entity: { kind: 'artifact', id: e['@id'] }, state: e,
+});
+
+const procedureToWire = (e) => ({
+  id: e['@id'], name: e.name, createdBy: e['schema:creator'], createdAt: e.dateCreated,
+});
+const procedureVersionToWire = (e) => ({
+  id: e['@id'], name: e.name, body: e['scrum:body'],
+  ofProcedure: e['scrum:ofProcedure'], createdBy: e['schema:creator'], createdAt: e.dateCreated,
+});
+const runToWire = (e) => ({
+  id: e['@id'], op: e['scrum:op'], startedAt: e['prov:startedAtTime'],
+  performedUsing: e['scrum:performedUsing'] ?? null,
+  used: e['prov:used'] ?? [], generated: e['prov:generated'] ?? [],
+  participants: e['prov:wasAssociatedWith'] ?? [],
+});
+const artifactToWire = (e) => ({
+  id: e['@id'], name: e.name, contentUrl: e['schema:contentUrl'],
+  encodingFormat: e['schema:encodingFormat'] ?? null, contentHash: e['scrum:contentHash'] ?? null,
+});
+
+/** The one declared writer. Declared, not authenticated (#125). */
+function requireBy(body) {
+  const by = typeof body.by === 'string' && body.by.trim() ? body.by.trim() : null;
+  return by || null;
+}
+
+async function handleCreateProcedure(req, res) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const by = requireBy(body);
+    if (!by) return sendJSON(res, 400, { error: 'by is required — who wrote this procedure. Declared, not authenticated.' });
+    const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim() : null;
+    if (!name) return sendJSON(res, 400, { error: 'name is required — what this method is called, e.g. "research a YouTube video"' });
+    const text = typeof body.body === 'string' && body.body.trim() ? body.body : null;
+    if (!text) {
+      return sendJSON(res, 400, {
+        error: 'body is required — the METHOD ITSELF, in words a seat can follow. A procedure with '
+          + 'no text is a name, and a run pointing at it would record that a method was followed '
+          + 'without recording which one.',
+      });
+    }
+    const result = await withWriteLock(async () => {
+      const data = readBoard();
+      const now = new Date().toISOString();
+      // Identity and text are SEPARATE entities, the #1189 pattern: improving
+      // the wording must not rewrite what past runs actually followed.
+      const proc = {
+        '@id': PROCEDURE_ID(), '@type': 'scrum:Procedure',
+        name, 'schema:creator': by, dateCreated: now,
+      };
+      const version = {
+        '@id': PROCEDURE_VERSION_ID(), '@type': 'scrum:ProcedureVersion',
+        name: `${name} v1`, 'scrum:body': text,
+        'scrum:ofProcedure': proc['@id'], 'schema:creator': by, dateCreated: now,
+      };
+      data.procedures = [...proceduresOf(data), proc, version];
+      writeBoard(data, [procedureEvent('create', proc, by), procedureEvent('create', version, by)]);
+      return { status: 201, wire: { ...procedureToWire(proc), version: procedureVersionToWire(version) } };
+    });
+    sendJSON(res, result.status, result.wire);
+  } catch (e) {
+    console.error('POST /api/procedures:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+
+async function handleCreateProcedureVersion(req, res) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const by = requireBy(body);
+    if (!by) return sendJSON(res, 400, { error: 'by is required — who revised this. Declared, not authenticated.' });
+    const text = typeof body.body === 'string' && body.body.trim() ? body.body : null;
+    if (!text) return sendJSON(res, 400, { error: 'body is required — the revised method text' });
+    const result = await withWriteLock(async () => {
+      const data = readBoard();
+      const proc = proceduresOf(data).find(
+        (e) => e['@type'] === 'scrum:Procedure' && (e['@id'] === body.procedure || e.name === body.procedure),
+      );
+      if (!proc) {
+        return { status: 400, wire: { error: `no such procedure ${JSON.stringify(body.procedure ?? null)} — `
+          + 'create it first (POST /api/procedures / procedure_create), then revise it' } };
+      }
+      const n = proceduresOf(data).filter((e) => e['scrum:ofProcedure'] === proc['@id']).length + 1;
+      const version = {
+        '@id': PROCEDURE_VERSION_ID(), '@type': 'scrum:ProcedureVersion',
+        name: `${proc.name} v${n}`, 'scrum:body': text,
+        'scrum:ofProcedure': proc['@id'], 'schema:creator': by,
+        dateCreated: new Date().toISOString(),
+      };
+      // The IDENTITY IS UNTOUCHED — no dateModified on the Procedure. A past run
+      // still resolves to the version it named.
+      data.procedures = [...proceduresOf(data), version];
+      writeBoard(data, [procedureEvent('create', version, by)]);
+      return { status: 201, wire: procedureVersionToWire(version) };
+    });
+    sendJSON(res, result.status, result.wire);
+  } catch (e) {
+    console.error('POST /api/procedure-versions:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+
+async function handleCreateRun(req, res) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const by = requireBy(body);
+    if (!by) {
+      return sendJSON(res, 400, { error: 'by is required — ONE declared initiating actor. Not the '
+        + 'participant list: `participants` is the many-seat relation, and merging them would make '
+        + '"who ran this" and "who was in the room" the same question (#1193).' });
+    }
+    const op = typeof body.op === 'string' && body.op.trim() ? body.op.trim() : null;
+    if (!op) return sendJSON(res, 400, { error: 'op is required — what kind of run this is, e.g. "research"' });
+    // ⛔ EVENT_OPS is the write path's closed vocabulary. A run op that collided
+    // with one would make every write activity answer a run query — the exact
+    // negative control #1206 asserts. Refuse the collision at the door.
+    if (EVENT_OPS.has(op)) {
+      return sendJSON(res, 400, { error: `op ${JSON.stringify(op)} is reserved: it is an EVENT op, and a run `
+        + 'carrying it would be indistinguishable from the board\'s own writes in every query that '
+        + 'asks "what runs have happened". Choose a domain verb like "research".' });
+    }
+    const result = await withWriteLock(async () => {
+      const data = readBoard();
+      let performedUsing = null;
+      if (body.performedUsing) {
+        const v = proceduresOf(data).find(
+          (e) => e['@type'] === 'scrum:ProcedureVersion' && e['@id'] === body.performedUsing,
+        );
+        if (!v) {
+          return { status: 400, wire: { error: `no such procedure version ${JSON.stringify(body.performedUsing)} — `
+            + 'a run that followed no version is unattributable method, the same class as an unstamped '
+            + 'write. Create the procedure first, then pass the VERSION id it returns.' } };
+        }
+        performedUsing = v['@id'];
+      }
+      const used = [];
+      for (const ref of [].concat(body.used ?? [])) {
+        const id = resolveNodeId(data, ref);
+        // A source that resolves to nothing is kept as a LITERAL rather than
+        // refused: a run's source is often a URL outside this board, and
+        // refusing it would push provenance back into prose.
+        used.push(id ?? String(ref));
+      }
+      const entity = {
+        '@id': RUN_ID(), '@type': 'prov:Activity',
+        'scrum:op': op,
+        'prov:startedAtTime': new Date().toISOString(),
+        'prov:wasAssociatedWith': [...new Set([by, ...[].concat(body.participants ?? [])])],
+        ...(used.length ? { 'prov:used': used } : {}),
+        ...(performedUsing ? { 'scrum:performedUsing': performedUsing } : {}),
+      };
+      data.runs = [...runsOf(data), entity];
+      writeBoard(data, [runEvent('create', entity, by)]);
+      return { status: 201, wire: runToWire(entity) };
+    });
+    sendJSON(res, result.status, result.wire);
+  } catch (e) {
+    console.error('POST /api/runs:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+
+async function handleAddArtifact(req, res) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const by = requireBy(body);
+    if (!by) return sendJSON(res, 400, { error: 'by is required. Declared, not authenticated.' });
+    const contentUrl = typeof body.contentUrl === 'string' && body.contentUrl.trim() ? body.contentUrl.trim() : null;
+    if (!contentUrl) {
+      return sendJSON(res, 400, { error: 'contentUrl is required — WHERE the bytes are. The graph points at '
+        + 'an artifact and does not contain it.' });
+    }
+    // ⛔ THE REFUSAL THAT MATTERS. Board state is snapshotted on every write, so
+    // a payload here is paid for on every later write, forever.
+    if (typeof body.body === 'string' && Buffer.byteLength(body.body, 'utf8') > ARTIFACT_BODY_LIMIT) {
+      return sendJSON(res, 400, {
+        error: `body is ${Buffer.byteLength(body.body, 'utf8')} bytes, over the ${ARTIFACT_BODY_LIMIT}-byte limit. `
+          + 'An artifact is a POINTER AND A HASH, never a payload: board state is snapshotted on every '
+          + 'write, so a file pasted into a node is that file again on every write that follows it. '
+          + 'Put the bytes on disk and pass contentUrl + contentHash.',
+      });
+    }
+    const result = await withWriteLock(async () => {
+      const data = readBoard();
+      const runIdx = runsOf(data).findIndex((r) => r['@id'] === body.run);
+      if (runIdx < 0) {
+        return { status: 400, wire: { error: `no such run ${JSON.stringify(body.run ?? null)} — `
+          + 'create the run first (POST /api/runs / run_create)' } };
+      }
+      const artifact = {
+        '@id': ARTIFACT_ID(), '@type': 'schema:CreativeWork',
+        name: typeof body.name === 'string' ? body.name : contentUrl.split('/').pop(),
+        'schema:contentUrl': contentUrl,
+        ...(body.encodingFormat ? { 'schema:encodingFormat': String(body.encodingFormat) } : {}),
+        // The hash is what a later reader uses to detect the file MOVED or
+        // changed. Without it, contentUrl is a promise nobody can check.
+        ...(body.contentHash ? { 'scrum:contentHash': String(body.contentHash) } : {}),
+        dateCreated: new Date().toISOString(),
+      };
+      const run = { ...runsOf(data)[runIdx] };
+      run['prov:generated'] = [...new Set([...(run['prov:generated'] ?? []), artifact['@id']])];
+      data.artifacts = [...artifactsOf(data), artifact];
+      data.runs = runsOf(data).map((r, i) => (i === runIdx ? run : r));
+      // TWO events: the artifact is its own entity and must rebuild from the
+      // log, and the run changed. Logging only the run would leave the
+      // artifact unreplayable — the gap #805 named for tending.
+      writeBoard(data, [artifactEvent(artifact, by), runEvent('update', run, by)]);
+      return { status: 201, wire: { ...artifactToWire(artifact), run: run['@id'] } };
+    });
+    sendJSON(res, result.status, result.wire);
+  } catch (e) {
+    console.error('POST /api/artifacts:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+
+async function handleRunGenerated(req, res) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const by = requireBy(body);
+    if (!by) return sendJSON(res, 400, { error: 'by is required. Declared, not authenticated.' });
+    const result = await withWriteLock(async () => {
+      const data = readBoard();
+      const runIdx = runsOf(data).findIndex((r) => r['@id'] === body.run);
+      if (runIdx < 0) return { status: 400, wire: { error: `no such run ${JSON.stringify(body.run ?? null)}` } };
+      const refs = [].concat(body.nodes ?? []);
+      if (!refs.length) return { status: 400, wire: { error: 'nodes is required — what this run produced' } };
+      const resolved = []; const dangling = [];
+      for (const ref of refs) {
+        const id = resolveNodeId(data, ref);
+        if (id) resolved.push(id); else dangling.push(String(ref));
+      }
+      if (dangling.length) {
+        // Refused, unlike `used`: a run GENERATING something that does not
+        // exist is a claim about this board that this board can disprove.
+        return { status: 400, wire: { error: `these do not resolve to nodes on this board: ${dangling.join(', ')}. `
+          + 'A run may USE an outside source, but what it GENERATED must exist here.' } };
+      }
+      const run = { ...runsOf(data)[runIdx] };
+      run['prov:generated'] = [...new Set([...(run['prov:generated'] ?? []), ...resolved])];
+      data.runs = runsOf(data).map((r, i) => (i === runIdx ? run : r));
+      writeBoard(data, [runEvent('update', run, by)]);
+      return { status: 200, wire: runToWire(run) };
+    });
+    sendJSON(res, result.status, result.wire);
+  } catch (e) {
+    console.error('POST /api/runs/generated:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+
+function handleListProcedures(req, res) {
+  const data = readBoard();
+  const all = proceduresOf(data);
+  const out = all.filter((e) => e['@type'] === 'scrum:Procedure').map((p) => ({
+    ...procedureToWire(p),
+    versions: all.filter((v) => v['scrum:ofProcedure'] === p['@id']).map(procedureVersionToWire),
+  }));
+  sendJSON(res, 200, out);
+}
+
+function handleListRuns(req, res) {
+  const q = parseQuery(req.url);
+  let out = runsOf(readBoard()).map(runToWire);
+  if (q.op) out = out.filter((r) => r.op === q.op);
+  sendJSON(res, 200, out);
 }
 
 // ── #1118 slice C — WAKES: the one time-shaped fact attached to a seat ─────
@@ -6706,6 +7007,15 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/decisions$/,            fn: (req, res) => handleCreateDecision(req, res) },
   { method: 'GET',    re: /^\/api\/wakes$/,                fn: (req, res) => handleListWakes(req, res) },
   { method: 'POST',   re: /^\/api\/wakes$/,                fn: (req, res) => handleCreateWake(req, res) },
+  // #1207 — the research write verbs. A card PATCH cannot say "this run
+  // generated that file"; these can.
+  { method: 'GET',    re: /^\/api\/procedures$/,           fn: (req, res) => handleListProcedures(req, res) },
+  { method: 'POST',   re: /^\/api\/procedures$/,           fn: (req, res) => handleCreateProcedure(req, res) },
+  { method: 'POST',   re: /^\/api\/procedure-versions$/,   fn: (req, res) => handleCreateProcedureVersion(req, res) },
+  { method: 'GET',    re: /^\/api\/runs$/,                 fn: (req, res) => handleListRuns(req, res) },
+  { method: 'POST',   re: /^\/api\/runs$/,                 fn: (req, res) => handleCreateRun(req, res) },
+  { method: 'POST',   re: /^\/api\/runs\/generated$/,      fn: (req, res) => handleRunGenerated(req, res) },
+  { method: 'POST',   re: /^\/api\/artifacts$/,            fn: (req, res) => handleAddArtifact(req, res) },
   { method: 'GET',    re: /^\/api\/obligations$/,          fn: (req, res) => handleListObligations(req, res) },
   { method: 'POST',   re: /^\/api\/obligations$/,          fn: (req, res) => handleCreateObligation(req, res) },
   { method: 'PATCH',  re: /^\/api\/obligations\/([^\/]+)$/, fn: (req, res, m) => handleUpdateObligation(req, res, m[1]) },

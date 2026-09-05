@@ -1327,6 +1327,89 @@ function buildMcpServer() {
     return jsonResult(await apiCall('GET', `/api/predicates${q}`));
   });
 
+  // ── #1207 — THE RESEARCH WRITE VERBS ──────────────────────────────────────
+  mcp.registerTool('procedure_create', {
+    description: 'Create a PROCEDURE — a repeatable method, with its first version (#1207). The '
+      + 'identity and the TEXT are separate entities on purpose: revising the wording adds a '
+      + 'version and leaves the identity alone, so a past run still resolves to what was actually '
+      + 'followed rather than to whatever the method says now.',
+    inputSchema: {
+      name: z.string().min(1).describe('What this method is called, e.g. "research a YouTube video"'),
+      body: z.string().min(1).describe('The METHOD ITSELF, in words a seat can follow. A name without text is a run pointing at nothing.'),
+      by: z.string().min(1).describe('Who wrote it. Declared, not authenticated.'),
+    },
+  }, async ({ name, body, by }) => jsonResult(await apiCall('POST', '/api/procedures', { name, body, by })));
+
+  mcp.registerTool('procedure_version_create', {
+    description: 'Revise a procedure (#1207): adds a NEW VERSION and leaves the identity untouched. '
+      + 'Never edits the old text — runs that named it must stay readable.',
+    inputSchema: {
+      procedure: z.string().min(1).describe('The procedure id, or its exact name'),
+      body: z.string().min(1).describe('The revised method text'),
+      by: z.string().min(1).describe('Who revised it'),
+    },
+  }, async ({ procedure, body, by }) => jsonResult(await apiCall('POST', '/api/procedure-versions', { procedure, body, by })));
+
+  mcp.registerTool('run_create', {
+    description: 'Record a RUN — one performance of a procedure (#1207). Projected as a prov:Activity '
+      + 'carrying scrum:op, NOT a class of its own, so "everything that happened here" stays one '
+      + 'query. ⚠️ `by` is ONE initiating actor and `participants` is the many-seat relation; they '
+      + 'are deliberately not merged, because "who ran this" and "who was in the room" are different '
+      + 'questions (#1193). An op that collides with an event op (create/update/…) is refused: a run '
+      + 'carrying one would be indistinguishable from the board\'s own writes.',
+    inputSchema: {
+      op: z.string().min(1).describe('What kind of run, e.g. "research"'),
+      by: z.string().min(1).describe('ONE declared initiating actor'),
+      participants: z.array(z.string()).optional().describe('Other seats involved → prov:wasAssociatedWith'),
+      performedUsing: z.string().optional().describe('The procedure VERSION id followed (not the procedure)'),
+      used: z.array(z.string()).optional().describe('Sources consumed. A card/node ref resolves; an outside URL is kept as a literal.'),
+    },
+  }, async (a) => jsonResult(await apiCall('POST', '/api/runs', a)));
+
+  mcp.registerTool('artifact_add', {
+    description: 'Attach a file a run produced or consumed (#1207). ⛔ POINTER AND HASH, NEVER PAYLOAD: '
+      + 'contentUrl says where the bytes are, contentHash says what they were when recorded. Board '
+      + 'state is snapshotted on every write, so bytes stored here are paid for again on every later '
+      + 'write, forever — a body over 4 KB is refused for that reason.',
+    inputSchema: {
+      run: z.string().min(1).describe('The run id'),
+      contentUrl: z.string().min(1).describe('WHERE the bytes are, e.g. file:///research/…'),
+      encodingFormat: z.string().optional().describe('Media type, e.g. text/markdown'),
+      contentHash: z.string().optional().describe('sha256:<hex> — what a later reader uses to detect the file moved'),
+      name: z.string().optional(),
+      // ⚠️ DECLARED SO THE REFUSAL IS REACHABLE. The REST handler refuses a
+      // body over 4 KB and explains why; if the tool did not accept the field
+      // at all, a caller pasting a transcript would have it silently dropped
+      // and would never learn the rule. #1163's guard caught exactly this:
+      // a handler dependency the tool could not reach.
+      body: z.string().optional().describe('A short note ABOUT the artifact (≤4 KB). ⛔ NOT the file contents — pass contentUrl + contentHash; a payload here is refused and told why.'),
+      by: z.string().min(1).describe('Who attached it'),
+    },
+  }, async (a) => jsonResult(await apiCall('POST', '/api/artifacts', a)));
+
+  mcp.registerTool('run_generated', {
+    description: 'Say what a run PRODUCED on this board (#1207) — cards, comment threads, any node. '
+      + 'A run may USE a source outside this board, but what it GENERATED must exist here, so an '
+      + 'unresolvable node is refused rather than stored as a literal.',
+    inputSchema: {
+      run: z.string().min(1).describe('The run id'),
+      nodes: z.array(z.union([z.string(), z.number()])).describe('Card shortIds or node ids this run produced'),
+      by: z.string().min(1).describe('Who is recording this'),
+    },
+  }, async (a) => jsonResult(await apiCall('POST', '/api/runs/generated', a)));
+
+  mcp.registerTool('run_list', {
+    description: 'List runs (#1207), optionally by op. "What research have we done" is this call, or '
+      + 'the graph query `?r a prov:Activity ; scrum:op "research"`.',
+    inputSchema: { op: z.string().optional().describe('Only runs with this op, e.g. "research"') },
+  }, async ({ op } = {}) => jsonResult(await apiCall('GET', `/api/runs${op ? `?op=${encodeURIComponent(op)}` : ''}`)));
+
+  mcp.registerTool('procedure_list', {
+    description: 'List procedures with their versions (#1207) — the methods this board knows how to '
+      + 'follow, and how each has changed.',
+    inputSchema: {},
+  }, async () => jsonResult(await apiCall('GET', '/api/procedures')));
+
   // ── #1214 — THE KIND REGISTRY ─────────────────────────────────────────────
   mcp.registerTool('kind_register', {
     description: 'Register (or revise) an ENTITY KIND — what this CLASS of thing is, and the verb '
