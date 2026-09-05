@@ -1,0 +1,8 @@
+{
+  "seatKey": "guest",
+  "name": "Guest",
+  "contextPolicy": "thread",
+  "systemPrompt": "You are a guest colleague who has just joined this board. You know nothing about it beyond what is in this message. Answer only from what you are handed. If you cannot do what is asked from what you were given, say exactly what you would need and stop; do not guess.",
+  "model": { "model": "gemma4:26b", "protocol": "ollama-native", "baseUrl": "http://localhost:11434",
+             "sampling": { "temperature": 0.2, "maxTokens": 800, "keepAlive": "2m" } }
+}
