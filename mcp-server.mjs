@@ -1070,7 +1070,7 @@ function buildMcpServer() {
     //
     // ⛔ NOT A SILENT SUBSTITUTION. The declared name is preserved as
     // `onBehalfOf` rather than discarded, because relaying is a real act here —
-    // seats relay each other and @michael constantly, and a fix that quietly
+    // seats relay each other and the operator constantly, and a fix that quietly
     // rewrote a relay into a first-person claim would replace impersonation
     // with a subtler falsehood.
     //
@@ -2057,14 +2057,55 @@ const whisperTick = async () => {
     console.error(`[#613] seat-state unreadable, tending proceeds unfiltered: ${e?.message ?? e}`);
   }
 
+  // #1189 — THE WORDS COME FROM THE GRAPH, and they are fetched HERE, before
+  // the tick, for the same reason `lastActivityAt` and `eligibility` are: the
+  // mint runs inside a deliberately await-free critical section, and the board
+  // document is ~55 MB, so resolving the pool inside it would block the event
+  // loop for the whole parse.
+  //
+  // ⛔ FAIL CLOSED, and this is the OPPOSITE of the seat-state gate above —
+  // deliberately. There, "I could not ask" must not become "nobody is
+  // available", so it fails open. Here, "I could not read the pool" must not
+  // become "send the words baked into the source", because those are exactly
+  // the words the operator may have just edited or disabled. Sending stale content
+  // is the defect this card exists to fix; a skipped window is recoverable and
+  // self-heals on the next tick.
+  let graphPool = null;
+  try {
+    graphPool = await apiCall('GET', '/api/tending/whispers');
+  } catch (e) {
+    console.error(`[#1189] whisper pool unreadable — SKIPPING this window rather than sending stale words: ${e?.message ?? e}`);
+    return null;
+  }
+  const poolEntries = (graphPool?.whispers ?? []);
+  if (poolEntries.length === 0) {
+    // Not an error. Every whisper disabled is a state the operator can choose, and
+    // silence is the correct rendering of it.
+    return null;
+  }
+
   return tendingTick({
     now: new Date().toISOString(),
-    // Re-read per firing, exactly like `tendingEnabled` — so a change @michael
+    // Re-read per firing, exactly like `tendingEnabled` — so a change the operator
     // makes in Settings applies to the very next tick, with no restart.
     quietAfterMinutes: quietAfterMinutes(),
     lastActivityAt: () => activityAt,
-    mint: mintOnce,
+    // The pool and the shuffle flag both come from the graph, per firing, so a
+    // change made in Settings applies to the very next tick.
+    mint: ({ now: n }) => mintOnce({ now: n, pool: poolEntries, shuffle: graphPool?.shuffle === true }),
     post: (body) => apiCall('POST', '/api/conversations', body),
+    // #1189 — every firing becomes a graph fact. Best-effort and AFTER the
+    // post: the whisper reaching the room is the deliverable, and a mint that
+    // fails to record must not suppress it. The failure is logged rather than
+    // swallowed, because an unrecorded firing is exactly the 393-vs-1 gap and
+    // it must not re-open silently.
+    onMinted: (prompt, reached) => apiCall('POST', '/api/tending/mints', {
+      window: prompt?.window,
+      mintedAt: prompt?.mintedAt,
+      versionId: prompt?.versionId ?? null,
+      reached: reached ?? [],
+      by: 'board',
+    }).catch((e) => console.error(`[#1189] firing not recorded in the graph: ${e?.message ?? e}`)),
     reachedSeats: liveSeats,
     // #613 — the stored no. Read fresh per firing, like the switch above, so a
     // seat that declares at 10:59 is honoured by the 11:00 window.

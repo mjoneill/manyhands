@@ -189,12 +189,52 @@ export function recentWhispers(file = whisperStateFilePath()) {
  * whispered in is a normal, healthy outcome — it is what a busy room looks like.
  * Keyed together, the first quiet-but-busy hour would suppress the next send.
  */
-export function mintOnce({ now, file = whisperStateFilePath(), pool = null, periodMs = HOUR_MS }) {
+
+/**
+ * #1189 —the window's whisper from either shape of pool.
+ *
+ * Entries may be plain strings (the legacy pool) or graph records carrying
+ * `{ body, slug, versionId }`. The graph shape is the one that matters: a mint
+ * that records only text cannot say which entity produced it, which is the
+ * 393-firings-against-1-TendingMint gap reproduced with better words.
+ *
+ * ⛔ SHUFFLE SELECTS OVER THE ALREADY-RESOLVED POOL. The pool arrives filtered
+ * (disabled prompts removed upstream), so there is no path where a disabled
+ * whisper can be drawn and rejected afterwards — that failure would be
+ * intermittent and read as a ghost.
+ */
+function mintFromPool({ pool, now, periodMs, shuffle, rand }) {
+  const window = windowAt(now, periodMs);
+  const items = (Array.isArray(pool) ? pool : [])
+    .map((p) => (typeof p === 'string'
+      ? { body: p, slug: null, versionId: null }
+      : { body: p?.body, slug: p?.slug ?? null, versionId: p?.versionId ?? null }))
+    .filter((p) => typeof p.body === 'string' && p.body.trim());
+  if (items.length === 0) return null;
+  const idx = shuffle
+    ? Math.min(items.length - 1, Math.max(0, Math.floor(rand() * items.length)))
+    // The existing deterministic rotation, unchanged: same window, same words,
+    // so a re-read of the history is reproducible.
+    : Math.floor(Date.parse(window) / periodMs) % items.length;
+  const chosen = items[idx];
+  return { window, body: chosen.body, mintedAt: now, slug: chosen.slug, versionId: chosen.versionId };
+}
+
+export function mintOnce({
+  now, file = whisperStateFilePath(), pool = null, periodMs = HOUR_MS,
+  shuffle = false, rand = Math.random,
+}) {
   // ── critical section: no await from here to the write ──────────────────
+  //
+  // ⚠️ #1189 — `pool` is RESOLVED BY THE CALLER and injected, never read from
+  // the board document here. The document is ~55 MB; parsing it inside a
+  // deliberately await-free section would block the event loop for the whole
+  // parse. The caller fetches the pool before entering, which is what the
+  // `pool` parameter was already for.
   const window = windowAt(now, periodMs);
   const d = readRaw(file);
   if (d.lastMintedWindow === window) return null;
-  const prompt = mintPrompt({ pool: pool ?? readPool(), now, periodMs });
+  const prompt = mintFromPool({ pool: pool ?? readPool(), now, periodMs, shuffle, rand });
   if (!prompt) return null;
   atomicWrite(file, { ...d, lastMintedWindow: window, lastMintedAt: now });
   // ── end critical section ───────────────────────────────────────────────

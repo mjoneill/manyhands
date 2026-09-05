@@ -43,6 +43,9 @@ import { appendEvent } from './core/event-log.mjs';
 import { readPool, recentWhispers, DEFAULT_POOL, poolFilePath } from './whisper-store.mjs';
 import { readTendingConfig, writeTendingConfig } from './tending-config.mjs';
 import { buildTendingEntities } from './core/tending-bootstrap.mjs';
+import { resolvePool as resolveWhisperPool } from './core/tending-pool.mjs';
+import { mintId } from './core/tending-ids.mjs';
+import { createPrompt, editPrompt, setEnabled, reorderPlaylist, removePrompt, setShuffle, readShuffle } from './core/tending-authoring.mjs';
 import { resolveProvenance } from './core/tending-provenance.mjs';
 import { boardToDomain, domainToBoard, cardToNode } from './core/mapping.mjs';
 import { verifyShaIntegrity, readShaStamp, collectShas, SHA_POPULATION } from './core/sha-integrity.mjs';
@@ -3249,7 +3252,7 @@ function bumpCardVersion(card) {
  *
  * ⇒ So the rule is DATA, not code. Today the declared map canonicalises the
  * hyphen variants onto `building scrum board` — the DEPRECATED token, which
- * contradicts @michael's ruling (decision 681628ca: the project is
+ * contradicts the operator's ruling (decision 681628ca: the project is
  * `manyhands`). Fixing the map is the owner half of #1050. When it is fixed
  * this starts producing `manyhands` with no change here.
  *
@@ -4405,7 +4408,7 @@ async function handleSetConfig(req, res) {
 // already persisted and already live-reloaded by the MCP tick — but only a seat
 // could change it. The Value Steward's disqualifier is explicit:
 //
-//   "A control @michael cannot reach. 'Editable by any seat' is a TOOL surface.
+//   "A control the operator cannot reach. 'Editable by any seat' is a TOOL surface.
 //    He is not a seat."
 //
 // And his own words: "there was no way for me to set the time intervals… part of
@@ -4438,6 +4441,104 @@ async function handleSetTendingConfig(req, res) {
   } catch (e) {
     console.error('POST /api/tending-config:', e.message);
     sendJSON(res, 500, { error: 'Failed to save tending config' });
+  }
+}
+
+// ── /api/tending/whispers (#1189) — the whispers themselves, as graph entities ──
+//
+// ⛔ WHY NOT EXTEND `whisper_pool`. That tool already writes the pool and takes
+// `string[]`. Routing the operator's editor through it was the fast path and it is
+// the one thing this card forbids: a bare string has no identity, so every save
+// would discard the version lineage, the authorship, the evidence links and the
+// authorship ruling recorded on 2026-08-15 — while looking like it worked,
+// because the room would still receive a whisper. The words would survive and
+// everything that makes them ATTRIBUTABLE would not.
+//
+// Same shape as /api/tending-config directly above: loopback trust, validate
+// then persist, 400 carrying the validator's own message. The authoring rules
+// live in core/tending-authoring.mjs so they are testable without a server, and
+// writeTendingEntities() enforces version immutability at the write seam — an
+// edit that tried to redefine an existing version fails loudly here rather than
+// replacing a node other entities point at.
+function tendingEntities() { return readBoard().tending || []; }
+
+function sendWhispers(res, code = 200) {
+  const ents = tendingEntities();
+  sendJSON(res, code, { whispers: resolveWhisperPool(ents), shuffle: readShuffle(ents) });
+}
+
+/** Apply a pure authoring op under the write lock, then answer with the pool. */
+async function applyTendingOp(req, res, op) {
+  try {
+    const raw = await readBody(req);
+    const body = raw ? JSON.parse(raw) : {};
+    const at = new Date().toISOString();
+    const result = await withWriteLock(async () => {
+      try {
+        const next = op(tendingEntities(), body, at);
+        writeTendingEntities(next, { actor: body.by || null, op: 'update' });
+        return { ok: true };
+      } catch (e) {
+        // The authoring module throws for OPERATOR error (unknown slug, blank
+        // body, a reorder that would silently delete). Those are 400s carrying
+        // the message verbatim — the same contract as the config route, and the
+        // reason those messages are written to be read by a person.
+        return { error: e?.message ?? String(e) };
+      }
+    });
+    if (result.error) return sendJSON(res, 400, { error: result.error });
+    sendWhispers(res);
+  } catch (e) {
+    console.error('tending whispers:', e.message);
+    sendJSON(res, 500, { error: 'Failed to save whisper' });
+  }
+}
+
+// ── POST /api/tending/mints (#1189) — a firing becomes a graph fact ──
+//
+// ⛔ THIS IS THE 393-vs-1 FIX, and it is the whole reason the card exists. The
+// board sent 393 whispers and the graph recorded ONE mint, because the mint was
+// only ever written by #805's one-off import of legacy history. A system whose
+// firings leave no trace in the graph is a system the graph merely DESCRIBES —
+// and a description nobody writes to goes stale without any signal that it has.
+//
+// The mint records which PROMPT VERSION produced the words. Recording only the
+// text would reproduce the gap with better prose: two versions may legitimately
+// share a body, so text cannot identify the entity that fired.
+async function handleCreateMint(req, res) {
+  try {
+    const raw = await readBody(req);
+    const body = raw ? JSON.parse(raw) : {};
+    const { window, mintedAt } = body;
+    if (!window || !mintedAt) return sendJSON(res, 400, { error: 'window and mintedAt are required' });
+    const at = new Date().toISOString();
+    await withWriteLock(async () => {
+      writeTendingEntities([{
+        '@id': mintId(window, mintedAt),
+        '@type': 'scrum:TendingMint',
+        'scrum:clockWindow': window,
+        'scrum:mintedAt': mintedAt,
+        // The graph entity that produced these words. ABSENT rather than
+        // guessed when the caller could not say — an invented edge here would
+        // be worse than the gap it fills.
+        'scrum:ofPromptVersion': body.versionId || undefined,
+        'scrum:seatNamesWithOpenStreamsAtSend':
+          Array.isArray(body.reached) && body.reached.length
+            ? body.reached.map((k) => `person:${k}`) : undefined,
+        'scrum:importedAt': at,
+      }], { actor: body.by || 'board', op: 'create' });
+    });
+    sendJSON(res, 201, { ok: true, id: mintId(window, mintedAt) });
+  } catch (e) {
+    console.error('POST /api/tending/mints:', e.message);
+    sendJSON(res, 500, { error: 'Failed to record mint' });
+  }
+}
+
+function handleGetWhispers(req, res) {
+  try { sendWhispers(res); } catch (e) {
+    console.error('GET /api/tending/whispers:', e.message);
+    sendJSON(res, 500, { error: 'Failed to read whispers' });
   }
 }
 
@@ -5466,7 +5567,7 @@ function createConversationFromPayload(body) {
     //
     // ⚠️ THIS FIELD IS A RECORD, NOT A PROOF. It says "the caller asked to speak
     // as X", never "X was verified". A relay is a legitimate act in this room —
-    // seats relay each other and @michael constantly — so it is preserved rather
+    // seats relay each other and the operator constantly — so it is preserved rather
     // than refused.
     //
     // ⛔ AND THERE IS DELIBERATELY NO `authorAuthenticated` FLAG HERE, though
@@ -5599,7 +5700,7 @@ function handleListConversations(req, res) {
     // The commons UI has always had a search box. It filtered the messages the
     // client had already LOADED — 50 by default (#210) plus whatever "Load
     // older" had pulled in — and then rendered "No messages match your search."
-    // A corpus-wide negative, asserted from a buffer-local check. @michael read
+    // A corpus-wide negative, asserted from a buffer-local check. the operator read
     // it the only way it can be read ("it routinely finds nothing even when I
     // know those terms exist") and diagnosed it himself: "maybe search is
     // intersecting that [load-older button]." It was.
@@ -6174,6 +6275,15 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/config$/,               fn: (req, res) => handleSetConfig(req, res) },
   // #953 — the tending silence threshold, same trust model as /api/config.
   { method: 'GET',    re: /^\/api\/tending-config$/,       fn: (req, res) => handleGetTendingConfig(req, res) },
+  { method: 'GET',    re: /^\/api\/tending\/whispers$/,     fn: (req, res) => handleGetWhispers(req, res) },
+  { method: 'POST',   re: /^\/api\/tending\/whispers$/,     fn: (req, res) => applyTendingOp(req, res, (e, b, at) => createPrompt(e, { ...b, at })) },
+  { method: 'PATCH',  re: /^\/api\/tending\/whispers\/([^\/]+)$/, fn: (req, res, m) => applyTendingOp(req, res, (e, b, at) => (
+      b.enabled === undefined ? editPrompt(e, { ...b, slug: decodeURIComponent(m[1]), at })
+                              : setEnabled(e, { slug: decodeURIComponent(m[1]), enabled: b.enabled === true }))) },
+  { method: 'DELETE', re: /^\/api\/tending\/whispers\/([^\/]+)$/, fn: (req, res, m) => applyTendingOp(req, res, (e, b, at) => removePrompt(e, { slug: decodeURIComponent(m[1]), at })) },
+  { method: 'POST',   re: /^\/api\/tending\/order$/,        fn: (req, res) => applyTendingOp(req, res, (e, b, at) => reorderPlaylist(e, { slugs: b.slugs, at })) },
+  { method: 'POST',   re: /^\/api\/tending\/shuffle$/,      fn: (req, res) => applyTendingOp(req, res, (e, b, at) => setShuffle(e, { shuffle: b.shuffle === true, at })) },
+  { method: 'POST',   re: /^\/api\/tending\/mints$/,        fn: (req, res) => handleCreateMint(req, res) },
   { method: 'POST',   re: /^\/api\/tending-config$/,       fn: (req, res) => handleSetTendingConfig(req, res) },
   { method: 'POST',   re: /^\/api\/roster$/,               fn: (req, res) => handleSetRoster(req, res) },   // #506
   { method: 'GET',    re: /^\/api\/people$/,               fn: (req, res) => handleListPeople(req, res) },       // #619

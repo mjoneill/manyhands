@@ -60,7 +60,7 @@
  * INVISIBLY, so it is one named, exported, tested function rather than a
  * filter buried in a call site.
  *
- * Decided by @michael 2026-08-20 ("agree. proceed"):
+ * Decided by the operator 2026-08-20 ("agree. proceed"):
  *
  *   COUNT      human comments · agent/seat comments
  *   DO NOT     tending posts · board/system notices
@@ -91,7 +91,7 @@ export function lastQualifyingActivity(messages) {
 }
 
 export async function tendingTick({
-  now, mint, post, reachedSeats = () => [], log = () => {}, onError = () => {},
+  now, mint, post, reachedSeats = () => [], log = () => {}, onError = () => {}, onMinted = null,
   quietAfterMinutes = null, lastActivityAt = null, eligibility = null,
 }) {
   // #953 — THE SILENCE GATE. Before #953 this function took NO room-state
@@ -100,7 +100,7 @@ export async function tendingTick({
   // reported it as "it just emits regardless" and he was right — there was no
   // gate to be broken.
   //
-  // ⭐ ACTIVITY POLICY, decided by @michael 2026-08-20 ("agree. proceed") and
+  // ⭐ ACTIVITY POLICY, decided by the operator 2026-08-20 ("agree. proceed") and
   // NOT chosen here: human and agent/seat comments COUNT; tending posts and
   // board/system notices DO NOT. That second half is load-bearing — the
   // whisper's own post is a message, and if it counted the timer would re-arm
@@ -197,5 +197,15 @@ export async function tendingTick({
     `[#804] tending minted key=${prompt.window}`
     + ` seatNamesWithOpenStreamsAtSend=[${seatNamesWithOpenStreamsAtSend.join(',')}]`,
   );
+  // #1189 — the firing becomes a graph fact. AFTER delivery and deliberately
+  // not awaited: the whisper reaching the room is the deliverable, and a
+  // recording failure must never suppress or delay it. It is also NOT in the
+  // failure path above — an undelivered mint is not a firing, and recording one
+  // would make the graph claim the room was tended when it was not.
+  if (typeof onMinted === 'function') {
+    try { onMinted(prompt, seatNamesWithOpenStreamsAtSend); }
+    catch (e) { onError(`[#1189] mint recording threw: ${e?.message ?? e}`); }
+  }
+
   return { minted: true, delivered: true, key: prompt.window, reason: 'delivered' };
 }

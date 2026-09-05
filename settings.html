@@ -179,6 +179,145 @@
     }());
   </script>
 
+  <!-- #1189 — the whispers themselves. #953 gave him the TIMING; this gives him
+       the WORDS. Same reason, one layer down: the prompts were already
+       versioned graph entities with authorship and provenance, and still only a
+       seat could reach them (through an MCP tool taking bare strings, which
+       would have discarded every one of those properties on save). -->
+  <h2 style="margin-top:28px">The whispers themselves</h2>
+  <p class="sub prose">The actual messages the board sends. Edit one and the next firing uses it — no restart, no deploy, no agent.</p>
+  <div class="card" data-whisper-editor>
+    <div class="row" style="margin-bottom:10px">
+      <label for="whisper-shuffle">Order</label>
+      <select id="whisper-shuffle">
+        <option value="false">In the order below</option>
+        <option value="true">Shuffled</option>
+      </select>
+    </div>
+    <div id="whisper-list"></div>
+    <div class="row" style="align-items:flex-start;gap:8px;margin-top:12px">
+      <input type="text" id="whisper-new-slug" placeholder="short-name" style="width:150px;font:inherit;padding:6px">
+      <textarea id="whisper-new-body" rows="2" placeholder="The new whisper…" style="flex:1;min-width:0;font:inherit;padding:6px"></textarea>
+      <button type="button" id="whisper-add" class="btn">Add</button>
+    </div>
+    <div class="msg" id="whisper-msg"></div>
+    <p class="live">
+      Stored as graph entities, not as a text file. <strong>Editing mints a new version</strong> — the previous
+      wording, its author and its provenance stay readable, so "what was the room running last Tuesday,
+      and who wrote it" stays answerable. Removing a whisper ends its use and keeps its history.
+    </p>
+  </div>
+
+  <script>
+    (function () {
+      const list = document.getElementById('whisper-list');
+      const msg = document.getElementById('whisper-msg');
+      const shuffle = document.getElementById('whisper-shuffle');
+      if (!list) return;
+      let current = [];
+
+      const say = (t, ok) => { msg.textContent = t; msg.style.color = ok ? '' : '#b00'; };
+
+      const send = async (method, url, body) => {
+        const res = await fetch(url, {
+          method,
+          headers: { 'Content-Type': 'application/json' },
+          // Attributed to the SURFACE, not to a person. This page has no
+          // identity mechanism — it is loopback-trusted admin — so naming a
+          // particular someone here would be a guess baked into the source of
+          // a board other people run. `settings` is the one thing actually
+          // known about this write, and it beats sending nothing: an omitted
+          // actor records null, and an anonymity-by-default write path is how
+          // the board came to hold thousands of unattributable edits.
+          body: body === undefined ? undefined : JSON.stringify({ ...body, by: 'settings' }),
+        });
+        const data = await res.json().catch(() => ({}));
+        // The server sends the validator's own message; showing anything else
+        // would hide the one sentence that says what to do differently.
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        return data;
+      };
+
+      const render = (data) => {
+        current = data.whispers || [];
+        shuffle.value = data.shuffle ? 'true' : 'false';
+        list.innerHTML = '';
+        if (!current.length) {
+          list.innerHTML = '<p class="live">No whispers are enabled. The board will stay quiet.</p>';
+          return;
+        }
+        current.forEach((w, i) => {
+          const row = document.createElement('div');
+          row.className = 'row';
+          row.style.cssText = 'align-items:flex-start;gap:8px;margin-bottom:10px';
+          const ta = document.createElement('textarea');
+          ta.value = w.body;
+          ta.rows = 3;
+          ta.style.cssText = 'flex:1;min-width:0;font:inherit;padding:6px';
+          const side = document.createElement('div');
+          side.style.cssText = 'display:flex;flex-direction:column;gap:4px;min-width:96px';
+          const ver = document.createElement('span');
+          ver.className = 'live';
+          ver.textContent = `${w.slug} · v${w.version}`;
+          const save = document.createElement('button');
+          save.className = 'btn'; save.type = 'button'; save.textContent = 'Save';
+          save.onclick = async () => {
+            try { render(await send('PATCH', `/api/tending/whispers/${encodeURIComponent(w.slug)}`, { body: ta.value })); say('Saved — a new version was minted.', true); }
+            catch (e) { say(e.message, false); }
+          };
+          const off = document.createElement('button');
+          off.className = 'btn'; off.type = 'button'; off.textContent = 'Disable';
+          off.onclick = async () => {
+            try { render(await send('PATCH', `/api/tending/whispers/${encodeURIComponent(w.slug)}`, { enabled: false })); say('Disabled. Its history is kept.', true); }
+            catch (e) { say(e.message, false); }
+          };
+          const up = document.createElement('button');
+          up.className = 'btn'; up.type = 'button'; up.textContent = '↑';
+          up.disabled = i === 0;
+          up.onclick = async () => {
+            const slugs = current.map((x) => x.slug);
+            [slugs[i - 1], slugs[i]] = [slugs[i], slugs[i - 1]];
+            try { render(await send('POST', '/api/tending/order', { slugs })); say('Reordered.', true); }
+            catch (e) { say(e.message, false); }
+          };
+          const del = document.createElement('button');
+          del.className = 'btn'; del.type = 'button'; del.textContent = 'Remove';
+          del.onclick = async () => {
+            try { render(await send('DELETE', `/api/tending/whispers/${encodeURIComponent(w.slug)}`)); say('Removed from the playlist; its versions are still readable.', true); }
+            catch (e) { say(e.message, false); }
+          };
+          side.append(ver, save, off, up, del);
+          row.append(ta, side);
+          list.appendChild(row);
+        });
+      };
+
+      shuffle.onchange = async () => {
+        try { render(await send('POST', '/api/tending/shuffle', { shuffle: shuffle.value === 'true' })); say('Saved.', true); }
+        catch (e) { say(e.message, false); }
+      };
+
+      // ⛔ NO NATIVE MODALS. prompt()/confirm() freeze the page for an agent
+      // driving this surface, and there is a test asserting their absence. The
+      // fields are inline for that reason, not for style.
+      document.getElementById('whisper-add').onclick = async () => {
+        const slugEl = document.getElementById('whisper-new-slug');
+        const bodyEl = document.getElementById('whisper-new-body');
+        const slug = (slugEl.value || '').trim();
+        const body = (bodyEl.value || '').trim();
+        if (!slug || !body) return say('A new whisper needs both a short name and some words.', false);
+        try {
+          render(await send('POST', '/api/tending/whispers', { slug, body }));
+          slugEl.value = ''; bodyEl.value = '';
+          say('Added.', true);
+        } catch (e) { say(e.message, false); }
+      };
+
+      fetch('/api/tending/whispers').then((r) => r.json()).then(render)
+        .catch(() => say("Couldn't read the whispers.", false));
+    }());
+  </script>
+
   <h1 style="margin-top:34px">👥 The room</h1>
   <p class="sub prose">Who's in this board — names, marks and lights. Yours to edit; no agent required.</p>
 
