@@ -156,3 +156,39 @@ export function selectPrompt(pool = [], { shuffle = false, rand } = {}) {
   const i = Math.min(pool.length - 1, Math.max(0, Math.floor(rand() * pool.length)));
   return pool[i];
 }
+
+/**
+ * #1189 follow-up — the NEXT whisper when the room is playing in list order.
+ *
+ * `lastVersionId` is the prompt version the previous firing sent, read from
+ * the most recent scrum:TendingMint. The cursor is therefore DERIVED from the
+ * graph rather than stored beside it: one fact, one home, nothing to drift.
+ *
+ * ⛔ MATCHES ON PROMPT IDENTITY, NOT ON THE VERSION IRI. Editing a whisper
+ * mints a new version, so comparing version IRIs would fail to find the
+ * last-fired entry and silently restart the sequence at the top — an edit
+ * would reset the running order, invisibly, which is worse than the rotation
+ * this replaces.
+ *
+ * Falls back to the FIRST entry when there is no previous firing, or when the
+ * one that fired is no longer in the playlist (removed, disabled, retired).
+ * Resuming from an absent member has no defined answer, and picking a
+ * neighbour would invent a position nobody chose.
+ */
+export function nextInOrder(pool = [], lastVersionId = null) {
+  if (!Array.isArray(pool) || pool.length === 0) return null;
+  if (!lastVersionId) return pool[0];
+  const lastPrompt = promptIdOfVersion(String(lastVersionId));
+  const at = pool.findIndex((p) => promptIdOfVersion(String(p.versionId)) === lastPrompt);
+  if (at < 0) return pool[0];
+  return pool[(at + 1) % pool.length];
+}
+
+/**
+ * A version IRI is `<prompt iri>/v<N>`; the prompt identity is everything
+ * before the final `/v<N>`. Derived rather than looked up so this stays pure —
+ * the caller passes bodies, not the entity graph.
+ */
+function promptIdOfVersion(versionIri) {
+  return String(versionIri).replace(/\/v\d+$/, '');
+}

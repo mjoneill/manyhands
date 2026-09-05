@@ -24,6 +24,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { claimWhisper, mintPrompt, windowAt, EMPTY_STATE, HOUR_MS } from './core/whisper-window.mjs';
+import { nextInOrder } from './core/tending-pool.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -203,7 +204,7 @@ export function recentWhispers(file = whisperStateFilePath()) {
  * whisper can be drawn and rejected afterwards — that failure would be
  * intermittent and read as a ghost.
  */
-function mintFromPool({ pool, now, periodMs, shuffle, rand }) {
+function mintFromPool({ pool, now, periodMs, shuffle, rand, lastVersionId }) {
   const window = windowAt(now, periodMs);
   const items = (Array.isArray(pool) ? pool : [])
     .map((p) => (typeof p === 'string'
@@ -211,18 +212,25 @@ function mintFromPool({ pool, now, periodMs, shuffle, rand }) {
       : { body: p?.body, slug: p?.slug ?? null, versionId: p?.versionId ?? null }))
     .filter((p) => typeof p.body === 'string' && p.body.trim());
   if (items.length === 0) return null;
-  const idx = shuffle
-    ? Math.min(items.length - 1, Math.max(0, Math.floor(rand() * items.length)))
-    // The existing deterministic rotation, unchanged: same window, same words,
-    // so a re-read of the history is reproducible.
-    : Math.floor(Date.parse(window) / periodMs) % items.length;
-  const chosen = items[idx];
+  let chosen;
+  if (shuffle) {
+    chosen = items[Math.min(items.length - 1, Math.max(0, Math.floor(rand() * items.length)))];
+  } else {
+    // ⛔ NOT `floor(epoch_hour) % length` any more, and the reason is a defect
+    // the board owner hit on day one: that rotation walks the list in order but
+    // its ENTRY POINT is the absolute clock, and the modulus changes whenever a
+    // whisper is added or removed — so "In the order below" picked the last
+    // entry on a six-item list and jumped again the next hour. The label is a
+    // promise about the NEXT firing; only a cursor keeps it.
+    chosen = nextInOrder(items, lastVersionId);
+  }
+  if (!chosen) return null;
   return { window, body: chosen.body, mintedAt: now, slug: chosen.slug, versionId: chosen.versionId };
 }
 
 export function mintOnce({
   now, file = whisperStateFilePath(), pool = null, periodMs = HOUR_MS,
-  shuffle = false, rand = Math.random,
+  shuffle = false, rand = Math.random, lastVersionId = null,
 }) {
   // ── critical section: no await from here to the write ──────────────────
   //
@@ -234,7 +242,7 @@ export function mintOnce({
   const window = windowAt(now, periodMs);
   const d = readRaw(file);
   if (d.lastMintedWindow === window) return null;
-  const prompt = mintFromPool({ pool: pool ?? readPool(), now, periodMs, shuffle, rand });
+  const prompt = mintFromPool({ pool: pool ?? readPool(), now, periodMs, shuffle, rand, lastVersionId });
   if (!prompt) return null;
   atomicWrite(file, { ...d, lastMintedWindow: window, lastMintedAt: now });
   // ── end critical section ───────────────────────────────────────────────

@@ -4462,9 +4462,33 @@ async function handleSetTendingConfig(req, res) {
 // replacing a node other entities point at.
 function tendingEntities() { return readBoard().tending || []; }
 
+/**
+ * #1189 follow-up — the running position, DERIVED from the last firing.
+ *
+ * "In the order below" is a promise about the NEXT whisper, so the caller needs
+ * to know which one went out last. That is already a graph fact: every firing
+ * writes a scrum:TendingMint naming the prompt version it sent. Reading it back
+ * here keeps ONE home for the cursor — a stored copy could disagree with the
+ * mints, and then neither would be authoritative.
+ */
+function lastFiredVersion(ents) {
+  let best = null;
+  for (const e of ents) {
+    if (e['@type'] !== 'scrum:TendingMint') continue;
+    const at = e['scrum:mintedAt'];
+    if (!at) continue;
+    if (!best || String(at) > String(best['scrum:mintedAt'])) best = e;
+  }
+  return best?.['scrum:promptVersion'] ?? null;
+}
+
 function sendWhispers(res, code = 200) {
   const ents = tendingEntities();
-  sendJSON(res, code, { whispers: resolveWhisperPool(ents), shuffle: readShuffle(ents) });
+  sendJSON(res, code, {
+    whispers: resolveWhisperPool(ents),
+    shuffle: readShuffle(ents),
+    lastVersionId: lastFiredVersion(ents),
+  });
 }
 
 /** Apply a pure authoring op under the write lock, then answer with the pool. */

@@ -2092,7 +2092,12 @@ const whisperTick = async () => {
     lastActivityAt: () => activityAt,
     // The pool and the shuffle flag both come from the graph, per firing, so a
     // change made in Settings applies to the very next tick.
-    mint: ({ now: n }) => mintOnce({ now: n, pool: poolEntries, shuffle: graphPool?.shuffle === true }),
+    mint: ({ now: n }) => mintOnce({
+      now: n, pool: poolEntries, shuffle: graphPool?.shuffle === true,
+      // The running position, derived from the last mint — so "in the order
+      // below" resumes after the whisper that actually went out last.
+      lastVersionId: graphPool?.lastVersionId ?? null,
+    }),
     post: (body) => apiCall('POST', '/api/conversations', body),
     // #1189 — every firing becomes a graph fact. Best-effort and AFTER the
     // post: the whisper reaching the room is the deliverable, and a mint that
