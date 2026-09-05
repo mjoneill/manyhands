@@ -304,6 +304,76 @@ SELECT ?name ?definition ?verb WHERE {
 
 ⚠️ **`instances` is `null`, not `0`, when the census could not run** (the graph replica is built lazily and is cold right after a restart — exactly when a new reader asks). `census` says which state you are in. A cold read reported as zero would be a lie that reads exactly like a measurement.
 
+### What has this room actually researched?
+
+Reading a video, a paper or a repo and writing up what you found is work, and it
+is the work most likely to evaporate. The notes land in a folder with a name
+only their author remembers, the reasoning lands in a chat log, and six weeks
+later somebody reads the same source again because nobody could find the first
+pass.
+
+So a piece of research is recorded as a **run**: an activity that followed a
+named method, consumed some sources, and produced some files and some cards.
+
+```
+curl -s http://localhost:3141/api/board/status | jq .researchRuns
+# → 1
+```
+
+That number is the point. It needs no card number and no filename — the two
+things a newcomer cannot possibly have. From there, three queries answer the
+questions people actually ask.
+
+**What research has happened, and when?**
+
+```sparql
+SELECT ?r ?t WHERE { ?r a prov:Activity ; scrum:op "research" ; prov:startedAtTime ?t }
+```
+
+**What files did it produce, and are they still the files it produced?**
+
+```sparql
+SELECT ?u ?h WHERE {
+  ?r a prov:Activity ; scrum:op "research" ; prov:generated ?a .
+  ?a schema:contentUrl ?u ; scrum:contentHash ?h }
+```
+
+The graph holds a **pointer and a hash**, never the bytes. It says where a
+transcript lives and what it hashed to when it was recorded, so a later reader
+can tell "moved" from "changed" from "fine". Storing the file itself would mean
+paying for it again on every subsequent write, forever.
+
+**And what did the research actually change?**
+
+```sparql
+SELECT ?id ?title WHERE {
+  ?r a prov:Activity ; scrum:op "research" ; prov:generated ?c .
+  ?c a scrum:Card ; schema:identifier ?id ; schema:name ?title }
+```
+
+That last one is the one worth stealing. A summary nobody acts on is a summary
+nobody needed; this query is how you find out whether reading the thing changed
+what you are building, or only how you felt about it.
+
+⚠️ **A run is a `prov:Activity`, the same class the board writes for every
+mutation** — deliberately, so "everything that happened here" stays one query
+instead of two. What separates them is `scrum:op`. On our board that is 21,534
+activities of which 1 is research, and the other 21,533 carry write ops
+(`post`, `update`, `create`, `delete`, `refused`, `redact`) that a run is
+refused at the door for using. Without that refusal the research query would
+quietly return every write anyone had ever made, and it would return them with
+a large, confident, wrong number.
+
+**The method is data too.** A run names the *version* of the procedure it
+followed, so improving the method later does not rewrite what a past run
+actually did:
+
+```sparql
+SELECT ?body WHERE {
+  ?r a prov:Activity ; scrum:op "research" ; scrum:performedUsing ?v .
+  ?v scrum:body ?body }
+```
+
 ⚠️ **The honest limit:** a tripwire can only watch what the graph can see — a node type, an edge, a label, whether something is reachable. It cannot watch a repo, a deploy, a running process, or a decision nobody has taken yet. So an unwatched claim is sometimes *"nobody got to it"* and sometimes *"no query could ever answer this"*, and the payload can't yet tell you which.
 
 ### A refused write is not lost

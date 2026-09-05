@@ -5202,6 +5202,12 @@ function handleBoardStatus(req, res) {
       // has been told; `instantiated` is the census. A kind declared with ZERO
       // instances is the one a census can never show, and it is visible here.
       kinds: kindsSummary(data),
+      // #1208 — "what has this room researched" as a NUMBER a stranger can see
+      // without knowing a card number or a filename. Counted from the runs
+      // collection rather than the graph, so it answers on a cold replica too:
+      // orientation must not depend on the one surface that is slowest to warm.
+      researchRuns: (Array.isArray(data.runs) ? data.runs : [])
+        .filter((r) => r && r['scrum:op'] === 'research').length,
       lastUpdated: data.lastUpdated,
     });
   } catch (e) {
