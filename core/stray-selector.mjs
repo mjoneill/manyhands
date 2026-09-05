@@ -43,7 +43,79 @@
  * the leaked fixtures of #998 that we exist to clear. It cannot separate them
  * and is deliberately NOT used. Recorded because it is a plausible-sounding
  * guard that would have produced a rail with a hole in it.
+ *
+ * ── #490: A DENYLIST FENCE IS NOT OWNERSHIP ───────────────────────────────
+ * Everything above answers "is this candidate PROTECTED?" — and a candidate
+ * that is protected by nothing falls through to `kill`. That is a denylist,
+ * and a denylist protects only what someone remembered to list.
+ *
+ * ⛔ MEASURED 2026-09-04: #490's PRIMARY RULE — "the reaper touches only Node
+ *    processes, and only those with a cwd inside the twin" — existed in the
+ *    card and NOWHERE IN CODE. The Node-only half lived entirely in the
+ *    caller's `SCRUM_STRAY_PATTERN`, an operator-supplied substring whose
+ *    default is the bare name match requirement 2 forbids. Point that env var
+ *    at another runtime and this function returns another project's processes
+ *    as eligible, having refused nothing, because they are in no live tree.
+ *
+ * ⇒ So `devTrees` is a POSITIVE scope and it is REQUIRED: a candidate must
+ *   prove it is OURS — node, in a tree we own, carrying a test-ownership mark
+ *   — before it can be signalled. Absence of protection is not ownership.
+ *
+ * ⚠️ It is applied LAST, so every refusal above keeps its own reason. A
+ *   candidate refused as `live-tree` must not start reporting `not-owned`:
+ *   the reason a thing was spared is evidence, and this layer is additive.
+ *
+ * ⭐ AND IT DOES NOT READ CPU, RSS OR DURATION. #490 names the trap directly:
+ *   another project on the same machine runs a job that sits for minutes at
+ *   high CPU holding several GB and then exits, so it looks exactly like a
+ *   runaway orphan while being load-bearing every time it runs. A heuristic
+ *   that would catch it is a heuristic that is wrong, and duration/CPU must
+ *   never override the Node-only scope.
+ *
+ * ⛔ THE SHAPE IS THE LESSON; THE PROJECT'S NAME IS NOT, AND DOES NOT SHIP.
+ *   An earlier cut of this comment named it. The push gate refused, correctly:
+ *   a reaper that carries the real never-touch inventory publishes the
+ *   machine's operational fingerprint — what runs beside this, and when. The
+ *   engine is public and knows only shapes; the inventory is private.
  */
+
+/**
+ * Does this candidate carry a mark that makes it OURS to reap?
+ *
+ * ⛔ NOT a name match. `node server.js` describes the live board as accurately
+ *    as it describes an orphan — that is requirement 2, and it is why the
+ *    #813 caller's default pattern could never have been the discriminator.
+ *
+ * The stable marks, taken from what tests/helpers/harness.mjs actually spawns:
+ *   · SCRUM_BOARD_FILE pointing at a scrum-test-board-* fixture  (spawned server)
+ *   · `--test` in the command line                               (orphaned runner)
+ *   · a *.test.mjs argument                                      (orphaned runner)
+ *
+ * ⚠️ The runner marks exist because #490's documented hole is that fixture
+ *    servers carry the env var and orphaned RUNNERS carry nothing — so a
+ *    selector built on the env var alone reports success with half the leak
+ *    still running. The third instance of that hole was found 2026-08-24, in
+ *    this project's own recommended sweep command.
+ */
+function ownershipMark(c) {
+  const cmd = String(c.command || '');
+  const env = String(c.env || '');
+  if (/scrum-test-board-/.test(env) || /scrum-test-board-/.test(cmd)) return 'fixture-board-file';
+  if (/(^|\s)--test(\s|$)/.test(cmd)) return 'node-test-runner';
+  if (/\S+\.test\.mjs(\s|$)/.test(cmd)) return 'test-file-argument';
+  return null;
+}
+
+/**
+ * Is the executable node? Positive, and on the FIRST token only.
+ *
+ * ⛔ `cmd.includes('node')` would match a python script called `node_tool.py`
+ *    and every path containing `node_modules` — which is most of them.
+ */
+function isNode(c) {
+  const first = String(c.command || '').trim().split(/\s+/)[0] || '';
+  return /(^|\/)node(\d+(\.\d+)*)?$/.test(first);
+}
 
 /** A refusal carries its reason, so a caller can print WHY rather than a count. */
 const refuse = (p, reason, detail) => ({ pid: p.pid, reason, detail });
@@ -63,6 +135,7 @@ const refuse = (p, reason, detail) => ({ pid: p.pid, reason, detail });
 export function selectStrays({
   candidates = [],
   liveTrees = [],
+  devTrees = [],
   protectedPorts = [],
   selfPid = null,
   selfPgid = null,
@@ -80,7 +153,24 @@ export function selectStrays({
     throw err;
   }
 
+  // ⛔ And fail closed on a missing POSITIVE scope, for the mirror-image reason.
+  // An empty devTrees list reads as "we own nothing", but the code path it
+  // produces is "every unprotected process on the machine is eligible" — the
+  // failure is silent, agreeable, and machine-wide. A tracked default here
+  // would be a fence that ships: correct on one machine, wrong on every clone.
+  if (!Array.isArray(devTrees) || devTrees.length === 0) {
+    const err = new Error(
+      'selectStrays: devTrees is empty. Refusing to select ANY target.\n' +
+      '  Ownership is what makes a process ours to signal. Without it this\n' +
+      '  function selects by ABSENCE of protection, which is a denylist, and a\n' +
+      '  denylist protects only what someone remembered to list.',
+    );
+    err.code = 'NO_SCOPE';
+    throw err;
+  }
+
   const roots = liveTrees.map((t) => String(t).replace(/\/+$/, ''));
+  const owned = devTrees.map((t) => String(t).replace(/\/+$/, ''));
   const ports = new Set(protectedPorts.map(Number));
 
   const kill = [];
@@ -113,7 +203,24 @@ export function selectStrays({
       refused.push(refuse(c, 'protected-port', `listening on ${held.join(', ')}`));
       continue;
     }
-    kill.push(c);
+    // ── #490 POSITIVE SCOPE. Everything above asked "is it protected?"; these
+    // three ask "is it OURS?" — and a candidate that cannot answer is spared.
+    if (!isNode(c)) {
+      const exe = String(c.command || '').trim().split(/\s+/)[0] || '(no command)';
+      refused.push(refuse(c, 'not-node', `${exe} is not a node process`));
+      continue;
+    }
+    const home = owned.find((r) => cwd === r || cwd.startsWith(`${r}/`));
+    if (!home) {
+      refused.push(refuse(c, 'not-owned', `cwd ${cwd} is in no tree we own`));
+      continue;
+    }
+    const mark = ownershipMark(c);
+    if (!mark) {
+      refused.push(refuse(c, 'no-test-mark', 'node in our tree, but nothing marks it as a TEST process'));
+      continue;
+    }
+    kill.push({ ...c, ownedBy: home, mark });
   }
 
   return { kill, refused };
