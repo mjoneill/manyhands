@@ -195,16 +195,28 @@ test('#1217 — the recovery query finds my refusal in the live graph, by seat',
 });
 
 test('#1217 — the refusal is recoverable through changes_since, with the body, and does not hide the real last write', async () => {
-  const srv = await startRestServer({ board: board() });
+  // ⛔ CI-RED TWICE, GREEN LOCALLY EVERY TIME, and it was not a flake. The first
+  // version used a FIXTURE card (which predates the log) and asked from the
+  // PATCH response's `updatedAt`. That stamp is taken inside the write, and the
+  // event's `recorded_at` is taken a moment later from `data.lastUpdated` — on
+  // a fast box the same millisecond, on CI the next one. With a pre-log card
+  // the retention floor is that first event, so a `since` one millisecond
+  // before it is refused as CURSOR_TOO_OLD (#679's honest-partial rule): the
+  // exact boundary the old comment claimed to be avoiding.
+  //
+  // Now: an EMPTY board and a card CREATED through the API, so the log's oldest
+  // line is the create event, and every later stamp — including the PATCH's
+  // `updatedAt` — is strictly inside retention on any machine.
+  const srv = await startRestServer({ board: makeBoardFixture({ cards: [], nextShortId: 1 }) });
   try {
+    const made = await api(srv.baseUrl, 'POST', '/api/cards', { title: 'one', description: 'original body', createdBy: 'ada' });
+    assert.equal(made.status, 201);
+    const id = made.body.shortId;
     // A real write, then a refused one, on the same card by the same seat.
-    const ok = await api(srv.baseUrl, 'PATCH', '/api/cards/1', { description: 'the real last write', by: 'ada' });
+    const ok = await api(srv.baseUrl, 'PATCH', `/api/cards/${id}`, { description: 'the real last write', by: 'ada' });
     assert.equal(ok.status, 200);
-    // The fixture card predates the log, so a since earlier than the first event
-    // is refused as CURSOR_TOO_OLD (#679's honest-partial rule). Ask from the
-    // first write we made, which is exactly what a returning seat has.
     const since = ok.body.updatedAt;
-    const bad = await api(srv.baseUrl, 'PATCH', '/api/cards/1', { description: 'the lost draft', by: 'ada', ifVersion: 1 });
+    const bad = await api(srv.baseUrl, 'PATCH', `/api/cards/${id}`, { description: 'the lost draft', by: 'ada', ifVersion: 1 });
     assert.equal(bad.status, 409);
 
     // history:true — the recovery ask. The body comes back.
