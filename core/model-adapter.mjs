@@ -100,9 +100,33 @@ export class ModelAssertionError extends Error {
  * weeks because nothing kept it. A status code without its body is a refusal
  * with its explanation thrown away.
  */
+/**
+ * ⚠️ THE PROVIDER'S OWN WORDS BELONG IN THE MESSAGE. Carried on `.body` alone
+ * they are invisible: what gets read is what gets printed, and a reader shown
+ * "refused (400): client error 400" learns nothing and goes looking in the
+ * wrong place. Found live when a tools-bearing request met a model with no
+ * tools capability — the 400's body said precisely that and the message did
+ * not. Fixed here rather than per protocol so every one of them gains it.
+ */
+function refusalDetail(body) {
+  const raw = typeof body === 'string' ? body : (body == null ? '' : JSON.stringify(body));
+  const text = raw.trim();
+  if (!text) return '';
+  // Prefer the provider's own message field when there is one; the rest of a
+  // JSON envelope is noise in an error line.
+  let said = text;
+  try {
+    const o = JSON.parse(text);
+    said = o?.error?.message ?? o?.error ?? o?.message ?? o?.detail ?? o?.title ?? text;
+    if (typeof said !== 'string') said = JSON.stringify(said);
+  } catch { /* not JSON: the text IS the message */ }
+  said = String(said).replace(/\s+/g, ' ').trim();
+  return said ? ` — provider said: ${said.slice(0, 300)}${said.length > 300 ? '…' : ''}` : '';
+}
+
 export class ModelRefusedError extends Error {
   constructor(status, reason, body, meta = {}) {
-    super(`model provider refused (${status}): ${reason}`);
+    super(`model provider refused (${status}): ${reason}${refusalDetail(body)}`);
     this.name = 'ModelRefusedError';
     this.code = 'REFUSED';
     this.status = status; this.reason = reason; this.body = body;
@@ -184,15 +208,51 @@ export async function defaultTransport(request) {
  * Each one only knows how to SHAPE a request and READ a response. None of them
  * decides retries, assertions or budgets — one policy, applied once, below.
  */
+/**
+ * #1196 slice A — TOOL CALLS, normalised across protocols.
+ *
+ * The wire shapes disagree: Ollama hands back `arguments` as an object, the
+ * OpenAI shape as a JSON STRING. A caller that has to know which one it is
+ * talking to in order to read a tool call has no tool channel, it has two.
+ *
+ * ⛔ Unparseable arguments are REPORTED, never dropped. A tool call quietly
+ * discarded reads downstream as a call the model never made, which is the one
+ * failure that cannot be noticed from the outside.
+ */
+function readToolCalls(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((c, i) => {
+    const fn = c?.function ?? c ?? {};
+    const a = fn.arguments;
+    let args = null; let argumentsError = null;
+    if (a === undefined || a === null) args = {};
+    else if (typeof a === 'object') args = a;
+    else {
+      try { args = JSON.parse(a); }
+      catch (e) { args = null; argumentsError = `arguments are not valid JSON: ${e.message}`; }
+    }
+    return {
+      id: c?.id ?? `call_${i}`,
+      name: fn.name ?? null,
+      arguments: args,
+      ...(argumentsError ? { argumentsError } : {}),
+    };
+  });
+}
+
 const PROTOCOLS = {
   /** Ollama's native /api/chat. */
   'ollama-native': {
-    request(model, messages, s) {
+    request(model, messages, s, grants = {}) {
       const options = { num_ctx: DEFAULT_NUM_CTX };
       for (const [ours, theirs] of Object.entries(OLLAMA_OPTION)) {
         if (s[ours] !== undefined) options[theirs] = s[ours];
       }
       const body = { model, messages, stream: false, options };
+      // A grant is data on the agent. NO KEY when nothing is granted: an empty
+      // array is a different claim from "this colleague has no tools", and some
+      // servers act on the difference.
+      if (Array.isArray(grants.tools) && grants.tools.length) body.tools = grants.tools;
       // The GPU on this box is shared with another local process (#1067 §4), so
       // how long a model stays resident is a NEIGHBOURLY choice, not a tuning one.
       if (s.keepAlive !== undefined) body.keep_alive = s.keepAlive;
@@ -211,6 +271,7 @@ const PROTOCOLS = {
       return {
         text: msg.content ?? '',
         thinking,
+        toolCalls: readToolCalls(msg.tool_calls),
         // Ollama says done_reason: "stop" | "length" | "load" …
         stopReason: body?.done_reason ?? (body?.done ? 'stop' : null),
         usage: {
@@ -227,8 +288,9 @@ const PROTOCOLS = {
 
   /** The OpenAI chat-completions shape — OpenRouter and most hosted providers. */
   'openai-completions': {
-    request(model, messages, s) {
+    request(model, messages, s, grants = {}) {
       const body = { model, messages, stream: false };
+      if (Array.isArray(grants.tools) && grants.tools.length) body.tools = grants.tools;
       if (s.temperature !== undefined) body.temperature = s.temperature;
       if (s.topP !== undefined) body.top_p = s.topP;
       if (s.maxTokens !== undefined) body.max_tokens = s.maxTokens;
@@ -240,6 +302,7 @@ const PROTOCOLS = {
       const choice = body?.choices?.[0];
       return {
         text: choice?.message?.content ?? '',
+        toolCalls: readToolCalls(choice?.message?.tool_calls),
         // finish_reason: "stop" | "length" | "content_filter" | "tool_calls"
         stopReason: choice?.finish_reason ?? null,
         usage: {
@@ -351,7 +414,12 @@ export async function callModel(agent, messages, opts = {}) {
   const promptTokens = approxTokens(messages.map((m) => m.content).join('\n'));
   const budget = runawayBudget(promptTokens);
 
-  const { path, body } = protocol.request(agent.model, messages, sampling);
+  // #1196 — TOOL GRANTS are deliberately NOT part of `sampling`. Sampling is a
+  // whitelist of generation knobs, and a capability that rode through it could be
+  // widened by an agent's own sampling block. What a colleague may reach is a
+  // grant, decided where agents are defined, and it travels on its own channel.
+  const grants = { tools: opts.tools ?? agent.tools ?? null };
+  const { path, body } = protocol.request(agent.model, messages, sampling, grants);
   const headers = { 'Content-Type': 'application/json' };
   if (opts.apiKey) headers.Authorization = `Bearer ${opts.apiKey}`;
 
@@ -383,13 +451,23 @@ export async function callModel(agent, messages, opts = {}) {
     }
 
     const out = protocol.read(res.body);
+    // #1196 — every protocol answers the same question the same way. A caller
+    // that must branch on `undefined` to ask "did it call a tool" will forget to,
+    // and a forgotten branch here loses the call silently.
+    if (!Array.isArray(out.toolCalls)) out.toolCalls = [];
 
     // ── ASSERTIONS, in the order that makes the failure most informative ──
 
     // 1. A `length` stop is a CONFIGURATION failure, not a model verdict
     //    (#1067 §5, reproduced by two seats). Returning the truncated text as
     //    if it were an answer is how a cut-off sentence becomes a finding.
-    if (out.stopReason && out.stopReason !== 'stop') {
+    // #1196 — a TOOL CALL is a complete turn, not a cut-off one. Before the tool
+    // channel existed, every non-stop finish meant a spent budget, so this guard
+    // correctly rejected them all. `tool_calls` with calls in hand is the model
+    // doing exactly what it was granted; treating it as a failed generation is
+    // how a working channel would look broken on its first live call.
+    const calledTools = out.toolCalls.length > 0;
+    if (out.stopReason && out.stopReason !== 'stop' && !(out.stopReason === 'tool_calls' && calledTools)) {
       // ⚠️ TWO DIFFERENT FAILURES WEAR THIS ONE NAME, and they need opposite
       // fixes. Found on this adapter's first live call: a thinking model spent
       // its whole budget reasoning and returned `content: ""` — raising the
@@ -435,7 +513,11 @@ export async function callModel(agent, messages, opts = {}) {
 
     // 4. Empty text is a failure with a name, not an empty string handed on.
     //    ⛔ An empty result and a failed call must never look identical.
-    if (!String(out.text).trim()) {
+    //    #1196 — EXCEPT when the turn is a tool call. A colleague that answers
+    //    "let me look that up" in prose AND calls the tool has said nothing
+    //    useful twice; silence plus a call is the correct shape, and rejecting
+    //    it would make the well-behaved case the failing one.
+    if (!String(out.text).trim() && !calledTools) {
       throw new ModelAssertionError('nonEmpty',
         'the provider returned success and no text. An empty answer and a failed call are '
         + 'different facts and the caller must be able to tell them apart.',

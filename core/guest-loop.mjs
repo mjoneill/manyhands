@@ -34,6 +34,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { runToolLoop } from './tool-loop.mjs';
+import { toolsFor, BOARD_TOOLS } from './board-tools.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -246,7 +248,7 @@ export async function budgetCheck({ agent, spentToday }) {
  *   post       ({author, body}) => Promise<{id?}>
  *   ledgerFile where the pre-ledger row goes
  */
-export async function guestOnce({ agent, wake, changes = () => [], memories = null, writeMemory = null, claimCard = null, callModel, post, ledgerFile = ledgerFilePath(), ledgerSink = null, spentToday = null, now = () => new Date().toISOString(), log = () => {}, onError = () => {} }) {
+export async function guestOnce({ agent, wake, changes = () => [], memories = null, writeMemory = null, claimCard = null, callModel, execute = null, maxHops = undefined, post, ledgerFile = ledgerFilePath(), ledgerSink = null, spentToday = null, now = () => new Date().toISOString(), log = () => {}, onError = () => {} }) {
   if (!agent?.seatKey) throw new Error('guestOnce: agent.seatKey is required — a post with no seat is actor:null forever (#1193)');
   if (!agent?.model?.model || !agent?.model?.protocol) throw new Error('guestOnce: agent.model {model, protocol} is required');
   // #1202 — the budget gate, BEFORE any context is fetched or any call is made.
@@ -280,29 +282,67 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
     memory: { handed: mem.length, state: memState },
     contextHanded: { policy: agent.contextPolicy || 'thread', changesRows: (agent.contextPolicy === 'artifact-only') ? 0 : rows.length },
     contextHandedTo: [wake.id, ...((agent.contextPolicy === 'artifact-only') ? [] : rows.slice(-20).map((c) => c.id))].filter(Boolean),
+    // #1196 — what this seat MAY reach, recorded whether it reached or not: an
+    // empty answer from a seat with no grants and one from a seat that looked
+    // and found nothing are different facts.
+    toolsGranted: toolsFor(agent).map((t) => t.function.name),
     at: now(),
   };
-  let result;
+  // #1196 slice C — THE COLLEAGUE LOOKS THINGS UP. A grant is real: `toolsFor`
+  // resolves what this seat may reach, and an ungranted seat takes the original
+  // single-call path unchanged, offered no tools at all. Every hop is recorded
+  // on the ledger row beside what was said, because the whole argument for this
+  // channel is that a claim becomes checkable, not that it becomes correct.
+  const tools = toolsFor(agent);
+  // ⚠️ THE HOP CEILING IS DEPLOYMENT DATA, NOT A CONSTANT. Every hop is a full
+  // model call, so this number multiplies whatever the slowest thing on THIS
+  // machine is. On the box that built it — a 12B model sharing 24 GB with two
+  // other local workloads — four hops is minutes. On a host with room, or
+  // pointed at a hosted frontier model, the same four hops may be seconds.
+  // Neither number is a property of this loop, and hard-coding a ceiling low
+  // enough for the cramped case would spend everyone's capability to buy our
+  // latency. It rides on the agent, beside its model and sampling, so an
+  // operator sets it against their own hardware; the row records what was
+  // actually spent, so a deployment can learn its own number rather than
+  // inherit ours.
+  const hopCeiling = maxHops ?? agent.maxHops ?? agent.model?.maxHops;
+  const useTools = tools.length > 0 && typeof execute === 'function';
+  let result; let hops = []; let modelCalls = 1; let stoppedBecause = null;
   try {
-    result = await callModel(agent.model, messages, { ...(agent.model.sampling || {}) });
+    if (useTools) {
+      const loop = await runToolLoop({
+        agent: agent.model, messages, tools, execute, callModel,
+        ...(hopCeiling === undefined ? {} : { maxHops: hopCeiling }),
+        opts: { ...(agent.model.sampling || {}) },
+      });
+      result = { text: loop.text, stopReason: 'stop', usage: null };
+      hops = loop.hops; modelCalls = loop.modelCalls; stoppedBecause = loop.stoppedBecause;
+    } else {
+      result = await callModel(agent.model, messages, { ...(agent.model.sampling || {}) });
+    }
   } catch (e) {
     const row = { ...base, ok: false, error: e?.message ?? String(e), latencyMs: Date.now() - started };
     await recordLedger({ sink: ledgerSink, file: ledgerFile, row, onError });
     onError(`[#1201] model call failed for ${agent.seatKey}; NO post made: ${row.error}`);
     return { posted: false, reason: 'model-failed', ledger: row };
   }
+  // #1196 — THE TOOL RECORD BELONGS ON EVERY ROW, not only the happy one. A
+  // wake that spent four model calls and produced nothing is precisely the one
+  // an operator needs the hops for; a row that drops them reads as a wake that
+  // never looked, which is the same lie as a dropped tool call one layer up.
+  const toolRecord = { toolHops: hops, modelCalls, ...(stoppedBecause ? { stoppedBecause } : {}) };
   const raw = String(result?.text ?? '').trim();
   // #1226 — directives come OUT of the post before it is made.
   const { post: text, remember, claims } = agent.residency === 'resident' ? splitDirectives(raw) : { post: raw, remember: [], claims: [] };
   if (!text && !remember.length) {
-    const row = { ...base, ok: false, error: 'empty reply', stopReason: result?.stopReason ?? null, usage: result?.usage ?? null, latencyMs: Date.now() - started };
+    const row = { ...base, ...toolRecord, ok: false, error: 'empty reply', stopReason: result?.stopReason ?? null, usage: result?.usage ?? null, latencyMs: Date.now() - started };
     await recordLedger({ sink: ledgerSink, file: ledgerFile, row, onError });
     return { posted: false, reason: 'empty-reply', ledger: row };
   }
   let posted = null;
   try { if (text) posted = await post({ author: agent.seatKey, body: text }); }
   catch (e) {
-    const row = { ...base, ok: false, error: `post failed: ${e?.message ?? e}`, stopReason: result.stopReason, usage: result.usage, latencyMs: Date.now() - started };
+    const row = { ...base, ...toolRecord, ok: false, error: `post failed: ${e?.message ?? e}`, stopReason: result.stopReason, usage: result.usage, latencyMs: Date.now() - started };
     await recordLedger({ sink: ledgerSink, file: ledgerFile, row, onError });
     return { posted: false, reason: 'post-failed', ledger: row };
   }
@@ -322,7 +362,13 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
     try { await claimCard(n, agent.seatKey); claimed.push({ card: n, ok: true }); }
     catch (e) { claimed.push({ card: n, ok: false, reason: e?.message ?? String(e) }); }
   }
+  // #1196 — THE CHECKABLE PAIR. `toolHops` says what was fetched and how many
+  // rows came back; `postedText` says what was claimed on the strength of it.
+  // Side by side in one row, a reader can finally ask whether the rows support
+  // the sentence — including the case that defeated every rule we tried
+  // tonight: zero rows and a confident answer.
   const row = { ...base, ok: true, stopReason: result.stopReason ?? null, usage: result.usage ?? null, attempts: result.attempts ?? null, latencyMs: Date.now() - started, postId: posted?.id ?? null,
+    ...toolRecord, postedText: text || null,
     memoryWritten, claims: claimed, ...(text ? {} : { reason: 'memory-only' }) };
   const recorded = await recordLedger({ sink: ledgerSink, file: ledgerFile, row, onError });
   row.recorded = recorded.recorded; row.ledgerId = recorded.id;
