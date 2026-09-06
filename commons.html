@@ -115,7 +115,7 @@
     import { mountConversationView } from './core/conversation-view.mjs';
     import { mountTopNav } from './core/header.mjs';
     import { renderChatMarkdown } from './core/render.mjs';
-    import { roster, identityOf, presenceLevel } from './core/identity.mjs';
+    import { roster, identityOf, presenceLevel, constellationOrder } from './core/identity.mjs';
     mountTopNav(document, 'commons'); // #303-2 shared nav
 
     // Presence constellation — the room as light. Each mind (the human + agents,
@@ -125,26 +125,84 @@
     const constellationEl = document.getElementById('constellation');
     const MINDS = roster().filter((m) => m.key !== 'wiki');
     const mindEls = new Map();
-    (function buildConstellation() {
+    let view = null; // set once the conversation view is mounted (below)
+    let _soloKey = null;
+    let _quietOpen = false;      // #1241 — the quiet are collapsed, never removed
+    let _lastByAuthor = new Map(); // so the expander can re-render without new messages
+
+    function chipFor(m) {
+      let chip = mindEls.get(m.key);
+      if (chip) return chip;
+      chip = document.createElement('span');
+      chip.className = 'mind'; chip.style.setProperty('--mind', m.color); chip.title = m.name;
+      const light = document.createElement('span'); light.className = 'mind-light';
+      const name = document.createElement('span'); name.className = 'mind-name'; name.textContent = m.glyph + ' ' + m.name;
+      chip.append(light, name);
+      // click a mind → listen to just their voice (toggle); solo state syncs
+      // the chips via the view's onSolo callback below.
+      chip.addEventListener('click', () => { if (view) view.solo(view.soloed === m.key ? null : m.key); });
+      mindEls.set(m.key, chip);
+      return chip;
+    }
+
+    // #1241 — the bar shows who is ACTUALLY here. It used to build one chip per
+    // roster seat once, at load, and fade the absent to 26% forever: a seat
+    // silent for weeks held a slot beside one that spoke ten seconds ago, and a
+    // seat invited after load never appeared at all.
+    //
+    // ⛔ The quiet are COUNTED, not dropped. #717/#718: a stopped seat and a
+    // quiet seat are indistinguishable from every position — a bar that simply
+    // stops rendering someone cannot say whether they left, broke, or had
+    // nothing to add. The overflow chip names them on hover and is the only
+    // honest way to reclaim the space.
+    function renderConstellation(lastByAuthor, now) {
+      const { live, quiet, quietCount } = constellationOrder(MINDS, lastByAuthor, now);
+      constellationEl.replaceChildren();
       constellationEl.appendChild(Object.assign(document.createElement('span'),
         { className: 'constellation-label', textContent: 'in the room' }));
-      for (const m of MINDS) {
-        const chip = document.createElement('span');
-        chip.className = 'mind'; chip.style.setProperty('--mind', m.color); chip.title = m.name;
-        const light = document.createElement('span'); light.className = 'mind-light';
-        const name = document.createElement('span'); name.className = 'mind-name'; name.textContent = m.glyph + ' ' + m.name;
-        chip.append(light, name); constellationEl.appendChild(chip); mindEls.set(m.key, chip);
-        // click a mind → listen to just their voice (toggle); solo state syncs
-        // the chips via the view's onSolo callback below.
-        chip.addEventListener('click', () => { if (view) view.solo(view.soloed === m.key ? null : m.key); });
+      let freshestKey = live.length ? live[0].key : null;
+      for (const m of live) {
+        const chip = chipFor(m);
+        const lvl = presenceLevel(m.lastPostMs, now);
+        chip.style.opacity = (0.26 + 0.74 * lvl).toFixed(3);
+        chip.classList.toggle('freshest', m.key === freshestKey && lvl > 0.5);
+        chip.classList.toggle('soloed', _soloKey === m.key);
+        constellationEl.appendChild(chip);
       }
-    })();
+      // ⚠️ A REGRESSION THIS AVOIDS: clicking a mind solos their voice, and a
+      // quiet mind removed from the DOM cannot be clicked. Collapsing without
+      // an expander would silently remove the only way to hear a seat that has
+      // gone quiet — which is precisely when you most want to.
+      if (quietCount && _quietOpen) {
+        for (const m of quiet) {
+          const chip = chipFor(m);
+          chip.style.opacity = '0.30';
+          chip.classList.remove('freshest');
+          chip.classList.toggle('soloed', _soloKey === m.key);
+          constellationEl.appendChild(chip);
+        }
+      }
+      if (quietCount) {
+        const rest = document.createElement('span');
+        rest.className = 'mind constellation-quiet';
+        rest.style.cursor = 'pointer';
+        rest.addEventListener('click', () => { _quietOpen = !_quietOpen; renderConstellation(_lastByAuthor, Date.now()); });
+        rest.style.opacity = '0.34';
+        // Named, so "who is missing" is answerable without a query. The count
+        // is the honest part: it says people exist here who are not speaking.
+        rest.title = 'quiet — not seen in the last 45 minutes:\n'
+          + quiet.map((m) => `${m.glyph} ${m.name}` + (m.lastPostMs ? '' : ' (never posted here)')).join('\n');
+        rest.textContent = _quietOpen ? 'hide quiet' : `+${quietCount} quiet`;
+        constellationEl.appendChild(rest);
+      }
+    }
+
     // reflect the soloed mind on the constellation (active chip + dim the rest).
     function reflectSolo(key) {
+      _soloKey = key;
       constellationEl.classList.toggle('has-solo', !!key);
       for (const [k, chip] of mindEls) chip.classList.toggle('soloed', k === key);
     }
-    let view = null; // set once the conversation view is mounted (below)
     function updateConstellation(messages) {
       const now = Date.now();
       const lastByAuthor = new Map();
@@ -152,15 +210,10 @@
         const k = identityOf(c.author).key; const t = Date.parse(c.createdAt);
         if (Number.isFinite(t) && (!(lastByAuthor.get(k) >= t))) lastByAuthor.set(k, t);
       }
-      let freshestKey = null, freshestT = -Infinity;
-      for (const m of MINDS) { const t = lastByAuthor.get(m.key); if (Number.isFinite(t) && t > freshestT) { freshestT = t; freshestKey = m.key; } }
-      for (const m of MINDS) {
-        const chip = mindEls.get(m.key);
-        const lvl = presenceLevel(lastByAuthor.get(m.key), now);   // 0..1
-        chip.style.opacity = (0.26 + 0.74 * lvl).toFixed(3);
-        chip.classList.toggle('freshest', m.key === freshestKey && lvl > 0.5);
-      }
+      _lastByAuthor = lastByAuthor;
+      renderConstellation(lastByAuthor, now);
     }
+    renderConstellation(new Map(), Date.now()); // first paint before any messages land
     // refresh the fade every 30s even without new posts (recency decays)
     let _lastMessages = [];
     setInterval(() => updateConstellation(_lastMessages), 30000);

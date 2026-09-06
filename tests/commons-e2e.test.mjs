@@ -411,14 +411,14 @@ test('#1010 a FAILED search is visibly failed — never "no matches"', async () 
   }, { server: { board: board2 }, launch: { headless: 'new' } });
 });
 
-test('presence: the constellation lights each mind + marks the most-recent speaker; messages carry their author light', async () => {
+test('presence: the constellation lights who is actually here, counts the quiet by name, and marks the most-recent speaker', async () => {
   const now = new Date();
   const iso = (minsAgo) => new Date(now.getTime() - minsAgo * 60000).toISOString();
   const presBoard = {
     cards: [],
     columns: [{ id: 'backlog', name: 'Backlog', order: 0 }],
     conversations: [
-      { id: 'p1', body: 'older thought', author: 'nova', attachedTo: null, createdAt: iso(40), mentions: [] },
+      { id: 'p1', body: 'older thought', author: 'nova', attachedTo: null, createdAt: iso(20), mentions: [] },
       { id: 'p2', body: 'the freshest word', author: 'robin', attachedTo: null, createdAt: iso(1), mentions: [] },
     ],
     nextShortId: 1,
@@ -428,25 +428,51 @@ test('presence: the constellation lights each mind + marks the most-recent speak
     await page.goto(`${server.baseUrl}/commons.html`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('.constellation .mind', { timeout: 5000 });
 
-    // The whole roster (human + 4 agents) is present; wiki is not a "mind".
+    // ⛔ THE GUARANTEE THIS GATE EXISTS FOR: nobody leaves the room silently.
+    // Before #1241 that was spelled "every roster seat has a chip". It is now
+    // "every roster seat is either a chip or inside the quiet count" — the same
+    // promise, one indirection later. Relaxing this to a smaller chip count
+    // would make it a tautology that passes when seats vanish.
     const names = await page.$$eval('.constellation .mind-name', (els) => els.map((e) => e.textContent));
-    assert.equal(names.length, 5, 'five minds in the room: ' + names.join(', '));
+    const quietChip = await page.$eval('.constellation-quiet', (e) => e.textContent).catch(() => null);
+    const quietN = Number((quietChip || '').match(/\+(\d+) quiet/)?.[1] ?? 0);
+    assert.equal(names.length, 2, 'the two who spoke inside the window are shown: ' + names.join(', '));
+    assert.equal(names.length + quietN, 5, `all five minds accounted for: ${names.length} lit + ${quietN} quiet`);
 
-    // Robin spoke most recently → she's the freshest (brighter than the absent).
+    // ⛔ COUNT ENTITIES, NEVER ROWS. The sum above is partly self-report: the
+    // page emits quietCount, and inside constellationOrder live+quiet == roster
+    // is a tautology, so the sum cannot see whether the quiet three are the
+    // RIGHT three. A title naming one seat and dropping two passes it. So the
+    // guarantee is the NAME SET; the sum survives only as the wiring check on
+    // the count text. This is what "nobody leaves silently" always meant.
+    const quietTitle = await page.$eval('.constellation-quiet', (e) => e.title);
+    const bare = (t) => t.replace(/\(never posted here\)/, '').replace(/^\S+\s+/, '').trim();
+    const accountedFor = names.map(bare)
+      .concat(quietTitle.split('\n').slice(1).map(bare))
+      .filter(Boolean)
+      .sort();
+    assert.deepEqual(accountedFor, ['Alex', 'Kit', 'Nova', 'Robin', 'Sage'],
+      'every seat accounted for BY NAME, exactly once: ' + accountedFor.join(', '));
+
+    // Robin spoke most recently → she's the freshest.
     const freshest = await page.$eval('.mind.freshest .mind-name', (e) => e.textContent).catch(() => null);
     assert.ok(/Robin/.test(freshest || ''), 'the freshest speaker is Robin: ' + freshest);
 
-    // A recent speaker's chip is brighter (higher opacity) than a long-absent one.
+    // Brightness must still track recency AMONG THE LIVING. The old form of
+    // this check compared a speaker to a never-spoken seat, which the collapse
+    // now hides — so it would have passed on a constellation that gave every
+    // live mind identical opacity. Nova (40m) and Robin (1m) are both lit.
     const opacities = await page.evaluate(() => {
       const byName = {};
       document.querySelectorAll('.constellation .mind').forEach((m) => {
-        byName[m.querySelector('.mind-name').textContent] = parseFloat(getComputedStyle(m).opacity);
+        const n = m.querySelector('.mind-name');
+        if (n) byName[n.textContent] = parseFloat(getComputedStyle(m).opacity);
       });
       return byName;
     });
     const robin = Object.entries(opacities).find(([n]) => /Robin/.test(n))[1];
-    const kit = Object.entries(opacities).find(([n]) => /Kit/.test(n))[1]; // never spoke → dark
-    assert.ok(robin > kit, `present mind brighter than absent: Robin ${robin} > Kit ${kit}`);
+    const nova = Object.entries(opacities).find(([n]) => /Nova/.test(n))[1];
+    assert.ok(robin > nova, `recent speaker brighter than fading one: Robin ${robin} > Nova ${nova}`);
 
     // Each message carries its author's signature light (a --mind colour set).
     const hasMind = await page.$$eval('.cv-msg-lit', (els) => els.every((e) => e.style.getPropertyValue('--mind')));
@@ -470,6 +496,14 @@ test('presence: clicking a mind in the constellation solos its voice; clearing r
     await page.goto(`${server.baseUrl}/commons.html`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('.constellation .mind', { timeout: 5000 });
     assert.equal((await page.$$('.cv-msg')).length, 3, 'all three messages before solo');
+
+    // ⚠️ These posts are days old, so EVERY mind is quiet and no chip is shown
+    // by name. That is the regression this gate now guards: a quiet seat you
+    // cannot click is a seat you cannot listen to — and going quiet is exactly
+    // when you want to. The expander must give the chip back.
+    assert.equal(await page.$('.mind-name'), null, 'nobody spoke inside the window, so no lit chips');
+    await page.evaluate(() => document.querySelector('.constellation-quiet').click());
+    await page.waitForSelector('.constellation .mind-name', { timeout: 3000 });
 
     // Click a seat's chip → feed solos to that seat (2 msgs), banner + active chip appear.
     await page.evaluate(() => [...document.querySelectorAll('.mind')].find((m) => /Sage/.test(m.textContent)).click());

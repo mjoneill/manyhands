@@ -126,3 +126,42 @@ export function presenceLevel(lastPostMs, now, windowMs = 45 * 60 * 1000, floor 
   const t = age / windowMs;
   return floor + (1 - floor) * (1 - t) * (1 - t);
 }
+
+/**
+ * #1241 — WHO IS IN THE ROOM, ranked by whether they are actually here.
+ *
+ * The constellation built one chip per roster seat, once, at page load, and
+ * then faded the dead ones to 26% opacity forever. Two consequences, both
+ * measured on a live board: a seat that has not spoken in weeks holds a slot
+ * beside one that spoke ten seconds ago, and a seat invited AFTER the page
+ * loaded never appears at all.
+ *
+ * ⛔ AND THE OBVIOUS FIX IS WRONG. Dropping quiet seats entirely trades one
+ * invisibility for another: #717/#718 — a stopped seat and a quiet seat are
+ * indistinguishable from every position, including the seat's own. A room that
+ * silently stops rendering someone cannot tell you whether they left, broke, or
+ * simply had nothing to say. So the quiet are COUNTED, never deleted.
+ *
+ * Pure, so the ranking is testable without a DOM: `now` and the last-post map
+ * are injected.
+ */
+export function constellationOrder(minds = [], lastByAuthor = new Map(), now = Date.now(), windowMs = 45 * 60 * 1000) {
+  const at = (m) => {
+    const t = lastByAuthor.get?.(m.key) ?? lastByAuthor[m.key];
+    return Number.isFinite(t) ? t : null;
+  };
+  const live = [];
+  const quiet = [];
+  for (const m of minds) {
+    const t = at(m);
+    // "Live" is spoke-within-the-window, not spoke-ever: a seat that posted
+    // last Tuesday is not in the room, and saying so is the point.
+    if (t !== null && now - t < windowMs) live.push({ ...m, lastPostMs: t });
+    else quiet.push({ ...m, lastPostMs: t });
+  }
+  live.sort((a, b) => b.lastPostMs - a.lastPostMs);
+  // Quiet ordered by how recently they were last here, never-spoken last, so
+  // "who faded most recently" reads off the top of the overflow.
+  quiet.sort((a, b) => (b.lastPostMs ?? -Infinity) - (a.lastPostMs ?? -Infinity));
+  return { live, quiet, quietCount: quiet.length };
+}
