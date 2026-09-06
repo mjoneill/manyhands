@@ -81,7 +81,7 @@ export const BOARD_TOOLS = Object.freeze([
       // carries meaning and no shape. So this tool answers BOTH, and the shape
       // is sampled from the live store rather than written down by hand.
       name: 'predicate_list',
-      description: 'List the predicates you may use in a graph_query — what each one MEANS, and what SHAPE its object takes (an IRI with a prefix like column:, or a quoted literal). USE THIS BEFORE WRITING A FILTER, and use it when a query you believe is correct returns zero rows: the most common cause is filtering an IRI predicate against a quoted string, which returns nothing and looks exactly like "nothing matched". Pass a name for one predicate.',
+      description: 'List the predicates you may use in a graph_query — what each one MEANS, and what SHAPE its object takes (an IRI with a prefix like column:, or a quoted literal). USE THIS BEFORE WRITING A FILTER, and use it when a query you believe is correct returns zero rows: the most common cause is filtering an IRI predicate against a quoted string, which returns nothing and looks exactly like "nothing matched". Pass a name for one predicate — a NAMED lookup reaches every predicate the graph actually uses, including ones nobody has written a definition for, which is where the shape matters most.',
       parameters: {
         type: 'object',
         properties: { name: { type: 'string', description: 'optional — one predicate, e.g. "scrum:column"' } },
@@ -175,7 +175,7 @@ export function makeExecutor({ get, post, by = 'board' }) {
         const all = await get(path);
         const list = Array.isArray(all) ? all : (Array.isArray(all?.predicates) ? all.predicates : []);
         if (wanted && !list.length) {
-          return { name: wanted, found: false, note: `no predicate named ${JSON.stringify(wanted)} is registered. A graph_query naming it will be refused rather than answered, so this is worth knowing before you write one.` };
+          return { name: wanted, found: false, note: `nothing in this graph uses ${JSON.stringify(wanted)} — it is neither registered nor emitted. A graph_query naming it will be refused rather than answered, so this is worth knowing before you write one.` };
         }
         return { predicates: list, note: 'objectShape is SAMPLED from the live graph, not declared. shape "iri" means filter against the prefixed form; "literal" means a quoted string; "none" means registered but never used, which is not the same as a literal.' };
       }

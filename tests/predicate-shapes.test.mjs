@@ -77,3 +77,25 @@ test('#1244 MIXED says so rather than picking a winner', () => {
   assert.equal(out[0].objectShape.shape, 'mixed');
   assert.match(out[0].objectShape.means, /BOTH kinds/);
 });
+
+test('#1244 ⛔ THE REGISTRY IS NOT THE VOCABULARY — an emitted, unregistered predicate still gets a shape', () => {
+  // scrum:column is EMITTED and UNREGISTERED, and it is the predicate whose
+  // object shape cost a colleague its whole hop budget. A shapes answer limited
+  // to the 23 registered definitions would not have prevented this card's own
+  // founding failure.
+  const registry = [{ name: 'scrum:blockedBy', definition: 'a dependency' }];
+  const sample = [
+    { p: 'scrum:blockedBy', n: '30', iris: '30', obj: 'entity:abc' },
+    { p: 'scrum:column', n: '1124', iris: '1124', obj: 'column:backlog' },
+  ];
+  const without = withObjectShapes(registry, sample);
+  assert.equal(without.length, 1, 'default stays the curated registry — ~190 predicates would flood a small model');
+
+  const withAll = withObjectShapes(registry, sample, { includeUnregistered: true });
+  const col = withAll.find((p) => p.name === 'scrum:column');
+  assert.ok(col, 'the unregistered predicate that caused the failure must be answerable');
+  assert.equal(col.objectShape.shape, 'iri');
+  assert.equal(col.objectShape.prefix, 'column');
+  assert.equal(col.definition, null, 'no definition exists, and inventing one would be the defect this card is about');
+  assert.equal(col.registered, false, 'and the seat is TOLD it is unregistered rather than left to assume');
+});

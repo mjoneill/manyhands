@@ -56,14 +56,13 @@ export function prefixOf(sample, shape) {
  * A registered predicate with no rows still appears, carrying `none` — absence
  * is an answer here and must not look like omission.
  */
-export function withObjectShapes(registry = [], sampleRows = []) {
+export function withObjectShapes(registry = [], sampleRows = [], { includeUnregistered = false } = {}) {
   const byPredicate = new Map();
   for (const r of sampleRows) {
     const name = r?.p;
     if (typeof name === 'string') byPredicate.set(name, r);
   }
-  return registry.map((entry) => {
-    const row = byPredicate.get(entry?.name);
+  const shaped = (entry, row) => {
     const shape = shapeOf(row ?? {});
     const sample = row?.obj ?? null;
     return {
@@ -82,5 +81,19 @@ export function withObjectShapes(registry = [], sampleRows = []) {
               : 'the object is a literal: filter against a quoted string',
       },
     };
-  });
+  };
+  const out = registry.map((entry) => shaped(entry, byPredicate.get(entry?.name)));
+  if (!includeUnregistered) return out;
+  // ⛔ THE REGISTRY IS NOT THE VOCABULARY. It holds 23 curated definitions; the
+  // graph emits ~190 predicates. `scrum:column` — the predicate whose object
+  // shape cost a colleague its whole hop budget — is EMITTED AND UNREGISTERED,
+  // so a shapes answer restricted to the registry would not have prevented the
+  // failure this card exists for. An unregistered predicate has no definition
+  // and still has a shape, and the shape is the half that was missing.
+  const known = new Set(registry.map((e) => e?.name));
+  for (const [name, row] of byPredicate) {
+    if (known.has(name)) continue;
+    out.push(shaped({ name, definition: null, registered: false }, row));
+  }
+  return out;
 }

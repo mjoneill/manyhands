@@ -2363,7 +2363,12 @@ async function handleListPredicates(req, res) {
     .map(predicateToWire);
   // An unknown name returns an EMPTY LIST, never an error: "unregistered" is
   // the common and correct answer while the registry is an observation.
-  if (q.name) out = out.filter((p) => p.name === q.name);
+  const wantName = typeof q.name === 'string' && q.name ? q.name : null;
+  // #1244 — NAME lookup is not filtered here: an EMITTED but UNREGISTERED
+  // predicate must still be answerable, because the one that cost a colleague
+  // its hop budget (`scrum:column`) is exactly that. Filtering happens after
+  // shaping, so the sample can supply what the registry does not.
+  if (wantName && !(q.shapes === 'true' || q.shapes === '1')) out = out.filter((p) => p.name === wantName);
   // #1244 — WHAT SHAPE THE OBJECT TAKES, sampled from the live store on
   // request. Opt-in because it costs a graph query (~270ms over the whole
   // store); the definitions alone are the cheap common case. A seat that got
@@ -2373,7 +2378,11 @@ async function handleListPredicates(req, res) {
       const { queryGraph } = await loadGraphModules();
       const { store } = await warmGraphStore();
       const sampled = queryGraph(store, SHAPE_QUERY, { limit: 5000 });
-      out = withObjectShapes(out, sampled?.rows ?? []);
+      // A named lookup reaches the whole emitted vocabulary; an unnamed list
+      // stays the curated registry, because ~190 predicates would spend a small
+      // model's entire budget on a directory it did not ask for.
+      out = withObjectShapes(out, sampled?.rows ?? [], { includeUnregistered: Boolean(wantName) });
+      if (wantName) out = out.filter((p) => p.name === wantName);
     } catch (e) {
       // ⛔ FAIL LOUD, NOT SILENT. A shapes request that quietly returns
       // definitions-without-shapes is indistinguishable from a registry that
