@@ -35,6 +35,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { loadDomain, saveDomain } from './core/store.mjs';
+import { BOARD_TOOLS } from './core/board-tools.mjs';
 import { cardContentKey } from './core/card-content-key.mjs';
 import { applyApexLabels, APEX_PREFIX, descendantIds as apexDescendantIds } from './core/apex-labels.mjs';
 import { inFlight } from './core/in-flight.mjs';
@@ -3367,6 +3368,14 @@ async function handleAgentPromptVersion(req, res, seat) {
 const AGENT_PATCH_FIELDS = new Set(['by', 'state', 'contextPolicy', 'toolGrants', 'budgetPerDay', 'model', 'modelKey',
   'name', 'emoji', 'color', 'residency', 'wakeOn', 'everyMinutes', 'thinking', 'prompt']);
 
+// #1196 — WHAT MAY BE GRANTED, checked. Grants were free strings, and the
+// resolver ignored any name it did not know, so "board-search" returned 200 and
+// read back EXACTLY as sent while granting nothing. A value that survives the
+// round trip and means nothing is worse than one that is dropped: it looks
+// verified, and reading it back — the discipline that caught the silent
+// `thinking` drop — passes on the typo.
+const GRANTABLE = new Set([...BOARD_TOOLS.map((t) => t.function.name), 'card_claim']);
+
 async function handlePatchAgent(req, res, seat) {
   try {
     const body = JSON.parse(await readBody(req));
@@ -3407,7 +3416,11 @@ async function handlePatchAgent(req, res, seat) {
         }
       }
       if (body.contextPolicy != null) updated['scrum:contextPolicy'] = body.contextPolicy;
-      if (Array.isArray(body.toolGrants)) updated['scrum:toolGrant'] = body.toolGrants.map(String).filter(Boolean);
+      if (Array.isArray(body.toolGrants)) {
+        const badGrants = body.toolGrants.map(String).filter(Boolean).filter((g) => !GRANTABLE.has(g));
+        if (badGrants.length) return { status: 400, wire: { error: `unknown tool grant${badGrants.length === 1 ? '' : 's'} ${badGrants.map((g) => JSON.stringify(g)).join(', ')} — a grant nothing resolves is not a grant, and it would read back exactly as sent. Grantable: ${[...GRANTABLE].join(', ')}` } };
+        updated['scrum:toolGrant'] = body.toolGrants.map(String).filter(Boolean);
+      }
       if (body.budgetPerDay !== undefined) updated['scrum:budgetPerDay'] = body.budgetPerDay == null ? null : Number(body.budgetPerDay);
       if (body.model && typeof body.model === 'object' && typeof body.model.model === 'string') { updated['scrum:modelSpec'] = body.model; updated['scrum:model'] = body.model.model; updated['scrum:usesModel'] = null; }
       if (typeof body.modelKey === 'string') { // #1197

@@ -76,3 +76,35 @@ test('#1196 an agent write REFUSES an unknown field by name instead of dropping 
     assert.equal(good.body.thinking, false);
   } finally { await srv.stop(); }
 });
+
+test('#1196 a tool grant is checked against the REAL tools — a typo cannot read back as a grant', async () => {
+  // Same class as the dropped `thinking` field, one level over, and found by a
+  // reviewer before it cost anything: the route took grants as free strings and
+  // the resolver silently ignored any name it did not know. So "board-search"
+  // or "cardGet" returned 200, read back EXACTLY as sent, and granted nothing —
+  // and a read-back check, which is the discipline that caught the last one,
+  // would have passed on the typo. A value that survives the round trip and
+  // means nothing is worse than one that is dropped, because it looks verified.
+  const srv = await startRestServer({ board: makeBoardFixture({ cards: [], nextShortId: 1 }) });
+  try {
+    assert.equal((await api(srv.baseUrl, 'POST', '/api/agents', AGENT)).status, 201);
+
+    const typo = await api(srv.baseUrl, 'PATCH', '/api/agents/gizmo', { toolGrants: ['board-search'], by: 'ada' });
+    assert.equal(typo.status, 400, 'a grant that grants nothing must not return success');
+    assert.match(String(typo.body?.error), /board-search/, 'the refusal names what was sent');
+    assert.match(String(typo.body?.error), /board_search/, 'and lists what is real, so the caller can fix it without reading source');
+
+    const real = await api(srv.baseUrl, 'PATCH', '/api/agents/gizmo', { toolGrants: ['card_get', 'board_search'], by: 'ada' });
+    assert.equal(real.status, 200, JSON.stringify(real.body));
+    assert.deepEqual(real.body.toolGrants, ['card_get', 'board_search']);
+
+    // card_claim is granted through this same list and is NOT a board-tool; it
+    // must keep working, or the guard breaks the standing-claim protocol.
+    const claim = await api(srv.baseUrl, 'PATCH', '/api/agents/gizmo', { toolGrants: ['card_claim'], by: 'ada' });
+    assert.equal(claim.status, 200, `card_claim is a real grant and must survive: ${JSON.stringify(claim.body)}`);
+
+    const none = await api(srv.baseUrl, 'PATCH', '/api/agents/gizmo', { toolGrants: [], by: 'ada' });
+    assert.equal(none.status, 200, 'granting nothing is a legitimate state');
+    assert.deepEqual(none.body.toolGrants, []);
+  } finally { await srv.stop(); }
+});
