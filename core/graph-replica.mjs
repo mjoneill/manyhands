@@ -957,8 +957,13 @@ function projectModelCall(store, e) {
   for (const h of hops) {
     if (h && h.name) add(nn(S + 'toolCalled'), lit(String(h.name)));
   }
-  if (hops.length) add(nn(S + 'toolHops'), num(hops.length));
-  if (hops.length) add(nn(S + 'toolRowsReturned'), num(hops.reduce((t, h) => t + (Number(h?.rowCount) || 0), 0)));
+  // ⚠️ ALWAYS, including zero. Emitting these only when there were hops made
+  // "which wakes answered without looking" a query by ABSENCE — a reader would
+  // have to know to ask for a missing predicate, and a zero nobody can filter
+  // on is a zero nobody finds. That pair, no rows and a confident answer, is
+  // the whole reason this record exists, and it lives in the rows with no hops.
+  if (Array.isArray(e['scrum:toolHops'])) add(nn(S + 'toolHops'), num(hops.length));
+  if (Array.isArray(e['scrum:toolHops'])) add(nn(S + 'toolRowsReturned'), num(hops.reduce((t, h) => t + (Number(h?.rowCount) || 0), 0)));
   if (e['scrum:modelCalls'] != null && Number.isFinite(Number(e['scrum:modelCalls']))) add(nn(S + 'modelCalls'), num(e['scrum:modelCalls']));
   if (e['scrum:stoppedBecause'] != null) add(nn(S + 'stoppedBecause'), lit(String(e['scrum:stoppedBecause'])));
 }

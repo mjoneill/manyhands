@@ -183,3 +183,34 @@ test('#1196 SEAM: the REAL RUNNER offers tools, runs them, and the record lands 
     await srv.stop();
   }
 });
+
+test('#1196 SEAM: a wake that NEVER LOOKED is queryable as zero, not as absence', async () => {
+  // ⛔ Found in review, and it is the negation trap: the projection emitted
+  // toolHops only when there were hops, so the single most important question
+  // this record exists to answer — "which wakes answered WITHOUT looking" — was
+  // a query by ABSENCE rather than by value. A reader would have to know to ask
+  // for the missing predicate, and a zero that cannot be filtered on is a zero
+  // nobody finds. The whole point of the record is the pair "no rows, confident
+  // answer"; that pair lives in the rows with NO hops.
+  const srv = await startRestServer({ board: makeBoardFixture({ cards: [], nextShortId: 1 }) });
+  try {
+    const made = await api(srv.baseUrl, 'POST', '/api/model-calls', {
+      ...ROW, toolHops: [], modelCalls: 1, stoppedBecause: 'answered',
+      postedText: 'The apex card is #73.',
+    });
+    assert.equal(made.status, 201, JSON.stringify(made.body));
+
+    const q = await api(srv.baseUrl, 'POST', '/api/graph', {
+      query: `SELECT ?c ?hops ?rows WHERE {
+        ?c a scrum:ModelCall ; scrum:toolHops ?hops ; scrum:toolRowsReturned ?rows .
+        FILTER(?hops = 0)
+      }`,
+      by: 'ada',
+    });
+    assert.equal(q.status, 200, `the query must run: ${JSON.stringify(q.body).slice(0, 300)}`);
+    const rows = q.body.rows || q.body.bindings || [];
+    assert.ok(rows.length, 'a wake with no hops must be FOUND BY FILTERING ON ZERO, not by asking for a missing predicate');
+    assert.equal(Number(rows[0].hops?.value ?? rows[0].hops), 0);
+    assert.equal(Number(rows[0].rows?.value ?? rows[0].rows), 0);
+  } finally { await srv.stop(); }
+});
