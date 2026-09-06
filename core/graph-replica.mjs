@@ -192,6 +192,7 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:modelCalls', 'scrum:stoppedBecause',
   // #1246 — the contradiction between what a wake claimed and what it called.
   'scrum:unbackedLookupClaims', 'scrum:claimedLookup',
+  'scrum:narrationRetryOutcome',
   // #1130 — an apex is a KIND, not a convention: a card carrying `apex:<X>`
   // projects as scrum:Apex with scrum:apexLabel "X", so "what lives here" is
   // one hop and needs no knowledge of the prefix.
@@ -977,6 +978,12 @@ function projectModelCall(store, e) {
     add(nn(S + 'unbackedLookupClaims'), num(cl.length));
     for (const c of cl) { if (c && c.verb) add(nn(S + 'claimedLookup'), lit(String(c.verb))); }
   }
+  // #1246b — the nudge's OUTCOME, so "does handing a seat its own sentence back
+  // actually work" is a rate rather than an anecdote. Emitted only when a nudge
+  // happened: unlike the claims count, the absent case here means "nothing was
+  // narrated", which is the healthy majority and needs no row of its own.
+  const nr = e['scrum:narrationRetry'];
+  if (nr && nr.outcome) add(nn(S + 'narrationRetryOutcome'), lit(String(nr.outcome)));
 }
 
 /**

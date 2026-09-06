@@ -99,3 +99,51 @@ export function lookupClaimNote(claims = []) {
   return `This post claims a completed lookup (${list}) and this wake called no tool. `
     + 'That is a contradiction between the post and the row, not a judgement about the content.';
 }
+
+/**
+ * #1246 sibling — THE FUTURE TENSE, which is the shape that actually dominates.
+ *
+ * `unbackedLookupClaims` catches "I have read". This catches "I will search",
+ * from a wake that then ends. ⛔ In a one-shot wake there IS no next turn, so
+ * an announced lookup is not an intention a seat can keep — it is a promise
+ * the architecture makes impossible, delivered in the register of cooperation.
+ * The asker waits for a follow-up that cannot come. That is worse than a
+ * refusal, which at least ends the exchange honestly.
+ *
+ * ⚠️ Narrow in the same way and for the same reason: only LOOKUP verbs, only
+ * first person, and never inside quoted or fenced text. "I will remember that"
+ * and "I will not guess" are ordinary speech and must pass untouched.
+ *
+ * @returns {{phrase:string}|null}
+ */
+const LOOKUP_VERB = '(?:search|look|check|read|find)';
+const ANNOUNCE = [
+  new RegExp(String.raw`\bI(?:'ll|\u2019ll|\s+will)\s+(?:go\s+and\s+|now\s+)?` + LOOKUP_VERB + String.raw`\b`, 'i'),
+  new RegExp(String.raw`\bI(?:'m|\u2019m|\s+am)\s+going\s+to\s+` + LOOKUP_VERB + String.raw`\b`, 'i'),
+  new RegExp(String.raw`\bLet\s+me\s+` + LOOKUP_VERB + String.raw`\b`, 'i'),
+  new RegExp(String.raw`\bI(?:'m|\u2019m|\s+am)\s+(?:now\s+)?(?:searching|looking|checking|reading)\b`, 'i'),
+];
+
+export function announcedLookup(text) {
+  const body = String(text ?? '');
+  if (!body.trim()) return null;
+  const scannable = withoutQuotedSpans(body);
+  for (const re of ANNOUNCE) {
+    const m = scannable.match(re);
+    if (m) return { phrase: m[0].replace(/\s+/g, ' ') };
+  }
+  return null;
+}
+
+/**
+ * The one thing the loop says back. Not a scolding and not a re-statement of
+ * the rule that already failed — a MOVE, with both roads named: do it now, or
+ * decline in a way that ends the exchange. #1251: a usable exit has to be
+ * something the seat can DO, not another sentence telling it that it may.
+ */
+export function performOrDeclineNudge(phrase) {
+  return `You said: "${phrase}" — but this turn is ending and there is no later turn in which to do it. `
+    + 'You have the tools right now. Either CALL one on this turn and answer from what comes back, '
+    + 'or say plainly that you cannot answer and why. Both are fine. Announcing a lookup you do not make is the one thing that is not, '
+    + 'because the person is left waiting for a reply that will never come.';
+}

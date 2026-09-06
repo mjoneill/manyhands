@@ -219,3 +219,71 @@ test('#1246 a clean wake carries the empty verdict, not a missing field', async 
   const row = rowsFrom(ledgerFile).at(-1);
   assert.deepEqual(row.unbackedLookupClaims, [], 'present and empty — absence would make the clean rows unfindable');
 });
+
+/**
+ * #1246b — the loop-level half of the future-tense fix. The detector is pure
+ * and tested pure; what matters here is that the LOOP hands the seat its own
+ * sentence back, with the tools still open, and takes the better answer.
+ */
+test('#1246b an announced-but-unmade lookup is nudged ONCE, and a real lookup replaces it', async () => {
+  const posts = []; const problems = [];
+  const ledgerFile = tmpLedger();
+  let turn = 0;
+  const callModel = async () => {
+    turn += 1;
+    // 1: narrates. 2: after the nudge, actually calls. 3: answers from the rows.
+    if (turn === 1) return { text: 'I will search the board for the genesis prompt and report back.', toolCalls: [], stopReason: 'stop', usage: null };
+    if (turn === 2) return { text: '', toolCalls: [{ id: 'c1', name: 'board_search', arguments: { q: 'genesis prompt' } }], stopReason: 'tool_calls', usage: null };
+    return { text: 'Card #1249 holds it; the body opens on the word.', toolCalls: [], stopReason: 'stop', usage: null };
+  };
+  const out = await guestOnce({
+    agent: agentWith(['board_search']), wake: WAKE, ledgerFile, callModel,
+    execute: async () => ({ rows: [{ shortId: 1249, title: 'THE GENESIS PROMPT' }] }),
+    post: async (p) => { posts.push(p); return { id: 'p1' }; },
+    onError: (m) => problems.push(m),
+  });
+
+  const row = rowsFrom(ledgerFile).at(-1);
+  assert.equal(row.narrationRetry.outcome, 'looked', 'the nudge turned a promise into a lookup');
+  assert.match(row.narrationRetry.phrase, /I will search/i);
+  assert.equal(row.toolHops.length, 1, 'and the hop is on the record');
+  assert.equal(posts[0].body, 'Card #1249 holds it; the body opens on the word.', 'the ANSWER is posted, not the promise');
+  assert.equal(out.posted, true);
+  assert.match(problems.join('\n'), /#1246b/, 'an operator can see it happened');
+});
+
+test('#1246b a seat that declines after the nudge is NOT forced to look — the exit is real', async () => {
+  const posts = [];
+  const ledgerFile = tmpLedger();
+  let turn = 0;
+  const callModel = async () => {
+    turn += 1;
+    if (turn === 1) return { text: 'Let me check that for you.', toolCalls: [], stopReason: 'stop', usage: null };
+    return { text: 'Nothing I can reach can see that, so I cannot answer it.', toolCalls: [], stopReason: 'stop', usage: null };
+  };
+  await guestOnce({
+    agent: agentWith(['board_search']), wake: WAKE, ledgerFile, callModel,
+    execute: async () => ({ rows: [] }),
+    post: async (p) => { posts.push(p); return { id: 'p1' }; },
+  });
+  const row = rowsFrom(ledgerFile).at(-1);
+  // ⛔ THE POINT OF #1251: both roads are acceptable. A mechanism that only
+  // accepts "look" would be coercion wearing a fix's clothes, and a seat with
+  // no honest way out is the situation that produced the fabrication.
+  assert.equal(row.narrationRetry.outcome, 'answered-without-looking');
+  assert.equal(posts[0].body, 'Nothing I can reach can see that, so I cannot answer it.', 'the honest refusal is what gets posted');
+});
+
+test('#1246b a wake that just ANSWERS is never nudged, and costs no extra call', async () => {
+  const ledgerFile = tmpLedger();
+  let calls = 0;
+  await guestOnce({
+    agent: agentWith(['board_search']), wake: WAKE, ledgerFile,
+    callModel: async () => { calls += 1; return { text: 'Card #1249 holds it.', toolCalls: [], stopReason: 'stop', usage: null }; },
+    execute: async () => ({ rows: [] }),
+    post: async () => ({ id: 'p1' }),
+  });
+  const row = rowsFrom(ledgerFile).at(-1);
+  assert.equal(row.narrationRetry, undefined, 'no nudge, no field');
+  assert.equal(calls, 1, 'and no second model call was spent');
+});

@@ -36,7 +36,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runToolLoop } from './tool-loop.mjs';
 import { toolsFor, BOARD_TOOLS } from './board-tools.mjs';
-import { unbackedLookupClaims, lookupClaimNote } from './lookup-claim.mjs';
+import { unbackedLookupClaims, lookupClaimNote, announcedLookup, performOrDeclineNudge } from './lookup-claim.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -393,6 +393,56 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
     onError(`[#1201] model call failed for ${agent.seatKey}; NO post made: ${row.error}`);
     return { posted: false, reason: 'model-failed', ledger: row };
   }
+  // #1246b — A NARRATED LOOKUP GETS ONE CHANCE TO BECOME A REAL ONE.
+  //
+  // Measured on this board 2026-09-06: of seven genuine asks to look something
+  // up, six produced NO tool call, and several announced the lookup instead —
+  // "I will search for the genesis prompt and read it." The wake then ends.
+  // There is no later turn, so that promise cannot be kept by construction,
+  // and the person is left waiting for a reply that will never come.
+  //
+  // ⛔ THE PROMPT ALREADY FORBIDS THIS IN THREE CONSECUTIVE CLAUSES and lost
+  // every time. So the answer is not a fourth clause. It is a MOVE the loop
+  // makes: hand the seat its own sentence back, with the tools still open and
+  // BOTH roads named — look now, or decline and end it honestly. #1251's whole
+  // finding is that an exit has to be something a seat can DO under pressure,
+  // not something it is told it may do.
+  //
+  // Bounded to ONE extra call. A retry that can retry is a budget with no floor.
+  let narrationRetry = null;
+  if (useTools && hops.length === 0) {
+    const announced = announcedLookup(result?.text ?? '');
+    if (announced) {
+      narrationRetry = { phrase: announced.phrase, outcome: 'no-change' };
+      try {
+        const again = await runToolLoop({
+          agent: agent.model, tools, execute, callModel,
+          messages: [...messages,
+            { role: 'assistant', content: String(result?.text ?? '') },
+            { role: 'user', content: performOrDeclineNudge(announced.phrase) }],
+          ...(hopCeiling === undefined ? {} : { maxHops: hopCeiling }),
+          opts: { ...(agent.model.sampling || {}) },
+        });
+        modelCalls += again.modelCalls;
+        if (again.hops.length) {
+          hops = again.hops; stoppedBecause = again.stoppedBecause;
+          result = { text: again.text, stopReason: 'stop', usage: result?.usage ?? null };
+          narrationRetry.outcome = 'looked';
+        } else if (String(again.text || '').trim()) {
+          result = { text: again.text, stopReason: 'stop', usage: result?.usage ?? null };
+          narrationRetry.outcome = 'answered-without-looking';
+        }
+      } catch (e) {
+        // ⚠️ A FAILED NUDGE MUST NOT COST THE ANSWER. The first reply is still
+        // the seat's reply; losing it to a retry would make this fix worse
+        // than the defect. Recorded, not raised.
+        narrationRetry.outcome = 'retry-failed';
+        narrationRetry.error = e?.message ?? String(e);
+        onError(`[#1246b] nudge failed for ${agent.seatKey}: ${narrationRetry.error}`);
+      }
+      onError(`[#1246b] ${agent.seatKey} announced a lookup it had not made ("${announced.phrase}") — nudged; outcome: ${narrationRetry.outcome}`);
+    }
+  }
   // #1196 — THE TOOL RECORD BELONGS ON EVERY ROW, not only the happy one. A
   // wake that spent four model calls and produced nothing is precisely the one
   // an operator needs the hops for; a row that drops them reads as a wake that
@@ -461,6 +511,7 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
   if (lookupClaims.length) onError(`[#1246] ${agent.seatKey} — ${lookupClaimNote(lookupClaims)}`);
   const row = { ...base, ok: true, stopReason: result.stopReason ?? null, usage: result.usage ?? null, attempts: result.attempts ?? null, latencyMs: Date.now() - started, postId: posted?.id ?? null,
     ...toolRecord, postedText: text || null, unbackedLookupClaims: lookupClaims,
+    ...(narrationRetry ? { narrationRetry } : {}),
     memoryWritten, ...(memoryRefused.length ? { memoryRefused } : {}), claims: claimed, ...(text ? {} : { reason: 'memory-only' }) };
   const recorded = await recordLedger({ sink: ledgerSink, file: ledgerFile, row, onError });
   row.recorded = recorded.recorded; row.ledgerId = recorded.id;

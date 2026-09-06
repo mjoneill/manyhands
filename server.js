@@ -3505,6 +3505,8 @@ const modelCallToWire = (e) => ({
   postedText: e['scrum:postedText'] ?? null,
   // #1246 — the contradiction between the post and the row, on the row.
   unbackedLookupClaims: e['scrum:unbackedLookupClaims'] ?? [],
+  // #1246b — was the seat handed its own announcement back, and what did it do then.
+  narrationRetry: e['scrum:narrationRetry'] ?? null,
 });
 const MODEL_CALL_FIELDS = new Set(['by', 'agent', 'model', 'provider', 'protocol', 'promptVersion', 'tokensIn', 'tokensOut', 'cost', 'latencyMs', 'stopReason', 'ok', 'contextHandedTo', 'producedPost', 'at', 'error', 'sampling', 'wake', 'memory', 'memoryWritten', 'claims',
   // #1196 — what the colleague FETCHED, beside what it said. A claim whose rows
@@ -3512,7 +3514,9 @@ const MODEL_CALL_FIELDS = new Set(['by', 'agent', 'model', 'provider', 'protocol
   // argument for giving it tools at all.
   'toolsGranted', 'toolHops', 'modelCalls', 'stoppedBecause', 'postedText',
   // #1246 — a claimed lookup from a wake that called no tool.
-  'unbackedLookupClaims']);
+  'unbackedLookupClaims',
+  // #1246b — the nudge and what it produced.
+  'narrationRetry']);
 const MODEL_CALL_SAMPLING = new Set(['temperature', 'topP', 'topK', 'repetitionPenalty', 'seed', 'stop', 'maxTokens', 'keepAlive']);
 // #1086 slice 2 — the row builder, shared by POST /api/model-calls and the
 // search reader, so a reader verdict is ledgered EXACTLY as a hand-posted row
@@ -3556,6 +3560,7 @@ function modelCallEntityFrom(body) {
     'scrum:stoppedBecause': typeof body.stoppedBecause === 'string' ? body.stoppedBecause : null,
     'scrum:postedText': typeof body.postedText === 'string' ? body.postedText : null,
     'scrum:unbackedLookupClaims': Array.isArray(body.unbackedLookupClaims) ? body.unbackedLookupClaims.slice(0, 20) : [],
+    'scrum:narrationRetry': (body.narrationRetry && typeof body.narrationRetry === 'object' && !Array.isArray(body.narrationRetry)) ? body.narrationRetry : null,
     'scrum:agent': agent, 'scrum:model': body.model.trim(),
     'scrum:provider': typeof body.provider === 'string' ? body.provider : null,
     'scrum:protocol': typeof body.protocol === 'string' ? body.protocol : null,
