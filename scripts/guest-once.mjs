@@ -21,7 +21,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { callModel } from '../core/model-adapter.mjs';
-import { findMentions, findWakes, guestOnce, fetchBoundedChanges, shouldMarkAnswered } from '../core/guest-loop.mjs';
+import { findMentions, findWakes, guestOnce, fetchBoundedChanges, shouldMarkAnswered, mentionScanPath, acquireLock, releaseLock } from '../core/guest-loop.mjs';
 
 const args = process.argv.slice(2);
 const opt = (k) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : null; };
@@ -59,7 +59,16 @@ const post = async (body) => {
 
 let state = {};
 try { state = JSON.parse(fs.readFileSync(stateFile, 'utf8')); } catch { /* first wake */ }
-const recent = await get('/api/conversations?attachedTo=null&limit=60');
+// #1237 — one run at a time per seat: the launchd tick and a hand run must not
+// both answer one mention. The lock sits beside the state file.
+const lockPath = `${stateFile}.lock`;
+const lock = dry ? { acquired: true } : acquireLock(lockPath);
+if (!lock.acquired) { console.log(`${new Date().toISOString()} ${agent.seatKey}: lock held by another run (pid ${lock.holder?.pid ?? '?'} since ${lock.holder?.at ?? '?'}) — doing nothing`); process.exit(0); }
+if (lock.broke) console.error(`[#1237] ${agent.seatKey}: broke a STALE lock (pid ${lock.broke.pid}, held ${Math.round(lock.heldMs / 1000)}s) — a run died mid-wake; check the log above this line`);
+if (!dry) { const done = () => releaseLock(lockPath); process.on('exit', done); for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { done(); process.exit(1); }); }
+// #1237 — scan by SINCE cursor, not the newest 60: a mention buried under a busy
+// night was invisible for good. mentionScanPath is tested.
+const recent = await get(mentionScanPath(state));
 const messages = Array.isArray(recent) ? recent : (recent?.conversations ?? []);
 // #1226 — wake sources are the agent's data. Cards are fetched only when a
 // kind needs them; a mention-only agent costs what slice 1 cost.
@@ -141,7 +150,7 @@ const r = await guestOnce({
 // it owed, so the next run finds it again (shouldMarkAnswered, tested).
 if (!dry && shouldMarkAnswered(r)) {
   const next = { ...state, at: new Date().toISOString(), posted: r.posted, reason: r.reason ?? null };
-  if (wake.kind === 'mention') next.lastAnsweredId = wake.id;
+  if (wake.kind === 'mention') { next.lastAnsweredId = wake.id; next.lastAnsweredAt = wake.createdAt ?? next.lastAnsweredAt ?? null; }   // #1237 the cursor
   if (wake.kind === 'assignment') next.assignmentsSeen = [...new Set([...(state.assignmentsSeen || []), wake.cardId])].slice(-200);
   if (wake.kind === 'schedule') next.lastScheduledAt = wake.createdAt;
   fs.writeFileSync(stateFile, JSON.stringify(next, null, 2));

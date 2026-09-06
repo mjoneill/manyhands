@@ -323,3 +323,51 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
   log(`[#1201] ${agent.seatKey} answered ${wake.id ?? 'a mention'} via ${agent.model.model} (${row.usage?.completionTokens ?? '?'} tokens, ${row.stopReason})`);
   return { posted: Boolean(posted), ...(text ? {} : { reason: 'memory-only' }), postId: row.postId, ledger: row, text, remember, claims: claimed };
 }
+
+// ---------------------------------------------------------------------------
+// #1237 — IN USE. The runner is started by a launchd tick every minute, so:
+//
+// The mention scan is a SINCE cursor, not the newest-60 window. On a busy night
+// a mention slid past 60 newer posts and was invisible for good — a human asked
+// the seat a question at 02:22Z and a dry run at 10:02Z found "nothing to wake
+// for". The cursor is the createdAt of the last mention answered; the first run
+// ever reaches back a few minutes only, because a first tick that replays a
+// night of old mentions one per minute is a flood, not a colleague.
+export const FIRST_RUN_WINDOW_MS = 10 * 60_000;
+export const SCAN_LIMIT = 500;
+export function mentionScanPath(state = {}, now = new Date().toISOString()) {
+  const since = typeof state.lastAnsweredAt === 'string' && state.lastAnsweredAt
+    ? state.lastAnsweredAt
+    : new Date(Date.parse(now) - FIRST_RUN_WINDOW_MS).toISOString();
+  return `/api/conversations?attachedTo=null&since=${encodeURIComponent(since)}&limit=${SCAN_LIMIT}`;
+}
+
+// A lock beside the state file, so the tick and a hand run cannot both answer
+// one mention. mkdir is atomic on every filesystem we run on; the holder's pid
+// and start time live inside so a refusal can NAME the holder and a stale lock
+// (a run that died mid-model-call) is broken rather than wedging the seat
+// forever — and the break is reported, not silent.
+export function acquireLock(lockPath, { pid = process.pid, now = Date.now(), staleMs = 10 * 60_000 } = {}) {
+  const infoFile = `${lockPath}/holder.json`;
+  const readHolder = () => { try { return JSON.parse(fs.readFileSync(infoFile, 'utf8')); } catch { return null; } };
+  // Build the lock COMPLETE in a sibling temp dir, then rename it into place:
+  // rename onto a non-empty directory fails, so a lock is never visible half-
+  // written, and a second run can never mistake a fresh lock for a stale one.
+  const take = () => {
+    const tmp = fs.mkdtempSync(`${lockPath}.tmp-`);
+    fs.writeFileSync(`${tmp}/holder.json`, JSON.stringify({ pid, at: new Date(now).toISOString() }));
+    try { fs.renameSync(tmp, lockPath); return true; }
+    catch (e) { fs.rmSync(tmp, { recursive: true, force: true }); if (e?.code === 'ENOTEMPTY' || e?.code === 'EEXIST' || e?.code === 'EPERM') return false; throw e; }
+  };
+  if (take()) return { acquired: true };
+  const holder = readHolder();
+  let heldMs;
+  if (holder?.at) heldMs = now - Date.parse(holder.at);
+  else { try { heldMs = now - fs.statSync(lockPath).mtimeMs; } catch { heldMs = 0; } }
+  if (!(heldMs >= staleMs)) return { acquired: false, holder, heldMs };
+  // stale: break it and say so
+  fs.rmSync(lockPath, { recursive: true, force: true });
+  if (!take()) { const h = readHolder(); return { acquired: false, holder: h, heldMs: h?.at ? now - Date.parse(h.at) : 0 }; }
+  return { acquired: true, broke: holder ?? { pid: null, at: null }, heldMs };
+}
+export function releaseLock(lockPath) { fs.rmSync(lockPath, { recursive: true, force: true }); }
