@@ -54,7 +54,7 @@ const board = () => makeBoardFixture({
 async function q(baseUrl, qs) {
   const res = await fetch(`${baseUrl}/api/cards?${qs}`);
   const body = await res.json();
-  return { status: res.status, body };
+  return { status: res.status, body, read: res.headers.get('x-board-read') };
 }
 
 test('#656 q matches the title, case-insensitively', async () => {
@@ -103,8 +103,12 @@ test('#656 a no-match q returns an EMPTY list with 200 — not an error, not eve
     assert.equal(miss.body.cards.length, 0, 'a genuine miss is empty');
 
     const control = await q(s.baseUrl, 'q=voiceprint&as=ada');
+    // #715 — on failure, say which read served each response: a shared board
+    // that was built empty and a filter that dropped three cards are the same
+    // number from outside, and CI is the only place this has ever failed.
     assert.equal(control.body.cards.length, 3,
-      'control: the search was alive in the same server that returned the empty set');
+      `control: the search was alive in the same server that returned the empty set`
+      + ` (miss read: ${miss.read ?? 'n/a'}; control read: ${control.read ?? 'n/a'})`);
   } finally { await s.stop(); }
 });
 

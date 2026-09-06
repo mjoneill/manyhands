@@ -24,7 +24,7 @@ test('#715 GET routes share: the first read after boot rebuilds, the next hits; 
     assert.equal(r1.status, 200);
     assert.match(hdr(r1), /^shared; (rebuilt=\d+ms|hit)/, 'a GET is served from the shared board: ' + hdr(r1));
     const r2 = await fetch(`${s.baseUrl}/api/cards`);
-    assert.match(hdr(r2), /^shared; hit; built=20\d\d-/, 'the second GET is a hit and names the build it hit: ' + hdr(r2));
+    assert.match(hdr(r2), /^shared; hit; built=20\d\d-.*; cards=\d+$/, 'the second GET is a hit and names the build it hit: ' + hdr(r2));
     const r3 = await fetch(`${s.baseUrl}/api/agents`);
     assert.match(hdr(r3), /^shared; hit/, 'a different GET route hits the same build');
     // ⛔ A POST never shares, even one that looks read-only: search with a
@@ -41,7 +41,7 @@ test('#715 GET routes share: the first read after boot rebuilds, the next hits; 
 
     // The write changed the file identity, so the next GET rebuilds ONCE and sees the new card.
     const r4 = await fetch(`${s.baseUrl}/api/cards`);
-    assert.match(hdr(r4), /^shared; rebuilt=\d+ms$/, 'the first GET after a write rebuilds: ' + hdr(r4));
+    assert.match(hdr(r4), /^shared; rebuilt=\d+ms; key=.+; cards=\d+$/, 'the first GET after a write rebuilds: ' + hdr(r4));
     const cards = await r4.json();
     assert.ok(cards.some((c) => c.title === 'after the cache'), 'the rebuilt shared board carries the write');
     const r5 = await fetch(`${s.baseUrl}/api/cards`);

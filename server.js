@@ -874,7 +874,7 @@ const DEFAULT_COLUMNS = [
 // by routeApi from the HTTP method, carried across awaits, consulted by
 // readBoard. A GET may never write, so it may share; anything else clones.
 const requestContext = new AsyncLocalStorage();
-let _sharedBoard = null;   // { key, board, builtMs, builtAt } — one per file identity
+let _sharedBoard = null;   // { file, key, board, builtMs, builtAt } — one per file identity
 
 function deepFreeze(root) {
   const stack = [root];
@@ -914,12 +914,14 @@ function readBoard() {
     // fails loudly here instead of corrupting every later reader silently.
     const t0 = performance.now();
     const { key, domain } = loadDomainShared(BOARD_DATA_FILE);
-    if (!_sharedBoard || _sharedBoard.key !== key) {
+    // Keyed by PATH as well as identity: one board file per process today, but
+    // a key that could match a different file's identity is a latent stale read.
+    if (!_sharedBoard || _sharedBoard.file !== BOARD_DATA_FILE || _sharedBoard.key !== key) {
       const board = deepFreeze(finishBoard(domainToBoard(domain)));
-      _sharedBoard = { key, board, builtMs: Math.round(performance.now() - t0), builtAt: new Date().toISOString() };
-      ctx.read = `shared; rebuilt=${_sharedBoard.builtMs}ms`;
+      _sharedBoard = { file: BOARD_DATA_FILE, key, board, builtMs: Math.round(performance.now() - t0), builtAt: new Date().toISOString() };
+      ctx.read = `shared; rebuilt=${_sharedBoard.builtMs}ms; key=${key}; cards=${board.cards.length}`;
     } else {
-      ctx.read = `shared; hit; built=${_sharedBoard.builtAt}`;
+      ctx.read = `shared; hit; built=${_sharedBoard.builtAt}; key=${_sharedBoard.key}; cards=${_sharedBoard.board.cards.length}`;
     }
     return _sharedBoard.board;
   }
