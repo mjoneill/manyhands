@@ -3503,12 +3503,16 @@ const modelCallToWire = (e) => ({
   toolsGranted: e['scrum:toolsGranted'] ?? [], toolHops: e['scrum:toolHops'] ?? [],
   modelCalls: e['scrum:modelCalls'] ?? null, stoppedBecause: e['scrum:stoppedBecause'] ?? null,
   postedText: e['scrum:postedText'] ?? null,
+  // #1246 — the contradiction between the post and the row, on the row.
+  unbackedLookupClaims: e['scrum:unbackedLookupClaims'] ?? [],
 });
 const MODEL_CALL_FIELDS = new Set(['by', 'agent', 'model', 'provider', 'protocol', 'promptVersion', 'tokensIn', 'tokensOut', 'cost', 'latencyMs', 'stopReason', 'ok', 'contextHandedTo', 'producedPost', 'at', 'error', 'sampling', 'wake', 'memory', 'memoryWritten', 'claims',
   // #1196 — what the colleague FETCHED, beside what it said. A claim whose rows
   // are not on the record cannot be checked by anyone later, which is the whole
   // argument for giving it tools at all.
-  'toolsGranted', 'toolHops', 'modelCalls', 'stoppedBecause', 'postedText']);
+  'toolsGranted', 'toolHops', 'modelCalls', 'stoppedBecause', 'postedText',
+  // #1246 — a claimed lookup from a wake that called no tool.
+  'unbackedLookupClaims']);
 const MODEL_CALL_SAMPLING = new Set(['temperature', 'topP', 'topK', 'repetitionPenalty', 'seed', 'stop', 'maxTokens', 'keepAlive']);
 // #1086 slice 2 — the row builder, shared by POST /api/model-calls and the
 // search reader, so a reader verdict is ledgered EXACTLY as a hand-posted row
@@ -3551,6 +3555,7 @@ function modelCallEntityFrom(body) {
     'scrum:modelCalls': n(body.modelCalls),
     'scrum:stoppedBecause': typeof body.stoppedBecause === 'string' ? body.stoppedBecause : null,
     'scrum:postedText': typeof body.postedText === 'string' ? body.postedText : null,
+    'scrum:unbackedLookupClaims': Array.isArray(body.unbackedLookupClaims) ? body.unbackedLookupClaims.slice(0, 20) : [],
     'scrum:agent': agent, 'scrum:model': body.model.trim(),
     'scrum:provider': typeof body.provider === 'string' ? body.provider : null,
     'scrum:protocol': typeof body.protocol === 'string' ? body.protocol : null,

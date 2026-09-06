@@ -179,3 +179,43 @@ test('#1196C a seat with tools is TOLD it has them — and told never to claim a
   });
   assert.doesNotMatch(ungrantedSystem, /board_search|card_get/, 'a seat with no tools is not told about tools');
 });
+
+/**
+ * #1246 — the loop-level half. The detector is pure and tested pure; what this
+ * asserts is that the LOOP runs it against the wake's real hops and puts the
+ * verdict on the row that gets recorded. A detector nobody calls is a detector
+ * that catches nothing.
+ */
+test('#1246 a zero-hop wake that claims a lookup is FLAGGED on the row, and the post still goes out', async () => {
+  const posts = []; const problems = [];
+  const ledgerFile = tmpLedger();
+  const out = await guestOnce({
+    agent: agentWith([]), wake: WAKE, ledgerFile,
+    callModel: async () => ({ text: 'I have read the genesis prompt and it speaks of a shared space.', toolCalls: [], stopReason: 'stop', usage: null }),
+    post: async (p) => { posts.push(p); return { id: 'p1' }; },
+    onError: (m) => problems.push(m),
+  });
+
+  const row = rowsFrom(ledgerFile).at(-1);
+  assert.deepEqual(row.toolHops, [], 'the wake called nothing');
+  assert.equal(row.unbackedLookupClaims.length, 1, 'and the row says the post claimed otherwise');
+  assert.equal(row.unbackedLookupClaims[0].verb, 'read');
+  assert.match(problems.join('\n'), /#1246/, 'an operator is told, or the record is only for archaeology');
+
+  // ⛔ RECORD-ONLY, ON PURPOSE. Refusing the post back to the loop is a real
+  // option and a separate argument; a false accusation of fabrication is worse
+  // than the fabrication, so nothing is suppressed until that argument is had.
+  assert.equal(out.posted, true, 'the post is NOT blocked');
+  assert.equal(posts.length, 1);
+});
+
+test('#1246 a clean wake carries the empty verdict, not a missing field', async () => {
+  const ledgerFile = tmpLedger();
+  await guestOnce({
+    agent: agentWith([]), wake: WAKE, ledgerFile,
+    callModel: async () => ({ text: 'I have no tool for that, so I cannot say what the card holds.', toolCalls: [], stopReason: 'stop', usage: null }),
+    post: async () => ({ id: 'p1' }),
+  });
+  const row = rowsFrom(ledgerFile).at(-1);
+  assert.deepEqual(row.unbackedLookupClaims, [], 'present and empty — absence would make the clean rows unfindable');
+});

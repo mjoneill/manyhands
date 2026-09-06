@@ -36,6 +36,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runToolLoop } from './tool-loop.mjs';
 import { toolsFor, BOARD_TOOLS } from './board-tools.mjs';
+import { unbackedLookupClaims, lookupClaimNote } from './lookup-claim.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -446,8 +447,20 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
   // Side by side in one row, a reader can finally ask whether the rows support
   // the sentence — including the case that defeated every rule we tried
   // tonight: zero rows and a confident answer.
+  // #1246 — THE CONTRADICTION, RECORDED. A post claiming a completed lookup
+  // from a wake that called no tool is checkable without judging the content,
+  // because both halves are facts about this row. Recorded and logged; the
+  // post is NOT blocked. Deciding to intervene is a separate argument, and a
+  // false accusation of fabrication is worse than the fabrication.
+  //
+  // ⚠️ ALWAYS SET, including the empty case — the same reason toolHops is
+  // emitted at zero. A field present only when it fired makes "which wakes
+  // were clean" a query by absence, and a reader would have to know to ask
+  // for a missing field.
+  const lookupClaims = unbackedLookupClaims(text, hops);
+  if (lookupClaims.length) onError(`[#1246] ${agent.seatKey} — ${lookupClaimNote(lookupClaims)}`);
   const row = { ...base, ok: true, stopReason: result.stopReason ?? null, usage: result.usage ?? null, attempts: result.attempts ?? null, latencyMs: Date.now() - started, postId: posted?.id ?? null,
-    ...toolRecord, postedText: text || null,
+    ...toolRecord, postedText: text || null, unbackedLookupClaims: lookupClaims,
     memoryWritten, ...(memoryRefused.length ? { memoryRefused } : {}), claims: claimed, ...(text ? {} : { reason: 'memory-only' }) };
   const recorded = await recordLedger({ sink: ledgerSink, file: ledgerFile, row, onError });
   row.recorded = recorded.recorded; row.ledgerId = recorded.id;

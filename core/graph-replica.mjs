@@ -190,6 +190,8 @@ export const GRAPH_VOCABULARY = new Set([
   // actually called, how far it went and how much came back.
   'scrum:toolGranted', 'scrum:toolCalled', 'scrum:toolHops', 'scrum:toolRowsReturned',
   'scrum:modelCalls', 'scrum:stoppedBecause',
+  // #1246 — the contradiction between what a wake claimed and what it called.
+  'scrum:unbackedLookupClaims', 'scrum:claimedLookup',
   // #1130 — an apex is a KIND, not a convention: a card carrying `apex:<X>`
   // projects as scrum:Apex with scrum:apexLabel "X", so "what lives here" is
   // one hop and needs no knowledge of the prefix.
@@ -966,6 +968,15 @@ function projectModelCall(store, e) {
   if (Array.isArray(e['scrum:toolHops'])) add(nn(S + 'toolRowsReturned'), num(hops.reduce((t, h) => t + (Number(h?.rowCount) || 0), 0)));
   if (e['scrum:modelCalls'] != null && Number.isFinite(Number(e['scrum:modelCalls']))) add(nn(S + 'modelCalls'), num(e['scrum:modelCalls']));
   if (e['scrum:stoppedBecause'] != null) add(nn(S + 'stoppedBecause'), lit(String(e['scrum:stoppedBecause'])));
+  // #1246 — WHICH WAKES CLAIMED A LOOKUP THEY DID NOT MAKE. The count is
+  // emitted ALWAYS, including zero, for the reason directly above: a flag
+  // present only when it fired makes the clean rows unfindable, and "how
+  // often does this happen" needs both halves of the ratio.
+  if (Array.isArray(e['scrum:unbackedLookupClaims'])) {
+    const cl = e['scrum:unbackedLookupClaims'];
+    add(nn(S + 'unbackedLookupClaims'), num(cl.length));
+    for (const c of cl) { if (c && c.verb) add(nn(S + 'claimedLookup'), lit(String(c.verb))); }
+  }
 }
 
 /**

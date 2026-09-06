@@ -214,3 +214,52 @@ test('#1196 SEAM: a wake that NEVER LOOKED is queryable as zero, not as absence'
     assert.equal(Number(rows[0].rows?.value ?? rows[0].rows), 0);
   } finally { await srv.stop(); }
 });
+
+/**
+ * #1246 — the contradiction must cross the SAME seam. A detector whose verdict
+ * lives only in the runner's log is a verdict nobody can query, which is the
+ * failure this file was written for one card earlier.
+ */
+test('#1246 SEAM: a claimed lookup from a zero-hop wake survives POST, the wire, and the GRAPH', async () => {
+  const srv = await startRestServer({ board: makeBoardFixture({ cards: [], nextShortId: 1 }) });
+  try {
+    const made = await api(srv.baseUrl, 'POST', '/api/model-calls', {
+      ...ROW,
+      toolHops: [], modelCalls: 1, postedText: 'I have read the genesis prompt.',
+      unbackedLookupClaims: [{ verb: 'read', phrase: 'I have read', index: 0 }],
+    });
+    assert.equal(made.status, 201, JSON.stringify(made.body));
+
+    const list = await api(srv.baseUrl, 'GET', '/api/model-calls?agent=gizmo');
+    const row = (list.body.calls || list.body)[0];
+    assert.equal(row.unbackedLookupClaims.length, 1, 'the verdict reads back on the wire');
+    assert.equal(row.unbackedLookupClaims[0].verb, 'read', 'and it reads back in the shape it was written');
+
+    const q = await api(srv.baseUrl, 'POST', '/api/graph', {
+      query: `SELECT ?n ?verb WHERE {
+        ?c a scrum:ModelCall ; scrum:unbackedLookupClaims ?n ; scrum:claimedLookup ?verb .
+      }`,
+      by: 'ada',
+    });
+    const bindings = q.body.rows || q.body.bindings || [];
+    assert.ok(bindings.length, `the verdict must be PROJECTED, not merely stored: ${JSON.stringify(q.body).slice(0, 300)}`);
+    assert.equal(Number(bindings[0].n?.value ?? bindings[0].n), 1);
+    assert.equal(String(bindings[0].verb?.value ?? bindings[0].verb), 'read');
+  } finally { await srv.stop(); }
+});
+
+test('#1246 SEAM: a CLEAN wake is queryable too — zero, not absent', async () => {
+  const srv = await startRestServer({ board: makeBoardFixture({ cards: [], nextShortId: 1 }) });
+  try {
+    await api(srv.baseUrl, 'POST', '/api/model-calls', { ...ROW, unbackedLookupClaims: [] });
+    const q = await api(srv.baseUrl, 'POST', '/api/graph', {
+      query: 'SELECT ?n WHERE { ?c a scrum:ModelCall ; scrum:unbackedLookupClaims ?n . }',
+      by: 'ada',
+    });
+    const bindings = q.body.rows || q.body.bindings || [];
+    // ⛔ Without this, "how often does this happen" has no denominator: only the
+    // flagged rows would exist, and a rate needs the clean ones to be countable.
+    assert.ok(bindings.length, 'a clean wake must be findable, or the flagged ones have nothing to be a rate OF');
+    assert.equal(Number(bindings[0].n?.value ?? bindings[0].n), 0);
+  } finally { await srv.stop(); }
+});
