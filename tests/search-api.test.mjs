@@ -200,3 +200,94 @@ test('an embedder that never answers ⇒ available:false naming the timeout, not
     assert.equal(calls.length, 1);
   } finally { await srv.stop(); srv0.closeAllConnections?.(); await new Promise((r) => srv0.close(r)); }
 });
+
+// ── #1086 slice 2 — the reader through the real route, against a fake Ollama /api/chat ──
+async function fakeReader(replyFor) {
+  const calls = [];
+  const srv = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      const body = JSON.parse(raw);
+      calls.push({ url: req.url, body });
+      res.setHeader('Content-Type', 'application/json');
+      const content = replyFor(body.messages.at(-1).content);
+      res.end(JSON.stringify({ model: body.model, message: { role: 'assistant', content }, done: true, done_reason: 'stop', prompt_eval_count: 321, eval_count: 40 }));
+    });
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  return { url: `http://127.0.0.1:${srv.address().port}`, calls, stop: () => new Promise((r) => srv.close(r)) };
+}
+
+test('reader: read:true has a local model READ the top-k; its verdict rides BESIDE the cosine one, names real cards, and is ledgered with prompt version + sampling', async () => {
+  const emb = await fakeEmbedder();
+  const rd = await fakeReader((prompt) => (/QUESTION: deploy deploy/.test(prompt) ? '{"verdict":"answer","cards":[1],"reason":"candidate 1 is the deploy card"}' : '{"verdict":"abstain","cards":[],"reason":"none"}'));
+  const srv = await startRestServer({ board: board(), env: { SEARCH_EMBED_URL: emb.url, SEARCH_EMBED_MODEL: 'fake', SEARCH_READER_MODEL: 'fake-reader', SEARCH_READER_URL: rd.url } });
+  try {
+    const r = await search(srv, { q: 'deploy deploy', by: 'ada', read: true });
+    assert.equal(r.available, true);
+    assert.equal(r.verdict, 'answer');                    // the cosine verdict is still there
+    assert.equal(r.reader.available, true);
+    assert.equal(r.reader.verdict, 'answer');
+    assert.equal(r.reader.picks[0].shortId, 1);           // a pick is a result row, not a bare number
+    assert.equal(r.reader.model, 'fake-reader');
+    assert.equal(r.reader.promptVersion, 'search-reader/v1');
+    assert.deepEqual(r.reader.sampling, { temperature: 0, seed: 42, maxTokens: 400 });
+    assert.match(r.reader.reason, /deploy card/);
+    assert.equal(typeof r.reader.ledgerId, 'string');
+    assert.equal(rd.calls.length, 1);
+    assert.equal(rd.calls[0].url, '/api/chat');
+    assert.match(rd.calls[0].body.messages[0].content, /1\. The deploy script asks CI before it exports/);
+    // the ledger row is the one the envelope names, and it carries what made the verdict
+    const rows = await fetch(`${srv.baseUrl}/api/model-calls`).then((x) => x.json());
+    const row = rows.calls.find((c) => c.id === r.reader.ledgerId);
+    assert.ok(row, 'ledger row exists');
+    assert.equal(row.agent, 'search-reader'); assert.equal(row.model, 'fake-reader');
+    assert.equal(row.promptVersion, 'search-reader/v1'); assert.deepEqual(row.sampling, { temperature: 0, seed: 42, maxTokens: 400 });
+    assert.equal(row.tokensIn, 321); assert.equal(row.ok, true);
+    assert.deepEqual(row.contextHandedTo, r.results.map((x) => x.id));
+    // the verbatim log carries the reader verdict too
+    const log = fs.readFileSync(path.join(path.dirname(srv.boardFile), 'search-log.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    assert.equal(log.at(-1).reader, 'answer');
+  } finally { await srv.stop(); await emb.stop(); await rd.stop(); }
+});
+
+test('reader: a reply naming a card it was not shown is REFUSED — available:false with the reason, the cosine verdict untouched, and the ledger row says ok:false', async () => {
+  const emb = await fakeEmbedder();
+  const rd = await fakeReader(() => '{"verdict":"answer","cards":[42],"reason":"made up"}');
+  const srv = await startRestServer({ board: board(), env: { SEARCH_EMBED_URL: emb.url, SEARCH_EMBED_MODEL: 'fake', SEARCH_READER_MODEL: 'fake-reader', SEARCH_READER_URL: rd.url } });
+  try {
+    const r = await search(srv, { q: 'deploy deploy', by: 'ada', read: true });
+    assert.equal(r.verdict, 'answer');
+    assert.equal(r.reader.available, false);
+    assert.match(r.reader.reason, /named candidate 42/);
+    assert.equal('verdict' in r.reader, false);
+    const rows = await fetch(`${srv.baseUrl}/api/model-calls`).then((x) => x.json());
+    const row = rows.calls.find((c) => c.id === r.reader.ledgerId);
+    assert.equal(row.ok, false); assert.match(row.error, /named candidate 42/);
+  } finally { await srv.stop(); await emb.stop(); await rd.stop(); }
+});
+
+test('reader: no SEARCH_READER_MODEL ⇒ reader.available:false naming the env, no model call, no ledger row; read omitted ⇒ reader is null', async () => {
+  const emb = await fakeEmbedder();
+  const srv = await startRestServer({ board: board(), env: { SEARCH_EMBED_URL: emb.url, SEARCH_EMBED_MODEL: 'fake' } });
+  try {
+    const r = await search(srv, { q: 'deploy deploy', read: true });
+    assert.equal(r.verdict, 'answer');
+    assert.equal(r.reader.available, false); assert.match(r.reader.reason, /SEARCH_READER_MODEL/); assert.equal(r.reader.ledgerId, null);
+    const rows = await fetch(`${srv.baseUrl}/api/model-calls`).then((x) => x.json());
+    assert.equal(rows.calls.length, 0);
+    const r2 = await search(srv, { q: 'deploy deploy' });
+    assert.equal(r2.reader, null); assert.match(r2.means.reader, /read:true/);
+  } finally { await srv.stop(); await emb.stop(); }
+});
+
+test('reader: an unreachable reader is available:false "could not be reached" — never an abstain — and the search still answers', async () => {
+  const emb = await fakeEmbedder();
+  const srv = await startRestServer({ board: board(), env: { SEARCH_EMBED_URL: emb.url, SEARCH_EMBED_MODEL: 'fake', SEARCH_READER_MODEL: 'fake-reader', SEARCH_READER_URL: 'http://127.0.0.1:9' } });
+  try {
+    const r = await search(srv, { q: 'deploy deploy', read: true });
+    assert.equal(r.verdict, 'answer');
+    assert.equal(r.reader.available, false); assert.match(r.reader.reason, /could not be reached/);
+  } finally { await srv.stop(); await emb.stop(); }
+});

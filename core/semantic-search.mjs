@@ -171,3 +171,108 @@ export function parseIndex(text, { model, dims }) {
   }
   return { generation: gen, rows };
 }
+
+// ── #1086 slice 2 — THE READER: a verdict from reading, not from a threshold ──
+//
+// Measured before this existed (card #1086, acceptance row 2, 2026-08-30): with
+// thresholds the verdict matched 5/14 on the frozen #1095 set, and the reason
+// was not the numbers — on 990 cards negatives score 0.57–0.61, asks 0.61–0.62,
+// positives 0.62, so no abstainBelow separates them and askWithin 0.03 reads
+// nearly everything as ask. Cosine says how CLOSE a card is; it cannot say
+// whether the card ADDRESSES the question. That is a reading, so a model reads.
+//
+// The contract does not change: answer | ask | abstain. What changes is the
+// instrument. The reader's verdict is published BESIDE the cosine one, never
+// instead of it, with the model, the prompt version and the ledger row that
+// made it, so a verdict on prod is reproducible from the row (#1202, #1203).
+//
+// Rails, each one a test:
+//   · a pick must be one of the candidates handed to it — a model that names a
+//     card it was not shown has not read; the reply is REFUSED, not coerced
+//   · answer = exactly one pick · ask = two or more · abstain = none
+//   · an unparseable reply, or a model that cannot be reached, is
+//     available:false with the reason — NEVER an abstain. "the reader could
+//     not read" and "the reader read and found nothing" are different facts.
+//
+// READER_PROMPT_VERSION is written once, before any score existed (the card's
+// pre-registration). A rewrite after a score exists bumps the version and the
+// card says so.
+export const READER_PROMPT_VERSION = 'search-reader/v1';
+export const READER_SNIPPET_CHARS = 500;
+export const READER_SAMPLING = Object.freeze({ temperature: 0, seed: 42, maxTokens: 400 });
+const VERDICTS = new Set(['answer', 'ask', 'abstain']);
+
+/** The candidates as the reader sees them: numbered 1..K, title + the head of the body. */
+export function readerCandidates(results, cardsById, { snippetChars = READER_SNIPPET_CHARS } = {}) {
+  return results.map((r, i) => {
+    const c = cardsById.get(r.id) ?? {};
+    const body = String(c.description ?? '').replace(/\s+/g, ' ').trim();
+    return { n: i + 1, id: r.id, shortId: c.shortId ?? null, title: String(c.title ?? ''), snippet: body.slice(0, snippetChars), score: r.score };
+  });
+}
+
+export function readerPrompt(q, candidates) {
+  const list = candidates.map((c) => `${c.n}. ${c.title}${c.snippet ? `\n   ${c.snippet}` : ''}`).join('\n');
+  return [
+    'A team keeps its work as cards on a board. Someone asked the board a question, and a search returned the cards below, ranked by similarity. Similarity is not relevance: a card that shares words or a topic with the question does not necessarily address it.',
+    '',
+    'Decide exactly one of:',
+    '- answer: exactly one card directly addresses the question. Name it.',
+    '- ask: two or more cards each plausibly address the question and the question does not say which is meant. Name them.',
+    '- abstain: none of the cards addresses the question, even if some are about nearby topics.',
+    '',
+    'Reply with JSON only, no prose before or after, in exactly this shape:',
+    '{"verdict":"answer" | "ask" | "abstain", "cards":[<candidate numbers>], "reason":"<one sentence>"}',
+    'Use the candidate numbers as listed. For abstain, cards is [].',
+    '',
+    `QUESTION: ${q}`,
+    '',
+    'CANDIDATES:',
+    list,
+  ].join('\n');
+}
+
+/** Pure: the model's text → a verdict, or a refusal that says why. Never an abstain. */
+export function parseReaderReply(text, candidates) {
+  const raw = String(text ?? '').trim();
+  const m = raw.match(/\{[\s\S]*\}/);
+  if (!m) return { ok: false, reason: 'the reader returned no JSON object' };
+  let obj;
+  try { obj = JSON.parse(m[0]); } catch (e) { return { ok: false, reason: `the reader returned malformed JSON — ${e.message}` }; }
+  const verdict = typeof obj.verdict === 'string' ? obj.verdict.trim().toLowerCase() : '';
+  if (!VERDICTS.has(verdict)) return { ok: false, reason: `the reader returned verdict ${JSON.stringify(obj.verdict)} — not one of answer, ask, abstain` };
+  const nums = Array.isArray(obj.cards) ? obj.cards : [];
+  const byN = new Map(candidates.map((c) => [c.n, c]));
+  const picks = []; const unknown = [];
+  for (const x of nums) {
+    const n = Number(x);
+    const c = byN.get(n);
+    if (c) { if (!picks.includes(c)) picks.push(c); } else unknown.push(x);
+  }
+  if (unknown.length) return { ok: false, reason: `the reader named candidate ${unknown.map(String).join(', ')}, which was not handed to it — a pick outside the candidates is not a reading` };
+  if (verdict === 'answer' && picks.length !== 1) return { ok: false, reason: `answer names exactly one card; the reader named ${picks.length}` };
+  if (verdict === 'ask' && picks.length < 2) return { ok: false, reason: `ask names two or more cards; the reader named ${picks.length}` };
+  if (verdict === 'abstain' && picks.length !== 0) return { ok: false, reason: `abstain names no card; the reader named ${picks.length}` };
+  const reason = typeof obj.reason === 'string' ? obj.reason.trim().slice(0, 500) : '';
+  return { ok: true, verdict, picks, reason };
+}
+
+/**
+ * The reader. `callModel` is injected (#1198's adapter live; a stub in tests).
+ * Returns the verdict envelope with what made it, or available:false with why.
+ * Never throws for a model or parse failure: the search still answers by cosine.
+ */
+export async function read({ q, candidates, callModel, agent, sampling = READER_SAMPLING, now = () => Date.now() }) {
+  const base = { model: agent?.model ?? null, promptVersion: READER_PROMPT_VERSION, sampling };
+  if (!agent?.model || !agent?.protocol) return { ...base, available: false, reason: 'no reader model is configured — nothing was read', latencyMs: 0, usage: null };
+  if (!candidates.length) return { ...base, available: false, reason: 'no candidates to read — the search returned nothing', latencyMs: 0, usage: null };
+  const prompt = readerPrompt(q, candidates);
+  const started = now();
+  let out;
+  try { out = await callModel(agent, [{ role: 'user', content: prompt }], { ...sampling }); }
+  catch (e) { return { ...base, available: false, reason: `the reader could not be reached — ${e?.message ?? e}`, latencyMs: now() - started, usage: null, stopReason: null }; }
+  const parsed = parseReaderReply(out?.text, candidates);
+  const common = { ...base, latencyMs: now() - started, usage: out?.usage ?? null, stopReason: out?.stopReason ?? null, raw: String(out?.text ?? '').slice(0, 2000) };
+  if (!parsed.ok) return { ...common, available: false, reason: parsed.reason };
+  return { ...common, available: true, verdict: parsed.verdict, picks: parsed.picks, reason: parsed.reason };
+}

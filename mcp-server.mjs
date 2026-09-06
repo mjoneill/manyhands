@@ -1841,8 +1841,9 @@ function buildMcpServer() {
       q: z.string().min(1).describe('The question, in your own words'),
       k: z.number().int().min(1).max(50).optional().describe('How many results to rank (default 8, the measured k)'),
       by: z.string().optional().describe('Your seat key — rides the verbatim query log'),
+      read: z.boolean().optional().describe('#1086 slice 2 — also have a local model READ the top-k and give its own answer/ask/abstain (the `reader` field, beside the cosine verdict, with the ledger row that made it). Costs a model call; unavailable with a reason if the server has no reader model.'),
     },
-  }, async ({ q, k, by } = {}) => jsonResult(await apiCall('POST', '/api/search', { q, k, by })));
+  }, async ({ q, k, by, read } = {}) => jsonResult(await apiCall('POST', '/api/search', { q, k, by, read })));
 
   mcp.registerTool('board_status', {
     description: 'Orientation snapshot: card counts by column, live claims (who is holding what '

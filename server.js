@@ -1079,6 +1079,17 @@ const SEARCH_LOG_FILE = path.join(path.dirname(BOARD_DATA_FILE), 'search-log.jso
 const numEnv = (name, dflt) => { const v = Number(process.env[name]); return Number.isFinite(v) ? v : dflt; };
 const SEARCH_ABSTAIN_BELOW = numEnv('SEARCH_ABSTAIN_BELOW', 0.5);
 const SEARCH_ASK_WITHIN = numEnv('SEARCH_ASK_WITHIN', 0.03);
+// #1086 slice 2 — the reader. A local model that READS the top-k and says
+// answer/ask/abstain, published beside the cosine verdict. Opt-in per request
+// (body.read: true) because it costs a model call; unset model ⇒ the reader
+// says it is unavailable, and the cosine verdict still answers.
+const SEARCH_READER_MODEL = process.env.SEARCH_READER_MODEL || '';
+const SEARCH_READER_URL = process.env.SEARCH_READER_URL || 'http://localhost:11434';
+let _adapterModule = null;
+async function loadAdapterModule() {
+  if (!_adapterModule) _adapterModule = await import('./core/model-adapter.mjs');
+  return _adapterModule;
+}
 const SEARCH_MAX_EMBED = Math.max(1, Math.floor(numEnv('SEARCH_MAX_EMBED', 50)));
 const SEARCH_MAX_EMBED_CHARS = Math.max(1, Math.floor(numEnv('SEARCH_MAX_EMBED_CHARS', 60000)));
 // Below undici's own 300 s so the failure is NAMED here rather than surfacing as "fetch failed".
@@ -1456,15 +1467,49 @@ async function handleSearch(req, res) {
     });
     const d = S.decide(ranked, thresholds);
     const pick = (r) => (r ? results.find((x) => x.id === r.id) ?? null : null);
+    // #1086 slice 2 — the reader, on request. Its verdict sits BESIDE the
+    // cosine one, never instead; each reading is a ledger row (#1202) so a
+    // verdict on prod reproduces from the row the way #1203's arms did.
+    let reader = null;
+    if (body.read === true) {
+      const agent = SEARCH_READER_MODEL ? { model: SEARCH_READER_MODEL, protocol: 'ollama-native', baseUrl: SEARCH_READER_URL } : null;
+      const candidates = S.readerCandidates(ranked, byId);
+      const A = agent ? await loadAdapterModule() : null;
+      const r = await S.read({ q, candidates, callModel: A ? A.callModel : async () => { throw new Error('no adapter'); }, agent });
+      let ledgerId = null;
+      if (agent) {
+        const built = modelCallEntityFrom({
+          by: (typeof body.by === 'string' && body.by.trim()) || 'board', agent: 'search-reader',
+          model: agent.model, provider: agent.baseUrl, protocol: agent.protocol, promptVersion: r.promptVersion,
+          sampling: r.sampling, tokensIn: r.usage?.promptTokens ?? null, tokensOut: r.usage?.completionTokens ?? null,
+          cost: 0, latencyMs: r.latencyMs, stopReason: r.stopReason ?? null, ok: r.available,
+          contextHandedTo: candidates.map((c) => c.id), error: r.available ? undefined : r.reason,
+        });
+        if (built.error) console.error('search reader ledger:', built.error);
+        else {
+          try {
+            await withWriteLock(async () => { const data = readBoard(); data.modelCalls = [...modelCallsOf(data), built.entity]; writeBoard(data, [modelCallEvent(built.entity, built.by)]); });
+            ledgerId = built.entity['@id'];
+          } catch (e) { console.error('search reader ledger:', e.message); }
+        }
+      }
+      reader = {
+        available: r.available, model: r.model, promptVersion: r.promptVersion, sampling: r.sampling, ledgerId, latencyMs: r.latencyMs,
+        ...(r.available
+          ? { verdict: r.verdict, picks: r.picks.map((c) => pick({ id: c.id })).filter(Boolean), reason: r.reason }
+          : { reason: agent ? r.reason : 'no reader model is configured on this server — set SEARCH_READER_MODEL (an Ollama model) and optionally SEARCH_READER_URL. The cosine verdict above still stands; nothing was read.' }),
+      };
+    }
     const out = {
       available: true, model: SEARCH_EMBED_MODEL, k,
       verdict: d.verdict, reason: d.reason,
       top: pick(d.top), contenders: d.contenders.map(pick).filter(Boolean),
       abstainBelow: d.abstainBelow, askWithin: d.askWithin,
-      results, coverage, partial,
+      results, coverage, partial, reader,
       generation: { model: generation.model, dims: generation.dims, builtAt: generation.builtAt },
       means: {
         verdict: 'answer = a clear top hit · ask = ≥2 candidates within askWithin of the top (they are the question) · abstain = top cosine below abstainBelow, or an empty index',
+        reader: 'null unless the request said read:true. Then a local model READS the top-k and gives its own answer/ask/abstain with the cards it names and one sentence why — a second instrument beside the cosine verdict, never a replacement. available:false with a reason when no model is configured, the model cannot be reached, or its reply could not be read: that is "could not read", never "found nothing". ledgerId is the model-call row that made it (#1202).',
         partial: 'true when cards remain un-embedded; the answer was computed over `coverage.indexed` of `coverage.total` cards — could-not-search-everything is not found-nothing',
       },
     };
@@ -1473,7 +1518,7 @@ async function handleSearch(req, res) {
     try {
       fs.appendFileSync(SEARCH_LOG_FILE, JSON.stringify({
         at: new Date().toISOString(), by: (typeof body.by === 'string' && body.by) || null,
-        q, verdict: d.verdict, top: results.slice(0, k).map((r) => r.shortId ?? r.id), coverage, partial,
+        q, verdict: d.verdict, reader: reader ? (reader.available ? reader.verdict : 'unavailable') : null, top: results.slice(0, k).map((r) => r.shortId ?? r.id), coverage, partial,
       }) + '\n');
     } catch { /* telemetry, never a gate on the answer */ }
     sendJSON(res, 200, out);
@@ -3382,52 +3427,61 @@ const modelCallToWire = (e) => ({
 });
 const MODEL_CALL_FIELDS = new Set(['by', 'agent', 'model', 'provider', 'protocol', 'promptVersion', 'tokensIn', 'tokensOut', 'cost', 'latencyMs', 'stopReason', 'ok', 'contextHandedTo', 'producedPost', 'at', 'error', 'sampling', 'wake', 'memory', 'memoryWritten', 'claims']);
 const MODEL_CALL_SAMPLING = new Set(['temperature', 'topP', 'topK', 'repetitionPenalty', 'seed', 'stop', 'maxTokens', 'keepAlive']);
+// #1086 slice 2 — the row builder, shared by POST /api/model-calls and the
+// search reader, so a reader verdict is ledgered EXACTLY as a hand-posted row
+// would be (same refusals, same shape). Returns {error} or {entity, by}.
+function modelCallEntityFrom(body) {
+  const by = typeof body.by === 'string' && body.by.trim() ? body.by.trim() : null;
+  if (!by) return { error: 'by is required — the seat that made the call. Declared, not authenticated (#1193: omit it and the row is actor:null forever).' };
+  const agent = typeof body.agent === 'string' && body.agent.trim() ? body.agent.trim() : by;
+  if (typeof body.model !== 'string' || !body.model.trim()) return { error: 'model is required — the model id that was called' };
+  const n = (v) => (v == null || v === '' ? null : (Number.isFinite(Number(v)) ? Number(v) : null));
+  // #1203 finding (2026-09-06): a row carrying seed 42 and temperature 0 got a
+  // 201 and read back with both silently DROPPED — an acceptance that loses
+  // what it accepted, #1217's lossy refusal inverted. A ledger that cannot
+  // say how a model was made to answer is an anecdote, not a record. So:
+  // the sampling knobs the adapter accepts ride the row as ONE object, and an
+  // unknown top-level field is REFUSED by name instead of dropped.
+  const unknown = Object.keys(body).filter((k) => !MODEL_CALL_FIELDS.has(k));
+  if (unknown.length) return { error: `unknown field${unknown.length === 1 ? '' : 's'} ${unknown.map((k) => JSON.stringify(k)).join(', ')} — a model-call row is a RECORD; a field it silently dropped would read as "not recorded" forever. Known: ${[...MODEL_CALL_FIELDS].join(', ')}` };
+  let sampling = null;
+  if (body.sampling != null) {
+    if (typeof body.sampling !== 'object' || Array.isArray(body.sampling)) return { error: 'sampling must be an object of the adapter\'s knobs: temperature, topP, topK, repetitionPenalty, seed, stop, maxTokens, keepAlive' };
+    const bad = Object.keys(body.sampling).filter((k) => !MODEL_CALL_SAMPLING.has(k));
+    if (bad.length) return { error: `unknown sampling knob${bad.length === 1 ? '' : 's'} ${bad.join(', ')} — known: ${[...MODEL_CALL_SAMPLING].join(', ')}` };
+    sampling = Object.fromEntries(Object.entries(body.sampling).filter(([, v]) => v !== undefined));
+  }
+  const entity = {
+    '@id': MODEL_CALL_ID(), '@type': 'scrum:ModelCall',
+    'scrum:sampling': sampling,
+    'scrum:wakeKind': typeof body.wake?.kind === 'string' ? body.wake.kind : null,
+    'scrum:wakeMessage': typeof body.wake?.messageId === 'string' ? body.wake.messageId : null,
+    'scrum:memoryHanded': n(body.memory?.handed), 'scrum:memoryState': typeof body.memory?.state === 'string' ? body.memory.state : null,
+    'scrum:memoryWritten': Array.isArray(body.memoryWritten) ? body.memoryWritten.map((m) => (typeof m === 'string' ? m : JSON.stringify(m))).slice(0, 50) : [],
+    'scrum:claims': Array.isArray(body.claims) ? body.claims.slice(0, 50) : [],
+    'scrum:agent': agent, 'scrum:model': body.model.trim(),
+    'scrum:provider': typeof body.provider === 'string' ? body.provider : null,
+    'scrum:protocol': typeof body.protocol === 'string' ? body.protocol : null,
+    'scrum:promptVersion': typeof body.promptVersion === 'string' ? body.promptVersion : null,
+    'scrum:tokensIn': n(body.tokensIn), 'scrum:tokensOut': n(body.tokensOut),
+    'scrum:cost': n(body.cost) ?? 0, 'scrum:latencyMs': n(body.latencyMs),
+    'scrum:stopReason': typeof body.stopReason === 'string' ? body.stopReason : null,
+    'scrum:ok': body.ok !== false,
+    'scrum:contextHandedTo': Array.isArray(body.contextHandedTo) ? body.contextHandedTo.map(String).slice(0, 200) : [],
+    'scrum:producedPost': typeof body.producedPost === 'string' ? body.producedPost : null,
+    'scrum:calledAt': typeof body.at === 'string' ? body.at : new Date().toISOString(),
+    text: typeof body.error === 'string' ? body.error.slice(0, 2000) : '',
+  };
+  return { entity, by };
+}
 async function handleCreateModelCall(req, res) {
   try {
     const body = JSON.parse(await readBody(req));
-    const by = typeof body.by === 'string' && body.by.trim() ? body.by.trim() : null;
-    if (!by) return sendJSON(res, 400, { error: 'by is required — the seat that made the call. Declared, not authenticated (#1193: omit it and the row is actor:null forever).' });
-    const agent = typeof body.agent === 'string' && body.agent.trim() ? body.agent.trim() : by;
-    if (typeof body.model !== 'string' || !body.model.trim()) return sendJSON(res, 400, { error: 'model is required — the model id that was called' });
-    const n = (v) => (v == null || v === '' ? null : (Number.isFinite(Number(v)) ? Number(v) : null));
-    // #1203 finding (2026-09-06): a row carrying seed 42 and temperature 0 got a
-    // 201 and read back with both silently DROPPED — an acceptance that loses
-    // what it accepted, #1217's lossy refusal inverted. A ledger that cannot
-    // say how a model was made to answer is an anecdote, not a record. So:
-    // the sampling knobs the adapter accepts ride the row as ONE object, and an
-    // unknown top-level field is REFUSED by name instead of dropped.
-    const unknown = Object.keys(body).filter((k) => !MODEL_CALL_FIELDS.has(k));
-    if (unknown.length) return sendJSON(res, 400, { error: `unknown field${unknown.length === 1 ? '' : 's'} ${unknown.map((k) => JSON.stringify(k)).join(', ')} — a model-call row is a RECORD; a field it silently dropped would read as "not recorded" forever. Known: ${[...MODEL_CALL_FIELDS].join(', ')}` });
-    let sampling = null;
-    if (body.sampling != null) {
-      if (typeof body.sampling !== 'object' || Array.isArray(body.sampling)) return sendJSON(res, 400, { error: 'sampling must be an object of the adapter\'s knobs: temperature, topP, topK, repetitionPenalty, seed, stop, maxTokens, keepAlive' });
-      const bad = Object.keys(body.sampling).filter((k) => !MODEL_CALL_SAMPLING.has(k));
-      if (bad.length) return sendJSON(res, 400, { error: `unknown sampling knob${bad.length === 1 ? '' : 's'} ${bad.join(', ')} — known: ${[...MODEL_CALL_SAMPLING].join(', ')}` });
-      sampling = Object.fromEntries(Object.entries(body.sampling).filter(([, v]) => v !== undefined));
-    }
+    const built = modelCallEntityFrom(body);
+    if (built.error) return sendJSON(res, 400, { error: built.error });
+    const { entity, by } = built;
     const result = await withWriteLock(async () => {
       const data = readBoard();
-      const entity = {
-        '@id': MODEL_CALL_ID(), '@type': 'scrum:ModelCall',
-        'scrum:sampling': sampling,
-        'scrum:wakeKind': typeof body.wake?.kind === 'string' ? body.wake.kind : null,
-        'scrum:wakeMessage': typeof body.wake?.messageId === 'string' ? body.wake.messageId : null,
-        'scrum:memoryHanded': n(body.memory?.handed), 'scrum:memoryState': typeof body.memory?.state === 'string' ? body.memory.state : null,
-        'scrum:memoryWritten': Array.isArray(body.memoryWritten) ? body.memoryWritten.map((m) => (typeof m === 'string' ? m : JSON.stringify(m))).slice(0, 50) : [],
-        'scrum:claims': Array.isArray(body.claims) ? body.claims.slice(0, 50) : [],
-        'scrum:agent': agent, 'scrum:model': body.model.trim(),
-        'scrum:provider': typeof body.provider === 'string' ? body.provider : null,
-        'scrum:protocol': typeof body.protocol === 'string' ? body.protocol : null,
-        'scrum:promptVersion': typeof body.promptVersion === 'string' ? body.promptVersion : null,
-        'scrum:tokensIn': n(body.tokensIn), 'scrum:tokensOut': n(body.tokensOut),
-        'scrum:cost': n(body.cost) ?? 0, 'scrum:latencyMs': n(body.latencyMs),
-        'scrum:stopReason': typeof body.stopReason === 'string' ? body.stopReason : null,
-        'scrum:ok': body.ok !== false,
-        'scrum:contextHandedTo': Array.isArray(body.contextHandedTo) ? body.contextHandedTo.map(String).slice(0, 200) : [],
-        'scrum:producedPost': typeof body.producedPost === 'string' ? body.producedPost : null,
-        'scrum:calledAt': typeof body.at === 'string' ? body.at : new Date().toISOString(),
-        text: typeof body.error === 'string' ? body.error.slice(0, 2000) : '',
-      };
       data.modelCalls = [...modelCallsOf(data), entity];
       writeBoard(data, [modelCallEvent(entity, by)]);
       return { status: 201, wire: modelCallToWire(entity) };
