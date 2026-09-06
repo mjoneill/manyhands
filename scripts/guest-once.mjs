@@ -142,6 +142,11 @@ const claimCard = dry ? async (n, seat) => console.log(`[dry-run] would claim #$
 
 const r = await guestOnce({
   agent, wake, changes: () => rows, ledgerSink, spentToday, memories, writeMemory, claimCard,
+  // #1237 — the file ledger (dry runs; the fallback when the board sink refuses)
+  // lives BESIDE THE STATE FILE, which is always writable. The default is next
+  // to the module, and the serve copy is read-only: a refused sink there threw
+  // EACCES and lost the row.
+  ledgerFile: process.env.SCRUM_MODEL_LEDGER_FILE || `${stateFile}.ledger.jsonl`,
   callModel: (a, m, o) => callModel(a, m, { ...o, apiKey: a.apiKeyRef ? process.env[a.apiKeyRef] : undefined }),
   post,
   log: (l) => console.log(l), onError: (l) => console.error(l),

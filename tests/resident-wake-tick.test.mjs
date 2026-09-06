@@ -69,9 +69,9 @@ function fakeOllama(reply = 'I am here.') {
   return new Promise((resolve) => srv.listen(0, '127.0.0.1', () => resolve({ calls, baseUrl: `http://127.0.0.1:${srv.address().port}`, stop: () => new Promise((r) => srv.close(r)) })));
 }
 
-function runOnce(env) {
+function runOnce(env, extraArgs = []) {
   return new Promise((resolve) => {
-    const p = spawn(process.execPath, [new URL('../scripts/guest-once.mjs', import.meta.url).pathname, '--seat', 'gizmo'], { env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const p = spawn(process.execPath, [new URL('../scripts/guest-once.mjs', import.meta.url).pathname, '--seat', 'gizmo', ...extraArgs], { env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '', err = '';
     p.stdout.on('data', (c) => { out += c; }); p.stderr.on('data', (c) => { err += c; });
     p.on('close', (code) => resolve({ code, out, err }));
@@ -118,5 +118,17 @@ test('#1237 SEAM: the real runner answers a mention buried under 80 newer posts 
     assert.equal(ollama.calls.length, 2);
     assert.ok(/lock|held|another run/i.test(ra.out + ra.err + rb.out + rb.err), 'the loser says WHY it did nothing');
     assert.equal(fs.existsSync(`${stateFile}.lock`), false, 'the lock is released after the run');
+
+    // #1237 — a DRY run keeps its ledger beside the state file (always
+    // writable), never beside the module (the serve copy is read-only): it
+    // ends clean, posts nothing, and the row is where the operator can read it.
+    const before = (await posts()).length;
+    const rd = await runOnce(env, ['--dry-run', '--once-id', m2.body.id]);
+    assert.equal(rd.code, 0, `dry run must end clean: ${rd.err}`);
+    assert.doesNotMatch(rd.err, /EACCES|ENOENT/);
+    assert.equal((await posts()).length, before, 'a dry run posts nothing');
+    const ledgerBeside = `${stateFile}.ledger.jsonl`;
+    assert.ok(fs.existsSync(ledgerBeside), `dry-run ledger expected at ${ledgerBeside}`);
+    assert.equal(fs.readFileSync(ledgerBeside, 'utf8').trim().split('\n').length, 1);
   } finally { await ollama.stop(); await srv.stop(); }
 });
