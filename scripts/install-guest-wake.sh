@@ -18,13 +18,18 @@
 # from a template has overwritten hand patches before — #1230).
 set -eu
 
-SEAT=guest; INTERVAL=60; SERVE="${DEPLOY_SERVE:-}"; VERIFY=0
+SEAT=guest; INTERVAL=60; SERVE="${DEPLOY_SERVE:-}"; VERIFY=0; KEYREF=''
 while [ $# -gt 0 ]; do
   case "$1" in
     --seat) SEAT="$2"; shift 2 ;;
     --interval) INTERVAL="$2"; shift 2 ;;
     --serve) SERVE="$2"; shift 2 ;;
     --verify) VERIFY=1; shift ;;
+    # #1196 — a HOSTED seat needs a credential, and the credential must never
+    # land in this plist. --key-ref names a Keychain item; the rendered job
+    # reads it AT RUN TIME into one process env and nothing else. Verified on
+    # this host: a detached, non-interactive read succeeds without prompting.
+    --key-ref) KEYREF="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -46,10 +51,20 @@ render() {
   <key>Label</key><string>$LABEL</string>
   <key>ProgramArguments</key>
   <array>
+$(if [ -n "$KEYREF" ]; then
+cat <<INNER
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>$KEYREF="\$(security find-generic-password -s $KEYREF -w)" exec "$NODE" "$SCRIPT" --seat $SEAT</string>
+INNER
+else
+cat <<INNER
     <string>$NODE</string>
     <string>$SCRIPT</string>
     <string>--seat</string>
     <string>$SEAT</string>
+INNER
+fi)
   </array>
   <key>EnvironmentVariables</key>
   <dict>
@@ -90,5 +105,5 @@ fi
 render > "$PLIST"
 plutil -lint "$PLIST" >/dev/null
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
-echo "installed $LABEL: every ${INTERVAL}s, runner $SCRIPT, state $STATE, log $LOG"
+echo "installed $LABEL: every ${INTERVAL}s, runner $SCRIPT, state $STATE, log $LOG${KEYREF:+, credential $KEYREF read from Keychain at run time (never stored here)}"
 launchctl list | grep -F "$LABEL" || { echo "⛔ loaded but not listed — check: launchctl print gui/$(id -u)/$LABEL" >&2; exit 1; }
