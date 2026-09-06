@@ -91,6 +91,7 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:emoji': 'scrum:emoji',
   'scrum:contextPolicy': 'scrum:contextPolicy',
   'scrum:toolGrant': 'scrum:toolGrant',
+  'scrum:promptGrantConflict': 'scrum:promptGrantConflict', 'scrum:promptGrantConflictReason': 'scrum:promptGrantConflictReason', 'scrum:promptGrantConflictSince': 'scrum:promptGrantConflictSince', // #1242
   'scrum:wakeOn': 'scrum:wakeOn', 'scrum:everyMinutes': 'scrum:everyMinutes', // #1226
   'scrum:seed': 'scrum:sampling', 'scrum:temperature': 'scrum:sampling', 'scrum:maxTokens': 'scrum:sampling', // #1203 finding: from the sampling object
   'scrum:wakeKind': 'scrum:wakeKind', 'scrum:memoryHanded': 'scrum:memoryHanded',

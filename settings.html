@@ -813,12 +813,13 @@ function agentRow(a) {
   const grants = new Set(a.toolGrants || []);
   const registeredKey = a.usesModel ? (MODELS.find((m) => m.id === a.usesModel) || {}).key || '' : '';
   const modelLabel = registeredKey ? `${esc(registeredKey)} (registered)` : `${esc(a.modelId || '?')} (inline)`;
-  row.innerHTML = `<div class="agent-head"><strong>${a.emoji ? esc(a.emoji) + ' ' : ''}${esc(a.name)}</strong> <code>${esc(a.seatKey)}</code> <span class="badge state-${esc(a.state)}">${esc(a.state)}</span> <span class="meta">${modelLabel} · ${esc(a.residency)} · ${esc(a.contextPolicy)} · prompt v${a.prompt ? a.prompt.version : '?'} (${a.promptVersions} version${a.promptVersions === 1 ? '' : 's'}) · grants ${grants.size}${a.maxHops != null ? ` · hops ≤ ${a.maxHops}` : ''}${a.thinking != null ? ` · thinking ${a.thinking ? 'on' : 'off'}` : ''}${a.budgetPerDay != null ? ` · budget ${a.budgetPerDay}/day` : ''}</span></div>
+  row.innerHTML = `<div class="agent-head"><strong>${a.emoji ? esc(a.emoji) + ' ' : ''}${esc(a.name)}</strong> <code>${esc(a.seatKey)}</code> <span class="badge state-${esc(a.state)}">${esc(a.state)}</span>${a.conflict ? ` <span class="badge state-retired" title="${esc(a.conflict.reason)}: &quot;${esc(a.conflict.phrase)}&quot; since ${esc(when(a.conflict.since))}" data-agent-conflict>⚠ prompt cancels grants</span>` : ''} <span class="meta">${modelLabel} · ${esc(a.residency)} · ${esc(a.contextPolicy)} · prompt v${a.prompt ? a.prompt.version : '?'} (${a.promptVersions} version${a.promptVersions === 1 ? '' : 's'}) · grants ${grants.size}${a.maxHops != null ? ` · hops ≤ ${a.maxHops}` : ''}${a.thinking != null ? ` · thinking ${a.thinking ? 'on' : 'off'}` : ''}${a.budgetPerDay != null ? ` · budget ${a.budgetPerDay}/day` : ''}</span></div>
     <details data-agent-editor><summary>Edit</summary>
       <div class="agent-editor">
         <div class="pane" data-agent-grants>
           <h4>What it may reach</h4>
           <p class="when" data-agent-grants-meta>settings as of ${when(a.updatedAt || a.createdAt)}</p>
+          ${a.conflict ? `<p class="msg err" style="margin:0 0 10px" data-agent-conflict-note>⚠ The prompt ${esc(a.conflict.reason)} (&quot;${esc(a.conflict.phrase)}&quot;), so these grants may be cancelled by the instruction. Since ${esc(when(a.conflict.since))}. #1242</p>` : ''}
           ${TOOLS.length ? TOOLS.map((t) => `<label class="grant"><input type="checkbox" value="${esc(t.name)}"${grants.has(t.name) ? ' checked' : ''}><span title="${esc(t.description)}"><code>${esc(t.name)}</code><div class="desc">${esc(firstSentence(t.description))}</div></span></label>`).join('') : '<p class="hint">the tool list could not be loaded, so grants cannot be edited from here</p>'}
           <div class="form-grid" style="margin-top:14px">
             <label>Hop ceiling <input data-agent-maxhops type="number" min="1" max="20" value="${a.maxHops ?? ''}" placeholder="default"><span class="hint">how many times it may look before it must answer</span></label>
@@ -850,7 +851,7 @@ function agentRow(a) {
   row.querySelector('[data-agent-version]').addEventListener('click', async () => {
     const body = row.querySelector('[data-agent-prompt]').value;
     const { ok, status, out } = await send('POST', `/api/agents/${encodeURIComponent(a.seatKey)}/prompt`, { body });
-    if (ok) loadAgents({ seat: a.seatKey, text: `Prompt saved as version ${out.prompt && out.prompt.version}; v${a.prompt ? a.prompt.version : '?'} stays readable.`, ok: true });
+    if (ok) loadAgents({ seat: a.seatKey, text: `Prompt saved as version ${out.prompt && out.prompt.version}; v${a.prompt ? a.prompt.version : '?'} stays readable.${out.warning ? ' ⚠ ' + out.warning : ''}`, ok: !out.warning });
     else rowMsg(msg, 'Rejected: ' + (out.error || status), false);
   });
   row.querySelector('[data-agent-save]').addEventListener('click', async () => {
@@ -877,7 +878,7 @@ function agentRow(a) {
     if (!TOOLS.length) delete body.toolGrants; // no list ⇒ do not send an empty grant set by accident
     try {
       const { ok, status, out } = await send('PATCH', `/api/agents/${encodeURIComponent(a.seatKey)}`, body);
-      if (ok) loadAgents({ seat: a.seatKey, text: `Saved ${out.seatKey}${out.released && out.released.length ? ` — released #${out.released.join(', #')}` : ''}.`, ok: true });
+      if (ok) loadAgents({ seat: a.seatKey, text: `Saved ${out.seatKey}${out.released && out.released.length ? ` — released #${out.released.join(', #')}` : ''}.${out.warning ? ' ⚠ ' + out.warning : ''}`, ok: !out.warning });
       else rowMsg(msg, 'Rejected: ' + (out.error || status), false);
     } catch (e) { rowMsg(msg, 'Save failed: ' + e.message, false); }
     btn.disabled = false;

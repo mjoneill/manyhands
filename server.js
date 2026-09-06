@@ -36,6 +36,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { loadDomain, saveDomain } from './core/store.mjs';
 import { BOARD_TOOLS } from './core/board-tools.mjs';
+import { promptGrantConflict, promptGrantWarning } from './core/prompt-grants.mjs'; // #1242
 import { cardContentKey } from './core/card-content-key.mjs';
 import { applyApexLabels, APEX_PREFIX, descendantIds as apexDescendantIds } from './core/apex-labels.mjs';
 import { inFlight } from './core/in-flight.mjs';
@@ -3304,11 +3305,27 @@ function agentToWire(data, e) {
     // told anything about it.
     thinking: e['scrum:thinking'] ?? null,
     maxHops: e['scrum:maxHops'] ?? null,
+    // #1242 — the prompt/grant contradiction, if the last write left one.
+    conflict: e['scrum:promptGrantConflict'] ? { phrase: e['scrum:promptGrantConflict'], reason: e['scrum:promptGrantConflictReason'] ?? null, since: e['scrum:promptGrantConflictSince'] ?? null } : null,
     prompt: current ? { id: current['@id'], version: current['scrum:version'], body: current['scrum:body'], by: current.author ?? null, at: current['scrum:importedAt'] ?? null } : null,
     promptVersions: versions.length, createdAt: e['scrum:importedAt'] ?? null, updatedAt: e.dateModified ?? null,
   };
 }
 function findAgent(data, seat) { return agentsOf(data).find((a) => a['scrum:seatKey'] === seat) || null; }
+// #1242 — RE-CHECK THE PAIR ON EVERY WRITE THAT TOUCHES EITHER HALF. The node
+// carries the finding (phrase, reason, when) or none of the three; the wire
+// carries `warning` so the writer sees it in the same response. Never refuses.
+function reconcilePromptGrants(data, node, now) {
+  const versions = agentPromptsOf(data);
+  const current = versions.find((v) => v['@id'] === node['scrum:currentPrompt']);
+  const c = promptGrantConflict(current ? current['scrum:body'] : '', node['scrum:toolGrant'] || []);
+  const had = node['scrum:promptGrantConflict'] || null;
+  if (!c) { delete node['scrum:promptGrantConflict']; delete node['scrum:promptGrantConflictReason']; delete node['scrum:promptGrantConflictSince']; return null; }
+  node['scrum:promptGrantConflict'] = c.phrase; node['scrum:promptGrantConflictReason'] = c.reason;
+  if (!had || had !== c.phrase) node['scrum:promptGrantConflictSince'] = now;
+  return promptGrantWarning(c, node['scrum:toolGrant'] || []);
+}
+const withWarning = (wire, warning) => (warning ? { ...wire, warning } : wire);
 async function handleCreateAgent(req, res) {
   try {
     const body = JSON.parse(await readBody(req));
@@ -3352,10 +3369,11 @@ async function handleCreateAgent(req, res) {
       };
       const identity = { '@id': promptId, '@type': 'scrum:AgentPrompt', 'scrum:ofAgent': agent['@id'], 'scrum:importedAt': now };
       const version = { '@id': v1, '@type': 'scrum:AgentPromptVersion', 'scrum:ofPrompt': promptId, 'scrum:version': 1, 'scrum:body': body.prompt, author: by, 'scrum:importedAt': now };
-      data.agents = [...agentsOf(data), agent];
       data.agentPrompts = [...agentPromptsOf(data), identity, version];
+      const warning = reconcilePromptGrants(data, agent, now); // #1242
+      data.agents = [...agentsOf(data), agent];
       writeBoard(data, [agentEvent('create', agent, by), agentPromptEvent('create', identity, by), agentPromptEvent('create', version, by)]);
-      return { status: 201, wire: agentToWire(data, agent) };
+      return { status: 201, wire: withWarning(agentToWire(data, agent), warning) };
     });
     sendJSON(res, result.status, result.wire);
   } catch (e) { console.error('POST /api/agents:', e.message); sendJSON(res, 500, { error: e.message }); }
@@ -3394,9 +3412,10 @@ async function handleAgentPromptVersion(req, res, seat) {
       const version = { '@id': AGENT_PROMPT_VERSION_ID(seat, n), '@type': 'scrum:AgentPromptVersion', 'scrum:ofPrompt': promptId, 'scrum:version': n, 'scrum:body': body.body, author: by, 'scrum:importedAt': now };
       const updated = { ...agent, 'scrum:currentPrompt': version['@id'], dateModified: now };
       data.agentPrompts = [...agentPromptsOf(data), version];
+      const warning = reconcilePromptGrants(data, updated, now); // #1242
       data.agents = agentsOf(data).map((a) => (a['@id'] === agent['@id'] ? updated : a));
       writeBoard(data, [agentPromptEvent('create', version, by), agentEvent('update', updated, by)]);
-      return { status: 201, wire: agentToWire(data, updated) };
+      return { status: 201, wire: withWarning(agentToWire(data, updated), warning) };
     });
     sendJSON(res, result.status, result.wire);
   } catch (e) { console.error('POST /api/agents/:seat/prompt:', e.message); sendJSON(res, 500, { error: e.message }); }
@@ -3486,9 +3505,10 @@ async function handlePatchAgent(req, res, seat) {
       if (body.everyMinutes !== undefined) updated['scrum:everyMinutes'] = body.everyMinutes == null ? null : Number(body.everyMinutes);
       if (body.thinking !== undefined) updated['scrum:thinking'] = body.thinking === null ? null : !!body.thinking;
       if (body.maxHops !== undefined) updated['scrum:maxHops'] = body.maxHops === null ? null : Number(body.maxHops);
+      const warning = reconcilePromptGrants(data, updated, updated.dateModified); // #1242
       data.agents = agentsOf(data).map((a) => (a['@id'] === agent['@id'] ? updated : a));
       writeBoard(data, [agentEvent('update', updated, by), ...releasedEvents]);
-      return { status: 200, wire: { ...agentToWire(data, updated), released: releasedCards.map((c) => c.shortId) } };
+      return { status: 200, wire: withWarning({ ...agentToWire(data, updated), released: releasedCards.map((c) => c.shortId) }, warning) };
     });
     sendJSON(res, result.status, result.wire);
   } catch (e) { console.error('PATCH /api/agents/:seat:', e.message); sendJSON(res, 500, { error: e.message }); }
