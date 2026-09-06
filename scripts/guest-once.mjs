@@ -22,6 +22,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { callModel } from '../core/model-adapter.mjs';
 import { findMentions, findWakes, guestOnce, fetchBoundedChanges, shouldMarkAnswered, mentionScanPath, acquireLock, releaseLock } from '../core/guest-loop.mjs';
+import { makeExecutor } from '../core/board-tools.mjs';
 
 const args = process.argv.slice(2);
 const opt = (k) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : null; };
@@ -99,6 +100,11 @@ const rowToBoard = (row) => ({
   contextHandedTo: row.contextHandedTo ?? [], producedPost: row.postId ?? null, at: row.at,
   // #1203 finding — the knobs that reproduce the call, and the resident's fields (#1226), ride the board row too.
   sampling: agent.model?.sampling ?? null, wake: row.wake ?? null, memory: row.memory ?? null, memoryWritten: row.memoryWritten ?? [], claims: row.claims ?? [],
+  // #1196 — the tool record travels to the BOARD, not just to the file beside
+  // this runner. A field that stops here is invisible to every reader who was
+  // not standing at this process, which is the same as not recording it.
+  toolsGranted: row.toolsGranted ?? [], toolHops: row.toolHops ?? [], modelCalls: row.modelCalls ?? null,
+  stoppedBecause: row.stoppedBecause ?? null, postedText: row.postedText ?? null,
 });
 const ledgerSink = dry ? null : async (row) => {
   const r = await fetch(`${BOARD}/api/model-calls`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(rowToBoard(row)) });
@@ -148,6 +154,27 @@ const r = await guestOnce({
   // EACCES and lost the row.
   ledgerFile: process.env.SCRUM_MODEL_LEDGER_FILE || `${stateFile}.ledger.jsonl`,
   callModel: (a, m, o) => callModel(a, m, { ...o, apiKey: a.apiKeyRef ? process.env[a.apiKeyRef] : undefined }),
+  // #1196 — the executor, bound to THIS board and acting AS this seat. Without
+  // it the loop has tools it cannot run, which is indistinguishable from having
+  // no tools at all: guestOnce takes the single-call path and a grant on the
+  // agent quietly means nothing. What it may reach is still decided by the
+  // agent's grants, not by this wiring.
+  execute: makeExecutor({
+    get: async (p) => {
+      const r = await fetch(`${BOARD}${p}`, { signal: AbortSignal.timeout(90_000) });
+      if (!r.ok) throw new Error(`GET ${p} → ${r.status}`);
+      return r.json();
+    },
+    post: async (p, body) => {
+      const r = await fetch(`${BOARD}${p}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body), signal: AbortSignal.timeout(90_000),
+      });
+      if (!r.ok) throw new Error(`POST ${p} → ${r.status}`);
+      return r.json();
+    },
+    by: agent.seatKey,
+  }),
   post,
   log: (l) => console.log(l), onError: (l) => console.error(l),
 });

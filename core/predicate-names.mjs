@@ -94,6 +94,10 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:wakeOn': 'scrum:wakeOn', 'scrum:everyMinutes': 'scrum:everyMinutes', // #1226
   'scrum:seed': 'scrum:sampling', 'scrum:temperature': 'scrum:sampling', 'scrum:maxTokens': 'scrum:sampling', // #1203 finding: from the sampling object
   'scrum:wakeKind': 'scrum:wakeKind', 'scrum:memoryHanded': 'scrum:memoryHanded',
+  // #1196 — the tool record
+  'scrum:toolGranted': 'scrum:toolGranted', 'scrum:toolCalled': 'scrum:toolCalled',
+  'scrum:toolHops': 'scrum:toolHops', 'scrum:toolRowsReturned': 'scrum:toolRowsReturned',
+  'scrum:modelCalls': 'scrum:modelCalls', 'scrum:stoppedBecause': 'scrum:stoppedBecause',
   'scrum:budgetPerDay': 'scrum:budgetPerDay',
   'scrum:residency': 'scrum:residency',
   'scrum:state': 'scrum:state',

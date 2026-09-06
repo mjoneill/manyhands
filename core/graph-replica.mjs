@@ -186,6 +186,10 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:deprecatesOn', 'scrum:lastProbeClass', 'scrum:lastProbeAt', 'scrum:lastProbeStatus', 'scrum:modelKey', 'scrum:usesModel',
   'scrum:wakeOn', 'scrum:everyMinutes', // #1226
   'scrum:seed', 'scrum:temperature', 'scrum:maxTokens', 'scrum:wakeKind', 'scrum:memoryHanded', // #1203 finding on #1202
+  // #1196 — the tool record: what a colleague was allowed to reach, what it
+  // actually called, how far it went and how much came back.
+  'scrum:toolGranted', 'scrum:toolCalled', 'scrum:toolHops', 'scrum:toolRowsReturned',
+  'scrum:modelCalls', 'scrum:stoppedBecause',
   // #1130 — an apex is a KIND, not a convention: a card carrying `apex:<X>`
   // projects as scrum:Apex with scrum:apexLabel "X", so "what lives here" is
   // one hop and needs no knowledge of the prefix.
@@ -940,6 +944,23 @@ function projectModelCall(store, e) {
   }
   if (e['scrum:wakeKind']) add(nn(S + 'wakeKind'), lit(String(e['scrum:wakeKind'])));
   if (e['scrum:memoryHanded'] != null && Number.isFinite(Number(e['scrum:memoryHanded']))) add(nn(S + 'memoryHanded'), num(e['scrum:memoryHanded']));
+  // #1196 — WHAT THE COLLEAGUE FETCHED, as facts the graph can answer with.
+  // The hops keep their arguments on the document; what belongs here is what a
+  // reader queries: which tools were granted, which were actually called, how
+  // many hops it took and HOW MANY ROWS came back in total. That last number
+  // is the one that makes an answer checkable — zero rows beside a produced
+  // post is the shape no rule caught tonight, and it is now one query.
+  for (const g of (Array.isArray(e['scrum:toolsGranted']) ? e['scrum:toolsGranted'] : [])) {
+    if (g) add(nn(S + 'toolGranted'), lit(String(g)));
+  }
+  const hops = Array.isArray(e['scrum:toolHops']) ? e['scrum:toolHops'] : [];
+  for (const h of hops) {
+    if (h && h.name) add(nn(S + 'toolCalled'), lit(String(h.name)));
+  }
+  if (hops.length) add(nn(S + 'toolHops'), num(hops.length));
+  if (hops.length) add(nn(S + 'toolRowsReturned'), num(hops.reduce((t, h) => t + (Number(h?.rowCount) || 0), 0)));
+  if (e['scrum:modelCalls'] != null && Number.isFinite(Number(e['scrum:modelCalls']))) add(nn(S + 'modelCalls'), num(e['scrum:modelCalls']));
+  if (e['scrum:stoppedBecause'] != null) add(nn(S + 'stoppedBecause'), lit(String(e['scrum:stoppedBecause'])));
 }
 
 /**

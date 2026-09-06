@@ -3424,8 +3424,17 @@ const modelCallToWire = (e) => ({
   at: e['scrum:calledAt'], error: e.text || null,
   sampling: e['scrum:sampling'] ?? null, wake: { kind: e['scrum:wakeKind'] ?? null, messageId: e['scrum:wakeMessage'] ?? null },
   memory: { handed: e['scrum:memoryHanded'] ?? null, state: e['scrum:memoryState'] ?? null }, memoryWritten: e['scrum:memoryWritten'] ?? [], claims: e['scrum:claims'] ?? [],
+  // #1196 — the tool record reads back in the shape it was written; a row that
+  // accepts a field and returns it changed is a record nobody can rely on.
+  toolsGranted: e['scrum:toolsGranted'] ?? [], toolHops: e['scrum:toolHops'] ?? [],
+  modelCalls: e['scrum:modelCalls'] ?? null, stoppedBecause: e['scrum:stoppedBecause'] ?? null,
+  postedText: e['scrum:postedText'] ?? null,
 });
-const MODEL_CALL_FIELDS = new Set(['by', 'agent', 'model', 'provider', 'protocol', 'promptVersion', 'tokensIn', 'tokensOut', 'cost', 'latencyMs', 'stopReason', 'ok', 'contextHandedTo', 'producedPost', 'at', 'error', 'sampling', 'wake', 'memory', 'memoryWritten', 'claims']);
+const MODEL_CALL_FIELDS = new Set(['by', 'agent', 'model', 'provider', 'protocol', 'promptVersion', 'tokensIn', 'tokensOut', 'cost', 'latencyMs', 'stopReason', 'ok', 'contextHandedTo', 'producedPost', 'at', 'error', 'sampling', 'wake', 'memory', 'memoryWritten', 'claims',
+  // #1196 — what the colleague FETCHED, beside what it said. A claim whose rows
+  // are not on the record cannot be checked by anyone later, which is the whole
+  // argument for giving it tools at all.
+  'toolsGranted', 'toolHops', 'modelCalls', 'stoppedBecause', 'postedText']);
 const MODEL_CALL_SAMPLING = new Set(['temperature', 'topP', 'topK', 'repetitionPenalty', 'seed', 'stop', 'maxTokens', 'keepAlive']);
 // #1086 slice 2 — the row builder, shared by POST /api/model-calls and the
 // search reader, so a reader verdict is ledgered EXACTLY as a hand-posted row
@@ -3459,6 +3468,15 @@ function modelCallEntityFrom(body) {
     'scrum:memoryHanded': n(body.memory?.handed), 'scrum:memoryState': typeof body.memory?.state === 'string' ? body.memory.state : null,
     'scrum:memoryWritten': Array.isArray(body.memoryWritten) ? body.memoryWritten.map((m) => (typeof m === 'string' ? m : JSON.stringify(m))).slice(0, 50) : [],
     'scrum:claims': Array.isArray(body.claims) ? body.claims.slice(0, 50) : [],
+    // #1196 — the tool record. Hops keep their full shape on the document; the
+    // graph gets the queryable summary (see projectModelCall), because the
+    // question a reader asks is "what did it fetch and how much came back",
+    // not "reconstruct the arguments".
+    'scrum:toolsGranted': Array.isArray(body.toolsGranted) ? body.toolsGranted.map(String).slice(0, 50) : [],
+    'scrum:toolHops': Array.isArray(body.toolHops) ? body.toolHops.slice(0, 50) : [],
+    'scrum:modelCalls': n(body.modelCalls),
+    'scrum:stoppedBecause': typeof body.stoppedBecause === 'string' ? body.stoppedBecause : null,
+    'scrum:postedText': typeof body.postedText === 'string' ? body.postedText : null,
     'scrum:agent': agent, 'scrum:model': body.model.trim(),
     'scrum:provider': typeof body.provider === 'string' ? body.provider : null,
     'scrum:protocol': typeof body.protocol === 'string' ? body.protocol : null,
