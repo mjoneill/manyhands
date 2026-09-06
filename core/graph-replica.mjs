@@ -180,6 +180,8 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:Agent', 'scrum:AgentPrompt', 'scrum:AgentPromptVersion', 'scrum:seatKey', 'scrum:emoji',
   'scrum:contextPolicy', 'scrum:toolGrant', 'scrum:budgetPerDay', 'scrum:residency', 'scrum:state',
   'scrum:currentPrompt', 'scrum:ofAgent',
+  // #1242 — a prompt that cancels the grants beside it, named on the node
+  'scrum:promptGrantConflict', 'scrum:promptGrantConflictReason', 'scrum:promptGrantConflictSince',
   // #1197 — the model registry node
   'scrum:Model', 'scrum:baseUrl', 'scrum:contextWindow', 'scrum:numCtx', 'scrum:thinking', 'scrum:maxOutputTokens',
   'scrum:timeoutMs', 'scrum:costIn', 'scrum:costOut', 'scrum:freeTier', 'scrum:capability', 'scrum:apiKeyRef',
@@ -1011,6 +1013,12 @@ function projectAgent(store, e) {
   if (e['scrum:residency']) add(nn(S + 'residency'), lit(String(e['scrum:residency'])));
   if (e['scrum:state']) add(nn(S + 'state'), lit(String(e['scrum:state'])));
   if (e['scrum:currentPrompt']) add(nn(S + 'currentPrompt'), nn(String(e['scrum:currentPrompt'])));
+  // #1242 — present only while the pair is contradictory, so ABSENCE is the clean state.
+  if (e['scrum:promptGrantConflict']) {
+    add(nn(S + 'promptGrantConflict'), lit(String(e['scrum:promptGrantConflict'])));
+    if (e['scrum:promptGrantConflictReason']) add(nn(S + 'promptGrantConflictReason'), lit(String(e['scrum:promptGrantConflictReason'])));
+    if (e['scrum:promptGrantConflictSince']) add(nn(S + 'promptGrantConflictSince'), lit(String(e['scrum:promptGrantConflictSince'])));
+  }
   if (e['scrum:importedAt']) add(nn(S + 'importedAt'), lit(String(e['scrum:importedAt'])));
 }
 
