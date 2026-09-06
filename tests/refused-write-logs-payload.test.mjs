@@ -140,16 +140,21 @@ test('#1217 — a secret in a refused body is REDACTED before it reaches the log
     // The OpenRouter-shaped fixture is ASSEMBLED, not written: GitHub's push
     // protection refused the literal (2026-09-06, GH013), which is the server
     // layer of the same rail this test checks the board's layer of.
+    // ALL THREE fixtures are assembled: the local gate now scans for these
+    // shapes too, with no exclusion for tests, because a leak in a test file
+    // is a leak.
     const orKey = ['sk', 'or', 'v1'].join('-') + '-' + '0123456789abcdef'.repeat(4);
+    const antKey = ['sk', 'ant', 'api03'].join('-') + '-' + 'AAAABBBBCCCCDDDD'.repeat(3);
+    const ghKey = 'gh' + 'p_' + 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
     const res = await api(srv.baseUrl, 'PATCH', '/api/cards/1', {
-      description: `deploy with sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIIIJJJJKKKKLLLL and ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 and ${orKey}`,
+      description: `deploy with ${antKey} and ${ghKey} and ${orKey}`,
       by: 'ada', ifVersion: 1,
     });
     assert.equal(res.status, 409);
     const ev = refusals(srv.boardFile).at(-1);
     const stored = JSON.stringify(ev.request);
-    assert.ok(!stored.includes('sk-ant-api03-AAAABBBB'), 'an API key must not land in the log');
-    assert.ok(!stored.includes('ghp_ABCDEFGHIJKLMNOP'), 'a token must not land in the log');
+    assert.ok(!stored.includes(antKey.slice(0, 22)), 'an API key must not land in the log');
+    assert.ok(!stored.includes(ghKey.slice(0, 20)), 'a token must not land in the log');
     // 2026-09-06 — the OpenRouter shape has hyphens after `sk-`, which the OpenAI
     // pattern does not match; it was passing through the redaction untouched.
     assert.ok(!stored.includes(orKey.slice(0, 24)), 'an OpenRouter key must not land in the log');
