@@ -214,3 +214,49 @@ test('anti-vacuity: the harness CAN see a warning', () => {
   ]);
   assert.equal(fired.length, 1, 'if this fails, every suppression test above is vacuous');
 });
+
+// ── #1229 — THE FLOOR ALARM POSTS ONCE PER STATE CHANGE, NOT ONCE PER COOLDOWN.
+// Measured on #1168: 58 identical floor posts in fifteen days, one every ~6 h
+// as the cooldown expired; the two real deafness incidents inside that band
+// each produced one more identical post nobody could read. A replay of that
+// shape (below the floor for five days, tick every 5 min) must post ONCE on
+// entry and ONCE on recovery, and still post on a deeper collapse or a fresh
+// one — the negative control that keeps this from becoming silence.
+test('#1229 five days below the floor → ONE entry post; recovery → ONE post; a deeper collapse and a fresh collapse still post; a flap inside the cooldown does not', () => {
+  const MIN = 60_000; const HOUR = 3600_000;
+  let state = { r: 7, s: 12, pendingFrom: null, warned: false, sigTimes: {}, hist: [7, 7, 7, 7, 7, 7] };
+  const posts = [];
+  const tick = (t, receivers, sessions = 8) => {
+    const out = decide({ ...base, now: t, receivers, sessions, state });
+    state = out.state; if (out.warnBody) posts.push({ t, body: out.warnBody });
+  };
+  // 5 days below the floor at 2 of 8, one tick every 5 minutes: 1,440 ticks.
+  let t = T0;
+  for (let i = 0; i < 1440; i++) { tick(t, 2); t += 5 * MIN; }
+  const entry = posts.filter((p) => /only 2 of 8/.test(p.body));
+  assert.equal(entry.length, 1, `entry posts once, not ${entry.length} times (the 08-21→09-05 shape was 58)`);
+  assert.equal(state.belowFloor, true, 'the state file says it is still below, for anyone who asks');
+  // A deeper collapse while below is a NEW fact and posts.
+  tick(t, 1); t += 5 * MIN;
+  assert.ok(/only 1 of 8/.test(posts.at(-1).body), 'deeper collapse posts');
+  for (let i = 0; i < 100; i++) { tick(t, 1); t += 5 * MIN; }
+  assert.equal(posts.filter((p) => /only 1 of 8/.test(p.body)).length, 1, 'and only once');
+  // Recovery posts once, naming the duration, and clears the floor state.
+  tick(t, 5); t += 5 * MIN;
+  assert.match(posts.at(-1).body, /back above the floor — 5 of 8 .* it was below for \d+ min/);
+  assert.equal(state.belowFloor, false);
+  const n = posts.length;
+  for (let i = 0; i < 50; i++) { tick(t, 5); t += 5 * MIN; }
+  assert.equal(posts.length, n, 'above the floor, silence');
+  // A FRESH collapse after the cooldown has passed posts again (the negative control).
+  t += 7 * HOUR;
+  tick(t, 2); t += 5 * MIN;
+  assert.ok(/only 2 of 8/.test(posts.at(-1).body), 'a new collapse after recovery + cooldown posts');
+  // Flap: recover and re-collapse at the SAME depth inside the cooldown → silent both ways.
+  tick(t, 5); t += 5 * MIN;   // recovery post (announced entry)
+  const m = posts.length;
+  tick(t, 2); t += 5 * MIN;   // re-entry 5 min later, same depth → flap, silent
+  assert.equal(posts.length, m, 'a same-depth re-entry inside the cooldown is a flap, not a post');
+  tick(t, 5); t += 5 * MIN;   // recovery from a suppressed entry → also silent
+  assert.equal(posts.length, m, 'recovery from a flap-suppressed entry is silent too');
+});

@@ -176,10 +176,27 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
   // discriminator. Below the floor, why the streams are gone stops mattering —
   // if only one of twelve sessions can hear the room, that is worth saying even
   // if eleven clients left in an orderly fashion.
+  // #1229 — THE FLOOR ALARM IS STATE-CHANGE GATED, not cooldown-repeated.
+  // Measured on #1168 (2026-09-06): 58 identical floor posts 08-21→09-05, one
+  // every ~6 h as the cooldown expired, and the two real deafness incidents
+  // in that window (#995, #1195) each produced one more identical post that
+  // no reader could tell from the background. A reader cannot receive the
+  // 59th of 58. So: post on the TRANSITION into below-floor, post on a
+  // DEEPER collapse while below (a real new fact), post ONCE on recovery,
+  // and otherwise stay silent — the current state is in the state file and
+  // on the tick line, for anyone who wants "is it still below". The cooldown
+  // survives only as a flap guard: re-entering at the same depth inside the
+  // cooldown of the last entry post is silent.
+  const wasBelow = Boolean(st.belowFloor);
   if (receivers < floor) {
     const floorSig = `floor:${receivers}`;
-    const floorDeepest = deepestMuted('floor:');
-    if (floorDeepest == null || receivers < floorDeepest) {
+    // Depth is tracked in state, not read off the muted signatures: those
+    // expire with the cooldown, and a collapse that deepens six hours in must
+    // still post (the first cut missed exactly that).
+    const deeper = wasBelow && st.floorDepth != null && receivers < st.floorDepth;
+    const lastEntry = st.floorEntryAt ?? null;
+    const flap = !wasBelow && lastEntry != null && (now - lastEntry) < cooldownMs && st.floorEntryDepth != null && receivers >= st.floorEntryDepth;
+    if ((!wasBelow && !flap) || deeper) {
       warnBody = `⚠️ fanout watch: only ${receivers} of ${sessions} live sessions hold an open stream `
         + `(floor: ${floor}). Seats without a stream receive NOTHING — no queue, no replay (#624). `
         // ⛔ SAME TWO FALSE REMEDIES AS THE DROP BRANCH ABOVE — see the note there
@@ -187,10 +204,24 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
         // duplicated here, and a fix applied to one branch would have left the
         // floor alarm still prescribing a cure that cannot work.
         + `No tool call restores a deaf seat's stream, and a pull does not repair push. `
-        + `(This signature now mutes for ${Math.round(cooldownMs / 3600000)}h; a deeper collapse still fires immediately.)`;
+        + `(Posted once for this collapse; a deeper collapse posts again, and recovery posts once. #1229)`;
       st.sigTimes[floorSig] = now;
+      if (!wasBelow) { st.floorEntryAt = now; st.floorEntryDepth = receivers; }
+      st.floorDepth = receivers;
     }
+    if (!wasBelow) { st.belowFloor = true; st.belowFloorSince = now; if (st.floorDepth == null || flap) st.floorDepth = receivers; }
     st.warned = true;
+  } else if (wasBelow) {
+    // Recovery: one post, naming how long it was below — and only if the
+    // entry was announced (a flap-suppressed entry gets no recovery post either).
+    const announced = st.floorEntryAt != null && st.floorEntryAt >= (st.belowFloorSince ?? 0);
+    if (announced) {
+      const mins = Math.round((now - (st.belowFloorSince ?? now)) / 60000);
+      warnBody = `✅ fanout watch: back above the floor — ${receivers} of ${sessions} live sessions hold an open stream `
+        + `(floor: ${floor}); it was below for ${mins} min. (#1229)`;
+    }
+    st.belowFloor = false; st.belowFloorSince = null; st.floorDepth = null;
+    for (const k of Object.keys(st.sigTimes)) if (k.startsWith('floor:')) delete st.sigTimes[k];
   }
 
   // ── #1195 — NAME THE STALE SEAT. Counting streams cannot see one deaf seat
