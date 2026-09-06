@@ -58,11 +58,16 @@ test('#1226 the prompt: a resident is handed ITS OWN memory and the REMEMBER pro
   const wake = { kind: 'mention', id: 'm1', author: 'ada', body: '@gizmo hi', createdAt: 't' };
   const r = buildMessages({ agent: RESIDENT, wake, memories: [{ body: 'sprint ends Friday', updatedAt: 't0' }] });
   assert.match(r[0].content, /REMEMBER: <one line>/); assert.match(r[0].content, /CLAIM: #<number>/);
-  assert.match(r[1].content, /Your memory — what YOU wrote/); assert.match(r[1].content, /sprint ends Friday/);
+  // #1240 — the wording changed and the GUARANTEE grew: the store is still
+  // introduced as this seat's own words, and is now also marked unverified,
+  // because a line that reads as a board fact is how one wake's guess became
+  // the whole room's premise.
+  assert.match(r[1].content, /What YOU SAID on earlier wakes/); assert.match(r[1].content, /sprint ends Friday/);
+  assert.match(r[1].content, /NOT facts about the board/);
   const g = buildMessages({ agent: GUEST, wake, memories: [{ body: 'sprint ends Friday' }] });
   assert.doesNotMatch(g[0].content, /REMEMBER/); assert.doesNotMatch(g[1].content, /sprint ends Friday/, 'a guest is handed no memory even if some exists');
   const empty = buildMessages({ agent: RESIDENT, wake, memories: [] });
-  assert.match(empty[1].content, /Your memory is empty/);
+  assert.match(empty[1].content, /written nothing on earlier wakes/);
   const sched = buildMessages({ agent: RESIDENT, wake: { kind: 'schedule', createdAt: 't' }, memories: [] });
   assert.match(sched[1].content, /scheduled wake/);
 });
@@ -97,7 +102,7 @@ test('#1226 an unreadable memory store does not read as empty, and a memory writ
   const r = await guestOnce({ agent: RESIDENT, wake, callModel: echoingModel(seen), post, memories: async () => { throw new Error('board blocking'); }, writeMemory: async () => { throw new Error('refused'); }, ledgerFile: file, onError: (l) => errors.push(l) });
   assert.equal(r.posted, true); assert.equal(r.ledger.memory.state, 'unreadable');
   assert.match(seen[0].find((m) => m.role === 'user').content, /could not be read this wake/);
-  assert.doesNotMatch(seen[0].find((m) => m.role === 'user').content, /Your memory is empty/);
+  assert.doesNotMatch(seen[0].find((m) => m.role === 'user').content, /written nothing on earlier wakes/);
   assert.equal(r.ledger.memoryWritten[0].error, 'refused'); assert.ok(errors.some((l) => /memory write failed/.test(l)));
   // Claims: granted → sink called; not granted → refused on the row, sink NOT called.
   const claimed = [];

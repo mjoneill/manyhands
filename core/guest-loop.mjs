@@ -75,6 +75,45 @@ export function findMentions(messages = [], seatKey, { sinceId = null, since = n
  * `CLAIM: #N` is the same shape for standing in claims, honoured only when
  * `card_claim` is in the agent's tool grants (P3's data, not this loop's code).
  */
+/**
+ * #1240 — A CARD NUMBER MAY NOT BE REMEMBERED UNLESS A TOOL RETURNED THAT CARD.
+ *
+ * The chain this closes, from the rows: a seat with no tool channel answered
+ * "card 73" to a question it could not look up, wrote that claim to memory, and
+ * twenty seconds later a DIFFERENT wake with working tools was handed the line,
+ * believed it, and used card_get to CONFIRM the number instead of to find the
+ * answer. The tool was never wrong. Our own store supplied the false premise.
+ *
+ * So the narrow rule: a remembered line that names a card is a claim ABOUT THE
+ * BOARD, and a claim about the board needs a row behind it from THIS wake.
+ * Everything else — a time, an intention, a preference — is unaffected, because
+ * this guard is about referents, not about truth in general.
+ *
+ * @returns {string|null} the reason to refuse, or null to allow
+ */
+export function provenanceRefusal(line, hops = []) {
+  const claimed = new Set();
+  for (const m of String(line).matchAll(/#(\d{1,5})\b/g)) claimed.add(Number(m[1]));
+  for (const m of String(line).matchAll(/\bcards?\s+#?(\d{1,5})\b/gi)) claimed.add(Number(m[1]));
+  if (!claimed.size) return null;
+
+  const fetched = new Set();
+  for (const h of hops) {
+    if (!h || h.ok === false) continue;           // a refused or failed hop proves nothing
+    const n = Number(h?.arguments?.shortId);
+    if (Number.isFinite(n)) fetched.add(n);
+    for (const id of (Array.isArray(h.returnedIds) ? h.returnedIds : [])) {
+      const r = Number(id);
+      if (Number.isFinite(r)) fetched.add(r);
+    }
+  }
+  const unbacked = [...claimed].filter((n) => !fetched.has(n));
+  if (!unbacked.length) return null;
+  return `refused: this line claims card ${unbacked.map((n) => `#${n}`).join(', ')} and no tool returned ${unbacked.length === 1 ? 'that card' : 'those cards'} on this wake. `
+    + 'A remembered card number is a claim about the board, and a claim about the board with nothing behind it becomes a fact for every later wake. '
+    + (fetched.size ? `Fetched this wake: ${[...fetched].map((n) => `#${n}`).join(', ')}.` : 'Nothing was fetched this wake.');
+}
+
 export const REMEMBER_RE = /^\s*REMEMBER:\s*(.+?)\s*$/;   // uppercase on purpose: prose "remember:" stays prose
 export const CLAIM_RE = /^\s*CLAIM:\s*#?(\d+)\s*$/;
 export function splitDirectives(text) {
@@ -166,9 +205,17 @@ export function buildMessages({ agent, wake, changes = [], memories = [] }) {
   const system = lines.join('\n\n');
   const ctx = [];
   if (agent.residency === 'resident') {
+    // #1240 — HOW THE STORE IS INTRODUCED IS PART OF THE DEFECT. Handed as a
+    // list of lines, a seat reads its own past guesses as established fact and
+    // repeats them; that is exactly how one no-tool answer became a card number
+    // the whole room saw twice. So the store is named for what it IS: sentences
+    // this seat wrote on earlier wakes, unverified, and possibly wrong.
     ctx.push(memories.length
-      ? 'Your memory — what YOU wrote on earlier wakes (newest last):\n' + memories.slice(-10).map((m) => `- [${m.updatedAt || m.createdAt || ''}] ${m.body}`).join('\n')
-      : 'Your memory is empty: this is your first wake, or you wrote nothing on the earlier ones.');
+      ? 'What YOU SAID on earlier wakes (newest last). ⚠️ These are your own past sentences, NOT facts about the board and NOT verified by anyone. '
+        + 'You may have been guessing when you wrote them. If one names a card, a person or a date and it matters to your answer, CHECK IT before repeating it; '
+        + 'if you cannot check it, say where it came from rather than stating it:\n'
+        + memories.slice(-10).map((m) => `- [${m.updatedAt || m.createdAt || ''}] you wrote: "${m.body}"`).join('\n')
+      : 'You have written nothing on earlier wakes: this is your first, or you kept nothing.');
   }
   ctx.push(wakeIntro(wake));
   if (policy !== 'artifact-only' && changes.length) {
@@ -368,9 +415,22 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
   // #1226 — the write to memory, AFTER the post: a memory failure must not
   // suppress the answer, and it is recorded on the row either way.
   const memoryWritten = [];
+  const memoryRefused = [];
   for (const line of remember) {
+    // #1240 — THE GUARD, before the sink. A remembered card number with no
+    // fetched row behind it is how one wake's guess becomes every later wake's
+    // premise. The refusal is recorded on the row: a guard that works silently
+    // is indistinguishable from one that never fired.
+    const refusal = provenanceRefusal(line, hops);
+    if (refusal) {
+      memoryRefused.push({ line, reason: refusal });
+      onError(`[#1240] ${agent.seatKey} not remembered — ${refusal} Line: "${line.slice(0, 120)}"`);
+      continue;
+    }
     if (typeof writeMemory !== 'function') { onError(`[#1226] ${agent.seatKey} asked to remember but no memory sink is wired: "${line.slice(0, 80)}"`); continue; }
-    try { const w = await writeMemory({ owner: agent.seatKey, body: line, wake: wake.id ?? null }); memoryWritten.push(w?.id ?? true); }
+    // #1240 — PROVENANCE: the memory names the call that produced it, so any
+    // claim in the store can be traced to the wake and the row that made it.
+    try { const w = await writeMemory({ owner: agent.seatKey, body: line, wake: wake.id ?? null, fromCall: base.at ?? null, hops: hops.length }); memoryWritten.push(w?.id ?? true); }
     catch (e) { onError(`[#1226] memory write failed for ${agent.seatKey}: ${e?.message ?? e}`); memoryWritten.push({ error: e?.message ?? String(e) }); }
   }
   // Standing in claims: honoured only under the grant; a refused one is on the row.
@@ -388,7 +448,7 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
   // tonight: zero rows and a confident answer.
   const row = { ...base, ok: true, stopReason: result.stopReason ?? null, usage: result.usage ?? null, attempts: result.attempts ?? null, latencyMs: Date.now() - started, postId: posted?.id ?? null,
     ...toolRecord, postedText: text || null,
-    memoryWritten, claims: claimed, ...(text ? {} : { reason: 'memory-only' }) };
+    memoryWritten, ...(memoryRefused.length ? { memoryRefused } : {}), claims: claimed, ...(text ? {} : { reason: 'memory-only' }) };
   const recorded = await recordLedger({ sink: ledgerSink, file: ledgerFile, row, onError });
   row.recorded = recorded.recorded; row.ledgerId = recorded.id;
   log(`[#1201] ${agent.seatKey} answered ${wake.id ?? 'a mention'} via ${agent.model.model} (${row.usage?.completionTokens ?? '?'} tokens, ${row.stopReason})`);
