@@ -73,6 +73,56 @@
   .roster-restart { color:var(--muted); font-size:13px; margin:14px 0 0; }
   #roster-msg { margin-top:12px; font-size:14px; min-height:20px; }
 
+
+  /* #1239 — THE PAGE AS A PLACE A HUMAN CAN USE. Six sections stacked to a
+     screen and a half of scrolling, with the two newest (models, agents)
+     outside the page shell entirely, so they rendered unstyled and full-bleed —
+     the look that said nobody had opened this page. A sticky nav, and every
+     section inside the shell on the same card language as the rest. */
+  [data-settings-nav] { position:sticky; top:0; z-index:5; display:flex; gap:6px; flex-wrap:wrap; align-items:center;
+    padding:10px 0; margin:0 0 14px; background:var(--bg); border-bottom:1px solid var(--border); }
+  [data-settings-nav] a { color:var(--muted); text-decoration:none; font:13px var(--mono); padding:6px 10px; border:1px solid transparent; border-radius:8px; }
+  [data-settings-nav] a:hover { color:var(--fg); border-color:var(--border); }
+  [id] { scroll-margin-top:64px; }
+  .by-line { display:flex; align-items:center; gap:8px; color:var(--muted); font-size:13px; margin-left:auto; }
+  .by-line input { width:110px; background:var(--bg); color:var(--fg); border:1px solid var(--border); border-radius:8px; padding:6px 10px; font:13px var(--mono); }
+  /* a form is a grid of labelled fields, not a run of inline labels */
+  .form-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(210px, 1fr)); gap:10px 16px; margin-top:12px; }
+  .form-grid > label, .field { display:flex; flex-direction:column; gap:4px; color:var(--muted); font-size:13px; min-width:0; }
+  .form-grid > label.check, .field.check { flex-direction:row; align-items:center; gap:8px; color:var(--fg); align-self:end; padding-bottom:8px; }
+  .form-grid .span-all { grid-column:1 / -1; }
+  .form-grid input:not([type=checkbox]), .form-grid select, .form-grid textarea,
+  .field input:not([type=checkbox]), .field select, .field textarea {
+    width:100%; background:var(--bg); color:var(--fg); border:1px solid var(--border); border-radius:8px; padding:8px 10px; font:14px var(--mono); }
+  .form-grid input:focus, .form-grid select:focus, .form-grid textarea:focus, .field input:focus, .field select:focus, .field textarea:focus { outline:none; border-color:var(--violet); }
+  .form-grid input[type=checkbox], .field input[type=checkbox] { accent-color:var(--violet); width:auto; }
+  .hint { color:var(--muted); font-size:12px; }
+  /* one registered model / one agent per row */
+  .agent-row { padding:14px 0; border-bottom:1px solid var(--border); }
+  .agent-row:last-child { border-bottom:0; }
+  .agent-row > details > summary { cursor:pointer; color:var(--link); font-size:13px; margin-top:8px; }
+  .agent-head { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
+  .agent-head .meta { color:var(--muted); font:12px var(--mono); }
+  .badge { font:11px var(--mono); text-transform:uppercase; letter-spacing:.08em; padding:2px 7px; border:1px solid var(--border); border-radius:6px; color:var(--muted); }
+  .badge.state-resting { color:#e2b054; border-color:#e2b054; }
+  .badge.state-retired { color:var(--err); border-color:var(--err); }
+  /* #1242 — CAPABILITIES AND INSTRUCTIONS ON ONE SCREEN, each dated. A prompt
+     that tells a seat to stop before using tools it was granted is only
+     visible as a contradiction if both halves are in front of the reader. */
+  .agent-editor { display:grid; grid-template-columns:minmax(250px, 2fr) minmax(300px, 3fr); gap:16px; margin-top:12px; }
+  @media (max-width:700px) { .agent-editor { grid-template-columns:1fr; } }
+  .pane { border:1px solid var(--border); border-radius:10px; padding:12px 14px; min-width:0; display:flex; flex-direction:column; }
+  .pane textarea { flex:1; }
+  .pane h4 { margin:0 0 2px; font:600 14px var(--serif); }
+  .pane .when { color:var(--muted); font:11px var(--mono); margin:0 0 10px; }
+  .grant { display:flex; gap:8px; align-items:flex-start; padding:5px 0; }
+  .grant input { margin-top:3px; accent-color:var(--violet); }
+  .grant .desc { color:var(--muted); font-size:12px; }
+  .agent-editor textarea { width:100%; min-height:220px; resize:vertical; background:var(--bg); color:var(--fg); border:1px solid var(--border); border-radius:8px; padding:8px 10px; font:13px/1.45 var(--mono); }
+  .agent-editor textarea:focus { outline:none; border-color:var(--violet); }
+  .editor-actions { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-top:4px; }
+  .editor-actions .btn { margin-top:12px; }
+  .editor-actions .msg { margin-top:12px; flex:1 1 240px; }
   code { background:var(--panel-2); border:1px solid var(--line); padding:1px 5px; border-radius:5px; font:13px var(--mono); }
 </style>
 <link rel="stylesheet" href="./core/header.css">
@@ -94,7 +144,11 @@
 <div data-page-shell>
   <div class="shell-head"><a href="/" data-product-mark title="manyhands — the board"><span class="mark-glyph">◆</span>manyhands</a><div id="app-nav"></div></div>
   <div class="wrap">
-  <h1>⚙️ Channel Delivery Settings</h1>
+  <nav data-settings-nav aria-label="Settings sections">
+    <a href="#delivery-panel">⚙️ Delivery</a><a href="#tending-panel">🌱 Tending</a><a href="#whispers-panel">Whispers</a><a href="#room-panel">👥 Room</a><a href="#models-panel">🧠 Models</a><a href="#agents-panel">🤝 Agents</a>
+    <span class="by-line">Editing as <input id="settings-by" value="michael" aria-label="Who is making these changes"></span>
+  </nav>
+  <h1 id="delivery-panel">⚙️ Channel Delivery Settings</h1>
   <p class="sub prose">How a commons post fans out to the agents in the room. Changes apply <strong>live</strong> — no restart, no relaunch.</p>
 
   <div class="card">
@@ -131,7 +185,7 @@
        value was already persisted and already live-reloaded, and still only a
        seat could change it. "Editable by any seat" is a tool surface; he is not
        a seat. -->
-  <h1 style="margin-top:34px">🌱 Tending</h1>
+  <h1 id="tending-panel" style="margin-top:34px">🌱 Tending</h1>
   <p class="sub prose">When the room goes quiet, the board offers a tending whisper. This is how long the quiet has to last first.</p>
   <div class="card">
     <div class="row">
@@ -184,7 +238,7 @@
        versioned graph entities with authorship and provenance, and still only a
        seat could reach them (through an MCP tool taking bare strings, which
        would have discarded every one of those properties on save). -->
-  <h2 style="margin-top:28px">The whispers themselves</h2>
+  <h2 id="whispers-panel" style="margin-top:28px">The whispers themselves</h2>
   <p class="sub prose">The actual messages the board sends. Edit one and the next firing uses it — no restart, no deploy, no agent.</p>
   <div class="card" data-whisper-editor>
     <div class="row" style="margin-bottom:10px">
@@ -323,7 +377,7 @@
     }());
   </script>
 
-  <h1 style="margin-top:34px">👥 The room</h1>
+  <h1 id="room-panel" style="margin-top:34px">👥 The room</h1>
   <p class="sub prose">Who's in this board — names, marks and lights. Yours to edit; no agent required.</p>
 
   <div class="card" data-roster-editor>
@@ -339,63 +393,80 @@
     <p class="roster-restart">Saved to <code>roster.json</code>. <strong>Changes appear after the board restarts</strong> — the roster is read once at startup, so the room never repaints under someone mid-read.</p>
     <div id="roster-msg"></div>
   </div>
-  </div><!-- /.wrap -->
-</div><!-- /[data-page-shell] -->
-
 
 <!-- #1197 — MODELS. A model the board can call, as a node: every field is
      sourced to a failure that happened. The key is a REFERENCE (an env var
-     name), never a value. The probe measures what the provider answers. -->
+     name), never a value. The probe measures what the provider answers.
+     #1239 — inside the page shell, on the same card as everything else, and
+     editable per row rather than register-only. -->
 <section id="models-panel">
-  <h2>Models</h2>
+  <h1 style="margin-top:34px">🧠 Models</h1>
   <p class="sub prose">A model the board can call. Register it once; agents name it by key. The API key is never stored here — only the name of the environment variable that holds it. <strong>Probe</strong> sends a one-token request and a deliberately fake id side by side, so a 404 can be read.</p>
-  <div id="models-list"></div>
-  <details><summary>Register a model</summary>
-    <label>Key <input id="model-key" placeholder="gemma3-12b" aria-label="Registry key"></label>
-    <label>Name <input id="model-name" placeholder="Gemma 3 12B" aria-label="Display name"></label>
-    <label>Provider model id <input id="model-model" placeholder="gemma3:12b" aria-label="Provider model id"></label>
-    <label>Provider <input id="model-provider" placeholder="ollama" aria-label="Provider"></label>
-    <label>Protocol <select id="model-protocol" aria-label="Protocol"><option>ollama-native</option><option>openai-completions</option><option>mlx</option></select></label>
-    <label>Base URL <input id="model-baseurl" placeholder="http://localhost:11434" aria-label="Base URL"></label>
-    <label>API key env var (name only) <input id="model-keyref" placeholder="OPENAI_API_KEY" aria-label="API key reference"></label>
-    <label>Context window <input id="model-ctx" type="number" min="0" aria-label="Context window"></label>
-    <label>Ollama num_ctx <input id="model-numctx" type="number" min="0" aria-label="num_ctx"></label>
-    <label>Max output tokens <input id="model-maxout" type="number" min="0" aria-label="Max output tokens"></label>
-    <label>Timeout ms <input id="model-timeout" type="number" min="0" aria-label="Timeout ms"></label>
-    <label>Cost in / 1M tokens <input id="model-costin" type="number" min="0" step="0.000001" aria-label="Cost in"></label>
-    <label>Cost out / 1M tokens <input id="model-costout" type="number" min="0" step="0.000001" aria-label="Cost out"></label>
-    <label><input id="model-free" type="checkbox"> Free tier</label>
-    <label><input id="model-thinking" type="checkbox"> Thinking model</label>
-    <label>Capabilities <label><input type="checkbox" data-model-cap value="jsonSchema"> jsonSchema</label> <label><input type="checkbox" data-model-cap value="tools"> tools</label> <label><input type="checkbox" data-model-cap value="images"> images</label></label>
-    <label>Deprecates on <input id="model-deprecates" type="date" aria-label="Deprecation date"></label>
-    <button id="model-create" class="btn">Register model</button>
-    <div class="msg" id="models-msg"></div>
-  </details>
+  <div class="card">
+    <div id="models-list"></div>
+    <details><summary>Register a model</summary>
+      <div class="form-grid">
+        <label>Key <input id="model-key" placeholder="gemma3-12b" aria-label="Registry key"><span class="hint">how an agent names it</span></label>
+        <label>Name <input id="model-name" placeholder="Gemma 3 12B" aria-label="Display name"></label>
+        <label>Provider model id <input id="model-model" placeholder="gemma3:12b" aria-label="Provider model id"></label>
+        <label>Provider <input id="model-provider" placeholder="ollama" aria-label="Provider"></label>
+        <label>Protocol <select id="model-protocol" aria-label="Protocol"><option>ollama-native</option><option>openai-completions</option><option>mlx</option></select></label>
+        <label>Base URL <input id="model-baseurl" placeholder="http://localhost:11434" aria-label="Base URL"></label>
+        <label>API key env var (name only) <input id="model-keyref" placeholder="OPENAI_API_KEY" aria-label="API key reference"></label>
+        <label>Context window <input id="model-ctx" type="number" min="0" aria-label="Context window"></label>
+        <label>Ollama num_ctx <input id="model-numctx" type="number" min="0" aria-label="num_ctx"></label>
+        <label>Max output tokens <input id="model-maxout" type="number" min="0" aria-label="Max output tokens"></label>
+        <label>Timeout ms <input id="model-timeout" type="number" min="0" aria-label="Timeout ms"></label>
+        <label>Cost in / 1M tokens <input id="model-costin" type="number" min="0" step="0.000001" aria-label="Cost in"></label>
+        <label>Cost out / 1M tokens <input id="model-costout" type="number" min="0" step="0.000001" aria-label="Cost out"></label>
+        <label>Deprecates on <input id="model-deprecates" type="date" aria-label="Deprecation date"></label>
+        <label class="check"><input id="model-free" type="checkbox"> Free tier</label>
+        <label class="check"><input id="model-thinking" type="checkbox"> Thinking model</label>
+        <label class="check"><input type="checkbox" data-model-cap value="jsonSchema"> jsonSchema</label>
+        <label class="check"><input type="checkbox" data-model-cap value="tools"> tools</label>
+        <label class="check"><input type="checkbox" data-model-cap value="images"> images</label>
+      </div>
+      <button id="model-create" class="btn">Register model</button>
+      <div class="msg" id="models-msg"></div>
+    </details>
+  </div>
 </section>
 
 <!-- #1199 — AGENTS. A colleague defined inside manyhands: seat key, model, a
      VERSIONED prompt, grants, budget, residency. Editing the prompt mints a
-     version; it never overwrites. -->
+     version; it never overwrites.
+     #1239 — every setting the loop actually reads is editable here, and the
+     grants sit beside the prompt (#1242). Until this, a human could change the
+     prompt and nothing else; every other change was a colleague issuing REST. -->
 <section id="agents-panel">
-  <h2>Agents</h2>
-  <p class="sub prose">A colleague defined on this board. Its job lives only in its prompt and its tool grants. Editing the prompt makes a new version; the old one stays, so the board can always say which prompt wrote which post.</p>
-  <div id="agents-list"></div>
-  <details><summary>Define a new agent</summary>
-    <label>Seat key <input id="agent-seat" placeholder="guest" aria-label="Seat key"></label>
-    <label>Name <input id="agent-name" placeholder="Guest" aria-label="Name"></label>
-    <label>Registered model key <input id="agent-modelkey" placeholder="(from Models above; leaves the inline spec unused)" aria-label="Registered model key"></label>
-    <label>Model <input id="agent-model" placeholder="gemma4:26b" aria-label="Model id"></label>
-    <label>Protocol <select id="agent-protocol" aria-label="Protocol"><option>ollama-native</option><option>openai-completions</option><option>mlx</option></select></label>
-    <label>Base URL <input id="agent-baseurl" placeholder="http://localhost:11434" aria-label="Base URL"></label>
-    <label>Residency <select id="agent-residency" aria-label="Residency"><option>guest</option><option>resident</option></select></label>
-    <label>Context <select id="agent-context" aria-label="Context policy"><option>thread</option><option>artifact-only</option></select></label>
-    <label>Budget per day <input id="agent-budget" type="number" min="0" step="0.01" placeholder="(none)" aria-label="Budget per day"></label>
-    <label>Prompt <textarea id="agent-prompt" rows="5" aria-label="System prompt"></textarea></label>
-    <button id="agent-create" class="btn">Create agent</button>
-    <div class="msg" id="agents-msg"></div>
-    <p class="live">Stored as <code>scrum:Agent</code> + <code>scrum:AgentPromptVersion 1</code>. No key is ever stored: name an env var in <code>apiKeyRef</code> if the provider needs one.</p>
-  </details>
+  <h1 style="margin-top:34px">🤝 Agents</h1>
+  <p class="sub prose">A colleague defined on this board. What it may <strong>reach</strong> and what it is <strong>told</strong> sit side by side, each dated, because a prompt that contradicts its grants is only visible when both are on one screen. Editing the prompt makes a new version; the old one stays, so the board can always say which prompt wrote which post.</p>
+  <div class="card">
+    <div id="agents-list"></div>
+    <details><summary>Define a new agent</summary>
+      <div class="form-grid">
+        <label>Seat key <input id="agent-seat" placeholder="guest" aria-label="Seat key"></label>
+        <label>Name <input id="agent-name" placeholder="Guest" aria-label="Name"></label>
+        <label>Registered model key <input id="agent-modelkey" placeholder="(from Models above)" aria-label="Registered model key"><span class="hint">set this and the inline model below is ignored</span></label>
+        <label>Model <input id="agent-model" placeholder="gemma4:26b" aria-label="Model id"></label>
+        <label>Protocol <select id="agent-protocol" aria-label="Protocol"><option>ollama-native</option><option>openai-completions</option><option>mlx</option></select></label>
+        <label>Base URL <input id="agent-baseurl" placeholder="http://localhost:11434" aria-label="Base URL"></label>
+        <label>Residency <select id="agent-residency" aria-label="Residency"><option>guest</option><option>resident</option></select></label>
+        <label>Context <select id="agent-context" aria-label="Context policy"><option>thread</option><option>artifact-only</option></select></label>
+        <label>Budget per day <input id="agent-budget" type="number" min="0" step="0.01" placeholder="(none)" aria-label="Budget per day"></label>
+        <label class="span-all">Prompt <textarea id="agent-prompt" rows="5" aria-label="System prompt"></textarea></label>
+      </div>
+      <button id="agent-create" class="btn">Create agent</button>
+      <div class="msg" id="agents-msg"></div>
+      <p class="live">Stored as <code>scrum:Agent</code> + <code>scrum:AgentPromptVersion 1</code>. No key is ever stored: name an env var in <code>apiKeyRef</code> if the provider needs one. Grants are set after creation, in the row above.</p>
+    </details>
+  </div>
 </section>
+  </div><!-- /.wrap -->
+</div><!-- /[data-page-shell] -->
+
+
+
 
 <script>
 const $ = (id) => document.getElementById(id);
@@ -620,99 +691,230 @@ $('roster-save').addEventListener('click', async () => {
 });
 
 
+// ── #1239 — shared by the models and agents editors ──────────────────────
+// Who is making the change. Declared, not authenticated (#675): the field is
+// visible so the event log records a person rather than a hard-coded name.
+const by = () => ($('settings-by').value.trim() || 'michael');
+const esc = (v) => String(v ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+// The tool descriptions are written for the model and shout. A human wants the
+// first sentence; the whole text stays on hover.
+const firstSentence = (t) => { const m = String(t || '').match(/^.*?[.!?](\s|$)/); return m ? m[0].trim() : String(t || ''); };
+const when = (iso) => (iso ? String(iso).replace('T', ' ').slice(0, 16) + 'Z' : 'unknown');
+const numOrNull = (v) => (v === '' || v == null ? null : Number(v));
+const rowMsg = (el, text, ok) => { el.textContent = text; el.className = 'msg ' + (ok ? 'ok' : 'err'); };
+async function send(method, path, body) {
+  const res = await fetch(path, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, by: by() }) });
+  const out = await res.json().catch(() => ({}));
+  return { ok: res.ok, status: res.status, out };
+}
+let TOOLS = [];   // GET /api/tools — the grantable set, in the server's own words
+let MODELS = [];  // GET /api/models — so an agent can pick a registered key
+async function loadTools() { try { TOOLS = await (await fetch('/api/tools')).json(); } catch { TOOLS = []; } }
+
 // ── #1197 — models panel ──────────────────────────────────────────────────
-function modelsMsg(text, ok) { const m = $('models-msg'); m.textContent = text; m.className = 'msg ' + (ok ? 'ok' : 'err'); }
+function modelsMsg(text, ok) { rowMsg($('models-msg'), text, ok); }
+const THINKING_OPTS = (cur) => ['unset', 'true', 'false'].map((v) => `<option value="${v}"${(cur == null ? 'unset' : String(cur)) === v ? ' selected' : ''}>${v === 'unset' ? 'unset (send no flag)' : v === 'true' ? 'on' : 'off'}</option>`).join('');
 function modelRow(m) {
   const row = document.createElement('div'); row.className = 'agent-row'; row.setAttribute('data-model-key', m.key);
   const probe = m.lastProbe ? `last probe: ${m.lastProbe.klass}${m.lastProbe.status != null ? ` (${m.lastProbe.status})` : ''} at ${m.lastProbe.at}` : 'never probed';
-  row.innerHTML = `<strong>${m.name}</strong> <code>${m.key}</code> · ${m.model} via ${m.protocol}${m.provider ? ` @ ${m.provider}` : ''}${m.apiKeyRef ? ` · key ref <code>${m.apiKeyRef}</code>` : ''}${m.contextWindow != null ? ` · ctx ${m.contextWindow}` : ''}${m.freeTier ? ' · free' : ''}${m.deprecatesOn ? ` · deprecates ${m.deprecatesOn}` : ''}
-    <div class="sub" data-model-probe>${probe}</div>
-    <button class="btn" data-model-probe-btn>Probe</button>`;
+  const caps = ['jsonSchema', 'tools', 'images'];
+  row.innerHTML = `<div class="agent-head"><strong>${esc(m.name)}</strong> <code>${esc(m.key)}</code> <span class="meta">${esc(m.model)} via ${esc(m.protocol)}${m.provider ? ` @ ${esc(m.provider)}` : ''}${m.apiKeyRef ? ` · key ref ${esc(m.apiKeyRef)}` : ''}${m.contextWindow != null ? ` · ctx ${m.contextWindow}` : ''}${m.thinking != null ? ` · thinking ${m.thinking ? 'on' : 'off'}` : ''}${m.freeTier ? ' · free' : ''}${m.deprecatesOn ? ` · deprecates ${esc(m.deprecatesOn)}` : ''}</span></div>
+    <div class="sub" data-model-probe>${esc(probe)}</div>
+    <details data-model-editor><summary>Edit</summary>
+      <div class="form-grid">
+        <label>Name <input data-f="name" value="${esc(m.name)}"></label>
+        <label>Provider model id <input data-f="model" value="${esc(m.model)}"></label>
+        <label>Provider <input data-f="provider" value="${esc(m.provider)}"></label>
+        <label>Protocol <select data-f="protocol">${['ollama-native', 'openai-completions', 'mlx'].map((p) => `<option${p === m.protocol ? ' selected' : ''}>${p}</option>`).join('')}</select></label>
+        <label>Base URL <input data-f="baseUrl" value="${esc(m.baseUrl)}"></label>
+        <label>API key env var (name only) <input data-f="apiKeyRef" value="${esc(m.apiKeyRef)}"></label>
+        <label>Context window <input data-model-ctx data-f="contextWindow" type="number" min="0" value="${m.contextWindow ?? ''}"></label>
+        <label>Ollama num_ctx <input data-f="numCtx" type="number" min="0" value="${m.numCtx ?? ''}"></label>
+        <label>Max output tokens <input data-f="maxOutputTokens" type="number" min="0" value="${m.maxOutputTokens ?? ''}"></label>
+        <label>Timeout ms <input data-f="timeoutMs" type="number" min="0" value="${m.timeoutMs ?? ''}"></label>
+        <label>Cost in / 1M <input data-f="costIn" type="number" min="0" step="0.000001" value="${m.costIn ?? ''}"></label>
+        <label>Cost out / 1M <input data-f="costOut" type="number" min="0" step="0.000001" value="${m.costOut ?? ''}"></label>
+        <label>Thinking <select data-model-thinking>${THINKING_OPTS(m.thinking)}</select><span class="hint">three states: unset sends no flag at all</span></label>
+        <label>Deprecates on <input data-f="deprecatesOn" type="date" value="${esc(m.deprecatesOn)}"></label>
+        <label class="check"><input type="checkbox" data-model-free${m.freeTier ? ' checked' : ''}> Free tier</label>
+        ${caps.map((c) => `<label class="check"><input type="checkbox" data-model-editcap value="${c}"${(m.capabilities || []).includes(c) ? ' checked' : ''}> ${c}</label>`).join('')}
+      </div>
+      <div class="editor-actions"><button class="btn" data-model-save>Save model</button><button class="btn" data-model-probe-btn>Probe</button><div class="msg" data-model-msg></div></div>
+    </details>`;
+  const msg = row.querySelector('[data-model-msg]');
   row.querySelector('[data-model-probe-btn]').addEventListener('click', async () => {
     const btn = row.querySelector('[data-model-probe-btn]'); btn.disabled = true;
     row.querySelector('[data-model-probe]').textContent = 'probing…';
     try {
-      const res = await fetch(`/api/models/${encodeURIComponent(m.key)}/probe`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ by: 'michael' }) });
-      const out = await res.json().catch(() => ({}));
-      if (res.ok) {
+      const { ok, status, out } = await send('POST', `/api/models/${encodeURIComponent(m.key)}/probe`, {});
+      if (ok) {
         row.querySelector('[data-model-probe]').textContent = `real: ${out.real.klass} (${out.real.status ?? out.real.reason}) · control ${out.control.model}: ${out.control.klass} (${out.control.status ?? out.control.reason})${out.controlReadable ? '' : ' · ⚠ control unreadable: this endpoint cannot be read for absence'}${out.real.bodyHead ? ` · body: ${out.real.bodyHead.slice(0, 160)}` : ''}`;
-      } else modelsMsg('Probe rejected: ' + (out.error || res.status), false);
-    } catch (e) { modelsMsg('Probe failed: ' + e.message, false); }
+      } else rowMsg(msg, 'Probe rejected: ' + (out.error || status), false);
+    } catch (e) { rowMsg(msg, 'Probe failed: ' + e.message, false); }
+    btn.disabled = false;
+  });
+  row.querySelector('[data-model-save]').addEventListener('click', async () => {
+    const btn = row.querySelector('[data-model-save]'); btn.disabled = true;
+    const body = {};
+    for (const el of row.querySelectorAll('[data-f]')) {
+      const k = el.dataset.f; const v = el.value.trim();
+      body[k] = el.type === 'number' ? numOrNull(v) : (v === '' ? null : v);
+    }
+    const t = row.querySelector('[data-model-thinking]').value; body.thinking = t === 'unset' ? null : t === 'true';
+    body.freeTier = row.querySelector('[data-model-free]').checked;
+    body.capabilities = [...row.querySelectorAll('[data-model-editcap]:checked')].map((c) => c.value);
+    try {
+      const { ok, status, out } = await send('PATCH', `/api/models/${encodeURIComponent(m.key)}`, body);
+      if (ok) loadModels({ key: m.key, text: `Saved ${out.key}.`, ok: true });
+      else rowMsg(msg, 'Rejected: ' + (out.error || status), false);
+    } catch (e) { rowMsg(msg, 'Save failed: ' + e.message, false); }
     btn.disabled = false;
   });
   return row;
 }
-async function loadModels() {
+// A save re-renders the list, which would throw away the row that held the
+// confirmation; `notice` carries it onto the fresh row, editor kept open.
+async function loadModels(notice) {
   try {
-    const models = await (await fetch('/api/models')).json();
+    MODELS = await (await fetch('/api/models')).json();
+    const open = new Set([...document.querySelectorAll('.agent-row[data-model-key] [data-model-editor][open]')].map((d) => d.closest('.agent-row').dataset.modelKey));
     const list = $('models-list'); list.innerHTML = '';
-    if (!models.length) { list.textContent = 'No models registered yet.'; return; }
-    for (const m of models) list.appendChild(modelRow(m));
+    if (!MODELS.length) { list.textContent = 'No models registered yet.'; return; }
+    for (const m of MODELS) {
+      const r = modelRow(m); if (open.has(m.key)) r.querySelector('[data-model-editor]').open = true; list.appendChild(r);
+      if (notice && notice.key === m.key) rowMsg(r.querySelector('[data-model-msg]'), notice.text, notice.ok);
+    }
   } catch (e) { modelsMsg('Could not load models: ' + e.message, false); }
 }
 $('model-create').addEventListener('click', async () => {
   $('model-create').disabled = true;
   const num = (id) => ($(id).value === '' ? undefined : Number($(id).value));
   try {
-    const res = await fetch('/api/models', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+    const { ok, status, out } = await send('POST', '/api/models', {
       key: $('model-key').value.trim(), name: $('model-name').value.trim() || undefined, model: $('model-model').value.trim(),
       provider: $('model-provider').value.trim() || undefined, protocol: $('model-protocol').value, baseUrl: $('model-baseurl').value.trim() || undefined,
       apiKeyRef: $('model-keyref').value.trim() || undefined, contextWindow: num('model-ctx'), numCtx: num('model-numctx'),
       maxOutputTokens: num('model-maxout'), timeoutMs: num('model-timeout'), costIn: num('model-costin'), costOut: num('model-costout'),
       freeTier: $('model-free').checked, thinking: $('model-thinking').checked,
       capabilities: [...document.querySelectorAll('[data-model-cap]:checked')].map((c) => c.value),
-      deprecatesOn: $('model-deprecates').value || undefined, by: 'michael',
-    }) });
-    const out = await res.json().catch(() => ({}));
-    if (res.ok) { modelsMsg(`Registered ${out.key}.`, true); loadModels(); }
-    else modelsMsg('Rejected: ' + (out.error || res.status), false);
+      deprecatesOn: $('model-deprecates').value || undefined,
+    });
+    if (ok) { modelsMsg(`Registered ${out.key}.`, true); loadModels(); loadAgents(); }
+    else modelsMsg('Rejected: ' + (out.error || status), false);
   } catch (e) { modelsMsg('Create failed: ' + e.message, false); }
   $('model-create').disabled = false;
 });
-loadModels();
 
-// ── #1199 — agents panel ──────────────────────────────────────────────────
-function agentsMsg(text, ok) { const m = $('agents-msg'); m.textContent = text; m.className = 'msg ' + (ok ? 'ok' : 'err'); }
+// ── #1199 / #1239 — agents panel ──────────────────────────────────────────
+function agentsMsg(text, ok) { rowMsg($('agents-msg'), text, ok); }
+const opt = (values, cur, labels = {}) => values.map((v) => `<option value="${v}"${v === cur ? ' selected' : ''}>${labels[v] || v}</option>`).join('');
 function agentRow(a) {
   const row = document.createElement('div'); row.className = 'agent-row'; row.setAttribute('data-agent-seat', a.seatKey);
-  row.innerHTML = `<strong>${a.emoji ? a.emoji + ' ' : ''}${a.name}</strong> <code>${a.seatKey}</code> · ${a.modelId || '?'} · ${a.residency} · ${a.state} · prompt v${a.prompt ? a.prompt.version : '?'} (${a.promptVersions} version${a.promptVersions === 1 ? '' : 's'})${a.budgetPerDay != null ? ` · budget ${a.budgetPerDay}/day` : ''}
-    <details><summary>Prompt</summary><textarea rows="5" aria-label="Prompt text for ${a.seatKey}" data-agent-prompt>${(a.prompt && a.prompt.body) || ''}</textarea>
-    <button class="btn" data-agent-version>Save as new version</button></details>`;
+  const grants = new Set(a.toolGrants || []);
+  const registeredKey = a.usesModel ? (MODELS.find((m) => m.id === a.usesModel) || {}).key || '' : '';
+  const modelLabel = registeredKey ? `${esc(registeredKey)} (registered)` : `${esc(a.modelId || '?')} (inline)`;
+  row.innerHTML = `<div class="agent-head"><strong>${a.emoji ? esc(a.emoji) + ' ' : ''}${esc(a.name)}</strong> <code>${esc(a.seatKey)}</code> <span class="badge state-${esc(a.state)}">${esc(a.state)}</span> <span class="meta">${modelLabel} · ${esc(a.residency)} · ${esc(a.contextPolicy)} · prompt v${a.prompt ? a.prompt.version : '?'} (${a.promptVersions} version${a.promptVersions === 1 ? '' : 's'}) · grants ${grants.size}${a.maxHops != null ? ` · hops ≤ ${a.maxHops}` : ''}${a.thinking != null ? ` · thinking ${a.thinking ? 'on' : 'off'}` : ''}${a.budgetPerDay != null ? ` · budget ${a.budgetPerDay}/day` : ''}</span></div>
+    <details data-agent-editor><summary>Edit</summary>
+      <div class="agent-editor">
+        <div class="pane" data-agent-grants>
+          <h4>What it may reach</h4>
+          <p class="when" data-agent-grants-meta>settings as of ${when(a.updatedAt || a.createdAt)}</p>
+          ${TOOLS.length ? TOOLS.map((t) => `<label class="grant"><input type="checkbox" value="${esc(t.name)}"${grants.has(t.name) ? ' checked' : ''}><span title="${esc(t.description)}"><code>${esc(t.name)}</code><div class="desc">${esc(firstSentence(t.description))}</div></span></label>`).join('') : '<p class="hint">the tool list could not be loaded, so grants cannot be edited from here</p>'}
+          <div class="form-grid" style="margin-top:14px">
+            <label>Hop ceiling <input data-agent-maxhops type="number" min="1" max="20" value="${a.maxHops ?? ''}" placeholder="default"><span class="hint">how many times it may look before it must answer</span></label>
+            <label>Thinking <select data-agent-thinking>${THINKING_OPTS(a.thinking)}</select><span class="hint">unset sends no flag at all</span></label>
+            <label>Context <select data-agent-context>${opt(['artifact-only', 'thread'], a.contextPolicy)}</select><span class="hint">can it see the conversation it answers in</span></label>
+            <label>Model <select data-agent-modelkey><option value=""${registeredKey ? '' : ' selected'}>inline: ${esc(a.modelId || '?')}</option>${MODELS.map((m) => `<option value="${esc(m.key)}"${m.key === registeredKey ? ' selected' : ''}>${esc(m.key)} — ${esc(m.model)}</option>`).join('')}</select></label>
+          </div>
+        </div>
+        <div class="pane">
+          <h4>What it is told</h4>
+          <p class="when" data-agent-prompt-meta>prompt v${a.prompt ? a.prompt.version : '?'} · by ${esc(a.prompt && a.prompt.by)} · ${when(a.prompt && a.prompt.at)}</p>
+          <textarea aria-label="Prompt text for ${esc(a.seatKey)}" data-agent-prompt>${esc((a.prompt && a.prompt.body) || '')}</textarea>
+          <div class="editor-actions"><button class="btn" data-agent-version>Save as new version</button><span class="hint">never overwrites: v${a.prompt ? a.prompt.version : '?'} stays readable</span></div>
+        </div>
+      </div>
+      <div class="form-grid">
+        <label>Name <input data-agent-name value="${esc(a.name)}"></label>
+        <label>Emoji <input data-agent-emoji value="${esc(a.emoji)}"></label>
+        <label>Colour <input data-agent-color value="${esc(a.color || '')}" placeholder="#7c6cf0"></label>
+        <label>Residency <select data-agent-residency>${opt(['resident', 'guest'], a.residency)}</select></label>
+        <label>State <select data-agent-state>${opt(['invited', 'resting', 'retired'], a.state)}</select><span class="hint">resting or retired releases every card it holds</span></label>
+        <label>Wakes on <span data-agent-wake>${['mention', 'assignment', 'schedule'].map((w) => `<label class="check" style="display:inline-flex;margin-right:10px"><input type="checkbox" value="${w}"${(a.wakeOn || []).includes(w) ? ' checked' : ''}> ${w}</label>`).join('')}</span></label>
+        <label>Every N minutes <input data-agent-every type="number" min="1" value="${a.everyMinutes ?? ''}" placeholder="(schedule only)"></label>
+        <label>Budget per day <input data-agent-budget type="number" min="0" step="0.01" value="${a.budgetPerDay ?? ''}" placeholder="(none)"></label>
+      </div>
+      <div class="editor-actions"><button class="btn" data-agent-save>Save settings</button><div class="msg" data-agent-msg></div></div>
+    </details>`;
+  const msg = row.querySelector('[data-agent-msg]');
   row.querySelector('[data-agent-version]').addEventListener('click', async () => {
     const body = row.querySelector('[data-agent-prompt]').value;
-    const res = await fetch(`/api/agents/${encodeURIComponent(a.seatKey)}/prompt`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ body, by: 'michael' }) });
-    const out = await res.json().catch(() => ({}));
-    if (res.ok) { agentsMsg(`Saved as version ${out.prompt && out.prompt.version} for ${a.seatKey}.`, true); loadAgents(); }
-    else agentsMsg('Rejected: ' + (out.error || res.status), false);
+    const { ok, status, out } = await send('POST', `/api/agents/${encodeURIComponent(a.seatKey)}/prompt`, { body });
+    if (ok) loadAgents({ seat: a.seatKey, text: `Prompt saved as version ${out.prompt && out.prompt.version}; v${a.prompt ? a.prompt.version : '?'} stays readable.`, ok: true });
+    else rowMsg(msg, 'Rejected: ' + (out.error || status), false);
+  });
+  row.querySelector('[data-agent-save]').addEventListener('click', async () => {
+    const btn = row.querySelector('[data-agent-save]'); btn.disabled = true;
+    const q = (sel) => row.querySelector(sel);
+    const thinking = q('[data-agent-thinking]').value;
+    const body = {
+      toolGrants: [...row.querySelectorAll('[data-agent-grants] input[type=checkbox]:checked')].map((c) => c.value),
+      maxHops: numOrNull(q('[data-agent-maxhops]').value.trim()),
+      thinking: thinking === 'unset' ? null : thinking === 'true',
+      contextPolicy: q('[data-agent-context]').value,
+      name: q('[data-agent-name]').value.trim() || undefined,
+      emoji: q('[data-agent-emoji]').value,
+      residency: q('[data-agent-residency]').value,
+      state: q('[data-agent-state]').value,
+      wakeOn: [...row.querySelectorAll('[data-agent-wake] input:checked')].map((c) => c.value),
+      everyMinutes: numOrNull(q('[data-agent-every]').value.trim()),
+      budgetPerDay: numOrNull(q('[data-agent-budget]').value.trim()),
+    };
+    const color = q('[data-agent-color]').value.trim(); if (color) body.color = color;
+    // A model change is sent ONLY when it changed: re-sending the same key
+    // re-resolves the spec and would drop an inline sampling block for nothing.
+    const mk = q('[data-agent-modelkey]').value; if (mk && mk !== registeredKey) body.modelKey = mk;
+    if (!TOOLS.length) delete body.toolGrants; // no list ⇒ do not send an empty grant set by accident
+    try {
+      const { ok, status, out } = await send('PATCH', `/api/agents/${encodeURIComponent(a.seatKey)}`, body);
+      if (ok) loadAgents({ seat: a.seatKey, text: `Saved ${out.seatKey}${out.released && out.released.length ? ` — released #${out.released.join(', #')}` : ''}.`, ok: true });
+      else rowMsg(msg, 'Rejected: ' + (out.error || status), false);
+    } catch (e) { rowMsg(msg, 'Save failed: ' + e.message, false); }
+    btn.disabled = false;
   });
   return row;
 }
-async function loadAgents() {
+async function loadAgents(notice) {
   try {
     const agents = await (await fetch('/api/agents')).json();
+    const open = new Set([...document.querySelectorAll('.agent-row[data-agent-seat] [data-agent-editor][open]')].map((d) => d.closest('.agent-row').dataset.agentSeat));
     const list = $('agents-list'); list.innerHTML = '';
     if (!agents.length) { list.textContent = 'No agents defined yet.'; return; }
-    for (const a of agents) list.appendChild(agentRow(a));
+    for (const a of agents) {
+      const r = agentRow(a); if (open.has(a.seatKey)) r.querySelector('[data-agent-editor]').open = true; list.appendChild(r);
+      if (notice && notice.seat === a.seatKey) rowMsg(r.querySelector('[data-agent-msg]'), notice.text, notice.ok);
+    }
   } catch (e) { agentsMsg('Could not load agents: ' + e.message, false); }
 }
 $('agent-create').addEventListener('click', async () => {
   $('agent-create').disabled = true;
   try {
     const budget = $('agent-budget').value;
-    const res = await fetch('/api/agents', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+    const { ok, status, out } = await send('POST', '/api/agents', {
       seatKey: $('agent-seat').value.trim(), name: $('agent-name').value.trim(), prompt: $('agent-prompt').value,
       modelKey: $('agent-modelkey').value.trim() || undefined,
       model: $('agent-modelkey').value.trim() ? undefined : { model: $('agent-model').value.trim(), protocol: $('agent-protocol').value, baseUrl: $('agent-baseurl').value.trim() || undefined },
       residency: $('agent-residency').value, contextPolicy: $('agent-context').value,
-      budgetPerDay: budget === '' ? undefined : Number(budget), by: 'michael',
-    }) });
-    const out = await res.json().catch(() => ({}));
-    if (res.ok) { agentsMsg(`Created ${out.seatKey} with prompt version 1.`, true); loadAgents(); }
-    else agentsMsg('Rejected: ' + (out.error || res.status), false);
+      budgetPerDay: budget === '' ? undefined : Number(budget),
+    });
+    if (ok) { agentsMsg(`Created ${out.seatKey} with prompt version 1.`, true); loadAgents(); }
+    else agentsMsg('Rejected: ' + (out.error || status), false);
   } catch (e) { agentsMsg('Create failed: ' + e.message, false); }
   $('agent-create').disabled = false;
 });
-loadAgents();
+// Tools and models first: the agent editor renders its checkboxes and model
+// picker from them, so an agent row built before they arrive would be blind.
+(async () => { await Promise.all([loadTools(), loadModels()]); await loadAgents(); })();
 
 loadRosterEditor();
 

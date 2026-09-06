@@ -3360,6 +3360,15 @@ async function handleCreateAgent(req, res) {
     sendJSON(res, result.status, result.wire);
   } catch (e) { console.error('POST /api/agents:', e.message); sendJSON(res, 500, { error: e.message }); }
 }
+// #1239 — WHAT MAY BE GRANTED, as a list the page can render. The settings page
+// used to have no way to show grants at all, and a checkbox list typed by hand
+// would drift from GRANTABLE the first time a tool was added. One source: the
+// same set the PATCH validator refuses against, with each tool's own words.
+function handleListTools(req, res) {
+  const tools = BOARD_TOOLS.map((t) => ({ name: t.function.name, description: t.function.description }));
+  tools.push({ name: 'card_claim', description: 'Claim a card before driving multi-step work on it (protocol #346): first write wins, a 409 names the holder and means yield. The one WRITE a seat may be granted.' });
+  sendJSON(res, 200, tools.filter((t) => GRANTABLE.has(t.name)));
+}
 function handleListAgents(req, res) {
   const q = parseQuery(req.url);
   const data = readBoard();
@@ -7663,6 +7672,7 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/models$/,               fn: (req, res) => handleCreateModel(req, res) },                      // #1197
   { method: 'PATCH',  re: /^\/api\/models\/([^\/]+)$/,      fn: (req, res, m) => handlePatchModel(req, res, decodeURIComponent(m[1])) },          // #1197
   { method: 'POST',   re: /^\/api\/models\/([^\/]+)\/probe$/, fn: (req, res, m) => handleProbeModel(req, res, decodeURIComponent(m[1])) },        // #1197
+  { method: 'GET',    re: /^\/api\/tools$/,                fn: (req, res) => handleListTools(req, res) },                        // #1239
   { method: 'GET',    re: /^\/api\/agents$/,               fn: (req, res) => handleListAgents(req, res) },                       // #1199
   { method: 'POST',   re: /^\/api\/agents$/,               fn: (req, res) => handleCreateAgent(req, res) },                      // #1199
   { method: 'PATCH',  re: /^\/api\/agents\/([^\/]+)$/,      fn: (req, res, m) => handlePatchAgent(req, res, decodeURIComponent(m[1])) },          // #1199
