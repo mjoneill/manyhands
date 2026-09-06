@@ -42,11 +42,17 @@ export function ledgerFilePath() {
 }
 
 /** Pure. Commons messages that @-mention the seat and were not written by it. */
+export const SYSTEM_AUTHOR = 'board';
 export function findMentions(messages = [], seatKey, { sinceId = null, since = null } = {}) {
   if (!seatKey) return [];
   const re = new RegExp(`(^|[^A-Za-z0-9_])@${seatKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z0-9_])`, 'i');
   const rows = (messages || []).filter((m) => m && typeof m.body === 'string'
     && String(m.author || '').toLowerCase() !== seatKey.toLowerCase()
+    // #1237 — the board's own notices (claim/release/done lines carrying a card
+    // title, tending whispers) are not someone talking to the seat, however
+    // many handles the quoted title holds. Seen live: a release notice for a
+    // card whose title named the seat woke it and it echoed the notice back.
+    && String(m.author || '').toLowerCase() !== SYSTEM_AUTHOR
     && re.test(m.body)
     && (!since || (typeof m.createdAt === 'string' && m.createdAt > since)));
   if (!sinceId) return rows;

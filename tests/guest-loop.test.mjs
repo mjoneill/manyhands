@@ -24,10 +24,14 @@ const MSGS = [
   { id: 'm3', author: 'gizmo', body: '@gizmo talking to myself', createdAt: '2026-09-06T10:02:00Z' },
   { id: 'm4', author: 'cy', body: 'email me at x@gizmo.example — not a mention', createdAt: '2026-09-06T10:03:00Z' },
   { id: 'm5', author: 'ada', body: 'and @Gizmo, one more thing', createdAt: '2026-09-06T10:04:00Z' },
+  // #1237 — a SYSTEM notice that quotes the handle (a claim/release line
+  // carrying a card title) is not someone talking to the seat.
+  { id: 'm6', author: 'board', body: '🔔 ada released #1 “ask @gizmo about it”', createdAt: '2026-09-06T10:05:00Z' },
 ];
 
-test('#1201 findMentions: only @seat in the body, never its own posts, never an email-shaped near miss; sinceId pages forward', () => {
+test('#1201 findMentions: only @seat in the body, never its own posts, never an email-shaped near miss, never a board notice (#1237); sinceId pages forward', () => {
   assert.deepEqual(findMentions(MSGS, 'gizmo').map((m) => m.id), ['m2', 'm5']);
+  assert.deepEqual(findMentions(MSGS, 'gizmo', { sinceId: 'm5' }).map((m) => m.id), [], 'the board notice after m5 is not a wake');
   assert.deepEqual(findMentions(MSGS, 'gizmo', { sinceId: 'm2' }).map((m) => m.id), ['m5']);
   assert.deepEqual(findMentions(MSGS, 'nobody'), []);
 });
