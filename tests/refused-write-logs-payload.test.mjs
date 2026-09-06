@@ -137,8 +137,12 @@ test('#1217 — a secret in a refused body is REDACTED before it reaches the log
     // The refusal path is the one write path that stores a body NOBODY validated.
     // A pasted token in a rejected payload would otherwise become permanent in an
     // append-only file, which is a worse outcome than the loss this card fixes.
+    // The OpenRouter-shaped fixture is ASSEMBLED, not written: GitHub's push
+    // protection refused the literal (2026-09-06, GH013), which is the server
+    // layer of the same rail this test checks the board's layer of.
+    const orKey = ['sk', 'or', 'v1'].join('-') + '-' + '0123456789abcdef'.repeat(4);
     const res = await api(srv.baseUrl, 'PATCH', '/api/cards/1', {
-      description: 'deploy with sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIIIJJJJKKKKLLLL and ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
+      description: `deploy with sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIIIJJJJKKKKLLLL and ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 and ${orKey}`,
       by: 'ada', ifVersion: 1,
     });
     assert.equal(res.status, 409);
@@ -146,6 +150,9 @@ test('#1217 — a secret in a refused body is REDACTED before it reaches the log
     const stored = JSON.stringify(ev.request);
     assert.ok(!stored.includes('sk-ant-api03-AAAABBBB'), 'an API key must not land in the log');
     assert.ok(!stored.includes('ghp_ABCDEFGHIJKLMNOP'), 'a token must not land in the log');
+    // 2026-09-06 — the OpenRouter shape has hyphens after `sk-`, which the OpenAI
+    // pattern does not match; it was passing through the redaction untouched.
+    assert.ok(!stored.includes(orKey.slice(0, 24)), 'an OpenRouter key must not land in the log');
     assert.match(stored, /REDACTED/, 'and the removal is VISIBLE, not silent');
     assert.match(stored, /deploy with/, 'the rest of the payload still survives');
   } finally { await srv.stop(); }

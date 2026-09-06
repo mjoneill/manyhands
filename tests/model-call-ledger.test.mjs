@@ -112,3 +112,26 @@ test('#1202 END TO END on a real board: run one → ledger node with producedPos
     assert.match(halts[0].body, /budget 0/);
   } finally { await srv.stop(); }
 });
+
+// ── 2026-09-06 — the ledger dropped the SEED. Found on #1203: a row carrying
+// seed 42 and temperature 0 got a 201 and read back without either. A record
+// that cannot say how the model was made to answer is an anecdote.
+test('#1202 a row keeps its SAMPLING (seed, temperature) on the wire AND in the graph; an unknown top-level field is REFUSED by name, never dropped', async () => {
+  const srv = await startRestServer({ board: makeBoardFixture({ cards: [], nextShortId: 1 }) });
+  try {
+    const a = await api(srv.baseUrl, 'POST', '/api/model-calls', { by: 'gizmo', model: 'gemma3:12b', protocol: 'ollama-native', sampling: { seed: 42, temperature: 0, maxTokens: 800 }, wake: { kind: 'mention', messageId: 'm-1' }, memory: { handed: 1, state: 'read' }, memoryWritten: ['mem-1'], claims: [{ card: 7, ok: true }] });
+    assert.equal(a.status, 201, JSON.stringify(a.body));
+    assert.deepEqual(a.body.sampling, { seed: 42, temperature: 0, maxTokens: 800 });
+    assert.equal(a.body.wake.kind, 'mention'); assert.equal(a.body.memory.handed, 1); assert.deepEqual(a.body.memoryWritten, ['mem-1']); assert.equal(a.body.claims[0].card, 7);
+    const listed = (await api(srv.baseUrl, 'GET', '/api/model-calls?agent=gizmo')).body.calls[0];
+    assert.equal(listed.sampling.seed, 42, 'read back, not just echoed');
+    const rows = (await api(srv.baseUrl, 'POST', '/api/graph', { query: 'SELECT ?seed ?t ?k ?h WHERE { ?c a scrum:ModelCall ; scrum:seed ?seed ; scrum:temperature ?t ; scrum:wakeKind ?k ; scrum:memoryHanded ?h }' })).body.rows;
+    assert.equal(rows.length, 1, 'the seed is a graph fact'); assert.equal(rows[0].seed, '42'); assert.equal(rows[0].t, '0'); assert.equal(rows[0].k, 'mention'); assert.equal(rows[0].h, '1');
+    const dropped = await api(srv.baseUrl, 'POST', '/api/model-calls', { by: 'gizmo', model: 'm', seed: 42 });
+    assert.equal(dropped.status, 400, 'a top-level seed is the shape that was silently dropped'); assert.match(dropped.body.error, /"seed"/);
+    const knob = await api(srv.baseUrl, 'POST', '/api/model-calls', { by: 'gizmo', model: 'm', sampling: { temp: 0 } });
+    assert.equal(knob.status, 400); assert.match(knob.body.error, /temp/);
+    const plain = await api(srv.baseUrl, 'POST', '/api/model-calls', { by: 'gizmo', model: 'm' });
+    assert.equal(plain.status, 201, 'slice-1 rows still land'); assert.equal(plain.body.sampling, null);
+  } finally { await srv.stop(); }
+});

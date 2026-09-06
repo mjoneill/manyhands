@@ -490,6 +490,7 @@ function readBody(req, maxBytes = MAX_BODY_BYTES) {
 // than no scrubber at all.
 const SECRET_SHAPES = [
   [/\bsk-ant-[A-Za-z0-9_-]{16,}/g, 'sk-ant-[REDACTED]'],            // Anthropic
+  [/\bsk-or-v1-[A-Za-z0-9]{32,}/g, 'sk-or-[REDACTED]'],             // OpenRouter — NOT matched by the OpenAI shape (hyphens), found 2026-09-06
   [/\bsk-[A-Za-z0-9]{32,}/g, 'sk-[REDACTED]'],                      // OpenAI-shaped
   [/\bgh[pousr]_[A-Za-z0-9]{16,}/g, 'gh_[REDACTED]'],               // GitHub
   [/\bxox[baprs]-[A-Za-z0-9-]{10,}/g, 'xox-[REDACTED]'],            // Slack
@@ -3363,7 +3364,11 @@ const modelCallToWire = (e) => ({
   stopReason: e['scrum:stopReason'] ?? null, latencyMs: e['scrum:latencyMs'] ?? null, ok: e['scrum:ok'] !== false,
   contextHandedTo: e['scrum:contextHandedTo'] ?? [], producedPost: e['scrum:producedPost'] ?? null,
   at: e['scrum:calledAt'], error: e.text || null,
+  sampling: e['scrum:sampling'] ?? null, wake: { kind: e['scrum:wakeKind'] ?? null, messageId: e['scrum:wakeMessage'] ?? null },
+  memory: { handed: e['scrum:memoryHanded'] ?? null, state: e['scrum:memoryState'] ?? null }, memoryWritten: e['scrum:memoryWritten'] ?? [], claims: e['scrum:claims'] ?? [],
 });
+const MODEL_CALL_FIELDS = new Set(['by', 'agent', 'model', 'provider', 'protocol', 'promptVersion', 'tokensIn', 'tokensOut', 'cost', 'latencyMs', 'stopReason', 'ok', 'contextHandedTo', 'producedPost', 'at', 'error', 'sampling', 'wake', 'memory', 'memoryWritten', 'claims']);
+const MODEL_CALL_SAMPLING = new Set(['temperature', 'topP', 'topK', 'repetitionPenalty', 'seed', 'stop', 'maxTokens', 'keepAlive']);
 async function handleCreateModelCall(req, res) {
   try {
     const body = JSON.parse(await readBody(req));
@@ -3372,10 +3377,31 @@ async function handleCreateModelCall(req, res) {
     const agent = typeof body.agent === 'string' && body.agent.trim() ? body.agent.trim() : by;
     if (typeof body.model !== 'string' || !body.model.trim()) return sendJSON(res, 400, { error: 'model is required — the model id that was called' });
     const n = (v) => (v == null || v === '' ? null : (Number.isFinite(Number(v)) ? Number(v) : null));
+    // #1203 finding (2026-09-06): a row carrying seed 42 and temperature 0 got a
+    // 201 and read back with both silently DROPPED — an acceptance that loses
+    // what it accepted, #1217's lossy refusal inverted. A ledger that cannot
+    // say how a model was made to answer is an anecdote, not a record. So:
+    // the sampling knobs the adapter accepts ride the row as ONE object, and an
+    // unknown top-level field is REFUSED by name instead of dropped.
+    const unknown = Object.keys(body).filter((k) => !MODEL_CALL_FIELDS.has(k));
+    if (unknown.length) return sendJSON(res, 400, { error: `unknown field${unknown.length === 1 ? '' : 's'} ${unknown.map((k) => JSON.stringify(k)).join(', ')} — a model-call row is a RECORD; a field it silently dropped would read as "not recorded" forever. Known: ${[...MODEL_CALL_FIELDS].join(', ')}` });
+    let sampling = null;
+    if (body.sampling != null) {
+      if (typeof body.sampling !== 'object' || Array.isArray(body.sampling)) return sendJSON(res, 400, { error: 'sampling must be an object of the adapter\'s knobs: temperature, topP, topK, repetitionPenalty, seed, stop, maxTokens, keepAlive' });
+      const bad = Object.keys(body.sampling).filter((k) => !MODEL_CALL_SAMPLING.has(k));
+      if (bad.length) return sendJSON(res, 400, { error: `unknown sampling knob${bad.length === 1 ? '' : 's'} ${bad.join(', ')} — known: ${[...MODEL_CALL_SAMPLING].join(', ')}` });
+      sampling = Object.fromEntries(Object.entries(body.sampling).filter(([, v]) => v !== undefined));
+    }
     const result = await withWriteLock(async () => {
       const data = readBoard();
       const entity = {
         '@id': MODEL_CALL_ID(), '@type': 'scrum:ModelCall',
+        'scrum:sampling': sampling,
+        'scrum:wakeKind': typeof body.wake?.kind === 'string' ? body.wake.kind : null,
+        'scrum:wakeMessage': typeof body.wake?.messageId === 'string' ? body.wake.messageId : null,
+        'scrum:memoryHanded': n(body.memory?.handed), 'scrum:memoryState': typeof body.memory?.state === 'string' ? body.memory.state : null,
+        'scrum:memoryWritten': Array.isArray(body.memoryWritten) ? body.memoryWritten.map((m) => (typeof m === 'string' ? m : JSON.stringify(m))).slice(0, 50) : [],
+        'scrum:claims': Array.isArray(body.claims) ? body.claims.slice(0, 50) : [],
         'scrum:agent': agent, 'scrum:model': body.model.trim(),
         'scrum:provider': typeof body.provider === 'string' ? body.provider : null,
         'scrum:protocol': typeof body.protocol === 'string' ? body.protocol : null,

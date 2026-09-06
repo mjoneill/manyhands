@@ -185,6 +185,7 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:timeoutMs', 'scrum:costIn', 'scrum:costOut', 'scrum:freeTier', 'scrum:capability', 'scrum:apiKeyRef',
   'scrum:deprecatesOn', 'scrum:lastProbeClass', 'scrum:lastProbeAt', 'scrum:lastProbeStatus', 'scrum:modelKey', 'scrum:usesModel',
   'scrum:wakeOn', 'scrum:everyMinutes', // #1226
+  'scrum:seed', 'scrum:temperature', 'scrum:maxTokens', 'scrum:wakeKind', 'scrum:memoryHanded', // #1203 finding on #1202
   // #1130 — an apex is a KIND, not a convention: a card carrying `apex:<X>`
   // projects as scrum:Apex with scrum:apexLabel "X", so "what lives here" is
   // one hop and needs no knowledge of the prefix.
@@ -912,6 +913,17 @@ function projectModelCall(store, e) {
   for (const c of (Array.isArray(e['scrum:contextHandedTo']) ? e['scrum:contextHandedTo'] : [])) {
     if (c) add(nn(S + 'contextHandedTo'), nn(String(c).startsWith('http') ? String(c) : E + c));
   }
+  // #1203 finding — the knobs that make a run REPRODUCIBLE ride the node as
+  // literals (seed and temperature are the two a re-run needs first); the
+  // whole sampling object stays on the wire form.
+  const smp = e['scrum:sampling'];
+  if (smp && typeof smp === 'object') {
+    if (smp.seed != null && Number.isFinite(Number(smp.seed))) add(nn(S + 'seed'), num(smp.seed));
+    if (smp.temperature != null && Number.isFinite(Number(smp.temperature))) add(nn(S + 'temperature'), num(smp.temperature));
+    if (smp.maxTokens != null && Number.isFinite(Number(smp.maxTokens))) add(nn(S + 'maxTokens'), num(smp.maxTokens));
+  }
+  if (e['scrum:wakeKind']) add(nn(S + 'wakeKind'), lit(String(e['scrum:wakeKind'])));
+  if (e['scrum:memoryHanded'] != null && Number.isFinite(Number(e['scrum:memoryHanded']))) add(nn(S + 'memoryHanded'), num(e['scrum:memoryHanded']));
 }
 
 /**

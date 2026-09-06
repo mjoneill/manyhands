@@ -90,3 +90,11 @@ tending-provenance.json
 # same commit that creates them — the #1085 lesson, applied before the incident.
 search-index.jsonl
 search-log.jsonl
+
+# #1197/#1199 — real agent files name a key REFERENCE only, but they also name a room's colleagues;
+# the shipped example is the only one that belongs in git. Env files never do.
+agents/*.json
+!agents/*.example.json
+.env
+.env.*
+*.env
