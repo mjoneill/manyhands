@@ -2586,7 +2586,7 @@ const ROSTER = (() => {
   const seats = usable ? injected : EXAMPLE;
   const out = {};
   for (const [key, v] of Object.entries(seats)) {
-    if (v && typeof v === 'object' && v.name) out[key] = { name: v.name, glyph: v.glyph || '◍' };
+    if (v && typeof v === 'object' && v.name) out[key] = { name: v.name, glyph: v.glyph || '◍', ...(v.agent === true ? { agent: true } : {}) };
   }
   // `unassigned` is not a person and never comes from the roster, but every
   // picker needs it. `both` is legacy and kept so old cards still render.
@@ -2617,7 +2617,7 @@ async function pollRoster() {
   if (!seats || typeof seats !== 'object') return;
   const keep = { unassigned: ROSTER.unassigned, both: ROSTER.both };
   const next = {};
-  for (const [key, v] of Object.entries(seats)) if (v && typeof v === 'object' && v.name) next[key] = { name: v.name, glyph: v.glyph || '◍' };
+  for (const [key, v] of Object.entries(seats)) if (v && typeof v === 'object' && v.name) next[key] = { name: v.name, glyph: v.glyph || '◍', ...(v.agent === true ? { agent: true } : {}) };
   const sig = JSON.stringify(Object.keys(next).sort());
   if (sig === _rosterSig) return;
   _rosterSig = sig;
@@ -2652,6 +2652,12 @@ async function pollRoster() {
 const PSEUDO_SEATS = new Set(['unassigned', 'wiki', 'both']);
 function assignableSeats() {
   return Object.entries(ROSTER).filter(([k]) => !PSEUDO_SEATS.has(k));
+}
+/** #1200 — the seats a HUMAN at this page may post as: never an agent seat. An
+ *  agent posts through its own loop; a person picking it would fabricate the
+ *  agent's words. Agents stay assignable (assignment is a wake source). */
+function humanSeats() {
+  return assignableSeats().filter(([, v]) => v.agent !== true);
 }
 
 /** Checkbox markup for an assignee picker, built from the roster. */
@@ -2696,7 +2702,7 @@ function rememberIdentity(key) {
 function populateRosterUI() {
   const author = document.getElementById('convs-author');
   if (author) {
-    author.innerHTML = assignableSeats()
+    author.innerHTML = humanSeats()
       .map(([key, v]) => `<option value="${key}">${v.glyph} ${v.name}</option>`).join('\n');
     // #631 — restore the last CHOSEN identity into the picker, and record every
     // change. Without this the select sits on the first roster seat forever.

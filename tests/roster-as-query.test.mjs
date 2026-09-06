@@ -13,6 +13,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { startRestServer, makeBoardFixture } from './helpers/harness.mjs';
 import { readEvents } from '../core/event-log.mjs';
 
@@ -93,5 +95,27 @@ test('#1200 the file roster wins a key collision, and the boot-time read is gone
   const html = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
   assert.match(html, /async function pollRoster\(/); assert.match(html, /setInterval\(pollRoster/);
   // collision rule is in the merge order: file seats spread LAST
-  assert.match(src, /\{ \.\.\.agentSeats\(board\), \.\.\.fileSeats \}/);
+  assert.match(src, /mergeSeats\(fileSeats, agentSeats\((board|data)\)\)/, 'file seats first, agents only where the key is free');
+});
+
+
+// 2026-09-06 — the owner posted twice as @guest without touching anything: agent
+// seats were spread FIRST into the roster, `guest` became the first key, and
+// the author picker defaults to the first option when nothing was ever chosen.
+test('#1200 the roster lists FILE seats first and agent seats after; the page never offers an agent seat as a human author', async () => {
+  // A real roster file, with two humans, so "file first" is a testable order.
+  const rosterFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'roster-')), 'roster.json');
+  fs.writeFileSync(rosterFile, JSON.stringify({ zed: { name: 'Zed', glyph: 'Z', color: '#123456' }, ada: { name: 'Ada', glyph: 'A', color: '#654321' } }));
+  const srv = await startRestServer({ board: makeBoardFixture({ cards: [], nextShortId: 1 }), env: { SCRUM_ROSTER_FILE: rosterFile } });
+  try {
+    const c = await api(srv.baseUrl, 'POST', '/api/agents', { seatKey: 'aardvark', name: 'Aardvark', prompt: 'p', model: MODEL, by: 'ada' });
+    assert.equal(c.status, 201);
+    const keys = Object.keys((await api(srv.baseUrl, 'GET', '/api/roster')).body.seats);
+    assert.deepEqual(keys, ['zed', 'ada', 'aardvark'], `file order first, then the agent, whatever the alphabet says: ${keys.join(',')}`);
+    const page = await (await fetch(`${srv.baseUrl}/`)).text();
+    const inlined = JSON.parse(page.match(/globalThis\.__SCRUM_ROSTER__=(\{.*?\});<\/script>/s)[1]);
+    assert.equal(Object.keys(inlined).at(-1), 'aardvark', 'the inlined first-paint roster keeps the same order');
+    assert.match(page, /author\.innerHTML = humanSeats\(\)/, 'the author picker is built from human seats only');
+    assert.match(page, /filter\(\(\[, v\]\) => v\.agent !== true\)/);
+  } finally { await srv.stop(); }
 });

@@ -162,14 +162,27 @@ function currentRoster(data = null) {
     _rosterComputing = true;
     try { board = readBoard(); } catch (e) { warnRosterOnce(`board unreadable for agent seats: ${e.message}`); } finally { _rosterComputing = false; }
     const fileSeats = loadRoster(undefined, warnRosterOnce) || {};
-    const merged = { ...agentSeats(board), ...fileSeats };
+    const merged = mergeSeats(fileSeats, agentSeats(board));
     const seats = Object.keys(merged).length ? merged : null;
     _rosterCache = { key, seats };
     return configureIdentities(seats);
   }
   const fileSeats = loadRoster(undefined, warnRosterOnce) || {};
-  const merged = { ...agentSeats(data), ...fileSeats };
+  const merged = mergeSeats(fileSeats, agentSeats(data));
   return configureIdentities(Object.keys(merged).length ? merged : null);
+}
+/**
+ * File seats FIRST, in the file's order; agent seats after, only where the key
+ * is free. 2026-09-06: the first cut spread agent seats first so the file
+ * could win a collision — which also made `guest` the FIRST key of the
+ * roster, and the board page's author picker defaults to the first option
+ * when no identity was ever chosen. The owner posted twice as @guest without
+ * touching anything. Insertion order is part of the roster's contract.
+ */
+function mergeSeats(fileSeats, agents) {
+  const out = { ...fileSeats };
+  for (const [k, v] of Object.entries(agents)) if (!(k in out)) out[k] = v;
+  return out;
 }
 
 /**
