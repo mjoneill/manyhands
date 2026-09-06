@@ -6,8 +6,9 @@
  * the message that woke it. This is the smallest surface that makes it a
  * participant rather than a correspondent.
  *
- * FOUR TOOLS, ALL READS. Read a card, search the board, query the graph, and
- * ask what kinds of thing the board records at all.
+ * FIVE TOOLS, ALL READS. Read a card, search the board, query the graph, ask
+ * what kinds of thing the board records, and ask what the predicates mean and
+ * what shape their objects take.
  * Nothing here writes. A colleague that can look things up is what the epic
  * promised; a colleague that can change things is a different card and deserves
  * its own argument rather than arriving as a convenience alongside this one.
@@ -67,6 +68,23 @@ export const BOARD_TOOLS = Object.freeze([
         type: 'object',
         properties: { query: { type: 'string', description: 'a SPARQL SELECT' } },
         required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      // ⛔ THE FACT THAT ACTUALLY COSTS HOPS. A colleague asked which cards sit
+      // in a column, used the RIGHT predicate, and passed a literal where the
+      // graph holds an IRI. Clean zero, indistinguishable from "no such cards".
+      // The definitions alone would not have saved it — measured: the registry
+      // carries meaning and no shape. So this tool answers BOTH, and the shape
+      // is sampled from the live store rather than written down by hand.
+      name: 'predicate_list',
+      description: 'List the predicates you may use in a graph_query — what each one MEANS, and what SHAPE its object takes (an IRI with a prefix like column:, or a quoted literal). USE THIS BEFORE WRITING A FILTER, and use it when a query you believe is correct returns zero rows: the most common cause is filtering an IRI predicate against a quoted string, which returns nothing and looks exactly like "nothing matched". Pass a name for one predicate.',
+      parameters: {
+        type: 'object',
+        properties: { name: { type: 'string', description: 'optional — one predicate, e.g. "scrum:column"' } },
       },
     },
   },
@@ -148,6 +166,18 @@ export function makeExecutor({ get, post, by = 'board' }) {
         // writes, accepted in silence. Read the name the route answers with.
         const rows = Array.isArray(out?.rows) ? out.rows : [];
         return rows.length ? out : { ...out, rows, note: 'the query ran and matched nothing. That is an answer, not a failure. If you are guessing at names, call kind_list to see what this board actually records.' };
+      }
+      case 'predicate_list': {
+        const wanted = String(args?.name ?? '').trim();
+        const path = wanted
+          ? `/api/predicates?shapes=true&name=${encodeURIComponent(wanted)}`
+          : '/api/predicates?shapes=true';
+        const all = await get(path);
+        const list = Array.isArray(all) ? all : (Array.isArray(all?.predicates) ? all.predicates : []);
+        if (wanted && !list.length) {
+          return { name: wanted, found: false, note: `no predicate named ${JSON.stringify(wanted)} is registered. A graph_query naming it will be refused rather than answered, so this is worth knowing before you write one.` };
+        }
+        return { predicates: list, note: 'objectShape is SAMPLED from the live graph, not declared. shape "iri" means filter against the prefixed form; "literal" means a quoted string; "none" means registered but never used, which is not the same as a literal.' };
       }
       case 'kind_list': {
         const all = await get('/api/kinds?declared=true');

@@ -41,6 +41,7 @@ import { applyApexLabels, APEX_PREFIX, descendantIds as apexDescendantIds } from
 import { inFlight } from './core/in-flight.mjs';
 import { appendEvent, ENTITY_KINDS, EVENT_OPS } from './core/event-log.mjs';
 import { KIND_DECLARATIONS, PROJECTED_TYPES, divergence } from './core/kind-registry.mjs';
+import { SHAPE_QUERY, withObjectShapes } from './core/predicate-shapes.mjs';
 import { shortenTypeIri } from './core/jsonld.mjs';
 // #805 — the boot migration's inputs (the live flat sources) and its builder.
 import { readPool, recentWhispers, DEFAULT_POOL, poolFilePath } from './whisper-store.mjs';
@@ -2355,7 +2356,7 @@ async function handleRegisterPredicate(req, res) {
   }
 }
 
-function handleListPredicates(req, res) {
+async function handleListPredicates(req, res) {
   const q = parseQuery(req.url);
   let out = predicatesOf(readBoard())
     .filter((e) => e['@type'] === 'scrum:PredicateDefinition')
@@ -2363,6 +2364,27 @@ function handleListPredicates(req, res) {
   // An unknown name returns an EMPTY LIST, never an error: "unregistered" is
   // the common and correct answer while the registry is an observation.
   if (q.name) out = out.filter((p) => p.name === q.name);
+  // #1244 — WHAT SHAPE THE OBJECT TAKES, sampled from the live store on
+  // request. Opt-in because it costs a graph query (~270ms over the whole
+  // store); the definitions alone are the cheap common case. A seat that got
+  // a clean zero from the right predicate needs this and nothing else.
+  if (q.shapes === 'true' || q.shapes === '1') {
+    try {
+      const { queryGraph } = await loadGraphModules();
+      const { store } = await warmGraphStore();
+      const sampled = queryGraph(store, SHAPE_QUERY, { limit: 5000 });
+      out = withObjectShapes(out, sampled?.rows ?? []);
+    } catch (e) {
+      // ⛔ FAIL LOUD, NOT SILENT. A shapes request that quietly returns
+      // definitions-without-shapes is indistinguishable from a registry that
+      // has none — which is the confusion this card exists to end.
+      return sendJSON(res, 503, {
+        error: `object shapes are unavailable: ${e.message}`,
+        code: e.code ?? 'SHAPES_UNAVAILABLE',
+        means: 'the definitions were NOT returned, because a shapeless answer to a shapes request reads as "this predicate has no shape"',
+      });
+    }
+  }
   sendJSON(res, 200, out);
 }
 

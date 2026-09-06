@@ -20,7 +20,7 @@ import { BOARD_TOOLS, toolsFor, makeExecutor } from '../core/board-tools.mjs';
 
 test('#1196B the surface is read-only, and every tool is named and described', () => {
   const names = BOARD_TOOLS.map((t) => t.function.name).sort();
-  assert.deepEqual(names, ['board_search', 'card_get', 'graph_query', 'kind_list']);
+  assert.deepEqual(names, ['board_search', 'card_get', 'graph_query', 'kind_list', 'predicate_list']);
   for (const t of BOARD_TOOLS) {
     assert.equal(t.type, 'function');
     assert.ok(t.function.description && t.function.description.length > 20, `${t.function.name} needs a description a model can act on`);
