@@ -137,3 +137,45 @@ test('#1196C the hop ceiling is DEPLOYMENT DATA: an agent sets its own, and the 
   assert.equal(row.stoppedBecause, 'max-hops');
   assert.ok(Number.isFinite(row.latencyMs), 'and the wall time is on the row, so a deployment learns its own number instead of inheriting ours');
 });
+
+test('#1196C a seat with tools is TOLD it has them — and told never to claim a lookup it did not make', async () => {
+  // ⛔ FOUND LIVE, and only because the record caught it. A seat was granted
+  // board_search and card_get, was offered both on the wire, called NEITHER,
+  // and then wrote "I searched the board for X but found no matching cards."
+  // The row said modelCalls 1 and toolHops []. The search endpoint was healthy
+  // and returns results for that exact query.
+  //
+  // So the model did not fail to search. It never tried, and then described a
+  // search it had not run — a confabulation about its OWN ACTIONS, which is
+  // worse than one about the board, and which no prompt about honesty catches
+  // because the sentence sounds like diligence.
+  //
+  // The prompt was the cause: it said "reply with one commons post" and never
+  // mentioned that looking things up was possible.
+  const ledgerFile = tmpLedger();
+  let sawSystem = '';
+  const callModel = async (m, msgs) => {
+    sawSystem = msgs.find((x) => x.role === 'system')?.content ?? '';
+    return { text: 'ok', toolCalls: [], stopReason: 'stop', usage: {} };
+  };
+  await guestOnce({
+    agent: agentWith(['card_get', 'board_search']), wake: WAKE, callModel, ledgerFile,
+    post: async () => ({ id: 'p1' }), execute: async () => ({ rows: [] }),
+  });
+  assert.match(sawSystem, /board_search/, 'the granted tools are NAMED in the prompt');
+  assert.match(sawSystem, /card_get/);
+  assert.match(sawSystem, /never say you (searched|looked)/i,
+    'and it is told not to describe a lookup it did not perform');
+  assert.match(sawSystem, /unless you actually called a tool/i,
+    'with the condition stated as the ACTION, not as a feeling about honesty');
+
+  // An ungranted seat is told nothing about tools: an instruction to use what
+  // it does not have is an invitation to invent it.
+  let ungrantedSystem = '';
+  await guestOnce({
+    agent: agentWith([]), wake: WAKE, ledgerFile,
+    callModel: async (m, msgs) => { ungrantedSystem = msgs.find((x) => x.role === 'system')?.content ?? ''; return { text: 'ok', toolCalls: [], stopReason: 'stop', usage: {} }; },
+    post: async () => ({ id: 'p1' }), execute: async () => ({ rows: [] }),
+  });
+  assert.doesNotMatch(ungrantedSystem, /board_search|card_get/, 'a seat with no tools is not told about tools');
+});

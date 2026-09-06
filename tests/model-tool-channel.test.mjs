@@ -147,3 +147,29 @@ test('#1196A a refusal carries the PROVIDER\'S OWN WORDS in the message, not jus
     );
   } finally { await new Promise((r) => bad.close(r)); }
 });
+
+test('#1196A a role can turn thinking OFF — the adapter\'s own advice was unreachable through the adapter', async () => {
+  // The stopReason error tells a reader to "raise the token budget or turn
+  // thinking off for this role". Nothing could turn it off: the adapter reads
+  // `message.thinking` on the way back and sends no flag on the way out.
+  // Measured on this host with a 9B thinking model answering "are you there?":
+  //   thinking on, 800 tokens  → 70 s, all 800 spent reasoning, EMPTY reply
+  //   thinking on, 2048 tokens → 112 s, 4524 characters of reasoning, "I'm here."
+  //   thinking off, 800 tokens → 1.3 s, 11 tokens, "Yes, I'm here."
+  // A conversational wake does not need the reasoning; a tool-using one may.
+  // So it is a per-role choice, which is what `thinking: false` on the agent
+  // now expresses — and absent stays absent, because sending think:true to a
+  // model that has no such flag is a different request from not sending one.
+  const srv = await fakeServer({ model: 'fake', message: { role: 'assistant', content: 'ok' }, done: true, done_reason: 'stop' });
+  try {
+    const base = { model: 'fake', protocol: 'ollama-native', baseUrl: srv.baseUrl };
+    await callModel({ ...base, thinking: false }, [{ role: 'user', content: 'x' }], {});
+    assert.equal(srv.seen[0].body.think, false, 'thinking:false must reach the wire as think:false');
+
+    await callModel({ ...base, thinking: true }, [{ role: 'user', content: 'x' }], {});
+    assert.equal(srv.seen[1].body.think, true, 'and thinking:true says so explicitly');
+
+    await callModel(base, [{ role: 'user', content: 'x' }], {});
+    assert.ok(!('think' in srv.seen[2].body), 'an agent that says nothing about thinking sends no flag at all');
+  } finally { await srv.stop(); }
+});

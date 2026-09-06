@@ -28,7 +28,13 @@ export const BOARD_TOOLS = Object.freeze([
     type: 'function',
     function: {
       name: 'card_get',
-      description: 'Read one card by its short id (the number people say out loud, like 1196). Returns its title, description and state. Use this when a message names a card number and you need what it actually says.',
+      // ⛔ WHEN NOT TO USE IT is the load-bearing half, found live: asked which
+      // card held a topic, the model called card_get with a number it had
+      // INVENTED, read that the card was about something else entirely, and
+      // reported it as the answer anyway. It never searched. A description that
+      // only says what a tool does sends a model that lacks the argument to make
+      // one up, because this is the tool shaped like the question.
+      description: 'Read one card by its short id and return what it says. ONLY use this when a card number is ALREADY in front of you — someone wrote it, or a search returned it. If you do not have a number, you must use board_search first: never invent a card number to pass here, and never treat a card you fetched by guess as the answer to "which card is this on".',
       parameters: {
         type: 'object',
         properties: { shortId: { type: 'number', description: 'the card number, e.g. 1196' } },
@@ -40,7 +46,7 @@ export const BOARD_TOOLS = Object.freeze([
     type: 'function',
     function: {
       name: 'board_search',
-      description: 'Search every card by meaning rather than exact words, for when you know the topic but not the number. Returns ranked cards with a coverage figure. Use this before saying you do not know something.',
+      description: 'Search every card by meaning rather than exact words. THIS IS THE TOOL FOR "which card is about X" and for any question where you do not already have a card number. Returns ranked cards with their numbers and a coverage figure. Use it before answering from memory and before saying the board does not cover something.',
       parameters: {
         type: 'object',
         properties: {

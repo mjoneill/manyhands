@@ -43,8 +43,12 @@ if (seatArg) {
   const a = list[0];
   if (a.state === 'retired') { console.error(`${seatArg} is retired; not waking it`); process.exit(2); }
   agent = { seatKey: a.seatKey, name: a.name, systemPrompt: a.prompt?.body ?? '', promptVersion: a.prompt?.id ?? null,
-    contextPolicy: a.contextPolicy, residency: a.residency, budgetPerDay: a.budgetPerDay ?? undefined, model: a.model,
-    toolGrants: a.toolGrants ?? [], wakeOn: a.wakeOn ?? ['mention'], everyMinutes: a.everyMinutes ?? undefined };   // #1226
+    contextPolicy: a.contextPolicy, residency: a.residency, budgetPerDay: a.budgetPerDay ?? undefined,
+    toolGrants: a.toolGrants ?? [], wakeOn: a.wakeOn ?? ['mention'], everyMinutes: a.everyMinutes ?? undefined,
+    // #1196 — the role's reasoning setting rides to the adapter on the MODEL
+    // spec, because that is the object callModel is handed. Left off entirely
+    // when the board says nothing, so a model with no such flag is sent none.
+    model: a.thinking == null ? a.model : { ...a.model, thinking: a.thinking } };   // #1226
 } else {
   agent = JSON.parse(fs.readFileSync(agentFile, 'utf8'));
 }

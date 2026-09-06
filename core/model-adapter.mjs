@@ -256,6 +256,15 @@ const PROTOCOLS = {
       // The GPU on this box is shared with another local process (#1067 §4), so
       // how long a model stays resident is a NEIGHBOURLY choice, not a tuning one.
       if (s.keepAlive !== undefined) body.keep_alive = s.keepAlive;
+      // #1196 — THINKING IS A PER-ROLE CHOICE, and until now the adapter's own
+      // error advised "turn thinking off for this role" while offering no way
+      // to do it. Measured here: a 9B thinking model asked "are you there?"
+      // spent 800 tokens reasoning and returned NOTHING; with reasoning off it
+      // answered in 1.3 s and 11 tokens. A conversational wake does not need
+      // the reasoning; a tool-using one may. Absent stays absent — sending
+      // think:true to a model with no such flag is a different request from
+      // sending none.
+      if (grants.thinking === true || grants.thinking === false) body.think = grants.thinking;
       return { path: '/api/chat', body };
     },
     read(body) {
@@ -418,7 +427,7 @@ export async function callModel(agent, messages, opts = {}) {
   // whitelist of generation knobs, and a capability that rode through it could be
   // widened by an agent's own sampling block. What a colleague may reach is a
   // grant, decided where agents are defined, and it travels on its own channel.
-  const grants = { tools: opts.tools ?? agent.tools ?? null };
+  const grants = { tools: opts.tools ?? agent.tools ?? null, thinking: opts.thinking ?? agent.thinking };
   const { path, body } = protocol.request(agent.model, messages, sampling, grants);
   const headers = { 'Content-Type': 'application/json' };
   if (opts.apiKey) headers.Authorization = `Bearer ${opts.apiKey}`;

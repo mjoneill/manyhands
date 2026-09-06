@@ -3267,6 +3267,10 @@ function agentToWire(data, e) {
     contextPolicy: e['scrum:contextPolicy'] ?? 'thread', toolGrants: e['scrum:toolGrant'] ?? [],
     budgetPerDay: e['scrum:budgetPerDay'] ?? null, residency: e['scrum:residency'] ?? 'guest', state: e['scrum:state'] ?? 'invited',
     wakeOn: Array.isArray(e['scrum:wakeOn']) && e['scrum:wakeOn'].length ? e['scrum:wakeOn'] : ['mention'], everyMinutes: e['scrum:everyMinutes'] ?? null,
+    // #1196 — whether this ROLE reasons before answering. Three states, not two:
+    // unset sends no flag at all, because a model with no such flag must not be
+    // told anything about it.
+    thinking: e['scrum:thinking'] ?? null,
     prompt: current ? { id: current['@id'], version: current['scrum:version'], body: current['scrum:body'], by: current.author ?? null, at: current['scrum:importedAt'] ?? null } : null,
     promptVersions: versions.length, createdAt: e['scrum:importedAt'] ?? null, updatedAt: e.dateModified ?? null,
   };
@@ -3354,11 +3358,25 @@ async function handleAgentPromptVersion(req, res, seat) {
     sendJSON(res, result.status, result.wire);
   } catch (e) { console.error('POST /api/agents/:seat/prompt:', e.message); sendJSON(res, 500, { error: e.message }); }
 }
+// #1196 — WHAT AN AGENT WRITE MAY SAY. The ledger route learned this first
+// (#1203/#1217): an unknown field REFUSED BY NAME, never dropped. This route
+// had not, and it cost a live seat — a swap sent {model, thinking:false},
+// returned 200, changed the model and discarded the rest. The seat then burned
+// its whole budget reasoning and answered nobody, once a minute, for as long as
+// nobody happened to read the value back.
+const AGENT_PATCH_FIELDS = new Set(['by', 'state', 'contextPolicy', 'toolGrants', 'budgetPerDay', 'model', 'modelKey',
+  'name', 'emoji', 'color', 'residency', 'wakeOn', 'everyMinutes', 'thinking', 'prompt']);
+
 async function handlePatchAgent(req, res, seat) {
   try {
     const body = JSON.parse(await readBody(req));
     const by = typeof body.by === 'string' && body.by.trim() ? body.by.trim() : null;
     if (!by) return sendJSON(res, 400, { error: 'by is required' });
+    const unknown = Object.keys(body).filter((k) => !AGENT_PATCH_FIELDS.has(k));
+    if (unknown.length) return sendJSON(res, 400, { error: `unknown field${unknown.length === 1 ? '' : 's'} ${unknown.map((k) => JSON.stringify(k)).join(', ')} — an agent write that silently dropped a field would read as "configured" forever while doing nothing. Known: ${[...AGENT_PATCH_FIELDS].join(', ')}` });
+    if (body.thinking !== undefined && body.thinking !== null && typeof body.thinking !== 'boolean') {
+      return sendJSON(res, 400, { error: 'thinking must be true, false, or null — null means send no flag at all, which is different from false' });
+    }
     if (body.state != null && !AGENT_STATES.has(body.state)) return sendJSON(res, 400, { error: 'state must be invited, resting or retired' });
     if (body.contextPolicy != null && !AGENT_CONTEXT_POLICIES.has(body.contextPolicy)) return sendJSON(res, 400, { error: 'contextPolicy must be artifact-only or thread' });
     if (body.prompt !== undefined) return sendJSON(res, 400, { error: 'the prompt is not a field of the agent — POST /api/agents/:seat/prompt mints a new VERSION; overwriting would lose which prompt wrote which post' });
@@ -3403,6 +3421,7 @@ async function handlePatchAgent(req, res, seat) {
       if (body.residency != null) { if (!AGENT_RESIDENCIES.has(body.residency)) return { status: 400, wire: { error: 'residency must be resident or guest' } }; updated['scrum:residency'] = body.residency; }
       if (Array.isArray(body.wakeOn)) { const bad = body.wakeOn.find((w) => !AGENT_WAKE_KINDS.has(w)); if (bad) return { status: 400, wire: { error: `unknown wake kind ${JSON.stringify(bad)} — mention, assignment or schedule` } }; updated['scrum:wakeOn'] = body.wakeOn.length ? body.wakeOn : ['mention']; }
       if (body.everyMinutes !== undefined) updated['scrum:everyMinutes'] = body.everyMinutes == null ? null : Number(body.everyMinutes);
+      if (body.thinking !== undefined) updated['scrum:thinking'] = body.thinking === null ? null : !!body.thinking;
       data.agents = agentsOf(data).map((a) => (a['@id'] === agent['@id'] ? updated : a));
       writeBoard(data, [agentEvent('update', updated, by), ...releasedEvents]);
       return { status: 200, wire: { ...agentToWire(data, updated), released: releasedCards.map((c) => c.shortId) } };

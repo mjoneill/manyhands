@@ -139,6 +139,25 @@ export function buildMessages({ agent, wake, changes = [], memories = [] }) {
     ? 'You persist across wakes. Your memory lives in the shared memory store on this board (memory_create / memory_list); what you do not write there, you will not have next time.'
     : 'You are invited for this question only and will not persist: nothing you say now will be handed back to you later unless someone writes it to the board.');
   if (agent.systemPrompt) lines.push(agent.systemPrompt);
+  // #1196 — A SEAT MUST BE TOLD IT CAN LOOK. Found live: a seat granted search
+  // and card-read was offered both on the wire, called NEITHER, and then wrote
+  // "I searched the board and found no matching cards" — while the row said one
+  // model call and zero hops, and the search endpoint was healthy and returns
+  // results for that exact query. It did not fail to search; it never tried,
+  // and then described a search it had not run. A confabulation about its OWN
+  // ACTIONS, which no honesty instruction catches, because the sentence sounds
+  // like diligence.
+  //
+  // The cause was this prompt: it said "reply with one post" and never said
+  // looking things up was possible. An ungranted seat is still told nothing —
+  // naming a tool it cannot reach is an invitation to invent one.
+  const granted = toolsFor(agent).map((t) => t.function.name);
+  if (granted.length) {
+    lines.push(`You can look things up before you answer. Available to you: ${granted.join(', ')}. `
+      + 'Use them whenever the answer depends on what is written on this board rather than on what you already know — a card number, what a card says, whether the board covers something at all. '
+      + '⛔ NEVER say you searched, looked, checked or found anything unless you ACTUALLY CALLED a tool on this turn. If you did not call one, say what you would need to look up instead. '
+      + 'If a tool returns nothing, say plainly that nothing matched: that is a real answer and it is better than a guess.');
+  }
   lines.push('Reply with the text of ONE commons post, plainly, no preamble. If you cannot answer from what you were handed, say what you would need.');
   if (agent.residency === 'resident') {
     lines.push('To keep something for your next wake, add a final line `REMEMBER: <one line>`. It is stored under your seat in the memory store and handed back to you next time; it is removed from the post. Only write what you will want later.');
