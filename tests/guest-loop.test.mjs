@@ -131,7 +131,7 @@ test('#1201 FRONT DOOR: a mention on a real board → the agent\'s post appears 
 
 test('#1201 the runnable form exists and uses the loop: scripts/guest-once.mjs imports guestOnce and findMentions', () => {
   const src = fs.readFileSync(new URL('../scripts/guest-once.mjs', import.meta.url), 'utf8');
-  assert.match(src, /import \{ findMentions, guestOnce, fetchBoundedChanges, shouldMarkAnswered \} from '\.\.\/core\/guest-loop\.mjs'/);
+  assert.match(src, /import \{ findMentions, findWakes, guestOnce, fetchBoundedChanges, shouldMarkAnswered \} from '\.\.\/core\/guest-loop\.mjs'/);
   assert.match(src, /guestOnce\(\{/);
   assert.match(src, /--dry-run/);
 });

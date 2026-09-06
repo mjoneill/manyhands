@@ -1429,6 +1429,8 @@ function buildMcpServer() {
       toolGrants: z.array(z.string()).optional().describe('Which verbs it may call — write authority by blast radius'),
       budgetPerDay: z.number().min(0).optional().describe('Halts loudly on breach (#987, via the #1202 ledger)'),
       residency: z.enum(['resident', 'guest']).optional(),
+      wakeOn: z.array(z.enum(['mention', 'assignment', 'schedule'])).optional().describe('#1226 — wake sources; default mention'),
+      everyMinutes: z.number().min(1).optional().describe('#1226 — the schedule wake interval, when wakeOn includes schedule'),
       by: z.string().min(1).describe('Who defines this colleague. Declared, not authenticated.'),
     },
   }, async (args) => jsonResult(await apiCall('POST', '/api/agents', args)));

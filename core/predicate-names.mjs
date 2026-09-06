@@ -91,6 +91,7 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:emoji': 'scrum:emoji',
   'scrum:contextPolicy': 'scrum:contextPolicy',
   'scrum:toolGrant': 'scrum:toolGrant',
+  'scrum:wakeOn': 'scrum:wakeOn', 'scrum:everyMinutes': 'scrum:everyMinutes', // #1226
   'scrum:budgetPerDay': 'scrum:budgetPerDay',
   'scrum:residency': 'scrum:residency',
   'scrum:state': 'scrum:state',

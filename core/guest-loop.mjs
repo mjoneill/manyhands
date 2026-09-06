@@ -55,7 +55,72 @@ export function findMentions(messages = [], seatKey, { sinceId = null, since = n
 }
 
 /** Pure. The messages handed to the model for one wake. */
-export function buildMessages({ agent, wake, changes = [] }) {
+/**
+ * #1226 — THE RESIDENT'S MEMORY PROTOCOL, in the prompt rather than in a tool
+ * call: the adapter's protocols (ollama-native, mlx) have no tool channel, so
+ * the agent's only way to write is in its reply. A trailing `REMEMBER: …`
+ * line is stripped from the post and stored under the seat's own key in the
+ * shared memory store; on the next wake the loop READS that store by owner
+ * and hands it back. Nobody else hands it: not the mentioning human, not the
+ * prompt author. That is the done-when's "without being handed it".
+ *
+ * `CLAIM: #N` is the same shape for standing in claims, honoured only when
+ * `card_claim` is in the agent's tool grants (P3's data, not this loop's code).
+ */
+export const REMEMBER_RE = /^\s*REMEMBER:\s*(.+?)\s*$/;   // uppercase on purpose: prose "remember:" stays prose
+export const CLAIM_RE = /^\s*CLAIM:\s*#?(\d+)\s*$/;
+export function splitDirectives(text) {
+  const remember = []; const claims = []; const keep = [];
+  for (const line of String(text ?? '').split('\n')) {
+    const m = line.match(REMEMBER_RE); const c = line.match(CLAIM_RE);
+    if (m) remember.push(m[1]);
+    else if (c) claims.push(Number(c[1]));
+    else keep.push(line);
+  }
+  return { post: keep.join('\n').trim(), remember, claims };
+}
+
+/** How a wake introduces itself to the model, by kind. */
+function wakeIntro(wake) {
+  switch (wake?.kind) {
+    case 'assignment': return `A card on the board was assigned to you and nobody holds it:\n#${wake.shortId ?? '?'} ${wake.title ?? ''}${wake.body ? `\n${String(wake.body).slice(0, 600)}` : ''}`;
+    case 'schedule': return `Your scheduled wake (${wake.createdAt || 'now'}). Nobody asked you anything; look at your memory and what changed, and say what, if anything, you want to do or note.`;
+    default: return `A message on the commons mentioned you:\n[${wake.createdAt || 'unknown time'}] ${wake.author}: ${wake.body}`;
+  }
+}
+
+/**
+ * #1226 — WAKE SOURCES BEYOND @-MENTION, chosen by the agent's `wakeOn` list
+ * (data on the node; default `['mention']`).
+ *   mention     — an @seat on the commons (slice 1)
+ *   assignment  — a card assigned to the seat that nobody holds and that this
+ *                 agent has not been woken for (state.assignmentsSeen)
+ *   schedule    — `everyMinutes` since state.lastScheduledAt (or never)
+ * Returns wakes in priority order: mention, assignment, schedule. ONE is taken
+ * per run; the rest wait for the next.
+ */
+export function findWakes({ agent, messages = [], cards = [], state = {}, now = new Date().toISOString() }) {
+  const on = Array.isArray(agent.wakeOn) && agent.wakeOn.length ? agent.wakeOn : ['mention'];
+  const out = [];
+  if (on.includes('mention')) {
+    for (const m of findMentions(messages, agent.seatKey, { sinceId: state.lastAnsweredId ?? null })) out.push({ kind: 'mention', ...m });
+  }
+  if (on.includes('assignment')) {
+    const seen = new Set(state.assignmentsSeen || []);
+    for (const c of cards) {
+      if (!Array.isArray(c.assignees) || !c.assignees.includes(agent.seatKey) || c.claimedBy || seen.has(c.id)) continue;
+      out.push({ kind: 'assignment', id: `assignment:${c.id}`, cardId: c.id, shortId: c.shortId, title: c.title, body: c.description ?? '', createdAt: c.updatedAt || c.createdAt, author: null });
+    }
+  }
+  if (on.includes('schedule')) {
+    const every = Number(agent.everyMinutes ?? 60) * 60_000;
+    const last = state.lastScheduledAt ? Date.parse(state.lastScheduledAt) : null;
+    if (last == null || Date.parse(now) - last >= every) out.push({ kind: 'schedule', id: `schedule:${now}`, createdAt: now, author: null, body: '' });
+  }
+  return out;
+}
+
+export function buildMessages({ agent, wake, changes = [], memories = [] }) {
   const policy = agent.contextPolicy || 'thread';
   const lines = [];
   lines.push(`You are ${agent.name || agent.seatKey}, a ${agent.residency === 'resident' ? 'resident' : 'guest'} seat on the manyhands board. Your seat key is "${agent.seatKey}".`);
@@ -67,9 +132,18 @@ export function buildMessages({ agent, wake, changes = [] }) {
     : 'You are invited for this question only and will not persist: nothing you say now will be handed back to you later unless someone writes it to the board.');
   if (agent.systemPrompt) lines.push(agent.systemPrompt);
   lines.push('Reply with the text of ONE commons post, plainly, no preamble. If you cannot answer from what you were handed, say what you would need.');
+  if (agent.residency === 'resident') {
+    lines.push('To keep something for your next wake, add a final line `REMEMBER: <one line>`. It is stored under your seat in the memory store and handed back to you next time; it is removed from the post. Only write what you will want later.');
+    if ((agent.toolGrants || []).includes('card_claim')) lines.push('To take a card, add a line `CLAIM: #<number>`; it is claimed as you and removed from the post.');
+  }
   const system = lines.join('\n\n');
   const ctx = [];
-  ctx.push(`A message on the commons mentioned you:\n[${wake.createdAt || 'unknown time'}] ${wake.author}: ${wake.body}`);
+  if (agent.residency === 'resident') {
+    ctx.push(memories.length
+      ? 'Your memory — what YOU wrote on earlier wakes (newest last):\n' + memories.slice(-10).map((m) => `- [${m.updatedAt || m.createdAt || ''}] ${m.body}`).join('\n')
+      : 'Your memory is empty: this is your first wake, or you wrote nothing on the earlier ones.');
+  }
+  ctx.push(wakeIntro(wake));
   if (policy !== 'artifact-only' && changes.length) {
     ctx.push('What changed on the board recently (bounded, newest last):\n' + changes.slice(-20).map((c) =>
       `- ${c.at || ''} ${c.kind || ''} ${c.op || ''} ${c.shortId != null ? `#${c.shortId}` : (c.id || '')}${c.title ? `: ${String(c.title).slice(0, 120)}` : ''}${c.by ? ` (by ${c.by})` : ''}`).join('\n'));
@@ -114,7 +188,7 @@ export async function fetchBoundedChanges(get, since, { limit = 20 } = {}) {
 export function shouldMarkAnswered(result) {
   if (!result) return false;
   if (result.halted) return false;
-  return result.posted === true || result.reason === 'model-failed' || result.reason === 'empty-reply';
+  return result.posted === true || result.reason === 'model-failed' || result.reason === 'empty-reply' || result.reason === 'memory-only';
 }
 
 function appendLedger(file, row) {
@@ -166,7 +240,7 @@ export async function budgetCheck({ agent, spentToday }) {
  *   post       ({author, body}) => Promise<{id?}>
  *   ledgerFile where the pre-ledger row goes
  */
-export async function guestOnce({ agent, wake, changes = () => [], callModel, post, ledgerFile = ledgerFilePath(), ledgerSink = null, spentToday = null, now = () => new Date().toISOString(), log = () => {}, onError = () => {} }) {
+export async function guestOnce({ agent, wake, changes = () => [], memories = null, writeMemory = null, claimCard = null, callModel, post, ledgerFile = ledgerFilePath(), ledgerSink = null, spentToday = null, now = () => new Date().toISOString(), log = () => {}, onError = () => {} }) {
   if (!agent?.seatKey) throw new Error('guestOnce: agent.seatKey is required — a post with no seat is actor:null forever (#1193)');
   if (!agent?.model?.model || !agent?.model?.protocol) throw new Error('guestOnce: agent.model {model, protocol} is required');
   // #1202 — the budget gate, BEFORE any context is fetched or any call is made.
@@ -182,12 +256,22 @@ export async function guestOnce({ agent, wake, changes = () => [], callModel, po
   }
   let rows = [];
   try { rows = changes() || []; } catch (e) { onError(`[#1201] bounded context unreadable — answering from the mention alone: ${e?.message ?? e}`); }
-  const messages = buildMessages({ agent, wake, changes: rows });
+  // #1226 — a resident reads its OWN memory (owner = seat) before it thinks.
+  // Unreadable is not empty: the row says which, and the agent is told nothing
+  // rather than told "your memory is empty" — a false empty would teach it
+  // that writing is pointless.
+  let mem = []; let memState = 'none';
+  if (agent.residency === 'resident' && typeof memories === 'function') {
+    try { mem = (await memories(agent.seatKey)) || []; memState = 'read'; }
+    catch (e) { memState = 'unreadable'; onError(`[#1226] memory unreadable for ${agent.seatKey}; waking without it: ${e?.message ?? e}`); }
+  }
+  const messages = buildMessages({ agent, wake, changes: rows, memories: memState === 'unreadable' ? [{ body: '(your memory could not be read this wake — do not conclude it is empty)' }] : mem });
   const started = Date.now();
   const base = {
     ledger: 'pre-P6', agent: agent.seatKey, model: agent.model.model, protocol: agent.model.protocol,
     provider: agent.model.baseUrl || null, promptVersion: agent.promptVersion ?? null,
-    wake: { kind: 'mention', messageId: wake.id ?? null, author: wake.author ?? null },
+    wake: { kind: wake.kind || 'mention', messageId: wake.id ?? null, author: wake.author ?? null },
+    memory: { handed: mem.length, state: memState },
     contextHanded: { policy: agent.contextPolicy || 'thread', changesRows: (agent.contextPolicy === 'artifact-only') ? 0 : rows.length },
     contextHandedTo: [wake.id, ...((agent.contextPolicy === 'artifact-only') ? [] : rows.slice(-20).map((c) => c.id))].filter(Boolean),
     at: now(),
@@ -201,22 +285,41 @@ export async function guestOnce({ agent, wake, changes = () => [], callModel, po
     onError(`[#1201] model call failed for ${agent.seatKey}; NO post made: ${row.error}`);
     return { posted: false, reason: 'model-failed', ledger: row };
   }
-  const text = String(result?.text ?? '').trim();
-  if (!text) {
+  const raw = String(result?.text ?? '').trim();
+  // #1226 — directives come OUT of the post before it is made.
+  const { post: text, remember, claims } = agent.residency === 'resident' ? splitDirectives(raw) : { post: raw, remember: [], claims: [] };
+  if (!text && !remember.length) {
     const row = { ...base, ok: false, error: 'empty reply', stopReason: result?.stopReason ?? null, usage: result?.usage ?? null, latencyMs: Date.now() - started };
     await recordLedger({ sink: ledgerSink, file: ledgerFile, row, onError });
     return { posted: false, reason: 'empty-reply', ledger: row };
   }
-  let posted;
-  try { posted = await post({ author: agent.seatKey, body: text }); }
+  let posted = null;
+  try { if (text) posted = await post({ author: agent.seatKey, body: text }); }
   catch (e) {
     const row = { ...base, ok: false, error: `post failed: ${e?.message ?? e}`, stopReason: result.stopReason, usage: result.usage, latencyMs: Date.now() - started };
     await recordLedger({ sink: ledgerSink, file: ledgerFile, row, onError });
     return { posted: false, reason: 'post-failed', ledger: row };
   }
-  const row = { ...base, ok: true, stopReason: result.stopReason ?? null, usage: result.usage ?? null, attempts: result.attempts ?? null, latencyMs: Date.now() - started, postId: posted?.id ?? null };
+  // #1226 — the write to memory, AFTER the post: a memory failure must not
+  // suppress the answer, and it is recorded on the row either way.
+  const memoryWritten = [];
+  for (const line of remember) {
+    if (typeof writeMemory !== 'function') { onError(`[#1226] ${agent.seatKey} asked to remember but no memory sink is wired: "${line.slice(0, 80)}"`); continue; }
+    try { const w = await writeMemory({ owner: agent.seatKey, body: line, wake: wake.id ?? null }); memoryWritten.push(w?.id ?? true); }
+    catch (e) { onError(`[#1226] memory write failed for ${agent.seatKey}: ${e?.message ?? e}`); memoryWritten.push({ error: e?.message ?? String(e) }); }
+  }
+  // Standing in claims: honoured only under the grant; a refused one is on the row.
+  const claimed = [];
+  for (const n of claims) {
+    if (!(agent.toolGrants || []).includes('card_claim')) { claimed.push({ card: n, ok: false, reason: 'no card_claim grant' }); continue; }
+    if (typeof claimCard !== 'function') { claimed.push({ card: n, ok: false, reason: 'no claim sink wired' }); continue; }
+    try { await claimCard(n, agent.seatKey); claimed.push({ card: n, ok: true }); }
+    catch (e) { claimed.push({ card: n, ok: false, reason: e?.message ?? String(e) }); }
+  }
+  const row = { ...base, ok: true, stopReason: result.stopReason ?? null, usage: result.usage ?? null, attempts: result.attempts ?? null, latencyMs: Date.now() - started, postId: posted?.id ?? null,
+    memoryWritten, claims: claimed, ...(text ? {} : { reason: 'memory-only' }) };
   const recorded = await recordLedger({ sink: ledgerSink, file: ledgerFile, row, onError });
   row.recorded = recorded.recorded; row.ledgerId = recorded.id;
   log(`[#1201] ${agent.seatKey} answered ${wake.id ?? 'a mention'} via ${agent.model.model} (${row.usage?.completionTokens ?? '?'} tokens, ${row.stopReason})`);
-  return { posted: true, postId: row.postId, ledger: row, text };
+  return { posted: Boolean(posted), ...(text ? {} : { reason: 'memory-only' }), postId: row.postId, ledger: row, text, remember, claims: claimed };
 }

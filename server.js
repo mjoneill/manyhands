@@ -3198,6 +3198,7 @@ const agentPromptEvent = (op, e, actor) => ({ op, actor, entity: { kind: 'agent-
 const AGENT_CONTEXT_POLICIES = new Set(['artifact-only', 'thread']);
 const AGENT_RESIDENCIES = new Set(['resident', 'guest']);
 const AGENT_STATES = new Set(['invited', 'resting', 'retired']);
+const AGENT_WAKE_KINDS = new Set(['mention', 'assignment', 'schedule']);   // #1226
 function agentToWire(data, e) {
   const versions = agentPromptsOf(data).filter((v) => v['@type'] === 'scrum:AgentPromptVersion' && v['scrum:ofPrompt'] === AGENT_PROMPT_ID(e['scrum:seatKey']));
   const current = versions.find((v) => v['@id'] === e['scrum:currentPrompt']) || null;
@@ -3206,6 +3207,7 @@ function agentToWire(data, e) {
     model: e['scrum:modelSpec'] ?? null, modelId: e['scrum:model'] ?? null, usesModel: e['scrum:usesModel'] ?? null,
     contextPolicy: e['scrum:contextPolicy'] ?? 'thread', toolGrants: e['scrum:toolGrant'] ?? [],
     budgetPerDay: e['scrum:budgetPerDay'] ?? null, residency: e['scrum:residency'] ?? 'guest', state: e['scrum:state'] ?? 'invited',
+    wakeOn: Array.isArray(e['scrum:wakeOn']) && e['scrum:wakeOn'].length ? e['scrum:wakeOn'] : ['mention'], everyMinutes: e['scrum:everyMinutes'] ?? null,
     prompt: current ? { id: current['@id'], version: current['scrum:version'], body: current['scrum:body'], by: current.author ?? null, at: current['scrum:importedAt'] ?? null } : null,
     promptVersions: versions.length, createdAt: e['scrum:importedAt'] ?? null, updatedAt: e.dateModified ?? null,
   };
@@ -3247,6 +3249,9 @@ async function handleCreateAgent(req, res) {
         'scrum:usesModel': registered ? registered['@id'] : null,
         'scrum:contextPolicy': contextPolicy, 'scrum:toolGrant': toolGrants, 'scrum:budgetPerDay': budget,
         'scrum:residency': residency, 'scrum:state': 'invited', 'scrum:currentPrompt': v1, 'scrum:importedAt': now,
+        // #1226 — wake sources are DATA on the node: mention | assignment | schedule
+        'scrum:wakeOn': Array.isArray(body.wakeOn) && body.wakeOn.length ? body.wakeOn.filter((w) => AGENT_WAKE_KINDS.has(w)) : ['mention'],
+        'scrum:everyMinutes': body.everyMinutes == null ? null : Number(body.everyMinutes),
       };
       const identity = { '@id': promptId, '@type': 'scrum:AgentPrompt', 'scrum:ofAgent': agent['@id'], 'scrum:importedAt': now };
       const version = { '@id': v1, '@type': 'scrum:AgentPromptVersion', 'scrum:ofPrompt': promptId, 'scrum:version': 1, 'scrum:body': body.prompt, author: by, 'scrum:importedAt': now };
@@ -3336,6 +3341,9 @@ async function handlePatchAgent(req, res, seat) {
       if (typeof body.name === 'string' && body.name.trim()) updated.name = body.name.trim();
       if (typeof body.emoji === 'string') updated['scrum:emoji'] = body.emoji;
       if (typeof body.color === 'string' && /^#[0-9a-f]{3,8}$/i.test(body.color)) updated['scrum:color'] = body.color;
+      if (body.residency != null) { if (!AGENT_RESIDENCIES.has(body.residency)) return { status: 400, wire: { error: 'residency must be resident or guest' } }; updated['scrum:residency'] = body.residency; }
+      if (Array.isArray(body.wakeOn)) { const bad = body.wakeOn.find((w) => !AGENT_WAKE_KINDS.has(w)); if (bad) return { status: 400, wire: { error: `unknown wake kind ${JSON.stringify(bad)} — mention, assignment or schedule` } }; updated['scrum:wakeOn'] = body.wakeOn.length ? body.wakeOn : ['mention']; }
+      if (body.everyMinutes !== undefined) updated['scrum:everyMinutes'] = body.everyMinutes == null ? null : Number(body.everyMinutes);
       data.agents = agentsOf(data).map((a) => (a['@id'] === agent['@id'] ? updated : a));
       writeBoard(data, [agentEvent('update', updated, by), ...releasedEvents]);
       return { status: 200, wire: { ...agentToWire(data, updated), released: releasedCards.map((c) => c.shortId) } };

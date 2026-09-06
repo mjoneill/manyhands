@@ -21,7 +21,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { callModel } from '../core/model-adapter.mjs';
-import { findMentions, guestOnce, fetchBoundedChanges, shouldMarkAnswered } from '../core/guest-loop.mjs';
+import { findMentions, findWakes, guestOnce, fetchBoundedChanges, shouldMarkAnswered } from '../core/guest-loop.mjs';
 
 const args = process.argv.slice(2);
 const opt = (k) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : null; };
@@ -42,7 +42,8 @@ if (seatArg) {
   const a = list[0];
   if (a.state === 'retired') { console.error(`${seatArg} is retired; not waking it`); process.exit(2); }
   agent = { seatKey: a.seatKey, name: a.name, systemPrompt: a.prompt?.body ?? '', promptVersion: a.prompt?.id ?? null,
-    contextPolicy: a.contextPolicy, residency: a.residency, budgetPerDay: a.budgetPerDay ?? undefined, model: a.model };
+    contextPolicy: a.contextPolicy, residency: a.residency, budgetPerDay: a.budgetPerDay ?? undefined, model: a.model,
+    toolGrants: a.toolGrants ?? [], wakeOn: a.wakeOn ?? ['mention'], everyMinutes: a.everyMinutes ?? undefined };   // #1226
 } else {
   agent = JSON.parse(fs.readFileSync(agentFile, 'utf8'));
 }
@@ -60,9 +61,16 @@ let state = {};
 try { state = JSON.parse(fs.readFileSync(stateFile, 'utf8')); } catch { /* first wake */ }
 const recent = await get('/api/conversations?attachedTo=null&limit=60');
 const messages = Array.isArray(recent) ? recent : (recent?.conversations ?? []);
-let wakes = findMentions(messages, agent.seatKey, { sinceId: state.lastAnsweredId ?? null });
-if (opt('--once-id')) wakes = messages.filter((m) => m.id === opt('--once-id'));
-if (!wakes.length) { console.log(`${new Date().toISOString()} ${agent.seatKey}: no new mention`); process.exit(0); }
+// #1226 — wake sources are the agent's data. Cards are fetched only when a
+// kind needs them; a mention-only agent costs what slice 1 cost.
+let cards = [];
+if ((agent.wakeOn || []).includes('assignment')) {
+  try { const c = await get('/api/cards?limit=500&fields=id,shortId,title,assignees,claimedBy,updatedAt,createdAt'); cards = Array.isArray(c) ? c : (c?.cards ?? []); }
+  catch (e) { console.error(`[#1226] cards unreadable — no assignment wakes this run: ${e.message}`); }
+}
+let wakes = findWakes({ agent, messages, cards, state });
+if (opt('--once-id')) wakes = messages.filter((m) => m.id === opt('--once-id')).map((m) => ({ kind: 'mention', ...m }));
+if (!wakes.length) { console.log(`${new Date().toISOString()} ${agent.seatKey}: nothing to wake for (${(agent.wakeOn || ['mention']).join(', ')})`); process.exit(0); }
 
 const wake = wakes[0];   // ONE wake per run — guest-once means once
 const sinceIso = new Date(Date.parse(wake.createdAt || Date.now()) - 60 * 60 * 1000).toISOString();
@@ -104,14 +112,37 @@ const spentToday = async (seat) => {
   throw last;
 };
 
+// #1226 — the resident's memory: read by OWNER (its seat), written as a memory
+// row under that owner. The mentioning human hands nothing.
+const memories = async (seat) => {
+  const j = await get(`/api/memories?owner=${encodeURIComponent(seat)}&limit=50`);
+  const list = Array.isArray(j) ? j : (j?.memories ?? []);
+  return list.filter((m) => (m.tags || []).includes('agent-memory')).sort((a, b) => String(a.updatedAt || '').localeCompare(String(b.updatedAt || ''))).slice(-10);
+};
+const writeMemory = dry ? async (m) => { console.log(`[dry-run] would remember as ${m.owner}: ${m.body}`); return { id: null }; } : async (m) => {
+  const r = await fetch(`${BOARD}/api/memories`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: m.body.slice(0, 80), body: m.body, owner: m.owner, by: m.owner, tags: ['agent-memory', m.owner] }) });
+  if (!r.ok) throw new Error(`POST /api/memories → ${r.status}`);
+  return r.json();
+};
+const claimCard = dry ? async (n, seat) => console.log(`[dry-run] would claim #${n} as ${seat}`) : async (n, seat) => {
+  const r = await fetch(`${BOARD}/api/cards/${n}/claim`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ by: seat }) });
+  if (!r.ok) throw new Error(`claim #${n} → ${r.status}`);
+};
+
 const r = await guestOnce({
-  agent, wake, changes: () => rows, ledgerSink, spentToday,
+  agent, wake, changes: () => rows, ledgerSink, spentToday, memories, writeMemory, claimCard,
   callModel: (a, m, o) => callModel(a, m, { ...o, apiKey: a.apiKeyRef ? process.env[a.apiKeyRef] : undefined }),
   post,
   log: (l) => console.log(l), onError: (l) => console.error(l),
 });
 // Advance the cursor only on an outcome that settles the mention; a halt leaves
 // it owed, so the next run finds it again (shouldMarkAnswered, tested).
-if (!dry && shouldMarkAnswered(r)) fs.writeFileSync(stateFile, JSON.stringify({ lastAnsweredId: wake.id, at: new Date().toISOString(), posted: r.posted, reason: r.reason ?? null }, null, 2));
+if (!dry && shouldMarkAnswered(r)) {
+  const next = { ...state, at: new Date().toISOString(), posted: r.posted, reason: r.reason ?? null };
+  if (wake.kind === 'mention') next.lastAnsweredId = wake.id;
+  if (wake.kind === 'assignment') next.assignmentsSeen = [...new Set([...(state.assignmentsSeen || []), wake.cardId])].slice(-200);
+  if (wake.kind === 'schedule') next.lastScheduledAt = wake.createdAt;
+  fs.writeFileSync(stateFile, JSON.stringify(next, null, 2));
+}
 else if (!dry) console.log(`[#1201] ${agent.seatKey}: mention ${wake.id} still owed (${r.reason ?? 'halted'}) — cursor not advanced`);
 console.log(JSON.stringify({ posted: r.posted, reason: r.reason ?? 'delivered', postId: r.postId ?? null, wake: wake.id }));

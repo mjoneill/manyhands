@@ -184,6 +184,7 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:Model', 'scrum:baseUrl', 'scrum:contextWindow', 'scrum:numCtx', 'scrum:thinking', 'scrum:maxOutputTokens',
   'scrum:timeoutMs', 'scrum:costIn', 'scrum:costOut', 'scrum:freeTier', 'scrum:capability', 'scrum:apiKeyRef',
   'scrum:deprecatesOn', 'scrum:lastProbeClass', 'scrum:lastProbeAt', 'scrum:lastProbeStatus', 'scrum:modelKey', 'scrum:usesModel',
+  'scrum:wakeOn', 'scrum:everyMinutes', // #1226
   // #1130 — an apex is a KIND, not a convention: a card carrying `apex:<X>`
   // projects as scrum:Apex with scrum:apexLabel "X", so "what lives here" is
   // one hop and needs no knowledge of the prefix.
@@ -932,6 +933,8 @@ function projectAgent(store, e) {
   if (e['scrum:usesModel']) add(nn(S + 'usesModel'), nn(String(e['scrum:usesModel']))); // #1197 — the registered node
   if (e['scrum:contextPolicy']) add(nn(S + 'contextPolicy'), lit(String(e['scrum:contextPolicy'])));
   for (const g of (Array.isArray(e['scrum:toolGrant']) ? e['scrum:toolGrant'] : [])) add(nn(S + 'toolGrant'), lit(String(g)));
+  for (const w of (Array.isArray(e['scrum:wakeOn']) ? e['scrum:wakeOn'] : [])) add(nn(S + 'wakeOn'), lit(String(w)));   // #1226
+  if (e['scrum:everyMinutes'] != null && Number.isFinite(Number(e['scrum:everyMinutes']))) add(nn(S + 'everyMinutes'), oxigraph.literal(String(e['scrum:everyMinutes']), nn('http://www.w3.org/2001/XMLSchema#decimal')));
   if (e['scrum:budgetPerDay'] != null && Number.isFinite(Number(e['scrum:budgetPerDay']))) add(nn(S + 'budgetPerDay'), oxigraph.literal(String(e['scrum:budgetPerDay']), nn('http://www.w3.org/2001/XMLSchema#decimal')));
   if (e['scrum:residency']) add(nn(S + 'residency'), lit(String(e['scrum:residency'])));
   if (e['scrum:state']) add(nn(S + 'state'), lit(String(e['scrum:state'])));
