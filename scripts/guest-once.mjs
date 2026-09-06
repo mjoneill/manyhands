@@ -45,6 +45,10 @@ if (seatArg) {
   agent = { seatKey: a.seatKey, name: a.name, systemPrompt: a.prompt?.body ?? '', promptVersion: a.prompt?.id ?? null,
     contextPolicy: a.contextPolicy, residency: a.residency, budgetPerDay: a.budgetPerDay ?? undefined,
     toolGrants: a.toolGrants ?? [], wakeOn: a.wakeOn ?? ['mention'], everyMinutes: a.everyMinutes ?? undefined,
+    // #1196 — the seat's own hop ceiling. Carried from the board or left off
+    // entirely: `undefined` lets the loop keep its default, where a `null` would
+    // read as "a ceiling of nothing" one layer down.
+    ...(a.maxHops == null ? {} : { maxHops: a.maxHops }),
     // #1196 — the role's reasoning setting rides to the adapter on the MODEL
     // spec, because that is the object callModel is handed. Left off entirely
     // when the board says nothing, so a model with no such flag is sent none.

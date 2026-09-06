@@ -108,3 +108,55 @@ test('#1196 a tool grant is checked against the REAL tools — a typo cannot rea
     assert.deepEqual(none.body.toolGrants, []);
   } finally { await srv.stop(); }
 });
+
+/**
+ * #1196 — THE HOP CEILING IS DEPLOYMENT DATA, and it must survive the round trip.
+ *
+ * A hosted seat spends four hops in 22 seconds; the local one pays a model
+ * reload for each and 150s+ for the same four. One ceiling cannot be right for
+ * both, so it belongs on the SEAT, not baked into the loop. The write was
+ * refused as an unknown field before this — correctly, by the guard that exists
+ * so a dropped field cannot read back as "configured" — which is why this test
+ * asserts the READ BACK and not merely the 200.
+ */
+test('#1196 maxHops is settable per seat, reads back, clears to null, and refuses a ceiling that is not one', async () => {
+  const srv = await startRestServer({ board: makeBoardFixture({ cards: [], nextShortId: 1 }) });
+  try {
+    const api = async (method, p, body) => {
+      const r = await fetch(`${srv.baseUrl}${p}`, {
+        method, headers: { 'Content-Type': 'application/json' },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      return { status: r.status, body: await r.json().catch(() => null) };
+    };
+    const made = await api('POST', '/api/agents', {
+      seatKey: 'hopper', prompt: 'Be brief.', by: 'ada',
+      model: { model: 'fake', protocol: 'ollama-native', baseUrl: 'http://127.0.0.1:1' },
+    });
+    assert.equal(made.status, 201, JSON.stringify(made.body));
+    assert.equal(made.body.maxHops, null, 'a seat that never named a ceiling has none, and null is not zero');
+
+    const set = await api('PATCH', '/api/agents/hopper', { by: 'ada', maxHops: 8 });
+    assert.equal(set.status, 200, JSON.stringify(set.body));
+    const read = await api('GET', '/api/agents');
+    const seat = (Array.isArray(read.body) ? read.body : read.body.agents).find((a) => a.seatKey === 'hopper');
+    assert.equal(seat.maxHops, 8, 'a 200 describes the request; this asserts the STATE');
+
+    const cleared = await api('PATCH', '/api/agents/hopper', { by: 'ada', maxHops: null });
+    assert.equal(cleared.status, 200);
+    const read2 = await api('GET', '/api/agents');
+    const seat2 = (Array.isArray(read2.body) ? read2.body : read2.body.agents).find((a) => a.seatKey === 'hopper');
+    assert.equal(seat2.maxHops, null, 'null restores the loop default rather than storing a zero');
+
+    // ⛔ A ceiling of 0 means the seat may never look, which is not a ceiling —
+    // and it is the value a caller reaches for when they mean "no limit".
+    for (const bad of [0, -1, 21, 2.5, 'four']) {
+      const r = await api('PATCH', '/api/agents/hopper', { by: 'ada', maxHops: bad });
+      assert.equal(r.status, 400, `maxHops ${JSON.stringify(bad)} must be refused, got ${r.status}`);
+      assert.match(r.body.error, /maxHops/);
+    }
+    const still = await api('GET', '/api/agents');
+    const seat3 = (Array.isArray(still.body) ? still.body : still.body.agents).find((a) => a.seatKey === 'hopper');
+    assert.equal(seat3.maxHops, null, 'a refused write changes nothing');
+  } finally { await srv.stop(); }
+});

@@ -3272,6 +3272,7 @@ function agentToWire(data, e) {
     // unset sends no flag at all, because a model with no such flag must not be
     // told anything about it.
     thinking: e['scrum:thinking'] ?? null,
+    maxHops: e['scrum:maxHops'] ?? null,
     prompt: current ? { id: current['@id'], version: current['scrum:version'], body: current['scrum:body'], by: current.author ?? null, at: current['scrum:importedAt'] ?? null } : null,
     promptVersions: versions.length, createdAt: e['scrum:importedAt'] ?? null, updatedAt: e.dateModified ?? null,
   };
@@ -3316,6 +3317,7 @@ async function handleCreateAgent(req, res) {
         // #1226 — wake sources are DATA on the node: mention | assignment | schedule
         'scrum:wakeOn': Array.isArray(body.wakeOn) && body.wakeOn.length ? body.wakeOn.filter((w) => AGENT_WAKE_KINDS.has(w)) : ['mention'],
         'scrum:everyMinutes': body.everyMinutes == null ? null : Number(body.everyMinutes),
+        'scrum:maxHops': body.maxHops == null ? null : Number(body.maxHops),
       };
       const identity = { '@id': promptId, '@type': 'scrum:AgentPrompt', 'scrum:ofAgent': agent['@id'], 'scrum:importedAt': now };
       const version = { '@id': v1, '@type': 'scrum:AgentPromptVersion', 'scrum:ofPrompt': promptId, 'scrum:version': 1, 'scrum:body': body.prompt, author: by, 'scrum:importedAt': now };
@@ -3366,7 +3368,7 @@ async function handleAgentPromptVersion(req, res, seat) {
 // its whole budget reasoning and answered nobody, once a minute, for as long as
 // nobody happened to read the value back.
 const AGENT_PATCH_FIELDS = new Set(['by', 'state', 'contextPolicy', 'toolGrants', 'budgetPerDay', 'model', 'modelKey',
-  'name', 'emoji', 'color', 'residency', 'wakeOn', 'everyMinutes', 'thinking', 'prompt']);
+  'name', 'emoji', 'color', 'residency', 'wakeOn', 'everyMinutes', 'thinking', 'maxHops', 'prompt']);
 
 // #1196 — WHAT MAY BE GRANTED, checked. Grants were free strings, and the
 // resolver ignored any name it did not know, so "board-search" returned 200 and
@@ -3385,6 +3387,14 @@ async function handlePatchAgent(req, res, seat) {
     if (unknown.length) return sendJSON(res, 400, { error: `unknown field${unknown.length === 1 ? '' : 's'} ${unknown.map((k) => JSON.stringify(k)).join(', ')} — an agent write that silently dropped a field would read as "configured" forever while doing nothing. Known: ${[...AGENT_PATCH_FIELDS].join(', ')}` });
     if (body.thinking !== undefined && body.thinking !== null && typeof body.thinking !== 'boolean') {
       return sendJSON(res, 400, { error: 'thinking must be true, false, or null — null means send no flag at all, which is different from false' });
+    }
+    // #1196 — HOW MANY TIMES THIS SEAT MAY LOOK before it must answer. Deployment
+    // data, not a property of the loop: a hosted seat spends four hops in 22
+    // seconds while a local one pays a model reload for each, so one ceiling
+    // cannot be right for both. null restores the loop's own default.
+    if (body.maxHops !== undefined && body.maxHops !== null
+        && !(Number.isInteger(body.maxHops) && body.maxHops >= 1 && body.maxHops <= 20)) {
+      return sendJSON(res, 400, { error: 'maxHops must be a whole number from 1 to 20, or null to use the default — a ceiling below 1 means the seat may never look, and one above 20 is not a ceiling' });
     }
     if (body.state != null && !AGENT_STATES.has(body.state)) return sendJSON(res, 400, { error: 'state must be invited, resting or retired' });
     if (body.contextPolicy != null && !AGENT_CONTEXT_POLICIES.has(body.contextPolicy)) return sendJSON(res, 400, { error: 'contextPolicy must be artifact-only or thread' });
@@ -3435,6 +3445,7 @@ async function handlePatchAgent(req, res, seat) {
       if (Array.isArray(body.wakeOn)) { const bad = body.wakeOn.find((w) => !AGENT_WAKE_KINDS.has(w)); if (bad) return { status: 400, wire: { error: `unknown wake kind ${JSON.stringify(bad)} — mention, assignment or schedule` } }; updated['scrum:wakeOn'] = body.wakeOn.length ? body.wakeOn : ['mention']; }
       if (body.everyMinutes !== undefined) updated['scrum:everyMinutes'] = body.everyMinutes == null ? null : Number(body.everyMinutes);
       if (body.thinking !== undefined) updated['scrum:thinking'] = body.thinking === null ? null : !!body.thinking;
+      if (body.maxHops !== undefined) updated['scrum:maxHops'] = body.maxHops === null ? null : Number(body.maxHops);
       data.agents = agentsOf(data).map((a) => (a['@id'] === agent['@id'] ? updated : a));
       writeBoard(data, [agentEvent('update', updated, by), ...releasedEvents]);
       return { status: 200, wire: { ...agentToWire(data, updated), released: releasedCards.map((c) => c.shortId) } };
