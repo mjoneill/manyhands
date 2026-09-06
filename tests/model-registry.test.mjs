@@ -34,6 +34,9 @@ async function startProvider() {
       if (m.startsWith('retired')) { res.writeHead(410, { 'Content-Type': 'text/plain' }); return res.end('model retired 2026-01-01'); }
       if (m.startsWith('locked')) { res.writeHead(401, { 'Content-Type': 'text/plain' }); return res.end('invalid api key'); }
       if (m.startsWith('gated')) { res.writeHead(404, { 'Content-Type': 'application/problem+json' }); return res.end(JSON.stringify({ title: 'not entitled', detail: 'your tier cannot use this model' })); }
+      // OpenRouter's live shape (2026-09-06): a fake id is a 400 JSON error, not a 404.
+      if (m.startsWith('or-fake')) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: { message: `${m} is not a valid model ID`, code: 400 } })); }
+      if (m.startsWith('bad-request')) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: { message: 'messages: field required', code: 400 } })); }
       if (m.startsWith('no-such-model')) { res.writeHead(404, { 'Content-Type': 'text/plain' }); return res.end(`model "${m}" not found`); }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ message: { role: 'assistant', content: 'pong' }, prompt_eval_count: 1, eval_count: 1 }));
@@ -121,6 +124,11 @@ test('#1197 probeModel sends the REFERENCED key as a bearer and never echoes it;
     assert.equal(dead.klass, 'unreachable'); assert.equal(dead.status, null);
     const bad = await probeModel({ model: 'x', protocol: 'smoke-signal' });
     assert.equal(bad.klass, 'unknown-protocol');
+    // OpenRouter's no-such-id is a 400 whose body says so; a 400 that says something else is NOT a missing model.
+    const orFake = await probeModel({ model: 'or-fake-1', protocol: 'openai-completions', baseUrl: provider.url });
+    assert.equal(orFake.klass, 'no-such-id', JSON.stringify(orFake)); assert.equal(orFake.status, 400);
+    const malformed = await probeModel({ model: 'bad-request-1', protocol: 'openai-completions', baseUrl: provider.url });
+    assert.equal(malformed.klass, 'client error 400', 'a malformed request must not read as a missing model');
   } finally { await provider.stop(); }
 });
 

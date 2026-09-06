@@ -323,6 +323,12 @@ export async function probeModel(agent, opts = {}) {
   if (res.status === 401 || res.status === 403) klass = 'exists-auth-gated';
   else if (res.status === 410) klass = 'retired';
   else if (res.status === 404) klass = contentType === 'problem+json' ? 'entitlement' : 'no-such-id';
+  // First live hosted reading, 2026-09-06 (#1203 via #1197): OpenRouter answers a
+  // fake id with 400 `{"error":{"message":"<id> is not a valid model ID"}}`, not a
+  // 404. A 400 whose body SAYS the model does not exist is no-such-id; a 400 that
+  // says anything else stays a client error, because a malformed request must not
+  // read as a missing model.
+  else if (res.status === 400 && /not a valid model|model not found|no such model|does not exist|unknown model/i.test(bodyHead)) klass = 'no-such-id';
   return { status: res.status, klass, reason: k.reason, contentType, bodyHead, latencyMs: Date.now() - started };
 }
 
