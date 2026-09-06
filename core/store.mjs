@@ -59,6 +59,27 @@ function _identity(filePath) {
   return `${st.mtimeNs}:${st.size}`;
 }
 
+/**
+ * #715 — the cached domain WITHOUT the clone, for readers that promise not to
+ * write. `loadDomain` clones on the way out because writers mutate what they
+ * are handed; on a 57 MB board that clone is ~250 ms and ~110 MB of allocation
+ * PER REQUEST, and a handful of overlapping readers turned it into a
+ * garbage-collection stall that blocked the event loop for eighteen minutes.
+ * The caller owns the freeze: this function only hands back the shared object
+ * and the identity it was parsed under, so a reader can tell a hit from a
+ * rebuild. ⛔ Mutating the result corrupts every later reader in the process.
+ */
+export function loadDomainShared(filePath) {
+  if (!existsSync(filePath)) return { key: null, domain: _parseDomain(filePath) };
+  const key = _identity(filePath);
+  const hit = _cache.get(filePath);
+  if (hit && hit.key === key) return { key, domain: hit.domain };
+  const fresh = _parseDomain(filePath);
+  if (_cache.size >= CACHE_MAX) _cache.delete(_cache.keys().next().value);
+  _cache.set(filePath, { key, domain: fresh });
+  return { key, domain: fresh };
+}
+
 /** Read the store → domain projection. Empty domain if the file is absent. */
 export function loadDomain(filePath) {
   if (existsSync(filePath)) {
