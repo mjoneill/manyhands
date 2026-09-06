@@ -15,7 +15,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decide, staleSeats } from '../scripts/fanout-decide.mjs';
+import { decide, staleSeats, staleFacts } from '../scripts/fanout-decide.mjs';
 
 const HOUR = 3600 * 1000;
 const T0 = 1_757_050_000_000;
@@ -87,4 +87,38 @@ test('#1195 a stale seat AND a floor breach in one tick produce ONE body carryin
   assert.ok(warnBody);
   assert.match(warnBody, /only 1 of 6/);
   assert.match(warnBody, /alpha/);
+});
+
+
+// 2026-09-06 — FLAP: the same reaped-id fact, the seat's stream restarted by its
+// own health monitor between ticks, re-warned four times in forty minutes.
+test('#1195 an episode is the reaped-id FACT: a seat that briefly holds a stream and drops again on the same firstAt is NOT re-warned; a new firstAt is', () => {
+  const T0 = 1_757_060_000_000; const MIN = 60_000;
+  const base = { floor: 3, cooldownMs: 6 * 3600 * 1000, receivers: 5, sessions: 12 };
+  const mk = (streams, firstAt = '2026-09-06T00:16:29.799Z') => ({
+    receivers: 5, sessions: 12, seats: { alpha: { streams }, beta: { streams: 1 } },
+    staleSessions: [{ seat: 'alpha', firstAt, lastAt: firstAt, hits: 2 }],
+  });
+  let state = { r: 5, s: 12, sigTimes: {}, hist: [5, 5, 5, 5, 5, 5] };
+  const posts = [];
+  const tick = (t, status) => {
+    const out = decide({ ...base, now: t, state, staleSeats: staleSeats(status), staleFacts: staleFacts(status), stoppedSeats: [] });
+    state = out.state; if (out.warnBody && /DEAF SEAT NAMED/.test(out.warnBody)) posts.push(t);
+  };
+  tick(T0, mk(0));                       // deaf: named
+  tick(T0 + 5 * MIN, mk(1));             // stream restarted by the health monitor; fact still present
+  tick(T0 + 10 * MIN, mk(0));            // dropped again, SAME fact → silent
+  tick(T0 + 15 * MIN, mk(1));
+  tick(T0 + 20 * MIN, mk(0));
+  assert.equal(posts.length, 1, `one alarm for one fact, got ${posts.length}`);
+  // The fact leaves the payload, then a NEW episode (new firstAt) → warns again.
+  const clean = { receivers: 5, sessions: 12, seats: { alpha: { streams: 1 }, beta: { streams: 1 } }, staleSessions: [] };
+  tick(T0 + 25 * MIN, clean);
+  assert.deepEqual(state.staleEpisodes, {}, 'the episode ends when the fact is gone');
+  tick(T0 + 30 * MIN, mk(0, '2026-09-06T01:00:00.000Z'));
+  assert.equal(posts.length, 2, 'a new reaped-id fact is a new episode');
+  // Backward compatibility: without staleFacts the old rule applies (documented, not silently changed).
+  let old = { r: 5, s: 12, sigTimes: {}, hist: [5, 5, 5, 5, 5, 5] }; let n = 0;
+  for (const [t, st] of [[T0, mk(0)], [T0 + 5 * MIN, mk(1)], [T0 + 10 * MIN, mk(0)]]) { const o = decide({ ...base, now: t, state: old, staleSeats: staleSeats(st), stoppedSeats: [] }); old = o.state; if (o.warnBody) n++; }
+  assert.equal(n, 2, 'the pre-fix rule re-warns on the flap — this is the defect, kept reachable so the fix is falsifiable');
 });

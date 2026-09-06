@@ -29,7 +29,7 @@
  * @param {object}  a.state       previous state (from the state file)
  * @returns {{state: object, warnBody: string|null}}
  */
-export function decide({ receivers, sessions, floor, cooldownMs, now, state, staleSeats: stale = [], stoppedSeats: stopped = [] }) {
+export function decide({ receivers, sessions, floor, cooldownMs, now, state, staleSeats: stale = [], stoppedSeats: stopped = [], staleFacts = null }) {
   // Deep-copy the two containers. A spread alone leaves `sigTimes` and `hist`
   // ALIASED to the caller's objects, so decide() would edit state it was only
   // asked to read — invisible in production (each run reads fresh state off
@@ -255,8 +255,17 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
     st.staleEpisodes[key] = now;
     named.push(s);
   }
+  // 2026-09-06 — FLAP. An episode used to end the moment the seat was not in
+  // `stale`, i.e. the moment it held a stream again. A seat whose channel
+  // stream is restarted by its own health monitor every few minutes therefore
+  // "recovered" and "went deaf" on the SAME reaped-id fact, and the watch
+  // re-posted the identical alarm four times in forty minutes. An episode is
+  // the (seat, firstAt) FACT in staleSessions[]; it ends when that fact is
+  // gone, not when the seat briefly hears. `staleFacts` is the full set from
+  // /channel/status (streams ignored); absent, fall back to the old rule.
+  const facts = staleFacts ? new Set(staleFacts) : staleNow;
   for (const key of Object.keys(st.staleEpisodes)) {
-    if (!staleNow.has(key)) delete st.staleEpisodes[key];   // recovered, or a new episode replaced it
+    if (!facts.has(key)) delete st.staleEpisodes[key];   // the reaped-id fact is gone, or a new episode replaced it
   }
   if (named.length) {
     const lines = named.map((s) => `${s.seat} has been re-sending a session id this server already reaped `
@@ -387,6 +396,11 @@ export function lastWriteBySeatFrom(changes) {
  *
  * @returns {Array<{seat:string, firstAt:string, lastAt:string|null, hits:number}>}
  */
+/** Every (seat, firstAt) reaped-id fact in the payload, streams IGNORED — the episode identity for decide(). */
+export function staleFacts(status) {
+  return [...new Set((status?.staleSessions ?? []).filter((s) => s?.seat && s.firstAt).map((s) => `${s.seat}@${s.firstAt}`))];
+}
+
 export function staleSeats(status) {
   const out = new Map();
   for (const s of status?.staleSessions ?? []) {
