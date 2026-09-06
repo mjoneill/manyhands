@@ -20,7 +20,7 @@ import { BOARD_TOOLS, toolsFor, makeExecutor } from '../core/board-tools.mjs';
 
 test('#1196B the surface is read-only, and every tool is named and described', () => {
   const names = BOARD_TOOLS.map((t) => t.function.name).sort();
-  assert.deepEqual(names, ['board_search', 'card_get', 'graph_query']);
+  assert.deepEqual(names, ['board_search', 'card_get', 'graph_query', 'kind_list']);
   for (const t of BOARD_TOOLS) {
     assert.equal(t.type, 'function');
     assert.ok(t.function.description && t.function.description.length > 20, `${t.function.name} needs a description a model can act on`);
@@ -90,4 +90,58 @@ test('#1196B the executor refuses an unknown tool by name rather than guessing',
 test('#1196B card_get requires a shortId and says which argument was missing', async () => {
   const exec = makeExecutor({ get: async () => ({}), post: async () => ({}) });
   await assert.rejects(() => exec('card_get', {}), /shortId/);
+});
+
+/**
+ * ⛔ THE NOTE MUST NOT CONTRADICT THE ROWS. The zero-row note was keyed on
+ * `bindings` — a name /api/graph has never answered with — so it fired on every
+ * successful query: the model received rows AND a sentence saying the query
+ * matched nothing. Silent, and worse than an error, because a colleague told
+ * "nothing matched" beside real rows learns not to believe its own tools.
+ */
+test('#1196B graph_query reads the name the route answers with, so a full result is never labelled empty', async () => {
+  const full = { rows: [{ s: 'entity:1' }, { s: 'entity:2' }], returned: 2 };
+  const exec = makeExecutor({ get: async () => ({}), post: async () => full });
+  const out = await exec('graph_query', { query: 'SELECT ?s WHERE { ?s ?p ?o }' });
+  assert.equal(out.rows.length, 2);
+  assert.ok(!('note' in out), 'two rows came back: nothing may tell the model the query matched nothing');
+
+  const empty = makeExecutor({ get: async () => ({}), post: async () => ({ rows: [], returned: 0 }) });
+  const none = await empty('graph_query', { query: 'SELECT ?s WHERE { ?s a scrum:Nothing }' });
+  assert.deepEqual(none.rows, []);
+  assert.match(none.note, /matched nothing/i);
+  // and an empty result points at the orientation tool, because guessing at
+  // names is what produces empty results in the first place
+  assert.match(none.note, /kind_list/);
+});
+
+const KINDS = [
+  { name: 'scrum:Card', createdBy: 'card_create / POST /api/cards', definition: 'A unit of work with a permanent short id. The short id is IDENTITY and never changes, and much more prose follows here.' },
+  { name: 'scrum:Decision', createdBy: 'decision_create', definition: 'A ruling the board has made and can be held to.' },
+];
+
+test('#1196B kind_list answers what KINDS of thing live here, summarised, with the verb that creates each', async () => {
+  const paths = [];
+  const exec = makeExecutor({ get: async (p) => { paths.push(p); return KINDS; }, post: async () => ({}) });
+  const out = await exec('kind_list', {});
+  assert.match(paths[0], /^\/api\/kinds/);
+  assert.equal(out.kinds.length, 2);
+  assert.equal(out.kinds[0].name, 'scrum:Card');
+  assert.equal(out.kinds[0].createdBy, 'card_create / POST /api/cards');
+  // ONE sentence, not the register: the full text is ~18 KB and a small model
+  // spends its entire budget reading it instead of answering.
+  assert.equal(out.kinds[0].definition, 'A unit of work with a permanent short id.');
+  assert.doesNotMatch(out.kinds[0].definition, /IDENTITY/);
+});
+
+test('#1196B kind_list by name returns that kind WHOLE, and an unregistered name is an ANSWER naming what is registered', async () => {
+  const exec = makeExecutor({ get: async () => KINDS, post: async () => ({}) });
+  const one = await exec('kind_list', { name: 'scrum:Decision' });
+  assert.equal(one.name, 'scrum:Decision');
+  assert.match(one.definition, /held to/, 'asked for one kind, the model gets the FULL definition, not the summary');
+
+  const missing = await exec('kind_list', { name: 'scrum:Sprocket' });
+  assert.equal(missing.found, false);
+  assert.match(missing.note, /does not record/i);
+  assert.match(missing.note, /scrum:Card/, 'a miss names what IS registered — otherwise the model guesses again');
 });

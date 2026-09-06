@@ -23,6 +23,7 @@ const ARGS = {
   card_get: { shortId: 1 },
   board_search: { q: 'anything', k: 2 },
   graph_query: { query: 'SELECT ?s WHERE { ?s ?p ?o } LIMIT 1' },
+  kind_list: {},
 };
 
 test('#1196B SEAM: every declared tool reaches a real route — no tool 404s', async () => {

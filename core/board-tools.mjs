@@ -6,7 +6,8 @@
  * the message that woke it. This is the smallest surface that makes it a
  * participant rather than a correspondent.
  *
- * THREE TOOLS, ALL READS. Read a card, search the board, query the graph.
+ * FOUR TOOLS, ALL READS. Read a card, search the board, query the graph, and
+ * ask what kinds of thing the board records at all.
  * Nothing here writes. A colleague that can look things up is what the epic
  * promised; a colleague that can change things is a different card and deserves
  * its own argument rather than arriving as a convenience alongside this one.
@@ -69,7 +70,33 @@ export const BOARD_TOOLS = Object.freeze([
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      // ⭐ THE ORIENTATION TOOL. The other three answer questions about the
+      // board's CONTENTS and assume you already know its SHAPE. This one
+      // answers "what kind of thing lives here at all" — every registered kind,
+      // what it means, and the verb that creates one. It is what a colleague
+      // needs on arrival and when a query keeps coming back empty, and it was
+      // measured missing: a seat spent 3 min 21 s guessing SPARQL predicates
+      // while this list sat one call away.
+      name: 'kind_list',
+      description: 'List every kind of thing this board records — cards, decisions, memories, obligations and the rest — each with what it means and the verb that creates one. USE THIS FIRST when you are new here, when you do not know what the board holds, or when a graph_query keeps returning nothing and you suspect you are guessing at names. Pass a name to get that one kind\'s full definition instead of the summary of all of them.',
+      parameters: {
+        type: 'object',
+        properties: { name: { type: 'string', description: 'optional — one kind, e.g. "scrum:Card", for its full definition' } },
+      },
+    },
+  },
 ]);
+
+/** The opening sentence of a definition — orientation, not the whole register. */
+function firstSentence(text) {
+  const s = String(text ?? '').trim();
+  if (!s) return '';
+  const m = s.match(/[.!?](\s|$)/);
+  return m ? s.slice(0, m.index + 1) : s.slice(0, 200);
+}
 
 const BY_NAME = new Map(BOARD_TOOLS.map((t) => [t.function.name, t]));
 
@@ -113,8 +140,34 @@ export function makeExecutor({ get, post, by = 'board' }) {
         const query = String(args?.query ?? '').trim();
         if (!query) throw new Error('graph_query needs a query — a SPARQL SELECT');
         const out = await post('/api/graph', { query, by });
-        const bindings = Array.isArray(out?.bindings) ? out.bindings : [];
-        return bindings.length ? out : { ...out, bindings, note: 'the query ran and matched nothing. That is an answer, not a failure.' };
+        // ⛔ THE ANSWER IS IN `rows`. This read `bindings` — a name the route has
+        // never used — so the check found an empty array on EVERY call and
+        // attached "matched nothing" to results that had matched plenty. The
+        // model was handed rows and a note contradicting them. Same family as
+        // the three defects of 2026-09-06: a field read by a name nothing
+        // writes, accepted in silence. Read the name the route answers with.
+        const rows = Array.isArray(out?.rows) ? out.rows : [];
+        return rows.length ? out : { ...out, rows, note: 'the query ran and matched nothing. That is an answer, not a failure. If you are guessing at names, call kind_list to see what this board actually records.' };
+      }
+      case 'kind_list': {
+        const all = await get('/api/kinds?declared=true');
+        const kinds = Array.isArray(all) ? all : (Array.isArray(all?.kinds) ? all.kinds : []);
+        const wanted = String(args?.name ?? '').trim();
+        if (wanted) {
+          const one = kinds.find((k) => k?.name === wanted);
+          if (!one) {
+            return { name: wanted, found: false, note: `no kind named ${JSON.stringify(wanted)} is registered. That is an answer: this board does not record such a thing. The registered names are: ${kinds.map((k) => k.name).join(', ')}` };
+          }
+          return one;
+        }
+        // ⚠️ SUMMARISED ON PURPOSE. The full register is ~18 KB of prose and a
+        // small model spends its whole budget reading it. One sentence each
+        // plus the creating verb is what orientation needs; `name` fetches the
+        // rest for the one kind that turned out to matter.
+        return {
+          kinds: kinds.map((k) => ({ name: k?.name, createdBy: k?.createdBy ?? null, definition: firstSentence(k?.definition) })),
+          note: 'One sentence each. Call kind_list again with a name for that kind\'s full definition.',
+        };
       }
       default:
         throw new Error(`no such tool ${JSON.stringify(name)} — this seat can reach: ${[...BY_NAME.keys()].join(', ')}`);
