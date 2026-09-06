@@ -303,9 +303,14 @@
       document.getElementById('whisper-add').onclick = async () => {
         const slugEl = document.getElementById('whisper-new-slug');
         const bodyEl = document.getElementById('whisper-new-body');
-        const slug = (slugEl.value || '').trim();
+        // The short name becomes an IRI segment. A space in it took the whole
+        // graph read side down on 2026-09-06; slugify here, and the server
+        // refuses anything that still is not a segment.
+        const typed = (slugEl.value || '').trim();
+        const slug = typed.toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80);
         const body = (bodyEl.value || '').trim();
         if (!slug || !body) return say('A new whisper needs both a short name and some words.', false);
+        if (slug !== typed) say(`Short name saved as "${slug}" (letters, digits, . _ - only).`, true);
         try {
           render(await send('POST', '/api/tending/whispers', { slug, body }));
           slugEl.value = ''; bodyEl.value = '';

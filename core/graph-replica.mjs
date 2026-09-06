@@ -204,7 +204,23 @@ export const GRAPH_VOCABULARY = new Set([
 export const DEFAULT_LIMIT = 100;
 export const LIMIT_CEILING = 1000;
 
-const nn = (i) => oxigraph.namedNode(i);
+// 2026-09-06 — ONE INVALID IRI TOOK THE WHOLE READ SIDE DOWN. A stored @id with
+// a space in it made oxigraph throw on every query that scanned the store,
+// including ASK { ?s ?p ?o }. The mint site is fixed (tending-authoring
+// assertSlug); this is the second layer: any character an IRI cannot carry is
+// percent-encoded at projection, so a bad node is queryable at its encoded
+// name instead of poisoning the store. Counted, so it can be surfaced.
+export const invalidIriSeen = { count: 0, samples: [] };
+const IRI_BAD = /[\s<>"{}|\\^`]/g;
+function safeIri(i) {
+  const s = String(i);
+  if (!IRI_BAD.test(s)) return s;
+  IRI_BAD.lastIndex = 0;
+  invalidIriSeen.count += 1;
+  if (invalidIriSeen.samples.length < 5) invalidIriSeen.samples.push(s);
+  return s.replace(IRI_BAD, (c) => encodeURIComponent(c));
+}
+const nn = (i) => oxigraph.namedNode(safeIri(i));
 const lit = (v) => oxigraph.literal(String(v));
 // #1034 — a TYPED numeric literal. SPARQL's bare `0` IS "0"^^xsd:integer, so a
 // plain string never matches the shape a caller writes: FILTER(?o != 0) becomes

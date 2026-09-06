@@ -140,8 +140,30 @@ function requireBody(body) {
   return clean;
 }
 
+/**
+ * A slug becomes an IRI SEGMENT verbatim (`…/tending/prompt/<slug>`), so it
+ * must be one. On 2026-09-06 a prompt named with a space was saved as
+ * `…/prompt/scrum board-clarity`; oxigraph refused every query that scanned
+ * the store ("Invalid IRI code point ' '") and the whole read side of
+ * graph-native was down until it was found. Refused here, with the form that
+ * would have worked, so the operator error is a 400 and never a stored node.
+ */
+export const SLUG_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
+export function slugify(name) {
+  return String(name ?? '').trim().toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80);
+}
+export function assertSlug(slug) {
+  if (!slug || typeof slug !== 'string') throw new Error('slug is required');
+  if (!SLUG_RE.test(slug)) {
+    const hint = slugify(slug);
+    throw new Error(`slug "${slug}" cannot be an IRI segment (letters, digits, . _ - only; a space or punctuation would make every graph query fail)${hint ? ` — use "${hint}"` : ''}`);
+  }
+  return slug;
+}
+
 export function createPrompt(entities = [], { slug, body, by, at } = {}) {
   if (!slug) throw new Error('createPrompt: slug is required');
+  assertSlug(slug);
   const clean = requireBody(body);
   if (promptBySlug(entities, slug)) {
     throw new Error(`a whisper with slug "${slug}" already exists — editing it mints a version, creating it would fork the identity`);
