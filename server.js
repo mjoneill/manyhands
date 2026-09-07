@@ -3472,7 +3472,27 @@ async function handleAgentPromptVersion(req, res, seat) {
 // its whole budget reasoning and answered nobody, once a minute, for as long as
 // nobody happened to read the value back.
 const AGENT_PATCH_FIELDS = new Set(['by', 'state', 'contextPolicy', 'toolGrants', 'budgetPerDay', 'model', 'modelKey',
-  'name', 'emoji', 'color', 'residency', 'wakeOn', 'everyMinutes', 'thinking', 'maxHops', 'prompt']);
+  'name', 'emoji', 'color', 'residency', 'wakeOn', 'everyMinutes', 'thinking', 'maxHops', 'prompt', 'sampling']);
+// #1258 — sampling is BEHAVIOUR and lives on the agent: two seats can share one
+// registered model and run different temperatures. Until this field existed the
+// only ways to write it replaced the whole model spec (`model`, which also
+// de-registers the seat) or re-resolved it from the registry (`modelKey`, which
+// resets it) — so the loop read a value on every wake that no verb could set on
+// its own. Numeric knobs must be finite numbers; a knob sent as null is REMOVED,
+// never stored as zero.
+const AGENT_SAMPLING_NUMERIC = new Set(['temperature', 'topP', 'topK', 'repetitionPenalty', 'seed', 'maxTokens']);
+function samplingError(s) {
+  if (typeof s !== 'object' || Array.isArray(s)) return 'sampling must be an object of knobs: ' + [...MODEL_CALL_SAMPLING].join(', ');
+  const bad = Object.keys(s).filter((k) => !MODEL_CALL_SAMPLING.has(k));
+  if (bad.length) return `unknown sampling knob${bad.length === 1 ? '' : 's'} ${bad.map((k) => JSON.stringify(k)).join(', ')} — the loop would carry it to the adapter unread. Known: ${[...MODEL_CALL_SAMPLING].join(', ')}`;
+  for (const [k, v] of Object.entries(s)) {
+    if (v == null) continue;
+    if (AGENT_SAMPLING_NUMERIC.has(k) && !(typeof v === 'number' && Number.isFinite(v))) return `${k} must be a finite number or null (null removes it) — got ${JSON.stringify(v)}`;
+    if (k === 'keepAlive' && !(typeof v === 'string' || (typeof v === 'number' && Number.isFinite(v)))) return 'keepAlive must be a duration string like "5m" or a number of seconds';
+    if (k === 'stop' && !(typeof v === 'string' || (Array.isArray(v) && v.every((x) => typeof x === 'string')))) return 'stop must be a string or an array of strings';
+  }
+  return null;
+}
 
 // #1196 — WHAT MAY BE GRANTED, checked. Grants were free strings, and the
 // resolver ignored any name it did not know, so "board-search" returned 200 and
@@ -3503,6 +3523,7 @@ async function handlePatchAgent(req, res, seat) {
     if (body.state != null && !AGENT_STATES.has(body.state)) return sendJSON(res, 400, { error: 'state must be invited, resting or retired' });
     if (body.contextPolicy != null && !AGENT_CONTEXT_POLICIES.has(body.contextPolicy)) return sendJSON(res, 400, { error: 'contextPolicy must be artifact-only or thread' });
     if (body.prompt !== undefined) return sendJSON(res, 400, { error: 'the prompt is not a field of the agent — POST /api/agents/:seat/prompt mints a new VERSION; overwriting would lose which prompt wrote which post' });
+    if (body.sampling !== undefined && body.sampling !== null) { const err = samplingError(body.sampling); if (err) return sendJSON(res, 400, { error: err }); }
     const result = await withWriteLock(async () => {
       const data = readBoard();
       const agent = findAgent(data, seat);
@@ -3541,6 +3562,14 @@ async function handlePatchAgent(req, res, seat) {
         const registered = findModel(data, body.modelKey.trim().toLowerCase());
         if (!registered) return { status: 400, wire: { error: `modelKey "${body.modelKey}" is not a registered model — POST /api/models first` } };
         updated['scrum:modelSpec'] = modelSpecOf(registered); updated['scrum:model'] = registered['scrum:model']; updated['scrum:usesModel'] = registered['@id'];
+      }
+      // #1258 — after model/modelKey, so an explicit sampling block rides a model
+      // change instead of being reset by it; the binding (usesModel) is untouched.
+      if (body.sampling !== undefined) {
+        const spec = { ...(updated['scrum:modelSpec'] || {}) };
+        const clean = body.sampling == null ? {} : Object.fromEntries(Object.entries(body.sampling).filter(([, v]) => v != null));
+        if (Object.keys(clean).length) spec.sampling = clean; else delete spec.sampling;
+        updated['scrum:modelSpec'] = spec;
       }
       if (typeof body.name === 'string' && body.name.trim()) updated.name = body.name.trim();
       if (typeof body.emoji === 'string') updated['scrum:emoji'] = body.emoji;

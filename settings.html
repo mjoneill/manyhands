@@ -822,7 +822,9 @@ const opt = (values, cur, labels = {}) => values.map((v) => `<option value="${v}
 function agentRow(a) {
   const row = document.createElement('div'); row.className = 'agent-row'; row.setAttribute('data-agent-seat', a.seatKey); row.id = 'agent-' + a.seatKey;
   const grants = new Set(a.toolGrants || []);
-  const registeredKey = a.usesModel ? (MODELS.find((m) => m.id === a.usesModel) || {}).key || '' : '';
+  const registeredModel = a.usesModel ? (MODELS.find((m) => m.id === a.usesModel) || null) : null;
+  const registeredKey = registeredModel ? registeredModel.key || '' : '';
+  const sampling = (a.model && a.model.sampling && typeof a.model.sampling === 'object') ? a.model.sampling : {};
   const modelLabel = registeredKey ? `${esc(registeredKey)} (registered)` : `${esc(a.modelId || '?')} (inline)`;
   row.innerHTML = `<div class="agent-head"><strong>${a.emoji ? esc(a.emoji) + ' ' : ''}${esc(a.name)}</strong> <code>${esc(a.seatKey)}</code> <span class="badge state-${esc(a.state)}">${esc(a.state)}</span>${a.conflict ? ` <span class="badge state-retired" title="${esc(a.conflict.reason)}: &quot;${esc(a.conflict.phrase)}&quot; since ${esc(when(a.conflict.since))}" data-agent-conflict>⚠ prompt cancels grants</span>` : ''} <span class="meta">${modelLabel} · ${esc(a.residency)} · ${esc(a.contextPolicy)} · prompt v${a.prompt ? a.prompt.version : '?'} (${a.promptVersions} version${a.promptVersions === 1 ? '' : 's'}) · grants ${grants.size}${a.maxHops != null ? ` · hops ≤ ${a.maxHops}` : ''}${a.thinking != null ? ` · thinking ${a.thinking ? 'on' : 'off'}` : ''}${a.budgetPerDay != null ? ` · budget ${a.budgetPerDay}/day` : ''}</span></div>
     <p class="prompt-peek" data-agent-prompt-peek title="the first line of the prompt; open the editor below to read or change all of it"><span class="lbl">prompt v${a.prompt ? a.prompt.version : '?'}</span>${a.prompt && a.prompt.body ? esc(peek(a.prompt.body)) : '<em>no prompt yet</em>'}</p>
@@ -838,6 +840,13 @@ function agentRow(a) {
             <label>Thinking <select data-agent-thinking>${THINKING_OPTS(a.thinking)}</select><span class="hint">unset sends no flag at all</span></label>
             <label>Context <select data-agent-context>${opt(['artifact-only', 'thread'], a.contextPolicy)}</select><span class="hint">can it see the conversation it answers in</span></label>
             <label>Model <select data-agent-modelkey><option value=""${registeredKey ? '' : ' selected'}>inline: ${esc(a.modelId || '?')}</option>${MODELS.map((m) => `<option value="${esc(m.key)}"${m.key === registeredKey ? ' selected' : ''}>${esc(m.key)} — ${esc(m.model)}</option>`).join('')}</select></label>
+          </div>
+          <h4 style="margin-top:14px">How it samples <span class="hint" style="font-weight:normal">(#1258 — per seat, read on every wake; empty sends nothing, never zero)</span></h4>
+          <div class="form-grid" data-agent-sampling>
+            <label>Temperature <input data-agent-temperature type="number" step="0.05" min="0" max="2" value="${sampling.temperature ?? ''}" placeholder="engine default"></label>
+            <label>Max tokens <input data-agent-maxtokens type="number" min="1" step="1" value="${sampling.maxTokens ?? ''}" placeholder="${registeredModel && registeredModel.maxOutputTokens != null ? `model ceiling ${registeredModel.maxOutputTokens}` : 'engine default'}"><span class="hint">${registeredModel && registeredModel.maxOutputTokens != null ? `unset ⇒ inherits the model's ceiling of ${registeredModel.maxOutputTokens}` : 'unset ⇒ the engine decides'}</span></label>
+            <label>Keep alive <input data-agent-keepalive value="${esc(sampling.keepAlive ?? '')}" placeholder="e.g. 5m"><span class="hint">how long a local engine keeps the weights loaded</span></label>
+            ${Object.keys(sampling).filter((k) => !['temperature', 'maxTokens', 'keepAlive'].includes(k)).length ? `<span class="hint">also set by REST, kept as-is: ${esc(Object.keys(sampling).filter((k) => !['temperature', 'maxTokens', 'keepAlive'].includes(k)).map((k) => `${k}=${JSON.stringify(sampling[k])}`).join(', '))}</span>` : ''}
           </div>
         </div>
         <div class="pane">
@@ -887,6 +896,14 @@ function agentRow(a) {
     // A model change is sent ONLY when it changed: re-sending the same key
     // re-resolves the spec and would drop an inline sampling block for nothing.
     const mk = q('[data-agent-modelkey]').value; if (mk && mk !== registeredKey) body.modelKey = mk;
+    // #1258 — the three boxes are the truth for their knobs; knobs set by REST
+    // that the page does not show are carried, not dropped. An empty box means
+    // the knob is ABSENT: null here removes it on the server, never stores 0.
+    const s = { ...sampling };
+    s.temperature = numOrNull(q('[data-agent-temperature]').value.trim());
+    s.maxTokens = numOrNull(q('[data-agent-maxtokens]').value.trim());
+    const ka = q('[data-agent-keepalive]').value.trim(); s.keepAlive = ka || null;
+    body.sampling = s;
     if (!TOOLS.length) delete body.toolGrants; // no list ⇒ do not send an empty grant set by accident
     try {
       const { ok, status, out } = await send('PATCH', `/api/agents/${encodeURIComponent(a.seatKey)}`, body);
