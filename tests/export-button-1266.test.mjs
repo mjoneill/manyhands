@@ -220,6 +220,20 @@ test('#1266 ⭐⭐ THE PRESS — and un-scrubbed takes TWO deliberate acts, not 
     assert.equal(await page.$eval('#export-raw-confirm', (el) => el.hidden), false,
       'ticking un-scrubbed reveals the warning rather than arming it');
 
+    // ⛔ AN ACKNOWLEDGEMENT MUST NOT OUTLIVE THE CHOICE IT WAS GIVEN FOR.
+    // Confirm, change your mind, tick again — the confirmation must be gone, or
+    // a moment of "actually, no" leaves the un-scrubbed path armed for the next
+    // press. Folded into this test rather than its own: it needs the same page
+    // in the same state, and a second browser launch on a 2-core CI runner is
+    // real contention — my first version's extra launch is the most likely
+    // reason an unrelated test's server failed to start there.
+    await page.click('#export-raw-ack');
+    await page.click('#export-raw');
+    assert.equal(await page.$eval('#export-raw', (el) => el.checked), false);
+    await page.click('#export-raw');
+    assert.equal(await page.$eval('#export-raw-confirm', (el) => el.hidden), false,
+      're-ticking must ask again, not remember');
+
     // ⛔ THE NEGATIVE CONTROL. One act must not be enough.
     await page.click('#export-run');
     await new Promise((r) => setTimeout(r, 500));
@@ -248,98 +262,6 @@ test('#1266 ⭐⭐ THE PRESS — and un-scrubbed takes TWO deliberate acts, not 
   fs.rmSync(out, { recursive: true, force: true });
 });
 
-/**
- * ⛔ THE THREE TESTS THE MUTATION PASS DEMANDED. Each of these mutations
- * SURVIVED the file above, which means the property it breaks was being
- * described in prose and asserted by nothing:
- *
- *   success reported from the EXIT CODE rather than from disk   → survived
- *   the child's stderr replaced with a constant                 → survived
- *   the UI acknowledgement surviving an untick                  → survived
- *
- * The first two matter because the whole reason this endpoint exists rather
- * than a documented command is that the operator cannot see the directory. The
- * third is the #523 boundary: an acknowledgement that outlives the choice it
- * was given for is not a confirmation, it is a latch.
- */
-test('#1266 ⛔ EXIT 0 IS NOT CONTENT — a run that wrote nothing is a FAILURE', async () => {
-  // An empty board with only cards selected: the exporter has nothing to write.
-  // Whatever it returns, a response that says ok with no parts on disk would be
-  // the endpoint reporting the child's opinion instead of the world's.
-  const s = await startRestServer({ board: makeBoardFixture({ cards: [], nextShortId: 1 }), env: rootEnv });
-  try {
-    const out = inRoot(`empty-${process.pid}`);
-    fs.rmSync(out, { recursive: true, force: true });
-    const r = await api(s.baseUrl, 'POST', '/api/export', { by: 'ada', out, raw: true, spaces: 'cards' });
-    const parts = fs.existsSync(out) ? fs.readdirSync(out).filter((x) => /^part-\d+-of-\d+\.md$/.test(x)) : [];
-    if (r.status === 200) {
-      assert.ok(parts.length > 0, 'a 200 must mean files exist — this is the whole verify-at-the-beneficiary property');
-      assert.equal(r.body.parts, parts.length);
-    } else {
-      assert.equal(parts.length, 0, 'a failure must not have left a partial archive claiming to be one');
-    }
-    fs.rmSync(out, { recursive: true, force: true });
-  } finally { await s.stop(); }
-});
-
-test('#1266 ⛔ THE FAILURE CARRIES THE CHILD\'S OWN WORDS, not a house summary', async () => {
-  // A destination inside home that CANNOT be a directory, because a file is
-  // already sitting on the path. The child fails with the operating system's
-  // own message, and that message — not a constant — is what has to reach the
-  // operator, because it is the only thing that distinguishes "no permission"
-  // from "the room refused to scrub".
-  // ⚠️ The board must be NON-EMPTY. My first version used an empty one and the
-  // child refused before it ever tried to write — the detail was still its own
-  // words ("the board came back empty"), but the case under test is the one
-  // where the WRITE fails, which is the permissions-shaped failure this whole
-  // endpoint is built around.
-  const s = await startRestServer({ board: makeBoardFixture({ cards: [{ title: 'a card', by: 'ada' }], nextShortId: 2 }), env: rootEnv });
-  const blocker = inRoot(`blocker-${process.pid}`);
-  try {
-    fs.writeFileSync(blocker, 'not a directory');
-    const r = await api(s.baseUrl, 'POST', '/api/export', {
-      by: 'ada', out: path.join(blocker, 'inside'), raw: true, spaces: 'cards',
-    });
-    assert.equal(r.status, 500, `must fail: ${JSON.stringify(r.body).slice(0, 300)}`);
-    assert.equal(r.body.parts, 0);
-    assert.match(String(r.body.wrote), new RegExp(`${process.pid}`), 'it names the path it tried');
-    // ⭐ The discriminating assertion: text only the CHILD or the OS could have
-    // produced. A summary would pass "detail is non-empty" and fail this.
-    assert.match(String(r.body.detail), /ENOTDIR|not a directory|EEXIST|ENOENT/i,
-      `the operating system's own words must survive to the operator: ${String(r.body.detail).slice(0, 300)}`);
-  } finally {
-    fs.rmSync(blocker, { force: true });
-    await s.stop();
-  }
-});
-
-test('#1266 ⛔ UNTICKING UN-SCRUBBED DISARMS THE ACKNOWLEDGEMENT', async () => {
-  // An acknowledgement that outlives the choice it was given for is a latch,
-  // not a confirmation: tick, confirm, untick, re-tick — and the confirmation
-  // must be gone. Otherwise a moment of "actually, no" leaves the un-scrubbed
-  // path armed for the next press.
-  const out = inRoot(`.scrum-export-latch-${process.pid}`);
-  fs.rmSync(out, { recursive: true, force: true });
-  await withBrowserServer(async ({ server, browser }) => {
-    const page = await browser.newPage();
-    await page.goto(`${server.baseUrl}/`, { waitUntil: 'networkidle0' });
-    await page.click('#btn-export');
-    await page.$eval('#export-out', (el, v) => { el.value = v; }, out);
-
-    await page.click('#export-raw');
-    await page.click('#export-raw-ack');          // armed
-    await page.click('#export-raw');              // ...and changed my mind
-    assert.equal(await page.$eval('#export-raw', (el) => el.checked), false);
-    await page.click('#export-raw');              // ticked again
-
-    await page.click('#export-run');
-    await new Promise((r) => setTimeout(r, 500));
-    assert.match(await page.$eval('#export-status', (el) => el.textContent), /Confirm/,
-      'the earlier acknowledgement must NOT still be arming the un-scrubbed path');
-    assert.equal(fs.existsSync(out), false, 'and nothing was written');
-  }, { server: { env: rootEnv }, launch: { headless: 'new' } });
-  fs.rmSync(out, { recursive: true, force: true });
-});
 
 test('#1266 ⛔⛔ A CHILD THAT EXITS 0 AND WRITES NOTHING IS STILL A FAILURE', async () => {
   // ⭐ THE TEST A MUTATION DEMANDED AND NOTHING ELSE COULD PROVIDE. Replacing
@@ -369,6 +291,48 @@ test('#1266 ⛔⛔ A CHILD THAT EXITS 0 AND WRITES NOTHING IS STILL A FAILURE', 
     assert.equal(fs.existsSync(out), false);
   } finally {
     fs.rmSync(stub, { force: true });
+    await s.stop();
+  }
+});
+
+/**
+ * ⛔ RESTORED AFTER I DELETED IT BY ACCIDENT.
+ *
+ * Folding the untick test into the press test, to save a browser launch on a
+ * 2-core CI runner, took out two neighbours with it — my removal walked back to
+ * the wrong comment block. The mutation pass is the only reason I know: "the
+ * child's stderr is summarised away" went from killed to SURVIVED, which is
+ * exactly what a deleted assertion looks like from the outside.
+ *
+ * ⚠️ A trim that shrinks a test file is indistinguishable from a trim that
+ * shrinks its coverage, and the tests still passing says nothing about it.
+ */
+test('#1266 ⛔ THE FAILURE CARRIES THE CHILD\'S OWN WORDS, not a house summary', async () => {
+  // A destination that CANNOT be a directory, because a file already sits on
+  // the path. The child fails with the operating system's own message — and
+  // that message, not a constant, is what has to reach the operator, because it
+  // is the only thing distinguishing "no permission to write here" from "the
+  // room refused to scrub this". On a launchd-spawned server those are the two
+  // live hypotheses and the button cannot tell them apart on its own.
+  const s = await startRestServer({
+    board: makeBoardFixture({ cards: [{ title: 'a card', by: 'ada' }], nextShortId: 2 }),
+    env: rootEnv,
+  });
+  const blocker = inRoot(`blocker-${process.pid}`);
+  try {
+    fs.writeFileSync(blocker, 'not a directory');
+    const r = await api(s.baseUrl, 'POST', '/api/export', {
+      by: 'ada', out: path.join(blocker, 'inside'), raw: true, spaces: 'cards',
+    });
+    assert.equal(r.status, 500, `must fail: ${JSON.stringify(r.body).slice(0, 300)}`);
+    assert.equal(r.body.parts, 0);
+    assert.match(String(r.body.wrote), new RegExp(`${process.pid}`), 'it names the path it tried');
+    // ⭐ The discriminating assertion: text only the CHILD or the OS could have
+    // produced. A house summary passes "detail is non-empty" and fails this.
+    assert.match(String(r.body.detail), /ENOTDIR|not a directory|EEXIST|ENOENT/i,
+      `the operating system's own words must survive to the operator: ${String(r.body.detail).slice(0, 300)}`);
+  } finally {
+    fs.rmSync(blocker, { force: true });
     await s.stop();
   }
 });
