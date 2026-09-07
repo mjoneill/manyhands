@@ -410,9 +410,10 @@
      editable per row rather than register-only. -->
 <section id="models-panel">
   <h1 style="margin-top:34px">🧠 Models</h1>
-  <p class="sub prose">A model the board can call. Register it once; agents name it by key. The API key is never stored here — only the name of the environment variable that holds it. <strong>Probe</strong> sends a one-token request and a deliberately fake id side by side, so a 404 can be read.</p>
+  <p class="sub prose">What this board runs, and what it has registered. A <strong>registered</strong> model is a shared definition agents name by key; an <strong>inline</strong> model belongs to one seat and is listed here too, because a page called Models that cannot answer "what models does this board use" is answering a different question than the one it is asked (#1257). The API key is never stored here — only the name of the environment variable that holds it. <strong>Probe</strong> sends a one-token request and a deliberately fake id side by side, so a 404 can be read.</p>
   <div class="card">
     <div id="models-list"></div>
+    <div id="models-inline" data-inline-models></div>
     <details><summary>Register a model</summary>
       <div class="form-grid">
         <label>Key <input id="model-key" placeholder="gemma3-12b" aria-label="Registry key"><span class="hint">how an agent names it</span></label>
@@ -720,6 +721,7 @@ async function send(method, path, body) {
 }
 let TOOLS = [];   // GET /api/tools — the grantable set, in the server's own words
 let MODELS = [];  // GET /api/models — so an agent can pick a registered key
+let AGENTS = [];  // #1257 — GET /api/agents — so the Models section can say who runs what
 async function loadTools() { try { TOOLS = await (await fetch('/api/tools')).json(); } catch { TOOLS = []; } }
 
 // ── #1197 — models panel ──────────────────────────────────────────────────
@@ -729,7 +731,11 @@ function modelRow(m) {
   const row = document.createElement('div'); row.className = 'agent-row'; row.setAttribute('data-model-key', m.key);
   const probe = m.lastProbe ? `last probe: ${m.lastProbe.klass}${m.lastProbe.status != null ? ` (${m.lastProbe.status})` : ''} at ${m.lastProbe.at}` : 'never probed';
   const caps = ['jsonSchema', 'tools', 'images'];
-  row.innerHTML = `<div class="agent-head"><strong>${esc(m.name)}</strong> <code>${esc(m.key)}</code> <span class="meta">${esc(m.model)} via ${esc(m.protocol)}${m.provider ? ` @ ${esc(m.provider)}` : ''}${m.apiKeyRef ? ` · key ref ${esc(m.apiKeyRef)}` : ''}${m.contextWindow != null ? ` · ctx ${m.contextWindow}` : ''}${m.thinking != null ? ` · thinking ${m.thinking ? 'on' : 'off'}` : ''}${m.freeTier ? ' · free' : ''}${m.deprecatesOn ? ` · deprecates ${esc(m.deprecatesOn)}` : ''}</span></div>
+  // #1257 — a registered model that nobody uses used to look like one that
+  // everybody does; the list was wrong in both directions at once.
+  const users = AGENTS.filter((a) => a.usesModel === m.id).map((a) => a.seatKey);
+  const usedBy = users.length ? `used by ${users.map((s) => `<a href="#agent-${esc(s)}">${esc(s)}</a>`).join(', ')}` : '<span class="badge state-resting" data-model-unused>registered, used by no agent</span>';
+  row.innerHTML = `<div class="agent-head"><strong>${esc(m.name)}</strong> <code>${esc(m.key)}</code> <span class="meta" data-model-used-by>${usedBy}</span> <span class="meta">${esc(m.model)} via ${esc(m.protocol)}${m.provider ? ` @ ${esc(m.provider)}` : ''}${m.apiKeyRef ? ` · key ref ${esc(m.apiKeyRef)}` : ''}${m.contextWindow != null ? ` · ctx ${m.contextWindow}` : ''}${m.thinking != null ? ` · thinking ${m.thinking ? 'on' : 'off'}` : ''}${m.freeTier ? ' · free' : ''}${m.deprecatesOn ? ` · deprecates ${esc(m.deprecatesOn)}` : ''}</span></div>
     <div class="sub" data-model-probe>${esc(probe)}</div>
     <details data-model-editor><summary>✏️ Edit endpoint, limits &amp; thinking</summary>
       <div class="form-grid">
@@ -787,15 +793,42 @@ function modelRow(m) {
 // confirmation; `notice` carries it onto the fresh row, editor kept open.
 async function loadModels(notice) {
   try {
-    MODELS = await (await fetch('/api/models')).json();
+    [MODELS, AGENTS] = await Promise.all([fetch('/api/models').then((r) => r.json()), fetch('/api/agents').then((r) => r.json()).catch(() => [])]);
     const open = new Set([...document.querySelectorAll('.agent-row[data-model-key] [data-model-editor][open]')].map((d) => d.closest('.agent-row').dataset.modelKey));
     const list = $('models-list'); list.innerHTML = '';
-    if (!MODELS.length) { list.textContent = 'No models registered yet.'; return; }
+    if (!MODELS.length) list.textContent = 'No models registered yet.';
     for (const m of MODELS) {
       const r = modelRow(m); if (open.has(m.key)) r.querySelector('[data-model-editor]').open = true; list.appendChild(r);
       if (notice && notice.key === m.key) rowMsg(r.querySelector('[data-model-msg]'), notice.text, notice.ok);
     }
+    renderInlineModels();
   } catch (e) { modelsMsg('Could not load models: ' + e.message, false); }
+}
+// #1257 — INLINE models: a seat pointed at an endpoint without a registry entry.
+// They exist on purpose (a probe, a one-off, a model nobody else should
+// inherit), so they are listed as what they are — per seat — and NEVER
+// auto-registered. Promotion is an explicit act: it fills the register form
+// from the seat's spec and leaves the human to name the key and press the
+// button; the seat stays inline until someone binds it.
+function renderInlineModels() {
+  const box = $('models-inline'); box.innerHTML = '';
+  const inline = AGENTS.filter((a) => !a.usesModel && a.model && a.model.model);
+  if (!inline.length) return;
+  const h = document.createElement('h4'); h.style.marginTop = '16px'; h.textContent = `Running inline, not registered (${inline.length})`; box.appendChild(h);
+  for (const a of inline) {
+    const row = document.createElement('div'); row.className = 'agent-row'; row.setAttribute('data-inline-model', a.seatKey);
+    row.innerHTML = `<div class="agent-head"><strong>${esc(a.model.model)}</strong> <span class="badge state-invited">inline</span> <span class="meta">used by <a href="#agent-${esc(a.seatKey)}">${esc(a.seatKey)}</a> · via ${esc(a.model.protocol || '?')}${a.model.baseUrl ? ` @ ${esc(a.model.baseUrl)}` : ''}${a.model.sampling && Object.keys(a.model.sampling).length ? ` · sampling ${esc(Object.entries(a.model.sampling).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(' '))}` : ''}</span>
+      <button class="btn" data-model-promote title="fills the register form from this seat's spec; nothing is created until you press Register">Register as shared model…</button></div>`;
+    row.querySelector('[data-model-promote]').addEventListener('click', () => {
+      $('model-key').value = ''; $('model-name').value = a.model.model; $('model-model').value = a.model.model;
+      $('model-provider').value = a.model.provider || ''; $('model-protocol').value = a.model.protocol || 'ollama-native';
+      $('model-baseurl').value = a.model.baseUrl || ''; $('model-keyref').value = a.model.apiKeyRef || '';
+      $('model-maxout').value = a.model.sampling && a.model.sampling.maxTokens != null ? a.model.sampling.maxTokens : '';
+      const form = $('model-key').closest('details'); form.open = true; $('model-key').focus();
+      modelsMsg(`Filled from ${a.seatKey}'s inline model. Choose a key and press Register; then bind ${a.seatKey} to it from its editor — it stays inline until you do.`, true);
+    });
+    box.appendChild(row);
+  }
 }
 $('model-create').addEventListener('click', async () => {
   $('model-create').disabled = true;
@@ -907,7 +940,7 @@ function agentRow(a) {
     if (!TOOLS.length) delete body.toolGrants; // no list ⇒ do not send an empty grant set by accident
     try {
       const { ok, status, out } = await send('PATCH', `/api/agents/${encodeURIComponent(a.seatKey)}`, body);
-      if (ok) loadAgents({ seat: a.seatKey, text: `Saved ${out.seatKey}${out.released && out.released.length ? ` — released #${out.released.join(', #')}` : ''}.${out.warning ? ' ⚠ ' + out.warning : ''}`, ok: !out.warning });
+      if (ok) loadModels(), loadAgents({ seat: a.seatKey, text: `Saved ${out.seatKey}${out.released && out.released.length ? ` — released #${out.released.join(', #')}` : ''}.${out.warning ? ' ⚠ ' + out.warning : ''}`, ok: !out.warning });
       else rowMsg(msg, 'Rejected: ' + (out.error || status), false);
     } catch (e) { rowMsg(msg, 'Save failed: ' + e.message, false); }
     btn.disabled = false;
