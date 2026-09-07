@@ -130,7 +130,62 @@ export function saveDomain(filePath, domain, opts = {}) {
   if (opts.roster) stamped = { ...ensurePeople(stamped, opts.roster), lastUpdated: stamped.lastUpdated };
   const doc = domainToJsonLd(stamped);
   const tmp = filePath + '.tmp';
-  writeFileSync(tmp, JSON.stringify(doc, null, 2), 'utf8');
+  const json = JSON.stringify(doc, null, 2);
+  writeFileSync(tmp, json, 'utf8');
   renameSync(tmp, filePath);
+
+  // #1114 — THE WRITER INSTALLS WHAT IT JUST WROTE.
+  //
+  // The cache is keyed on file identity, so before this line every write
+  // invalidated it and the next read paid a full re-read + reparse: 422 ms on
+  // the live 55.9 MB board, on the same single thread the writes need. In a
+  // busy room reads and writes alternate, so the hit rate collapsed toward
+  // zero exactly when the cache was worth most.
+  //
+  // ⛔ What is installed must be what a COLD PROCESS would read, not merely
+  // what we have in hand. Three ways to get there, MEASURED on the live 55.9 MB
+  // document rather than argued:
+  //
+  //     what a cold read costs:   readFile 132 ms + JSON.parse 102 ms = 234 ms
+  //     A  reparse the string we already wrote          116 ms   ✅ shipped
+  //     B  extra JSON.stringify + JSON.parse            371 ms   ⛔ NET LOSS
+  //     C  project `doc` directly                        11 ms   ⛔ INCORRECT
+  //
+  // ⚠️ B is what this fix shipped as until it was measured — it "saves" a
+  // 234 ms read by spending 371 ms, which is slower than doing nothing. The
+  // store's own #715 note says the same thing in different words and I still
+  // had to be shown the number. An optimisation nobody timed is a guess.
+  //
+  // ⛔ C is the fastest and it is WRONG, which the test caught and reasoning
+  // did not: `JSON.stringify` DROPS `undefined`-valued keys, so a domain
+  // carrying one makes the cache disagree with the file — silently, for every
+  // reader until the next write. That is a worse failure than a slow read.
+  //
+  // ⇒ A is correct BY CONSTRUCTION rather than by argument: `json` is the
+  // exact byte sequence now on disk, and `jsonLdToDomain(JSON.parse(json))` is
+  // the exact function a cold reader applies to it. There is no shape that can
+  // round-trip differently, because it is the same round trip.
+  try {
+    _cache.set(filePath, {
+      key: _identity(filePath),
+      domain: jsonLdToDomain(JSON.parse(json)),
+    });
+    if (_cache.size > CACHE_MAX) _cache.delete(_cache.keys().next().value);
+  } catch {
+    // A cache we cannot build correctly is a cache we must not have. Dropping
+    // it costs the next reader a reparse; installing a wrong one costs every
+    // reader until the next write, silently.
+    _cache.delete(filePath);
+  }
   return doc;
+}
+
+/**
+ * #1114 — test seam. Drops the cached parse for one path so a test can prove
+ * that an assertion about a cache HIT was not vacuous. Nothing in the server
+ * calls this; it exists so the control in `store-write-cache-1114.test.mjs`
+ * can show the same read failing without the cache.
+ */
+export function _dropCacheForTest(filePath) {
+  _cache.delete(filePath);
 }

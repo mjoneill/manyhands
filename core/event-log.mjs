@@ -30,7 +30,7 @@
  * event recording what/when/who — never the content. See `redactEvent`.
  */
 
-import { readFileSync, writeFileSync, appendFileSync, readdirSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, readdirSync, existsSync, mkdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 /** Closed vocabulary. An unknown op is a rejected write, not a logged curiosity. */
@@ -142,16 +142,69 @@ function parseSegment(dir, file) {
 }
 
 /**
+ * #1114 — the memo, and the hazard it creates.
+ *
+ * `nextSeq` used to re-parse the whole newest segment to read ONE integer, on
+ * EVERY append, and `writeBoard` appends once per event. Measured on the live
+ * log: 26 ms against an 8.5 MB segment at midday. Segments are day-scoped, so
+ * that cost grows all day and resets at midnight — the previous day's peak was
+ * 23 MB. It was the one straightforwardly wasteful line in a write path whose
+ * measured uncontended floor is ~430 ms.
+ *
+ * ⛔ A memo in an append-only log risks the one thing the log exists to
+ * provide: if an appender this process cannot see writes seq 2, a stale memo
+ * MINTS A DUPLICATE 2 and the total order is gone — silently, with no error
+ * anywhere. Today the REST server is the only writer (MCP proxies to it over
+ * HTTP), but tests, repair scripts and a second server on the same directory
+ * all append, and "only one writer" is a fact about this deployment, not a
+ * property of this function.
+ *
+ * So the memo is VALIDATED, not trusted: it records the identity (name, size,
+ * mtime) of the segment it was derived from, and any difference sends us back
+ * to the parse. That keeps the cheap half of what the parse was buying and
+ * costs a `stat` — microseconds against milliseconds — while a foreign append,
+ * a truncation, or an in-place rewrite all fall back to reading the file.
+ */
+const _seqMemo = new Map();
+
+/** Identity of the segment a memo was derived from; `null` if it is gone. */
+function segmentIdentity(dir, file) {
+  try {
+    const st = statSync(join(dir, file));
+    return `${file}:${st.size}:${st.mtimeMs}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The next seq to assign. Scans the NEWEST segment holding a readable event and
  * takes its max + 1 — correct because seq is monotonic and segments are
  * date-ordered, and bounded because it never reads the whole history.
+ *
+ * Memoized per directory and validated against the newest segment's identity;
+ * see the note above for why the validation is the load-bearing part.
  */
 export function nextSeq(dir) {
   const files = segments(dir);
+  const newest = files.length ? files[files.length - 1] : null;
+  const identity = newest ? segmentIdentity(dir, newest) : null;
+
+  const memo = _seqMemo.get(dir);
+  if (memo && identity && memo.identity === identity) return memo.seq;
+
   for (let i = files.length - 1; i >= 0; i--) {
     const evs = parseSegment(dir, files[i]);
-    if (evs.length) return Math.max(...evs.map((e) => e.seq)) + 1;
+    if (evs.length) {
+      const seq = Math.max(...evs.map((e) => e.seq)) + 1;
+      // Only the NEWEST segment's identity can certify the answer: if we fell
+      // through to an older one, a later write to the newest must re-derive.
+      if (identity && i === files.length - 1) _seqMemo.set(dir, { identity, seq });
+      else _seqMemo.delete(dir);
+      return seq;
+    }
   }
+  _seqMemo.delete(dir);
   return 1;
 }
 
@@ -331,7 +384,14 @@ export function appendEvent(dir, event, opts = {}) {
     stored.fields = event.fields;
   }
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  appendFileSync(join(dir, segmentFor(recorded_at)), JSON.stringify(stored) + '\n', 'utf8');
+  const file = segmentFor(recorded_at);
+  appendFileSync(join(dir, file), JSON.stringify(stored) + '\n', 'utf8');
+  // #1114 — refresh the memo from the file we just wrote, so the NEXT append
+  // is a stat rather than a parse. Keyed on the post-write identity, so any
+  // other writer still invalidates it.
+  const identity = segmentIdentity(dir, file);
+  if (identity && file === (segments(dir).at(-1) ?? file)) _seqMemo.set(dir, { identity, seq: stored.seq + 1 });
+  else _seqMemo.delete(dir);
   return stored;
 }
 
