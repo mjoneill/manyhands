@@ -363,3 +363,53 @@ test('#1198 Ollama reasoning is counted, so `thinking: true` is a claim somethin
     'before this, the thinking assertion could never be satisfied for an Ollama model — '
     + 'a guard that cannot pass is as useless as one that cannot fail');
 });
+
+/**
+ * #1261 — THE PROVIDER'S OWN WORDS MUST REACH THE READER.
+ *
+ * Live, 2026-09-06T12:08Z: a tools-bearing request to a model with no tools
+ * capability returned 400 "does not support tools". The reader saw
+ * `model provider refused (400): client error 400` and the body — the entire
+ * diagnosis — was gone. #838/#840 is the same defect one boundary over: a 410
+ * end-of-life notice consumed as a busy signal thirteen times because nobody
+ * kept the body.
+ *
+ * ⚠️ WHY THIS TEST EXISTS EVEN THOUGH THE BEHAVIOUR ALREADY WORKS. `refusalDetail`
+ * landed in 6178da0 on 2026-09-06T12:31Z — twenty-three minutes AFTER the finding
+ * was observed, in the same epic whose body the finding was sitting in. The card
+ * was then lifted out of that body the next morning and filed as open work. So
+ * the fix shipped, nothing pinned it, and the finding outlived it in prose.
+ * ⇒ A behaviour with no falsifier is indistinguishable from a behaviour that was
+ * never built, and this one has now cost two readings of the same defect.
+ */
+const ollamaRefusal = (status, rawBody) => ({ status, body: null, rawBody });
+
+test('#1261 a refusal carries the provider\'s words into the message, on every protocol', async () => {
+  for (const protocol of PROTOCOL_NAMES) {
+    const s = stub(ollamaRefusal(400, JSON.stringify({ error: 'model does not support tools' })));
+    const err = await callModel({ model: 'm', protocol, baseUrl: 'http://x' }, MSGS, { transport: s.transport })
+      .then(() => null, (e) => e);
+    assert.ok(err instanceof ModelRefusedError, `${protocol}: a 400 must refuse`);
+    assert.match(err.message, /does not support tools/,
+      `${protocol}: the reader is shown the message, so the provider's words must be IN it — got: ${err.message}`);
+    assert.equal(err.body, JSON.stringify({ error: 'model does not support tools' }),
+      `${protocol}: and the raw body is kept whole for anything that wants to parse it`);
+  }
+});
+
+test('#1261 the message stays useful when the body is not JSON, and says nothing extra when there is no body', async () => {
+  // Plain text: the text IS the message, not an envelope to dig through.
+  const s1 = stub(ollamaRefusal(400, 'this model has no tools'));
+  const e1 = await callModel({ model: 'm', protocol: 'ollama-native', baseUrl: 'http://x' }, MSGS,
+    { transport: s1.transport }).then(() => null, (e) => e);
+  assert.match(e1.message, /this model has no tools/, 'a non-JSON body is quoted as-is');
+
+  // ⇒ THE OTHER DIRECTION, and the reason this is not just "assert a substring":
+  // an empty body must not manufacture a ` — provider said: ` with nothing after
+  // it. A diagnostic that always speaks teaches the reader to stop reading it.
+  const s2 = stub(ollamaRefusal(400, ''));
+  const e2 = await callModel({ model: 'm', protocol: 'ollama-native', baseUrl: 'http://x' }, MSGS,
+    { transport: s2.transport }).then(() => null, (e) => e);
+  assert.doesNotMatch(e2.message, /provider said/, 'no body ⇒ no provider-said clause at all');
+  assert.match(e2.message, /client error 400/, 'and the classification still reaches the reader');
+});
