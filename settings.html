@@ -83,6 +83,11 @@
     padding:10px 0; margin:0 0 14px; background:var(--bg); border-bottom:1px solid var(--border); }
   [data-settings-nav] a { color:var(--muted); text-decoration:none; font:13px var(--mono); padding:6px 10px; border:1px solid transparent; border-radius:8px; }
   [data-settings-nav] a:hover { color:var(--fg); border-color:var(--border); }
+  /* #1256 — the nav says which section is ON SCREEN, and only that. A clicked
+     link used to keep its focus ring while the reader scrolled on, so the nav
+     pointed at the last thing clicked, not the thing being looked at. */
+  [data-settings-nav] a[aria-current="location"] { color:var(--fg); border-color:var(--border); background:var(--card); }
+  [data-settings-nav] a:focus:not(:focus-visible) { outline:none; }
   [id] { scroll-margin-top:64px; }
   .by-line { display:flex; align-items:center; gap:8px; color:var(--muted); font-size:13px; margin-left:auto; }
   .by-line input { width:110px; background:var(--bg); color:var(--fg); border:1px solid var(--border); border-radius:8px; padding:6px 10px; font:13px var(--mono); }
@@ -103,6 +108,10 @@
   .agent-row > details > summary { cursor:pointer; color:var(--link); font-size:13px; margin-top:8px; }
   .agent-head { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
   .agent-head .meta { color:var(--muted); font:12px var(--mono); }
+  /* #1256 — the prompt is the thing people come here for; its first line is
+     visible before any click, and the fold names what it hides. */
+  .prompt-peek { margin:6px 0 0; color:var(--fg); font-size:13px; line-height:1.4; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%; }
+  .prompt-peek .lbl { color:var(--muted); font:12px var(--mono); margin-right:6px; }
   .badge { font:11px var(--mono); text-transform:uppercase; letter-spacing:.08em; padding:2px 7px; border:1px solid var(--border); border-radius:6px; color:var(--muted); }
   .badge.state-resting { color:#e2b054; border-color:#e2b054; }
   .badge.state-retired { color:var(--err); border-color:var(--err); }
@@ -700,6 +709,8 @@ const esc = (v) => String(v ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<
 // first sentence; the whole text stays on hover.
 const firstSentence = (t) => { const m = String(t || '').match(/^.*?[.!?](\s|$)/); return m ? m[0].trim() : String(t || ''); };
 const when = (iso) => (iso ? String(iso).replace('T', ' ').slice(0, 16) + 'Z' : 'unknown');
+// #1256 — one line of a prompt, for the peek: first non-empty line, clipped.
+const peek = (t, n = 160) => { const line = String(t || '').split(/\r?\n/).map((l) => l.trim()).find(Boolean) || ''; return line.length > n ? line.slice(0, n - 1) + '…' : line; };
 const numOrNull = (v) => (v === '' || v == null ? null : Number(v));
 const rowMsg = (el, text, ok) => { el.textContent = text; el.className = 'msg ' + (ok ? 'ok' : 'err'); };
 async function send(method, path, body) {
@@ -720,7 +731,7 @@ function modelRow(m) {
   const caps = ['jsonSchema', 'tools', 'images'];
   row.innerHTML = `<div class="agent-head"><strong>${esc(m.name)}</strong> <code>${esc(m.key)}</code> <span class="meta">${esc(m.model)} via ${esc(m.protocol)}${m.provider ? ` @ ${esc(m.provider)}` : ''}${m.apiKeyRef ? ` · key ref ${esc(m.apiKeyRef)}` : ''}${m.contextWindow != null ? ` · ctx ${m.contextWindow}` : ''}${m.thinking != null ? ` · thinking ${m.thinking ? 'on' : 'off'}` : ''}${m.freeTier ? ' · free' : ''}${m.deprecatesOn ? ` · deprecates ${esc(m.deprecatesOn)}` : ''}</span></div>
     <div class="sub" data-model-probe>${esc(probe)}</div>
-    <details data-model-editor><summary>Edit</summary>
+    <details data-model-editor><summary>✏️ Edit endpoint, limits &amp; thinking</summary>
       <div class="form-grid">
         <label>Name <input data-f="name" value="${esc(m.name)}"></label>
         <label>Provider model id <input data-f="model" value="${esc(m.model)}"></label>
@@ -809,12 +820,13 @@ $('model-create').addEventListener('click', async () => {
 function agentsMsg(text, ok) { rowMsg($('agents-msg'), text, ok); }
 const opt = (values, cur, labels = {}) => values.map((v) => `<option value="${v}"${v === cur ? ' selected' : ''}>${labels[v] || v}</option>`).join('');
 function agentRow(a) {
-  const row = document.createElement('div'); row.className = 'agent-row'; row.setAttribute('data-agent-seat', a.seatKey);
+  const row = document.createElement('div'); row.className = 'agent-row'; row.setAttribute('data-agent-seat', a.seatKey); row.id = 'agent-' + a.seatKey;
   const grants = new Set(a.toolGrants || []);
   const registeredKey = a.usesModel ? (MODELS.find((m) => m.id === a.usesModel) || {}).key || '' : '';
   const modelLabel = registeredKey ? `${esc(registeredKey)} (registered)` : `${esc(a.modelId || '?')} (inline)`;
   row.innerHTML = `<div class="agent-head"><strong>${a.emoji ? esc(a.emoji) + ' ' : ''}${esc(a.name)}</strong> <code>${esc(a.seatKey)}</code> <span class="badge state-${esc(a.state)}">${esc(a.state)}</span>${a.conflict ? ` <span class="badge state-retired" title="${esc(a.conflict.reason)}: &quot;${esc(a.conflict.phrase)}&quot; since ${esc(when(a.conflict.since))}" data-agent-conflict>⚠ prompt cancels grants</span>` : ''} <span class="meta">${modelLabel} · ${esc(a.residency)} · ${esc(a.contextPolicy)} · prompt v${a.prompt ? a.prompt.version : '?'} (${a.promptVersions} version${a.promptVersions === 1 ? '' : 's'}) · grants ${grants.size}${a.maxHops != null ? ` · hops ≤ ${a.maxHops}` : ''}${a.thinking != null ? ` · thinking ${a.thinking ? 'on' : 'off'}` : ''}${a.budgetPerDay != null ? ` · budget ${a.budgetPerDay}/day` : ''}</span></div>
-    <details data-agent-editor><summary>Edit</summary>
+    <p class="prompt-peek" data-agent-prompt-peek title="the first line of the prompt; open the editor below to read or change all of it"><span class="lbl">prompt v${a.prompt ? a.prompt.version : '?'}</span>${a.prompt && a.prompt.body ? esc(peek(a.prompt.body)) : '<em>no prompt yet</em>'}</p>
+    <details data-agent-editor><summary>✏️ Edit prompt, grants &amp; settings</summary>
       <div class="agent-editor">
         <div class="pane" data-agent-grants>
           <h4>What it may reach</h4>
@@ -885,6 +897,26 @@ function agentRow(a) {
   });
   return row;
 }
+// #1256 — the nav marks the section on screen. Not an IntersectionObserver:
+// "which heading is the last one above the fold" is one pass over six
+// headings and answers the same on every browser the harness runs.
+const NAV_LINKS = [...document.querySelectorAll('[data-settings-nav] a[href^="#"]')];
+function markCurrentSection() {
+  let current = null;
+  for (const a of NAV_LINKS) {
+    const h = document.getElementById(a.getAttribute('href').slice(1));
+    if (h && h.getBoundingClientRect().top <= 80) current = a;
+  }
+  if (!current) current = NAV_LINKS[0] || null;
+  for (const a of NAV_LINKS) { if (a === current) a.setAttribute('aria-current', 'location'); else a.removeAttribute('aria-current'); }
+}
+addEventListener('scroll', markCurrentSection, { passive: true });
+addEventListener('resize', markCurrentSection);
+addEventListener('load', markCurrentSection);
+for (const a of NAV_LINKS) a.addEventListener('click', () => setTimeout(() => { a.blur(); markCurrentSection(); }, 0));
+// A link to #agent-<seat> opens that seat's editor, arriving or in place.
+addEventListener('hashchange', () => { const d = document.querySelector(`.agent-row[id="${CSS.escape(location.hash.slice(1))}"] [data-agent-editor]`); if (d) { d.open = true; d.closest('.agent-row').scrollIntoView(); } });
+
 async function loadAgents(notice) {
   try {
     const agents = await (await fetch('/api/agents')).json();
@@ -892,7 +924,7 @@ async function loadAgents(notice) {
     const list = $('agents-list'); list.innerHTML = '';
     if (!agents.length) { list.textContent = 'No agents defined yet.'; return; }
     for (const a of agents) {
-      const r = agentRow(a); if (open.has(a.seatKey)) r.querySelector('[data-agent-editor]').open = true; list.appendChild(r);
+      const r = agentRow(a); if (open.has(a.seatKey) || location.hash === '#agent-' + a.seatKey) r.querySelector('[data-agent-editor]').open = true; list.appendChild(r);
       if (notice && notice.seat === a.seatKey) rowMsg(r.querySelector('[data-agent-msg]'), notice.text, notice.ok);
     }
   } catch (e) { agentsMsg('Could not load agents: ' + e.message, false); }

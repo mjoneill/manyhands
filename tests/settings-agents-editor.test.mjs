@@ -147,3 +147,67 @@ test('#1239 the page has a section nav and every link lands on a section that ex
   for (const id of hrefs) assert.match(html, new RegExp(`id="${id}"`), `#${id} exists on the page`);
   for (const must of ['models-panel', 'agents-panel']) assert.ok(hrefs.includes(must), `${must} is reachable from the nav`);
 });
+
+/**
+ * #1256 — THE OWNER OPENED THE PAGE AND CONCLUDED THE PROMPT EDITOR HAD BEEN
+ * REMOVED. Nothing was removed: #1239 put the prompt behind a fold whose whole
+ * label was "Edit". A control that exists and cannot be found produces a FALSE
+ * belief about the system, which is worse than an absent one. So: the prompt's
+ * first line is on the page before any click, the fold names what it holds, a
+ * link to #agent-<seat> opens that seat's editor, and the nav marks the section
+ * that is actually on screen (a clicked link used to keep its focus ring while
+ * the reader scrolled away, so the nav pointed at the last click).
+ */
+
+test('#1256 the prompt is visible before any click, and the fold says what it hides', async () => {
+  await withBrowserServer(async ({ server, browser }) => {
+    const r = await post(server.baseUrl, '/api/agents', SEED_AGENT); assert.equal(r.status, 201, await r.text());
+    const page = await browser.newPage();
+    await page.goto(`${server.baseUrl}/settings.html`, { waitUntil: 'networkidle0' });
+    const row = '.agent-row[data-agent-seat="probe"]';
+    await page.waitForSelector(`${row} [data-agent-editor]`, { timeout: 5000 });
+    const seen = await page.$eval(row, (el) => ({
+      peek: el.querySelector('[data-agent-prompt-peek]')?.textContent || '',
+      peekVisible: !!(el.querySelector('[data-agent-prompt-peek]') && el.querySelector('[data-agent-prompt-peek]').getBoundingClientRect().height > 0),
+      summary: el.querySelector('[data-agent-editor] > summary')?.textContent || '',
+      open: el.querySelector('[data-agent-editor]').open,
+      id: el.id,
+    }));
+    assert.ok(seen.peek.includes('You are a probe.'), 'the prompt\'s first line is on the page: ' + seen.peek);
+    assert.ok(seen.peekVisible, 'and it is rendered, not merely present in the DOM');
+    assert.equal(seen.open, false, 'the full editor still starts folded — the peek is what makes that acceptable');
+    assert.match(seen.summary, /prompt/i, 'the fold names the prompt: ' + seen.summary);
+    assert.match(seen.summary, /grants/i, 'and the grants: ' + seen.summary);
+    assert.equal(seen.id, 'agent-probe', 'the row is addressable');
+  });
+});
+
+test('#1256 a link to #agent-<seat> lands on that seat with its editor OPEN', async () => {
+  await withBrowserServer(async ({ server, browser }) => {
+    const r = await post(server.baseUrl, '/api/agents', SEED_AGENT); assert.equal(r.status, 201, await r.text());
+    const page = await browser.newPage();
+    await page.goto(`${server.baseUrl}/settings.html#agent-probe`, { waitUntil: 'networkidle0' });
+    await page.waitForSelector('.agent-row[data-agent-seat="probe"] [data-agent-editor]', { timeout: 5000 });
+    const open = await page.$eval('.agent-row[data-agent-seat="probe"] [data-agent-editor]', (d) => d.open);
+    assert.equal(open, true, 'arriving by link opens the editor');
+    const textarea = await page.$eval('.agent-row[data-agent-seat="probe"] [data-agent-prompt]', (t) => ({ value: t.value, visible: t.getBoundingClientRect().height > 0 }));
+    assert.ok(textarea.visible && textarea.value.startsWith('You are a probe.'), 'and the prompt textarea is on screen with the prompt in it');
+  });
+});
+
+test('#1256 the nav marks the section ON SCREEN — scrolled to Models, it says Models, not the last thing clicked', async () => {
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1000, height: 600 });
+    await page.goto(`${server.baseUrl}/settings.html`, { waitUntil: 'networkidle0' });
+    // Click Whispers (the specimen: the nav kept saying Whispers), then scroll to Models by hand.
+    await page.click('[data-settings-nav] a[href="#whispers-panel"]');
+    await page.waitForFunction(() => document.querySelector('[data-settings-nav] a[href="#whispers-panel"]')?.getAttribute('aria-current') === 'location', { timeout: 3000 });
+    await page.evaluate(() => document.getElementById('models-panel').scrollIntoView());
+    await page.waitForFunction(() => document.querySelector('[data-settings-nav] a[href="#models-panel"]')?.getAttribute('aria-current') === 'location', { timeout: 3000 });
+    const marked = await page.$$eval('[data-settings-nav] a[aria-current]', (els) => els.map((a) => a.getAttribute('href')));
+    assert.deepEqual(marked, ['#models-panel'], 'exactly one link is current, and it is the section on screen');
+    const focused = await page.evaluate(() => document.activeElement && document.activeElement.getAttribute('href'));
+    assert.notEqual(focused, '#whispers-panel', 'the clicked link does not keep focus to masquerade as current');
+  });
+});
