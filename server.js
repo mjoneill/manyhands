@@ -1304,7 +1304,53 @@ let _activitySeq = 0;
 // describe the same cursor.
 let _activityAt = null;
 
+/**
+ * #1114 — SINGLE-FLIGHT. The sync had no in-flight guard, so N concurrent
+ * readers each ran their own full projection of the same document.
+ *
+ * Measured across 1,326 syncs on 2026-09-07, from the log line below:
+ *
+ *     concurrent syncs   count    median ms      max ms
+ *           0               81          316       27,596
+ *           2            1,017        3,219      101,060
+ *           6+             159      115,807      575,608
+ *
+ * Alone: 316 ms. Six or more racing: median 115,807 ms — on a store whose
+ * entity count moved 4% all day. The worst was "1 updated … of 27,721 entities
+ * (hashed 2,344, reused 25,377) in 575,608 ms": nine and a half minutes to
+ * update ONE entity while correctly reusing 25,377. #714's diff was never the
+ * problem. It was being run many times at once.
+ *
+ * ⛔ AND #884's FIX OPENED IT. Chunking makes the projection yield to the event
+ * loop between batches, deliberately, so other requests get a turn during a
+ * sync. Those requests land here, find `_graphDirty` still true — it clears
+ * only at the END — and start their own. The yield that makes it polite is the
+ * yield that lets the herd in.
+ *
+ * ⚠️ THE CHUNKING STAYS. Un-yielding would hide the herd by making each run hog
+ * the thread outright: the symptom moves, it does not go. The missing guard is
+ * the defect.
+ *
+ * ⛔ AND THE MEMO MUST NOT OUTLIVE ITS SYNC. One that is never released serves a
+ * STALE graph, which is worse than a slow one because it is silent — so it is
+ * cleared in a `finally`, on the failure path as well as the success path.
+ */
+let _graphSyncInFlight = null;
+
 async function warmGraphStore() {
+  // Nothing to do: answer immediately rather than joining a sync we do not need.
+  if (!_graphDirty && _graphStore) {
+    return { store: _graphStore, rebuiltMs: null, projectedThrough: _graphProjectedThrough };
+  }
+  // A sync is already running: await THAT one. No `await` sits between this
+  // check and the assignment below, so the window cannot interleave.
+  if (_graphSyncInFlight) return _graphSyncInFlight;
+  _graphSyncInFlight = warmGraphStoreOnce()
+    .finally(() => { _graphSyncInFlight = null; });
+  return _graphSyncInFlight;
+}
+
+async function warmGraphStoreOnce() {
   const { buildGraphStore, syncGraphStoreChunked, verifyHashCache, projectActivities, projectLabelAliases, projectWorkLedger } = await loadGraphModules();
   let rebuiltMs = null;
   if (_graphDirty || !_graphStore) {
@@ -1674,10 +1720,19 @@ async function handleGraphQuery(req, res) {
     const slow = totalMs >= slowAfterMs ? processContextForSlowQuery(eluStart) : undefined;
     result.timing = {
       ms: result.ms, rebuiltMs: rebuiltMs ?? null, totalMs, slowAfterMs,
+      // #1114 — how many syncs this process has COMPLETED, ever. Published
+      // because the defect it exposes is a COUNT, not a duration: the herd ran
+      // seven correct syncs at once, and every one of them looked fine on its
+      // own. A timing number cannot distinguish "one slow sync" from "seven
+      // concurrent syncs", and only the second is a bug.
+      syncCount: _graphSyncCount,
       means: {
         ms: 'synchronous engine time inside store.query() — nothing interleaves; a slow ms was spent in the engine',
         rebuiltMs: 'projection sync that ran BEFORE the query in this call; null means no sync ran',
         totalMs: 'wall time of the whole call: module load + sync + engine',
+        syncCount: 'completed replica syncs since boot. Two readers that both '
+          + 'trigger a sync move this by ONE if they were concurrent (they share it) '
+          + 'and by TWO if they were sequential — which is the difference #1114 fixed',
         slow: 'present only when totalMs >= slowAfterMs: the process at that moment (load, memory, event-loop utilization over the call)',
       },
       ...(slow ? { slow } : {}),
