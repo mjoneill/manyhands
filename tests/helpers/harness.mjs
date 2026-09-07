@@ -14,6 +14,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import net from 'node:net';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -49,7 +50,7 @@ export function freePort() {
 }
 
 /** Poll an HTTP URL until it responds (any status) or the timeout elapses. */
-export async function waitForHttp(url, timeoutMs = 8000) {
+export async function waitForHttp(url, timeoutMs = 8000, { expectHeader } = {}) {
   const deadline = Date.now() + timeoutMs;
   let lastErr;
   while (Date.now() < deadline) {
@@ -63,9 +64,25 @@ export async function waitForHttp(url, timeoutMs = 8000) {
     // defeated the old shape, which is why it never showed up as a failure.)
     const remaining = Math.max(1, deadline - Date.now());
     try {
-      await fetch(url, { signal: AbortSignal.timeout(remaining) });
+      const res = await fetch(url, { signal: AbortSignal.timeout(remaining) });
+      // #1259 — "a server answered" is not "MY server answered". freePort()
+      // hands the number back unheld (#1140), so the process listening here may
+      // be another worker's. Its 200 has the right shape and the wrong board,
+      // and every read the test then makes is answered by a stranger. When the
+      // caller says which instance it is waiting for, anything else is a
+      // failure NOW — not a reason to keep polling, and not a success.
+      if (expectHeader) {
+        const [name, want] = expectHeader;
+        const got = res.headers.get(name);
+        if (got !== want) {
+          const err = new Error(`${url} was answered by a server I did not start (#1259): ${name}=${got ?? '<absent>'}, expected ${want}`);
+          err.stranger = true;
+          throw err;
+        }
+      }
       return;
     } catch (e) {
+      if (e.stranger) throw e;
       lastErr = e;
     }
     await new Promise((r) => setTimeout(r, Math.min(50, Math.max(0, deadline - Date.now()))));
@@ -100,13 +117,13 @@ export function makeBoardFixture(overrides = {}) {
  * http://127.0.0.1:32985/api/board", with the real cause two lines down in
  * stderr. The room read a starved runner off that headline for an evening.
  */
-function waitForHttpOrExit(url, proc, timeoutMs = 8000) {
+function waitForHttpOrExit(url, proc, timeoutMs = 8000, opts = {}) {
   return new Promise((resolve, reject) => {
     let settled = false;
     const finish = (fn, v) => { if (!settled) { settled = true; fn(v); } };
     proc.once('exit', (code, signal) =>
       finish(reject, new Error(`process exited (code ${code}, signal ${signal}) before answering ${url}`)));
-    waitForHttp(url, timeoutMs).then(() => finish(resolve), (e) => finish(reject, e));
+    waitForHttp(url, timeoutMs, opts).then(() => finish(resolve), (e) => finish(reject, e));
   });
 }
 
@@ -127,19 +144,29 @@ async function startOnPort({ port: explicitPort, allocatePort = freePort, readyP
   let lastErr = null;
   for (let i = 0; i < attempts; i++) {
     const port = explicitPort ?? (await allocatePort());
-    const started = spawnOnce(port);
+    // #1259 — one nonce per ATTEMPT, handed to the child as SCRUM_INSTANCE_ID
+    // and echoed back as X-Scrum-Instance. Readiness means THAT answer, not any
+    // answer: a stranger on the port used to satisfy the poll before our child
+    // reached bind(), the #1140 retry (which lives in this catch) never armed,
+    // and the test read the stranger's board as a clean 200.
+    const nonce = randomUUID();
+    const started = spawnOnce(port, nonce);
     const { proc, stderr } = started;
     const baseUrl = `http://127.0.0.1:${port}`;
     try {
-      await waitForHttpOrExit(`${baseUrl}${readyPath}`, proc);
+      await waitForHttpOrExit(`${baseUrl}${readyPath}`, proc, 8000, { expectHeader: ['x-scrum-instance', nonce] });
       return { ...started, port, baseUrl };
     } catch (e) {
       proc.kill('SIGKILL');
       const text = stderr.join('');
-      const contended = PORT_IN_USE.test(text);
+      const stranger = e.stranger === true;
+      const contended = stranger || PORT_IN_USE.test(text);
+      const why = stranger
+        ? `port ${port} was answered by a server I did not start (#1259)`
+        : `port ${port} is already in use`;
       lastErr = contended
         ? new Error(
-            `${label} failed to start: port ${port} is already in use — lost the allocation race (#1140)`
+            `${label} failed to start: ${why} — lost the allocation race (#1140)`
             + `${explicitPort == null ? `, attempt ${i + 1}/${attempts}` : ' (port was requested explicitly, so it is not retried)'}`
             + `\nstderr: ${text}`)
         : new Error(`${label} failed to start: ${e.message}\nstderr: ${text}`);
@@ -209,10 +236,10 @@ export async function startRestServer({ board, boardFile: sharedBoardFile, stati
     allocatePort,
     readyPath: '/api/board',
     label: 'REST server',
-    spawnOnce(p) {
+    spawnOnce(p, nonce) {
       const child = spawn('node', ['server.js'], {
         cwd: PROJECT_DIR,
-        env: { ...env, SCRUM_PORT: String(p) },
+        env: { ...env, SCRUM_PORT: String(p), SCRUM_INSTANCE_ID: nonce },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       const err = [];
@@ -287,7 +314,7 @@ export async function startMcpServer({ restApiBase, port, env: extraEnv, allocat
     allocatePort,
     readyPath: '/health',
     label: 'MCP server',
-    spawnOnce(p) {
+    spawnOnce(p, nonce) {
       const child = spawn('node', ['mcp-server.mjs'], {
         cwd: PROJECT_DIR,
         env: {
@@ -296,6 +323,7 @@ export async function startMcpServer({ restApiBase, port, env: extraEnv, allocat
           SCRUM_CHANNEL_STAGGER: 'off', // #256/#265 — keep channel tests instant; scheduling logic is unit-tested in channel-scheduler.test.mjs
           SCRUM_BOARD_API: boardApi,
           ...(extraEnv || {}),
+          SCRUM_INSTANCE_ID: nonce, // #1259 — LAST: an isolation var a caller's env cannot override
         },
         stdio: ['ignore', 'pipe', 'pipe'],
       });

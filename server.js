@@ -86,6 +86,12 @@ import { configureIdentities, usingDefaultRoster } from './core/identity.mjs';
 const PORT = process.env.SCRUM_PORT ? parseInt(process.env.SCRUM_PORT, 10) : 3141;
 const PROJECT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const BOARD_DATA_FILE = process.env.SCRUM_BOARD_FILE || path.join(PROJECT_DIR, 'board-data.json');
+// #1259 — a process can prove WHICH process is answering. The test harness
+// mints a nonce per spawn and its readiness poll accepts only a response that
+// carries it back, so a stranger already listening on a port we were handed
+// (#1140's allocation race) fails loudly instead of answering the test with
+// its own board. Unset in production ⇒ no header, no new surface.
+const INSTANCE_ID = process.env.SCRUM_INSTANCE_ID || '';
 // #669 — the event log is named FOR ITS BOARD FILE, not merely placed beside it:
 //   board-data.json  →  board-data-events/
 //
@@ -652,6 +658,7 @@ function sendJSON(res, statusCode, data) {
   res.writeHead(statusCode, {
     'Content-Type': 'application/json',
     'Content-Length': Buffer.byteLength(body),
+    ...(INSTANCE_ID ? { 'X-Scrum-Instance': INSTANCE_ID } : {}),
   });
   res.end(body);
 }

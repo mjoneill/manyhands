@@ -111,6 +111,8 @@ const DEFAULT_MCP_PORT = 3001;
 const DEFAULT_BOARD_PORT = 3141;
 const declaredBoardApi = process.env.SCRUM_BOARD_API || '';
 const declaredBoardPort = process.env.SCRUM_PORT || '';
+// #1259 — see server.js: the harness's readiness poll accepts only the process it spawned.
+const INSTANCE_ID = process.env.SCRUM_INSTANCE_ID || '';
 const REST_API_BASE = declaredBoardApi
   || `http://127.0.0.1:${declaredBoardPort || DEFAULT_BOARD_PORT}`;
 if (MCP_PORT !== DEFAULT_MCP_PORT && !declaredBoardApi && !declaredBoardPort) {
@@ -2982,7 +2984,7 @@ const httpServer = http.createServer(async (req, res) => {
     // Health endpoint — cheap probe so clients can distinguish "MCP is alive"
     // from "MCP is down/crashed" without trying a full handshake.
     if (req.url === '/health' && req.method === 'GET') {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.writeHead(200, { 'Content-Type': 'application/json', ...(INSTANCE_ID ? { 'X-Scrum-Instance': INSTANCE_ID } : {}) });
       return res.end(JSON.stringify({ ok: true, sessions: transports.size }));
     }
 
