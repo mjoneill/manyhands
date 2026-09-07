@@ -3598,6 +3598,11 @@ const modelCallToWire = (e) => ({
   tokensIn: e['scrum:tokensIn'] ?? null, tokensOut: e['scrum:tokensOut'] ?? null, cost: e['scrum:cost'] ?? 0,
   stopReason: e['scrum:stopReason'] ?? null, latencyMs: e['scrum:latencyMs'] ?? null, ok: e['scrum:ok'] !== false,
   contextHandedTo: e['scrum:contextHandedTo'] ?? [], producedPost: e['scrum:producedPost'] ?? null,
+  // #1254 — the field was ACCEPTED on write and PROJECTED to the graph and never
+  // returned on read. Three layers widened, the fourth missed, and the
+  // cross-seam test asserted the graph so it passed. A field a caller cannot
+  // read back is a field that does not exist to the caller.
+  markerLines: e['scrum:markerLines'] ?? null,
   at: e['scrum:calledAt'], error: e.text || null,
   sampling: e['scrum:sampling'] ?? null, wake: { kind: e['scrum:wakeKind'] ?? null, messageId: e['scrum:wakeMessage'] ?? null },
   memory: { handed: e['scrum:memoryHanded'] ?? null, state: e['scrum:memoryState'] ?? null }, memoryWritten: e['scrum:memoryWritten'] ?? [], claims: e['scrum:claims'] ?? [],

@@ -233,6 +233,14 @@ test('#1254 markerLines survives POST, the wire, and the GRAPH — a marking sea
       'SELECT ?c ?n WHERE { ?c a scrum:ModelCall ; scrum:markerLines ?n }');
     assert.equal(rows.length, 1, 'the graph has it, not only REST');
     assert.equal(Number(rows[0].n), 3, 'and it is the COUNT, so >1 is filterable');
+
+    // ⛔ AND IT COMES BACK ON READ. Asserting only the graph is how this shipped
+    // broken: accepted on write, projected to the graph, never returned by GET,
+    // and green the whole way. Both directions or neither.
+    const back = await api(srv.baseUrl, 'GET', '/api/model-calls');
+    const mine = (back.body.calls || []).find((c) => c.markerLines != null);
+    assert.ok(mine, 'a caller who POSTed markerLines can READ markerLines');
+    assert.equal(mine.markerLines, 3);
   } finally { await srv.stop(); }
 });
 
