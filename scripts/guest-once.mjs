@@ -21,7 +21,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { callModel } from '../core/model-adapter.mjs';
-import { findMentions, findWakes, guestOnce, fetchBoundedChanges, shouldMarkAnswered, mentionScanPath, acquireLock, releaseLock } from '../core/guest-loop.mjs';
+import { findMentions, findWakes, guestOnce, fetchBoundedChanges, shouldMarkAnswered, mentionScanPath, fetchMentionWindow, acquireLock, releaseLock } from '../core/guest-loop.mjs';
 import { makeExecutor } from '../core/board-tools.mjs';
 
 const args = process.argv.slice(2);
@@ -77,8 +77,34 @@ if (lock.broke) console.error(`[#1237] ${agent.seatKey}: broke a STALE lock (pid
 if (!dry) { const done = () => releaseLock(lockPath); process.on('exit', done); for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { done(); process.exit(1); }); }
 // #1237 — scan by SINCE cursor, not the newest 60: a mention buried under a busy
 // night was invisible for good. mentionScanPath is tested.
-const recent = await get(mentionScanPath(state));
-const messages = Array.isArray(recent) ? recent : (recent?.conversations ?? []);
+// #1274 — and the scan's OWN ceiling: the server clamps that limit to 200 and
+// returns the NEWEST 200, silently. On a busy stretch the rows nearest the
+// cursor — the unanswered ones — were the rows dropped. fetchMentionWindow
+// pages backward with `before` until the window is whole; a quiet tick still
+// costs exactly one request.
+const getPage = async (p) => {
+  const r = await fetch(`${BOARD}${p}`);
+  if (!r.ok) throw new Error(`GET ${p} → ${r.status}`);
+  const body = await r.json();
+  const rows = Array.isArray(body) ? body : (body?.conversations ?? []);
+  const total = r.headers.get('x-total-count');   // #1010's count, taken BEFORE the limit
+  return { rows, total: total == null ? null : Number(total) };
+};
+const window_ = await fetchMentionWindow(getPage, state);
+const messages = window_.messages;
+if (!window_.complete) {
+  // ⛔ Reported, never absorbed: the seat cannot see this and nobody else is looking.
+  console.error(`[#1274] ${agent.seatKey}: SCAN INCOMPLETE — read ${window_.truncated.seen} of ${window_.truncated.total} posts since ${window_.truncated.since} in ${window_.truncated.pages} pages. Mentions older than the oldest row read were NOT scanned.`);
+  // …and kept, because a line in a launchd log is not somewhere the seat can
+  // look. The state file is the one artifact the seat carries between wakes.
+  state.lastScanIncomplete = { at: new Date().toISOString(), ...window_.truncated };
+  // Written NOW, not at the end: the run that finds nothing to wake for exits
+  // before the state write, and that is exactly the run whose silence needs
+  // explaining.
+  if (!dry) { try { fs.writeFileSync(stateFile, JSON.stringify(state, null, 2)); } catch (e) { console.error(`[#1274] could not record the incomplete scan: ${e.message}`); } }
+} else if (state.lastScanIncomplete) {
+  state.lastScanIncomplete = null;
+}
 // #1226 — wake sources are the agent's data. Cards are fetched only when a
 // kind needs them; a mention-only agent costs what slice 1 cost.
 let cards = [];

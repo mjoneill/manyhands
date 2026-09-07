@@ -671,11 +671,73 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
 // night of old mentions one per minute is a flood, not a colleague.
 export const FIRST_RUN_WINDOW_MS = 10 * 60_000;
 export const SCAN_LIMIT = 500;
-export function mentionScanPath(state = {}, now = new Date().toISOString()) {
-  const since = typeof state.lastAnsweredAt === 'string' && state.lastAnsweredAt
+// #1274 — the server's own ceiling, named here because the loop must plan
+// around it: `/api/conversations` clamps any `limit` to MAX_CONV_LIST_LIMIT
+// (server.js) and returns the NEWEST N of the matching set, with no marker in
+// the body. Asking for 500 and receiving 200 is byte-identical to "there were
+// 200". Kept as a constant rather than inferred from a response, so a test can
+// pin the two files together.
+export const CONV_LIST_CAP = 200;
+export function scanWindowSince(state = {}, now = new Date().toISOString()) {
+  return typeof state.lastAnsweredAt === 'string' && state.lastAnsweredAt
     ? state.lastAnsweredAt
     : new Date(Date.parse(now) - FIRST_RUN_WINDOW_MS).toISOString();
-  return `/api/conversations?attachedTo=null&since=${encodeURIComponent(since)}&limit=${SCAN_LIMIT}`;
+}
+export function mentionScanPath(state = {}, now = new Date().toISOString(), { before = null } = {}) {
+  const since = scanWindowSince(state, now);
+  // `before` walks BACKWARD through the same window: `since` is held fixed, so
+  // the two bounds close on each other rather than the window sliding.
+  return `/api/conversations?attachedTo=null&since=${encodeURIComponent(since)}&limit=${SCAN_LIMIT}`
+    + (before ? `&before=${encodeURIComponent(before)}` : '');
+}
+
+/**
+ * #1274 — READ THE WHOLE WINDOW, not the newest page of it.
+ *
+ * `getPage(path)` returns `{ rows, total }`; `total` is X-Total-Count, the
+ * match count the server took BEFORE applying the limit (server.js, #1010). It
+ * may be null — a caller that cannot read headers still gets correct paging,
+ * because the loop-until-short-page rule does not depend on it. The header is
+ * what makes an UNRECOVERABLE truncation reportable with real numbers instead
+ * of a shrug.
+ *
+ * Pages backward on `before` until a page comes back shorter than the cap.
+ * A quiet window is one request; the extra cost is paid only in the state that
+ * currently loses mentions.
+ *
+ * ⚠️ STATED BOUND, not fixed here: `before` is a strict `<` on `createdAt`. If
+ * two messages share an identical millisecond timestamp AND a page boundary
+ * falls between them, the second is skipped. Deduping by id does not rescue
+ * that; an id-stable cursor would, and that is a larger change than this bug.
+ */
+export async function fetchMentionWindow(getPage, state = {}, now = new Date().toISOString(), { maxPages = 25 } = {}) {
+  const byId = new Map();
+  let before = null;
+  let total = null;
+  let complete = false;
+  let pages = 0;
+  while (pages < maxPages) {
+    const res = await getPage(mentionScanPath(state, now, { before }));
+    const rows = Array.isArray(res) ? res : (res?.rows ?? []);
+    pages += 1;
+    if (pages === 1 && res && res.total != null) total = Number(res.total);
+    for (const m of rows) if (m && m.id != null && !byId.has(m.id)) byId.set(m.id, m);
+    if (rows.length < CONV_LIST_CAP) { complete = true; break; }
+    // The oldest row of this page becomes the next page's exclusive upper bound.
+    const oldest = rows.reduce((a, b) => (String(a.createdAt) <= String(b.createdAt) ? a : b));
+    if (!oldest || typeof oldest.createdAt !== 'string') { complete = true; break; }
+    if (before === oldest.createdAt) { complete = true; break; }   // no progress: stop rather than spin
+    before = oldest.createdAt;
+  }
+  const messages = [...byId.values()].sort((a, b) => (String(a.createdAt) < String(b.createdAt) ? -1 : 1));
+  return {
+    messages,
+    complete,
+    pages,
+    // ⛔ A truncation the loop could not walk out of is a RECORD, never an
+    // absence. The seat cannot see this and nobody else is looking.
+    truncated: complete ? null : { seen: messages.length, total: total ?? messages.length + 1, pages, since: scanWindowSince(state, now) },
+  };
 }
 
 // A lock beside the state file, so the tick and a hand run cannot both answer
