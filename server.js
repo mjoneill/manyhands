@@ -3349,6 +3349,9 @@ function agentToWire(data, e) {
     // unset sends no flag at all, because a model with no such flag must not be
     // told anything about it.
     thinking: e['scrum:thinking'] ?? null,
+    // #1271 — whether this seat is told WHEN to speak. Delivery mechanism is
+    // unconditional; this is the policy half, default OFF by ruling cb82348e.
+    participationClause: e['scrum:participationClause'] ?? null,
     maxHops: e['scrum:maxHops'] ?? null,
     // #1242 — the prompt/grant contradiction, if the last write left one.
     conflict: e['scrum:promptGrantConflict'] ? { phrase: e['scrum:promptGrantConflict'], reason: e['scrum:promptGrantConflictReason'] ?? null, since: e['scrum:promptGrantConflictSince'] ?? null } : null,
@@ -3472,7 +3475,8 @@ async function handleAgentPromptVersion(req, res, seat) {
 // its whole budget reasoning and answered nobody, once a minute, for as long as
 // nobody happened to read the value back.
 const AGENT_PATCH_FIELDS = new Set(['by', 'state', 'contextPolicy', 'toolGrants', 'budgetPerDay', 'model', 'modelKey',
-  'name', 'emoji', 'color', 'residency', 'wakeOn', 'everyMinutes', 'thinking', 'maxHops', 'prompt', 'sampling']);
+  'name', 'emoji', 'color', 'residency', 'wakeOn', 'everyMinutes', 'thinking', 'maxHops', 'prompt', 'sampling',
+  'participationClause']);
 // #1258 — sampling is BEHAVIOUR and lives on the agent: two seats can share one
 // registered model and run different temperatures. Until this field existed the
 // only ways to write it replaced the whole model spec (`model`, which also
@@ -3578,6 +3582,7 @@ async function handlePatchAgent(req, res, seat) {
       if (Array.isArray(body.wakeOn)) { const bad = body.wakeOn.find((w) => !AGENT_WAKE_KINDS.has(w)); if (bad) return { status: 400, wire: { error: `unknown wake kind ${JSON.stringify(bad)} — mention, assignment or schedule` } }; updated['scrum:wakeOn'] = body.wakeOn.length ? body.wakeOn : ['mention']; }
       if (body.everyMinutes !== undefined) updated['scrum:everyMinutes'] = body.everyMinutes == null ? null : Number(body.everyMinutes);
       if (body.thinking !== undefined) updated['scrum:thinking'] = body.thinking === null ? null : !!body.thinking;
+      if (body.participationClause !== undefined) updated['scrum:participationClause'] = body.participationClause === null ? null : !!body.participationClause;
       if (body.maxHops !== undefined) updated['scrum:maxHops'] = body.maxHops === null ? null : Number(body.maxHops);
       const warning = reconcilePromptGrants(data, updated, updated.dateModified); // #1242
       data.agents = agentsOf(data).map((a) => (a['@id'] === agent['@id'] ? updated : a));

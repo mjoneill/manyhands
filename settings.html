@@ -859,7 +859,7 @@ function agentRow(a) {
   const registeredKey = registeredModel ? registeredModel.key || '' : '';
   const sampling = (a.model && a.model.sampling && typeof a.model.sampling === 'object') ? a.model.sampling : {};
   const modelLabel = registeredKey ? `${esc(registeredKey)} (registered)` : `${esc(a.modelId || '?')} (inline)`;
-  row.innerHTML = `<div class="agent-head"><strong>${a.emoji ? esc(a.emoji) + ' ' : ''}${esc(a.name)}</strong> <code>${esc(a.seatKey)}</code> <span class="badge state-${esc(a.state)}">${esc(a.state)}</span>${a.conflict ? ` <span class="badge state-retired" title="${esc(a.conflict.reason)}: &quot;${esc(a.conflict.phrase)}&quot; since ${esc(when(a.conflict.since))}" data-agent-conflict>⚠ prompt cancels grants</span>` : ''} <span class="meta">${modelLabel} · ${esc(a.residency)} · ${esc(a.contextPolicy)} · prompt v${a.prompt ? a.prompt.version : '?'} (${a.promptVersions} version${a.promptVersions === 1 ? '' : 's'}) · grants ${grants.size}${a.maxHops != null ? ` · hops ≤ ${a.maxHops}` : ''}${a.thinking != null ? ` · thinking ${a.thinking ? 'on' : 'off'}` : ''}${a.budgetPerDay != null ? ` · budget ${a.budgetPerDay}/day` : ''}</span></div>
+  row.innerHTML = `<div class="agent-head"><strong>${a.emoji ? esc(a.emoji) + ' ' : ''}${esc(a.name)}</strong> <code>${esc(a.seatKey)}</code> <span class="badge state-${esc(a.state)}">${esc(a.state)}</span>${a.conflict ? ` <span class="badge state-retired" title="${esc(a.conflict.reason)}: &quot;${esc(a.conflict.phrase)}&quot; since ${esc(when(a.conflict.since))}" data-agent-conflict>⚠ prompt cancels grants</span>` : ''} <span class="meta">${modelLabel} · ${esc(a.residency)} · ${esc(a.contextPolicy)} · prompt v${a.prompt ? a.prompt.version : '?'} (${a.promptVersions} version${a.promptVersions === 1 ? '' : 's'}) · grants ${grants.size}${a.maxHops != null ? ` · hops ≤ ${a.maxHops}` : ''}${a.thinking != null ? ` · thinking ${a.thinking ? 'on' : 'off'}` : ''}${a.participationClause ? ' · told when to speak' : ''}${a.budgetPerDay != null ? ` · budget ${a.budgetPerDay}/day` : ''}</span></div>
     <p class="prompt-peek" data-agent-prompt-peek title="the first line of the prompt; open the editor below to read or change all of it"><span class="lbl">prompt v${a.prompt ? a.prompt.version : '?'}</span>${a.prompt && a.prompt.body ? esc(peek(a.prompt.body)) : '<em>no prompt yet</em>'}</p>
     <details data-agent-editor><summary>✏️ Edit prompt, grants &amp; settings</summary>
       <div class="agent-editor">
@@ -872,6 +872,7 @@ function agentRow(a) {
             <label>Hop ceiling <input data-agent-maxhops type="number" min="1" max="20" value="${a.maxHops ?? ''}" placeholder="default"><span class="hint">how many times it may look before it must answer</span></label>
             <label>Thinking <select data-agent-thinking>${THINKING_OPTS(a.thinking)}</select><span class="hint">unset sends no flag at all</span></label>
             <label>Context <select data-agent-context>${opt(['artifact-only', 'thread'], a.contextPolicy)}</select><span class="hint">can it see the conversation it answers in</span></label>
+            <label class="check" style="align-self:end"><input type="checkbox" data-agent-participation${a.participationClause ? ' checked' : ''}> Tell it when to speak<span class="hint">#1271 — adds a sentence asking it to judge whether it has something worth saying. DEFAULT OFF: the delivery rules (REPLY:, NO_REPLY) are always sent and are what stop reasoning leaking; this is separate policy and it measurably quietened three seats.</span></label>
             <label>Model <select data-agent-modelkey><option value=""${registeredKey ? '' : ' selected'}>inline: ${esc(a.modelId || '?')}</option>${MODELS.map((m) => `<option value="${esc(m.key)}"${m.key === registeredKey ? ' selected' : ''}>${esc(m.key)} — ${esc(m.model)}</option>`).join('')}</select></label>
           </div>
           <h4 style="margin-top:14px">How it samples <span class="hint" style="font-weight:normal">(#1258 — per seat, read on every wake; empty sends nothing, never zero)</span></h4>
@@ -916,6 +917,7 @@ function agentRow(a) {
       toolGrants: [...row.querySelectorAll('[data-agent-grants] input[type=checkbox]:checked')].map((c) => c.value),
       maxHops: numOrNull(q('[data-agent-maxhops]').value.trim()),
       thinking: thinking === 'unset' ? null : thinking === 'true',
+      participationClause: q('[data-agent-participation]').checked,
       contextPolicy: q('[data-agent-context]').value,
       name: q('[data-agent-name]').value.trim() || undefined,
       emoji: q('[data-agent-emoji]').value,

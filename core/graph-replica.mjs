@@ -188,6 +188,8 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:Agent', 'scrum:AgentPrompt', 'scrum:AgentPromptVersion', 'scrum:seatKey', 'scrum:emoji',
   'scrum:contextPolicy', 'scrum:toolGrant', 'scrum:budgetPerDay', 'scrum:residency', 'scrum:state',
   'scrum:currentPrompt', 'scrum:ofAgent',
+  // #1271 — whether this seat is told WHEN to speak. Policy, not mechanism.
+  'scrum:participationClause',
   // #1242 — a prompt that cancels the grants beside it, named on the node
   'scrum:promptGrantConflict', 'scrum:promptGrantConflictReason', 'scrum:promptGrantConflictSince',
   // #1197 — the model registry node
@@ -1025,6 +1027,9 @@ function projectAgent(store, e) {
   for (const w of (Array.isArray(e['scrum:wakeOn']) ? e['scrum:wakeOn'] : [])) add(nn(S + 'wakeOn'), lit(String(w)));   // #1226
   if (e['scrum:everyMinutes'] != null && Number.isFinite(Number(e['scrum:everyMinutes']))) add(nn(S + 'everyMinutes'), oxigraph.literal(String(e['scrum:everyMinutes']), nn('http://www.w3.org/2001/XMLSchema#decimal')));
   if (e['scrum:budgetPerDay'] != null && Number.isFinite(Number(e['scrum:budgetPerDay']))) add(nn(S + 'budgetPerDay'), oxigraph.literal(String(e['scrum:budgetPerDay']), nn('http://www.w3.org/2001/XMLSchema#decimal')));
+  // #1271 — a BOOLEAN, so `!= null` rather than truthiness: `false` is a
+  // stored decision (the ruled default) and must be queryable as one.
+  if (e['scrum:participationClause'] != null) add(nn(S + 'participationClause'), lit(String(!!e['scrum:participationClause'])));
   if (e['scrum:residency']) add(nn(S + 'residency'), lit(String(e['scrum:residency'])));
   if (e['scrum:state']) add(nn(S + 'state'), lit(String(e['scrum:state'])));
   if (e['scrum:currentPrompt']) add(nn(S + 'currentPrompt'), nn(String(e['scrum:currentPrompt'])));

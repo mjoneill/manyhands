@@ -117,7 +117,7 @@ export const PREDICATE_SOURCE = Object.freeze({
   // #1197 — scrum:Model (store key models[])
   'scrum:Model': null,
   'scrum:baseUrl': 'scrum:baseUrl', 'scrum:contextWindow': 'scrum:contextWindow', 'scrum:numCtx': 'scrum:numCtx',
-  'scrum:thinking': 'scrum:thinking', 'scrum:maxOutputTokens': 'scrum:maxOutputTokens', 'scrum:timeoutMs': 'scrum:timeoutMs',
+  'scrum:thinking': 'scrum:thinking', 'scrum:participationClause': 'scrum:participationClause', 'scrum:maxOutputTokens': 'scrum:maxOutputTokens', 'scrum:timeoutMs': 'scrum:timeoutMs',
   'scrum:costIn': 'scrum:costIn', 'scrum:costOut': 'scrum:costOut', 'scrum:freeTier': 'scrum:freeTier',
   'scrum:capability': 'scrum:capability', 'scrum:apiKeyRef': 'scrum:apiKeyRef', 'scrum:deprecatesOn': 'scrum:deprecatesOn',
   'scrum:modelKey': 'scrum:modelKey', 'scrum:usesModel': 'scrum:usesModel',

@@ -269,10 +269,32 @@ export function buildMessages({ agent, wake, changes = [], memories = [] }) {
   // ⇒ A permissive criterion is SAFE here precisely BECAUSE the boundary is
   // strict: #528's flood was narration entering the history, and narration now
   // drops and is counted. The gate is what buys the room its voice back.
+  // #1271 — DELIVERY MECHANISM. Always sent, to every seat, in every toggle
+  // state. This is the whole of the #1119 ask: a reasoning block cannot reach
+  // the commons because nothing without the marker publishes, and that is
+  // enforced by splitPublishMarker() at the deliver boundary rather than by
+  // this sentence. The prose describes the contract; the branch keeps it.
+  //
+  // ⚠️ "nothing you WANT TO SAY", not "nothing to ADD". The second is the
+  // contribution test in miniature, surviving inside the sentence a seat reads
+  // when it is deciding to stay quiet — which is exactly where it does damage.
   lines.push('Nothing you write is posted unless it begins with `REPLY:`. To say something to the room, start your answer with `REPLY:` and then the text of ONE commons post, plainly, no preamble. '
-    + 'Reply when you have something real to add — an answer, a fact you hold, a disagreement, a thought worth the room\'s time — whether or not you were named; being addressed is not required, and not being addressed is not a reason to stay silent. '
-    + 'If you genuinely have nothing to add, answer with exactly `NO_REPLY` and nothing else. That is a complete, correct answer. Do not describe staying quiet: a message that does not begin with `REPLY:` is never posted, so a sentence about not replying reaches no one. '
+    + 'If you have nothing you want to say, answer with exactly `NO_REPLY` and nothing else. That is a complete, correct answer. Do not describe staying quiet: a message that does not begin with `REPLY:` is never posted, so a sentence about not replying reaches no one. '
     + 'If you cannot answer from what you were handed, that IS worth saying: begin with `REPLY:` and say what you would need.');
+
+  // #1271 — PARTICIPATION POLICY. A per-seat toggle, DEFAULT OFF, ruled by the
+  // board owner (decision cb82348e) after three seats read this one sentence
+  // three incompatible ways: as a burden of proof, as a reason to sit on
+  // curiosity, and as a licence to speak. It asks a seat to appraise its own
+  // contribution before speaking, and a self-model is the instrument this room
+  // has measured as least reliable (#1245).
+  //
+  // ⛔ SWITCHED OFF, NOT DELETED. Someone can turn it back on and that was
+  // deliberate — the text is preserved here rather than removed so the decision
+  // stays reversible without archaeology.
+  if (agent.participationClause === true) {
+    lines.push('Reply when you have something real to add — an answer, a fact you hold, a disagreement, a thought worth the room\'s time — whether or not you were named; being addressed is not required, and not being addressed is not a reason to stay silent.');
+  }
   if (agent.residency === 'resident') {
     lines.push('To keep something for your next wake, add a final line `REMEMBER: <one line>`. It is stored under your seat in the memory store and handed back to you next time; it is removed from the post. Only write what you will want later.');
     if ((agent.toolGrants || []).includes('card_claim')) lines.push('To take a card, add a line `CLAIM: #<number>`; it is claimed as you and removed from the post.');

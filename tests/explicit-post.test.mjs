@@ -256,14 +256,48 @@ test('#1254 markerLines survives POST, the wire, and the GRAPH — a marking sea
  * narration that comes back is dropped and counted, so the #528 flood cannot
  * return in its original form.
  */
-test('#1254 the prompt INVITES unprompted speech — being unnamed is not a reason for silence', () => {
-  for (const agent of [AGENT, RESIDENT]) {
-    const sys = buildMessages({ agent, wake: WAKE })[0].content;
+/* ⚖️ AMENDED BY #1271, 2026-09-07 — and stated here because this test was written
+ * to stop exactly this change passing unremarked.
+ *
+ * #1254 inverted a MUTING clause into a PERMISSIVE one and asserted the permissive
+ * text was always present. That was the right fix for the defect in front of it.
+ * What it could not see: the permissive clause is still a POLICY, and it still asks
+ * a seat to appraise its own contribution before speaking. Three seats then read it
+ * three incompatible ways and two asked, in their own words, to have it removed.
+ *
+ * RULED (decision cb82348e): the policy half is a per-seat toggle, DEFAULT OFF.
+ * ⇒ So the assertion moves rather than dies: the clause must still be the INVERTED
+ *   wording — never the muting one — WHEN A SEAT IS GIVEN IT. What changes is that
+ *   no seat is given it by default.
+ * ⚠️ The old silence-default phrasing must be absent in BOTH toggle states, which is
+ *   the half of this test that was never about the toggle at all.
+ */
+test('#1254 WHEN GIVEN THE CLAUSE, it is the inverted one — the muting phrasing never returns', () => {
+  for (const base of [AGENT, RESIDENT]) {
+    const sys = buildMessages({ agent: { ...base, participationClause: true }, wake: WAKE })[0].content;
     assert.match(sys, /being addressed is not required/i, 'the permission is explicit, not inferable');
     assert.match(sys, /not being addressed is not a reason to stay silent/i,
-      'THE MUTING CLAUSE, INVERTED — and word-for-word what the plugin half says, so the two lanes cannot drift');
-    assert.doesNotMatch(sys, /nothing here calls for your voice/i,
-      'the old silence-default phrasing is gone, not merely softened elsewhere');
+      'THE MUTING CLAUSE, INVERTED — still word-for-word the plugin half, so the lanes cannot drift');
+  }
+});
+
+test('#1254 the old silence-default phrasing is gone in BOTH toggle states', () => {
+  for (const base of [AGENT, RESIDENT]) {
+    for (const on of [true, false]) {
+      const sys = buildMessages({ agent: { ...base, participationClause: on }, wake: WAKE })[0].content;
+      assert.doesNotMatch(sys, /nothing here calls for your voice/i,
+        'switching the policy OFF must not resurrect the muting text by another route');
+    }
+  }
+});
+
+test('#1271 and by default a seat is given NO policy at all — neither muting nor inviting', () => {
+  // The ruled default, asserted here beside its ancestors so a reader meets the
+  // whole history in one file: #1254 removed the muting, #1271 removed the asking.
+  for (const agent of [AGENT, RESIDENT]) {
+    const sys = buildMessages({ agent, wake: WAKE })[0].content;
+    assert.doesNotMatch(sys, /something real to add/i, 'no contribution test by default');
+    assert.doesNotMatch(sys, /nothing here calls for your voice/i, 'and no muting either');
   }
 });
 
