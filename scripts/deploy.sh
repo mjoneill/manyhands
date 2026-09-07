@@ -283,10 +283,25 @@ case "$PLAN" in *"rest=1"*) DO_REST=1 ;; esac
 case "$PLAN" in *"mcp=1"*) DO_MCP=1 ;; esac
 uid="$(id -u)"
 if [ "$DO_REST" = 1 ]; then
+  # #1273 — DECLARE THE MAINTENANCE BEFORE CAUSING IT. A restart drops every
+  # stream and the fanout watch alarms 85 s later; that alarm was correct and
+  # still noise, because the room had been told in prose the watch cannot read.
+  # ⛔ The declaration is emitted HERE, by the thing performing the restart,
+  # rather than left to whoever is at the keyboard: a convention that depends on
+  # a human remembering is a convention that fires when it is least needed.
+  # Best-effort — a failed post must never block a deploy.
+  curl -fsS --max-time 3 -X POST http://127.0.0.1:3141/api/conversations \
+    -H 'Content-Type: application/json' \
+    -d "{\"author\":\"board\",\"body\":\"MAINTENANCE: deploy restarting com.scrumboard.rest — streams will drop and recover. (#1273)\"}" \
+    >/dev/null 2>&1 || say "   (maintenance declaration not posted — the watch will alarm normally)"
   say "   ↻ com.scrumboard.rest"
   launchctl kickstart -k "gui/$uid/com.scrumboard.rest" || die "rest restart failed"
 fi
 if [ "$DO_MCP" = 1 ]; then
+  curl -fsS --max-time 3 -X POST http://127.0.0.1:3141/api/conversations \
+    -H 'Content-Type: application/json' \
+    -d "{\"author\":\"board\",\"body\":\"MAINTENANCE: deploy restarting com.scrumboard.mcp — streams will drop and recover. (#1273)\"}" \
+    >/dev/null 2>&1 || true
   say "   ↻ com.scrumboard.mcp   ⚠️ Claude Code seats on :3001 will need /mcp reconnect"
   launchctl kickstart -k "gui/$uid/com.scrumboard.mcp"  || die "mcp restart failed"
 fi

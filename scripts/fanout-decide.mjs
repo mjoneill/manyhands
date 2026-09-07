@@ -29,7 +29,60 @@
  * @param {object}  a.state       previous state (from the state file)
  * @returns {{state: object, warnBody: string|null}}
  */
-export function decide({ receivers, sessions, floor, cooldownMs, now, state, staleSeats: stale = [], stoppedSeats: stopped = [], staleFacts = null }) {
+/**
+ * #1273 — MAINTENANCE IS DECLARED, NEVER INFERRED FROM PROSE.
+ *
+ * A deliberate restart drops every stream, and the floor alarm fired 85 seconds
+ * after one was announced in plain words in the room this watch posts into.
+ * Every clause was correct and the alarm was still noise.
+ *
+ * ⛔ THE OBVIOUS FIX — read the announcement — WAS MEASURED AND REJECTED.
+ * On 2026-09-07 the commons carried 35 posts containing "restart" and 6
+ * containing "restarting"; exactly ONE was an announcement. The other five
+ * included "I am not restarting anything and neither is he" (a negation) and
+ * three quotations of this alarm's own prescribed remedy. ⇒ A prose matcher
+ * suppresses on 5 of 6 matches in a room that discusses restarts constantly —
+ * inside the alarms themselves. That is a mute button held down by the subject.
+ *
+ * ⛔ THE OTHER ALTERNATIVE — infer the restart from a `staleSessions` burst —
+ * was rejected, and my first stated reason for rejecting it was WRONG. I wrote
+ * "it detects the restart ~5 minutes late." Measured afterwards: the 16:00:59Z
+ * gateway restart produced NO staleSessions entries AT ALL. That list only
+ * carries MCP-server reaps (the two live entries are from an 02:21Z MCP
+ * restart, 2 ms apart, which IS a clean signature of THAT). ⇒ The signature
+ * does not detect a gateway restart late; it does not detect one at all. Right
+ * call, wrong reason, and the reason is recorded because an unmeasured caveat
+ * is a blocker nobody can clear.
+ *
+ * ⇒ So the signal is a TOKEN, the way REPLY: is a token: something a tool emits
+ * on purpose, that no amount of talking about restarts can produce by accident.
+ * `scripts/deploy.sh` and the kickstart path emit it themselves, so adoption is
+ * a property of the act rather than a habit someone has to remember.
+ */
+export const MAINTENANCE_MARKER = 'MAINTENANCE:';
+
+/**
+ * The most recent declared maintenance inside the window, or null.
+ *
+ * ⚠️ The window is REQUIRED to be bounded and is stated by the caller: an
+ * unstated window is how a maintenance mode becomes a permanent blindfold.
+ */
+export function maintenanceFrom(changes, { now = Date.now(), windowMs = 10 * 60 * 1000 } = {}) {
+  let best = null;
+  for (const c of Array.isArray(changes) ? changes : []) {
+    if (c?.kind !== 'conversation') continue;
+    const text = typeof c.title === 'string' ? c.title : '';
+    // Anchored at the start of a line: a QUOTATION of an announcement sits
+    // inside prose, and an announcement is the first thing its post says.
+    if (!new RegExp(`(^|\n)\s*${MAINTENANCE_MARKER}`).test(text)) continue;
+    const at = typeof c.at === 'string' ? Date.parse(c.at) : NaN;
+    if (!Number.isFinite(at) || now - at > windowMs || at > now) continue;
+    if (!best || at > best.at) best = { at, by: typeof c.by === 'string' ? c.by : null, text };
+  }
+  return best;
+}
+
+export function decide({ receivers, sessions, floor, cooldownMs, now, state, staleSeats: stale = [], stoppedSeats: stopped = [], staleFacts = null, maintenance = null }) {
   // Deep-copy the two containers. A spread alone leaves `sigTimes` and `hist`
   // ALIASED to the caller's objects, so decide() would edit state it was only
   // asked to read — invisible in production (each run reads fresh state off
@@ -196,7 +249,20 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
     const deeper = wasBelow && st.floorDepth != null && receivers < st.floorDepth;
     const lastEntry = st.floorEntryAt ?? null;
     const flap = !wasBelow && lastEntry != null && (now - lastEntry) < cooldownMs && st.floorEntryDepth != null && receivers >= st.floorEntryDepth;
-    if ((!wasBelow && !flap) || deeper) {
+    // #1273 — an ANNOUNCED restart is not news. Suppress the ENTRY post only:
+    // a DEEPER collapse while below is a new fact and still posts, because the
+    // declaration covers the expected drop and not everything that happens
+    // during it. ⛔ And the suppression is RECORDED — a watch that decided not
+    // to speak must still be askable, or its silence is indistinguishable from
+    // a watch that never ran (#1272 applied to an instrument).
+    const suppressedByMaintenance = Boolean(maintenance) && !deeper;
+    if (suppressedByMaintenance && !wasBelow && !flap) {
+      st.maintenanceSuppressed = {
+        at: now, receivers, sessions, by: maintenance.by ?? null,
+        announcedAt: maintenance.at ?? null,
+      };
+    }
+    if (((!wasBelow && !flap) || deeper) && !suppressedByMaintenance) {
       warnBody = `⚠️ fanout watch: only ${receivers} of ${sessions} live sessions hold an open stream `
         + `(floor: ${floor}). Seats without a stream receive NOTHING — no queue, no replay (#624). `
         // ⛔ SAME TWO FALSE REMEDIES AS THE DROP BRANCH ABOVE — see the note there
@@ -220,7 +286,7 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
       warnBody = `✅ fanout watch: back above the floor — ${receivers} of ${sessions} live sessions hold an open stream `
         + `(floor: ${floor}); it was below for ${mins} min. (#1229)`;
     }
-    st.belowFloor = false; st.belowFloorSince = null; st.floorDepth = null;
+    st.belowFloor = false; st.belowFloorSince = null; st.floorDepth = null; delete st.maintenanceSuppressed;
     for (const k of Object.keys(st.sigTimes)) if (k.startsWith('floor:')) delete st.sigTimes[k];
   }
 

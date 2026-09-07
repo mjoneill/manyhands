@@ -50,7 +50,7 @@ import fs from 'node:fs';
 // #726 — the decision lives in a pure, tested module. See fanout-decide.mjs for
 // why: six production fixes, no test, and the seventh change had a failure mode
 // (a watch that stops warning) indistinguishable from a healthy room.
-import { decide, seatSuffix, seatBracket, staleSeats, staleFacts, stoppedSeats, lastWriteBySeatFrom } from './fanout-decide.mjs';
+import { decide, seatSuffix, seatBracket, staleSeats, staleFacts, stoppedSeats, lastWriteBySeatFrom, maintenanceFrom } from './fanout-decide.mjs';
 
 const STATUS_URL = process.env.SCRUM_STATUS_URL || 'http://127.0.0.1:3001/channel/status';
 const POST_URL = process.env.SCRUM_POST_URL || 'http://127.0.0.1:3141/api/conversations';
@@ -137,12 +137,22 @@ try {
 // one /api/changes page over the stale window. Unreadable → no rescue (the
 // client reading decides alone, as before), and the tick says so.
 const CHANGES_URL = CARDS_URL.replace(/\/api\/cards$/, '/api/changes');
+// #1273 — bounded and STATED. An unstated window is how a maintenance mode
+// becomes a permanent blindfold; 10 min covers a restart (60-120 s observed)
+// with room for a slow one, and nothing longer.
+const MAINTENANCE_WINDOW_MS = Number(process.env.SCRUM_MAINTENANCE_WINDOW_MS ?? 10 * 60 * 1000);
+let maintenance = null;
 let lastWriteBySeat = {};
 try {
   const since = new Date(Date.now() - STOPPED_AFTER_MS - 60_000).toISOString();
   const r = await fetch(`${CHANGES_URL}?since=${encodeURIComponent(since)}&limit=500`, { signal: AbortSignal.timeout(5000) });
   const j = await r.json();
   lastWriteBySeat = lastWriteBySeatFrom(j?.changes);
+  // #1273 — the maintenance declaration rides the page we already fetched.
+  // No new request, no new failure mode: if this fetch fails, `maintenance`
+  // stays null and the alarm behaves exactly as it did before this existed —
+  // which is the safe direction, because the fallback is SPEAKING, not silence.
+  maintenance = maintenanceFrom(j?.changes, { now: Date.now(), windowMs: MAINTENANCE_WINDOW_MS });
 } catch (e) { console.log(`${now} attributed writes unreadable (${e.message}) — the client-request reading decides alone this tick`); lastWriteBySeat = {}; }
 const stopped = claimsBySeat ? stoppedSeats(status, { now: Date.now(), staleMs: STOPPED_AFTER_MS, claimsBySeat, lastWriteBySeat }) : [];
 if (stopped.length) console.log(`${now} stopped seats: ${stopped.map((s) => `${s.seat} since ${s.lastClientRequestAt} holding ${s.claims.map((c) => `#${c}`).join(',')}`).join('; ')}`);
@@ -158,10 +168,14 @@ const { state: st, warnBody } = decide({
   staleSeats: stale,
   staleFacts: staleFacts(status),
   stoppedSeats: stopped,
+  maintenance,
 });
 
 fs.writeFileSync(STATE_FILE, JSON.stringify(st));
 
+if (st.maintenanceSuppressed && !warnBody) {
+  console.log(`${now} floor alarm SUPPRESSED — maintenance declared by ${st.maintenanceSuppressed.by ?? 'unknown'} (#1273); receivers=${st.maintenanceSuppressed.receivers}`);
+}
 if (!warnBody) process.exit(0);
 // #703 — an alarm that can name seats must name them: append who IS bound
 // (so the reader can infer who vanished) and the unbound count.
