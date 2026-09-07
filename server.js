@@ -754,6 +754,51 @@ async function handleSave(req, res) {
       merged[k] = k === 'cards' ? carryForward(incoming[k]) : incoming[k];
     }
 
+    // #1265 / #760 — THE LAST UNGUARDED COLUMN WRITE.
+    //
+    // #760 closed card_create and PATCH by resolving `column` against the
+    // board's own column list. This endpoint was left, and it is the one that
+    // could still write any string at all: it takes `cards` WHOLESALE, so the
+    // value arrives from the client untouched. #760's four specimens are what
+    // that costs — "review", "planned", "Backlog", "planned" — each a card
+    // rendered in NO column at all, one of them invisible for days.
+    //
+    // ⛔ AND THE RULE HERE IS NOT #760's RULE, which is why it was left a note
+    // rather than folded into that fix. This endpoint can legitimately ADD a
+    // column and move cards into it in the SAME request — deleteColumn does
+    // exactly that with the Orphanage. Validating against the STORED columns
+    // would refuse a correct save.
+    //
+    // ⇒ So it validates against `merged.columns`: the set this save is
+    // ESTABLISHING. That is simultaneously stricter and more permissive than
+    // the stored set, and both directions are load-bearing — it accepts a
+    // column introduced by this save, and it catches a card left stranded in a
+    // column this save DELETES, which a stored-set check would miss entirely.
+    //
+    // An absent or null `column` is left alone: at create it has always meant
+    // "no opinion", and refusing it here would be a regression wearing a fix's
+    // clothes.
+    if (Array.isArray(merged.cards)) {
+      const validColumns = new Set(
+        (merged.columns || []).map((c) => c && c.id).filter(Boolean),
+      );
+      const strandedCards = merged.cards.filter(
+        (c) => c && c.column != null && !validColumns.has(c.column),
+      );
+      if (strandedCards.length) {
+        // Every offender, not the first: a refusal that names one of four
+        // sends the client back three more times.
+        const which = strandedCards.slice(0, 10)
+          .map((c) => `#${c.shortId ?? '?'} → "${c.column}"`).join(', ');
+        return sendJSON(res, 400, {
+          error: `Refused: ${strandedCards.length} card(s) name a column that would not exist `
+            + `after this save (${which}). Valid column ids: ${[...validColumns].join(', ')}. `
+            + 'A card in an unknown column renders in no column at all. Nothing was written.',
+          strandedCards: strandedCards.map((c) => ({ id: c.id, shortId: c.shortId ?? null, column: c.column })),
+        });
+      }
+    }
+
     // #534 — THE VERSION IS SERVER-COMPUTED HERE, NEVER ACCEPTED.
     //
     // The loop above takes the cards array WHOLESALE, so every per-card field
