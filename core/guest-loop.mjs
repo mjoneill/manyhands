@@ -44,9 +44,23 @@ import { runToolLoop } from './tool-loop.mjs';
 function sumUsage(a, b) {
   if (!a && !b) return null;
   const out = {};
-  for (const k of ['promptTokens', 'completionTokens', 'reasoningTokens']) {
-    const x = Number(a?.[k]); const y = Number(b?.[k]);
-    if (Number.isFinite(x) || Number.isFinite(y)) out[k] = (Number.isFinite(x) ? x : 0) + (Number.isFinite(y) ? y : 0);
+  for (const k of ['promptTokens', 'completionTokens', 'reasoningTokens', 'cachedPromptTokens']) {
+    // ⛔ #1296 — an explicit null must not become a measured zero here either:
+    // `Number(null)` is 0 and passes a finiteness test, so adding two honest
+    // silences would manufacture a number.
+    //
+    // ⚠️ HONESTLY LABELLED: this guard is UNREACHABLE TODAY and its mutation
+    // SURVIVES. Both call sites sit behind `useTools`, so both operands come
+    // from runToolLoop, which now omits an unreported category entirely rather
+    // than nulling it — the absent key arrives as undefined, which the old
+    // numeric test already handled. It is kept because the asymmetry it guards
+    // is a property of the ADAPTERS (they null what they cannot count), and the
+    // day a non-tool result reaches here that null would be billed as a zero.
+    // Not presented as tested; a reader should not infer coverage from its
+    // presence.
+    const num = (v) => (v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
+    const x = num(a?.[k]); const y = num(b?.[k]);
+    if (x != null || y != null) out[k] = (x ?? 0) + (y ?? 0);
   }
   return Object.keys(out).length ? out : null;
 }

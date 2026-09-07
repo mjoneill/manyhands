@@ -75,16 +75,28 @@ export async function runToolLoop({ agent, messages, tools = [], execute, callMo
   // ⛔ NULL WHEN NOTHING REPORTED, never {promptTokens: 0}: a zero here would
   // price the wake as free and be indistinguishable from a genuinely free
   // call, which is the defect one layer up. An unmeasured zero is not a value.
-  const usage = { promptTokens: 0, completionTokens: 0, reasoningTokens: 0 };
-  let sawUsage = false;
+  //
+  // ⛔ #1296 — AND THE ABSENCE IS PER-CATEGORY, not per-call. The first version
+  // of this seeded all four categories at 0 behind a single `sawUsage` flag, so
+  // a provider that reported prompt and completion and said NOTHING about
+  // reasoning or caching produced `reasoningTokens: 0` — a confident claim that
+  // the model did not think, and a perfect cache miss, neither of which anyone
+  // measured. That is the same unmeasured zero this comment warns about, one
+  // level down, and it was found by an assertion rather than by re-reading.
+  const usage = {};
+  const seen = new Set();
   const addUsage = (u) => {
     if (!u || typeof u !== 'object') return;
-    let any = false;
-    for (const k of ['promptTokens', 'completionTokens', 'reasoningTokens']) {
-      const v = Number(u[k]);
-      if (Number.isFinite(v)) { usage[k] += v; any = true; }
+    for (const k of ['promptTokens', 'completionTokens', 'reasoningTokens', 'cachedPromptTokens']) {
+      // ⛔ `Number(null)` is 0 and `Number.isFinite(0)` is true, so a numeric
+      // guard alone reads an EXPLICIT null as a measured zero. Every adapter
+      // reports an uncounted category as null, which is precisely the case
+      // this must not convert into a value.
+      const raw = u[k];
+      if (raw == null || raw === '') continue;
+      const v = Number(raw);
+      if (Number.isFinite(v)) { usage[k] = (usage[k] ?? 0) + v; seen.add(k); }
     }
-    if (any) sawUsage = true;
   };
   let modelCalls = 0;
   let text = '';
@@ -145,5 +157,5 @@ export async function runToolLoop({ agent, messages, tools = [], execute, callMo
     if (stoppedBecause === 'max-hops') break;
   }
 
-  return { text, hops, modelCalls, stoppedBecause, messages: convo, usage: sawUsage ? usage : null };
+  return { text, hops, modelCalls, stoppedBecause, messages: convo, usage: seen.size ? usage : null };
 }

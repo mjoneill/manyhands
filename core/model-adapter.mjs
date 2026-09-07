@@ -318,6 +318,11 @@ const PROTOCOLS = {
           promptTokens: body?.usage?.prompt_tokens ?? null,
           completionTokens: body?.usage?.completion_tokens ?? null,
           reasoningTokens: body?.usage?.completion_tokens_details?.reasoning_tokens ?? null,
+          // #1296 — the cache lever's gauge. A SUBSET of promptTokens, not a
+          // fourth addend: OpenAI-shaped providers report cached_tokens as the
+          // portion of prompt_tokens that was served from cache. Summing a
+          // subset across hops is still a subset, so it rides the same path.
+          cachedPromptTokens: body?.usage?.prompt_tokens_details?.cached_tokens ?? null,
         },
       };
     },

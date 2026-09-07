@@ -135,6 +135,11 @@ const rowToBoard = (row) => ({
   // beside it is exactly the thing we cannot currently tell — and a row that
   // carries both numbers is what makes that answerable against an invoice.
   reasoningTokens: row.usage?.reasoningTokens ?? null,
+  // #1296 — how much of the prompt was served from cache. Without this the
+  // largest lever anyone has identified has no gauge on our side of the wire:
+  // "did the caching work pay off" is answerable only by a human logging into
+  // the vendor's dashboard, once per change.
+  cachedPromptTokens: row.usage?.cachedPromptTokens ?? null,
   cost: (agent.model?.costIn != null || agent.model?.costOut != null)
     ? ((row.usage?.promptTokens ?? 0) * (agent.model.costIn ?? 0) + (row.usage?.completionTokens ?? 0) * (agent.model.costOut ?? 0)) : 0,
   stopReason: row.stopReason ?? null, latencyMs: row.latencyMs, ok: row.ok, error: row.error ?? null,
