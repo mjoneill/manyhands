@@ -46,8 +46,8 @@ const SHELL = '[data-page-shell]';
 const PROSE = '.prose';
 
 const VIEWPORTS = [480, 768, 1024, 1442]; // the #499 set
-const SURFACES = ['/', '/wiki.html', '/commons.html', '/settings.html'];
-const EXPECTED_NAV = ['▦ Board', '📖 Wiki', '💬 Commons', '⚙️ Settings'];
+const SURFACES = ['/', '/wiki.html', '/commons.html', '/insights.html', '/settings.html'];
+const EXPECTED_NAV = ['▦ Board', '📖 Wiki', '💬 Commons', '📈 Insights', '⚙️ Settings'];
 
 const ts = '2026-05-01T00:00:00.000Z';
 

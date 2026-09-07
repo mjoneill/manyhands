@@ -14,6 +14,7 @@ export const NAV_ITEMS = [
   { id: 'board', href: '/', label: '▦ Board' },
   { id: 'wiki', href: '/wiki.html', label: '📖 Wiki' },
   { id: 'commons', href: '/commons.html', label: '💬 Commons' },
+  { id: 'insights', href: '/insights.html', label: '📈 Insights' },   // #1290 shadow — recommends, changes nothing
   { id: 'settings', href: '/settings.html', label: '⚙️ Settings' },
 ];
 

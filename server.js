@@ -55,6 +55,7 @@ import { createPrompt, editPrompt, setEnabled, reorderPlaylist, removePrompt, se
 import { resolveProvenance } from './core/tending-provenance.mjs';
 import { boardToDomain, domainToBoard, cardToNode } from './core/mapping.mjs';
 import { verifyShaIntegrity, readShaStamp, collectShas, SHA_POPULATION } from './core/sha-integrity.mjs';
+import { summariseSeat, recommendInterval, backlogFor, costCoverage, budgetGateStatus, TICK_MS } from './core/insights.mjs';   // #1290 shadow insights
 import { buildTree, buildChildIndex } from './core/tree.mjs';
 import { buildLinkIndex } from './core/links.mjs';
 import { commentMetadata } from './core/card-comments.mjs';
@@ -3905,6 +3906,105 @@ async function handleCreateModelCall(req, res) {
     sendJSON(res, 500, { error: e.message });
   }
 }
+/**
+ * #1290 — SHADOW INSIGHTS. The aggregate the dashboard reads.
+ *
+ * ⛔ READ-ONLY AND ADVISORY. This endpoint computes what a model WOULD
+ * recommend. It writes nothing, changes no interval, and affects no wake.
+ *
+ * ⚠️ It deliberately does NOT touch the graph replica: the diagnostic surface
+ * must not queue behind the thing it exists to diagnose (#1114's herd took the
+ * board down twice today, and both times the API could not answer why).
+ */
+function handleInsights(req, res) {
+  try {
+    const q = parseQuery(req.url);
+    const now = Date.now();
+    const windowHours = Math.max(1, Math.min(168, Number.parseInt(q.hours, 10) || 6));
+    const since = new Date(now - windowHours * 3600_000).toISOString();
+
+    const data = readBoard();
+    // The ledger, in the module's vocabulary. `at` is the wire name for calledAt.
+    const calls = modelCallsOf(data).map(modelCallToWire)
+      .map((c) => ({ ...c, calledAt: c.at }))
+      .filter((c) => typeof c.calledAt === 'string');
+    const inWindow = calls.filter((c) => c.calledAt >= since);
+
+    const agents = agentsOf(data).map(agentToWire);
+    const convs = Array.isArray(data.conversations) ? data.conversations : [];
+
+    const seats = [];
+    const names = new Set([...agents.map((a) => a.seatKey).filter(Boolean),
+      ...inWindow.map((c) => c.agent).filter(Boolean)]);
+
+    for (const seat of names) {
+      const rows = inWindow.filter((c) => c.agent === seat);
+      const summary = summariseSeat(rows);
+      const advice = recommendInterval(summary);
+
+      // Mentions of this seat, and its own posts, over the same window.
+      const re = new RegExp(`(^|[^A-Za-z0-9_])@${String(seat).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z0-9_])`, 'i');
+      const mentions = convs.filter((m) => m && typeof m.body === 'string'
+        && typeof m.createdAt === 'string' && m.createdAt >= since
+        && String(m.author || '').toLowerCase() !== String(seat).toLowerCase()
+        && String(m.author || '').toLowerCase() !== 'board'
+        && re.test(m.body));
+      const answered = convs.filter((m) => m && String(m.author || '').toLowerCase() === String(seat).toLowerCase()
+        && typeof m.createdAt === 'string' && m.createdAt >= since).length;
+
+      const agent = agents.find((a) => a.seatKey === seat) || null;
+      const cov = costCoverage(rows);
+
+      seats.push({
+        seat,
+        wakeOn: agent?.wakeOn ?? null,
+        summary,
+        advice,
+        currentIntervalMs: TICK_MS,
+        backlog: backlogFor({ mentions, answered, now, staleAfterMinutes: 30 }),
+        // #1290 — priced vs unpriced, because the ledger reported $0.0007
+        // against OpenRouter's $2.05 on 2026-09-07. An unpriced row is not
+        // a free one, and a sum over unpriced rows is a confident zero.
+        cost: {
+          ...cov,
+          budgetPerDay: agent?.budgetPerDay ?? null,
+          gate: budgetGateStatus({ budgetPerDay: agent?.budgetPerDay ?? null, coverage: cov }),
+          // ⚠️ null unless BOTH the budget and a trustworthy spend exist — a
+          // runway computed from an unpriced ledger invents its denominator.
+          runwayHours: (agent?.budgetPerDay && cov.trustworthy && cov.spent > 0)
+            ? Math.round((agent.budgetPerDay / (cov.spent / windowHours)) * 10) / 10
+            : null,
+        },
+      });
+    }
+
+    seats.sort((a, b) => (b.summary.rowsSeen || 0) - (a.summary.rowsSeen || 0));
+
+    sendJSON(res, 200, {
+      shadow: true,
+      note: 'ADVISORY ONLY — nothing here is applied. These are recommendations a human may act on.',
+      generatedAt: new Date(now).toISOString(),
+      windowHours,
+      since,
+      population: {
+        ledgerRowsTotal: calls.length,
+        ledgerRowsInWindow: inWindow.length,
+        seats: seats.length,
+        // ⛔ The coverage line. A dashboard that hides its gaps renders a
+        // measurement failure as health — three instruments did exactly that today.
+        rowsMissingLatency: inWindow.filter((c) => typeof c.latencyMs !== 'number').length,
+        // ⛔ The ledger is not a billing instrument and must not be read as one.
+        rowsUnpriced: inWindow.filter((c) => !((Number(c.cost) || 0) > 0)).length,
+        costWarning: 'ledger cost is derived from costIn/costOut on the model spec; where those are unset the row records 0. Verified against the provider dashboard 2026-09-07: ledger $0.0007 vs actual $2.05. Treat spend here as a FLOOR.',
+      },
+      seats,
+    });
+  } catch (e) {
+    console.error('GET /api/insights:', e.message);
+    sendJSON(res, 500, { error: 'insights unavailable', detail: e.message });
+  }
+}
+
 function handleListModelCalls(req, res) {
   const q = parseQuery(req.url);
   let out = modelCallsOf(readBoard()).map(modelCallToWire).sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
@@ -8088,6 +8188,7 @@ const API_ROUTES = [
   { method: 'PATCH',  re: /^\/api\/agents\/([^\/]+)$/,      fn: (req, res, m) => handlePatchAgent(req, res, decodeURIComponent(m[1])) },          // #1199
   { method: 'POST',   re: /^\/api\/agents\/([^\/]+)\/prompt$/, fn: (req, res, m) => handleAgentPromptVersion(req, res, decodeURIComponent(m[1])) }, // #1199
   { method: 'GET',    re: /^\/api\/model-calls$/,          fn: (req, res) => handleListModelCalls(req, res) },   // #1202
+  { method: 'GET',    re: /^\/api\/insights$/,             fn: (req, res) => handleInsights(req, res) },              // #1290 shadow
   { method: 'POST',   re: /^\/api\/model-calls$/,          fn: (req, res) => handleCreateModelCall(req, res) }, // #1202
   { method: 'GET',    re: /^\/api\/wakes$/,                fn: (req, res) => handleListWakes(req, res) },
   { method: 'POST',   re: /^\/api\/wakes$/,                fn: (req, res) => handleCreateWake(req, res) },
