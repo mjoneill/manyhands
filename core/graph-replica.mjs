@@ -174,7 +174,7 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:Wake', 'scrum:wokeSeat', 'scrum:wokeAt',
   // #1202 — the provenance ledger row
   'scrum:ModelCall', 'scrum:agent', 'scrum:model', 'scrum:provider', 'scrum:protocol',
-  'scrum:promptVersion', 'scrum:tokensIn', 'scrum:tokensOut', 'scrum:cost', 'scrum:stopReason',
+  'scrum:promptVersion', 'scrum:tokensIn', 'scrum:tokensOut', 'scrum:cost', 'scrum:costMeasured', 'scrum:stopReason',
   'scrum:latencyMs', 'scrum:contextHandedTo', 'scrum:producedPost', 'scrum:calledAt', 'scrum:ok',
   // #1254 — WHAT A TURN KEPT, beside whether it spoke. Under the publish gate a
   // seat can decline to post and still write to its own memory, and that write
@@ -948,6 +948,10 @@ function projectModelCall(store, e) {
   if (Number.isFinite(Number(e['scrum:tokensIn'])) && e['scrum:tokensIn'] != null) add(nn(S + 'tokensIn'), num(e['scrum:tokensIn']));
   if (Number.isFinite(Number(e['scrum:tokensOut'])) && e['scrum:tokensOut'] != null) add(nn(S + 'tokensOut'), num(e['scrum:tokensOut']));
   if (Number.isFinite(Number(e['scrum:cost'])) && e['scrum:cost'] != null) add(nn(S + 'cost'), num(e['scrum:cost']));
+  // #1294 — whether that cost is an ANSWER or an ABSENCE. Projected because
+  // the graph is where "what did this seat cost" gets asked, and a query that
+  // sums cost across rows silently mixes free calls with unpriced ones.
+  if (e['scrum:costMeasured'] != null) add(nn(S + 'costMeasured'), lit(String(!!e['scrum:costMeasured'])));
   if (Number.isFinite(Number(e['scrum:latencyMs'])) && e['scrum:latencyMs'] != null) add(nn(S + 'latencyMs'), num(e['scrum:latencyMs']));
   if (e['scrum:ok'] != null) add(nn(S + 'ok'), lit(String(!!e['scrum:ok'])));
   if (Number.isFinite(Number(e['scrum:markerLines'])) && e['scrum:markerLines'] != null) add(nn(S + 'markerLines'), num(e['scrum:markerLines']));

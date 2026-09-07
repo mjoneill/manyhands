@@ -79,6 +79,9 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:tokensIn': 'scrum:tokensIn',
   'scrum:tokensOut': 'scrum:tokensOut',
   'scrum:cost': 'scrum:cost',
+  // #1294 — whether scrum:cost was computed from real usage. A free model's 0
+  // and an unpriced call's 0 are the same number and different facts.
+  'scrum:costMeasured': 'scrum:costMeasured',
   'scrum:stopReason': 'scrum:stopReason',
   'scrum:latencyMs': 'scrum:latencyMs',
   'scrum:contextHandedTo': 'scrum:contextHandedTo',   // → entity: IRIs

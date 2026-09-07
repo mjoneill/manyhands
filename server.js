@@ -3798,6 +3798,10 @@ const modelCallToWire = (e) => ({
   id: e['@id'], agent: e['scrum:agent'], model: e['scrum:model'], provider: e['scrum:provider'] ?? null,
   protocol: e['scrum:protocol'] ?? null, promptVersion: e['scrum:promptVersion'] ?? null,
   tokensIn: e['scrum:tokensIn'] ?? null, tokensOut: e['scrum:tokensOut'] ?? null, cost: e['scrum:cost'] ?? 0,
+  // #1294 — is that cost an ANSWER or an ABSENCE? Without this, a free model's
+  // 0 and a dropped-usage 0 read identically, which is how 145 unpriced rows
+  // looked like 145 free ones.
+  costMeasured: e['scrum:costMeasured'] ?? false,
   stopReason: e['scrum:stopReason'] ?? null, latencyMs: e['scrum:latencyMs'] ?? null, ok: e['scrum:ok'] !== false,
   contextHandedTo: e['scrum:contextHandedTo'] ?? [], producedPost: e['scrum:producedPost'] ?? null,
   // #1254 — the field was ACCEPTED on write and PROJECTED to the graph and never
@@ -3888,6 +3892,63 @@ function modelCallEntityFrom(body) {
   };
   return { entity, by };
 }
+/**
+ * #1294 — COST IS COMPUTED HERE, FROM THE REGISTRY, NEVER ACCEPTED.
+ *
+ * The daily budget cap could not fire: 145 rows for one seat recorded cost 0
+ * while OpenRouter billed $2.05 over the same window. `budgetCheck` halts on
+ * `spent >= budget` and `spent` was structurally zero, so the comparison was
+ * never true.
+ *
+ * The cause was one omission: `modelSpecOf` materialises a registered model's
+ * maxOutputTokens, timeoutMs and thinking onto the agent, and NOT costIn /
+ * costOut — so the runner's `rowToBoard`, which prices a call from
+ * `agent.model.costIn`, always took its `: 0` branch. The rates were on the
+ * Model entity the whole time; nothing carried them to the arithmetic.
+ *
+ * Pricing here instead of at the runner:
+ *   - works for agents ALREADY BOUND — no re-bind, no migration
+ *   - keeps the registry the single authority, so a rate change is live. A
+ *     materialised PRICE goes stale silently and under-bills, which is this
+ *     defect wearing a different hat.
+ *   - #534's precedent, in this same file: `version` is server-computed and
+ *     never accepted, because a value the caller controls cannot gate
+ *     anything. A budget the caller can zero out is not a budget.
+ *
+ * ⛔ AND AN UNMEASURED ZERO IS MARKED AS ONE. A free model's 0 and a dropped
+ * usage's 0 were indistinguishable, and that is precisely what hid this across
+ * 145 rows: "an unmeasured zero isn't a value — it's a gap wearing a number."
+ * So `costMeasured` says whether the number is an answer or an absence.
+ */
+function priceModelCall(data, entity, declaredCost) {
+  const tokensIn = entity['scrum:tokensIn'];
+  const tokensOut = entity['scrum:tokensOut'];
+  const called = entity['scrum:model'];
+  const model = modelsOf(data).find((m) => m && (m['scrum:model'] === called || m['scrum:modelKey'] === called));
+
+  // ⭐ THE REGISTRY WINS WHERE IT CAN PRICE. A registered model with usage is
+  // priced here, and a caller-supplied number is ignored — that is the half
+  // that makes a budget a budget (#534: a value the caller controls cannot
+  // gate anything).
+  if (model && (tokensIn != null || tokensOut != null)) {
+    const cost = (Number(tokensIn ?? 0) * Number(model['scrum:costIn'] ?? 0))
+      + (Number(tokensOut ?? 0) * Number(model['scrum:costOut'] ?? 0));
+    return { cost: Number.isFinite(cost) ? cost : 0, measured: true };
+  }
+
+  // ⛔ AND IT DOES NOT OVERRIDE WHAT IT CANNOT COMPUTE. #1202's own tests post
+  // an UNREGISTERED model with a cost the caller measured, and that is a
+  // legitimate ledger row — refusing the number would lose the only
+  // measurement anyone has. My first version zeroed those rows, and #1202's
+  // tests are what caught it.
+  if (declaredCost != null && Number.isFinite(Number(declaredCost)) && Number(declaredCost) !== 0) {
+    return { cost: Number(declaredCost), measured: true };
+  }
+
+  // Nothing to compute from and nothing declared ⇒ UNKNOWN, not "free".
+  return { cost: 0, measured: false };
+}
+
 async function handleCreateModelCall(req, res) {
   try {
     const body = JSON.parse(await readBody(req));
@@ -3896,6 +3957,9 @@ async function handleCreateModelCall(req, res) {
     const { entity, by } = built;
     const result = await withWriteLock(async () => {
       const data = readBoard();
+      const priced = priceModelCall(data, entity, body.cost);
+      entity['scrum:cost'] = priced.cost;
+      entity['scrum:costMeasured'] = priced.measured;
       data.modelCalls = [...modelCallsOf(data), entity];
       writeBoard(data, [modelCallEvent(entity, by)]);
       return { status: 201, wire: modelCallToWire(entity) };
