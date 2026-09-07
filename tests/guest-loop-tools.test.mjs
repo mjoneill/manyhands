@@ -39,7 +39,7 @@ test('#1196C a granted seat uses the channel, and every hop lands on the ledger 
   const callModel = async () => {
     turn += 1;
     if (turn === 1) return { text: '', toolCalls: [{ id: 'c1', name: 'card_get', arguments: { shortId: 858 } }], stopReason: 'tool_calls', usage: { promptTokens: 5, completionTokens: 1 } };
-    return { text: 'Card #858 is about the vocabulary gap.', toolCalls: [], stopReason: 'stop', usage: { promptTokens: 9, completionTokens: 8 } };
+    return { text: 'REPLY: Card #858 is about the vocabulary gap.', toolCalls: [], stopReason: 'stop', usage: { promptTokens: 9, completionTokens: 8 } };
   };
   const out = await guestOnce({
     agent: agentWith(['card_get']), wake: WAKE, callModel, ledgerFile,
@@ -67,7 +67,7 @@ test('#1196C ZERO ROWS is recorded as zero, so a confident answer over nothing i
   const callModel = async () => {
     turn += 1;
     if (turn === 1) return { text: '', toolCalls: [{ id: 'c1', name: 'board_search', arguments: { q: 'nothing' } }], stopReason: 'tool_calls', usage: {} };
-    return { text: 'The board clearly says the migration finished last Tuesday.', toolCalls: [], stopReason: 'stop', usage: {} };
+    return { text: 'REPLY: The board clearly says the migration finished last Tuesday.', toolCalls: [], stopReason: 'stop', usage: {} };
   };
   const out = await guestOnce({
     agent: agentWith(['board_search']), wake: WAKE, callModel, ledgerFile,
@@ -85,7 +85,7 @@ test('#1196C ZERO ROWS is recorded as zero, so a confident answer over nothing i
 test('#1196C an UNGRANTED seat is unchanged: one call, no tools offered, no hops', async () => {
   const ledgerFile = tmpLedger();
   let calls = 0; let sawTools = null;
-  const callModel = async (m, msgs, opts) => { calls += 1; sawTools = opts?.tools ?? null; return { text: 'plain answer', toolCalls: [], stopReason: 'stop', usage: {} }; };
+  const callModel = async (m, msgs, opts) => { calls += 1; sawTools = opts?.tools ?? null; return { text: 'REPLY: plain answer', toolCalls: [], stopReason: 'stop', usage: {} }; };
   const out = await guestOnce({
     agent: agentWith([]), wake: WAKE, callModel, ledgerFile,
     post: async () => ({ id: 'p1' }),
@@ -105,7 +105,7 @@ test('#1196C a failing tool does not lose the wake, and the failure is on the ro
   const callModel = async () => {
     turn += 1;
     if (turn === 1) return { text: '', toolCalls: [{ id: 'c1', name: 'card_get', arguments: { shortId: 5 } }], stopReason: 'tool_calls', usage: {} };
-    return { text: 'I could not read that card.', toolCalls: [], stopReason: 'stop', usage: {} };
+    return { text: 'REPLY: I could not read that card.', toolCalls: [], stopReason: 'stop', usage: {} };
   };
   const out = await guestOnce({
     agent: agentWith(['card_get']), wake: WAKE, callModel, ledgerFile,
@@ -156,7 +156,7 @@ test('#1196C a seat with tools is TOLD it has them — and told never to claim a
   let sawSystem = '';
   const callModel = async (m, msgs) => {
     sawSystem = msgs.find((x) => x.role === 'system')?.content ?? '';
-    return { text: 'ok', toolCalls: [], stopReason: 'stop', usage: {} };
+    return { text: 'REPLY: ok', toolCalls: [], stopReason: 'stop', usage: {} };
   };
   await guestOnce({
     agent: agentWith(['card_get', 'board_search']), wake: WAKE, callModel, ledgerFile,
@@ -174,7 +174,7 @@ test('#1196C a seat with tools is TOLD it has them — and told never to claim a
   let ungrantedSystem = '';
   await guestOnce({
     agent: agentWith([]), wake: WAKE, ledgerFile,
-    callModel: async (m, msgs) => { ungrantedSystem = msgs.find((x) => x.role === 'system')?.content ?? ''; return { text: 'ok', toolCalls: [], stopReason: 'stop', usage: {} }; },
+    callModel: async (m, msgs) => { ungrantedSystem = msgs.find((x) => x.role === 'system')?.content ?? ''; return { text: 'REPLY: ok', toolCalls: [], stopReason: 'stop', usage: {} }; },
     post: async () => ({ id: 'p1' }), execute: async () => ({ rows: [] }),
   });
   assert.doesNotMatch(ungrantedSystem, /board_search|card_get/, 'a seat with no tools is not told about tools');
@@ -191,7 +191,7 @@ test('#1246 a zero-hop wake that claims a lookup is FLAGGED on the row, and the 
   const ledgerFile = tmpLedger();
   const out = await guestOnce({
     agent: agentWith([]), wake: WAKE, ledgerFile,
-    callModel: async () => ({ text: 'I have read the genesis prompt and it speaks of a shared space.', toolCalls: [], stopReason: 'stop', usage: null }),
+    callModel: async () => ({ text: 'REPLY: I have read the genesis prompt and it speaks of a shared space.', toolCalls: [], stopReason: 'stop', usage: null }),
     post: async (p) => { posts.push(p); return { id: 'p1' }; },
     onError: (m) => problems.push(m),
   });
@@ -213,7 +213,7 @@ test('#1246 a clean wake carries the empty verdict, not a missing field', async 
   const ledgerFile = tmpLedger();
   await guestOnce({
     agent: agentWith([]), wake: WAKE, ledgerFile,
-    callModel: async () => ({ text: 'I have no tool for that, so I cannot say what the card holds.', toolCalls: [], stopReason: 'stop', usage: null }),
+    callModel: async () => ({ text: 'REPLY: I have no tool for that, so I cannot say what the card holds.', toolCalls: [], stopReason: 'stop', usage: null }),
     post: async () => ({ id: 'p1' }),
   });
   const row = rowsFrom(ledgerFile).at(-1);
@@ -232,9 +232,9 @@ test('#1246b an announced-but-unmade lookup is nudged ONCE, and a real lookup re
   const callModel = async () => {
     turn += 1;
     // 1: narrates. 2: after the nudge, actually calls. 3: answers from the rows.
-    if (turn === 1) return { text: 'I will search the board for the genesis prompt and report back.', toolCalls: [], stopReason: 'stop', usage: null };
+    if (turn === 1) return { text: 'REPLY: I will search the board for the genesis prompt and report back.', toolCalls: [], stopReason: 'stop', usage: null };
     if (turn === 2) return { text: '', toolCalls: [{ id: 'c1', name: 'board_search', arguments: { q: 'genesis prompt' } }], stopReason: 'tool_calls', usage: null };
-    return { text: 'Card #1249 holds it; the body opens on the word.', toolCalls: [], stopReason: 'stop', usage: null };
+    return { text: 'REPLY: Card #1249 holds it; the body opens on the word.', toolCalls: [], stopReason: 'stop', usage: null };
   };
   const out = await guestOnce({
     agent: agentWith(['board_search']), wake: WAKE, ledgerFile, callModel,
@@ -258,8 +258,8 @@ test('#1246b a seat that declines after the nudge is NOT forced to look — the 
   let turn = 0;
   const callModel = async () => {
     turn += 1;
-    if (turn === 1) return { text: 'Let me check that for you.', toolCalls: [], stopReason: 'stop', usage: null };
-    return { text: 'Nothing I can reach can see that, so I cannot answer it.', toolCalls: [], stopReason: 'stop', usage: null };
+    if (turn === 1) return { text: 'REPLY: Let me check that for you.', toolCalls: [], stopReason: 'stop', usage: null };
+    return { text: 'REPLY: Nothing I can reach can see that, so I cannot answer it.', toolCalls: [], stopReason: 'stop', usage: null };
   };
   await guestOnce({
     agent: agentWith(['board_search']), wake: WAKE, ledgerFile, callModel,
@@ -279,7 +279,7 @@ test('#1246b a wake that just ANSWERS is never nudged, and costs no extra call',
   let calls = 0;
   await guestOnce({
     agent: agentWith(['board_search']), wake: WAKE, ledgerFile,
-    callModel: async () => { calls += 1; return { text: 'Card #1249 holds it.', toolCalls: [], stopReason: 'stop', usage: null }; },
+    callModel: async () => { calls += 1; return { text: 'REPLY: Card #1249 holds it.', toolCalls: [], stopReason: 'stop', usage: null }; },
     execute: async () => ({ rows: [] }),
     post: async () => ({ id: 'p1' }),
   });

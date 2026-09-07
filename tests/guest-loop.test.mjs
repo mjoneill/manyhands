@@ -15,7 +15,15 @@ const tmp = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'guest-')), 'm
 const ledgerRows = (f) => fs.existsSync(f) ? fs.readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
 
 const AGENT = { seatKey: 'gizmo', name: 'Gizmo', systemPrompt: 'Be brief.', model: { model: 'm', protocol: 'ollama-native', baseUrl: 'http://x' } };
-const ollamaOk = (text) => ({ status: 200, body: { message: { content: text }, done: true, done_reason: 'stop', prompt_eval_count: 40, eval_count: 9 }, rawBody: '{}' });
+// #1254 — these fixtures were written when publishing was IMPLICIT. The gate
+// inverted that default, so a fixture that stands for "the model produced a
+// reply" now has to say so with the marker, exactly as a real seat does. The
+// prefix is added here rather than at 30 call sites, and skipped when the
+// fixture's first line is already a directive or a deliberate non-reply — those
+// cases are the subject of their own tests. The gate itself is tested in
+// tests/explicit-post.test.mjs, never here.
+const publishable = (t) => (!String(t ?? '').trim() || /^\s*(REPLY:|REMEMBER:|CLAIM:|NO_REPLY)/i.test(String(t))) ? t : `REPLY: ${t}`;
+const ollamaOk = (text) => ({ status: 200, body: { message: { content: publishable(text) }, done: true, done_reason: 'stop', prompt_eval_count: 40, eval_count: 9 }, rawBody: '{}' });
 const withTransport = (resp) => (agent, messages, opts) => callModel(agent, messages, { ...opts, transport: async () => (typeof resp === 'function' ? resp() : resp) });
 
 const MSGS = [

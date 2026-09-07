@@ -56,7 +56,11 @@ test('#1237 acquireLock: second holder is refused and told who holds it; release
 });
 
 /** A fake Ollama: answers /api/chat with one fixed reply, counts calls. */
-function fakeOllama(reply = 'I am here.') {
+// #1254 — the marker is on the FIXTURE, not added by the harness: this stub
+// stands in for a model that INTENDED to publish, and under the inverted
+// default a model says so by beginning with `REPLY:`. A stub that skips it is
+// no longer modelling a reply, it is modelling a decline.
+function fakeOllama(reply = 'REPLY: I am here.') {
   const calls = [];
   const srv = http.createServer((req, res) => {
     let raw = ''; req.on('data', (c) => { raw += c; });
@@ -80,7 +84,7 @@ function runOnce(env, extraArgs = []) {
 
 test('#1237 SEAM: the real runner answers a mention buried under 80 newer posts exactly once, and two concurrent runs answer one mention exactly once', async () => {
   const srv = await startRestServer({ board: makeBoardFixture({ cards: [], nextShortId: 1 }) });
-  const ollama = await fakeOllama('Gizmo here: the board is for work.');
+  const ollama = await fakeOllama('REPLY: Gizmo here: the board is for work.');
   const dir = tmpdir(); const stateFile = path.join(dir, 'gizmo.state.json');
   try {
     const api = async (method, p, body) => { const r = await fetch(`${srv.baseUrl}${p}`, { method, headers: { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) }); return { status: r.status, body: await r.json().catch(() => null) }; };

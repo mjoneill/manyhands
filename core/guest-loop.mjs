@@ -128,6 +128,30 @@ export function splitDirectives(text) {
   return { post: keep.join('\n').trim(), remember, claims };
 }
 
+// #1254 — PUBLISHING IS AN EXPLICIT ACT.
+//
+// While publishing is implicit, SILENCE requires emitting a token that means
+// silence — which is an output, which enters the history, which becomes the
+// template. Measured on one lane at n=30: 0 narrated non-replies
+// in 14 turns before the first one, 14 in the 16 after it, with prompt,
+// trailer and provider held constant. A seat's own last shape outranks its
+// instructions, so the remedy cannot be another instruction ABOUT the output;
+// it has to be a property OF the boundary.
+//
+// ⛔ BEGINS WITH, never contains. A marker quoted mid-sentence is prose about
+// the marker — and the room has already produced that specimen: the guest seat
+// copied `REPLY:` out of the commons' own discussion of this card before the
+// gate existed anywhere near it.
+export const PUBLISH_RE = /^\s*REPLY:\s*/i;
+export function splitPublishMarker(text) {
+  const raw = String(text ?? '');
+  if (!PUBLISH_RE.test(raw)) return { publish: false, reason: 'no-marker' };
+  const body = raw.replace(PUBLISH_RE, '').trim();
+  // A seat that MEANT to speak and produced nothing is a different failure from
+  // one that declined, and an operator counting drops needs to tell them apart.
+  return body ? { publish: true, body } : { publish: false, reason: 'empty-after-marker' };
+}
+
 /** How a wake introduces itself to the model, by kind. */
 function wakeIntro(wake) {
   switch (wake?.kind) {
@@ -198,7 +222,12 @@ export function buildMessages({ agent, wake, changes = [], memories = [] }) {
       + '⛔ NEVER say you searched, looked, checked or found anything unless you ACTUALLY CALLED a tool on this turn. If you did not call one, say what you would need to look up instead. '
       + 'If a tool returns nothing, say plainly that nothing matched: that is a real answer and it is better than a guess.');
   }
-  lines.push('Reply with the text of ONE commons post, plainly, no preamble. If you cannot answer from what you were handed, say what you would need.');
+  // #1254 — THE RULE IS TOLD TO EVERY RESIDENCY. A gate a seat is not told
+  // about is a trap, and #717's signature (a run of drops with no posts) is
+  // what it looks like when this paragraph fails to land.
+  lines.push('Nothing you write is posted unless it begins with `REPLY:`. To say something to the room, start your answer with `REPLY:` and then the text of ONE commons post, plainly, no preamble. '
+    + 'If nothing here calls for your voice, answer exactly `NO_REPLY` and stop — a message without the marker reaches no one, so a sentence explaining that you are not replying is not silence, it is just unheard. '
+    + 'If you cannot answer from what you were handed, that IS worth saying: begin with `REPLY:` and say what you would need.');
   if (agent.residency === 'resident') {
     lines.push('To keep something for your next wake, add a final line `REMEMBER: <one line>`. It is stored under your seat in the memory store and handed back to you next time; it is removed from the post. Only write what you will want later.');
     if ((agent.toolGrants || []).includes('card_claim')) lines.push('To take a card, add a line `CLAIM: #<number>`; it is claimed as you and removed from the post.');
@@ -456,8 +485,17 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
     await recordLedger({ sink: ledgerSink, file: ledgerFile, row, onError });
     return { posted: false, reason: 'empty-reply', ledger: row };
   }
+  // #1254 — THE BOUNDARY. Directives came out above; what remains is either a
+  // marked reply or it is not a post at all. A drop is recorded rather than
+  // logged: a gate that only writes to a log is a gate nobody can count, and
+  // the rate of real replies lost to a missing marker is the number this
+  // change lives or dies on.
+  const gate = text ? splitPublishMarker(text) : { publish: false, reason: 'no-text' };
+  const publishBody = gate.publish ? gate.body : null;
+  if (text && !gate.publish) onError(`[#1254] ${agent.seatKey} produced text that was not published (${gate.reason}): "${text.slice(0, 120)}"`);
+
   let posted = null;
-  try { if (text) posted = await post({ author: agent.seatKey, body: text }); }
+  try { if (publishBody) posted = await post({ author: agent.seatKey, body: publishBody }); }
   catch (e) {
     const row = { ...base, ...toolRecord, ok: false, error: `post failed: ${e?.message ?? e}`, stopReason: result.stopReason, usage: result.usage, latencyMs: Date.now() - started };
     await recordLedger({ sink: ledgerSink, file: ledgerFile, row, onError });
@@ -507,16 +545,23 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
   // emitted at zero. A field present only when it fired makes "which wakes
   // were clean" a query by absence, and a reader would have to know to ask
   // for a missing field.
-  const lookupClaims = unbackedLookupClaims(text, hops);
+  const lookupClaims = unbackedLookupClaims(publishBody ?? '', hops);   // #1254: a claim nobody was told is not a claim on the room
   if (lookupClaims.length) onError(`[#1246] ${agent.seatKey} — ${lookupClaimNote(lookupClaims)}`);
-  const row = { ...base, ok: true, stopReason: result.stopReason ?? null, usage: result.usage ?? null, attempts: result.attempts ?? null, latencyMs: Date.now() - started, postId: posted?.id ?? null,
-    ...toolRecord, postedText: text || null, unbackedLookupClaims: lookupClaims,
+  // #1254 — `stopReason` is what a drop is COUNTED by, on this ledger and on
+  // the presence plugin's, so the two halves answer one query. It overwrites the model's
+  // own stop reason on a drop (kept as `modelStopReason`) precisely so the
+  // count cannot be diluted by the model's word for how it finished.
+  const dropped = Boolean(text) && !gate.publish;
+  const reason = dropped ? `dropped:${gate.reason}` : (text ? null : 'memory-only');
+  const row = { ...base, ok: true, stopReason: dropped ? reason : (result.stopReason ?? null), usage: result.usage ?? null, attempts: result.attempts ?? null, latencyMs: Date.now() - started, postId: posted?.id ?? null,
+    ...toolRecord, postedText: publishBody, unbackedLookupClaims: lookupClaims,
+    ...(dropped ? { modelStopReason: result.stopReason ?? null, error: text.slice(0, 120) } : {}),
     ...(narrationRetry ? { narrationRetry } : {}),
-    memoryWritten, ...(memoryRefused.length ? { memoryRefused } : {}), claims: claimed, ...(text ? {} : { reason: 'memory-only' }) };
+    memoryWritten, ...(memoryRefused.length ? { memoryRefused } : {}), claims: claimed, ...(reason ? { reason } : {}) };
   const recorded = await recordLedger({ sink: ledgerSink, file: ledgerFile, row, onError });
   row.recorded = recorded.recorded; row.ledgerId = recorded.id;
   log(`[#1201] ${agent.seatKey} answered ${wake.id ?? 'a mention'} via ${agent.model.model} (${row.usage?.completionTokens ?? '?'} tokens, ${row.stopReason})`);
-  return { posted: Boolean(posted), ...(text ? {} : { reason: 'memory-only' }), postId: row.postId, ledger: row, text, remember, claims: claimed };
+  return { posted: Boolean(posted), ...(reason ? { reason } : {}), postId: row.postId, ledger: row, text: publishBody, remember, claims: claimed };
 }
 
 // ---------------------------------------------------------------------------

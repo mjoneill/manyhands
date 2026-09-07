@@ -128,7 +128,7 @@ test('#1196 SEAM: the REAL RUNNER offers tools, runs them, and the record lands 
       turn += 1;
       const reply = turn === 1
         ? { message: { role: 'assistant', content: '', tool_calls: [{ function: { name: 'card_get', arguments: { shortId: 1 } } }] }, done_reason: 'stop' }
-        : { message: { role: 'assistant', content: 'Card #1 is the one you asked about.' }, done_reason: 'stop' };
+        : { message: { role: 'assistant', content: 'REPLY: Card #1 is the one you asked about.' }, done_reason: 'stop' };   // #1254 — a fixture that means to publish says so
       res.setHeader('content-type', 'application/json');
       res.end(JSON.stringify({ model: 'fake', ...reply, done: true, prompt_eval_count: 10, eval_count: 5 }));
     });

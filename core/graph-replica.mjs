@@ -176,6 +176,12 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:ModelCall', 'scrum:agent', 'scrum:model', 'scrum:provider', 'scrum:protocol',
   'scrum:promptVersion', 'scrum:tokensIn', 'scrum:tokensOut', 'scrum:cost', 'scrum:stopReason',
   'scrum:latencyMs', 'scrum:contextHandedTo', 'scrum:producedPost', 'scrum:calledAt', 'scrum:ok',
+  // #1254 — WHAT A TURN KEPT, beside whether it spoke. Under the publish gate a
+  // seat can decline to post and still write to its own memory, and that write
+  // feeds only the seat that made it: no reader is present to catch it the way
+  // the room catches a post. Asked for on the card, and the right shape — the hole
+  // becomes a number ("dropped turns that wrote memory") rather than a rule.
+  'scrum:memoryWritten',
   // #1199 — the agent persona and its versioned prompt
   'scrum:Agent', 'scrum:AgentPrompt', 'scrum:AgentPromptVersion', 'scrum:seatKey', 'scrum:emoji',
   'scrum:contextPolicy', 'scrum:toolGrant', 'scrum:budgetPerDay', 'scrum:residency', 'scrum:state',
@@ -937,6 +943,12 @@ function projectModelCall(store, e) {
   if (e['scrum:producedPost']) add(nn(S + 'producedPost'), nn(String(e['scrum:producedPost']).startsWith('http') ? String(e['scrum:producedPost']) : E + e['scrum:producedPost']));
   for (const c of (Array.isArray(e['scrum:contextHandedTo']) ? e['scrum:contextHandedTo'] : [])) {
     if (c) add(nn(S + 'contextHandedTo'), nn(String(c).startsWith('http') ? String(c) : E + c));
+  }
+  // #1254 — a literal, not an entity IRI: the stored values are memory ids on a
+  // good day and a stringified error object on a bad one, and a projection that
+  // minted IRIs from the bad ones would make failures look like records.
+  for (const m of (Array.isArray(e['scrum:memoryWritten']) ? e['scrum:memoryWritten'] : [])) {
+    if (m) add(nn(S + 'memoryWritten'), lit(String(m)));
   }
   // #1203 finding — the knobs that make a run REPRODUCIBLE ride the node as
   // literals (seed and temperature are the two a re-run needs first); the

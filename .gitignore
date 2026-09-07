@@ -14,6 +14,12 @@ board-data.json
 *.bak-*
 
 node_modules/
+# …and the SYMLINK a worktree gets instead of a directory. `node_modules/` with a
+# trailing slash matches only a directory, so scripts/worktree.sh's symlink was
+# committable — and a symlink's CONTENT is its target path, which here carries
+# the operator's home directory and username. The history gate reads that as an
+# attribution finding, which is exactly what it is.
+node_modules
 .DS_Store
 .claude/
 backups/

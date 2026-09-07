@@ -144,6 +144,7 @@ export function announcedLookup(text) {
 export function performOrDeclineNudge(phrase) {
   return `You said: "${phrase}" — but this turn is ending and there is no later turn in which to do it. `
     + 'You have the tools right now. Either CALL one on this turn and answer from what comes back, '
-    + 'or say plainly that you cannot answer and why. Both are fine. Announcing a lookup you do not make is the one thing that is not, '
+    + 'or say plainly that you cannot answer and why — beginning, as always, with `REPLY:`, or the person waiting will get silence instead of your reason (#1254). Both are fine. '
+    + 'Announcing a lookup you do not make is the one thing that is not, '
     + 'because the person is left waiting for a reply that will never come.';
 }

@@ -54,7 +54,7 @@ test('#1240 guard 3, live: the poisoning wake is refused and says why', async ()
   const errors = [];
   const out = await guestOnce({
     agent: agentWith([]), wake: WAKE, ledgerFile,
-    callModel: async () => ({ text: 'The vocabulary gap is on card 73.\nREMEMBER: vocabulary gap on card 73', toolCalls: [], stopReason: 'stop', usage: {} }),
+    callModel: async () => ({ text: 'REPLY: The vocabulary gap is on card 73.\nREMEMBER: vocabulary gap on card 73', toolCalls: [], stopReason: 'stop', usage: {} }),
     post: async () => ({ id: 'p1' }),
     writeMemory: async (m) => { written.push(m); return { id: 'mem1' }; },
     onError: (e) => errors.push(String(e)),
@@ -71,7 +71,7 @@ test('#1240 guard 1: a stored memory carries the ledger row that produced it', a
   const written = [];
   await guestOnce({
     agent: agentWith([]), wake: WAKE, ledgerFile,
-    callModel: async () => ({ text: 'Noted.\nREMEMBER: the sprint review is Thursday at 10:00 CDT', toolCalls: [], stopReason: 'stop', usage: {} }),
+    callModel: async () => ({ text: 'REPLY: Noted.\nREMEMBER: the sprint review is Thursday at 10:00 CDT', toolCalls: [], stopReason: 'stop', usage: {} }),
     post: async () => ({ id: 'p1' }),
     writeMemory: async (m) => { written.push(m); return { id: 'mem1' }; },
   });
@@ -85,7 +85,7 @@ test('#1240 guard 2: memories are handed back as WHAT THIS SEAT SAID, not as boa
   await guestOnce({
     agent: agentWith([]), wake: WAKE, ledgerFile: tmpLedger(),
     memories: async () => [{ body: 'vocabulary gap on card 73', updatedAt: '2026-09-06T13:22:16.388Z' }],
-    callModel: async (m, msgs) => { sawUser = msgs.find((x) => x.role === 'user')?.content ?? ''; return { text: 'ok', toolCalls: [], stopReason: 'stop', usage: {} }; },
+    callModel: async (m, msgs) => { sawUser = msgs.find((x) => x.role === 'user')?.content ?? ''; return { text: 'REPLY: ok', toolCalls: [], stopReason: 'stop', usage: {} }; },
     post: async () => ({ id: 'p1' }),
   });
   assert.match(sawUser, /you (wrote|said)/i, 'the store is introduced as this seat\'s own past words');

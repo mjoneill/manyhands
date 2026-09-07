@@ -101,7 +101,7 @@ test('#1199 → #1202: a run from a BOARD agent records its prompt VERSION on th
     const mention = (await api(srv.baseUrl, 'POST', '/api/conversations', { body: '@gizmo hello?', author: 'bo' })).body;
     const post = (b) => api(srv.baseUrl, 'POST', '/api/conversations', b).then((r) => r.body);
     const ledgerSink = async (row) => (await api(srv.baseUrl, 'POST', '/api/model-calls', { by: row.agent, model: row.model, promptVersion: row.promptVersion, producedPost: row.postId, cost: 0 })).body;
-    const ok = { status: 200, body: { message: { content: 'hello' }, done: true, done_reason: 'stop', prompt_eval_count: 1, eval_count: 1 }, rawBody: '{}' };
+    const ok = { status: 200, body: { message: { content: 'REPLY: hello' }, done: true, done_reason: 'stop', prompt_eval_count: 1, eval_count: 1 }, rawBody: '{}' };
     const r = await guestOnce({ agent, wake: mention, callModel: (ag, m, o) => callModel(ag, m, { ...o, transport: async () => ok }), post, ledgerSink, ledgerFile: '/tmp/never-used-1199.jsonl' });
     assert.equal(r.posted, true);
     const rows = await sparql(srv.baseUrl, `SELECT ?pv ?body WHERE { ?x a scrum:ModelCall ; scrum:producedPost entity:${r.postId} ; scrum:promptVersion ?pv . ?v a scrum:AgentPromptVersion ; scrum:body ?body . FILTER(STR(?v) = ?pv) }`);
