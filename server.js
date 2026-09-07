@@ -2685,11 +2685,19 @@ async function handleAssert(req, res) {
         const subjObligation = subjIdx < 0
           ? obligationsOf(data).find((e) => e['@id'] === String(a.subject)) ?? null
           : null;
-        if (subjIdx < 0 && !subjObligation) {
+        // #1287 — a MEMORY is the third subject kind. #945's Option D promised
+        // "any node type"; #1118 slice B added obligations; memories were the
+        // gap that made #971 unable to use the very verb it names as its
+        // mechanism. Nothing new is invented here — `resolveNodeId` has
+        // resolved memory @ids for obligations' `about` field all along.
+        const subjMemory = (subjIdx < 0 && !subjObligation)
+          ? findMemory(data, a.subject)
+          : null;
+        if (subjIdx < 0 && !subjObligation && !subjMemory) {
           return {
             status: 400,
             error: `assertions[${i}]: subject ${JSON.stringify(a.subject)} does not resolve to a card `
-              + '(shortId or uuid) or an obligation (@id). Nothing in this batch was applied.',
+              + '(shortId or uuid), an obligation (@id) or a memory (@id). Nothing in this batch was applied.',
           };
         }
         if (a.predicate === 'scrum:dischargedBy') {
@@ -2744,6 +2752,33 @@ async function handleAssert(req, res) {
           plan.push({ kind: 'sha', subject, sha: a.object, a });
           continue;
         }
+        // #1287 — a memory subject takes a memory object, and exactly one
+        // predicate. ⛔ SCOPE, deliberately: `scrum:relatedTo` only. Its
+        // registered definition asserts "no direction, no dependency, no
+        // belonging, no lineage, no endorsement, and no ranking" — so it adds
+        // the EDGE without taking any of #971's open design decisions
+        // (ordering, membership, what a collection is) by implementation.
+        // An ordering predicate here would decide those by shipping.
+        if (subjMemory) {
+          if (a.predicate !== 'scrum:relatedTo') {
+            return {
+              status: 400,
+              error: `assertions[${i}]: ${a.predicate} has no store mapping for a MEMORY subject — `
+                + 'today only scrum:relatedTo is assertable between memories (#1287). '
+                + 'Assertability grows by deliberate act (see #945). Nothing in this batch was applied.',
+            };
+          }
+          const objMemory = findMemory(data, a.object);
+          if (!objMemory) {
+            return {
+              status: 400,
+              error: `assertions[${i}]: object ${JSON.stringify(a.object)} does not resolve to a memory (@id) — `
+                + 'a memory subject takes a memory object. Nothing in this batch was applied.',
+            };
+          }
+          plan.push({ kind: 'memoryRelatedTo', subjectMemory: subjMemory, objectMemory: objMemory, a });
+          continue;
+        }
         const objIdx = findCardIndex(data, a.object);
         if (objIdx < 0) {
           return {
@@ -2783,9 +2818,33 @@ async function handleAssert(req, res) {
       const now = new Date().toISOString();
       const touched = new Map(); // card.id → card
       const obligationEvents = [];
+      const memoryEvents = [];
       const results = [];
       for (const p of plan) {
-        if (p.kind === 'evidence') {
+        if (p.kind === 'memoryRelatedTo') {
+          // #1287 — SYMMETRIC, because scrum:relatedTo's registered definition
+          // says it is "symmetric BY CONSTRUCTION — the server writes both
+          // directions on every relationships write". Writing one direction
+          // would make memories the one entity where this predicate means
+          // something different from everywhere else it is used.
+          const cur = (id) => memoriesOf(data).find((m) => m && m['@id'] === id);
+          const A = cur(p.subjectMemory['@id']);
+          const B = cur(p.objectMemory['@id']);
+          const listOf = (m) => [].concat(m['scrum:relatedTo'] || []);
+          if (listOf(A).includes(B['@id']) && listOf(B).includes(A['@id'])) {
+            results.push(wire(p.a, 'noop'));
+            continue;
+          }
+          const nextA = { ...A, 'scrum:relatedTo': [...new Set([...listOf(A), B['@id']])] };
+          const nextB = { ...B, 'scrum:relatedTo': [...new Set([...listOf(B), A['@id']])] };
+          data.memories = memoriesOf(data).map((m) => {
+            if (m['@id'] === nextA['@id']) return nextA;
+            if (m['@id'] === nextB['@id']) return nextB;
+            return m;
+          });
+          memoryEvents.push(memoryEvent('update', nextA, by), memoryEvent('update', nextB, by));
+          results.push(wire(p.a, 'edge-added'));
+        } else if (p.kind === 'evidence') {
           const cur = obligationsOf(data).find((e) => e['@id'] === p.obligation['@id']) ?? p.obligation;
           const list = [].concat(cur['scrum:evidencedBy'] || []);
           if (list.includes(p.sha)) { results.push(wire(p.a, 'noop')); continue; }
@@ -2833,10 +2892,11 @@ async function handleAssert(req, res) {
           results.push(wire(p.a, 'sha-recorded'));
         }
       }
-      if (touched.size > 0 || obligationEvents.length > 0) {
+      if (touched.size > 0 || obligationEvents.length > 0 || memoryEvents.length > 0) {
         for (const c of touched.values()) bumpCardVersion(c); // #534 — the ONE version rule
         // ONE writeBoard, ONE event boundary, across node kinds.
-        writeBoard(data, [...[...touched.values()].map((c) => cardEvent('update', c, by)), ...obligationEvents]);
+        writeBoard(data, [...[...touched.values()].map((c) => cardEvent('update', c, by)),
+          ...obligationEvents, ...memoryEvents]);
       }
       return {
         status: 200,
@@ -2849,6 +2909,22 @@ async function handleAssert(req, res) {
     console.error('POST /api/assert:', e.message);
     sendJSON(res, 500, { error: e.message });
   }
+}
+
+/**
+ * #1287 — resolve a memory reference the way findCardIndex resolves a card:
+ * by its full `@id` URI OR by the bare uuid the API actually hands out.
+ *
+ * ⚠️ NOT a convenience. `POST /api/memories` returns `{id: "<uuid>", …}` and
+ * NEVER the `@id`, so a caller who creates a memory and immediately wants to
+ * relate it holds the one form the verb would otherwise refuse. Accepting only
+ * the `@id` would make the write path unreachable from the read path — the
+ * same shape as #814's short-sha refusal, but with no way to get the long form.
+ */
+function findMemory(data, ref) {
+  if (ref === undefined || ref === null || ref === '') return null;
+  const s = String(ref);
+  return memoriesOf(data).find((m) => m && (m['@id'] === s || m.identifier === s)) ?? null;
 }
 
 function decisionsOf(data) {

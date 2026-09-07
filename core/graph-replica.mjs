@@ -830,6 +830,12 @@ export const MEMORY_PREDICATES = Object.freeze({
   'scrum:tag': 'literal',          // repeatable
   'scrum:currentVersion': 'ref',   // Memory → its newest MemoryVersion
   'scrum:ofMemory': 'ref',         // MemoryVersion → its Memory
+  'scrum:relatedTo': 'ref',        // #1287 — Memory → Memory, symmetric, the
+                                   // first edge BETWEEN memories. #971's thesis
+                                   // is that memories are "in the graph and not
+                                   // OF it"; this is the one relation that makes
+                                   // that false. A ref, never a literal: the
+                                   // point is that it is traversable.
   'scrum:version': 'literal',
   'scrum:body': 'literal',         // the text. IMMUTABLE on a version.
   author: 'person',
