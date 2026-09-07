@@ -1735,6 +1735,7 @@ body::before {
   import { mountCommonsPanel } from './core/commons-panel.mjs';
   import { identityOf } from './core/identity.mjs';
   import { cardContentKey } from './core/card-content-key.mjs';
+  import { mountComposerWatch } from './core/composer-watch.mjs';
   window.renderChatMarkdown = renderChatMarkdown;
   window.identityOf = identityOf; // #333 — assignee chips glow their identity light
   // #466 — the SAME "did this card change?" the server uses, so a refused save
@@ -1744,6 +1745,11 @@ body::before {
   // The classic script's first hydrate may have run before this module did, in
   // which case its _rebaseline no-op'd. Take the baseline now that we can.
   if (typeof _rebaseline === 'function' && typeof cards !== 'undefined') _rebaseline(cards);
+  // #1255 slice 1 — the composer keeps the draft, and records enough to tell a
+  // lost draft from a stalled machine. Mounted here because the classic script
+  // below runs at parse time and cannot import; it reaches this through window,
+  // the same bridge renderChatMarkdown and identityOf use.
+  window._composerWatch = mountComposerWatch(document);
   mountTopNav(document, 'board'); // #303-2 shared nav
   // The classic board script renders once at parse-time, before this deferred
   // module runs — so the first paint's assignee chips miss their identity light.
@@ -5385,16 +5391,26 @@ async function postConversation(body, author, attachments) {
   const text = (body || '').trim();
   const atts = Array.isArray(attachments) ? attachments : [];
   if (!text && atts.length === 0) return false;   // body OR attachment required
+  // #1255 — the SUBMIT SEAM. What the box held vs what the request carries: the
+  // difference between "the UI lost it" and "it was already short when it left".
+  const _payload = JSON.stringify({ body: text, author, attachments: atts });
+  try { window._composerWatch?.noteSubmit((body || '').length, text.length); } catch { /* never break the post */ }
+  const _t0 = Date.now();
   try {
     const res = await fetch('/api/conversations', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ body: text, author, attachments: atts }),
+      body: _payload,
     });
+    try { window._composerWatch?.noteResponse(res.status, Date.now() - _t0); } catch { /* ignore */ }
     if (!res.ok) return false;
     await loadConversations();
     return true;
   } catch (e) {
+    // #1255 — a THROWN fetch is status 0, and that is the shape a stalled or
+    // aborted request takes. Recorded, because "it never came back" and "it
+    // came back slowly" are different verdicts.
+    try { window._composerWatch?.noteResponse(0, Date.now() - _t0); } catch { /* ignore */ }
     return false;
   }
 }
@@ -5487,6 +5503,9 @@ if (_convsForm) {
     if ((!body || !body.trim()) && _pendingAttachments.length === 0) return;  // body OR attachment
     const ok = await postConversation(body, author, _pendingAttachments);
     if (ok) {
+      // #1255 — the saved draft is released ONLY here, after the post is
+      // confirmed stored. A cleared box is not a saved message.
+      try { window._composerWatch?.clearDraft(); } catch { /* ignore */ }
       if (bodyEl) bodyEl.value = '';
       _pendingAttachments = [];
       renderPendingAttachments();

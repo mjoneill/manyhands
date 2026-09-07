@@ -5762,6 +5762,41 @@ function kindsSummary(data) {
 // /api/board itself is deliberately UNCHANGED: it is also the board-state
 // MCP resource (manyhands://board), a full-state contract something may
 // rely on. Split, don't mutate (option 3 on the card).
+/**
+ * #1255 slice 1 — HOST PRESSURE, so a browser can tell a stalled MACHINE from
+ * a broken COMPOSER.
+ *
+ * ⛔ THE REASON THIS EXISTS ON THE SERVER: the page cannot see the host. When
+ * the operator loses typed text, "the machine froze and the tab reloaded" and
+ * "the composer dropped it" are the SAME observation from inside a tab. The
+ * diagnostic samples this alongside the draft so the two can be separated at
+ * all — without it the answer is UNKNOWN, and honestly so.
+ *
+ * ⚠️ STATED BOUND: this reports MEMORY and LOAD, not which process took them.
+ * A correlation with free memory falling is not an identification of the
+ * cause; anyone reading it as "Ollama did it" is reading past the data.
+ *
+ * Deliberately cheap: no board read, no lock, nothing that queues behind a
+ * write (#1114). An instrument that stalls under load is useless in exactly
+ * the window it exists to measure.
+ */
+function handleHostPressure(req, res) {
+  try {
+    const mem = process.memoryUsage();
+    sendJSON(res, 200, {
+      at: new Date().toISOString(),
+      loadavg1: Math.round(os.loadavg()[0] * 100) / 100,
+      freeMemMb: Math.round(os.freemem() / 1048576),
+      totalMemMb: Math.round(os.totalmem() / 1048576),
+      rssMb: Math.round(mem.rss / 1048576),
+      uptimeS: Math.round(process.uptime()),
+    });
+  } catch (e) {
+    console.error('GET /api/host-pressure:', e.message);
+    sendJSON(res, 500, { error: 'host pressure unavailable' });
+  }
+}
+
 function handleBoardStatus(req, res) {
   try {
     const data = readBoard();
@@ -7871,6 +7906,7 @@ const API_ROUTES = [
   { method: 'GET',    re: /^\/api\/memories\/([^\/]+)$/,   fn: (req, res, m) => handleGetMemory(req, res, m[1]) },
   { method: 'PATCH',  re: /^\/api\/memories\/([^\/]+)$/,   fn: (req, res, m) => handleUpdateMemory(req, res, m[1]) },
   { method: 'GET',    re: /^\/api\/board\/status$/,         fn: (req, res) => handleBoardStatus(req, res) },
+  { method: 'GET',    re: /^\/api\/host-pressure$/,        fn: (req, res) => handleHostPressure(req, res) },
   { method: 'GET',    re: /^\/api\/board$/,                fn: (req, res) => handleGetBoard(req, res) },
   { method: 'GET',    re: /^\/api\/seats\/state$/,          fn: (req, res) => handleSeatStates(req, res) },
   { method: 'PUT',    re: /^\/api\/seats\/([^\/]+)\/state$/, fn: (req, res, m) => handleSeatDeclare(req, res, decodeURIComponent(m[1])) },
