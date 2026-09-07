@@ -81,14 +81,18 @@ export const CARD_CREATE_PROBES = [
     with: { parkedBy: 'ada' } },
   { name: 'id', wellFormed: '11111111-2222-3333-4444-555555555555', malformed: 'not-a-uuid',
     note: 'UUID_RE' },
+  // #760 — MOVED OUT of the no-rule block, where its note read "unvalidated at
+  // create — a nonexistent column id is accepted". It is validated now, on both
+  // write surfaces, and the malformed value is the specimen that ate #778: the
+  // NAME of a column whose id is a slug.
+  { name: 'column', wellFormed: 'planned', malformed: 'Planned',
+    note: '#760 — resolved against the board\'s own column list, never an enum' },
 
   // ── free-form fields with no rule by design ──
   { name: 'title', wellFormed: 'a title', malformed: null, noRule: true },
   { name: 'description', wellFormed: 'body text', malformed: null, noRule: true },
   { name: 'labels', wellFormed: ['x'], malformed: null, noRule: true },
   { name: 'for', wellFormed: 'someone', malformed: null, noRule: true },
-  { name: 'column', wellFormed: 'backlog', malformed: null, noRule: true,
-    note: 'unvalidated at create — a nonexistent column id is accepted' },
   { name: 'order', wellFormed: 3, malformed: null, noRule: true },
   // ⚠️ VALUE MUST DIFFER FROM WHAT CREATE WRITES. The probe helper creates every
   // card with createdBy:'ada', so a probe sending 'ada' cannot tell "the write

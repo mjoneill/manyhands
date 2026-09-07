@@ -4611,6 +4611,38 @@ function resolveParentValue(data, value) {
   return { ok: true, id: data.cards[idx].id };
 }
 
+// #760 — RESOLVE THE COLUMN AGAINST THE BOARD'S OWN LIST, on the write path.
+//
+// A column id was stored verbatim, so `card_move` with "planned" (the NAME of a
+// column whose id is a slug), or a create with "Backlog" (the right word, wrong
+// case), returned 200 and put the card in a container that does not exist. It
+// reads back exactly as sent and renders in NO column view — not hidden, not
+// collapsed: there is nothing for it to be inside. Four specimens, 08-09 through
+// 09-07, one of which swallowed #778, the card describing this defect.
+//
+// ⛔ NOT AN ENUM, AND NOT IN THE MCP SCHEMA. #41 shipped user-creatable columns,
+// so a hardcoded allowlist refuses a legitimate new column; and REST callers
+// never see a tool schema — three of the four specimens came in over REST. The
+// list is read from the board, inside the lock, next to the write it guards.
+//
+// ⭐ The words are `unknownValue`'s, on purpose. GET /api/cards has refused an
+// unknown column since #659 and names the valid ids; the write path is now the
+// same refusal in the same shape. Same field, same vocabulary, both verbs.
+function resolveColumnValue(data, value) {
+  // Absent means "unchanged" on PATCH and "backlog" on create — neither is a
+  // caller naming a column, and dragging them into the resolver would refuse
+  // every write that does not mention one.
+  if (value === undefined) return { ok: true };
+  const valid = (data.columns || []).map((c) => c.id);
+  if (typeof value === 'string' && valid.includes(value)) return { ok: true };
+  return {
+    ok: false,
+    error: `unknown column: ${String(value)} (valid: ${valid.join(', ')}). `
+         + 'Nothing was written — a card stored in a column that does not exist '
+         + 'renders in no column view at all (#760).',
+  };
+}
+
 // #534 — THE card version rule, in ONE place. Six call sites share it, and they
 // must share the RULE and not merely the field name: a token maintained by only
 // some write paths is worse than no token, because the precondition built on it
@@ -6345,6 +6377,19 @@ async function handleCreateCard(req, res) {
       const rp = resolveParentValue(data, body.parent);
       if (!rp.ok) { createErr = rp.error; return null; }
       if (body.parent !== undefined) body.parent = rp.id;
+      // #760 — same rule, same moment: resolve before constructing, so the card
+      // is never built with a column the board cannot render.
+      //
+      // ⚠️ GUARDED BY THE SAME TRUTHINESS createCardFromPayload USES. It writes
+      // `body.column || 'backlog'`, so null, '' and a missing key already mean
+      // "no opinion, use the default" on this surface — resolving them would
+      // newly refuse creates that have always worked, which is a regression
+      // wearing a fix's clothes. PATCH is the opposite: there, `column: null`
+      // is a caller writing null over a real column, and it is refused.
+      if (body.column) {
+        const rc = resolveColumnValue(data, body.column);
+        if (!rc.ok) { createErr = rc.error; return null; }
+      }
       similar = similarCards(data.cards, body.title);
       // #1050 — the alias map is read from the board INSIDE the lock, beside
       // the card it is resolving, so a create cannot canonicalise against a
@@ -6524,6 +6569,17 @@ async function handleUpdateCard(req, res, idOrShortId) {
         }
       }
 
+      // #760 — beside the compare-and-swap, before the field verbs below.
+      //
+      // ⚠️ The placement is a HABIT, not a protection, and the mutation test
+      // says so: moving this guard below descriptionAppend and the upsert verbs
+      // leaves all five tests green. Nothing persists without writeBoard, and a
+      // refused write returns before it, so the `card` those verbs mutate is a
+      // per-request clone that is simply discarded. Claiming "this must come
+      // first or the card is damaged" would be a protection no test can fail on.
+      const rc = resolveColumnValue(data, patch.column);
+      if (!rc.ok) return { columnError: rc.error };
+
       const wasDone = card.column === 'done';
       let fanout = [];        // #669 — siblings this patch rewrites via #614
       nudge = null;           // #1081 — reset per attempt; declared above the lock
@@ -6694,6 +6750,11 @@ async function handleUpdateCard(req, res, idOrShortId) {
           + 'Re-read the card and reapply your edit — this is a yield, not a retry.',
         currentVersion: updated.currentVersion,
       });
+    }
+    // #760 — 400, not 409: the request names a column that does not exist, and
+    // re-reading the card will never make it exist. A retry loop has no exit.
+    if (updated.columnError) {
+      return sendJSON(res, 400, { error: updated.columnError });
     }
     // #823 — present only when something WAS dropped, so a clean write never
     // claims it ignored something (an empty array on every response would be
