@@ -451,18 +451,36 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
   // inherit ours.
   const hopCeiling = maxHops ?? agent.maxHops ?? agent.model?.maxHops;
   const useTools = tools.length > 0 && typeof execute === 'function';
+
+  // #1260 — THE AGENT'S `thinking` REACHES THE WIRE, and it must ride EVERY branch.
+  //
+  // callModel resolves `opts.thinking ?? agent.thinking`, where its `agent` is the
+  // MODEL SPEC we hand it. The board agent's own field arrives only if we put it in
+  // opts, and `??` then gives the ruled semantics exactly: the seat's value wins when
+  // set, the model's applies when the seat has none. `false` is a value rather than an
+  // absence, which is why this tests for a boolean and not for truthiness.
+  //
+  // ⚠️ THREE CALL SITES, and I found the third only because a uniqueness assert in my
+  // own patch script refused:
+  //     1  runToolLoop      — production: the branch any tool-granted seat takes.
+  //     2  callModel        — the no-tool branch, the one #1260's wire tests measure.
+  //     3  runToolLoop again — #1246b's narration retry, a second turn granted to a
+  //                            seat that announced a lookup instead of performing one.
+  // Fixing only the measured branch would have turned every test in that file green
+  // and changed nothing on a live turn.
+  const thinkingOpt = typeof agent.thinking === 'boolean' ? { thinking: agent.thinking } : {};
   let result; let hops = []; let modelCalls = 1; let stoppedBecause = null;
   try {
     if (useTools) {
       const loop = await runToolLoop({
         agent: agent.model, messages, tools, execute, callModel,
         ...(hopCeiling === undefined ? {} : { maxHops: hopCeiling }),
-        opts: { ...(agent.model.sampling || {}) },
+        opts: { ...(agent.model.sampling || {}), ...thinkingOpt },
       });
       result = { text: loop.text, stopReason: 'stop', usage: null };
       hops = loop.hops; modelCalls = loop.modelCalls; stoppedBecause = loop.stoppedBecause;
     } else {
-      result = await callModel(agent.model, messages, { ...(agent.model.sampling || {}) });
+      result = await callModel(agent.model, messages, { ...(agent.model.sampling || {}), ...thinkingOpt });
     }
   } catch (e) {
     const row = { ...base, ok: false, error: e?.message ?? String(e), latencyMs: Date.now() - started };
@@ -498,7 +516,7 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
             { role: 'assistant', content: String(result?.text ?? '') },
             { role: 'user', content: performOrDeclineNudge(announced.phrase) }],
           ...(hopCeiling === undefined ? {} : { maxHops: hopCeiling }),
-          opts: { ...(agent.model.sampling || {}) },
+          opts: { ...(agent.model.sampling || {}), ...thinkingOpt },
         });
         modelCalls += again.modelCalls;
         if (again.hops.length) {

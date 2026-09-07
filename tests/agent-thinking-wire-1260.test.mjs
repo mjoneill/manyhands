@@ -59,49 +59,132 @@ async function wireBodyFor(agent) {
   return sent;
 }
 
-test('#1260 the wire carries the MODEL\'s thinking; the agent\'s own field never arrives', async () => {
-  // The live shape: the page says false, the model spec says true.
+/* ────────────────────────────────────────────────────────────────────────────
+ * ⚖️ THE OVERRIDE WAS IMPLEMENTED, 2026-09-07, and this block exists because
+ * this file demanded that whoever implemented it say so here.
+ *
+ * The three tests below were written as CHARACTERISATION — they pinned today's
+ * broken truth so that anyone implementing the fix would be stopped at this file
+ * and made to state the change rather than absorb it. That worked exactly as
+ * designed: all three went red the moment the override landed, and this block is
+ * me coming here and saying so.
+ *
+ * RULED by the board owner, 2026-09-07: "the agent's value OVERRIDES the model's
+ * when set, and INHERITS it when unset" — recommended by both building seats,
+ * decided by him. Recorded on #1260 and in the decision log.
+ *
+ * ⇒ WHAT CHANGED IN EACH, and why each still earns its place:
+ *   1  false-over-true — was "the model wins"; now the seat wins. THE defect.
+ *   2  true-over-false — the mirror. Still the guard against a fix that only
+ *      special-cases `false`; it just asserts the other outcome now.
+ *   3  agent set, model unset — was "the agent does NOT supply a flag". Under the
+ *      ruling it DOES: set is set, whichever side sets it. ⚠️ The property that
+ *      test was really protecting — that this file cannot be satisfied by a wire
+ *      which always sends `think` — is NOT lost: it moved to the neither-side-sets
+ *      case, asserted below on both branches.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+test('#1260 the agent\'s thinking OVERRIDES the model\'s — the seat said false, the wire says false', async () => {
+  // The live shape that started this: the page said false, the model spec said true,
+  // and the request thought anyway. Now the page and the wire agree.
   const sent = await wireBodyFor({
     seatKey: 'gizmo', name: 'Gizmo', systemPrompt: 'Be brief.',
-    thinking: false,                                    // what the editor shows
+    thinking: false,
     model: { model: 'm', protocol: 'ollama-native', baseUrl: 'http://x', thinking: true },
   });
-
-  assert.equal(sent.think, true,
-    'MEASURED, NOT ASSUMED: the wire carries the MODEL value. This is the defect — '
-    + 'the agent said false and the request thinks anyway.');
-
-  // ⇒ CHARACTERISATION, ON PURPOSE. #1260 says the instance fix (agent overrides
-  // model when set, inherits when unset) is a DECISION and not a value — it is a
-  // behaviour change with tests, argued from the owner's stated intent, and it
-  // should be decided rather than assumed by whoever happens to be in the file.
-  // So this pins TODAY'S truth rather than shipping the change: the moment
-  // someone implements the override, this assertion fails and they must come
-  // here and say so deliberately. A record that cannot refuse anyone is what let
-  // this live; this one can.
+  assert.equal(sent.think, false,
+    'the seat\'s value wins over the model\'s. This assertion is the inverse of the one '
+    + 'it replaced, and that inversion IS the fix.');
 });
 
-test('#1260 the agent field is inert in BOTH directions — it cannot turn thinking on either', async () => {
-  // ⚠️ The mirror case, and the one a reader would assume works. If only the
-  // false-over-true case were asserted, a "fix" that special-cased false would
-  // pass while the field stayed unread.
+test('#1260 the override works in BOTH directions — a seat can turn thinking ON as well as off', async () => {
+  // ⚠️ Kept from the characterisation set unchanged in purpose: a "fix" that
+  // special-cased false would pass the test above and fail this one.
   const sent = await wireBodyFor({
     seatKey: 'gizmo', name: 'Gizmo', systemPrompt: 'Be brief.',
     thinking: true,
     model: { model: 'm', protocol: 'ollama-native', baseUrl: 'http://x', thinking: false },
   });
-  assert.equal(sent.think, false, 'the agent asking to think is ignored exactly as the agent asking not to is');
+  assert.equal(sent.think, true, 'the seat asking to think is honoured exactly as the seat asking not to is');
 });
 
-test('#1260 with no model-level value, the wire sends NO think flag at all — unset is a third state', async () => {
-  // The load-bearing positive: this file must not be satisfiable by a wire that
-  // always sends `think`. A model with no such flag is sent none, and the agent's
-  // field does not fill the gap.
+test('#1260 the agent supplies the flag when the model has none — set is set, whichever side sets it', async () => {
   const sent = await wireBodyFor({
     seatKey: 'gizmo', name: 'Gizmo', systemPrompt: 'Be brief.',
     thinking: true,
     model: { model: 'm', protocol: 'ollama-native', baseUrl: 'http://x' },
   });
-  assert.ok(!('think' in sent),
-    'unset means unset: no flag on the wire, and the agent-level value does NOT supply one');
+  assert.equal(sent.think, true,
+    'INHERITS when unset means the MODEL inherits from the SEAT here — the seat is the '
+    + 'one with a value. The old assertion (no flag) was the defect seen from the other side.');
+});
+
+test('#1260 with NEITHER side setting it, the wire sends no think flag — unset is still a third state', async () => {
+  // ⭐ THE LOAD-BEARING POSITIVE, inherited from the test above and now standing on
+  // its own: this file must not be satisfiable by a wire that always sends `think`.
+  const sent = await wireBodyFor({
+    seatKey: 'gizmo', name: 'Gizmo', systemPrompt: 'Be brief.',
+    model: { model: 'm', protocol: 'ollama-native', baseUrl: 'http://x' },
+  });
+  assert.ok(!('think' in sent), 'no value anywhere means no flag on the wire');
+});
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * #1260, SECOND CALL SITE — 2026-09-07.
+ *
+ * ⛔ THE THREE TESTS ABOVE ALL RUN THE NO-TOOL PATH. `wireBodyFor` passes no
+ * tools, so `useTools` is false and guest-loop takes:
+ *
+ *     callModel(agent.model, messages, { ...(agent.model.sampling || {}) })
+ *
+ * ⚠️ PRODUCTION DOES NOT TAKE THAT BRANCH. The board's resident agents each carry
+ * tool grants and scripts/guest-once.mjs supplies an executor, so the live path
+ * is runToolLoop → callModel, a DIFFERENT line with its own `opts`.
+ *
+ * ⇒ A fix applied only to the tested line would turn all three tests above
+ * green and leave every real turn unchanged. The class-ending test would have
+ * certified the class closed while the defect ran in production — which is the
+ * same shape as the "#1196 … AND REACHES THE LOOP" test that never invoked the
+ * loop, arriving one layer down in the file written to replace it.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** Same as wireBodyFor, but with a tool grant — the path production actually runs. */
+async function wireBodyForWithTools(agent) {
+  let sent = null;
+  await guestOnce({
+    agent,
+    wake: WAKE,
+    tools: [{ type: 'function', function: { name: 'card_get', description: 'x', parameters: { type: 'object', properties: {} } } }],
+    execute: async () => ({ ok: true, result: 'x' }),
+    callModel: (a, m, o) => callModel(a, m, {
+      ...o,
+      transport: async (req) => { sent = typeof req.body === 'string' ? JSON.parse(req.body) : req.body; return ollamaOk('ok'); },
+    }),
+    post: async () => ({ id: 'p-1' }),
+    ledgerFile: tmp(),
+  });
+  return sent;
+}
+
+test('#1260 THE TOOL PATH carries the agent\'s thinking too — the branch production actually runs', async () => {
+  const sent = await wireBodyForWithTools({
+    seatKey: 'gizmo', name: 'Gizmo', systemPrompt: 'Be brief.',
+    thinking: false,
+    model: { model: 'm', protocol: 'ollama-native', baseUrl: 'http://x', thinking: true },
+    toolGrants: ['card_get'],
+  });
+  assert.equal(sent.think, false,
+    'the agent said false on the TOOL path — the one every tool-granted resident takes on each '
+    + 'live turn. If this passes while the no-tool tests fail, only half the fix landed.');
+});
+
+test('#1260 the tool path sends NO think flag when neither agent nor model sets one', async () => {
+  // The positive control for the tool branch: this file must not be satisfiable
+  // by a wire that always carries `think`.
+  const sent = await wireBodyForWithTools({
+    seatKey: 'gizmo', name: 'Gizmo', systemPrompt: 'Be brief.',
+    model: { model: 'm', protocol: 'ollama-native', baseUrl: 'http://x' },
+    toolGrants: ['card_get'],
+  });
+  assert.ok(!('think' in sent), 'unset on both sides means no flag, on the tool path as well');
 });
