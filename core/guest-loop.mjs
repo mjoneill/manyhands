@@ -35,6 +35,21 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runToolLoop } from './tool-loop.mjs';
+
+/**
+ * #1294 — add two usage blocks, keeping NULL when neither reported anything.
+ * A zero would price the wake as free and be indistinguishable from a call
+ * that genuinely cost nothing: an unmeasured zero is not a value.
+ */
+function sumUsage(a, b) {
+  if (!a && !b) return null;
+  const out = {};
+  for (const k of ['promptTokens', 'completionTokens', 'reasoningTokens']) {
+    const x = Number(a?.[k]); const y = Number(b?.[k]);
+    if (Number.isFinite(x) || Number.isFinite(y)) out[k] = (Number.isFinite(x) ? x : 0) + (Number.isFinite(y) ? y : 0);
+  }
+  return Object.keys(out).length ? out : null;
+}
 import { toolsFor, BOARD_TOOLS } from './board-tools.mjs';
 import { unbackedLookupClaims, lookupClaimNote, announcedLookup, performOrDeclineNudge } from './lookup-claim.mjs';
 
@@ -499,7 +514,10 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
         ...(hopCeiling === undefined ? {} : { maxHops: hopCeiling }),
         opts: { ...(agent.model.sampling || {}), ...thinkingOpt },
       });
-      result = { text: loop.text, stopReason: 'stop', usage: null };
+      // #1294 — CARRY THE LOOP'S USAGE. This line said `usage: null`, so even
+      // once runToolLoop summed it the ledger would still record nothing:
+      // tokens null ⇒ cost 0 ⇒ `spent >= budget` never true.
+      result = { text: loop.text, stopReason: 'stop', usage: loop.usage ?? null };
       hops = loop.hops; modelCalls = loop.modelCalls; stoppedBecause = loop.stoppedBecause;
     } else {
       result = await callModel(agent.model, messages, { ...(agent.model.sampling || {}), ...thinkingOpt });
@@ -543,10 +561,16 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
         modelCalls += again.modelCalls;
         if (again.hops.length) {
           hops = again.hops; stoppedBecause = again.stoppedBecause;
-          result = { text: again.text, stopReason: 'stop', usage: result?.usage ?? null };
+          // #1294 — the retry is a SECOND PAID TURN. Keeping only the first
+          // call's usage under-bills exactly the wakes that cost most: the
+          // ones that needed a nudge and then went and did the work.
+          result = { text: again.text, stopReason: 'stop', usage: sumUsage(result?.usage, again.usage) };
           narrationRetry.outcome = 'looked';
         } else if (String(again.text || '').trim()) {
-          result = { text: again.text, stopReason: 'stop', usage: result?.usage ?? null };
+          // #1294 — the retry is a SECOND PAID TURN. Keeping only the first
+          // call's usage under-bills exactly the wakes that cost most: the
+          // ones that needed a nudge and then went and did the work.
+          result = { text: again.text, stopReason: 'stop', usage: sumUsage(result?.usage, again.usage) };
           narrationRetry.outcome = 'answered-without-looking';
         }
       } catch (e) {

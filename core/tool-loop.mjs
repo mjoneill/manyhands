@@ -55,6 +55,37 @@ export async function runToolLoop({ agent, messages, tools = [], execute, callMo
   const granted = new Set((tools || []).map(nameOf).filter(Boolean));
   const convo = [...messages];
   const hops = [];
+  // #1294 — USAGE IS SUMMED ACROSS HOPS, and the sum is the point.
+  //
+  // This loop returned {text, hops, modelCalls, stoppedBecause, messages} and
+  // dropped every call's usage. The guest loop records `usage: result.usage`
+  // from this return, so its ledger rows carried no tokens, cost priced to 0,
+  // and `spent >= budget` could never be true — 145 rows for one seat while
+  // OpenRouter billed $2.05 over the same window.
+  //
+  // ⭐ It also explains the asymmetry that made it findable: the search reader
+  // calls callModel DIRECTLY and its rows carry tokens correctly. One adapter,
+  // two callers, opposite outcomes.
+  //
+  // ⚠️ SUMMED, not last-wins: one wake is N model calls (~3 per wake measured,
+  // against maxHops 8), so reporting only the final hop would under-bill by
+  // roughly the factor that makes this expensive — and would look correct in
+  // any single-hop test.
+  //
+  // ⛔ NULL WHEN NOTHING REPORTED, never {promptTokens: 0}: a zero here would
+  // price the wake as free and be indistinguishable from a genuinely free
+  // call, which is the defect one layer up. An unmeasured zero is not a value.
+  const usage = { promptTokens: 0, completionTokens: 0, reasoningTokens: 0 };
+  let sawUsage = false;
+  const addUsage = (u) => {
+    if (!u || typeof u !== 'object') return;
+    let any = false;
+    for (const k of ['promptTokens', 'completionTokens', 'reasoningTokens']) {
+      const v = Number(u[k]);
+      if (Number.isFinite(v)) { usage[k] += v; any = true; }
+    }
+    if (any) sawUsage = true;
+  };
   let modelCalls = 0;
   let text = '';
   let stoppedBecause = 'answered';
@@ -62,6 +93,7 @@ export async function runToolLoop({ agent, messages, tools = [], execute, callMo
   for (;;) {
     const out = await callModel(agent, convo, { ...opts, ...(granted.size ? { tools } : {}) });
     modelCalls += 1;
+    addUsage(out.usage);   // #1294 — every hop is billed, including the last
     text = out.text ?? '';
     const calls = Array.isArray(out.toolCalls) ? out.toolCalls : [];
     if (!calls.length) { stoppedBecause = 'answered'; break; }
@@ -113,5 +145,5 @@ export async function runToolLoop({ agent, messages, tools = [], execute, callMo
     if (stoppedBecause === 'max-hops') break;
   }
 
-  return { text, hops, modelCalls, stoppedBecause, messages: convo };
+  return { text, hops, modelCalls, stoppedBecause, messages: convo, usage: sawUsage ? usage : null };
 }
