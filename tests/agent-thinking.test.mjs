@@ -32,7 +32,17 @@ const AGENT = {
   residency: 'resident', contextPolicy: 'artifact-only', by: 'ada',
 };
 
-test('#1196 thinking is stored, read back, and reaches the loop', async () => {
+// ⛔ #1260 — RENAMED. This was "…stored, read back, and REACHES THE LOOP", and it
+// asserts a PATCH round-trip and a GET. It never invokes the loop, and the field
+// does not in fact reach it: guest-loop passes `agent.model` to the adapter, so
+// the adapter's `agent.thinking` is the MODEL's value and the agent's own never
+// arrives. The name claimed the exact property that is broken, and a green test
+// carrying that name is why nobody looked for two days.
+//
+// ⇒ A TEST NAME IS A PASSIVE INSTRUMENT: it cannot refuse anyone, it can only be
+// believed. The wire-level assertions live in tests/agent-thinking-wire-1260.test.mjs,
+// where the claim can fail. This one keeps its real and useful scope: the STORE.
+test('#1196 thinking is stored and reads back — storage only; the wire is #1260\'s file', async () => {
   const srv = await startRestServer({ board: makeBoardFixture({ cards: [], nextShortId: 1 }) });
   try {
     assert.equal((await api(srv.baseUrl, 'POST', '/api/agents', AGENT)).status, 201);
@@ -43,7 +53,7 @@ test('#1196 thinking is stored, read back, and reaches the loop', async () => {
 
     const list = await api(srv.baseUrl, 'GET', '/api/agents');
     const a = (list.body.agents || list.body).find((x) => x.seatKey === 'gizmo');
-    assert.equal(a.thinking, false, 'and it must survive to the reader the runner uses');
+    assert.equal(a.thinking, false, 'and it must survive to the REST reader — not the runner: see #1260');
 
     const on = await api(srv.baseUrl, 'PATCH', '/api/agents/gizmo', { thinking: true, by: 'ada' });
     assert.equal(on.body.thinking, true);
