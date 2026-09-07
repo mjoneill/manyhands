@@ -1581,6 +1581,43 @@ body::before {
       <button id="btn-filter" class="btn-filter" data-filter-add data-action="toggle-filter-menu" aria-haspopup="true" aria-expanded="false" title="Filter the board">⚗ Filter</button>
       <div id="filter-menu" class="filter-menu" hidden></div>
     </div>
+
+    <!-- #1266 half 2 — THE EXPORT BUTTON. The archaeology this removes: the
+         operator asked a seat for an export, and the seat recovered the flags by
+         reading a PREVIOUS export, because the artifact was durable and the
+         invocation never was. Half 1 recorded the invocation. This is the press.
+
+         ⛔ RAW IS DELIBERATELY AWKWARD. #523's scrub boundary is fail-closed, so
+         scrubbed is the default here and the un-scrubbed path takes a second,
+         separate confirmation. A button that puts `--raw` one click from the
+         default would be a publication hazard with a nice UI. -->
+    <div class="export-control">
+      <button id="btn-export" class="btn-filter" data-action="toggle-export-menu" aria-haspopup="true" aria-expanded="false" title="Export the board to files you can read or upload">⬇ Export</button>
+      <div id="export-menu" class="filter-menu export-menu" hidden>
+        <label class="export-row"><span>Where</span>
+          <input id="export-out" type="text" placeholder="~/Downloads/scrum-board-export-YYYYMMDD" spellcheck="false">
+        </label>
+        <label class="export-row"><span>Segment size</span>
+          <input id="export-max-bytes" type="number" min="100000" max="20000000" step="50000" value="1500000">
+        </label>
+        <div class="export-row"><span>Include</span>
+          <span>
+            <label><input id="export-commons" type="checkbox" checked> commons</label>
+            <label><input id="export-cards" type="checkbox" checked> cards</label>
+          </span>
+        </div>
+        <label class="export-row"><span>Un-scrubbed</span>
+          <span><input id="export-raw" type="checkbox"> <span class="export-hint">in-room archive only</span></span>
+        </label>
+        <div id="export-raw-confirm" class="export-warn" hidden>
+          ⚠️ This writes an archive with nothing redacted — paths, names, everything the room has said.
+          It is the right choice for your own reading and the wrong one for anything that leaves the room.
+          <button type="button" id="export-raw-ack" class="export-ack">I understand — keep it un-scrubbed</button>
+        </div>
+        <button type="button" id="export-run" class="btn-add export-run">Export</button>
+        <div id="export-status" class="export-status" role="status" aria-live="polite"></div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -1779,6 +1816,25 @@ body::before {
 // (localhost OR 127.0.0.1 OR a LAN host) and is testable on any port. Hardcoding
 // http://localhost:3141 made every other origin CORS-fail. Served from :3141 it
 // resolves to the same place as before.
+/* #1266 — the export menu reuses .filter-menu's shell so it inherits the
+   board's popover chrome; only the form rows are new. */
+const _exportStyle = document.createElement('style');
+_exportStyle.textContent = `
+  .export-control { position: relative; display: inline-flex; }
+  .export-menu { min-width: 320px; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+  .export-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; }
+  .export-row > span:first-child { flex: 0 0 96px; opacity: .8; }
+  .export-row input[type=text], .export-row input[type=number] { flex: 1 1 auto; min-width: 0; padding: 4px 6px; font: inherit; }
+  .export-hint { opacity: .6; font-size: 12px; }
+  .export-warn { font-size: 12px; line-height: 1.4; padding: 8px; border-radius: 6px;
+                 background: rgba(200,120,0,.12); border: 1px solid rgba(200,120,0,.4); }
+  .export-ack { display: block; margin-top: 6px; font: inherit; padding: 4px 8px; cursor: pointer; }
+  .export-run { width: 100%; }
+  .export-status { font-size: 12px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto; }
+  .export-status.err { color: #b3261e; }
+`;
+document.head.appendChild(_exportStyle);
+
 const API_BASE = '';
 const JSON_ENDPOINTS = { save: '/api/save', load: '/api/load' };
 
@@ -5620,6 +5676,105 @@ if (_convsForm) {
   _boardRenderedSig = boardSignature(cards, columns);
   if (!_IS_TEST_MODE) startBoardPolling();
 })();
+// ── #1266 half 2 — THE EXPORT BUTTON ────────────────────────────────────────
+//
+// The server does the work (POST /api/export); this collects the settings and
+// reports what came back. Two things it deliberately does NOT do:
+//
+//   ⛔ it does not summarise a failure. The endpoint returns the export
+//      script's own stderr, and a permissions refusal and a scrub refusal are
+//      completely different problems that only the original text tells apart.
+//   ⛔ it does not let `raw` be set in one motion. #523's boundary is
+//      fail-closed; the checkbox arms a warning and the warning has its own
+//      button. Two deliberate acts, or the archive is scrubbed.
+(function wireExport() {
+  const btn = document.getElementById('btn-export');
+  const menu = document.getElementById('export-menu');
+  if (!btn || !menu) return;
+  const $ = (id) => document.getElementById(id);
+  const rawBox = $('export-raw');
+  const rawConfirm = $('export-raw-confirm');
+  const statusEl = $('export-status');
+  let rawAcknowledged = false;
+
+  const setStatus = (text, isError) => {
+    statusEl.textContent = text;
+    statusEl.classList.toggle('err', !!isError);
+  };
+
+  btn.addEventListener('click', () => {
+    const open = menu.hidden;
+    menu.hidden = !open;
+    btn.setAttribute('aria-expanded', String(open));
+  });
+
+  // The checkbox alone does not enable raw: it reveals the warning, and the
+  // warning's own button is what arms it. Unticking disarms again, so an
+  // acknowledgement cannot outlive the choice it was given for.
+  rawBox.addEventListener('change', () => {
+    rawAcknowledged = false;
+    rawConfirm.hidden = !rawBox.checked;
+    if (!rawBox.checked) setStatus('');
+  });
+  $('export-raw-ack').addEventListener('click', () => {
+    rawAcknowledged = true;
+    rawConfirm.hidden = true;
+    setStatus('Un-scrubbed archive armed for this export.');
+  });
+
+  $('export-run').addEventListener('click', async () => {
+    const spaces = [];
+    if ($('export-commons').checked) spaces.push('commons');
+    if ($('export-cards').checked) spaces.push('cards');
+    if (!spaces.length) return setStatus('Pick at least one of commons or cards.', true);
+
+    const wantRaw = rawBox.checked;
+    if (wantRaw && !rawAcknowledged) {
+      rawConfirm.hidden = false;
+      return setStatus('Confirm the un-scrubbed archive before exporting.', true);
+    }
+
+    const body = {
+      // ⛔ NOT A GUESSED PERSON. The board UI has no viewer identity, and
+      // attribution here is DECLARED, never authenticated — so declaring a
+      // specific human the server cannot verify would put a name in the event
+      // log on nothing but this line's assumption. `commons.html` sets the same
+      // kind of UI-originated write to a non-person actor; this says which
+      // surface the press came from, which is the part that is actually true.
+      by: (window.CURRENT_USER || 'board-ui'),
+      spaces: spaces.join(','),
+      maxBytes: Number($('export-max-bytes').value) || undefined,
+      // ⛔ Literal true only. The endpoint refuses to treat anything else as
+      // consent, and this side must not be the layer that softens that.
+      raw: wantRaw === true,
+    };
+    const out = $('export-out').value.trim();
+    if (out) body.out = out;
+
+    $('export-run').disabled = true;
+    setStatus('Exporting… a full board takes a minute or two.');
+    try {
+      const r = await fetch(`${API_BASE}/api/export`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) {
+        // The child's own words, verbatim, plus where it tried to write — so a
+        // permissions problem is diagnosable without opening a terminal.
+        const where = j.wrote ? `\n\nTried to write: ${j.wrote}` : '';
+        setStatus(`${j.error || `export failed (${r.status})`}${where}\n\n${j.detail || ''}`.trim(), true);
+        return;
+      }
+      const secs = Math.round((j.durationMs || 0) / 1000);
+      setStatus(`✅ ${j.parts} part${j.parts === 1 ? '' : 's'} written in ${secs}s — ${j.scrub}\n${j.out}`);
+    } catch (e) {
+      setStatus(`export failed: ${e && e.message ? e.message : e}`, true);
+    } finally {
+      $('export-run').disabled = false;
+    }
+  });
+})();
+
 </script>
 
 </body>

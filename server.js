@@ -4039,6 +4039,171 @@ function priceModelCall(data, entity, declaredCost) {
   return { cost: 0, measured: false };
 }
 
+
+/**
+ * #1266 half 2 — THE EXPORT BUTTON'S SERVER HALF.
+ *
+ * The defect this closes is not missing functionality: `export-board.mjs` was
+ * already fully parameterised. It is that the INVOCATION lived nowhere, so the
+ * operator had to ask a colleague, who recovered the flags by reading a
+ * previous export. Half 1 made the flags readable. This makes them pressable.
+ *
+ * ⛔ THE FAILURE MODE THIS IS BUILT AGAINST IS A SILENT ONE. The card's
+ * pre-flight asks whether a launchd-spawned server can write to a TCC-protected
+ * directory like ~/Downloads at all — nothing on this box answers it, because no
+ * other job has ever tried. A daemon cannot answer a macOS permission prompt, so
+ * the plausible failure is EPERM, and an export that writes nothing while
+ * reporting success is worse than one that never ran.
+ *
+ * ⇒ So this endpoint VERIFIES AT THE BENEFICIARY: after the child exits it reads
+ * the directory back and counts what is actually on disk. A run that produced no
+ * parts is reported as a failure with the child's own stderr, whatever its exit
+ * code claimed.
+ *
+ * ⚠️ NO SHELL, EVER. `execFile` with an argv array, every value checked against a
+ * range or a whitelist, and `out` resolved and required to sit under the user's
+ * home. This endpoint runs a program; a string that reached a shell here would be
+ * remote code execution with a nice UI.
+ */
+// ⚠️ A TEST SEAM, in the codebase's own idiom (SCRUM_BOARD_FILE, SCRUM_PORT…).
+// It exists because the property below — that success is read from DISK and not
+// from the child's exit code — is otherwise unassertable: the real exporter
+// cannot be made to exit 0 while writing nothing, so a mutation deleting the
+// disk check SURVIVED every test until this seam let a stub do exactly that.
+// Read from the process environment at startup, never from a request.
+const EXPORT_SCRIPT = process.env.SCRUM_EXPORT_SCRIPT || path.join(PROJECT_DIR, 'export-board.mjs');
+const EXPORT_SPACES = ['commons', 'cards', 'wiki'];
+const EXPORT_MAX_BYTES_MIN = 100000;
+const EXPORT_MAX_BYTES_MAX = 20000000;
+// ⛔ THE WRITABLE ROOT IS CONFIGURATION, NOT AN ASSUMPTION. It defaults to the
+// operator's home because that is where every previous export has gone, but it
+// is a deployment property: a board serving someone whose exports belong
+// elsewhere should not need a code change, and #837's rail is right that a
+// hardcoded home directory in tracked source drags tests into a real person's
+// files. That rail is what found this — the containment check below was written
+// against os.homedir() and the tests had no honest place to write.
+const EXPORT_ROOT = process.env.SCRUM_EXPORT_ROOT || os.homedir();
+function exportDefaultOut() {
+  const d = new Date();
+  const stamp = `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}${String(d.getUTCDate()).padStart(2, '0')}`;
+  // The UTC date, matching every previous export's folder name. A local-date
+  // namer would produce a different folder for the same run (#1266's own note).
+  return path.join(EXPORT_ROOT, 'Downloads', `scrum-board-export-${stamp}`);
+}
+function exportArgsFrom(body) {
+  const settings = {};
+
+  let out = exportDefaultOut();
+  if (body.out !== undefined && body.out !== null && String(body.out).trim() !== '') {
+    const given = String(body.out);
+    // A codepoint test, not a character-class regex: a literal control
+    // character in a source file is invisible in every diff and every
+    // review, and this build has already been bitten by one today.
+    for (const ch of given) {
+      if (ch.codePointAt(0) < 0x20) return { error: 'out must not contain control characters' };
+    }
+    const root = EXPORT_ROOT;
+    const resolved = path.resolve(given.startsWith('~' + '/') ? path.join(root, given.slice(2)) : given);
+    // Containment is checked on the RESOLVED path, so `../` cannot climb out of
+    // it. A prefix test against the raw string is the classic way this check
+    // passes while the write lands somewhere else entirely.
+    if (resolved !== root && !resolved.startsWith(root + path.sep)) {
+      return { error: `out must be inside ${root} — got ${resolved}` };
+    }
+    out = resolved;
+  }
+  settings.out = out;
+
+  let maxBytes = 1500000;
+  if (body.maxBytes !== undefined && body.maxBytes !== null && body.maxBytes !== '') {
+    maxBytes = Number(body.maxBytes);
+    if (!Number.isInteger(maxBytes)) return { error: 'maxBytes must be a whole number of bytes' };
+    if (maxBytes < EXPORT_MAX_BYTES_MIN || maxBytes > EXPORT_MAX_BYTES_MAX) {
+      return { error: `maxBytes must be between ${EXPORT_MAX_BYTES_MIN} and ${EXPORT_MAX_BYTES_MAX}` };
+    }
+  }
+  settings.maxBytes = maxBytes;
+
+  let tolerance = 5;
+  if (body.tolerance !== undefined && body.tolerance !== null && body.tolerance !== '') {
+    tolerance = Number(body.tolerance);
+    if (!Number.isFinite(tolerance) || tolerance < 0 || tolerance > 100) {
+      return { error: 'tolerance must be a percentage between 0 and 100' };
+    }
+  }
+  settings.tolerance = tolerance;
+
+  let spaces = ['commons', 'cards'];
+  if (body.spaces !== undefined && body.spaces !== null) {
+    const list = Array.isArray(body.spaces) ? body.spaces : String(body.spaces).split(',');
+    spaces = list.map((x) => String(x).trim().toLowerCase()).filter(Boolean);
+    if (!spaces.length) return { error: `spaces must name at least one of ${EXPORT_SPACES.join(', ')}` };
+    const bad = spaces.find((x) => !EXPORT_SPACES.includes(x));
+    if (bad) return { error: `unknown space ${JSON.stringify(bad)} — known: ${EXPORT_SPACES.join(', ')}` };
+  }
+  settings.spaces = spaces;
+
+  // ⛔ #523 — FAIL-CLOSED. Scrubbed unless the caller says so in words. A truthy
+  // coercion would let `raw: "false"` or `raw: 0` decide a publication boundary,
+  // which is the exact class of accident the boundary exists to prevent.
+  settings.raw = body.raw === true;
+
+  const argv = [EXPORT_SCRIPT, '--out', out, '--max-bytes', String(maxBytes),
+    '--tolerance', String(tolerance), '--spaces', spaces.join(','),
+    '--base', `http://127.0.0.1:${PORT}`];
+  if (settings.raw) argv.push('--raw');
+  return { out, argv, settings };
+}
+async function handleExport(req, res) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const by = typeof body.by === 'string' && body.by.trim() ? body.by.trim() : null;
+    if (!by) return sendJSON(res, 400, { error: 'by is required — who pressed it. Declared, not authenticated (#1193).' });
+    const built = exportArgsFrom(body);
+    if (built.error) return sendJSON(res, 400, { error: built.error });
+    const { out, argv, settings } = built;
+
+    const { execFile } = await import('node:child_process');
+    const started = Date.now();
+    const run = await new Promise((resolve) => {
+      execFile(process.execPath, argv, { cwd: PROJECT_DIR, maxBuffer: 8 << 20, timeout: 10 * 60 * 1000 },
+        (err, stdout, stderr) => resolve({ err, stdout: String(stdout || ''), stderr: String(stderr || '') }));
+    });
+
+    // ⭐ VERIFY AT THE BENEFICIARY, not at the exit code. The reason this exists
+    // rather than a documented command is that the operator cannot see the
+    // directory from a button — so the button has to look on his behalf.
+    let parts = [];
+    let indexText = null;
+    try {
+      parts = fs.readdirSync(out).filter((x) => /^part-\d+-of-\d+\.md$/.test(x)).sort();
+      indexText = fs.readFileSync(path.join(out, '00-INDEX.md'), 'utf8');
+    } catch { /* reported below as the absence it is */ }
+
+    if (run.err || !parts.length || indexText == null) {
+      const detail = (run.stderr || run.stdout || run.err?.message || '').trim().slice(-4000);
+      return sendJSON(res, 500, {
+        error: 'the export did not produce a readable archive',
+        // ⛔ The child's own words, not a summary of them. A permissions refusal
+        // and a scrub refusal are completely different problems, and only the
+        // original text tells them apart.
+        detail: detail || 'the export produced no output and said nothing',
+        wrote: out, parts: parts.length, exitOk: !run.err, settings,
+      });
+    }
+
+    sendJSON(res, 200, {
+      ok: true, out, parts: parts.length, durationMs: Date.now() - started, settings,
+      scrub: settings.raw ? 'raw' : 'scrubbed',
+      index: indexText.slice(0, 4000),
+      files: parts,
+    });
+  } catch (e) {
+    console.error('POST /api/export:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+
 async function handleCreateModelCall(req, res) {
   try {
     const body = JSON.parse(await readBody(req));
@@ -8348,6 +8513,7 @@ const API_ROUTES = [
   { method: 'GET',    re: /^\/api\/model-calls$/,          fn: (req, res) => handleListModelCalls(req, res) },   // #1202
   { method: 'GET',    re: /^\/api\/insights$/,             fn: (req, res) => handleInsights(req, res) },              // #1290 shadow
   { method: 'POST',   re: /^\/api\/model-calls$/,          fn: (req, res) => handleCreateModelCall(req, res) }, // #1202
+  { method: 'POST',   re: /^\/api\/export$/,               fn: (req, res) => handleExport(req, res) },       // #1266
   { method: 'GET',    re: /^\/api\/wakes$/,                fn: (req, res) => handleListWakes(req, res) },
   { method: 'POST',   re: /^\/api\/wakes$/,                fn: (req, res) => handleCreateWake(req, res) },
   // #1207 — the research write verbs. A card PATCH cannot say "this run
