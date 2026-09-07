@@ -744,7 +744,27 @@ async function handleSave(req, res) {
     const declaredVersion = new Map(
       incoming.cards.filter((c) => c && c.id).map((c) => [c.id, c.version]),
     );
-    const carryForward = (incomingCards) => incomingCards.map((c) => (
+    // #1288 — READ DECORATIONS MUST NOT ROUND-TRIP INTO THE STORE.
+    //
+    // `GET /api/cards?excerpt=N&legacyIndex=1` decorates each card with fields
+    // the store does not hold, and the browser asks for exactly that (index.html
+    // sends both). This endpoint then takes the cards array WHOLESALE, and
+    // #1039's carryForward is `{...stored, ...incoming}` — so any key the client
+    // sends is kept. A client that hydrated from the decorated list and saved
+    // the board back would make a COMPUTED field durable, after which it is a
+    // STALE copy of a description that can change without it.
+    //
+    // Found by #1288's negative control, which was written to prove these two
+    // are not caller-settable and discovered that through this path they were.
+    // The exclusion in RC0b's SERVER_ASSIGNED set depends on this line.
+    const stripDecorations = (c) => {
+      if (!c || typeof c !== 'object') return c;
+      if (!READ_DECORATIONS.some((k) => k in c)) return c;
+      const out = { ...c };
+      for (const k of READ_DECORATIONS) delete out[k];
+      return out;
+    };
+    const carryForward = (incomingCards) => incomingCards.map(stripDecorations).map((c) => (
       c && c.id && storedById.has(c.id) ? { ...storedById.get(c.id), ...c } : c
     ));
 
@@ -5753,6 +5773,13 @@ function upsertArrayEntries(field, existing, entries) {
   }
   return next;
 }
+
+/**
+ * #1288 — fields `GET /api/cards` COMPUTES onto a card and the store never
+ * holds. They are read decorations, and a write path that accepts them turns a
+ * computed value into durable, silently-stale state.
+ */
+const READ_DECORATIONS = ['descriptionExcerpt', 'legacyArrayIndex'];
 
 const PATCHABLE_CARD_FIELDS = new Set([
   'title', 'description', 'type', 'assignees', 'assignee', 'labels',

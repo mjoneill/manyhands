@@ -61,6 +61,25 @@ const SERVER_ASSIGNED = new Set([
   'claimedBy',    // set only via the claim endpoint, never a card write
   'claimedAt',    // ditto
   'ignoredFields', // the diagnostic itself, not a stored field
+  // #1288 — READ DECORATIONS, and they are not stored AT ALL.
+  //
+  // `GET /api/cards` with no params returns a bare LIST and decorates every
+  // card with both; `?limit=N` returns {cards, cardsTotal} and adds them only
+  // when `excerpt=`/`legacyIndex=` ask. This enumeration calls the plain form,
+  // so it sees them — which is why the guard reds on a clean tree.
+  //
+  // ⚠️ VERIFIED NOT STORED, not assumed: zero nodes in board-data.json carry
+  // either key under ANY spelling (checked for namespaced variants too), and
+  // both are absent from PATCHABLE_CARD_FIELDS, so a caller sending one
+  // changes nothing. Their only occurrences in the server are the read
+  // decorator in core/cards-query.mjs.
+  //
+  // ⛔ Excluding them NARROWS the universe, which this list's own header warns
+  // is how a coverage check quietly stops covering things. The negative
+  // control below is what keeps that honest: if either ever becomes writable,
+  // that test reds and this exclusion must be revisited.
+  'descriptionExcerpt',
+  'legacyArrayIndex',
 ]);
 
 /** Meta keys that travel WITH a write but are not fields OF the card. */
@@ -183,6 +202,18 @@ test('#831 RC0b — every caller-settable field in the universe has a probe', as
     `${uncovered.length} field(s) in the universe have no probe, so the audit cannot see them:\n`
     + uncovered.map((k) => `  - ${k}`).join('\n')
     + '\n\nAdd a probe to tools/field-probes.mjs, or add the field to SERVER_ASSIGNED '
-    + 'with a reason. Silently narrowing the universe is the failure this condition exists to prevent.',
+    + 'with a reason. Silently narrowing the universe is the failure this condition exists to prevent.'
+    // #1288 — SAY WHOSE RED THIS IS. The stored half of this universe is read
+    // from the LIVE board when one is running (#866), so this condition's
+    // subject is PRODUCTION AS IT IS NOW, not the commit under test. A builder
+    // can go red here for a field a colleague deployed an hour ago, on a branch
+    // that touched none of it — and the reflex that produces is "quiet the red",
+    // which is the exact failure this guard exists to prevent.
+    + `\n\n⚠️ SUBJECT: ${stored ? stored.source : 'no card source'}`
+    + (stored && stored.source === 'LIVE board'
+      ? ' — this red describes PRODUCTION RIGHT NOW, not necessarily your commit. '
+        + 'A field deployed by someone else reds here on a branch that never touched it. '
+        + 'Check whether it fails on a clean main before changing anything.'
+      : ''),
   );
 });
