@@ -896,13 +896,50 @@ function agentRow(a) {
         <label>Colour <input data-agent-color value="${esc(a.color || '')}" placeholder="#7c6cf0"></label>
         <label>Residency <select data-agent-residency>${opt(['resident', 'guest'], a.residency)}</select></label>
         <label>State <select data-agent-state>${opt(['invited', 'resting', 'retired'], a.state)}</select><span class="hint">resting or retired releases every card it holds</span></label>
-        <label>Wakes on <span data-agent-wake>${['mention', 'assignment', 'schedule'].map((w) => `<label class="check" style="display:inline-flex;margin-right:10px"><input type="checkbox" value="${w}"${(a.wakeOn || []).includes(w) ? ' checked' : ''}> ${w}</label>`).join('')}</span></label>
+        <label>Wakes on <span data-agent-wake>${['mention', 'assignment', 'schedule'].map((w) => `<label class="check" style="display:inline-flex;margin-right:10px"><input type="checkbox" value="${w}"${(a.wakeOn || []).includes(w) ? ' checked' : ''}> ${w}</label>`).join('')}</span><span class="hint" data-agent-wake-state></span></label>
         <label>Every N minutes <input data-agent-every type="number" min="1" value="${a.everyMinutes ?? ''}" placeholder="(schedule only)"></label>
         <label>Budget per day <input data-agent-budget type="number" min="0" step="0.01" value="${a.budgetPerDay ?? ''}" placeholder="(none)"></label>
       </div>
       <div class="editor-actions"><button class="btn" data-agent-save>Save settings</button><div class="msg" data-agent-msg></div></div>
     </details>`;
   const msg = row.querySelector('[data-agent-msg]');
+
+  // #1268 — UNCHECKING EVERY BOX DOES NOT SILENCE THE SEAT, AND THE PAGE SAID
+  // "Saved" ANYWAY.
+  //
+  // The card asked for the opposite warning: @bubbles ruled that all-unchecked
+  // is "a retired seat wearing an invited one's clothes" and the page should
+  // say UNREACHABLE out loud. Measuring it inverted the finding. There is no
+  // unreachable state: the server coerces an empty wakeOn back to ['mention']
+  // at all three sites that touch it — the read projection, create, and PATCH.
+  //
+  // So the deception is real and it points the other way. Measured end to end
+  // through this page:
+  //
+  //     uncheck all three → Save → "Saved quiet."   and the store holds
+  //     ["mention"], so the seat is still woken by every mention.
+  //
+  // ⇒ A person unchecking every box is trying to let a colleague rest. They are
+  // told it worked. It did nothing, and nothing anywhere says so. That is worse
+  // than the state the ruling feared, because it is a considerate act failing
+  // silently.
+  //
+  // ⛔ LIVE, at the moment of the last uncheck — after a save it is too late,
+  // and after a reload the boxes have already been rewritten to match the store,
+  // so the person never sees what happened at all.
+  const wakeState = row.querySelector('[data-agent-wake-state]');
+  const refreshWakeState = () => {
+    const anyOn = row.querySelectorAll('[data-agent-wake] input:checked').length > 0;
+    wakeState.textContent = anyOn
+      ? ''
+      : '⚠️ This does NOT silence the seat. With no box checked the server stores '
+        + '`mention`, so it will still wake whenever someone types its handle — and the '
+        + 'save will report success. There is currently no way to make a seat unwakeable here.';
+    wakeState.style.color = wakeState.textContent ? 'var(--danger, #c0392b)' : '';
+  };
+  row.querySelectorAll('[data-agent-wake] input').forEach((i) => i.addEventListener('change', refreshWakeState));
+  refreshWakeState();
+
   row.querySelector('[data-agent-version]').addEventListener('click', async () => {
     const body = row.querySelector('[data-agent-prompt]').value;
     const { ok, status, out } = await send('POST', `/api/agents/${encodeURIComponent(a.seatKey)}/prompt`, { body });
