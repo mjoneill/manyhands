@@ -55,10 +55,10 @@ const run = async (text, agent = AGENT) => {
 };
 
 test('#1254 splitPublishMarker: the marker is the whole gate, and it is case-insensitive', () => {
-  assert.deepEqual(splitPublishMarker('REPLY: hello'), { publish: true, body: 'hello' });
-  assert.deepEqual(splitPublishMarker('reply: hello'), { publish: true, body: 'hello' },
+  assert.deepEqual(splitPublishMarker('REPLY: hello'), { publish: true, body: 'hello', markerLines: 1 });
+  assert.deepEqual(splitPublishMarker('reply: hello'), { publish: true, body: 'hello', markerLines: 1 },
     'a model that lowercases its own marker still meant to publish');
-  assert.deepEqual(splitPublishMarker('  REPLY:hello  '), { publish: true, body: 'hello' },
+  assert.deepEqual(splitPublishMarker('  REPLY:hello  '), { publish: true, body: 'hello', markerLines: 1 },
     'the space after the colon is not the contract');
   assert.deepEqual(splitPublishMarker('NO_REPLY'), { publish: false, reason: 'no-marker' });
   assert.deepEqual(splitPublishMarker('NO_REPLY — nothing here needs my voice'), { publish: false, reason: 'no-marker' },
@@ -166,5 +166,72 @@ test('#1254 a dropped turn that wrote memory is ONE GRAPH QUERY away, not merely
       'SELECT ?c ?m WHERE { ?c a scrum:ModelCall ; scrum:stopReason "dropped:no-marker" ; scrum:memoryWritten ?m }');
     assert.deepEqual(rows.map((r) => r.m).sort(), ['mem-a', 'mem-b'],
       'THE HOLE IS NOW A NUMBER: a turn that said nothing and kept something is countable without reading the seat store');
+  } finally { await srv.stop(); }
+});
+
+/**
+ * #1254 — THE MARKER LEAKED INTO THE COMMONS, live, on the first real wake after
+ * the deploy (2026-09-07T02:09:44Z). Raw text was three paragraphs, EACH
+ * beginning `REPLY:`. The gate stripped the leading one and published the rest,
+ * so the room now holds a post containing the marker as body text, twice.
+ *
+ * ⛔ Why that is the worst possible artifact for THIS card and not a cosmetic
+ * bug: #1254 exists because seats copy shapes out of the commons history. This
+ * same seat had already copied `REPLY:` off the room once, at 00:00:36Z, before
+ * the gate existed anywhere in its loop. Publishing the marker as text seeds
+ * the template into the exact surface the card is about — the fix becomes its
+ * own contagion vector.
+ *
+ * ⚠️ The counter-argument, which is right and which this design keeps: the
+ * repeated markers are EVIDENCE of the copying, and stripping them silently
+ * destroys the signal. So the evidence moves to where analysts actually look —
+ * the ledger row — instead of living in the room where it is both noise and a
+ * template. Strip the body, COUNT the markers.
+ */
+test('#1254 EVERY line-initial marker is stripped — the room must not carry the template as text', () => {
+  const raw = 'REPLY: I cannot read my own store.\n\nREPLY: The change is new to me.\n\nREPLY: Ready when you are.';
+  const got = splitPublishMarker(raw);
+  assert.equal(got.publish, true);
+  assert.ok(!/REPLY:/i.test(got.body), 'NO marker survives into the published body: ' + got.body);
+  assert.equal(got.body, 'I cannot read my own store.\n\nThe change is new to me.\n\nReady when you are.');
+  assert.equal(got.markerLines, 3, 'the COUNT is kept — the evidence moves to the ledger, it is not destroyed');
+});
+
+test('#1254 a single marker still reports its count, so "1" and "3" are one queryable field', () => {
+  const got = splitPublishMarker('REPLY: just the one.');
+  assert.equal(got.body, 'just the one.');
+  assert.equal(got.markerLines, 1);
+});
+
+test('#1254 a marker MID-LINE is still prose, not a marker — stripping is line-initial only', () => {
+  const got = splitPublishMarker('REPLY: I was asked to start with REPLY: and I did.');
+  assert.equal(got.body, 'I was asked to start with REPLY: and I did.',
+    'a marker discussed inside a sentence is the seat talking ABOUT the rule, and must survive verbatim');
+  assert.equal(got.markerLines, 1);
+});
+
+test('#1254 markers on every line with nothing else is empty-after-marker, not a post of blank lines', () => {
+  assert.equal(splitPublishMarker('REPLY:\nREPLY:\nREPLY:').publish, false);
+  assert.equal(splitPublishMarker('REPLY:\nREPLY:\nREPLY:').reason, 'empty-after-marker');
+});
+
+/**
+ * #1254 — the count has to CROSS. `memoryWritten` taught this the hard way
+ * three hours ago: an accepted wire field, readable over REST, and absent from
+ * the graph — so the query an analyst would actually write returned nothing
+ * while both halves looked healthy. Asserted on a real server through SPARQL.
+ */
+test('#1254 markerLines survives POST, the wire, and the GRAPH — a marking seat is one query away', async () => {
+  const srv = await startRestServer({ board: makeBoardFixture({ cards: [], nextShortId: 1 }) });
+  try {
+    const post = await api(srv.baseUrl, 'POST', '/api/model-calls', {
+      by: 'gizmo', agent: 'gizmo', model: 'm', ok: true, stopReason: 'stop',
+      markerLines: 3, postedText: 'three paragraphs, three markers',
+    });
+    assert.equal(post.status, 201, JSON.stringify(post.body));
+    const rows = await sparql(srv.baseUrl,
+      'SELECT ?c ?n WHERE { ?c a scrum:ModelCall ; scrum:markerLines ?n }');
+    assert.equal(rows.length, 1, 'the graph has it, not only REST');
+    assert.equal(Number(rows[0].n), 3, 'and it is the COUNT, so >1 is filterable');
   } finally { await srv.stop(); }
 });

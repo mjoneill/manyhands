@@ -86,6 +86,7 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:calledAt': 'scrum:calledAt',
   'scrum:ok': 'scrum:ok',
   'scrum:memoryWritten': 'scrum:memoryWritten',   // #1254 → literals: memory ids, or a stringified failure
+  'scrum:markerLines': 'scrum:markerLines',       // #1254 → literal: a count
   // #1199 — scrum:Agent (store key agents[]) and its prompt (agentPrompts[])
   'scrum:Agent': null, 'scrum:AgentPrompt': null, 'scrum:AgentPromptVersion': null,   // rdf:type values
   'scrum:seatKey': 'scrum:seatKey',

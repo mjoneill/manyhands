@@ -143,13 +143,32 @@ export function splitDirectives(text) {
 // copied `REPLY:` out of the commons' own discussion of this card before the
 // gate existed anywhere near it.
 export const PUBLISH_RE = /^\s*REPLY:\s*/i;
+// #1254 — EVERY line-initial marker comes off, not just the first.
+//
+// Found live on the first real wake after the deploy: a seat marked all three
+// of its paragraphs, the leading marker was stripped, and the other two were
+// PUBLISHED AS TEXT. This card exists because seats copy shapes out of the
+// commons history — so a published marker seeds the template into the exact
+// surface the card is about, and the fix becomes its own contagion vector.
+// The same seat had already copied `REPLY:` off this room once, before the
+// gate existed anywhere in its loop.
+//
+// ⚠️ The repeats are EVIDENCE of that copying, and stripping them silently
+// would destroy the signal — so the count rides the ledger row instead, where
+// an analyst looks, rather than the room, where it is noise AND a template.
+// Strip the body; COUNT the markers.
+//
+// ⛔ Line-initial only. `REPLY:` inside a sentence is a seat talking ABOUT the
+// rule and must survive verbatim, or the gate starts editing prose.
+const MARKER_LINE = /^[ \t]*REPLY:[ \t]*/gim;
 export function splitPublishMarker(text) {
   const raw = String(text ?? '');
   if (!PUBLISH_RE.test(raw)) return { publish: false, reason: 'no-marker' };
-  const body = raw.replace(PUBLISH_RE, '').trim();
+  const markerLines = (raw.match(MARKER_LINE) || []).length;
+  const body = raw.replace(MARKER_LINE, '').trim();
   // A seat that MEANT to speak and produced nothing is a different failure from
   // one that declined, and an operator counting drops needs to tell them apart.
-  return body ? { publish: true, body } : { publish: false, reason: 'empty-after-marker' };
+  return body ? { publish: true, body, markerLines } : { publish: false, reason: 'empty-after-marker' };
 }
 
 /** How a wake introduces itself to the model, by kind. */
@@ -556,6 +575,13 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
   const row = { ...base, ok: true, stopReason: dropped ? reason : (result.stopReason ?? null), usage: result.usage ?? null, attempts: result.attempts ?? null, latencyMs: Date.now() - started, postId: posted?.id ?? null,
     ...toolRecord, postedText: publishBody, unbackedLookupClaims: lookupClaims,
     ...(dropped ? { modelStopReason: result.stopReason ?? null, error: text.slice(0, 120) } : {}),
+    // #1254 — how many line-initial markers the seat emitted. 1 is a seat
+    // following the rule; >1 is a seat marking every paragraph, which is the
+    // copy-shape this card is about and which used to reach the room as text.
+    // Recorded on every published row, including the ordinary 1, for the same
+    // reason toolHops is emitted at zero: a field present only when it fired
+    // makes "which turns were ordinary" a query by absence.
+    ...(publishBody ? { markerLines: gate.markerLines ?? null } : {}),
     ...(narrationRetry ? { narrationRetry } : {}),
     memoryWritten, ...(memoryRefused.length ? { memoryRefused } : {}), claims: claimed, ...(reason ? { reason } : {}) };
   const recorded = await recordLedger({ sink: ledgerSink, file: ledgerFile, row, onError });

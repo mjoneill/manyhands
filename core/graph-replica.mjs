@@ -182,6 +182,8 @@ export const GRAPH_VOCABULARY = new Set([
   // the room catches a post. Asked for on the card, and the right shape — the hole
   // becomes a number ("dropped turns that wrote memory") rather than a rule.
   'scrum:memoryWritten',
+  // #1254 — >1 is a seat marking EVERY paragraph: the copy-shape, countable.
+  'scrum:markerLines',
   // #1199 — the agent persona and its versioned prompt
   'scrum:Agent', 'scrum:AgentPrompt', 'scrum:AgentPromptVersion', 'scrum:seatKey', 'scrum:emoji',
   'scrum:contextPolicy', 'scrum:toolGrant', 'scrum:budgetPerDay', 'scrum:residency', 'scrum:state',
@@ -940,6 +942,7 @@ function projectModelCall(store, e) {
   if (Number.isFinite(Number(e['scrum:cost'])) && e['scrum:cost'] != null) add(nn(S + 'cost'), num(e['scrum:cost']));
   if (Number.isFinite(Number(e['scrum:latencyMs'])) && e['scrum:latencyMs'] != null) add(nn(S + 'latencyMs'), num(e['scrum:latencyMs']));
   if (e['scrum:ok'] != null) add(nn(S + 'ok'), lit(String(!!e['scrum:ok'])));
+  if (Number.isFinite(Number(e['scrum:markerLines'])) && e['scrum:markerLines'] != null) add(nn(S + 'markerLines'), num(e['scrum:markerLines']));
   if (e['scrum:producedPost']) add(nn(S + 'producedPost'), nn(String(e['scrum:producedPost']).startsWith('http') ? String(e['scrum:producedPost']) : E + e['scrum:producedPost']));
   for (const c of (Array.isArray(e['scrum:contextHandedTo']) ? e['scrum:contextHandedTo'] : [])) {
     if (c) add(nn(S + 'contextHandedTo'), nn(String(c).startsWith('http') ? String(c) : E + c));

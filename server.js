@@ -3586,7 +3586,7 @@ const MODEL_CALL_FIELDS = new Set(['by', 'agent', 'model', 'provider', 'protocol
   // #1196 — what the colleague FETCHED, beside what it said. A claim whose rows
   // are not on the record cannot be checked by anyone later, which is the whole
   // argument for giving it tools at all.
-  'toolsGranted', 'toolHops', 'modelCalls', 'stoppedBecause', 'postedText',
+  'toolsGranted', 'toolHops', 'modelCalls', 'stoppedBecause', 'postedText', 'markerLines',
   // #1246 — a claimed lookup from a wake that called no tool.
   'unbackedLookupClaims',
   // #1246b — the nudge and what it produced.
@@ -3641,6 +3641,8 @@ function modelCallEntityFrom(body) {
     'scrum:promptVersion': typeof body.promptVersion === 'string' ? body.promptVersion : null,
     'scrum:tokensIn': n(body.tokensIn), 'scrum:tokensOut': n(body.tokensOut),
     'scrum:cost': n(body.cost) ?? 0, 'scrum:latencyMs': n(body.latencyMs),
+    // #1254 — line-initial markers the seat emitted on a published turn.
+    'scrum:markerLines': n(body.markerLines),
     'scrum:stopReason': typeof body.stopReason === 'string' ? body.stopReason : null,
     'scrum:ok': body.ok !== false,
     'scrum:contextHandedTo': Array.isArray(body.contextHandedTo) ? body.contextHandedTo.map(String).slice(0, 200) : [],
