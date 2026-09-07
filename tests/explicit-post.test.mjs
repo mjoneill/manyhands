@@ -22,7 +22,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { buildMessages, guestOnce, splitPublishMarker } from '../core/guest-loop.mjs';
+import { buildMessages, guestOnce, splitPublishMarker, shouldMarkAnswered } from '../core/guest-loop.mjs';
 import { callModel } from '../core/model-adapter.mjs';
 import { startRestServer, makeBoardFixture } from './helpers/harness.mjs';
 
@@ -264,4 +264,43 @@ test('#1254 the MECHANISM survives the loosening — the marker rule is still st
   assert.match(sys, /Nothing you write is posted unless it begins with `REPLY:`/,
     'loosening WHEN to speak must not loosen HOW: silence still has to leave no trace');
   assert.match(sys, /reaches no one/i, 'and the consequence of narrating instead is still stated');
+});
+
+/**
+ * #1254 — A DECLINE IS AN ANSWER. Found live 2026-09-07T04:2xZ: one seat woke
+ * on the same mention THREE times, answered `NO_REPLY` twice, and then produced
+ * an empty reply — three model calls to decline one message.
+ *
+ * The cursor deliberately does NOT advance on a drop, so that a real reply which
+ * lost its marker gets retried rather than lost. That is right, and it saved a
+ * garbled generation at 04:15Z whose retry became the best post of the night.
+ * ⛔ But it treats a DELIBERATE decline as an unanswered wake, and a seat that
+ * has decided to stay quiet is then asked the same question again, and again,
+ * until it degrades into an empty reply — which finally does advance it.
+ *
+ * ⇒ The discriminator already existed: I published it as the thing to watch for
+ * ("a dropped row whose recorded head is NOT a declined reply") and then never
+ * used it to decide anything. It decides this.
+ */
+test('#1254 a bare NO_REPLY ADVANCES the cursor — declining is answering, not failing to answer', async () => {
+  const { r } = await run('NO_REPLY');
+  assert.equal(r.posted, false);
+  assert.equal(r.reason, 'dropped:no-marker');
+  assert.equal(r.declined, true, 'the seat DECIDED; the wake is discharged');
+  assert.equal(shouldMarkAnswered(r), true, 'so the same message is never re-asked');
+});
+
+test('#1254 a NARRATED decline also advances — the narration is dropped, the DECISION stands', async () => {
+  const { r } = await run('NO_REPLY — this is aimed at someone else, not me.');
+  assert.equal(r.declined, true);
+  assert.equal(shouldMarkAnswered(r), true,
+    'THE #528 SHAPE: we drop the sentence, we do not re-ask the question');
+});
+
+test('#1254 a REAL reply that lost its marker still RETRIES — the case the cursor rule exists for', async () => {
+  const { r } = await run('The deploy landed at 04:08 and nothing restarted.');
+  assert.equal(r.posted, false);
+  assert.equal(r.reason, 'dropped:no-marker');
+  assert.notEqual(r.declined, true, 'this is a lost answer, not a decision');
+  assert.equal(shouldMarkAnswered(r), false, 'so it is asked again and the reply is recovered');
 });

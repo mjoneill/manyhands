@@ -143,6 +143,19 @@ export function splitDirectives(text) {
 // copied `REPLY:` out of the commons' own discussion of this card before the
 // gate existed anywhere near it.
 export const PUBLISH_RE = /^\s*REPLY:\s*/i;
+// #1254 — A DECLINE IS AN ANSWER, and this is the line that says so.
+//
+// The cursor does not advance on a drop, so that a real reply which lost its
+// marker is retried rather than lost — that rule saved a garbled generation
+// whose retry became a seat's best post of the night. But a DELIBERATE decline
+// is not an unanswered wake. Without this, a seat that has decided to stay
+// quiet is asked the same question again, and again, until it degrades into an
+// empty reply — measured live: three model calls to decline one message.
+//
+// ⚠️ A NARRATED decline counts too. We drop the sentence; the DECISION stands.
+// Re-asking because the seat explained itself is punishing it for the exact
+// habit #528 documented and this card was built to make harmless.
+export const DECLINE_RE = /^\s*NO_REPLY\b/i;
 // #1254 — EVERY line-initial marker comes off, not just the first.
 //
 // Found live on the first real wake after the deploy: a seat marked all three
@@ -324,6 +337,9 @@ export async function fetchBoundedChanges(get, since, { limit = 20 } = {}) {
 export function shouldMarkAnswered(result) {
   if (!result) return false;
   if (result.halted) return false;
+  // #1254 — a DECLINE discharges the wake. Only a drop that was NOT a decline
+  // (a real reply that lost its marker) is left owed for another attempt.
+  if (result.declined === true) return true;
   return result.posted === true || result.reason === 'model-failed' || result.reason === 'empty-reply' || result.reason === 'memory-only';
 }
 
@@ -585,6 +601,7 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
   // count cannot be diluted by the model's word for how it finished.
   const dropped = Boolean(text) && !gate.publish;
   const reason = dropped ? `dropped:${gate.reason}` : (text ? null : 'memory-only');
+  const declined = dropped && DECLINE_RE.test(text);
   const row = { ...base, ok: true, stopReason: dropped ? reason : (result.stopReason ?? null), usage: result.usage ?? null, attempts: result.attempts ?? null, latencyMs: Date.now() - started, postId: posted?.id ?? null,
     ...toolRecord, postedText: publishBody, unbackedLookupClaims: lookupClaims,
     ...(dropped ? { modelStopReason: result.stopReason ?? null, error: text.slice(0, 120) } : {}),
@@ -596,11 +613,11 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
     // makes "which turns were ordinary" a query by absence.
     ...(publishBody ? { markerLines: gate.markerLines ?? null } : {}),
     ...(narrationRetry ? { narrationRetry } : {}),
-    memoryWritten, ...(memoryRefused.length ? { memoryRefused } : {}), claims: claimed, ...(reason ? { reason } : {}) };
+    memoryWritten, ...(memoryRefused.length ? { memoryRefused } : {}), claims: claimed, ...(reason ? { reason } : {}), ...(declined ? { declined: true } : {}) };
   const recorded = await recordLedger({ sink: ledgerSink, file: ledgerFile, row, onError });
   row.recorded = recorded.recorded; row.ledgerId = recorded.id;
   log(`[#1201] ${agent.seatKey} answered ${wake.id ?? 'a mention'} via ${agent.model.model} (${row.usage?.completionTokens ?? '?'} tokens, ${row.stopReason})`);
-  return { posted: Boolean(posted), ...(reason ? { reason } : {}), postId: row.postId, ledger: row, text: publishBody, remember, claims: claimed };
+  return { posted: Boolean(posted), ...(reason ? { reason } : {}), ...(declined ? { declined: true } : {}), postId: row.postId, ledger: row, text: publishBody, remember, claims: claimed };
 }
 
 // ---------------------------------------------------------------------------
