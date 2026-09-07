@@ -34,7 +34,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { loadDomain, saveDomain } from './core/store.mjs';
+import { loadDomain, loadDomainShared, saveDomain } from './core/store.mjs';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { BOARD_TOOLS } from './core/board-tools.mjs';
 import { promptGrantConflict, promptGrantWarning } from './core/prompt-grants.mjs'; // #1242
 import { cardContentKey } from './core/card-content-key.mjs';
@@ -655,10 +656,14 @@ function sendJSON(res, statusCode, data) {
   // call sites, so a refusal added later is covered without anyone remembering.
   if (statusCode >= 400) logRefused(res.req, statusCode, data);
   const body = JSON.stringify(data);
+  const ctx = requestContext.getStore();
   res.writeHead(statusCode, {
     'Content-Type': 'application/json',
     'Content-Length': Buffer.byteLength(body),
     ...(INSTANCE_ID ? { 'X-Scrum-Instance': INSTANCE_ID } : {}),
+    // #715 — measurable: which read served this, and what it cost. Without this
+    // a working cache and an idle box are indistinguishable from outside.
+    ...(ctx && ctx.read ? { 'X-Board-Read': ctx.read } : {}),
   });
   res.end(body);
 }
@@ -873,8 +878,27 @@ const DEFAULT_COLUMNS = [
   { id: 'done', name: 'Done', order: 2 },
 ];
 
-function readBoard() {
-  const data = domainToBoard(loadDomain(BOARD_DATA_FILE));
+// #715 — WHICH KIND OF READ THIS REQUEST IS ALLOWED. Set once per API request
+// by routeApi from the HTTP method, carried across awaits, consulted by
+// readBoard. A GET may never write, so it may share; anything else clones.
+const requestContext = new AsyncLocalStorage();
+let _sharedBoard = null;   // { file, key, board, builtMs, builtAt } — one per file identity
+
+function deepFreeze(root) {
+  const stack = [root];
+  while (stack.length) {
+    const o = stack.pop();
+    if (o === null || typeof o !== 'object' || Object.isFrozen(o)) continue;
+    Object.freeze(o);
+    for (const k of Object.keys(o)) { const v = o[k]; if (v !== null && typeof v === 'object') stack.push(v); }
+  }
+  return root;
+}
+
+// The board as handlers expect it: projected from the domain, mentions
+// backfilled, columns seeded. Shared by both read paths so a GET and a PATCH
+// see the same shape.
+function finishBoard(data) {
   // #110 — backfill mentions on conversations created before the field existed.
   // #1200 — against the roster derived from THIS document: extractMentions()
   // would call currentRoster(), which reads the board, which is this function.
@@ -885,22 +909,36 @@ function readBoard() {
     rosterForBackfill ??= currentRoster(data);
     c.mentions = extractMentionsFromRoster(c.body, rosterForBackfill);
   }
-
-  // A board with no columns is a brand-new install, and it used to be a trap.
-  // New cards default to `column: 'backlog'`, the UI drew BACKLOG/IN PROGRESS/
-  // DONE as placeholders that did not exist, and a card pointing at a column
-  // that isn't there rendered NOWHERE. So a first-timer followed the quickstart
-  // exactly — clone, run, create a card — opened the browser, saw "No cards
-  // yet", and reasonably concluded the install was broken. The card was there
-  // the whole time and unreachable.
-  //
-  // It never bit us because our own board has had real columns since before any
-  // of us arrived; the empty-board path had simply never been walked. Seeding
-  // here makes the placeholders' promise true.
   if (!data.columns.length) data.columns = DEFAULT_COLUMNS.map((c) => ({ ...c }));
-
   return data;
 }
+
+function readBoard() {
+  const ctx = requestContext.getStore();
+  if (ctx && ctx.shares) {
+    // #715 — A READER SHARES. One projected, deep-frozen board per file
+    // identity; a write changes the identity (mtime + size) and the next GET
+    // rebuilds once. Frozen so a handler that tries to write through a read
+    // fails loudly here instead of corrupting every later reader silently.
+    const t0 = performance.now();
+    const { key, domain } = loadDomainShared(BOARD_DATA_FILE);
+    // Keyed by PATH as well as identity: one board file per process today, but
+    // a key that could match a different file's identity is a latent stale read.
+    if (!_sharedBoard || _sharedBoard.file !== BOARD_DATA_FILE || _sharedBoard.key !== key) {
+      const board = deepFreeze(finishBoard(domainToBoard(domain)));
+      _sharedBoard = { file: BOARD_DATA_FILE, key, board, builtMs: Math.round(performance.now() - t0), builtAt: new Date().toISOString() };
+      ctx.read = `shared; rebuilt=${_sharedBoard.builtMs}ms; key=${key}; cards=${board.cards.length}`;
+    } else {
+      ctx.read = `shared; hit; built=${_sharedBoard.builtAt}; key=${_sharedBoard.key}; cards=${_sharedBoard.board.cards.length}`;
+    }
+    return _sharedBoard.board;
+  }
+  const t0 = performance.now();
+  const data = finishBoard(domainToBoard(loadDomain(BOARD_DATA_FILE)));
+  if (ctx) ctx.read = `clone; ${Math.round(performance.now() - t0)}ms`;
+  return data;
+}
+
 
 // Write board state — through the node-domain port (#219). saveDomain owns the
 // atomic tmp+rename, _README-first ordering, and lastUpdated stamp. We still
@@ -7784,7 +7822,13 @@ function routeApi(method, urlPath, req, res) {
     if (r.method !== method) continue;
     const m = urlPath.match(r.re);
     if (m) {
-      r.fn(req, res, m);
+      // #715 — the method decides the read kind for everything this handler
+      // does, including after its awaits.
+      // ⛔ GET alone. A POST that looks read-only is not: search with a reader
+      // model writes a ledger row inside the request, and a flag on the route
+      // line also broke the instrument that maps MCP tools to routes by parsing
+      // this table (#1163). Measured, not reasoned: both failed in the suite.
+      requestContext.run({ method, shares: method === 'GET', read: null }, () => r.fn(req, res, m));
       return true;
     }
   }
