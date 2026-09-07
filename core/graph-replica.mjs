@@ -174,7 +174,7 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:Wake', 'scrum:wokeSeat', 'scrum:wokeAt',
   // #1202 — the provenance ledger row
   'scrum:ModelCall', 'scrum:agent', 'scrum:model', 'scrum:provider', 'scrum:protocol',
-  'scrum:promptVersion', 'scrum:tokensIn', 'scrum:tokensOut', 'scrum:reasoningTokens', 'scrum:cachedPromptTokens', 'scrum:cost', 'scrum:costMeasured', 'scrum:stopReason',
+  'scrum:promptVersion', 'scrum:tokensIn', 'scrum:tokensOut', 'scrum:reasoningTokens', 'scrum:cachedPromptTokens', 'scrum:cost', 'scrum:costMeasured', 'scrum:costCategories', 'scrum:stopReason',
   'scrum:latencyMs', 'scrum:contextHandedTo', 'scrum:producedPost', 'scrum:calledAt', 'scrum:ok',
   // #1254 — WHAT A TURN KEPT, beside whether it spoke. Under the publish gate a
   // seat can decline to post and still write to its own memory, and that write
@@ -194,7 +194,7 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:promptGrantConflict', 'scrum:promptGrantConflictReason', 'scrum:promptGrantConflictSince',
   // #1197 — the model registry node
   'scrum:Model', 'scrum:baseUrl', 'scrum:contextWindow', 'scrum:numCtx', 'scrum:thinking', 'scrum:maxOutputTokens',
-  'scrum:timeoutMs', 'scrum:costIn', 'scrum:costOut', 'scrum:freeTier', 'scrum:capability', 'scrum:apiKeyRef',
+  'scrum:timeoutMs', 'scrum:costIn', 'scrum:costOut', 'scrum:rates', 'scrum:freeTier', 'scrum:capability', 'scrum:apiKeyRef',
   'scrum:deprecatesOn', 'scrum:lastProbeClass', 'scrum:lastProbeAt', 'scrum:lastProbeStatus', 'scrum:modelKey', 'scrum:usesModel',
   'scrum:wakeOn', 'scrum:everyMinutes', // #1226
   'scrum:seed', 'scrum:temperature', 'scrum:maxTokens', 'scrum:wakeKind', 'scrum:memoryHanded', // #1203 finding on #1202
@@ -954,6 +954,12 @@ function projectModelCall(store, e) {
   // the graph is where "what did this seat cost" gets asked, and a query that
   // sums cost across rows silently mixes free calls with unpriced ones.
   if (e['scrum:costMeasured'] != null) add(nn(S + 'costMeasured'), lit(String(!!e['scrum:costMeasured'])));
+  // #1296 — the TERMS the cost is made of, one literal each. A reader filtering
+  // for rows priced without a `reasoning` term is asking the question this
+  // predicate exists for, and a bare cost cannot answer it.
+  for (const c of (Array.isArray(e['scrum:costCategories']) ? e['scrum:costCategories'] : [])) {
+    if (c) add(nn(S + 'costCategories'), lit(String(c)));
+  }
   if (Number.isFinite(Number(e['scrum:latencyMs'])) && e['scrum:latencyMs'] != null) add(nn(S + 'latencyMs'), num(e['scrum:latencyMs']));
   if (e['scrum:ok'] != null) add(nn(S + 'ok'), lit(String(!!e['scrum:ok'])));
   if (Number.isFinite(Number(e['scrum:markerLines'])) && e['scrum:markerLines'] != null) add(nn(S + 'markerLines'), num(e['scrum:markerLines']));
@@ -1077,6 +1083,11 @@ function projectModel(store, e) {
   if (e['scrum:thinking'] != null) add(nn(S + 'thinking'), lit(String(!!e['scrum:thinking'])));
   if (Number.isFinite(Number(e['scrum:maxOutputTokens'])) && e['scrum:maxOutputTokens'] != null) add(nn(S + 'maxOutputTokens'), dec(e['scrum:maxOutputTokens']));
   if (Number.isFinite(Number(e['scrum:timeoutMs'])) && e['scrum:timeoutMs'] != null) add(nn(S + 'timeoutMs'), dec(e['scrum:timeoutMs']));
+  // #1296 — the rate table as ONE JSON literal, deliberately not one predicate
+  // per category. The category set is OPEN, and a dynamic predicate name is
+  // exactly what #875's census forbids: an emitted predicate nobody declared.
+  // A blob is queryable and honest; invented predicate names would be neither.
+  if (e['scrum:rates'] && typeof e['scrum:rates'] === 'object') add(nn(S + 'rates'), lit(JSON.stringify(e['scrum:rates'])));
   if (Number.isFinite(Number(e['scrum:costIn'])) && e['scrum:costIn'] != null) add(nn(S + 'costIn'), dec(e['scrum:costIn']));
   if (Number.isFinite(Number(e['scrum:costOut'])) && e['scrum:costOut'] != null) add(nn(S + 'costOut'), dec(e['scrum:costOut']));
   if (e['scrum:freeTier'] != null) add(nn(S + 'freeTier'), lit(String(!!e['scrum:freeTier'])));

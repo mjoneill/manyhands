@@ -3389,6 +3389,7 @@ function modelToWire(e) {
     apiKeyRef: e['scrum:apiKeyRef'] ?? null, contextWindow: e['scrum:contextWindow'] ?? null, numCtx: e['scrum:numCtx'] ?? null,
     thinking: e['scrum:thinking'] ?? null, maxOutputTokens: e['scrum:maxOutputTokens'] ?? null, timeoutMs: e['scrum:timeoutMs'] ?? null,
     costIn: e['scrum:costIn'] ?? null, costOut: e['scrum:costOut'] ?? null, freeTier: e['scrum:freeTier'] ?? null,
+    rates: e['scrum:rates'] ?? null,
     capabilities: e['scrum:capability'] ?? [], deprecatesOn: e['scrum:deprecatesOn'] ?? null,
     lastProbe: e['scrum:lastProbeClass'] ? { klass: e['scrum:lastProbeClass'], status: e['scrum:lastProbeStatus'] ?? null, at: e['scrum:lastProbeAt'] ?? null } : null,
     createdAt: e['scrum:importedAt'] ?? null, updatedAt: e.dateModified ?? null,
@@ -3424,6 +3425,29 @@ function modelFieldsFrom(body, into) {
     const bad = body.capabilities.find((c) => !MODEL_CAPABILITIES.has(c));
     if (bad) return `unknown capability ${JSON.stringify(bad)} — known: ${[...MODEL_CAPABILITIES].join(', ')}`;
     into['scrum:capability'] = [...new Set(body.capabilities)];
+  }
+  // #1296 — RATES PER BILLED CATEGORY. The vendor bills prompt, completion,
+  // reasoning and cached-prompt; costIn/costOut model two of the four, and a
+  // two-term model of a four-term bill is not an inaccurate number — it is a
+  // number that cannot become accurate.
+  //
+  // ⭐ DELIBERATELY AN OPEN MAP, not four named fields. @wren's condition on the
+  // card: "prefer a shape that carries whatever categories arrive over one that
+  // hardcodes these four", because a second provider may split differently and
+  // a hardcoded schema would silently drop the category it has never seen.
+  if (body.rates !== undefined) {
+    if (body.rates === null) into['scrum:rates'] = null;
+    else {
+      if (typeof body.rates !== 'object' || Array.isArray(body.rates)) return 'rates must be an object of billed category → price per token, e.g. {"prompt":1.4e-7,"completion":2.8e-7,"reasoning":2.8e-7,"cachedPrompt":2.8e-8}';
+      const out = {};
+      for (const [k, v] of Object.entries(body.rates)) {
+        if (!/^[a-zA-Z][a-zA-Z0-9]{0,31}$/.test(k)) return `rate category ${JSON.stringify(k)} must be 1-32 alphanumeric characters starting with a letter`;
+        if (v == null) continue;
+        if (!(Number.isFinite(Number(v)) && Number(v) >= 0)) return `rate for ${k} must be a non-negative number (price per TOKEN, not per million)`;
+        out[k] = Number(v);
+      }
+      into['scrum:rates'] = Object.keys(out).length ? out : null;
+    }
   }
   if (typeof body.name === 'string' && body.name.trim()) into.name = body.name.trim();
   return null;
@@ -3804,6 +3828,7 @@ const modelCallToWire = (e) => ({
   // 0 and a dropped-usage 0 read identically, which is how 145 unpriced rows
   // looked like 145 free ones.
   costMeasured: e['scrum:costMeasured'] ?? false,
+  costCategories: e['scrum:costCategories'] ?? [],
   stopReason: e['scrum:stopReason'] ?? null, latencyMs: e['scrum:latencyMs'] ?? null, ok: e['scrum:ok'] !== false,
   contextHandedTo: e['scrum:contextHandedTo'] ?? [], producedPost: e['scrum:producedPost'] ?? null,
   // #1254 — the field was ACCEPTED on write and PROJECTED to the graph and never
@@ -3930,6 +3955,62 @@ function modelCallEntityFrom(body) {
  * 145 rows: "an unmeasured zero isn't a value — it's a gap wearing a number."
  * So `costMeasured` says whether the number is an answer or an absence.
  */
+/**
+ * #1296 — PRICE A CALL BY BILLED CATEGORY.
+ *
+ * The vendor's invoice has four terms — prompt, completion, reasoning, and the
+ * cached portion of the prompt at its own reduced rate. The registry modelled
+ * two, so the ledger read low and could not be reconciled against a bill.
+ *
+ * ⭐ THE CATEGORY SET IS OPEN. A rate registered under a name this function has
+ * never heard of is honoured if the row carries tokens for it, and reported in
+ * `categories` either way — because the alternative is a hardcoded schema that
+ * silently drops whatever the next provider splits differently.
+ *
+ * ⛔ AND A CATEGORY WITH NO REGISTERED RATE IS NOT PRICED AT ZERO. It is left
+ * out and named as absent, which is the #1294 rule applied one level up: a cost
+ * that silently omits a term is indistinguishable from one where the term is
+ * free, and only one of those is a fact.
+ */
+const RATE_TOKEN_FIELD = {
+  prompt: 'scrum:tokensIn',
+  completion: 'scrum:tokensOut',
+  reasoning: 'scrum:reasoningTokens',
+  cachedPrompt: 'scrum:cachedPromptTokens',
+};
+function rateTableOf(model) {
+  const declared = model['scrum:rates'];
+  const rates = (declared && typeof declared === 'object' && !Array.isArray(declared)) ? { ...declared } : {};
+  // costIn/costOut ARE the prompt and completion rates under their old names.
+  // Kept as a fallback rather than migrated: every model registered before this
+  // change prices exactly as it did, and #1202's tests say so.
+  if (rates.prompt == null && model['scrum:costIn'] != null) rates.prompt = Number(model['scrum:costIn']);
+  if (rates.completion == null && model['scrum:costOut'] != null) rates.completion = Number(model['scrum:costOut']);
+  return rates;
+}
+function priceByCategory(model, entity) {
+  const rates = rateTableOf(model);
+  const num = (v) => (v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
+  const cached = num(entity['scrum:cachedPromptTokens']);
+  // ⚠️ The cached tokens are a SUBSET of tokensIn. Split them out only when a
+  // cachedPrompt rate exists — otherwise they are ordinary prompt tokens and
+  // billing them at zero would invent a discount the vendor never gave.
+  const splitCache = rates.cachedPrompt != null && cached != null;
+  let cost = 0;
+  const categories = [];
+  for (const [category, rate] of Object.entries(rates)) {
+    if (!(Number.isFinite(Number(rate)) && Number(rate) >= 0)) continue;
+    const field = RATE_TOKEN_FIELD[category];
+    let tokens = field ? num(entity[field]) : null;
+    if (category === 'prompt' && tokens != null && splitCache) tokens -= cached;
+    if (tokens == null) continue;
+    cost += tokens * Number(rate);
+    categories.push(category);
+  }
+  if (!categories.length) return null;
+  categories.sort();
+  return { cost: Number.isFinite(cost) ? cost : 0, measured: true, categories };
+}
 function priceModelCall(data, entity, declaredCost) {
   const tokensIn = entity['scrum:tokensIn'];
   const tokensOut = entity['scrum:tokensOut'];
@@ -3941,9 +4022,8 @@ function priceModelCall(data, entity, declaredCost) {
   // that makes a budget a budget (#534: a value the caller controls cannot
   // gate anything).
   if (model && (tokensIn != null || tokensOut != null)) {
-    const cost = (Number(tokensIn ?? 0) * Number(model['scrum:costIn'] ?? 0))
-      + (Number(tokensOut ?? 0) * Number(model['scrum:costOut'] ?? 0));
-    return { cost: Number.isFinite(cost) ? cost : 0, measured: true };
+    const priced = priceByCategory(model, entity);
+    if (priced) return priced;
   }
 
   // ⛔ AND IT DOES NOT OVERRIDE WHAT IT CANNOT COMPUTE. #1202's own tests post
@@ -3970,6 +4050,10 @@ async function handleCreateModelCall(req, res) {
       const priced = priceModelCall(data, entity, body.cost);
       entity['scrum:cost'] = priced.cost;
       entity['scrum:costMeasured'] = priced.measured;
+      // #1296 — WHICH terms this cost is made of. A bare number cannot say
+      // whether a missing category was free or unpriced, and that ambiguity is
+      // the whole reason the ledger read 22% of actual without ever looking wrong.
+      entity['scrum:costCategories'] = priced.categories ?? [];
       data.modelCalls = [...modelCallsOf(data), entity];
       writeBoard(data, [modelCallEvent(entity, by)]);
       return { status: 201, wire: modelCallToWire(entity) };

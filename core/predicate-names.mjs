@@ -81,6 +81,7 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:reasoningTokens': 'scrum:reasoningTokens',   // #1294 → literal: the third billed category
   'scrum:cachedPromptTokens': 'scrum:cachedPromptTokens',   // #1296 → literal: the cached SUBSET of tokensIn
   'scrum:cost': 'scrum:cost',
+  'scrum:costCategories': 'scrum:costCategories',   // #1296 → literals: which billed terms this cost is made of
   // #1294 — whether scrum:cost was computed from real usage. A free model's 0
   // and an unpriced call's 0 are the same number and different facts.
   'scrum:costMeasured': 'scrum:costMeasured',
@@ -123,7 +124,10 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:Model': null,
   'scrum:baseUrl': 'scrum:baseUrl', 'scrum:contextWindow': 'scrum:contextWindow', 'scrum:numCtx': 'scrum:numCtx',
   'scrum:thinking': 'scrum:thinking', 'scrum:participationClause': 'scrum:participationClause', 'scrum:maxOutputTokens': 'scrum:maxOutputTokens', 'scrum:timeoutMs': 'scrum:timeoutMs',
-  'scrum:costIn': 'scrum:costIn', 'scrum:costOut': 'scrum:costOut', 'scrum:freeTier': 'scrum:freeTier',
+  'scrum:costIn': 'scrum:costIn', 'scrum:costOut': 'scrum:costOut',
+  // #1296 → literal: the JSON rate table, open category set
+  'scrum:rates': 'scrum:rates',
+  'scrum:freeTier': 'scrum:freeTier',
   'scrum:capability': 'scrum:capability', 'scrum:apiKeyRef': 'scrum:apiKeyRef', 'scrum:deprecatesOn': 'scrum:deprecatesOn',
   'scrum:modelKey': 'scrum:modelKey', 'scrum:usesModel': 'scrum:usesModel',
   'scrum:lastProbeClass': 'scrum:lastProbeClass', 'scrum:lastProbeAt': 'scrum:lastProbeAt', 'scrum:lastProbeStatus': 'scrum:lastProbeStatus',
