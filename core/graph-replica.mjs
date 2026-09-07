@@ -174,7 +174,7 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:Wake', 'scrum:wokeSeat', 'scrum:wokeAt',
   // #1202 — the provenance ledger row
   'scrum:ModelCall', 'scrum:agent', 'scrum:model', 'scrum:provider', 'scrum:protocol',
-  'scrum:promptVersion', 'scrum:tokensIn', 'scrum:tokensOut', 'scrum:cost', 'scrum:costMeasured', 'scrum:stopReason',
+  'scrum:promptVersion', 'scrum:tokensIn', 'scrum:tokensOut', 'scrum:reasoningTokens', 'scrum:cost', 'scrum:costMeasured', 'scrum:stopReason',
   'scrum:latencyMs', 'scrum:contextHandedTo', 'scrum:producedPost', 'scrum:calledAt', 'scrum:ok',
   // #1254 — WHAT A TURN KEPT, beside whether it spoke. Under the publish gate a
   // seat can decline to post and still write to its own memory, and that write
@@ -947,6 +947,7 @@ function projectModelCall(store, e) {
   if (e['scrum:calledAt'] != null) add(nn(S + 'calledAt'), lit(String(e['scrum:calledAt'])));
   if (Number.isFinite(Number(e['scrum:tokensIn'])) && e['scrum:tokensIn'] != null) add(nn(S + 'tokensIn'), num(e['scrum:tokensIn']));
   if (Number.isFinite(Number(e['scrum:tokensOut'])) && e['scrum:tokensOut'] != null) add(nn(S + 'tokensOut'), num(e['scrum:tokensOut']));
+  if (Number.isFinite(Number(e['scrum:reasoningTokens'])) && e['scrum:reasoningTokens'] != null) add(nn(S + 'reasoningTokens'), num(e['scrum:reasoningTokens']));
   if (Number.isFinite(Number(e['scrum:cost'])) && e['scrum:cost'] != null) add(nn(S + 'cost'), num(e['scrum:cost']));
   // #1294 — whether that cost is an ANSWER or an ABSENCE. Projected because
   // the graph is where "what did this seat cost" gets asked, and a query that

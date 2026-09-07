@@ -3797,7 +3797,8 @@ const modelCallEvent = (e, actor) => ({ op: 'create', actor, entity: { kind: 'mo
 const modelCallToWire = (e) => ({
   id: e['@id'], agent: e['scrum:agent'], model: e['scrum:model'], provider: e['scrum:provider'] ?? null,
   protocol: e['scrum:protocol'] ?? null, promptVersion: e['scrum:promptVersion'] ?? null,
-  tokensIn: e['scrum:tokensIn'] ?? null, tokensOut: e['scrum:tokensOut'] ?? null, cost: e['scrum:cost'] ?? 0,
+  tokensIn: e['scrum:tokensIn'] ?? null, tokensOut: e['scrum:tokensOut'] ?? null,
+  reasoningTokens: e['scrum:reasoningTokens'] ?? null, cost: e['scrum:cost'] ?? 0,
   // #1294 — is that cost an ANSWER or an ABSENCE? Without this, a free model's
   // 0 and a dropped-usage 0 read identically, which is how 145 unpriced rows
   // looked like 145 free ones.
@@ -3822,7 +3823,7 @@ const modelCallToWire = (e) => ({
   // #1246b — was the seat handed its own announcement back, and what did it do then.
   narrationRetry: e['scrum:narrationRetry'] ?? null,
 });
-const MODEL_CALL_FIELDS = new Set(['by', 'agent', 'model', 'provider', 'protocol', 'promptVersion', 'tokensIn', 'tokensOut', 'cost', 'latencyMs', 'stopReason', 'ok', 'contextHandedTo', 'producedPost', 'at', 'error', 'sampling', 'wake', 'memory', 'memoryWritten', 'claims',
+const MODEL_CALL_FIELDS = new Set(['by', 'agent', 'model', 'provider', 'protocol', 'promptVersion', 'tokensIn', 'tokensOut', 'reasoningTokens', 'cost', 'latencyMs', 'stopReason', 'ok', 'contextHandedTo', 'producedPost', 'at', 'error', 'sampling', 'wake', 'memory', 'memoryWritten', 'claims',
   // #1196 — what the colleague FETCHED, beside what it said. A claim whose rows
   // are not on the record cannot be checked by anyone later, which is the whole
   // argument for giving it tools at all.
@@ -3880,6 +3881,10 @@ function modelCallEntityFrom(body) {
     'scrum:protocol': typeof body.protocol === 'string' ? body.protocol : null,
     'scrum:promptVersion': typeof body.promptVersion === 'string' ? body.promptVersion : null,
     'scrum:tokensIn': n(body.tokensIn), 'scrum:tokensOut': n(body.tokensOut),
+    // #1294 — the third billed category. Stored beside tokensOut, never summed
+    // into it: a reader who wants the total can add them, but a reader handed a
+    // pre-added number can never get the two back.
+    'scrum:reasoningTokens': n(body.reasoningTokens),
     'scrum:cost': n(body.cost) ?? 0, 'scrum:latencyMs': n(body.latencyMs),
     // #1254 — line-initial markers the seat emitted on a published turn.
     'scrum:markerLines': n(body.markerLines),

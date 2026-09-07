@@ -128,6 +128,13 @@ const rowToBoard = (row) => ({
   by: row.agent, agent: row.agent, model: row.model, provider: row.provider, protocol: row.protocol,
   promptVersion: row.promptVersion, tokensIn: row.usage?.promptTokens ?? row.usage?.prompt_eval_count ?? null,
   tokensOut: row.usage?.completionTokens ?? row.usage?.eval_count ?? null,
+  // #1294 — the adapter reads it, runToolLoop sums it across hops, and this
+  // builder dropped it, so every reasoning model on this board ledgered as if
+  // it did not think. It is recorded as its OWN column and NOT folded into
+  // cost, because whether the vendor counts it inside completionTokens or
+  // beside it is exactly the thing we cannot currently tell — and a row that
+  // carries both numbers is what makes that answerable against an invoice.
+  reasoningTokens: row.usage?.reasoningTokens ?? null,
   cost: (agent.model?.costIn != null || agent.model?.costOut != null)
     ? ((row.usage?.promptTokens ?? 0) * (agent.model.costIn ?? 0) + (row.usage?.completionTokens ?? 0) * (agent.model.costOut ?? 0)) : 0,
   stopReason: row.stopReason ?? null, latencyMs: row.latencyMs, ok: row.ok, error: row.error ?? null,

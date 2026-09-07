@@ -78,6 +78,7 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:promptVersion': 'scrum:promptVersion',
   'scrum:tokensIn': 'scrum:tokensIn',
   'scrum:tokensOut': 'scrum:tokensOut',
+  'scrum:reasoningTokens': 'scrum:reasoningTokens',   // #1294 → literal: the third billed category
   'scrum:cost': 'scrum:cost',
   // #1294 — whether scrum:cost was computed from real usage. A free model's 0
   // and an unpriced call's 0 are the same number and different facts.
