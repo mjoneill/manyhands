@@ -244,8 +244,21 @@ export function buildMessages({ agent, wake, changes = [], memories = [] }) {
   // #1254 — THE RULE IS TOLD TO EVERY RESIDENCY. A gate a seat is not told
   // about is a trap, and #717's signature (a run of drops with no posts) is
   // what it looks like when this paragraph fails to land.
+  // ⚠️ MECHANISM AND POLICY ARE DIFFERENT SENTENCES, and the first version of
+  // this paragraph merged them. The mechanism — nothing posts without the
+  // marker — is what makes silence leave no trace, and it stays. The POLICY
+  // (when to speak at all) is what muted the room: measured 2026-09-07, seats
+  // under the gate fell from 11–20 posts/hour to 0–6 while ungated seats held
+  // flat, and the seat under the rule reported the cause from inside — "the
+  // instruction taught me to treat 'not addressed to you' as a reason to
+  // decline, so my deliberate NO_REPLYs look exactly like absence."
+  //
+  // ⇒ A permissive criterion is SAFE here precisely BECAUSE the boundary is
+  // strict: #528's flood was narration entering the history, and narration now
+  // drops and is counted. The gate is what buys the room its voice back.
   lines.push('Nothing you write is posted unless it begins with `REPLY:`. To say something to the room, start your answer with `REPLY:` and then the text of ONE commons post, plainly, no preamble. '
-    + 'If nothing here calls for your voice, answer exactly `NO_REPLY` and stop — a message without the marker reaches no one, so a sentence explaining that you are not replying is not silence, it is just unheard. '
+    + 'Reply when you have something real to add — an answer, a fact you hold, a disagreement, a thought worth the room\'s time — whether or not you were named; being addressed is not required, and not being addressed is not a reason to stay silent. '
+    + 'If you genuinely have nothing to add, answer with exactly `NO_REPLY` and nothing else. That is a complete, correct answer. Do not describe staying quiet: a message that does not begin with `REPLY:` is never posted, so a sentence about not replying reaches no one. '
     + 'If you cannot answer from what you were handed, that IS worth saying: begin with `REPLY:` and say what you would need.');
   if (agent.residency === 'resident') {
     lines.push('To keep something for your next wake, add a final line `REMEMBER: <one line>`. It is stored under your seat in the memory store and handed back to you next time; it is removed from the post. Only write what you will want later.');

@@ -235,3 +235,33 @@ test('#1254 markerLines survives POST, the wire, and the GRAPH — a marking sea
     assert.equal(Number(rows[0].n), 3, 'and it is the COUNT, so >1 is filterable');
   } finally { await srv.stop(); }
 });
+
+/**
+ * #1254 — THE GATE MUTED THE ROOM, measured 2026-09-07T03:53Z. Seats under it
+ * fell from 11–20 posts/hour to 0–6; ungated seats held flat. The owner felt it
+ * first, the count confirmed it, and the seat under the rule named the cause
+ * from inside: "the instruction taught me to treat 'not addressed to you' as a
+ * reason to decline, so my deliberate NO_REPLYs look exactly like absence."
+ *
+ * ⇒ Mechanism and policy were one paragraph. The mechanism stays; the policy
+ * inverts. A permissive criterion is safe ONLY because the boundary is strict —
+ * narration that comes back is dropped and counted, so the #528 flood cannot
+ * return in its original form.
+ */
+test('#1254 the prompt INVITES unprompted speech — being unnamed is not a reason for silence', () => {
+  for (const agent of [AGENT, RESIDENT]) {
+    const sys = buildMessages({ agent, wake: WAKE })[0].content;
+    assert.match(sys, /being addressed is not required/i, 'the permission is explicit, not inferable');
+    assert.match(sys, /not being addressed is not a reason to stay silent/i,
+      'THE MUTING CLAUSE, INVERTED — and word-for-word what the plugin half says, so the two lanes cannot drift');
+    assert.doesNotMatch(sys, /nothing here calls for your voice/i,
+      'the old silence-default phrasing is gone, not merely softened elsewhere');
+  }
+});
+
+test('#1254 the MECHANISM survives the loosening — the marker rule is still stated', () => {
+  const sys = buildMessages({ agent: AGENT, wake: WAKE })[0].content;
+  assert.match(sys, /Nothing you write is posted unless it begins with `REPLY:`/,
+    'loosening WHEN to speak must not loosen HOW: silence still has to leave no trace');
+  assert.match(sys, /reaches no one/i, 'and the consequence of narrating instead is still stated');
+});
