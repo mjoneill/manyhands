@@ -30,6 +30,20 @@ card_line() {   # <shortId> → "title · column · holder" from the board; says
   printf '%s' "$json" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const c=JSON.parse(s);console.log(`${(c.title||"").slice(0,60)} · ${c.column||"?"} · ${c.claimedBy?("held by "+c.claimedBy):"UNCLAIMED"}`)}catch{console.log("(no such card)")}})'
 }
 
+# #1264 — node's own algorithm, as the question the report should have asked:
+# walk up from the tree looking for a node_modules that EXISTS. `-e` follows
+# symlinks, so a dangling link at the tree root is not a resolution and the walk
+# correctly continues past it. No package name is named on purpose — naming one
+# would tie this diagnostic to a dependency list that changes for other reasons.
+resolves_node_modules() {
+  d=$1
+  while [ -n "$d" ] && [ "$d" != "/" ]; do
+    [ -e "$d/node_modules" ] && return 0
+    d=$(dirname "$d")
+  done
+  [ -e "/node_modules" ]
+}
+
 case "${1:-}" in
   home) say "$HOME_DIR" ;;
   new)
@@ -104,10 +118,26 @@ case "${1:-}" in
       age=$(( (now - mt) / 86400 ))
       dirty=$(git -C "$wt" status --porcelain 2>/dev/null | grep -vc '^?? node_modules' || true)
       case "$wt" in "$HOME_DIR"/*) where="home" ;; *) where="⚠️ OUTSIDE HOME" ;; esac
-      # -e follows the link: a dangling symlink (or no node_modules at all) means
-      # every import errors and the suite reads as FAILING for a reason that has
-      # nothing to do with the code.
-      nm=""; [ -e "$wt/node_modules" ] || nm="  ⚠️ node_modules does not resolve (suite would ERROR, not fail)"
+      # -e follows the link: a dangling symlink means every import errors and the
+      # suite reads as FAILING for a reason that has nothing to do with the code.
+      #
+      # ⛔ #1264 — BUT THE ABSENCE OF `$wt/node_modules` IS NOT THAT. This was a
+      # filesystem test at ONE path printing a claim about node's RESOLUTION, and
+      # node walks UP: a worktree nested inside the repo resolves the repo's copy
+      # without owning one. Measured on the two trees this line flagged —
+      # `require.resolve('oxigraph')` returned the repo's copy and `node --test`
+      # passed 7/7 in the tree the report said would ERROR.
+      #
+      # ⚠️ And it was only ever wrong about hand-made trees, which are the only
+      # ones it flags: `new` (:47) symlinks node_modules into every tree IT makes,
+      # and those are SIBLINGS of the repo where walking up genuinely misses. So
+      # path-exists and resolution agreed for every tree the script owns, and the
+      # check had never been wrong about one.
+      #
+      # ⇒ The false alarm is the expensive direction. Its own words — "suite would
+      # ERROR, not fail" — name the failure a reader is right to fear, so believing
+      # it means abandoning a control arm that works, and that looks like diligence.
+      nm=""; resolves_node_modules "$wt" || nm="  ⚠️ node_modules does not resolve (suite would ERROR, not fail)"
       info=$([ -n "$card" ] && card_line "$card" || echo "⚠️ NO CARD in branch name")
       say "$where  $wt  [$br]  ${age}d  dirty:$dirty  #$card $info$nm"
     done ;;

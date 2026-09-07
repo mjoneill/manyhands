@@ -143,3 +143,55 @@ test('#877 done removes a worktree that holds a READ-ONLY directory left by a te
   assert.equal(done.status, 0, done.out);
   assert.ok(!fs.existsSync(wt), 'removed despite the read-only directory');
 });
+
+/**
+ * #1264 — the flag must measure RESOLUTION, not a path.
+ *
+ * `[ -e "$wt/node_modules" ]` is a filesystem test at ONE location, printed as
+ * a claim about node's module resolution — and node walks UP. So a worktree
+ * nested inside the repo resolves the repo's node_modules without owning one,
+ * and the report called it unable to run its suite while it ran it fine.
+ *
+ * Measured 2026-09-07 on the live trees it flagged: `require.resolve('oxigraph')`
+ * returned the repo's copy and `node --test` passed 7/7 in the tree the report
+ * said would ERROR.
+ *
+ * ⚠️ The false alarm is the expensive direction: its own words — "suite would
+ * ERROR, not fail" — name the failure a reader is right to fear, so believing
+ * it means abandoning a control arm that works, and abandoning it looks like
+ * diligence.
+ */
+test('#1264 a worktree that RESOLVES node_modules by walking up is not flagged; a broken link still is', () => {
+  const { base, dir, git } = makeRepo();
+  fs.mkdirSync(path.join(dir, 'node_modules'));
+  fs.writeFileSync(path.join(dir, 'node_modules', '.package-lock.json'), '{}');
+
+  // NESTED inside the repo, no node_modules of its own — the shape the report
+  // was wrong about. Node resolves it by walking up to <repo>/node_modules.
+  const nested = path.join(dir, '.worktrees', 'nested-11');
+  git(['worktree', 'add', '-q', '-b', 'card/11-nested', nested]);
+  assert.ok(!fs.existsSync(path.join(nested, 'node_modules')),
+    'precondition: it owns no node_modules — the old check tested exactly this and stopped there');
+
+  // ⇒ THE CONTROL FOR THE CONTROL, and my first attempt at it was worthless:
+  // `spawnSync(...)` always returns an object, so asserting it is truthy proves
+  // nothing — a check that cannot fail, guarding a test about a check that
+  // could not pass. This one is structural: the repo's node_modules must be a
+  // real ANCESTOR of the nested tree, or the assertion below would hold for the
+  // wrong reason and this test would pass on a broken fixture forever.
+  const ancestor = path.join(nested, '..', '..', 'node_modules', '.package-lock.json');
+  assert.ok(fs.existsSync(ancestor),
+    `the walk-up target must be a real ancestor of ${nested} — otherwise "not flagged" means nothing`);
+
+  // OUTSIDE the home with a dangling link — nothing to walk up to. Still flagged.
+  const broken = path.join(base, 'repo.worktrees', '12-broken');
+  git(['worktree', 'add', '-q', '-b', 'card/12-broken', broken]);
+  fs.symlinkSync('../nowhere/node_modules', path.join(broken, 'node_modules'));
+
+  const list = run(dir, ['list']);
+  assert.equal(list.status, 0, list.out);
+  assert.doesNotMatch(list.out, /nested-11.*does not resolve/,
+    'a nested worktree resolves by walking up and must NOT be flagged — this is the #1264 regression');
+  assert.match(list.out, /12-broken.*node_modules does not resolve/,
+    'and the true positive still fires: a dangling link with no ancestor copy cannot resolve');
+});
