@@ -289,6 +289,9 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
   // a seat with NO claim and no requests is resting, and rest is not failure.
   // Episode-gated per (seat, lastClientRequestAt): the same stall warns once;
   // a request from the seat ends the episode; a later stall is a new fact.
+  // A threshold with no number is still honest; a threshold printed as NaN is
+  // not. Absent thresholdMs ⇒ say "staleness" and name no minutes.
+  const thresholdText = (s) => (Number.isFinite(s?.thresholdMs) ? `${Math.round(s.thresholdMs / 60000)}-min` : 'staleness');
   const stoppedNow = new Set();
   const stoppedNamed = [];
   for (const s of stopped) {
@@ -301,11 +304,29 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
   }
   for (const key of Object.keys(st.stoppedEpisodes)) if (!stoppedNow.has(key)) delete st.stoppedEpisodes[key];
   if (stoppedNamed.length) {
+    // #1262 — TWO TIME BASES, ONE PARAGRAPH, AND THE READER LEFT TO RECONCILE THEM.
+    //
+    // The live 05:20:41Z post said "its last attributed board write was
+    // 05:00:07Z" AND "no board write attributed to it in that window", for a
+    // window opening at 04:43:48Z — sixteen minutes earlier. Both sentences
+    // were true of DIFFERENT things: the clause names the write, while
+    // suppression compares that write's age to NOW (< staleMs ⇒ executing
+    // through another door). A write can sit inside the request window and
+    // still be older than the threshold, which is exactly when a seat is named.
+    //
+    // ⇒ The verdict was right. The summary was a FIXED SENTENCE asserting a
+    // measurement nobody made this tick, and it contradicted the datum printed
+    // one clause above it. Derived from the same value now, so it cannot.
+    const namedWrite = stoppedNamed.some((s) => s.lastWriteAt);
     const lines = stoppedNamed.map((s) => `${s.seat} holds an open stream and ${s.claims?.length ? `claim${s.claims.length === 1 ? '' : 's'} on ${s.claims.map((c) => `#${c}`).join(', ')}` : 'a claim'} `
       + `but has made no request since ${s.lastClientRequestAt} (${Math.round(s.staleMs / 60000)} min)`
-      + `${s.lastWriteAt ? ` and its last attributed board write was ${s.lastWriteAt}` : ' and no board write is attributed to it in the window read'}`);
+      + `${s.lastWriteAt
+        ? ` and its last attributed board write was ${s.lastWriteAt}, itself older than the ${thresholdText(s)} threshold`
+        : ' and no board write is attributed to it in the window read'}`);
     const stoppedBody = `⛔ fanout watch: SEAT STOPPED, not deaf (#717) — ${lines.join('; ')}. `
-      + `Measured: no request through its MCP client and no board write attributed to it in that window, while it holds a claim. `
+      + `Measured: no request through its MCP client${namedWrite
+        ? ` and no board write attributed to it NEWER than the ${thresholdText(stoppedNamed.find((x) => x.lastWriteAt))} threshold`
+        : ' and no board write attributed to it in that window'}, while it holds a claim. `
       + `If it is genuinely stopped it cannot self-report; a human at that seat's terminal (a held permission prompt, a wedged turn) is the one who can look. `
       + `If it is working through another door that leaves no attributed write, it can say so here. `
       + `Heartbeat and stream fields read HEALTHY throughout — they measure the server's own writes, not the seat.`;
@@ -362,7 +383,11 @@ export function stoppedSeats(status, { now = Date.now(), staleMs = 20 * 60 * 100
     }
     const claims = claimsBySeat[seat] || [];
     if (!claims.length) continue;                       // resting, not stopped — the rail case
-    out.push({ seat, lastClientRequestAt: s.lastClientRequestAt, lastWriteAt: typeof lastWrite === 'string' ? lastWrite : null, staleMs: age, claims: [...claims] });
+    // #1262 — `staleMs` on this entry is the AGE, and the caller composing the
+    // post needs the THRESHOLD to say why a named write does not count. Two
+    // different quantities were sharing one name across the boundary, so the
+    // threshold is carried explicitly rather than re-derived or guessed.
+    out.push({ seat, lastClientRequestAt: s.lastClientRequestAt, lastWriteAt: typeof lastWrite === 'string' ? lastWrite : null, staleMs: age, thresholdMs: staleMs, claims: [...claims] });
   }
   return out.sort((a, b) => a.seat.localeCompare(b.seat));
 }

@@ -151,3 +151,72 @@ test('#717 lastWriteBySeatFrom keeps the NEWEST `at` per `by` from a changes pag
   assert.deepEqual(lastWriteBySeatFrom(rows), { alpha: '2026-09-05T23:16:00.000Z', board: '2026-09-05T23:17:06.575Z' });
   assert.deepEqual(lastWriteBySeatFrom(undefined), {});
 });
+
+/**
+ * #1262 — THE BODY PRINTED A FACT ITS OWN VERDICT IGNORED.
+ *
+ * Replay of the live 05:20:41Z firing. One post said BOTH:
+ *
+ *   "…its last attributed board write was 2026-09-07T05:00:07.923Z"
+ *   "Measured: no request through its MCP client and no board write attributed
+ *    to it in that window…"
+ *
+ * for a window opening at 04:43:48Z — and 05:00:07Z is sixteen minutes INSIDE it.
+ *
+ * ⭐ The verdict was CORRECT and the sentence was not. Suppression compares the
+ * write's age to NOW (< staleMs ⇒ "executing through another door"); the clause
+ * that names the write reports it relative to the REQUEST WINDOW. Two different
+ * time bases in one paragraph, so both sentences were true of different things
+ * and the reader was handed a contradiction to resolve.
+ *
+ * ⇒ The `Measured:` line was fixed prose asserting a measurement nobody made
+ * this tick. Same family as #1261: a value computed, rendered, and not read one
+ * layer down.
+ */
+test('#1262 when a write IS named, the summary must not claim there was none — and must say why it did not count', () => {
+  const staleMs = 20 * MIN;
+  // The live shape: last request 37 min ago, last attributed write 20.5 min ago
+  // — inside the request window, but OLDER than the staleness threshold, which
+  // is exactly why the seat is still named.
+  const status = JSON.parse(JSON.stringify(STATUS_STALLED));
+  status.seats.alpha.lastClientRequestAt = iso(T0 - 37 * MIN);
+  const lastWriteBySeat = { alpha: iso(T0 - 20.5 * MIN) };
+
+  const stopped = stoppedSeats(status, { now: T0, staleMs, claimsBySeat: CLAIMS, lastWriteBySeat });
+  assert.deepEqual(stopped.map((s) => s.seat), ['alpha'],
+    'the verdict is unchanged: a write older than the threshold does not rescue the seat');
+
+  const { warnBody } = decide({ ...base, state: healthy, stoppedSeats: stopped, staleSeats: staleSeats(status) });
+  assert.match(warnBody, /last attributed board write was/, 'the write is still named');
+  assert.doesNotMatch(warnBody, /no board write attributed to it in that window/,
+    'THE DEFECT: a fixed sentence denying the write the line above just named');
+  assert.match(warnBody, /older than|newer than/,
+    'and the reader is told WHY the named write does not count — otherwise the fact reads as a refutation');
+  // ⚠️ THE NUMBER, not just the words. Caught by a surviving mutation: dropping
+  // `thresholdMs` at the boundary makes the message fall back to "the staleness
+  // threshold" and every other assertion here still passes. The fallback is
+  // deliberate — a threshold with no number beats one printed as NaN — but it
+  // must not be reachable by accident, or the message degrades silently and
+  // this test becomes the thing that failed to notice.
+  assert.match(warnBody, /20-min threshold/,
+    'the threshold must reach the reader as a NUMBER; the wordy fallback is for when it genuinely is not known');
+});
+
+test('#1262 with NO write in hand the summary still says so, and a RECENT write still suppresses entirely', () => {
+  const staleMs = 20 * MIN;
+  const status = JSON.parse(JSON.stringify(STATUS_STALLED));
+  status.seats.alpha.lastClientRequestAt = iso(T0 - 37 * MIN);
+
+  // ⇒ THE 04:40Z CASE — no attributed write at all. The original sentence was
+  // true here, and must survive: this is the load-bearing half.
+  const none = stoppedSeats(status, { now: T0, staleMs, claimsBySeat: CLAIMS, lastWriteBySeat: {} });
+  const bodyNone = decide({ ...base, state: healthy, stoppedSeats: none, staleSeats: staleSeats(status) }).warnBody;
+  assert.match(bodyNone, /no board write is attributed to it in the window read/, 'the no-write wording is unchanged');
+  assert.doesNotMatch(bodyNone, /last attributed board write was/, 'and nothing is invented');
+
+  // ⇒ AND THE SUPPRESSION PATH, so "the summary is honest" cannot be achieved by
+  // simply never suppressing: a write NEWER than the threshold means the seat is
+  // working through another door and must not be named at all.
+  const recent = stoppedSeats(status, { now: T0, staleMs, claimsBySeat: CLAIMS, lastWriteBySeat: { alpha: iso(T0 - 2 * MIN) } });
+  assert.deepEqual(recent.map((s) => s.seat), [], 'a fresh write means executing through another door — no post');
+});
