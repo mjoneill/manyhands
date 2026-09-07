@@ -2224,13 +2224,26 @@ function liveSeats() {
 // it did before the gate existed. A REST hiccup must not silently switch the
 // room's tending off — that failure would look exactly like "it's quiet".
 const ACTIVITY_LOOKBACK = 25;
+// #953 — TWO DIFFERENT NOTHINGS, and they used to be the same `null`.
+//
+//   null                  the classifier looked and nothing QUALIFIES —
+//                         a genuinely quiet room, which must be tended
+//   ACTIVITY_UNREADABLE   the read FAILED — we do not know what the room did
+//
+// ⛔ The previous version returned `null` for both, with a comment that said
+// exactly what it was doing: "activity read failed, treating room as quiet".
+// Measured 2026-09-06: the board was unreachable ~18 minutes and a whisper
+// fired inside a busy hour. The log line above was printed and nobody read it,
+// which is why this is a RETURN VALUE now and not a better log message.
+export const ACTIVITY_UNREADABLE = Symbol('activity-unreadable');
+
 async function lastRoomActivity() {
   try {
     const convs = await apiCall('GET', `/api/conversations?limit=${ACTIVITY_LOOKBACK}`);
     return lastQualifyingActivity(Array.isArray(convs) ? convs : []);
   } catch (e) {
-    console.error(`[#953] activity read failed, treating room as quiet: ${e?.message ?? e}`);
-    return null;
+    console.error(`[#953] activity read FAILED — the room is UNKNOWN, not quiet: ${e?.message ?? e}`);
+    return ACTIVITY_UNREADABLE;
   }
 }
 
@@ -2316,7 +2329,14 @@ const whisperTick = async () => {
     // Re-read per firing, exactly like `tendingEnabled` — so a change the operator
     // makes in Settings applies to the very next tick, with no restart.
     quietAfterMinutes: quietAfterMinutes(),
-    lastActivityAt: () => activityAt,
+    // #953 — the getter THROWS when the read failed, which is how a caller
+    // tells the gate "I could not determine this" under the gate's existing
+    // synchronous contract. The gate turns that into reason:'activity-unknown'
+    // and suppresses; an unwired caller is untouched and still fires.
+    lastActivityAt: () => {
+      if (activityAt === ACTIVITY_UNREADABLE) throw new Error('activity unreadable');
+      return activityAt;
+    },
     // The pool and the shuffle flag both come from the graph, per firing, so a
     // change made in Settings applies to the very next tick.
     mint: ({ now: n }) => mintOnce({
@@ -2374,12 +2394,22 @@ const digestTickOnce = async () => {
   try {
     const recent = await apiCall('GET', '/api/conversations?attachedTo=null&limit=40');
     activityAt = lastQualifyingActivity(Array.isArray(recent) ? recent : (recent?.conversations ?? []));
-  } catch { activityAt = null; }   // fails OPEN, like the whisper's gate: "I could not ask" is not "the room is busy"
+  // #953 — SECOND SITE OF THE SAME DEFECT. The old comment said this "fails
+  // OPEN, like the whisper's gate", and it did — including the half that was
+  // wrong. "I could not ask" is not "the room is busy", TRUE; but it is also
+  // not "the room is quiet", and returning null said exactly that.
+  //
+  // ⚠️ Found only by checking the neighbouring caller after fixing the whisper
+  // path. One fix would have left the digest firing blind and #953 closed.
+  } catch { activityAt = ACTIVITY_UNREADABLE; }
   return digestTick({
     now: new Date().toISOString(),
     standing: () => standing,
     quietAfterMinutes: quietAfterMinutes(),
-    lastActivityAt: () => activityAt,
+    lastActivityAt: () => {
+      if (activityAt === ACTIVITY_UNREADABLE) throw new Error('activity unreadable');
+      return activityAt;
+    },
     post: (body) => apiCall('POST', '/api/conversations', body),
     // Provenance: the firing is a TendingMint like every whisper's; the rendered
     // body lives in the commons post it produced. Best-effort and after the post.

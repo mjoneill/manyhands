@@ -166,6 +166,81 @@ test('#953 with NO activity source supplied, behaviour is unchanged', async () =
 });
 
 // ────────────────────────────────────────────────────────────────────────────
+// #953 — WIRED BUT BLIND. The gate fails OPEN when it was never wired, which is
+// deliberate and protected by the test directly above. This block is the OTHER
+// unknown: a gate that IS configured, IS handed a reader, asks it, and gets
+// nothing back.
+//
+// ⛔ Today those two are the same line. `if (last)` treats "nobody told me"
+// and "I asked and could not find out" identically, so a configured gate that
+// cannot read the room fires exactly like a board that has no gate at all.
+//
+// ⚠️ THE SPECIMEN IS REAL: during the 2026-09-06 outage the board was
+// unreachable for ~18 minutes and a whisper fired inside a busy hour. From
+// outside, that firing is indistinguishable from a correctly-timed one — which
+// is #717/#718's shape (a stopped thing and a quiet thing look the same),
+// arriving in the instrument built to measure quiet.
+//
+// ⭐ FAIL-OPEN IS NOT THE SAME AS FAIL-INVISIBLE. Unwired keeps firing; blind
+// SUPPRESSES and SAYS SO, so the difference is queryable rather than silent.
+// ────────────────────────────────────────────────────────────────────────────
+
+test('#953 ⛔ null is NOT blindness — "I looked and nothing qualifies" is a QUIET room and must be tended', async () => {
+  const posted = [];
+  const r = await tendingTick({
+    now: AT('2026-08-20T14:00:00.000Z'),
+    quietAfterMinutes: 60,
+    lastActivityAt: () => null,          // the classifier found no QUALIFYING activity
+    mint: () => prompt,
+    post: async (b) => { posted.push(b); },
+  });
+  // ⚠️ Written after breaking it: the first cut of this fix read null as blind
+  // and silenced exactly the case the whole feature exists for.
+  assert.equal(r.delivered, true, 'no qualifying activity IS quiet — this is the feature, not the failure');
+  assert.equal(posted.length, 1);
+});
+
+test('#953 WIRED BUT BLIND: an unparseable timestamp is blindness, not quiet', async () => {
+  const r = await tendingTick({
+    now: AT('2026-08-20T14:00:00.000Z'),
+    quietAfterMinutes: 60,
+    lastActivityAt: () => 'not-a-date',
+    mint: () => prompt,
+    post: async () => {},
+  });
+  assert.equal(r.delivered, false);
+  assert.match(String(r.reason), /activity-unknown/);
+});
+
+test('#953 WIRED BUT BLIND: a reader that THROWS is blindness, not a crash and not quiet', async () => {
+  const r = await tendingTick({
+    now: AT('2026-08-20T14:00:00.000Z'),
+    quietAfterMinutes: 60,
+    lastActivityAt: () => { throw new Error('board unreachable'); },
+    mint: () => prompt,
+    post: async () => {},
+  });
+  assert.equal(r.delivered, false, 'an unreachable board must not fire the whisper');
+  assert.match(String(r.reason), /activity-unknown/);
+});
+
+test('#953 ⛔ THE PROTECTION HOLDS: unwired still fires, and the two are DISTINGUISHABLE', async () => {
+  const unwired = await tendingTick({
+    now: AT('2026-08-20T14:00:00.000Z'), mint: () => prompt, post: async () => {},
+  });
+  const blind = await tendingTick({
+    now: AT('2026-08-20T15:00:00.000Z'), quietAfterMinutes: 60,
+    lastActivityAt: () => { throw new Error('board unreachable'); },
+    mint: () => prompt, post: async () => {},
+  });
+  // ⛔ The whole point of splitting them: same "I have no timestamp", opposite
+  // correct answers, and a reader can tell which happened.
+  assert.equal(unwired.delivered, true, 'never wired ⇒ keep emitting (the comment protects this)');
+  assert.equal(blind.delivered, false, 'wired but blind ⇒ suppress');
+  assert.notEqual(String(unwired.reason), String(blind.reason), 'and they must not report the same thing');
+});
+
+// ────────────────────────────────────────────────────────────────────────────
 // #953 — THE ACTIVITY CLASSIFIER. The steward's item 6, as a named function
 // rather than a filter buried in a call site, because it is the semantic
 // choice she said a builder must not make invisibly.

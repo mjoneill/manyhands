@@ -114,7 +114,36 @@ export async function tendingTick({
   // emitter-breaking failure the control test exists to catch, arriving through
   // a default instead of through a bug.
   if (quietAfterMinutes != null && typeof lastActivityAt === 'function') {
-    const last = lastActivityAt();
+    // #953 — TWO UNKNOWNS, OPPOSITE ANSWERS. Above, "nobody wired me" fires,
+    // and that is protected. Here the gate IS wired: it was configured, it was
+    // handed a reader, it asked — and got nothing back. That is not evidence
+    // the room is quiet; it is evidence the gate cannot see.
+    //
+    // ⛔ Both used to reach the same line. A configured gate that could not
+    // read the room fired exactly like a board that had no gate at all, and
+    // from outside the firing was indistinguishable from a correctly-timed one.
+    // Measured 2026-09-06: during an ~18-minute outage a whisper fired inside a
+    // busy hour, and nothing in the record said why.
+    //
+    // ⭐ FAIL-OPEN IS NOT FAIL-INVISIBLE. Unwired keeps its old behaviour;
+    // blind SUPPRESSES and NAMES ITSELF, so "was that a quiet room or a blind
+    // gate?" is a queryable difference instead of a shrug.
+    // ⚠️ AND `null` IS NOT BLINDNESS. It is the classifier saying "I looked and
+    // nothing in the window QUALIFIES" — the whisper's own post, board notices.
+    // That room is genuinely quiet and must be tended. Reading null as blind
+    // silences exactly the case the feature exists for; the test named
+    // "the whisper's OWN post does not count as activity" is that guard, and
+    // it caught this while the change was being written.
+    //
+    // ⇒ So blindness is only what a reader can PROVE it could not determine:
+    //   THROWN            the read failed — an unreachable board
+    //   NON-NULL GARBAGE  something came back and it is not a time
+    // Everything else keeps the old contract.
+    let last = null;
+    let blind = false;
+    try { last = lastActivityAt(); } catch { blind = true; }
+    if (!blind && last != null && !Number.isFinite(Date.parse(last))) blind = true;
+    if (blind) return { minted: false, delivered: false, reason: 'activity-unknown' };
     if (last) {
       const quietMs = Date.parse(now) - Date.parse(last);
       const thresholdMs = Number(quietAfterMinutes) * 60_000;
