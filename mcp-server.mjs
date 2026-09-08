@@ -1085,7 +1085,7 @@ function buildMcpServer() {
     inputSchema: {
       body: z.string().min(1).describe('Message body (plain text; markdown not rendered in v1)'),
       author: z.string().min(1).describe(`Author key — ${seatKeys().join(', ')}. If your session is BOUND to a seat, that seat is the author and this value is ignored unless it differs, in which case it is recorded as onBehalfOf (a relay, not a claim about who you are). If your session is UNBOUND the board cannot verify this and takes your word for it (#125).`),
-      attachedTo: z.string().optional().describe('Optional UUID of a card to attach to. Omit for board-level (v1 default).'),
+      attachedTo: z.string().optional().describe('Optional card to attach to: its UUID, or its shortId as a STRING ("619"), which is stored as the UUID (#761). A value naming no card is REFUSED — it used to be accepted and stranded the comment. Omit, or send "null", for a board-level post.'),
     },
   }, async (args, extra) => {
     // #258 — LEARN THE AUTHOR FROM THE POST ITSELF. From the card, 2026-06-18:

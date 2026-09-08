@@ -37,6 +37,7 @@ import { fileURLToPath } from 'node:url';
 import { loadDomain, loadDomainShared, saveDomain } from './core/store.mjs';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { BOARD_TOOLS } from './core/board-tools.mjs';
+import { resolveAttachedTo } from './core/attached-to.mjs'; // #761
 import { promptGrantConflict, promptGrantWarning } from './core/prompt-grants.mjs'; // #1242
 import { cardContentKey } from './core/card-content-key.mjs';
 import { applyApexLabels, APEX_PREFIX, descendantIds as apexDescendantIds } from './core/apex-labels.mjs';
@@ -7748,8 +7749,16 @@ async function handleDeleteColumn(req, res, columnId) {
 
 // ── /api/conversations (#93) ──
 // Board-level Slack-like commons. Append-only, plain text, no shortId,
-// no editing, no intent field. `attachedTo` is reserved for forward-compat
-// with the future card-attached threads feature (#39) — v1 only uses null.
+// no editing, no intent field.
+//
+// ⚠️ #761 — this note used to end: "`attachedTo` is reserved for forward-compat
+// with the future card-attached threads feature (#39) — v1 only uses null."
+// That stopped being true long ago: 1,395 posts are card-attached as of
+// 2026-09-08. It is corrected rather than deleted because it is the CAUSE of
+// the defect below it, not merely stale decoration — it told every later
+// reader the field was unused, and so the write path never checked that the
+// id named anything. A comment that misdescribes a field is load-bearing in
+// exactly one direction: it authorises the check nobody writes.
 
 // #699 — mention extraction now validates against the ROSTER and canonicalises
 // display names to seat keys. The #110 parser recorded any `@word`, which on
@@ -7790,16 +7799,30 @@ function unconsumedConversationFields(body) {
   return Object.keys(body).filter((k) => !CONVERSATION_CONSUMED_FIELDS.has(k)).sort();
 }
 
-function createConversationFromPayload(body) {
+// #761 — `attachedTo` arrives ALREADY RESOLVED, and the default is null.
+//
+// It used to be derived here from the raw payload: any non-empty string that
+// was not the literal "null" was stored verbatim, with nothing asking whether
+// it named a card. That produced 130 unreachable posts on the live board — 18
+// pointing at nothing, 110 keyed by shortId under a UUID join.
+//
+// Resolution needs the card list, which only exists inside the write lock, so
+// it happens there (handleCreateConversation) and the answer is passed in.
+// The parameter is not optional-with-a-fallback on purpose: a second derivation
+// living here would be a layer disagreeing with the one above it about what is
+// allowed, which is the shape of the defect this fixes. #688's "null" case is
+// handled by resolveAttachedTo, which is now the only place it is spelled.
+//
+// The four internal callers (claim announcements, seat-state releases, wiki
+// pages) never attach to a card and take the default.
+function createConversationFromPayload(body, attachedTo = null) {
   const now = new Date().toISOString();
   const text = (typeof body.body === 'string') ? body.body : '';
   return {
     id: crypto.randomUUID(),
     body: text,
     author: (typeof body.author === 'string' && body.author.length > 0) ? body.author : 'unassigned',
-    // #688: the literal string "null" is a client's serialized absence, not a
-    // card ref — 42 live posts proved this write path stores it verbatim.
-    attachedTo: (typeof body.attachedTo === 'string' && body.attachedTo.length > 0 && body.attachedTo !== 'null') ? body.attachedTo : null,
+    attachedTo,
     attachments: sanitizeAttachments(body.attachments),
     mentions: extractMentions(text),
     // #125 — the DECLARED name, kept when it differs from the authenticated one.
@@ -8043,13 +8066,29 @@ async function handleCreateConversation(req, res) {
     if (typeof body.author !== 'string' || body.author.trim().length === 0) {
       return sendJSON(res, 400, { error: 'author is required (non-empty string)' });
     }
+    // #761 — resolve `attachedTo` INSIDE the lock, against the same board
+    // snapshot the post is appended to. Resolving beforehand would let a card
+    // be deleted between the check and the write, which is the check passing
+    // and the edge dangling anyway.
     const created = await withWriteLock(async () => {
       const data = readBoard();
-      const conv = createConversationFromPayload(body);
+      const ref = resolveAttachedTo(body.attachedTo, data.cards);
+      if (!ref.ok) return { refused: ref.id };
+      const conv = createConversationFromPayload(body, ref.value);
       data.conversations.push(conv);
       writeBoard(data, [convEvent(conv)]);
       return conv;
     });
+    if (created.refused !== undefined) {
+      // Refuse BEFORE anything is stored. A 400 that still appends is worse
+      // than no check at all: the caller then believes nothing was written.
+      return sendJSON(res, 400, {
+        error: `no card with id ${created.refused} — attachedTo must name a card `
+             + `by its uuid (a shortId is accepted and stored as the uuid); `
+             + `omit it, or send null, for a board-level post`,
+        code: 'NO_SUCH_CARD',
+      });
+    }
     notifyMcpOfPost(created);
     // #843 — say what was dropped. Present only when non-empty: an empty array
     // on every post is noise every seat learns to skip, which is how the

@@ -130,7 +130,22 @@ test('cardRefHref: builds a board deep-link that scrollToCardByShortId can resol
 import { startRestServer as srv688, makeBoardFixture as fix688 } from './helpers/harness.mjs';
 
 test('#688: attachedTo "null" (string) is stored as null, not as a phantom card ref', async () => {
-  const s = await srv688({ board: fix688({ cards: [], conversations: [] }) });
+  // ⚠️ #761 CHANGED THIS FIXTURE, and said so rather than editing quietly.
+  // The third assertion below used to pass the string 'some-uuid' against a
+  // board with NO cards and assert it was "untouched" — which was true only
+  // because nothing validated the reference. That is the defect #761 removes,
+  // so keeping the assertion as written would have pinned the bug.
+  //
+  // The assertion's INTENT — a genuine card reference is stored unchanged —
+  // is still exactly right, and is what is tested now: the board has a real
+  // card and the post attaches to it. #688's own subject, the string "null",
+  // is untouched in both directions.
+  const s = await srv688({
+    board: fix688({
+      cards: [{ id: 'some-uuid', shortId: 1, title: 'a real card to refer to', column: 'backlog', createdAt: '2026-01-01T00:00:00.000Z' }],
+      conversations: [],
+    }),
+  });
   try {
     const mk = (attachedTo) => fetch(`${s.baseUrl}/api/conversations`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
