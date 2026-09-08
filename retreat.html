@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Retreat · manyhands</title>
+<link rel="stylesheet" href="./core/theme.css">
+<style>
+/* ── #1255 — THE RETREAT ROOM ────────────────────────────────────────────────
+ *
+ * The requirement, restated rather than quoted: a calm surface for one-to-one
+ * work, uncluttered, with everything that is not the conversation removed.
+ * A retreat rather than a feed.
+ *
+ * And the reasons the commons is the wrong place for long writing, restated the
+ * same way, because they ARE the acceptance criteria:
+ *
+ *   the room moves too fast to follow
+ *   composing long text in it is hard
+ *   the writing area is too short
+ *   it takes too much scrolling
+ *   and it feels fragile: a misclick navigates away and the draft is gone
+ *
+ * ⛔ SO THE HARDEST REQUIREMENT IS THE ONE THAT LOOKS LIKE A CAVEAT:
+ *    IT IS EXPECTED TO BE USED SELDOM.
+ *
+ *    SELDOM IS A REQUIREMENT. A retreat that must be visited to stay useful has
+ *    become another surface to maintain. There are deliberately NO unread
+ *    badges, NO activity counts, NO notification dots and NO polling refresh on
+ *    this page. Nothing here asks to be visited. A room you must attend is not
+ *    a retreat, and every one of those features would be easy and wrong.
+ *
+ * ⚠️ AND IT DELIBERATELY BREAKS ONE HOUSE INVARIANT, said out loud rather than
+ *    quietly: #303-2 mounts ONE cross-surface nav on every surface so the links
+ *    cannot drift apart. This page does NOT mount it — "all the other visual
+ *    distraction goes away" is the requirement, and a five-item navbar is the
+ *    distraction. What replaces it is a single way out, top-left, because a room
+ *    with a door you close still has to have a door.
+ */
+* { box-sizing:border-box; }
+body {
+  margin:0; background:var(--bg); color:var(--ink);
+  font:17px/1.75 var(--serif, Georgia, serif);
+  /* Nothing decorative. The commons has a constellation; this room has none. */
+}
+.leave {
+  position:fixed; top:0; left:0; padding:14px 18px; z-index:5;
+  font:12px/1 var(--mono, ui-monospace, monospace); letter-spacing:.14em; text-transform:uppercase;
+  color:var(--muted); text-decoration:none; opacity:.45; transition:opacity .3s ease;
+}
+.leave:hover, .leave:focus { opacity:1; }
+
+/* ONE column, measured for reading rather than for filling the window. */
+.room { max-width:41rem; margin:0 auto; padding:76px 24px 40vh; }
+
+h1.thread-title { font:600 27px/1.35 var(--serif); margin:0 0 4px; }
+.thread-sub { color:var(--muted); font:12px/1.6 var(--mono); margin:0 0 40px; }
+
+.turn { margin:0 0 38px; }
+.turn-who { font:11px/1 var(--mono); letter-spacing:.16em; text-transform:uppercase; color:var(--muted); margin-bottom:10px; }
+.turn-body > :first-child { margin-top:0; }
+.turn-body > :last-child { margin-bottom:0; }
+.turn-body p { margin:0 0 1em; }
+.turn-body h1,.turn-body h2,.turn-body h3 { font-family:var(--serif); line-height:1.35; margin:1.6em 0 .5em; }
+.turn-body code { font:0.88em var(--mono); background:var(--code-bg, rgba(127,127,127,.12)); padding:.1em .35em; border-radius:3px; }
+.turn-body pre { overflow-x:auto; padding:12px 14px; border-radius:6px; background:var(--code-bg, rgba(127,127,127,.12)); }
+.turn-body pre code { background:none; padding:0; }
+.turn-body img { max-width:100%; height:auto; border-radius:4px; }
+.turn-body blockquote { margin:0 0 1em; padding-left:1em; border-left:2px solid var(--line); color:var(--muted); }
+
+/* ── the composer ─────────────────────────────────────────────────────────
+ * It grows with what is written. He said the vertical height was the problem,
+ * so the box is never the constraint: it starts tall and grows to fit. */
+.composer { margin-top:8px; }
+#say {
+  width:100%; min-height:11rem; resize:none; overflow:hidden;
+  background:transparent; color:var(--ink); border:none; outline:none;
+  font:inherit; padding:0;
+}
+#say::placeholder { color:var(--muted); opacity:.5; }
+.composer-rule { height:1px; background:var(--line); margin:0 0 18px; opacity:.6; }
+.composer-foot {
+  display:flex; align-items:center; justify-content:space-between; gap:16px;
+  margin-top:14px; font:11px/1.6 var(--mono); color:var(--muted);
+}
+.composer-hint { opacity:.55; }
+.composer-state { opacity:.8; }
+.composer-state.err { color:var(--danger, #b3261e); opacity:1; }
+.pending { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+.pending span { font:11px var(--mono); color:var(--muted); border:1px solid var(--line); border-radius:999px; padding:3px 9px; }
+
+/* The list of rooms, when no thread is open. Deliberately plain: titles and
+ * when they were last spoken in. No counts, no unread state, no ordering by
+ * activity volume. */
+.rooms { list-style:none; padding:0; margin:34px 0 0; }
+.rooms li { margin:0 0 20px; }
+.rooms a { color:var(--ink); text-decoration:none; font:500 19px/1.4 var(--serif); }
+.rooms a:hover { text-decoration:underline; }
+.rooms .when { display:block; font:11px var(--mono); color:var(--muted); margin-top:4px; letter-spacing:.08em; }
+.empty { color:var(--muted); font-style:italic; }
+</style>
+</head>
+<body>
+<a class="leave" href="/" title="Back to the board">← leave</a>
+<main class="room" id="room"><p class="empty">…</p></main>
+
+<script type="module">
+import { renderMarkdown } from './core/render.mjs';
+
+// ── #1255 — A THREAD IS A CARD. There is no new entity here, deliberately. ──
+//
+// The card asked for four properties: ADDRESSABLE, PUBLIC, DURABLE, SEARCHABLE.
+// A card labelled `retreat` plus its attached comments already has all four —
+// it is in the graph, board_search reaches it, it survives compaction and
+// restart, and every seat can read it. Minting a Thread entity would have added
+// a second home for a fact the board already stores, which is the mistake #971
+// spent two months describing.
+const LABEL = 'retreat';
+const params = new URLSearchParams(location.search);
+const threadId = params.get('t');
+const room = document.getElementById('room');
+
+// One identity, shared with every other surface (#631). This page sets nothing;
+// it reads what the operator already chose and posts as `system` if they have not
+// chosen — an honest gap beats an invented author.
+const IDENTITY_KEY = 'manyhands.identity';
+const me = () => { try { return (localStorage.getItem(IDENTITY_KEY) || '').trim() || null; } catch { return null; } };
+
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+const el = (tag, cls, html) => { const n = document.createElement(tag); if (cls) n.className = cls; if (html != null) n.innerHTML = html; return n; };
+const when = (iso) => { try { return new Date(iso).toLocaleString(undefined, { dateStyle:'medium', timeStyle:'short' }); } catch { return iso; } };
+
+async function json(url, opts) {
+  const r = await fetch(url, opts);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || `${r.status}`);
+  return j;
+}
+
+// ── THE LIST OF ROOMS ──────────────────────────────────────────────────────
+async function showRooms() {
+  document.title = 'Retreat · manyhands';
+  const { cards = [] } = await json('/api/cards?limit=500');
+  const threads = cards.filter((c) => (c.labels || []).includes(LABEL))
+    .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+  room.innerHTML = '';
+  room.append(el('h1', 'thread-title', 'Retreat'));
+  room.append(el('p', 'thread-sub', 'somewhere to think slowly. every word here is readable by the room.'));
+  if (!threads.length) {
+    room.append(el('p', 'empty', 'No rooms yet. Label a card <code>retreat</code> and it becomes one.'));
+    return;
+  }
+  const ul = el('ul', 'rooms');
+  for (const c of threads) {
+    const li = el('li');
+    const a = el('a', null, esc(c.title));
+    a.href = `?t=${encodeURIComponent(c.id)}`;
+    li.append(a, el('span', 'when', `last spoken in ${when(c.updatedAt)}`));
+    ul.append(li);
+  }
+  room.append(ul);
+}
+
+// ── ONE ROOM ───────────────────────────────────────────────────────────────
+async function showThread(id) {
+  const [card, convs] = await Promise.all([
+    json(`/api/cards/${encodeURIComponent(id)}`),
+    json(`/api/conversations?attachedTo=${encodeURIComponent(id)}&limit=500`),
+  ]);
+  document.title = `${card.title} · Retreat`;
+  const turns = (convs.messages || convs || [])
+    .slice().sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+
+  room.innerHTML = '';
+  room.append(el('h1', 'thread-title', esc(card.title)));
+  room.append(el('p', 'thread-sub', `opened ${when(card.createdAt)} · readable by everyone in the room`));
+  if (card.description) {
+    const opening = el('div', 'turn');
+    opening.append(el('div', 'turn-who', esc(card.createdBy || 'unattributed')));
+    opening.append(el('div', 'turn-body', renderMarkdown(card.description)));
+    room.append(opening);
+  }
+  for (const m of turns) {
+    const t = el('div', 'turn');
+    t.append(el('div', 'turn-who', esc(m.author || 'unattributed')));
+    t.append(el('div', 'turn-body', renderMarkdown(m.body || '')));
+    room.append(t);
+  }
+  room.append(composer(id));
+}
+
+// ── THE COMPOSER, and the draft is the whole point ─────────────────────────
+//
+// ⛔ THE DEFECT THAT RAISED THIS CARD TO p1 IS A LOST DRAFT: "it feels fragile
+//    — if I missclick something and go off page, I lose my draft." So:
+//
+//    · every keystroke is saved to localStorage, keyed by thread
+//    · the draft is restored on load, so a misclick and a Back costs nothing
+//    · ⭐ THE DRAFT IS CLEARED ONLY AFTER A CONFIRMED 200. Not on Enter, not
+//      optimistically. That is what makes Enter-to-post safe on a surface built
+//      for long writing: a stray Return posts early, and the words are still
+//      there to finish. A composer that cleared on send would reproduce the
+//      exact loss this card exists to fix, in a new place.
+function composer(id) {
+  const DRAFT_KEY = `manyhands.retreat.draft.${id}`;
+  const wrap = el('div', 'composer');
+  wrap.append(el('div', 'composer-rule'));
+  const ta = document.createElement('textarea');
+  ta.id = 'say';
+  ta.placeholder = 'say the thing slowly…';
+  ta.setAttribute('aria-label', 'what you want to say');
+  wrap.append(ta);
+  const pending = el('div', 'pending');
+  const foot = el('div', 'composer-foot');
+  const hint = el('span', 'composer-hint', 'enter posts · shift+enter for a new line · paste an image');
+  const state = el('span', 'composer-state');
+  foot.append(hint, state);
+  wrap.append(pending, foot);
+
+  let attachments = [];
+  const grow = () => { ta.style.height = 'auto'; ta.style.height = `${ta.scrollHeight}px`; };
+  const save = () => { try { localStorage.setItem(DRAFT_KEY, ta.value); } catch { /* private mode */ } };
+  try { ta.value = localStorage.getItem(DRAFT_KEY) || ''; } catch { /* nothing to restore */ }
+
+  const drawPending = () => {
+    pending.innerHTML = '';
+    for (const a of attachments) pending.append(el('span', null, `📎 ${esc(a.name)}`));
+  };
+
+  ta.addEventListener('input', () => { grow(); save(); });
+
+  // Paste an image straight in — he named screenshots explicitly. The file is
+  // uploaded immediately and referenced by markdown, so the draft text stays
+  // plain text and survives everything the draft survives.
+  ta.addEventListener('paste', async (e) => {
+    const items = [...(e.clipboardData?.items || [])].filter((i) => i.kind === 'file');
+    if (!items.length) return;
+    e.preventDefault();
+    for (const item of items) {
+      const file = item.getAsFile();
+      if (!file) continue;
+      state.textContent = `attaching ${file.name || 'image'}…`;
+      state.classList.remove('err');
+      try {
+        const data = await new Promise((res, rej) => {
+          const fr = new FileReader();
+          fr.onload = () => res(String(fr.result).split(',')[1] || '');
+          fr.onerror = () => rej(new Error('could not read the file'));
+          fr.readAsDataURL(file);
+        });
+        const up = await json('/api/attachments', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ data, name: file.name || 'pasted-image.png', mime: file.type || 'application/octet-stream' }),
+        });
+        attachments.push(up);
+        drawPending();
+        state.textContent = '';
+      } catch (err) {
+        // ⛔ The server's own words. "file type not allowed" and "too large" are
+        // different problems and only the original text tells them apart.
+        state.textContent = String(err.message || err);
+        state.classList.add('err');
+      }
+    }
+  });
+
+  ta.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return;
+    e.preventDefault();
+    post();
+  });
+
+  async function post() {
+    const body = ta.value.trim();
+    if (!body && !attachments.length) return;
+    ta.disabled = true;
+    state.classList.remove('err');
+    state.textContent = 'saying…';
+    try {
+      await json('/api/conversations', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        // ⛔ `attachedTo` is the id READ FROM THE CARD this page just fetched,
+        // never a typed one (#761: an unresolvable attachedTo is accepted with
+        // a 200 and the comment is stranded).
+        body: JSON.stringify({
+          attachedTo: id,
+          author: me() || 'system',
+          body,
+          attachments: attachments.map((a) => ({ id: a.id, name: a.name, mime: a.mime, size: a.size })),
+        }),
+      });
+      // ⭐ ONLY NOW. The draft outlives the send until the send is confirmed.
+      ta.value = '';
+      attachments = [];
+      try { localStorage.removeItem(DRAFT_KEY); } catch { /* nothing to clear */ }
+      drawPending();
+      await showThread(id);
+      const next = document.getElementById('say');
+      if (next) next.focus();
+    } catch (err) {
+      state.textContent = `not saved — ${err.message || err}. your words are still here.`;
+      state.classList.add('err');
+    } finally {
+      ta.disabled = false;
+    }
+  }
+
+  setTimeout(() => { grow(); ta.focus(); }, 0);
+  return wrap;
+}
+
+(async () => {
+  try {
+    if (threadId) await showThread(threadId);
+    else await showRooms();
+  } catch (e) {
+    room.innerHTML = '';
+    room.append(el('p', 'empty', `could not open the room — ${esc(e.message || e)}`));
+  }
+})();
+</script>
+</body>
+</html>
