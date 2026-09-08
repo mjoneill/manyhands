@@ -236,9 +236,26 @@ export function holdsOpenWindow({ actor, card, workObjects = [], now }) {
  * ⚠️ FAIL-OPEN ON BOTH SIDES OF THE COMPARISON, deliberately. If the action
  * carries no card, or the window names none, the gate has no basis to say this
  * IS the declared work — and guessing would rebuild the whole-seat mutex
- * through the back door. `work_declare` requires `card`, so the second case is
+ * through the back door.
+ *
+ * ⛔⛔ #1284 — THE SECOND CASE IS NOW LIVE, AND THIS PARAGRAPH USED TO SAY IT
+ * COULD NOT BE. It read: "`work_declare` requires `card`, so the second case is
  * a belt, not a live hole; if the surface ever stops requiring it, that is when
- * this gate goes blind, and it will do so silently.
+ * this gate goes blind, and it will do so silently." The surface has stopped
+ * requiring it — a declaration may now anchor on `sourceMessageId` instead,
+ * because an ask broadcast to the room has no card and that is where every
+ * recorded collision began.
+ *
+ * ⇒ So say what is true rather than leaving a prediction to rot into a false
+ *   claim: A CARDLESS WINDOW GATES NOTHING. That is not a regression, it is the
+ *   scope of this gate — it is a mutex over EDITS TO A NAMED CARD, and an ask
+ *   has no card to be a mutex over. What an ask-anchored window buys is that a
+ *   second seat can SEE it before deciding to act. Visibility, not exclusion,
+ *   and #1284 asks for exactly that: contention AWARENESS, which a claim rail
+ *   cannot manufacture after both seats have already decided.
+ *
+ * ⚠️ Asserted, not assumed: tests/cardless-declare-1284.test.mjs pins this
+ * allow so the behaviour is a recorded decision rather than a discovery.
  *
  * @param {object}   arg
  * @param {?string}  arg.actor        seat key, or null/absent for the human path

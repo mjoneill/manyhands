@@ -72,6 +72,25 @@ function persistAndDerive(dir, wo, now) {
  * `replyByMinutes` is REQUIRED and there is no default. The first hand-run's
  * own recorded defect was a bid with no deadline — "not a window, an intention
  * that resolves when the bidder decides it has." A caller cannot forget it.
+ *
+ * ⭐ #1284 — THE ANCHOR IS REQUIRED; THE CARD IS ONE OF TWO WAYS TO BE ONE.
+ *
+ * This layer used to demand an integer `card`, and that requirement was NOT
+ * the state machine's: `declare()` has defaulted `card` to null since #755
+ * slice 2e, with a comment saying in its own words that a bid may name a
+ * source message instead when no card exists yet. The store round-trips both
+ * fields; the gate skips a window with no card. Only this line and the MCP
+ * inputSchema forbade what every layer beneath them already modelled.
+ *
+ * ⇒ And the forbidden case is the ONE #1284 is about. Every collision on that
+ *   card began with an ask broadcast to the room, which has no card when it
+ *   arrives — so the rail could not address the population it was built for.
+ *
+ * ⛔ An object with NEITHER anchor is still refused. A work object carries no
+ * title and no description on purpose (that is what keeps PII structurally out
+ * of this log), so the pointer is the only thing it says about what it is for.
+ * With no pointer it says nothing at all, and could never be recognised by the
+ * seat it exists to warn.
  */
 export function workDeclare(fields) {
   only(fields, ['dir', 'id', 'by', 'card', 'required', 'replyByMinutes', 'sourceMessageId', 'now'], 'workDeclare');
@@ -80,7 +99,29 @@ export function workDeclare(fields) {
   if (!Number.isFinite(replyByMinutes) || replyByMinutes <= 0) {
     throw new Error('workDeclare: replyByMinutes is required and must be a positive number — a bid without a deadline is not a window');
   }
-  if (!Number.isInteger(card)) throw new Error('workDeclare: card must be an integer shortId');
+  // Presence, then shape. An empty string is not an anchor: a guard that only
+  // tested for a key would persist an object pointing at nothing, and it would
+  // read back as a real anchor in every listing.
+  const hasCard = card !== undefined && card !== null;
+  const hasSource = sourceMessageId !== undefined && sourceMessageId !== null && sourceMessageId !== '';
+  // ⛔⛔ THE SHAPE IS THE PII GUARD, AND IT DOES NOT LIVE ONLY IN THE SCHEMA.
+  //
+  // This surface has no free-text field by design: that is what makes "no PII
+  // reaches the work-object log" structural rather than a habit. A bare string
+  // anchor would be a "just a short note" field with a respectable name.
+  //
+  // The MCP schema pins the same pattern, but a guard that exists at exactly
+  // one boundary is a property of WHERE IT SITS, not a rule — and this module
+  // has other callers. So the shape is checked here too, where the value is
+  // about to be persisted.
+  if (hasSource && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(String(sourceMessageId))) {
+    throw new Error('workDeclare: sourceMessageId must be a commons message id (uuid) — this surface carries no free text');
+  }
+  if (!hasCard && !hasSource) {
+    throw new Error('workDeclare: card or sourceMessageId is required — a work object is a POINTER, '
+      + 'and one that names neither a card nor the message it answers cannot be recognised by anyone');
+  }
+  if (hasCard && !Number.isInteger(card)) throw new Error('workDeclare: card must be an integer shortId');
 
   const replyBy = new Date(new Date(now).getTime() + replyByMinutes * 60_000).toISOString();
   const wo = declare({ id, by, at: now, replyBy, required, sourceMessageId, card });
@@ -172,15 +213,31 @@ export function workGrant(fields) {
  * A seat about to act reads `open` to see whether it holds a window. A reader
  * asking what happened reads `settled`. Neither is stored; both are computed
  * from the log, which is why a restart changes nothing.
+ *
+ * ⭐ #1284 — THE POINTERS TRAVEL WITH THE STATE. This listing used to project
+ * `id` and `replyBy` and drop both anchors, so a second seat could read that
+ * SOMEONE held a window and not what it was about. For a card-anchored object
+ * that was a nuisance you could resolve by hand; for an ask-anchored one it is
+ * fatal, because the message id is the ONLY handle the ask has — the whole
+ * point is that a seat reading the same request recognises it here.
+ *
+ * ⚠️ `card` and `sourceMessageId` are pointers, in the same class as `id` and
+ * `replyBy`, and are taken off the OBJECT. They are deliberately not added to
+ * `stateAt`, which answers what the auction says is true and owns no pointers.
  */
 export function workList(fields) {
   only(fields, ['dir', 'now'], 'workList');
   const { dir, now } = fields;
   requireNow(now, 'workList');
-  const open = openWorkObjectsAt(dir, now).map((wo) => ({ id: wo.id, replyBy: wo.replyBy, ...stateAt(wo, now) }));
+  const view = (wo) => ({
+    id: wo.id,
+    card: wo.card ?? null,
+    sourceMessageId: wo.sourceMessageId ?? null,
+    replyBy: wo.replyBy,
+    ...stateAt(wo, now),
+  });
+  const open = openWorkObjectsAt(dir, now).map(view);
   const openIds = new Set(open.map((o) => o.id));
-  const settled = readWorkObjects(dir)
-    .filter((wo) => !openIds.has(wo.id))
-    .map((wo) => ({ id: wo.id, replyBy: wo.replyBy, ...stateAt(wo, now) }));
+  const settled = readWorkObjects(dir).filter((wo) => !openIds.has(wo.id)).map(view);
   return { open, settled };
 }

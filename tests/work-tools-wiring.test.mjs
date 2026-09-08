@@ -303,7 +303,18 @@ test('#755-2e ⛔ NO FREE-TEXT FIELD EXISTS ON THE TOOL SURFACE — the guard is
     for (const t of tools) {
       const props = Object.entries(t.inputSchema?.properties || {});
       for (const [name, schema] of props) {
-        const isFreeText = schema.type === 'string' && !schema.enum;
+        // ⭐ #1284 — A PATTERN IS A STRUCTURAL CONSTRAINT, so a string pinned to
+        // one is not free text. `sourceMessageId` is a commons message UUID:
+        // an opaque key of exactly the same class as `id`, `by` and `to`, and
+        // prose cannot be typed into it.
+        //
+        // ⚠️ Recognising `pattern` rather than adding the name to the allowlist
+        // is deliberate. An allowlist entry exempts a field forever whatever
+        // its schema later becomes; this predicate keeps the guard pointed at
+        // the property that actually matters — can a sentence arrive here — so
+        // relaxing the regex would put the field back under the rule instead of
+        // leaving it permanently waved through.
+        const isFreeText = schema.type === 'string' && !schema.enum && !schema.pattern;
         const allowed = ['id', 'by', 'to'].includes(name); // opaque keys, not prose
         assert.ok(!isFreeText || allowed, `${t.name}.${name} is a free-text field — PII can arrive here`);
       }

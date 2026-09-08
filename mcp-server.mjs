@@ -735,11 +735,32 @@ function buildMcpServer() {
     mcp.registerTool('work_declare', {
       description: 'Declare that you intend to do a piece of work, and open a reply window on it. '
         + 'The other required seats bid, nobid, or contest; silence at replyBy grants it to you. '
-        + 'While your window is open you may not take a covered action (see #755).',
+        + 'While your window is open you may not take a covered action (see #755). '
+        + '⭐ #1284 — anchor it with `card` OR `sourceMessageId`. Most asks arrive as a message '
+        + 'with no card, and that is the case every recorded collision started from.',
       inputSchema: {
         id,
         by,
-        card: z.number().int().describe('The card shortId this work is about — a pointer, not a description'),
+        // ⛔ #1284 — OPTIONAL, and it was the schema that made it mandatory.
+        // `declare()` has defaulted card to null since #755 slice 2e and says
+        // so in its own comment; this allowlist is what the seats can reach,
+        // and zod strips what it omits, so a field absent HERE does not exist
+        // for any caller no matter what the core accepts (#534's defect).
+        card: z.number().int().optional().describe('The card shortId this work is about — a pointer, not a description. Optional: give this OR sourceMessageId.'),
+        // ⛔⛔ SHAPE-CONSTRAINED ON PURPOSE, and the constraint is the PII guard.
+        // This surface has NO free-text field by design — that is what makes
+        // "no PII can reach the work-object log" structural rather than a
+        // habit, and a test walks every work_* property to enforce it. A bare
+        // z.string() here would have been a "just a short note" field with a
+        // respectable name: it went red on the first full run, correctly.
+        //
+        // ⇒ A commons message id is a UUID (verified across the live feed), so
+        //   pinning the pattern keeps the anchor reachable AND keeps prose
+        //   structurally unable to arrive in it. An opaque key, same class as
+        //   `id` and `by` — not an exemption from the rule.
+        sourceMessageId: z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
+          .optional()
+          .describe('The commons message id (UUID) this work answers — the anchor for an ASK, which is what most requests are when they arrive. A room-wide ask has no card yet, and by the time two seats would reach for card_claim each has already decided to act. Give this OR card.'),
         required: z.array(z.string()).min(1).describe('Seat keys who should answer. Their silence at replyBy is what grants.'),
         replyByMinutes: z.number().positive().describe('REQUIRED, no default — how long the window stays open. '
           + 'A bid without a deadline is not a window, it is an intention that resolves when the bidder decides it has.'),
