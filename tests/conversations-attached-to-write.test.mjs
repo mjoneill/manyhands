@@ -105,6 +105,40 @@ test('#761 a value that is NEITHER a uuid nor a number is refused', async () => 
   } finally { await srv.stop(); }
 });
 
+test('#761 ⛔ a number-ish string must NOT coerce onto a real card', async () => {
+  // Found in review, and it is worse than the defect this file fixes.
+  // `Number()` accepts hex, binary, exponents, trailing dots, signs and
+  // whitespace, so with `Number.isInteger(Number(x))` as the guard:
+  //
+  //   '0x1F' -> 31 · '0b11111' -> 31 · '1e3' -> 1000 · '12.0' -> 12
+  //
+  // Every one resolved to a REAL card — silently, and to the wrong one.
+  //
+  // ⭐ A dangling edge is detectable: sweeping every post finds all of them.
+  // A WRONG edge resolves, renders and reads back perfectly, and no sweep can
+  // ever tell it from a correct one. Refusing is the only safe answer.
+  const srv = await startRestServer({
+    board: makeBoardFixture({
+      cards: [
+        { id: 'uuid-31', shortId: 31, title: 'thirty one', column: 'backlog', createdAt: '2026-01-01T00:00:00.000Z' },
+        { id: 'uuid-1000', shortId: 1000, title: 'one thousand', column: 'backlog', createdAt: '2026-01-01T00:00:00.000Z' },
+      ],
+      conversations: [],
+    }),
+  });
+  try {
+    for (const bad of ['0x1F', '0b11111', '1e3', '31.', '+31', ' 31 ', '\n31']) {
+      const res = await post(srv, { body: 'x', author: 'ada', attachedTo: bad });
+      assert.equal(res.status, 400, `${JSON.stringify(bad)} is not how anyone writes a card number`);
+    }
+    // POSITIVE CONTROL: the plain decimal form still resolves, so the guard
+    // has not simply turned shortIds off.
+    const good = await post(srv, { body: 'x', author: 'ada', attachedTo: '31' });
+    assert.equal(good.status, 201);
+    assert.equal((await good.json()).attachedTo, 'uuid-31');
+  } finally { await srv.stop(); }
+});
+
 // ── the key split: coerce, do not reject ──────────────────────────────────
 
 test('#761 a resolvable shortId is COERCED to the card UUID and stored that way', async () => {

@@ -66,9 +66,26 @@ export function resolveAttachedTo(raw, cards) {
   // 2. Does it name a card by shortId? That is the number printed on every
   //    card, so it is what a human or an agent reaching for "the card" types.
   //    Stored as the id, which is what makes the thread findable afterwards.
-  const n = Number(asText);
-  if (Number.isInteger(n)) {
-    const card = cards.find((c) => c.shortId === n);
+  //
+  // ⛔ THE DIGIT GUARD IS LOad-BEARING. This was `Number.isInteger(Number(x))`,
+  // which accepts far more than a card number: `0x1F` → 31, `0b11111` → 31,
+  // `1e3` → 1000, and `31.` / `12.0` / `+12` / `\n12` / ` 12 ` all coerce too.
+  // Every one of those resolved to a REAL card — silently, and to the WRONG
+  // one.
+  //
+  // ⭐ That is strictly worse than the defect this file fixes. A dangling edge
+  // is detectable: a sweep over every post finds all of them, which is how the
+  // 20 on the live board were found. A wrong edge resolves, renders and reads
+  // back perfectly, and no sweep can ever distinguish it from a correct one.
+  //
+  // ⚠️ AND THIS IS NOT THE SHAPE-CHECK MISTAKE MADE ABOVE, though it looks
+  // like one. That check tested the shape of a CARD ID, which has no
+  // guaranteed shape — `bk` is a real one — so it could only ever be wrong.
+  // This tests the shape of a SHORTID, which is decimal digits by schema. It
+  // is the key's own domain, not a guess about it, and the lookup still
+  // decides. The guard only limits which strings get read as a number at all.
+  if (/^\d+$/.test(asText)) {
+    const card = cards.find((c) => c.shortId === Number(asText));
     if (card) return { ok: true, value: card.id };
   }
 
