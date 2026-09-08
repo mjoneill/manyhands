@@ -1160,6 +1160,27 @@ body::before {
   border-color: var(--accent-task);
   background: rgba(30, 41, 59, 0.65);
 }
+/* #1304 — the progressive disclosure. It carries its own gap because the form
+   is a flex column and <details> collapses to a single row when shut. */
+.form-more {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.form-more-summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-muted, #94a3b8);
+  padding: 2px 0;
+  list-style: revert;
+  user-select: none;
+}
+.form-more-summary:hover { color: var(--text-primary, #e2e8f0); }
+.form-more[open] > .form-more-summary { margin-bottom: 2px; }
+/* The author is always visible, muted until it has a value to show. An unset
+   author must be legible AT THE MOMENT OF WRITING, which is the whole repair. */
+.form-author .form-select { font-size: 12px; }
+.form-author.unset .form-select { border-color: var(--accent-warn, #d97706); }
 
 .form-row {
   display: flex;
@@ -1689,65 +1710,104 @@ body::before {
   <button class="btn-expand-form" id="btn-expand-form" data-column-id="backlog" title="Add new card">+</button>
   <div class="add-card-form-wrapper" id="add-card-form-wrapper">
     <div class="add-card-form" id="add-card-form">
+      <!-- #1304 — TWO AUDIENCES, ONE FORM.
+           A seat writes cards all day and wants every field at hand. A person
+           has one sentence and wants it recorded. The old form served the first
+           and made the second pay for it: ten fields in a column's width, four
+           of them graph edges, before a thought could be written down. Two
+           cards arrived with a title and nothing else, and the report was
+           "small windows, many fields."
+           ⇒ So the first screen is TITLE and TYPE. Everything else lives behind
+             one disclosure that REMEMBERS being open (#1304), which is how the
+             seat's ten fields survive: open it once and it stays open. A
+             progressive form that re-collapses on every card would fix the
+             person by taxing the seat. -->
       <div class="form-field">
         <label class="form-label" for="card-title">Title</label>
         <input class="form-input" type="text" id="card-title" placeholder="What needs to happen?" maxlength="120" />
       </div>
       <div class="form-field">
-        <label class="form-label" for="card-desc">Description</label>
-        <textarea class="form-textarea" id="card-desc" placeholder="More context..."></textarea>
-      </div>
-      <div class="form-field">
         <label class="form-label" for="card-type">Type</label>
         <select class="form-select" id="card-type">
           <option value="task">📋 Task</option>
+          <option value="bug">🐛 Bug</option>
+          <option value="feature">✨ Feature</option>
           <option value="idea">💡 Idea</option>
           <option value="goal">🎯 Goal</option>
           <option value="reference">📌 Reference</option>
         </select>
       </div>
-      <div class="form-field">
-        <label class="form-label">Assignees</label>
-        <div class="assignee-checkbox-group" id="card-assignees-group">
-        </div>
-      </div>
-      <div class="form-row">
+      <details class="form-more" id="card-more">
+        <summary class="form-more-summary">More — description, who it's for, assignees, priority, labels, links</summary>
         <div class="form-field">
-          <label class="form-label" for="card-priority">Priority</label>
-          <select class="form-select" id="card-priority">
-            <option value="">— none —</option>
-            <option value="p0">🔴 P0</option>
-            <option value="p1">🟠 P1</option>
-            <option value="p2">🟡 P2</option>
-            <option value="p3">⚪ P3</option>
-          </select>
+          <label class="form-label" for="card-desc">Description</label>
+          <textarea class="form-textarea" id="card-desc" placeholder="More context..."></textarea>
+        </div>
+        <!-- #1304 — `for` has existed on every card since the model was written
+             and has never been on this form. The room treats it as the strongest
+             signal of a card's quality, and it was reachable only through the
+             API. -->
+        <div class="form-field">
+          <label class="form-label" for="card-for">Who is this for?</label>
+          <input class="form-input" type="text" id="card-for" placeholder="the person or need this serves" />
         </div>
         <div class="form-field">
-          <label class="form-label" for="card-labels">Labels</label>
-          <input class="form-input" type="text" id="card-labels" placeholder="comma, separated, tags" />
+          <label class="form-label">Assignees</label>
+          <div class="assignee-checkbox-group" id="card-assignees-group">
+          </div>
         </div>
-      </div>
-      <!-- #614 — the edge is offered where the writing happens. Closed cards
-           are valid targets (citation/supersession reference finished work). -->
-      <div class="form-row">
-        <div class="form-field">
-          <label class="form-label" for="card-related-to">Related to</label>
-          <input class="form-input" type="text" id="card-related-to" placeholder="#12, #34 — type # to search" autocomplete="off" />
+        <div class="form-row">
+          <div class="form-field">
+            <label class="form-label" for="card-priority">Priority</label>
+            <select class="form-select" id="card-priority">
+              <option value="">— none —</option>
+              <option value="p0">🔴 P0</option>
+              <option value="p1">🟠 P1</option>
+              <option value="p2">🟡 P2</option>
+              <option value="p3">⚪ P3</option>
+            </select>
+          </div>
+          <div class="form-field">
+            <label class="form-label" for="card-labels">Labels</label>
+            <input class="form-input" type="text" id="card-labels" placeholder="comma, separated, tags" />
+          </div>
         </div>
-        <div class="form-field">
-          <label class="form-label" for="card-blocked-by">Blocked by</label>
-          <input class="form-input" type="text" id="card-blocked-by" placeholder="#12 — type # to search" autocomplete="off" />
+        <!-- #614 — the edge is offered where the writing happens. Closed cards
+             are valid targets (citation/supersession reference finished work). -->
+        <div class="form-row">
+          <div class="form-field">
+            <label class="form-label" for="card-related-to">Related to</label>
+            <input class="form-input" type="text" id="card-related-to" placeholder="#12, #34 — type # to search" autocomplete="off" />
+          </div>
+          <div class="form-field">
+            <label class="form-label" for="card-blocked-by">Blocked by</label>
+            <input class="form-input" type="text" id="card-blocked-by" placeholder="#12 — type # to search" autocomplete="off" />
+          </div>
         </div>
-      </div>
-      <div class="form-row">
-        <div class="form-field">
-          <label class="form-label" for="card-supersedes">Supersedes</label>
-          <input class="form-input" type="text" id="card-supersedes" placeholder="#12 — this card replaces it" autocomplete="off" />
+        <div class="form-row">
+          <div class="form-field">
+            <label class="form-label" for="card-supersedes">Supersedes</label>
+            <input class="form-input" type="text" id="card-supersedes" placeholder="#12 — this card replaces it" autocomplete="off" />
+          </div>
+          <div class="form-field">
+            <label class="form-label" for="card-derived-from">Derived from</label>
+            <input class="form-input" type="text" id="card-derived-from" placeholder="#12 — this card builds on it" autocomplete="off" />
+          </div>
         </div>
-        <div class="form-field">
-          <label class="form-label" for="card-derived-from">Derived from</label>
-          <input class="form-input" type="text" id="card-derived-from" placeholder="#12 — this card builds on it" autocomplete="off" />
-        </div>
+      </details>
+      <!-- #1304 — THE AUTHOR, SHOWN RATHER THAN ASSUMED.
+           `createdBy` was never missing: it reads the identity chosen in the
+           conversations view's "Post as" picker. But that picker lives on
+           ANOTHER PAGE, so anyone who had not used it filed every card as
+           `createdBy: null` and nothing on this form said so. A board with
+           26,000 provenance activities had exactly one unattributed writer, and
+           it was the human.
+           ⛔ Declared, not authenticated — same contract as every other seat
+           key here. Showing it is the point: an unset author is now visible at
+           the moment of writing instead of discovered in the data later. -->
+      <div class="form-field form-author">
+        <label class="form-label" for="card-created-by">Filing as</label>
+        <select class="form-select" id="card-created-by"></select>
       </div>
       <button class="btn-add" id="btn-add-card">Add Card</button>
     </div>
@@ -2857,7 +2917,7 @@ function _normalizeAssignees(value) {
   return ['unassigned'];
 }
 
-function createCard(title, description, type, assignee, labels, column, priority) {
+function createCard(title, description, type, assignee, labels, column, priority, forWhom) {
   const now = new Date().toISOString();
   return {
     id: crypto.randomUUID(),
@@ -2866,7 +2926,11 @@ function createCard(title, description, type, assignee, labels, column, priority
     type: type || 'task',
     assignees: _normalizeAssignees(assignee),
     labels: labels || [],
-    for: null,
+    // #1304 — reachable from the create form at last. The room treats this as
+    // the strongest signal of a card's quality and it was API-only until now.
+    // Absent stays NULL, never an empty string: "nobody said" and "said nobody"
+    // are different facts and only one of them is a measurement.
+    for: (typeof forWhom === 'string' && forWhom.trim()) ? forWhom.trim() : null,
     createdAt: now,
     updatedAt: now,
     // #631 — who wrote this card. The board has no login, so the honest source
@@ -2889,8 +2953,8 @@ function createCard(title, description, type, assignee, labels, column, priority
 // relationships (#614): optional { relatedTo|blockedBy|supersedes|derivedFrom:
 // [shortId] } applied through setRelationship so maintained inverses land
 // before the save — the edge is offered where the writing happens.
-function addCard(title, description, type, assignee, labels, column, priority, relationships) {
-  const card = createCard(title, description, type, assignee, labels, column, priority);
+function addCard(title, description, type, assignee, labels, column, priority, relationships, forWhom) {
+  const card = createCard(title, description, type, assignee, labels, column, priority, forWhom);
   cards.push(card);
   if (relationships && typeof relationships === 'object') {
     for (const relType of RELATIONSHIP_TYPES) {
@@ -4727,12 +4791,16 @@ function handleAddCard() {
     derivedFrom: parseShortIdList(document.getElementById('card-derived-from').value),
   };
 
-  addCard(title, descInput.value, typeInput.value, assignees, labels, currentAddCardColumn, priority, relationships);
+  const forInput = document.getElementById('card-for');
+
+  addCard(title, descInput.value, typeInput.value, assignees, labels, currentAddCardColumn, priority, relationships,
+    forInput ? forInput.value : '');
   renderBoard();
 
   // Reset form
   titleInput.value = '';
   descInput.value = '';
+  if (forInput) forInput.value = '';
   typeInput.value = 'task';
   document.querySelectorAll('#card-assignees-group input[type="checkbox"]').forEach(cb => { cb.checked = false; });
   priorityInput.value = '';
@@ -4743,6 +4811,65 @@ function handleAddCard() {
 }
 
 // ── Event Listeners ──
+
+// ── #1304 — THE AUTHOR PICKER AND THE REMEMBERED DISCLOSURE ────────────────
+//
+// ⛔ `createdBy` was never missing from the code. It reads `chosenIdentity()`,
+// which reads the identity chosen in the CONVERSATIONS view's "Post as" picker
+// — a control on another page. So anyone who had not been there filed every
+// card as `createdBy: null`, silently, and the form gave no sign of it. The
+// defect was never the stamp; it was that the stamp's only input was somewhere
+// else. This puts the same input where the writing happens.
+//
+// ⚠️ Same store, same key: choosing here changes who you post as in the room
+// and vice versa. One identity, two places to set it — NOT a second identity
+// that could disagree with the first, which would be the same class of defect
+// one layer up.
+const CARD_MORE_KEY = 'manyhands.cardFormExpanded';
+
+function syncCardAuthorPicker() {
+  const sel = document.getElementById('card-created-by');
+  if (!sel) return;
+  const seats = humanSeats();
+  const chosen = chosenIdentity();
+  // ⛔ The empty option is FIRST and is a real choice, not a placeholder. An
+  // author the board does not know is recorded as absent; inventing one is
+  // worse than admitting we do not have it (#631).
+  sel.innerHTML = ['<option value="">— nobody chosen —</option>']
+    .concat(seats.map(([key, v]) => `<option value="${escapeAttr(key)}">${v.glyph} ${escapeHTML(v.name)}</option>`))
+    .join('\n');
+  sel.value = (chosen && seats.some(([k]) => k === chosen)) ? chosen : '';
+  sel.closest('.form-author')?.classList.toggle('unset', !sel.value);
+  if (!sel.dataset.bound) {
+    sel.addEventListener('change', () => {
+      rememberIdentity(sel.value);
+      // rememberIdentity ignores '' by design, so clear explicitly: choosing
+      // "nobody" must be able to UNDO a previous choice, or the control is
+      // one-way and the user cannot get back to an honest null.
+      if (!sel.value) { try { localStorage.removeItem(IDENTITY_KEY); } catch { /* non-fatal */ } }
+      sel.closest('.form-author')?.classList.toggle('unset', !sel.value);
+      populateRosterUI();
+    });
+    sel.dataset.bound = '1';
+  }
+}
+
+// The disclosure remembers. This is what keeps acceptance 5 honest: a seat who
+// wants all ten fields opens it once and never opens it again, so making the
+// first screen small costs the seat exactly one click, ever — not one per card.
+function bindCardMoreDisclosure() {
+  const more = document.getElementById('card-more');
+  if (!more || more.dataset.bound) return;
+  try { more.open = localStorage.getItem(CARD_MORE_KEY) === '1'; } catch { /* default shut */ }
+  more.addEventListener('toggle', () => {
+    try { localStorage.setItem(CARD_MORE_KEY, more.open ? '1' : '0'); } catch { /* non-fatal */ }
+  });
+  more.dataset.bound = '1';
+}
+
+syncCardAuthorPicker();
+bindCardMoreDisclosure();
+
 document.getElementById('btn-add-card').addEventListener('click', handleAddCard);
 document.getElementById('card-title').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { e.preventDefault(); handleAddCard(); }

@@ -718,13 +718,137 @@ test('add card form exists with all required fields', () => {
   assert(document.getElementById('btn-add-card'), 'add button should exist');
 });
 
-test('type select has all four options', () => {
+test('#1304: the type select offers EVERY type the API accepts', () => {
+  // ⛔ It offered four of six. `feature` and `bug` — the two that describe most
+  // of the work here — were unreachable, so every card a person filed became a
+  // `task` because that was the default and nothing better was on offer. The
+  // card reporting this defect is typed `bug`: a seat could type it and the
+  // person who found it could not.
+  //
+  // ⚠️ The list is written out rather than read from a shared constant on
+  // purpose. A test that derives its expectation from the same source as the
+  // code cannot see the two of them agreeing on the wrong answer, and a silent
+  // subset of the API's own vocabulary is exactly that failure.
   const select = document.getElementById('card-type');
   const options = Array.from(select.options).map(o => o.value);
-  assert(options.includes('task'), 'should have task option');
-  assert(options.includes('idea'), 'should have idea option');
-  assert(options.includes('goal'), 'should have goal option');
-  assert(options.includes('reference'), 'should have reference option');
+  ['task', 'bug', 'feature', 'idea', 'goal', 'reference'].forEach(t => {
+    assert(options.includes(t), `type select is missing "${t}"`);
+  });
+  assertEqual(options.length, 6, 'and offers nothing the API would refuse');
+});
+
+test('#1304: a title alone files a card — one field, one press', () => {
+  // Acceptance 2, as the person actually experiences it. Everything else on
+  // this form is optional, and a card with only a title must still be a valid
+  // card rather than a half-written record the API rejects.
+  renderBoard();
+  document.getElementById('card-title').value = 'the smallest possible card';
+  const before = cards.length;
+  handleAddCard();
+  assertEqual(cards.length, before + 1, 'one field and one press created a card');
+  const made = cards.find(c => c.title === 'the smallest possible card');
+  assertEqual(made.type, 'task', 'and it took the default type');
+  assertEqual(made.for, null, 'an unstated `for` is null, not an empty string');
+});
+
+test('#1304: the ten fields are behind ONE disclosure, and the edges are with them', () => {
+  // Acceptance 2 again, from the other side: the first screen is title + type,
+  // and the ceremony no longer arrives before the thought does.
+  const more = document.getElementById('card-more');
+  assert(more, 'the disclosure exists');
+  assertEqual(more.tagName.toLowerCase(), 'details', 'and it is a real disclosure');
+  ['card-desc', 'card-for', 'card-assignees-group', 'card-priority', 'card-labels',
+   'card-related-to', 'card-blocked-by', 'card-supersedes', 'card-derived-from']
+    .forEach(id => {
+      const el = document.getElementById(id);
+      assert(el, `${id} still exists`);
+      assert(more.contains(el), `${id} should live behind the disclosure`);
+    });
+  // ⛔ NEGATIVE CONTROL (acceptance 5): title and type must NOT be behind it.
+  // Hiding the first screen too would "simplify" the form into uselessness and
+  // every assertion above would still pass.
+  ['card-title', 'card-type'].forEach(id => {
+    assert(!more.contains(document.getElementById(id)), `${id} must stay on the first screen`);
+  });
+  // ⛔⛔ AND THE DISCLOSURE ITSELF MUST BE REACHABLE. A mutation that added
+  // `hidden` to the <details> SURVIVED every assertion above — containment is
+  // not availability, and a form whose ten fields are behind an element nobody
+  // can open has not simplified anything, it has deleted it. Caught by
+  // mutation, which is the only reason this line exists.
+  assert(!more.hidden, 'the disclosure must not be hidden — that removes the fields, not the ceremony');
+  assert(more.querySelector('summary'), 'and it must have a summary to open it by');
+});
+
+test('#1304: the disclosure REMEMBERS, which is what keeps it free for a seat', () => {
+  // Acceptance 5's real cost question. Making the first screen small taxes a
+  // seat one click PER CARD unless the state persists — with persistence it is
+  // one click, ever. Without this the negative control is satisfied on paper
+  // and violated in use.
+  const more = document.getElementById('card-more');
+  const before = localStorage.getItem(CARD_MORE_KEY);
+  try {
+    more.open = true;
+    more.dispatchEvent(new Event('toggle'));
+    assertEqual(localStorage.getItem(CARD_MORE_KEY), '1', 'opening it is remembered');
+    more.open = false;
+    more.dispatchEvent(new Event('toggle'));
+    assertEqual(localStorage.getItem(CARD_MORE_KEY), '0', 'and so is closing it');
+  } finally {
+    if (before === null) { localStorage.removeItem(CARD_MORE_KEY); } else { localStorage.setItem(CARD_MORE_KEY, before); }
+  }
+});
+
+test('#1304: `for` is reachable from the form and lands on the card', () => {
+  // It has been on the model since the model was written and on no form at all.
+  renderBoard();
+  document.getElementById('card-title').value = 'has a reader';
+  document.getElementById('card-for').value = '  the next person to read this  ';
+  handleAddCard();
+  const made = cards.find(c => c.title === 'has a reader');
+  assertEqual(made.for, 'the next person to read this', '`for` is stored, trimmed');
+});
+
+test('#1304: whitespace in `for` is absence, not a value', () => {
+  // The falsifier for the test above. A trim that produced '' would store an
+  // empty string, and "nobody said" would become "said nobody" — two different
+  // facts, only one of which anyone measured.
+  renderBoard();
+  document.getElementById('card-title').value = 'blank for';
+  document.getElementById('card-for').value = '   ';
+  handleAddCard();
+  assertEqual(cards.find(c => c.title === 'blank for').for, null, 'blank stays null');
+});
+
+test('#1304: the author picker is ON THE FORM and shares the room identity', () => {
+  // ⛔ `createdBy` was never missing — it read the identity chosen in the
+  // CONVERSATIONS view, a control on another page. Anyone who had not been
+  // there filed every card as null, silently. One identity, two places to set
+  // it; a second independent identity could disagree with the first, which is
+  // the same defect one layer up.
+  const sel = document.getElementById('card-created-by');
+  assert(sel, 'the form has an author picker');
+  const before = chosenIdentity();
+  try {
+    const someone = humanSeats()[0][0];
+    sel.value = someone;
+    sel.dispatchEvent(new Event('change'));
+    assertEqual(chosenIdentity(), someone, 'choosing here sets the shared identity');
+
+    renderBoard();
+    document.getElementById('card-title').value = 'stamped';
+    handleAddCard();
+    assertEqual(cards.find(c => c.title === 'stamped').createdBy, someone,
+      'and the card carries the author');
+
+    // ⇒ And "nobody" must UNDO it. rememberIdentity() ignores '' by design, so
+    // without an explicit clear the control is one-way and a person cannot get
+    // back to an honest null after one wrong click.
+    sel.value = '';
+    sel.dispatchEvent(new Event('change'));
+    assertEqual(chosenIdentity(), null, 'choosing nobody clears the identity');
+  } finally {
+    if (before) { rememberIdentity(before); } else { try { localStorage.removeItem(IDENTITY_KEY); } catch {} }
+  }
 });
 
 test('rendering a card in backlog produces correct DOM', () => {
