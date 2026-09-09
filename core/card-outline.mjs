@@ -39,6 +39,24 @@
  */
 const HEADING = /^[ \t]*(?:>[ \t]*)*(#{1,6})[ \t]+(.+?)[ \t]*$/;
 
+/**
+ * ⛔ A `#` LINE INSIDE A FENCE IS NOT A HEADING — review of 8f76600.
+ *
+ * This board writes fenced blocks full of `#` constantly: shell comments, test
+ * output, `# tests 2805`. Measured across the 542 cards over 5KB: 15 carry
+ * phantom headings, 44 in total, worst is #888 with 9 of 197.
+ *
+ * ⚠️ TODAY none of them can produce a WRONG answer — 3 phantoms carry dates and
+ * on no card is a phantom the newest. **That is a measurement, not a guarantee.**
+ * The mechanism permits it: one fenced line reading `# 2026-09-10 …` becomes the
+ * newest section and sends a reader into a code block, which is the single thing
+ * this index exists to get right.
+ *
+ * Closing fences may be longer than their opener and may be indented; a fence
+ * inside a blockquote is still a fence, because corrections are quoted here.
+ */
+const FENCE = /^[ \t]*(?:>[ \t]*)*(`{3,}|~{3,})/;
+
 /** ISO-ish date, optionally with a time. Board headings carry these by habit,
  *  not by rule — so `at` is present when found and absent otherwise, never
  *  guessed from position. */
@@ -57,8 +75,15 @@ export function cardOutline(body, { maxSections = OUTLINE_MAX_SECTIONS } = {}) {
   const text = typeof body === 'string' ? body : '';
   const found = [];
   let pos = 0;
+  let fence = null;   // the opening delimiter while inside a fenced block
   for (const line of text.split('\n')) {
-    const m = HEADING.exec(line);
+    const f = FENCE.exec(line);
+    if (f) {
+      // Open, or close only on a delimiter of the same kind and at least as long.
+      if (!fence) fence = f[1];
+      else if (f[1][0] === fence[0] && f[1].length >= fence.length) fence = null;
+    }
+    const m = fence ? null : HEADING.exec(line);
     if (m) {
       const w = WHEN.exec(m[2]);
       found.push({

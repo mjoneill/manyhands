@@ -124,6 +124,54 @@ test('#1332 the outline is DERIVED — the stored card never acquires it', async
   } finally { await server.stop(); }
 });
 
+/**
+ * ⛔ FENCED CODE — reviewing 8f76600.
+ *
+ * She measured before judging: of the 542 cards over 5KB, 15 carry phantom
+ * headings, 44 in total, and on ZERO cards is a phantom the newest dated
+ * section. A real defect that could not, today, produce a wrong answer.
+ *
+ * ⭐ Her sharper finding is about my suite, not my code: "a mutation suite tests
+ * the code you wrote against the INPUTS YOU IMAGINED." My five mutations were
+ * ordering and truncation. None could surface this, because no fixture had a
+ * fence. The severity test below is the one that would have failed.
+ */
+test('#1332 a `#` line inside a fence is NOT a heading', () => {
+  const body = [
+    '# Real heading',
+    '```', '# tests 2805', '# pass 2803', '```',
+    '## Another real',
+    '```bash', '# a shell comment', '```',
+  ].join('\n');
+  const { sections, headingsFound } = cardOutline(body);
+  assert.equal(headingsFound, 2, 'three phantoms would make this 5');
+  assert.deepEqual(sections.map((x) => x.text), ['Real heading', 'Another real']);
+});
+
+test('#1332 SEVERITY — a DATED line in a fence must never become the newest section', () => {
+  // ⇒ The case that review's measurement showed does not occur today and the
+  //   mechanism permits: a fenced line with a later date wins `newest` and
+  //   sends the reader into a code block — the one thing this index exists
+  //   to get right.
+  const body = [
+    '## Genuine current state 2026-09-09',
+    'body',
+    '```', '# 2026-09-10 tomorrow in a code block', '```',
+  ].join('\n');
+  const { sections } = cardOutline(body);
+  assert.equal(sections.length, 1);
+  assert.equal(newestIndex(sections), 0, 'the fenced future date must not win');
+});
+
+test('#1332 fences close only on a matching, no-shorter delimiter — and count inside a quote', () => {
+  // A longer closing fence is legal; a shorter one does not close, and ~~~ does
+  // not close ```. Corrections are quoted here, so `> ```' is still a fence.
+  const mixed = ['```', '# hidden', '~~~', '# still hidden', '````', '# real after close'].join('\n');
+  assert.deepEqual(cardOutline(mixed).sections.map((s) => s.text), ['real after close']);
+  const quoted = ['> ```', '> # hidden in a quoted fence', '> ```', '> ## visible'].join('\n');
+  assert.deepEqual(cardOutline(quoted).sections.map((s) => s.text), ['visible']);
+});
+
 test('#1332 truncation is confessed, and spans stay true across the cut', () => {
   const many = Array.from({ length: 12 }, (_, i) => `## H${i} 2026-08-0${(i % 9) + 1}\nbody`).join('\n');
   const r = cardOutline(many, { maxSections: 5 });
