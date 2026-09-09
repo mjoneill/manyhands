@@ -60,6 +60,7 @@ import { summariseSeat, recommendInterval, backlogFor, costCoverage, budgetGateS
 import { buildTree, buildChildIndex } from './core/tree.mjs';
 import { buildLinkIndex } from './core/links.mjs';
 import { commentMetadata } from './core/card-comments.mjs';
+import { cardOutline } from './core/card-outline.mjs';
 import { validateDeclaration, seatState, tendingEligibility, declarationsFromRows, UNKNOWN as SEAT_UNKNOWN } from './core/seat-state.mjs';
 import { readConfig, writeConfig, LIMITS } from './channel-config.mjs';
 import { loadRoster, writeRoster, rosterFilePath } from './core/roster-config.mjs';
@@ -7012,6 +7013,25 @@ function handleGetCard(req, res, idOrShortId) {
     const idx = findCardIndex(data, idOrShortId);
     if (idx < 0) return sendJSON(res, 404, { error: 'Card not found' });
     const card = data.cards[idx];
+    // ⭐ #1332 — `?outline=1` answers "where is the current state on this card"
+    // WITHOUT paying for the body. It REPLACES `description`; it does not
+    // accompany it. #794's block above is the precedent and it is explicit:
+    // adding to this response moves the size problem from the write path to the
+    // read path. An outline shipped beside a 33KB description costs more than
+    // it saves and still reads as a win, because what it optimises is invisible
+    // in the response. `descriptionChars` is kept so a caller can see the cost
+    // it just declined to pay.
+    const url = new URL(req.url, 'http://localhost');
+    if (url.searchParams.get('outline') != null) {
+      const { description, ...rest } = card;
+      const outline = cardOutline(description);
+      return sendJSON(res, 200, {
+        ...rest,
+        descriptionChars: outline.totalChars,
+        outline,
+        comments: commentMetadata(data.conversations, card.id),
+      });
+    }
     // Spread rather than mutate: `data` came from readBoard() and the stored
     // object must not acquire a derived field.
     sendJSON(res, 200, { ...card, comments: commentMetadata(data.conversations, card.id) });

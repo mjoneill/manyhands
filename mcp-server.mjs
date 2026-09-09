@@ -936,9 +936,28 @@ function buildMcpServer() {
   }, cardMoveHandler);
 
   mcp.registerTool('card_get', {
-    description: 'Get a single card by id or shortId.',
-    inputSchema: { id: z.string().describe('Card UUID or shortId') },
-  }, async ({ id }) => jsonResult(await apiCall('GET', `/api/cards/${encodeURIComponent(id)}`)));
+    description: 'Get a single card by id or shortId. `outline: true` (#1332) answers WHERE THE '
+      + 'CURRENT STATE IS without paying for the body: it REPLACES `description` with a section '
+      + 'index — level, heading text, offset, size, and `at` when the heading carries a date — '
+      + 'plus `descriptionChars` so you can see the cost you declined. Measured over all 1,204 '
+      + 'cards: of the twenty longest, the newest dated block sits in the FIRST quarter 13 times '
+      + 'and the LAST quarter 5, so neither end is a reliable place to look and nothing in the '
+      + 'body says which kind of card you are holding. Headings inside blockquotes (`> # …`) are '
+      + 'indexed too, because that is how corrections are prepended here.',
+    inputSchema: {
+      id: z.string().describe('Card UUID or shortId'),
+      outline: z.boolean().optional()
+        .describe('Return a section index INSTEAD of the description (#1332)'),
+    },
+    // ⚠️ #831 — the destructure and the forwarded call are TWO LISTS, and a
+    // param present in one and absent from the other is accepted and silently
+    // dropped. card_list carries the same warning because it happened there
+    // twice in one hour. Adding `outline` here means adding it in both places;
+    // the every-declared-param-is-forwarded test is what catches a miss.
+  }, async ({ id, outline }) => jsonResult(await apiCall(
+    'GET',
+    `/api/cards/${encodeURIComponent(id)}${outline ? '?outline=1' : ''}`,
+  )));
 
   // #657 — bounded + summary BY DEFAULT. The MCP tool is the agents' default
   // surface, and agents pay for payload in context window: the unbounded list
