@@ -41,7 +41,11 @@
  * to write)
  */
 
-import { applyTransforms, findResidue } from './core/export-transforms.mjs';
+import {
+  transformManyForExport,
+  describeConfig,
+  GENERIC_TRANSFORMS,
+} from './core/export-transforms.mjs';
 
 const DEFAULTS = {
   base: process.env.SCRUM_API_BASE || 'http://localhost:3141',
@@ -311,32 +315,53 @@ async function main() {
   // Same fail-closed contract as export-wiki.mjs (#459): transform, then refuse
   // if anything survived. Residue is collected across every record and reported
   // once — 8,000 separate throws would bury the finding it exists to surface.
+  const mode = args.raw ? 'raw' : 'scrub';
   let scrubNote;
-  if (args.raw) {
+  let provenance = null;
+  if (mode === 'raw') {
     scrubNote = 'RAW — NOT SCRUBBED. In-room archive; do not share outside the room.';
     console.log(`  ⚠️  --raw: no scrub. This archive carries the room's language verbatim.`);
   } else {
     const configPath = args.config || defaultConfigPath();
     let config;
+    let source;
     try {
       config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    } catch (err) {
-      die(`no export transform config at ${configPath}\n`
-        + `  The rules describe the BOARD being exported, so they are read from the data\n`
-        + `  root (beside board-data.json), never from this checkout — a config from the\n`
-        + `  wrong install would scrub against the wrong list and certify itself clean.\n`
-        + `  ${err.message}\n\n`
-        + `  If you want the unscrubbed in-room archive, say so explicitly:\n`
-        + `    node export-board.mjs --raw`);
+      source = args.config
+        ? 'explicit'
+        : (process.env.SCRUM_BOARD_FILE ? 'data-root' : 'checkout-template');
+    } catch {
+      // ⭐ #1331 — ABSENT POLICY IS THE ORDINARY STATE, NOT THE DANGEROUS ONE.
+      //
+      // This used to die() and offer `--raw` as its only door. A fresh install
+      // has never created that file — nothing in install creates it — so the
+      // first Export a new operator ever runs failed, and the single actionable
+      // suggestion was the UNSCRUBBED path. The safe default was unreachable
+      // and the loud opt-out was the only one that worked, which inverts the
+      // whole boundary and trains people through the confirmation.
+      //
+      // ⚠️ The distinction that makes this safe: "this board has no policy" is
+      // ordinary; "this board's policy was not FOUND" is dangerous. They are
+      // only different if the artifact says which one produced it — which is
+      // why `source` is recorded and printed rather than collapsed to
+      // "scrubbed". A default that is silent about being a default is the
+      // silent-leak-that-certifies-itself this file already warns about.
+      config = GENERIC_TRANSFORMS;
+      source = 'generic-defaults';
     }
-    const samples = [];
-    let residueTotal = 0;
-    for (const rec of records) {
-      rec.text = applyTransforms(rec.text, config);
-      const hits = findResidue(rec.text, config);
-      residueTotal += hits.length;
-      for (const h of hits) if (samples.length < 10) samples.push(h);
-    }
+    provenance = describeConfig(config, {
+      source,
+      path: source === 'generic-defaults' ? '(built in)' : configPath,
+    });
+    // ⇒ ONE entry point. This block used to reach past the composed function to
+    // applyTransforms/findResidue and rebuild apply→check→refuse with its own
+    // --raw branch; export-wiki.mjs called the composed one. Two copies of the
+    // same decision drifted into different refusal semantics, which is how a
+    // publication boundary came to mean different things in two files.
+    const { texts, residue } = transformManyForExport(records.map((r) => r.text), config, { mode });
+    texts.forEach((t, i) => { records[i].text = t; });
+    const samples = residue.slice(0, 10);
+    const residueTotal = residue.length;
     if (residueTotal) {
       die(`export refused — ${residueTotal} un-transformed term(s) survived the scrub.\n\n`
         + samples.map((r) => `      • ${JSON.stringify(r.match)}${r.note ? ` (${r.note})` : ''}\n          …${r.sample}…`).join('\n')
@@ -349,8 +374,12 @@ async function main() {
         + `  If it is meant to leave, narrow the scope (--spaces cards) or add rules to\n`
         + `  ${configPath}.`);
     }
-    scrubNote = `Scrubbed via ${configPath.split('/').slice(-1)[0]} — fail-closed, zero residue.`;
-    console.log(`  scrub: clean (${records.length} records through ${(config.rules || []).length} rules)`);
+    // ⭐ "Scrubbed" is true of an export against a room's 21 rules and of one
+    // against the two built-in defaults, and those are not the same artifact.
+    // The reader who needs to tell them apart is someone deciding whether to
+    // attach this file to an email, weeks later, with no access to the config.
+    scrubNote = `${provenance.line} · zero residue.`;
+    console.log(`  scrub: clean — ${provenance.line}`);
   }
 
   const parts = packRecords(records, args.maxBytes - HEADER_ALLOWANCE);
@@ -360,7 +389,8 @@ async function main() {
   parts.forEach((part, i) => {
     const name = `part-${String(i + 1).padStart(2, '0')}-of-${String(parts.length).padStart(2, '0')}.md`;
     const header = `# Scrum-Board Full Export — Part ${i + 1} of ${parts.length}\n`
-      + `**Section:** ${part.section}  ·  **Exported:** ${stamp(startedAt.toISOString())}\n\n---\n\n`;
+      + `**Section:** ${part.section}  ·  **Exported:** ${stamp(startedAt.toISOString())}\n`
+      + `**Scrub:** ${args.raw ? '⚠️ ' : ''}${scrubNote}\n\n---\n\n`;
     const body = header + part.records.map((r) => r.text).join('\n');
     fs.writeFileSync(path.join(outDir, name), body);
     written.push({ name, section: part.section, bytes: Buffer.byteLength(body, 'utf8'), records: part.records.length, oversized: part.oversized });
