@@ -86,8 +86,17 @@ import {
   discardPendingServes, headSeq, PULL_LIMIT,
 } from './core/cursor-service.mjs';
 import { configureIdentities, usingDefaultRoster } from './core/identity.mjs';
+import { hostAllowed, parseAllowedHosts, refuseHost } from './core/host-guard.mjs';
 
 const PORT = process.env.SCRUM_PORT ? parseInt(process.env.SCRUM_PORT, 10) : 3141;
+// #1338 — extra local names this board may be reached by. Loopback names need
+// no entry. See core/host-guard.mjs.
+const ALLOWED_HOSTS = parseAllowedHosts(process.env.SCRUM_ALLOWED_HOSTS);
+// The port the guard compares against is the one we are BOUND to, not the one
+// we were configured with: SCRUM_PORT=0 (the test harness, and anyone letting
+// the OS pick) binds somewhere else, and a guard keyed to 0 would refuse every
+// loopback client that names its port. Set in the listen callback.
+let BOUND_PORT = PORT;
 const PROJECT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const BOARD_DATA_FILE = process.env.SCRUM_BOARD_FILE || path.join(PROJECT_DIR, 'board-data.json');
 // #1259 — a process can prove WHICH process is answering. The test harness
@@ -8802,6 +8811,16 @@ function serveStaticFile(req, res) {
  * Main request handler
  */
 function handleRequest(req, res) {
+  // #1338 — THE HOST GUARD RUNS FIRST. Before the method is read, before the
+  // path is split, before X-Robots-Tag, before #249. A DNS-rebinding page's
+  // fetch is same-origin to the browser and reaches this loopback-bound server
+  // carrying the attacker's name in Host; nothing below this line can tell it
+  // from a real request, so the decision has to be made here or not at all.
+  // See core/host-guard.mjs for the attack and the allowlist.
+  if (!hostAllowed(req.headers.host, { port: BOUND_PORT, extra: ALLOWED_HOSTS })) {
+    return refuseHost(res, req.headers.host);
+  }
+
   const method = req.method.toUpperCase();
   const urlPath = req.url.split('?')[0];
 
@@ -9192,6 +9211,7 @@ migrateTendingIfNeeded();
 const server = http.createServer(handleRequest);
 
 server.listen(PORT, '127.0.0.1', () => {
+  BOUND_PORT = server.address().port;   // #1338 — the port the Host guard checks against
   // #683 — drop every served-but-unacked range at boot. NOT tidiness: the fence
   // discriminates on the registry epoch, and seat-registry keeps its counter in
   // a closure with no persistence, so epochs restart at 1 with the process

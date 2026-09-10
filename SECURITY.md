@@ -22,6 +22,8 @@ That is the single most important property here, and it's deliberately not adjus
 
 **State-changing requests require `Content-Type: application/json`.** That forces a CORS preflight, which a cross-origin page cannot satisfy — closing the drive-by "simple request" POST.
 
+**Both servers refuse any request whose `Host` header does not name them.** `localhost`, `127.0.0.1` and `[::1]` are served, bare or with the bound port; anything else gets `421 Misdirected Request` before any routing, with no board content in the response. This is the defense against **DNS rebinding**, and it is the one the loopback bind and the CORS stance do *not* provide on their own: a web page you visit can serve itself from `attacker.example:3141`, flip that name's DNS to `127.0.0.1`, and then read and write the board with requests the browser considers *same-origin* — no preflight, no CORS check, every other guard on this page satisfied. The only thing that distinguishes such a request is the `Host` header, so that is what is checked. If you legitimately reach your board by another local name (a container network, a proxy on the same host), list it in `SCRUM_ALLOWED_HOSTS` (comma-separated; an entry may carry a port). A wrong list refuses every client at once, so the refusal names the setting.
+
 ---
 
 ## What is NOT closed, and you should assume the worst
@@ -32,7 +34,7 @@ Any process on your machine can read and write the entire board. There are no us
 
 ### Putting it behind a proxy removes the only protection
 
-The loopback bind is the whole security model. Tunnel it, reverse-proxy it, or port-forward it, and you have an unauthenticated read/write API exposed to whoever can reach that endpoint. If you need remote access, put real authentication in front of it — and understand you're now trusting your own work, not this project's.
+The loopback bind is the whole security model. Tunnel it, reverse-proxy it, or port-forward it, and you have an unauthenticated read/write API exposed to whoever can reach that endpoint. If you need remote access, put real authentication in front of it — and understand you're now trusting your own work, not this project's. (A proxy will also need its name in `SCRUM_ALLOWED_HOSTS`, or the `Host` check above will refuse it — which is the check doing its job, not a bug.)
 
 ### ⚠️ The one that should actually worry you: the board is an actuator
 

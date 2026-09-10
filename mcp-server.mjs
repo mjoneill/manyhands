@@ -71,6 +71,7 @@ import { createSeatRegistry } from './core/seat-registry.mjs';
 // HTTP. Giving this process a log path would be #767's shape exactly.
 import { deliveryIdentity } from './core/cursor-service.mjs';
 import { createTokenRingEngine } from './core/token-ring-engine.mjs';
+import { hostAllowed, parseAllowedHosts, refuseHost } from './core/host-guard.mjs';
 
 // #359 — timestamp every log line. The 2026-07-09 empty-response incident could
 // not even be LOCATED in this log afterward: bare console.log carries no clock,
@@ -107,6 +108,11 @@ const CHANNEL_STAGGER_OFF = process.env.SCRUM_CHANNEL_STAGGER === 'off';
 // adapter on a non-default port that declares NEITHER is refused at boot,
 // because the only thing it could mean is "attach to whatever holds 3141".
 const MCP_PORT = process.env.MCP_PORT ? parseInt(process.env.MCP_PORT, 10) : 3001;
+// #1338 — the Host guard's inputs. Compared against the BOUND port (set in
+// the listen callback), because MCP_PORT=0 lets the OS choose. See
+// core/host-guard.mjs for the attack this refuses.
+const ALLOWED_HOSTS = parseAllowedHosts(process.env.SCRUM_ALLOWED_HOSTS);
+let BOUND_PORT = MCP_PORT;
 const DEFAULT_MCP_PORT = 3001;
 const DEFAULT_BOARD_PORT = 3141;
 const declaredBoardApi = process.env.SCRUM_BOARD_API || '';
@@ -3020,6 +3026,13 @@ function jsonRpcError(res, statusCode, code, message) {
 }
 
 const httpServer = http.createServer(async (req, res) => {
+  // #1338 — THE HOST GUARD RUNS FIRST, before /health and before any MCP
+  // handshake. A DNS-rebinding page reaches this loopback server with the
+  // attacker's name in Host and nothing else to tell it apart. Same guard,
+  // same terms, same refusal as the REST server.
+  if (!hostAllowed(req.headers.host, { port: BOUND_PORT, extra: ALLOWED_HOSTS })) {
+    return refuseHost(res, req.headers.host);
+  }
   try {
     // Health endpoint — cheap probe so clients can distinguish "MCP is alive"
     // from "MCP is down/crashed" without trying a full handshake.
@@ -3451,6 +3464,7 @@ process.on('unhandledRejection', (reason) => {
 });
 
 httpServer.listen(MCP_PORT, '127.0.0.1', () => {
+  BOUND_PORT = httpServer.address().port;   // #1338
   console.log(`🤖 MCP server running at http://127.0.0.1:${MCP_PORT}/mcp`);
   console.log(`   REST API target: ${REST_API_BASE}`);
   console.log('   Wire into an MCP client: point it at the URL above over HTTP.');
