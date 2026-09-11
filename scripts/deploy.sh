@@ -373,19 +373,23 @@ if [ "${DEPLOY_RELEASE:-1}" != "0" ]; then
     TAG="$(node "$CLONE/tools/release-notes.mjs" --repo "$CLONE" --next-tag)" || TAG=""
     NOTES="$(mktemp -t relnotes)"
     if [ -n "$TAG" ] && node "$CLONE/tools/release-notes.mjs" --repo "$CLONE" --from "$PREV_SHA" --to "$NEW_SHA" --tag "$TAG" > "$NOTES" 2>/dev/null; then
-      if git -C "$CLONE" tag -a "$TAG" -F "$NOTES" "$NEW_SHA" 2>/dev/null \
-         && git -C "$CLONE" push -q origin "refs/tags/$TAG" 2>/dev/null \
+      if git -C "$CLONE" tag -a --cleanup=verbatim "$TAG" -F "$NOTES" "$NEW_SHA" 2>/dev/null \
+         && git -C "$CLONE" push -q origin "refs/tags/$TAG" 2>"$NOTES.err" \
          && gh release create "$TAG" --repo "$(git -C "$CLONE" remote get-url origin)" --title "$TAG" --notes-file "$NOTES" >/dev/null 2>&1; then
         say "📦 release: $TAG published — $(grep -c '^- ' "$NOTES") line(s) · https://github.com/$(git -C "$CLONE" remote get-url origin | sed -E 's#.*github.com[:/]##; s#\.git$##')/releases/tag/$TAG"
       else
         say "⚠️ release: $TAG NOT PUBLISHED (tag, push or gh release failed). Production is serving $(printf '%s' "$NEW_SHA" | cut -c1-7) regardless. Publish by hand:"
+        [ -s "$NOTES.err" ] && sed "s/^/       │ /" "$NOTES.err" | head -20
+        # A local tag with no remote is a phantom the next --next-tag would step
+        # over, minting v….2 for a release that never existed. Remove it.
+        git -C "$CLONE" tag -d "$TAG" >/dev/null 2>&1 || true
         say "     node $CLONE/tools/release-notes.mjs --repo $CLONE --from $PREV_SHA --to $NEW_SHA --tag $TAG > /tmp/$TAG.md"
-        say "     git -C $CLONE tag -f -a $TAG -F /tmp/$TAG.md $NEW_SHA && git -C $CLONE push -f origin refs/tags/$TAG"
+        say "     git -C $CLONE tag -f -a --cleanup=verbatim $TAG -F /tmp/$TAG.md $NEW_SHA && git -C $CLONE push -f origin refs/tags/$TAG"
         say "     gh release create $TAG --title $TAG --notes-file /tmp/$TAG.md"
       fi
     else
       say "⚠️ release: notes could not be generated for $(printf '%s' "$PREV_SHA" | cut -c1-7)..$(printf '%s' "$NEW_SHA" | cut -c1-7) — NOT PUBLISHED; production unaffected"
     fi
-    rm -f "$NOTES"
+    rm -f "$NOTES" "$NOTES.err"
   fi
 fi
