@@ -346,3 +346,46 @@ until curl -fsS --max-time 3 http://127.0.0.1:3141/api/board/status >/dev/null 2
   i=$((i + 1)); [ "$i" -gt 40 ] && die "rest did not return within 80s"; sleep 2
 done
 say "   mcp 200 · rest 200 · serving $(cat "$SERVE/DEPLOYED-SHA" | cut -c1-7) · restarted: rest=$DO_REST mcp=$DO_MCP"
+
+# #1026 — A DEPLOY IS A RELEASE, so it gets a name and notes a downstream
+# reader can open. "there's not an obvious way that I can tell that helps me
+# understand what's changing. no version numbers." — the customer, 2026-08-23.
+#
+# Runs AFTER verification: a deploy that did not come up gets no release, and
+# a release that cannot be published must not un-deploy anything, so this
+# step is loud on failure and never fatal. The tag names the sha that is now
+# SERVING; the notes cover prev..new from the drift tool's own commit listing
+# (one walker, two callers — #1042). Date-based tag, not semver: nothing here
+# has a compatibility contract and a number implying one would be a lie.
+#
+# ⚠️ The notes say which half of the question they answer. They are "what
+# changed between two deploys"; they are not the project's evolution.
+#
+#   DEPLOY_RELEASE=0   skip (default: on when `gh` can see the repo)
+if [ "${DEPLOY_RELEASE:-1}" != "0" ]; then
+  if [ "$PREV_SHA" = "-" ]; then
+    say "📦 release: SKIPPED — previous served sha unknown, so there is no range to describe (first deploy on this serve dir?)"
+  elif ! gh auth status >/dev/null 2>&1; then
+    say "📦 release: SKIPPED — gh is not authenticated; tag and notes not published. Publish later with:"
+    say "     node $CLONE/tools/release-notes.mjs --repo $CLONE --from $PREV_SHA --to $NEW_SHA --tag \$(node $CLONE/tools/release-notes.mjs --repo $CLONE --next-tag)"
+  else
+    git -C "$CLONE" fetch --tags -q origin 2>/dev/null || true
+    TAG="$(node "$CLONE/tools/release-notes.mjs" --repo "$CLONE" --next-tag)" || TAG=""
+    NOTES="$(mktemp -t relnotes)"
+    if [ -n "$TAG" ] && node "$CLONE/tools/release-notes.mjs" --repo "$CLONE" --from "$PREV_SHA" --to "$NEW_SHA" --tag "$TAG" > "$NOTES" 2>/dev/null; then
+      if git -C "$CLONE" tag -a "$TAG" -F "$NOTES" "$NEW_SHA" 2>/dev/null \
+         && git -C "$CLONE" push -q origin "refs/tags/$TAG" 2>/dev/null \
+         && gh release create "$TAG" --repo "$(git -C "$CLONE" remote get-url origin)" --title "$TAG" --notes-file "$NOTES" >/dev/null 2>&1; then
+        say "📦 release: $TAG published — $(grep -c '^- ' "$NOTES") line(s) · https://github.com/$(git -C "$CLONE" remote get-url origin | sed -E 's#.*github.com[:/]##; s#\.git$##')/releases/tag/$TAG"
+      else
+        say "⚠️ release: $TAG NOT PUBLISHED (tag, push or gh release failed). Production is serving $(printf '%s' "$NEW_SHA" | cut -c1-7) regardless. Publish by hand:"
+        say "     node $CLONE/tools/release-notes.mjs --repo $CLONE --from $PREV_SHA --to $NEW_SHA --tag $TAG > /tmp/$TAG.md"
+        say "     git -C $CLONE tag -f -a $TAG -F /tmp/$TAG.md $NEW_SHA && git -C $CLONE push -f origin refs/tags/$TAG"
+        say "     gh release create $TAG --title $TAG --notes-file /tmp/$TAG.md"
+      fi
+    else
+      say "⚠️ release: notes could not be generated for $(printf '%s' "$PREV_SHA" | cut -c1-7)..$(printf '%s' "$NEW_SHA" | cut -c1-7) — NOT PUBLISHED; production unaffected"
+    fi
+    rm -f "$NOTES"
+  fi
+fi

@@ -79,6 +79,26 @@ function refFreshness(repoDir, ref) {
 }
 
 /**
+ * #1026 — THE ONE COMMIT-WALKER. The commits in `from..to`, oldest first, each
+ * with its files and the runtime / test-only split. Extracted from driftReport
+ * so the release-notes generator shares it instead of growing a second idea of
+ * "which commits" (#1042: this room already had five instruments that each
+ * learned "which tree" differently). Throws on a git error; callers decide
+ * whether that is UNKNOWN (drift) or a skipped release (deploy).
+ */
+export function commitsBetween(repoDir, from, to) {
+  const raw = git(repoDir, ['log', '--reverse', '--format=%H%x00%s', `${from}..${to}`]);
+  if (!raw) return [];
+  return raw.split('\n').map((l) => {
+    const [sha, subject] = l.split('\0');
+    const files = git(repoDir, ['show', '--name-only', '--format=', sha])
+      .split('\n').map((s) => s.trim()).filter(Boolean);
+    const runtimeFiles = files.filter((f) => !NON_RUNTIME.some((re) => re.test(f)));
+    return { sha, short: sha.slice(0, 7), subject, files, runtimeFiles, isRuntime: runtimeFiles.length > 0 };
+  });
+}
+
+/**
  * @returns {{ok:boolean,total:number|null,runtime:Array,testOnly:Array,lines:string[],header:string[],summary:string,refAge:object,error?:string}}
  */
 export function driftReport({ repoDir, servedDir, ref = 'origin/main' } = {}) {
@@ -104,20 +124,12 @@ export function driftReport({ repoDir, servedDir, ref = 'origin/main' } = {}) {
     return fail(`served sha ${served.slice(0, 7)} is unknown to this clone — cannot resolve it, so no count is possible`);
   }
 
-  let raw;
+  let commits;
   try {
-    raw = git(repoDir, ['log', '--reverse', '--format=%H%x00%s', `${served}..${ref}`]);
+    commits = commitsBetween(repoDir, served, ref);
   } catch (e) {
     return fail(`could not compare ${served.slice(0, 7)}..${ref}: ${e.message.split('\n')[0]}`);
   }
-
-  const commits = raw ? raw.split('\n').map((l) => {
-    const [sha, subject] = l.split('\0');
-    const files = git(repoDir, ['show', '--name-only', '--format=', sha])
-      .split('\n').map((s) => s.trim()).filter(Boolean);
-    const runtimeFiles = files.filter((f) => !NON_RUNTIME.some((re) => re.test(f)));
-    return { sha, short: sha.slice(0, 7), subject, files, runtimeFiles, isRuntime: runtimeFiles.length > 0 };
-  }) : [];
 
   const runtime = commits.filter((c) => c.isRuntime);
   const testOnly = commits.filter((c) => !c.isRuntime);
