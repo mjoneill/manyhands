@@ -46,7 +46,7 @@ const ROSTER_SEATS = configureIdentities(loadRoster());
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createChannelScheduler } from './core/channel-scheduler.mjs';
-import { deliveryStaleMs, classifyDeliveries } from './core/delivery.mjs';   // #1346
+import { deliveryStaleMs, classifyDeliveries, boundedResidentReader } from './core/delivery.mjs';   // #1346
 import { mintOnce, claimWindow, readPool, writePool, recentWhispers } from './whisper-store.mjs';
 import { tendingTick, lastQualifyingActivity } from './core/tending-tick.mjs';
 import { tendingEnabled, quietAfterMinutes } from './tending-config.mjs';
@@ -2584,8 +2584,9 @@ setInterval(reapIdleSessions, REAP_SWEEP_MS).unref();
 // stream. Read from the agent records per fanout — the mode is a field on the
 // board (slice 1), and a cache would be one more place for it to go stale.
 const RESIDENT_TARGET = 'resident:';
+const readResidents = boundedResidentReader({ timeoutMs: Number(process.env.SCRUM_STATUS_RESIDENTS_TIMEOUT_MS) || 1500 });
 async function residentInboxes() {
-  try {
+  return readResidents(async () => {
     const agents = await apiCall('GET', '/api/agents');
     const out = {};
     const staleMs = deliveryStaleMs();
@@ -2594,10 +2595,9 @@ async function residentInboxes() {
       out[a.seatKey] = { deliveryMode: 'channel', ...classifyDeliveries(list, { staleMs }) };
     }
     return out;
-  } catch (e) {
-    return { error: `resident inboxes unreadable: ${e.message}` };
-  }
+  });
 }
+
 async function residentTargets(conversation) {
   let agents;
   try { agents = await apiCall('GET', '/api/agents'); }
@@ -3166,12 +3166,17 @@ const httpServer = http.createServer(async (req, res) => {
       // fanout watch and the constraints surface can see a seat that has no
       // stream and is nonetheless receiving. Read from the board on each call;
       // unreadable ⇒ named as such, never an empty object pretending to be zero.
-      const residents = await residentInboxes();
+      // Bounded (1.5 s) with the last good reading as the fallback, stamped
+      // stale: the deploy's seat check reads this page while REST is still
+      // blocked on its post-restart graph sync, and an unbounded read left
+      // that check UNMEASURED on the first live run (5.8 s vs curl's 3 s).
+      const { residents, read: residentsRead } = await residentInboxes();
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({
         pending: channelScheduler.pending(),
         mode: CHANNEL_STAGGER_OFF ? 'off' : (readConfig().mode || 'off'),
         residents,
+        residentsRead,
         receivers,
         sessions: transports.size,
         seats,

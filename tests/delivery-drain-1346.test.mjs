@@ -264,6 +264,46 @@ test('#1346 DISCLOSURE — /channel/status carries every channel-mode resident: 
     const session = await mcpSession(pair.mcp.mcpUrl);
     await session.callTool('conversation_post', { author: 'bex', body: 'five, through the fanout' });
     for (let i = 0; i < 40 && (await status()).residents.gizmo.open < 3; i++) await new Promise((r) => setTimeout(r, 50));
-    assert.equal((await status()).residents.gizmo.open, 3);
+    const fin = await status();
+    const recs = (await api(rest, 'GET', '/api/deliveries?to=gizmo')).body.deliveries.map((d) => d.state);
+    assert.equal(fin.residents.gizmo.open, 3, `status=${JSON.stringify(fin.residents)} read=${JSON.stringify(fin.residentsRead)} records=${JSON.stringify(recs)} mcpLog=${pair.mcp.logs?.().slice(-800) ?? ''}`);
   } finally { await pair.stop(); }
+});
+
+// ── the bounded read: /channel/status must answer while REST is blocked ──────
+import { boundedResidentReader } from '../core/delivery.mjs';
+
+test('#1346 boundedResidentReader — a slow board does not stall the status page: last good reading served, stamped stale with the reason; no reading ⇒ named unreadable', async () => {
+  let t = 1_000_000;
+  const read = boundedResidentReader({ timeoutMs: 50, now: () => t });
+  const never = () => new Promise(() => {});
+  const first = await read(never);
+  assert.equal(first.read.fresh, false);
+  assert.match(first.residents.error, /unreadable.*timeout after 50ms/, 'no cache yet ⇒ an error field, not an empty map');
+
+  t += 1000;
+  const good = await read(async () => ({ gizmo: { deliveryMode: 'channel', open: 2, inTurn: 0, stuck: 0 } }));
+  assert.deepEqual(good, { residents: { gizmo: { deliveryMode: 'channel', open: 2, inTurn: 0, stuck: 0 } }, read: { at: new Date(1_001_000).toISOString(), fresh: true } });
+
+  t += 1000;
+  const stale = await read(never);
+  assert.deepEqual(stale.residents, good.residents, 'the last good reading is served');
+  assert.equal(stale.read.fresh, false);
+  assert.equal(stale.read.at, good.read.at, 'stamped with WHEN it was read, not now');
+  assert.match(stale.read.reason, /timeout/);
+
+  const failed = await read(async () => { throw new Error('ECONNREFUSED'); });
+  assert.equal(failed.read.fresh, false); assert.match(failed.read.reason, /ECONNREFUSED/);
+  assert.deepEqual(failed.residents, good.residents);
+});
+
+test('#1346 the status counter and the drain query agree on a third failure — one constant, both sides', async () => {
+  const { classifyDeliveries, isOpenDelivery, DELIVERY_MAX_ATTEMPTS } = await import('../core/delivery.mjs');
+  const claim = { state: 'runner-claimed', at: '2026-09-13T00:00:00Z' };
+  const fail = { state: 'failed', at: '2026-09-13T00:00:01Z' };
+  const twice = { state: 'failed', events: [{ state: 'offered' }, claim, fail, claim, fail] };
+  const thrice = { state: 'failed', events: [{ state: 'offered' }, claim, fail, claim, fail, claim, fail] };
+  assert.equal(DELIVERY_MAX_ATTEMPTS, 3);
+  assert.equal(isOpenDelivery(twice), true); assert.equal(isOpenDelivery(thrice), false);
+  assert.deepEqual(classifyDeliveries([twice, thrice]), { open: 1, inTurn: 0, stuck: 0 });
 });

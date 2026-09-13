@@ -10,6 +10,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+// The project root by THIS FILE's location, not the cwd: `path.resolve('.')`
+// served 404s whenever the file was run from tests/ (2026-09-13).
+const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 import { startRestServer, withBrowserServer } from './helpers/harness.mjs';
 
 const ts = (n) => `2026-05-0${n}T00:00:00.000Z`;
@@ -648,7 +652,7 @@ test('clearing a raised hand does NOT invent an author', async () => {
       !Object.keys(roster).includes(resolution.author),
       `the resolution must not be attributed to a roster seat (got "${resolution.author}")`,
     );
-  }, { server: { board, staticDir: path.resolve('.') }, launch: { headless: 'new', args: ['--no-sandbox'] } });
+  }, { server: { board, staticDir: PROJECT_ROOT }, launch: { headless: 'new', args: ['--no-sandbox'] } });
 });
 
 /**

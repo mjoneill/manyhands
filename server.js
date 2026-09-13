@@ -34,6 +34,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { isOpenDelivery } from './core/delivery.mjs';   // #1346
 import { loadDomain, loadDomainShared, saveDomain } from './core/store.mjs';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { BOARD_TOOLS } from './core/board-tools.mjs';
@@ -3384,16 +3385,10 @@ function deliveriesOf(data) { return Array.isArray(data.deliveries) ? data.deliv
 const deliveryEvent = (op, e, actor) => ({ op, actor, entity: { kind: 'delivery', id: e['@id'] }, state: e });
 const DELIVERY_STATES = ['offered', 'queued', 'runner-claimed', 'turn-started', 'published', 'declined', 'failed'];
 const DELIVERY_CLAIMABLE = new Set(['offered', 'queued', 'failed']);
-// "Open" = the runner's drain query: never claimed, or failed with tries left.
-// A retry budget, not a retry loop: a model that fails every time stops at
-// three, and the record says so; a runner that died once gets its second try.
-const DELIVERY_MAX_ATTEMPTS = 3;
-const deliveryOpen = (e) => {
-  const st = deliveryState(e);
-  if (st === 'offered' || st === 'queued') return true;
-  if (st !== 'failed') return false;
-  return deliveryEventsOf(e).filter((ev) => ev['scrum:state'] === 'runner-claimed').length < DELIVERY_MAX_ATTEMPTS;
-};
+// "Open" = the runner's drain query: never claimed, or failed with tries left
+// (DELIVERY_MAX_ATTEMPTS, one constant shared with the status counter in
+// core/delivery.mjs). A retry budget, not a retry loop.
+const deliveryOpen = (e) => isOpenDelivery(deliveryToWire(e));
 const DELIVERY_SOURCES = new Set(['fanout', 'guest-runner', 'presence-bridge']);
 // What each step may follow. `runner-claimed` is DELIVERY_CLAIMABLE above.
 const DELIVERY_NEXT = {

@@ -55,6 +55,12 @@ async function tick(stateFile, receivers, sessions = FLAT_SESSIONS) {
       env: {
         ...process.env,
         SCRUM_STATUS_URL: `http://127.0.0.1:${srv.address().port}/channel/status`,
+        // #837 — the watch derives its cards/changes URLs from SCRUM_POST_URL and
+        // its DEFAULT is the live board. Left unset, this test read a real deploy's
+        // MAINTENANCE declaration (#1273) off production and the floor alarm was
+        // rightly muted — two failures on 2026-09-13 that were prod's state, not
+        // the code's. A dead port: the watch treats unreadable as "no maintenance".
+        SCRUM_POST_URL: 'http://127.0.0.1:9/api/conversations',
         SCRUM_FANOUT_STATE: stateFile,
         SCRUM_FANOUT_DRYRUN: '1',
       },
