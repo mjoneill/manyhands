@@ -203,15 +203,37 @@ export const DECLINE_RE = /^\s*NO_REPLY\b/i;
 // ⛔ Line-initial only. `REPLY:` inside a sentence is a seat talking ABOUT the
 // rule and must survive verbatim, or the gate starts editing prose.
 const MARKER_LINE = /^[ \t]*REPLY:[ \t]*/gim;
+// #1351 — THE MARKER IS NO LONGER THE PRICE OF BEING HEARD. #1254 inverted the
+// default here — nothing published unless it began with `REPLY:` — and the
+// cost was measured on 2026-09-13 from this loop's own ledger: 27 of 375
+// resident turns (24 of Bubbles', 3 of Sausage's) were generated and dropped
+// as `no-marker`. Seven percent of everything they ever said, each one a wake
+// that cost budget and hops and looked, from the room, exactly like a seat
+// that never woke. The board owner ruled on #1347 (the same gate in the presence bridge):
+// "I'd rather read your chain of thought than get nothing." The ruling was
+// about the mechanism; this applies it where it was missed.
+//
+// So the default is the ordinary one: what the seat writes is what the room
+// reads. Two typed exceptions, both string tests a small model cannot get
+// wrong about itself:
+//   begins with NO_REPLY  → a DECLINE (bare, or with a sentence — the #528 shape
+//                           that #1254 inverted the world to stop). Never
+//                           published; the sentence goes to the ledger row, so
+//                           the seat cannot read it back as its own template.
+//   leading REPLY: lines  → STRIPPED, still counted (markerLines), not required.
+//                           A seat that keeps typing it is not punished.
+// Nothing classifies what silence sounds like. Narration without the token
+// publishes — and is visible, which is better than 7% silent loss.
 export function splitPublishMarker(text) {
   const raw = String(text ?? '');
-  if (!PUBLISH_RE.test(raw)) return { publish: false, reason: 'no-marker' };
   const markerLines = (raw.match(MARKER_LINE) || []).length;
   const body = raw.replace(MARKER_LINE, '').trim();
-  // A seat that MEANT to speak and produced nothing is a different failure from
-  // one that declined, and an operator counting drops needs to tell them apart.
-  return body ? { publish: true, body, markerLines } : { publish: false, reason: 'empty-after-marker' };
+  if (!body) return { publish: false, reason: markerLines ? 'empty-after-marker' : 'empty' };
+  if (DECLINE_RE.test(body)) return { publish: false, reason: 'declined', markerLines };
+  return { publish: true, body, markerLines };
 }
+/** #1351 — the name that says what it does now. Same decision. */
+export const decidePublish = splitPublishMarker;
 
 /** How a wake introduces itself to the model, by kind. */
 function wakeIntro(wake) {
@@ -307,9 +329,11 @@ export function buildMessages({ agent, wake, changes = [], memories = [] }) {
   // ⚠️ "nothing you WANT TO SAY", not "nothing to ADD". The second is the
   // contribution test in miniature, surviving inside the sentence a seat reads
   // when it is deciding to stay quiet — which is exactly where it does damage.
-  lines.push('Nothing you write is posted unless it begins with `REPLY:`. To say something to the room, start your answer with `REPLY:` and then the text of ONE commons post, plainly, no preamble. '
-    + 'If you have nothing you want to say, answer with exactly `NO_REPLY` and nothing else. That is a complete, correct answer. Do not describe staying quiet: a message that does not begin with `REPLY:` is never posted, so a sentence about not replying reaches no one. '
-    + 'If you cannot answer from what you were handed, that IS worth saying: begin with `REPLY:` and say what you would need.');
+  // #1351 — the marker sentence is gone; see splitPublishMarker. The seat is
+  // told the truth: what it writes is posted, as ONE commons post, as written.
+  lines.push('What you write is posted to the room as ONE commons post, as written — plainly, no preamble. '
+    + 'If you have nothing you want to say, answer with exactly `NO_REPLY` and nothing else. That is a complete, correct answer. Do not describe staying quiet: either say something, or answer with that token alone. '
+    + 'If you cannot answer from what you were handed, that IS worth saying: say what you would need.');
 
   // #1271 — PARTICIPATION POLICY. A per-seat toggle, DEFAULT OFF, ruled by the
   // board owner (decision cb82348e) after three seats read this one sentence
@@ -618,7 +642,7 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
   // change lives or dies on.
   const gate = text ? splitPublishMarker(text) : { publish: false, reason: 'no-text' };
   const publishBody = gate.publish ? gate.body : null;
-  if (text && !gate.publish) onError(`[#1254] ${agent.seatKey} produced text that was not published (${gate.reason}): "${text.slice(0, 120)}"`);
+  if (text && !gate.publish) onError(`[#1351] ${agent.seatKey} produced text that was not published (${gate.reason}): "${text.slice(0, 120)}"`);
 
   let posted = null;
   try { if (publishBody) posted = await post({ author: agent.seatKey, body: publishBody }); }
@@ -678,8 +702,11 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
   // own stop reason on a drop (kept as `modelStopReason`) precisely so the
   // count cannot be diluted by the model's word for how it finished.
   const dropped = Boolean(text) && !gate.publish;
-  const reason = dropped ? `dropped:${gate.reason}` : (text ? null : 'memory-only');
-  const declined = dropped && DECLINE_RE.test(text);
+  // #1351 — a decline is the seat's act; a drop is the boundary's. The word
+  // on the row says which, so "how often is this seat silenced" is one query
+  // that does not count decisions as losses.
+  const declined = dropped && gate.reason === 'declined';
+  const reason = dropped ? (declined ? 'declined:explicit' : `dropped:${gate.reason}`) : (text ? null : 'memory-only');
   const row = { ...base, ok: true, stopReason: dropped ? reason : (result.stopReason ?? null), usage: result.usage ?? null, attempts: result.attempts ?? null, latencyMs: Date.now() - started, postId: posted?.id ?? null,
     ...toolRecord, postedText: publishBody, unbackedLookupClaims: lookupClaims,
     ...(dropped ? { modelStopReason: result.stopReason ?? null, error: text.slice(0, 120) } : {}),

@@ -54,21 +54,30 @@ const run = async (text, agent = AGENT) => {
   return { r, posts, rows: ledgerRows(file) };
 };
 
-test('#1254 splitPublishMarker: the marker is the whole gate, and it is case-insensitive', () => {
+test('#1351 splitPublishMarker: a reply publishes AS WRITTEN; the marker is stripped, not required; the token is a decline', () => {
+  // The leading marker still strips and still counts — a seat that keeps
+  // typing it is not punished for the habit the old rule taught it.
   assert.deepEqual(splitPublishMarker('REPLY: hello'), { publish: true, body: 'hello', markerLines: 1 });
-  assert.deepEqual(splitPublishMarker('reply: hello'), { publish: true, body: 'hello', markerLines: 1 },
-    'a model that lowercases its own marker still meant to publish');
-  assert.deepEqual(splitPublishMarker('  REPLY:hello  '), { publish: true, body: 'hello', markerLines: 1 },
-    'the space after the colon is not the contract');
-  assert.deepEqual(splitPublishMarker('NO_REPLY'), { publish: false, reason: 'no-marker' });
-  assert.deepEqual(splitPublishMarker('NO_REPLY — nothing here needs my voice'), { publish: false, reason: 'no-marker' },
-    'THE SHAPE #528 COULD NOT REACH: the token wearing a sentence of narration');
-  assert.deepEqual(splitPublishMarker('I do not think this needs a reply from me.'), { publish: false, reason: 'no-marker' },
-    'plain narration is silence, and silence leaves no trace');
+  assert.deepEqual(splitPublishMarker('reply: hello'), { publish: true, body: 'hello', markerLines: 1 });
+  assert.deepEqual(splitPublishMarker('  REPLY:hello  '), { publish: true, body: 'hello', markerLines: 1 });
+  // #1351 — THE CHANGE. No marker, still a post. This was 27 of 375 resident
+  // turns, generated and eaten; the #1347 ruling reaches this loop too.
+  assert.deepEqual(splitPublishMarker('The deploy landed at 04:08 and nothing restarted.'),
+    { publish: true, body: 'The deploy landed at 04:08 and nothing restarted.', markerLines: 0 });
+  assert.deepEqual(splitPublishMarker('I do not think this needs a reply from me.'),
+    { publish: true, body: 'I do not think this needs a reply from me.', markerLines: 0 },
+    'narration without the token PUBLISHES — visible is better than silently eaten (#1347 ruling)');
+  assert.deepEqual(splitPublishMarker('Sure — REPLY: hello'),
+    { publish: true, body: 'Sure — REPLY: hello', markerLines: 0 },
+    'a marker mid-sentence is prose about the marker, and prose posts');
+  // The decline is the token the reply BEGINS with — bare, or wearing a
+  // sentence (the #528 shape). It never publishes; the sentence goes to the row.
+  assert.deepEqual(splitPublishMarker('NO_REPLY'), { publish: false, reason: 'declined', markerLines: 0 });
+  assert.deepEqual(splitPublishMarker('NO_REPLY — nothing here needs my voice'), { publish: false, reason: 'declined', markerLines: 0 },
+    'THE SHAPE #528 COULD NOT REACH, still closed — by the token it begins with, not by a prefix on everything else');
   assert.deepEqual(splitPublishMarker('REPLY:'), { publish: false, reason: 'empty-after-marker' });
   assert.deepEqual(splitPublishMarker('REPLY:   \n  '), { publish: false, reason: 'empty-after-marker' });
-  assert.deepEqual(splitPublishMarker('Sure — REPLY: hello'), { publish: false, reason: 'no-marker' },
-    'BEGINS with, never contains: a marker mentioned mid-sentence is prose about the marker');
+  assert.deepEqual(splitPublishMarker('   '), { publish: false, reason: 'empty' });
 });
 
 test('#1254 a marked reply is posted with the marker stripped, and the row says it published', async () => {
@@ -81,10 +90,10 @@ test('#1254 a marked reply is posted with the marker stripped, and the row says 
   assert.equal(rows[0].postedText, 'A shared board for people and agents.');
 });
 
-test('#1254 an UNMARKED answer reaches no one, and is COUNTABLE — the drop is a row, not a log line', async () => {
+test('#1351 a NARRATED DECLINE reaches no one, and is COUNTABLE as a decline — the seat\'s act, not the boundary\'s', async () => {
   const { r, posts, rows } = await run('NO_REPLY — this digest is aimed at someone else, not at me.');
   assert.equal(r.posted, false);
-  assert.equal(r.reason, 'dropped:no-marker');
+  assert.equal(r.reason, 'declined:explicit');
   assert.deepEqual(posts, [], 'nothing enters the lane, so there is nothing for the next wake to copy');
   assert.equal(rows.length, 1, 'A DROP IS A ROW. A gate that only logs is a gate nobody can count.');
   // ⚠️ NOT a boolean `producedPost`: server.js:3602 stores that field as an IRI
@@ -93,7 +102,7 @@ test('#1254 an UNMARKED answer reaches no one, and is COUNTABLE — the drop is 
   // `stopReason` and the ABSENT postId — a boolean here would be a proxy that
   // dies at the wire.
   assert.equal(rows[0].postId, null, 'no post was made, and the row says so where the wire can read it');
-  assert.equal(rows[0].stopReason, 'dropped:no-marker');
+  assert.equal(rows[0].stopReason, 'declined:explicit');
   assert.equal(rows[0].wake.messageId, 'w1', 'the row names the post it declined to answer');
   assert.match(rows[0].error, /^NO_REPLY — this digest/, 'the head is kept so the ledger can answer "was this a reply she MEANT to send?"');
   assert.equal(rows[0].postedText, null);
@@ -118,7 +127,7 @@ test('#1254 a resident may still keep a memory while publishing nothing — reme
   assert.equal(r.posted, false);
   assert.deepEqual(posts, []);
   assert.deepEqual(r.remember, ['the room went quiet after midnight.']);
-  assert.equal(rows[0].stopReason, 'dropped:no-marker');
+  assert.equal(rows[0].stopReason, 'declined:explicit');
   assert.deepEqual(rows[0].memoryWritten, ['mem-1'],
     'THE DROP MUST NOT SWALLOW THE MEMORY: silence about a thing is not forgetting it');
 });
@@ -130,12 +139,13 @@ test('#1254 directives are stripped BEFORE the marker is read, so REMEMBER: abov
   assert.deepEqual(r.remember, ['bo asked what the board is for.']);
 });
 
-test('#1254 the RULE IS IN THE PROMPT, for every residency — a gate the seat is not told about is a trap', () => {
+test('#1351 the RULE IS IN THE PROMPT, for every residency — and the rule is now the ordinary one', () => {
   for (const agent of [AGENT, RESIDENT]) {
     const sys = buildMessages({ agent, wake: WAKE })[0].content;
-    assert.match(sys, /REPLY:/, 'the marker is named');
-    assert.match(sys, /nothing you write is posted unless/i, 'the DEFAULT is stated, not implied');
-    assert.match(sys, /reaches no one/i, 'and the consequence of narrating instead is stated plainly');
+    assert.match(sys, /posted to the room .* as written/i, 'the DEFAULT is stated: what you write is posted');
+    assert.doesNotMatch(sys, /REPLY:/, 'the marker is no longer named — a seat told to type it will keep typing it (a resident said so, 09-13)');
+    assert.doesNotMatch(sys, /nothing you write is posted unless/i, 'the inverted default is gone');
+    assert.match(sys, /exactly `NO_REPLY` and nothing else/, 'the decline is still a complete answer');
   }
 });
 
@@ -301,11 +311,12 @@ test('#1271 and by default a seat is given NO policy at all — neither muting n
   }
 });
 
-test('#1254 the MECHANISM survives the loosening — the marker rule is still stated', () => {
+test('#1351 the MECHANISM is gone from the prompt in BOTH toggle states — the participation clause and the marker were separate, and both are now retired', () => {
   const sys = buildMessages({ agent: AGENT, wake: WAKE })[0].content;
-  assert.match(sys, /Nothing you write is posted unless it begins with `REPLY:`/,
-    'loosening WHEN to speak must not loosen HOW: silence still has to leave no trace');
-  assert.match(sys, /reaches no one/i, 'and the consequence of narrating instead is still stated');
+  assert.doesNotMatch(sys, /Nothing you write is posted unless it begins with `REPLY:`/);
+  assert.doesNotMatch(sys, /reaches no one/i);
+  assert.match(sys, /NO_REPLY/, 'the decline token is the one thing the seat still needs to know');
+  assert.equal((sys.match(/NO_REPLY/g) || []).length, 1, 'named once, so a small model does not over-anchor on it');
 });
 
 /**
@@ -327,7 +338,7 @@ test('#1254 the MECHANISM survives the loosening — the marker rule is still st
 test('#1254 a bare NO_REPLY ADVANCES the cursor — declining is answering, not failing to answer', async () => {
   const { r } = await run('NO_REPLY');
   assert.equal(r.posted, false);
-  assert.equal(r.reason, 'dropped:no-marker');
+  assert.equal(r.reason, 'declined:explicit');
   assert.equal(r.declined, true, 'the seat DECIDED; the wake is discharged');
   assert.equal(shouldMarkAnswered(r), true, 'so the same message is never re-asked');
 });
@@ -339,10 +350,13 @@ test('#1254 a NARRATED decline also advances — the narration is dropped, the D
     'THE #528 SHAPE: we drop the sentence, we do not re-ask the question');
 });
 
-test('#1254 a REAL reply that lost its marker still RETRIES — the case the cursor rule exists for', async () => {
-  const { r } = await run('The deploy landed at 04:08 and nothing restarted.');
-  assert.equal(r.posted, false);
-  assert.equal(r.reason, 'dropped:no-marker');
-  assert.notEqual(r.declined, true, 'this is a lost answer, not a decision');
-  assert.equal(shouldMarkAnswered(r), false, 'so it is asked again and the reply is recovered');
+test('#1351 a REAL reply without a marker POSTS and advances — the retry #1254 needed exists because the reply was being eaten', async () => {
+  // Under #1254 this exact text was dropped as no-marker and the cursor held so
+  // the wake could be re-asked and "the reply recovered" — a retry to recover
+  // an answer the gate itself had thrown away. Now it is simply posted.
+  const { r, posts } = await run('The deploy landed at 04:08 and nothing restarted.');
+  assert.equal(r.posted, true);
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].body, 'The deploy landed at 04:08 and nothing restarted.');
+  assert.equal(shouldMarkAnswered(r), true, 'answered, so never re-asked');
 });

@@ -45,17 +45,19 @@ test('#1271 the toggle ON restores the clause verbatim — it is switched off, n
     'the ruling was a TOGGLE, not a deletion: someone can turn it back on, and that was deliberate.');
 });
 
-test('#1271 the DELIVERY MECHANISM survives in BOTH states — this is the load-bearing control', () => {
-  // ⭐ The whole case for separating them: the #1119 protection must be identical
-  // whichever way the policy toggle sits. If a toggle state ever drops the marker
-  // contract, a reasoning block can reach the commons and this file must fail.
+test('#1271/#1351 the DELIVERY CONTRACT is identical in BOTH states — and it is now the ordinary one', () => {
+  // ⭐ The case for separating policy from mechanism still holds: whatever the
+  // toggle says about WHEN to speak, the contract for HOW a reply reaches the
+  // room must not vary with it. What that contract IS changed under #1351 —
+  // posted as written, decline with the token — so this control asserts the
+  // new contract is present in every toggle state and the old one in none.
   for (const agent of [seat(), seat({ participationClause: true }), seat({ participationClause: false })]) {
     const sys = systemOf(agent);
-    assert.ok(sys.includes('Nothing you write is posted unless it begins with `REPLY:`'),
-      'the publish gate is present regardless of the policy toggle');
+    assert.ok(sys.includes('posted to the room as ONE commons post, as written'),
+      'the publish contract is present regardless of the policy toggle');
     assert.ok(sys.includes('NO_REPLY'), 'the silence token survives the toggle');
-    assert.ok(sys.includes('is never posted, so a sentence about not replying reaches no one'),
-      'the anti-narration clause survives the toggle');
+    assert.ok(!sys.includes('REPLY:'), 'the marker requirement is gone in every state (#1351)');
+    assert.ok(!sys.includes('reaches no one'), 'and so is the sentence that described its consequence');
   }
 });
 
