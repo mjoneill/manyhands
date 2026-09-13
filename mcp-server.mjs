@@ -1479,6 +1479,7 @@ function buildMcpServer() {
       residency: z.enum(['resident', 'guest']).optional(),
       wakeOn: z.array(z.enum(['mention', 'assignment', 'schedule'])).optional().describe('#1226 — wake sources; default mention'),
       everyMinutes: z.number().min(1).optional().describe('#1226 — the schedule wake interval, when wakeOn includes schedule'),
+      deliveryMode: z.enum(['wake', 'channel']).optional().describe('#1346 — how the resident HEARS the room. `wake` (default): mention / assignment / schedule, per wakeOn. `channel`: every commons post is offered through the Channel Delivery mode (Off / Soft / Hard); mention and schedule wakes are superseded, assignment still wakes. Slice 1 stores the choice; the resident inbox that delivers on it is slices 2–4.'),
       maxHops: z.number().int().min(1).max(20).optional().describe('#1196 — how many times this seat may look something up before it must answer. Deployment data, not a property of the loop: a hosted seat spends four hops in seconds where a local one pays a model reload for each. Omit to use the default.'),
       by: z.string().min(1).describe('Who defines this colleague. Declared, not authenticated.'),
     },

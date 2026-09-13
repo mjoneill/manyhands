@@ -896,6 +896,7 @@ function agentRow(a) {
         <label>Colour <input data-agent-color value="${esc(a.color || '')}" placeholder="#7c6cf0"></label>
         <label>Residency <select data-agent-residency>${opt(['resident', 'guest'], a.residency)}</select></label>
         <label>State <select data-agent-state>${opt(['invited', 'resting', 'retired'], a.state)}</select><span class="hint">resting or retired releases every card it holds</span></label>
+        <label>Delivery <select data-agent-delivery>${opt(['wake', 'channel'], a.deliveryMode || 'wake')}</select><span class="hint" data-agent-delivery-hint></span></label>
         <label>Wakes on <span data-agent-wake>${['mention', 'assignment', 'schedule'].map((w) => `<label class="check" style="display:inline-flex;margin-right:10px"><input type="checkbox" value="${w}"${(a.wakeOn || []).includes(w) ? ' checked' : ''}> ${w}</label>`).join('')}</span><span class="hint" data-agent-wake-state></span></label>
         <label>Every N minutes <input data-agent-every type="number" min="1" value="${a.everyMinutes ?? ''}" placeholder="(schedule only)"></label>
         <label>Budget per day <input data-agent-budget type="number" min="0" step="0.01" value="${a.budgetPerDay ?? ''}" placeholder="(none)"></label>
@@ -940,6 +941,34 @@ function agentRow(a) {
   row.querySelectorAll('[data-agent-wake] input').forEach((i) => i.addEventListener('change', refreshWakeState));
   refreshWakeState();
 
+  // #1346 — DELIVERY MODE. Two modes, mutually exclusive, a selector rather than
+  // a checkbox so they cannot combine silently. "channel": every post is offered
+  // through the Settings-page Channel Delivery mode (Off / Soft / Hard); the
+  // `mention` and `schedule` wake rules are SUPERSEDED — a mention arrives
+  // through the channel anyway, and the room is the clock — so their boxes
+  // grey out. `assignment` stays live: an assignment is an obligation, not a
+  // room post, and never enters the fanout. Slice 1 stores the choice and
+  // shows it truthfully; the transport that honours it is slices 2–4, and the
+  // hint says so rather than letting the selector promise a delivery that does
+  // not exist yet.
+  const delivery = row.querySelector('[data-agent-delivery]');
+  const deliveryHint = row.querySelector('[data-agent-delivery-hint]');
+  const refreshDelivery = () => {
+    const channel = delivery.value === 'channel';
+    row.querySelectorAll('[data-agent-wake] input').forEach((i) => {
+      const superseded = channel && i.value !== 'assignment';
+      i.disabled = superseded;
+      i.closest('label').style.opacity = superseded ? '0.45' : '';
+      i.closest('label').title = superseded ? 'superseded by channel delivery (#1346)' : '';
+    });
+    row.querySelector('[data-agent-every]').disabled = channel;
+    deliveryHint.textContent = channel
+      ? 'every commons post is offered through Channel Delivery (Off / Soft / Hard); mention and schedule wakes are superseded, assignment still wakes. ⚠️ Stored now; the resident inbox that delivers it lands in #1346 slices 2–4.'
+      : 'wakes on the rules to the left; the room reaches it only by mention, assignment or clock.';
+  };
+  delivery.addEventListener('change', refreshDelivery);
+  refreshDelivery();
+
   row.querySelector('[data-agent-version]').addEventListener('click', async () => {
     const body = row.querySelector('[data-agent-prompt]').value;
     const { ok, status, out } = await send('POST', `/api/agents/${encodeURIComponent(a.seatKey)}/prompt`, { body });
@@ -961,6 +990,7 @@ function agentRow(a) {
       residency: q('[data-agent-residency]').value,
       state: q('[data-agent-state]').value,
       wakeOn: [...row.querySelectorAll('[data-agent-wake] input:checked')].map((c) => c.value),
+      deliveryMode: q('[data-agent-delivery]').value,   // #1346
       everyMinutes: numOrNull(q('[data-agent-every]').value.trim()),
       budgetPerDay: numOrNull(q('[data-agent-budget]').value.trim()),
     };

@@ -3569,6 +3569,14 @@ const AGENT_CONTEXT_POLICIES = new Set(['artifact-only', 'thread']);
 const AGENT_RESIDENCIES = new Set(['resident', 'guest']);
 const AGENT_STATES = new Set(['invited', 'resting', 'retired']);
 const AGENT_WAKE_KINDS = new Set(['mention', 'assignment', 'schedule']);   // #1226
+// #1346 — how a resident HEARS the room. 'wake' is today's behaviour: mention,
+// assignment, schedule. 'channel' offers every post through the Channel
+// Delivery mode (Off/Soft/Hard); mention and schedule are superseded by it,
+// assignment is kept because an assignment is an obligation and never enters
+// the fanout. Slice 1 is the FIELD only — validated, stored, read back, shown
+// on the #1350 surface. The transport that honours it is slices 2–4.
+const AGENT_DELIVERY_MODES = new Set(['wake', 'channel']);
+const DELIVERY_MODE_DEFAULT = 'wake';
 function agentToWire(data, e) {
   const versions = agentPromptsOf(data).filter((v) => v['@type'] === 'scrum:AgentPromptVersion' && v['scrum:ofPrompt'] === AGENT_PROMPT_ID(e['scrum:seatKey']));
   const current = versions.find((v) => v['@id'] === e['scrum:currentPrompt']) || null;
@@ -3578,6 +3586,7 @@ function agentToWire(data, e) {
     contextPolicy: e['scrum:contextPolicy'] ?? 'thread', toolGrants: e['scrum:toolGrant'] ?? [],
     budgetPerDay: e['scrum:budgetPerDay'] ?? null, residency: e['scrum:residency'] ?? 'guest', state: e['scrum:state'] ?? 'invited',
     wakeOn: Array.isArray(e['scrum:wakeOn']) && e['scrum:wakeOn'].length ? e['scrum:wakeOn'] : ['mention'], everyMinutes: e['scrum:everyMinutes'] ?? null,
+    deliveryMode: AGENT_DELIVERY_MODES.has(e['scrum:deliveryMode']) ? e['scrum:deliveryMode'] : DELIVERY_MODE_DEFAULT,   // #1346
     // #1196 — whether this ROLE reasons before answering. Three states, not two:
     // unset sends no flag at all, because a model with no such flag must not be
     // told anything about it.
@@ -3625,6 +3634,7 @@ async function handleCreateAgent(req, res) {
     if (!AGENT_CONTEXT_POLICIES.has(contextPolicy)) return sendJSON(res, 400, { error: 'contextPolicy must be artifact-only or thread' });
     const residency = body.residency ?? 'guest';
     if (!AGENT_RESIDENCIES.has(residency)) return sendJSON(res, 400, { error: 'residency must be resident or guest' });
+    if (body.deliveryMode !== undefined && !AGENT_DELIVERY_MODES.has(body.deliveryMode)) return sendJSON(res, 400, { error: `unknown deliveryMode ${JSON.stringify(body.deliveryMode)} — wake or channel (#1346)` });
     const toolGrants = Array.isArray(body.toolGrants) ? body.toolGrants.map(String).filter(Boolean) : [];
     const budget = body.budgetPerDay == null ? null : Number(body.budgetPerDay);
     if (budget != null && !(Number.isFinite(budget) && budget >= 0)) return sendJSON(res, 400, { error: 'budgetPerDay must be a non-negative number' });
@@ -3646,6 +3656,7 @@ async function handleCreateAgent(req, res) {
         // #1226 — wake sources are DATA on the node: mention | assignment | schedule
         'scrum:wakeOn': Array.isArray(body.wakeOn) && body.wakeOn.length ? body.wakeOn.filter((w) => AGENT_WAKE_KINDS.has(w)) : ['mention'],
         'scrum:everyMinutes': body.everyMinutes == null ? null : Number(body.everyMinutes),
+        ...(body.deliveryMode !== undefined ? { 'scrum:deliveryMode': body.deliveryMode } : {}),   // #1346 — validated above
         'scrum:maxHops': body.maxHops == null ? null : Number(body.maxHops),
       };
       const identity = { '@id': promptId, '@type': 'scrum:AgentPrompt', 'scrum:ofAgent': agent['@id'], 'scrum:importedAt': now };
@@ -3709,7 +3720,7 @@ async function handleAgentPromptVersion(req, res, seat) {
 // nobody happened to read the value back.
 const AGENT_PATCH_FIELDS = new Set(['by', 'state', 'contextPolicy', 'toolGrants', 'budgetPerDay', 'model', 'modelKey',
   'name', 'emoji', 'color', 'residency', 'wakeOn', 'everyMinutes', 'thinking', 'maxHops', 'prompt', 'sampling',
-  'participationClause']);
+  'participationClause', 'deliveryMode']);   // #1346
 // #1258 — sampling is BEHAVIOUR and lives on the agent: two seats can share one
 // registered model and run different temperatures. Until this field existed the
 // only ways to write it replaced the whole model spec (`model`, which also
@@ -3834,6 +3845,7 @@ async function handlePatchAgent(req, res, seat) {
       if (body.residency != null) { if (!AGENT_RESIDENCIES.has(body.residency)) return { status: 400, wire: { error: 'residency must be resident or guest' } }; updated['scrum:residency'] = body.residency; }
       if (Array.isArray(body.wakeOn)) { const bad = body.wakeOn.find((w) => !AGENT_WAKE_KINDS.has(w)); if (bad) return { status: 400, wire: { error: `unknown wake kind ${JSON.stringify(bad)} — mention, assignment or schedule` } }; updated['scrum:wakeOn'] = body.wakeOn.length ? body.wakeOn : ['mention']; }
       if (body.everyMinutes !== undefined) updated['scrum:everyMinutes'] = body.everyMinutes == null ? null : Number(body.everyMinutes);
+      if (body.deliveryMode !== undefined) { if (!AGENT_DELIVERY_MODES.has(body.deliveryMode)) return { status: 400, wire: { error: `unknown deliveryMode ${JSON.stringify(body.deliveryMode)} — wake or channel (#1346)` } }; updated['scrum:deliveryMode'] = body.deliveryMode; }
       if (body.thinking !== undefined) updated['scrum:thinking'] = body.thinking === null ? null : !!body.thinking;
       if (body.participationClause !== undefined) updated['scrum:participationClause'] = body.participationClause === null ? null : !!body.participationClause;
       if (body.maxHops !== undefined) updated['scrum:maxHops'] = body.maxHops === null ? null : Number(body.maxHops);

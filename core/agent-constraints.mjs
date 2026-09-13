@@ -42,6 +42,7 @@ export const CODE_DEFAULTS = Object.freeze({
   residency: 'guest',
   state: 'invited',
   participationClause: false,
+  deliveryMode: 'wake',   // #1346 — today's behaviour, named rather than inferred from absence
 });
 
 const has = (v) => v !== undefined && v !== null;
@@ -63,11 +64,6 @@ export function unseenLayers(node) {
       layer: 'env',
       what: 'SCRUM_GUEST_STATE_FILE, SCRUM_MODEL_LEDGER_FILE, the API key named by apiKeyRef',
       why: 'set in the process that runs the seat (guest-once.mjs); the board cannot read another process\'s environment',
-    },
-    {
-      layer: 'channel delivery',
-      what: 'delivery mode (wake rules vs channel-managed Off/Soft/Hard/TokenRing)',
-      why: 'not a field yet — #1346 builds it; until then every board-native agent is wake-rule only',
     },
   ];
 }
@@ -123,7 +119,7 @@ export function agentConstraints(node, { model = null, promptVersions = [], mode
       participationClause: has(node['scrum:participationClause']) ? fromRecord(node['scrum:participationClause']) : codeDefault(CODE_DEFAULTS.participationClause),
       wakeOn,
       everyMinutes,
-      deliveryMode: unset(),   // #1346 — not a field yet; listed in `unseen`
+      deliveryMode: has(node['scrum:deliveryMode']) ? fromRecord(node['scrum:deliveryMode']) : codeDefault(CODE_DEFAULTS.deliveryMode),   // #1346 slice 1
       toolGrants: Array.isArray(node['scrum:toolGrant']) ? fromRecord(node['scrum:toolGrant']) : codeDefault([]),
       contextPolicy: has(node['scrum:contextPolicy']) ? fromRecord(node['scrum:contextPolicy']) : codeDefault(CODE_DEFAULTS.contextPolicy),
       residency: has(node['scrum:residency']) ? fromRecord(node['scrum:residency']) : codeDefault(CODE_DEFAULTS.residency),

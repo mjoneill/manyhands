@@ -76,13 +76,16 @@ test('#1350 spent today comes from the ledger and is stated against the budget; 
   assert.deepEqual(r.constraints.holds, { value: [{ card: 42, title: 'A card' }], source: 'board' });
 });
 
-test('#1350 ACCEPTANCE 4 — the layers the board cannot read are LISTED with a reason, and delivery mode is declared unset until #1346 exists', () => {
+test('#1350 ACCEPTANCE 4 — the layers the board cannot read are LISTED with a reason; delivery mode LEFT the list when #1346 made it a field', () => {
   const r = agentConstraints(base());
   const layers = r.unseen.map((u) => u.layer);
-  assert.deepEqual(layers, ['plugin config', 'env', 'channel delivery']);
+  // #1346 slice 1 — 'channel delivery' was here until the field existed. An
+  // inspector must not declare blind a thing it can read, so the list shrank.
+  assert.deepEqual(layers, ['plugin config', 'env']);
   for (const u of r.unseen) assert.ok(u.what && u.why, `${u.layer} must say what and why`);
   assert.match(r.unseen[0].what, /debounce/);
-  assert.deepEqual(r.constraints.deliveryMode, { value: null, source: 'unset' });
+  assert.deepEqual(r.constraints.deliveryMode, { value: 'wake', source: 'code default' },
+    'absent on the record ⇒ the code default, NAMED as such — never unset, never blank');
 });
 
 test('#1350 wire — GET /api/agents/:seat/constraints serves the inspector; an unknown seat is a 404 that still names the blind spot', async () => {
@@ -101,7 +104,7 @@ test('#1350 wire — GET /api/agents/:seat/constraints serves the inspector; an 
     assert.deepEqual(r.body.constraints.budgetPerDay, { value: 0.5, source: 'agent record' });
     assert.equal(r.body.constraints.spentToday.source, 'ledger');
     assert.deepEqual(r.body.constraints.promptVersion.value, 1);
-    assert.ok(Array.isArray(r.body.unseen) && r.body.unseen.length >= 3);
+    assert.ok(Array.isArray(r.body.unseen) && r.body.unseen.length >= 2);   // #1346 took 'channel delivery' off the list
 
     const missing = await api('GET', '/api/agents/nobody/constraints');
     assert.equal(missing.status, 404);
