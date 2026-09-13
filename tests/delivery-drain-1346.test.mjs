@@ -25,7 +25,7 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
-import { startRestServer, makeBoardFixture } from './helpers/harness.mjs';
+import { startRestServer, startPair, mcpSession, makeBoardFixture } from './helpers/harness.mjs';
 import { effectiveWakeOn } from '../core/guest-loop.mjs';
 
 const tmpdir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'drain-1346-'));
@@ -63,7 +63,18 @@ test('#1346 GUARD — no step without a claim, nothing after a terminal, and a l
     for (const s of ['turn-started', 'failed', 'declined', 'runner-claimed']) {
       assert.equal((await ev({ state: s })).status, 409, `${s} after published must be refused`);
     }
-    // A delivery of a message that is DELETED is still a record; nothing here depends on the message body.
+    // THE RETRY BUDGET: failed-with-tries-left is open; a third failure is not.
+    const m2 = (await api(srv.baseUrl, 'POST', '/api/conversations', { author: 'ada', body: 'fails every time' })).body;
+    const d2 = (await api(srv.baseUrl, 'POST', '/api/deliveries', { to: 'gizmo', conversation: m2.id, source: 'fanout', by: 'board' })).body;
+    const ev2 = (body) => api(srv.baseUrl, 'POST', `/api/deliveries/${encodeURIComponent(d2.id)}/events`, { source: 'guest-runner', by: 'gizmo', ...body });
+    const openIds = async () => (await api(srv.baseUrl, 'GET', '/api/deliveries?to=gizmo&open=1')).body.deliveries.map((x) => x.id);
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      assert.ok((await openIds()).includes(d2.id), `open before attempt ${attempt}`);
+      assert.equal((await ev2({ state: 'runner-claimed' })).status, 201);
+      assert.equal((await ev2({ state: 'failed', note: 'model timeout' })).status, 201);
+    }
+    assert.ok(!(await openIds()).includes(d2.id), 'three failures: no longer open — a retry budget, not a retry loop');
+    assert.equal((await api(srv.baseUrl, 'GET', `/api/deliveries?conversation=${encodeURIComponent(m2.id)}`)).body.deliveries[0].state, 'failed', 'and the record says so');
   } finally { await srv.stop(); }
 });
 
@@ -183,4 +194,76 @@ test('#1346 DRAIN SEAM — N open deliveries → ONE digest turn; every record w
     assert.equal((await open()).length, 1);
     assert.match(r4.out + r4.err, /budget/i, 'the runner says WHY it left them');
   } finally { await ollama.stop(); await srv.stop(); }
+});
+
+// ── slice 4: the STALE SWEEP and the DISCLOSURE ─────────────────────────────
+
+test('#1346 STALE SWEEP — a delivery left at turn-started by a runner that died is failed (reason: stale) and drained again; a fresh one is left alone', async () => {
+  const srv = await startRestServer({ board: fresh() });
+  const ollama = await fakeOllama('REPLY: back from the dead.');
+  const dir = tmpdir(); const stateFile = path.join(dir, 'gizmo.state.json');
+  // A stale window of ONE SECOND so the test does not wait ten minutes; production keeps the lock's window.
+  const env = { SCRUM_BOARD_URL: srv.baseUrl, SCRUM_GUEST_STATE_FILE: stateFile, SCRUM_DELIVERY_STALE_MS: '1000' };
+  try {
+    assert.equal((await api(srv.baseUrl, 'POST', '/api/agents', {
+      seatKey: 'gizmo', prompt: 'Be brief.', model: { model: 'fake', protocol: 'ollama-native', baseUrl: ollama.baseUrl },
+      residency: 'resident', contextPolicy: 'artifact-only', by: 'ada', deliveryMode: 'channel',
+    })).status, 201);
+    const mk = async (body) => {
+      const m = (await api(srv.baseUrl, 'POST', '/api/conversations', { author: 'ada', body })).body;
+      return (await api(srv.baseUrl, 'POST', '/api/deliveries', { to: 'gizmo', conversation: m.id, source: 'fanout', by: 'board' })).body;
+    };
+    const ev = (id, body) => api(srv.baseUrl, 'POST', `/api/deliveries/${encodeURIComponent(id)}/events`, { source: 'guest-runner', by: 'gizmo', ...body });
+    // The crash shape: claimed, turn started, then the process died.
+    const dead = await mk('answered by a runner that died');
+    await ev(dead.id, { state: 'runner-claimed' }); await ev(dead.id, { state: 'turn-started' });
+    assert.equal((await api(srv.baseUrl, 'GET', '/api/deliveries?to=gizmo&open=1')).body.deliveries.length, 0, 'invisible to open — the finding');
+    await new Promise((r) => setTimeout(r, 1200));
+    // A FRESH claim, inside the window: must not be swept.
+    const live = await mk('being answered right now');
+    await ev(live.id, { state: 'runner-claimed' });
+
+    const r = await runOnce(env);
+    assert.equal(r.code, 0, r.err + r.out);
+    const byId = Object.fromEntries((await api(srv.baseUrl, 'GET', '/api/deliveries?to=gizmo')).body.deliveries.map((d) => [d.id, d]));
+    assert.deepEqual(byId[dead.id].events.map((e) => e.state), ['offered', 'runner-claimed', 'turn-started', 'failed', 'runner-claimed', 'turn-started', 'published'],
+      `swept to failed, reclaimed at attempt 2, drained — ${JSON.stringify(byId[dead.id].events)}`);
+    assert.equal(byId[dead.id].events[3].reason, 'stale', 'the sweep says why');
+    assert.equal(byId[dead.id].events[4].attempt, 2);
+    assert.deepEqual(byId[live.id].events.map((e) => e.state), ['offered', 'runner-claimed'], 'a claim inside the window is somebody\'s turn in progress — untouched');
+    assert.equal(ollama.calls.length, 1);
+    assert.match(r.out + r.err, /stale/i, 'the sweep is logged');
+  } finally { await ollama.stop(); await srv.stop(); }
+});
+
+test('#1346 DISCLOSURE — /channel/status carries every channel-mode resident: mode, open, in-turn, stuck', async () => {
+  const pair = await startPair({ board: fresh() });
+  try {
+    const rest = pair.rest.baseUrl;
+    const mkAgent = (seatKey, extra) => api(rest, 'POST', '/api/agents', { seatKey, prompt: 'p', residency: 'resident', by: 'ada', model: { model: 'fake', protocol: 'ollama-native', baseUrl: 'http://127.0.0.1:1' }, ...extra });
+    assert.equal((await mkAgent('gizmo', { deliveryMode: 'channel' })).status, 201);
+    assert.equal((await mkAgent('bo', {})).status, 201, 'wake mode — must NOT appear as a resident inbox');
+    const status = async () => (await fetch(`${pair.mcp.baseUrl}/channel/status`)).json();
+    let s = await status();
+    assert.deepEqual(s.residents, { gizmo: { deliveryMode: 'channel', open: 0, inTurn: 0, stuck: 0 } }, JSON.stringify(s.residents));
+
+    const mk = async (body) => {
+      const m = (await api(rest, 'POST', '/api/conversations', { author: 'ada', body })).body;
+      return (await api(rest, 'POST', '/api/deliveries', { to: 'gizmo', conversation: m.id, source: 'fanout', by: 'board' })).body;
+    };
+    const ev = (id, body) => api(rest, 'POST', `/api/deliveries/${encodeURIComponent(id)}/events`, { source: 'guest-runner', by: 'gizmo', ...body });
+    await mk('one'); await mk('two');
+    const claimed = await mk('three'); await ev(claimed.id, { state: 'runner-claimed' }); await ev(claimed.id, { state: 'turn-started' });
+    const done = await mk('four'); await ev(done.id, { state: 'runner-claimed' }); await ev(done.id, { state: 'published' });
+    s = await status();
+    assert.equal(s.residents.gizmo.open, 2, 'the two offered');
+    assert.equal(s.residents.gizmo.inTurn, 1, 'the one claimed or in a turn, inside the stale window');
+    assert.equal(s.residents.gizmo.stuck, 0, 'nothing is older than the window yet');
+    assert.ok(!('bo' in s.residents));
+    // The fanout itself also offers to gizmo — through MCP, the whole path.
+    const session = await mcpSession(pair.mcp.mcpUrl);
+    await session.callTool('conversation_post', { author: 'bex', body: 'five, through the fanout' });
+    for (let i = 0; i < 40 && (await status()).residents.gizmo.open < 3; i++) await new Promise((r) => setTimeout(r, 50));
+    assert.equal((await status()).residents.gizmo.open, 3);
+  } finally { await pair.stop(); }
 });

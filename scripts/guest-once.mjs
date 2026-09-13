@@ -21,6 +21,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { callModel } from '../core/model-adapter.mjs';
+import { deliveryStaleMs, isStaleDelivery } from '../core/delivery.mjs';   // #1346
 import { findMentions, findWakes, guestOnce, fetchBoundedChanges, shouldMarkAnswered, mentionScanPath, fetchMentionWindow, acquireLock, releaseLock, effectiveWakeOn, budgetCheck } from '../core/guest-loop.mjs';
 import { makeExecutor } from '../core/board-tools.mjs';
 
@@ -142,7 +143,20 @@ const channelMode = agent.deliveryMode === 'channel' && !opt('--once-id');
 let claimed = [];
 if (channelMode && !wakes.length) {
   let openList = [];
-  try { openList = (await get(`/api/deliveries?to=${encodeURIComponent(agent.seatKey)}&open=1`)).deliveries ?? []; }
+  try {
+    const mine = (await get(`/api/deliveries?to=${encodeURIComponent(agent.seatKey)}`)).deliveries ?? [];
+    // THE STALE SWEEP (slice 3 review): a runner that claimed, started its
+    // turn and died leaves a record no producer can move. Older than the
+    // window ⇒ failed (reason: stale), which makes it claimable again below
+    // at attempt +1. Inside the window it is somebody's turn — untouched.
+    const staleMs = deliveryStaleMs();
+    for (const d of mine.filter((x) => isStaleDelivery(x, { staleMs }))) {
+      if (dry) { console.log(`[dry-run] would mark delivery ${d.id} failed (stale)`); continue; }
+      const r = await fetch(`${BOARD}/api/deliveries/${encodeURIComponent(d.id)}/events`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state: 'failed', reason: 'stale', note: `no outcome ${Math.round(staleMs / 1000)}s after ${d.state}`, source: 'guest-runner', by: agent.seatKey }) });
+      console.log(`[#1346] ${agent.seatKey}: delivery ${d.id} was ${d.state} past the stale window — marked failed (${r.status}); reclaimable`);
+    }
+    openList = (await get(`/api/deliveries?to=${encodeURIComponent(agent.seatKey)}&open=1`)).deliveries ?? [];
+  }
   catch (e) { console.error(`[#1346] ${agent.seatKey}: deliveries unreadable — nothing drained this run: ${e.message}`); }
   if (openList.length) {
     // The budget is read BEFORE any claim. A breached budget must leave the

@@ -161,6 +161,16 @@ export const KIND_DECLARATIONS = Object.freeze([
       + '"what happened to this message" — that the bridge answers for its own lane.',
   },
   {
+    name: 'scrum:DeliveryEvent', eventKind: null, collection: null,
+    createdBy: 'the graph projection, one per entry of a Delivery\'s hasEvent[] (written by POST /api/deliveries/:id/events)',
+    definition: 'ONE APPEND-ONLY STEP of a Delivery (#1346), minted by the projection so "how many were '
+      + 'claimed and never published" is a filter over nodes rather than a string parse: `scrum:ofDelivery` '
+      + 'points home; `scrum:state` is what happened (offered · queued · runner-claimed · turn-started · '
+      + 'published · declined · failed); `scrum:source` is who did it (fanout · guest-runner · '
+      + 'presence-bridge); `scrum:at`, `scrum:attempt`, and `scrum:reason` (whose act a terminal state '
+      + 'was — explicit is the seat\'s own NO). Never edited: the latest by `scrum:at` is the current state.',
+  },
+  {
     name: 'scrum:Model', eventKind: 'model', collection: 'models',
     createdBy: 'model_register',
     definition: 'A MODEL THE BOARD CAN CALL, as a node rather than a line in a JSON file (#1197): provider, '

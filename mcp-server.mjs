@@ -46,6 +46,7 @@ const ROSTER_SEATS = configureIdentities(loadRoster());
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createChannelScheduler } from './core/channel-scheduler.mjs';
+import { deliveryStaleMs, classifyDeliveries } from './core/delivery.mjs';   // #1346
 import { mintOnce, claimWindow, readPool, writePool, recentWhispers } from './whisper-store.mjs';
 import { tendingTick, lastQualifyingActivity } from './core/tending-tick.mjs';
 import { tendingEnabled, quietAfterMinutes } from './tending-config.mjs';
@@ -2583,6 +2584,20 @@ setInterval(reapIdleSessions, REAP_SWEEP_MS).unref();
 // stream. Read from the agent records per fanout — the mode is a field on the
 // board (slice 1), and a cache would be one more place for it to go stale.
 const RESIDENT_TARGET = 'resident:';
+async function residentInboxes() {
+  try {
+    const agents = await apiCall('GET', '/api/agents');
+    const out = {};
+    const staleMs = deliveryStaleMs();
+    for (const a of (Array.isArray(agents) ? agents : []).filter((x) => x && x.deliveryMode === 'channel' && x.state === 'invited' && x.seatKey)) {
+      const list = (await apiCall('GET', `/api/deliveries?to=${encodeURIComponent(a.seatKey)}`))?.deliveries ?? [];
+      out[a.seatKey] = { deliveryMode: 'channel', ...classifyDeliveries(list, { staleMs }) };
+    }
+    return out;
+  } catch (e) {
+    return { error: `resident inboxes unreadable: ${e.message}` };
+  }
+}
 async function residentTargets(conversation) {
   let agents;
   try { agents = await apiCall('GET', '/api/agents'); }
@@ -3146,10 +3161,17 @@ const httpServer = http.createServer(async (req, res) => {
           s.lastBeatOk = m.lastBeatOk ?? null;
         }
       }
+      // #1346 — the RESIDENT INBOXES beside the streams: every channel-mode
+      // resident with {open, inTurn, stuck} from its delivery records, so the
+      // fanout watch and the constraints surface can see a seat that has no
+      // stream and is nonetheless receiving. Read from the board on each call;
+      // unreadable ⇒ named as such, never an empty object pretending to be zero.
+      const residents = await residentInboxes();
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({
         pending: channelScheduler.pending(),
         mode: CHANNEL_STAGGER_OFF ? 'off' : (readConfig().mode || 'off'),
+        residents,
         receivers,
         sessions: transports.size,
         seats,

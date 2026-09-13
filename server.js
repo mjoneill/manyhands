@@ -3384,7 +3384,16 @@ function deliveriesOf(data) { return Array.isArray(data.deliveries) ? data.deliv
 const deliveryEvent = (op, e, actor) => ({ op, actor, entity: { kind: 'delivery', id: e['@id'] }, state: e });
 const DELIVERY_STATES = ['offered', 'queued', 'runner-claimed', 'turn-started', 'published', 'declined', 'failed'];
 const DELIVERY_CLAIMABLE = new Set(['offered', 'queued', 'failed']);
-const DELIVERY_OPEN = new Set(['offered', 'queued']);
+// "Open" = the runner's drain query: never claimed, or failed with tries left.
+// A retry budget, not a retry loop: a model that fails every time stops at
+// three, and the record says so; a runner that died once gets its second try.
+const DELIVERY_MAX_ATTEMPTS = 3;
+const deliveryOpen = (e) => {
+  const st = deliveryState(e);
+  if (st === 'offered' || st === 'queued') return true;
+  if (st !== 'failed') return false;
+  return deliveryEventsOf(e).filter((ev) => ev['scrum:state'] === 'runner-claimed').length < DELIVERY_MAX_ATTEMPTS;
+};
 const DELIVERY_SOURCES = new Set(['fanout', 'guest-runner', 'presence-bridge']);
 // What each step may follow. `runner-claimed` is DELIVERY_CLAIMABLE above.
 const DELIVERY_NEXT = {
@@ -4542,7 +4551,7 @@ function handleListDeliveries(req, res) {
   let out = deliveriesOf(readBoard());
   if (q.to) out = out.filter((d) => d['scrum:deliveredTo'] === q.to);
   if (q.conversation) out = out.filter((d) => d['scrum:ofConversation'] === q.conversation);
-  if (q.open === '1' || q.open === 'true') out = out.filter((d) => DELIVERY_OPEN.has(deliveryState(d)));
+  if (q.open === '1' || q.open === 'true') out = out.filter(deliveryOpen);
   out = out.map(deliveryToWire).sort((a, b) => (a.offeredAt < b.offeredAt ? -1 : a.offeredAt > b.offeredAt ? 1 : 0));
   const limit = Number.parseInt(q.limit, 10);
   if (Number.isInteger(limit) && limit > 0) out = out.slice(0, limit);
