@@ -235,9 +235,27 @@ export function splitPublishMarker(text) {
 /** #1351 — the name that says what it does now. Same decision. */
 export const decidePublish = splitPublishMarker;
 
+/**
+ * #1346 — which wake rules are IN FORCE for this agent. In channel mode every
+ * post reaches the seat through its delivery record, so a mention wake would
+ * answer the same message twice and a schedule wake has no job — the room is
+ * the clock. Assignment stays: a card assigned to a resident is an obligation,
+ * never enters the fanout, and would otherwise wait for the next unrelated
+ * post to drain the inbox. Wake mode is untouched.
+ */
+export function effectiveWakeOn(agent) {
+  const on = Array.isArray(agent?.wakeOn) && agent.wakeOn.length ? agent.wakeOn : ['mention'];
+  return agent?.deliveryMode === 'channel' ? on.filter((k) => k === 'assignment') : on;
+}
+
 /** How a wake introduces itself to the model, by kind. */
 function wakeIntro(wake) {
   switch (wake?.kind) {
+    case 'channel': {
+      const posts = Array.isArray(wake.posts) ? wake.posts : [];
+      return `${posts.length} post${posts.length === 1 ? '' : 's'} on the commons ${posts.length === 1 ? 'was' : 'were'} delivered to you since your last turn (oldest first). This is ONE turn for all of them: answer what calls for you, and NO_REPLY if nothing does.\n`
+        + posts.map((m) => `[${m.createdAt || 'unknown time'}] ${m.author}: ${m.body}`).join('\n');
+    }
     case 'assignment': return `A card on the board was assigned to you and nobody holds it:\n#${wake.shortId ?? '?'} ${wake.title ?? ''}${wake.body ? `\n${String(wake.body).slice(0, 600)}` : ''}`;
     case 'schedule': return `Your scheduled wake (${wake.createdAt || 'now'}). Nobody asked you anything; look at your memory and what changed, and say what, if anything, you want to do or note.`;
     default: return `A message on the commons mentioned you:\n[${wake.createdAt || 'unknown time'}] ${wake.author}: ${wake.body}`;
@@ -255,7 +273,7 @@ function wakeIntro(wake) {
  * per run; the rest wait for the next.
  */
 export function findWakes({ agent, messages = [], cards = [], state = {}, now = new Date().toISOString() }) {
-  const on = Array.isArray(agent.wakeOn) && agent.wakeOn.length ? agent.wakeOn : ['mention'];
+  const on = effectiveWakeOn(agent);   // #1346 — channel mode keeps only assignment
   const out = [];
   if (on.includes('mention')) {
     for (const m of findMentions(messages, agent.seatKey, { sinceId: state.lastAnsweredId ?? null })) out.push({ kind: 'mention', ...m });
@@ -497,10 +515,12 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
   const base = {
     ledger: 'pre-P6', agent: agent.seatKey, model: agent.model.model, protocol: agent.model.protocol,
     provider: agent.model.baseUrl || null, promptVersion: agent.promptVersion ?? null,
-    wake: { kind: wake.kind || 'mention', messageId: wake.id ?? null, author: wake.author ?? null },
+    wake: { kind: wake.kind || 'mention', messageId: wake.id ?? null, author: wake.author ?? null,
+      // #1346 — a channel digest answers MANY messages; the ledger names them all.
+      ...(Array.isArray(wake.messageIds) ? { messageIds: wake.messageIds } : {}) },
     memory: { handed: mem.length, state: memState },
     contextHanded: { policy: agent.contextPolicy || 'thread', changesRows: (agent.contextPolicy === 'artifact-only') ? 0 : rows.length },
-    contextHandedTo: [wake.id, ...((agent.contextPolicy === 'artifact-only') ? [] : rows.slice(-20).map((c) => c.id))].filter(Boolean),
+    contextHandedTo: [...(Array.isArray(wake.messageIds) ? wake.messageIds : [wake.id]), ...((agent.contextPolicy === 'artifact-only') ? [] : rows.slice(-20).map((c) => c.id))].filter(Boolean),
     // #1196 — what this seat MAY reach, recorded whether it reached or not: an
     // empty answer from a seat with no grants and one from a seat that looked
     // and found nothing are different facts.

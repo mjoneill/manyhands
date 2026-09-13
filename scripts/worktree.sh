@@ -56,10 +56,17 @@ case "${1:-}" in
     if git -C "$REPO" show-ref --verify --quiet "refs/heads/$branch"; then
       git -C "$REPO" worktree add "$dest" "$branch"
     else
-      git -C "$REPO" worktree add -b "$branch" "$dest" main
+      # Cut from ORIGIN's main, not the dev checkout's. Seats push from
+      # worktrees and nobody pulls the dev tree, so its `main` goes stale by
+      # every push made since — a fix worktree cut from it patched the wrong
+      # tree on 2026-09-13 (#877). If the fetch fails the local ref is the
+      # fallback, and the line below says which one it was.
+      base=main
+      if git -C "$REPO" fetch -q origin main 2>/dev/null; then base=origin/main; else say "⚠️ could not fetch origin — cutting from LOCAL main, which may be stale"; fi
+      git -C "$REPO" worktree add -b "$branch" "$dest" "$base"
     fi
     [ -d "$REPO/node_modules" ] && ln -s "$REPO/node_modules" "$dest/node_modules"
-    say "✓ $dest  on $branch  (from main @ $(git -C "$REPO" rev-parse --short main))"
+    say "✓ $dest  on $branch  (from ${base:-$branch} @ $(git -C "$dest" rev-parse --short HEAD))"
     say "  card: $(card_line "$card")"
     # The push gate clones by BRANCH NAME to build its snapshot, so `HEAD:main`
     # is refused with "Remote branch HEAD not found" — name the branch.

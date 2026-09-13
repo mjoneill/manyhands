@@ -3386,6 +3386,12 @@ const DELIVERY_STATES = ['offered', 'queued', 'runner-claimed', 'turn-started', 
 const DELIVERY_CLAIMABLE = new Set(['offered', 'queued', 'failed']);
 const DELIVERY_OPEN = new Set(['offered', 'queued']);
 const DELIVERY_SOURCES = new Set(['fanout', 'guest-runner', 'presence-bridge']);
+// What each step may follow. `runner-claimed` is DELIVERY_CLAIMABLE above.
+const DELIVERY_NEXT = {
+  offered: new Set(['offered', 'queued']), queued: new Set(['offered', 'queued']),
+  'turn-started': new Set(['runner-claimed']),
+  published: new Set(['runner-claimed', 'turn-started']), declined: new Set(['runner-claimed', 'turn-started']), failed: new Set(['runner-claimed', 'turn-started']),
+};
 const deliveryEventsOf = (e) => (Array.isArray(e['scrum:hasEvent']) ? e['scrum:hasEvent'] : []);
 const deliveryState = (e) => deliveryEventsOf(e).at(-1)?.['scrum:state'] ?? 'offered';
 function deliveryToWire(e) {
@@ -4498,6 +4504,14 @@ async function handleCreateDeliveryEvent(req, res, id) {
       // at once cannot both claim it: the second sees the first's claim here.
       if (body.state === 'runner-claimed' && !DELIVERY_CLAIMABLE.has(latest)) {
         return { status: 409, wire: { error: `delivery is ${latest}; only an offered, queued or failed delivery can be claimed`, state: latest } };
+      }
+      // THE OTHER TRANSITIONS, guarded (slice 2 review): a step needs an open
+      // claim, a terminal state accepts nothing, and offered/queued may only
+      // precede a claim — so a retrying fanout's late `queued` cannot re-open
+      // a published delivery and hand the runner a second wake for it.
+      const allowed = DELIVERY_NEXT[body.state];
+      if (allowed && !allowed.has(latest)) {
+        return { status: 409, wire: { error: `delivery is ${latest}; ${body.state} may follow only ${[...allowed].join(' | ')}`, state: latest } };
       }
       const attempt = body.state === 'runner-claimed'
         ? events.filter((ev) => ev['scrum:state'] === 'runner-claimed').length + 1

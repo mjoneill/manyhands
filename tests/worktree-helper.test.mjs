@@ -195,3 +195,35 @@ test('#1264 a worktree that RESOLVES node_modules by walking up is not flagged; 
   assert.match(list.out, /12-broken.*node_modules does not resolve/,
     'and the true positive still fires: a dangling link with no ancestor copy cannot resolve');
 });
+
+// #877 (2026-09-13) — `new` cuts from ORIGIN's main. Seats push from worktrees
+// and nobody pulls the dev checkout, so its local `main` is stale by every push
+// since; a fix worktree cut from it patched the wrong tree. With a remote, the
+// worktree starts at origin/main even when local main is behind; with none, it
+// falls back to local main and SAYS so.
+test('#877 new cuts from origin/main when there is a remote, and names the fallback when there is not', () => {
+  const { base, dir, git } = makeRepo();
+  // A bare "origin" one commit AHEAD of the dev checkout's main.
+  const origin = path.join(base, 'origin.git');
+  execFileSync('git', ['init', '-q', '--bare', '-b', 'main', origin]);
+  git(['remote', 'add', 'origin', origin]);
+  git(['push', '-q', 'origin', 'main']);
+  const scratch = path.join(base, 'scratch');
+  execFileSync('git', ['clone', '-q', origin, scratch]);
+  execFileSync('git', ['-C', scratch, 'config', 'user.name', 'Other']); execFileSync('git', ['-C', scratch, 'config', 'user.email', 'other@example.com']);
+  fs.writeFileSync(path.join(scratch, 'b.txt'), 'pushed from elsewhere');
+  execFileSync('git', ['-C', scratch, 'add', '.']); execFileSync('git', ['-C', scratch, 'commit', '-q', '-m', 'ahead']); execFileSync('git', ['-C', scratch, 'push', '-q', 'origin', 'main']);
+  assert.ok(!fs.existsSync(path.join(dir, 'b.txt')), 'the dev checkout is behind origin — the stale-main shape');
+
+  const made = run(dir, ['new', '7', 'fresh']);
+  assert.equal(made.status, 0, made.out);
+  const wt = path.join(base, 'repo.worktrees', '7-fresh');
+  assert.ok(fs.existsSync(path.join(wt, 'b.txt')), 'the worktree starts at origin/main, not the stale local main');
+  assert.match(made.out, /from origin\/main @/);
+
+  // No remote: local main, and the line says so.
+  git(['remote', 'remove', 'origin']);
+  const local = run(dir, ['new', '8', 'offline']);
+  assert.equal(local.status, 0, local.out);
+  assert.match(local.out, /LOCAL main/, 'the fallback is named, not silent');
+});

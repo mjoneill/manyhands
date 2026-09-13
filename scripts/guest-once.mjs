@@ -21,7 +21,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { callModel } from '../core/model-adapter.mjs';
-import { findMentions, findWakes, guestOnce, fetchBoundedChanges, shouldMarkAnswered, mentionScanPath, fetchMentionWindow, acquireLock, releaseLock } from '../core/guest-loop.mjs';
+import { findMentions, findWakes, guestOnce, fetchBoundedChanges, shouldMarkAnswered, mentionScanPath, fetchMentionWindow, acquireLock, releaseLock, effectiveWakeOn, budgetCheck } from '../core/guest-loop.mjs';
 import { makeExecutor } from '../core/board-tools.mjs';
 
 const args = process.argv.slice(2);
@@ -45,6 +45,7 @@ if (seatArg) {
   agent = { seatKey: a.seatKey, name: a.name, systemPrompt: a.prompt?.body ?? '', promptVersion: a.prompt?.id ?? null,
     contextPolicy: a.contextPolicy, residency: a.residency, budgetPerDay: a.budgetPerDay ?? undefined,
     toolGrants: a.toolGrants ?? [], wakeOn: a.wakeOn ?? ['mention'], everyMinutes: a.everyMinutes ?? undefined,
+    deliveryMode: a.deliveryMode ?? 'wake',   // #1346 — the wire carries it; a runner that drops it runs the seat in wake mode whatever the board says
     // #1196 — the seat's own hop ceiling. Carried from the board or left off
     // entirely: `undefined` lets the loop keep its default, where a `null` would
     // read as "a ceiling of nothing" one layer down.
@@ -112,9 +113,71 @@ if ((agent.wakeOn || []).includes('assignment')) {
   try { const c = await get('/api/cards?limit=500&fields=id,shortId,title,assignees,claimedBy,updatedAt,createdAt'); cards = Array.isArray(c) ? c : (c?.cards ?? []); }
   catch (e) { console.error(`[#1226] cards unreadable — no assignment wakes this run: ${e.message}`); }
 }
+// The board's REST blocks for tens of seconds during a graph sync under load
+// (measured 20–66 s on 2026-09-05). A budget read that gives up at the first
+// stall halts the loop for a reason that has nothing to do with the budget, so:
+// a bounded wait, and one retry, before "unreadable" is allowed to mean halt.
+const spentToday = async (seat) => {
+  const since = new Date(); since.setUTCHours(0, 0, 0, 0);
+  const url = `${BOARD}/api/model-calls?agent=${encodeURIComponent(seat)}&since=${since.toISOString()}`;
+  let last;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const r = await fetch(url, { signal: AbortSignal.timeout(90_000) });
+      if (!r.ok) throw new Error(`GET /api/model-calls → ${r.status}`);
+      return r.json();
+    } catch (e) { last = e; if (attempt === 0) await new Promise((res) => setTimeout(res, 5_000)); }
+  }
+  throw last;
+};
+
 let wakes = findWakes({ agent, messages, cards, state });
 if (opt('--once-id')) wakes = messages.filter((m) => m.id === opt('--once-id')).map((m) => ({ kind: 'mention', ...m }));
-if (!wakes.length) { console.log(`${new Date().toISOString()} ${agent.seatKey}: nothing to wake for (${(agent.wakeOn || ['mention']).join(', ')})`); process.exit(0); }
+
+// #1346 slice 3 — CHANNEL MODE: the room reaches this seat as delivery records
+// (offered by the fanout, one per post). Drain "offered to me, not yet
+// claimed" into ONE digest turn. Assignment wakes (above) come first — an
+// obligation before the room — so a busy room cannot starve an assigned card.
+const channelMode = agent.deliveryMode === 'channel' && !opt('--once-id');
+let claimed = [];
+if (channelMode && !wakes.length) {
+  let openList = [];
+  try { openList = (await get(`/api/deliveries?to=${encodeURIComponent(agent.seatKey)}&open=1`)).deliveries ?? []; }
+  catch (e) { console.error(`[#1346] ${agent.seatKey}: deliveries unreadable — nothing drained this run: ${e.message}`); }
+  if (openList.length) {
+    // The budget is read BEFORE any claim. A breached budget must leave the
+    // deliveries open and unclaimed — a claim-then-halt every tick would burn
+    // an attempt a minute and turn the record into noise.
+    const budget = await budgetCheck({ agent, spentToday });
+    if (!budget.allowed) {
+      console.log(`[#1346] ${agent.seatKey}: ${openList.length} deliver${openList.length === 1 ? 'y' : 'ies'} open, left unclaimed — ${budget.reason}${budget.spent != null ? ` (spent ${budget.spent} of ${budget.budget})` : ''}`);
+      process.exit(0);
+    }
+    const step = async (id, body) => {
+      if (dry) { console.log(`[dry-run] would mark delivery ${id} ${body.state}`); return { status: 201, body: null }; }
+      const r = await fetch(`${BOARD}/api/deliveries/${encodeURIComponent(id)}/events`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source: 'guest-runner', by: agent.seatKey, ...body }) });
+      let b = null; try { b = await r.json(); } catch { /* none */ }
+      return { status: r.status, body: b };
+    };
+    for (const d of openList) {
+      const r = await step(d.id, { state: 'runner-claimed' });
+      if (r.status === 201) claimed.push(d);
+      else console.log(`[#1346] ${agent.seatKey}: delivery ${d.id} not claimed (${r.status}${r.body?.state ? ` — ${r.body.state}` : ''})`);
+    }
+    if (claimed.length) {
+      const posts = [];
+      for (const d of claimed) {
+        try { const m = await get(`/api/conversations/${encodeURIComponent(d.conversation)}`); posts.push({ id: m.id, author: m.author, body: m.body, createdAt: m.createdAt }); }
+        catch (e) { console.error(`[#1346] ${agent.seatKey}: message ${d.conversation} unreadable, delivered as such: ${e.message}`); posts.push({ id: d.conversation, author: '?', body: '(message unreadable)', createdAt: d.offeredAt }); }
+      }
+      posts.sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
+      const newest = posts.at(-1);
+      wakes = [{ kind: 'channel', id: `channel:${newest?.id ?? new Date().toISOString()}`, createdAt: newest?.createdAt ?? new Date().toISOString(), author: null, body: '', posts, messageIds: posts.map((m) => m.id), deliveries: claimed.map((d) => d.id) }];
+      for (const d of claimed) await step(d.id, { state: 'turn-started' });
+    }
+  }
+}
+if (!wakes.length) { console.log(`${new Date().toISOString()} ${agent.seatKey}: nothing to wake for (${channelMode ? 'channel' : effectiveWakeOn(agent).join(', ')})`); process.exit(0); }
 
 const wake = wakes[0];   // ONE wake per run — guest-once means once
 const sinceIso = new Date(Date.parse(wake.createdAt || Date.now()) - 60 * 60 * 1000).toISOString();
@@ -158,24 +221,6 @@ const ledgerSink = dry ? null : async (row) => {
   if (!r.ok) throw new Error(`POST /api/model-calls → ${r.status}`);
   return r.json();
 };
-// The board's REST blocks for tens of seconds during a graph sync under load
-// (measured 20–66 s on 2026-09-05). A budget read that gives up at the first
-// stall halts the loop for a reason that has nothing to do with the budget, so:
-// a bounded wait, and one retry, before "unreadable" is allowed to mean halt.
-const spentToday = async (seat) => {
-  const since = new Date(); since.setUTCHours(0, 0, 0, 0);
-  const url = `${BOARD}/api/model-calls?agent=${encodeURIComponent(seat)}&since=${since.toISOString()}`;
-  let last;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const r = await fetch(url, { signal: AbortSignal.timeout(90_000) });
-      if (!r.ok) throw new Error(`GET /api/model-calls → ${r.status}`);
-      return r.json();
-    } catch (e) { last = e; if (attempt === 0) await new Promise((res) => setTimeout(res, 5_000)); }
-  }
-  throw last;
-};
-
 // #1226 — the resident's memory: read by OWNER (its seat), written as a memory
 // row under that owner. The mentioning human hands nothing.
 const memories = async (seat) => {
@@ -225,6 +270,21 @@ const r = await guestOnce({
   post,
   log: (l) => console.log(l), onError: (l) => console.error(l),
 });
+// #1346 — the outcome goes on EVERY delivery this turn drained. published |
+// declined (the seat's own NO, reason: explicit) | failed (claimable again next
+// tick, attempt +1). A halt after the claim is a failure too — recorded, not
+// silently left as a claim that never resolves.
+if (wake.kind === 'channel' && !dry) {
+  const outcome = r.posted ? { state: 'published' }
+    : r.declined ? { state: 'declined', reason: 'explicit' }
+    : { state: 'failed', note: r.reason ?? 'halted' };
+  for (const id of wake.deliveries) {
+    try {
+      const x = await fetch(`${BOARD}/api/deliveries/${encodeURIComponent(id)}/events`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source: 'guest-runner', by: agent.seatKey, ...outcome }) });
+      if (!x.ok) console.error(`[#1346] ${agent.seatKey}: delivery ${id} outcome ${outcome.state} NOT recorded → ${x.status}`);
+    } catch (e) { console.error(`[#1346] ${agent.seatKey}: delivery ${id} outcome ${outcome.state} NOT recorded: ${e.message}`); }
+  }
+}
 // Advance the cursor only on an outcome that settles the mention; a halt leaves
 // it owed, so the next run finds it again (shouldMarkAnswered, tested).
 if (!dry && shouldMarkAnswered(r)) {
@@ -232,6 +292,7 @@ if (!dry && shouldMarkAnswered(r)) {
   if (wake.kind === 'mention') { next.lastAnsweredId = wake.id; next.lastAnsweredAt = wake.createdAt ?? next.lastAnsweredAt ?? null; }   // #1237 the cursor
   if (wake.kind === 'assignment') next.assignmentsSeen = [...new Set([...(state.assignmentsSeen || []), wake.cardId])].slice(-200);
   if (wake.kind === 'schedule') next.lastScheduledAt = wake.createdAt;
+  if (wake.kind === 'channel') next.lastChannelDrainAt = new Date().toISOString();   // #1346
   fs.writeFileSync(stateFile, JSON.stringify(next, null, 2));
 }
 else if (!dry) console.log(`[#1201] ${agent.seatKey}: mention ${wake.id} still owed (${r.reason ?? 'halted'}) — cursor not advanced`);
