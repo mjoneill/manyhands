@@ -172,6 +172,10 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:dischargedBy', 'scrum:dischargedAt',
   // #1118 — wakes: the one time-shaped fact attached to a seat
   'scrum:Wake', 'scrum:wokeSeat', 'scrum:wokeAt',
+  // #1346 — a delivery: what happened to one message for one seat, as a node
+  // with one child node per append-only event
+  'scrum:Delivery', 'scrum:deliveredTo', 'scrum:ofConversation', 'scrum:offeredAt',
+  'scrum:DeliveryEvent', 'scrum:ofDelivery', 'scrum:source', 'scrum:attempt', 'scrum:at', 'scrum:reason',
   // #1202 — the provenance ledger row
   'scrum:ModelCall', 'scrum:agent', 'scrum:model', 'scrum:provider', 'scrum:protocol',
   'scrum:promptVersion', 'scrum:tokensIn', 'scrum:tokensOut', 'scrum:reasoningTokens', 'scrum:cachedPromptTokens', 'scrum:cost', 'scrum:costMeasured', 'scrum:costCategories', 'scrum:stopReason',
@@ -920,6 +924,40 @@ function projectWake(store, e) {
 }
 
 /**
+ * #1346 — a DELIVERY: what happened to ONE message for ONE seat. `deliveredTo`
+ * is a person EDGE and `ofConversation` an entity EDGE, so "what did this seat
+ * get, and what became of it" and "who was offered this message" are each one
+ * traversal. Every event is its OWN node (`scrum:DeliveryEvent`, ofDelivery →
+ * the delivery) rather than a literal, because the question "how many were
+ * claimed and never published" is a filter over events, not a string parse.
+ * Nothing here is mutable: the latest state is ORDER BY DESC(?at) LIMIT 1.
+ */
+function projectDelivery(store, e) {
+  const S = IRI.scrum, P = IRI.person, E = IRI.entity;
+  const s = nn(e['@id']);
+  const add = (p, o) => store.add(oxigraph.triple(s, p, o));
+  const num = (v) => oxigraph.literal(String(v), nn('http://www.w3.org/2001/XMLSchema#integer'));
+  add(A, nn(S + 'Delivery'));
+  if (e['scrum:deliveredTo']) add(nn(S + 'deliveredTo'), nn(String(e['scrum:deliveredTo']).startsWith('http') ? String(e['scrum:deliveredTo']) : P + e['scrum:deliveredTo']));
+  if (e['scrum:ofConversation']) add(nn(S + 'ofConversation'), nn(String(e['scrum:ofConversation']).startsWith('http') ? String(e['scrum:ofConversation']) : E + e['scrum:ofConversation']));
+  if (e['scrum:offeredAt']) add(nn(S + 'offeredAt'), lit(String(e['scrum:offeredAt'])));
+  const events = Array.isArray(e['scrum:hasEvent']) ? e['scrum:hasEvent'] : [];
+  events.forEach((ev, i) => {
+    if (!ev || typeof ev !== 'object') return;
+    const es = nn(`${e['@id']}/event/${i}`);
+    const addE = (p, o) => store.add(oxigraph.triple(es, p, o));
+    addE(A, nn(S + 'DeliveryEvent'));
+    addE(nn(S + 'ofDelivery'), s);
+    if (ev['scrum:state']) addE(nn(S + 'state'), lit(String(ev['scrum:state'])));
+    if (ev['scrum:source']) addE(nn(S + 'source'), lit(String(ev['scrum:source'])));
+    if (ev['scrum:at']) addE(nn(S + 'at'), lit(String(ev['scrum:at'])));
+    if (Number.isInteger(ev['scrum:attempt'])) addE(nn(S + 'attempt'), num(ev['scrum:attempt']));
+    if (ev['scrum:reason']) addE(nn(S + 'reason'), lit(String(ev['scrum:reason'])));
+    if (ev.text) addE(nn(IRI.schema + 'text'), lit(String(ev.text)));
+  });
+}
+
+/**
  * #1202 — a MODEL CALL: the provenance ledger row as a node. `agent` is a person
  * EDGE so "what did this seat spend today" is one traversal; `producedPost` and
  * `contextHandedTo` are entity EDGES so "which call made this post" and "what
@@ -1558,6 +1596,8 @@ function projectEntity(store, e) {
       projectWake(store, e);
     } else if (t === 'scrum:ModelCall') {
       projectModelCall(store, e);
+    } else if (t === 'scrum:Delivery') {
+      projectDelivery(store, e);
     } else if (t === 'scrum:Agent') {
       projectAgent(store, e);
     } else if (t === 'scrum:Model') {

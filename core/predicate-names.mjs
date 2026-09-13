@@ -69,6 +69,17 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:Wake': null,                       // #1118 — the type; minted by the projection
   'scrum:wokeSeat': 'scrum:wokeSeat',       // → person: IRI
   'scrum:wokeAt': 'scrum:wokeAt',
+  // #1346 — scrum:Delivery: what happened to ONE message for ONE seat (store key deliveries[])
+  'scrum:Delivery': null,                   // the type; minted by the projection
+  'scrum:deliveredTo': 'scrum:deliveredTo', // → person: IRI
+  'scrum:ofConversation': 'scrum:ofConversation', // → entity: IRI of the message
+  'scrum:offeredAt': 'scrum:offeredAt',
+  'scrum:DeliveryEvent': null,              // one append-only step; minted by the projection
+  'scrum:ofDelivery': 'scrum:ofDelivery',   // event → delivery
+  'scrum:source': 'scrum:source',           // fanout | guest-runner | presence-bridge
+  'scrum:attempt': 'scrum:attempt',
+  'scrum:at': 'scrum:at',                   // when the event happened
+  'scrum:reason': 'scrum:reason',           // whose act a terminal state was: explicit | …
   // #1202 — scrum:ModelCall, the provenance ledger row (store key modelCalls[])
   'scrum:ModelCall': null,          // rdf:type value
   'scrum:agent': 'scrum:agent',     // → person: IRI

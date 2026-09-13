@@ -150,6 +150,17 @@ export const KIND_DECLARATIONS = Object.freeze([
       + 'transport dropped is indistinguishable from an idle one, so the record is the evidence.',
   },
   {
+    name: 'scrum:Delivery', eventKind: 'delivery', collection: 'deliveries',
+    createdBy: 'POST /api/deliveries (the fanout, for every channel-mode resident) / POST /api/deliveries/:id/events (the runner)',
+    definition: 'WHAT HAPPENED TO ONE MESSAGE FOR ONE SEAT (#1346): the resident inbox as a record on the '
+      + 'board rather than a side-file. One per (seat, message); an append-only list of typed events '
+      + '(offered → runner-claimed → turn-started → published | declined | failed), each with its source '
+      + '(fanout | guest-runner | presence-bridge), its attempt and its time. The runner drains "offered to '
+      + 'me, not yet claimed"; runner-claimed is the one atomic step, so a claim is never mistaken for a '
+      + 'completed delivery and a retry keeps its attempt number. The seat-side half of one question — '
+      + '"what happened to this message" — that the bridge answers for its own lane.',
+  },
+  {
     name: 'scrum:Model', eventKind: 'model', collection: 'models',
     createdBy: 'model_register',
     definition: 'A MODEL THE BOARD CAN CALL, as a node rather than a line in a JSON file (#1197): provider, '

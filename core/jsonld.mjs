@@ -324,6 +324,9 @@ const isObligation = (entity) => entity && entity['@type'] === 'scrum:Obligation
 // #1118 — a wake is the one time-shaped fact that attaches to a SEAT.
 const isWake = (entity) => entity && entity['@type'] === 'scrum:Wake';
 const isModelCall = (entity) => entity && entity['@type'] === 'scrum:ModelCall';   // #1202
+// #1346 — a delivery is what happened to ONE message for ONE seat: the resident
+// inbox as a record on the board, never a side-file.
+const isDelivery = (entity) => entity && entity['@type'] === 'scrum:Delivery';
 const isAgent = (entity) => entity && entity['@type'] === 'scrum:Agent';           // #1199
 const isModel = (entity) => entity && entity['@type'] === 'scrum:Model';           // #1197
 const isAgentPrompt = (entity) => entity && (entity['@type'] === 'scrum:AgentPrompt' || entity['@type'] === 'scrum:AgentPromptVersion');
@@ -412,7 +415,7 @@ export const CONTEXT_RANGE = Object.freeze(Object.fromEntries(
 export function domainToJsonLd(domain) {
   const {
     nodes = [], messages = [], people = [], columns = [],
-    tending = [], memories = [], decisions = [], predicates = [], kinds = [], procedures = [], runs = [], artifacts = [], obligations = [], wakes = [], modelCalls = [], agents = [], agentPrompts = [], models = [], labelAliases = [], _unmodelled = [], _README, ...meta
+    tending = [], memories = [], decisions = [], predicates = [], kinds = [], procedures = [], runs = [], artifacts = [], obligations = [], wakes = [], modelCalls = [], deliveries = [], agents = [], agentPrompts = [], models = [], labelAliases = [], _unmodelled = [], _README, ...meta
   } = domain;
   const doc = {};
   if (_README !== undefined) doc._README = _README;   // first key — JSON.stringify keeps insertion order
@@ -450,6 +453,7 @@ export function domainToJsonLd(domain) {
     ...obligations,
     ...wakes,
     ...modelCalls,   // #1202 — same rule as kinds: a collection that stays a top-level key never reaches the replica
+    ...deliveries,   // #1346
     ...agents,       // #1199
     ...agentPrompts, // #1199
     ...models,       // #1197
@@ -522,6 +526,8 @@ export function jsonLdToDomain(doc) {
   if (wakes.length) domain.wakes = wakes;
   const modelCalls = graph.filter(isModelCall);   // #1202
   if (modelCalls.length) domain.modelCalls = modelCalls;
+  const deliveries = graph.filter(isDelivery);    // #1346
+  if (deliveries.length) domain.deliveries = deliveries;
   const agents = graph.filter(isAgent);            // #1199
   if (agents.length) domain.agents = agents;
   const agentPrompts = graph.filter(isAgentPrompt);
@@ -534,7 +540,7 @@ export function jsonLdToDomain(doc) {
     (e) => !isCard(e) && !isMessage(e) && !isPerson(e) && !isColumn(e) && !isTending(e)
       && !isMemory(e) && !isDecision(e) && !isPredicateDefinition(e) && !isKindDefinition(e)
       && !isProcedure(e) && !isRun(e) && !isArtifact(e)
-      && !isObligation(e) && !isWake(e) && !isModelCall(e) && !isAgent(e) && !isAgentPrompt(e) && !isModel(e),
+      && !isObligation(e) && !isWake(e) && !isModelCall(e) && !isDelivery(e) && !isAgent(e) && !isAgentPrompt(e) && !isModel(e),
   );
   if (unmodelled.length) domain._unmodelled = unmodelled;
   if (Array.isArray(doc._labelAliases) && doc._labelAliases.length) domain.labelAliases = doc._labelAliases;

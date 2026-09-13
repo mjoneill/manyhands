@@ -2577,9 +2577,36 @@ setInterval(reapIdleSessions, REAP_SWEEP_MS).unref();
 // dispatch from channel-config.json, so flipping mode (soft/hard) or timings in
 // the settings page applies live. soft = one random-immediate + rest [min,max];
 // hard = strict one-at-a-time, timeout-spaced; off (harness) = immediate.
+// #1346 — CHANNEL-MODE RESIDENTS are fanout targets with no transport. Their
+// "session id" is an opaque prefix + seat, so the scheduler treats them like
+// any other receiver and deliver() knows to write the board instead of a
+// stream. Read from the agent records per fanout — the mode is a field on the
+// board (slice 1), and a cache would be one more place for it to go stale.
+const RESIDENT_TARGET = 'resident:';
+async function residentTargets(conversation) {
+  let agents;
+  try { agents = await apiCall('GET', '/api/agents'); }
+  catch (e) { console.log(`[#1346] residents unknown for msg=${conversation.id}: ${e.message}`); return []; }
+  return (Array.isArray(agents) ? agents : [])
+    .filter((a) => a && a.deliveryMode === 'channel' && a.state === 'invited' && a.seatKey && a.seatKey !== conversation.author)
+    .map((a) => `${RESIDENT_TARGET}${a.seatKey}`);
+}
+
 const channelScheduler = createChannelScheduler({
   getConfig: () => (CHANNEL_STAGGER_OFF ? { mode: 'off' } : readConfig()),
   deliver(sessionId, notification) {
+    // #1346 — a RESIDENT target is not a transport: delivering to it means
+    // writing the offer on the board, where the runner drains it. Opaque to
+    // the scheduler, which staggers the id like any other; the record is
+    // idempotent on (seat, message), so a re-dispatch cannot double an inbox.
+    if (sessionId.startsWith(RESIDENT_TARGET)) {
+      const to = sessionId.slice(RESIDENT_TARGET.length);
+      const messageId = notification?.params?.meta?.message_id;
+      if (!messageId) return;
+      apiCall('POST', '/api/deliveries', { to, conversation: messageId, source: 'fanout', by: 'board' })
+        .catch((e) => console.log(`[#1346] offer NOT recorded for ${to} msg=${messageId}: ${e.message}`));
+      return;
+    }
     // Look the transport up FRESH at delivery time — it may have been reaped or
     // replaced since dispatch (closed-transport guard).
     const transport = transports.get(sessionId);
@@ -2880,6 +2907,14 @@ function broadcastFanout(conversation) {
   // #265 — hand all real receivers to the scheduler at once, so it can pick one
   // (fresh random) to deliver immediately and stagger the rest across [MIN,MAX].
   channelScheduler.dispatch(targets.map(([sid]) => sid), notification);
+  // #1346 — and every channel-mode resident, as an opaque target. Async
+  // because the roster is read from the board; logged always, zero included,
+  // so "no resident was offered this" is a reading and not an absence.
+  residentTargets(conversation).then((ids) => {
+    console.log(`[#1346] fanout msg=${conversation.id} residents=${ids.length}`
+      + (ids.length ? ` offered=[${ids.map((id) => id.slice(RESIDENT_TARGET.length)).join(',')}]` : ''));
+    if (ids.length) channelScheduler.dispatch(ids, notification);
+  });
   return targets.length;
 }
 

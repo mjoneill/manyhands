@@ -3373,6 +3373,34 @@ function wakesOf(data) {
 const wakeEvent = (e, actor) => ({ op: 'create', actor, entity: { kind: 'wake', id: e['@id'] }, state: e });
 const wakeToWire = (e) => ({ id: e['@id'], seat: e['scrum:wokeSeat'], at: e['scrum:wokeAt'], note: e.text ?? '' });
 
+// ── #1346 slice 2 — DELIVERIES: what happened to ONE message for ONE seat ──
+// The resident inbox as a record on the board, not a side-file. One per
+// (seat, message), APPEND-ONLY events; the runner drains "offered to me, not
+// yet claimed". `runner-claimed` is the one atomic step: a claim is never a
+// completed delivery, and a retry keeps its attempt number (the shape agreed
+// with the bridge side, so its trace and this record are one type).
+const DELIVERY_ID = () => `https://scrumboard.local/delivery/${crypto.randomUUID()}`;
+function deliveriesOf(data) { return Array.isArray(data.deliveries) ? data.deliveries : []; }
+const deliveryEvent = (op, e, actor) => ({ op, actor, entity: { kind: 'delivery', id: e['@id'] }, state: e });
+const DELIVERY_STATES = ['offered', 'queued', 'runner-claimed', 'turn-started', 'published', 'declined', 'failed'];
+const DELIVERY_CLAIMABLE = new Set(['offered', 'queued', 'failed']);
+const DELIVERY_OPEN = new Set(['offered', 'queued']);
+const DELIVERY_SOURCES = new Set(['fanout', 'guest-runner', 'presence-bridge']);
+const deliveryEventsOf = (e) => (Array.isArray(e['scrum:hasEvent']) ? e['scrum:hasEvent'] : []);
+const deliveryState = (e) => deliveryEventsOf(e).at(-1)?.['scrum:state'] ?? 'offered';
+function deliveryToWire(e) {
+  return {
+    id: e['@id'], to: e['scrum:deliveredTo'], conversation: e['scrum:ofConversation'], offeredAt: e['scrum:offeredAt'],
+    state: deliveryState(e),
+    events: deliveryEventsOf(e).map((ev) => ({
+      state: ev['scrum:state'], at: ev['scrum:at'], source: ev['scrum:source'], by: ev.creator ?? null,
+      ...(Number.isInteger(ev['scrum:attempt']) ? { attempt: ev['scrum:attempt'] } : {}),
+      ...(ev['scrum:reason'] ? { reason: ev['scrum:reason'] } : {}),
+      ...(ev.text ? { note: ev.text } : {}),
+    })),
+  };
+}
+
 // ── #1197 — THE MODEL REGISTRY: a model the board can call, as a NODE ────────
 // Every field below is sourced to a failure that happened (the card lists
 // them); the key is a REFERENCE (an env var name), never a value, because this
@@ -4410,6 +4438,101 @@ async function handleCreateWake(req, res) {
     console.error('POST /api/wakes:', e.message);
     sendJSON(res, 500, { error: e.message });
   }
+}
+
+async function handleCreateDelivery(req, res) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const by = typeof body.by === 'string' && body.by.trim() ? body.by.trim() : null;
+    if (!by) return sendJSON(res, 400, { error: 'by is required — who offers this delivery. Declared, not authenticated.' });
+    const to = typeof body.to === 'string' && body.to.trim() ? body.to.trim() : null;
+    if (!to) return sendJSON(res, 400, { error: 'to is required — the seat the message is offered to.' });
+    const conversation = typeof body.conversation === 'string' && body.conversation.trim() ? body.conversation.trim() : null;
+    if (!conversation) return sendJSON(res, 400, { error: 'conversation is required — the id of the message offered.' });
+    const source = typeof body.source === 'string' ? body.source : 'fanout';
+    if (!DELIVERY_SOURCES.has(source)) return sendJSON(res, 400, { error: `source must be one of ${[...DELIVERY_SOURCES].join(' | ')} (got ${JSON.stringify(body.source)})` });
+    const result = await withWriteLock(async () => {
+      const data = readBoard();
+      if (!(Array.isArray(data.conversations) && data.conversations.some((c) => c && c.id === conversation))) {
+        return { status: 400, wire: { error: `conversation ${JSON.stringify(conversation)} is not a message this board holds. A delivery of nothing is refused.` } };
+      }
+      // Idempotent on (seat, message): a re-offer is the SAME inbox item, not a second one.
+      const existing = deliveriesOf(data).find((d) => d['scrum:deliveredTo'] === to && d['scrum:ofConversation'] === conversation);
+      if (existing) return { status: 200, wire: deliveryToWire(existing) };
+      const now = new Date().toISOString();
+      const entity = {
+        '@id': DELIVERY_ID(), '@type': 'scrum:Delivery',
+        'scrum:deliveredTo': to, 'scrum:ofConversation': conversation, 'scrum:offeredAt': now,
+        'scrum:hasEvent': [{ 'scrum:state': 'offered', 'scrum:at': now, 'scrum:source': source, creator: by }],
+        creator: by, dateCreated: now,
+      };
+      data.deliveries = [...deliveriesOf(data), entity];
+      writeBoard(data, [deliveryEvent('create', entity, by)]);
+      return { status: 201, wire: deliveryToWire(entity) };
+    });
+    sendJSON(res, result.status, result.wire);
+  } catch (e) {
+    console.error('POST /api/deliveries:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+
+async function handleCreateDeliveryEvent(req, res, id) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const by = typeof body.by === 'string' && body.by.trim() ? body.by.trim() : null;
+    if (!by) return sendJSON(res, 400, { error: 'by is required — who records this step. Declared, not authenticated.' });
+    if (!DELIVERY_STATES.includes(body.state)) {
+      return sendJSON(res, 400, { error: `state must be one of ${DELIVERY_STATES.join(' | ')} (got ${JSON.stringify(body.state)})` });
+    }
+    const source = typeof body.source === 'string' ? body.source : 'guest-runner';
+    if (!DELIVERY_SOURCES.has(source)) return sendJSON(res, 400, { error: `source must be one of ${[...DELIVERY_SOURCES].join(' | ')} (got ${JSON.stringify(body.source)})` });
+    const result = await withWriteLock(async () => {
+      const data = readBoard();
+      const idx = deliveriesOf(data).findIndex((d) => d['@id'] === id);
+      if (idx < 0) return { status: 404, wire: { error: `no delivery ${id}` } };
+      const cur = deliveriesOf(data)[idx];
+      const events = deliveryEventsOf(cur);
+      const latest = deliveryState(cur);
+      // THE ATOMIC STEP. Under the write lock, so two runners reading "offered"
+      // at once cannot both claim it: the second sees the first's claim here.
+      if (body.state === 'runner-claimed' && !DELIVERY_CLAIMABLE.has(latest)) {
+        return { status: 409, wire: { error: `delivery is ${latest}; only an offered, queued or failed delivery can be claimed`, state: latest } };
+      }
+      const attempt = body.state === 'runner-claimed'
+        ? events.filter((ev) => ev['scrum:state'] === 'runner-claimed').length + 1
+        : (events.findLast((ev) => Number.isInteger(ev['scrum:attempt']))?.['scrum:attempt'] ?? null);
+      const ev = {
+        'scrum:state': body.state, 'scrum:at': new Date().toISOString(), 'scrum:source': source, creator: by,
+        ...(Number.isInteger(attempt) ? { 'scrum:attempt': attempt } : {}),
+        // "state answers WHAT happened; reason answers WHOSE act it was" — a
+        // deliberate decline (reason: explicit) must stay distinguishable from
+        // every boundary-generated non-publication in one query.
+        ...(typeof body.reason === 'string' && body.reason.trim() ? { 'scrum:reason': body.reason.trim() } : {}),
+        ...(typeof body.note === 'string' && body.note ? { text: body.note } : {}),
+      };
+      const entity = { ...cur, 'scrum:hasEvent': [...events, ev] };
+      data.deliveries = deliveriesOf(data).map((d, i) => (i === idx ? entity : d));
+      writeBoard(data, [deliveryEvent('update', entity, by)]);
+      return { status: 201, wire: deliveryToWire(entity) };
+    });
+    sendJSON(res, result.status, result.wire);
+  } catch (e) {
+    console.error('POST /api/deliveries/:id/events:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+
+function handleListDeliveries(req, res) {
+  const q = parseQuery(req.url);
+  let out = deliveriesOf(readBoard());
+  if (q.to) out = out.filter((d) => d['scrum:deliveredTo'] === q.to);
+  if (q.conversation) out = out.filter((d) => d['scrum:ofConversation'] === q.conversation);
+  if (q.open === '1' || q.open === 'true') out = out.filter((d) => DELIVERY_OPEN.has(deliveryState(d)));
+  out = out.map(deliveryToWire).sort((a, b) => (a.offeredAt < b.offeredAt ? -1 : a.offeredAt > b.offeredAt ? 1 : 0));
+  const limit = Number.parseInt(q.limit, 10);
+  if (Number.isInteger(limit) && limit > 0) out = out.slice(0, limit);
+  sendJSON(res, 200, { deliveries: out, count: out.length });
 }
 
 function handleListWakes(req, res) {
@@ -8623,6 +8746,9 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/export$/,               fn: (req, res) => handleExport(req, res) },       // #1266
   { method: 'GET',    re: /^\/api\/wakes$/,                fn: (req, res) => handleListWakes(req, res) },
   { method: 'POST',   re: /^\/api\/wakes$/,                fn: (req, res) => handleCreateWake(req, res) },
+  { method: 'POST',   re: /^\/api\/deliveries$/,           fn: (req, res) => handleCreateDelivery(req, res) },                 // #1346
+  { method: 'POST',   re: /^\/api\/deliveries\/([^/]+)\/events$/, fn: (req, res, m) => handleCreateDeliveryEvent(req, res, decodeURIComponent(m[1])) },
+  { method: 'GET',    re: /^\/api\/deliveries$/,           fn: (req, res) => handleListDeliveries(req, res) },
   // #1207 — the research write verbs. A card PATCH cannot say "this run
   // generated that file"; these can.
   { method: 'GET',    re: /^\/api\/procedures$/,           fn: (req, res) => handleListProcedures(req, res) },
