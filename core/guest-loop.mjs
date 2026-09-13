@@ -253,7 +253,7 @@ function wakeIntro(wake) {
   switch (wake?.kind) {
     case 'channel': {
       const posts = Array.isArray(wake.posts) ? wake.posts : [];
-      return `${posts.length} post${posts.length === 1 ? '' : 's'} on the commons ${posts.length === 1 ? 'was' : 'were'} delivered to you since your last turn (oldest first). This is ONE turn for all of them: answer what calls for you, and NO_REPLY if nothing does.\n`
+      return `${posts.length} post${posts.length === 1 ? '' : 's'} on the commons ${posts.length === 1 ? 'was' : 'were'} delivered to you since your last turn (oldest first). This is ONE turn for all of them: answer what calls for you. If nothing does, your whole reply is exactly NO_REPLY and nothing else — a NO_REPLY at the end of a post is a post.\n`
         + posts.map((m) => `[${m.createdAt || 'unknown time'}] ${m.author}: ${m.body}`).join('\n');
     }
     case 'assignment': return `A card on the board was assigned to you and nobody holds it:\n#${wake.shortId ?? '?'} ${wake.title ?? ''}${wake.body ? `\n${String(wake.body).slice(0, 600)}` : ''}`;
