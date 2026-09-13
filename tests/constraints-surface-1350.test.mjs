@@ -123,6 +123,12 @@ test('#1350 board: an assignee chip is a door too — click opens the popover fo
     const hops = await page.$eval('.constraints-popover .constraints-row[data-constraint="maxHops"] .constraints-value', (td) => td.textContent);
     assert.equal(hops, '8');
     assert.equal(await page.$$eval('.card', (els) => els.length), cardsBefore, 'the chip is an indicator: nothing on the board was filtered by the click');
+    // VISIBLE, not just present: boardEl's own click handler must not have
+    // opened the card detail on top of it (reviewer finding, 13:35Z — the
+    // first version asserted "filters nothing", true, and not "is visible").
+    assert.equal(await page.$eval('#card-detail-backdrop', (b) => b.hidden), true, 'the card detail did NOT open on a chip click');
+    const onTop = await page.$eval('.constraints-popover', (p) => { const r = p.getBoundingClientRect(); return p.contains(document.elementFromPoint(r.left + 10, r.top + 10)); });
+    assert.ok(onTop, 'the popover is the topmost element at its own corner — nothing covers it');
     await page.keyboard.press('Escape');
     assert.equal(await page.$$eval('.constraints-popover', (ps) => ps.length), 0);
     await page.close();

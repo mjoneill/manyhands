@@ -1840,14 +1840,22 @@ body::before {
   // this file, so per-chip wiring would be lost on every redraw. Read-only —
   // #498's lesson holds: a chip must never change what the board SHOWS; this
   // opens a detail about the seat and touches no filter.
+  // CAPTURE phase, because boardEl's own bubbling click handler (~4416) opens
+  // the card detail for any click inside .card and would run first — the
+  // popover then sat under the detail's z-90 backdrop, invisible, and closed
+  // on the backdrop click. Found from source by a reviewer (13:35Z), not from
+  // the screen: the test asserted "filters nothing", which was true, and not
+  // "is visible", which was false. Capture + stopPropagation makes the chip
+  // ONE door: the popover opens and the detail does not.
   document.addEventListener('click', (e) => {
     const chip = e.target.closest('.card-assignee[data-assignee], .conv-msg-author');
     if (!chip) return;
     const seat = chip.dataset.assignee || chip.textContent.trim();
     if (!seat || seat === 'unassigned' || seat === 'unknown') return;
     e.stopPropagation();
+    e.preventDefault();
     openConstraintsPopover(chip, seat);
-  });
+  }, true);
   window.renderChatMarkdown = renderChatMarkdown;
   window.identityOf = identityOf; // #333 — assignee chips glow their identity light
   // #466 — the SAME "did this card change?" the server uses, so a refused save
