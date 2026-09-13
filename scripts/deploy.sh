@@ -297,12 +297,25 @@ if [ "$DO_REST" = 1 ]; then
   say "   ↻ com.scrumboard.rest"
   launchctl kickstart -k "gui/$uid/com.scrumboard.rest" || die "rest restart failed"
 fi
+SEATS_BEFORE=""; MCP_RESTART_AT=""
 if [ "$DO_MCP" = 1 ]; then
+  # #1324 — SNAPSHOT WHO IS RECEIVING BEFORE THE RESTART. The deploy used to
+  # verify the SERVER came back and call it done; three times a seat sat deaf
+  # behind that verification (57 min, 12 h, 51 h). /channel/status already
+  # carries per-seat `streams` and `lastClientRequestAt`; the "after" snapshot
+  # below is compared against this one and the seats that did not come back
+  # are NAMED. A snapshot we could not take is reported as unmeasured, not as
+  # nobody-lost — an all-clear from a missing input is the false pass this
+  # room keeps paying for.
+  SEATS_BEFORE="$(mktemp -t seats-before)"
+  curl -fsS --max-time 3 http://127.0.0.1:3001/channel/status >"$SEATS_BEFORE" 2>/dev/null \
+    || { rm -f "$SEATS_BEFORE"; SEATS_BEFORE=""; say "   (could not snapshot /channel/status before the restart — seat check will be UNMEASURED)"; }
   curl -fsS --max-time 3 -X POST http://127.0.0.1:3141/api/conversations \
     -H 'Content-Type: application/json' \
     -d "{\"author\":\"board\",\"body\":\"MAINTENANCE: deploy restarting com.scrumboard.mcp — streams will drop and recover. (#1273)\"}" \
     >/dev/null 2>&1 || true
   say "   ↻ com.scrumboard.mcp   ⚠️ Claude Code seats on :3001 will need /mcp reconnect"
+  MCP_RESTART_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   launchctl kickstart -k "gui/$uid/com.scrumboard.mcp"  || die "mcp restart failed"
 fi
 [ "$DO_REST" = 1 ] || [ "$DO_MCP" = 1 ] || say "   nothing a running service loads changed — no restart, no seat muted"
@@ -346,6 +359,45 @@ until curl -fsS --max-time 3 http://127.0.0.1:3141/api/board/status >/dev/null 2
   i=$((i + 1)); [ "$i" -gt 40 ] && die "rest did not return within 80s"; sleep 2
 done
 say "   mcp 200 · rest 200 · serving $(cat "$SERVE/DEPLOYED-SHA" | cut -c1-7) · restarted: rest=$DO_REST mcp=$DO_MCP"
+
+# #1324 — VERIFY AT THE SEATS, NOT ONLY AT THE SERVER. Only when MCP actually
+# restarted (acceptance 5: a check that fires on every deploy is one nobody
+# reads). Wait a settle window for clients that reconnect on their own, then
+# compare the seats table against the pre-restart snapshot and name every seat
+# whose stream did not return OR whose client has made no request since the
+# restart (streams=1 read healthy for twelve hours with a dead client behind
+# it — lastClientRequestAt is the field that moves). It REPORTS, it does not
+# block: no seat can repair another's stream (#664). The report also goes to
+# the commons, because "the script printed the warning and the deployer
+# relayed it" is the exact failure this card records — the humans who can run
+# /mcp reconnect read the room, not the deploy log.
+#   DEPLOY_SEAT_SETTLE=30   seconds to wait before the after-snapshot
+if [ "$DO_MCP" = 1 ]; then
+  SETTLE="${DEPLOY_SEAT_SETTLE:-30}"
+  CHECK="$CLONE/scripts/deploy-seat-check.mjs"
+  if [ -z "$SEATS_BEFORE" ] || [ ! -f "$CHECK" ]; then
+    say "⚠️ seat check UNMEASURED after the MCP restart (no before-snapshot or no $CHECK) — look yourself: curl -s http://127.0.0.1:3001/channel/status | jq .seats"
+  else
+    say "⏳ waiting ${SETTLE}s for seats to reconnect before naming who did not (#1324)"
+    sleep "$SETTLE"
+    SEATS_AFTER="$(mktemp -t seats-after)"
+    curl -fsS --max-time 3 http://127.0.0.1:3001/channel/status >"$SEATS_AFTER" 2>/dev/null || : >"$SEATS_AFTER"
+    if REPORT="$(node "$CHECK" "$SEATS_BEFORE" "$SEATS_AFTER" "$MCP_RESTART_AT" "$SETTLE")"; then
+      if [ -n "$REPORT" ]; then
+        say "$REPORT"
+        BODY="$(printf '%s' "$REPORT" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.stringify({author:"board",body:s})))')"
+        curl -fsS --max-time 3 -X POST http://127.0.0.1:3141/api/conversations -H 'Content-Type: application/json' -d "$BODY" >/dev/null 2>&1 \
+          || say "   (seat report not posted to the commons — tell the room by hand)"
+      else
+        say "✓ every seat that was receiving before the restart is receiving again and has spoken since (${SETTLE}s settle)"
+      fi
+    else
+      say "⚠️ seat check UNMEASURED (deploy-seat-check exited non-zero) — look yourself: curl -s http://127.0.0.1:3001/channel/status | jq .seats"
+    fi
+    rm -f "$SEATS_AFTER"
+  fi
+  rm -f "$SEATS_BEFORE"
+fi
 
 # #1026 — A DEPLOY IS A RELEASE, so it gets a name and notes a downstream
 # reader can open. "there's not an obvious way that I can tell that helps me
