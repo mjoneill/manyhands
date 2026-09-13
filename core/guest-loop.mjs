@@ -717,6 +717,8 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
     // reason toolHops is emitted at zero: a field present only when it fired
     // makes "which turns were ordinary" a query by absence.
     ...(publishBody ? { markerLines: gate.markerLines ?? null } : {}),
+    // #1352 — what the adapter noticed and did NOT refuse on; the ledger's to count.
+    anomalies: result.anomalies ?? [],
     ...(narrationRetry ? { narrationRetry } : {}),
     memoryWritten, ...(memoryRefused.length ? { memoryRefused } : {}), claims: claimed, ...(reason ? { reason } : {}), ...(declined ? { declined: true } : {}) };
   const recorded = await recordLedger({ sink: ledgerSink, file: ledgerFile, row, onError });

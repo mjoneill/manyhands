@@ -516,14 +516,23 @@ export async function callModel(agent, messages, opts = {}) {
       throw new RunawayGenerationError(produced, budget, promptTokens);
     }
 
-    // 3. A thinking model must have actually been given room to think, or the
-    //    registry's `thinking: true` is a claim nothing checks.
-    if (agent.thinking && out.usage.reasoningTokens === 0) {
-      throw new ModelAssertionError('thinking',
-        'the registry says this model reasons, and the response reports zero reasoning tokens — '
-        + 'the budget was not honoured, so this answer is not the one that was asked for',
-        { usage: out.usage, attempts: attempt });
-    }
+    // 3. A thinking model that reports ZERO reasoning tokens is an ANOMALY ON
+    //    THE ROW, not a reason to throw the answer away. #1352: this used to be
+    //    an assertion, and it discarded 9 of 378 resident turns after 80–516 s
+    //    of generation each — eight and a half minutes of text once — every one
+    //    reading, from the room, as a seat that never woke. The guard was
+    //    written for cost accounting (#1294: a thinking model that reports no
+    //    reasoning is a fact the ledger needs); the remedy chosen punished the
+    //    reader for the ledger's problem. The answer text is the answer. The
+    //    missing count is a fact about the usage row, so that is where it goes:
+    //    `anomalies: ['zero-reasoning-tokens']`, carried to the ledger by the
+    //    callers, so "how often does this provider skip reasoning" is one query
+    //    and the answer still reached the room.
+    //    ⛔ Refuse only what is actually unusable — empty text (below) or a
+    //    provider error (above). A refusal must never fire on a row that has
+    //    an answer in it.
+    const anomalies = [];
+    if (agent.thinking && out.usage.reasoningTokens === 0) anomalies.push('zero-reasoning-tokens');
 
     // 4. Empty text is a failure with a name, not an empty string handed on.
     //    ⛔ An empty result and a failed call must never look identical.
@@ -538,7 +547,7 @@ export async function callModel(agent, messages, opts = {}) {
         { usage: out.usage, attempts: attempt });
     }
 
-    return { ...out, raw: res.body, attempts: attempt };
+    return { ...out, raw: res.body, attempts: attempt, anomalies };
   }
 }
 

@@ -3868,6 +3868,7 @@ const modelCallToWire = (e) => ({
   // cross-seam test asserted the graph so it passed. A field a caller cannot
   // read back is a field that does not exist to the caller.
   markerLines: e['scrum:markerLines'] ?? null,
+  anomalies: e['scrum:anomaly'] ?? [],   // #1352
   at: e['scrum:calledAt'], error: e.text || null,
   sampling: e['scrum:sampling'] ?? null, wake: { kind: e['scrum:wakeKind'] ?? null, messageId: e['scrum:wakeMessage'] ?? null },
   memory: { handed: e['scrum:memoryHanded'] ?? null, state: e['scrum:memoryState'] ?? null }, memoryWritten: e['scrum:memoryWritten'] ?? [], claims: e['scrum:claims'] ?? [],
@@ -3889,7 +3890,10 @@ const MODEL_CALL_FIELDS = new Set(['by', 'agent', 'model', 'provider', 'protocol
   // #1246 — a claimed lookup from a wake that called no tool.
   'unbackedLookupClaims',
   // #1246b — the nudge and what it produced.
-  'narrationRetry']);
+  'narrationRetry',
+  // #1352 — what the adapter noticed about the response and did NOT refuse on
+  // (e.g. zero-reasoning-tokens on a thinking model). Countable, never a drop.
+  'anomalies']);
 const MODEL_CALL_SAMPLING = new Set(['temperature', 'topP', 'topK', 'repetitionPenalty', 'seed', 'stop', 'maxTokens', 'keepAlive']);
 // #1086 slice 2 — the row builder, shared by POST /api/model-calls and the
 // search reader, so a reader verdict is ledgered EXACTLY as a hand-posted row
@@ -3950,6 +3954,7 @@ function modelCallEntityFrom(body) {
     'scrum:cost': n(body.cost) ?? 0, 'scrum:latencyMs': n(body.latencyMs),
     // #1254 — line-initial markers the seat emitted on a published turn.
     'scrum:markerLines': n(body.markerLines),
+    'scrum:anomaly': Array.isArray(body.anomalies) ? body.anomalies.map(String).slice(0, 20) : [],   // #1352
     'scrum:stopReason': typeof body.stopReason === 'string' ? body.stopReason : null,
     'scrum:ok': body.ok !== false,
     'scrum:contextHandedTo': Array.isArray(body.contextHandedTo) ? body.contextHandedTo.map(String).slice(0, 200) : [],

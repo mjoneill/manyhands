@@ -149,22 +149,44 @@ test('#1198 empty text with a 200 is a NAMED failure — the soft-refusal shape'
   );
 });
 
-test('#1198 a thinking model reporting ZERO reasoning tokens is refused', async () => {
+// #1352 — FLIPPED, not deleted. This used to assert a refusal; the refusal
+// discarded 9 of 378 resident turns (80–516 s of generation each) and every
+// one read as a seat that never woke. The answer is the answer; the missing
+// reasoning count is a fact about the usage row, recorded there.
+test('#1352 a thinking model reporting ZERO reasoning tokens is PUBLISHED, and the row carries the anomaly', async () => {
   const res = openaiOk('answered without thinking', {
     usage: { completion_tokens_details: { reasoning_tokens: 0 } },
   });
+  const out = await callModel({ model: 'm', protocol: 'openai-completions', baseUrl: 'http://x', thinking: true },
+    MSGS, { transport: stub(res).transport });
+  assert.equal(out.text, 'answered without thinking', 'the text reached the caller');
+  assert.deepEqual(out.anomalies, ['zero-reasoning-tokens']);
+  assert.equal(out.usage.reasoningTokens, 0, 'the count stays on the row for #1294 to price');
+});
+
+test('#1352 NEGATIVE CONTROL — a thinking model that DID reason records no anomaly', async () => {
+  const res = openaiOk('reasoned', { usage: { completion_tokens_details: { reasoning_tokens: 41 } } });
+  const out = await callModel({ model: 'm', protocol: 'openai-completions', baseUrl: 'http://x', thinking: true },
+    MSGS, { transport: stub(res).transport });
+  assert.equal(out.text, 'reasoned');
+  assert.deepEqual(out.anomalies, []);
+});
+
+test('#1352 NEGATIVE CONTROL — a thinking model that returns NO TEXT still fails, by name, not as an anomaly', async () => {
+  const res = openaiOk('   ', { usage: { completion_tokens_details: { reasoning_tokens: 0 } } });
   await assert.rejects(
     () => callModel({ model: 'm', protocol: 'openai-completions', baseUrl: 'http://x', thinking: true },
       MSGS, { transport: stub(res).transport }),
-    (e) => e instanceof ModelAssertionError && e.assertion === 'thinking',
+    (e) => e instanceof ModelAssertionError && e.assertion === 'nonEmpty',
   );
 });
 
-test('#1198 a NON-thinking model is not held to a reasoning budget', async () => {
+test('#1198 a NON-thinking model is not held to a reasoning budget — and records no anomaly either', async () => {
   const res = openaiOk('fine', { usage: { completion_tokens_details: { reasoning_tokens: 0 } } });
   const out = await callModel({ model: 'm', protocol: 'openai-completions', baseUrl: 'http://x' },
     MSGS, { transport: stub(res).transport });
   assert.equal(out.text, 'fine', 'the assertion must be scoped to what the registry claims');
+  assert.deepEqual(out.anomalies, []);
 });
 
 // ── the runaway budget ──────────────────────────────────────────────────────

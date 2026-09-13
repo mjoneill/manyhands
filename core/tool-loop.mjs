@@ -84,6 +84,7 @@ export async function runToolLoop({ agent, messages, tools = [], execute, callMo
   // measured. That is the same unmeasured zero this comment warns about, one
   // level down, and it was found by an assertion rather than by re-reading.
   const usage = {};
+  const anomalies = new Set();   // #1352
   const seen = new Set();
   const addUsage = (u) => {
     if (!u || typeof u !== 'object') return;
@@ -106,6 +107,7 @@ export async function runToolLoop({ agent, messages, tools = [], execute, callMo
     const out = await callModel(agent, convo, { ...opts, ...(granted.size ? { tools } : {}) });
     modelCalls += 1;
     addUsage(out.usage);   // #1294 — every hop is billed, including the last
+    for (const a of out.anomalies ?? []) anomalies.add(a);   // #1352 — an anomaly on any hop is on the wake
     text = out.text ?? '';
     const calls = Array.isArray(out.toolCalls) ? out.toolCalls : [];
     if (!calls.length) { stoppedBecause = 'answered'; break; }
@@ -157,5 +159,5 @@ export async function runToolLoop({ agent, messages, tools = [], execute, callMo
     if (stoppedBecause === 'max-hops') break;
   }
 
-  return { text, hops, modelCalls, stoppedBecause, messages: convo, usage: seen.size ? usage : null };
+  return { text, hops, modelCalls, stoppedBecause, messages: convo, usage: seen.size ? usage : null, anomalies: [...anomalies] };
 }

@@ -143,6 +143,7 @@ const rowToBoard = (row) => ({
   cost: (agent.model?.costIn != null || agent.model?.costOut != null)
     ? ((row.usage?.promptTokens ?? 0) * (agent.model.costIn ?? 0) + (row.usage?.completionTokens ?? 0) * (agent.model.costOut ?? 0)) : 0,
   stopReason: row.stopReason ?? null, latencyMs: row.latencyMs, ok: row.ok, error: row.error ?? null,
+  anomalies: row.anomalies ?? [],   // #1352
   contextHandedTo: row.contextHandedTo ?? [], producedPost: row.postId ?? null, at: row.at,
   // #1203 finding — the knobs that reproduce the call, and the resident's fields (#1226), ride the board row too.
   sampling: agent.model?.sampling ?? null, wake: row.wake ?? null, memory: row.memory ?? null, memoryWritten: row.memoryWritten ?? [], claims: row.claims ?? [],
