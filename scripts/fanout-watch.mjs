@@ -50,7 +50,7 @@ import fs from 'node:fs';
 // #726 — the decision lives in a pure, tested module. See fanout-decide.mjs for
 // why: six production fixes, no test, and the seventh change had a failure mode
 // (a watch that stops warning) indistinguishable from a healthy room.
-import { decide, seatSuffix, seatBracket, staleSeats, staleFacts, stoppedSeats, lastWriteBySeatFrom, maintenanceFrom } from './fanout-decide.mjs';
+import { decide, seatSuffix, seatBracket, staleSeats, staleFacts, stoppedSeats, answeredSeatsFrom, lastWriteBySeatFrom, maintenanceFrom } from './fanout-decide.mjs';
 
 const STATUS_URL = process.env.SCRUM_STATUS_URL || 'http://127.0.0.1:3001/channel/status';
 const POST_URL = process.env.SCRUM_POST_URL || 'http://127.0.0.1:3141/api/conversations';
@@ -124,6 +124,8 @@ const stale = staleSeats(status);
 // this tick (fail quiet, say so), because "I could not look" is not "nobody is
 // mid-work".
 const STOPPED_AFTER_MS = Number(process.env.SCRUM_STOPPED_AFTER_MS ?? 20 * 60 * 1000);
+// #1358 — how long an ANSWERED stall stays quiet before it is asked again (three windows).
+const STOPPED_REFIRE_MS = Number(process.env.SCRUM_STOPPED_REFIRE_MS ?? 3 * STOPPED_AFTER_MS);
 const CARDS_URL = (process.env.SCRUM_POST_URL || 'http://127.0.0.1:3141/api/conversations').replace(/\/api\/conversations$/, '/api/cards');
 let claimsBySeat = {};
 try {
@@ -144,7 +146,11 @@ const MAINTENANCE_WINDOW_MS = Number(process.env.SCRUM_MAINTENANCE_WINDOW_MS ?? 
 let maintenance = null;
 let lastWriteBySeat = {};
 try {
-  const since = new Date(Date.now() - STOPPED_AFTER_MS - 60_000).toISOString();
+  // #1358 — the page must reach back as far as the re-ask backoff, or a write
+  // that answered the episode (24 min old at the 16:52Z firing) is invisible
+  // and "no board write in the window read" is true of a window that was too
+  // short to hold the answer.
+  const since = new Date(Date.now() - Math.max(STOPPED_AFTER_MS, STOPPED_REFIRE_MS) - 60_000).toISOString();
   const r = await fetch(`${CHANGES_URL}?since=${encodeURIComponent(since)}&limit=500`, { signal: AbortSignal.timeout(5000) });
   const j = await r.json();
   lastWriteBySeat = lastWriteBySeatFrom(j?.changes);
@@ -155,6 +161,8 @@ try {
   maintenance = maintenanceFrom(j?.changes, { now: Date.now(), windowMs: MAINTENANCE_WINDOW_MS });
 } catch (e) { console.log(`${now} attributed writes unreadable (${e.message}) — the client-request reading decides alone this tick`); lastWriteBySeat = {}; }
 const stopped = claimsBySeat ? stoppedSeats(status, { now: Date.now(), staleMs: STOPPED_AFTER_MS, claimsBySeat, lastWriteBySeat }) : [];
+const answeredSeats = claimsBySeat ? answeredSeatsFrom(status, { now: Date.now(), staleMs: STOPPED_AFTER_MS, claimsBySeat, lastWriteBySeat }) : [];
+if (answeredSeats.length) console.log(`${now} answered stalls (not re-asked inside ${Math.round(STOPPED_REFIRE_MS / 60000)} min): ${answeredSeats.map((a) => `${a.seat} wrote ${a.lastWriteAt} after its request ${a.lastClientRequestAt}`).join('; ')}`);
 if (stopped.length) console.log(`${now} stopped seats: ${stopped.map((s) => `${s.seat} since ${s.lastClientRequestAt} holding ${s.claims.map((c) => `#${c}`).join(',')}`).join('; ')}`);
 if (stale.length) console.log(`${now} stale seats: ${stale.map((s) => `${s.seat} since ${s.firstAt} (${s.hits} hits)`).join(', ')}`);
 
@@ -168,6 +176,8 @@ const { state: st, warnBody } = decide({
   staleSeats: stale,
   staleFacts: staleFacts(status),
   stoppedSeats: stopped,
+  answeredSeats,            // #1358
+  stoppedRefireMs: STOPPED_REFIRE_MS,
   maintenance,
 });
 

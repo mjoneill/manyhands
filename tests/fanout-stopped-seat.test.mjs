@@ -220,3 +220,85 @@ test('#1262 with NO write in hand the summary still says so, and a RECENT write 
   const recent = stoppedSeats(status, { now: T0, staleMs, claimsBySeat: CLAIMS, lastWriteBySeat: { alpha: iso(T0 - 2 * MIN) } });
   assert.deepEqual(recent.map((s) => s.seat), [], 'a fresh write means executing through another door — no post');
 });
+
+// ── #1358 — a REST rescue must not END the episode, and a seat that answered
+// through another door is not asked again until a long backoff ─────────────
+//
+// Three live specimens on 2026-09-13 (15:47, 16:12, 16:52Z): the same seat,
+// working in a worktree and writing to the commons through REST, named STOPPED
+// three times. Mechanism: decide() deleted every episode absent from the tick's
+// list, so a fresh write (which removes the seat from stoppedSeats) ENDED the
+// episode; when the write aged past staleMs the same (seat, lastClientRequestAt)
+// key came back as a NEW fact and fired again. An episode ends when the seat's
+// client request moves — nothing else.
+test('#1358 the 16:12 specimen: a write inside the window suppresses the name and the episode SURVIVES — when the write ages out, the same key does not fire again', () => {
+  const claims = { alpha: [1349] };
+  // t0: stale request (3 h), no write in hand → named once (today's behaviour).
+  const first = stoppedSeats(STATUS_STALLED, { now: T0, staleMs: 20 * MIN, claimsBySeat: claims, lastWriteBySeat: {} });
+  const t1 = decide({ ...base, state: healthy, stoppedSeats: first });
+  assert.ok(t1.warnBody, 'first firing stands');
+  // t0+25: the seat wrote at t0+22 ("active, building") — a fresh write, so stoppedSeats omits her.
+  const rescued = stoppedSeats(STATUS_STALLED, { now: T0 + 25 * MIN, staleMs: 20 * MIN, claimsBySeat: claims, lastWriteBySeat: { alpha: iso(T0 + 22 * MIN) } });
+  assert.deepEqual(rescued, [], 'precondition: a fresh write rescues (unchanged)');
+  const t2 = decide({ ...base, now: T0 + 25 * MIN, state: t1.state, stoppedSeats: rescued, answeredSeats: [{ seat: 'alpha', lastClientRequestAt: STATUS_STALLED.seats.alpha.lastClientRequestAt, lastWriteAt: iso(T0 + 22 * MIN) }] });
+  assert.equal(t2.warnBody, null);
+  assert.ok(Object.keys(t2.state.stoppedEpisodes).length === 1, 'the episode is KEPT, marked answered — not deleted');
+  // t0+46: the write is 24 min old — outside the 20-min rescue — same request key. The old code fired here.
+  const aged = stoppedSeats(STATUS_STALLED, { now: T0 + 46 * MIN, staleMs: 20 * MIN, claimsBySeat: claims, lastWriteBySeat: { alpha: iso(T0 + 22 * MIN) } });
+  assert.deepEqual(aged.map((s) => s.seat), ['alpha'], 'precondition: past the window the seat is a stopped candidate again');
+  const t3 = decide({ ...base, now: T0 + 46 * MIN, state: t2.state, stoppedSeats: aged });
+  assert.equal(t3.warnBody, null, 'the 16:52 specimen: the seat answered this episode 24 min ago; the same question is not re-asked');
+});
+
+test('#1358 the backoff: an answered episode is re-asked only after refireMs with NO newer write, and says when it last answered; a request from the seat still ends it', () => {
+  const claims = { alpha: [1349] };
+  const req = STATUS_STALLED.seats.alpha.lastClientRequestAt;
+  const answered = [{ seat: 'alpha', lastClientRequestAt: req, lastWriteAt: iso(T0) }];
+  const t1 = decide({ ...base, now: T0 + 1 * MIN, state: healthy, stoppedSeats: [], answeredSeats: answered });
+  assert.equal(t1.warnBody, null, 'a write newer than the request answers the episode before it is asked');
+  const cand = (now) => stoppedSeats(STATUS_STALLED, { now, staleMs: 20 * MIN, claimsBySeat: claims, lastWriteBySeat: { alpha: iso(T0) } });
+  const t2 = decide({ ...base, now: T0 + 40 * MIN, state: t1.state, stoppedSeats: cand(T0 + 40 * MIN), stoppedRefireMs: 60 * MIN });
+  assert.equal(t2.warnBody, null, '40 min after the answer: inside the backoff');
+  const t3 = decide({ ...base, now: T0 + 61 * MIN, state: t2.state, stoppedSeats: cand(T0 + 61 * MIN), stoppedRefireMs: 60 * MIN });
+  assert.ok(t3.warnBody, '61 min with nothing further: asked again — a seat can answer once and then truly wedge');
+  assert.match(t3.warnBody, /last answered .*61 min ago|answered through another door .*ago/i, 'the re-ask says the seat had answered, and when');
+  const t4 = decide({ ...base, now: T0 + 70 * MIN, state: t3.state, stoppedSeats: cand(T0 + 70 * MIN), stoppedRefireMs: 60 * MIN });
+  assert.equal(t4.warnBody, null, 'and once per backoff, not per tick');
+  const moved = decide({ ...base, now: T0 + 75 * MIN, state: t4.state, stoppedSeats: [], answeredSeats: [] });   // she made a request
+  assert.deepEqual(moved.state.stoppedEpisodes, {}, 'a client request ends the episode, as before');
+});
+
+test('#1358 POSITIVE CONTROL kept: a seat that writes nothing anywhere is still named on the first tick, and a pre-#1358 numeric episode record is read without error', () => {
+  const claims = { alpha: [717] };
+  const named = stoppedSeats(STATUS_STALLED, { now: T0, staleMs: 20 * MIN, claimsBySeat: claims, lastWriteBySeat: {} });
+  const t1 = decide({ ...base, state: healthy, stoppedSeats: named });
+  assert.match(t1.warnBody ?? '', /SEAT STOPPED/);
+  // A state file written by the old code holds `key: <number>`; the new code must not choke or re-fire.
+  const key = `alpha@${STATUS_STALLED.seats.alpha.lastClientRequestAt}`;
+  const legacy = { ...healthy, stoppedEpisodes: { [key]: T0 - 5 * MIN } };
+  const t2 = decide({ ...base, state: legacy, stoppedSeats: named });
+  assert.equal(t2.warnBody, null, 'an episode already named under the old shape is not named again');
+});
+
+test('#1358 SABOTAGE: an always-answered gate and a never-answered gate both fail this suite', () => {
+  // Spelled as a property the two tests above must hold jointly: the positive
+  // control fires (so the gate is not always-answered) AND the aged rescue is
+  // silent (so it is not never-answered). If either assertion is deleted, the
+  // other still discriminates one direction; this test exists so both stay.
+  const claims = { alpha: [1] };
+  const named = stoppedSeats(STATUS_STALLED, { now: T0, staleMs: 20 * MIN, claimsBySeat: claims, lastWriteBySeat: {} });
+  const fires = decide({ ...base, state: healthy, stoppedSeats: named }).warnBody != null;
+  const ans = [{ seat: 'alpha', lastClientRequestAt: STATUS_STALLED.seats.alpha.lastClientRequestAt, lastWriteAt: iso(T0 - 1 * MIN) }];
+  const s1 = decide({ ...base, state: healthy, stoppedSeats: [], answeredSeats: ans }).state;
+  const quiet = decide({ ...base, now: T0 + 30 * MIN, state: s1, stoppedSeats: stoppedSeats(STATUS_STALLED, { now: T0 + 30 * MIN, staleMs: 20 * MIN, claimsBySeat: claims, lastWriteBySeat: { alpha: iso(T0 - 1 * MIN) } }) }).warnBody == null;
+  assert.equal(fires && quiet, true, `fires=${fires} quiet=${quiet}`);
+});
+
+test('#1358 answeredSeatsFrom: a seat whose newest attributed write is NEWER than its stale client request has answered its episode through another door', async () => {
+  const { answeredSeatsFrom } = await import('../scripts/fanout-decide.mjs');
+  const claims = { alpha: [1349], gamma: [5] };
+  const req = STATUS_STALLED.seats.alpha.lastClientRequestAt;
+  const out = answeredSeatsFrom(STATUS_STALLED, { claimsBySeat: claims, lastWriteBySeat: { alpha: iso(T0 - 24 * MIN), gamma: iso(T0 - 5 * 60 * MIN) } });
+  assert.deepEqual(out, [{ seat: 'alpha', lastClientRequestAt: req, lastWriteAt: iso(T0 - 24 * MIN) }],
+    'alpha wrote after her request went quiet ⇒ answered; gamma\'s write predates her request ⇒ not an answer; beta is not stale');
+});

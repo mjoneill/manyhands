@@ -82,7 +82,7 @@ export function maintenanceFrom(changes, { now = Date.now(), windowMs = 10 * 60 
   return best;
 }
 
-export function decide({ receivers, sessions, floor, cooldownMs, now, state, staleSeats: stale = [], stoppedSeats: stopped = [], staleFacts = null, maintenance = null }) {
+export function decide({ receivers, sessions, floor, cooldownMs, now, state, staleSeats: stale = [], stoppedSeats: stopped = [], answeredSeats: answered = [], stoppedRefireMs = 60 * 60 * 1000, staleFacts = null, maintenance = null }) {
   // Deep-copy the two containers. A spread alone leaves `sigTimes` and `hist`
   // ALIASED to the caller's objects, so decide() would edit state it was only
   // asked to read — invisible in production (each run reads fresh state off
@@ -358,14 +358,44 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
   // A threshold with no number is still honest; a threshold printed as NaN is
   // not. Absent thresholdMs ⇒ say "staleness" and name no minutes.
   const thresholdText = (s) => (Number.isFinite(s?.thresholdMs) ? `${Math.round(s.thresholdMs / 60000)}-min` : 'staleness');
+  // #1358 — AN EPISODE SURVIVES A RESCUE. Measured 2026-09-13 (15:47, 16:12,
+  // 16:52Z): a seat working through REST wrote to the commons, which removed
+  // her from `stopped` for one window — and this loop deleted her episode as
+  // "over". When the write aged past the threshold the SAME request stamp came
+  // back as a NEW fact and fired again: three alarms on one stall she had
+  // answered. Now: an episode is the (seat, lastClientRequestAt) fact; it ends
+  // when that stamp moves (a real client request) or the seat drops its claim.
+  // A write newer than the stamp ANSWERS the episode (`answered`, from
+  // answeredSeatsFrom, or a rescue seen this tick); an answered episode is not
+  // re-asked until `stoppedRefireMs` (default 60 min, three windows) has
+  // passed with nothing newer — so a seat that answered once and then truly
+  // wedged is still found, and the re-ask says when she last answered.
+  // Pre-#1358 state files hold `key: <number>` (namedAt); read as such.
+  const episode = (v) => (v && typeof v === 'object' ? v : (Number.isFinite(v) ? { namedAt: v } : null));
   const stoppedNow = new Set();
   const stoppedNamed = [];
+  for (const a of answered) {
+    if (!a?.seat || !a.lastClientRequestAt) continue;
+    const key = `${a.seat}@${a.lastClientRequestAt}`;
+    stoppedNow.add(key);
+    const ep = episode(st.stoppedEpisodes[key]) ?? {};
+    const prev = typeof ep.answeredAt === 'string' ? ep.answeredAt : null;
+    st.stoppedEpisodes[key] = { ...ep, answeredAt: prev && prev > a.lastWriteAt ? prev : a.lastWriteAt };
+  }
   for (const s of stopped) {
     if (!s?.seat || !s.lastClientRequestAt) continue;
     const key = `${s.seat}@${s.lastClientRequestAt}`;
     stoppedNow.add(key);
-    if (st.stoppedEpisodes[key]) continue;
-    st.stoppedEpisodes[key] = now;
+    const ep = episode(st.stoppedEpisodes[key]);
+    if (ep) {
+      const answeredAt = typeof ep.answeredAt === 'string' ? Date.parse(ep.answeredAt) : NaN;
+      const last = Math.max(Number.isFinite(ep.namedAt) ? ep.namedAt : 0, Number.isFinite(answeredAt) ? answeredAt : 0);
+      if (!Number.isFinite(answeredAt) || now - last < stoppedRefireMs) continue;   // asked once, or answered and inside the backoff
+      st.stoppedEpisodes[key] = { ...ep, namedAt: now };
+      stoppedNamed.push({ ...s, answeredAt: ep.answeredAt });
+      continue;
+    }
+    st.stoppedEpisodes[key] = { namedAt: now };
     stoppedNamed.push(s);
   }
   for (const key of Object.keys(st.stoppedEpisodes)) if (!stoppedNow.has(key)) delete st.stoppedEpisodes[key];
@@ -388,7 +418,8 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
       + `but has made no request since ${s.lastClientRequestAt} (${Math.round(s.staleMs / 60000)} min)`
       + `${s.lastWriteAt
         ? ` and its last attributed board write was ${s.lastWriteAt}, itself older than the ${thresholdText(s)} threshold`
-        : ' and no board write is attributed to it in the window read'}`);
+        : ' and no board write is attributed to it in the window read'}`
+      + (s.answeredAt ? ` — it answered through another door at ${s.answeredAt} (last answered ${Math.round((now - Date.parse(s.answeredAt)) / 60000)} min ago) and nothing since` : ''));
     const stoppedBody = `⛔ fanout watch: SEAT STOPPED, not deaf (#717) — ${lines.join('; ')}. `
       + `Measured: no request through its MCP client${namedWrite
         ? ` and no board write attributed to it NEWER than the ${thresholdText(stoppedNamed.find((x) => x.lastWriteAt))} threshold`
@@ -454,6 +485,30 @@ export function stoppedSeats(status, { now = Date.now(), staleMs = 20 * 60 * 100
     // different quantities were sharing one name across the boundary, so the
     // threshold is carried explicitly rather than re-derived or guessed.
     out.push({ seat, lastClientRequestAt: s.lastClientRequestAt, lastWriteAt: typeof lastWrite === 'string' ? lastWrite : null, staleMs: age, thresholdMs: staleMs, claims: [...claims] });
+  }
+  return out.sort((a, b) => a.seat.localeCompare(b.seat));
+}
+
+/**
+ * #1358 — which stale-request seats have ANSWERED their episode through another
+ * door: open stream, stale client request, a claim, and a newest attributed
+ * write NEWER than that request. The write's age does not matter here (that is
+ * stoppedSeats' rescue); what matters is that it came after the request went
+ * quiet, so the seat has spoken since — decide() keeps the episode as answered
+ * and re-asks only after its backoff.
+ */
+export function answeredSeatsFrom(status, { staleMs = 20 * 60 * 1000, now = Date.now(), claimsBySeat = {}, lastWriteBySeat = {} } = {}) {
+  const out = [];
+  for (const [seat, s] of Object.entries(status?.seats ?? {})) {
+    const streams = Number(s?.streams);
+    if (!Number.isFinite(streams) || streams <= 0) continue;
+    if (typeof s?.lastClientRequestAt !== 'string') continue;
+    const age = now - Date.parse(s.lastClientRequestAt);
+    if (!Number.isFinite(age) || age < staleMs) continue;
+    if (!(claimsBySeat[seat] || []).length) continue;
+    const w = lastWriteBySeat?.[seat];
+    if (typeof w !== 'string' || !(w > s.lastClientRequestAt)) continue;
+    out.push({ seat, lastClientRequestAt: s.lastClientRequestAt, lastWriteAt: w });
   }
   return out.sort((a, b) => a.seat.localeCompare(b.seat));
 }
