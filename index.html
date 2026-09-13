@@ -7,6 +7,7 @@
 <title>manyhands</title>
 <link rel="stylesheet" href="./core/theme.css"><!-- shared design language (#333) -->
 <link rel="stylesheet" href="./core/header.css"><!-- #303-2 shared nav (mounted by the module bridge below) -->
+<link rel="stylesheet" href="./core/constraints-view.css"><!-- #1350 what governs an agent -->
 <style>
 /* ── CSS Custom Properties ── */
 /* #333 — the board on the shared design language. Structural vars alias the
@@ -1833,6 +1834,20 @@ body::before {
   import { identityOf } from './core/identity.mjs';
   import { cardContentKey } from './core/card-content-key.mjs';
   import { mountComposerWatch } from './core/composer-watch.mjs';
+  import { openConstraintsPopover } from './core/constraints-view.mjs';
+  // #1350 slice 3 — a name on the board is a door to what governs it. One
+  // delegated listener: assignee chips are re-rendered by innerHTML all over
+  // this file, so per-chip wiring would be lost on every redraw. Read-only —
+  // #498's lesson holds: a chip must never change what the board SHOWS; this
+  // opens a detail about the seat and touches no filter.
+  document.addEventListener('click', (e) => {
+    const chip = e.target.closest('.card-assignee[data-assignee], .conv-msg-author');
+    if (!chip) return;
+    const seat = chip.dataset.assignee || chip.textContent.trim();
+    if (!seat || seat === 'unassigned' || seat === 'unknown') return;
+    e.stopPropagation();
+    openConstraintsPopover(chip, seat);
+  });
   window.renderChatMarkdown = renderChatMarkdown;
   window.identityOf = identityOf; // #333 — assignee chips glow their identity light
   // #466 — the SAME "did this card change?" the server uses, so a refused save
@@ -5470,6 +5485,7 @@ function createConvMessageNode(c) {
   const author = document.createElement('span');
   author.className = 'conv-msg-author';
   author.textContent = c.author || 'unknown';
+  author.title = `what governs ${c.author || 'this seat'} now (#1350)`;   // #1350 — click opens the constraints popover (delegated in the module bridge)
   const ts = document.createElement('span');
   ts.className = 'conv-msg-ts';
   ts.textContent = formatTimestamp(c.createdAt);

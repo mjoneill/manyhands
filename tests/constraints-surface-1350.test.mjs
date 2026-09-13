@@ -108,3 +108,23 @@ test('#1350 commons: click a NAME → popover with the same inventory; a seat wi
     await page.close();
   });
 });
+
+test('#1350 board: an assignee chip is a door too — click opens the popover for that seat and changes NO filter (#498)', async () => {
+  await withBrowserServer(async ({ server, browser }) => {
+    const r = await post(server.baseUrl, '/api/agents', SEED); assert.equal(r.status, 201, await r.text());
+    const c = await post(server.baseUrl, '/api/cards', { title: 'a card held by the probe', assignees: ['probe'], by: 'sage' });
+    assert.equal(c.status, 201, await c.text());
+    const page = await browser.newPage();
+    await page.goto(`${server.baseUrl}/index.html`, { waitUntil: 'networkidle0' });
+    await page.waitForSelector('.card-assignee[data-assignee="probe"]', { timeout: 8000 });
+    const cardsBefore = await page.$$eval('.card', (els) => els.length);
+    await page.$eval('.card-assignee[data-assignee="probe"]', (el) => el.click());
+    await page.waitForSelector('.constraints-popover[data-seat="probe"] .constraints-table', { timeout: 5000 });
+    const hops = await page.$eval('.constraints-popover .constraints-row[data-constraint="maxHops"] .constraints-value', (td) => td.textContent);
+    assert.equal(hops, '8');
+    assert.equal(await page.$$eval('.card', (els) => els.length), cardsBefore, 'the chip is an indicator: nothing on the board was filtered by the click');
+    await page.keyboard.press('Escape');
+    assert.equal(await page.$$eval('.constraints-popover', (ps) => ps.length), 0);
+    await page.close();
+  });
+});
