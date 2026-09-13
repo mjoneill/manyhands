@@ -80,8 +80,23 @@ export function seatsNotBack(before, after, restartAtIso) {
   return out.sort((x, y) => x.seat.localeCompare(y.seat));
 }
 
+/**
+ * #1353 — how many NAMELESS clients hold a stream in the after-snapshot.
+ * Binding happens on the session-register request, after the stream opens
+ * (#703), so during the settle window a seat can be back on the wire and
+ * absent from the seats table. On the first live run two such sessions sat
+ * beside two "dropped" names. Counted, never used to suppress a name: a seat
+ * genuinely gone and an unbound stream belonging to someone else must both
+ * stay visible. Tool-only unbound sessions (streams=0) are #707's problem.
+ */
+export function unboundWithStream(after) {
+  const a = asSnapshot(after, 'after');
+  const list = Array.isArray(a.unboundSessions) ? a.unboundSessions : [];
+  return list.filter((u) => (u?.streams ?? 0) > 0).length;
+}
+
 /** Human-facing lines for the deploy log and the commons. Empty string when nothing is wrong. */
-export function formatReport(rows, { restartAt, settleSeconds }) {
+export function formatReport(rows, { restartAt, settleSeconds, unboundStreams = 0 }) {
   if (!rows.length) return '';
   const what = (r) => r.shape === 'dropped'
     ? 'stream did not return'
@@ -89,6 +104,9 @@ export function formatReport(rows, { restartAt, settleSeconds }) {
   const lines = [
     `⛔ ${rows.length} seat${rows.length === 1 ? '' : 's'} not back ${settleSeconds}s after the MCP restart at ${restartAt} (#1324):`,
     ...rows.map((r) => `   ${r.seat.padEnd(12)} ${r.shape.padEnd(8)} ${what(r)}`),
+    ...(unboundStreams > 0
+      ? [`   ⚠️ ${unboundStreams} unbound session${unboundStreams === 1 ? '' : 's'} hold${unboundStreams === 1 ? 's' : ''} a stream — a named seat may be back but not yet registered; re-check before reconnecting (#1353).`]
+      : []),
     '   A Claude Code seat needs a human at its terminal to run /mcp reconnect (#697, #664). Sending still works from a deaf seat, so it will not notice on its own.',
     '   Re-check: curl -s http://127.0.0.1:3001/channel/status | jq .seats',
   ];
@@ -102,8 +120,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       if (!p || !fs.existsSync(p)) throw new Error(`unmeasured: ${label} snapshot file missing (${p ?? 'no path'})`);
       return fs.readFileSync(p, 'utf8');
     };
-    const rows = seatsNotBack(read(beforePath, 'before'), read(afterPath, 'after'), restartAt);
-    process.stdout.write(formatReport(rows, { restartAt, settleSeconds: Number(settle) }));
+    const after = read(afterPath, 'after');
+    const rows = seatsNotBack(read(beforePath, 'before'), after, restartAt);
+    process.stdout.write(formatReport(rows, { restartAt, settleSeconds: Number(settle), unboundStreams: unboundWithStream(after) }));
   } catch (e) {
     process.stderr.write(`deploy-seat-check: ${e.message}\n`);
     process.exit(2);

@@ -21,7 +21,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { seatsNotBack, formatReport } from '../scripts/deploy-seat-check.mjs';
+import { seatsNotBack, formatReport, unboundWithStream } from '../scripts/deploy-seat-check.mjs';
 
 const RESTART_AT = '2026-09-10T23:07:00.000Z';
 const seat = (streams, lastClientRequestAt, sessions = streams || 1) =>
@@ -96,4 +96,30 @@ test('#1324 the report names seats, states the shape, and says what a human must
   assert.match(lines, /\/mcp reconnect/);
   assert.doesNotMatch(lines, /charlie/);
   assert.equal(formatReport([], { restartAt: RESTART_AT, settleSeconds: 30 }), '');
+});
+
+// #1353 — found on the first live run: two "dropped" names beside two unbound
+// sessions that held streams four seconds after the restart. Back on the wire,
+// not yet in the seats table. The report says so — and still names the seats.
+test('#1353 unbound sessions that hold a stream are COUNTED and the report says a named seat may already be back', () => {
+  const after = { seats: { alpha: seat(1, '2026-09-10T23:07:31.000Z') }, unboundSessions: [
+    { sid: 'a', streams: 1, lastClientRequestAt: '2026-09-10T23:07:04.000Z' },
+    { sid: 'b', streams: 1, lastClientRequestAt: '2026-09-10T23:07:04.000Z' },
+    { sid: 'c', streams: 0, lastClientRequestAt: '2026-09-10T23:07:04.000Z' },   // tool-only: not counted (#707)
+  ] };
+  assert.equal(unboundWithStream(after), 2);
+  const rows = seatsNotBack(BEFORE, after, RESTART_AT);
+  assert.deepEqual(rows.map((r) => r.seat), ['bravo', 'charlie'], 'the names are NOT suppressed by the count');
+  const text = formatReport(rows, { restartAt: RESTART_AT, settleSeconds: 30, unboundStreams: unboundWithStream(after) });
+  assert.match(text, /2 unbound sessions hold a stream/);
+  assert.match(text, /bravo/); assert.match(text, /charlie/);
+});
+
+test('#1353 NEGATIVE CONTROL — no unbound stream ⇒ no extra line; a payload without the field counts zero', () => {
+  const after = { seats: { alpha: seat(1, '2026-09-10T23:07:31.000Z') }, unboundSessions: [{ sid: 'c', streams: 0, lastClientRequestAt: null }] };
+  assert.equal(unboundWithStream(after), 0);
+  assert.equal(unboundWithStream({ seats: {} }), 0);
+  const text = formatReport(seatsNotBack(BEFORE, after, RESTART_AT), { restartAt: RESTART_AT, settleSeconds: 30, unboundStreams: 0 });
+  assert.doesNotMatch(text, /unbound/);
+  assert.match(text, /bravo/);
 });
