@@ -281,6 +281,19 @@ export function mountConversationView(opts = {}) {
     const meta = el('div', 'cv-msg-meta');
     meta.append(el('span', 'cv-msg-dot'));
     const author = el('span', 'cv-msg-author', (who.glyph ? who.glyph + ' ' : '') + (who.name || c.author || 'unknown'));
+    // #1350 — a name is a door to what governs it. Click opens the constraints
+    // popover for that seat; a seat with no agent record gets the endpoint's
+    // 404 (its runtime governs it, and the layers the board cannot see), which
+    // is still an answer. Lazy import keeps this module's own tests DOM-free.
+    if (typeof c.author === 'string' && c.author) {
+      author.dataset.constraintsSeat = c.author;
+      author.title = `what governs ${c.author} now (#1350)`;
+      author.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const m = await import('./constraints-view.mjs');
+        m.openConstraintsPopover(author, c.author, { baseUrl });
+      });
+    }
     meta.append(author);
     if (c.createdAt) {
       const ts = el('span', 'cv-msg-ts', formatTs(c.createdAt));

@@ -135,10 +135,13 @@
   code { background:var(--panel-2); border:1px solid var(--line); padding:1px 5px; border-radius:5px; font:13px var(--mono); }
 </style>
 <link rel="stylesheet" href="./core/header.css">
+<link rel="stylesheet" href="./core/constraints-view.css"><!-- #1350 what governs an agent -->
 <script type="module">
   import { mountTopNav } from './core/header.mjs';
   import { mountCommonsPanel } from './core/commons-panel.mjs';
   import { mountConversationView } from './core/conversation-view.mjs';
+  import { loadConstraints } from './core/constraints-view.mjs';   // #1350
+  window.loadConstraints = loadConstraints;   // #1350 — the agents panel is a classic script; the module hands it the loader
   mountTopNav(document, 'settings'); // #303-2 shared nav
   // #497 — settings had no way into the room at all. Same control, same place.
   let _panelView = null;
@@ -861,6 +864,7 @@ function agentRow(a) {
   const modelLabel = registeredKey ? `${esc(registeredKey)} (registered)` : `${esc(a.modelId || '?')} (inline)`;
   row.innerHTML = `<div class="agent-head"><strong>${a.emoji ? esc(a.emoji) + ' ' : ''}${esc(a.name)}</strong> <code>${esc(a.seatKey)}</code> <span class="badge state-${esc(a.state)}">${esc(a.state)}</span>${a.conflict ? ` <span class="badge state-retired" title="${esc(a.conflict.reason)}: &quot;${esc(a.conflict.phrase)}&quot; since ${esc(when(a.conflict.since))}" data-agent-conflict>⚠ prompt cancels grants</span>` : ''} <span class="meta">${modelLabel} · ${esc(a.residency)} · ${esc(a.contextPolicy)} · prompt v${a.prompt ? a.prompt.version : '?'} (${a.promptVersions} version${a.promptVersions === 1 ? '' : 's'}) · grants ${grants.size}${a.maxHops != null ? ` · hops ≤ ${a.maxHops}` : ''}${a.thinking != null ? ` · thinking ${a.thinking ? 'on' : 'off'}` : ''}${a.participationClause ? ' · told when to speak' : ''}${a.budgetPerDay != null ? ` · budget ${a.budgetPerDay}/day` : ''}</span></div>
     <p class="prompt-peek" data-agent-prompt-peek title="the first line of the prompt; open the editor below to read or change all of it"><span class="lbl">prompt v${a.prompt ? a.prompt.version : '?'}</span>${a.prompt && a.prompt.body ? esc(peek(a.prompt.body)) : '<em>no prompt yet</em>'}</p>
+    <details data-agent-constraints><summary>🔍 What governs it now — every value in effect, and which layer set it</summary><div data-agent-constraints-body class="hint">open to read</div></details>
     <details data-agent-editor><summary>✏️ Edit prompt, grants &amp; settings</summary>
       <div class="agent-editor">
         <div class="pane" data-agent-grants>
@@ -1014,6 +1018,13 @@ function agentRow(a) {
     } catch (e) { rowMsg(msg, 'Save failed: ' + e.message, false); }
     btn.disabled = false;
   });
+  // #1350 — the inventory is READ from the endpoint on open, never composed from
+  // the row's own fields: the row shows what the record says, the endpoint shows
+  // what is IN EFFECT and which layer won. Two different questions; the second is
+  // the one a reader asking "why did she go quiet" needs.
+  const cons = row.querySelector('[data-agent-constraints]');
+  cons.addEventListener('toggle', () => { if (cons.open) window.loadConstraints(row.querySelector('[data-agent-constraints-body]'), a.seatKey); });
+
   return row;
 }
 // #1256 — the nav marks the section on screen. Not an IntersectionObserver:
