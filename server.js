@@ -87,6 +87,7 @@ import {
 } from './core/cursor-service.mjs';
 import { configureIdentities, usingDefaultRoster } from './core/identity.mjs';
 import { hostAllowed, parseAllowedHosts, refuseHost } from './core/host-guard.mjs';
+import { agentConstraints, unseenLayers } from './core/agent-constraints.mjs';   // #1350
 
 const PORT = process.env.SCRUM_PORT ? parseInt(process.env.SCRUM_PORT, 10) : 3141;
 // #1338 — extra local names this board may be reached by. Loopback names need
@@ -3738,6 +3739,26 @@ function samplingError(s) {
 // `thinking` drop — passes on the typo.
 const GRANTABLE = new Set([...BOARD_TOOLS.map((t) => t.function.name), 'card_claim']);
 
+// #1350 — WHAT GOVERNS THIS AGENT, NOW, WITH WHERE EACH VALUE CAME FROM. The
+// hop cap that silenced a seat and the debounce that muted another were both
+// in effect and recorded nowhere a human reads; the recourse was to ask the
+// seat to trace itself, the faculty the constraint degrades. Read-only; the
+// precedence is the runtime's (core/agent-constraints.mjs quotes the lines).
+// An unknown seat is a 404 that still lists the layers the board cannot see:
+// an MCP-bound seat is governed entirely by its own runtime, and saying so is
+// the surface's job too.
+function handleAgentConstraints(req, res, seat) {
+  const data = readBoard();
+  const node = findAgent(data, seat);
+  if (!node) return sendJSON(res, 404, { error: `no agent record for seat "${seat}" — a Claude Code or gateway-bridged seat is governed by its own runtime, which the board cannot read`, unseen: unseenLayers({ 'scrum:seatKey': seat }) });
+  const model = node['scrum:usesModel'] ? modelsOf(data).find((m) => m['@id'] === node['scrum:usesModel']) || null : null;
+  const promptVersions = agentPromptsOf(data).filter((v) => v['scrum:ofPrompt'] === AGENT_PROMPT_ID(seat));
+  const since = new Date(); since.setUTCHours(0, 0, 0, 0);
+  const sinceIso = since.toISOString();
+  const modelCallsToday = modelCallsOf(data).filter((c) => c['scrum:agent'] === seat && typeof c['scrum:calledAt'] === 'string' && c['scrum:calledAt'] >= sinceIso).map(modelCallToWire);
+  const claims = (Array.isArray(data.cards) ? data.cards : []).filter((c) => c.claimedBy === seat).map((c) => ({ shortId: c.shortId, title: c.title }));
+  sendJSON(res, 200, agentConstraints(node, { model, promptVersions, modelCallsToday, claims, since: sinceIso }));
+}
 async function handlePatchAgent(req, res, seat) {
   try {
     const body = JSON.parse(await readBody(req));
@@ -8577,6 +8598,7 @@ const API_ROUTES = [
   { method: 'GET',    re: /^\/api\/agents$/,               fn: (req, res) => handleListAgents(req, res) },                       // #1199
   { method: 'POST',   re: /^\/api\/agents$/,               fn: (req, res) => handleCreateAgent(req, res) },                      // #1199
   { method: 'PATCH',  re: /^\/api\/agents\/([^\/]+)$/,      fn: (req, res, m) => handlePatchAgent(req, res, decodeURIComponent(m[1])) },          // #1199
+  { method: 'GET',    re: /^\/api\/agents\/([^\/]+)\/constraints$/, fn: (req, res, m) => handleAgentConstraints(req, res, decodeURIComponent(m[1])) }, // #1350
   { method: 'POST',   re: /^\/api\/agents\/([^\/]+)\/prompt$/, fn: (req, res, m) => handleAgentPromptVersion(req, res, decodeURIComponent(m[1])) }, // #1199
   { method: 'GET',    re: /^\/api\/model-calls$/,          fn: (req, res) => handleListModelCalls(req, res) },   // #1202
   { method: 'GET',    re: /^\/api\/insights$/,             fn: (req, res) => handleInsights(req, res) },              // #1290 shadow
