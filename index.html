@@ -510,6 +510,22 @@ body::before {
 .card-detail-body { white-space: pre-wrap; }
 .card-detail-body.prose { max-width: none; }   /* the panel already holds the measure */
 .card-detail-empty { color: var(--text-muted, #8b92aa); font-style: italic; }
+/* #1365 — the big view can write */
+.card-detail-edit {
+  position: absolute; top: 12px; right: 50px; height: 30px; padding: 0 10px;
+  border: 1px solid var(--border-subtle, #262c3d); border-radius: var(--radius-sm, 7px);
+  background: transparent; color: var(--text-secondary, #94a3b8); font: inherit; font-size: 12px; cursor: pointer;
+}
+.card-detail-edit:hover { color: var(--text-primary, #e2e8f0); border-color: var(--accent-task); }
+.card-detail .card.editing { width: auto; max-width: none; margin: 0; cursor: default; box-shadow: none; border: none; background: transparent; padding: 0; }
+.card-detail .card.editing .card-edit-form { max-width: none; }
+.edit-conflict { margin: 0 0 14px; padding: 10px 12px; border: 1px solid #b45309; border-radius: var(--radius-sm, 7px); background: rgba(180, 83, 9, .12); font-size: 13px; }
+.edit-conflict-head { margin-bottom: 8px; }
+.edit-conflict-title { margin-bottom: 8px; }
+.edit-conflict-diff { font-family: var(--mono, ui-monospace); font-size: 12px; max-height: 240px; overflow: auto; background: rgba(0,0,0,.25); border-radius: 6px; padding: 6px 8px; margin-bottom: 8px; white-space: pre-wrap; }
+.diff-line.add { color: #86efac; } .diff-line.del { color: #fca5a5; text-decoration: line-through; } .diff-line.same { color: var(--text-muted, #8b92aa); }
+.diff-mark { display: inline-block; width: 1.2em; opacity: .8; }
+.edit-conflict-actions { display: flex; gap: 8px; justify-content: flex-end; }
 .card-detail-relationships { margin: 8px 0 12px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
 .card-detail-rel-label { color: var(--text-muted, #8b92aa); }
 
@@ -1804,6 +1820,7 @@ body::before {
   import { installLeavingGuard, registerComposer } from './core/leaving-guard.mjs';   // #1366
   import { openConstraintsPopover } from './core/constraints-view.mjs';
   import { mountEditor } from './core/editor.mjs';
+  import { renderLineDiff } from './core/line-diff.mjs';   // #1365 — the conflict view's diff
   // #1350 slice 3 — a name on the board is a door to what governs it. One
   // delegated listener: assignee chips are re-rendered by innerHTML all over
   // this file, so per-chip wiring would be lost on every redraw. Read-only —
@@ -1831,6 +1848,7 @@ body::before {
   // ran before this module resolved); the column edit form is built per edit
   // and mounts itself through mountBoardDescriptionEditor below.
   window.mountEditor = mountEditor;
+  window.renderLineDiff = renderLineDiff;
   mountBoardDescriptionEditor(document.getElementById('card-desc'), handleAddCard);
   mountEditor(document.getElementById('convs-body'), {
     render: renderChatMarkdown,
@@ -3335,7 +3353,7 @@ function renderCardEditForm(card) {
   // Populate values via DOM properties (safe — no HTML injection)
   el.querySelector('.edit-title').value = card.title || '';
   el.querySelector('.edit-desc').value = card.description || '';
-  mountBoardDescriptionEditor(el.querySelector('.edit-desc'), () => saveEdit(card.id));   // #1367
+  mountBoardDescriptionEditor(el.querySelector('.edit-desc'), () => (el.isConnected && el.closest('#card-detail') ? el.closest('#card-detail').dispatchEvent(new CustomEvent('detail-save', { bubbles: true })) : saveEdit(card.id)));   // #1367 · #1365 the pop-out routes through its own save
   // #1366 — an edit draft, keyed to THIS card and pinned to the description it
   // was written on: it restores over the same text and is dropped against a
   // newer one, so a half-typed edit never overwrites someone else's save.
@@ -3423,11 +3441,15 @@ async function editCard(cardId) {
   });
 }
 
-function saveEdit(cardId) {
-  const cardEl = document.querySelector(`.card[data-id="${cardId}"]`);
-  if (!cardEl) return;
+// #1365 — `root` is the element holding the edit form: the column card by
+// default, the pop-out panel when the big view is writing. Returns the save
+// promise so a caller that needs the verdict (the pop-out's conflict view) can
+// await it; the column path ignores it as before.
+function saveEdit(cardId, root = null) {
+  const cardEl = root || document.querySelector(`.card[data-id="${cardId}"]`);
+  if (!cardEl) return null;
   const card = cards.find(c => c.id === cardId);
-  if (!card) return;
+  if (!card) return null;
 
   const titleInput = cardEl.querySelector('.edit-title');
   const title = titleInput.value.trim();
@@ -3480,10 +3502,11 @@ function saveEdit(cardId) {
 
   editingCardId = null;
   saveToLocalStorage();
-  saveToJSONFile(); // Fire-and-forget JSON sync
+  const saved = saveToJSONFile(); // fire-and-forget for the column path; awaited by the pop-out (#1365)
   _testHookMarkSaved();
   _releaseEditDraft(cardId);   // #1366 — the text is the card's now (local-first, synced by the line above)
   renderBoard();
+  return saved;
 }
 
 // #1366 — an edit draft is released when the edit is committed or explicitly
@@ -3557,6 +3580,8 @@ function openCardDetail(shortId, push = true) {
 
   const seats = (card.assignees || []).map((a) => ASSIGNEE_NAME[a] || a).join(', ');
   let html = '<button class="card-detail-close" data-action="close-card-detail" title="Close (Esc)">✕</button>';
+  // #1365 — the big view can write. One control, the same form the column uses.
+  html += '<button class="card-detail-edit" data-action="edit-card-detail" title="Edit this card here">✎ Edit</button>';
   html += `<div class="card-detail-eyebrow">${escapeHTML(card.type || 'card')} · #${escapeHTML(String(card.shortId))}</div>`;
   html += `<h2 class="card-detail-title" id="card-detail-title">${escapeHTML(card.title || '(untitled)')}</h2>`;
   html += '<div class="card-detail-meta">';
@@ -3634,9 +3659,126 @@ function openCardDetail(shortId, push = true) {
   return true;
 }
 
+// ── #1365 — EDIT IN PLACE, in the pop-out ─────────────────────────────────
+// "How bad it was to open a card in the nice big full page view, but there's
+// no way to edit in that view." The pop-out swaps its read view for the SAME
+// form the column uses (renderCardEditForm: same fields, same #1367 editor,
+// same #1366 draft keyed `edit:<id>` — so a half-typed edit started in the
+// column continues here and vice versa). Save goes through the same
+// versioned whole-board save the column path uses; a 409 for THIS card is
+// shown here as a conflict with a line diff of what they changed, and the
+// user's text stays in the box. An overwrite is possible only from that view,
+// by a button that says so — never silently.
+let _detailEditing = null;   // { cardId, versionAtOpen } while the pop-out is writing
+function _detailAsk(msg) {
+  const ask = typeof window._detailAsk === 'function' ? window._detailAsk : ((m) => window.confirm(m));
+  // Fail SAFE: if the ask itself cannot be shown, the answer is "keep it" —
+  // an editor that stays open costs a click; a discarded edit costs the edit.
+  try { return !!ask(msg); } catch { return false; }
+}
+function _detailIsDirty() {
+  if (!_detailEditing) return false;
+  const panel = document.getElementById('card-detail');
+  const card = cards.find((c) => c.id === _detailEditing.cardId);
+  if (!panel || !card) return false;
+  // Dirty is measured against what was SAVED when the editor opened, not the
+  // in-memory card: on the conflict path saveEdit has already copied the
+  // user's text into `card`, and comparing to that would call an unsaved edit
+  // clean — the exact discard the card forbids.
+  const base = _detailEditing.base || { title: card.title || '', description: card.description || '' };
+  const t = panel.querySelector('.edit-title'); const d = panel.querySelector('.edit-desc');
+  return !!((t && t.value !== base.title) || (d && d.value !== base.description));
+}
+function openCardDetailEditor(card) {
+  const back = document.getElementById('card-detail-backdrop');
+  const panel = document.getElementById('card-detail');
+  if (!card || !back || !panel) return false;
+  const go = () => {
+    panel.innerHTML = '<button class="card-detail-close" data-action="close-card-detail" title="Close (Esc)">✕</button>';
+    const eyebrow = document.createElement('div');
+    eyebrow.className = 'card-detail-eyebrow';
+    // read-only identity: shortId and createdAt are shown, never edited (the negative control)
+    eyebrow.textContent = `editing · #${card.shortId} · created ${card.createdAt ? String(card.createdAt).slice(0, 10) : '—'}`;
+    panel.appendChild(eyebrow);
+    const slot = document.createElement('div');
+    slot.className = 'edit-conflict';
+    slot.hidden = true;
+    panel.appendChild(slot);
+    panel.appendChild(renderCardEditForm(card));
+    _detailEditing = { cardId: card.id, versionAtOpen: card.version ?? null, base: { title: card.title || '', description: card.description || '' } };
+    back.hidden = false;
+    panel.querySelector('.edit-desc')?.focus();
+  };
+  if (typeof card.description !== 'string') {
+    ensureCardDescription(card).then((ok) => { if (ok) go(); else showUndoToast('Cannot edit — the card body could not be loaded.'); });
+  } else go();
+  return true;
+}
+async function saveCardDetailEdit(overwrite = false) {
+  if (!_detailEditing) return;
+  const panel = document.getElementById('card-detail');
+  const card = cards.find((c) => c.id === _detailEditing.cardId);
+  if (!panel || !card) return;
+  const cardId = card.id;
+  if (overwrite && _detailEditing.serverVersion != null) card.version = _detailEditing.serverVersion;   // informed, explicit, after the diff
+  const saved = saveEdit(cardId, panel);
+  if (!saved) return;   // validation refused (empty title); the form said so
+  const ok = await saved;
+  if (ok) { _detailEditing = null; openCardDetail(card.shortId, false); return; }
+  // Refused. Was it THIS card that moved? Ask the server for its copy.
+  let server = null;
+  try { const r = await fetch(`${API_BASE}/api/cards/${encodeURIComponent(cardId)}`); if (r.ok) server = await r.json(); } catch { server = null; }
+  const slot = panel.querySelector('.edit-conflict');
+  if (!slot) return;
+  if (server && server.version != null && server.version !== _detailEditing.versionAtOpen) {
+    _detailEditing.serverVersion = server.version;
+    const mine = panel.querySelector('.edit-desc')?.value ?? card.description ?? '';
+    const titleNote = server.title !== card.title ? `<div class="edit-conflict-title">Title there: <b>${escapeHTML(server.title || '')}</b> · yours: <b>${escapeHTML(card.title || '')}</b></div>` : '';
+    slot.innerHTML = `<div class="edit-conflict-head">⚠️ Someone changed this while you were editing (now version ${escapeHTML(String(server.version))}; you opened ${escapeHTML(String(_detailEditing.versionAtOpen))}). Your text is still in the box. What they saved, against yours:</div>`
+      + titleNote
+      + `<div class="edit-conflict-diff">${window.renderLineDiff ? window.renderLineDiff(mine, server.description || '') : escapeHTML(server.description || '')}</div>`
+      + '<div class="edit-conflict-actions">'
+      + '<button type="button" class="btn-cancel-edit" data-action="use-theirs">Use theirs</button>'
+      + '<button type="button" class="btn-save-edit" data-action="save-edit-anyway">Save mine anyway (overwrites theirs)</button>'
+      + '</div>';
+    slot.hidden = false;
+    // #1366 — re-arm the draft against THEIR base, so a reload keeps my text
+    if (typeof window.mountComposerWatch === 'function') {
+      const ta = panel.querySelector('.edit-desc');
+      const w = ta && window.mountComposerWatch(document, { textarea: ta, key: `edit:${cardId}`, base: server.description || '', sample: false });
+      if (w) { _editDescWatches.set(cardId, w); w.unregister = window.registerComposer?.(w, { describe: () => `an unsaved edit of #${card.shortId}` }); ta.dispatchEvent(new Event('input', { bubbles: true })); }
+    }
+  } else {
+    slot.textContent = 'Not saved — the board could not be written (see the status line). Your text is still in the box; try again.';
+    slot.hidden = false;
+  }
+}
+function useTheirsInDetail() {
+  if (!_detailEditing) return;
+  const card = cards.find((c) => c.id === _detailEditing.cardId);
+  if (!card) return;
+  fetch(`${API_BASE}/api/cards/${encodeURIComponent(card.id)}`).then((r) => (r.ok ? r.json() : null)).then((server) => {
+    if (!server) return;
+    for (const k of ['title', 'description', 'type', 'assignees', 'column', 'priority', 'labels', 'for', 'relationships', 'version', 'updatedAt']) if (k in server) card[k] = server[k];
+    _releaseEditDraft(card.id);
+    _rebaseline([card]);
+    renderBoard();
+    openCardDetailEditor(card);
+  }).catch(() => {});
+}
+function closeCardDetailEditor({ ask = true } = {}) {
+  if (!_detailEditing) return true;
+  const card = cards.find((c) => c.id === _detailEditing.cardId);
+  if (ask && _detailIsDirty() && !_detailAsk(`You have unsaved changes on #${card ? card.shortId : '?'}. Discard them?`)) return false;
+  if (card) _releaseEditDraft(card.id);
+  _detailEditing = null;
+  return true;
+}
+
 function closeCardDetail(pop = true) {
   const back = document.getElementById('card-detail-backdrop');
   if (!back || back.hidden) return;
+  if (!closeCardDetailEditor()) return;   // #1365 — Esc/close with unsaved changes asks; "no" keeps the editor
   back.hidden = true;
   if (pop) {
     try { history.pushState({}, '', location.pathname); } catch (e) { /* file:// */ }
@@ -3654,6 +3796,7 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeCardD
 (function wireCardDetailExits() {
   const back = document.getElementById('card-detail-backdrop');
   if (!back) return;
+  back.addEventListener('detail-save', () => { if (_detailEditing) saveCardDetailEdit(false); });   // #1365 — ⌘/Ctrl+Enter in the pop-out's editor
   back.addEventListener('click', (e) => {
     // the backdrop itself, or anything carrying the close action
     // NOTE the selector: `.card-detail-close`, NOT [data-action="close-card-detail"].
@@ -3664,6 +3807,23 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeCardD
     // like a navigation bug rather than a dismissal bug.
     if (e.target === back || e.target.closest('.card-detail-close')) {
       closeCardDetail();
+      return;
+    }
+    // #1365 — the pop-out's own edit controls (it lives outside boardEl's delegation)
+    const ctl = e.target.closest('[data-action]');
+    const act = ctl && ctl.dataset.action;
+    if (act === 'edit-card-detail') {
+      const n = Number(new URLSearchParams(location.search).get('card')) || Number((back.querySelector('.card-detail-eyebrow')?.textContent.match(/#(\d+)/) || [])[1]);
+      const card = cards.find((c) => c.shortId === n);
+      if (card) openCardDetailEditor(card);
+      return;
+    }
+    if (act === 'save-edit' && _detailEditing) { saveCardDetailEdit(false); return; }
+    if (act === 'save-edit-anyway' && _detailEditing) { saveCardDetailEdit(true); return; }
+    if (act === 'use-theirs' && _detailEditing) { useTheirsInDetail(); return; }
+    if (act === 'cancel-edit' && _detailEditing) {
+      const card = cards.find((c) => c.id === _detailEditing.cardId);
+      if (closeCardDetailEditor()) { if (card) openCardDetail(card.shortId, false); }
       return;
     }
     // A citation INSIDE the pop-out. Repro: open #330, click the #182
