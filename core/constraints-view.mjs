@@ -46,7 +46,7 @@ export function formatValue(key, rec) {
   if (key === 'promptGrantConflict') return v && v.phrase ? `⚠ "${v.phrase}"${v.reason ? ` — ${v.reason}` : ''}` : 'none';
   if (key === 'promptVersion') return `v${v}`;
   // #1382 — a held role is an object {key, name, definedBy}; never let it reach String()
-  if (key === 'role') return v && typeof v === 'object' ? `${v.name || v.key} (${v.key})${v.definedBy && v.definedBy.shortId != null ? ` · #${v.definedBy.shortId}` : ''}` : String(v);
+  if (key === 'role') return v && typeof v === 'object' ? `${v.name || v.key} (${v.key})${v.definedBy && v.definedBy.shortId != null ? ` · #${v.definedBy.shortId}` : ''}${v.version ? ` · v${v.version}` : ''}` : String(v);   // #1387 — which revision the holder is running
   if (Array.isArray(v)) return v.length ? v.join(', ') : '(none)';
   if (typeof v === 'boolean') return v ? 'on' : 'off';
   return String(v);

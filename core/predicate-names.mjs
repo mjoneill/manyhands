@@ -70,6 +70,8 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:Role': null,                       // the type; minted by the projection
   'scrum:roleKey': 'scrum:roleKey',         // po | scrum-master | value-steward | … (unique per board)
   'scrum:definedBy': 'scrum:definedBy',     // → entity: the card holding the full definition
+  'scrum:RoleVersion': null,                // #1387 — the type; a state a role has held
+  'scrum:ofRole': 'scrum:ofRole',           // → the role IRI this version belongs to
   'scrum:role': 'scrum:role',               // SeatDeclaration → entity: the Role held for that interval
   'scrum:Wake': null,                       // #1118 — the type; minted by the projection
   'scrum:wokeSeat': 'scrum:wokeSeat',       // → person: IRI

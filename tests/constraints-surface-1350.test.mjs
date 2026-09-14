@@ -139,6 +139,7 @@ test('#1350 board: an assignee chip is a door too — click opens the popover fo
 test('#1382 formatValue: a held role reads as name (key) · #card; none held reads —; never [object Object]', () => {
   assert.equal(formatValue('role', { value: { key: 'po', name: 'Product Owner', definedBy: { shortId: 915, title: 'PO INTAKE' } }, source: 'board' }), 'Product Owner (po) · #915');
   assert.equal(formatValue('role', { value: { key: 'scrum-master', name: 'Scrum Master', definedBy: null }, source: 'board' }), 'Scrum Master (scrum-master)');
+  assert.equal(formatValue('role', { value: { key: 'scrum-master', name: 'Scrum Master', definedBy: { shortId: 272 }, version: 2 }, source: 'board' }), 'Scrum Master (scrum-master) · #272 · v2', '#1387 — the revision the holder runs');
   assert.equal(formatValue('role', { value: null, source: 'board' }), '—');
   assert.equal(formatValue('role', { value: null, source: 'unset' }), '—');
 });

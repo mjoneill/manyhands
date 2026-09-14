@@ -1802,6 +1802,19 @@ function buildMcpServer() {
     },
   }, async (args) => jsonResult(await apiCall('POST', '/api/roles', args)));
 
+  mcp.registerTool('role_update', {
+    description: 'REVISE a role the board holds (#1387): its short definition, its name, or the card holding the full '
+      + 'text — on the SAME node (declarations point at its IRI; the key cannot change). Every prior state is kept as a '
+      + 'scrum:RoleVersion, so the history is a query. The holder\'s prompt (#1376) carries the new text on its next turn.',
+    inputSchema: {
+      by: z.string().min(1).describe('Who revises it. Declared, not authenticated.'),
+      key: z.string().min(2).describe('The role key: po, scrum-master, …'),
+      definition: z.string().min(40).optional().describe('The new short definition (≥ 40 chars)'),
+      name: z.string().min(1).optional().describe('The new display name'),
+      definedBy: z.union([z.number(), z.string()]).optional().describe('The card (shortId or uuid) holding the full definition'),
+    },
+  }, async ({ key, ...rest }) => jsonResult(await apiCall('PATCH', `/api/roles/${encodeURIComponent(key)}`, rest)));
+
   mcp.registerTool('role_list', {
     description: 'The roles this board defines (#915): key, name, short definition, and the card that holds the full text. Who HOLDS one is a seat-state question — see seat_states / the graph query on role_create.',
     inputSchema: {},

@@ -3415,6 +3415,8 @@ const roleToWire = (data, e) => {
     id: e['@id'], key: e['scrum:roleKey'], name: e.name, definition: e.text,
     definedBy: e['scrum:definedBy'] ? { id: e['scrum:definedBy'], ...(card ? { shortId: card.shortId, title: card.title } : {}) } : null,
     createdBy: e.creator ?? null, createdAt: e.dateCreated ?? null,
+    version: Number(e['scrum:version']) || 1,   // #1387
+    versions: Math.max(1, (Array.isArray(data.roleVersions) ? data.roleVersions : []).filter((v) => v['scrum:ofRole'] === e['@id']).length),
   };
 };
 async function handleCreateRole(req, res) {
@@ -3442,10 +3444,12 @@ async function handleCreateRole(req, res) {
       if (!card) return { status: 400, wire: { error: `definedBy ${JSON.stringify(body.definedBy)} names no card on this board — the defining card must exist (this registry consolidates roles the room already wrote)` } };
       const entity = {
         '@id': ROLE_IRI(key), '@type': 'scrum:Role', 'scrum:roleKey': key, name, text: definition,
-        'scrum:definedBy': card.id, creator: by, dateCreated: new Date().toISOString(),
+        'scrum:definedBy': card.id, creator: by, dateCreated: new Date().toISOString(), 'scrum:version': 1,   // #1387
       };
+      const v1 = roleVersionNode(entity, 1, by, entity.dateCreated);   // #1387 — the minted state is version 1
       data.roles = [...rolesOf(data), entity];
-      writeBoard(data, [roleEvent('create', entity, by)]);
+      data.roleVersions = [...roleVersionsOf(data), v1];
+      writeBoard(data, [roleEvent('create', entity, by), roleVersionEvent('create', v1, by)]);
       return { status: 201, wire: roleToWire(data, entity) };
     });
     sendJSON(res, result.status, result.wire);
@@ -3473,6 +3477,60 @@ async function handleSeatRoleSection(req, res, seat) {
   } catch (e) {
     if (e?.code === 'GRAPH_DEPS_MISSING') return sendJSON(res, 503, { error: e.message, code: e.code });
     console.error(`GET /api/seats/${seat}/role-section:`, e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+// #1387 — a role can be REVISED, and its history kept. The node keeps its IRI
+// (declarations point at it); every state the role has held is a
+// scrum:RoleVersion (the #1199 AgentPromptVersion pattern), so "what was the
+// SM told on 09-13 vs 09-15" is a query. Version 1 is minted at create time
+// and written lazily on the first revision for roles minted before this.
+function roleVersionsOf(data) { return Array.isArray(data.roleVersions) ? data.roleVersions : []; }
+const ROLE_VERSION_IRI = (key, n) => `${ROLE_IRI(key)}/v${n}`;
+const roleVersionEvent = (op, e, actor) => ({ op, actor, entity: { kind: 'roleVersion', id: e['@id'] }, state: e });
+const roleVersionNode = (role, n, by, at) => ({
+  '@id': ROLE_VERSION_IRI(role['scrum:roleKey'], n), '@type': 'scrum:RoleVersion', 'scrum:ofRole': role['@id'], 'scrum:version': n,
+  name: role.name, text: role.text, 'scrum:definedBy': role['scrum:definedBy'], creator: by, dateCreated: at,
+});
+async function handleUpdateRole(req, res, keyRaw) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const key = String(keyRaw || '').trim().toLowerCase();
+    const by = typeof body.by === 'string' && body.by.trim() ? body.by.trim() : null;
+    if (!by) return sendJSON(res, 400, { error: 'by is required — who revises this role. Declared, not authenticated.' });
+    if (body.key !== undefined && String(body.key).trim().toLowerCase() !== key) return sendJSON(res, 400, { error: 'a role\'s key is its identity and cannot change — declarations point at it; mint a new role for a new key' });
+    const wants = {};
+    if (body.name !== undefined) { const name = typeof body.name === 'string' ? body.name.trim() : ''; if (!name) return sendJSON(res, 400, { error: 'name, when given, must be non-empty' }); wants.name = name; }
+    if (body.definition !== undefined) { const d = typeof body.definition === 'string' ? body.definition.trim() : ''; if (d.length < 40) return sendJSON(res, 400, { error: 'definition, when given, must be ≥ 40 characters — a short statement of what holding this role commits a seat to' }); wants.text = d; }
+    const definedByGiven = body.definedBy !== undefined && body.definedBy !== null && body.definedBy !== '';
+    if (!definedByGiven && !('name' in wants) && !('text' in wants)) return sendJSON(res, 400, { error: 'nothing to revise — send definition, name, or definedBy' });
+    const result = await withWriteLock(async () => {
+      const data = readBoard();
+      const role = rolesOf(data).find((r) => r['scrum:roleKey'] === key);
+      if (!role) return { status: 404, wire: { error: `no role with key ${JSON.stringify(key)} — known: ${rolesOf(data).map((r) => r['scrum:roleKey']).join(', ') || '(none)'}` } };
+      if (definedByGiven) {
+        const card = (data.cards || []).find((c) => c.id === String(body.definedBy) || String(c.shortId) === String(body.definedBy));
+        if (!card) return { status: 400, wire: { error: `definedBy ${JSON.stringify(body.definedBy)} names no card on this board — the defining card must exist` } };
+        wants['scrum:definedBy'] = card.id;
+      }
+      const now = new Date().toISOString();
+      const versions = roleVersionsOf(data).filter((v) => v['scrum:ofRole'] === role['@id']);
+      const events = [];
+      let n = versions.reduce((m, v) => Math.max(m, Number(v['scrum:version']) || 0), 0);
+      const added = [];
+      if (n === 0) { const v1 = roleVersionNode(role, 1, role.creator ?? by, role.dateCreated ?? now); added.push(v1); events.push(roleVersionEvent('create', v1, by)); n = 1; }   // minted before #1387: record what it said
+      const updated = { ...role, ...wants, 'scrum:version': n + 1, dateModified: now };
+      const vNext = roleVersionNode(updated, n + 1, by, now);
+      added.push(vNext); events.push(roleVersionEvent('create', vNext, by));
+      data.roleVersions = [...roleVersionsOf(data), ...added];
+      data.roles = rolesOf(data).map((r) => (r['@id'] === role['@id'] ? updated : r));
+      events.push(roleEvent('update', updated, by));
+      writeBoard(data, events);
+      return { status: 200, wire: roleToWire(data, updated) };
+    });
+    sendJSON(res, result.status, result.wire);
+  } catch (e) {
+    console.error('PATCH /api/roles/:key:', e.message);
     sendJSON(res, 500, { error: e.message });
   }
 }
@@ -3924,7 +3982,7 @@ async function handleAgentConstraints(req, res, seat) {
   let role = { value: null, source: 'unset', section: '' };
   try {
     const r = await roleSectionForSeat(seat);
-    role = r.role ? { value: { key: r.role.key, name: r.role.name, definedBy: r.role.definedBy ?? null }, source: 'board', section: r.section } : { value: null, source: 'board', section: '' };
+    role = r.role ? { value: { key: r.role.key, name: r.role.name, definedBy: r.role.definedBy ?? null, version: r.role.version ?? 1 }, source: 'board', section: r.section } : { value: null, source: 'board', section: '' };
   } catch (e) { role = { value: null, source: 'unset', section: '', unreadable: String(e?.message ?? e) }; }
   const out = agentConstraints(node, { model, promptVersions, modelCallsToday, claims, since: sinceIso });
   out.constraints.role = role;
@@ -8998,6 +9056,7 @@ const API_ROUTES = [
   { method: 'GET',    re: /^\/api\/roles$/,                fn: (req, res) => handleListRoles(req, res) },        // #915
   { method: 'GET',    re: /^\/api\/seats\/([^/]+)\/role-section$/, fn: (req, res, m) => handleSeatRoleSection(req, res, decodeURIComponent(m[1])) },   // #1376
   { method: 'POST',   re: /^\/api\/roles$/,                fn: (req, res) => handleCreateRole(req, res) },       // #915
+  { method: 'PATCH',  re: /^\/api\/roles\/([^\/]+)$/,       fn: (req, res, m) => handleUpdateRole(req, res, decodeURIComponent(m[1])) },   // #1387
   { method: 'GET',    re: /^\/api\/export\/spaces$/,      fn: (req, res) => handleExportSpaces(req, res) },   // #1321
   { method: 'GET',    re: /^\/api\/wakes$/,                fn: (req, res) => handleListWakes(req, res) },
   { method: 'POST',   re: /^\/api\/wakes$/,                fn: (req, res) => handleCreateWake(req, res) },

@@ -155,6 +155,15 @@ export const KIND_DECLARATIONS = Object.freeze([
       + 'holder is the OPEN interval, never the newest node by date.',
   },
   {
+    name: 'scrum:RoleVersion', eventKind: 'roleVersion', collection: 'roleVersions',
+    createdBy: 'role_create (version 1) / role_update (later versions)',
+    definition: 'A STATE a role has held — name, short definition, defining card — kept when the role '
+      + 'is revised (#1387), so "what was this role told on 09-13 vs 09-15" is a query. Points back '
+      + 'at its role with scrum:ofRole; scrum:version orders them; the role node carries the '
+      + 'CURRENT version number. A role keeps its IRI across revisions because seat declarations '
+      + 'point at it.',
+  },
+  {
     name: 'scrum:Wake', eventKind: 'wake', collection: 'wakes',
     createdBy: 'seat_wake',
     definition: 'A request that a seat be brought back to attention, recorded as an entity rather '

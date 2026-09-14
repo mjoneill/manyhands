@@ -180,6 +180,7 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:traceId', 'scrum:ofModelCall',   // #1372
   // #915 — roles as entities; a seat declaration may hold one
   'scrum:Role', 'scrum:roleKey', 'scrum:definedBy', 'scrum:role',
+  'scrum:RoleVersion', 'scrum:ofRole',   // #1387 — a revised role keeps its history
   // #1202 — the provenance ledger row
   'scrum:ModelCall', 'scrum:agent', 'scrum:model', 'scrum:provider', 'scrum:protocol',
   'scrum:promptVersion', 'scrum:tokensIn', 'scrum:tokensOut', 'scrum:reasoningTokens', 'scrum:cachedPromptTokens', 'scrum:cost', 'scrum:costMeasured', 'scrum:costCategories', 'scrum:stopReason',
@@ -979,12 +980,27 @@ export const ROLE_IRI = (key) => `https://scrumboard.local/role/${encodeURICompo
  * room argued it and the role stays queryable. `roleKey` is the join key a
  * seat declaration's `scrum:role` edge lands on.
  */
+function projectRoleVersion(store, e) {
+  const S = IRI.scrum, SC = IRI.schema, P = IRI.person, E = IRI.entity;
+  const s = nn(e['@id']);
+  const add = (p, o) => store.add(oxigraph.triple(s, p, o));
+  add(A, nn(S + 'RoleVersion'));
+  if (e['scrum:ofRole']) add(nn(S + 'ofRole'), nn(String(e['scrum:ofRole'])));
+  if (e['scrum:version'] != null) add(nn(S + 'version'), oxigraph.literal(String(e['scrum:version']), nn('http://www.w3.org/2001/XMLSchema#integer')));
+  if (e.name) add(nn(SC + 'name'), lit(String(e.name)));
+  if (e.text) add(nn(SC + 'text'), lit(String(e.text)));
+  if (e['scrum:definedBy']) add(nn(S + 'definedBy'), nn(String(e['scrum:definedBy']).startsWith('http') ? String(e['scrum:definedBy']) : E + e['scrum:definedBy']));
+  if (e.creator) add(nn(SC + 'creator'), nn(String(e.creator).startsWith('http') ? String(e.creator) : P + e.creator));
+  if (e.dateCreated) add(nn(SC + 'dateCreated'), lit(String(e.dateCreated)));
+}
+
 function projectRole(store, e) {
   const S = IRI.scrum, SC = IRI.schema, P = IRI.person, E = IRI.entity;
   const s = nn(e['@id']);
   const add = (p, o) => store.add(oxigraph.triple(s, p, o));
   add(A, nn(S + 'Role'));
   if (e['scrum:roleKey']) add(nn(S + 'roleKey'), lit(String(e['scrum:roleKey'])));
+  if (e['scrum:version'] != null) add(nn(S + 'version'), oxigraph.literal(String(e['scrum:version']), nn('http://www.w3.org/2001/XMLSchema#integer')));   // #1387 — the CURRENT version
   if (e.name) add(nn(SC + 'name'), lit(String(e.name)));
   if (e.text) add(nn(SC + 'text'), lit(String(e.text)));
   if (e['scrum:definedBy']) add(nn(S + 'definedBy'), nn(String(e['scrum:definedBy']).startsWith('http') ? String(e['scrum:definedBy']) : E + e['scrum:definedBy']));
@@ -1635,6 +1651,8 @@ function projectEntity(store, e) {
       projectDelivery(store, e);
     } else if (t === 'scrum:Role') {
       projectRole(store, e);
+    } else if (t === 'scrum:RoleVersion') {
+      projectRoleVersion(store, e);   // #1387
     } else if (t === 'scrum:Agent') {
       projectAgent(store, e);
     } else if (t === 'scrum:Model') {
