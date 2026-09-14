@@ -294,6 +294,20 @@ const r = await guestOnce({
       if (!r.ok) throw new Error(`POST ${p} → ${r.status}`);
       return r.json();
     },
+    // #1383 - the seat's own declaration; the route's refusal text is worth
+    // handing back to the model (an expiry too far out, a role not minted).
+    put: async (p, body) => {
+      const r = await fetch(`${BOARD}${p}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(90_000) });
+      const j = await r.json().catch(() => null);
+      if (!r.ok) throw new Error(`PUT ${p} -> ${r.status}${j && j.error ? `: ${j.error}` : ''}`);
+      return j;
+    },
+    del: async (p) => {
+      const r = await fetch(`${BOARD}${p}`, { method: 'DELETE', signal: AbortSignal.timeout(90_000) });
+      const j = await r.json().catch(() => null);
+      if (!r.ok) throw new Error(`DELETE ${p} -> ${r.status}${j && j.error ? `: ${j.error}` : ''}`);
+      return j ?? { cleared: true };
+    },
     by: agent.seatKey,
   }),
   post,

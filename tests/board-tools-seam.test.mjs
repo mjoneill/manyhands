@@ -25,6 +25,10 @@ const ARGS = {
   graph_query: { query: 'SELECT ?s WHERE { ?s ?p ?o } LIMIT 1' },
   kind_list: {},
   predicate_list: {},
+  // #1383 — declare first so clear has something to clear; the order of
+  // BOARD_TOOLS puts them that way round.
+  seat_declare: { mode: 'available', acceptsRoutineWork: true, expiresAt: new Date(Date.now() + 3600_000).toISOString() },
+  seat_clear: {},
 };
 
 test('#1196B SEAM: every declared tool reaches a real route — no tool 404s', async () => {
@@ -57,6 +61,8 @@ test('#1196B SEAM: every declared tool reaches a real route — no tool 404s', a
     const exec = makeExecutor({
       get: (p) => call('GET', p),
       post: (p, b) => call('POST', p, b),
+      put: (p, b) => call('PUT', p, b),      // #1383
+      del: (p) => call('DELETE', p),         // #1383
       by: 'ada',
     });
 

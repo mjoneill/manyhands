@@ -6,12 +6,16 @@
  * the message that woke it. This is the smallest surface that makes it a
  * participant rather than a correspondent.
  *
- * FIVE TOOLS, ALL READS. Read a card, search the board, query the graph, ask
- * what kinds of thing the board records, and ask what the predicates mean and
- * what shape their objects take.
- * Nothing here writes. A colleague that can look things up is what the epic
- * promised; a colleague that can change things is a different card and deserves
- * its own argument rather than arriving as a convenience alongside this one.
+ * FIVE READS, AND TWO WRITES ABOUT THE SEAT ITSELF (#1383). Read a card, search
+ * the board, query the graph, ask what kinds of thing the board records, and
+ * ask what the predicates mean and what shape their objects take. Then, since
+ * 2026-09-14: declare or clear the seat's OWN state - availability, routine
+ * work, expiry, and the role it holds (#613, #915). Those two are the argument
+ * #1196 said a write would need, made: a resident IS its seat, so a declaration
+ * from its own wake is the seat speaking for itself; there is no `seat`
+ * parameter, so it cannot speak for another; and it is exactly what a human
+ * seat may already do over MCP, with the same 168 h cap and the same graph
+ * visibility. Writes to CARDS remain a different card.
  *
  * ⭐ A GRANT IS NOW REAL. `toolGrants` used to change one sentence of an agent's
  * prompt and nothing else, so an agent granted everything and an agent granted
@@ -106,6 +110,33 @@ export const BOARD_TOOLS = Object.freeze([
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'seat_declare',
+      description: 'Declare YOUR OWN seat state on the board (#613): availability, whether you accept routine work, when the declaration expires (ISO, at most 168 h away), and optionally the ROLE you hold (#915: a role key the board has minted, e.g. scrum-master; omit to keep the role you already hold, null to release it). This is about you, never about another seat. Use it when you take up or lay down a role, or when your availability changes.',
+      parameters: {
+        type: 'object',
+        properties: {
+          mode: { type: 'string', enum: ['available', 'resting', 'degraded'], description: 'your availability' },
+          acceptsRoutineWork: { type: 'boolean', description: 'whether routine work may be routed to you' },
+          expiresAt: { type: 'string', description: 'ISO timestamp in the future, at most 168 h away - a declaration with no end is a permanent opt-out' },
+          constraints: { type: 'array', items: { type: 'string', enum: ['reads-unreliable', 'no-writes', 'slow', 'low-context'] }, description: 'optional' },
+          note: { type: 'string', description: 'optional, one line' },
+          role: { type: ['string', 'null'], description: 'a role key the board holds (scrum-master, po); omit = keep; null = release' },
+        },
+        required: ['mode', 'acceptsRoutineWork', 'expiresAt'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'seat_clear',
+      description: 'Clear YOUR OWN seat declaration (#613) - you become unknown to the roster again and any role you held is released with it. Prefer seat_declare with role: null when you only mean to lay down a role.',
+      parameters: { type: 'object', properties: {} },
+    },
+  },
 ]);
 
 /** The opening sentence of a definition — orientation, not the whole register. */
@@ -133,9 +164,21 @@ export function toolsFor(agent = {}) {
  * contract is testable without a server, and so this module never decides how
  * the board is reached.
  */
-export function makeExecutor({ get, post, by = 'board' }) {
+export function makeExecutor({ get, post, put = null, del = null, by = 'board' }) {
   return async function execute(name, args = {}) {
     switch (name) {
+      // #1383 - the seat's OWN state. The path is built from `by`, the seat the
+      // runner binds; nothing in `args` can aim it elsewhere (a smuggled `seat`
+      // is dropped before the wire, and the route refuses a mismatch anyway).
+      case 'seat_declare': {
+        if (typeof put !== 'function') throw new Error('seat_declare is not wired here: this executor was built without put');
+        const { seat: _ignored, ...body } = args || {};
+        return put(`/api/seats/${encodeURIComponent(by)}/state`, body);
+      }
+      case 'seat_clear': {
+        if (typeof del !== 'function') throw new Error('seat_clear is not wired here: this executor was built without del');
+        return del(`/api/seats/${encodeURIComponent(by)}/state`);
+      }
       case 'card_get': {
         const id = args?.shortId;
         if (id === undefined || id === null || id === '') {

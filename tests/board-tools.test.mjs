@@ -18,15 +18,18 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { BOARD_TOOLS, toolsFor, makeExecutor } from '../core/board-tools.mjs';
 
-test('#1196B the surface is read-only, and every tool is named and described', () => {
+test('#1196B/#1383 the surface is five reads plus the seat\'s OWN two writes, every tool named and described', () => {
   const names = BOARD_TOOLS.map((t) => t.function.name).sort();
-  assert.deepEqual(names, ['board_search', 'card_get', 'graph_query', 'kind_list', 'predicate_list']);
+  assert.deepEqual(names, ['board_search', 'card_get', 'graph_query', 'kind_list', 'predicate_list', 'seat_clear', 'seat_declare']);
   for (const t of BOARD_TOOLS) {
     assert.equal(t.type, 'function');
     assert.ok(t.function.description && t.function.description.length > 20, `${t.function.name} needs a description a model can act on`);
     assert.equal(t.function.parameters.type, 'object');
-    // ⛔ nothing that writes, ever, on this surface
+    // ⛔ nothing that writes to CARDS or the graph, ever, on this surface. The two
+    // seat_* tools (#1383) write the seat's own state and nothing else, and
+    // they cannot name a seat — the executor binds the runner's own.
     assert.doesNotMatch(t.function.name, /create|update|delete|post|claim|assert|write|move/);
+    if (t.function.name.startsWith('seat_')) assert.equal('seat' in (t.function.parameters.properties || {}), false, `${t.function.name} must not take a seat argument`);
   }
 });
 

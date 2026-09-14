@@ -393,6 +393,9 @@ export function buildMessages({ agent, wake, changes = [], memories = [] }) {
   if (agent.residency === 'resident') {
     lines.push('To keep something for your next wake, add a final line `REMEMBER: <one line>`. It is stored under your seat in the memory store and handed back to you next time; it is removed from the post. Only write what you will want later.');
     if ((agent.toolGrants || []).includes('card_claim')) lines.push('To take a card, add a line `CLAIM: #<number>`; it is claimed as you and removed from the post.');
+    // #1383 — the two writes about the seat itself are named as such, so a model
+    // told it can "look things up" also knows it may speak for its own seat.
+    if ((agent.toolGrants || []).includes('seat_declare')) lines.push('You may declare your OWN seat state with seat_declare (availability, whether you take routine work, an expiry, and the role you hold); seat_clear withdraws it. It is about you, never another seat.');
   }
   const system = lines.join('\n\n');
   const ctx = [];
