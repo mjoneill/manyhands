@@ -2494,6 +2494,11 @@ const emitterTickOnce = async () => {
 setInterval(() => { if (tendingEnabled()) emitterTickOnce(); }, WHISPER_TICK_MS).unref();
 
 const REAP_IDLE_MS = Number(process.env.MCP_REAP_IDLE_MS ?? 300000); // 5 min default
+// #1129 — how recently a stream's client must have spoken for the stream to
+// count as LIVE on /channel/status. Same default as the reaper's idle window,
+// so "live" and "not yet reapable" mean the same thing; overridable so the
+// split can be tested in seconds. Nothing is reaped on this number.
+const LIVE_WINDOW_MS = Number(process.env.SCRUM_LIVE_WINDOW_MS ?? REAP_IDLE_MS);
 // #726 — how long a session must hold ZERO streams before a request from it counts
 // as deafness rather than an in-flight reconnect. See the detector below for the
 // derivation; env-overridable so tests can drive it without sleeping.
@@ -3133,6 +3138,7 @@ const httpServer = http.createServer(async (req, res) => {
       const unboundSessions = [];
       let unbound = 0;
       let unknownToken = 0;
+      const now = Date.now();   // #1129 — one clock for the whole read
       for (const [sid, m] of sessionMeta) {
         const streams = m.openStreamCount ?? 0;
         if (m.unknownToken) unknownToken += 1;
@@ -3147,8 +3153,20 @@ const httpServer = http.createServer(async (req, res) => {
           });
           continue;
         }
-        const s = seats[m.seat] ?? (seats[m.seat] = { streams: 0, sessions: 0, lastBeatAt: null, lastBeatOk: null, lastClientRequestAt: null });
+        const s = seats[m.seat] ?? (seats[m.seat] = { streams: 0, liveStreams: 0, staleStreams: 0, sessions: 0, lastBeatAt: null, lastBeatOk: null, lastClientRequestAt: null });
         s.streams += streams;
+        // #1129 — `streams` counts every open SSE stream the server holds under
+        // this token, reconnect churn included (one seat read 12/12 on 09-13),
+        // and a held stream with a dead client behind it read healthy for 12 h
+        // on 09-10. So the row SPLITS the count: a stream is LIVE when its
+        // client has made a request inside LIVE_WINDOW_MS, STALE otherwise.
+        // `streams` stays and is the sum, so nothing that reads it changes.
+        // Nothing is reaped here — a reap that guesses wrong is a deafness
+        // (#182/#664); this makes the number honest, slice 2 decides the reap.
+        if (streams > 0) {
+          const spoke = m.lastClientRequestAt && (now - m.lastClientRequestAt) <= LIVE_WINDOW_MS;
+          if (spoke) s.liveStreams += streams; else s.staleStreams += streams;
+        }
         s.sessions += 1;
         // #717 — the NEWEST request across the seat's sessions. Absent stays
         // null (never "epoch"): a seat we have never heard a request from is
@@ -3175,6 +3193,18 @@ const httpServer = http.createServer(async (req, res) => {
       return res.end(JSON.stringify({
         pending: channelScheduler.pending(),
         mode: CHANNEL_STAGGER_OFF ? 'off' : (readConfig().mode || 'off'),
+        liveWindowMs: LIVE_WINDOW_MS,   // #1129 — the window liveStreams/staleStreams were split against
+        // #1129 — WHAT THIS PAGE CANNOT SEE, said on the page. Two readers
+        // misread a REST-only seat's absence as a dead stream within 60 s of
+        // each other (09-01); the shape recurred on 09-13 (#1353). `seats{}`
+        // enumerates MCP-bound sessions and nothing else; absence from it is
+        // not a fact about the seat. Same move as board_ready's watermark
+        // ("position, not fidelity"): the instrument states its own blind spot.
+        blindTo: [
+          { transport: 'rest-only', why: 'a seat that reaches the board only through REST (curl, a bridge lane that never opens an MCP session) has no row here; its liveness is its attributed writes (/api/changes), not this table' },
+          { transport: 'resident-inbox', why: 'a channel-mode resident holds no stream; its inbox is its transport — read residents{} above, not seats{}' },
+          { transport: 'gateway-ingress', why: 'a seat delivered by the presence plugin appears only while its lane holds an MCP session; between lane restarts it is absent, not deaf' },
+        ],
         residents,
         residentsRead,
         receivers,
