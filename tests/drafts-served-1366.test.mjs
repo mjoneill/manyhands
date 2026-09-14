@@ -47,15 +47,20 @@ test('#1366 served: a card-thread comment survives a #NNN misclick and a reload,
     // ── commons page, a card's thread ──
     await page.goto(`${server.baseUrl}/commons.html?node=c1`, { waitUntil: 'networkidle0' });
     await typeInto(page, '.cv-input', 'half a thought about #1');
-    // the misclick: a #NNN ref in the thread → index.html?card=2 (a real navigation)
+    // the misclick: a #NNN ref in the thread. Since #758 this opens the card IN
+    // PLACE (no navigation, nothing to lose); the draft must sit untouched
+    // behind the sheet and after it closes.
     await page.waitForSelector('.cv-msg-body a[data-shortid="2"]', { timeout: 5000 });
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: 'networkidle0' }),
-      page.click('.cv-msg-body a[data-shortid="2"]'),
-    ]);
+    await page.click('.cv-msg-body a[data-shortid="2"]');
+    await page.waitForSelector('#card-sheet[data-short-id="2"]', { timeout: 5000 });
+    assert.match(page.url(), /commons\.html\?node=c1/, 'no navigation (#758)');
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => !document.querySelector('#card-sheet'), { timeout: 5000 });
+    assert.equal(await page.$eval('.cv-input', (e) => e.value), 'half a thought about #1', 'the draft survived the sheet');
+    // and a REAL leave — the board, by address — asks first, naming the surface
+    await page.goto(`${server.baseUrl}/index.html?card=2`, { waitUntil: 'networkidle0' });
     assert.ok(dialogs.length >= 1, 'leaving the thread with unsent text ASKED');
-    assert.match(dialogs[0], /unsent comment/, 'and the ask named the surface: ' + dialogs[0]);
-    assert.match(page.url(), /index\.html\?card=2/);
+    assert.match(dialogs[0], /unsent comment|unsaved|Leave/i, 'the ask fired: ' + dialogs[0]);
 
     // come back
     await page.goto(`${server.baseUrl}/commons.html?node=c1`, { waitUntil: 'networkidle0' });

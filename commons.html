@@ -7,6 +7,7 @@
 <title>Commons · manyhands</title>
 <link rel="stylesheet" href="./core/theme.css"><!-- shared design language (#333) -->
 <link rel="stylesheet" href="./core/conversation-view.css">
+<link rel="stylesheet" href="./core/card-sheet.css"><!-- #758 — a card opened in place -->
 <link rel="stylesheet" href="./core/editor.css"><!-- #1367 -->
 <link rel="stylesheet" href="./core/constraints-view.css"><!-- #1350 what governs an agent -->
 <link rel="stylesheet" href="./core/header.css">
@@ -116,6 +117,7 @@
   <script type="module">
     import { mountConversationView } from './core/conversation-view.mjs';
     import { resolveRoleHolder } from './core/roles.mjs';   // #1368 — the PO seat, read from the board
+    import { openCardSheet, wireCardRefs } from './core/card-sheet.mjs';   // #758 — open a card without leaving
     import { mountTopNav } from './core/header.mjs';
     import { renderChatMarkdown } from './core/render.mjs';
     import { roster, identityOf, presenceLevel, constellationOrder } from './core/identity.mjs';
@@ -402,6 +404,8 @@
         const openCard = document.createElement('a'); openCard.className = 'blocked-open-card';
         openCard.textContent = (r.card ? r.card.title : 'open card') + ' →';
         openCard.href = r.card ? 'index.html?card=' + r.card.shortId : '#';
+        // #758 — opens IN PLACE (the sheet); the href stays for a modifier-click or a new tab
+        if (r.card) openCard.dataset.openCard = String(r.card.shortId);
         const done = document.createElement('button'); done.className = 'blocked-done'; done.type = 'button';
         done.textContent = '✓ unblocked';
         done.title = isLabel ? 'Remove the blocked label' : 'Clear this raised hand';
@@ -516,7 +520,11 @@
       for (const [cardId, card] of cardById) {
         if (seen.has(cardId)) continue; // raise already covers this card
         if ((card.labels || []).includes(BLOCKED_LABEL)) {
-          raises.push({ cardId, by: 'label', ask: 'Labelled as ' + BLOCKED_LABEL, at: card.updatedAt || card.createdAt, card, source: 'label' });
+          // #758 (decided 2026-08-09): the label path IS the empty case — say so,
+          // never restate the label as if it were an ask. And a card in `done`
+          // is not waiting on anyone: closing a card clears its raise.
+          if (card.column === 'done') continue;
+          raises.push({ cardId, by: 'label', ask: '(no detail given)', at: card.updatedAt || card.createdAt, card, source: 'label' });
           seen.add(cardId);
         }
       }
@@ -664,6 +672,10 @@
         onMessages: (msgs) => { _lastMessages = msgs; updateConstellation(msgs); anchorToPlace(); }, // presence pulse · #517 arrive where the reader was
         onSolo: reflectSolo,             // presence — sync the constellation to the soloed mind
       });
+      // #758 — a #NNN in the feed, or a raised-hand entry, opens the card HERE.
+      // Closing the sheet leaves the room exactly where it was.
+      wireCardRefs(document.body, { keepScroll: ['.cv-feed'], onMissing: (k) => { const m = document.createElement('div'); m.className = 'card-sheet-missing'; m.textContent = `No card #${k} on this board.`; document.body.appendChild(m); setTimeout(() => m.remove(), 2500); } });
+      window.openCardSheet = openCardSheet;   // for the raised-hands panel and tests
     }
 
     // #303-7 — delivery observability. Poll the (same-origin) channel-status

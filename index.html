@@ -9,6 +9,7 @@
 <link rel="stylesheet" href="./core/editor.css"><!-- #1367 one editor everywhere a description is written -->
 <link rel="stylesheet" href="./core/header.css"><!-- #303-2 shared nav (mounted by the module bridge below) -->
 <link rel="stylesheet" href="./core/constraints-view.css"><!-- #1350 what governs an agent -->
+<link rel="stylesheet" href="./core/conversation-view.css"><!-- #758 the card thread in the pop-out -->
 <style>
 /* ── CSS Custom Properties ── */
 /* #333 — the board on the shared design language. Structural vars alias the
@@ -526,6 +527,9 @@ body::before {
 .card-detail-groom:hover { color: var(--text-primary, #e2e8f0); border-color: #a78bfa; }
 .card-detail-decisions { margin: 6px 0 14px; padding: 10px 12px; border-left: 3px solid #7c3aed; background: rgba(124, 58, 237, .08); border-radius: 0 6px 6px 0; font-size: 13px; }
 .card-detail-decisions-head { font-weight: 600; margin-bottom: 6px; }
+/* #758 — the card's thread in the pop-out */
+.card-detail-thread-head { font: 600 11px/1 var(--mono, ui-monospace); text-transform: uppercase; letter-spacing: .12em; color: var(--text-muted, #8b92aa); margin: 18px 0 4px; }
+.card-detail-thread .cv-toolbar { display: none; }
 .card-detail-decision { margin: 6px 0; }
 .card-detail-decision-stmt { white-space: pre-wrap; }
 .card-detail-decision-meta { color: var(--text-muted, #8b92aa); font-size: 11px; margin-top: 2px; }
@@ -578,20 +582,9 @@ body::before {
   background: rgba(236,72,153,0.15);
   color: #f9a8d4;
 }
-/* Clickable label tags (for filter) */
-.label-tag {
-  cursor: pointer;
-  user-select: none;
-  transition: background 0.15s, color 0.15s, transform 0.1s, box-shadow 0.15s;
-}
-.label-tag:hover {
-  transform: translateY(-1px);
-  filter: brightness(1.15);
-}
-.label-tag.active-filter {
-  box-shadow: 0 0 0 2px currentColor inset, 0 0 8px rgba(255,255,255,0.05);
-  filter: brightness(1.1);
-}
+/* #758 — #498 REMOVED label-click filtering; the pointer cursor, hover lift
+   and `.active-filter` rule outlived it as a false affordance. Deleted, not
+   re-added: a chip that lifts on hover promises a click it cannot honour. */
 
 /* ── Short ID Badge ── */
 .card-shortid {
@@ -1834,6 +1827,8 @@ body::before {
   import { openConstraintsPopover } from './core/constraints-view.mjs';
   import { mountEditor } from './core/editor.mjs';
   import { renderLineDiff } from './core/line-diff.mjs';   // #1365 — the conflict view's diff
+  import { mountConversationView } from './core/conversation-view.mjs';   // #758 — the card's thread, in the pop-out
+  import { resolveRoleHolder } from './core/roles.mjs';
   // #1350 slice 3 — a name on the board is a door to what governs it. One
   // delegated listener: assignee chips are re-rendered by innerHTML all over
   // this file, so per-chip wiring would be lost on every redraw. Read-only —
@@ -1862,6 +1857,16 @@ body::before {
   // and mounts itself through mountBoardDescriptionEditor below.
   window.mountEditor = mountEditor;
   window.renderLineDiff = renderLineDiff;
+  // #758 — Finding C: the pop-out rendered NO card-attached conversations, so
+  // a raised hand's ask was invisible and there was nowhere to add a comment
+  // TO. The thread mounts here through the same conversation-view every other
+  // surface uses (#1368: PO badged, ⚖ Ruling on a comment; #1366: drafts).
+  window.mountCardThread = async (slot, card) => {
+    let poSeat = null;
+    try { poSeat = await resolveRoleHolder('po'); } catch { poSeat = null; }
+    if (!slot.isConnected) return null;
+    return mountConversationView({ mount: slot, attachedTo: card.id, poll: true, poSeat, card: { id: card.id, shortId: card.shortId }, placeholder: 'Add to this card…' });
+  };
   mountBoardDescriptionEditor(document.getElementById('card-desc'), handleAddCard);
   mountEditor(document.getElementById('convs-body'), {
     render: renderChatMarkdown,
@@ -3661,6 +3666,8 @@ function openCardDetail(shortId, push = true) {
   // an empty answer renders nothing rather than "no decisions", which would
   // be a claim about the graph the tile cannot make until it has asked).
   html += '<div class="card-detail-decisions" data-decisions-for="' + escapeAttr(String(card.shortId)) + '" hidden></div>';
+  // #758 — the card's thread (comments) and a composer, mounted after the paint
+  const threadSlotHtml = '<div class="card-detail-thread-head">💬 On this card</div><div class="card-detail-thread" data-thread-for="' + escapeAttr(card.id) + '"></div>';
   // #209 — three states, and the middle one is new: a projection-hydrated card
   // has no `description` KEY at all, which is not the same as having an empty
   // one. "No description." must stay reserved for a card that genuinely has
@@ -3673,9 +3680,10 @@ function openCardDetail(shortId, push = true) {
   } else {
     html += '<div class="card-detail-body prose" data-body-pending="1">Loading the card body…</div>';
   }
-  panel.innerHTML = html;
+  panel.innerHTML = html + threadSlotHtml;
   back.hidden = false;
   loadCardDecisions(card.shortId);   // #1368
+  _mountDetailThread(card);          // #758
   if (!bodyIsLoaded) {
     // Fetch, then patch the body in place. Re-checking the panel's card id
     // afterwards matters: the reader can open #A, get bored, open #B, and the
@@ -3746,6 +3754,7 @@ function openCardDetailEditor(card) {
   const panel = document.getElementById('card-detail');
   if (!card || !back || !panel) return false;
   const go = () => {
+    _teardownDetailThread();   // #758 — the edit view replaces the thread; it comes back on save/cancel
     panel.innerHTML = '<button class="card-detail-close" data-action="close-card-detail" title="Close (Esc)">✕</button>';
     const eyebrow = document.createElement('div');
     eyebrow.className = 'card-detail-eyebrow';
@@ -3827,10 +3836,29 @@ function closeCardDetailEditor({ ask = true } = {}) {
   return true;
 }
 
+// #758 — one thread view at a time in the pop-out; torn down on close or when
+// another card replaces it, so its poll timer never outlives the panel.
+let _detailThread = null;
+function _teardownDetailThread() {
+  if (_detailThread) { try { _detailThread.destroy?.(); } catch { /* going away regardless */ } _detailThread = null; }
+}
+function _mountDetailThread(card) {
+  _teardownDetailThread();
+  if (typeof window.mountCardThread !== 'function') return;   // file:// lane: no module, no thread
+  const slot = document.querySelector(`#card-detail .card-detail-thread[data-thread-for="${CSS.escape(card.id)}"]`);
+  if (!slot) return;
+  window.mountCardThread(slot, card).then((v) => {
+    // the reader may have moved on while the roster answered
+    if (!slot.isConnected) { try { v?.destroy?.(); } catch { /* ignore */ } return; }
+    _detailThread = v || null;
+  }).catch(() => {});
+}
+
 function closeCardDetail(pop = true) {
   const back = document.getElementById('card-detail-backdrop');
   if (!back || back.hidden) return;
   if (!closeCardDetailEditor()) return;   // #1365 — Esc/close with unsaved changes asks; "no" keeps the editor
+  _teardownDetailThread();   // #758
   back.hidden = true;
   if (pop) {
     try { history.pushState({}, '', location.pathname); } catch (e) { /* file:// */ }

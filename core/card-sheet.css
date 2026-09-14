@@ -1,0 +1,21 @@
+/* core/card-sheet.css — #758: a card, opened in place on any page. Tokens from core/theme.css. */
+.card-sheet-backdrop { position: fixed; inset: 0; z-index: 90; background: rgba(0, 0, 0, .55); display: flex; align-items: flex-start; justify-content: center; padding: 6vh 16px 24px; overflow-y: auto; }
+.card-sheet { position: relative; width: 100%; max-width: 72ch; background: var(--bg-card, var(--bg, #141826)); color: var(--ink, var(--text-primary, #e2e8f0)); border: 1px solid var(--line, #262c3d); border-radius: 10px; box-shadow: 0 24px 70px rgba(0,0,0,.55); padding: 26px 30px 30px; }
+body.card-sheet-open { overflow: hidden; }
+.card-sheet-close { position: absolute; top: 12px; right: 12px; width: 30px; height: 30px; border: none; border-radius: 7px; background: rgba(148,163,184,.12); color: inherit; font: inherit; cursor: pointer; }
+.card-sheet-close:hover { background: rgba(148,163,184,.25); }
+.card-sheet-eyebrow { font: 600 11px/1 var(--mono, ui-monospace); text-transform: uppercase; letter-spacing: .14em; color: var(--muted, #8b92aa); margin-bottom: 10px; }
+.card-sheet-title { font: 600 1.4rem/1.25 var(--serif, Georgia); margin: 0 0 12px; }
+.card-sheet-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.card-sheet-chip { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: rgba(148,163,184,.12); color: var(--muted, #8b92aa); text-transform: uppercase; letter-spacing: .04em; }
+.card-sheet-links { display: flex; gap: 12px; margin: 0 0 14px; font-size: 13px; }
+.card-sheet-link { color: var(--link, #60a5fa); text-decoration: none; border-bottom: 1px dotted currentColor; }
+.card-sheet-link:hover { border-bottom-style: solid; }
+.card-sheet-asks { margin: 0 0 12px; padding: 8px 12px; border-left: 3px solid #f59e0b; background: rgba(245,158,11,.08); border-radius: 0 6px 6px 0; font-size: 13px; }
+.card-sheet-ask + .card-sheet-ask { margin-top: 4px; }
+.card-sheet-body { white-space: pre-wrap; word-break: break-word; max-width: none; font-size: 14px; line-height: 1.55; margin-bottom: 18px; }
+.card-sheet-body.empty { color: var(--muted, #8b92aa); font-style: italic; }
+.card-sheet-body a.cardref { color: var(--link, #60a5fa); text-decoration: none; border-bottom: 1px dotted currentColor; }
+.card-sheet-thread-head { font: 600 12px/1 var(--mono, ui-monospace); text-transform: uppercase; letter-spacing: .1em; color: var(--muted, #8b92aa); margin: 6px 0 4px; }
+.card-sheet-thread .cv-toolbar { display: none; }   /* the sheet is one thread: no search box, no load-older */
+@media (max-width: 480px) { .card-sheet { padding: 20px 16px 24px; } .card-sheet-backdrop { padding: 3vh 8px 16px; } }
