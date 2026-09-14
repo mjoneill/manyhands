@@ -6,6 +6,7 @@
 <meta name="robots" content="noindex, nofollow">
 <title>manyhands</title>
 <link rel="stylesheet" href="./core/theme.css"><!-- shared design language (#333) -->
+<link rel="stylesheet" href="./core/editor.css"><!-- #1367 one editor everywhere a description is written -->
 <link rel="stylesheet" href="./core/header.css"><!-- #303-2 shared nav (mounted by the module bridge below) -->
 <link rel="stylesheet" href="./core/constraints-view.css"><!-- #1350 what governs an agent -->
 <style>
@@ -1801,6 +1802,7 @@ body::before {
   import { cardContentKey } from './core/card-content-key.mjs';
   import { mountComposerWatch } from './core/composer-watch.mjs';
   import { openConstraintsPopover } from './core/constraints-view.mjs';
+  import { mountEditor } from './core/editor.mjs';
   // #1350 slice 3 — a name on the board is a door to what governs it. One
   // delegated listener: assignee chips are re-rendered by innerHTML all over
   // this file, so per-chip wiring would be lost on every redraw. Read-only —
@@ -1823,6 +1825,17 @@ body::before {
     openConstraintsPopover(chip, seat);
   }, true);
   window.renderChatMarkdown = renderChatMarkdown;
+  // #1367 — the editor reaches the classic script through the same bridge.
+  // The two textareas that exist at load are mounted HERE (the classic script
+  // ran before this module resolved); the column edit form is built per edit
+  // and mounts itself through mountBoardDescriptionEditor below.
+  window.mountEditor = mountEditor;
+  mountBoardDescriptionEditor(document.getElementById('card-desc'), handleAddCard);
+  mountEditor(document.getElementById('convs-body'), {
+    render: renderChatMarkdown,
+    resolveTitle: boardCardTitle,
+    onSubmit: () => document.getElementById('convs-form')?.requestSubmit(),
+  });
   window.identityOf = identityOf; // #333 — assignee chips glow their identity light
   // #466 — the SAME "did this card change?" the server uses, so a refused save
   // can tell an untouched stale card from an edited one with the server's own
@@ -3310,6 +3323,7 @@ function renderCardEditForm(card) {
   // Populate values via DOM properties (safe — no HTML injection)
   el.querySelector('.edit-title').value = card.title || '';
   el.querySelector('.edit-desc').value = card.description || '';
+  mountBoardDescriptionEditor(el.querySelector('.edit-desc'), () => saveEdit(card.id));   // #1367
   el.querySelector('.edit-type').value = card.type || 'task';
   // Multi-assignee (#51): tick the checkboxes that correspond to card.assignees.
   // Fall back to legacy card.assignee for any not-yet-migrated card.
@@ -3475,6 +3489,26 @@ function escapeAttr(str) {
 // ── Render description with #N shortId links ──
 function renderDescriptionWithLinks(desc) {
   return escapeHTML(desc).replace(/#(\d+)/g, '<a href="#" class="shortid-link" data-action="shortid-link" data-shortid="$1" title="Go to card #$1">#$1</a>');
+}
+
+// #1367 — one editor for every description box on the board. The preview goes
+// through renderDescriptionWithLinks, the SAME function the tile and the #510
+// pop-out use, so what the preview shows is what save will show — not a
+// markdown rendering the board does not perform. Absent bridge (the file://
+// lane never resolves the module) ⇒ the textarea stays a bare textarea; every
+// selector and handler on it is unchanged either way, because the editor wraps
+// in place.
+function boardCardTitle(shortId) {
+  const c = cards.find((x) => x && x.shortId === shortId);
+  return c ? c.title : undefined;
+}
+function mountBoardDescriptionEditor(textarea, onSubmit) {
+  if (!textarea || typeof window.mountEditor !== 'function') return null;
+  return window.mountEditor(textarea, {
+    render: renderDescriptionWithLinks,
+    resolveTitle: boardCardTitle,
+    onSubmit,
+  });
 }
 
 // ── Scroll to and highlight a card by shortId ──

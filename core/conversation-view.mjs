@@ -21,6 +21,7 @@
 
 import { renderChatMarkdown } from './render.mjs';
 import { identityOf, roster } from './identity.mjs';
+import { mountEditor } from './editor.mjs';   // #1367 — one editor for every composer
 
 // ── pure helpers (node-testable) ───────────────────────────────────────────
 
@@ -550,6 +551,11 @@ export function mountConversationView(opts = {}) {
     send.type = 'submit';
     row.append(who, attachBtn, send);
     fm.append(ta, chips, fileInput, row);
+    // #1367 — grows with content, previews through the SAME chat renderer the
+    // feed uses, Cmd/Ctrl+Enter posts. Mounted after append so the wrapper
+    // lands inside the form; the paste/drop listeners below bind to `ta`
+    // itself and are untouched by the wrap.
+    mountEditor(ta, { doc, render: renderChatMarkdown, onSubmit: () => fm.requestSubmit() });
 
     attachBtn.addEventListener('click', () => fileInput.click());
     fileInput.addEventListener('change', async () => {
