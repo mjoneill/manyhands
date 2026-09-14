@@ -209,11 +209,12 @@ test('#1266 ⭐⭐ THE PRESS — and un-scrubbed takes TWO deliberate acts, not 
     const page = await browser.newPage();
     const pageErrors = [];
     page.on('pageerror', (e) => pageErrors.push(String(e)));
-    await page.goto(`${server.baseUrl}/`, { waitUntil: 'networkidle0' });
+    // #1321 — the control lives in Settings now; every safety property below is unchanged.
+    await page.goto(`${server.baseUrl}/settings.html`, { waitUntil: 'networkidle0' });
+    await page.waitForSelector('#export-panel #export-kinds input[type=checkbox]', { timeout: 5000 });
 
-    assert.equal(await page.$eval('#export-menu', (el) => el.hidden), true, 'the menu starts closed');
-    await page.click('#btn-export');
-    assert.equal(await page.$eval('#export-menu', (el) => el.hidden), false, 'and opens on the button');
+    // (#1321: no popup menu any more — the panel is a section on the Settings page, always visible.)
+    assert.equal(await page.$eval('#export-raw-confirm', (el) => el.hidden), true, 'the raw warning starts hidden');
 
     await page.$eval('#export-out', (el, v) => { el.value = v; }, out);
     await page.click('#export-raw');

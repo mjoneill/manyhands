@@ -35,6 +35,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { isOpenDelivery } from './core/delivery.mjs';   // #1346
+import { exportableSpaces, resolveSpaces, describeExportSet } from './core/export-spaces.mjs';   // #1321
 import { loadDomain, loadDomainShared, saveDomain } from './core/store.mjs';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { BOARD_TOOLS } from './core/board-tools.mjs';
@@ -4169,7 +4170,8 @@ function priceModelCall(data, entity, declaredCost) {
 // disk check SURVIVED every test until this seam let a stub do exactly that.
 // Read from the process environment at startup, never from a request.
 const EXPORT_SCRIPT = process.env.SCRUM_EXPORT_SCRIPT || path.join(PROJECT_DIR, 'export-board.mjs');
-const EXPORT_SPACES = ['commons', 'cards', 'wiki'];
+// #1321 — the exportable set is DERIVED from the kind registry (core/export-spaces.mjs);
+// this file no longer types a list. `resolveSpaces` knows the aliases and `all`.
 const EXPORT_MAX_BYTES_MIN = 100000;
 const EXPORT_MAX_BYTES_MAX = 20000000;
 // ⛔ THE WRITABLE ROOT IS CONFIGURATION, NOT AN ASSUMPTION. It defaults to the
@@ -4232,11 +4234,10 @@ function exportArgsFrom(body) {
 
   let spaces = ['commons', 'cards'];
   if (body.spaces !== undefined && body.spaces !== null) {
-    const list = Array.isArray(body.spaces) ? body.spaces : String(body.spaces).split(',');
-    spaces = list.map((x) => String(x).trim().toLowerCase()).filter(Boolean);
-    if (!spaces.length) return { error: `spaces must name at least one of ${EXPORT_SPACES.join(', ')}` };
-    const bad = spaces.find((x) => !EXPORT_SPACES.includes(x));
-    if (bad) return { error: `unknown space ${JSON.stringify(bad)} — known: ${EXPORT_SPACES.join(', ')}` };
+    const r = resolveSpaces(body.spaces);
+    if (r.unknown.length) return { error: `unknown space ${JSON.stringify(r.unknown[0])} — known: ${r.known.join(', ')}, all` };
+    if (!r.resolved.length) return { error: `spaces must name at least one of ${r.known.join(', ')}, or all` };
+    spaces = r.resolved;
   }
   settings.spaces = spaces;
 
@@ -4250,6 +4251,23 @@ function exportArgsFrom(body) {
     '--base', `http://127.0.0.1:${PORT}`];
   if (settings.raw) argv.push('--raw');
   return { out, argv, settings };
+}
+// #1321 — the menu, served from the same derivation the exporter uses, with live counts.
+async function handleExportSpaces(req, res) {
+  try {
+    const data = readBoard();
+    let decisions = [];
+    try { decisions = await liveDecisions(); } catch { /* counted as 0 below; the exporter itself refuses if it cannot read them */ }
+    const d = describeExportSet(data, [], { decisions });
+    const spaces = exportableSpaces().map((sp) => {
+      const row = d.excluded.find((x) => x.space === sp.space) || d.included.find((x) => x.space === sp.space);
+      return { space: sp.space, kind: sp.kind, collection: sp.collection, prose: sp.prose, aliases: sp.aliases, definition: sp.definition, count: row ? row.count : 0, defaultOn: sp.prose };
+    });
+    sendJSON(res, 200, { spaces, unregistered: d.unregistered });
+  } catch (e) {
+    console.error('GET /api/export/spaces:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
 }
 async function handleExport(req, res) {
   try {
@@ -8773,6 +8791,7 @@ const API_ROUTES = [
   { method: 'GET',    re: /^\/api\/insights$/,             fn: (req, res) => handleInsights(req, res) },              // #1290 shadow
   { method: 'POST',   re: /^\/api\/model-calls$/,          fn: (req, res) => handleCreateModelCall(req, res) }, // #1202
   { method: 'POST',   re: /^\/api\/export$/,               fn: (req, res) => handleExport(req, res) },       // #1266
+  { method: 'GET',    re: /^\/api\/export\/spaces$/,      fn: (req, res) => handleExportSpaces(req, res) },   // #1321
   { method: 'GET',    re: /^\/api\/wakes$/,                fn: (req, res) => handleListWakes(req, res) },
   { method: 'POST',   re: /^\/api\/wakes$/,                fn: (req, res) => handleCreateWake(req, res) },
   { method: 'POST',   re: /^\/api\/deliveries$/,           fn: (req, res) => handleCreateDelivery(req, res) },                 // #1346

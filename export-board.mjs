@@ -81,11 +81,12 @@ const DEFAULTS = {
   format: 'md',
 };
 
-const KNOWN_SPACES = ['commons', 'cards'];
-// `wiki` is an alias, not a third space: this board's wiki IS the card bodies —
-// same nodes, different view. Accepting the word and mapping it is kinder than
-// rejecting it, and the INDEX says so out loud so nobody thinks pages went missing.
-const SPACE_ALIASES = { wiki: 'cards', board: 'cards', conversations: 'commons', room: 'commons' };
+// #1321 — the exportable set is DERIVED from the kind registry (core/export-spaces.mjs),
+// never typed here: every registered kind with a collection is a space; `wiki`
+// and `conversations` stay as aliases; `all` means everything registered. The
+// INDEX names what was included, what was excluded (with counts), and anything
+// present on the board that the registry does not know.
+import { exportableSpaces, resolveSpaces, describeExportSet, rowsFor } from './core/export-spaces.mjs';
 
 /**
  * Where EXPORT_TRANSFORMS.json comes from — the same rule as export-wiki.mjs,
@@ -119,10 +120,8 @@ function parseArgs(argv) {
     else if (flag === '--config') a.config = argv[++i];
     else if (flag === '--format') a.format = String(argv[++i]).toLowerCase();
     else if (flag === '--spaces') {
-      a.spaces = String(argv[++i]).split(',').map((s) => {
-        const k = s.trim().toLowerCase();
-        return SPACE_ALIASES[k] || k;
-      }).filter((s, idx, arr) => arr.indexOf(s) === idx);
+      const r = resolveSpaces(String(argv[++i]));
+      a.spaces = r.resolved; a.unknownSpaces = r.unknown;
     } else if (flag === '--help' || flag === '-h') {
       console.log(`usage: node export-board.mjs [--out DIR] [--spaces commons,cards] [--format md]
                             [--max-bytes N] [--tolerance PCT] [--base URL]
@@ -149,8 +148,7 @@ function parseArgs(argv) {
   // #465 will grow html and json here. The flag exists NOW, with one value
   // implemented, so adding them later doesn't change the command anyone learned.
   if (a.format !== 'md') die(`--format ${a.format} is not built yet (this slice ships 'md'; html and json are #465)`);
-  const bad = a.spaces.filter((s) => !KNOWN_SPACES.includes(s));
-  if (bad.length) die(`unknown space(s): ${bad.join(', ')} — known: ${KNOWN_SPACES.join(', ')}, wiki (⇒ cards)`);
+  if (a.unknownSpaces?.length) die(`unknown space(s): ${a.unknownSpaces.join(', ')} — known: ${exportableSpaces().map((x) => x.space).join(', ')}, all, wiki (⇒ cards)`);
   if (!a.spaces.length) die('no spaces selected');
   if (!Number.isFinite(a.maxBytes) || a.maxBytes < 50_000) die('--max-bytes must be a number ≥ 50000');
   if (!Number.isFinite(a.tolerancePct) || a.tolerancePct < 0 || a.tolerancePct > 100) {
@@ -195,6 +193,30 @@ export function renderCard(card, thread = []) {
   }
   out += '\n---\n';
   return out;
+}
+
+// ── #1321 — the other kinds ──────────────────────────────────────────────────
+const short = (id) => String(id ?? '').replace(/^https:\/\/scrumboard\.local\/[^/]+\//, '');
+const firstOf = (e, keys) => { for (const k of keys) if (e?.[k] != null && String(e[k]).trim() !== '') return String(e[k]); return ''; };
+/** A prose entity (memory, decision, procedure, obligation, definition): title, provenance, body — readable, not a dump. */
+export function renderProse(space, e) {
+  const title = firstOf(e, ['name', 'schema:name', 'title']) || short(e['@id']);
+  const body = firstOf(e, ['text', 'schema:text', 'statement', 'scrum:statement', 'body', 'scrum:body', 'definition', 'scrum:definition', 'description']);
+  const who = firstOf(e, ['scrum:owner', 'owner', 'scrum:decidedBy', 'decidedBy', 'scrum:owedBy', 'owedBy', 'creator', 'scrum:registeredBy', 'registeredBy', 'author']);
+  const when = firstOf(e, ['dateCreated', 'scrum:decidedAt', 'decidedAt', 'scrum:registeredAt', 'registeredAt', 'createdAt', 'scrum:at']);
+  const meta = [
+    `- **Kind:** \`${space.kind || space.space}\`  ·  **Id:** \`${short(e['@id'] ?? e.id)}\``,
+    who ? `- **By:** ${who}` : null,
+    when ? `- **When:** ${stamp(when)}` : null,
+    (e['scrum:reopensIf'] || e.reopensIf) ? `- **Reopens if:** ${e['scrum:reopensIf'] || e.reopensIf}` : null,
+    (Array.isArray(e['scrum:constrains'] || e.constrains) && (e['scrum:constrains'] || e.constrains).length) ? `- **Constrains:** ${(e['scrum:constrains'] || e.constrains).join(', ')}` : null,
+    Array.isArray(e.tags) && e.tags.length ? `- **Tags:** ${e.tags.join(', ')}` : null,
+  ].filter(Boolean).join('\n');
+  return `## ${title}\n${meta}\n\n${(body || '_(no body)_').trim()}\n\n---\n`;
+}
+/** A machine entity (ledger row, wake, delivery, agent, model, run, artifact): the record itself, fenced, so nothing is lost and nothing is pretended. */
+export function renderMachine(space, e) {
+  return `## ${space.kind || space.space} ${short(e['@id'] ?? e.id)}\n\n\`\`\`json\n${JSON.stringify(e, null, 1)}\n\`\`\`\n\n---\n`;
 }
 
 // ── packing ────────────────────────────────────────────────────────────────
@@ -260,7 +282,10 @@ async function main() {
   // conversation history (18.7MB the browser never reads), which silently emptied
   // this tool's only data source. The opt-in says out loud that this is a bulk
   // consumer; the lean default stays the default for everyone else.
-  const loadUrl = `${args.base}/api/load?conversations=1`;
+  // #1321 — ONE source, the whole document: /api/board carries every collection
+  // the registry knows (and, under `_unmodelled`, the ones it does not), so an
+  // export of memories or decisions reads the same file the cards come from.
+  const loadUrl = `${args.base}/api/board`;
   console.log(`  source: ${loadUrl}`);
 
   let board;
@@ -268,20 +293,25 @@ async function main() {
     const res = await fetch(loadUrl);
     if (!res.ok) die(`the board API answered ${res.status} — is the server running at ${args.base}?`);
     board = await res.json();
-    // If the server is old enough to omit unconditionally, say so plainly rather
-    // than writing a room with no room in it.
-    if (board.conversationsOmitted) {
-      die('the board API omitted conversations even with ?conversations=1 — '
-        + 'this server predates #671; upgrade it rather than exporting a partial archive');
-    }
   } catch (err) {
     die(`could not reach ${args.base} — ${err.message}`);
   }
 
   const allCards = board.cards || [];
   const allMessages = board.conversations || [];
-  console.log(`  received: ${allMessages.length} messages · ${allCards.length} cards\n`);
-  if (!allMessages.length && !allCards.length) die('the board came back empty — refusing to write an empty export');
+  // Spaces that live outside the document are read from their own endpoint.
+  const overrides = {};
+  for (const sp of exportableSpaces().filter((x) => x.source)) {
+    try {
+      const r = await fetch(`${args.base}${sp.source}`);
+      if (!r.ok) die(`${sp.source} answered ${r.status}`);
+      const j = await r.json();
+      overrides[sp.space] = Array.isArray(j) ? j : (j?.[sp.space] ?? j?.rows ?? []);
+    } catch (err) { die(`could not read ${sp.source} — ${err.message}`); }
+  }
+  const setInfo = describeExportSet(board, args.spaces, overrides);
+  console.log(`  received: ${allMessages.length} messages · ${allCards.length} cards · ${setInfo.included.length} of ${setInfo.included.length + setInfo.excluded.length} kinds selected\n`);
+  if (!allMessages.length && !allCards.length && !setInfo.included.some((x) => x.count)) die('the board came back empty — refusing to write an empty export');
 
   // Chronological, ascending: the room's own order, oldest first, so the
   // archive reads the way the conversation happened.
@@ -308,6 +338,16 @@ async function main() {
     for (const c of [...allCards].sort((a, b) => (a.shortId || 0) - (b.shortId || 0))) {
       records.push({ section: 'CARDS + WIKI', text: renderCard(c, homed.get(c.id) || []) });
     }
+  }
+  // #1321 — every other selected kind: prose kinds as readable entries, machine
+  // kinds as one fenced JSON record each. Same scrub, same packing, same count check.
+  const perKind = {};
+  for (const inc of setInfo.included) {
+    if (inc.space === 'commons' || inc.space === 'cards') continue;
+    const rows = rowsFor(board, inc, overrides);
+    perKind[inc.space] = rows.length;
+    const section = inc.space.toUpperCase();
+    for (const e of rows) records.push({ section, text: inc.prose ? renderProse(inc, e) : renderMachine(inc, e) });
   }
   if (!records.length) die('nothing selected to export');
 
@@ -432,8 +472,14 @@ async function main() {
     die(`${allMessages.length} messages received but ${accountedFor} accounted for — refusing to write a lossy archive`);
   }
 
+  // #1321 — the count check, per kind: what we built for each must be what the board held.
+  for (const [space, n] of Object.entries(perKind)) {
+    const built = records.filter((r) => r.section === space.toUpperCase()).length;
+    if (built !== n) die(`${space}: board holds ${n}, archive built ${built} — refusing to report a complete export`);
+  }
+  const kindLine = (x) => `- **${x.space}** (\`${x.kind || x.collection}\`) — ${x.count}`;
   const index = [
-    `# Scrum-Board — Full Export (${args.spaces.map((s) => (s === 'cards' ? 'Cards/Wiki' : 'Commons')).join(' + ')})`,
+    `# Scrum-Board — Export (${args.spaces.join(' + ')})`,
     '',
     `- **Exported:** ${stamp(startedAt.toISOString())}`,
     `- **Source:** \`${args.base}\``,
@@ -448,6 +494,23 @@ async function main() {
     `- **Parts:** ${parts.length} · target **${(args.maxBytes / 1e6).toFixed(2)} MB ±${args.tolerancePct}%** `
       + `(ceiling ${(args.ceiling / 1e6).toFixed(2)} MB) · largest written **${(Math.max(...written.map((w) => w.bytes)) / 1e6).toFixed(2)} MB** `
       + `— ${beyond.length ? `⚠️ ${beyond.length} beyond tolerance` : 'all within tolerance'}. Split at message/card boundaries, never mid-record.`,
+    '',
+    '',
+    '### What this archive holds, by kind',
+    '',
+    ...setInfo.included.map(kindLine),
+    '',
+    `### Not exported (${setInfo.excluded.length} registered kind${setInfo.excluded.length === 1 ? '' : 's'} on this board, not selected)`,
+    '',
+    ...(setInfo.excluded.length ? setInfo.excluded.map(kindLine) : ['- _(nothing — every registered kind is in this archive)_']),
+    '',
+    `### Present but unregistered (${setInfo.unregistered.length})`,
+    '',
+    '> Entities the board holds under a type the kind registry does not know (#1215 names these until someone registers them). They are NOT in this archive; an honest subset names what it leaves behind.',
+    '',
+    ...(setInfo.unregistered.length
+      ? setInfo.unregistered.map((u) => `- \`${u.type}\` — ${u.count} · unnamed · not exported${u.example ? ` (e.g. \`${u.example}\`)` : ''}`)
+      : ['- _(none)_']),
     '',
     '> This board uses a unified model — the **wiki is the card bodies** (same nodes, different view).',
     '> Cards below carry their full text, metadata, and any thread homed on them.',

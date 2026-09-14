@@ -133,6 +133,38 @@
   .editor-actions .btn { margin-top:12px; }
   .editor-actions .msg { margin-top:12px; flex:1 1 240px; }
   code { background:var(--panel-2); border:1px solid var(--line); padding:1px 5px; border-radius:5px; font:13px var(--mono); }
+
+  /* #1321 — the export panel. Two groups with two jobs: INCLUDE is what goes in
+     (derived from the kind registry), BOUNDARY is how much is redacted (#523's
+     fail-closed scrub, with its own two-act un-scrubbed path). */
+  .export-groups { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 720px) { .export-groups { grid-template-columns: 1fr; } }
+  .export-group { border: 1px solid var(--line, #333); border-radius: 10px; padding: 12px 14px; }
+  .export-group h3 { margin: 0 0 8px; font-size: 14px; }
+  .export-group .hint { opacity: .7; font-size: 12px; margin: 0 0 8px; }
+  .export-kinds { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; font-size: 13px; }
+  .export-kinds label { display: flex; align-items: baseline; gap: 6px; }
+  .export-kinds .n { opacity: .55; font-size: 12px; }
+  .export-kinds .machine { opacity: .85; }
+  .export-unregistered { font-size: 12px; opacity: .8; margin: 8px 0 0; }
+  /* the sticky top nav must never cover the one button that arms an un-scrubbed export */
+  #export-raw-confirm, #export-run { scroll-margin-top: 96px; }
+/* #1266 — carried from the board page: the menu shell and the raw warning
+   board's popover chrome; only the form rows are new. */
+const _exportStyle = document.createElement('style');
+_exportStyle.textContent = `
+  .export-control { position: relative; display: inline-flex; }
+  .export-menu { min-width: 320px; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+  .export-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; }
+  .export-row > span:first-child { flex: 0 0 96px; opacity: .8; }
+  .export-row input[type=text], .export-row input[type=number] { flex: 1 1 auto; min-width: 0; padding: 4px 6px; font: inherit; }
+  .export-hint { opacity: .6; font-size: 12px; }
+  .export-warn { font-size: 12px; line-height: 1.4; padding: 8px; border-radius: 6px;
+                 background: rgba(200,120,0,.12); border: 1px solid rgba(200,120,0,.4); }
+  .export-ack { display: block; margin-top: 6px; font: inherit; padding: 4px 8px; cursor: pointer; }
+  .export-run { width: 100%; }
+  .export-status { font-size: 12px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto; }
+  .export-status.err { color: #b3261e; }
 </style>
 <link rel="stylesheet" href="./core/header.css">
 <link rel="stylesheet" href="./core/constraints-view.css"><!-- #1350 what governs an agent -->
@@ -405,6 +437,50 @@
     <p class="roster-restart">Saved to <code>roster.json</code>. <strong>Changes appear after the board restarts</strong> — the roster is read once at startup, so the room never repaints under someone mid-read.</p>
     <div id="roster-msg"></div>
   </div>
+
+<!-- #1321 — EXPORT. Moved here from the board's action row: a control on the
+     board page reads as exporting the board, and until this card it did — a
+     hardcoded three of 38 kinds. Now the INCLUDE list is derived from the kind
+     registry (GET /api/export/spaces), prose kinds ticked, machine kinds
+     offered; the BOUNDARY (#523 scrub, fail-closed) is its own group with its
+     own weight; and the page says what is present-but-unregistered BEFORE the
+     press, so an honest subset is chosen, not discovered. -->
+<section id="export-panel">
+  <h1 style="margin-top:34px">⬇ Export</h1>
+  <p class="sub prose">Write the board to files you can read or upload. <strong>Everything the registry knows can be exported</strong> — the list below is derived from it, so a kind added next month appears here on its own. The archive's index names every kind included, every kind left out, and anything present that nobody has registered. Scrubbed by default; the un-scrubbed archive takes two deliberate acts.</p>
+  <div class="card">
+    <div class="export-groups">
+      <div class="export-group" data-export-include>
+        <h3>Include</h3>
+        <p class="hint">What goes in. The room's words are ticked; machine records (ledgers, wakes, deliveries) are offered but off, because an archive is for reading.</p>
+        <div class="export-kinds" id="export-kinds"><span class="hint">reading the registry…</span></div>
+        <p class="export-unregistered" data-export-unregistered></p>
+      </div>
+      <div class="export-group" data-export-boundary>
+        <h3>Boundary</h3>
+        <p class="hint">How much is redacted before it leaves the room. Scrubbed is the default and it is fail-closed: an archive with residue is refused, not written.</p>
+        <label class="export-row"><span>Un-scrubbed</span>
+          <span><input id="export-raw" type="checkbox"> <span class="export-hint">in-room archive only</span></span>
+        </label>
+        <div id="export-raw-confirm" class="export-warn" hidden>
+          ⚠️ This writes an archive with nothing redacted — paths, names, everything the room has said.
+          It is the right choice for your own reading and the wrong one for anything that leaves the room.
+          <button type="button" id="export-raw-ack" class="export-ack">I understand — keep it un-scrubbed</button>
+        </div>
+      </div>
+    </div>
+    <div class="export-menu" style="margin-top:14px">
+      <label class="export-row"><span>Where</span>
+        <input id="export-out" type="text" placeholder="~/Downloads/scrum-board-export-YYYYMMDD" spellcheck="false">
+      </label>
+      <label class="export-row"><span>Segment size</span>
+        <input id="export-max-bytes" type="number" min="100000" max="20000000" step="50000" value="1500000">
+      </label>
+      <button type="button" id="export-run" class="btn-add export-run">Export</button>
+      <div id="export-status" class="export-status" role="status" aria-live="polite"></div>
+    </div>
+  </div>
+</section>
 
 <!-- #1197 — MODELS. A model the board can call, as a node: every field is
      sourced to a failure that happened. The key is a REFERENCE (an env var
@@ -1083,6 +1159,85 @@ loadRosterEditor();
 $('mode').addEventListener('change', showFields);
 $('save').addEventListener('click', save);
 load();
+
+// ── #1321 — the export panel ────────────────────────────────────────────────
+// The server does the work (POST /api/export); this collects the settings and
+// reports what came back, verbatim — a permissions refusal and a scrub refusal
+// are different problems that only the child's own words tell apart. The
+// INCLUDE list is READ from /api/export/spaces (the exporter's own derivation),
+// never typed here. `raw` is two deliberate acts, or the archive is scrubbed.
+(async function wireExport() {
+  const $ = (id) => document.getElementById(id);
+  const panel = $('export-panel');
+  if (!panel) return;
+  const rawBox = $('export-raw');
+  const rawConfirm = $('export-raw-confirm');
+  const statusEl = $('export-status');
+  const kindsEl = $('export-kinds');
+  const unregEl = panel.querySelector('[data-export-unregistered]');
+  let rawAcknowledged = false;
+  const setStatus = (text, isError) => { statusEl.textContent = text; statusEl.classList.toggle('err', !!isError); };
+
+  try {
+    const r = await fetch('/api/export/spaces');
+    const j = await r.json();
+    kindsEl.replaceChildren();
+    for (const sp of j.spaces) {
+      const label = document.createElement('label');
+      if (!sp.prose) label.className = 'machine';
+      const box = document.createElement('input'); box.type = 'checkbox'; box.value = sp.space; box.checked = !!sp.defaultOn;
+      const name = document.createElement('span'); name.textContent = sp.space;
+      const n = document.createElement('span'); n.className = 'n'; n.textContent = `${sp.count}`;
+      label.title = `${sp.kind || sp.collection} — ${sp.definition}`.slice(0, 300);
+      label.append(box, name, n);
+      kindsEl.append(label);
+    }
+    const u = Array.isArray(j.unregistered) ? j.unregistered : [];
+    unregEl.textContent = u.length
+      ? `Present but unregistered — not exportable until registered (#1215): ${u.map((x) => `${x.type} ×${x.count}`).join(', ')}`
+      : 'Every entity on this board belongs to a registered kind.';
+  } catch (e) {
+    kindsEl.textContent = `could not read the exportable kinds: ${e && e.message ? e.message : e}`;
+  }
+
+  // When the warning appears it scrolls itself under the sticky nav's shadow —
+  // measured: the ack button sat at y=45 beneath the nav, so a click landed on
+  // the nav and the confirmation silently never happened. Bring it into view.
+  const reveal = () => { rawConfirm.hidden = false; rawConfirm.scrollIntoView({ block: 'center' }); };
+  rawBox.addEventListener('change', () => {
+    rawAcknowledged = false;
+    if (rawBox.checked) reveal(); else { rawConfirm.hidden = true; setStatus(''); }
+  });
+  $('export-raw-ack').addEventListener('click', () => {
+    rawAcknowledged = true; rawConfirm.hidden = true;
+    setStatus('Un-scrubbed archive armed for this export.');
+  });
+
+  $('export-run').addEventListener('click', async () => {
+    const spaces = [...kindsEl.querySelectorAll('input[type=checkbox]:checked')].map((b) => b.value);
+    if (!spaces.length) return setStatus('Tick at least one kind to include.', true);
+    const wantRaw = rawBox.checked;
+    if (wantRaw && !rawAcknowledged) { reveal(); return setStatus('Confirm the un-scrubbed archive before exporting.', true); }
+    const body = { by: (window.CURRENT_USER || 'settings-ui'), spaces, maxBytes: Number($('export-max-bytes').value) || undefined, raw: wantRaw === true };
+    const out = $('export-out').value.trim();
+    if (out) body.out = out;
+    $('export-run').disabled = true;
+    setStatus('Exporting… a full board takes a minute or two.');
+    try {
+      const r = await fetch('/api/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) {
+        const where = j.wrote ? `\n\nTried to write: ${j.wrote}` : '';
+        setStatus(`${j.error || `export failed (${r.status})`}${where}\n\n${j.detail || ''}`.trim(), true);
+        return;
+      }
+      const secs = Math.round((j.durationMs || 0) / 1000);
+      setStatus(`✅ ${j.parts} part${j.parts === 1 ? '' : 's'} written in ${secs}s — ${j.scrub}\n${j.out}\n\n${(j.index || '').split('\n').slice(0, 12).join('\n')}`);
+    } catch (e) {
+      setStatus(`export failed: ${e && e.message ? e.message : e}`, true);
+    } finally { $('export-run').disabled = false; }
+  });
+})();
 </script>
 </body>
 </html>
