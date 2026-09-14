@@ -66,27 +66,35 @@ const uncheckAll = (page) => page.$$eval(`${ROW} [data-agent-wake] input`, (els)
   i.dispatchEvent(new Event('change', { bubbles: true }));
 }));
 
-test('#1268 ⛔ THE INVERSION — an empty wakeOn is COERCED to ["mention"] on create', async () => {
+// #1363 — FLIPPED, not deleted. Decision fc4cfeef: no boxes ⇒ not woken. The
+// same fixture that proved the inversion now proves its absence; the default
+// for a record that never chose is unchanged, which is the negative control.
+test('#1363 (was #1268\'s inversion) — an empty wakeOn is STORED as empty on create; a record with NO list still defaults to ["mention"]', async () => {
   const s = await startRestServer({});
   try {
     await seed(s.baseUrl, { wakeOn: [] });
-    assert.deepEqual((await agent(s.baseUrl, 'quiet')).wakeOn, ['mention'],
-      'a seat cannot be CREATED unwakeable — the empty list is replaced, not stored');
+    assert.deepEqual((await agent(s.baseUrl, 'quiet')).wakeOn, [],
+      'a seat CAN be created unwakeable — the empty list is stored, read back empty');
+    const u = await post(s.baseUrl, '/api/agents', { seatKey: 'undecided', name: 'Undecided', prompt: 'Answer.', by: 'ada', modelKey: 'engine', residency: 'guest', toolGrants: ['card_get'] });
+    assert.equal(u.status, 201, await u.text());
+    assert.deepEqual((await agent(s.baseUrl, 'undecided')).wakeOn, ['mention'],
+      'NEGATIVE CONTROL — the default-for-the-undecided is not the same as an explicit empty');
   } finally { await s.stop(); }
 });
 
-test('#1268 ⛔ …and on PATCH too, which is the path the settings page uses', async () => {
+test('#1363 (was #1268\'s PATCH inversion) — PATCH [] stores [] and reads back [] — the path the settings page uses', async () => {
   const s = await startRestServer({});
   try {
     await seed(s.baseUrl);
     const r = await patch(s.baseUrl, '/api/agents/quiet', { by: 'ada', wakeOn: [] });
-    assert.equal(r.status, 200, 'the write SUCCEEDS — it is not refused, it is rewritten');
-    assert.deepEqual((await agent(s.baseUrl, 'quiet')).wakeOn, ['mention'],
-      'PATCH [] stores ["mention"], and says nothing about having done so');
+    assert.equal(r.status, 200);
+    assert.deepEqual((await agent(s.baseUrl, 'quiet')).wakeOn, [], 'PATCH [] is honoured');
+    const c = await (await fetch(`${s.baseUrl}/api/agents/quiet/constraints`)).json();
+    assert.deepEqual(c.constraints.wakeOn, { value: [], source: 'agent record' }, '#1350 shows none / agent record, not a code default');
   } finally { await s.stop(); }
 });
 
-test('#1268 ⭐ THE DECEPTION, END TO END THROUGH THE REAL PAGE — "Saved" while the seat still wakes', async () => {
+test('#1363 (was #1268\'s deception) — END TO END THROUGH THE REAL PAGE: "Saved" and the seat is genuinely silent', async () => {
   // The specimen. A person unchecking every box is trying to let a seat rest.
   // Without the notice, this sequence tells them it worked.
   await withBrowserServer(async ({ server, browser }) => {
@@ -99,12 +107,12 @@ test('#1268 ⭐ THE DECEPTION, END TO END THROUGH THE REAL PAGE — "Saved" whil
 
     const said = await page.$eval(`${ROW} [data-agent-msg]`, (e) => e.textContent.trim());
     assert.match(said, /saved/i, 'the save reports success');
-    assert.deepEqual((await agent(server.baseUrl, 'quiet')).wakeOn, ['mention'],
-      'and the seat is still woken by every mention');
+    assert.deepEqual((await agent(server.baseUrl, 'quiet')).wakeOn, [],
+      '#1363 — and it is TRUE now: the seat is not woken');
   });
 });
 
-test('#1268 ⭐ SO THE PAGE MUST SAY IT — unchecking everything warns that it does NOT silence the seat', async () => {
+test('#1363 (was #1268\'s warning) — unchecking everything STATES that the seat is not woken', async () => {
   await withBrowserServer(async ({ server, browser }) => {
     await seed(server.baseUrl);
     const page = await browser.newPage();
@@ -114,8 +122,8 @@ test('#1268 ⭐ SO THE PAGE MUST SAY IT — unchecking everything warns that it 
     await uncheckAll(page);
     await page.waitForFunction((sel) => (document.querySelector(sel)?.textContent || '').length > 0, { timeout: 5000 }, NOTICE);
     const text = await noticeText(page);
-    assert.match(text, /mention/i, `it must name what will actually be stored: ${text}`);
-    assert.match(text, /not|won't|cannot|does not/i, `it must say this does NOT do what it looks like: ${text}`);
+    assert.match(text, /not woken/i, `#1363 — it must STATE the effect, not warn of the opposite: ${text}`);
+    assert.doesNotMatch(text, /does NOT silence|still wake/i, `the #1268 warning text is gone: ${text}`);
   });
 });
 
@@ -156,4 +164,22 @@ test('#1268 — the three sources are the whole delivery surface, so the claim s
   const html = fs.readFileSync(new URL('../settings.html', import.meta.url), 'utf8');
   assert.match(html, /\['mention', 'assignment', 'schedule'\]/,
     'the editor offers exactly the sources the loop reads — add a fourth and this test, the notice, and the coercion must all be revisited together');
+});
+
+// #1363 — the seam: through the REAL wake finder, an explicit empty list wakes
+// on nothing; the undecided default still wakes on a mention. And the channel
+// mode interaction stated so the Settings sentence cannot be false for a
+// channel-mode seat: channel keeps only 'assignment' AND only if it is ticked.
+import { findWakes, effectiveWakeOn } from '../core/guest-loop.mjs';
+test('#1363 seam — wakeOn [] finds NO wake for a mention, an assignment, or a due schedule; the undecided default still finds the mention', () => {
+  const now = '2026-09-14T00:30:00.000Z';
+  const messages = [{ id: 'm1', author: 'bo', body: '@quiet hello?', createdAt: '2026-09-14T00:29:00.000Z' }];
+  const cards = [{ id: 'c1', shortId: 7, title: 'x', assignees: ['quiet'], claimedBy: null }];
+  const silent = findWakes({ agent: { seatKey: 'quiet', wakeOn: [] }, messages, cards, state: {}, now });
+  assert.deepEqual(silent, [], 'nothing to wake for (none)');
+  const undecided = findWakes({ agent: { seatKey: 'quiet' }, messages, cards, state: {}, now });
+  assert.deepEqual(undecided.map((w) => w.kind), ['mention'], 'no list at all ⇒ the mention default, as before');
+  assert.deepEqual(effectiveWakeOn({ wakeOn: [] }), []);
+  assert.deepEqual(effectiveWakeOn({ deliveryMode: 'channel', wakeOn: [] }), [], 'channel + no boxes: no wake rules either — the room still reaches it through the inbox');
+  assert.deepEqual(effectiveWakeOn({ deliveryMode: 'channel', wakeOn: ['assignment'] }), ['assignment']);
 });

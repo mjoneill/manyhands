@@ -244,7 +244,9 @@ export const decidePublish = splitPublishMarker;
  * post to drain the inbox. Wake mode is untouched.
  */
 export function effectiveWakeOn(agent) {
-  const on = Array.isArray(agent?.wakeOn) && agent.wakeOn.length ? agent.wakeOn : ['mention'];
+  // #1363 — an explicit empty list is an explicit choice: not woken. Only a
+  // record that carries no list at all gets the default. Decision fc4cfeef.
+  const on = Array.isArray(agent?.wakeOn) ? agent.wakeOn : ['mention'];
   return agent?.deliveryMode === 'channel' ? on.filter((k) => k === 'assignment') : on;
 }
 

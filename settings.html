@@ -937,10 +937,9 @@ function agentRow(a) {
     const anyOn = row.querySelectorAll('[data-agent-wake] input:checked').length > 0;
     wakeState.textContent = anyOn
       ? ''
-      : '⚠️ This does NOT silence the seat. With no box checked the server stores '
-        + '`mention`, so it will still wake whenever someone types its handle — and the '
-        + 'save will report success. There is currently no way to make a seat unwakeable here.';
-    wakeState.style.color = wakeState.textContent ? 'var(--danger, #c0392b)' : '';
+      : 'No boxes: this seat is not woken — not by a mention, an assignment, or a clock (#1363, decision fc4cfeef). '
+        + 'It can still hear the room by switching Delivery to channel.';
+    wakeState.style.color = '';
   };
   row.querySelectorAll('[data-agent-wake] input').forEach((i) => i.addEventListener('change', refreshWakeState));
   refreshWakeState();

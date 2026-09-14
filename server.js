@@ -3623,7 +3623,8 @@ function agentToWire(data, e) {
     model: e['scrum:modelSpec'] ?? null, modelId: e['scrum:model'] ?? null, usesModel: e['scrum:usesModel'] ?? null,
     contextPolicy: e['scrum:contextPolicy'] ?? 'thread', toolGrants: e['scrum:toolGrant'] ?? [],
     budgetPerDay: e['scrum:budgetPerDay'] ?? null, residency: e['scrum:residency'] ?? 'guest', state: e['scrum:state'] ?? 'invited',
-    wakeOn: Array.isArray(e['scrum:wakeOn']) && e['scrum:wakeOn'].length ? e['scrum:wakeOn'] : ['mention'], everyMinutes: e['scrum:everyMinutes'] ?? null,
+    // #1363 — an EXPLICIT empty list is honoured (not woken); only a record that never chose gets the default. Decision fc4cfeef.
+    wakeOn: Array.isArray(e['scrum:wakeOn']) ? e['scrum:wakeOn'] : ['mention'], everyMinutes: e['scrum:everyMinutes'] ?? null,
     deliveryMode: AGENT_DELIVERY_MODES.has(e['scrum:deliveryMode']) ? e['scrum:deliveryMode'] : DELIVERY_MODE_DEFAULT,   // #1346
     // #1196 — whether this ROLE reasons before answering. Three states, not two:
     // unset sends no flag at all, because a model with no such flag must not be
@@ -3692,7 +3693,7 @@ async function handleCreateAgent(req, res) {
         'scrum:contextPolicy': contextPolicy, 'scrum:toolGrant': toolGrants, 'scrum:budgetPerDay': budget,
         'scrum:residency': residency, 'scrum:state': 'invited', 'scrum:currentPrompt': v1, 'scrum:importedAt': now,
         // #1226 — wake sources are DATA on the node: mention | assignment | schedule
-        'scrum:wakeOn': Array.isArray(body.wakeOn) && body.wakeOn.length ? body.wakeOn.filter((w) => AGENT_WAKE_KINDS.has(w)) : ['mention'],
+        'scrum:wakeOn': Array.isArray(body.wakeOn) ? body.wakeOn.filter((w) => AGENT_WAKE_KINDS.has(w)) : ['mention'],   // #1363 — [] stays []
         'scrum:everyMinutes': body.everyMinutes == null ? null : Number(body.everyMinutes),
         ...(body.deliveryMode !== undefined ? { 'scrum:deliveryMode': body.deliveryMode } : {}),   // #1346 — validated above
         'scrum:maxHops': body.maxHops == null ? null : Number(body.maxHops),
@@ -3881,7 +3882,7 @@ async function handlePatchAgent(req, res, seat) {
       if (typeof body.emoji === 'string') updated['scrum:emoji'] = body.emoji;
       if (typeof body.color === 'string' && /^#[0-9a-f]{3,8}$/i.test(body.color)) updated['scrum:color'] = body.color;
       if (body.residency != null) { if (!AGENT_RESIDENCIES.has(body.residency)) return { status: 400, wire: { error: 'residency must be resident or guest' } }; updated['scrum:residency'] = body.residency; }
-      if (Array.isArray(body.wakeOn)) { const bad = body.wakeOn.find((w) => !AGENT_WAKE_KINDS.has(w)); if (bad) return { status: 400, wire: { error: `unknown wake kind ${JSON.stringify(bad)} — mention, assignment or schedule` } }; updated['scrum:wakeOn'] = body.wakeOn.length ? body.wakeOn : ['mention']; }
+      if (Array.isArray(body.wakeOn)) { const bad = body.wakeOn.find((w) => !AGENT_WAKE_KINDS.has(w)); if (bad) return { status: 400, wire: { error: `unknown wake kind ${JSON.stringify(bad)} — mention, assignment or schedule` } }; updated['scrum:wakeOn'] = body.wakeOn; }   // #1363 — an explicit [] means not woken
       if (body.everyMinutes !== undefined) updated['scrum:everyMinutes'] = body.everyMinutes == null ? null : Number(body.everyMinutes);
       if (body.deliveryMode !== undefined) { if (!AGENT_DELIVERY_MODES.has(body.deliveryMode)) return { status: 400, wire: { error: `unknown deliveryMode ${JSON.stringify(body.deliveryMode)} — wake or channel (#1346)` } }; updated['scrum:deliveryMode'] = body.deliveryMode; }
       if (body.thinking !== undefined) updated['scrum:thinking'] = body.thinking === null ? null : !!body.thinking;

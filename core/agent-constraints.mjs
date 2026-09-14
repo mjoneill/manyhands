@@ -92,7 +92,7 @@ export function agentConstraints(node, { model = null, promptVersions = [], mode
     : codeDefault(CODE_DEFAULTS.maxHops);
 
   const wakeOnRaw = node['scrum:wakeOn'];
-  const wakeOn = Array.isArray(wakeOnRaw) && wakeOnRaw.length ? fromRecord(wakeOnRaw) : codeDefault(CODE_DEFAULTS.wakeOn);
+  const wakeOn = Array.isArray(wakeOnRaw) ? fromRecord(wakeOnRaw) : codeDefault(CODE_DEFAULTS.wakeOn);   // #1363 — [] is a record value, not a default
   const everyMinutes = has(node['scrum:everyMinutes']) ? fromRecord(node['scrum:everyMinutes'])
     : wakeOn.value.includes('schedule') ? codeDefault(CODE_DEFAULTS.everyMinutes)
     : unset();
