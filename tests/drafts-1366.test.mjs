@@ -142,3 +142,13 @@ test('#1366 leaving guard: accepting the ask lets the click through, and install
   assert.equal(asks, 1, 'one guard, one ask');
   h.stop(); w.restore();
 });
+
+test('#1366/#1365 a DETACHED box is never dirty — a saved-and-re-rendered form must not arm the guard', () => {
+  const w = world({ value: 'v1' });
+  const h = mountComposerWatch(w.doc, { textarea: w.ta, key: 'edit:c1', base: 'v1', sample: false });
+  type(w, 'v1 changed');
+  assert.equal(h.isDirty(), true);
+  w.ta.remove();
+  assert.equal(h.isDirty(), false, 'off the document ⇒ nothing to lose');
+  h.stop(); w.restore();
+});

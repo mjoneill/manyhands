@@ -445,7 +445,7 @@
       // #1366 — keyed to this page and pinned to the text it was opened on:
       // restores over the same text, dropped against a newer one.
       const draft = mountComposerWatch(document, { textarea: body, key: `wiki:${node['@id']}`, base: node.text || '', sample: false });
-      if (draft) { registerComposer(draft, { describe: () => `an unsaved edit of «${node.name || 'this page'}»` }); installLeavingGuard(window); }
+      if (draft) { draft.unregister = registerComposer(draft, { describe: () => `an unsaved edit of «${node.name || 'this page'}»` }); installLeavingGuard(window); }
       const parentSel = el('select', 'edit-parent');
       const none = el('option', '', '— top level —'); none.value = ''; parentSel.appendChild(none);
       for (const n of allNodes) {
@@ -494,11 +494,11 @@
           method: 'PATCH', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ title: title.value, body: body.value, parent: parentSel.value || null, attachments: workingAttachments }),
         });
-        try { draft?.clearDraft(); draft?.stop(); } catch { /* #1366 — never break the save */ }
+        try { draft?.clearDraft(); draft?.stop(); draft?.unregister?.(); } catch { /* #1366 — never break the save */ }
         await loadTree();
         openNode(node['@id']);
       };
-      const cancel = el('button', 'btn', 'Cancel'); cancel.onclick = () => { try { draft?.clearDraft(); draft?.stop(); } catch { /* ignore */ } openNode(node['@id']); };
+      const cancel = el('button', 'btn', 'Cancel'); cancel.onclick = () => { try { draft?.clearDraft(); draft?.stop(); draft?.unregister?.(); } catch { /* ignore */ } openNode(node['@id']); };
       const bar = el('div', 'toolbar'); bar.append(save, cancel);
       main.append(el('div', 'meta', 'Editing'), title, parentRow, attachRow, attachList, body, bar);
     }

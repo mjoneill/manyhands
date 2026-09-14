@@ -80,8 +80,15 @@ test('#1255 ⭐⭐ A DRAFT SURVIVES LEAVING THE PAGE — the loss that raised th
     const LONG = 'a paragraph that took a while to write, and then a misclick';
     await page.type('#say', LONG);
 
+    // #1366 — leaving with text in the box now ASKS (beforeunload). Answer
+    // "leave" and record that it fired: the guard is part of the contract, and
+    // the draft must survive the trip regardless of the answer.
+    let asked = 0;
+    page.on('dialog', async (d) => { asked += 1; await d.accept(); });
+
     // The misclick: away, and back.
     await page.goto(`${server.baseUrl}/retreat.html`, { waitUntil: 'networkidle0' });
+    assert.equal(asked, 1, 'leaving the room with unsent text asked first (#1366)');
     await page.goto(`${server.baseUrl}/retreat.html?t=r1`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('#say', { timeout: 5000 });
     const restored = await page.$eval('#say', (e) => e.value);

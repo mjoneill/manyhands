@@ -3341,7 +3341,7 @@ function renderCardEditForm(card) {
   // newer one, so a half-typed edit never overwrites someone else's save.
   if (typeof window.mountComposerWatch === 'function') {
     const w = window.mountComposerWatch(document, { textarea: el.querySelector('.edit-desc'), key: `edit:${card.id}`, base: card.description || '', sample: false });
-    if (w) { _editDescWatches.set(card.id, w); window.registerComposer?.(w, { describe: () => `an unsaved edit of #${card.shortId}` }); }
+    if (w) { _editDescWatches.set(card.id, w); w.unregister = window.registerComposer?.(w, { describe: () => `an unsaved edit of #${card.shortId}` }); }
   }
   el.querySelector('.edit-type').value = card.type || 'task';
   // Multi-assignee (#51): tick the checkboxes that correspond to card.assignees.
@@ -3491,7 +3491,7 @@ function saveEdit(cardId) {
 function _releaseEditDraft(cardId) {
   const w = _editDescWatches.get(cardId);
   if (!w) return;
-  try { w.clearDraft(); w.stop(); } catch { /* never break the edit */ }
+  try { w.clearDraft(); w.stop(); w.unregister?.(); } catch { /* never break the edit */ }
   _editDescWatches.delete(cardId);
 }
 

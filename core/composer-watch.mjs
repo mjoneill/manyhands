@@ -74,7 +74,12 @@ export function mountComposerWatch(doc, { textarea, form, fetchImpl = (...a) => 
     try { const o = JSON.parse(raw); return (o && typeof o === 'object' && o.base === base) ? String(o.text ?? '') : null; } catch { return null; }
   };
   const writeDraft = (text) => safeSet(KEY, hasBase ? JSON.stringify({ base, text }) : text);
-  const isDirty = () => (hasBase ? ta.value !== base : ta.value.length > 0);
+  // A box no longer in the document cannot lose anything: a form that was
+  // saved and re-rendered leaves its old textarea detached with the text
+  // still in it, and the leaving guard must not ask about a ghost. (Found by
+  // #1365's served test: a successful pop-out save was followed by a spurious
+  // beforeunload on the next navigation.)
+  const isDirty = () => (ta.isConnected === false ? false : (hasBase ? ta.value !== base : ta.value.length > 0));
 
   const saved = readDraft();
   if (saved != null && (hasBase ? saved !== base : (saved && !ta.value))) {
