@@ -107,6 +107,8 @@ h1.thread-title { font:600 27px/1.35 var(--serif); margin:0 0 4px; }
 
 <script type="module">
 import { renderMarkdown } from './core/render.mjs';
+import { mountComposerWatch } from './core/composer-watch.mjs';   // #1366 — the shared draft mechanism, on the key this room already used
+import { installLeavingGuard, registerComposer } from './core/leaving-guard.mjs';
 
 // ── #1255 — A THREAD IS A CARD. There is no new entity here, deliberately. ──
 //
@@ -220,15 +222,17 @@ function composer(id) {
 
   let attachments = [];
   const grow = () => { ta.style.height = 'auto'; ta.style.height = `${ta.scrollHeight}px`; };
-  const save = () => { try { localStorage.setItem(DRAFT_KEY, ta.value); } catch { /* private mode */ } };
-  try { ta.value = localStorage.getItem(DRAFT_KEY) || ''; } catch { /* nothing to restore */ }
+  // #1366 — the room's own restore folds into the shared mechanism, on the SAME
+  // storage key it used before, so a draft left here last week still comes back.
+  const draft = mountComposerWatch(document, { textarea: ta, key: DRAFT_KEY, sample: false });
+  if (draft) { registerComposer(draft, { describe: () => 'an unsent post in the retreat' }); installLeavingGuard(window); }
 
   const drawPending = () => {
     pending.innerHTML = '';
     for (const a of attachments) pending.append(el('span', null, `📎 ${esc(a.name)}`));
   };
 
-  ta.addEventListener('input', () => { grow(); save(); });
+  ta.addEventListener('input', () => { grow(); });
 
   // Paste an image straight in — he named screenshots explicitly. The file is
   // uploaded immediately and referenced by markdown, so the draft text stays
@@ -293,7 +297,7 @@ function composer(id) {
       // ⭐ ONLY NOW. The draft outlives the send until the send is confirmed.
       ta.value = '';
       attachments = [];
-      try { localStorage.removeItem(DRAFT_KEY); } catch { /* nothing to clear */ }
+      try { draft?.clearDraft(); } catch { /* nothing to clear */ }
       drawPending();
       await showThread(id);
       const next = document.getElementById('say');

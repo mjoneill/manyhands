@@ -22,6 +22,8 @@
 import { renderChatMarkdown } from './render.mjs';
 import { identityOf, roster } from './identity.mjs';
 import { mountEditor } from './editor.mjs';   // #1367 — one editor for every composer
+import { mountComposerWatch } from './composer-watch.mjs';   // #1366 — a draft per thread
+import { installLeavingGuard, registerComposer } from './leaving-guard.mjs';
 
 // ── pure helpers (node-testable) ───────────────────────────────────────────
 
@@ -158,6 +160,7 @@ export function mountConversationView(opts = {}) {
     onMessages,        // presence — called with the full message list after each load/poll (constellation feed)
     onSolo,            // presence — called with the soloed author key (or null) whenever it changes
   } = opts;
+  let watch = null;   // #1366 — this composer's draft watch (declared here: buildForm is hoisted and may run before any later `let`)
   if (!mount) throw new Error('mountConversationView: opts.mount is required');
 
   const doc = mount.ownerDocument || document;
@@ -556,6 +559,18 @@ export function mountConversationView(opts = {}) {
     // lands inside the form; the paste/drop listeners below bind to `ta`
     // itself and are untouched by the wrap.
     mountEditor(ta, { doc, render: renderChatMarkdown, onSubmit: () => fm.requestSubmit() });
+    // #1366 — the draft is keyed by THREAD (`card:<id>` or the whole commons),
+    // so a misclick to a #NNN and back restores this box and no other; the
+    // leaving guard names it. Released only after the post is confirmed.
+    watch = mountComposerWatch(doc, {
+      textarea: ta,
+      key: typeof attachedTo === 'string' && attachedTo ? `card:${attachedTo}` : 'commons',
+      sample: false,
+    });
+    if (watch) {
+      registerComposer(watch, { describe: () => (attachedTo ? 'an unsent comment on this card\'s thread' : 'an unsent post on the commons'), win: doc.defaultView });
+      installLeavingGuard(doc.defaultView);
+    }
 
     attachBtn.addEventListener('click', () => fileInput.click());
     fileInput.addEventListener('change', async () => {
@@ -580,7 +595,7 @@ export function mountConversationView(opts = {}) {
       const body = ta.value.trim();
       if (!body && pending.length === 0) return;   // body OR attachment required
       const ok = await post(body, who.value, pending);
-      if (ok) { ta.value = ''; pending = []; renderPending(chips); }
+      if (ok) { ta.value = ''; pending = []; renderPending(chips); try { watch?.clearDraft(); } catch { /* never break the post */ } }
     });
     return fm;
   }

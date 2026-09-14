@@ -1801,6 +1801,7 @@ body::before {
   import { identityOf } from './core/identity.mjs';
   import { cardContentKey } from './core/card-content-key.mjs';
   import { mountComposerWatch } from './core/composer-watch.mjs';
+  import { installLeavingGuard, registerComposer } from './core/leaving-guard.mjs';   // #1366
   import { openConstraintsPopover } from './core/constraints-view.mjs';
   import { mountEditor } from './core/editor.mjs';
   // #1350 slice 3 — a name on the board is a door to what governs it. One
@@ -1849,6 +1850,16 @@ body::before {
   // below runs at parse time and cannot import; it reaches this through window,
   // the same bridge renderChatMarkdown and identityOf use.
   window._composerWatch = mountComposerWatch(document);
+  // #1366 — every composer on this page keeps its draft and the page asks
+  // before it leaves with one. The commons box keeps the #1255 key; the
+  // new-card description gets its own; the edit form mounts per edit (below,
+  // in the classic script, through the same bridge).
+  window.mountComposerWatch = mountComposerWatch;
+  window.registerComposer = registerComposer;
+  if (window._composerWatch) registerComposer(window._composerWatch, { describe: () => 'an unsent post on the commons' });
+  const _createWatch = mountComposerWatch(document, { textarea: document.getElementById('card-desc'), key: 'create', sample: false });
+  if (_createWatch) { window._createDescWatch = _createWatch; registerComposer(_createWatch, { describe: () => 'an unfinished new card' }); }
+  installLeavingGuard(window);
   mountTopNav(document, 'board'); // #303-2 shared nav
   // The classic board script renders once at parse-time, before this deferred
   // module runs — so the first paint's assignee chips miss their identity light.
@@ -3229,6 +3240,7 @@ function renderCard(card) {
 }
 
 // ── Render a Card in Edit Mode ──
+const _editDescWatches = new Map();   // #1366 — cardId → draft watch for an open edit form
 function renderCardEditForm(card) {
   const el = document.createElement('div');
   el.className = 'card editing';
@@ -3324,6 +3336,13 @@ function renderCardEditForm(card) {
   el.querySelector('.edit-title').value = card.title || '';
   el.querySelector('.edit-desc').value = card.description || '';
   mountBoardDescriptionEditor(el.querySelector('.edit-desc'), () => saveEdit(card.id));   // #1367
+  // #1366 — an edit draft, keyed to THIS card and pinned to the description it
+  // was written on: it restores over the same text and is dropped against a
+  // newer one, so a half-typed edit never overwrites someone else's save.
+  if (typeof window.mountComposerWatch === 'function') {
+    const w = window.mountComposerWatch(document, { textarea: el.querySelector('.edit-desc'), key: `edit:${card.id}`, base: card.description || '', sample: false });
+    if (w) { _editDescWatches.set(card.id, w); window.registerComposer?.(w, { describe: () => `an unsaved edit of #${card.shortId}` }); }
+  }
   el.querySelector('.edit-type').value = card.type || 'task';
   // Multi-assignee (#51): tick the checkboxes that correspond to card.assignees.
   // Fall back to legacy card.assignee for any not-yet-migrated card.
@@ -3463,10 +3482,21 @@ function saveEdit(cardId) {
   saveToLocalStorage();
   saveToJSONFile(); // Fire-and-forget JSON sync
   _testHookMarkSaved();
+  _releaseEditDraft(cardId);   // #1366 — the text is the card's now (local-first, synced by the line above)
   renderBoard();
 }
 
+// #1366 — an edit draft is released when the edit is committed or explicitly
+// cancelled; a re-render for any other reason (a poll, a move) keeps it.
+function _releaseEditDraft(cardId) {
+  const w = _editDescWatches.get(cardId);
+  if (!w) return;
+  try { w.clearDraft(); w.stop(); } catch { /* never break the edit */ }
+  _editDescWatches.delete(cardId);
+}
+
 function cancelEdit() {
+  _releaseEditDraft(editingCardId);   // #1366 — Cancel is the operator's word; the draft goes with it
   editingCardId = null;
   renderBoard();
 }
@@ -4804,6 +4834,7 @@ function handleAddCard() {
   // Reset form
   titleInput.value = '';
   descInput.value = '';
+  try { window._createDescWatch?.clearDraft(); } catch { /* #1366 — never break the add */ }
   if (forInput) forInput.value = '';
   typeInput.value = 'task';
   document.querySelectorAll('#card-assignees-group input[type="checkbox"]').forEach(cb => { cb.checked = false; });

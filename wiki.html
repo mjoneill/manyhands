@@ -167,6 +167,8 @@
     import { mountCommonsPanel } from './core/commons-panel.mjs';
     import { matchesNodeQuery, nodeComparator, filterTree, sortTree } from './core/nav.mjs';
     import { mountTopNav } from './core/header.mjs';
+    import { mountComposerWatch } from './core/composer-watch.mjs';   // #1366 — the page edit keeps its draft
+    import { installLeavingGuard, registerComposer } from './core/leaving-guard.mjs';
     mountTopNav(document, 'wiki'); // #303-2 shared nav
 
     let nodesByName = new Map();   // lowercase name → node, for wikilink resolution
@@ -440,6 +442,10 @@
       const title = el('input', 'edit-title'); title.value = node.name || ''; title.placeholder = 'Title';
       const body = el('textarea', 'edit-body'); body.value = node.text || '';
       body.placeholder = 'Markdown body…  [[Page Name]] to link';
+      // #1366 — keyed to this page and pinned to the text it was opened on:
+      // restores over the same text, dropped against a newer one.
+      const draft = mountComposerWatch(document, { textarea: body, key: `wiki:${node['@id']}`, base: node.text || '', sample: false });
+      if (draft) { registerComposer(draft, { describe: () => `an unsaved edit of «${node.name || 'this page'}»` }); installLeavingGuard(window); }
       const parentSel = el('select', 'edit-parent');
       const none = el('option', '', '— top level —'); none.value = ''; parentSel.appendChild(none);
       for (const n of allNodes) {
@@ -488,10 +494,11 @@
           method: 'PATCH', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ title: title.value, body: body.value, parent: parentSel.value || null, attachments: workingAttachments }),
         });
+        try { draft?.clearDraft(); draft?.stop(); } catch { /* #1366 — never break the save */ }
         await loadTree();
         openNode(node['@id']);
       };
-      const cancel = el('button', 'btn', 'Cancel'); cancel.onclick = () => openNode(node['@id']);
+      const cancel = el('button', 'btn', 'Cancel'); cancel.onclick = () => { try { draft?.clearDraft(); draft?.stop(); } catch { /* ignore */ } openNode(node['@id']); };
       const bar = el('div', 'toolbar'); bar.append(save, cancel);
       main.append(el('div', 'meta', 'Editing'), title, parentRow, attachRow, attachList, body, bar);
     }
