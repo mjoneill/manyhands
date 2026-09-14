@@ -1532,7 +1532,7 @@ async function warmGraphStoreOnce() {
       console.error(`${new Date().toISOString()} graph-replica: a write landed mid-sync (generation ${genAtStart} → ${_graphGeneration}); staying dirty so the next query re-projects`);
     }
     rebuiltMs = Math.round(performance.now() - t);
-    console.error(`${new Date().toISOString()} graph-replica: synced ${stats.updated} updated, ${stats.removed} removed of ${stats.total} entities (hashed ${stats.hashed}, reused ${stats.reused}), +${activities} activities (through seq ${_activitySeq}) → ${_graphStore.size} triples in ${rebuiltMs}ms`);
+    console.error(`${new Date().toISOString()} graph-replica: synced ${stats.updated} updated, ${stats.removed} removed of ${stats.total} entities (hashed ${stats.hashed}, reused ${stats.reused}), +${activities} activities (through seq ${_activitySeq}) → ${_graphStore.size} triples in ${rebuiltMs}ms` + (stats.projection?.n ? ` · #1369 per-entity projection n=${stats.projection.n} p50=${stats.projection.p50}ms p95=${stats.projection.p95}ms max=${stats.projection.max}ms (${stats.projection.slowest.type})` : ''));
   }
   return { store: _graphStore, rebuiltMs, projectedThrough: _graphProjectedThrough };
 }

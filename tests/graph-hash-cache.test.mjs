@@ -90,3 +90,33 @@ test('#1157 without signals (the legacy call shape) every entity is hashed — t
   const warm = syncGraphStore(inc, d, cold.hashes);
   assert.equal(warm.reused, 0); assert.equal(warm.hashed, 6);
 });
+
+// #1369 — GATE 3 IS MEASURED WHERE IT HAPPENS. Every incremental sync now
+// returns `projection`: per-changed-entity re-projection timings (n, p50, p95,
+// max, the slowest entity by name). An unchanged pass reports n: 0 and NULLS,
+// never zeros — an unmeasured pass must not read as a fast one.
+import { projectionStats } from '../core/graph-replica.mjs';
+test('#1369 an incremental sync reports per-entity projection timings; an unchanged pass reports n: 0 with nulls', () => {
+  const d = doc();
+  const inc = buildGraphStore(d);
+  const cold = syncGraphStore(inc, d, null);
+  assert.deepEqual(cold.projection, { n: 0, p50: null, p95: null, max: null, slowest: null }, 'cold start projects, it does not re-project');
+  const same = syncGraphStore(inc, d, cold.hashes, { signals: cold.signals });
+  assert.equal(same.projection.n, 0);
+  assert.equal(same.projection.p95, null, 'unchanged ⇒ null, not 0');
+  const d2 = doc();
+  d2['@graph'].find((e) => e['@type'] === 'CreativeWork' || (Array.isArray(e['@type']) && e['@type'].includes('CreativeWork'))).name = 'renamed';
+  const changed = syncGraphStore(inc, d2, cold.hashes, { signals: cold.signals });
+  assert.equal(changed.updated, 1);
+  assert.equal(changed.projection.n, 1, 'exactly the changed entity was timed');
+  assert.ok(changed.projection.p95 >= 0 && changed.projection.max >= changed.projection.p95);
+  assert.equal(typeof changed.projection.slowest.key, 'string');
+});
+
+test('#1369 projectionStats — p95 is the 95th percentile of the sample, not the mean, and the slowest is named', () => {
+  const t = Array.from({ length: 20 }, (_, i) => ({ key: `k${i}`, type: 'T', ms: i + 1 }));   // 1..20
+  const s = projectionStats(t);
+  assert.equal(s.n, 20); assert.equal(s.p50, 10); assert.equal(s.p95, 19); assert.equal(s.max, 20);
+  assert.deepEqual(s.slowest, { key: 'k19', type: 'T', ms: 20 });
+  assert.deepEqual(projectionStats([]), { n: 0, p50: null, p95: null, max: null, slowest: null });
+});

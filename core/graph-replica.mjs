@@ -19,6 +19,7 @@
  */
 
 import oxigraph from 'oxigraph';
+import { performance } from 'node:perf_hooks';
 import { createHash } from 'node:crypto';
 import { REL_TYPES, MENTIONS_CARD } from './jsonld.mjs';
 import { APEX_PREFIX } from './apex-labels.mjs';
@@ -1790,11 +1791,34 @@ function syncOneEntity(store, e, prev, next, cache) {
     // Cold start: nothing to replace, so the match-and-delete is pointless work.
     projectEntity(store, e); return 1;
   }
-  if (prev.get(key) !== hash) { updateEntity(store, e); return 1; }
+  if (prev.get(key) !== hash) {
+    // #1369 — GATE 3 IS A NUMBER, and this is where it is measured: the wall
+    // time to re-project ONE changed entity, per entity, on the real board.
+    // Decision 839eb614 asks for the p95 over a predeclared sample; nothing
+    // recorded it, so the 13.8 s figure on the card was never re-taken.
+    const t0 = performance.now();
+    updateEntity(store, e);
+    cache.timings.push({ key, type: entityTypeName(e), ms: performance.now() - t0 });
+    return 1;
+  }
   return 0;
 }
 
-const newCache = (signals) => ({ prevSignals: signals instanceof Map ? signals : null, nextSignals: new Map(), reused: 0, hashed: 0 });
+const entityTypeName = (e) => { const t = e?.['@type']; return Array.isArray(t) ? String(t[0]) : (t == null ? 'unknown' : String(t)); };
+const newCache = (signals) => ({ prevSignals: signals instanceof Map ? signals : null, nextSignals: new Map(), reused: 0, hashed: 0, timings: [] });
+
+/**
+ * #1369 — summarise per-entity projection timings: count, p50, p95, max (ms),
+ * plus the slowest entity so a bad number has a name. Empty ⇒ n: 0 and nulls,
+ * never zeros — an unmeasured pass must not read as a fast one.
+ */
+export function projectionStats(timings) {
+  const ms = (Array.isArray(timings) ? timings : []).map((t) => t.ms).filter(Number.isFinite).sort((a, b) => a - b);
+  if (!ms.length) return { n: 0, p50: null, p95: null, max: null, slowest: null };
+  const q = (p) => ms[Math.min(ms.length - 1, Math.max(0, Math.ceil(p * ms.length) - 1))];
+  const slow = timings.reduce((a, b) => (b.ms > (a?.ms ?? -1) ? b : a), null);
+  return { n: ms.length, p50: +q(0.5).toFixed(2), p95: +q(0.95).toFixed(2), max: +ms[ms.length - 1].toFixed(2), slowest: slow ? { key: slow.key, type: slow.type, ms: +slow.ms.toFixed(2) } : null };
+}
 
 /**
  * #1157 — the bound on the cache's honesty. Full-hashes every entity whose
@@ -1861,7 +1885,7 @@ export async function syncGraphStoreChunked(store, doc, prev, { batchSize = 250,
     if (i + batchSize < entities.length) await new Promise(setImmediate);
   }
   const removed = sweepVanished(store, prev, next);
-  return { hashes: next, signals: cache.nextSignals, reused: cache.reused, hashed: cache.hashed, updated, removed, total: entities.length };
+  return { hashes: next, signals: cache.nextSignals, reused: cache.reused, hashed: cache.hashed, updated, removed, total: entities.length, projection: projectionStats(cache.timings) };
 }
 
 export function syncGraphStore(store, doc, prev, { signals = null } = {}) {
@@ -1875,7 +1899,7 @@ export function syncGraphStore(store, doc, prev, { signals = null } = {}) {
   // Arrows POINTING at a vanished entity survive under their own subjects — the
   // same dangling-reference behaviour a full rebuild produces.
   removed = sweepVanished(store, prev, next);
-  return { hashes: next, signals: cache.nextSignals, reused: cache.reused, hashed: cache.hashed, updated, removed, total: entities.length };
+  return { hashes: next, signals: cache.nextSignals, reused: cache.reused, hashed: cache.hashed, updated, removed, total: entities.length, projection: projectionStats(cache.timings) };
 }
 
 /** IRI → prefixed short form for token-efficient results. */
