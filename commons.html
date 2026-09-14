@@ -115,6 +115,7 @@
 
   <script type="module">
     import { mountConversationView } from './core/conversation-view.mjs';
+    import { resolveRoleHolder } from './core/roles.mjs';   // #1368 — the PO seat, read from the board
     import { mountTopNav } from './core/header.mjs';
     import { renderChatMarkdown } from './core/render.mjs';
     import { roster, identityOf, presenceLevel, constellationOrder } from './core/identity.mjs';
@@ -643,12 +644,22 @@
       // reader — or a test — can make the window small and see that search
       // reaches past it; the corpus search is what makes a small window safe.
       const limitParam = Number(new URLSearchParams(location.search).get('limit'));
+      // #1368 — a card's thread is a GROOMING thread: the PO's answers are
+      // badged, a comment can become a ruling on the card, and `?groom=1`
+      // (the card's "Groom this" door) arrives with the PO mentioned.
+      const groom = new URLSearchParams(location.search).get('groom') === '1';
+      let groomCard = null;
+      if (node) {
+        try { const r = await fetch('/api/cards/' + encodeURIComponent(node)); if (r.ok) { const c = await r.json(); if (c && c.shortId != null) groomCard = { id: c.id, shortId: c.shortId }; } } catch { /* a thread on a non-card node has no ruling affordance */ }
+      }
+      const poSeat = node ? await resolveRoleHolder('po') : null;
       view = mountConversationView({
         mount: viewEl,
         ...(Number.isInteger(limitParam) && limitParam > 0 ? { limit: limitParam } : {}),
         attachedTo: node || undefined,   // node ⇒ that thread; absent ⇒ the whole commons
         poll: true,
-        placeholder: node ? 'Add to this discussion…' : 'Say something to the room…',
+        poSeat, groom, card: groomCard,   // #1368
+        placeholder: node ? (groom ? 'Ask the PO — what do you need to know to start?' : 'Add to this discussion…') : 'Say something to the room…',
         attachedPointer,                 // #294 — pointer-collapse in the unscoped room
         onMessages: (msgs) => { _lastMessages = msgs; updateConstellation(msgs); anchorToPlace(); }, // presence pulse · #517 arrive where the reader was
         onSolo: reflectSolo,             // presence — sync the constellation to the soloed mind

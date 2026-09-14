@@ -181,12 +181,18 @@ if (channelMode && !wakes.length) {
     if (claimed.length) {
       const posts = [];
       for (const d of claimed) {
-        try { const m = await get(`/api/conversations/${encodeURIComponent(d.conversation)}`); posts.push({ id: m.id, author: m.author, body: m.body, createdAt: m.createdAt }); }
+        try { const m = await get(`/api/conversations/${encodeURIComponent(d.conversation)}`); posts.push({ id: m.id, author: m.author, body: m.body, createdAt: m.createdAt, attachedTo: m.attachedTo || null }); }   // #1368 — a card thread's post carries its thread
         catch (e) { console.error(`[#1346] ${agent.seatKey}: message ${d.conversation} unreadable, delivered as such: ${e.message}`); posts.push({ id: d.conversation, author: '?', body: '(message unreadable)', createdAt: d.offeredAt }); }
       }
       posts.sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
       const newest = posts.at(-1);
-      wakes = [{ kind: 'channel', id: `channel:${newest?.id ?? new Date().toISOString()}`, createdAt: newest?.createdAt ?? new Date().toISOString(), author: null, body: '', posts, messageIds: posts.map((m) => m.id), deliveries: claimed.map((d) => d.id) }];
+      // #1368 — REPLY WHERE ASKED. A digest whose posts all sit in ONE card
+      // thread (a grooming ask) is answered IN that thread, not on the commons:
+      // "the owner's questions and the PO's answers are on the record" means
+      // on the card's record. Mixed or board-level posts answer board-level.
+      const threads = new Set(posts.map((m) => m.attachedTo || null));
+      const attachedTo = threads.size === 1 ? [...threads][0] : null;
+      wakes = [{ kind: 'channel', id: `channel:${newest?.id ?? new Date().toISOString()}`, createdAt: newest?.createdAt ?? new Date().toISOString(), author: null, body: '', posts, messageIds: posts.map((m) => m.id), deliveries: claimed.map((d) => d.id), attachedTo }];
       for (const d of claimed) await step(d.id, { state: 'turn-started' });
     }
   }

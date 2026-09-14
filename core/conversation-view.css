@@ -97,3 +97,17 @@
 @media (prefers-reduced-motion: reduce) {
   .cv-msg-arrived { animation: none; box-shadow: inset 2px 0 0 var(--ember, #f2a25c); }
 }
+
+/* #1368 — grooming: the PO's answers are marked; a comment can become a ruling */
+.cv-po-badge { font: 600 10px/1 var(--mono, ui-monospace); letter-spacing: .08em; padding: 2px 6px; border-radius: 999px; background: rgba(124, 58, 237, .18); color: var(--accent, #a78bfa); border: 1px solid rgba(124, 58, 237, .4); }
+.cv-ruling-btn { margin-left: auto; background: none; border: 1px solid var(--line); color: var(--muted, #94a3b8); border-radius: 6px; font: inherit; font-size: 11px; padding: 1px 7px; cursor: pointer; opacity: .6; }
+.cv-msg:hover .cv-ruling-btn, .cv-ruling-btn:focus { opacity: 1; }
+.cv-ruling-btn:hover { color: var(--ink); border-color: var(--accent); }
+.cv-ruling-form { margin: 8px 0 4px; padding: 10px; border: 1px dashed var(--accent, #a78bfa); border-radius: 8px; display: flex; flex-direction: column; gap: 8px; background: rgba(124, 58, 237, .06); }
+.cv-ruling-form textarea, .cv-ruling-form input[type=text] { width: 100%; box-sizing: border-box; background: var(--bg); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 8px; font: inherit; }
+.cv-ruling-row { display: flex; gap: 8px; align-items: center; justify-content: flex-end; }
+.cv-ruling-row select { margin-right: auto; }
+.cv-ruling-record { background: var(--accent, #7c3aed); color: #fff; border: none; border-radius: 6px; padding: 6px 12px; font: inherit; cursor: pointer; }
+.cv-ruling-cancel { background: none; border: 1px solid var(--line); color: var(--muted); border-radius: 6px; padding: 6px 10px; font: inherit; cursor: pointer; }
+.cv-ruling-status { font-size: 12px; color: var(--muted); min-height: 1em; }
+.cv-msg.cv-ruled { border-left: 3px solid var(--accent, #7c3aed); padding-left: 8px; }

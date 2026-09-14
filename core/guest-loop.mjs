@@ -685,7 +685,8 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
   if (text && !gate.publish) onError(`[#1351] ${agent.seatKey} produced text that was not published (${gate.reason}): "${text.slice(0, 120)}"`);
 
   let posted = null;
-  try { if (publishBody) posted = await post({ author: agent.seatKey, body: publishBody }); }
+  // #1368 — a wake that came from one card thread is answered in that thread.
+  try { if (publishBody) posted = await post({ author: agent.seatKey, body: publishBody, ...(typeof wake?.attachedTo === 'string' && wake.attachedTo ? { attachedTo: wake.attachedTo } : {}) }); }
   catch (e) {
     const row = { ...base, ...toolRecord, ok: false, error: `post failed: ${e?.message ?? e}`, stopReason: result.stopReason, usage: result.usage, latencyMs: Date.now() - started };
     await recordLedger({ sink: ledgerSink, file: ledgerFile, row, onError });

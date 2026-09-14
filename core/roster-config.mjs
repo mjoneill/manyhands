@@ -131,9 +131,50 @@ export function validateRoster(input) {
   return clean;
 }
 
-/** Validate, then write atomically. Returns the cleaned seats. */
+/**
+ * #1368 — ROLES beside seats. `roles.po` names the seat holding the Product
+ * Owner grant, so "Groom this" can mention the PO by READING the board rather
+ * than hardcoding a name. Interim by design: #915's Role entity replaces it
+ * when it lands; until then this is the one place the grant is queryable.
+ * Closed vocabulary — an unknown role key is refused, not stored.
+ */
+export const ROLE_KEYS = new Set(['po']);
+
+export function validateRoles(input, seats) {
+  if (input == null) return {};
+  if (typeof input !== 'object' || Array.isArray(input)) throw new Error('roles must be an object like { "po": "seatKey" }');
+  const clean = {};
+  for (const [role, seat] of Object.entries(input)) {
+    if (!ROLE_KEYS.has(role)) throw new Error(`unknown role "${role}" — the roster knows: ${[...ROLE_KEYS].join(', ')}`);
+    const key = String(seat ?? '').trim();
+    if (!key) continue;   // an empty value clears the role
+    if (!seats || !Object.prototype.hasOwnProperty.call(seats, key)) throw new Error(`role ${role} names "${key}", which is not a seat in this roster`);
+    clean[role] = key;
+  }
+  return clean;
+}
+
+/** The roles in the file, or {} — never a throw; a roster without roles is the normal case. */
+export function loadRosterRoles(file = rosterFilePath()) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const roles = parsed && typeof parsed === 'object' ? parsed.roles : null;
+    if (!roles || typeof roles !== 'object' || Array.isArray(roles)) return {};
+    const out = {};
+    for (const [k, v] of Object.entries(roles)) if (ROLE_KEYS.has(k) && typeof v === 'string' && v.trim()) out[k] = v.trim();
+    return out;
+  } catch { return {}; }
+}
+
+/**
+ * Validate, then write atomically. Returns the cleaned seats (and, when the
+ * caller passed `roles`, writes those too — a save that says nothing about
+ * roles keeps the file's; an explicit empty value clears one).
+ */
 export function writeRoster(input, file = rosterFilePath()) {
   const clean = validateRoster(input);
+  const rolesGiven = input && typeof input === 'object' && Object.prototype.hasOwnProperty.call(input, 'roles');
+  const roles = rolesGiven ? validateRoles(input.roles, clean) : null;
 
   // Preserve everything in the file we did not come here to change.
   //
@@ -153,9 +194,10 @@ export function writeRoster(input, file = rosterFilePath()) {
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) existing = parsed;
   } catch { /* no file yet, or unreadable — a fresh write is the right outcome */ }
 
-  const { seats: _dropped, ...carried } = existing;
+  const { seats: _dropped, roles: _oldRoles, ...carried } = existing;
+  const keptRoles = roles ?? loadRosterRoles(file);
   const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, `${JSON.stringify({ ...carried, seats: clean }, null, 2)}\n`);
+  fs.writeFileSync(tmp, `${JSON.stringify({ ...carried, ...(Object.keys(keptRoles).length ? { roles: keptRoles } : {}), seats: clean }, null, 2)}\n`);
   fs.renameSync(tmp, file);
   return clean;
 }

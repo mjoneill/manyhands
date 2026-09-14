@@ -430,6 +430,15 @@ _exportStyle.textContent = `
 
   <div class="card" data-roster-editor>
     <div id="roster-list"></div>
+    <!-- #1368 — the roles the room actually uses, read from here rather than
+         hardcoded. Product Owner is the seat "Groom this" mentions by default.
+         Interim: #915's Role entity replaces this row when it lands. -->
+    <div class="roster-seat" data-roster-roles>
+      <span class="roster-key">roles</span>
+      <label style="display:flex;align-items:center;gap:8px">Product Owner
+        <select id="roster-po" data-roster-po aria-label="Which seat holds the Product Owner role"><option value="">— nobody —</option></select>
+      </label>
+    </div>
     <div class="roster-actions">
       <button type="button" id="roster-add" class="btn" data-roster-add>+ Add someone</button>
       <button type="button" id="roster-save" class="btn" data-roster-save>Save the room</button>
@@ -739,13 +748,21 @@ function collectRoster() {
 
 async function loadRosterEditor() {
   try {
-    const { seats } = await (await fetch('/api/roster')).json();
+    const { seats, roles } = await (await fetch('/api/roster')).json();
     const list = $('roster-list');
     list.innerHTML = '';
     loadedSeats.clear();
     for (const [key, seat] of Object.entries(seats || {})) {
       loadedSeats.set(key, seat);   // #619 — remember fields the form cannot edit
       list.appendChild(rosterRow(key, seat));
+    }
+    // #1368 — the PO select lists the seats; the current holder is selected
+    const po = $('roster-po');
+    po.innerHTML = '<option value="">— nobody —</option>';
+    for (const [key, seat] of Object.entries(seats || {})) {
+      const o = document.createElement('option'); o.value = key; o.textContent = `${seat.glyph ? seat.glyph + ' ' : ''}${seat.name || key} (${key})`;
+      if (roles && roles.po === key) o.selected = true;
+      po.appendChild(o);
     }
   } catch (e) {
     rosterMsg('Could not load the roster: ' + e.message, false);
@@ -774,7 +791,7 @@ $('roster-save').addEventListener('click', async () => {
   try {
     const res = await fetch('/api/roster', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ seats: collectRoster() }),
+      body: JSON.stringify({ seats: collectRoster(), roles: { po: $('roster-po').value } }),   // #1368
     });
     const out = await res.json().catch(() => ({}));
     if (res.ok) rosterMsg('Saved — the room changes when the board restarts.', true);

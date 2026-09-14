@@ -517,6 +517,18 @@ body::before {
   background: transparent; color: var(--text-secondary, #94a3b8); font: inherit; font-size: 12px; cursor: pointer;
 }
 .card-detail-edit:hover { color: var(--text-primary, #e2e8f0); border-color: var(--accent-task); }
+/* #1368 — the grooming door and the rulings on a card */
+.card-detail-groom {
+  position: absolute; top: 12px; right: 122px; height: 30px; padding: 0 10px; display: inline-flex; align-items: center;
+  border: 1px solid var(--border-subtle, #262c3d); border-radius: var(--radius-sm, 7px);
+  color: var(--text-secondary, #94a3b8); font-size: 12px; text-decoration: none;
+}
+.card-detail-groom:hover { color: var(--text-primary, #e2e8f0); border-color: #a78bfa; }
+.card-detail-decisions { margin: 6px 0 14px; padding: 10px 12px; border-left: 3px solid #7c3aed; background: rgba(124, 58, 237, .08); border-radius: 0 6px 6px 0; font-size: 13px; }
+.card-detail-decisions-head { font-weight: 600; margin-bottom: 6px; }
+.card-detail-decision { margin: 6px 0; }
+.card-detail-decision-stmt { white-space: pre-wrap; }
+.card-detail-decision-meta { color: var(--text-muted, #8b92aa); font-size: 11px; margin-top: 2px; }
 .card-detail .card.editing { width: auto; max-width: none; margin: 0; cursor: default; box-shadow: none; border: none; background: transparent; padding: 0; }
 .card-detail .card.editing .card-edit-form { max-width: none; }
 .edit-conflict { margin: 0 0 14px; padding: 10px 12px; border: 1px solid #b45309; border-radius: var(--radius-sm, 7px); background: rgba(180, 83, 9, .12); font-size: 13px; }
@@ -3552,6 +3564,36 @@ function renderDescriptionWithLinks(desc) {
 // lane never resolves the module) ⇒ the textarea stays a bare textarea; every
 // selector and handler on it is unchanged either way, because the editor wraps
 // in place.
+// #1368 — the decisions that constrain a card, by either topic spelling the
+// room has used ("1368" and "#1368" both exist on prod: 72 bare, 19 hashed).
+// Read on open, rendered into the pop-out's slot if the panel still shows the
+// same card when the answer arrives.
+async function loadCardDecisions(shortId) {
+  const slot = document.querySelector(`#card-detail .card-detail-decisions[data-decisions-for="${CSS.escape(String(shortId))}"]`);
+  if (!slot) return;
+  let list = [];
+  try {
+    const r = await fetch(`${API_BASE}/api/decisions`);
+    if (!r.ok) return;
+    const all = await r.json();
+    const want = new Set([String(shortId), `#${shortId}`]);
+    list = (Array.isArray(all) ? all : []).filter((d) => Array.isArray(d.constrains) && d.constrains.some((t) => want.has(String(t))));
+  } catch { return; }
+  if (!slot.isConnected || !list.length) return;
+  list.sort((a, b) => String(b.decidedAt || '').localeCompare(String(a.decidedAt || '')));
+  slot.innerHTML = '';
+  const h = document.createElement('div'); h.className = 'card-detail-decisions-head'; h.textContent = `⚖ Rulings on this card (${list.length})`;
+  slot.appendChild(h);
+  for (const d of list) {
+    const row = document.createElement('div'); row.className = 'card-detail-decision';
+    const stmt = document.createElement('div'); stmt.className = 'card-detail-decision-stmt'; stmt.textContent = d.statement || '';
+    const meta = document.createElement('div'); meta.className = 'card-detail-decision-meta';
+    meta.textContent = `${d.decidedBy || '?'} · ${d.decidedAt ? String(d.decidedAt).slice(0, 16).replace('T', ' ') + 'Z' : ''}${d.reopensIf ? ' · reopens if: ' + d.reopensIf : ''}`;
+    row.append(stmt, meta);
+    slot.appendChild(row);
+  }
+  slot.hidden = false;
+}
 function boardCardTitle(shortId) {
   const c = cards.find((x) => x && x.shortId === shortId);
   return c ? c.title : undefined;
@@ -3583,6 +3625,10 @@ function openCardDetail(shortId, push = true) {
   let html = '<button class="card-detail-close" data-action="close-card-detail" title="Close (Esc)">✕</button>';
   // #1365 — the big view can write. One control, the same form the column uses.
   html += '<button class="card-detail-edit" data-action="edit-card-detail" title="Edit this card here">✎ Edit</button>';
+  // #1368 — the grooming door: the card's thread, composer focused, the PO
+  // mentioned. A real link (same-origin navigation) so #1366's leave-ask
+  // covers an unsaved edit on the way out.
+  html += `<a class="card-detail-groom" href="commons.html?node=${escapeAttr(card.id)}&groom=1" title="Ask the PO about this card — on the record, where others can follow">🗣 Groom this</a>`;
   html += `<div class="card-detail-eyebrow">${escapeHTML(card.type || 'card')} · #${escapeHTML(String(card.shortId))}</div>`;
   html += `<h2 class="card-detail-title" id="card-detail-title">${escapeHTML(card.title || '(untitled)')}</h2>`;
   html += '<div class="card-detail-meta">';
@@ -3611,6 +3657,10 @@ function openCardDetail(shortId, push = true) {
     relHtml += `<div class="card-detail-relationship"><span class="card-detail-rel-label">${label}:</span> ${links}</div>`;
   }
   if (relHtml) html += `<div class="card-detail-relationships">${relHtml}</div>`;
+  // #1368 — rulings on this card, filled in after the read (the graph answers;
+  // an empty answer renders nothing rather than "no decisions", which would
+  // be a claim about the graph the tile cannot make until it has asked).
+  html += '<div class="card-detail-decisions" data-decisions-for="' + escapeAttr(String(card.shortId)) + '" hidden></div>';
   // #209 — three states, and the middle one is new: a projection-hydrated card
   // has no `description` KEY at all, which is not the same as having an empty
   // one. "No description." must stay reserved for a card that genuinely has
@@ -3625,6 +3675,7 @@ function openCardDetail(shortId, push = true) {
   }
   panel.innerHTML = html;
   back.hidden = false;
+  loadCardDecisions(card.shortId);   // #1368
   if (!bodyIsLoaded) {
     // Fetch, then patch the body in place. Re-checking the panel's card id
     // afterwards matters: the reader can open #A, get bored, open #B, and the

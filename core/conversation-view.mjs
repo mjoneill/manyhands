@@ -159,6 +159,11 @@ export function mountConversationView(opts = {}) {
     attachedPointer,   // #294 — (msg) => {label, href, preview} | null; collapse card-attached posts to a pointer
     onMessages,        // presence — called with the full message list after each load/poll (constellation feed)
     onSolo,            // presence — called with the soloed author key (or null) whenever it changes
+    // #1368 — GROOMING. A card's thread the PO answers in, on the record.
+    poSeat = null,     // seat key holding the Product Owner role (roster roles.po, read not hardcoded); its posts are badged
+    groom = false,     // open with the composer focused and the PO mentioned, unless a draft is already there
+    card = null,       // { id, shortId } of the card this thread belongs to — enables the ruling affordance
+    onRuling,          // optional (decision) => void after a ruling is recorded
   } = opts;
   let watch = null;   // #1366 — this composer's draft watch (declared here: buildForm is hoisted and may run before any later `let`)
   if (!mount) throw new Error('mountConversationView: opts.mount is required');
@@ -223,6 +228,19 @@ export function mountConversationView(opts = {}) {
   olderBtn.addEventListener('click', () => loadOlder());
   mount.innerHTML = '';
   mount.appendChild(root);
+
+  // #1368 — "Groom this": arrive with the composer focused and the PO
+  // mentioned, so the ask reaches the seat that answers it. A draft already
+  // in the box (#1366) wins — this never overwrites the operator's words; it
+  // only fills an EMPTY box.
+  if (groom) {
+    const ta = form.querySelector('.cv-input');
+    if (ta) {
+      if (!ta.value && poSeat) { ta.value = `@${poSeat} `; ta.dispatchEvent(new doc.defaultView.Event('input', { bubbles: true })); }
+      form.dataset.groom = '1';
+      try { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); } catch { /* not focusable yet */ }
+    }
+  }
 
   function el(tag, cls, text) {
     const e = doc.createElement(tag);
@@ -299,10 +317,24 @@ export function mountConversationView(opts = {}) {
       });
     }
     meta.append(author);
+    // #1368 — the PO's answers are MARKED, so a reader can tell a ruling-grade
+    // answer from a passing remark without knowing who holds the role today.
+    if (poSeat && c.author === poSeat) { const b = el('span', 'cv-po-badge', 'PO'); b.title = `${poSeat} holds the Product Owner role (roster)`; meta.append(b); }
     if (c.createdAt) {
       const ts = el('span', 'cv-msg-ts', formatTs(c.createdAt));
       ts.title = c.createdAt;
       meta.append(ts);
+    }
+    // #1368 — "make my response durable" is one affordance, not a re-ask: a
+    // comment becomes a Decision constraining this card. Any reader may press
+    // it; the decision records who pressed (declared, #1193) and what was said.
+    if (card && card.shortId != null && typeof c.body === 'string' && c.body.trim()) {
+      const rule = el('button', 'cv-ruling-btn', '⚖ Ruling');
+      rule.type = 'button';
+      rule.title = `Record this comment as a decision constraining #${card.shortId}`;
+      rule.dataset.rulingFor = c.id;
+      rule.addEventListener('click', (e) => { e.stopPropagation(); openRulingForm(msg, c); });
+      meta.append(rule);
     }
     msg.append(meta, cardBody(c.body || ''));   // #291 — body via text-nodes + #NNN links
     if (Array.isArray(c.attachments) && c.attachments.length) {
@@ -527,6 +559,50 @@ export function mountConversationView(opts = {}) {
       chip.appendChild(rm);
       chipsEl.appendChild(chip);
     });
+  }
+
+  // #1368 — the ruling form: the comment as the statement (editable), the
+  // reopensIf the API requires (a decision nobody can overturn is an opinion
+  // with a timestamp — server.js), and the card as the topic. Nothing posts
+  // until the operator presses Record.
+  function openRulingForm(msgEl, c) {
+    if (msgEl.querySelector('.cv-ruling-form')) return;
+    const fm = doc.createElement('form');
+    fm.className = 'cv-ruling-form';
+    const stmt = doc.createElement('textarea'); stmt.className = 'cv-ruling-statement'; stmt.rows = 3; stmt.value = c.body || '';
+    stmt.setAttribute('aria-label', 'The ruling, as it will be recorded');
+    const reopens = doc.createElement('input'); reopens.className = 'cv-ruling-reopens'; reopens.type = 'text'; reopens.required = true;
+    reopens.placeholder = 'Reopens if… (required: what evidence would overturn this?)';
+    reopens.setAttribute('aria-label', 'What would overturn this ruling');
+    const who = doc.createElement('select'); who.className = 'cv-ruling-by';
+    for (const a of actors) { const o = el('option', '', a); o.value = a; if (a === author) o.selected = true; who.appendChild(o); }
+    const row = el('div', 'cv-ruling-row');
+    const rec = el('button', 'cv-ruling-record', `Record as a decision on #${card.shortId}`); rec.type = 'submit';
+    const cancel = el('button', 'cv-ruling-cancel', 'Cancel'); cancel.type = 'button';
+    cancel.addEventListener('click', () => fm.remove());
+    const status = el('div', 'cv-ruling-status', '');
+    row.append(who, cancel, rec);
+    fm.append(stmt, reopens, row, status);
+    fm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const statement = stmt.value.trim(); const reopensIf = reopens.value.trim();
+      if (!statement || !reopensIf) { status.textContent = 'A ruling needs a statement and a reopens-if.'; return; }
+      rec.disabled = true;
+      try {
+        const res = await f(baseUrl + '/api/decisions', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ statement, reopensIf, constrains: [String(card.shortId)], decidedBy: who.value, by: who.value, from: c.id }),
+        });
+        const j = await res.json().catch(() => null);
+        if (!res.ok) { status.textContent = `Not recorded: ${(j && j.error) || res.status}`; rec.disabled = false; return; }
+        status.textContent = `Recorded: decision ${String(j.id || '').slice(0, 8)} constrains #${card.shortId}.`;
+        stmt.disabled = true; reopens.disabled = true; rec.remove(); cancel.textContent = 'Close';
+        msgEl.classList.add('cv-ruled');
+        if (typeof onRuling === 'function') onRuling(j);
+      } catch (err) { status.textContent = `Not recorded: ${err && err.message ? err.message : err}`; rec.disabled = false; }
+    });
+    msgEl.appendChild(fm);
+    reopens.focus();
   }
 
   function buildForm() {

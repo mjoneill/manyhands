@@ -432,7 +432,10 @@
       const edit = el('button', 'btn', '✎ Edit'); edit.onclick = () => editMode(node);
       const add = el('button', 'btn', '+ New child'); add.onclick = () => createChild(node['@id']);
       const asCard = el('a', 'btn', '▦ Open as card'); asCard.href = '/?focus=' + encodeURIComponent(node['@id']);
-      bar.append(edit, add, asCard);
+      // #1368 — the grooming door from the page view too: the same thread, the PO mentioned
+      const groom = el('a', 'btn', '🗣 Groom this'); groom.href = '/commons.html?node=' + encodeURIComponent(node['@id']) + '&groom=1';
+      groom.title = 'Ask the PO about this card — on the record, where others can follow';
+      bar.append(edit, add, asCard, groom);
       return bar;
     }
 

@@ -65,7 +65,7 @@ import { commentMetadata } from './core/card-comments.mjs';
 import { cardOutline } from './core/card-outline.mjs';
 import { validateDeclaration, seatState, tendingEligibility, declarationsFromRows, UNKNOWN as SEAT_UNKNOWN } from './core/seat-state.mjs';
 import { readConfig, writeConfig, LIMITS } from './channel-config.mjs';
-import { loadRoster, writeRoster, rosterFilePath } from './core/roster-config.mjs';
+import { loadRoster, writeRoster, rosterFilePath, loadRosterRoles } from './core/roster-config.mjs';
 import { extractMentions as extractMentionsFromRoster } from './core/people.mjs';
 // #868 — the graph modules are imported LAZILY, at the bottom of this file's
 // graph section, and deliberately NOT here. They reach `oxigraph`, an npm
@@ -6799,7 +6799,7 @@ function handleGetBoard(req, res) {
 // matters when someone is trying to work out why their colours didn't take.
 function handleGetRoster(req, res) {
   const seats = currentRoster();
-  sendJSON(res, 200, { seats, usingDefaults: usingDefaultRoster() });
+  sendJSON(res, 200, { seats, roles: loadRosterRoles(), usingDefaults: usingDefaultRoster() });   // #1368 — roles.po: the PO seat, read not hardcoded
 }
 
 // ── POST /api/roster (#506) — a human edits their own room, no agent required.
@@ -6821,7 +6821,7 @@ async function handleSetRoster(req, res) {
     } catch (ve) {
       return sendJSON(res, 400, { error: ve.message });
     }
-    sendJSON(res, 200, { seats: clean, file: rosterFilePath(), appliesOnRestart: true });
+    sendJSON(res, 200, { seats: clean, roles: loadRosterRoles(), file: rosterFilePath(), appliesOnRestart: true });
   } catch (e) {
     console.error('POST /api/roster:', e.message);
     sendJSON(res, 500, { error: 'Failed to save roster' });
