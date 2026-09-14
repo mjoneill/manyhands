@@ -12,7 +12,7 @@ test('every surface is represented, once', () => {
   const ids = NAV_ITEMS.map((i) => i.id);
   // #1290 added Insights. Kept as an EXACT list rather than a count: a new
   // surface must be declared here deliberately, never slip in.
-  assert.deepEqual(ids, ['board', 'wiki', 'commons', 'insights', 'settings']);
+  assert.deepEqual(ids, ['board', 'wiki', 'commons', 'insights', 'retreat', 'settings']);   // #1255 — the room its owner could not find
   assert.equal(new Set(ids).size, ids.length, 'no dupes');
 });
 
@@ -35,6 +35,7 @@ test('exactly the active item is a non-link <span aria-current>, the rest are <a
   assert.ok(html.includes('href="/wiki.html"'), 'wiki link present');
   assert.ok(html.includes('href="/commons.html"'), 'commons link present');
   assert.ok(html.includes('href="/insights.html"'), 'insights link present');
+  assert.ok(html.includes('href="/retreat.html"'), '#1255 retreat link present — the room shipped 09-08 and was reachable only by typing the URL');
   // exactly one active
   assert.equal((html.match(/class="navlink active"/g) || []).length, 1, 'exactly one active');
 });
