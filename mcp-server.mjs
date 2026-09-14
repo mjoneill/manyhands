@@ -1798,7 +1798,7 @@ function buildMcpServer() {
       key: z.string().min(2).describe('Short lowercase slug: po, scrum-master, value-steward'),
       name: z.string().min(1).describe('What the room calls it'),
       definition: z.string().min(40).describe('A short statement of what holding it commits a seat to; the full text lives on the definedBy card'),
-      definedBy: z.union([z.number(), z.string()]).optional().describe('The card (shortId or uuid) holding the full definition, e.g. 272 for the Scrum Master'),
+      definedBy: z.union([z.number(), z.string()]).describe('REQUIRED — the card (shortId or uuid) holding the full definition, e.g. 272 for the Scrum Master. A role with no defining card is the prose this registry replaces.'),
     },
   }, async (args) => jsonResult(await apiCall('POST', '/api/roles', args)));
 

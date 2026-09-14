@@ -66,6 +66,12 @@ test('#915 POST /api/roles mints a role that names its defining card; the key is
     const bad = await api(srv.baseUrl, 'POST', '/api/roles', { by: 'ada', key: 'scrum-master', name: 'Scrum Master', definition: 'x'.repeat(50), definedBy: 999 });
     assert.equal(bad.status, 400, JSON.stringify(bad.body));
     assert.match(bad.body.error, /definedBy/);
+    // OMITTED is refused too — a review caught it optional while the kind
+    // definition promised the edge; a role with no defining card is prose.
+    const none = await api(srv.baseUrl, 'POST', '/api/roles', { by: 'ada', key: 'scrum-master', name: 'Scrum Master', definition: 'x'.repeat(50) });
+    assert.equal(none.status, 400, JSON.stringify(none.body));
+    assert.match(none.body.error, /definedBy is required/);
+    assert.equal((await api(srv.baseUrl, 'GET', '/api/roles')).body.roles.length, 0, 'nothing minted by either refusal');
 
     const ok = await api(srv.baseUrl, 'POST', '/api/roles', { by: 'ada', key: 'scrum-master', name: 'Scrum Master (Reflective Facilitator)', definition: 'Coaches the team to live the values of scrum; asks, never asserts; cite-don\'t-guess. Full text on the defining card.', definedBy: 1 });
     assert.equal(ok.status, 201, JSON.stringify(ok.body));
@@ -73,7 +79,7 @@ test('#915 POST /api/roles mints a role that names its defining card; the key is
     assert.match(ok.body.id, /^https:\/\/scrumboard\.local\/role\//);
     assert.ok(ok.body.definedBy, 'the defining card rides the wire as a reference');
 
-    const dup = await api(srv.baseUrl, 'POST', '/api/roles', { by: 'ada', key: 'scrum-master', name: 'again', definition: 'y'.repeat(50) });
+    const dup = await api(srv.baseUrl, 'POST', '/api/roles', { by: 'ada', key: 'scrum-master', name: 'again', definition: 'y'.repeat(50), definedBy: 1 });
     assert.equal(dup.status, 409, 'one role per key — a second mint is a revision, not a twin');
 
     const list = await api(srv.baseUrl, 'GET', '/api/roles');
@@ -93,7 +99,7 @@ test('#915 SEAM — declare a seat WITH a role over MCP → "who holds role X no
   fs.writeFileSync(tokensFile, JSON.stringify({ tokens: { 'tok-ada': { seat: 'ada', heartbeat_s: 60 } } }));
   const { rest, mcp, stop } = await startPair({ board: fresh(), mcpEnv: { SCRUM_SEAT_TOKENS: tokensFile } });
   try {
-    const minted = await api(rest.baseUrl, 'POST', '/api/roles', { by: 'ada', key: 'po', name: 'Product Owner', definition: 'Owns Planned as the sprint; grooms WHY / WHAT / first move; every resident a full participant.' });
+    const minted = await api(rest.baseUrl, 'POST', '/api/roles', { by: 'ada', key: 'po', name: 'Product Owner', definition: 'Owns Planned as the sprint; grooms WHY / WHAT / first move; every resident a full participant.', definedBy: 1 });
     assert.equal(minted.status, 201, JSON.stringify(minted.body));
 
     const ada = await mcpSession(mcp.mcpUrl, { headers: { Authorization: 'Bearer tok-ada' } });
@@ -143,6 +149,8 @@ test('#915 role_create / role_list over MCP mint and read the same rows', async 
   const { rest, mcp, stop } = await startPair({ board: fresh() });
   try {
     const s = await mcpSession(mcp.mcpUrl);
+    const bare = await s.callTool('role_create', { by: 'ada', key: 'value-steward', name: 'Value Steward', definition: 'A non-builder named at kickoff; writes the Banana Test; binding andon. Full text on the defining card.' });
+    assert.match(JSON.stringify(bare), /definedBy/, `MCP refuses an omitted definedBy at the schema — ${JSON.stringify(bare).slice(0, 200)}`);
     const made = await s.callTool('role_create', { by: 'ada', key: 'value-steward', name: 'Value Steward', definition: 'A non-builder named at kickoff; writes the Banana Test; binding andon. Full text on the defining card.', definedBy: 1 });
     const mj = JSON.parse(text(made));
     assert.equal(mj.key, 'value-steward', text(made));

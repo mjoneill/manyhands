@@ -2171,8 +2171,9 @@ async function handleSeatDeclare(req, res, seat) {
     // interval; `role: null` (or '') → released; a key → held (must exist).
     if (body.role !== undefined && body.role !== null && body.role !== '') {
       const key = String(body.role).trim().toLowerCase();
-      if (!rolesOf(readBoard()).some((r) => r['scrum:roleKey'] === key)) {
-        return sendJSON(res, 400, { error: `role ${JSON.stringify(body.role)} names no scrum:Role on this board — mint it first (role_create / POST /api/roles); known: ${rolesOf(readBoard()).map((r) => r['scrum:roleKey']).join(', ') || '(none)'}`, code: 'UNKNOWN_ROLE' });
+      const known = rolesOf(readBoard()).map((r) => r['scrum:roleKey']);
+      if (!known.includes(key)) {
+        return sendJSON(res, 400, { error: `role ${JSON.stringify(body.role)} names no scrum:Role on this board — mint it first (role_create / POST /api/roles); known: ${known.join(', ') || '(none)'}`, code: 'UNKNOWN_ROLE' });
       }
       decl.role = key;
     }
@@ -3429,15 +3430,18 @@ async function handleCreateRole(req, res) {
     const result = await withWriteLock(async () => {
       const data = readBoard();
       if (rolesOf(data).some((r) => r['scrum:roleKey'] === key)) return { status: 409, wire: { error: `a role with key ${JSON.stringify(key)} already exists — one instance per key; revise it rather than minting a twin`, key } };
-      let definedBy = null;
-      if (body.definedBy !== undefined && body.definedBy !== null && body.definedBy !== '') {
-        const card = (data.cards || []).find((c) => c.id === String(body.definedBy) || String(c.shortId) === String(body.definedBy));
-        if (!card) return { status: 400, wire: { error: `definedBy ${JSON.stringify(body.definedBy)} names no card on this board — the defining card must exist (this registry consolidates roles the room already wrote)` } };
-        definedBy = card.id;
+      // definedBy is REQUIRED (a review caught it optional while the kind
+      // definition promised the edge): a role with no defining card is the
+      // prose this registry exists to replace, and "consolidates roles the
+      // room already wrote" is only true if every instance points at where.
+      if (body.definedBy === undefined || body.definedBy === null || body.definedBy === '') {
+        return { status: 400, wire: { error: 'definedBy is required — the card (shortId or uuid) holding this role\'s full definition. This registry consolidates roles the room already wrote; a role with no defining card is the prose it exists to replace.' } };
       }
+      const card = (data.cards || []).find((c) => c.id === String(body.definedBy) || String(c.shortId) === String(body.definedBy));
+      if (!card) return { status: 400, wire: { error: `definedBy ${JSON.stringify(body.definedBy)} names no card on this board — the defining card must exist (this registry consolidates roles the room already wrote)` } };
       const entity = {
         '@id': ROLE_IRI(key), '@type': 'scrum:Role', 'scrum:roleKey': key, name, text: definition,
-        ...(definedBy ? { 'scrum:definedBy': definedBy } : {}), creator: by, dateCreated: new Date().toISOString(),
+        'scrum:definedBy': card.id, creator: by, dateCreated: new Date().toISOString(),
       };
       data.roles = [...rolesOf(data), entity];
       writeBoard(data, [roleEvent('create', entity, by)]);
