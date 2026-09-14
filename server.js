@@ -4297,7 +4297,9 @@ async function handleExportPreview(req, res) {
     if (run.err || !rep || rep.dryRun !== true) {
       return sendJSON(res, 500, { error: 'the preview did not run', detail: (run.stderr || run.stdout || run.err?.message || '').trim().slice(-4000), settings });
     }
-    sendJSON(res, 200, { mode: rep.mode, wouldPass: rep.wouldPass, residue: rep.residue, byKind: rep.byKind, samples: rep.samples, perKind: rep.perKind, provenance: rep.provenance, settings });
+    // `empty` rides through: a review caught this list dropping it, which made an
+    // empty board read "will pass" on the page — the field the branch keys on.
+    sendJSON(res, 200, { mode: rep.mode, empty: rep.empty === true, wouldPass: rep.wouldPass, residue: rep.residue, byKind: rep.byKind, samples: rep.samples, perKind: rep.perKind, provenance: rep.provenance, settings });
   } catch (e) {
     console.error('POST /api/export/preview:', e.message);
     sendJSON(res, 500, { error: e.message });
@@ -4344,7 +4346,7 @@ async function handleExport(req, res) {
           return sendJSON(res, 409, {
             refusedBy: 'scrub', residue: rep.residue, byKind: rep.byKind || {}, samples: rep.samples || [],
             error: `refused by the scrub boundary — ${rep.residue} term(s) the rules recognise but cannot rewrite survived the scrub. This is the scrub working, not the export failing.`,
-            detail, wrote: out, settings,
+            detail, wouldHaveWritten: out, wrote: null, settings,   // nothing was written; the key says so
           });
         }
       }

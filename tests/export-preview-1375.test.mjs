@@ -74,6 +74,20 @@ test('#1375 PREVIEW is a dry run: residue counted per kind from the live selecti
   } finally { await srv.stop(); }
 });
 
+test('#1375 an EMPTY board/selection previews as empty — through REST and onto the page — never as "will pass"', async () => {
+  await withBrowserServer(async ({ server, browser }) => {
+    const r = await api(server.baseUrl, 'POST', '/api/export/preview', { by: 'ada', spaces: ['commons', 'cards', 'memories'] });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.empty, true, 'the field the page branches on survives the REST boundary');
+    assert.equal(r.body.wouldPass, false);
+    const page = await browser.newPage();
+    await page.goto(`${server.baseUrl}/settings.html`, { waitUntil: 'networkidle0' });
+    await page.waitForFunction(() => /nothing to export/i.test(document.querySelector('#export-panel [data-export-preview]')?.textContent || ''), { timeout: 8000 });
+    const line = await page.$eval('#export-panel [data-export-preview]', (e) => e.textContent);
+    assert.doesNotMatch(line, /will pass/i, line);
+  }, { server: { board: makeBoardFixture(), env: rootEnv }, launch: { headless: 'new', args: ['--no-sandbox'] } });
+});
+
 test('#1375 a press refused for residue is 409 refusedBy:scrub with the count and split — not the 500 a real failure gets', async () => {
   const srv = await startRestServer({ board: board(), env: rootEnv });
   try {
@@ -87,6 +101,8 @@ test('#1375 a press refused for residue is 409 refusedBy:scrub with the count an
     assert.match(refused.body.error, /refused by the scrub boundary/i);
     assert.doesNotMatch(refused.body.error, /did not produce a readable archive/, 'the boundary working is not an export failure');
     assert.equal(fs.existsSync(path.join(out, '00-INDEX.md')), false, 'fail-closed: nothing written');
+    assert.equal(refused.body.wrote, null, 'and the body does not claim it wrote — the intended path is wouldHaveWritten');
+    assert.equal(refused.body.wouldHaveWritten, out);
 
     const ok = await api(srv.baseUrl, 'POST', '/api/export', { by: 'ada', out, maxBytes: 200000, spaces: ['cards'] });
     assert.equal(ok.status, 200, JSON.stringify(ok.body));
