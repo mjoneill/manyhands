@@ -11,8 +11,29 @@
  * No node imports — runs in the browser (isomorphic core, ADR-002).
  */
 
-/** [{op: '=' | '-' | '+', text}] — `-` is the OLD side, `+` the NEW side. */
+/**
+ * The cap. The table is (n+1)·(m+1)·4 bytes: 2,000 lines a side is 16 MB and
+ * instant; 10,000 a side is 400 MB and a frozen tab — while the page is
+ * explaining a conflict, which is the worst moment. A description may legally
+ * be that long (the server takes 10 MB bodies), so the cap is a guard, not a
+ * limit on descriptions: past it the caller gets `tooLarge` and shows the two
+ * doors without the picture. (A reviewer's finding on 68c0463 — the test had
+ * timed a friendly fixture and proved nothing about the unfriendly one.)
+ */
+export const MAX_DIFF_LINES = 2000;
+
+/** True when a diff of these two texts would exceed the cap. Counts lines, allocates nothing. */
+export function diffTooLarge(oldText, newText, max = MAX_DIFF_LINES) {
+  const count = (t) => (t === '' || t == null ? 0 : String(t).split('\n').length);
+  return count(oldText) > max || count(newText) > max;
+}
+
+/**
+ * [{op: '=' | '-' | '+', text}] — `-` is the OLD side, `+` the NEW side.
+ * Throws RangeError past MAX_DIFF_LINES: check `diffTooLarge` first, or catch.
+ */
 export function lineDiff(oldText, newText) {
+  if (diffTooLarge(oldText, newText)) throw new RangeError(`line diff refused: more than ${MAX_DIFF_LINES} lines a side`);
   const a = oldText === '' ? [] : String(oldText ?? '').split('\n');
   const b = newText === '' ? [] : String(newText ?? '').split('\n');
   const n = a.length, m = b.length;
@@ -40,8 +61,15 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-/** Escape-FIRST HTML: one <div class="diff-line …"> per line. */
+/**
+ * Escape-FIRST HTML: one <div class="diff-line …"> per line. Past the cap it
+ * renders a single line saying so — the conflict view keeps its two doors,
+ * it just has no picture to show.
+ */
 export function renderLineDiff(oldText, newText) {
+  if (diffTooLarge(oldText, newText)) {
+    return `<div class="diff-line too-large">Diff not shown: more than ${MAX_DIFF_LINES} lines a side. Choose “Use theirs” or “Save mine anyway”, or compare the texts elsewhere.</div>`;
+  }
   const cls = { '=': 'same', '-': 'del', '+': 'add' };
   const mark = { '=': ' ', '-': '−', '+': '+' };
   return lineDiff(oldText, newText)
