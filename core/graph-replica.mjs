@@ -177,6 +177,7 @@ export const GRAPH_VOCABULARY = new Set([
   // with one child node per append-only event
   'scrum:Delivery', 'scrum:deliveredTo', 'scrum:ofConversation', 'scrum:offeredAt',
   'scrum:DeliveryEvent', 'scrum:ofDelivery', 'scrum:source', 'scrum:attempt', 'scrum:at', 'scrum:reason',
+  'scrum:traceId', 'scrum:ofModelCall',   // #1372
   // #1202 — the provenance ledger row
   'scrum:ModelCall', 'scrum:agent', 'scrum:model', 'scrum:provider', 'scrum:protocol',
   'scrum:promptVersion', 'scrum:tokensIn', 'scrum:tokensOut', 'scrum:reasoningTokens', 'scrum:cachedPromptTokens', 'scrum:cost', 'scrum:costMeasured', 'scrum:costCategories', 'scrum:stopReason',
@@ -956,6 +957,11 @@ function projectDelivery(store, e) {
     if (Number.isInteger(ev['scrum:attempt'])) addE(nn(S + 'attempt'), num(ev['scrum:attempt']));
     if (ev['scrum:reason']) addE(nn(S + 'reason'), lit(String(ev['scrum:reason'])));
     if (ev.text) addE(nn(IRI.schema + 'text'), lit(String(ev.text)));
+    // #1372 — the trace is a literal (opaque; "every event of trace T" is one
+    // FILTER); the model call is an ENTITY EDGE to the ledger node, so "which
+    // call produced this outcome" is one hop and joins to the row's fields.
+    if (ev['scrum:traceId']) addE(nn(S + 'traceId'), lit(String(ev['scrum:traceId'])));
+    if (ev['scrum:ofModelCall']) addE(nn(S + 'ofModelCall'), nn(String(ev['scrum:ofModelCall'])));
   });
 }
 

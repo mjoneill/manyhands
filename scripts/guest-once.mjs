@@ -22,7 +22,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { callModel } from '../core/model-adapter.mjs';
 import { deliveryStaleMs, isStaleDelivery } from '../core/delivery.mjs';   // #1346
-import { findMentions, findWakes, guestOnce, fetchBoundedChanges, shouldMarkAnswered, mentionScanPath, fetchMentionWindow, acquireLock, releaseLock, effectiveWakeOn, budgetCheck } from '../core/guest-loop.mjs';
+import { findMentions, findWakes, guestOnce, fetchBoundedChanges, shouldMarkAnswered, mentionScanPath, fetchMentionWindow, acquireLock, releaseLock, effectiveWakeOn, budgetCheck, deliveryOutcome } from '../core/guest-loop.mjs';
 import { makeExecutor } from '../core/board-tools.mjs';
 
 const args = process.argv.slice(2);
@@ -289,9 +289,7 @@ const r = await guestOnce({
 // tick, attempt +1). A halt after the claim is a failure too — recorded, not
 // silently left as a claim that never resolves.
 if (wake.kind === 'channel' && !dry) {
-  const outcome = r.posted ? { state: 'published' }
-    : r.declined ? { state: 'declined', reason: 'explicit' }
-    : { state: 'failed', note: r.reason ?? 'halted' };
+  const outcome = deliveryOutcome(r, wake.deliveries);   // #1372 — batch-ambiguous + modelCall
   for (const id of wake.deliveries) {
     try {
       const x = await fetch(`${BOARD}/api/deliveries/${encodeURIComponent(id)}/events`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source: 'guest-runner', by: agent.seatKey, ...outcome }) });

@@ -79,7 +79,9 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:source': 'scrum:source',           // fanout | guest-runner | presence-bridge
   'scrum:attempt': 'scrum:attempt',
   'scrum:at': 'scrum:at',                   // when the event happened
-  'scrum:reason': 'scrum:reason',           // whose act a terminal state was: explicit | …
+  'scrum:reason': 'scrum:reason',           // whose act a terminal state was: explicit | batch-ambiguous | …
+  'scrum:traceId': 'scrum:traceId',         // #1372 — opaque trace identity on an event (≤128 chars; the server assigns it no meaning)
+  'scrum:ofModelCall': 'scrum:ofModelCall', // #1372 — event → entity: the scrum:ModelCall row that produced this step
   // #1202 — scrum:ModelCall, the provenance ledger row (store key modelCalls[])
   'scrum:ModelCall': null,          // rdf:type value
   'scrum:agent': 'scrum:agent',     // → person: IRI

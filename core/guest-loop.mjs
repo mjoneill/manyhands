@@ -236,6 +236,24 @@ export function splitPublishMarker(text) {
 export const decidePublish = splitPublishMarker;
 
 /**
+ * #1372 — the outcome a channel drain writes on EVERY delivery it held, from
+ * the turn's result. `published` when the seat posted, `declined` (reason:
+ * explicit — the seat's own NO, never a batch artefact) when it said NO_REPLY,
+ * `failed` otherwise. When the digest held MORE THAN ONE message and produced
+ * ONE post, each `published` carries `reason: batch-ambiguous`: one post is not
+ * N replies, and marking all N as plainly published would invent a per-message
+ * reply relationship by omission. `modelCall` is the ledger row the turn wrote
+ * (`scrum:ofModelCall` on the event); absent when there was no row — a halt
+ * before the call, or a row that only reached the file.
+ */
+export function deliveryOutcome(r, deliveries) {
+  const modelCall = r?.ledger?.ledgerId ? { modelCall: r.ledger.ledgerId } : {};
+  if (r?.posted) return { state: 'published', ...(deliveries.length > 1 ? { reason: 'batch-ambiguous' } : {}), ...modelCall };
+  if (r?.declined) return { state: 'declined', reason: 'explicit', ...modelCall };
+  return { state: 'failed', note: r?.reason ?? 'halted', ...modelCall };
+}
+
+/**
  * #1346 — which wake rules are IN FORCE for this agent. In channel mode every
  * post reaches the seat through its delivery record, so a mention wake would
  * answer the same message twice and a schedule wake has no job — the room is

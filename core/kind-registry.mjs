@@ -168,7 +168,10 @@ export const KIND_DECLARATIONS = Object.freeze([
       + 'points home; `scrum:state` is what happened (offered · queued · claimed · turn-started · '
       + 'published · declined · failed); `scrum:source` is who did it (fanout · guest-runner · '
       + 'presence-bridge); `scrum:at`, `scrum:attempt`, and `scrum:reason` (whose act a terminal state '
-      + 'was — explicit is the seat\'s own NO). Never edited: the latest by `scrum:at` is the current state.',
+      + 'was — explicit is the seat\'s own NO; batch-ambiguous marks a published that was ONE post over '
+      + 'several messages, #1372). Optional `scrum:traceId` (an opaque consumer-side id, ≤128 chars) and '
+      + '`scrum:ofModelCall` (an edge to the scrum:ModelCall row that produced the step; a ref the board '
+      + 'does not hold is refused, never dangling). Never edited: the latest by `scrum:at` is the current state.',
   },
   {
     name: 'scrum:Model', eventKind: 'model', collection: 'models',

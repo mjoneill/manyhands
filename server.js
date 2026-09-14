@@ -3417,6 +3417,10 @@ function deliveryToWire(e) {
       ...(Number.isInteger(ev['scrum:attempt']) ? { attempt: ev['scrum:attempt'] } : {}),
       ...(ev['scrum:reason'] ? { reason: ev['scrum:reason'] } : {}),
       ...(ev.text ? { note: ev.text } : {}),
+      // #1372 — trace identity and the call that produced the outcome, read back
+      // as written: a field a caller cannot read back does not exist to the caller.
+      ...(ev['scrum:traceId'] ? { traceId: ev['scrum:traceId'] } : {}),
+      ...(ev['scrum:ofModelCall'] ? { modelCall: ev['scrum:ofModelCall'] } : {}),
     })),
   };
 }
@@ -4526,11 +4530,25 @@ async function handleCreateDeliveryEvent(req, res, id) {
     }
     const source = typeof body.source === 'string' ? body.source : 'guest-runner';
     if (!DELIVERY_SOURCES.has(source)) return sendJSON(res, 400, { error: `source must be one of ${[...DELIVERY_SOURCES].join(' | ')} (got ${JSON.stringify(body.source)})` });
+    // #1372 — an OPAQUE trace identity (the bridge's per-attempt id, the
+    // runner's turn id: the server assigns it no meaning) and the ModelCall row
+    // that produced this step. Both optional; a malformed one is refused, not
+    // dropped, so the record can never read "not traced" for a caller that traced.
+    if (body.traceId != null && (typeof body.traceId !== 'string' || !body.traceId.trim() || body.traceId.length > 128)) {
+      return sendJSON(res, 400, { error: 'traceId must be a non-empty string of at most 128 characters — an opaque id, not a payload' });
+    }
+    if (body.modelCall != null && (typeof body.modelCall !== 'string' || !body.modelCall.trim())) {
+      return sendJSON(res, 400, { error: 'modelCall must be the id of a scrum:ModelCall row the board holds' });
+    }
     const result = await withWriteLock(async () => {
       const data = readBoard();
       const idx = deliveriesOf(data).findIndex((d) => d['@id'] === id);
       if (idx < 0) return { status: 404, wire: { error: `no delivery ${id}` } };
       const cur = deliveriesOf(data)[idx];
+      // Resolved UNDER the lock against the same read: a ref the board does not
+      // hold is a 400 with nothing appended — never a dangling edge in the graph.
+      const modelCall = body.modelCall == null ? null : (modelCallsOf(data).find((c) => c['@id'] === body.modelCall.trim() || c['@id'].endsWith(`/${body.modelCall.trim()}`))?.['@id'] ?? undefined);
+      if (modelCall === undefined) return { status: 400, wire: { error: `modelCall ${JSON.stringify(body.modelCall)} names no scrum:ModelCall row on this board — post the ledger row first (POST /api/model-calls), then link it` } };
       const events = deliveryEventsOf(cur);
       const latest = deliveryState(cur);
       // THE ATOMIC STEP. Under the write lock, so two runners reading "offered"
@@ -4557,6 +4575,8 @@ async function handleCreateDeliveryEvent(req, res, id) {
         // every boundary-generated non-publication in one query.
         ...(typeof body.reason === 'string' && body.reason.trim() ? { 'scrum:reason': body.reason.trim() } : {}),
         ...(typeof body.note === 'string' && body.note ? { text: body.note } : {}),
+        ...(typeof body.traceId === 'string' ? { 'scrum:traceId': body.traceId.trim() } : {}),   // #1372
+        ...(modelCall ? { 'scrum:ofModelCall': modelCall } : {}),
       };
       const entity = { ...cur, 'scrum:hasEvent': [...events, ev] };
       data.deliveries = deliveriesOf(data).map((d, i) => (i === idx ? entity : d));
