@@ -499,6 +499,16 @@ export async function startPair({
   _startRest = startRestServer,
   _startMcp = startMcpServer,
 } = {}) {
+  // #1377 — the pair's ports are chosen UP FRONT (the REST child needs the
+  // MCP notify URL before MCP exists), so between REST coming up (seconds) and
+  // MCP binding, another concurrently-starting test file can take the MCP
+  // port. startOnPort treats a pre-chosen port as explicit and does not retry
+  // — measured on CI 2026-09-14: two "unrelated" files (#1158, #624) failed in
+  // 0.3 s on exactly that line, on two different runs. So the PAIR retries:
+  // on a contended MCP start, stop the REST sibling, allocate fresh ports, go
+  // again, bounded like a single server. Any other failure rejects at once.
+  const CONTENDED = /lost the allocation race/;
+  for (let pairAttempt = 1; pairAttempt <= START_ATTEMPTS; pairAttempt++) {
   const restPort = await freePort();
   const mcpPort = await freePort();
   const mcpNotifyUrl = `http://127.0.0.1:${mcpPort}/internal/notify`;
@@ -560,6 +570,10 @@ export async function startPair({
     // The sibling is already running. Stop it before surfacing the failure,
     // and never let a teardown error mask the acquisition error that caused it.
     try { await rest.stop(); } catch { /* the original failure is the one that matters */ }
+    if (CONTENDED.test(String(e && e.message))) {
+      if (pairAttempt < START_ATTEMPTS) continue;   // #1377 — fresh ports, both servers
+      throw new Error(`${e.message}\n— pair attempt ${pairAttempt}/${START_ATTEMPTS}: the MCP port chosen up front was taken while REST started (#1377)`);
+    }
     throw e;
   }
 
@@ -571,6 +585,8 @@ export async function startPair({
       await rest.stop();
     },
   };
+  }   // #1377 pair attempts
+  throw new Error('startPair: unreachable');
 }
 
 /**

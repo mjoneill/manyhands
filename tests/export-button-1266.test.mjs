@@ -246,8 +246,12 @@ test('#1266 ⭐⭐ THE PRESS — and un-scrubbed takes TWO deliberate acts, not 
     // the second, separate act
     await page.click('#export-raw-ack');
     await page.click('#export-run');
+    // #1377 — every TERMINAL status the page can render, so a real failure
+    // reports in seconds with the page's own words instead of sitting the
+    // full 120 s: `/✅|failed/` matched neither the scrub refusal (#1375) nor
+    // "did not produce a readable archive".
     await page.waitForFunction(
-      () => /✅|failed/.test(document.getElementById('export-status').textContent),
+      () => /✅|failed|Refused by the scrub boundary|did not produce|export failed/.test(document.getElementById('export-status').textContent),
       { timeout: 120000 });
 
     const status = await page.$eval('#export-status', (el) => el.textContent);
