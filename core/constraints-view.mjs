@@ -28,7 +28,7 @@ const ORDER = [
   ['promptVersion', 'prompt version'], ['participationClause', 'told when to speak'],
   ['wakeOn', 'wakes on'], ['everyMinutes', 'every (min)'], ['deliveryMode', 'delivery mode'],
   ['maxHops', 'hop ceiling'], ['toolGrants', 'tool grants'], ['contextPolicy', 'context'],
-  ['residency', 'residency'], ['state', 'state'], ['holds', 'holds'], ['promptGrantConflict', 'prompt vs grants'],
+  ['residency', 'residency'], ['state', 'state'], ['role', 'role on this team'], ['holds', 'holds'], ['promptGrantConflict', 'prompt vs grants'],   // #1382 — role from the live declaration (#1376)
 ];
 
 const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
@@ -45,6 +45,8 @@ export function formatValue(key, rec) {
   if (key === 'holds') return Array.isArray(v) && v.length ? v.map((h) => `#${h.card}`).join(', ') : 'nothing';
   if (key === 'promptGrantConflict') return v && v.phrase ? `⚠ "${v.phrase}"${v.reason ? ` — ${v.reason}` : ''}` : 'none';
   if (key === 'promptVersion') return `v${v}`;
+  // #1382 — a held role is an object {key, name, definedBy}; never let it reach String()
+  if (key === 'role') return v && typeof v === 'object' ? `${v.name || v.key} (${v.key})${v.definedBy && v.definedBy.shortId != null ? ` · #${v.definedBy.shortId}` : ''}` : String(v);
   if (Array.isArray(v)) return v.length ? v.join(', ') : '(none)';
   if (typeof v === 'boolean') return v ? 'on' : 'off';
   return String(v);

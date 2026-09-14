@@ -134,3 +134,29 @@ test('#1350 board: an assignee chip is a door too — click opens the popover fo
     await page.close();
   });
 });
+
+// #1382 — the role row (#1376 put it on the API; the view rendered a fixed list without it)
+test('#1382 formatValue: a held role reads as name (key) · #card; none held reads —; never [object Object]', () => {
+  assert.equal(formatValue('role', { value: { key: 'po', name: 'Product Owner', definedBy: { shortId: 915, title: 'PO INTAKE' } }, source: 'board' }), 'Product Owner (po) · #915');
+  assert.equal(formatValue('role', { value: { key: 'scrum-master', name: 'Scrum Master', definedBy: null }, source: 'board' }), 'Scrum Master (scrum-master)');
+  assert.equal(formatValue('role', { value: null, source: 'board' }), '—');
+  assert.equal(formatValue('role', { value: null, source: 'unset' }), '—');
+});
+
+test('#1382 renderConstraints shows the role row from a #1376 payload, sourced board — and nothing renders as [object Object]', async () => {
+  const { JSDOM } = await import('jsdom');
+  const { window } = new JSDOM('<!doctype html><body><div id="m"></div></body>');
+  const prev = { document: global.document, window: global.window };
+  global.document = window.document; global.window = window;
+  try {
+    const { renderConstraints } = await import('../core/constraints-view.mjs');
+    const m = window.document.getElementById('m');
+    renderConstraints(m, { seat: 'pip', constraints: { model: { value: 'fake', source: 'model spec' }, role: { value: { key: 'po', name: 'Product Owner', definedBy: { shortId: 915 } }, source: 'board' } } }, { seat: 'pip' });
+    const row = m.querySelector('tr[data-constraint="role"]');
+    assert.ok(row, 'the role row renders');
+    assert.equal(row.querySelector('.constraints-key').textContent, 'role on this team');
+    assert.equal(row.querySelector('.constraints-value').textContent, 'Product Owner (po) · #915');
+    assert.match(row.querySelector('.constraints-source').textContent, /board/);
+    assert.ok(!m.textContent.includes('[object Object]'), 'negative control');
+  } finally { global.document = prev.document; global.window = prev.window; }
+});
