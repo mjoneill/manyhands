@@ -143,6 +143,18 @@ export const KIND_DECLARATIONS = Object.freeze([
       + 'wrote one, nothing in the graph could have told a seat this kind was available.',
   },
   {
+    name: 'scrum:Role', eventKind: 'role', collection: 'roles',
+    createdBy: 'role_create / POST /api/roles',
+    definition: 'A ROLE the team actually uses — Product Owner, Scrum Master (the reflective '
+      + 'facilitator of #272), Value Steward (#418) — as an entity, so "who holds role X now, since '
+      + 'when, and what does that commit them to" is a query rather than scrollback (#915; ruled a '
+      + 'new type by decision f9e31a70). One instance per `scrum:roleKey`; `scrum:definedBy` points '
+      + 'at the card that holds the full definition — the registry CONSOLIDATES roles the room has '
+      + 'already written, it does not invent them. Holding a role is a scrum:SeatDeclaration with a '
+      + '`scrum:role` edge: a person holds a typed state for a bounded interval, and the current '
+      + 'holder is the OPEN interval, never the newest node by date.',
+  },
+  {
     name: 'scrum:Wake', eventKind: 'wake', collection: 'wakes',
     createdBy: 'seat_wake',
     definition: 'A request that a seat be brought back to attention, recorded as an entity rather '

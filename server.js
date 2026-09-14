@@ -2161,13 +2161,30 @@ async function handleSeatDeclare(req, res, seat) {
     } catch (e) {
       return sendJSON(res, 400, { error: e.message, code: e.code });
     }
+    // #915 — a role grant IS a seat declaration: the optional `role` names a
+    // scrum:Role the board holds, and the interval carries it as an edge. An
+    // unknown key is refused — a role held that nobody defined is the prose
+    // this card exists to replace.
+    // The role SURVIVES a re-declare that does not mention it (an availability
+    // change, the weekly refresh): a seat's role is not shortened by an
+    // unrelated declaration. `role` absent → carried forward from the open
+    // interval; `role: null` (or '') → released; a key → held (must exist).
+    if (body.role !== undefined && body.role !== null && body.role !== '') {
+      const key = String(body.role).trim().toLowerCase();
+      if (!rolesOf(readBoard()).some((r) => r['scrum:roleKey'] === key)) {
+        return sendJSON(res, 400, { error: `role ${JSON.stringify(body.role)} names no scrum:Role on this board — mint it first (role_create / POST /api/roles); known: ${rolesOf(readBoard()).map((r) => r['scrum:roleKey']).join(', ') || '(none)'}`, code: 'UNKNOWN_ROLE' });
+      }
+      decl.role = key;
+    }
     // #1143 — the prior state is read from the GRAPH, before the lock: it only
     // chooses the event's op label (create vs update), and the projection
     // treats both alike (end the open interval, open a new one), so a race
     // here can mislabel an op and change nothing else.
     let prior = false;
     try {
-      prior = (await liveSeatDecls()).decls.some((d) => d.seat === seat);
+      const open = (await liveSeatDecls()).decls.find((d) => d.seat === seat);
+      prior = !!open;
+      if (body.role === undefined && open?.role) decl.role = open.role;   // #915 — carried forward
     } catch (e) {
       if (e?.code === 'GRAPH_DEPS_MISSING') return sendJSON(res, 503, { error: e.message, code: e.code });
       throw e;
@@ -3383,6 +3400,59 @@ const wakeToWire = (e) => ({ id: e['@id'], seat: e['scrum:wokeSeat'], at: e['scr
 // with the bridge side, so its trace and this record are one type).
 const DELIVERY_ID = () => `https://scrumboard.local/delivery/${crypto.randomUUID()}`;
 function deliveriesOf(data) { return Array.isArray(data.deliveries) ? data.deliveries : []; }
+// ── #915 — ROLES the team uses, as entities (one per key; a grant is a seat declaration) ──
+function rolesOf(data) { return Array.isArray(data.roles) ? data.roles : []; }
+const roleEvent = (op, e, actor) => ({ op, actor, entity: { kind: 'role', id: e['@id'] }, state: e });
+const ROLE_KEY = /^[a-z][a-z0-9-]{1,31}$/;
+// The same formula core/graph-replica.mjs exports (ROLE_IRI): a role's IRI is its key,
+// so a declaration's edge needs no lookup. Duplicated because the replica is a lazy import here.
+const ROLE_IRI = (key) => `https://scrumboard.local/role/${encodeURIComponent(String(key))}`;
+const roleToWire = (data, e) => {
+  const card = e['scrum:definedBy'] ? (data.cards || []).find((c) => c.id === e['scrum:definedBy']) : null;
+  return {
+    id: e['@id'], key: e['scrum:roleKey'], name: e.name, definition: e.text,
+    definedBy: e['scrum:definedBy'] ? { id: e['scrum:definedBy'], ...(card ? { shortId: card.shortId, title: card.title } : {}) } : null,
+    createdBy: e.creator ?? null, createdAt: e.dateCreated ?? null,
+  };
+};
+async function handleCreateRole(req, res) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const by = typeof body.by === 'string' && body.by.trim() ? body.by.trim() : null;
+    if (!by) return sendJSON(res, 400, { error: 'by is required — who records this role. Declared, not authenticated.' });
+    const key = typeof body.key === 'string' ? body.key.trim().toLowerCase() : '';
+    if (!ROLE_KEY.test(key)) return sendJSON(res, 400, { error: `key must be a short lowercase slug (po, scrum-master, value-steward…) — got ${JSON.stringify(body.key)}` });
+    const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim() : null;
+    if (!name) return sendJSON(res, 400, { error: 'name is required — what the room calls this role' });
+    const definition = typeof body.definition === 'string' ? body.definition.trim() : '';
+    if (definition.length < 40) return sendJSON(res, 400, { error: 'definition is required (≥ 40 characters) — a short statement of what holding this role commits a seat to; the full text lives on the card named by definedBy' });
+    const result = await withWriteLock(async () => {
+      const data = readBoard();
+      if (rolesOf(data).some((r) => r['scrum:roleKey'] === key)) return { status: 409, wire: { error: `a role with key ${JSON.stringify(key)} already exists — one instance per key; revise it rather than minting a twin`, key } };
+      let definedBy = null;
+      if (body.definedBy !== undefined && body.definedBy !== null && body.definedBy !== '') {
+        const card = (data.cards || []).find((c) => c.id === String(body.definedBy) || String(c.shortId) === String(body.definedBy));
+        if (!card) return { status: 400, wire: { error: `definedBy ${JSON.stringify(body.definedBy)} names no card on this board — the defining card must exist (this registry consolidates roles the room already wrote)` } };
+        definedBy = card.id;
+      }
+      const entity = {
+        '@id': ROLE_IRI(key), '@type': 'scrum:Role', 'scrum:roleKey': key, name, text: definition,
+        ...(definedBy ? { 'scrum:definedBy': definedBy } : {}), creator: by, dateCreated: new Date().toISOString(),
+      };
+      data.roles = [...rolesOf(data), entity];
+      writeBoard(data, [roleEvent('create', entity, by)]);
+      return { status: 201, wire: roleToWire(data, entity) };
+    });
+    sendJSON(res, result.status, result.wire);
+  } catch (e) {
+    console.error('POST /api/roles:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+function handleListRoles(req, res) {
+  const data = readBoard();
+  sendJSON(res, 200, { roles: rolesOf(data).map((r) => roleToWire(data, r)) });
+}
 const deliveryEvent = (op, e, actor) => ({ op, actor, entity: { kind: 'delivery', id: e['@id'] }, state: e });
 // #1373 — the claim step is named for the ACT, not for its first consumer. It
 // was born `runner-claimed` when the resident runner was the only thing that
@@ -8861,6 +8931,8 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/model-calls$/,          fn: (req, res) => handleCreateModelCall(req, res) }, // #1202
   { method: 'POST',   re: /^\/api\/export$/,               fn: (req, res) => handleExport(req, res) },       // #1266
   { method: 'POST',   re: /^\/api\/export\/preview$/,       fn: (req, res) => handleExportPreview(req, res) },   // #1375 dry run
+  { method: 'GET',    re: /^\/api\/roles$/,                fn: (req, res) => handleListRoles(req, res) },        // #915
+  { method: 'POST',   re: /^\/api\/roles$/,                fn: (req, res) => handleCreateRole(req, res) },       // #915
   { method: 'GET',    re: /^\/api\/export\/spaces$/,      fn: (req, res) => handleExportSpaces(req, res) },   // #1321
   { method: 'GET',    re: /^\/api\/wakes$/,                fn: (req, res) => handleListWakes(req, res) },
   { method: 'POST',   re: /^\/api\/wakes$/,                fn: (req, res) => handleCreateWake(req, res) },

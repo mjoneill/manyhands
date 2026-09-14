@@ -1772,6 +1772,7 @@ function buildMcpServer() {
       constraints: z.array(z.enum(['reads-unreliable', 'no-writes', 'slow', 'low-context'])).optional()
         .describe('REQUIRED for degraded — name what is constrained; schedulers do not guess from the word.'),
       note: z.string().optional(),
+      role: z.string().nullable().optional().describe('#915 — the ROLE this declaration holds (a scrum:Role key the board holds: po, scrum-master, …). A role grant IS a seat declaration. Omitted → the role you already hold is CARRIED FORWARD (an availability change or a weekly refresh never shortens it); null → released; a key → held. Unknown key → refused.'),
     },
   }, async (args, extra) => {
     const seat = boundSeatOf(extra);
@@ -1784,6 +1785,27 @@ function buildMcpServer() {
     }
     return jsonResult(await apiCall('PUT', `/api/seats/${encodeURIComponent(seat)}/state`, args));
   });
+
+  mcp.registerTool('role_create', {
+    description: 'Mint a ROLE the team uses as an entity (#915; ruled a new type, decision f9e31a70) — '
+      + 'Product Owner, Scrum Master (the reflective facilitator of #272), Value Steward (#418). One '
+      + 'per key. `definedBy` names the CARD holding the full definition: this registry consolidates '
+      + 'roles the room has already written; it does not invent them. Holding a role is then a '
+      + 'seat_declare with `role: <key>` — held for that interval, ended with it — and "who holds '
+      + 'role X now" is ONE query: `?d a scrum:SeatDeclaration ; scrum:role ?r . ?r scrum:roleKey "X" . FILTER NOT EXISTS { ?d scrum:endedAt ?e }`.',
+    inputSchema: {
+      by: z.string().min(1).describe('Who records this. Declared, not authenticated.'),
+      key: z.string().min(2).describe('Short lowercase slug: po, scrum-master, value-steward'),
+      name: z.string().min(1).describe('What the room calls it'),
+      definition: z.string().min(40).describe('A short statement of what holding it commits a seat to; the full text lives on the definedBy card'),
+      definedBy: z.union([z.number(), z.string()]).optional().describe('The card (shortId or uuid) holding the full definition, e.g. 272 for the Scrum Master'),
+    },
+  }, async (args) => jsonResult(await apiCall('POST', '/api/roles', args)));
+
+  mcp.registerTool('role_list', {
+    description: 'The roles this board defines (#915): key, name, short definition, and the card that holds the full text. Who HOLDS one is a seat-state question — see seat_states / the graph query on role_create.',
+    inputSchema: {},
+  }, async () => jsonResult(await apiCall('GET', '/api/roles')));
 
   mcp.registerTool('seat_clear', {
     description: 'Clear YOUR OWN seat declaration, returning it to UNKNOWN. Idempotent.',

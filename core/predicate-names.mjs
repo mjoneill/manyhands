@@ -66,6 +66,11 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:obligationKind': 'scrum:kind',     // steward | review | promise | tripwire
   'scrum:dischargedBy': 'scrum:dischargedBy',   // → person: IRI
   'scrum:dischargedAt': 'scrum:dischargedAt',
+  // ── #915 — roles the team uses, as entities (store key roles[]) ─────────
+  'scrum:Role': null,                       // the type; minted by the projection
+  'scrum:roleKey': 'scrum:roleKey',         // po | scrum-master | value-steward | … (unique per board)
+  'scrum:definedBy': 'scrum:definedBy',     // → entity: the card holding the full definition
+  'scrum:role': 'scrum:role',               // SeatDeclaration → entity: the Role held for that interval
   'scrum:Wake': null,                       // #1118 — the type; minted by the projection
   'scrum:wokeSeat': 'scrum:wokeSeat',       // → person: IRI
   'scrum:wokeAt': 'scrum:wokeAt',

@@ -178,6 +178,8 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:Delivery', 'scrum:deliveredTo', 'scrum:ofConversation', 'scrum:offeredAt',
   'scrum:DeliveryEvent', 'scrum:ofDelivery', 'scrum:source', 'scrum:attempt', 'scrum:at', 'scrum:reason',
   'scrum:traceId', 'scrum:ofModelCall',   // #1372
+  // #915 — roles as entities; a seat declaration may hold one
+  'scrum:Role', 'scrum:roleKey', 'scrum:definedBy', 'scrum:role',
   // #1202 — the provenance ledger row
   'scrum:ModelCall', 'scrum:agent', 'scrum:model', 'scrum:provider', 'scrum:protocol',
   'scrum:promptVersion', 'scrum:tokensIn', 'scrum:tokensOut', 'scrum:reasoningTokens', 'scrum:cachedPromptTokens', 'scrum:cost', 'scrum:costMeasured', 'scrum:costCategories', 'scrum:stopReason',
@@ -460,6 +462,9 @@ function projectSeatDeclarationEvent(store, ev, when) {
   if (st.note) add(nn(S + 'note'), lit(st.note));
   add(nn(S + 'declaredAt'), lit(st.declaredAt || when));
   if (st.expiresAt) add(nn(S + 'expiresAt'), lit(st.expiresAt));
+  // #915 — the role held for THIS interval, as an edge to the Role node. Ends
+  // with the interval: "who holds po now" is the open declaration with this edge.
+  if (st.role) add(nn(S + 'role'), nn(String(st.role).startsWith('http') ? String(st.role) : ROLE_IRI(String(st.role))));
 }
 
 /**
@@ -963,6 +968,28 @@ function projectDelivery(store, e) {
     if (ev['scrum:traceId']) addE(nn(S + 'traceId'), lit(String(ev['scrum:traceId'])));
     if (ev['scrum:ofModelCall']) addE(nn(S + 'ofModelCall'), nn(String(ev['scrum:ofModelCall'])));
   });
+}
+
+/** #915 — a role's IRI is its KEY, so a declaration can point at it without a lookup. */
+export const ROLE_IRI = (key) => `https://scrumboard.local/role/${encodeURIComponent(String(key))}`;
+
+/**
+ * #915 — a ROLE the team uses, as a node. `definedBy` is an ENTITY EDGE to the
+ * card holding the full text (#272, #418), so the definition stays where the
+ * room argued it and the role stays queryable. `roleKey` is the join key a
+ * seat declaration's `scrum:role` edge lands on.
+ */
+function projectRole(store, e) {
+  const S = IRI.scrum, SC = IRI.schema, P = IRI.person, E = IRI.entity;
+  const s = nn(e['@id']);
+  const add = (p, o) => store.add(oxigraph.triple(s, p, o));
+  add(A, nn(S + 'Role'));
+  if (e['scrum:roleKey']) add(nn(S + 'roleKey'), lit(String(e['scrum:roleKey'])));
+  if (e.name) add(nn(SC + 'name'), lit(String(e.name)));
+  if (e.text) add(nn(SC + 'text'), lit(String(e.text)));
+  if (e['scrum:definedBy']) add(nn(S + 'definedBy'), nn(String(e['scrum:definedBy']).startsWith('http') ? String(e['scrum:definedBy']) : E + e['scrum:definedBy']));
+  if (e.creator) add(nn(SC + 'creator'), nn(String(e.creator).startsWith('http') ? String(e.creator) : P + e.creator));
+  if (e.dateCreated) add(nn(SC + 'dateCreated'), lit(String(e.dateCreated)));
 }
 
 /**
@@ -1606,6 +1633,8 @@ function projectEntity(store, e) {
       projectModelCall(store, e);
     } else if (t === 'scrum:Delivery') {
       projectDelivery(store, e);
+    } else if (t === 'scrum:Role') {
+      projectRole(store, e);
     } else if (t === 'scrum:Agent') {
       projectAgent(store, e);
     } else if (t === 'scrum:Model') {

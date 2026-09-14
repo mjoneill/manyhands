@@ -234,7 +234,7 @@ export function declarationsFromRows(rows, { limit } = {}) {
   }
   const nodes = new Map();
   for (const r of rows) {
-    const n = nodes.get(r.d) || { seat: null, mode: null, acceptsRoutineWork: null, constraints: [], note: null, declaredAt: null, expiresAt: null };
+    const n = nodes.get(r.d) || { seat: null, mode: null, acceptsRoutineWork: null, constraints: [], note: null, declaredAt: null, expiresAt: null, role: null };
     nodes.set(r.d, n);
     switch (localName(r.p)) {
       case 'declaredSeat': n.seat = seatKeyOf(r.o); break;
@@ -244,6 +244,7 @@ export function declarationsFromRows(rows, { limit } = {}) {
       case 'note': n.note = r.o; break;
       case 'declaredAt': n.declaredAt = r.o; break;
       case 'expiresAt': n.expiresAt = r.o; break;
+      case 'role': n.role = String(r.o).replace(/^.*\/role\//, '').replace(/^entity:role\//, ''); break;   // #915 — the Role IRI's key
       default: break;
     }
   }

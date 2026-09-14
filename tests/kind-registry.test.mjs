@@ -65,6 +65,7 @@ const ENTITY_KINDS_ADDED_SINCE = [
   'agent-prompt', // #1199 — its versioned system prompt (identity + versions)
   'model',        // #1197 — a model the board can call
   'delivery',     // #1346 — what happened to one message for one seat; the resident inbox as a record
+  'role',         // #915 — a role the team uses, as an entity; held by a seat declaration
 ];
 
 test('#1214 the derived set adds only DECLARED new kinds — a silent addition is as bad as a loss', () => {
@@ -93,6 +94,7 @@ const COLLECTIONS_ADDED_SINCE = {
   agent: 'agents', 'agent-prompt': 'agentPrompts', // #1199
   model: 'models', // #1197
   delivery: 'deliveries', // #1346
+  role: 'roles', // #915
 };
 
 test('#1214 a kind maps only to a collection replay knows, or one declared new here', () => {
