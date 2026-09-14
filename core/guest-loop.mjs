@@ -324,6 +324,10 @@ export function buildMessages({ agent, wake, changes = [], memories = [] }) {
     ? 'You persist across wakes. Your memory lives in the shared memory store on this board (memory_create / memory_list); what you do not write there, you will not have next time.'
     : 'You are invited for this question only and will not persist: nothing you say now will be handed back to you later unless someone writes it to the board.');
   if (agent.systemPrompt) lines.push(agent.systemPrompt);
+  // #1376 — the ROLE the seat holds on the board, assembled at wake time by
+  // the runner from the live declaration (core/role-section.mjs). State, not
+  // identity: never part of the prompt version. Absent → nothing at all.
+  if (typeof agent.roleSection === 'string' && agent.roleSection.trim()) lines.push(agent.roleSection.trim());
   // #1196 — A SEAT MUST BE TOLD IT CAN LOOK. Found live: a seat granted search
   // and card-read was offered both on the wire, called NEITHER, and then wrote
   // "I searched the board and found no matching cards" — while the row said one

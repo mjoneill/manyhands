@@ -58,6 +58,15 @@ if (seatArg) {
 } else {
   agent = JSON.parse(fs.readFileSync(agentFile, 'utf8'));
 }
+// #1376 — the ROLE this seat holds on the board rides into the prompt as
+// state, read at wake from the live declaration; '' when none. A dead
+// endpoint is logged and the wake proceeds without a section (never a guess).
+try {
+  const rs = await fetch(`${BOARD}/api/seats/${encodeURIComponent(agent.seatKey)}/role-section`);
+  const rj = rs.ok ? await rs.json() : null;
+  agent.roleSection = rj && typeof rj.section === 'string' ? rj.section : '';
+  console.log(`[#1376] role: ${rj?.role?.key ?? 'none'}${rj?.role?.key ? ` — section ${agent.roleSection.split('\n')[0].slice(0, 80)}` : ''}`);
+} catch (e) { agent.roleSection = ''; console.error(`[#1376] role section unreadable (${e?.message ?? e}) — waking without one`); }
 const stateFile = process.env.SCRUM_GUEST_STATE_FILE || (agentFile ? path.join(path.dirname(agentFile), `.${agent.seatKey}.guest-state.json`) : path.join(process.cwd(), `.${agent.seatKey}.guest-state.json`));
 
 const get = async (p) => { const r = await fetch(`${BOARD}${p}`); if (!r.ok) throw new Error(`GET ${p} → ${r.status}`); return r.json(); };

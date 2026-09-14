@@ -63,6 +63,7 @@ import { buildTree, buildChildIndex } from './core/tree.mjs';
 import { buildLinkIndex } from './core/links.mjs';
 import { commentMetadata } from './core/card-comments.mjs';
 import { cardOutline } from './core/card-outline.mjs';
+import { roleSectionFor, heldRoleKey } from './core/role-section.mjs';   // #1376
 import { validateDeclaration, seatState, tendingEligibility, declarationsFromRows, UNKNOWN as SEAT_UNKNOWN } from './core/seat-state.mjs';
 import { readConfig, writeConfig, LIMITS } from './channel-config.mjs';
 import { droppedAgentSeats, loadRoster, writeRoster, rosterFilePath, loadRosterRoles } from './core/roster-config.mjs';
@@ -3453,6 +3454,28 @@ async function handleCreateRole(req, res) {
     sendJSON(res, 500, { error: e.message });
   }
 }
+// #1376 — the role section for a seat's prompt: what the runner prepends at
+// wake, readable here so a reviewer (and the constraints view) sees what the
+// seat was told. '' when the seat holds no live role.
+async function roleSectionForSeat(seat) {
+  const data = readBoard();
+  const decls = (await liveSeatDecls()).decls;
+  const now = new Date().toISOString();
+  const seats = decls.map((d) => seatState(decls, d.seat, now));
+  const roles = rolesOf(data).map((r) => roleToWire(data, r));
+  const key = heldRoleKey(seat, seats);
+  const role = key ? (roles.find((r) => r.key === key) || { key, name: key, definition: null, definedBy: null }) : null;
+  return { seat, role, section: roleSectionFor({ seat, seats, roles }) };
+}
+async function handleSeatRoleSection(req, res, seat) {
+  try {
+    sendJSON(res, 200, await roleSectionForSeat(seat));
+  } catch (e) {
+    if (e?.code === 'GRAPH_DEPS_MISSING') return sendJSON(res, 503, { error: e.message, code: e.code });
+    console.error(`GET /api/seats/${seat}/role-section:`, e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
 function handleListRoles(req, res) {
   const data = readBoard();
   sendJSON(res, 200, { roles: rolesOf(data).map((r) => roleToWire(data, r)) });
@@ -3885,7 +3908,7 @@ const GRANTABLE = new Set([...BOARD_TOOLS.map((t) => t.function.name), 'card_cla
 // An unknown seat is a 404 that still lists the layers the board cannot see:
 // an MCP-bound seat is governed entirely by its own runtime, and saying so is
 // the surface's job too.
-function handleAgentConstraints(req, res, seat) {
+async function handleAgentConstraints(req, res, seat) {
   const data = readBoard();
   const node = findAgent(data, seat);
   if (!node) return sendJSON(res, 404, { error: `no agent record for seat "${seat}" — a Claude Code or gateway-bridged seat is governed by its own runtime, which the board cannot read`, unseen: unseenLayers({ 'scrum:seatKey': seat }) });
@@ -3895,7 +3918,17 @@ function handleAgentConstraints(req, res, seat) {
   const sinceIso = since.toISOString();
   const modelCallsToday = modelCallsOf(data).filter((c) => c['scrum:agent'] === seat && typeof c['scrum:calledAt'] === 'string' && c['scrum:calledAt'] >= sinceIso).map(modelCallToWire);
   const claims = (Array.isArray(data.cards) ? data.cards : []).filter((c) => c.claimedBy === seat).map((c) => ({ shortId: c.shortId, title: c.title }));
-  sendJSON(res, 200, agentConstraints(node, { model, promptVersions, modelCallsToday, claims, since: sinceIso }));
+  // #1376 — the role the seat holds, read from the graph (never the agent
+  // record), shown beside the prompt version so a reviewer sees what the
+  // seat was told this turn. Unreadable graph → the row says so, not "none".
+  let role = { value: null, source: 'unset', section: '' };
+  try {
+    const r = await roleSectionForSeat(seat);
+    role = r.role ? { value: { key: r.role.key, name: r.role.name, definedBy: r.role.definedBy ?? null }, source: 'board', section: r.section } : { value: null, source: 'board', section: '' };
+  } catch (e) { role = { value: null, source: 'unset', section: '', unreadable: String(e?.message ?? e) }; }
+  const out = agentConstraints(node, { model, promptVersions, modelCallsToday, claims, since: sinceIso });
+  out.constraints.role = role;
+  sendJSON(res, 200, out);
 }
 async function handlePatchAgent(req, res, seat) {
   try {
@@ -8939,6 +8972,7 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/export$/,               fn: (req, res) => handleExport(req, res) },       // #1266
   { method: 'POST',   re: /^\/api\/export\/preview$/,       fn: (req, res) => handleExportPreview(req, res) },   // #1375 dry run
   { method: 'GET',    re: /^\/api\/roles$/,                fn: (req, res) => handleListRoles(req, res) },        // #915
+  { method: 'GET',    re: /^\/api\/seats\/([^/]+)\/role-section$/, fn: (req, res, m) => handleSeatRoleSection(req, res, decodeURIComponent(m[1])) },   // #1376
   { method: 'POST',   re: /^\/api\/roles$/,                fn: (req, res) => handleCreateRole(req, res) },       // #915
   { method: 'GET',    re: /^\/api\/export\/spaces$/,      fn: (req, res) => handleExportSpaces(req, res) },   // #1321
   { method: 'GET',    re: /^\/api\/wakes$/,                fn: (req, res) => handleListWakes(req, res) },
