@@ -65,7 +65,7 @@ import { commentMetadata } from './core/card-comments.mjs';
 import { cardOutline } from './core/card-outline.mjs';
 import { validateDeclaration, seatState, tendingEligibility, declarationsFromRows, UNKNOWN as SEAT_UNKNOWN } from './core/seat-state.mjs';
 import { readConfig, writeConfig, LIMITS } from './channel-config.mjs';
-import { loadRoster, writeRoster, rosterFilePath, loadRosterRoles } from './core/roster-config.mjs';
+import { droppedAgentSeats, loadRoster, writeRoster, rosterFilePath, loadRosterRoles } from './core/roster-config.mjs';
 import { extractMentions as extractMentionsFromRoster } from './core/people.mjs';
 // #868 — the graph modules are imported LAZILY, at the bottom of this file's
 // graph section, and deliberately NOT here. They reach `oxigraph`, an npm
@@ -6895,7 +6895,10 @@ async function handleSetRoster(req, res) {
     } catch (ve) {
       return sendJSON(res, 400, { error: ve.message });
     }
-    sendJSON(res, 200, { seats: clean, roles: loadRosterRoles(), file: rosterFilePath(), appliesOnRestart: true });
+    // #1380 — a client that sends the merged read back gets told which seats
+    // were agent records and were not written, rather than finding out later.
+    const dropped = droppedAgentSeats(body);
+    sendJSON(res, 200, { seats: clean, roles: loadRosterRoles(), file: rosterFilePath(), appliesOnRestart: true, ...(dropped.length ? { dropped } : {}) });
   } catch (e) {
     console.error('POST /api/roster:', e.message);
     sendJSON(res, 500, { error: 'Failed to save roster' });

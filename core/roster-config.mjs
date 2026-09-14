@@ -98,6 +98,11 @@ export function validateRoster(input) {
     }
     const seat = seats[key];
     if (!seat || typeof seat !== 'object') throw new Error(`seat "${key}" must be an object`);
+    // #1380 — a seat the API MERGED from an agent record (`agent: true`) is not
+    // the file's to keep: written here it would shadow the record and outlive
+    // its deletion. Dropped, and named by droppedAgentSeats() so the save can
+    // say so; never silently absorbed.
+    if (seat.agent === true) continue;
     const name = String(seat.name ?? '').trim();
     if (!name) throw new Error(`seat "${key}" needs a name`);
     if (name.length > 64) throw new Error(`seat "${key}" name is too long (max 64)`);
@@ -121,14 +126,28 @@ export function validateRoster(input) {
           .map((a) => a.trim().slice(0, 64)))]
       : [];
     if (aliases.length > 16) throw new Error(`seat "${key}" has more than 16 aliases`);
+    // #1380 — carry `kind` through. It is the history gate's ONLY opt-out
+    // (#600: `kind: system` on `board` and `wiki`); a save that dropped it
+    // armed the gate on the words "board" and "wiki" and refused every push.
+    // A string rides verbatim; anything else is not a kind and is not smuggled.
+    const kind = typeof seat.kind === 'string' && seat.kind.trim() ? seat.kind.trim() : null;
     clean[key] = {
       name,
       ...(glyph ? { glyph } : {}),
       color,
       ...(aliases.length ? { aliases } : {}),
+      ...(kind ? { kind } : {}),
     };
   }
+  if (Object.keys(clean).length === 0) throw new Error('a roster with no seats of its own would empty the room — every seat sent was an agent record');
   return clean;
+}
+
+/** #1380 — the seat keys a save will leave out because they are merged agent records, so the caller can say so. */
+export function droppedAgentSeats(input) {
+  const seats = input && typeof input === 'object' && input.seats ? input.seats : input;
+  if (!seats || typeof seats !== 'object' || Array.isArray(seats)) return [];
+  return Object.entries(seats).filter(([, v]) => v && typeof v === 'object' && v.agent === true).map(([k]) => k);
 }
 
 /**

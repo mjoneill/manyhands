@@ -74,6 +74,11 @@ function sanitizeRoster(input) {
     // the file. Optional and absent on every file seat; kept so a reader can
     // tell the two apart without a second lookup.
     if (v.agent === true) out[String(key).trim().toLowerCase()].agent = true;
+    // #1380 — `kind` rides the READ too (it was dropped here as well as on the
+    // write). It is the history gate's only opt-out (`kind: system` on `board`
+    // and `wiki`, #600); a client that saves what it read must be able to hand
+    // it back, or the round trip disarms the gate's exemption.
+    if (typeof v.kind === 'string' && v.kind.trim()) out[String(key).trim().toLowerCase()].kind = v.kind.trim();
   }
   return Object.keys(out).length ? out : null;
 }
