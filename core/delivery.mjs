@@ -3,7 +3,7 @@
  * runner (which sweeps) and the MCP status page (which counts), so the two
  * cannot disagree about what "stuck" means.
  *
- * A delivery at `runner-claimed` or `turn-started` is somebody's turn in
+ * A delivery at `claimed` (née `runner-claimed`, #1373) or `turn-started` is somebody's turn in
  * progress — until it is older than the stale window, after which the runner
  * that held it is presumed dead (SIGKILL, host reboot: the crash leaves the
  * record not open, not terminal, not claimable, and no producer can move it).
@@ -15,7 +15,7 @@ export function deliveryStaleMs(env = process.env) {
   const n = Number(env.SCRUM_DELIVERY_STALE_MS);
   return Number.isFinite(n) && n > 0 ? n : DELIVERY_STALE_MS_DEFAULT;
 }
-const IN_TURN = new Set(['runner-claimed', 'turn-started']);
+const IN_TURN = new Set(['claimed', 'runner-claimed', 'turn-started']);   // #1373 — the old spelling reads as the new
 const OPEN = new Set(['offered', 'queued']);
 /**
  * The retry budget: a failed delivery is open while it has tries left, capped
@@ -24,7 +24,7 @@ const OPEN = new Set(['offered', 'queued']);
  * disagree by one on a delivery's third failure.
  */
 export const DELIVERY_MAX_ATTEMPTS = 3;
-const claims = (d) => (Array.isArray(d?.events) ? d.events : []).filter((e) => e?.state === 'runner-claimed').length;
+const claims = (d) => (Array.isArray(d?.events) ? d.events : []).filter((e) => e?.state === 'claimed' || e?.state === 'runner-claimed').length;
 /** The drain rule on a WIRE record: never claimed, or failed with tries left. */
 export function isOpenDelivery(d) {
   if (OPEN.has(d?.state)) return true;

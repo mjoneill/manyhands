@@ -948,7 +948,8 @@ function projectDelivery(store, e) {
     const addE = (p, o) => store.add(oxigraph.triple(es, p, o));
     addE(A, nn(S + 'DeliveryEvent'));
     addE(nn(S + 'ofDelivery'), s);
-    if (ev['scrum:state']) addE(nn(S + 'state'), lit(String(ev['scrum:state'])));
+    // #1373 — the claim state is `claimed`; rows written as `runner-claimed` project under the new name.
+    if (ev['scrum:state']) addE(nn(S + 'state'), lit(String(ev['scrum:state']) === 'runner-claimed' ? 'claimed' : String(ev['scrum:state'])));
     if (ev['scrum:source']) addE(nn(S + 'source'), lit(String(ev['scrum:source'])));
     if (ev['scrum:at']) addE(nn(S + 'at'), lit(String(ev['scrum:at'])));
     if (Number.isInteger(ev['scrum:attempt'])) addE(nn(S + 'attempt'), num(ev['scrum:attempt']));

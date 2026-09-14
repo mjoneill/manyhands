@@ -154,9 +154,9 @@ export const KIND_DECLARATIONS = Object.freeze([
     createdBy: 'POST /api/deliveries (the fanout, for every channel-mode resident) / POST /api/deliveries/:id/events (the runner)',
     definition: 'WHAT HAPPENED TO ONE MESSAGE FOR ONE SEAT (#1346): the resident inbox as a record on the '
       + 'board rather than a side-file. One per (seat, message); an append-only list of typed events '
-      + '(offered → runner-claimed → turn-started → published | declined | failed), each with its source '
+      + '(offered → claimed → turn-started → published | declined | failed), each with its source '
       + '(fanout | guest-runner | presence-bridge), its attempt and its time. The runner drains "offered to '
-      + 'me, not yet claimed"; runner-claimed is the one atomic step, so a claim is never mistaken for a '
+      + 'me, not yet claimed"; claimed is the one atomic step (named for the act, not the consumer — #1373; `runner-claimed` is its alias), so a claim is never mistaken for a '
       + 'completed delivery and a retry keeps its attempt number. The seat-side half of one question — '
       + '"what happened to this message" — that the bridge answers for its own lane.',
   },
@@ -165,7 +165,7 @@ export const KIND_DECLARATIONS = Object.freeze([
     createdBy: 'the graph projection, one per entry of a Delivery\'s hasEvent[] (written by POST /api/deliveries/:id/events)',
     definition: 'ONE APPEND-ONLY STEP of a Delivery (#1346), minted by the projection so "how many were '
       + 'claimed and never published" is a filter over nodes rather than a string parse: `scrum:ofDelivery` '
-      + 'points home; `scrum:state` is what happened (offered · queued · runner-claimed · turn-started · '
+      + 'points home; `scrum:state` is what happened (offered · queued · claimed · turn-started · '
       + 'published · declined · failed); `scrum:source` is who did it (fanout · guest-runner · '
       + 'presence-bridge); `scrum:at`, `scrum:attempt`, and `scrum:reason` (whose act a terminal state '
       + 'was — explicit is the seat\'s own NO). Never edited: the latest by `scrum:at` is the current state.',

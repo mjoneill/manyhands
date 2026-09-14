@@ -3377,33 +3377,42 @@ const wakeToWire = (e) => ({ id: e['@id'], seat: e['scrum:wokeSeat'], at: e['scr
 // ── #1346 slice 2 — DELIVERIES: what happened to ONE message for ONE seat ──
 // The resident inbox as a record on the board, not a side-file. One per
 // (seat, message), APPEND-ONLY events; the runner drains "offered to me, not
-// yet claimed". `runner-claimed` is the one atomic step: a claim is never a
+// yet claimed". `claimed` is the one atomic step: a claim is never a
 // completed delivery, and a retry keeps its attempt number (the shape agreed
 // with the bridge side, so its trace and this record are one type).
 const DELIVERY_ID = () => `https://scrumboard.local/delivery/${crypto.randomUUID()}`;
 function deliveriesOf(data) { return Array.isArray(data.deliveries) ? data.deliveries : []; }
 const deliveryEvent = (op, e, actor) => ({ op, actor, entity: { kind: 'delivery', id: e['@id'] }, state: e });
-const DELIVERY_STATES = ['offered', 'queued', 'runner-claimed', 'turn-started', 'published', 'declined', 'failed'];
+// #1373 — the claim step is named for the ACT, not for its first consumer. It
+// was born `runner-claimed` when the resident runner was the only thing that
+// could take a delivery; the presence bridge takes one the same way (its
+// debounce window closes and ONE turn holds the message for an attempt), and
+// `scrum:source` already says which consumer. So the state is `claimed`, and
+// `runner-claimed` is an ALIAS on both write and read: existing rows are not
+// rewritten, existing runners and tests keep their word, and both read back
+// as `claimed`. `deliveryStateName` is the one place the alias lives.
+const deliveryStateName = (st) => (st === 'runner-claimed' ? 'claimed' : st);
+const DELIVERY_STATES = ['offered', 'queued', 'claimed', 'turn-started', 'published', 'declined', 'failed'];
 const DELIVERY_CLAIMABLE = new Set(['offered', 'queued', 'failed']);
 // "Open" = the runner's drain query: never claimed, or failed with tries left
 // (DELIVERY_MAX_ATTEMPTS, one constant shared with the status counter in
 // core/delivery.mjs). A retry budget, not a retry loop.
 const deliveryOpen = (e) => isOpenDelivery(deliveryToWire(e));
 const DELIVERY_SOURCES = new Set(['fanout', 'guest-runner', 'presence-bridge']);
-// What each step may follow. `runner-claimed` is DELIVERY_CLAIMABLE above.
+// What each step may follow. `claimed` is DELIVERY_CLAIMABLE above.
 const DELIVERY_NEXT = {
   offered: new Set(['offered', 'queued']), queued: new Set(['offered', 'queued']),
-  'turn-started': new Set(['runner-claimed']),
-  published: new Set(['runner-claimed', 'turn-started']), declined: new Set(['runner-claimed', 'turn-started']), failed: new Set(['runner-claimed', 'turn-started']),
+  'turn-started': new Set(['claimed']),
+  published: new Set(['claimed', 'turn-started']), declined: new Set(['claimed', 'turn-started']), failed: new Set(['claimed', 'turn-started']),
 };
 const deliveryEventsOf = (e) => (Array.isArray(e['scrum:hasEvent']) ? e['scrum:hasEvent'] : []);
-const deliveryState = (e) => deliveryEventsOf(e).at(-1)?.['scrum:state'] ?? 'offered';
+const deliveryState = (e) => deliveryStateName(deliveryEventsOf(e).at(-1)?.['scrum:state'] ?? 'offered');
 function deliveryToWire(e) {
   return {
     id: e['@id'], to: e['scrum:deliveredTo'], conversation: e['scrum:ofConversation'], offeredAt: e['scrum:offeredAt'],
     state: deliveryState(e),
     events: deliveryEventsOf(e).map((ev) => ({
-      state: ev['scrum:state'], at: ev['scrum:at'], source: ev['scrum:source'], by: ev.creator ?? null,
+      state: deliveryStateName(ev['scrum:state']), at: ev['scrum:at'], source: ev['scrum:source'], by: ev.creator ?? null,   // #1373 alias on read
       ...(Number.isInteger(ev['scrum:attempt']) ? { attempt: ev['scrum:attempt'] } : {}),
       ...(ev['scrum:reason'] ? { reason: ev['scrum:reason'] } : {}),
       ...(ev.text ? { note: ev.text } : {}),
@@ -4493,6 +4502,7 @@ async function handleCreateDeliveryEvent(req, res, id) {
     const body = JSON.parse(await readBody(req));
     const by = typeof body.by === 'string' && body.by.trim() ? body.by.trim() : null;
     if (!by) return sendJSON(res, 400, { error: 'by is required — who records this step. Declared, not authenticated.' });
+    body.state = deliveryStateName(body.state);   // #1373 — `runner-claimed` accepted, stored as `claimed`
     if (!DELIVERY_STATES.includes(body.state)) {
       return sendJSON(res, 400, { error: `state must be one of ${DELIVERY_STATES.join(' | ')} (got ${JSON.stringify(body.state)})` });
     }
@@ -4507,7 +4517,7 @@ async function handleCreateDeliveryEvent(req, res, id) {
       const latest = deliveryState(cur);
       // THE ATOMIC STEP. Under the write lock, so two runners reading "offered"
       // at once cannot both claim it: the second sees the first's claim here.
-      if (body.state === 'runner-claimed' && !DELIVERY_CLAIMABLE.has(latest)) {
+      if (body.state === 'claimed' && !DELIVERY_CLAIMABLE.has(latest)) {
         return { status: 409, wire: { error: `delivery is ${latest}; only an offered, queued or failed delivery can be claimed`, state: latest } };
       }
       // THE OTHER TRANSITIONS, guarded (slice 2 review): a step needs an open
@@ -4518,8 +4528,8 @@ async function handleCreateDeliveryEvent(req, res, id) {
       if (allowed && !allowed.has(latest)) {
         return { status: 409, wire: { error: `delivery is ${latest}; ${body.state} may follow only ${[...allowed].join(' | ')}`, state: latest } };
       }
-      const attempt = body.state === 'runner-claimed'
-        ? events.filter((ev) => ev['scrum:state'] === 'runner-claimed').length + 1
+      const attempt = body.state === 'claimed'
+        ? events.filter((ev) => deliveryStateName(ev['scrum:state']) === 'claimed').length + 1
         : (events.findLast((ev) => Number.isInteger(ev['scrum:attempt']))?.['scrum:attempt'] ?? null);
       const ev = {
         'scrum:state': body.state, 'scrum:at': new Date().toISOString(), 'scrum:source': source, creator: by,

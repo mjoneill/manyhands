@@ -66,7 +66,7 @@ test('#1346 the CLAIM is atomic and the rest is append-only: state names, attemp
 
     const claim = await ev({ state: 'runner-claimed' });
     assert.equal(claim.status, 201, JSON.stringify(claim.body));
-    assert.equal(claim.body.state, 'runner-claimed');
+    assert.equal(claim.body.state, 'claimed', '#1373 — written as runner-claimed, read back as claimed');
     assert.equal(claim.body.events.at(-1).attempt, 1, 'the first claim is attempt 1');
     const second = await ev({ state: 'runner-claimed' });
     assert.equal(second.status, 409, 'a second claim on a claimed item is refused — two runners cannot both hold it');
@@ -90,7 +90,7 @@ test('#1346 the CLAIM is atomic and the rest is append-only: state names, attemp
     // (…the story continues on a fresh record below; this one stays declined)
     const done = (await api(srv.baseUrl, 'GET', `/api/deliveries?conversation=${encodeURIComponent(msg.id)}`)).body.deliveries[0];
     assert.equal(done.state, 'declined');
-    assert.deepEqual(done.events.map((e) => e.state), ['offered', 'runner-claimed', 'turn-started', 'failed', 'runner-claimed', 'declined'],
+    assert.deepEqual(done.events.map((e) => e.state), ['offered', 'claimed', 'turn-started', 'failed', 'claimed', 'declined'],
       'nothing was overwritten: the whole path is on the record');
     const second_msg = (await post(srv.baseUrl, 'ada', 'and one that publishes')).body;
     const d2 = (await api(srv.baseUrl, 'POST', '/api/deliveries', { to: 'gizmo', conversation: second_msg.id, source: 'fanout', by: 'board' })).body;
@@ -136,8 +136,9 @@ test('#1346 the record is a GRAPH NODE: deliveredTo is a person edge, ofConversa
     assert.ok(rows.every((r) => String(r.d) === d.id), JSON.stringify(rows));
     assert.ok(rows.every((r) => /^person:gizmo$|person\/gizmo$/.test(String(r.to))), `deliveredTo is a person IRI (the route compacts prefixes) — ${rows[0].to}`);
     assert.ok(rows.every((r) => String(r.conv).endsWith(msg.id) && /^entity:|scrumboard\.local\/entity\//.test(String(r.conv))), `ofConversation is the message's entity IRI — ${rows[0].conv}`);
-    assert.deepEqual(rows.map((r) => String(r.state)), ['offered', 'runner-claimed']);
-    assert.deepEqual(rows.map((r) => String(r.src)), ['fanout', 'guest-runner']);
+    // ORDER BY ?state is alphabetical: 'claimed' now sorts before 'offered' (#1373).
+    assert.deepEqual(rows.map((r) => String(r.state)), ['claimed', 'offered'], '#1373 — the graph carries the new name for rows written under the old');
+    assert.deepEqual(rows.map((r) => String(r.src)), ['guest-runner', 'fanout']);
   } finally { await srv.stop(); }
 });
 
@@ -181,4 +182,37 @@ test('#1346 FANOUT — a channel-mode resident gets an `offered` record; a wake-
     assert.equal(all.length, 2);
     assert.ok(all.every((d) => d.events.length === 1));
   } finally { await pair.stop(); }
+});
+
+// #1373 — the claim state is named for the act. A BRIDGE lane takes a message
+// for one attempt exactly as the runner does; `source` says which consumer.
+// Written as `claimed`, and as `runner-claimed` (the alias), both read back
+// `claimed`, carry the same attempt numbers, and pass the same guard.
+test('#1373 the bridge chain offered → claimed(presence-bridge) → turn-started → published is accepted; runner-claimed is an alias on write and read; the guard is unchanged', async () => {
+  const srv = await startRestServer({ board: makeBoardFixture({ cards: [], nextShortId: 1 }) });
+  try {
+    const msg = (await api(srv.baseUrl, 'POST', '/api/conversations', { body: 'a post', author: 'bo' })).body;
+    const mk = async (to) => (await api(srv.baseUrl, 'POST', '/api/deliveries', { to, conversation: msg.id, source: 'presence-bridge', by: 'bridge' })).body;
+    const ev = (id, body) => api(srv.baseUrl, 'POST', `/api/deliveries/${encodeURIComponent(id)}/events`, { source: 'presence-bridge', by: 'bridge', ...body });
+    const d = await mk('lane-a');
+    assert.equal((await ev(d.id, { state: 'claimed' })).status, 201);
+    assert.equal((await ev(d.id, { state: 'claimed' })).status, 409, 'a second consumer is refused — the record that exactly one turn ran');
+    assert.equal((await ev(d.id, { state: 'turn-started' })).status, 201);
+    const pub = await ev(d.id, { state: 'published', reason: 'batch-ambiguous' });
+    assert.equal(pub.status, 201);
+    assert.deepEqual(pub.body.events.map((e) => e.state), ['offered', 'claimed', 'turn-started', 'published']);
+    assert.equal(pub.body.events[1].attempt, 1);
+    assert.equal(pub.body.events[3].reason, 'batch-ambiguous', 'the digest boundary rides as reason, not as an invented per-message edge');
+    assert.equal((await ev(d.id, { state: 'queued' })).status, 409, 'the guard is intact: nothing follows a terminal');
+
+    // the alias: an old runner still writes runner-claimed; a failed retry counts attempts across both spellings
+    const d2 = await mk('lane-b');
+    assert.equal((await ev(d2.id, { state: 'runner-claimed', source: 'guest-runner' })).status, 201);
+    assert.equal((await ev(d2.id, { state: 'claimed' })).status, 409, 'the alias holds the claim: a claimed delivery is not claimable under the other spelling');
+    assert.equal((await ev(d2.id, { state: 'failed', source: 'guest-runner' })).status, 201);
+    const retry = await ev(d2.id, { state: 'claimed' });
+    assert.equal(retry.status, 201);
+    assert.deepEqual(retry.body.events.map((e) => [e.state, e.attempt ?? null]), [['offered', null], ['claimed', 1], ['failed', 1], ['claimed', 2]], 'attempts count across both spellings');
+    assert.equal((await api(srv.baseUrl, 'POST', `/api/deliveries/${encodeURIComponent(d2.id)}/events`, { state: 'runner-clamed', source: 'guest-runner', by: 'x' })).status, 400, 'a misspelling is still refused');
+  } finally { await srv.stop(); }
 });

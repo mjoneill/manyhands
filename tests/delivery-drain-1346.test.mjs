@@ -155,7 +155,7 @@ test('#1346 DRAIN SEAM — N open deliveries → ONE digest turn; every record w
     assert.equal(after1[0].body, 'Gizmo read all three.');
     assert.equal((await open()).length, 0, 'nothing left open');
     for (const d of await all()) {
-      assert.deepEqual(d.events.map((e) => e.state), ['offered', 'runner-claimed', 'turn-started', 'published'], JSON.stringify(d.events));
+      assert.deepEqual(d.events.map((e) => e.state), ['offered', 'claimed', 'turn-started', 'published'], JSON.stringify(d.events));
       assert.ok(d.events.slice(1).every((e) => e.source === 'guest-runner' && e.by === 'gizmo'), 'the runner signs its steps');
       assert.equal(d.events.at(-1).attempt, 1);
     }
@@ -176,7 +176,7 @@ test('#1346 DRAIN SEAM — N open deliveries → ONE digest turn; every record w
     assert.equal(ollama.calls.length, 2);
     assert.equal((await posts()).length, 1, 'a decline posts nothing');
     const d4 = (await all()).find((d) => d.conversation === m4.id);
-    assert.deepEqual(d4.events.map((e) => e.state), ['offered', 'runner-claimed', 'turn-started', 'declined']);
+    assert.deepEqual(d4.events.map((e) => e.state), ['offered', 'claimed', 'turn-started', 'declined']);
     assert.equal(d4.events.at(-1).reason, 'explicit', 'the seat\'s own NO, and it says so');
     assert.equal((await open()).length, 0, 'a decline discharges the delivery');
 
@@ -226,11 +226,11 @@ test('#1346 STALE SWEEP — a delivery left at turn-started by a runner that die
     const r = await runOnce(env);
     assert.equal(r.code, 0, r.err + r.out);
     const byId = Object.fromEntries((await api(srv.baseUrl, 'GET', '/api/deliveries?to=gizmo')).body.deliveries.map((d) => [d.id, d]));
-    assert.deepEqual(byId[dead.id].events.map((e) => e.state), ['offered', 'runner-claimed', 'turn-started', 'failed', 'runner-claimed', 'turn-started', 'published'],
+    assert.deepEqual(byId[dead.id].events.map((e) => e.state), ['offered', 'claimed', 'turn-started', 'failed', 'claimed', 'turn-started', 'published'],
       `swept to failed, reclaimed at attempt 2, drained — ${JSON.stringify(byId[dead.id].events)}`);
     assert.equal(byId[dead.id].events[3].reason, 'stale', 'the sweep says why');
     assert.equal(byId[dead.id].events[4].attempt, 2);
-    assert.deepEqual(byId[live.id].events.map((e) => e.state), ['offered', 'runner-claimed'], 'a claim inside the window is somebody\'s turn in progress — untouched');
+    assert.deepEqual(byId[live.id].events.map((e) => e.state), ['offered', 'claimed'], 'a claim inside the window is somebody\'s turn in progress — untouched');
     assert.equal(ollama.calls.length, 1);
     assert.match(r.out + r.err, /stale/i, 'the sweep is logged');
   } finally { await ollama.stop(); await srv.stop(); }
