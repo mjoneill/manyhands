@@ -5192,6 +5192,27 @@ const STANDING_CHECKS = [
       + 'FILTER NOT EXISTS { ?k a scrum:KindDefinition ; schema:name ?name . '
       + 'FILTER(?name = CONCAT("scrum:", STRAFTER(STR(?type), "#"))) } } GROUP BY ?type ORDER BY DESC(?n)',
   },
+  {
+    // #1381 (#1380 item 3) — THE FILE, not the save path. The history gate
+    // exempts `board` and `wiki` from its guarded-word list by the mark
+    // `kind: system` in roster.json; without it their names are guarded and
+    // every push is refused (#600 in July, #1380 at 15:25Z on 2026-09-14 —
+    // found when a Settings save dropped the mark). #1380 fixed the save; a
+    // hand-edit, a restored backup or a regressed cleaner can still drop it,
+    // and the first symptom would again be the gate. This reads the file on
+    // every /api/checks and the daily digest (#1216) renders a row the day it
+    // appears. A missing roster file is NO rows: the defaults are code.
+    id: 'roster-system-seats',
+    claim: 'the roster\'s `board` and `wiki` seats carry `kind: system` — the mark the history gate exempts '
+      + 'them by; without it their names become guarded words and every push is refused (#600, #1380)',
+    run: () => {
+      const seats = loadRoster(undefined, () => {}) || {};
+      return ['board', 'wiki']
+        .filter((k) => Object.prototype.hasOwnProperty.call(seats, k))
+        .filter((k) => !(seats[k] && seats[k].kind === 'system'))
+        .map((k) => ({ seat: k, kind: (seats[k] && typeof seats[k].kind === 'string') ? seats[k].kind : null }));
+    },
+  },
 ];
 
 // ── #902 — WHAT A CHECK ACTUALLY LOOKS AT ────────────────────────────────────
@@ -5333,6 +5354,9 @@ async function handleChecks(req, res) {
     // things at once, which is the confusion this endpoint exists to refuse.
     const standing = STANDING_CHECKS.map((c) => {
       try {
+        // #1381 — a check may READ A FILE instead of the replica (`run`); same
+        // shape out, same digest line, same "an error is not an empty result".
+        if (typeof c.run === 'function') return { id: c.id, claim: c.claim, rows: c.run(data) ?? [] };
         const r = queryGraph(store, c.query);
         return { id: c.id, claim: c.claim, query: c.query, rows: r.rows ?? [] };
       } catch (e) {
