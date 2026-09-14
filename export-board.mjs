@@ -60,6 +60,7 @@ const DEFAULTS = {
   // the in-room archive — which is a legitimate and frequent need — has to be
   // asked for by name.
   raw: false,
+  dryRun: false,
   // 1.5 MB: the size that made the 2026-07-22 export usable. Parts are packed
   // UNDER it at record boundaries, so a part is never a torn message.
   maxBytes: 1_500_000,
@@ -117,6 +118,7 @@ function parseArgs(argv) {
     else if (flag === '--max-bytes') a.maxBytes = Number(argv[++i]);
     else if (flag === '--tolerance') a.tolerancePct = Number(argv[++i]);
     else if (flag === '--raw') a.raw = true;
+    else if (flag === '--dry-run') a.dryRun = true;   // #1375 — count residue, write nothing
     else if (flag === '--config') a.config = argv[++i];
     else if (flag === '--format') a.format = String(argv[++i]).toLowerCase();
     else if (flag === '--spaces') {
@@ -127,6 +129,11 @@ function parseArgs(argv) {
                             [--max-bytes N] [--tolerance PCT] [--base URL]
                             [--raw] [--config FILE]
 
+  --dry-run    run the selection through the scrub and REPORT — one JSON line
+               on stdout {mode, residue, byKind, samples, wouldPass, perKind} —
+               writing nothing. What the Settings page reads before the press
+               (#1375), so a refusal is never the first time anyone learns
+               which selection carries the residue.
   --raw        skip the export scrub and write the room verbatim. This is the
                IN-ROOM ARCHIVE: it carries every name and every word exactly as
                said. Default is scrubbed and fail-closed — residue refuses the
@@ -311,7 +318,11 @@ async function main() {
   }
   const setInfo = describeExportSet(board, args.spaces, overrides);
   console.log(`  received: ${allMessages.length} messages · ${allCards.length} cards · ${setInfo.included.length} of ${setInfo.included.length + setInfo.excluded.length} kinds selected\n`);
-  if (!allMessages.length && !allCards.length && !setInfo.included.some((x) => x.count)) die('the board came back empty — refusing to write an empty export');
+  const emptyDryRun = () => { process.stdout.write(JSON.stringify({ dryRun: true, mode: args.raw ? 'raw' : 'scrub', empty: true, wouldPass: false, residue: 0, byKind: {}, samples: [], perKind: {} }) + '\n'); process.exit(0); };
+  if (!allMessages.length && !allCards.length && !setInfo.included.some((x) => x.count)) {
+    if (args.dryRun) emptyDryRun();   // #1375 — an empty board is an answer to the page, not a failure
+    die('the board came back empty — refusing to write an empty export');
+  }
 
   // Chronological, ascending: the room's own order, oldest first, so the
   // archive reads the way the conversation happened.
@@ -349,7 +360,12 @@ async function main() {
     const section = inc.space.toUpperCase();
     for (const e of rows) records.push({ section, text: inc.prose ? renderProse(inc, e) : renderMachine(inc, e) });
   }
-  if (!records.length) die('nothing selected to export');
+  if (!records.length) {
+    // #1375 — a dry run on an empty selection is an answer, not a failure: the
+    // page asks this on every board, including one with nothing in it yet.
+    if (args.dryRun) emptyDryRun();
+    die('nothing selected to export');
+  }
 
   // ── #523: the export boundary ────────────────────────────────────────────
   // Same fail-closed contract as export-wiki.mjs (#459): transform, then refuse
@@ -358,7 +374,40 @@ async function main() {
   const mode = args.raw ? 'raw' : 'scrub';
   let scrubNote;
   let provenance = null;
+  // #1375 — the residue, counted PER KIND, is the answer to "which of my
+  // selections can the scrub pass". Computed in every mode (a raw export still
+  // tells its reader how many terms the scrub would have refused) and reported
+  // by --dry-run before anything is written. `sectionKind` maps a record's
+  // section back to the include word the page shows.
+  const sectionKind = (sec) => (sec === 'COMMONS' ? 'commons' : sec === 'CARDS + WIKI' ? 'cards' : sec.toLowerCase());
+  const residueReport = (config) => {
+    const byKind = {};
+    const samples = [];
+    let residue = 0;
+    const groups = new Map();
+    records.forEach((r, i) => { const k = sectionKind(r.section); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(i); });
+    for (const [k, idxs] of groups) {
+      const { residue: hits } = transformManyForExport(idxs.map((i) => records[i].text), config, { mode: 'scrub' });
+      if (hits.length) { byKind[k] = hits.length; residue += hits.length; }
+      for (const h of hits) if (samples.length < 10) samples.push({ kind: k, match: h.match, note: h.note, sample: h.sample });
+    }
+    return { residue, byKind, samples };
+  };
+  const dryRunExit = (config, provenanceLine) => {
+    const rep = residueReport(config);
+    const perKind = {};
+    if (args.spaces.includes('commons')) perKind.commons = records.filter((r) => r.section === 'COMMONS').length;
+    if (args.spaces.includes('cards')) perKind.cards = records.filter((r) => r.section === 'CARDS + WIKI').length;
+    for (const inc of setInfo.included) if (inc.space !== 'commons' && inc.space !== 'cards') perKind[inc.space] = records.filter((r) => sectionKind(r.section) === inc.space).length;
+    process.stdout.write(JSON.stringify({ dryRun: true, mode, wouldPass: mode === 'raw' || rep.residue === 0, ...rep, perKind, provenance: provenanceLine }) + '\n');
+    process.exit(0);
+  };
   if (mode === 'raw') {
+    if (args.dryRun) {
+      let cfg = GENERIC_TRANSFORMS;
+      try { cfg = JSON.parse(fs.readFileSync(args.config || defaultConfigPath(), 'utf8')); } catch { /* generic */ }
+      dryRunExit(cfg, 'raw — not scrubbed');
+    }
     scrubNote = 'RAW — NOT SCRUBBED. In-room archive; do not share outside the room.';
     console.log(`  ⚠️  --raw: no scrub. This archive carries the room's language verbatim.`);
   } else {
@@ -398,12 +447,18 @@ async function main() {
     // --raw branch; export-wiki.mjs called the composed one. Two copies of the
     // same decision drifted into different refusal semantics, which is how a
     // publication boundary came to mean different things in two files.
+    if (args.dryRun) dryRunExit(config, provenance.line);
     const { texts, residue } = transformManyForExport(records.map((r) => r.text), config, { mode });
     texts.forEach((t, i) => { records[i].text = t; });
     const samples = residue.slice(0, 10);
     const residueTotal = residue.length;
     if (residueTotal) {
-      die(`export refused — ${residueTotal} un-transformed term(s) survived the scrub.\n\n`
+      // #1375 — one machine-readable line BEFORE the prose, so the button can
+      // tell "the boundary refused" from "the export broke" without parsing
+      // a paragraph, and can say which selection carried the residue.
+      const rep = residueReport(config);
+      console.error(`EXPORT_REFUSED ${JSON.stringify({ refusedBy: 'scrub', residue: residueTotal, byKind: rep.byKind, samples: rep.samples })}`);
+      die(`REFUSED BY THE SCRUB BOUNDARY — ${residueTotal} un-transformed term(s) survived the scrub. This is the scrub working, not the export failing.\n\n`
         + samples.map((r) => `      • ${JSON.stringify(r.match)}${r.note ? ` (${r.note})` : ''}\n          …${r.sample}…`).join('\n')
         + (residueTotal > samples.length ? `\n      … and ${residueTotal - samples.length} more` : '')
         + `\n\n  A full commons export usually CANNOT be scrubbed into a publishable artifact —\n`

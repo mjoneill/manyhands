@@ -165,6 +165,10 @@ _exportStyle.textContent = `
   .export-run { width: 100%; }
   .export-status { font-size: 12px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto; }
   .export-status.err { color: #b3261e; }
+  .export-status.boundary { color: var(--ink, #222); border-left: 3px solid #b3261e; padding-left: 10px; }
+  .export-preview { font-size: 12px; line-height: 1.45; margin: 6px 0 10px; }
+  .export-preview.refuse { color: #b3261e; }
+  .export-preview.pass { color: #1d6b3a; }
 </style>
 <link rel="stylesheet" href="./core/header.css">
 <link rel="stylesheet" href="./core/constraints-view.css"><!-- #1350 what governs an agent -->
@@ -459,6 +463,8 @@ _exportStyle.textContent = `
       <div class="export-group" data-export-boundary>
         <h3>Boundary</h3>
         <p class="hint">How much is redacted before it leaves the room. Scrubbed is the default and it is fail-closed: an archive with residue is refused, not written.</p>
+        <!-- #1375 — computed from the LIVE selection, before the press: will the scrub pass it? -->
+        <p class="export-preview" data-export-preview aria-live="polite">checking the selection against the scrub…</p>
         <label class="export-row"><span>Un-scrubbed</span>
           <span><input id="export-raw" type="checkbox"> <span class="export-hint">in-room archive only</span></span>
         </label>
@@ -1176,7 +1182,48 @@ load();
   const kindsEl = $('export-kinds');
   const unregEl = panel.querySelector('[data-export-unregistered]');
   let rawAcknowledged = false;
-  const setStatus = (text, isError) => { statusEl.textContent = text; statusEl.classList.toggle('err', !!isError); };
+  const setStatus = (text, isError, boundary) => { statusEl.textContent = text; statusEl.classList.toggle('err', !!isError); statusEl.classList.toggle('boundary', !!boundary); };
+  const previewEl = panel.querySelector('[data-export-preview]');
+  const selectedSpaces = () => [...kindsEl.querySelectorAll('input[type=checkbox]:checked')].map((b) => b.value);
+  const splitText = (byKind) => Object.entries(byKind || {}).map(([k, n]) => `${k} ${n.toLocaleString()}`).join(' · ');
+
+  // #1375 — "how is it scrubbed if it just errors out?" The answer belongs on
+  // the page BEFORE the press: a dry run of the scrub over the current ticks.
+  // Debounced; the newest request wins so a stale answer never overwrites a
+  // fresh selection.
+  let previewSeq = 0;
+  let previewTimer = null;
+  const preview = () => {
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(async () => {
+      const seq = ++previewSeq;
+      const spaces = selectedSpaces();
+      if (!spaces.length) { previewEl.textContent = 'Tick at least one kind to include.'; previewEl.className = 'export-preview'; return; }
+      previewEl.textContent = 'checking the selection against the scrub…'; previewEl.className = 'export-preview';
+      try {
+        const r = await fetch('/api/export/preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ by: (window.CURRENT_USER || 'settings-ui'), spaces, raw: rawBox.checked === true }) });
+        const j = await r.json().catch(() => ({}));
+        if (seq !== previewSeq) return;
+        if (!r.ok) { previewEl.textContent = `could not check the selection: ${j.error || r.status}`; previewEl.className = 'export-preview'; return; }
+        const n = Number(j.residue) || 0;
+        if (j.empty) { previewEl.textContent = 'Nothing to export in this selection yet.'; previewEl.className = 'export-preview'; return; }
+        if (j.mode === 'raw') {
+          previewEl.textContent = n
+            ? `Un-scrubbed: nothing is redacted. (Scrubbed would refuse this selection — ${n.toLocaleString()} term${n === 1 ? '' : 's'}: ${splitText(j.byKind)}.)`
+            : 'Un-scrubbed: nothing is redacted. (Scrubbed would also pass this selection.)';
+          previewEl.className = 'export-preview';
+        } else if (n) {
+          previewEl.textContent = `Scrubbed will REFUSE this selection: ${n.toLocaleString()} term${n === 1 ? '' : 's'} the rules recognise but cannot rewrite (${splitText(j.byKind)}). That is the scrub working. For your own archive, use un-scrubbed; to make it leave the room, untick the kinds that carry the residue or add rules.`;
+          previewEl.className = 'export-preview refuse';
+        } else {
+          previewEl.textContent = 'Scrubbed will pass this selection — zero residue against the current rules.';
+          previewEl.className = 'export-preview pass';
+        }
+      } catch (e) {
+        if (seq === previewSeq) { previewEl.textContent = `could not check the selection: ${e && e.message ? e.message : e}`; previewEl.className = 'export-preview'; }
+      }
+    }, 250);
+  };
 
   try {
     const r = await fetch('/api/export/spaces');
@@ -1192,6 +1239,8 @@ load();
       label.append(box, name, n);
       kindsEl.append(label);
     }
+    kindsEl.addEventListener('change', preview);
+    preview();
     const u = Array.isArray(j.unregistered) ? j.unregistered : [];
     unregEl.textContent = u.length
       ? `Present but unregistered — not exportable until registered (#1215): ${u.map((x) => `${x.type} ×${x.count}`).join(', ')}`
@@ -1207,6 +1256,7 @@ load();
   rawBox.addEventListener('change', () => {
     rawAcknowledged = false;
     if (rawBox.checked) reveal(); else { rawConfirm.hidden = true; setStatus(''); }
+    preview();
   });
   $('export-raw-ack').addEventListener('click', () => {
     rawAcknowledged = true; rawConfirm.hidden = true;
@@ -1226,6 +1276,13 @@ load();
     try {
       const r = await fetch('/api/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       const j = await r.json().catch(() => ({}));
+      if (r.status === 409 && j.refusedBy === 'scrub') {
+        // #1375 — the boundary did its job. Say so, with the split and the door.
+        const n = Number(j.residue) || 0;
+        const top = (j.samples || []).slice(0, 3).map((x) => `  • ${x.match}${x.kind ? ` (${x.kind})` : ''}`).join('\n');
+        setStatus(`Refused by the scrub boundary — ${n.toLocaleString()} term${n === 1 ? '' : 's'} the rules recognise but cannot rewrite (${splitText(j.byKind)}). Nothing was written. This is the scrub working, not the export failing.\n${top ? `${top}\n` : ''}\nOptions: tick Un-scrubbed above for your own archive · untick the kinds carrying the residue · add rules for those terms.`, false, true);
+        return;
+      }
       if (!r.ok || !j.ok) {
         const where = j.wrote ? `\n\nTried to write: ${j.wrote}` : '';
         setStatus(`${j.error || `export failed (${r.status})`}${where}\n\n${j.detail || ''}`.trim(), true);

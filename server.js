@@ -4273,6 +4273,37 @@ async function handleExportSpaces(req, res) {
     sendJSON(res, 500, { error: e.message });
   }
 }
+// #1375 — the DRY RUN: same arguments, same child, `--dry-run`; the child
+// counts residue per kind and writes nothing. What the Settings page reads
+// from the live selection so the answer to "can scrubbed pass this?" is on
+// the page BEFORE the press, and the refusal is never the first time anyone
+// learns which selection carried it.
+async function handleExportPreview(req, res) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const by = typeof body.by === 'string' && body.by.trim() ? body.by.trim() : null;
+    if (!by) return sendJSON(res, 400, { error: 'by is required — who is asking. Declared, not authenticated (#1193).' });
+    const built = exportArgsFrom(body);
+    if (built.error) return sendJSON(res, 400, { error: built.error });
+    const { argv, settings } = built;
+    const { execFile } = await import('node:child_process');
+    const run = await new Promise((resolve) => {
+      execFile(process.execPath, [...argv, '--dry-run'], { cwd: PROJECT_DIR, maxBuffer: 8 << 20, timeout: 10 * 60 * 1000 },
+        (err, stdout, stderr) => resolve({ err, stdout: String(stdout || ''), stderr: String(stderr || '') }));
+    });
+    const line = run.stdout.trim().split('\n').reverse().find((l) => l.startsWith('{'));
+    let rep = null;
+    try { rep = line ? JSON.parse(line) : null; } catch { /* reported below */ }
+    if (run.err || !rep || rep.dryRun !== true) {
+      return sendJSON(res, 500, { error: 'the preview did not run', detail: (run.stderr || run.stdout || run.err?.message || '').trim().slice(-4000), settings });
+    }
+    sendJSON(res, 200, { mode: rep.mode, wouldPass: rep.wouldPass, residue: rep.residue, byKind: rep.byKind, samples: rep.samples, perKind: rep.perKind, provenance: rep.provenance, settings });
+  } catch (e) {
+    console.error('POST /api/export/preview:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+
 async function handleExport(req, res) {
   try {
     const body = JSON.parse(await readBody(req));
@@ -4301,6 +4332,22 @@ async function handleExport(req, res) {
 
     if (run.err || !parts.length || indexText == null) {
       const detail = (run.stderr || run.stdout || run.err?.message || '').trim().slice(-4000);
+      // #1375 — THE BOUNDARY REFUSING IS NOT THE EXPORT FAILING. The child says
+      // which on one machine line; the button passes that on as a 409 with the
+      // count and the per-kind split, so the page can say "the scrub is
+      // working — here is the door" instead of "did not produce an archive".
+      const refused = /^EXPORT_REFUSED (\{.*\})$/m.exec(run.stderr || '');
+      if (refused) {
+        let rep = null;
+        try { rep = JSON.parse(refused[1]); } catch { /* fall through to the 500 */ }
+        if (rep && rep.refusedBy === 'scrub') {
+          return sendJSON(res, 409, {
+            refusedBy: 'scrub', residue: rep.residue, byKind: rep.byKind || {}, samples: rep.samples || [],
+            error: `refused by the scrub boundary — ${rep.residue} term(s) the rules recognise but cannot rewrite survived the scrub. This is the scrub working, not the export failing.`,
+            detail, wrote: out, settings,
+          });
+        }
+      }
       return sendJSON(res, 500, {
         error: 'the export did not produce a readable archive',
         // ⛔ The child's own words, not a summary of them. A permissions refusal
@@ -8811,6 +8858,7 @@ const API_ROUTES = [
   { method: 'GET',    re: /^\/api\/insights$/,             fn: (req, res) => handleInsights(req, res) },              // #1290 shadow
   { method: 'POST',   re: /^\/api\/model-calls$/,          fn: (req, res) => handleCreateModelCall(req, res) }, // #1202
   { method: 'POST',   re: /^\/api\/export$/,               fn: (req, res) => handleExport(req, res) },       // #1266
+  { method: 'POST',   re: /^\/api\/export\/preview$/,       fn: (req, res) => handleExportPreview(req, res) },   // #1375 dry run
   { method: 'GET',    re: /^\/api\/export\/spaces$/,      fn: (req, res) => handleExportSpaces(req, res) },   // #1321
   { method: 'GET',    re: /^\/api\/wakes$/,                fn: (req, res) => handleListWakes(req, res) },
   { method: 'POST',   re: /^\/api\/wakes$/,                fn: (req, res) => handleCreateWake(req, res) },
