@@ -64,7 +64,6 @@ import { buildLinkIndex } from './core/links.mjs';
 import { commentMetadata } from './core/card-comments.mjs';
 import { cardOutline } from './core/card-outline.mjs';
 import { roleSectionFor, heldRoleKey } from './core/role-section.mjs';   // #1376
-import { censusByType } from './core/graph-replica.mjs';   // #1397
 import { validateDeclaration, seatState, tendingEligibility, declarationsFromRows, UNKNOWN as SEAT_UNKNOWN } from './core/seat-state.mjs';
 import { readConfig, writeConfig, LIMITS } from './channel-config.mjs';
 import { droppedAgentSeats, loadRoster, writeRoster, rosterFilePath, loadRosterRoles } from './core/roster-config.mjs';
@@ -6903,6 +6902,9 @@ function kindsSummary(data) {
       // every real type was reported as undeclared. Two false lists,
       // opposite directions, one mistyped constant — the exact clean-zero
       // failure this feature exists to expose, shipped inside the feature.
+      // The modules are lazy (#868: server.js boots without oxigraph); a live
+      // _graphStore means loadGraphModules() already ran, so this never awaits.
+      const { censusByType } = _graphModules;
       for (const [iri, n] of Object.entries(censusByType(_graphStore))) {
         const t = shortenTypeIri(iri);
         counts[t] = (counts[t] ?? 0) + n;
