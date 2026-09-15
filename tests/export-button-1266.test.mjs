@@ -198,6 +198,25 @@ test('#1266 ⭐⭐ END TO END — the press produces a real archive the operator
  */
 import { withBrowserServer } from './helpers/harness.mjs';
 
+// #1394 — a click is a CDP round trip and the page's handler runs after it;
+// reading the instant after (`hidden` still true) went red on CI 2026-09-15
+// (#1131 family, same shape as #1393). Wait for the observable, and on a miss
+// say what the panel looked like instead of just the wrong boolean.
+async function expectAfterClick(page, selector, prop, want, why) {
+  try {
+    await page.waitForFunction((sel, p, w) => document.querySelector(sel)?.[p] === w, { timeout: 5000, polling: 50 }, selector, prop, want);
+  } catch (_) {
+    const state = await page.evaluate(() => ({
+      raw: document.getElementById('export-raw')?.checked ?? null,
+      confirmHidden: document.getElementById('export-raw-confirm')?.hidden ?? null,
+      ack: !!document.getElementById('export-raw-ack'),
+      status: document.getElementById('export-status')?.textContent ?? null,
+    }));
+    throw new Error(`#1394 ${why} — ${selector}.${prop} never became ${want} within 5 s; panel: ${JSON.stringify(state)}`);
+  }
+  assert.equal(await page.$eval(selector, (el, p) => el[p], prop), want, why);
+}
+
 test('#1266 ⭐⭐ THE PRESS — and un-scrubbed takes TWO deliberate acts, not one', async () => {
   const out = inRoot(`.scrum-export-btn-${process.pid}`);
   fs.rmSync(out, { recursive: true, force: true });
@@ -218,8 +237,7 @@ test('#1266 ⭐⭐ THE PRESS — and un-scrubbed takes TWO deliberate acts, not 
 
     await page.$eval('#export-out', (el, v) => { el.value = v; }, out);
     await page.click('#export-raw');
-    assert.equal(await page.$eval('#export-raw-confirm', (el) => el.hidden), false,
-      'ticking un-scrubbed reveals the warning rather than arming it');
+    await expectAfterClick(page, '#export-raw-confirm', 'hidden', false, 'ticking un-scrubbed reveals the warning rather than arming it');
 
     // ⛔ AN ACKNOWLEDGEMENT MUST NOT OUTLIVE THE CHOICE IT WAS GIVEN FOR.
     // Confirm, change your mind, tick again — the confirmation must be gone, or
@@ -230,10 +248,9 @@ test('#1266 ⭐⭐ THE PRESS — and un-scrubbed takes TWO deliberate acts, not 
     // reason an unrelated test's server failed to start there.
     await page.click('#export-raw-ack');
     await page.click('#export-raw');
-    assert.equal(await page.$eval('#export-raw', (el) => el.checked), false);
+    await expectAfterClick(page, '#export-raw', 'checked', false, 'changing your mind un-ticks');
     await page.click('#export-raw');
-    assert.equal(await page.$eval('#export-raw-confirm', (el) => el.hidden), false,
-      're-ticking must ask again, not remember');
+    await expectAfterClick(page, '#export-raw-confirm', 'hidden', false, 're-ticking must ask again, not remember');
 
     // ⛔ THE NEGATIVE CONTROL. One act must not be enough.
     await page.click('#export-run');
