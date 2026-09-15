@@ -79,6 +79,33 @@ test('#1367 served: 20 KB + three refs create → saved whole → preview links 
     assert.ok(h > 120, `create textarea grew past the old 120px cap (got ${h})`);
 
     await clickWhenOnTop(page, '.mh-editor:has(#card-desc) [data-editor-preview]');
+    // #1393 — wait for the OBSERVABLE, never read the instant after a click.
+    // The preview render is synchronous once the click lands, but the click
+    // is a CDP round trip and the form is mid-transition; this went `[]` twice
+    // on 2026-09-15 under load (0/19 reproductions on demand — the mechanism
+    // is still a hypothesis, so on a miss the failure NAMES the state instead
+    // of just the empty array).
+    try {
+      await page.waitForFunction(
+        () => document.querySelectorAll('.mh-editor:has(#card-desc) .mh-editor-preview:not([hidden]) a[data-shortid]').length === 3,
+        { timeout: 5000, polling: 100 },
+      );
+    } catch (_) {
+      const state = await page.evaluate(() => {
+        const ed = document.querySelector('.mh-editor:has(#card-desc)');
+        const pv = ed?.querySelector('.mh-editor-preview');
+        return {
+          previewing: ed?.classList.contains('previewing') ?? null,
+          previewHidden: pv?.hidden ?? null,
+          previewLinks: pv?.querySelectorAll('a[data-shortid]').length ?? null,
+          previewChars: pv?.textContent.length ?? null,
+          textareaChars: document.getElementById('card-desc')?.value.length ?? null,
+          pressed: ed?.querySelector('[data-editor-preview]')?.getAttribute('aria-pressed') ?? null,
+          wrapperClass: document.getElementById('add-card-form-wrapper')?.className ?? null,
+        };
+      });
+      assert.fail(`#1393 preview never showed three refs within 5 s — state: ${JSON.stringify(state)}`);
+    }
     const refs = await page.$$eval('.mh-editor:has(#card-desc) .mh-editor-preview a[data-shortid]',
       (els) => els.map((a) => [a.dataset.shortid, a.title]));
     assert.deepEqual(refs, [['1', 'first card'], ['2', 'second card'], ['3', 'third card']],
