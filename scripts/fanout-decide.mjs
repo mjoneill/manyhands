@@ -155,6 +155,9 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
     // would suppress the exact #624 incident this watch was built for. One
     // tick later the cases separate: clients reconnect, sessions return to
     // baseline, and streams that failed to re-open leave receivers behind.
+    // #1395 — a suppressed episode re-arms for a DEEPER drop than the one the
+    // declaration covered; without this, `warned` would swallow the collapse.
+    if (st.warned && st.maintenanceSuppressed?.signature?.startsWith('drop:') && receivers < st.maintenanceSuppressed.receivers) st.warned = false;
     const receiversDelta = receivers - st.pendingFrom;
     const sessionsDelta = sessions - (st.pendingSessionsFrom ?? sessions);
     const clientsLeft = sessionsDelta <= receiversDelta;
@@ -162,7 +165,23 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
     const sig = `drop:${receivers}`;
     const deepest = deepestMuted('drop:');
     const inCooldown = deepest != null && receivers >= deepest;
-    if (!st.warned && !inCooldown && !clientsLeft) {
+    // #1395 — a DECLARED restart's real signature is THIS branch, not the floor's:
+    // streams die under live sessions and come back. On 2026-09-15 the marker
+    // fired at 15:00:22Z and this line posted at 15:09:52Z because only the
+    // floor branch read `maintenance`. Same rule as #1273 there: the declaration
+    // covers the EXPECTED drop, so the first reading inside the window is
+    // recorded (never silently dropped) and not posted; a drop that DEEPENS past
+    // that recorded reading is a new fact and still posts.
+    const deeperThanDeclared = st.maintenanceSuppressed?.signature?.startsWith('drop:')
+      && receivers < st.maintenanceSuppressed.receivers;
+    const suppressedByMaintenance = Boolean(maintenance) && !clientsLeft && !deeperThanDeclared;
+    if (!st.warned && !inCooldown && !clientsLeft && suppressedByMaintenance) {
+      st.maintenanceSuppressed = {
+        at: now, signature: sig, receivers, sessions, by: maintenance.by ?? null,
+        announcedAt: maintenance.at ?? null,
+      };
+      st.warned = true;                                   // gated once, exactly like a cooldown-suppressed drop
+    } else if (!st.warned && !inCooldown && !clientsLeft) {
       warnBody = `⚠️ fanout watch: receivers dropped ${st.pendingFrom} → ${receivers} and stayed there `
         + `across two ticks while sessions held (${st.pendingSessionsFrom} → ${sessions}) — `
         + `${st.pendingFrom - receivers} stream(s) died under live sessions, which is deafness `
