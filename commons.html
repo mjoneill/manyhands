@@ -575,14 +575,63 @@
       return all;
     }
 
+    // #1392 — the poll keeps STATE and reads DELTAS. Measured 2026-09-15 on
+    // prod: the previous shape fetched every conversation (45 MB, 27k
+    // messages, 0.5 s of REST) and every card page, every 8 s, per open tab,
+    // and re-rendered whether or not anything had changed — ~80 MB of JSON
+    // churn per tick and ~6 % of REST's single thread for a panel that moves
+    // a few times a day. Now: one full read at boot, then `since=` /
+    // `updatedSince=` (both already served) merged into these maps, and a
+    // render only when a delta actually arrived.
+    //
+    // Both server filters are INCLUSIVE (`>=`), so the newest row comes back
+    // again each tick — the merge is keyed by id, so that costs one row, not
+    // a rebuild. Stamps advance from what the SERVER returned, never from
+    // this machine's clock. A card deleted after boot stays in the map until
+    // reload; the panel already skips `done`, and deletion is rare enough
+    // that a reload is the honest answer rather than a fourth read. The same
+    // class: a raise message REDACTED after boot — `since=` never returns a
+    // removed row, so that hand stays up until reload (2 redactions in 31k
+    // events when this shipped; the review that found it is on #1392).
+    const blocked = { convos: new Map(), cards: new Map(), convoSince: null, cardSince: null, loaded: false };
+    const maxStamp = (cur, rows, key) => rows.reduce((m, r) => (typeof r[key] === 'string' && (!m || r[key] > m) ? r[key] : m), cur);
     async function refreshBlocked() {
       try {
-        const [convos, cards] = await Promise.all([
-          fetch('/api/conversations').then((r) => r.json()),
-          fetchCardSummaries(),
-        ]);
-        const cardById = new Map((Array.isArray(cards) ? cards : []).map((c) => [c.id, c]));
-        const raises = openRaises(Array.isArray(convos) ? convos : [], cardById);
+        let changed = false;
+        if (!blocked.loaded || !blocked.convoSince || !blocked.cardSince) {
+          const [convos, cards] = await Promise.all([
+            fetch('/api/conversations').then((r) => r.json()),
+            fetchCardSummaries(),
+          ]);
+          for (const m of (Array.isArray(convos) ? convos : [])) blocked.convos.set(m.id, m);
+          for (const c of (Array.isArray(cards) ? cards : [])) blocked.cards.set(c.id, c);
+          blocked.convoSince = maxStamp(blocked.convoSince, [...blocked.convos.values()], 'createdAt');
+          blocked.cardSince = maxStamp(blocked.cardSince, [...blocked.cards.values()], 'updatedAt');
+          blocked.loaded = true;
+          changed = true;
+        } else {
+          const [convos, res] = await Promise.all([
+            fetch('/api/conversations?since=' + encodeURIComponent(blocked.convoSince)).then((r) => r.json()),
+            fetch('/api/cards?limit=500&updatedSince=' + encodeURIComponent(blocked.cardSince)).then((r) => r.json()),
+          ]);
+          const cards = res && Array.isArray(res.cards) ? res.cards : [];
+          for (const m of (Array.isArray(convos) ? convos : [])) {
+            if (!m || blocked.convos.has(m.id)) continue;
+            blocked.convos.set(m.id, m);
+            changed = true;
+          }
+          for (const c of cards) {
+            const prev = blocked.cards.get(c.id);
+            if (prev && prev.updatedAt === c.updatedAt) continue;
+            blocked.cards.set(c.id, c);
+            changed = true;
+          }
+          blocked.convoSince = maxStamp(blocked.convoSince, Array.isArray(convos) ? convos : [], 'createdAt');
+          blocked.cardSince = maxStamp(blocked.cardSince, cards, 'updatedAt');
+        }
+        if (!changed) return;
+        const cardById = blocked.cards;
+        const raises = openRaises([...blocked.convos.values()], cardById);
         blockedToggle.textContent = `🚧 Raised hands · ${raises.length}`;
         blockedToggle.classList.toggle('has-items', raises.length > 0);
         renderBlocked(raises, cardById);
