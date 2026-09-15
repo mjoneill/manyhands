@@ -81,6 +81,7 @@ import { queryCards, facetCards } from './core/cards-query.mjs';
 import { similarCards } from './core/similar-cards.mjs';
 import { queryChangesFromLog } from './core/changes-log-query.mjs';
 import { readEvents, oldestRetainedAt, seqAsOf, seqOfEntityEvent, activityReadWindow, advanceActivityCursor } from './core/event-log.mjs';
+import { writeSnapshot, readSnapshot, sweepSnapshotTemps } from './core/graph-snapshot.mjs';   // #884
 // #683 — the deafness cure's server half. REST owns the event log, so it owns
 // the cursors that index it; mcp-server asks over HTTP rather than learning a
 // path it has no business knowing (#767).
@@ -1142,6 +1143,14 @@ let _graphDirty = true;
 // events are read after an awaited, yielding projection, so that cursor can be
 // newer than the bytes actually in the store.
 let _graphProjectedThrough = null;
+// #884 — the event-log seq the last snapshot was taken at, and how many
+// events may pass before the next one. 0 = no snapshot written by this
+// process yet (a warm boot sets it to the loaded snapshot's seq).
+const GRAPH_SNAPSHOT_EVERY = Number(process.env.SCRUM_GRAPH_SNAPSHOT_EVERY || 500);
+const GRAPH_SNAPSHOT_DIR = path.dirname(BOARD_DATA_FILE);
+let _graphSnapshotSeq = 0;
+let _graphSnapshotWriting = false;
+let _graphDocStamp = null;   // the document `lastUpdated` the store was last synced from; travels in the sidecar
 // #931 — HOW MANY WRITES HAVE HAPPENED. Monotonic, bumped beside every
 // `_graphDirty = true`. The sync compares it before and after: if a write
 // landed while the projection was yielding, the generation moved and the flag
@@ -1403,7 +1412,25 @@ async function warmGraphStoreOnce() {
     // document is read. Everything below describes the board as of this moment;
     // if `_graphGeneration` has moved by the time we finish, it does not.
     const genAtStart = _graphGeneration;
-    if (!_graphStore) { _graphStore = buildGraphStore({ '@graph': [] }); _activitySeq = 0; _activityAt = null; }
+    if (!_graphStore) {
+      // #884 — WARM if a usable snapshot sits beside the board: the store, its
+      // sync cache and its log position come from disk (~1 s on the prod
+      // shape) and the sync below re-projects only what changed since. COLD
+      // otherwise — the path this used to take on every boot — and the reason
+      // is in the log, because "a boot took 30 s" must be explainable.
+      const { default: oxigraph } = await import('oxigraph');
+      const swept = sweepSnapshotTemps(GRAPH_SNAPSHOT_DIR);
+      if (swept) console.error(`${new Date().toISOString()} graph-replica: swept ${swept} snapshot temp file(s) left by an interrupted write`);
+      const snap = readSnapshot(GRAPH_SNAPSHOT_DIR, { logHeadSeq: seqAsOf(EVENT_LOG_DIR, '\uffff'), oxigraph });
+      if (snap.ok) {
+        _graphStore = snap.store; _graphHashes = snap.hashes; _graphSignals = snap.signals;
+        _activitySeq = snap.seq; _activityAt = snap.at; _graphSnapshotSeq = snap.seq;
+        console.error(`${new Date().toISOString()} graph-replica: boot WARM from snapshot seq=${snap.seq} (${snap.triples} triples, ${snap.hashes.size} cached entities) in ${Math.round(snap.ms)}ms`);
+      } else {
+        _graphStore = buildGraphStore({ '@graph': [] }); _activitySeq = 0; _activityAt = null;
+        console.error(`${new Date().toISOString()} graph-replica: boot COLD — ${snap.reason}: ${snap.detail}`);
+      }
+    }
     // #949 — the document and its stamp are read as ONE act. `writeBoard`
     // stamps the board and its events with the same instant, so this snapshot's
     // `lastUpdated` maps exactly onto a position in the event log. Capturing it
@@ -1411,6 +1438,7 @@ async function warmGraphStoreOnce() {
     // a different file than the one we are about to project.
     const domain = loadDomain(BOARD_DATA_FILE);
     const docStamp = typeof domain?.lastUpdated === 'string' ? domain.lastUpdated : null;
+    _graphDocStamp = docStamp;
     const doc = domainToJsonLd(domain);
     // #884 — CHUNKED, so the projection yields to the event loop between batches.
     //
@@ -1533,10 +1561,46 @@ async function warmGraphStoreOnce() {
       console.error(`${new Date().toISOString()} graph-replica: a write landed mid-sync (generation ${genAtStart} → ${_graphGeneration}); staying dirty so the next query re-projects`);
     }
     rebuiltMs = Math.round(performance.now() - t);
+    // #884 — snapshot when GRAPH_SNAPSHOT_EVERY events have passed since the
+    // last one. Only from a clean state (nothing landed mid-sync), only when
+    // no write is already running, and off this tick so the caller's answer
+    // goes out first: the dump is synchronous (~1.2 s on the prod shape).
+    if (_graphGeneration === genAtStart && _activitySeq - _graphSnapshotSeq >= GRAPH_SNAPSHOT_EVERY) {
+      setImmediate(() => snapshotGraphStore('every ' + GRAPH_SNAPSHOT_EVERY + ' events'));
+    }
     console.error(`${new Date().toISOString()} graph-replica: synced ${stats.updated} updated, ${stats.removed} removed of ${stats.total} entities (hashed ${stats.hashed}, reused ${stats.reused}), +${activities} activities (through seq ${_activitySeq}) → ${_graphStore.size} triples in ${rebuiltMs}ms` + (stats.projection?.n ? ` · #1369 per-entity projection n=${stats.projection.n} p50=${stats.projection.p50}ms p95=${stats.projection.p95}ms max=${stats.projection.max}ms (${stats.projection.slowest.type})` : ''));
   }
   return { store: _graphStore, rebuiltMs, projectedThrough: _graphProjectedThrough };
 }
+
+// #884 — write the snapshot. Never throws to a caller: a failed dump is a log
+// line and the next boot is cold, which is where every boot was before this.
+function snapshotGraphStore(why) {
+  if (!_graphStore || _graphSnapshotWriting) return null;
+  if (_graphDirty) return null;   // the store is behind the document; a snapshot of it would be too
+  _graphSnapshotWriting = true;
+  try {
+    const w = writeSnapshot(GRAPH_SNAPSHOT_DIR, {
+      store: _graphStore, seq: _activitySeq, at: _activityAt, docStamp: _graphDocStamp,
+      hashes: _graphHashes, signals: _graphSignals,
+    });
+    _graphSnapshotSeq = _activitySeq;
+    console.error(`${new Date().toISOString()} graph-replica: snapshot written (${why}) seq=${w.seq} ${w.triples} triples ${(w.bytes / 1048576).toFixed(1)} MB in ${Math.round(w.ms)}ms`);
+    return w;
+  } catch (e) {
+    console.error(`${new Date().toISOString()} graph-replica: SNAPSHOT NOT WRITTEN (${why}): ${e?.message} — the next boot is cold`);
+    return null;
+  } finally {
+    _graphSnapshotWriting = false;
+  }
+}
+// launchd's `kickstart -k` and a deploy both stop this process with SIGTERM.
+// A snapshot at the head of the log makes the boot that follows warm; without
+// this handler the process died mid-nothing and the next boot replayed all.
+process.once('SIGTERM', () => {
+  try { snapshotGraphStore('SIGTERM'); } catch { /* logged inside */ }
+  process.exit(0);
+});
 
 /**
  * #949 — WHAT STORE STATE DOES THIS ANSWER REPRESENT?
