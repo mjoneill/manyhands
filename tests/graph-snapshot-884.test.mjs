@@ -192,3 +192,19 @@ test('#884 an interrupted write\'s temp files are swept, and only those', () => 
   assert.deepEqual(fs.readdirSync(dir).sort(), ['graph-snapshot.json', 'graph-snapshot.nq', 'unrelated.tmp-1'], 'the real pair and a stranger\'s file survive');
   assert.equal(readSnapshot(dir, { logHeadSeq: 1, oxigraph }).ok, true);
 });
+
+test('#884 a SIGTERM that cannot snapshot (store dirty) SAYS SO — the skip is a logged decision, not silence', async () => {
+  const s = await startRestServer({ board: makeBoardFixture({ cards: [], nextShortId: 1 }), env: { SCRUM_GRAPH_SNAPSHOT_EVERY: '1000000' } });
+  const dir = path.dirname(s.boardFile);
+  try {
+    await sparql(s.baseUrl, 'ASK { ?a a prov:Activity }');           // store warmed and clean
+    await createCard(s.baseUrl, 'a write AFTER the last sync');      // dirties the store; no query follows, so no sync
+    const port = new URL(s.baseUrl).port;
+    const pid = Number(execSync(`lsof -nP -iTCP:${port} -sTCP:LISTEN -t`).toString().trim().split('\n')[0]);
+    process.kill(pid, 'SIGTERM');
+    assert.ok(await s.waitForStderr(/graph-replica: snapshot skipped \(SIGTERM\): store is behind the document/, 8000), `the skip must name its reason; stderr:\n${s.stderr().slice(-600)}`);
+    assert.equal(fs.existsSync(snapshotPaths(dir).meta), false, 'and nothing was written from a dirty store');
+  } finally {
+    await s.stop();
+  }
+});

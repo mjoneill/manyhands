@@ -1577,8 +1577,12 @@ async function warmGraphStoreOnce() {
 // #884 — write the snapshot. Never throws to a caller: a failed dump is a log
 // line and the next boot is cold, which is where every boot was before this.
 function snapshotGraphStore(why) {
-  if (!_graphStore || _graphSnapshotWriting) return null;
-  if (_graphDirty) return null;   // the store is behind the document; a snapshot of it would be too
+  if (!_graphStore) return null;
+  // A skipped snapshot is a decision, and a decision that leaves no trace is
+  // indistinguishable from a bug (13:00Z on 09-15: no SIGTERM line, twenty
+  // minutes of wondering). Say which reason, then skip.
+  if (_graphSnapshotWriting) { console.error(`${new Date().toISOString()} graph-replica: snapshot skipped (${why}): a write is already in progress`); return null; }
+  if (_graphDirty) { console.error(`${new Date().toISOString()} graph-replica: snapshot skipped (${why}): store is behind the document (a write landed after the last sync) — the next boot loads the previous snapshot and replays forward`); return null; }
   _graphSnapshotWriting = true;
   try {
     const w = writeSnapshot(GRAPH_SNAPSHOT_DIR, {
