@@ -82,6 +82,7 @@ import { similarCards } from './core/similar-cards.mjs';
 import { queryChangesFromLog } from './core/changes-log-query.mjs';
 import { readEvents, oldestRetainedAt, seqAsOf, seqOfEntityEvent, activityReadWindow, advanceActivityCursor } from './core/event-log.mjs';
 import { writeSnapshot, readSnapshot, sweepSnapshotTemps } from './core/graph-snapshot.mjs';   // #884
+import { staleClaims, STALE_CLAIM_HOURS } from './core/stale-claims.mjs';   // #455
 // #683 — the deafness cure's server half. REST owns the event log, so it owns
 // the cursors that index it; mcp-server asks over HTTP rather than learning a
 // path it has no business knowing (#767).
@@ -5334,6 +5335,27 @@ const STANDING_CHECKS = [
         .filter((k) => !(seats[k] && seats[k].kind === 'system'))
         .map((k) => ({ seat: k, kind: (seats[k] && typeof seats[k].kind === 'string') ? seats[k].kind : null }));
     },
+  },
+  {
+    // #455 — a claim whose holder has written nothing on the card for N hours.
+    // A claim is the only record that a seat is mid-something, and a dead or
+    // idle holder's looks identical to a live one; on 2026-09-14 a card was
+    // held ~5 h in silence and the room found out because a human asked by
+    // hand. This row is the ask's evidence — the adapter's tick posts ONE
+    // commons line per episode from it (core/stale-claim-ask.mjs) and the
+    // holder clears it with any write on the card, including a one-line
+    // answer naming the next check. It never reclaims. Reads the event log
+    // only when some claim is old enough to be stale, and only from the
+    // oldest such claim forward.
+    id: 'stale-claims',
+    claim: `every held card has a write from its holder on it within the last ${STALE_CLAIM_HOURS} h — `
+      + 'or the holder has said when the next one comes; a silent claim is asked about, never reclaimed (#455)',
+    run: (data) => staleClaims({
+      cards: data.cards || [],
+      conversations: data.conversations || [],
+      events: (since) => readEvents(EVENT_LOG_DIR, { sinceDate: since }),
+      now: new Date().toISOString(),
+    }),
   },
 ];
 

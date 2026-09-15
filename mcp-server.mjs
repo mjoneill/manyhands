@@ -54,6 +54,7 @@ import { tendingEnabled, quietAfterMinutes } from './tending-config.mjs';
 // standing[] at fire time. Same quiet rule, same window discipline, same mint.
 import { digestTick } from './core/digest.mjs';
 import { makeChecksTick } from './core/checks-tick.mjs';   // #1388
+import { staleClaimAskTick } from './core/stale-claim-ask.mjs';   // #455
 // #1215 — the unregistered-thing emitter: the board announces a newly-seen
 // undeclared kind once, as itself. Reads the same standing[] the digest reads.
 import { emitterTick } from './core/unregistered-emitter.mjs';
@@ -2532,9 +2533,22 @@ const emitterTickOnce = async (checks) => {
 // does not get its own interval. The deadline is shorter than the tick so a
 // slow board costs one abort, never a queue.
 const CHECKS_TIMEOUT_MS = Number(process.env.MCP_CHECKS_TIMEOUT_MS ?? 45_000);
+// ── #455 — the stale-claim ask: one commons line per silence episode, from
+// the `stale-claims` standing rows of the same shared read. The holder clears
+// it by writing on the card; nothing here reclaims.
+const staleClaimAskOnce = async (checks) => {
+  const std = (checks?.standing || []).find((s) => s.id === 'stale-claims');
+  const rows = (!std || std.error) ? null : (Array.isArray(std.rows) ? std.rows : []);   // unreadable ⇒ ask nothing, forget nothing
+  return staleClaimAskTick({
+    now: new Date().toISOString(),
+    rows,
+    post: (body) => apiCall('POST', '/api/conversations', body),
+    log: (line) => console.error(line),
+  });
+};
 const checksTick = makeChecksTick({
   fetchChecks: ({ signal }) => apiCall('GET', '/api/checks', undefined, { signal }),
-  consumers: [digestTickOnce, emitterTickOnce],
+  consumers: [digestTickOnce, emitterTickOnce, staleClaimAskOnce],
   timeoutMs: CHECKS_TIMEOUT_MS,
   log: (line) => console.error(line),
 });
