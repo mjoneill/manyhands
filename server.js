@@ -64,6 +64,7 @@ import { buildLinkIndex } from './core/links.mjs';
 import { commentMetadata } from './core/card-comments.mjs';
 import { cardOutline } from './core/card-outline.mjs';
 import { roleSectionFor, heldRoleKey } from './core/role-section.mjs';   // #1376
+import { censusByType } from './core/graph-replica.mjs';   // #1397
 import { validateDeclaration, seatState, tendingEligibility, declarationsFromRows, UNKNOWN as SEAT_UNKNOWN } from './core/seat-state.mjs';
 import { readConfig, writeConfig, LIMITS } from './channel-config.mjs';
 import { droppedAgentSeats, loadRoster, writeRoster, rosterFilePath, loadRosterRoles } from './core/roster-config.mjs';
@@ -6892,18 +6893,19 @@ function kindsSummary(data) {
   try {
     if (_graphStore) {
       counts = {};
-      for (const q of _graphStore.match(null, null, null)) {
-        if (q.predicate.value !== 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type') continue;
-        if (q.object.termType !== 'NamedNode') continue;
-        // ⛔ DERIVED, never retyped. This block used to shorten with a
-        // hand-written 'https://scrumboard.local/vocab#'. The real base is
-        // '.../ns#', so on production NOTHING matched: every declared kind
-        // reported zero instances (scrum:Card among them, with >1,000) and
-        // every real type was reported as undeclared. Two false lists,
-        // opposite directions, one mistyped constant — the exact clean-zero
-        // failure this feature exists to expose, shipped inside the feature.
-        const t = shortenTypeIri(q.object.value);
-        counts[t] = (counts[t] ?? 0) + 1;
+      // #1397 — ONE aggregate query, never `match(null, null, null)`: the walk
+      // materialised every quad of the replica per call and wedged REST on
+      // 2026-09-15 (39 % walk + 38 % GC, 3.3 GB RSS). See censusByType.
+      // ⛔ DERIVED, never retyped. This block used to shorten with a
+      // hand-written 'https://scrumboard.local/vocab#'. The real base is
+      // '.../ns#', so on production NOTHING matched: every declared kind
+      // reported zero instances (scrum:Card among them, with >1,000) and
+      // every real type was reported as undeclared. Two false lists,
+      // opposite directions, one mistyped constant — the exact clean-zero
+      // failure this feature exists to expose, shipped inside the feature.
+      for (const [iri, n] of Object.entries(censusByType(_graphStore))) {
+        const t = shortenTypeIri(iri);
+        counts[t] = (counts[t] ?? 0) + n;
       }
       census = 'live';
       censusNote = null;

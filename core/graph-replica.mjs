@@ -2016,6 +2016,28 @@ export function vocabularyDrift(store) {
  * capped at LIMIT_CEILING; the cut is confessed via `truncated` (fetched at
  * limit+1, same trick as every bounded surface here).
  */
+/**
+ * #1397 — the kind CENSUS: instances per rdf:type, as one aggregate query.
+ *
+ * The previous census walked `store.match(null, null, null)` — every quad of
+ * the replica materialised as a JS object per call. On 2026-09-15 that was
+ * 434k objects per GET /api/board/status (every seat's orientation call):
+ * 39 % of REST's samples in the walk, 38 % in the garbage collector, 3.3 GB
+ * RSS, the board wedged with memory to spare. The engine counts natively.
+ * Keys are FULL type IRIs; callers shorten. Throws propagate: a census that
+ * fails must be reported as failed, never as empty (see kindsSummary).
+ */
+export function censusByType(store) {
+  const out = store.query('SELECT ?t (COUNT(?s) AS ?n) WHERE { ?s a ?t . FILTER(isIRI(?t)) } GROUP BY ?t');
+  const counts = {};
+  for (const row of out) {
+    const t = row.get('t'); const n = row.get('n');
+    if (!t || t.termType !== 'NamedNode') continue;
+    counts[t.value] = Number(n?.value ?? 0);
+  }
+  return counts;
+}
+
 export function queryGraph(store, sparql, { limit } = {}) {
   if (typeof sparql !== 'string' || !sparql.trim()) throw Object.assign(new Error('empty query'), { code: 'EMPTY_QUERY' });
   // ⛔ #899 — STRIP STRING LITERALS BEFORE LOOKING FOR VERBS, or the board's own
