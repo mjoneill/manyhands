@@ -156,3 +156,16 @@ test('#1362 (5) NEGATIVE CONTROL — direct seats never enter the stream ring: a
   assert.equal(open.records.length, 2, 'while the direct segment offers the post to both residents');
   assert.equal(engine.snapshot().ring.length, 0, 'still empty after the direct slot opened');
 });
+
+test('#1362 bounded — history keeps the last N cycles, and the TTL is read at each open', () => {
+  let ttl = 300 * S;
+  const s = createDirectSegment({ directSeats: () => ['ada'], ttlMs: () => ttl, historyCycles: 3 });
+  for (let c = 0; c < 10; c++) {
+    s.openSlot({ now: at(c * 400 * S), posts: [] });
+    s.recordTerminal({ seat: 'ada', state: 'published', now: at(c * 400 * S + 10 * S) });
+  }
+  assert.ok(s.allRecords().length <= 4, `history grew to ${s.allRecords().length} records over 10 cycles with a cap of 3`);
+  ttl = 600 * S;                                                       // config changed between cycles
+  s.openSlot({ now: at(5000 * S), posts: [] });
+  assert.equal(s.status().slot.ttlMs, 600 * S, 'the new TTL applied at the next open without a restart');
+});

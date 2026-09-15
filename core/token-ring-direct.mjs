@@ -33,11 +33,15 @@
 export const DIRECT_SLOT_FLOOR_MS = 180_000;
 export const TERMINAL = new Set(['published', 'declined', 'failed', 'timeout', 'advanced']);
 
-export function createDirectSegment({ directSeats, ttlMs, floorMs = DIRECT_SLOT_FLOOR_MS, genRecordId } = {}) {
+export const HISTORY_CYCLES = 50;   // records kept for status/tests: the last N cycles, not forever (#1392's lesson)
+
+export function createDirectSegment({ directSeats, ttlMs, floorMs = DIRECT_SLOT_FLOOR_MS, genRecordId, historyCycles = HISTORY_CYCLES } = {}) {
   if (typeof directSeats !== 'function') throw new Error('direct segment needs directSeats()');
   let seq = 0;
   const nextId = genRecordId ?? (() => `direct-${++seq}`);
-  const slotTtl = Math.max(Number(ttlMs) || 0, floorMs);
+  // The TTL is read when a slot OPENS (a function is called each time), so a
+  // config change reaches the next cycle without an adapter restart.
+  const slotTtlNow = () => Math.max(Number(typeof ttlMs === 'function' ? ttlMs() : ttlMs) || 0, floorMs);
 
   let slot = null;                 // { openedAt, deadline, cycle, records: Map<seat, record> }
   const latched = new Map();       // seat → { since, lastTimeoutAt }
@@ -81,7 +85,9 @@ export function createDirectSegment({ directSeats, ttlMs, floorMs = DIRECT_SLOT_
       records.set(seat, r);
       history.push(r);
     }
-    slot = { openedAt: now, deadline: new Date(Date.parse(now) + slotTtl).toISOString(), cycle: cycles, records };
+    const ttl = slotTtlNow();
+    slot = { openedAt: now, deadline: new Date(Date.parse(now) + ttl).toISOString(), ttlMs: ttl, cycle: cycles, records };
+    while (history.length && history[0].cycle < cycles - historyCycles) history.shift();
     return { records: [...records.values()].map((r) => ({ id: r.id, seat: r.seat, posts: r.posts })), deadline: slot.deadline };
   }
 
@@ -115,7 +121,7 @@ export function createDirectSegment({ directSeats, ttlMs, floorMs = DIRECT_SLOT_
     const seats = slot ? [...slot.records.keys()] : [...new Set(directSeats())];
     return {
       slot: slot ? {
-        state: 'open', cycle: slot.cycle, openedAt: slot.openedAt, ttlMs: slotTtl, deadline: slot.deadline,
+        state: 'open', cycle: slot.cycle, openedAt: slot.openedAt, ttlMs: slot.ttlMs, deadline: slot.deadline,
         records: [...slot.records.values()].map((r) => ({ id: r.id, seat: r.seat, state: r.state, waitedOn: !latched.has(r.seat) })),
       } : null,
       seats: seats.map((seat) => ({ seat, notAnswering: latched.has(seat), since: latched.get(seat)?.since ?? null, lastTimeoutAt: latched.get(seat)?.lastTimeoutAt ?? null })),
@@ -125,5 +131,5 @@ export function createDirectSegment({ directSeats, ttlMs, floorMs = DIRECT_SLOT_
     };
   }
 
-  return { openSlot, recordTerminal, tick, status, allRecords: () => history.map((r) => ({ ...r })), slotTtlMs: slotTtl };
+  return { openSlot, recordTerminal, tick, status, allRecords: () => history.map((r) => ({ ...r })), slotTtlMs: slotTtlNow };
 }

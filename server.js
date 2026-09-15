@@ -3623,7 +3623,9 @@ const DELIVERY_CLAIMABLE = new Set(['offered', 'queued', 'failed']);
 // (DELIVERY_MAX_ATTEMPTS, one constant shared with the status counter in
 // core/delivery.mjs). A retry budget, not a retry loop.
 const deliveryOpen = (e) => isOpenDelivery(deliveryToWire(e));
-const DELIVERY_SOURCES = new Set(['fanout', 'guest-runner', 'presence-bridge']);
+// #1362 — `ring`: an offer made by the token ring's direct segment (the residents'
+// end-of-cycle slot), so a ledger row can say which policy delivered it.
+const DELIVERY_SOURCES = new Set(['fanout', 'guest-runner', 'presence-bridge', 'ring']);
 // What each step may follow. `claimed` is DELIVERY_CLAIMABLE above.
 const DELIVERY_NEXT = {
   offered: new Set(['offered', 'queued']), queued: new Set(['offered', 'queued']),

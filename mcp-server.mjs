@@ -55,6 +55,7 @@ import { tendingEnabled, quietAfterMinutes } from './tending-config.mjs';
 import { digestTick } from './core/digest.mjs';
 import { makeChecksTick } from './core/checks-tick.mjs';   // #1388
 import { staleClaimAskTick } from './core/stale-claim-ask.mjs';   // #455
+import { createDirectSegment } from './core/token-ring-direct.mjs';   // #1362
 // #1215 — the unregistered-thing emitter: the board announces a newly-seen
 // undeclared kind once, as itself. Reads the same standing[] the digest reads.
 import { emitterTick } from './core/unregistered-emitter.mjs';
@@ -2801,6 +2802,86 @@ function tokenRingTimeoutMs() {
   return (CHANNEL_STAGGER_OFF ? {} : readConfig())?.tokenRing?.timeoutMs ?? 300000;
 }
 
+// ── #1362 — THE DIRECT SEGMENT: the ring runs its registered stream seats,
+// then the direct-wired residents (deliveryMode: channel), whose transport is
+// their inbox (#1346). Posts handled in ring mode queue in `directPending`;
+// when the STREAM segment is quiet (no lease) the slot opens: each resident
+// gets one delivery record per post of the cycle, source `ring`. The runner
+// closes records through REST as it always has; a poll on DIRECT_TICK_MS reads
+// them back and the pure segment (core/token-ring-direct.mjs) decides advance
+// / timeout / the not-answering latch. Rules and their tests live in that
+// module; this is the transport.
+//   never-armed fan-out reaches residents already (#1346) → the segment is idle
+//   armed + empty stream segment → the ring HOLDS, the inbox does not: the slot
+//                                   still opens ("holds the ring, never the inbox")
+const DIRECT_TICK_MS = Number(process.env.MCP_DIRECT_TICK_MS ?? 60000);
+let directSeatsNow = [];
+const directSegment = createDirectSegment({ directSeats: () => directSeatsNow, ttlMs: tokenRingTimeoutMs });   // read at each slot open
+const directPending = [];                    // [{ id, author }] handled in ring mode, not yet offered
+const directRecordDeliveries = new Map();    // record id → { seat, deliveryIds }
+let directOpening = false;
+
+async function residentSeatKeys() {
+  let agents;
+  try { agents = await apiCall('GET', '/api/agents'); } catch (e) { console.log(`[#1362 direct] residents unknown: ${e.message}`); return []; }
+  return (Array.isArray(agents) ? agents : [])
+    .filter((a) => a && a.deliveryMode === 'channel' && a.state === 'invited' && a.seatKey)
+    .map((a) => a.seatKey);
+}
+
+async function maybeOpenDirectSlot(why) {
+  if (directOpening || directSegment.status().slot || !directPending.length) return;
+  if (tokenRingEngine.snapshot().lease) return;          // the stream segment first
+  directOpening = true;
+  try {
+    const posts = directPending.splice(0);
+    directSeatsNow = await residentSeatKeys();
+    const now = new Date().toISOString();
+    const open = directSegment.openSlot({ now, posts });
+    if (!open) { directPending.unshift(...posts); return; }
+    console.log(`[#1362 direct] slot opened (${why}) cycle=${directSegment.status().slot.cycle} seats=${open.records.length} posts=${posts.length} deadline=${open.deadline}`);
+    for (const r of open.records) {
+      const ids = [];
+      for (const p of posts) {
+        if (p.author === r.seat) continue;                 // a resident is not offered its own post
+        try {
+          const d = await apiCall('POST', '/api/deliveries', { to: r.seat, conversation: p.id, source: 'ring', by: 'board' });
+          if (d?.id) ids.push(d.id);
+        } catch (e) { console.log(`[#1362 direct] offer NOT recorded for ${r.seat} msg=${p.id}: ${e.message}`); }
+      }
+      directRecordDeliveries.set(r.id, { seat: r.seat, deliveryIds: ids });
+      if (!ids.length) directSegment.recordTerminal({ seat: r.seat, state: 'declined', now: new Date().toISOString() });   // nothing to offer = nothing to wait on
+    }
+  } finally {
+    directOpening = false;
+  }
+}
+
+const DIRECT_TERMINAL = new Set(['published', 'declined', 'failed']);
+async function directTick() {
+  const st = directSegment.status();
+  if (st.slot) {
+    for (const rec of st.slot.records.filter((r) => r.state === 'open')) {
+      const entry = directRecordDeliveries.get(rec.id);
+      if (!entry) continue;
+      let list;
+      try { list = (await apiCall('GET', `/api/deliveries?to=${encodeURIComponent(rec.seat)}`))?.deliveries ?? []; }
+      catch (e) { console.log(`[#1362 direct] deliveries unreadable for ${rec.seat}: ${e.message}`); continue; }
+      const mine = list.filter((d) => entry.deliveryIds.includes(d.id));
+      if (mine.length !== entry.deliveryIds.length || !mine.every((d) => DIRECT_TERMINAL.has(d.state))) continue;
+      const state = mine.some((d) => d.state === 'published') ? 'published' : mine.some((d) => d.state === 'declined') ? 'declined' : 'failed';
+      const r = directSegment.recordTerminal({ seat: rec.seat, state, now: new Date().toISOString() });
+      directRecordDeliveries.delete(rec.id);
+      console.log(`[#1362 direct] ${rec.seat} ${state} (${mine.length} record(s))${r.advanced ? ` → slot advanced: ${r.advanced.reason}` : ''}`);
+    }
+    const t = directSegment.tick({ now: new Date().toISOString() });
+    if (t.advanced) for (const c of t.advanced.closed) directRecordDeliveries.delete(c.id);
+    if (t.advanced) console.log(`[#1362 direct] slot advanced: ${t.advanced.reason} cycle=${t.advanced.cycle}${t.advanced.closed.length ? ` closed-by-advance=${t.advanced.closed.map((c) => c.seat).join(',')}` : ''}`);
+  }
+  await maybeOpenDirectSlot('tick');
+}
+setInterval(() => { directTick().catch((e) => console.log(`[#1362 direct] tick failed: ${e.message}`)); }, DIRECT_TICK_MS).unref();
+
 // #119 — channel notifier. server.js POSTs each new commons post to
 // /internal/notify; we fan a `notifications/claude/channel` out to every
 // live MCP session, so a `claude --channels server:manyhands` session
@@ -3049,6 +3130,7 @@ function tokenRingOnTimeout(leaseId, seatId, envelopeId) {
   tokenRingActiveLease = null;
   const { deliveries, needsTimeout } = tokenRingEngine.handleTimeout({ seatId, leaseId });
   tokenRingDeliver(deliveries, needsTimeout);
+  maybeOpenDirectSlot('stream-timeout').catch((e) => console.log(`[#1362 direct] open failed: ${e.message}`));   // #1362
 }
 
 // Reconcile the single timer with the engine's current lease after any event:
@@ -3111,6 +3193,9 @@ function broadcastTokenRing(conversation) {
     // during recovery, violating the dormant-seat guarantee.
     if (tokenRingArmed) {
       console.log(`[#410 token-ring] R2 fail-closed: armed + empty ring — holding (no fan-out) for post ${conversation.id}`);
+      // #1362 — the hold is the RING's; the residents' inbox is not held.
+      directPending.push({ id: conversation.id, author: conversation.author });
+      maybeOpenDirectSlot('armed-hold').catch((e) => console.log(`[#1362 direct] open failed: ${e.message}`));
       return 0;
     }
     console.log('[#410 token-ring] no registered seats (never armed) — falling back to parallel fan-out (inert)');
@@ -3123,6 +3208,11 @@ function broadcastTokenRing(conversation) {
   });
   console.log(`[#410 token-ring] ${JSON.stringify(telemetry)}`); // debug-only; acceptance uses [#410 lifecycle]
   tokenRingDeliver(deliveries, needsTimeout);
+  // #1362 — the residents' turn comes after the stream segment: queue the post;
+  // the slot opens when no stream lease is held (now, or after the holder's
+  // RESPOND / a TIMEOUT brings the ring to rest).
+  directPending.push({ id: conversation.id, author: conversation.author });
+  maybeOpenDirectSlot('post').catch((e) => console.log(`[#1362 direct] open failed: ${e.message}`));
   return deliveries.length;
 }
 
@@ -3268,6 +3358,7 @@ const httpServer = http.createServer(async (req, res) => {
         ],
         residents,
         residentsRead,
+        ring: { direct: directSegment.status(), directPending: directPending.length },   // #1362
         receivers,
         sessions: transports.size,
         seats,
