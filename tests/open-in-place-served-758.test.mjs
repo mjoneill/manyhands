@@ -78,7 +78,15 @@ test('#758 served: a #NNN in the commons opens the card in place — ask shown, 
     const list = Array.isArray(thread) ? thread : thread.conversations;
     assert.ok(list.some((m) => m.body === 'answered from the sheet' && m.attachedTo === 'c1'), 'the comment is on the card');
 
-    // ── close: Esc; the place is unchanged ──
+    // ── close: Esc; the place is RESTORED ──
+    // Sabotage 2026-09-15 (#1371 ledger): with restoreScroll removed this test
+    // stayed green, because nothing had MOVED the feed while the sheet was open
+    // — "unchanged" and "restored" were byte-identical. So move it: the reader
+    // (or the thread's own render) scrolls under the overlay, and close must
+    // still put the feed back where it was.
+    await page.evaluate(() => { const f = document.querySelector('.cv-feed'); if (f) f.scrollTop = 0; window.scrollTo(0, 0); });
+    const moved = await page.evaluate(() => document.querySelector('.cv-feed')?.scrollTop ?? null);
+    assert.notEqual(moved, before.feed, 'the feed really moved under the overlay (' + moved + ' vs ' + before.feed + ')');
     await page.keyboard.press('Escape');
     await page.waitForFunction(() => !document.querySelector('#card-sheet'), { timeout: 5000 });
     const after = await page.evaluate(() => ({ y: window.scrollY, feed: document.querySelector('.cv-feed')?.scrollTop ?? null }));
