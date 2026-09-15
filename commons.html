@@ -8,6 +8,15 @@
 <link rel="stylesheet" href="./core/theme.css"><!-- shared design language (#333) -->
 <link rel="stylesheet" href="./core/conversation-view.css">
 <link rel="stylesheet" href="./core/card-sheet.css"><!-- #758 — a card opened in place -->
+<style>
+  /* #1391 — the card above its thread */
+  #thread-head.card-head { border: 1px solid var(--line); border-radius: 10px; padding: 14px 18px 12px; margin: 0 0 14px; background: var(--bg-card, transparent); }
+  #thread-head .card-head-title { font-size: 1.25rem; margin-bottom: 8px; }
+  #thread-head .card-head-body { max-height: 30vh; overflow-y: auto; margin-bottom: 0; }
+  #thread-head .card-head-toggle { background: none; border: 1px solid var(--line); color: var(--muted); border-radius: 6px; font: inherit; font-size: 12px; padding: 3px 9px; cursor: pointer; margin: 0 0 8px; }
+  #thread-head .card-head-toggle:hover { color: var(--ink); border-color: var(--link); }
+  .groom-note { font-size: 12px; color: var(--muted); margin: 0 0 6px; }
+</style>
 <link rel="stylesheet" href="./core/editor.css"><!-- #1367 -->
 <link rel="stylesheet" href="./core/constraints-view.css"><!-- #1350 what governs an agent -->
 <link rel="stylesheet" href="./core/header.css">
@@ -117,7 +126,7 @@
   <script type="module">
     import { mountConversationView } from './core/conversation-view.mjs';
     import { resolveRoleHolder } from './core/roles.mjs';   // #1368 — the PO seat, read from the board
-    import { openCardSheet, wireCardRefs } from './core/card-sheet.mjs';   // #758 — open a card without leaving
+    import { openCardSheet, wireCardRefs, renderCardHead } from './core/card-sheet.mjs';   // #758 — open a card without leaving · #1391 — the card above its thread
     import { mountTopNav } from './core/header.mjs';
     import { renderChatMarkdown } from './core/render.mjs';
     import { roster, identityOf, presenceLevel, constellationOrder } from './core/identity.mjs';
@@ -657,21 +666,56 @@
       // (the card's "Groom this" door) arrives with the PO mentioned.
       const groom = new URLSearchParams(location.search).get('groom') === '1';
       let groomCard = null;
+      let cardFull = null;
       if (node) {
-        try { const r = await fetch('/api/cards/' + encodeURIComponent(node)); if (r.ok) { const c = await r.json(); if (c && c.shortId != null) groomCard = { id: c.id, shortId: c.shortId }; } } catch { /* a thread on a non-card node has no ruling affordance */ }
+        try { const r = await fetch('/api/cards/' + encodeURIComponent(node)); if (r.ok) { const c = await r.json(); if (c && c.shortId != null) { groomCard = { id: c.id, shortId: c.shortId }; cardFull = c; } } } catch { /* a thread on a non-card node has no ruling affordance */ }
       }
       const poSeat = node ? await resolveRoleHolder('po') : null;
+      // #1391 — a card's thread shows the CARD above it. The owner's first
+      // thirty seconds in the grooming view: "no way to see what's on the card
+      // right now" — he was writing about a card he could not see.
+      let leading = null;
+      if (cardFull) {
+        const head = renderCardHead(cardFull, { doc: document });
+        head.id = 'thread-head';
+        // The feed is the page's scroller and the column is fixed-height, so
+        // the head must not eat the feed: the description folds behind one
+        // toggle, open by default on a tall window, closed on a short one,
+        // and the choice is remembered per card. Title, meta and the doors
+        // stay visible either way.
+        const body = head.querySelector('.card-head-body');
+        const key = `manyhands.groom.head-open.${cardFull.id}`;
+        let open; try { open = localStorage.getItem(key); } catch { open = null; }
+        const isOpen = open == null ? window.innerHeight >= 900 : open === '1';
+        const toggle = document.createElement('button'); toggle.type = 'button'; toggle.className = 'card-head-toggle';
+        const paint = (on) => { body.hidden = !on; toggle.textContent = on ? 'Hide the description ▴' : 'Show the description ▾'; toggle.setAttribute('aria-expanded', String(on)); };
+        toggle.addEventListener('click', () => { const on = body.hidden; paint(on); try { localStorage.setItem(key, on ? '1' : '0'); } catch { /* fine */ } });
+        head.insertBefore(toggle, body);
+        paint(isOpen);
+        leading = head;   // lives at the top of the feed and scrolls with it, so the feed keeps its height
+      }
       view = mountConversationView({
         mount: viewEl,
         ...(Number.isInteger(limitParam) && limitParam > 0 ? { limit: limitParam } : {}),
         attachedTo: node || undefined,   // node ⇒ that thread; absent ⇒ the whole commons
         poll: true,
         poSeat, groom, card: groomCard,   // #1368
+        leading,                          // #1391
         placeholder: node ? (groom ? 'Ask the PO — what do you need to know to start?' : 'Add to this discussion…') : 'Say something to the room…',
         attachedPointer,                 // #294 — pointer-collapse in the unscoped room
         onMessages: (msgs) => { _lastMessages = msgs; updateConstellation(msgs); anchorToPlace(); }, // presence pulse · #517 arrive where the reader was
         onSolo: reflectSolo,             // presence — sync the constellation to the soloed mind
       });
+      // #1391 — before the first post: what posting here DOES, and who it wakes —
+      // the PO from the board (declaration first, roster fallback), never a name typed here.
+      if (groomCard) {
+        const form = viewEl.querySelector('.cv-form');
+        if (form) {
+          const note = document.createElement('div'); note.className = 'groom-note';
+          note.textContent = `Posting here adds to #${groomCard.shortId}'s thread — public, like the rest of the board — and ${poSeat ? `wakes @${poSeat}, who holds the PO role` : 'would wake the PO, but no seat holds the PO role right now'}.`;
+          form.prepend(note);
+        }
+      }
       // #758 — a #NNN in the feed, or a raised-hand entry, opens the card HERE.
       // Closing the sheet leaves the room exactly where it was.
       wireCardRefs(document.body, { keepScroll: ['.cv-feed'], onMissing: (k) => { const m = document.createElement('div'); m.className = 'card-sheet-missing'; m.textContent = `No card #${k} on this board.`; document.body.appendChild(m); setTimeout(() => m.remove(), 2500); } });

@@ -36,6 +36,52 @@ export function renderDescription(text) {
   return escapeHtml(text || '').replace(CARD_REF_RE, (_, n) => `<a class="cardref" data-shortid="${n}" href="index.html?card=${n}">#${n}</a>`);
 }
 
+/**
+ * #1391 — THE CARD'S HEAD, one renderer with two homes: the sheet (an overlay
+ * on any page) and the grooming page itself (commons.html?node=<card>), where
+ * the owner found himself "writing about a card you cannot see". Eyebrow,
+ * title, meta chips, the doors out, open raised hands (the ASK), and the
+ * description with its #NNN refs live. Built from text nodes and one
+ * escape-first innerHTML (renderDescription), so it is XSS-safe by
+ * construction wherever it is mounted.
+ */
+export function renderCardHead(card, { doc = document, baseUrl = '', titleId = null } = {}) {
+  const el = (tag, cls, text) => { const n = doc.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
+  const head = el('div', 'card-head');
+  head.dataset.cardId = card.id; head.dataset.shortId = String(card.shortId);
+  const eyebrow = el('div', 'card-head-eyebrow card-sheet-eyebrow', `${card.type || 'card'} · #${card.shortId}${card.column ? ' · ' + card.column : ''}`);
+  const title = el('h2', 'card-head-title card-sheet-title', card.title || '(untitled)');
+  if (titleId) title.id = titleId;
+  const meta = el('div', 'card-head-meta card-sheet-meta');
+  if (card.priority) meta.appendChild(el('span', 'card-sheet-chip', String(card.priority).toUpperCase()));
+  for (const a of (card.assignees || [])) meta.appendChild(el('span', 'card-sheet-chip', a));
+  for (const l of (card.labels || [])) meta.appendChild(el('span', 'card-sheet-chip label', l));
+  // Links OUT — they stop being the only option, they do not disappear.
+  const links = el('div', 'card-head-links card-sheet-links');
+  const edit = el('a', 'card-head-link card-sheet-link edit', '✎ Edit on the board');
+  edit.href = `${baseUrl}/index.html?card=${encodeURIComponent(card.shortId)}`; edit.target = '_blank'; edit.rel = 'noopener';
+  edit.title = 'Opens the board in a new tab with this card big and editable (#1365) — this page keeps its place';
+  const wiki = el('a', 'card-head-link card-sheet-link', '📄 Wiki page');
+  wiki.href = `${baseUrl}/wiki.html?node=${encodeURIComponent(card.id)}`; wiki.target = '_blank'; wiki.rel = 'noopener';
+  links.append(edit, wiki);
+  head.append(eyebrow, title, meta, links);
+  // The ASK, stated: raised hands on this card (structured blockers), if any.
+  const asks = (Array.isArray(card.blockers) ? card.blockers : []).filter((b) => b && (b.status || 'open') !== 'cleared');
+  if (asks.length) {
+    const askEl = el('div', 'card-head-asks card-sheet-asks');
+    for (const b of asks) {
+      const who = b.anyHuman ? 'any human' : (b.person || (b.card != null ? `card #${b.card}` : 'someone'));
+      askEl.appendChild(el('div', 'card-sheet-ask', `🚧 waiting on ${who}: ${b.note || '(no detail given)'}`));
+    }
+    head.appendChild(askEl);
+  }
+  const body = el('div', 'card-head-body card-sheet-body prose');
+  if (typeof card.description === 'string' && card.description) body.innerHTML = renderDescription(card.description);   // escaped first; only #NNN anchors are added
+  else { body.classList.add('empty'); body.textContent = 'No description.'; }
+  head.appendChild(body);
+  return head;
+}
+
 let current = null;   // { root, view, restoreScroll }
 
 export function closeCardSheet(doc = document) {
@@ -83,45 +129,11 @@ export async function openCardSheet(key, { doc = document, baseUrl = '', fetchIm
   close.className = 'card-sheet-close'; close.type = 'button'; close.title = 'Close (Esc)'; close.textContent = '✕';
   close.addEventListener('click', () => closeCardSheet(doc));
 
-  const eyebrow = doc.createElement('div'); eyebrow.className = 'card-sheet-eyebrow';
-  eyebrow.textContent = `${card.type || 'card'} · #${card.shortId}${card.column ? ' · ' + card.column : ''}`;
-  const title = doc.createElement('h2'); title.className = 'card-sheet-title'; title.id = 'card-sheet-title'; title.textContent = card.title || '(untitled)';
-
-  const meta = doc.createElement('div'); meta.className = 'card-sheet-meta';
-  if (card.priority) { const p = doc.createElement('span'); p.className = 'card-sheet-chip'; p.textContent = String(card.priority).toUpperCase(); meta.appendChild(p); }
-  for (const a of (card.assignees || [])) { const s = doc.createElement('span'); s.className = 'card-sheet-chip'; s.textContent = a; meta.appendChild(s); }
-  for (const l of (card.labels || [])) { const s = doc.createElement('span'); s.className = 'card-sheet-chip label'; s.textContent = l; meta.appendChild(s); }
-
-  // Links OUT — they stop being the only option, they do not disappear.
-  const links = doc.createElement('div'); links.className = 'card-sheet-links';
-  const edit = doc.createElement('a'); edit.className = 'card-sheet-link edit'; edit.href = `${baseUrl}/index.html?card=${encodeURIComponent(card.shortId)}`; edit.target = '_blank'; edit.rel = 'noopener';
-  edit.textContent = '✎ Edit on the board'; edit.title = 'Opens the board in a new tab with this card big and editable (#1365) — this page keeps its place';
-  const wiki = doc.createElement('a'); wiki.className = 'card-sheet-link'; wiki.href = `${baseUrl}/wiki.html?node=${encodeURIComponent(card.id)}`; wiki.target = '_blank'; wiki.rel = 'noopener'; wiki.textContent = '📄 Wiki page';
-  links.append(edit, wiki);
-
-  // The ASK, stated: raised hands on this card (structured blockers), if any.
-  const asks = (Array.isArray(card.blockers) ? card.blockers : []).filter((b) => b && (b.status || 'open') !== 'cleared');
-  let askEl = null;
-  if (asks.length) {
-    askEl = doc.createElement('div'); askEl.className = 'card-sheet-asks';
-    for (const b of asks) {
-      const row = doc.createElement('div'); row.className = 'card-sheet-ask';
-      const who = b.anyHuman ? 'any human' : (b.person || (b.card != null ? `card #${b.card}` : 'someone'));
-      row.textContent = `🚧 waiting on ${who}: ${b.note || '(no detail given)'}`;
-      askEl.appendChild(row);
-    }
-  }
-
-  const body = doc.createElement('div'); body.className = 'card-sheet-body prose';
-  if (typeof card.description === 'string' && card.description) body.innerHTML = renderDescription(card.description);   // escaped first; only #NNN anchors are added
-  else { body.classList.add('empty'); body.textContent = 'No description.'; }
-
+  const head = renderCardHead(card, { doc, baseUrl, titleId: 'card-sheet-title' });   // #1391 — one renderer, two homes
   const threadHead = doc.createElement('div'); threadHead.className = 'card-sheet-thread-head'; threadHead.textContent = '💬 On this card';
   const thread = doc.createElement('div'); thread.className = 'card-sheet-thread';
 
-  sheet.append(close, eyebrow, title, meta, links);
-  if (askEl) sheet.appendChild(askEl);
-  sheet.append(body, threadHead, thread);
+  sheet.append(close, head, threadHead, thread);
   back.appendChild(sheet);
 
   // exits: backdrop click (not the sheet), Esc

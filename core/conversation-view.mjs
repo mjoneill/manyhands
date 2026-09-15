@@ -164,6 +164,7 @@ export function mountConversationView(opts = {}) {
     groom = false,     // open with the composer focused and the PO mentioned, unless a draft is already there
     card = null,       // { id, shortId } of the card this thread belongs to — enables the ruling affordance
     onRuling,          // optional (decision) => void after a ruling is recorded
+    leading = null,    // #1391 — an element kept at the TOP of the feed across renders (the card above its thread); it scrolls with the conversation
   } = opts;
   let watch = null;   // #1366 — this composer's draft watch (declared here: buildForm is hoisted and may run before any later `let`)
   if (!mount) throw new Error('mountConversationView: opts.mount is required');
@@ -446,6 +447,7 @@ export function mountConversationView(opts = {}) {
 
   function renderSearch() {
     feed.innerHTML = '';
+    if (leading) feed.appendChild(leading);   // #1391 — the card stays first, whatever the feed shows
     renderedIds.clear();
     feed.appendChild(searchHeader());
     if (searchState === 'done') {
@@ -464,6 +466,7 @@ export function mountConversationView(opts = {}) {
   function renderAll() {
     if (query && !authorSolo) { renderSearch(); return; }
     feed.innerHTML = '';
+    if (leading) feed.appendChild(leading);   // #1391 — the card stays first, whatever the feed shows
     renderedIds.clear();
     // presence — a "listening to one mind" banner with a clear-back-to-the-room.
     if (authorSolo) {
