@@ -139,6 +139,10 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
 
   if (st.pendingFrom != null && receivers >= st.pendingFrom) {
     st.pendingFrom = null; st.pendingSessionsFrom = null; st.warned = false;   // recovered
+    // #1395 — a drop-branch suppression record belongs to the episode it
+    // recorded; left behind, a later unrelated drop below that stale number
+    // would re-arm a cooldown-set `warned` and post once too often.
+    if (st.maintenanceSuppressed?.signature?.startsWith('drop:')) delete st.maintenanceSuppressed;
   } else if (st.pendingFrom != null && receivers < st.pendingFrom) {
     // ── #726, THE DISCRIMINATOR ───────────────────────────────────────────
     // A falling `receivers` has two causes that this watch could not tell
@@ -219,6 +223,7 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
       // Benign turnover: stand down entirely rather than staying armed, so the
       // next genuine drop arms from a current baseline instead of a stale one.
       st.pendingFrom = null; st.pendingSessionsFrom = null; st.warned = false;
+      if (st.maintenanceSuppressed?.signature?.startsWith('drop:')) delete st.maintenanceSuppressed;   // #1395
     }
   } else if (receivers < prevReceivers) {
     // #668 settle-vs-drop: a drop TO a level held for most of recent history is

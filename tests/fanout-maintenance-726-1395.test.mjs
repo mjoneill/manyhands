@@ -83,3 +83,21 @@ test('#1395 a benign client departure inside the window is still benign — the 
   assert.equal(state.pendingFrom, null, 'stood down, not suppressed');
   assert.ok(!state.maintenanceSuppressed);
 });
+
+test('#1395 the drop-branch record clears on RECOVERY — a later unrelated drop is governed by its cooldown alone', () => {
+  // Suppressed inside a declared window, then the streams come back.
+  const suppressed = decide({ ...base, ...reading, state: armed(), maintenance: marker(4 * MIN) });
+  assert.ok(suppressed.state.maintenanceSuppressed);
+  const recovered = decide({ ...base, receivers: 8, sessions: 13, now: T0 + 10 * MIN, state: suppressed.state, maintenance: null });
+  assert.equal(recovered.state.pendingFrom, null, 'recovered');
+  assert.ok(!recovered.state.maintenanceSuppressed, 'the episode\'s record went with it');
+  // Weeks later: a genuine drop (8 → 4) posts once, then a cooldown-gated tick at 2 must NOT post a second time
+  // because of a stale "declared at 3" record — there is none.
+  const weeks = T0 + 20 * 24 * 3600 * 1000;
+  const arm = decide({ ...base, receivers: 4, sessions: 13, now: weeks, state: { ...recovered.state, r: 8, hist: [8, 8, 8, 8, 8, 8] }, maintenance: null });
+  const post1 = decide({ ...base, receivers: 4, sessions: 13, now: weeks + 5 * MIN, state: arm.state, maintenance: null });
+  assert.ok(post1.warnBody, 'the genuine drop posts');
+  const post2 = decide({ ...base, receivers: 2, sessions: 13, now: weeks + 10 * MIN, state: post1.state, maintenance: null });
+  // receivers 2 is below floor 3 → the FLOOR branch may speak; the DROP branch must not add a second line on a stale record.
+  assert.ok(!post2.warnBody || !/receivers dropped/.test(post2.warnBody), `the drop branch posted again on a stale record: ${post2.warnBody}`);
+});
