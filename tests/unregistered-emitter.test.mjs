@@ -74,4 +74,7 @@ test('#1215 the emitter is WIRED: mcp-server.mjs calls emitterTick on the tendin
   const src = fs.readFileSync(new URL('../mcp-server.mjs', import.meta.url), 'utf8');
   assert.match(src, /import \{ emitterTick \} from '\.\/core\/unregistered-emitter\.mjs'/);
   assert.match(src, /emitterTick\(\{/);
+  // #1388 — the emitter reads the tick's shared /api/checks object; it fetches nothing itself.
+  assert.match(src, /consumers: \[digestTickOnce, emitterTickOnce\]/, 'the emitter consumes the shared checks read (#1388)');
+  assert.doesNotMatch(src, /emitterTickOnce\(\)/, 'nothing calls the emitter on its own interval any more (#1388)');
 });

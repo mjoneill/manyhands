@@ -173,5 +173,10 @@ test('#1216 the digest tick is WIRED: mcp-server.mjs calls digestTick on the ten
   const src = fs.readFileSync(new URL('../mcp-server.mjs', import.meta.url), 'utf8');
   assert.match(src, /import \{ digestTick \} from '\.\/core\/digest\.mjs'/);
   assert.match(src, /digestTick\(\{/, 'the function is called, not merely imported');
-  assert.match(src, /if \(tendingEnabled\(\)\) digestTickOnce\(\)/, 'and it rides the operator switch');
+  // #1388 — the digest no longer owns an interval: it is a CONSUMER of the one
+  // guarded /api/checks read per tick, and that tick rides the operator switch.
+  // Asserting the join both ways: the consumer is listed, and the tick is gated.
+  assert.match(src, /consumers: \[digestTickOnce, emitterTickOnce\]/, 'the digest consumes the shared checks read (#1388)');
+  assert.match(src, /if \(tendingEnabled\(\)\) checksTick\(\)/, 'and the shared tick rides the operator switch');
+  assert.doesNotMatch(src, /digestTickOnce\(\)/, 'nothing calls the digest on its own interval any more (#1388)');
 });

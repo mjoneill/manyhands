@@ -53,6 +53,7 @@ import { tendingEnabled, quietAfterMinutes } from './tending-config.mjs';
 // #1216 — the daily digest: a whisper whose body is rendered from /api/checks
 // standing[] at fire time. Same quiet rule, same window discipline, same mint.
 import { digestTick } from './core/digest.mjs';
+import { makeChecksTick } from './core/checks-tick.mjs';   // #1388
 // #1215 — the unregistered-thing emitter: the board announces a newly-seen
 // undeclared kind once, as itself. Reads the same standing[] the digest reads.
 import { emitterTick } from './core/unregistered-emitter.mjs';
@@ -298,7 +299,7 @@ function reportRefusal({ actor, rule, reason, entity, request, route }) {
     .catch((e) => console.error(`[#1167] could not record a refusal (${rule}): ${e.message}`));
 }
 
-async function apiCall(method, path, body) {
+async function apiCall(method, path, body, { signal } = {}) {
   const url = REST_API_BASE + path;
   let res;
   try {
@@ -306,8 +307,10 @@ async function apiCall(method, path, body) {
       method,
       headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
       body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal,   // #1388 — a caller with a deadline passes it; the checks tick does
     });
   } catch (e) {
+    if (e?.name === 'TimeoutError' || e?.name === 'AbortError') throw e;   // #1388 — the deadline is the caller's to read, not a "start the dev server" hint
     throw new Error(
       `Cannot reach scrum board REST API at ${REST_API_BASE}. ` +
       `Start the dev server: \`node server.js\`. (${e.message})`
@@ -2465,15 +2468,11 @@ setInterval(() => { if (tendingEnabled()) whisperTick(); }, WHISPER_TICK_MS).unr
 // ⛔ FAILS CLOSED on an unreadable checks surface — a skipped morning
 // self-heals tomorrow; a digest built from a partial or stale standing[] would
 // tell the room "nothing wrong" about the very things it exists to surface.
-const digestTickOnce = async () => {
-  let standing = null;
-  try {
-    const checks = await apiCall('GET', '/api/checks');
-    standing = Array.isArray(checks?.standing) ? checks.standing : null;
-  } catch (e) {
-    console.error(`[#1216] /api/checks unreadable — skipping this digest tick: ${e?.message ?? e}`);
-    return null;
-  }
+// #1388 — `checks` arrives from the ONE guarded read per tick (checksTick
+// below); this consumer never fetches. An unreadable surface never reaches
+// here — the tick skips and says so.
+const digestTickOnce = async (checks) => {
+  const standing = Array.isArray(checks?.standing) ? checks.standing : null;
   if (!standing) return null;
   let activityAt = null;
   try {
@@ -2505,20 +2504,18 @@ const digestTickOnce = async () => {
     onError: (line) => console.error(line),
   });
 };
-setInterval(() => { if (tendingEnabled()) digestTickOnce(); }, WHISPER_TICK_MS).unref();
+// (interval: see checksTick below — #1388 — one guarded read feeds both this
+// and the #1215 emitter.)
 
 // ── #1215 — SAY IT, within one tick of the write rather than at the write:
 // the replica syncs on query, not on write, so "at the moment of the write"
 // is not a place this process can stand. One tick later is, and it is the
 // same interval the whisper and the digest already ride.
-const emitterTickOnce = async () => {
-  let rows = null;
-  try {
-    const checks = await apiCall('GET', '/api/checks');
-    const std = (checks?.standing || []).find((s) => s.id === 'unregistered-kinds');
-    if (!std || std.error) return null;              // unreadable or errored: say nothing, forget nothing
-    rows = Array.isArray(std.rows) ? std.rows : [];
-  } catch (e) { return null; }
+const emitterTickOnce = async (checks) => {
+  // #1388 — `checks` is the tick's one shared read; see checksTick below.
+  const std = (checks?.standing || []).find((s) => s.id === 'unregistered-kinds');
+  if (!std || std.error) return null;              // unreadable or errored: say nothing, forget nothing
+  const rows = Array.isArray(std.rows) ? std.rows : [];
   return emitterTick({
     now: new Date().toISOString(),
     rows: () => rows,
@@ -2526,7 +2523,22 @@ const emitterTickOnce = async () => {
     onError: (line) => console.error(line),
   });
 };
-setInterval(() => { if (tendingEnabled()) emitterTickOnce(); }, WHISPER_TICK_MS).unref();
+// ── #1388 — ONE guarded /api/checks read per tick, shared by the digest and
+// the emitter. Before this, each had its own 60 s setInterval fetching
+// /api/checks with no in-flight guard and no timeout; when one call ran past
+// a minute the adapter queued another every minute until REST did nothing
+// else (40 outstanding on 2026-09-15 01:12Z). The guard, the deadline and the
+// sharing live in core/checks-tick.mjs; a third consumer joins the list, it
+// does not get its own interval. The deadline is shorter than the tick so a
+// slow board costs one abort, never a queue.
+const CHECKS_TIMEOUT_MS = Number(process.env.MCP_CHECKS_TIMEOUT_MS ?? 45_000);
+const checksTick = makeChecksTick({
+  fetchChecks: ({ signal }) => apiCall('GET', '/api/checks', undefined, { signal }),
+  consumers: [digestTickOnce, emitterTickOnce],
+  timeoutMs: CHECKS_TIMEOUT_MS,
+  log: (line) => console.error(line),
+});
+setInterval(() => { if (tendingEnabled()) checksTick(); }, WHISPER_TICK_MS).unref();
 
 const REAP_IDLE_MS = Number(process.env.MCP_REAP_IDLE_MS ?? 300000); // 5 min default
 // #1129 — how recently a stream's client must have spoken for the stream to
