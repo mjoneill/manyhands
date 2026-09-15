@@ -138,3 +138,40 @@ test('#1392 a blocker written to a CARD after load reaches the panel through upd
     assert.deepEqual(refs, ['#20'], `the card delta must carry the blocker into the panel: ${JSON.stringify(refs)}`);
   }, { server: { board }, launch: { headless: 'new' } });
 });
+
+/**
+ * Second pass, 2026-09-15T11:44Z: 25 minutes into the 24 h run of the first
+ * cut, the retained heap sat FLAT AT 87 MB per tab — the churn was gone and
+ * the whole corpus had moved in instead, because the map kept every message
+ * to compute raises from. `openRaises` only reads rows attached to a card
+ * that start with 🚧 or ✅, so only those are kept now.
+ *
+ * Measured, not inferred: a corpus of plain chatter must not stay resident.
+ * 3,000 × 2 KB of unattached messages ≈ 6 MB of JSON; a page that keeps them
+ * holds ≥ 6 MB after GC, a page that filters holds a few hundred KB.
+ */
+test('#1392 the poll KEEPS only raise/resolve rows — plain chatter is not resident after boot', async () => {
+  const chatter = JSON.parse(JSON.stringify(board));
+  const filler = 'x'.repeat(2048);
+  for (let i = 0; i < 3000; i++) {
+    chatter.conversations.push({ id: `c${i}`, author: 'bo', body: filler, createdAt: ts(3 + (i % 50)), attachedTo: null });
+  }
+  chatter.conversations.push({ id: 'raise', author: 'bo', body: '🚧 the one that matters', createdAt: ts(55), attachedTo: 'later' });
+
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await browser.newPage();
+    const cdp = await page.createCDPSession();
+    await cdp.send('HeapProfiler.enable');
+    await cdp.send('Performance.enable');
+    await page.goto(`${server.baseUrl}/commons.html?limit=5`, { waitUntil: 'networkidle0' });
+    await page.waitForFunction(
+      () => /· 1$/.test(document.getElementById('blocked-toggle').textContent.trim()),
+      { timeout: 10_000, polling: 250 },
+    );
+    await cdp.send('HeapProfiler.collectGarbage');
+    const { metrics } = await cdp.send('Performance.getMetrics');
+    const heapMB = metrics.find((m) => m.name === 'JSHeapUsedSize').value / 1048576;
+    assert.ok(heapMB < 4,
+      `6 MB of chatter must not be resident — retained heap after GC is ${heapMB.toFixed(1)} MB; a map that keeps every message reads ≥ 6`);
+  }, { server: { board: chatter }, launch: { headless: 'new' } });
+});

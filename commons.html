@@ -593,8 +593,17 @@
     // class: a raise message REDACTED after boot — `since=` never returns a
     // removed row, so that hand stays up until reload (2 redactions in 31k
     // events when this shipped; the review that found it is on #1392).
+    //
+    // Only the rows `openRaises` can read are KEPT: attached to a card and
+    // starting with 🚧 or ✅. Measured 2026-09-15T11:44Z, 25 min into the 24 h
+    // run of the first cut: keeping every message made the retained heap a
+    // flat 87 MB per tab (27k rows) — the churn was gone but the corpus had
+    // moved in. The stamp still advances over EVERY row the server returned,
+    // kept or not, so the next delta starts where this one ended.
     const blocked = { convos: new Map(), cards: new Map(), convoSince: null, cardSince: null, loaded: false };
     const maxStamp = (cur, rows, key) => rows.reduce((m, r) => (typeof r[key] === 'string' && (!m || r[key] > m) ? r[key] : m), cur);
+    const raiseRow = (m) => m && typeof m.attachedTo === 'string' && m.attachedTo
+      && (RAISE_RE.test(m.body || '') || RESOLVE_RE.test(m.body || ''));
     async function refreshBlocked() {
       try {
         let changed = false;
@@ -603,9 +612,10 @@
             fetch('/api/conversations').then((r) => r.json()),
             fetchCardSummaries(),
           ]);
-          for (const m of (Array.isArray(convos) ? convos : [])) blocked.convos.set(m.id, m);
+          const rows = Array.isArray(convos) ? convos : [];
+          for (const m of rows) if (raiseRow(m)) blocked.convos.set(m.id, m);
           for (const c of (Array.isArray(cards) ? cards : [])) blocked.cards.set(c.id, c);
-          blocked.convoSince = maxStamp(blocked.convoSince, [...blocked.convos.values()], 'createdAt');
+          blocked.convoSince = maxStamp(blocked.convoSince, rows, 'createdAt');
           blocked.cardSince = maxStamp(blocked.cardSince, [...blocked.cards.values()], 'updatedAt');
           blocked.loaded = true;
           changed = true;
@@ -616,7 +626,7 @@
           ]);
           const cards = res && Array.isArray(res.cards) ? res.cards : [];
           for (const m of (Array.isArray(convos) ? convos : [])) {
-            if (!m || blocked.convos.has(m.id)) continue;
+            if (!raiseRow(m) || blocked.convos.has(m.id)) continue;
             blocked.convos.set(m.id, m);
             changed = true;
           }
