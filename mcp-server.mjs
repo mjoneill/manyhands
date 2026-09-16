@@ -2802,6 +2802,57 @@ function tokenRingTimeoutMs() {
   return (CHANNEL_STAGGER_OFF ? {} : readConfig())?.tokenRing?.timeoutMs ?? 300000;
 }
 
+// ── #1396 — THE THIRD REGISTRATION PATH: a seat whose transport is an MCP
+// session bound by bearer (the Claude Code seats) joins the ring at the bind
+// site, the way the presence lane joins by `scrum/session/register` and the
+// residents join by the direct segment (#1362). Until now the ring only ever
+// knew the presence lane, so "token-ring mode" could never work for every
+// participant (decision 5ece8067: the ring is wanted on that condition).
+//
+//   member  = bearer-bound seat listed in `tokenRing.bearerSeats` (channel
+//             config; an explicit list because a PRESENCE session is ALSO
+//             bearer-bound and registers itself under a lane-qualified id —
+//             registering it here first would reject its own register call
+//             with `session-already-bound`)
+//   joins   = when the session is bound AND holds an open GET stream: the
+//             ring delivers by `transport.send`, which needs the stream; a
+//             registered seat with no stream is a dead seat for one TTL
+//   leaves  = when the seat is latched DEAF (#726: no stream for longer than
+//             the grace; clients cycle streams every ~1 s, so a bare close is
+//             not a leave) or the session closes (the fenced release below)
+//   rejoins = on the next GET stream — the registry's supersede handles it
+//
+// Reads the running config on every sync, so the trial turns a seat on
+// without a restart. `ring: true|false` per seat rides /channel/status so the
+// room can read who is in BEFORE the mode flips.
+const bearerRingSessions = new Set();   // sessions THIS path registered (never touch the presence lane's)
+function ringBearerSeats() {
+  const list = (CHANNEL_STAGGER_OFF ? {} : readConfig())?.tokenRing?.bearerSeats;
+  return Array.isArray(list) ? list.filter((s) => typeof s === 'string' && s) : [];
+}
+// `leave` is only true from the DEAF latch: a bare stream close is a reconnect
+// (clients cycle streams every ~1 s — 20k of them in one four-week window),
+// and releasing on each would churn the registry's epochs for nothing. The
+// #726 grace is the line between a reconnect and a deafness.
+function ringSyncBearer(sessionId, why, { leave = false } = {}) {
+  const m = sessionMeta.get(sessionId);
+  if (!m || !m.seat) return;
+  const wanted = !leave && ringBearerSeats().includes(m.seat) && (m.openStreamCount ?? 0) > 0 && !m.deafSince;
+  const registered = bearerRingSessions.has(sessionId) && seatRegistry.seatForSession(sessionId) === m.seat;
+  if (!wanted && registered && !leave) return;   // a gap between streams is not a leave
+  if (wanted && !registered) {
+    if (seatRegistry.seatForSession(sessionId)) return;   // the presence lane got here first — theirs
+    const r = seatRegistry.register({ seatId: m.seat, sessionId, author: m.seat });
+    if (!r.ok) { console.warn(`[#1396 ring] seat ${m.seat} NOT registered (${why}) sid=${sessionId}: ${r.reason}`); return; }
+    bearerRingSessions.add(sessionId);
+    console.log(`[#1396 ring] seat ${m.seat} joined via bearer (${why}) sid=${sessionId} epoch=${r.epoch}${r.supersededSession ? ` superseded=${r.supersededSession}` : ''} ring=[${seatRegistry.seats().join(', ')}]`);
+  } else if (!wanted && registered) {
+    const released = seatRegistry.release({ sessionId });
+    bearerRingSessions.delete(sessionId);
+    if (released) console.log(`[#1396 ring] seat ${released} left the ring (${why}) sid=${sessionId} ring=[${seatRegistry.seats().join(', ')}]`);
+  }
+}
+
 // ── #1362 — THE DIRECT SEGMENT: the ring runs its registered stream seats,
 // then the direct-wired residents (deliveryMode: channel), whose transport is
 // their inbox (#1346). Posts handled in ring mode queue in `directPending`;
@@ -3304,7 +3355,12 @@ const httpServer = http.createServer(async (req, res) => {
           });
           continue;
         }
-        const s = seats[m.seat] ?? (seats[m.seat] = { streams: 0, liveStreams: 0, staleStreams: 0, sessions: 0, lastBeatAt: null, lastBeatOk: null, lastClientRequestAt: null });
+        const s = seats[m.seat] ?? (seats[m.seat] = { streams: 0, liveStreams: 0, staleStreams: 0, sessions: 0, lastBeatAt: null, lastBeatOk: null, lastClientRequestAt: null, ring: false });
+        // #1396 — in the ring right now, by whichever path registered it: a
+        // bearer session this adapter registered, or the presence lane's own
+        // lane-qualified id (`<seat>.<lane>`). Read here so the room can see
+        // who would take a turn BEFORE the mode flips.
+        if (seatRegistry.seatForSession(sid) === m.seat || seatRegistry.seats().some((id) => id === m.seat || id.startsWith(`${m.seat}.`))) s.ring = true;
         s.streams += streams;
         // #1129 — `streams` counts every open SSE stream the server holds under
         // this token, reconnect churn included (one seat read 12/12 on 09-13),
@@ -3358,7 +3414,8 @@ const httpServer = http.createServer(async (req, res) => {
         ],
         residents,
         residentsRead,
-        ring: { direct: directSegment.status(), directPending: directPending.length },   // #1362
+        ring: { direct: directSegment.status(), directPending: directPending.length,
+          members: seatRegistry.seats(), bearerSeats: ringBearerSeats() },   // #1362 · #1396: who is in, and who MAY join by bearer
         receivers,
         sessions: transports.size,
         seats,
@@ -3484,6 +3541,7 @@ const httpServer = http.createServer(async (req, res) => {
         m.seat = binding.seat;
         m.heartbeatS = binding.heartbeat_s;
         m.unknownToken = false;   // it produced a good token; the drift is over
+        ringSyncBearer(sessionId, 'bind');   // #1396
       }
     } else if (!sessionId && body && isInitializeRequest(body)) {
       // New session: fresh transport + fresh McpServer
@@ -3518,6 +3576,7 @@ const httpServer = http.createServer(async (req, res) => {
           // a stale close from a superseded (reconnected-away) session is a no-op
           // and never unbinds the fresh session.
           const releasedSeat = seatRegistry.release({ sessionId: sid });
+          bearerRingSessions.delete(sid);   // #1396 — a closed session is out either way
           if (releasedSeat) console.log(`[#410 register] seat ${releasedSeat} released on close of sid=${sid}`);
           console.log(`Session closed: ${sid}`);
         }
@@ -3615,6 +3674,7 @@ const httpServer = http.createServer(async (req, res) => {
             && downMs > DEAF_GRACE_MS && !m.deafSince) {
           m.deafSince = Date.now();
           console.log(`[#726] DEAF seat=${m.seat ?? 'unbound'} sid=${sessionId} downMs=${downMs} — request received with no open stream; this seat is not receiving broadcasts (#624: no queue, no replay)`);
+          ringSyncBearer(sessionId, 'deaf', { leave: true });   // #1396 — a deaf seat must not hold a lease
         }
         if (req.method === 'GET') {
           // #289 — count concurrent GETs; do NOT flag a shared boolean. A client
@@ -3628,6 +3688,7 @@ const httpServer = http.createServer(async (req, res) => {
           m.everHadStream = true;
           m.deafSince = null;
           m.streamDownSince = null;   // #726 — reconnected; grace clock stops
+          ringSyncBearer(sessionId, 'stream-open');   // #1396 — bound + listening ⇒ in the ring
           // #284 — instrument the held GET so we can name what closes it.
           // heldMs ≈ 300000 ⇒ the old Node timeout ceiling; surviving >10 min
           // ⇒ the timeout fix holds. resDestroyed/reqDestroyed/writableEnded

@@ -19,7 +19,7 @@ export const DEFAULT_CONFIG = {
   mode: 'soft', // 'soft' (#265) | 'hard' (#266) | 'off' | 'token-ring' (#410, ring/lease)
   soft: { minMs: 30000, maxMs: 60000 },
   hard: { timeoutMs: 300000 },
-  tokenRing: { timeoutMs: 300000 }, // #410 — lease TTL (dead-seat recovery TIMEOUT)
+  tokenRing: { timeoutMs: 300000 }, // #410 — lease TTL (dead-seat recovery TIMEOUT) · #1396: `bearerSeats: [...]` lists the seats that join the ring by bearer (absent ⇒ none)
 };
 
 // Sane bounds so a bad save can't wedge delivery (e.g. a 9-hour timeout).
@@ -82,7 +82,19 @@ export function validateConfig(input) {
   if (!Number.isFinite(tokenRingTimeoutMs) || tokenRingTimeoutMs < TOKEN_RING_MIN_MS || tokenRingTimeoutMs > TOKEN_RING_MAX_MS) {
     throw new Error(`token-ring.timeoutMs must be between ${TOKEN_RING_MIN_MS} and ${TOKEN_RING_MAX_MS}`);
   }
-  return { mode, soft: { minMs, maxMs }, hard: { timeoutMs }, tokenRing: { timeoutMs: tokenRingTimeoutMs } };
+  // #1396 — the seats that JOIN THE RING BY BEARER (Claude Code seats): an
+  // explicit list, validated to seat-key strings, absent ⇒ none. Explicit
+  // because a presence session is also bearer-bound and registers itself
+  // under a lane-qualified id; listing it here would break its own register.
+  const bearerSeatsIn = tokenRing.bearerSeats === undefined ? [] : tokenRing.bearerSeats;
+  if (!Array.isArray(bearerSeatsIn) || !bearerSeatsIn.every((k) => typeof k === 'string' && /^[a-z][a-z0-9_-]*$/i.test(k))) {
+    throw new Error('tokenRing.bearerSeats must be an array of seat keys');
+  }
+  const bearerSeats = [...new Set(bearerSeatsIn)];
+  // Carried only when set: an empty list and an absent key mean the same
+  // thing (nobody joins by bearer), and every existing reader keeps its shape.
+  const ring = { timeoutMs: tokenRingTimeoutMs, ...(bearerSeats.length ? { bearerSeats } : {}) };
+  return { mode, soft: { minMs, maxMs }, hard: { timeoutMs }, tokenRing: ring };
 }
 
 /** Read the current config; always returns a valid object (missing/corrupt → defaults). */
