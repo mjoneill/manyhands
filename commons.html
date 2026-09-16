@@ -739,13 +739,16 @@
         head.id = 'thread-head';
         // The feed is the page's scroller and the column is fixed-height, so
         // the head must not eat the feed: the description folds behind one
-        // toggle, open by default on a tall window, closed on a short one,
-        // and the choice is remembered per card. Title, meta and the doors
-        // stay visible either way.
+        // toggle and the choice is remembered per card. OPEN BY DEFAULT on
+        // every window: the first cut opened it only above 900 px, and the
+        // owner's read (#1385 row 4, 2026-09-15 17:44Z) was that the view
+        // "just repeats the title" — the card he came to groom was hidden
+        // behind a toggle he had no reason to press. A short window scrolls;
+        // a card you can't see is the finding this card exists for.
         const body = head.querySelector('.card-head-body');
         const key = `manyhands.groom.head-open.${cardFull.id}`;
         let open; try { open = localStorage.getItem(key); } catch { open = null; }
-        const isOpen = open == null ? window.innerHeight >= 900 : open === '1';
+        const isOpen = open == null ? true : open === '1';
         const toggle = document.createElement('button'); toggle.type = 'button'; toggle.className = 'card-head-toggle';
         const paint = (on) => { body.hidden = !on; toggle.textContent = on ? 'Hide the description ▴' : 'Show the description ▾'; toggle.setAttribute('aria-expanded', String(on)); };
         toggle.addEventListener('click', () => { const on = body.hidden; paint(on); try { localStorage.setItem(key, on ? '1' : '0'); } catch { /* fine */ } });

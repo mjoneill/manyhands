@@ -36,9 +36,13 @@ test('#1391 served: Groom-this shows the card above the thread, refs live, doors
     const head = await page.$('#thread-head.card-head');
     assert.ok(head, 'the card head renders on the grooming page');
     assert.equal(await page.$eval('#thread-head .card-head-title', (e) => e.textContent), 'the card being groomed');
-    // a 600px-tall window: the description folds behind one toggle so the feed keeps its height; open it
-    if (await page.$eval('#thread-head .card-head-body', (e) => e.hidden)) await page.click('#thread-head .card-head-toggle');
-    await page.waitForFunction(() => !document.querySelector('#thread-head .card-head-body').hidden, { timeout: 3000 });
+    // The owner's row-4 reopen (2026-09-15 17:44Z: the view "just repeats the
+    // title"): on a SHORT window, first visit, no click — the description is
+    // showing. The fold exists (the toggle is there and remembered), but the
+    // default is open on every window, not only tall ones.
+    assert.equal(await page.$eval('#thread-head .card-head-body', (e) => e.hidden), false,
+      'the description is open on first view, on a short window, with no click — the card is what he came to groom');
+    assert.ok(await page.$('#thread-head .card-head-toggle'), 'the fold toggle still exists for anyone who wants the room');
     assert.match(await page.$eval('#thread-head .card-head-body', (e) => e.textContent), /what exists today/);
     assert.ok(await page.evaluate(() => document.querySelector('.cv-feed').getBoundingClientRect().height > 40), 'the feed keeps a usable height with the head open');
     const placed = await page.evaluate(() => {
