@@ -32,7 +32,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
-import { startPair, makeBoardFixture } from './helpers/harness.mjs';
+import { startPair, startRestServer, makeBoardFixture } from './helpers/harness.mjs';
 
 /** Is anything accepting connections on this port? The orphan's signature. */
 const isListening = (port) => new Promise((resolve) => {
@@ -107,6 +107,17 @@ test('#730 a HANGING second acquisition must be bounded, and must not strand the
     () => startPair({
       board: makeBoardFixture(),
       acquireTimeoutMs: 400,
+      // #1407 — REST is NOT under the tight deadline (the #837 2a split the
+      // sibling test below already uses). With REST sharing the 400 ms, a loaded
+      // runner (three CI jobs, or the local suite's shards) spent it all on REST's
+      // boot, the deadline fired with the right message, `_startMcp` never ran,
+      // and the anti-vacuity guard below reported it — three times on 2026-09-17.
+      restAcquireTimeoutMs: 60_000,
+      // …and REST is made SLOWER than the MCP budget on purpose, so this test
+      // exercises the loaded-runner shape every time instead of only when CI
+      // happens to be busy: 600 ms > 400 ms. Under the old shared deadline this
+      // is the deterministic reproduction of the three 09-17 failures.
+      _startRest: async (opts) => { await new Promise((r) => setTimeout(r, 600)); return startRestServer(opts); },
       // Never resolves. No timer, no handle — exactly what a wedged spawn looks like.
       _startMcp: async ({ restApiBase }) => {
         restPort = Number(new URL(restApiBase).port);
