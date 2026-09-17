@@ -5778,10 +5778,13 @@ function handleHealth(req, res) {
     pid: process.pid,
     uptimeMs: Math.round(process.uptime() * 1000),
     now: new Date().toISOString(),
-    // `ready` = the replica is BUILT (the first warm/cold projection finished).
-    // A process answers /api/health the instant it listens, seconds before it
-    // can answer a graph read; a deploy's verify waits for THIS, not for 200.
-    graph: { ready: _graphStore != null, generation: _graphGeneration, projectedThrough: _graphProjectedThrough ?? null, boot: _graphBoot },
+    // `ready` = the replica's FIRST SYNC COMPLETED. Not `_graphStore != null`:
+    // the cold path creates an EMPTY store first and fills it in the sync that
+    // follows, so the store existed 4 s before it held a triple (measured on a
+    // copy of prod: ready:true at +5 s, first synced line at +9 s, 32k entities
+    // in 5.2 s). A process answers /api/health the instant it listens; a
+    // deploy's verify waits for THIS, not for 200 and not for an object.
+    graph: { ready: _graphStore != null && _graphSyncCount > 0, generation: _graphGeneration, projectedThrough: _graphProjectedThrough ?? null, boot: _graphBoot, syncs: _graphSyncCount },
     checks: { passes: _checksPasses, inflight: !!_checksInflight, cachedAt: _checksCache ? new Date(_checksCache.at).toISOString() : null },
   });
 }
