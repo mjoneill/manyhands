@@ -2221,12 +2221,13 @@ function dropLegacyMemoryRows(data, iri) {
   return before - after.length;
 }
 const LIVE_MEMORIES_QUERY = 'SELECT ?s ?t ?p ?o WHERE { ?s a ?t ; ?p ?o . VALUES ?t { scrum:Memory scrum:MemoryVersion } }';
-const LIVE_MEMORIES_ROW_CAP = 400000;   // triples (~7 per memory, ~6 per version); refused at the cap, never cut mid-memory
+// ⛔ Read with queryGraphAll, NOT queryGraph: the public read caps every query at
+// LIMIT_CEILING (1,000 rows) and says so in `truncated` — the field beside the
+// one this fold read. First cut asked for 400,000, got 1,000, and listed 128 of
+// 395 memories with no error (found by the slice-3 dry run on a copy of prod).
+const LIVE_MEMORIES_ROW_CAP = 400000;   // ~7 rows per memory, ~6 per version; REFUSED past it, never cut mid-memory
 /** Graph rows → Map<memory uuid, {identity, versions}> in the ENTITY shape (what the event state carries). */
-function memoriesFromRows(rows, { limit } = {}) {
-  if (Number.isFinite(limit) && rows.length >= limit) {
-    throw Object.assign(new Error(`memory read returned ${rows.length} rows against a cap of ${limit}: the set may be cut mid-memory, so it is refused rather than answered short`), { code: 'ROW_CAP' });
-  }
+function memoriesFromRows(rows) {
   const local = (iri) => String(iri).replace(/^.*[#/:]/, '');
   const ids = new Map();      // identity iri → identity
   const vers = new Map();     // version iri → version
@@ -2266,10 +2267,10 @@ function memoriesFromRows(rows, { limit } = {}) {
   return out;
 }
 async function liveMemories() {
-  const { queryGraph } = await loadGraphModules();
+  const { queryGraphAll } = await loadGraphModules();
   const { store } = await warmGraphStore();
-  const { rows } = queryGraph(store, LIVE_MEMORIES_QUERY, { limit: LIVE_MEMORIES_ROW_CAP });
-  return memoriesFromRows(rows, { limit: LIVE_MEMORIES_ROW_CAP });
+  const { rows } = queryGraphAll(store, LIVE_MEMORIES_QUERY, { cap: LIVE_MEMORIES_ROW_CAP });
+  return memoriesFromRows(rows);
 }
 /** One memory from the graph, or {identity:null, versions:[]}. */
 async function liveMemoryParts(id) {

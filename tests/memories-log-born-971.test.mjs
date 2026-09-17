@@ -217,3 +217,28 @@ test('#971 gate 1 — no graph dependency ⇒ 503 GRAPH_DEPS_MISSING on the memo
     assert.equal(u.status, 503, `an UPDATE reads the current state from the graph, so it is refused: ${JSON.stringify(u.body)}`);
   } finally { child.kill(); }
 });
+
+test('#971 the list is NEVER SHORT — 300 memories (well past the public read\'s 1,000-row ceiling) all come back, or the read refuses', async () => {
+  // Found by the slice-3 dry run on a copy of prod: the public queryGraph caps
+  // every query at LIMIT_CEILING (1,000 rows) and says so in `truncated`; the
+  // first fold read asked for 400,000, got 1,000, and listed 128 of 395 with
+  // no error. A fold read must see every row or refuse.
+  const memories = [];
+  for (let i = 0; i < 300; i++) {
+    const id = `00000000-0000-4000-8000-${String(100000 + i).padStart(12, '0')}`;
+    const iri = `https://scrumboard.local/memory/${id}`;
+    memories.push({ '@id': iri, '@type': 'scrum:Memory', identifier: id, name: `memory ${i}`, 'scrum:owner': i % 2 ? 'ada' : 'pip', 'scrum:tag': ['bulk', `t${i % 7}`], 'scrum:currentVersion': `${iri}/v1` });
+    memories.push({ '@id': `${iri}/v1`, '@type': 'scrum:MemoryVersion', 'scrum:ofMemory': iri, 'scrum:version': 1, 'scrum:body': `body ${i}`, author: 'ada', dateCreated: '2026-09-01T00:00:00.000Z' });
+  }
+  const s = await startRestServer({ board: makeBoardFixture({ cards: [], memories }) });
+  try {
+    const all = await api(s.baseUrl, 'GET', '/api/memories');
+    assert.equal(all.status, 200, JSON.stringify(all.body).slice(0, 300));
+    assert.equal(all.body.total, 300, `every memory, not the first thousand rows' worth: ${all.body.total}`);
+    assert.equal(all.body.legacyRows, 600);
+    const ada = await api(s.baseUrl, 'GET', '/api/memories?owner=ada');
+    assert.equal(ada.body.total, 150);
+    const last = await api(s.baseUrl, 'GET', `/api/memories/00000000-0000-4000-8000-${String(100000 + 299).padStart(12, '0')}`);
+    assert.equal(last.body.body, 'body 299', 'the 300th memory is readable by id');
+  } finally { await s.stop(); }
+});

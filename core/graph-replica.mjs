@@ -2358,3 +2358,35 @@ export function queryGraph(store, sparql, { limit } = {}) {
   if (truncated) rows.length = wanted;
   return { rows, returned: rows.length, truncated, limit: wanted, ms: Math.round(ms * 10) / 10 };
 }
+
+/**
+ * #971 — a SERVER-SIDE FOLD READ: every row, or a refusal. Never short.
+ *
+ * `queryGraph` is the public surface and is bounded on purpose (#885: LIMIT
+ * capped at LIMIT_CEILING = 1000, the cut confessed in `truncated`). A reader
+ * that folds nodes out of rows — memories, decisions, declarations — cannot
+ * live inside that bound: on 2026-09-17 the memory list asked for 400,000
+ * rows, received 1,000, compared its own cap against 400,000, and answered
+ * 128 memories for a board that held 395 — no error, no warning, a clean
+ * short list. The adjacent field said `truncated: true`; nothing read it.
+ *
+ * This read has no LIMIT injection and ONE hard cap it REFUSES past (throws
+ * ROW_CAP), because a fold that is cut mid-node is wrong in a way a count
+ * cannot see. Internal only: never wire it to an HTTP surface.
+ */
+export function queryGraphAll(store, sparql, { cap = 250_000 } = {}) {
+  if (typeof sparql !== 'string' || !sparql.trim()) throw Object.assign(new Error('empty query'), { code: 'EMPTY_QUERY' });
+  if (!/^\s*(SELECT)\b/i.test(sparql.replace(/^\s*PREFIX[^\n]*\n/gim, ''))) throw Object.assign(new Error('queryGraphAll takes a SELECT'), { code: 'NOT_SELECT' });
+  const t = performance.now();
+  const out = store.query(`${SPARQL_PREFIXES}\n${sparql}`);
+  const rows = [];
+  for (const binding of out) {
+    const row = {};
+    for (const [k, v] of binding.entries()) row[k] = v.termType === 'NamedNode' ? shorten(v.value) : v.value;
+    rows.push(row);
+    if (rows.length > cap) {
+      throw Object.assign(new Error(`fold read exceeded its cap of ${cap} rows — refused rather than answered short`), { code: 'ROW_CAP', cap });
+    }
+  }
+  return { rows, returned: rows.length, ms: Math.round((performance.now() - t) * 10) / 10 };
+}
