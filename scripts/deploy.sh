@@ -379,7 +379,10 @@ done
 # so a single 8 s try read "did not return" on a service that was simply still
 # booting (2026-09-02 17:55Z). Wait the way MCP is waited for.
 i=0
-until curl -fsS --max-time 3 http://127.0.0.1:3141/api/board/status >/dev/null 2>&1; do
+# #1404 — and poll the door that costs nothing: /api/health answers from memory.
+# /api/board/status walks the board; /api/checks runs every card's SPARQL and
+# wedged REST for 8 min on 2026-09-17 when a seat polled it as a liveness probe.
+until curl -fsS --max-time 3 http://127.0.0.1:3141/api/health >/dev/null 2>&1; do
   i=$((i + 1)); [ "$i" -gt 40 ] && die "rest did not return within 80s"; sleep 2
 done
 say "   mcp 200 · rest 200 · serving $(cat "$SERVE/DEPLOYED-SHA" | cut -c1-7) · restarted: rest=$DO_REST mcp=$DO_MCP"

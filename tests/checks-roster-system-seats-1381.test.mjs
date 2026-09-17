@@ -17,8 +17,12 @@ import { startRestServer, makeBoardFixture } from './helpers/harness.mjs';
 const tmp = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'roster-check-')), 'roster.json');
 const SEATS = (wikiKind) => ({ ada: { name: 'Ada', color: '#7cc4a0' }, board: { name: 'Board', color: '#888888', kind: 'system' }, wiki: { name: 'Wiki', color: '#999999', ...(wikiKind ? { kind: wikiKind } : {}) } });
 
+// `?fresh=1`: #1404 serves one pass for a minute unless the BOARD changed, and
+// this check watches a FILE — a hand-edit to the roster is exactly the change
+// the cache cannot see. The forced read is what a human does after such an
+// edit; the tick sees it within the cache window either way.
 async function standing(baseUrl) {
-  const j = await (await fetch(`${baseUrl}/api/checks`)).json();
+  const j = await (await fetch(`${baseUrl}/api/checks?fresh=1`)).json();
   const c = (j.standing || []).find((x) => x.id === 'roster-system-seats');
   assert.ok(c, 'the check is in standing[]: ' + JSON.stringify((j.standing || []).map((x) => x.id)));
   return c;

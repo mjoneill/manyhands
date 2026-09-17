@@ -5548,12 +5548,98 @@ function describeAsk(ask) {
   };
 }
 
+// ── #1404 — ONE PASS AT A TIME, AND A PASS IS SHARED.
+//
+// 2026-09-17 16:03–16:11Z: REST answered nothing for eight minutes with the
+// main thread at 91% inside this handler. The pass below runs every card's
+// stored ASK synchronously (56 checks = 5.4 s of main thread on that day's
+// board, one of them #900's `isPartOf+` walk), and it ran ONCE PER CALLER: the
+// MCP tick queued one every minute, a seat's "is REST back?" curl queued one
+// every five seconds, and a client that gives up does not cancel the request
+// node already parsed — the queue could never drain. Same family as #1397/
+// #1398 (a full-store walk per orientation call) and the residual #887 named
+// (the engine is synchronous and cannot be interrupted).
+//
+//   single-flight  a second caller during a pass JOINS it (same promise, same
+//                  `evaluatedAt`) — never starts another.
+//   cached         a pass is served again for SCRUM_CHECKS_CACHE_MS (60 s) with
+//                  `evaluatedAt` + `ageMs` on the payload, so a reader knows
+//                  what they hold; `?fresh=1` forces one evaluation, never N.
+//   yielding       the loop gives the event loop back between cards, so a cheap
+//                  door (/api/health) answers within ONE check's cost during a
+//                  pass instead of after the whole pass. It cannot do better:
+//                  one ASK is one synchronous WASM call (#885).
+//   priced         every check carries `ms`; over SCRUM_CHECK_CEILING_MS it is
+//                  flagged `slow: true` beside its verdict (a verdict stays a
+//                  verdict — `status` never means two things, the rule of this
+//                  endpoint), so an author can see what their tripwire costs.
+//
+// `passes` on the payload counts evaluations since boot — the number the served
+// test moves (20 concurrent callers ⇒ +1), and the number a reader can use to
+// tell "cached" from "re-run" without trusting a label.
+const CHECKS_CACHE_MS = Number(process.env.SCRUM_CHECKS_CACHE_MS ?? 60_000);
+const CHECK_CEILING_MS = Number(process.env.SCRUM_CHECK_CEILING_MS ?? 2000);
+let _checksCache = null;     // { at: ms, payload }
+let _checksInflight = null;  // Promise<payload> while a pass runs
+let _checksPasses = 0;
+// Two hops, not one: a NEW connection (a curl probe) needs one poll turn to be
+// accepted and a second for its request bytes to be read — one setImmediate
+// gave the accept and then ran the next check before the read (measured:
+// health served after two checks, not one).
+const _yield = async () => { await new Promise((r) => setImmediate(r)); await new Promise((r) => setImmediate(r)); };
+
 async function handleChecks(req, res) {
   try {
+    const url = new URL(req.url, 'http://localhost');
+    const fresh = url.searchParams.get('fresh') === '1';
+    let payload, servedFrom;
+    // A cached pass is served only while the board it described is the board
+    // there is: any write bumps `_graphGeneration` (#931) and the next caller
+    // re-runs — once. So a seat that writes a tripwire and reads it back gets
+    // its own verdict, and the cache only ever elides passes that would have
+    // said the same thing.
+    if (!fresh && _checksCache && _checksCache.generation === _graphGeneration && Date.now() - _checksCache.at < CHECKS_CACHE_MS) {
+      payload = _checksCache.payload; servedFrom = 'cache';
+    } else if (_checksInflight) {
+      payload = await _checksInflight; servedFrom = 'joined';
+    } else {
+      _checksInflight = evaluateChecks().finally(() => { _checksInflight = null; });
+      payload = await _checksInflight; servedFrom = 'fresh';
+    }
+    sendJSON(res, 200, {
+      ...payload,
+      servedFrom,
+      ageMs: Math.max(0, Date.now() - Date.parse(payload.evaluatedAt)),
+      cacheMs: CHECKS_CACHE_MS,
+    });
+  } catch (e) {
+    if (e?.code === 'GRAPH_DEPS_MISSING') return sendJSON(res, 503, { error: e.message, code: e.code });
+    console.error('GET /api/checks:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+
+// #1404 — the door that costs nothing. Answers from memory: no document read,
+// no SPARQL, no git. THIS is what a liveness probe polls; /api/checks is not.
+function handleHealth(req, res) {
+  sendJSON(res, 200, {
+    ok: true,
+    pid: process.pid,
+    uptimeMs: Math.round(process.uptime() * 1000),
+    now: new Date().toISOString(),
+    graph: { generation: _graphGeneration, projectedThrough: _graphProjectedThrough ?? null, boot: _graphBoot },
+    checks: { passes: _checksPasses, inflight: !!_checksInflight, cachedAt: _checksCache ? new Date(_checksCache.at).toISOString() : null },
+  });
+}
+
+async function evaluateChecks() {
+  {
+    const evaluationStarted = Date.now();
     // #949 (scope extension) — a VERDICT surface needs currency more than a
     // query surface does. A seat reading /api/graph re-runs a surprising number;
     // "this tripwire holds" and "this card is ready" get BELIEVED.
     const { store, projectedThrough } = await warmGraphStore();
+    const generation = _graphGeneration;   // #1404 — the board these verdicts describe
     const { queryGraph } = await loadGraphModules();
     const data = readBoard();
     const results = [];
@@ -5589,8 +5675,11 @@ async function handleChecks(req, res) {
         continue;
       }
       watched += 1;
+      await _yield();   // #1404 — a cheap door gets served between cards
       const evaluated = checks.map((c) => {
         checksTotal += 1;
+        const t0 = performance.now();
+        const priced = (row) => { const ms = Math.round(performance.now() - t0); return { ...row, ms, ...(ms > CHECK_CEILING_MS ? { slow: true } : {}) }; };
         try {
           const r = queryGraph(store, c.ask);
           // ⚠️ The ASK boolean arrives as `ask`, NOT `boolean` — read from
@@ -5602,20 +5691,20 @@ async function handleChecks(req, res) {
           const got = r.ask;
           if (typeof got !== 'boolean') {
             errors += 1;
-            return { claim: c.claim, status: 'error', error: 'ASK did not return a boolean' };
+            return priced({ claim: c.claim, status: 'error', error: 'ASK did not return a boolean' });
           }
           const holds = got === c.expect;
           if (!holds) stale += 1;
           // #902 — what this check LOOKS AT, beside what it answered.
           const looks = describeAsk(c.ask);
           if (looks.referencesOnlyCardIdentity) identityOnly += 1;
-          return {
+          return priced({
             claim: c.claim, status: holds ? 'holds' : 'stale', expected: c.expect, actual: got,
             looksAt: looks,
-          };
+          });
         } catch (e) {
           errors += 1;
-          return { claim: c.claim, status: 'error', error: e?.message || String(e) };
+          return priced({ claim: c.claim, status: 'error', error: e?.message || String(e) });
         }
       });
       results.push({ shortId: card.shortId, title: card.title, checks: evaluated });
@@ -5627,16 +5716,18 @@ async function handleChecks(req, res) {
     // because nobody would think to". Summing them would make `stale` mean two
     // things at once, which is the confusion this endpoint exists to refuse.
     const standing = STANDING_CHECKS.map((c) => {
+      const t0 = performance.now();
+      const priced = (row) => { const ms = Math.round(performance.now() - t0); return { ...row, ms, ...(ms > CHECK_CEILING_MS ? { slow: true } : {}) }; };   // #1404
       try {
         // #1381 — a check may READ A FILE instead of the replica (`run`); same
         // shape out, same digest line, same "an error is not an empty result".
-        if (typeof c.run === 'function') return { id: c.id, claim: c.claim, rows: c.run(data, { store, queryGraph }) ?? [] };   // #1400 — a check may read the replica too
+        if (typeof c.run === 'function') return priced({ id: c.id, claim: c.claim, rows: c.run(data, { store, queryGraph }) ?? [] });   // #1400 — a check may read the replica too
         const r = queryGraph(store, c.query);
-        return { id: c.id, claim: c.claim, query: c.query, rows: r.rows ?? [] };
+        return priced({ id: c.id, claim: c.claim, query: c.query, rows: r.rows ?? [] });
       } catch (e) {
         // An error is NOT an empty result. A standing check that cannot run must
         // never read as "nothing found" — the #792 lesson, on a second surface.
-        return { id: c.id, claim: c.claim, query: c.query, error: e?.message || String(e) };
+        return priced({ id: c.id, claim: c.claim, query: c.query, error: e?.message || String(e) });
       }
     });
 
@@ -5688,7 +5779,15 @@ async function handleChecks(req, res) {
       },
     });
 
-    sendJSON(res, 200, {
+    _checksPasses += 1;
+    const payload = {
+      // #1404 — WHEN these verdicts were computed and what the pass cost. A
+      // cached payload is a true statement about the board as of this stamp.
+      evaluatedAt: new Date(evaluationStarted).toISOString(),
+      evaluationMs: Date.now() - evaluationStarted,
+      passes: _checksPasses,
+      generation,
+      checkCeilingMs: CHECK_CEILING_MS,
       // #949 — WHICH STORE STATE THESE VERDICTS DESCRIBE. `stale: 0` computed
       // from a lagging projection is a true statement about the wrong board.
       watermark: graphWatermark(projectedThrough),
@@ -5724,13 +5823,14 @@ async function handleChecks(req, res) {
         + 'every commit sha on the board resolves. It reports UNMEASURABLE rather than zero '
         + 'when the repository cannot be read, because "no fabrications found" and "I could '
         + 'not look" are otherwise identical — and it names what it cannot see, since this '
-        + 'runs on the deploy clone and a freshly-pushed commit legitimately reads as missing.',
+        + 'runs on the deploy clone and a freshly-pushed commit legitimately reads as missing. '
+        + 'evaluatedAt/ageMs/servedFrom say how old these verdicts are: one pass is shared by every '
+        + 'concurrent caller and served for cacheMs; ?fresh=1 forces one re-run. Each check carries '
+        + 'its ms; slow:true marks one over checkCeilingMs — the price its author is paying the main thread.',
       results,
-    });
-  } catch (e) {
-    if (e?.code === 'GRAPH_DEPS_MISSING') return sendJSON(res, 503, { error: e.message, code: e.code });
-    console.error('GET /api/checks:', e.message);
-    sendJSON(res, 500, { error: e.message });
+    };
+    _checksCache = { at: Date.now(), generation, payload };
+    return payload;
   }
 }
 
@@ -9257,6 +9357,7 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/search$/,               fn: (req, res) => handleSearch(req, res) },
   { method: 'GET',    re: /^\/api\/graph\/vocabulary$/,    fn: (req, res) => handleGraphVocabulary(req, res) },   // #1104
   { method: 'GET',    re: /^\/api\/ready$/,                fn: (req, res) => handleReady(req, res) },       // #815
+  { method: 'GET',    re: /^\/api\/health$/,               fn: (req, res) => handleHealth(req, res) },      // #1404 — the door that costs nothing
   { method: 'GET',    re: /^\/api\/checks$/,               fn: (req, res) => handleChecks(req, res) },      // #792
   { method: 'GET',    re: /^\/api\/misses$/,               fn: (req, res) => handleMisses(req, res) },      // #801
   // #857 §IV — the controlled vocabulary. `collisions` is declared before the

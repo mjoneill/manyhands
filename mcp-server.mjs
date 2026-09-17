@@ -2553,8 +2553,14 @@ const staleClaimAskOnce = async (checks) => {
     log: (line) => console.error(line),
   });
 };
+// #1404 — `?fresh=1`: this tick IS the scheduled refresher. REST serves one
+// pass for a minute unless the board changed, but two standing checks move
+// with the clock and the filesystem, not the board (#455 stale-claims reads
+// `now`; #1381 reads the roster file), and a quiet board is exactly when the
+// stale-claim ask must fire. Single-flight still holds: a tick that lands
+// while a pass runs joins it, never stacks one (the 09-15 01:12Z queue).
 const checksTick = makeChecksTick({
-  fetchChecks: ({ signal }) => apiCall('GET', '/api/checks', undefined, { signal }),
+  fetchChecks: ({ signal }) => apiCall('GET', '/api/checks?fresh=1', undefined, { signal }),
   consumers: [digestTickOnce, emitterTickOnce, staleClaimAskOnce],
   timeoutMs: CHECKS_TIMEOUT_MS,
   log: (line) => console.error(line),
