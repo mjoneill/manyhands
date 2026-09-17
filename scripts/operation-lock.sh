@@ -42,7 +42,6 @@ field() { sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p" "$LOCK" 2>/dev/null | head -
 epoch_of() {  # ISO-8601 Z → epoch; macOS date and GNU date spell this differently
   date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$1" +%s 2>/dev/null || date -u -d "$1" +%s 2>/dev/null || echo 0
 }
-esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 
 describe() {  # prints "holder · op · note · age" for the current file
   h="$(field holder)"; o="$(field op)"; n="$(field note)"; at="$(field claimedAt)"
@@ -57,8 +56,12 @@ case "$cmd" in
   acquire)
     op="${2:-}"; holder="${3:-}"; note="${4:-}"
     [ -n "$op" ] && [ -n "$holder" ] || { printf 'usage: %s acquire <op> <holder> [note]\n' "$0" >&2; exit 2; }
+    # The reader below is a one-line sed, not a JSON parser: it does not un-escape,
+    # so a holder written as x\"y reads back as x\ and could never release its own
+    # lock. Refuse the two characters the writer would have to escape.
+    case "$op$holder$note" in *'"'*|*'\'*) printf '⛔ operation lock: op, holder and note may not contain a double quote or backslash\n' >&2; exit 2 ;; esac
     body="$(printf '{"holder":"%s","op":"%s","note":"%s","claimedAt":"%s","pid":%s}' \
-      "$(esc "$holder")" "$(esc "$op")" "$(esc "$note")" "$(now_utc)" "$$")"
+      "$holder" "$op" "$note" "$(now_utc)" "$$")"
     if ( set -C; printf '%s\n' "$body" > "$LOCK" ) 2>/dev/null; then
       printf '🔒 operation lock: %s held by %s — %s\n' "$op" "$holder" "$LOCK"
       exit 0

@@ -94,6 +94,16 @@ test('#1399 a STALE lock (> 30 min) is NAMED, never overridden', () => {
   assert.match(s.stdout, /stale/i);
 });
 
+test('#1399 a holder or note carrying a double quote or backslash is REFUSED at acquire (the one-line JSON reader does not un-escape, so such a holder could never release its own lock)', () => {
+  const { lock } = fresh();
+  for (const [holder, note] of [['x"y', 'ok'], ['ok', 'say "hi"'], ['back\\slash', 'ok']]) {
+    const r = run(lock, 'acquire', 'deploy', holder, note);
+    assert.notEqual(r.status, 0, `${holder} / ${note} must be refused`);
+    assert.match(r.stderr, /quote|backslash/i);
+    assert.ok(!existsSync(lock), 'nothing written');
+  }
+});
+
 test('#1399 no lock path configured → says UNAVAILABLE, exits non-zero (fail-open is not fail-invisible)', () => {
   const r = spawnSync('sh', [SCRIPT, 'acquire', 'deploy', 'alpha'], { env: { PATH: process.env.PATH }, encoding: 'utf8' });
   assert.notEqual(r.status, 0);
