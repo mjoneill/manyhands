@@ -101,4 +101,9 @@ for (const id of ids) {
 const final = await api('GET', '/api/memories');
 console.log(`done: ${migrated} migrated in ${Math.round((Date.now() - t0) / 1000)} s · legacyRows now ${final.legacyRows} · total memories ${final.total} (was ${list.total})`);
 if (final.legacyRows !== 0) { console.error(`⛔ legacyRows is ${final.legacyRows}, expected 0`); process.exit(5); }
-if (final.total !== list.total) { console.error(`⛔ total moved ${list.total} → ${final.total}`); process.exit(5); }
+// A LIVE board keeps writing during the run: on prod (2026-09-17) a seat created a
+// memory mid-migration and `total` moved 397 → 398 — a healthy room, not a lost
+// memory. The invariant a touch preserves is "nothing disappears": total may
+// only GROW while this runs.
+if (final.total < list.total) { console.error(`⛔ total SHRANK ${list.total} → ${final.total} — a memory is missing`); process.exit(5); }
+if (final.total > list.total) console.log(`note: total grew ${list.total} → ${final.total} — memories born in the log while this ran, not touched by it`);
