@@ -81,8 +81,9 @@ import { queryCards, facetCards } from './core/cards-query.mjs';
 import { similarCards } from './core/similar-cards.mjs';
 import { queryChangesFromLog } from './core/changes-log-query.mjs';
 import { readEvents, oldestRetainedAt, seqAsOf, seqOfEntityEvent, activityReadWindow, advanceActivityCursor } from './core/event-log.mjs';
-import { writeSnapshot, readSnapshot, sweepSnapshotTemps } from './core/graph-snapshot.mjs';   // #884
+import { writeSnapshot, readSnapshot, sweepSnapshotTemps, snapshotPaths } from './core/graph-snapshot.mjs';   // #884 · #1386 reads the sidecar
 import { staleClaims, STALE_CLAIM_HOURS } from './core/stale-claims.mjs';   // #455
+import { readStoreMeter, meterLine, meterCeilings } from './core/store-meter.mjs';   // #1386
 // #683 — the deafness cure's server half. REST owns the event log, so it owns
 // the cursors that index it; mcp-server asks over HTTP rather than learning a
 // path it has no business knowing (#767).
@@ -1150,6 +1151,12 @@ let _graphProjectedThrough = null;
 const GRAPH_SNAPSHOT_EVERY = Number(process.env.SCRUM_GRAPH_SNAPSHOT_EVERY || 500);
 const GRAPH_SNAPSHOT_DIR = path.dirname(BOARD_DATA_FILE);
 let _graphSnapshotSeq = 0;
+// #1386 — what the store meter reads about the boot that built this replica:
+// which path (warm|cold), how long, and the first sync after it (the replay
+// tail). Set once per process, at the boot, so /api/checks can report the
+// warm-start ceiling from the event rather than from a log grep.
+let _graphBoot = null;          // { path: 'warm'|'cold', ms, seq, at }
+let _graphReplayTailMs = null;  // ms of the first sync after boot, null until it has run
 let _graphSnapshotWriting = false;
 let _graphDocStamp = null;   // the document `lastUpdated` the store was last synced from; travels in the sidecar
 // #931 — HOW MANY WRITES HAVE HAPPENED. Monotonic, bumped beside every
@@ -1426,9 +1433,11 @@ async function warmGraphStoreOnce() {
       if (snap.ok) {
         _graphStore = snap.store; _graphHashes = snap.hashes; _graphSignals = snap.signals;
         _activitySeq = snap.seq; _activityAt = snap.at; _graphSnapshotSeq = snap.seq;
+        _graphBoot = { path: 'warm', ms: Math.round(snap.ms), seq: snap.seq, at: new Date().toISOString() };   // #1386
         console.error(`${new Date().toISOString()} graph-replica: boot WARM from snapshot seq=${snap.seq} (${snap.triples} triples, ${snap.hashes.size} cached entities) in ${Math.round(snap.ms)}ms`);
       } else {
         _graphStore = buildGraphStore({ '@graph': [] }); _activitySeq = 0; _activityAt = null;
+        _graphBoot = { path: 'cold', ms: 0, seq: 0, at: new Date().toISOString(), reason: snap.reason };   // #1386 — cold's cost is the first sync, recorded as the replay tail below
         console.error(`${new Date().toISOString()} graph-replica: boot COLD — ${snap.reason}: ${snap.detail}`);
       }
     }
@@ -1562,6 +1571,10 @@ async function warmGraphStoreOnce() {
       console.error(`${new Date().toISOString()} graph-replica: a write landed mid-sync (generation ${genAtStart} → ${_graphGeneration}); staying dirty so the next query re-projects`);
     }
     rebuiltMs = Math.round(performance.now() - t);
+    if (_graphReplayTailMs === null) {   // #1386 — the first sync after boot IS the replay tail
+      _graphReplayTailMs = rebuiltMs;
+      try { console.error(`${new Date().toISOString()} ${meterLine(readStoreMeter({ store: _graphStore, memory: process.memoryUsage(), boot: _graphBoot, replayTailMs: _graphReplayTailMs, snapshot: readSnapshotMeta() }).readings)}`); } catch (e) { console.error(`${new Date().toISOString()} graph-store-meter: unreadable at boot: ${e?.message}`); }
+    }
     // #884 — snapshot when GRAPH_SNAPSHOT_EVERY events have passed since the
     // last one. Only from a clean state (nothing landed mid-sync), only when
     // no write is already running, and off this tick so the caller's answer
@@ -1573,6 +1586,23 @@ async function warmGraphStoreOnce() {
   }
   return { store: _graphStore, rebuiltMs, projectedThrough: _graphProjectedThrough };
 }
+
+// #1386 — the snapshot sidecar's headline numbers, or null when no snapshot exists.
+function readSnapshotMeta() {
+  try {
+    const m = JSON.parse(fs.readFileSync(snapshotPaths(GRAPH_SNAPSHOT_DIR).meta, 'utf8'));
+    return { seq: m.seq ?? null, bytes: m.bytes ?? null, dumpedAt: m.dumpedAt ?? null, triples: m.triples ?? null };
+  } catch { return null; }
+}
+// #1386 — the meter as one object: readings + crossed ceilings. Throws when the
+// replica is not built (a boot that has not built it yet is an error, not zero rows).
+function graphStoreMeter() {
+  return readStoreMeter({ store: _graphStore, memory: process.memoryUsage(), boot: _graphBoot, replayTailMs: _graphReplayTailMs, snapshot: readSnapshotMeta(), ceilings: meterCeilings() });
+}
+// One line an hour so the trend is in the log without anyone polling /api/checks.
+setInterval(() => {
+  try { const m = graphStoreMeter(); console.error(`${new Date().toISOString()} ${meterLine(m.readings, m.crossed)}`); } catch { /* not built yet — the boot line covers it */ }
+}, Number(process.env.SCRUM_METER_LOG_MS ?? 3_600_000)).unref();
 
 // #884 — write the snapshot. Never throws to a caller: a failed dump is a log
 // line and the next boot is cold, which is where every boot was before this.
@@ -5363,6 +5393,17 @@ const STANDING_CHECKS = [
       now: new Date().toISOString(),
     }),
   },
+  {
+    // #1386 — the store meter: rows are CROSSED ceilings only, so the daily
+    // digest says "storeMB 1601 > 1536" the day it happens and nothing on
+    // the days it does not. The raw readings ride /api/checks as `storeMeter`
+    // beside standing[]; a replica that is not built yet throws here, which
+    // the runner reports as `error` — never as zero rows.
+    id: 'graph-store-meter',
+    claim: 'the in-process graph store is within the ceilings decision d0c5839d named — resident store ≤ 1.5 GB, '
+      + 'warm start ≤ 10 s, replay tail ≤ 60 s — so (b) stays a measured choice and (a1)/#1389 is reached by a number',
+    run: () => graphStoreMeter().crossed,
+  },
 ];
 
 // ── #902 — WHAT A CHECK ACTUALLY LOOKS AT ────────────────────────────────────
@@ -5577,6 +5618,9 @@ async function handleChecks(req, res) {
       checksTotal,
       checksReferencingOnlyCardIdentity: identityOnly,
       shaIntegrity,
+      // #1386 — the meter's raw readings, for the trend page and any reader
+      // who wants the number before it crosses. `error` when the replica is not built.
+      storeMeter: (() => { try { return graphStoreMeter().readings; } catch (e) { return { error: e?.message || String(e) }; } })(),
       unwatchedByType,
       unwatchedGoals,
       standing,
