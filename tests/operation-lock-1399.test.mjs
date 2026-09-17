@@ -152,6 +152,7 @@ test('#1399 SEAM — deploy.sh releases the lock on EVERY exit path (a dirty clo
   assert.match(r.stdout + r.stderr, /🔒 operation lock: deploy held by /, 'it ACQUIRED first — without this line the next assertion is vacuous');
   assert.match(r.stdout + r.stderr, /uncommitted changes/, 'it got past the lock and died at the dirty check');
   assert.ok(!existsSync(lock), 'the EXIT trap released the lock');
+  assert.match(r.stdout, /🔓 operation lock released: deploy by /, 'and SAID so — a deploy record can quote both ends');
 });
 
 test('#1399 SEAM — `deploy.sh status` reports the lock holder without taking it', () => {

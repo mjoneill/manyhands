@@ -232,7 +232,9 @@ elif [ -f "$OP_LOCK" ]; then
   if ! sh "$OP_LOCK" acquire deploy "$OP_HOLDER" "deploy.sh from $CLONE @ $(git -C "$CLONE" rev-parse --short HEAD) pid $$"; then
     die "another operation holds the lock — not deploying under it"
   fi
-  trap 'sh "$OP_LOCK" release deploy "$OP_HOLDER" >/dev/null 2>&1 || true' EXIT
+  # The release prints its own 🔓 line so a deploy record can quote both ends
+  # of the lock (the first attended run under it could quote only the acquire).
+  trap 'sh "$OP_LOCK" release deploy "$OP_HOLDER" 2>/dev/null || true' EXIT
 else
   say "⚠️ no scripts/operation-lock.sh in the clone — deploying UNLOCKED (a second operator could restart under this one)"
 fi
