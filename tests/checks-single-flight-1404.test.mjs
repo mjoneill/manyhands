@@ -115,6 +115,7 @@ test('#1404 /api/health answers from memory WHILE a checks pass runs — within 
     await new Promise((r) => setTimeout(r, 150));          // the pass is under way
     const health = await get(s.baseUrl, '/api/health');
     const pass = await passP;
+    assert.equal(health.body.graph.ready, true, 'the replica is built by the time a pass is running — the field a deploy verify waits for');
     const oneCheck = Math.max(...pass.body.results.map((r) => r.checks[0].ms));
     assert.ok(pass.body.evaluationMs > 2500, `the pass must be long enough to be caught mid-way (${pass.body.evaluationMs} ms)`);
     assert.ok(health.ms < oneCheck + 400,

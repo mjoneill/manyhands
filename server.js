@@ -5627,7 +5627,10 @@ function handleHealth(req, res) {
     pid: process.pid,
     uptimeMs: Math.round(process.uptime() * 1000),
     now: new Date().toISOString(),
-    graph: { generation: _graphGeneration, projectedThrough: _graphProjectedThrough ?? null, boot: _graphBoot },
+    // `ready` = the replica is BUILT (the first warm/cold projection finished).
+    // A process answers /api/health the instant it listens, seconds before it
+    // can answer a graph read; a deploy's verify waits for THIS, not for 200.
+    graph: { ready: _graphStore != null, generation: _graphGeneration, projectedThrough: _graphProjectedThrough ?? null, boot: _graphBoot },
     checks: { passes: _checksPasses, inflight: !!_checksInflight, cachedAt: _checksCache ? new Date(_checksCache.at).toISOString() : null },
   });
 }

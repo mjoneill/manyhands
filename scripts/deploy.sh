@@ -382,8 +382,12 @@ i=0
 # #1404 — and poll the door that costs nothing: /api/health answers from memory.
 # /api/board/status walks the board; /api/checks runs every card's SPARQL and
 # wedged REST for 8 min on 2026-09-17 when a seat polled it as a liveness probe.
-until curl -fsS --max-time 3 http://127.0.0.1:3141/api/health >/dev/null 2>&1; do
-  i=$((i + 1)); [ "$i" -gt 40 ] && die "rest did not return within 80s"; sleep 2
+# ⚠️ and wait for `graph.ready:true`, not for 200: health answers the instant
+# the process listens, seconds before the replica is built (1.5 s warm; a
+# cold boot is longer) — a 200 alone would call a board that cannot yet answer
+# a graph read "back".
+until curl -fsS --max-time 3 http://127.0.0.1:3141/api/health 2>/dev/null | grep -q '"ready":true'; do
+  i=$((i + 1)); [ "$i" -gt 40 ] && die "rest did not return ready within 80s"; sleep 2
 done
 say "   mcp 200 · rest 200 · serving $(cat "$SERVE/DEPLOYED-SHA" | cut -c1-7) · restarted: rest=$DO_REST mcp=$DO_MCP"
 
