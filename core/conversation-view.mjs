@@ -684,11 +684,21 @@ export function mountConversationView(opts = {}) {
       fm.classList.remove('cv-dragover');
       for (const fl of Array.from((e.dataTransfer && e.dataTransfer.files) || [])) await uploadFile(fl, chips);
     });
+    // #1408 — ONE post per send. Without this latch a second submit while the
+    // first is in flight (a double click, Enter twice, a browser retry) posts
+    // again: the customer's first Talk message landed twice, 1.2 s apart — the
+    // POST + reload round trip on prod. Held across post() AND the reload it
+    // awaits; released in finally so a failed post never wedges the composer.
+    let sending = false;
     fm.addEventListener('submit', async (e) => {
       e.preventDefault();
+      if (sending) return;
       const body = ta.value.trim();
       if (!body && pending.length === 0) return;   // body OR attachment required
-      const ok = await post(body, who.value, pending);
+      sending = true; send.disabled = true;
+      let ok = false;
+      try { ok = await post(body, who.value, pending); }
+      finally { sending = false; send.disabled = false; }
       if (ok) { ta.value = ''; pending = []; renderPending(chips); try { watch?.clearDraft(); } catch { /* never break the post */ } }
     });
     return fm;
