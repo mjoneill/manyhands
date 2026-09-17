@@ -1770,7 +1770,10 @@ function buildMcpServer() {
       + 'work is welcome). The declaration is finite and expires back to UNKNOWN; nothing '
       + 'renews it but you. ⚠️ It is NOT authority: it never changes a claim, a lease or a '
       + 'permission, and it never suppresses a direct mention or a safety notice. '
-      + 'UNKNOWN cannot be declared — it is the absence of a declaration; use seat_clear.',
+      + 'UNKNOWN cannot be declared — it is the absence of a declaration; use seat_clear. '
+      + '⚠️ #1400 — a new declaration ENDS your open one, role included: re-declaring with a '
+      + 'SHORTER expiry (to carry a note, say) shortens the role you hold to that expiry. The '
+      + 'result then carries `shortened` and a `warning` line — read it; the fix is to declare again with the longer expiry.',
     inputSchema: {
       mode: z.enum(['available', 'resting', 'degraded']),
       acceptsRoutineWork: z.boolean().describe(

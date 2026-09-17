@@ -84,6 +84,7 @@ import { readEvents, oldestRetainedAt, seqAsOf, seqOfEntityEvent, activityReadWi
 import { writeSnapshot, readSnapshot, sweepSnapshotTemps, snapshotPaths } from './core/graph-snapshot.mjs';   // #884 · #1386 reads the sidecar
 import { staleClaims, STALE_CLAIM_HOURS } from './core/stale-claims.mjs';   // #455
 import { readStoreMeter, meterLine, meterCeilings } from './core/store-meter.mjs';   // #1386
+import { roleShortening, roleExpiryRows } from './core/role-expiry.mjs';   // #1400
 // #683 — the deafness cure's server half. REST owns the event log, so it owns
 // the cursors that index it; mcp-server asks over HTTP rather than learning a
 // path it has no business knowing (#767).
@@ -2282,10 +2283,16 @@ async function handleSeatDeclare(req, res, seat) {
     // treats both alike (end the open interval, open a new one), so a race
     // here can mislabel an op and change nothing else.
     let prior = false;
+    // #1400 — a new declaration ENDS the open one, so a shorter expiry on a
+    // re-declaration made for any other reason (a note, an availability
+    // change) silently shortens the role it carries. Said in the write's own
+    // result — never refused: a short window is sometimes meant.
+    let shortened = null;
     try {
       const open = (await liveSeatDecls()).decls.find((d) => d.seat === seat);
       prior = !!open;
       if (body.role === undefined && open?.role) decl.role = open.role;   // #915 — carried forward
+      shortened = roleShortening({ prior: open, next: decl });
     } catch (e) {
       if (e?.code === 'GRAPH_DEPS_MISSING') return sendJSON(res, 503, { error: e.message, code: e.code });
       throw e;
@@ -2306,7 +2313,7 @@ async function handleSeatDeclare(req, res, seat) {
     });
     // #1171 — the declaration is the caller's own object; `graph` is the only
     // part of this body that describes the SYSTEM rather than the request.
-    sendJSON(res, 200, { ...saved, graph: writeWatermark() });
+    sendJSON(res, 200, { ...saved, ...(shortened ? { shortened: { role: shortened.role, from: shortened.from, to: shortened.to }, warning: shortened.warning } : {}), graph: writeWatermark() });
   } catch (e) {
     console.error(`PUT /api/seats/${seat}/state:`, e.message);
     sendJSON(res, 500, { error: e.message });
@@ -5457,6 +5464,19 @@ const STANDING_CHECKS = [
     }),
   },
   {
+    // #1400 — a role lapsing is said BEFORE the bell, and a seat acting on a
+    // lapsed grant is said after it. Rows: open role declarations expiring
+    // within 24 h; declarations that expired within 7 d whose holder has
+    // posted since. A lapsed role nobody acts on is not a row — it ended.
+    id: 'role-expiry',
+    claim: 'no held role is within 24 h of lapsing unannounced, and no seat is acting on a role that lapsed in the last 7 days (#1400)',
+    run: (data, ctx) => roleExpiryRows({
+      decls: seatDeclsFromGraph(ctx.queryGraph, ctx.store),
+      conversations: data.conversations || [],
+      now: new Date().toISOString(),
+    }),
+  },
+  {
     // #1386 — the store meter: rows are CROSSED ceilings only, so the daily
     // digest says "storeMB 1601 > 1536" the day it happens and nothing on
     // the days it does not. The raw readings ride /api/checks as `storeMeter`
@@ -5610,7 +5630,7 @@ async function handleChecks(req, res) {
       try {
         // #1381 — a check may READ A FILE instead of the replica (`run`); same
         // shape out, same digest line, same "an error is not an empty result".
-        if (typeof c.run === 'function') return { id: c.id, claim: c.claim, rows: c.run(data) ?? [] };
+        if (typeof c.run === 'function') return { id: c.id, claim: c.claim, rows: c.run(data, { store, queryGraph }) ?? [] };   // #1400 — a check may read the replica too
         const r = queryGraph(store, c.query);
         return { id: c.id, claim: c.claim, query: c.query, rows: r.rows ?? [] };
       } catch (e) {
