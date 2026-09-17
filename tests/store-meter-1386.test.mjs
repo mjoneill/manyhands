@@ -19,7 +19,7 @@ import { readStoreMeter, meterCeilings, meterLine } from '../core/store-meter.mj
 import { startRestServer, makeBoardFixture } from './helpers/harness.mjs';
 
 const MB = 1048576;
-const mem = (o = {}) => ({ rss: 900 * MB, heapTotal: 300 * MB, heapUsed: 200 * MB, external: 600 * MB, arrayBuffers: 591 * MB, ...o });
+const mem = (o = {}) => ({ rss: 900 * MB, heapTotal: 300 * MB, heapUsed: 200 * MB, external: 591 * MB, arrayBuffers: 0, ...o });   // external is where the WASM memory lands (measured 09-17); arrayBuffers reads 0 with a 455k-triple store loaded
 
 test('#1386 within bounds ⇒ readings and ZERO crossed; each ceiling crossed ⇒ exactly its row', () => {
   const base = { store: { size: 432_000 }, memory: mem(), boot: { path: 'warm', ms: 1064, seq: 32157 }, replayTailMs: 1332, snapshot: { seq: 32157, bytes: 110 * MB, dumpedAt: '2026-09-15T12:40:03Z' } };
@@ -30,12 +30,19 @@ test('#1386 within bounds ⇒ readings and ZERO crossed; each ceiling crossed �
   assert.equal(ok.readings.kbPerTriple, 1.4, 'the number the 09-15/16 reads argued about, reported not gated');
   assert.equal(ok.readings.boot.path, 'warm');
 
-  assert.deepEqual(readStoreMeter({ ...base, memory: mem({ arrayBuffers: 1700 * MB }) }).crossed.map((c) => c.measure), ['storeMB']);
+  assert.deepEqual(readStoreMeter({ ...base, memory: mem({ external: 1700 * MB }) }).crossed.map((c) => c.measure), ['storeMB']);
+  // THE 15:50Z PROD READING: 461k triples and a proxy reading 0.1 MB — a row that says UNMEASURABLE, never a quiet zero
+  const zero = readStoreMeter({ ...base, store: { size: 461_109 }, memory: mem({ external: 0.1 * MB }) });
+  assert.equal(zero.crossed.length, 1);
+  assert.equal(zero.crossed[0].measure, 'storeMB');
+  assert.match(zero.crossed[0].unmeasurable, /not seeing the WASM memory/);
+  assert.equal(zero.readings.storeUnmeasurable, true);
+  assert.match(meterLine(zero.readings, zero.crossed), /storeMB UNMEASURABLE \(0\.1MB for 461109 triples\)/);
   assert.deepEqual(readStoreMeter({ ...base, memory: mem({ rss: 4200 * MB }) }).crossed.map((c) => c.measure), ['rssMB']);
   assert.deepEqual(readStoreMeter({ ...base, boot: { path: 'warm', ms: 12_000 } }).crossed.map((c) => c.measure), ['warmBootMs']);
   assert.deepEqual(readStoreMeter({ ...base, boot: { path: 'cold', ms: 0 }, replayTailMs: 15_021 }).crossed, [], 'a COLD boot\'s 15 s is not a warm-start crossing; it is the replay tail, under 60 s');
   assert.deepEqual(readStoreMeter({ ...base, replayTailMs: 1_600_925 }).crossed.map((c) => c.measure), ['replayTailMs'], 'the 09-15 18:41Z sync (26.7 min) would have been a row');
-  const c = readStoreMeter({ ...base, memory: mem({ arrayBuffers: 1700 * MB }) }).crossed[0];
+  const c = readStoreMeter({ ...base, memory: mem({ external: 1700 * MB }) }).crossed[0];
   assert.deepEqual(Object.keys(c).sort(), ['ceiling', 'measure', 'value'], 'a row is {measure, value, ceiling}');
 });
 
@@ -69,7 +76,9 @@ test('#1386 served — /api/checks carries storeMeter with triples/RSS/boot path
     assert.equal(m.boot.path, 'cold', 'a fixture board has no snapshot beside it');
     assert.equal(typeof m.replayTailMs, 'number', 'the first sync after boot is the replay tail');
     assert.equal(m.snapshot, null, 'no sidecar yet');
-    assert.match(m.storeMBmeans, /arrayBuffers/, 'the proxy is named as one on the payload');
+    assert.match(m.storeMBmeans, /external/, 'the proxy is named as one on the payload');
+    assert.ok(m.storeMB > 5, `a real fixture store reads real external memory, not ~0: ${m.storeMB} MB`);
+    assert.equal(m.storeUnmeasurable, false, `a built replica measures: ${JSON.stringify({ triples: m.triples, storeMB: m.storeMB })}`);
   } finally { await srv.stop(); }
 
   const low = await startRestServer({ board, env: { SCRUM_METER_RSS_CEILING_MB: '1' } });

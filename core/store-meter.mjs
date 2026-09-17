@@ -11,11 +11,16 @@
  *
  * What is measured, and from where:
  *   triples          store.size — the replica's own count
- *   storeMB          process.memoryUsage().arrayBuffers — the WASM store's
- *                    linear memory lives in ONE ArrayBuffer (591 MB of 591.1 on
- *                    2026-09-15's heap snapshot, #1389); the oxigraph binding
- *                    does not export `memory`, so this is the honest proxy and
- *                    it is named as one on the payload
+ *   storeMB          process.memoryUsage().external — V8's external memory,
+ *                    which is where a WebAssembly.Memory is accounted. MEASURED
+ *                    2026-09-17: loading the prod snapshot (455k triples) moved
+ *                    `external` 6.9 → 433.8 MB and `arrayBuffers` 3.9 → 0.0 —
+ *                    the first cut read arrayBuffers and reported 0.1 MB for a
+ *                    461k-triple store on prod, the exact zero-that-cannot-say-
+ *                    which-zero (the first prod read, 15:50Z). The binding exports no memory
+ *                    handle, so this is a PROXY and the payload names it as one;
+ *                    a reading implausibly small for the triple count is itself
+ *                    a row (`storeMB unmeasurable`), never a quiet zero.
  *   kbPerTriple      storeMB / triples — the number the 09-15/16 reads argued
  *                    about (1.4 KB at +60 s cold, 2.6 KB at 11 h): reported,
  *                    NOT a ceiling, because the criterion is the owner's ruling
@@ -67,12 +72,18 @@ export function readStoreMeter({ store, memory, boot = null, replayTailMs = null
   if (!store || typeof store.size !== 'number') throw new Error('store not built — nothing to meter (a boot that has not built the replica yet reads as error, not as zero rows)');
   if (!memory || typeof memory.rss !== 'number') throw new Error('process memory unreadable');
   const triples = store.size;
-  const storeMB = mb(memory.arrayBuffers ?? 0);
+  const externalBytes = memory.external ?? 0;
+  const storeMB = mb(externalBytes);
+  // Below ~0.2 KB/triple no WASM store this size exists (measured 0.95–2.6
+  // KB/triple on prod); a reading under that is the accounting missing the
+  // store, not a small store — say so as a row, never as a zero.
+  const storeUnmeasurable = triples > 1000 && externalBytes < triples * 200;
   const readings = {
     triples,
     storeMB,
-    storeMBmeans: 'process.memoryUsage().arrayBuffers — the WASM store\'s linear memory is one ArrayBuffer and dominates this number; the binding exports no memory handle, so this is a proxy and named as one',
-    kbPerTriple: triples > 0 ? Math.round((memory.arrayBuffers ?? 0) / triples / 1024 * 100) / 100 : null,
+    storeMBmeans: 'process.memoryUsage().external — V8 external memory, where a WebAssembly.Memory is accounted (measured 2026-09-17: +427 MB for 455k triples); the oxigraph binding exports no memory handle, so this is a proxy and named as one. arrayBuffers does NOT see it (read 0.1 MB on prod, 15:50Z).',
+    storeUnmeasurable,
+    kbPerTriple: triples > 0 ? Math.round(externalBytes / triples / 1024 * 100) / 100 : null,
     rssMB: mb(memory.rss),
     heapMB: mb(memory.heapUsed),
     boot,
@@ -82,7 +93,8 @@ export function readStoreMeter({ store, memory, boot = null, replayTailMs = null
     readAt: new Date().toISOString(),
   };
   const crossed = [];
-  if (storeMB > ceilings.storeMB) crossed.push({ measure: 'storeMB', value: storeMB, ceiling: ceilings.storeMB });
+  if (storeUnmeasurable) crossed.push({ measure: 'storeMB', value: storeMB, ceiling: ceilings.storeMB, unmeasurable: `external ${storeMB} MB for ${triples} triples is below any real store's size — the accounting is not seeing the WASM memory; the ceiling cannot be watched from this reading` });
+  else if (storeMB > ceilings.storeMB) crossed.push({ measure: 'storeMB', value: storeMB, ceiling: ceilings.storeMB });
   if (readings.rssMB > ceilings.rssMB) crossed.push({ measure: 'rssMB', value: readings.rssMB, ceiling: ceilings.rssMB });
   if (boot && boot.path === 'warm' && boot.ms > ceilings.warmBootMs) crossed.push({ measure: 'warmBootMs', value: Math.round(boot.ms), ceiling: ceilings.warmBootMs });
   if (typeof replayTailMs === 'number' && replayTailMs > ceilings.replayTailMs) crossed.push({ measure: 'replayTailMs', value: Math.round(replayTailMs), ceiling: ceilings.replayTailMs });
@@ -94,6 +106,6 @@ export function meterLine(readings, crossed = []) {
   const b = readings.boot ? `${readings.boot.path} ${Math.round(readings.boot.ms)}ms` : 'boot ?';
   const tail = typeof readings.replayTailMs === 'number' ? ` replay ${Math.round(readings.replayTailMs)}ms` : '';
   const snap = readings.snapshot ? ` snapshot seq=${readings.snapshot.seq} ${mb(readings.snapshot.bytes)}MB` : ' snapshot none';
-  const x = crossed.length ? ` ⚠️ CROSSED ${crossed.map((c) => `${c.measure}=${c.value}>${c.ceiling}`).join(' ')}` : '';
+  const x = crossed.length ? ` ⚠️ ${crossed.map((c) => c.unmeasurable ? `${c.measure} UNMEASURABLE (${c.value}MB for ${readings.triples} triples)` : `CROSSED ${c.measure}=${c.value}>${c.ceiling}`).join(' ')}` : '';
   return `graph-store-meter: ${readings.triples} triples · store ${readings.storeMB}MB (${readings.kbPerTriple ?? '?'} KB/triple) · rss ${readings.rssMB}MB · heap ${readings.heapMB}MB · boot ${b}${tail}${snap}${x}`;
 }
