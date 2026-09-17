@@ -2134,16 +2134,21 @@ const MEMORY_VERSION_ID = (id, v) => `https://scrumboard.local/memory/${id}/v${v
 // consumer that acts on this) needs the MCP adapter, which needs the install.
 const LIVE_SEAT_DECLS_QUERY =
   'SELECT ?d ?p ?o WHERE { ?d a scrum:SeatDeclaration ; ?p ?o FILTER NOT EXISTS { ?d scrum:endedAt ?x } }';
-const LIVE_SEAT_DECLS_ROW_CAP = 1000;   // triples, not declarations — see declarationsFromRows
+// #1405 — a FOLD read goes through queryGraphAll (every row or a refusal), never
+// the public queryGraph, whose LIMIT_CEILING (1,000) would hand the fold a cut
+// set with `truncated: true` in a field the fold never reads. This reader's cap
+// happened to EQUAL the ceiling, so it refused correctly by coincidence; the
+// decisions reader's did not (20,000) and answered short. Same door for both.
+const LIVE_SEAT_DECLS_ROW_CAP = 50000;   // triples, not declarations; refused past it, never cut
 /** The OPEN declarations in the graph → the plain shape core/seat-state.mjs reasons about. */
-function seatDeclsFromGraph(queryGraph, store) {
-  const { rows } = queryGraph(store, LIVE_SEAT_DECLS_QUERY, { limit: LIVE_SEAT_DECLS_ROW_CAP });
-  return declarationsFromRows(rows, { limit: LIVE_SEAT_DECLS_ROW_CAP });
+function seatDeclsFromGraph(queryGraphAll, store) {
+  const { rows } = queryGraphAll(store, LIVE_SEAT_DECLS_QUERY, { cap: LIVE_SEAT_DECLS_ROW_CAP });
+  return declarationsFromRows(rows);
 }
 async function liveSeatDecls() {
-  const { queryGraph } = await loadGraphModules();
+  const { queryGraphAll } = await loadGraphModules();
   const { store, rebuiltMs, projectedThrough } = await warmGraphStore();
-  return { decls: seatDeclsFromGraph(queryGraph, store), rebuiltMs: rebuiltMs ?? null, projectedThrough };
+  return { decls: seatDeclsFromGraph(queryGraphAll, store), rebuiltMs: rebuiltMs ?? null, projectedThrough };
 }
 /** Rows an older document still carries. Counted, never read (#1143). */
 function legacySeatRows(data) {
@@ -5300,7 +5305,9 @@ async function handleCreateDecision(req, res) {
 // document path produced, so callers see no change. Same fail-closed doctrine
 // as #1143: no graph dependency ⇒ 503, never an empty list dressed as "none".
 const LIVE_DECISIONS_QUERY = 'SELECT ?d ?p ?o WHERE { ?d a scrum:Decision ; ?p ?o }';
-const LIVE_DECISIONS_ROW_CAP = 20000;   // triples; ~8 per decision, refused at the cap rather than cut
+// #1405 — read through queryGraphAll: the public read's 1,000-row ceiling was
+// silently cutting this fold at ~72 decisions (553 rows for 40 on 2026-09-17).
+const LIVE_DECISIONS_ROW_CAP = 50000;   // triples; ~14 per decision; REFUSED past it, never cut
 function decisionsFromRows(rows, { limit } = {}) {
   if (Number.isFinite(limit) && rows.length >= limit) {
     throw Object.assign(new Error(`decision read returned ${rows.length} rows against a cap of ${limit}: the set may be cut mid-decision, so it is refused rather than answered short`), { code: 'DECISIONS_TRUNCATED' });
@@ -5326,10 +5333,10 @@ function decisionsFromRows(rows, { limit } = {}) {
   return [...nodes.values()].sort((a, b) => String(a.dateCreated || '').localeCompare(String(b.dateCreated || '')));
 }
 async function liveDecisions() {
-  const { queryGraph } = await loadGraphModules();
+  const { queryGraphAll } = await loadGraphModules();
   const { store } = await warmGraphStore();
-  const { rows } = queryGraph(store, LIVE_DECISIONS_QUERY, { limit: LIVE_DECISIONS_ROW_CAP });
-  return decisionsFromRows(rows, { limit: LIVE_DECISIONS_ROW_CAP });
+  const { rows } = queryGraphAll(store, LIVE_DECISIONS_QUERY, { cap: LIVE_DECISIONS_ROW_CAP });
+  return decisionsFromRows(rows);
 }
 async function handleListDecisions(req, res) {
   const q = parseQuery(req.url);
@@ -5611,7 +5618,7 @@ const STANDING_CHECKS = [
     id: 'role-expiry',
     claim: 'no held role is within 24 h of lapsing unannounced, and no seat is acting on a role that lapsed in the last 7 days (#1400)',
     run: (data, ctx) => roleExpiryRows({
-      decls: seatDeclsFromGraph(ctx.queryGraph, ctx.store),
+      decls: seatDeclsFromGraph(ctx.queryGraphAll, ctx.store),
       conversations: data.conversations || [],
       now: new Date().toISOString(),
     }),
@@ -5798,7 +5805,7 @@ async function evaluateChecks() {
     // "this tripwire holds" and "this card is ready" get BELIEVED.
     const { store, projectedThrough } = await warmGraphStore();
     const generation = _graphGeneration;   // #1404 — the board these verdicts describe
-    const { queryGraph } = await loadGraphModules();
+    const { queryGraph, queryGraphAll } = await loadGraphModules();
     const data = readBoard();
     const results = [];
     let stale = 0, errors = 0, watched = 0, unwatched = 0;
@@ -5879,7 +5886,7 @@ async function evaluateChecks() {
       try {
         // #1381 — a check may READ A FILE instead of the replica (`run`); same
         // shape out, same digest line, same "an error is not an empty result".
-        if (typeof c.run === 'function') return priced({ id: c.id, claim: c.claim, rows: c.run(data, { store, queryGraph }) ?? [] });   // #1400 — a check may read the replica too
+        if (typeof c.run === 'function') return priced({ id: c.id, claim: c.claim, rows: c.run(data, { store, queryGraph, queryGraphAll }) ?? [] });   // #1400 — a check may read the replica too; #1405 — folds use queryGraphAll
         const r = queryGraph(store, c.query);
         return priced({ id: c.id, claim: c.claim, query: c.query, rows: r.rows ?? [] });
       } catch (e) {
