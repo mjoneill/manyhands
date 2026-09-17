@@ -44,7 +44,12 @@
 #   scripts/deploy.sh --no-restart   pull + ask CI + re-export only
 #   scripts/deploy.sh export         ask CI + re-export from the current clone HEAD
 #   scripts/deploy.sh unlock         open the serve dir — the escape hatch
-#   scripts/deploy.sh status         report without changing anything
+#   scripts/deploy.sh status         report without changing anything (incl. who holds the operation lock)
+#
+# ⚠️ Restarting a service BY HAND (launchctl kickstart …)? Run
+#   scripts/operation-lock.sh status   first — and acquire it if you are about to
+#   act. On 2026-09-15 two operators restarted REST 28 min apart because nothing
+#   in this path checked (#1399). The lock file works while REST is down.
 set -eu
 
 # ⚠️ NO DEFAULT PATHS, and that is deliberate twice over. The publication gate
@@ -203,6 +208,7 @@ case "${1:-deploy}" in
       say "  locked? $([ -w "$SERVE/DO-NOT-EDIT-HERE.md" ] && echo 'UNLOCKED' || echo 'LOCKED')"
     else say "serve   $SERVE  (does not exist yet)"; fi
     say "clone   $CLONE @ $(git -C "$CLONE" rev-parse --short HEAD)"
+    sh "$(dirname "$0")/operation-lock.sh" status 2>&1 | sed 's/^/op-lock /' || true     # #1399
     exit 0 ;;
   unlock)
     unlock; say "🔓 UNLOCKED $SERVE"; say "   re-lock with: scripts/deploy.sh export"; exit 0 ;;
@@ -212,6 +218,24 @@ case "${1:-deploy}" in
   deploy) : ;;
   *) die "unknown command: $1" ;;
 esac
+
+# #1399 — THE OPERATION LOCK, first check in the path. A file beside the board
+# (see scripts/operation-lock.sh), so it works while REST is wedged — which is
+# exactly when two operators restarted the same service 28 min apart on
+# 2026-09-15. Held by someone else → we stop HERE, naming them and their note,
+# before the pull. Released on EVERY exit path by the trap.
+OP_LOCK="$(dirname "$0")/operation-lock.sh"     # beside this script, whichever tree runs it
+OP_HOLDER="${DEPLOY_LOCK_HOLDER:-${USER:-operator}-deploy}"
+if [ -z "${DEPLOY_LOCK:-}" ] && [ -z "${DEPLOY_SHA_STAMP:-}" ]; then
+  say "⚠️ operation lock UNAVAILABLE (neither DEPLOY_LOCK nor DEPLOY_SHA_STAMP set) — deploying UNLOCKED: a second operator could restart under this one"
+elif [ -f "$OP_LOCK" ]; then
+  if ! sh "$OP_LOCK" acquire deploy "$OP_HOLDER" "deploy.sh from $CLONE @ $(git -C "$CLONE" rev-parse --short HEAD) pid $$"; then
+    die "another operation holds the lock — not deploying under it"
+  fi
+  trap 'sh "$OP_LOCK" release deploy "$OP_HOLDER" >/dev/null 2>&1 || true' EXIT
+else
+  say "⚠️ no scripts/operation-lock.sh in the clone — deploying UNLOCKED (a second operator could restart under this one)"
+fi
 
 # ⚠️ REFUSE TO PULL OVER SOMEONE'S UNCOMMITTED WORK. The clone is writable by
 # design now, so this is where the 2026-08-19 near-loss would be caught: 59
