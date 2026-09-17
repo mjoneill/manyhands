@@ -424,8 +424,36 @@ export function projectActivities(store, events) {
     // the document to the SAME IRI, and triples are a set, so the two sources
     // cannot double a node. Immutable, so only `create` carries state.
     if (ent.kind === 'decision' && ev.op === 'create' && ev.state && ev.state['@id']) projectDecision(store, ev.state);
+    // #971 slice 2 — a memory BORN IN THE LOG. The event's state carries the
+    // whole memory: `{identity, versions}`. A create projects both halves; an
+    // update DROPS the identity subject's triples and re-projects from state
+    // (the identity is mutable — title, tags, currentVersion, relatedTo,
+    // priority — and a set cannot un-say an old title), then adds any version
+    // it has not seen (versions are immutable, so re-adding is a no-op). Events
+    // apply in seq order, so the last update wins on a rebuild exactly as it
+    // did live. ⚠️ The OLD event shape (#651: `state` = the identity alone) is
+    // deliberately NOT projected here: for a memory the document still carries,
+    // the document is the authority until the memory is touched, and the
+    // touch writes the new shape and drops the rows in one write.
+    if (ent.kind === 'memory' && (ev.op === 'create' || ev.op === 'update') && isLogBornMemoryState(ev.state)) {
+      projectMemoryState(store, ev.state, ev.op);
+    }
   }
   return store;
+}
+
+/** #971 — the new-shape memory event: `{identity: <scrum:Memory>, versions: [<scrum:MemoryVersion>…]}`. */
+export function isLogBornMemoryState(state) {
+  return !!(state && typeof state === 'object' && state.identity && state.identity['@id']
+    && state.identity['@type'] === 'scrum:Memory' && Array.isArray(state.versions));
+}
+
+/** #971 — apply one log-born memory state to the store (see projectActivities). */
+export function projectMemoryState(store, state, op) {
+  const subject = nn(state.identity['@id']);
+  if (op === 'update') { for (const q of store.match(subject, null, null)) store.delete(q); }
+  projectMemory(store, state.identity);
+  for (const v of state.versions) if (v && v['@id']) projectMemory(store, v);
 }
 
 /**
@@ -843,6 +871,9 @@ export const MEMORY_PREDICATES = Object.freeze({
   'scrum:owner': 'person',         // whose memory it is — an EDGE, never a string
   'scrum:tag': 'literal',          // repeatable
   'scrum:currentVersion': 'ref',   // Memory → its newest MemoryVersion
+  'scrum:priority': 'literal',     // #971 — p0–p3, unset by default (decision 60729016):
+                                   // a property of the MEMORY, not of an edge or a
+                                   // per-seat load order; refused outside the four values
   'scrum:ofMemory': 'ref',         // MemoryVersion → its Memory
   'scrum:relatedTo': 'ref',        // #1287 — Memory → Memory, symmetric, the
                                    // first edge BETWEEN memories. #971's thesis

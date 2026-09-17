@@ -2166,16 +2166,9 @@ function memoriesOf(data) {
   return Array.isArray(data.memories) ? data.memories : [];
 }
 
-/** The stored entities for one memory, newest version last. */
-function memoryParts(data, id) {
-  const all = memoriesOf(data);
-  const iri = MEMORY_ID(id);
-  const identity = all.find((e) => e['@type'] === 'scrum:Memory' && e['@id'] === iri) || null;
-  const versions = all
-    .filter((e) => e['@type'] === 'scrum:MemoryVersion' && e['scrum:ofMemory'] === iri)
-    .sort((a, b) => (a['scrum:version'] || 0) - (b['scrum:version'] || 0));
-  return { identity, versions };
-}
+// (#971 — `memoryParts`, the document read, is gone: every memory read is
+// liveMemoryParts. `memoriesOf` remains only to COUNT the rows an older
+// document still carries, never to read them.)
 
 function memoryToWire(identity, versions) {
   const newest = versions[versions.length - 1];
@@ -2184,11 +2177,108 @@ function memoryToWire(identity, versions) {
     title: identity.name,
     owner: identity['scrum:owner'] || null,
     tags: [].concat(identity['scrum:tag'] || []),
+    ...(identity['scrum:priority'] ? { priority: identity['scrum:priority'] } : {}),   // #971 — unset by default
     body: newest ? newest['scrum:body'] : '',
     version: newest ? newest['scrum:version'] : 0,
     updatedAt: newest ? newest.dateCreated : null,
   };
 }
+
+// ── #971 slice 2 — MEMORIES ARE BORN IN THE LOG. The second D3 migration
+// (after seat state #1143 and decisions #1147), and the first with a MUTABLE
+// identity: title, tags, currentVersion, relatedTo and priority change; the
+// version texts never do.
+//
+//   write   the event IS the write. Its `state` carries the WHOLE memory —
+//           `{identity, versions}` — never a diff, so a rebuild replays it
+//           without needing what came before. The document receives NO row.
+//   read    every read is a graph query (liveMemories), folded back into the
+//           entity shape the document held, so the wire shape is unchanged.
+//   touch   a memory an older document still carries is projected FROM the
+//           document until it is touched; the first write to it drops its
+//           document rows in the same write (dropLegacyMemoryRows — #1143's
+//           migration-by-touch) and carries the whole memory in the event.
+//           The replica syncs the document first (the rows vanish and their
+//           triples with them) and projects activities second (the event puts
+//           them back, plus the change) — one write, one sync, no gap and no
+//           second title. Slice 3 is this touch applied to every row at once.
+//   fail    no graph dependency ⇒ 503 GRAPH_DEPS_MISSING on every memory
+//           route, never an empty list dressed as "no memories" — the #1143
+//           doctrine, and the failure-coupling gate this card names.
+//
+// ⚠️ The OLD event shape (#651: state = identity only) is not projected by
+// the replica; those memories live in the document until touched.
+const MEMORY_PRIORITIES = new Set(['p0', 'p1', 'p2', 'p3']);
+const memoryStateEvent = (op, identity, versions, actor = null) => ({
+  op, actor, entity: { kind: 'memory', id: identity['@id'] }, state: { identity, versions },
+});
+/** Migration by touch: a write to a memory removes its rows (identity + versions) from the document, if any. */
+function dropLegacyMemoryRows(data, iri) {
+  if (!Array.isArray(data.memories)) return 0;
+  const before = data.memories.length;
+  const after = data.memories.filter((e) => !(e && (e['@id'] === iri || e['scrum:ofMemory'] === iri)));
+  if (after.length) data.memories = after; else delete data.memories;
+  return before - after.length;
+}
+const LIVE_MEMORIES_QUERY = 'SELECT ?s ?t ?p ?o WHERE { ?s a ?t ; ?p ?o . VALUES ?t { scrum:Memory scrum:MemoryVersion } }';
+const LIVE_MEMORIES_ROW_CAP = 400000;   // triples (~7 per memory, ~6 per version); refused at the cap, never cut mid-memory
+/** Graph rows → Map<memory uuid, {identity, versions}> in the ENTITY shape (what the event state carries). */
+function memoriesFromRows(rows, { limit } = {}) {
+  if (Number.isFinite(limit) && rows.length >= limit) {
+    throw Object.assign(new Error(`memory read returned ${rows.length} rows against a cap of ${limit}: the set may be cut mid-memory, so it is refused rather than answered short`), { code: 'ROW_CAP' });
+  }
+  const local = (iri) => String(iri).replace(/^.*[#/:]/, '');
+  const ids = new Map();      // identity iri → identity
+  const vers = new Map();     // version iri → version
+  for (const r of rows) {
+    const t = local(r.t), p = local(r.p), o = r.o == null ? null : String(r.o);
+    if (t === 'Memory') {
+      const n = ids.get(r.s) || { '@id': r.s, '@type': 'scrum:Memory' };
+      ids.set(r.s, n);
+      if (p === 'identifier') n.identifier = o;
+      else if (p === 'name') n.name = o;
+      else if (p === 'owner') n['scrum:owner'] = local(o);
+      else if (p === 'tag') n['scrum:tag'] = [...(n['scrum:tag'] || []), o];
+      else if (p === 'currentVersion') n['scrum:currentVersion'] = o;
+      else if (p === 'relatedTo') n['scrum:relatedTo'] = [...(n['scrum:relatedTo'] || []), o];
+      else if (p === 'priority') n['scrum:priority'] = o;
+    } else if (t === 'MemoryVersion') {
+      const v = vers.get(r.s) || { '@id': r.s, '@type': 'scrum:MemoryVersion' };
+      vers.set(r.s, v);
+      if (p === 'ofMemory') v['scrum:ofMemory'] = o;
+      else if (p === 'version') v['scrum:version'] = Number(o);
+      else if (p === 'body') v['scrum:body'] = o;
+      else if (p === 'author') v.author = local(o);
+      else if (p === 'dateCreated') v.dateCreated = o;
+    }
+  }
+  const out = new Map();
+  for (const n of ids.values()) {
+    if (Array.isArray(n['scrum:tag'])) n['scrum:tag'].sort();          // a graph is a SET; the wire order is documented, not incidental
+    if (Array.isArray(n['scrum:relatedTo'])) n['scrum:relatedTo'].sort();
+    out.set(n.identifier, { identity: n, versions: [] });
+  }
+  for (const v of vers.values()) {
+    const m = [...out.values()].find((x) => x.identity['@id'] === v['scrum:ofMemory']);
+    if (m) m.versions.push(v);
+  }
+  for (const m of out.values()) m.versions.sort((a, b) => (a['scrum:version'] || 0) - (b['scrum:version'] || 0));
+  return out;
+}
+async function liveMemories() {
+  const { queryGraph } = await loadGraphModules();
+  const { store } = await warmGraphStore();
+  const { rows } = queryGraph(store, LIVE_MEMORIES_QUERY, { limit: LIVE_MEMORIES_ROW_CAP });
+  return memoriesFromRows(rows, { limit: LIVE_MEMORIES_ROW_CAP });
+}
+/** One memory from the graph, or {identity:null, versions:[]}. */
+async function liveMemoryParts(id) {
+  return (await liveMemories()).get(String(id)) || { identity: null, versions: [] };
+}
+const graphRefused = (res, e) => {
+  if (e?.code === 'GRAPH_DEPS_MISSING') { sendJSON(res, 503, { error: e.message, code: e.code }); return true; }
+  return false;
+};
 
 /**
  * #613 — GET /api/seats/state. Every roster seat, with UNKNOWN for the ones
@@ -2349,6 +2439,9 @@ async function handleCreateMemory(req, res) {
     const owner = body.owner || body.by || null;
     if (!owner) return sendJSON(res, 400, { error: 'owner is required: a memory with no owner cannot answer "what are MY memories", which is the question this type exists for' });
     if (body.tags !== undefined && !Array.isArray(body.tags)) return sendJSON(res, 400, { error: 'tags must be an array' });
+    if (body.priority !== undefined && body.priority !== null && !MEMORY_PRIORITIES.has(body.priority)) {
+      return sendJSON(res, 400, { error: `priority must be one of p0 | p1 | p2 | p3 (got ${JSON.stringify(body.priority)}) — a property of the memory, unset by default (#971)` });
+    }
 
     const created = await withWriteLock(async () => {
       const data = readBoard();
@@ -2360,6 +2453,7 @@ async function handleCreateMemory(req, res) {
         identifier: id, name: String(body.title),
         'scrum:owner': owner,
         ...(body.tags?.length ? { 'scrum:tag': [...body.tags] } : {}),
+        ...(body.priority ? { 'scrum:priority': body.priority } : {}),
         'scrum:currentVersion': vIri,
       };
       const version = {
@@ -2370,12 +2464,14 @@ async function handleCreateMemory(req, res) {
         // carried their byline from its first byte.
         'scrum:body': body.body, author: (typeof body.by === 'string' && body.by) || owner, dateCreated: now,
       };
-      data.memories = [...memoriesOf(data), identity, version];
-      writeBoard(data, [memoryEvent('create', identity, (typeof body.by === 'string' && body.by) || owner)]);
+      // #971 — BORN IN THE LOG: no document row. The replica projects both
+      // halves from this event at the next sync; every reader asks the graph.
+      writeBoard(data, [memoryStateEvent('create', identity, [version], (typeof body.by === 'string' && body.by) || owner)]);
       return memoryToWire(identity, [version]);
     });
     sendJSON(res, 201, created);
   } catch (e) {
+    if (graphRefused(res, e)) return;
     console.error('POST /api/memories:', e.message);
     sendJSON(res, 500, { error: e.message });
   }
@@ -2448,10 +2544,19 @@ async function handleUpdateMemory(req, res, id) {
       }
     }
 
+    if (body.priority !== undefined && body.priority !== null && !MEMORY_PRIORITIES.has(body.priority)) {
+      return sendJSON(res, 400, { error: `priority must be one of p0 | p1 | p2 | p3, or null to unset (got ${JSON.stringify(body.priority)})` });
+    }
+
     const updated = await withWriteLock(async () => {
       const data = readBoard();
-      const { identity, versions } = memoryParts(data, id);
-      if (!identity) return null;
+      // #971 — the current state is read from the GRAPH under the lock (the
+      // sync inside warmGraphStore sees every write before this one), whether
+      // the memory was born in the log or still lives in the document.
+      const { identity: liveIdentity, versions: liveVersions } = await liveMemoryParts(id);
+      if (!liveIdentity) return null;
+      const identity = { ...liveIdentity };
+      const versions = [...liveVersions];
 
       // #466 — OPTIONAL compare-and-swap. A caller that read version N and means
       // to write on top of THAT text can say so; if the memory has moved on, the
@@ -2489,22 +2594,28 @@ async function handleUpdateMemory(req, res, id) {
       if (nextBody !== null) {
         const next = (versions[versions.length - 1]?.['scrum:version'] || 0) + 1;
         const vIri = MEMORY_VERSION_ID(id, next);
-        data.memories = [...memoriesOf(data), {
+        versions.push({
           '@id': vIri, '@type': 'scrum:MemoryVersion',
           'scrum:ofMemory': MEMORY_ID(id), 'scrum:version': next,
           'scrum:body': nextBody,
           author: body.by || identity['scrum:owner'] || null,
           dateCreated: new Date().toISOString(),
-        }];
+        });
         identity['scrum:currentVersion'] = vIri;
       }
       // The IDENTITY is mutable — that is the point of the split. Retitling or
       // retagging a memory must not mint a version of unchanged text.
       if (typeof body.title === 'string' && body.title.trim()) identity.name = body.title;
       if (Array.isArray(body.tags)) identity['scrum:tag'] = [...body.tags];
+      if (body.priority === null) delete identity['scrum:priority'];
+      else if (body.priority !== undefined) identity['scrum:priority'] = body.priority;
 
-      writeBoard(data, [memoryEvent('update', identity, body.by || identity['scrum:owner'] || null)]);
-      const after = memoryParts(readBoard(), id);
+      // #971 — migration by touch, then the event carries the whole memory.
+      dropLegacyMemoryRows(data, MEMORY_ID(id));
+      writeBoard(data, [memoryStateEvent('update', identity, versions, body.by || identity['scrum:owner'] || null)]);
+      // Read back from the graph: the sync projects the event just written.
+      const after = await liveMemoryParts(id);
+      if (!after.identity) throw new Error(`memory ${id}: written to the log but not readable from the graph — the projection did not land`);
       return memoryToWire(after.identity, after.versions);
     });
     if (!updated) return sendJSON(res, 404, { error: `no memory ${id}` });
@@ -2516,19 +2627,24 @@ async function handleUpdateMemory(req, res, id) {
     }
     sendJSON(res, 200, updated);
   } catch (e) {
+    if (graphRefused(res, e)) return;
     console.error('PATCH /api/memories:', e.message);
     sendJSON(res, 500, { error: e.message });
   }
 }
 
-function handleGetMemory(req, res, id) {
-  const { identity, versions } = memoryParts(readBoard(), id);
+async function handleGetMemory(req, res, id) {
+  let parts;
+  try { parts = await liveMemoryParts(id); } catch (e) { if (graphRefused(res, e)) return; throw e; }
+  const { identity, versions } = parts;
   if (!identity) return sendJSON(res, 404, { error: `no memory ${id}` });
   sendJSON(res, 200, memoryToWire(identity, versions));
 }
 
-function handleMemoryVersions(req, res, id) {
-  const { identity, versions } = memoryParts(readBoard(), id);
+async function handleMemoryVersions(req, res, id) {
+  let parts;
+  try { parts = await liveMemoryParts(id); } catch (e) { if (graphRefused(res, e)) return; throw e; }
+  const { identity, versions } = parts;
   if (!identity) return sendJSON(res, 404, { error: `no memory ${id}` });
   sendJSON(res, 200, {
     id, title: identity.name, owner: identity['scrum:owner'] || null,
@@ -2541,19 +2657,17 @@ function handleMemoryVersions(req, res, id) {
   });
 }
 
-function handleListMemories(req, res) {
+async function handleListMemories(req, res) {
   const q = parseQuery(req.url);
-  const data = readBoard();
-  const ids = memoriesOf(data)
-    .filter((e) => e['@type'] === 'scrum:Memory')
-    .map((e) => e.identifier);
-  let out = ids.map((id) => {
-    const { identity, versions } = memoryParts(data, id);
-    return memoryToWire(identity, versions);
-  });
+  let all;
+  try { all = await liveMemories(); } catch (e) { if (graphRefused(res, e)) return; throw e; }
+  let out = [...all.values()].map(({ identity, versions }) => memoryToWire(identity, versions));
   if (q.owner) out = out.filter((m) => m.owner === q.owner);
   if (q.tag) out = out.filter((m) => m.tags.includes(q.tag));
-  sendJSON(res, 200, { total: out.length, memories: out });
+  // #971 — rows an older document still carries: counted, never read (#1143's
+  // shape). Slice 3 drives this to zero; until then it is the migration's meter.
+  const legacyRows = memoriesOf(readBoard()).length;
+  sendJSON(res, 200, { total: out.length, memories: out, legacyRows });
 }
 
 
@@ -2869,6 +2983,10 @@ async function handleAssert(req, res) {
     const wire = (a, effect) => ({ subject: a.subject, predicate: a.predicate, object: a.object, effect });
     const result = await withWriteLock(async () => {
       const data = readBoard();
+      // #971 — memories are read from the graph, under the lock (current).
+      let liveMems;
+      try { liveMems = await liveMemories(); }
+      catch (e) { if (e?.code === 'GRAPH_DEPS_MISSING') return { status: 503, error: e.message, code: e.code }; throw e; }
       const registered = new Map(predicatesOf(data)
         .filter((e) => e['@type'] === 'scrum:PredicateDefinition')
         .map((e) => [e.name, e]));
@@ -2906,7 +3024,7 @@ async function handleAssert(req, res) {
         // mechanism. Nothing new is invented here — `resolveNodeId` has
         // resolved memory @ids for obligations' `about` field all along.
         const subjMemory = (subjIdx < 0 && !subjObligation)
-          ? findMemory(data, a.subject)
+          ? findMemory(liveMems, a.subject)
           : null;
         if (subjIdx < 0 && !subjObligation && !subjMemory) {
           return {
@@ -2983,7 +3101,7 @@ async function handleAssert(req, res) {
                 + 'Assertability grows by deliberate act (see #945). Nothing in this batch was applied.',
             };
           }
-          const objMemory = findMemory(data, a.object);
+          const objMemory = findMemory(liveMems, a.object);
           if (!objMemory) {
             return {
               status: 400,
@@ -3042,22 +3160,23 @@ async function handleAssert(req, res) {
           // directions on every relationships write". Writing one direction
           // would make memories the one entity where this predicate means
           // something different from everywhere else it is used.
-          const cur = (id) => memoriesOf(data).find((m) => m && m['@id'] === id);
-          const A = cur(p.subjectMemory['@id']);
-          const B = cur(p.objectMemory['@id']);
-          const listOf = (m) => [].concat(m['scrum:relatedTo'] || []);
-          if (listOf(A).includes(B['@id']) && listOf(B).includes(A['@id'])) {
+          // #971 — both memories are read from the graph (liveMems, under this
+          // lock); the edge is written through the log as two update events
+          // carrying each WHOLE memory, and any document rows are dropped (touch).
+          const partsOf = (id) => [...liveMems.values()].find((m) => m.identity['@id'] === id);
+          const A = partsOf(p.subjectMemory['@id']);
+          const B = partsOf(p.objectMemory['@id']);
+          const listOf = (m) => [].concat(m.identity['scrum:relatedTo'] || []);
+          if (listOf(A).includes(B.identity['@id']) && listOf(B).includes(A.identity['@id'])) {
             results.push(wire(p.a, 'noop'));
             continue;
           }
-          const nextA = { ...A, 'scrum:relatedTo': [...new Set([...listOf(A), B['@id']])] };
-          const nextB = { ...B, 'scrum:relatedTo': [...new Set([...listOf(B), A['@id']])] };
-          data.memories = memoriesOf(data).map((m) => {
-            if (m['@id'] === nextA['@id']) return nextA;
-            if (m['@id'] === nextB['@id']) return nextB;
-            return m;
-          });
-          memoryEvents.push(memoryEvent('update', nextA, by), memoryEvent('update', nextB, by));
+          const nextA = { ...A.identity, 'scrum:relatedTo': [...new Set([...listOf(A), B.identity['@id']])] };
+          const nextB = { ...B.identity, 'scrum:relatedTo': [...new Set([...listOf(B), A.identity['@id']])] };
+          A.identity = nextA; B.identity = nextB;   // a later assertion in this batch sees the edge
+          dropLegacyMemoryRows(data, nextA['@id']);
+          dropLegacyMemoryRows(data, nextB['@id']);
+          memoryEvents.push(memoryStateEvent('update', nextA, A.versions, by), memoryStateEvent('update', nextB, B.versions, by));
           results.push(wire(p.a, 'edge-added'));
         } else if (p.kind === 'evidence') {
           const cur = obligationsOf(data).find((e) => e['@id'] === p.obligation['@id']) ?? p.obligation;
@@ -3136,10 +3255,16 @@ async function handleAssert(req, res) {
  * the `@id` would make the write path unreachable from the read path — the
  * same shape as #814's short-sha refusal, but with no way to get the long form.
  */
-function findMemory(data, ref) {
+// #971 — resolves against the GRAPH's memories (a Map from liveMemories),
+// so a memory born in the log is a valid subject/object; the document is not
+// consulted (a row an older document still carries is in the graph too).
+function findMemory(liveMap, ref) {
   if (ref === undefined || ref === null || ref === '') return null;
   const s = String(ref);
-  return memoriesOf(data).find((m) => m && (m['@id'] === s || m.identifier === s)) ?? null;
+  for (const { identity } of liveMap.values()) {
+    if (identity['@id'] === s || identity.identifier === s) return identity;
+  }
+  return null;
 }
 
 function decisionsOf(data) {
@@ -3183,10 +3308,15 @@ function resolveNodeId(data, ref, extraIds = new Set()) {
   if (ci >= 0) return data.cards[ci].id;
   const s = String(ref);
   if (extraIds.has(s)) return s;   // #1147 — a decision the graph holds and the document does not
-  const pools = [decisionsOf(data), predicatesOf(data), obligationsOf(data),
-    Array.isArray(data.memories) ? data.memories : []];
+  // #971 — memories resolve through `extraIds` (the graph's ids), as decisions
+  // do; the document's rows are a subset of the graph's and are not consulted.
+  const pools = [decisionsOf(data), predicatesOf(data), obligationsOf(data)];
   for (const pool of pools) if (pool.some((e) => e && e['@id'] === s)) return s;
   return null;
+}
+/** #971 — the graph's memory ids, for resolveNodeId's `extraIds`. */
+async function graphMemoryIds() {
+  return new Set([...(await liveMemories()).values()].map((m) => m.identity['@id']));
 }
 
 // ── #1207 (slice 2 of #1205) — THE RESEARCH WRITE VERBS ────────────────────
@@ -3343,6 +3473,9 @@ async function handleCreateRun(req, res) {
         + 'carrying it would be indistinguishable from the board\'s own writes in every query that '
         + 'asks "what runs have happened". Choose a domain verb like "research".' });
     }
+    let graphIds = new Set();   // #971 — memories (and decisions) live in the graph, not the document
+    try { graphIds = await graphMemoryIds(); for (const d of await liveDecisions()) graphIds.add(d['@id']); }
+    catch (e) { if (e?.code === 'GRAPH_DEPS_MISSING') return sendJSON(res, 503, { error: e.message, code: e.code }); throw e; }
     const result = await withWriteLock(async () => {
       const data = readBoard();
       let performedUsing = null;
@@ -3359,7 +3492,7 @@ async function handleCreateRun(req, res) {
       }
       const used = [];
       for (const ref of [].concat(body.used ?? [])) {
-        const id = resolveNodeId(data, ref);
+        const id = resolveNodeId(data, ref, graphIds);
         // A source that resolves to nothing is kept as a LITERAL rather than
         // refused: a run's source is often a URL outside this board, and
         // refusing it would push provenance back into prose.
@@ -3443,6 +3576,9 @@ async function handleRunGenerated(req, res) {
     const body = JSON.parse(await readBody(req));
     const by = requireBy(body);
     if (!by) return sendJSON(res, 400, { error: 'by is required. Declared, not authenticated.' });
+    let graphIds = new Set();   // #971 — see run create
+    try { graphIds = await graphMemoryIds(); for (const d of await liveDecisions()) graphIds.add(d['@id']); }
+    catch (e) { if (e?.code === 'GRAPH_DEPS_MISSING') return sendJSON(res, 503, { error: e.message, code: e.code }); throw e; }
     const result = await withWriteLock(async () => {
       const data = readBoard();
       const runIdx = runsOf(data).findIndex((r) => r['@id'] === body.run);
@@ -3451,7 +3587,7 @@ async function handleRunGenerated(req, res) {
       if (!refs.length) return { status: 400, wire: { error: 'nodes is required — what this run produced' } };
       const resolved = []; const dangling = [];
       for (const ref of refs) {
-        const id = resolveNodeId(data, ref);
+        const id = resolveNodeId(data, ref, graphIds);
         if (id) resolved.push(id); else dangling.push(String(ref));
       }
       if (dangling.length) {
@@ -5009,7 +5145,10 @@ async function handleCreateObligation(req, res) {
     // #1147 — decisions are read from the graph, so the pool a reference can
     // resolve against includes the graph's decision ids, read BEFORE the lock.
     let graphDecisionIds = new Set();
-    try { graphDecisionIds = new Set((await liveDecisions()).map((d) => d['@id'])); }
+    try {
+      graphDecisionIds = new Set((await liveDecisions()).map((d) => d['@id']));
+      for (const id of await graphMemoryIds()) graphDecisionIds.add(id);   // #971 — memories are graph-held too
+    }
     catch (e) { if (e?.code === 'GRAPH_DEPS_MISSING') return sendJSON(res, 503, { error: e.message, code: e.code }); throw e; }
     const result = await withWriteLock(async () => {
       const data = readBoard();

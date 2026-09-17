@@ -1848,19 +1848,20 @@ function buildMcpServer() {
   }, async () => jsonResult(await apiCall('GET', '/api/seats/state')));
 
   mcp.registerTool('memory_create', {
-    description: 'Create a new memory in the store. Returns the created memory with version 1.',
+    description: 'Create a new memory in the store. Returns the created memory with version 1. #971: a memory is BORN IN THE EVENT LOG and read from the graph (scrum:Memory node + scrum:MemoryVersion nodes); board-data.json receives no row for it.',
     inputSchema: {
       owner: z.string().describe('REQUIRED — the seat key who owns this memory.'),
       title: z.string().min(1).describe('Memory title (required, non-empty)'),
       body: z.string().min(1).describe('Memory body (required — a memory with no text is a title pretending to be a memory)'),
-      tags: z.array(z.string()).optional().describe('Optional tags for categorization and query filtering'),
+      tags: z.array(z.string()).optional().describe('Optional tags for categorization and query filtering. A tag IS the collection (decision 13d8fcdf): memory_list(tag) is the membership read.'),
+      priority: z.enum(['p0', 'p1', 'p2', 'p3']).optional().describe('#971 — a property of the MEMORY (decision 60729016), unset by default: p0 = load this first when you wake, p3 = keep but rarely needed. Not an ordering of a collection and not per-seat.'),
       by: z.string().optional().describe('#1106 — your seat key when you create a memory OWNED BY SOMEONE ELSE; v1 is recorded as written by you. Omitted, v1 is attributed to the owner.'),
     },
   }, async (args) => {
-    const { owner, title, body, tags, by } = args;
+    const { owner, title, body, tags, priority, by } = args;
     // #1106 — `by` was not declared and not forwarded, so v1's author was
     // always the owner even when someone else wrote it. Forward only when sent.
-    return jsonResult(await apiCall('POST', '/api/memories', { owner, title, body, tags, ...(by !== undefined ? { by } : {}) }));
+    return jsonResult(await apiCall('POST', '/api/memories', { owner, title, body, tags, ...(priority !== undefined ? { priority } : {}), ...(by !== undefined ? { by } : {}) }));
   });
 
   mcp.registerTool('memory_update', {
@@ -1872,6 +1873,7 @@ function buildMcpServer() {
       bodyPrepend: z.string().optional().describe('Text added to the BEGINNING of the current body, byte-preserving, as a new version (#1022). Use it for a CORRECTION, so a reader meets it before the text it supersedes — a memory is read top-first. Cannot be combined with `body`; composes with bodyAppend.'),
       title: z.string().optional().describe('New title — updates the identity without creating a version'),
       tags: z.array(z.string()).optional().describe('New tags — updates the identity without creating a version'),
+      priority: z.enum(['p0', 'p1', 'p2', 'p3']).nullable().optional().describe('#971 — set the memory\'s priority (p0–p3) or null to unset; identity only, no version minted.'),
       // #1106 — ⚠️ These two lines are the whole reachability of #466's memory
       // CAS and of honest attribution. This inputSchema is an allowlist: a key
       // not declared here is rejected by zod before the handler runs, and the
@@ -1881,7 +1883,7 @@ function buildMcpServer() {
       by: z.string().optional().describe('#675/#1106 — your seat key: who is writing this version. Declared, not authenticated. ⚠️ WITHOUT it the version is recorded as the memory OWNER\'s, and a laundered byline is byte-identical to an honest one — send it whenever you write a memory you do not own.'),
     },
   }, async (args) => {
-    const { id, body, bodyAppend, bodyPrepend, title, tags, ifVersion, by } = args;
+    const { id, body, bodyAppend, bodyPrepend, title, tags, priority, ifVersion, by } = args;
     // Only send fields that are actually provided (PATCH behavior)
     const updates = {};
     if (body !== undefined) updates.body = body;
@@ -1889,6 +1891,7 @@ function buildMcpServer() {
     if (bodyPrepend !== undefined) updates.bodyPrepend = bodyPrepend;
     if (title !== undefined) updates.title = title;
     if (tags !== undefined) updates.tags = tags;
+    if (priority !== undefined) updates.priority = priority;   // #971 — null unsets
     if (ifVersion !== undefined) updates.ifVersion = ifVersion;
     if (by !== undefined) updates.by = by;
     return jsonResult(await apiCall('PATCH', `/api/memories/${encodeURIComponent(id)}`, updates));

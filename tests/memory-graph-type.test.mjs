@@ -156,23 +156,31 @@ test('#651 a memory is a first-class GRAPH node, not a blob in a side table', as
   } finally { await s.stop(); }
 });
 
-test('#651 the store round-trips through the document without loss', async () => {
-  // ⚠️ The projection partitions @graph by type. An entity class the projection
-  // does not know rides in `_unmodelled` — preserved, but filed under a name
-  // that lies about what it holds. This asserts memories survive a full
-  // save/load as MEMORIES.
+test('#971 (inverts #651) a memory is BORN IN THE LOG: the document holds NO row for it, and the read comes from the graph', async () => {
+  // #651 asserted that memories survive a save/load AS MEMORIES in the document
+  // (not swept into `_unmodelled`). #971 slice 2 retires the document as the
+  // memory's home: the event log is the record and the graph is the read, so
+  // the same round-trip now proves the OPPOSITE — after a create and a version
+  // the document carries zero memory rows, the id is absent from the file by
+  // grep, and GET returns v2 from the graph. The `_unmodelled` line stands:
+  // an absent class cannot be swept into it either.
   const s = await startRestServer({ board: makeBoardFixture({ cards: [], nextShortId: 1 }) });
   try {
     const c = await api(s.baseUrl, 'POST', '/api/memories', MEM);
-    await api(s.baseUrl, 'PATCH', `/api/memories/${c.body.id}`, { body: 'v2', by: 'ada' });
+    assert.equal(c.status, 201, JSON.stringify(c.body));
+    const u = await api(s.baseUrl, 'PATCH', `/api/memories/${c.body.id}`, { body: 'v2', by: 'ada' });
+    assert.equal(u.status, 200, JSON.stringify(u.body));
 
     const raw = s.readBoardFile();
     const graph = raw['@graph'] || [];
-    const mems = graph.filter((e) => e['@type'] === 'scrum:Memory');
-    const vers = graph.filter((e) => e['@type'] === 'scrum:MemoryVersion');
-    assert.equal(mems.length, 1, 'one memory identity in the stored document');
-    assert.equal(vers.length, 2, 'two immutable versions beside it');
+    assert.equal(graph.filter((e) => e['@type'] === 'scrum:Memory').length, 0, 'no memory identity row in the stored document');
+    assert.equal(graph.filter((e) => e['@type'] === 'scrum:MemoryVersion').length, 0, 'no version row beside it');
+    assert.ok(!JSON.stringify(raw).includes(c.body.id), 'the memory id is ABSENT from board-data.json by grep');
     assert.ok(!('_unmodelled' in raw) || !(raw._unmodelled || []).some((e) => /Memory/.test(e['@type'] || '')),
-      'memories must be a MODELLED class, not swept into the unmodelled bucket');
+      'and nothing memory-shaped was swept into the unmodelled bucket');
+
+    const g = await api(s.baseUrl, 'GET', `/api/memories/${c.body.id}`);
+    assert.equal(g.body.version, 2, 'the graph read returns the second version');
+    assert.equal(g.body.body, 'v2');
   } finally { await s.stop(); }
 });
