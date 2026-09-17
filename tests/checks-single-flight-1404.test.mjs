@@ -145,3 +145,14 @@ test('#1404 a write invalidates the cached pass — a seat that writes a tripwir
     assert.equal(mine?.checks?.[0]?.status, 'holds', 'and the writer sees their own tripwire evaluated');
   } finally { await s.stop(); }
 });
+
+test('#1404 /api/health KICKS the replica build when it is not ready — a verify loop alone reaches ready:true', async () => {
+  const s = await startRestServer({ board: makeBoardFixture({ cards: [card(1, [quickCheck])] }) });
+  try {
+    const first = await get(s.baseUrl, '/api/health');
+    assert.equal(first.body.graph.ready, false, 'control: a fresh process has not built its replica (nothing has read the graph)');
+    let ready = false;
+    for (let i = 0; i < 40 && !ready; i++) { await new Promise((r) => setTimeout(r, 250)); ready = (await get(s.baseUrl, '/api/health')).body.graph.ready; }
+    assert.equal(ready, true, 'health alone — no graph read, no checks pass — drives the replica to ready');
+  } finally { await s.stop(); }
+});

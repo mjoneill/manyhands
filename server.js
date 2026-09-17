@@ -5760,7 +5760,19 @@ async function handleChecks(req, res) {
 
 // #1404 — the door that costs nothing. Answers from memory: no document read,
 // no SPARQL, no git. THIS is what a liveness probe polls; /api/checks is not.
+let _healthWarmKicked = false;
 function handleHealth(req, res) {
+  // The replica is built LAZILY, on the first graph read. A probe that reads
+  // nothing would therefore report ready:false forever on a quiet box — and a
+  // deploy's verify loop, which now waits for ready:true, would die at 80 s
+  // for want of a caller (measured on a copy of prod: 5 min of ready:false
+  // with no other traffic). The old /api/board/status poll warmed the store
+  // by accident; this door does it on purpose, once, without awaiting: the
+  // probe stays free, and the NEXT probe sees the build land.
+  if (_graphStore == null && !_healthWarmKicked) {
+    _healthWarmKicked = true;
+    warmGraphStore().catch((e) => { _healthWarmKicked = false; console.error(`${new Date().toISOString()} /api/health: warm kick failed (${e?.message || e})`); });
+  }
   sendJSON(res, 200, {
     ok: true,
     pid: process.pid,
