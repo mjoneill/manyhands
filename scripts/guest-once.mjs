@@ -190,7 +190,7 @@ if (channelMode && !wakes.length) {
     if (claimed.length) {
       const posts = [];
       for (const d of claimed) {
-        try { const m = await get(`/api/conversations/${encodeURIComponent(d.conversation)}`); posts.push({ id: m.id, author: m.author, body: m.body, createdAt: m.createdAt, attachedTo: m.attachedTo || null }); }   // #1368 — a card thread's post carries its thread
+        try { const m = await get(`/api/conversations/${encodeURIComponent(d.conversation)}`); posts.push({ id: m.id, author: m.author, body: m.body, createdAt: m.createdAt, attachedTo: m.attachedTo || null, conversation: m.conversation || null }); }   // #1368 — a card thread's post carries its thread; #1401 — and its talk tag
         catch (e) { console.error(`[#1346] ${agent.seatKey}: message ${d.conversation} unreadable, delivered as such: ${e.message}`); posts.push({ id: d.conversation, author: '?', body: '(message unreadable)', createdAt: d.offeredAt }); }
       }
       posts.sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
@@ -201,7 +201,11 @@ if (channelMode && !wakes.length) {
       // on the card's record. Mixed or board-level posts answer board-level.
       const threads = new Set(posts.map((m) => m.attachedTo || null));
       const attachedTo = threads.size === 1 ? [...threads][0] : null;
-      wakes = [{ kind: 'channel', id: `channel:${newest?.id ?? new Date().toISOString()}`, createdAt: newest?.createdAt ?? new Date().toISOString(), author: null, body: '', posts, messageIds: posts.map((m) => m.id), deliveries: claimed.map((d) => d.id), attachedTo }];
+      // #1401 — same rule for the talk tag: a digest whose posts all carry ONE
+      // tag is answered into that talk; mixed or untagged answers untagged.
+      const talks = new Set(posts.map((m) => m.conversation || null));
+      const conversation = talks.size === 1 ? [...talks][0] : null;
+      wakes = [{ kind: 'channel', id: `channel:${newest?.id ?? new Date().toISOString()}`, createdAt: newest?.createdAt ?? new Date().toISOString(), author: null, body: '', posts, messageIds: posts.map((m) => m.id), deliveries: claimed.map((d) => d.id), attachedTo, conversation }];
       for (const d of claimed) await step(d.id, { state: 'turn-started' });
     }
   }

@@ -1117,6 +1117,7 @@ function buildMcpServer() {
       body: z.string().min(1).describe('Message body (plain text; markdown not rendered in v1)'),
       author: z.string().min(1).describe(`Author key — ${seatKeys().join(', ')}. If your session is BOUND to a seat, that seat is the author and this value is ignored unless it differs, in which case it is recorded as onBehalfOf (a relay, not a claim about who you are). If your session is UNBOUND the board cannot verify this and takes your word for it (#125).`),
       attachedTo: z.string().optional().describe('Optional card to attach to: its UUID, or its shortId as a STRING ("619"), which is stored as the UUID (#761). A value naming no card is REFUSED — it used to be accepted and stranded the comment. Omit, or send "null", for a board-level post.'),
+      conversation: z.string().optional().describe('#1401 — the 1:1 talk this post belongs to (a talk id from a "Talk with…" wake or from talk_list). The post stays board-level and visible to the whole room; the tag is what the talk\'s view filters by. If you were handed a talk id in the message you are answering, reply with the same id so your answer lands in that view. Names no talk → REFUSED.'),
     },
   }, async (args, extra) => {
     // #258 — LEARN THE AUTHOR FROM THE POST ITSELF. From the card, 2026-06-18:
@@ -1284,6 +1285,7 @@ function buildMcpServer() {
     inputSchema: {
       author: z.string().optional().describe('Filter to this author only'),
       attachedTo: z.string().optional().describe('Filter to conversations attached to this card UUID. Pass the literal string "null" to filter to board-level conversations only.'),
+      conversation: z.string().optional().describe('#1401 — only the posts tagged into this 1:1 talk (talk id). The plain list shows them inline with everything else.'),
       mentions_me: z.string().optional().describe('Only conversations whose body @mentions this name (case-insensitive). Combine with since for "anything for me since I last ran?".'),
       since: z.string().optional().describe('ISO timestamp; only return conversations created at or after this time'),
       limit: z.string().optional().describe('Max number of most-recent conversations to return, or "all" for full history. Default: a recent window bounded to the tool-result budget so a catch-up call never dumps the whole board.'),
@@ -1292,6 +1294,7 @@ function buildMcpServer() {
     const params = new URLSearchParams();
     if (args.author) params.set('author', args.author);
     if (args.attachedTo) params.set('attachedTo', args.attachedTo);
+    if (args.conversation) params.set('conversation', args.conversation);   // #1401
     if (args.mentions_me) params.set('mentions_me', args.mentions_me);
     if (args.since) params.set('since', args.since);
     const qs = params.toString();

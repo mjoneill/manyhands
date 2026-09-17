@@ -71,6 +71,10 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:roleKey': 'scrum:roleKey',         // po | scrum-master | value-steward | … (unique per board)
   'scrum:definedBy': 'scrum:definedBy',     // → entity: the card holding the full definition
   'scrum:RoleVersion': null,                // #1387 — the type; a state a role has held
+  'scrum:Talk': null,                       // #1401 — the type; a 1:1 conversation tag
+  'scrum:with': 'scrum:with',               // → the seat a talk is with
+  'scrum:conversation': 'scrum:conversation', // → the talk a post is tagged into (#1401)
+  'scrum:closedAt': 'scrum:closedAt',       // → when a talk was closed (#1401 slice 3; null while open)
   'scrum:ofRole': 'scrum:ofRole',           // → the role IRI this version belongs to
   'scrum:role': 'scrum:role',               // SeatDeclaration → entity: the Role held for that interval
   'scrum:Wake': null,                       // #1118 — the type; minted by the projection

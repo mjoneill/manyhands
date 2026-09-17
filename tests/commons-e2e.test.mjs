@@ -685,9 +685,9 @@ test('#504 commons author picker offers the CONFIGURED roster, not the example s
     await withBrowserServer(async ({ server, browser }) => {
       const page = await browser.newPage();
       await page.goto(`${server.baseUrl}/commons.html`, { waitUntil: 'networkidle0' });
-      await page.waitForSelector('select', { timeout: 5000 });
+      await page.waitForSelector('.cv-who', { timeout: 5000 });
       const opts = await page.evaluate(() =>
-        [...document.querySelector('select').options].map((o) => o.value));
+        [...document.querySelector('.cv-who').options].map((o) => o.value));
 
       assert.deepEqual(opts.sort(), ['vlorbo', 'zzquux'],
         `picker must offer exactly the configured seats (wiki is not a person); got ${opts.join(', ')}`);
@@ -707,9 +707,9 @@ test('#504 mirror: with NO roster configured, the shipped example seats DO retur
   await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
     await page.goto(`${server.baseUrl}/commons.html`, { waitUntil: 'networkidle0' });
-    await page.waitForSelector('select', { timeout: 5000 });
+    await page.waitForSelector('.cv-who', { timeout: 5000 });
     const opts = await page.evaluate(() =>
-      [...document.querySelector('select').options].map((o) => o.value));
+      [...document.querySelector('.cv-who').options].map((o) => o.value));
     assert.ok(opts.length > 0, 'a fresh install must still offer someone to post as');
     assert.ok(opts.includes('alex'), `expected the shipped examples; got ${opts.join(', ')}`);
   }, { server: { board }, launch: { headless: 'new' } });

@@ -28,6 +28,7 @@ export const IRI = Object.freeze({
   entity: 'https://scrumboard.local/entity/',
   person: 'https://scrumboard.local/person/',
   column: 'https://scrumboard.local/column/',
+  talk: 'https://scrumboard.local/talk/',       // #1401 — a 1:1 conversation tag
   scrum: 'https://scrumboard.local/ns#',
   schema: 'https://schema.org/',
   rdf: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
@@ -181,6 +182,7 @@ export const GRAPH_VOCABULARY = new Set([
   // #915 — roles as entities; a seat declaration may hold one
   'scrum:Role', 'scrum:roleKey', 'scrum:definedBy', 'scrum:role',
   'scrum:RoleVersion', 'scrum:ofRole',   // #1387 — a revised role keeps its history
+  'scrum:Talk', 'scrum:with', 'scrum:conversation', 'scrum:closedAt',   // #1401 — a 1:1 conversation tag and the posts that carry it
   // #1202 — the provenance ledger row
   'scrum:ModelCall', 'scrum:agent', 'scrum:model', 'scrum:provider', 'scrum:protocol',
   'scrum:promptVersion', 'scrum:tokensIn', 'scrum:tokensOut', 'scrum:reasoningTokens', 'scrum:cachedPromptTokens', 'scrum:cost', 'scrum:costMeasured', 'scrum:costCategories', 'scrum:stopReason',
@@ -994,6 +996,19 @@ function projectRoleVersion(store, e) {
   if (e.dateCreated) add(nn(SC + 'dateCreated'), lit(String(e.dateCreated)));
 }
 
+// #1401 — a talk: the tag a 1:1 view filters by. Small on purpose.
+function projectTalk(store, e) {
+  const S = IRI.scrum, SC = IRI.schema, P = IRI.person;
+  const s = nn(e['@id']);
+  const add = (p, o) => store.add(oxigraph.triple(s, p, o));
+  add(A, nn(S + 'Talk'));
+  if (e.name) add(nn(SC + 'name'), lit(String(e.name)));
+  if (e['scrum:with']) add(nn(S + 'with'), nn(String(e['scrum:with']).startsWith('http') ? String(e['scrum:with']) : P + e['scrum:with']));
+  if (e.creator) add(nn(SC + 'creator'), nn(String(e.creator).startsWith('http') ? String(e.creator) : P + e.creator));
+  if (e.dateCreated) add(nn(SC + 'dateCreated'), lit(String(e.dateCreated)));
+  if (e['scrum:closedAt']) add(nn(S + 'closedAt'), lit(String(e['scrum:closedAt'])));
+}
+
 function projectRole(store, e) {
   const S = IRI.scrum, SC = IRI.schema, P = IRI.person, E = IRI.entity;
   const s = nn(e['@id']);
@@ -1620,6 +1635,7 @@ function projectEntity(store, e) {
       add(s, A, nn(SC + 'Comment'));
       if (e.author) add(s, nn(SC + 'author'), personRef(e.author));
       if (typeof e.about === 'string' && e.about !== 'null') add(s, nn(SC + 'about'), nn(E + e.about));
+      if (typeof e['scrum:conversation'] === 'string' && e['scrum:conversation']) add(s, nn(S + 'conversation'), nn(String(e['scrum:conversation']).startsWith('http') ? e['scrum:conversation'] : IRI.talk + e['scrum:conversation']));   // #1401
       if (e.dateCreated) add(s, nn(SC + 'dateCreated'), lit(e.dateCreated));
       if (e.text) add(s, nn(SC + 'text'), lit(e.text));
       for (const m of e.mentions || []) if (m) add(s, nn(S + 'mentionsName'), lit(m));
@@ -1651,6 +1667,8 @@ function projectEntity(store, e) {
       projectDelivery(store, e);
     } else if (t === 'scrum:Role') {
       projectRole(store, e);
+    } else if (t === 'scrum:Talk') {
+      projectTalk(store, e);          // #1401
     } else if (t === 'scrum:RoleVersion') {
       projectRoleVersion(store, e);   // #1387
     } else if (t === 'scrum:Agent') {

@@ -16,6 +16,15 @@
   #thread-head .card-head-toggle { background: none; border: 1px solid var(--line); color: var(--muted); border-radius: 6px; font: inherit; font-size: 12px; padding: 3px 9px; cursor: pointer; margin: 0 0 8px; }
   #thread-head .card-head-toggle:hover { color: var(--ink); border-color: var(--link); }
   .groom-note { font-size: 12px; color: var(--muted); margin: 0 0 6px; }
+  .talk-toggle { margin-left: 8px; }
+  .talk-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 6px 0 0; font-size: 13px; }
+  .talk-form label { display: flex; gap: 6px; align-items: center; }
+  .talk-form input[type=text] { min-width: 18em; }
+  .talk-error { color: #b00020; }
+  .talk-note { font-size: 12px; color: var(--muted); margin: 0 0 6px; }
+  .talk-head { padding: 8px 0 6px; border-bottom: 1px solid var(--border, #ddd); margin-bottom: 8px; }
+  .talk-head h2 { margin: 0 0 2px; font-size: 16px; }
+  .talk-head .talk-meta { font-size: 12px; color: var(--muted); }
 </style>
 <link rel="stylesheet" href="./core/editor.css"><!-- #1367 -->
 <link rel="stylesheet" href="./core/constraints-view.css"><!-- #1350 what governs an agent -->
@@ -108,7 +117,14 @@
  <div data-page-shell>
   <div class="shell-head"><a href="/" data-product-mark title="manyhands — the board"><span class="mark-glyph">◆</span>manyhands</a><div id="app-nav"></div></div>
   <header>
-    <div class="head-row"><h1 id="title">💬 Commons</h1><span id="delivery-status" class="delivery-status" title="Channel delivery status"></span><button id="blocked-toggle" class="blocked-toggle" title="Cards with an unresolved raised hand (a 🚧 post on the card), anywhere on the board">🚧 Raised hands · 0</button><a id="back" class="scope-back" style="display:none"></a></div>
+    <div class="head-row"><h1 id="title">💬 Commons</h1><span id="delivery-status" class="delivery-status" title="Channel delivery status"></span><button id="blocked-toggle" class="blocked-toggle" title="Cards with an unresolved raised hand (a 🚧 post on the card), anywhere on the board">🚧 Raised hands · 0</button><button id="talk-toggle" class="talk-toggle" type="button" title="#1401 — open a 1:1 with any seat about anything: a view of the room's stream filtered to one conversation. No card needed; the room can see it.">🗣 Talk with…</button><a id="back" class="scope-back" style="display:none"></a></div>
+    <form id="talk-form" class="talk-form" hidden>
+      <label>with <select id="talk-with" name="with" required></select></label>
+      <label>about <input id="talk-title" name="title" type="text" maxlength="120" placeholder="one line — the next sprint, a question, anything" required></label>
+      <button type="submit" class="btn-primary">Open</button>
+      <button type="button" id="talk-cancel">Cancel</button>
+      <span id="talk-error" class="talk-error" role="alert"></span>
+    </form>
     <div id="constellation" class="constellation" aria-label="Who's been in the room"></div>
   </header>
   <div id="view"><p style="color:var(--muted)">Loading…</p></div>
@@ -724,6 +740,15 @@
       // badged, a comment can become a ruling on the card, and `?groom=1`
       // (the card's "Groom this" door) arrives with the PO mentioned.
       const groom = new URLSearchParams(location.search).get('groom') === '1';
+      // #1401 — `?conversation=<talk id>`: the 1:1 view. A talk is a small
+      // node (title · with · who opened it); the posts are the room's own,
+      // tagged. The view filters to the tag the way a seat solo filters to a
+      // voice; nothing here is private, and "show the whole room" is one link.
+      const talkId = new URLSearchParams(location.search).get('conversation');
+      let talk = null;
+      if (talkId) {
+        try { const r = await fetch('/api/talks/' + encodeURIComponent(talkId)); if (r.ok) talk = await r.json(); } catch { /* falls through to the plain room */ }
+      }
       let groomCard = null;
       let cardFull = null;
       if (node) {
@@ -756,14 +781,27 @@
         paint(isOpen);
         leading = head;   // lives at the top of the feed and scrolls with it, so the feed keeps its height
       }
+      if (talk) {
+        // #1401 — the talk's head sits first in the feed, like a card's (#1391).
+        const head = document.createElement('div'); head.className = 'talk-head'; head.id = 'talk-head';
+        const h2 = document.createElement('h2'); h2.textContent = `🗣 Talk with ${talk.with} — ${talk.title}`;
+        const meta = document.createElement('div'); meta.className = 'talk-meta';
+        meta.append(document.createTextNode(`opened by ${talk.openedBy || '?'} · ${talk.openedAt ? new Date(talk.openedAt).toLocaleString() : ''} · `));
+        const whole = document.createElement('a'); whole.href = 'commons.html'; whole.textContent = 'show the whole room'; whole.className = 'talk-whole-room';
+        meta.append(whole);
+        head.append(h2, meta);
+        leading = head;
+        document.title = `Talk with ${talk.with} — ${talk.title}`;
+      }
       view = mountConversationView({
         mount: viewEl,
         ...(Number.isInteger(limitParam) && limitParam > 0 ? { limit: limitParam } : {}),
         attachedTo: node || undefined,   // node ⇒ that thread; absent ⇒ the whole commons
         poll: true,
         poSeat, groom, card: groomCard,   // #1368
+        talk,                             // #1401
         leading,                          // #1391
-        placeholder: node ? (groom ? 'Ask the PO — what do you need to know to start?' : 'Add to this discussion…') : 'Say something to the room…',
+        placeholder: talk ? `Say something to ${talk.with} — the room can read it` : (node ? (groom ? 'Ask the PO — what do you need to know to start?' : 'Add to this discussion…') : 'Say something to the room…'),
         attachedPointer,                 // #294 — pointer-collapse in the unscoped room
         onMessages: (msgs) => { _lastMessages = msgs; updateConstellation(msgs); anchorToPlace(); }, // presence pulse · #517 arrive where the reader was
         onSolo: reflectSolo,             // presence — sync the constellation to the soloed mind
@@ -778,11 +816,60 @@
           form.prepend(note);
         }
       }
+      if (talk) {
+        const form = viewEl.querySelector('.cv-form');
+        if (form) {
+          const note = document.createElement('div'); note.className = 'talk-note';
+          note.textContent = `Posting here tags the post into this talk and wakes @${talk.with} — it is public, like the rest of the room, and shows inline in the whole stream.`;
+          form.prepend(note);
+        }
+      }
       // #758 — a #NNN in the feed, or a raised-hand entry, opens the card HERE.
       // Closing the sheet leaves the room exactly where it was.
       wireCardRefs(document.body, { keepScroll: ['.cv-feed'], onMissing: (k) => { const m = document.createElement('div'); m.className = 'card-sheet-missing'; m.textContent = `No card #${k} on this board.`; document.body.appendChild(m); setTimeout(() => m.remove(), 2500); } });
       window.openCardSheet = openCardSheet;   // for the raised-hands panel and tests
     }
+
+    // #1401 — the door. Pick a seat, one line of topic → POST /api/talks →
+    // open the view. An inline form, never a native prompt (#481 froze
+    // agent-driven browsers on prompt()). The roster is the seat list.
+    (function wireTalkDoor() {
+      const toggle = document.getElementById('talk-toggle');
+      const form = document.getElementById('talk-form');
+      const sel = document.getElementById('talk-with');
+      const title = document.getElementById('talk-title');
+      const err = document.getElementById('talk-error');
+      if (!toggle || !form) return;
+      let loaded = false;
+      async function loadSeats() {
+        if (loaded) return;
+        try {
+          const r = await fetch('/api/roster'); const j = await r.json();
+          const seats = j && j.seats && typeof j.seats === 'object' ? j.seats : {};
+          sel.innerHTML = '';
+          for (const [key, v] of Object.entries(seats)) {
+            if (v && v.kind === 'system') continue;   // wiki/board are not someone to talk with
+            const o = document.createElement('option'); o.value = key; o.textContent = `${v && v.emoji ? v.emoji + ' ' : ''}${v && v.name ? v.name : key}`;
+            sel.appendChild(o);
+          }
+          loaded = sel.options.length > 0;
+        } catch { err.textContent = 'could not read the roster'; }
+      }
+      toggle.addEventListener('click', async () => { form.hidden = !form.hidden; if (!form.hidden) { await loadSeats(); title.focus(); } });
+      document.getElementById('talk-cancel').addEventListener('click', () => { form.hidden = true; err.textContent = ''; });
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault(); err.textContent = '';
+        // The opener is whoever the composer is set to speak as — the same
+        // select the posts use — so the talk's `openedBy` matches its first post.
+        const by = (document.querySelector('.cv-who')?.value || '').trim() || 'michael';
+        try {
+          const r = await fetch('/api/talks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ with: sel.value, title: title.value.trim(), by }) });
+          const j = await r.json();
+          if (!r.ok) { err.textContent = j.error || `refused (${r.status})`; return; }
+          location.href = 'commons.html?conversation=' + encodeURIComponent(j.id);
+        } catch (ex) { err.textContent = 'could not open the talk: ' + ex.message; }
+      });
+    })();
 
     // #303-7 — delivery observability. Poll the (same-origin) channel-status
     // proxy and show "🛰 N delivering" when the router has staggered posts still

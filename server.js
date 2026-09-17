@@ -3633,6 +3633,69 @@ async function handleUpdateRole(req, res, keyRaw) {
     sendJSON(res, 500, { error: e.message });
   }
 }
+// ── #1401 — TALKS: a 1:1 conversation TAG. Ruled by the owner 2026-09-17: a
+// 1:1 "is just a view of the ongoing conversation in the room. each post maybe
+// gets tagged with a 1:1 conversation attribute, but the rest of the room sees
+// the messages flowing in like any others". So a talk is a small addressable
+// node (title · with · who opened it · when); posts are NOT attached to it —
+// they stay board-level and carry `conversation: <talk id>`; the commons view
+// `?conversation=<id>` filters to the tag the way the seat-chip solo does.
+// Cards are neither a prerequisite nor a product. Closing (a state on the tag)
+// is slice 3's sidebar; slice 1 mints, lists and tags.
+const TALK_IRI = (id) => `https://scrumboard.local/talk/${encodeURIComponent(String(id))}`;
+const talkEvent = (op, e, actor) => ({ op, actor, entity: { kind: 'talk', id: e['@id'] }, state: e });
+function talksOf(data) { return Array.isArray(data.talks) ? data.talks : []; }
+function talkIdOf(e) { return String(e['@id'] || '').replace('https://scrumboard.local/talk/', ''); }
+function talkToWire(e) {
+  return { id: talkIdOf(e), title: e.name ?? '', with: e['scrum:with'] ?? null, openedBy: e.creator ?? null, openedAt: e.dateCreated ?? null, closedAt: e['scrum:closedAt'] ?? null };
+}
+/** The talk a post names, resolved against the board — or `refused` with the raw id. Absent ⇒ null. */
+function resolveConversation(raw, data) {
+  if (raw === undefined || raw === null || raw === '' || raw === 'null') return { ok: true, value: null };
+  if (typeof raw !== 'string') return { ok: false, id: String(raw) };
+  const id = raw.replace('https://scrumboard.local/talk/', '');
+  return talksOf(data).some((t) => talkIdOf(t) === id) ? { ok: true, value: id } : { ok: false, id };
+}
+async function handleCreateTalk(req, res) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const by = typeof body.by === 'string' && body.by.trim() ? body.by.trim() : null;
+    if (!by) return sendJSON(res, 400, { error: 'by is required — who opens this talk. Declared, not authenticated.' });
+    const title = typeof body.title === 'string' ? body.title.trim() : '';
+    if (!title) return sendJSON(res, 400, { error: 'title is required — one line: what this talk is about' });
+    const withSeat = typeof body.with === 'string' ? body.with.trim() : '';
+    if (!withSeat) return sendJSON(res, 400, { error: 'with is required — the seat this talk is with (any roster seat, humans included)' });
+    const result = await withWriteLock(async () => {
+      const data = readBoard();
+      const seats = currentRoster(data);
+      if (!Object.prototype.hasOwnProperty.call(seats, withSeat)) {
+        return { status: 400, wire: { error: `with ${JSON.stringify(withSeat)} is not a seat on this roster — known: ${Object.keys(seats).join(', ')}`, code: 'UNKNOWN_SEAT' } };
+      }
+      const id = crypto.randomUUID();
+      const entity = { '@id': TALK_IRI(id), '@type': 'scrum:Talk', name: title, 'scrum:with': withSeat, creator: by, dateCreated: new Date().toISOString() };
+      data.talks = [...talksOf(data), entity];
+      writeBoard(data, [talkEvent('create', entity, by)]);
+      return { status: 201, wire: talkToWire(entity) };
+    });
+    sendJSON(res, result.status, result.wire);
+  } catch (e) {
+    console.error('POST /api/talks:', e.message);
+    sendJSON(res, 500, { error: 'Failed to open talk' });
+  }
+}
+function handleListTalks(req, res) {
+  const data = readBoard();
+  const all = /(^|[?&])all=1(&|$)/.test(req.url.split('?')[1] || '');
+  const talks = talksOf(data).map(talkToWire).filter((t) => all || !t.closedAt);
+  sendJSON(res, 200, { talks });
+}
+function handleGetTalk(req, res, id) {
+  const data = readBoard();
+  const t = talksOf(data).find((e) => talkIdOf(e) === id);
+  if (!t) return sendJSON(res, 404, { error: `no talk with id ${id}` });
+  sendJSON(res, 200, talkToWire(t));
+}
+
 function handleListRoles(req, res) {
   const data = readBoard();
   sendJSON(res, 200, { roles: rolesOf(data).map((r) => roleToWire(data, r)) });
@@ -8421,7 +8484,7 @@ function extractMentions(text) {
 // ⚠️ Derived from what the CONSTRUCTOR reads, not from the stored object's keys:
 // `id`, `mentions` and `createdAt` appear on the result but are computed here,
 // so a client that sends them is sending something the server will discard.
-const CONVERSATION_CONSUMED_FIELDS = new Set(['body', 'author', 'attachedTo', 'attachments']);
+const CONVERSATION_CONSUMED_FIELDS = new Set(['body', 'author', 'attachedTo', 'attachments', 'conversation']);   // #1401 — `conversation`: the talk tag
 
 /**
  * Keys the caller sent that this route will silently drop. Empty when clean.
@@ -8453,7 +8516,7 @@ function unconsumedConversationFields(body) {
 //
 // The four internal callers (claim announcements, seat-state releases, wiki
 // pages) never attach to a card and take the default.
-function createConversationFromPayload(body, attachedTo = null) {
+function createConversationFromPayload(body, attachedTo = null, conversation = null) {
   const now = new Date().toISOString();
   const text = (typeof body.body === 'string') ? body.body : '';
   return {
@@ -8461,6 +8524,9 @@ function createConversationFromPayload(body, attachedTo = null) {
     body: text,
     author: (typeof body.author === 'string' && body.author.length > 0) ? body.author : 'unassigned',
     attachedTo,
+    // #1401 — the 1:1 view's tag, resolved inside the lock like attachedTo;
+    // absent on every post that is not part of a talk.
+    ...(conversation ? { conversation } : {}),
     attachments: sanitizeAttachments(body.attachments),
     mentions: extractMentions(text),
     // #125 — the DECLARED name, kept when it differs from the authenticated one.
@@ -8551,6 +8617,7 @@ const MAX_CONV_LIST_LIMIT = Number(process.env.SCRUM_MAX_CONV_LIST_LIMIT) || 200
  */
 const CONVERSATION_PARAMS = new Set([
   'attachedTo', 'author', 'since', 'mentions_me', 'before', 'limit', 'q',
+  'conversation',   // #1401 — the 1:1 view: only posts carrying this talk tag
 ]);
 
 function handleListConversations(req, res) {
@@ -8559,6 +8626,10 @@ function handleListConversations(req, res) {
     if (!q) return;                       // guard already sent the 400
     const data = readBoard();
     let convs = data.conversations;
+    if (typeof q.conversation === 'string' && q.conversation) {   // #1401
+      if (!talksOf(data).some((t) => talkIdOf(t) === q.conversation)) return sendJSON(res, 400, { error: `no talk with id ${q.conversation}`, code: 'NO_SUCH_TALK' });
+      convs = convs.filter((c) => c.conversation === q.conversation);
+    }
     if (typeof q.attachedTo === 'string') {
       // Allow "null" string to filter to board-level conversations
       if (q.attachedTo === 'null') convs = convs.filter(c => c.attachedTo === null);
@@ -8712,11 +8783,16 @@ async function handleCreateConversation(req, res) {
       const data = readBoard();
       const ref = resolveAttachedTo(body.attachedTo, data.cards);
       if (!ref.ok) return { refused: ref.id };
-      const conv = createConversationFromPayload(body, ref.value);
+      const talk = resolveConversation(body.conversation, data);   // #1401
+      if (!talk.ok) return { refusedTalk: talk.id };
+      const conv = createConversationFromPayload(body, ref.value, talk.value);
       data.conversations.push(conv);
       writeBoard(data, [convEvent(conv)]);
       return conv;
     });
+    if (created.refusedTalk !== undefined) {
+      return sendJSON(res, 400, { error: `no talk with id ${created.refusedTalk} — conversation must name an open talk (POST /api/talks mints one); omit it for an untagged post`, code: 'NO_SUCH_TALK' });
+    }
     if (created.refused !== undefined) {
       // Refuse BEFORE anything is stored. A 400 that still appends is worse
       // than no check at all: the caller then believes nothing was written.
@@ -9194,6 +9270,9 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/export$/,               fn: (req, res) => handleExport(req, res) },       // #1266
   { method: 'POST',   re: /^\/api\/export\/preview$/,       fn: (req, res) => handleExportPreview(req, res) },   // #1375 dry run
   { method: 'GET',    re: /^\/api\/roles$/,                fn: (req, res) => handleListRoles(req, res) },        // #915
+  { method: 'GET',    re: /^\/api\/talks$/,                fn: (req, res) => handleListTalks(req, res) },        // #1401
+  { method: 'GET',    re: /^\/api\/talks\/([^\/]+)$/,       fn: (req, res, m) => handleGetTalk(req, res, decodeURIComponent(m[1])) },   // #1401
+  { method: 'POST',   re: /^\/api\/talks$/,                fn: (req, res) => handleCreateTalk(req, res) },       // #1401
   { method: 'GET',    re: /^\/api\/seats\/([^/]+)\/role-section$/, fn: (req, res, m) => handleSeatRoleSection(req, res, decodeURIComponent(m[1])) },   // #1376
   { method: 'POST',   re: /^\/api\/roles$/,                fn: (req, res) => handleCreateRole(req, res) },       // #915
   { method: 'PATCH',  re: /^\/api\/roles\/([^\/]+)$/,       fn: (req, res, m) => handleUpdateRole(req, res, decodeURIComponent(m[1])) },   // #1387

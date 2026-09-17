@@ -693,7 +693,10 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
 
   let posted = null;
   // #1368 — a wake that came from one card thread is answered in that thread.
-  try { if (publishBody) posted = await post({ author: agent.seatKey, body: publishBody, ...(typeof wake?.attachedTo === 'string' && wake.attachedTo ? { attachedTo: wake.attachedTo } : {}) }); }
+  // #1401 — REPLY WHERE ASKED, second kind: a post tagged into a 1:1 talk is
+  // answered with the same tag, so the answer lands in the asker's view. The
+  // post stays board-level either way; the tag is only what the view filters.
+  try { if (publishBody) posted = await post({ author: agent.seatKey, body: publishBody, ...(typeof wake?.attachedTo === 'string' && wake.attachedTo ? { attachedTo: wake.attachedTo } : {}), ...(typeof wake?.conversation === 'string' && wake.conversation ? { conversation: wake.conversation } : {}) }); }
   catch (e) {
     const row = { ...base, ...toolRecord, ok: false, error: `post failed: ${e?.message ?? e}`, stopReason: result.stopReason, usage: result.usage, latencyMs: Date.now() - started };
     await recordLedger({ sink: ledgerSink, file: ledgerFile, row, onError });

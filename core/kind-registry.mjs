@@ -155,6 +155,14 @@ export const KIND_DECLARATIONS = Object.freeze([
       + 'holder is the OPEN interval, never the newest node by date.',
   },
   {
+    name: 'scrum:Talk', eventKind: 'talk', collection: 'talks',
+    createdBy: 'POST /api/talks (the commons header\'s "Talk with…")',
+    definition: 'A 1:1 conversation TAG (#1401, ruled by the owner 2026-09-17): title, the seat it is with, '
+      + 'who opened it and when. Posts are NOT attached to it — they stay board-level and carry '
+      + '`scrum:conversation` pointing here, so the room sees them inline and one view filters to '
+      + 'the tag. A VIEW over the commons, not a container; cards are neither a prerequisite nor a product.',
+  },
+  {
     name: 'scrum:RoleVersion', eventKind: 'roleVersion', collection: 'roleVersions',
     createdBy: 'role_create (version 1) / role_update (later versions)',
     definition: 'A STATE a role has held — name, short definition, defining card — kept when the role '

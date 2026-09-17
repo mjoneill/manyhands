@@ -67,6 +67,7 @@ const ENTITY_KINDS_ADDED_SINCE = [
   'delivery',     // #1346 — what happened to one message for one seat; the resident inbox as a record
   'role',         // #915 — a role the team uses, as an entity; held by a seat declaration
   'roleVersion',  // #1387 — a state a role has held; kept when the role is revised
+  'talk',         // #1401 — a 1:1 conversation tag; posts carry scrum:conversation pointing at it
 ];
 
 test('#1214 the derived set adds only DECLARED new kinds — a silent addition is as bad as a loss', () => {
@@ -97,6 +98,7 @@ const COLLECTIONS_ADDED_SINCE = {
   delivery: 'deliveries', // #1346
   role: 'roles', // #915
   roleVersion: 'roleVersions', // #1387
+  talk: 'talks', // #1401
 };
 
 test('#1214 a kind maps only to a collection replay knows, or one declared new here', () => {

@@ -132,6 +132,7 @@ const MSG_CONTENT_TO_NODE = {
   author: 'author',
   createdAt: 'dateCreated',
   attachedTo: 'about',
+  conversation: 'scrum:conversation',   // #1401 — the 1:1 view's tag; a board-level post stays board-level
 };
 const MSG_NODE_TO_CONTENT = Object.fromEntries(
   Object.entries(MSG_CONTENT_TO_NODE).map(([conv, node]) => [node, conv]),

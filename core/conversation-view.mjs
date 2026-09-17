@@ -162,6 +162,12 @@ export function mountConversationView(opts = {}) {
     // #1368 — GROOMING. A card's thread the PO answers in, on the record.
     poSeat = null,     // seat key holding the Product Owner role (roster roles.po, read not hardcoded); its posts are badged
     groom = false,     // open with the composer focused and the PO mentioned, unless a draft is already there
+    // #1401 — a 1:1 TALK: { id, title, with }. The view filters the feed to
+    // posts carrying `conversation === id` (the seat-solo mechanism with a
+    // different key), the composer tags every post it sends with the id, and
+    // it opens with `@<with> ` prefilled. Posts stay board-level; the room
+    // sees them inline; only THIS view is quiet.
+    talk = null,
     card = null,       // { id, shortId } of the card this thread belongs to — enables the ruling affordance
     onRuling,          // optional (decision) => void after a ruling is recorded
     leading = null,    // #1391 — an element kept at the TOP of the feed across renders (the card above its thread); it scrolls with the conversation
@@ -234,6 +240,12 @@ export function mountConversationView(opts = {}) {
   // mentioned, so the ask reaches the seat that answers it. A draft already
   // in the box (#1366) wins — this never overwrites the operator's words; it
   // only fills an EMPTY box.
+  if (talk && talk.with) {   // #1401 — the talk opens addressed to its seat, unless a draft is already there
+    const ta = form.querySelector('.cv-input');
+    if (ta && !ta.value) { ta.value = `@${talk.with} `; ta.dispatchEvent(new doc.defaultView.Event('input', { bubbles: true })); }
+    form.dataset.talk = talk.id;
+    try { ta?.focus(); ta?.setSelectionRange(ta.value.length, ta.value.length); } catch { /* not focusable yet */ }
+  }
   if (groom) {
     const ta = form.querySelector('.cv-input');
     if (ta) {
@@ -384,6 +396,7 @@ export function mountConversationView(opts = {}) {
     let out = messages;
     // presence — soloing a mind filters the room to that author's voice.
     if (authorSolo) out = out.filter((c) => identityOf(c.author).key === authorSolo);
+    if (talk && talk.id) out = out.filter((c) => c.conversation === talk.id);   // #1401
     if (query) out = out.filter((c) =>
       (typeof c.body === 'string' && c.body.toLowerCase().includes(query)) ||
       (typeof c.author === 'string' && c.author.toLowerCase().includes(query)));
@@ -482,7 +495,7 @@ export function mountConversationView(opts = {}) {
     }
     const vis = visibleMessages();
     if (!vis.length) {
-      feed.appendChild(el('div', 'cv-empty', authorSolo ? 'Nothing from them yet.' : (query ? 'No messages match your search.' : 'No messages yet. Be the first.')));
+      feed.appendChild(el('div', 'cv-empty', authorSolo ? 'Nothing from them yet.' : (query ? 'No messages match your search.' : (talk ? 'Nothing in this talk yet — say the first thing.' : 'No messages yet. Be the first.'))));
     } else {
       for (const c of vis) { feed.appendChild(messageNode(c)); renderedIds.add(c.id); }
     }
@@ -510,6 +523,8 @@ export function mountConversationView(opts = {}) {
     // #303-6 — while searching, a new post must respect the filter; re-render
     // through the query path rather than blindly appending.
     if (query) { renderAll(); return; }
+    // #1401 — a live post that is not in this talk stays out of this view.
+    if (talk && talk.id) { fresh = fresh.filter((c) => c.conversation === talk.id); if (!fresh.length) return; }
     const empty = feed.querySelector('.cv-empty');
     if (empty) empty.remove();
     const stick = atBottom();
@@ -737,6 +752,7 @@ export function mountConversationView(opts = {}) {
   async function post(body, who, attachments) {
     const payload = { body, author: who };
     if (typeof attachedTo === 'string' && attachedTo) payload.attachedTo = attachedTo;
+    if (talk && talk.id) payload.conversation = talk.id;   // #1401 — every post from this view carries the talk's tag
     if (Array.isArray(attachments) && attachments.length) payload.attachments = attachments;
     try {
       const res = await f(baseUrl + '/api/conversations', {
