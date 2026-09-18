@@ -79,8 +79,10 @@ test('#1413 B — a bound seat\'s body with NO actor field is filled silently (m
     assert.equal(patched.status, 200, JSON.stringify(patched.body));
     const posted = await api(srv.baseUrl, 'POST', '/api/conversations', { body: { author: 'ada', body: 'as myself' }, token: t.ada });
     assert.equal(posted.status, 201);
+    const carried = await api(srv.baseUrl, 'PATCH', '/api/cards/c1', { body: { title: 'carries its own relay field', onBehalfOf: 'someone' }, token: t.ada });
+    assert.equal(carried.status, 200, JSON.stringify(carried.body));
     let h = await api(srv.baseUrl, 'GET', '/api/health');
-    assert.equal(h.body.auth.mismatched, 0, 'a fill and an agreement are not mismatches');
+    assert.equal(h.body.auth.mismatched, 0, 'a fill, an agreement, and a body that CARRIES its own onBehalfOf are not mismatches');
     const relayed = await api(srv.baseUrl, 'POST', '/api/conversations', { body: { author: 'bo', body: 'declared bo' }, token: t.ada });
     assert.equal(relayed.status, 201);
     h = await api(srv.baseUrl, 'GET', '/api/health');

@@ -553,7 +553,7 @@ function readBody(req, maxBytes = MAX_BODY_BYTES) {
             if (asserted !== parsed) {
               // #1413 B — a FILL (no actor field) is silent; only a non-empty
               // declared actor that differs from the seat is a mismatch.
-              if (asserted.onBehalfOf) authStats.mismatched++;
+              if (asserted.onBehalfOf && asserted.onBehalfOf !== parsed.onBehalfOf) authStats.mismatched++;   // the assertion's own onBehalfOf, not one the body carried
               if (req.auth.enforced) { req._rawBody = JSON.stringify(asserted); return resolve(req._rawBody); }
             }
           } catch { /* not JSON: the handler refuses it */ }
