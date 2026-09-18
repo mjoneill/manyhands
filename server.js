@@ -85,6 +85,7 @@ import { writeSnapshot, readSnapshot, sweepSnapshotTemps, snapshotPaths } from '
 import { staleClaims, STALE_CLAIM_HOURS } from './core/stale-claims.mjs';   // #455
 import { readStoreMeter, meterLine, meterCeilings } from './core/store-meter.mjs';   // #1386
 import { roleShortening, roleExpiryRows } from './core/role-expiry.mjs';   // #1400
+import { loadCredentials, resolveBearer, authDecision, needFor, assertActor, credentialExpiryRows, readAuthMode } from './core/credentials.mjs';   // #1343
 // #683 — the deafness cure's server half. REST owns the event log, so it owns
 // the cursors that index it; mcp-server asks over HTTP rather than learning a
 // path it has no business knowing (#767).
@@ -107,6 +108,34 @@ const ALLOWED_HOSTS = parseAllowedHosts(process.env.SCRUM_ALLOWED_HOSTS);
 let BOUND_PORT = PORT;
 const PROJECT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const BOARD_DATA_FILE = process.env.SCRUM_BOARD_FILE || path.join(PROJECT_DIR, 'board-data.json');
+
+// #1343 — seat credentials. Env-var-else-BESIDE-THE-BOARD: the file the MCP
+// adapter reads (SCRUM_SEAT_TOKENS) is this one; with no env it is the board
+// file's sibling, which is where the deployment keeps it. Absent = DORMANT.
+// The mode is per PROCESS, read once at boot, and a misspelling THROWS here
+// rather than running open (core/credentials.mjs readAuthMode).
+const SEAT_TOKENS_PATH = process.env.SCRUM_SEAT_TOKENS || path.join(path.dirname(BOARD_DATA_FILE), 'seat-tokens.json');
+const AUTH_MODE = readAuthMode(process.env.SCRUM_AUTH);
+const authStats = { refused: 0, unknownBearers: 0, expiredBearers: 0, mismatched: 0 };
+let _creds = null, _credsMtime = -1, _credsCheckedAt = 0;
+/**
+ * The credential file, re-read when its mtime changes (checked at most every
+ * 2 s): a mint or a revoke by scripts/credential.mjs is live at the next
+ * request with no restart, which is what rotation-with-overlap needs.
+ */
+function seatCredentials() {
+  const now = Date.now();
+  if (_creds && now - _credsCheckedAt < 2000) return _creds;
+  _credsCheckedAt = now;
+  let mtime = -1;
+  try { mtime = fs.statSync(SEAT_TOKENS_PATH).mtimeMs; } catch { /* absent → dormant */ }
+  if (!_creds || mtime !== _credsMtime) {
+    _credsMtime = mtime;
+    _creds = loadCredentials(SEAT_TOKENS_PATH);
+    if (!_creds.dormant) console.log(`[#1343] credentials ${AUTH_MODE}: ${_creds.byHash.size} credential(s) for ${[..._creds.seats.keys()].join(', ')}${_creds.legacy.length ? ` (PLAINTEXT rows for ${_creds.legacy.join(', ')} — migrate)` : ''}`);
+  }
+  return _creds;
+}
 // #1259 — a process can prove WHICH process is answering. The test harness
 // mints a nonce per spawn and its readiness poll accepts only a response that
 // carries it back, so a stranger already listening on a port we were handed
@@ -510,6 +539,23 @@ function readBody(req, maxBytes = MAX_BODY_BYTES) {
         // remembered and silently absent everywhere else, which is how a rail
         // becomes decoration.
         req._rawBody = raw;
+        // #1343 — the ONE place a body is read is the one place the actor is
+        // asserted. A bound seat whose body declares someone else is COUNTED
+        // in every mode (the #703 Q3 mismatch, now where the room looks) and,
+        // in `required`, REWRITTEN: the credential's seat becomes `by`/`author`
+        // and the declared one is kept as `onBehalfOf` — the relay recorded,
+        // never refused (#125 4b). A body that is not JSON is left for the
+        // handler's own 400.
+        if (req.auth?.seat && raw) {
+          try {
+            const parsed = JSON.parse(raw);
+            const asserted = assertActor(parsed, req.auth.seat);
+            if (asserted !== parsed) {
+              authStats.mismatched++;
+              if (req.auth.enforced) { req._rawBody = JSON.stringify(asserted); return resolve(req._rawBody); }
+            }
+          } catch { /* not JSON: the handler refuses it */ }
+        }
         resolve(raw);
       }
     });
@@ -538,6 +584,7 @@ const SECRET_SHAPES = [
   [/\bgh[pousr]_[A-Za-z0-9]{16,}/g, 'gh_[REDACTED]'],               // GitHub
   [/\bxox[baprs]-[A-Za-z0-9-]{10,}/g, 'xox-[REDACTED]'],            // Slack
   [/\bAKIA[0-9A-Z]{16}\b/g, 'AKIA[REDACTED]'],                      // AWS key id
+  [/\bmh_[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])/g, 'mh_[REDACTED]'],     // #1343 — this board's own seat credentials (core/credentials.mjs TOKEN_SHAPE)
   [/\bey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, '[REDACTED-JWT]'],
   [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '[REDACTED-PRIVATE-KEY]'],
 ];
@@ -5661,6 +5708,15 @@ const STANDING_CHECKS = [
     }),
   },
   {
+    // #1343 — a credential within 72 h of lapsing is said before it bites
+    // (`expiring`); one that lapsed in the last 7 days and was never revoked
+    // is a seat that went silent by accident (`expired`). Revoked = retired,
+    // no row. Rows name seat + note, never a hash.
+    id: 'credential-expiry',
+    claim: 'no seat credential is within 72 h of expiry unannounced, and none lapsed in the last 7 days without being revoked on purpose (#1343)',
+    run: () => credentialExpiryRows({ credentials: seatCredentials(), now: new Date().toISOString() }),
+  },
+  {
     // #1386 — the store meter: rows are CROSSED ceilings only, so the daily
     // digest says "storeMB 1601 > 1536" the day it happens and nothing on
     // the days it does not. The raw readings ride /api/checks as `storeMeter`
@@ -5818,11 +5874,16 @@ function handleHealth(req, res) {
     _healthWarmKicked = true;
     warmGraphStore().catch((e) => { _healthWarmKicked = false; console.error(`${new Date().toISOString()} /api/health: warm kick failed (${e?.message || e})`); });
   }
+  const creds = seatCredentials();
   sendJSON(res, 200, {
     ok: true,
     pid: process.pid,
     uptimeMs: Math.round(process.uptime() * 1000),
     now: new Date().toISOString(),
+    // #1343 — which auth mode is LIVE is a fact read here, not a belief about
+    // the plist. Counts, never values: credentials held, seats named, rows
+    // still in #703 plaintext, and what this process has refused or counted.
+    auth: { mode: AUTH_MODE, credentials: creds.byHash.size, seats: [...creds.seats.keys()], legacy: creds.legacy, ...authStats },
     // `ready` = the replica's FIRST SYNC COMPLETED. Not `_graphStore != null`:
     // the cold path creates an EMPTY store first and fills it in the sync that
     // follows, so the store existed 4 s before it held a triple (measured on a
@@ -9882,6 +9943,22 @@ function handleRequest(req, res) {
       return sendJSON(res, 413, { error: 'Request body too large' });
     }
   }
+
+  // #1343 — THE CREDENTIAL DOOR, for every path below the host guard: API,
+  // legacy endpoints, static pages alike (the UI is board content; there is
+  // no anonymous side door). `observe` never refuses — it binds the known and
+  // counts the rest; `required` refuses with a status, a code and a sentence
+  // naming the seat when it can. /api/health needs nothing in either mode: a
+  // liveness probe carries no board content and a proxy must reach it blind.
+  const binding = resolveBearer(req.headers.authorization, seatCredentials());
+  if (binding && !binding.seat) { authStats.unknownBearers++; if (binding.reason === 'expired') authStats.expiredBearers++; }
+  const decision = authDecision({ binding, mode: AUTH_MODE, need: needFor(method, urlPath) });
+  if (!decision.ok) {
+    authStats.refused++;
+    req.resume();
+    return sendJSON(res, decision.status, { error: decision.error, code: decision.code });
+  }
+  req.auth = decision;   // { seat, scope, enforced } — never the header
 
   // Granular API (#90) — regex router
   if (routeApi(method, urlPath, req, res)) return;

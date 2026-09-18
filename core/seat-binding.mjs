@@ -1,6 +1,11 @@
 /**
  * core/seat-binding.mjs — #703: connection identity, from a token file.
  *
+ * ⚠️ SUCCEEDED by core/credentials.mjs (#1343, 2026-09-18): both servers now
+ * load the file through `loadCredentials` (hashes at rest, scope, expiry,
+ * revocation, SCRUM_AUTH mode). This module's plaintext loader is kept for
+ * its tests and DEFAULT_HEARTBEAT_S; the design notes below still hold.
+ *
  * Room-vetted design (unanimous, 2026-08-05): per-seat bearer tokens in each
  * MCP client's config bind connections to seats at the door. FAIL-OPEN by
  * ruling — "fail-closed is right when a control PREVENTS; fail-open when it

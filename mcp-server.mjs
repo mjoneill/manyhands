@@ -38,7 +38,10 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { loadRoster } from './core/roster-config.mjs';
 import { configureIdentities } from './core/identity.mjs';
-import { loadSeatTokens, bindFromAuthHeader, DEFAULT_HEARTBEAT_S } from './core/seat-binding.mjs';
+import { DEFAULT_HEARTBEAT_S } from './core/seat-binding.mjs';
+import { loadCredentials, resolveBearer, authDecision, readAuthMode } from './core/credentials.mjs';   // #1343 — succeeds #703's loader: hashes at rest, scope, expiry, mode
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { statSync as fsStatSync, readFileSync as fsReadFileSync } from 'node:fs';
 
 // The same roster the board serves — read once at boot from the optional,
 // gitignored roster.json. Falls back to the shipped example when absent.
@@ -307,7 +310,7 @@ async function apiCall(method, path, body, { signal } = {}) {
   try {
     res = await fetch(url, {
       method,
-      headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
+      headers: { ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...bearerHeaders() },   // #1343 — the session's credential rides along
       body: body !== undefined ? JSON.stringify(body) : undefined,
       signal,   // #1388 — a caller with a deadline passes it; the checks tick does
     });
@@ -338,7 +341,7 @@ async function claimApiCall(method, path, body) {
   try {
     res = await fetch(url, {
       method,
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...bearerHeaders() },   // #1343
       body: JSON.stringify(body),
     });
   } catch (e) {
@@ -2248,8 +2251,44 @@ function recordStaleSession(sid, seat = null) {
 // tree in the launchd plist; the repo-relative default serves the harness.
 const SEAT_TOKENS_PATH = process.env.SCRUM_SEAT_TOKENS
   || new URL('./seat-tokens.json', import.meta.url).pathname;
-const seatTokens = loadSeatTokens(SEAT_TOKENS_PATH);
-if (!seatTokens.dormant) console.log(`[#703] seat binding ACTIVE: ${seatTokens.byToken.size} token(s) from ${SEAT_TOKENS_PATH}`);
+// #1343 — the credential file is re-read when its mtime changes (checked at
+// most every 2 s), so a mint or revoke by scripts/credential.mjs is live at the
+// next request. `seatTokens` keeps its name and its `.dormant` for the
+// instruments that read it; `.byToken` is gone — the file holds hashes now.
+const AUTH_MODE = readAuthMode(process.env.SCRUM_AUTH);
+let _creds = null, _credsMtime = -1, _credsCheckedAt = 0;
+function seatCredentials() {
+  const now = Date.now();
+  if (_creds && now - _credsCheckedAt < 2000) return _creds;
+  _credsCheckedAt = now;
+  let mtime = -1;
+  try { mtime = fsStatSync(SEAT_TOKENS_PATH).mtimeMs; } catch { /* absent → dormant */ }
+  if (!_creds || mtime !== _credsMtime) {
+    _credsMtime = mtime;
+    _creds = loadCredentials(SEAT_TOKENS_PATH);
+    if (!_creds.dormant) console.log(`[#703/#1343] seat binding ACTIVE (${AUTH_MODE}): ${_creds.byHash.size} credential(s) for ${[..._creds.seats.keys()].join(', ')} from ${SEAT_TOKENS_PATH}`);
+  }
+  return _creds;
+}
+const seatTokens = { get dormant() { return seatCredentials().dormant; } };
+const authStats = { refused: 0, unknownBearers: 0 };
+// #1343 — the bearer a request arrived with, carried through the SDK's dispatch
+// so a tool call's REST request presents the SAME credential (inherited, never
+// re-declared). Memory only, per request; nothing here is logged.
+const requestAuth = new AsyncLocalStorage();
+// A process-level fallback for calls no session made (the checks tick, the
+// wake pipeline, refusal records): a 0600 file named by env, read at boot —
+// the residents' mechanism (scheme Hole A), reused. Absent → those calls go
+// bare, which `observe` admits and `required` refuses loudly per call.
+const SERVICE_BEARER = (() => {
+  const f = process.env.SCRUM_SEAT_TOKEN_FILE;
+  if (!f) return null;
+  try { return fsReadFileSync(f, 'utf8').trim() || null; } catch (e) { console.error(`[#1343] SCRUM_SEAT_TOKEN_FILE unreadable (${e.code || e.message}) — this process's own REST calls will be refused in required mode`); return null; }
+})();
+function bearerHeaders() {
+  const b = requestAuth.getStore()?.bearer || SERVICE_BEARER;
+  return b ? { Authorization: `Bearer ${b}` } : {};
+}
 
 // Heartbeats: a per-stream server-initiated notification on the seat's own
 // cadence. The method is one clients silently DROP (unknown JSON-RPC method) —
@@ -3316,7 +3355,7 @@ const httpServer = http.createServer(async (req, res) => {
     // from "MCP is down/crashed" without trying a full handshake.
     if (req.url === '/health' && req.method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json', ...(INSTANCE_ID ? { 'X-Scrum-Instance': INSTANCE_ID } : {}) });
-      return res.end(JSON.stringify({ ok: true, sessions: transports.size }));
+      return res.end(JSON.stringify({ ok: true, sessions: transports.size, auth: { mode: AUTH_MODE, credentials: seatCredentials().byHash.size, ...authStats } }));   // #1343 — which mode is LIVE
     }
 
     // #303-7 — delivery observability. Reports how many channel deliveries are
@@ -3525,7 +3564,21 @@ const httpServer = http.createServer(async (req, res) => {
     // header on EVERY request (a client may gain its token mid-life). Fail-open:
     // unbound and unknown-token connections are admitted; unknown tokens log
     // loudly because they are config drift wearing a working connection.
-    const binding = bindFromAuthHeader(req.headers.authorization, seatTokens);
+    const resolved = resolveBearer(req.headers.authorization, seatCredentials());
+    // #1343 — the same shape #703's callers below read: `unknownToken` covers
+    // every bearer we hold no live credential for (unknown, expired, revoked).
+    const binding = resolved && !resolved.seat ? { seat: null, unknownToken: true, reason: resolved.reason, seatHint: resolved.seatHint } : resolved;
+    if (binding?.unknownToken) authStats.unknownBearers++;
+    // #1343 — THE DOOR. `observe` admits everything (below, unchanged);
+    // `required` refuses a session that presents no live credential, with the
+    // reason in the JSON-RPC error. Identity is settled here; SCOPE is REST's
+    // (the credential rides every tool call's REST request, see bearerHeaders).
+    const decision = authDecision({ binding: resolved, mode: AUTH_MODE, need: 'read' });
+    if (!decision.ok) {
+      authStats.refused++;
+      console.error(`[#1343] REFUSED sid=${sessionId ?? '(new session)'}: ${decision.code}${resolved?.seatHint ? ` seat=${resolved.seatHint}` : ''}`);
+      return jsonRpcError(res, decision.status, -32001, `${decision.code}: ${decision.error}`);
+    }
     // #707 — NOT gated on sessionId. An `initialize` carries no mcp-session-id
     // (there is no session yet), so gating here silenced the warning on exactly
     // the request where a stale token is FIRST presented. A client that connects
@@ -3756,7 +3809,9 @@ const httpServer = http.createServer(async (req, res) => {
       }
     }
 
-    await transport.handleRequest(req, res, body);
+    // #1343 — the request's bearer travels with the SDK's dispatch (memory only)
+    const m0 = req.headers.authorization?.match(/^\s*Bearer\s+(\S+)\s*$/i);
+    await requestAuth.run({ bearer: m0 ? m0[1] : null, seat: binding?.seat ?? null }, () => transport.handleRequest(req, res, body));
   } catch (err) {
     // Catch-all for any error in request handling — never crash the process.
     console.error(`Unhandled error in request handler: ${err.message}`);
