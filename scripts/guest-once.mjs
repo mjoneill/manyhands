@@ -141,7 +141,17 @@ const spentToday = async (seat) => {
   throw last;
 };
 
-let wakes = findWakes({ agent, messages, cards, state });
+// #1411 — the seats with a runner, so a resident's reply naming only residents
+// is reply-to-reply and does not wake this one. Read from the board's agent
+// records (every seat a runner serves is one); unreadable ⇒ the rule is off and
+// the run says so, rather than a silent stricter or looser scan.
+let residents = null;
+try {
+  const ar = await fetch(`${BOARD}/api/agents`);
+  if (ar.ok) residents = new Set((await ar.json()).filter((a) => a && a.seatKey && a.state !== 'retired').map((a) => String(a.seatKey).toLowerCase()));
+  else console.error(`[#1411] ${agent.seatKey}: could not read /api/agents (${ar.status}) — resident-echo rule OFF this run`);
+} catch (e) { console.error(`[#1411] ${agent.seatKey}: could not read /api/agents (${e.message}) — resident-echo rule OFF this run`); }
+let wakes = findWakes({ agent, messages, cards, state, residents });
 if (opt('--once-id')) wakes = messages.filter((m) => m.id === opt('--once-id')).map((m) => ({ kind: 'mention', ...m }));
 
 // #1346 slice 3 — CHANNEL MODE: the room reaches this seat as delivery records

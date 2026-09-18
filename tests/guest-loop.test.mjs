@@ -50,6 +50,23 @@ const NAMED = [
   { id: 'n6', author: 'ada', body: 'a row from before the field existed: @guest hi', createdAt: '2026-09-18T00:10:00Z' },
   { id: 'n7', author: 'ada', body: 'text says @guest but the board resolved nobody', mentions: [], createdAt: '2026-09-18T00:10:30Z' },
 ];
+// #1411 — residents do not wake residents by mention. The loop: A names B →
+// B wakes, names A → A wakes … (four rounds in four minutes, 2026-09-18).
+const RES = new Set(['guest', 'bubbles']);
+const CHAIN = [
+  { id: 'c1', author: 'ada',     body: '@sausage what was it like?',            mentions: ['guest'],            createdAt: '2026-09-18T00:40:00Z' },   // a human ⇒ wakes
+  { id: 'c2', author: 'bubbles', body: '@sausage just so nobody has to guess…', mentions: ['guest'],            createdAt: '2026-09-18T00:41:50Z' },   // resident → resident only ⇒ no wake
+  { id: 'c3', author: 'bubbles', body: '@sausage @ada — both of you',           mentions: ['guest', 'ada'],     createdAt: '2026-09-18T00:42:00Z' },   // a resident addressing a human too ⇒ wakes
+  { id: 'c4', author: 'cy',      body: '@sausage from a terminal seat',          mentions: ['guest'],            createdAt: '2026-09-18T00:43:00Z' },   // terminal seat ⇒ wakes
+  { id: 'c5', author: 'bubbles', body: '@sausage @bubbles we are separate',     mentions: ['guest', 'bubbles'], createdAt: '2026-09-18T00:44:04Z' },   // residents only ⇒ no wake
+];
+test('#1411 a resident-authored post whose mentions are all residents does not wake (reply-to-reply); humans, terminal seats, and a resident addressing a human still do', () => {
+  assert.deepEqual(findMentions(CHAIN, 'guest', { residents: RES }).map((m) => m.id), ['c1', 'c3', 'c4'],
+    'c2 and c5 are resident→resident only; c3 names a human too');
+  assert.deepEqual(findMentions(CHAIN, 'guest').map((m) => m.id), ['c1', 'c2', 'c3', 'c4', 'c5'],
+    'control: with no resident set handed in, the rule is off and every mention wakes');
+});
+
 test('#1410 findMentions trusts the board\'s resolved `mentions` — a seat addressed by her display NAME wakes; the key regex is only the fallback for rows without the field', () => {
   assert.deepEqual(findMentions(NAMED, 'guest').map((m) => m.id), ['n1', 'n2', 'n6'],
     'n1/n2: named, resolved by the board ⇒ wake · n3: nobody · n4: own post · n5: board notice · n6: pre-field row, regex fallback · n7: the board says nobody, the text is not re-parsed');

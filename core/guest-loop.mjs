@@ -75,8 +75,25 @@ export function ledgerFilePath() {
 
 /** Pure. Commons messages that @-mention the seat and were not written by it. */
 export const SYSTEM_AUTHOR = 'board';
-export function findMentions(messages = [], seatKey, { sinceId = null, since = null } = {}) {
+export function findMentions(messages = [], seatKey, { sinceId = null, since = null, residents = null } = {}) {
   if (!seatKey) return [];
+  // #1411 — RESIDENTS DO NOT WAKE RESIDENTS BY MENTION. The moment names became
+  // wakes (#1410) two residents looped four rounds in four minutes, each reply
+  // at-signing the other; nothing inside a turn could see the loop, and no
+  // step in it was wrong. Rule: a post AUTHORED by a resident whose mentions
+  // are ALL residents is reply-to-reply and does not wake — a human or a
+  // terminal seat naming a resident still does, and a resident's post that
+  // also names a human still does (that post is addressed outward). `residents`
+  // is the set of seat keys with a runner (the agent records); when the caller
+  // hands none, the rule is off and every mention wakes as before.
+  const res = residents instanceof Set ? residents : (Array.isArray(residents) ? new Set(residents) : null);
+  const residentEcho = (m) => {
+    if (!res || !res.size) return false;
+    if (!res.has(String(m.author || '').toLowerCase())) return false;
+    const ms = Array.isArray(m.mentions) ? m.mentions.map((k) => String(k).toLowerCase()) : null;
+    if (!ms || !ms.length) return false;
+    return ms.every((k) => res.has(k));
+  };
   const re = new RegExp(`(^|[^A-Za-z0-9_])@${seatKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z0-9_])`, 'i');
   // #1410 — THE BOARD ALREADY RESOLVED THE MENTION; READ IT, DON'T RE-PARSE.
   // `POST /api/conversations` records `mentions: [<seat key>…]` with display
@@ -97,6 +114,7 @@ export function findMentions(messages = [], seatKey, { sinceId = null, since = n
     // card whose title named the seat woke it and it echoed the notice back.
     && String(m.author || '').toLowerCase() !== SYSTEM_AUTHOR
     && mentioned(m)
+    && !residentEcho(m)   // #1411
     && (!since || (typeof m.createdAt === 'string' && m.createdAt > since)));
   if (!sinceId) return rows;
   const i = rows.findIndex((m) => m.id === sinceId);
@@ -303,11 +321,11 @@ function wakeIntro(wake) {
  * Returns wakes in priority order: mention, assignment, schedule. ONE is taken
  * per run; the rest wait for the next.
  */
-export function findWakes({ agent, messages = [], cards = [], state = {}, now = new Date().toISOString() }) {
+export function findWakes({ agent, messages = [], cards = [], state = {}, now = new Date().toISOString(), residents = null }) {
   const on = effectiveWakeOn(agent);   // #1346 — channel mode keeps only assignment
   const out = [];
   if (on.includes('mention')) {
-    for (const m of findMentions(messages, agent.seatKey, { sinceId: state.lastAnsweredId ?? null })) out.push({ kind: 'mention', ...m });
+    for (const m of findMentions(messages, agent.seatKey, { sinceId: state.lastAnsweredId ?? null, residents })) out.push({ kind: 'mention', ...m });   // #1411 — residents handed in
   }
   if (on.includes('assignment')) {
     const seen = new Set(state.assignmentsSeen || []);
