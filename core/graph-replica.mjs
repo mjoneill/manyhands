@@ -128,6 +128,9 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:assignee', 'scrum:blockedByAnyHuman', 'scrum:derivedFrom',
   'scrum:ofCard', 'scrum:blockedBy', 'scrum:expect', 'scrum:ask', 'scrum:claim',
   'scrum:hasCheck', 'scrum:supersededBy', 'scrum:supersedes',
+  // #1322 — a decision recorded twice: the twin points at the original.
+  // `scrum:supersedes` above is reused for decision → decision amendments.
+  'scrum:duplicateOf',
   'scrum:blockedByCard', 'scrum:parkedReason', 'scrum:parkedUntil',
   'scrum:parkedBy',
   // #1110 — seat declarations as intervals (projected from seat-state events)
@@ -424,6 +427,11 @@ export function projectActivities(store, events) {
     // the document to the SAME IRI, and triples are a set, so the two sources
     // cannot double a node. Immutable, so only `create` carries state.
     if (ent.kind === 'decision' && ev.op === 'create' && ev.state && ev.state['@id']) projectDecision(store, ev.state);
+    // #1322 — an UPDATE event on a decision is a new assertion ABOUT it
+    // (supersedes / duplicateOf), never an edit of it: its state is only the
+    // decision's @id plus the edge(s), and triples are a set, so projecting it
+    // through the same function adds the edge and nothing else.
+    if (ent.kind === 'decision' && ev.op === 'update' && ev.state && ev.state['@id']) projectDecision(store, ev.state);
     // #971 slice 2 — a memory BORN IN THE LOG. The event's state carries the
     // whole memory: `{identity, versions}`. A create projects both halves; an
     // update DROPS the identity subject's triples and re-projects from state
@@ -904,6 +912,7 @@ export const MEMORY_PREDICATES = Object.freeze({
 //
 // ⇒ So the clever loop defeats the rail that exists to catch exactly this. The
 // explicit form costs six lines and makes the guard real for this type.
+const DECISION_BASE = 'https://scrumboard.local/decision/';   // #1322 — matches server.js DECISION_ID
 function projectDecision(store, e) {
   const add_ = (p, o) => store.add(oxigraph.triple(nn(e['@id']), p, o));
   const S = IRI.scrum, SC = IRI.schema, P = IRI.person;
@@ -919,6 +928,15 @@ function projectDecision(store, e) {
   for (const t of [].concat(e['scrum:constrains'] || [])) add_(nn(S + 'constrains'), lit(String(t)));
   if (e['scrum:reopensIf']) add_(nn(S + 'reopensIf'), lit(e['scrum:reopensIf']));
   if (e.dateCreated) add_(nn(SC + 'dateCreated'), lit(e.dateCreated));
+  // #1322 — decision → decision EDGES, the way cards carry supersedes: a
+  // later ruling amends (supersedes) or repeats (duplicateOf) an earlier one,
+  // and the earlier one is never edited — the marking is this new node's.
+  // ⚠️ NOT an IRI-table entry: the table's prefixes are what query results
+  // compact by, and a `decision:` prefix turned every ?d into `decision:<id>`
+  // — resolveNodeId then matched nothing (the #1147 obligation test went red).
+  const D = DECISION_BASE;
+  for (const t of [].concat(e['scrum:supersedes'] || [])) add_(nn(S + 'supersedes'), nn(String(t).startsWith('http') ? String(t) : D + t));
+  if (e['scrum:duplicateOf']) { const t = String(e['scrum:duplicateOf']); add_(nn(S + 'duplicateOf'), nn(t.startsWith('http') ? t : D + t)); }
 }
 
 /**

@@ -5320,7 +5320,7 @@ const decisionEvent = (op, d, actor = null) => ({
 });
 
 function decisionToWire(e) {
-  return {
+  const w = {
     id: e.identifier,
     statement: e['scrum:statement'],
     decidedBy: e['scrum:decidedBy'],
@@ -5328,6 +5328,51 @@ function decisionToWire(e) {
     reopensIf: e['scrum:reopensIf'],
     decidedAt: e.dateCreated,
   };
+  // #1322 — relations only when present (a decision that amends nothing reads
+  // as it always did); `live` on every row, because "which rulings are live"
+  // is the one question the list exists to answer without prose archaeology.
+  const sup = [].concat(e['scrum:supersedes'] || []);
+  if (sup.length) w.supersedes = sup;
+  if (e['scrum:duplicateOf']) w.duplicateOf = e['scrum:duplicateOf'];
+  if (e._supersededBy?.length) w.supersededBy = e._supersededBy;
+  if (e._duplicates?.length) w.duplicates = e._duplicates;
+  w.live = !(e['scrum:duplicateOf'] || e._supersededBy?.length);
+  return w;
+}
+
+// #1322 — the inverse edges and liveness, computed over the whole set once:
+// a ruling is LIVE unless something supersedes it or it is a duplicate.
+function annotateDecisionRelations(list) {
+  const byId = new Map(list.map((e) => [e.identifier, e]));
+  for (const e of list) { e._supersededBy = []; e._duplicates = []; }
+  for (const e of list) {
+    for (const t of [].concat(e['scrum:supersedes'] || [])) byId.get(t)?._supersededBy.push(e.identifier);
+    if (e['scrum:duplicateOf']) byId.get(e['scrum:duplicateOf'])?._duplicates.push(e.identifier);
+  }
+  return list;
+}
+
+// #1322 — THE TWIN RAIL. Two seats recorded one ruling 35 s apart (09-08) and
+// 5 s apart (09-18); each time the writer had run no decision_list, and the
+// only tool for marking the twin afterwards was prose in a third decision. A
+// person rules once: the same decider recorded twice inside this window with
+// NO relation named is refused, naming the sibling(s), until the writer says
+// which it is — a duplicate, an amendment, or (force) a distinct ruling.
+const DECISION_TWIN_WINDOW_MS = 10 * 60_000;
+function decisionTwins(existing, decidedBy, nowMs) {
+  const who = String(decidedBy).trim().toLowerCase();
+  return existing.filter((e) => String(e['scrum:decidedBy'] || '').trim().toLowerCase() === who
+    && Number.isFinite(Date.parse(e.dateCreated)) && nowMs - Date.parse(e.dateCreated) < DECISION_TWIN_WINDOW_MS
+    && nowMs - Date.parse(e.dateCreated) >= 0);
+}
+/** A decision id, or a prefix of at least 8 chars, resolved against the live set. Throws with a reason. */
+function resolveDecisionRef(existing, ref) {
+  const r = String(ref || '').trim();
+  if (r.length < 8) throw new Error(`"${r}" is too short to name a decision — give at least 8 characters of its id`);
+  const hits = existing.filter((e) => e.identifier === r || String(e.identifier).startsWith(r));
+  if (hits.length === 0) throw new Error(`no decision matches "${r}"`);
+  if (hits.length > 1) throw new Error(`"${r}" names ${hits.length} decisions — give more of the id`);
+  return hits[0].identifier;
 }
 
 /** @returns {string|null} an error message, or null if the payload is sound. */
@@ -5359,6 +5404,28 @@ async function handleCreateDecision(req, res) {
     const body = JSON.parse(await readBody(req));
     const err = validateDecision(body);
     if (err) return sendJSON(res, 400, { error: err });
+    // #1322 — relations resolve against the LIVE set (the graph), and the
+    // twin rail reads the same set. Read once, before the lock: a rail, not a
+    // lock — two twins racing each other inside the same second is a smaller
+    // problem than the one this closes.
+    const existing = await liveDecisions();
+    let supersedes = [], duplicateOf = null;
+    try {
+      for (const ref of [].concat(body.supersedes ?? [])) supersedes.push(resolveDecisionRef(existing, ref));
+      if (body.duplicateOf != null && body.duplicateOf !== '') duplicateOf = resolveDecisionRef(existing, body.duplicateOf);
+    } catch (e) { return sendJSON(res, 400, { error: e.message, code: 'DECISION_REF' }); }
+    supersedes = [...new Set(supersedes)];
+    if (!supersedes.length && !duplicateOf && body.force !== true) {
+      const twins = decisionTwins(existing, body.decidedBy || body.by, Date.now());
+      if (twins.length) {
+        return sendJSON(res, 409, {
+          code: 'DECISION_TWIN',
+          error: `${body.decidedBy || body.by} already has ${twins.length} decision(s) recorded in the last ${DECISION_TWIN_WINDOW_MS / 60_000} minutes — a person rules once. `
+            + 'If this is the SAME ruling pass duplicateOf: <id>; if it AMENDS one pass supersedes: [<id>]; if it is genuinely a distinct ruling pass force: true.',
+          siblings: twins.map((e) => ({ id: e.identifier, decidedAt: e.dateCreated, statement: String(e['scrum:statement'] || '').slice(0, 160) })),
+        });
+      }
+    }
     const created = await withWriteLock(async () => {
       const data = readBoard();
       const id = crypto.randomUUID();
@@ -5371,6 +5438,8 @@ async function handleCreateDecision(req, res) {
         'scrum:reopensIf': String(body.reopensIf),
         dateCreated: new Date().toISOString(),
       };
+      if (supersedes.length) entity['scrum:supersedes'] = supersedes;   // #1322 — decision → decision edges
+      if (duplicateOf) entity['scrum:duplicateOf'] = duplicateOf;
       // #1147 — BORN IN THE GRAPH: the event is the write. No document row;
       // the replica projects the decision from this event (graph-replica
       // projectActivities), and every reader asks the graph. The document
@@ -5381,6 +5450,43 @@ async function handleCreateDecision(req, res) {
     sendJSON(res, 201, created);
   } catch (e) {
     console.error('POST /api/decisions:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+
+// #1322 — mark an EXISTING decision as superseding, or a duplicate of,
+// another: a new assertion about it (an `update` event carrying ONLY the edge; the statement is untouched),
+// for the twins that were recorded before the rail existed and for the case
+// where the relation is only seen afterwards. Projected by the replica as
+// the same edge a create-time relation gets.
+async function handleRelateDecision(req, res, ref) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const by = body.by;
+    if (typeof by !== 'string' || !by.trim()) return sendJSON(res, 400, { error: 'by is required — a relation nobody asserted cannot be weighed' });
+    const existing = await liveDecisions();
+    let id, supersedes = [], duplicateOf = null;
+    try {
+      id = resolveDecisionRef(existing, ref);
+      for (const r of [].concat(body.supersedes ?? [])) supersedes.push(resolveDecisionRef(existing, r));
+      if (body.duplicateOf != null && body.duplicateOf !== '') duplicateOf = resolveDecisionRef(existing, body.duplicateOf);
+    } catch (e) { return sendJSON(res, 400, { error: e.message, code: 'DECISION_REF' }); }
+    supersedes = [...new Set(supersedes)].filter((t) => t !== id);
+    if (duplicateOf === id) duplicateOf = null;
+    if (!supersedes.length && !duplicateOf) return sendJSON(res, 400, { error: 'name a relation: supersedes: [<id>] and/or duplicateOf: <id>' });
+    const created = await withWriteLock(async () => {
+      const data = readBoard();
+      const state = { '@id': DECISION_ID(id), '@type': 'scrum:Decision', identifier: id };
+      if (supersedes.length) state['scrum:supersedes'] = supersedes;
+      if (duplicateOf) state['scrum:duplicateOf'] = duplicateOf;
+      // op `update`: the vocabulary is fixed (core/event-log.mjs EVENT_OPS) and this is the
+      // ONE update a decision takes — an added edge, never a changed word.
+      writeBoard(data, [decisionEvent('update', state, by)]);
+      return { id, supersedes, duplicateOf, by };
+    });
+    sendJSON(res, 201, created);
+  } catch (e) {
+    console.error('POST /api/decisions/:id/relations:', e.message);
     sendJSON(res, 500, { error: e.message });
   }
 }
@@ -5410,13 +5516,15 @@ function decisionsFromRows(rows, { limit } = {}) {
     else if (p === 'constrains') n['scrum:constrains'].push(o);
     else if (p === 'reopensIf') n['scrum:reopensIf'] = o;
     else if (p === 'dateCreated') n.dateCreated = o;
+    else if (p === 'supersedes') (n['scrum:supersedes'] ??= []).push(local(o));   // #1322
+    else if (p === 'duplicateOf') n['scrum:duplicateOf'] = local(o);
   }
   // A graph is a SET: the order topics were typed in is not a fact it keeps.
   // Sorted, so the wire order is deterministic and documented rather than
   // whichever order the engine returned rows in. (The one property the
   // document path had that this path does not; recorded on #1147.)
-  for (const n of nodes.values()) n['scrum:constrains'].sort();
-  return [...nodes.values()].sort((a, b) => String(a.dateCreated || '').localeCompare(String(b.dateCreated || '')));
+  for (const n of nodes.values()) { n['scrum:constrains'].sort(); if (n['scrum:supersedes']) n['scrum:supersedes'].sort(); }
+  return annotateDecisionRelations([...nodes.values()].sort((a, b) => String(a.dateCreated || '').localeCompare(String(b.dateCreated || ''))));
 }
 async function liveDecisions() {
   const { queryGraphAll } = await loadGraphModules();
@@ -5440,6 +5548,7 @@ async function handleListDecisions(req, res) {
   // stops asking.
   if (q.constrains) out = out.filter((d) => d.constrains.includes(q.constrains));
   if (q.decidedBy) out = out.filter((d) => d.decidedBy === q.decidedBy);
+  if (q.live === '1' || q.live === 'true') out = out.filter((d) => d.live);   // #1322 — the rulings still in force
   sendJSON(res, 200, out);
 }
 
@@ -9649,6 +9758,7 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/kinds$/,                fn: (req, res) => handleRegisterKind(req, res) },
   { method: 'POST',   re: /^\/api\/assert$/,               fn: (req, res) => handleAssert(req, res) },
   { method: 'POST',   re: /^\/api\/decisions$/,            fn: (req, res) => handleCreateDecision(req, res) },
+  { method: 'POST',   re: /^\/api\/decisions\/([^\/]+)\/relations$/, fn: (req, res, m) => handleRelateDecision(req, res, m[1]) },   // #1322
   { method: 'GET',    re: /^\/api\/models$/,               fn: (req, res) => handleListModels(req, res) },                       // #1197
   { method: 'POST',   re: /^\/api\/models$/,               fn: (req, res) => handleCreateModel(req, res) },                      // #1197
   { method: 'PATCH',  re: /^\/api\/models\/([^\/]+)$/,      fn: (req, res, m) => handlePatchModel(req, res, decodeURIComponent(m[1])) },          // #1197

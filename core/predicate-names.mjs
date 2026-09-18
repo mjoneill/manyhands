@@ -296,6 +296,11 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:decidedBy': 'decidedBy',       // an EDGE to a person — "what has X ruled" is a traversal
   'scrum:constrains': 'constrains',     // repeatable TOPIC; the retrieval key, one triple per topic
   'scrum:reopensIf': 'reopensIf',       // ⭐ what evidence would overturn this. Required at the write path.
+  // #1322 — decision → decision EDGES, written at create (`supersedes`, `duplicateOf` on the body)
+  // or by POST /api/decisions/:id/relations afterwards. The earlier decision is never edited;
+  // the list derives supersededBy / duplicates / live from these.
+  'scrum:supersedes': 'supersedes',     // this ruling AMENDS or replaces the target
+  'scrum:duplicateOf': 'duplicateOf',   // this ruling is the SAME ruling recorded twice; the target is the original
 });
 
 /**

@@ -1719,10 +1719,37 @@ function buildMcpServer() {
           + 'constraining nothing is invisible to the only query this type exists for.'),
       reopensIf: z.string().min(1)
         .describe('REQUIRED — what evidence would overturn this? The difference between a decision and an opinion.'),
+      // #1322 — decision → decision relations, and the twin rail's three doors.
+      supersedes: z.array(z.string().min(8)).optional()
+        .describe('#1322 — decision id(s) this ruling AMENDS or replaces (8+ chars of the id is enough). The earlier '
+          + 'decision is never edited; it reads live:false with supersededBy pointing here. Use this for a re-decision, '
+          + 'never for the same ruling recorded twice — that is duplicateOf.'),
+      duplicateOf: z.string().min(8).optional()
+        .describe('#1322 — the decision this one is a DUPLICATE of: the same ruling, recorded twice (two seats, one '
+          + 'moment). Records the twin honestly instead of prose in a third decision; this one reads live:false.'),
+      force: z.boolean().optional()
+        .describe('#1322 — TWIN RAIL override. A decider recorded twice inside 10 minutes with no relation named is '
+          + 'REFUSED (409 DECISION_TWIN, naming the sibling). Pass true only when it is genuinely a second, distinct '
+          + 'ruling by the same person in the same minutes.'),
     },
   }, async (args) => {
-    const { statement, decidedBy, constrains, reopensIf } = args;
-    return jsonResult(await apiCall('POST', '/api/decisions', { statement, decidedBy, constrains, reopensIf }));
+    const { statement, decidedBy, constrains, reopensIf, supersedes, duplicateOf, force } = args;
+    return jsonResult(await apiCall('POST', '/api/decisions', { statement, decidedBy, constrains, reopensIf, supersedes, duplicateOf, force }));
+  });
+
+  mcp.registerTool('decision_relate', {
+    description: '#1322 — mark an EXISTING decision as SUPERSEDING another (a re-decision) or as a DUPLICATE OF '
+      + 'another (the same ruling recorded twice). A new assertion about it, never an edit: the statement stays; '
+      + 'the marked decision reads live:false and the list shows supersededBy / duplicateOf. Use it for twins '
+      + 'seen after the fact; at write time pass supersedes / duplicateOf to decision_create instead.',
+    inputSchema: {
+      id: z.string().min(8).describe('The decision being marked (8+ chars of its id)'),
+      by: z.string().min(1).describe('Your seat key — who asserts the relation'),
+      supersedes: z.array(z.string().min(8)).optional().describe('Decision id(s) this one amends or replaces'),
+      duplicateOf: z.string().min(8).optional().describe('The decision this one is a duplicate of'),
+    },
+  }, async ({ id, by, supersedes, duplicateOf }) => {
+    return jsonResult(await apiCall('POST', `/api/decisions/${encodeURIComponent(id)}/relations`, { by, supersedes, duplicateOf }));
   });
 
   mcp.registerTool('decision_list', {
@@ -1733,15 +1760,17 @@ function buildMcpServer() {
     inputSchema: {
       constrains: z.string().optional().describe('Only decisions constraining this topic (exact match)'),
       decidedBy: z.string().optional().describe('Only decisions made by this seat/person'),
+      live: z.boolean().optional().describe('#1322 — true: only rulings still in force (not superseded, not a duplicate). '
+        + 'Every row carries `live`; superseded ones carry `supersededBy`, twins carry `duplicateOf`.'),
     },
     // ⚠️ DESTRUCTURED, not `args.constrains`. #831's forwarding guard reads the
     // handler's parameter names to check every advertised param is actually
     // used — a handler that reaches through an `args` object is invisible to it
     // and passes while forwarding nothing. Third guard to catch me on this card,
     // and the third one I would have shipped past.
-  }, async ({ constrains, decidedBy } = {}) => {
+  }, async ({ constrains, decidedBy, live } = {}) => {
     const q = new URLSearchParams(
-      Object.entries({ constrains, decidedBy })
+      Object.entries({ constrains, decidedBy, live: live === true ? '1' : undefined })
         .filter(([, v]) => v != null && v !== '')
         .map(([k, v]) => [k, String(v)]),
     ).toString();
