@@ -3803,7 +3803,44 @@ function resolveConversation(raw, data) {
   if (raw === undefined || raw === null || raw === '' || raw === 'null') return { ok: true, value: null };
   if (typeof raw !== 'string') return { ok: false, id: String(raw) };
   const id = raw.replace('https://scrumboard.local/talk/', '');
-  return talksOf(data).some((t) => talkIdOf(t) === id) ? { ok: true, value: id } : { ok: false, id };
+  const t = talksOf(data).find((e) => talkIdOf(e) === id);
+  if (!t) return { ok: false, id };
+  // #1409 — a CLOSED talk takes no new posts: its view is read-only until a
+  // participant reopens it. Refused with its own code so the composer can say so.
+  if (t['scrum:closedAt']) return { ok: false, id, closed: true };
+  return { ok: true, value: id };
+}
+// #1409 — close / reopen a talk: a state on the tag, nothing else. Only the
+// opener or the seat it is with may close or reopen (the room reads along; it
+// does not end other people's conversations). Idempotent: closing a closed
+// talk is a noop that says so.
+async function handleUpdateTalk(req, res, id) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const by = typeof body.by === 'string' && body.by.trim() ? body.by.trim() : null;
+    if (!by) return sendJSON(res, 400, { error: 'by is required — who is closing or reopening this talk' });
+    if (typeof body.closed !== 'boolean') return sendJSON(res, 400, { error: 'closed must be true (close) or false (reopen)' });
+    const result = await withWriteLock(async () => {
+      const data = readBoard();
+      const idx = talksOf(data).findIndex((e) => talkIdOf(e) === id);
+      if (idx < 0) return { status: 404, wire: { error: `no talk with id ${id}` } };
+      const t = talksOf(data)[idx];
+      if (by !== t.creator && by !== t['scrum:with']) {
+        return { status: 403, wire: { error: `${by} is neither the opener (${t.creator}) nor the seat this talk is with (${t['scrum:with']}) — only a participant closes or reopens a talk`, code: 'NOT_A_PARTICIPANT' } };
+      }
+      const already = !!t['scrum:closedAt'];
+      if (already === body.closed) return { status: 200, wire: { ...talkToWire(t), noop: true } };
+      const next = { ...t };
+      if (body.closed) next['scrum:closedAt'] = new Date().toISOString(); else delete next['scrum:closedAt'];
+      data.talks = talksOf(data).map((e, i) => (i === idx ? next : e));
+      writeBoard(data, [talkEvent('update', next, by)]);
+      return { status: 200, wire: talkToWire(next) };
+    });
+    sendJSON(res, result.status, result.wire);
+  } catch (e) {
+    console.error('PATCH /api/talks:', e.message);
+    sendJSON(res, 500, { error: 'Failed to update talk' });
+  }
 }
 async function handleCreateTalk(req, res) {
   try {
@@ -9069,13 +9106,17 @@ async function handleCreateConversation(req, res) {
       const ref = resolveAttachedTo(body.attachedTo, data.cards);
       if (!ref.ok) return { refused: ref.id };
       const talk = resolveConversation(body.conversation, data);   // #1401
-      if (!talk.ok) return { refusedTalk: talk.id };
+      if (!talk.ok) return { refusedTalk: talk.id, talkClosed: !!talk.closed };
       const conv = createConversationFromPayload(body, ref.value, talk.value);
       data.conversations.push(conv);
       writeBoard(data, [convEvent(conv)]);
       return conv;
     });
     if (created.refusedTalk !== undefined) {
+      if (created.talkClosed) {
+        // #1409 — the talk exists and is closed: read-only until a participant reopens it.
+        return sendJSON(res, 409, { error: `talk ${created.refusedTalk} is closed — a participant can reopen it (PATCH /api/talks/${created.refusedTalk} {closed:false}); omit conversation for an untagged post`, code: 'TALK_CLOSED' });
+      }
       return sendJSON(res, 400, { error: `no talk with id ${created.refusedTalk} — conversation must name an open talk (POST /api/talks mints one); omit it for an untagged post`, code: 'NO_SUCH_TALK' });
     }
     if (created.refused !== undefined) {
@@ -9559,6 +9600,7 @@ const API_ROUTES = [
   { method: 'GET',    re: /^\/api\/talks$/,                fn: (req, res) => handleListTalks(req, res) },        // #1401
   { method: 'GET',    re: /^\/api\/talks\/([^\/]+)$/,       fn: (req, res, m) => handleGetTalk(req, res, decodeURIComponent(m[1])) },   // #1401
   { method: 'POST',   re: /^\/api\/talks$/,                fn: (req, res) => handleCreateTalk(req, res) },       // #1401
+  { method: 'PATCH',  re: /^\/api\/talks\/([^\/]+)$/,       fn: (req, res, m) => handleUpdateTalk(req, res, decodeURIComponent(m[1])) },  // #1409 — close / reopen
   { method: 'GET',    re: /^\/api\/seats\/([^/]+)\/role-section$/, fn: (req, res, m) => handleSeatRoleSection(req, res, decodeURIComponent(m[1])) },   // #1376
   { method: 'POST',   re: /^\/api\/roles$/,                fn: (req, res) => handleCreateRole(req, res) },       // #915
   { method: 'PATCH',  re: /^\/api\/roles\/([^\/]+)$/,       fn: (req, res, m) => handleUpdateRole(req, res, decodeURIComponent(m[1])) },   // #1387

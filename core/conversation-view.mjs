@@ -168,6 +168,7 @@ export function mountConversationView(opts = {}) {
     // it opens with `@<with> ` prefilled. Posts stay board-level; the room
     // sees them inline; only THIS view is quiet.
     talk = null,
+    readOnly = false,  // #1409 — a CLOSED talk's view: the feed renders, the composer does not (the server refuses posts into it anyway)
     card = null,       // { id, shortId } of the card this thread belongs to — enables the ruling affordance
     onRuling,          // optional (decision) => void after a ruling is recorded
     leading = null,    // #1391 — an element kept at the TOP of the feed across renders (the card above its thread); it scrolls with the conversation
@@ -222,6 +223,7 @@ export function mountConversationView(opts = {}) {
   feed.className = 'cv-feed';
   feed.setAttribute('aria-live', 'polite');
   const form = buildForm();
+  if (readOnly) form.hidden = true;   // #1409 — present for the API's sake (dataset.talk etc.), never shown
   root.append(toolbar, feed, form);
 
   search.addEventListener('input', () => {

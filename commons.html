@@ -25,6 +25,13 @@
   .talk-head { padding: 8px 0 6px; border-bottom: 1px solid var(--border, #ddd); margin-bottom: 8px; }
   .talk-head h2 { margin: 0 0 2px; font-size: 16px; }
   .talk-head .talk-meta { font-size: 12px; color: var(--muted); }
+  .talk-head .talk-actions { display: inline-flex; gap: 8px; margin-left: 10px; vertical-align: middle; }
+  .talk-head .talk-actions button { font-size: 12px; padding: 2px 8px; }
+  .talk-head.talk-closed h2 { color: var(--muted); }
+  .talk-closed-note { font-size: 12px; color: var(--muted); margin: 4px 0 0; }
+  /* #1409 — a seat chip's second affordance: open a talk with that seat */
+  .mind .mind-talk { display: none; margin-left: 6px; font-size: 11px; cursor: pointer; opacity: .8; }
+  .mind:hover .mind-talk, .mind:focus-within .mind-talk { display: inline; }
 </style>
 <link rel="stylesheet" href="./core/editor.css"><!-- #1367 -->
 <link rel="stylesheet" href="./core/constraints-view.css"><!-- #1350 what governs an agent -->
@@ -171,6 +178,14 @@
       // click a mind → listen to just their voice (toggle); solo state syncs
       // the chips via the view's onSolo callback below.
       chip.addEventListener('click', () => { if (view) view.solo(view.soloed === m.key ? null : m.key); });
+      // #1409 — the second affordance the owner assumed a name had: open a
+      // talk WITH this seat. Same door as the header, seat preselected.
+      if (m.key !== 'wiki' && m.key !== 'board') {
+        const talkBtn = document.createElement('button'); talkBtn.type = 'button'; talkBtn.className = 'mind-talk';
+        talkBtn.textContent = '🗣 talk'; talkBtn.title = `Open a talk with ${m.name}`; talkBtn.dataset.seat = m.key;
+        talkBtn.addEventListener('click', (e) => { e.stopPropagation(); window.openTalkDoor?.(m.key); });
+        chip.append(talkBtn);
+      }
       mindEls.set(m.key, chip);
       return chip;
     }
@@ -789,12 +804,50 @@
         meta.append(document.createTextNode(`opened by ${talk.openedBy || '?'} · ${talk.openedAt ? new Date(talk.openedAt).toLocaleString() : ''} · `));
         const whole = document.createElement('a'); whole.href = 'commons.html'; whole.textContent = 'show the whole room'; whole.className = 'talk-whole-room';
         meta.append(whole);
+        // #1409 — two controls the owner could not find as a link: LEAVE (back
+        // to the room; the talk stays open and listed) and CLOSE (ends it —
+        // closedAt written, view read-only, gone from the default list; a
+        // participant can REOPEN). Closing takes you back to the room.
+        const actions = document.createElement('span'); actions.className = 'talk-actions';
+        const leave = document.createElement('button'); leave.type = 'button'; leave.id = 'talk-leave'; leave.textContent = '↩ Leave talk';
+        leave.title = 'Back to the whole room. The talk stays open; find it again by its link.';
+        leave.addEventListener('click', () => { location.href = 'commons.html'; });
+        actions.append(leave);
+        const whoAmI = () => (document.querySelector('.cv-who')?.value || '').trim() || 'michael';
+        const err = document.createElement('span'); err.className = 'talk-error'; err.id = 'talk-head-error'; err.setAttribute('role', 'alert');
+        const setClosed = async (closed) => {
+          err.textContent = '';
+          const r = await fetch('/api/talks/' + encodeURIComponent(talk.id), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ by: whoAmI(), closed }) });
+          const j = await r.json().catch(() => ({}));
+          // inline, never a native modal — a modal freezes the page for an agent (the suite's own rule)
+          if (!r.ok) { err.textContent = j.error || `refused (${r.status})`; return false; }
+          return true;
+        };
+        if (!talk.closedAt) {
+          const close = document.createElement('button'); close.type = 'button'; close.id = 'talk-close'; close.textContent = '✔ Close talk';
+          close.title = 'End this talk. It becomes read-only (a participant can reopen it) and you go back to the room.';
+          close.addEventListener('click', async () => { if (await setClosed(true)) location.href = 'commons.html'; });
+          actions.append(close);
+        } else {
+          head.classList.add('talk-closed');
+          const reopen = document.createElement('button'); reopen.type = 'button'; reopen.id = 'talk-reopen'; reopen.textContent = '↺ Reopen';
+          reopen.addEventListener('click', async () => { if (await setClosed(false)) location.reload(); });
+          actions.append(reopen);
+        }
+        actions.append(err);
+        h2.append(actions);
         head.append(h2, meta);
+        if (talk.closedAt) {
+          const note = document.createElement('p'); note.className = 'talk-closed-note'; note.id = 'talk-closed-note';
+          note.textContent = `closed ${new Date(talk.closedAt).toLocaleString()} — read-only; reopen to continue.`;
+          head.append(note);
+        }
         leading = head;
-        document.title = `Talk with ${talk.with} — ${talk.title}`;
+        document.title = `${talk.closedAt ? '(closed) ' : ''}Talk with ${talk.with} — ${talk.title}`;
       }
       view = mountConversationView({
         mount: viewEl,
+        ...(talk && talk.closedAt ? { readOnly: true } : {}),   // #1409 — a closed talk takes no posts
         ...(Number.isInteger(limitParam) && limitParam > 0 ? { limit: limitParam } : {}),
         attachedTo: node || undefined,   // node ⇒ that thread; absent ⇒ the whole commons
         poll: true,
@@ -856,6 +909,8 @@
         } catch { err.textContent = 'could not read the roster'; }
       }
       toggle.addEventListener('click', async () => { form.hidden = !form.hidden; if (!form.hidden) { await loadSeats(); title.focus(); } });
+      // #1409 — a seat chip opens the same door with that seat chosen.
+      window.openTalkDoor = async (seatKey) => { form.hidden = false; await loadSeats(); if (seatKey) sel.value = seatKey; title.focus(); };
       document.getElementById('talk-cancel').addEventListener('click', () => { form.hidden = true; err.textContent = ''; });
       form.addEventListener('submit', async (e) => {
         e.preventDefault(); err.textContent = '';
