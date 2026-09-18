@@ -78,6 +78,17 @@ export const SYSTEM_AUTHOR = 'board';
 export function findMentions(messages = [], seatKey, { sinceId = null, since = null } = {}) {
   if (!seatKey) return [];
   const re = new RegExp(`(^|[^A-Za-z0-9_])@${seatKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z0-9_])`, 'i');
+  // #1410 — THE BOARD ALREADY RESOLVED THE MENTION; READ IT, DON'T RE-PARSE.
+  // `POST /api/conversations` records `mentions: [<seat key>…]` with display
+  // names canonicalised to keys (core/people.mjs: "@sausage" → `guest`). This
+  // runner re-parsed the body against the seat KEY alone, so a seat addressed
+  // by the name the room gave her — "@sausage", three times on 2026-09-18 —
+  // read `nothing to wake for (mention)` while the board's own row said
+  // `mentions: ['guest']`. Two parsers, one name. The board's field wins; the
+  // regex is only the fallback for a row that predates the field.
+  const mentioned = (m) => (Array.isArray(m.mentions)
+    ? m.mentions.some((k) => String(k).toLowerCase() === seatKey.toLowerCase())
+    : re.test(m.body));
   const rows = (messages || []).filter((m) => m && typeof m.body === 'string'
     && String(m.author || '').toLowerCase() !== seatKey.toLowerCase()
     // #1237 — the board's own notices (claim/release/done lines carrying a card
@@ -85,7 +96,7 @@ export function findMentions(messages = [], seatKey, { sinceId = null, since = n
     // many handles the quoted title holds. Seen live: a release notice for a
     // card whose title named the seat woke it and it echoed the notice back.
     && String(m.author || '').toLowerCase() !== SYSTEM_AUTHOR
-    && re.test(m.body)
+    && mentioned(m)
     && (!since || (typeof m.createdAt === 'string' && m.createdAt > since)));
   if (!sinceId) return rows;
   const i = rows.findIndex((m) => m.id === sinceId);

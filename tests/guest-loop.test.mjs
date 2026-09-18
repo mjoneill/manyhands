@@ -37,6 +37,24 @@ const MSGS = [
   { id: 'm6', author: 'board', body: '🔔 ada released #1 “ask @gizmo about it”', createdAt: '2026-09-06T10:05:00Z' },
 ];
 
+// #1410 — the board resolves display names to keys ("@sausage" → guest) and
+// records `mentions` on the row; the runner must READ that, not re-parse the
+// body for the key. The owner called the guest seat by the name the room gave
+// her three times on 2026-09-18 and she never woke.
+const NAMED = [
+  { id: 'n1', author: 'ada', body: '@sausage what was it like?', mentions: ['guest'], createdAt: '2026-09-18T00:04:35Z' },
+  { id: 'n2', author: 'ada', body: 'not hearing from @sausage', mentions: ['guest'], createdAt: '2026-09-18T00:08:33Z' },
+  { id: 'n3', author: 'ada', body: 'this mentions nobody', mentions: [], createdAt: '2026-09-18T00:09:00Z' },
+  { id: 'n4', author: 'guest', body: '@sausage myself', mentions: ['guest'], createdAt: '2026-09-18T00:09:30Z' },
+  { id: 'n5', author: 'board', body: '🔔 released “ask @sausage”', mentions: ['guest'], createdAt: '2026-09-18T00:09:40Z' },
+  { id: 'n6', author: 'ada', body: 'a row from before the field existed: @guest hi', createdAt: '2026-09-18T00:10:00Z' },
+  { id: 'n7', author: 'ada', body: 'text says @guest but the board resolved nobody', mentions: [], createdAt: '2026-09-18T00:10:30Z' },
+];
+test('#1410 findMentions trusts the board\'s resolved `mentions` — a seat addressed by her display NAME wakes; the key regex is only the fallback for rows without the field', () => {
+  assert.deepEqual(findMentions(NAMED, 'guest').map((m) => m.id), ['n1', 'n2', 'n6'],
+    'n1/n2: named, resolved by the board ⇒ wake · n3: nobody · n4: own post · n5: board notice · n6: pre-field row, regex fallback · n7: the board says nobody, the text is not re-parsed');
+});
+
 test('#1201 findMentions: only @seat in the body, never its own posts, never an email-shaped near miss, never a board notice (#1237); sinceId pages forward', () => {
   assert.deepEqual(findMentions(MSGS, 'gizmo').map((m) => m.id), ['m2', 'm5']);
   assert.deepEqual(findMentions(MSGS, 'gizmo', { sinceId: 'm5' }).map((m) => m.id), [], 'the board notice after m5 is not a wake');
@@ -105,7 +123,13 @@ test('#1201 FRONT DOOR: a mention on a real board → the agent\'s post appears 
   try {
     const mk = (body, author) => fetch(`${srv.baseUrl}/api/conversations`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ body, author }) }).then((r) => r.json());
     await fetch(`${srv.baseUrl}/api/cards`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'the only card', createdBy: 'ada' }) });
+    // #1410 — the seat exists on the board (an agent record, hence on the
+    // roster) so the SERVER resolves "@gizmo" to a mention; the runner trusts
+    // that field now instead of grepping the body, exactly as on prod.
+    const reg = await fetch(`${srv.baseUrl}/api/agents`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ seatKey: 'gizmo', prompt: 'You are Gizmo.', model: { model: 'fake', protocol: 'ollama-native', baseUrl: 'http://127.0.0.1:1' }, residency: 'guest', contextPolicy: 'artifact-only', deliveryMode: 'channel', by: 'bo' }) });
+    assert.equal(reg.status, 201, await reg.text());
     const mention = await mk('@gizmo what is on this board?', 'bo');
+    assert.deepEqual(mention.mentions, ['gizmo'], 'the board resolved the handle');
     const recent = await fetch(`${srv.baseUrl}/api/conversations?attachedTo=null&limit=20`).then((r) => r.json());
     const wakes = findMentions(Array.isArray(recent) ? recent : recent.conversations, 'gizmo');
     assert.equal(wakes.length, 1); assert.equal(wakes[0].id, mention.id);
