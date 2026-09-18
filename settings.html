@@ -224,6 +224,18 @@ _exportStyle.textContent = `
       <p class="live" style="margin-top:4px">A holder that doesn't respond within this window yields to the next seat (dead-seat recovery). Must exceed the ~60s wake debounce. Serialized delivery engages once ring seats register. Before that, posts go to everyone immediately (Off's geometry, not Soft's). Once seats have registered, an empty ring HOLDS posts until one returns — delivery stops rather than fanning out.</p>
     </fieldset>
 
+    <!-- #1396 slice 2 — the ring's SEATS, on the page the owner reaches for
+         (his word, 2026-09-17 23:56Z: "We have a settings page for stuff like
+         this"; decision 327a18f6). Always visible, whatever the mode: the
+         seats are ticked FIRST and confirmed in the ring, THEN the mode is
+         flipped — flipping first would start a ring with nobody in it. -->
+    <fieldset id="ring-seats-fields">
+      <legend>TokenRing seats</legend>
+      <p class="live" style="margin:0 0 6px">Terminal seats connect by a bearer token and join the ring only when listed here <em>and</em> holding an open stream. Residents and the presence lane join on their own. Tick, Save, then read the line below before switching the mode to TokenRing.</p>
+      <div id="ring-seats" class="row" style="flex-wrap:wrap;gap:10px"></div>
+      <p class="live" id="ring-live" style="margin-top:6px">in the ring now: …</p>
+    </fieldset>
+
     <button id="save" class="btn">Save</button>
     <div class="msg" id="msg"></div>
     <p class="live">Saved to <code>channel-config.json</code>; the MCP server picks it up on the next post. No kick required.</p>
@@ -648,10 +660,44 @@ async function load() {
     $('softMax').value = Math.round((cfg.soft?.maxMs ?? 60000) / 1000);
     $('hardTimeout').value = Math.round((cfg.hard?.timeoutMs ?? 300000) / 1000);
     $('tokenRingTimeout').value = Math.round((cfg.tokenRing?.timeoutMs ?? 300000) / 1000);
+    await loadRingSeats(cfg.tokenRing?.bearerSeats || []);
     showFields();
   } catch (e) {
     msg('Could not load config: ' + e.message, false);
   }
+}
+
+// ── #1396 slice 2 — the ring's seats ───────────────────────────────────────
+// Candidates are the roster's non-system, non-resident seats (a resident joins
+// through its own lane; a human's browser holds no bearer). Checked = listed in
+// tokenRing.bearerSeats. The live line reads /api/channel-status so the owner
+// sees a seat actually IN the ring (bound AND streaming) before flipping the mode.
+function ringSeatsChecked() {
+  return [...document.querySelectorAll('#ring-seats input[type=checkbox]:checked')].map((c) => c.value);
+}
+async function loadRingSeats(listed) {
+  const box = $('ring-seats'); box.innerHTML = '';
+  let seats = {};
+  try { const j = await (await fetch('/api/roster')).json(); seats = j?.seats || {}; } catch { box.textContent = 'could not read the roster'; return; }
+  let residents = new Set();
+  try { const ag = await (await fetch('/api/agents')).json(); residents = new Set((Array.isArray(ag) ? ag : []).map((a) => a.seatKey)); } catch { /* none known */ }
+  for (const [key, v] of Object.entries(seats)) {
+    if (!v || v.kind === 'system' || residents.has(key)) continue;
+    const lab = document.createElement('label'); lab.style.display = 'inline-flex'; lab.style.gap = '4px'; lab.style.alignItems = 'center';
+    const cb = document.createElement('input'); cb.type = 'checkbox'; cb.value = key; cb.checked = listed.includes(key); cb.dataset.seat = key;
+    lab.append(cb, document.createTextNode(`${v.emoji ? v.emoji + ' ' : ''}${v.name || key}`));
+    box.append(lab);
+  }
+  await refreshRingLive();
+}
+async function refreshRingLive() {
+  const el = $('ring-live'); if (!el) return;
+  try {
+    const st = await (await fetch('/api/channel-status')).json();
+    const inRing = Object.entries(st?.seats || {}).filter(([, v]) => v && v.ring === true).map(([k]) => k);
+    const listed = st?.ring?.bearerSeats || [];
+    el.textContent = `in the ring now: ${inRing.length ? inRing.join(', ') : 'nobody'} · listed by token: ${listed.length ? listed.join(', ') : 'none'} · mode: ${st?.mode ?? '?'}`;
+  } catch { el.textContent = 'in the ring now: (channel status unreadable)'; }
 }
 
 async function save() {
@@ -674,12 +720,16 @@ async function save() {
     mode,
     soft: { minMs: Math.round(secs.softMin * 1000), maxMs: Math.round(secs.softMax * 1000) },
     hard: { timeoutMs: Math.round(secs.hard * 1000) },
-    tokenRing: { timeoutMs: Math.round(secs.ring * 1000) },
+    // #1396 — the ticked seats ride the same save; an unticked page CLEARS the
+    // list (the server treats an absent list as none), which is the point:
+    // the page is the whole switch, no file edit beside it.
+    tokenRing: { timeoutMs: Math.round(secs.ring * 1000), bearerSeats: ringSeatsChecked() },
   };
   try {
     const res = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     if (res.ok) {
       msg('Saved — live now (' + mode + ').', true);
+      setTimeout(refreshRingLive, 1500);   // #1396 — the adapter re-reads on its next tick; show who joined
     } else {
       const err = await res.json().catch(() => ({}));
       msg('Rejected: ' + (err.error || res.status), false);

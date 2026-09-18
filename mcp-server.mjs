@@ -2852,9 +2852,14 @@ function ringBearerSeats() {
 function ringSyncBearer(sessionId, why, { leave = false } = {}) {
   const m = sessionMeta.get(sessionId);
   if (!m || !m.seat) return;
-  const wanted = !leave && ringBearerSeats().includes(m.seat) && (m.openStreamCount ?? 0) > 0 && !m.deafSince;
+  const listed = ringBearerSeats().includes(m.seat);
+  const wanted = !leave && listed && (m.openStreamCount ?? 0) > 0 && !m.deafSince;
   const registered = bearerRingSessions.has(sessionId) && seatRegistry.seatForSession(sessionId) === m.seat;
-  if (!wanted && registered && !leave) return;   // a gap between streams is not a leave
+  // A gap between streams is not a leave — but being UNLISTED is (#1396 s2: the
+  // Settings page unticks a seat and it must be out at its next stream event,
+  // not at its next deafness; a stick handed to a seat the owner just removed
+  // is the page lying about the switch).
+  if (!wanted && registered && !leave && listed) return;
   if (wanted && !registered) {
     if (seatRegistry.seatForSession(sessionId)) return;   // the presence lane got here first — theirs
     const r = seatRegistry.register({ seatId: m.seat, sessionId, author: m.seat });
