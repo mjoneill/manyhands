@@ -78,7 +78,15 @@ export function restartPlan({ changed, readFile }) {
   }
   const plan = { rest: false, mcp: false, reason: { rest: null, mcp: null }, unknown: false };
   for (const [name, { entry }] of Object.entries(SERVICES)) {
-    const inputs = importClosure(entry, readFile);
+    let inputs;
+    try { inputs = importClosure(entry, readFile); }
+    catch (e) {
+      // #1415 — a read that FAILED (not one that found nothing) leaves the
+      // closure unknowable; the safe plan is the same as for an unknown
+      // previous sha: restart both, and say which read failed and why.
+      const why = `could not read ${entry} (${e?.code || e?.message || e}) — closure unknown`;
+      return { rest: true, mcp: true, reason: { rest: why, mcp: why }, unknown: true };
+    }
     for (const p of changed) {
       if (inputs.has(p) || MANIFESTS.has(p)) { plan[name] = true; plan.reason[name] = p; break; }
     }
@@ -91,10 +99,23 @@ export function gitChanged(repo, prev, next) {
   const out = execFileSync('git', ['-C', repo, 'diff', '--name-only', `${prev}..${next}`], { encoding: 'utf8' });
   return out.split('\n').map((s) => s.trim()).filter(Boolean);
 }
-export function gitReader(repo, sha) {
+// #1415 — `maxBuffer`: Node's default is 1 MiB and a child whose stdout passes
+// it is KILLED (ENOBUFS). server.js was 583 KB on 2026-09-18, growing ~16 KB a
+// day; without this the read would fail around mid-October and, swallowed as
+// null below, the entry would count as "not a file" — an empty closure and a
+// green rest=0 for a change to server.js itself. 64 MiB is #1414's figure.
+export const GIT_SHOW_MAX_BUFFER = 64 * 1024 * 1024;
+const NOT_IN_TREE = /does not exist in|exists on disk, but not in|invalid object name|Not a valid object name/i;
+export function gitReader(repo, sha, { maxBuffer = GIT_SHOW_MAX_BUFFER } = {}) {
   return (rel) => {
-    try { return execFileSync('git', ['-C', repo, 'show', `${sha}:${rel}`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }); }
-    catch { return null; }
+    try { return execFileSync('git', ['-C', repo, 'show', `${sha}:${rel}`], { encoding: 'utf8', maxBuffer, stdio: ['ignore', 'pipe', 'pipe'] }); }
+    catch (e) {
+      // Only ABSENCE is null: git says so on stderr with exit 128. Anything
+      // else (ENOBUFS, a dead git, a bad repo path) is a failed read and
+      // must reach the plan as UNKNOWN, not as "nothing imports this".
+      if (e?.status === 128 && NOT_IN_TREE.test(String(e.stderr ?? ''))) return null;
+      throw e;
+    }
   };
 }
 

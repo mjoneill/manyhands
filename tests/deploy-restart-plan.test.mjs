@@ -83,3 +83,51 @@ test('#1138 CONTROL against the real tree — the MCP closure holds its known mo
   assert.deepEqual(out, { '7ac421d': [false, false], 'a35c8f5': [false, false], '9bc06bd': [true, true], '250b6c1': [true, false] },
     'two of four restarts today were for nothing, and the fourth needed REST only');
 });
+
+// #1415 — a read that FAILS is not a read that found nothing. `gitReader` used
+// to swallow every error as null, and importClosure reads null as "not a file
+// in this tree", so an entry whose `git show` blew Node's 1 MiB maxBuffer
+// (ENOBUFS — the #1414 mechanism) produced an EMPTY closure and a plan that
+// said rest=0 for a change to server.js itself. server.js was 583 KB on
+// 2026-09-18, growing ~16 KB/day.
+import { gitReader } from '../scripts/deploy-restart-plan.mjs';
+import os from 'node:os';
+import { execFileSync } from 'node:child_process';
+
+test('#1415 a reader that THROWS for the entry makes the plan UNKNOWN (both restart, the file named) — never a quiet rest=0', () => {
+  const enobufs = (rel) => { if (rel === 'server.js') { const e = new Error('spawnSync git ENOBUFS'); e.code = 'ENOBUFS'; throw e; } return read(rel); };
+  const p = restartPlan({ changed: ['server.js'], readFile: enobufs });
+  assert.equal(p.unknown, true);
+  assert.deepEqual([p.rest, p.mcp], [true, true]);
+  assert.match(p.reason.rest, /server\.js/);
+  assert.match(p.reason.rest, /ENOBUFS/);
+});
+
+test('#1415 GUARD — an import that is ABSENT (null) is still skipped, so a deleted module does not force a restart', () => {
+  const absent = (rel) => (rel === 'core/lazy.mjs' ? null : read(rel));
+  const p = restartPlan({ changed: ['core/lazy.mjs'], readFile: absent });
+  assert.deepEqual([p.rest, p.mcp, p.unknown], [false, false, false]);
+});
+
+test('#1415 gitReader: a path NOT IN THE TREE is null; a read that fails for any other reason THROWS (a 1 KiB maxBuffer against the real server.js)', () => {
+  const at = gitReader(ROOT, 'HEAD');
+  assert.equal(at('core/this-module-does-not-exist.mjs'), null, 'absent in tree → null, as before');
+  assert.ok(at('server.js').length > 100_000, 'the real entry reads whole with the raised buffer');
+  const starved = gitReader(ROOT, 'HEAD', { maxBuffer: 1024 });
+  assert.throws(() => starved('server.js'), (e) => e.code === 'ENOBUFS', 'the swallow is gone: ENOBUFS surfaces');
+});
+
+test('#1415 gitReader DEFAULT buffer reads a 2 MiB entry whole — the size server.js reaches in October (a throwaway repo, one commit)', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'drp-1415-'));
+  try {
+    const g = (...a) => execFileSync('git', ['-C', dir, '-c', 'user.name=t', '-c', 'user.email=t@t.invalid', ...a], { stdio: 'pipe' });
+    g('init', '-q');
+    const big = 'import { a } from \'./core/shared.mjs\';\n' + '// '.padEnd(80, 'x').concat('\n').repeat(26_000);   // > 2 MiB
+    fs.writeFileSync(path.join(dir, 'server.js'), big);
+    g('add', 'server.js'); g('commit', '-qm', 'big');
+    assert.ok(big.length > 2 * 1024 * 1024, `fixture is ${big.length} bytes`);
+    const text = gitReader(dir, 'HEAD')('server.js');
+    assert.equal(text.length, big.length, 'read whole with the default buffer');
+    assert.ok(importClosure('server.js', gitReader(dir, 'HEAD')).has('server.js'), 'the entry is in its own closure');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
