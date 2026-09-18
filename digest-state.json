@@ -1,7 +1,0 @@
-{
-  "lastMintedWindow": "digest:2026-09-18",
-  "lastMintedAt": "2026-09-18T11:53:21.025Z",
-  "firstSeen": {
-    "stale-claims|{\"claimedAt\":\"2026-09-18T08:53:19.672Z\",\"holder\":\"bo\",\"id\":\"silent\",\"lastHolderWriteAt\":\"2026-09-18T08:53:19.672Z\",\"quietUntil\":null,\"shortId\":10,\"silentHours\":3,\"title\":\"card 10\"}": "2026-09-18T11:53:21.025Z"
-  }
-}

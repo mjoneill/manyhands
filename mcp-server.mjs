@@ -2286,7 +2286,11 @@ const SERVICE_BEARER = (() => {
   try { return fsReadFileSync(f, 'utf8').trim() || null; } catch (e) { console.error(`[#1343] SCRUM_SEAT_TOKEN_FILE unreadable (${e.code || e.message}) — this process's own REST calls will be refused in required mode`); return null; }
 })();
 function bearerHeaders() {
-  const b = requestAuth.getStore()?.bearer || SERVICE_BEARER;
+  // #1413 C — INSIDE a request store the store's bearer is the credential even
+  // when it is null: an unbound session's call must reach REST unbound, never
+  // as the service seat. The service bearer is for calls no session made.
+  const store = requestAuth.getStore();
+  const b = store ? store.bearer : SERVICE_BEARER;
   return b ? { Authorization: `Bearer ${b}` } : {};
 }
 

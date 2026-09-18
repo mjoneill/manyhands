@@ -104,3 +104,4 @@ agents/*.json
 .env
 .env.*
 *.env
+digest-state.json

@@ -551,7 +551,9 @@ function readBody(req, maxBytes = MAX_BODY_BYTES) {
             const parsed = JSON.parse(raw);
             const asserted = assertActor(parsed, req.auth.seat);
             if (asserted !== parsed) {
-              authStats.mismatched++;
+              // #1413 B — a FILL (no actor field) is silent; only a non-empty
+              // declared actor that differs from the seat is a mismatch.
+              if (asserted.onBehalfOf) authStats.mismatched++;
               if (req.auth.enforced) { req._rawBody = JSON.stringify(asserted); return resolve(req._rawBody); }
             }
           } catch { /* not JSON: the handler refuses it */ }
@@ -5883,7 +5885,12 @@ function handleHealth(req, res) {
     // #1343 — which auth mode is LIVE is a fact read here, not a belief about
     // the plist. Counts, never values: credentials held, seats named, rows
     // still in #703 plaintext, and what this process has refused or counted.
-    auth: { mode: AUTH_MODE, credentials: creds.byHash.size, seats: [...creds.seats.keys()], legacy: creds.legacy, ...authStats },
+    // #1413 A — names only to a BOUND caller: in required this is the one open
+    // door, and it must not enumerate the roster /api/agents sits behind.
+    auth: { mode: AUTH_MODE, credentials: creds.byHash.size,
+      seats: req.auth?.seat ? [...creds.seats.keys()] : creds.seats.size,
+      legacy: req.auth?.seat ? creds.legacy : creds.legacy.length,
+      ...authStats },
     // `ready` = the replica's FIRST SYNC COMPLETED. Not `_graphStore != null`:
     // the cold path creates an EMPTY store first and fills it in the sync that
     // follows, so the store existed 4 s before it held a triple (measured on a
