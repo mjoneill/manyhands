@@ -33,6 +33,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { runBoundedProcessTree } from './run-process-tree.mjs';
 import { newRunId } from './verdict-ledger.mjs';
+import { rmTreeForce, withSystemBins } from './watch-env.mjs';   // #1417
 
 const REPO = process.env.SUITE_WATCH_REPO
   || path.join(path.dirname(new URL(import.meta.url).pathname), '..');
@@ -100,7 +101,19 @@ if (!NO_CLONE) {
   suiteDir = path.join(cloneDir, 'tree');
   execFileSync('npm', ['ci', '--ignore-scripts', '--silent'], { cwd: suiteDir, timeout: 5 * 60 * 1000 });
 }
-const cleanup = () => { if (cloneDir) fs.rmSync(cloneDir, { recursive: true, force: true }); };
+// #1417 — the clone holds a deliberately read-only deploy fixture; a plain
+// rmSync died EACCES on it every night AFTER the verdict, and that crash was
+// the exit code launchd reported. Cleanup makes the tree writable first, and a
+// cleanup failure is LOGGED, never the run's verdict.
+const cleanup = () => {
+  if (!cloneDir) return;
+  try { rmTreeForce(cloneDir); }
+  catch (e) { console.error(`${new Date().toISOString()} cleanup could not remove ${cloneDir}: ${e?.code || e?.message || e} — left in place, verdict unaffected`); }
+};
+// #1417 — the plist's PATH has no /usr/sbin, so `lsof` (which #884's tests
+// run) was "command not found" under the nightly and nowhere else. The suite
+// runs with the system bin dirs on its PATH whatever the launcher handed us.
+process.env.PATH = withSystemBins(process.env.PATH);
 
 /**
  * #735 — run it so the deadline can actually STOP it, and keep what it said.
