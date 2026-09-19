@@ -116,19 +116,45 @@ test('#1201 the happy path: one mention → one post attributed to the seat → 
   assert.equal(rows[0].wake.messageId, 'm2'); assert.equal(rows[0].postId, 'p-1'); assert.equal(rows[0].contextHanded.changesRows, 1);
 });
 
-test('#1201 a model failure → NO post, one ledger row saying why; an empty reply → NO post', async () => {
+test('#1201/#1420 a model failure → NO reply, one ledger row saying why, and ONE failure line where the mention came from (never silent); an empty reply → the same', async () => {
   const file = tmp(); const posts = [];
   const bad = { status: 500, body: null, rawBody: 'boom' };
   const r = await guestOnce({ agent: AGENT, wake: MSGS[1], callModel: (a, m, o) => callModel(a, m, { ...o, retries: 0, transport: async () => bad }),
-    post: async (b) => { posts.push(b); }, ledgerFile: file });
-  assert.equal(r.posted, false); assert.equal(r.reason, 'model-failed'); assert.equal(posts.length, 0);
+    post: async (b) => { posts.push(b); return { id: 'f-1' }; }, ledgerFile: file });
+  assert.equal(r.posted, false); assert.equal(r.reason, 'model-failed');
   assert.equal(ledgerRows(file).length, 1); assert.equal(ledgerRows(file)[0].ok, false);
+  // #1420 — Sausage woke on a job at 15:37Z on 2026-09-19, the call died
+  // `fetch failed` after 7.7 min, the wake was marked answered and NOBODY was
+  // told for 77 minutes. The failure is still not an answer (posted:false, the
+  // ledger says why), but it is SAID once, by the seat, where the mention came
+  // from, naming nobody — so the asker learns in the same minute and a second
+  // mention is a deliberate retry.
+  assert.equal(posts.length, 1, 'exactly one failure line');
+  assert.equal(posts[0].author, 'gizmo');
+  assert.match(posts[0].body, /^⚠️ Gizmo: I was named but my model call failed/);
+  assert.match(posts[0].body, /name me again to retry/);
+  assert.doesNotMatch(posts[0].body, /@/, 'the line names nobody — it must wake nobody');
+  assert.equal(r.failureLine, 'f-1');
   // An EMPTY reply is refused by the adapter itself (#1198 learned this from a
   // thinking model that spent its whole budget in a field nobody read), so it
-  // arrives here as a model failure. Either way: NO post, one row saying why.
-  const r2 = await guestOnce({ agent: AGENT, wake: MSGS[1], callModel: withTransport(ollamaOk('   ')), post: async (b) => { posts.push(b); }, ledgerFile: file });
-  assert.equal(r2.posted, false); assert.ok(['empty-reply', 'model-failed'].includes(r2.reason), r2.reason); assert.equal(posts.length, 0);
+  // arrives here as a model failure. Either way: NO reply, one row, one line.
+  const r2 = await guestOnce({ agent: AGENT, wake: MSGS[1], callModel: withTransport(ollamaOk('   ')), post: async (b) => { posts.push(b); return { id: 'f-2' }; }, ledgerFile: file });
+  assert.equal(r2.posted, false); assert.ok(['empty-reply', 'model-failed'].includes(r2.reason), r2.reason); assert.equal(posts.length, 2);
   assert.equal(ledgerRows(file).length, 2); assert.match(String(ledgerRows(file)[1].error), /empty|content|nothing/i);
+});
+
+test('#1420 the failure line goes WHERE the mention came from (card trail or talk), and a failure of the line itself is logged, never thrown', async () => {
+  const file = tmp(); const posts = []; const errs = [];
+  const bad = { status: 500, body: null, rawBody: 'boom' };
+  const onCard = { ...MSGS[1], attachedTo: 'card-9' };
+  await guestOnce({ agent: AGENT, wake: onCard, callModel: (a, m, o) => callModel(a, m, { ...o, retries: 0, transport: async () => bad }), post: async (b) => { posts.push(b); return { id: 'f' }; }, ledgerFile: file });
+  assert.equal(posts[0].attachedTo, 'card-9', 'a mention on a card is answered on the card');
+  const inTalk = { ...MSGS[1], conversation: 'talk-3' };
+  await guestOnce({ agent: AGENT, wake: inTalk, callModel: (a, m, o) => callModel(a, m, { ...o, retries: 0, transport: async () => bad }), post: async (b) => { posts.push(b); return { id: 'f' }; }, ledgerFile: file });
+  assert.equal(posts[1].conversation, 'talk-3', 'a mention in a talk is answered in the talk');
+  const r = await guestOnce({ agent: AGENT, wake: MSGS[1], callModel: (a, m, o) => callModel(a, m, { ...o, retries: 0, transport: async () => bad }), post: async () => { throw new Error('board down'); }, ledgerFile: file, onError: (l) => errs.push(l) });
+  assert.equal(r.posted, false); assert.equal(r.reason, 'model-failed'); assert.equal(r.failureLine, null);
+  assert.ok(errs.some((l) => /failure line/.test(l) && /board down/.test(l)), JSON.stringify(errs));
 });
 
 test('#1201 an unreadable changes surface is not fatal: the agent answers from the mention alone and the row says 0 context rows', async () => {

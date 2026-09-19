@@ -570,6 +570,23 @@ export async function budgetCheck({ agent, spentToday }) {
 }
 
 /**
+ * #1420 — one line where the mention came from, naming nobody. Returns the
+ * post id, or null when the line could not be posted (logged, not thrown).
+ */
+async function postFailureLine({ agent, wake, error, latencyMs, post, onError }) {
+  const name = agent.name || agent.seatKey;
+  const secs = Number.isFinite(latencyMs) ? ` after ${Math.round(latencyMs / 1000)} s` : '';
+  const why = String(error || 'unknown').replace(/@/g, '').slice(0, 120);
+  const body = `⚠️ ${name}: I was named but my model call failed${secs} (${why}) — no answer this time; name me again to retry.`;
+  const where = {
+    ...(typeof wake?.attachedTo === 'string' && wake.attachedTo ? { attachedTo: wake.attachedTo } : {}),
+    ...(typeof wake?.conversation === 'string' && wake.conversation ? { conversation: wake.conversation } : {}),
+  };
+  try { const r = await post({ author: agent.seatKey, body, ...where }); return r?.id ?? null; }
+  catch (e) { onError(`[#1420] ${agent.seatKey}: failure line not posted (${e?.message ?? e}) — the ledger row still says why`); return null; }
+}
+
+/**
  * One wake. Everything injected.
  *
  *   agent      {seatKey, name?, systemPrompt?, contextPolicy?, model: {model, protocol, baseUrl, sampling?}}
@@ -678,7 +695,16 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
     const row = { ...base, ok: false, error: e?.message ?? String(e), latencyMs: Date.now() - started };
     await recordLedger({ sink: ledgerSink, file: ledgerFile, row, onError });
     onError(`[#1201] model call failed for ${agent.seatKey}; NO post made: ${row.error}`);
-    return { posted: false, reason: 'model-failed', ledger: row };
+    // #1420 — the failure is not an answer, but it is SAID. 2026-09-19 15:37Z:
+    // Sausage woke on a job, the call died `fetch failed` after 7.7 min, the
+    // wake was marked answered (rightly — #1254, no retry-forever) and nobody
+    // was told for 77 minutes; from the board it read as a resident ignoring
+    // a human. One line, by the seat, where the mention came from, naming
+    // nobody (so it wakes nobody): the asker learns in the same minute and a
+    // second mention is a deliberate retry. A failure of the line itself is
+    // logged and never thrown — the ledger row already holds the truth.
+    const failureLine = await postFailureLine({ agent, wake, error: row.error, latencyMs: row.latencyMs, post, onError });
+    return { posted: false, reason: 'model-failed', ledger: row, failureLine };
   }
   // #1246b — A NARRATED LOOKUP GETS ONE CHANCE TO BECOME A REAL ONE.
   //
