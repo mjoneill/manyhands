@@ -84,3 +84,37 @@ test('#1396 s2 — a terminal seat is ticked into the ring from Settings, joins 
     }, { server: { board: makeBoardFixture({ cards: [] }), mcpNotifyUrl: `http://127.0.0.1:${mcpPort}/internal/notify`, env: { SCRUM_ROSTER_FILE: roster } }, launch: { headless: 'new' } });
   } finally { if (mcp) await mcp.stop(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+// #1411 slice 2 — the residents' PAIR CAP is the owner's number, and it lives
+// on the same page (decision 40daaa38 · 327a18f6): shown from the config with
+// the runner's default when unset, saved with the form, refused out of range.
+test('#1411 s2 — the resident reply cap is set from Settings: default shown, a number saved to /api/config, 0 allowed (= rule 1), out of range refused by the server', async () => {
+  // The first test removes the shared temp dir in its finally; write the config straight into the harness's isolated file.
+  const cfgJson = JSON.stringify({ mode: 'off', soft: { minMs: 60000, maxMs: 120000 }, hard: { timeoutMs: 300000 }, tokenRing: { timeoutMs: 90000 } });
+  await withBrowserServer(async ({ server, browser }) => {
+    fs.writeFileSync(server.configFile, cfgJson);
+    const page = await browser.newPage();
+    await page.goto(`${server.baseUrl}/settings.html`, { waitUntil: 'networkidle0' });
+    await page.waitForSelector('#residentPairCap', { timeout: 5000 });
+    assert.equal(await page.$eval('#residentPairCap', (e) => e.value), '3', 'unset in the config ⇒ the runner default is shown, not a blank');
+    const setAndSave = async (v) => {
+      await page.$eval('#residentPairCap', (e, val) => { e.value = val; }, String(v));
+      await page.click('#save');
+      await page.waitForFunction(() => /Saved|Rejected/.test(document.querySelector('#msg')?.textContent || ''), { timeout: 5000 });
+      return page.$eval('#msg', (e) => e.textContent);
+    };
+    assert.match(await setAndSave(5), /Saved/);
+    let saved = await (await fetch(`${server.baseUrl}/api/config`)).json();
+    assert.equal(saved.residents?.replyWakesPerPairPerHour, 5, `the number is on the config: ${JSON.stringify(saved)}`);
+    assert.match(await setAndSave(0), /Saved/);
+    saved = await (await fetch(`${server.baseUrl}/api/config`)).json();
+    assert.equal(saved.residents?.replyWakesPerPairPerHour, 0, '0 is a valid number: residents never wake residents');
+    // The server is the authority: a value past the bound is refused, and the config keeps the last good one.
+    const bad = await fetch(`${server.baseUrl}/api/config`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...saved, residents: { replyWakesPerPairPerHour: 61 } }) });
+    assert.equal(bad.status, 400);
+    saved = await (await fetch(`${server.baseUrl}/api/config`)).json();
+    assert.equal(saved.residents?.replyWakesPerPairPerHour, 0);
+    await page.reload({ waitUntil: 'networkidle0' });
+    assert.equal(await page.$eval('#residentPairCap', (e) => e.value), '0', 'the page shows what the config holds');
+  }, { launch: {} });
+});

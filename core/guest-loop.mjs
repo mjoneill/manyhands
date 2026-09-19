@@ -73,26 +73,64 @@ export function ledgerFilePath() {
   return process.env.SCRUM_MODEL_LEDGER_FILE || path.join(__dirname, '..', 'model-calls.jsonl');
 }
 
+// #1411 slice 2 — THE PAIR CAP. Rule 1 ("a resident's post naming only
+// residents wakes nobody") stopped the 00:41Z loop and was retired the same
+// day: the owner, 21:56Z — limiting agents' ability to speak is not core
+// architecture; the limit is per-seat tuning (decision 40daaa38). So: agents
+// may address agents. What is bounded is the PRICE — each resident wake is a
+// paid model call with no human in the loop — and the bound is a number:
+// reply-wakes a PAIR of residents may spend on each other per hour. Inside the
+// cap a resident's post naming another resident wakes her exactly as a human's
+// would; at the cap it does not, until the hour slides or a human / terminal
+// seat names her (their posts are never capped). Cap 0 is rule 1 exactly.
+export const DEFAULT_PAIR_CAP_PER_HOUR = 3;
+const HOUR_MS = 3600_000;
+const lc = (x) => String(x || '').toLowerCase();
+const mentionsOf = (m) => (Array.isArray(m.mentions) ? m.mentions.map(lc) : []);
+/**
+ * Pure. Resident-authored posts between the pair {a, b} inside the hour before
+ * `before` (exclusive of the post at `before` itself): what the pair has already
+ * spent. A post counts when one of the pair wrote it naming the other.
+ */
+export function pairSpend(messages, a, b, { residents, before, excludeId = null }) {
+  const A = lc(a), B = lc(b);
+  const from = new Date(Date.parse(before) - HOUR_MS).toISOString();
+  return (messages || []).filter((m) => m && m.id !== excludeId && typeof m.createdAt === 'string'
+    && m.createdAt > from && m.createdAt <= before
+    && residents.has(lc(m.author))
+    && ((lc(m.author) === A && mentionsOf(m).includes(B)) || (lc(m.author) === B && mentionsOf(m).includes(A)))).length;
+}
+/**
+ * Pure. The resident-authored mentions of `seatKey` that the pair cap SUPPRESSES
+ * — the caller says so once (guest-once.mjs) rather than silently not waking.
+ */
+export function pairCapSuppressed(messages = [], seatKey, { residents = null, perHour = DEFAULT_PAIR_CAP_PER_HOUR, sinceId = null, since = null, history = null } = {}) {
+  const woken = new Set(findMentions(messages, seatKey, { residents, perHour, sinceId, since, history }).map((m) => m.id));
+  const all = findMentions(messages, seatKey, { residents: null, sinceId, since });
+  return all.filter((m) => !woken.has(m.id));
+}
+
 /** Pure. Commons messages that @-mention the seat and were not written by it. */
 export const SYSTEM_AUTHOR = 'board';
-export function findMentions(messages = [], seatKey, { sinceId = null, since = null, residents = null } = {}) {
+export function findMentions(messages = [], seatKey, { sinceId = null, since = null, residents = null, perHour = DEFAULT_PAIR_CAP_PER_HOUR, history = null } = {}) {
   if (!seatKey) return [];
-  // #1411 — RESIDENTS DO NOT WAKE RESIDENTS BY MENTION. The moment names became
-  // wakes (#1410) two residents looped four rounds in four minutes, each reply
-  // at-signing the other; nothing inside a turn could see the loop, and no
-  // step in it was wrong. Rule: a post AUTHORED by a resident whose mentions
-  // are ALL residents is reply-to-reply and does not wake — a human or a
-  // terminal seat naming a resident still does, and a resident's post that
-  // also names a human still does (that post is addressed outward). `residents`
-  // is the set of seat keys with a runner (the agent records); when the caller
-  // hands none, the rule is off and every mention wakes as before.
+  // `history` is what the pair's spend is counted over — the last hour of the
+  // commons — because `messages` is the runner's scan window, which starts at
+  // the seat's LAST ANSWER: after one reply the window holds only newer posts,
+  // and a spend counted over it reads 0 forever (the served test caught it:
+  // eight posts where four were the cap). Absent ⇒ counted over `messages`.
+  const spendRows = Array.isArray(history) ? history : messages;
+  // `residents` is the set of seat keys with a runner (the agent records);
+  // when the caller hands none, the cap is off and every mention wakes as
+  // before. A resident-authored mention is capped against what its pair has
+  // already spent in the hour before it; a non-resident's never is.
   const res = residents instanceof Set ? residents : (Array.isArray(residents) ? new Set(residents) : null);
-  const residentEcho = (m) => {
+  const cap = Number.isFinite(Number(perHour)) ? Math.max(0, Number(perHour)) : DEFAULT_PAIR_CAP_PER_HOUR;
+  const capped = (m) => {
     if (!res || !res.size) return false;
-    if (!res.has(String(m.author || '').toLowerCase())) return false;
-    const ms = Array.isArray(m.mentions) ? m.mentions.map((k) => String(k).toLowerCase()) : null;
-    if (!ms || !ms.length) return false;
-    return ms.every((k) => res.has(k));
+    if (!res.has(lc(m.author))) return false;
+    if (typeof m.createdAt !== 'string') return false;
+    return pairSpend(spendRows, m.author, seatKey, { residents: res, before: m.createdAt, excludeId: m.id }) >= cap;
   };
   const re = new RegExp(`(^|[^A-Za-z0-9_])@${seatKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z0-9_])`, 'i');
   // #1410 — THE BOARD ALREADY RESOLVED THE MENTION; READ IT, DON'T RE-PARSE.
@@ -114,7 +152,7 @@ export function findMentions(messages = [], seatKey, { sinceId = null, since = n
     // card whose title named the seat woke it and it echoed the notice back.
     && String(m.author || '').toLowerCase() !== SYSTEM_AUTHOR
     && mentioned(m)
-    && !residentEcho(m)   // #1411
+    && !capped(m)   // #1411 — the pair cap
     && (!since || (typeof m.createdAt === 'string' && m.createdAt > since)));
   if (!sinceId) return rows;
   const i = rows.findIndex((m) => m.id === sinceId);
@@ -321,11 +359,11 @@ function wakeIntro(wake) {
  * Returns wakes in priority order: mention, assignment, schedule. ONE is taken
  * per run; the rest wait for the next.
  */
-export function findWakes({ agent, messages = [], cards = [], state = {}, now = new Date().toISOString(), residents = null }) {
+export function findWakes({ agent, messages = [], cards = [], state = {}, now = new Date().toISOString(), residents = null, perHour = DEFAULT_PAIR_CAP_PER_HOUR, history = null }) {
   const on = effectiveWakeOn(agent);   // #1346 — channel mode keeps only assignment
   const out = [];
   if (on.includes('mention')) {
-    for (const m of findMentions(messages, agent.seatKey, { sinceId: state.lastAnsweredId ?? null, residents })) out.push({ kind: 'mention', ...m });   // #1411 — residents handed in
+    for (const m of findMentions(messages, agent.seatKey, { sinceId: state.lastAnsweredId ?? null, residents, perHour, history })) out.push({ kind: 'mention', ...m });   // #1411 — residents handed in
   }
   if (on.includes('assignment')) {
     const seen = new Set(state.assignmentsSeen || []);

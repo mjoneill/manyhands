@@ -22,7 +22,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { callModel } from '../core/model-adapter.mjs';
 import { deliveryStaleMs, isStaleDelivery } from '../core/delivery.mjs';   // #1346
-import { findMentions, findWakes, guestOnce, fetchBoundedChanges, shouldMarkAnswered, mentionScanPath, fetchMentionWindow, acquireLock, releaseLock, effectiveWakeOn, budgetCheck, deliveryOutcome } from '../core/guest-loop.mjs';
+import { findMentions, findWakes, pairCapSuppressed, DEFAULT_PAIR_CAP_PER_HOUR, guestOnce, fetchBoundedChanges, shouldMarkAnswered, mentionScanPath, fetchMentionWindow, acquireLock, releaseLock, effectiveWakeOn, budgetCheck, deliveryOutcome } from '../core/guest-loop.mjs';
 import { makeExecutor } from '../core/board-tools.mjs';
 
 const args = process.argv.slice(2);
@@ -151,7 +151,42 @@ try {
   if (ar.ok) residents = new Set((await ar.json()).filter((a) => a && a.seatKey && a.state !== 'retired').map((a) => String(a.seatKey).toLowerCase()));
   else console.error(`[#1411] ${agent.seatKey}: could not read /api/agents (${ar.status}) — resident-echo rule OFF this run`);
 } catch (e) { console.error(`[#1411] ${agent.seatKey}: could not read /api/agents (${e.message}) — resident-echo rule OFF this run`); }
-let wakes = findWakes({ agent, messages, cards, state, residents });
+// #1411 slice 2 — the PAIR CAP: reply-wakes a pair of residents may spend on
+// each other per hour, a Settings-page number (channel config
+// `residents.replyWakesPerPairPerHour`, default 3; 0 = residents never wake
+// residents). Read live so an owner's edit applies at the next tick.
+let perHour = DEFAULT_PAIR_CAP_PER_HOUR;
+try { const cfg = await get('/api/config'); if (Number.isFinite(Number(cfg?.residents?.replyWakesPerPairPerHour))) perHour = Number(cfg.residents.replyWakesPerPairPerHour); }
+catch (e) { console.error(`[#1411] ${agent.seatKey}: could not read /api/config (${e.message}) — pair cap at the default ${perHour}`); }
+// The spend is counted over the LAST HOUR of the commons, not the scan window
+// (which starts at this seat's last answer and so forgets the pair's earlier
+// posts). Same pager, a fixed one-hour cursor.
+let history = messages;
+if (residents) {
+  try { history = (await fetchMentionWindow(getPage, { lastAnsweredAt: new Date(Date.now() - 3600_000).toISOString() })).messages; }
+  catch (e) { console.error(`[#1411] ${agent.seatKey}: could not read the last hour for the pair cap (${e.message}) — counting over the scan window`); }
+}
+let wakes = findWakes({ agent, messages, cards, state, residents, perHour, history });
+// A capped mention is SAID ONCE, not silently dropped: one line from this seat
+// per hour, naming nobody (so it wakes nobody), so a reader of the commons can
+// see why a resident went quiet on another. The cap re-arms when the hour
+// slides or when a human or terminal seat names her.
+if (residents && !opt('--once-id')) {
+  const held = pairCapSuppressed(messages, agent.seatKey, { residents, perHour, sinceId: state.lastAnsweredId ?? null, history });
+  if (held.length) {
+    const hourAgo = new Date(Date.now() - 3600_000).toISOString();
+    const saidAlready = history.some((m) => String(m.author || '').toLowerCase() === agent.seatKey.toLowerCase() && /reply cap reached/.test(m.body || '') && m.createdAt > hourAgo);
+    const others = [...new Set(held.map((m) => m.author))].join(', ');
+    if (saidAlready) console.log(`[#1411] ${agent.seatKey}: ${held.length} mention(s) from ${others} held by the pair cap (${perHour}/h); already said this hour`);
+    else if (dry) console.log(`[dry-run] would post the pair-cap line (${others})`);
+    else {
+      try {
+        await fetch(`${BOARD}/api/conversations`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ author: agent.seatKey, body: `⏸ ${agent.name || agent.seatKey}: reply cap reached with ${others} (${perHour} reply-wakes per pair per hour) — quiet on that thread until the hour passes or a human or terminal seat names me.` }) });
+        console.log(`[#1411] ${agent.seatKey}: pair cap (${perHour}/h) held ${held.length} mention(s) from ${others}; said so once`);
+      } catch (e) { console.error(`[#1411] ${agent.seatKey}: pair-cap line failed to post: ${e.message}`); }
+    }
+  }
+}
 if (opt('--once-id')) wakes = messages.filter((m) => m.id === opt('--once-id')).map((m) => ({ kind: 'mention', ...m }));
 
 // #1346 slice 3 — CHANNEL MODE: the room reaches this seat as delivery records

@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { findMentions, buildMessages, guestOnce, fetchBoundedChanges } from '../core/guest-loop.mjs';
+import { findMentions, pairCapSuppressed, pairSpend, buildMessages, guestOnce, fetchBoundedChanges } from '../core/guest-loop.mjs';
 import { callModel } from '../core/model-adapter.mjs';
 
 const tmp = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'guest-')), 'model-calls.jsonl');
@@ -50,21 +50,32 @@ const NAMED = [
   { id: 'n6', author: 'ada', body: 'a row from before the field existed: @guest hi', createdAt: '2026-09-18T00:10:00Z' },
   { id: 'n7', author: 'ada', body: 'text says @guest but the board resolved nobody', mentions: [], createdAt: '2026-09-18T00:10:30Z' },
 ];
-// #1411 — residents do not wake residents by mention. The loop: A names B →
-// B wakes, names A → A wakes … (four rounds in four minutes, 2026-09-18).
+// #1411 slice 2 — THE PAIR CAP replaces rule 1 (decision 40daaa38: agents may
+// address agents; the limit is a per-seat number). A pair of residents may
+// spend N reply-wakes on each other per hour; a human or terminal seat naming
+// a resident is never capped. Cap 0 is the retired rule 1 exactly.
 const RES = new Set(['guest', 'bubbles']);
 const CHAIN = [
-  { id: 'c1', author: 'ada',     body: '@sausage what was it like?',            mentions: ['guest'],            createdAt: '2026-09-18T00:40:00Z' },   // a human ⇒ wakes
-  { id: 'c2', author: 'bubbles', body: '@sausage just so nobody has to guess…', mentions: ['guest'],            createdAt: '2026-09-18T00:41:50Z' },   // resident → resident only ⇒ no wake
-  { id: 'c3', author: 'bubbles', body: '@sausage @ada — both of you',           mentions: ['guest', 'ada'],     createdAt: '2026-09-18T00:42:00Z' },   // a resident addressing a human too ⇒ wakes
-  { id: 'c4', author: 'cy',      body: '@sausage from a terminal seat',          mentions: ['guest'],            createdAt: '2026-09-18T00:43:00Z' },   // terminal seat ⇒ wakes
-  { id: 'c5', author: 'bubbles', body: '@sausage @bubbles we are separate',     mentions: ['guest', 'bubbles'], createdAt: '2026-09-18T00:44:04Z' },   // residents only ⇒ no wake
+  { id: 'c1', author: 'ada',     body: '@sausage what was it like?',            mentions: ['guest'],            createdAt: '2026-09-18T00:40:00Z' },   // a human ⇒ wakes, never capped
+  { id: 'c2', author: 'bubbles', body: '@sausage just so nobody has to guess…', mentions: ['guest'],            createdAt: '2026-09-18T00:41:50Z' },   // pair spend before: 0 ⇒ wakes
+  { id: 'c3', author: 'bubbles', body: '@sausage @ada — both of you',           mentions: ['guest', 'ada'],     createdAt: '2026-09-18T00:42:00Z' },   // spend 1 ⇒ wakes
+  { id: 'c4', author: 'cy',      body: '@sausage from a terminal seat',          mentions: ['guest'],            createdAt: '2026-09-18T00:43:00Z' },   // terminal seat ⇒ wakes, never capped
+  { id: 'c5', author: 'bubbles', body: '@sausage @bubbles we are separate',     mentions: ['guest', 'bubbles'], createdAt: '2026-09-18T00:44:04Z' },   // spend 2 ⇒ wakes (the third)
+  { id: 'c6', author: 'bubbles', body: '@sausage once more',                    mentions: ['guest'],            createdAt: '2026-09-18T00:45:00Z' },   // spend 3 ⇒ CAPPED
+  { id: 'c7', author: 'ada',     body: '@sausage are you there?',               mentions: ['guest'],            createdAt: '2026-09-18T00:46:00Z' },   // a human restarts her ⇒ wakes
+  { id: 'c8', author: 'guest',   body: '@bubbles yes',                          mentions: ['bubbles'],          createdAt: '2026-09-18T00:46:30Z' },   // guest's own post — never a wake for guest; counts toward the pair
+  { id: 'c9', author: 'bubbles', body: '@sausage good',                         mentions: ['guest'],            createdAt: '2026-09-18T00:47:00Z' },   // spend 4 in the hour ⇒ CAPPED
+  { id: 'c10', author: 'bubbles', body: '@sausage an hour later',               mentions: ['guest'],            createdAt: '2026-09-18T01:48:00Z' },   // the hour slid: spend inside (00:48, 01:48] = 0 ⇒ wakes
 ];
-test('#1411 a resident-authored post whose mentions are all residents does not wake (reply-to-reply); humans, terminal seats, and a resident addressing a human still do', () => {
-  assert.deepEqual(findMentions(CHAIN, 'guest', { residents: RES }).map((m) => m.id), ['c1', 'c3', 'c4'],
-    'c2 and c5 are resident→resident only; c3 names a human too');
-  assert.deepEqual(findMentions(CHAIN, 'guest').map((m) => m.id), ['c1', 'c2', 'c3', 'c4', 'c5'],
-    'control: with no resident set handed in, the rule is off and every mention wakes');
+test('#1411 the PAIR CAP: a pair of residents wakes each other N times an hour, then not, until the hour slides; humans and terminal seats are never capped; cap 0 is rule 1; no resident set = no cap', () => {
+  assert.deepEqual(findMentions(CHAIN, 'guest', { residents: RES, perHour: 3 }).map((m) => m.id), ['c1', 'c2', 'c3', 'c4', 'c5', 'c7', 'c10'],
+    'c6 and c9 sit at or past three pair posts inside their hour; c10 is an hour later');
+  assert.deepEqual(pairCapSuppressed(CHAIN, 'guest', { residents: RES, perHour: 3 }).map((m) => m.id), ['c6', 'c9'], 'the suppressed rows are reported, so the seat can say so once');
+  assert.deepEqual(findMentions(CHAIN, 'guest', { residents: RES, perHour: 0 }).map((m) => m.id), ['c1', 'c4', 'c7'],
+    'cap 0 = the retired rule 1: no resident-authored mention wakes, humans and terminal seats do');
+  assert.deepEqual(findMentions(CHAIN, 'guest').map((m) => m.id), ['c1', 'c2', 'c3', 'c4', 'c5', 'c6', 'c7', 'c9', 'c10'],
+    'control: with no resident set handed in, the cap is off and every mention wakes');
+  assert.equal(pairSpend(CHAIN, 'bubbles', 'guest', { residents: RES, before: '2026-09-18T00:47:00Z', excludeId: 'c9' }), 5, 'c2, c3, c5, c6 by bubbles naming guest + c8 by guest naming bubbles; c1/c4/c7 are not the pair');
 });
 
 test('#1410 findMentions trusts the board\'s resolved `mentions` — a seat addressed by her display NAME wakes; the key regex is only the fallback for rows without the field', () => {
@@ -184,7 +195,7 @@ test('#1201 FRONT DOOR: a mention on a real board → the agent\'s post appears 
 
 test('#1201 the runnable form exists and uses the loop: scripts/guest-once.mjs imports guestOnce and findMentions', () => {
   const src = fs.readFileSync(new URL('../scripts/guest-once.mjs', import.meta.url), 'utf8');
-  assert.match(src, /import \{ findMentions, findWakes, guestOnce, fetchBoundedChanges, shouldMarkAnswered, mentionScanPath, fetchMentionWindow, acquireLock, releaseLock, effectiveWakeOn, budgetCheck, deliveryOutcome \} from '\.\.\/core\/guest-loop\.mjs'/);   // #1237 widened the import; #1274 added the paged window; #1346 the channel drain; #1372 the outcome
+  assert.match(src, /import \{ findMentions, findWakes, pairCapSuppressed, DEFAULT_PAIR_CAP_PER_HOUR, guestOnce, fetchBoundedChanges, shouldMarkAnswered, mentionScanPath, fetchMentionWindow, acquireLock, releaseLock, effectiveWakeOn, budgetCheck, deliveryOutcome \} from '\.\.\/core\/guest-loop\.mjs'/);   // #1237 widened the import; #1274 added the paged window; #1346 the channel drain; #1372 the outcome
   assert.match(src, /guestOnce\(\{/);
   assert.match(src, /--dry-run/);
 });

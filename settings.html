@@ -236,6 +236,19 @@ _exportStyle.textContent = `
       <p class="live" id="ring-live" style="margin-top:6px">in the ring now: …</p>
     </fieldset>
 
+    <!-- #1411 slice 2 — the residents' PAIR CAP (decision 40daaa38: agents may
+         address agents; the limit is per-seat tuning, and it lives here, not
+         in a rule). Each resident wake is a paid model call with no human in
+         the loop, so the number is the owner's: how many reply-wakes a pair of
+         residents may spend on each other in an hour before they go quiet
+         until a human or terminal seat names one of them. 0 = residents never
+         wake residents. -->
+    <fieldset id="resident-cap-fields">
+      <legend>Resident reply cap</legend>
+      <div class="row"><label>Reply-wakes per pair per hour</label><input type="number" id="residentPairCap" min="0" max="60" step="1"> <span class="unit">wakes (0–60; 0 = residents never wake residents)</span></div>
+      <p class="live" style="margin:6px 0 0">Two residents naming each other by at-sign wake each other up to this many times an hour, then the pair goes quiet — the capped seat says so once on the commons — until the hour passes or a human or terminal seat names one of them. Read by the runner at its next tick.</p>
+    </fieldset>
+
     <button id="save" class="btn">Save</button>
     <div class="msg" id="msg"></div>
     <p class="live">Saved to <code>channel-config.json</code>; the MCP server picks it up on the next post. No kick required.</p>
@@ -653,6 +666,10 @@ async function load() {
       $('hardTimeout').max = LIMITS_S.hard.max;
       $('tokenRingTimeout').min = LIMITS_S.tokenRing.min;
       $('tokenRingTimeout').max = LIMITS_S.tokenRing.max;
+      if (lim.residents?.replyWakesPerPairPerHour) {   // #1411
+        $('residentPairCap').min = lim.residents.replyWakesPerPairPerHour.min;
+        $('residentPairCap').max = lim.residents.replyWakesPerPairPerHour.max;
+      }
     }
     const r = document.querySelector(`input[name=mode][value="${cfg.mode}"]`);
     if (r) r.checked = true;
@@ -661,6 +678,7 @@ async function load() {
     $('hardTimeout').value = Math.round((cfg.hard?.timeoutMs ?? 300000) / 1000);
     $('tokenRingTimeout').value = Math.round((cfg.tokenRing?.timeoutMs ?? 300000) / 1000);
     await loadRingSeats(cfg.tokenRing?.bearerSeats || []);
+    $('residentPairCap').value = cfg.residents?.replyWakesPerPairPerHour ?? (lim?.residents?.replyWakesPerPairPerHour?.default ?? 3);   // #1411 — absent ⇒ the runner's default
     showFields();
   } catch (e) {
     msg('Could not load config: ' + e.message, false);
@@ -724,6 +742,8 @@ async function save() {
     // list (the server treats an absent list as none), which is the point:
     // the page is the whole switch, no file edit beside it.
     tokenRing: { timeoutMs: Math.round(secs.ring * 1000), bearerSeats: ringSeatsChecked() },
+    // #1411 — the pair cap rides the same save, always sent, so the page is the whole switch.
+    residents: { replyWakesPerPairPerHour: Math.round(Number($('residentPairCap').value)) },
   };
   try {
     const res = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });

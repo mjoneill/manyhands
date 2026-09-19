@@ -32,6 +32,9 @@ const HARD_MAX_MS = 1800000; // 30 min
 // lease-vs-debounce relationship against real invocation logs.
 const TOKEN_RING_MIN_MS = 90000; // 90 s
 const TOKEN_RING_MAX_MS = 1800000; // 30 min
+// #1411 — the pair cap's bounds: 0 (never) to 60 (one a minute, the tick rate).
+const RESIDENT_PAIR_CAP_MIN = 0;
+const RESIDENT_PAIR_CAP_MAX = 60;
 
 /**
  * #737 — the bounds, published rather than private.
@@ -51,6 +54,7 @@ export const LIMITS = {
   soft: { minMs: 0, maxMs: SOFT_CEIL_MS },
   hard: { minMs: HARD_MIN_MS, maxMs: HARD_MAX_MS },
   tokenRing: { minMs: TOKEN_RING_MIN_MS, maxMs: TOKEN_RING_MAX_MS },
+  residents: { replyWakesPerPairPerHour: { min: RESIDENT_PAIR_CAP_MIN, max: RESIDENT_PAIR_CAP_MAX, default: 3 } },   // #1411
 };
 
 /** The config file path, resolved per-call so SCRUM_CHANNEL_CONFIG_FILE (tests) works at runtime. */
@@ -94,7 +98,24 @@ export function validateConfig(input) {
   // Carried only when set: an empty list and an absent key mean the same
   // thing (nobody joins by bearer), and every existing reader keeps its shape.
   const ring = { timeoutMs: tokenRingTimeoutMs, ...(bearerSeats.length ? { bearerSeats } : {}) };
-  return { mode, soft: { minMs, maxMs }, hard: { timeoutMs }, tokenRing: ring };
+  // #1411 slice 2 — the residents' PAIR CAP: reply-wakes a pair of residents
+  // may spend on each other per hour (decision 40daaa38: agents may address
+  // agents; the limit is tuning). Carried only when set, so the pinned config
+  // shape is unchanged for everyone who never touches it; the runner's default
+  // is 3. 0 = residents never wake residents (the retired rule 1, as a number).
+  let residents;
+  if (input.residents !== undefined) {
+    if (!input.residents || typeof input.residents !== 'object') throw new Error('residents must be an object');
+    const capIn = input.residents.replyWakesPerPairPerHour;
+    if (capIn !== undefined) {
+      const cap = Number(capIn);
+      if (!Number.isInteger(cap) || cap < RESIDENT_PAIR_CAP_MIN || cap > RESIDENT_PAIR_CAP_MAX) {
+        throw new Error(`residents.replyWakesPerPairPerHour must be an integer between ${RESIDENT_PAIR_CAP_MIN} and ${RESIDENT_PAIR_CAP_MAX}`);
+      }
+      residents = { replyWakesPerPairPerHour: cap };
+    }
+  }
+  return { mode, soft: { minMs, maxMs }, hard: { timeoutMs }, tokenRing: ring, ...(residents ? { residents } : {}) };
 }
 
 /** Read the current config; always returns a valid object (missing/corrupt → defaults). */

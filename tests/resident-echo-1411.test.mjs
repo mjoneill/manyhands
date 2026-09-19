@@ -1,15 +1,18 @@
 /**
- * #1411 — two mention-woken residents must not wake each other forever.
+ * #1411 slice 2 — THE PAIR CAP, served with the REAL runner (scripts/guest-once.mjs)
+ * for TWO resident seats on fake models that always at-sign the other resident.
  *
- * Served, with the REAL runner (scripts/guest-once.mjs) for TWO resident seats
- * on fake models that always at-sign the other resident. A human names one
- * of them once. Under the old scan each reply woke the other and the board
- * grew by one post per tick without end; now a resident's reply that names
- * only residents is reply-to-reply and wakes nobody. Three ticks of both
- * runners ⇒ the human's post + exactly ONE resident reply. A human naming a
- * resident still wakes her (the first reply proves it).
+ * Rule 1 (slice 1: "a resident's post naming only residents wakes nobody") is
+ * RETIRED here — the owner, 2026-09-18 21:56Z: limiting agents' ability to speak
+ * is not core architecture; the limit is per-seat tuning (decision 40daaa38).
+ * Now a pair of residents may spend N reply-wakes on each other per hour
+ * (Settings: residents.replyWakesPerPairPerHour, default 3), then the capped
+ * seat says so ONCE and the pair is quiet until the hour slides or a human or
+ * terminal seat names one of them. Cap 0 is rule 1 exactly, as a number.
  *
- * Sabotage: the resident rule removed ⇒ "one reply, not a chain" reads 3+.
+ * Sabotage: the cap unread (perHour ignored) ⇒ the pre-fix chain returns and
+ * "exactly N pair wakes" reads 3+ more; the say-once line removed ⇒ the
+ * "says so once" assertion fails; cap 0 not honoured ⇒ the rule-1 case wakes.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -35,32 +38,60 @@ function runOnce(env, seat) {
   });
 }
 
-test('#1411 two residents that always at-sign each other: a human names one → ONE reply, not a chain, across three ticks of both runners', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'echo-1411-'));
+const pairPosts = (posts) => posts.filter((p) => ['guest', 'bubbles'].includes(p.author) && !/reply cap reached/.test(p.body));
+const capLines = (posts) => posts.filter((p) => /reply cap reached/.test(p.body));
+const listPosts = async (base) => { const l = (await api(base, 'GET', '/api/conversations?limit=100')).body; return Array.isArray(l) ? l : l.conversations; };
+
+async function twoResidents({ cap }) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cap-1411-'));
   const sausage = await fakeOllama('REPLY: @bubbles just so nobody has to guess — we are separate seats.');
   const bubbles = await fakeOllama('REPLY: @sausage and you are Sausage; the key is separate.');
   const s = await startRestServer({ board: makeBoardFixture({ cards: [], conversations: [] }) });
+  const mk = (seatKey, name, baseUrl) => api(s.baseUrl, 'POST', '/api/agents', { seatKey, name, prompt: `You are ${name}.`, model: { model: 'fake', protocol: 'ollama-native', baseUrl }, residency: 'resident', deliveryMode: 'wake', wakeOn: ['mention'], by: 'ada' });
+  assert.equal((await mk('guest', 'Sausage', sausage.baseUrl)).status, 201);
+  assert.equal((await mk('bubbles', 'Bubbles', bubbles.baseUrl)).status, 201);
+  if (cap !== undefined) {
+    const c = await api(s.baseUrl, 'POST', '/api/config', { mode: 'soft', residents: { replyWakesPerPairPerHour: cap } });
+    assert.equal(c.status, 200, JSON.stringify(c.body));
+  }
+  const env = (seat) => ({ SCRUM_BOARD_URL: s.baseUrl, SCRUM_GUEST_STATE_FILE: path.join(dir, `${seat}.state.json`) });
+  const outs = [];
+  const tick = async () => { for (const seat of ['guest', 'bubbles']) { const r = await runOnce(env(seat), seat); assert.equal(r.code, 0, r.err + r.out); outs.push(`[${seat}] ${(r.out + r.err).trim().split('\n').pop()}`); } };
+  const stop = async () => { await s.stop(); await sausage.stop(); await bubbles.stop(); fs.rmSync(dir, { recursive: true, force: true }); };
+  return { s, tick, outs, stop };
+}
+
+test('#1411 PAIR CAP (default 3): a human names one resident → the pair converses exactly three wakes and stops; the capped seat says so ONCE; a human naming one of them restarts her and only her', async () => {
+  const t = await twoResidents({});
   try {
-    const mk = (seatKey, name, baseUrl) => api(s.baseUrl, 'POST', '/api/agents', { seatKey, name, prompt: `You are ${name}.`, model: { model: 'fake', protocol: 'ollama-native', baseUrl }, residency: 'resident', contextPolicy: 'thread', deliveryMode: 'wake', wakeOn: ['mention'], by: 'ada' });
-    assert.equal((await mk('guest', 'Sausage', sausage.baseUrl)).status, 201);
-    assert.equal((await mk('bubbles', 'Bubbles', bubbles.baseUrl)).status, 201);
+    const human = await api(t.s.baseUrl, 'POST', '/api/conversations', { author: 'ada', body: '@sausage what was it like?' });
+    assert.deepEqual(human.body.mentions, ['guest']);
+    for (let i = 0; i < 4; i++) await t.tick();
+    let posts = await listPosts(t.s.baseUrl);
+    const pair = pairPosts(posts);
+    assert.equal(pair.length, 4, `human wake + 3 pair wakes = 4 resident replies (G B G B), then silence, not ${pair.length}:\n${t.outs.join('\n')}`);
+    assert.deepEqual(pair.map((p) => p.author), ['guest', 'bubbles', 'guest', 'bubbles']);
+    assert.equal(capLines(posts).length, 1, `the capped seat says so exactly once:\n${posts.map((p) => `${p.author}: ${p.body.slice(0, 60)}`).join('\n')}`);
+    assert.equal(capLines(posts)[0].author, 'guest', 'guest is the one whose fourth wake was held (B2 named her at spend 3)');
+    assert.deepEqual(capLines(posts)[0].mentions, [], 'the cap line names nobody, so it wakes nobody');
+    // A human naming the OTHER resident restarts her — and her reply to guest is still held (the hour has not slid).
+    await api(t.s.baseUrl, 'POST', '/api/conversations', { author: 'ada', body: '@bubbles still there?' });
+    for (let i = 0; i < 2; i++) await t.tick();
+    posts = await listPosts(t.s.baseUrl);
+    const pair2 = pairPosts(posts);
+    assert.equal(pair2.length, 5, `the human's second post woke bubbles once more; guest stayed capped:\n${t.outs.join('\n')}`);
+    assert.equal(pair2.at(-1).author, 'bubbles');
+    assert.equal(capLines(posts).length, 1, 'said once per hour, not once per held mention');
+  } finally { await t.stop(); }
+});
 
-    const human = await api(s.baseUrl, 'POST', '/api/conversations', { author: 'ada', body: '@sausage what was it like?' });
-    assert.deepEqual(human.body.mentions, ['guest'], 'the human names one resident');
-
-    const env = (seat) => ({ SCRUM_BOARD_URL: s.baseUrl, SCRUM_GUEST_STATE_FILE: path.join(dir, `${seat}.state.json`) });
-    const outs = [];
-    for (let tick = 0; tick < 3; tick++) {
-      for (const seat of ['guest', 'bubbles']) {
-        const r = await runOnce(env(seat), seat);
-        assert.equal(r.code, 0, r.err + r.out);
-        outs.push(`[${tick}/${seat}] ${(r.out + r.err).trim().split('\n').pop()}`);
-      }
-    }
-    const listed = (await api(s.baseUrl, 'GET', '/api/conversations?limit=50')).body; const posts = Array.isArray(listed) ? listed : listed.conversations;
-    const byAuthor = posts.reduce((m, p) => ({ ...m, [p.author]: (m[p.author] || 0) + 1 }), {});
-    assert.equal(byAuthor.guest, 1, `the human's mention woke her exactly once: ${JSON.stringify(byAuthor)}\n${outs.join('\n')}`);
-    assert.equal(byAuthor.bubbles ?? 0, 0, `her reply named only a resident, so it woke nobody — one reply, not a chain: ${JSON.stringify(byAuthor)}\n${outs.join('\n')}`);
-    assert.equal(posts.length, 2, `the board holds the human's post and one reply after three ticks of both runners, not ${posts.length}`);
-  } finally { await s.stop(); await sausage.stop(); await bubbles.stop(); fs.rmSync(dir, { recursive: true, force: true }); }
+test('#1411 cap 0 is rule 1 exactly: a human names one → ONE reply, not a chain, and the held seat says so once', async () => {
+  const t = await twoResidents({ cap: 0 });
+  try {
+    await api(t.s.baseUrl, 'POST', '/api/conversations', { author: 'ada', body: '@sausage what was it like?' });
+    for (let i = 0; i < 3; i++) await t.tick();
+    const posts = await listPosts(t.s.baseUrl);
+    assert.deepEqual(pairPosts(posts).map((p) => p.author), ['guest'], `one reply, no chain:\n${t.outs.join('\n')}`);
+    assert.equal(capLines(posts).length, 1); assert.equal(capLines(posts)[0].author, 'bubbles');
+  } finally { await t.stop(); }
 });
