@@ -569,6 +569,20 @@ export async function budgetCheck({ agent, spentToday }) {
   return { allowed: true, reason: 'within-budget', spent, budget, calls };
 }
 
+// #1420 — provider error text, made safe for a board post: no at-signs (a wake),
+// no credential-shaped values (the shapes server.js SECRET_SHAPES redacts).
+const ERROR_SECRET_SHAPES = [
+  /\bsk-ant-[A-Za-z0-9_-]{16,}/g, /\bsk-or-v1-[A-Za-z0-9]{32,}/g, /\bsk-[A-Za-z0-9]{32,}/g,
+  /\bgh[pousr]_[A-Za-z0-9]{16,}/g, /\bxox[baprs]-[A-Za-z0-9-]{10,}/g, /\bAKIA[0-9A-Z]{16}\b/g,
+  /\bmh_[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])/g, /\bey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g,
+  /Bearer\s+\S+/g,
+];
+export function scrubErrorText(error) {
+  let t = String(error || 'unknown').replace(/@/g, '');
+  for (const re of ERROR_SECRET_SHAPES) t = t.replace(re, '[REDACTED]');
+  return t.slice(0, 120);
+}
+
 /**
  * #1420 — one line where the mention came from, naming nobody. Returns the
  * post id, or null when the line could not be posted (logged, not thrown).
@@ -576,7 +590,10 @@ export async function budgetCheck({ agent, spentToday }) {
 async function postFailureLine({ agent, wake, error, latencyMs, post, onError }) {
   const name = agent.name || agent.seatKey;
   const secs = Number.isFinite(latencyMs) ? ` after ${Math.round(latencyMs / 1000)} s` : '';
-  const why = String(error || 'unknown').replace(/@/g, '').slice(0, 120);
+  // The error text is the PROVIDER's, not ours: it may echo a name (strip the
+  // at-sign so the line wakes nobody) or a credential (scrub it — the same
+  // shapes server.js redacts, #1217/#1343 — before it lands on the board).
+  const why = scrubErrorText(error);
   const body = `⚠️ ${name}: I was named but my model call failed${secs} (${why}) — no answer this time; name me again to retry.`;
   const where = {
     ...(typeof wake?.attachedTo === 'string' && wake.attachedTo ? { attachedTo: wake.attachedTo } : {}),

@@ -155,6 +155,14 @@ test('#1420 the failure line goes WHERE the mention came from (card trail or tal
   const r = await guestOnce({ agent: AGENT, wake: MSGS[1], callModel: (a, m, o) => callModel(a, m, { ...o, retries: 0, transport: async () => bad }), post: async () => { throw new Error('board down'); }, ledgerFile: file, onError: (l) => errs.push(l) });
   assert.equal(r.posted, false); assert.equal(r.reason, 'model-failed'); assert.equal(r.failureLine, null);
   assert.ok(errs.some((l) => /failure line/.test(l) && /board down/.test(l)), JSON.stringify(errs));
+  // the error text is the provider's, not ours: a name it echoes must not wake, a secret it echoes must not land
+  // the fixture's key is ASSEMBLED at runtime so no literal in this file matches a credential shape (the push gate scans for them)
+  const fakeKey = ['sk', 'ant', 'a'.repeat(24)].join('-');
+  await guestOnce({ agent: AGENT, wake: MSGS[1], callModel: async () => { throw new Error(`upstream said @ada token ${fakeKey}`); }, post: async (b) => { posts.push(b); return { id: 'f' }; }, ledgerFile: file });
+  const line = posts[posts.length - 1].body;
+  assert.match(line, /upstream said/, 'the provider\'s words do reach the line (so the test bites)');
+  assert.doesNotMatch(line, /@/, 'an echoed name is stripped — the line must wake nobody');
+  assert.equal(line.includes(fakeKey), false, 'an echoed credential is scrubbed before it reaches the board');
 });
 
 test('#1201 an unreadable changes surface is not fatal: the agent answers from the mention alone and the row says 0 context rows', async () => {
