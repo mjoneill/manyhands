@@ -72,7 +72,7 @@ test('#1417 the suite the watcher spawns can find lsof — the plist PATH withou
     'import { test } from "node:test"; import a from "node:assert/strict"; import { execSync } from "node:child_process";\n'
     + 'test("lsof resolves on this PATH", () => { a.doesNotThrow(() => execSync("lsof -v", { stdio: "pipe" }), "lsof must be findable"); a.ok(process.env.PATH.split(":").includes("/usr/sbin"), process.env.PATH); });\n');
   const state = path.join(dir, 'watch.state');
-  const env = { ...process.env, PATH: '/opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:/usr/bin:/bin',
+  const env = { ...process.env, PATH: [path.dirname(process.execPath), '/opt/homebrew/bin', '/usr/bin', '/bin'].join(':'),   // the RUNNING node's dir, not a mac-only path: the runner has no /opt/homebrew
     SUITE_WATCH_REPO: dir, SUITE_WATCH_STATE: state, SUITE_WATCH_DRYRUN: '1', SUITE_WATCH_NO_CLONE: '1',
     SUITE_WATCH_ARTIFACTS: fs.mkdtempSync(path.join(os.tmpdir(), 'art1417-')), SCRUM_VERDICT_LEDGER: path.join(dir, 'ledger.jsonl') };
   for (const k of Object.keys(env)) if (k.startsWith('NODE_TEST')) delete env[k];
