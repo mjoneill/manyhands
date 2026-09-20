@@ -91,19 +91,27 @@ export function createTokenRingEngine({ registry, genEnvelopeId, isDeliverable =
     const skipped = [];
     let out = grantDeliveries(beforeLease);
     if (!isDeliverable) return { ...out, skipped };
+    // A SKIP is a TIMEOUT that does NOT charge the seat. The reducer's TIMEOUT sets
+    // cursors[holder] = lease.snapshot (the seat is deemed to have seen the
+    // interlude), which for a seat that never received the envelope means the
+    // posts are lost to it (R1 review finding: with everyone dead, a post reached nobody).
+    // So the cursors of every skipped seat are remembered and put back AFTER the
+    // lap — not inside it, or a dead seat would re-queue and be granted again in
+    // the same lap. Each in-lap TIMEOUT un-queues that seat, so the lap ends with
+    // either a deliverable holder or no lease (QUIESCENT); the restored cursors
+    // then re-queue the skipped seats for the NEXT dispatch, and the one that
+    // comes back receives what it was skipped over for on its first turn.
+    const cursorsBefore = {};
     let guard = state.ring.length + 1;
     while (state.lease && !isDeliverable(state.lease.holder) && guard-- > 0) {
       const { holder, id } = state.lease;
       skipped.push(holder);
+      cursorsBefore[holder] = state.cursors[holder];
       const before = state.lease;
       state = reduce(state, { type: 'TIMEOUT', holder, leaseId: id });
       out = grantDeliveries(before);
     }
-    if (state.lease && !isDeliverable(state.lease.holder)) {
-      // went all the way round and every member is dead: quiesce, never grant a ghost
-      state = { ...initialState(state.ring), cursors: state.cursors, nextLeaseId: state.nextLeaseId, ringPos: state.ringPos };
-      out = { deliveries: [], needsTimeout: null };
-    }
+    if (skipped.length) state = { ...state, cursors: { ...state.cursors, ...cursorsBefore } };
     return { ...out, skipped };
   }
 

@@ -171,3 +171,19 @@ test('#1424 quiesce() drops the lease so the caller can honour a mode flip: no l
   assert.equal(engine.snapshot().lease, null);
   assert.equal(engine.snapshot().ring.length, 2, 'membership is kept; only the lease and the queue go');
 });
+
+test('#1424 R1 — a SKIP does not charge the skipped seat: when it comes back, its first turn carries the posts it was skipped over for', () => {
+  const registry = createSeatRegistry();
+  const dead = new Set(['a', 'b']);
+  const engine = createTokenRingEngine({ registry, isDeliverable: (id) => !dead.has(id) });
+  registry.register({ seatId: 'a', sessionId: 'S1', author: 'aa' });
+  registry.register({ seatId: 'b', sessionId: 'S2', author: 'bb' });
+  const r1 = engine.handlePost({ author: 'alex', body: 'everyone dead' });
+  assert.deepEqual(r1.deliveries, []); assert.equal(engine.snapshot().status, 'QUIESCENT');
+  assert.ok(r1.telemetry.skipped.includes('a') && r1.telemetry.skipped.includes('b'));
+  dead.clear();
+  const r2 = engine.handlePost({ author: 'alex', body: 'everyone back' });
+  assert.equal(r2.deliveries.length, 1);
+  const bodies = r2.deliveries[0].envelope.payload.map((m) => m.body);
+  assert.deepEqual(bodies, ['everyone dead', 'everyone back'], `the first live turn carries BOTH posts, not just the new one: ${JSON.stringify(bodies)}`);
+});
