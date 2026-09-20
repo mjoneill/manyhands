@@ -245,15 +245,33 @@ export const LIMIT_CEILING = 1000;
 // name instead of poisoning the store. Counted, so it can be surfaced.
 export const invalidIriSeen = { count: 0, samples: [] };
 const IRI_BAD = /[\s<>"{}|\\^`]/g;
-function safeIri(i) {
-  const s = String(i);
-  if (!IRI_BAD.test(s)) return s;
-  IRI_BAD.lastIndex = 0;
+// #1426 — an absolute IRI has a SCHEME. A value that reaches here without one
+// (2026-09-20: `https%3A%2F%2F…`, a URL-encoded id that a caller's
+// `startsWith('http')` test waved through as absolute) made oxigraph throw
+// `No scheme found in an absolute IRI`, uncaught, and REST crash-looped on its
+// own snapshot. Such a value is minted under the entity namespace, encoded, and
+// counted — a node at a strange name beats a process that is not there.
+const IRI_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;
+function noteInvalid(s) {
   invalidIriSeen.count += 1;
   if (invalidIriSeen.samples.length < 5) invalidIriSeen.samples.push(s);
+}
+export function safeIri(i) {
+  const s = String(i);
+  if (!IRI_SCHEME.test(s)) { noteInvalid(s); return IRI.entity + encodeURIComponent(s); }
+  if (!IRI_BAD.test(s)) return s;
+  IRI_BAD.lastIndex = 0;
+  noteInvalid(s);
   return s.replace(IRI_BAD, (c) => encodeURIComponent(c));
 }
-const nn = (i) => oxigraph.namedNode(safeIri(i));
+// #1426 — and if oxigraph still refuses the string for a reason the two guards
+// above do not know, the node is minted under the entity namespace rather than
+// the throw ending the sync (and, at boot, the process).
+function nn(i) {
+  const s = safeIri(i);
+  try { return oxigraph.namedNode(s); }
+  catch (e) { noteInvalid(s); return oxigraph.namedNode(IRI.entity + encodeURIComponent(s)); }
+}
 const lit = (v) => oxigraph.literal(String(v));
 // #1034 — a TYPED numeric literal. SPARQL's bare `0` IS "0"^^xsd:integer, so a
 // plain string never matches the shape a caller writes: FILTER(?o != 0) becomes
