@@ -47,8 +47,11 @@ export function reconcileRing(state, seats) {
   return { ...state, ring, cursors, ringPos };
 }
 
-export function createTokenRingEngine({ registry, genEnvelopeId }) {
+export function createTokenRingEngine({ registry, genEnvelopeId, isDeliverable = null }) {
   if (!registry) throw new Error('token-ring engine requires a seat registry');
+  // #1424 — the caller's liveness verdict per seat (an open, recently-spoken
+  // stream), beyond "a session is registered". Absent ⇒ every registered seat
+  // is deliverable, which is the pre-#1424 behaviour and what the pure tests use.
   let envSeq = 0;
   const nextEnvelopeId = genEnvelopeId ?? (() => `env-${++envSeq}`);
   let state = initialState([]); // empty ring until seats register (inert)
@@ -79,6 +82,42 @@ export function createTokenRingEngine({ registry, genEnvelopeId }) {
     return { deliveries: [{ seatId, sessionId, envelope }], needsTimeout: null };
   }
 
+  // #1424 — a grant to a member the caller says is NOT deliverable (registered,
+  // but its stream is dead or stale) does not wait out a lease: the token moves
+  // on at once, at most once around the ring; if nobody is deliverable the ring
+  // quiesces. Measured 2026-09-20: two ghost registrations each held a full
+  // 300 s lease while the owner posted into silence. `skipped` names them.
+  function grantDeliverable(beforeLease) {
+    const skipped = [];
+    let out = grantDeliveries(beforeLease);
+    if (!isDeliverable) return { ...out, skipped };
+    let guard = state.ring.length + 1;
+    while (state.lease && !isDeliverable(state.lease.holder) && guard-- > 0) {
+      const { holder, id } = state.lease;
+      skipped.push(holder);
+      const before = state.lease;
+      state = reduce(state, { type: 'TIMEOUT', holder, leaseId: id });
+      out = grantDeliveries(before);
+    }
+    if (state.lease && !isDeliverable(state.lease.holder)) {
+      // went all the way round and every member is dead: quiesce, never grant a ghost
+      state = { ...initialState(state.ring), cursors: state.cursors, nextLeaseId: state.nextLeaseId, ringPos: state.ringPos };
+      out = { deliveries: [], needsTimeout: null };
+    }
+    return { ...out, skipped };
+  }
+
+  /**
+   * #1424 — drop the held lease and the queued interlude, keep membership: the
+   * caller uses it when the delivery mode leaves token-ring, so a lease timer
+   * that fires later is a stale no-op instead of the next grant.
+   */
+  function quiesce() {
+    const hadLease = !!state.lease;
+    state = { ...initialState(state.ring), cursors: Object.fromEntries(state.ring.map((a) => [a, 0])), nextLeaseId: state.nextLeaseId, ringPos: state.ringPos };
+    return { hadLease };
+  }
+
   /**
    * Feed a new commons post. Returns { deliveries, needsTimeout, telemetry }.
    * @param {{author:string, body:string, id?:string, originSessionId?:string}} post
@@ -102,9 +141,10 @@ export function createTokenRingEngine({ registry, genEnvelopeId }) {
     }
     state = reduce(state, event);
 
-    const { deliveries, needsTimeout } = grantDeliveries(beforeLease);
+    const { deliveries, needsTimeout, skipped } = grantDeliverable(beforeLease);
     const telemetry = {
       event: event.type,
+      skipped,   // #1424
       poster: originSeatId ?? `author:${author}`,
       holder: state.lease?.holder ?? null,
       leaseId: state.lease?.id ?? null,
@@ -124,9 +164,10 @@ export function createTokenRingEngine({ registry, genEnvelopeId }) {
   function handleTimeout({ seatId, leaseId } = {}) {
     const beforeLease = state.lease;
     state = reduce(state, { type: 'TIMEOUT', holder: seatId, leaseId });
-    const { deliveries, needsTimeout } = grantDeliveries(beforeLease);
+    const { deliveries, needsTimeout, skipped } = grantDeliverable(beforeLease);
     const telemetry = {
       event: 'TIMEOUT',
+      skipped,   // #1424
       poster: seatId,
       holder: state.lease?.holder ?? null,
       leaseId: state.lease?.id ?? null,
@@ -140,6 +181,7 @@ export function createTokenRingEngine({ registry, genEnvelopeId }) {
   return {
     handlePost,
     handleTimeout,
+    quiesce,   // #1424
     /** Read-only peek for tests/telemetry. */
     snapshot: () => ({ status: state.status, lease: state.lease, ring: [...state.ring], hwm: state.log.length }),
   };

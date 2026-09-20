@@ -2853,7 +2853,18 @@ function laneFor(sessionId) {
 }
 
 const seatRegistry = createSeatRegistry();
-const tokenRingEngine = createTokenRingEngine({ registry: seatRegistry, genEnvelopeId: () => randomUUID() });
+// #1424 — the engine asks this before granting: a registered seat is deliverable
+// only if its session holds an open stream whose client spoke inside
+// LIVE_WINDOW_MS and is not marked deaf — the same live/stale rule
+// /channel/status prints per seat. Two ghost registrations held two full
+// leases on 2026-09-20 because "registered" was the only test.
+function ringSeatDeliverable(seatId) {
+  const sid = seatRegistry.sessionForSeat(seatId);
+  const m = sid ? sessionMeta.get(sid) : null;
+  if (!m || (m.openStreamCount ?? 0) <= 0 || m.deafSince) return false;
+  return !!m.lastClientRequestAt && (Date.now() - m.lastClientRequestAt) <= LIVE_WINDOW_MS;
+}
+const tokenRingEngine = createTokenRingEngine({ registry: seatRegistry, genEnvelopeId: () => randomUUID(), isDeliverable: ringSeatDeliverable });
 
 // Shared lifecycle telemetry (schema v1.1, locked across seats): one JSON
 // object per line, prefixed `[#410 lifecycle] `. Every envelope-scoped event
@@ -3070,6 +3081,10 @@ function broadcastChannel(conversation) {
 // session, staggered by the channel scheduler. Logic unchanged from #119/#265;
 // extracted so token-ring can fall back to it.
 function broadcastFanout(conversation) {
+  // #1424 — a post arriving in a non-ring mode while the engine still holds a
+  // lease means the mode was flipped mid-lease; quiesce at the first post, not
+  // the next timeout.
+  if (tokenRingEngine.snapshot().lease) tokenRingQuiesceIfOff('post');
   // #206 — attachments are signalled to a channel-receiving agent by a scalar
   // `[📎 name]` marker folded into `content`; the agent then pulls the bytes via
   // attachment_get(id) (id from conversation_get on message_id / conversation_list).
@@ -3271,9 +3286,30 @@ function tokenRingOnTimeout(leaseId, seatId, envelopeId) {
   }
   lifecycle('board.timeout.fired', { seatId, leaseId, envelopeId });
   tokenRingActiveLease = null;
+  // #1424 — the mode is read HERE too, not only on the post path: after the owner
+  // flipped TokenRing off at 14:25:22Z on 2026-09-20 this handler granted lease 5
+  // at 14:28:56Z and lease 6 at 14:33:56Z, re-delivering ring-held posts to seats
+  // that had already had them by fan-out. A timeout in any other mode quiesces.
+  if (tokenRingQuiesceIfOff('timeout')) return;
   const { deliveries, needsTimeout } = tokenRingEngine.handleTimeout({ seatId, leaseId });
   tokenRingDeliver(deliveries, needsTimeout);
   maybeOpenDirectSlot('stream-timeout').catch((e) => console.log(`[#1362 direct] open failed: ${e.message}`));   // #1362
+}
+
+// #1424 — honour a mode flip: if the delivery mode is not token-ring and the
+// engine still holds a lease, drop it, cancel the timer, say so, and open the
+// direct slot so anything queued for the residents drains now rather than at
+// the next ghost turn. Returns true when it quiesced.
+function tokenRingQuiesceIfOff(why) {
+  const mode = CHANNEL_STAGGER_OFF ? 'off' : (readConfig().mode || 'off');
+  if (mode === 'token-ring') return false;
+  const { hadLease } = tokenRingEngine.quiesce();
+  tokenRingClearTimer();
+  if (hadLease) {
+    lifecycle('board.quiesce', { reason: `mode-${mode}`, why });
+    maybeOpenDirectSlot('quiesce').catch((e) => console.log(`[#1362 direct] open failed: ${e.message}`));
+  }
+  return true;
 }
 
 // Reconcile the single timer with the engine's current lease after any event:

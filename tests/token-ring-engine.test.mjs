@@ -122,3 +122,52 @@ test('reaches quiescence (holder with nothing to add times out), and a later-reg
   assert.ok(engine.snapshot().ring.includes('b'), 'b joined the ring on wake');
   assert.equal(r.deliveries.length, 1, 'the wake grants exactly one lease');
 });
+
+// #1424 — measured 2026-09-20 during the #1396 trial: two registrations whose
+// streams were dead each held a full five-minute lease (the caller's timeout was
+// the only thing that moved the token), and after the owner flipped the mode
+// OFF the engine kept granting on timeouts for as long as the process lived.
+test('#1424 a holder the caller says is NOT DELIVERABLE is skipped at grant — the token moves to the next live member with no timeout wait', () => {
+  const registry = createSeatRegistry();
+  let n = 0;
+  const dead = new Set(['a']);
+  const engine = createTokenRingEngine({ registry, genEnvelopeId: () => `E${++n}`, isDeliverable: (seatId) => !dead.has(seatId) });
+  registry.register({ seatId: 'a', sessionId: 'S1', author: 'aa' });   // registered, session present, stream dead
+  registry.register({ seatId: 'b', sessionId: 'S2', author: 'bb' });
+  const r = engine.handlePost({ author: 'alex', body: 'seed' });
+  assert.equal(r.needsTimeout, null, 'no timeout scheduled for the dead seat');
+  assert.equal(r.deliveries.length, 1);
+  assert.equal(r.deliveries[0].seatId, 'b', 'the grant skipped the dead member');
+  assert.equal(engine.snapshot().lease?.holder, 'b');
+  assert.ok(r.telemetry.skipped?.includes('a'), `telemetry names the skipped seat: ${JSON.stringify(r.telemetry)}`);
+});
+
+test('#1424 when NO member is deliverable the ring quiesces instead of walking dead seats forever', () => {
+  const registry = createSeatRegistry();
+  const engine = createTokenRingEngine({ registry, isDeliverable: () => false });
+  registry.register({ seatId: 'a', sessionId: 'S1', author: 'aa' });
+  registry.register({ seatId: 'b', sessionId: 'S2', author: 'bb' });
+  const r = engine.handlePost({ author: 'alex', body: 'seed' });
+  assert.deepEqual(r.deliveries, []);
+  assert.equal(r.needsTimeout, null);
+  assert.equal(engine.snapshot().status, 'QUIESCENT', 'nobody live ⇒ quiescent, not a lease to a ghost');
+  assert.equal(engine.snapshot().lease, null);
+});
+
+test('#1424 quiesce() drops the lease so the caller can honour a mode flip: no lease, no further grant on a stale timeout', () => {
+  const { registry, engine } = makeEngine();
+  registry.register({ seatId: 'a', sessionId: 'S1', author: 'aa' });
+  registry.register({ seatId: 'b', sessionId: 'S2', author: 'bb' });
+  const seed = engine.handlePost({ author: 'alex', body: 'seed' });
+  const lease = seed.deliveries[0].envelope.leaseId;
+  assert.ok(engine.snapshot().lease, 'control: a lease is held');
+  const q = engine.quiesce();
+  assert.equal(q.hadLease, true);
+  assert.equal(engine.snapshot().lease, null);
+  assert.equal(engine.snapshot().status, 'QUIESCENT');
+  // the timer the caller still holds for the old lease must be inert now
+  const t = engine.handleTimeout({ seatId: 'a', leaseId: lease });
+  assert.deepEqual(t.deliveries, [], 'a stale timeout after quiesce grants nothing');
+  assert.equal(engine.snapshot().lease, null);
+  assert.equal(engine.snapshot().ring.length, 2, 'membership is kept; only the lease and the queue go');
+});
