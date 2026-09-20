@@ -648,7 +648,13 @@ function logRefused(req, statusCode, data) {
     // The entity is the first segment after the collection (`/api/cards/7/claim`
     // is about card 7); the full path survives in `route`, so nothing is lost by
     // keeping the id joinable to the card's other events.
-    const tail = url.split('/').filter(Boolean)[2] || '';
+    // #1427 — DECODED, as the route handler decodes it. The raw segment
+    // (`https%3A%2F%2F…`) became a change-row id that no handler had ever seen,
+    // was handed on as if it named an entity, and crashed the projection
+    // (#1426). A segment that will not decode keeps its raw form.
+    const rawTail = url.split('/').filter(Boolean)[2] || '';
+    let tail = rawTail;
+    try { tail = decodeURIComponent(rawTail); } catch { /* malformed escape — the raw form is the only id it has */ }
     const actor = (request && (request.by || request.author || request.createdBy || request.decidedBy)) || null;
     appendEvent(EVENT_LOG_DIR, {
       op: 'refused',

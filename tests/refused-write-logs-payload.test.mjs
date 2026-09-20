@@ -250,3 +250,32 @@ test('#1217 — the refusal is recoverable through changes_since, with the body,
     void card1;
   } finally { await srv.stop(); }
 });
+
+// #1427 — the refused row's id is the DECODED segment, as the handler saw it.
+// On 2026-09-20 a PATCH to /api/agents/<url-encoded IRI> (404) logged the raw
+// `https%3A%2F%2F…` as its entity id; that string was handed on by the resident
+// runner as context and crashed the graph projection (#1426). The handler
+// decodes; the logger must too, or one request yields two ids for one target.
+test('#1427 — a refused write whose target segment is URL-ENCODED logs the DECODED id', async () => {
+  const srv = await startRestServer({ board: board() });
+  try {
+    const iri = 'https://scrumboard.local/agent/guest';
+    const res = await api(srv.baseUrl, 'PATCH', `/api/agents/${encodeURIComponent(iri)}`, { by: 'cy', name: 'x' });
+    assert.equal(res.status, 404);
+    const ev = refusals(srv.boardFile).at(-1);
+    assert.equal(ev.entity.kind, 'agent');
+    assert.equal(ev.entity.id, iri, 'the id is what the handler decoded, not the wire form');
+    assert.ok(!ev.entity.id.includes('%3A'), 'no percent-escapes survive');
+    assert.equal(ev.route, `PATCH /api/agents/${encodeURIComponent(iri)}`, 'the wire form still survives in route');
+  } finally { await srv.stop(); }
+});
+
+test('#1427 — a segment that will NOT decode (malformed escape) keeps its raw form rather than losing the refusal', async () => {
+  const srv = await startRestServer({ board: board() });
+  try {
+    const res = await api(srv.baseUrl, 'PATCH', '/api/cards/%zz', { by: 'cy', title: 'x' });
+    assert.ok(res.status >= 400, `refused (${res.status})`);
+    const ev = refusals(srv.boardFile).at(-1);
+    assert.equal(ev.entity.id, '%zz');
+  } finally { await srv.stop(); }
+});
