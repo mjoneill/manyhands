@@ -78,3 +78,45 @@ test('#1424 B — a registered member with a DEAD stream is skipped at grant: th
     assert.ok(!ghostStream.messages.some((m) => m.method === 'notifications/claude/channel' && m.params?.content?.includes('nonce-skip')), 'the ghost was not handed the token');
   } finally { ghostStream.close(); liveStream.close(); await p.stop(); }
 });
+
+// #1434 — the regression 8b71c01 shipped: when EVERY member is quiet past the
+// live window, the lap skipped them all and the ring went silent. On
+// 2026-09-21 12:28→12:54Z every post fanned out to zero, the owner's included.
+// A seat with an open, non-deaf stream is reachable; when nobody is "active",
+// reachable is enough — a lease that may time out beats a post that reaches no one.
+test('#1434 — two members, both holding open streams, both silent past the live window: a post is GRANTED (fanned to one of them), not skipped to silence', async () => {
+  const p = await pair({ SCRUM_TOKEN_RING_TIMEOUT_MS: '300000', SCRUM_LIVE_WINDOW_MS: '600' });
+  const a = await mcpSession(p.mcp.mcpUrl);
+  const aStream = await openChannelStream(p.mcp.mcpUrl, a.sessionId);
+  const b = await mcpSession(p.mcp.mcpUrl);
+  const bStream = await openChannelStream(p.mcp.mcpUrl, b.sessionId);
+  try {
+    assert.equal((await a.rpc('scrum/session/register', { seatId: 'a.sb', author: 'aa' })).result.ok, true);
+    assert.equal((await b.rpc('scrum/session/register', { seatId: 'b.sb', author: 'bb' })).result.ok, true);
+    await new Promise((r) => setTimeout(r, 800));   // both idle past the window — the 12:28Z shape
+    await post(p.rest.baseUrl, 'nonce-idle');
+    const env = await Promise.race([aStream.next('notifications/claude/channel'), bStream.next('notifications/claude/channel')]);
+    assert.ok(env.params.content.includes('nonce-idle'), 'an idle-but-listening seat received the turn');
+    assert.ok(['a.sb', 'b.sb'].includes(env.params.meta.token_ring_seat), `granted to a member with an open stream: ${JSON.stringify(env.params.meta)}`);
+    const log = () => p.mcp.stdoutText();
+    assert.ok(await poll(() => grants(log()).length >= 1, 2000), `a board.grant was logged: ${log().slice(-400)}`);
+    assert.ok(!/fanned out to 0 session/.test(log().split('nonce-idle').pop() || ''), 'no fan-out-to-zero after the post');
+  } finally { aStream.close(); bStream.close(); await p.stop(); }
+});
+
+test('#1434 — the tier holds: a member that SPOKE inside the window still wins the grant over a quiet one (the Sunday ghost still loses)', async () => {
+  const p = await pair({ SCRUM_TOKEN_RING_TIMEOUT_MS: '300000', SCRUM_LIVE_WINDOW_MS: '600' });
+  const quiet = await mcpSession(p.mcp.mcpUrl);
+  const quietStream = await openChannelStream(p.mcp.mcpUrl, quiet.sessionId);
+  const live = await mcpSession(p.mcp.mcpUrl);
+  const liveStream = await openChannelStream(p.mcp.mcpUrl, live.sessionId);
+  try {
+    assert.equal((await quiet.rpc('scrum/session/register', { seatId: 'q.sb', author: 'qq' })).result.ok, true);   // registered FIRST — ring order favours it
+    assert.equal((await live.rpc('scrum/session/register', { seatId: 'l.sb', author: 'll' })).result.ok, true);
+    await new Promise((r) => setTimeout(r, 800));
+    await live.rpc('ping', {}).catch(() => {});
+    await post(p.rest.baseUrl, 'nonce-tier');
+    const env = await liveStream.next('notifications/claude/channel');
+    assert.equal(env.params.meta.token_ring_seat, 'l.sb', `the active seat is granted over the quiet one: ${JSON.stringify(env.params.meta)}`);
+  } finally { quietStream.close(); liveStream.close(); await p.stop(); }
+});

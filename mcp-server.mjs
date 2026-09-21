@@ -2858,11 +2858,27 @@ const seatRegistry = createSeatRegistry();
 // LIVE_WINDOW_MS and is not marked deaf — the same live/stale rule
 // /channel/status prints per seat. Two ghost registrations held two full
 // leases on 2026-09-20 because "registered" was the only test.
-function ringSeatDeliverable(seatId) {
+//
+// #1434 — TWO TIERS, or the ring goes silent. 8b71c01 made "spoke inside
+// LIVE_WINDOW_MS" the whole test, and on 2026-09-21 12:28→12:54Z every terminal
+// seat was idle past the window (they LISTEN between turns — that is when they
+// need push), so every INTERJECT skipped all five members and fanned out to
+// zero, the owner's post included. A seat that spoke recently still wins the
+// grant over one that didn't (Sunday's ghost lanes lose to a working seat); but
+// when NOBODY in the ring spoke recently, any open non-deaf stream is
+// deliverable — a lease that may time out beats a post that reaches no one.
+function ringSeatMeta(seatId) {
   const sid = seatRegistry.sessionForSeat(seatId);
-  const m = sid ? sessionMeta.get(sid) : null;
-  if (!m || (m.openStreamCount ?? 0) <= 0 || m.deafSince) return false;
-  return !!m.lastClientRequestAt && (Date.now() - m.lastClientRequestAt) <= LIVE_WINDOW_MS;
+  return sid ? sessionMeta.get(sid) : null;
+}
+function ringSeatReachable(m) { return !!m && (m.openStreamCount ?? 0) > 0 && !m.deafSince; }
+function ringSeatActive(m) { return ringSeatReachable(m) && !!m.lastClientRequestAt && (Date.now() - m.lastClientRequestAt) <= LIVE_WINDOW_MS; }
+function ringSeatDeliverable(seatId) {
+  const m = ringSeatMeta(seatId);
+  if (ringSeatActive(m)) return true;
+  if (!ringSeatReachable(m)) return false;
+  // reachable but quiet: deliverable only if no member of the ring is active
+  return !seatRegistry.seats().some((id) => ringSeatActive(ringSeatMeta(id)));
 }
 const tokenRingEngine = createTokenRingEngine({ registry: seatRegistry, genEnvelopeId: () => randomUUID(), isDeliverable: ringSeatDeliverable });
 
