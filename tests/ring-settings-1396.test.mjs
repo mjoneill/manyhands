@@ -41,6 +41,16 @@ test('#1396 s2 — a terminal seat is ticked into the ring from Settings, joins 
       fs.writeFileSync(server.configFile, fs.readFileSync(cfg));
       mcp = await startMcpServer({ port: mcpPort, restApiBase: server.baseUrl, env: { SCRUM_SEAT_TOKENS: tokens, SCRUM_CHANNEL_STAGGER: '', SCRUM_CHANNEL_CONFIG_FILE: server.configFile } });
       const status = async () => (await fetch(`${new URL(mcp.mcpUrl).origin}/channel/status`)).json();
+      // A client-side close reaches the server a beat later; a GET that lands
+      // before the transport drops the old stream is 409'd (one SSE stream per
+      // session — channel.test.mjs #289 asserts exactly that). CI lost this race
+      // 3/3 on 2026-09-21 while it never lost it locally. Wait for the seat's
+      // stream count to read 0 before opening the next one.
+      const closeAndDrain = async (s) => {
+        s.close();
+        const gone = await until(async () => { const x = await status(); return (x.seats?.alpha?.streams ?? 0) === 0 ? x : null; }, 6000, 50);
+        assert.ok(gone, 'the closed stream is gone from /channel/status before the next open');
+      };
       const a = await mcpSession(mcp.mcpUrl, { headers: { Authorization: 'Bearer tok-alpha' } });
       const stream = await openChannelStream(mcp.mcpUrl, a.sessionId);
       let st = await status();
@@ -61,7 +71,7 @@ test('#1396 s2 — a terminal seat is ticked into the ring from Settings, joins 
       assert.deepEqual(saved.tokenRing.bearerSeats, ['alpha'], 'the save carried the ticked seat');
 
       // the adapter re-reads the config; a fresh stream open registers the seat
-      stream.close();
+      await closeAndDrain(stream);
       const stream2 = await openChannelStream(mcp.mcpUrl, a.sessionId);
       st = await until(async () => { const x = await status(); return x.seats.alpha.ring ? x : null; });
       assert.ok(st, 'ring:true — the seat joined from the page, no file edit');
@@ -76,7 +86,7 @@ test('#1396 s2 — a terminal seat is ticked into the ring from Settings, joins 
       await page.waitForFunction(() => /Saved/.test(document.querySelector('#msg')?.textContent || ''), { timeout: 5000 });
       const cleared = await (await fetch(`${server.baseUrl}/api/config`)).json();
       assert.equal(cleared.tokenRing.bearerSeats, undefined, 'unticked ⇒ the list is gone from the config');
-      stream2.close();
+      await closeAndDrain(stream2);
       const stream3 = await openChannelStream(mcp.mcpUrl, a.sessionId);
       st = await until(async () => { const x = await status(); return x.seats.alpha.ring === false ? x : null; });
       assert.ok(st, 'unlisted again ⇒ not in the ring');
