@@ -659,7 +659,7 @@ export function mountConversationView(opts = {}) {
     // had ONE row, then none. Cap the composer at a third of the viewport
     // (never above the default), so the thing being answered stays on screen.
     const win = doc.defaultView;
-    const maxHeight = Math.max(120, Math.min(480, Math.round(((win && win.innerHeight) || 900) * 0.33)));
+    const maxHeight = () => Math.max(120, Math.min(480, Math.round(((win && win.innerHeight) || 900) * 0.33)));   // a function: follows the window (#1431)
     mountEditor(ta, { doc, render: renderChatMarkdown, onSubmit: () => fm.requestSubmit(), maxHeight });
     // #1366 — the draft is keyed by THREAD (`card:<id>` or the whole commons),
     // so a misclick to a #NNN and back restores this box and no other; the

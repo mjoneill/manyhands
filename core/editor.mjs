@@ -27,7 +27,7 @@
  *                   a #NNN's hover in the preview when the surface can look it
  *                   up; nothing when it cannot.
  *     onSubmit      () => void — Cmd/Ctrl+Enter. Plain Enter stays a newline.
- *     maxHeight     px — grows to fit up to here, then scrolls (default 480).
+ *     maxHeight     px, or a FUNCTION returning px — grows to fit up to here, then scrolls (default 480); a function is re-read on every grow and on window resize (#1431).
  *
  * Returns a handle: { root, textarea, previewing, showPreview(bool), refresh(),
  * destroy() }. Mounting twice on one textarea returns the same handle.
@@ -79,9 +79,14 @@ export function mountEditor(textarea, {
   // Growth. The surface's own stylesheet may cap the box (index.html caps
   // .form-textarea at 120px); the inline max-height wins so the ceiling here
   // is the one that applies.
-  textarea.style.maxHeight = `${maxHeight}px`;
+  // #1431 — `maxHeight` may be a FUNCTION (a cap that follows the window);
+  // read at every grow so a resize after typing re-caps the box.
+  const cap = () => Math.max(1, Number(typeof maxHeight === 'function' ? maxHeight() : maxHeight) || 480);
+  textarea.style.maxHeight = `${cap()}px`;
   textarea.style.resize = 'vertical';
   const grow = () => {
+    const maxHeight = cap();
+    textarea.style.maxHeight = `${maxHeight}px`;
     textarea.style.height = 'auto';
     const h = textarea.scrollHeight;
     // Not laid out (display:none ancestor, a closed <details>): scrollHeight
@@ -128,6 +133,7 @@ export function mountEditor(textarea, {
   };
 
   textarea.addEventListener('input', grow);
+  const win = doc?.defaultView; if (win) win.addEventListener('resize', grow);   // #1431 — the cap follows the window
   textarea.addEventListener('focus', grow);
   textarea.addEventListener('keydown', onKey);
   if (writeBtn) writeBtn.addEventListener('click', () => showPreview(false));
@@ -143,6 +149,7 @@ export function mountEditor(textarea, {
     grow,
     destroy() {
       textarea.removeEventListener('input', grow);
+      if (win) win.removeEventListener('resize', grow);
       textarea.removeEventListener('focus', grow);
       textarea.removeEventListener('keydown', onKey);
       textarea.hidden = false;

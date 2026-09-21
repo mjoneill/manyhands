@@ -139,6 +139,12 @@ test('#1409/#1431 on a laptop viewport with a scrolled talk and a long draft, Le
     assert.ok(m.closeInView, `Close is inside the viewport: ${JSON.stringify(m)}`);
     assert.ok(m.feedHeight >= 120, `the feed keeps rows (>=120px): ${JSON.stringify(m)}`);
     assert.ok(m.composerHeight <= m.vh * 0.34 + 2, `the composer is capped near a third of the viewport: ${JSON.stringify(m)}`);
+    // #1431 review nit — the cap FOLLOWS the window: shrink it after typing and the box re-caps.
+    await page.setViewport({ width: 1232, height: 500 });
+    await new Promise((r) => setTimeout(r, 150));
+    const after = await page.evaluate(() => ({ vh: window.innerHeight, composerHeight: document.querySelector('.cv-input').getBoundingClientRect().height, feedHeight: document.querySelector('.cv-feed').getBoundingClientRect().height }));
+    assert.ok(after.composerHeight <= after.vh * 0.34 + 2, `after a resize the composer re-caps to the new viewport: ${JSON.stringify(after)}`);
+    assert.ok(after.feedHeight >= 120, `and the feed keeps its floor after the resize: ${JSON.stringify(after)}`);
     await page.close();
   }, { server: { board, env: { SCRUM_ROSTER_FILE: rosterFile } }, launch: { headless: 'new' } });
 });
