@@ -25,8 +25,8 @@
   .talk-head { padding: 8px 0 6px; border-bottom: 1px solid var(--border, #ddd); margin-bottom: 8px; }
   .talk-head h2 { margin: 0 0 2px; font-size: 16px; }
   .talk-head .talk-meta { font-size: 12px; color: var(--muted); }
-  .talk-head .talk-actions { display: inline-flex; gap: 8px; margin-left: 10px; vertical-align: middle; }
-  .talk-head .talk-actions button { font-size: 12px; padding: 2px 8px; }
+  .talk-head .talk-actions, .talk-note .talk-actions { display: inline-flex; gap: 8px; margin-left: 10px; vertical-align: middle; }
+  .talk-head .talk-actions button, .talk-note .talk-actions button { font-size: 12px; padding: 2px 8px; }
   .talk-head.talk-closed h2 { color: var(--muted); }
   .talk-closed-note { font-size: 12px; color: var(--muted); margin: 4px 0 0; }
   /* #1409 — a seat chip's second affordance: open a talk with that seat */
@@ -761,6 +761,7 @@
       // voice; nothing here is private, and "show the whole room" is one link.
       const talkId = new URLSearchParams(location.search).get('conversation');
       let talk = null;
+      let talkActions = null;   // #1409 — built with the head, mounted on the form's talk-note
       if (talkId) {
         try { const r = await fetch('/api/talks/' + encodeURIComponent(talkId)); if (r.ok) talk = await r.json(); } catch { /* falls through to the plain room */ }
       }
@@ -835,7 +836,14 @@
           actions.append(reopen);
         }
         actions.append(err);
-        h2.append(actions);
+        // #1409 (2026-09-21): the controls do NOT live in the head. The head is
+        // the FIRST element of a feed that scrolls to its newest post, so the
+        // owner never saw them — his screenshot had a one-row feed (#1431) and
+        // the buttons above its fold. They go on the talk-note line inside the
+        // form, which is on screen in every state; the head keeps the title.
+        // A CLOSED talk hides its composer (and the form the note lives in), so
+        // its Reopen stays in the head, where the closed line is.
+        if (talk.closedAt) h2.append(actions); else talkActions = actions;
         head.append(h2, meta);
         if (talk.closedAt) {
           const note = document.createElement('p'); note.className = 'talk-closed-note'; note.id = 'talk-closed-note';
@@ -874,6 +882,7 @@
         if (form) {
           const note = document.createElement('div'); note.className = 'talk-note';
           note.textContent = `Posting here tags the post into this talk and wakes @${talk.with} — it is public, like the rest of the room, and shows inline in the whole stream.`;
+          if (talkActions) note.append(talkActions);   // #1409 — Leave / Close where the owner can see them
           form.prepend(note);
         }
       }

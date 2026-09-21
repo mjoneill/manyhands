@@ -5,6 +5,10 @@
 
 .cv-root { display: flex; flex-direction: column; min-height: 0; height: 100%; }
 .cv-feed { flex: 1; overflow-y: auto; min-height: 0; padding-right: 4px; }
+/* #1431 — the feed keeps a floor: a growing composer cannot take it below
+   ~6 lines. The composer's own cap (conversation-view.mjs) does most of the
+   work; this holds when the viewport is shorter than both. */
+.cv-root > .cv-feed { min-height: 9rem; }
 
 /* #303-6 — search + load-older toolbar above the feed */
 .cv-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }

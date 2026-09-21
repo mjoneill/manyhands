@@ -654,7 +654,13 @@ export function mountConversationView(opts = {}) {
     // feed uses, Cmd/Ctrl+Enter posts. Mounted after append so the wrapper
     // lands inside the form; the paste/drop listeners below bind to `ta`
     // itself and are untouched by the wrap.
-    mountEditor(ta, { doc, render: renderChatMarkdown, onSubmit: () => fm.requestSubmit() });
+    // #1431 — the editor's default ceiling (480px) is taller than the room a
+    // laptop leaves after the header: the owner's reply grew until the feed
+    // had ONE row, then none. Cap the composer at a third of the viewport
+    // (never above the default), so the thing being answered stays on screen.
+    const win = doc.defaultView;
+    const maxHeight = Math.max(120, Math.min(480, Math.round(((win && win.innerHeight) || 900) * 0.33)));
+    mountEditor(ta, { doc, render: renderChatMarkdown, onSubmit: () => fm.requestSubmit(), maxHeight });
     // #1366 — the draft is keyed by THREAD (`card:<id>` or the whole commons),
     // so a misclick to a #NNN and back restores this box and no other; the
     // leaving guard names it. Released only after the post is confirmed.

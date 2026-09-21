@@ -42,7 +42,7 @@ test('#1409 close a talk from its view (read-only + reopen after), and open one 
 
     // ── the view carries LEAVE and CLOSE ──
     await page.goto(`${server.baseUrl}/commons.html?conversation=${id}`, { waitUntil: 'networkidle0' });
-    await page.waitForSelector('#talk-head #talk-leave', { timeout: 5000 });
+    await page.waitForSelector('.cv-form .talk-note #talk-leave', { timeout: 5000 });
     assert.ok(await page.$('#talk-close'), 'an open talk offers Close');
     await page.select('.cv-who', 'ada');   // the composer speaks as the opener, as it would for the human who opened it
     assert.equal(await page.$eval('.cv-form', (f) => f.hidden), false, 'an open talk has its composer');
@@ -66,7 +66,7 @@ test('#1409 close a talk from its view (read-only + reopen after), and open one 
     assert.equal(await page.$eval('.cv-form', (f) => f.hidden), true, 'a closed talk shows no composer');
     assert.ok(await page.$('#talk-closed-note'), 'and says it is closed');
     await Promise.all([page.waitForNavigation({ waitUntil: 'networkidle0' }), page.click('#talk-reopen')]);
-    await page.waitForSelector('#talk-head #talk-close', { timeout: 5000 });
+    await page.waitForSelector('.cv-form .talk-note #talk-close', { timeout: 5000 });
     assert.equal(await page.$eval('.cv-form', (f) => f.hidden), false, 'reopened: the composer is back');
     const again = await api(server.baseUrl, 'GET', '/api/talks/' + id);
     assert.equal(again.body.closedAt, null, 'reopen cleared closedAt');
@@ -95,5 +95,50 @@ test('#1409 close a talk from its view (read-only + reopen after), and open one 
     assert.ok(fromChip, 'the chip door opened a talk');
     const minted = await api(server.baseUrl, 'GET', '/api/talks/' + fromChip);
     assert.equal(minted.body.with, 'pip'); assert.equal(minted.body.title, 'from the chip');
+  }, { server: { board, env: { SCRUM_ROSTER_FILE: rosterFile } }, launch: { headless: 'new' } });
+});
+
+// #1409 (2026-09-21) + #1431 — the owner's screenshot: a laptop viewport, a talk
+// with enough posts to scroll, a ten-line reply in the box. The feed had ONE
+// row; Leave/Close were the first element of that feed, above its fold, and he
+// said "I still don't see any mechanism to close the talks with mode." An
+// element that is in the DOM but outside the viewport is not a control the
+// human has. This test asks the browser where things ARE, not whether they exist.
+test('#1409/#1431 on a laptop viewport with a scrolled talk and a long draft, Leave/Close are ON SCREEN and the feed keeps rows', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'talk-1409-vp-'));
+  const rosterFile = path.join(dir, 'roster.json');
+  fs.writeFileSync(rosterFile, JSON.stringify({ seats: SEATS }));
+  const board = makeBoardFixture({ cards: [], conversations: [] });
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1232, height: 763 });   // his screenshot's size
+    const opened = await api(server.baseUrl, 'POST', '/api/talks', { with: 'pip', title: 'long one', by: 'ada' });
+    const id = opened.body.id;
+    for (let i = 0; i < 30; i++) {
+      await api(server.baseUrl, 'POST', '/api/conversations', { author: i % 2 ? 'pip' : 'ada', body: `line ${i} — ${'words '.repeat(30)}`, conversation: id });
+    }
+    await page.goto(`${server.baseUrl}/commons.html?conversation=${id}`, { waitUntil: 'networkidle0' });
+    await page.waitForSelector('.cv-form .talk-note #talk-close', { timeout: 5000 });
+    // a long draft, typed
+    await page.click('.cv-input');
+    await page.type('.cv-input', Array.from({ length: 24 }, (_, i) => `draft line ${i} that runs on for a while so the box grows`).join('\n'));
+    const m = await page.evaluate(() => {
+      const vh = window.innerHeight;
+      const inView = (el) => { const r = el.getBoundingClientRect(); return r.top >= 0 && r.bottom <= vh && r.height > 0; };
+      const feed = document.querySelector('.cv-feed');
+      const ta = document.querySelector('.cv-input');
+      return {
+        leaveInView: inView(document.querySelector('#talk-leave')),
+        closeInView: inView(document.querySelector('#talk-close')),
+        feedHeight: feed.getBoundingClientRect().height,
+        composerHeight: ta.getBoundingClientRect().height,
+        vh,
+      };
+    });
+    assert.ok(m.leaveInView, `Leave is inside the viewport: ${JSON.stringify(m)}`);
+    assert.ok(m.closeInView, `Close is inside the viewport: ${JSON.stringify(m)}`);
+    assert.ok(m.feedHeight >= 120, `the feed keeps rows (>=120px): ${JSON.stringify(m)}`);
+    assert.ok(m.composerHeight <= m.vh * 0.34 + 2, `the composer is capped near a third of the viewport: ${JSON.stringify(m)}`);
+    await page.close();
   }, { server: { board, env: { SCRUM_ROSTER_FILE: rosterFile } }, launch: { headless: 'new' } });
 });
