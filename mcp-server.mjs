@@ -2873,12 +2873,18 @@ function ringSeatMeta(seatId) {
 }
 function ringSeatReachable(m) { return !!m && (m.openStreamCount ?? 0) > 0 && !m.deafSince; }
 function ringSeatActive(m) { return ringSeatReachable(m) && !!m.lastClientRequestAt && (Date.now() - m.lastClientRequestAt) <= LIVE_WINDOW_MS; }
-function ringSeatDeliverable(seatId) {
+// R1 (review of bb80838): tier 2 asks whether any ACTIVE member is still
+// QUEUED for this grant — not whether anyone is active at all. Otherwise a
+// seat that just spoke, once served, would keep every listening seat skipped
+// for the whole live window, and a room with one busy seat would go silent
+// for the rest — today's defect narrowed, not fixed. The engine hands the
+// queued set in; a caller without it falls back to "any member active".
+function ringSeatDeliverable(seatId, { queued = null } = {}) {
   const m = ringSeatMeta(seatId);
   if (ringSeatActive(m)) return true;
   if (!ringSeatReachable(m)) return false;
-  // reachable but quiet: deliverable only if no member of the ring is active
-  return !seatRegistry.seats().some((id) => ringSeatActive(ringSeatMeta(id)));
+  const contenders = Array.isArray(queued) ? queued : seatRegistry.seats();
+  return !contenders.some((id) => id !== seatId && ringSeatActive(ringSeatMeta(id)));
 }
 const tokenRingEngine = createTokenRingEngine({ registry: seatRegistry, genEnvelopeId: () => randomUUID(), isDeliverable: ringSeatDeliverable });
 

@@ -67,6 +67,10 @@ function hasUnreadForeign(s, p) {
   return false;
 }
 const queued = (s, p) => isRing(s, p) && p !== s.lease?.holder && hasUnreadForeign(s, p);
+// #1434 — the members owed a grant right now (unread foreign material, not the
+// holder). The engine hands this to its deliverable hook so a delivery rule can
+// ask "is anyone ACTIVE still queued?" rather than "is anyone active at all".
+export const queuedSeats = (s) => s.ring.filter((p) => queued(s, p));
 
 // A scheduled event is valid only against the CURRENT lease — matching BOTH holder AND the
 // fencing id. This rejects stale late events from an earlier lease to the same seat (the ABA

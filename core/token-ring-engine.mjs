@@ -28,7 +28,7 @@
  *   - Holder's post → RESPOND (advance the ring). Anyone else → additive append.
  */
 
-import { initialState, reduce, delivery } from './token-ring.mjs';
+import { initialState, reduce, delivery, queuedSeats } from './token-ring.mjs';
 
 /**
  * Adjust ring membership to the current registry seats. Joiners enter at
@@ -103,7 +103,7 @@ export function createTokenRingEngine({ registry, genEnvelopeId, isDeliverable =
     // comes back receives what it was skipped over for on its first turn.
     const cursorsBefore = {};
     let guard = state.ring.length + 1;
-    while (state.lease && !isDeliverable(state.lease.holder) && guard-- > 0) {
+    while (state.lease && !isDeliverable(state.lease.holder, { queued: queuedSeats(state) }) && guard-- > 0) {
       const { holder, id } = state.lease;
       skipped.push(holder);
       cursorsBefore[holder] = state.cursors[holder];

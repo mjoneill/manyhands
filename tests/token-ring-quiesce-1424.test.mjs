@@ -120,3 +120,31 @@ test('#1434 — the tier holds: a member that SPOKE inside the window still wins
     assert.equal(env.params.meta.token_ring_seat, 'l.sb', `the active seat is granted over the quiet one: ${JSON.stringify(env.params.meta)}`);
   } finally { quietStream.close(); liveStream.close(); await p.stop(); }
 });
+
+// #1434 R1 — tier 2 keys on ACTIVE-AND-QUEUED, not merely active: once the
+// active seat has been served (it RESPONDS), the quiet seat behind it is granted
+// at once instead of waiting out the live window. (Registering is itself a
+// client request, so the window is allowed to lapse before only one seat speaks.)
+test('#1434 R1 — after the active member is served, the quiet member is granted next, inside the live window', async () => {
+  const p = await pair({ SCRUM_TOKEN_RING_TIMEOUT_MS: '300000', SCRUM_LIVE_WINDOW_MS: '2000' });
+  const live = await mcpSession(p.mcp.mcpUrl);
+  const liveStream = await openChannelStream(p.mcp.mcpUrl, live.sessionId);
+  const quiet = await mcpSession(p.mcp.mcpUrl);
+  const quietStream = await openChannelStream(p.mcp.mcpUrl, quiet.sessionId);
+  try {
+    assert.equal((await live.rpc('scrum/session/register', { seatId: 'l.sb', author: 'll' })).result.ok, true);
+    assert.equal((await quiet.rpc('scrum/session/register', { seatId: 'q.sb', author: 'qq' })).result.ok, true);
+    await new Promise((r) => setTimeout(r, 2200));               // let the window lapse for BOTH
+    await live.rpc('ping', {}).catch(() => {});                 // now only l.sb is active; q.sb stays quiet
+    await post(p.rest.baseUrl, 'nonce-r1');
+    const first = await liveStream.next('notifications/claude/channel');
+    assert.equal(first.params.meta.token_ring_seat, 'l.sb', 'the active seat is served first');
+    // the holder RESPONDS (a post by its author) → lease consumed → next grant
+    await fetch(`${p.rest.baseUrl}/api/conversations`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ body: 'reply from ll', author: 'll' }) });
+    const second = await Promise.race([
+      quietStream.next('notifications/claude/channel'),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('the quiet seat was never granted inside the live window')), 8000)),
+    ]);
+    assert.equal(second.params.meta.token_ring_seat, 'q.sb', `the quiet seat is granted next, not skipped: ${JSON.stringify(second.params.meta)}`);
+  } finally { liveStream.close(); quietStream.close(); await p.stop(); }
+});
