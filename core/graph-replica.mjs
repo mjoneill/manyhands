@@ -218,6 +218,7 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:modelCalls', 'scrum:stoppedBecause',
   // #1246 — the contradiction between what a wake claimed and what it called.
   'scrum:unbackedLookupClaims', 'scrum:claimedLookup',
+  'scrum:memoryRefused',   // #1441
   'scrum:narrationRetryOutcome',
   // #1130 — an apex is a KIND, not a convention: a card carrying `apex:<X>`
   // projects as scrum:Apex with scrum:apexLabel "X", so "what lives here" is
@@ -1186,6 +1187,10 @@ function projectModelCall(store, e) {
     add(nn(S + 'unbackedLookupClaims'), num(cl.length));
     for (const c of cl) { if (c && c.verb) add(nn(S + 'claimedLookup'), lit(String(c.verb))); }
   }
+  // #1441 — HOW MANY REMEMBER LINES #1240 REFUSED on this call. Emitted always,
+  // zero included, for the ratio's sake (see #1246 above): "how often is this
+  // seat's memory refused" needs the clean rows findable too.
+  if (Array.isArray(e['scrum:memoryRefused'])) add(nn(S + 'memoryRefused'), num(e['scrum:memoryRefused'].length));
   // #1246b — the nudge's OUTCOME, so "does handing a seat its own sentence back
   // actually work" is a rate rather than an anecdote. Emitted only when a nudge
   // happened: unlike the claims count, the absent case here means "nothing was

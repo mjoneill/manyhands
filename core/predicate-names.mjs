@@ -131,6 +131,7 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:toolGranted': 'scrum:toolGranted', 'scrum:toolCalled': 'scrum:toolCalled',
   'scrum:toolHops': 'scrum:toolHops', 'scrum:toolRowsReturned': 'scrum:toolRowsReturned',
   'scrum:unbackedLookupClaims': 'scrum:unbackedLookupClaims', 'scrum:claimedLookup': 'scrum:claimedLookup',
+  'scrum:memoryRefused': 'scrum:memoryRefused',   // #1441
   'scrum:narrationRetryOutcome': 'scrum:narrationRetryOutcome',
   'scrum:modelCalls': 'scrum:modelCalls', 'scrum:stoppedBecause': 'scrum:stoppedBecause',
   'scrum:budgetPerDay': 'scrum:budgetPerDay',

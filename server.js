@@ -4506,7 +4506,7 @@ const modelCallToWire = (e) => ({
   anomalies: e['scrum:anomaly'] ?? [],   // #1352
   at: e['scrum:calledAt'], error: e.text || null,
   sampling: e['scrum:sampling'] ?? null, wake: { kind: e['scrum:wakeKind'] ?? null, messageId: e['scrum:wakeMessage'] ?? null },
-  memory: { handed: e['scrum:memoryHanded'] ?? null, state: e['scrum:memoryState'] ?? null }, memoryWritten: e['scrum:memoryWritten'] ?? [], claims: e['scrum:claims'] ?? [],
+  memory: { handed: e['scrum:memoryHanded'] ?? null, state: e['scrum:memoryState'] ?? null, refusalsHanded: e['scrum:memoryRefusalsHanded'] ?? null }, memoryWritten: e['scrum:memoryWritten'] ?? [], claims: e['scrum:claims'] ?? [],
   // #1196 — the tool record reads back in the shape it was written; a row that
   // accepts a field and returns it changed is a record nobody can rely on.
   toolsGranted: e['scrum:toolsGranted'] ?? [], toolHops: e['scrum:toolHops'] ?? [],
@@ -4514,6 +4514,8 @@ const modelCallToWire = (e) => ({
   postedText: e['scrum:postedText'] ?? null,
   // #1246 — the contradiction between the post and the row, on the row.
   unbackedLookupClaims: e['scrum:unbackedLookupClaims'] ?? [],
+  // #1441 — refused REMEMBER lines, read back so the seat's next wake can be told.
+  memoryRefused: e['scrum:memoryRefused'] ?? [],
   // #1246b — was the seat handed its own announcement back, and what did it do then.
   narrationRetry: e['scrum:narrationRetry'] ?? null,
 });
@@ -4526,6 +4528,8 @@ const MODEL_CALL_FIELDS = new Set(['by', 'agent', 'model', 'provider', 'protocol
   'unbackedLookupClaims',
   // #1246b — the nudge and what it produced.
   'narrationRetry',
+  // #1441 — REMEMBER lines #1240 refused, with why: the seat's only surface is the board.
+  'memoryRefused',
   // #1352 — what the adapter noticed about the response and did NOT refuse on
   // (e.g. zero-reasoning-tokens on a thinking model). Countable, never a drop.
   'anomalies']);
@@ -4560,6 +4564,8 @@ function modelCallEntityFrom(body) {
     'scrum:wakeKind': typeof body.wake?.kind === 'string' ? body.wake.kind : null,
     'scrum:wakeMessage': typeof body.wake?.messageId === 'string' ? body.wake.messageId : null,
     'scrum:memoryHanded': n(body.memory?.handed), 'scrum:memoryState': typeof body.memory?.state === 'string' ? body.memory.state : null,
+    // #1441 — how many refused REMEMBER lines this call was handed back (absent = none).
+    'scrum:memoryRefusalsHanded': n(body.memory?.refusalsHanded),
     'scrum:memoryWritten': Array.isArray(body.memoryWritten) ? body.memoryWritten.map((m) => (typeof m === 'string' ? m : JSON.stringify(m))).slice(0, 50) : [],
     'scrum:claims': Array.isArray(body.claims) ? body.claims.slice(0, 50) : [],
     // #1196 — the tool record. Hops keep their full shape on the document; the
@@ -4572,6 +4578,13 @@ function modelCallEntityFrom(body) {
     'scrum:stoppedBecause': typeof body.stoppedBecause === 'string' ? body.stoppedBecause : null,
     'scrum:postedText': typeof body.postedText === 'string' ? body.postedText : null,
     'scrum:unbackedLookupClaims': Array.isArray(body.unbackedLookupClaims) ? body.unbackedLookupClaims.slice(0, 20) : [],
+    // #1441 — what the seat tried to remember and #1240 refused, with the reason.
+    // Only {line, reason} strings are kept: the row stores what was refused, not
+    // whatever else a caller attached.
+    'scrum:memoryRefused': Array.isArray(body.memoryRefused)
+      ? body.memoryRefused.filter((m) => m && typeof m.line === 'string').slice(0, 20)
+        .map((m) => ({ line: m.line.slice(0, 500), reason: typeof m.reason === 'string' ? m.reason.slice(0, 500) : null }))
+      : [],
     'scrum:narrationRetry': (body.narrationRetry && typeof body.narrationRetry === 'object' && !Array.isArray(body.narrationRetry)) ? body.narrationRetry : null,
     'scrum:agent': agent, 'scrum:model': body.model.trim(),
     'scrum:provider': typeof body.provider === 'string' ? body.provider : null,

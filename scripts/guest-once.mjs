@@ -22,6 +22,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { callModel } from '../core/model-adapter.mjs';
 import { deliveryStaleMs, isStaleDelivery } from '../core/delivery.mjs';   // #1346
+import { rowToBoard } from '../core/model-call-row.mjs';
 import { findMentions, findWakes, pairCapSuppressed, DEFAULT_PAIR_CAP_PER_HOUR, guestOnce, fetchBoundedChanges, shouldMarkAnswered, mentionScanPath, fetchMentionWindow, acquireLock, releaseLock, effectiveWakeOn, budgetCheck, deliveryOutcome, bindingRulings } from '../core/guest-loop.mjs';
 import { makeExecutor } from '../core/board-tools.mjs';
 
@@ -266,42 +267,22 @@ try { rows = await fetchBoundedChanges(getRaw, sinceIso); }
 catch (e) { console.error(`[#1201] changes unreadable — answering from the mention alone: ${e.message}`); }
 // #1202 — the ledger row goes to the board as a scrum:ModelCall node; the JSONL
 // file is the fallback if the board refuses, and the row says which happened.
-const rowToBoard = (row) => ({
-  by: row.agent, agent: row.agent, model: row.model, provider: row.provider, protocol: row.protocol,
-  promptVersion: row.promptVersion, tokensIn: row.usage?.promptTokens ?? row.usage?.prompt_eval_count ?? null,
-  tokensOut: row.usage?.completionTokens ?? row.usage?.eval_count ?? null,
-  // #1294 — the adapter reads it, runToolLoop sums it across hops, and this
-  // builder dropped it, so every reasoning model on this board ledgered as if
-  // it did not think. It is recorded as its OWN column and NOT folded into
-  // cost, because whether the vendor counts it inside completionTokens or
-  // beside it is exactly the thing we cannot currently tell — and a row that
-  // carries both numbers is what makes that answerable against an invoice.
-  reasoningTokens: row.usage?.reasoningTokens ?? null,
-  // #1296 — how much of the prompt was served from cache. Without this the
-  // largest lever anyone has identified has no gauge on our side of the wire:
-  // "did the caching work pay off" is answerable only by a human logging into
-  // the vendor's dashboard, once per change.
-  cachedPromptTokens: row.usage?.cachedPromptTokens ?? null,
-  cost: (agent.model?.costIn != null || agent.model?.costOut != null)
-    ? ((row.usage?.promptTokens ?? 0) * (agent.model.costIn ?? 0) + (row.usage?.completionTokens ?? 0) * (agent.model.costOut ?? 0)) : 0,
-  stopReason: row.stopReason ?? null, latencyMs: row.latencyMs, ok: row.ok, error: row.error ?? null,
-  anomalies: row.anomalies ?? [],   // #1352
-  contextHandedTo: row.contextHandedTo ?? [], producedPost: row.postId ?? null, at: row.at,
-  // #1203 finding — the knobs that reproduce the call, and the resident's fields (#1226), ride the board row too.
-  sampling: agent.model?.sampling ?? null, wake: row.wake ?? null, memory: row.memory ?? null, memoryWritten: row.memoryWritten ?? [], claims: row.claims ?? [],
-  // #1196 — the tool record travels to the BOARD, not just to the file beside
-  // this runner. A field that stops here is invisible to every reader who was
-  // not standing at this process, which is the same as not recording it.
-  toolsGranted: row.toolsGranted ?? [], toolHops: row.toolHops ?? [], modelCalls: row.modelCalls ?? null,
-  stoppedBecause: row.stoppedBecause ?? null, postedText: row.postedText ?? null,
-});
+// #1441 — the builder lives in core/model-call-row.mjs so tests exercise the real one.
+
 const ledgerSink = dry ? null : async (row) => {
-  const r = await fetch(`${BOARD}/api/model-calls`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(rowToBoard(row)) });
+  const r = await fetch(`${BOARD}/api/model-calls`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(rowToBoard(row, agent)) });
   if (!r.ok) throw new Error(`POST /api/model-calls → ${r.status}`);
   return r.json();
 };
 // #1226 — the resident's memory: read by OWNER (its seat), written as a memory
 // row under that owner. The mentioning human hands nothing.
+// #1441 — the previous call's refused REMEMBER lines, read from the board row
+// (newest first, so limit=1 is the call before this one).
+const priorRefusals = async (seat) => {
+  const j = await get(`/api/model-calls?agent=${encodeURIComponent(seat)}&limit=1`);
+  const last = Array.isArray(j?.calls) ? j.calls[0] : null;
+  return Array.isArray(last?.memoryRefused) ? last.memoryRefused : [];
+};
 const memories = async (seat) => {
   const j = await get(`/api/memories?owner=${encodeURIComponent(seat)}&limit=50`);
   const list = Array.isArray(j) ? j : (j?.memories ?? []);
@@ -318,7 +299,7 @@ const claimCard = dry ? async (n, seat) => console.log(`[dry-run] would claim #$
 };
 
 const r = await guestOnce({
-  agent, wake, changes: () => rows, ledgerSink, spentToday, memories, writeMemory, claimCard,
+  agent, wake, changes: () => rows, ledgerSink, spentToday, memories, priorRefusals, writeMemory, claimCard,
   // #1436 — the live decisions that name this seat, its held role, or its display name
   rulings: async (seatKey) => {
     const all = (await get('/api/decisions?live=1'));

@@ -403,7 +403,7 @@ export function findWakes({ agent, messages = [], cards = [], state = {}, now = 
   return out;
 }
 
-export function buildMessages({ agent, wake, changes = [], memories = [], rulings = [] }) {
+export function buildMessages({ agent, wake, changes = [], memories = [], rulings = [], refusedMemory = [] }) {
   const policy = agent.contextPolicy || 'thread';
   const lines = [];
   lines.push(`You are ${agent.name || agent.seatKey}, a ${agent.residency === 'resident' ? 'resident' : 'guest'} seat on the manyhands board. Your seat key is "${agent.seatKey}".`);
@@ -501,6 +501,17 @@ export function buildMessages({ agent, wake, changes = [], memories = [], ruling
         + 'if you cannot check it, say where it came from rather than stating it:\n'
         + memories.slice(-10).map((m) => `- [${m.updatedAt || m.createdAt || ''}] you wrote: "${m.body}"`).join('\n')
       : 'You have written nothing on earlier wakes: this is your first, or you kept nothing.');
+  }
+  // #1441 — WHAT YOU TRIED TO KEEP LAST TIME AND WAS NOT KEPT. #1240 refuses a
+  // REMEMBER line naming a card no tool returned on that wake; until this, the
+  // refusal went only to the runner's log and the seat believed it remembered
+  // (226 silent refusals for one resident, 09-06→09-22). The reason is handed
+  // back VERBATIM because it names the unfetched card: fetch that one card and
+  // the line can be re-written this wake — a one-hop repair, not a guess.
+  if (Array.isArray(refusedMemory) && refusedMemory.length) {
+    ctx.push('⚠️ Your last REMEMBER was refused — it was NOT stored, and it is not in the memory above:\n'
+      + refusedMemory.slice(0, 5).map((m) => `- line: "${m.line}"\n  why: ${m.reason ?? '(no reason recorded)'}`).join('\n')
+      + '\nIf it still matters, fetch the card the reason names and write the line again, or write it without the card number.');
   }
   ctx.push(wakeIntro(wake));
   // #1436 — rulings that bind THIS seat ride into every wake, above the change
@@ -644,7 +655,7 @@ async function postFailureLine({ agent, wake, error, latencyMs, post, onError })
  *   post       ({author, body}) => Promise<{id?}>
  *   ledgerFile where the pre-ledger row goes
  */
-export async function guestOnce({ agent, wake, changes = () => [], memories = null, rulings = null, writeMemory = null, claimCard = null, callModel, execute = null, maxHops = undefined, post, ledgerFile = ledgerFilePath(), ledgerSink = null, spentToday = null, now = () => new Date().toISOString(), log = () => {}, onError = () => {} }) {
+export async function guestOnce({ agent, wake, changes = () => [], memories = null, rulings = null, priorRefusals = null, writeMemory = null, claimCard = null, callModel, execute = null, maxHops = undefined, post, ledgerFile = ledgerFilePath(), ledgerSink = null, spentToday = null, now = () => new Date().toISOString(), log = () => {}, onError = () => {} }) {
   if (!agent?.seatKey) throw new Error('guestOnce: agent.seatKey is required — a post with no seat is actor:null forever (#1193)');
   if (!agent?.model?.model || !agent?.model?.protocol) throw new Error('guestOnce: agent.model {model, protocol} is required');
   // #1202 — the budget gate, BEFORE any context is fetched or any call is made.
@@ -673,7 +684,14 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
   let rul = [];
   if (typeof rulings === 'function') { try { rul = (await rulings(agent.seatKey)) || []; } catch (e) { onError(`[#1436] rulings unreadable for ${agent.seatKey}; waking without them: ${e?.message ?? e}`); } }
   else if (Array.isArray(rulings)) rul = rulings;
-  const messages = buildMessages({ agent, wake, changes: rows, memories: memState === 'unreadable' ? [{ body: '(your memory could not be read this wake — do not conclude it is empty)' }] : mem, rulings: rul });
+  // #1441 — the refusals from this seat's previous call, from the BOARD row (the
+  // seat's own surface), not the runner's log. Unreadable ⇒ none, logged.
+  let refusedMemory = [];
+  if (agent.residency === 'resident' && typeof priorRefusals === 'function') {
+    try { refusedMemory = (await priorRefusals(agent.seatKey)) || []; }
+    catch (e) { onError(`[#1441] prior refusals unreadable for ${agent.seatKey}; waking without them: ${e?.message ?? e}`); }
+  }
+  const messages = buildMessages({ agent, wake, changes: rows, memories: memState === 'unreadable' ? [{ body: '(your memory could not be read this wake — do not conclude it is empty)' }] : mem, rulings: rul, refusedMemory });
   const started = Date.now();
   const base = {
     ledger: 'pre-P6', agent: agent.seatKey, model: agent.model.model, protocol: agent.model.protocol,
@@ -681,7 +699,7 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
     wake: { kind: wake.kind || 'mention', messageId: wake.id ?? null, author: wake.author ?? null,
       // #1346 — a channel digest answers MANY messages; the ledger names them all.
       ...(Array.isArray(wake.messageIds) ? { messageIds: wake.messageIds } : {}) },
-    memory: { handed: mem.length, state: memState },
+    memory: { handed: mem.length, state: memState, ...(refusedMemory.length ? { refusalsHanded: refusedMemory.length } : {}) },
     contextHanded: { policy: agent.contextPolicy || 'thread', changesRows: (agent.contextPolicy === 'artifact-only') ? 0 : rows.length },
     contextHandedTo: [...(Array.isArray(wake.messageIds) ? wake.messageIds : [wake.id]), ...((agent.contextPolicy === 'artifact-only') ? [] : rows.slice(-20).map((c) => c.id))].filter(Boolean),
     // #1196 — what this seat MAY reach, recorded whether it reached or not: an
