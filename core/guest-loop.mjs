@@ -762,7 +762,13 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
       result = await callModel(agent.model, messages, { ...(agent.model.sampling || {}), ...thinkingOpt });
     }
   } catch (e) {
-    const row = { ...base, ok: false, error: e?.message ?? String(e), latencyMs: Date.now() - started };
+    // #1435 — THE FAILED ROW CARRIES WHAT THE CALL SPENT. The adapter attaches
+    // usage + finish reason to its errors, and the tool loop attaches the
+    // wake's summed usage and hops; without them a failed row is blind exactly
+    // where the question lives ("did it spend its whole budget thinking?").
+    const row = { ...base, ok: false, error: e?.message ?? String(e), latencyMs: Date.now() - started,
+      usage: e?.usage ?? null, stopReason: e?.stopReason ?? null, attempts: e?.attempts ?? null,
+      ...(Array.isArray(e?.hops) ? { toolHops: e.hops, modelCalls: e.modelCalls ?? null } : {}) };
     await recordLedger({ sink: ledgerSink, file: ledgerFile, row, onError });
     onError(`[#1201] model call failed for ${agent.seatKey}; NO post made: ${row.error}`);
     // #1420 — the failure is not an answer, but it is SAID. 2026-09-19 15:37Z:

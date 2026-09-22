@@ -513,7 +513,10 @@ export async function callModel(agent, messages, opts = {}) {
     //    maxTokens sails past.
     const produced = out.usage.completionTokens ?? approxTokens(out.text);
     if (produced > budget) {
-      throw new RunawayGenerationError(produced, budget, promptTokens);
+      // #1435 — a failed call still spent tokens; the row must be able to say how many.
+      const err = new RunawayGenerationError(produced, budget, promptTokens);
+      err.usage = out.usage; err.stopReason = out.stopReason ?? null; err.attempts = attempt;
+      throw err;
     }
 
     // 3. A thinking model that reports ZERO reasoning tokens is an ANOMALY ON
@@ -544,7 +547,8 @@ export async function callModel(agent, messages, opts = {}) {
       throw new ModelAssertionError('nonEmpty',
         'the provider returned success and no text. An empty answer and a failed call are '
         + 'different facts and the caller must be able to tell them apart.',
-        { usage: out.usage, attempts: attempt });
+        // #1435 — the finish reason too: "empty with stop" and "empty at length" are different facts.
+        { usage: out.usage, attempts: attempt, stopReason: out.stopReason ?? null });
     }
 
     return { ...out, raw: res.body, attempts: attempt, anomalies };

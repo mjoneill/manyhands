@@ -104,7 +104,20 @@ export async function runToolLoop({ agent, messages, tools = [], execute, callMo
   let stoppedBecause = 'answered';
 
   for (;;) {
-    const out = await callModel(agent, convo, { ...opts, ...(granted.size ? { tools } : {}) });
+    let out;
+    try { out = await callModel(agent, convo, { ...opts, ...(granted.size ? { tools } : {}) }); }
+    catch (e) {
+      // #1435 — A FAILED HOP DOES NOT ERASE THE HOPS BEFORE IT. The error
+      // leaves this loop with the wake's usage SUMMED (earlier hops + the
+      // failed one, when the adapter attached it) and the hops it made, so the
+      // failure row can say what the wake spent and fetched before it died.
+      if (e && typeof e === 'object') {
+        addUsage(e.usage);
+        e.usage = seen.size ? { ...usage } : (e.usage ?? null);
+        e.hops = hops; e.modelCalls = modelCalls + 1;
+      }
+      throw e;
+    }
     modelCalls += 1;
     addUsage(out.usage);   // #1294 — every hop is billed, including the last
     for (const a of out.anomalies ?? []) anomalies.add(a);   // #1352 — an anomaly on any hop is on the wake
