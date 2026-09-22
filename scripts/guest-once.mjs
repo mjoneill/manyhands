@@ -22,7 +22,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { callModel } from '../core/model-adapter.mjs';
 import { deliveryStaleMs, isStaleDelivery } from '../core/delivery.mjs';   // #1346
-import { rowToBoard } from '../core/model-call-row.mjs';
+import { rowToBoard, refusalsSince } from '../core/model-call-row.mjs';
 import { findMentions, findWakes, pairCapSuppressed, DEFAULT_PAIR_CAP_PER_HOUR, guestOnce, fetchBoundedChanges, shouldMarkAnswered, mentionScanPath, fetchMentionWindow, acquireLock, releaseLock, effectiveWakeOn, budgetCheck, deliveryOutcome, bindingRulings } from '../core/guest-loop.mjs';
 import { makeExecutor } from '../core/board-tools.mjs';
 
@@ -276,12 +276,11 @@ const ledgerSink = dry ? null : async (row) => {
 };
 // #1226 — the resident's memory: read by OWNER (its seat), written as a memory
 // row under that owner. The mentioning human hands nothing.
-// #1441 — the previous call's refused REMEMBER lines, read from the board row
-// (newest first, so limit=1 is the call before this one).
+// #1441 — refused REMEMBER lines since the seat last wrote memory, read from
+// its recent board rows (newest first); the rule lives in core/model-call-row.mjs.
 const priorRefusals = async (seat) => {
-  const j = await get(`/api/model-calls?agent=${encodeURIComponent(seat)}&limit=1`);
-  const last = Array.isArray(j?.calls) ? j.calls[0] : null;
-  return Array.isArray(last?.memoryRefused) ? last.memoryRefused : [];
+  const j = await get(`/api/model-calls?agent=${encodeURIComponent(seat)}&limit=10`);
+  return refusalsSince(j?.calls);
 };
 const memories = async (seat) => {
   const j = await get(`/api/memories?owner=${encodeURIComponent(seat)}&limit=50`);

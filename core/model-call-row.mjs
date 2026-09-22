@@ -46,3 +46,29 @@ export function rowToBoard(row, agent = {}) {
   memoryRefused: row.memoryRefused ?? [],
   };
 }
+
+/**
+ * #1441 — which refused REMEMBER lines to hand back on this wake, from the
+ * seat's recent board rows (NEWEST FIRST, as GET /api/model-calls returns them).
+ *
+ * Every refusal since the seat last SUCCEEDED in writing memory, not just the
+ * previous call's: a seat told once that does not re-write, then goes quiet,
+ * would otherwise lose the refusal exactly when it stopped trying (the
+ * resident's point, review of 3ecca80). A failed call (ok:false) is skipped,
+ * not treated as the boundary: it wrote nothing and was told nothing.
+ * Walk stops at the first ok row that wrote memory — that row's own refusals
+ * are included (it may have kept one line and lost another). Capped.
+ */
+export function refusalsSince(calls, { cap = 5 } = {}) {
+  const out = [];
+  for (const c of Array.isArray(calls) ? calls : []) {
+    if (!c || c.ok === false) continue;
+    if (Array.isArray(c.memoryRefused)) out.push(...c.memoryRefused);
+    const wrote = Array.isArray(c.memoryWritten) && c.memoryWritten.some((m) => {
+      if (typeof m !== 'string') return Boolean(m) && !m.error;
+      try { const o = JSON.parse(m); return !(o && typeof o === 'object' && o.error); } catch { return true; }
+    });
+    if (wrote) break;
+  }
+  return out.slice(0, cap);
+}

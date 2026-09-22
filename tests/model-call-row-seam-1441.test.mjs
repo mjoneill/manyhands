@@ -20,7 +20,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { guestOnce, buildMessages } from '../core/guest-loop.mjs';
-import { rowToBoard } from '../core/model-call-row.mjs';
+import { rowToBoard, refusalsSince } from '../core/model-call-row.mjs';
 import { startRestServer, makeBoardFixture } from './helpers/harness.mjs';
 
 const api = async (baseUrl, method, p, body) => {
@@ -46,27 +46,66 @@ async function oneWake(srv, { text, memories = [] }) {
   return { r, captured };
 }
 
-test('#1441 GENERIC SEAM — every field a real wake puts on its row that the wire returns comes back as written', async () => {
+// A value at its default ([], {}, null, '') cannot tell "forwarded" from
+// "dropped": a dropped field reads back as that same default. (Review of
+// 3ecca80: deleting unbackedLookupClaims from rowToBoard left this file green.)
+// So every compared field is given a NON-default value here, and the test
+// refuses to run vacuously: a compared field left at its default fails with
+// its name, which is what makes the NEXT forwarded field land here.
+const isDefault = (v) => v === null || v === undefined || v === '' || (Array.isArray(v) && v.length === 0) || (typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length === 0);
+const SAMPLE = {
+  unbackedLookupClaims: [{ verb: 'read', phrase: 'I have read', index: 0 }],
+  narrationRetry: { outcome: 'performed', announced: 'I will search' },
+  memoryRefused: [{ line: 'card #7 is the vocabulary one', reason: 'this line claims card #7 and no tool returned that card on this wake.' }],
+  markerLines: 2,
+  anomalies: ['zero-reasoning-tokens'],
+  toolsGranted: ['card_get'],
+  toolHops: [{ id: 'c1', name: 'card_get', arguments: { shortId: 7 }, ok: true, rowCount: 1 }],
+  modelCalls: 2,
+  stoppedBecause: 'answered',
+  claims: [{ shortId: 7, ok: true }],
+  memoryWritten: ['m1'],
+  error: 'sample error text',
+  promptVersion: 'pv-1',
+  provider: 'http://localhost:9',
+  contextHandedTo: ['https://scrumboard.local/conversation/x'],
+};
+// Compared fields that are legitimately allowed to stay at their default in
+// this fixture, each with the reason. Keep this list short and argued.
+const MAY_BE_DEFAULT = {};
+
+test('#1441 GENERIC SEAM — every field a real wake puts on its row that the wire returns comes back as written (non-default values only)', async () => {
   const srv = await startRestServer({ board: makeBoardFixture({ cards: [], nextShortId: 1 }) });
   try {
-    const { captured } = await oneWake(srv, { text: 'REPLY: here, and card #7 is the one.\nREMEMBER: card #7 is the vocabulary one' });
+    const { captured } = await oneWake(srv, { text: 'REPLY: here.\nREMEMBER: nothing with a number' });
     assert.ok(captured, 'the runner produced a row');
+    const probe = (await api(srv.baseUrl, 'GET', '/api/model-calls?agent=gizmo&limit=1')).body.calls[0];
+    // the REAL row's shape, with every default overlaid by a sample, posted through the REAL builder
+    const row = { ...captured };
+    // …including the fields the runner puts on the row only when they fire
+    // (narrationRetry, memoryRefused are spread in conditionally).
+    for (const k of Object.keys(SAMPLE)) if (!(k in row) || isDefault(row[k])) row[k] = SAMPLE[k];
+    // a later timestamp, so the read-back (newest first) is THIS row and not the probe's
+    row.at = new Date(Date.parse(captured.at) + 60_000).toISOString();
+    const compared = Object.keys(row).filter((k) => !DERIVED.has(k) && k in probe);
+    const vacuous = compared.filter((k) => isDefault(row[k]) && !(k in MAY_BE_DEFAULT));
+    assert.deepEqual(vacuous, [], 'these compared fields sit at their default in the fixture, so a drop could not be seen — give each a SAMPLE value');
+    const posted = await api(srv.baseUrl, 'POST', '/api/model-calls', rowToBoard(row, AGENT));
+    assert.equal(posted.status, 201, JSON.stringify(posted.body));
     const wire = (await api(srv.baseUrl, 'GET', '/api/model-calls?agent=gizmo&limit=1')).body.calls[0];
+    const plain = (x) => x && typeof x === 'object' && !Array.isArray(x);
     const dropped = [];
-    for (const [k, v] of Object.entries(captured)) {
-      if (DERIVED.has(k) || !(k in wire)) continue;
-      // A nested object the wire returns a PROJECTION of (e.g. wake: the row keeps
-      // the mention's author, the board keeps kind + messageId — the author is one
-      // lookup away on the message) is compared on the keys the wire returns.
-      const plain = (x) => x && typeof x === 'object' && !Array.isArray(x);
-      const got = wire[k];
+    for (const k of compared) {
+      const v = row[k]; const got = wire[k];
+      // A nested object the wire returns a PROJECTION of (wake: the board keeps
+      // kind + messageId; the author is one lookup away on the message) is
+      // compared on the keys the wire returns.
       const want = plain(v) && plain(got) ? Object.fromEntries(Object.keys(got).map((kk) => [kk, v[kk] ?? null])) : v;
       if (JSON.stringify(got) !== JSON.stringify(want)) dropped.push(`${k}: row=${JSON.stringify(v)} wire=${JSON.stringify(got)}`);
     }
     assert.deepEqual(dropped, [], 'a field the runner wrote and the server returns came back different (dropped between them)');
-    // and the specific ones measured at zero in production
-    assert.equal(wire.markerLines, 1, '#1254 markerLines reaches the board');
-    assert.equal(wire.unbackedLookupClaims.length >= 0, true);
+    assert.ok(compared.includes('markerLines') && compared.includes('unbackedLookupClaims') && compared.includes('narrationRetry') && compared.includes('memoryRefused'),
+      `the four fields measured at zero in production are among those compared: ${compared.join(', ')}`);
   } finally { await srv.stop(); }
 });
 
@@ -125,4 +164,36 @@ test('#1441 END TO END — wake 1 is refused on the board; wake 2 reads it back 
     const row = (await api(srv.baseUrl, 'GET', '/api/model-calls?agent=gizmo&limit=1')).body.calls[0];
     assert.equal(row.memory.refusalsHanded, 1, 'DONE WHEN is observable on the BOARD: the second call\'s row says it was handed one refusal');
   } finally { await srv.stop(); }
+});
+
+test('#1441 RANGE — refused, then a quiet wake with no REMEMBER, then a FAILED call: the refusal is still handed on the wake after', async () => {
+  const srv = await startRestServer({ board: makeBoardFixture({ cards: [], nextShortId: 1 }) });
+  try {
+    const fromBoard = async () => refusalsSince((await api(srv.baseUrl, 'GET', '/api/model-calls?agent=gizmo&limit=10')).body.calls);
+    await oneWake(srv, { text: 'REPLY: noted.\nREMEMBER: card #7 is the vocabulary one' });          // refused
+    await oneWake(srv, { text: 'REPLY: nothing to keep.' });                                          // quiet: told, did not re-write
+    await api(srv.baseUrl, 'POST', '/api/model-calls', { by: 'gizmo', agent: 'gizmo', model: 'm', cost: 0, ok: false, error: 'fetch failed', at: new Date(Date.now() + 5_000).toISOString() });
+    let got = await fromBoard();
+    assert.equal(got.length, 1, `still handed after a quiet wake and a failed call: ${JSON.stringify(got)}`);
+    assert.match(got[0].reason, /claims card #7/);
+    // …and it clears once the seat SUCCEEDS in writing memory
+    await oneWake(srv, { text: 'REPLY: fixed.\nREMEMBER: the vocabulary card is the one I was told about' });
+    got = await fromBoard();
+    assert.deepEqual(got, [], 'a successful memory write is the boundary');
+  } finally { await srv.stop(); }
+});
+
+test('#1441 RANGE (pure) — ok:false rows are skipped, a writing row bounds the walk and contributes its own refusals, capped at 5', () => {
+  const r = (line) => ({ line, reason: `claims card ${line}` });
+  const calls = [
+    { ok: false, memoryRefused: [r('#x')] },                               // failed: skipped entirely
+    { ok: true, memoryRefused: [r('#1')], memoryWritten: [] },
+    { ok: true, memoryRefused: [r('#2')], memoryWritten: ['m9'] },         // wrote: boundary, its refusal counts
+    { ok: true, memoryRefused: [r('#3')], memoryWritten: [] },             // older than the boundary: not handed
+  ];
+  assert.deepEqual(refusalsSince(calls).map((m) => m.line), ['#1', '#2']);
+  const many = [{ ok: true, memoryRefused: Array.from({ length: 9 }, (_, i) => r(`#${i}`)) }];
+  assert.equal(refusalsSince(many).length, 5);
+  assert.deepEqual(refusalsSince([{ ok: true, memoryWritten: ['{"error":"boom"}'], memoryRefused: [r('#e')] }, { ok: true, memoryRefused: [r('#f')] }]).map((m) => m.line), ['#e', '#f'],
+    'a write that ERRORED is not a successful write — it does not bound the walk');
 });
