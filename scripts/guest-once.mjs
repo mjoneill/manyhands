@@ -22,7 +22,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { callModel } from '../core/model-adapter.mjs';
 import { deliveryStaleMs, isStaleDelivery } from '../core/delivery.mjs';   // #1346
-import { findMentions, findWakes, pairCapSuppressed, DEFAULT_PAIR_CAP_PER_HOUR, guestOnce, fetchBoundedChanges, shouldMarkAnswered, mentionScanPath, fetchMentionWindow, acquireLock, releaseLock, effectiveWakeOn, budgetCheck, deliveryOutcome } from '../core/guest-loop.mjs';
+import { findMentions, findWakes, pairCapSuppressed, DEFAULT_PAIR_CAP_PER_HOUR, guestOnce, fetchBoundedChanges, shouldMarkAnswered, mentionScanPath, fetchMentionWindow, acquireLock, releaseLock, effectiveWakeOn, budgetCheck, deliveryOutcome, bindingRulings } from '../core/guest-loop.mjs';
 import { makeExecutor } from '../core/board-tools.mjs';
 
 const args = process.argv.slice(2);
@@ -65,6 +65,7 @@ try {
   const rs = await fetch(`${BOARD}/api/seats/${encodeURIComponent(agent.seatKey)}/role-section`);
   const rj = rs.ok ? await rs.json() : null;
   agent.roleSection = rj && typeof rj.section === 'string' ? rj.section : '';
+  agent.roleKey = rj?.role?.key ?? null;   // #1436 — the held role's key, for the rulings match
   console.log(`[#1376] role: ${rj?.role?.key ?? 'none'}${rj?.role?.key ? ` — section ${agent.roleSection.split('\n')[0].slice(0, 80)}` : ''}`);
 } catch (e) { agent.roleSection = ''; console.error(`[#1376] role section unreadable (${e?.message ?? e}) — waking without one`); }
 const stateFile = process.env.SCRUM_GUEST_STATE_FILE || (agentFile ? path.join(path.dirname(agentFile), `.${agent.seatKey}.guest-state.json`) : path.join(process.cwd(), `.${agent.seatKey}.guest-state.json`));
@@ -318,6 +319,12 @@ const claimCard = dry ? async (n, seat) => console.log(`[dry-run] would claim #$
 
 const r = await guestOnce({
   agent, wake, changes: () => rows, ledgerSink, spentToday, memories, writeMemory, claimCard,
+  // #1436 — the live decisions that name this seat, its held role, or its display name
+  rulings: async (seatKey) => {
+    const all = (await get('/api/decisions?live=1'));
+    const list = Array.isArray(all) ? all : (all?.decisions ?? all?.rows ?? []);
+    return bindingRulings(list, { seatKey, roleKey: agent.roleKey ?? null, displayName: agent.name ?? null });
+  },
   // #1237 — the file ledger (dry runs; the fallback when the board sink refuses)
   // lives BESIDE THE STATE FILE, which is always writable. The default is next
   // to the module, and the serve copy is read-only: a refused sink there threw

@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { findMentions, pairCapSuppressed, pairSpend, buildMessages, guestOnce, fetchBoundedChanges } from '../core/guest-loop.mjs';
+import { findMentions, pairCapSuppressed, pairSpend, buildMessages, guestOnce, fetchBoundedChanges, bindingRulings } from '../core/guest-loop.mjs';
 import { callModel } from '../core/model-adapter.mjs';
 
 const tmp = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'guest-')), 'model-calls.jsonl');
@@ -229,7 +229,7 @@ test('#1201 FRONT DOOR: a mention on a real board → the agent\'s post appears 
 
 test('#1201 the runnable form exists and uses the loop: scripts/guest-once.mjs imports guestOnce and findMentions', () => {
   const src = fs.readFileSync(new URL('../scripts/guest-once.mjs', import.meta.url), 'utf8');
-  assert.match(src, /import \{ findMentions, findWakes, pairCapSuppressed, DEFAULT_PAIR_CAP_PER_HOUR, guestOnce, fetchBoundedChanges, shouldMarkAnswered, mentionScanPath, fetchMentionWindow, acquireLock, releaseLock, effectiveWakeOn, budgetCheck, deliveryOutcome \} from '\.\.\/core\/guest-loop\.mjs'/);   // #1237 widened the import; #1274 added the paged window; #1346 the channel drain; #1372 the outcome
+  assert.match(src, /import \{ findMentions, findWakes, pairCapSuppressed, DEFAULT_PAIR_CAP_PER_HOUR, guestOnce, fetchBoundedChanges, shouldMarkAnswered, mentionScanPath, fetchMentionWindow, acquireLock, releaseLock, effectiveWakeOn, budgetCheck, deliveryOutcome, bindingRulings \} from '\.\.\/core\/guest-loop\.mjs'/);   // #1436 added the rulings   // #1237 widened the import; #1274 added the paged window; #1346 the channel drain; #1372 the outcome
   assert.match(src, /guestOnce\(\{/);
   assert.match(src, /--dry-run/);
 });
@@ -255,4 +255,40 @@ test('#1201 the wake cursor advances only on a settled outcome: posted or a defi
   assert.equal(shouldMarkAnswered({ posted: false, halted: true, reason: 'budget-unreadable: fetch failed' }), false, 'measured on prod: a halt advanced the cursor and the mention was never answered');
   assert.equal(shouldMarkAnswered({ posted: false, halted: true, reason: 'budget-breached' }), false);
   assert.equal(shouldMarkAnswered({ posted: false, reason: 'post-failed' }), false, 'a failed post is retryable');
+});
+
+
+// #1436 — a settled decision about a seat's OWN role rode only in the change
+// window and scrolled out within the hour; the seat re-lost it four times in a
+// day, each correction a paid call. Live rulings that name the seat (or its
+// role, or its display name) reach every wake, above the change rows.
+const DECISIONS = [
+  { id: 'fd13308e-aaaa', statement: 'From the 2026-09-24 planning, the Scrum Master of record is the OpenRouter resident seat (bubbles).', decidedBy: 'ada', decidedAt: '2026-09-21T13:09:56Z', constrains: ['roles', 'scrum-master'], reopensIf: 'the owner says otherwise', live: true },
+  { id: '11111111-bbbb', statement: 'Deploys need a second seat\'s review.', decidedBy: 'pip', decidedAt: '2026-09-10T00:00:00Z', constrains: ['deploy'], live: true },
+  { id: '22222222-cccc', statement: 'bubbles opens the retro (superseded).', decidedBy: 'pip', decidedAt: '2026-09-19T00:00:00Z', constrains: ['ceremonies'], live: false },
+  { id: '33333333-dddd', statement: 'The PO holds Planned.', decidedBy: 'owner', decidedAt: '2026-09-13T00:00:00Z', constrains: ['po'], live: true },
+];
+
+test('#1436 bindingRulings — live decisions naming the seat, its held role, or its display name; superseded ones excluded; newest first', () => {
+  const mine = bindingRulings(DECISIONS, { seatKey: 'bubbles' });
+  assert.deepEqual(mine.map((d) => d.id), ['fd13308e-aaaa'], 'the live ruling naming the seat, not the superseded one, not the unrelated ones');
+  const byRole = bindingRulings(DECISIONS, { seatKey: 'pip', roleKey: 'po' });
+  assert.deepEqual(byRole.map((d) => d.id), ['33333333-dddd'], 'a ruling that constrains the seat\'s HELD role binds it');
+  const byName = bindingRulings(DECISIONS, { seatKey: 'x', displayName: 'Scrum Master' });
+  assert.deepEqual(byName.map((d) => d.id), ['fd13308e-aaaa']);
+  assert.deepEqual(bindingRulings(DECISIONS, { seatKey: 'nobody' }), []);
+  assert.deepEqual(bindingRulings(null, { seatKey: 'bubbles' }), []);
+});
+
+test('#1436 buildMessages carries the binding rulings ABOVE the change rows, as settled rules with what reopens them', () => {
+  const changes = [{ at: '2026-09-21T20:00:00Z', kind: 'card', op: 'update', shortId: 1, title: 'unrelated' }];
+  const rulings = bindingRulings(DECISIONS, { seatKey: 'bubbles' });
+  const m = buildMessages({ agent: AGENT, wake: MSGS[1], changes, rulings });
+  const user = m[1].content;
+  assert.match(user, /Rulings that bind this seat/);
+  assert.match(user, /Scrum Master of record is the OpenRouter resident seat/);
+  assert.match(user, /reopens if: the owner says otherwise/);
+  assert.ok(user.indexOf('Rulings that bind this seat') < user.indexOf('What changed on the board recently'), 'rulings come before the change rows');
+  const none = buildMessages({ agent: AGENT, wake: MSGS[1], changes, rulings: [] });
+  assert.doesNotMatch(none[1].content, /Rulings that bind this seat/, 'no block when nothing binds');
 });

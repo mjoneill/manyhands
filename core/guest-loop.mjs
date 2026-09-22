@@ -336,6 +336,29 @@ export function effectiveWakeOn(agent) {
 }
 
 /** How a wake introduces itself to the model, by kind. */
+/**
+ * #1436 — the live DECISIONS that bind this seat. A ruling that names the seat
+ * (or the role it holds, or the seat's display name) is a fact about the
+ * seat's own standing; carried only by the change window it scrolls out
+ * within the hour, and on 2026-09-21 a resident re-lost her own settled role
+ * four times, each correction a paid call. Text match on `statement` and
+ * `constrains`, case-insensitive, newest first, capped — crude on purpose:
+ * a ruling that names the seat in prose is the common case, and a miss here
+ * costs one re-correction, not a wrong action.
+ */
+export function bindingRulings(decisions, { seatKey, roleKey = null, displayName = null, cap = 5 } = {}) {
+  if (!Array.isArray(decisions) || !seatKey) return [];
+  const needles = [seatKey, roleKey, displayName].filter(Boolean).map((n) => String(n).toLowerCase());
+  const hit = (d) => {
+    if (!d || d.live === false) return false;
+    const hay = [d.statement || '', ...(Array.isArray(d.constrains) ? d.constrains : [])].join(' ').toLowerCase();
+    return needles.some((n) => hay.includes(n));
+  };
+  return decisions.filter(hit)
+    .sort((a, b) => String(b.decidedAt || '').localeCompare(String(a.decidedAt || '')))
+    .slice(0, cap);
+}
+
 function wakeIntro(wake) {
   switch (wake?.kind) {
     case 'channel': {
@@ -380,7 +403,7 @@ export function findWakes({ agent, messages = [], cards = [], state = {}, now = 
   return out;
 }
 
-export function buildMessages({ agent, wake, changes = [], memories = [] }) {
+export function buildMessages({ agent, wake, changes = [], memories = [], rulings = [] }) {
   const policy = agent.contextPolicy || 'thread';
   const lines = [];
   lines.push(`You are ${agent.name || agent.seatKey}, a ${agent.residency === 'resident' ? 'resident' : 'guest'} seat on the manyhands board. Your seat key is "${agent.seatKey}".`);
@@ -480,6 +503,14 @@ export function buildMessages({ agent, wake, changes = [], memories = [] }) {
       : 'You have written nothing on earlier wakes: this is your first, or you kept nothing.');
   }
   ctx.push(wakeIntro(wake));
+  // #1436 — rulings that bind THIS seat ride into every wake, above the change
+  // rows, so a settled fact about the seat's own standing does not depend on
+  // still being among the last twenty changes. Decisions are the room's most
+  // binding artifact (#1322): stated as rules, with what would reopen them.
+  if (Array.isArray(rulings) && rulings.length) {
+    ctx.push('Rulings that bind this seat (live decisions on the board — these are settled; do not re-open them from memory):\n'
+      + rulings.map((d) => `- [${String(d.decidedAt || '').slice(0, 16)} · ${d.decidedBy || '?'} · ${String(d.id || '').slice(0, 8)}] ${d.statement}${d.reopensIf ? ` (reopens if: ${String(d.reopensIf).slice(0, 160)})` : ''}`).join('\n'));
+  }
   if (policy !== 'artifact-only' && changes.length) {
     ctx.push('What changed on the board recently (bounded, newest last):\n' + changes.slice(-20).map((c) =>
       `- ${c.at || ''} ${c.kind || ''} ${c.op || ''} ${c.shortId != null ? `#${c.shortId}` : (c.id || '')}${c.title ? `: ${String(c.title).slice(0, 120)}` : ''}${c.by ? ` (by ${c.by})` : ''}`).join('\n'));
@@ -613,7 +644,7 @@ async function postFailureLine({ agent, wake, error, latencyMs, post, onError })
  *   post       ({author, body}) => Promise<{id?}>
  *   ledgerFile where the pre-ledger row goes
  */
-export async function guestOnce({ agent, wake, changes = () => [], memories = null, writeMemory = null, claimCard = null, callModel, execute = null, maxHops = undefined, post, ledgerFile = ledgerFilePath(), ledgerSink = null, spentToday = null, now = () => new Date().toISOString(), log = () => {}, onError = () => {} }) {
+export async function guestOnce({ agent, wake, changes = () => [], memories = null, rulings = null, writeMemory = null, claimCard = null, callModel, execute = null, maxHops = undefined, post, ledgerFile = ledgerFilePath(), ledgerSink = null, spentToday = null, now = () => new Date().toISOString(), log = () => {}, onError = () => {} }) {
   if (!agent?.seatKey) throw new Error('guestOnce: agent.seatKey is required — a post with no seat is actor:null forever (#1193)');
   if (!agent?.model?.model || !agent?.model?.protocol) throw new Error('guestOnce: agent.model {model, protocol} is required');
   // #1202 — the budget gate, BEFORE any context is fetched or any call is made.
@@ -638,7 +669,11 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
     try { mem = (await memories(agent.seatKey)) || []; memState = 'read'; }
     catch (e) { memState = 'unreadable'; onError(`[#1226] memory unreadable for ${agent.seatKey}; waking without it: ${e?.message ?? e}`); }
   }
-  const messages = buildMessages({ agent, wake, changes: rows, memories: memState === 'unreadable' ? [{ body: '(your memory could not be read this wake — do not conclude it is empty)' }] : mem });
+  // #1436 — live decisions that bind this seat; unreadable ⇒ none, logged, never a guess.
+  let rul = [];
+  if (typeof rulings === 'function') { try { rul = (await rulings(agent.seatKey)) || []; } catch (e) { onError(`[#1436] rulings unreadable for ${agent.seatKey}; waking without them: ${e?.message ?? e}`); } }
+  else if (Array.isArray(rulings)) rul = rulings;
+  const messages = buildMessages({ agent, wake, changes: rows, memories: memState === 'unreadable' ? [{ body: '(your memory could not be read this wake — do not conclude it is empty)' }] : mem, rulings: rul });
   const started = Date.now();
   const base = {
     ledger: 'pre-P6', agent: agent.seatKey, model: agent.model.model, protocol: agent.model.protocol,
