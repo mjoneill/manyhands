@@ -260,7 +260,7 @@ const CHANNEL_INSTRUCTIONS = `The manyhands commons is a shared, multi-agent cha
 
 New commons posts arrive as <channel source="manyhands" chat_id="commons" message_id="..."> blocks — each is one message, formatted "author: body".
 
-A block that also carries conversation="<talk id>" is a post inside a 1:1 talk ("Talk with…"). Answer it inside the same talk: reply with conversation_post and set its conversation argument to that same id, so the reply lands in the talk's view. A block without it is a room post; answer untagged.
+A block that also carries conversation="<talk id>" is a post inside a 1:1 talk ("Talk with…"), and talk_with names the seat the talk is WITH. If talk_with is YOUR seat, you are that talk's concierge: reply with conversation_post and set its conversation argument to that same id, so the reply lands in the talk's view. If talk_with is another seat, it is someone else's talk: answer in the room untagged, and only if it genuinely calls for you. A block without conversation is a room post; answer untagged.
 
 To say anything back to the room, use the conversation_post tool. Your transcript output is NOT seen by the commons — only conversation_post reaches it. Read recent context with conversation_list before replying.
 
@@ -3136,6 +3136,12 @@ function broadcastFanout(conversation) {
         // cannot see it. Scalar string, present only when tagged (#206 invariant).
         ...(typeof conversation.conversation === 'string' && conversation.conversation
           ? { conversation: conversation.conversation }
+          : {}),
+        // …and the seat the talk is WITH, so a receiver can tell its own talk from
+        // someone else's (#1409: only the partner answers inside; the rest of the
+        // room answers untagged, if at all). Supplied by REST on the nudge.
+        ...(typeof conversation.talkWith === 'string' && conversation.talkWith
+          ? { talk_with: conversation.talkWith }
           : {}),
       },
     },

@@ -43,12 +43,12 @@ async function openTalk(baseUrl) {
     talk = await json(baseUrl, 'POST', '/api/talks', { by: 'alex', title: 'stuff', with: seat });
   }
   assert.equal(talk.status, 201, `talk opened (${JSON.stringify(talk.body)})`);
-  return talk.body.id;
+  return { id: talk.body.id, with: talk.body.with };
 }
 
 test('#1440 — a talk-tagged post arrives with meta.conversation = the talk id, as a scalar string', async () => {
   await withStream(async (pair, stream) => {
-    const talkId = await openTalk(pair.rest.baseUrl);
+    const { id: talkId, with: partner } = await openTalk(pair.rest.baseUrl);
     const post = await json(pair.rest.baseUrl, 'POST', '/api/conversations', { author: 'alex', body: 'so, you have questions for me?', conversation: talkId });
     assert.equal(post.body.conversation, talkId, 'the STORE tags it (the half that already worked)');
     const notif = await stream.next('notifications/claude/channel');
@@ -56,6 +56,9 @@ test('#1440 — a talk-tagged post arrives with meta.conversation = the talk id,
     assert.equal(m.conversation, talkId, 'the PUSH carries the talk id, so the seat can answer inside the talk');
     assert.equal(typeof m.conversation, 'string', '#206: scalar meta only');
     assert.equal(m.chat_id, 'commons', 'a talk post is still board-level: chat_id unchanged');
+    assert.ok(partner, 'the talk has a partner (guard is not vacuous)');
+    assert.equal(m.talk_with, partner, 'the PUSH names the seat the talk is WITH — every seat receives it, only the partner answers inside (#1409)');
+    assert.equal(typeof m.talk_with, 'string', '#206: scalar meta only');
   });
 });
 
@@ -65,6 +68,7 @@ test('#1440 — an untagged post carries NO conversation key (absence, not a con
     await json(pair.rest.baseUrl, 'POST', '/api/conversations', { author: 'alex', body: 'room post' });
     const notif = await stream.next('notifications/claude/channel');
     assert.equal('conversation' in (notif.params?.meta || {}), false, 'no talk → no key');
+    assert.equal('talk_with' in (notif.params?.meta || {}), false, 'no talk → no partner key');
   });
 });
 
@@ -80,6 +84,7 @@ test('#1440 — the server instructions tell a seat what the key means and how t
     const instructions = JSON.parse((dataLine ?? text).replace(/^\s*data:\s*/, '')).result?.instructions ?? '';
     assert.ok(instructions.length > 0, 'instructions present (guard is not vacuous)');
     assert.match(instructions, /conversation="/, 'instructions name the conversation attribute on a channel block');
-    assert.match(instructions, /conversation_post[^.]*`?conversation`?/, 'instructions say to reply with the same id in conversation_post.conversation');
+    assert.match(instructions, /talk_with is YOUR seat[^.]*conversation_post[^.]*conversation/, 'the PARTNER replies inside the talk with the same id');
+    assert.match(instructions, /talk_with is another seat[^.]*untagged/, 'a NON-partner answers in the room untagged (#1409 — the talk must not become the room)');
   });
 });

@@ -9284,12 +9284,18 @@ async function handleCreateConversation(req, res) {
     // snapshot the post is appended to. Resolving beforehand would let a card
     // be deleted between the check and the write, which is the check passing
     // and the edge dangling anyway.
+    // #1440 — the talk's partner rides the MCP nudge (never the stored post):
+    // a talk post is pushed to EVERY seat, and only the seat the talk is WITH
+    // answers inside it (#1409 norm). Without the partner, each receiver would
+    // have to guess whose talk it is.
+    let talkWith = null;
     const created = await withWriteLock(async () => {
       const data = readBoard();
       const ref = resolveAttachedTo(body.attachedTo, data.cards);
       if (!ref.ok) return { refused: ref.id };
       const talk = resolveConversation(body.conversation, data);   // #1401
       if (!talk.ok) return { refusedTalk: talk.id, talkClosed: !!talk.closed };
+      if (talk.value) talkWith = talksOf(data).find((e) => talkIdOf(e) === talk.value)?.['scrum:with'] ?? null;
       const conv = createConversationFromPayload(body, ref.value, talk.value);
       data.conversations.push(conv);
       writeBoard(data, [convEvent(conv)]);
@@ -9312,7 +9318,7 @@ async function handleCreateConversation(req, res) {
         code: 'NO_SUCH_CARD',
       });
     }
-    notifyMcpOfPost(created);
+    notifyMcpOfPost(talkWith ? { ...created, talkWith } : created);
     // #843 — say what was dropped. Present only when non-empty: an empty array
     // on every post is noise every seat learns to skip, which is how the
     // original silence went unnoticed. The stored record is NOT touched — the
