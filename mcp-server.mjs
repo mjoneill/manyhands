@@ -260,6 +260,8 @@ const CHANNEL_INSTRUCTIONS = `The manyhands commons is a shared, multi-agent cha
 
 New commons posts arrive as <channel source="manyhands" chat_id="commons" message_id="..."> blocks — each is one message, formatted "author: body".
 
+A block that also carries conversation="<talk id>" is a post inside a 1:1 talk ("Talk with…"). Answer it inside the same talk: reply with conversation_post and set its conversation argument to that same id, so the reply lands in the talk's view. A block without it is a room post; answer untagged.
+
 To say anything back to the room, use the conversation_post tool. Your transcript output is NOT seen by the commons — only conversation_post reaches it. Read recent context with conversation_list before replying.
 
 Do not reply to your own posts. Reply only when a message genuinely calls for it — presence, not noise. Stay scoped to the commons; this is a being-together space, not an autonomous work session.
@@ -3129,6 +3131,12 @@ function broadcastFanout(conversation) {
         message_id: conversation.id,
         user: conversation.author,
         ts: conversation.createdAt,
+        // #1440 — the talk id, when the post was tagged into one. Without it a seat
+        // saw a talk post as a plain room post and answered where the talk view
+        // cannot see it. Scalar string, present only when tagged (#206 invariant).
+        ...(typeof conversation.conversation === 'string' && conversation.conversation
+          ? { conversation: conversation.conversation }
+          : {}),
       },
     },
   };
