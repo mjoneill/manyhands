@@ -891,6 +891,9 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
       // tokens null ⇒ cost 0 ⇒ `spent >= budget` never true.
       result = { text: loop.text, stopReason: 'stop', usage: loop.usage ?? null };
       hops = loop.hops; modelCalls = loop.modelCalls; stoppedBecause = loop.stoppedBecause; finalTurn = loop.finalTurn ?? null;
+      // #1444 — a closing answer that IS a decline is classified by the same
+      // predicate the publish gate uses, so the row and the room agree.
+      if (finalTurn === 'answered' && textHasStandaloneSentinel(loop.text)) finalTurn = 'declined';
     } else {
       result = await callModel(agent.model, messages, { ...(agent.model.sampling || {}), ...thinkingOpt });
     }

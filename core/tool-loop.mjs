@@ -209,9 +209,10 @@ export async function runToolLoop({ agent, messages, tools = [], execute, callMo
     addUsage(fin.usage);
     for (const a of fin.anomalies ?? []) anomalies.add(a);
     text = fin.text ?? '';
-    finalTurn = !String(text).trim() ? 'empty'
-      : /(^|\n)[ \t]*NO_REPLY[ \t]*(\n|$)/i.test(text) ? 'declined'
-      : 'answered';
+    // Only "did it say anything". Whether what it said is a DECLINE is the
+    // publish gate's call (#1428's textHasStandaloneSentinel, in guest-loop),
+    // so the telemetry can never disagree with what the room actually saw.
+    finalTurn = String(text).trim() ? 'answered' : 'empty';
   }
 
   return { text, hops, modelCalls, stoppedBecause, ...(finalTurn ? { finalTurn } : {}), messages: convo, usage: seen.size ? usage : null, anomalies: [...anomalies] };

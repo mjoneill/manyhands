@@ -69,12 +69,28 @@ test('#1444 a seat that answers before the ceiling never triggers the closing ca
   assert.equal(n, 2);
 });
 
-test('#1444 the closing call may decline or come back empty — recorded, not hidden', async () => {
-  const declined = await runToolLoop({ agent: AGENT, messages: [], tools: TOOLS, execute: async () => 'ok', callModel: recorder('NO_REPLY').callModel, maxHops: 1 });
-  assert.equal(declined.finalTurn, 'declined');
-  assert.equal(declined.text, 'NO_REPLY', 'the decline is passed on for the publish gate to handle');
+test('#1444 the loop reports only whether the closing call said anything; an empty one is recorded, not hidden', async () => {
   const empty = await runToolLoop({ agent: AGENT, messages: [], tools: TOOLS, execute: async () => 'ok', callModel: recorder('   ').callModel, maxHops: 1 });
   assert.equal(empty.finalTurn, 'empty');
+  const said = await runToolLoop({ agent: AGENT, messages: [], tools: TOOLS, execute: async () => 'ok', callModel: recorder('NO_REPLY').callModel, maxHops: 1 });
+  assert.equal(said.finalTurn, 'answered', 'decline-or-not is the publish gate\'s call, made in guest-loop');
+  assert.equal(said.text, 'NO_REPLY', 'and the text is passed on to it');
+});
+
+test('#1444 (review) a ceiling reached WITH text in hand makes NO closing call: the answer is kept, not replaced', async () => {
+  // The last turn both answered AND asked for a tool; the ceiling bit. That
+  // answer is the wake's answer — a second call would cost again and its
+  // text would REPLACE it.
+  const calls = [];
+  const callModel = async (agent, messages, opts) => {
+    calls.push(opts?.tools ?? null);
+    return { text: 'Here is my answer already.', toolCalls: [{ id: 'c1', name: 'card_get', arguments: { shortId: 1 } }], stopReason: 'tool_calls', usage: {} };
+  };
+  const out = await runToolLoop({ agent: AGENT, messages: [], tools: TOOLS, execute: async () => 'ok', callModel, maxHops: 1 });
+  assert.equal(out.stoppedBecause, 'max-hops');
+  assert.equal(out.text, 'Here is my answer already.', 'the answer in hand is kept');
+  assert.equal(out.finalTurn ?? null, null, 'no closing turn happened');
+  assert.ok(calls.every((t) => t !== null), 'every call that was made offered tools — none was the tool-free closing call');
 });
 
 import { guestOnce } from '../core/guest-loop.mjs';
@@ -101,5 +117,27 @@ test('#1444 END TO END — a resident that keeps reaching for tools now POSTS, a
     const q = await api(srv.baseUrl, 'POST', '/api/graph', { query: 'SELECT ?t WHERE { ?c a scrum:ModelCall ; scrum:finalTurn ?t . }', by: 'ada' });
     const b = q.body.rows || q.body.bindings || [];
     assert.equal(String(b[0]?.t?.value ?? b[0]?.t), 'answered', 'queryable in the graph');
+  } finally { await srv.stop(); }
+});
+
+test('#1444 (review) END TO END — a closing answer that is a standalone NO_REPLY is recorded DECLINED by the same predicate the gate uses; one QUOTED in code is published and recorded answered', async () => {
+  const srv = await startRestServer({ board: makeBoardFixture({ cards: [], nextShortId: 1 }) });
+  try {
+    const agent = { seatKey: 'gizmo', name: 'Gizmo', systemPrompt: 'x', residency: 'resident', toolGrants: ['card_get'], maxHops: 1, model: { model: 'm', protocol: 'openai-completions' } };
+    const run = async (closing) => {
+      const mention = (await api(srv.baseUrl, 'POST', '/api/conversations', { body: '@gizmo hi', author: 'bo' })).body;
+      const r = await guestOnce({ agent, wake: mention, memories: async () => [], callModel: recorder(closing).callModel, execute: async () => ({ id: 'x' }),
+        post: (b) => api(srv.baseUrl, 'POST', '/api/conversations', b).then((x) => x.body),
+        ledgerSink: async (row) => (await api(srv.baseUrl, 'POST', '/api/model-calls', rowToBoard(row, agent))).body,
+        ledgerFile: `/tmp/never-used-1444b-${process.pid}.jsonl` });
+      const row = (await api(srv.baseUrl, 'GET', '/api/model-calls?agent=gizmo&limit=1')).body.calls[0];
+      return { r, row };
+    };
+    const dec = await run('NO_REPLY');
+    assert.equal(dec.r.posted, false, 'the gate declined it');
+    assert.equal(dec.row.finalTurn, 'declined');
+    const quoted = await run('The rule is:\n\n```\nNO_REPLY\n```\n\nthat is all.');
+    assert.equal(quoted.r.posted, true, 'the gate published the quoted token');
+    assert.equal(quoted.row.finalTurn, 'answered', 'and the row agrees with what the room saw');
   } finally { await srv.stop(); }
 });
