@@ -30,6 +30,7 @@
  * URL is the only thing that varies.
  */
 
+import { unreachableMessage } from './core/rest-unreachable.mjs';   // #1442
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -318,10 +319,7 @@ async function apiCall(method, path, body, { signal } = {}) {
     });
   } catch (e) {
     if (e?.name === 'TimeoutError' || e?.name === 'AbortError') throw e;   // #1388 — the deadline is the caller's to read, not a "start the dev server" hint
-    throw new Error(
-      `Cannot reach scrum board REST API at ${REST_API_BASE}. ` +
-      `Start the dev server: \`node server.js\`. (${e.message})`
-    );
+    throw new Error(unreachableMessage(REST_API_BASE, e));   // #1442 — the cause, and the hint only when it is true
   }
   if (res.status === 204) return null;
   const text = await res.text();
@@ -347,10 +345,7 @@ async function claimApiCall(method, path, body) {
       body: JSON.stringify(body),
     });
   } catch (e) {
-    throw new Error(
-      `Cannot reach scrum board REST API at ${REST_API_BASE}. ` +
-      `Start the dev server: \`node server.js\`. (${e.message})`
-    );
+    throw new Error(unreachableMessage(REST_API_BASE, e));   // #1442 — the cause, and the hint only when it is true
   }
   const text = await res.text();
   let payload;
