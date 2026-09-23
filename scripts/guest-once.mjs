@@ -24,6 +24,7 @@ import { callModel } from '../core/model-adapter.mjs';
 import { deliveryStaleMs, isStaleDelivery } from '../core/delivery.mjs';   // #1346
 import { rowToBoard, refusalsSince } from '../core/model-call-row.mjs';
 import { handBackFromState, defaultWithheldStatePath } from '../core/withheld-state.mjs';   // #1428 — private per-seat withheld recovery
+import { annotateTalks } from '../core/guest-loop.mjs';   // #1446
 import { findMentions, findWakes, pairCapSuppressed, DEFAULT_PAIR_CAP_PER_HOUR, guestOnce, fetchBoundedChanges, shouldMarkAnswered, mentionScanPath, fetchMentionWindow, acquireLock, releaseLock, effectiveWakeOn, budgetCheck, deliveryOutcome, bindingRulings } from '../core/guest-loop.mjs';
 import { makeExecutor } from '../core/board-tools.mjs';
 
@@ -261,6 +262,19 @@ if (channelMode && !wakes.length) {
 if (!wakes.length) { console.log(`${new Date().toISOString()} ${agent.seatKey}: nothing to wake for (${channelMode ? 'channel' : effectiveWakeOn(agent).join(', ')})`); process.exit(0); }
 
 const wake = wakes[0];   // ONE wake per run — guest-once means once
+// #1446 — whose talk is it? Stamp the wake (and each post) with the seat the
+// talk is WITH, so the reply is filed into a talk only when it is this seat's
+// own, and the wake shows which posts belong to someone else's talk. If the
+// lookup fails, answer in the ROOM (the contract's safe side), never a guess.
+if ((typeof wake.conversation === 'string' && wake.conversation) || (Array.isArray(wake.posts) && wake.posts.some((m) => m.conversation))) {
+  try {
+    const t = await get('/api/talks');
+    annotateTalks(wake, Array.isArray(t) ? t : (t?.talks ?? []));
+  } catch (e) {
+    console.error(`[#1446] ${agent.seatKey}: talks unreadable (${e.message}) — answering in the room`);
+    annotateTalks(wake, []);
+  }
+}
 const sinceIso = new Date(Date.parse(wake.createdAt || Date.now()) - 60 * 60 * 1000).toISOString();
 const getRaw = async (p) => { const r = await fetch(`${BOARD}${p}`); let body = null; try { body = await r.json(); } catch { /* none */ } return { status: r.status, body }; };
 let rows = [];

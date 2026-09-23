@@ -437,16 +437,56 @@ export function bindingRulings(decisions, { seatKey, roleKey = null, displayName
     .slice(0, cap);
 }
 
-function wakeIntro(wake) {
+/**
+ * #1446 — TALKS ARE A SOCIAL CONTRACT (decision c86896b0), and a resident has to
+ * be able to SEE it to keep it. Everything in a 1:1 talk is readable by the
+ * room; the seat the talk is WITH answers inside it; everyone else answers in
+ * the room. The runner used to file a resident's reply into whatever talk its
+ * waking posts were tagged with — never asking whose talk it was — and the
+ * wake showed talk posts as plain "author: body", so the resident could not
+ * tell a talk post from a room post, and the rule lived only in the MCP
+ * instructions residents never receive.
+ *
+ * annotateTalks: stamp each tagged post (and the wake) with the seat the talk
+ * is WITH, from GET /api/talks. Pure; unknown ids stamp null.
+ */
+export function annotateTalks(wake, talks) {
+  const withOf = new Map((Array.isArray(talks) ? talks : []).map((t) => [t?.id, t?.with ?? null]));
+  for (const p of Array.isArray(wake?.posts) ? wake.posts : []) {
+    if (typeof p?.conversation === 'string' && p.conversation) p.talkWith = withOf.get(p.conversation) ?? null;
+  }
+  if (wake && typeof wake.conversation === 'string' && wake.conversation) wake.talkWith = withOf.get(wake.conversation) ?? null;
+  return wake;
+}
+
+/** #1446 — where a reply may be filed: into the talk only if it is THIS seat's
+ *  talk. A wake annotated with a different partner (or an unknown one) answers
+ *  in the room. A wake never annotated keeps the old behaviour (legacy callers). */
+export function replyTalkFor(wake, seatKey) {
+  if (!(typeof wake?.conversation === 'string' && wake.conversation)) return null;
+  if (!Object.prototype.hasOwnProperty.call(wake, 'talkWith')) return wake.conversation;
+  return wake.talkWith && wake.talkWith === seatKey ? wake.conversation : null;
+}
+
+const talkMark = (m, seatKey) => (typeof m?.conversation === 'string' && m.conversation && Object.prototype.hasOwnProperty.call(m, 'talkWith')
+  ? ` [in a 1:1 talk with ${m.talkWith === seatKey ? 'YOU' : (m.talkWith || 'another seat')}]` : '');
+
+const TALK_CONTRACT = 'Posts marked [in a 1:1 talk with …] belong to a focused conversation between a human and that seat. '
+  + 'The room may read them and talk about them; by the room\'s agreement only the seat the talk is WITH answers inside it. '
+  + 'If one calls for you and the talk is not with YOU, answer in the room — your reply will be posted there.';
+
+function wakeIntro(wake, seatKey = null) {
   switch (wake?.kind) {
     case 'channel': {
       const posts = Array.isArray(wake.posts) ? wake.posts : [];
       return `${posts.length} post${posts.length === 1 ? '' : 's'} on the commons ${posts.length === 1 ? 'was' : 'were'} delivered to you since your last turn (oldest first). This is ONE turn for all of them: answer what calls for you. If nothing does, your whole reply is exactly NO_REPLY and nothing else — a NO_REPLY at the end of a post is a post.\n`
-        + posts.map((m) => `[${m.createdAt || 'unknown time'}] ${m.author}: ${m.body}`).join('\n');
+        + posts.map((m) => `[${m.createdAt || 'unknown time'}] ${m.author}${talkMark(m, seatKey)}: ${m.body}`).join('\n')
+        + (posts.some((m) => talkMark(m, seatKey)) ? `\n\n${TALK_CONTRACT}` : '');
     }
     case 'assignment': return `A card on the board was assigned to you and nobody holds it:\n#${wake.shortId ?? '?'} ${wake.title ?? ''}${wake.body ? `\n${String(wake.body).slice(0, 600)}` : ''}`;
     case 'schedule': return `Your scheduled wake (${wake.createdAt || 'now'}). Nobody asked you anything; look at your memory and what changed, and say what, if anything, you want to do or note.`;
-    default: return `A message on the commons mentioned you:\n[${wake.createdAt || 'unknown time'}] ${wake.author}: ${wake.body}`;
+    default: return `A message on the commons mentioned you:\n[${wake.createdAt || 'unknown time'}] ${wake.author}${talkMark(wake, seatKey)}: ${wake.body}`
+      + (talkMark(wake, seatKey) ? `\n\n${TALK_CONTRACT}` : '');
   }
 }
 
@@ -617,7 +657,7 @@ export function buildMessages({ agent, wake, changes = [], memories = [], ruling
       + '\nTo publish it, answer this wake AGAIN WITHOUT the standalone `NO_REPLY` line — post the rest of that text as your reply (the text above is the recoverable body). '
       + 'If nothing about it has changed, you can quote the body verbatim and omit the sentinel line; the loop will not auto-replay it, you must answer again.');
   }
-  ctx.push(wakeIntro(wake));
+  ctx.push(wakeIntro(wake, agent?.seatKey ?? null));
   // #1436 — rulings that bind THIS seat ride into every wake, above the change
   // rows, so a settled fact about the seat's own standing does not depend on
   // still being among the last twenty changes. Decisions are the room's most
@@ -743,7 +783,7 @@ async function postFailureLine({ agent, wake, error, latencyMs, post, onError })
   const body = `⚠️ ${name}: I was named but my model call failed${secs} (${why}) — no answer this time; name me again to retry.`;
   const where = {
     ...(typeof wake?.attachedTo === 'string' && wake.attachedTo ? { attachedTo: wake.attachedTo } : {}),
-    ...(typeof wake?.conversation === 'string' && wake.conversation ? { conversation: wake.conversation } : {}),
+    ...(replyTalkFor(wake, agent.seatKey) ? { conversation: replyTalkFor(wake, agent.seatKey) } : {}),   // #1446
   };
   try { const r = await post({ author: agent.seatKey, body, ...where }); return r?.id ?? null; }
   catch (e) { onError(`[#1420] ${agent.seatKey}: failure line not posted (${e?.message ?? e}) — the ledger row still says why`); return null; }
@@ -1019,7 +1059,7 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
   // #1401 — REPLY WHERE ASKED, second kind: a post tagged into a 1:1 talk is
   // answered with the same tag, so the answer lands in the asker's view. The
   // post stays board-level either way; the tag is only what the view filters.
-  try { if (publishBody) posted = await post({ author: agent.seatKey, body: publishBody, ...(typeof wake?.attachedTo === 'string' && wake.attachedTo ? { attachedTo: wake.attachedTo } : {}), ...(typeof wake?.conversation === 'string' && wake.conversation ? { conversation: wake.conversation } : {}) }); }
+  try { if (publishBody) posted = await post({ author: agent.seatKey, body: publishBody, ...(typeof wake?.attachedTo === 'string' && wake.attachedTo ? { attachedTo: wake.attachedTo } : {}), ...(replyTalkFor(wake, agent.seatKey) ? { conversation: replyTalkFor(wake, agent.seatKey) } : {}) }); }   // #1446 — only into the seat's OWN talk
   catch (e) {
     const row = { ...base, ...toolRecord, ok: false, error: `post failed: ${e?.message ?? e}`, stopReason: result.stopReason, usage: result.usage, latencyMs: Date.now() - started };
     await recordLedger({ sink: ledgerSink, file: ledgerFile, row, onError });
