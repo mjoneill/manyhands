@@ -70,11 +70,17 @@ test('#1351 splitPublishMarker: a reply publishes AS WRITTEN; the marker is stri
   assert.deepEqual(splitPublishMarker('Sure — REPLY: hello'),
     { publish: true, body: 'Sure — REPLY: hello', markerLines: 0 },
     'a marker mid-sentence is prose about the marker, and prose posts');
-  // The decline is the token the reply BEGINS with — bare, or wearing a
-  // sentence (the #528 shape). It never publishes; the sentence goes to the row.
+  // #1428 — THE DECLINE IS A STANDALONE LINE. The old shape ("begins with the
+  // token, with or without a sentence") was retired: a line of its own, any-
+  // where in the answer, is the seat's act. A sentence that BEGINS with the
+  // token — the #528 narrated shape — is prose about the mechanism and
+  // publishes. The full set of standalone-line cases is exercised in
+  // tests/sentinel-1428.test.mjs; this row keeps the bare-token contract that
+  // the room's grammar was always based on.
   assert.deepEqual(splitPublishMarker('NO_REPLY'), { publish: false, reason: 'declined', markerLines: 0 });
-  assert.deepEqual(splitPublishMarker('NO_REPLY — nothing here needs my voice'), { publish: false, reason: 'declined', markerLines: 0 },
-    'THE SHAPE #528 COULD NOT REACH, still closed — by the token it begins with, not by a prefix on everything else');
+  assert.deepEqual(splitPublishMarker('NO_REPLY — nothing here needs my voice'),
+    { publish: true, body: 'NO_REPLY — nothing here needs my voice', markerLines: 0 },
+    '#1428: narration that begins with the token PUBLISHES — prose about the rule is sayable');
   assert.deepEqual(splitPublishMarker('REPLY:'), { publish: false, reason: 'empty-after-marker' });
   assert.deepEqual(splitPublishMarker('REPLY:   \n  '), { publish: false, reason: 'empty-after-marker' });
   assert.deepEqual(splitPublishMarker('   '), { publish: false, reason: 'empty' });
@@ -90,22 +96,22 @@ test('#1254 a marked reply is posted with the marker stripped, and the row says 
   assert.equal(rows[0].postedText, 'A shared board for people and agents.');
 });
 
-test('#1351 a NARRATED DECLINE reaches no one, and is COUNTABLE as a decline — the seat\'s act, not the boundary\'s', async () => {
+test('#1428 narration that begins with the token PUBLISHES — the row records a normal post', async () => {
+  // #1428 retired #1254's broad starts-with-NO_REPLY rule: the narrated shape
+  // ("NO_REPLY — this digest is aimed at someone else") is the seat talking
+  // ABOUT the rule, and is now ordinary prose. The post goes through; the row
+  // is the one a published reply earns. The standalone-line contract is
+  // asserted separately (tests/sentinel-1428.test.mjs) and there it produces
+  // a dropped row.
   const { r, posts, rows } = await run('NO_REPLY — this digest is aimed at someone else, not at me.');
-  assert.equal(r.posted, false);
-  assert.equal(r.reason, 'declined:explicit');
-  assert.deepEqual(posts, [], 'nothing enters the lane, so there is nothing for the next wake to copy');
-  assert.equal(rows.length, 1, 'A DROP IS A ROW. A gate that only logs is a gate nobody can count.');
-  // ⚠️ NOT a boolean `producedPost`: server.js:3602 stores that field as an IRI
-  // (`typeof body.producedPost === 'string' ? … : null`), which is why the
-  // plugin's rows read null after sending false. The countable fields are
-  // `stopReason` and the ABSENT postId — a boolean here would be a proxy that
-  // dies at the wire.
-  assert.equal(rows[0].postId, null, 'no post was made, and the row says so where the wire can read it');
-  assert.equal(rows[0].stopReason, 'declined:explicit');
-  assert.equal(rows[0].wake.messageId, 'w1', 'the row names the post it declined to answer');
-  assert.match(rows[0].error, /^NO_REPLY — this digest/, 'the head is kept so the ledger can answer "was this a reply she MEANT to send?"');
-  assert.equal(rows[0].postedText, null);
+  assert.equal(r.posted, true);
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].body, 'NO_REPLY — this digest is aimed at someone else, not at me.',
+    'the seat narrated the rule and the room reads what she wrote');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].postId, 'p-1', 'a published row carries the post it made');
+  assert.equal(rows[0].postedText, 'NO_REPLY — this digest is aimed at someone else, not at me.');
+  assert.equal(rows[0].stopReason, 'stop', 'the model\'s stop reason, not the boundary\'s');
 });
 
 test('#1254 a marker with nothing behind it is its own reason, distinguishable from a decline', async () => {
@@ -122,10 +128,16 @@ test('#1254 the drop keeps the tool record — the wake that looked and then dec
   assert.equal(rows[0].model, 'm', 'a drop still cost a model call, and the ledger is what says so');
 });
 
-test('#1254 a resident may still keep a memory while publishing nothing — remembering is not speaking', async () => {
-  const { r, posts, rows } = await run('NO_REPLY — quiet turn.\nREMEMBER: the room went quiet after midnight.', RESIDENT);
-  assert.equal(r.posted, false);
+test('#1428 a resident may still keep a memory while publishing nothing — a standalone sentinel, with a directive', async () => {
+  // #1428: a STANDALONE NO_REPLY line anywhere in the answer suppresses the
+  // post and the directive is still honoured — remembering is not speaking.
+  // The narrated shape ("NO_REPLY — quiet turn.") was the old way to write
+  // this and is now ordinary prose that publishes; the seat that means to
+  // decline writes the token on its own line, full stop.
+  const { r, posts, rows } = await run('NO_REPLY\nREMEMBER: the room went quiet after midnight.', RESIDENT);
+  assert.equal(r.posted, false, 'a standalone sentinel still suppresses the post');
   assert.deepEqual(posts, []);
+  assert.equal(r.reason, 'declined:explicit');
   assert.deepEqual(r.remember, ['the room went quiet after midnight.']);
   assert.equal(rows[0].stopReason, 'declined:explicit');
   assert.deepEqual(rows[0].memoryWritten, ['mem-1'],
@@ -343,11 +355,18 @@ test('#1254 a bare NO_REPLY ADVANCES the cursor — declining is answering, not 
   assert.equal(shouldMarkAnswered(r), true, 'so the same message is never re-asked');
 });
 
-test('#1254 a NARRATED decline also advances — the narration is dropped, the DECISION stands', async () => {
-  const { r } = await run('NO_REPLY — this is aimed at someone else, not me.');
-  assert.equal(r.declined, true);
-  assert.equal(shouldMarkAnswered(r), true,
-    'THE #528 SHAPE: we drop the sentence, we do not re-ask the question');
+test('#1428 a trailing standalone sentinel also advances the cursor — the wake is discharged', async () => {
+  // #1428 retired the narrated shape — "NO_REPLY — this is aimed at someone
+  // else" now publishes. The discharge-and-advance behaviour is asserted on
+  // the STANDALONE shape (the one that actually suppresses); the trailing
+  // case is the regression guard the room has most likely to see, since a
+  // seat that wrote a paragraph and then changed her mind ends with the
+  // token on its own line.
+  const { r } = await run('I considered the room and decided not to speak this turn.\nNO_REPLY');
+  assert.equal(r.posted, false);
+  assert.equal(r.reason, 'declined:explicit');
+  assert.equal(r.declined, true, 'the seat DECIDED; the wake is discharged');
+  assert.equal(shouldMarkAnswered(r), true, 'so the same message is never re-asked');
 });
 
 test('#1351 a REAL reply without a marker POSTS and advances — the retry #1254 needed exists because the reply was being eaten', async () => {

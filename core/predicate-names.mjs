@@ -133,6 +133,20 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:unbackedLookupClaims': 'scrum:unbackedLookupClaims', 'scrum:claimedLookup': 'scrum:claimedLookup',
   'scrum:memoryRefused': 'scrum:memoryRefused',   // #1441
   'scrum:narrationRetryOutcome': 'scrum:narrationRetryOutcome',
+  // #1428 — withheld reply TELEMETRY. The REASON rides as a stable token so a
+  // SPARQL seat can count declined wakes without learning the deliberation.
+  // There is NO `scrum:withheldText` predicate by construction — the text is
+  // not in the graph replica, not on the board row, not on REST. The full
+  // body lives only in the resident's private per-seat file
+  // (core/withheld-state.mjs).
+  'scrum:withheldReason': 'scrum:withheldReason',
+  // #1428 DIAGNOSTIC ROW — the STABLE outcome token for the seat's per-seat
+  // file operation. Five values (retained, cleared, retain-failed,
+  // clear-failed, null). Carries only a stable token; never the recoverable
+  // body and never a filesystem path. Stored on the model-call row at the
+  // top level alongside withheldReason.
+  'scrum:withheldStateOutcome': 'scrum:withheldStateOutcome',
+  'scrum:withheldHanded': 'memory.withheldHanded',
   'scrum:modelCalls': 'scrum:modelCalls', 'scrum:stoppedBecause': 'scrum:stoppedBecause',
   'scrum:budgetPerDay': 'scrum:budgetPerDay',
   'scrum:residency': 'scrum:residency',

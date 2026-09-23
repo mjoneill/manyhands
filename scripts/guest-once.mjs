@@ -23,6 +23,7 @@ import path from 'node:path';
 import { callModel } from '../core/model-adapter.mjs';
 import { deliveryStaleMs, isStaleDelivery } from '../core/delivery.mjs';   // #1346
 import { rowToBoard, refusalsSince } from '../core/model-call-row.mjs';
+import { handBackFromState, defaultWithheldStatePath } from '../core/withheld-state.mjs';   // #1428 — private per-seat withheld recovery
 import { findMentions, findWakes, pairCapSuppressed, DEFAULT_PAIR_CAP_PER_HOUR, guestOnce, fetchBoundedChanges, shouldMarkAnswered, mentionScanPath, fetchMentionWindow, acquireLock, releaseLock, effectiveWakeOn, budgetCheck, deliveryOutcome, bindingRulings } from '../core/guest-loop.mjs';
 import { makeExecutor } from '../core/board-tools.mjs';
 
@@ -278,10 +279,20 @@ const ledgerSink = dry ? null : async (row) => {
 // row under that owner. The mentioning human hands nothing.
 // #1441 — refused REMEMBER lines since the seat last wrote memory, read from
 // its recent board rows (newest first); the rule lives in core/model-call-row.mjs.
+// #1428 PRIVACY — WITHHELD-REPLY HAND-BACK reads the resident's PRIVATE per-seat
+// file (core/withheld-state.mjs). The recoverable body never reaches the board,
+// so the runner does not fetch /api/model-calls for the text — it walks the file
+// next to the state file.
 const priorRefusals = async (seat) => {
   const j = await get(`/api/model-calls?agent=${encodeURIComponent(seat)}&limit=10`);
   return refusalsSince(j?.calls);
 };
+const priorWithheld = async (seat) => {
+  // The default file path mirrors the guest-state file convention.
+  const file = `${stateFile}.withheld-state.json`;
+  return handBackFromState(file, { cap: 5 });
+};
+const withheldStateFile = defaultWithheldStatePath(stateFile);
 const memories = async (seat) => {
   const j = await get(`/api/memories?owner=${encodeURIComponent(seat)}&limit=50`);
   const list = Array.isArray(j) ? j : (j?.memories ?? []);
@@ -298,7 +309,7 @@ const claimCard = dry ? async (n, seat) => console.log(`[dry-run] would claim #$
 };
 
 const r = await guestOnce({
-  agent, wake, changes: () => rows, ledgerSink, spentToday, memories, priorRefusals, writeMemory, claimCard,
+  agent, wake, changes: () => rows, ledgerSink, spentToday, memories, priorRefusals, priorWithheld, withheldStateFile, writeMemory, claimCard,
   // #1436 — the live decisions that name this seat, its held role, or its display name
   rulings: async (seatKey) => {
     const all = (await get('/api/decisions?live=1'));

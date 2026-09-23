@@ -4506,7 +4506,16 @@ const modelCallToWire = (e) => ({
   anomalies: e['scrum:anomaly'] ?? [],   // #1352
   at: e['scrum:calledAt'], error: e.text || null,
   sampling: e['scrum:sampling'] ?? null, wake: { kind: e['scrum:wakeKind'] ?? null, messageId: e['scrum:wakeMessage'] ?? null },
-  memory: { handed: e['scrum:memoryHanded'] ?? null, state: e['scrum:memoryState'] ?? null, refusalsHanded: e['scrum:memoryRefusalsHanded'] ?? null }, memoryWritten: e['scrum:memoryWritten'] ?? [], claims: e['scrum:claims'] ?? [],
+  memory: {
+    handed: e['scrum:memoryHanded'] ?? null, state: e['scrum:memoryState'] ?? null,
+    refusalsHanded: e['scrum:memoryRefusalsHanded'] ?? null,
+    // #1428 PRIVACY — withheld reply carrying (a number ≥ 1 here on the wake
+    // that RECEIVED a hand-back from the private file). The state file is
+    // cleared on a successful receiving wake, so the same hand-back is never
+    // offered twice. The text itself never reaches this surface.
+    withheldHanded: e['scrum:withheldHanded'] ?? null,
+  },
+  memoryWritten: e['scrum:memoryWritten'] ?? [], claims: e['scrum:claims'] ?? [],
   // #1196 — the tool record reads back in the shape it was written; a row that
   // accepts a field and returns it changed is a record nobody can rely on.
   toolsGranted: e['scrum:toolsGranted'] ?? [], toolHops: e['scrum:toolHops'] ?? [],
@@ -4518,6 +4527,19 @@ const modelCallToWire = (e) => ({
   memoryRefused: e['scrum:memoryRefused'] ?? [],
   // #1246b — was the seat handed its own announcement back, and what did it do then.
   narrationRetry: e['scrum:narrationRetry'] ?? null,
+  // #1428 PRIVACY — THE WITHHELD REASON. A STABLE TOKEN ("standalone-no-reply")
+  // names the gate's cause, on the wire. The FULL TEXT is NOT here — that would
+  // be a privacy leak (the resident's deliberation belongs in her private file,
+  // not on the board). `error` is null on a successful decline and carries the
+  // scrubbed provider-error otherwise; readers MUST NOT infer a decline from
+  // `error` or `stopReason` — read the dedicated field by name.
+  withheldReason: typeof e['scrum:withheldReason'] === 'string' ? e['scrum:withheldReason'] : null,
+  // #1428 DIAGNOSTIC ROW — the STABLE outcome token for the seat's per-seat
+  // file operation. Five values: `retained`, `cleared`, `retain-failed`,
+  // `clear-failed`, null on unrelated rows. The token is the only thing
+  // that ever leaves the runner's private surface — never the recoverable
+  // body, never a filesystem path.
+  withheldStateOutcome: typeof e['scrum:withheldStateOutcome'] === 'string' ? e['scrum:withheldStateOutcome'] : null,
 });
 const MODEL_CALL_FIELDS = new Set(['by', 'agent', 'model', 'provider', 'protocol', 'promptVersion', 'tokensIn', 'tokensOut', 'reasoningTokens', 'cachedPromptTokens', 'cost', 'latencyMs', 'stopReason', 'ok', 'contextHandedTo', 'producedPost', 'at', 'error', 'sampling', 'wake', 'memory', 'memoryWritten', 'claims',
   // #1196 — what the colleague FETCHED, beside what it said. A claim whose rows
@@ -4532,7 +4554,46 @@ const MODEL_CALL_FIELDS = new Set(['by', 'agent', 'model', 'provider', 'protocol
   'memoryRefused',
   // #1352 — what the adapter noticed about the response and did NOT refuse on
   // (e.g. zero-reasoning-tokens on a thinking model). Countable, never a drop.
-  'anomalies']);
+  'anomalies',
+  // #1428 PRIVACY — the STABLE TOKEN only. `withheldText` is NOT in this
+  // allowlist by construction: any caller that tries to POST a withheld text
+  // hits the unknown-field refusal below — the runner never has it on a row
+  // (the recoverable body lives in the resident's private file, see
+  // core/withheld-state.mjs), a hostile board cannot put one there either.
+  'withheldReason',
+  // #1428 DIAGNOSTIC ROW — the STABLE outcome token. A short vocabulary value
+  // (`retained`, `cleared`, `retain-failed`, `clear-failed`); the runner
+  // sets it; readers count it. Not free text — bounded to 120 chars below.
+  'withheldStateOutcome']);
+// #1428 REVIEW — FIXED VOCABULARIES AT THE REST BOUNDARY.
+// withheldReason and withheldStateOutcome are STABLE TOKENS, not arbitrary
+// strings <=120. The runner's production code paths emit only the values
+// listed below; a free-text string here is either a vocabulary drift or a
+// caller smuggling a body field under another name. The prior 120-char cap
+// accepted any short string — a caller could POST 'free-text reason' or a
+// 60-character "note" and the row would carry it. The vocabulary check
+// rejects unknown strings outright at the boundary, the same way unknown
+// fields are rejected above. The two arrays are the FULL set of values the
+// runner ever writes; the runner's `core/guest-loop.mjs` is the source of
+// truth, and the comment above each list names the production code path
+// that emits each value.
+const WITHHELD_REASON_VALUES = new Set([
+  // `standalone-no-reply` — core/guest-loop.mjs: `const withheldReason = declined ? 'standalone-no-reply' : null;`
+  // The runner's only declaration. A decline is the only shape that emits a reason.
+  'standalone-no-reply',
+]);
+const WITHHELD_STATE_OUTCOME_VALUES = new Set([
+  // `retained` — core/guest-loop.mjs: `withheldStateOutcome = 'retained'` on a successful retain.
+  'retained',
+  // `cleared` — core/guest-loop.mjs: `withheldStateOutcome = 'cleared'` on a successful clear (handed entry closed).
+  'cleared',
+  // `retain-failed` — core/guest-loop.mjs: `withheldStateOutcome = 'retain-failed'` on a retain that threw.
+  'retain-failed',
+  // `clear-failed` — core/guest-loop.mjs: `withheldStateOutcome = 'clear-failed'` on a clear that threw.
+  'clear-failed',
+  // `preserve-failed` — core/guest-loop.mjs: `withheldStateOutcome = 'preserve-failed'` on a preserve that threw.
+  'preserve-failed',
+]);
 const MODEL_CALL_SAMPLING = new Set(['temperature', 'topP', 'topK', 'repetitionPenalty', 'seed', 'stop', 'maxTokens', 'keepAlive']);
 // #1086 slice 2 — the row builder, shared by POST /api/model-calls and the
 // search reader, so a reader verdict is ledgered EXACTLY as a hand-posted row
@@ -4542,6 +4603,23 @@ function modelCallEntityFrom(body) {
   if (!by) return { error: 'by is required — the seat that made the call. Declared, not authenticated (#1193: omit it and the row is actor:null forever).' };
   const agent = typeof body.agent === 'string' && body.agent.trim() ? body.agent.trim() : by;
   if (typeof body.model !== 'string' || !body.model.trim()) return { error: 'model is required — the model id that was called' };
+  // #1428 REVIEW — FIXED VOCABULARIES REJECTED UPFRONT. A withheldReason
+  // or withheldStateOutcome that is not in the production vocabulary is
+  // REFUSED here, before the entity is built. The prior shape accepted any
+  // short string and silently landed it on the row, which is exactly the
+  // shape a caller would use to smuggle a body field under another name —
+  // a privacy leak the vocabulary is here to prevent. Null/undefined are
+  // accepted (the field is optional on unrelated rows).
+  if (body.withheldReason !== undefined && body.withheldReason !== null) {
+    if (typeof body.withheldReason !== 'string' || !WITHHELD_REASON_VALUES.has(body.withheldReason)) {
+      return { error: `withheldReason ${JSON.stringify(body.withheldReason)} is not a known vocabulary value — allowed: ${[...WITHHELD_REASON_VALUES].join(', ')}. Free-text here would be a privacy leak the vocabulary is here to prevent.` };
+    }
+  }
+  if (body.withheldStateOutcome !== undefined && body.withheldStateOutcome !== null) {
+    if (typeof body.withheldStateOutcome !== 'string' || !WITHHELD_STATE_OUTCOME_VALUES.has(body.withheldStateOutcome)) {
+      return { error: `withheldStateOutcome ${JSON.stringify(body.withheldStateOutcome)} is not a known vocabulary value — allowed: ${[...WITHHELD_STATE_OUTCOME_VALUES].join(', ')}. Free-text here would be a privacy leak the vocabulary is here to prevent.` };
+    }
+  }
   const n = (v) => (v == null || v === '' ? null : (Number.isFinite(Number(v)) ? Number(v) : null));
   // #1203 finding (2026-09-06): a row carrying seed 42 and temperature 0 got a
   // 201 and read back with both silently DROPPED — an acceptance that loses
@@ -4564,8 +4642,17 @@ function modelCallEntityFrom(body) {
     'scrum:wakeKind': typeof body.wake?.kind === 'string' ? body.wake.kind : null,
     'scrum:wakeMessage': typeof body.wake?.messageId === 'string' ? body.wake.messageId : null,
     'scrum:memoryHanded': n(body.memory?.handed), 'scrum:memoryState': typeof body.memory?.state === 'string' ? body.memory.state : null,
-    // #1441 — how many refused REMEMBER lines this call was handed back (absent = none).
+// #1441 — how many refused REMEMBER lines this call was handed back (absent = none).
     'scrum:memoryRefusalsHanded': n(body.memory?.refusalsHanded),
+    // #1428 PRIVACY — withheld-reply HAND-BACK count (number ≥ 1 here on a wake
+    // that received one). A row with ≥ 1 here bounds the NEXT wake's
+    // `handBackFromState` walk (the private file is `clear`ed on success, so
+    // the same hand-back is never offered twice). The TEXT itself never
+    // reaches the document: `withheldText` is not in MODEL_CALL_FIELDS, and
+    // a hostile submission gets the unknown-field refusal. The reason rides
+    // on its own field; the recoverable body lives in the resident's private
+    // file (core/withheld-state.mjs).
+    'scrum:withheldHanded': n(body.memory?.withheldHanded),
     'scrum:memoryWritten': Array.isArray(body.memoryWritten) ? body.memoryWritten.map((m) => (typeof m === 'string' ? m : JSON.stringify(m))).slice(0, 50) : [],
     'scrum:claims': Array.isArray(body.claims) ? body.claims.slice(0, 50) : [],
     // #1196 — the tool record. Hops keep their full shape on the document; the
@@ -4608,6 +4695,20 @@ function modelCallEntityFrom(body) {
     'scrum:contextHandedTo': Array.isArray(body.contextHandedTo) ? body.contextHandedTo.map(String).slice(0, 200) : [],
     'scrum:producedPost': typeof body.producedPost === 'string' ? body.producedPost : null,
     'scrum:calledAt': typeof body.at === 'string' ? body.at : new Date().toISOString(),
+    // #1428 PRIVACY — WITHHELD REASON on the document. A STABLE TOKEN from
+    // WITHHELD_REASON_VALUES (validated above; an unknown value was refused
+    // before the entity was built). The full text NEVER reaches this
+    // document: `withheldText` is not in MODEL_CALL_FIELDS, so any caller
+    // that tries to POST it is refused as an unknown field above. The
+    // recoverable body lives in the resident's private file
+    // (core/withheld-state.mjs); the runner references it by file path, the
+    // SPARQL seat sees the count via `withheldHanded`.
+    'scrum:withheldReason': typeof body.withheldReason === 'string' ? body.withheldReason : null,
+    // #1428 DIAGNOSTIC ROW — STABLE outcome token from
+    // WITHHELD_STATE_OUTCOME_VALUES (validated above). A free-text string
+    // here would be a body field smuggled under another name; the vocabulary
+    // check rejects it the same way unknown fields are rejected.
+    'scrum:withheldStateOutcome': typeof body.withheldStateOutcome === 'string' ? body.withheldStateOutcome : null,
     text: typeof body.error === 'string' ? body.error.slice(0, 2000) : '',
   };
   return { entity, by };

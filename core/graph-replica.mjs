@@ -220,6 +220,13 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:unbackedLookupClaims', 'scrum:claimedLookup',
   'scrum:memoryRefused',   // #1441
   'scrum:narrationRetryOutcome',
+  // #1428 — withheld reply TELEMETRY. The COUNT of wakes that carried a
+  // withheld reason is a board-visible aggregate (see projection below);
+  // the TEXT is NOT, and lives only in the resident's PRIVATE per-seat file
+  // (core/withheld-state.mjs). The graph seat can ask "how often" without
+  // learning "what"; the resident's deliberation is the only thing that
+  // stays put.
+  'scrum:withheldReason', 'scrum:withheldStateOutcome', 'scrum:withheldHanded',
   // #1130 — an apex is a KIND, not a convention: a card carrying `apex:<X>`
   // projects as scrum:Apex with scrum:apexLabel "X", so "what lives here" is
   // one hop and needs no knowledge of the prefix.
@@ -1191,6 +1198,19 @@ function projectModelCall(store, e) {
   // zero included, for the ratio's sake (see #1246 above): "how often is this
   // seat's memory refused" needs the clean rows findable too.
   if (Array.isArray(e['scrum:memoryRefused'])) add(nn(S + 'memoryRefused'), num(e['scrum:memoryRefused'].length));
+  // #1428 PRIVACY — only the REASON rides the graph. The full withheld text
+  // NEVER reaches this surface — it lives only in the resident's private
+  // per-seat file (core/withheld-state.mjs). A SPARQL seat can ask which seats
+  // declined and how often without learning what was said; telemetry stays
+  // public, deliberation does not. `withheldHanded` is the wake that received
+  // a hand-back (a number bounded by the file's clear on a successful wake).
+  if (typeof e['scrum:withheldReason'] === 'string' && e['scrum:withheldReason']) add(nn(S + 'withheldReason'), lit(e['scrum:withheldReason']));
+  // #1428 DIAGNOSTIC ROW — the STABLE outcome token for the seat's per-seat
+  // file operation. Carried to the graph so a SPARQL seat can count "how
+  // often does the private file fail" without learning the recoverable
+  // body. The token is bounded to the five documented values.
+  if (typeof e['scrum:withheldStateOutcome'] === 'string' && e['scrum:withheldStateOutcome']) add(nn(S + 'withheldStateOutcome'), lit(e['scrum:withheldStateOutcome']));
+  if (e['scrum:withheldHanded'] != null && Number.isFinite(Number(e['scrum:withheldHanded']))) add(nn(S + 'withheldHanded'), num(e['scrum:withheldHanded']));
   // #1246b — the nudge's OUTCOME, so "does handing a seat its own sentence back
   // actually work" is a rate rather than an anecdote. Emitted only when a nudge
   // happened: unlike the claims count, the absent case here means "nothing was

@@ -69,7 +69,22 @@ const SAMPLE = {
   promptVersion: 'pv-1',
   provider: 'http://localhost:9',
   contextHandedTo: ['https://scrumboard.local/conversation/x'],
+  // #1428 PRIVACY — `withheldReason` rides the wire as a STABLE TOKEN, so a
+  // downward selector can count declines. `withheldText` is NOT in this
+  // fixture, NOT on the row, NOT on the wire — the recoverable body lives
+  // only in the resident's private file (core/withheld-state.mjs). The
+  // seam test asserts the privacy contract on this last test below.
+  withheldReason: 'standalone-no-reply',
+  // #1428 DIAGNOSTIC ROW — withheldStateOutcome is the STABLE outcome token
+  // for the seat's per-seat file operation. Five values: retained, cleared,
+  // retain-failed, clear-failed; null on unrelated rows. Public, REST, graph
+  // may carry it; NEVER the withheld text or a filesystem path.
+  withheldStateOutcome: 'retain-failed',
 };
+// A wake's received-hand-back count lives INSIDE `memory` (alongside
+// refusalsHanded), and the SAME drop-detection rule applies there: the seam
+// will only see a drop when the field carries a non-default value.
+const MEMORY_SAMPLE = { withheldHanded: 2 };
 // Compared fields that are legitimately allowed to stay at their default in
 // this fixture, each with the reason. Keep this list short and argued.
 const MAY_BE_DEFAULT = {};
@@ -85,6 +100,11 @@ test('#1441 GENERIC SEAM — every field a real wake puts on its row that the wi
     // …including the fields the runner puts on the row only when they fire
     // (narrationRetry, memoryRefused are spread in conditionally).
     for (const k of Object.keys(SAMPLE)) if (!(k in row) || isDefault(row[k])) row[k] = SAMPLE[k];
+    // #1428 slice 2 — withheldHanded lives INSIDE `memory`, not at the top
+    // level. Overlay the same way: a default (null) cannot tell "forwarded"
+    // from "dropped", so the test refuses to compare against it.
+    row.memory = { ...(row.memory ?? {}) };
+    for (const k of Object.keys(MEMORY_SAMPLE)) if (!(k in row.memory) || isDefault(row.memory[k])) row.memory[k] = MEMORY_SAMPLE[k];
     // a later timestamp, so the read-back (newest first) is THIS row and not the probe's
     row.at = new Date(Date.parse(captured.at) + 60_000).toISOString();
     const compared = Object.keys(row).filter((k) => !DERIVED.has(k) && k in probe);
@@ -103,9 +123,30 @@ test('#1441 GENERIC SEAM — every field a real wake puts on its row that the wi
       const want = plain(v) && plain(got) ? Object.fromEntries(Object.keys(got).map((kk) => [kk, v[kk] ?? null])) : v;
       if (JSON.stringify(got) !== JSON.stringify(want)) dropped.push(`${k}: row=${JSON.stringify(v)} wire=${JSON.stringify(got)}`);
     }
+    // #1428 slice 2 — `memory.withheldHanded` lives INSIDE `memory`, not at
+    // the top level. The seam loops over top-level keys; one nested round
+    // handles the new hand-back count.
+    if (row.memory && plain(wire.memory)) {
+      for (const [k, v] of Object.entries(row.memory)) {
+        if (!(k in wire.memory)) continue;
+        if (isDefault(v) && !(k in MAY_BE_DEFAULT)) { dropped.push(`memory.${k}: defaulted in the fixture, drop would not be visible`); continue; }
+        if (JSON.stringify(v) !== JSON.stringify(wire.memory[k])) dropped.push(`memory.${k}: row=${JSON.stringify(v)} wire=${JSON.stringify(wire.memory[k])}`);
+      }
+    }
     assert.deepEqual(dropped, [], 'a field the runner wrote and the server returns came back different (dropped between them)');
     assert.ok(compared.includes('markerLines') && compared.includes('unbackedLookupClaims') && compared.includes('narrationRetry') && compared.includes('memoryRefused'),
       `the four fields measured at zero in production are among those compared: ${compared.join(', ')}`);
+    // #1428 PRIVACY — `withheldReason` is compared at the top level (the
+    // STABLE TOKEN ride); `withheldText` is NOT in `compared` because the
+    // runner row does not carry it any more — it lives only in the resident's
+    // private file. The test asserts the privacy contract on the
+    // withheldReason path below.
+    assert.ok(compared.includes('withheldReason'),
+      `withheldReason is among those compared (stable token that survives the round-trip): ${compared.join(', ')}`);
+    assert.ok(!compared.includes('withheldText'),
+      `withheldText is NOT among those compared: a future runner that puts the recoverable body back on the row is a privacy regression that fails here. compared: ${compared.join(', ')}`);
+    assert.ok(compared.includes('withheldStateOutcome'),
+      `withheldStateOutcome is among those compared (stable outcome token): ${compared.join(', ')}`);
   } finally { await srv.stop(); }
 });
 

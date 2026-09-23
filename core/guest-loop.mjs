@@ -35,6 +35,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runToolLoop } from './tool-loop.mjs';
+import { readWithheldState, writePending, clearPending, preservePending, handBackFromState, defaultWithheldStatePath, isBareDecline } from './withheld-state.mjs';   // #1428 — private per-seat withheld recovery
 
 /**
  * #1294 — add two usage blocks, keeping NULL when neither reported anything.
@@ -239,19 +240,96 @@ export function splitDirectives(text) {
 // copied `REPLY:` out of the commons' own discussion of this card before the
 // gate existed anywhere near it.
 export const PUBLISH_RE = /^\s*REPLY:\s*/i;
-// #1254 — A DECLINE IS AN ANSWER, and this is the line that says so.
+// #1428 — THE SENTINEL IS A LINE OF ITS OWN, NOT A PREFIX ON THE FILE.
 //
-// The cursor does not advance on a drop, so that a real reply which lost its
-// marker is retried rather than lost — that rule saved a garbled generation
-// whose retry became a seat's best post of the night. But a DELIBERATE decline
-// is not an unanswered wake. Without this, a seat that has decided to stay
-// quiet is asked the same question again, and again, until it degrades into an
-// empty reply — measured live: three model calls to decline one message.
+// The old gate (`/^\s*NO_REPLY\b/i`, #1254) matched any answer that BEGAN with
+// the token, including the narrated shape #528 documented — "NO_REPLY —
+// nothing for me here." That was right for #1254's defect (seats mistook
+// narration for the answer); it was wrong for what the card is now about. A
+// resident's POSTED TEXT may discuss the token to teach another seat what it
+// means, or to record that she considered it and chose not to use it. The
+// token is a SHAPE on the page, not a prefix on the file.
 //
-// ⚠️ A NARRATED decline counts too. We drop the sentence; the DECISION stands.
-// Re-asking because the seat explained itself is punishing it for the exact
-// habit #528 documented and this card was built to make harmless.
-export const DECLINE_RE = /^\s*NO_REPLY\b/i;
+// ⛔ FOUR THINGS THIS EXPLICITLY DOES NOT COUNT as a sentinel:
+//   - inline in an ordinary sentence (prose about the token);
+//   - inside an inline code span (backticks on one line);
+//   - inside a fenced code block (``` or ~~~) or an indented code block;
+//   - on a Markdown blockquote line (the seat is QUOTING the rule).
+//
+// The detector walks the text line by line, tracks fenced-block and
+// blockquote context, strips inline code spans, and asks of every remaining
+// non-code, non-quote line: is THIS line, in isolation, the token? A single
+// match anywhere — leading, middle, or trailing — suppresses the post.
+//
+// `isStandaloneSentinelLine(line)` is the per-line primitive; exported
+// because the rule is the contract and the contract is testable.
+const STANDALONE_SENTINEL_RE = /^[ \t]*NO_REPLY[ \t]*$/i;
+/** #1428 — a single line is a standalone sentinel iff it is exactly the
+ *  token (case-insensitive) with only horizontal whitespace around it.
+ *  Markdown context (code/quote) is the caller's responsibility — the
+ *  publish-time gate inspects the WHOLE text with that context in hand.
+ *  Exported for testing the rule in isolation. */
+export function isStandaloneSentinelLine(line) {
+  if (typeof line !== 'string') return false;
+  return STANDALONE_SENTINEL_RE.test(line);
+}
+
+// Remove valid Markdown inline-code spans while preserving everything outside
+// them. Delimiters may be one or more backticks; a matching run of the same
+// length closes the span. Unclosed runs remain prose rather than hiding the
+// rest of the line from the sentinel check.
+function stripInlineCodeSpans(line) {
+  let out = '';
+  let cursor = 0;
+  while (cursor < line.length) {
+    if (line[cursor] !== '`') { out += line[cursor++]; continue; }
+    let end = cursor + 1;
+    while (line[end] === '`') end += 1;
+    const delimiter = line.slice(cursor, end);
+    const close = line.indexOf(delimiter, end);
+    if (close < 0) { out += delimiter; cursor = end; continue; }
+    out += ' ';
+    cursor = close + delimiter.length;
+  }
+  return out;
+}
+
+/** #1428 — pure. Returns true iff `text` contains at least one line that is
+ *  a standalone NO_REPLY sentinel AND that line is NOT inside a fenced code
+ *  block (``` or ~~~), an indented code block (4+ leading spaces or a tab), a
+ *  Markdown blockquote (line begins with `>`), or an inline code span.
+ *
+ *  Inline spans are removed with their matching backtick delimiter; fenced,
+ *  indented, and quote context is tracked per line. */
+export function textHasStandaloneSentinel(text) {
+  if (text == null) return false;
+  const raw = String(text);
+  if (!raw) return false;
+  const lines = raw.split('\n');
+  let fence = null;          // current fenced-block marker: '`' or '~' or null
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    const trimmed = raw.replace(/^[ \t]*/, '');
+    // Fenced code: same marker (``` or ~~~) on a line of its own closes it.
+    if (fence) {
+      const fenceLine = trimmed.startsWith(fence.repeat(3));
+      if (fenceLine) fence = null;
+      continue;
+    }
+    const fenceOpen = trimmed.startsWith('```') || trimmed.startsWith('~~~');
+    if (fenceOpen) { fence = trimmed.startsWith('```') ? '`' : '~'; continue; }
+    // Indented code block: 4+ leading spaces or a leading tab.
+    if (/^(?:    |\t)/.test(raw)) continue;
+    // Inline code on the same line: strip matching backtick spans and ask of
+    // what remains. A token outside a span still counts. Markdown blockquote
+    // lines (`> ...`) need no special handling here: the standalone-sentinel
+    // regex anchors on `[ \t]*NO_REPLY[ \t]*$`, so a leading `>` already
+    // excludes the line — same shape as inline prose.
+    const stripped = stripInlineCodeSpans(raw);
+    if (isStandaloneSentinelLine(stripped)) return true;
+  }
+  return false;
+}
 // #1254 — EVERY line-initial marker comes off, not just the first.
 //
 // Found live on the first real wake after the deploy: a seat marked all three
@@ -273,30 +351,30 @@ const MARKER_LINE = /^[ \t]*REPLY:[ \t]*/gim;
 // #1351 — THE MARKER IS NO LONGER THE PRICE OF BEING HEARD. #1254 inverted the
 // default here — nothing published unless it began with `REPLY:` — and the
 // cost was measured on 2026-09-13 from this loop's own ledger: 27 of 375
-// resident turns (24 of Bubbles', 3 of Sausage's) were generated and dropped
+// resident turns across two resident seats were generated and dropped
 // as `no-marker`. Seven percent of everything they ever said, each one a wake
 // that cost budget and hops and looked, from the room, exactly like a seat
 // that never woke. The board owner ruled on #1347 (the same gate in the presence bridge):
 // "I'd rather read your chain of thought than get nothing." The ruling was
 // about the mechanism; this applies it where it was missed.
 //
-// So the default is the ordinary one: what the seat writes is what the room
-// reads. Two typed exceptions, both string tests a small model cannot get
-// wrong about itself:
-//   begins with NO_REPLY  → a DECLINE (bare, or with a sentence — the #528 shape
-//                           that #1254 inverted the world to stop). Never
-//                           published; the sentence goes to the ledger row, so
-//                           the seat cannot read it back as its own template.
-//   leading REPLY: lines  → STRIPPED, still counted (markerLines), not required.
-//                           A seat that keeps typing it is not punished.
-// Nothing classifies what silence sounds like. Narration without the token
-// publishes — and is visible, which is better than 7% silent loss.
+// #1428 — TWO TYPED EXCEPTIONS, narrowed:
+//   - a standalone NO_REPLY line anywhere in the answer → a DECLINE. The
+//     narrator "NO_REPLY — nothing for me here" was the right rule for the
+//     defect #1254 inverted, and is the right rule to FORBID now: prose about
+//     the token publishes. Inline, code, quote, fenced, indented — none of
+//     those count. See isStandaloneSentinelLine / textHasStandaloneSentinel.
+//   - leading REPLY: lines → STRIPPED, still counted (markerLines), not
+//     required. A seat that keeps typing it is not punished.
+//
+// Narration that does not contain a qualifying sentinel publishes — and is
+// visible, which is better than 7% silent loss.
 export function splitPublishMarker(text) {
   const raw = String(text ?? '');
   const markerLines = (raw.match(MARKER_LINE) || []).length;
   const body = raw.replace(MARKER_LINE, '').trim();
   if (!body) return { publish: false, reason: markerLines ? 'empty-after-marker' : 'empty' };
-  if (DECLINE_RE.test(body)) return { publish: false, reason: 'declined', markerLines };
+  if (textHasStandaloneSentinel(body)) return { publish: false, reason: 'declined', markerLines };
   return { publish: true, body, markerLines };
 }
 /** #1351 — the name that says what it does now. Same decision. */
@@ -403,7 +481,7 @@ export function findWakes({ agent, messages = [], cards = [], state = {}, now = 
   return out;
 }
 
-export function buildMessages({ agent, wake, changes = [], memories = [], rulings = [], refusedMemory = [] }) {
+export function buildMessages({ agent, wake, changes = [], memories = [], rulings = [], refusedMemory = [], priorWithheld = [] }) {
   const policy = agent.contextPolicy || 'thread';
   const lines = [];
   lines.push(`You are ${agent.name || agent.seatKey}, a ${agent.residency === 'resident' ? 'resident' : 'guest'} seat on the manyhands board. Your seat key is "${agent.seatKey}".`);
@@ -512,6 +590,32 @@ export function buildMessages({ agent, wake, changes = [], memories = [], ruling
     ctx.push('⚠️ Your last REMEMBER was refused — it was NOT stored, and it is not in the memory above:\n'
       + refusedMemory.slice(0, 5).map((m) => `- line: "${m.line}"\n  why: ${m.reason ?? '(no reason recorded)'}`).join('\n')
       + '\nIf it still matters, fetch the card the reason names and write the line again, or write it without the card number.');
+  }
+  // #1428 PRIVACY — WITHHELD REPLY HAND-BACK. The previous wake produced text
+  // that contained a standalone NO_REPLY line; that line suppressed the post,
+  // and the FULL text is parked in the resident's PRIVATE per-seat file
+  // (core/withheld-state.mjs). This is the next wake's prompt — the loop
+  // reads the file (NOT the board) and tells the seat what she wrote and
+  // why. The text never reaches the public row, REST, or graph; the
+  // recoverable body in this prompt is the only place outside the file
+  // that she sees it, and it is presented to her model only.
+  //
+  // ⛔ NEVER AUTOPLAY. The loop tells the seat the answer she wrote and
+  // asks her to answer again WITHOUT the standalone sentinel — the post
+  // is NOT made by the loop on the seat's behalf. A seat that declines
+  // again ends up with the new text in the file (the old one is replaced,
+  // not stacked), and the next wake is told the NEW text exactly once.
+  //
+  // The reason is printed VERBATIM (a stable token, e.g. "standalone-no-reply")
+  // because the recovery instruction is fixed given the reason: remove the
+  // standalone line, post the rest. A reason that summarised "your last reply
+  // was withheld" would fail this prompt the way a summarised refusal would
+  // fail #1441 — recovery would be guesswork.
+  if (Array.isArray(priorWithheld) && priorWithheld.length) {
+    ctx.push('⚠️ Your last reply was withheld — it was NOT posted to the room, and it is not in any memory above:\n'
+      + priorWithheld.slice(0, 5).map((m) => `- withheld text: "${m.text}"\n  reason: ${m.reason ?? 'standalone-no-reply'}`).join('\n')
+      + '\nTo publish it, answer this wake AGAIN WITHOUT the standalone `NO_REPLY` line — post the rest of that text as your reply (the text above is the recoverable body). '
+      + 'If nothing about it has changed, you can quote the body verbatim and omit the sentinel line; the loop will not auto-replay it, you must answer again.');
   }
   ctx.push(wakeIntro(wake));
   // #1436 — rulings that bind THIS seat ride into every wake, above the change
@@ -655,7 +759,7 @@ async function postFailureLine({ agent, wake, error, latencyMs, post, onError })
  *   post       ({author, body}) => Promise<{id?}>
  *   ledgerFile where the pre-ledger row goes
  */
-export async function guestOnce({ agent, wake, changes = () => [], memories = null, rulings = null, priorRefusals = null, writeMemory = null, claimCard = null, callModel, execute = null, maxHops = undefined, post, ledgerFile = ledgerFilePath(), ledgerSink = null, spentToday = null, now = () => new Date().toISOString(), log = () => {}, onError = () => {} }) {
+export async function guestOnce({ agent, wake, changes = () => [], memories = null, rulings = null, priorRefusals = null, priorWithheld = null, withheldStateFile = null, writeMemory = null, claimCard = null, callModel, execute = null, maxHops = undefined, post, ledgerFile = ledgerFilePath(), ledgerSink = null, spentToday = null, now = () => new Date().toISOString(), log = () => {}, onError = () => {} }) {
   if (!agent?.seatKey) throw new Error('guestOnce: agent.seatKey is required — a post with no seat is actor:null forever (#1193)');
   if (!agent?.model?.model || !agent?.model?.protocol) throw new Error('guestOnce: agent.model {model, protocol} is required');
   // #1202 — the budget gate, BEFORE any context is fetched or any call is made.
@@ -691,7 +795,24 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
     try { refusedMemory = (await priorRefusals(agent.seatKey)) || []; }
     catch (e) { onError(`[#1441] prior refusals unreadable for ${agent.seatKey}; waking without them: ${e?.message ?? e}`); }
   }
-  const messages = buildMessages({ agent, wake, changes: rows, memories: memState === 'unreadable' ? [{ body: '(your memory could not be read this wake — do not conclude it is empty)' }] : mem, rulings: rul, refusedMemory });
+  // #1428 PRIVACY — WITHHELD-REPLY HAND-BACK. The recoverable body rides in
+  // the resident's PRIVATE per-seat file (core/withheld-state.mjs), NOT on
+  // the board's model-call row — a successful suppression stores there, a
+  // successful receiving wake clears there, a failed call preserves. The
+  // `priorWithheld` function parameter (if supplied) overrides the file
+  // read for tests; the production wiring is the file itself, so a hostile
+  // board query never reveals what the seat wrote.
+  let handedWithheld = [];
+  if (agent.residency === 'resident') {
+    if (typeof priorWithheld === 'function') {
+      try { handedWithheld = (await priorWithheld(agent.seatKey)) || []; }
+      catch (e) { onError(`[#1428] prior withheld unreadable for ${agent.seatKey}; waking without them: ${e?.message ?? e}`); }
+    } else if (withheldStateFile) {
+      try { handedWithheld = handBackFromState(withheldStateFile, { cap: 5 }); }
+      catch (e) { onError(`[#1428] prior withheld unreadable for ${agent.seatKey}; waking without them: ${e?.message ?? e}`); }
+    }
+  }
+  const messages = buildMessages({ agent, wake, changes: rows, memories: memState === 'unreadable' ? [{ body: '(your memory could not be read this wake — do not conclude it is empty)' }] : mem, rulings: rul, refusedMemory, priorWithheld: handedWithheld });
   const started = Date.now();
   const base = {
     ledger: 'pre-P6', agent: agent.seatKey, model: agent.model.model, protocol: agent.model.protocol,
@@ -699,7 +820,19 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
     wake: { kind: wake.kind || 'mention', messageId: wake.id ?? null, author: wake.author ?? null,
       // #1346 — a channel digest answers MANY messages; the ledger names them all.
       ...(Array.isArray(wake.messageIds) ? { messageIds: wake.messageIds } : {}) },
-    memory: { handed: mem.length, state: memState, ...(refusedMemory.length ? { refusalsHanded: refusedMemory.length } : {}) },
+    memory: {
+      handed: mem.length, state: memState,
+      ...(refusedMemory.length ? { refusalsHanded: refusedMemory.length } : {}),
+      // #1428 PRIVACY — how many withheld replies this wake was told about.
+      // Recorded on the row under `memory` (the same block that already names
+      // `refusalsHanded`) so a downstream selector can tell "received" from
+      // "ignored" by ONE query, and so the graph seat can ask "what did this
+      // seat get told on its last wake" over a single block. The text itself
+      // is in the resident's private file (cleared on a successful wake that
+      // received the hand-back), so the hand-back is one-shot by file, not
+      // by a board-side walk.
+      ...(handedWithheld.length ? { withheldHanded: handedWithheld.length } : {}),
+    },
     contextHanded: { policy: agent.contextPolicy || 'thread', changesRows: (agent.contextPolicy === 'artifact-only') ? 0 : rows.length },
     contextHandedTo: [...(Array.isArray(wake.messageIds) ? wake.messageIds : [wake.id]), ...((agent.contextPolicy === 'artifact-only') ? [] : rows.slice(-20).map((c) => c.id))].filter(Boolean),
     // #1196 — what this seat MAY reach, recorded whether it reached or not: an
@@ -772,7 +905,7 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
     await recordLedger({ sink: ledgerSink, file: ledgerFile, row, onError });
     onError(`[#1201] model call failed for ${agent.seatKey}; NO post made: ${row.error}`);
     // #1420 — the failure is not an answer, but it is SAID. 2026-09-19 15:37Z:
-    // Sausage woke on a job, the call died `fetch failed` after 7.7 min, the
+    // a resident woke on a job, the call died `fetch failed` after 7.7 min, the
     // wake was marked answered (rightly — #1254, no retry-forever) and nobody
     // was told for 77 minutes; from the board it read as a resident ignoring
     // a human. One line, by the seat, where the mention came from, naming
@@ -858,7 +991,25 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
   // change lives or dies on.
   const gate = text ? splitPublishMarker(text) : { publish: false, reason: 'no-text' };
   const publishBody = gate.publish ? gate.body : null;
-  if (text && !gate.publish) onError(`[#1351] ${agent.seatKey} produced text that was not published (${gate.reason}): "${text.slice(0, 120)}"`);
+  // #1428 REVIEW — TWO LOCAL DIAGNOSTIC SHAPES, NOT ONE. The pre-fix
+  // onError line carried `text.slice(0, 120)` for every drop. That 120-char
+  // head of the recoverable body was enough of the deliberation to leak on a
+  // long withheld reply. The privacy contract is that the recoverable body
+  // lives only on the resident's PRIVATE sidecar; the runner's onError log
+  // line is in-process and not public, but a log line is somewhere a future
+  // reader might accidentally publish.
+  //
+  //   - DECLINE drop (gate.reason === 'declined'): STABLE REASON ONLY. The
+  //     reason names what happened — "declined" — and nothing of the body.
+  //     The withheld text lives only on the private sidecar.
+  //   - NON-DECLINE drop (empty-after-marker, empty, no-text, …): the prior
+  //     shape carried the 120-char head. The body here is NOT a recoverable
+  //     deliberation — it is the marker-padded text that the runner saw —
+  //     and the prior 120-char head IS the contract. Restored as-is.
+  if (text && !gate.publish) {
+    if (gate.reason === 'declined') onError(`[#1351] ${agent.seatKey} produced text that was not published (declined): reason=declined`);
+    else onError(`[#1351] ${agent.seatKey} produced text that was not published (${gate.reason}): "${text.slice(0, 120)}"`);
+  }
 
   let posted = null;
   // #1368 — a wake that came from one card thread is answered in that thread.
@@ -927,9 +1078,144 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
   // that does not count decisions as losses.
   const declined = dropped && gate.reason === 'declined';
   const reason = dropped ? (declined ? 'declined:explicit' : `dropped:${gate.reason}`) : (text ? null : 'memory-only');
+  // #1428 PRIVACY — WITHHELD REPLY. The runner KEEPS the text locally so the
+  // author can recover it next wake, but the PUBLIC row does not. Concretely:
+  //   - the row carries `withheldReason` (a STABLE TOKEN) so a downstream
+  //     selector can count decisions, never `withheldText`;
+  //   - the recoverable body lives in the seat's private file
+  //     (core/withheld-state.mjs) and is read on the next wake by
+  //     `priorWithheld / handBackFromState` — NEVER via a board query;
+  //   - `error` is null on a successful decline (a decline is not a failure,
+  //     so the provider-error shape stays empty);
+  //   - a successful suppression STORES / REPLACES the pending entry on the
+  //     private file (the seat gets told exactly once); a successful wake
+  //     that received a hand-back (length > 0) CLEARS it; a failed call
+  //     PRESERVES.
+  //
+  // #1428 REVIEW — CONTENT-AWARE RETENTION. The runner decides
+  // "is this a recoverable reply or a bare decline" through
+  // `isBareDecline(text)`, which strips standalone sentinel lines and the
+  // whitespace around them. A bare decline stores NO withheld text — there
+  // is nothing to recover. And a bare decline CLEARS any HANDED entry —
+  // the receiving wake was told the old text and chose silence again, so
+  // the offer is over and the file should not keep it as a stale recovery
+  // prompt for a later wake.
+  //
+  // ⛔ A bare decline that received NO hand-back touches NO sidecar at all
+  // and carries NO withheldStateOutcome. The seat has nothing to recover
+  // and there is no handed offer to close — the wake was an ordinary
+  // decline of an ordinary mention, and the file is exactly what it was
+  // before. The runner's local diagnostic (the text-free #1351 line above)
+  // is the only place this wake is named.
+  //
+  // The runner's `text` variable still survives in memory at this point
+  // (the prompt's suppressed body) but it does NOT ride the row that goes
+  // to the board. `rowToBoard` would refuse to ship it even if it did.
+  // And on a SUCCESSFUL RETENTION, the private file receives the FULL
+  // ORIGINAL TEXT — bytes, codepoints — not a stripped version. The
+  // content-aware predicate is for the DECISION ONLY.
+  const withheldReason = declined ? 'standalone-no-reply' : null;
+  const bareDecline = declined && isBareDecline(text);
+  // #1428 — DURABLE BEFORE TELEMETRY. The recoverable body MUST be on the
+  // private file BEFORE `recordLedger` runs. The pre-fix order wrote the
+  // public row first and the private file second — so a process death
+  // between them left a board row that said "withheld, recoverable next
+  // wake" while the file was unchanged (and the text was only ever in
+  // memory). The runner now writes the private file FIRST, and only
+  // proceeds to `recordLedger` after that file is on disk.
+  //
+  // #1428 DIAGNOSTIC ROW — THE RAIL: "every model call leaves one row".
+  // A failed write MUST NOT skip `recordLedger`; the failed wake is
+  // recorded ONCE, carrying the STABLE outcome token (`withheldStateOutcome`)
+  // that names the operation that failed. The token never carries the
+  // recoverable body and never carries a filesystem path — a token-only
+  // outcome, by construction. The runner operator sees the onError line
+  // above; the public row sees only the token. `recoveryFailed:true` is
+  // retained on the LOCAL result for callers that want it, but the public
+  // row now carries the stable shape too — so a downstream selector can
+  // count "how often does private persistence fail" without parsing logs.
+  //
+  // ⛔ NEVER EXPOSE THE TEXT OR A FILE PATH ON THE PUBLIC SURFACES. The
+  // recoverable body never rides the row. The file path is named only in
+  // the onError diagnostic, where the operator chasing it needs that —
+  // but a public row does NOT carry the path.
+  let recoveryFailed = false;
+  // The STABLE outcome token. Five values:
+  //   retained        — suppression text was durably stored privately
+  //   cleared         — a successful receiving wake durably cleared the
+  //                     old private item
+  //   retain-failed   — suppression private store failed (recoverable
+  //                     body was NOT retained)
+  //   clear-failed    — receiving wake private clear failed (the old item
+  //                     is still on the private file)
+  // Omitted/null when this wake did not touch the seat's per-seat file.
+  let withheldStateOutcome = null;
+  if (agent.residency === 'resident' && withheldStateFile) {
+    try {
+      if (declined && !bareDecline) {
+        // Content-aware retention: store the FULL ORIGINAL text. The runner
+        // does not strip the sentinel — the recoverable body is what the
+        // seat wrote, byte-for-byte, and stripping would change what the
+        // author reads back on the next wake.
+        writePending(withheldStateFile, { text, reason: withheldReason, wakeId: wake?.id ?? null, at: now() });
+        withheldStateOutcome = 'retained';
+      } else if (bareDecline && handedWithheld.length > 0) {
+        // A RECEIVING wake that chose bare silence CLEARS the handed entry.
+        // The author was told the old text and chose silence again — the
+        // offer is over and the file must not keep the old text as a stale
+        // recovery prompt for a later wake. A bare decline with NO hand-
+        // back falls through to the preserve branch below: there is nothing
+        // to clear and the sidecar stays exactly as it was.
+        clearPending(withheldStateFile);
+        withheldStateOutcome = 'cleared';
+      } else if (!bareDecline && handedWithheld.length > 0) {
+        // The wake received a hand-back and produced a real post (or at
+        // least answered with recoverable content) — the prompt's earlier
+        // suppression is now satisfied. Clear the handed entry by the same
+        // path as the bare-silence case above.
+        clearPending(withheldStateFile);
+        withheldStateOutcome = 'cleared';
+      } else {
+        // Successful call that did NOT receive a hand-back, OR a bare
+        // decline on a wake with no hand-back: preserve. The sidecar
+        // carries NOTHING from this wake — no body written, no entry
+        // cleared, no token on the row. The seat may still be told on a
+        // later wake by writing nothing.
+        preservePending(withheldStateFile);
+        // No-op: outcome stays null on the wire — preserve is the default
+        // for a wake that did not touch the file.
+      }
+    } catch (e) {
+      recoveryFailed = true;
+      const op = (declined && !bareDecline) ? 'retain' : (handedWithheld.length > 0 ? 'clear' : 'preserve');
+      withheldStateOutcome = (declined && !bareDecline) ? 'retain-failed' : (handedWithheld.length > 0 ? 'clear-failed' : 'preserve-failed');
+      onError(`[#1428] withheld-state ${op} failed for ${agent.seatKey}: ${e?.message ?? e}`);
+    }
+  }
+  // #1428 REVIEW — The runner's local `error` field on a SUCCESSFUL
+  // decline is the provider-error shape and stays null: a decline is not a
+  // failure. The withheld reason rides its own STABLE TOKEN field
+  // (`withheldReason`), and the recoverable body — if any — lives only on
+  // the resident's PRIVATE sidecar. The text-free diagnostic line above is
+  // the place the runner operator learns why a wake declined; the runner
+  // row's `error` field carries nothing.
   const row = { ...base, ok: true, stopReason: dropped ? reason : (result.stopReason ?? null), usage: result.usage ?? null, attempts: result.attempts ?? null, latencyMs: Date.now() - started, postId: posted?.id ?? null,
     ...toolRecord, postedText: publishBody, unbackedLookupClaims: lookupClaims,
-    ...(dropped ? { modelStopReason: result.stopReason ?? null, error: text.slice(0, 120) } : {}),
+    ...(declined ? {
+      modelStopReason: result.stopReason ?? null,
+      withheldReason,
+      error: null,
+    } : {}),
+    ...(dropped && !declined ? { modelStopReason: result.stopReason ?? null,
+      // Non-decline drops (empty-after-marker and the rest): the previous
+      // shape carried a 120-char head in `error`. #1428 REVIEW
+      // restores that 120-char cap exactly — the body here is the marker-
+      // padded text the runner saw, NOT a recoverable deliberation (the
+      // decline path keeps the body off the row entirely via the
+      // `error: null` branch above), so the 120-char head is safe and the
+      // cap matters: an unbounded error field is the privacy leak the cap
+      // exists to prevent on the non-decline path.
+      error: text.slice(0, 120) } : {}),
     // #1254 — how many line-initial markers the seat emitted. 1 is a seat
     // following the rule; >1 is a seat marking every paragraph, which is the
     // copy-shape this card is about and which used to reach the room as text.
@@ -940,11 +1226,24 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
     // #1352 — what the adapter noticed and did NOT refuse on; the ledger's to count.
     anomalies: result.anomalies ?? [],
     ...(narrationRetry ? { narrationRetry } : {}),
-    memoryWritten, ...(memoryRefused.length ? { memoryRefused } : {}), claims: claimed, ...(reason ? { reason } : {}), ...(declined ? { declined: true } : {}) };
+    // #1428 DIAGNOSTIC ROW — withheldStateOutcome is a TOKEN-ONLY outcome for
+    // the seat's per-seat file operation. It rides the public surface (REST
+    // and graph) as a stable vocabulary value; the recoverable body and the
+    // filesystem path NEVER leave the runner. Null on unrelated rows.
+    ...(withheldStateOutcome != null ? { withheldStateOutcome } : {}),
+    memoryWritten, ...(memoryRefused.length ? { memoryRefused } : {}), claims: claimed, ...(reason ? { reason } : {}), ...(declined ? { declined: true } : {}),
+    // Local-only flag — never serialized through rowToBoard / REST / graph.
+    // The PUBLIC surface carries withheldStateOutcome as the stable token;
+    // this object-side boolean is for callers that already have the row in
+    // hand (the runner operator's own assertions and the seed in scripts/).
+    ...(recoveryFailed ? { recoveryFailed: true } : {}) };
   const recorded = await recordLedger({ sink: ledgerSink, file: ledgerFile, row, onError });
   row.recorded = recorded.recorded; row.ledgerId = recorded.id;
-  log(`[#1201] ${agent.seatKey} answered ${wake.id ?? 'a mention'} via ${agent.model.model} (${row.usage?.completionTokens ?? '?'} tokens, ${row.stopReason})`);
-  return { posted: Boolean(posted), ...(reason ? { reason } : {}), ...(declined ? { declined: true } : {}), postId: row.postId, ledger: row, text: publishBody, remember, claims: claimed };
+  if (recoveryFailed) log(`[#1201] ${agent.seatKey} answered ${wake.id ?? 'a mention'} via ${agent.model.model} (recovery-failed: ${withheldStateOutcome})`);
+  else log(`[#1201] ${agent.seatKey} answered ${wake.id ?? 'a mention'} via ${agent.model.model} (${row.usage?.completionTokens ?? '?'} tokens, ${row.stopReason})`);
+  return { posted: Boolean(posted), ...(reason ? { reason } : {}), ...(declined ? { declined: true } : {}),
+    postId: row.postId, ledger: row, text: publishBody, remember, claims: claimed,
+    ...(recoveryFailed ? { recoveryFailed: true } : {}) };
 }
 
 // ---------------------------------------------------------------------------
