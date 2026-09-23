@@ -46,3 +46,17 @@ test('#1447 a local Ollama call is untouched', async () => {
   const body = await sentBody({ model: 'qwen3.5:9b', protocol: 'ollama-native', baseUrl: 'http://localhost:11434' }, ollamaOk);
   assert.equal('provider' in body, false);
 });
+
+test('#1447 a PROBE runs under the same policy as the calls it vouches for', async () => {
+  // A probe that goes out under the account's policy can say "answers" for a
+  // model whose every real call fails under deny: a false green from the very
+  // instrument you'd reach for to diagnose it.
+  const { probeModel } = await import('../core/model-adapter.mjs');
+  const sent = [];
+  const transport = async (r) => { sent.push(r); return ok; };
+  await probeModel({ model: 'm', protocol: 'openai-completions', baseUrl: 'https://openrouter.ai/api/v1' }, { transport });
+  assert.equal(sent[0].body.provider?.data_collection, 'deny');
+  sent.length = 0;
+  await probeModel({ model: 'm', protocol: 'openai-completions', baseUrl: 'https://api.openai.com/v1' }, { transport });
+  assert.equal('provider' in sent[0].body, false);
+});

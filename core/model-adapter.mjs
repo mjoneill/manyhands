@@ -389,6 +389,7 @@ export async function probeModel(agent, opts = {}) {
   const headers = { 'Content-Type': 'application/json' };
   if (opts.apiKey) headers.Authorization = `Bearer ${opts.apiKey}`;
   const base = String(agent.baseUrl || DEFAULT_OLLAMA_URL).replace(/\/+$/, '');
+  withDataPolicy(base, body);   // #1447 — probe under the policy the live calls run under
   const started = Date.now();
   let res;
   try { res = await transport({ url: base + path, headers, body, signal: AbortSignal.timeout(opts.timeoutMs ?? 20_000) }); }
@@ -413,6 +414,12 @@ export async function probeModel(agent, opts = {}) {
 function isOpenRouter(base) {
   try { const h = new URL(base).hostname; return h === 'openrouter.ai' || h.endsWith('.openrouter.ai'); }
   catch { return false; }
+}
+
+/** #1447 — one policy for every request that leaves for OpenRouter: real calls AND probes. */
+function withDataPolicy(base, body) {
+  if (isOpenRouter(base)) body.provider = { ...(body.provider || {}), data_collection: 'deny' };
+  return body;
 }
 
 export async function callModel(agent, messages, opts = {}) {
@@ -449,7 +456,7 @@ export async function callModel(agent, messages, opts = {}) {
   // traffic carries its policy per request instead of inheriting that switch.
   // OpenRouter hosts only: the field is theirs, and another OpenAI-shaped host
   // may reject a parameter it does not know.
-  if (isOpenRouter(base)) body.provider = { ...(body.provider || {}), data_collection: 'deny' };
+  withDataPolicy(base, body);
   const request = { url: base + path, headers, body };
 
   let attempt = 0; let lastRetryable = null;
