@@ -240,6 +240,34 @@ function readToolCalls(raw) {
   });
 }
 
+/**
+ * #1447 — the tool loop keeps an assistant's calls in OUR normalised shape
+ * ({id, name, arguments}, from readToolCalls) and hands the transcript back.
+ * The wire shape belongs to the protocol: OpenAI's schema wants
+ * {id, type:'function', function:{name, arguments:"<json string>"}}, Ollama the
+ * same with OBJECT arguments. Lenient providers accepted ours; the first strict
+ * one refused every multi-hop wake and returned the refusal AS CONTENT. An
+ * entry already carrying `function` is wire-shaped and passes through. The
+ * caller's transcript is never mutated.
+ */
+function toWireMessages(messages, { stringArgs }) {
+  return messages.map((m) => {
+    if (m?.role !== 'assistant' || !Array.isArray(m.tool_calls)) return m;
+    return {
+      ...m,
+      tool_calls: m.tool_calls.map((c) => {
+        if (c && typeof c.function === 'object' && c.function) return c;
+        const args = c?.arguments ?? {};
+        return {
+          id: c?.id ?? null,
+          type: 'function',
+          function: { name: c?.name ?? null, arguments: stringArgs ? JSON.stringify(args) : args },
+        };
+      }),
+    };
+  });
+}
+
 const PROTOCOLS = {
   /** Ollama's native /api/chat. */
   'ollama-native': {
@@ -248,7 +276,7 @@ const PROTOCOLS = {
       for (const [ours, theirs] of Object.entries(OLLAMA_OPTION)) {
         if (s[ours] !== undefined) options[theirs] = s[ours];
       }
-      const body = { model, messages, stream: false, options };
+      const body = { model, messages: toWireMessages(messages, { stringArgs: false }), stream: false, options };
       // A grant is data on the agent. NO KEY when nothing is granted: an empty
       // array is a different claim from "this colleague has no tools", and some
       // servers act on the difference.
@@ -298,7 +326,7 @@ const PROTOCOLS = {
   /** The OpenAI chat-completions shape — OpenRouter and most hosted providers. */
   'openai-completions': {
     request(model, messages, s, grants = {}) {
-      const body = { model, messages, stream: false };
+      const body = { model, messages: toWireMessages(messages, { stringArgs: true }), stream: false };
       if (Array.isArray(grants.tools) && grants.tools.length) body.tools = grants.tools;
       if (s.temperature !== undefined) body.temperature = s.temperature;
       if (s.topP !== undefined) body.top_p = s.topP;
