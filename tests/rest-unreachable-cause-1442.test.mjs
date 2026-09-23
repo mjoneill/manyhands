@@ -23,7 +23,7 @@ test('#1442 pure — a refused connection names ECONNREFUSED and keeps the start
 
 test('#1442 pure — a reset or closed socket names its code and does NOT tell anyone to start a running server', () => {
   for (const code of ['ECONNRESET', 'UND_ERR_SOCKET', 'UND_ERR_HEADERS_TIMEOUT']) {
-    const m = unreachableMessage('http://127.0.0.1:3141', fetchFailed(code, 'other side closed'));
+    const m = unreachableMessage('http://127.0.0.1:9', fetchFailed(code, 'other side closed'));
     assert.match(m, new RegExp(code), `${code} is named`);
     assert.doesNotMatch(m, /start the dev server/i, `${code}: the server may be up — no hint`);
   }
