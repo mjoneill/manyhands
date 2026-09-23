@@ -220,6 +220,7 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:unbackedLookupClaims', 'scrum:claimedLookup',
   'scrum:memoryRefused',   // #1441
   'scrum:narrationRetryOutcome',
+  'scrum:finalTurn',   // #1444
   // #1428 — withheld reply TELEMETRY. The COUNT of wakes that carried a
   // withheld reason is a board-visible aggregate (see projection below);
   // the TEXT is NOT, and lives only in the resident's PRIVATE per-seat file
@@ -1217,6 +1218,8 @@ function projectModelCall(store, e) {
   // narrated", which is the healthy majority and needs no row of its own.
   const nr = e['scrum:narrationRetry'];
   if (nr && nr.outcome) add(nn(S + 'narrationRetryOutcome'), lit(String(nr.outcome)));
+  // #1444 — the ceiling's closing call, so "how often does a capped wake still answer" is one query.
+  if (typeof e['scrum:finalTurn'] === 'string' && e['scrum:finalTurn']) add(nn(S + 'finalTurn'), lit(e['scrum:finalTurn']));
 }
 
 /**

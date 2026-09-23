@@ -56,6 +56,7 @@ const isDefault = (v) => v === null || v === undefined || v === '' || (Array.isA
 const SAMPLE = {
   unbackedLookupClaims: [{ verb: 'read', phrase: 'I have read', index: 0 }],
   narrationRetry: { outcome: 'performed', announced: 'I will search' },
+  finalTurn: 'answered',   // #1444
   memoryRefused: [{ line: 'card #7 is the vocabulary one', reason: 'this line claims card #7 and no tool returned that card on this wake.' }],
   markerLines: 2,
   anomalies: ['zero-reasoning-tokens'],

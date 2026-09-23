@@ -878,7 +878,7 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
   // Fixing only the measured branch would have turned every test in that file green
   // and changed nothing on a live turn.
   const thinkingOpt = typeof agent.thinking === 'boolean' ? { thinking: agent.thinking } : {};
-  let result; let hops = []; let modelCalls = 1; let stoppedBecause = null;
+  let result; let hops = []; let modelCalls = 1; let stoppedBecause = null; let finalTurn = null;   // #1444
   try {
     if (useTools) {
       const loop = await runToolLoop({
@@ -890,7 +890,7 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
       // once runToolLoop summed it the ledger would still record nothing:
       // tokens null ⇒ cost 0 ⇒ `spent >= budget` never true.
       result = { text: loop.text, stopReason: 'stop', usage: loop.usage ?? null };
-      hops = loop.hops; modelCalls = loop.modelCalls; stoppedBecause = loop.stoppedBecause;
+      hops = loop.hops; modelCalls = loop.modelCalls; stoppedBecause = loop.stoppedBecause; finalTurn = loop.finalTurn ?? null;
     } else {
       result = await callModel(agent.model, messages, { ...(agent.model.sampling || {}), ...thinkingOpt });
     }
@@ -975,7 +975,7 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
   // wake that spent four model calls and produced nothing is precisely the one
   // an operator needs the hops for; a row that drops them reads as a wake that
   // never looked, which is the same lie as a dropped tool call one layer up.
-  const toolRecord = { toolHops: hops, modelCalls, ...(stoppedBecause ? { stoppedBecause } : {}) };
+  const toolRecord = { toolHops: hops, modelCalls, ...(stoppedBecause ? { stoppedBecause } : {}), ...(finalTurn ? { finalTurn } : {}) };   // #1444 — what the ceiling's closing call did
   const raw = String(result?.text ?? '').trim();
   // #1226 — directives come OUT of the post before it is made.
   const { post: text, remember, claims } = agent.residency === 'resident' ? splitDirectives(raw) : { post: raw, remember: [], claims: [] };

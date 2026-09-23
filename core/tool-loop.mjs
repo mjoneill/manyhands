@@ -172,5 +172,47 @@ export async function runToolLoop({ agent, messages, tools = [], execute, callMo
     if (stoppedBecause === 'max-hops') break;
   }
 
-  return { text, hops, modelCalls, stoppedBecause, messages: convo, usage: seen.size ? usage : null, anomalies: [...anomalies] };
+  // #1444 — THE CEILING EARNS ONE CLOSING CALL. Breaking out at max-hops left
+  // the wake holding the last tool-calling turn's text, which is almost always
+  // empty (that turn asked for a tool instead of answering): 88 of 1,116
+  // resident wakes (7.9%) posted NOTHING after 4–7 paid calls. So when the
+  // ceiling bites with nothing said, the seat gets one call WITHOUT tools, the
+  // transcript so far, and one line saying why. It is not a hop and runs no
+  // tool; it is counted and billed like any call.
+  let finalTurn = null;
+  if (stoppedBecause === 'max-hops' && !String(text ?? '').trim()) {
+    // A provider rejects a transcript whose tool_calls lack results, and a
+    // ceiling hit mid-turn leaves the unrun calls unanswered — say so.
+    const answered = new Set(convo.filter((m) => m.role === 'tool').map((m) => m.tool_call_id));
+    for (const m of convo) {
+      if (m.role !== 'assistant' || !Array.isArray(m.tool_calls)) continue;
+      for (const c of m.tool_calls) {
+        if (c?.id == null || answered.has(c.id)) continue;
+        convo.push({ role: 'tool', name: c.name ?? 'unknown', tool_call_id: c.id, content: 'skipped: the lookup ceiling was reached before this ran' });
+        answered.add(c.id);
+      }
+    }
+    convo.push({ role: 'user', content: 'You have used your lookups for this wake — the ceiling is reached, and no more tools will run. '
+      + 'Answer now from what you found, and say plainly what you could not check. If nothing here calls for you, reply NO_REPLY.' });
+    let fin;
+    try { fin = await callModel(agent, convo, { ...opts }); }   // ⛔ no `tools`: nothing more can be looked up
+    catch (e) {
+      // #1435 — the closing call's failure carries the wake's usage and hops, like any hop's.
+      if (e && typeof e === 'object') {
+        addUsage(e.usage);
+        e.usage = seen.size ? { ...usage } : (e.usage ?? null);
+        e.hops = hops; e.modelCalls = modelCalls + 1;
+      }
+      throw e;
+    }
+    modelCalls += 1;
+    addUsage(fin.usage);
+    for (const a of fin.anomalies ?? []) anomalies.add(a);
+    text = fin.text ?? '';
+    finalTurn = !String(text).trim() ? 'empty'
+      : /(^|\n)[ \t]*NO_REPLY[ \t]*(\n|$)/i.test(text) ? 'declined'
+      : 'answered';
+  }
+
+  return { text, hops, modelCalls, stoppedBecause, ...(finalTurn ? { finalTurn } : {}), messages: convo, usage: seen.size ? usage : null, anomalies: [...anomalies] };
 }

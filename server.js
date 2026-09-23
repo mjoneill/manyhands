@@ -4527,6 +4527,8 @@ const modelCallToWire = (e) => ({
   memoryRefused: e['scrum:memoryRefused'] ?? [],
   // #1246b — was the seat handed its own announcement back, and what did it do then.
   narrationRetry: e['scrum:narrationRetry'] ?? null,
+  // #1444 — the hop ceiling's closing call: answered / declined / empty (null when the ceiling never bit).
+  finalTurn: e['scrum:finalTurn'] ?? null,
   // #1428 PRIVACY — THE WITHHELD REASON. A STABLE TOKEN ("standalone-no-reply")
   // names the gate's cause, on the wire. The FULL TEXT is NOT here — that would
   // be a privacy leak (the resident's deliberation belongs in her private file,
@@ -4550,6 +4552,8 @@ const MODEL_CALL_FIELDS = new Set(['by', 'agent', 'model', 'provider', 'protocol
   'unbackedLookupClaims',
   // #1246b — the nudge and what it produced.
   'narrationRetry',
+  // #1444 — the hop ceiling's closing call outcome (a fixed vocabulary, below).
+  'finalTurn',
   // #1441 — REMEMBER lines #1240 refused, with why: the seat's only surface is the board.
   'memoryRefused',
   // #1352 — what the adapter noticed about the response and did NOT refuse on
@@ -4673,6 +4677,8 @@ function modelCallEntityFrom(body) {
         .map((m) => ({ line: m.line.slice(0, 500), reason: typeof m.reason === 'string' ? m.reason.slice(0, 500) : null }))
       : [],
     'scrum:narrationRetry': (body.narrationRetry && typeof body.narrationRetry === 'object' && !Array.isArray(body.narrationRetry)) ? body.narrationRetry : null,
+    // #1444 — a fixed vocabulary; anything else is stored as null rather than as free text.
+    'scrum:finalTurn': ['answered', 'declined', 'empty'].includes(body.finalTurn) ? body.finalTurn : null,
     'scrum:agent': agent, 'scrum:model': body.model.trim(),
     'scrum:provider': typeof body.provider === 'string' ? body.provider : null,
     'scrum:protocol': typeof body.protocol === 'string' ? body.protocol : null,

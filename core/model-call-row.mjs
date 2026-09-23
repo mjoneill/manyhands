@@ -67,6 +67,8 @@ export function rowToBoard(row, agent = {}) {
   // ZERO. And #1240's refusals, which lived only in the runner's log.
   markerLines: row.markerLines ?? null,
   narrationRetry: row.narrationRetry ?? null,
+  // #1444 — when the hop ceiling bit: did the closing call answer, decline, or come back empty?
+  finalTurn: row.finalTurn ?? null,
   unbackedLookupClaims: row.unbackedLookupClaims ?? [],
   memoryRefused: row.memoryRefused ?? [],
   // #1428 — WITHHELD REASON (a STABLE TOKEN: "standalone-no-reply"). The full

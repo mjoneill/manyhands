@@ -133,6 +133,7 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:unbackedLookupClaims': 'scrum:unbackedLookupClaims', 'scrum:claimedLookup': 'scrum:claimedLookup',
   'scrum:memoryRefused': 'scrum:memoryRefused',   // #1441
   'scrum:narrationRetryOutcome': 'scrum:narrationRetryOutcome',
+  'scrum:finalTurn': 'scrum:finalTurn',   // #1444
   // #1428 — withheld reply TELEMETRY. The REASON rides as a stable token so a
   // SPARQL seat can count declined wakes without learning the deliberation.
   // There is NO `scrum:withheldText` predicate by construction — the text is
