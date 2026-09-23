@@ -409,6 +409,12 @@ export async function probeModel(agent, opts = {}) {
   return { status: res.status, klass, reason: k.reason, contentType, bodyHead, latencyMs: Date.now() - started };
 }
 
+/** #1447 — true for openrouter.ai and its subdomains, by parsed HOST, never by substring. */
+function isOpenRouter(base) {
+  try { const h = new URL(base).hostname; return h === 'openrouter.ai' || h.endsWith('.openrouter.ai'); }
+  catch { return false; }
+}
+
 export async function callModel(agent, messages, opts = {}) {
   const protocol = PROTOCOLS[agent?.protocol];
   if (!protocol) {
@@ -438,6 +444,12 @@ export async function callModel(agent, messages, opts = {}) {
   if (opts.apiKey) headers.Authorization = `Bearer ${opts.apiKey}`;
 
   const base = String(agent.baseUrl || DEFAULT_OLLAMA_URL).replace(/\/+$/, '');
+  // #1447 — OpenRouter's "no providers that retain or train on prompts" is an
+  // ACCOUNT toggle, and it gets turned off to evaluate models. The room's own
+  // traffic carries its policy per request instead of inheriting that switch.
+  // OpenRouter hosts only: the field is theirs, and another OpenAI-shaped host
+  // may reject a parameter it does not know.
+  if (isOpenRouter(base)) body.provider = { ...(body.provider || {}), data_collection: 'deny' };
   const request = { url: base + path, headers, body };
 
   let attempt = 0; let lastRetryable = null;
