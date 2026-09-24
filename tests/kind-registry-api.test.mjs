@@ -103,7 +103,11 @@ test('#1214 re-registering REVISES one entity rather than minting a second row',
 
   const all = await api(s.baseUrl, 'GET', '/api/kinds');
   assert.equal(all.body.length, 1, 'one entity per name — two rows would be two homes for one fact');
-  assert.equal(all.body[0].registeredBy, 'bo');
+  // #1477 — the same rule as predicates (reversed there by its own author,
+  // 2026-09-24): the registrant is who DEFINED the kind; the reviser is
+  // recorded beside revisedAt.
+  assert.equal(all.body[0].registeredBy, 'ada', 'a revision does not change who defined the kind');
+  assert.equal(all.body[0].revisedBy, 'bo');
   assert.ok(all.body[0].revisedAt, 'a revision is stamped so the change is visible');
 });
 

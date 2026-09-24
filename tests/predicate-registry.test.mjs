@@ -69,7 +69,14 @@ test('#945-1 re-registering the same name REVISES the definition (one entity per
     const all = await list(s.baseUrl);
     assert.equal(all.length, 1, 'one definition per predicate name');
     assert.match(all[0].definition, /revised/);
-    assert.equal(all[0].registeredBy, 'bo', 'the reviser is the current registrant of record');
+    // #1477 — REVERSED, by this assertion's own author (2026-09-24, on the
+    // #1474 thread): "the current record says who DEFINED the term, and it
+    // shouldn't change hands on a revision." The first version pinned the reviser
+    // as registrant while keeping the first registration's date, so one record
+    // credited a term to someone who had only edited it.
+    assert.equal(all[0].registeredBy, 'ada', 'the registrant is who DEFINED the term — a revision does not change it');
+    assert.equal(all[0].revisedBy, 'bo', 'the reviser is recorded beside revisedAt');
+    assert.ok(all[0].revisedAt, 'and the revision is stamped');
   } finally { await s.stop(); }
 });
 

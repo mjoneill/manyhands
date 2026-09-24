@@ -2791,6 +2791,7 @@ function predicateToWire(e) {
     definition: e['scrum:definition'],
     registeredBy: e['scrum:registeredBy'],
     registeredAt: e.dateCreated,
+    revisedBy: e['scrum:revisedBy'] ?? null,   // #1477
     revisedAt: e.dateModified ?? null,
   };
 }
@@ -2826,10 +2827,15 @@ async function handleRegisterPredicate(req, res) {
       if (existing) {
         // ONE entity per name: a re-register is a REVISION. The event log keeps
         // every prior definition; the entity carries the current one.
+        // #1477 — the REGISTRANT is who defined the term, and a revision does
+        // not change that: `registeredBy`/`dateCreated` stay from the first
+        // registration, and the reviser is recorded beside `revisedAt`. The first
+        // cut overwrote `registeredBy` with the reviser while keeping the old
+        // date, so one record credited a term to someone who had only edited it.
         const revised = {
           ...existing,
           'scrum:definition': String(body.definition),
-          'scrum:registeredBy': who,
+          'scrum:revisedBy': who,
           dateModified: now,
         };
         data.predicates = predicatesOf(data).map((e) => (e.name === body.name ? revised : e));
@@ -2929,6 +2935,7 @@ function kindToWire(e) {
     eventKind: e['scrum:eventKind'] ?? null,
     registeredBy: e['scrum:registeredBy'],
     registeredAt: e.dateCreated,
+    revisedBy: e['scrum:revisedBy'] ?? null,   // #1477
     revisedAt: e.dateModified ?? null,
   };
 }
@@ -2976,7 +2983,10 @@ async function handleRegisterKind(req, res) {
       if (existing) {
         // ONE entity per name; a re-register is a REVISION, exactly as for
         // predicates. The event log keeps every prior definition.
-        const revised = { ...existing, ...fields, dateModified: now };
+        // #1477 — same rule as predicates: the registrant is who DEFINED the
+        // kind, so a revision keeps it and records the reviser separately.
+        const { 'scrum:registeredBy': _registrant, ...revisable } = fields;
+        const revised = { ...existing, ...revisable, 'scrum:revisedBy': who, dateModified: now };
         data.kinds = kindsOf(data).map((e) => (e.name === body.name ? revised : e));
         writeBoard(data, [kindEvent('update', revised, who)]);
         return { status: 200, wire: kindToWire(revised) };
