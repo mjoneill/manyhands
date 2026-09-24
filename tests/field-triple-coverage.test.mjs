@@ -59,6 +59,13 @@ const SERVER_ASSIGNED = new Set([
   // from stored cards as well as from schemas.
   'version',
   'claimedBy',    // set only via the claim endpoint, never a card write
+  // #1471 — the seats that depend on this card's substrate. Written ONLY by
+  // graph_assert's person-subject path, after it resolves the seat against the
+  // current roster; card PATCH ignores it (verified 09-24: a PATCH carrying
+  // dependentSeats returns 200 and stores nothing). So it is not caller-settable
+  // through the card door. Like `version`, it entered this universe from
+  // PRODUCTION (#1051 after the first assertion), not from source.
+  'dependentSeats',
   'claimedAt',    // ditto
   'ignoredFields', // the diagnostic itself, not a stored field
   // #1288 — READ DECORATIONS, and they are not stored AT ALL.
