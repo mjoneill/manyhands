@@ -50,6 +50,10 @@ if (seatArg) {
     contextPolicy: a.contextPolicy, residency: a.residency, budgetPerDay: a.budgetPerDay ?? undefined,
     toolGrants: a.toolGrants ?? [], wakeOn: a.wakeOn ?? ['mention'], everyMinutes: a.everyMinutes ?? undefined,
     deliveryMode: a.deliveryMode ?? 'wake',   // #1346 — the wire carries it; a runner that drops it runs the seat in wake mode whatever the board says
+    // #1473 — the memory budget. A runner that drops it wakes the seat on the
+    // newest-ten slice whatever the board says (found by the seam test: this
+    // hand-picked list is where a new agent field silently goes missing).
+    ...(a.memoryBudgetBytes ? { memoryBudgetBytes: a.memoryBudgetBytes } : {}),
     // #1196 — the seat's own hop ceiling. Carried from the board or left off
     // entirely: `undefined` lets the loop keep its default, where a `null` would
     // read as "a ceiling of nothing" one layer down.
@@ -308,6 +312,13 @@ const priorWithheld = async (seat) => {
 };
 const withheldStateFile = defaultWithheldStatePath(stateFile);
 const memories = async (seat) => {
+  // #1473 — a declared budget means the wake reads the ASSEMBLY: her
+  // `agent-memory` memories, priority first then newest, inside the budget,
+  // with what did not fit named. Unset keeps the newest-ten slice below.
+  if (agent?.memoryBudgetBytes) {
+    const a = await get(`/api/memories/assemble?owner=${encodeURIComponent(seat)}&budget=${encodeURIComponent(agent.memoryBudgetBytes)}&tag=agent-memory`);
+    return { assembled: true, ...a };
+  }
   const j = await get(`/api/memories?owner=${encodeURIComponent(seat)}&limit=50`);
   const list = Array.isArray(j) ? j : (j?.memories ?? []);
   return list.filter((m) => (m.tags || []).includes('agent-memory')).sort((a, b) => String(a.updatedAt || '').localeCompare(String(b.updatedAt || ''))).slice(-10);

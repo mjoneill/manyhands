@@ -2732,7 +2732,7 @@ async function handleAssembleMemories(req, res) {
   let all;
   try { all = await liveMemories(); } catch (e) { if (graphRefused(res, e)) return; throw e; }
   const memories = [...all.values()].map(({ identity, versions }) => memoryToWire(identity, versions));
-  sendJSON(res, 200, assembleMemories(memories, { owner: q.owner, budgetBytes }));
+  sendJSON(res, 200, assembleMemories(memories, { owner: q.owner, budgetBytes, tag: q.tag || null }));   // #1473 — optional ?tag=
 }
 
 async function handleListMemories(req, res) {
@@ -4278,6 +4278,7 @@ function agentToWire(data, e) {
     budgetPerDay: e['scrum:budgetPerDay'] ?? null, residency: e['scrum:residency'] ?? 'guest', state: e['scrum:state'] ?? 'invited',
     // #1363 — an EXPLICIT empty list is honoured (not woken); only a record that never chose gets the default. Decision fc4cfeef.
     wakeOn: Array.isArray(e['scrum:wakeOn']) ? e['scrum:wakeOn'] : ['mention'], everyMinutes: e['scrum:everyMinutes'] ?? null,
+    memoryBudgetBytes: e['scrum:memoryBudgetBytes'] ?? null,   // #1473 — unset ⇒ the legacy newest-ten wake
     deliveryMode: AGENT_DELIVERY_MODES.has(e['scrum:deliveryMode']) ? e['scrum:deliveryMode'] : DELIVERY_MODE_DEFAULT,   // #1346
     // #1196 — whether this ROLE reasons before answering. Three states, not two:
     // unset sends no flag at all, because a model with no such flag must not be
@@ -4412,7 +4413,7 @@ async function handleAgentPromptVersion(req, res, seat) {
 // nobody happened to read the value back.
 const AGENT_PATCH_FIELDS = new Set(['by', 'state', 'contextPolicy', 'toolGrants', 'budgetPerDay', 'model', 'modelKey',
   'name', 'emoji', 'color', 'residency', 'wakeOn', 'everyMinutes', 'thinking', 'maxHops', 'prompt', 'sampling',
-  'participationClause', 'deliveryMode']);   // #1346
+  'participationClause', 'deliveryMode', 'memoryBudgetBytes']);   // #1346, #1473
 // #1258 — sampling is BEHAVIOUR and lives on the agent: two seats can share one
 // registered model and run different temperatures. Until this field existed the
 // only ways to write it replaced the whole model spec (`model`, which also
@@ -4547,6 +4548,16 @@ async function handlePatchAgent(req, res, seat) {
       if (body.residency != null) { if (!AGENT_RESIDENCIES.has(body.residency)) return { status: 400, wire: { error: 'residency must be resident or guest' } }; updated['scrum:residency'] = body.residency; }
       if (Array.isArray(body.wakeOn)) { const bad = body.wakeOn.find((w) => !AGENT_WAKE_KINDS.has(w)); if (bad) return { status: 400, wire: { error: `unknown wake kind ${JSON.stringify(bad)} — mention, assignment or schedule` } }; updated['scrum:wakeOn'] = body.wakeOn; }   // #1363 — an explicit [] means not woken
       if (body.everyMinutes !== undefined) updated['scrum:everyMinutes'] = body.everyMinutes == null ? null : Number(body.everyMinutes);
+      // #1473 — the byte budget her wake assembles her memories into. null clears
+      // it (back to the legacy newest-ten wake); anything else must be a
+      // positive integer, or the assembly would refuse it at every wake.
+      if (body.memoryBudgetBytes !== undefined) {
+        const b = body.memoryBudgetBytes;
+        if (b !== null && !(Number.isInteger(b) && b > 0)) {
+          return { status: 400, wire: { error: `memoryBudgetBytes must be a positive integer number of bytes, or null to clear it (got ${JSON.stringify(b)})` } };
+        }
+        updated['scrum:memoryBudgetBytes'] = b;
+      }
       if (body.deliveryMode !== undefined) { if (!AGENT_DELIVERY_MODES.has(body.deliveryMode)) return { status: 400, wire: { error: `unknown deliveryMode ${JSON.stringify(body.deliveryMode)} — wake or channel (#1346)` } }; updated['scrum:deliveryMode'] = body.deliveryMode; }
       if (body.thinking !== undefined) updated['scrum:thinking'] = body.thinking === null ? null : !!body.thinking;
       if (body.participationClause !== undefined) updated['scrum:participationClause'] = body.participationClause === null ? null : !!body.participationClause;
@@ -4593,6 +4604,7 @@ const modelCallToWire = (e) => ({
     // cleared on a successful receiving wake, so the same hand-back is never
     // offered twice. The text itself never reaches this surface.
     withheldHanded: e['scrum:withheldHanded'] ?? null,
+    assembly: e['scrum:memoryAssembly'] ?? null,   // #1473
   },
   memoryWritten: e['scrum:memoryWritten'] ?? [], claims: e['scrum:claims'] ?? [],
   // #1196 — the tool record reads back in the shape it was written; a row that
@@ -4736,6 +4748,15 @@ function modelCallEntityFrom(body) {
     // on its own field; the recoverable body lives in the resident's private
     // file (core/withheld-state.mjs).
     'scrum:withheldHanded': n(body.memory?.withheldHanded),
+    // #1473 — an assembled wake's record: what she was handed, bounded. Stored
+    // on the document for the acceptance read (/api/model-calls); not projected
+    // to the graph until a query needs it (#1469 P2).
+    'scrum:memoryAssembly': (() => {
+      const a = body.memory?.assembly;
+      if (!a || typeof a !== 'object') return null;
+      const ids = (x, cap) => (Array.isArray(x) ? x.map(String).slice(0, cap) : []);
+      return { budgetBytes: n(a.budgetBytes), bytes: n(a.bytes), included: ids(a.included, 200), omitted: ids(a.omitted, 500) };
+    })(),
     'scrum:memoryWritten': Array.isArray(body.memoryWritten) ? body.memoryWritten.map((m) => (typeof m === 'string' ? m : JSON.stringify(m))).slice(0, 50) : [],
     'scrum:claims': Array.isArray(body.claims) ? body.claims.slice(0, 50) : [],
     // #1196 — the tool record. Hops keep their full shape on the document; the

@@ -27,10 +27,10 @@ function render(m) {
 
 /**
  * @param {Array<{id,title,owner,priority?,body,updatedAt}>} memories
- * @param {{owner: string, budgetBytes: number}} opts
+ * @param {{owner: string, budgetBytes: number, tag?: string|null}} opts
  * @returns {{owner, budgetBytes, bytes, text, included: string[], omitted: Array<{id,title}>}}
  */
-export function assembleMemories(memories, { owner, budgetBytes } = {}) {
+export function assembleMemories(memories, { owner, budgetBytes, tag = null } = {}) {
   if (typeof owner !== 'string' || !owner) throw new Error('owner is required — whose memories to assemble');
   if (!Number.isInteger(budgetBytes) || budgetBytes <= 0) {
     throw new Error(`budget must be a positive integer number of bytes (got ${JSON.stringify(budgetBytes)})`);
@@ -38,6 +38,10 @@ export function assembleMemories(memories, { owner, budgetBytes } = {}) {
 
   const mine = memories
     .filter((m) => m.owner === owner)
+    // #1473 — an optional tag narrows the SET (a resident's `agent-memory`, her
+    // "this belongs in my wake" marker). Filtered out is not omitted: those
+    // memories were never candidates, so they are not named in the footer.
+    .filter((m) => !tag || (Array.isArray(m.tags) && m.tags.includes(tag)))
     .sort((a, b) => rank(a) - rank(b) || String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
 
   if (mine.length === 0) {

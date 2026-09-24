@@ -212,6 +212,7 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:timeoutMs', 'scrum:costIn', 'scrum:costOut', 'scrum:rates', 'scrum:freeTier', 'scrum:capability', 'scrum:apiKeyRef',
   'scrum:deprecatesOn', 'scrum:lastProbeClass', 'scrum:lastProbeAt', 'scrum:lastProbeStatus', 'scrum:modelKey', 'scrum:usesModel',
   'scrum:wakeOn', 'scrum:everyMinutes', // #1226
+  'scrum:memoryBudgetBytes', // #1473
   'scrum:seed', 'scrum:temperature', 'scrum:maxTokens', 'scrum:wakeKind', 'scrum:memoryHanded', // #1203 finding on #1202
   // #1196 — the tool record: what a colleague was allowed to reach, what it
   // actually called, how far it went and how much came back.
@@ -1277,6 +1278,8 @@ function projectAgent(store, e) {
   for (const g of (Array.isArray(e['scrum:toolGrant']) ? e['scrum:toolGrant'] : [])) add(nn(S + 'toolGrant'), lit(String(g)));
   for (const w of (Array.isArray(e['scrum:wakeOn']) ? e['scrum:wakeOn'] : [])) add(nn(S + 'wakeOn'), lit(String(w)));   // #1226
   if (e['scrum:everyMinutes'] != null && Number.isFinite(Number(e['scrum:everyMinutes']))) add(nn(S + 'everyMinutes'), oxigraph.literal(String(e['scrum:everyMinutes']), nn('http://www.w3.org/2001/XMLSchema#decimal')));
+  // #1473 — the byte budget a resident's wake assembles her memories into, so the room can ask what each seat was given.
+  if (e['scrum:memoryBudgetBytes'] != null && Number.isFinite(Number(e['scrum:memoryBudgetBytes']))) add(nn(S + 'memoryBudgetBytes'), oxigraph.literal(String(e['scrum:memoryBudgetBytes']), nn('http://www.w3.org/2001/XMLSchema#integer')));
   if (e['scrum:budgetPerDay'] != null && Number.isFinite(Number(e['scrum:budgetPerDay']))) add(nn(S + 'budgetPerDay'), oxigraph.literal(String(e['scrum:budgetPerDay']), nn('http://www.w3.org/2001/XMLSchema#decimal')));
   // #1271 — a BOOLEAN, so `!= null` rather than truthiness: `false` is a
   // stored decision (the ruled default) and must be queryable as one.

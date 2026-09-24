@@ -54,6 +54,9 @@ export function rowToBoard(row, agent = {}) {
     // is the signal a downstream selector uses to mark that exact row as
     // 'received'. The WITHELD TEXT itself NEVER lives on this row.
     withheldHanded: row.memory?.withheldHanded ?? null,
+    // #1473 — what an ASSEMBLED wake handed her: budget, bytes, and the ids
+    // included and left out. Absent on a newest-ten wake.
+    ...(row.memory?.assembly ? { assembly: row.memory.assembly } : {}),
   },
   memoryWritten: row.memoryWritten ?? [], claims: row.claims ?? [],
   // #1196 — the tool record travels to the BOARD, not just to the file beside

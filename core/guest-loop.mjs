@@ -534,7 +534,12 @@ export function buildMessages({ agent, wake, changes = [], memories = [], ruling
     // and planned around them. It now names only what works for THIS seat.
     ? 'You persist across wakes. Your memory lives in the shared memory store on this board: you add to it with a REMEMBER line (described below), and what you do not keep there, you will not have next time.'
       + ((agent.toolGrants || []).includes('memory_update')
-        ? ' You may also revise your OWN memories with memory_update (each is shown to you with its id): set a priority to record what matters most (your wake does not yet order by it; for now you see your newest ten), retag or retitle one, or append to it, including to say a lesson no longer holds.'
+        ? ' You may also revise your OWN memories with memory_update (each is shown to you with its id): '
+          + (agent.memoryBudgetBytes
+            // #1473 — true once the wake reads by the assembly: priority first, inside a budget.
+            ? `set a priority to decide what you wake with (your memories are handed to you priority first, then newest, inside ${agent.memoryBudgetBytes} bytes; what does not fit is named so you can fetch it)`
+            : 'set a priority to record what matters most (your wake does not yet order by it; for now you see your newest ten)')
+          + ', retag or retitle one, or append to it, including to say a lesson no longer holds.'
         : '')
     : 'You are invited for this question only and will not persist: nothing you say now will be handed back to you later unless someone writes it to the board.');
   if (agent.systemPrompt) lines.push(agent.systemPrompt);
@@ -619,7 +624,18 @@ export function buildMessages({ agent, wake, changes = [], memories = [], ruling
     // repeats them; that is exactly how one no-tool answer became a card number
     // the whole room saw twice. So the store is named for what it IS: sentences
     // this seat wrote on earlier wakes, unverified, and possibly wrong.
-    ctx.push(memories.length
+    // #1473 — an ASSEMBLY (priority first, inside the declared budget, omissions
+    // named) replaces the newest-ten list when the agent declares a budget. The
+    // #1240 framing is kept word for word: assembled or not, these are her own
+    // unverified sentences.
+    if (memories && memories.assembled) {
+      ctx.push(memories.included.length
+        ? 'What YOU SAID on earlier wakes, most important first (your priorities), inside your memory budget. ⚠️ These are your own past sentences, NOT facts about the board and NOT verified by anyone. '
+          + 'You may have been guessing when you wrote them. If one names a card, a person or a date and it matters to your answer, CHECK IT before repeating it; '
+          + 'if you cannot check it, say where it came from rather than stating it:\n'
+          + memories.text
+        : 'You have written nothing on earlier wakes: this is your first, or you kept nothing.');
+    } else ctx.push(memories.length
       ? 'What YOU SAID on earlier wakes (newest last). ⚠️ These are your own past sentences, NOT facts about the board and NOT verified by anyone. '
         + 'You may have been guessing when you wrote them. If one names a card, a person or a date and it matters to your answer, CHECK IT before repeating it; '
         + 'if you cannot check it, say where it came from rather than stating it:\n'
@@ -868,7 +884,9 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
       // #1346 — a channel digest answers MANY messages; the ledger names them all.
       ...(Array.isArray(wake.messageIds) ? { messageIds: wake.messageIds } : {}) },
     memory: {
-      handed: mem.length, state: memState,
+      handed: mem && mem.assembled ? mem.included.length : mem.length, state: memState,
+      // #1473 — what she was handed, so "what did she wake with" is answerable after the fact.
+      ...(mem && mem.assembled ? { assembly: { budgetBytes: mem.budgetBytes, bytes: mem.bytes, included: mem.included, omitted: mem.omitted.map((o) => o.id) } } : {}),
       ...(refusedMemory.length ? { refusalsHanded: refusedMemory.length } : {}),
       // #1428 PRIVACY — how many withheld replies this wake was told about.
       // Recorded on the row under `memory` (the same block that already names
