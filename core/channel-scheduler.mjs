@@ -63,23 +63,35 @@ export function createChannelScheduler({
   // increment it — they're already delivered.
   let inFlight = 0;
 
-  function dispatch(sessionIds, message) {
-    const n = sessionIds.length;
-    if (n === 0) return;
+  // #1453 — a target is a bare session id, or {sessionId, seat?, surfaces?}.
+  // The RECEIVE-set is per session (every target is delivered); the SLOT-set is
+  // per SEAT (#298's split): one seat with three connections holds one slot, and
+  // its surfacing connections share that slot's delay. A connection that
+  // declares `surfaces: false` (a probe lane) is delivered at once, outside the
+  // stagger, and holds no slot. No seat ⇒ keyed on the session, never merged.
+  function dispatch(targets, message) {
+    const all = targets.map((x) => (typeof x === 'string'
+      ? { sid: x, key: `sid:${x}`, surfaces: true }
+      : { sid: x.sessionId, key: x.seat ? `seat:${x.seat}` : `sid:${x.sessionId}`, surfaces: x.surfaces !== false }));
+    if (all.length === 0) return;
 
     const cfg = getConfig() || { mode: 'off' };
     if (cfg.mode === 'off') {
-      for (const sid of sessionIds) deliver(sid, message); // immediate, in order
+      for (const { sid } of all) deliver(sid, message); // immediate, in order
       return;
     }
 
-    const delays = cfg.mode === 'hard'
+    const keys = [...new Set(all.filter((x) => x.surfaces).map((x) => x.key))];
+    const n = keys.length;
+    const unitDelays = n === 0 ? [] : cfg.mode === 'hard'
       ? hardDelays(n, cfg.hard.timeoutMs, rng)
       : softDelays(n, cfg.soft.minMs, cfg.soft.maxMs, rng);
+    const delayOf = new Map(keys.map((k, i) => [k, unitDelays[i]]));
 
     const t = now();
-    sessionIds.forEach((sid, i) => {
-      const target = Math.max(t + delays[i], nextAvailable.get(sid) ?? 0);
+    all.forEach(({ sid, key, surfaces }) => {
+      const delay = surfaces ? delayOf.get(key) : 0;
+      const target = Math.max(t + delay, nextAvailable.get(sid) ?? 0);
       nextAvailable.set(sid, target + 1);
       const wait = target - t;
       if (wait <= 0) {

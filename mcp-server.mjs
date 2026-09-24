@@ -3272,7 +3272,15 @@ function broadcastFanout(conversation) {
 
   // #265 — hand all real receivers to the scheduler at once, so it can pick one
   // (fresh random) to deliver immediately and stagger the rest across [MIN,MAX].
-  channelScheduler.dispatch(targets.map(([sid]) => sid), notification);
+  // #1453 — each target carries its SEAT, so the scheduler gives one slot per
+  // seat rather than per connection (one seat with three connections was three
+  // serial slots in hard mode, and her chat lane heard a post 20 min late). An
+  // unbound session has no seat and keeps its own slot. `surfaces` is not yet
+  // declared by any client; a probe lane opting out of the slot is slice 2.
+  channelScheduler.dispatch(
+    targets.map(([sid]) => ({ sessionId: sid, seat: sessionMeta.get(sid)?.seat, surfaces: sessionMeta.get(sid)?.surfaces })),
+    notification,
+  );
   // #1346 — and every channel-mode resident, as an opaque target. Async
   // because the roster is read from the board; logged always, zero included,
   // so "no resident was offered this" is a reading and not an absence.
