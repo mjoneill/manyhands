@@ -76,6 +76,8 @@ test('#1470 only the editable fields reach the wire, and an empty edit is refuse
 
 test('#1470 memory_update is a board tool, grantable, and absent when ungranted', () => {
   assert.ok(BOARD_TOOLS.some((t) => t.function.name === 'memory_update'));
+  const d = JSON.stringify(BOARD_TOOLS.find((t) => t.function.name === 'memory_update'));
+  assert.doesNotMatch(d, /read first/, 'the tool description promises nothing the wake does not do');
   assert.deepEqual(toolsFor({ toolGrants: ['card_get'] }).map((t) => t.function.name), ['card_get']);
   assert.deepEqual(toolsFor({ toolGrants: ['memory_update'] }).map((t) => t.function.name), ['memory_update']);
 });
@@ -95,6 +97,11 @@ test('#1470 the prompt no longer names memory tools the seat does not hold', () 
 test('#1470 a seat granted memory_update is told so, and sees each memory\'s id', () => {
   const m = buildMessages({ agent: { seatKey: 'pip', name: 'pip', residency: 'resident', toolGrants: ['memory_update'] }, wake: WAKE, memories: MEM });
   assert.match(sys(m), /memory_update/);
+  // Review finding (09-24): the wake shows the newest ten, not priority order,
+  // so the prompt must not promise priority decides what she sees. That
+  // changes when assembly is wired into the resident wake (#1438).
+  assert.doesNotMatch(sys(m), /read first/, 'no promise the wake does not keep');
+  assert.match(sys(m), /does not yet order by it/);
   assert.match(all(m), /mem-123/, 'the id she needs to name a memory is in front of her');
 });
 

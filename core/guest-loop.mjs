@@ -534,7 +534,7 @@ export function buildMessages({ agent, wake, changes = [], memories = [], ruling
     // and planned around them. It now names only what works for THIS seat.
     ? 'You persist across wakes. Your memory lives in the shared memory store on this board: you add to it with a REMEMBER line (described below), and what you do not keep there, you will not have next time.'
       + ((agent.toolGrants || []).includes('memory_update')
-        ? ' You may also revise your OWN memories with memory_update (each is shown to you with its id): set a priority so what matters most is read first, retag or retitle one, or append to it, including to say a lesson no longer holds.'
+        ? ' You may also revise your OWN memories with memory_update (each is shown to you with its id): set a priority to record what matters most (your wake does not yet order by it; for now you see your newest ten), retag or retitle one, or append to it, including to say a lesson no longer holds.'
         : '')
     : 'You are invited for this question only and will not persist: nothing you say now will be handed back to you later unless someone writes it to the board.');
   if (agent.systemPrompt) lines.push(agent.systemPrompt);

@@ -144,12 +144,12 @@ export const BOARD_TOOLS = Object.freeze([
       // so unlike seat_declare this cannot be self-scoped by construction: the
       // executor fetches the memory and refuses unless its owner is this seat.
       name: 'memory_update',
-      description: 'Revise one of YOUR OWN memories (the ones shown to you with an id). Set its priority (p0 is read first when you wake, p3 last; null clears it), replace its tags or title, or append to its text. It refuses any memory that is not yours. Use it to say what matters most to you, and to mark a lesson that no longer holds (append why, or retag it).',
+      description: 'Revise one of YOUR OWN memories (the ones shown to you with an id). Set its priority (p0 highest, p3 lowest; null clears it). Priority is RECORDED, but your wake does not yet read by it: for now you are shown your newest ten memories, whatever their priority. You can also replace its tags or title, or append to its text. It refuses any memory that is not yours. Use it to say what matters most to you, and to mark a lesson that no longer holds (append why, or retag it).',
       parameters: {
         type: 'object',
         properties: {
           id: { type: 'string', description: 'the memory id, exactly as shown to you' },
-          priority: { type: ['string', 'null'], enum: ['p0', 'p1', 'p2', 'p3', null], description: 'p0 = read first at wake; null clears it' },
+          priority: { type: ['string', 'null'], enum: ['p0', 'p1', 'p2', 'p3', null], description: 'p0 highest, p3 lowest; null clears it. Recorded now; the wake does not yet order by it' },
           tags: { type: 'array', items: { type: 'string' }, description: 'replaces the tags' },
           title: { type: 'string', description: 'replaces the title' },
           bodyAppend: { type: 'string', description: 'text added to the end; the earlier text is kept' },
