@@ -376,6 +376,10 @@ const SessionRegisterRequestSchema = z.object({
   params: z.object({
     seatId: z.string().min(1),
     author: z.string().optional(),
+    // #1453b — does this lane SURFACE (is it the seat's presence/chat lane)?
+    // Declared by the client, never inferred. Optional: an older client that
+    // sends nothing keeps today's behaviour exactly.
+    surfaces: z.boolean().optional(),
   }),
 });
 
@@ -461,13 +465,13 @@ function buildMcpServer() {
   // the board binds the CURRENT session (extra.sessionId) to the declared seat.
   // Board owns registration authority; presence only declares its configured seat.
   mcp.server.setRequestHandler(SessionRegisterRequestSchema, async (request, extra) => {
-    const { seatId, author } = request.params;
+    const { seatId, author, surfaces } = request.params;
     const sessionId = extra.sessionId;
     if (!sessionId) {
       console.warn(`[#410 register] REJECTED seatId=${seatId}: no session bound to this request`);
       return { ok: false, reason: 'no-session' };
     }
-    const result = seatRegistry.register({ seatId, sessionId, author });
+    const result = seatRegistry.register({ seatId, sessionId, author, surfaces });
     if (!result.ok) {
       console.warn(`[#410 register] REJECTED seatId=${seatId} sid=${sessionId}: ${result.reason} (heldBy=${result.heldBy ?? '-'})`);
       return { ok: false, reason: result.reason, heldBy: result.heldBy };
@@ -476,7 +480,13 @@ function buildMcpServer() {
       // Loud: this is a normal reconnect OR an accidental duplicate seatId config.
       console.warn(`[#410 register] seat ${seatId} SUPERSEDED session ${result.supersededSession} (reconnect or DUPLICATE config?) → now sid=${sessionId} epoch=${result.epoch}`);
     }
-    console.log(`[#410 register] seat ${seatId} ↔ sid=${sessionId} epoch=${result.epoch} author=${author ?? '(none)'} ring=[${seatRegistry.seats().join(', ')}]`);
+    // #1453b — the same declaration steers the fan-out (#1453 1a): a lane that
+    // says it does not surface still receives, outside the stagger, with no slot.
+    if (surfaces === true || surfaces === false) {
+      const meta = sessionMeta.get(sessionId);
+      if (meta) meta.surfaces = surfaces;
+    }
+    console.log(`[#410 register] seat ${seatId} ↔ sid=${sessionId} epoch=${result.epoch} author=${author ?? '(none)'}${surfaces === undefined ? '' : ` surfaces=${surfaces}`} ring=[${seatRegistry.ringSeats().join(', ')}]`);
     // #683 — a lane that registers gets a durable cursor. A lane we already
     // know KEEPS its cursor: re-registration is exactly the case where NOT
     // resetting is the whole point, because a seat re-registers precisely when
@@ -3597,7 +3607,7 @@ const httpServer = http.createServer(async (req, res) => {
         residents,
         residentsRead,
         ring: { direct: directSegment.status(), directPending: directPending.length,
-          members: seatRegistry.seats(), bearerSeats: ringBearerSeats() },   // #1362 · #1396: who is in, and who MAY join by bearer
+          members: seatRegistry.ringSeats(), registered: seatRegistry.seats(), bearerSeats: ringBearerSeats() },   // #1362 · #1396 · #1453b: who holds turns, every registered lane (receive-set), and who MAY join by bearer
         receivers,
         sessions: transports.size,
         seats,

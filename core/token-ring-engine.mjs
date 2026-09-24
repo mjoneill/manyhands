@@ -132,7 +132,9 @@ export function createTokenRingEngine({ registry, genEnvelopeId, isDeliverable =
    */
   function handlePost({ author, body, id, originSessionId } = {}) {
     // Reconcile membership only at a non-active boundary (never mid-lease).
-    if (!state.lease) state = reconcileRing(state, registry.seats());
+    // #1453b — the ring is one member per seat where a lane declared `surfaces`
+    // (a registry without ringSeats, like the pure tests' fakes, keeps every lane).
+    if (!state.lease) state = reconcileRing(state, typeof registry.ringSeats === 'function' ? registry.ringSeats() : registry.seats());
 
     const holder = state.lease?.holder ?? null;
     let originSeatId = originSessionId ? registry.seatForSession(originSessionId) : null;

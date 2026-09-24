@@ -36,6 +36,7 @@ export function createSeatRegistry() {
   const sessionToSeat = new Map(); // sessionId -> seatId  (inverse; enforces bijection)
   const seatAuthor = new Map();    // seatId  -> author label (display only)
   const seatEpoch = new Map();     // seatId  -> monotonic epoch, bumped on each (re)bind
+  const seatSurfaces = new Map();  // seatId  -> true | false (#1453b; absent = undeclared)
   let epochCounter = 0;
 
   /**
@@ -47,7 +48,7 @@ export function createSeatRegistry() {
    *   - Conflict: a session already bound to a DIFFERENT seat cannot re-declare;
    *     a session identifies as exactly one persona. Rejected, binding untouched.
    */
-  function register({ seatId, sessionId, author } = {}) {
+  function register({ seatId, sessionId, author, surfaces } = {}) {
     if (!seatId || !sessionId) return { ok: false, reason: 'seatId and sessionId are required' };
 
     const priorSeatOfSession = sessionToSeat.get(sessionId);
@@ -64,6 +65,9 @@ export function createSeatRegistry() {
     seatToSession.set(seatId, sessionId);
     sessionToSeat.set(sessionId, seatId);
     if (author !== undefined) seatAuthor.set(seatId, author);
+    // #1453b — a lane DECLARES whether it surfaces (is the seat's presence /
+    // chat lane). Declared, never inferred from recency or bind order.
+    if (surfaces === true || surfaces === false) seatSurfaces.set(seatId, surfaces);
     const epoch = ++epochCounter;
     seatEpoch.set(seatId, epoch);
     return { ok: true, seatId, epoch, supersededSession: supersededSession === sessionId ? null : supersededSession };
@@ -87,6 +91,7 @@ export function createSeatRegistry() {
     sessionToSeat.delete(sessionId);
     seatEpoch.delete(seatId);
     seatAuthor.delete(seatId);
+    seatSurfaces.delete(seatId);
     return seatId;
   }
 
@@ -115,6 +120,35 @@ export function createSeatRegistry() {
     return [...seatToSession.keys()];
   }
 
+  /** #1453b — the lane's declared `surfaces`, or null when it declared nothing. */
+  function surfacesForSeat(seatId) {
+    return seatSurfaces.has(seatId) ? seatSurfaces.get(seatId) : null;
+  }
+
+  /**
+   * #1453b — RING membership, one member per SEAT where the seat has said which
+   * lane surfaces. Lanes group by `author` (the seat key; a lane with no author
+   * is its own group). A group with a lane that declared `surfaces: true`
+   * contributes THAT lane only; its siblings (a probe, a bare-key tool
+   * connection) receive but take no turn. A group with no such declaration
+   * contributes every lane, exactly as `seats()` did. Registration (the
+   * receive-set) is untouched: this only narrows who holds a turn.
+   */
+  function ringSeats() {
+    const groups = new Map();
+    for (const seatId of seatToSession.keys()) {
+      const key = seatAuthor.get(seatId) ?? seatId;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(seatId);
+    }
+    const out = [];
+    for (const lanes of groups.values()) {
+      const surfacing = lanes.filter((l) => seatSurfaces.get(l) === true);
+      out.push(...(surfacing.length ? surfacing.slice(0, 1) : lanes));
+    }
+    return out;
+  }
+
   /** True if this seat currently has a live session. */
   function isLive(seatId) {
     return seatToSession.has(seatId);
@@ -128,6 +162,8 @@ export function createSeatRegistry() {
     authorForSeat,
     epochForSeat,
     seats,
+    ringSeats,        // #1453b
+    surfacesForSeat,  // #1453b
     isLive,
   };
 }
