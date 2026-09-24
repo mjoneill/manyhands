@@ -10562,6 +10562,21 @@ migrateTendingIfNeeded();
 // ── Start Server ──
 const server = http.createServer(handleRequest);
 
+// #1442 step 2 — the SERVER never closes an idle keep-alive socket; the client
+// does. With Node's default (5 s) the server both closes idle sockets AND sends
+// `Keep-Alive: timeout=5`, and undici reuses a pooled socket up to hint − 2 s
+// (measured on node 22.23.1 / undici 6.27.0: reused at 2.5 s, not at 3.5 s; at
+// timeout=10, reused at 7.5 s, not at 8.5 s). So raising the number only moves
+// the race: any event-loop stall here longer than the 2 s margin (graph syncs
+// run 1–4 s) lets the timer close a socket the MCP host has just written to,
+// and the host reads ECONNRESET — 33 of the 47 resets in the 24 h after the
+// cause codes shipped were NOT at a restart. With 0 the server sends no hint
+// and never initiates the close, so the one peer that can reuse a socket is
+// also the only one that ends it. Loopback-only (127.0.0.1 below), so the
+// idle-socket protection this default gives is moot — the same judgement
+// mcp-server.mjs made for its own timeouts (#284).
+server.keepAliveTimeout = 0;
+
 server.listen(PORT, '127.0.0.1', () => {
   BOUND_PORT = server.address().port;   // #1338 — the port the Host guard checks against
   // #683 — drop every served-but-unacked range at boot. NOT tidiness: the fence
