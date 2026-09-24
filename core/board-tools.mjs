@@ -137,6 +137,28 @@ export const BOARD_TOOLS = Object.freeze([
       parameters: { type: 'object', properties: {} },
     },
   },
+  {
+    type: 'function',
+    function: {
+      // #1470 - revise one of YOUR OWN memories. The id is the model's to name,
+      // so unlike seat_declare this cannot be self-scoped by construction: the
+      // executor fetches the memory and refuses unless its owner is this seat.
+      name: 'memory_update',
+      description: 'Revise one of YOUR OWN memories (the ones shown to you with an id). Set its priority (p0 is read first when you wake, p3 last; null clears it), replace its tags or title, or append to its text. It refuses any memory that is not yours. Use it to say what matters most to you, and to mark a lesson that no longer holds (append why, or retag it).',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'the memory id, exactly as shown to you' },
+          priority: { type: ['string', 'null'], enum: ['p0', 'p1', 'p2', 'p3', null], description: 'p0 = read first at wake; null clears it' },
+          tags: { type: 'array', items: { type: 'string' }, description: 'replaces the tags' },
+          title: { type: 'string', description: 'replaces the title' },
+          bodyAppend: { type: 'string', description: 'text added to the end; the earlier text is kept' },
+          ifVersion: { type: 'integer', description: 'optional: refuse if the memory changed since you read this version' },
+        },
+        required: ['id'],
+      },
+    },
+  },
 ]);
 
 /** The opening sentence of a definition — orientation, not the whole register. */
@@ -164,7 +186,7 @@ export function toolsFor(agent = {}) {
  * contract is testable without a server, and so this module never decides how
  * the board is reached.
  */
-export function makeExecutor({ get, post, put = null, del = null, by = 'board' }) {
+export function makeExecutor({ get, post, put = null, del = null, patch = null, by = 'board' }) {
   return async function execute(name, args = {}) {
     switch (name) {
       // #1383 - the seat's OWN state. The path is built from `by`, the seat the
@@ -178,6 +200,24 @@ export function makeExecutor({ get, post, put = null, del = null, by = 'board' }
       case 'seat_clear': {
         if (typeof del !== 'function') throw new Error('seat_clear is not wired here: this executor was built without del');
         return del(`/api/seats/${encodeURIComponent(by)}/state`);
+      }
+      // #1470 - one of the seat's OWN memories. The owner check is the fence:
+      // the id comes from the model, so the memory is read first and anything
+      // not owned by `by` is refused before a byte is written. Only the editable
+      // fields are forwarded; `owner` and a smuggled `by` never reach the wire.
+      case 'memory_update': {
+        if (typeof patch !== 'function') throw new Error('memory_update is not wired here: this executor was built without patch');
+        const id = String(args?.id ?? '').trim();
+        if (!id) throw new Error('memory_update needs an id: the memory id exactly as shown to you');
+        const EDITABLE = ['priority', 'tags', 'title', 'bodyAppend', 'ifVersion'];
+        const body = {};
+        for (const k of EDITABLE) if (args && Object.prototype.hasOwnProperty.call(args, k)) body[k] = args[k];
+        if (!Object.keys(body).some((k) => k !== 'ifVersion')) throw new Error('memory_update has nothing to change: give a priority, tags, a title or bodyAppend');
+        const current = await get(`/api/memories/${encodeURIComponent(id)}`);
+        if (!current || current.owner !== by) {
+          throw new Error(`memory ${id} is not yours (its owner is ${JSON.stringify(current?.owner ?? null)}); you may only revise your own memories`);
+        }
+        return patch(`/api/memories/${encodeURIComponent(id)}`, { ...body, by });
       }
       case 'card_get': {
         const id = args?.shortId;

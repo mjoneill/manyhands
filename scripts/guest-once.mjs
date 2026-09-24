@@ -369,6 +369,15 @@ const r = await guestOnce({
       if (!r.ok) throw new Error(`DELETE ${p} -> ${r.status}${j && j.error ? `: ${j.error}` : ''}`);
       return j ?? { cleared: true };
     },
+    // #1470 - revise one of the seat's OWN memories (the executor checks the
+    // owner before calling this). The route's refusal text goes back to the
+    // model, e.g. a stale ifVersion.
+    patch: async (p, body) => {
+      const r = await fetch(`${BOARD}${p}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(90_000) });
+      const j = await r.json().catch(() => null);
+      if (!r.ok) throw new Error(`PATCH ${p} -> ${r.status}${j && j.error ? `: ${j.error}` : ''}`);
+      return j;
+    },
     by: agent.seatKey,
   }),
   post,

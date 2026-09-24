@@ -39,6 +39,13 @@ test('#1196B SEAM: every declared tool reaches a real route — no tool 404s', a
       body: JSON.stringify({ title: 'a card to read', by: 'ada' }),
     });
     assert.equal(c.status, 201);
+    // #1470 — memory_update needs a memory OWNED by the executor's seat (ada).
+    const m = await fetch(`${srv.baseUrl}/api/memories`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'ada lesson', body: 'kept', owner: 'ada', by: 'ada', tags: ['agent-memory'] }),
+    });
+    assert.equal(m.status, 201);
+    ARGS.memory_update = { id: (await m.json()).id, priority: 'p1' };
 
     // The real transport: no fakes, no injected shapes, no path strings in the
     // test. Whatever the executor asks for is what the server is asked for.
@@ -63,6 +70,7 @@ test('#1196B SEAM: every declared tool reaches a real route — no tool 404s', a
       post: (p, b) => call('POST', p, b),
       put: (p, b) => call('PUT', p, b),      // #1383
       del: (p) => call('DELETE', p),         // #1383
+      patch: (p, b) => call('PATCH', p, b),  // #1470
       by: 'ada',
     });
 

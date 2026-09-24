@@ -529,7 +529,13 @@ export function buildMessages({ agent, wake, changes = [], memories = [], ruling
   // will not persist; a resident is told it persists and where its memory
   // lives. A truthfulness claim about the arrangement, not a welfare claim.
   lines.push(agent.residency === 'resident'
-    ? 'You persist across wakes. Your memory lives in the shared memory store on this board (memory_create / memory_list); what you do not write there, you will not have next time.'
+    // #1470 — this line named memory_create / memory_list, which no resident was
+    // granted: a seat read it, believed she held tools the executor would refuse,
+    // and planned around them. It now names only what works for THIS seat.
+    ? 'You persist across wakes. Your memory lives in the shared memory store on this board: you add to it with a REMEMBER line (described below), and what you do not keep there, you will not have next time.'
+      + ((agent.toolGrants || []).includes('memory_update')
+        ? ' You may also revise your OWN memories with memory_update (each is shown to you with its id): set a priority so what matters most is read first, retag or retitle one, or append to it, including to say a lesson no longer holds.'
+        : '')
     : 'You are invited for this question only and will not persist: nothing you say now will be handed back to you later unless someone writes it to the board.');
   if (agent.systemPrompt) lines.push(agent.systemPrompt);
   // #1376 — the ROLE the seat holds on the board, assembled at wake time by
@@ -617,7 +623,8 @@ export function buildMessages({ agent, wake, changes = [], memories = [], ruling
       ? 'What YOU SAID on earlier wakes (newest last). ⚠️ These are your own past sentences, NOT facts about the board and NOT verified by anyone. '
         + 'You may have been guessing when you wrote them. If one names a card, a person or a date and it matters to your answer, CHECK IT before repeating it; '
         + 'if you cannot check it, say where it came from rather than stating it:\n'
-        + memories.slice(-10).map((m) => `- [${m.updatedAt || m.createdAt || ''}] you wrote: "${m.body}"`).join('\n')
+        // #1470 — the id only when the seat can act on it (memory_update granted).
+        + memories.slice(-10).map((m) => `- [${m.updatedAt || m.createdAt || ''}]${(agent.toolGrants || []).includes('memory_update') && m.id ? ` (id ${m.id})` : ''} you wrote: "${m.body}"`).join('\n')
       : 'You have written nothing on earlier wakes: this is your first, or you kept nothing.');
   }
   // #1441 — WHAT YOU TRIED TO KEEP LAST TIME AND WAS NOT KEPT. #1240 refuses a

@@ -18,9 +18,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { BOARD_TOOLS, toolsFor, makeExecutor } from '../core/board-tools.mjs';
 
-test('#1196B/#1383 the surface is five reads plus the seat\'s OWN two writes, every tool named and described', () => {
+test('#1196B/#1383/#1470 the surface is five reads plus the seat\'s OWN three writes (its declaration, and its own memories), every tool named and described', () => {
   const names = BOARD_TOOLS.map((t) => t.function.name).sort();
-  assert.deepEqual(names, ['board_search', 'card_get', 'graph_query', 'kind_list', 'predicate_list', 'seat_clear', 'seat_declare']);
+  assert.deepEqual(names, ['board_search', 'card_get', 'graph_query', 'kind_list', 'memory_update', 'predicate_list', 'seat_clear', 'seat_declare']);
   for (const t of BOARD_TOOLS) {
     assert.equal(t.type, 'function');
     assert.ok(t.function.description && t.function.description.length > 20, `${t.function.name} needs a description a model can act on`);
@@ -28,7 +28,17 @@ test('#1196B/#1383 the surface is five reads plus the seat\'s OWN two writes, ev
     // ⛔ nothing that writes to CARDS or the graph, ever, on this surface. The two
     // seat_* tools (#1383) write the seat's own state and nothing else, and
     // they cannot name a seat — the executor binds the runner's own.
-    assert.doesNotMatch(t.function.name, /create|update|delete|post|claim|assert|write|move/);
+    // #1470 — ONE named exception, decided by the room (commons 09-24,
+    // f3c5d917 / ca2256ab / 61852425): `memory_update` writes the seat's OWN
+    // memories and nothing else. It CAN name a memory, so its fence is the
+    // executor's owner check, pinned by the cross-seat refusal tests in
+    // resident-memory-update-1470.test.mjs (sabotaged: removing the check turns
+    // them red). The exception is a list of one on purpose: a second write tool
+    // must argue its own way in, not inherit this.
+    const SELF_SCOPED_WRITES = ['memory_update'];
+    if (!SELF_SCOPED_WRITES.includes(t.function.name)) {
+      assert.doesNotMatch(t.function.name, /create|update|delete|post|claim|assert|write|move/);
+    }
     if (t.function.name.startsWith('seat_')) assert.equal('seat' in (t.function.parameters.properties || {}), false, `${t.function.name} must not take a seat argument`);
   }
 });
