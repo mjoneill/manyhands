@@ -78,6 +78,9 @@ test('#1470 memory_update is a board tool, grantable, and absent when ungranted'
   assert.ok(BOARD_TOOLS.some((t) => t.function.name === 'memory_update'));
   const d = JSON.stringify(BOARD_TOOLS.find((t) => t.function.name === 'memory_update'));
   assert.doesNotMatch(d, /read first/, 'the tool description promises nothing the wake does not do');
+  // tags REPLACE the list, and the wake shows only `agent-memory`-tagged
+  // memories: a retag without it silently drops the memory from her wake.
+  assert.match(d, /agent-memory/, 'the tags field warns what dropping agent-memory does');
   assert.deepEqual(toolsFor({ toolGrants: ['card_get'] }).map((t) => t.function.name), ['card_get']);
   assert.deepEqual(toolsFor({ toolGrants: ['memory_update'] }).map((t) => t.function.name), ['memory_update']);
 });

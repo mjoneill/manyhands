@@ -150,7 +150,7 @@ export const BOARD_TOOLS = Object.freeze([
         properties: {
           id: { type: 'string', description: 'the memory id, exactly as shown to you' },
           priority: { type: ['string', 'null'], enum: ['p0', 'p1', 'p2', 'p3', null], description: 'p0 highest, p3 lowest; null clears it. Recorded now; the wake does not yet order by it' },
-          tags: { type: 'array', items: { type: 'string' }, description: 'replaces the tags' },
+          tags: { type: 'array', items: { type: 'string' }, description: 'REPLACES the whole tag list. Keep "agent-memory" in it, or this memory will no longer be shown to you when you wake (drop it only if you mean to retire the memory from your wake)' },
           title: { type: 'string', description: 'replaces the title' },
           bodyAppend: { type: 'string', description: 'text added to the end; the earlier text is kept' },
           ifVersion: { type: 'integer', description: 'optional: refuse if the memory changed since you read this version' },
