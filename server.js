@@ -3167,6 +3167,17 @@ async function handleAssert(req, res) {
                   + 'why and by whom (#1469 P8), never as a silent removal. Nothing in this batch was applied.',
               };
             }
+            // #1478 — the WRITER is resolved against the roster as the subject is:
+            // an ended record is never deleted (P8), so a typo'd `by` would be a
+            // permanent attribution to a person no seat owns.
+            const ender = rosterSeatOf(`person:${String(by ?? '').trim()}`, currentRoster(data));
+            if (!ender) {
+              return {
+                status: 400,
+                error: `assertions[${i}]: the writer ${JSON.stringify(by)} is not a roster seat, and an ended `
+                  + 'dependency records who ended it for good (#1469 P8). Nothing in this batch was applied.',
+              };
+            }
             const entries = Array.isArray(objCard.dependentSeats) ? objCard.dependentSeats : [];
             const current = entries.includes(subjPerson);
             const endedBefore = entries.some((x) => x && typeof x === 'object' && x.seat === subjPerson);
@@ -3177,7 +3188,7 @@ async function handleAssert(req, res) {
                   + 'Nothing in this batch was applied.',
               };
             }
-            plan.push({ kind: current ? 'endDependency' : 'endDependencyNoop', seat: subjPerson, object: objCard, reason, a });
+            plan.push({ kind: current ? 'endDependency' : 'endDependencyNoop', seat: subjPerson, object: objCard, reason, ender, a });
             continue;
           }
           plan.push({ kind: 'dependentSeat', seat: subjPerson, object: objCard, a });
@@ -3389,7 +3400,7 @@ async function handleAssert(req, res) {
           if (!list.includes(p.seat)) { results.push(wire(p.a, 'noop')); continue; }   // ended earlier in this batch
           p.object.dependentSeats = [
             ...list.filter((x) => x !== p.seat),
-            { seat: p.seat, endedAt: now, endedBy: by, reason: p.reason },
+            { seat: p.seat, endedAt: now, endedBy: p.ender, reason: p.reason },
           ];
           p.object.updatedAt = now;
           touched.set(p.object.id, p.object);

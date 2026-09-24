@@ -147,3 +147,14 @@ test('#1474 refusals: no reason, never depended, unknown op, end on a non-person
     assert.deepEqual(await cardSeats(s.baseUrl, id), ['robin'], 'no refusal changed anything');
   });
 });
+
+test('#1478 an end by a writer who is NOT a roster seat is refused — the record is permanent, so its endedBy must be someone', async () => {
+  await withServer(async (s, id) => {
+    await assertAll(s.baseUrl, [dep(id)]);
+    const r = await assertAll(s.baseUrl, [dep(id, { op: 'end', reason: 'typo in by' })], 'ktt');
+    const raw = await r.text();
+    assert.equal(r.status, 400, raw);
+    assert.match(JSON.parse(raw).error, /not a roster seat/);
+    assert.deepEqual(await cardSeats(s.baseUrl, id), ['robin'], 'the dependency is still current: nothing applied');
+  });
+});
