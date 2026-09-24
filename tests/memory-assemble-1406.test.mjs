@@ -82,6 +82,21 @@ test('#1406 the budget holds even when the omitted list itself would not fit', (
   assert.ok(a.omitted.length > 0);
 });
 
+test('#1406 memories that fit EXACTLY come back whole — the footer reserve is held only when something overflows', () => {
+  // Reproduced in review: the reserve was held back on every include
+  // check, so a seat whose memories fit its budget still lost one.
+  const three = [0, 1, 2].map((i) => ({ id: `m${i}`, title: `t${i}`, owner: 'ada', tags: [], priority: 'p1',
+    body: 'y'.repeat(300), version: 1, updatedAt: `2026-09-0${i + 1}T00:00:00.000Z` }));
+  const whole = assembleMemories(three, { owner: 'ada', budgetBytes: 100000 });
+  const exact = assembleMemories(three, { owner: 'ada', budgetBytes: whole.bytes });
+  assert.deepEqual(exact.omitted, [], 'nothing omitted at exactly the needed size');
+  assert.equal(exact.included.length, 3);
+  assert.equal(exact.text, whole.text);
+  const tight = assembleMemories(three, { owner: 'ada', budgetBytes: whole.bytes - 1 });
+  assert.ok(tight.omitted.length > 0, 'one byte short does overflow');
+  assert.ok(Buffer.byteLength(tight.text, 'utf8') <= whole.bytes - 1);
+});
+
 test('#1406 a memory added after the first assembly appears in the second, nothing else touched', () => {
   const all = fixture();
   const first = assembleMemories(all, { owner: 'grace', budgetBytes: 4096 });

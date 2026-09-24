@@ -46,8 +46,18 @@ export function assembleMemories(memories, { owner, budgetBytes } = {}) {
     return { owner, budgetBytes, bytes: bytes(text), text, included: [], omitted: [] };
   }
 
-  // Reserve room for the omitted footer's head AND its first line up front, so
-  // a full body can never crowd out the fact that something was left behind.
+  // Everything fits: return it whole. The footer reserve below is held back
+  // only when something overflows — held unconditionally, it cost a seat
+  // whose memories fit its budget exactly one of them (found in review).
+  const pieces = mine.map(render);
+  const whole = pieces.join('');
+  if (bytes(whole) <= budgetBytes) {
+    return { owner, budgetBytes, bytes: bytes(whole), text: whole, included: mine.map((m) => m.id), omitted: [] };
+  }
+
+  // Something overflows. Reserve room for the omitted footer's head AND its
+  // first line up front, so a full body can never crowd out the fact that
+  // something was left behind.
   const footerHead = (n) => `---\n${n} memor${n === 1 ? 'y' : 'ies'} not included (budget ${budgetBytes} bytes). Fetch by id:\n`;
   const FIRST_LINE_ALLOWANCE = 120;
   const reserve = bytes(footerHead(mine.length)) + FIRST_LINE_ALLOWANCE;
