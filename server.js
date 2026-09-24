@@ -96,6 +96,7 @@ import {
 import { configureIdentities, usingDefaultRoster } from './core/identity.mjs';
 import { hostAllowed, parseAllowedHosts, refuseHost } from './core/host-guard.mjs';
 import { agentConstraints, unseenLayers } from './core/agent-constraints.mjs';   // #1350
+import { assembleMemories } from './core/memory-assemble.mjs';   // #1406
 
 const PORT = process.env.SCRUM_PORT ? parseInt(process.env.SCRUM_PORT, 10) : 3141;
 // #1338 — extra local names this board may be reached by. Loopback names need
@@ -2716,6 +2717,22 @@ async function handleMemoryVersions(req, res, id) {
       author: v.author || null, at: v.dateCreated || null,
     })),
   });
+}
+
+// #1406 slice 1 — a seat's memories ASSEMBLED to a byte budget, so a
+// session-start hook can pull from the store instead of loading a file of
+// copies. Omitted memories are named, never dropped silently (#1438).
+async function handleAssembleMemories(req, res) {
+  const q = parseQuery(req.url);
+  const budgetBytes = /^\d+$/.test(q.budget || '') ? Number(q.budget) : NaN;
+  if (!q.owner) return sendJSON(res, 400, { error: 'owner is required — whose memories to assemble (?owner=<seat>)' });
+  if (!Number.isInteger(budgetBytes) || budgetBytes <= 0) {
+    return sendJSON(res, 400, { error: `budget is required, a positive integer number of bytes (?budget=4096) — got ${JSON.stringify(q.budget ?? null)}` });
+  }
+  let all;
+  try { all = await liveMemories(); } catch (e) { if (graphRefused(res, e)) return; throw e; }
+  const memories = [...all.values()].map(({ identity, versions }) => memoryToWire(identity, versions));
+  sendJSON(res, 200, assembleMemories(memories, { owner: q.owner, budgetBytes }));
 }
 
 async function handleListMemories(req, res) {
@@ -9934,6 +9951,7 @@ const API_ROUTES = [
   { method: 'PATCH',  re: /^\/api\/obligations\/([^\/]+)$/, fn: (req, res, m) => handleUpdateObligation(req, res, m[1]) },
   { method: 'GET',    re: /^\/api\/memories$/,             fn: (req, res) => handleListMemories(req, res) },
   { method: 'POST',   re: /^\/api\/memories$/,             fn: (req, res) => handleCreateMemory(req, res) },
+  { method: 'GET',    re: /^\/api\/memories\/assemble$/,    fn: (req, res) => handleAssembleMemories(req, res) },   // #1406 — before :id
   { method: 'GET',    re: /^\/api\/memories\/([^\/]+)\/versions$/, fn: (req, res, m) => handleMemoryVersions(req, res, m[1]) },
   { method: 'GET',    re: /^\/api\/memories\/([^\/]+)$/,   fn: (req, res, m) => handleGetMemory(req, res, m[1]) },
   { method: 'PATCH',  re: /^\/api\/memories\/([^\/]+)$/,   fn: (req, res, m) => handleUpdateMemory(req, res, m[1]) },

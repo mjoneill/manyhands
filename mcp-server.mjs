@@ -1942,6 +1942,21 @@ function buildMcpServer() {
     return jsonResult(await apiCall('GET', path));
   });
 
+  // #1406 slice 1 — the read a session-start hook calls instead of loading a
+  // file of copies. Omitted memories are named, so nothing is lost silently.
+  mcp.registerTool('memory_assemble', {
+    description: 'Assemble ONE seat\'s memories into text that fits a byte BUDGET: priority first (p0 → p3, then unset), newest first within a priority. '
+      + 'Anything that does not fit is NAMED (id + title) in `omitted` and, as far as the budget allows, at the foot of the text, so you can fetch it by id. '
+      + 'Left out is never the same as absent. An owner with no memories gets an explicit sentence, never an empty string.',
+    inputSchema: {
+      owner: z.string().min(1).describe('Whose memories to assemble (seat key)'),
+      budgetBytes: z.number().int().positive().describe('The byte budget for the assembled text (UTF-8 bytes), e.g. 4096'),
+    },
+  }, async ({ owner, budgetBytes }) => {
+    const params = new URLSearchParams({ owner, budget: String(budgetBytes) });
+    return jsonResult(await apiCall('GET', `/api/memories/assemble?${params}`));
+  });
+
   mcp.registerTool('memory_versions', {
     description: 'Get the version history of a memory — all versions that have ever been stored.',
     inputSchema: {
