@@ -230,6 +230,10 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:parkedUntil': 'scrum:parkedUntil',
   'scrum:parkedReason': 'scrum:parkedReason',
   'scrum:implementedBy': 'implementedBy',
+  // #1471 — emitted with the PERSON as subject, but STORED on the OBJECT card:
+  // grep the store for `dependsOn` and you find nothing; the field is the
+  // card's `dependentSeats` (a person has no record of its own).
+  'scrum:dependsOn': 'dependentSeats',
   'scrum:mentionsCard': 'scrum:mentionsCard',   // derived at projection (#656), stored in the document
   'scrum:blocks': 'blockers',
   'scrum:blockedByCard': 'blockers',
