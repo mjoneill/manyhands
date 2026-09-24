@@ -124,6 +124,7 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:resolved', 'scrum:mentionsName', 'scrum:relatedTo', 'scrum:note',
   'scrum:status', 'scrum:blockedByPerson', 'scrum:blocks', 'scrum:mentionsCard',
   'scrum:label', 'scrum:implementedBy', 'scrum:priority', 'scrum:column',
+  'scrum:dependsOn',   // #1471 — person → substrate card, stored on the card
   'scrum:cardType', 'scrum:claimedAt', 'scrum:claimedBy', 'scrum:for',
   'scrum:assignee', 'scrum:blockedByAnyHuman', 'scrum:derivedFrom',
   'scrum:ofCard', 'scrum:blockedBy', 'scrum:expect', 'scrum:ask', 'scrum:claim',
@@ -801,6 +802,31 @@ function sweepOrphanConcepts(store, candidates) {
   }
 }
 
+/**
+ * #1471 — PERSON-SUBJECT edges stored on an OBJECT card. `scrum:dependsOn` is
+ * the only one today (shape A; a typed statement kind waits for a second
+ * person-subject predicate). Its triples are emitted by the CARD's projection
+ * with the PERSON as subject, so subject-scoped deletion gets both ends wrong:
+ *   the card changes  → its old inbound edge is not under the card's subject,
+ *                       so it would survive a removed seat (a stale row)
+ *   the person changes → the edge IS under the person's subject, so a roster
+ *                       re-derive would wipe an edge the card still asserts
+ * This returns the person's edges to KEEP (re-added after), and deletes the
+ * card's inbound ones now (its projection re-adds the current set). Keeps the
+ * synced store equal to a rebuilt one, which projects each entity once.
+ */
+const PERSON_EDGES_OWNED_BY_OBJECT = ['dependsOn'];
+function foreignOwnedEdgesOf(store, entityOrId, subject) {
+  const kept = [];
+  const isPerson = subject.value.startsWith(IRI.person);
+  for (const local of PERSON_EDGES_OWNED_BY_OBJECT) {
+    const pred = nn(IRI.scrum + local);
+    if (isPerson) kept.push(...store.match(subject, pred, null));
+    else for (const q of store.match(null, pred, subject)) store.delete(q);
+  }
+  return kept;
+}
+
 export function updateEntity(store, entity) {
   const subject = nn(subjectIriFor(entity));
   // #687 — read the old concept edges while they still exist.
@@ -823,6 +849,11 @@ export function updateEntity(store, entity) {
   // every reorder. Walk and delete the chain FIRST, while the head edge that
   // reaches it still exists.
   dropListChains(store, subject);
+  // #1471 — edges this entity does NOT own but sits on either end of. A person's
+  // `dependsOn` triples belong to the CARD that stores them: keep them across
+  // the person's own re-projection. And a card's inbound ones are its own:
+  // drop them here so re-projection recreates exactly the current set.
+  const keptForeign = foreignOwnedEdgesOf(store, entity, subject);
   for (const q of store.match(subject, null, null)) store.delete(q);
   // BEFORE re-projecting, unlike the concept sweep below: these nodes are owned
   // outright, so re-projection recreates exactly the ones that survive.
@@ -852,6 +883,7 @@ export function updateEntity(store, entity) {
   // fabricated shas: the call SITE was right and the identifier was made up.
   sweepBlockerNodes(store, subject.value);
   projectEntity(store, entity);
+  for (const q of keptForeign) store.add(q);
   // AFTER re-projecting: a concept the entity still carries has just been
   // re-added, so it will not be swept. Only genuinely dropped ones are.
   sweepOrphanConcepts(store, priorConcepts);
@@ -887,8 +919,10 @@ export function removeEntity(store, idOrEntity) {
   // updateEntity: read the edges before the triples that carry them are gone.
   const priorConcepts = conceptsOf(store, subject);
   sweepBlockerNodes(store, subject.value);
+  const keptForeign = foreignOwnedEdgesOf(store, idOrEntity, subject);   // #1471
   let n = 0;
   for (const q of store.match(subject, null, null)) { store.delete(q); n += 1; }
+  for (const q of keptForeign) store.add(q);
   sweepOrphanConcepts(store, priorConcepts);
   return n;
 }
@@ -1409,6 +1443,17 @@ function projectEntity(store, e) {
         add(s, nn(S + 'implementedBy'), c);
         add(c, A, nn(S + 'Commit'));
         add(c, nn(SC + 'identifier'), lit(sha));
+      }
+      // #1471 — the seats that depend on this card's substrate. STORED here, on
+      // the object, and emitted with the PERSON as subject, because that is the
+      // registered meaning of scrum:dependsOn ("which seats are hurt if X
+      // breaks?"). ⚠️ A triple emitted from this card with a FOREIGN subject:
+      // updateEntity/removeEntity own its lifecycle explicitly (see
+      // PERSON_EDGES_OWNED_BY_OBJECT), because subject-scoped deletion alone
+      // would orphan it when this card changes and wipe it when the person does.
+      for (const seat of e['scrum:dependentSeats'] || []) {
+        if (typeof seat !== 'string' || !seat) continue;
+        add(personRef(seat), nn(S + 'dependsOn'), s);
       }
       // #723 — `for` is free text, not a person. Measured across the corpus:
       // 100 cards set it, 74 distinct values, and only a quarter resemble any

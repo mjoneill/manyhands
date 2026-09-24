@@ -81,7 +81,13 @@ const BOARD_KEYS = new Set(['column', 'order', 'assignees', 'priority', 'labels'
   // #814 — acceptance evidence. First-class for the same reason as blockers and
   // checks: it has a validator, an API surface and a graph projection, and a
   // modelled field left in the unmodelled bag is the lying-container shape.
-  'acceptance']);
+  'acceptance',
+  // #1471 — the seats that DEPEND ON this card's substrate (`person:X
+  // scrum:dependsOn <card>`). Stored on the OBJECT because a Person has no
+  // record of its own (core/people.mjs re-derives people on every save); the
+  // projection emits it person → card. Modelled for the same reason as the
+  // three above: it has a write verb (graph_assert) and a graph projection.
+  'dependentSeats']);
 // #222 — page attachments ride verbatim as a first-class node field (so the wiki
 // reads node.attachments directly, not from board._extra). schema.org would model
 // each as an associatedMedia ImageObject/MediaObject; that transform is deferred.

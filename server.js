@@ -47,7 +47,7 @@ import { inFlight } from './core/in-flight.mjs';
 import { appendEvent, ENTITY_KINDS, EVENT_OPS } from './core/event-log.mjs';
 import { KIND_DECLARATIONS, PROJECTED_TYPES, divergence } from './core/kind-registry.mjs';
 import { SHAPE_QUERY, withObjectShapes } from './core/predicate-shapes.mjs';
-import { shortenTypeIri } from './core/jsonld.mjs';
+import { shortenTypeIri, PERSON_IRI_BASE } from './core/jsonld.mjs';
 // #805 — the boot migration's inputs (the live flat sources) and its builder.
 import { readPool, recentWhispers, DEFAULT_POOL, poolFilePath } from './whisper-store.mjs';
 import { readTendingConfig, writeTendingConfig } from './tending-config.mjs';
@@ -3104,11 +3104,50 @@ async function handleAssert(req, res) {
         const subjMemory = (subjIdx < 0 && !subjObligation)
           ? findMemory(liveMems, a.subject)
           : null;
-        if (subjIdx < 0 && !subjObligation && !subjMemory) {
+        // #1471 — a PERSON (a roster seat) is the fourth subject kind, for ONE
+        // predicate. A Person has no record to store into (core/people.mjs
+        // re-derives people on every save), so the edge is stored on the OBJECT
+        // card and projected person → card: shape (A), decided on #1471. A typed
+        // statement kind (B) waits for a SECOND person-subject predicate with a
+        // named consumer (#1469 P2, applied to storage as well as to terms).
+        const subjPerson = (subjIdx < 0 && !subjObligation && !subjMemory)
+          ? rosterSeatOf(a.subject, currentRoster(data))
+          : null;
+        if (subjIdx < 0 && !subjObligation && !subjMemory && !subjPerson) {
           return {
             status: 400,
             error: `assertions[${i}]: subject ${JSON.stringify(a.subject)} does not resolve to a card `
-              + '(shortId or uuid), an obligation (@id) or a memory (@id). Nothing in this batch was applied.',
+              + '(shortId or uuid), an obligation (@id), a memory (@id) or a roster seat (person:<key>). '
+              + 'Nothing in this batch was applied.',
+          };
+        }
+        if (subjPerson) {
+          if (a.predicate !== 'scrum:dependsOn') {
+            return {
+              status: 400,
+              error: `assertions[${i}]: ${a.predicate} has no store mapping for a PERSON subject — `
+                + 'today only scrum:dependsOn is assertable from a person (#1471). '
+                + 'Assertability grows by deliberate act (see #945). Nothing in this batch was applied.',
+            };
+          }
+          const objIdx = findCardIndex(data, a.object);
+          if (objIdx < 0) {
+            return {
+              status: 400,
+              error: `assertions[${i}]: object ${JSON.stringify(a.object)} does not resolve to a card — `
+                + "scrum:dependsOn takes a substrate's apex CARD (shortId or uuid) as object. "
+                + 'Nothing in this batch was applied.',
+            };
+          }
+          plan.push({ kind: 'dependentSeat', seat: subjPerson, object: data.cards[objIdx], a });
+          continue;
+        }
+        if (a.predicate === 'scrum:dependsOn') {
+          return {
+            status: 400,
+            error: `assertions[${i}]: scrum:dependsOn takes a PERSON subject (a roster seat, person:<key>), `
+              + `not ${JSON.stringify(a.subject)} — its registered definition: NOT a card → card edge at all. `
+              + 'Nothing in this batch was applied.',
           };
         }
         if (a.predicate === 'scrum:dischargedBy') {
@@ -3295,6 +3334,13 @@ async function handleAssert(req, res) {
           touched.set(p.subject.id, p.subject);
           for (const t of syncInverseRelationships(data, p.subject, before, after)) touched.set(t.id, t);
           results.push(wire(p.a, 'edge-added'));
+        } else if (p.kind === 'dependentSeat') {
+          const list = Array.isArray(p.object.dependentSeats) ? p.object.dependentSeats : [];
+          if (list.includes(p.seat)) { results.push(wire(p.a, 'noop')); continue; }
+          p.object.dependentSeats = [...list, p.seat];
+          p.object.updatedAt = now;
+          touched.set(p.object.id, p.object);
+          results.push(wire(p.a, 'edge-added'));
         } else if (p.kind === 'sha') {
           const list = Array.isArray(p.subject.implementedBy) ? p.subject.implementedBy : [];
           if (list.includes(p.sha)) { results.push(wire(p.a, 'noop')); continue; }
@@ -3321,6 +3367,22 @@ async function handleAssert(req, res) {
     console.error('POST /api/assert:', e.message);
     sendJSON(res, 500, { error: e.message });
   }
+}
+
+/**
+ * #1471 — a person reference → its roster seat key, or null. Takes the full
+ * person IRI or `person:<key>`, and nothing bare: a bare word is not a node
+ * reference anywhere else on this verb. Only a seat on the CURRENT roster
+ * resolves, because scrum:dependsOn's subject is a seat, and a key minted by
+ * a typo would otherwise become an edge from nobody.
+ */
+function rosterSeatOf(ref, roster) {
+  const s = String(ref ?? '').trim();
+  const key = s.startsWith(PERSON_IRI_BASE) ? s.slice(PERSON_IRI_BASE.length)
+    : s.startsWith('person:') ? s.slice('person:'.length) : null;
+  if (!key) return null;
+  const k = key.toLowerCase();
+  return roster && Object.prototype.hasOwnProperty.call(roster, k) ? k : null;
 }
 
 /**
