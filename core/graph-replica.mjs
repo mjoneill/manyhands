@@ -125,6 +125,7 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:status', 'scrum:blockedByPerson', 'scrum:blocks', 'scrum:mentionsCard',
   'scrum:label', 'scrum:implementedBy', 'scrum:priority', 'scrum:column',
   'scrum:dependsOn',   // #1471 — person → substrate card, stored on the card
+  'scrum:dependent', 'scrum:endedBy',   // #1474 — on an ended scrum:DependencyRecord
   'scrum:cardType', 'scrum:claimedAt', 'scrum:claimedBy', 'scrum:for',
   'scrum:assignee', 'scrum:blockedByAnyHuman', 'scrum:derivedFrom',
   'scrum:ofCard', 'scrum:blockedBy', 'scrum:expect', 'scrum:ask', 'scrum:claim',
@@ -152,6 +153,7 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:TendingState', 'scrum:TendingPlaylistVersion', 'scrum:TendingPlaylist',
   'scrum:TendingPromptVersion', 'scrum:TendingPrompt', 'scrum:Column',
   'scrum:Blocker', 'scrum:Commit', 'scrum:UnresolvedReference', 'scrum:Check',
+  'scrum:DependencyRecord',   // #1474
   'scrum:Tending', 'scrum:SeatDeclaration', 'scrum:WorkObject',
   'scrum:PredicateDefinition', 'scrum:definition',
   // #1214 — the KIND registry, mirroring the predicate registry directly above.
@@ -784,6 +786,8 @@ function sweepBlockerNodes(store, cardSubjectIri) {
   // copied: the first one cost a production orphan because its case was not
   // written, and a second hand-rolled prefix walk would be two places to forget.
   sweepDerivedNodes(store, cardSubjectIri, 'ReleaseCondition', 'rc');
+  // #1474 — the THIRD family: ended-dependency records under <card>/dependency/.
+  sweepDerivedNodes(store, cardSubjectIri, 'DependencyRecord', 'dependency');
 }
 
 /** Delete nodes of `type` whose subject is `<card>/<segment>/…`. */
@@ -1454,9 +1458,20 @@ function projectEntity(store, e) {
       // updateEntity/removeEntity own its lifecycle explicitly (see
       // PERSON_EDGES_OWNED_BY_OBJECT), because subject-scoped deletion alone
       // would orphan it when this card changes and wipe it when the person does.
-      for (const seat of e['scrum:dependentSeats'] || []) {
-        if (typeof seat !== 'string' || !seat) continue;
-        add(personRef(seat), nn(S + 'dependsOn'), s);
+      // #1474 — an entry is a bare seat key (a CURRENT dependency: the live
+      // triple above) or {seat, endedAt, endedBy, reason} (an ENDED one: a
+      // scrum:DependencyRecord under <card>/dependency/<seat>/<endedAt>, swept
+      // with this card like blockers). An ended dependency emits NO dependsOn,
+      // so "which seats are hurt if X breaks" stays current-only and one hop.
+      for (const entry of e['scrum:dependentSeats'] || []) {
+        if (typeof entry === 'string' && entry) { add(personRef(entry), nn(S + 'dependsOn'), s); continue; }
+        if (!entry || typeof entry !== 'object' || !entry.seat || !entry.endedAt) continue;
+        const rec = nn(`${s.value}/dependency/${encodeURIComponent(entry.seat)}/${encodeURIComponent(entry.endedAt)}`);
+        add(rec, A, nn(S + 'DependencyRecord'));
+        add(rec, nn(S + 'dependent'), personRef(entry.seat));
+        add(rec, nn(S + 'endedAt'), lit(entry.endedAt));
+        if (entry.endedBy) add(rec, nn(S + 'endedBy'), personRef(entry.endedBy));
+        if (entry.reason) add(rec, nn(S + 'note'), lit(entry.reason));
       }
       // #723 — `for` is free text, not a person. Measured across the corpus:
       // 100 cards set it, 74 distinct values, and only a quarter resemble any

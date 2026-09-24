@@ -3061,6 +3061,12 @@ async function handleAssert(req, res) {
       if (!a || typeof a !== 'object' || Array.isArray(a)) {
         return sendJSON(res, 400, { error: `assertions[${i}] must be an object {subject, predicate, object}` });
       }
+      // #1474 — `op` is 'assert' (the default) or 'end'. An unknown op is
+      // refused rather than read as an assertion: a caller who asked to END an
+      // edge must never find one ADDED.
+      if (a.op !== undefined && a.op !== 'assert' && a.op !== 'end') {
+        return sendJSON(res, 400, { error: `assertions[${i}].op must be "assert" (the default) or "end", got ${JSON.stringify(a.op)}` });
+      }
       if (typeof a.predicate !== 'string' || !PREDICATE_NAME_RE.test(a.predicate)) {
         return sendJSON(res, 400, {
           error: `assertions[${i}].predicate must be a prefixed term like "scrum:blockedBy" or "schema:isPartOf" `
@@ -3149,8 +3155,40 @@ async function handleAssert(req, res) {
                 + 'Nothing in this batch was applied.',
             };
           }
-          plan.push({ kind: 'dependentSeat', seat: subjPerson, object: data.cards[objIdx], a });
+          const objCard = data.cards[objIdx];
+          if (a.op === 'end') {
+            // #1474 — ENDING is recorded, never deleted (#1469 P8): the seat
+            // leaves the current set and an ended record keeps when, who and why.
+            const reason = typeof a.reason === 'string' ? a.reason.trim() : '';
+            if (!reason) {
+              return {
+                status: 400,
+                error: `assertions[${i}]: ending scrum:dependsOn needs a reason — the "no" is recorded with `
+                  + 'why and by whom (#1469 P8), never as a silent removal. Nothing in this batch was applied.',
+              };
+            }
+            const entries = Array.isArray(objCard.dependentSeats) ? objCard.dependentSeats : [];
+            const current = entries.includes(subjPerson);
+            const endedBefore = entries.some((x) => x && typeof x === 'object' && x.seat === subjPerson);
+            if (!current && !endedBefore) {
+              return {
+                status: 400,
+                error: `assertions[${i}]: ${subjPerson} has no dependency on card ${objCard.shortId} to end. `
+                  + 'Nothing in this batch was applied.',
+              };
+            }
+            plan.push({ kind: current ? 'endDependency' : 'endDependencyNoop', seat: subjPerson, object: objCard, reason, a });
+            continue;
+          }
+          plan.push({ kind: 'dependentSeat', seat: subjPerson, object: objCard, a });
           continue;
+        }
+        if (a.op === 'end') {
+          return {
+            status: 400,
+            error: `assertions[${i}]: op "end" is only defined for scrum:dependsOn with a PERSON subject (#1474). `
+              + 'Nothing in this batch was applied.',
+          };
         }
         if (a.predicate === 'scrum:dependsOn') {
           return {
@@ -3344,6 +3382,18 @@ async function handleAssert(req, res) {
           touched.set(p.subject.id, p.subject);
           for (const t of syncInverseRelationships(data, p.subject, before, after)) touched.set(t.id, t);
           results.push(wire(p.a, 'edge-added'));
+        } else if (p.kind === 'endDependencyNoop') {
+          results.push(wire(p.a, 'noop'));   // already ended, not current: nothing to end
+        } else if (p.kind === 'endDependency') {
+          const list = Array.isArray(p.object.dependentSeats) ? p.object.dependentSeats : [];
+          if (!list.includes(p.seat)) { results.push(wire(p.a, 'noop')); continue; }   // ended earlier in this batch
+          p.object.dependentSeats = [
+            ...list.filter((x) => x !== p.seat),
+            { seat: p.seat, endedAt: now, endedBy: by, reason: p.reason },
+          ];
+          p.object.updatedAt = now;
+          touched.set(p.object.id, p.object);
+          results.push(wire(p.a, 'dependency-ended'));
         } else if (p.kind === 'dependentSeat') {
           const list = Array.isArray(p.object.dependentSeats) ? p.object.dependentSeats : [];
           if (list.includes(p.seat)) { results.push(wire(p.a, 'noop')); continue; }

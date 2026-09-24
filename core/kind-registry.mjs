@@ -136,6 +136,15 @@ export const KIND_DECLARATIONS = Object.freeze([
       + 'obstacle that is not itself a card.',
   },
   {
+    // #1474 — the record of a dependency that ENDED. A live one is the
+    // `person scrum:dependsOn card` triple and has no record.
+    name: 'scrum:DependencyRecord', eventKind: null, collection: null,
+    createdBy: 'graph_assert (op: "end" on scrum:dependsOn)',
+    definition: 'The record of a seat\'s dependency on a substrate that has ENDED: a derived node '
+      + 'owned by the substrate card, carrying who depended, when it ended, who ended it and why. '
+      + 'Distinct from a current dependency, which is a live dependsOn triple with no record.',
+  },
+  {
     name: 'scrum:Obligation', eventKind: 'obligation', collection: 'obligations',
     createdBy: 'obligation_create',
     definition: 'Something a seat owes, tracked as an entity so it outlives the conversation that '

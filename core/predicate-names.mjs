@@ -235,6 +235,10 @@ export const PREDICATE_SOURCE = Object.freeze({
   // grep the store for `dependsOn` and you find nothing; the field is the
   // card's `dependentSeats` (a person has no record of its own).
   'scrum:dependsOn': 'dependentSeats',
+  // #1474 — on an ENDED dependency's record, projected from the same
+  // `dependentSeats` entry ({seat, endedAt, endedBy, reason}).
+  'scrum:dependent': 'dependentSeats',
+  'scrum:endedBy': 'dependentSeats',
   'scrum:mentionsCard': 'scrum:mentionsCard',   // derived at projection (#656), stored in the document
   'scrum:blocks': 'blockers',
   'scrum:blockedByCard': 'blockers',
@@ -307,6 +311,7 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:Check': null,
   'scrum:Blocker': null,
   'scrum:ReleaseCondition': null,
+  'scrum:DependencyRecord': null,   // #1474 — minted for an ended dependentSeats entry
   'scrum:UnresolvedReference': null,   // #818 — a relationship member naming no card
   'scrum:Decision': null,              // #918 — rdf:type, minted by the projection
 
