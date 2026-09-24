@@ -480,9 +480,14 @@ function buildMcpServer() {
       // Loud: this is a normal reconnect OR an accidental duplicate seatId config.
       console.warn(`[#410 register] seat ${seatId} SUPERSEDED session ${result.supersededSession} (reconnect or DUPLICATE config?) → now sid=${sessionId} epoch=${result.epoch}`);
     }
+    if (result.surfacesConflict) {
+      // #1453b review — two lanes of one seat both claim to surface. Not settled
+      // by bind order: the second claim is refused and named, LOUDLY.
+      console.warn(`[#1453b register] seat ${seatId} claimed surfaces:true but ${result.surfacesConflict} already holds it for author=${author ?? '(none)'}; claim NOT recorded (one surfacing lane per seat — fix the client config)`);
+    }
     // #1453b — the same declaration steers the fan-out (#1453 1a): a lane that
     // says it does not surface still receives, outside the stagger, with no slot.
-    if (surfaces === true || surfaces === false) {
+    if (surfaces === false || (surfaces === true && !result.surfacesConflict)) {
       const meta = sessionMeta.get(sessionId);
       if (meta) meta.surfaces = surfaces;
     }

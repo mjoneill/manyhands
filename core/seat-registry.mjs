@@ -67,10 +67,24 @@ export function createSeatRegistry() {
     if (author !== undefined) seatAuthor.set(seatId, author);
     // #1453b — a lane DECLARES whether it surfaces (is the seat's presence /
     // chat lane). Declared, never inferred from recency or bind order.
-    if (surfaces === true || surfaces === false) seatSurfaces.set(seatId, surfaces);
+    // A re-register WITHOUT `surfaces` keeps the lane's earlier declaration:
+    // a reconnect is not a retraction (only an explicit false withdraws it).
+    // From review: a SECOND lane of the same seat claiming surfaces:true
+    // would otherwise be settled by bind order, the one tiebreak the card
+    // rules out. So it is REFUSED as a conflict: the lane still registers and
+    // receives, its claim is not recorded, and the holder is named so the
+    // caller can say so loudly.
+    let surfacesConflict = null;
+    if (surfaces === true) {
+      const group = author ?? seatAuthor.get(seatId) ?? seatId;
+      for (const [other, v] of seatSurfaces) {
+        if (other !== seatId && v === true && seatToSession.has(other) && (seatAuthor.get(other) ?? other) === group) { surfacesConflict = other; break; }
+      }
+    }
+    if (surfaces === false || (surfaces === true && !surfacesConflict)) seatSurfaces.set(seatId, surfaces);
     const epoch = ++epochCounter;
     seatEpoch.set(seatId, epoch);
-    return { ok: true, seatId, epoch, supersededSession: supersededSession === sessionId ? null : supersededSession };
+    return { ok: true, seatId, epoch, supersededSession: supersededSession === sessionId ? null : supersededSession, ...(surfacesConflict ? { surfacesConflict } : {}) };
   }
 
   /**

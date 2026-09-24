@@ -106,3 +106,21 @@ test('#1453b SEAM: in token-ring mode the seat\'s turn reaches its SURFACING lan
     assert.deepEqual([...st.ring.registered].sort(), ['xx.cs', 'xx.sb'], 'both lanes still registered (receive-set)');
   } finally { chatStream.close(); probeStream.close(); await p.stop(); }
 });
+
+test('#1453b review: a SECOND lane of the same seat declaring surfaces:true is NOT silently picked by bind order; it is refused as a conflict and stays undeclared', () => {
+  const r = createSeatRegistry();
+  const a = r.register({ seatId: 'x.sb', sessionId: 's1', author: 'x', surfaces: true });
+  assert.equal(a.ok, true);
+  const b = r.register({ seatId: 'x.sb2', sessionId: 's2', author: 'x', surfaces: true });
+  assert.equal(b.ok, true, 'the lane still registers (it still receives)');
+  assert.equal(b.surfacesConflict, 'x.sb', 'the conflict is named, so the caller can log it loudly');
+  assert.equal(r.surfacesForSeat('x.sb2'), null, 'the second declaration is not recorded');
+  assert.deepEqual(r.ringSeats(), ['x.sb'], 'the seat keeps its FIRST declared surfacing lane, and the conflict is reported, not decided by order silently');
+});
+
+test('#1453b review: a re-register of the same lane WITHOUT `surfaces` keeps its earlier declaration (a reconnect does not reset it)', () => {
+  const r = createSeatRegistry();
+  r.register({ seatId: 'x.sb', sessionId: 's1', author: 'x', surfaces: true });
+  r.register({ seatId: 'x.sb', sessionId: 's1b', author: 'x' });
+  assert.equal(r.surfacesForSeat('x.sb'), true);
+});
