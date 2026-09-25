@@ -1367,11 +1367,12 @@ let _graphModules = null;
 async function loadGraphModules() {
   if (_graphModules) return _graphModules;
   try {
-    const [replica, ready] = await Promise.all([
+    const [replica, ready, neighbors] = await Promise.all([
       import('./core/graph-replica.mjs'),
       import('./core/ready-query.mjs'),
+      import('./core/graph-neighbors.mjs'),   // #1484
     ]);
-    _graphModules = { ...replica, ...ready };
+    _graphModules = { ...replica, ...ready, graphNeighbors: neighbors.graphNeighbors };
     return _graphModules;
   } catch (e) {
     if (e?.code === 'ERR_MODULE_NOT_FOUND') {
@@ -1874,6 +1875,35 @@ async function handleGraphVocabulary(req, res) {
     if (e.code === 'GRAPH_DEPS_MISSING') return sendJSON(res, 503, { error: e.message, code: e.code });
     console.error('GET /api/graph/vocabulary:', e.message);
     sendJSON(res, 500, { error: 'Failed to measure vocabulary drift' });
+  }
+}
+
+// ── GET /api/graph/neighbors — #1484: "what's near me?" as one call, no SPARQL.
+// Same warm replica graph_query reads. An unknown node is a 404 that NAMES what
+// was tried, never an empty 200: a clean zero here would be #1104's trap again.
+async function handleGraphNeighbors(req, res) {
+  try {
+    const q = new URL(req.url, 'http://localhost').searchParams;
+    const node = q.get('node');
+    if (!node) return sendJSON(res, 400, { error: 'node is required: a card shortId, a full uuid, person:<key> or decision:<uuid>' });
+    const { graphNeighbors } = await loadGraphModules();
+    const { store, rebuiltMs, projectedThrough } = await warmGraphStore();
+    const predicates = q.get('predicates') ? q.get('predicates').split(',').map((x) => x.trim()).filter(Boolean) : null;
+    const result = graphNeighbors(store, {
+      node,
+      direction: q.get('direction') || 'both',
+      predicates,
+      limit: q.get('limit') ? Number(q.get('limit')) : undefined,
+      properties: q.get('properties') === 'all' ? 'all' : 'default',
+      includeHistory: q.get('includeHistory') === 'true' || q.get('includeHistory') === '1',
+    });
+    sendJSON(res, 200, { ...result, rebuiltMs: rebuiltMs ?? null, watermark: graphWatermark(projectedThrough) });
+  } catch (e) {
+    if (e.code === 'GRAPH_DEPS_MISSING') return sendJSON(res, 503, { error: e.message, code: e.code });
+    if (e.code === 'UNKNOWN_NODE') return sendJSON(res, 404, { error: e.message, code: e.code, tried: e.tried });
+    if (e.code === 'BAD_DIRECTION') return sendJSON(res, 400, { error: e.message, code: e.code });
+    console.error('GET /api/graph/neighbors:', e.message);
+    sendJSON(res, 500, { error: 'Failed to read neighbours' });
   }
 }
 
@@ -10042,6 +10072,7 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/graph$/,                fn: (req, res) => handleGraphQuery(req, res) },
   { method: 'POST',   re: /^\/api\/search$/,               fn: (req, res) => handleSearch(req, res) },
   { method: 'GET',    re: /^\/api\/graph\/vocabulary$/,    fn: (req, res) => handleGraphVocabulary(req, res) },   // #1104
+  { method: 'GET',    re: /^\/api\/graph\/neighbors$/,     fn: (req, res) => handleGraphNeighbors(req, res) },   // #1484
   { method: 'GET',    re: /^\/api\/ready$/,                fn: (req, res) => handleReady(req, res) },       // #815
   { method: 'GET',    re: /^\/api\/health$/,               fn: (req, res) => handleHealth(req, res) },      // #1404 — the door that costs nothing
   { method: 'GET',    re: /^\/api\/checks$/,               fn: (req, res) => handleChecks(req, res) },      // #792
