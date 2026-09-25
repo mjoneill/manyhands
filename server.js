@@ -10141,10 +10141,24 @@ async function handleCursorServed(req, res) {
     if (!key) return sendJSON(res, 400, { error: 'identity is required', code: 'NO_DELIVERY_IDENTITY' });
     if (!body.conversationId) return sendJSON(res, 400, { error: 'conversationId is required', code: 'NO_CONVERSATION' });
     const seq = seqOfEntityEvent(EVENT_LOG_DIR, { kind: 'conversation', id: String(body.conversationId), op: 'post' });
-    if (seq == null) return sendJSON(res, 200, { served: false, code: 'EVENT_NOT_FOUND', identity: key });
+    if (seq == null) return sendJSON(res, 200, { served: false, advanced: false, code: 'EVENT_NOT_FOUND', identity: key });
     const out = markServed(EVENT_LOG_DIR, key, { seq, via: body.via ?? null });
-    if (!out.known) return sendJSON(res, 200, { served: false, code: 'UNKNOWN_LANE', identity: key, seq });
-    sendJSON(res, 200, { served: out.served === seq, identity: key, seq, last_served_seq: out.served, last_acked_seq: out.acked });
+    if (!out.known) return sendJSON(res, 200, { served: false, advanced: false, code: 'UNKNOWN_LANE', identity: key, seq });
+    // #1460 — the cursor is a high-water mark: an event AT OR BELOW it is served,
+    // whether or not this call moved it. The old `served: out.served === seq`
+    // answered a codeless `false` for exactly those (the MCP host then logged
+    // "served NOT recorded … : undefined", 247 times in one day). Now: `served`
+    // says whether the event is covered, `advanced` says whether THIS call moved
+    // the cursor, and `code` names the cursor that already covered it.
+    const advanced = out.served === seq;
+    const coveredByAck = out.acked != null && seq <= out.acked;
+    const coveredByServed = out.served != null && seq <= out.served;
+    const served = advanced || coveredByServed || coveredByAck;
+    // NOT_ADVANCED is DEFENSIVE: recordServed's Math.max and its ack guard mean
+    // a mark either advances or is covered, so no test reaches it today. It
+    // exists so that if the store's rule ever changes, a false still has a code.
+    const code = advanced ? undefined : coveredByAck ? 'ALREADY_ACKED' : coveredByServed ? 'ALREADY_PAST' : 'NOT_ADVANCED';
+    sendJSON(res, 200, { served, advanced, ...(code ? { code } : {}), identity: key, seq, last_served_seq: out.served, last_acked_seq: out.acked });
   } catch (e) {
     console.error('POST /api/cursors/served:', e.message);
     sendJSON(res, 500, { error: 'Failed to record served' });
