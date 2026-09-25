@@ -2175,6 +2175,38 @@ function buildMcpServer() {
     return jsonResult(await apiCall('POST', '/api/graph', { query, limit, by }));
   });
 
+  // ── #1484 — graph_neighbors: "what's near me?" as ONE call, no SPARQL ──
+  mcp.registerTool('graph_neighbors', {
+    description: 'What is connected to one node, in ONE call and without SPARQL (#1484). '
+      + 'Give it a node you can NAME: a card shortId ("857", digits only, never a prefix), a full uuid '
+      + '(a post, memory or card, optionally "entity:<uuid>"), "person:<key>", or "decision:<full uuid>". '
+      + 'Returns `edges` grouped by predicate AND direction (out = this node points at it; in = it points '
+      + 'at this node, which is where backlinks live), every neighbour LABELLED (#N title for a card, '
+      + '"author: first words" for a post), with `total` and `truncated` per group (default 10 members, '
+      + 'max 100: a group whose size equals the limit was CUT, and says so). Literal values are '
+      + '`properties` (name and identifier by default; properties:"all" for the rest), rdf:type is `kinds`, '
+      + 'and write history (prov:*) is collapsed into `history {count, latest}` unless includeHistory. '
+      + 'An unknown node REFUSES naming what it tried, so an empty answer always means a real node with no '
+      + 'edges, never a misspelled id. Same live replica graph_query reads. For anything shaped '
+      + 'differently (paths, counts, filters), use graph_query.',
+    inputSchema: {
+      node: z.string().min(1).describe('Card shortId (digits), full uuid, person:<key>, or decision:<full uuid>'),
+      direction: z.enum(['in', 'out', 'both']).optional().describe('Default both'),
+      predicates: z.array(z.string()).optional().describe('Only these prefixed predicates, e.g. ["scrum:relatedTo"]'),
+      limit: z.number().int().min(1).max(100).optional().describe('Members per group (default 10)'),
+      properties: z.enum(['default', 'all']).optional().describe('Literal properties to include (default: name and identifier)'),
+      includeHistory: z.boolean().optional().describe('Return prov:* write history as edge groups instead of a count'),
+    },
+  }, async ({ node, direction, predicates, limit, properties, includeHistory } = {}) => {
+    const q = new URLSearchParams({ node });
+    if (direction) q.set('direction', direction);
+    if (predicates?.length) q.set('predicates', predicates.join(','));
+    if (limit) q.set('limit', String(limit));
+    if (properties) q.set('properties', properties);
+    if (includeHistory) q.set('includeHistory', 'true');
+    return jsonResult(await apiCall('GET', `/api/graph/neighbors?${q}`));
+  });
+
   // ── #815 — board_ready: the computed work queue ───────────────────
   mcp.registerTool('board_ready', {
     description: 'The computed work queue — cards that are UNBLOCKED (no blockedBy edge to a '
