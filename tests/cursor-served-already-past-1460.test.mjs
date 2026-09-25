@@ -66,10 +66,11 @@ test('#1460 an event the lane already ACKED is served too, with its own code', a
   });
 });
 
-test('#1460 the real failures still say served:false WITH a code — nothing became silently true', async () => {
+test('#1460 a missing event still answers served:false WITH a code, and every answer carries `advanced`', async () => {
   await withLane(async ({ base, identity }) => {
     const missing = await mark(base, identity, 'no-such-conversation');
     assert.equal(missing.body.served, false);
     assert.equal(missing.body.code, 'EVENT_NOT_FOUND');
+    assert.equal(missing.body.advanced, false, 'one response shape on every path');
   });
 });
