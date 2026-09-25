@@ -1743,21 +1743,17 @@ function graphWatermark(projectedThrough) {
 // card is re-embedded only when its text hash changes, at most SEARCH_MAX_EMBED
 // per call) and every answer carries `coverage`, so a partial index reads as
 // partial rather than as "found nothing".
-async function handleSearch(req, res) {
-  try {
-    const body = JSON.parse(await readBody(req));
-    const q = typeof body.q === 'string' ? body.q.trim() : '';
-    if (!q) return sendJSON(res, 400, { error: 'body.q (the question, in your own words) is required' });
-    const S = await loadSearchModule();
-    const k = Number.isInteger(body.k) && body.k > 0 ? Math.min(body.k, 50) : S.DEFAULTS.k;
-    const thresholds = { abstainBelow: SEARCH_ABSTAIN_BELOW, askWithin: SEARCH_ASK_WITHIN };
-    if (!SEARCH_EMBED_URL || !SEARCH_EMBED_MODEL) {
-      return sendJSON(res, 200, {
-        available: false,
-        reason: 'no embedder is configured on this server — set SEARCH_EMBED_URL (an Ollama-shaped /api/embed) and SEARCH_EMBED_MODEL. Nothing was searched.',
-        ...thresholds, k,
-      });
-    }
+// #1485 — the dense card ranking, shared by board_search and search_all. It
+// returns what the old handler computed inline; every early exit is an
+// `available:false` with its reason, exactly as board_search reported it.
+async function denseCardSearch(q, k, S, thresholds) {
+  if (!SEARCH_EMBED_URL || !SEARCH_EMBED_MODEL) {
+    return {
+      available: false,
+      reason: 'no embedder is configured on this server — set SEARCH_EMBED_URL (an Ollama-shaped /api/embed) and SEARCH_EMBED_MODEL. Nothing was searched.',
+      ...thresholds, k,
+    };
+  }
     const data = readBoard();
     const cards = data.cards.filter((c) => c && c.id);
     // Load the index under the model this server runs; a different generation
@@ -1767,7 +1763,7 @@ async function handleSearch(req, res) {
       const text = fs.existsSync(SEARCH_INDEX_FILE) ? fs.readFileSync(SEARCH_INDEX_FILE, 'utf8') : '';
       index = S.parseIndex(text, { model: SEARCH_EMBED_MODEL, dims: null });
     } catch (e) {
-      return sendJSON(res, 200, { available: false, reason: e.message, ...thresholds, k });
+      return { available: false, reason: e.message, ...thresholds, k };
     }
     const plan = S.planIndexUpdate(cards, index.rows, { maxEmbed: SEARCH_MAX_EMBED, maxEmbedChars: SEARCH_MAX_EMBED_CHARS });
     // ONE embedder call: the query first, then this batch of changed cards.
@@ -1775,13 +1771,13 @@ async function handleSearch(req, res) {
     try {
       vectors = await embedTexts([q, ...plan.toEmbed.map((t) => t.text)]);
     } catch (e) {
-      return sendJSON(res, 200, { available: false, reason: `embedder unavailable — ${e.message}. Nothing was searched.`, ...thresholds, k });
+      return { available: false, reason: `embedder unavailable — ${e.message}. Nothing was searched.`, ...thresholds, k };
     }
     const [qv, ...cardVecs] = vectors;
     const dims = qv.length;
     const generation = index.generation ?? { model: SEARCH_EMBED_MODEL, dims, textShape: S.TEXT_SHAPE, builtAt: new Date().toISOString() };
     if (generation.dims !== dims) {
-      return sendJSON(res, 200, { available: false, reason: `search index: generation mismatch — file is ${generation.model}/${generation.dims}, the embedder now returns ${dims} dimensions. Delete ${SEARCH_INDEX_FILE} to rebuild.`, ...thresholds, k });
+      return { available: false, reason: `search index: generation mismatch — file is ${generation.model}/${generation.dims}, the embedder now returns ${dims} dimensions. Delete ${SEARCH_INDEX_FILE} to rebuild.`, ...thresholds, k };
     }
     const fresh = plan.toEmbed.map((t, i) => ({ id: t.id, hash: t.hash, vec: cardVecs[i] }));
     const rows = [...plan.keep, ...fresh];
@@ -1796,6 +1792,20 @@ async function handleSearch(req, res) {
       const c = byId.get(r.id);
       return { id: r.id, shortId: c?.shortId ?? null, title: c?.title ?? null, column: c?.column ?? null, score: Math.round(r.score * 1000) / 1000 };
     });
+    return { available: true, S, ranked, results, coverage, partial, generation, byId, cards };
+}
+
+async function handleSearch(req, res) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const q = typeof body.q === 'string' ? body.q.trim() : '';
+    if (!q) return sendJSON(res, 400, { error: 'body.q (the question, in your own words) is required' });
+    const S = await loadSearchModule();
+    const k = Number.isInteger(body.k) && body.k > 0 ? Math.min(body.k, 50) : S.DEFAULTS.k;
+    const thresholds = { abstainBelow: SEARCH_ABSTAIN_BELOW, askWithin: SEARCH_ASK_WITHIN };
+    const dense = await denseCardSearch(q, k, S, thresholds);
+    if (!dense.available) return sendJSON(res, 200, dense);
+    const { ranked, results, coverage, partial, generation, byId } = dense;
     const d = S.decide(ranked, thresholds);
     const pick = (r) => (r ? results.find((x) => x.id === r.id) ?? null : null);
     // #1086 slice 2 — the reader, on request. Its verdict sits BESIDE the
@@ -1864,6 +1874,85 @@ async function handleSearch(req, res) {
 // the same sync every query gets), so the number is about production, not a
 // fixture. `undeclared` non-empty means the dictionary fell behind the
 // projection and the guard is worse than no guard until someone adds the term.
+// ── POST /api/search/all — #1485: "have we said anything about X, anywhere?"
+// Cards (dense, board_search's own index), posts and decisions (BM25) in ONE
+// call, each surface ranked by itself — scores are never fused — and a
+// coverage line per surface naming its method and how much it searched. A
+// surface that cannot answer says `searched: 0` with the reason, never
+// "0 hits": a partial look reported as a clean zero is the false negative
+// this card was filed about. Talks are excluded until the owner rules (P9).
+let _crossSearch = null;
+async function loadCrossSearch() {
+  if (!_crossSearch) _crossSearch = await import('./core/cross-search.mjs');
+  return _crossSearch;
+}
+async function handleSearchAll(req, res) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const q = typeof body.q === 'string' ? body.q.trim() : '';
+    if (!q) return sendJSON(res, 400, { error: 'body.q (the question, in your own words) is required' });
+    const k = Number.isInteger(body.k) && body.k > 0 ? Math.min(body.k, 50) : 8;
+    const X = await loadCrossSearch();
+    const asOf = new Date().toISOString();
+    const data = readBoard();
+    const shortOf = new Map((data.cards || []).map((c) => [c.id, c.shortId]));
+
+    // Posts — BM25 by scan over this read of the board: no index held, so
+    // nothing to sync and nothing stale (see core/cross-search.mjs for why).
+    const t0 = performance.now();
+    const conversations = Array.isArray(data.conversations) ? data.conversations : [];
+    const scanned = X.scanRank(conversations, q, { k });
+    const scanMs = Math.round(performance.now() - t0);
+    const postHits = scanned.hits.map(({ id, score, item: c }) => ({
+      id: `entity:${id}`, score, author: c.author ?? null, dateCreated: c.createdAt ?? null,
+      about: c.attachedTo ? (shortOf.get(c.attachedTo) ?? c.attachedTo) : null,
+      snippet: X.snippet(c.body, q),
+    }));
+
+    // Decisions — few enough to rank fresh. The same source GET /api/decisions
+    // reads (the graph's live set), so a ruling the list shows is one this finds.
+    let wires = [];
+    let decisionError = null;
+    try { wires = (await liveDecisions()).map(decisionToWire); } catch (e) { decisionError = e.message; }
+    const decisionHits = X.rankDecisions(wires, q, k).map((h) => ({
+      id: `decision:${h.id}`, score: h.score, decidedAt: h.decision?.decidedAt ?? null,
+      live: h.decision?.live ?? null, snippet: X.snippet(h.decision?.statement, q),
+    }));
+
+    // Cards — board_search's dense path, unchanged.
+    let cardHits = [];
+    let cardCoverage;
+    try {
+      const S = await loadSearchModule();
+      const dense = await denseCardSearch(q, k, S, { abstainBelow: SEARCH_ABSTAIN_BELOW, askWithin: SEARCH_ASK_WITHIN });
+      if (dense.available) {
+        cardHits = dense.results.map((r) => ({ id: String(r.shortId ?? r.id), score: r.score, title: r.title, column: r.column }));
+        cardCoverage = { method: 'dense', model: SEARCH_EMBED_MODEL, searched: dense.coverage.indexed, total: dense.coverage.total, stale: dense.coverage.stale };
+      } else {
+        cardCoverage = { method: 'dense', searched: 0, total: (data.cards || []).length, error: dense.reason };
+      }
+    } catch (e) {
+      cardCoverage = { method: 'dense', searched: 0, total: (data.cards || []).length, error: e.message };
+    }
+
+    sendJSON(res, 200, {
+      q, k, asOf,
+      cards: { hits: cardHits },
+      posts: { hits: postHits },
+      decisions: { hits: decisionHits },
+      coverage: {
+        cards: cardCoverage,
+        posts: { method: 'bm25-scan', searched: scanned.searched, total: conversations.length, excludedTalks: scanned.excluded, ms: scanMs },
+        decisions: decisionError ? { method: 'bm25-scan', searched: 0, error: decisionError } : { method: 'bm25-scan', searched: wires.length, total: wires.length },
+      },
+      means: 'Each surface is ranked by its own method; scores are NOT comparable across surfaces. `searched: 0` with an `error` means that surface was NOT searched — never read it as "nothing found". Talk posts are excluded (counted in excludedTalks). Every hit id is in graph_neighbors\' grammar.',
+    });
+  } catch (e) {
+    console.error('POST /api/search/all:', e.message);
+    sendJSON(res, 500, { error: 'Failed to search' });
+  }
+}
+
 async function handleGraphVocabulary(req, res) {
   try {
     const { vocabularyDrift } = await loadGraphModules();
@@ -10040,6 +10129,7 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/cursors\/inbound$/,     fn: (req, res) => handleCursorInbound(req, res) },
   { method: 'POST',   re: /^\/api\/cursors\/served$/,      fn: (req, res) => handleCursorServed(req, res) },
   { method: 'POST',   re: /^\/api\/graph$/,                fn: (req, res) => handleGraphQuery(req, res) },
+  { method: 'POST',   re: /^\/api\/search\/all$/,           fn: (req, res) => handleSearchAll(req, res) },   // #1485
   { method: 'POST',   re: /^\/api\/search$/,               fn: (req, res) => handleSearch(req, res) },
   { method: 'GET',    re: /^\/api\/graph\/vocabulary$/,    fn: (req, res) => handleGraphVocabulary(req, res) },   // #1104
   { method: 'GET',    re: /^\/api\/ready$/,                fn: (req, res) => handleReady(req, res) },       // #815
