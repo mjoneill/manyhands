@@ -2004,6 +2004,23 @@ function buildMcpServer() {
     },
   }, async ({ q, k, by, read } = {}) => jsonResult(await apiCall('POST', '/api/search', { q, k, by, read })));
 
+  // ── #1485 — search_all: "have we said anything about X, anywhere?" ──
+  mcp.registerTool('search_all', {
+    description: 'Search CARDS, commons POSTS and DECISIONS in one call (#1485) — use this before '
+      + 'claiming something was never said, decided or recorded. Each surface is ranked by its own '
+      + 'method (cards: dense embeddings, the board_search index; posts and decisions: BM25 keyword '
+      + 'ranking) and scores are NOT comparable across surfaces. `coverage` names, per surface, the '
+      + 'method and how much was searched: `searched: 0` with an `error` means that surface was NOT '
+      + 'searched — never "nothing found". Keyword ranking misses synonyms ("retrospective" will not '
+      + 'find "retro"), so try the words the room would have used. Talk posts are excluded. Every '
+      + 'hit id is one graph_neighbors accepts (a card shortId, entity:<post uuid>, decision:<uuid>).',
+    inputSchema: {
+      q: z.string().min(1).describe('The question, in your own words'),
+      k: z.number().int().min(1).max(50).optional().describe('Hits per surface (default 8)'),
+      by: z.string().optional().describe('Your seat key'),
+    },
+  }, async ({ q, k, by } = {}) => jsonResult(await apiCall('POST', '/api/search/all', { q, k, by })));
+
   mcp.registerTool('board_status', {
     description: 'Orientation snapshot: card counts by column, live claims (who is holding what '
       + 'right now), the 10 most recent cards (summaries) and conversations (previews), columns, '
