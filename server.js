@@ -3040,7 +3040,7 @@ function handleListKinds(req, res) {
 // Option D bought. Derived predicates refuse with their own registered
 // definition quoted: the registry constrains use, not just spelling.
 
-const DERIVED_ASSERT_PREDICATES = new Set(['scrum:mentionsCard']);
+const DERIVED_ASSERT_PREDICATES = new Set(['scrum:mentionsCard', 'scrum:postMentionsCard']);   // #1483 — the post sibling is derived too
 
 async function handleAssert(req, res) {
   try {

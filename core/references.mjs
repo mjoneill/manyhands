@@ -101,3 +101,36 @@ export function deriveCardReferences(node, shortToId) {
   }
   return targets.length > 0 ? targets : null;
 }
+
+/**
+ * #1483 — the same derived reference, from a POST's text, on a SIBLING
+ * predicate.
+ *
+ * ⛔ NOT `MENTIONS_CARD`. That predicate's lived population is card→card (9,151
+ * edges, zero with a non-card subject, measured 2026-09-25), and the documented
+ * closure walks it in both directions. A post on it would bridge every pair of
+ * cards it names, and every existing closure and isolation query would return a
+ * different number without erroring. Decided on #1483 by its reader. A consumer
+ * who wants both corpora asks `scrum:mentionsCard|scrum:postMentionsCard`.
+ */
+export const POST_MENTIONS_CARD = 'scrum:postMentionsCard';
+
+/**
+ * The derived edges for one post, as target card @ids, or `null` when there
+ * are none. Same rules as `deriveCardReferences`: deduplicated, and a `#NNN`
+ * naming no card is dropped (a dangling pointer is not a connection). No self
+ * case: a post is never a card.
+ *
+ * @param {object} message  a Comment entity (only `text` is read)
+ * @param {Map<string|number,string>} shortToId  shortId → card @id
+ */
+export function derivePostReferences(message, shortToId) {
+  const refs = parseCardRefs(message?.text);
+  if (refs.length === 0) return null;
+  const targets = [];
+  for (const short of refs) {
+    const id = shortToId.get(short) ?? shortToId.get(Number(short));
+    if (id !== undefined) targets.push(id);
+  }
+  return targets.length > 0 ? targets : null;
+}

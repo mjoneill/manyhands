@@ -240,6 +240,7 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:dependent': 'dependentSeats',
   'scrum:endedBy': 'dependentSeats',
   'scrum:mentionsCard': 'scrum:mentionsCard',   // derived at projection (#656), stored in the document
+  'scrum:postMentionsCard': 'scrum:postMentionsCard',   // #1483 — post → card, derived at projection, stored in the document, dropped on load
   'scrum:blocks': 'blockers',
   'scrum:blockedByCard': 'blockers',
   // #1041 — the card→card edge itself, and (new) the SAME predicate emitted from

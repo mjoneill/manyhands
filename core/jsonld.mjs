@@ -26,9 +26,9 @@
  * same graph. The strings on 12K existing records became edges by DECLARATION,
  * not by rewriting.
  */
-import { deriveCardReferences, MENTIONS_CARD } from './references.mjs';
+import { deriveCardReferences, MENTIONS_CARD, derivePostReferences, POST_MENTIONS_CARD } from './references.mjs';
 
-export { MENTIONS_CARD };
+export { MENTIONS_CARD, POST_MENTIONS_CARD };
 
 export const PERSON_IRI_BASE = 'https://scrumboard.local/person/';
 
@@ -96,6 +96,8 @@ const CONTEXT = {
   // #656 — DERIVED, weak, and namespaced away from `mentions` on purpose (see
   // core/references.mjs). "This card's text mentions that card" — nothing more.
   [MENTIONS_CARD]: { '@id': MENTIONS_CARD, '@type': '@id' },
+  // #1483 — the sibling: "this POST's text mentions that card". Derived, never stored back.
+  [POST_MENTIONS_CARD]: { '@id': POST_MENTIONS_CARD, '@type': '@id' },
   relatedTo: { '@id': 'scrum:relatedTo', '@type': '@id' },
   blockedBy: { '@id': 'scrum:blockedBy', '@type': '@id' },
   supersedes: { '@id': 'scrum:supersedes', '@type': '@id' },
@@ -256,6 +258,11 @@ function flatToCardNode(entity, idToShort) {
 // means a new class is a first-class citizen of @graph, not a sidecar file and
 // not a card facet.
 const isMessage = (entity) => entity && entity['@type'] === 'Comment';
+const stripPostReferences = (m) => {
+  if (!(POST_MENTIONS_CARD in m)) return m;
+  const { [POST_MENTIONS_CARD]: _derived, ...rest } = m;
+  return rest;
+};
 const isPerson = (entity) => entity && entity['@type'] === 'Person';
 const isColumn = (entity) => entity && entity['@type'] === 'scrum:Column';
 
@@ -435,7 +442,15 @@ export function domainToJsonLd(domain) {
   // citizens beside cards and messages.
   doc['@graph'] = [
     ...nodes.map((n) => cardNodeToFlat(n, shortToId)),
-    ...messages, ...people, ...columns.map(columnToNode),
+    // #1483 — a post's derived card references ride beside it, computed here
+    // for the same reason as #656's: serialization holds the whole graph, so a
+    // forward reference resolves on the save that creates the card, and the
+    // post's projected hash changes without the post being edited.
+    ...messages.map((m) => {
+      const refs = derivePostReferences(m, shortToId);
+      return refs ? { ...m, [POST_MENTIONS_CARD]: refs } : m;
+    }),
+    ...people, ...columns.map(columnToNode),
     ...tending,
     ...memories,
     ...decisions,
@@ -489,7 +504,9 @@ export function jsonLdToDomain(doc) {
     // `nodes`: nodes round-trip through nodeToCard and would surface them as
     // phantom cards in card_list. #685 — flat card entities re-nest their facet.
     nodes: cardEntities.map((e) => flatToCardNode(e, idToShort)),
-    messages: graph.filter(isMessage),
+    // ⛔ #1483 — the derived post edge is DROPPED on the way in, or it would be
+    // written back as a second copy of a derived fact and outlive its text.
+    messages: graph.filter(isMessage).map(stripPostReferences),
     ...meta,
   };
   // #687 — graph columns are the canonical location; a legacy document

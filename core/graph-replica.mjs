@@ -21,7 +21,7 @@
 import oxigraph from 'oxigraph';
 import { performance } from 'node:perf_hooks';
 import { createHash } from 'node:crypto';
-import { REL_TYPES, MENTIONS_CARD } from './jsonld.mjs';
+import { REL_TYPES, MENTIONS_CARD, POST_MENTIONS_CARD } from './jsonld.mjs';
 import { APEX_PREFIX } from './apex-labels.mjs';
 
 export const IRI = Object.freeze({
@@ -123,6 +123,7 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:ofPlaylist', 'scrum:evidencedBy', 'scrum:ofPrompt', 'scrum:order',
   'scrum:resolved', 'scrum:mentionsName', 'scrum:relatedTo', 'scrum:note',
   'scrum:status', 'scrum:blockedByPerson', 'scrum:blocks', 'scrum:mentionsCard',
+  'scrum:postMentionsCard',   // #1483 — derived post → card reference
   'scrum:label', 'scrum:implementedBy', 'scrum:priority', 'scrum:column',
   'scrum:dependsOn',   // #1471 — person → substrate card, stored on the card
   'scrum:dependent', 'scrum:endedBy',   // #1474 — on an ended scrum:DependencyRecord
@@ -313,6 +314,32 @@ export function buildGraphStore(doc) {
   const store = new oxigraph.Store();
   for (const e of doc['@graph'] || []) projectEntity(store, e);
   projectLabelAliases(store, doc._labelAliases);
+  return store;
+}
+
+/**
+ * #1483 — the kinship between the two derived-reference predicates, IN the
+ * graph rather than only in prose: postMentionsCard is a narrower
+ * mentionsCard (its subject is a post).
+ *
+ * ⛔ INERT BY DESIGN. The replica does no RDFS inference, so this triple
+ * documents the relation without pulling posts into mentionsCard's card↔card
+ * closure. tests/post-mentions-card-1483.test.mjs pins that: if inference is
+ * ever switched on, it goes red and the union gets chosen out loud.
+ * Emitted alongside the first post edge rather than unconditionally at build,
+ * so an empty document still projects an EMPTY store (#725's anti-vacuity
+ * pin, #899's structural-boundary pin). Idempotent: the store is a set. Its
+ * subject is the predicate, not an entity, so a sync that re-projects posts
+ * never sweeps it. ⚠️ It therefore outlives the last post edge if every one
+ * vanished, which is harmless (a true statement about the vocabulary) and is
+ * the only way a synced store can differ from a rebuild here.
+ */
+export function projectVocabularyKinship(store) {
+  store.add(oxigraph.triple(
+    nn(IRI.scrum + 'postMentionsCard'),
+    nn('http://www.w3.org/2000/01/rdf-schema#subPropertyOf'),
+    nn(IRI.scrum + 'mentionsCard'),
+  ));
   return store;
 }
 
@@ -1797,6 +1824,13 @@ function projectEntity(store, e) {
       if (e.dateCreated) add(s, nn(SC + 'dateCreated'), lit(e.dateCreated));
       if (e.text) add(s, nn(SC + 'text'), lit(e.text));
       for (const m of e.mentions || []) if (m) add(s, nn(S + 'mentionsName'), lit(m));
+      // #1483 — derived post → card references, on the SIBLING predicate so the
+      // card↔card closure contract of mentionsCard is untouched.
+      let anyPostRef = false;
+      for (const r of e[POST_MENTIONS_CARD] || []) {
+        if (typeof r === 'string' && r) { add(s, nn(S + 'postMentionsCard'), nn(E + r)); anyPostRef = true; }
+      }
+      if (anyPostRef) projectVocabularyKinship(store);
     } else if (t === 'Person') {
       const s = nn(e['@id']);
       add(s, A, nn(SC + 'Person'));
