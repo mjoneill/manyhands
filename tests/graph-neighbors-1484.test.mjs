@@ -122,6 +122,31 @@ test('#1484 write history (prov:*) is COLLAPSED by default, and opt-in returns i
   assert.ok(withHist.edges.some((g) => g.predicate.startsWith('prov:') && g.direction === 'in'), 'opt-in returns the writes as an in-group');
 });
 
+test('#1484 PINNED: digits that match no card NEVER resolve to a decision whose uuid starts with them', () => {
+  // The review's mutation (13:25Z): a digits fall-through to decision-prefix matching
+  // survived all 11 tests. This is the collision point 3 exists to prevent.
+  const s = buildGraphStore(domainToJsonLd({
+    nodes: [card('u-a', 1, 'alpha', '')],
+    messages: [], people: [], columns: [],
+    decisions: [{ '@type': 'scrum:Decision', '@id': 'https://scrumboard.local/decision/4567abcd-0000-4000-8000-000000000001',
+      identifier: '4567abcd-0000-4000-8000-000000000001', 'scrum:statement': 'a ruling', 'scrum:decidedBy': 'ada' }],
+  }));
+  assert.ok(graphNeighbors(s, { node: 'decision:4567abcd-0000-4000-8000-000000000001' }).exists, 'control: the decision IS reachable by its full id');
+  assert.throws(() => graphNeighbors(s, { node: '4567' }), (e) => e.code === 'UNKNOWN_NODE', 'digits must mean a card or refuse');
+});
+
+test('#1484 two cards sharing a shortId are reported AMBIGUOUS, naming both, not "no node answers"', () => {
+  const s = buildGraphStore(domainToJsonLd({ nodes: [card('u-a', 5, 'one', ''), card('u-b', 5, 'two', '')], messages: [], people: [], columns: [] }));
+  assert.throws(() => graphNeighbors(s, { node: '5' }), (e) => e.code === 'AMBIGUOUS_NODE' && e.candidates.length === 2);
+});
+
+test('#1484 an explicit prov:* predicate filter returns those edges instead of silently collapsing them', () => {
+  const s = store();
+  projectActivities(s, [{ seq: 1, recorded_at: '2026-09-25T10:00:00.000Z', occurred_at: '2026-09-25T10:00:00.000Z', actor: 'ada', op: 'update', entity: { kind: 'card', id: 'u-a' }, state: { id: 'u-a' } }]);
+  const r = graphNeighbors(s, { node: '1', predicates: ['prov:used'] });
+  assert.ok(r.edges.some((g) => g.predicate === 'prov:used'), `asked for prov:used by name: ${JSON.stringify(r.edges)}`);
+});
+
 // ── the seam: called the way a seat calls it, through MCP → REST → replica ──
 import { startRestServer, startMcpServer, mcpSession, makeBoardFixture } from './helpers/harness.mjs';
 

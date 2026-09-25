@@ -56,6 +56,12 @@ export function resolveNode(store, node) {
       .map((q) => q.subject.value)
       .filter((s) => store.match(nn(s), nn(RDF_TYPE), nn(IRI.schema + 'CreativeWork')).length > 0);
     if (hits.length === 1) return hits[0];
+    if (hits.length > 1) {
+      throw Object.assign(
+        new Error(`card #${raw} is AMBIGUOUS: ${hits.length} cards carry that identifier (${hits.map(shorten).join(', ')}). Ask by full uuid.`),
+        { code: 'AMBIGUOUS_NODE', candidates: hits.map(shorten) },
+      );
+    }
     throw unknown(raw, [`card #${raw}`]);
   }
   const tried = [];
@@ -128,7 +134,9 @@ export function graphNeighbors(store, opts = {}) {
   const push = (dir, pred, other) => {
     const short = shorten(pred);
     if (wantPred && !wantPred.has(short)) return;
-    if (!includeHistory && isHistory(pred)) {
+    // An explicit prov:* filter is a request to SEE those edges: honour it rather
+    // than answer a named predicate with an empty edge list and a count.
+    if (!includeHistory && isHistory(pred) && !(wantPred && wantPred.has(short))) {
       history.count += 1;
       return;
     }
@@ -152,7 +160,7 @@ export function graphNeighbors(store, opts = {}) {
     for (const q of store.match(null, null, nn(iri))) push('in', q.predicate.value, q.subject.value);
   }
   if (!includeHistory && history.count) {
-    // latest = the history-bearing neighbour with the greatest prov:atTime / dateCreated literal
+    // latest = the history-bearing neighbour with the greatest prov:startedAtTime / dateCreated literal
     let best = null;
     for (const q of store.match(null, null, nn(iri))) {
       if (!isHistory(q.predicate.value)) continue;

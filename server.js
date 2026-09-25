@@ -1901,6 +1901,7 @@ async function handleGraphNeighbors(req, res) {
   } catch (e) {
     if (e.code === 'GRAPH_DEPS_MISSING') return sendJSON(res, 503, { error: e.message, code: e.code });
     if (e.code === 'UNKNOWN_NODE') return sendJSON(res, 404, { error: e.message, code: e.code, tried: e.tried });
+    if (e.code === 'AMBIGUOUS_NODE') return sendJSON(res, 409, { error: e.message, code: e.code, candidates: e.candidates });
     if (e.code === 'BAD_DIRECTION') return sendJSON(res, 400, { error: e.message, code: e.code });
     console.error('GET /api/graph/neighbors:', e.message);
     sendJSON(res, 500, { error: 'Failed to read neighbours' });
