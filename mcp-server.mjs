@@ -2012,7 +2012,7 @@ function buildMcpServer() {
       + 'ranking) and scores are NOT comparable across surfaces. `coverage` names, per surface, the '
       + 'method and how much was searched: `searched: 0` with an `error` means that surface was NOT '
       + 'searched — never "nothing found". Keyword ranking misses synonyms ("retrospective" will not '
-      + 'find "retro"), so try the words the room would have used. Talk posts are excluded. Every '
+      + 'find "retro"), so try the words the room would have used. Talk posts are included (a hit in a talk carries `talk`). Every '
       + 'hit id is one graph_neighbors accepts (a card shortId, entity:<post uuid>, decision:<uuid>).',
     inputSchema: {
       q: z.string().min(1).describe('The question, in your own words'),

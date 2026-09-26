@@ -52,11 +52,11 @@ test('#1485 matching is substring: a short date finds the long one, and "retro" 
   assert.deepEqual(ids(scanRank(ps, 'retrospective')), ['p2'], 'the named synonym gap, pinned so a fix is visible');
 });
 
-test('#1485 a post in a TALK is excluded by default and COUNTED as excluded (#1457 P9: the owner decides who sees Talks)', () => {
-  const r = scanRank([post('p1', 'canary in the room'), post('t1', 'canary in a talk', { 'scrum:conversation': 'talk-1' })], 'canary');
-  assert.deepEqual(ids(r), ['p1']);
-  assert.equal(r.excluded, 1, 'the coverage line must say a talk was skipped, not pretend it was searched');
-  assert.equal(r.searched, 1);
+test('#1491 a post in a TALK is searched like any other — a talk is room-visible by design, not a wall', () => {
+  const r = scanRank([post('p1', 'canary in the room'), post('t1', 'canary canary in a talk', { 'scrum:conversation': 'talk-1' })], 'canary');
+  assert.deepEqual(ids(r), ['t1', 'p1'], 'the talk post is found, and ranks on its own terms');
+  assert.equal(r.searched, 2, 'both posts were searched; nothing is held back');
+  assert.deepEqual(scanRank([post('t1', 'canary', { conversation: 'talk-1' })], 'zzzz').hits, [], 'NEGATIVE CONTROL: a talk post still has to match');
 });
 
 test('#1485 decisions rank lexically over their statement', () => {
@@ -80,6 +80,7 @@ const board = () => makeBoardFixture({
   conversations: [
     { id: 'm-1', body: 'RETRO — sprint 2026-09-17→09-24, opening now', author: 'kit', attachedTo: 'uuid-1', createdAt: '2026-09-21T16:10:55.000Z', mentions: [] },
     { id: 'm-2', body: 'unrelated chatter about lunch', author: 'kit', attachedTo: null, createdAt: '2026-09-21T17:00:00.000Z', mentions: [] },
+    { id: 'm-3', body: 'grooming the heron backlog in a talk', author: 'kit', attachedTo: null, createdAt: '2026-09-21T18:00:00.000Z', mentions: [], conversation: 'talk-9' },
   ],
   nextShortId: 2,
 });
@@ -101,7 +102,7 @@ test('#1485 ⭐ the case that made the card: the retro POST is found, and covera
     assert.equal(posts.hits[0].about, 1, 'the card the post sits on, as a shortId');
     assert.match(posts.hits[0].snippet, /RETRO/);
     assert.equal(coverage.posts.method, 'bm25-scan');
-    assert.equal(coverage.posts.searched, 2);
+    assert.equal(coverage.posts.searched, 3, 'the talk post is searched too (#1491)');
     assert.equal(coverage.decisions.method, 'bm25-scan');
     assert.equal(coverage.decisions.searched, 1);
     // No embedder configured in this harness: cards must say UNSEARCHED, never "0 hits".
@@ -146,4 +147,18 @@ test('#1485 SEAM: the MCP search_all tool reaches the same answer through REST',
     assert.equal(body.posts.hits[0].id, 'entity:m-1');
     assert.equal(body.coverage.posts.method, 'bm25-scan');
   } finally { await mcp.stop(); await rest.stop(); }
+});
+
+test('#1491 SERVED: a hit inside a talk is found over REST and names its talk; a room post carries no talk', async () => {
+  const s = await startRestServer({ board: board() });
+  try {
+    const r = await searchAll(s.baseUrl, { q: 'heron grooming' });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.deepEqual(r.body.posts.hits.map((h) => h.id), ['entity:m-3']);
+    assert.equal(r.body.posts.hits[0].talk, 'talk-9', 'the reader can see which view the post lives in');
+    assert.equal(r.body.coverage.posts.excludedTalks, undefined, 'nothing is excluded, so nothing is counted as excluded');
+    const room = await searchAll(s.baseUrl, { q: 'retro sprint' });
+    assert.equal(room.body.posts.hits[0].id, 'entity:m-1');
+    assert.equal(room.body.posts.hits[0].talk, undefined, 'a room post names no talk');
+  } finally { await s.stop(); }
 });

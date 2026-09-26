@@ -52,7 +52,6 @@ const B = 0.75;
 // conversation (core/mapping.mjs maps one onto the other).
 const textOf = (m) => (m ? (m.text ?? m.body) : null);
 const idOf = (m) => m['@id'] ?? m.id;
-const isTalk = (m) => Boolean(m['scrum:conversation'] ?? m.conversation);
 const escape = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /**
@@ -73,16 +72,11 @@ const escape = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
  */
 export function scanRank(items, q, { k = 10 } = {}) {
   const terms = [...new Set(tokenize(q))];
-  let excluded = 0;
-  const docs = [];
-  for (const m of items || []) {
-    const text = textOf(m);
-    if (typeof text !== 'string' || !idOf(m)) continue;
-    if (isTalk(m)) { excluded += 1; continue; }
-    docs.push(m);
-  }
+  // Talk posts are searched like any other: a talk is room-visible by design,
+  // a filter for the human's scrolling, not a wall (the owner, 2026-09-26, #1491).
+  const docs = (items || []).filter((m) => typeof textOf(m) === 'string' && idOf(m));
   const N = docs.length;
-  if (!terms.length || !N) return { hits: [], searched: N, excluded };
+  if (!terms.length || !N) return { hits: [], searched: N };
   const res = terms.map((t) => new RegExp(escape(t), 'gi'));
   const df = new Array(terms.length).fill(0);
   let totalLen = 0;
@@ -110,7 +104,7 @@ export function scanRank(items, q, { k = 10 } = {}) {
   })
     .sort((a, b) => b.score - a.score || (String(a.id) < String(b.id) ? -1 : 1))
     .slice(0, k);
-  return { hits, searched: N, excluded };
+  return { hits, searched: N };
 }
 
 /** Decisions: the same scan over their statement. */

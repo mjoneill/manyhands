@@ -1881,7 +1881,8 @@ async function handleSearch(req, res) {
 // coverage line per surface naming its method and how much it searched. A
 // surface that cannot answer says `searched: 0` with the reason, never
 // "0 hits": a partial look reported as a clean zero is the false negative
-// this card was filed about. Talks are excluded until the owner rules (P9).
+// this card was filed about. Talk posts are searched too (#1491): a talk is
+// room-visible by design, and each hit names its talk.
 let _crossSearch = null;
 async function loadCrossSearch() {
   if (!_crossSearch) _crossSearch = await import('./core/cross-search.mjs');
@@ -1908,6 +1909,7 @@ async function handleSearchAll(req, res) {
       id: `entity:${id}`, score, author: c.author ?? null, dateCreated: c.createdAt ?? null,
       about: c.attachedTo ? (shortOf.get(c.attachedTo) ?? c.attachedTo) : null,
       snippet: X.snippet(c.body, q),
+      ...(c.conversation ? { talk: c.conversation } : {}),
     }));
 
     // Decisions — few enough to rank fresh. The same source GET /api/decisions
@@ -1943,10 +1945,10 @@ async function handleSearchAll(req, res) {
       decisions: { hits: decisionHits },
       coverage: {
         cards: cardCoverage,
-        posts: { method: 'bm25-scan', searched: scanned.searched, total: conversations.length, excludedTalks: scanned.excluded, ms: scanMs },
+        posts: { method: 'bm25-scan', searched: scanned.searched, total: conversations.length, ms: scanMs },
         decisions: decisionError ? { method: 'bm25-scan', searched: 0, error: decisionError } : { method: 'bm25-scan', searched: wires.length, total: wires.length },
       },
-      means: 'Each surface is ranked by its own method; scores are NOT comparable across surfaces. `searched: 0` with an `error` means that surface was NOT searched — never read it as "nothing found". Talk posts are excluded (counted in excludedTalks). Every hit id is in graph_neighbors\' grammar.',
+      means: 'Each surface is ranked by its own method; scores are NOT comparable across surfaces. `searched: 0` with an `error` means that surface was NOT searched — never read it as "nothing found". Talk posts are included; a hit inside a talk carries `talk`. Every hit id is in graph_neighbors\' grammar.',
     });
   } catch (e) {
     console.error('POST /api/search/all:', e.message);
