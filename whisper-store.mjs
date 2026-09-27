@@ -24,7 +24,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { claimWhisper, mintPrompt, windowAt, EMPTY_STATE, HOUR_MS } from './core/whisper-window.mjs';
-import { nextInOrder } from './core/tending-pool.mjs';
+import { nextInOrder, selectFromBag } from './core/tending-pool.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -204,7 +204,7 @@ export function recentWhispers(file = whisperStateFilePath()) {
  * whisper can be drawn and rejected afterwards — that failure would be
  * intermittent and read as a ghost.
  */
-function mintFromPool({ pool, now, periodMs, shuffle, rand, lastVersionId }) {
+function mintFromPool({ pool, now, periodMs, shuffle, rand, lastVersionId, bag = null }) {
   const window = windowAt(now, periodMs);
   const items = (Array.isArray(pool) ? pool : [])
     .map((p) => (typeof p === 'string'
@@ -213,7 +213,17 @@ function mintFromPool({ pool, now, periodMs, shuffle, rand, lastVersionId }) {
     .filter((p) => typeof p.body === 'string' && p.body.trim());
   if (items.length === 0) return null;
   let chosen;
-  if (shuffle) {
+  let cycle;
+  if (shuffle && bag && items.every((p) => p.versionId)) {
+    // #1384 — DEAL, don't draw: every active prompt once per cycle, in random
+    // order. The server hands us where the bag stands (derived from the stored
+    // cycle numbers on the mints); the cycle we pick in is recorded on the mint.
+    const pick = selectFromBag(items, bag, rand, lastVersionId);
+    chosen = pick?.entry ?? null;
+    cycle = pick?.cycle;
+  } else if (shuffle) {
+    // No bag (an older server) or legacy string entries with no prompt identity
+    // to deal by: the pre-#1384 uniform draw.
     chosen = items[Math.min(items.length - 1, Math.max(0, Math.floor(rand() * items.length)))];
   } else {
     // ⛔ NOT `floor(epoch_hour) % length` any more, and the reason is a defect
@@ -225,12 +235,12 @@ function mintFromPool({ pool, now, periodMs, shuffle, rand, lastVersionId }) {
     chosen = nextInOrder(items, lastVersionId);
   }
   if (!chosen) return null;
-  return { window, body: chosen.body, mintedAt: now, slug: chosen.slug, versionId: chosen.versionId };
+  return { window, body: chosen.body, mintedAt: now, slug: chosen.slug, versionId: chosen.versionId, ...(Number.isInteger(cycle) ? { cycle } : {}) };
 }
 
 export function mintOnce({
   now, file = whisperStateFilePath(), pool = null, periodMs = HOUR_MS,
-  shuffle = false, rand = Math.random, lastVersionId = null,
+  shuffle = false, rand = Math.random, lastVersionId = null, bag = null,
 }) {
   // ── critical section: no await from here to the write ──────────────────
   //
@@ -242,7 +252,7 @@ export function mintOnce({
   const window = windowAt(now, periodMs);
   const d = readRaw(file);
   if (d.lastMintedWindow === window) return null;
-  const prompt = mintFromPool({ pool: pool ?? readPool(), now, periodMs, shuffle, rand, lastVersionId });
+  const prompt = mintFromPool({ pool: pool ?? readPool(), now, periodMs, shuffle, rand, lastVersionId, bag });
   if (!prompt) return null;
   atomicWrite(file, { ...d, lastMintedWindow: window, lastMintedAt: now });
   // ── end critical section ───────────────────────────────────────────────

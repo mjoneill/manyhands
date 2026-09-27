@@ -2591,6 +2591,8 @@ const whisperTick = async () => {
       // The running position, derived from the last mint — so "in the order
       // below" resumes after the whisper that actually went out last.
       lastVersionId: graphPool?.lastVersionId ?? null,
+      // #1384 — where the shuffle-bag stands, so shuffle deals instead of draws.
+      bag: graphPool?.bag ?? null,
     }),
     post: (body) => apiCall('POST', '/api/conversations', body),
     // #1189 — every firing becomes a graph fact. Best-effort and AFTER the
@@ -2602,6 +2604,7 @@ const whisperTick = async () => {
       window: prompt?.window,
       mintedAt: prompt?.mintedAt,
       versionId: prompt?.versionId ?? null,
+      cycle: prompt?.cycle ?? null,
       reached: reached ?? [],
       by: 'board',
     }).catch((e) => console.error(`[#1189] firing not recorded in the graph: ${e?.message ?? e}`)),

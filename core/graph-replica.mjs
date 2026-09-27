@@ -120,6 +120,7 @@ export const GRAPH_VOCABULARY = new Set([
   // #1189 — the live tending writers. `clockWindow` is the CURRENT firing's
   // window; `legacyClockWindow` above is #805's import and stays distinct.
   'scrum:shuffle', 'scrum:clockWindow',
+  'scrum:tendingCycle',   // #1384 — the shuffle-bag cycle a firing was dealt in
   'scrum:ofPlaylist', 'scrum:evidencedBy', 'scrum:ofPrompt', 'scrum:order',
   'scrum:resolved', 'scrum:mentionsName', 'scrum:relatedTo', 'scrum:note',
   'scrum:status', 'scrum:blockedByPerson', 'scrum:blocks', 'scrum:mentionsCard',
@@ -679,6 +680,7 @@ export const TENDING_PREDICATES = Object.freeze({
   // one. Same shape, different provenance, and collapsing them would date every
   // new firing into the imported set.
   'scrum:clockWindow': 'literal',
+  'scrum:tendingCycle': 'literal',
   'scrum:legacyClockWindow': 'literal',
   'scrum:silenceSince': 'literal',
   'scrum:mintedAt': 'literal',
