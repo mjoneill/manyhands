@@ -101,6 +101,15 @@ export function cardRefHref(shortId, boardPath = 'index.html') {
 // ── safe-serve policy (mirrors index.html #113) ─────────────────────────────
 
 const INLINE_IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+// #1503 — audio the server serves inline (see EXT_TO_INLINE_TYPE in server.js).
+const INLINE_AUDIO_MIMES = new Set(['audio/wav', 'audio/x-wav', 'audio/mpeg', 'audio/ogg', 'audio/mp4']);
+
+/** #1503 — how an attachment renders: in place as an image or a player, or as a download. */
+export function attachmentKind(mime) {
+  if (INLINE_IMAGE_MIMES.has(mime)) return 'image';
+  if (INLINE_AUDIO_MIMES.has(mime)) return 'audio';
+  return 'file';
+}
 /**
  * Who the author picker offers when the caller doesn't name them explicitly.
  *
@@ -282,6 +291,24 @@ export function mountConversationView(opts = {}) {
 
   function attachmentNode(a) {
     const url = baseUrl + '/api/attachments/' + encodeURIComponent(a.id);
+    if (attachmentKind(a.mime) === 'audio') {
+      // #1503 — play in place; the download link stays beside it.
+      const wrap = doc.createElement('span');
+      wrap.className = 'cv-attach-audio';
+      const audio = doc.createElement('audio');
+      audio.controls = true;
+      audio.preload = 'none';
+      audio.src = url;
+      audio.title = a.name || 'audio';   // property assignment — no XSS
+      const link = doc.createElement('a');
+      link.className = 'cv-attach-link';
+      link.href = url;
+      link.download = a.name || 'audio';
+      link.textContent = '⬇ ' + (a.name || 'audio');   // textContent — no XSS
+      wrap.appendChild(audio);
+      wrap.appendChild(link);
+      return wrap;
+    }
     if (INLINE_IMAGE_MIMES.has(a.mime)) {
       const img = doc.createElement('img');
       img.className = 'cv-attach-img';

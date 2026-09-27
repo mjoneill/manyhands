@@ -459,11 +459,17 @@ const ATTACHMENT_ID_RE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9]+$/;
 // Only these render INLINE (served with their real image content-type). Anything
 // else is forced to download as octet-stream — which neutralises stored-XSS from
 // an html/svg/js upload regardless of what got stored.
-const EXT_TO_INLINE_TYPE = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' };
+const EXT_TO_INLINE_TYPE = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp',
+  // #1503 — audio plays in place. It cannot execute in our origin, so it doesn't
+  // reopen the stored-XSS door this list exists to keep shut.
+  wav: 'audio/wav', mp3: 'audio/mpeg', ogg: 'audio/ogg', m4a: 'audio/mp4',
+};
 const MIME_TO_EXT = {
   'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp',
   'application/pdf': 'pdf', 'text/plain': 'txt', 'text/markdown': 'md', 'text/csv': 'csv',
-  'application/json': 'json', 'application/zip': 'zip', 'audio/mpeg': 'mp3', 'audio/wav': 'wav', 'video/mp4': 'mp4',
+  'application/json': 'json', 'application/zip': 'zip', 'audio/mpeg': 'mp3', 'audio/wav': 'wav', 'audio/x-wav': 'wav',
+  'audio/ogg': 'ogg', 'audio/mp4': 'm4a', 'video/mp4': 'mp4',
 };
 // Blocked at upload (executables + browser-executable/script types).
 const BLOCKED_ATTACHMENT_EXT = new Set([
@@ -9826,12 +9832,30 @@ function serveAttachment(req, res, rawId) {
   }
   const ext = path.extname(id).toLowerCase().slice(1);
   const inlineType = EXT_TO_INLINE_TYPE[ext] || null;
-  const headers = { 'Content-Length': content.length, 'X-Content-Type-Options': 'nosniff' };
+  const headers = { 'Content-Length': content.length, 'X-Content-Type-Options': 'nosniff', 'Accept-Ranges': 'bytes' };
   if (inlineType) {
     headers['Content-Type'] = inlineType;
   } else {
     headers['Content-Type'] = 'application/octet-stream';
     headers['Content-Disposition'] = 'attachment';
+  }
+  // #1503 — a single byte range (RFC 9110). Safari will not play <audio> from a
+  // server that ignores Range, and seeking needs it everywhere.
+  const range = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range || '').trim());
+  // A range whose last byte precedes its first is invalid, not unsatisfiable:
+  // RFC 9110 says ignore the header and send the whole representation.
+  const invalid = range && range[1] !== '' && range[2] !== '' && Number(range[2]) < Number(range[1]);
+  if (range && !invalid && (range[1] !== '' || range[2] !== '')) {
+    const size = content.length;
+    let start, end;
+    if (range[1] === '') { start = Math.max(0, size - Number(range[2])); end = size - 1; }   // suffix: last N bytes
+    else { start = Number(range[1]); end = range[2] === '' ? size - 1 : Math.min(Number(range[2]), size - 1); }
+    if (!(start <= end) || start >= size) {
+      res.writeHead(416, { 'Content-Range': `bytes */${size}`, 'X-Content-Type-Options': 'nosniff' });
+      return res.end();
+    }
+    res.writeHead(206, { ...headers, 'Content-Length': end - start + 1, 'Content-Range': `bytes ${start}-${end}/${size}` });
+    return res.end(content.subarray(start, end + 1));
   }
   res.writeHead(200, headers);
   res.end(content);
