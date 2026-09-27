@@ -110,3 +110,23 @@ test('#1503 all three renderers draw an <audio controls> for audio, not only the
     assert.match(src, /\.controls\s*=\s*true/, `${page} gives the player controls`);
   }
 });
+
+test('#1503 a suffix Range (bytes=-N) returns exactly the LAST N bytes', async () => {
+  await withServer(async (rest) => {
+    const meta = await uploadWav(rest);
+    const whole = tinyWav();
+    const res = await fetch(`${rest.baseUrl}/api/attachments/${meta.id}`, { headers: { Range: 'bytes=-4' } });
+    assert.equal(res.status, 206);
+    assert.equal(res.headers.get('content-range'), `bytes ${whole.length - 4}-${whole.length - 1}/${whole.length}`);
+    assert.deepEqual(Buffer.from(await res.arrayBuffer()), whole.subarray(whole.length - 4));
+  });
+});
+
+test('#1503 an INVALID range (last byte before first) is ignored: 200 with the whole body, per RFC 9110', async () => {
+  await withServer(async (rest) => {
+    const meta = await uploadWav(rest);
+    const res = await fetch(`${rest.baseUrl}/api/attachments/${meta.id}`, { headers: { Range: 'bytes=5-3' } });
+    assert.equal(res.status, 200);
+    assert.deepEqual(Buffer.from(await res.arrayBuffer()), tinyWav());
+  });
+});

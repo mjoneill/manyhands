@@ -9842,7 +9842,10 @@ function serveAttachment(req, res, rawId) {
   // #1503 — a single byte range (RFC 9110). Safari will not play <audio> from a
   // server that ignores Range, and seeking needs it everywhere.
   const range = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range || '').trim());
-  if (range && (range[1] !== '' || range[2] !== '')) {
+  // A range whose last byte precedes its first is invalid, not unsatisfiable:
+  // RFC 9110 says ignore the header and send the whole representation.
+  const invalid = range && range[1] !== '' && range[2] !== '' && Number(range[2]) < Number(range[1]);
+  if (range && !invalid && (range[1] !== '' || range[2] !== '')) {
     const size = content.length;
     let start, end;
     if (range[1] === '') { start = Math.max(0, size - Number(range[2])); end = size - 1; }   // suffix: last N bytes
