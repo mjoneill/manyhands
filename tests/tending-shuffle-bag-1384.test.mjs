@@ -170,3 +170,17 @@ test('#1384 SEAM: GET /api/tending/whispers reports the bag, and a mint POSTed w
     assert.equal(Number(q.body.rows?.[0]?.n ?? q.body.results?.bindings?.[0]?.n?.value), 2, `the cycle is a queryable graph fact: ${JSON.stringify(q.body)}`);
   } finally { await srv.stop(); }
 });
+
+test('#1384 a STALE bag (every prompt already dealt) still never re-deals the prompt that just fired', () => {
+  // Unreachable while bag and pool come from one read (bagState rolls first),
+  // but a caller passing a stale bag must not get a back-to-back repeat.
+  const p = pool(3);
+  const staleBag = { cycle: 1, dealt: p.map((e) => e.promptId) };
+  // Fixed draws covering every index: a seeded LCG's FIRST value barely moves
+  // with the seed (0.23–0.28 for seeds 1–100), which let this test pass blind.
+  for (const r of [0, 0.34, 0.5, 0.67, 0.99]) {
+    const pick = selectFromBag(p, staleBag, () => r, p[1].versionId);
+    assert.equal(pick.cycle, 2, 'the roll-over opens the next cycle');
+    assert.notEqual(pick.entry.slug, 'p01', `draw ${r} re-dealt the prompt that just fired`);
+  }
+});

@@ -233,8 +233,11 @@ export function selectFromBag(pool = [], bag = { cycle: 1, dealt: [] }, rand, la
   const dealt = new Set(bag?.dealt ?? []);
   let cycle = Number.isInteger(bag?.cycle) && bag.cycle > 0 ? bag.cycle : 1;
   let eligible = pool.filter((p) => !dealt.has(promptIdOfVersion(String(p.versionId))));
-  if (eligible.length === 0) { eligible = pool.slice(); cycle += 1; }
-  if (dealt.size === 0 && lastVersionId && eligible.length > 1) {
+  // A stale bag (everything already dealt) rolls over here; the boundary guard
+  // below must cover that opening too, not only a bag that arrives empty.
+  const rolled = eligible.length === 0;
+  if (rolled) { eligible = pool.slice(); cycle += 1; }
+  if ((dealt.size === 0 || rolled) && lastVersionId && eligible.length > 1) {
     const last = promptIdOfVersion(String(lastVersionId));
     const other = eligible.filter((p) => promptIdOfVersion(String(p.versionId)) !== last);
     if (other.length > 0) eligible = other;
