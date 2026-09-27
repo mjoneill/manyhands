@@ -185,6 +185,65 @@ export function nextInOrder(pool = [], lastVersionId = null) {
 }
 
 /**
+ * #1384 — where the shuffle-bag stands, from the mint history.
+ *
+ * `mints` are `{ versionId, cycle }` (cycle absent on legacy mints). The
+ * current cycle is the highest recorded; its dealt set is the prompts that
+ * fired in it AND are still in the pool. Intersecting with the pool is what
+ * lets a cycle close after a prompt is disabled mid-cycle: a dealt set that
+ * waited for a prompt that can no longer fire would never complete.
+ *
+ * When the dealt set covers the pool, the answer is the NEXT cycle with
+ * nothing dealt. Mints without a cycle number (everything before the bag
+ * existed) are ignored, so the first bag firing opens cycle 1.
+ *
+ * ⛔ The cycle is STORED on the mint, not derived from a run of distinct
+ * prompts. The derivation was proposed and falsified in review (#1384,
+ * 2026-09-27): at every boundary it counted most of the previous cycle as
+ * already dealt.
+ */
+export function bagState(mints = [], pool = []) {
+  const numbered = (Array.isArray(mints) ? mints : [])
+    .filter((m) => m && Number.isInteger(m.cycle) && m.cycle > 0 && m.versionId);
+  if (numbered.length === 0) return { cycle: 1, dealt: [] };
+  const cycle = Math.max(...numbered.map((m) => m.cycle));
+  const inPool = new Set((Array.isArray(pool) ? pool : []).map((p) => promptIdOfVersion(String(p.versionId))));
+  const dealt = [...new Set(numbered
+    .filter((m) => m.cycle === cycle)
+    .map((m) => promptIdOfVersion(String(m.versionId)))
+    .filter((id) => inPool.has(id)))];
+  if (inPool.size > 0 && dealt.length >= inPool.size) return { cycle: cycle + 1, dealt: [] };
+  return { cycle, dealt };
+}
+
+/**
+ * #1384 — deal the next whisper from the bag: a random pick among the prompts
+ * not yet dealt this cycle. Returns `{ entry, cycle }`, or null for an empty pool.
+ *
+ * At the start of a cycle the last-fired prompt is excluded, so a cycle
+ * boundary never produces a back-to-back repeat. The exclusion YIELDS when it
+ * would leave nothing to pick (a pool of one): repeating is then the only
+ * honest answer, and a guard that refused would stop tending altogether.
+ */
+export function selectFromBag(pool = [], bag = { cycle: 1, dealt: [] }, rand, lastVersionId = null) {
+  if (!Array.isArray(pool) || pool.length === 0) return null;
+  if (typeof rand !== 'function') {
+    throw new Error('selectFromBag: requires an injected `rand` — this module never reaches for its own randomness');
+  }
+  const dealt = new Set(bag?.dealt ?? []);
+  let cycle = Number.isInteger(bag?.cycle) && bag.cycle > 0 ? bag.cycle : 1;
+  let eligible = pool.filter((p) => !dealt.has(promptIdOfVersion(String(p.versionId))));
+  if (eligible.length === 0) { eligible = pool.slice(); cycle += 1; }
+  if (dealt.size === 0 && lastVersionId && eligible.length > 1) {
+    const last = promptIdOfVersion(String(lastVersionId));
+    const other = eligible.filter((p) => promptIdOfVersion(String(p.versionId)) !== last);
+    if (other.length > 0) eligible = other;
+  }
+  const i = Math.min(eligible.length - 1, Math.max(0, Math.floor(rand() * eligible.length)));
+  return { entry: eligible[i], cycle };
+}
+
+/**
  * A version IRI is `<prompt iri>/v<N>`; the prompt identity is everything
  * before the final `/v<N>`. Derived rather than looked up so this stays pure —
  * the caller passes bodies, not the entity graph.

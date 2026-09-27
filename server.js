@@ -52,7 +52,7 @@ import { shortenTypeIri, PERSON_IRI_BASE } from './core/jsonld.mjs';
 import { readPool, recentWhispers, DEFAULT_POOL, poolFilePath } from './whisper-store.mjs';
 import { readTendingConfig, writeTendingConfig } from './tending-config.mjs';
 import { buildTendingEntities, person as personIri } from './core/tending-bootstrap.mjs';
-import { resolvePool as resolveWhisperPool } from './core/tending-pool.mjs';
+import { resolvePool as resolveWhisperPool, bagState } from './core/tending-pool.mjs';
 import { mintId } from './core/tending-ids.mjs';
 import { createPrompt, editPrompt, setEnabled, reorderPlaylist, removePrompt, setShuffle, readShuffle } from './core/tending-authoring.mjs';
 import { resolveProvenance } from './core/tending-provenance.mjs';
@@ -8265,12 +8265,26 @@ function lastFiredVersion(ents) {
   return best?.['scrum:promptVersion'] ?? null;
 }
 
+/**
+ * #1384 — where the shuffle-bag stands: the mints' stored cycle numbers against
+ * the current pool. Read from the same TendingMint facts as lastFiredVersion, so
+ * the bag has one home and nothing new is stored beside it.
+ */
+function whisperBag(ents, pool) {
+  const mints = ents
+    .filter((e) => e['@type'] === 'scrum:TendingMint')
+    .map((e) => ({ versionId: e['scrum:promptVersion'], cycle: Number(e['scrum:tendingCycle']) }));
+  return bagState(mints, pool);
+}
+
 function sendWhispers(res, code = 200) {
   const ents = tendingEntities();
+  const whispers = resolveWhisperPool(ents);
   sendJSON(res, code, {
-    whispers: resolveWhisperPool(ents),
+    whispers,
     shuffle: readShuffle(ents),
     lastVersionId: lastFiredVersion(ents),
+    bag: whisperBag(ents, whispers),
   });
 }
 
@@ -8335,6 +8349,10 @@ async function handleCreateMint(req, res) {
         // wrong, well-formed answer — which is the exact failure this card's own
         // line-stop was.
         'scrum:promptVersion': body.versionId || undefined,
+        // #1384 — the shuffle-bag cycle this firing was dealt in. Stored, not
+        // derived: deriving it from a run of distinct prompts was falsified in
+        // review (it inherits most of the previous cycle at every boundary).
+        'scrum:tendingCycle': Number.isInteger(body.cycle) && body.cycle > 0 ? body.cycle : undefined,
         // personIri(), not a `person:` CURIE — the projector prepends the person
         // base to anything non-http, so a CURIE here double-prefixes and the
         // seat never joins to its own node.
