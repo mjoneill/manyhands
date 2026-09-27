@@ -5680,6 +5680,8 @@ function stopConvsPolling() {
 // #113 — only these render inline; everything else is a download link (matches
 // the server's safe-serve policy exactly).
 const INLINE_IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+// #1503 — audio plays in place (mirrors core/conversation-view.mjs attachmentKind).
+const INLINE_AUDIO_MIMES = new Set(['audio/wav', 'audio/x-wav', 'audio/mpeg', 'audio/ogg', 'audio/mp4']);
 
 function renderAttachmentList(attachments) {
   const wrap = document.createElement('div');
@@ -5687,6 +5689,24 @@ function renderAttachmentList(attachments) {
   attachments.forEach(a => {
     if (!a || typeof a.id !== 'string') return;
     const url = '/api/attachments/' + encodeURIComponent(a.id);
+    if (INLINE_AUDIO_MIMES.has(a.mime)) {
+      const box = document.createElement('span');
+      box.className = 'conv-attach-audio';
+      const audio = document.createElement('audio');
+      audio.controls = true;
+      audio.preload = 'none';
+      audio.src = url;
+      audio.title = a.name || 'audio';   // property assignment — no XSS
+      const link = document.createElement('a');
+      link.className = 'conv-attach-link';
+      link.href = url;
+      link.download = a.name || 'audio';
+      link.textContent = '⬇ ' + (a.name || 'audio');   // textContent — no XSS
+      box.appendChild(audio);
+      box.appendChild(link);
+      wrap.appendChild(box);
+      return;
+    }
     if (INLINE_IMAGE_MIMES.has(a.mime)) {
       const img = document.createElement('img');
       img.className = 'conv-attach-img';

@@ -400,6 +400,15 @@
     // server forces non-images to download (stored-XSS guard), so this is safe.
     function attachmentEl(a) {
       const url = '/api/attachments/' + encodeURIComponent(a.id);
+      // #1503 — audio plays in place (mirrors core/conversation-view.mjs attachmentKind).
+      if (['audio/wav', 'audio/x-wav', 'audio/mpeg', 'audio/ogg', 'audio/mp4'].includes(a.mime)) {
+        const box = el('span', 'attach-audio');
+        const audio = el('audio'); audio.controls = true; audio.preload = 'none'; audio.src = url; audio.title = a.name || 'audio';
+        const link = el('a', 'attach-file', '⬇ ' + (a.name || 'audio'));
+        link.href = url; link.download = a.name || 'audio';
+        box.appendChild(audio); box.appendChild(link);
+        return box;
+      }
       if (typeof a.mime === 'string' && a.mime.startsWith('image/')) {
         const img = el('img', 'attach-img'); img.src = url; img.alt = a.name || 'image'; img.title = a.name || '';
         img.onclick = () => window.open(url, '_blank');
