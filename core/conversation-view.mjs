@@ -300,11 +300,32 @@ export function mountConversationView(opts = {}) {
       audio.preload = 'none';
       audio.src = url;
       audio.title = a.name || 'audio';   // property assignment — no XSS
+      // #1509 — the NAME is the obvious thing to click, so clicking it PLAYS the
+      // take (and pauses it again). The download is a bare ⬇ that says what it
+      // downloads only to tooltips and screen readers.
+      const label = a.name || 'audio';
+      const name = doc.createElement('button');
+      name.type = 'button';
+      name.className = 'cv-attach-name';
+      const glyph = () => { name.textContent = (audio.paused ? '▶ ' : '⏸ ') + label; };   // textContent — no XSS
+      name.title = 'Play ' + label;
+      name.addEventListener('click', () => {
+        if (!audio.paused) { audio.pause(); return; }
+        const started = audio.play();   // a rejected play (e.g. undecodable) must not leave ⏸ over silence
+        if (started && typeof started.catch === 'function') started.catch(glyph);
+      });
+      audio.addEventListener('play', glyph);
+      audio.addEventListener('pause', glyph);
+      audio.addEventListener('ended', glyph);
+      glyph();
       const link = doc.createElement('a');
       link.className = 'cv-attach-link';
       link.href = url;
       link.download = a.name || 'audio';
-      link.textContent = '⬇ ' + (a.name || 'audio');   // textContent — no XSS
+      link.textContent = '⬇';
+      link.title = 'Download ' + (a.name || 'audio');
+      link.setAttribute('aria-label', 'Download ' + (a.name || 'audio'));
+      wrap.appendChild(name);
       wrap.appendChild(audio);
       wrap.appendChild(link);
       return wrap;

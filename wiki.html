@@ -81,6 +81,10 @@
   .attach-img:hover { border-color:var(--violet); }
   .attach-file { display:inline-flex; align-items:center; gap:6px; color:var(--link); text-decoration:none; border:1px solid var(--line); border-radius:8px; padding:7px 12px; font-size:13px; }
   .attach-file:hover { background:var(--panel-2); color:var(--ink); }
+  /* #1509 — the take is named ON the player. */
+  .attach-audio { display:inline-flex; flex-wrap:wrap; align-items:center; gap:4px 8px; }
+  .attach-audio-name { flex-basis:100%; text-align:left; font:inherit; font-size:13px; color:var(--link); background:none; border:0; padding:0; cursor:pointer; }
+  .attach-audio-name:hover { text-decoration:underline; }
   .attach-edit-item { display:inline-flex; align-items:center; gap:7px; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:5px 7px 5px 11px; font:12px var(--mono); }
   .attach-rm { background:none; border:none; color:var(--muted); cursor:pointer; font-size:15px; line-height:1; padding:0; }
   .attach-rm:hover { color:var(--ink); }
@@ -404,9 +408,22 @@
       if (['audio/wav', 'audio/x-wav', 'audio/mpeg', 'audio/ogg', 'audio/mp4'].includes(a.mime)) {
         const box = el('span', 'attach-audio');
         const audio = el('audio'); audio.controls = true; audio.preload = 'none'; audio.src = url; audio.title = a.name || 'audio';
-        const link = el('a', 'attach-file', '⬇ ' + (a.name || 'audio'));
+        // #1509 — clicking the NAME plays the take; the download is a bare ⬇.
+        const label = a.name || 'audio';
+        const name = el('button', 'attach-audio-name');
+        name.type = 'button'; name.title = 'Play ' + label;
+        const glyph = () => { name.textContent = (audio.paused ? '▶ ' : '⏸ ') + label; };
+        name.addEventListener('click', () => {
+          if (!audio.paused) { audio.pause(); return; }
+          const started = audio.play();
+          if (started && typeof started.catch === 'function') started.catch(glyph);
+        });
+        audio.addEventListener('play', glyph); audio.addEventListener('pause', glyph); audio.addEventListener('ended', glyph);
+        glyph();
+        const link = el('a', 'attach-file', '⬇');
         link.href = url; link.download = a.name || 'audio';
-        box.appendChild(audio); box.appendChild(link);
+        link.title = 'Download ' + (a.name || 'audio'); link.setAttribute('aria-label', 'Download ' + (a.name || 'audio'));
+        box.appendChild(name); box.appendChild(audio); box.appendChild(link);
         return box;
       }
       if (typeof a.mime === 'string' && a.mime.startsWith('image/')) {
