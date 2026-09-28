@@ -3,7 +3,7 @@
  *
  * Measured 2026-09-28 00:08Z: the owner's first click after #1503 downloaded the
  * take. The page drew a player, but the only visible file name was
- * `<a download>⬇ sausage-take1.wav</a>` beside it, so the natural click (the
+ * `<a download>⬇ take1.wav</a>` beside it, so the natural click (the
  * name) downloaded. Both the build and the review had checked "served safely
  * and correctly"; neither asked what the reader would click.
  *
