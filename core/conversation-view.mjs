@@ -300,11 +300,20 @@ export function mountConversationView(opts = {}) {
       audio.preload = 'none';
       audio.src = url;
       audio.title = a.name || 'audio';   // property assignment — no XSS
+      // #1509 — the NAME labels the player; it is not a link. The download is a
+      // bare ⬇ that says what it downloads only to tooltips and screen readers,
+      // so the obvious click (the name) never downloads.
+      const name = doc.createElement('span');
+      name.className = 'cv-attach-name';
+      name.textContent = a.name || 'audio';   // textContent — no XSS
       const link = doc.createElement('a');
       link.className = 'cv-attach-link';
       link.href = url;
       link.download = a.name || 'audio';
-      link.textContent = '⬇ ' + (a.name || 'audio');   // textContent — no XSS
+      link.textContent = '⬇';
+      link.title = 'Download ' + (a.name || 'audio');
+      link.setAttribute('aria-label', 'Download ' + (a.name || 'audio'));
+      wrap.appendChild(name);
       wrap.appendChild(audio);
       wrap.appendChild(link);
       return wrap;

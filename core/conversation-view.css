@@ -58,6 +58,9 @@
 .cv-attach-img { max-width: 240px; max-height: 200px; border-radius: 8px; border: 1px solid var(--line); cursor: pointer; }
 .cv-attach-link { color: var(--link); text-decoration: none; border: 1px solid var(--line); border-radius: 7px; padding: 4px 9px; font-size: 13px; }
 .cv-attach-link:hover { background: var(--panel); }
+/* #1509 — the take is named ON the player; the download is a small ⬇ beside it. */
+.cv-attach-audio { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.cv-attach-name { flex-basis: 100%; font-size: 13px; color: var(--ink, inherit); }
 
 .cv-form { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
 .cv-input { background: var(--bg); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 9px; font: inherit; resize: vertical; }

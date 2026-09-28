@@ -770,6 +770,9 @@ body::before {
 }
 .conv-msg-attachments { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
 .conv-attach-img { max-width: 280px; max-height: 280px; border-radius: 8px; border: 1px solid rgba(148, 163, 184, 0.25); cursor: pointer; }
+/* #1509 — the take is named ON the player; the download is a small ⬇ beside it. */
+.conv-attach-audio { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.conv-attach-name { flex-basis: 100%; font-size: 13px; }
 .conv-attach-link {
   display: inline-flex; align-items: center; gap: 6px; font-size: 0.82rem; color: #60a5fa;
   text-decoration: none; padding: 4px 8px; background: rgba(15, 23, 42, 0.5);
@@ -5697,11 +5700,18 @@ function renderAttachmentList(attachments) {
       audio.preload = 'none';
       audio.src = url;
       audio.title = a.name || 'audio';   // property assignment — no XSS
+      // #1509 — mirrors core/conversation-view.mjs: the name labels the player.
+      const name = document.createElement('span');
+      name.className = 'conv-attach-name';
+      name.textContent = a.name || 'audio';   // textContent — no XSS
       const link = document.createElement('a');
       link.className = 'conv-attach-link';
       link.href = url;
       link.download = a.name || 'audio';
-      link.textContent = '⬇ ' + (a.name || 'audio');   // textContent — no XSS
+      link.textContent = '⬇';
+      link.title = 'Download ' + (a.name || 'audio');
+      link.setAttribute('aria-label', 'Download ' + (a.name || 'audio'));
+      box.appendChild(name);
       box.appendChild(audio);
       box.appendChild(link);
       wrap.appendChild(box);
