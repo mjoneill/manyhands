@@ -2958,12 +2958,24 @@ function ringSeatActive(m) { return ringSeatReachable(m) && !!m.lastClientReques
 // for the whole live window, and a room with one busy seat would go silent
 // for the rest — today's defect narrowed, not fixed. The engine hands the
 // queued set in; a caller without it falls back to "any member active".
-function ringSeatDeliverable(seatId, { queued = null } = {}) {
+function ringSeatDeliverable(seatId, { queued = null, explain = null } = {}) {
   const m = ringSeatMeta(seatId);
+  // #1513 SHADOW — say WHY, for the mid-lease-eviction record (defect C). `explain`
+  // is filled and never read back: every verdict below is exactly what it was.
+  if (explain) {
+    explain.seat = seatId;
+    explain.openStreamCount = m?.openStreamCount ?? 0;
+    explain.deaf = !!m?.deafSince;
+    explain.lastClientRequestAt = m?.lastClientRequestAt ?? null;
+    explain.msSinceLastRequest = m?.lastClientRequestAt ? Date.now() - m.lastClientRequestAt : null;
+    explain.liveWindowMs = LIVE_WINDOW_MS;
+  }
   if (ringSeatActive(m)) return true;
   if (!ringSeatReachable(m)) return false;
   const contenders = Array.isArray(queued) ? queued : seatRegistry.seats();
-  return !contenders.some((id) => id !== seatId && ringSeatActive(ringSeatMeta(id)));
+  const activeContender = contenders.find((id) => id !== seatId && ringSeatActive(ringSeatMeta(id))) ?? null;
+  if (explain) explain.activeContender = activeContender;
+  return activeContender === null;
 }
 const tokenRingEngine = createTokenRingEngine({ registry: seatRegistry, genEnvelopeId: () => randomUUID(), isDeliverable: ringSeatDeliverable });
 
@@ -3412,7 +3424,8 @@ function tokenRingOnTimeout(leaseId, seatId, envelopeId) {
   // at 14:28:56Z and lease 6 at 14:33:56Z, re-delivering ring-held posts to seats
   // that had already had them by fan-out. A timeout in any other mode quiesces.
   if (tokenRingQuiesceIfOff('timeout')) return;
-  const { deliveries, needsTimeout } = tokenRingEngine.handleTimeout({ seatId, leaseId });
+  const { deliveries, needsTimeout, telemetry } = tokenRingEngine.handleTimeout({ seatId, leaseId });
+  logRingShadow(telemetry, null);   // #1513 — a stale timer that evicts a held lease is a mid-lease eviction too
   tokenRingDeliver(deliveries, needsTimeout);
   maybeOpenDirectSlot('stream-timeout').catch((e) => console.log(`[#1362 direct] open failed: ${e.message}`));   // #1362
 }
@@ -3482,6 +3495,20 @@ function tokenRingDeliver(deliveries, needsTimeout) {
 
 // #410 — token-ring delivery entry from a new commons post. Serializes through the
 // ring: at most the current holder's session receives one frozen turn-envelope.
+// #1513 SHADOW — one greppable line per RESPOND and per mid-lease eviction, so the
+// three defects are MEASURED before anything enforces (`grep '#1513 shadow'`).
+// Log-only: a throw here must never reach the ring, so it is contained.
+function logRingShadow(telemetry, postId) {
+  try {
+    const sh = telemetry?.shadow;
+    if (!sh) return;
+    if (sh.respond) console.log(`[#1513 shadow] respond ${JSON.stringify({ postId, ...sh.respond })}`);
+    for (const ev of sh.midLeaseEvictions ?? []) console.log(`[#1513 shadow] mid-lease-eviction ${JSON.stringify({ postId, ...ev })}`);
+  } catch (e) {
+    console.log(`[#1513 shadow] log failed: ${e.message}`);
+  }
+}
+
 function broadcastTokenRing(conversation) {
   const nSeats = seatRegistry.seats().length;
   if (nSeats > 0) tokenRingArmed = true;
@@ -3507,6 +3534,7 @@ function broadcastTokenRing(conversation) {
     id: conversation.id,
   });
   console.log(`[#410 token-ring] ${JSON.stringify(telemetry)}`); // debug-only; acceptance uses [#410 lifecycle]
+  logRingShadow(telemetry, conversation.id);
   tokenRingDeliver(deliveries, needsTimeout);
   // #1362 — the residents' turn comes after the stream segment: queue the post;
   // the slot opens when no stream lease is held (now, or after the holder's

@@ -55,6 +55,10 @@ export function createTokenRingEngine({ registry, genEnvelopeId, isDeliverable =
   let envSeq = 0;
   const nextEnvelopeId = genEnvelopeId ?? (() => `env-${++envSeq}`);
   let state = initialState([]); // empty ring until seats register (inert)
+  // #1513 SHADOW — the envelope the CURRENT lease was granted (null when the holder
+  // had no session, so nothing was delivered). Read-only bookkeeping: no decision
+  // in this file consults it.
+  let currentEnvelope = null;
 
   // Build the delivery intent for a freshly granted lease, if the grant is new.
   // A new grant = there is a holder now whose leaseId differs from beforeLease.
@@ -76,6 +80,7 @@ export function createTokenRingEngine({ registry, genEnvelopeId, isDeliverable =
       kind: 'scheduled-turn',
       payload,
     };
+    currentEnvelope = { leaseId: after.id, envelopeId: sessionId ? envelope.envelopeId : null };
     // Holder with no live session ⇒ dead seat: the caller must schedule a TIMEOUT
     // to advance the ring rather than push into the void.
     if (!sessionId) return { deliveries: [], needsTimeout: { seatId, leaseId: after.id } };
@@ -89,8 +94,13 @@ export function createTokenRingEngine({ registry, genEnvelopeId, isDeliverable =
   // 300 s lease while the owner posted into silence. `skipped` names them.
   function grantDeliverable(beforeLease) {
     const skipped = [];
+    // #1513 SHADOW — evictions of a lease that was ALREADY HELD when this call began
+    // (defect C). A grant that is skipped the moment it is made never held anything
+    // and is not listed. Log-only: `explain` is a bag the caller MAY fill with the
+    // inputs behind its verdict; the verdict itself is untouched.
+    const midLeaseEvictions = [];
     let out = grantDeliveries(beforeLease);
-    if (!isDeliverable) return { ...out, skipped };
+    if (!isDeliverable) return { ...out, skipped, midLeaseEvictions };
     // A SKIP is a TIMEOUT that does NOT charge the seat. The reducer's TIMEOUT sets
     // cursors[holder] = lease.snapshot (the seat is deemed to have seen the
     // interlude), which for a seat that never received the envelope means the
@@ -103,16 +113,25 @@ export function createTokenRingEngine({ registry, genEnvelopeId, isDeliverable =
     // comes back receives what it was skipped over for on its first turn.
     const cursorsBefore = {};
     let guard = state.ring.length + 1;
-    while (state.lease && !isDeliverable(state.lease.holder, { queued: queuedSeats(state) }) && guard-- > 0) {
+    let explain = {};
+    const probe = () => { explain = {}; return isDeliverable(state.lease.holder, { queued: queuedSeats(state), explain }); };
+    while (state.lease && !probe() && guard-- > 0) {
       const { holder, id } = state.lease;
       skipped.push(holder);
+      if (beforeLease && id === beforeLease.id) {
+        midLeaseEvictions.push({
+          holder, leaseId: id,
+          envelopeId: currentEnvelope?.leaseId === id ? currentEnvelope.envelopeId : null,
+          inputs: explain,
+        });
+      }
       cursorsBefore[holder] = state.cursors[holder];
       const before = state.lease;
       state = reduce(state, { type: 'TIMEOUT', holder, leaseId: id });
       out = grantDeliveries(before);
     }
     if (skipped.length) state = { ...state, cursors: { ...state.cursors, ...cursorsBefore } };
-    return { ...out, skipped };
+    return { ...out, skipped, midLeaseEvictions };
   }
 
   /**
@@ -128,9 +147,11 @@ export function createTokenRingEngine({ registry, genEnvelopeId, isDeliverable =
 
   /**
    * Feed a new commons post. Returns { deliveries, needsTimeout, telemetry }.
-   * @param {{author:string, body:string, id?:string, originSessionId?:string}} post
+   * @param {{author:string, body:string, id?:string, originSessionId?:string, carriedEnvelopeId?:string}} post
+   *   `carriedEnvelopeId` (#1513) is SHADOW input only: the envelope id the post says it
+   *   answers, if a caller ever supplies one. It is recorded, never consulted.
    */
-  function handlePost({ author, body, id, originSessionId } = {}) {
+  function handlePost({ author, body, id, originSessionId, carriedEnvelopeId } = {}) {
     // Reconcile membership only at a non-active boundary (never mid-lease).
     // #1453b — the ring is one member per seat where a lane declared `surfaces`
     // (a registry without ringSeats, like the pure tests' fakes, keeps every lane).
@@ -138,23 +159,34 @@ export function createTokenRingEngine({ registry, genEnvelopeId, isDeliverable =
 
     const holder = state.lease?.holder ?? null;
     let originSeatId = originSessionId ? registry.seatForSession(originSessionId) : null;
+    let boundBy = originSeatId ? 'session' : null; // #1513 shadow
     if (!originSeatId && holder && registry.authorForSeat(holder) === author) {
       originSeatId = holder; // dormancy gate ⇒ a REST reply mid-lease is the holder's RESPOND
+      boundBy = 'author';
     }
 
     const beforeLease = state.lease;
     let event;
+    let respond = null; // #1513 shadow: how this RESPOND was bound, and whether it echoed the envelope
     if (holder && originSeatId === holder) {
       event = { type: 'RESPOND', holder, leaseId: state.lease.id, body };
+      const currentEnvelopeId = currentEnvelope?.leaseId === state.lease.id ? currentEnvelope.envelopeId : null;
+      respond = {
+        holder, leaseId: state.lease.id, currentEnvelopeId,
+        carriedEnvelopeId: carriedEnvelopeId ?? null,
+        echoed: carriedEnvelopeId != null && carriedEnvelopeId === currentEnvelopeId,
+        boundBy,
+      };
     } else {
       event = { type: 'INTERJECT', author, body }; // additive: human or non-holder chorus
     }
     state = reduce(state, event);
 
-    const { deliveries, needsTimeout, skipped } = grantDeliverable(beforeLease);
+    const { deliveries, needsTimeout, skipped, midLeaseEvictions } = grantDeliverable(beforeLease);
     const telemetry = {
       event: event.type,
       skipped,   // #1424
+      shadow: { respond, midLeaseEvictions },   // #1513 — log-only
       poster: originSeatId ?? `author:${author}`,
       holder: state.lease?.holder ?? null,
       leaseId: state.lease?.id ?? null,
@@ -174,10 +206,11 @@ export function createTokenRingEngine({ registry, genEnvelopeId, isDeliverable =
   function handleTimeout({ seatId, leaseId } = {}) {
     const beforeLease = state.lease;
     state = reduce(state, { type: 'TIMEOUT', holder: seatId, leaseId });
-    const { deliveries, needsTimeout, skipped } = grantDeliverable(beforeLease);
+    const { deliveries, needsTimeout, skipped, midLeaseEvictions } = grantDeliverable(beforeLease);
     const telemetry = {
       event: 'TIMEOUT',
       skipped,   // #1424
+      shadow: { respond: null, midLeaseEvictions },   // #1513 — log-only
       poster: seatId,
       holder: state.lease?.holder ?? null,
       leaseId: state.lease?.id ?? null,
