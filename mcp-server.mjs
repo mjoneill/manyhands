@@ -79,6 +79,7 @@ import { createSeatRegistry } from './core/seat-registry.mjs';
 // HTTP. Giving this process a log path would be #767's shape exactly.
 import { deliveryIdentity } from './core/cursor-service.mjs';
 import { createTokenRingEngine } from './core/token-ring-engine.mjs';
+import { residentSlotShadow } from './core/ring-shadow.mjs';   // #1513 — log-only
 import { hostAllowed, parseAllowedHosts, refuseHost } from './core/host-guard.mjs';
 
 // #359 — timestamp every log line. The 2026-07-09 empty-response incident could
@@ -3083,7 +3084,9 @@ function ringSyncBearer(sessionId, why, { leave = false } = {}) {
 //                                   still opens ("holds the ring, never the inbox")
 const DIRECT_TICK_MS = Number(process.env.MCP_DIRECT_TICK_MS ?? 60000);
 let directSeatsNow = [];
-const directSegment = createDirectSegment({ directSeats: () => directSeatsNow, ttlMs: tokenRingTimeoutMs });   // read at each slot open
+// #1513 — SCRUM_DIRECT_SLOT_FLOOR_MS is a TEST seam (the 180 s floor cannot be waited out in a test);
+// unset, `undefined` falls through to the segment's own default, i.e. no behaviour change.
+const directSegment = createDirectSegment({ directSeats: () => directSeatsNow, ttlMs: tokenRingTimeoutMs, floorMs: Number(process.env.SCRUM_DIRECT_SLOT_FLOOR_MS) || undefined });   // read at each slot open
 const directPending = [];                    // [{ id, author }] handled in ring mode, not yet offered
 const directRecordDeliveries = new Map();    // record id → { seat, deliveryIds }
 let directOpening = false;
@@ -3125,8 +3128,16 @@ async function maybeOpenDirectSlot(why) {
 }
 
 const DIRECT_TERMINAL = new Set(['published', 'declined', 'failed']);
+// #1513 SHADOW — one line per resident record when its slot closes, set against the
+// receipt trail the runner already writes. Log-only and contained: it reads, it
+// never feeds back into the slot (the slot still ignores `turn-started`).
+function logResidentSlotShadow(args) {
+  try { console.log(`[#1513 shadow] resident-slot ${JSON.stringify(residentSlotShadow(args))}`); }
+  catch (e) { console.log(`[#1513 shadow] resident-slot log failed: ${e.message}`); }
+}
 async function directTick() {
   const st = directSegment.status();
+  const slotAtStart = st.slot;   // #1513 shadow: the slot's opening/deadline, before this tick can close it
   if (st.slot) {
     for (const rec of st.slot.records.filter((r) => r.state === 'open')) {
       const entry = directRecordDeliveries.get(rec.id);
@@ -3137,12 +3148,29 @@ async function directTick() {
       const mine = list.filter((d) => entry.deliveryIds.includes(d.id));
       if (mine.length !== entry.deliveryIds.length || !mine.every((d) => DIRECT_TERMINAL.has(d.state))) continue;
       const state = mine.some((d) => d.state === 'published') ? 'published' : mine.some((d) => d.state === 'declined') ? 'declined' : 'failed';
-      const r = directSegment.recordTerminal({ seat: rec.seat, state, now: new Date().toISOString() });
+      const closedAt = new Date().toISOString();
+      const r = directSegment.recordTerminal({ seat: rec.seat, state, now: closedAt });
+      logResidentSlotShadow({ seat: rec.seat, cycle: slotAtStart.cycle, slotOpenedAt: slotAtStart.openedAt, deadline: slotAtStart.deadline, outcome: state, closedAt, deliveries: mine });   // #1513
       directRecordDeliveries.delete(rec.id);
       console.log(`[#1362 direct] ${rec.seat} ${state} (${mine.length} record(s))${r.advanced ? ` → slot advanced: ${r.advanced.reason}` : ''}`);
     }
-    const t = directSegment.tick({ now: new Date().toISOString() });
-    if (t.advanced) for (const c of t.advanced.closed) directRecordDeliveries.delete(c.id);
+    const tickNow = new Date().toISOString();
+    // #1513 shadow: which records are still open going into the tick. `tick()` closes a
+    // timed-out record itself, BEFORE it builds `advanced.closed`, so on a timeout that
+    // list is empty and cannot be the source.
+    const openGoingIn = (directSegment.status().slot?.records ?? []).filter((r) => r.state === 'open').map((r) => ({ id: r.id, seat: r.seat, entry: directRecordDeliveries.get(r.id) }));
+    const t = directSegment.tick({ now: tickNow });
+    if (t.advanced) {
+      const outcome = t.advanced.reason === 'timeout' ? 'timeout' : 'advanced';
+      for (const rec of openGoingIn) {
+        if (!rec.entry) continue;
+        // read what the runner had recorded for it, off the tick's path
+        apiCall('GET', `/api/deliveries?to=${encodeURIComponent(rec.seat)}`)
+          .then((r) => logResidentSlotShadow({ seat: rec.seat, cycle: slotAtStart.cycle, slotOpenedAt: slotAtStart.openedAt, deadline: slotAtStart.deadline, outcome, closedAt: tickNow, deliveries: (r?.deliveries ?? []).filter((d) => rec.entry.deliveryIds.includes(d.id)) }))
+          .catch((e) => console.log(`[#1513 shadow] resident-slot deliveries unreadable for ${rec.seat}: ${e.message}`));
+      }
+      for (const c of t.advanced.closed) directRecordDeliveries.delete(c.id);
+    }
     if (t.advanced) console.log(`[#1362 direct] slot advanced: ${t.advanced.reason} cycle=${t.advanced.cycle}${t.advanced.closed.length ? ` closed-by-advance=${t.advanced.closed.map((c) => c.seat).join(',')}` : ''}`);
   }
   await maybeOpenDirectSlot('tick');

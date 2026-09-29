@@ -67,3 +67,68 @@ test('#1513 — a mid-lease eviction and an author-bound RESPOND are both logged
     assert.equal(r.currentEnvelopeId, second.params.meta.token_ring_envelope_id, 'names the envelope it was supposed to answer');
   } finally { aStream.close(); bStream.close(); await p.stop(); }
 });
+
+// ── the RESIDENT path: a slot that expires over a live turn, and one that closes on time ──
+const api = async (base, method, p, body) => {
+  const r = await fetch(`${base}${p}`, { method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  let j = null; try { j = await r.json(); } catch { /* empty */ }
+  return { status: r.status, body: j };
+};
+const RESIDENT = (seatKey) => ({ seatKey, name: seatKey, emoji: '🤖', prompt: 'Answer only from what you are handed.', model: { model: 'test-model', protocol: 'ollama-native', baseUrl: 'http://127.0.0.1:1' }, toolGrants: ['conversation_post'], budgetPerDay: 0.5, by: 'owner' });
+async function inviteResident(base, seatKey) {
+  assert.equal((await api(base, 'POST', '/api/agents', RESIDENT(seatKey))).status, 201);
+  assert.equal((await api(base, 'PATCH', `/api/agents/${seatKey}`, { deliveryMode: 'channel', by: 'owner' })).status, 200);
+}
+const deliveriesTo = async (base, seat) => (await api(base, 'GET', `/api/deliveries?to=${seat}`)).body.deliveries ?? [];
+const event = (base, d, state, by) => api(base, 'POST', `/api/deliveries/${encodeURIComponent(d.id)}/events`, { state, source: 'guest-runner', by });
+const residentLines = (log) => [...log.matchAll(/\[#1513 shadow\] resident-slot (\{.*\})/g)].map((m) => JSON.parse(m[1]));
+
+// Bring the ring to the point where the residents' slot opens: a stream seat holds, then RESPONDs.
+async function openResidentSlot(p, resident) {
+  await inviteResident(p.rest.baseUrl, resident);
+  const holder = await mcpSession(p.mcp.mcpUrl);
+  const stream = await openChannelStream(p.mcp.mcpUrl, holder.sessionId);
+  await holder.rpc('scrum/session/register', { seatId: 'tester.sb', author: 'tester' });
+  await post(p.rest.baseUrl, 'hello, room', 'owner');
+  await new Promise((r) => setTimeout(r, 400));
+  await post(p.rest.baseUrl, 'holder answers', 'tester');
+  const offers = await (async () => { for (let i = 0; i < 60; i++) { const d = await deliveriesTo(p.rest.baseUrl, resident); if (d.length >= 2) return d; await new Promise((r) => setTimeout(r, 100)); } return null; })();
+  assert.ok(offers, 'the resident was offered both posts');
+  return { offers, stream };
+}
+
+test('#1513 — a resident slot that EXPIRES over a live turn is logged as timeout with the turn still running', async () => {
+  const p = await pair({ SCRUM_TOKEN_RING_TIMEOUT_MS: '1500', SCRUM_DIRECT_SLOT_FLOOR_MS: '1500', MCP_DIRECT_TICK_MS: '250' });
+  let stream;
+  try {
+    const opened = await openResidentSlot(p, 'lin');
+    stream = opened.stream;
+    // the runner claims and STARTS the turn, then never finishes inside the slot
+    for (const d of opened.offers) { await event(p.rest.baseUrl, d, 'claimed', 'lin'); await event(p.rest.baseUrl, d, 'turn-started', 'lin'); }
+    assert.ok(await poll(() => residentLines(p.mcp.stdoutText()).some((l) => l.outcome === 'timeout'), 8000), `a timeout line was logged: ${p.mcp.stdoutText().slice(-700)}`);
+    const l = residentLines(p.mcp.stdoutText()).find((x) => x.outcome === 'timeout');
+    assert.equal(l.seat, 'lin');
+    assert.equal(l.turnRunningAtClose, true, 'the slot ended over a live turn — the receipt existed and the slot ignored it');
+    assert.ok(l.turnRunMsAtClose > 0);
+    assert.equal(l.publishedAt, null);
+    assert.equal(l.deliveryCount, 2);
+    assert.equal(l.slotMs, 1500);
+  } finally { stream?.close(); await p.stop(); }
+});
+
+test('#1513 — a resident slot that closes on a published turn is logged with the turn length, and the slot still advances on terminal', async () => {
+  const p = await pair({ SCRUM_TOKEN_RING_TIMEOUT_MS: '300000', MCP_DIRECT_TICK_MS: '250' });
+  let stream;
+  try {
+    const opened = await openResidentSlot(p, 'ada');
+    stream = opened.stream;
+    for (const d of opened.offers) { await event(p.rest.baseUrl, d, 'claimed', 'ada'); await event(p.rest.baseUrl, d, 'turn-started', 'ada'); await event(p.rest.baseUrl, d, 'published', 'ada'); }
+    assert.ok(await poll(() => residentLines(p.mcp.stdoutText()).some((l) => l.outcome === 'published'), 6000), `a published line was logged: ${p.mcp.stdoutText().slice(-700)}`);
+    const l = residentLines(p.mcp.stdoutText()).find((x) => x.outcome === 'published');
+    assert.equal(l.seat, 'ada');
+    assert.equal(l.turnRunningAtClose, false);
+    assert.equal(l.publishedAfterClose, false);
+    assert.ok(l.turnMs >= 0 && l.claimToTurnStartMs >= 0);
+    assert.ok(await poll(() => /\[#1362 direct\] ada published \(\d+ record\(s\)\) → slot advanced: terminal/.test(p.mcp.stdoutText()), 3000), 'BEHAVIOUR UNCHANGED: the slot still advanced on the terminal state');
+  } finally { stream?.close(); await p.stop(); }
+});
