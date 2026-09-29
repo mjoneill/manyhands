@@ -132,3 +132,45 @@ test('#1513 — a resident slot that closes on a published turn is logged with t
     assert.ok(await poll(() => /\[#1362 direct\] ada published \(\d+ record\(s\)\) → slot advanced: terminal/.test(p.mcp.stdoutText()), 3000), 'BEHAVIOUR UNCHANGED: the slot still advanced on the terminal state');
   } finally { stream?.close(); await p.stop(); }
 });
+
+// ── a turn that OUTLIVES its slot: the censored case, at exactly the bound being sized ──
+const lateLines = (log) => [...log.matchAll(/\[#1513 shadow\] resident-turn-late (\{.*\})/g)].map((m) => JSON.parse(m[1]));
+const unfinishedLines = (log) => [...log.matchAll(/\[#1513 shadow\] resident-turn-unfinished (\{.*\})/g)].map((m) => JSON.parse(m[1]));
+
+test('#1513 — a resident turn that outlives its slot is logged with its length when it finally publishes', async () => {
+  const p = await pair({ SCRUM_TOKEN_RING_TIMEOUT_MS: '1500', SCRUM_DIRECT_SLOT_FLOOR_MS: '1500', MCP_DIRECT_TICK_MS: '250' });
+  let stream;
+  try {
+    const opened = await openResidentSlot(p, 'lin');
+    stream = opened.stream;
+    for (const d of opened.offers) { await event(p.rest.baseUrl, d, 'claimed', 'lin'); await event(p.rest.baseUrl, d, 'turn-started', 'lin'); }
+    assert.ok(await poll(() => residentLines(p.mcp.stdoutText()).some((l) => l.outcome === 'timeout'), 8000), 'the slot timed out over the live turn');
+    assert.equal(lateLines(p.mcp.stdoutText()).length, 0, 'control: nothing is late while the turn is still running');
+    // the turn outlives the slot, then finishes: its length must still be recorded
+    for (const d of opened.offers) await event(p.rest.baseUrl, d, 'published', 'lin');
+    assert.ok(await poll(() => lateLines(p.mcp.stdoutText()).length >= 1, 6000), `a late line was logged: ${p.mcp.stdoutText().slice(-800)}`);
+    const l = lateLines(p.mcp.stdoutText())[0];
+    assert.equal(l.seat, 'lin');
+    assert.equal(l.outcome, 'late');
+    assert.equal(l.publishedAfterClose, true);
+    assert.ok(l.turnMs > 0, 'the length of the turn that outlived the slot — the censored figure');
+    assert.equal(l.turnRunningAtClose, true, 'and at the moment the slot closed it was still running');
+    await new Promise((r) => setTimeout(r, 600));
+    assert.equal(lateLines(p.mcp.stdoutText()).length, 1, 'logged once, then off the watch list');
+  } finally { stream?.close(); await p.stop(); }
+});
+
+test('#1513 — a resident turn that NEVER finishes is reported as unfinished, so a censored turn is visible as censored', async () => {
+  const p = await pair({ SCRUM_TOKEN_RING_TIMEOUT_MS: '1500', SCRUM_DIRECT_SLOT_FLOOR_MS: '1500', MCP_DIRECT_TICK_MS: '250', SCRUM_LATE_WATCH_MAX_MS: '1200' });
+  let stream;
+  try {
+    const opened = await openResidentSlot(p, 'lin');
+    stream = opened.stream;
+    for (const d of opened.offers) { await event(p.rest.baseUrl, d, 'claimed', 'lin'); await event(p.rest.baseUrl, d, 'turn-started', 'lin'); }
+    assert.ok(await poll(() => unfinishedLines(p.mcp.stdoutText()).length >= 1, 10000), `an unfinished line was logged: ${p.mcp.stdoutText().slice(-800)}`);
+    const u = unfinishedLines(p.mcp.stdoutText())[0];
+    assert.equal(u.seat, 'lin');
+    assert.ok(u.watchedMs >= 1200);
+    assert.equal(lateLines(p.mcp.stdoutText()).length, 0);
+  } finally { stream?.close(); await p.stop(); }
+});

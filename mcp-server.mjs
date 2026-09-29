@@ -3135,9 +3135,49 @@ function logResidentSlotShadow(args) {
   try { console.log(`[#1513 shadow] resident-slot ${JSON.stringify(residentSlotShadow(args))}`); }
   catch (e) { console.log(`[#1513 shadow] resident-slot log failed: ${e.message}`); }
 }
+// #1513 SHADOW — a turn that outlives its slot has not published when the slot's own line is
+// written, so that line can never carry its length: read only at close, turnMs would exist for
+// turns SHORTER than the slot and be missing at exactly the bound being sized (found in review:
+// round 1's 8m34s turn would have logged null). Timed-out and advanced records that still had
+// no terminal event go on this watch; when they finish, one `resident-turn-late` line carries
+// the turn. Bounded twice (age and count), and an entry that never finishes says so, so a
+// censored turn is visible as censored rather than absent.
+const LATE_WATCH_MAX_MS = Number(process.env.SCRUM_LATE_WATCH_MAX_MS ?? 3_600_000);
+const LATE_WATCH_MAX_ENTRIES = 100;
+const directLateWatch = [];
+let lateWatchPolling = false;
+async function pollLateWatch() {
+  try {
+    const now = Date.now();
+    const keep = [];
+    for (const w of directLateWatch.splice(0)) {
+      if (now - Date.parse(w.closedAt) > LATE_WATCH_MAX_MS) {
+        console.log(`[#1513 shadow] resident-turn-unfinished ${JSON.stringify({ seat: w.seat, cycle: w.cycle, closedAt: w.closedAt, watchedMs: now - Date.parse(w.closedAt) })}`);
+      } else keep.push(w);
+    }
+    directLateWatch.push(...keep);
+    for (const seat of [...new Set(directLateWatch.map((w) => w.seat))]) {
+      let list;
+      try { list = (await apiCall('GET', `/api/deliveries?to=${encodeURIComponent(seat)}`))?.deliveries ?? []; }
+      catch (e) { console.log(`[#1513 shadow] resident-turn-late deliveries unreadable for ${seat}: ${e.message}`); continue; }
+      for (const w of directLateWatch.filter((x) => x.seat === seat)) {
+        const mine = list.filter((d) => w.deliveryIds.includes(d.id));
+        if (mine.length !== w.deliveryIds.length || !mine.every((d) => DIRECT_TERMINAL.has(d.state))) continue;
+        directLateWatch.splice(directLateWatch.indexOf(w), 1);
+        console.log(`[#1513 shadow] resident-turn-late ${JSON.stringify(residentSlotShadow({ seat, cycle: w.cycle, slotOpenedAt: w.slotOpenedAt, deadline: w.deadline, outcome: 'late', closedAt: w.closedAt, deliveries: mine }))}`);
+      }
+    }
+  } catch (e) {
+    console.log(`[#1513 shadow] resident-turn-late poll failed: ${e.message}`);
+  }
+}
 async function directTick() {
   const st = directSegment.status();
   const slotAtStart = st.slot;   // #1513 shadow: the slot's opening/deadline, before this tick can close it
+  if (directLateWatch.length && !lateWatchPolling) {   // #1513 — off the tick's path, never awaited
+    lateWatchPolling = true;
+    pollLateWatch().finally(() => { lateWatchPolling = false; });
+  }
   if (st.slot) {
     for (const rec of st.slot.records.filter((r) => r.state === 'open')) {
       const entry = directRecordDeliveries.get(rec.id);
@@ -3166,7 +3206,19 @@ async function directTick() {
         if (!rec.entry) continue;
         // read what the runner had recorded for it, off the tick's path
         apiCall('GET', `/api/deliveries?to=${encodeURIComponent(rec.seat)}`)
-          .then((r) => logResidentSlotShadow({ seat: rec.seat, cycle: slotAtStart.cycle, slotOpenedAt: slotAtStart.openedAt, deadline: slotAtStart.deadline, outcome, closedAt: tickNow, deliveries: (r?.deliveries ?? []).filter((d) => rec.entry.deliveryIds.includes(d.id)) }))
+          .then((r) => {
+            const deliveries = (r?.deliveries ?? []).filter((d) => rec.entry.deliveryIds.includes(d.id));
+            logResidentSlotShadow({ seat: rec.seat, cycle: slotAtStart.cycle, slotOpenedAt: slotAtStart.openedAt, deadline: slotAtStart.deadline, outcome, closedAt: tickNow, deliveries });
+            // a turn with no terminal event yet is still running: watch it, or its length is never known
+            const finished = deliveries.length === rec.entry.deliveryIds.length && deliveries.every((d) => DIRECT_TERMINAL.has(d.state));
+            if (!finished) {
+              directLateWatch.push({ seat: rec.seat, cycle: slotAtStart.cycle, slotOpenedAt: slotAtStart.openedAt, deadline: slotAtStart.deadline, closedAt: tickNow, deliveryIds: rec.entry.deliveryIds });
+              while (directLateWatch.length > LATE_WATCH_MAX_ENTRIES) {
+                const w = directLateWatch.shift();
+                console.log(`[#1513 shadow] resident-turn-unfinished ${JSON.stringify({ seat: w.seat, cycle: w.cycle, closedAt: w.closedAt, dropped: 'watch list full' })}`);
+              }
+            }
+          })
           .catch((e) => console.log(`[#1513 shadow] resident-slot deliveries unreadable for ${rec.seat}: ${e.message}`));
       }
       for (const c of t.advanced.closed) directRecordDeliveries.delete(c.id);

@@ -47,6 +47,9 @@ test('a slot that closed on a published turn reports the turn length and no over
   assert.equal(r.publishedAfterClose, false);
 });
 
+// The SERVED path feeds this case from the late watch (`resident-turn-late`), not from the slot's own
+// line: at slot close a live turn has not published, so a line written then cannot carry its length.
+// This pure test alone would have passed while the served path never produced the input (#1513 review).
 test('an output that lands AFTER the slot closed is marked, so the late-result fence is observable', () => {
   const r = residentSlotShadow({
     ...slot, outcome: 'timeout', closedAt: T('49:28.858'),
