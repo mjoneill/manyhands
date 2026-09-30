@@ -79,6 +79,7 @@ import { createSeatRegistry } from './core/seat-registry.mjs';
 // HTTP. Giving this process a log path would be #767's shape exactly.
 import { deliveryIdentity } from './core/cursor-service.mjs';
 import { createTokenRingEngine } from './core/token-ring-engine.mjs';
+import { residentSlotShadow } from './core/ring-shadow.mjs';   // #1513 — log-only
 import { hostAllowed, parseAllowedHosts, refuseHost } from './core/host-guard.mjs';
 
 // #359 — timestamp every log line. The 2026-07-09 empty-response incident could
@@ -2958,12 +2959,24 @@ function ringSeatActive(m) { return ringSeatReachable(m) && !!m.lastClientReques
 // for the whole live window, and a room with one busy seat would go silent
 // for the rest — today's defect narrowed, not fixed. The engine hands the
 // queued set in; a caller without it falls back to "any member active".
-function ringSeatDeliverable(seatId, { queued = null } = {}) {
+function ringSeatDeliverable(seatId, { queued = null, explain = null } = {}) {
   const m = ringSeatMeta(seatId);
+  // #1513 SHADOW — say WHY, for the mid-lease-eviction record (defect C). `explain`
+  // is filled and never read back: every verdict below is exactly what it was.
+  if (explain) {
+    explain.seat = seatId;
+    explain.openStreamCount = m?.openStreamCount ?? 0;
+    explain.deaf = !!m?.deafSince;
+    explain.lastClientRequestAt = m?.lastClientRequestAt ?? null;
+    explain.msSinceLastRequest = m?.lastClientRequestAt ? Date.now() - m.lastClientRequestAt : null;
+    explain.liveWindowMs = LIVE_WINDOW_MS;
+  }
   if (ringSeatActive(m)) return true;
   if (!ringSeatReachable(m)) return false;
   const contenders = Array.isArray(queued) ? queued : seatRegistry.seats();
-  return !contenders.some((id) => id !== seatId && ringSeatActive(ringSeatMeta(id)));
+  const activeContender = contenders.find((id) => id !== seatId && ringSeatActive(ringSeatMeta(id))) ?? null;
+  if (explain) explain.activeContender = activeContender;
+  return activeContender === null;
 }
 const tokenRingEngine = createTokenRingEngine({ registry: seatRegistry, genEnvelopeId: () => randomUUID(), isDeliverable: ringSeatDeliverable });
 
@@ -3071,7 +3084,9 @@ function ringSyncBearer(sessionId, why, { leave = false } = {}) {
 //                                   still opens ("holds the ring, never the inbox")
 const DIRECT_TICK_MS = Number(process.env.MCP_DIRECT_TICK_MS ?? 60000);
 let directSeatsNow = [];
-const directSegment = createDirectSegment({ directSeats: () => directSeatsNow, ttlMs: tokenRingTimeoutMs });   // read at each slot open
+// #1513 — SCRUM_DIRECT_SLOT_FLOOR_MS is a TEST seam (the 180 s floor cannot be waited out in a test);
+// unset, `undefined` falls through to the segment's own default, i.e. no behaviour change.
+const directSegment = createDirectSegment({ directSeats: () => directSeatsNow, ttlMs: tokenRingTimeoutMs, floorMs: Number(process.env.SCRUM_DIRECT_SLOT_FLOOR_MS) || undefined });   // read at each slot open
 const directPending = [];                    // [{ id, author }] handled in ring mode, not yet offered
 const directRecordDeliveries = new Map();    // record id → { seat, deliveryIds }
 let directOpening = false;
@@ -3113,8 +3128,56 @@ async function maybeOpenDirectSlot(why) {
 }
 
 const DIRECT_TERMINAL = new Set(['published', 'declined', 'failed']);
+// #1513 SHADOW — one line per resident record when its slot closes, set against the
+// receipt trail the runner already writes. Log-only and contained: it reads, it
+// never feeds back into the slot (the slot still ignores `turn-started`).
+function logResidentSlotShadow(args) {
+  try { console.log(`[#1513 shadow] resident-slot ${JSON.stringify(residentSlotShadow(args))}`); }
+  catch (e) { console.log(`[#1513 shadow] resident-slot log failed: ${e.message}`); }
+}
+// #1513 SHADOW — a turn that outlives its slot has not published when the slot's own line is
+// written, so that line can never carry its length: read only at close, turnMs would exist for
+// turns SHORTER than the slot and be missing at exactly the bound being sized (found in review:
+// round 1's 8m34s turn would have logged null). Timed-out and advanced records that still had
+// no terminal event go on this watch; when they finish, one `resident-turn-late` line carries
+// the turn. Bounded twice (age and count), and an entry that never finishes says so, so a
+// censored turn is visible as censored rather than absent.
+const LATE_WATCH_MAX_MS = Number(process.env.SCRUM_LATE_WATCH_MAX_MS ?? 3_600_000);
+const LATE_WATCH_MAX_ENTRIES = 100;
+const directLateWatch = [];
+let lateWatchPolling = false;
+async function pollLateWatch() {
+  try {
+    const now = Date.now();
+    const keep = [];
+    for (const w of directLateWatch.splice(0)) {
+      if (now - Date.parse(w.closedAt) > LATE_WATCH_MAX_MS) {
+        console.log(`[#1513 shadow] resident-turn-unfinished ${JSON.stringify({ seat: w.seat, cycle: w.cycle, closedAt: w.closedAt, watchedMs: now - Date.parse(w.closedAt) })}`);
+      } else keep.push(w);
+    }
+    directLateWatch.push(...keep);
+    for (const seat of [...new Set(directLateWatch.map((w) => w.seat))]) {
+      let list;
+      try { list = (await apiCall('GET', `/api/deliveries?to=${encodeURIComponent(seat)}`))?.deliveries ?? []; }
+      catch (e) { console.log(`[#1513 shadow] resident-turn-late deliveries unreadable for ${seat}: ${e.message}`); continue; }
+      for (const w of directLateWatch.filter((x) => x.seat === seat)) {
+        const mine = list.filter((d) => w.deliveryIds.includes(d.id));
+        if (mine.length !== w.deliveryIds.length || !mine.every((d) => DIRECT_TERMINAL.has(d.state))) continue;
+        directLateWatch.splice(directLateWatch.indexOf(w), 1);
+        console.log(`[#1513 shadow] resident-turn-late ${JSON.stringify(residentSlotShadow({ seat, cycle: w.cycle, slotOpenedAt: w.slotOpenedAt, deadline: w.deadline, outcome: 'late', closedAt: w.closedAt, deliveries: mine }))}`);
+      }
+    }
+  } catch (e) {
+    console.log(`[#1513 shadow] resident-turn-late poll failed: ${e.message}`);
+  }
+}
 async function directTick() {
   const st = directSegment.status();
+  const slotAtStart = st.slot;   // #1513 shadow: the slot's opening/deadline, before this tick can close it
+  if (directLateWatch.length && !lateWatchPolling) {   // #1513 — off the tick's path, never awaited
+    lateWatchPolling = true;
+    pollLateWatch().finally(() => { lateWatchPolling = false; });
+  }
   if (st.slot) {
     for (const rec of st.slot.records.filter((r) => r.state === 'open')) {
       const entry = directRecordDeliveries.get(rec.id);
@@ -3125,12 +3188,41 @@ async function directTick() {
       const mine = list.filter((d) => entry.deliveryIds.includes(d.id));
       if (mine.length !== entry.deliveryIds.length || !mine.every((d) => DIRECT_TERMINAL.has(d.state))) continue;
       const state = mine.some((d) => d.state === 'published') ? 'published' : mine.some((d) => d.state === 'declined') ? 'declined' : 'failed';
-      const r = directSegment.recordTerminal({ seat: rec.seat, state, now: new Date().toISOString() });
+      const closedAt = new Date().toISOString();
+      const r = directSegment.recordTerminal({ seat: rec.seat, state, now: closedAt });
+      logResidentSlotShadow({ seat: rec.seat, cycle: slotAtStart.cycle, slotOpenedAt: slotAtStart.openedAt, deadline: slotAtStart.deadline, outcome: state, closedAt, deliveries: mine });   // #1513
       directRecordDeliveries.delete(rec.id);
       console.log(`[#1362 direct] ${rec.seat} ${state} (${mine.length} record(s))${r.advanced ? ` → slot advanced: ${r.advanced.reason}` : ''}`);
     }
-    const t = directSegment.tick({ now: new Date().toISOString() });
-    if (t.advanced) for (const c of t.advanced.closed) directRecordDeliveries.delete(c.id);
+    const tickNow = new Date().toISOString();
+    // #1513 shadow: which records are still open going into the tick. `tick()` closes a
+    // timed-out record itself, BEFORE it builds `advanced.closed`, so on a timeout that
+    // list is empty and cannot be the source.
+    const openGoingIn = (directSegment.status().slot?.records ?? []).filter((r) => r.state === 'open').map((r) => ({ id: r.id, seat: r.seat, entry: directRecordDeliveries.get(r.id) }));
+    const t = directSegment.tick({ now: tickNow });
+    if (t.advanced) {
+      const outcome = t.advanced.reason === 'timeout' ? 'timeout' : 'advanced';
+      for (const rec of openGoingIn) {
+        if (!rec.entry) continue;
+        // read what the runner had recorded for it, off the tick's path
+        apiCall('GET', `/api/deliveries?to=${encodeURIComponent(rec.seat)}`)
+          .then((r) => {
+            const deliveries = (r?.deliveries ?? []).filter((d) => rec.entry.deliveryIds.includes(d.id));
+            logResidentSlotShadow({ seat: rec.seat, cycle: slotAtStart.cycle, slotOpenedAt: slotAtStart.openedAt, deadline: slotAtStart.deadline, outcome, closedAt: tickNow, deliveries });
+            // a turn with no terminal event yet is still running: watch it, or its length is never known
+            const finished = deliveries.length === rec.entry.deliveryIds.length && deliveries.every((d) => DIRECT_TERMINAL.has(d.state));
+            if (!finished) {
+              directLateWatch.push({ seat: rec.seat, cycle: slotAtStart.cycle, slotOpenedAt: slotAtStart.openedAt, deadline: slotAtStart.deadline, closedAt: tickNow, deliveryIds: rec.entry.deliveryIds });
+              while (directLateWatch.length > LATE_WATCH_MAX_ENTRIES) {
+                const w = directLateWatch.shift();
+                console.log(`[#1513 shadow] resident-turn-unfinished ${JSON.stringify({ seat: w.seat, cycle: w.cycle, closedAt: w.closedAt, dropped: 'watch list full' })}`);
+              }
+            }
+          })
+          .catch((e) => console.log(`[#1513 shadow] resident-slot deliveries unreadable for ${rec.seat}: ${e.message}`));
+      }
+      for (const c of t.advanced.closed) directRecordDeliveries.delete(c.id);
+    }
     if (t.advanced) console.log(`[#1362 direct] slot advanced: ${t.advanced.reason} cycle=${t.advanced.cycle}${t.advanced.closed.length ? ` closed-by-advance=${t.advanced.closed.map((c) => c.seat).join(',')}` : ''}`);
   }
   await maybeOpenDirectSlot('tick');
@@ -3412,7 +3504,8 @@ function tokenRingOnTimeout(leaseId, seatId, envelopeId) {
   // at 14:28:56Z and lease 6 at 14:33:56Z, re-delivering ring-held posts to seats
   // that had already had them by fan-out. A timeout in any other mode quiesces.
   if (tokenRingQuiesceIfOff('timeout')) return;
-  const { deliveries, needsTimeout } = tokenRingEngine.handleTimeout({ seatId, leaseId });
+  const { deliveries, needsTimeout, telemetry } = tokenRingEngine.handleTimeout({ seatId, leaseId });
+  logRingShadow(telemetry, null);   // #1513 — a stale timer that evicts a held lease is a mid-lease eviction too
   tokenRingDeliver(deliveries, needsTimeout);
   maybeOpenDirectSlot('stream-timeout').catch((e) => console.log(`[#1362 direct] open failed: ${e.message}`));   // #1362
 }
@@ -3482,6 +3575,20 @@ function tokenRingDeliver(deliveries, needsTimeout) {
 
 // #410 — token-ring delivery entry from a new commons post. Serializes through the
 // ring: at most the current holder's session receives one frozen turn-envelope.
+// #1513 SHADOW — one greppable line per RESPOND and per mid-lease eviction, so the
+// three defects are MEASURED before anything enforces (`grep '#1513 shadow'`).
+// Log-only: a throw here must never reach the ring, so it is contained.
+function logRingShadow(telemetry, postId) {
+  try {
+    const sh = telemetry?.shadow;
+    if (!sh) return;
+    if (sh.respond) console.log(`[#1513 shadow] respond ${JSON.stringify({ postId, ...sh.respond })}`);
+    for (const ev of sh.midLeaseEvictions ?? []) console.log(`[#1513 shadow] mid-lease-eviction ${JSON.stringify({ postId, ...ev })}`);
+  } catch (e) {
+    console.log(`[#1513 shadow] log failed: ${e.message}`);
+  }
+}
+
 function broadcastTokenRing(conversation) {
   const nSeats = seatRegistry.seats().length;
   if (nSeats > 0) tokenRingArmed = true;
@@ -3507,6 +3614,7 @@ function broadcastTokenRing(conversation) {
     id: conversation.id,
   });
   console.log(`[#410 token-ring] ${JSON.stringify(telemetry)}`); // debug-only; acceptance uses [#410 lifecycle]
+  logRingShadow(telemetry, conversation.id);
   tokenRingDeliver(deliveries, needsTimeout);
   // #1362 — the residents' turn comes after the stream segment: queue the post;
   // the slot opens when no stream lease is held (now, or after the holder's
