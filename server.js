@@ -257,6 +257,60 @@ const rosterScript = () => `<script>globalThis.__SCRUM_ROSTER__=${
   JSON.stringify(currentRoster()).replace(/</g, '\\u003c')
 };</script>`;
 
+// #1510 — an open tab never learns the UI was redeployed, so the owner tested the OLD
+// page (#1509: "those play bars were not present on my first view, but appear now").
+// The server already stamps what it serves in DEPLOYED-SHA; this exposes it and puts a
+// watcher in every page. Injected here, beside the roster, for the same reason: a new
+// page cannot forget it.
+//
+// The watcher NEVER reloads: a tab may hold an unsent draft, so it announces and waits
+// for the human. It compares the sha the page was SERVED with (embedded in the page
+// itself, so a deploy landing between the page load and a first fetch cannot become the
+// baseline) against /api/version. An unknown sha (a dev tree with no DEPLOYED-SHA, or an
+// unreadable/garbled file) is "cannot tell", never "changed": no baseline, no banner. A
+// failed poll (the server restarting is exactly when it fails) is ignored the same way.
+const DEPLOYED_SHA_RE = /^[0-9a-f]{40}$/;
+function deployedSha() {
+  try {
+    const sha = fs.readFileSync(path.join(STATIC_DIR, 'DEPLOYED-SHA'), 'utf8').trim();
+    return DEPLOYED_SHA_RE.test(sha) ? sha : null;
+  } catch { return null; }
+}
+// SCRUM_DEPLOY_WATCH_MS is a test seam (a browser test cannot wait half a minute); unset → 30 s.
+const DEPLOY_WATCH_MS = Number(process.env.SCRUM_DEPLOY_WATCH_MS) > 0 ? Number(process.env.SCRUM_DEPLOY_WATCH_MS) : 30000;
+// Text is built with textContent, never innerHTML; no dollar signs, because this string is
+// handed to String.replace and a dollar sequence in a replacement means something else.
+const deployWatchScript = () => `<script>(function(){
+var LOADED=${JSON.stringify(deployedSha())};
+if(!LOADED)return;
+var shown=false;
+function show(){
+  if(shown)return; shown=true;
+  var bar=document.createElement('div');
+  bar.setAttribute('data-deploy-banner','');
+  bar.setAttribute('role','status');
+  bar.setAttribute('aria-live','polite');
+  bar.style.cssText='position:fixed;left:50%;bottom:16px;transform:translateX(-50%);z-index:2147483000;display:flex;align-items:center;gap:12px;max-width:calc(100vw - 32px);padding:10px 14px;border-radius:10px;background:#1f2937;color:#fff;font:14px/1.3 system-ui,sans-serif;box-shadow:0 4px 18px rgba(0,0,0,.35)';
+  var t=document.createElement('span');
+  t.textContent='The board was updated \u2014 reload to see it.';
+  var b=document.createElement('button');
+  b.type='button';
+  b.textContent='Reload';
+  b.style.cssText='font:inherit;padding:4px 10px;border-radius:6px;border:0;background:#fff;color:#1f2937;cursor:pointer';
+  b.addEventListener('click',function(){location.reload();});
+  bar.appendChild(t); bar.appendChild(b);
+  (document.body||document.documentElement).appendChild(bar);
+}
+function check(){
+  if(shown)return;
+  fetch('/api/version',{cache:'no-store'}).then(function(r){return r.ok?r.json():null;}).then(function(v){
+    if(v&&v.sha&&v.sha!==LOADED)show();
+  }).catch(function(){});
+}
+setInterval(check,${DEPLOY_WATCH_MS});
+document.addEventListener('visibilitychange',function(){if(!document.hidden)check();});
+})();</script>`;
+
 // #119 — autonomous room. On a new commons post, fire a best-effort notify
 // to the MCP server, which emits a Channels notification to live sessions.
 // Unset → default to the localhost MCP server. Empty string → disabled.
@@ -10296,6 +10350,7 @@ const API_ROUTES = [
   { method: 'PUT',    re: /^\/api\/seats\/([^\/]+)\/state$/, fn: (req, res, m) => handleSeatDeclare(req, res, decodeURIComponent(m[1])) },
   { method: 'DELETE', re: /^\/api\/seats\/([^\/]+)\/state$/, fn: (req, res, m) => handleSeatClear(req, res, decodeURIComponent(m[1])) },
   { method: 'GET',    re: /^\/api\/roster$/,               fn: (req, res) => handleGetRoster(req, res) },
+  { method: 'GET',    re: /^\/api\/version$/,              fn: (req, res) => sendJSON(res, 200, { sha: deployedSha() }) },   // #1510 — read fresh: a deploy replaces the file, no restart needed
   { method: 'GET',    re: /^\/api\/config\/limits$/,       fn: (req, res) => handleGetConfigLimits(req, res) },
   { method: 'GET',    re: /^\/api\/config$/,               fn: (req, res) => handleGetConfig(req, res) },
   { method: 'GET',    re: /^\/api\/channel-status$/,       fn: (req, res) => handleChannelStatus(req, res) },
@@ -10478,8 +10533,11 @@ function serveStaticFile(req, res) {
     if (ext === '.html') {
       const html = content.toString('utf8');
       const marker = html.includes('</head>') ? '</head>' : '<body>';
+      // A replacer FUNCTION: the injected text is code, and a dollar sequence in a plain
+      // replacement string would be expanded by String.replace (#1510).
+      const injected = `${rosterScript()}${deployWatchScript()}`;
       content = Buffer.from(
-        html.includes(marker) ? html.replace(marker, `${rosterScript()}${marker}`) : rosterScript() + html,
+        html.includes(marker) ? html.replace(marker, () => `${injected}${marker}`) : injected + html,
         'utf8',
       );
     }
