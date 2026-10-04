@@ -32,7 +32,9 @@
  * `board` author. Never printed.
  *
  * Exit: the monitor's verdict code (OK 0 · UNAVAILABLE 3 · STALE 4 · NO-COPY 5 ·
- * UNVERIFIED-NEWEST 6), so launchd's record matches the monitor's; 2 usage. A failed
+ * UNVERIFIED-NEWEST 6), so launchd's record matches the monitor's; 7 when the verdict is OK but
+ * the alert state file is unwritable; 8 when an alert was NOT sent because its state could not
+ * be written first (fail-closed); 2 usage. A failed
  * post does not change the exit code; it is printed as `ALERT-DELIVERY FAILED`.
  */
 import fs from 'node:fs';
@@ -89,6 +91,9 @@ function writeAlertState(file, s, run = null) {
   fs.renameSync(tmp, file);
 }
 
+/** A state write that cannot fail the run: returns the error (or null). */
+function trySave(file, st, run) { try { writeAlertState(file, st, run); return null; } catch (e) { return `${file}: ${e?.message ?? e}`; } }
+
 /**
  * Pure. Add one undelivered post to the queue. A long board outage must not flood the
  * commons on recovery: only the LATEST reminder is kept (an older one is stale the
@@ -118,29 +123,34 @@ export async function alertOnce({ dest, board, key = null, store = null, stateFi
   const st = readAlertState(file);
   let posted = 0;
   // 1. Undelivered posts from earlier runs go first, in order. Stop at the first failure.
+  let stateError = null;
   while (st.pending.length) {
     try { await deliver({ board, body: st.pending[0].body, key, fetchImpl }); } catch (e) {
       const result = monitor({ dest, store, nowMs, intervalMs: DEFAULT_INTERVAL_MS, limitMs });
       const { post, next } = decide({ result, prev: st, nowMs, remindMs });
-      writeAlertState(file, { episode: next.episode, pending: post ? queue(st.pending, post) : st.pending }, { nowMs, verdict: result.verdict });
-      return { result, posted, deliveryError: `pending delivery failed: ${e?.message ?? e}` };
+      stateError = trySave(file, { episode: next.episode, pending: post ? queue(st.pending, post) : st.pending }, { nowMs, verdict: result.verdict });
+      return { result, posted, deliveryError: `pending delivery failed: ${e?.message ?? e}`, stateError };
     }
     st.pending.shift(); posted += 1;
-    writeAlertState(file, st);
+    stateError = trySave(file, st) ?? stateError;
   }
   // 2. This run's verdict.
   const result = monitor({ dest, store, nowMs, intervalMs: DEFAULT_INTERVAL_MS, limitMs });
   const { post, next } = decide({ result, prev: st, nowMs, remindMs });
-  if (!post) { writeAlertState(file, { episode: next.episode, pending: [] }, { nowMs, verdict: result.verdict }); return { result, posted, deliveryError: null }; }
+  if (!post) { stateError = trySave(file, { episode: next.episode, pending: [] }, { nowMs, verdict: result.verdict }) ?? stateError; return { result, posted, deliveryError: null, stateError }; }
   // WRITE-AHEAD: the text is persisted as pending BEFORE it is sent, so a process killed
   // mid-request leaves it to be delivered by the next run (even if the backups have
   // recovered by then). It is removed only after the board accepted it.
-  writeAlertState(file, { episode: next.episode, pending: queue([], post) }, { nowMs, verdict: result.verdict });
+  // FAIL-CLOSED: if the state CANNOT be written, nothing is sent (an untracked post would
+  // repeat every run). The run reports STATE-UNWRITABLE and exits non-zero (8); the
+  // independent watcher must catch that. Until it exists this is a stated delivery limit.
+  const aheadError = trySave(file, { episode: next.episode, pending: queue([], post) }, { nowMs, verdict: result.verdict });
+  if (aheadError) return { result, posted, deliveryError: null, stateError: aheadError, notSent: true };
   try { await deliver({ board, body: post, key, fetchImpl }); } catch (e) {
-    return { result, posted, deliveryError: e?.message ?? String(e) };   // pending already holds it
+    return { result, posted, deliveryError: e?.message ?? String(e), stateError };   // pending holds it, unless the state is unwritable
   }
-  writeAlertState(file, { episode: next.episode, pending: [] }, { nowMs, verdict: result.verdict });
-  return { result, posted: posted + 1, deliveryError: null };
+  stateError = trySave(file, { episode: next.episode, pending: [] }, { nowMs, verdict: result.verdict }) ?? stateError;
+  return { result, posted: posted + 1, deliveryError: null, stateError };
 }
 
 function parseArgs(argv) {
@@ -175,5 +185,8 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
   console.log(r.result.line);
   if (r.posted) console.log(`ALERT-DELIVERED ${r.posted} post(s) to ${a.board} (commons, author board)`);
   if (r.deliveryError) console.log(`ALERT-DELIVERY FAILED: ${r.deliveryError} (kept as pending; delivered first next run)`);
-  process.exit(EXIT[r.result.verdict]);
+  if (r.stateError) console.log(`STATE-UNWRITABLE: ${r.stateError} (alerts will repeat until fixed)`);
+  if (r.notSent) console.log('ALERT-NOT-SENT: state unwritable, fail-closed (an untracked post would repeat every run)');
+  // A broken state file must not look healthy: an unsent alert exits 8; OK + unwritable state exits 7.
+  process.exit(r.notSent ? 8 : r.stateError && r.result.verdict === 'OK' ? 7 : EXIT[r.result.verdict]);
 }
