@@ -926,7 +926,11 @@ function compileLg(c, digest) {
   where.push(`  BIND(?s + 1 AS ?s1)`);
   D('op', OP);
 
-  // precondition: the thread generation the caller read (deleteThread bumps it)
+  // precondition: the thread generation the caller read (deleteThread bumps it). This is the
+  // write FENCE against deleteThread: it sits in the same WHERE as the write, so the executor
+  // evaluates it atomically with it, and every domain triple is gated on ?ok — an lg.* write
+  // that lands after the generation moved is PRECONDITION_FAILED and writes nothing
+  // (tests/langgraph-saver-fences.test.mjs).
   if (g.gen === '0') pre.push(`    FILTER NOT EXISTS { ${THR} ${LG.gen} ?x_anyGen }`);
   else pre.push(`    ${THR} ${LG.gen} ?x_g .`, `    FILTER(?x_g = ${g.gen})`);
 

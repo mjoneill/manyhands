@@ -25,6 +25,18 @@
  *               branch, maintained by the transition table in the compiler;
  *   thread gen  bumped by deleteThread; it is part of every opId, so a deleted
  *               thread's ids can be written again.
+ *
+ * Fences against deleteThread (a reviewer's two requirements, 2026-10-04):
+ *   - WRITES: every compiled lg.* update carries the thread generation the
+ *     caller read as a precondition IN ITS OWN WHERE clause (compileLg), so the
+ *     executor evaluates it atomically with the write. A put / putWrites /
+ *     runTransition whose update lands after deleteThread bumped the generation
+ *     is PRECONDITION_FAILED and writes nothing; the saver then raises
+ *     ThreadDeletedError and does NOT rebuild the write for the new generation
+ *     (that would attach an old generation's writes to a new one).
+ *   - READS: getTuple and list are ONE SELECT, evaluated by the engine against
+ *     one store snapshot, so a concurrent deleteThread is seen entirely or not
+ *     at all: the complete checkpoint with all its writes, or nothing.
  */
 import { createHash, randomBytes } from 'node:crypto';
 import {
@@ -42,6 +54,11 @@ const STATUS = Object.fromEntries(['running', 'waiting', 'resumed', 'done', 'fai
 
 export class SaverWriteError extends Error {
   constructor(message, result) { super(message); this.result = result; }
+}
+
+/** A write built against a thread generation that deleteThread has since ended: nothing was written. */
+export class ThreadDeletedError extends SaverWriteError {
+  constructor(message, result) { super(message, result); this.name = 'ThreadDeletedError'; }
 }
 
 /** The assignee DECLARED in an interrupt payload ({assignee} on the value passed to interrupt()); never inferred. */
@@ -85,10 +102,17 @@ export class OxigraphSaver extends BaseCheckpointSaver {
 
   /**
    * Apply one intention built for the current thread generation. UNKNOWN is
-   * resolved by replaying the SAME intention (D2 §4); a PRECONDITION_FAILED
-   * caused by a moved generation is rebuilt once against the new generation.
+   * resolved by replaying the SAME intention (D2 §4).
+   *
+   * A PRECONDITION_FAILED caused by a moved generation means a deleteThread
+   * landed between the generation read and this update; the update's own
+   * generation guard already made it write nothing. A FENCED write (put,
+   * putWrites, runTransition) belongs to the deleted generation and is NOT
+   * rebuilt for the new one: it raises ThreadDeletedError (or, with
+   * allowPreconditionFailed, returns the PRECONDITION_FAILED result). Only
+   * deleteThread itself (fenced: false) is rebuilt for the new generation.
    */
-  async _apply(tid, build, { allowPreconditionFailed = false } = {}) {
+  async _apply(tid, build, { allowPreconditionFailed = false, fenced = true } = {}) {
     for (let attempt = 0; attempt < 3; attempt++) {
       const gen = await this._readGen(tid);
       const intention = build(gen);
@@ -100,7 +124,11 @@ export class OxigraphSaver extends BaseCheckpointSaver {
       if (r.outcome === 'APPLIED') return r;
       if (r.outcome === 'PRECONDITION_FAILED') {
         const now = await this._readGen(tid);
-        if (now !== gen) continue; // the thread was deleted underneath us: rebuild for the new generation
+        if (now !== gen) {
+          if (!fenced) continue; // deleteThread: delete whatever generation is current now
+          if (allowPreconditionFailed) return r;
+          throw new ThreadDeletedError(`${intention.kind} ${intention.opId}: thread deleted (generation ${gen} -> ${now}); nothing was written`, r);
+        }
         if (allowPreconditionFailed) return r;
         throw new SaverWriteError(`${intention.kind} ${intention.opId}: PRECONDITION_FAILED`, r);
       }
@@ -173,7 +201,7 @@ export class OxigraphSaver extends BaseCheckpointSaver {
     const thread = String(threadId);
     await this._apply(thread, (gen) => ({
       kind: 'lg.deleteThread', opId: this._op('delete', thread, gen), actor: this.actor, lg: { scope: this.scope, thread, gen },
-    }));
+    }), { fenced: false });
   }
 
   /**
