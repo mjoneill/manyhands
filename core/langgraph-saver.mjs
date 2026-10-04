@@ -40,8 +40,8 @@
  *     checkpoint it removes with its generation (lg:deletedInGen). The compiled
  *     put (by its parent) and putWrites (by its checkpoint) refuse a tombstoned,
  *     not-live-again checkpoint inside the same WHERE. A put refused that way is
- *     followed by lg.reap: its own checkpoint is tombstoned and any writes for it
- *     accepted as writes-before-put are removed. (A configurable key was not
+ *     followed (NON-STRICT only, best effort) by lg.reap: its own checkpoint is
+ *     tombstoned and any writes for it accepted as writes-before-put are removed. (A configurable key was not
  *     used: LangGraph JS discards the config put returns, and the conformance
  *     suite compares getTuple's config with toEqual.)
  *   - RUNS: a LangGraph run passes ONE config.signal object (made per stream()
@@ -64,8 +64,9 @@
  * with no birth generation — no signal, or a signal this saver never saw read
  * the thread — is rejected with UnfencedWriteError BEFORE anything is sent; it
  * never falls back to the current generation. The atomic in-update generation
- * guard is then the fence on its own; tombstones and reap remain as defense in
- * depth. Default false keeps signal-less callers (the official conformance
+ * guard is then the fence on its own; the tombstone filter remains as defense in
+ * depth, and reap is NOT used (it acts at the current generation and could remove
+ * a new run's writes-before-put for a reused checkpoint id). Default false keeps signal-less callers (the official conformance
  * suite) working, with the weaker non-strict fences.
  *   - READS: getTuple and list are ONE SELECT, evaluated by the engine against
  *     one store snapshot, so a concurrent deleteThread is seen entirely or not
@@ -253,14 +254,20 @@ export class OxigraphSaver extends BaseCheckpointSaver {
       // fenced: the generation moved under this put, or (generation unchanged) its parent is
       // tombstoned. Either way an old run's checkpoint can never be stored: reap it (lg.reap applies
       // only when the parent IS tombstoned), then report.
-      if (parentCid != null) await this._reap(thread, ns, checkpoint.id, parentCid).catch(() => {}); // best effort: the put is refused either way
+      // NON-STRICT ONLY, best-effort cleanup. Never in strict mode: reap reads the CURRENT generation,
+      // so it could delete a NEW run's legitimate writes-before-put for this same checkpoint id.
+      if (parentCid != null && !this.strictGenerations) await this._reap(thread, ns, checkpoint.id, parentCid).catch(() => {});
       if (e instanceof ThreadDeletedError) throw e;
       throw new ThreadDeletedError(`lg.put ${checkpoint.id}: its parent ${parentCid} was removed by deleteThread; nothing was written`, e.result);
     }
     return { configurable: { thread_id: tid, checkpoint_ns: ns, checkpoint_id: checkpoint.id } };
   }
 
-  /** Defense in depth after a refused put (see the header); never what makes a stale write fail. */
+  /**
+   * NON-STRICT best-effort cleanup after a refused put (see the header); never what makes a stale
+   * write fail, and never called in strict mode: it runs at the current generation, so it cannot
+   * tell an old run's orphan writes from a new run's writes-before-put for a reused checkpoint id.
+   */
   _reap(thread, ns, cid, parentCid) {
     return this._apply(thread, (gen) => ({
       kind: 'lg.reap', opId: this._op('reap', thread, gen, `ns:${ns}`, cid), actor: this.actor,

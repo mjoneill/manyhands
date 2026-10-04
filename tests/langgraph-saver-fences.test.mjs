@@ -505,3 +505,37 @@ test('#1562 R2c strict regression: ONE caller AbortController signal reused acro
     assert.deepEqual((await saver.getTuple({ configurable: { thread_id: thread } }))?.checkpoint.channel_values.log, ['r2', 'a', 'b']);
   }
 });
+
+test('#1562 R2c strict, PRODUCTION saver (nothing stubbed): an old run\'s refused put of child C never touches a NEW run\'s writes-before-put for C', { skip: SKIP }, async () => {
+  const scope = newScope();
+  const thread = 'strict-noreap-prod';
+  const outcomes = [];
+  const rec = { ...client, async update(i, o) { const r = await client.update(i, o); outcomes.push([i.kind, r.outcome]); return r; } };
+  const s = new OxigraphSaver({ client: rec, scope, strictGenerations: true }); // unmodified
+  const P = uuid6(-1), C = uuid6(0);
+  // (1) the old run stores its parent P; the owner deletes the thread
+  const run1 = runCfg(thread);
+  await s.getTuple(run1);
+  await s.put(run1, cp(P, { a: 'old' }), meta(-1), { a: 1 });
+  await new OxigraphSaver({ client, scope }).deleteThread(thread);
+  // (2) a NEW-generation run legitimately writes for child C before C's put
+  const run2 = runCfg(thread);
+  await s.getTuple(run2);
+  await s.putWrites(withId(run2, C), [['out', 'new-run-early']], 'taskN');
+  const before = await checkpointTriples(scope, thread, C);
+  assert.ok(before.length > 0, 'the new run\'s writes for C are stored');
+  const n0 = outcomes.length;
+  // (3) the old run's put of C (parent P) lands late
+  const e = await s.put(withId(run1, P), cp(C, { a: 'stale' }, 2), meta(0), { a: 2 }).then(() => null, (x) => x);
+  assert.equal(e?.name, 'ThreadDeletedError', `${e?.name}: ${e?.message}`);
+  // (4) the new run's writes for C are byte-identical, and C is not tombstoned
+  assert.deepEqual(await checkpointTriples(scope, thread, C), before, `the new run's writes for C were changed (updates sent: ${JSON.stringify(outcomes.slice(n0))})`);
+  const tomb = await client.ask(`ASK { <${lgMint.cp(scope, thread, '', C)}> <urn:ex:lg/deletedInGen> ?g }`);
+  assert.equal(tomb.boolean, false, 'C was tombstoned');
+  assert.deepEqual(outcomes.slice(n0), [['lg.put', 'PRECONDITION_FAILED']], `strict mode sent more than the refused put: ${JSON.stringify(outcomes.slice(n0))}`);
+  // and the new run completes C normally
+  const head = await s.getTuple(run2);
+  assert.equal(head, undefined);
+  await s.put(run2, cp(C, { a: 'new' }, 3), meta(-1), { a: 3 });
+  assert.deepEqual((await s.getTuple(withId(runCfg(thread), C))).pendingWrites.map((w) => w[2]), ['new-run-early']);
+});
