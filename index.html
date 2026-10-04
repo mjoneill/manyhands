@@ -2297,7 +2297,12 @@ function loadFromLocalStorage() {
 function restoreFromLocalStorage() {
   const saved = loadFromLocalStorage();
   cards.length = 0; // Clear without reassigning
-  saved.forEach(c => cards.push(c));
+  saved.forEach(c => {
+    // #1583 — a create cannot still be in flight across a reload: a card
+    // stored as 'pending' was never confirmed, so it is local-only.
+    if (c && c._unsynced === 'pending') c._unsynced = 'failed';
+    cards.push(c);
+  });
 }
 
 // ── JSON File Sync ──
@@ -2440,8 +2445,21 @@ function _cardForSave(card) {
 }
 
 async function saveToJSONFile() {
+  // #1583 — WAIT FOR ANY CREATE ON THE WIRE. /api/save replaces the stored
+  // card list with this tab's, and a card whose POST /api/cards has not been
+  // answered is not in it yet (it is still provisional, and excluded below).
+  // Serializing now would DELETE the card the server has just created. So the
+  // whole-board save is built only after every in-flight create has settled
+  // and been adopted.
+  if (_createInFlight.size > 0) {
+    const inFlight = [..._createInFlight.values()];
+    return _trackPendingWrite(Promise.allSettled(inFlight).then(() => saveToJSONFile()));
+  }
   const payload = {
-    cards: cards.map(_cardForSave), // shallow clone, minus derived fields
+    // #1583 — a card the server has not created yet is NOT this save's to
+    // write: POST /api/cards owns its birth, and sending it here too would
+    // create it twice under two ids.
+    cards: cards.filter((c) => !c._unsynced).map(_cardForSave), // shallow clone, minus derived fields
     columns: columns.map(c => ({...c})), // persist column order + names
     nextShortId: nextShortId,
     lastUpdated: new Date().toISOString()
@@ -2493,7 +2511,7 @@ async function saveToJSONFile() {
           const conflicts = await _mergeStaleCards(refused.staleCards);
           if (conflicts.length === 0) {
             const retry = {
-              cards: cards.map(c => ({...c})), columns: columns.map(c => ({...c})),
+              cards: cards.filter((c) => !c._unsynced).map(c => ({...c})), columns: columns.map(c => ({...c})),
               nextShortId, lastUpdated: new Date().toISOString(),
             };
             _testHookCapturePayload(retry);
@@ -2951,6 +2969,18 @@ function _normalizeAssignees(value) {
   return ['unassigned'];
 }
 
+// #1583 — one past the highest numeric order in `column` (0 when empty);
+// mirrors the server's nextOrderInColumn. Provisional only — see createCard.
+function _endOfColumnOrder(column) {
+  let max = -1;
+  for (const c of cards) {
+    if (!c || c.column !== column) continue;
+    const o = Number(c.order);
+    if (Number.isFinite(o) && o > max) max = o;
+  }
+  return Math.floor(max) + 1;
+}
+
 function createCard(title, description, type, assignee, labels, column, priority, forWhom) {
   const now = new Date().toISOString();
   return {
@@ -2976,7 +3006,11 @@ function createCard(title, description, type, assignee, labels, column, priority
     // claimant: assigning a card to someone is not a claim that they wrote it,
     // and inventing an author is worse than admitting we don't have one.
     createdBy: chosenIdentity(),
-    order: cards.length,
+    // #1583 — END OF ITS COLUMN, provisionally. `cards.length` was a GLOBAL
+    // count and could tie or undercut an order already in the column. The
+    // server allocates the real value under its write lock; this one only
+    // places the tile until the server's answer replaces it.
+    order: _endOfColumnOrder(column || 'backlog'),
     column: column || 'backlog',
     shortId: nextShortId++,
     priority: priority || null,
@@ -2996,9 +3030,139 @@ function addCard(title, description, type, assignee, labels, column, priority, r
     }
   }
   saveToLocalStorage();
-  saveToJSONFile(); // Fire-and-forget JSON sync
+  // #1583 (#118 slice 1) — created through POST /api/cards, NOT the whole-board
+  // save. The card above is PROVISIONAL: it exists so the page (and the
+  // file:// lane, which has no server) has something to hold, but its id,
+  // shortId, order and version are the client's guesses, and the server's 201
+  // replaces every one of them. Until then it is marked `_unsynced` and kept
+  // OUT of any whole-board save — two writers creating one card is how a
+  // duplicate is born.
+  _persistNewCard(card);
   _testHookMarkSaved();
   return card;
+}
+
+// The four edge types a writer may assert (the maintained inverse is the
+// server's job, #614/#669).
+function _writableRelationships(rel) {
+  const out = {};
+  for (const t of RELATIONSHIP_TYPES) out[t] = (rel && Array.isArray(rel[t])) ? [...rel[t]] : [];
+  return out;
+}
+
+// Keys the create/PATCH responses carry ABOUT the request, never fields of the card.
+const RESPONSE_ONLY_FIELDS = ['ignoredFields', 'refusedFields', 'redirectedFields', 'similarCards'];
+
+function _trackPendingWrite(p) {
+  _pendingSaves.push(p);   // the poll skips while this is non-empty; the test wrapper drains it
+  p.finally(() => {
+    const i = _pendingSaves.indexOf(p);
+    if (i >= 0) _pendingSaves.splice(i, 1);
+  });
+  return p;
+}
+
+// A create still on the wire, by card object, so an edit made before the
+// server answered can wait for the real id and version instead of guessing.
+const _createInFlight = new Map();
+
+function _persistNewCard(card) {
+  const provisionalId = card.id;
+  const provisionalShortId = card.shortId;
+  card._unsynced = 'pending';
+  const body = {
+    title: card.title,
+    description: card.description,
+    type: card.type,
+    assignees: card.assignees,
+    labels: card.labels,
+    priority: card.priority,
+    column: card.column,
+    relationships: _writableRelationships(card.relationships),
+    // ORDER IS DELIBERATELY ABSENT: the server allocates end-of-column under
+    // its write lock, which a client snapshot cannot do atomically.
+    ...(card.for ? { for: card.for } : {}),
+    ...(card.createdBy ? { createdBy: card.createdBy } : {}),
+  };
+  const p = (async () => {
+    const pendingTimer = setTimeout(() => _setSaveStatus('saving', 'Saving…'), SAVE_PENDING_DELAY_MS);
+    let res = null;
+    let server = null;
+    try {
+      res = await fetch(API_BASE + '/api/cards', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      try { server = await res.json(); } catch { server = null; }
+    } catch (e) {
+      res = null;
+    }
+    clearTimeout(pendingTimer);
+    const created = res && res.ok && server && typeof server.id === 'string' && Number.isInteger(server.shortId);
+    if (!created) {
+      card._unsynced = 'failed';   // (localStorage already holds it from addCard; a reload re-reads 'pending' as 'failed')
+      _setSaveStatus('failed', !res
+        ? 'Not saved — cannot reach the server, so the new card was not created. It is on this screen only.'
+        : `Not saved — the server did not create the new card (${res.ok ? 'unexpected reply' : res.status}`
+          + `${server && server.error ? ': ' + server.error : ''}). It is on this screen only.`);
+      _replaceTile(provisionalId, card);
+      return false;
+    }
+    _adoptCreatedCard(card, server, provisionalId, provisionalShortId);
+    _setSaveStatus('saved', 'Saved');
+    return true;
+  })();
+  _createInFlight.set(card, p);
+  p.finally(() => _createInFlight.delete(card));
+  return _trackPendingWrite(p);
+}
+
+// The server's record REPLACES the provisional card, in place (same object, so
+// any reference the page holds stays valid).
+function _adoptCreatedCard(card, server, provisionalId, provisionalShortId) {
+  for (const k of Object.keys(card)) delete card[k];
+  Object.assign(card, server);
+  for (const k of RESPONSE_ONLY_FIELDS) delete card[k];
+  // Maintained inverses this tab wrote locally under the PROVISIONAL shortId
+  // are renamed to the server's — only on the targets this card names, so an
+  // unrelated card that happens to own that number is never touched.
+  if (provisionalShortId !== card.shortId) {
+    for (const [type, inv] of Object.entries(RELATIONSHIP_INVERSE_OF)) {
+      for (const sid of (card.relationships && card.relationships[type]) || []) {
+        const target = cards.find((c) => c && c.shortId === sid && c !== card);
+        const list = target && target.relationships && target.relationships[inv];
+        if (!Array.isArray(list)) continue;
+        target.relationships[inv] = list.map((x) => (x === provisionalShortId ? card.shortId : x));
+      }
+    }
+  }
+  if (Number.isInteger(card.shortId) && nextShortId <= card.shortId) nextShortId = card.shortId + 1;
+  if (typeof window.cardContentKey === 'function') _hydratedKeys.set(card.id, window.cardContentKey(card));
+  if (editingCardId === provisionalId) editingCardId = card.id;
+  saveToLocalStorage();
+  _replaceTile(provisionalId, card);
+}
+
+// Swap ONE tile for a fresh render, without a whole-board render: a full render
+// right after a create would steal focus from the add form, and would rebuild
+// any editor open elsewhere from the card object rather than what is typed.
+function _replaceTile(oldId, card) {
+  if (typeof document === 'undefined') return;
+  const tile = document.querySelector(`.card[data-id="${CSS.escape(oldId)}"]`);
+  if (!tile) return;
+  if (editingCardId === card.id) { tile.dataset.id = card.id; return; }   // never rebuild an open editor
+  const fresh = renderCardOrEdit(card);
+  tile.replaceWith(fresh);
+  // Position: the server's order is the truth; re-seat the tile within its
+  // column body if the provisional guess differed.
+  const body = fresh.parentElement;
+  if (!body) return;
+  const siblings = [...body.querySelectorAll(':scope > .card')];
+  const byId = new Map(cards.map((c) => [c.id, c]));
+  const after = siblings.find((el) => el !== fresh && byId.has(el.dataset.id)
+    && (Number(byId.get(el.dataset.id).order) || 0) > (Number(card.order) || 0));
+  if (after && fresh.nextElementSibling !== after) body.insertBefore(fresh, after);
 }
 
 // ── Card Relationships (Card #42) ──
@@ -3242,7 +3406,7 @@ function renderCard(card) {
   <button class="card-move-btn card-move-right" data-action="move-right" ${_atLast ? 'disabled' : ''} title="Move to next column" aria-label="Move to next column">▶</button>
   <div class="card-top">
     <span class="card-emoji">${emoji}</span>
-    <span class="card-shortid">#${card.shortId}</span>${priorityBadge}${claimBadge}${blockedBadge}${blockingBadge}
+    <span class="card-shortid">#${card._unsynced === 'pending' ? '…' : card.shortId}</span>${priorityBadge}${claimBadge}${blockedBadge}${blockingBadge}
     ${assigneeBadgesHtml}
     ${card.for ? `<span class="card-for" title="For">For: ${escapeHTML(card.for)}</span>` : ''}
   </div>
@@ -3524,11 +3688,121 @@ function saveEdit(cardId, root = null) {
 
   editingCardId = null;
   saveToLocalStorage();
-  const saved = saveToJSONFile(); // fire-and-forget for the column path; awaited by the pop-out (#1365)
+  // #1583 (#118 slice 1) — PATCH /api/cards/:id under ifVersion, not the
+  // whole-board save. Fire-and-forget for the column path; awaited by the
+  // pop-out (#1365), which shows its own conflict view on `false`.
+  const saved = _patchEditedCard(card, { reopenOnFailure: !root });
   _testHookMarkSaved();
-  _releaseEditDraft(cardId);   // #1366 — the text is the card's now (local-first, synced by the line above)
   renderBoard();
   return saved;
+}
+
+// #1583 — one card's edit, as a compare-and-swap (#534). The version declared
+// is the one this tab holds; a seat that wrote in between moved the server
+// past it and the write is REFUSED (409), never merged over and never retried.
+// The user's edit is left in `card` and, on the column path, the editor is
+// reopened on it — so the exact text they typed is still in front of them.
+// The draft (#1366) is released only once the server has the text.
+function _patchEditedCard(card, { reopenOnFailure }) {
+  const reopen = () => {
+    if (!reopenOnFailure || editingCardId !== null) return;   // never hijack another open editor
+    if (!cards.includes(card)) return;
+    const cardId = card.id;   // read late: an adopted create has changed it
+    const w = _editDescWatches.get(cardId);
+    if (w) { try { w.stop(); w.unregister?.(); } catch { /* keep the draft */ } _editDescWatches.delete(cardId); }
+    editingCardId = cardId;
+    renderBoard();
+  };
+  // The edit as typed, captured NOW: if the card's create is still in flight,
+  // adopting the server's record replaces every field, and the edit is
+  // re-applied on top of it before the PATCH goes out.
+  const edit = {
+    title: card.title,
+    description: card.description,
+    type: card.type,
+    assignees: card.assignees,
+    column: card.column,
+    priority: card.priority,
+    labels: card.labels,
+    for: card.for,
+    relationships: _writableRelationships(card.relationships),
+  };
+  const createInFlight = card._unsynced === 'pending' ? _createInFlight.get(card) : null;
+  const who = chosenIdentity();
+  const p = (async () => {
+    if (createInFlight) {
+      try { await createInFlight; } catch { /* settled either way */ }
+      if (!card._unsynced) {
+        for (const [k, v] of Object.entries(edit)) {
+          if (k === 'relationships') card.relationships = { ...(card.relationships || {}), ...v };
+          else card[k] = v;
+        }
+      }
+    }
+    if (card._unsynced) {
+      // Never created on the server: the edit is kept on this screen (it is
+      // already in the card), and nothing pretends it was stored.
+      _setSaveStatus('failed', 'Not saved — this card was never created on the server; it and your edit exist only on this screen.');
+      return false;
+    }
+    return _sendCardPatch(card, edit, who, reopen);
+  })();
+  return _trackPendingWrite(p);
+}
+
+async function _sendCardPatch(card, edit, who, reopen) {
+  const cardId = card.id;
+  const body = {
+    ...edit,
+    // An unversioned (legacy) card reads as 0 on the server, so 0 is the
+    // honest declaration for it — not an absent precondition.
+    ifVersion: Number.isInteger(card.version) && card.version >= 0 ? card.version : 0,
+    ...(who ? { by: who } : {}),
+  };
+  {
+    const pendingTimer = setTimeout(() => _setSaveStatus('saving', 'Saving…'), SAVE_PENDING_DELAY_MS);
+    let res = null;
+    let server = null;
+    try {
+      res = await fetch(API_BASE + '/api/cards/' + encodeURIComponent(cardId), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      try { server = await res.json(); } catch { server = null; }
+    } catch (e) {
+      res = null;
+    }
+    clearTimeout(pendingTimer);
+    if (!res) {
+      _setSaveStatus('failed', 'Not saved — cannot reach the server. Your edit is still in the editor.');
+      reopen();
+      return false;
+    }
+    if (res.status === 409) {
+      _setSaveStatus('failed', `Not saved — #${card.shortId} changed elsewhere while you were editing it. `
+        + 'Your edit is still in the editor; reload to see their version, then reapply.');
+      reopen();
+      return false;
+    }
+    if (!res.ok) {
+      _setSaveStatus('failed', `Not saved — the server refused (${res.status}`
+        + `${server && server.error ? ': ' + server.error : ''}). Your edit is still in the editor.`);
+      reopen();
+      return false;
+    }
+    // Accepted. The server's copy is the truth from here: its version is the
+    // next ifVersion, and the baseline (#466) is what it stored.
+    if (server && server.id === cardId) {
+      for (const [k, v] of Object.entries(server)) if (!RESPONSE_ONLY_FIELDS.includes(k)) card[k] = v;
+      if (typeof window.cardContentKey === 'function') _hydratedKeys.set(card.id, window.cardContentKey(card));
+      saveToLocalStorage();
+      _replaceTile(cardId, card);
+    }
+    _releaseEditDraft(cardId);   // #1366 — the server has the text now
+    _setSaveStatus('saved', 'Saved');
+    return true;
+  }
 }
 
 // #1366 — an edit draft is released when the edit is committed or explicitly

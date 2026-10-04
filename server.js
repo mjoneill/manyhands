@@ -8985,6 +8985,22 @@ function handleGetCard(req, res, idOrShortId) {
   }
 }
 
+/**
+ * #1583 — the order that puts a new card LAST in `column`: one past the
+ * highest numeric order already there, or 0 for an empty column. Non-numeric
+ * orders are ignored rather than read as NaN (which would poison the max).
+ * Must be called under withWriteLock against the board being written.
+ */
+function nextOrderInColumn(cardsArr, column) {
+  let max = -1;
+  for (const c of cardsArr) {
+    if (!c || c.column !== column) continue;
+    const o = Number(c.order);
+    if (Number.isFinite(o) && o > max) max = o;
+  }
+  return Math.floor(max) + 1;
+}
+
 async function handleCreateCard(req, res) {
   try {
     const raw = await readBody(req);
@@ -9026,6 +9042,12 @@ async function handleCreateCard(req, res) {
       // the card it is resolving, so a create cannot canonicalise against a
       // map that was replaced while this request was in flight.
       const card = createCardFromPayload(body, data.nextShortId, aliasMap(data));
+      // #1583 — END OF ITS COLUMN, allocated HERE, inside the write lock. A
+      // create that names no order used to be born at 0, colliding with every
+      // other API-created card at the top of its column. Computed against the
+      // board as read under the lock, so two simultaneous creates cannot read
+      // the same maximum. An explicit number (0 included) is still the caller's.
+      if (typeof body.order !== 'number') card.order = nextOrderInColumn(data.cards, card.column);
       data.cards.push(card);
       if (card.parent != null) applyApexLabels(data.cards, card.id);   // #902 item 4 — born labelled
       data.nextShortId = (data.nextShortId || 1) + 1;

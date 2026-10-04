@@ -84,11 +84,15 @@ test('#1025 ⭐ THE CONTROL — a board that genuinely CHANGED mid-flight is sti
     // edit — trading a visible double-write for invisible data loss, which
     // is the same defect wearing the remedy's clothes.
     const TITLE = 'changed while the first save was on the wire';
-    // Drive the REAL path: addCard mutates the board and fires its own save,
-    // which is exactly the sequence a person produces by editing during a save.
+    // A real board change made while the first whole-board save is on the
+    // wire, then its own save. (#1583: this used to be driven by addCard, which
+    // now creates through POST /api/cards and no longer reaches this guard.
+    // The same change — a new card in the array, then a whole-board save — is
+    // made directly, which is the shape the remaining whole-board callers have.)
     await page.evaluate((t) => {
       window.saveToJSONFile();
-      window.addCard(t, '', 'task', 'sage', [], 'backlog', null);
+      cards.push(createCard(t, '', 'task', 'sage', [], 'backlog', null));
+      window.saveToJSONFile();
       return null;
     }, TITLE);
 
