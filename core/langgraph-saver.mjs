@@ -34,6 +34,24 @@
  *     is PRECONDITION_FAILED and writes nothing; the saver then raises
  *     ThreadDeletedError and does NOT rebuild the write for the new generation
  *     (that would attach an old generation's writes to a new one).
+ *   - OLD RUNS: a run that keeps writing after the delete reads the NEW
+ *     generation, so the generation guard alone cannot stop it. What its config
+ *     still carries is its old checkpoint id, and deleteThread tombstones every
+ *     checkpoint it removes with its generation (lg:deletedInGen). The compiled
+ *     put (by its parent) and putWrites (by its checkpoint) refuse a tombstoned,
+ *     not-live-again checkpoint inside the same WHERE. A put refused that way is
+ *     followed by lg.reap: its own checkpoint is tombstoned and any writes for it
+ *     accepted as writes-before-put are removed. (A configurable key was not
+ *     used: LangGraph JS discards the config put returns, and the conformance
+ *     suite compares getTuple's config with toEqual.)
+ *   - RUNS: a LangGraph run passes ONE config.signal object (made per stream()
+ *     call) on its getTuple at loop start and on every put / putWrites after.
+ *     The generation the run was BORN in — the one its first getTuple read, in
+ *     the same SELECT as the checkpoint — is kept per (signal, thread), and every
+ *     write of that run is compiled for that generation, so the in-update guard
+ *     refuses it once deleteThread has moved on, even for checkpoints the store
+ *     has never seen. A call without a signal (a direct caller) uses the current
+ *     generation and relies on the tombstones above.
  *   - READS: getTuple and list are ONE SELECT, evaluated by the engine against
  *     one store snapshot, so a concurrent deleteThread is seen entirely or not
  *     at all: the complete checkpoint with all its writes, or nothing.
@@ -86,6 +104,36 @@ export class OxigraphSaver extends BaseCheckpointSaver {
     // No in-process generation cache: a stale generation would reuse an old opId, and the
     // duplicate guard would then return that op's OLD receipt (APPLIED) for data a
     // deleteThread has since removed. The store is the only memory (D2 proofs A2 §5).
+    // The one exception is deliberate: the generation a RUN was born in (see the header), keyed
+    // by the run's own config.signal object and dropped with it. A stale value there is the
+    // point — it is what makes the run's late writes fail.
+    this._runGens = new WeakMap(); // signal -> Map(thread -> Promise<gen>)
+  }
+
+  _runMap(config) {
+    const k = config?.signal;
+    if (!k || typeof k !== 'object') return null;
+    let m = this._runGens.get(k);
+    if (!m) this._runGens.set(k, (m = new Map()));
+    return m;
+  }
+
+  /** The generation a write is built for: the run's birth generation if it has one, else the current. */
+  _genFor(config, tid) {
+    const m = this._runMap(config);
+    if (!m) return this._readGen(tid);
+    if (!m.has(tid)) {
+      const p = this._readGen(tid);
+      m.set(tid, p); // concurrent first writes of one run share ONE read
+      p.catch(() => m.delete(tid));
+    }
+    return m.get(tid);
+  }
+
+  /** A read registers the generation it saw as the run's birth generation (first read wins). */
+  _bornAt(config, tid, gen) {
+    const m = this._runMap(config);
+    if (m && !m.has(tid)) m.set(tid, Promise.resolve(gen));
   }
 
   // ---------- writes ----------
@@ -112,9 +160,9 @@ export class OxigraphSaver extends BaseCheckpointSaver {
    * allowPreconditionFailed, returns the PRECONDITION_FAILED result). Only
    * deleteThread itself (fenced: false) is rebuilt for the new generation.
    */
-  async _apply(tid, build, { allowPreconditionFailed = false, fenced = true } = {}) {
+  async _apply(tid, build, { allowPreconditionFailed = false, fenced = true, config = null } = {}) {
     for (let attempt = 0; attempt < 3; attempt++) {
-      const gen = await this._readGen(tid);
+      const gen = fenced ? await this._genFor(config, tid) : await this._readGen(tid);
       const intention = build(gen);
       let r = await this.client.update(intention);
       for (let k = 0; r.outcome === 'UNKNOWN' && k < this.unknownRetries; k++) {
@@ -166,9 +214,24 @@ export class OxigraphSaver extends BaseCheckpointSaver {
       channelVersions: Object.entries(checkpoint.channel_versions ?? {}).map(([channel, v]) => ({ channel, version: String(v) })),
       blobs,
     };
-    await this._apply(thread, (gen) => ({
-      kind: 'lg.put', opId: this._op('put', thread, gen, `ns:${ns}`, checkpoint.id), actor: this.actor, lg: { ...lg, gen },
-    }));
+    try {
+      await this._apply(thread, (gen) => ({
+        kind: 'lg.put', opId: this._op('put', thread, gen, `ns:${ns}`, checkpoint.id), actor: this.actor, lg: { ...lg, gen },
+      }), { config });
+    } catch (e) {
+      if (!(e instanceof ThreadDeletedError) && e?.result?.outcome !== 'PRECONDITION_FAILED') throw e;
+      // fenced: the generation moved under this put, or (generation unchanged) its parent is
+      // tombstoned. Either way an old run's checkpoint can never be stored: reap it (lg.reap applies
+      // only when the parent IS tombstoned), then report.
+      if (parentCid != null) {
+        await this._apply(thread, (gen) => ({
+          kind: 'lg.reap', opId: this._op('reap', thread, gen, `ns:${ns}`, checkpoint.id), actor: this.actor,
+          lg: { scope: this.scope, thread, ns, gen, cid: checkpoint.id, parentCid },
+        }), { allowPreconditionFailed: true }).catch(() => {}); // best effort: the put is refused either way
+      }
+      if (e instanceof ThreadDeletedError) throw e;
+      throw new ThreadDeletedError(`lg.put ${checkpoint.id}: its parent ${parentCid} was removed by deleteThread; nothing was written`, e.result);
+    }
     return { configurable: { thread_id: tid, checkpoint_ns: ns, checkpoint_id: checkpoint.id } };
   }
 
@@ -191,10 +254,16 @@ export class OxigraphSaver extends BaseCheckpointSaver {
     for (let i = 0; i < writes.length; i++) { const w = byIdx.get(i); dedup.set(w.idx, w); }
     const ws = [...dedup.values()];
     const h = createHash('sha256').update(JSON.stringify([ws, resumer])).digest('hex').slice(0, 24);
-    await this._apply(thread, (gen) => ({
-      kind: 'lg.putWrites', opId: this._op('writes', thread, gen, `ns:${ns}`, cid, String(taskId), h), actor: this.actor,
-      lg: { scope: this.scope, thread, ns, gen, cid, taskId: String(taskId), resumer, writes: ws },
-    }));
+    try {
+      await this._apply(thread, (gen) => ({
+        kind: 'lg.putWrites', opId: this._op('writes', thread, gen, `ns:${ns}`, cid, String(taskId), h), actor: this.actor,
+        lg: { scope: this.scope, thread, ns, gen, cid, taskId: String(taskId), resumer, writes: ws },
+      }), { config });
+    } catch (e) {
+      if (e instanceof ThreadDeletedError || e?.result?.outcome !== 'PRECONDITION_FAILED') throw e;
+      // the generation did not move, so the refusal is the tombstone fence
+      throw new ThreadDeletedError(`lg.putWrites ${cid}: that checkpoint was removed by deleteThread; nothing was written`, e.result);
+    }
   }
 
   async deleteThread(threadId) {
@@ -216,7 +285,7 @@ export class OxigraphSaver extends BaseCheckpointSaver {
     const r = await this._apply(thread, (gen) => ({
       kind: 'lg.runTransition', opId: this._op('run', thread, gen, `ns:${ns}`, cid, to), actor: this.actor,
       lg: { scope: this.scope, thread, ns, gen, cid, to },
-    }), { allowPreconditionFailed: true });
+    }), { allowPreconditionFailed: true, config });
     return r.outcome;
   }
 
@@ -262,7 +331,10 @@ export class OxigraphSaver extends BaseCheckpointSaver {
       if (v === undefined) { f.push(`FILTER NOT EXISTS { ?cp ${lgMetaPredicate(key)} ?any }`); continue; }
       f.push(`?cp ${lgMetaPredicate(key)} "${b64(Buffer.from(JSON.stringify(v), 'utf8'))}" .`);
     }
-    return `SELECT ?cp ?cid ?tid ?ns ?k ?pcid ?pt ?pv ?mt ?mv ?ch ?bt ?bv ?wt ?wi ?wc ?wvt ?wv WHERE {
+    // with a thread: the thread generation, from the SAME snapshot (a run's birth generation)
+    const genRow = thread !== undefined ? `{ BIND("g" AS ?k) OPTIONAL { <${lgMint.thread(this.scope, String(thread))}> ${LG.gen} ?tg } }\n  UNION ` : '';
+    return `SELECT ?cp ?cid ?tid ?ns ?k ?pcid ?pt ?pv ?mt ?mv ?ch ?bt ?bv ?wt ?wi ?wc ?wvt ?wv ?tg WHERE {
+  ${genRow}{
   { SELECT ?cp ?cid ?tid ?ns WHERE {
       ?cp a ${LG.Checkpoint} . ?cp ${LG.inScope} <${lgMint.scope(this.scope)}> .
       ?cp ${LG.checkpointId} ?cid . ?cp ${LG.thread} ?tid . ?cp ${LG.ns} ?ns .
@@ -272,6 +344,7 @@ export class OxigraphSaver extends BaseCheckpointSaver {
   UNION { BIND("b" AS ?k) ?cp ${LG.usesBlob} ?bl . ?bl ${LG.channel} ?ch . ?bl ${LG.blobType} ?bt . ?bl ${LG.blobValue} ?bv }
   UNION { BIND("w" AS ?k) ?w ${LG.checkpoint} ?cp . ?w ${LG.taskId} ?wt . ?w ${LG.idx} ?wi . ?w ${LG.channel} ?wc . ?w ${LG.valueType} ?wvt . ?w ${LG.value} ?wv }
   UNION { BIND("s" AS ?k) ?cp ${LG.parent} ?par . ?w ${LG.checkpoint} ?par . ?w ${LG.channel} ${lit(TASKS)} . ?w ${LG.taskId} ?wt . ?w ${LG.idx} ?wi . ?w ${LG.valueType} ?wvt . ?w ${LG.value} ?wv }
+  }
 }`;
   }
 
@@ -280,6 +353,10 @@ export class OxigraphSaver extends BaseCheckpointSaver {
     if (!r.ok) throw new Error(`graph unavailable: ${r.reason}`); // never an empty result in place of a failed read
     const by = new Map();
     for (const row of r.rows) {
+      if (row.k.value === 'g') {
+        if (opts.config) this._bornAt(opts.config, String(opts.thread), row.tg ? Number(row.tg.value) : 0);
+        continue;
+      }
       const key = row.cp.value;
       if (!by.has(key)) by.set(key, { cid: dec(row.cid.value), tid: dec(row.tid.value), ns: dec(row.ns.value), c: null, blobs: new Map(), writes: [], sends: [] });
       const e = by.get(key);
@@ -331,7 +408,7 @@ export class OxigraphSaver extends BaseCheckpointSaver {
     if (thread === undefined || thread === null) return undefined;
     const ns = config.configurable.checkpoint_ns ?? '';
     const cid = getCheckpointId(config);
-    const [t] = await this._tuples({ thread, ns, cid: cid || undefined, limit: 1 });
+    const [t] = await this._tuples({ thread, ns, cid: cid || undefined, limit: 1, config });
     return t;
   }
 
@@ -341,7 +418,7 @@ export class OxigraphSaver extends BaseCheckpointSaver {
     const c = config?.configurable ?? {};
     const tuples = await this._tuples({
       thread: c.thread_id ?? undefined, ns: c.checkpoint_ns, cid: c.checkpoint_id || undefined,
-      before: before?.configurable?.checkpoint_id, filter, limit,
+      before: before?.configurable?.checkpoint_id, filter, limit, config,
     });
     for (const t of tuples) yield t;
   }

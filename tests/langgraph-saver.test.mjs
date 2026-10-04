@@ -330,6 +330,7 @@ test('#1562 every lg.* intention compiles to ONE update that passes the unchange
     { ...base, kind: 'lg.putWrites', lg: { ...lg, taskId: 't', resumer: null, writes: [{ idx: 0, channel: 'a', type: 'json', value: 'e30=' }, { idx: -1, channel: '__error__', type: 'json', value: 'e30=' }] } },
     { ...base, kind: 'lg.deleteThread', lg: { scope: 's', thread: 'th', gen: 3 } },
     { ...base, kind: 'lg.runTransition', lg: { ...lg, gen: 1, to: 'done' } },
+    { ...base, kind: 'lg.reap', lg: { ...lg, gen: 2, parentCid: 'p"0' } },
   ];
   for (const it of intents) {
     const { sparql } = compile(it);
