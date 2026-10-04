@@ -253,3 +253,24 @@ test('#1578 A5: with NO --state, the CLI keeps its state under HOME/.claude, nev
     assert.equal(b.seen.length, 1, 'the alert was delivered');
   } finally { await b.stop(); }
 });
+
+test('#1578 an UNWRITABLE state path FAILS CLOSED: nothing is sent, the run reports it, and the CLI exits 8', async () => {
+  const dest = fs.mkdtempSync(path.join(os.tmpdir(), 'alert-dest-'));
+  const blocker = fs.mkdtempSync(path.join(os.tmpdir(), 'alert-ro-'));
+  fs.writeFileSync(path.join(blocker, 'is-a-file'), 'x');   // the parent "directory" is a file: mkdir and write fail
+  const stateFile = path.join(blocker, 'is-a-file', 'state.json');
+  const b = await standInBoard([201]);
+  try {
+    const r = await alertOnce({ key: KEY, dest, board: b.url, stateFile, nowMs: T0 });
+    assert.equal(r.posted, 0, 'no untracked post');
+    assert.equal(r.notSent, true);
+    assert.ok(r.stateError, 'the state error is reported');
+    assert.equal(b.seen.length, 0, 'the board received nothing');
+    const keyFile = path.join(blocker, 'k'); fs.writeFileSync(keyFile, KEY, { mode: 0o600 });
+    const script = fileURLToPath(new URL('../scripts/graph-store-backup-alert.mjs', import.meta.url));
+    const cli = childProc.spawnSync(process.execPath, [script, '--dest', dest, '--board', b.url, '--key-file', keyFile, '--state', stateFile], { encoding: 'utf8' });
+    assert.equal(cli.status, 8, cli.stdout + cli.stderr);
+    assert.match(cli.stdout, /ALERT-NOT-SENT: state unwritable, fail-closed/);
+    assert.equal(b.seen.length, 0);
+  } finally { await b.stop(); }
+});
