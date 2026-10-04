@@ -50,6 +50,7 @@ function test(name, fn) {
       clearFilterState();
       cards.length = 0;
       enableFetchMock({ ok: true, json: async () => ({ cards: [], lastUpdated: null }) });
+      _fetchMockRefuseCreate = true;   // #1583 — see enableFetchMock
       try {
         await fn();
       } finally {
@@ -1418,13 +1419,23 @@ let _fetchMockError = false;
 let _fetchMockCalls = [];
 const _realFetch = window.fetch;
 
+// #1583 — the wrapper's DEFAULT mock answers a card create with a refusal
+// (definitively not created ⇒ the card is local-only), which is what these
+// fixture tests always ran under. A test that installs its own mock gets the
+// raw behaviour, flag cleared.
+let _fetchMockRefuseCreate = false;
+
 function enableFetchMock(response, shouldError) {
   _fetchMockResponse = response || null;
   _fetchMockError = shouldError || false;
   _fetchMockCalls = [];
+  _fetchMockRefuseCreate = false;
   window.fetch = async function(url, options) {
     _fetchMockCalls.push({ url, options });
     if (_fetchMockError) throw new Error('Network error: server not running');
+    if (_fetchMockRefuseCreate && options && options.method === 'POST' && /\/api\/cards$/.test(String(url))) {
+      return { ok: false, status: 404, json: async () => ({ error: 'no server in the file:// lane' }) };
+    }
     if (_fetchMockResponse) {
       return {
         ok: true,
@@ -1475,6 +1486,52 @@ test('#1583 addCard creates through POST /api/cards, never /api/save, and ADOPTS
   } finally {
     cards.length = 0;
     _jsonSaveCalled = false;
+    disableFetchMock();
+    swapToRealLocalStorage();
+  }
+});
+
+test('#1583 a 2xx create reply that cannot be CONFIRMED is "unknown", never "failed"', async () => {
+  // The server said yes; the body is unreadable or lacks the card identity.
+  swapToMockLocalStorage();
+  try {
+    cards.length = 0;
+    enableFetchMock({ ok: true });   // 200, valid JSON, no id/shortId
+    const a = addCard('Unconfirmed', '', 'task', 'unassigned', []);
+    await Promise.allSettled(_pendingSaves.slice());
+    assertEqual(a._unsynced, 'unknown', 'identity-less 2xx ⇒ unknown');
+    window.fetch = async (url, options) => ({ ok: true, status: 201, json: async () => { throw new SyntaxError('Unexpected end of JSON input'); } });
+    const b = addCard('Garbled', '', 'task', 'unassigned', []);
+    await Promise.allSettled(_pendingSaves.slice());
+    assertEqual(b._unsynced, 'unknown', 'garbled 2xx ⇒ unknown');
+    window.fetch = async () => ({ ok: false, status: 400, json: async () => ({ error: 'bad' }) });
+    const c = addCard('Refused', '', 'task', 'unassigned', []);
+    await Promise.allSettled(_pendingSaves.slice());
+    assertEqual(c._unsynced, 'failed', 'a 4xx refusal is the only definitive failure');
+  } finally {
+    cards.length = 0;
+    disableFetchMock();
+    swapToRealLocalStorage();
+  }
+});
+
+test('#1583 the request identity is persisted BEFORE the first send', async () => {
+  swapToMockLocalStorage();
+  try {
+    cards.length = 0;
+    let storedAtSend = null;
+    window.fetch = async (url, options) => {
+      storedAtSend = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+      return { ok: false, status: 400, json: async () => ({}) };
+    };
+    const card = addCard('Persist first', '', 'task', 'unassigned', []);
+    await Promise.allSettled(_pendingSaves.slice());
+    const atSend = (storedAtSend || []).find((c) => c.title === 'Persist first');
+    assert(atSend, 'the card was in localStorage when the POST went out');
+    assertEqual(atSend._unsynced, 'pending', 'marked pending');
+    assert(atSend._requestId && atSend._requestId === card._requestId, 'with the SAME requestId the POST carries');
+  } finally {
+    cards.length = 0;
     disableFetchMock();
     swapToRealLocalStorage();
   }

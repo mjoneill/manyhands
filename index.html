@@ -2294,6 +2294,22 @@ function loadFromLocalStorage() {
   return [];
 }
 
+// #1583 — creates this tab sent whose outcome it never learned, as persisted
+// (with their requestId). Re-read on load and carried across every wholesale
+// replacement of `cards`: they are not in the server's list by THIS tab's id,
+// and dropping them would lose the only key that can find them.
+function _unresolvedCreates(list) {
+  return (list || []).filter((c) => c && c._requestId && (c._unsynced === 'pending' || c._unsynced === 'unknown'));
+}
+function _carryUnresolvedCreates(from) {
+  const carried = _unresolvedCreates(from);
+  for (const c of carried) {
+    if (c._unsynced === 'pending' && !_createInFlight.has(c)) c._unsynced = 'unknown';
+    if (!cards.includes(c) && !cards.some((x) => x && x.id === c.id)) cards.push(c);
+  }
+  if (cards.some((c) => c && c._unsynced === 'unknown')) _trackPendingWrite(_reconcileUnknownCreates());
+}
+
 function restoreFromLocalStorage() {
   const saved = loadFromLocalStorage();
   cards.length = 0; // Clear without reassigning
@@ -3084,7 +3100,7 @@ const _createInFlight = new Map();
 // "outcome unknown". Each retry re-sends the SAME requestId, so the server
 // answers with the card the first attempt made (if it made one) rather than a
 // second card.
-const CREATE_RETRY_DELAYS_MS = [0, 400, 1200, 3000];
+const CREATE_RETRY_DELAYS_MS = _IS_TEST_MODE ? [0] : [0, 400, 1200, 3000];   // the file:// lane has no server to wait for
 
 function _persistNewCard(card, delays = CREATE_RETRY_DELAYS_MS) {
   const provisionalId = card.id;
@@ -3093,6 +3109,10 @@ function _persistNewCard(card, delays = CREATE_RETRY_DELAYS_MS) {
   // reloads (it lives on the provisional card, so localStorage carries it).
   if (!card._requestId) card._requestId = crypto.randomUUID();
   card._unsynced = 'pending';
+  // ⛔ PERSISTED BEFORE THE FIRST SEND. A reload or crash while this request
+  // is on the wire must still know which request to ask about; otherwise a
+  // committed card is unreconcilable and the next whole-board save deletes it.
+  saveToLocalStorage();
   const body = {
     requestId: card._requestId,
     title: card.title,
@@ -3125,8 +3145,12 @@ function _persistNewCard(card, delays = CREATE_RETRY_DELAYS_MS) {
     let server = null;
     try { server = await res.json(); } catch { server = null; }
     if (res.ok && server && typeof server.id === 'string' && Number.isInteger(server.shortId)) return { kind: 'created', server };
-    if (res.status >= 500) return { kind: 'unknown' };
-    return { kind: 'failed', status: res.ok ? 'unexpected reply' : res.status, error: server && server.error };
+    // ⛔ A SUCCESS STATUS WHOSE BODY CANNOT BE CONFIRMED IS NOT A FAILURE. The
+    // server said yes; only the reply is unreadable (truncated, garbled, or
+    // missing the card's identity). The card may well exist, so it is
+    // reconciled by requestId like a lost reply — never written off.
+    if (res.ok || res.status >= 500) return { kind: 'unknown' };
+    return { kind: 'failed', status: res.status, error: server && server.error };
   };
   const p = (async () => {
     const pendingTimer = setTimeout(() => _setSaveStatus('saving', 'Saving…'), SAVE_PENDING_DELAY_MS);
@@ -3173,6 +3197,14 @@ async function _reconcileUnknownCreates() {
 // The server's record REPLACES the provisional card, in place (same object, so
 // any reference the page holds stays valid).
 function _adoptCreatedCard(card, server, provisionalId, provisionalShortId) {
+  // A reconciled create may already be on the board under its server id (a
+  // reload or poll fetched it while this tab still held the provisional copy).
+  // One card, one entry: the server-loaded duplicate and its tile go.
+  const dupIdx = cards.findIndex((c) => c !== card && c && c.id === server.id);
+  if (dupIdx >= 0) {
+    cards.splice(dupIdx, 1);
+    if (typeof document !== 'undefined') document.querySelector(`.card[data-id="${CSS.escape(server.id)}"]`)?.remove();
+  }
   for (const k of Object.keys(card)) delete card[k];
   Object.assign(card, server);
   for (const k of RESPONSE_ONLY_FIELDS) delete card[k];
@@ -5986,14 +6018,19 @@ async function pollBoard() {
   // writing — skip this tick so we don't read pre-save state and overwrite
   // the local in-memory new state. The next tick catches up.
   if (_pendingSaves.length > 0) return;
+  // #1583 — a create whose outcome is unknown is asked about first (by its
+  // requestId); the board is re-read on the next tick.
+  if (cards.some((c) => c && c._unsynced === 'unknown')) { _trackPendingWrite(_reconcileUnknownCreates()); return; }
   const data = await loadFromJSONFile();
   if (!data) return;  // network blip; try again next tick
   const newSig = boardSignature(data.cards, data.columns);
   if (newSig === _boardRenderedSig) return;  // nothing changed server-side
   if (shouldSkipBoardRender()) return;  // user is mid-action; defer until idle
   // Apply new state in place to preserve array identity for any references.
+  const unresolved = _unresolvedCreates(cards);   // #1583 — never dropped by a poll
   cards.length = 0;
   data.cards.forEach(c => cards.push(c));
+  _carryUnresolvedCreates(unresolved);
   if (Array.isArray(data.columns)) {
     columns.length = 0;
     data.columns.forEach(c => columns.push({ ...c }));
@@ -6495,10 +6532,12 @@ if (_convsForm) {
   // then pop, which reads as a bug.
   populateRosterUI();
 
+  const persistedUnresolved = _unresolvedCreates(loadFromLocalStorage());   // #1583 — read BEFORE anything overwrites it
   const jsonResult = await loadFromJSONFile();
   if (jsonResult && jsonResult.cards && jsonResult.cards.length > 0) {
     cards.length = 0;
     jsonResult.cards.forEach(c => cards.push(c));
+    _carryUnresolvedCreates(persistedUnresolved.map((c) => ({ ...c, _unsynced: 'unknown' })));
     // Restore columns from JSON if present
     if (Array.isArray(jsonResult.columns) && jsonResult.columns.length > 0) {
       columns.length = 0;

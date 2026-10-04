@@ -479,3 +479,140 @@ test('#1583 409 recovery across a RELOAD: the draft is offered (not auto-applied
     assert.deepEqual(patches.map((w) => w.body.ifVersion), [2], 'saved under the refreshed version the reload read');
   }, { server: { board: fixture() }, launch: { headless: 'new' } });
 });
+
+// ── Round 3: the create boundary ────────────────────────────────────────────
+
+test('#1583 a COMMITTED create whose 2xx reply is truncated → "unknown" → reconciled by requestId to exactly one card; a move deletes nothing', async () => {
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await openBoard(browser, server.baseUrl);
+    let garbled = 0;
+    await page.setRequestInterception(true);
+    page.on('request', async (r) => {
+      const u = new URL(r.url());
+      if (garbled === 0 && r.method() === 'POST' && u.pathname === '/api/cards') {
+        garbled += 1;
+        // Commit it for real, then hand the browser a broken success.
+        const real = await fetch(`${server.baseUrl}/api/cards`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: r.postData() });
+        const text = await real.text();
+        r.respond({ status: real.status, contentType: 'application/json', body: text.slice(0, Math.floor(text.length / 2)) }).catch(() => {});
+        return;
+      }
+      r.continue().catch(() => {});
+    });
+    const writes = recordWrites(page);
+    await addViaForm(page, 'half a reply');
+    await clickMove(page, 'k1');
+    await page.waitForFunction(() => _pendingSaves.length === 0, { timeout: 15000 });
+    assert.equal(garbled, 1, 'precondition: the committed create got a truncated 2xx');
+
+    const all = (await api(server.baseUrl, 'GET', '/api/cards?limit=50')).body.cards;
+    const made = all.filter((c) => c.title === 'half a reply');
+    assert.equal(made.length, 1, 'exactly one card: ' + JSON.stringify(all.map((c) => c.title)));
+    assert.equal(all.length, 4, 'nothing deleted or duplicated');
+    assert.equal(all.find((c) => c.id === 'k1').column, 'planned', 'the move landed');
+    const local = await page.evaluate(() => cards.filter((c) => c.title === 'half a reply').map((c) => ({ id: c.id, u: c._unsynced || null })));
+    assert.deepEqual(local, [{ id: made[0].id, u: null }], 'the tab holds exactly the server card');
+    const creates = writes.filter((w) => w.method === 'POST' && w.path === '/api/cards');
+    assert.ok(creates.length >= 2 && creates.every((w) => w.body.requestId === creates[0].body.requestId),
+      'reconciled by re-asking with the SAME requestId');
+  }, { server: { board: fixture() }, launch: { headless: 'new' } });
+});
+
+test('#1583 reload while a create is unresolved, board unreachable → no whole-board save; when the network returns the reloaded tab reconciles by the PERSISTED requestId → exactly one card', async () => {
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await openBoard(browser, server.baseUrl);
+    const net = { mode: 'hang-first-create', hung: null, offline: false, back: false };
+    const attempted = [];
+    await page.setRequestInterception(true);
+    page.on('request', async (r) => {
+      const u = new URL(r.url());
+      if (u.pathname.startsWith('/api/') && r.method() !== 'GET') {
+        let body = null; try { body = JSON.parse(r.postData() || 'null'); } catch { body = null; }
+        attempted.push({ method: r.method(), path: u.pathname, body, offline: net.offline, back: net.back });
+      }
+      if (net.mode === 'hang-first-create' && !net.hung && r.method() === 'POST' && u.pathname === '/api/cards') {
+        net.hung = r;   // never answered: the request is still unresolved when the tab reloads
+        await fetch(`${server.baseUrl}/api/cards`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: r.postData() });
+        return;
+      }
+      if (net.offline && u.pathname.startsWith('/api/')) { r.abort('internetdisconnected').catch(() => {}); return; }
+      r.continue().catch(() => {});
+    });
+
+    await addViaForm(page, 'reloaded mid-flight');
+    await page.waitForFunction(() => cards.some((c) => c.title === 'reloaded mid-flight'), { timeout: 5000 });
+    const rid = await page.evaluate(() => JSON.parse(localStorage.getItem('manyhands')).find((c) => c.title === 'reloaded mid-flight')?._requestId);
+    assert.match(String(rid), /^[0-9a-f-]{36}$/, 'the requestId was persisted before the POST resolved');
+    assert.ok(net.hung, 'precondition: the create is on the wire, unanswered (and committed server-side)');
+
+    // Reload with the board unreachable.
+    net.mode = 'normal';
+    net.offline = true;
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => typeof cards !== 'undefined' && cards.some((c) => c.title === 'reloaded mid-flight'), { timeout: 10000 });
+    await new Promise((res) => setTimeout(res, 1500));
+    assert.equal(await page.evaluate(() => cards.find((c) => c.title === 'reloaded mid-flight')._unsynced), 'unknown',
+      'restored as unknown, not failed');
+
+    // The network returns; the board's own cadence reconciles.
+    net.offline = false;
+    net.back = true;
+    await page.waitForFunction(() => {
+      const c = cards.filter((x) => x.title === 'reloaded mid-flight');
+      return c.length === 1 && !c[0]._unsynced;
+    }, { timeout: 30000 });
+    await page.waitForFunction(() => _pendingSaves.length === 0, { timeout: 15000 });
+
+    const all = (await api(server.baseUrl, 'GET', '/api/cards?limit=50')).body.cards;
+    const made = all.filter((c) => c.title === 'reloaded mid-flight');
+    assert.equal(made.length, 1, 'exactly one card on the server');
+    assert.equal(made[0].createRequestId, rid, 'it is the card of the persisted request');
+    assert.equal(all.length, 4);
+    assert.equal(await page.evaluate((id) => cards.filter((c) => c.id === id).length, made[0].id), 1, 'the tab holds it once');
+    const saves = attempted.filter((w) => w.path === '/api/save');
+    assert.deepEqual(saves, [], 'no whole-board save was even attempted before (or during) reconciliation');
+    const replays = attempted.filter((w) => w.method === 'POST' && w.path === '/api/cards');
+    assert.ok(replays.length >= 2 && replays.every((w) => w.body.requestId === rid), 'every create attempt carried the persisted requestId');
+    assert.ok(replays.some((w) => w.back),
+      'after the network returned, the tab ASKED by requestId (not merely picked up the server copy)');
+    try { net.hung.abort().catch(() => {}); } catch { /* already gone with the old document */ }
+  }, { server: { board: fixture() }, launch: { headless: 'new' } });
+});
+
+test('#1583 the same reload, but the create NEVER reached the server → the reloaded tab creates it once, by the persisted requestId (not dropped)', async () => {
+  // The negative of the test above: here the server has no copy to fall back
+  // on, so a tab that dropped the provisional card on reload would lose it.
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await openBoard(browser, server.baseUrl);
+    const net = { hung: null, offline: false };
+    const attempted = [];
+    await page.setRequestInterception(true);
+    page.on('request', (r) => {
+      const u = new URL(r.url());
+      if (u.pathname.startsWith('/api/') && r.method() !== 'GET') attempted.push({ method: r.method(), path: u.pathname, offline: net.offline });
+      if (!net.hung && r.method() === 'POST' && u.pathname === '/api/cards') { net.hung = r; return; }   // never forwarded
+      if (net.offline && u.pathname.startsWith('/api/')) { r.abort('internetdisconnected').catch(() => {}); return; }
+      r.continue().catch(() => {});
+    });
+    await addViaForm(page, 'never left the tab');
+    await page.waitForFunction(() => cards.some((c) => c.title === 'never left the tab'), { timeout: 5000 });
+    const rid = await page.evaluate(() => JSON.parse(localStorage.getItem('manyhands')).find((c) => c.title === 'never left the tab')?._requestId);
+    assert.match(String(rid), /^[0-9a-f-]{36}$/);
+    net.offline = true;
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => typeof cards !== 'undefined' && cards.some((c) => c.title === 'never left the tab'), { timeout: 10000 });
+    await new Promise((res) => setTimeout(res, 1500));
+    net.offline = false;
+    await page.waitForFunction(() => {
+      const c = cards.filter((x) => x.title === 'never left the tab');
+      return c.length === 1 && !c[0]._unsynced;
+    }, { timeout: 30000 });
+    await page.waitForFunction(() => _pendingSaves.length === 0, { timeout: 15000 });
+    const all = (await api(server.baseUrl, 'GET', '/api/cards?limit=50')).body.cards;
+    const made = all.filter((c) => c.title === 'never left the tab');
+    assert.equal(made.length, 1, 'created exactly once after the network returned');
+    assert.equal(made[0].createRequestId, rid, 'by the persisted request');
+    assert.equal(all.length, 4);
+    assert.deepEqual(attempted.filter((w) => w.path === '/api/save'), [], 'no whole-board save attempted');
+  }, { server: { board: fixture() }, launch: { headless: 'new' } });
+});
