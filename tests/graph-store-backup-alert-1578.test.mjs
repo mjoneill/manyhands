@@ -9,6 +9,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
+import * as childProc from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { decide, alertOnce, queue } from '../scripts/graph-store-backup-alert.mjs';
 import { renderPlist } from '../scripts/graph-store-backup-plist.mjs';
 
@@ -227,5 +229,27 @@ test('#1578 alertOnce: KILLED mid-request, then backups recover before restart: 
     assert.equal(r.posted, 2);
     assert.match(b.seen[0].body.body, /BACKUP ALERT NO-COPY/);
     assert.match(b.seen[1].body.body, /^✅ backups recovered/);
+  } finally { await b.stop(); }
+});
+
+test('#1578 A5: with NO --state, the CLI keeps its state under HOME/.claude, never inside DEST (temporary HOME, real state untouched)', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'alert-home-'));   // no .claude inside yet
+  const dest = fs.mkdtempSync(path.join(os.tmpdir(), 'alert-dest-'));
+  const keyFile = path.join(home, 'k'); fs.writeFileSync(keyFile, KEY, { mode: 0o600 });
+  const b = await standInBoard([201]);
+  try {
+    const script = fileURLToPath(new URL('../scripts/graph-store-backup-alert.mjs', import.meta.url));
+    const r = await new Promise((resolve) => {
+      const { spawn } = childProc;
+      const p = spawn(process.execPath, [script, '--dest', dest, '--board', b.url, '--key-file', keyFile], { env: { PATH: process.env.PATH, HOME: home }, stdio: ['ignore', 'pipe', 'pipe'] });
+      let out = ''; p.stdout.on('data', (c) => { out += c; }); p.stderr.on('data', (c) => { out += c; });
+      p.on('close', (code) => resolve({ code, out }));
+    });
+    assert.equal(r.code, 5, `NO-COPY exit code: ${r.out}`);
+    const expected = path.join(home, '.claude', 'graph-store-backup-alert-state.json');
+    assert.ok(fs.existsSync(expected), `state at ${expected}: ${r.out}`);
+    assert.equal(JSON.parse(fs.readFileSync(expected, 'utf8')).lastVerdict, 'NO-COPY');
+    assert.deepEqual(fs.readdirSync(dest), [], 'nothing written into DEST');
+    assert.equal(b.seen.length, 1, 'the alert was delivered');
   } finally { await b.stop(); }
 });
