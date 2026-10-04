@@ -348,7 +348,15 @@ export function makeShorten(iriTable) {
 export function plainRows(rows, shorten) {
   return rows.map((b) => Object.fromEntries(Object.entries(b).map(([k, t]) => [k, t.type === 'uri' ? shorten(t.value) : t.value])));
 }
-const unavailable = (why) => Object.assign(new Error(`graph executor unavailable: ${why}`), { code: 'GRAPH_EXECUTOR_UNAVAILABLE' });
+// #1587 — a failure of an executor CALL carries that call's own interval: when it STARTED
+// (wall clock, ISO) and how long it ran before failing. A blocked event loop can log the
+// error much later; the message itself says when the call was made, so a reader can place
+// it against the replica-sync lines without trusting the log line's position.
+const unavailable = (why, t0 = null) => {
+  const at = t0 === null ? null : { startedAt: new Date(t0).toISOString(), elapsedMs: Date.now() - t0 };
+  const msg = at ? `graph executor unavailable (call started ${at.startedAt}, failed after ${at.elapsedMs} ms): ${why}` : `graph executor unavailable: ${why}`;
+  return Object.assign(new Error(msg), { code: 'GRAPH_EXECUTOR_UNAVAILABLE' }, at ?? {});
+};
 
 /**
  * The unit's runtime: reads and writes through the slice's client, fenced.
@@ -381,10 +389,11 @@ export function createLogbornUnit({ slice, loadIri, audit = stderrPersonAudit })
   let shorten = null;
   async function select(sparql) {
     shorten ??= makeShorten(await loadIri());
+    const t0 = Date.now();
     const fenced = await slice.fence();
-    if (fenced) throw unavailable(fenced);
+    if (fenced) throw unavailable(fenced, t0);
     const r = await slice.client.query(sparql);
-    if (!r.ok) throw unavailable(r.reason);
+    if (!r.ok) throw unavailable(r.reason, t0);
     return r.rows;
   }
   async function readMemories() {
@@ -453,10 +462,11 @@ export function createLogbornUnit({ slice, loadIri, audit = stderrPersonAudit })
       .map((k) => e[k]).filter((v) => typeof v === 'string').map(asPerson)))];
     if (!refs.length) return { intention, unresolvedReferences: [] };
     const values = `VALUES ?s { ${refs.map((r) => `<${r}>`).join(' ')} }`;
+    const t0 = Date.now();
     const [pr, tr] = [await slice.client.query(`SELECT ?s ?p ?o WHERE { ${values} ?s <${RDF_TYPE}> <${TM.Person}> ; ?p ?o }`),
       await slice.client.query(`SELECT ?s ?t WHERE { ${values} ?s <${RDF_TYPE}> ?t }`)];
-    if (!pr.ok) throw unavailable(pr.reason);
-    if (!tr.ok) throw unavailable(tr.reason);
+    if (!pr.ok) throw unavailable(pr.reason, t0);
+    if (!tr.ok) throw unavailable(tr.reason, t0);
     const canonicalPeople = peopleFromRows(pr.rows.map((b) => ({ s: b.s.value, p: b.p.value, o: b.o.value })));
     const occupied = tr.rows.map((b) => ({ '@id': b.s.value, '@type': b.t.value === TM.Person ? 'Person' : b.t.value }));
     const plan = planUnitPeople({ entities, canonicalPeople, occupied });
