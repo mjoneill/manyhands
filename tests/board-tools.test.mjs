@@ -18,9 +18,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { BOARD_TOOLS, toolsFor, makeExecutor } from '../core/board-tools.mjs';
 
-test('#1196B/#1383/#1470 the surface is five reads plus the seat\'s OWN three writes (its declaration, and its own memories), every tool named and described', () => {
+test('#1196B/#1383/#1470/#1558 the surface is six reads plus the seat\'s OWN three writes (its declaration, and its own memories), every tool named and described', () => {
   const names = BOARD_TOOLS.map((t) => t.function.name).sort();
-  assert.deepEqual(names, ['board_search', 'card_get', 'graph_query', 'kind_list', 'memory_update', 'predicate_list', 'seat_clear', 'seat_declare']);
+  // #1558 — graph_authority joins as a READ (the shared authority resolver), added on
+  // purpose: this pinned list is how a new tool announces itself to review.
+  assert.deepEqual(names, ['board_search', 'card_get', 'graph_authority', 'graph_query', 'kind_list', 'memory_update', 'predicate_list', 'seat_clear', 'seat_declare']);
   for (const t of BOARD_TOOLS) {
     assert.equal(t.type, 'function');
     assert.ok(t.function.description && t.function.description.length > 20, `${t.function.name} needs a description a model can act on`);

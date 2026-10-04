@@ -26,7 +26,17 @@ const src = (f) => readFileSync(join(ROOT, f), 'utf8');
 const ADJUDICATED = [
   { tool: 'conversation_post', field: 'attachments', reason: 'FILED as card 9141ca7c-3236-4580-a38d-4b595358efed (#1164): a genuine gap — no MCP surface can attach a file — left as a design question, not baselined' },
   { tool: 'seat_declare', field: 'seat', reason: 'NOT A DEPENDENCY: the handler reads body.seat only to refuse a body that CONTRADICTS the path parameter; the tool sends the seat in the path' },
+  { tool: 'replay_pull', path: '/api/cursors/ack', field: 'identity', reason: 'NOT A DEPENDENCY OF THE TOOL\'S INPUT (#1576): replay_pull posts the ack ITSELF after it holds the page, sending its own lane identity (mcp-server.mjs, `apiCall(\'POST\', \'/api/cursors/ack\', { identity: lane.identity, token: page.ack_token })`); the model neither can nor should supply it' },
+  { tool: 'replay_pull', path: '/api/cursors/ack', field: 'token', reason: 'NOT A DEPENDENCY OF THE TOOL\'S INPUT (#1576): the token is the ack_token of the page the tool just pulled, sent by the tool itself (same line); a model-supplied ack token is #1579\'s design, not this one' },
 ];
+// a reviewer 16:26Z: an adjudication that names a `path` excuses that ROUTE only, never the tool+field everywhere
+const isAdjudicated = (g) => ADJUDICATED.some((a) => a.tool === g.tool && a.field === g.field && (a.path == null || a.path === g.path));
+
+test('#1163 an adjudication pinned to a route does not excuse the same tool+field on another route', () => {
+  assert.equal(isAdjudicated({ tool: 'replay_pull', field: 'identity', path: '/api/cursors/ack' }), true);
+  assert.equal(isAdjudicated({ tool: 'replay_pull', field: 'identity', path: '/api/cursors/somewhere-else' }), false);
+  assert.equal(isAdjudicated({ tool: 'replay_pull', field: 'token', path: '/api/cursors/pull' }), false);
+});
 
 test('#1163 LIVE — every MCP write tool reaches every body field its REST handler depends on (n printed; unmapped = fail)', async () => {
   const pair = await startPair({ board: makeBoardFixture({ cards: [] }) });
@@ -40,11 +50,11 @@ test('#1163 LIVE — every MCP write tool reaches every body field its REST hand
     assert.deepEqual(r.unmapped, [], 'a write tool whose route could not be mapped is a FAIL, not an absence');
     // the member I am CERTAIN belongs: the tool that started this class
     assert.ok(r.rows.some((row) => row.tool === 'memory_update' && row.handler === 'handleUpdateMemory'), 'memory_update → handleUpdateMemory must be in the population');
-    const unadjudicated = r.gaps.filter((g) => !ADJUDICATED.some((a) => a.tool === g.tool && a.field === g.field));
+    const unadjudicated = r.gaps.filter((g) => !isAdjudicated(g));
     assert.deepEqual(unadjudicated, [], `UNREACHABLE FIELDS (${r.dependsOn}):\n` + unadjudicated.map((g) => `  ${g.tool} → ${g.method} ${g.path} (${g.handler}) reads body.${g.field}, the tool cannot send it:\n    ${g.lines.join('\n    ')}`).join('\n'));
     // an adjudication for a gap that no longer exists is stale and must go
     for (const a of ADJUDICATED) {
-      assert.ok(r.gaps.some((g) => g.tool === a.tool && g.field === a.field), `stale adjudication: ${a.tool}.${a.field} is no longer a gap — remove its entry`);
+      assert.ok(r.gaps.some((g) => g.tool === a.tool && g.field === a.field && (a.path == null || a.path === g.path)), `stale adjudication: ${a.tool}${a.path ? ` ${a.path}` : ''}.${a.field} is no longer a gap — remove its entry`);
     }
   } finally { await pair.stop(); }
 });

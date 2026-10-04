@@ -15,29 +15,22 @@
  * ── SERVED-THEN-ACKED ─────────────────────────────────────────────────────
  * Two numbers per seat, and the gap between them is the whole design:
  *
- *   acked   — the seat has (as far as we can tell) RECEIVED everything ≤ this
- *   served  — the max seq written into a COMPLETED response, not yet confirmed
+ *   acked   — the seat has SAID it received everything ≤ this (an explicit ack)
+ *   served  — the max seq a pull put into a response, not yet acknowledged
  *
  * A pull serves events > `acked` and records `served`. `acked` does not move.
- * It moves only when the seat's NEXT inbound call arrives — aliveness AFTER the
- * response is the implicit ack. A stream that dies mid-response never records
- * `served` at all, so the cursor cannot advance past events the seat never got.
- * That is the #624 scenario, and it is the reason `served` exists as a separate
- * number rather than as an eager write to `acked`.
+ * #1576 — it moves ONLY on an EXPLICIT client ack (core/cursor-service.mjs
+ * `ackFor`, POST /api/cursors/ack with the pull's `ack_token`), clamped to
+ * `served` and never backward.
  *
- * ⚠️ WHAT THIS DOES NOT GUARANTEE — named because an unstated limit in a
- * delivery guarantee is how the original bug got believed. The implicit ack
- * assumes a completed response was RECEIVED. If a response completes on the
- * server, is lost in transit, and the seat then calls again for any reason,
- * `acked` advances over events the seat never saw. Server-side detection is
- * impossible without the client saying what it got, and the ruled contract is
- * explicitly "no smart clients". So the honest statement of the guarantee is:
- *
- *   at-least-once against STREAM DEATH and RESTART (the observed failure modes)
- *   NOT proof against a lost completed response (unobserved, needs a client ack)
- *
- * `ackMode: 'explicit'` exists for when a client CAN report its high-water mark;
- * it closes the gap above and is the upgrade path, not today's default.
+ * ⚠️ WHY NOT THE IMPLICIT ACK THIS MODULE SHIPPED WITH (#683). It treated the
+ * seat's NEXT inbound call as the ack — "aliveness after the response" — and
+ * recorded `served` in `res.end`'s callback. Measured on Node 22 (#1571/#1576):
+ * `res.end`'s callback fires even when the client destroyed the socket
+ * mid-body, so a response that died was recorded as served, and the seat's next
+ * call of ANY kind acked it. #624's loss class inside its own cure. Neither a
+ * completed server-side write nor a later inbound call is delivery evidence;
+ * only the client saying what it got is. `recordInbound` is now liveness only.
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from 'node:fs';
@@ -153,13 +146,15 @@ export function recordServed(state, seat, maxSeq) {
 }
 
 /**
- * An inbound call from the seat. This is the implicit ack: the seat was alive
- * AFTER we completed the last response, so we believe it received it.
+ * An inbound call from the seat: LIVENESS evidence for `reachability`, nothing more.
+ *
+ * ⛔ #1576 — NOT an ack. This used to move `acked` to `served` ("the seat was alive
+ * after the response, so it got it"); a response that died mid-body is still
+ * `served` (Node 22 fires `res.end`'s callback for it), so that rule acked pages the
+ * seat never received. `acked` / `graph_acked` move only in cursor-service `ackFor`.
  */
 export function recordInbound(state, seat, headSeq, { now = new Date().toISOString() } = {}) {
   const s = seatOf(state, seat);
-  if (s.served != null && s.served > s.acked) s.acked = s.served;
-  s.served = null;
   s.last_inbound_at = now;
   s.last_inbound_seq = Number(headSeq) || s.last_inbound_seq || 0;
   return state;

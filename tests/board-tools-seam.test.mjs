@@ -25,6 +25,10 @@ const ARGS = {
   graph_query: { query: 'SELECT ?s WHERE { ?s ?p ?o } LIMIT 1' },
   kind_list: {},
   predicate_list: {},
+  // #1558 — the shared authority read. Its route exists only with the graph slice on
+  // (the server below turns it on); with no resolver installed it answers 503, which
+  // the tool reports as UNAVAILABLE. A 404 would mean the route is missing.
+  graph_authority: { topic: 'urn:ex:t', predicate: 'urn:ex:p', scope: 'urn:ex:s' },
   // #1383 — declare first so clear has something to clear; the order of
   // BOARD_TOOLS puts them that way round.
   seat_declare: { mode: 'available', acceptsRoutineWork: true, expiresAt: new Date(Date.now() + 3600_000).toISOString() },
@@ -32,7 +36,9 @@ const ARGS = {
 };
 
 test('#1196B SEAM: every declared tool reaches a real route — no tool 404s', async () => {
-  const srv = await startRestServer({ board: makeBoardFixture({ cards: [], nextShortId: 1 }) });
+  // #1558 — the graph slice ON (its executor URL points nowhere; nothing here writes the graph)
+  // so graph_authority's route exists, exactly as it must on any board that grants the tool.
+  const srv = await startRestServer({ board: makeBoardFixture({ cards: [], nextShortId: 1 }), env: { SCRUM_GRAPH_EXECUTOR_URL: 'http://127.0.0.1:1', SCRUM_GRAPH_DATASET_ID: 'seam' } });
   try {
     const c = await fetch(`${srv.baseUrl}/api/cards`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -79,10 +85,19 @@ test('#1196B SEAM: every declared tool reaches a real route — no tool 404s', a
       const name = t.function.name;
       const args = ARGS[name];
       assert.ok(args, `#1196B: tool ${name} has no arguments in this seam test — add them, or it ships untested against a real route`);
+      const before = seen.length;
       try { await exec(name, args); }
       catch (e) { failures.push(`${name}: ${e.message}`); }
+      // #1558 (a reviewer) — a tool that answers without touching the wire (a stub
+      // returning UNAVAILABLE, say) would pass the 404 check vacuously.
+      if (seen.length === before) failures.push(`${name}: made no request at all`);
     }
     assert.deepEqual(failures, [], `tools that cannot reach the board:\n${failures.join('\n')}`);
+    // #1558 — GENERIC, from the transport's own record: a tool that CATCHES its
+    // errors (graph_authority turns a failed read into UNAVAILABLE, on purpose)
+    // would swallow a 404 above. The wire still saw it, so ask the wire.
+    const missing = seen.filter((s) => s.status === 404);
+    assert.deepEqual(missing, [], `a tool reached a route that does not exist (caught inside the tool, but the wire saw it)`);
 
     // And the actor travels: a search that logs a null actor cannot answer
     // "who asked this", which is the only question the search log is for.

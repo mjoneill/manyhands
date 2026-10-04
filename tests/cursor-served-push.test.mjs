@@ -1,9 +1,13 @@
 /**
  * #782 — Decision 5b43edcd amends #642 for PUSH delivery: when the scheduler has
  * actually written a conversation notification to a session's open stream, the
- * server records that conversation's event seq as `served` for the session's
- * lane. The cursor still advances only on the lane's NEXT inbound call, and a
- * different session acking is still fenced.
+ * server records that conversation's event seq for the session's lane.
+ *
+ * ⛔ #1576 AMENDS the ack half of 5b43edcd: a resolved stream write is a
+ * server-side "sent" event (the class of res.end's callback, which Node 22 fires
+ * for a socket the client destroyed), so it is reported as `last_pushed_seq` and
+ * is NEVER an ack — nor is the lane's next inbound call. The cursor advances only
+ * on an explicit ack: replay_pull acks the page it received.
  *
  * Measured 2026-08-30 before this: `served: null` on all five production lanes,
  * `acked` frozen at registration for 19 days, head 15,533 — nothing had ever
@@ -56,12 +60,12 @@ async function withRoom(run) {
   } finally { await stop(); }
 }
 
-test('#782 a push written to an open stream is SERVED; the next inbound call ACKS it; the un-served lane stays behind — one snapshot', async () => {
+test('#782/#1576 a push written to an open stream is REPORTED (last_pushed_seq), never acked by it or by the next inbound; replay_pull\'s explicit ack is what moves the cursor — one snapshot', async () => {
   await withRoom(async ({ rest, bo, adaStream, boStream }) => {
     const before = await lanes(rest);
     for (const k of ['bearer:ada', 'bearer:bo', 'bearer:cy']) {
       assert.ok(before.by[k], `lane ${k} adopted: ${JSON.stringify(before)}`);
-      assert.equal(before.by[k].last_served_seq, null, 'nothing served yet');
+      assert.equal(before.by[k].last_pushed_seq, null, 'nothing pushed yet');
     }
 
     // A fourth voice posts through REST, so nobody's self-echo suppression applies:
@@ -74,22 +78,30 @@ test('#782 a push written to an open stream is SERVED; the next inbound call ACK
     const got = (st) => st.messages.some((m) => /hello room/.test(String(m.params?.content ?? '')));
     assert.ok(got(boStream) && got(adaStream), 'anti-vacuity: both open streams actually received the push');
 
-    const served = await lanes(rest);
-    const seq = served.by['bearer:bo'].last_served_seq;
-    assert.ok(Number.isInteger(seq) && seq > before.head, `bo's lane records the pushed event as SERVED: ${JSON.stringify(served.by['bearer:bo'])}`);
-    assert.equal(served.by['bearer:ada'].last_served_seq, seq, 'ada, who also received it, is served the same seq');
-    assert.equal(served.by['bearer:bo'].last_acked_seq, before.by['bearer:bo'].last_acked_seq, 'served is NOT acked — the cursor does not move on the write');
-    assert.equal(served.by['bearer:cy'].last_served_seq, null, 'the lane with no stream received nothing and is served nothing');
+    const pushed = await lanes(rest);
+    const seq = pushed.by['bearer:bo'].last_pushed_seq;
+    assert.ok(Number.isInteger(seq) && seq > before.head, `bo's lane records the pushed event: ${JSON.stringify(pushed.by['bearer:bo'])}`);
+    assert.equal(pushed.by['bearer:ada'].last_pushed_seq, seq, 'ada, who also received it, records the same seq');
+    assert.equal(pushed.by['bearer:bo'].last_served_seq, null, 'a push is not a pull serve');
+    assert.equal(pushed.by['bearer:bo'].last_acked_seq, before.by['bearer:bo'].last_acked_seq, 'the cursor does not move on the write');
+    assert.equal(pushed.by['bearer:cy'].last_pushed_seq, null, 'the lane with no stream received nothing');
 
-    // bo comes back: the implicit ack. ada and cy stay silent.
+    // bo comes back with an ordinary call: NOT an ack (#1576).
     await bo.callTool('column_list', {});
     await settle(300);
+    const alive = await lanes(rest);
+    assert.equal(alive.by['bearer:bo'].last_acked_seq, before.by['bearer:bo'].last_acked_seq, 'the next inbound call is liveness, not delivery');
+
+    // bo pulls: the tool acks the page it received, and only that moves the cursor.
+    const res = await bo.callTool('replay_pull', {});
+    const page = JSON.parse(res.result.content[0].text);
+    assert.equal(page.ack?.advanced, true, JSON.stringify(page.ack));
     const after = await lanes(rest);
-    assert.equal(after.by['bearer:bo'].last_acked_seq, seq, 'bo\'s next inbound call acks exactly what was served');
+    assert.ok(after.by['bearer:bo'].last_acked_seq >= seq, `bo's explicit ack covers the pushed event: ${JSON.stringify(after.by['bearer:bo'])}`);
     assert.equal(after.by['bearer:bo'].state, 'reachable', `bo reads reachable: ${JSON.stringify(after.by['bearer:bo'])}`);
-    assert.equal(after.by['bearer:ada'].last_acked_seq, before.by['bearer:ada'].last_acked_seq, 'ada was served but has not come back: served, not acked');
+    assert.equal(after.by['bearer:ada'].last_acked_seq, before.by['bearer:ada'].last_acked_seq, 'ada was pushed to but never acked: not acked');
     assert.ok(after.by['bearer:cy'].lag >= 1 && after.by['bearer:cy'].state !== 'reachable',
-      `cy, served nothing, is behind and reads so in the SAME snapshot: ${JSON.stringify(after.by['bearer:cy'])}`);
+      `cy is behind and reads so in the SAME snapshot: ${JSON.stringify(after.by['bearer:cy'])}`);
   });
 });
 
@@ -105,7 +117,7 @@ test('#782 ⛔ CONTROL — a session that holds NO stream is never marked served
     });
     await settle();
     const l = await lanes(rest);
-    assert.equal(l.by['bearer:ada'].last_served_seq, null, 'no stream ⇒ no write ⇒ nothing served — #642\'s fear, still refused');
+    assert.equal(l.by['bearer:ada'].last_pushed_seq, null, 'no stream ⇒ no write ⇒ nothing recorded — #642\'s fear, still refused');
     await ada.callTool('column_list', {});
     await settle(300);
     const l2 = await lanes(rest);

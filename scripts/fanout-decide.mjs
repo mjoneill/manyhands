@@ -545,7 +545,11 @@ export function lastWriteBySeatFrom(changes) {
   const out = {};
   for (const c of Array.isArray(changes) ? changes : []) {
     const by = typeof c?.by === 'string' ? c.by.toLowerCase() : null;
-    const at = typeof c?.at === 'string' ? c.at : null;
+    // #1561 rollback — a reverse-exported row was RECORDED at the rollback but WRITTEN at
+    // its receipt's time; the seat's last write is the latter, or a rollback would make
+    // every seat that wrote while the unit was ON look active at the moment of rollback.
+    const raw = typeof c?.reverseExport?.at === 'string' ? c.reverseExport.at : c?.at;
+    const at = typeof raw === 'string' ? (c?.reverseExport ? new Date(Date.parse(raw)).toISOString() : raw) : null;
     if (!by || !at) continue;
     if (!out[by] || at > out[by]) out[by] = at;
   }

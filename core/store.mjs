@@ -19,6 +19,7 @@
  */
 
 import { readFileSync, writeFileSync, renameSync, existsSync, statSync } from 'node:fs';
+import { countLegacy } from './legacy-counters.mjs';
 import { boardToDomain } from './mapping.mjs';
 import { domainToJsonLd, jsonLdToDomain, isJsonLdDocument } from './jsonld.mjs';
 import { ensurePeople } from './people.mjs';
@@ -70,6 +71,7 @@ function _identity(filePath) {
  * rebuild. ⛔ Mutating the result corrupts every later reader in the process.
  */
 export function loadDomainShared(filePath) {
+  countLegacy('loadDomainShared');
   if (!existsSync(filePath)) return { key: null, domain: _parseDomain(filePath) };
   const key = _identity(filePath);
   const hit = _cache.get(filePath);
@@ -82,6 +84,7 @@ export function loadDomainShared(filePath) {
 
 /** Read the store → domain projection. Empty domain if the file is absent. */
 export function loadDomain(filePath) {
+  countLegacy('loadDomain');
   if (existsSync(filePath)) {
     const key = _identity(filePath);
     const hit = _cache.get(filePath);
@@ -121,6 +124,7 @@ function _parseDomain(filePath) {
  * the timestamp (test determinism). Returns the written JSON-LD document.
  */
 export function saveDomain(filePath, domain, opts = {}) {
+  countLegacy('saveDomain');
   let stamped = { ...domain, lastUpdated: opts.now || new Date().toISOString() };
   // #686 — a ROSTERED writer materializes Person nodes into the document
   // (regenerated each save: one function, one authority, rebuilt not synced).

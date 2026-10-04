@@ -27,11 +27,30 @@ import { handBackFromState, defaultWithheldStatePath } from '../core/withheld-st
 import { annotateTalks } from '../core/guest-loop.mjs';   // #1446
 import { findMentions, findWakes, pairCapSuppressed, DEFAULT_PAIR_CAP_PER_HOUR, guestOnce, fetchBoundedChanges, shouldMarkAnswered, mentionScanPath, fetchMentionWindow, acquireLock, releaseLock, effectiveWakeOn, budgetCheck, deliveryOutcome, bindingRulings } from '../core/guest-loop.mjs';
 import { makeExecutor } from '../core/board-tools.mjs';
+import { makeHandedCapture } from '../core/handed-dump.mjs';   // #1567 PC5
+const handedCapture = process.env.SCRUM_HANDED_DUMP
+  ? makeHandedCapture({ file: process.env.SCRUM_HANDED_DUMP, wakeId: process.env.SCRUM_HANDED_WAKE_ID || null })
+  : (fn) => fn;
 
 const args = process.argv.slice(2);
 const opt = (k) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : null; };
 const has = (k) => args.includes(k);
 const BOARD = process.env.SCRUM_BOARD_URL || 'http://127.0.0.1:3141';
+// #1561 launch — this seat's own board key, read from SCRUM_SEAT_TOKEN_FILE (the MCP
+// server's convention). The unit's write routes (memories, decisions, seat state) refuse a
+// keyless write. It is sent ONLY to BOARD: this module-local fetch shadows the global one for
+// the board calls below; core/model-adapter.mjs calls the model provider with the GLOBAL
+// fetch, so the key never leaves for it.
+const SEAT_BEARER = (() => {
+  const f = process.env.SCRUM_SEAT_TOKEN_FILE;
+  if (!f) return null;
+  try { return fs.readFileSync(f, 'utf8').trim() || null; } catch (e) { console.error(`[#1561] SCRUM_SEAT_TOKEN_FILE unreadable (${e.code || e.message}) — memory, decision and seat writes will be refused`); return null; }
+})();
+const fetch = (url, opts = {}) => {
+  const u = String(url);
+  if (!SEAT_BEARER || !(u === BOARD || u.startsWith(`${BOARD}/`))) return globalThis.fetch(url, opts);
+  return globalThis.fetch(url, { ...opts, headers: { ...(opts.headers || {}), Authorization: `Bearer ${SEAT_BEARER}` } });
+};
 const agentFile = opt('--agent');
 const seatArg = opt('--seat');
 if (!agentFile && !seatArg) { console.error('usage: guest-once.mjs (--agent <file.json> | --seat <seatKey>) [--dry-run] [--once-id <messageId>]'); process.exit(2); }
@@ -281,9 +300,10 @@ if ((typeof wake.conversation === 'string' && wake.conversation) || (Array.isArr
 }
 const sinceIso = new Date(Date.parse(wake.createdAt || Date.now()) - 60 * 60 * 1000).toISOString();
 const getRaw = async (p) => { const r = await fetch(`${BOARD}${p}`); let body = null; try { body = await r.json(); } catch { /* none */ } return { status: r.status, body }; };
-let rows = [];
+// #1561 — an unreadable list is rethrown through changes() so the wake says "could not be read", never shows it empty
+let rows = []; let changesError = null;
 try { rows = await fetchBoundedChanges(getRaw, sinceIso); }
-catch (e) { console.error(`[#1201] changes unreadable — answering from the mention alone: ${e.message}`); }
+catch (e) { changesError = e; console.error(`[#1201] changes unreadable — answering from the mention alone: ${e.message}`); }
 // #1202 — the ledger row goes to the board as a scrum:ModelCall node; the JSONL
 // file is the fallback if the board refuses, and the row says which happened.
 // #1441 — the builder lives in core/model-call-row.mjs so tests exercise the real one.
@@ -334,7 +354,7 @@ const claimCard = dry ? async (n, seat) => console.log(`[dry-run] would claim #$
 };
 
 const r = await guestOnce({
-  agent, wake, changes: () => rows, ledgerSink, spentToday, memories, priorRefusals, priorWithheld, withheldStateFile, writeMemory, claimCard,
+  agent, wake, changes: () => { if (changesError) throw changesError; return rows; }, ledgerSink, spentToday, memories, priorRefusals, priorWithheld, withheldStateFile, writeMemory, claimCard,
   // #1436 — the live decisions that name this seat, its held role, or its display name
   rulings: async (seatKey) => {
     const all = (await get('/api/decisions?live=1'));
@@ -346,7 +366,9 @@ const r = await guestOnce({
   // to the module, and the serve copy is read-only: a refused sink there threw
   // EACCES and lost the row.
   ledgerFile: process.env.SCRUM_MODEL_LEDGER_FILE || `${stateFile}.ledger.jsonl`,
-  callModel: (a, m, o) => callModel(a, m, { ...o, apiKey: a.apiKeyRef ? process.env[a.apiKeyRef] : undefined }),
+  // #1567 PC5 — harness-only: SCRUM_HANDED_DUMP records every dispatch's exact
+  // messages and tools BEFORE the key is added (core/handed-dump.mjs). Off by default.
+  callModel: handedCapture((a, m, o) => callModel(a, m, { ...o, apiKey: a.apiKeyRef ? process.env[a.apiKeyRef] : undefined })),
   // #1196 — the executor, bound to THIS board and acting AS this seat. Without
   // it the loop has tools it cannot run, which is indistinguishable from having
   // no tools at all: guestOnce takes the single-call path and a grant on the

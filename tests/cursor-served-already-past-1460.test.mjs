@@ -38,7 +38,7 @@ test('#1460 CONTROL: a mark that advances the cursor answers served:true, advanc
     assert.equal(r.status, 200);
     assert.equal(r.body.served, true, JSON.stringify(r.body));
     assert.equal(r.body.advanced, true);
-    assert.equal(r.body.last_served_seq, r.body.seq);
+    assert.equal(r.body.last_pushed_seq, r.body.seq, '#1576: a push mark is push_served, never the pull\'s served');
   });
 });
 
@@ -50,15 +50,18 @@ test('#1460 ⭐ an EARLIER event marked after a later one is served (the cursor 
     assert.equal(r.body.served, true, `the undefined-logging case: ${JSON.stringify(r.body)}`);
     assert.equal(r.body.advanced, false, 'it did not move the cursor, and says so');
     assert.equal(r.body.code, 'ALREADY_PAST');
-    assert.ok(r.body.last_served_seq > r.body.seq, 'the cursor that covers it is named');
+    assert.ok(r.body.last_pushed_seq > r.body.seq, 'the cursor that covers it is named');
   });
 });
 
 test('#1460 an event the lane already ACKED is served too, with its own code', async () => {
   await withLane(async ({ base, identity, first, second }) => {
     await mark(base, identity, second);
-    const ack = await post(base, '/api/cursors/inbound', { identity });
+    // #1576 — only an explicit ack of a PULLED page advances the cursor (inbound and push do not)
+    const page = await fetch(`${base}/api/cursors/pull?identity=${encodeURIComponent(identity)}`).then((r) => r.json());
+    const ack = await post(base, '/api/cursors/ack', { identity, token: page.ack_token });
     assert.equal(ack.status, 200, JSON.stringify(ack.body));
+    assert.equal(ack.body.advanced, true, JSON.stringify(ack.body));
     const r = await mark(base, identity, first);
     assert.equal(r.body.served, true, JSON.stringify(r.body));
     assert.equal(r.body.advanced, false);

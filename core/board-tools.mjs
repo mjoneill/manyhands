@@ -78,6 +78,25 @@ export const BOARD_TOOLS = Object.freeze([
   {
     type: 'function',
     function: {
+      // #1558 — the SHARED authority read. One resolver answers "what currently
+      // governs this", so a seat never assembles authority from raw SPARQL and
+      // never reads a store failure as "nothing governs it".
+      name: 'graph_authority',
+      description: 'Ask what currently GOVERNS a topic: which assertion is in force, who made it and under what grant, what (if anything) it retired and why, and any newer assertion that does not override it. The answer has a status: CURRENT (one governing assertion), UNRESOLVED (binding assertions conflict; nothing governs until that is settled), NO_AUTHORITY (nothing binding exists), or UNAVAILABLE (the store could not be read). UNAVAILABLE never means "nothing governs it": it means you do not know. Use this before acting on anything you remember about a rule or decision.',
+      parameters: {
+        type: 'object',
+        properties: {
+          topic: { type: 'string', description: 'the subject IRI, e.g. urn:ex:topic1' },
+          predicate: { type: 'string', description: 'the predicate IRI, e.g. urn:ex:policy' },
+          scope: { type: 'string', description: 'the scope IRI the authority applies in' },
+        },
+        required: ['topic', 'predicate', 'scope'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       // ⛔ THE FACT THAT ACTUALLY COSTS HOPS. A colleague asked which cards sit
       // in a column, used the RIGHT predicate, and passed a literal where the
       // graph holds an IRI. Clean zero, indistinguishable from "no such cards".
@@ -249,6 +268,22 @@ export function makeExecutor({ get, post, put = null, del = null, patch = null, 
         // writes, accepted in silence. Read the name the route answers with.
         const rows = Array.isArray(out?.rows) ? out.rows : [];
         return rows.length ? out : { ...out, rows, note: 'the query ran and matched nothing. That is an answer, not a failure. If you are guessing at names, call kind_list to see what this board actually records.' };
+      }
+      case 'graph_authority': {
+        const q = new URLSearchParams();
+        for (const k of ['topic', 'predicate', 'scope']) {
+          const v = String(args?.[k] ?? '').trim();
+          if (!v) throw new Error(`graph_authority needs a ${k}`);
+          q.set(k, v);
+        }
+        // ⛔ A failed read is UNAVAILABLE, never an exception the model narrates
+        // over and never an empty answer: the route says 503 when no resolver
+        // is installed, and a transport failure means the same thing.
+        try {
+          return await get(`/api/graph/authority?${q}`);
+        } catch (e) {
+          return { status: 'UNAVAILABLE', reason: String(e?.message || e), note: 'the authority could not be read. That is NOT "nothing governs it": you do not know what governs it.' };
+        }
       }
       case 'predicate_list': {
         const wanted = String(args?.name ?? '').trim();

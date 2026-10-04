@@ -479,7 +479,9 @@ export function projectActivities(store, events) {
     // this not-yet-projected path, so it inherits the seq idempotency above:
     // replaying the log is not new history, and the ending each event applies
     // to its predecessor is re-derived identically on a rebuild.
-    if (ent.kind === 'seat-state' && when) projectSeatDeclarationEvent(store, ev, when);
+    // #1568 — a REFUSED request is an activity, never a declaration: projecting it
+    // here ended the seat's open interval although nothing was written.
+    if (ent.kind === 'seat-state' && when && op !== 'refused') projectSeatDeclarationEvent(store, ev, when);
     // #1147 — a decision's CREATE event ALSO projects the decision itself. The
     // EVENT LOG is the record for decisions born after #1147; the document no
     // longer receives a row. Rows an older document still carries project from
@@ -1413,6 +1415,58 @@ function projectMemory(store, e) {
       else add(s, predIri(k), lit(one));
     }
   }
+}
+
+/**
+ * #1570 — THE EXECUTOR-HELD KINDS IN THE ONE READ VIEW.
+ *
+ * With the #1561 log-born unit ON, memory / decision / seat-state live in the
+ * graph executor and their writes never reach this replica, so graph_query was
+ * blind to them while every card stayed visible. Reviewer constraints (a reviewer):
+ * a query joining a memory to a card must see BOTH sides, and an unchanged
+ * default-graph query must return the same rows as with the flag OFF.
+ *
+ * ⇒ The executor's records are COPIED INTO this store, replacing whatever the
+ * document/event-log projection held for those kinds. One store, one default
+ * graph: arbitrary SPARQL joins across kinds, no GRAPH/FROM clause needed, no
+ * routing by kind.
+ *
+ *   OWNERSHIP  a subject typed with one of LOGBORN_CLASSES belongs to the
+ *              executor: ALL its triples (as subject) are dropped, then the
+ *              executor's triples are added. Edges FROM other (JSON-held) nodes
+ *              TO a record are the document's and are kept.
+ *   DIRECTION  executor → replica only. The replica is a disposable read cache
+ *              (never written through, see the header), so this adds no write
+ *              path to the executor at all.
+ *   SHAPE      `triples` are SPARQL-JSON terms {s, p, o} as the executor returns
+ *              them; the caller has already excluded the executor's own `urn:ex:`
+ *              bookkeeping, which the flag-OFF graph never carried.
+ *
+ * Returns { removed, added } (triple counts), for the log line.
+ */
+export const LOGBORN_CLASSES = Object.freeze([
+  IRI.scrum + 'Memory', IRI.scrum + 'MemoryVersion', IRI.scrum + 'Decision', IRI.scrum + 'SeatDeclaration',
+]);
+function termOf(t) {
+  if (!t || typeof t !== 'object') throw new Error('replaceLogbornRecords: a term must be a SPARQL-JSON object');
+  if (t.type === 'uri') return nn(t.value);
+  if (t.type === 'bnode') return oxigraph.blankNode(t.value);
+  if (t.type === 'literal') {
+    if (t['xml:lang']) return oxigraph.literal(t.value, t['xml:lang']);
+    if (t.datatype) return oxigraph.literal(t.value, nn(t.datatype));
+    return oxigraph.literal(t.value);
+  }
+  throw new Error(`replaceLogbornRecords: unknown term type ${t.type}`);
+}
+export function replaceLogbornRecords(store, triples) {
+  // build every new triple FIRST: a malformed term throws before the store is touched
+  const add = triples.map((t) => oxigraph.triple(termOf(t.s), termOf(t.p), termOf(t.o)));
+  const owned = new Set();
+  for (const cls of LOGBORN_CLASSES) for (const q of store.match(null, A, nn(cls))) owned.add(q.subject);
+  let removed = 0;
+  for (const s of owned) for (const q of store.match(s, null, null)) { store.delete(q); removed += 1; }
+  for (const q of add) store.add(q);
+  return { removed, added: add.length };
 }
 
 /** Emit one entity's triples into `store`. The projection, per entity. */

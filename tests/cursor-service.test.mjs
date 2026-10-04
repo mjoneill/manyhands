@@ -22,7 +22,7 @@ import { appendEvent } from '../core/event-log.mjs';
 import { loadCursors, saveCursors } from '../core/cursors.mjs';
 import {
   deliveryIdentity, registerFor, serveFor, noteInbound, envelopeFor, reachabilityReport,
-  discardPendingServes, markServed,
+  discardPendingServes, markServed, ackFor, ACK_FENCED,
 } from '../core/cursor-service.mjs';
 import { seqOfEntityEvent } from '../core/event-log.mjs';
 
@@ -46,16 +46,16 @@ function seed(dir, count, { day = '2026-08-11' } = {}) {
 // ── delivery identity: the key cursors are stored under ────────────────────
 
 test('#683 identity — a #410-registered lane keys on its endpoint id', () => {
-  const id = deliveryIdentity({ registrySeatId: 'minimo.sb' });
-  assert.equal(id.key, 'registry:minimo.sb');
+  const id = deliveryIdentity({ registrySeatId: 'dex.sb' });
+  assert.equal(id.key, 'registry:dex.sb');
   assert.equal(id.kind, 'registry');
 });
 
 test('#683 identity — a token-bound session with no registration keys on its seat', () => {
   // @wren and @indigo have NEVER registered through #410 (measured: 0 and 0).
   // Keying only on the registry would give this half of the room no cursors.
-  const id = deliveryIdentity({ bearerSeat: 'indigo' });
-  assert.equal(id.key, 'bearer:indigo');
+  const id = deliveryIdentity({ bearerSeat: 'cleo' });
+  assert.equal(id.key, 'bearer:cleo');
   assert.equal(id.kind, 'bearer');
 });
 
@@ -92,11 +92,11 @@ test('#683 identity — neither ⇒ NO cursor, and it says so rather than guessi
 test('#683 a fresh lane registers at HEAD and is owed nothing', () => {
   const dir = tmp();
   seed(dir, 5);
-  const { cursor, fresh, envelope } = registerFor(dir, 'registry:minimo.sb');
+  const { cursor, fresh, envelope } = registerFor(dir, 'registry:dex.sb');
   assert.equal(fresh, true);
   assert.equal(cursor, 5);
   assert.equal(envelope.lag, 0);
-  assert.equal(serveFor(dir, 'registry:minimo.sb').events.length, 0);
+  assert.equal(serveFor(dir, 'registry:dex.sb').events.length, 0);
 });
 
 test('#683 REPLAY WORKS FOR AN UNBOUND SEAT — @wren\'s acceptance bar', () => {
@@ -115,21 +115,24 @@ test('#683 REPLAY WORKS FOR AN UNBOUND SEAT — @wren\'s acceptance bar', () => 
 test('#683 a pull SERVES but does not ACK — the cursor holds until the seat speaks again', () => {
   const dir = tmp();
   seed(dir, 2);
-  registerFor(dir, 'bearer:indigo');
+  registerFor(dir, 'bearer:cleo');
   seed(dir, 2);
-  serveFor(dir, 'bearer:indigo').commit();
-  assert.equal(loadCursors(dir).seats['bearer:indigo'].acked, 2, 'acked must NOT move on serve');
-  assert.equal(loadCursors(dir).seats['bearer:indigo'].served, 4);
+  serveFor(dir, 'bearer:cleo').commit();
+  assert.equal(loadCursors(dir).seats['bearer:cleo'].acked, 2, 'acked must NOT move on serve');
+  assert.equal(loadCursors(dir).seats['bearer:cleo'].served, 4);
 });
 
-test('#683 the NEXT inbound call is the ack', () => {
+test('#1576 the NEXT inbound call is NOT the ack (it was, under #683) — only the explicit ack is', () => {
   const dir = tmp();
   seed(dir, 2);
-  registerFor(dir, 'bearer:indigo');
+  registerFor(dir, 'bearer:cleo');
   seed(dir, 2);
-  serveFor(dir, 'bearer:indigo').commit();
-  noteInbound(dir, 'bearer:indigo');
-  assert.equal(loadCursors(dir).seats['bearer:indigo'].acked, 4, 'aliveness after the response is the ack');
+  const p = serveFor(dir, 'bearer:cleo');
+  p.commit();
+  noteInbound(dir, 'bearer:cleo');
+  assert.equal(loadCursors(dir).seats['bearer:cleo'].acked, 2, 'aliveness after the response is NOT delivery evidence');
+  assert.equal(ackFor(dir, 'bearer:cleo', p.ack_token).advanced, true);
+  assert.equal(loadCursors(dir).seats['bearer:cleo'].acked, 4, 'the client said it got 3..4');
 });
 
 test('#683 LOST RESPONSE ⇒ the same events are re-served, never skipped', () => {
@@ -137,11 +140,11 @@ test('#683 LOST RESPONSE ⇒ the same events are re-served, never skipped', () =
   // the envelope); it may never see one zero times.
   const dir = tmp();
   seed(dir, 1);
-  registerFor(dir, 'bearer:indigo');
+  registerFor(dir, 'bearer:cleo');
   seed(dir, 3);
-  const first = serveFor(dir, 'bearer:indigo');
+  const first = serveFor(dir, 'bearer:cleo');
   first.commit();
-  const second = serveFor(dir, 'bearer:indigo');   // no inbound between: unacked
+  const second = serveFor(dir, 'bearer:cleo');   // no inbound between: unacked
   assert.deepEqual(second.events.map((e) => e.seq), first.events.map((e) => e.seq),
     'an unacked serve is re-served in full');
 });
@@ -158,15 +161,16 @@ test('#683 STREAM DEATH MID-REPLAY ⇒ NOTHING advances (blocker-1, and the reas
   // only checked "the right events came back".
   const dir = tmp();
   seed(dir, 1);
-  registerFor(dir, 'bearer:indigo');
+  registerFor(dir, 'bearer:cleo');
   seed(dir, 4);
-  const pull = serveFor(dir, 'bearer:indigo');
+  const pull = serveFor(dir, 'bearer:cleo');
   assert.deepEqual(pull.events.map((e) => e.seq), [2, 3, 4, 5]);
   // …the stream dies here. commit() is never reached.
-  assert.equal(loadCursors(dir).seats['bearer:indigo'].served, null, 'an uncommitted serve records nothing');
-  noteInbound(dir, 'bearer:indigo');
-  assert.equal(loadCursors(dir).seats['bearer:indigo'].acked, 1, 'an ack with nothing served must not skip');
-  assert.deepEqual(serveFor(dir, 'bearer:indigo').events.map((e) => e.seq), [2, 3, 4, 5],
+  assert.equal(loadCursors(dir).seats['bearer:cleo'].served, null, 'an uncommitted serve records nothing');
+  noteInbound(dir, 'bearer:cleo');
+  assert.equal(ackFor(dir, 'bearer:cleo', pull.ack_token).code, 'ACK_BEYOND_SERVED', 'an ack of an unrecorded serve is refused');
+  assert.equal(loadCursors(dir).seats['bearer:cleo'].acked, 1, 'an ack with nothing served must not skip');
+  assert.deepEqual(serveFor(dir, 'bearer:cleo').events.map((e) => e.seq), [2, 3, 4, 5],
     'everything the seat missed is still owed to it');
 });
 
@@ -177,22 +181,21 @@ test('#683 FENCE — a superseded session cannot ack a range served to another (
   // is client-supplied". Two processes can hold one lane name, and the registry
   // log itself cannot tell them apart: "(reconnect or DUPLICATE config?)".
   //
-  // Under one shared cursor and no fence: A is served 2–5 and acks, B never
-  // received them and never will. That is #624's loss class arriving through
-  // the key of its own cure — and silent, because a cursor's job is to assert
-  // delivery. This is the only bar item that fails without a trace.
+  // #1576: the ack is explicit and names the session it was served to. When the
+  // range has since been served to ANOTHER session, the first session's ack is
+  // refused (ACK_FENCED) and the range is re-served — duplicate, never loss.
   const dir = tmp();
   seed(dir, 1);
-  registerFor(dir, 'registry:minimo.sb');
+  registerFor(dir, 'registry:dex.sb');
   seed(dir, 4);
-  serveFor(dir, 'registry:minimo.sb', { via: 'epoch1:sessionA' }).commit();
-
-  // …B registers the same lane name. Its inbound call must NOT ack A's range.
-  const r = noteInbound(dir, 'registry:minimo.sb', { via: 'epoch2:sessionB' });
-  assert.equal(r.fenced, true, 'a stranger acking someone else\'s range must be refused');
-  assert.equal(r.acked, false);
-  assert.equal(loadCursors(dir).seats['registry:minimo.sb'].acked, 1, 'the cursor did not move');
-  assert.deepEqual(serveFor(dir, 'registry:minimo.sb').events.map((e) => e.seq), [2, 3, 4, 5],
+  const a = serveFor(dir, 'registry:dex.sb', { via: 'epoch1:sessionA' }); a.commit();
+  // …B registers the same lane name and pulls the same range.
+  serveFor(dir, 'registry:dex.sb', { via: 'epoch2:sessionB' }).commit();
+  const r = ackFor(dir, 'registry:dex.sb', a.ack_token);
+  assert.equal(r.code, ACK_FENCED, 'a stranger acking someone else\'s range must be refused');
+  assert.equal(r.advanced, false);
+  assert.equal(loadCursors(dir).seats['registry:dex.sb'].acked, 1, 'the cursor did not move');
+  assert.deepEqual(serveFor(dir, 'registry:dex.sb').events.map((e) => e.seq), [2, 3, 4, 5],
     're-served in full — duplicate delivery is acceptable, silent loss is not');
 });
 
@@ -201,13 +204,13 @@ test('#683 FENCE — the session that WAS served may ack normally', () => {
   // refusing the ordinary case, or it is just a broken ack path.
   const dir = tmp();
   seed(dir, 1);
-  registerFor(dir, 'registry:minimo.sb');
+  registerFor(dir, 'registry:dex.sb');
   seed(dir, 4);
-  serveFor(dir, 'registry:minimo.sb', { via: 'epoch1:sessionA' }).commit();
-  const r = noteInbound(dir, 'registry:minimo.sb', { via: 'epoch1:sessionA' });
-  assert.equal(r.fenced, false);
-  assert.equal(r.acked, true);
-  assert.equal(loadCursors(dir).seats['registry:minimo.sb'].acked, 5);
+  const a = serveFor(dir, 'registry:dex.sb', { via: 'epoch1:sessionA' }); a.commit();
+  const r = ackFor(dir, 'registry:dex.sb', a.ack_token);
+  assert.equal(r.ok, true);
+  assert.equal(r.advanced, true);
+  assert.equal(loadCursors(dir).seats['registry:dex.sb'].acked, 5);
 });
 
 test('#683 FENCE — pending serves are discarded on server restart, because EPOCHS RESET', () => {
@@ -218,14 +221,14 @@ test('#683 FENCE — pending serves are discarded on server restart, because EPO
   // ephemeral because its discriminator is ephemeral.
   const dir = tmp();
   seed(dir, 1);
-  registerFor(dir, 'registry:minimo.sb');
+  registerFor(dir, 'registry:dex.sb');
   seed(dir, 3);
-  serveFor(dir, 'registry:minimo.sb', { via: 'epoch1:sessionA' }).commit();
+  serveFor(dir, 'registry:dex.sb', { via: 'epoch1:sessionA' }).commit();
   discardPendingServes(dir);                       // ← what the server calls at boot
   const st = loadCursors(dir);
-  assert.equal(st.seats['registry:minimo.sb'].served, null, 'no pending serve survives a restart');
-  assert.equal(st.seats['registry:minimo.sb'].acked, 1, 'the DURABLE cursor is untouched');
-  assert.deepEqual(serveFor(dir, 'registry:minimo.sb').events.map((e) => e.seq), [2, 3, 4]);
+  assert.equal(st.seats['registry:dex.sb'].served, null, 'no pending serve survives a restart');
+  assert.equal(st.seats['registry:dex.sb'].acked, 1, 'the DURABLE cursor is untouched');
+  assert.deepEqual(serveFor(dir, 'registry:dex.sb').events.map((e) => e.seq), [2, 3, 4]);
 });
 
 test('#683 two lanes of one agent keep INDEPENDENT cursors', () => {
@@ -233,12 +236,12 @@ test('#683 two lanes of one agent keep INDEPENDENT cursors', () => {
   // other lane's events delivered — that would be #624 with extra steps.
   const dir = tmp();
   seed(dir, 1);
-  registerFor(dir, 'registry:minimo.sb');
+  registerFor(dir, 'registry:dex.sb');
   registerFor(dir, 'registry:minimo.cs');
   seed(dir, 2);
-  serveFor(dir, 'registry:minimo.sb').commit();
-  noteInbound(dir, 'registry:minimo.sb');
-  assert.equal(loadCursors(dir).seats['registry:minimo.sb'].acked, 3);
+  const p = serveFor(dir, 'registry:dex.sb'); p.commit();
+  ackFor(dir, 'registry:dex.sb', p.ack_token);
+  assert.equal(loadCursors(dir).seats['registry:dex.sb'].acked, 3);
   assert.equal(loadCursors(dir).seats['registry:minimo.cs'].acked, 1, 'the other lane is untouched');
   assert.equal(serveFor(dir, 'registry:minimo.cs').events.length, 2);
 });
@@ -249,13 +252,13 @@ test('#683 RESTART SURVIVAL — cursors are identical across a process restart',
   // which is the ceremony this slice retires.
   const dir = tmp();
   seed(dir, 3);
-  registerFor(dir, 'bearer:indigo');
+  registerFor(dir, 'bearer:cleo');
   seed(dir, 2);
-  serveFor(dir, 'bearer:indigo').commit();
-  noteInbound(dir, 'bearer:indigo');
+  const p = serveFor(dir, 'bearer:cleo'); p.commit();
+  ackFor(dir, 'bearer:cleo', p.ack_token);
   const before = JSON.parse(JSON.stringify(loadCursors(dir)));   // simulate: nothing in memory
   assert.deepEqual(loadCursors(dir), before);
-  assert.equal(serveFor(dir, 'bearer:indigo').events.length, 0, 'nothing re-served after a clean ack');
+  assert.equal(serveFor(dir, 'bearer:cleo').events.length, 0, 'nothing re-served after a clean ack');
 });
 
 // ── the envelope: server-computed, so the client compares nothing ──────────
@@ -263,9 +266,9 @@ test('#683 RESTART SURVIVAL — cursors are identical across a process restart',
 test('#683 the envelope carries the four fields the room ruled on', () => {
   const dir = tmp();
   seed(dir, 2);
-  registerFor(dir, 'bearer:indigo');
+  registerFor(dir, 'bearer:cleo');
   const later = seed(dir, 2, { day: '2026-08-12' });
-  const env = envelopeFor(dir, 'bearer:indigo');
+  const env = envelopeFor(dir, 'bearer:cleo');
   assert.equal(env.head_seq, 4);
   assert.equal(env.last_acked_seq, 2);
   assert.equal(env.lag, 2);
@@ -276,8 +279,8 @@ test('#683 the envelope carries the four fields the room ruled on', () => {
 test('#683 oldest_unserved_at is null when nothing is outstanding', () => {
   const dir = tmp();
   seed(dir, 2);
-  registerFor(dir, 'bearer:indigo');
-  assert.equal(envelopeFor(dir, 'bearer:indigo').oldest_unserved_at, null);
+  registerFor(dir, 'bearer:cleo');
+  assert.equal(envelopeFor(dir, 'bearer:cleo').oldest_unserved_at, null);
 });
 
 test('#683 an unknown lane gets an envelope that says UNKNOWN, not zero', () => {
@@ -296,10 +299,10 @@ test('#683 an unknown lane gets an envelope that says UNKNOWN, not zero', () => 
 test('#683 UNCONFIRMED — inbound recent, lag growing (the 8-hour incident, scored right)', () => {
   const dir = tmp();
   seed(dir, 1);
-  registerFor(dir, 'registry:minimo.sb', { now: '2026-08-11T02:00:00.000Z' });
+  registerFor(dir, 'registry:dex.sb', { now: '2026-08-11T02:00:00.000Z' });
   seed(dir, 5);   // the room moves on; she receives none of it
   const rep = reachabilityReport(dir, { now: Date.parse('2026-08-11T02:01:00.000Z') });
-  const row = rep.find((r) => r.identity === 'registry:minimo.sb');
+  const row = rep.find((r) => r.identity === 'registry:dex.sb');
   assert.equal(row.state, 'unconfirmed');   // #992: renamed from 'deaf' — it measures unacked lag, not reception
   assert.equal(row.lag, 5);
 });
@@ -311,12 +314,12 @@ test('#683 POSITIVE CONTROL — the outbound-shaped question calls the same seat
   // so the difference cannot be attributed to anything else.
   const dir = tmp();
   seed(dir, 1);
-  registerFor(dir, 'registry:minimo.sb', { now: '2026-08-11T02:00:00.000Z' });
+  registerFor(dir, 'registry:dex.sb', { now: '2026-08-11T02:00:00.000Z' });
   seed(dir, 5);
   const now = Date.parse('2026-08-11T02:01:00.000Z');
-  const inbound = reachabilityReport(dir, { now }).find((r) => r.identity === 'registry:minimo.sb');
-  const outbound = reachabilityReport(dir, { now, inputs: 'stream_open', streamOpen: { 'registry:minimo.sb': true } })
-    .find((r) => r.identity === 'registry:minimo.sb');
+  const inbound = reachabilityReport(dir, { now }).find((r) => r.identity === 'registry:dex.sb');
+  const outbound = reachabilityReport(dir, { now, inputs: 'stream_open', streamOpen: { 'registry:dex.sb': true } })
+    .find((r) => r.identity === 'registry:dex.sb');
   assert.equal(inbound.state, 'unconfirmed');   // #992
   assert.equal(outbound.state, 'reachable',
     'the banned instrument disagrees — that disagreement IS the finding');
@@ -325,9 +328,9 @@ test('#683 POSITIVE CONTROL — the outbound-shaped question calls the same seat
 test('#683 UNREACHABLE — no inbound for a long time', () => {
   const dir = tmp();
   seed(dir, 1);
-  registerFor(dir, 'bearer:indigo', { now: '2026-08-11T00:00:00.000Z' });
+  registerFor(dir, 'bearer:cleo', { now: '2026-08-11T00:00:00.000Z' });
   const rep = reachabilityReport(dir, { now: Date.parse('2026-08-11T03:00:00.000Z') });
-  assert.equal(rep.find((r) => r.identity === 'bearer:indigo').state, 'unreachable');
+  assert.equal(rep.find((r) => r.identity === 'bearer:cleo').state, 'unreachable');
 });
 
 test('#683 a bearer lane ADOPTS a cursor on its first inbound call', () => {
@@ -336,11 +339,11 @@ test('#683 a bearer lane ADOPTS a cursor on its first inbound call', () => {
   // would cover exactly the half of the room it wasn't written for.
   const dir = tmp();
   seed(dir, 4);
-  const r = noteInbound(dir, 'bearer:indigo');
+  const r = noteInbound(dir, 'bearer:cleo');
   assert.equal(r.adopted, true);
-  assert.equal(loadCursors(dir).seats['bearer:indigo'].acked, 4, 'adopts at HEAD, not zero');
+  assert.equal(loadCursors(dir).seats['bearer:cleo'].acked, 4, 'adopts at HEAD, not zero');
   seed(dir, 2);
-  assert.deepEqual(serveFor(dir, 'bearer:indigo').events.map((e) => e.seq), [5, 6],
+  assert.deepEqual(serveFor(dir, 'bearer:cleo').events.map((e) => e.seq), [5, 6],
     'and is owed everything after the moment we first saw it');
 });
 
@@ -358,20 +361,20 @@ test('#683 RETENTION — a pull REFUSES rather than serving a partial range', ()
   // the card says to reuse the shape — this is the reuse.
   const dir = tmp();
   seed(dir, 3, { day: '2026-08-01' });
-  registerFor(dir, 'registry:minimo.sb');
-  loadCursors(dir).seats['registry:minimo.sb'].acked = 0;
+  registerFor(dir, 'registry:dex.sb');
+  loadCursors(dir).seats['registry:dex.sb'].acked = 0;
   saveCursors(dir, Object.assign(loadCursors(dir), {
-    seats: { 'registry:minimo.sb': { acked: 0, served: null, last_inbound_at: '2026-08-01T00:00:00.000Z', last_inbound_seq: 0, registered_at: '2026-08-01T00:00:00.000Z' } },
+    seats: { 'registry:dex.sb': { acked: 0, served: null, last_inbound_at: '2026-08-01T00:00:00.000Z', last_inbound_seq: 0, registered_at: '2026-08-01T00:00:00.000Z' } },
   }));
   seed(dir, 2, { day: '2026-08-11' });
   trimSegment(dir, '2026-08-01');                 // retention eats what it was owed
-  const pull = serveFor(dir, 'registry:minimo.sb');
+  const pull = serveFor(dir, 'registry:dex.sb');
   assert.equal(pull.refused, 'CURSOR_TOO_OLD');
   assert.equal(pull.events.length, 0, 'a partial answer is worse than a refusal here');
   assert.equal(pull.gap.missingFrom, 1);
   assert.equal(pull.gap.missingTo, 3);
   assert.equal(pull.commit(), null, 'a refused pull commits nothing');
-  assert.equal(loadCursors(dir).seats['registry:minimo.sb'].acked, 0, 'the cursor did not move');
+  assert.equal(loadCursors(dir).seats['registry:dex.sb'].acked, 0, 'the cursor did not move');
 });
 
 test('#683 RETENTION — oldest_unserved_at goes UNKNOWN, never younger (it fails unsafe otherwise)', () => {
@@ -382,13 +385,13 @@ test('#683 RETENTION — oldest_unserved_at goes UNKNOWN, never younger (it fail
   // harness it exists to catch. Three states, not two.
   const dir = tmp();
   seed(dir, 2, { day: '2026-08-01' });
-  saveCursors(dir, { version: 1, seats: { 'bearer:indigo': { acked: 0, served: null, last_inbound_at: '2026-08-01T00:00:00.000Z', last_inbound_seq: 0, registered_at: '2026-08-01T00:00:00.000Z' } } });
+  saveCursors(dir, { version: 1, seats: { 'bearer:cleo': { acked: 0, served: null, last_inbound_at: '2026-08-01T00:00:00.000Z', last_inbound_seq: 0, registered_at: '2026-08-01T00:00:00.000Z' } } });
   seed(dir, 2, { day: '2026-08-11' });
-  const before = envelopeFor(dir, 'bearer:indigo');
+  const before = envelopeFor(dir, 'bearer:cleo');
   assert.equal(before.oldest_unserved_state, 'known');
   assert.equal(before.oldest_unserved_at, '2026-08-01T00:00:00.000Z');
   trimSegment(dir, '2026-08-01');
-  const after = envelopeFor(dir, 'bearer:indigo');
+  const after = envelopeFor(dir, 'bearer:cleo');
   assert.equal(after.oldest_unserved_state, 'trimmed');
   assert.equal(after.oldest_unserved_at, null, 'never a younger timestamp — unknown is the safe direction');
   assert.equal(after.oldest_retained_at, '2026-08-11T00:00:00.000Z', 'and it says what it CAN see');
@@ -399,16 +402,16 @@ test('#683 RETENTION — a contiguous log is not mistaken for a trimmed one', ()
   // not refuse, or every ordinary pull would 400.
   const dir = tmp();
   seed(dir, 4);
-  saveCursors(dir, { version: 1, seats: { 'bearer:indigo': { acked: 0, served: null, last_inbound_at: '2026-08-11T00:00:00.000Z', last_inbound_seq: 0, registered_at: '2026-08-11T00:00:00.000Z' } } });
-  const pull = serveFor(dir, 'bearer:indigo');
+  saveCursors(dir, { version: 1, seats: { 'bearer:cleo': { acked: 0, served: null, last_inbound_at: '2026-08-11T00:00:00.000Z', last_inbound_seq: 0, registered_at: '2026-08-11T00:00:00.000Z' } } });
+  const pull = serveFor(dir, 'bearer:cleo');
   assert.equal(pull.refused, undefined);
   assert.deepEqual(pull.events.map((e) => e.seq), [1, 2, 3, 4]);
-  assert.equal(envelopeFor(dir, 'bearer:indigo').oldest_unserved_state, 'known');
+  assert.equal(envelopeFor(dir, 'bearer:cleo').oldest_unserved_state, 'known');
 });
 
-// ── #782 / Decision 5b43edcd — served on PUSH write, acked on the next inbound ──
+// ── #782 / Decision 5b43edcd — a PUSH write is reported; #1576: it is never an ack ──
 
-test('#782 markServed records a pushed seq for a KNOWN lane; the same session acks it, a different session is fenced', () => {
+test('#782/#1576 markServed records a pushed seq for a KNOWN lane as push_served — no inbound, from any session, acks it', () => {
   const dir = tmp();
   seed(dir, 3);
   const key = 'bearer:ada';
@@ -416,19 +419,17 @@ test('#782 markServed records a pushed seq for a KNOWN lane; the same session ac
   const post = appendEvent(dir, { op: 'post', entity: { kind: 'conversation', id: 'msg-1' }, state: { body: 'x' }, actor: 'bo' }, { now: '2026-08-11T00:10:00.000Z' });
   const r = markServed(dir, key, { seq: post.seq, via: 'none:s1' });
   assert.equal(r.known, true);
-  assert.equal(r.served, post.seq);
+  assert.equal(r.pushed, post.seq);
+  assert.equal(r.served, null, 'a push is not a pull serve: the ack ceiling is untouched');
   assert.equal(envelopeFor(dir, key).last_acked_seq, 3, 'served is not acked');
-
-  // a DIFFERENT session acking is fenced: the range is dropped, not stolen
-  const other = noteInbound(dir, key, { via: 'none:s2' });
-  assert.equal(other.fenced, true);
-  assert.equal(envelopeFor(dir, key).last_acked_seq, 3);
-  assert.equal(envelopeFor(dir, key).last_served_seq, null);
-
-  // the same session acks
-  markServed(dir, key, { seq: post.seq, via: 'none:s1' });
-  const same = noteInbound(dir, key, { via: 'none:s1' });
-  assert.equal(same.acked, true);
+  noteInbound(dir, key, { via: 'none:s2' });
+  noteInbound(dir, key, { via: 'none:s1' });
+  assert.equal(envelopeFor(dir, key).last_acked_seq, 3, 'a resolved stream write is a server-side "sent", not delivery');
+  // the pushed event stays owed to the pull, and the explicit ack clears it
+  const p = serveFor(dir, key, { via: 'none:s1' });
+  assert.deepEqual(p.events.map((e) => e.seq), [post.seq]);
+  p.commit();
+  assert.equal(ackFor(dir, key, p.ack_token).advanced, true);
   assert.equal(envelopeFor(dir, key).last_acked_seq, post.seq);
 });
 
@@ -437,9 +438,9 @@ test('#782 markServed on an UNKNOWN lane writes nothing and says so; a seq at or
   seed(dir, 2);
   assert.deepEqual(markServed(dir, 'bearer:nobody', { seq: 2, via: 'none:s1' }), { known: false });
   assert.equal(loadCursors(dir).seats['bearer:nobody'], undefined, 'no lane was created by a push');
-  noteInbound(dir, 'bearer:ada', { via: 'none:s1' });          // acked 2
+  noteInbound(dir, 'bearer:ada', { via: 'none:s1' });          // adopted at head: acked 2
   const r = markServed(dir, 'bearer:ada', { seq: 1, via: 'none:s1' });
-  assert.equal(r.served, null, 'already past it — nothing outstanding');
+  assert.equal(r.pushed, null, 'already past it — nothing outstanding');
 });
 
 test('#782 seqOfEntityEvent finds the seq of a conversation post by id, newest-first, and answers null for a stranger', () => {

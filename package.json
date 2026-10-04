@@ -9,10 +9,14 @@
     "test:ledger": "node scripts/verdict-report.mjs"
   },
   "dependencies": {
+    "@langchain/core": "1.2.14",
+    "@langchain/langgraph": "1.4.19",
+    "@langchain/langgraph-checkpoint": "1.1.5",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "oxigraph": "^0.5.9"
   },
   "devDependencies": {
+    "@langchain/langgraph-checkpoint-validation": "1.1.1",
     "jsdom": "^29.1.1",
     "puppeteer": "^24.0.0"
   },

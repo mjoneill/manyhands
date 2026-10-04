@@ -521,7 +521,7 @@ export function findWakes({ agent, messages = [], cards = [], state = {}, now = 
   return out;
 }
 
-export function buildMessages({ agent, wake, changes = [], memories = [], rulings = [], refusedMemory = [], priorWithheld = [] }) {
+export function buildMessages({ agent, wake, changes = [], changesUnreadable = false, memories = [], rulings = [], refusedMemory = [], priorWithheld = [] }) {
   const policy = agent.contextPolicy || 'thread';
   const lines = [];
   lines.push(`You are ${agent.name || agent.seatKey}, a ${agent.residency === 'resident' ? 'resident' : 'guest'} seat on the manyhands board. Your seat key is "${agent.seatKey}".`);
@@ -689,6 +689,12 @@ export function buildMessages({ agent, wake, changes = [], memories = [], ruling
     ctx.push('Rulings that bind this seat (live decisions on the board — these are settled; do not re-open them from memory):\n'
       + rulings.map((d) => `- [${String(d.decidedAt || '').slice(0, 16)} · ${d.decidedBy || '?'} · ${String(d.id || '').slice(0, 8)}] ${d.statement}${d.reopensIf ? ` (reopens if: ${String(d.reopensIf).slice(0, 160)})` : ''}`).join('\n'));
   }
+  // #1561 — unreadable is NOT empty (reviewers 14:48Z): an executor restart 503s the
+  // whole feed, and a silent empty tail would read as "nothing changed" (the G1 pattern).
+  if (policy !== 'artifact-only' && changesUnreadable) {
+    ctx.push('What changed on the board recently: the recent changes could not be read this wake. '
+      + 'This is not evidence that nothing changed; do not tell anyone nothing changed, and do not act as if nothing did.');
+  }
   if (policy !== 'artifact-only' && changes.length) {
     ctx.push('What changed on the board recently (bounded, newest last):\n' + changes.slice(-20).map((c) =>
       `- ${c.at || ''} ${c.kind || ''} ${c.op || ''} ${c.shortId != null ? `#${c.shortId}` : (c.id || '')}${c.title ? `: ${String(c.title).slice(0, 120)}` : ''}${c.by ? ` (by ${c.by})` : ''}`).join('\n'));
@@ -836,8 +842,8 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
       return { posted: false, halted: true, reason: b.reason, budget: b };
     }
   }
-  let rows = [];
-  try { rows = changes() || []; } catch (e) { onError(`[#1201] bounded context unreadable — answering from the mention alone: ${e?.message ?? e}`); }
+  let rows = []; let changesUnreadable = false;
+  try { rows = changes() || []; } catch (e) { changesUnreadable = true; onError(`[#1201] bounded context unreadable — answering from the mention alone: ${e?.message ?? e}`); }
   // #1226 — a resident reads its OWN memory (owner = seat) before it thinks.
   // Unreadable is not empty: the row says which, and the agent is told nothing
   // rather than told "your memory is empty" — a false empty would teach it
@@ -875,7 +881,7 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
       catch (e) { onError(`[#1428] prior withheld unreadable for ${agent.seatKey}; waking without them: ${e?.message ?? e}`); }
     }
   }
-  const messages = buildMessages({ agent, wake, changes: rows, memories: memState === 'unreadable' ? [{ body: '(your memory could not be read this wake — do not conclude it is empty)' }] : mem, rulings: rul, refusedMemory, priorWithheld: handedWithheld });
+  const messages = buildMessages({ agent, wake, changes: rows, changesUnreadable, memories: memState === 'unreadable' ? [{ body: '(your memory could not be read this wake — do not conclude it is empty)' }] : mem, rulings: rul, refusedMemory, priorWithheld: handedWithheld });
   const started = Date.now();
   const base = {
     ledger: 'pre-P6', agent: agent.seatKey, model: agent.model.model, protocol: agent.model.protocol,

@@ -38,6 +38,16 @@ import { isOpenDelivery } from './core/delivery.mjs';   // #1346
 import { exportableSpaces, resolveSpaces, describeExportSet } from './core/export-spaces.mjs';   // #1321
 import { loadDomain, loadDomainShared, saveDomain } from './core/store.mjs';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { countLegacy, setLegacyContext, installStructuredCloneCounter } from './core/legacy-counters.mjs';
+import { createGraphSlice } from './core/graph-slice-routes.mjs';
+// #1561 — the log-born unit (memory, decision, seat-state) on the graph executor, behind
+// SCRUM_GRAPH_UNIT_LOGBORN=1. The folds live there now; with the flag OFF they are the only part used.
+import {
+  memoriesFromRows, decisionsFromRows, annotateDecisionRelations, createLogbornUnit, logbornUnitConfig,
+  memoryCreateIntention, memoryReviseIntention, decisionCreateIntention, decisionRelateIntention,
+  seatDeclareIntention, seatClearIntention, SEAT_DECL_BASE,
+  collapseIdentities, identitiesFromEvents, identityOf,
+} from './core/logborn-unit.mjs';
 import { BOARD_TOOLS } from './core/board-tools.mjs';
 import { resolveAttachedTo } from './core/attached-to.mjs'; // #761
 import { promptGrantConflict, promptGrantWarning } from './core/prompt-grants.mjs'; // #1242
@@ -79,19 +89,22 @@ import { probeModel, PROTOCOL_NAMES as MODEL_PROTOCOLS } from './core/model-adap
 import { deriveGraph, personByKey } from './core/people.mjs';
 import { queryCards, facetCards } from './core/cards-query.mjs';
 import { similarCards } from './core/similar-cards.mjs';
-import { queryChangesFromLog } from './core/changes-log-query.mjs';
-import { readEvents, oldestRetainedAt, seqAsOf, seqOfEntityEvent, activityReadWindow, advanceActivityCursor } from './core/event-log.mjs';
+import { queryChangesFromLog, parseSince, EPOCH_CHANGED } from './core/changes-log-query.mjs';
+import { feedQuery, feedRowsFromBindings } from './core/logborn-feed.mjs';   // #1561 — the unit's writes in the change feed
+import { readEvents, nextSeq, oldestRetainedAt, seqAsOf, seqOfEntityEvent, activityReadWindow, advanceActivityCursor } from './core/event-log.mjs';
 import { writeSnapshot, readSnapshot, sweepSnapshotTemps, snapshotPaths } from './core/graph-snapshot.mjs';   // #884 · #1386 reads the sidecar
 import { staleClaims, STALE_CLAIM_HOURS } from './core/stale-claims.mjs';   // #455
 import { readStoreMeter, meterLine, meterCeilings } from './core/store-meter.mjs';   // #1386
 import { roleShortening, roleExpiryRows } from './core/role-expiry.mjs';   // #1400
 import { loadCredentials, resolveBearer, authDecision, needFor, assertActor, credentialExpiryRows, readAuthMode } from './core/credentials.mjs';   // #1343
+import { isLogbornWriteRoute } from './core/graph-auth.mjs';   // #1561 launch — the unit's write routes need a key in observe too
 // #683 — the deafness cure's server half. REST owns the event log, so it owns
 // the cursors that index it; mcp-server asks over HTTP rather than learning a
 // path it has no business knowing (#767).
 import {
   deliveryIdentity, registerFor, serveFor, noteInbound, reachabilityReport, markServed,
-  discardPendingServes, headSeq, PULL_LIMIT,
+  discardPendingServes, headSeq, PULL_LIMIT, graphAckedOf, ackFor, parseAckToken,   // #1576
+  ACK_TOKEN_INVALID, ACK_UNKNOWN_LANE, ACK_FENCED, CURSOR_ROLLED_BACK,   // #1561 rollback
 } from './core/cursor-service.mjs';
 import { configureIdentities, usingDefaultRoster } from './core/identity.mjs';
 import { hostAllowed, parseAllowedHosts, refuseHost } from './core/host-guard.mjs';
@@ -1083,6 +1096,9 @@ const DEFAULT_COLUMNS = [
 // by routeApi from the HTTP method, carried across awaits, consulted by
 // readBoard. A GET may never write, so it may share; anything else clones.
 const requestContext = new AsyncLocalStorage();
+/** #1561 — the log-born unit's runtime when SCRUM_GRAPH_UNIT_LOGBORN=1 (set beside GRAPH_SLICE); null = today's paths. */
+let LOGBORN = null;
+setLegacyContext(() => requestContext.getStore());   // #1558 — per-request legacy-path counters
 let _sharedBoard = null;   // { file, key, board, builtMs, builtAt } — one per file identity
 
 function deepFreeze(root) {
@@ -1224,6 +1240,7 @@ function deriveEvents(before, after, actor = null) {
 }
 
 function writeBoard(data, events) {
+  countLegacy('writeBoard');
   if (!Array.isArray(events) || events.length === 0) {
     throw new Error(
       'writeBoard requires a non-empty events[] (#669): every write must declare '
@@ -1522,6 +1539,7 @@ async function warmGraphStore() {
 }
 
 async function warmGraphStoreOnce() {
+  countLegacy('graphReplicaSync');
   const { buildGraphStore, syncGraphStoreChunked, verifyHashCache, projectActivities, projectLabelAliases, projectWorkLedger } = await loadGraphModules();
   let rebuiltMs = null;
   if (_graphDirty || !_graphStore) {
@@ -1703,6 +1721,53 @@ async function warmGraphStoreOnce() {
     console.error(`${new Date().toISOString()} graph-replica: synced ${stats.updated} updated, ${stats.removed} removed of ${stats.total} entities (hashed ${stats.hashed}, reused ${stats.reused}), +${activities} activities (through seq ${_activitySeq}) → ${_graphStore.size} triples in ${rebuiltMs}ms` + (stats.projection?.n ? ` · #1369 per-entity projection n=${stats.projection.n} p50=${stats.projection.p50}ms p95=${stats.projection.p95}ms max=${stats.projection.max}ms (${stats.projection.slowest.type})` : ''));
   }
   return { store: _graphStore, rebuiltMs, projectedThrough: _graphProjectedThrough };
+}
+
+/**
+ * #1570 — THE ONE READ VIEW graph_query answers from.
+ *
+ * Flag OFF: exactly warmGraphStore(). Flag ON (#1561 log-born unit): the replica
+ * as warmGraphStore() leaves it, with every memory / decision / seat-state record
+ * REPLACED by the executor's copy (core/graph-replica.mjs replaceLogbornRecords).
+ * One store, one default graph, so a query joining a memory to a card sees both
+ * sides and needs no GRAPH/FROM clause.
+ *
+ * FRESHNESS — the same read-your-writes bound the replica already gives cards:
+ * every call reads the executor's position (`epoch:commitSeq`, one SELECT) and
+ * re-pulls the records when it moved, so a write that returned APPLIED before
+ * this call began is in the answer. The copy is re-applied whenever a document
+ * sync ran since the last apply, because a sync may re-project a stale record
+ * for these kinds from the document or the log (a cold rebuild does).
+ *
+ * FAILURE — an unreadable executor THROWS GRAPH_EXECUTOR_UNAVAILABLE (503).
+ * Answering from the replica alone would be a graph silently missing three
+ * kinds, which is the defect this exists to end.
+ *
+ * ⚠️ The copy lives in the SHARED replica store, so other replica readers
+ * (/api/ready, /api/checks, graph_neighbors) see it as of the last graph_query;
+ * they do not refresh it themselves.
+ */
+let _logbornCopy = null;     // { position, triples } — the newest pull
+let _logbornApplied = { position: null, syncCount: -1, store: null };
+const positionKey = (p) => String(p).split(':').map(Number);
+const positionNewer = (a, b) => { const [ea, sa] = positionKey(a), [eb, sb] = positionKey(b); return ea !== eb ? ea > eb : sa > sb; };
+async function warmGraphView() {
+  const warmed = await warmGraphStore();
+  if (!LOGBORN) return warmed;
+  const { replaceLogbornRecords } = await loadGraphModules();
+  const at = await LOGBORN.position();
+  if (!_logbornCopy || positionNewer(at, _logbornCopy.position)) {
+    const pulled = await LOGBORN.readRecordTriples();
+    // concurrent pulls finish in any order: keep the NEWEST, never let an older one win
+    if (!_logbornCopy || !positionNewer(_logbornCopy.position, pulled.position)) _logbornCopy = pulled;
+  }
+  const a = _logbornApplied;
+  if (a.position !== _logbornCopy.position || a.syncCount !== _graphSyncCount || a.store !== warmed.store) {
+    const r = replaceLogbornRecords(warmed.store, _logbornCopy.triples);
+    _logbornApplied = { position: _logbornCopy.position, syncCount: _graphSyncCount, store: warmed.store };
+    if (a.position !== _logbornCopy.position) console.error(`${new Date().toISOString()} #1570 read view: executor records at ${_logbornCopy.position} → replica (-${r.removed} +${r.added} triples)`);
+  }
+  return { ...warmed, executorPosition: _logbornCopy.position };
 }
 
 // #1386 — the snapshot sidecar's headline numbers, or null when no snapshot exists.
@@ -2075,8 +2140,9 @@ async function handleGraphQuery(req, res) {
     // slow row can say whether the loop was busy or the store was.
     const eluStart = performance.eventLoopUtilization();
     const { queryGraph } = await loadGraphModules();
-    const { store, rebuiltMs, projectedThrough } = await warmGraphStore();
+    const { store, rebuiltMs, projectedThrough, executorPosition } = await warmGraphView();   // #1570
     const result = queryGraph(store, body.query, { limit: body.limit });
+    if (executorPosition) result.executorPosition = executorPosition;   // #1570 — the executor records this answer includes
     // #949 — read AFTER the sync, so `storeHead` reflects anything that landed
     // during it. That ordering is the whole point: a write arriving mid-sync is
     // the #931 window, and it must widen the gap rather than disappear into it.
@@ -2122,7 +2188,7 @@ async function handleGraphQuery(req, res) {
     } catch { /* the log is telemetry, never a gate on the answer */ }
     sendJSON(res, 200, result);
   } catch (e) {
-    if (e.code === 'GRAPH_DEPS_MISSING') return sendJSON(res, 503, { error: e.message, code: e.code });
+    if (e.code === 'GRAPH_DEPS_MISSING' || e.code === 'GRAPH_EXECUTOR_UNAVAILABLE') return sendJSON(res, 503, { error: e.message, code: e.code });   // #1570: never the replica alone
     if (e.code === 'READ_ONLY' || e.code === 'EMPTY_QUERY') return sendJSON(res, 400, { error: e.message, code: e.code });
     // #885 — an unbounded path refusal carries its OWN hint naming the query
     // that works, and it must survive to the caller. The generic branch below
@@ -2384,6 +2450,7 @@ function seatDeclsFromGraph(queryGraphAll, store) {
   return declarationsFromRows(rows);
 }
 async function liveSeatDecls() {
+  if (LOGBORN) return { ...(await LOGBORN.readOpenSeatDecls()), rebuiltMs: null, projectedThrough: null };   // #1561
   const { queryGraphAll } = await loadGraphModules();
   const { store, rebuiltMs, projectedThrough } = await warmGraphStore();
   return { decls: seatDeclsFromGraph(queryGraphAll, store), rebuiltMs: rebuiltMs ?? null, projectedThrough };
@@ -2469,47 +2536,8 @@ const LIVE_MEMORIES_QUERY = 'SELECT ?s ?t ?p ?o WHERE { ?s a ?t ; ?p ?o . VALUES
 // one this fold read. First cut asked for 400,000, got 1,000, and listed 128 of
 // 395 memories with no error (found by the slice-3 dry run on a copy of prod).
 const LIVE_MEMORIES_ROW_CAP = 400000;   // ~7 rows per memory, ~6 per version; REFUSED past it, never cut mid-memory
-/** Graph rows → Map<memory uuid, {identity, versions}> in the ENTITY shape (what the event state carries). */
-function memoriesFromRows(rows) {
-  const local = (iri) => String(iri).replace(/^.*[#/:]/, '');
-  const ids = new Map();      // identity iri → identity
-  const vers = new Map();     // version iri → version
-  for (const r of rows) {
-    const t = local(r.t), p = local(r.p), o = r.o == null ? null : String(r.o);
-    if (t === 'Memory') {
-      const n = ids.get(r.s) || { '@id': r.s, '@type': 'scrum:Memory' };
-      ids.set(r.s, n);
-      if (p === 'identifier') n.identifier = o;
-      else if (p === 'name') n.name = o;
-      else if (p === 'owner') n['scrum:owner'] = local(o);
-      else if (p === 'tag') n['scrum:tag'] = [...(n['scrum:tag'] || []), o];
-      else if (p === 'currentVersion') n['scrum:currentVersion'] = o;
-      else if (p === 'relatedTo') n['scrum:relatedTo'] = [...(n['scrum:relatedTo'] || []), o];
-      else if (p === 'priority') n['scrum:priority'] = o;
-    } else if (t === 'MemoryVersion') {
-      const v = vers.get(r.s) || { '@id': r.s, '@type': 'scrum:MemoryVersion' };
-      vers.set(r.s, v);
-      if (p === 'ofMemory') v['scrum:ofMemory'] = o;
-      else if (p === 'version') v['scrum:version'] = Number(o);
-      else if (p === 'body') v['scrum:body'] = o;
-      else if (p === 'author') v.author = local(o);
-      else if (p === 'dateCreated') v.dateCreated = o;
-    }
-  }
-  const out = new Map();
-  for (const n of ids.values()) {
-    if (Array.isArray(n['scrum:tag'])) n['scrum:tag'].sort();          // a graph is a SET; the wire order is documented, not incidental
-    if (Array.isArray(n['scrum:relatedTo'])) n['scrum:relatedTo'].sort();
-    out.set(n.identifier, { identity: n, versions: [] });
-  }
-  for (const v of vers.values()) {
-    const m = [...out.values()].find((x) => x.identity['@id'] === v['scrum:ofMemory']);
-    if (m) m.versions.push(v);
-  }
-  for (const m of out.values()) m.versions.sort((a, b) => (a['scrum:version'] || 0) - (b['scrum:version'] || 0));
-  return out;
-}
 async function liveMemories() {
+  if (LOGBORN) return LOGBORN.readMemories();   // #1561 — the executor is the store
   const { queryGraphAll } = await loadGraphModules();
   const { store } = await warmGraphStore();
   const { rows } = queryGraphAll(store, LIVE_MEMORIES_QUERY, { cap: LIVE_MEMORIES_ROW_CAP });
@@ -2520,7 +2548,7 @@ async function liveMemoryParts(id) {
   return (await liveMemories()).get(String(id)) || { identity: null, versions: [] };
 }
 const graphRefused = (res, e) => {
-  if (e?.code === 'GRAPH_DEPS_MISSING') { sendJSON(res, 503, { error: e.message, code: e.code }); return true; }
+  if (e?.code === 'GRAPH_DEPS_MISSING' || e?.code === 'GRAPH_EXECUTOR_UNAVAILABLE') { sendJSON(res, 503, { error: e.message, code: e.code }); return true; }
   return false;
 };
 
@@ -2536,6 +2564,7 @@ async function handleSeatStates(req, res) {
     live = await liveSeatDecls();
   } catch (e) {
     if (e?.code === 'GRAPH_DEPS_MISSING') return sendJSON(res, 503, { error: e.message, code: e.code });
+    if (executorRefused(res, e)) return;   // #1561
     // SEAT_STATE_TRUNCATED — the row cap was reached; a short list would be a
     // silently-missing seat, so the read refuses instead (declarationsFromRows).
     console.error('GET /api/seats/state:', e.message);
@@ -2579,8 +2608,75 @@ async function handleSeatStates(req, res) {
  * requirements and does not exist yet. Silently accepting it would store an
  * observation as a declaration.
  */
+/**
+ * #1561 — a declaration on the executor. The graph holds AT MOST ONE open
+ * declaration per seat (a compiler precondition, not a convention): a declare
+ * names the open one it ends (`ends`) and is refused if any other is open, so two
+ * concurrent declares cannot both open an interval. A PRECONDITION_FAILED means
+ * the open set moved between read and write: re-read (the carried role and the
+ * shortening warning are recomputed from the new prior) and retry.
+ */
+async function declareSeatOnGraph(req, res, seat, body, decl0) {
+  let actor = null;
+  for (let attempt = 0; attempt < LOGBORN_RETRIES; attempt++) {
+    let live;
+    try { live = await LOGBORN.readOpenSeatDecls(); } catch (e) { if (graphRefused(res, e)) return; throw e; }
+    const open = live.decls.find((d) => d.seat === seat);
+    const decl = { ...decl0 };
+    if (body.role === undefined && open?.role) decl.role = open.role;   // #915 — carried forward
+    const shortened = roleShortening({ prior: open, next: decl });
+    actor ??= logbornActor(req, res, 'seat.declare');
+    if (!actor) return;
+    const ends = open ? (live.iriBySeat.get(seat) ?? null) : null;
+    const r = await LOGBORN.write(seatDeclareIntention({
+      actor, seat, decl, iri: `${SEAT_DECL_BASE}${encodeURIComponent(seat)}/decl-${crypto.randomUUID()}`,
+      ends, at: ends ? new Date().toISOString() : null,
+    }));
+    if (r.outcome === 'PRECONDITION_FAILED') continue;
+    if (r.outcome !== 'APPLIED') return logbornWriteFailed(res, r);
+    return sendJSON(res, 200, { ...decl, ...(shortened ? { shortened: { role: shortened.role, from: shortened.from, to: shortened.to }, warning: shortened.warning } : {}), graph: writeWatermark() });
+  }
+  return contended(res, `seat ${seat}`);
+}
+async function clearSeatOnGraph(req, res, seat) {
+  let actor = null;
+  for (let attempt = 0; attempt < LOGBORN_RETRIES; attempt++) {
+    let live;
+    try { live = await LOGBORN.readOpenSeatDecls(); } catch (e) { if (graphRefused(res, e)) return; return sendJSON(res, 500, { error: e.message }); }
+    const ends = live.iriBySeat.get(seat);
+    // Idempotent, as on the document path: nothing open is already the desired end state.
+    if (!ends) return sendJSON(res, 200, { seat, mode: SEAT_UNKNOWN, cleared: false, graph: writeWatermark() });
+    actor ??= logbornActor(req, res, 'seat.clear');
+    if (!actor) return;
+    const r = await LOGBORN.write(seatClearIntention({ actor, seat, ends, at: new Date().toISOString() }));
+    if (r.outcome === 'PRECONDITION_FAILED') continue;
+    if (r.outcome !== 'APPLIED') return logbornWriteFailed(res, r);
+    return sendJSON(res, 200, { seat, mode: SEAT_UNKNOWN, cleared: true, graph: writeWatermark() });
+  }
+  return contended(res, `seat ${seat}`);
+}
+
+/**
+ * #1569 — with auth ENFORCED, a seat declares and clears only its OWN state. Seat
+ * state decides who is offered routine work, so naming another seat in the path is
+ * an authorization question, not just attribution (the #1561 receipt names the
+ * writer; it did not stop the write). In observe mode there is no verified "self"
+ * to compare, so nothing changes there. Refused before any read or write.
+ */
+function refuseOtherSeat(req, res, seat) {
+  if (req.auth?.enforced === true && req.auth.seat && req.auth.seat !== seat) {
+    sendJSON(res, 403, {
+      error: `seat '${req.auth.seat}' may declare or clear only its own state, not '${seat}'.`,
+      code: 'SEAT_NOT_SELF',
+    });
+    return true;
+  }
+  return false;
+}
+
 async function handleSeatDeclare(req, res, seat) {
   try {
+    if (refuseOtherSeat(req, res, seat)) return;   // #1569
     const body = JSON.parse(await readBody(req));
     if (body.seat && String(body.seat) !== seat) {
       return sendJSON(res, 403, {
@@ -2612,6 +2708,7 @@ async function handleSeatDeclare(req, res, seat) {
       }
       decl.role = key;
     }
+    if (LOGBORN) return await declareSeatOnGraph(req, res, seat, body, decl);   // #1561
     // #1143 — the prior state is read from the GRAPH, before the lock: it only
     // chooses the event's op label (create vs update), and the projection
     // treats both alike (end the open interval, open a new one), so a race
@@ -2655,6 +2752,8 @@ async function handleSeatDeclare(req, res, seat) {
 }
 
 async function handleSeatClear(req, res, seat) {
+  if (refuseOtherSeat(req, res, seat)) return;   // #1569
+  if (LOGBORN) return clearSeatOnGraph(req, res, seat);   // #1561
   // #1143 — "was there something to clear" is a graph question now.
   let open = false;
   try {
@@ -2675,6 +2774,61 @@ async function handleSeatClear(req, res, seat) {
   sendJSON(res, 200, { seat, mode: SEAT_UNKNOWN, cleared, graph: writeWatermark() });
 }
 
+/** #971/#1106 — a new memory's two halves (identity + v1). Shared by the document and the #1561 executor paths. */
+function newMemoryEntities(body, owner) {
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const vIri = MEMORY_VERSION_ID(id, 1);
+  const identity = {
+    '@id': MEMORY_ID(id), '@type': 'scrum:Memory',
+    identifier: id, name: String(body.title),
+    'scrum:owner': owner,
+    ...(body.tags?.length ? { 'scrum:tag': [...body.tags] } : {}),
+    ...(body.priority ? { 'scrum:priority': body.priority } : {}),
+    'scrum:currentVersion': vIri,
+  };
+  const version = {
+    '@id': vIri, '@type': 'scrum:MemoryVersion',
+    'scrum:ofMemory': MEMORY_ID(id), 'scrum:version': 1,
+    // #1106 — the writer, when named; the owner otherwise. Before this
+    // v1 was ALWAYS the owner, so a memory created on someone's behalf
+    // carried their byline from its first byte.
+    'scrum:body': body.body, author: (typeof body.by === 'string' && body.by) || owner, dateCreated: now,
+  };
+  return { identity, version };
+}
+
+// ── #1561 — the log-born unit's write door ──────────────────────────────────
+// WHO writes is the AUTHENTICATED seat (core/graph-auth.mjs), decided only when a
+// write is about to happen; the domain fields (owner, author, decidedBy, `by`) keep
+// today's meaning. One intention per write; the outcome is mapped to HTTP here.
+const LOGBORN_RETRIES = 8;
+function logbornActor(req, res, kind) {
+  const who = LOGBORN.actorFor(req, kind);
+  if (who.refused) { sendJSON(res, who.status ?? 401, { error: `graph write refused: ${who.refused}`, code: who.status === 403 ? 'GRAPH_WRITE_SCOPE' : 'GRAPH_WRITE_UNAUTHENTICATED' }); return null; }
+  return who.actor;
+}
+function logbornWriteFailed(res, r) {
+  const status = r.outcome === 'REJECTED' ? 400 : r.outcome === 'PRECONDITION_FAILED' ? 409 : 503;
+  // #1561 rollback — a write whose outcome is not known (it may have committed) is the one
+  // a rollback must reconcile by receipt. Its opId is returned to the caller AND written to
+  // stderr as one greppable JSON line: the rollback reads those lines (--pending) and says,
+  // per opId, APPLIED (exported) or ABSENT (not applied). Never dropped, never guessed.
+  const unknown = r.outcome === 'UNKNOWN' || r.outcome === 'RECONCILE_REQUIRED';
+  if (unknown && r.opId) console.error(`[#1561 unknown-write] ${JSON.stringify({ at: new Date().toISOString(), opId: r.opId, kind: r.kind ?? null, actor: r.actor ?? null, outcome: r.outcome, reason: r.reason ?? null })}`);
+  sendJSON(res, status, { error: `graph write ${r.outcome}${r.reason ? `: ${r.reason}` : ''}`, code: `GRAPH_WRITE_${r.outcome}`, ...(unknown && r.opId ? { opId: r.opId } : {}) });
+}
+/** Only the executor's unavailability → 503; leaves every flag-OFF error path as it was. */
+function executorRefused(res, e) {
+  if (e?.code !== 'GRAPH_EXECUTOR_UNAVAILABLE') return false;
+  sendJSON(res, 503, { error: e.message, code: e.code });
+  return true;
+}
+const contended = (res, what) => sendJSON(res, 409, {
+  error: `${what}: ${LOGBORN_RETRIES} attempts each lost a race with another write; nothing was written by this request — re-read and retry`,
+  code: 'GRAPH_WRITE_CONTENDED',
+});
+
 async function handleCreateMemory(req, res) {
   try {
     const body = JSON.parse(await readBody(req));
@@ -2687,27 +2841,18 @@ async function handleCreateMemory(req, res) {
       return sendJSON(res, 400, { error: `priority must be one of p0 | p1 | p2 | p3 (got ${JSON.stringify(body.priority)}) — a property of the memory, unset by default (#971)` });
     }
 
+    // #1561 — with the unit ON the memory is ONE guarded intention to the executor.
+    if (LOGBORN) {
+      const { identity, version } = newMemoryEntities(body, owner);
+      const actor = logbornActor(req, res, 'memory.create');
+      if (!actor) return;
+      const r = await LOGBORN.write(memoryCreateIntention({ actor, identity, versions: [version] }));
+      if (r.outcome !== 'APPLIED') return logbornWriteFailed(res, r);
+      return sendJSON(res, 201, memoryToWire(identity, [version]));
+    }
     const created = await withWriteLock(async () => {
       const data = readBoard();
-      const id = crypto.randomUUID();
-      const now = new Date().toISOString();
-      const vIri = MEMORY_VERSION_ID(id, 1);
-      const identity = {
-        '@id': MEMORY_ID(id), '@type': 'scrum:Memory',
-        identifier: id, name: String(body.title),
-        'scrum:owner': owner,
-        ...(body.tags?.length ? { 'scrum:tag': [...body.tags] } : {}),
-        ...(body.priority ? { 'scrum:priority': body.priority } : {}),
-        'scrum:currentVersion': vIri,
-      };
-      const version = {
-        '@id': vIri, '@type': 'scrum:MemoryVersion',
-        'scrum:ofMemory': MEMORY_ID(id), 'scrum:version': 1,
-        // #1106 — the writer, when named; the owner otherwise. Before this
-        // v1 was ALWAYS the owner, so a memory created on someone's behalf
-        // carried their byline from its first byte.
-        'scrum:body': body.body, author: (typeof body.by === 'string' && body.by) || owner, dateCreated: now,
-      };
+      const { identity, version } = newMemoryEntities(body, owner);
       // #971 — BORN IN THE LOG: no document row. The replica projects both
       // halves from this event at the next sync; every reader asks the graph.
       writeBoard(data, [memoryStateEvent('create', identity, [version], (typeof body.by === 'string' && body.by) || owner)]);
@@ -2719,6 +2864,110 @@ async function handleCreateMemory(req, res) {
     console.error('POST /api/memories:', e.message);
     sendJSON(res, 500, { error: e.message });
   }
+}
+
+/**
+ * #466/#1022/#971 — compose ONE memory update against the state just read: the
+ * ifVersion check, the next version (replace, or append/prepend composed against
+ * the CURRENT text) and the identity changes. Pure. Shared by the document path
+ * (under withWriteLock) and the #1561 executor path (under an expected-version
+ * guard), so the two cannot compose differently. `added` is the version(s) minted.
+ */
+function composeMemoryUpdate(liveIdentity, liveVersions, id, body, { hasAppend, hasPrepend }) {
+  const identity = { ...liveIdentity };
+  const versions = [...liveVersions];
+
+  // #466 — OPTIONAL compare-and-swap. A caller that read version N and means
+  // to write on top of THAT text can say so; if the memory has moved on, the
+  // write is refused with the current version so it can re-read and retry.
+  //
+  // ⛔ OPT-IN BY CONSTRUCTION. A caller that sends no `ifVersion` is
+  // unaffected — that is every existing writer, and a precondition applied
+  // to callers who never asked for one is a worse defect than the one this
+  // fixes. Pinned by test 1 in memory-ifversion-cas.test.mjs.
+  //
+  // Inside withWriteLock and BEFORE the append, so the version it compares
+  // is the one the append is about to succeed. Outside the lock this is a
+  // check-then-act race and would read as CAS while providing none.
+  if (body.ifVersion !== undefined) {
+    const current = versions[versions.length - 1]?.['scrum:version'] || 0;
+    if (body.ifVersion !== current) {
+      return { conflict: true, currentVersion: current };
+    }
+  }
+
+  // ⛔ APPEND-ONLY. A caller naming an older version does NOT get to rewrite
+  // it: the new text always becomes the NEXT version. History that can be
+  // edited answers "what did this say before?" with whatever someone most
+  // recently wished it had said, which is worse than no history at all.
+  // #1022 — the addition is composed against the CURRENT version, read
+  // under this same lock. That is what makes two concurrent appends both
+  // survive: the second sees the first's text, not the snapshot it started
+  // from, because it never held a snapshot at all.
+  let nextBody = null;
+  if (typeof body.body === 'string' && body.body.length) nextBody = body.body;
+  else if (hasAppend || hasPrepend) {
+    const current = versions[versions.length - 1]?.['scrum:body'] ?? '';
+    nextBody = `${hasPrepend ? body.bodyPrepend : ''}${current}${hasAppend ? body.bodyAppend : ''}`;
+  }
+  const added = [];
+  if (nextBody !== null) {
+    const next = (versions[versions.length - 1]?.['scrum:version'] || 0) + 1;
+    const vIri = MEMORY_VERSION_ID(id, next);
+    const v = {
+      '@id': vIri, '@type': 'scrum:MemoryVersion',
+      'scrum:ofMemory': MEMORY_ID(id), 'scrum:version': next,
+      'scrum:body': nextBody,
+      author: body.by || identity['scrum:owner'] || null,
+      dateCreated: new Date().toISOString(),
+    };
+    versions.push(v);
+    added.push(v);
+    identity['scrum:currentVersion'] = vIri;
+  }
+  // The IDENTITY is mutable — that is the point of the split. Retitling or
+  // retagging a memory must not mint a version of unchanged text.
+  if (typeof body.title === 'string' && body.title.trim()) identity.name = body.title;
+  if (Array.isArray(body.tags)) identity['scrum:tag'] = [...body.tags];
+  if (body.priority === null) delete identity['scrum:priority'];
+  else if (body.priority !== undefined) identity['scrum:priority'] = body.priority;
+  return { identity, versions, added };
+}
+
+/**
+ * #1561 — PATCH /api/memories/:id on the executor. The read returns the memory AND
+ * its write revision (`urn:ex:ver`) from ONE query; the write is guarded by that
+ * revision (the compiler's expected-version precondition). A PRECONDITION_FAILED
+ * means another write landed between this read and this write: re-read, re-compose
+ * (so a concurrent append still sees the other's text, as under the lock), retry.
+ * `ifVersion` is checked against the SAME read the guard protects, so a 409 here
+ * means exactly what it means on the document path.
+ */
+async function updateMemoryOnGraph(req, res, id, body, flags) {
+  let actor = null;
+  for (let attempt = 0; attempt < LOGBORN_RETRIES; attempt++) {
+    let cur;
+    try { cur = await LOGBORN.readMemory(id); } catch (e) { if (graphRefused(res, e)) return; throw e; }
+    if (!cur) return sendJSON(res, 404, { error: `no memory ${id}` });
+    const composed = composeMemoryUpdate(cur.identity, cur.versions, id, body, flags);
+    if (composed.conflict) {
+      return sendJSON(res, 409, {
+        error: `memory ${id} has moved on: you declared ifVersion but the current version is ${composed.currentVersion}`,
+        currentVersion: composed.currentVersion,
+      });
+    }
+    if (cur.rev == null) return sendJSON(res, 500, { error: `memory ${id} has no write revision (urn:ex:ver) in the graph store: it was not written by this unit or its migration` });
+    actor ??= logbornActor(req, res, 'memory.revise');
+    if (!actor) return;
+    const r = await LOGBORN.write(memoryReviseIntention({ actor, identity: composed.identity, newVersions: composed.added, expectedRev: cur.rev }));
+    if (r.outcome === 'PRECONDITION_FAILED') continue;
+    if (r.outcome !== 'APPLIED') return logbornWriteFailed(res, r);
+    let after;
+    try { after = await LOGBORN.readMemory(id); } catch (e) { if (graphRefused(res, e)) return; throw e; }
+    if (!after) throw new Error(`memory ${id}: the write was APPLIED but the memory is not readable from the graph store`);
+    return sendJSON(res, 200, memoryToWire(after.identity, after.versions));
+  }
+  return contended(res, `memory ${id}`);
 }
 
 async function handleUpdateMemory(req, res, id) {
@@ -2792,6 +3041,8 @@ async function handleUpdateMemory(req, res, id) {
       return sendJSON(res, 400, { error: `priority must be one of p0 | p1 | p2 | p3, or null to unset (got ${JSON.stringify(body.priority)})` });
     }
 
+    if (LOGBORN) return await updateMemoryOnGraph(req, res, id, body, { hasAppend, hasPrepend });   // #1561
+
     const updated = await withWriteLock(async () => {
       const data = readBoard();
       // #971 — the current state is read from the GRAPH under the lock (the
@@ -2799,60 +3050,9 @@ async function handleUpdateMemory(req, res, id) {
       // the memory was born in the log or still lives in the document.
       const { identity: liveIdentity, versions: liveVersions } = await liveMemoryParts(id);
       if (!liveIdentity) return null;
-      const identity = { ...liveIdentity };
-      const versions = [...liveVersions];
-
-      // #466 — OPTIONAL compare-and-swap. A caller that read version N and means
-      // to write on top of THAT text can say so; if the memory has moved on, the
-      // write is refused with the current version so it can re-read and retry.
-      //
-      // ⛔ OPT-IN BY CONSTRUCTION. A caller that sends no `ifVersion` is
-      // unaffected — that is every existing writer, and a precondition applied
-      // to callers who never asked for one is a worse defect than the one this
-      // fixes. Pinned by test 1 in memory-ifversion-cas.test.mjs.
-      //
-      // Inside withWriteLock and BEFORE the append, so the version it compares
-      // is the one the append is about to succeed. Outside the lock this is a
-      // check-then-act race and would read as CAS while providing none.
-      if (body.ifVersion !== undefined) {
-        const current = versions[versions.length - 1]?.['scrum:version'] || 0;
-        if (body.ifVersion !== current) {
-          return { conflict: true, currentVersion: current };
-        }
-      }
-
-      // ⛔ APPEND-ONLY. A caller naming an older version does NOT get to rewrite
-      // it: the new text always becomes the NEXT version. History that can be
-      // edited answers "what did this say before?" with whatever someone most
-      // recently wished it had said, which is worse than no history at all.
-      // #1022 — the addition is composed against the CURRENT version, read
-      // under this same lock. That is what makes two concurrent appends both
-      // survive: the second sees the first's text, not the snapshot it started
-      // from, because it never held a snapshot at all.
-      let nextBody = null;
-      if (typeof body.body === 'string' && body.body.length) nextBody = body.body;
-      else if (hasAppend || hasPrepend) {
-        const current = versions[versions.length - 1]?.['scrum:body'] ?? '';
-        nextBody = `${hasPrepend ? body.bodyPrepend : ''}${current}${hasAppend ? body.bodyAppend : ''}`;
-      }
-      if (nextBody !== null) {
-        const next = (versions[versions.length - 1]?.['scrum:version'] || 0) + 1;
-        const vIri = MEMORY_VERSION_ID(id, next);
-        versions.push({
-          '@id': vIri, '@type': 'scrum:MemoryVersion',
-          'scrum:ofMemory': MEMORY_ID(id), 'scrum:version': next,
-          'scrum:body': nextBody,
-          author: body.by || identity['scrum:owner'] || null,
-          dateCreated: new Date().toISOString(),
-        });
-        identity['scrum:currentVersion'] = vIri;
-      }
-      // The IDENTITY is mutable — that is the point of the split. Retitling or
-      // retagging a memory must not mint a version of unchanged text.
-      if (typeof body.title === 'string' && body.title.trim()) identity.name = body.title;
-      if (Array.isArray(body.tags)) identity['scrum:tag'] = [...body.tags];
-      if (body.priority === null) delete identity['scrum:priority'];
-      else if (body.priority !== undefined) identity['scrum:priority'] = body.priority;
+      const composed = composeMemoryUpdate(liveIdentity, liveVersions, id, body, { hasAppend, hasPrepend });
+      if (composed.conflict) return composed;
+      const { identity, versions } = composed;
 
       // #971 — migration by touch, then the event carries the whole memory.
       dropLegacyMemoryRows(data, MEMORY_ID(id));
@@ -2885,9 +3085,25 @@ async function handleGetMemory(req, res, id) {
   sendJSON(res, 200, memoryToWire(identity, versions));
 }
 
+/**
+ * #1561 — the identity history (title/tags/priority, oldest first, current last), the same
+ * shape on both paths. Flag ON: the revision nodes each memory.revise appends, read in the
+ * SAME query as the memory. Flag OFF: the states the event log recorded (one per write),
+ * plus the current state (a document-born memory has no event until it is touched).
+ * Opt-in (?identities=1) because the flag-OFF answer scans the event log.
+ */
+async function memoryHistoryParts(id) {
+  if (LOGBORN) return (await LOGBORN.readMemoryHistory(id)) || { identity: null, versions: [], identities: [] };
+  const parts = await liveMemoryParts(id);
+  if (!parts.identity) return { ...parts, identities: [] };
+  const fromLog = identitiesFromEvents(readEvents(EVENT_LOG_DIR), parts.identity['@id']);
+  return { ...parts, identities: collapseIdentities([...fromLog, identityOf(parts.identity)]) };
+}
+
 async function handleMemoryVersions(req, res, id) {
+  const withIdentities = ['1', 'true'].includes(parseQuery(req.url).identities);
   let parts;
-  try { parts = await liveMemoryParts(id); } catch (e) { if (graphRefused(res, e)) return; throw e; }
+  try { parts = withIdentities ? await memoryHistoryParts(id) : await liveMemoryParts(id); } catch (e) { if (graphRefused(res, e)) return; throw e; }
   const { identity, versions } = parts;
   if (!identity) return sendJSON(res, 404, { error: `no memory ${id}` });
   sendJSON(res, 200, {
@@ -2898,6 +3114,7 @@ async function handleMemoryVersions(req, res, id) {
       version: v['scrum:version'], body: v['scrum:body'],
       author: v.author || null, at: v.dateCreated || null,
     })),
+    ...(withIdentities ? { identities: parts.identities } : {}),
   });
 }
 
@@ -3505,6 +3722,21 @@ async function handleAssert(req, res) {
         parentOverlay.set(p.subject.id, p.object.id);
       }
 
+      // #1561 — option (b), agreed with a reviewer: with the log-born unit ON, memories live
+      // in the graph executor and this batch's cards and obligations do not. Applying the
+      // memory edge there and the rest here would split ONE atomic batch across two
+      // stores, and writing it here would make /api/assert a second memory authority. So
+      // a batch with ANY memory assertion is refused WHOLE, before any effect, until the
+      // cards unit cuts over. Nothing above this line has mutated anything.
+      if (LOGBORN && plan.some((p) => p.kind === 'memoryRelatedTo')) {
+        return {
+          status: 409, code: 'MEMORY_ASSERT_NOT_CUT_OVER',
+          error: 'this batch asserts a relation between memories, and memories now live in the graph store (#1561) while '
+            + 'cards and obligations do not: one batch cannot be atomic across both, so NOTHING in this batch was applied. '
+            + 'Send the memory assertion on its own once the cards unit has cut over; send the rest without it now.',
+        };
+      }
+
       // ── APPLY — everything validated; one mutation pass, ONE event boundary.
       const now = new Date().toISOString();
       const touched = new Map(); // card.id → card
@@ -3614,7 +3846,7 @@ async function handleAssert(req, res) {
         wire: { applied: results.filter((r) => r.effect !== 'noop' && r.effect !== 'already-closed').length, results },
       };
     });
-    if (result.error) return sendJSON(res, result.status, { error: result.error });
+    if (result.error) return sendJSON(res, result.status, { error: result.error, ...(result.code === 'MEMORY_ASSERT_NOT_CUT_OVER' ? { code: result.code } : {}) });
     sendJSON(res, result.status, result.wire);
   } catch (e) {
     console.error('POST /api/assert:', e.message);
@@ -5819,17 +6051,6 @@ function decisionToWire(e) {
   return w;
 }
 
-// #1322 — the inverse edges and liveness, computed over the whole set once:
-// a ruling is LIVE unless something supersedes it or it is a duplicate.
-function annotateDecisionRelations(list) {
-  const byId = new Map(list.map((e) => [e.identifier, e]));
-  for (const e of list) { e._supersededBy = []; e._duplicates = []; }
-  for (const e of list) {
-    for (const t of [].concat(e['scrum:supersedes'] || [])) byId.get(t)?._supersededBy.push(e.identifier);
-    if (e['scrum:duplicateOf']) byId.get(e['scrum:duplicateOf'])?._duplicates.push(e.identifier);
-  }
-  return list;
-}
 
 // #1322 — THE TWIN RAIL. Two seats recorded one ruling 35 s apart (09-08) and
 // 5 s apart (09-18); each time the writer had run no decision_list, and the
@@ -5878,6 +6099,23 @@ function validateDecision(b) {
   return null;
 }
 
+/** #918/#1322 — a new decision entity. Shared by the document and the #1561 executor paths. */
+function newDecisionEntity(body, supersedes, duplicateOf) {
+  const id = crypto.randomUUID();
+  const entity = {
+    '@id': DECISION_ID(id), '@type': 'scrum:Decision',
+    identifier: id,
+    'scrum:statement': String(body.statement),
+    'scrum:decidedBy': body.decidedBy || body.by,
+    'scrum:constrains': [...body.constrains],
+    'scrum:reopensIf': String(body.reopensIf),
+    dateCreated: new Date().toISOString(),
+  };
+  if (supersedes.length) entity['scrum:supersedes'] = supersedes;   // #1322 — decision → decision edges
+  if (duplicateOf) entity['scrum:duplicateOf'] = duplicateOf;
+  return entity;
+}
+
 async function handleCreateDecision(req, res) {
   try {
     const body = JSON.parse(await readBody(req));
@@ -5905,20 +6143,19 @@ async function handleCreateDecision(req, res) {
         });
       }
     }
+    // #1561 — with the unit ON the decision is ONE guarded intention; its relations
+    // are preconditions there (each named decision must exist), not just a prior read.
+    if (LOGBORN) {
+      const entity = newDecisionEntity(body, supersedes, duplicateOf);
+      const actor = logbornActor(req, res, 'decision.create');
+      if (!actor) return;
+      const r = await LOGBORN.write(decisionCreateIntention({ actor, entity }));
+      if (r.outcome !== 'APPLIED') return logbornWriteFailed(res, r);
+      return sendJSON(res, 201, decisionToWire(entity));
+    }
     const created = await withWriteLock(async () => {
       const data = readBoard();
-      const id = crypto.randomUUID();
-      const entity = {
-        '@id': DECISION_ID(id), '@type': 'scrum:Decision',
-        identifier: id,
-        'scrum:statement': String(body.statement),
-        'scrum:decidedBy': body.decidedBy || body.by,
-        'scrum:constrains': [...body.constrains],
-        'scrum:reopensIf': String(body.reopensIf),
-        dateCreated: new Date().toISOString(),
-      };
-      if (supersedes.length) entity['scrum:supersedes'] = supersedes;   // #1322 — decision → decision edges
-      if (duplicateOf) entity['scrum:duplicateOf'] = duplicateOf;
+      const entity = newDecisionEntity(body, supersedes, duplicateOf);
       // #1147 — BORN IN THE GRAPH: the event is the write. No document row;
       // the replica projects the decision from this event (graph-replica
       // projectActivities), and every reader asks the graph. The document
@@ -5928,6 +6165,7 @@ async function handleCreateDecision(req, res) {
     });
     sendJSON(res, 201, created);
   } catch (e) {
+    if (executorRefused(res, e)) return;   // #1561 — only reachable with the unit ON
     console.error('POST /api/decisions:', e.message);
     sendJSON(res, 500, { error: e.message });
   }
@@ -5953,6 +6191,13 @@ async function handleRelateDecision(req, res, ref) {
     supersedes = [...new Set(supersedes)].filter((t) => t !== id);
     if (duplicateOf === id) duplicateOf = null;
     if (!supersedes.length && !duplicateOf) return sendJSON(res, 400, { error: 'name a relation: supersedes: [<id>] and/or duplicateOf: <id>' });
+    if (LOGBORN) {   // #1561 — the added edge(s) as ONE guarded intention; every named decision must exist
+      const actor = logbornActor(req, res, 'decision.relate');
+      if (!actor) return;
+      const r = await LOGBORN.write(decisionRelateIntention({ actor, iri: DECISION_ID(id), supersedes, duplicateOf: duplicateOf ? [duplicateOf] : [] }));
+      if (r.outcome !== 'APPLIED') return logbornWriteFailed(res, r);
+      return sendJSON(res, 201, { id, supersedes, duplicateOf, by });
+    }
     const created = await withWriteLock(async () => {
       const data = readBoard();
       const state = { '@id': DECISION_ID(id), '@type': 'scrum:Decision', identifier: id };
@@ -5965,6 +6210,7 @@ async function handleRelateDecision(req, res, ref) {
     });
     sendJSON(res, 201, created);
   } catch (e) {
+    if (executorRefused(res, e)) return;   // #1561
     console.error('POST /api/decisions/:id/relations:', e.message);
     sendJSON(res, 500, { error: e.message });
   }
@@ -5979,33 +6225,8 @@ const LIVE_DECISIONS_QUERY = 'SELECT ?d ?p ?o WHERE { ?d a scrum:Decision ; ?p ?
 // #1405 — read through queryGraphAll: the public read's 1,000-row ceiling was
 // silently cutting this fold at ~72 decisions (553 rows for 40 on 2026-09-17).
 const LIVE_DECISIONS_ROW_CAP = 50000;   // triples; ~14 per decision; REFUSED past it, never cut
-function decisionsFromRows(rows, { limit } = {}) {
-  if (Number.isFinite(limit) && rows.length >= limit) {
-    throw Object.assign(new Error(`decision read returned ${rows.length} rows against a cap of ${limit}: the set may be cut mid-decision, so it is refused rather than answered short`), { code: 'DECISIONS_TRUNCATED' });
-  }
-  const local = (iri) => String(iri).replace(/^.*[#/:]/, '');
-  const nodes = new Map();
-  for (const r of rows) {
-    const n = nodes.get(r.d) || { '@id': r.d, '@type': 'scrum:Decision', 'scrum:constrains': [] };
-    nodes.set(r.d, n);
-    const p = local(r.p), o = r.o == null ? null : String(r.o);
-    if (p === 'identifier') n.identifier = o;
-    else if (p === 'statement') n['scrum:statement'] = o;
-    else if (p === 'decidedBy') n['scrum:decidedBy'] = local(o);
-    else if (p === 'constrains') n['scrum:constrains'].push(o);
-    else if (p === 'reopensIf') n['scrum:reopensIf'] = o;
-    else if (p === 'dateCreated') n.dateCreated = o;
-    else if (p === 'supersedes') (n['scrum:supersedes'] ??= []).push(local(o));   // #1322
-    else if (p === 'duplicateOf') n['scrum:duplicateOf'] = local(o);
-  }
-  // A graph is a SET: the order topics were typed in is not a fact it keeps.
-  // Sorted, so the wire order is deterministic and documented rather than
-  // whichever order the engine returned rows in. (The one property the
-  // document path had that this path does not; recorded on #1147.)
-  for (const n of nodes.values()) { n['scrum:constrains'].sort(); if (n['scrum:supersedes']) n['scrum:supersedes'].sort(); }
-  return annotateDecisionRelations([...nodes.values()].sort((a, b) => String(a.dateCreated || '').localeCompare(String(b.dateCreated || ''))));
-}
 async function liveDecisions() {
+  if (LOGBORN) return LOGBORN.readDecisions();   // #1561
   const { queryGraphAll } = await loadGraphModules();
   const { store } = await warmGraphStore();
   const { rows } = queryGraphAll(store, LIVE_DECISIONS_QUERY, { cap: LIVE_DECISIONS_ROW_CAP });
@@ -6018,6 +6239,7 @@ async function handleListDecisions(req, res) {
     out = (await liveDecisions()).map(decisionToWire);
   } catch (e) {
     if (e?.code === 'GRAPH_DEPS_MISSING') return sendJSON(res, 503, { error: e.message, code: e.code });
+    if (executorRefused(res, e)) return;   // #1561
     console.error('GET /api/decisions:', e.message);
     return sendJSON(res, 500, { error: e.message, code: e.code ?? 'DECISIONS_READ_FAILED' });
   }
@@ -7889,7 +8111,7 @@ const CHANGES_PARAMS = new Set([
   'history', 'entity', 'actor', 'limitCards', 'limitPosts',
 ]);
 
-function handleChanges(req, res) {
+async function handleChanges(req, res) {
   try {
     const q = parseQuery(req.url);
     const unsupported = Object.keys(q).filter((k) => !CHANGES_PARAMS.has(k));
@@ -7909,7 +8131,19 @@ function handleChanges(req, res) {
     if (q.order != null && q.order !== '' && q.order !== 'asc' && q.order !== 'desc') {
       return sendJSON(res, 400, { error: `unknown order: ${q.order} (valid: asc, desc)` });
     }
-    const events = readEvents(EVENT_LOG_DIR, { sinceDate: q.since });
+    // #1561 — `since` is an ISO time window, or the opaque forward cursor of a
+    // previous reply (one position per source). The log is read synchronously, so
+    // its high-water and its rows come from one moment.
+    const from = parseSince(q.since);
+    const events = from.cursor
+      ? readEvents(EVENT_LOG_DIR, { sinceSeq: from.log })
+      : readEvents(EVENT_LOG_DIR, { sinceDate: q.since });
+    const logThrough = nextSeq(EVENT_LOG_DIR) - 1;
+    // A forward cursor whose next event is no longer held is refused, as an old `since` is.
+    let oldestRetainedSeq = null;
+    if (from.cursor && (events.length ? events[0].seq !== from.log + 1 : logThrough > from.log)) {
+      oldestRetainedSeq = readEvents(EVENT_LOG_DIR, { limit: 1 })[0]?.seq ?? null;
+    }
     // Coverage boundary (#679): refuse a pre-log `since` ONLY when unrecorded
     // history actually exists — the live board predates its log (birth
     // 2026-08-04), so pre-birth sinces would be silently partial there; a
@@ -7923,7 +8157,29 @@ function handleChanges(req, res) {
       const preLog = (b?.cards || []).some((c) => typeof c?.createdAt === 'string' && c.createdAt < firstAt);
       if (preLog) oldestRetained = firstAt;
     }
+    // #1561 — with the log-born unit ON, memory / decision / seat-state writes are
+    // in the executor, not the log: their APPLIED receipts are the second source.
+    // ONE executor query (one snapshot) gives the rows and the commit high-water.
+    // An unreadable executor REFUSES (503) — a feed that silently drops a source
+    // reads as "nothing happened", which is the blindness this closes.
+    let graph = null;
+    if (LOGBORN) {
+      try {
+        graph = feedRowsFromBindings(await LOGBORN.query(feedQuery(from.cursor ? from.graph : 0)));
+      } catch (e) {
+        if (graphRefused(res, e)) return;
+        throw e;
+      }
+    }
     const result = queryChangesFromLog(events, {
+      graphRows: graph ? graph.rows : null,
+      graphThrough: graph ? graph.through : null,
+      graphEpoch: graph ? graph.epoch : null,          // #1575 — from the same snapshot as the rows
+      graphEpochBase: graph ? graph.epochBase : null,
+      graphIncarnation: graph ? graph.incarnation : null,          // #1577 — same snapshot
+      graphIncarnationFrom: graph ? graph.incarnationFrom : null,
+      logThrough,
+      oldestRetainedSeq,
       since: q.since,
       before: q.before,
       oldestRetained,
@@ -7945,6 +8201,17 @@ function handleChanges(req, res) {
       });
     }
     if (e.code === 'UNKNOWN_CURSOR') return sendJSON(res, 400, { error: e.message, code: e.code });
+    if (e.code === EPOCH_CHANGED) {
+      // #1575 — the cursor names another executor epoch. Refused, never answered: resuming it
+      // would silently skip the new epoch's reused commitSeqs. The caller keeps its cursor and
+      // resumes from `resync_cursor` (log half unchanged; executor half at `baseline`).
+      return sendJSON(res, 400, {
+        error: e.message, code: e.code, resync: true, reason: e.reason, epoch: e.epoch, cursor_epoch: e.cursor_epoch,
+        incarnation: e.incarnation ?? null, cursor_incarnation: e.cursor_incarnation ?? null,   // #1577
+        baseline: e.baseline, resync_cursor: e.resync_cursor,
+      });
+    }
+    if (e.code === 'CURSOR_RESET') return sendJSON(res, 400, { error: e.message, code: e.code, resync: true });   // #1561 rollback
     console.error('GET /api/changes:', e.message);
     sendJSON(res, 500, { error: 'Failed to compute changes' });
   }
@@ -10132,6 +10399,27 @@ function handleCursorReport(req, res) {
   }
 }
 
+/**
+ * #1571 — the executor's commit high-water, for starting a FRESH lane's executor
+ * cursor at head (as its log cursor starts at the log's). Same one-snapshot feed
+ * query the pull uses, asked for nothing past MAX: only the marker row comes back.
+ * null when the unit is OFF, or when the executor cannot be read — the lane is then
+ * created without an executor cursor, which means "owed every live log-born write":
+ * at-least-once, never a silent skip.
+ */
+async function graphHeadOrNull() {
+  if (!LOGBORN) return null;
+  try {
+    // #1575 — the head is a position IN AN EPOCH: { through, epoch, epochBase }, one snapshot.
+    // #1577 — and in an INCARNATION (+ the one it was promoted from).
+    const { through, epoch, epochBase, incarnation, incarnationFrom } = feedRowsFromBindings(await LOGBORN.query(feedQuery(Number.MAX_SAFE_INTEGER)));
+    return { through, epoch, epochBase, incarnation, incarnationFrom };
+  } catch (e) {
+    console.error(`[#1571] executor head unreadable; a new lane starts without an executor cursor: ${e.message}`);
+    return null;
+  }
+}
+
 /** POST /api/cursors/register — a lane announces itself. Known lanes KEEP their cursor. */
 async function handleCursorRegister(req, res) {
   try {
@@ -10145,7 +10433,14 @@ async function handleCursorRegister(req, res) {
         code: 'NO_DELIVERY_IDENTITY',
       });
     }
-    const out = registerFor(EVENT_LOG_DIR, id.key);
+    // #1575 — read for a KNOWN lane too: its executor epoch is checked against the store's
+    // (reported as epoch_mismatch; moved only when the body asks `resync: "epoch"`).
+    const head = await graphHeadOrNull();
+    const out = registerFor(EVENT_LOG_DIR, id.key, {
+      graphHead: head?.through ?? null, graphEpoch: head?.epoch ?? null, graphEpochBase: head?.epochBase ?? null,
+      graphIncarnation: head?.incarnation ?? null, graphIncarnationFrom: head?.incarnationFrom ?? null,   // #1577
+      resync: body.resync === 'epoch' ? 'epoch' : body.resync === 'rollback' ? 'rollback' : null,   // #1561 rollback
+    });
     sendJSON(res, 200, { identity: id, ...out });
   } catch (e) {
     console.error('POST /api/cursors/register:', e.message);
@@ -10154,13 +10449,17 @@ async function handleCursorRegister(req, res) {
 }
 
 /**
- * GET /api/cursors/pull — what this lane missed.
+ * GET /api/cursors/pull — what this lane missed, plus an `ack_token` for the page.
  *
- * ⚠️ The commit happens AFTER the response is written, not before. Recording at
- * the moment of deciding what to send is #624 reimplemented inside its own
- * cure: a response that dies in flight would still advance the cursor.
+ * ⛔ #1576 — a pull NEVER advances the lane's durable cursor, and `res.end`'s callback
+ * is not delivery evidence: measured on Node 22, it fires for a response whose client
+ * destroyed the socket mid-body. #683 recorded the serve there and acked it on the
+ * lane's next inbound call, so a page that died on the wire was skipped forever. Now
+ * the serve is recorded BEFORE writing (a serve asserts nothing) and only an explicit
+ * POST /api/cursors/ack with this page's `ack_token` advances the cursor. A client that
+ * never acks is re-served the same page.
  */
-function handleCursorPull(req, res) {
+async function handleCursorPull(req, res) {
   const q = queryGuard(req, res);
   if (!q) return;
   if (!q.identity) {
@@ -10171,7 +10470,23 @@ function handleCursorPull(req, res) {
   }
   try {
     const limit = q.limit ? Math.min(Number(q.limit) || PULL_LIMIT, PULL_LIMIT) : PULL_LIMIT;
-    const pull = serveFor(EVENT_LOG_DIR, q.identity, { limit, via: q.via || null });
+    // #1571 — with the log-born unit ON, memory / decision / seat-state writes are in
+    // the executor, not the log: the lane is also owed the feed rows past its executor
+    // cursor (core/logborn-feed.mjs — APPLIED live receipts only; ONE query, one
+    // snapshot). An unreadable executor FAILS the pull (503, same as /api/changes):
+    // a log-only answer would read as "nothing happened there", and nothing is
+    // committed, so neither cursor moves.
+    let graph = null;
+    const graphAcked = LOGBORN ? graphAckedOf(EVENT_LOG_DIR, q.identity) : null;
+    if (graphAcked != null) {
+      try {
+        graph = feedRowsFromBindings(await LOGBORN.query(feedQuery(graphAcked)));
+      } catch (e) {
+        if (graphRefused(res, e)) return;
+        throw e;
+      }
+    }
+    const pull = serveFor(EVENT_LOG_DIR, q.identity, { limit, via: q.via || null, graph });
     if (pull.refused === 'CURSOR_TOO_OLD') {
       // Refuse, never answer partially — the same contract /api/changes has had
       // since #679. Serving "whatever survived" would let the lane ack past
@@ -10185,39 +10500,92 @@ function handleCursorPull(req, res) {
         envelope: pull.envelope,
       });
     }
+    if (pull.refused === EPOCH_CHANGED) {
+      // #1575 — the lane's executor cursor is from another executor epoch (a restore was
+      // promoted). Refused, cursors unchanged: answering would skip the reused commitSeqs.
+      const e = pull.epochError;
+      return sendJSON(res, 400, {
+        error: e.message, code: e.code, resync: true, hint: pull.resync,
+        reason: e.reason, epoch: e.epoch, cursor_epoch: e.cursor_epoch,
+        incarnation: e.incarnation ?? null, cursor_incarnation: e.cursor_incarnation ?? null,   // #1577
+        baseline: e.baseline, envelope: pull.envelope,
+      });
+    }
+    if (pull.refused === CURSOR_ROLLED_BACK) {
+      // #1561 ROLLBACK — the lane's executor half cannot be proven against the reverse-exported
+      // events it is owed (another epoch / incarnation, or a marker without one). Refused, lane
+      // unchanged; the explicit resync names where replay resumes.
+      const e = pull.rollbackError;
+      return sendJSON(res, 400, {
+        error: e.message, code: e.code, resync: true, hint: pull.resync, reason: e.reason,
+        lane: e.lane, export: e.export, exports_owed: e.exports_owed, resume_from_seq: e.resume_from_seq, baseline: e.baseline,
+        envelope: pull.envelope,
+      });
+    }
     if (!pull.known) {
       return sendJSON(res, 404, {
         error: `no cursor for ${q.identity} — register the lane first`,
         code: 'LANE_NOT_REGISTERED', envelope: pull.envelope,
       });
     }
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ events: pull.events, envelope: pull.envelope }), () => {
-      // The response is on the wire. Only now is it honest to say it was served.
-      try { pull.commit(); } catch (e) { console.error('[#683] commit failed:', e.message); }
-    });
+    // #1576 — record the SERVE before writing (it is the ceiling an ack is clamped to, so it
+    // must exist before the client can ack). Nothing here, and nothing in `res.end`, acks.
+    pull.commit();
+    sendJSON(res, 200, { events: pull.events, envelope: pull.envelope, ack_token: pull.ack_token });
   } catch (e) {
     console.error('GET /api/cursors/pull:', e.message);
     sendJSON(res, 500, { error: 'Failed to serve replay' });
   }
 }
 
-/** POST /api/cursors/inbound — the implicit ack: the lane was alive AFTER the response. */
+/**
+ * POST /api/cursors/ack — #1576: THE ONLY PATH THAT ADVANCES A LANE'S DURABLE CURSOR.
+ *
+ * Body `{identity, token}` — `token` is the `ack_token` of a pull the client RECEIVED
+ * IN FULL. Advances each half to the token's high-water, clamped to what was served to
+ * this lane; a repeat is a 200 no-op (`ALREADY_ACKED`). Refusals move nothing: 400
+ * ACK_TOKEN_INVALID, 404 LANE_NOT_REGISTERED, 409 ACK_FOREIGN_LANE / ACK_EPOCH_STALE /
+ * ACK_BEYOND_SERVED / ACK_FENCED. A token with an executor half is checked against the
+ * LIVE store's epoch / incarnation; an unreadable executor refuses (503), never guesses.
+ */
+async function handleCursorAck(req, res) {
+  try {
+    const body = JSON.parse((await readBody(req)) || '{}');
+    const key = body.identity || deliveryIdentity(body)?.key;
+    if (!key) return sendJSON(res, 400, { error: 'identity is required', code: 'NO_DELIVERY_IDENTITY' });
+    const t = parseAckToken(body.token);
+    let store = null;
+    if (t?.graph && LOGBORN) {
+      const head = await graphHeadOrNull();
+      if (!head) {
+        return sendJSON(res, 503, { error: 'the graph executor is unreadable, so this ack cannot be checked against its epoch — nothing was acked; retry', code: 'GRAPH_EXECUTOR_UNAVAILABLE', advanced: false, identity: key });
+      }
+      store = { epoch: head.epoch, incarnation: head.incarnation ?? null };
+    }
+    const out = ackFor(EVENT_LOG_DIR, key, body.token, { store });
+    if (out.ok) return sendJSON(res, 200, out);
+    if (out.code === ACK_FENCED) {
+      console.warn(`[#1576] ${ACK_FENCED} identity=${key} — an ack for a range since served to another session; re-serving`);
+    }
+    sendJSON(res, out.code === ACK_TOKEN_INVALID ? 400 : out.code === ACK_UNKNOWN_LANE ? 404 : 409, out);
+  } catch (e) {
+    console.error('POST /api/cursors/ack:', e.message);
+    sendJSON(res, 500, { error: 'Failed to record ack' });
+  }
+}
+
+/**
+ * POST /api/cursors/inbound — LIVENESS (reachability), and a bearer lane's adoption.
+ * ⛔ #1576: no longer an ack — see /api/cursors/ack.
+ */
 async function handleCursorInbound(req, res) {
   try {
     const body = JSON.parse((await readBody(req)) || '{}');
     const key = body.identity || deliveryIdentity(body)?.key;
     if (!key) return sendJSON(res, 400, { error: 'identity is required', code: 'NO_DELIVERY_IDENTITY' });
-    const out = noteInbound(EVENT_LOG_DIR, key, { via: body.via ?? null });
-    if (out.fenced) {
-      // Named, because the symptom of duplicate lane config is THRASH, not
-      // loss, and thrash reads as "replay is broken" unless the log says
-      // otherwise. Identity only — no secrets.
-      console.warn(
-        `[#683] CURSOR_PENDING_INVALIDATED_BY_SUPERSESSION identity=${key} `
-        + `via=${body.via ?? 'null'} — a session acked a range served to another; re-serving`,
-      );
-    }
+    // #1571 — a lane adopted HERE (first inbound) starts at the executor head too.
+    const head = LOGBORN && graphAckedOf(EVENT_LOG_DIR, key) == null ? await graphHeadOrNull() : null;
+    const out = noteInbound(EVENT_LOG_DIR, key, { via: body.via ?? null, graphHead: head?.through ?? null, graphEpoch: head?.epoch ?? null, graphIncarnation: head?.incarnation ?? null });
     sendJSON(res, 200, out);
   } catch (e) {
     console.error('POST /api/cursors/inbound:', e.message);
@@ -10240,6 +10608,8 @@ async function handleCursorServed(req, res) {
     if (!body.conversationId) return sendJSON(res, 400, { error: 'conversationId is required', code: 'NO_CONVERSATION' });
     const seq = seqOfEntityEvent(EVENT_LOG_DIR, { kind: 'conversation', id: String(body.conversationId), op: 'post' });
     if (seq == null) return sendJSON(res, 200, { served: false, advanced: false, code: 'EVENT_NOT_FOUND', identity: key });
+    // #1576 — a PUSH mark is reported (`push_served`), never an ack and never a pull serve:
+    // a resolved stream write is a server-side "sent", like res.end's callback.
     const out = markServed(EVENT_LOG_DIR, key, { seq, via: body.via ?? null });
     if (!out.known) return sendJSON(res, 200, { served: false, advanced: false, code: 'UNKNOWN_LANE', identity: key, seq });
     // #1460 — the cursor is a high-water mark: an event AT OR BELOW it is served,
@@ -10248,15 +10618,15 @@ async function handleCursorServed(req, res) {
     // "served NOT recorded … : undefined", 247 times in one day). Now: `served`
     // says whether the event is covered, `advanced` says whether THIS call moved
     // the cursor, and `code` names the cursor that already covered it.
-    const advanced = out.served === seq;
+    const advanced = out.pushed === seq;
     const coveredByAck = out.acked != null && seq <= out.acked;
-    const coveredByServed = out.served != null && seq <= out.served;
+    const coveredByServed = out.pushed != null && seq <= out.pushed;
     const served = advanced || coveredByServed || coveredByAck;
     // NOT_ADVANCED is DEFENSIVE: recordServed's Math.max and its ack guard mean
     // a mark either advances or is covered, so no test reaches it today. It
     // exists so that if the store's rule ever changes, a false still has a code.
     const code = advanced ? undefined : coveredByAck ? 'ALREADY_ACKED' : coveredByServed ? 'ALREADY_PAST' : 'NOT_ADVANCED';
-    sendJSON(res, 200, { served, advanced, ...(code ? { code } : {}), identity: key, seq, last_served_seq: out.served, last_acked_seq: out.acked });
+    sendJSON(res, 200, { served, advanced, ...(code ? { code } : {}), identity: key, seq, last_pushed_seq: out.pushed, last_served_seq: out.served, last_acked_seq: out.acked });
   } catch (e) {
     console.error('POST /api/cursors/served:', e.message);
     sendJSON(res, 500, { error: 'Failed to record served' });
@@ -10269,6 +10639,7 @@ const API_ROUTES = [
   { method: 'GET',    re: /^\/api\/cursors$/,              fn: (req, res) => handleCursorReport(req, res) },
   { method: 'POST',   re: /^\/api\/cursors\/register$/,    fn: (req, res) => handleCursorRegister(req, res) },
   { method: 'GET',    re: /^\/api\/cursors\/pull$/,        fn: (req, res) => handleCursorPull(req, res) },
+  { method: 'POST',   re: /^\/api\/cursors\/ack$/,         fn: (req, res) => handleCursorAck(req, res) },   // #1576
   { method: 'POST',   re: /^\/api\/cursors\/inbound$/,     fn: (req, res) => handleCursorInbound(req, res) },
   { method: 'POST',   re: /^\/api\/cursors\/served$/,      fn: (req, res) => handleCursorServed(req, res) },
   { method: 'POST',   re: /^\/api\/graph$/,                fn: (req, res) => handleGraphQuery(req, res) },
@@ -10393,6 +10764,23 @@ const API_ROUTES = [
   { method: 'GET',    re: /^\/api\/nodes\/([^\/]+)$/,              fn: (req, res, m) => handleGetNode(req, res, m[1]) },
   { method: 'PATCH',  re: /^\/api\/nodes\/([^\/]+)$/,              fn: (req, res, m) => handleUpdateNode(req, res, m[1]) },
 ];
+
+// #1558 — the graph write/read slice. OFF unless SCRUM_GRAPH_EXECUTOR_URL is set
+// (fabricated trial data only; see core/graph-slice-routes.mjs for its named gaps).
+const GRAPH_SLICE = createGraphSlice({ getContext: () => requestContext.getStore(), sendJSON, readBody });
+// #1561 — refuses to start when the flag is set without the slice (the records would have nowhere to live).
+if (logbornUnitConfig(process.env, { sliceEnabled: GRAPH_SLICE.enabled }).enabled) {
+  LOGBORN = createLogbornUnit({ slice: GRAPH_SLICE, loadIri: async () => (await loadGraphModules()).IRI });
+  console.error(`${new Date().toISOString()} #1561 log-born unit ON: memory, decision and seat-state read from and write to the graph executor`);
+}
+if (GRAPH_SLICE.enabled) {
+  installStructuredCloneCounter();
+  API_ROUTES.push(...GRAPH_SLICE.routes);
+  if (process.env.SCRUM_TRIAL_EXECUTOR_STORE) {
+    GRAPH_SLICE.startExecutor().catch((e) => console.error(`graph-slice: trial executor did not start: ${e.message}`));
+    process.on('exit', () => GRAPH_SLICE.stopExecutor());
+  }
+}
 
 function routeApi(method, urlPath, req, res) {
   for (const r of API_ROUTES) {
@@ -10618,6 +11006,18 @@ function handleRequest(req, res) {
     return sendJSON(res, decision.status, { error: decision.error, code: decision.code });
   }
   req.auth = decision;   // { seat, scope, enforced } — never the header
+  req.authBinding = binding;   // #1561 — the matched credential, for the graph unit's own write check (core/logborn-unit.mjs actorFor)
+  // #1561 launch — the log-born unit's write routes need a key even in observe
+  // (core/graph-auth.mjs isLogbornWriteRoute). Only with the unit ON; nothing else moves.
+  if (LOGBORN && !decision.enforced && isLogbornWriteRoute(method, urlPath)) {
+    const strict = authDecision({ binding, mode: 'required', need: needFor(method, urlPath) });
+    if (!strict.ok) {
+      authStats.refused++;
+      req.resume();
+      return sendJSON(res, strict.status, { error: `graph write refused: ${strict.error}`, code: strict.status === 403 ? 'GRAPH_WRITE_SCOPE' : 'GRAPH_WRITE_UNAUTHENTICATED', reason: strict.code });
+    }
+    req.auth = strict;
+  }
 
   // Granular API (#90) — regex router
   if (routeApi(method, urlPath, req, res)) return;

@@ -85,3 +85,27 @@ test('MCP changes_since round-trips the log-backed envelope with filters', async
     await rest.stop();
   }
 });
+
+test('#1561 MCP changes_since passes the opaque cursors through: nextBefore as before, cursor as since', async () => {
+  const rest = await startRestServer({ board: makeBoardFixture({ cards: [], conversations: [] }) });
+  const mcp = await startMcpServer({ restApiBase: rest.baseUrl });
+  try {
+    for (const b of ['one', 'two', 'three']) await fetch(`${rest.baseUrl}/api/conversations`, json({ body: b, author: 'ada' }));
+    const session = await mcpSession(mcp.mcpUrl);
+    const ask = async (args) => {
+      const r = await session.callTool('changes_since', args);
+      return JSON.parse((r.result?.content ?? []).map((c) => c.text ?? '').join('\n'));
+    };
+    const p1 = await ask({ since: '2026-01-01T00:00:00Z', limitPosts: 2 });
+    assert.deepEqual(p1.changes.map((c) => c.title), ['two', 'three']);
+    assert.equal(typeof p1.nextBefore, 'string');
+    const p2 = await ask({ since: '2026-01-01T00:00:00Z', limitPosts: 2, before: p1.nextBefore });
+    assert.deepEqual(p2.changes.map((c) => c.title), ['one'], JSON.stringify(p2));
+    await fetch(`${rest.baseUrl}/api/conversations`, json({ body: 'four', author: 'ada' }));
+    const fwd = await ask({ since: p1.cursor });
+    assert.deepEqual(fwd.changes.map((c) => c.title), ['four'], JSON.stringify(fwd));
+  } finally {
+    await mcp.stop();
+    await rest.stop();
+  }
+});

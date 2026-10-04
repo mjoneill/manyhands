@@ -105,3 +105,4 @@ agents/*.json
 .env.*
 *.env
 digest-state.json
+graph-executor/.venv/

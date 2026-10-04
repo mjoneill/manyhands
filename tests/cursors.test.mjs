@@ -41,7 +41,7 @@ test('#683 RE-registration keeps the cursor — the entire point of the slice', 
   const st = { version: 1, seats: {} };
   registerSeat(st, 'ada', 100);
   recordServed(st, 'ada', 120);
-  recordInbound(st, 'ada', 120);          // acked = 120
+  st.seats.ada.acked = 120;               // acked = 120 (#1576: only cursor-service ackFor does this)
   const { cursor, fresh } = registerSeat(st, 'ada', 500);
   assert.equal(fresh, false);
   assert.equal(cursor, 120, 'the cursor survives re-registration; head moving to 500 is irrelevant');
@@ -72,28 +72,31 @@ test('#683 BLOCKER-1 — a stream killed mid-replay leaves the cursor unmoved, a
   assert.deepEqual(wouldServe, [11, 20, 33, 40]);
 });
 
-test('#683 the implicit ack advances the cursor on the NEXT inbound, not on the send', () => {
+test('#1576 the NEXT inbound is NOT an ack (it was #683\'s implicit ack) — liveness only', () => {
+  // #683 acked on the seat's next inbound call. A response that died mid-body still
+  // reached `served` (Node 22 fires res.end's callback for it), so that rule acked
+  // pages the seat never received. Only cursor-service `ackFor` moves `acked` now.
   const st = { version: 1, seats: {} };
   registerSeat(st, 'ada', 10);
   recordServed(st, 'ada', 40);
-  assert.equal(cursorFor(st, 'ada'), 10, 'still unconfirmed');
-  recordInbound(st, 'ada', 40);
-  assert.equal(cursorFor(st, 'ada'), 40, 'aliveness AFTER the response is the ack');
-  assert.equal(st.seats.ada.served, null, 'and the pending mark is cleared, not left to double-apply');
+  recordInbound(st, 'ada', 40, { now: '2026-10-04T00:00:00.000Z' });
+  assert.equal(cursorFor(st, 'ada'), 10, 'aliveness after the response is NOT delivery evidence');
+  assert.equal(st.seats.ada.served, 40, 'the serve stays pending — an explicit ack may still clear it');
+  assert.equal(st.seats.ada.last_inbound_at, '2026-10-04T00:00:00.000Z', 'liveness is still recorded');
 });
 
 test('#683 at-least-once: a re-pull before any ack re-serves the same events', () => {
   const st = { version: 1, seats: {} };
   registerSeat(st, 'ada', 10);
   recordServed(st, 'ada', 25);
-  // A second pull arrives. The inbound acks 25, but a client that never got the
-  // first response has simply seen 11..25 once. Dedup is BY SEQ, client-side,
-  // and it is safe precisely because seq is total and stable.
+  // A second pull arrives without an ack (#1576: an inbound call between is not one).
+  // The client sees 11..25 again — dedup is BY SEQ, client-side, and it is safe
+  // precisely because seq is total and stable.
   const firstPull = [15, 25].filter((s) => s > 10);
   recordInbound(st, 'ada', 25);
   const secondPull = [15, 25].filter((s) => s > cursorFor(st, 'ada'));
   assert.deepEqual(firstPull, [15, 25]);
-  assert.deepEqual(secondPull, [], 'duplicates are possible; gaps are what we refuse');
+  assert.deepEqual(secondPull, [15, 25], 'duplicates are possible; gaps are what we refuse');
 });
 
 test('#683 recordServed never moves BACKWARD, and ignores seqs at or below the cursor', () => {
@@ -158,7 +161,7 @@ test('#683 cursors are IDENTICAL across a restart — restarts stop being deafne
   registerSeat(st, 'ada', 100);
   registerSeat(st, 'bex', 100);
   recordServed(st, 'ada', 150);
-  recordInbound(st, 'ada', 150);
+  st.seats.ada.acked = 150; st.seats.ada.served = null;   // an explicit ack (#1576: cursor-service ackFor)
   saveCursors(dir, st);
 
   const reloaded = loadCursors(dir);           // ← the "restart"

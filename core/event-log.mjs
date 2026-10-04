@@ -98,6 +98,7 @@ export const REDACTION_MARKER_PREFIX = '[redacted';
 // module are reported by `divergence()`, never silently accepted.
 export { ENTITY_KINDS } from './kind-registry.mjs';
 import { ENTITY_KINDS, COLLECTION_OF } from './kind-registry.mjs';
+import { countLegacy } from './legacy-counters.mjs';
 
 /** Which board collection a given entity kind projects into. */
 // #805 blocker 6: tending rides the SAME door as every family — the ruling was
@@ -354,6 +355,7 @@ export function validateEvent(ev) {
  * Returns the stored event (with seq/recorded_at/occurred_at filled in).
  */
 export function appendEvent(dir, event, opts = {}) {
+  countLegacy('appendEvent');
   validateEvent(event);                      // ← throws before anything is written
   const recorded_at = opts.now || new Date().toISOString();
   const stored = {
@@ -382,6 +384,18 @@ export function appendEvent(dir, event, opts = {}) {
     stored.authority = event.authority;
     stored.reason = event.reason ?? null;
     stored.fields = event.fields;
+  }
+  // #1561 rollback — an event REVERSE-EXPORTED from the graph executor (scripts/
+  // rollback-logborn-1561.mjs) names the receipt it carries: the write happened at
+  // `occurred_at` (the receipt's time) by the receipt's actor, and was RECORDED here
+  // at `recorded_at` (the rollback). Carried only on those events, so every other
+  // line stays byte-identical; a reader tells the two apart by its presence.
+  if (event.reverseExport !== undefined) {
+    const x = event.reverseExport;
+    if (!x || typeof x !== 'object' || typeof x.opId !== 'string' || !x.opId || !Number.isInteger(x.commitSeq)) {
+      throw new Error('reverseExport must name the executor receipt it carries: { opId, commitSeq, … }');
+    }
+    stored.reverseExport = x;
   }
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   const file = segmentFor(recorded_at);

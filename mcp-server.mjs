@@ -1974,12 +1974,14 @@ function buildMcpServer() {
   });
 
   mcp.registerTool('memory_versions', {
-    description: 'Get the version history of a memory — all versions that have ever been stored.',
+    description: 'Get the version history of a memory — all versions that have ever been stored. '
+      + 'With identities: true, also every title/tags/priority it has held (oldest first, current last).',
     inputSchema: {
       id: z.string().describe('Memory UUID to inspect'),
+      identities: z.boolean().optional().describe('Also return the title/tags/priority history (#1561)'),
     },
-  }, async ({ id }) => {
-    return jsonResult(await apiCall('GET', `/api/memories/${encodeURIComponent(id)}/versions`));
+  }, async ({ id, identities }) => {
+    return jsonResult(await apiCall('GET', `/api/memories/${encodeURIComponent(id)}/versions${identities ? '?identities=1' : ''}`));
   });
 
   // ── Board snapshot ───────────────────────────────────────────────
@@ -2056,16 +2058,18 @@ function buildMcpServer() {
       + 'cannot starve out card changes); latest-event-per-entity by default (history:true for '
       + 'every event). Filters: entity=<shortId> (one card\'s history), actor=<seat> (one '
       + 'seat\'s activity). A since older than the log\'s retention REFUSES with '
-      + 'oldest_retained rather than answering partially. Page backward with before=<seq>. '
-      + 'Remaining honest omission: edit-actor is null on updates/deletes until #675.',
+      + 'oldest_retained rather than answering partially. Page backward with before=<the reply\'s nextBefore> '
+      + '(a bare seq still works). To resume later without gaps, pass the reply\'s `cursor` as since. '
+      + '#1561: memory/decision/seat-state rows written through the graph executor carry seq:null and a `graph` '
+      + '{opId, commitSeq, version}; the cursors track the log and the executor separately, never by time.',
     inputSchema: {
-      since: z.string().describe('ISO timestamp cutoff — e.g. your last known activity'),
+      since: z.string().describe('ISO timestamp cutoff — e.g. your last known activity — or the `cursor` of a previous reply'),
       history: z.boolean().optional().describe('true = every event per entity (default: latest only)'),
       entity: z.number().int().optional().describe('Filter to one card by shortId — its change history'),
       actor: z.string().optional().describe('Filter to one seat\'s events'),
       limitCards: z.number().int().min(1).optional().describe('Card-side quota (default 50)'),
       limitPosts: z.number().int().min(1).optional().describe('Post-side quota (default 50)'),
-      before: z.number().int().optional().describe('Backward cursor: a seq from a previous page'),
+      before: z.union([z.number().int(), z.string()]).optional().describe('Backward cursor: the previous reply\'s nextBefore (opaque), or a seq from a previous page'),
     },
   }, async ({ since, history, entity, actor, limitCards, limitPosts, before } = {}) => {
     const q = new URLSearchParams(
@@ -2086,10 +2090,20 @@ function buildMcpServer() {
     description: 'Collect everything this lane missed, from its SERVER-SIDE cursor (#683). '
       + 'Unlike changes_since you pass no timestamp: a seat that went deaf does not know when, '
       + 'and the board has been tracking what it actually received. Delivery is at-least-once — '
-      + 'you may see an event twice, never zero times; dedup by seq. The cursor advances only on '
-      + 'your NEXT call, so a response lost in flight is re-served rather than skipped. Returns '
+      + 'you may see an event twice, never zero times; dedup by seq. With the log-born unit on, '
+      + 'memory / decision / seat-state writes arrive in the same list as event-shaped rows with '
+      + 'seq: null and a `graph` object {opId, commitSeq, version} — dedup those by graph.opId; '
+      + 'state is null (read the record from the store). The cursor advances only on an EXPLICIT '
+      + 'ack (#1576): this tool acks the page itself, after the board\'s MCP host has received the whole '
+      + 'response — a pull that dies in flight, or whose ack fails, is re-served rather than skipped '
+      + '(`ack` in the result says which). After a ROLLBACK of the log-born unit a lane whose earlier '
+      + 'graph rows cannot be proven against the rolled-back records is refused with CURSOR_ROLLED_BACK: '
+      + 'nothing is lost; re-register with resync "rollback" (POST /api/cursors/register) and replay '
+      + 'resumes from the last acked log position, duplicates possible (dedup by reverseExport.opId). Returns '
       + 'the events plus an envelope: {last_acked_seq, last_served_seq, head_seq, lag, '
-      + 'oldest_unserved_at}. Lag>0 with a stale oldest_unserved_at means you are behind the room.',
+      + 'oldest_unserved_at} (with the unit on, also log_lag and graph:{head_commit_seq, '
+      + 'last_acked_commit_seq, last_served_commit_seq, lag}; lag is both sources). '
+      + 'Lag>0 with a stale oldest_unserved_at means you are behind the room.',
     inputSchema: {
       limit: z.number().int().min(1).optional().describe('Max events this pull (default/ceiling 200)'),
     },
@@ -2109,7 +2123,27 @@ function buildMcpServer() {
     }
     const q = new URLSearchParams({ identity: lane.identity, via: lane.via });
     if (limit) q.set('limit', String(limit));
-    return jsonResult(await apiCall('GET', `/api/cursors/pull?${q.toString()}`));
+    const page = await apiCall('GET', `/api/cursors/pull?${q.toString()}`);
+    // #1576 — THE ACK, and why it is here. `apiCall` has read and parsed the WHOLE body
+    // before it returns, so this process holds the page: that is the delivery evidence
+    // the server cannot have (res.end's callback fires for a socket the client destroyed).
+    // Only then is the page acked. A failed ack is reported, never thrown: the page is
+    // still in hand, and it will simply be re-served (at-least-once).
+    // ⚠️ NOT covered: this process → the model. If the tool result is lost on the MCP
+    // transport after this ack, the page is not re-served.
+    if (page?.ack_token) {
+      try {
+        const a = await apiCall('POST', '/api/cursors/ack', { identity: lane.identity, token: page.ack_token });
+        page.ack = { advanced: !!a?.advanced, ...(a?.code ? { code: a.code } : {}), last_acked_seq: a?.last_acked_seq ?? null,
+          ...(a?.last_acked_commit_seq != null ? { last_acked_commit_seq: a.last_acked_commit_seq } : {}) };
+      } catch (e) {
+        console.error(`[#1576] replay ack failed for ${lane.identity}: ${e.message}`);
+        page.ack = { advanced: false, error: e.message, note: 'not acked — this page will be served again on the next replay_pull' };
+      }
+    } else if (page && typeof page === 'object') {
+      page.ack = { advanced: false, code: 'NOTHING_TO_ACK' };
+    }
+    return jsonResult(page);
   });
 
   // ── #694 — graph_query: native graph traversal ────────────────────
@@ -2191,6 +2225,35 @@ function buildMcpServer() {
     },
   }, async ({ query, limit, by } = {}) => {
     return jsonResult(await apiCall('POST', '/api/graph', { query, limit, by }));
+  });
+
+  // ── #1559 remainder (2) — graph_authority: the SAME shared resolver resident seats reach
+  // through board-tools (#1558), for MCP seats. graph_query cannot tell "nothing governs it"
+  // from "the store could not be read"; this can. The route's envelope passes through
+  // unaltered; a failed read is UNAVAILABLE with the note, never a thrown error or empty.
+  mcp.registerTool('graph_authority', {
+    description: 'Ask what currently GOVERNS a topic: which assertion is in force, who made it and under what '
+      + 'grant, what (if anything) it retired and why, and any newer assertion that does not override it. '
+      + 'The answer has a status and a `meaning` saying what to do with it: CURRENT (one governing assertion), '
+      + 'UNRESOLVED (binding assertions conflict; nothing governs until that is settled), NO_AUTHORITY (nothing '
+      + 'binding exists: a remembered belief is NOT authority), or UNAVAILABLE (the store could not be read). '
+      + 'UNAVAILABLE never means "nothing governs it": it means you do not know. Use this before acting on '
+      + 'anything you remember about a rule or decision. Same resolver as the residents\' graph_authority (#1558).',
+    inputSchema: {
+      topic: z.string().min(1).describe('the subject IRI, e.g. urn:ex:topic1'),
+      predicate: z.string().min(1).describe('the predicate IRI, e.g. urn:ex:policy'),
+      scope: z.string().min(1).describe('the scope IRI the authority applies in'),
+      evaluationTime: z.string().optional().describe('ISO time to evaluate at (default: now, chosen by the server)'),
+    },
+  }, async ({ topic, predicate, scope, evaluationTime } = {}) => {
+    const q = new URLSearchParams({ topic, predicate, scope });
+    if (evaluationTime) q.set('evaluationTime', evaluationTime);
+    try {
+      return jsonResult(await apiCall('GET', `/api/graph/authority?${q}`));
+    } catch (e) {
+      return jsonResult({ status: 'UNAVAILABLE', reason: String(e?.message || e),
+        note: 'the authority could not be read. That is NOT "nothing governs it": you do not know what governs it.' });
+    }
   });
 
   // ── #1484 — graph_neighbors: "what's near me?" as ONE call, no SPARQL ──
@@ -2863,11 +2926,10 @@ const channelScheduler = createChannelScheduler({
     Promise.resolve()
       .then(() => transport.send(notification))
       .then(() => {
-        // #782 / Decision 5b43edcd — the write RESOLVED, so this session's lane
-        // is SERVED this conversation. Acked only on the lane's next inbound
-        // call (the #683 hook), fenced if a different session acks. Fire-and-
-        // forget and fail-open, like the ack: a mark we could not record costs a
-        // re-serve on the next pull, which at-least-once already permits.
+        // #782 / Decision 5b43edcd — the write RESOLVED; reported to the lane as
+        // `push_served`. ⛔ #1576: never an ack — a resolved stream write is a
+        // server-side "sent", so the conversation stays owed to the lane's pull.
+        // Fire-and-forget and fail-open.
         const messageId = notification?.params?.meta?.message_id;
         if (notification?.method !== 'notifications/claude/channel' || !messageId) return;
         const lane = laneFor(sessionId);
@@ -3891,12 +3953,11 @@ const httpServer = http.createServer(async (req, res) => {
     if (sessionId && transports.has(sessionId)) {
       transport = transports.get(sessionId);
       const m = sessionMeta.get(sessionId);
-      // #683 — THE IMPLICIT ACK. The lane is calling us, which means it was
-      // alive AFTER we finished the last response, so we believe that response
-      // arrived. Fire-and-forget and fail-open: a cursor we could not advance
-      // costs a duplicate on the next pull, which the at-least-once contract
-      // already permits. A cursor call that could block a tool call would be a
-      // rail whose failure mode is worse than the problem it solves.
+      // #683 — LIVENESS for the lane's reachability (and a bearer lane's adoption).
+      // ⛔ #1576: NOT an ack any more — "alive after the response" is not delivery
+      // evidence (a pull that died mid-body was acked by exactly this call). The
+      // cursor advances only through replay_pull's explicit ack. Fire-and-forget
+      // and fail-open, as before.
       const lane = laneFor(sessionId);
       if (lane) {
         apiCall('POST', '/api/cursors/inbound', { identity: lane.identity, via: lane.via })
