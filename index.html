@@ -2299,8 +2299,8 @@ function restoreFromLocalStorage() {
   cards.length = 0; // Clear without reassigning
   saved.forEach(c => {
     // #1583 — a create cannot still be in flight across a reload: a card
-    // stored as 'pending' was never confirmed, so it is local-only.
-    if (c && c._unsynced === 'pending') c._unsynced = 'failed';
+    // stored as 'pending' was never confirmed either way.
+    if (c && c._unsynced === 'pending') c._unsynced = 'unknown';   // it may have committed: ask again before any whole-board save
     cards.push(c);
   });
 }
@@ -2451,9 +2451,23 @@ async function saveToJSONFile() {
   // Serializing now would DELETE the card the server has just created. So the
   // whole-board save is built only after every in-flight create has settled
   // and been adopted.
-  if (_createInFlight.size > 0) {
+  //
+  // ⛔ AND A CREATE WHOSE OUTCOME IS UNKNOWN (no reply) BLOCKS THE SAVE. It may
+  // be committed on the server while this tab holds only the provisional copy,
+  // so the same deletion applies. It is re-asked first; if still unknown, the
+  // save is refused, visibly, and nothing is written.
+  const unknownCreate = () => cards.some((c) => c && c._unsynced === 'unknown');
+  if (_createInFlight.size > 0 || unknownCreate()) {
     const inFlight = [..._createInFlight.values()];
-    return _trackPendingWrite(Promise.allSettled(inFlight).then(() => saveToJSONFile()));
+    return _trackPendingWrite(Promise.allSettled(inFlight).then(async () => {
+      if (unknownCreate()) await _reconcileUnknownCreates();
+      if (unknownCreate()) {
+        _setSaveStatus('failed', 'Not saved — a new card could not be confirmed on the server, and saving the whole board now '
+          + 'could delete it. Your change is still on screen; reload to resync.');
+        return false;
+      }
+      return saveToJSONFile();
+    }));
   }
   const payload = {
     // #1583 — a card the server has not created yet is NOT this save's to
@@ -3051,7 +3065,7 @@ function _writableRelationships(rel) {
 }
 
 // Keys the create/PATCH responses carry ABOUT the request, never fields of the card.
-const RESPONSE_ONLY_FIELDS = ['ignoredFields', 'refusedFields', 'redirectedFields', 'similarCards'];
+const RESPONSE_ONLY_FIELDS = ['ignoredFields', 'refusedFields', 'redirectedFields', 'similarCards', 'replayed'];
 
 function _trackPendingWrite(p) {
   _pendingSaves.push(p);   // the poll skips while this is non-empty; the test wrapper drains it
@@ -3066,11 +3080,21 @@ function _trackPendingWrite(p) {
 // server answered can wait for the real id and version instead of guessing.
 const _createInFlight = new Map();
 
-function _persistNewCard(card) {
+// #1583 — how long to keep asking before a create with NO reply is left as
+// "outcome unknown". Each retry re-sends the SAME requestId, so the server
+// answers with the card the first attempt made (if it made one) rather than a
+// second card.
+const CREATE_RETRY_DELAYS_MS = [0, 400, 1200, 3000];
+
+function _persistNewCard(card, delays = CREATE_RETRY_DELAYS_MS) {
   const provisionalId = card.id;
   const provisionalShortId = card.shortId;
+  // The REQUEST IDENTITY: generated once per card and kept across retries and
+  // reloads (it lives on the provisional card, so localStorage carries it).
+  if (!card._requestId) card._requestId = crypto.randomUUID();
   card._unsynced = 'pending';
   const body = {
+    requestId: card._requestId,
     title: card.title,
     description: card.description,
     type: card.type,
@@ -3084,38 +3108,66 @@ function _persistNewCard(card) {
     ...(card.for ? { for: card.for } : {}),
     ...(card.createdBy ? { createdBy: card.createdBy } : {}),
   };
-  const p = (async () => {
-    const pendingTimer = setTimeout(() => _setSaveStatus('saving', 'Saving…'), SAVE_PENDING_DELAY_MS);
-    let res = null;
-    let server = null;
+  // One attempt → 'created' (with the server's card), 'failed' (the server
+  // answered and refused: definitively not created), or 'unknown' (no answer,
+  // or a 5xx that may have committed before failing).
+  const attempt = async () => {
+    let res;
     try {
       res = await fetch(API_BASE + '/api/cards', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
-      try { server = await res.json(); } catch { server = null; }
     } catch (e) {
-      res = null;
+      return { kind: 'unknown' };
+    }
+    let server = null;
+    try { server = await res.json(); } catch { server = null; }
+    if (res.ok && server && typeof server.id === 'string' && Number.isInteger(server.shortId)) return { kind: 'created', server };
+    if (res.status >= 500) return { kind: 'unknown' };
+    return { kind: 'failed', status: res.ok ? 'unexpected reply' : res.status, error: server && server.error };
+  };
+  const p = (async () => {
+    const pendingTimer = setTimeout(() => _setSaveStatus('saving', 'Saving…'), SAVE_PENDING_DELAY_MS);
+    let out = { kind: 'unknown' };
+    for (const d of delays) {
+      if (d) await new Promise((r) => setTimeout(r, d));
+      out = await attempt();
+      if (out.kind !== 'unknown') break;
     }
     clearTimeout(pendingTimer);
-    const created = res && res.ok && server && typeof server.id === 'string' && Number.isInteger(server.shortId);
-    if (!created) {
-      card._unsynced = 'failed';   // (localStorage already holds it from addCard; a reload re-reads 'pending' as 'failed')
-      _setSaveStatus('failed', !res
-        ? 'Not saved — cannot reach the server, so the new card was not created. It is on this screen only.'
-        : `Not saved — the server did not create the new card (${res.ok ? 'unexpected reply' : res.status}`
-          + `${server && server.error ? ': ' + server.error : ''}). It is on this screen only.`);
-      _replaceTile(provisionalId, card);
-      return false;
+    if (out.kind === 'created') {
+      _adoptCreatedCard(card, out.server, provisionalId, provisionalShortId);
+      _setSaveStatus('saved', 'Saved');
+      return true;
     }
-    _adoptCreatedCard(card, server, provisionalId, provisionalShortId);
-    _setSaveStatus('saved', 'Saved');
-    return true;
+    if (out.kind === 'failed') {
+      card._unsynced = 'failed';
+      _setSaveStatus('failed', `Not saved — the server did not create the new card (${out.status}`
+        + `${out.error ? ': ' + out.error : ''}). It is on this screen only.`);
+    } else {
+      // ⛔ NOT "failed". The server may have committed it; only the reply is
+      // missing. Whole-board saves stay blocked until this is resolved,
+      // because a save that omits a committed card deletes it.
+      card._unsynced = 'unknown';
+      _setSaveStatus('failed', 'Not confirmed — no reply from the server, so it is unknown whether the new card was created. '
+        + 'Moves are paused until it is confirmed; it will be checked again on your next change, or reload to resync.');
+    }
+    saveToLocalStorage();
+    _replaceTile(provisionalId, card);
+    return false;
   })();
   _createInFlight.set(card, p);
   p.finally(() => _createInFlight.delete(card));
   return _trackPendingWrite(p);
+}
+
+// Ask again about every create whose outcome is unknown (the same requestId,
+// so a committed card is returned, not duplicated). One attempt each.
+async function _reconcileUnknownCreates() {
+  const unknown = cards.filter((c) => c && c._unsynced === 'unknown');
+  await Promise.allSettled(unknown.map((c) => _persistNewCard(c, [0])));
 }
 
 // The server's record REPLACES the provisional card, in place (same object, so
@@ -3406,7 +3458,7 @@ function renderCard(card) {
   <button class="card-move-btn card-move-right" data-action="move-right" ${_atLast ? 'disabled' : ''} title="Move to next column" aria-label="Move to next column">▶</button>
   <div class="card-top">
     <span class="card-emoji">${emoji}</span>
-    <span class="card-shortid">#${card._unsynced === 'pending' ? '…' : card.shortId}</span>${priorityBadge}${claimBadge}${blockedBadge}${blockingBadge}
+    <span class="card-shortid">#${card._unsynced === 'pending' ? '…' : card._unsynced === 'unknown' ? '?' : card.shortId}</span>${priorityBadge}${claimBadge}${blockedBadge}${blockingBadge}
     ${assigneeBadgesHtml}
     ${card.for ? `<span class="card-for" title="For">For: ${escapeHTML(card.for)}</span>` : ''}
   </div>
@@ -3594,7 +3646,7 @@ function renderCardEditForm(card) {
 
 // ── Dispatch: render a card normally or in edit mode ──
 function renderCardOrEdit(card) {
-  if (editingCardId === card.id) return renderCardEditForm(card);
+  if (editingCardId === card.id) return _decorateEditConflict(renderCardEditForm(card), card);   // #1583
   return renderCard(card);
 }
 
@@ -3742,7 +3794,9 @@ function _patchEditedCard(card, { reopenOnFailure }) {
     if (card._unsynced) {
       // Never created on the server: the edit is kept on this screen (it is
       // already in the card), and nothing pretends it was stored.
-      _setSaveStatus('failed', 'Not saved — this card was never created on the server; it and your edit exist only on this screen.');
+      _setSaveStatus('failed', card._unsynced === 'unknown'
+        ? 'Not saved — this card\'s creation is not confirmed yet. Your edit is on this screen; reload to resync before editing it.'
+        : 'Not saved — this card was never created on the server; it and your edit exist only on this screen.');
       return false;
     }
     return _sendCardPatch(card, edit, who, reopen);
@@ -3780,8 +3834,16 @@ async function _sendCardPatch(card, edit, who, reopen) {
       return false;
     }
     if (res.status === 409) {
+      // #1583 — the draft must survive the recovery, not just the refusal. It
+      // is kept twice: in memory for the in-place "Load their version" path,
+      // and in sessionStorage so a reload (the other remedy offered) still
+      // has it. Nothing is reapplied automatically: the user restores it, on
+      // top of the version they have now SEEN, and saves under that version.
+      const draft = { title: edit.title, description: edit.description };
+      _editConflicts.set(cardId, { draft, theirs: null });
+      _stashConflictDraft(cardId, draft);
       _setSaveStatus('failed', `Not saved — #${card.shortId} changed elsewhere while you were editing it. `
-        + 'Your edit is still in the editor; reload to see their version, then reapply.');
+        + 'Your edit is still in the editor: use “Load their version” there, or reload — your draft is kept for this card.');
       reopen();
       return false;
     }
@@ -3800,9 +3862,100 @@ async function _sendCardPatch(card, edit, who, reopen) {
       _replaceTile(cardId, card);
     }
     _releaseEditDraft(cardId);   // #1366 — the server has the text now
+    _editConflicts.delete(cardId);
+    _stashConflictDraft(cardId, null);
     _setSaveStatus('saved', 'Saved');
     return true;
   }
+}
+
+// ── #1583 — 409 RECOVERY for the column editor ─────────────────────────────
+// A refused edit leaves the user's draft in the editor, with two ways forward:
+//   · "Load their version" — fetch the card as stored, adopt its version, and
+//     show what they saved; the draft stays in the editor. Saving then is an
+//     explicit act, under the REFRESHED version's ifVersion.
+//   · reload — the draft was stashed in sessionStorage; the editor for that
+//     card offers "Restore my draft", which fills the fields (never saves).
+// Nothing is ever reapplied without a click, and nothing is saved over the
+// other writer except by pressing Save after seeing their version.
+const _editConflicts = new Map();   // cardId → { draft:{title,description}, theirs:null|{title,description,version} }
+const CONFLICT_DRAFT_PREFIX = 'mh-conflict-draft:';
+
+function _stashConflictDraft(cardId, draft) {
+  try {
+    if (draft) sessionStorage.setItem(CONFLICT_DRAFT_PREFIX + cardId, JSON.stringify({ ...draft, at: new Date().toISOString() }));
+    else sessionStorage.removeItem(CONFLICT_DRAFT_PREFIX + cardId);
+  } catch { /* storage unavailable: the in-memory copy still serves this page */ }
+}
+function _readConflictDraft(cardId) {
+  try {
+    const raw = sessionStorage.getItem(CONFLICT_DRAFT_PREFIX + cardId);
+    const d = raw && JSON.parse(raw);
+    return d && typeof d.title === 'string' && typeof d.description === 'string' ? d : null;
+  } catch { return null; }
+}
+
+// Called on the column editor after it is built.
+function _decorateEditConflict(el, card) {
+  const form = el.querySelector('.card-edit-form');
+  if (!form) return el;
+  const conflict = _editConflicts.get(card.id);
+  const stashed = conflict ? null : _readConflictDraft(card.id);
+  if (!conflict && !stashed) return el;
+  if (stashed && stashed.title === (card.title || '') && stashed.description === (card.description || '')) return el;
+  const box = document.createElement('div');
+  box.className = 'edit-conflict';
+  if (conflict && !conflict.theirs) {
+    box.innerHTML = '<div class="edit-conflict-head">⚠️ Someone changed this card while you were editing. Your draft is below, not saved.</div>'
+      + '<div class="edit-conflict-actions"><button type="button" class="btn-save-edit" data-action="edit-load-theirs">Load their version (keep my draft)</button></div>';
+  } else if (conflict && conflict.theirs) {
+    const t = conflict.theirs;
+    box.innerHTML = `<div class="edit-conflict-head">Their version (v${escapeHTML(String(t.version))}) is loaded. Your draft is below; Save replaces theirs with it.</div>`
+      + `<div class="edit-conflict-title">Their title: <b class="edit-conflict-their-title"></b></div>`
+      + '<div class="edit-conflict-diff edit-conflict-their-desc"></div>';
+    box.querySelector('.edit-conflict-their-title').textContent = t.title || '';
+    box.querySelector('.edit-conflict-their-desc').textContent = t.description || '';
+  } else {
+    box.innerHTML = '<div class="edit-conflict-head">You have an unsaved draft of this card from an edit that was refused. The fields below show the card as it is now.</div>'
+      + '<div class="edit-conflict-actions"><button type="button" class="btn-save-edit" data-action="edit-restore-draft">Restore my draft</button>'
+      + '<button type="button" class="btn-cancel-edit" data-action="edit-discard-draft">Discard it</button></div>';
+  }
+  form.prepend(box);
+  // The draft wins in the fields while a conflict is open (in-place path).
+  if (conflict) {
+    el.querySelector('.edit-title').value = conflict.draft.title;
+    el.querySelector('.edit-desc').value = conflict.draft.description;
+  }
+  return el;
+}
+
+async function loadTheirsKeepDraft(cardId) {
+  const card = cards.find((c) => c.id === cardId);
+  const conflict = _editConflicts.get(cardId);
+  const el = document.querySelector(`.card[data-id="${CSS.escape(cardId)}"]`);
+  if (!card || !conflict || !el) return;
+  // What is in the editor NOW is the draft (the user may have kept typing).
+  conflict.draft = { title: el.querySelector('.edit-title').value, description: el.querySelector('.edit-desc').value };
+  _stashConflictDraft(cardId, conflict.draft);
+  let server = null;
+  try { const r = await fetch(API_BASE + '/api/cards/' + encodeURIComponent(cardId)); if (r.ok) server = await r.json(); } catch { server = null; }
+  if (!server) { _setSaveStatus('failed', 'Could not load their version — the server did not answer. Your draft is still in the editor.'); return; }
+  for (const [k, v] of Object.entries(server)) if (!RESPONSE_ONLY_FIELDS.includes(k)) card[k] = v;
+  if (typeof window.cardContentKey === 'function') _hydratedKeys.set(card.id, window.cardContentKey(card));
+  conflict.theirs = { title: server.title, description: server.description, version: server.version };
+  saveToLocalStorage();
+  renderBoard();
+}
+
+function restoreConflictDraft(cardId) {
+  const d = _readConflictDraft(cardId);
+  const el = document.querySelector(`.card[data-id="${CSS.escape(cardId)}"]`);
+  if (!d || !el) return;
+  el.querySelector('.edit-title').value = d.title;
+  const ta = el.querySelector('.edit-desc');
+  ta.value = d.description;
+  ta.dispatchEvent(new Event('input', { bubbles: true }));
+  el.querySelector('.edit-conflict')?.remove();
 }
 
 // #1366 — an edit draft is released when the edit is committed or explicitly
@@ -3816,6 +3969,7 @@ function _releaseEditDraft(cardId) {
 
 function cancelEdit() {
   _releaseEditDraft(editingCardId);   // #1366 — Cancel is the operator's word; the draft goes with it
+  if (editingCardId) { _editConflicts.delete(editingCardId); _stashConflictDraft(editingCardId, null); }   // #1583 — and so does a conflict draft
   editingCardId = null;
   renderBoard();
 }
@@ -5040,6 +5194,13 @@ boardEl.addEventListener('click', (e) => {
     saveEdit(cardId);
   } else if (action === 'cancel-edit') {
     cancelEdit();
+  } else if (action === 'edit-load-theirs') {
+    loadTheirsKeepDraft(cardId);   // #1583
+  } else if (action === 'edit-restore-draft') {
+    restoreConflictDraft(cardId);   // #1583
+  } else if (action === 'edit-discard-draft') {
+    _stashConflictDraft(cardId, null);
+    cardEl.querySelector('.edit-conflict')?.remove();
   } else if (action === 'close-card-detail') {
     closeCardDetail();
   } else if (action === 'move-left' || action === 'move-right') {

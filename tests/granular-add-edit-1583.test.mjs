@@ -54,7 +54,9 @@ const recordWrites = (page) => {
 
 const openBoard = async (browser, baseUrl) => {
   const page = await browser.newPage();
-  page.on('dialog', (d) => d.dismiss().catch(() => {}));
+  // A reload with an editor open raises beforeunload: accept THAT (the test
+  // reloads on purpose); answer "stay" to anything else.
+  page.on('dialog', (d) => (d.type() === 'beforeunload' ? d.accept() : d.dismiss()).catch(() => {}));
   await page.goto(`${baseUrl}/`, { waitUntil: 'networkidle0' });
   await page.waitForSelector('.card[data-id="k1"]', { timeout: 8000 });
   return page;
@@ -295,5 +297,185 @@ test('#1583 a whole-board save fired while a create is still on the wire does no
     const made = all.filter((c) => c.title === 'created during a save');
     assert.equal(made.length, 1, 'the new card exists exactly once on the server: ' + JSON.stringify(all.map((c) => c.title)));
     assert.equal(all.length, 4, 'and nothing else was lost or duplicated');
+  }, { server: { board: fixture() }, launch: { headless: 'new' } });
+});
+
+// ── Review round: a lost create reply, and 409 recovery ─────────────────────
+
+/**
+ * A man-in-the-middle for the browser's FIRST create: the request is sent to
+ * the server from here (so it COMMITS), and the browser is told the network
+ * failed. `dropAll` keeps failing every later create too, without forwarding.
+ */
+async function loseCreateReplies(page, baseUrl, { dropAll = false } = {}) {
+  const state = { committed: 0, dropped: 0, active: true };
+  await page.setRequestInterception(true);
+  page.on('request', async (r) => {
+    const u = new URL(r.url());
+    const isCreate = r.method() === 'POST' && u.pathname === '/api/cards';
+    if (!state.active || !isCreate || (!dropAll && state.dropped >= 1)) { r.continue().catch(() => {}); return; }
+    if (state.committed === 0) {
+      await fetch(`${baseUrl}/api/cards`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: r.postData() });
+      state.committed += 1;
+    }
+    state.dropped += 1;
+    r.abort('failed').catch(() => {});
+  });
+  return state;
+}
+
+// The move arrows are hover-revealed and the board re-renders as creates
+// settle, so a coordinate click can land on nothing. Dispatch the click on the
+// element itself — the same delegated handler the user's click reaches.
+const clickMove = (page, id) => page.evaluate((k) => {
+  document.querySelector(`.card[data-id="${k}"] .card-move-right`).click();
+}, id);
+
+const addViaForm = async (page, title) => {
+  await page.click('#btn-expand-form');
+  await page.waitForSelector('#add-card-form-wrapper.expanded', { timeout: 5000 });
+  await page.waitForSelector('#card-title', { visible: true, timeout: 5000 });
+  await setValue(page, '#card-title', title);
+  await clickWhenOnTop(page, '#btn-add-card');
+};
+
+test('#1583 lost create reply: the POST committed but the reply was dropped → a move does not delete it; the tab converges on the server card (by request id)', async () => {
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await openBoard(browser, server.baseUrl);
+    const lost = await loseCreateReplies(page, server.baseUrl);
+    const writes = recordWrites(page);
+    await addViaForm(page, 'reply lost in transit');
+    await clickMove(page, 'k1');   // a remaining whole-board caller
+    await page.waitForFunction(() => _pendingSaves.length === 0, { timeout: 15000 });
+    assert.equal(lost.committed, 1, 'precondition: the first create committed on the server');
+    assert.equal(lost.dropped, 1, 'and its reply never reached the tab');
+
+    const all = (await api(server.baseUrl, 'GET', '/api/cards?limit=50')).body.cards;
+    const made = all.filter((c) => c.title === 'reply lost in transit');
+    assert.equal(made.length, 1, 'the server card exists exactly once: ' + JSON.stringify(all.map((c) => c.title)));
+    assert.equal(all.length, 4, 'nothing deleted, nothing duplicated');
+    assert.equal(all.find((c) => c.id === 'k1').column, 'planned', 'the move itself still landed');
+    // Converged: the tile is the server's card, by id and number.
+    const tile = await page.evaluate(() => {
+      const t = [...document.querySelectorAll('.card')].find((c) => c.textContent.includes('reply lost in transit'));
+      return t && { id: t.dataset.id, sid: t.querySelector('.card-shortid')?.textContent.trim() };
+    });
+    assert.deepEqual(tile, { id: made[0].id, sid: `#${made[0].shortId}` }, 'the tab adopted the committed card');
+    const creates = writes.filter((w) => w.method === 'POST' && w.path === '/api/cards');
+    assert.ok(creates.length >= 2, 'the create was re-asked');
+    assert.ok(creates.every((w) => w.body.requestId === creates[0].body.requestId && /^[0-9a-f-]{36}$/.test(w.body.requestId)),
+      'every retry carried the SAME client-generated request id');
+  }, { server: { board: fixture() }, launch: { headless: 'new' } });
+});
+
+test('#1583 create outcome UNKNOWN blocks whole-board saves (visibly) until it is confirmed; then the tab converges', async () => {
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await openBoard(browser, server.baseUrl);
+    const lost = await loseCreateReplies(page, server.baseUrl, { dropAll: true });
+    const writes = recordWrites(page);
+    await addViaForm(page, 'never confirmed');
+    await page.waitForFunction(() => _pendingSaves.length === 0, { timeout: 15000 });
+    assert.equal(lost.committed, 1);
+    assert.ok(lost.dropped >= 2, 'every retry failed too');
+    assert.equal(await page.evaluate(() => cards.find((c) => c.title === 'never confirmed')?._unsynced), 'unknown',
+      'no reply is "unknown", not "failed"');
+
+    await clickMove(page, 'k1');
+    await page.waitForFunction(() => _pendingSaves.length === 0, { timeout: 15000 });
+    assert.equal(writes.filter((w) => w.path === '/api/save').length, 0, 'the whole-board save was BLOCKED, not sent');
+    const msg = await page.$eval('.save-status', (e) => e.textContent);
+    assert.match(msg, /not saved/i, msg);
+    let all = (await api(server.baseUrl, 'GET', '/api/cards?limit=50')).body.cards;
+    assert.equal(all.filter((c) => c.title === 'never confirmed').length, 1, 'the committed card is still there, once');
+
+    // The network heals; the next change re-asks by request id, then saves.
+    lost.active = false;
+    await clickMove(page, 'k2');
+    await page.waitForFunction(() => _pendingSaves.length === 0, { timeout: 15000 });
+    all = (await api(server.baseUrl, 'GET', '/api/cards?limit=50')).body.cards;
+    const made = all.filter((c) => c.title === 'never confirmed');
+    assert.equal(made.length, 1, 'still exactly once after the save went through');
+    assert.equal(all.length, 4);
+    assert.equal(all.find((c) => c.id === 'k2').column, 'planned', 'the second move landed');
+    assert.equal(await page.evaluate((id) => !!cards.find((c) => c.id === id && !c._unsynced), made[0].id), true,
+      'the tab converged on the server card');
+  }, { server: { board: fixture() }, launch: { headless: 'new' } });
+});
+
+/** The 409 set-up shared by both recovery tests: a seat edits title AND body, then the browser edits both. */
+async function conflictOnK1(page, baseUrl) {
+  const seat = await api(baseUrl, 'PATCH', '/api/cards/k1', { by: 'bob', title: 'title by the seat', description: 'body by the seat' });
+  assert.equal(seat.status, 200);
+  await page.click('.card[data-id="k1"] .card-edit-btn');
+  await page.waitForSelector('.card[data-id="k1"] .edit-title', { timeout: 5000 });
+  await setValue(page, '.card[data-id="k1"] .edit-title', 'title by the user');
+  await setValue(page, '.card[data-id="k1"] .edit-desc', 'body by the user\nsecond line');
+  await page.click('.card[data-id="k1"] .btn-save-edit');
+  await page.waitForSelector('.card[data-id="k1"] .edit-conflict', { timeout: 8000 });
+}
+const fields = (page) => page.evaluate(() => ({
+  title: document.querySelector('.card[data-id="k1"] .edit-title')?.value,
+  description: document.querySelector('.card[data-id="k1"] .edit-desc')?.value,
+}));
+const SEAT = { title: 'title by the seat', description: 'body by the seat' };
+const MINE = { title: 'title by the user', description: 'body by the user\nsecond line' };
+
+test('#1583 409 recovery in place: "Load their version" shows theirs, keeps my draft, writes NOTHING; Save is then explicit under the refreshed version', async () => {
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await openBoard(browser, server.baseUrl);
+    const writes = recordWrites(page);
+    await conflictOnK1(page, server.baseUrl);
+    assert.deepEqual(await fields(page), MINE, 'after the 409 the draft is in the editor');
+
+    await page.click('.card[data-id="k1"] [data-action="edit-load-theirs"]');
+    await page.waitForSelector('.card[data-id="k1"] .edit-conflict-their-title', { timeout: 5000 });
+    assert.equal(await page.$eval('.edit-conflict-their-title', (e) => e.textContent), SEAT.title, 'their title is shown');
+    assert.equal(await page.$eval('.edit-conflict-their-desc', (e) => e.textContent), SEAT.description, 'their body is shown');
+    assert.deepEqual(await fields(page), MINE, 'my draft (title AND body) is still in the editor');
+    let stored = (await api(server.baseUrl, 'GET', '/api/cards/k1')).body;
+    assert.deepEqual({ title: stored.title, description: stored.description, version: stored.version }, { ...SEAT, version: 2 },
+      'loading their version wrote nothing');
+    assert.equal(writes.filter((w) => w.method === 'PATCH').length, 1, 'no write beyond the refused one');
+
+    await page.click('.card[data-id="k1"] .btn-save-edit');
+    stored = await until(async () => {
+      const c = (await api(server.baseUrl, 'GET', '/api/cards/k1')).body;
+      return c.title === MINE.title ? c : null;
+    });
+    assert.ok(stored, 'the explicit Save landed');
+    assert.equal(stored.description, MINE.description);
+    assert.equal(stored.version, 3);
+    const patches = writes.filter((w) => w.method === 'PATCH');
+    assert.deepEqual(patches.map((w) => w.body.ifVersion), [1, 2], 'refused at v1; the explicit save declared the REFRESHED v2');
+    assert.equal(writes.filter((w) => w.path === '/api/save').length, 0);
+  }, { server: { board: fixture() }, launch: { headless: 'new' } });
+});
+
+test('#1583 409 recovery across a RELOAD: the draft is offered (not auto-applied), restored only on click, saved only on Save under the refreshed version', async () => {
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await openBoard(browser, server.baseUrl);
+    await conflictOnK1(page, server.baseUrl);
+
+    await page.reload({ waitUntil: 'networkidle0' });
+    await page.waitForSelector('.card[data-id="k1"]', { timeout: 8000 });
+    const writes = recordWrites(page);
+    await page.click('.card[data-id="k1"] .card-edit-btn');
+    await page.waitForSelector('.card[data-id="k1"] [data-action="edit-restore-draft"]', { timeout: 5000 });
+    assert.deepEqual(await fields(page), SEAT, 'the editor opens on THEIR version — nothing reapplied automatically');
+
+    await page.click('.card[data-id="k1"] [data-action="edit-restore-draft"]');
+    assert.deepEqual(await fields(page), MINE, 'one click restores my draft, title AND body');
+    let stored = (await api(server.baseUrl, 'GET', '/api/cards/k1')).body;
+    assert.deepEqual({ title: stored.title, description: stored.description }, SEAT, 'restoring wrote nothing');
+
+    await page.click('.card[data-id="k1"] .btn-save-edit');
+    stored = await until(async () => {
+      const c = (await api(server.baseUrl, 'GET', '/api/cards/k1')).body;
+      return c.title === MINE.title ? c : null;
+    });
+    assert.ok(stored, 'the explicit Save landed');
+    assert.equal(stored.description, MINE.description);
+    const patches = writes.filter((w) => w.method === 'PATCH');
+    assert.deepEqual(patches.map((w) => w.body.ifVersion), [2], 'saved under the refreshed version the reload read');
   }, { server: { board: fixture() }, launch: { headless: 'new' } });
 });

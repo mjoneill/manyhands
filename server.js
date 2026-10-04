@@ -7050,6 +7050,9 @@ const CREATE_CONSUMED_FIELDS = new Set([
   // 2026-08-18 carry it, including #857, the apex card arguing this board is
   // the room's record. Accepting the alias costs nothing and closes the trap.
   'by',
+  // #1583 — the create's REQUEST IDENTITY (idempotency key). Consumed as
+  // `createRequestId` on the stored card; see handleCreateCard.
+  'requestId',
 ]);
 
 /**
@@ -9010,6 +9013,16 @@ async function handleCreateCard(req, res) {
     }
     const verr = validateCardFields(body, { surface: 'create' }); // #830
     if (verr) return sendJSON(res, 400, { error: verr });
+    // #1583 — the REQUEST IDENTITY. A client that lost the response to its
+    // create cannot tell "never arrived" from "committed, reply lost"; it
+    // re-sends the SAME requestId and gets the card that request made (200,
+    // `replayed: true`) instead of a second card. Keyed on this id only —
+    // never on the content, which two genuine creates may share.
+    if (body.requestId !== undefined
+        && !(typeof body.requestId === 'string' && /^[A-Za-z0-9-]{8,64}$/.test(body.requestId))) {
+      return sendJSON(res, 400, { error: 'requestId must be 8–64 characters of [A-Za-z0-9-] (a client-generated UUID)' });
+    }
+    let replayed = null;
     let createErr = null;
     // #280 — the dup warning. Computed against the board AS READ inside the
     // lock, so "a similar card was created a second ago" is inside the window
@@ -9018,6 +9031,12 @@ async function handleCreateCard(req, res) {
     let similar = [];
     const created = await withWriteLock(async () => {
       const data = readBoard();
+      // #1583 — inside the lock, so a retry racing its own original cannot
+      // both miss the lookup and both create.
+      if (typeof body.requestId === 'string') {
+        const prior = data.cards.find((c) => c && c.createRequestId === body.requestId);
+        if (prior) { replayed = prior; return null; }
+      }
       // #917 — resolve before constructing, so the card is never built with a
       // value that would mint a dangling IRI. Inside the lock because it reads
       // the board it is resolving against.
@@ -9048,6 +9067,7 @@ async function handleCreateCard(req, res) {
       // board as read under the lock, so two simultaneous creates cannot read
       // the same maximum. An explicit number (0 included) is still the caller's.
       if (typeof body.order !== 'number') card.order = nextOrderInColumn(data.cards, card.column);
+      if (typeof body.requestId === 'string') card.createRequestId = body.requestId;   // #1583 — queryable by replay
       data.cards.push(card);
       if (card.parent != null) applyApexLabels(data.cards, card.id);   // #902 item 4 — born labelled
       data.nextShortId = (data.nextShortId || 1) + 1;
@@ -9068,6 +9088,7 @@ async function handleCreateCard(req, res) {
     // does. That is the accepted-then-something-else shape — the exact class I
     // had filed a card about the same afternoon. Naming it here rather than
     // quietly closing it, because the near-miss is the useful part.
+    if (replayed) return sendJSON(res, 200, { ...replayed, replayed: true });
     if (createErr) return sendJSON(res, 400, { error: createErr });
     // #829 — create reports what it dropped, matching PATCH. Present only when
     // non-empty: an empty array on every response is noise a caller learns to
