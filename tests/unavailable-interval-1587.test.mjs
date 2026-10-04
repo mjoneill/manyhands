@@ -6,7 +6,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createLogbornUnit } from '../core/logborn-unit.mjs';
+import { createLogbornUnit, memoryCreateIntention } from '../core/logborn-unit.mjs';
 import { IRI } from '../core/graph-replica.mjs';
 
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -39,4 +39,22 @@ test('#1587 a fenced (refused before the call) failure carries its interval too'
   assert.match(err.startedAt, ISO);
   assert.ok(Number.isInteger(err.elapsedMs) && err.elapsedMs >= 0);
   assert.match(err.message, /^graph executor unavailable \(call started .+, failed after \d+ ms\): executor fenced/);
+});
+
+test('#1587 person plan: a FAST first-query failure keeps ITS interval and the second query never runs', async () => {
+  let calls = 0;
+  const unit = unitWith({ query: async () => {
+    calls += 1;
+    if (calls === 1) { await sleep(10); return { ok: false, reason: 'first query failed' }; }
+    await sleep(300); return { ok: true, rows: [] };   // a slow second query that must NOT be reached
+  } });
+  const now = '2026-10-04T00:00:00.000Z';
+  const identity = { '@id': 'https://scrumboard.local/memory/u1', '@type': 'scrum:Memory', identifier: 'u1', name: 't', 'scrum:owner': 'ada', 'scrum:currentVersion': 'https://scrumboard.local/memory/u1/v1' };
+  const version = { '@id': 'https://scrumboard.local/memory/u1/v1', '@type': 'scrum:MemoryVersion', 'scrum:ofMemory': identity['@id'], 'scrum:version': 1, 'scrum:body': 'b', author: 'ada', dateCreated: now };
+  const r = await unit.write(memoryCreateIntention({ actor: 'urn:ex:seat/builder', identity, versions: [version] }));
+  assert.equal(r.outcome, 'UNAVAILABLE');
+  assert.equal(calls, 1, 'the second query was never started');
+  const m = /failed after (\d+) ms\): first query failed$/.exec(r.reason);
+  assert.ok(m, r.reason);
+  assert.ok(Number(m[1]) < 200, `the interval (${m[1]} ms) is the first call's, not inflated by a later query`);
 });
