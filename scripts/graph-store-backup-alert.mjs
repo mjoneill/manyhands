@@ -85,7 +85,7 @@ function readAlertState(file) {
 }
 function writeAlertState(file, s, run = null) {
   if (run) s = { ...s, lastRunAt: new Date(run.nowMs).toISOString(), lastVerdict: run.verdict };
-  fs.mkdirSync(path.dirname(file), { recursive: true });   // a fresh home has no ~/.claude yet
+  fs.mkdirSync(path.dirname(file), { recursive: true });   // a fresh HOME has no .claude directory yet
   const tmp = `${file}.tmp-${process.pid}`;
   fs.writeFileSync(tmp, JSON.stringify(s, null, 2) + '\n');
   fs.renameSync(tmp, file);
