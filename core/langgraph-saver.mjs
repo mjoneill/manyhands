@@ -52,6 +52,21 @@
  *     refuses it once deleteThread has moved on, even for checkpoints the store
  *     has never seen. A call without a signal (a direct caller) uses the current
  *     generation and relies on the tombstones above.
+ *     LangGraph makes a NEW signal per run even when the caller passes the same
+ *     one to every invoke (Pregel.stream always combines it with its own fresh
+ *     signal, and combineAbortSignals of two signals makes a new controller), so
+ *     a reused caller signal still gives each run its own birth generation.
+ *
+ * strictGenerations (option, default false): the PRODUCTION mode. Every put and
+ * putWrites must be built for the birth generation of a run that READ the
+ * thread first (getTuple / list with that run's signal; on an empty thread the
+ * same SELECT returns the generation, 0 if the thread never had one). A write
+ * with no birth generation — no signal, or a signal this saver never saw read
+ * the thread — is rejected with UnfencedWriteError BEFORE anything is sent; it
+ * never falls back to the current generation. The atomic in-update generation
+ * guard is then the fence on its own; tombstones and reap remain as defense in
+ * depth. Default false keeps signal-less callers (the official conformance
+ * suite) working, with the weaker non-strict fences.
  *   - READS: getTuple and list are ONE SELECT, evaluated by the engine against
  *     one store snapshot, so a concurrent deleteThread is seen entirely or not
  *     at all: the complete checkpoint with all its writes, or nothing.
@@ -74,6 +89,11 @@ export class SaverWriteError extends Error {
   constructor(message, result) { super(message); this.result = result; }
 }
 
+/** strictGenerations: a write with no birth generation from a prior read of its run. Nothing was sent. */
+export class UnfencedWriteError extends Error {
+  constructor(message) { super(message); this.name = 'UnfencedWriteError'; }
+}
+
 /** A write built against a thread generation that deleteThread has since ended: nothing was written. */
 export class ThreadDeletedError extends SaverWriteError {
   constructor(message, result) { super(message, result); this.name = 'ThreadDeletedError'; }
@@ -93,7 +113,7 @@ export class OxigraphSaver extends BaseCheckpointSaver {
    * @param {string} [o.scope]   partition of the store this saver reads and writes ([A-Za-z0-9_-])
    * @param {string} [o.actor]   the actor IRI on every receipt
    */
-  constructor({ client, scope = 'default', actor = 'urn:ex:agent/langgraph-saver', serde, unknownRetries = 5, retryDelayMs = 50 } = {}) {
+  constructor({ client, scope = 'default', actor = 'urn:ex:agent/langgraph-saver', serde, unknownRetries = 5, retryDelayMs = 50, strictGenerations = false } = {}) {
     super(serde);
     if (!client) throw new Error('OxigraphSaver: client required');
     this.client = client;
@@ -101,6 +121,7 @@ export class OxigraphSaver extends BaseCheckpointSaver {
     this.actor = actor;
     this.unknownRetries = unknownRetries;
     this.retryDelayMs = retryDelayMs;
+    this.strictGenerations = strictGenerations === true;
     // No in-process generation cache: a stale generation would reuse an old opId, and the
     // duplicate guard would then return that op's OLD receipt (APPLIED) for data a
     // deleteThread has since removed. The store is the only memory (D2 proofs A2 §5).
@@ -120,6 +141,15 @@ export class OxigraphSaver extends BaseCheckpointSaver {
 
   /** The generation a write is built for: the run's birth generation if it has one, else the current. */
   _genFor(config, tid) {
+    if (this.strictGenerations) {
+      // never the current generation: only the one a read of THIS run established
+      const k = config?.signal;
+      const m = k && typeof k === 'object' ? this._runGens.get(k) : undefined;
+      if (!m?.has(tid)) {
+        throw new UnfencedWriteError(`strictGenerations: no birth generation for thread ${tid} — ${k && typeof k === 'object' ? 'this run (signal) never read the thread through this saver' : 'the config carries no run signal'}; nothing was sent`);
+      }
+      return m.get(tid);
+    }
     const m = this._runMap(config);
     if (!m) return this._readGen(tid);
     if (!m.has(tid)) {
@@ -223,16 +253,19 @@ export class OxigraphSaver extends BaseCheckpointSaver {
       // fenced: the generation moved under this put, or (generation unchanged) its parent is
       // tombstoned. Either way an old run's checkpoint can never be stored: reap it (lg.reap applies
       // only when the parent IS tombstoned), then report.
-      if (parentCid != null) {
-        await this._apply(thread, (gen) => ({
-          kind: 'lg.reap', opId: this._op('reap', thread, gen, `ns:${ns}`, checkpoint.id), actor: this.actor,
-          lg: { scope: this.scope, thread, ns, gen, cid: checkpoint.id, parentCid },
-        }), { allowPreconditionFailed: true }).catch(() => {}); // best effort: the put is refused either way
-      }
+      if (parentCid != null) await this._reap(thread, ns, checkpoint.id, parentCid).catch(() => {}); // best effort: the put is refused either way
       if (e instanceof ThreadDeletedError) throw e;
       throw new ThreadDeletedError(`lg.put ${checkpoint.id}: its parent ${parentCid} was removed by deleteThread; nothing was written`, e.result);
     }
     return { configurable: { thread_id: tid, checkpoint_ns: ns, checkpoint_id: checkpoint.id } };
+  }
+
+  /** Defense in depth after a refused put (see the header); never what makes a stale write fail. */
+  _reap(thread, ns, cid, parentCid) {
+    return this._apply(thread, (gen) => ({
+      kind: 'lg.reap', opId: this._op('reap', thread, gen, `ns:${ns}`, cid), actor: this.actor,
+      lg: { scope: this.scope, thread, ns, gen, cid, parentCid },
+    }), { allowPreconditionFailed: true, fenced: false });
   }
 
   async putWrites(config, writes, taskId) {
