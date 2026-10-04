@@ -539,3 +539,33 @@ test('#1562 R2c strict, PRODUCTION saver (nothing stubbed): an old run\'s refuse
   await s.put(run2, cp(C, { a: 'new' }, 3), meta(-1), { a: 3 });
   assert.deepEqual((await s.getTuple(withId(runCfg(thread), C))).pendingWrites.map((w) => w[2]), ['new-run-early']);
 });
+
+test('#1562 R2c strict: a run\'s birth generation is its FIRST read — a re-read after another instance deleted the thread does not re-bless the run (getTuple and list variants)', { skip: SKIP }, async () => {
+  for (const reread of ['getTuple', 'list']) {
+    const scope = newScope();
+    const thread = `first-read-${reread}`;
+    const outcomes = [];
+    const rec = { ...client, async update(i, o) { const r = await client.update(i, o); outcomes.push([i.kind, i.lg.gen, r.outcome]); return r; } };
+    const s = new OxigraphSaver({ client: rec, scope, strictGenerations: true }); // unmodified
+    // generation 0 exists with a checkpoint (written by a different, earlier run)
+    const seed = runCfg(thread);
+    await s.getTuple(seed);
+    const P = uuid6(-1);
+    await s.put(seed, cp(P, { a: 'zero' }), meta(-1), { a: 1 });
+    // the run reads the thread at generation 0
+    const run = runCfg(thread);
+    assert.equal((await s.getTuple(run)).checkpoint.id, P);
+    await new OxigraphSaver({ client, scope }).deleteThread(thread); // ANOTHER instance
+    // the SAME run reads again (now generation 1, empty)
+    if (reread === 'getTuple') assert.equal(await s.getTuple(run), undefined);
+    else { const xs = []; for await (const t of s.list(run)) xs.push(t); assert.deepEqual(xs, []); }
+    const n0 = outcomes.length;
+    const C = uuid6(0);
+    const e1 = await s.putWrites(withId(run, C), [['out', 'late']], 'taskA').then(() => null, (x) => x);
+    const e2 = await s.put(run, cp(C, { a: 'late' }, 2), meta(-1), { a: 2 }).then(() => null, (x) => x);
+    assert.deepEqual(await liveTriples(scope, thread), [], `${reread}: the run wrote into the new generation (updates: ${JSON.stringify(outcomes.slice(n0))})`);
+    assert.equal(e1?.name, 'ThreadDeletedError', `${reread}/putWrites: ${e1?.name}: ${e1?.message}`);
+    assert.equal(e2?.name, 'ThreadDeletedError', `${reread}/put: ${e2?.name}: ${e2?.message}`);
+    assert.deepEqual(outcomes.slice(n0).map((o) => [o[1], o[2]]), [[0, 'PRECONDITION_FAILED'], [0, 'PRECONDITION_FAILED']], `${reread}: each write built for birth generation 0 and refused by the update`);
+  }
+});
