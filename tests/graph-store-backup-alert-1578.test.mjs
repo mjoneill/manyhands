@@ -211,3 +211,21 @@ test('#1578 alertOnce: EVERY run stamps lastRunAt and the verdict (a freshness s
     assert.equal(st.lastVerdict, 'NO-COPY');
   } finally { await b.stop(); }
 });
+
+test('#1578 alertOnce: KILLED mid-request, then backups recover before restart: the alert is still delivered (write-ahead)', async () => {
+  const dest = fs.mkdtempSync(path.join(os.tmpdir(), 'alert-dest-'));
+  const stateFile = stateIn();
+  let pendingAtSend = null;
+  // The "kill": the request starts, the state is inspected at that instant, and the run dies before any answer.
+  const killedFetch = async () => { pendingAtSend = readSt(stateFile).pending; throw new Error('process killed mid-request'); };
+  await alertOnce({ key: KEY, dest, board: 'http://127.0.0.1:9', stateFile, nowMs: T0, fetchImpl: killedFetch });
+  assert.equal(pendingAtSend?.length, 1, 'the alert text was persisted BEFORE the request was sent');
+  assert.match(pendingAtSend[0].body, /BACKUP ALERT NO-COPY/);
+  const b = await standInBoard([201]);
+  try {
+    const r = await alertOnce({ key: KEY, dest: makeOkDest(), board: b.url, stateFile, nowMs: T0 + 5 * MIN });
+    assert.equal(r.posted, 2);
+    assert.match(b.seen[0].body.body, /BACKUP ALERT NO-COPY/);
+    assert.match(b.seen[1].body.body, /^✅ backups recovered/);
+  } finally { await b.stop(); }
+});

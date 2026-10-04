@@ -14,8 +14,8 @@
  * (~/.claude/graph-store-backup-alert-state.json): a missing or unreadable DEST is
  * one of the failures being reported, so it must not also erase the dedupe.
  *
- * A post that fails is NOT dropped: the episode is recorded as open and the
- * undelivered text is kept as `pending`. Every run delivers `pending` FIRST, before
+ * A post is written to `pending` BEFORE it is sent (write-ahead) and removed after the
+ * board accepts it, so neither a failed post nor a process killed mid-request loses it. Every run delivers `pending` FIRST, before
  * deciding anything new, so "alert, post fails, backups recover" still reaches the
  * commons as the alert followed by the recovery. A crash between a successful post
  * and the state write can repeat that one post; nothing undelivered is forgotten.
@@ -131,10 +131,12 @@ export async function alertOnce({ dest, board, key = null, store = null, stateFi
   const result = monitor({ dest, store, nowMs, intervalMs: DEFAULT_INTERVAL_MS, limitMs });
   const { post, next } = decide({ result, prev: st, nowMs, remindMs });
   if (!post) { writeAlertState(file, { episode: next.episode, pending: [] }, { nowMs, verdict: result.verdict }); return { result, posted, deliveryError: null }; }
+  // WRITE-AHEAD: the text is persisted as pending BEFORE it is sent, so a process killed
+  // mid-request leaves it to be delivered by the next run (even if the backups have
+  // recovered by then). It is removed only after the board accepted it.
+  writeAlertState(file, { episode: next.episode, pending: queue([], post) }, { nowMs, verdict: result.verdict });
   try { await deliver({ board, body: post, key, fetchImpl }); } catch (e) {
-    // The episode is recorded (so the next run does not re-open it) and the text is kept.
-    writeAlertState(file, { episode: next.episode, pending: queue([], post) }, { nowMs, verdict: result.verdict });
-    return { result, posted, deliveryError: e?.message ?? String(e) };
+    return { result, posted, deliveryError: e?.message ?? String(e) };   // pending already holds it
   }
   writeAlertState(file, { episode: next.episode, pending: [] }, { nowMs, verdict: result.verdict });
   return { result, posted: posted + 1, deliveryError: null };
