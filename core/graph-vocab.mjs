@@ -104,6 +104,9 @@ export const LG = Object.freeze({
   assignee: lgi('assignee'), resumer: lgi('resumer'),
   // thread generation (bumped by deleteThread; never deleted)
   gen: lgi('gen'),
+  // tombstone: deleteThread leaves <checkpoint> lg:deletedInGen g on every checkpoint it removes, so a
+  // config naming that checkpoint is known to belong to an ended generation (never deleted itself)
+  deletedInGen: lgi('deletedInGen'),
   // process facts, one node per branch (§4 + v0.2 #1)
   head: lgi('head'), headId: lgi('headId'), status: lgi('status'), waitingAt: lgi('waitingAt'), waitingOn: lgi('waitingOn'),
   incarnation: lgi('incarnation'), asOfStep: lgi('asOfStep'), resumedBy: lgi('resumedBy'), lastErrorAt: lgi('lastErrorAt'),

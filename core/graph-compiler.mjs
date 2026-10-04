@@ -788,14 +788,16 @@ function compileRecord(c) {
 
 // ---------- #1562: LangGraph checkpoint-saver kinds ----------
 //
-// Four kinds — lg.put, lg.putWrites, lg.deleteThread, lg.runTransition — that
+// Five kinds — lg.put, lg.putWrites, lg.deleteThread, lg.runTransition, lg.reap — that
 // compile through the SAME three-category template as the kinds above and are
 // read back by the SAME staticCheck: a top-level duplicate guard, a commit-marker
 // bump and a receipt bound whenever the guard passes, and every DOMAIN template
 // triple carrying a ?d_ variable that is IF(BOUND(?ok), x, ?u).
 //
-// The only PRECONDITION of every lg kind is the thread generation (deleteThread
-// bumps it), plus, for lg.runTransition, the branch head and status. The
+// The PRECONDITION of every lg kind is the thread generation (deleteThread
+// bumps it); put and putWrites also refuse a checkpoint deleteThread tombstoned
+// (an old run's config); lg.runTransition also needs the branch head and status;
+// lg.reap needs a tombstoned parent. The
 // process-fact transition (design v0.2 §1) is computed in ?x_ helper bindings
 // and then passed through the ?ok guard like every other domain value: the guard
 // is necessary for a domain triple, and the transition may further leave a ?x_
@@ -806,7 +808,7 @@ function compileRecord(c) {
 // the update text is always inside [A-Za-z0-9+/=%._~!*'()-] and can never carry
 // SPARQL syntax that the static checker would have to parse around.
 
-export const LG_KINDS = Object.freeze(['lg.put', 'lg.putWrites', 'lg.deleteThread', 'lg.runTransition']);
+export const LG_KINDS = Object.freeze(['lg.put', 'lg.putWrites', 'lg.deleteThread', 'lg.runTransition', 'lg.reap']);
 /** WRITES_IDX_MAP of @langchain/langgraph-checkpoint 1.1.5, pinned (a special write's idx is its channel's). */
 export const LG_SPECIAL_IDX = Object.freeze({ __error__: -1, __scheduled__: -2, __interrupt__: -3, __resume__: -4 });
 const LG_FIELDS = {
@@ -814,6 +816,7 @@ const LG_FIELDS = {
   'lg.putWrites': ['scope', 'thread', 'ns', 'gen', 'cid', 'taskId', 'resumer', 'writes'],
   'lg.deleteThread': ['scope', 'thread', 'gen'],
   'lg.runTransition': ['scope', 'thread', 'ns', 'gen', 'cid', 'to'],
+  'lg.reap': ['scope', 'thread', 'ns', 'gen', 'cid', 'parentCid'],
 };
 const B64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
 const SAFE_LIT_RE = /^[A-Za-z0-9+/=%._~!*'()-]*$/;
@@ -889,6 +892,9 @@ function canonicalizeLg(i) {
   } else if (i.kind === 'lg.runTransition') {
     if (!['done', 'failed'].includes(g.to)) fail('lg.to must be done or failed');
     out.to = g.to;
+  } else if (i.kind === 'lg.reap') {
+    out.parentCid = str(g.parentCid, 'lg.parentCid');
+    if (out.parentCid === '') fail('lg.parentCid must be non-empty');
   }
   return { kind: i.kind, opId, actor, evidence: [], targets: [], newAssertion: null, authority: null, grant: null, rule: null, lg: out };
 }
@@ -926,7 +932,19 @@ function compileLg(c, digest) {
   where.push(`  BIND(?s + 1 AS ?s1)`);
   D('op', OP);
 
-  // precondition: the thread generation the caller read (deleteThread bumps it)
+  // precondition: the thread generation the caller read (deleteThread bumps it). This is the
+  // write FENCE against deleteThread: it sits in the same WHERE as the write, so the executor
+  // evaluates it atomically with it, and every domain triple is gated on ?ok — an lg.* write
+  // that lands after the generation moved is PRECONDITION_FAILED and writes nothing
+  // (tests/langgraph-saver-fences.test.mjs).
+  //
+  // The generation a caller reads is the CURRENT one, so it cannot fence an OLD run that reads
+  // it after the delete. That run's config still names its old checkpoint id, and deleteThread
+  // tombstones every checkpoint it removes (<cp> lg:deletedInGen g). So, also in this WHERE:
+  // a put whose PARENT, or a putWrites whose CHECKPOINT, is tombstoned and not live again is
+  // refused (PRECONDITION_FAILED). A checkpoint that is neither live nor tombstoned is still
+  // accepted for putWrites: that is writes-before-put (async durability).
+  const tomb = (X) => `    FILTER NOT EXISTS { ${X} ${LG.deletedInGen} ?x_tg_any . FILTER NOT EXISTS { ${X} ${LG.inThread} ${THR} } }`;
   if (g.gen === '0') pre.push(`    FILTER NOT EXISTS { ${THR} ${LG.gen} ?x_anyGen }`);
   else pre.push(`    ${THR} ${LG.gen} ?x_g .`, `    FILTER(?x_g = ${g.gen})`);
 
@@ -935,9 +953,22 @@ function compileLg(c, digest) {
   if (c.kind === 'lg.deleteThread') {
     pre.push(`    OPTIONAL { ?x_n ${LG.inThread} ${THR} . ?x_n ?x_p ?x_o }`);
     T(del, D('n', '?x_n'), D('p', '?x_p'), D('o', '?x_o'));
+    // tombstone every checkpoint removed here with the generation it belonged to
+    xs.push(`  BIND(IF(EXISTS { ?x_n a ${LG.Checkpoint} }, ?x_n, ?u) AS ?x_tc)`);
+    T(ins, D('tc', '?x_tc'), LG.deletedInGen, D('tg', g.gen));
     const thr = D('thr', THR);
     if (g.gen !== '0') T(del, thr, LG.gen, D('og', '?x_g'));
     T(ins, thr, LG.gen, D('ng', String(Number(g.gen) + 1)));
+  } else if (c.kind === 'lg.reap') {
+    // after a put was refused because its parent is tombstoned: that put's checkpoint can never be
+    // stored, so tombstone it too (a later putWrites for it is then refused) and remove any of its
+    // writes that were accepted as writes-before-put in the meantime
+    const C = ref(lgMint.cp(g.scope, g.thread, g.ns, g.cid));
+    const P = ref(lgMint.cp(g.scope, g.thread, g.ns, g.parentCid));
+    pre.push(`    ${P} ${LG.deletedInGen} ?x_ptg .`, `    FILTER NOT EXISTS { ${P} ${LG.inThread} ${THR} }`, `    FILTER NOT EXISTS { ${C} ${LG.inThread} ${THR} }`);
+    pre.push(`    OPTIONAL { ?x_w ${LG.checkpoint} ${C} . ?x_w ${LG.inThread} ${THR} . ?x_w ?x_wp ?x_wo }`);
+    T(del, D('w', '?x_w'), D('wp', '?x_wp'), D('wo', '?x_wo'));
+    T(ins, D('c', C), LG.deletedInGen, D('ptg', '?x_ptg'));
   } else if (c.kind === 'lg.runTransition') {
     const C = ref(lgMint.cp(g.scope, g.thread, g.ns, g.cid));
     pre.push(`    ${C} ${LG.branch} ?x_b .`, `    ?x_b ${LG.headId} ${elit(g.cid)} .`, `    ?x_b ${LG.status} ?x_st .`,
@@ -952,6 +983,7 @@ function compileLg(c, digest) {
     // branch: extend the parent's branch only if the parent is that branch's head; otherwise this is a fork
     if (g.parentCid != null) {
       const P = ref(lgMint.cp(g.scope, g.thread, g.ns, g.parentCid));
+      pre.push(tomb(P)); // an OLD run's config: its parent was removed by deleteThread
       xs.push(`  OPTIONAL { ${P} ${LG.branch} ?x_pb . ?x_pb ${LG.headId} ?x_pbh }`);
       xs.push(`  BIND(IF(COALESCE(?x_pbh = ${elit(g.parentCid)}, false), ?x_pb, ${NEWB}) AS ?x_b)`);
     } else xs.push(`  BIND(${NEWB} AS ?x_b)`);
@@ -1019,6 +1051,7 @@ function compileLg(c, digest) {
     const hasInt = g.writes.some((w) => w.channel === '__interrupt__');
     const hasRes = g.writes.some((w) => w.channel === '__resume__');
     const hasErr = g.writes.some((w) => w.channel === '__error__');
+    pre.push(tomb(C)); // an OLD run's config: its checkpoint was removed by deleteThread
     const { thr, scope, tid } = common();
     const nsl = D('ns', elit(g.ns));
     const cp = D('c', C);

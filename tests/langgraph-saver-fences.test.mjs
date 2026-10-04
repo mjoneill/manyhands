@@ -1,0 +1,571 @@
+/**
+ * #1562 — the two requirements a reviewer set on OxigraphSaver before any real
+ * workflow relies on it:
+ *
+ *   R1  a read (getTuple / list) racing deleteThread returns EITHER the complete
+ *       pre-delete checkpoint WITH all its pending writes, OR nothing — never a
+ *       mixed tuple (checkpoint with writes partly/fully gone, or one
+ *       generation's writes attached to another generation's checkpoint);
+ *   R2  a put / putWrites built against a generation that deleteThread has since
+ *       bumped writes NOTHING, and the fence is evaluated INSIDE the compiled
+ *       update (the same DELETE/INSERT WHERE), not only by an earlier read.
+ *
+ * Interleavings are forced deterministically by wrapping the graph client (a
+ * hook runs a deleteThread from ANOTHER saver between two client calls), plus
+ * one stress test that issues reads and a delete concurrently over HTTP to the
+ * real, multi-threaded executor. Fabricated data only.
+ */
+import { test, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { INTERRUPT, uuid6 } from '@langchain/langgraph-checkpoint';
+import { StateGraph, Annotation, START, END } from '@langchain/langgraph';
+import { createGraphClient } from '../core/graph-client.mjs';
+import { lgMint } from '../core/graph-compiler.mjs';
+import { OxigraphSaver } from '../core/langgraph-saver.mjs';
+import { HAVE_PY, PY, startExecutor, killExecutor, tmpStore } from './helpers/graph-executor-proc.mjs';
+
+const SKIP = HAVE_PY ? false : `UNAVAILABLE: no python with pyoxigraph at ${PY}`;
+
+let exec, client;
+let scopeN = 0;
+const newScope = () => `f${process.pid}x${++scopeN}`;
+
+before(async () => {
+  if (SKIP) return;
+  exec = await startExecutor({ store: tmpStore('lg-fence-'), datasetId: 'lg-fence-test', create: true });
+  client = createGraphClient({ baseUrl: exec.baseUrl, expectedDatasetId: 'lg-fence-test', timeoutMs: 30000 });
+});
+after(async () => { await killExecutor(exec); });
+
+function cp(id, values = {}, version = 1) {
+  const channel_versions = Object.fromEntries(Object.keys(values).map((k) => [k, version]));
+  return { v: 4, id, ts: new Date().toISOString(), channel_values: values, channel_versions, versions_seen: {} };
+}
+const at = (thread, id) => ({ configurable: { thread_id: thread, checkpoint_ns: '', checkpoint_id: id } });
+const root = (thread) => ({ configurable: { thread_id: thread, checkpoint_ns: '' } });
+const meta = (step) => ({ source: step < 0 ? 'input' : 'loop', step, parents: {} });
+
+/** A client that records every update and can run a hook BEFORE an update / AFTER a query. */
+function hookedClient() {
+  const h = { updates: [], beforeUpdate: null, afterQuery: null, queries: 0 };
+  h.client = {
+    ...client,
+    async update(intention, o) {
+      h.updates.push(intention);
+      if (h.beforeUpdate && h.beforeUpdate.kinds.includes(intention.kind)) { const f = h.beforeUpdate.run; h.beforeUpdate = null; await f(); }
+      return client.update(intention, o);
+    },
+    async query(q) {
+      h.queries++;
+      const r = await client.query(q);
+      if (h.afterQuery) { const f = h.afterQuery; h.afterQuery = null; await f(); }
+      return r;
+    },
+  };
+  return h;
+}
+
+/**
+ * Every triple whose subject is the thread node or anything minted under it, EXCEPT the
+ * deleteThread tombstones (<checkpoint> lg:deletedInGen g), which are asserted separately:
+ * they are the only thing besides the generation a deleted thread may still hold.
+ */
+async function threadTriples(scope, thread) {
+  const pre = lgMint.thread(scope, thread);
+  const r = await client.query(`SELECT ?s ?p ?o WHERE { ?s ?p ?o FILTER(STRSTARTS(STR(?s), "${pre}")) }`);
+  assert.ok(r.ok, r.reason);
+  const all = r.rows.map((x) => [x.s.value, x.p.value, x.o.value]);
+  for (const [s, p, o] of all.filter((t) => t[1] === 'urn:ex:lg/deletedInGen')) {
+    assert.match(s, /\/cp\/[^/]+$/, `a tombstone on a non-checkpoint node: ${s}`);
+    assert.match(o, /^\d+$/, `a tombstone without a generation: ${s} ${o}`);
+  }
+  return all.filter((t) => t[1] !== 'urn:ex:lg/deletedInGen').map((t) => t.join(' ')).sort();
+}
+async function seededThread(s, thread, nWrites) {
+  const ids = [uuid6(-1), uuid6(0)];
+  await s.put(root(thread), cp(ids[0], { a: 'zero' }), meta(-1), { a: 1 });
+  await s.put(at(thread, ids[0]), cp(ids[1], { a: 'one' }, 2), meta(0), { a: 2 });
+  const writes = Array.from({ length: nWrites }, (_, k) => ['out', `w-${k}`]);
+  await s.putWrites(at(thread, ids[1]), writes, 'taskB');
+  await s.putWrites(at(thread, ids[1]), [[INTERRUPT, { value: { assignee: 'approver', ask: 'ok?' }, id: 'int-1' }]], 'taskA');
+  return { ids, expectWrites: nWrites + 1 };
+}
+/** R1's property for one read result: nothing, or the checkpoint with EVERY pending write. */
+function completeOrNothing(t, { cid, nWrites }, what) {
+  if (t === undefined) return 'empty';
+  assert.equal(t.checkpoint.id, cid, `${what}: wrong checkpoint`);
+  assert.deepEqual(t.checkpoint.channel_values, { a: 'one' }, `${what}: channel values torn`);
+  const outs = t.pendingWrites.filter((w) => w[1] === 'out').map((w) => w[2]);
+  const ints = t.pendingWrites.filter((w) => w[1] === INTERRUPT);
+  assert.equal(t.pendingWrites.length, nWrites + 1, `${what}: MIXED tuple — checkpoint present with ${t.pendingWrites.length} of ${nWrites + 1} pending writes`);
+  assert.deepEqual(outs, Array.from({ length: nWrites }, (_, k) => `w-${k}`), `${what}: writes not the pre-delete set`);
+  assert.equal(ints.length, 1, `${what}: interrupt write missing`);
+  return 'full';
+}
+
+// ---------- R2: the generation fence is inside the compiled update ----------
+
+test('#1562 R2: a gen-0 put/putWrites/runTransition intention sent AFTER deleteThread is PRECONDITION_FAILED by the update itself and writes nothing', { skip: SKIP }, async () => {
+  const scope = newScope();
+  const h = hookedClient();
+  const s = new OxigraphSaver({ client: h.client, scope });
+  const thread = 'raw-fence';
+  const { ids } = await seededThread(s, thread, 3);
+  // intentions the saver itself built at generation 0 (no hand-written SPARQL)
+  const late = uuid6(5);
+  await s.putWrites(at(thread, ids[1]), [['out', 'late-write']], 'taskC');
+  await s.put(at(thread, ids[1]), cp(late, { a: 'late' }, 3), meta(1), { a: 3 });
+  const g0 = h.updates.filter((i) => i.lg.gen === 0);
+  const putI = g0.filter((i) => i.kind === 'lg.put').at(-1);
+  const wrI = g0.filter((i) => i.kind === 'lg.putWrites').at(-1);
+  assert.equal(putI.lg.cid, late);
+  await s.deleteThread(thread);
+  const afterDelete = await threadTriples(scope, thread);
+  assert.equal(afterDelete.length, 1, `after the delete only the generation triple remains, found:\n${afterDelete.join('\n')}`);
+  // a FRESH opId for the same gen-0 bodies: the duplicate guard cannot answer it, only the gen precondition can
+  const run = { kind: 'lg.runTransition', opId: `${putI.opId}/run-late`, actor: putI.actor, lg: { scope, thread, ns: '', gen: 0, cid: late, to: 'done' } };
+  for (const i of [{ ...putI, opId: `${putI.opId}/again` }, { ...wrI, opId: `${wrI.opId}/again` }, run]) {
+    const r = await client.update(i);
+    assert.equal(r.outcome, 'PRECONDITION_FAILED', `${i.kind} at a deleted generation: ${r.outcome} ${r.reason ?? ''}`);
+    assert.deepEqual(await threadTriples(scope, thread), afterDelete, `${i.kind} at a deleted generation wrote into the thread`);
+  }
+  assert.equal(await s.getTuple(at(thread, late)), undefined);
+  assert.equal(await s.getTuple(at(thread, ids[1])), undefined);
+});
+
+test('#1562 R2: a put whose update lands after a concurrent deleteThread writes NOTHING (the saver does not re-aim it at the new generation)', { skip: SKIP }, async () => {
+  const scope = newScope();
+  const h = hookedClient();
+  const s = new OxigraphSaver({ client: h.client, scope });
+  const other = new OxigraphSaver({ client, scope });
+  const thread = 'put-race';
+  const { ids } = await seededThread(s, thread, 2);
+  const late = uuid6(7);
+  // the put has read generation 0; the other saver's delete lands before its update
+  h.beforeUpdate = { kinds: ['lg.put'], run: () => other.deleteThread(thread) };
+  const err = await s.put(at(thread, ids[1]), cp(late, { a: 'late' }, 3), meta(1), { a: 3 }).then(() => null, (e) => e);
+  assert.equal(h.beforeUpdate, null, 'the hook fired');
+  // what was STORED is checked first, so a failure here names the data, not just a missing error
+  assert.equal(await s.getTuple(at(thread, late)), undefined, 'the late put resurrected a checkpoint after the delete');
+  assert.equal(await s.getProcess(at(thread, late)), undefined);
+  const left = await threadTriples(scope, thread);
+  assert.equal(left.length, 1, `only the generation triple may remain, found:\n${left.join('\n')}`);
+  assert.equal(err?.name, 'ThreadDeletedError', `the caller must learn the write was fenced; got ${err?.name}: ${err?.message}`);
+  assert.equal(err.result?.outcome, 'PRECONDITION_FAILED');
+});
+
+test('#1562 R2: putWrites whose update lands after a concurrent deleteThread writes NOTHING — no old-generation writes attach to a re-put checkpoint', { skip: SKIP }, async () => {
+  const scope = newScope();
+  const h = hookedClient();
+  const s = new OxigraphSaver({ client: h.client, scope });
+  const other = new OxigraphSaver({ client, scope });
+  const thread = 'writes-race';
+  const ids = [uuid6(-1)];
+  const c0 = cp(ids[0], { a: 'zero' });
+  await s.put(root(thread), c0, meta(-1), { a: 1 });
+  h.beforeUpdate = { kinds: ['lg.putWrites'], run: () => other.deleteThread(thread) };
+  const err = await s.putWrites(at(thread, ids[0]), [['out', 'gen0-write'], ['other', 'gen0-write-2']], 'taskB').then(() => null, (e) => e);
+  assert.equal(h.beforeUpdate, null, 'the hook fired');
+  const left = await threadTriples(scope, thread);
+  // the same checkpoint id is legitimately written again in the new generation, WITHOUT writes
+  await other.put(root(thread), c0, meta(-1), { a: 1 });
+  const t = await other.getTuple(at(thread, ids[0]));
+  assert.ok(t, 'the re-put checkpoint is stored');
+  assert.deepEqual(t.pendingWrites, [], 'MIXED generations: a write from the deleted generation is attached to the new generation\'s checkpoint');
+  assert.equal(left.length, 1, `only the generation triple may remain, found:\n${left.join('\n')}`);
+  assert.equal(err?.name, 'ThreadDeletedError', `the caller must learn the write was fenced; got ${err?.name}: ${err?.message}`);
+  assert.equal(err.result?.outcome, 'PRECONDITION_FAILED');
+});
+
+// ---------- R1: reads racing deleteThread ----------
+
+test('#1562 R1: getTuple / list with a deleteThread landing DURING the read (between any two of its queries) return all-or-nothing', { skip: SKIP }, async () => {
+  for (const reader of ['getTuple', 'list', 'getTuple-latest']) {
+    for (const when of ['after-first-query', 'before-read']) {
+      const scope = newScope();
+      const thread = `read-race-${reader}-${when}`;
+      const writer = new OxigraphSaver({ client, scope });
+      const nWrites = 12;
+      const { ids } = await seededThread(writer, thread, nWrites);
+      const h = hookedClient();
+      const r = new OxigraphSaver({ client: h.client, scope });
+      if (when === 'before-read') await writer.deleteThread(thread);
+      else h.afterQuery = () => writer.deleteThread(thread);
+      let got;
+      if (reader === 'getTuple') got = await r.getTuple(at(thread, ids[1]));
+      else if (reader === 'getTuple-latest') got = await r.getTuple(root(thread));
+      else { const xs = []; for await (const t of r.list(root(thread), { limit: 1 })) xs.push(t); assert.ok(xs.length <= 1); got = xs[0]; }
+      assert.equal(h.afterQuery, null, `${reader}/${when}: the hook did not fire`);
+      const kind = completeOrNothing(got, { cid: ids[1], nWrites }, `${reader}/${when}`);
+      // the delete DID land: a read now is empty, so "full" above was the pre-delete snapshot
+      assert.equal(await r.getTuple(at(thread, ids[1])), undefined, `${reader}/${when}: the delete did not land`);
+      assert.equal(kind, when === 'before-read' ? 'empty' : 'full', `${reader}/${when}: ${kind}`);
+    }
+  }
+});
+
+test('#1562 R1 stress: reads issued CONCURRENTLY with a deleteThread to the multi-threaded executor are each all-or-nothing', { skip: SKIP, timeout: 180000 }, async () => {
+  // READERS loop until the delete is acknowledged (plus one read after), so reads are in
+  // flight on the executor's other threads while the delete commits. Both outcomes must be
+  // seen across the run, or the test did not sample the boundary at all.
+  const ROUNDS = 6, READERS = 8, nWrites = 150;
+  const tally = { full: 0, empty: 0, overlapped: 0, reads: 0 };
+  for (let round = 0; round < ROUNDS; round++) {
+    const scope = newScope();
+    const thread = `stress-${round}`;
+    const s = new OxigraphSaver({ client, scope });
+    const { ids } = await seededThread(s, thread, nWrites);
+    let delStart = Infinity, delEnd = Infinity, delDone = false;
+    const reader = async (k) => {
+      const r = new OxigraphSaver({ client, scope });
+      const out = [];
+      for (let n = 0; n < 400; n++) {
+        const last = delDone;
+        const t0 = performance.now();
+        let got;
+        if ((k + n) % 2) got = await r.getTuple(at(thread, ids[1]));
+        else { for await (const t of r.list(root(thread), { limit: 1 })) got = t; }
+        out.push({ got, t0, t1: performance.now(), k, n });
+        if (last) break;
+      }
+      return out;
+    };
+    const reads = Array.from({ length: READERS }, (_, k) => reader(k));
+    const del = (async () => { await new Promise((res) => setTimeout(res, 15)); delStart = performance.now(); await s.deleteThread(thread); delEnd = performance.now(); delDone = true; })();
+    const results = (await Promise.all(reads)).flat();
+    await del;
+    for (const x of results) {
+      tally.reads++;
+      tally[completeOrNothing(x.got, { cid: ids[1], nWrites }, `round ${round} reader ${x.k} read ${x.n}`)]++;
+      if (x.t0 < delEnd && x.t1 > delStart) tally.overlapped++;
+    }
+    assert.equal(await s.getTuple(at(thread, ids[1])), undefined);
+  }
+  console.log(`# R1 stress: ${tally.reads} reads — ${tally.full} full, ${tally.empty} empty, ${tally.overlapped} in flight while the delete was in flight (client-side clock)`);
+  assert.equal(tally.full + tally.empty, tally.reads);
+  assert.ok(tally.full > 0 && tally.empty > 0, 'the run never sampled both sides of the delete');
+  assert.ok(tally.overlapped > 0, 'no read was in flight while the delete was');
+});
+
+// ---------- R2b: an OLD run's config carries its generation (via its checkpoint id) ----------
+
+/** Live (non-tombstone) data of a thread: every node still lg:inThread it. */
+async function liveTriples(scope, thread) {
+  const r = await client.query(`SELECT ?s ?p ?o WHERE { ?s <urn:ex:lg/inThread> <${lgMint.thread(scope, thread)}> . ?s ?p ?o }`);
+  assert.ok(r.ok, r.reason);
+  return r.rows.map((x) => `${x.s.value} ${x.p.value} ${x.o.value}`).sort();
+}
+
+test('#1562 R2b: old config → deleteThread → delayed put/putWrites from that config write NOTHING into the new generation (any saver instance); new-generation work, incl. writes-before-put, still succeeds', { skip: SKIP }, async () => {
+  const scope = newScope();
+  const thread = 'stale-run';
+  const run = new OxigraphSaver({ client, scope }); // the old run's saver
+  const ids = [uuid6(-1), uuid6(0), uuid6(1)];
+  const c0cfg = await run.put(root(thread), cp(ids[0], { a: 'zero' }), meta(-1), { a: 1 });
+  const oldCfg = await run.put(c0cfg, cp(ids[1], { a: 'one' }, 2), meta(0), { a: 2 }); // the old run's current config
+  await run.putWrites(oldCfg, [['out', 'before-delete']], 'taskA');
+  await new OxigraphSaver({ client, scope }).deleteThread(thread); // the owner deletes the thread
+  const gen = async () => (await client.query(`SELECT ?g WHERE { <${lgMint.thread(scope, thread)}> <urn:ex:lg/gen> ?g }`)).rows.map((x) => x.g.value);
+  const genAfterDelete = await gen();
+
+  // the old run keeps going AFTER the delete: every write is built from its old config
+  const fenced = async (what, p) => {
+    const e = await p.then(() => null, (x) => x);
+    assert.deepEqual(await liveTriples(scope, thread), [], `${what} wrote into the new generation`);
+    assert.equal(e?.name, 'ThreadDeletedError', `${what}: the caller must learn it was fenced; got ${e?.name}: ${e?.message}`);
+  };
+  const c2cfg = { configurable: { ...oldCfg.configurable, checkpoint_id: ids[2] } };
+  await fenced('stale putWrites(old checkpoint)', run.putWrites(oldCfg, [['out', 'after-delete']], 'taskB'));
+  await fenced('stale putWrites(old checkpoint) from ANOTHER saver instance', new OxigraphSaver({ client, scope }).putWrites(oldCfg, [['out', 'other-proc']], 'taskC'));
+  // a write for the old run's NEXT checkpoint, whose put has not landed yet (async durability):
+  // it cannot be told from writes-before-put on its own, so it may land — but the put that
+  // follows is refused and reaps it, and nothing of it survives
+  await run.putWrites(c2cfg, [['out', 'orphan']], 'taskD').catch(() => {});
+  await fenced('stale put(child of old checkpoint)', run.put(oldCfg, cp(ids[2], { a: 'two' }, 3), meta(1), { a: 3 }));
+  await fenced('stale putWrites(the refused child) after its put was refused', run.putWrites(c2cfg, [['out', 'orphan-2']], 'taskE'));
+  assert.equal(await run.getTuple(oldCfg), undefined);
+  assert.equal(await run.getTuple(c2cfg), undefined);
+  const listed = []; for await (const t of run.list(root(thread))) listed.push(t);
+  assert.deepEqual(listed, [], 'list shows data from the stale run');
+  assert.deepEqual(await gen(), genAfterDelete, 'the generation moved');
+
+  // deliberate new-generation work on the SAME thread id still succeeds, with the SAME saver instance
+  const nid = [uuid6(10), uuid6(11)];
+  const n0 = await run.put(root(thread), cp(nid[0], { a: 'new-zero' }, 4), meta(-1), { a: 4 });
+  const n1cfg = { configurable: { ...n0.configurable, checkpoint_id: nid[1] } };
+  await run.putWrites(n1cfg, [['out', 'new-early']], 'taskN'); // writes BEFORE their put
+  await run.put(n0, cp(nid[1], { a: 'new-one' }, 5), meta(0), { a: 5 });
+  await run.putWrites(n1cfg, [['out2', 'new-late']], 'taskM');
+  const t = await run.getTuple(n1cfg);
+  assert.ok(t, 'new-generation checkpoint stored');
+  assert.deepEqual(t.checkpoint.channel_values, { a: 'new-one' });
+  assert.deepEqual(t.pendingWrites.map((w) => w[2]).sort(), ['new-early', 'new-late']);
+  // and a re-put of an OLD id with no parent (a deliberate new run reusing ids) is accepted
+  await run.put(root(thread), cp(ids[0], { a: 'zero-again' }, 6), meta(-1), { a: 6 });
+  assert.deepEqual((await run.getTuple(at(thread, ids[0]))).checkpoint.channel_values, { a: 'zero-again' });
+});
+
+test('#1562 R2b real StateGraph (non-strict, and strict with reap disabled): a node deletes its own thread mid-run — every later write of that (old) run is refused; a new run on the thread then works', { skip: SKIP, timeout: 60000 }, async () => {
+  for (const [durability, strict] of [['sync', false], ['async', false], ['sync', true], ['async', true]]) {
+    const scope = newScope();
+    const thread = `sg-${durability}-${strict ? 'strict' : 'lax'}`;
+    const saver = strict ? strictNoReap({ client, scope }) : new OxigraphSaver({ client, scope });
+    const owner = new OxigraphSaver({ client, scope });
+    const State = Annotation.Root({ log: Annotation({ reducer: (a, b) => a.concat(b), default: () => [] }) });
+    let deleteIn = 'b';
+    const node = (name) => async () => {
+      if (name === deleteIn) await owner.deleteThread(thread);
+      return { log: [name] };
+    };
+    const g = new StateGraph(State).addNode('a', node('a')).addNode('b', node('b')).addNode('c', node('c'))
+      .addEdge(START, 'a').addEdge('a', 'b').addEdge('b', 'c').addEdge('c', END).compile({ checkpointer: saver });
+    const cfg = { configurable: { thread_id: thread } };
+    const staleRun = async (what, input) => {
+      deleteIn = 'b';
+      const err = await g.invoke(input, { ...cfg, durability }).then(() => null, (e) => e);
+      // whatever the loop does with the refusal, NOTHING of the old run may be live in the new generation
+      assert.deepEqual(await liveTriples(scope, thread), [], `${durability}/${what}: the old run wrote into the new generation (invoke ${err ? `threw ${err.name}` : 'returned'})`);
+      assert.equal(await saver.getTuple(cfg), undefined, `${durability}/${what}: a checkpoint of the old run is visible`);
+      assert.equal(err?.name, 'ThreadDeletedError', `${durability}/${what}: the run must fail loudly; got ${err?.name}: ${err?.message}`);
+    };
+    const freshRun = async (what, input, expectLog) => {
+      deleteIn = null;
+      const out = await g.invoke(input, { ...cfg, durability });
+      assert.deepEqual(out.log, expectLog, `${durability}/${what}`);
+      assert.deepEqual((await saver.getTuple(cfg)).checkpoint.channel_values.log, expectLog, `${durability}/${what}: stored state`);
+    };
+    await staleRun('run born on an empty thread', { log: ['in'] });
+    // a NEW run on the same thread id, same saver instance, is unaffected
+    await freshRun('new run after the delete', { log: ['in2'] }, ['in2', 'a', 'b', 'c']);
+    await freshRun('second run continuing the new history', { log: ['in3'] }, ['in2', 'a', 'b', 'c', 'in3', 'a', 'b', 'c']);
+    // a run that LOADED existing history, deleted under it mid-run
+    await staleRun('run born on a thread with history', { log: ['in4'] });
+    await freshRun('new run after the second delete', { log: ['in5'] }, ['in5', 'a', 'b', 'c']);
+  }
+});
+
+// ---------- R2c: strictGenerations — every write must carry a birth generation from a read ----------
+
+/** A LangGraph-shaped run: one signal object for all of its calls, as the loop passes it. */
+const runCfg = (thread, extra = {}) => ({ signal: new AbortController().signal, configurable: { thread_id: thread, checkpoint_ns: '', ...extra } });
+const withId = (cfg, id) => ({ ...cfg, configurable: { ...cfg.configurable, checkpoint_id: id } });
+/** A strict saver whose best-effort reap is DISABLED, so only the atomic guard can stop a stale write. */
+const strictNoReap = (o) => {
+  const s = new OxigraphSaver({ ...o, strictGenerations: true });
+  s._reap = async () => { throw new Error('reap must not be needed in strict mode'); };
+  return s;
+};
+/** Every triple of one checkpoint node and of the nodes minted under it (its writes). */
+async function checkpointTriples(scope, thread, id) {
+  const pre = lgMint.cp(scope, thread, '', id);
+  const r = await client.query(`SELECT ?s ?p ?o WHERE { ?s ?p ?o FILTER(STRSTARTS(STR(?s), "${pre}")) }`);
+  assert.ok(r.ok, r.reason);
+  return r.rows.map((x) => `${x.s.value} ${x.p.value} ${x.o.value}`).sort();
+}
+
+test('#1562 R2c strict: delete X → X legitimately re-put → a stale run (old birth generation) writing to X is refused atomically and X is untouched; a write with no birth generation is rejected before sending', { skip: SKIP }, async () => {
+  const scope = newScope();
+  const thread = 'strict-reuse';
+  const h = hookedClient();
+  const outcomes = [];
+  const rec = { ...h.client, async update(i, o) { const r = await h.client.update(i, o); outcomes.push([i.kind, i.lg.gen, r.outcome]); return r; } };
+  const s = strictNoReap({ client: rec, scope });
+  const X = uuid6(-1);
+  // run 1, born in generation 0 by its first read (an EMPTY thread)
+  const run1 = runCfg(thread);
+  assert.equal(await s.getTuple(run1), undefined);
+  const x1 = await s.put(run1, cp(X, { a: 'gen0' }), meta(-1), { a: 1 });
+  await s.putWrites(withId(run1, X), [['out', 'gen0-write']], 'taskA');
+  await new OxigraphSaver({ client, scope }).deleteThread(thread);
+  // run 2, born in generation 1, legitimately re-puts the SAME id X
+  const run2 = runCfg(thread);
+  assert.equal(await s.getTuple(run2), undefined);
+  await s.put(run2, cp(X, { a: 'gen1' }, 2), meta(-1), { a: 2 });
+  await s.putWrites(withId(run2, X), [['out', 'gen1-write']], 'taskB');
+  const before = await checkpointTriples(scope, thread, X);
+  const live0 = await liveTriples(scope, thread);
+  const n0 = outcomes.length;
+  // the stale run 1 keeps writing to X (live again, so no tombstone applies — only the guard can stop it)
+  const e1 = await s.putWrites(withId(run1, X), [['out', 'stale-write']], 'taskC').then(() => null, (e) => e);
+  const e2 = await s.put(withId(run1, X), cp(uuid6(1), { a: 'stale-child' }, 3), meta(0), { a: 3 }).then(() => null, (e) => e);
+  assert.equal(e1?.name, 'ThreadDeletedError', `stale putWrites: ${e1?.name}: ${e1?.message}`);
+  assert.equal(e2?.name, 'ThreadDeletedError', `stale put: ${e2?.name}: ${e2?.message}`);
+  assert.deepEqual(outcomes.slice(n0).map((o) => o[2]), ['PRECONDITION_FAILED', 'PRECONDITION_FAILED'], 'every stale update must be refused by the update itself');
+  assert.deepEqual(await checkpointTriples(scope, thread, X), before, 'X was touched by the stale run');
+  assert.deepEqual(await liveTriples(scope, thread), live0, 'the stale run changed the thread');
+  const t = await s.getTuple(withId(runCfg(thread), X));
+  assert.deepEqual(t.checkpoint.channel_values, { a: 'gen1' });
+  assert.deepEqual(t.pendingWrites.map((w) => w[2]), ['gen1-write']);
+  // a write that carries NO birth generation: no signal (a direct caller, another saver's config),
+  // or a signal this saver never saw read the thread — rejected client-side, nothing sent
+  const n1 = h.updates.length;
+  for (const [what, cfg] of [['no signal', { configurable: x1.configurable }], ['unread signal', withId(runCfg(thread), X)]]) {
+    for (const [op, call] of [['putWrites', (c) => s.putWrites(c, [['out', 'unfenced']], 'taskD')], ['put', (c) => s.put(c, cp(uuid6(2), { a: 'unfenced' }, 4), meta(1), { a: 4 })]]) {
+      const e = await call(cfg).then(() => null, (x) => x);
+      assert.equal(e?.name, 'UnfencedWriteError', `${op}/${what}: ${e?.name}: ${e?.message}`);
+    }
+  }
+  const other = strictNoReap({ client: rec, scope }); // another strict saver: run 1's signal means nothing to it
+  const e3 = await other.putWrites(withId(run2, X), [['out', 'x']], 'taskE').then(() => null, (x) => x);
+  assert.equal(e3?.name, 'UnfencedWriteError', `another instance: ${e3?.name}`);
+  assert.equal(h.updates.length, n1, 'an unfenced write reached the executor');
+  assert.deepEqual(await checkpointTriples(scope, thread, X), before);
+});
+
+test('#1562 R2c strict, reap DISABLED: a stale run\'s writes for a child it never stored are refused by the update itself — no triple of the stale run ever lands', { skip: SKIP }, async () => {
+  const scope = newScope();
+  const thread = 'strict-orphan';
+  const applied = [];
+  const rec = { ...client, async update(i, o) { const r = await client.update(i, o); applied.push([i.kind, i.lg.cid, r.outcome]); return r; } };
+  const s = strictNoReap({ client: rec, scope });
+  const ids = [uuid6(-1), uuid6(0), uuid6(1)];
+  const run1 = runCfg(thread);
+  await s.getTuple(run1); // born in generation 0
+  await s.put(run1, cp(ids[0], { a: 'zero' }), meta(-1), { a: 1 });
+  await s.put(withId(run1, ids[0]), cp(ids[1], { a: 'one' }, 2), meta(0), { a: 2 });
+  await new OxigraphSaver({ client, scope }).deleteThread(thread);
+  const n0 = applied.length;
+  const stale = [];
+  // the child C2 was never stored, so it is neither live nor tombstoned: writes-before-put in shape
+  for (const [what, p] of [
+    ['putWrites(never-stored child)', () => s.putWrites(withId(run1, ids[2]), [['out', 'orphan']], 'taskD')],
+    ['put(child)', () => s.put(withId(run1, ids[1]), cp(ids[2], { a: 'two' }, 3), meta(1), { a: 3 })],
+    ['putWrites(never-stored child) again', () => s.putWrites(withId(run1, ids[2]), [['out', 'orphan-2']], 'taskE')],
+  ]) {
+    const e = await p().then(() => null, (x) => x);
+    stale.push(what);
+    assert.equal(e?.name, 'ThreadDeletedError', `${what}: ${e?.name}: ${e?.message}`);
+    assert.deepEqual(await liveTriples(scope, thread), [], `${what}: a triple of the stale run landed`);
+  }
+  assert.deepEqual(applied.slice(n0).map((a) => a[2]), stale.map(() => 'PRECONDITION_FAILED'), `every stale update refused, none applied: ${JSON.stringify(applied.slice(n0))}`);
+  // the child id is then legitimately used by a new run: no old write appears on it
+  const run2 = runCfg(thread);
+  await s.getTuple(run2);
+  await s.put(run2, cp(ids[2], { a: 'new' }, 4), meta(-1), { a: 4 });
+  assert.deepEqual((await s.getTuple(withId(runCfg(thread), ids[2]))).pendingWrites, []);
+  // writes-before-put still works for a run of the CURRENT generation in strict mode
+  const run3 = runCfg(thread);
+  const head = await s.getTuple(run3);
+  const nid = uuid6(9);
+  await s.putWrites(withId(run3, nid), [['out', 'early']], 'taskN');
+  await s.put(withId(run3, head.config.configurable.checkpoint_id), cp(nid, { a: 'next' }, 5), meta(0), { a: 5 });
+  assert.deepEqual((await s.getTuple(withId(runCfg(thread), nid))).pendingWrites.map((w) => w[2]), ['early']);
+});
+
+test('#1562 R2c strict, a second reviewer\'s probe: put X → owner deleteThread → X legitimately re-put → a SEPARATE saver with NO signal putWrites X — UnfencedWriteError, nothing sent (non-strict control: the stale write lands)', { skip: SKIP }, async () => {
+  for (const strict of [true, false]) {
+    const scope = newScope();
+    const thread = `probe-${strict ? 'strict' : 'lax'}`;
+    const mk = (c) => (strict ? strictNoReap({ client: c, scope }) : new OxigraphSaver({ client: c, scope }));
+    const s = mk(client);
+    const X = uuid6(-1);
+    const run1 = runCfg(thread);
+    await s.getTuple(run1);
+    const x1 = await s.put(run1, cp(X, { a: 'gen0' }), meta(-1), { a: 1 });
+    await new OxigraphSaver({ client, scope }).deleteThread(thread); // the owner
+    const run2 = runCfg(thread);
+    await s.getTuple(run2);
+    await s.put(run2, cp(X, { a: 'gen1' }, 2), meta(-1), { a: 2 }); // legitimate re-put of X
+    const before = await checkpointTriples(scope, thread, X);
+    const h = hookedClient();
+    const sep = mk(h.client); // a separate saver instance
+    const e = await sep.putWrites({ configurable: x1.configurable }, [['out', 'stale-write']], 'taskS').then(() => null, (x) => x);
+    const pw = (await s.getTuple(withId(runCfg(thread), X))).pendingWrites.map((w) => w[2]);
+    if (strict) {
+      assert.equal(e?.name, 'UnfencedWriteError', `strict: ${e?.name}: ${e?.message}`);
+      assert.equal(h.updates.length, 0, 'strict: an unfenced write reached the executor');
+      assert.deepEqual(await checkpointTriples(scope, thread, X), before, 'strict: X was touched');
+      assert.deepEqual(pw, []);
+      // and the stale run itself, WITH its old birth generation, is refused by the update
+      const e2 = await s.putWrites(withId(run1, X), [['out', 'stale-run']], 'taskT').then(() => null, (x) => x);
+      assert.equal(e2?.name, 'ThreadDeletedError', `strict stale run: ${e2?.name}`);
+      assert.deepEqual(await checkpointTriples(scope, thread, X), before, 'strict: X was touched by the stale run');
+    } else {
+      // MEASURED GAP, kept visible: without strictGenerations a signal-less config adopts the current
+      // generation. If this ever stops landing, the non-strict contract changed: update this control.
+      assert.equal(e, null);
+      assert.deepEqual(pw, ['stale-write'], 'non-strict control: the documented gap no longer reproduces');
+    }
+  }
+});
+
+test('#1562 R2c strict regression: ONE caller AbortController signal reused across two real StateGraph runs with a deleteThread between them — the second run succeeds (each run gets its own birth generation)', { skip: SKIP, timeout: 60000 }, async () => {
+  for (const durability of ['sync', 'async']) {
+    const scope = newScope();
+    const thread = `reuse-${durability}`;
+    const saver = strictNoReap({ client, scope });
+    const State = Annotation.Root({ log: Annotation({ reducer: (a, b) => a.concat(b), default: () => [] }) });
+    const g = new StateGraph(State).addNode('a', async () => ({ log: ['a'] })).addNode('b', async () => ({ log: ['b'] }))
+      .addEdge(START, 'a').addEdge('a', 'b').addEdge('b', END).compile({ checkpointer: saver });
+    const signal = new AbortController().signal; // the caller's, reused
+    const cfg = { configurable: { thread_id: thread }, durability, signal };
+    assert.deepEqual((await g.invoke({ log: ['r1'] }, cfg)).log, ['r1', 'a', 'b']);
+    await new OxigraphSaver({ client, scope }).deleteThread(thread);
+    assert.deepEqual((await g.invoke({ log: ['r2'] }, cfg)).log, ['r2', 'a', 'b'], `${durability}: the second run was wrongly fenced`);
+    assert.deepEqual((await saver.getTuple({ configurable: { thread_id: thread } }))?.checkpoint.channel_values.log, ['r2', 'a', 'b']);
+  }
+});
+
+test('#1562 R2c strict, PRODUCTION saver (nothing stubbed): an old run\'s refused put of child C never touches a NEW run\'s writes-before-put for C', { skip: SKIP }, async () => {
+  const scope = newScope();
+  const thread = 'strict-noreap-prod';
+  const outcomes = [];
+  const rec = { ...client, async update(i, o) { const r = await client.update(i, o); outcomes.push([i.kind, r.outcome]); return r; } };
+  const s = new OxigraphSaver({ client: rec, scope, strictGenerations: true }); // unmodified
+  const P = uuid6(-1), C = uuid6(0);
+  // (1) the old run stores its parent P; the owner deletes the thread
+  const run1 = runCfg(thread);
+  await s.getTuple(run1);
+  await s.put(run1, cp(P, { a: 'old' }), meta(-1), { a: 1 });
+  await new OxigraphSaver({ client, scope }).deleteThread(thread);
+  // (2) a NEW-generation run legitimately writes for child C before C's put
+  const run2 = runCfg(thread);
+  await s.getTuple(run2);
+  await s.putWrites(withId(run2, C), [['out', 'new-run-early']], 'taskN');
+  const before = await checkpointTriples(scope, thread, C);
+  assert.ok(before.length > 0, 'the new run\'s writes for C are stored');
+  const n0 = outcomes.length;
+  // (3) the old run's put of C (parent P) lands late
+  const e = await s.put(withId(run1, P), cp(C, { a: 'stale' }, 2), meta(0), { a: 2 }).then(() => null, (x) => x);
+  assert.equal(e?.name, 'ThreadDeletedError', `${e?.name}: ${e?.message}`);
+  // (4) the new run's writes for C are byte-identical, and C is not tombstoned
+  assert.deepEqual(await checkpointTriples(scope, thread, C), before, `the new run's writes for C were changed (updates sent: ${JSON.stringify(outcomes.slice(n0))})`);
+  const tomb = await client.ask(`ASK { <${lgMint.cp(scope, thread, '', C)}> <urn:ex:lg/deletedInGen> ?g }`);
+  assert.equal(tomb.boolean, false, 'C was tombstoned');
+  assert.deepEqual(outcomes.slice(n0), [['lg.put', 'PRECONDITION_FAILED']], `strict mode sent more than the refused put: ${JSON.stringify(outcomes.slice(n0))}`);
+  // and the new run completes C normally
+  const head = await s.getTuple(run2);
+  assert.equal(head, undefined);
+  await s.put(run2, cp(C, { a: 'new' }, 3), meta(-1), { a: 3 });
+  assert.deepEqual((await s.getTuple(withId(runCfg(thread), C))).pendingWrites.map((w) => w[2]), ['new-run-early']);
+});
+
+test('#1562 R2c strict: a run\'s birth generation is its FIRST read — a re-read after another instance deleted the thread does not re-bless the run (getTuple and list variants)', { skip: SKIP }, async () => {
+  for (const reread of ['getTuple', 'list']) {
+    const scope = newScope();
+    const thread = `first-read-${reread}`;
+    const outcomes = [];
+    const rec = { ...client, async update(i, o) { const r = await client.update(i, o); outcomes.push([i.kind, i.lg.gen, r.outcome]); return r; } };
+    const s = new OxigraphSaver({ client: rec, scope, strictGenerations: true }); // unmodified
+    // generation 0 exists with a checkpoint (written by a different, earlier run)
+    const seed = runCfg(thread);
+    await s.getTuple(seed);
+    const P = uuid6(-1);
+    await s.put(seed, cp(P, { a: 'zero' }), meta(-1), { a: 1 });
+    // the run reads the thread at generation 0
+    const run = runCfg(thread);
+    assert.equal((await s.getTuple(run)).checkpoint.id, P);
+    await new OxigraphSaver({ client, scope }).deleteThread(thread); // ANOTHER instance
+    // the SAME run reads again (now generation 1, empty)
+    if (reread === 'getTuple') assert.equal(await s.getTuple(run), undefined);
+    else { const xs = []; for await (const t of s.list(run)) xs.push(t); assert.deepEqual(xs, []); }
+    const n0 = outcomes.length;
+    const C = uuid6(0);
+    const e1 = await s.putWrites(withId(run, C), [['out', 'late']], 'taskA').then(() => null, (x) => x);
+    const e2 = await s.put(run, cp(C, { a: 'late' }, 2), meta(-1), { a: 2 }).then(() => null, (x) => x);
+    assert.deepEqual(await liveTriples(scope, thread), [], `${reread}: the run wrote into the new generation (updates: ${JSON.stringify(outcomes.slice(n0))})`);
+    assert.equal(e1?.name, 'ThreadDeletedError', `${reread}/putWrites: ${e1?.name}: ${e1?.message}`);
+    assert.equal(e2?.name, 'ThreadDeletedError', `${reread}/put: ${e2?.name}: ${e2?.message}`);
+    assert.deepEqual(outcomes.slice(n0).map((o) => [o[1], o[2]]), [[0, 'PRECONDITION_FAILED'], [0, 'PRECONDITION_FAILED']], `${reread}: each write built for birth generation 0 and refused by the update`);
+  }
+});
