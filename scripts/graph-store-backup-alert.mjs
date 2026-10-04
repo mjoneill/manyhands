@@ -10,9 +10,15 @@
  *   - at most once per --remind-min (default 60) while that episode stays open;
  *   - once when it closes (the next OK after an alert).
  *
- * The episode lives in --state (default DEST/backup-alert-state.json). The post is
- * made FIRST and the state written AFTER it succeeds, so a failed post is retried
- * on the next run, and a crash between the two can repeat one post (never lose one).
+ * State lives in --state, by default OUTSIDE the monitored destination
+ * (~/.claude/graph-store-backup-alert-state.json): a missing or unreadable DEST is
+ * one of the failures being reported, so it must not also erase the dedupe.
+ *
+ * A post that fails is NOT dropped: the episode is recorded as open and the
+ * undelivered text is kept as `pending`. Every run delivers `pending` FIRST, before
+ * deciding anything new, so "alert, post fails, backups recover" still reaches the
+ * commons as the alert followed by the recovery. A crash between a successful post
+ * and the state write can repeat that one post; nothing undelivered is forgotten.
  *
  *   node scripts/graph-store-backup-alert.mjs --dest DIR --board http://127.0.0.1:PORT
  *        [--store DIR] [--state FILE] [--remind-min 60] [--limit-min M] [--now ISO]
@@ -22,12 +28,13 @@
  * post does not change the exit code; it is printed as `ALERT-DELIVERY FAILED`.
  */
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { monitor, DEFAULT_INTERVAL_MS } from './graph-store-backup-monitor.mjs';
 
 const MIN = 60_000;
-export const ALERT_STATE_FILE = 'backup-alert-state.json';
+export const DEFAULT_ALERT_STATE = () => path.join(os.homedir(), '.claude', 'graph-store-backup-alert-state.json');
 const EXIT = { OK: 0, UNAVAILABLE: 3, STALE: 4, 'NO-COPY': 5, 'UNVERIFIED-NEWEST': 6 };
 
 /**
@@ -59,7 +66,8 @@ export function decide({ result, prev, nowMs, remindMs = 60 * MIN }) {
 }
 
 function readAlertState(file) {
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return { episode: null }; }
+  try { const s = JSON.parse(fs.readFileSync(file, 'utf8')); return { episode: s.episode ?? null, pending: s.pending ?? [] }; }
+  catch { return { episode: null, pending: [] }; }
 }
 function writeAlertState(file, s) {
   const tmp = `${file}.tmp-${process.pid}`;
@@ -67,27 +75,45 @@ function writeAlertState(file, s) {
   fs.renameSync(tmp, file);
 }
 
-/** One run: monitor, decide, post, record. Returns { result, posted, deliveryError }. */
+async function deliver({ board, body, fetchImpl }) {
+  const r = await fetchImpl(`${board}/api/conversations`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ author: 'board', body }), signal: AbortSignal.timeout(30_000),
+  });
+  if (r.status !== 201 && r.status !== 200) throw new Error(`HTTP ${r.status}`);
+}
+
+/**
+ * One run: deliver anything still pending, then monitor, decide, post, record.
+ * Returns { result, posted (count delivered this run), deliveryError }.
+ */
 export async function alertOnce({ dest, board, store = null, stateFile = null, remindMs = 60 * MIN, limitMs = null,
   nowMs = Date.now(), fetchImpl = fetch }) {
+  const file = stateFile || DEFAULT_ALERT_STATE();
+  const st = readAlertState(file);
+  let posted = 0;
+  // 1. Undelivered posts from earlier runs go first, in order. Stop at the first failure.
+  while (st.pending.length) {
+    try { await deliver({ board, body: st.pending[0], fetchImpl }); } catch (e) {
+      const result = monitor({ dest, store, nowMs, intervalMs: DEFAULT_INTERVAL_MS, limitMs });
+      const { post, next } = decide({ result, prev: st, nowMs, remindMs });
+      writeAlertState(file, { episode: next.episode, pending: post ? [...st.pending, post] : st.pending });
+      return { result, posted, deliveryError: `pending delivery failed: ${e?.message ?? e}` };
+    }
+    st.pending.shift(); posted += 1;
+    writeAlertState(file, st);
+  }
+  // 2. This run's verdict.
   const result = monitor({ dest, store, nowMs, intervalMs: DEFAULT_INTERVAL_MS, limitMs });
-  const file = stateFile || path.join(dest, ALERT_STATE_FILE);
-  const { post, next } = decide({ result, prev: readAlertState(file), nowMs, remindMs });
-  if (!post) {
-    if (!result.alert) { try { writeAlertState(file, next); } catch { /* DEST unreadable is already the verdict */ } }
-    return { result, posted: false, deliveryError: null };
+  const { post, next } = decide({ result, prev: st, nowMs, remindMs });
+  if (!post) { writeAlertState(file, { episode: next.episode, pending: [] }); return { result, posted, deliveryError: null }; }
+  try { await deliver({ board, body: post, fetchImpl }); } catch (e) {
+    // The episode is recorded (so the next run does not re-open it) and the text is kept.
+    writeAlertState(file, { episode: next.episode, pending: [post] });
+    return { result, posted, deliveryError: e?.message ?? String(e) };
   }
-  try {
-    const r = await fetchImpl(`${board}/api/conversations`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ author: 'board', body: post }), signal: AbortSignal.timeout(30_000),
-    });
-    if (r.status !== 201 && r.status !== 200) throw new Error(`HTTP ${r.status}`);
-  } catch (e) {
-    return { result, posted: false, deliveryError: e?.message ?? String(e) };   // state NOT advanced: retried next run
-  }
-  try { writeAlertState(file, next); } catch (e) { return { result, posted: true, deliveryError: `posted, but state not recorded: ${e.message}` }; }
-  return { result, posted: true, deliveryError: null };
+  writeAlertState(file, { episode: next.episode, pending: [] });
+  return { result, posted: posted + 1, deliveryError: null };
 }
 
 function parseArgs(argv) {
@@ -116,7 +142,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
   try { a = parseArgs(process.argv.slice(2)); } catch (e) { console.error(e.message); process.exit(2); }
   const r = await alertOnce(a);
   console.log(r.result.line);
-  if (r.posted) console.log(`ALERT-DELIVERED to ${a.board} (commons, author board)`);
-  if (r.deliveryError) console.log(`ALERT-DELIVERY FAILED: ${r.deliveryError} (will retry next run)`);
+  if (r.posted) console.log(`ALERT-DELIVERED ${r.posted} post(s) to ${a.board} (commons, author board)`);
+  if (r.deliveryError) console.log(`ALERT-DELIVERY FAILED: ${r.deliveryError} (kept as pending; delivered first next run)`);
   process.exit(EXIT[r.result.verdict]);
 }
