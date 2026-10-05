@@ -292,6 +292,15 @@ export const KIND_DECLARATIONS = Object.freeze([
       + 'the later publish decision. NOT projected as an rdf:type and with no collection mapping: '
       + 'the outbox is a top-level document field, so like `wiki` it does not rebuild from the log.',
   },
+  {
+    name: null, eventKind: 'board-meta', collection: null,
+    createdBy: 'the first seq-mode GET /api/conversations on a board with no postSeqEpoch (#1592)',
+    definition: 'A change to a server-owned, top-level board field that belongs to no entity: today only '
+      + 'the post-sequence epoch (`postSeqEpoch`), minted once by the first seq-mode read of a board '
+      + 'that has none so a cursor handed out before the first post stays valid across a restart. '
+      + 'NOT projected as an rdf:type and with no collection mapping: like `announcement` it records a '
+      + 'top-level document field, which does not rebuild from the log.',
+  },
 
   // ── vocabulary ────────────────────────────────────────────────────────────
   {
