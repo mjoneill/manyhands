@@ -414,7 +414,7 @@ export function staticCheck(sparql, opId) {
 // =====================================================================================
 
 export const RECORD_V = 2;   // 2: memory.revise records the identity it replaces (a MemoryRevision node)
-export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import']);
+export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create']);
 
 const RS = 'https://scrumboard.local/ns#';
 const RSC = 'https://schema.org/';
@@ -434,6 +434,9 @@ export const LOGBORN_TERMS = Object.freeze({
   ver: `${NS}ver`, recordedBy: `${NS}recordedBy`,
   // #1561 Person identity nodes (the replica's Person projection, plus the planner's whitelist)
   Person: `${RSC}Person`, glyph: `${RS}glyph`, resolved: `${RS}resolved`, aliases: `${RS}aliases`,
+  // #1574 C3c — an announcement post (schema:Comment), written by the outbox publisher
+  Comment: `${RSC}Comment`, text: `${RSC}text`, postSeq: `${RS}postSeq`, originOccurredAt: `${RS}originOccurredAt`,
+  originMutation: `${RS}originMutation`, originSlot: `${RS}originSlot`, originActor: `${RS}originActor`, mentionsName: `${RS}mentionsName`,
 });
 const TM = LOGBORN_TERMS;
 
@@ -445,6 +448,7 @@ const RECORD_FIELDS = {
   'seat.declare': ['seat', 'declaration', 'ends', 'at'],
   'seat.clear': ['seat', 'ends', 'at'],
   'person.import': [],
+  'post.create': ['post'],   // #1574 C3c
 };
 
 const SAFE_CH = /^[A-Za-z0-9 _.,:/@#+=*!~%&$-]$/;
@@ -536,6 +540,20 @@ function canonicalizeRecord(i) {
     } };
     const D = record.decision;
     if ([...D.supersedes, ...D.duplicateOf].includes(D.iri)) fail('a decision cannot relate to itself');
+  } else if (i.kind === 'post.create') {
+    // #1574 C3c — every field comes from the outbox entry's frozen payload plus the two values the server fixed once
+    // at the first publish attempt (publicationAt, postSeq). All of it is in `record`, so all of it is digest-covered.
+    const p = obj(i.post, ['id', 'body', 'author', 'originActor', 'origin', 'occurredAt', 'publicationAt', 'postSeq', 'mentions'], 'post');
+    const o = obj(p.origin, ['mutationId', 'slot'], 'post.origin');
+    if (!Number.isSafeInteger(p.postSeq) || p.postSeq <= 0) fail('post.postSeq must be a positive safe integer');
+    const seat = (v, what) => { const x = rStr(v, what); if (!x) fail(`${what} is empty`); return checkIri(`${PERSON_IRI}${x}`, what); };
+    record = { post: {
+      iri: checkIri(`${ENTITY_IRI}${rStr(p.id, 'post.id')}`, 'post.id'), body: rStr(p.body, 'post.body'),
+      author: seat(p.author, 'post.author'), originActor: seat(p.originActor, 'post.originActor'),
+      mutationId: rStr(o.mutationId, 'post.origin.mutationId'), slot: rStr(o.slot, 'post.origin.slot'),
+      occurredAt: rStr(p.occurredAt, 'post.occurredAt'), publicationAt: rStr(p.publicationAt, 'post.publicationAt'),
+      postSeq: p.postSeq, mentions: rList(p.mentions, 'post.mentions', rStr),
+    } };
   } else if (i.kind === 'decision.relate') {
     const target = checkIri(i.target, 'target');
     const supersedes = rList(i.supersedes, 'supersedes', checkIri);
@@ -583,6 +601,7 @@ export const memoryRevisionIri = (memoryIri, expectedVersion) => `${memoryIri}/r
  */
 export const PERSON_PAYLOAD_FIELDS = Object.freeze(['@type', '@id', 'identifier', 'name', 'scrum:glyph', 'scrum:resolved', 'scrum:aliases']);
 export const PERSON_IRI = 'https://scrumboard.local/person/';
+export const ENTITY_IRI = 'https://scrumboard.local/entity/';   // #1574 C3c — a post node
 function canonPeople(list, what) {
   if (!Array.isArray(list)) fail(`${what} must be an array`);
   const out = list.map((x, k) => {
@@ -690,6 +709,20 @@ function planRecord(c) {
     for (const t of [R.target, ...R.supersedes, ...R.duplicateOf]) pre.push(`    ${I(t)} ${I(TM.type)} ${I(TM.Decision)} .`);
     for (const t of R.supersedes) add(R.target, TM.supersedes, I(t));
     for (const t of R.duplicateOf) add(R.target, TM.duplicateOf, I(t));
+  } else if (c.kind === 'post.create') {
+    const P = R.post; target = null;   // a create: the post IRI must be fresh
+    fresh.push(P.iri);
+    add(P.iri, TM.type, I(TM.Comment));
+    add(P.iri, TM.text, L(P.body));
+    add(P.iri, TM.author, I(P.author));
+    add(P.iri, TM.dateCreated, L(P.publicationAt));
+    add(P.iri, TM.postSeq, String(P.postSeq));   // a bare integer token: an xsd:integer literal (logical order, not discovery)
+    add(P.iri, TM.originOccurredAt, L(P.occurredAt));
+    add(P.iri, TM.originMutation, L(P.mutationId));
+    add(P.iri, TM.originSlot, L(P.slot));
+    add(P.iri, TM.originActor, I(P.originActor));
+    for (const m of P.mentions) add(P.iri, TM.mentionsName, L(m));
+    add(P.iri, TM.recordedBy, ref(c.opId));
   } else if (c.kind === 'person.import') {
     target = null;   // only the Person nodes below; like a create, it names no receipt target
   } else {

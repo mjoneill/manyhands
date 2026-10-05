@@ -15,6 +15,8 @@
  * obligationId = `${mutationId}:${slot}`.
  */
 
+import { createHash } from 'node:crypto';
+
 export const OUTBOX_FIELD = 'announcementOutbox';
 export const OUTBOX_STATUSES = Object.freeze(['pending', 'published', 'blocked']);
 /**
@@ -140,6 +142,55 @@ export function modeProblem(entry, origin) {
   if (entry.mode !== origin.mode) return 'malformed-entry';
   return null;
 }
+
+// ── #1574 C3c — the publisher's graph write ──
+/**
+ * The namespace of every announcement post id. Chosen once and NEVER changed: a different namespace derives a
+ * different id for the same obligation, and a retry after a deploy would then write a second node.
+ */
+export const ANNOUNCE_POST_NAMESPACE = 'bb9ac420-d837-46bc-984d-6c875b978aee';
+
+/** The post id of one obligation: an RFC 4122 version-5 UUID of `<mutationId>:<slot>` under ANNOUNCE_POST_NAMESPACE. */
+export function announcePostId(mutationId, slot) {
+  const ns = Buffer.from(ANNOUNCE_POST_NAMESPACE.replace(/-/g, ''), 'hex');
+  const h = createHash('sha1').update(ns).update(Buffer.from(`${mutationId}:${slot}`, 'utf8')).digest();
+  const b = Buffer.from(h.subarray(0, 16));
+  b[6] = (b[6] & 0x0f) | 0x50;   // version 5
+  b[8] = (b[8] & 0x3f) | 0x80;   // RFC 4122 variant
+  const x = b.toString('hex');
+  return `${x.slice(0, 8)}-${x.slice(8, 12)}-${x.slice(12, 16)}-${x.slice(16, 20)}-${x.slice(20)}`;
+}
+
+/**
+ * The `post.create` intention of a publisher-mode entry, built ONLY from what the entry stores: its frozen payload,
+ * plus `publicationAt` and `postSeq`, which the server fixed once at the first publish attempt (the reservation).
+ * Status, receipt and caller fields never reach it, and nothing reads a clock, so a retry rebuilds the identical
+ * intention (the same digest) and is never an intent-collision. Throws for an entry without a valid reservation: a
+ * number is never synthesised here.
+ */
+export function postCreateIntention(entry) {
+  if (!isObj(entry) || !isObj(entry.payload)) throw new Error('postCreateIntention: an entry with a payload is required');
+  if (!Number.isSafeInteger(entry.postSeq) || entry.postSeq <= 0) throw new Error('postCreateIntention: the entry has no reserved postSeq');
+  if (typeof entry.publicationAt !== 'string' || !entry.publicationAt) throw new Error('postCreateIntention: the entry has no publicationAt');
+  const p = entry.payload;
+  return {
+    kind: 'post.create',
+    opId: opIdFor(entry.mutationId, entry.slot),
+    actor: `${PERSON_IRI}${p.author}`,
+    post: {
+      id: announcePostId(entry.mutationId, entry.slot),
+      body: p.body,
+      author: p.author,
+      originActor: p.originActor,
+      origin: { mutationId: entry.mutationId, slot: entry.slot },
+      occurredAt: p.occurredAt,
+      publicationAt: entry.publicationAt,
+      postSeq: entry.postSeq,
+      ...(Array.isArray(p.mentions) && p.mentions.length ? { mentions: [...p.mentions] } : {}),
+    },
+  };
+}
+const PERSON_IRI = 'https://scrumboard.local/person/';
 
 /** Does `post` say exactly what the frozen payload says, for exactly this obligation? */
 export function postMatchesEntry(entry, post) {

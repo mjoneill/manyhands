@@ -67,7 +67,7 @@ import { mintId } from './core/tending-ids.mjs';
 import { createPrompt, editPrompt, setEnabled, reorderPlaylist, removePrompt, setShuffle, readShuffle } from './core/tending-authoring.mjs';
 import { resolveProvenance } from './core/tending-provenance.mjs';
 import { boardToDomain, domainToBoard, cardToNode } from './core/mapping.mjs';
-import { OUTBOX_FIELD, outboxOf, withAnnouncement, listOutbox, modeProblem, legacyProof, postMatchesEntry, opIdFor } from './core/announce-outbox.mjs';   // #1574 C3a/C3b
+import { OUTBOX_FIELD, outboxOf, withAnnouncement, listOutbox, modeProblem, legacyProof, postMatchesEntry, opIdFor, announcePostId, postCreateIntention } from './core/announce-outbox.mjs';   // #1574 C3a/C3b/C3c
 import { createGraphClient } from './core/graph-client.mjs';   // #1574 C3b — the conversations unit's executor door
 import { NEXT_POST_SEQ, POST_SEQ_EPOCH, isEpoch, mintEpoch, stampPostSeq, postSeqState, assertPostSeqWritable, PostSeqStateCorrupt, migrationRequiredBody, parseSeqSyntax, checkSeqEpoch, selectSeqPage, SEQ_PARAMS } from './core/post-seq.mjs';   // #1592 — the document path's post sequence
 import { verifyShaIntegrity, readShaStamp, collectShas, SHA_POPULATION } from './core/sha-integrity.mjs';
@@ -10044,28 +10044,62 @@ function applyPublish(data, d, actor) {
     return { result: { status: 'published', postId: d.postId } };
   }
   // d.kind === 'post' — the post and the published mark are ONE write.
+  // #1574 C3c — ONE DATE RULE FOR BOTH PATHS: the post's createdAt is the entry's publicationAt (fixed at the first
+  // attempt; here, flag OFF, that is this write), and the frozen origin time rides as provenance. Neither makes the
+  // post discoverable to a since-cursor that has already passed it; that is the read slice's job.
   const p = d.entry.payload;
+  const publicationAt = typeof d.entry.publicationAt === 'string' ? d.entry.publicationAt : now;
   const conv = createConversationFromPayload({ body: p.body, author: p.author });
   conv.opId = d.opId;
-  conv.origin = { mutationId: d.entry.mutationId, slot: d.entry.slot };
+  conv.origin = { mutationId: d.entry.mutationId, slot: d.entry.slot, occurredAt: p.occurredAt };
+  conv.createdAt = publicationAt;
   pushPost(data, conv);
-  const next = put({ ...d.entry, status: 'published', postId: conv.id, publishedAt: now, receipt: 'document' });
+  const next = put({ ...d.entry, publicationAt, status: 'published', postId: conv.id, publishedAt: now, receipt: 'document' });
   writeBoard(data, [convEvent(conv, p.author), announcementEvent(next, actor)]);
   testBarrier('after-publish-write');
   return { result: { status: 'published', postId: conv.id }, notify: p.notify ? conv : null };
 }
 
 /**
- * The executor half, called with NO board lock held. C3b ships the unlocked,
- * fenced, bounded call and its failure handling only: the conversation-post
- * intention kind does not exist in the graph compiler yet (it is the unit's own
- * slice), so a reachable executor is still answered `pending` with that reason.
- * Nothing is ever guessed from a failure.
+ * #1574 C3c — THE RESERVATION. Under the lock, at a publisher entry's FIRST graph attempt: fix `publicationAt`
+ * and take `postSeq` from the document's own counter (minting the epoch on an empty board), in ONE document write,
+ * so a document post made afterwards always gets a higher number. Every later attempt reuses both: the counter is
+ * consumed once per obligation, and a failed attempt leaves a gap (allowed). These mark the RESERVATION, never a
+ * successful publication: only a matching APPLIED receipt proves the write, and graph discovery is commitSeq's job.
+ * A `clean` (un-migrated) board reserves nothing and writes nothing: the entry stays pending, the reason is in the
+ * response only. Returns {entry} (reserved) or {pending: body}.
  */
-async function publishThroughExecutor(entry, opId) {
-  const id = await ANNOUNCE_EXECUTOR.datasetIdentity();
-  if (!id.ok) return { applied: false, reason: `executor-unavailable: ${id.reason}` };
-  return { applied: false, reason: `executor-post-write-not-built: no conversation intention kind for ${opId}` };
+function reserveForGraph(data, entry, actor) {
+  if (Number.isSafeInteger(entry.postSeq) && entry.postSeq > 0 && typeof entry.publicationAt === 'string') return { entry };
+  const { state } = postSeqState(data);
+  if (state === 'clean') return { pending: { status: 'pending', reason: 'POST_SEQ_MIGRATION_REQUIRED', code: 'POST_SEQ_MIGRATION_REQUIRED' } };
+  const events = [];
+  if (!isEpoch(data[POST_SEQ_EPOCH])) { data[POST_SEQ_EPOCH] = mintEpoch(); events.push(boardMetaEvent(POST_SEQ_EPOCH, data[POST_SEQ_EPOCH])); }
+  const n = Number.isSafeInteger(data[NEXT_POST_SEQ]) && data[NEXT_POST_SEQ] > 0 ? data[NEXT_POST_SEQ] : 1;
+  data[NEXT_POST_SEQ] = n + 1;
+  events.push(boardMetaEvent(NEXT_POST_SEQ, n + 1));
+  const ob = outboxOf(data);
+  const next = { ...entry, publicationAt: typeof entry.publicationAt === 'string' ? entry.publicationAt : new Date().toISOString(), postSeq: n };
+  data[OUTBOX_FIELD] = { origins: ob.origins, entries: { ...ob.entries, [next.obligationId]: next } };
+  writeBoard(data, [...events, announcementEvent(next, actor)]);   // its after-document barrier is "reserved, executor not yet contacted"
+  return { entry: next };
+}
+
+/**
+ * The executor half, called with NO board lock held: the entry's `post.create` intention, built only from what
+ * the entry stores. APPLIED (the client has already checked the receipt's digest is this intention's) → published;
+ * REJECTED (an intent-collision: the opId holds different content) or PRECONDITION_FAILED → blocked; anything
+ * else (UNKNOWN, UNAVAILABLE, RECONCILE_REQUIRED) → pending. Nothing is ever guessed from a failure.
+ */
+async function publishThroughExecutor(entry) {
+  let intention;
+  try { intention = postCreateIntention(entry); } catch (e) { return { applied: false, block: 'malformed-entry', reason: e.message }; }
+  const r = await ANNOUNCE_EXECUTOR.update(intention);
+  if (r.outcome === 'APPLIED') return { applied: true, postId: intention.post.id };
+  if (r.outcome === 'REJECTED' || r.outcome === 'PRECONDITION_FAILED') {
+    return { applied: false, block: r.reason === 'intent-collision' ? 'publisher-intent-collision' : `publisher-${String(r.outcome).toLowerCase()}`, reason: r.reason };
+  }
+  return { applied: false, reason: `executor-${String(r.outcome).toLowerCase()}: ${r.reason ?? ''}`.trim() };
 }
 
 async function handlePublishOutbox(req, res, rawId) {
@@ -10080,19 +10114,25 @@ async function handlePublishOutbox(req, res, rawId) {
       const d = decidePublish(data, obligationId);
       if (d.kind === 'unknown') return { status: 404 };
       if (d.kind === 'done') return { result: d.result };
-      if (d.kind === 'post' && ANNOUNCE_EXECUTOR) return { viaExecutor: d };   // lock is released on return
+      if (d.kind === 'post' && ANNOUNCE_EXECUTOR) {
+        const r = reserveForGraph(data, d.entry, actor);   // #1574 C3c
+        if (r.pending) return { result: r.pending };
+        return { viaExecutor: { ...d, entry: r.entry } };   // lock is released on return
+      }
       return applyPublish(data, d, actor);
     });
     if (first.status === 404) return sendJSON(res, 404, { error: 'Obligation not found', obligationId });
     if (first.notify) notifyMcpOfPost(first.notify);
     if (!first.viaExecutor) return sendJSON(res, 200, first.result);
-    const call = await publishThroughExecutor(first.viaExecutor.entry, first.viaExecutor.opId);
-    if (!call.applied) return sendJSON(res, 200, { status: 'pending', reason: call.reason });
+    const call = await publishThroughExecutor(first.viaExecutor.entry);
+    testBarrier('after-executor-apply');   // TEST-ONLY: the executor answered, nothing recorded yet, no lock held
+    if (!call.applied && !call.block) return sendJSON(res, 200, { status: 'pending', reason: call.reason });
     // Lock again and revalidate against the CURRENT document before recording.
     const second = await withWriteLock(async () => {
       const data = readBoard();
       const d = decidePublish(data, obligationId);
       if (d.kind === 'done' || d.kind === 'unknown' || d.kind === 'block') return { result: d.result ?? { status: 'pending', reason: 'changed-while-publishing' } };
+      if (call.block) return applyPublish(data, { kind: 'block', entry: d.entry, reason: call.block }, actor);
       return applyPublish(data, { kind: 'mark', entry: d.entry, postId: call.postId, receipt: 'executor' }, actor);
     });
     sendJSON(res, 200, second.result);
@@ -11424,7 +11464,10 @@ if (logbornUnitConfig(process.env, { sliceEnabled: GRAPH_SLICE.enabled }).enable
 // the post into the board document, as before the flag.
 if (process.env.SCRUM_GRAPH_UNIT_CONVERSATIONS === '1') {
   if (!GRAPH_SLICE.enabled) throw new Error('#1574: SCRUM_GRAPH_UNIT_CONVERSATIONS=1 requires the graph slice (SCRUM_GRAPH_EXECUTOR_URL + SCRUM_GRAPH_DATASET_ID)');
-  ANNOUNCE_EXECUTOR = createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID });
+  // #1574 C3c — the call runs with the board lock RELEASED, so a slow executor costs only this publish. The bound is
+  // long enough for a real write under load; past it the outcome is UNKNOWN, the entry stays pending, and the
+  // identical intention is replayed on the next attempt (the receipt makes that idempotent).
+  ANNOUNCE_EXECUTOR = createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: 15000 });
   console.error(`${new Date().toISOString()} #1574 conversations unit ON: publisher-mode announcements go through the graph executor (lock released during the call)`);
 }
 if (GRAPH_SLICE.enabled) {
