@@ -157,3 +157,59 @@ function rowOf(o) {
     graph: { opId: o.op, commitSeq: o.seq, version },
   };
 }
+
+// ── #1574 C1–C6 — POSTS IN THE CHANGES FEED (the graph conversations unit ON) ──────────────────────────────────────────
+// With the unit on a post lives in the graph, so the changes feed reads its receipts here: ordinary writes (`op/post/`),
+// publisher announcements (`op/announce/`) and redactions (`op/redact/`). Not `op/backfill/`: an import is history, not a
+// change. Each row's projection is the post node AS IT IS NOW, so a post redacted since its write replays as a content-free
+// tombstone, never its text. The rows are cut to the commit high-water of the feed's own snapshot (`through`), so the one
+// graph position of the cursor covers them exactly.
+export const POST_OP_PREFIXES = Object.freeze([`${NS}op/post/`, `${NS}op/announce/`, `${NS}op/redact/`]);
+const S_TEXT = 'https://schema.org/text', S_AUTHOR = 'https://schema.org/author', RDF_T = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const T_REDACTED = 'https://scrumboard.local/ns#RedactedPost', T_POSTSEQ = 'https://scrumboard.local/ns#postSeq';
+const T_RECBY = 'urn:ex:recordedBy', T_REDBY = 'https://scrumboard.local/ns#redactedBy';
+const ENTITY_IRI = 'https://scrumboard.local/entity/', PERSON_IRI = 'https://scrumboard.local/person/';
+
+export function postFeedQuery(afterCommitSeq = 0) {
+  const n = Number(afterCommitSeq);
+  if (!Number.isSafeInteger(n) || n < 0) throw new Error(`postFeedQuery: afterCommitSeq must be a non-negative integer (got ${afterCommitSeq})`);
+  const pre = POST_OP_PREFIXES.map((p) => `STRSTARTS(STR(?op), ${JSON.stringify(p)})`).join(' || ');
+  return `SELECT ?op ?seq ?at ?actor ?p ?t ?text ?author WHERE {
+  ?op ${RX('outcome')} ${RX('APPLIED')} ; ${RX('commitSeq')} ?seq ; ${RX('at')} ?at ; ${RX('actor')} ?actor .
+  FILTER((${pre}) && ?seq > ${n})
+  { ?p <${T_RECBY}> ?op } UNION { ?p <${T_REDBY}> ?op }
+  ?p <${T_POSTSEQ}> ?ps .
+  OPTIONAL { ?p <${RDF_T}> ?t } OPTIONAL { ?p <${S_TEXT}> ?text } OPTIONAL { ?p <${S_AUTHOR}> ?author }
+}`;
+}
+
+/** Bindings → changes rows (the log's conversation row shape), cut to `through`. */
+export function postFeedRows(bindings, through) {
+  const ops = new Map();
+  for (const b of bindings || []) {
+    const op = b.op.value, seq = Number(b.seq.value);
+    if (!Number.isSafeInteger(seq) || (Number.isSafeInteger(through) && seq > through)) continue;
+    const o = ops.get(op) || { op, seq, at: b.at.value, actor: b.actor?.value ?? null, p: b.p.value, types: new Set(), text: null, author: null };
+    if (b.t) o.types.add(b.t.value);
+    if (b.text) o.text = b.text.value;
+    if (b.author) o.author = b.author.value;
+    ops.set(op, o);
+  }
+  return [...ops.values()].sort((a, b) => a.seq - b.seq).map((o) => {
+    const redactOp = o.op.startsWith(`${NS}op/redact/`);
+    const gone = redactOp || o.types.has(T_REDACTED);
+    const id = o.p.startsWith(ENTITY_IRI) ? o.p.slice(ENTITY_IRI.length) : local(o.p);
+    const by = !gone && o.author ? (o.author.startsWith(PERSON_IRI) ? o.author.slice(PERSON_IRI.length) : local(o.author)) : actorSeat(o.actor);
+    return {
+      kind: 'conversation', op: redactOp ? 'redact' : 'post', seq: null, id, shortId: null,
+      title: gone ? null : (typeof o.text === 'string' ? o.text.slice(0, 120) : null),
+      column: null, by, at: isoAt(o.at),
+      ...(gone ? { redacted: true } : {}),
+      graph: { opId: o.op, commitSeq: o.seq, version: null },
+    };
+  });
+}
+
+/** Every post the graph holds as a tombstone: a log row naming one is served without its text. */
+export const REDACTED_IDS_QUERY = `SELECT ?p WHERE { ?p <${RDF_T}> <${T_REDACTED}> }`;
+export const redactedIdsFrom = (bindings) => new Set((bindings || []).map((b) => String(b.p.value)).filter((v) => v.startsWith(ENTITY_IRI)).map((v) => v.slice(ENTITY_IRI.length)));

@@ -414,7 +414,7 @@ export function staticCheck(sparql, opId) {
 // =====================================================================================
 
 export const RECORD_V = 2;   // 2: memory.revise records the identity it replaces (a MemoryRevision node)
-export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create']);
+export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create', 'post.import', 'post.write', 'post.redact']);
 
 const RS = 'https://scrumboard.local/ns#';
 const RSC = 'https://schema.org/';
@@ -437,6 +437,14 @@ export const LOGBORN_TERMS = Object.freeze({
   // #1574 C3c — an announcement post (schema:Comment), written by the outbox publisher
   Comment: `${RSC}Comment`, text: `${RSC}text`, postSeq: `${RS}postSeq`, originOccurredAt: `${RS}originOccurredAt`,
   originMutation: `${RS}originMutation`, originSlot: `${RS}originSlot`, originActor: `${RS}originActor`, mentionsName: `${RS}mentionsName`,
+  about: `${RSC}about`,   // #1574 R0 — a post's attachedTo, the existing document mapping
+  // #1574 R4a — a redacted post's tombstone, and the other content predicates a post node can carry
+  RedactedPost: `${RS}RedactedPost`, redactedBy: `${RS}redactedBy`, conversation: `${RS}conversation`, postMentionsCard: `${RS}postMentionsCard`,
+  // #1574 U1–U4 — the rest of a document post, as copied by the backfill
+  onBehalfOf: `${RS}onBehalfOf`, recovered: `${RS}recovered`, opId: `${RS}opId`,
+  // #1574 U5 (decision f4940204) — an author-repair trail, kept as provenance literals: never an actor, never authority
+  originalAuthorToken: `${RS}originalAuthorToken`, authorCorrectedAt: `${RS}authorCorrectedAt`, authorCorrectedBy: `${RS}authorCorrectedBy`,
+  attachmentOf: `${RS}attachmentOf`, attachmentIndex: `${RS}attachmentIndex`, encodingFormat: `${RSC}encodingFormat`, contentSize: `${RSC}contentSize`,
 });
 const TM = LOGBORN_TERMS;
 
@@ -449,6 +457,9 @@ const RECORD_FIELDS = {
   'seat.clear': ['seat', 'ends', 'at'],
   'person.import': [],
   'post.create': ['post'],   // #1574 C3c
+  'post.import': ['post'],   // #1574 R0 — a document post copied into the graph
+  'post.write': ['post'],    // #1574 R2 — an ordinary post written straight to the graph (the same node shape as post.import)
+  'post.redact': ['post', 'authorityRef', 'occurredAt'],   // #1574 R4a — logical deletion of a post's content
 };
 
 const SAFE_CH = /^[A-Za-z0-9 _.,:/@#+=*!~%&$-]$/;
@@ -554,6 +565,42 @@ function canonicalizeRecord(i) {
       occurredAt: rStr(p.occurredAt, 'post.occurredAt'), publicationAt: rStr(p.publicationAt, 'post.publicationAt'),
       postSeq: p.postSeq, mentions: rList(p.mentions, 'post.mentions', rStr),
     } };
+  } else if (i.kind === 'post.import' || i.kind === 'post.write') {
+    // #1574 R0 (and R2's post.write, which writes the same shape) — a document post copied as it is stored: only the SETTLED fields exist here, so nothing unsettled can be
+    // dropped on the way in (the backfill refuses a post that carries one). createdAt is the stored time, never now.
+    const p = obj(i.post, ['id', 'body', 'author', 'createdAt', 'attachedTo', 'mentions', 'postSeq', 'conversation', 'onBehalfOf', 'recovered', 'opId', 'origin', 'attachments', 'originalAuthorToken', 'authorCorrectedAt', 'authorCorrectedBy'], 'post');
+    if (!Number.isSafeInteger(p.postSeq) || p.postSeq <= 0) fail('post.postSeq must be a positive safe integer');
+    const author = rStr(p.author, 'post.author'); if (!author) fail('post.author is empty');
+    const about = rOpt(p.attachedTo, 'post.attachedTo');
+    const iri = checkIri(`${ENTITY_IRI}${rStr(p.id, 'post.id')}`, 'post.id');
+    const conv = rOpt(p.conversation, 'post.conversation');
+    let origin = null;
+    if (p.origin != null) {
+      const o = obj(p.origin, ['mutationId', 'slot', 'occurredAt'], 'post.origin');
+      origin = { mutationId: rStr(o.mutationId, 'post.origin.mutationId'), slot: rStr(o.slot, 'post.origin.slot'), occurredAt: rOpt(o.occurredAt, 'post.origin.occurredAt') };
+    }
+    if (p.attachments != null && !Array.isArray(p.attachments)) fail('post.attachments must be an array');
+    const attachments = (p.attachments || []).map((a, k) => {
+      const w = `post.attachments[${k}]`; obj(a, ['id', 'mime', 'name', 'size'], w);
+      if (!Number.isSafeInteger(a.size) || a.size < 0) fail(`${w}.size must be a non-negative safe integer`);
+      return { iri: checkIri(`${iri}/attachment/${k}`, `${w}`), index: k, id: rStr(a.id, `${w}.id`), mime: rStr(a.mime, `${w}.mime`), name: rStr(a.name, `${w}.name`), size: a.size };
+    });
+    record = { post: {
+      iri, body: rStr(p.body, 'post.body'),
+      author: checkIri(`${PERSON_IRI}${author}`, 'post.author'), createdAt: rStr(p.createdAt, 'post.createdAt'),
+      about: about ? checkIri(`${ENTITY_IRI}${about}`, 'post.attachedTo') : null,
+      mentions: rList(p.mentions, 'post.mentions', rStr), postSeq: p.postSeq,
+      conversation: conv ? checkIri(`https://scrumboard.local/talk/${conv}`, 'post.conversation') : null,
+      onBehalfOf: rOpt(p.onBehalfOf, 'post.onBehalfOf'), recovered: rOpt(p.recovered, 'post.recovered'), opId: rOpt(p.opId, 'post.opId'),
+      origin, attachments,
+      originalAuthorToken: rOpt(p.originalAuthorToken, 'post.originalAuthorToken'), authorCorrectedAt: rOpt(p.authorCorrectedAt, 'post.authorCorrectedAt'),
+      authorCorrectedBy: rOpt(p.authorCorrectedBy, 'post.authorCorrectedBy'),
+    } };
+  } else if (i.kind === 'post.redact') {
+    // #1574 R4a — content-free by construction: the intention names the post and nothing it said.
+    const p = obj(i.post, ['id'], 'post');
+    record = { post: { iri: checkIri(`${ENTITY_IRI}${rStr(p.id, 'post.id')}`, 'post.id') },
+      authorityRef: rStr(i.authorityRef, 'authorityRef'), occurredAt: rStr(i.occurredAt, 'occurredAt') };
   } else if (i.kind === 'decision.relate') {
     const target = checkIri(i.target, 'target');
     const supersedes = rList(i.supersedes, 'supersedes', checkIri);
@@ -649,6 +696,8 @@ function planRecord(c) {
   const fresh = [];
   const ins = [];          // [subject IRI, predicate IRI, object TEXT]
   const delAll = [];       // [{s, p, keep?:[subject, predicate]}]: every current value is removed (and, with keep, recorded there)
+  const delAny = [];       // #1574 R4a [{s, keep:[predicate…]}]: every triple of s is removed except those predicates
+  const delOwned = [];     // #1574 R4a [{owner, prefix}]: every triple of every node that is attachmentOf owner AND under prefix is removed
   let verGuard = null;
   let target;
   const add = (s, p, o) => { if (o != null) ins.push([s, p, o]); };
@@ -723,6 +772,53 @@ function planRecord(c) {
     add(P.iri, TM.originActor, I(P.originActor));
     for (const m of P.mentions) add(P.iri, TM.mentionsName, L(m));
     add(P.iri, TM.recordedBy, ref(c.opId));
+  } else if (c.kind === 'post.import' || c.kind === 'post.write') {
+    const P = R.post; target = null;   // a create: the post IRI must be fresh
+    fresh.push(P.iri);
+    add(P.iri, TM.type, I(TM.Comment));
+    add(P.iri, TM.text, L(P.body));
+    add(P.iri, TM.author, I(P.author));
+    add(P.iri, TM.dateCreated, L(P.createdAt));
+    add(P.iri, TM.about, P.about && I(P.about));
+    for (const m of P.mentions) add(P.iri, TM.mentionsName, L(m));
+    add(P.iri, TM.postSeq, String(P.postSeq));   // the STORED number, an xsd:integer: never renumbered
+    // #1574 U1–U4 — the talk tag (a grouping, not access control), the DECLARED onBehalfOf (a literal, never proof), provenance strings
+    add(P.iri, TM.conversation, P.conversation && I(P.conversation));
+    add(P.iri, TM.onBehalfOf, P.onBehalfOf == null ? null : L(P.onBehalfOf));
+    add(P.iri, TM.recovered, P.recovered == null ? null : L(P.recovered));
+    add(P.iri, TM.opId, P.opId == null ? null : L(P.opId));
+    for (const k of ['originalAuthorToken', 'authorCorrectedAt', 'authorCorrectedBy']) add(P.iri, TM[k], P[k] == null ? null : L(P[k]));
+    if (P.origin) {
+      add(P.iri, TM.originMutation, L(P.origin.mutationId)); add(P.iri, TM.originSlot, L(P.origin.slot));
+      add(P.iri, TM.originOccurredAt, P.origin.occurredAt == null ? null : L(P.origin.occurredAt));
+    }
+    for (const A of P.attachments) {   // one fresh node per attachment, by array index; the bytes stay on disk
+      fresh.push(A.iri);
+      add(A.iri, TM.attachmentOf, I(P.iri)); add(A.iri, TM.attachmentIndex, String(A.index));
+      add(A.iri, TM.identifier, L(A.id)); add(A.iri, TM.name, L(A.name)); add(A.iri, TM.encodingFormat, L(A.mime)); add(A.iri, TM.contentSize, String(A.size));
+      add(A.iri, TM.recordedBy, ref(c.opId));
+    }
+    add(P.iri, TM.recordedBy, ref(c.opId));
+  } else if (c.kind === 'post.redact') {
+    // #1574 R4a — LOGICAL deletion only: every content triple of the post is deleted and the node is left as a tombstone
+    // (RedactedPost, its original postSeq and recordedBy, and redactedBy = this operation). The precondition is a LIVE
+    // post: an unknown target, or one already redacted, is PRECONDITION_FAILED and changes nothing. This does NOT make
+    // the text physically unrecoverable from the store's files; that is the physical slice, not this kind.
+    const P = R.post.iri; target = P;
+    pre.push(`    ${I(P)} ${I(TM.type)} ${I(TM.Comment)} ; ${I(TM.postSeq)} ?xps .`);
+    // An ALLOW-list, not a deny-list: every triple of the post goes except the two the tombstone keeps, so a field added
+    // later (or one this list never knew) cannot survive a redaction; and every node under the post's attachment prefix
+    // goes with it (attachments go with a redacted post).
+    delAny.push({ s: P, keep: [TM.postSeq, TM.recordedBy] });
+    // Attachment nodes go only when ownership is PROVEN twice (attachmentOf the post AND under the post's attachment prefix).
+    // Anything ambiguous refuses the whole redaction rather than widening what is deleted: a node under the prefix that
+    // does not say it belongs to this post, or a node that says it belongs to this post but lives elsewhere.
+    const AP = `${P}/attachment/`;
+    pre.push(`    FILTER NOT EXISTS { ?xa1 ${I(TM.attachmentOf)} ${I(P)} FILTER(!STRSTARTS(STR(?xa1), ${JSON.stringify(AP)})) }`);
+    pre.push(`    FILTER NOT EXISTS { ?xa2 ?xa2p ?xa2o FILTER(STRSTARTS(STR(?xa2), ${JSON.stringify(AP)})) FILTER NOT EXISTS { ?xa2 ${I(TM.attachmentOf)} ${I(P)} } }`);
+    delOwned.push({ owner: P, prefix: AP });
+    add(P, TM.type, I(TM.RedactedPost));
+    add(P, TM.redactedBy, ref(c.opId));
   } else if (c.kind === 'person.import') {
     target = null;   // only the Person nodes below; like a create, it names no receipt target
   } else {
@@ -761,7 +857,7 @@ function planRecord(c) {
     for (const a of P.aliases) add(P.iri, TM.aliases, L(a));
     add(P.iri, TM.recordedBy, ref(c.opId));
   }
-  return { target, pre, fresh, ins, delAll, verGuard };
+  return { target, pre, fresh, ins, delAll, delAny, delOwned, verGuard };
 }
 
 function compileRecord(c) {
@@ -797,6 +893,16 @@ function compileRecord(c) {
     dBinds.push(ok(`?xd${k}`, `xd${k}`));
     del.push(`  ${v(ref(s))} ${ref(p)} ?d_xd${k} .`);
     if (keep) dIns.push(`  ${v(ref(keep[0]))} ${ref(keep[1])} ?d_xd${k} .`);
+  });
+  (plan.delAny || []).forEach(({ s, keep }, k) => {
+    top.push(`  OPTIONAL { ${ref(s)} ?xap${k} ?xao${k} FILTER(?xap${k} NOT IN (${keep.map(ref).join(', ')})) }`);
+    dBinds.push(ok(`?xap${k}`, `xap${k}`), ok(`?xao${k}`, `xao${k}`));
+    del.push(`  ${v(ref(s))} ?d_xap${k} ?d_xao${k} .`);
+  });
+  (plan.delOwned || []).forEach(({ owner, prefix }, k) => {
+    top.push(`  OPTIONAL { ?xs${k} ${ref(LOGBORN_TERMS.attachmentOf)} ${ref(owner)} . ?xs${k} ?xsp${k} ?xso${k} FILTER(STRSTARTS(STR(?xs${k}), ${JSON.stringify(prefix)})) }`);
+    dBinds.push(ok(`?xs${k}`, `xs${k}`), ok(`?xsp${k}`, `xsp${k}`), ok(`?xso${k}`, `xso${k}`));
+    del.push(`  ?d_xs${k} ?d_xsp${k} ?d_xso${k} .`);
   });
   for (const [s, p, o] of plan.ins) dIns.push(`  ${v(ref(s))} ${ref(p)} ${v(o)} .`);
 

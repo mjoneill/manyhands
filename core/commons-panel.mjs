@@ -35,6 +35,14 @@ export const ENTRANCE_ABSENT_ON = 'commons';
 
 /** localStorage key for the "what had I already seen" cursor. */
 export const SEEN_KEY = 'manyhands:commons:lastSeenAt';
+/**
+ * #1574 R3 T2 — the badge's state when the server serves the commit-ordered feed (the conversations unit ON):
+ * `{cursor, unread: [post ids]}`. A post's `createdAt` is fixed when it is RESERVED but it becomes visible when it
+ * COMMITS, so a slow post can carry an older time than one the reader has already passed. Counting by time misses it;
+ * counting the posts DELIVERED by the commit-ordered feed, and not yet seen, cannot. The legacy `SEEN_KEY` is kept for
+ * the document path (unit OFF) and read once as the starting point of a migration.
+ */
+export const UNREAD_KEY = 'manyhands:commons:unread.v2';
 
 /** Refresh cadence for the unread count while the panel is closed. Slow on
  *  purpose — this drives a badge, not a feed. The open panel polls faster
@@ -193,12 +201,103 @@ export function mountCommonsPanel(doc, opts = {}) {
     }
   }
 
-  async function refreshUnread() {
+  // ── the commit-ordered badge (unit ON) ──────────────────────────────────
+  // State: {cursor, unread: [post ids], known: string}. `unread` has NO cap and is matched by post IDENTITY. `known` is
+  // what this reader has been delivered: line n-1 holds the EXACT id of the post at postSeq n (a UUID packed into 22
+  // base64 characters, any other id verbatim), so a rebuilt store that puts a DIFFERENT post at a number already seen
+  // is always told apart from the post that was seen (B7b). No fingerprint: a collision would silently mark a post seen.
+  // Held in memory for the session; storage is best effort (a failing write is ignored).
+  const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  const pack = (id) => {
+    const t = String(id);
+    if (!UUID.test(t)) return t.includes('\n') ? JSON.stringify(t) : `=${t}`;   // '=' marks a verbatim id (never a packed one)
+    const hex = t.replace(/-/g, ''); let bits = ''; for (const ch of hex) bits += parseInt(ch, 16).toString(2).padStart(4, '0');
+    bits += '0000'; let out = ''; for (let i = 0; i < bits.length; i += 6) out += B64[parseInt(bits.slice(i, i + 6), 2)];
+    return out;   // 132 bits → 22 characters, exact and reversible
+  };
+  const knownAt = (known, ps) => (Number.isSafeInteger(ps) && ps > 0 ? (known[ps - 1] ?? '') : '');
+  const setKnown = (known, ps, id) => { if (Number.isSafeInteger(ps) && ps > 0) { while (known.length < ps) known.push(''); known[ps - 1] = pack(id); } return known; };
+  let mem;   // undefined = not loaded yet; null = no state
+  const readState = () => {
+    if (mem !== undefined) return mem;
+    try { const v = storage && storage.getItem(UNREAD_KEY); const o = v ? JSON.parse(v) : null; mem = o && typeof o.cursor === 'string' && Array.isArray(o.unread) ? { cursor: o.cursor, unread: new Set(o.unread), known: typeof o.known === 'string' && o.known ? o.known.split('\n') : [] } : null; } catch { mem = null; }
+    return mem;
+  };
+  const writeState = (st) => {
+    mem = st;
+    try { if (storage) storage.setItem(UNREAD_KEY, JSON.stringify({ cursor: st.cursor, unread: [...st.unread], known: st.known.join('\n') })); } catch { /* private mode, quota: the session keeps counting */ }
+  };
+  const gone = (c) => c && (c.redacted === true || c.op === 'redact');   // hidden from counts (decision dd472a5f)
+  const GRACE_MS = 15 * 60 * 1000;   // decision edf8f91c: the once-per-browser migration window
+  /** One pass over the feed from `from`. */
+  async function walk(from, onItem) {
+    let tok = from;
+    for (let guard = 0; guard < 100000; guard++) {
+      let res, page;
+      try { res = await fetch(`${baseUrl}/api/conversations?afterCommit=${encodeURIComponent(tok)}&limit=200`); page = await res.json(); } catch { return { failed: true }; }
+      if (res.status === 400 && page && page.code === 'GRAPH_DISCOVERY_OFF') return { off: true };
+      if (res.status === 409) return { resync: true };
+      if (res.status === 503) return { failed: true };   // the feed exists but cannot be read right now: keep the badge as it is
+      if (!res.ok || !page || Array.isArray(page) || !Array.isArray(page.conversations) || typeof page.nextAfterCommit !== 'string') return { off: true };
+      for (const c of page.conversations) onItem(c);
+      tok = page.nextAfterCommit;
+      if (page.phase === 'live' && page.conversations.length === 0) return { cursor: tok };
+    }
+    return { failed: true };
+  }
+  /** true when the commit feed answered (the badge is painted from it); false when it is not served here. */
+  async function refreshFromCommits() {
+    let st = readState();
+    if (!st) {
+      // First use of the commit feed on this browser: walk it once from the start. A legacy time cursor keeps what was
+      // unread then, with the owner's 15-minute grace (edf8f91c); no legacy cursor is a first visit, and counts nothing.
+      const legacy = readCursor();
+      const since = legacy && Number.isFinite(Date.parse(legacy)) ? new Date(Date.parse(legacy) - GRACE_MS).toISOString() : null;
+      const unread = new Set(); const known = [];
+      const r = await walk('start', (c) => {
+        setKnown(known, c.postSeq, c.id);
+        if (gone(c)) unread.delete(c.id);
+        else if (since && typeof c.createdAt === 'string' && c.createdAt > since) unread.add(c.id);
+      });
+      if (r.off) return false;
+      if (!r.cursor) return true;
+      st = { cursor: r.cursor, unread, known };
+    } else {
+      const unread = new Set(st.unread); const known = [...st.known];
+      const r = await walk(st.cursor, (c) => { setKnown(known, c.postSeq, c.id); if (gone(c)) unread.delete(c.id); else unread.add(c.id); });
+      if (r.off) return false;
+      if (r.resync) {
+        // A NEW STORE (another incarnation): its positions mean nothing to the old cursor, so walk it from the start and
+        // reconcile by identity. A post still held that was unread stays unread; one no longer held, or redacted, is
+        // dropped; a post this reader was never delivered (an id the fingerprint at its number does not match) is new.
+        const old = st.unread, oldKnown = st.known; const next = new Set(); const known2 = [];
+        const r2 = await walk('start', (c) => {
+          setKnown(known2, c.postSeq, c.id);
+          if (gone(c)) { next.delete(c.id); return; }
+          if (old.has(c.id) || knownAt(oldKnown, c.postSeq) !== pack(c.id)) next.add(c.id);
+        });
+        if (r2.off) return false;
+        if (!r2.cursor) return true;
+        st = { cursor: r2.cursor, unread: next, known: known2 };
+      } else {
+        if (!r.cursor) return true;
+        st = { cursor: r.cursor, unread, known };
+      }
+    }
+    writeState(st);
+    paintBadge(st.unread.size);
+    return true;
+  }
+
+  /** The time-cursor badge (the document path). Returns true when the server says it serves the commit feed instead. */
+  async function refreshFromTimes() {
     const cursor = readCursor();
     const url = `${baseUrl}/api/conversations?limit=100${cursor ? `&since=${encodeURIComponent(cursor)}` : ''}`;
     let msgs;
     try {
       const res = await fetch(url);
+      if (res.headers && typeof res.headers.get === 'function' && res.headers.get('X-Commit-Feed') === '1') return true;
       if (!res.ok) return;
       msgs = await res.json();
     } catch { return; }
@@ -215,7 +314,26 @@ export function mountCommonsPanel(doc, opts = {}) {
     paintBadge(unreadSince(msgs, cursor));
   }
 
+  // Refreshes run ONE AT A TIME, in order: the mount, the timer and a wake can all ask at once, and two walks of the
+  // same cursor would race to write it.
+  // The commit feed is used once the server has SAID it serves it (the X-Commit-Feed header on the list request the badge
+  // makes anyway), never by probing: a board without it would answer a probe with a 400, logged by the browser as an error.
+  let commitFeed = false;
+  let queue = Promise.resolve();
+  function refreshUnread() {
+    const run = queue.then(async () => {
+      if (commitFeed || await refreshFromTimes()) {
+        commitFeed = true;
+        if (!(await refreshFromCommits())) { commitFeed = false; await refreshFromTimes(); }
+      }
+    });
+    queue = run.catch(() => {});
+    return run;
+  }
+
   function markSeen() {
+    const st = readState();
+    if (st) writeState({ cursor: st.cursor, unread: new Set(), known: st.known });
     if (latestAt) writeCursor(latestAt);
     paintBadge(0);
   }

@@ -1321,6 +1321,12 @@ function buildMcpServer() {
     if (args.conversation) params.set('conversation', args.conversation);   // #1401
     if (args.mentions_me) params.set('mentions_me', args.mentions_me);
     if (args.since) params.set('since', args.since);
+    // #1574 T6/T7 — ask REST for a BOUNDED page when the answer is bounded anyway: the default catch-up and a numeric
+    // limit up to REST's own cap (200) are byte-trimmed below to ~24 KB, far fewer posts than 200, so fetching every post
+    // to keep the last few dozen read the whole store on each call. `all`, `0` and larger numbers keep the full fetch.
+    const lim = args.limit == null ? '' : String(args.limit);
+    if (lim === '') params.set('limit', '200');
+    else if (/^\d+$/.test(lim) && Number(lim) > 0 && Number(lim) <= 200) params.set('limit', lim);
     const qs = params.toString();
     const path = '/api/conversations' + (qs ? '?' + qs : '');
     return jsonResult(capConversations(await apiCall('GET', path), args.limit));
@@ -2595,8 +2601,33 @@ async function refreshDecliningSeats() {
 }
 
 /** The stamp the whisper itself writes. Nothing wider is ever suppressed. */
-const isTendingOffer = (conversation) => conversation?.author === 'board'
-  && /^\[tending /.test(String(conversation?.body ?? ''));
+const isTendingOffer = (conversation) => conversation?.tending === true   // #1600 — decided at the routing read for an id-only hint
+  || (conversation?.author === 'board' && /^\[tending /.test(String(conversation?.body ?? '')));
+
+// #1600 D1 — AN ID-ONLY HINT IS ROUTED BY ONE READ AND DELIVERED WITHOUT ITS TEXT (decision 3dc9df18). With the graph
+// conversations unit on, REST sends `{conversation: {id}}` and nothing the post said. This process reads the post once,
+// for ROUTING only (its author for the #258 self-skip, its talk and the talk's partner, whether it is a tending offer),
+// and hands the fan-out a routing record that carries none of its text; the seat reads the post itself. A failed read, a
+// tombstone, an id that names no post, or a talk that cannot be read delivers to NO ONE: never a fall-back to everyone.
+// Logs name the id and the reason, never the text.
+const isIdOnlyHint = (c) => !!c && typeof c.id === 'string' && !('body' in c) && !('author' in c);
+async function routeHint(id) {
+  let p;
+  try { p = await apiCall('GET', `/api/conversations/${encodeURIComponent(id)}`); } catch { return { skip: 'the post could not be read' }; }
+  if (!p || p.redacted === true || typeof p.author !== 'string' || !p.author) return { skip: 'redacted, or not a post' };
+  let talkWith = null;
+  if (typeof p.conversation === 'string' && p.conversation) {
+    try { const t = await apiCall('GET', `/api/talks/${encodeURIComponent(p.conversation)}`); talkWith = typeof t?.with === 'string' && t.with ? t.with : null; }
+    catch { return { skip: 'its talk could not be read' }; }
+  }
+  return { route: {
+    hint: true, id: p.id, author: p.author, attachedTo: p.attachedTo ?? null,
+    ...(typeof p.conversation === 'string' && p.conversation ? { conversation: p.conversation } : {}),
+    ...(talkWith ? { talkWith } : {}),
+    tending: isTendingOffer(p),
+  } };
+}
+const hintContent = (id) => `New post ${id}: read it with conversation_get.`;
 
 const whisperTick = async () => {
   // Read once per tick, before the gate, so `lastActivityAt` is a pure getter
@@ -2771,7 +2802,7 @@ const CHECKS_TIMEOUT_MS = Number(process.env.MCP_CHECKS_TIMEOUT_MS ?? 45_000);
 // it by writing on the card; nothing here reclaims.
 const staleClaimAskOnce = async (checks) => {
   const std = (checks?.standing || []).find((s) => s.id === 'stale-claims');
-  const rows = (!std || std.error) ? null : (Array.isArray(std.rows) ? std.rows : []);   // unreadable ⇒ ask nothing, forget nothing
+  const rows = (!std || std.error || std.disabled) ? null : (Array.isArray(std.rows) ? std.rows : []);   // unreadable or disabled (#1574) ⇒ ask nothing, forget nothing
   return staleClaimAskTick({
     now: new Date().toISOString(),
     rows,
@@ -3364,12 +3395,12 @@ function broadcastFanout(conversation) {
     jsonrpc: '2.0',
     method: 'notifications/claude/channel',
     params: {
-      content: `${conversation.author}: ${conversation.body}${marker}`,
+      content: conversation.hint ? hintContent(conversation.id) : `${conversation.author}: ${conversation.body}${marker}`,
       meta: {
         chat_id: conversation.attachedTo || 'commons',
         message_id: conversation.id,
-        user: conversation.author,
-        ts: conversation.createdAt,
+        // #1600 — an id-only hint carries the post's identity and routing, not who said it or when (decision 3dc9df18)
+        ...(conversation.hint ? {} : { user: conversation.author, ts: conversation.createdAt }),
         // #1440 — the talk id, when the post was tagged into one. Without it a seat
         // saw a talk post as a plain room post and answered where the talk view
         // cannot see it. Scalar string, present only when tagged (#206 invariant).
@@ -3527,7 +3558,7 @@ function broadcastFanout(conversation) {
 // on it. meta stays strings-only (the #206 all-scalar invariant — a non-scalar
 // meta value deafens the seat).
 function tokenRingEnvelopeNotification(envelope) {
-  const content = envelope.payload.map((m) => `${m.author}: ${m.body}`).join('\n');
+  const content = envelope.payload.map((m) => (m.hint ? hintContent(m.id) : `${m.author}: ${m.body}`)).join('\n');   // #1600 — a hint stays text-free in the ring too
   const last = envelope.payload.length ? envelope.payload[envelope.payload.length - 1].author : 'token-ring';
   return {
     jsonrpc: '2.0',
@@ -3883,11 +3914,17 @@ const httpServer = http.createServer(async (req, res) => {
       let payload;
       try { payload = raw ? JSON.parse(raw) : {}; } catch { payload = {}; }
       if (payload && payload.conversation && payload.conversation.id) {
+        let target = payload.conversation;
+        if (isIdOnlyHint(target)) {
+          const r = await routeHint(target.id);
+          if (!r.route) { console.log(`channel notify: hint ${JSON.stringify(target.id)} delivered to no one (${r.skip})`); res.writeHead(204); return res.end(); }
+          target = r.route;
+        }
         // #613 — read the declarations at the moment of use, for the one post
         // kind that consults them. Hourly, and it removes the "only the tick
         // produces these" assumption entirely.
-        if (isTendingOffer(payload.conversation)) await refreshDecliningSeats();
-        const n = broadcastChannel(payload.conversation);
+        if (isTendingOffer(target)) await refreshDecliningSeats();
+        const n = broadcastChannel(target);
         console.log(`channel notify: fanned out to ${n} session(s)`);
       }
       res.writeHead(204);

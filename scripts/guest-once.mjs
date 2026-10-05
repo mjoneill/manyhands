@@ -262,7 +262,13 @@ if (channelMode && !wakes.length) {
     if (claimed.length) {
       const posts = [];
       for (const d of claimed) {
-        try { const m = await get(`/api/conversations/${encodeURIComponent(d.conversation)}`); posts.push({ id: m.id, author: m.author, body: m.body, createdAt: m.createdAt, attachedTo: m.attachedTo || null, conversation: m.conversation || null }); }   // #1368 — a card thread's post carries its thread; #1401 — and its talk tag
+        try {
+          const m = await get(`/api/conversations/${encodeURIComponent(d.conversation)}`);
+          // #1600 — a post redacted before this read answers as a tombstone ({id, postSeq, redacted: true, body: null}). It is
+          // handed over as what it is, a redaction marker, never as `undefined: null` and never with anything it said.
+          if (m && m.redacted === true) posts.push({ id: m.id, author: 'redacted', body: 'This post was redacted.', createdAt: null, attachedTo: null, conversation: null });
+          else posts.push({ id: m.id, author: m.author, body: m.body, createdAt: m.createdAt, attachedTo: m.attachedTo || null, conversation: m.conversation || null });   // #1368 — a card thread's post carries its thread; #1401 — and its talk tag
+        }
         catch (e) { console.error(`[#1346] ${agent.seatKey}: message ${d.conversation} unreadable, delivered as such: ${e.message}`); posts.push({ id: d.conversation, author: '?', body: '(message unreadable)', createdAt: d.offeredAt }); }
       }
       posts.sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));

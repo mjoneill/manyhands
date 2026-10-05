@@ -118,6 +118,19 @@ export function createGraphClient({ baseUrl, expectedDatasetId = null, timeoutMs
   }
   function refreshEpoch() { knownEpoch = null; }
 
+  // #1574 R4a — A CLIENT FOR DATASET X NEVER WRITES INTO DATASET Y. The identity used to be checked only while learning
+  // the epoch, and a failed check fell through to the write, so a client built for the wrong dataset applied it. Now the
+  // first write confirms the store is the expected dataset before anything is sent: a mismatch is refused, an identity
+  // that cannot be read is UNAVAILABLE, and in both cases nothing reached the store. Confirmed once per client.
+  let identityConfirmed = expectedDatasetId == null;
+  async function confirmIdentity() {
+    if (identityConfirmed) return null;
+    const id = await datasetIdentity();
+    if (id.ok) { identityConfirmed = true; if (knownEpoch == null) knownEpoch = String(id.epoch); return null; }
+    if (id.status === 'REFUSED') return { outcome: 'REJECTED', reason: `wrong dataset, nothing sent: ${id.reason}` };
+    return { outcome: 'UNAVAILABLE', reason: `the store's dataset identity could not be read, nothing sent: ${id.reason || id.status || 'unreadable'}` };
+  }
+
   async function update(intention, { epoch } = {}) {
     let compiled;
     try {
@@ -127,6 +140,9 @@ export function createGraphClient({ baseUrl, expectedDatasetId = null, timeoutMs
       throw e;
     }
     const { sparql, digest, canonical } = compiled;
+    let fence;
+    try { fence = await confirmIdentity(); } catch (e) { fence = { outcome: 'UNAVAILABLE', reason: `the store's dataset identity could not be read, nothing sent: ${e?.message || e}` }; }
+    if (fence) return { ...fence, digest };
     let res;
     try {
       const ep = epoch != null ? String(epoch) : await currentEpoch();

@@ -69,6 +69,8 @@ import { resolveProvenance } from './core/tending-provenance.mjs';
 import { boardToDomain, domainToBoard, cardToNode } from './core/mapping.mjs';
 import { OUTBOX_FIELD, outboxOf, withAnnouncement, listOutbox, modeProblem, legacyProof, postMatchesEntry, opIdFor, announcePostId, postCreateIntention } from './core/announce-outbox.mjs';   // #1574 C3a/C3b/C3c
 import { createGraphClient } from './core/graph-client.mjs';   // #1574 C3b — the conversations unit's executor door
+import { postFeed, DiscoveryError } from './core/post-discovery.mjs';   // #1574 R3
+import { RESERVATIONS_FIELD, postWriteId, findReservation, reservationKey, pruneReservations, validRequestId, validAttachmentSize, postWriteIntention } from './core/post-write.mjs';   // #1574 R2
 import { NEXT_POST_SEQ, POST_SEQ_EPOCH, isEpoch, mintEpoch, stampPostSeq, postSeqState, assertPostSeqWritable, PostSeqStateCorrupt, migrationRequiredBody, parseSeqSyntax, checkSeqEpoch, selectSeqPage, SEQ_PARAMS } from './core/post-seq.mjs';   // #1592 — the document path's post sequence
 import { verifyShaIntegrity, readShaStamp, collectShas, SHA_POPULATION } from './core/sha-integrity.mjs';
 import { summariseSeat, recommendInterval, backlogFor, costCoverage, budgetGateStatus, TICK_MS } from './core/insights.mjs';   // #1290 shadow insights
@@ -93,7 +95,7 @@ import { deriveGraph, personByKey } from './core/people.mjs';
 import { queryCards, facetCards, excerptOf, EXCERPT_CEILING } from './core/cards-query.mjs';
 import { similarCards } from './core/similar-cards.mjs';
 import { queryChangesFromLog, parseSince, EPOCH_CHANGED } from './core/changes-log-query.mjs';
-import { feedQuery, feedRowsFromBindings } from './core/logborn-feed.mjs';   // #1561 — the unit's writes in the change feed
+import { feedQuery, feedRowsFromBindings, postFeedQuery, postFeedRows, REDACTED_IDS_QUERY, redactedIdsFrom } from './core/logborn-feed.mjs';   // #1561 — the unit's writes in the change feed
 import { readEvents, nextSeq, oldestRetainedAt, seqAsOf, seqOfEntityEvent, activityReadWindow, advanceActivityCursor } from './core/event-log.mjs';
 import { writeSnapshot, readSnapshot, sweepSnapshotTemps, snapshotPaths } from './core/graph-snapshot.mjs';   // #884 · #1386 reads the sidecar
 import { staleClaims, STALE_CLAIM_HOURS } from './core/stale-claims.mjs';   // #455
@@ -764,18 +766,26 @@ function logRefused(req, statusCode, data) {
     let tail = rawTail;
     try { tail = decodeURIComponent(rawTail); } catch { /* malformed escape — the raw form is the only id it has */ }
     const actor = (request && (request.by || request.author || request.createdBy || request.decidedBy)) || null;
+    // #1574 W39/W40 — A REFUSED POST LEAVES NO COPY OF WHAT IT SAID. This log is append-only and redaction never reaches
+    // it, so a refused conversation write (a retry of a redacted post above all) would put the post's text back into a
+    // retained store. Its audit keeps the outcome and the identifiers: who, which requestId, which status and code. Not the
+    // body, attachments, mentions, card or talk, and not the human-readable error, which can name the card or talk.
+    const contentFree = req.method === 'POST' && /^\/api\/conversations\/?$/.test(url);
+    const ident = (o) => (o && typeof o === 'object' ? { ...(typeof o.requestId === 'string' ? { requestId: o.requestId } : {}), ...(typeof o.code === 'string' ? { code: o.code } : {}) } : null);
     appendEvent(EVENT_LOG_DIR, {
       op: 'refused',
       entity: { kind: kindEntry ? kindEntry[1] : 'request', id: tail || url },
       actor: typeof actor === 'string' ? actor : null,
       state: null,
-      reason: String((data && (data.error || data.message)) || `HTTP ${statusCode}`),
-      request: redactSecrets(request),
+      reason: contentFree
+        ? String((data && data.code) || `HTTP ${statusCode}`)
+        : String((data && (data.error || data.message)) || `HTTP ${statusCode}`),
+      request: contentFree ? ident(request) : redactSecrets(request),
       // #1167 — the refusal's RESPONSE too. A claim 409 names the incumbent
       // holder and an ifVersion 409 names currentVersion only in the body that
       // went back; without it the row says "refused" and not by whom or against
       // what, which is the audit gap #1167 exists to close.
-      response: data ?? null,
+      response: contentFree ? ident(data) : (data ?? null),
       status: statusCode,
       route: `${req.method} ${url}`,
     });
@@ -2144,7 +2154,8 @@ async function handleSearchAll(req, res) {
     // Posts — BM25 by scan over this read of the board: no index held, so
     // nothing to sync and nothing stale (see core/cross-search.mjs for why).
     const t0 = performance.now();
-    const conversations = Array.isArray(data.conversations) ? data.conversations : [];
+    let conversations;
+    try { conversations = await postsView(data); } catch (e) { if (postsUnavailable(res, e)) return; throw e; }   // #1574
     const scanned = X.scanRank(conversations, q, { k });
     const scanMs = Math.round(performance.now() - t0);
     const postHits = scanned.hits.map(({ id, score, item: c }) => ({
@@ -5801,7 +5812,7 @@ async function handleCreateModelCall(req, res) {
  * must not queue behind the thing it exists to diagnose (#1114's herd took the
  * board down twice today, and both times the API could not answer why).
  */
-function handleInsights(req, res) {
+async function handleInsights(req, res) {
   try {
     const q = parseQuery(req.url);
     const now = Date.now();
@@ -5816,7 +5827,8 @@ function handleInsights(req, res) {
     const inWindow = calls.filter((c) => c.calledAt >= since);
 
     const agents = agentsOf(data).map(agentToWire);
-    const convs = Array.isArray(data.conversations) ? data.conversations : [];
+    let convs;
+    try { convs = await postsView(data); } catch (e) { if (postsUnavailable(res, e)) return; throw e; }   // #1574
 
     const seats = [];
     const names = new Set([...agents.map((a) => a.seatKey).filter(Boolean),
@@ -5936,14 +5948,28 @@ async function handleCreateDelivery(req, res) {
     if (!conversation) return sendJSON(res, 400, { error: 'conversation is required — the id of the message offered.' });
     const source = typeof body.source === 'string' ? body.source : 'fanout';
     if (!DELIVERY_SOURCES.has(source)) return sendJSON(res, 400, { error: `source must be one of ${[...DELIVERY_SOURCES].join(' | ')} (got ${JSON.stringify(body.source)})` });
+    // #1574 D1 — with the conversations unit ON the graph is authoritative, as for GET /api/conversations/:id: it is read
+    // first (outside the lock), and a graph that cannot be read is a 503, never "not held", never a created delivery, and
+    // never answered from a document copy instead. Only a post the graph does not hold falls back to the document.
+    let inGraph = false;
+    let redacted = false;
+    if (ANNOUNCE_EXECUTOR) {
+      const g = await readGraphPost(conversation);
+      if (g.unavailable) return sendJSON(res, 503, { error: `the graph could not be read, so whether this board holds conversation ${JSON.stringify(conversation)} is unknown: ${g.unavailable}`, code: 'GRAPH_UNAVAILABLE' });
+      inGraph = !!(g.post || g.redacted);
+      redacted = !!g.redacted;
+    }
     const result = await withWriteLock(async () => {
       const data = readBoard();
-      if (!(Array.isArray(data.conversations) && data.conversations.some((c) => c && c.id === conversation))) {
+      if (!inGraph && !(Array.isArray(data.conversations) && data.conversations.some((c) => c && c.id === conversation))) {
         return { status: 400, wire: { error: `conversation ${JSON.stringify(conversation)} is not a message this board holds. A delivery of nothing is refused.` } };
       }
       // Idempotent on (seat, message): a re-offer is the SAME inbox item, not a second one.
       const existing = deliveriesOf(data).find((d) => d['scrum:deliveredTo'] === to && d['scrum:ofConversation'] === conversation);
       if (existing) return { status: 200, wire: deliveryToWire(existing) };
+      // A redacted post is offered to no one NEW (there is nothing to deliver); a delivery that already existed keeps its
+      // identity and history above, and resolves to the tombstone.
+      if (redacted) return { status: 409, wire: { error: `conversation ${JSON.stringify(conversation)} has been redacted; it is not offered to anyone new`, code: 'POST_REDACTED' } };
       const now = new Date().toISOString();
       const entity = {
         '@id': DELIVERY_ID(), '@type': 'scrum:Delivery',
@@ -6616,6 +6642,7 @@ const STANDING_CHECKS = [
     // only when some claim is old enough to be stale, and only from the
     // oldest such claim forward.
     id: 'stale-claims',
+    readsDocumentPosts: true,   // #1574 — disabled under the graph conversations unit (see the standing loop)
     claim: `every held card has a write from its holder on it within the last ${STALE_CLAIM_HOURS} h — `
       + 'or the holder has said when the next one comes; a silent claim is asked about, never reclaimed (#455)',
     run: (data) => staleClaims({
@@ -6631,6 +6658,7 @@ const STANDING_CHECKS = [
     // within 24 h; declarations that expired within 7 d whose holder has
     // posted since. A lapsed role nobody acts on is not a row — it ended.
     id: 'role-expiry',
+    readsDocumentPosts: true,   // #1574 — disabled under the graph conversations unit (see the standing loop)
     claim: 'no held role is within 24 h of lapsing unannounced, and no seat is acting on a role that lapsed in the last 7 days (#1400)',
     run: (data, ctx) => roleExpiryRows({
       decls: seatDeclsFromGraph(ctx.queryGraphAll, ctx.store),
@@ -6915,6 +6943,11 @@ async function evaluateChecks() {
     // because nobody would think to". Summing them would make `stale` mean two
     // things at once, which is the confusion this endpoint exists to refuse.
     const standing = STANDING_CHECKS.map((c) => {
+      // #1574 — A DECISION-MAKER THAT CANNOT SEE GRAPH POSTS IS SWITCHED OFF, SAYING SO. With the conversations unit on,
+      // a seat may post only to the graph; a check that reads the document's posts would read it as silent and nudge it
+      // (stale-claims) or act on its role (role-expiry). It answers `disabled` with the reason, never an empty "nothing
+      // found" (#792), and its consumers treat that as unreadable: ask nothing, forget nothing. Unit off: unchanged.
+      if (c.readsDocumentPosts && ANNOUNCE_EXECUTOR) return { id: c.id, claim: c.claim, disabled: true, reason: DOC_POST_CHECK_DISABLED };
       const t0 = performance.now();
       const priced = (row) => { const ms = Math.round(performance.now() - t0); return { ...row, ms, ...(ms > CHECK_CEILING_MS ? { slow: true } : {}) }; };   // #1404
       try {
@@ -8285,15 +8318,30 @@ async function handleChanges(req, res) {
     // An unreadable executor REFUSES (503) — a feed that silently drops a source
     // reads as "nothing happened", which is the blindness this closes.
     let graph = null;
-    if (LOGBORN) {
+    let redactedPostIds = null;
+    // #1574 C1–C6 — with the conversations unit ON, posts and redactions are graph receipts too, and the log's older
+    // conversation rows are projected through the graph's tombstones. Either unit makes the executor a REQUIRED source:
+    // unreadable is a 503, never a log-only answer.
+    const convQuery = ANNOUNCE_EXECUTOR ? async (sparql) => {
+      const r = await POSTS_READER.query(sparql);
+      if (!r.ok) throw Object.assign(new Error(`the graph could not be read: ${r.reason || 'unreadable'}`), { code: 'GRAPH_EXECUTOR_UNAVAILABLE' });
+      return r.rows;
+    } : null;
+    if (LOGBORN || convQuery) {
       try {
-        graph = feedRowsFromBindings(await LOGBORN.query(feedQuery(from.cursor ? from.graph : 0)));
+        const after = from.cursor ? from.graph : 0;
+        graph = feedRowsFromBindings(await (LOGBORN ? LOGBORN.query(feedQuery(after)) : convQuery(feedQuery(after))));
+        if (convQuery) {
+          graph.rows = [...graph.rows, ...postFeedRows(await convQuery(postFeedQuery(after)), graph.through)];
+          redactedPostIds = redactedIdsFrom(await convQuery(REDACTED_IDS_QUERY));
+        }
       } catch (e) {
         if (graphRefused(res, e)) return;
         throw e;
       }
     }
     const result = queryChangesFromLog(events, {
+      redactedPostIds,
       graphRows: graph ? graph.rows : null,
       graphThrough: graph ? graph.through : null,
       graphEpoch: graph ? graph.epoch : null,          // #1575 — from the same snapshot as the rows
@@ -8470,9 +8518,15 @@ function handleHostPressure(req, res) {
   }
 }
 
-function handleBoardStatus(req, res) {
+async function handleBoardStatus(req, res) {
   try {
     const data = readBoard();
+    let posts;
+    let postsTotal = null;
+    try {   // #1574 T2 — the unit on: the newest ten by createdAt and the count, not every post
+      if (ANNOUNCE_EXECUTOR) { const t = await targetedPosts(data.conversations, { limit: 10, order: 'created' }); posts = t.posts; postsTotal = t.total; }
+      else posts = await postsView(data);
+    } catch (e) { if (postsUnavailable(res, e)) return; throw e; }   // #1574
     const cardsByColumn = {};
     for (const col of data.columns) cardsByColumn[col.id] = 0;
     for (const c of data.cards) {
@@ -8497,7 +8551,7 @@ function handleBoardStatus(req, res) {
           members: apexDescendantIds(data.cards, c.id).length });
       }
     }
-    const convs = [...data.conversations].sort((a, b) =>
+    const convs = [...posts].sort((a, b) =>
       String(a?.createdAt ?? '').localeCompare(String(b?.createdAt ?? '')));
     const recentConversations = convs.slice(-10).map((c) => ({
       id: c.id,
@@ -8511,7 +8565,7 @@ function handleBoardStatus(req, res) {
       cardsByColumn,
       columns: data.columns,
       nextShortId: data.nextShortId,
-      conversationsTotal: data.conversations.length,
+      conversationsTotal: postsTotal ?? posts.length,
       claims,
       apexes,
       // #1078 — ONE answer to "what is in flight": the claim is authoritative,
@@ -8850,23 +8904,27 @@ async function handleChannelStatus(req, res) {
 // ONE derivation (core/people.mjs deriveGraph) — there is no stored person
 // node and no maintained edge, so nothing here can fall out of sync with the
 // cards and conversations it is computed from.
-function handleListPeople(req, res) {
+async function handleListPeople(req, res) {
   try {
-    const data = readBoard();
-    sendJSON(res, 200, deriveGraph(data, { seats: currentRoster(data) }));
+    const doc = readBoard();
+    let data;
+    try { data = { ...doc, conversations: await postsView(doc) }; } catch (e) { if (postsUnavailable(res, e)) return; throw e; }   // #1574
+    sendJSON(res, 200, deriveGraph(data, { seats: currentRoster(doc) }));
   } catch (e) {
     console.error('GET /api/people:', e.message);
     sendJSON(res, 500, { error: 'Failed to derive people' });
   }
 }
 
-function handleGetPerson(req, res, key) {
+async function handleGetPerson(req, res, key) {
   try {
     // #628 — backward-paging cursors; every list is bounded by default and
     // the full history is one explicit call away.
     const q = parseQuery(req.url);
-    const data = readBoard();
-    const person = personByKey(data, { seats: currentRoster(data) }, decodeURIComponent(key), {
+    const doc = readBoard();
+    let data;
+    try { data = { ...doc, conversations: await postsView(doc) }; } catch (e) { if (postsUnavailable(res, e)) return; throw e; }   // #1574
+    const person = personByKey(data, { seats: currentRoster(doc) }, decodeURIComponent(key), {
       assignedBefore: q.assignedBefore,
       authoredBefore: q.authoredBefore,
       claimingBefore: q.claimingBefore,
@@ -9073,11 +9131,16 @@ function handleListCards(req, res) {
 // `nodeToCard` round-trip the domain object, and `domain.test.mjs:43,90` assert
 // that round-trip is lossless. A derived count has no business surviving it,
 // and those tests would break — correctly — if this moved onto the card.
-function handleGetCard(req, res, idOrShortId) {
+async function handleGetCard(req, res, idOrShortId) {
   try {
     const data = readBoard();
     const idx = findCardIndex(data, idOrShortId);
     if (idx < 0) return sendJSON(res, 404, { error: 'Card not found' });
+    let posts;
+    try {   // #1574 T1 — the unit on: only this card's posts (a card id that cannot go into a query safely takes the bulk path)
+      const t = ANNOUNCE_EXECUTOR ? await targetedPosts(data.conversations, { attachedTo: data.cards[idx].id }) : null;
+      posts = t ? t.posts : await postsView(data);
+    } catch (e) { if (postsUnavailable(res, e)) return; throw e; }   // #1574 — a card's comments include its graph posts
     const card = data.cards[idx];
     // ⭐ #1332 — `?outline=1` answers "where is the current state on this card"
     // WITHOUT paying for the body. It REPLACES `description`; it does not
@@ -9095,12 +9158,12 @@ function handleGetCard(req, res, idOrShortId) {
         ...rest,
         descriptionChars: outline.totalChars,
         outline,
-        comments: commentMetadata(data.conversations, card.id),
+        comments: commentMetadata(posts, card.id),
       });
     }
     // Spread rather than mutate: `data` came from readBoard() and the stored
     // object must not acquire a derived field.
-    sendJSON(res, 200, { ...card, comments: commentMetadata(data.conversations, card.id) });
+    sendJSON(res, 200, { ...card, comments: commentMetadata(posts, card.id) });
   } catch (e) {
     console.error('GET /api/cards/:id:', e.message);
     sendJSON(res, 500, { error: 'Failed to read card' });
@@ -10001,6 +10064,16 @@ const announcementEvent = (entry, actor = null) => ({
   op: 'update', actor, entity: { kind: 'announcement', id: entry.obligationId }, state: entry,
 });
 let ANNOUNCE_EXECUTOR = null;   // set at startup when SCRUM_GRAPH_UNIT_CONVERSATIONS=1
+// #1574 H1/S6 — the same executor, for READ paths only (lists, a post by id, a card's comments, /api/changes), under a
+// short user-facing budget: a HUNG executor answers a fast 503 instead of holding a page open for the writer's 15 s.
+// Writes, their acknowledgement and UNKNOWN handling keep ANNOUNCE_EXECUTOR's budget.
+let POSTS_READER = null;
+const POSTS_READ_TIMEOUT_MS = 3000;
+// #1574 T1–T6 — the BULK read (every post's triples: the unlimited list, load, people, search) is legitimately ~2 s on a
+// 36k corpus, so it gets its own longer per-request bound. The hot pages no longer take this path.
+let POSTS_BULK_READER = null;
+const POSTS_BULK_READ_TIMEOUT_MS = 10000;
+const DOC_POST_CHECK_DISABLED = 'disabled under the graph conversations unit (#1574): it reads document posts and would misread a seat that posts only to the graph';
 
 function decidePublish(data, obligationId) {
   const { origins, entries } = outboxOf(data);
@@ -10095,7 +10168,14 @@ async function publishThroughExecutor(entry) {
   let intention;
   try { intention = postCreateIntention(entry); } catch (e) { return { applied: false, block: 'malformed-entry', reason: e.message }; }
   const r = await ANNOUNCE_EXECUTOR.update(intention);
-  if (r.outcome === 'APPLIED') return { applied: true, postId: intention.post.id };
+  if (r.outcome === 'APPLIED') {
+    // #1574 R4a — an APPLIED receipt says the create happened, not that the post is still there: a post redacted since
+    // (its recording write lost, so the entry still says pending) is BLOCKED, never reported as published.
+    const q = await ANNOUNCE_EXECUTOR.query(`SELECT ?t WHERE { <https://scrumboard.local/entity/${intention.post.id}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> ?t }`);
+    if (!q.ok) return { applied: false, reason: `executor-unavailable: the post's current state could not be read (${q.reason || 'unreadable'})` };
+    if (q.rows.some((row) => row.t.value === 'https://scrumboard.local/ns#RedactedPost')) return { applied: false, block: 'POST_REDACTED', reason: 'the post was redacted after it was written' };
+    return { applied: true, postId: intention.post.id };
+  }
   if (r.outcome === 'REJECTED' || r.outcome === 'PRECONDITION_FAILED') {
     return { applied: false, block: r.reason === 'intent-collision' ? 'publisher-intent-collision' : `publisher-${String(r.outcome).toLowerCase()}`, reason: r.reason };
   }
@@ -10520,14 +10600,49 @@ const CONVERSATION_PARAMS = new Set([
   'attachedTo', 'author', 'since', 'mentions_me', 'before', 'limit', 'q',
   'conversation',   // #1401 — the 1:1 view: only posts carrying this talk tag
   ...SEQ_PARAMS,   // #1592 — afterSeq, beforeSeq, tail: opt-in seq mode (core/post-seq.mjs)
+  'afterCommit',    // #1574 R3 — graph discovery by commit order (core/post-discovery.mjs), conversations unit ON only
 ]);
+// #1574 R3 — the parameters that each select a DIFFERENT listing from afterCommit's commit order
+const AFTER_COMMIT_CONFLICTS = ['since', 'before', 'afterSeq', 'beforeSeq', 'tail'];
 
 const SEQ_PARAM_PRESENT = (q) => SEQ_PARAMS.some((k) => typeof q[k] === 'string');
 
+/**
+ * #1574 R3 — GET /api/conversations?afterCommit=… : posts discovered by the executor's commit order. Served only with
+ * the conversations unit ON (the posts it finds live in the graph); OFF, it is refused before anything is contacted.
+ * The cursor contract is core/post-discovery.mjs. A failure hands out no cursor.
+ */
+async function listByCommit(q, res) {
+  if (!ANNOUNCE_EXECUTOR) {
+    return sendJSON(res, 400, { error: 'afterCommit is served only with the graph conversations unit on (SCRUM_GRAPH_UNIT_CONVERSATIONS=1); the document path pages with afterSeq', code: 'GRAPH_DISCOVERY_OFF' });
+  }
+  const clash = AFTER_COMMIT_CONFLICTS.filter((k) => typeof q[k] === 'string');
+  if (clash.length) {
+    return sendJSON(res, 400, { error: `conflicting cursor parameters: afterCommit with ${clash.join(', ')} — each selects a different listing; send one`, code: 'CONFLICTING_CURSOR_PARAMS', params: ['afterCommit', ...clash] });
+  }
+  let limit = MAX_CONV_LIST_LIMIT;
+  if (typeof q.limit === 'string' && q.limit !== '') { const n = parseInt(q.limit, 10); if (Number.isFinite(n) && n >= 0) limit = Math.min(n, MAX_CONV_LIST_LIMIT); }
+  const filters = {
+    mentions_me: typeof q.mentions_me === 'string' ? q.mentions_me : null,
+    attachedTo: typeof q.attachedTo === 'string' ? q.attachedTo : null,
+    conversation: typeof q.conversation === 'string' && q.conversation ? q.conversation : null,
+  };
+  try {
+    return sendJSON(res, 200, await postFeed(ANNOUNCE_EXECUTOR, { after: q.afterCommit, limit, filters }));
+  } catch (e) {
+    if (e instanceof DiscoveryError) return sendJSON(res, e.status, e.body);
+    throw e;
+  }
+}
+
 async function handleListConversations(req, res) {
   try {
+    // #1574 R3 T2 — tells a client (the unread badge) that the commit-ordered feed is served here, on the request it makes
+    // anyway: probing `afterCommit` on a board without the unit would cost a 400, which a browser logs as an error.
+    if (ANNOUNCE_EXECUTOR) res.setHeader('X-Commit-Feed', '1');
     const q = queryGuard(req, res, CONVERSATION_PARAMS);
     if (!q) return;                       // guard already sent the 400
+    if (typeof q.afterCommit === 'string') return await listByCommit(q, res);   // #1574 R3 — never reads the document
     const data = readBoard();
     // #1592 — SEQ MODE IS OPT-IN. Only a request carrying afterSeq, beforeSeq or
     // tail gets it; with none of them `seqReq.mode` is null and everything below
@@ -10539,7 +10654,26 @@ async function handleListConversations(req, res) {
     // refused request writes nothing.
     const seqReq = SEQ_PARAM_PRESENT(q) ? parseSeqSyntax(q, MAX_CONV_LIST_LIMIT) : { mode: null };
     if (seqReq.error) return sendJSON(res, seqReq.error.status, seqReq.error.body);
+    // #1574 T3–T5 — the unit on and a PLAIN `?limit=N` (optionally author or attachedTo, nothing else): the newest N
+    // matching visible posts and the matching total, without reading every post. Any other shape takes the bulk path below.
+    if (ANNOUNCE_EXECUTOR && !seqReq.mode && typeof q.limit === 'string' && /^\d+$/.test(q.limit)
+      && Object.keys(q).every((k) => q[k] === undefined || ['limit', 'author', 'attachedTo'].includes(k))
+      && (q.attachedTo === undefined || q.attachedTo === 'null' || data.cards.some((c) => c.id === q.attachedTo))) {
+      const capped = Math.min(parseInt(q.limit, 10), MAX_CONV_LIST_LIMIT);
+      let t;
+      try {
+        t = await targetedPosts(data.conversations, {
+          limit: capped, ...(q.author !== undefined ? { author: q.author } : {}),
+          ...(q.attachedTo !== undefined ? { attachedTo: q.attachedTo === 'null' ? null : q.attachedTo } : {}),
+        });
+      } catch (e) { if (e && e.unavailable) return sendJSON(res, 503, { error: `the graph could not be read: ${e.unavailable}`, code: 'GRAPH_UNAVAILABLE' }); throw e; }
+      if (t) { res.setHeader('X-Total-Count', String(t.total)); return sendJSON(res, 200, t.posts); }
+    }
     let convs = data.conversations;
+    if (ANNOUNCE_EXECUTOR) {   // #1574 R1 — the graph's posts too, the graph winning by identity
+      try { convs = await mergedConversations(data.conversations); }
+      catch (e) { if (e && e.unavailable) return sendJSON(res, 503, { error: `the graph could not be read: ${e.unavailable}`, code: 'GRAPH_UNAVAILABLE' }); throw e; }
+    }
     if (typeof q.conversation === 'string' && q.conversation) {   // #1401
       if (!talksOf(data).some((t) => talkIdOf(t) === q.conversation)) return sendJSON(res, 400, { error: `no talk with id ${q.conversation}`, code: 'NO_SUCH_TALK' });
       convs = convs.filter((c) => c.conversation === q.conversation);
@@ -10688,8 +10822,186 @@ async function handleListConversations(req, res) {
   }
 }
 
-function handleGetConversation(req, res, id) {
+// #1574 R1/D1 — ONE POST READ FROM THE GRAPH (conversations unit ON). One query: the post's own triples and its attachment
+// nodes. Answers {unavailable} (the graph could not be read: never treated as "absent"), {absent}, {redacted: tombstone} or
+// {post}. The tombstone is R3's shape and carries nothing the post said (decision dd472a5f).
+const G = { type: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', S: 'https://schema.org/', NS: 'https://scrumboard.local/ns#',
+  ENTITY: 'https://scrumboard.local/entity/', PERSON: 'https://scrumboard.local/person/', TALK: 'https://scrumboard.local/talk/' };
+async function readGraphPost(id) {
+  const iri = `${G.ENTITY}${id}`;
+  if (!/^[^\s<>"{}|^`\\]+$/.test(String(id))) return { absent: true };
+  const q = await POSTS_READER.query(`SELECT ?s ?p ?o WHERE { { BIND(<${iri}> AS ?s) <${iri}> ?p ?o } UNION { ?s <${G.NS}attachmentOf> <${iri}> . ?s ?p ?o } }`);
+  if (!q.ok) return { unavailable: q.reason || 'unreadable' };
+  const own = q.rows.filter((r) => r.s.value === iri);
+  if (!own.length) return { absent: true };
+  return graphPostFrom(id, own, q.rows.filter((r) => r.s.value !== iri));
+}
+
+/** One post from its own triples and its attachment nodes' triples: {redacted: tombstone} | {post} | {absent}. */
+function graphPostFrom(id, own, attRows) {
+  const all = (pred) => own.filter((r) => r.p.value === pred).map((r) => r.o.value);
+  const one = (pred) => all(pred)[0];
+  const postSeq = Number(one(`${G.NS}postSeq`));
+  if (all(G.type).includes(`${G.NS}RedactedPost`)) return { redacted: { id, postSeq, redacted: true, body: null } };
+  if (!all(G.type).includes(`${G.S}Comment`)) return { absent: true };
+  const strip = (v, pre) => (typeof v === 'string' && v.startsWith(pre) ? v.slice(pre.length) : v ?? null);
+  const atts = new Map();
+  for (const r of attRows) {
+    const a = atts.get(r.s.value) || {}; atts.set(r.s.value, a);
+    const k = { [`${G.NS}attachmentIndex`]: 'index', [`${G.S}identifier`]: 'id', [`${G.S}name`]: 'name', [`${G.S}encodingFormat`]: 'mime', [`${G.S}contentSize`]: 'size' }[r.p.value];
+    if (k) a[k] = (k === 'index' || k === 'size') ? Number(r.o.value) : r.o.value;
+  }
+  const attachments = [...atts.values()].sort((x, y) => x.index - y.index).map(({ id: aid, name, mime, size }) => ({ id: aid, name, mime, size }));
+  const conversation = strip(one(`${G.NS}conversation`), G.TALK);
+  return { post: {
+    id, body: one(`${G.S}text`) ?? '', author: strip(one(`${G.S}author`), G.PERSON), attachedTo: strip(one(`${G.S}about`), G.ENTITY),
+    ...(conversation ? { conversation } : {}), attachments, mentions: all(`${G.NS}mentionsName`).sort(),
+    onBehalfOf: one(`${G.NS}onBehalfOf`) ?? null, createdAt: one(`${G.S}dateCreated`) ?? null, postSeq,
+  } };
+}
+
+/**
+ * #1574 R1 — THE COMMONS LIST WITH THE CONVERSATIONS UNIT ON: the graph's posts merged with the document's, the GRAPH
+ * WINNING BY POST IDENTITY (a post it holds, a tombstone included, replaces any document copy, so a redacted post's stale
+ * document text can never reappear), tombstones omitted (decision dd472a5f), in postSeq order. Two reads: every node with
+ * a postSeq, and every attachment node. Throws {unavailable} when the graph cannot be read: the caller answers 503,
+ * never a silent document-only list.
+ */
+async function mergedConversations(docPosts) {
+  const [q, qa] = await Promise.all([
+    POSTS_BULK_READER.query(`SELECT ?s ?p ?o WHERE { ?s <${G.NS}postSeq> ?n . ?s ?p ?o }`),
+    POSTS_BULK_READER.query(`SELECT ?s ?p ?o ?post WHERE { ?s <${G.NS}attachmentOf> ?post . ?s ?p ?o }`),
+  ]);
+  if (!q.ok) throw Object.assign(new Error('graph unavailable'), { unavailable: q.reason || 'unreadable' });
+  if (!qa.ok) throw Object.assign(new Error('graph unavailable'), { unavailable: qa.reason || 'unreadable' });
+  const bySubject = new Map();
+  for (const r of q.rows) { const k = r.s.value; if (!bySubject.has(k)) bySubject.set(k, []); bySubject.get(k).push(r); }
+  const attsOf = new Map();
+  for (const r of qa.rows) { const k = r.post.value; if (!attsOf.has(k)) attsOf.set(k, []); attsOf.get(k).push(r); }
+  const held = new Set(); const live = [];
+  for (const [iri, own] of bySubject) {
+    if (!iri.startsWith(G.ENTITY)) continue;
+    const id = iri.slice(G.ENTITY.length);
+    const g = graphPostFrom(id, own, attsOf.get(iri) || []);
+    if (g.absent) continue;
+    held.add(id);
+    if (g.post) live.push(g.post);
+  }
+  const merged = [...(docPosts || []).filter((c) => c && !held.has(c.id)), ...live];
+  const seqOf = (c) => (Number.isSafeInteger(c.postSeq) ? c.postSeq : Infinity);
+  return merged.map((c, i) => [c, i]).sort((a, b) => (seqOf(a[0]) - seqOf(b[0])) || (a[1] - b[1])).map(([c]) => c);
+}
+
+/**
+ * #1574 T1–T6 — TARGETED READS: the same answer as mergedConversations() + filter + window, without reading every post.
+ *
+ * The visible posts are (document posts the graph does NOT hold) ∪ (live graph posts); a document post the graph holds is
+ * either a live graph post (counted there) or a tombstone (hidden), so neither side counts twice and a redacted post's
+ * stale document copy never reappears. "Held" is cached per process (DOC_HELD): with the unit on no write adds a document
+ * post, and the only things that put a document id into the graph (the backfill, the rollback) run with REST stopped, so the
+ * set cannot change under a running server; the key still changes if the document's post list does.
+ *
+ * Graph side: a COUNT with the filters, the newest `window` live posts by the requested order, then the full triples of
+ * those few. Document side: in memory. The candidates from both are put through the SAME ordering as the full merge
+ * (postSeq, document before graph on a tie, then position; for 'created' that order then a stable sort by createdAt), and
+ * the newest `limit` kept. Throws {unavailable} like mergedConversations. Returns null when a filter value cannot be put
+ * into a query safely: the caller then takes the bulk path, which is always correct.
+ */
+let DOC_HELD = null;   // { key, held: Set<doc post id> }
+const SAFE_ID = /^[A-Za-z0-9._~-]{1,200}$/;
+async function docHeldIds(docPosts) {
+  const key = `${docPosts.length}:${docPosts[0]?.id ?? ''}:${docPosts[docPosts.length - 1]?.id ?? ''}`;
+  if (DOC_HELD && DOC_HELD.key === key) return DOC_HELD.held;
+  const held = new Set();
+  const ids = docPosts.map((p) => p?.id).filter((id) => typeof id === 'string' && SAFE_ID.test(id));
+  for (let i = 0; i < ids.length; i += 2000) {
+    const values = ids.slice(i, i + 2000).map((id) => `<${G.ENTITY}${id}>`).join(' ');
+    const q = await POSTS_READER.query(`SELECT ?s WHERE { VALUES ?s { ${values} } ?s <${G.NS}postSeq> ?n }`);
+    if (!q.ok) throw Object.assign(new Error('graph unavailable'), { unavailable: q.reason || 'unreadable' });
+    for (const r of q.rows) held.add(r.s.value.slice(G.ENTITY.length));
+  }
+  DOC_HELD = { key, held };
+  return held;
+}
+async function targetedPosts(docPosts, { limit = Infinity, author, attachedTo, order = 'seq' } = {}) {
+  if (author !== undefined && !SAFE_ID.test(author)) return null;
+  if (attachedTo !== undefined && attachedTo !== null && !SAFE_ID.test(attachedTo)) return null;
+  docPosts = Array.isArray(docPosts) ? docPosts : [];
+  const held = await docHeldIds(docPosts);
+  const match = (p) => (author === undefined || p.author === author)
+    && (attachedTo === undefined || (attachedTo === null ? p.attachedTo === null : p.attachedTo === attachedTo));
+  const docVisible = docPosts.filter((p) => p && !held.has(p.id) && match(p));
+  let where = `?s <${G.type}> <${G.S}Comment> ; <${G.NS}postSeq> ?n .`;
+  if (author !== undefined) where += ` ?s <${G.S}author> <${G.PERSON}${author}> .`;
+  if (attachedTo === null) where += ` FILTER NOT EXISTS { ?s <${G.S}about> ?ab }`;
+  else if (attachedTo !== undefined) where += ` ?s <${G.S}about> <${G.ENTITY}${attachedTo}> .`;
+  const fail = (q) => { throw Object.assign(new Error('graph unavailable'), { unavailable: q.reason || 'unreadable' }); };
+  const bounded = Number.isFinite(limit);
+  const margin = order === 'created' ? 10 : 0;   // equal createdAt across the window edge: a few extra candidates settle it
+  const sel = order === 'created'
+    ? `SELECT ?s WHERE { ${where} ?s <${G.S}dateCreated> ?c } ORDER BY DESC(?c) DESC(?n)`
+    : `SELECT ?s WHERE { ${where} } ORDER BY DESC(?n)`;
+  const [cq, wq] = await Promise.all([
+    POSTS_READER.query(`SELECT (COUNT(?s) AS ?c) WHERE { ${where} }`),
+    POSTS_READER.query(bounded ? `${sel} LIMIT ${limit + margin}` : sel),
+  ]);
+  if (!cq.ok) fail(cq);
+  if (!wq.ok) fail(wq);
+  const graphCount = Number(cq.rows[0]?.c?.value ?? 0);
+  const iris = wq.rows.map((r) => r.s.value);
+  const live = [];
+  if (iris.length) {
+    const values = iris.map((i) => `<${i}>`).join(' ');
+    const [q, qa] = await Promise.all([
+      POSTS_READER.query(`SELECT ?s ?p ?o WHERE { VALUES ?s { ${values} } ?s ?p ?o }`),
+      POSTS_READER.query(`SELECT ?s ?p ?o ?post WHERE { VALUES ?post { ${values} } ?s <${G.NS}attachmentOf> ?post . ?s ?p ?o }`),
+    ]);
+    if (!q.ok) fail(q);
+    if (!qa.ok) fail(qa);
+    const own = new Map(); for (const r of q.rows) (own.get(r.s.value) || own.set(r.s.value, []).get(r.s.value)).push(r);
+    const atts = new Map(); for (const r of qa.rows) (atts.get(r.post.value) || atts.set(r.post.value, []).get(r.post.value)).push(r);
+    for (const iri of iris) { const g = graphPostFrom(iri.slice(G.ENTITY.length), own.get(iri) || [], atts.get(iri) || []); if (g.post) live.push(g.post); }
+  }
+  // the full merge's order: postSeq ascending, the document's before the graph's on a tie, then position
+  const seqOf = (c) => (Number.isSafeInteger(c.postSeq) ? c.postSeq : Infinity);
+  const ranked = (arr, side) => arr.map((c, i) => ({ c, side, i }));
+  const bySeq = (a, b) => (seqOf(a.c) - seqOf(b.c)) || (a.side - b.side) || (a.i - b.i);
+  let docCand = ranked(docVisible, 0).sort(bySeq);
+  if (bounded) {
+    if (order === 'created') docCand = [...docCand].sort((a, b) => String(a.c.createdAt ?? '').localeCompare(String(b.c.createdAt ?? ''))).slice(-(limit + margin));
+    else docCand = docCand.slice(-limit);
+  }
+  let merged = [...docCand, ...ranked(live, 1)].sort(bySeq).map((x) => x.c);
+  if (order === 'created') merged = [...merged].sort((a, b) => String(a?.createdAt ?? '').localeCompare(String(b?.createdAt ?? '')));
+  if (bounded) merged = limit <= 0 ? [] : merged.slice(-limit);
+  return { posts: merged, total: docVisible.length + graphCount };
+}
+
+/**
+ * #1574 — THE ONE WAY A READ SURFACE SEES THE BOARD'S POSTS. Unit off: the document's, exactly as before. Unit on: R1's
+ * merge (graph posts, the graph winning by identity, tombstones omitted), so a new post is visible and a redacted one is
+ * not, on every surface that reads through here. Throws {unavailable}: the caller answers 503 ITSELF (routeApi does not
+ * await a handler's promise, so an uncaught rejection would never become a response).
+ */
+async function postsView(data) {
+  if (!ANNOUNCE_EXECUTOR) return Array.isArray(data?.conversations) ? data.conversations : [];
+  return mergedConversations(data?.conversations);
+}
+const postsUnavailable = (res, e) => {
+  if (e && e.unavailable) { sendJSON(res, 503, { error: `the graph could not be read: ${e.unavailable}`, code: 'GRAPH_UNAVAILABLE' }); return true; }
+  return false;
+};
+
+async function handleGetConversation(req, res, id) {
   try {
+    // With the conversations unit ON the graph is authoritative for a post it holds (a redaction lives there); a post it does
+    // not hold falls back to the document (not yet migrated). An unreadable graph is a 503, never a silent document answer.
+    if (ANNOUNCE_EXECUTOR) {
+      const g = await readGraphPost(id);
+      if (g.unavailable) return sendJSON(res, 503, { error: `the graph could not be read: ${g.unavailable}`, code: 'GRAPH_UNAVAILABLE' });
+      if (g.redacted) return sendJSON(res, 200, g.redacted);
+      if (g.post) return sendJSON(res, 200, g.post);
+    }
     const data = readBoard();
     const idx = findConversationIndex(data, id);
     if (idx < 0) return sendJSON(res, 404, { error: 'Conversation not found' });
@@ -10713,6 +11025,7 @@ async function handleCreateConversation(req, res) {
     if (typeof body.author !== 'string' || body.author.trim().length === 0) {
       return sendJSON(res, 400, { error: 'author is required (non-empty string)' });
     }
+    if (ANNOUNCE_EXECUTOR) return await createPostThroughGraph(res, body);   // #1574 R2 — the conversations unit ON
     // #761 — resolve `attachedTo` INSIDE the lock, against the same board
     // snapshot the post is appended to. Resolving beforehand would let a card
     // be deleted between the check and the write, which is the check passing
@@ -10764,6 +11077,173 @@ async function handleCreateConversation(req, res) {
     console.error('POST /api/conversations:', e.message);
     sendJSON(res, 500, { error: 'Failed to create conversation' });
   }
+}
+
+// ── #1574 R2 — an ordinary post written to the graph (conversations unit ON) ──
+//
+// The order, and why:
+//   1. under the document lock: the same checks as the document path (card, talk), the rewind check, and a lookup
+//      of this author's reservation for the key. Nothing is written here.
+//   2. no reservation: READ the graph for the post's node, with no lock held. A failed read is a 503 and consumes
+//      nothing (never "unreadable, so mint"). A node that exists is replayed with ITS number and time, or refused.
+//   3. still nothing: under the lock again, re-check (a concurrent first post of the same key may have reserved it),
+//      then take the next number and record the reservation in ONE document write.
+//   4. with the lock RELEASED, send the `post.write` intention. APPLIED → the post; intent-collision → 409; anything
+//      the executor could not settle → 503 GRAPH_WRITE_UNKNOWN with the requestId, and the same key replays.
+// No document conversation is ever written on this path.
+//
+// THE REWIND GUARD. POST_SEQ_MARK is the highest `nextPostSeq` this process has seen or issued, seeded at startup from
+// the graph's highest postSeq + 1. A document whose counter is BELOW it has been rewound (an older copy restored), and
+// every post write is refused until the runbook raises the counter. File identity and mtime play no part.
+// The seed is taken LAZILY, inside the first post's own graph read (one query either way): the server never contacts the
+// executor at startup, and a graph that is down when the server starts costs nothing until someone posts.
+let POST_SEQ_MARK = null;
+// Reservation keys this process has seen APPLIED, stamped `applied` (and so prunable) by the next reservation write.
+const APPLIED_RESERVATION_KEYS = new Set();
+const raisePostSeqMark = (n) => { if (Number.isSafeInteger(n) && n > 0) POST_SEQ_MARK = Math.max(POST_SEQ_MARK ?? 0, n); };
+const rewound = (data) => POST_SEQ_MARK != null && Number.isSafeInteger(data[NEXT_POST_SEQ]) && data[NEXT_POST_SEQ] < POST_SEQ_MARK;
+const behindGraphBody = () => ({ error: `the board document's post counter is behind the graph (a restored older copy?): post writes are refused until the counter is raised above the graph's highest postSeq`, code: 'POST_SEQ_BEHIND_GRAPH' });
+const unknownBody = (requestId, reason) => ({ error: `the graph write could not be confirmed: retry with the same requestId and it replays (${reason})`, code: 'GRAPH_WRITE_UNKNOWN', requestId });
+
+async function createPostThroughGraph(res, body) {
+  const author = body.author;
+  const requestId = body.requestId === undefined ? crypto.randomUUID() : body.requestId;
+  if (!validRequestId(requestId)) return sendJSON(res, 400, { error: 'requestId must be a string of 1–256 UTF-16 code units, with no control characters and no unpaired surrogates', code: 'INVALID_REQUEST_ID' });
+  const attachments = sanitizeAttachments(body.attachments);
+  const badSize = attachments.findIndex((a) => !validAttachmentSize(a.size));
+  if (badSize >= 0) return sendJSON(res, 400, { error: `attachments[${badSize}].size must be a non-negative integer`, code: 'INVALID_ATTACHMENT_SIZE' });
+  const postId = postWriteId(author, requestId);
+  let talkWith = null;
+  // The post, minus its number and time, from exactly what the document path would store.
+  const draft = (data) => {
+    const ref = resolveAttachedTo(body.attachedTo, data.cards);
+    if (!ref.ok) return { refused: ref.id };
+    const talk = resolveConversation(body.conversation, data);
+    if (!talk.ok) return { refusedTalk: talk.id, talkClosed: !!talk.closed };
+    if (talk.value) talkWith = talksOf(data).find((e) => talkIdOf(e) === talk.value)?.['scrum:with'] ?? null;
+    const conv = createConversationFromPayload(body, ref.value, talk.value);
+    conv.id = postId;
+    conv.attachments = attachments;
+    return { conv };
+  };
+  const refusal = (d) => {
+    if (d.refusedTalk !== undefined) {
+      return d.talkClosed
+        ? [409, { error: `talk ${d.refusedTalk} is closed — a participant can reopen it (PATCH /api/talks/${d.refusedTalk} {closed:false}); omit conversation for an untagged post`, code: 'TALK_CLOSED' }]
+        : [400, { error: `no talk with id ${d.refusedTalk} — conversation must name an open talk (POST /api/talks mints one); omit it for an untagged post`, code: 'NO_SUCH_TALK' }];
+    }
+    if (d.refused !== undefined) {
+      return [400, { error: `no card with id ${d.refused} — attachedTo must name a card by its uuid (a shortId is accepted and stored as the uuid); omit it, or send null, for a board-level post`, code: 'NO_SUCH_CARD' }];
+    }
+    return null;
+  };
+
+  // 1. checks + reservation lookup, nothing written
+  const first = await withWriteLock(async () => {
+    const data = readBoard();
+    assertPostSeqWritable(data);
+    const d = draft(data);
+    if (!d.conv) return d;
+    if (rewound(data)) return { behind: true };
+    raisePostSeqMark(POST_SEQ_MARK != null ? data[NEXT_POST_SEQ] : null);
+    const r = findReservation(data, requestId, author);
+    return r ? { conv: { ...d.conv, postSeq: r.postSeq, createdAt: r.createdAt }, key: r.key } : { conv: d.conv, unreserved: true };
+  });
+  const refused1 = refusal(first);
+  if (refused1) return sendJSON(res, ...refused1);
+  if (first.behind) return sendJSON(res, 409, behindGraphBody());
+  let post = first.conv;
+  let resKey = first.key ?? null;
+  let heldBefore = !!first.key;   // a reservation that existed before this request: this is a RETRY
+  let replay = false;
+
+  if (first.unreserved) {
+    // 2. read the graph: does this key's post already exist (a reservation compacted away)?
+    //    While the rewind mark is unseeded, the same query also reads the graph's highest postSeq: still ONE read.
+    const node = `{ <https://scrumboard.local/entity/${postId}> ?p ?o }`;
+    const q = await ANNOUNCE_EXECUTOR.query(POST_SEQ_MARK != null
+      ? `SELECT ?p ?o WHERE ${node}`
+      : `SELECT ?p ?o ?max WHERE { { SELECT (MAX(?n) AS ?max) WHERE { ?s <https://scrumboard.local/ns#postSeq> ?n } } OPTIONAL ${node} }`);
+    if (!q.ok) return sendJSON(res, 503, unknownBody(requestId, `the graph could not be read, nothing was reserved: ${q.reason || 'unreadable'}`));
+    if (POST_SEQ_MARK == null) { const mx = q.rows.find((row) => row.max)?.max?.value; raisePostSeqMark((mx == null ? 0 : Number(mx)) + 1); }
+    q.rows = q.rows.filter((row) => row.p && row.o);
+    const val = (pred) => q.rows.find((row) => row.p.value === pred)?.o?.value;
+    if (q.rows.some((row) => row.p.value === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' && row.o.value === 'https://scrumboard.local/ns#RedactedPost')) {
+      return sendJSON(res, 409, { error: 'this requestId names a post that has been redacted', code: 'POST_REDACTED', requestId });
+    }
+    const storedSeq = Number(val('https://scrumboard.local/ns#postSeq'));
+    const storedAt = val('https://schema.org/dateCreated');
+    if (q.rows.length && Number.isSafeInteger(storedSeq) && typeof storedAt === 'string') {
+      post = { ...post, postSeq: storedSeq, createdAt: storedAt };   // the ORIGINAL number and time; the receipt arbitrates the content
+      replay = true;
+    } else if (q.rows.length) {
+      return sendJSON(res, 409, { error: 'this requestId names a node that is not a readable post', code: 'POST_NODE_UNREADABLE', requestId });
+    } else {
+      // 3. mint, under the lock, re-checked
+      const minted = await withWriteLock(async () => {
+        const data = readBoard();
+        assertPostSeqWritable(data);
+        const d = draft(data);
+        if (!d.conv) return d;
+        if (rewound(data)) return { behind: true };
+        const held = findReservation(data, requestId, author);
+        if (held) return { conv: { ...d.conv, postSeq: held.postSeq, createdAt: held.createdAt }, key: held.key, held: true };
+        if (postSeqState(data).state === 'clean') return { migration: true };
+        const events = [];
+        if (!isEpoch(data[POST_SEQ_EPOCH])) { data[POST_SEQ_EPOCH] = mintEpoch(); events.push(boardMetaEvent(POST_SEQ_EPOCH, data[POST_SEQ_EPOCH])); }
+        const n = Number.isSafeInteger(data[NEXT_POST_SEQ]) && data[NEXT_POST_SEQ] > 0 ? data[NEXT_POST_SEQ] : 1;
+        data[NEXT_POST_SEQ] = n + 1;
+        const reservation = { postId, postSeq: n, createdAt: new Date().toISOString() };
+        const key = reservationKey(data, requestId, author);
+        const stamped = new Set(APPLIED_RESERVATION_KEYS);
+        data[RESERVATIONS_FIELD] = { ...pruneReservations(data[RESERVATIONS_FIELD], Date.now(), stamped), [key]: reservation };
+        events.push(boardMetaEvent(NEXT_POST_SEQ, n + 1), boardMetaEvent(RESERVATIONS_FIELD, { [key]: reservation }));
+        writeBoard(data, events);
+        raisePostSeqMark(n + 1);
+        for (const k of stamped) APPLIED_RESERVATION_KEYS.delete(k);   // recorded in this write
+        return { conv: { ...d.conv, postSeq: n, createdAt: reservation.createdAt }, key };
+      });
+      const refused3 = refusal(minted);
+      if (refused3) return sendJSON(res, ...refused3);
+      if (minted.behind) return sendJSON(res, 409, behindGraphBody());
+      if (minted.migration) return sendJSON(res, 409, migrationRequiredBody());
+      post = minted.conv;
+      resKey = minted.key ?? null;
+      heldBefore = !!minted.held;
+    }
+  }
+
+  // 4. the write, no lock held
+  const r = await ANNOUNCE_EXECUTOR.update(postWriteIntention(post));
+  if (r.outcome === 'APPLIED') {
+    // A RETRY's APPLIED may be the executor replaying the original receipt for a post that has since been REDACTED (the
+    // replay restores nothing; the answer would still say "created"), so a retry reads the post's type and refuses a
+    // redacted one (W30a/b). A fresh create is linearized at APPLIED and needs no read.
+    const retry = heldBefore || replay;
+    if (retry) {
+      const t = await ANNOUNCE_EXECUTOR.query(`SELECT ?t WHERE { <https://scrumboard.local/entity/${post.id}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> ?t }`);
+      if (!t.ok) return sendJSON(res, 503, unknownBody(requestId, `the post's current state could not be read: ${t.reason || 'unreadable'}`));
+      if (t.rows.some((row) => row.t.value === 'https://scrumboard.local/ns#RedactedPost')) {
+        return sendJSON(res, 409, { error: 'this requestId names a post that has been redacted', code: 'POST_REDACTED', requestId });
+      }
+    }
+    if (resKey) APPLIED_RESERVATION_KEYS.add(resKey);
+    // Announced ONCE, by the request that created it (W36): the push is a hint and R3 discovery is the authority, so a
+    // retry never re-announces, and a crash between commit and notify loses a hint, never a post.
+    // The hint carries the post's identity and nothing it said (decision 3dc9df18): a seat resolves it through discovery,
+    // which never serves a redacted body, so a redaction at any moment after this cannot have leaked its text here.
+    if (!retry) notifyMcpOfPost({ id: post.id });
+    const ignoredFields = unconsumedConversationFields(body).filter((k) => k !== 'requestId');
+    const out = ignoredFields.length ? { ...post, ignoredFields } : post;
+    return sendJSON(res, replay ? 200 : 201, out);
+  }
+  if (r.outcome === 'REJECTED' && r.reason === 'intent-collision') {
+    return sendJSON(res, 409, { error: 'this requestId already names a post with different content', code: 'REQUEST_ID_CONFLICT', requestId });
+  }
+  if (r.outcome === 'REJECTED' || r.outcome === 'PRECONDITION_FAILED') {
+    return sendJSON(res, 409, { error: `the graph refused the post: ${r.reason || r.outcome}`, code: 'GRAPH_WRITE_REFUSED', requestId });
+  }
+  return sendJSON(res, 503, unknownBody(requestId, `${String(r.outcome).toLowerCase()}${r.reason ? `: ${r.reason}` : ''}`));
 }
 
 // POST /api/attachments (#113) — base64-JSON upload, stored UUID-keyed on disk.
@@ -11468,7 +11948,10 @@ if (process.env.SCRUM_GRAPH_UNIT_CONVERSATIONS === '1') {
   // long enough for a real write under load; past it the outcome is UNKNOWN, the entry stays pending, and the
   // identical intention is replayed on the next attempt (the receipt makes that idempotent).
   ANNOUNCE_EXECUTOR = createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: 15000 });
+  POSTS_READER = createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: POSTS_READ_TIMEOUT_MS });
+  POSTS_BULK_READER = createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: POSTS_BULK_READ_TIMEOUT_MS });
   console.error(`${new Date().toISOString()} #1574 conversations unit ON: publisher-mode announcements go through the graph executor (lock released during the call)`);
+  console.error(`${new Date().toISOString()} #1574 conversations unit ON: standing checks stale-claims and role-expiry are DISABLED (${DOC_POST_CHECK_DISABLED})`);
 }
 if (GRAPH_SLICE.enabled) {
   installStructuredCloneCounter();
@@ -11533,7 +12016,11 @@ function handleLoad(req, res) {
     // That trap is why export-board reads this endpoint at all, and it was
     // proposed twice on 2026-08-04 by people who had both read the warning.
     const board = readBoard();
-    if (parseQuery(req.url).conversations === '1') { sendJSON(res, 200, board); return; }
+    if (parseQuery(req.url).conversations === '1') {
+      if (!ANNOUNCE_EXECUTOR) { sendJSON(res, 200, board); return; }
+      postsView(board).then((posts) => sendJSON(res, 200, { ...board, conversations: posts }), (e) => { if (!postsUnavailable(res, e)) sendJSON(res, 500, { error: 'Failed to load board' }); });   // #1574 — the board is a shared, frozen read: never mutated
+      return;
+    }
     const { conversations, ...rest } = board;
     sendJSON(res, 200, { ...rest, conversations: [], conversationsOmitted: true });
   } catch (e) {

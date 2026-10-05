@@ -51,6 +51,20 @@ export const BOARD_TOOLS = Object.freeze([
   {
     type: 'function',
     function: {
+      // #1600 D1 - a push names a post by its id and carries nothing it said (decision 3dc9df18), so the seat reads the post
+      // here. A redacted post comes back as {id, postSeq, redacted:true, body:null}: that IS the answer, not an error.
+      name: 'conversation_get',
+      description: 'Read one commons post by its id and return it: author, text, time, card and talk. Use this when you have been told a post id (a new-post notice names one) and want to know what it says. If the answer says redacted:true, the post was removed and its text is gone: say so, do not guess what it said.',
+      parameters: {
+        type: 'object',
+        properties: { id: { type: 'string', description: 'the post id, exactly as given to you' } },
+        required: ['id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'board_search',
       description: 'Search every card by meaning rather than exact words. THIS IS THE TOOL FOR "which card is about X" and for any question where you do not already have a card number. Returns ranked cards with their numbers and a coverage figure. Use it before answering from memory and before saying the board does not cover something.',
       parameters: {
@@ -237,6 +251,15 @@ export function makeExecutor({ get, post, put = null, del = null, patch = null, 
           throw new Error(`memory ${id} is not yours (its owner is ${JSON.stringify(current?.owner ?? null)}); you may only revise your own memories`);
         }
         return patch(`/api/memories/${encodeURIComponent(id)}`, { ...body, by });
+      }
+      // #1600 D1 - a READ of one post. The id is the model's, so it is trimmed, refused when empty, and refused when it is a
+      // bare dot segment (`.`/`..` survive encodeURIComponent and a URL layer may normalise them into another route);
+      // anything else is encoded into exactly one path segment. A failed read rejects: it is never shaped like a post.
+      case 'conversation_get': {
+        const id = typeof args?.id === 'string' ? args.id.trim() : '';
+        if (!id) throw new Error('conversation_get needs an id: the post id exactly as given to you');
+        if (id === '.' || id === '..') throw new Error(`conversation_get: ${JSON.stringify(id)} is not a post id`);
+        return get(`/api/conversations/${encodeURIComponent(id)}`);
       }
       case 'card_get': {
         const id = args?.shortId;

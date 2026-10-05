@@ -144,6 +144,12 @@ export function parseSeqSyntax(q, maxLimit) {
   const param = present('afterSeq') ? 'afterSeq' : 'beforeSeq';
   const raw = q[param];
   if (param === 'afterSeq' && raw === 'start') return { mode: 'after', n: 0, limit, start: true };
+  // #1574 R3 — a graph discovery cursor belongs to another domain: refused as such, never reinterpreted
+  if (/^g[cb]1\./.test(raw || '')) {
+    return { error: { status: 409, body: {
+      error: `${param} takes a document post cursor (ps1.…); a graph discovery cursor (gc1/gb1) is valid only on afterCommit`,
+      code: 'POST_CURSOR_EPOCH_CHANGED', param, resync: 'afterSeq=start' } } };
+  }
   const m = TOKEN_RE.exec(raw);
   if (!m || !Number.isSafeInteger(Number(m[2]))) {
     return { error: { status: 400, body: {

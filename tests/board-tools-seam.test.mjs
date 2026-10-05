@@ -52,6 +52,10 @@ test('#1196B SEAM: every declared tool reaches a real route — no tool 404s', a
     });
     assert.equal(m.status, 201);
     ARGS.memory_update = { id: (await m.json()).id, priority: 'p1' };
+    // #1574 D1 — conversation_get reads a REAL post by id (an unknown id would 404 by design and read as a missing route here)
+    const cv = await fetch(`${srv.baseUrl}/api/conversations`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ author: 'ada', body: 'a post to read by id' }) });
+    assert.equal(cv.status, 201);
+    ARGS.conversation_get = { id: (await cv.json()).id };
 
     // The real transport: no fakes, no injected shapes, no path strings in the
     // test. Whatever the executor asks for is what the server is asked for.

@@ -21,6 +21,12 @@ const QUOTA_CEILING = 500;
 
 const bucketOf = (ev) => (ev.entity?.kind === 'conversation' ? 'posts' : 'cards');
 
+/** #1574 C4 — a log conversation row whose post the graph now holds as a tombstone keeps its place, not its text. */
+function withoutRedactedText(row, redacted) {
+  if (!redacted || row.kind !== 'conversation' || !redacted.has(row.id)) return row;
+  return { ...row, title: null, redacted: true };
+}
+
 function toRow(ev) {
   const s = ev.state || {};
   return {
@@ -187,6 +193,8 @@ const BACK1 = /^chgb1\.(\d+)\.(\d+)\.(\d+)$/;
 const BACK2 = /^chgb2\.(\d+)\.(\d+)\.(\d+)\.(\d+)$/;
 const FWD3 = /^chg3\.(\d+)\.([0-9a-f]{32})\.(\d+)\.(\d+)$/;
 const BACK3 = /^chgb3\.(\d+)\.(\d+)\.([0-9a-f]{32})\.(\d+)\.(\d+)$/;
+// #1574 — graph posts page in the posts bucket, so a backward token needs a graph position PER BUCKET
+const BACK4 = /^chgb4\.(\d+)\.(\d+)\.([0-9a-f]{32})\.(\d+)\.(\d+)\.(\d+)$/;
 /** `since` → a time window, or the forward cursor's positions (log seq; executor epoch + commitSeq). */
 export function parseSince(since) {
   const s = String(since ?? '');
@@ -204,11 +212,13 @@ export function parseSince(since) {
 // Falling through to "an ISO time" answered it silently with whatever that comparison happened to give.
 const TOKEN_SHAPED = /^chgb?\d/;
 function unknownCursor(s) {
-  return Object.assign(new Error(`unknown cursor ${JSON.stringify(String(s).slice(0, 80))}: not a cursor this board issued (chg1/chg2/chg3 forward, chgb1/chgb2/chgb3 backward)`), { code: 'UNKNOWN_CURSOR' });
+  return Object.assign(new Error(`unknown cursor ${JSON.stringify(String(s).slice(0, 80))}: not a cursor this board issued (chg1/chg2/chg3 forward, chgb1/chgb2/chgb3/chgb4 backward)`), { code: 'UNKNOWN_CURSOR' });
 }
 function parseBefore(before) {
   const s = String(before);
-  let m = BACK3.exec(s);
+  let m = BACK4.exec(s);
+  if (m) return { cardsLog: Number(m[1]), postsLog: Number(m[2]), incarnation: m[3], epoch: Number(m[4]), graph: Number(m[5]), graphPosts: Number(m[6]) };
+  m = BACK3.exec(s);
   if (m) return { cardsLog: Number(m[1]), postsLog: Number(m[2]), incarnation: m[3], epoch: Number(m[4]), graph: Number(m[5]) };
   m = BACK2.exec(s);
   if (m) return { cardsLog: Number(m[1]), postsLog: Number(m[2]), incarnation: null, epoch: Number(m[3]), graph: Number(m[4]) };
@@ -219,10 +229,12 @@ function parseBefore(before) {
 }
 export const forwardCursor = (log, epoch, graph, incarnation = null) => (incarnation
   ? `chg3.${log}.${incarnation}.${epoch}.${graph}` : `chg2.${log}.${epoch}.${graph}`);
-const backCursor = (b) => (b.incarnation
-  ? `chgb3.${b.cardsLog}.${b.postsLog}.${b.incarnation}.${b.epoch}.${b.graph}` : `chgb2.${b.cardsLog}.${b.postsLog}.${b.epoch}.${b.graph}`);
+const backCursor = (b) => (b.incarnation && b.graphPosts != null && b.graphPosts !== b.graph
+  ? `chgb4.${b.cardsLog}.${b.postsLog}.${b.incarnation}.${b.epoch}.${b.graph}.${b.graphPosts}`
+  : b.incarnation
+    ? `chgb3.${b.cardsLog}.${b.postsLog}.${b.incarnation}.${b.epoch}.${b.graph}` : `chgb2.${b.cardsLog}.${b.postsLog}.${b.epoch}.${b.graph}`);
 
-const itemBucket = (it) => (it.src === 'graph' ? 'cards' : bucketOf(it.ev));
+const itemBucket = (it) => (it.src === 'graph' ? (it.row.kind === 'conversation' ? 'posts' : 'cards') : bucketOf(it.ev));   // #1574 — a graph post is a post
 const itemAt = (it) => (it.src === 'graph' ? it.row.at : it.ev.recorded_at);
 const itemPos = (it) => (it.src === 'graph' ? it.row.graph.commitSeq : it.ev.seq);
 
@@ -251,6 +263,7 @@ export function queryChangesFromLog(events, {
   since, oldestRetained, limit, history = false, entity, actor, before,
   graphRows = null, logThrough = null, graphThrough = null, oldestRetainedSeq = null,
   graphEpoch = null, graphEpochBase = null, graphIncarnation = null, graphIncarnationFrom = null,
+  redactedPostIds = null,   // #1574 C4 — posts the graph holds as tombstones: a LOG row naming one is served without its text
 } = {}) {
   if (since == null || since === '') {
     const err = new Error('since is required (ISO timestamp, or the `cursor` of a previous reply): a changes query without a cutoff is an unbounded read');
@@ -330,6 +343,9 @@ export function queryChangesFromLog(events, {
       && Number(ev.reverseExport.epoch ?? LEGACY_EPOCH) === from.epoch
       && ev.reverseExport.incarnation === from.incarnation));
   }
+  // #1574 — does the graph source carry posts at all (the conversations unit)? Decided on the WHOLE source, never on one
+  // page's leftovers, so a backward walk keeps one meaning for its token from the first page to the last.
+  const graphHasPosts = (graphRows || []).some((r) => r.kind === 'conversation');
   let gRows = (graphRows || []).filter((r) => (from.cursor ? r.graph.commitSeq > from.graph : r.at >= since));
   if (entity != null) { logEvs = logEvs.filter((ev) => ev.entity?.shortId === Number(entity)); gRows = gRows.filter((r) => r.shortId === Number(entity)); }
   if (actor != null) { logEvs = logEvs.filter((ev) => ev.actor === actor); gRows = gRows.filter((r) => r.by === actor); }
@@ -344,11 +360,11 @@ export function queryChangesFromLog(events, {
   // the epoch the tokens below name: the executor's when it was read, else the caller's
   const outEpoch = epoch ?? backTok?.epoch ?? (from.cursor ? from.epoch : LEGACY_EPOCH);
   const outInc = epoch != null ? store.incarnation : (backTok ? backTok.incarnation : (from.cursor ? from.incarnation : null));   // #1577
-  let bound = { cardsLog: lt + 1, postsLog: lt + 1, graph: gt + 1, epoch: outEpoch, incarnation: outInc };
+  let bound = { cardsLog: lt + 1, postsLog: lt + 1, graph: gt + 1, graphPosts: gt + 1, epoch: outEpoch, incarnation: outInc };
   if (before != null && before !== '') {
     const tok = backTok;
     if (tok) {
-      bound = { cardsLog: tok.cardsLog, postsLog: tok.postsLog, graph: tok.graph, epoch: outEpoch, incarnation: outInc };
+      bound = { cardsLog: tok.cardsLog, postsLog: tok.postsLog, graph: tok.graph, graphPosts: tok.graphPosts ?? tok.graph, epoch: outEpoch, incarnation: outInc };
       // #1561 ROLLBACK — a page token whose graph half is past 1 was minted with the
       // executor as a source (a flag-OFF reply always mints graph 1). With that source
       // gone, the rows it bounded now sit in the log at seqs NEWER than the token's log
@@ -360,7 +376,7 @@ export function queryChangesFromLog(events, {
         err.resync = true;
         throw err;
       }
-      rows = rows.filter((it) => itemPos(it) < (it.src === 'graph' ? bound.graph : itemBucket(it) === 'posts' ? bound.postsLog : bound.cardsLog));
+      rows = rows.filter((it) => itemPos(it) < (it.src === 'graph' ? (itemBucket(it) === 'posts' ? bound.graphPosts : bound.graph) : itemBucket(it) === 'posts' ? bound.postsLog : bound.cardsLog));
     } else {
       const cursor = Number(before);
       const at = rows.findIndex((it) => it.src === 'log' && it.ev.seq === cursor);
@@ -415,12 +431,15 @@ export function queryChangesFromLog(events, {
     cardsLog: minPos(cut.cards, 'log', bound.cardsLog),
     postsLog: minPos(cut.posts, 'log', bound.postsLog),
     graph: minPos(cut.cards, 'graph', bound.graph),
+    // #1574 — each bucket's graph prefix advances on its own, but only when graph POSTS are in this window at all; with
+    // none, the posts bucket has no graph prefix to keep and the token stays the chgb3 every older caller expects.
+    graphPosts: graphHasPosts ? minPos(cut.posts, 'graph', bound.graphPosts) : minPos(cut.cards, 'graph', bound.graph),
     epoch: outEpoch,
     incarnation: outInc,
   }) : null;
 
   return {
-    changes: merged.map((it) => (it.src === 'graph' ? it.row : toRow(it.ev))),
+    changes: merged.map((it) => (it.src === 'graph' ? it.row : withoutRedactedText(toRow(it.ev), redactedPostIds))),
     window: { since },
     newest: merged.length ? itemAt(merged.at(-1)) : null,
     oldest: merged.length ? itemAt(merged[0]) : null,

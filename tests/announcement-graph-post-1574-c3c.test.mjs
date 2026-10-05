@@ -474,19 +474,22 @@ test('G8 ONE counter for two paths: a graph post takes the next number, a docume
   });
 });
 
-test('G9 the reservation SURVIVES an unfinished attempt: executor down, a document post lands meanwhile and gets a HIGHER number, then the same obligation publishes under its RESERVED number and digest, and the counter was consumed once', { skip: SKIP }, async () => {
+test('G9 the reservation SURVIVES an unfinished attempt: executor down for two attempts, then reachable again; an ORDINARY post lands meanwhile and gets a HIGHER number (with the unit on an ordinary post is a graph post and takes its number from the same counter), then the same obligation publishes under its RESERVED number and digest, and the counter was consumed once', { skip: SKIP }, async () => {
   await withStack(migratedSeeded('m-g', 3), {}, async ({ s, exec, store }) => {
     const port = exec.port;
     await killExecutor(exec);
     assert.equal((await publish(s.baseUrl, 'm-g:claim')).body.status, 'pending');
     const first = await entryOf(s.baseUrl, 'm-g:claim');
     assert.equal(first.postSeq, 4, 'reserved at the first attempt although nothing reached the graph');
-    const between = await docPost(s.baseUrl, 'posted while the graph write was pending');
-    assert.equal(between.body.postSeq, 5, 'an intervening document post gets a HIGHER number');
     assert.equal((await publish(s.baseUrl, 'm-g:claim')).body.status, 'pending', 'still down: a second attempt');
     assert.equal((await entryOf(s.baseUrl, 'm-g:claim')).postSeq, 4, 'the retry did not reserve again');
     const back = await startExecutor({ store, datasetId: DSID, create: false, port });
     try {
+      // the graph is reachable again, but the obligation has NOT been retried yet: an ordinary post is written meanwhile
+      const between = await docPost(s.baseUrl, 'posted while the graph write was pending');
+      assert.equal(between.status, 201, JSON.stringify(between.body));
+      assert.equal(between.body.postSeq, 5, 'an intervening ordinary post gets a HIGHER number');
+      assert.equal((await entryOf(s.baseUrl, 'm-g:claim')).postSeq, 4, 'the outstanding reservation is untouched by the intervening post');
       assert.equal((await publish(s.baseUrl, 'm-g:claim')).body.status, 'published');
       const done = await entryOf(s.baseUrl, 'm-g:claim');
       assert.deepEqual([done.postSeq, done.publicationAt], [first.postSeq, first.publicationAt], 'the stored reservation was reused unchanged');
