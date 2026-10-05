@@ -4,7 +4,7 @@
  *
  *   node scripts/migrate-post-seq-1592.mjs --board-file <board-data.json> [--dry-run] [--rollback]
  *
- * MIGRATE   Only a file with NO postSeqEpoch is numbered: each post gets postSeq = its array index + 1 (today's
+ * MIGRATE   Only a file with NO postSeqEpoch and NO numbered post is numbered: each post gets postSeq = its array index + 1 (today's
  *           order exactly, which is array order and NOT time order), nextPostSeq = count + 1, and a new
  *           postSeqEpoch (a UUID). A file that already HAS an epoch is left byte-for-byte alone: survivors of a
  *           removal keep their numbers and the counter is never reset to count + 1, because a reset would hand a
@@ -12,6 +12,11 @@
  * ROLLBACK  strips postSeq from every post and nextPostSeq / postSeqEpoch from the document. Migrating again
  *           afterwards gives the same posts and seqs under a DIFFERENT epoch, so a token from before the rollback is
  *           refused (409 POST_CURSOR_EPOCH_CHANGED) instead of being read against a different numbering.
+ * REFUSED   (exit 3, file byte-identical, stderr names the reason and lists the un-numbered post ids) any file the
+ *           server would call 'corrupt' (core/post-seq.mjs postSeqState): some posts numbered and some not, an epoch
+ *           while a post lacks a valid postSeq, numbers with no epoch, a duplicate, or a counter not above the highest
+ *           number. Such a file cannot keep both its existing numbers and array order: explicit reconciliation.
+ * NO-OP     a 'migrated' file (epoch, every post uniquely numbered, counter above them): exit 0, untouched.
  * --dry-run prints what would change and writes nothing.
  *
  * The file keeps its own shape: a legacy {cards, conversations, …} file stays legacy (the three fields are
@@ -24,6 +29,7 @@
  */
 import fs from 'node:fs';
 import crypto from 'node:crypto';
+import { postSeqState } from '../core/post-seq.mjs';
 
 const args = process.argv.slice(2);
 const opt = (k) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : null; };
@@ -55,6 +61,15 @@ if (jsonLd) {
 }
 
 const shape = jsonLd ? 'JSON-LD' : 'legacy';
+// The server's view of the same file, for the shared state rule.
+const state = postSeqState({
+  conversations: posts.map((p) => {
+    const v = getSeq(p);
+    return { id: jsonLd ? p['@id'] : p.id, ...(v !== undefined ? { postSeq: v } : {}) };
+  }),
+  ...(meta.postSeqEpoch !== undefined ? { postSeqEpoch: meta.postSeqEpoch } : {}),
+  ...(meta.nextPostSeq !== undefined ? { nextPostSeq: meta.nextPostSeq } : {}),
+});
 let changed = false;
 if (ROLLBACK) {
   const numbered = posts.filter((p) => getSeq(p) !== undefined).length;
@@ -65,8 +80,19 @@ if (ROLLBACK) {
     delete meta.nextPostSeq; delete meta.postSeqEpoch;
     changed = true;
   }
-} else if (meta.postSeqEpoch !== undefined) {
-  console.log(`${shape} file already numbered (epoch ${meta.postSeqEpoch}, nextPostSeq ${meta.nextPostSeq}): left untouched`);
+} else if (state.state !== 'empty' && state.state !== 'clean') {
+  // The SAME three-state rule the server enforces (core/post-seq.mjs postSeqState). 'migrated' is a no-op; 'corrupt'
+  // — some posts numbered and some not, an epoch while a post lacks a valid postSeq, numbers with no epoch, a
+  // duplicate, a counter not above the highest number — is REFUSED with the file byte-identical. A mixed file such as
+  // [A(1), B(none), C(2)] cannot keep both its existing numbers and array order: it needs explicit reconciliation.
+  if (state.state === 'migrated') {
+    console.log(`${shape} file already numbered (epoch ${meta.postSeqEpoch}, nextPostSeq ${meta.nextPostSeq}): left untouched`);
+  } else {
+    const ids = posts.filter((p) => !Number.isSafeInteger(getSeq(p))).map((p) => (jsonLd ? p['@id'] : p.id));
+    console.error(`REFUSED: ${shape} file's post sequence is inconsistent (${state.reason}). Nothing was written; reconcile explicitly.`);
+    if (ids.length) console.error(`un-numbered post ids:\n${ids.join('\n')}`);
+    process.exit(3);
+  }
 } else {
   const epoch = crypto.randomUUID();
   console.log(`${shape} file, ${posts.length} posts: postSeq = index + 1 (1..${posts.length}), nextPostSeq = ${posts.length + 1}, postSeqEpoch = ${epoch}`);

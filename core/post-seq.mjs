@@ -28,6 +28,75 @@ export const mintEpoch = () => crypto.randomUUID();
 export const tokenFor = (epoch, n) => `ps1.${epoch}.${n}`;
 
 /**
+ * The board's post-sequence state. Every post-creating handler asks this FIRST, inside its write lock, before it
+ * changes anything; a seq-mode read asks it before serving a cursor.
+ *
+ *   'empty'     no posts and no epoch: numbering starts here (the first post or seq-mode read mints the epoch).
+ *   'clean'     posts, no epoch, and NO post carries a postSeq key: an un-migrated board. Posts are appended exactly
+ *               as before #1592 (no postSeq, no mint, no counter); a seq-mode read is 409 POST_SEQ_MIGRATION_REQUIRED.
+ *   'migrated'  a valid epoch, every post a UNIQUE positive safe-integer postSeq, and nextPostSeq a safe integer
+ *               above every one of them: number as built.
+ *   'corrupt'   anything else — including posts numbered with no epoch, an epoch with an un-numbered post, a
+ *               duplicate, or a counter at or below a committed number. Every post-creating write and every seq-mode
+ *               read is refused (500 POST_SEQ_STATE_CORRUPT) with the document untouched: there is no automatic
+ *               answer that keeps both the existing numbers and array order.
+ * Returns {state, reason?}.
+ */
+export function postSeqState(data) {
+  const posts = Array.isArray(data?.conversations) ? data.conversations : [];
+  const hasEpoch = data?.[POST_SEQ_EPOCH] !== undefined;
+  const keyed = posts.filter((c) => c && typeof c === 'object' && POST_SEQ in c).length;
+  if (!hasEpoch) {
+    if (keyed === 0) return { state: posts.length === 0 ? 'empty' : 'clean' };
+    return { state: 'corrupt', reason: `${keyed} post(s) carry a postSeq but the board has no postSeqEpoch` };
+  }
+  if (!isEpoch(data[POST_SEQ_EPOCH])) return { state: 'corrupt', reason: 'postSeqEpoch is not a UUID' };
+  const seen = new Set();
+  let max = 0;
+  const bad = [];
+  for (const c of posts) {
+    const n = c && c[POST_SEQ];
+    if (!Number.isSafeInteger(n) || n <= 0 || seen.has(n)) { bad.push(c && c.id); continue; }
+    seen.add(n);
+    if (n > max) max = n;
+  }
+  if (bad.length) return { state: 'corrupt', reason: `${bad.length} post(s) without a unique positive postSeq under epoch ${data[POST_SEQ_EPOCH]}`, ids: bad.slice(0, 20) };
+  const next = data[NEXT_POST_SEQ];
+  if (!Number.isSafeInteger(next) || next <= max) return { state: 'corrupt', reason: `nextPostSeq ${JSON.stringify(next)} is not above the highest committed postSeq ${max}` };
+  return { state: 'migrated' };
+}
+
+/** The named error a post-creating handler throws (inside its lock, before any change) on a corrupt board. */
+export class PostSeqStateCorrupt extends Error {
+  constructor(detail) {
+    super(`POST_SEQ_STATE_CORRUPT: ${detail.reason}`);
+    this.code = 'POST_SEQ_STATE_CORRUPT';
+    this.body = {
+      error: `the board's post sequence is inconsistent (${detail.reason}); nothing was written. `
+        + 'This needs explicit reconciliation (see scripts/migrate-post-seq-1592.mjs, which refuses such a file and lists the posts).',
+      code: 'POST_SEQ_STATE_CORRUPT', reason: detail.reason, ...(detail.ids ? { ids: detail.ids } : {}),
+    };
+  }
+}
+
+/** Throws PostSeqStateCorrupt on a corrupt board; returns the state otherwise. */
+export function assertPostSeqWritable(data) {
+  const st = postSeqState(data);
+  if (st.state === 'corrupt') throw new PostSeqStateCorrupt(st);
+  return st.state;
+}
+
+/** 409 body for a seq-mode read of a 'clean' (un-migrated) board. */
+export function migrationRequiredBody() {
+  return {
+    error: 'this board has posts but no post sequence yet: seq cursors (afterSeq, beforeSeq, tail) are served only after '
+      + 'the migration (stop the server, then node scripts/migrate-post-seq-1592.mjs --board-file <board file>). '
+      + 'Reads without a cursor parameter work as before.',
+    code: 'POST_SEQ_MIGRATION_REQUIRED',
+  };
+}
+
+/**
  * Allocate the next postSeq onto `conv` and advance the document's counter. MUST be called inside the write lock,
  * on the same `data` the caller then passes to writeBoard: the number and the post are one write.
  *

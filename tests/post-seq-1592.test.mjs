@@ -11,8 +11,8 @@
  * a behaviour change with its own delayed-publication control, frozen separately; the MCP `conversation_list` field;
  * the GRAPH path (discovery by the executor's commitSeq, the reserve-41/commit-42/complete-41 control, rollback
  * materialisation and the cursor-epoch switch between the two domains); real redaction (a removed post is simulated by
- * editing a stopped board's file); board-status order; a board with posts but NO migration (not pinned: migrate before
- * use); power loss.
+ * editing a stopped board's file); board-status order; the done-nudge, wiki and rest/retire notices on an unmigrated board
+ * (only claim and release go through the outbox today: what the others do must be identified before it is changed); power loss.
  *
  * CONTRACT PINNED HERE
  *   FIELD     every post carries an integer `postSeq`, strictly increasing and never reused (NOT promised gap-free:
@@ -44,11 +44,22 @@
  *             afterSeq+beforeSeq, a seq param with since/before, and `tail` with any of afterSeq, beforeSeq, since or before.
  *   COMMIT    the number is allocated in the SAME document write that makes the post visible: a crash before it leaves neither the
  *             post nor an advanced counter, so the next post takes the number the lost one would have had.
+ *   STATES    CLEAN UNMIGRATED (no epoch, no post has a postSeq key): posting behaves exactly as today (no number, no epoch minted), a valid
+ *             seq-mode read is 409 `POST_SEQ_MIGRATION_REQUIRED` and writes nothing, no-cursor reads are served. VALID MIGRATED (an epoch, unique
+ *             positive safe-integer postSeq on every post, a counter above every one). ANYTHING ELSE is CORRUPT (mixed numbering with no epoch, an
+ *             epoch with un-numbered posts, a duplicate, a non-integer, a counter not above every sequence): the WHOLE mutation, a claim included,
+ *             is refused BEFORE any event or document write with 500 `POST_SEQ_STATE_CORRUPT`, and a valid seq-mode read the same way; malformed or
+ *             conflicting requests are still the 400s above (validation first). An empty board mints normally. Migration is an explicit step on a
+ *             STOPPED file, never a side effect of a request or of start-up. The script numbers ONLY a clean unmigrated file; a corrupt one is refused
+ *             with exit 3, the un-numbered ids listed, the file byte-identical, --dry-run the same; a fully migrated file is a no-op, exit 0.
+ *   INTERNAL  a claim on a clean unmigrated board still commits AND posts its notice as today, with the REAL legacyPostId; migration then preserves
+ *             the post and the proof. Nothing is skipped, logged-and-dropped, or blocked as legacy-proof-missing.
+ *   ONE SITE  every post is appended by one function, pushPost (Q14 scans server.js): a stray append would corrupt a migrated board.
  *   MIGRATE   node scripts/migrate-post-seq-1592.mjs --board-file F [--dry-run] [--rollback], on a STOPPED board's file, in whatever
- *             shape the file has (the three fields are top-level keys). Only a file with NO postSeqEpoch is numbered: postSeq =
- *             array index + 1, nextPostSeq = count + 1, a new postSeqEpoch (a UUID). A file that HAS an epoch is left byte-for-byte
- *             alone: no renumbering of survivors after a removal, no reset of the counter. --dry-run writes nothing. --rollback
- *             strips the three fields. Migrate, roll back, migrate: identical posts and seqs, a DIFFERENT epoch.
+ *             shape the file has (the three fields are top-level keys). Only a CLEAN file (no postSeqEpoch AND no postSeq on any post, or an
+ *             empty one) is numbered: postSeq = array index + 1, nextPostSeq = count + 1, a new postSeqEpoch (a UUID). A VALID MIGRATED file is
+ *             left byte-for-byte alone: no renumbering of survivors after a removal, no reset of the counter. A corrupt one exits 3 (Q12b).
+ *             --dry-run writes nothing. --rollback strips the three fields. Migrate, roll back, migrate: identical posts and seqs, a DIFFERENT epoch.
  *   BARRIER   env SCRUM_TEST_BARRIER_DIR with the fifo `after-events` (present since the C3a build).
  */
 import { test } from 'node:test';
@@ -310,6 +321,152 @@ test('Q8b a REFUSED request has no side effects: on a board with no epoch yet, m
   } finally { a?.stop(); }
 });
 
+// ---- the migration boundary. THREE states, and nothing else:
+//   CLEAN UNMIGRATED  no postSeqEpoch and no post has a `postSeq` key: posting behaves exactly as today (no number, no epoch),
+//                     a valid seq-mode read is 409 POST_SEQ_MIGRATION_REQUIRED and writes nothing.
+//   VALID MIGRATED    an epoch, unique positive safe-integer postSeq on every post, a counter above every one: numbering as built.
+//   ANYTHING ELSE     (mixed numbering with no epoch, an epoch with un-numbered posts, a duplicate, a non-integer, a counter that is not
+//                     above every sequence): CORRUPT. The WHOLE mutation is refused before any event or document write, 500
+//                     POST_SEQ_STATE_CORRUPT, file byte-identical; a valid seq-mode read is refused the same way.
+const T3 = () => [conv('c1', 'old one', T(1)), conv('c2', 'old two', T(2)), conv('c3', 'old three', T(3))];
+const ids = (r) => (Array.isArray(r.body) ? r.body : r.body.conversations).map((c) => c.id);
+function fileFor(conversations, extra = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ps1592-mig-'));
+  const file = path.join(dir, 'board.json');
+  fs.writeFileSync(file, JSON.stringify(makeBoardFixture({ conversations, ...extra }), null, 2));
+  const barrierDir = path.join(dir, 'barriers'); fs.mkdirSync(barrierDir);
+  return { dir, file, barrierDir };
+}
+const EPOCH = '11111111-2222-4333-8444-555555555555';
+const CORRUPT_BOARDS = [
+  ['mixed numbering and NO epoch', () => fileFor([conv('c1', 'a', T(1), { postSeq: 1 }), conv('c2', 'b', T(2)), conv('c3', 'c', T(3), { postSeq: 2 })])],
+  ['an epoch and a counter, but a post has no number', () => fileFor([conv('c1', 'a', T(1), { postSeq: 1 }), conv('c2', 'b', T(2))], { postSeqEpoch: EPOCH, nextPostSeq: 3 })],
+  ['an epoch, but NO post is numbered', () => fileFor(T3(), { postSeqEpoch: EPOCH, nextPostSeq: 1 })],
+  ['a duplicate postSeq', () => fileFor([conv('c1', 'a', T(1), { postSeq: 1 }), conv('c2', 'b', T(2), { postSeq: 1 })], { postSeqEpoch: EPOCH, nextPostSeq: 2 })],
+  ['a postSeq that is not an integer', () => fileFor([conv('c1', 'a', T(1), { postSeq: '1' }), conv('c2', 'b', T(2), { postSeq: 2 })], { postSeqEpoch: EPOCH, nextPostSeq: 3 })],
+  ['a counter that is not above every sequence', () => fileFor([conv('c1', 'a', T(1), { postSeq: 1 }), conv('c2', 'b', T(2), { postSeq: 2 })], { postSeqEpoch: EPOCH, nextPostSeq: 2 })],
+];
+for (const [label, make] of CORRUPT_BOARDS) {
+  test(`Q12 corrupt (${label}): the whole mutation is 500 POST_SEQ_STATE_CORRUPT with the file byte-identical; valid seq reads too; malformed ones stay 400; no-cursor reads are served`, async () => {
+    const { file, barrierDir } = make();
+    let a;
+    try {
+      a = await spawnServer(file, barrierDir);
+      const card = (await api(a.base, 'POST', '/api/cards', { title: 'claim me', description: 'x', createdBy: 'ada' })).body;   // a card is not a post: it commits
+      assert.ok(card?.id, 'precondition: card creation is not refused');
+      const settled = fs.readFileSync(file);
+      const before = await list(a.base);
+      assert.equal(before.status, 200, before.text);
+      assert.ok(Array.isArray(before.body), 'a no-cursor read is the bare array it always was');
+      const create = await post(a.base, 'must be refused');
+      assert.equal(create.status, 500, create.text);
+      assert.equal(create.body.code, 'POST_SEQ_STATE_CORRUPT');
+      const claim = await api(a.base, 'POST', `/api/cards/${card.id}/claim`, { by: 'ada' });
+      assert.equal(claim.status, 500, `an internal announcement must be refused WITH its change, not after it committed: ${claim.text}`);
+      assert.equal(claim.body.code, 'POST_SEQ_STATE_CORRUPT');
+      for (const qs of ['?afterSeq=start', '?tail=2', '?afterSeq=start&limit=2']) {
+        const r = await list(a.base, qs);
+        assert.equal(r.status, 500, `${qs}: ${r.text}`);
+        assert.equal(r.body.code, 'POST_SEQ_STATE_CORRUPT');
+      }
+      for (const qs of ['?afterSeq=garbage', '?tail=x', '?afterSeq=start&beforeSeq=start']) assert.equal((await list(a.base, qs)).status, 400, `${qs}: validation comes before the state check`);
+      assert.deepEqual(fs.readFileSync(file), settled, 'a refused mutation writes nothing: no event, no epoch, no counter, no claim, no obligation');
+      assert.equal((await api(a.base, 'GET', `/api/cards/${card.id}`)).body.claimedBy ?? null, null, 'the claim did not commit');
+      assert.deepEqual((await api(a.base, 'GET', '/api/outbox')).body, { origins: [], entries: [] });
+      const after = await list(a.base);
+      assert.equal(after.status, 200); assert.deepEqual(after.body, before.body, 'no-cursor reads are served exactly as before');
+      assert.equal((await list(a.base, '?limit=2')).status, 200);
+    } finally { a?.stop(); }
+  });
+}
+test('Q12a CLEAN unmigrated: posts append exactly as today (no number, NO epoch), a valid seq read is 409 POST_SEQ_MIGRATION_REQUIRED with the file byte-identical, and migration then numbers every post, the new ones included, in array order', async () => {
+  const { file, barrierDir } = fileFor(T3());
+  let a;
+  try {
+    a = await spawnServer(file, barrierDir);
+    const made = await post(a.base, 'posted before the migration');
+    assert.equal(made.status, 201, made.text);
+    assert.equal(made.body.postSeq, undefined, 'no number is allocated on an unmigrated board');
+    assert.ok(!/postSeqEpoch/.test(fs.readFileSync(file, 'utf8')), 'and no epoch is minted: minting on top of un-numbered posts is the hazard');
+    const settled = fs.readFileSync(file);
+    for (const qs of ['?afterSeq=start', '?tail=2']) {
+      const r = await list(a.base, qs);
+      assert.equal(r.status, 409, `${qs}: ${r.text}`);
+      assert.equal(r.body.code, 'POST_SEQ_MIGRATION_REQUIRED');
+    }
+    for (const qs of ['?afterSeq=garbage', '?tail=x']) assert.equal((await list(a.base, qs)).status, 400);
+    assert.deepEqual(fs.readFileSync(file), settled, 'a refused read writes nothing');
+    assert.deepEqual(bodies(await list(a.base)), ['old one', 'old two', 'old three', 'posted before the migration'], 'no-cursor reads are exactly as before');
+    a.stop();
+  } finally { a?.stop(); }
+  assert.equal(migrate(file).code, 0, 'the clean file migrates');
+  await withBoard(file, async (s) => {
+    const d = await drain(s.baseUrl, 10);
+    assert.deepEqual(d.got.map((c) => c.body), ['old one', 'old two', 'old three', 'posted before the migration']);
+    assert.deepEqual(d.got.map((c) => c.postSeq), [1, 2, 3, 4], 'every post, the one posted during the unmigrated window included, in array order');
+    assert.equal((await post(s.baseUrl, 'after')).body.postSeq, 5);
+  });
+});
+test('Q12b the migration script refuses every CORRUPT file (exit 3, the un-numbered post ids listed where there are any, the file byte-identical, --dry-run the same), and migrates a clean one', async () => {
+  for (const [label, make] of CORRUPT_BOARDS) {
+    const { file } = make();
+    const before = fs.readFileSync(file);
+    const r = migrate(file);
+    assert.equal(r.code, 3, `${label}: ${r.out}${r.err}`);
+    const said = `${r.out}${r.err}`;
+    assert.ok(said.trim().length > 0, `${label}: a refusal says why`);
+    for (const c of JSON.parse(before.toString('utf8')).conversations.filter((x) => x.postSeq === undefined)) {
+      if (label.includes('NO epoch') || label.includes('has no number') || label.includes('NO post is numbered')) assert.ok(said.includes(c.id), `${label}: the un-numbered id ${c.id} must be listed: ${said}`);
+    }
+    assert.deepEqual(fs.readFileSync(file), before, `${label}: a refused migration writes nothing`);
+    assert.equal(migrate(file, '--dry-run').code, 3, `${label}: --dry-run reports the same refusal`);
+  }
+  const { file } = fileFor(T3());
+  assert.equal(migrate(file).code, 0);
+  assert.equal(migrate(file).code, 0, 'a fully migrated file is a no-op, exit 0');
+});
+test('Q13 a CLAIM on a clean unmigrated board retains its notice: the claim commits, the notice exists, its obligation carries the REAL legacyPostId, publication verifies it, and migration preserves both the post and the proof', async () => {
+  const { file, barrierDir } = fileFor(T3());
+  let a, b;
+  try {
+    a = await spawnServer(file, barrierDir);
+    const card = (await api(a.base, 'POST', '/api/cards', { title: 'claim me', description: 'x', createdBy: 'ada' })).body;
+    const claim = await api(a.base, 'POST', `/api/cards/${card.id}/claim`, { by: 'ada' });
+    assert.equal(claim.status, 200, `a claim must never fail because the commons is not migrated: ${claim.text}`);
+    assert.equal((await api(a.base, 'GET', `/api/cards/${card.id}`)).body.claimedBy, 'ada');
+    const notices = (await list(a.base)).body.filter((c) => c.author === 'board');
+    assert.equal(notices.length, 1, 'the notice exists, posted as today');
+    assert.equal(notices[0].postSeq, undefined, 'and it is un-numbered until the migration');
+    const ob = (await api(a.base, 'GET', '/api/outbox')).body;
+    const [e] = ob.entries;
+    assert.equal(e.mode, 'legacy'); assert.equal(e.legacyPostId, notices[0].id, 'the obligation carries the REAL proof, not a missing one');
+    const pub = await api(a.base, 'POST', `/api/outbox/${encodeURIComponent(e.obligationId)}/publish`, {});
+    assert.equal(pub.body.status, 'published', `publication verifies the proof, never blocked as legacy-proof-missing: ${pub.text}`);
+    a.stop();
+    assert.equal(migrate(file).code, 0);
+    b = await spawnServer(file, barrierDir);
+    const after = (await list(b.base)).body;
+    const kept = after.find((c) => c.id === notices[0].id);
+    assert.ok(kept, 'migration preserved the notice'); assert.ok(Number.isSafeInteger(kept.postSeq), 'and numbered it');
+    assert.deepEqual(after.map((c) => c.postSeq), [1, 2, 3, 4], 'array order, the notice last');
+    const again = await api(b.base, 'POST', `/api/outbox/${encodeURIComponent(e.obligationId)}/publish`, {});
+    assert.equal(again.body.status, 'published', 'the proof survived the migration');
+    assert.equal((await list(b.base)).body.filter((c) => c.author === 'board').length, 1, 'still exactly one notice');
+  } finally { a?.stop(); b?.stop(); }
+});
+test('Q14 (structural) no code path appends a post except through pushPost: a stray `conversations.push(` would make a migrated board corrupt, and then every post is refused', () => {
+  const src = fs.readFileSync(path.join(PROJECT_DIR, 'server.js'), 'utf8');
+  const start = src.indexOf('function pushPost(');
+  assert.ok(start >= 0, 'server.js must define pushPost(...), the one place a post is appended and numbered');
+  let depth = 0, end = -1;
+  for (let k = src.indexOf('{', start); k < src.length; k++) { if (src[k] === '{') depth++; else if (src[k] === '}' && --depth === 0) { end = k; break; } }
+  assert.ok(end > start, 'could not find the end of pushPost');
+  const outside = src.slice(0, start) + src.slice(end);
+  const strays = [...outside.matchAll(/\bconversations\s*\.\s*(push|unshift|splice)\s*\(/g)].map((m) => `${m[0]} at offset ${m.index}`);
+  assert.deepEqual(strays, [], 'a post appended outside pushPost bypasses numbering and the corruption check');
+  assert.match(src.slice(start, end), /conversations\s*\.\s*push\s*\(/, 'pushPost itself is where the append happens');
+});
+
 test('Q9 a token from another EPOCH is 409 POST_CURSOR_EPOCH_CHANGED naming the current epoch and afterSeq=start; the same epoch with a higher number is a plain empty page', async () => {
   const s = await startRestServer({ board: makeBoardFixture() });
   try {
@@ -340,6 +497,38 @@ test('Q10 a real /api/save does not disturb the counter: numbering continues wit
     assert.equal((await post(s.baseUrl, 'three')).body.postSeq, 3, 'no reuse, no reset');
     assert.deepEqual(seqs(await list(s.baseUrl)), [1, 2, 3]);
   } finally { await s.stop(); }
+});
+test('Q10b a /api/save body carrying extra, un-numbered or re-numbered conversations, and a forged counter and epoch, leaves the server\'s conversations, every postSeq, the epoch and the counter exactly as they were', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ps1592-save-'));
+  const file = path.join(dir, 'board.json'); fs.writeFileSync(file, JSON.stringify(makeBoardFixture(), null, 2));
+  const barrierDir = path.join(dir, 'barriers'); fs.mkdirSync(barrierDir);
+  let a;
+  try {
+    a = await spawnServer(file, barrierDir);
+    await post(a.base, 'one'); await post(a.base, 'two'); await post(a.base, 'three');
+    // The server rewrites a legacy file as JSON-LD on its first save, so the stored state is read in WHICHEVER shape the file now has:
+    // the posts are the document's Comment nodes (or its `conversations`), the counter and epoch live on `scrum:meta` (or top level).
+    const state = () => {
+      const d = readDoc(file), ld = Array.isArray(d['@graph']), meta = ld ? (d['scrum:meta'] || {}) : d;
+      return { posts: ld ? d['@graph'].filter((e) => e && e['@type'] === 'Comment') : d.conversations, nextPostSeq: meta.nextPostSeq, postSeqEpoch: meta.postSeqEpoch };
+    };
+    const before = state();
+    assert.equal(before.posts?.length, 3, 'precondition: the reader sees the three stored posts'); assert.ok(before.postSeqEpoch, 'and the epoch'); assert.equal(before.nextPostSeq, 4, 'and the counter');
+    const snap = (await api(a.base, 'GET', '/api/board')).body;
+    const seen = (await list(a.base)).body;
+    const hostile = [
+      conv('smuggled', 'an un-numbered post a snapshot tried to introduce', T(4)),
+      { ...seen[0], postSeq: 99 },
+      { ...seen[1], postSeq: 1 },
+    ];
+    for (const extra of [{ conversations: hostile }, { conversations: [] }, { conversations: null }, { conversations: hostile, nextPostSeq: 1, postSeqEpoch: 'forged' }]) {
+      const save = await api(a.base, 'POST', '/api/save', { cards: snap.cards, columns: snap.columns, nextShortId: snap.nextShortId, ...extra });
+      assert.ok(save.status < 500, save.text);   // refused or ignored are both fine; what matters is the state
+      assert.deepEqual(state(), before, `${JSON.stringify(Object.keys(extra))}: a save must not introduce, remove or renumber a post, or touch the epoch or counter`);
+    }
+    assert.deepEqual(seqs(await list(a.base)), [1, 2, 3]);
+    assert.equal((await post(a.base, 'four')).body.postSeq, 4, 'numbering carries on');
+  } finally { a?.stop(); }
 });
 
 async function spawnServer(file, barrierDir) {
