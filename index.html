@@ -2473,13 +2473,23 @@ async function saveToJSONFile() {
   // so the same deletion applies. It is re-asked first; if still unknown, the
   // save is refused, visibly, and nothing is written.
   const unknownCreate = () => cards.some((c) => c && c._unsynced === 'unknown');
-  if (_createInFlight.size > 0 || unknownCreate()) {
-    const inFlight = [..._createInFlight.values()];
+  // #1584 — THE SAME RULE FOR MOVES. A move on the wire, or one whose reply
+  // was lost, may have committed with neighbour renumbering this tab's
+  // snapshot does not have; a whole-board save built now could revert both.
+  // Wait for the wire; read the server for the unknowns; refuse if still unknown.
+  if (_createInFlight.size > 0 || unknownCreate() || _movesInFlight > 0 || _unconfirmedMoves.size > 0) {
+    const inFlight = [..._createInFlight.values(), _moveChain];
     return _trackPendingWrite(Promise.allSettled(inFlight).then(async () => {
       if (unknownCreate()) await _reconcileUnknownCreates();
       if (unknownCreate()) {
         _setSaveStatus('failed', 'Not saved — a new card could not be confirmed on the server, and saving the whole board now '
           + 'could delete it. Your change is still on screen; reload to resync.');
+        return false;
+      }
+      if (_unconfirmedMoves.size > 0) await _reconcileMoves();
+      if (_unconfirmedMoves.size > 0) {
+        _setSaveStatus('failed', 'Not saved — a card move could not be confirmed on the server, and saving the whole board now '
+          + 'could undo it. Your change is still on screen; reload to resync.');
         return false;
       }
       return saveToJSONFile();
@@ -4831,6 +4841,13 @@ function pushUndoEntry(card) {
     // stores and what undo sends back. arrayIndex is kept only to put the card
     // back in the same place in the local array.
     order: card.order,
+    // …and the card it sat just after (null = top of its column): the
+    // placement undo restores, which a tied order cannot express.
+    after: (() => {
+      const col = _columnCardsInRenderOrder(card.column);
+      const at = col.indexOf(card);
+      return at > 0 ? col[at - 1].id : null;
+    })(),
     arrayIndex: cards.findIndex(c => c.id === card.id),
     title: card.title,
     timestamp: Date.now(),
@@ -4848,21 +4865,38 @@ function undoLastMove() {
   const fromColumn = card.column;
   const currentIdx = cards.findIndex(c => c.id === entry.cardId);
   if (currentIdx >= 0) cards.splice(currentIdx, 1);
+  // #1584 — back to the card it sat after (or the top), if that card is still
+  // in the column; that is the placement a tie cannot blur. If it has gone, the
+  // prior order is used as a number. An entry from before #1584 has neither:
+  // the card goes to the end of the column it came from.
+  const colNow = _columnCardsInRenderOrder(entry.column, card);
+  let order;
+  let after;   // undefined = "no anchor": place by number
+  if (entry.after === null) {
+    after = null;
+    order = _orderBetween(null, colNow[0] || null);
+  } else if (typeof entry.after === 'string' && colNow.some((c) => c.id === entry.after)) {
+    const anchor = colNow.find((c) => c.id === entry.after);
+    after = anchor.id;
+    order = _orderBetween(anchor, null);
+  } else if (entry.order !== undefined && entry.order !== null && Number.isFinite(Number(entry.order))) {
+    order = Math.floor(Number(entry.order));
+  } else {
+    const last = colNow[colNow.length - 1] || null;
+    after = last ? last.id : null;
+    order = _orderBetween(last, null);
+  }
   card.column = entry.column;
-  // An entry from before #1584 has no order: put the card at the end of the
-  // column it came from rather than inventing a slot.
-  const hasOrder = entry.order !== undefined && entry.order !== null && Number.isFinite(Number(entry.order));
-  if (hasOrder) card.order = Number(entry.order);
-  else { const tgt = _columnCardsInRenderOrder(entry.column, card); card.order = _orderBetween(tgt[tgt.length - 1] || null, null); }
+  card.order = order;
   const targetIdx = Math.min(Math.max(0, entry.arrayIndex), cards.length);
   cards.splice(targetIdx, 0, card);
-  const shifts = _makeRoomLocally(card);
+  const shifts = _makeRoomLocally(card, after === undefined ? undefined : (after === null ? null : cards.find((c) => c.id === after)));
   card.updatedAt = new Date().toISOString();
   saveToLocalStorage();
-  // #1584 — the prior {column, order} goes back through the API, under the
-  // version the card has NOW (read when the request is sent, after any move
-  // still on the wire has answered). Never a whole-board save.
-  _persistMove(card, { shifts, touched: [fromColumn, card.column] });
+  // #1584 — the prior position goes back through the API, under the version
+  // the card has NOW (read when the request is sent, after any move still on
+  // the wire has answered). Never a whole-board save.
+  _persistMove(card, { after, shifts, touched: [fromColumn, card.column] });
   _testHookMarkSaved();
   renderBoard();
   showUndoToast(`Undid: "${entry.title}" returned to ${entry.column}`);
@@ -4872,25 +4906,33 @@ function undoLastMove() {
 // ── #1584 (#118 slice 2) — CARD MOVES through PATCH {column, order} ─────────
 //
 // Every move (drag, ◀ ▶, reorder, undo) is ONE request:
-//   PATCH /api/cards/:id { column, order, makeRoom: true, ifVersion }
-// `makeRoom` asks the SERVER to shift the neighbours the new order collides
+//   PATCH /api/cards/:id { column, order, makeRoom: true, after, requestId, ifVersion }
+// `makeRoom` asks the SERVER to renumber the neighbours the move collides
 // with, inside the same write lock and the same compare-and-swap as the move.
+// `after` names the card the move goes just after (null = top), so a drop
+// BETWEEN TWO TIED CARDS lands between them rather than wherever the number
+// happens to sort. `requestId` is the move's identity, recorded on the card.
 //
 // ⭐ WHY ONE REQUEST AND NOT ONE PER RENUMBERED CARD. N PATCHes can be refused
 // half-way: the third neighbour 409s and the column is left in an order nobody
-// chose, with the first two "saved". There is no honest local state to show
-// for that. With the renumber on the server, the move lands whole or — on a
-// stale ifVersion — not at all, and the client never has a partial to explain.
+// chose. With the renumber on the server the move lands whole or not at all.
 //
-// ⛔ ON A 409 the move is NOT retried and NOT re-applied. The card changed
-// elsewhere since this tab read it; the user is told so, and the columns the
-// move touched are re-read from the server, so nothing on screen claims a
-// position the server does not hold. Queued moves made before that re-read
-// are dropped (their intent was computed against the state that just lost).
+// ⛔ ON A 409 the move is NOT retried and NOT re-applied: the user is told,
+// and the columns the move touched are re-read from the server.
 //
-// The neighbours this tab shifted LOCALLY (for an immediate render) are put
-// back and replaced by the server's own list of what it shifted — the
-// server's answer is the truth, the local shift only a preview.
+// ⛔ ON AN UNCONFIRMED OUTCOME (no reply, or a 2xx this tab cannot read) the
+// move may have COMMITTED. It is never re-sent — a makeRoom move is not
+// idempotent, and although its own ifVersion would turn a replay into a 409,
+// the outcome is learned by READING, not by asking twice. Until the server's
+// copy has been read, the tab does not claim the move either way, and every
+// whole-board save is refused: a snapshot taken before the move could revert
+// it and its shifts.
+//
+// ⛔ SHIFTED NEIGHBOURS ARE ADOPTED WHOLE. The server returns each renumbered
+// card as stored; the tab's copy is replaced by it, so a neighbour someone
+// else edited is never held as old content under a new version. A neighbour
+// open in an editor keeps its old version (only its position updates): its
+// save then 409s visibly instead of overwriting that change.
 
 // Cards of `column` in the order the board renders them (renderBoard's stable
 // sort: `order`, ties by array position), minus `exclude`.
@@ -4903,9 +4945,7 @@ function _columnCardsInRenderOrder(column, exclude = null) {
 }
 
 // The integer order that puts a card just after `prev` (or just before `next`
-// when it goes to the top). A collision is fine: makeRoom shifts the chain.
-// ⚠️ Assumes `prev` and `next` do not TIE on order — true on a backfilled
-// board (#923); with legacy ties the card can land one slot off.
+// when it goes to the top). A collision is fine: makeRoom renumbers the chain.
 function _orderBetween(prev, next) {
   if (prev) return Math.floor(Number(prev.order) || 0) + 1;
   if (next) {
@@ -4916,18 +4956,23 @@ function _orderBetween(prev, next) {
 }
 
 // The server's makeRoomInColumn, applied locally so the tile renders where it
-// was dropped before the reply. Returns [{ card, prevOrder }] so the preview
+// was dropped before the reply. `anchor`: the card it goes after, null for the
+// top, undefined for "by number". Returns [{ card, prevOrder }] so the preview
 // can be undone and replaced by the server's answer.
-function _makeRoomLocally(moved) {
+function _makeRoomLocally(moved, anchor) {
   const at = Number(moved.order);
   if (!Number.isFinite(at)) return [];
-  const peers = cards
-    .map((c, i) => ({ c, i, o: Number(c && c.order) }))
-    .filter(({ c, o }) => c && c !== moved && c.column === moved.column && Number.isFinite(o) && o >= at)
+  const seq = cards
+    .map((c, i) => ({ c, i, o: Number(c && c.order) || 0 }))
+    .filter(({ c }) => c && c !== moved && c.column === moved.column)
     .sort((a, b) => (a.o - b.o) || (a.i - b.i));
+  let walk;
+  if (anchor === undefined) walk = seq.filter(({ o }) => o >= at);
+  else if (anchor === null) walk = seq;
+  else walk = seq.slice(seq.findIndex(({ c }) => c === anchor) + 1);
   const shifts = [];
   let floor = at;
-  for (const { c, o } of peers) {
+  for (const { c, o } of walk) {
     if (o > floor) break;
     shifts.push({ card: c, prevOrder: c.order });
     c.order = floor + 1;
@@ -4936,15 +4981,40 @@ function _makeRoomLocally(moved) {
   return shifts;
 }
 
-let _moveChain = Promise.resolve();
-let _boardRereadGen = 0;   // bumped by every re-read: a move queued before it is stale
+const _cardOpenInAnEditor = (id) => id === editingCardId || (typeof _detailEditing !== 'undefined' && _detailEditing && _detailEditing.cardId === id);
 
-function _persistMove(card, { shifts = [], touched = [], undoEntry = null } = {}) {
+// Replace this tab's copy of a card with the server's (projection-shaped:
+// no `description`, so the editor fetches before it opens). A card open in an
+// editor keeps its own fields and version — only its position is taken — so
+// the user's draft is not replaced and their save is judged against the
+// version they opened.
+function _adoptServerCard(server) {
+  const i = cards.findIndex((c) => c && c.id === server.id);
+  if (i < 0) return;
+  if (_cardOpenInAnEditor(server.id)) {
+    cards[i].order = server.order;
+    cards[i].column = server.column;
+    return;
+  }
+  const fresh = {};
+  for (const [k, v] of Object.entries(server)) if (!RESPONSE_ONLY_FIELDS.includes(k)) fresh[k] = v;
+  cards[i] = fresh;
+  if (typeof window.cardContentKey === 'function') _hydratedKeys.set(fresh.id, window.cardContentKey(fresh));
+}
+
+let _moveChain = Promise.resolve();
+let _movesInFlight = 0;
+let _boardRereadGen = 0;   // bumped by every re-read: a move queued before it is stale
+// requestId → { cardId, touched } for moves whose outcome this tab does not know.
+const _unconfirmedMoves = new Map();
+
+function _persistMove(card, { after, shifts = [], touched = [], undoEntry = null } = {}) {
   const target = { column: card.column, order: card.order };
   const gen = _boardRereadGen;
   const createInFlight = card._unsynced === 'pending' ? _createInFlight.get(card) : null;
   const who = chosenIdentity();
   const touchedCols = [...new Set([...touched, target.column].filter(Boolean))];
+  const requestId = crypto.randomUUID();
   const run = async () => {
     if (createInFlight) {
       try { await createInFlight; } catch { /* settled either way */ }
@@ -4963,6 +5033,8 @@ function _persistMove(card, { shifts = [], touched = [], undoEntry = null } = {}
       column: target.column,
       order: target.order,
       makeRoom: true,
+      ...(after !== undefined ? { after } : {}),
+      requestId,
       ifVersion: Number.isInteger(card.version) && card.version >= 0 ? card.version : 0,
       return: 'id',
       ...(who ? { by: who } : {}),
@@ -4971,7 +5043,7 @@ function _persistMove(card, { shifts = [], touched = [], undoEntry = null } = {}
     let res = null;
     let server = null;
     try {
-      res = await fetch(API_BASE + '/api/cards/' + encodeURIComponent(cardId), {
+      res = await fetch(API_BASE + '/api/cards/' + encodeURIComponent(cardId) + '?excerpt=' + DESC_RENDER_CAP, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -4981,8 +5053,16 @@ function _persistMove(card, { shifts = [], touched = [], undoEntry = null } = {}
       res = null;
     }
     clearTimeout(pendingTimer);
-    if (!res) {
-      _setSaveStatus('failed', 'Not saved — cannot reach the server. The move is on this screen only; reload to see the saved board.');
+    const readable = res && res.ok && server && server.id === cardId && Number.isInteger(server.version);
+    if (!res || (res.ok && !readable)) {
+      // The move may have committed. Say exactly that, never re-send it, and
+      // learn the outcome by reading the server's copy.
+      _unconfirmedMoves.set(requestId, { cardId, touched: touchedCols });
+      _boardRereadGen++;   // moves queued behind this one were computed on an unknown state
+      _setSaveStatus('failed', 'Move not confirmed — '
+        + (res ? 'the server\'s reply could not be read' : 'no reply from the server')
+        + ', so it is not known whether it was stored. Checking the board…');
+      await _reconcileMoves();
       return false;
     }
     if (!res.ok) {
@@ -4990,27 +5070,20 @@ function _persistMove(card, { shifts = [], touched = [], undoEntry = null } = {}
       // a lie: drop its undo entry and re-read what the move touched.
       if (undoEntry) { const i = _undoStack.lastIndexOf(undoEntry); if (i >= 0) _undoStack.splice(i, 1); }
       _setSaveStatus('failed', res.status === 409
-        ? `Not moved — #${card.shortId} changed elsewhere since this tab loaded it. `
+        ? `Not moved — #${card.shortId} ${server && server.code === 'NEIGHBOUR_MOVED' ? 'or the card it was dropped beside ' : ''}changed elsewhere since this tab loaded it. `
           + 'Its column has been reloaded from the server; reload the page to see every change.'
         : `Not moved — the server refused (${res.status}${server && server.error ? ': ' + server.error : ''}). `
           + 'The column has been reloaded from the server; reload the page if it still looks wrong.');
       await _rereadColumns(touchedCols, [cardId]);
       return false;
     }
-    // Accepted. The server's version is the next ifVersion; its list of
-    // shifted neighbours replaces the local preview.
+    // Accepted. The server's version is the next ifVersion; the neighbours it
+    // shifted are taken from it whole, replacing the local preview.
     for (const { card: c, prevOrder } of shifts) c.order = prevOrder;
-    if (server && server.id === cardId && Number.isInteger(server.version)) {
-      card.version = server.version;
-      if (server.updatedAt) card.updatedAt = server.updatedAt;
-    }
-    for (const sh of (server && Array.isArray(server.shifted) ? server.shifted : [])) {
-      const c = cards.find((x) => x && x.id === sh.id);
-      if (!c) continue;
-      c.order = sh.order;
-      if (Number.isInteger(sh.version)) c.version = sh.version;
-      if (typeof window.cardContentKey === 'function') _hydratedKeys.set(c.id, window.cardContentKey(c));
-    }
+    card.version = server.version;
+    if (server.updatedAt) card.updatedAt = server.updatedAt;
+    card.lastMoveRequestId = requestId;
+    for (const sh of (Array.isArray(server.shifted) ? server.shifted : [])) _adoptServerCard(sh);
     if (typeof window.cardContentKey === 'function') _hydratedKeys.set(card.id, window.cardContentKey(card));
     saveToLocalStorage();
     if (draggedCardId === null) renderBoard();
@@ -5019,14 +5092,45 @@ function _persistMove(card, { shifts = [], touched = [], undoEntry = null } = {}
   };
   // Moves go out one at a time, so each reads the version the previous one
   // produced — two quick moves of one card must not race their own ifVersion.
-  const p = _moveChain.then(run, run);
+  _movesInFlight++;
+  const p = _moveChain.then(run, run).finally(() => { _movesInFlight--; });
   _moveChain = p.catch(() => {});
   return _trackPendingWrite(p);
 }
 
+// Learn the outcome of every unconfirmed move by READING the board: the
+// card's `lastMoveRequestId` says whether this tab's move is the one stored.
+// Either way the touched columns are replaced by the server's copy, so the
+// screen shows what is stored. If the board cannot be read the moves stay
+// unconfirmed (and whole-board saves stay blocked).
+async function _reconcileMoves() {
+  if (_unconfirmedMoves.size === 0) return true;
+  const data = await loadFromJSONFile();
+  if (!data) {
+    _setSaveStatus('failed', 'Move not confirmed — the server could not be read, so it is not known whether the move was stored. '
+      + 'Nothing will be saved over it until it is; reload to resync.');
+    return false;
+  }
+  const pending = [..._unconfirmedMoves.entries()];
+  _unconfirmedMoves.clear();
+  const cols = new Set();
+  const ids = [];
+  let stored = 0;
+  for (const [rid, m] of pending) {
+    m.touched.forEach((c) => cols.add(c));
+    ids.push(m.cardId);
+    const s = data.cards.find((c) => c && c.id === m.cardId);
+    if (s && s.lastMoveRequestId === rid) stored++;
+  }
+  _adoptServerColumns(data, [...cols], ids);
+  if (stored === pending.length) _setSaveStatus('saved', 'Saved — confirmed on the server after its reply was lost.');
+  else _setSaveStatus('failed', (pending.length === 1 ? 'Not moved — the server does not hold this move' : 'Some moves are not on the server')
+    + ' (it was not stored, or the card has moved again since). The board shows what the server holds.');
+  return true;
+}
+
 // Re-read the server's state for `columns` (and the cards in `ids`, wherever
-// they now are) and replace this tab's copy of them. Cards not yet created on
-// the server, and a card open in the editor, are left alone.
+// they now are) and replace this tab's copy of them.
 async function _rereadColumns(cols, ids = []) {
   _boardRereadGen++;
   const data = await loadFromJSONFile();
@@ -5034,25 +5138,33 @@ async function _rereadColumns(cols, ids = []) {
     _setSaveStatus('failed', 'Not moved, and the server could not be re-read — reload the page before moving anything else.');
     return false;
   }
+  _adoptServerColumns(data, cols, ids);
+  return true;
+}
+
+// Replace this tab's copy of `cols` (and `ids`) with `data`'s. Cards not yet
+// created on the server are left alone; a card open in an editor keeps its
+// fields and version and takes only its position (_adoptServerCard).
+function _adoptServerColumns(data, cols, ids = []) {
+  _boardRereadGen++;
   const colSet = new Set(cols);
   const idSet = new Set(ids);
   const inScope = (c) => c && (colSet.has(c.column) || idSet.has(c.id));
   const removed = new Set();
   for (let i = cards.length - 1; i >= 0; i--) {
     const c = cards[i];
-    if (!inScope(c) || c._unsynced || c.id === editingCardId) continue;
+    if (!inScope(c) || c._unsynced || _cardOpenInAnEditor(c.id)) continue;
     removed.add(c.id);
     cards.splice(i, 1);
   }
   for (const sc of data.cards) {
-    if (!sc || !(inScope(sc) || removed.has(sc.id)) || sc.id === editingCardId) continue;
-    const j = cards.findIndex((c) => c && c.id === sc.id);
-    if (j >= 0) cards[j] = sc; else cards.push(sc);
+    if (!sc || !(inScope(sc) || removed.has(sc.id))) continue;
+    if (cards.some((c) => c && c.id === sc.id)) { _adoptServerCard(sc); continue; }
+    cards.push(sc);
     if (typeof window.cardContentKey === 'function') _hydratedKeys.set(sc.id, window.cardContentKey(sc));
   }
   saveToLocalStorage();
   renderBoard();
-  return true;
 }
 
 // #1584 — a column REORDER (header drag). Columns carry no version, so this is
@@ -5271,11 +5383,12 @@ function moveCardColumn(cardId, dir) {
   const undoEntry = pushUndoEntry(card);
   const tgt = _columnCardsInRenderOrder(ord[targetIdx].id, card);
   _insertCardAtPosition(card, ord[targetIdx].id, Infinity);
-  card.order = _orderBetween(tgt[tgt.length - 1] || null, null);   // #1584 — end of the target column
-  const shifts = _makeRoomLocally(card);
+  const last = tgt[tgt.length - 1] || null;
+  card.order = _orderBetween(last, null);   // #1584 — end of the target column
+  const shifts = _makeRoomLocally(card, last);
   card.updatedAt = new Date().toISOString();
   saveToLocalStorage();
-  _persistMove(card, { shifts, touched: [fromColumn, card.column], undoEntry });   // #1584
+  _persistMove(card, { after: last ? last.id : null, shifts, touched: [fromColumn, card.column], undoEntry });   // #1584
   _testHookMarkSaved();
   renderBoard();
 }
@@ -5359,10 +5472,10 @@ function handleDrop(e) {
         const undoEntry = pushUndoEntry(card);
         _insertCardAtPosition(card, targetColumn, position);
         card.order = _orderBetween(prev, next);
-        const shifts = _makeRoomLocally(card);
+        const shifts = _makeRoomLocally(card, prev);
         card.updatedAt = now;
         saveToLocalStorage();
-        _persistMove(card, { shifts, touched: [fromColumn, targetColumn], undoEntry });   // #1584
+        _persistMove(card, { after: prev ? prev.id : null, shifts, touched: [fromColumn, targetColumn], undoEntry });   // #1584
         _testHookMarkSaved();
       }
     } else if (card.column !== targetColumn) {
@@ -5372,11 +5485,12 @@ function handleDrop(e) {
       const undoEntry = pushUndoEntry(card);
       const tgt = _columnCardsInRenderOrder(targetColumn, card);
       card.column = targetColumn;
-      card.order = _orderBetween(tgt[tgt.length - 1] || null, null);
-      const shifts = _makeRoomLocally(card);
+      const last = tgt[tgt.length - 1] || null;
+      card.order = _orderBetween(last, null);
+      const shifts = _makeRoomLocally(card, last);
       card.updatedAt = now;
       saveToLocalStorage();
-      _persistMove(card, { shifts, touched: [fromColumn, targetColumn], undoEntry });   // #1584
+      _persistMove(card, { after: last ? last.id : null, shifts, touched: [fromColumn, targetColumn], undoEntry });   // #1584
       _testHookMarkSaved();
     }
   }
@@ -6284,6 +6398,8 @@ async function pollBoard() {
   // #1583 — a create whose outcome is unknown is asked about first (by its
   // requestId); the board is re-read on the next tick.
   if (cards.some((c) => c && c._unsynced === 'unknown')) { _trackPendingWrite(_reconcileUnknownCreates()); return; }
+  // #1584 — likewise a move whose outcome is unknown: read for it first.
+  if (_unconfirmedMoves.size > 0) { _trackPendingWrite(_reconcileMoves()); return; }
   const data = await loadFromJSONFile();
   if (!data) return;  // network blip; try again next tick
   const newSig = boardSignature(data.cards, data.columns);

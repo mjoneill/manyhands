@@ -49,6 +49,10 @@ function test(name, fn) {
     fn: async () => {
       clearFilterState();
       cards.length = 0;
+      // #1584 — a move whose reply this sandbox could not give (no server) is
+      // held as UNCONFIRMED and blocks whole-board saves, by design. That is
+      // one test's state, not the next one's.
+      _unconfirmedMoves.clear();
       enableFetchMock({ ok: true, json: async () => ({ cards: [], lastUpdated: null }) });
       _fetchMockRefuseCreate = true;   // #1583 — see enableFetchMock
       try {
@@ -1588,7 +1592,7 @@ test('#1584 a column change via drag-and-drop persists through PATCH /api/cards/
     assertEqual(_fetchMockCalls.filter(c => String(c.url).includes('/api/save')).length, 0, 'no whole-board save');
     const patch = _fetchMockCalls.find(c => c.options && c.options.method === 'PATCH');
     assert(patch !== undefined, 'a PATCH went out');
-    assert(String(patch.url).endsWith('/api/cards/' + card.id), 'to the moved card: ' + patch.url);
+    assert(String(patch.url).split('?')[0].endsWith('/api/cards/' + card.id), 'to the moved card: ' + patch.url);
     const body = JSON.parse(patch.options.body);
     assertEqual(body.column, 'done', 'PATCH names the target column');
     assert(Number.isInteger(body.order), 'PATCH carries an integer order');

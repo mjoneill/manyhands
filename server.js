@@ -87,7 +87,7 @@ import { extractMentions as extractMentionsFromRoster } from './core/people.mjs'
 import { domainToJsonLd } from './core/jsonld.mjs';
 import { probeModel, PROTOCOL_NAMES as MODEL_PROTOCOLS } from './core/model-adapter.mjs'; // #1197
 import { deriveGraph, personByKey } from './core/people.mjs';
-import { queryCards, facetCards } from './core/cards-query.mjs';
+import { queryCards, facetCards, excerptOf, EXCERPT_CEILING } from './core/cards-query.mjs';
 import { similarCards } from './core/similar-cards.mjs';
 import { queryChangesFromLog, parseSince, EPOCH_CHANGED } from './core/changes-log-query.mjs';
 import { feedQuery, feedRowsFromBindings } from './core/logborn-feed.mjs';   // #1561 — the unit's writes in the change feed
@@ -9005,39 +9005,56 @@ function nextOrderInColumn(cardsArr, column) {
 }
 
 /**
- * #1584 (#118 slice 2) — MAKE ROOM for `moved` at its (column, order): every
- * other card in that column whose order the move collides with is pushed down
- * by one, and the push stops at the first gap. Only the collision chain moves;
- * a card past a gap, or above the slot, is not touched.
+ * #1584 (#118 slice 2) — MAKE ROOM for `moved` at its (column, order).
+ *
+ * The cards that come AFTER the insertion point, in the board's own render
+ * order (order ASC, ties by store position), are walked in sequence; each one
+ * whose order is not already above the slot is renumbered to the next integer,
+ * and the walk stops at the first gap. Only that chain moves; a card above the
+ * slot, or past a gap, is not touched.
+ *
+ * WHERE THE INSERTION POINT IS — `anchor`:
+ *   · a card  — "just after this card" (the drop's upper neighbour). The walk
+ *               starts at the card after it, so a drop BETWEEN TWO TIED CARDS
+ *               lands between them: the tied cards after the anchor are pushed
+ *               below the moved card instead of staying level with the anchor
+ *               and sorting above it. Ties are live on the board, not legacy.
+ *   · null    — "the top of the column": the walk starts at the first card.
+ *   · undefined (no `after` sent) — the walk is every card with order >= the
+ *               slot. Correct on an untied column; between tied cards it cannot
+ *               know which side of the tie was meant.
  *
  * ⭐ WHY THIS IS THE SERVER'S JOB AND NOT THE CLIENT'S. Renumbering neighbours
  * as N separate PATCHes can be refused half-way (one neighbour 409s), leaving
  * an order nobody chose. Here the whole renumber happens inside the moved
  * card's own write lock and compare-and-swap: it lands whole, or — on a stale
- * ifVersion — not at all.
+ * ifVersion — not at all. That same compare-and-swap makes a REPLAYED move a
+ * 409, never a second shift: the first one advanced the version it declared.
  *
  * Each shifted card's order really changed, so its version is bumped (#534: a
  * writer holding the old version must not overwrite the new position). Its
  * `updatedAt` is NOT touched: a nudge in position is not an edit of the card,
  * and the board's "untouched for N days" fold reads that field.
  *
- * Ties (legacy cards sharing an order) are walked in store order. Must be
- * called under withWriteLock, after `moved` has its final column and order.
- * Returns the shifted cards.
+ * Must be called under withWriteLock, after `moved` has its final column and
+ * order. Returns the shifted cards.
  */
-function makeRoomInColumn(cardsArr, moved) {
+function makeRoomInColumn(cardsArr, moved, anchor) {
   const at = Number(moved.order);
   if (!Number.isFinite(at)) return [];
-  const peers = [];
+  const seq = [];
   cardsArr.forEach((c, i) => {
     if (!c || c === moved || c.column !== moved.column) return;
-    const o = Number(c.order);
-    if (Number.isFinite(o) && o >= at) peers.push({ c, o, i });
+    seq.push({ c, o: Number(c.order) || 0, i });
   });
-  peers.sort((a, b) => (a.o - b.o) || (a.i - b.i));
+  seq.sort((a, b) => (a.o - b.o) || (a.i - b.i));
+  let walk;
+  if (anchor === undefined) walk = seq.filter(({ o }) => o >= at);
+  else if (anchor === null) walk = seq;
+  else walk = seq.slice(seq.findIndex(({ c }) => c === anchor) + 1);
   const shifted = [];
   let floor = at;
-  for (const { c, o } of peers) {
+  for (const { c, o } of walk) {
     if (o > floor) break;   // a gap: nothing below it collides
     c.order = floor + 1;
     floor = c.order;
@@ -9197,6 +9214,19 @@ async function handleUpdateCard(req, res, idOrShortId) {
         return sendJSON(res, 400, { error: 'makeRoom places the card at `order` and shifts the cards it collides with — '
           + `it needs an integer order. Got ${JSON.stringify(patch.order)}. Nothing was written.` });
       }
+      // `after` — the card the move goes just after (null = top of column).
+      if (patch.after !== undefined && patch.after !== null && typeof patch.after !== 'string') {
+        return sendJSON(res, 400, { error: `after must be a card id, or null for the top of the column. Got ${JSON.stringify(patch.after)}. Nothing was written.` });
+      }
+      // `requestId` — the move's identity, recorded on the card as
+      // `lastMoveRequestId` so a tab whose reply was lost can tell, by
+      // READING, whether its move committed. It is never replayed.
+      if (patch.requestId !== undefined
+          && !(typeof patch.requestId === 'string' && /^[A-Za-z0-9-]{8,64}$/.test(patch.requestId))) {
+        return sendJSON(res, 400, { error: 'requestId must be 8–64 characters of [A-Za-z0-9-] (a client-generated UUID). Nothing was written.' });
+      }
+    } else if (patch.after !== undefined || patch.requestId !== undefined) {
+      return sendJSON(res, 400, { error: '`after` and `requestId` describe a move and are only accepted with makeRoom: true. Nothing was written.' });
     }
     // #1032 — the response SHAPE, validated before the write.
     //
@@ -9378,7 +9408,7 @@ async function handleUpdateCard(req, res, idOrShortId) {
         // PATCHABLE_CARD_FIELDS so it is never written as a literal key, and
         // reported as neither ignored (#823) nor refused: it was honoured.
         if (k === 'descriptionAppend' || k === 'descriptionPrepend') continue;
-        if (k === 'makeRoom') continue; // #1584 — consumed below, after column/order are applied
+        if (k === 'makeRoom' || k === 'after' || k === 'requestId') continue; // #1584 — consumed below, after column/order are applied
         if (k in ARRAY_UPSERT_VERBS) continue; // #1137 — consumed above, same reason
         if (RELATIONSHIP_VERBS.includes(k)) continue; // #1066 — consumed above, same reason
         // #844 — an unchanged value was not an attempt. Silent.
@@ -9444,7 +9474,21 @@ async function handleUpdateCard(req, res, idOrShortId) {
       // AFTER the fields are applied so it sees the parent this write set.
       if ('parent' in patch && patch.parent != null) applyApexLabels(data.cards, card.id);
       // #1584 — after the fields, so it sees the column and order this write set.
-      if (patch.makeRoom === true) shifted = makeRoomInColumn(data.cards, card);
+      if (patch.makeRoom === true) {
+        let anchor;
+        if (patch.after === null) anchor = null;
+        else if (typeof patch.after === 'string') {
+          anchor = data.cards.find((c) => c && c.id === patch.after);
+          // The neighbour the user dropped beside is not where the tab saw it.
+          // Placing by number anyway would put the card somewhere nobody chose.
+          if (!anchor || anchor === card || anchor.column !== card.column
+              || !((Number(anchor.order) || 0) < card.order)) {
+            return { neighbourMoved: true };
+          }
+        }
+        shifted = makeRoomInColumn(data.cards, card, anchor);
+        if (typeof patch.requestId === 'string') card.lastMoveRequestId = patch.requestId;
+      }
       card.updatedAt = new Date().toISOString();
       bumpCardVersion(card);   // #534 — one bump per accepted PATCH, not per field
       // #665 — the board is the ignition: a card ENTERING done asks the room
@@ -9481,6 +9525,13 @@ async function handleUpdateCard(req, res, idOrShortId) {
     // #534 — the CAS refusal, read outside the lock because that is where the
     // response is written. 409 carries the CURRENT version: a refusal that says
     // "no" without saying "no, and here is where we are" forces a blind retry.
+    if (updated.neighbourMoved) {
+      return sendJSON(res, 409, {
+        error: 'The card this move was placed after (`after`) is no longer where you saw it — it moved, '
+          + 'changed order or was deleted. Re-read the column and drop again. Nothing was written.',
+        code: 'NEIGHBOUR_MOVED',
+      });
+    }
     if (updated.conflict) {
       return sendJSON(res, 409, {
         error: `Card has moved on: you declared ifVersion but the current version is ${updated.currentVersion}. `
@@ -9513,6 +9564,10 @@ async function handleUpdateCard(req, res, idOrShortId) {
     // break a PATCH.
     if (nudge) notifyMcpOfPost(nudge);
 
+    const shiftedExcerptCap = (() => {
+      const n = Number(parseQuery(req.url).excerpt);
+      return Number.isInteger(n) && n >= 1 ? Math.min(n, EXCERPT_CEILING) : 0;
+    })();
     const disclosures = {
       ...(ignoredFields.length ? { ignoredFields } : {}),
       ...(refusedFields.length ? { refusedFields } : {}),
@@ -9521,7 +9576,18 @@ async function handleUpdateCard(req, res, idOrShortId) {
       ...(Object.keys(redirectedFields).length ? { redirectedFields } : {}),
       // #1584 — the neighbours a makeRoom move renumbered, so the caller can
       // adopt their new order AND version without re-reading the column.
-      ...(shifted.length ? { shifted: shifted.map((c) => ({ id: c.id, shortId: c.shortId, column: c.column, order: c.order, version: c.version })) } : {}),
+      //
+      // ⛔ THE WHOLE CARD, NOT JUST {order, version}. A neighbour may have been
+      // edited by someone else since the tab read it; handing the tab only the
+      // new version would pair STALE content with a CURRENT version, and the
+      // tab's next edit of it would overwrite that change without a 409. The
+      // body is left out (it can be large, and an absent `description` is what
+      // tells the editor to fetch before it opens); `?excerpt=N` adds the
+      // tile's preview, as GET /api/cards does.
+      ...(shifted.length ? { shifted: shifted.map((c) => {
+        const { description, ...rest } = c;
+        return shiftedExcerptCap ? { ...rest, descriptionExcerpt: excerptOf(description, shiftedExcerptCap) } : rest;
+      }) } : {}),
     };
     if (patch.return === 'id') {
       // ⭐ Not merely cheaper — it answers the question an append caller

@@ -102,3 +102,101 @@ test('#1584 makeRoom: malformed requests are 400 and write nothing', async () =>
     assert.deepEqual(p, { m5: [1, 1], m6: [2, 1] });
   } finally { await s.stop(); }
 });
+
+// ── Review round: ties, the anchor, the move's identity, whole neighbours ────
+
+const tiedBoard = () => makeBoardFixture({
+  cards: [
+    card(1, 'backlog', 5), card(2, 'backlog', 5), card(3, 'backlog', 5),
+    card(5, 'planned', 1, { description: 'x'.repeat(50) }), card(6, 'planned', 2),
+  ],
+  nextShortId: 7,
+});
+// The column as the board renders it: order ASC, ties by store position.
+const rendered = async (baseUrl, column) => {
+  const all = (await req(baseUrl, 'GET', '/api/cards?limit=50&legacyIndex=1')).body.cards.filter((c) => c.column === column);
+  return all.sort((a, b) => (a.order - b.order) || (a.legacyArrayIndex - b.legacyArrayIndex)).map((c) => c.id);
+};
+
+test('#1584 after: a card dropped BETWEEN TWO TIED cards lands between them — the tied cards after the anchor are renumbered below it', async () => {
+  const s = await startRestServer({ board: tiedBoard() });
+  try {
+    assert.deepEqual(await rendered(s.baseUrl, 'backlog'), ['m1', 'm2', 'm3'], 'precondition: a three-way tie, store order');
+    const r = await req(s.baseUrl, 'PATCH', '/api/cards/m6', { column: 'backlog', order: 6, makeRoom: true, after: 'm1', ifVersion: 1, return: 'id' });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.deepEqual(await rendered(s.baseUrl, 'backlog'), ['m1', 'm6', 'm2', 'm3'], 'between m1 and m2, as dropped');
+    const b = await orders(s.baseUrl, 'backlog');
+    assert.deepEqual(b, { m1: [5, 1], m6: [6, 2], m2: [7, 2], m3: [8, 2] }, 'the anchor and anything above it keep their order and version');
+    // Within the tie: m3 to just after m1.
+    const r2 = await req(s.baseUrl, 'PATCH', '/api/cards/m3', { column: 'backlog', order: 6, makeRoom: true, after: 'm1', ifVersion: 2 });
+    assert.equal(r2.status, 200, JSON.stringify(r2.body));
+    assert.deepEqual(await rendered(s.baseUrl, 'backlog'), ['m1', 'm3', 'm6', 'm2']);
+  } finally { await s.stop(); }
+});
+
+test('#1584 after:null puts the card at the TOP of a tied column, ahead of every tied card', async () => {
+  const s = await startRestServer({ board: makeBoardFixture({
+    cards: [card(1, 'backlog', 0), card(2, 'backlog', 0), card(6, 'planned', 1)], nextShortId: 7,
+  }) });
+  try {
+    const r = await req(s.baseUrl, 'PATCH', '/api/cards/m6', { column: 'backlog', order: 0, makeRoom: true, after: null, ifVersion: 1 });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.deepEqual(await rendered(s.baseUrl, 'backlog'), ['m6', 'm1', 'm2']);
+  } finally { await s.stop(); }
+});
+
+test('#1584 after: an anchor that is no longer where the tab saw it is a 409 (NEIGHBOUR_MOVED) and writes nothing', async () => {
+  const s = await startRestServer({ board: board() });
+  try {
+    const elsewhere = await req(s.baseUrl, 'PATCH', '/api/cards/m6', { column: 'backlog', order: 2, makeRoom: true, after: 'm5', ifVersion: 1 });
+    assert.equal(elsewhere.status, 409, JSON.stringify(elsewhere.body));
+    assert.equal(elsewhere.body.code, 'NEIGHBOUR_MOVED');
+    const below = await req(s.baseUrl, 'PATCH', '/api/cards/m6', { column: 'backlog', order: 2, makeRoom: true, after: 'm3', ifVersion: 1 });
+    assert.equal(below.status, 409, 'the anchor sorts at or below the requested order: ' + JSON.stringify(below.body));
+    const gone = await req(s.baseUrl, 'PATCH', '/api/cards/m6', { column: 'backlog', order: 2, makeRoom: true, after: 'no-such-card', ifVersion: 1 });
+    assert.equal(gone.status, 409);
+    assert.deepEqual(await orders(s.baseUrl, 'backlog'), { m1: [1, 1], m2: [2, 1], m3: [3, 1], m4: [7, 1] }, 'nothing renumbered');
+    assert.deepEqual(await orders(s.baseUrl, 'planned'), { m5: [1, 1], m6: [2, 1] }, 'nothing moved');
+    const loose = await req(s.baseUrl, 'PATCH', '/api/cards/m6', { title: 'x', after: 'm1' });
+    assert.equal(loose.status, 400, '`after` without makeRoom is refused, not ignored');
+  } finally { await s.stop(); }
+});
+
+test('#1584 requestId: recorded on the moved card; a REPLAY of the same move is a 409 and shifts nobody twice', async () => {
+  const s = await startRestServer({ board: board() });
+  try {
+    const move = { column: 'backlog', order: 2, makeRoom: true, after: 'm1', requestId: 'move-0001-abcd', ifVersion: 1 };
+    const first = await req(s.baseUrl, 'PATCH', '/api/cards/m6', move);
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    const stored = (await req(s.baseUrl, 'GET', '/api/cards/m6')).body;
+    assert.equal(stored.lastMoveRequestId, 'move-0001-abcd', 'readable by a tab whose reply was lost');
+    const listed = (await req(s.baseUrl, 'GET', '/api/cards?limit=50')).body.cards.find((c) => c.id === 'm6');
+    assert.equal(listed.lastMoveRequestId, 'move-0001-abcd', 'and on the list the board loads from');
+    const replay = await req(s.baseUrl, 'PATCH', '/api/cards/m6', move);
+    assert.equal(replay.status, 409, 'its own ifVersion refuses the replay');
+    assert.deepEqual(await orders(s.baseUrl, 'backlog'), { m1: [1, 1], m6: [2, 2], m2: [3, 2], m3: [4, 2], m4: [7, 1] },
+      'each neighbour shifted exactly once');
+    const bad = await req(s.baseUrl, 'PATCH', '/api/cards/m5', { ...move, requestId: 'no spaces!', ifVersion: 1 });
+    assert.equal(bad.status, 400);
+  } finally { await s.stop(); }
+});
+
+test('#1584 shifted: each renumbered neighbour comes back WHOLE (current content, not just order+version), body left out, excerpt on request', async () => {
+  const s = await startRestServer({ board: tiedBoard() });
+  try {
+    // A seat edits the neighbour first.
+    const seat = await req(s.baseUrl, 'PATCH', '/api/cards/m6', { title: 'edited by a seat', ifVersion: 1 });
+    assert.equal(seat.status, 200);
+    const r = await req(s.baseUrl, 'PATCH', '/api/cards/m5?excerpt=10',
+      { column: 'planned', order: 2, makeRoom: true, after: null, ifVersion: 1, return: 'id' });
+    // Top of planned at order 2: the walk starts at the first card, m6 (2), which shifts to 3.
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    const sh = (r.body.shifted || []).find((c) => c.id === 'm6');
+    assert.ok(sh, 'm6 was shifted: ' + JSON.stringify(r.body));
+    assert.equal(sh.title, 'edited by a seat', 'the neighbour as STORED, including the seat\'s edit');
+    assert.equal(sh.version, 3);
+    assert.equal(sh.order, 3);
+    assert.equal('description' in sh, false, 'no body: an absent description makes the editor fetch');
+    assert.equal(typeof sh.descriptionExcerpt, 'string', 'the tile preview, at the requested cap');
+  } finally { await s.stop(); }
+});
