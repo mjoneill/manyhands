@@ -123,6 +123,9 @@ test('#1367 served: 20 KB + three refs create → saved whole → preview links 
     assert.equal(saved.description, text, 'saved byte-for-byte');
 
     // ── column edit form: mounted, reopens the same text without loss ──
+    // #1583 — the tile is re-keyed to the server's id when the create's 201 is
+    // adopted, which can land a beat after the server has stored it.
+    await page.waitForSelector(`.card[data-id="${saved.id}"] [data-action="edit"]`, { timeout: 5000 });
     await page.evaluate((id) => {
       document.querySelector(`.card[data-id="${id}"] [data-action="edit"]`).click();
     }, saved.id);

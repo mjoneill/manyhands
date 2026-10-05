@@ -49,7 +49,13 @@ function test(name, fn) {
     fn: async () => {
       clearFilterState();
       cards.length = 0;
+      // #1584 — a move whose reply this sandbox could not give (no server) is
+      // held as UNCONFIRMED and blocks whole-board saves, by design. That is
+      // one test's state, not the next one's.
+      _unconfirmedMoves.clear();
+      _writeMoveRecord({});
       enableFetchMock({ ok: true, json: async () => ({ cards: [], lastUpdated: null }) });
+      _fetchMockRefuseCreate = true;   // #1583 — see enableFetchMock
       try {
         await fn();
       } finally {
@@ -409,11 +415,20 @@ test('backfill assigns shortIds to existing cards in creation order', () => {
   renderBoard();
 });
 
-test('card displays shortId badge on board', () => {
+test('card displays shortId badge on board', async () => {
   cards.length = 0;
   _resetNextShortId();
   try {
+    // #1583 — the badge shows the SERVER's shortId once the create is adopted
+    // (a provisional card shows '#…', never the tab's guess).
+    enableFetchMock({ id: 'badge-server-id', shortId: 41, version: 1, title: 'Badge Test', description: '',
+      type: 'task', assignees: ['unassigned'], labels: [], column: 'backlog', order: 0 });
     const card = addCard('Badge Test', '', 'task', 'unassigned', []);
+    renderBoard();
+    assertEqual(document.querySelector(`.card[data-id="${card.id}"] .card-shortid`).textContent.trim(), '#…',
+      'a provisional card shows no guessed number');
+    await Promise.allSettled(_pendingSaves.slice());
+    assertEqual(card.shortId, 41, 'adopted the server shortId');
     renderBoard();
     const cardEl = document.querySelector(`.card[data-id="${card.id}"]`);
     const badge = cardEl.querySelector('.card-shortid');
@@ -566,10 +581,13 @@ test('backfill assigns shortIds to existing cards in creation order', () => {
   renderBoard();
 });
 
-test('card displays shortId badge on board', () => {
+test('card displays shortId badge on board', async () => {
   cards.length = 0;
   _resetNextShortId();
+  enableFetchMock({ id: 'badge-server-id-2', shortId: 42, version: 1, title: 'Badge Test', description: '',
+    type: 'task', assignees: ['unassigned'], labels: [], column: 'backlog', order: 0 });   // #1583 — see above
   const card = addCard('Badge Test', '', 'task', 'unassigned', []);
+  await Promise.allSettled(_pendingSaves.slice());
   renderBoard();
   const cardEl = document.querySelector(`.card[data-id="${card.id}"]`);
   const badge = cardEl.querySelector('.card-shortid');
@@ -1406,13 +1424,23 @@ let _fetchMockError = false;
 let _fetchMockCalls = [];
 const _realFetch = window.fetch;
 
+// #1583 — the wrapper's DEFAULT mock answers a card create with a refusal
+// (definitively not created ⇒ the card is local-only), which is what these
+// fixture tests always ran under. A test that installs its own mock gets the
+// raw behaviour, flag cleared.
+let _fetchMockRefuseCreate = false;
+
 function enableFetchMock(response, shouldError) {
   _fetchMockResponse = response || null;
   _fetchMockError = shouldError || false;
   _fetchMockCalls = [];
+  _fetchMockRefuseCreate = false;
   window.fetch = async function(url, options) {
     _fetchMockCalls.push({ url, options });
     if (_fetchMockError) throw new Error('Network error: server not running');
+    if (_fetchMockRefuseCreate && options && options.method === 'POST' && /\/api\/cards$/.test(String(url))) {
+      return { ok: false, status: 404, json: async () => ({ error: 'no server in the file:// lane' }) };
+    }
     if (_fetchMockResponse) {
       return {
         ok: true,
@@ -1430,27 +1458,36 @@ function disableFetchMock() {
   _fetchMockError = false;
 }
 
-test('saveToJSONFile is called after addCard', async () => {
+test('#1583 addCard creates through POST /api/cards, never /api/save, and ADOPTS the server\'s record', async () => {
+  // #118 slice 1. The whole-board save let the client allocate the shortId and
+  // hand the server its nextShortId. Now the card is born on the server; the
+  // local card is provisional until the 201 replaces id, shortId and version.
   swapToMockLocalStorage();
   try {
     cards.length = 0;
     _jsonSaveCalled = false;
-    enableFetchMock({ cards: [], lastUpdated: new Date().toISOString() });
+    enableFetchMock({ id: 'server-made-id', shortId: 77, version: 1, title: 'JSON Save Test',
+      description: 'desc', type: 'task', assignees: ['unassigned'], labels: ['tag1'],
+      column: 'backlog', order: 0, similarCards: [{ shortId: 1 }] });
 
-    addCard('JSON Save Test', 'desc', 'task', 'unassigned', ['tag1']);
+    const card = addCard('JSON Save Test', 'desc', 'task', 'unassigned', ['tag1']);
+    assertEqual(card._unsynced, 'pending', 'provisional until the server answers');
 
-    // Allow microtask queue to flush
-    await new Promise(r => setTimeout(r, 10));
+    await Promise.allSettled(_pendingSaves.slice());
 
-    assert(_jsonSaveCalled, 'saveToJSONFile should have been called after addCard');
+    assert(_jsonSaveCalled, 'a persist was initiated after addCard');
     assertEqual(_fetchMockCalls.length, 1, 'fetch should have been called once');
-    assert(_fetchMockCalls[0].url.includes('/api/save'), 'fetch URL should be the save endpoint');
-
+    assert(/\/api\/cards$/.test(_fetchMockCalls[0].url), 'the create endpoint, not /api/save: ' + _fetchMockCalls[0].url);
+    assertEqual(_fetchMockCalls[0].options.method, 'POST', 'a POST');
     const body = JSON.parse(_fetchMockCalls[0].options.body);
-    assert(Array.isArray(body.cards), 'payload should have cards array');
-    assert(body.lastUpdated !== undefined, 'payload should have lastUpdated');
-    assertEqual(body.cards.length, 1, 'payload should have 1 card');
-    assertEqual(body.cards[0].title, 'JSON Save Test', 'payload card title should match');
+    assertEqual(body.title, 'JSON Save Test', 'title sent');
+    assertEqual(body.shortId, undefined, 'the client proposes no shortId');
+    assertEqual(body.id, undefined, 'nor an id');
+    assertEqual(body.order, undefined, 'nor an order — the server allocates it under its lock');
+    assertEqual(card.id, 'server-made-id', 'the local card took the server\'s id');
+    assertEqual(card.shortId, 77, 'and the server\'s shortId');
+    assertEqual(card._unsynced, undefined, 'and is no longer provisional');
+    assertEqual(card.similarCards, undefined, 'response-only keys are not adopted as card fields');
   } finally {
     cards.length = 0;
     _jsonSaveCalled = false;
@@ -1459,36 +1496,109 @@ test('saveToJSONFile is called after addCard', async () => {
   }
 });
 
-test('saveToJSONFile is called after a column change via drag-and-drop', async () => {
+test('#1583 a 2xx create reply that cannot be CONFIRMED is "unknown", never "failed"', async () => {
+  // The server said yes; the body is unreadable or lacks the card identity.
+  swapToMockLocalStorage();
+  try {
+    cards.length = 0;
+    enableFetchMock({ ok: true });   // 200, valid JSON, no id/shortId
+    const a = addCard('Unconfirmed', '', 'task', 'unassigned', []);
+    await Promise.allSettled(_pendingSaves.slice());
+    assertEqual(a._unsynced, 'unknown', 'identity-less 2xx ⇒ unknown');
+    window.fetch = async (url, options) => ({ ok: true, status: 201, json: async () => { throw new SyntaxError('Unexpected end of JSON input'); } });
+    const b = addCard('Garbled', '', 'task', 'unassigned', []);
+    await Promise.allSettled(_pendingSaves.slice());
+    assertEqual(b._unsynced, 'unknown', 'garbled 2xx ⇒ unknown');
+    window.fetch = async () => ({ ok: false, status: 400, json: async () => ({ error: 'bad' }) });
+    const c = addCard('Refused', '', 'task', 'unassigned', []);
+    await Promise.allSettled(_pendingSaves.slice());
+    assertEqual(c._unsynced, 'failed', 'a 4xx refusal is the only definitive failure');
+  } finally {
+    cards.length = 0;
+    disableFetchMock();
+    swapToRealLocalStorage();
+  }
+});
+
+test('#1583 the request identity is persisted BEFORE the first send', async () => {
+  swapToMockLocalStorage();
+  try {
+    cards.length = 0;
+    let storedAtSend = null;
+    window.fetch = async (url, options) => {
+      storedAtSend = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+      return { ok: false, status: 400, json: async () => ({}) };
+    };
+    const card = addCard('Persist first', '', 'task', 'unassigned', []);
+    await Promise.allSettled(_pendingSaves.slice());
+    const atSend = (storedAtSend || []).find((c) => c.title === 'Persist first');
+    assert(atSend, 'the card was in localStorage when the POST went out');
+    assertEqual(atSend._unsynced, 'pending', 'marked pending');
+    assert(atSend._requestId && atSend._requestId === card._requestId, 'with the SAME requestId the POST carries');
+  } finally {
+    cards.length = 0;
+    disableFetchMock();
+    swapToRealLocalStorage();
+  }
+});
+
+test('#1583 a provisional (unsynced) card is never sent by the whole-board save', async () => {
+  // Two writers creating one card is how a duplicate is born.
+  swapToMockLocalStorage();
+  try {
+    cards.length = 0;
+    enableFetchMock(null);   // the create "fails" (404) ⇒ the card stays local-only
+    const card = addCard('Only local', '', 'task', 'unassigned', []);
+    await Promise.allSettled(_pendingSaves.slice());
+    assertEqual(card._unsynced, 'failed', 'a failed create is marked, not silently dropped');
+    _fetchMockCalls = [];
+    saveToJSONFile();
+    await Promise.allSettled(_pendingSaves.slice());
+    const save = _fetchMockCalls.find(c => c.url.includes('/api/save'));
+    assert(save, 'the whole-board save still ran');
+    const body = JSON.parse(save.options.body);
+    assert(!body.cards.some(c => c.id === card.id), 'the unsynced card is not in the whole-board payload');
+  } finally {
+    cards.length = 0;
+    disableFetchMock();
+    swapToRealLocalStorage();
+  }
+});
+
+test('#1584 a column change via drag-and-drop persists through PATCH /api/cards/:id {column, order, ifVersion}, never /api/save', async () => {
+  // Inverted from the pre-#1584 "saveToJSONFile is called after drop": a move
+  // is now one granular PATCH (#118 slice 2), and the whole-board save must NOT
+  // be part of it.
   swapToMockLocalStorage();
   try {
     cards.length = 0;
     _jsonSaveCalled = false;
     enableFetchMock({ cards: [], lastUpdated: new Date().toISOString() });
 
-    const card = addCard('Drop JSON Test', '', 'task', 'unassigned', []);
+    const card = createCard('Drop JSON Test', '', 'task', 'unassigned', []);
+    card.version = 4;
+    cards.push(card);
 
-    // Clear mock calls from addCard
     _fetchMockCalls = [];
     _jsonSaveCalled = false;
 
-    // Simulate drag to done
     draggedCardId = card.id;
     const doneColumn = document.getElementById('column-done');
     const dropEvent = new DragEvent('drop', { bubbles: true, dataTransfer: new DataTransfer() });
     doneColumn.dispatchEvent(dropEvent);
 
-    // Allow microtask queue to flush
-    await new Promise(r => setTimeout(r, 10));
+    await Promise.allSettled([..._pendingSaves]);
 
-    assert(_jsonSaveCalled, 'saveToJSONFile should have been called after drop');
-    assertEqual(_fetchMockCalls.length, 1, 'fetch should have been called once after drop');
-    assert(_fetchMockCalls[0].url.includes('/api/save'), 'fetch URL should be the save endpoint');
-
-    const body = JSON.parse(_fetchMockCalls[0].options.body);
-    const movedCard = body.cards.find(c => c.id === card.id);
-    assert(movedCard !== undefined, 'moved card should be in payload');
-    assertEqual(movedCard.column, 'done', 'payload card should be in done column');
+    assert(_jsonSaveCalled, 'a persist was initiated after drop');
+    assertEqual(_fetchMockCalls.filter(c => String(c.url).includes('/api/save')).length, 0, 'no whole-board save');
+    const patch = _fetchMockCalls.find(c => c.options && c.options.method === 'PATCH');
+    assert(patch !== undefined, 'a PATCH went out');
+    assert(String(patch.url).split('?')[0].endsWith('/api/cards/' + card.id), 'to the moved card: ' + patch.url);
+    const body = JSON.parse(patch.options.body);
+    assertEqual(body.column, 'done', 'PATCH names the target column');
+    assert(Number.isInteger(body.order), 'PATCH carries an integer order');
+    assertEqual(body.makeRoom, true, 'the server makes room for it');
+    assertEqual(body.ifVersion, 4, 'under the version the tab holds');
   } finally {
     cards.length = 0;
     _jsonSaveCalled = false;
@@ -1538,7 +1648,10 @@ test('board-data.json structure has "cards" and "lastUpdated" fields', async () 
     cards.length = 0;
     enableFetchMock(null);
 
-    addCard('Structure Test', 'desc', 'goal', 'both', ['check']);
+    // #1583 — a stored card and an explicit whole-board save: addCard no
+    // longer goes through /api/save, and this test is about /api/save's shape.
+    cards.push(createCard('Structure Test', 'desc', 'goal', 'both', ['check']));
+    saveToJSONFile();
 
     await new Promise(r => setTimeout(r, 10));
 

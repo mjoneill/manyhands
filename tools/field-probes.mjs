@@ -21,7 +21,7 @@
  * probe failed to trip it" — two states that look identical from the wire.
  */
 
-/** @type {Array<{name:string, wellFormed:any, malformed:any, storedAs?:string, with?:object, noRule?:boolean, note?:string}>} */
+/** @type {Array<{name:string, wellFormed:any, malformed:any, storedAs?:string, patchStoredAs?:string, with?:object, noRule?:boolean, note?:string}>} */
 export const CARD_CREATE_PROBES = [
   // ── fields with a real validation rule ──
   { name: 'type', wellFormed: 'bug', malformed: 'not-a-type',
@@ -259,6 +259,19 @@ export const CARD_CREATE_PROBES = [
         + 'version, updatedAt and descriptionBytes instead of the whole card; omitting it is '
         + 'unchanged, because some callers legitimately use the echoed version and changing '
         + 'the DEFAULT would break them to save tokens. Unsupported value or 400.' },
+
+  // #1583 — the create's IDEMPOTENCY KEY. Declared on card_create (#1163 reach);
+  // stored as `createRequestId` so a retried create can find the card the first
+  // one made. Malformed = a value with characters outside [A-Za-z0-9-], which
+  // the server refuses (400) rather than storing an id no retry could match.
+  // `with`: on PATCH a requestId is a MOVE's identity and is refused without
+  // makeRoom (400), so the companions make it a move. On create they are an
+  // explicit order (a real create field) and makeRoom (ignored, and said so).
+  { name: 'requestId', wellFormed: 'req-0001-abcd-ef01', malformed: 'not a valid id!',
+    with: { makeRoom: true, order: 1 },
+    storedAs: 'createRequestId', patchStoredAs: 'lastMoveRequestId', expectStored: 'req-0001-abcd-ef01',
+    note: '#1583 — 8–64 chars of [A-Za-z0-9-]; a retried create with the same id returns the first card. '
+        + 'On PATCH it is a move\'s identity and is accepted only with makeRoom: true (#1584).' },
 
   // ── the control: a typo, consistently absent everywhere ──
   { name: 'titel', wellFormed: 'misspelled', malformed: null, noRule: true,

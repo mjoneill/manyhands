@@ -254,6 +254,10 @@ export async function startRestServer({ board, boardFile: sharedBoardFile, stati
     boardFile,
     attachmentsDir,
     configFile,
+    /** #1584 — the server's pid, and a kill that leaves the data on disk (for
+     * crash-and-restart tests; stop() still does the cleanup afterwards). */
+    pid: proc.pid,
+    kill: (sig = 'SIGKILL') => { try { proc.kill(sig); } catch { /* already gone */ } },
     /** Read the temp board file straight off disk (bypasses the API). */
     readBoardFile: () => JSON.parse(fs.readFileSync(boardFile, 'utf8')),
     /** #657 — the card-query miss log is part of the wire contract; tests

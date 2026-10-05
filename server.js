@@ -87,7 +87,7 @@ import { extractMentions as extractMentionsFromRoster } from './core/people.mjs'
 import { domainToJsonLd } from './core/jsonld.mjs';
 import { probeModel, PROTOCOL_NAMES as MODEL_PROTOCOLS } from './core/model-adapter.mjs'; // #1197
 import { deriveGraph, personByKey } from './core/people.mjs';
-import { queryCards, facetCards } from './core/cards-query.mjs';
+import { queryCards, facetCards, excerptOf, EXCERPT_CEILING } from './core/cards-query.mjs';
 import { similarCards } from './core/similar-cards.mjs';
 import { queryChangesFromLog, parseSince, EPOCH_CHANGED } from './core/changes-log-query.mjs';
 import { feedQuery, feedRowsFromBindings } from './core/logborn-feed.mjs';   // #1561 — the unit's writes in the change feed
@@ -913,9 +913,22 @@ async function handleSave(req, res) {
       for (const k of READ_DECORATIONS) delete out[k];
       return out;
     };
+    // #1584 — `lastMoveRequestId` is SERVER-OWNED: the move fence reads it as
+    // proof of a commit, so a browser snapshot must never set or clear it.
+    // (`moveFences` is board-level and server-owned too; it is preserved
+    // because `merged` starts from the stored board and only the four keys
+    // below are taken from the snapshot.)
+    const keepServerOwned = (c) => {
+      if (!c || !c.id) return c;
+      const stored = storedById.get(c.id);
+      const out = { ...c };
+      if (stored && stored.lastMoveRequestId !== undefined) out.lastMoveRequestId = stored.lastMoveRequestId;
+      else delete out.lastMoveRequestId;
+      return out;
+    };
     const carryForward = (incomingCards) => incomingCards.map(stripDecorations).map((c) => (
       c && c.id && storedById.has(c.id) ? { ...storedById.get(c.id), ...c } : c
-    ));
+    )).map(keepServerOwned);
 
     const merged = { ...existing };
     for (const k of ['cards', 'columns', 'nextShortId', 'lastUpdated']) {
@@ -1251,11 +1264,41 @@ function writeBoard(data, events) {
   data.lastUpdated = new Date().toISOString();
   data._README = BOARD_README;
   for (const ev of events) appendEvent(EVENT_LOG_DIR, ev, { now: data.lastUpdated });
+  // #1584 — TEST-ONLY crash-gap seams, read from env and from the events this
+  // write was given (a move's card state carries its lastMoveRequestId). With
+  // both env vars unset this is two property reads and nothing else.
+  if (process.env.SCRUM_TEST_FAIL_BOARD_WRITE_FOR_MOVE || process.env.SCRUM_TEST_PAUSE_AFTER_EVENTS_FOR_MOVE) {
+    testCrashGapSeams(events);
+  }
   // #686 — every server write is a ROSTERED save: Person nodes are
   // (re)materialized into @graph from this one authority on every write.
   saveDomain(BOARD_DATA_FILE, boardToDomain(data), { now: data.lastUpdated, roster: { seats: currentRoster(data) } });
   _graphDirty = true;   // #694 — the replica rebuilds lazily on next query
   _graphGeneration++;   // #931 — and SAYS SO, so a sync in flight cannot clear it
+}
+
+// #1584 — TEST-ONLY seams for the move crash gap (events appended, board not
+// yet written). Each env var names one move: its requestId, or `card:<id>`
+// for any makeRoom move of that card. The move's own event is tagged by the
+// PATCH handler with MOVE_WRITE_ID — a Symbol key, so appendEvent (which
+// copies named fields) never persists it. Called only when a var is set.
+const MOVE_WRITE_ID = Symbol('moveWriteRequestId');
+function testCrashGapSeams(events) {
+  const move = events.find((ev) => ev && typeof ev[MOVE_WRITE_ID] === 'string');
+  if (!move) return;
+  const rid = move[MOVE_WRITE_ID];
+  const names = (v) => !!v && (v === rid || v === `card:${move.entity.id}`);
+  if (names(process.env.SCRUM_TEST_FAIL_BOARD_WRITE_FOR_MOVE)) {
+    throw new Error('test seam: the board write failed after its events were appended');
+  }
+  if (names(process.env.SCRUM_TEST_PAUSE_AFTER_EVENTS_FOR_MOVE)) {
+    // Hold the process INSIDE the gap so a test can SIGKILL it there. Announced
+    // synchronously on fd 2 (a piped stderr write would not flush while the
+    // thread is blocked), then a blocking sleep.
+    fs.writeSync(2, `[test-seam] paused after events, before the board write (${rid})\n`);
+    const ms = Number(process.env.SCRUM_TEST_PAUSE_AFTER_EVENTS_MS) || 10000;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(ms, 30000));
+  }
 }
 
 // ── #694 — the graph traversal replica ──────────────────────────────────────
@@ -7050,6 +7093,9 @@ const CREATE_CONSUMED_FIELDS = new Set([
   // 2026-08-18 carry it, including #857, the apex card arguing this board is
   // the room's record. Accepting the alias costs nothing and closes the trap.
   'by',
+  // #1583 — the create's REQUEST IDENTITY (idempotency key). Consumed as
+  // `createRequestId` on the stored card; see handleCreateCard.
+  'requestId',
 ]);
 
 /**
@@ -8985,6 +9031,82 @@ function handleGetCard(req, res, idOrShortId) {
   }
 }
 
+/**
+ * #1583 — the order that puts a new card LAST in `column`: one past the
+ * highest numeric order already there, or 0 for an empty column. Non-numeric
+ * orders are ignored rather than read as NaN (which would poison the max).
+ * Must be called under withWriteLock against the board being written.
+ */
+function nextOrderInColumn(cardsArr, column) {
+  let max = -1;
+  for (const c of cardsArr) {
+    if (!c || c.column !== column) continue;
+    const o = Number(c.order);
+    if (Number.isFinite(o) && o > max) max = o;
+  }
+  return Math.floor(max) + 1;
+}
+
+/**
+ * #1584 (#118 slice 2) — MAKE ROOM for `moved` at its (column, order).
+ *
+ * The cards that come AFTER the insertion point, in the board's own render
+ * order (order ASC, ties by store position), are walked in sequence; each one
+ * whose order is not already above the slot is renumbered to the next integer,
+ * and the walk stops at the first gap. Only that chain moves; a card above the
+ * slot, or past a gap, is not touched.
+ *
+ * WHERE THE INSERTION POINT IS — `anchor`:
+ *   · a card  — "just after this card" (the drop's upper neighbour). The walk
+ *               starts at the card after it, so a drop BETWEEN TWO TIED CARDS
+ *               lands between them: the tied cards after the anchor are pushed
+ *               below the moved card instead of staying level with the anchor
+ *               and sorting above it. Ties are live on the board, not legacy.
+ *   · null    — "the top of the column": the walk starts at the first card.
+ *   · undefined (no `after` sent) — the walk is every card with order >= the
+ *               slot. Correct on an untied column; between tied cards it cannot
+ *               know which side of the tie was meant.
+ *
+ * ⭐ WHY THIS IS THE SERVER'S JOB AND NOT THE CLIENT'S. Renumbering neighbours
+ * as N separate PATCHes can be refused half-way (one neighbour 409s), leaving
+ * an order nobody chose. Here the whole renumber happens inside the moved
+ * card's own write lock and compare-and-swap: it lands whole, or — on a stale
+ * ifVersion — not at all. That same compare-and-swap makes a REPLAYED move a
+ * 409, never a second shift: the first one advanced the version it declared.
+ *
+ * Each shifted card's order really changed, so its version is bumped (#534: a
+ * writer holding the old version must not overwrite the new position). Its
+ * `updatedAt` is NOT touched: a nudge in position is not an edit of the card,
+ * and the board's "untouched for N days" fold reads that field.
+ *
+ * Must be called under withWriteLock, after `moved` has its final column and
+ * order. Returns the shifted cards.
+ */
+function makeRoomInColumn(cardsArr, moved, anchor) {
+  const at = Number(moved.order);
+  if (!Number.isFinite(at)) return [];
+  const seq = [];
+  cardsArr.forEach((c, i) => {
+    if (!c || c === moved || c.column !== moved.column) return;
+    seq.push({ c, o: Number(c.order) || 0, i });
+  });
+  seq.sort((a, b) => (a.o - b.o) || (a.i - b.i));
+  let walk;
+  if (anchor === undefined) walk = seq.filter(({ o }) => o >= at);
+  else if (anchor === null) walk = seq;
+  else walk = seq.slice(seq.findIndex(({ c }) => c === anchor) + 1);
+  const shifted = [];
+  let floor = at;
+  for (const { c, o } of walk) {
+    if (o > floor) break;   // a gap: nothing below it collides
+    c.order = floor + 1;
+    floor = c.order;
+    bumpCardVersion(c);
+    shifted.push(c);
+  }
+  return shifted;
+}
+
 async function handleCreateCard(req, res) {
   try {
     const raw = await readBody(req);
@@ -8994,6 +9116,16 @@ async function handleCreateCard(req, res) {
     }
     const verr = validateCardFields(body, { surface: 'create' }); // #830
     if (verr) return sendJSON(res, 400, { error: verr });
+    // #1583 — the REQUEST IDENTITY. A client that lost the response to its
+    // create cannot tell "never arrived" from "committed, reply lost"; it
+    // re-sends the SAME requestId and gets the card that request made (200,
+    // `replayed: true`) instead of a second card. Keyed on this id only —
+    // never on the content, which two genuine creates may share.
+    if (body.requestId !== undefined
+        && !(typeof body.requestId === 'string' && /^[A-Za-z0-9-]{8,64}$/.test(body.requestId))) {
+      return sendJSON(res, 400, { error: 'requestId must be 8–64 characters of [A-Za-z0-9-] (a client-generated UUID)' });
+    }
+    let replayed = null;
     let createErr = null;
     // #280 — the dup warning. Computed against the board AS READ inside the
     // lock, so "a similar card was created a second ago" is inside the window
@@ -9002,6 +9134,12 @@ async function handleCreateCard(req, res) {
     let similar = [];
     const created = await withWriteLock(async () => {
       const data = readBoard();
+      // #1583 — inside the lock, so a retry racing its own original cannot
+      // both miss the lookup and both create.
+      if (typeof body.requestId === 'string') {
+        const prior = data.cards.find((c) => c && c.createRequestId === body.requestId);
+        if (prior) { replayed = prior; return null; }
+      }
       // #917 — resolve before constructing, so the card is never built with a
       // value that would mint a dangling IRI. Inside the lock because it reads
       // the board it is resolving against.
@@ -9026,6 +9164,13 @@ async function handleCreateCard(req, res) {
       // the card it is resolving, so a create cannot canonicalise against a
       // map that was replaced while this request was in flight.
       const card = createCardFromPayload(body, data.nextShortId, aliasMap(data));
+      // #1583 — END OF ITS COLUMN, allocated HERE, inside the write lock. A
+      // create that names no order used to be born at 0, colliding with every
+      // other API-created card at the top of its column. Computed against the
+      // board as read under the lock, so two simultaneous creates cannot read
+      // the same maximum. An explicit number (0 included) is still the caller's.
+      if (typeof body.order !== 'number') card.order = nextOrderInColumn(data.cards, card.column);
+      if (typeof body.requestId === 'string') card.createRequestId = body.requestId;   // #1583 — queryable by replay
       data.cards.push(card);
       if (card.parent != null) applyApexLabels(data.cards, card.id);   // #902 item 4 — born labelled
       data.nextShortId = (data.nextShortId || 1) + 1;
@@ -9046,6 +9191,7 @@ async function handleCreateCard(req, res) {
     // does. That is the accepted-then-something-else shape — the exact class I
     // had filed a card about the same afternoon. Naming it here rather than
     // quietly closing it, because the near-miss is the useful part.
+    if (replayed) return sendJSON(res, 200, { ...replayed, replayed: true });
     if (createErr) return sendJSON(res, 400, { error: createErr });
     // #829 — create reports what it dropped, matching PATCH. Present only when
     // non-empty: an empty array on every response is noise a caller learns to
@@ -9097,6 +9243,33 @@ async function handleUpdateCard(req, res, idOrShortId) {
           + `Got ${JSON.stringify(patch.ifVersion)}. This is a malformed request, `
           + 'not a version conflict — re-reading and retrying will not clear it.',
       });
+    }
+    // #1584 — `makeRoom` is a VERB on `order`, so it needs one to act on. An
+    // integer, because a fractional slot would reintroduce the between-two-
+    // numbers ordering the per-column integer order (#923) retired. 400, not
+    // ignored: a move that silently did not make room would stack two cards on
+    // one order and report success.
+    if (patch.makeRoom !== undefined) {
+      if (patch.makeRoom !== true) {
+        return sendJSON(res, 400, { error: `makeRoom must be true when present. Got ${JSON.stringify(patch.makeRoom)}. Nothing was written.` });
+      }
+      if (!Number.isInteger(patch.order)) {
+        return sendJSON(res, 400, { error: 'makeRoom places the card at `order` and shifts the cards it collides with — '
+          + `it needs an integer order. Got ${JSON.stringify(patch.order)}. Nothing was written.` });
+      }
+      // `after` — the card the move goes just after (null = top of column).
+      if (patch.after !== undefined && patch.after !== null && typeof patch.after !== 'string') {
+        return sendJSON(res, 400, { error: `after must be a card id, or null for the top of the column. Got ${JSON.stringify(patch.after)}. Nothing was written.` });
+      }
+      // `requestId` — the move's identity, recorded on the card as
+      // `lastMoveRequestId` so a tab whose reply was lost can tell, by
+      // READING, whether its move committed. It is never replayed.
+      if (patch.requestId !== undefined
+          && !(typeof patch.requestId === 'string' && /^[A-Za-z0-9-]{8,64}$/.test(patch.requestId))) {
+        return sendJSON(res, 400, { error: 'requestId must be 8–64 characters of [A-Za-z0-9-] (a client-generated UUID). Nothing was written.' });
+      }
+    } else if (patch.after !== undefined || patch.requestId !== undefined) {
+      return sendJSON(res, 400, { error: '`after` and `requestId` describe a move and are only accepted with makeRoom: true. Nothing was written.' });
     }
     // #1032 — the response SHAPE, validated before the write.
     //
@@ -9176,8 +9349,17 @@ async function handleUpdateCard(req, res, idOrShortId) {
     // path can ring the doorbell for it. Reset per attempt inside the lock, so a
     // retried write can never notify with a stale nudge from an earlier pass.
     let nudge = null;
+    let shifted = [];   // #1584 — neighbours makeRoom renumbered; reset per attempt
     const updated = await withWriteLock(async () => {
+      shifted = [];
       const data = readBoard();
+      // #1584 — a move whose id was FENCED (its tab gave up waiting for the
+      // outcome and settled it) can never apply. Checked first, before the card
+      // lookup and the compare-and-swap, so nothing at all is written.
+      if (patch.makeRoom === true && typeof patch.requestId === 'string'
+          && moveFencesOf(data).includes(patch.requestId)) {
+        return { moveFenced: true };
+      }
       const idx = findCardIndex(data, idOrShortId);
       if (idx < 0) return null;
       const card = data.cards[idx];
@@ -9276,6 +9458,7 @@ async function handleUpdateCard(req, res, idOrShortId) {
         // PATCHABLE_CARD_FIELDS so it is never written as a literal key, and
         // reported as neither ignored (#823) nor refused: it was honoured.
         if (k === 'descriptionAppend' || k === 'descriptionPrepend') continue;
+        if (k === 'makeRoom' || k === 'after' || k === 'requestId') continue; // #1584 — consumed below, after column/order are applied
         if (k in ARRAY_UPSERT_VERBS) continue; // #1137 — consumed above, same reason
         if (RELATIONSHIP_VERBS.includes(k)) continue; // #1066 — consumed above, same reason
         // #844 — an unchanged value was not an attempt. Silent.
@@ -9340,6 +9523,24 @@ async function handleUpdateCard(req, res, idOrShortId) {
       // descendants (they moved with it). Additive only; never strips. Runs
       // AFTER the fields are applied so it sees the parent this write set.
       if ('parent' in patch && patch.parent != null) applyApexLabels(data.cards, card.id);
+      // #1584 — after the fields, so it sees the column and order this write set.
+      if (patch.makeRoom === true) {
+        let anchor;
+        if (patch.after === null) anchor = null;
+        else if (typeof patch.after === 'string') {
+          anchor = data.cards.find((c) => c && c.id === patch.after);
+          // The neighbour the user dropped beside is not where the tab saw it.
+          // Placing by number anyway would put the card somewhere nobody chose.
+          if (!anchor || anchor === card || anchor.column !== card.column
+              || !((Number(anchor.order) || 0) < card.order)) {
+            return { neighbourMoved: true };
+          }
+        }
+        shifted = makeRoomInColumn(data.cards, card, anchor);
+        // #1584 — the move's identity, on the stored card, so the fence can
+        // tell a committed move from one that may still arrive (handleMoveFence).
+        if (typeof patch.requestId === 'string') card.lastMoveRequestId = patch.requestId;
+      }
       card.updatedAt = new Date().toISOString();
       bumpCardVersion(card);   // #534 — one bump per accepted PATCH, not per field
       // #665 — the board is the ignition: a card ENTERING done asks the room
@@ -9364,9 +9565,14 @@ async function handleUpdateCard(req, res, idOrShortId) {
       // unknown-key guard already keeps `by` off the card itself. Optional:
       // a silent caller records null, never an invented attribution.
       const by = typeof patch.by === 'string' && patch.by ? patch.by : null;
+      const ownEvent = cardEvent('update', card, by);
+      // #1584 — names this write as a move, for the test-only crash-gap seams
+      // in writeBoard (a Symbol key: never persisted, invisible to JSON).
+      if (patch.makeRoom === true && typeof patch.requestId === 'string') ownEvent[MOVE_WRITE_ID] = patch.requestId;
       writeBoard(data, [
-        cardEvent('update', card, by),
+        ownEvent,
         ...fanout.map((c) => cardEvent('update', c, by)),
+        ...shifted.map((c) => cardEvent('update', c, by)),   // #1584 — each renumbered neighbour
         ...(nudge ? [convEvent(nudge)] : []),
       ]);
       return card;
@@ -9375,6 +9581,19 @@ async function handleUpdateCard(req, res, idOrShortId) {
     // #534 — the CAS refusal, read outside the lock because that is where the
     // response is written. 409 carries the CURRENT version: a refusal that says
     // "no" without saying "no, and here is where we are" forces a blind retry.
+    if (updated.moveFenced) {
+      return sendJSON(res, 409, {
+        error: 'This move was fenced: its tab settled it as unknown, so it can no longer be applied. Nothing was written.',
+        code: 'MOVE_FENCED',
+      });
+    }
+    if (updated.neighbourMoved) {
+      return sendJSON(res, 409, {
+        error: 'The card this move was placed after (`after`) is no longer where you saw it — it moved, '
+          + 'changed order or was deleted. Re-read the column and drop again. Nothing was written.',
+        code: 'NEIGHBOUR_MOVED',
+      });
+    }
     if (updated.conflict) {
       return sendJSON(res, 409, {
         error: `Card has moved on: you declared ifVersion but the current version is ${updated.currentVersion}. `
@@ -9407,12 +9626,30 @@ async function handleUpdateCard(req, res, idOrShortId) {
     // break a PATCH.
     if (nudge) notifyMcpOfPost(nudge);
 
+    const shiftedExcerptCap = (() => {
+      const n = Number(parseQuery(req.url).excerpt);
+      return Number.isInteger(n) && n >= 1 ? Math.min(n, EXCERPT_CEILING) : 0;
+    })();
     const disclosures = {
       ...(ignoredFields.length ? { ignoredFields } : {}),
       ...(refusedFields.length ? { refusedFields } : {}),
       // #856 — same discipline: present only when a caller actually tried
       // something, absent on every read-modify-write echo.
       ...(Object.keys(redirectedFields).length ? { redirectedFields } : {}),
+      // #1584 — the neighbours a makeRoom move renumbered, so the caller can
+      // adopt their new order AND version without re-reading the column.
+      //
+      // ⛔ THE WHOLE CARD, NOT JUST {order, version}. A neighbour may have been
+      // edited by someone else since the tab read it; handing the tab only the
+      // new version would pair STALE content with a CURRENT version, and the
+      // tab's next edit of it would overwrite that change without a 409. The
+      // body is left out (it can be large, and an absent `description` is what
+      // tells the editor to fetch before it opens); `?excerpt=N` adds the
+      // tile's preview, as GET /api/cards does.
+      ...(shifted.length ? { shifted: shifted.map((c) => {
+        const { description, ...rest } = c;
+        return shiftedExcerptCap ? { ...rest, descriptionExcerpt: excerptOf(description, shiftedExcerptCap) } : rest;
+      }) } : {}),
     };
     if (patch.return === 'id') {
       // ⭐ Not merely cheaper — it answers the question an append caller
@@ -9463,6 +9700,61 @@ async function handleDeleteCard(req, res, idOrShortId) {
     sendJSON(res, 500, { error: 'Failed to delete card' });
   }
 }
+
+// ── /api/cards/:id/move-fence — settle a move whose outcome is unknown (#1584) ──
+//
+// A tab whose move reply was lost (no reply, unreadable 2xx, 5xx…) cannot tell
+// whether the move committed, and must not build a whole-board save until it
+// can no longer be overtaken by it. It never re-sends. It calls this instead.
+//
+// Under the write lock, against the BOARD (the event log is consulted for
+// nothing — it is appended before the board is written, so an event alone is a
+// write-ahead claim, not proof):
+//   · the stored card's lastMoveRequestId is this id ⇒ { outcome: 'committed' }
+//   · otherwise the id is added to the board's server-owned `moveFences` set
+//     IN THE SAME board write ⇒ { outcome: 'fenced' }. A makeRoom PATCH
+//     carrying a fenced id is refused (409 MOVE_FENCED) before anything is
+//     applied, so from this answer on the move can never land.
+// 'fenced' does NOT mean "never applied": the move may have committed and
+// then been superseded (a later move overwrote lastMoveRequestId). It means
+// only that it cannot apply from now on — which is what makes a save safe.
+//
+// ⚠️ FENCES ARE PERMANENT. A UUID carries no trustworthy age, and a pruned
+// fence can no longer guarantee the refusal. Only unknown outcomes create
+// them, so the set stays tiny — a limit to revisit if that ever changes.
+async function handleMoveFence(req, res, idOrShortId) {
+  try {
+    let body = {};
+    try { body = JSON.parse((await readBody(req)) || '{}'); } catch { return sendJSON(res, 400, { error: 'body must be JSON: { requestId }' }); }
+    const requestId = body && body.requestId;
+    if (typeof requestId !== 'string' || !/^[A-Za-z0-9-]{8,64}$/.test(requestId)) {
+      return sendJSON(res, 400, { error: 'requestId must be the move\'s 8–64 character id. Nothing was written.' });
+    }
+    const out = await withWriteLock(async () => {
+      const data = readBoard();
+      const idx = findCardIndex(data, idOrShortId);
+      const card = idx >= 0 ? data.cards[idx] : null;
+      if (card && card.lastMoveRequestId === requestId) return { outcome: 'committed', cardFound: true };
+      // Test seam (unset in production): widens the gap between this read and
+      // its write, so a test can fire the move INTO it and prove the lock keeps
+      // it out. A delay only — it changes no decision.
+      const pause = Number(process.env.SCRUM_MOVE_FENCE_PAUSE_MS);
+      if (Number.isFinite(pause) && pause > 0) await new Promise((r) => setTimeout(r, Math.min(pause, 5000)));
+      const fences = moveFencesOf(data);
+      if (!fences.includes(requestId)) {
+        data.moveFences = [...fences, requestId];
+        const target = card || { id: String(idOrShortId), shortId: null };
+        writeBoard(data, [{ op: 'update', actor: null, entity: { kind: 'card', id: target.id, shortId: target.shortId ?? null }, state: card || { id: target.id, moveFenced: requestId } }]);
+      }
+      return { outcome: 'fenced', cardFound: !!card };
+    });
+    sendJSON(res, 200, { requestId, ...out });
+  } catch (e) {
+    console.error('POST /api/cards/:id/move-fence:', e.message);
+    sendJSON(res, 500, { error: 'Failed to fence the move' });
+  }
+}
+const moveFencesOf = (data) => (Array.isArray(data.moveFences) ? data.moveFences.filter((x) => typeof x === 'string') : []);
 
 // ── /api/cards/:id/claim — atomic first-write-wins claim (#348) ──
 // The coordination primitive: two agents racing to claim the same card must
@@ -10744,6 +11036,7 @@ const API_ROUTES = [
   { method: 'GET',    re: /^\/api\/cards$/,                fn: (req, res) => handleListCards(req, res) },
   { method: 'POST',   re: /^\/api\/cards$/,                fn: (req, res) => handleCreateCard(req, res) },
   { method: 'POST',   re: /^\/api\/refusals$/,             fn: (req, res) => handleReportRefusal(req, res) },   // #1167
+  { method: 'POST',   re: /^\/api\/cards\/([^\/]+)\/move-fence$/, fn: (req, res, m) => handleMoveFence(req, res, decodeURIComponent(m[1])) },   // #1584
   { method: 'POST',   re: /^\/api\/cards\/([^\/]+)\/claim$/, fn: (req, res, m) => handleClaimCard(req, res, m[1]) },
   { method: 'DELETE', re: /^\/api\/cards\/([^\/]+)\/claim$/, fn: (req, res, m) => handleReleaseCard(req, res, m[1]) },
   { method: 'GET',    re: /^\/api\/cards\/([^\/]+)$/,      fn: (req, res, m) => handleGetCard(req, res, m[1]) },

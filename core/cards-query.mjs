@@ -263,14 +263,14 @@ export function facetCards(cards, query = {}, opts = {}) {
  * ⚠️ Trailing surrogate trimmed: slicing mid-pair yields U+FFFD in the tile and
  * nothing errors — the edge found in review of 077cfd1.
  */
-function excerptOf(description, cap) {
+export function excerptOf(description, cap) {   // #1584 — also used for a move's shifted neighbours
   if (typeof description !== 'string') return '';
   if (description.length <= cap) return description;
   return description.slice(0, cap).replace(/[\uD800-\uDBFF]$/, '') + '…';
 }
 
 /** Clamp an `excerpt=` request to something a tile could plausibly show. */
-const EXCERPT_CEILING = 2000;
+export const EXCERPT_CEILING = 2000;
 
 export function queryCards(cards, query = {}, opts = {}) {
   const { limit, before, fields, excerpt, legacyIndex } = query;

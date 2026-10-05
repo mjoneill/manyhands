@@ -202,7 +202,12 @@ export async function auditCreateField(baseUrl, probe) {
  * earlier probe cannot make a later one read as stored.
  */
 export async function auditPatchField(baseUrl, probe) {
-  const { name, storedAs = name } = probe;
+  // #1584 — a field may be stored under a different key on PATCH than on
+  // create (a create's requestId is `createRequestId`; a move's is
+  // `lastMoveRequestId`). `patchStoredAs` names the PATCH key; absent, the
+  // probe's `storedAs` (or its name) applies, exactly as before.
+  const { name } = probe;
+  const storedAs = probe.patchStoredAs ?? probe.storedAs ?? name;
   const evidence = {};
 
   const targetCard = await post(baseUrl, {});
