@@ -145,6 +145,12 @@ const CHANGES_URL = CARDS_URL.replace(/\/api\/cards$/, '/api/changes');
 const MAINTENANCE_WINDOW_MS = Number(process.env.SCRUM_MAINTENANCE_WINDOW_MS ?? 10 * 60 * 1000);
 let maintenance = null;
 let lastWriteBySeat = {};
+// #717 (2026-10-05) — UNKNOWN IS NOT NONE. This read used to fall back to `{}`
+// when it failed, so a seat that wrote 62 s earlier was named STOPPED "with no
+// board write attributed to it in the window read" — of a window nobody read.
+// A read that timed out, failed, answered non-2xx (even with a JSON body) or
+// answered non-JSON is UNREADABLE, and an unreadable read cannot support STOPPED.
+let writesUnreadable = null;
 try {
   // #1358 — the page must reach back as far as the re-ask backoff, or a write
   // that answered the episode (24 min old at the 16:52Z firing) is invisible
@@ -152,15 +158,25 @@ try {
   // short to hold the answer.
   const since = new Date(Date.now() - Math.max(STOPPED_AFTER_MS, STOPPED_REFIRE_MS) - 60_000).toISOString();
   const r = await fetch(`${CHANGES_URL}?since=${encodeURIComponent(since)}&limit=500`, { signal: AbortSignal.timeout(5000) });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
   const j = await r.json();
-  lastWriteBySeat = lastWriteBySeatFrom(j?.changes);
+  if (!Array.isArray(j?.changes)) throw new Error('no changes array in the response');
+  lastWriteBySeat = lastWriteBySeatFrom(j.changes);
   // #1273 — the maintenance declaration rides the page we already fetched.
   // No new request, no new failure mode: if this fetch fails, `maintenance`
   // stays null and the alarm behaves exactly as it did before this existed —
   // which is the safe direction, because the fallback is SPEAKING, not silence.
-  maintenance = maintenanceFrom(j?.changes, { now: Date.now(), windowMs: MAINTENANCE_WINDOW_MS });
-} catch (e) { console.log(`${now} attributed writes unreadable (${e.message}) — the client-request reading decides alone this tick`); lastWriteBySeat = {}; }
-const stopped = claimsBySeat ? stoppedSeats(status, { now: Date.now(), staleMs: STOPPED_AFTER_MS, claimsBySeat, lastWriteBySeat }) : [];
+  maintenance = maintenanceFrom(j.changes, { now: Date.now(), windowMs: MAINTENANCE_WINDOW_MS });
+} catch (e) {
+  writesUnreadable = e.message;
+  console.log(`${now} attributed writes UNREADABLE (${e.message}) — no seat can be named STOPPED this tick`);
+  lastWriteBySeat = {};
+}
+// On an unreadable tick the client-request reading alone still says who it CANNOT
+// confirm; decide() reports them as a degraded observation, never as STOPPED.
+const candidates = claimsBySeat ? stoppedSeats(status, { now: Date.now(), staleMs: STOPPED_AFTER_MS, claimsBySeat, lastWriteBySeat }) : [];
+const stopped = writesUnreadable ? [] : candidates;
+const unconfirmed = writesUnreadable ? candidates : null;
 const answeredSeats = claimsBySeat ? answeredSeatsFrom(status, { now: Date.now(), staleMs: STOPPED_AFTER_MS, claimsBySeat, lastWriteBySeat }) : [];
 if (answeredSeats.length) console.log(`${now} answered stalls (not re-asked inside ${Math.round(STOPPED_REFIRE_MS / 60000)} min): ${answeredSeats.map((a) => `${a.seat} wrote ${a.lastWriteAt} after its request ${a.lastClientRequestAt}`).join('; ')}`);
 if (stopped.length) console.log(`${now} stopped seats: ${stopped.map((s) => `${s.seat} since ${s.lastClientRequestAt} holding ${s.claims.map((c) => `#${c}`).join(',')}`).join('; ')}`);
@@ -177,6 +193,8 @@ const { state: st, warnBody } = decide({
   staleFacts: staleFacts(status),
   stoppedSeats: stopped,
   answeredSeats,            // #1358
+  unconfirmedSeats: unconfirmed,   // #717 — non-null only when the attributed-write read was UNREADABLE
+  writesUnreadableReason: writesUnreadable,
   stoppedRefireMs: STOPPED_REFIRE_MS,
   maintenance,
 });
