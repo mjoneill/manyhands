@@ -283,6 +283,15 @@ export const KIND_DECLARATIONS = Object.freeze([
       + 'sayable for routes this vocabulary has not learned about yet. Added by #1217; '
       + 'declared here rather than as a literal because this is where kinds live now.',
   },
+  {
+    name: null, eventKind: 'announcement', collection: null,
+    createdBy: 'POST /api/outbox/:obligationId/publish (#1574)',
+    definition: 'A change to an announcement obligation in the board\'s server-owned outbox: it was '
+      + 'verified and marked published, or blocked with a reason. The obligation itself is created '
+      + 'inside the card write that caused it and rides that write\'s card event; this kind records '
+      + 'the later publish decision. NOT projected as an rdf:type and with no collection mapping: '
+      + 'the outbox is a top-level document field, so like `wiki` it does not rebuild from the log.',
+  },
 
   // ── vocabulary ────────────────────────────────────────────────────────────
   {
