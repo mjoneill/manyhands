@@ -380,17 +380,27 @@ test('#1583 create outcome UNKNOWN blocks whole-board saves (visibly) until it i
     assert.equal(await page.evaluate(() => cards.find((c) => c.title === 'never confirmed')?._unsynced), 'unknown',
       'no reply is "unknown", not "failed"');
 
+    // #1584 — a MOVE is no longer a whole-board save (it is one PATCH of the
+    // moved card), so it cannot delete the unconfirmed card and is not
+    // blocked. The remaining whole-board callers (column rename/add/delete,
+    // slices 3–4) still are; saveToJSONFile() stands in for them here.
     await clickMove(page, 'k1');
+    await page.waitForFunction(() => _pendingSaves.length === 0, { timeout: 15000 });
+    assert.equal(writes.filter((w) => w.method === 'PATCH' && w.path === '/api/cards/k1').length, 1, 'the move went out as its own PATCH');
+    await page.evaluate(() => { saveToJSONFile(); });
     await page.waitForFunction(() => _pendingSaves.length === 0, { timeout: 15000 });
     assert.equal(writes.filter((w) => w.path === '/api/save').length, 0, 'the whole-board save was BLOCKED, not sent');
     const msg = await page.$eval('.save-status', (e) => e.textContent);
     assert.match(msg, /not saved/i, msg);
     let all = (await api(server.baseUrl, 'GET', '/api/cards?limit=50')).body.cards;
     assert.equal(all.filter((c) => c.title === 'never confirmed').length, 1, 'the committed card is still there, once');
+    assert.equal(all.find((c) => c.id === 'k1').column, 'planned', 'and the granular move landed');
 
-    // The network heals; the next change re-asks by request id, then saves.
+    // The network heals; the next whole-board save re-asks by request id, then saves.
     lost.active = false;
     await clickMove(page, 'k2');
+    await page.waitForFunction(() => _pendingSaves.length === 0, { timeout: 15000 });
+    await page.evaluate(() => { saveToJSONFile(); });
     await page.waitForFunction(() => _pendingSaves.length === 0, { timeout: 15000 });
     all = (await api(server.baseUrl, 'GET', '/api/cards?limit=50')).body.cards;
     const made = all.filter((c) => c.title === 'never confirmed');

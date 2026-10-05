@@ -9004,6 +9004,49 @@ function nextOrderInColumn(cardsArr, column) {
   return Math.floor(max) + 1;
 }
 
+/**
+ * #1584 (#118 slice 2) — MAKE ROOM for `moved` at its (column, order): every
+ * other card in that column whose order the move collides with is pushed down
+ * by one, and the push stops at the first gap. Only the collision chain moves;
+ * a card past a gap, or above the slot, is not touched.
+ *
+ * ⭐ WHY THIS IS THE SERVER'S JOB AND NOT THE CLIENT'S. Renumbering neighbours
+ * as N separate PATCHes can be refused half-way (one neighbour 409s), leaving
+ * an order nobody chose. Here the whole renumber happens inside the moved
+ * card's own write lock and compare-and-swap: it lands whole, or — on a stale
+ * ifVersion — not at all.
+ *
+ * Each shifted card's order really changed, so its version is bumped (#534: a
+ * writer holding the old version must not overwrite the new position). Its
+ * `updatedAt` is NOT touched: a nudge in position is not an edit of the card,
+ * and the board's "untouched for N days" fold reads that field.
+ *
+ * Ties (legacy cards sharing an order) are walked in store order. Must be
+ * called under withWriteLock, after `moved` has its final column and order.
+ * Returns the shifted cards.
+ */
+function makeRoomInColumn(cardsArr, moved) {
+  const at = Number(moved.order);
+  if (!Number.isFinite(at)) return [];
+  const peers = [];
+  cardsArr.forEach((c, i) => {
+    if (!c || c === moved || c.column !== moved.column) return;
+    const o = Number(c.order);
+    if (Number.isFinite(o) && o >= at) peers.push({ c, o, i });
+  });
+  peers.sort((a, b) => (a.o - b.o) || (a.i - b.i));
+  const shifted = [];
+  let floor = at;
+  for (const { c, o } of peers) {
+    if (o > floor) break;   // a gap: nothing below it collides
+    c.order = floor + 1;
+    floor = c.order;
+    bumpCardVersion(c);
+    shifted.push(c);
+  }
+  return shifted;
+}
+
 async function handleCreateCard(req, res) {
   try {
     const raw = await readBody(req);
@@ -9141,6 +9184,20 @@ async function handleUpdateCard(req, res, idOrShortId) {
           + 'not a version conflict — re-reading and retrying will not clear it.',
       });
     }
+    // #1584 — `makeRoom` is a VERB on `order`, so it needs one to act on. An
+    // integer, because a fractional slot would reintroduce the between-two-
+    // numbers ordering the per-column integer order (#923) retired. 400, not
+    // ignored: a move that silently did not make room would stack two cards on
+    // one order and report success.
+    if (patch.makeRoom !== undefined) {
+      if (patch.makeRoom !== true) {
+        return sendJSON(res, 400, { error: `makeRoom must be true when present. Got ${JSON.stringify(patch.makeRoom)}. Nothing was written.` });
+      }
+      if (!Number.isInteger(patch.order)) {
+        return sendJSON(res, 400, { error: 'makeRoom places the card at `order` and shifts the cards it collides with — '
+          + `it needs an integer order. Got ${JSON.stringify(patch.order)}. Nothing was written.` });
+      }
+    }
     // #1032 — the response SHAPE, validated before the write.
     //
     // Every card write echoes the whole body back: a one-line append to the
@@ -9219,7 +9276,9 @@ async function handleUpdateCard(req, res, idOrShortId) {
     // path can ring the doorbell for it. Reset per attempt inside the lock, so a
     // retried write can never notify with a stale nudge from an earlier pass.
     let nudge = null;
+    let shifted = [];   // #1584 — neighbours makeRoom renumbered; reset per attempt
     const updated = await withWriteLock(async () => {
+      shifted = [];
       const data = readBoard();
       const idx = findCardIndex(data, idOrShortId);
       if (idx < 0) return null;
@@ -9319,6 +9378,7 @@ async function handleUpdateCard(req, res, idOrShortId) {
         // PATCHABLE_CARD_FIELDS so it is never written as a literal key, and
         // reported as neither ignored (#823) nor refused: it was honoured.
         if (k === 'descriptionAppend' || k === 'descriptionPrepend') continue;
+        if (k === 'makeRoom') continue; // #1584 — consumed below, after column/order are applied
         if (k in ARRAY_UPSERT_VERBS) continue; // #1137 — consumed above, same reason
         if (RELATIONSHIP_VERBS.includes(k)) continue; // #1066 — consumed above, same reason
         // #844 — an unchanged value was not an attempt. Silent.
@@ -9383,6 +9443,8 @@ async function handleUpdateCard(req, res, idOrShortId) {
       // descendants (they moved with it). Additive only; never strips. Runs
       // AFTER the fields are applied so it sees the parent this write set.
       if ('parent' in patch && patch.parent != null) applyApexLabels(data.cards, card.id);
+      // #1584 — after the fields, so it sees the column and order this write set.
+      if (patch.makeRoom === true) shifted = makeRoomInColumn(data.cards, card);
       card.updatedAt = new Date().toISOString();
       bumpCardVersion(card);   // #534 — one bump per accepted PATCH, not per field
       // #665 — the board is the ignition: a card ENTERING done asks the room
@@ -9410,6 +9472,7 @@ async function handleUpdateCard(req, res, idOrShortId) {
       writeBoard(data, [
         cardEvent('update', card, by),
         ...fanout.map((c) => cardEvent('update', c, by)),
+        ...shifted.map((c) => cardEvent('update', c, by)),   // #1584 — each renumbered neighbour
         ...(nudge ? [convEvent(nudge)] : []),
       ]);
       return card;
@@ -9456,6 +9519,9 @@ async function handleUpdateCard(req, res, idOrShortId) {
       // #856 — same discipline: present only when a caller actually tried
       // something, absent on every read-modify-write echo.
       ...(Object.keys(redirectedFields).length ? { redirectedFields } : {}),
+      // #1584 — the neighbours a makeRoom move renumbered, so the caller can
+      // adopt their new order AND version without re-reading the column.
+      ...(shifted.length ? { shifted: shifted.map((c) => ({ id: c.id, shortId: c.shortId, column: c.column, order: c.order, version: c.version })) } : {}),
     };
     if (patch.return === 'id') {
       // ⭐ Not merely cheaper — it answers the question an append caller

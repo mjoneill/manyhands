@@ -1560,40 +1560,40 @@ test('#1583 a provisional (unsynced) card is never sent by the whole-board save'
   }
 });
 
-test('saveToJSONFile is called after a column change via drag-and-drop', async () => {
+test('#1584 a column change via drag-and-drop persists through PATCH /api/cards/:id {column, order, ifVersion}, never /api/save', async () => {
+  // Inverted from the pre-#1584 "saveToJSONFile is called after drop": a move
+  // is now one granular PATCH (#118 slice 2), and the whole-board save must NOT
+  // be part of it.
   swapToMockLocalStorage();
   try {
     cards.length = 0;
     _jsonSaveCalled = false;
     enableFetchMock({ cards: [], lastUpdated: new Date().toISOString() });
 
-    // #1583 — seeded as an already-stored card: addCard now creates through
-    // POST /api/cards and a card the server has not confirmed is (rightly)
-    // kept out of the whole-board save this test is about.
     const card = createCard('Drop JSON Test', '', 'task', 'unassigned', []);
+    card.version = 4;
     cards.push(card);
 
-    // Clear mock calls from addCard
     _fetchMockCalls = [];
     _jsonSaveCalled = false;
 
-    // Simulate drag to done
     draggedCardId = card.id;
     const doneColumn = document.getElementById('column-done');
     const dropEvent = new DragEvent('drop', { bubbles: true, dataTransfer: new DataTransfer() });
     doneColumn.dispatchEvent(dropEvent);
 
-    // Allow microtask queue to flush
-    await new Promise(r => setTimeout(r, 10));
+    await Promise.allSettled([..._pendingSaves]);
 
-    assert(_jsonSaveCalled, 'saveToJSONFile should have been called after drop');
-    assertEqual(_fetchMockCalls.length, 1, 'fetch should have been called once after drop');
-    assert(_fetchMockCalls[0].url.includes('/api/save'), 'fetch URL should be the save endpoint');
-
-    const body = JSON.parse(_fetchMockCalls[0].options.body);
-    const movedCard = body.cards.find(c => c.id === card.id);
-    assert(movedCard !== undefined, 'moved card should be in payload');
-    assertEqual(movedCard.column, 'done', 'payload card should be in done column');
+    assert(_jsonSaveCalled, 'a persist was initiated after drop');
+    assertEqual(_fetchMockCalls.filter(c => String(c.url).includes('/api/save')).length, 0, 'no whole-board save');
+    const patch = _fetchMockCalls.find(c => c.options && c.options.method === 'PATCH');
+    assert(patch !== undefined, 'a PATCH went out');
+    assert(String(patch.url).endsWith('/api/cards/' + card.id), 'to the moved card: ' + patch.url);
+    const body = JSON.parse(patch.options.body);
+    assertEqual(body.column, 'done', 'PATCH names the target column');
+    assert(Number.isInteger(body.order), 'PATCH carries an integer order');
+    assertEqual(body.makeRoom, true, 'the server makes room for it');
+    assertEqual(body.ifVersion, 4, 'under the version the tab holds');
   } finally {
     cards.length = 0;
     _jsonSaveCalled = false;
