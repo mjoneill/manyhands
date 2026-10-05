@@ -67,6 +67,7 @@ import { mintId } from './core/tending-ids.mjs';
 import { createPrompt, editPrompt, setEnabled, reorderPlaylist, removePrompt, setShuffle, readShuffle } from './core/tending-authoring.mjs';
 import { resolveProvenance } from './core/tending-provenance.mjs';
 import { boardToDomain, domainToBoard, cardToNode } from './core/mapping.mjs';
+import { OUTBOX_FIELD, outboxOf, withAnnouncement, listOutbox } from './core/announce-outbox.mjs';   // #1574 C3a
 import { verifyShaIntegrity, readShaStamp, collectShas, SHA_POPULATION } from './core/sha-integrity.mjs';
 import { summariseSeat, recommendInterval, backlogFor, costCoverage, budgetGateStatus, TICK_MS } from './core/insights.mjs';   // #1290 shadow insights
 import { buildTree, buildChildIndex } from './core/tree.mjs';
@@ -455,6 +456,25 @@ function appendClaimAnnouncement(data, card, actor, action) {
     console.error('#578 claim announcement skipped:', e.message);
     return null;
   }
+}
+
+// #1574 C3a — THE ANNOUNCEMENT OBLIGATION rides the same document write as
+// the card change that caused it. The mutationId is minted HERE, inside the
+// caller's write lock, never taken from a request; the origin (slots +
+// provenance) and one pending entry per slot, with its payload frozen now,
+// land in `data.announcementOutbox` and are persisted by the caller's single
+// writeBoard. No write ⇒ no obligation; the write ⇒ both. Not best-effort on
+// purpose (unlike appendClaimAnnouncement above): if the obligation cannot be
+// recorded, the claim must not commit without it.
+function commitCardObligation(data, card, actor, slot, action) {
+  const body = claimAnnouncement(card, actor, action) || `${actor} ${action} #${card.shortId}`;
+  data[OUTBOX_FIELD] = withAnnouncement(data[OUTBOX_FIELD], {
+    mutationId: crypto.randomUUID(),
+    origin: { cardId: card.id, version: card.version },
+    at: new Date().toISOString(),
+    originActor: actor,
+    slots: [{ slot, body, mentions: extractMentionsFromRoster(body, currentRoster(data)), notify: true }],
+  });
 }
 
 // README block injected into every write so the warning is the first thing
@@ -922,6 +942,15 @@ async function handleSave(req, res) {
       if (incoming[k] === undefined) continue;
       merged[k] = k === 'cards' ? carryForward(incoming[k]) : incoming[k];
     }
+    // #1574 C3a — THE OUTBOX IS SERVER-OWNED. It is taken from the server's
+    // CURRENT document (read above, with no await between that read and the
+    // write below, so no locked writer can interleave) and the client's copy is
+    // ignored entirely: a forged, emptied or null `announcementOutbox` in the
+    // body changes nothing, and a snapshot read before a claim cannot erase the
+    // obligation that claim committed. Stated here rather than left to the
+    // allow-list above, so widening that list cannot silently hand it over.
+    if (existing[OUTBOX_FIELD] !== undefined) merged[OUTBOX_FIELD] = existing[OUTBOX_FIELD];
+    else delete merged[OUTBOX_FIELD];
 
     // #1265 / #760 — THE LAST UNGUARDED COLUMN WRITE.
     //
@@ -1251,11 +1280,31 @@ function writeBoard(data, events) {
   data.lastUpdated = new Date().toISOString();
   data._README = BOARD_README;
   for (const ev of events) appendEvent(EVENT_LOG_DIR, ev, { now: data.lastUpdated });
+  testBarrier('after-events');     // #1574 C3a — test-only; a no-op unless SCRUM_TEST_BARRIER_DIR is set
   // #686 — every server write is a ROSTERED save: Person nodes are
   // (re)materialized into @graph from this one authority on every write.
   saveDomain(BOARD_DATA_FILE, boardToDomain(data), { now: data.lastUpdated, roster: { seats: currentRoster(data) } });
   _graphDirty = true;   // #694 — the replica rebuilds lazily on next query
   _graphGeneration++;   // #931 — and SAYS SO, so a sync in flight cannot clear it
+  testBarrier('after-document');   // #1574 C3a — after the document write, before any caller responds
+}
+
+// #1574 C3a — TEST-ONLY crash barriers. With SCRUM_TEST_BARRIER_DIR set, a
+// FIFO named `after-events` / `after-document` in that dir is opened and read
+// (blocking the process) at that point in writeBoard, so a test can SIGKILL
+// the server in a known window. Unset, this function returns before touching
+// the filesystem, and the write order is the shipped one. Only a FIFO gates: a
+// regular file of the same name is ignored, so a stray file cannot hang a write.
+// (The variable is read per call, not hoisted into a module const, so a write
+// during module evaluation cannot hit a temporal-dead-zone error.)
+function testBarrier(name) {
+  const dir = process.env.SCRUM_TEST_BARRIER_DIR;
+  if (!dir) return;
+  const p = path.join(dir, name);
+  let st = null;
+  try { st = fs.statSync(p); } catch { return; }
+  if (!st.isFIFO()) return;
+  try { fs.readFileSync(p); } catch { /* the test removed it: pass */ }
 }
 
 // ── #694 — the graph traversal replica ──────────────────────────────────────
@@ -9498,6 +9547,8 @@ async function handleClaimCard(req, res, idOrShortId) {
         // it here rather than in a second write keeps the two atomic: there is
         // no window in which the card is claimed and the room was never told.
         const announced = appendClaimAnnouncement(data, card, by, 'claimed');
+        // #1574 C3a — and the durable OBLIGATION to announce it, in the same write.
+        commitCardObligation(data, card, by, 'claim', 'claimed');
         // #669 — claim + its announcement, two events on ONE write (#578).
         writeBoard(data, [cardEvent('update', card, by),
           ...(announced ? [convEvent(announced, by)] : [])]);
@@ -9549,6 +9600,9 @@ async function handleReleaseCard(req, res, idOrShortId) {
       card.updatedAt = new Date().toISOString();
       bumpCardVersion(card);   // #534 — a release is a card write
       const announced = wasHeld ? appendClaimAnnouncement(data, card, by, 'released') : null;
+      // #1574 C3a — only a real transition owes an announcement: an unheld
+      // release mints no mutationId and writes no origin or entry.
+      if (wasHeld) commitCardObligation(data, card, by, 'release', 'released');
       writeBoard(data, [cardEvent('update', card, by),
         ...(announced ? [convEvent(announced, by)] : [])]);
       return { status: 200, payload: { released: true }, announced };
@@ -9558,6 +9612,46 @@ async function handleReleaseCard(req, res, idOrShortId) {
   } catch (e) {
     console.error('DELETE /api/cards/:id/claim:', e.message);
     sendJSON(res, 500, { error: 'Failed to release card' });
+  }
+}
+
+// ── #1574 C3a — the announcement outbox ──
+// GET /api/outbox[?status=&mutationId=] → { origins: [...], entries: [...] }.
+// ONE read, taken under the write lock, so the two lists come from the same
+// document: an origin and its entries can never be read across a write.
+// Origins are returned even when none of their entries exist.
+async function handleGetOutbox(req, res) {
+  try {
+    const q = new URL(req.url, 'http://x').searchParams;
+    const status = q.get('status') || undefined;
+    const mutationId = q.get('mutationId') || undefined;
+    const listed = await withWriteLock(async () => listOutbox(readBoard(), { status, mutationId }));
+    sendJSON(res, 200, listed);
+  } catch (e) {
+    console.error('GET /api/outbox:', e.message);
+    sendJSON(res, 500, { error: 'Failed to read the outbox' });
+  }
+}
+
+// POST /api/outbox/:obligationId/complete {postId}
+// NEVER trusts a caller-supplied receipt, status or postId: publication is
+// recorded only from the server's own lookup of the post. C3a ships no such
+// lookup, so a known obligation is refused and stays `pending` (503, nothing
+// written); an unknown one is 404. The verified path is C3b.
+async function handleCompleteOutbox(req, res, rawId) {
+  try {
+    await readBody(req);   // drained, and deliberately not consulted
+    let obligationId;
+    try { obligationId = decodeURIComponent(rawId); } catch { return sendJSON(res, 400, { error: 'malformed obligation id' }); }
+    const known = await withWriteLock(async () => Boolean(outboxOf(readBoard()).entries[obligationId]));
+    if (!known) return sendJSON(res, 404, { error: 'Obligation not found', obligationId });
+    sendJSON(res, 503, {
+      error: 'The post cannot be verified: no graph lookup is available. A caller-supplied receipt is never accepted; the obligation stays pending.',
+      code: 'OUTBOX_UNVERIFIABLE', obligationId, status: 'pending',
+    });
+  } catch (e) {
+    console.error('POST /api/outbox/:id/complete:', e.message);
+    sendJSON(res, 500, { error: 'Failed to complete the obligation' });
   }
 }
 
@@ -10746,6 +10840,8 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/refusals$/,             fn: (req, res) => handleReportRefusal(req, res) },   // #1167
   { method: 'POST',   re: /^\/api\/cards\/([^\/]+)\/claim$/, fn: (req, res, m) => handleClaimCard(req, res, m[1]) },
   { method: 'DELETE', re: /^\/api\/cards\/([^\/]+)\/claim$/, fn: (req, res, m) => handleReleaseCard(req, res, m[1]) },
+  { method: 'GET',    re: /^\/api\/outbox$/,              fn: (req, res) => handleGetOutbox(req, res) },                    // #1574 C3a
+  { method: 'POST',   re: /^\/api\/outbox\/([^\/]+)\/complete$/, fn: (req, res, m) => handleCompleteOutbox(req, res, m[1]) }, // #1574 C3a
   { method: 'GET',    re: /^\/api\/cards\/([^\/]+)$/,      fn: (req, res, m) => handleGetCard(req, res, m[1]) },
   { method: 'PATCH',  re: /^\/api\/cards\/([^\/]+)$/,      fn: (req, res, m) => handleUpdateCard(req, res, m[1]) },
   { method: 'DELETE', re: /^\/api\/cards\/([^\/]+)$/,      fn: (req, res, m) => handleDeleteCard(req, res, m[1]) },
