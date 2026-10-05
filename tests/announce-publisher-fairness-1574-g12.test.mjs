@@ -204,7 +204,10 @@ test('F1 five entries the board keeps PENDING plus one newer publishable entry, 
   await new Promise((r) => bad.listen(0, '127.0.0.1', r));
   const stuck = [1, 2, 3, 4, 5].map((n) => item(`m-s${n}`, 'publisher', { at: `2026-10-04T12:0${n}:00.000Z` }));
   const fresh = item('m-new', 'legacy', { entry: { legacyPostId: 'p-new' }, at: '2026-10-04T12:30:00.000Z' });
-  const board = seeded([...stuck, fresh], [legacyPost('p-new', 'm-new')]);
+  // the board is MIGRATED (an epoch, a numbered post, a counter above it): a publisher-mode entry on a clean unmigrated board is held
+  // pending with POST_SEQ_MIGRATION_REQUIRED and never reaches the executor (C3c G10), which would defeat what this row needs: stuck entries that
+  // the executor stand-in is really asked about
+  const board = { ...seeded([...stuck, fresh], [legacyPost('p-new', 'm-new', { postSeq: 1 })]), postSeqEpoch: '11111111-2222-4333-8444-555555555555', nextPostSeq: 2 };
   try {
     await withServer(board, { ...FLAG, SCRUM_GRAPH_EXECUTOR_URL: `http://127.0.0.1:${bad.address().port}` }, (s) => withProxy(s.baseUrl, async (proxy) => {
       const dir = tmp();

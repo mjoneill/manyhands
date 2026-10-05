@@ -161,7 +161,10 @@ async function withStack(board, { envExtra = {}, proxyDelayMs = 0 } = {}, body) 
     proxy = http.createServer(async (req, res) => {
       const chunks = []; for await (const c of req) chunks.push(c);
       if (req.method === 'POST' && req.url === '/update') { proxyState.arrivals++; arrive(); await new Promise((r) => setTimeout(r, proxyDelayMs)); }
-      const f = await fetch(`${exec.baseUrl}${req.url}`, { method: req.method, headers: { 'content-type': req.headers['content-type'] || 'text/plain' }, ...(req.method === 'POST' ? { body: Buffer.concat(chunks) } : {}) });
+      // every request header is forwarded except the two the fetch sets itself: the executor REQUIRES x-op-id on a write, and a proxy that drops it
+      // turns a healthy publish into a pending one (found when the real build ran this row)
+      const fwd = { ...req.headers }; delete fwd.host; delete fwd['content-length']; delete fwd.connection;
+      const f = await fetch(`${exec.baseUrl}${req.url}`, { method: req.method, headers: fwd, ...(req.method === 'POST' ? { body: Buffer.concat(chunks) } : {}) });
       res.statusCode = f.status; res.end(await f.text());
     });
     await new Promise((r) => proxy.listen(0, '127.0.0.1', r));
