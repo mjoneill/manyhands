@@ -1252,7 +1252,7 @@ function deriveEvents(before, after, actor = null) {
   return out;
 }
 
-function writeBoard(data, events, { failAfterEvents = false, pauseAfterEvents = null } = {}) {
+function writeBoard(data, events) {
   countLegacy('writeBoard');
   if (!Array.isArray(events) || events.length === 0) {
     throw new Error(
@@ -1264,20 +1264,41 @@ function writeBoard(data, events, { failAfterEvents = false, pauseAfterEvents = 
   data.lastUpdated = new Date().toISOString();
   data._README = BOARD_README;
   for (const ev of events) appendEvent(EVENT_LOG_DIR, ev, { now: data.lastUpdated });
-  if (failAfterEvents) throw new Error('test seam: the board write failed after its events were appended');
-  if (pauseAfterEvents) {
-    // Test seam (unset in production): hold the process INSIDE the crash gap —
-    // events appended, board not yet written — so a test can SIGKILL it there.
-    // Announced synchronously on fd 2 (a piped stderr write would not flush
-    // while the thread is blocked), then a blocking sleep.
-    fs.writeSync(2, `[test-seam] paused after events, before the board write (${pauseAfterEvents.label})\n`);
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(pauseAfterEvents.ms, 30000));
+  // #1584 — TEST-ONLY crash-gap seams, read from env and from the events this
+  // write was given (a move's card state carries its lastMoveRequestId). With
+  // both env vars unset this is two property reads and nothing else.
+  if (process.env.SCRUM_TEST_FAIL_BOARD_WRITE_FOR_MOVE || process.env.SCRUM_TEST_PAUSE_AFTER_EVENTS_FOR_MOVE) {
+    testCrashGapSeams(events);
   }
   // #686 — every server write is a ROSTERED save: Person nodes are
   // (re)materialized into @graph from this one authority on every write.
   saveDomain(BOARD_DATA_FILE, boardToDomain(data), { now: data.lastUpdated, roster: { seats: currentRoster(data) } });
   _graphDirty = true;   // #694 — the replica rebuilds lazily on next query
   _graphGeneration++;   // #931 — and SAYS SO, so a sync in flight cannot clear it
+}
+
+// #1584 — TEST-ONLY seams for the move crash gap (events appended, board not
+// yet written). Each env var names one move: its requestId, or `card:<id>`
+// for any makeRoom move of that card. The move's own event is tagged by the
+// PATCH handler with MOVE_WRITE_ID — a Symbol key, so appendEvent (which
+// copies named fields) never persists it. Called only when a var is set.
+const MOVE_WRITE_ID = Symbol('moveWriteRequestId');
+function testCrashGapSeams(events) {
+  const move = events.find((ev) => ev && typeof ev[MOVE_WRITE_ID] === 'string');
+  if (!move) return;
+  const rid = move[MOVE_WRITE_ID];
+  const names = (v) => !!v && (v === rid || v === `card:${move.entity.id}`);
+  if (names(process.env.SCRUM_TEST_FAIL_BOARD_WRITE_FOR_MOVE)) {
+    throw new Error('test seam: the board write failed after its events were appended');
+  }
+  if (names(process.env.SCRUM_TEST_PAUSE_AFTER_EVENTS_FOR_MOVE)) {
+    // Hold the process INSIDE the gap so a test can SIGKILL it there. Announced
+    // synchronously on fd 2 (a piped stderr write would not flush while the
+    // thread is blocked), then a blocking sleep.
+    fs.writeSync(2, `[test-seam] paused after events, before the board write (${rid})\n`);
+    const ms = Number(process.env.SCRUM_TEST_PAUSE_AFTER_EVENTS_MS) || 10000;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(ms, 30000));
+  }
 }
 
 // ── #694 — the graph traversal replica ──────────────────────────────────────
@@ -9544,20 +9565,16 @@ async function handleUpdateCard(req, res, idOrShortId) {
       // unknown-key guard already keeps `by` off the card itself. Optional:
       // a silent caller records null, never an invented attribution.
       const by = typeof patch.by === 'string' && patch.by ? patch.by : null;
+      const ownEvent = cardEvent('update', card, by);
+      // #1584 — names this write as a move, for the test-only crash-gap seams
+      // in writeBoard (a Symbol key: never persisted, invisible to JSON).
+      if (patch.makeRoom === true && typeof patch.requestId === 'string') ownEvent[MOVE_WRITE_ID] = patch.requestId;
       writeBoard(data, [
-        cardEvent('update', card, by),
+        ownEvent,
         ...fanout.map((c) => cardEvent('update', c, by)),
         ...shifted.map((c) => cardEvent('update', c, by)),   // #1584 — each renumbered neighbour
         ...(nudge ? [convEvent(nudge)] : []),
-      ], {
-        // Test seam (unset in production): the crash gap — events appended,
-        // then the board write fails — for one named move id.
-        // Each names one move: its requestId, or `card:<id>` for any makeRoom
-        // move of that card (a browser test cannot know the id in advance).
-        failAfterEvents: testSeamNamesMove(process.env.SCRUM_TEST_FAIL_BOARD_WRITE_FOR_MOVE, patch, card),
-        pauseAfterEvents: testSeamNamesMove(process.env.SCRUM_TEST_PAUSE_AFTER_EVENTS_FOR_MOVE, patch, card)
-          ? { ms: Number(process.env.SCRUM_TEST_PAUSE_AFTER_EVENTS_MS) || 10000, label: patch.requestId } : null,
-      });
+      ]);
       return card;
     });
     if (!updated) return sendJSON(res, 404, { error: 'Card not found' });
@@ -9737,9 +9754,6 @@ async function handleMoveFence(req, res, idOrShortId) {
     sendJSON(res, 500, { error: 'Failed to fence the move' });
   }
 }
-// #1584 — test seams only: does an env value name this move? (unset ⇒ never)
-const testSeamNamesMove = (v, patch, card) => !!v && patch.makeRoom === true
-  && (v === patch.requestId || v === `card:${card.id}`);
 const moveFencesOf = (data) => (Array.isArray(data.moveFences) ? data.moveFences.filter((x) => typeof x === 'string') : []);
 
 // ── /api/cards/:id/claim — atomic first-write-wins claim (#348) ──
