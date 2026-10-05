@@ -301,6 +301,14 @@ collection**, so the event log is evidence of those writes, not a replay source 
   graph after the executor backup is absent from the restored store, while its outbox entry
   may still say `published`. Treat such entries like the lost writes above: reconcile them by
   opId before trusting either side.
+- **An event-log replay also gets post sequences wrong** (#1592). Events are appended before
+  the document is written, so a post whose document write never happened still has its event,
+  carrying the `postSeq` it would have taken. The next committed post legitimately takes that
+  same number. A raw replay can therefore **resurrect a post that was never visible** and
+  **duplicate a `postSeq`**. A replayed document is **not cursor-ready**: do not serve
+  `afterSeq` or `beforeSeq` from it until every post and its sequence has been reconciled
+  against committed evidence. "Never reused" applies to committed, visible posts. An
+  abandoned write-ahead event never owned its number.
 
 None of this has been rehearsed on the live board. (a reviewer 2026-10-05, from the review
 of the `announcement` kind)
