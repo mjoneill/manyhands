@@ -21,7 +21,7 @@
  * probe failed to trip it" — two states that look identical from the wire.
  */
 
-/** @type {Array<{name:string, wellFormed:any, malformed:any, storedAs?:string, with?:object, noRule?:boolean, note?:string}>} */
+/** @type {Array<{name:string, wellFormed:any, malformed:any, storedAs?:string, patchStoredAs?:string, with?:object, noRule?:boolean, note?:string}>} */
 export const CARD_CREATE_PROBES = [
   // ── fields with a real validation rule ──
   { name: 'type', wellFormed: 'bug', malformed: 'not-a-type',
@@ -269,7 +269,7 @@ export const CARD_CREATE_PROBES = [
   // explicit order (a real create field) and makeRoom (ignored, and said so).
   { name: 'requestId', wellFormed: 'req-0001-abcd-ef01', malformed: 'not a valid id!',
     with: { makeRoom: true, order: 1 },
-    storedAs: 'createRequestId', expectStored: 'req-0001-abcd-ef01',
+    storedAs: 'createRequestId', patchStoredAs: 'lastMoveRequestId', expectStored: 'req-0001-abcd-ef01',
     note: '#1583 — 8–64 chars of [A-Za-z0-9-]; a retried create with the same id returns the first card. '
         + 'On PATCH it is a move\'s identity and is accepted only with makeRoom: true (#1584).' },
 

@@ -110,12 +110,6 @@ const PATCH_EXCLUDED = new Set(['id']);
 const KNOWN_PATCH_DISAGREEMENTS = {
   ifVersion: 'VALIDATED_THEN_DISCARDED',
   return: 'VALIDATED_THEN_DISCARDED',
-  // #1584 — NOT discarded: on PATCH a move's requestId is stored as
-  // `lastMoveRequestId` (the move fence reads it), while on create it is stored
-  // as `createRequestId`. The probe table holds ONE storedAs per field, so the
-  // PATCH row looks under the create key and reads nothing. The same #1023
-  // taxonomy gap (a value consumed under another name), a third member.
-  requestId: 'VALIDATED_THEN_DISCARDED',
 };
 
 async function sweep(baseUrl, fn = auditCreateField, probes = CARD_CREATE_PROBES) {
