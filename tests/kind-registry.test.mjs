@@ -68,6 +68,7 @@ const ENTITY_KINDS_ADDED_SINCE = [
   'role',         // #915 — a role the team uses, as an entity; held by a seat declaration
   'roleVersion',  // #1387 — a state a role has held; kept when the role is revised
   'talk',         // #1401 — a 1:1 conversation tag; posts carry scrum:conversation pointing at it
+  'announcement', // #1574 — a change to an announcement obligation in the server-owned outbox (no collection)
 ];
 
 test('#1214 the derived set adds only DECLARED new kinds — a silent addition is as bad as a loss', () => {
