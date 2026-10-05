@@ -82,7 +82,7 @@ export function maintenanceFrom(changes, { now = Date.now(), windowMs = 10 * 60 
   return best;
 }
 
-export function decide({ receivers, sessions, floor, cooldownMs, now, state, staleSeats: stale = [], stoppedSeats: stopped = [], answeredSeats: answered = [], stoppedRefireMs = 60 * 60 * 1000, staleFacts = null, maintenance = null }) {
+export function decide({ receivers, sessions, floor, cooldownMs, now, state, staleSeats: stale = [], stoppedSeats: stopped = [], answeredSeats: answered = [], unconfirmedSeats: unconfirmed = null, writesUnreadableReason = null, stoppedRefireMs = 60 * 60 * 1000, staleFacts = null, maintenance = null }) {
   // Deep-copy the two containers. A spread alone leaves `sigTimes` and `hist`
   // ALIASED to the caller's objects, so decide() would edit state it was only
   // asked to read — invisible in production (each run reads fresh state off
@@ -101,6 +101,7 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
     hist: [...(state?.hist ?? [])],
     staleEpisodes: { ...(state?.staleEpisodes ?? {}) },
     stoppedEpisodes: { ...(state?.stoppedEpisodes ?? {}) },
+    unconfirmedEpisodes: { ...(state?.unconfirmedEpisodes ?? {}) },
   };
   // A state file written before #726 has no `s`. Treating that as 0 would make
   // the very first tick after deploy look like a total session collapse and
@@ -396,6 +397,37 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
   // wedged is still found, and the re-ask says when she last answered.
   // Pre-#1358 state files hold `key: <number>` (namedAt); read as such.
   const episode = (v) => (v && typeof v === 'object' ? v : (Number.isFinite(v) ? { namedAt: v } : null));
+  // #717 (2026-10-05) — UNKNOWN IS NOT NONE. `unconfirmed` is non-null only when
+  // the attributed-write read was UNREADABLE: these are the seats the client-
+  // request reading alone would have named. They are reported as a degraded
+  // observation, never as STOPPED, and the tick touches no stopped episode —
+  // neither creating one (a later good, stale read must still fire) nor ending
+  // one (an episode already named must not be re-accused when reads recover).
+  // The degraded report keeps its OWN episode map, so it can never mute the
+  // real alarm, and it posts once per (seat, stale request), not once per tick.
+  if (unconfirmed) {
+    const keys = new Set();
+    const fresh = [];
+    for (const s of unconfirmed) {
+      if (!s?.seat || !s.lastClientRequestAt) continue;
+      const key = `${s.seat}@${s.lastClientRequestAt}`;
+      keys.add(key);
+      if (st.unconfirmedEpisodes[key]) continue;
+      st.unconfirmedEpisodes[key] = now;
+      fresh.push(s);
+    }
+    for (const key of Object.keys(st.unconfirmedEpisodes)) if (!keys.has(key)) delete st.unconfirmedEpisodes[key];
+    if (fresh.length) {
+      const lines = fresh.map((s) => `${s.seat} (open stream, ${s.claims?.length ? `claim${s.claims.length === 1 ? '' : 's'} on ${s.claims.map((c) => `#${c}`).join(', ')}` : 'a claim'}, no MCP request since ${s.lastClientRequestAt}, ${Math.round(s.staleMs / 60000)} min)`);
+      const degradedBody = `⚠ fanout watch: attributed-write read UNREADABLE this tick (${writesUnreadableReason ?? 'unknown reason'}) — cannot confirm the state of ${lines.join('; ')}. `
+        + `Nobody is named as stopped: an unread window is not evidence that a seat wrote nothing. `
+        + `The next readable tick decides (#717).`;
+      warnBody = warnBody ? `${warnBody}\n${degradedBody}` : degradedBody;
+    }
+    st.r = receivers;
+    st.s = sessions;
+    return { state: st, warnBody };
+  }
   const stoppedNow = new Set();
   const stoppedNamed = [];
   for (const a of answered) {
