@@ -60,6 +60,13 @@ export const SCRIPTS = Object.freeze({
 export const CODES = Object.freeze(['config-invalid', 'state-unreadable', 'state-timestamp-invalid', 'state-verdict-invalid',
   'state-stale', 'deliverer-verdict', 'dest-unreadable', 'no-verified-copy', 'timing-missing', 'copy-stale', 'future-dated']);
 const CONFIG_KEYS = Object.freeze(['freshnessK', 'maxClockSkewSec', 'graceIntervals', 'stateStalenessIntervals']);
+/**
+ * The CLOSED set of verdicts the deliverer can write as lastVerdict: the keys of the EXIT map in
+ * graph-store-backup-monitor.mjs and graph-store-backup-alert.mjs (neither exports it, so it is
+ * copied here; keep the three in step). Matched exactly: no case folding, no trimming. Anything
+ * else is state-verdict-invalid at once, never given the grace of a recognized non-OK verdict.
+ */
+export const DELIVERER_VERDICTS = Object.freeze(['OK', 'UNAVAILABLE', 'STALE', 'NO-COPY', 'UNVERIFIED-NEWEST']);
 
 const iso = (ms) => new Date(ms).toISOString();
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -256,7 +263,7 @@ export function evaluate({ dest, alertState, plistDir, configFile, statusFile, a
       if (future(t)) hit('future-dated', `deliverer lastRunAt ${s.lastRunAt} is more than ${config.maxClockSkewSec} s ahead of ${iso(nowMs)}`);
       else if (stateLimitMs != null && nowMs - t > stateLimitMs) hit('state-stale', `deliverer lastRunAt ${s.lastRunAt} is ${stateAgeMin.toFixed(2)} min old > ${stateLimitMs / MIN} min`);
     }
-    if (typeof s.lastVerdict !== 'string' || !s.lastVerdict) hit('state-verdict-invalid', `lastVerdict ${JSON.stringify(s.lastVerdict) ?? 'missing'} is not a verdict`);
+    if (!DELIVERER_VERDICTS.includes(s.lastVerdict)) hit('state-verdict-invalid', `lastVerdict ${JSON.stringify(s.lastVerdict) ?? 'missing'} is not one of ${DELIVERER_VERDICTS.join(', ')}`);
     else delivererVerdict = s.lastVerdict;
   }
 
