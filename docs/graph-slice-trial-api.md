@@ -277,6 +277,32 @@ client that received them from the lost store is told by the refusal above to re
 memories, decisions and seat state from the live store. Downstream reconciliation of lost
 operations has not been rehearsed. (a reviewer 2026-10-04)
 
+### The board document's announcement outbox: which recovery keeps it (#1574)
+
+Pending announcement obligations live **only in the board document** (`announcementOutbox`,
+a server-owned top-level field). They are written in the same document write as the claim,
+release or other change that created them. The `announcement` event kind has **no
+collection**, so the event log is evidence of those writes, not a replay source for them.
+
+- **Restoring the board document from its backup keeps the outbox.** Pending, published and
+  blocked entries come back exactly as they were at the backup's moment. Obligations
+  created after that backup are lost, together with the changes that created them.
+- **Rebuilding the board document by replaying the event log does NOT restore the outbox.**
+  The rebuilt document has no `announcementOutbox`, so every pending obligation is gone and
+  the publisher has nothing to publish. If a replay is ever the only option, record that the
+  outbox was lost. Before trusting the result, list the claims and releases whose
+  announcements were pending at the time of the failure (from the last document backup) and
+  reconcile them by hand. Never re-create obligations by guessing.
+- **Say which recovery you are doing** before you start: a document restore, an event-log
+  replay, or an executor-store restore (the section above). The three keep different things.
+- **An executor-store restore does not touch the outbox.** A post the publisher wrote to the
+  graph after the executor backup is absent from the restored store, while its outbox entry
+  may still say `published`. Treat such entries like the lost writes above: reconcile them by
+  opId before trusting either side.
+
+None of this has been rehearsed on the live board. (a reviewer 2026-10-05, from the review
+of the `announcement` kind)
+
 ### Rolling the unit back (#1561)
 
 Rolling back means turning `SCRUM_GRAPH_UNIT_LOGBORN` OFF without losing anything
