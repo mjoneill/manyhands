@@ -69,6 +69,7 @@ import { resolveProvenance } from './core/tending-provenance.mjs';
 import { boardToDomain, domainToBoard, cardToNode } from './core/mapping.mjs';
 import { OUTBOX_FIELD, outboxOf, withAnnouncement, listOutbox, modeProblem, legacyProof, postMatchesEntry, opIdFor } from './core/announce-outbox.mjs';   // #1574 C3a/C3b
 import { createGraphClient } from './core/graph-client.mjs';   // #1574 C3b — the conversations unit's executor door
+import { NEXT_POST_SEQ, POST_SEQ_EPOCH, isEpoch, mintEpoch, stampPostSeq, postSeqState, assertPostSeqWritable, PostSeqStateCorrupt, migrationRequiredBody, parseSeqSyntax, checkSeqEpoch, selectSeqPage, SEQ_PARAMS } from './core/post-seq.mjs';   // #1592 — the document path's post sequence
 import { verifyShaIntegrity, readShaStamp, collectShas, SHA_POPULATION } from './core/sha-integrity.mjs';
 import { summariseSeat, recommendInterval, backlogFor, costCoverage, budgetGateStatus, TICK_MS } from './core/insights.mjs';   // #1290 shadow insights
 import { buildTree, buildChildIndex } from './core/tree.mjs';
@@ -451,9 +452,10 @@ function appendClaimAnnouncement(data, card, actor, action) {
     const body = claimAnnouncement(card, actor, action);
     if (!body) return null;
     const conv = createConversationFromPayload({ body, author: CLAIM_ANNOUNCER });
-    data.conversations.push(conv);
+    pushPost(data, conv);
     return conv;
   } catch (e) {
+    if (e instanceof PostSeqStateCorrupt) throw e;   // #1592 — never a silent drop
     console.error('#578 claim announcement skipped:', e.message);
     return null;
   }
@@ -976,6 +978,17 @@ async function handleSave(req, res) {
     // allow-list above, so widening that list cannot silently hand it over.
     if (existing[OUTBOX_FIELD] !== undefined) merged[OUTBOX_FIELD] = existing[OUTBOX_FIELD];
     else delete merged[OUTBOX_FIELD];
+    // #1592 — THE POST SEQUENCE IS SERVER-OWNED, for the same reason and in the
+    // same way: the counter and the epoch come from the server's current
+    // document, never the body, so a stale or forged snapshot cannot rewind the
+    // counter (a reused number would be invisible to every afterSeq cursor past
+    // it) or change the epoch. Posts themselves are `existing`'s (the allow-list
+    // above never takes `conversations`), so every post's postSeq is the server's.
+    for (const k of [NEXT_POST_SEQ, POST_SEQ_EPOCH]) {
+      if (existing[k] !== undefined) merged[k] = existing[k];
+      else delete merged[k];
+    }
+    merged.conversations = existing.conversations;
 
     // #1265 / #760 — THE LAST UNGUARDED COLUMN WRITE.
     //
@@ -5086,6 +5099,7 @@ async function handlePatchAgent(req, res, seat) {
     if (body.sampling !== undefined && body.sampling !== null) { const err = samplingError(body.sampling); if (err) return sendJSON(res, 400, { error: err }); }
     const result = await withWriteLock(async () => {
       const data = readBoard();
+      assertPostSeqWritable(data);   // #1592 — a corrupt post sequence refuses the WHOLE write, before any change
       const agent = findAgent(data, seat);
       if (!agent) return { status: 404, wire: { error: `no agent with seatKey "${seat}"` } };
       const updated = { ...agent, dateModified: new Date().toISOString() };
@@ -5106,7 +5120,7 @@ async function handlePatchAgent(req, res, seat) {
         }
         if (releasedCards.length) {
           const conv = createConversationFromPayload({ author: CLAIM_ANNOUNCER, body: `🔔 ${seat} is ${body.state} (set by ${by}) — released ${releasedCards.map((c) => `#${c.shortId}`).join(', ')}; ${releasedCards.length === 1 ? 'it is' : 'they are'} free to pull` });
-          data.conversations.push(conv); releasedEvents.push(convEvent(conv, by));
+          pushPost(data, conv); releasedEvents.push(convEvent(conv, by));
           updated['scrum:releasedOnRest'] = releasedCards.map((c) => c.shortId);
         }
       }
@@ -5157,7 +5171,8 @@ async function handlePatchAgent(req, res, seat) {
       return { status: 200, wire: withWarning({ ...agentToWire(data, updated), released: releasedCards.map((c) => c.shortId) }, warning) };
     });
     sendJSON(res, result.status, result.wire);
-  } catch (e) { console.error('PATCH /api/agents/:seat:', e.message); sendJSON(res, 500, { error: e.message }); }
+  } catch (e) { if (e instanceof PostSeqStateCorrupt) return sendJSON(res, 500, e.body);   // #1592
+    console.error('PATCH /api/agents/:seat:', e.message); sendJSON(res, 500, { error: e.message }); }
 }
 
 // ── #1202 — THE PROVENANCE LEDGER: one row per model call, as a node ────────
@@ -9421,6 +9436,7 @@ async function handleUpdateCard(req, res, idOrShortId) {
           && moveFencesOf(data).includes(patch.requestId)) {
         return { moveFenced: true };
       }
+      assertPostSeqWritable(data);   // #1592 — a corrupt post sequence refuses the WHOLE write, before any change
       const idx = findCardIndex(data, idOrShortId);
       if (idx < 0) return null;
       const card = data.cards[idx];
@@ -9614,9 +9630,10 @@ async function handleUpdateCard(req, res, idOrShortId) {
             body: `✅ #${card.shortId} done — what's the next pull? (every done has a next: claim it, or name its gate)`,
             author: CLAIM_ANNOUNCER,
           });
-          data.conversations.push(conv);
+          pushPost(data, conv);
           nudge = conv;
         } catch (e) {
+          if (e instanceof PostSeqStateCorrupt) throw e;   // #1592 — never a silent drop
           console.error('#665 done-nudge skipped:', e.message);
         }
       }
@@ -9733,6 +9750,7 @@ async function handleUpdateCard(req, res, idOrShortId) {
     }
     sendJSON(res, 200, { ...updated, ...disclosures });
   } catch (e) {
+    if (e instanceof PostSeqStateCorrupt) return sendJSON(res, 500, e.body);   // #1592
     console.error('PATCH /api/cards/:id:', e.message);
     sendJSON(res, 500, { error: 'Failed to update card' });
   }
@@ -9838,6 +9856,7 @@ async function handleClaimCard(req, res, idOrShortId) {
         return { status: 400, payload: { error: 'invalid claimant' } };
       }
       const data = readBoard();
+      assertPostSeqWritable(data);   // #1592 — a corrupt post sequence refuses the WHOLE write, before any change
       const idx = findCardIndex(data, idOrShortId);
       if (idx < 0) return { status: 404, payload: { error: 'Card not found' } };
       const card = data.cards[idx];
@@ -9873,6 +9892,7 @@ async function handleClaimCard(req, res, idOrShortId) {
     if (result.announced) notifyMcpOfPost(result.announced);
     sendJSON(res, result.status, result.payload);
   } catch (e) {
+    if (e instanceof PostSeqStateCorrupt) return sendJSON(res, 500, e.body);   // #1592
     console.error('POST /api/cards/:id/claim:', e.message);
     sendJSON(res, 500, { error: 'Failed to claim card' });
   }
@@ -9889,6 +9909,7 @@ async function handleReleaseCard(req, res, idOrShortId) {
     const result = await withWriteLock(async () => {
       const by = body.by;
       const data = readBoard();
+      assertPostSeqWritable(data);   // #1592 — a corrupt post sequence refuses the WHOLE write, before any change
       const idx = findCardIndex(data, idOrShortId);
       if (idx < 0) return { status: 404, payload: { error: 'Card not found' } };
       const card = data.cards[idx];
@@ -9914,6 +9935,7 @@ async function handleReleaseCard(req, res, idOrShortId) {
     if (result.announced) notifyMcpOfPost(result.announced);
     sendJSON(res, result.status, result.payload);
   } catch (e) {
+    if (e instanceof PostSeqStateCorrupt) return sendJSON(res, 500, e.body);   // #1592
     console.error('DELETE /api/cards/:id/claim:', e.message);
     sendJSON(res, 500, { error: 'Failed to release card' });
   }
@@ -10026,8 +10048,7 @@ function applyPublish(data, d, actor) {
   const conv = createConversationFromPayload({ body: p.body, author: p.author });
   conv.opId = d.opId;
   conv.origin = { mutationId: d.entry.mutationId, slot: d.entry.slot };
-  if (!Array.isArray(data.conversations)) data.conversations = [];
-  data.conversations.push(conv);
+  pushPost(data, conv);
   const next = put({ ...d.entry, status: 'published', postId: conv.id, publishedAt: now, receipt: 'document' });
   writeBoard(data, [convEvent(conv, p.author), announcementEvent(next, actor)]);
   testBarrier('after-publish-write');
@@ -10055,6 +10076,7 @@ async function handlePublishOutbox(req, res, rawId) {
     const actor = req.auth?.seat ?? null;
     const first = await withWriteLock(async () => {
       const data = readBoard();
+      assertPostSeqWritable(data);   // #1592 — a corrupt post sequence refuses the WHOLE write, before any change
       const d = decidePublish(data, obligationId);
       if (d.kind === 'unknown') return { status: 404 };
       if (d.kind === 'done') return { result: d.result };
@@ -10075,6 +10097,7 @@ async function handlePublishOutbox(req, res, rawId) {
     });
     sendJSON(res, 200, second.result);
   } catch (e) {
+    if (e instanceof PostSeqStateCorrupt) return sendJSON(res, 500, e.body);   // #1592
     console.error('POST /api/outbox/:id/publish:', e.message);
     sendJSON(res, 500, { error: 'Failed to publish the obligation' });
   }
@@ -10338,6 +10361,62 @@ function createConversationFromPayload(body, attachedTo = null, conversation = n
   };
 }
 
+// #1592 — THE ONE WAY A POST BECOMES PART OF THE DOCUMENT. Every post-creating
+// site (POST /api/conversations, the claim announcement, the rest/retire release
+// notice, the done-nudge, the wiki notice, the outbox publisher) appends through
+// here, inside its write lock, on the `data` it then hands to writeBoard — so
+// the post's `postSeq` and the advanced `nextPostSeq` are ONE document write.
+// A crash before that write leaves neither: the next post takes the number the
+// lost one would have had. ⛔ Never number a post anywhere else, and never
+// append to data.conversations directly: a post without a postSeq is invisible
+// to every seq cursor.
+//
+// #1592 (d) — the board's state decides, and the HANDLER has already checked it:
+//   'clean'    (posts, no epoch, no postSeq anywhere) → appended exactly as
+//              before #1592: no postSeq, no epoch, no counter;
+//   'empty' / 'migrated' → numbered;
+//   'corrupt'  → never reaches here: every post-creating handler calls
+//              assertPostSeqWritable at the start of its locked write. The throw
+//              below is only a backstop for a handler that forgot, and it is
+//              rethrown by the best-effort announcement catches, so it fails
+//              the whole write instead of silently dropping the post.
+function pushPost(data, conv) {
+  const { state } = postSeqState(data);
+  if (state === 'corrupt') assertPostSeqWritable(data);
+  if (state !== 'clean') stampPostSeq(data, conv);
+  if (!Array.isArray(data.conversations)) data.conversations = [];
+  data.conversations.push(conv);
+  return conv;
+}
+
+// #1592 — THE EPOCH IS MINTED ONCE AND PERSISTED BY WHATEVER NEEDS IT FIRST:
+// the first post (stampPostSeq, inside that post's write) or the first seq-mode
+// read of a board that has none (here). A read that mints it WRITES it, so a
+// token handed out by an empty board survives a restart before the first post.
+// Under the write lock, re-read, and minted only if STILL absent inside the
+// lock: two concurrent first requests agree on one epoch. The write declares a
+// `board-meta` event (#669 — every document write says what it did; the kind is
+// declared in core/kind-registry.mjs for exactly this field).
+const boardMetaEvent = (field, value) => ({
+  op: 'create', actor: null, entity: { kind: 'board-meta', id: field }, state: { [field]: value },
+});
+function ensurePostSeqEpoch() {
+  return withWriteLock(() => requestContext.run({ method: 'GET', shares: false, read: null }, () => {
+    const fresh = readBoard();   // a clone, not the shared frozen read: this one is written
+    // Re-checked INSIDE the lock: the board may have changed since the caller's
+    // read (a post landed, so it is no longer empty).
+    const st = postSeqState(fresh);
+    if (st.state === 'corrupt') throw new PostSeqStateCorrupt(st);
+    if (st.state === 'clean') return { migrationRequired: true };
+    if (st.state === 'migrated') return fresh[POST_SEQ_EPOCH];
+    // 'empty': mint the epoch and start the counter, in one declared write.
+    fresh[POST_SEQ_EPOCH] = mintEpoch();
+    if (!(Number.isSafeInteger(fresh[NEXT_POST_SEQ]) && fresh[NEXT_POST_SEQ] > 0)) fresh[NEXT_POST_SEQ] = 1;
+    writeBoard(fresh, [boardMetaEvent(POST_SEQ_EPOCH, fresh[POST_SEQ_EPOCH])]);
+    return fresh[POST_SEQ_EPOCH];
+  }));
+}
+
 function findConversationIndex(data, id) {
   return data.conversations.findIndex(c => c.id === id);
 }
@@ -10400,13 +10479,26 @@ const MAX_CONV_LIST_LIMIT = Number(process.env.SCRUM_MAX_CONV_LIST_LIMIT) || 200
 const CONVERSATION_PARAMS = new Set([
   'attachedTo', 'author', 'since', 'mentions_me', 'before', 'limit', 'q',
   'conversation',   // #1401 — the 1:1 view: only posts carrying this talk tag
+  ...SEQ_PARAMS,   // #1592 — afterSeq, beforeSeq, tail: opt-in seq mode (core/post-seq.mjs)
 ]);
 
-function handleListConversations(req, res) {
+const SEQ_PARAM_PRESENT = (q) => SEQ_PARAMS.some((k) => typeof q[k] === 'string');
+
+async function handleListConversations(req, res) {
   try {
     const q = queryGuard(req, res, CONVERSATION_PARAMS);
     if (!q) return;                       // guard already sent the 400
     const data = readBoard();
+    // #1592 — SEQ MODE IS OPT-IN. Only a request carrying afterSeq, beforeSeq or
+    // tail gets it; with none of them `seqReq.mode` is null and everything below
+    // is today's listing, byte for byte (a bare array, uncapped without limit,
+    // the most recent N with it, no cursor). Validated BEFORE the filters so a
+    // malformed token or a two-mode request is refused, never half-answered.
+    // Only the checks that need no epoch run here: the epoch is minted (and
+    // persisted) further down, after every refusal this request could get, so a
+    // refused request writes nothing.
+    const seqReq = SEQ_PARAM_PRESENT(q) ? parseSeqSyntax(q, MAX_CONV_LIST_LIMIT) : { mode: null };
+    if (seqReq.error) return sendJSON(res, seqReq.error.status, seqReq.error.body);
     let convs = data.conversations;
     if (typeof q.conversation === 'string' && q.conversation) {   // #1401
       if (!talksOf(data).some((t) => talkIdOf(t) === q.conversation)) return sendJSON(res, 400, { error: `no talk with id ${q.conversation}`, code: 'NO_SUCH_TALK' });
@@ -10518,6 +10610,29 @@ function handleListConversations(req, res) {
     const matchTotal = convs.length;
     res.setHeader('X-Total-Count', String(matchTotal));
 
+    // #1592 — a seq-mode page, after every content filter: the envelope
+    // {conversations, nextAfterSeq}, ascending by postSeq, and a usable token
+    // always comes back (`ps1.<epoch>.0` on an empty board).
+    //
+    // The epoch: the stored one, or — on a board that has none — minted and
+    // persisted now, after every refusal above. Paging from the snapshot read
+    // before the mint is still correct: postSeq only grows, so a post committed
+    // after that read lies above this page's nextAfterSeq and the next request
+    // finds it. Then the epoch COMPARISON (409) for a well-formed token.
+    if (seqReq.mode) {
+      // #1592 (d) — the board's state, after every syntax refusal and before any
+      // mint: an un-migrated board cannot serve a cursor (409), a corrupt one
+      // cannot either (500); neither writes anything.
+      const st = postSeqState(data);
+      if (st.state === 'corrupt') return sendJSON(res, 500, new PostSeqStateCorrupt(st).body);
+      if (st.state === 'clean') return sendJSON(res, 409, migrationRequiredBody());
+      const postEpoch = st.state === 'migrated' ? data[POST_SEQ_EPOCH] : await ensurePostSeqEpoch();
+      if (postEpoch && postEpoch.migrationRequired) return sendJSON(res, 409, migrationRequiredBody());
+      const page = checkSeqEpoch(seqReq, postEpoch);
+      if (page.error) return sendJSON(res, page.error.status, page.error.body);
+      return sendJSON(res, 200, selectSeqPage(convs, page, postEpoch));
+    }
+
     if (typeof q.limit === 'string' && q.limit !== '') {
       const n = parseInt(q.limit, 10);
       if (Number.isFinite(n) && n >= 0) {
@@ -10527,6 +10642,7 @@ function handleListConversations(req, res) {
     }
     sendJSON(res, 200, convs);
   } catch (e) {
+    if (e instanceof PostSeqStateCorrupt) return sendJSON(res, 500, e.body);   // #1592
     console.error('GET /api/conversations:', e.message);
     sendJSON(res, 500, { error: 'Failed to list conversations' });
   }
@@ -10568,13 +10684,14 @@ async function handleCreateConversation(req, res) {
     let talkWith = null;
     const created = await withWriteLock(async () => {
       const data = readBoard();
+      assertPostSeqWritable(data);   // #1592 — a corrupt post sequence refuses the WHOLE write, before any change
       const ref = resolveAttachedTo(body.attachedTo, data.cards);
       if (!ref.ok) return { refused: ref.id };
       const talk = resolveConversation(body.conversation, data);   // #1401
       if (!talk.ok) return { refusedTalk: talk.id, talkClosed: !!talk.closed };
       if (talk.value) talkWith = talksOf(data).find((e) => talkIdOf(e) === talk.value)?.['scrum:with'] ?? null;
       const conv = createConversationFromPayload(body, ref.value, talk.value);
-      data.conversations.push(conv);
+      pushPost(data, conv);
       writeBoard(data, [convEvent(conv)]);
       return conv;
     });
@@ -10603,6 +10720,7 @@ async function handleCreateConversation(req, res) {
     const ignoredFields = unconsumedConversationFields(body);
     sendJSON(res, 201, ignoredFields.length ? { ...created, ignoredFields } : created);
   } catch (e) {
+    if (e instanceof PostSeqStateCorrupt) return sendJSON(res, 500, e.body);   // #1592
     console.error('POST /api/conversations:', e.message);
     sendJSON(res, 500, { error: 'Failed to create conversation' });
   }
@@ -10745,7 +10863,7 @@ function appendWikiNotice(data, verb, card) {
   const title = (card.title || 'untitled').trim();
   const body = `📄 page ${verb}: **${title}** (#${card.shortId})`;
   const conv = createConversationFromPayload({ body, author: 'wiki' });
-  data.conversations.push(conv);
+  pushPost(data, conv);
   return conv;
 }
 
@@ -10760,6 +10878,7 @@ async function handleCreateNode(req, res) {
     let notice = null;
     const created = await withWriteLock(async () => {
       const data = readBoard();
+      assertPostSeqWritable(data);   // #1592 — a corrupt post sequence refuses the WHOLE write, before any change
       // #631 — createdBy MUST be forwarded explicitly. This route hand-builds
       // its payload instead of passing `body` through, so teaching
       // createCardFromPayload about a new field does NOT reach the wiki surface:
@@ -10787,6 +10906,7 @@ async function handleCreateNode(req, res) {
     });
     sendJSON(res, 201, cardToNode(created));
   } catch (e) {
+    if (e instanceof PostSeqStateCorrupt) return sendJSON(res, 500, e.body);   // #1592
     console.error('POST /api/nodes:', e.message);
     sendJSON(res, 500, { error: 'Failed to create node' });
   }
@@ -10839,6 +10959,7 @@ async function handleUpdateNode(req, res, idOrShortId) {
     const contentChanged = ('title' in patch) || ('body' in patch);
     const updated = await withWriteLock(async () => {
       const data = readBoard();
+      assertPostSeqWritable(data);   // #1592 — a corrupt post sequence refuses the WHOLE write, before any change
       const idx = findCardIndex(data, idOrShortId);
       if (idx < 0) return null;
       const card = data.cards[idx];
@@ -10863,6 +10984,7 @@ async function handleUpdateNode(req, res, idOrShortId) {
     const node = cardToNode(updated);
     sendJSON(res, 200, ignoredFields.length ? { ...node, ignoredFields } : node);
   } catch (e) {
+    if (e instanceof PostSeqStateCorrupt) return sendJSON(res, 500, e.body);   // #1592
     console.error('PATCH /api/nodes/:id:', e.message);
     sendJSON(res, 500, { error: 'Failed to update node' });
   }
