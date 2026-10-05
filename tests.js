@@ -53,6 +53,7 @@ function test(name, fn) {
       // held as UNCONFIRMED and blocks whole-board saves, by design. That is
       // one test's state, not the next one's.
       _unconfirmedMoves.clear();
+      _writeMoveRecord({});
       enableFetchMock({ ok: true, json: async () => ({ cards: [], lastUpdated: null }) });
       _fetchMockRefuseCreate = true;   // #1583 — see enableFetchMock
       try {

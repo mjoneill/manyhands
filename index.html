@@ -5005,8 +5005,36 @@ function _adoptServerCard(server) {
 let _moveChain = Promise.resolve();
 let _movesInFlight = 0;
 let _boardRereadGen = 0;   // bumped by every re-read: a move queued before it is stale
-// requestId → { cardId, touched } for moves whose outcome this tab does not know.
-const _unconfirmedMoves = new Map();
+// ── #1584 — THE MOVE RECORD, persisted like a create's requestId (#1583).
+// Each move is written to localStorage (requestId → { cardId, touched })
+// BEFORE its PATCH is sent, and removed only when its outcome is KNOWN: a
+// readable 2xx, a definite refusal, or a read of the server that settles it.
+// A record found on load is a move whose outcome this tab never learned —
+// it may have committed — so it is restored as unconfirmed, and every
+// whole-board save (including the offline-bootstrap one in initBoard) is
+// refused until the server has been read. localStorage already holds the
+// optimistic move; without this record a reload would drop the guard and a
+// whole-board save from that snapshot could overwrite the committed shifts.
+const MOVE_RECORD_KEY = 'manyhands-unresolved-moves';
+function _readMoveRecord() {
+  try {
+    const o = JSON.parse(localStorage.getItem(MOVE_RECORD_KEY) || '{}');
+    return o && typeof o === 'object' && !Array.isArray(o) ? o : {};
+  } catch { return {}; }
+}
+function _writeMoveRecord(o) {
+  try {
+    if (Object.keys(o).length) localStorage.setItem(MOVE_RECORD_KEY, JSON.stringify(o));
+    else localStorage.removeItem(MOVE_RECORD_KEY);
+  } catch { /* storage unavailable: the in-memory guard still serves this page */ }
+}
+function _recordMove(requestId, entry) { const o = _readMoveRecord(); o[requestId] = entry; _writeMoveRecord(o); }
+function _forgetMoves(requestIds) { const o = _readMoveRecord(); for (const r of requestIds) delete o[r]; _writeMoveRecord(o); }
+
+// requestId → { cardId, touched } for moves whose outcome this tab does not
+// know — including every move a previous load of this page left unresolved.
+const _unconfirmedMoves = new Map(Object.entries(_readMoveRecord())
+  .filter(([, m]) => m && typeof m.cardId === 'string' && Array.isArray(m.touched)));
 
 function _persistMove(card, { after, shifts = [], touched = [], undoEntry = null } = {}) {
   const target = { column: card.column, order: card.order };
@@ -5039,6 +5067,7 @@ function _persistMove(card, { after, shifts = [], touched = [], undoEntry = null
       return: 'id',
       ...(who ? { by: who } : {}),
     };
+    _recordMove(requestId, { cardId, touched: touchedCols });   // BEFORE the request: a reload mid-flight must still know
     const pendingTimer = setTimeout(() => _setSaveStatus('saving', 'Saving…'), SAVE_PENDING_DELAY_MS);
     let res = null;
     let server = null;
@@ -5054,17 +5083,27 @@ function _persistMove(card, { after, shifts = [], touched = [], undoEntry = null
     }
     clearTimeout(pendingTimer);
     const readable = res && res.ok && server && server.id === cardId && Number.isInteger(server.version);
-    if (!res || (res.ok && !readable)) {
+    // ⛔ ONLY A DEFINITE REFUSAL IS "NOT MOVED": a 409 (a stale ifVersion or a
+    // moved anchor, both refused before anything is written) or a 400 (every
+    // PATCH 400 is returned before the write), in the server's own JSON. A 5xx
+    // can follow a commit, and a non-JSON error is a proxy's, not the
+    // server's: both are UNKNOWN, handled exactly like a lost reply.
+    const refused = res && (res.status === 409 || res.status === 400)
+      && server && typeof server === 'object' && typeof server.error === 'string';
+    if (!res || (res.ok && !readable) || (!res.ok && !refused)) {
       // The move may have committed. Say exactly that, never re-send it, and
       // learn the outcome by reading the server's copy.
       _unconfirmedMoves.set(requestId, { cardId, touched: touchedCols });
       _boardRereadGen++;   // moves queued behind this one were computed on an unknown state
       _setSaveStatus('failed', 'Move not confirmed — '
-        + (res ? 'the server\'s reply could not be read' : 'no reply from the server')
+        + (!res ? 'no reply from the server'
+          : res.ok ? 'the server\'s reply could not be read'
+          : `the server answered ${res.status}, which does not say whether it was stored`)
         + ', so it is not known whether it was stored. Checking the board…');
       await _reconcileMoves();
       return false;
     }
+    _forgetMoves([requestId]);   // the outcome is known from here on
     if (!res.ok) {
       // The move did not happen on the server, so this tab's preview of it is
       // a lie: drop its undo entry and re-read what the move touched.
@@ -5074,7 +5113,14 @@ function _persistMove(card, { after, shifts = [], touched = [], undoEntry = null
           + 'Its column has been reloaded from the server; reload the page to see every change.'
         : `Not moved — the server refused (${res.status}${server && server.error ? ': ' + server.error : ''}). `
           + 'The column has been reloaded from the server; reload the page if it still looks wrong.');
-      await _rereadColumns(touchedCols, [cardId]);
+      if (!(await _rereadColumns(touchedCols, [cardId]))) {
+        // Refused for certain, but the tab still shows its own preview of the
+        // move and could not replace it. Hold it like an unknown outcome, so no
+        // whole-board save is built from a board the server does not hold;
+        // the next successful read settles it ("not on the server").
+        _unconfirmedMoves.set(requestId, { cardId, touched: touchedCols });
+        _recordMove(requestId, { cardId, touched: touchedCols });
+      }
       return false;
     }
     // Accepted. The server's version is the next ifVersion; the neighbours it
@@ -5111,8 +5157,17 @@ async function _reconcileMoves() {
       + 'Nothing will be saved over it until it is; reload to resync.');
     return false;
   }
+  _settleMovesAgainst(data);
+  return true;
+}
+
+// Settle every unconfirmed move against a board READ from the server (never
+// by re-sending it): the card's lastMoveRequestId says whether it is stored.
+function _settleMovesAgainst(data) {
+  if (_unconfirmedMoves.size === 0) return;
   const pending = [..._unconfirmedMoves.entries()];
   _unconfirmedMoves.clear();
+  _forgetMoves(pending.map(([rid]) => rid));
   const cols = new Set();
   const ids = [];
   let stored = 0;
@@ -5123,10 +5178,9 @@ async function _reconcileMoves() {
     if (s && s.lastMoveRequestId === rid) stored++;
   }
   _adoptServerColumns(data, [...cols], ids);
-  if (stored === pending.length) _setSaveStatus('saved', 'Saved — confirmed on the server after its reply was lost.');
+  if (stored === pending.length) _setSaveStatus('saved', 'Saved — the move is confirmed on the server (its reply had not been usable).');
   else _setSaveStatus('failed', (pending.length === 1 ? 'Not moved — the server does not hold this move' : 'Some moves are not on the server')
     + ' (it was not stored, or the card has moved again since). The board shows what the server holds.');
-  return true;
 }
 
 // Re-read the server's state for `columns` (and the cards in `ids`, wherever
@@ -6926,6 +6980,9 @@ if (_convsForm) {
     nextShortId = recomputeNextShortId(cards, jsonResult.nextShortId);
     saveToLocalStorage();
     _rebaseline(cards);   // #466 — the baseline a refused save is merged against
+    // #1584 — a move a previous load left unresolved is settled against THIS
+    // read, before anything else can snapshot the board.
+    if (_unconfirmedMoves.size > 0) _settleMovesAgainst(jsonResult);
   } else {
     restoreFromLocalStorage();
     nextShortId = recomputeNextShortId(cards, null);

@@ -400,3 +400,159 @@ for (const mode of ['drop', 'garble']) {
     }, { server: { board: fixture() }, launch: { headless: 'new' } });
   });
 }
+
+// ── Round 3: the guard survives a reload; a 5xx is not a refusal ─────────────
+
+/** Open the board with a status-line recorder that survives reloads. */
+async function openRecorded(browser, baseUrl) {
+  const page = await browser.newPage();
+  page.on('dialog', (d) => (d.type() === 'beforeunload' ? d.accept() : d.dismiss()).catch(() => {}));
+  await page.evaluateOnNewDocument(() => {
+    window.__statusLog = [];
+    const note = () => {
+      const t = document.querySelector('.save-status')?.textContent;
+      if (t && window.__statusLog[window.__statusLog.length - 1] !== t) window.__statusLog.push(t);
+    };
+    new MutationObserver(note).observe(document, { subtree: true, childList: true, characterData: true });
+  });
+  await page.goto(`${baseUrl}/`, { waitUntil: 'networkidle0' });
+  await page.waitForSelector('.card[data-id="k1"]', { timeout: 8000 });
+  return page;
+}
+const statusLog = (page) => page.evaluate(() => window.__statusLog.slice());
+
+/**
+ * The move PATCH of `cardId` is forwarded to the server (so it COMMITS); the
+ * browser gets a network failure ('drop') or a 500 with a JSON error body
+ * ('500'). While `blockReads` is set every board read fails.
+ */
+async function interceptMove(page, baseUrl, cardId, mode) {
+  const state = { committed: 0, browserPatches: 0, requestId: null, blockReads: true };
+  await page.setRequestInterception(true);
+  page.on('request', async (r) => {
+    const u = new URL(r.url());
+    const isMove = r.method() === 'PATCH' && u.pathname === `/api/cards/${cardId}`;
+    const isRead = r.method() === 'GET' && (u.pathname.startsWith('/api/cards') || u.pathname === '/api/load' || u.pathname === '/api/board/status');
+    if (isMove) {
+      state.browserPatches += 1;
+      if (state.committed === 0) {
+        try { state.requestId = JSON.parse(r.postData()).requestId; } catch { /* asserted below */ }
+        const fwd = await fetch(`${baseUrl}${u.pathname}${u.search}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: r.postData() });
+        state.committed += fwd.ok ? 1 : 0;
+        if (mode === '500') { r.respond({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'Failed to update card' }) }).catch(() => {}); return; }
+        r.abort('failed').catch(() => {});
+        return;
+      }
+      r.continue().catch(() => {});
+      return;
+    }
+    if (isRead && state.blockReads) { r.abort('failed').catch(() => {}); return; }
+    r.continue().catch(() => {});
+  });
+  return state;
+}
+
+const moveRecord = (page) => page.evaluate(() => localStorage.getItem('manyhands-unresolved-moves'));
+const reloadOffline = async (page) => {
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => typeof cards !== 'undefined' && cards.some((c) => c.id === 'k1') && typeof _pendingSaves !== 'undefined', { timeout: 10000 });
+  await new Promise((res) => setTimeout(res, 800));   // initBoard's fallback has run (and, if unguarded, saved)
+  await settle(page);
+};
+
+test('#1584 (a) a committed move with a lost reply, then RELOADS with the board unreadable: the record survives every reload, every whole-board save is refused; once readable it reconciles by requestId and saves; neighbours shifted once', async () => {
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await openRecorded(browser, server.baseUrl);
+    const lost = await interceptMove(page, server.baseUrl, 'k1', 'drop');
+    const writes = recordWrites(page);
+
+    await drag(page, 'k1', 'planned', 'k5');
+    await settle(page);
+    assert.equal(lost.committed, 1, 'precondition: the move committed');
+    assert.match(String(lost.requestId), /^[0-9a-f-]{36}$/, 'the move carried a requestId');
+
+    for (const round of [1, 2]) {
+      await reloadOffline(page);   // includes initBoard's offline-bootstrap whole-board save
+      assert.ok(String(await moveRecord(page)).includes(lost.requestId), `reload ${round}: the unresolved record survived`);
+      await page.evaluate(() => { saveToJSONFile(); });
+      await settle(page);
+      assert.equal(writes.filter((w) => w.path === '/api/save').length, 0, `reload ${round}: no whole-board save: ` + wire(writes));
+      assert.match(await page.$eval('.save-status', (e) => e.textContent), /not saved/i, `reload ${round}: the refusal is visible`);
+      assert.ok(String(await moveRecord(page)).includes(lost.requestId), `reload ${round}: a FAILED re-read leaves the record in place`);
+    }
+
+    lost.blockReads = false;
+    await page.evaluate(() => { saveToJSONFile(); });
+    await settle(page);
+    assert.equal(lost.browserPatches, 1, 'never re-sent');
+    assert.ok((await statusLog(page)).some((t) => /confirmed on the server/i.test(t)), 'reconciled and said so: ' + JSON.stringify(await statusLog(page)));
+    assert.equal(await moveRecord(page), null, 'the record is cleared once the outcome is known');
+    assert.ok(writes.some((w) => w.path === '/api/save'), 'and the whole-board save is allowed again');
+    const k1 = (await api(server.baseUrl, 'GET', '/api/cards/k1')).body;
+    const k5 = (await api(server.baseUrl, 'GET', '/api/cards/k5')).body;
+    assert.equal(k1.lastMoveRequestId, lost.requestId);
+    assert.deepEqual([k1.column, k1.order], ['planned', 2], 'the committed move survived');
+    assert.equal(k5.order, 3, 'its shift survived, exactly once');
+  }, { server: { board: fixture() }, launch: { headless: 'new' } });
+});
+
+test('#1584 (b) a committed move answered with a 500 is UNKNOWN, not "Not moved": saves blocked while the board is unreadable; once readable it is confirmed', async () => {
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await openRecorded(browser, server.baseUrl);
+    const lost = await interceptMove(page, server.baseUrl, 'k1', '500');
+    const writes = recordWrites(page);
+
+    await drag(page, 'k1', 'planned', 'k5');
+    await settle(page);
+    assert.equal(lost.committed, 1, 'precondition: the move committed');
+    const log = await statusLog(page);
+    assert.ok(!log.some((t) => /not moved/i.test(t)), 'a 5xx is never reported as a refusal: ' + JSON.stringify(log));
+    assert.match(log[log.length - 1] || '', /not known|not confirmed/i, JSON.stringify(log));
+
+    await page.evaluate(() => { saveToJSONFile(); });
+    await settle(page);
+    assert.equal(writes.filter((w) => w.path === '/api/save').length, 0, 'no whole-board save: ' + wire(writes));
+
+    lost.blockReads = false;
+    await page.waitForFunction(() => window.__statusLog.some((t) => /confirmed on the server/i.test(t)), { timeout: 15000 });
+    await settle(page);
+    assert.equal(lost.browserPatches, 1, 'never re-sent');
+    const k5 = (await api(server.baseUrl, 'GET', '/api/cards/k5')).body;
+    assert.equal(k5.order, 3, 'shifted exactly once');
+    await page.evaluate(() => { saveToJSONFile(); });
+    await settle(page);
+    assert.ok(writes.some((w) => w.path === '/api/save'), 'saves are allowed once it is confirmed');
+    const k1 = (await api(server.baseUrl, 'GET', '/api/cards/k1')).body;
+    assert.deepEqual([k1.column, k1.order], ['planned', 2]);
+  }, { server: { board: fixture() }, launch: { headless: 'new' } });
+});
+
+test('#1584 (c) valid twin: a GENUINE 409 says "Not moved", is never "not confirmed", re-adopts the server\'s state, and the whole-board save that follows carries the server\'s columns and the seat\'s change', async () => {
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await openRecorded(browser, server.baseUrl);
+    const writes = recordWrites(page);
+    const seat = await api(server.baseUrl, 'PATCH', '/api/cards/k1', { by: 'bob', title: SEAT_TITLE });
+    assert.equal(seat.status, 200);
+
+    await drag(page, 'k1', 'planned', 'k5');
+    await settle(page);
+    const log = await statusLog(page);
+    assert.ok(log.some((t) => /not moved/i.test(t)), JSON.stringify(log));
+    assert.ok(!log.some((t) => /not confirmed|not known/i.test(t)), 'a definite refusal is not an unknown: ' + JSON.stringify(log));
+    assert.equal(await moveRecord(page), null, 'nothing left unresolved');
+
+    const server_ = (await api(server.baseUrl, 'GET', '/api/cards?limit=50')).body.cards;   // the truth BEFORE the save
+    await page.evaluate(() => { saveToJSONFile(); });
+    await settle(page);
+    const saves = writes.filter((w) => w.path === '/api/save');
+    assert.equal(saves.length, 1, 'the whole-board save is NOT blocked: ' + wire(writes));
+    const sent = saves[0].body.cards;
+    const byOrder = (list, col) => list.filter((c) => c.column === col).sort((a, b) => a.order - b.order).map((c) => [c.id, c.order]);
+    for (const col of ['backlog', 'planned']) {
+      assert.deepEqual(byOrder(sent, col), byOrder(server_, col), `${col}: the saved board is the server's, not the tab's preview`);
+    }
+    const sentK1 = sent.find((c) => c.id === 'k1');
+    assert.equal(sentK1.title, SEAT_TITLE, 'the seat\'s change is in what the tab saved');
+    assert.equal(sentK1.version, server_.find((c) => c.id === 'k1').version, 'under the server\'s version');
+  }, { server: { board: fixture() }, launch: { headless: 'new' } });
+});
