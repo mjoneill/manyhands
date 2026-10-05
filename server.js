@@ -67,6 +67,8 @@ import { mintId } from './core/tending-ids.mjs';
 import { createPrompt, editPrompt, setEnabled, reorderPlaylist, removePrompt, setShuffle, readShuffle } from './core/tending-authoring.mjs';
 import { resolveProvenance } from './core/tending-provenance.mjs';
 import { boardToDomain, domainToBoard, cardToNode } from './core/mapping.mjs';
+import { OUTBOX_FIELD, outboxOf, withAnnouncement, listOutbox, modeProblem, legacyProof, postMatchesEntry, opIdFor } from './core/announce-outbox.mjs';   // #1574 C3a/C3b
+import { createGraphClient } from './core/graph-client.mjs';   // #1574 C3b — the conversations unit's executor door
 import { verifyShaIntegrity, readShaStamp, collectShas, SHA_POPULATION } from './core/sha-integrity.mjs';
 import { summariseSeat, recommendInterval, backlogFor, costCoverage, budgetGateStatus, TICK_MS } from './core/insights.mjs';   // #1290 shadow insights
 import { buildTree, buildChildIndex } from './core/tree.mjs';
@@ -455,6 +457,36 @@ function appendClaimAnnouncement(data, card, actor, action) {
     console.error('#578 claim announcement skipped:', e.message);
     return null;
   }
+}
+
+// #1574 C3a — THE ANNOUNCEMENT OBLIGATION rides the same document write as
+// the card change that caused it. The mutationId is minted HERE, inside the
+// caller's write lock, never taken from a request; the origin (slots +
+// provenance) and one pending entry per slot, with its payload frozen now,
+// land in `data.announcementOutbox` and are persisted by the caller's single
+// writeBoard. No write ⇒ no obligation; the write ⇒ both. Not best-effort on
+// purpose (unlike appendClaimAnnouncement above): if the obligation cannot be
+// recorded, the claim must not commit without it.
+//
+// #1574 C3b — while the direct post is still written (`announced`, appended to
+// data.conversations by appendClaimAnnouncement in this same write), the
+// obligation is mode 'legacy': the entry names that post as `legacyPostId`,
+// the post carries `origin: {mutationId, slot}`, and the frozen payload body IS
+// the post's body, so /publish can verify the proof instead of posting again.
+// If the direct post was skipped (it is best-effort), the entry has no proof
+// and /publish blocks it as legacy-proof-missing rather than guessing.
+function commitCardObligation(data, card, actor, slot, action, announced = null) {
+  const mutationId = crypto.randomUUID();
+  const body = announced?.body || claimAnnouncement(card, actor, action) || `${actor} ${action} #${card.shortId}`;
+  if (announced) announced.origin = { mutationId, slot };
+  data[OUTBOX_FIELD] = withAnnouncement(data[OUTBOX_FIELD], {
+    mutationId,
+    origin: { cardId: card.id, version: card.version },
+    at: new Date().toISOString(),
+    originActor: actor,
+    mode: 'legacy',
+    slots: [{ slot, body, mentions: extractMentionsFromRoster(body, currentRoster(data)), notify: true, ...(announced ? { legacyPostId: announced.id } : {}) }],
+  });
 }
 
 // README block injected into every write so the warning is the first thing
@@ -935,6 +967,15 @@ async function handleSave(req, res) {
       if (incoming[k] === undefined) continue;
       merged[k] = k === 'cards' ? carryForward(incoming[k]) : incoming[k];
     }
+    // #1574 C3a — THE OUTBOX IS SERVER-OWNED. It is taken from the server's
+    // CURRENT document (read above, with no await between that read and the
+    // write below, so no locked writer can interleave) and the client's copy is
+    // ignored entirely: a forged, emptied or null `announcementOutbox` in the
+    // body changes nothing, and a snapshot read before a claim cannot erase the
+    // obligation that claim committed. Stated here rather than left to the
+    // allow-list above, so widening that list cannot silently hand it over.
+    if (existing[OUTBOX_FIELD] !== undefined) merged[OUTBOX_FIELD] = existing[OUTBOX_FIELD];
+    else delete merged[OUTBOX_FIELD];
 
     // #1265 / #760 — THE LAST UNGUARDED COLUMN WRITE.
     //
@@ -1270,11 +1311,31 @@ function writeBoard(data, events) {
   if (process.env.SCRUM_TEST_FAIL_BOARD_WRITE_FOR_MOVE || process.env.SCRUM_TEST_PAUSE_AFTER_EVENTS_FOR_MOVE) {
     testCrashGapSeams(events);
   }
+  testBarrier('after-events');     // #1574 C3a — test-only; a no-op unless SCRUM_TEST_BARRIER_DIR is set
   // #686 — every server write is a ROSTERED save: Person nodes are
   // (re)materialized into @graph from this one authority on every write.
   saveDomain(BOARD_DATA_FILE, boardToDomain(data), { now: data.lastUpdated, roster: { seats: currentRoster(data) } });
   _graphDirty = true;   // #694 — the replica rebuilds lazily on next query
   _graphGeneration++;   // #931 — and SAYS SO, so a sync in flight cannot clear it
+  testBarrier('after-document');   // #1574 C3a — after the document write, before any caller responds
+}
+
+// #1574 C3a — TEST-ONLY crash barriers. With SCRUM_TEST_BARRIER_DIR set, a
+// FIFO named `after-events` / `after-document` in that dir is opened and read
+// (blocking the process) at that point in writeBoard, so a test can SIGKILL
+// the server in a known window. Unset, this function returns before touching
+// the filesystem, and the write order is the shipped one. Only a FIFO gates: a
+// regular file of the same name is ignored, so a stray file cannot hang a write.
+// (The variable is read per call, not hoisted into a module const, so a write
+// during module evaluation cannot hit a temporal-dead-zone error.)
+function testBarrier(name) {
+  const dir = process.env.SCRUM_TEST_BARRIER_DIR;
+  if (!dir) return;
+  const p = path.join(dir, name);
+  let st = null;
+  try { st = fs.statSync(p); } catch { return; }
+  if (!st.isFIFO()) return;
+  try { fs.readFileSync(p); } catch { /* the test removed it: pass */ }
 }
 
 // #1584 — TEST-ONLY seams for the move crash gap (events appended, board not
@@ -9790,6 +9851,8 @@ async function handleClaimCard(req, res, idOrShortId) {
         // it here rather than in a second write keeps the two atomic: there is
         // no window in which the card is claimed and the room was never told.
         const announced = appendClaimAnnouncement(data, card, by, 'claimed');
+        // #1574 C3a — and the durable OBLIGATION to announce it, in the same write.
+        commitCardObligation(data, card, by, 'claim', 'claimed', announced);
         // #669 — claim + its announcement, two events on ONE write (#578).
         writeBoard(data, [cardEvent('update', card, by),
           ...(announced ? [convEvent(announced, by)] : [])]);
@@ -9841,6 +9904,9 @@ async function handleReleaseCard(req, res, idOrShortId) {
       card.updatedAt = new Date().toISOString();
       bumpCardVersion(card);   // #534 — a release is a card write
       const announced = wasHeld ? appendClaimAnnouncement(data, card, by, 'released') : null;
+      // #1574 C3a — only a real transition owes an announcement: an unheld
+      // release mints no mutationId and writes no origin or entry.
+      if (wasHeld) commitCardObligation(data, card, by, 'release', 'released', announced);
       writeBoard(data, [cardEvent('update', card, by),
         ...(announced ? [convEvent(announced, by)] : [])]);
       return { status: 200, payload: { released: true }, announced };
@@ -9850,6 +9916,167 @@ async function handleReleaseCard(req, res, idOrShortId) {
   } catch (e) {
     console.error('DELETE /api/cards/:id/claim:', e.message);
     sendJSON(res, 500, { error: 'Failed to release card' });
+  }
+}
+
+// ── #1574 C3a — the announcement outbox ──
+// GET /api/outbox[?status=&mutationId=] → { origins: [...], entries: [...] }.
+// ONE read, taken under the write lock, so the two lists come from the same
+// document: an origin and its entries can never be read across a write.
+// Origins are returned even when none of their entries exist.
+async function handleGetOutbox(req, res) {
+  try {
+    const q = new URL(req.url, 'http://x').searchParams;
+    const status = q.get('status') || undefined;
+    const mutationId = q.get('mutationId') || undefined;
+    const listed = await withWriteLock(async () => listOutbox(readBoard(), { status, mutationId }));
+    sendJSON(res, 200, listed);
+  } catch (e) {
+    console.error('GET /api/outbox:', e.message);
+    sendJSON(res, 500, { error: 'Failed to read the outbox' });
+  }
+}
+
+// POST /api/outbox/:obligationId/complete {postId}
+// NEVER trusts a caller-supplied receipt, status or postId: publication is
+// recorded only from the server's own lookup of the post. C3a ships no such
+// lookup, so a known obligation is refused and stays `pending` (503, nothing
+// written); an unknown one is 404. The verified path is C3b.
+async function handleCompleteOutbox(req, res, rawId) {
+  try {
+    await readBody(req);   // drained, and deliberately not consulted
+    let obligationId;
+    try { obligationId = decodeURIComponent(rawId); } catch { return sendJSON(res, 400, { error: 'malformed obligation id' }); }
+    const known = await withWriteLock(async () => Boolean(outboxOf(readBoard()).entries[obligationId]));
+    if (!known) return sendJSON(res, 404, { error: 'Obligation not found', obligationId });
+    sendJSON(res, 503, {
+      error: 'The post cannot be verified: no graph lookup is available. A caller-supplied receipt is never accepted; the obligation stays pending.',
+      code: 'OUTBOX_UNVERIFIABLE', obligationId, status: 'pending',
+    });
+  } catch (e) {
+    console.error('POST /api/outbox/:id/complete:', e.message);
+    sendJSON(res, 500, { error: 'Failed to complete the obligation' });
+  }
+}
+
+// ── #1574 C3b — POST /api/outbox/:obligationId/publish ──
+// Publishes ONE obligation, idempotently. 404 for an unknown id; otherwise
+// 200 with {status: 'published'|'pending'|'blocked', postId?, reason?}.
+//   · already published / blocked → reported as stored; a blocked entry is NEVER republished.
+//   · a missing, unknown or entry/origin-disagreeing mode → blocked 'malformed-entry' (never inferred).
+//   · legacy    → the direct post named by legacyPostId must exist and match the frozen
+//                 payload and provenance → published, receipt 'legacy', no new post;
+//                 otherwise blocked legacy-proof-missing / legacy-proof-mismatch.
+//   · publisher → a post already holding the opId and matching is FOUND (receipt 'found');
+//                 one holding it and NOT matching → blocked. Otherwise, with the
+//                 conversations unit OFF, the post and the entry's move to published are
+//                 ONE writeBoard. With it ON the executor is called with the write lock
+//                 RELEASED (lock, read, release, call, lock, revalidate, record), and an
+//                 unavailable or hung executor leaves the entry pending.
+// Every decision here is re-made under the lock from the stored document, so
+// concurrent callers serialize and all see the first writer's post.
+const announcementEvent = (entry, actor = null) => ({
+  op: 'update', actor, entity: { kind: 'announcement', id: entry.obligationId }, state: entry,
+});
+let ANNOUNCE_EXECUTOR = null;   // set at startup when SCRUM_GRAPH_UNIT_CONVERSATIONS=1
+
+function decidePublish(data, obligationId) {
+  const { origins, entries } = outboxOf(data);
+  const entry = entries[obligationId];
+  if (!entry) return { kind: 'unknown' };
+  if (entry.status === 'published') return { kind: 'done', result: { status: 'published', postId: entry.postId } };
+  if (entry.status === 'blocked') return { kind: 'done', result: { status: 'blocked', reason: entry.reason } };
+  if (entry.status !== 'pending') return { kind: 'block', entry, reason: 'malformed-entry' };
+  const problem = modeProblem(entry, origins[entry.mutationId]);
+  if (problem) return { kind: 'block', entry, reason: problem };
+  const posts = Array.isArray(data.conversations) ? data.conversations : [];
+  if (entry.mode === 'legacy') {
+    const proof = legacyProof(entry, (id) => posts.find((c) => c && c.id === id) || null);
+    return proof.ok ? { kind: 'mark', entry, postId: proof.postId, receipt: 'legacy' } : { kind: 'block', entry, reason: proof.reason };
+  }
+  const opId = opIdFor(entry.mutationId, entry.slot);
+  const held = posts.find((c) => c && c.opId === opId);
+  if (held) {
+    return postMatchesEntry(entry, held)
+      ? { kind: 'mark', entry, postId: held.id, receipt: 'found' }
+      : { kind: 'block', entry, reason: 'publisher-opid-mismatch' };
+  }
+  return { kind: 'post', entry, opId };
+}
+
+/** Under the lock: record a decision in ONE document write. Returns {result, notify?}. */
+function applyPublish(data, d, actor) {
+  const ob = outboxOf(data);
+  const now = new Date().toISOString();
+  const put = (next) => { data[OUTBOX_FIELD] = { origins: ob.origins, entries: { ...ob.entries, [next.obligationId]: next } }; return next; };
+  if (d.kind === 'block') {
+    const next = put({ ...d.entry, status: 'blocked', reason: d.reason, blockedAt: now });
+    writeBoard(data, [announcementEvent(next, actor)]);
+    testBarrier('after-publish-write');
+    return { result: { status: 'blocked', reason: d.reason } };
+  }
+  if (d.kind === 'mark') {
+    const next = put({ ...d.entry, status: 'published', postId: d.postId, publishedAt: now, receipt: d.receipt });
+    writeBoard(data, [announcementEvent(next, actor)]);
+    testBarrier('after-publish-write');
+    return { result: { status: 'published', postId: d.postId } };
+  }
+  // d.kind === 'post' — the post and the published mark are ONE write.
+  const p = d.entry.payload;
+  const conv = createConversationFromPayload({ body: p.body, author: p.author });
+  conv.opId = d.opId;
+  conv.origin = { mutationId: d.entry.mutationId, slot: d.entry.slot };
+  if (!Array.isArray(data.conversations)) data.conversations = [];
+  data.conversations.push(conv);
+  const next = put({ ...d.entry, status: 'published', postId: conv.id, publishedAt: now, receipt: 'document' });
+  writeBoard(data, [convEvent(conv, p.author), announcementEvent(next, actor)]);
+  testBarrier('after-publish-write');
+  return { result: { status: 'published', postId: conv.id }, notify: p.notify ? conv : null };
+}
+
+/**
+ * The executor half, called with NO board lock held. C3b ships the unlocked,
+ * fenced, bounded call and its failure handling only: the conversation-post
+ * intention kind does not exist in the graph compiler yet (it is the unit's own
+ * slice), so a reachable executor is still answered `pending` with that reason.
+ * Nothing is ever guessed from a failure.
+ */
+async function publishThroughExecutor(entry, opId) {
+  const id = await ANNOUNCE_EXECUTOR.datasetIdentity();
+  if (!id.ok) return { applied: false, reason: `executor-unavailable: ${id.reason}` };
+  return { applied: false, reason: `executor-post-write-not-built: no conversation intention kind for ${opId}` };
+}
+
+async function handlePublishOutbox(req, res, rawId) {
+  try {
+    await readBody(req);   // drained; nothing the caller sends is consulted
+    let obligationId;
+    try { obligationId = decodeURIComponent(rawId); } catch { return sendJSON(res, 400, { error: 'malformed obligation id' }); }
+    const actor = req.auth?.seat ?? null;
+    const first = await withWriteLock(async () => {
+      const data = readBoard();
+      const d = decidePublish(data, obligationId);
+      if (d.kind === 'unknown') return { status: 404 };
+      if (d.kind === 'done') return { result: d.result };
+      if (d.kind === 'post' && ANNOUNCE_EXECUTOR) return { viaExecutor: d };   // lock is released on return
+      return applyPublish(data, d, actor);
+    });
+    if (first.status === 404) return sendJSON(res, 404, { error: 'Obligation not found', obligationId });
+    if (first.notify) notifyMcpOfPost(first.notify);
+    if (!first.viaExecutor) return sendJSON(res, 200, first.result);
+    const call = await publishThroughExecutor(first.viaExecutor.entry, first.viaExecutor.opId);
+    if (!call.applied) return sendJSON(res, 200, { status: 'pending', reason: call.reason });
+    // Lock again and revalidate against the CURRENT document before recording.
+    const second = await withWriteLock(async () => {
+      const data = readBoard();
+      const d = decidePublish(data, obligationId);
+      if (d.kind === 'done' || d.kind === 'unknown' || d.kind === 'block') return { result: d.result ?? { status: 'pending', reason: 'changed-while-publishing' } };
+      return applyPublish(data, { kind: 'mark', entry: d.entry, postId: call.postId, receipt: 'executor' }, actor);
+    });
+    sendJSON(res, 200, second.result);
+  } catch (e) {
+    console.error('POST /api/outbox/:id/publish:', e.message);
+    sendJSON(res, 500, { error: 'Failed to publish the obligation' });
   }
 }
 
@@ -11039,6 +11266,9 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/cards\/([^\/]+)\/move-fence$/, fn: (req, res, m) => handleMoveFence(req, res, decodeURIComponent(m[1])) },   // #1584
   { method: 'POST',   re: /^\/api\/cards\/([^\/]+)\/claim$/, fn: (req, res, m) => handleClaimCard(req, res, m[1]) },
   { method: 'DELETE', re: /^\/api\/cards\/([^\/]+)\/claim$/, fn: (req, res, m) => handleReleaseCard(req, res, m[1]) },
+  { method: 'GET',    re: /^\/api\/outbox$/,              fn: (req, res) => handleGetOutbox(req, res) },                    // #1574 C3a
+  { method: 'POST',   re: /^\/api\/outbox\/([^\/]+)\/complete$/, fn: (req, res, m) => handleCompleteOutbox(req, res, m[1]) }, // #1574 C3a
+  { method: 'POST',   re: /^\/api\/outbox\/([^\/]+)\/publish$/,  fn: (req, res, m) => handlePublishOutbox(req, res, m[1]) },  // #1574 C3b
   { method: 'GET',    re: /^\/api\/cards\/([^\/]+)$/,      fn: (req, res, m) => handleGetCard(req, res, m[1]) },
   { method: 'PATCH',  re: /^\/api\/cards\/([^\/]+)$/,      fn: (req, res, m) => handleUpdateCard(req, res, m[1]) },
   { method: 'DELETE', re: /^\/api\/cards\/([^\/]+)$/,      fn: (req, res, m) => handleDeleteCard(req, res, m[1]) },
@@ -11065,6 +11295,15 @@ const GRAPH_SLICE = createGraphSlice({ getContext: () => requestContext.getStore
 if (logbornUnitConfig(process.env, { sliceEnabled: GRAPH_SLICE.enabled }).enabled) {
   LOGBORN = createLogbornUnit({ slice: GRAPH_SLICE, loadIri: async () => (await loadGraphModules()).IRI });
   console.error(`${new Date().toISOString()} #1561 log-born unit ON: memory, decision and seat-state read from and write to the graph executor`);
+}
+// #1574 C3b — the conversations unit (same flag family as SCRUM_GRAPH_UNIT_LOGBORN).
+// Like the log-born unit it refuses to start without the fenced graph slice: a
+// publisher-mode post would otherwise have nowhere to go. OFF ⇒ /publish writes
+// the post into the board document, as before the flag.
+if (process.env.SCRUM_GRAPH_UNIT_CONVERSATIONS === '1') {
+  if (!GRAPH_SLICE.enabled) throw new Error('#1574: SCRUM_GRAPH_UNIT_CONVERSATIONS=1 requires the graph slice (SCRUM_GRAPH_EXECUTOR_URL + SCRUM_GRAPH_DATASET_ID)');
+  ANNOUNCE_EXECUTOR = createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID });
+  console.error(`${new Date().toISOString()} #1574 conversations unit ON: publisher-mode announcements go through the graph executor (lock released during the call)`);
 }
 if (GRAPH_SLICE.enabled) {
   installStructuredCloneCounter();
