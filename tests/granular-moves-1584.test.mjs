@@ -20,7 +20,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { makeBoardFixture, withBrowserServer } from './helpers/harness.mjs';
+import { makeBoardFixture, withBrowserServer, startRestServer } from './helpers/harness.mjs';
 
 const ts = '2026-09-01T00:00:00.000Z';
 const card = (shortId, column, order, extra = {}) => ({
@@ -340,7 +340,8 @@ async function loseMoveReply(page, baseUrl, cardId, mode) {
   page.on('request', async (r) => {
     const u = new URL(r.url());
     const isMove = r.method() === 'PATCH' && u.pathname === `/api/cards/${cardId}`;
-    const isRead = r.method() === 'GET' && (u.pathname.startsWith('/api/cards') || u.pathname === '/api/load' || u.pathname === '/api/board/status');
+    const isRead = (r.method() === 'GET' && (u.pathname.startsWith('/api/cards') || u.pathname === '/api/load' || u.pathname === '/api/board/status'))
+      || (r.method() === 'POST' && u.pathname.endsWith('/move-fence'));   // offline means the fence cannot reach it either
     if (isMove) {
       state.browserPatches += 1;
       if (state.committed === 0) {
@@ -432,7 +433,8 @@ async function interceptMove(page, baseUrl, cardId, mode) {
   page.on('request', async (r) => {
     const u = new URL(r.url());
     const isMove = r.method() === 'PATCH' && u.pathname === `/api/cards/${cardId}`;
-    const isRead = r.method() === 'GET' && (u.pathname.startsWith('/api/cards') || u.pathname === '/api/load' || u.pathname === '/api/board/status');
+    const isRead = (r.method() === 'GET' && (u.pathname.startsWith('/api/cards') || u.pathname === '/api/load' || u.pathname === '/api/board/status'))
+      || (r.method() === 'POST' && u.pathname.endsWith('/move-fence'));   // offline means the fence cannot reach it either
     if (isMove) {
       state.browserPatches += 1;
       if (state.committed === 0) {
@@ -555,4 +557,162 @@ test('#1584 (c) valid twin: a GENUINE 409 says "Not moved", is never "not confir
     assert.equal(sentK1.title, SEAT_TITLE, 'the seat\'s change is in what the tab saved');
     assert.equal(sentK1.version, server_.find((c) => c.id === 'k1').version, 'under the server\'s version');
   }, { server: { board: fixture() }, launch: { headless: 'new' } });
+});
+
+
+// ── Round 4: settle only by the server's move FENCE ──────────────────────────
+
+/** Hold the browser's move PATCH: the browser is told the network failed and
+ *  the request is NOT forwarded until the test calls `release()`. */
+async function holdMove(page, baseUrl, cardId) {
+  const state = { held: null, browserPatches: 0, fences: 0 };
+  await page.setRequestInterception(true);
+  page.on('request', (r) => {
+    const u = new URL(r.url());
+    if (r.method() === 'POST' && u.pathname === `/api/cards/${cardId}/move-fence`) state.fences += 1;
+    if (r.method() === 'PATCH' && u.pathname === `/api/cards/${cardId}`) {
+      state.browserPatches += 1;
+      if (!state.held) { state.held = { path: u.pathname + u.search, body: r.postData() }; r.abort('failed').catch(() => {}); return; }
+    }
+    r.continue().catch(() => {});
+  });
+  state.release = async () => {
+    const res = await fetch(`${baseUrl}${state.held.path}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: state.held.body });
+    return { status: res.status, body: await res.json().catch(() => null) };
+  };
+  return state;
+}
+const FENCED_LABEL = /can no longer be applied; whether it was applied earlier is unclear/i;
+const byOrder = (list, col) => list.filter((c) => c.column === col).sort((a, b) => a.order - b.order).map((c) => [c.id, c.order]);
+
+test('#1584 C1 crash gap: the server appends the move\'s event, then its board write fails (500) ⇒ fenced, never "Moved"; nothing shifted', async () => {
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await openRecorded(browser, server.baseUrl);
+    const writes = recordWrites(page);
+    await drag(page, 'k1', 'planned', 'k5');
+    await settle(page);
+    const log = await statusLog(page);
+    assert.ok(!log.some((t) => /^moved/i.test(t)), 'never "Moved": ' + JSON.stringify(log));
+    assert.ok(log.some((t) => FENCED_LABEL.test(t)), JSON.stringify(log));
+    assert.equal(writes.filter((w) => w.path.endsWith('/move-fence')).length, 1, 'fenced once: ' + wire(writes));
+    assert.equal(writes.filter((w) => w.method === 'PATCH').length, 1, 'never re-sent');
+    assert.equal(await moveRecord(page), null);
+    assert.deepEqual(byOrder((await api(server.baseUrl, 'GET', '/api/cards?limit=50')).body.cards, 'planned'), [['k4', 1], ['k5', 2]]);
+    assert.deepEqual(await columnOrder(page, 'planned'), ['k4', 'k5'], 'the tab shows the server\'s copy');
+  }, { server: { board: fixture(), env: { SCRUM_TEST_FAIL_BOARD_WRITE_FOR_MOVE: 'card:k1' } }, launch: { headless: 'new' } });
+});
+
+test('#1584 C2+C5 delayed PATCH vs fence: held, fenced, a whole-board save (which omits moveFences), then released ⇒ 409 MOVE_FENCED, nothing shifts, label is the fenced text', async () => {
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await openRecorded(browser, server.baseUrl);
+    const held = await holdMove(page, server.baseUrl, 'k1');
+    const writes = recordWrites(page);
+    await drag(page, 'k1', 'planned', 'k5');
+    await settle(page);
+    assert.ok(held.held, 'precondition: the PATCH never reached the server');
+    assert.equal(held.fences, 1, 'the tab fenced it');
+    const log = await statusLog(page);
+    assert.ok(log.some((t) => FENCED_LABEL.test(t)), JSON.stringify(log));
+    assert.ok(!log.some((t) => /not moved/i.test(t) || /^moved/i.test(t)), 'neither "Not moved" nor "Moved": ' + JSON.stringify(log));
+
+    await page.evaluate(() => { saveToJSONFile(); });   // a snapshot without moveFences
+    await settle(page);
+    const saves = writes.filter((w) => w.path === '/api/save');
+    assert.equal(saves.length, 1, 'saves are allowed once fenced: ' + wire(writes));
+    assert.equal(saves[0].body.moveFences, undefined, 'precondition: the snapshot carries no fences');
+
+    const late = await held.release();
+    assert.deepEqual([late.status, late.body && late.body.code], [409, 'MOVE_FENCED'], 'the fence survived the save and refuses the late move');
+    assert.equal(held.browserPatches, 1, 'never re-sent');
+    const truth = (await api(server.baseUrl, 'GET', '/api/cards?limit=50')).body.cards;
+    assert.deepEqual(byOrder(truth, 'planned'), [['k4', 1], ['k5', 2]], 'nothing shifted');
+    assert.equal(truth.find((c) => c.id === 'k1').column, 'backlog');
+  }, { server: { board: fixture() }, launch: { headless: 'new' } });
+});
+
+test('#1584 C3 committed, then SUPERSEDED by a seat\'s later move, then reconcile ⇒ fenced, "unclear", never "Not moved"; saves allowed with the server\'s state', async () => {
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await openRecorded(browser, server.baseUrl);
+    const lost = await interceptMove(page, server.baseUrl, 'k1', 'drop');   // commits; reply dropped; reads AND fences blocked
+    const writes = recordWrites(page);
+    await drag(page, 'k1', 'planned', 'k5');
+    await settle(page);
+    assert.equal(lost.committed, 1);
+    const seat = await api(server.baseUrl, 'PATCH', '/api/cards/k1',
+      { column: 'backlog', order: 1, makeRoom: true, after: null, requestId: 'seat-move-0001', ifVersion: 2, by: 'bob' });
+    assert.equal(seat.status, 200, JSON.stringify(seat.body));
+
+    lost.blockReads = false;
+    const truth = (await api(server.baseUrl, 'GET', '/api/cards?limit=50')).body.cards;
+    await page.evaluate(() => { saveToJSONFile(); });
+    await settle(page);
+    const log = await statusLog(page);
+    assert.ok(log.some((t) => FENCED_LABEL.test(t)), JSON.stringify(log));
+    assert.ok(!log.some((t) => /not moved/i.test(t)), 'never "Not moved": ' + JSON.stringify(log));
+    assert.equal(await moveRecord(page), null);
+    assert.equal(lost.browserPatches, 1);
+    const saves = writes.filter((w) => w.path === '/api/save');
+    assert.equal(saves.length, 1, wire(writes));
+    for (const col of ['backlog', 'planned']) assert.deepEqual(byOrder(saves[0].body.cards, col), byOrder(truth, col), `${col}: the server's state was adopted`);
+    assert.equal((await api(server.baseUrl, 'GET', '/api/cards/k5')).body.order, 3, 'our shift happened exactly once');
+    const replay = await api(server.baseUrl, 'PATCH', '/api/cards/k1',
+      { column: 'planned', order: 2, makeRoom: true, after: 'k4', requestId: lost.requestId, ifVersion: 3 });
+    assert.deepEqual([replay.status, replay.body && replay.body.code], [409, 'MOVE_FENCED'],
+      'saves were unblocked by a REAL fence on the server, not by the tab deciding on its own');
+  }, { server: { board: fixture() }, launch: { headless: 'new' } });
+});
+
+test('#1584 C4 committed and still the latest: reply dropped, reconcile ⇒ committed, "Moved", saves allowed', async () => {
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await openRecorded(browser, server.baseUrl);
+    const lost = await interceptMove(page, server.baseUrl, 'k1', 'drop');
+    const writes = recordWrites(page);
+    await drag(page, 'k1', 'planned', 'k5');
+    await settle(page);
+    lost.blockReads = false;
+    await page.evaluate(() => { saveToJSONFile(); });
+    await settle(page);
+    const log = await statusLog(page);
+    assert.ok(log.some((t) => /^moved/i.test(t)), JSON.stringify(log));
+    assert.ok(writes.some((w) => w.path === '/api/save'), 'saves allowed');
+    assert.deepEqual(byOrder((await api(server.baseUrl, 'GET', '/api/cards?limit=50')).body.cards, 'planned'), [['k4', 1], ['k1', 2], ['k5', 3]]);
+  }, { server: { board: fixture() }, launch: { headless: 'new' } });
+});
+
+test('#1584 C1b crash gap, REAL kill: the server is SIGKILLed between appending the move\'s event and writing the board; restarted on the same data and port, the tab fences ⇒ the fenced label, never "Moved"; no process left', async (t) => {
+  const pidGone = (pid) => { try { process.kill(pid, 0); return false; } catch { return true; } };
+  let s2 = null;
+  let firstPid = null;
+  await withBrowserServer(async ({ server, browser }) => {
+    firstPid = server.pid;
+    const page = await openRecorded(browser, server.baseUrl);
+    const writes = recordWrites(page);
+    await drag(page, 'k1', 'planned', 'k5');   // the PATCH is now held INSIDE the gap
+    assert.ok(await server.waitForStderr(/paused after events, before the board write/, 8000), 'precondition: the server is inside the gap');
+    server.kill('SIGKILL');
+    for (let i = 0; i < 50 && !pidGone(server.pid); i++) await new Promise((r) => setTimeout(r, 100));
+    assert.ok(pidGone(server.pid), 'the first server is dead');
+    await settle(page);   // the reply never came; the fence cannot reach a dead server either
+    assert.ok(String(await moveRecord(page)).length > 2, 'unknown: recorded');
+
+    s2 = await startRestServer({ boardFile: server.boardFile, port: Number(new URL(server.baseUrl).port) });
+    await page.evaluate(() => { saveToJSONFile(); });   // a whole-board caller: reconciles first
+    await settle(page);
+    const log = await statusLog(page);
+    const fencedText = log.find((t2) => FENCED_LABEL.test(t2));
+    t.diagnostic('observed status after the restart: ' + JSON.stringify(fencedText));
+    assert.ok(fencedText, 'the POSITIVE fenced label is shown: ' + JSON.stringify(log));
+    assert.ok(!log.some((t2) => /^moved/i.test(t2)), 'never "Moved": ' + JSON.stringify(log));
+    assert.equal(writes.filter((w) => w.method === 'PATCH').length, 1, 'never re-sent');
+    const truth = (await api(s2.baseUrl, 'GET', '/api/cards?limit=50')).body.cards;
+    assert.deepEqual(byOrder(truth, 'planned'), [['k4', 1], ['k5', 2]], 'the stored board never got the move');
+    assert.equal(truth.find((c) => c.id === 'k1').column, 'backlog');
+    assert.deepEqual(await columnOrder(page, 'planned'), ['k4', 'k5'], 'the tab shows the server\'s copy');
+    const rid = writes.find((w) => w.method === 'PATCH').body.requestId;
+    const replay = await api(s2.baseUrl, 'PATCH', '/api/cards/k1', { column: 'planned', order: 2, makeRoom: true, after: 'k4', requestId: rid, ifVersion: 1 });
+    assert.deepEqual([replay.status, replay.body && replay.body.code], [409, 'MOVE_FENCED']);
+  }, { server: { board: fixture(), env: { SCRUM_TEST_PAUSE_AFTER_EVENTS_FOR_MOVE: 'card:k1', SCRUM_TEST_PAUSE_AFTER_EVENTS_MS: '20000' } }, launch: { headless: 'new' } })
+    .finally(async () => { if (s2) await s2.stop(); });
+  for (let i = 0; i < 50 && s2 && !pidGone(s2.pid); i++) await new Promise((r) => setTimeout(r, 100));
+  assert.ok(pidGone(firstPid) && (!s2 || pidGone(s2.pid)), 'no server process left behind');
 });

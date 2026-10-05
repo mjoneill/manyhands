@@ -5067,7 +5067,10 @@ function _persistMove(card, { after, shifts = [], touched = [], undoEntry = null
       return: 'id',
       ...(who ? { by: who } : {}),
     };
-    _recordMove(requestId, { cardId, touched: touchedCols });   // BEFORE the request: a reload mid-flight must still know
+    // BEFORE the request: a reload mid-flight must still know. `ifVersion` is
+    // kept for the record; the outcome itself is settled by the move fence (_reconcileMoves).
+    const moveEntry = { cardId, touched: touchedCols, ifVersion: body.ifVersion };
+    _recordMove(requestId, moveEntry);
     const pendingTimer = setTimeout(() => _setSaveStatus('saving', 'Saving…'), SAVE_PENDING_DELAY_MS);
     let res = null;
     let server = null;
@@ -5093,7 +5096,7 @@ function _persistMove(card, { after, shifts = [], touched = [], undoEntry = null
     if (!res || (res.ok && !readable) || (!res.ok && !refused)) {
       // The move may have committed. Say exactly that, never re-send it, and
       // learn the outcome by reading the server's copy.
-      _unconfirmedMoves.set(requestId, { cardId, touched: touchedCols });
+      _unconfirmedMoves.set(requestId, moveEntry);
       _boardRereadGen++;   // moves queued behind this one were computed on an unknown state
       _setSaveStatus('failed', 'Move not confirmed — '
         + (!res ? 'no reply from the server'
@@ -5118,8 +5121,8 @@ function _persistMove(card, { after, shifts = [], touched = [], undoEntry = null
         // move and could not replace it. Hold it like an unknown outcome, so no
         // whole-board save is built from a board the server does not hold;
         // the next successful read settles it ("not on the server").
-        _unconfirmedMoves.set(requestId, { cardId, touched: touchedCols });
-        _recordMove(requestId, { cardId, touched: touchedCols });
+        _unconfirmedMoves.set(requestId, { ...moveEntry, refused: true });
+        _recordMove(requestId, { ...moveEntry, refused: true });
       }
       return false;
     }
@@ -5144,43 +5147,67 @@ function _persistMove(card, { after, shifts = [], touched = [], undoEntry = null
   return _trackPendingWrite(p);
 }
 
-// Learn the outcome of every unconfirmed move by READING the board: the
-// card's `lastMoveRequestId` says whether this tab's move is the one stored.
-// Either way the touched columns are replaced by the server's copy, so the
-// screen shows what is stored. If the board cannot be read the moves stay
-// unconfirmed (and whole-board saves stay blocked).
+// Settle every unconfirmed move — never by re-sending it. For each one the
+// server is asked to FENCE it (POST /api/cards/:id/move-fence), under its
+// write lock against the stored board:
+//   'committed'  the stored card carries this move's id: it is on the board.
+//   'fenced'     it is not; the server has recorded that this id may never
+//                apply, so from here on it cannot land and overtake a save.
+//                It may still have committed earlier and been superseded — so
+//                this is never reported as "Not moved".
+// A definite refusal (refused: true) needs no fence. Only after the outcome is
+// known AND the board has been re-read (so the tab holds the server's copy of
+// what the move touched) does the record clear and whole-board saves unblock.
+// If either step fails the move stays UNKNOWN: recorded, saves blocked.
 async function _reconcileMoves() {
   if (_unconfirmedMoves.size === 0) return true;
-  const data = await loadFromJSONFile();
-  if (!data) {
-    _setSaveStatus('failed', 'Move not confirmed — the server could not be read, so it is not known whether the move was stored. '
-      + 'Nothing will be saved over it until it is; reload to resync.');
+  const outcomes = [];
+  let unreachable = false;
+  for (const [rid, m] of [..._unconfirmedMoves.entries()]) {
+    if (m.refused) { outcomes.push([rid, m, 'refused']); continue; }
+    let outcome = 'unknown';
+    try {
+      const r = await fetch(API_BASE + '/api/cards/' + encodeURIComponent(m.cardId) + '/move-fence', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestId: rid }),
+      });
+      const b = r.ok ? await r.json() : null;
+      if (b && b.requestId === rid && (b.outcome === 'committed' || b.outcome === 'fenced')) outcome = b.outcome;
+      else unreachable = true;
+    } catch { unreachable = true; }
+    outcomes.push([rid, m, outcome]);
+  }
+  const settled = outcomes.filter(([, , o]) => o !== 'unknown');
+  if (settled.length === 0) {
+    _setSaveStatus('failed', 'Move not confirmed — ' + (unreachable ? 'the server could not be reached' : 'the server gave no usable answer')
+      + ', so it is not known whether the move was stored. Nothing will be saved over it until it is; reload to resync.');
     return false;
   }
-  _settleMovesAgainst(data);
-  return true;
-}
-
-// Settle every unconfirmed move against a board READ from the server (never
-// by re-sending it): the card's lastMoveRequestId says whether it is stored.
-function _settleMovesAgainst(data) {
-  if (_unconfirmedMoves.size === 0) return;
-  const pending = [..._unconfirmedMoves.entries()];
-  _unconfirmedMoves.clear();
-  _forgetMoves(pending.map(([rid]) => rid));
+  const data = await loadFromJSONFile();
+  if (!data) {
+    _setSaveStatus('failed', 'Move not confirmed — the board could not be re-read. Nothing will be saved over it until it is; reload to resync.');
+    return false;
+  }
+  for (const [rid] of settled) _unconfirmedMoves.delete(rid);
+  _forgetMoves(settled.map(([rid]) => rid));
   const cols = new Set();
   const ids = [];
-  let stored = 0;
-  for (const [rid, m] of pending) {
-    m.touched.forEach((c) => cols.add(c));
-    ids.push(m.cardId);
-    const s = data.cards.find((c) => c && c.id === m.cardId);
-    if (s && s.lastMoveRequestId === rid) stored++;
-  }
+  for (const [, m] of settled) { m.touched.forEach((c) => cols.add(c)); ids.push(m.cardId); }
   _adoptServerColumns(data, [...cols], ids);
-  if (stored === pending.length) _setSaveStatus('saved', 'Saved — the move is confirmed on the server (its reply had not been usable).');
-  else _setSaveStatus('failed', (pending.length === 1 ? 'Not moved — the server does not hold this move' : 'Some moves are not on the server')
-    + ' (it was not stored, or the card has moved again since). The board shows what the server holds.');
+  const kinds = new Set(settled.map(([, , o]) => o));
+  if (_unconfirmedMoves.size > 0) {
+    _setSaveStatus('failed', 'Some moves are still not confirmed — nothing will be saved over them until they are settled.');
+  } else if (kinds.size === 1 && kinds.has('committed')) {
+    _setSaveStatus('saved', 'Moved — confirmed on the server (its reply had not been usable).');
+  } else if (kinds.size === 1 && kinds.has('refused')) {
+    _setSaveStatus('failed', 'Not moved — the server refused the move. The board shows what the server holds.');
+  } else if (kinds.size === 1 && kinds.has('fenced')) {
+    _setSaveStatus('failed', 'This move can no longer be applied; whether it was applied earlier is unclear. '
+      + 'The board now shows the server\'s copy.');
+  } else {
+    _setSaveStatus('failed', 'Some moves landed and some could not be confirmed or can no longer be applied. '
+      + 'The board now shows the server\'s copy.');
+  }
+  return true;
 }
 
 // Re-read the server's state for `columns` (and the cards in `ids`, wherever
@@ -6980,9 +7007,9 @@ if (_convsForm) {
     nextShortId = recomputeNextShortId(cards, jsonResult.nextShortId);
     saveToLocalStorage();
     _rebaseline(cards);   // #466 — the baseline a refused save is merged against
-    // #1584 — a move a previous load left unresolved is settled against THIS
-    // read, before anything else can snapshot the board.
-    if (_unconfirmedMoves.size > 0) _settleMovesAgainst(jsonResult);
+    // #1584 — a move a previous load left unresolved is asked about now; until
+    // it is settled every whole-board save is refused.
+    if (_unconfirmedMoves.size > 0) _trackPendingWrite(_reconcileMoves());
   } else {
     restoreFromLocalStorage();
     nextShortId = recomputeNextShortId(cards, null);

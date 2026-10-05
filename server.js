@@ -913,9 +913,22 @@ async function handleSave(req, res) {
       for (const k of READ_DECORATIONS) delete out[k];
       return out;
     };
+    // #1584 — `lastMoveRequestId` is SERVER-OWNED: the move fence reads it as
+    // proof of a commit, so a browser snapshot must never set or clear it.
+    // (`moveFences` is board-level and server-owned too; it is preserved
+    // because `merged` starts from the stored board and only the four keys
+    // below are taken from the snapshot.)
+    const keepServerOwned = (c) => {
+      if (!c || !c.id) return c;
+      const stored = storedById.get(c.id);
+      const out = { ...c };
+      if (stored && stored.lastMoveRequestId !== undefined) out.lastMoveRequestId = stored.lastMoveRequestId;
+      else delete out.lastMoveRequestId;
+      return out;
+    };
     const carryForward = (incomingCards) => incomingCards.map(stripDecorations).map((c) => (
       c && c.id && storedById.has(c.id) ? { ...storedById.get(c.id), ...c } : c
-    ));
+    )).map(keepServerOwned);
 
     const merged = { ...existing };
     for (const k of ['cards', 'columns', 'nextShortId', 'lastUpdated']) {
@@ -1239,7 +1252,7 @@ function deriveEvents(before, after, actor = null) {
   return out;
 }
 
-function writeBoard(data, events) {
+function writeBoard(data, events, { failAfterEvents = false, pauseAfterEvents = null } = {}) {
   countLegacy('writeBoard');
   if (!Array.isArray(events) || events.length === 0) {
     throw new Error(
@@ -1251,6 +1264,15 @@ function writeBoard(data, events) {
   data.lastUpdated = new Date().toISOString();
   data._README = BOARD_README;
   for (const ev of events) appendEvent(EVENT_LOG_DIR, ev, { now: data.lastUpdated });
+  if (failAfterEvents) throw new Error('test seam: the board write failed after its events were appended');
+  if (pauseAfterEvents) {
+    // Test seam (unset in production): hold the process INSIDE the crash gap —
+    // events appended, board not yet written — so a test can SIGKILL it there.
+    // Announced synchronously on fd 2 (a piped stderr write would not flush
+    // while the thread is blocked), then a blocking sleep.
+    fs.writeSync(2, `[test-seam] paused after events, before the board write (${pauseAfterEvents.label})\n`);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(pauseAfterEvents.ms, 30000));
+  }
   // #686 — every server write is a ROSTERED save: Person nodes are
   // (re)materialized into @graph from this one authority on every write.
   saveDomain(BOARD_DATA_FILE, boardToDomain(data), { now: data.lastUpdated, roster: { seats: currentRoster(data) } });
@@ -9310,6 +9332,13 @@ async function handleUpdateCard(req, res, idOrShortId) {
     const updated = await withWriteLock(async () => {
       shifted = [];
       const data = readBoard();
+      // #1584 — a move whose id was FENCED (its tab gave up waiting for the
+      // outcome and settled it) can never apply. Checked first, before the card
+      // lookup and the compare-and-swap, so nothing at all is written.
+      if (patch.makeRoom === true && typeof patch.requestId === 'string'
+          && moveFencesOf(data).includes(patch.requestId)) {
+        return { moveFenced: true };
+      }
       const idx = findCardIndex(data, idOrShortId);
       if (idx < 0) return null;
       const card = data.cards[idx];
@@ -9487,6 +9516,8 @@ async function handleUpdateCard(req, res, idOrShortId) {
           }
         }
         shifted = makeRoomInColumn(data.cards, card, anchor);
+        // #1584 — the move's identity, on the stored card, so the fence can
+        // tell a committed move from one that may still arrive (handleMoveFence).
         if (typeof patch.requestId === 'string') card.lastMoveRequestId = patch.requestId;
       }
       card.updatedAt = new Date().toISOString();
@@ -9518,13 +9549,27 @@ async function handleUpdateCard(req, res, idOrShortId) {
         ...fanout.map((c) => cardEvent('update', c, by)),
         ...shifted.map((c) => cardEvent('update', c, by)),   // #1584 — each renumbered neighbour
         ...(nudge ? [convEvent(nudge)] : []),
-      ]);
+      ], {
+        // Test seam (unset in production): the crash gap — events appended,
+        // then the board write fails — for one named move id.
+        // Each names one move: its requestId, or `card:<id>` for any makeRoom
+        // move of that card (a browser test cannot know the id in advance).
+        failAfterEvents: testSeamNamesMove(process.env.SCRUM_TEST_FAIL_BOARD_WRITE_FOR_MOVE, patch, card),
+        pauseAfterEvents: testSeamNamesMove(process.env.SCRUM_TEST_PAUSE_AFTER_EVENTS_FOR_MOVE, patch, card)
+          ? { ms: Number(process.env.SCRUM_TEST_PAUSE_AFTER_EVENTS_MS) || 10000, label: patch.requestId } : null,
+      });
       return card;
     });
     if (!updated) return sendJSON(res, 404, { error: 'Card not found' });
     // #534 — the CAS refusal, read outside the lock because that is where the
     // response is written. 409 carries the CURRENT version: a refusal that says
     // "no" without saying "no, and here is where we are" forces a blind retry.
+    if (updated.moveFenced) {
+      return sendJSON(res, 409, {
+        error: 'This move was fenced: its tab settled it as unknown, so it can no longer be applied. Nothing was written.',
+        code: 'MOVE_FENCED',
+      });
+    }
     if (updated.neighbourMoved) {
       return sendJSON(res, 409, {
         error: 'The card this move was placed after (`after`) is no longer where you saw it — it moved, '
@@ -9638,6 +9683,64 @@ async function handleDeleteCard(req, res, idOrShortId) {
     sendJSON(res, 500, { error: 'Failed to delete card' });
   }
 }
+
+// ── /api/cards/:id/move-fence — settle a move whose outcome is unknown (#1584) ──
+//
+// A tab whose move reply was lost (no reply, unreadable 2xx, 5xx…) cannot tell
+// whether the move committed, and must not build a whole-board save until it
+// can no longer be overtaken by it. It never re-sends. It calls this instead.
+//
+// Under the write lock, against the BOARD (the event log is consulted for
+// nothing — it is appended before the board is written, so an event alone is a
+// write-ahead claim, not proof):
+//   · the stored card's lastMoveRequestId is this id ⇒ { outcome: 'committed' }
+//   · otherwise the id is added to the board's server-owned `moveFences` set
+//     IN THE SAME board write ⇒ { outcome: 'fenced' }. A makeRoom PATCH
+//     carrying a fenced id is refused (409 MOVE_FENCED) before anything is
+//     applied, so from this answer on the move can never land.
+// 'fenced' does NOT mean "never applied": the move may have committed and
+// then been superseded (a later move overwrote lastMoveRequestId). It means
+// only that it cannot apply from now on — which is what makes a save safe.
+//
+// ⚠️ FENCES ARE PERMANENT. A UUID carries no trustworthy age, and a pruned
+// fence can no longer guarantee the refusal. Only unknown outcomes create
+// them, so the set stays tiny — a limit to revisit if that ever changes.
+async function handleMoveFence(req, res, idOrShortId) {
+  try {
+    let body = {};
+    try { body = JSON.parse((await readBody(req)) || '{}'); } catch { return sendJSON(res, 400, { error: 'body must be JSON: { requestId }' }); }
+    const requestId = body && body.requestId;
+    if (typeof requestId !== 'string' || !/^[A-Za-z0-9-]{8,64}$/.test(requestId)) {
+      return sendJSON(res, 400, { error: 'requestId must be the move\'s 8–64 character id. Nothing was written.' });
+    }
+    const out = await withWriteLock(async () => {
+      const data = readBoard();
+      const idx = findCardIndex(data, idOrShortId);
+      const card = idx >= 0 ? data.cards[idx] : null;
+      if (card && card.lastMoveRequestId === requestId) return { outcome: 'committed', cardFound: true };
+      // Test seam (unset in production): widens the gap between this read and
+      // its write, so a test can fire the move INTO it and prove the lock keeps
+      // it out. A delay only — it changes no decision.
+      const pause = Number(process.env.SCRUM_MOVE_FENCE_PAUSE_MS);
+      if (Number.isFinite(pause) && pause > 0) await new Promise((r) => setTimeout(r, Math.min(pause, 5000)));
+      const fences = moveFencesOf(data);
+      if (!fences.includes(requestId)) {
+        data.moveFences = [...fences, requestId];
+        const target = card || { id: String(idOrShortId), shortId: null };
+        writeBoard(data, [{ op: 'update', actor: null, entity: { kind: 'card', id: target.id, shortId: target.shortId ?? null }, state: card || { id: target.id, moveFenced: requestId } }]);
+      }
+      return { outcome: 'fenced', cardFound: !!card };
+    });
+    sendJSON(res, 200, { requestId, ...out });
+  } catch (e) {
+    console.error('POST /api/cards/:id/move-fence:', e.message);
+    sendJSON(res, 500, { error: 'Failed to fence the move' });
+  }
+}
+// #1584 — test seams only: does an env value name this move? (unset ⇒ never)
+const testSeamNamesMove = (v, patch, card) => !!v && patch.makeRoom === true
+  && (v === patch.requestId || v === `card:${card.id}`);
+const moveFencesOf = (data) => (Array.isArray(data.moveFences) ? data.moveFences.filter((x) => typeof x === 'string') : []);
 
 // ── /api/cards/:id/claim — atomic first-write-wins claim (#348) ──
 // The coordination primitive: two agents racing to claim the same card must
@@ -10919,6 +11022,7 @@ const API_ROUTES = [
   { method: 'GET',    re: /^\/api\/cards$/,                fn: (req, res) => handleListCards(req, res) },
   { method: 'POST',   re: /^\/api\/cards$/,                fn: (req, res) => handleCreateCard(req, res) },
   { method: 'POST',   re: /^\/api\/refusals$/,             fn: (req, res) => handleReportRefusal(req, res) },   // #1167
+  { method: 'POST',   re: /^\/api\/cards\/([^\/]+)\/move-fence$/, fn: (req, res, m) => handleMoveFence(req, res, decodeURIComponent(m[1])) },   // #1584
   { method: 'POST',   re: /^\/api\/cards\/([^\/]+)\/claim$/, fn: (req, res, m) => handleClaimCard(req, res, m[1]) },
   { method: 'DELETE', re: /^\/api\/cards\/([^\/]+)\/claim$/, fn: (req, res, m) => handleReleaseCard(req, res, m[1]) },
   { method: 'GET',    re: /^\/api\/cards\/([^\/]+)$/,      fn: (req, res, m) => handleGetCard(req, res, m[1]) },
