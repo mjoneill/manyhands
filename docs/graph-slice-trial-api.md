@@ -290,9 +290,11 @@ collection**, so the event log is evidence of those writes, not a replay source 
 - **Rebuilding the board document by replaying the event log does NOT restore the outbox.**
   The rebuilt document has no `announcementOutbox`, so every pending obligation is gone and
   the publisher has nothing to publish. If a replay is ever the only option, record that the
-  outbox was lost. Before trusting the result, list the claims and releases whose
-  announcements were pending at the time of the failure (from the last document backup) and
-  reconcile them by hand. Never re-create obligations by guessing.
+  outbox was lost. The last document backup shows only what was pending **at the backup's
+  moment**, not at the failure. Between the backup and the failure is a gap: treat what was
+  pending in it as **unknown**. Inventory the changes made in that gap from the evidence
+  that exists, remembering that a write-ahead event is not proof that its change was
+  committed. Reconcile by hand, and never re-create obligations by guessing.
 - **Say which recovery you are doing** before you start: a document restore, an event-log
   replay, or an executor-store restore (the section above). The three keep different things.
 - **An executor-store restore does not touch the outbox.** A post the publisher wrote to the
