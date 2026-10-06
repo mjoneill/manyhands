@@ -7758,8 +7758,9 @@ const CARD_PROJECTIONS = {
   comments: {
     // The comparand echo-suppression was missing. #844 compared against
     // `card[field]` — undefined for every projection — so it could never tell
-    // an RMW echo from a real attempt. This is the SAME call GET makes.
-    value: (data, card) => commentMetadata(data.conversations, card.id),
+    // an RMW echo from a real attempt. This is the SAME call GET makes, over the
+    // SAME posts GET reads (the caller passes them: the graph's, with the unit on).
+    value: (posts, card) => commentMetadata(posts, card.id),
     destination: 'POST /api/conversations with attachedTo (MCP: conversation_post attachedTo:) — comments are not a card field',
   },
 };
@@ -9513,6 +9514,18 @@ async function handleUpdateCard(req, res, idOrShortId) {
     // retried write can never notify with a stale nudge from an earlier pass.
     let nudge = null;
     let shifted = [];   // #1584 — neighbours makeRoom renumbered; reset per attempt
+    // Phase 2 step 1 — a projection's comparand reads the posts GET reads. With the conversations unit on, a card's
+    // comments live in the graph and the document's copy may be empty, so a comparand over `data.conversations` would
+    // report an unchanged GET/modify/PATCH echo as a redirected field. Read OUTSIDE the write lock: posts are not
+    // document state, and a graph read inside the lock would hold every other writer behind its deadline. Unit off:
+    // null, and the comparand reads `data.conversations` inside the lock exactly as before.
+    let projectionPosts = null;
+    if (ANNOUNCE_EXECUTOR && Object.keys(patch).some((k) => k in CARD_PROJECTIONS)) {
+      try {
+        const d = readBoard(); const i = findCardIndex(d, idOrShortId);
+        if (i >= 0) projectionPosts = (await targetedPosts(d.conversations, { attachedTo: d.cards[i].id }))?.posts ?? null;
+      } catch (e) { if (postsUnavailable(res, e)) return; throw e; }
+    }
     const updated = await withWriteLock(async () => {
       shifted = [];
       const data = readBoard();
@@ -9644,7 +9657,7 @@ async function handleUpdateCard(req, res, idOrShortId) {
           // projection back is the ordinary GET/modify/PATCH cycle and must stay
           // SILENT; sending something DIFFERENT is a caller who meant to do a
           // real thing and needs to be told where that thing actually lives.
-          if (!isEchoOfStored(v, projection.value(data, card))) {
+          if (!isEchoOfStored(v, projection.value(projectionPosts ?? data.conversations, card))) {
             redirectedFields[k] = projection.destination;
           }
           continue;
