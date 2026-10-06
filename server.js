@@ -10662,16 +10662,20 @@ async function handleListConversations(req, res) {
     if (seqReq.error) return sendJSON(res, seqReq.error.status, seqReq.error.body);
     // #1574 T3–T5 — the unit on and a PLAIN `?limit=N` (optionally author or attachedTo, nothing else): the newest N
     // matching visible posts and the matching total, without reading every post. Any other shape takes the bulk path below.
-    if (ANNOUNCE_EXECUTOR && !seqReq.mode && typeof q.limit === 'string' && /^\d+$/.test(q.limit)
-      && Object.keys(q).every((k) => q[k] === undefined || ['limit', 'author', 'attachedTo', 'since', 'mentions_me'].includes(k))
+    // #1607 — a `since` or `before` read with NO limit is targeted too (the browser's poll): the window is every match
+    const hasLimit = typeof q.limit === 'string' && /^\d+$/.test(q.limit);
+    if (ANNOUNCE_EXECUTOR && !seqReq.mode && (hasLimit || typeof q.since === 'string' || typeof q.before === 'string')
+      && (q.limit === undefined || hasLimit)
+      && Object.keys(q).every((k) => q[k] === undefined || ['limit', 'author', 'attachedTo', 'since', 'before', 'mentions_me'].includes(k))
       && (q.attachedTo === undefined || q.attachedTo === 'null' || data.cards.some((c) => c.id === q.attachedTo))) {
-      const capped = Math.min(parseInt(q.limit, 10), MAX_CONV_LIST_LIMIT);
+      const capped = hasLimit ? Math.min(parseInt(q.limit, 10), MAX_CONV_LIST_LIMIT) : Infinity;   // no limit: every match, as the bulk path answers
       let t;
       try {
         t = await targetedPosts(data.conversations, {
           limit: capped, ...(q.author !== undefined ? { author: q.author } : {}),
           ...(q.attachedTo !== undefined ? { attachedTo: q.attachedTo === 'null' ? null : q.attachedTo } : {}),
           ...(typeof q.since === 'string' ? { since: q.since } : {}),
+          ...(typeof q.before === 'string' ? { before: q.before } : {}),
           ...(typeof q.mentions_me === 'string' ? { mentions: q.mentions_me.toLowerCase() } : {}),
         });
       } catch (e) { if (e && e.unavailable) return sendJSON(res, 503, { error: `the graph could not be read: ${e.unavailable}`, code: 'GRAPH_UNAVAILABLE' }); throw e; }
@@ -10958,16 +10962,18 @@ async function buildDocHeld(docPosts, key) {
 // afterwards misses posts committed late with old timestamps (and recent posts with low numbers). Values outside these
 // shapes cannot go into a query safely and take the bulk path.
 const SAFE_SINCE = /^[0-9TZ:.+-]{1,40}$/;
-async function targetedPosts(docPosts, { limit = Infinity, author, attachedTo, since, mentions, order = 'seq' } = {}) {
+async function targetedPosts(docPosts, { limit = Infinity, author, attachedTo, since, before, mentions, order = 'seq' } = {}) {
   if (author !== undefined && !SAFE_ID.test(author)) return null;
   if (attachedTo !== undefined && attachedTo !== null && !SAFE_ID.test(attachedTo)) return null;
   if (since !== undefined && !SAFE_SINCE.test(since)) return null;
+  if (before !== undefined && !SAFE_SINCE.test(before)) return null;   // #1607/#1608 — the runner's scan pages backward with before=
   if (mentions !== undefined && !SAFE_ID.test(mentions)) return null;
   docPosts = Array.isArray(docPosts) ? docPosts : [];
   const held = await docHeldIds(docPosts);
   const match = (p) => (author === undefined || p.author === author)
     && (attachedTo === undefined || (attachedTo === null ? p.attachedTo === null : p.attachedTo === attachedTo))
     && (since === undefined || (typeof p.createdAt === 'string' && p.createdAt >= since))
+    && (before === undefined || (typeof p.createdAt === 'string' && p.createdAt < before))
     && (mentions === undefined || (Array.isArray(p.mentions) && p.mentions.includes(mentions)));
   const docVisible = docPosts.filter((p) => p && !held.has(p.id) && match(p));
   let where = `?s <${G.type}> <${G.S}Comment> ; <${G.NS}postSeq> ?n .`;
@@ -10975,7 +10981,11 @@ async function targetedPosts(docPosts, { limit = Infinity, author, attachedTo, s
   if (attachedTo === null) where += ` FILTER NOT EXISTS { ?s <${G.S}about> ?ab }`;
   else if (attachedTo !== undefined) where += ` ?s <${G.S}about> <${G.ENTITY}${attachedTo}> .`;
   if (mentions !== undefined) where += ` ?s <${G.NS}mentionsName> ${JSON.stringify(mentions)} .`;
-  if (since !== undefined) where += ` ?s <${G.S}dateCreated> ?sinceC . FILTER(STR(?sinceC) >= ${JSON.stringify(since)})`;
+  if (since !== undefined || before !== undefined) {
+    where += ` ?s <${G.S}dateCreated> ?sinceC .`;
+    if (since !== undefined) where += ` FILTER(STR(?sinceC) >= ${JSON.stringify(since)})`;
+    if (before !== undefined) where += ` FILTER(STR(?sinceC) < ${JSON.stringify(before)})`;
+  }
   const fail = (q) => { throw Object.assign(new Error('graph unavailable'), { unavailable: q.reason || 'unreadable' }); };
   const bounded = Number.isFinite(limit);
   const margin = order === 'created' ? 10 : 0;   // equal createdAt across the window edge: a few extra candidates settle it
