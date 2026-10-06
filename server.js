@@ -2138,8 +2138,14 @@ async function handleSearch(req, res) {
         if (built.error) console.error('search reader ledger:', built.error);
         else {
           try {
-            await withWriteLock(async () => { const data = readBoard(); data.modelCalls = [...modelCallsOf(data), built.entity]; writeBoard(data, [modelCallEvent(built.entity, built.by)]); });
-            ledgerId = built.entity['@id'];
+            if (DELIVERIES_UNIT) {   // #1582 — the ledger row goes to the graph; this reading is its own request
+              const w = await graphCreateModelCall(crypto.randomUUID(), built, 0);
+              if (w.status >= 300) throw new Error(w.wire?.error ?? `HTTP ${w.status}`);
+              ledgerId = w.wire.id;
+            } else {
+              await withWriteLock(async () => { const data = readBoard(); data.modelCalls = [...modelCallsOf(data), built.entity]; writeBoard(data, [modelCallEvent(built.entity, built.by)]); });
+              ledgerId = built.entity['@id'];
+            }
           } catch (e) { console.error('search reader ledger:', e.message); }
         }
       }
@@ -5133,7 +5139,13 @@ async function handleAgentConstraints(req, res, seat) {
   const promptVersions = agentPromptsOf(data).filter((v) => v['scrum:ofPrompt'] === AGENT_PROMPT_ID(seat));
   const since = new Date(); since.setUTCHours(0, 0, 0, 0);
   const sinceIso = since.toISOString();
-  const modelCallsToday = modelCallsOf(data).filter((c) => c['scrum:agent'] === seat && typeof c['scrum:calledAt'] === 'string' && c['scrum:calledAt'] >= sinceIso).map(modelCallToWire);
+  let todayRows;
+  if (DELIVERIES_UNIT) {   // #1582 — the ledger is the graph's; unreadable is a 503, never "no calls today"
+    const g = U3.SEAT_RE.test(seat) ? await graphModelCalls({ agent: seat, since: sinceIso }, POSTS_READER) : { calls: [] };
+    if (g.unavailable) { const d = modelCallGraphDown(g.unavailable); return sendJSON(res, d.status, d.wire); }
+    todayRows = g.calls;
+  } else todayRows = modelCallsOf(data);
+  const modelCallsToday = todayRows.filter((c) => c['scrum:agent'] === seat && typeof c['scrum:calledAt'] === 'string' && c['scrum:calledAt'] >= sinceIso).map(modelCallToWire);
   const claims = (Array.isArray(data.cards) ? data.cards : []).filter((c) => c.claimedBy === seat).map((c) => ({ shortId: c.shortId, title: c.title }));
   // #1376 — the role the seat holds, read from the graph (never the agent
   // record), shown beside the prompt version so a reviewer sees what the
@@ -5410,7 +5422,7 @@ function modelCallEntityFrom(body) {
   // say how a model was made to answer is an anecdote, not a record. So:
   // the sampling knobs the adapter accepts ride the row as ONE object, and an
   // unknown top-level field is REFUSED by name instead of dropped.
-  const unknown = Object.keys(body).filter((k) => !MODEL_CALL_FIELDS.has(k));
+  const unknown = Object.keys(body).filter((k) => !MODEL_CALL_FIELDS.has(k) && !(DELIVERIES_UNIT && k === 'requestId'));   // #1582
   if (unknown.length) return { error: `unknown field${unknown.length === 1 ? '' : 's'} ${unknown.map((k) => JSON.stringify(k)).join(', ')} — a model-call row is a RECORD; a field it silently dropped would read as "not recorded" forever. Known: ${[...MODEL_CALL_FIELDS].join(', ')}` };
   let sampling = null;
   if (body.sampling != null) {
@@ -5850,11 +5862,60 @@ async function handleExport(req, res) {
   }
 }
 
+// ── #1582 — MODEL CALLS IN THE GRAPH (SCRUM_GRAPH_UNIT_DELIVERIES=1). One row per (agent, requestId), at a derived IRI, so a
+// retry is one row and one charge. The row is the entity as JSON plus `postedText` as its own triple, which the compiler
+// stores only if the produced post is not redacted when the update runs. Every read the graph cannot answer is a 503,
+// never "0 spent".
+const modelCallGraphDown = (why) => ({ status: 503, wire: { error: `the graph could not be read or written, so the model-call ledger is unknown: ${why}`, code: 'GRAPH_UNAVAILABLE' } });
+
+/** Model calls from the graph: {unavailable} | {calls: entity[]}. */
+async function graphModelCalls(filter = {}, reader = POSTS_BULK_READER) {
+  const q = await reader.query(U3.modelCallsQuery(filter));
+  if (!q.ok) return { unavailable: q.reason || 'unreadable' };
+  return { calls: q.rows.map(U3.modelCallFromRow).filter(Boolean) };
+}
+
+async function graphCreateModelCall(rid, built, declaredCost) {
+  if (rid == null) return { status: 400, wire: { error: 'requestId is required: 8-64 of [A-Za-z0-9-], one per call. A retry of the same call sends the same requestId, and is recorded once.', code: 'REQUEST_ID_REQUIRED' } };
+  if (typeof rid !== 'string' || !U3.REQUEST_ID_RE.test(rid)) return { status: 400, wire: { error: `requestId must be 8-64 of [A-Za-z0-9-] (got ${JSON.stringify(rid)})`, code: 'REQUEST_ID_INVALID' } };
+  const { entity, by } = built;
+  const agent = entity['scrum:agent'];
+  if (!U3.SEAT_RE.test(agent)) return { status: 400, wire: { error: `agent must be a seat key, [a-z0-9][a-z0-9_-]* (got ${JSON.stringify(agent)})` } };
+  const iri = U3.modelCallIriOf(agent, rid);
+  const readOne = async () => { const r = await graphModelCalls({ iri }, POSTS_READER); return r.unavailable ? r : { call: r.calls[0] ?? null }; };
+  const cur = await readOne();
+  if (cur.unavailable) return modelCallGraphDown(cur.unavailable);
+  if (cur.call) return { status: 200, wire: modelCallToWire(cur.call) };   // this call is already recorded: one row, one charge
+  const priced = priceModelCall(readBoard(), entity, declaredCost);
+  const row = { ...entity, '@id': iri, 'scrum:cost': priced.cost, 'scrum:costMeasured': priced.measured, 'scrum:costCategories': priced.categories ?? [] };
+  const text = row['scrum:postedText'];
+  const pp = row['scrum:producedPost'];
+  const ppIri = typeof pp === 'string' && U3.POST_ID_RE.test(pp) ? `${G.ENTITY}${pp}` : null;
+  // The text is stored only where the guard can see its post: a producedPost the graph cannot link stores no text.
+  const storeText = typeof text === 'string' && (pp == null || ppIri != null) ? text : null;
+  const r = await ANNOUNCE_EXECUTOR.update({
+    kind: 'modelcall.create', opId: U3.modelCallOp(agent, rid), actor: graphActor(by),
+    call: { iri, agent, model: row['scrum:model'] ?? null, calledAt: row['scrum:calledAt'], cost: String(row['scrum:cost']),
+      producedPost: ppIri, postedText: storeText, requestId: rid, entityJson: JSON.stringify({ ...row, 'scrum:postedText': null }) },
+  });
+  if (r.outcome === 'APPLIED' || r.outcome === 'PRECONDITION_FAILED' || r.reason === 'intent-collision') {
+    // Read back what the graph HOLDS (the guard may have withheld the text). A refused create means a concurrent copy of
+    // this same call landed first: its row is this call's row.
+    const again = await readOne();
+    if (again.call) return { status: r.outcome === 'APPLIED' ? 201 : 200, wire: modelCallToWire(again.call) };
+    if (r.outcome === 'APPLIED') return { status: 201, wire: modelCallToWire({ ...row, 'scrum:postedText': null }) };
+    return modelCallGraphDown(again.unavailable || `the create was refused (${r.outcome}) and the call cannot be read back`);
+  }
+  if (r.outcome === 'REJECTED') return { status: 500, wire: { error: `the graph refused the model call: ${r.reason ?? 'rejected'}` } };
+  return modelCallGraphDown(`${String(r.outcome).toLowerCase()}: ${r.reason ?? ''}`.trim() + '; resend with the SAME requestId');
+}
+
 async function handleCreateModelCall(req, res) {
   try {
     const body = JSON.parse(await readBody(req));
     const built = modelCallEntityFrom(body);
     if (built.error) return sendJSON(res, 400, { error: built.error });
+    if (DELIVERIES_UNIT) { const r = await graphCreateModelCall(body.requestId, built, body.cost); return sendJSON(res, r.status, r.wire); }
     const { entity, by } = built;
     const result = await withWriteLock(async () => {
       const data = readBoard();
@@ -5893,8 +5954,14 @@ async function handleInsights(req, res) {
     const since = new Date(now - windowHours * 3600_000).toISOString();
 
     const data = readBoard();
+    let ledger;
+    if (DELIVERIES_UNIT) {   // #1582 — the ledger is the graph's; unreadable is a 503, never an empty ledger
+      const g = await graphModelCalls();
+      if (g.unavailable) { const d = modelCallGraphDown(g.unavailable); return sendJSON(res, d.status, d.wire); }
+      ledger = g.calls;
+    } else ledger = modelCallsOf(data);
     // The ledger, in the module's vocabulary. `at` is the wire name for calledAt.
-    const calls = modelCallsOf(data).map(modelCallToWire)
+    const calls = ledger.map(modelCallToWire)
       .map((c) => ({ ...c, calledAt: c.at }))
       .filter((c) => typeof c.calledAt === 'string');
     const inWindow = calls.filter((c) => c.calledAt >= since);
@@ -5975,9 +6042,21 @@ async function handleInsights(req, res) {
   }
 }
 
-function handleListModelCalls(req, res) {
+async function handleListModelCalls(req, res) {
+  try { return await handleListModelCallsInner(req, res); }
+  catch (e) { console.error('GET /api/model-calls:', e.message); if (!res.headersSent) sendJSON(res, 500, { error: e.message }); }
+}
+async function handleListModelCallsInner(req, res) {
   const q = parseQuery(req.url);
-  let out = modelCallsOf(readBoard()).map(modelCallToWire).sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+  let rows;
+  if (DELIVERIES_UNIT) {
+    if (q.agent && !U3.SEAT_RE.test(q.agent)) return sendJSON(res, 200, { calls: [], count: 0, spent: 0 });
+    if (q.since && !U3.SINCE_RE.test(q.since)) return sendJSON(res, 400, { error: `since must be an ISO-8601 timestamp (got ${JSON.stringify(q.since)})` });
+    const g = await graphModelCalls({ agent: q.agent, since: q.since });
+    if (g.unavailable) { const d = modelCallGraphDown(g.unavailable); return sendJSON(res, d.status, d.wire); }
+    rows = g.calls;
+  } else rows = modelCallsOf(readBoard());
+  let out = rows.map(modelCallToWire).sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
   if (q.agent) out = out.filter((c) => c.agent === q.agent);
   if (q.since) out = out.filter((c) => typeof c.at === 'string' && c.at >= q.since);
   const spent = out.reduce((n, c) => n + (Number(c.cost) || 0), 0);
@@ -6349,10 +6428,13 @@ async function graphListDeliveries(q) {
 }
 
 async function handleListDeliveries(req, res) {
+  try { return await handleListDeliveriesInner(req, res); }
+  catch (e) { console.error('GET /api/deliveries:', e.message); if (!res.headersSent) sendJSON(res, 500, { error: e.message }); }
+}
+async function handleListDeliveriesInner(req, res) {
   const q = parseQuery(req.url);
   if (DELIVERIES_UNIT) {
-    try { const r = await graphListDeliveries(q); return sendJSON(res, r.status, r.wire); }
-    catch (e) { console.error('GET /api/deliveries:', e.message); return sendJSON(res, 500, { error: e.message }); }
+    const r = await graphListDeliveries(q); return sendJSON(res, r.status, r.wire);
   }
   let out = deliveriesOf(readBoard());
   if (q.to) out = out.filter((d) => d['scrum:deliveredTo'] === q.to);

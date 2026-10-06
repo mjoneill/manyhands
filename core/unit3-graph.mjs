@@ -133,3 +133,25 @@ export function groupByDelivery(rows) {
   }
   return [...by.entries()].map(([d, g]) => deliveryFromRows(d, g.nodeRows, g.stepRows)).filter(Boolean);
 }
+
+// ---------------------------------------------------------------- model calls
+
+/** A ledger timestamp bound REST may put inside a SPARQL string (an ISO-8601 instant or a prefix of one). */
+export const SINCE_RE = /^[0-9][0-9A-Za-z:.+-]{0,39}$/;
+
+/**
+ * Model-call rows: the entity as JSON, plus `postedText` from its own triple (kept apart so a redaction can remove it, and
+ * a call recorded after one never stores it). One row per call. `iri` reads one call; `agent` and `since` filter, and are
+ * only ever passed already checked against SEAT_RE and SINCE_RE.
+ */
+export function modelCallsQuery({ iri, agent, since } = {}) {
+  return `SELECT ?c ?j ?t WHERE { ${iri ? `VALUES ?c { <${iri}> } ` : ''}?c <${RDF_TYPE}> ${t('ModelCall')} ; ${t('entityJson')} ?j ; ${t('calledAt')} ?at ; ${t('agent')} ?ag . `
+    + `OPTIONAL { ?c ${t('postedText')} ?t }${agent ? ` FILTER(?ag = ${lit(agent)})` : ''}${since ? ` FILTER(?at >= ${lit(since)})` : ''} }`;
+}
+
+/** One row → the document-shaped entity the existing wire builder reads (modelCallToWire). Null for a row that does not parse. */
+export function modelCallFromRow(r) {
+  let e; try { e = JSON.parse(val(r.j)); } catch { return null; }
+  if (!e || typeof e !== 'object') return null;
+  return { ...e, '@id': val(r.c), 'scrum:postedText': r.t ? val(r.t) : null };
+}
