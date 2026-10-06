@@ -5422,7 +5422,9 @@ function modelCallEntityFrom(body) {
   // say how a model was made to answer is an anecdote, not a record. So:
   // the sampling knobs the adapter accepts ride the row as ONE object, and an
   // unknown top-level field is REFUSED by name instead of dropped.
-  const unknown = Object.keys(body).filter((k) => !MODEL_CALL_FIELDS.has(k) && !(DELIVERIES_UNIT && k === 'requestId'));   // #1582
+  // #1582 — `requestId` names the REQUEST, not a field of the row: with the deliveries unit on it is the row's identity,
+  // and without it it is accepted and unused, so a caller (the runner) can send it before the unit is switched on.
+  const unknown = Object.keys(body).filter((k) => !MODEL_CALL_FIELDS.has(k) && k !== 'requestId');
   if (unknown.length) return { error: `unknown field${unknown.length === 1 ? '' : 's'} ${unknown.map((k) => JSON.stringify(k)).join(', ')} — a model-call row is a RECORD; a field it silently dropped would read as "not recorded" forever. Known: ${[...MODEL_CALL_FIELDS].join(', ')}` };
   let sampling = null;
   if (body.sampling != null) {
@@ -9002,7 +9004,8 @@ function handleGetBoard(req, res) {
   try {
     const data = readBoard();
     // #1582 — with the deliveries unit on, the document's copies are not the record: they are not served as if they were.
-    if (DELIVERIES_UNIT) { delete data.deliveries; delete data.modelCalls; }
+    // A COPY without the two keys: a GET's board is the shared, deep-frozen read, and deleting a key it holds throws.
+    if (DELIVERIES_UNIT) { const { deliveries: _d, modelCalls: _m, ...rest } = data; return sendJSON(res, 200, rest); }
     sendJSON(res, 200, data);
   } catch (e) {
     console.error('GET /api/board:', e.message);

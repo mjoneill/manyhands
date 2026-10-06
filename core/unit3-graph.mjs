@@ -14,6 +14,7 @@
  *     text can make it a non-IRI (#1622).
  */
 import { createHash } from 'node:crypto';
+import { LOGBORN_TERMS as TM } from './graph-compiler.mjs';
 
 // Chosen once, NEVER changed: a different namespace derives a different id for the same pair.
 export const DELIVERY_NAMESPACE = 'd301e56c-6e8a-45e0-a348-a63ab5295c8e';
@@ -24,7 +25,6 @@ export const MODEL_CALL_PREFIX = 'https://scrumboard.local/model-call/';
 export const ENTITY_PREFIX = 'https://scrumboard.local/entity/';
 const RS = 'https://scrumboard.local/ns#';
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
-const VER = 'urn:ex:ver';
 
 /** An RFC 4122 version-5 uuid of `name` under `namespace` (same construction as announcePostId). */
 export function uuidV5(namespace, name) {
@@ -87,7 +87,9 @@ export const modelCallExistsQuery = (iri) => `SELECT ?t WHERE { <${iri}> <${RDF_
 // ---------------------------------------------------------------- rows → a document-shaped entity
 
 const val = (b) => b?.value;
-const short = (p) => (p.startsWith(RS) ? p.slice(RS.length) : p);
+// A step's fields keyed by the predicate the COMPILER writes (a step's note is schema.org's `text`, not this namespace's):
+// read through the same table, so the writer and this reader cannot drift apart.
+const STEP_FIELD = new Map(['stepIndex', 'state', 'at', 'source', 'creator', 'attempt', 'reason', 'text', 'traceId', 'ofModelCall'].map((k) => [TM[k], k]));
 
 /**
  * Rebuild the document's delivery shape from graph rows, so deliveryToWire / deliveryState / the transition rules run
@@ -100,17 +102,18 @@ export function deliveryFromRows(iri, nodeRows, stepRows) {
   let ver = null;
   for (const r of nodeRows) {
     const p = val(r.p), o = val(r.o);
-    if (p === VER) ver = Number(o);
-    else if (p === `${RS}deliveredTo`) e['scrum:deliveredTo'] = o;
-    else if (p === `${RS}ofConversation`) e['scrum:ofConversation'] = o.startsWith(ENTITY_PREFIX) ? o.slice(ENTITY_PREFIX.length) : o;
-    else if (p === `${RS}offeredAt`) e['scrum:offeredAt'] = o;
-    else if (p === `${RS}source`) e['scrum:source'] = o;
+    if (p === TM.ver) ver = Number(o);
+    else if (p === TM.deliveredTo) e['scrum:deliveredTo'] = o;
+    else if (p === TM.ofConversation) e['scrum:ofConversation'] = o.startsWith(ENTITY_PREFIX) ? o.slice(ENTITY_PREFIX.length) : o;
+    else if (p === TM.offeredAt) e['scrum:offeredAt'] = o;
+    else if (p === TM.source) e['scrum:source'] = o;
   }
   if (ver == null || !e['scrum:deliveredTo']) return null;   // not a delivery node
   const steps = new Map();
   for (const r of stepRows) {
     const s = val(r.s); if (!steps.has(s)) steps.set(s, {});
-    steps.get(s)[short(val(r.p))] = val(r.o);
+    const k = STEP_FIELD.get(val(r.p));
+    if (k) steps.get(s)[k] = val(r.o);
   }
   e['scrum:hasEvent'] = [...steps.values()]
     .filter((s) => s.stepIndex != null && s.state != null)
