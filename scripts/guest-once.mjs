@@ -128,7 +128,16 @@ const getPage = async (p) => {
   const total = r.headers.get('x-total-count');   // #1010's count, taken BEFORE the limit
   return { rows, total: total == null ? null : Number(total) };
 };
-const window_ = await fetchMentionWindow(getPage, state);
+// #1608 — A SEAT THAT CANNOT BE WOKEN BY A MENTION DOES NOT SCAN FOR MENTIONS. In channel mode effectiveWakeOn drops
+// `mention` (#1346): every post addressed to the seat arrives as a DELIVERY, a durable per-post record whose outcome
+// (published / declined / failed, claimable again) is the obligation ledger. The scan's rows were read and discarded:
+// measured 2026-10-06, one channel-mode seat's cursor (advanced only by mention wakes it can never take) had frozen at
+// 09-13 and it read 25 pages × 200 posts every minute, 5,996 incomplete scans in its log. `--once-id` still scans.
+const scansMentions = effectiveWakeOn(agent).includes('mention') || Boolean(opt('--once-id'));
+const window_ = scansMentions
+  ? await fetchMentionWindow(getPage, state)
+  : { messages: [], complete: true, pages: 0, truncated: null };
+if (!scansMentions) console.log(`[#1608] ${agent.seatKey}: no mention scan (wakeOn has no mention in ${agent.deliveryMode ?? 'wake'} mode; deliveries carry the obligations)`);
 const messages = window_.messages;
 if (!window_.complete) {
   // ⛔ Reported, never absorbed: the seat cannot see this and nobody else is looking.
@@ -189,7 +198,7 @@ catch (e) { console.error(`[#1411] ${agent.seatKey}: could not read /api/config 
 // (which starts at this seat's last answer and so forgets the pair's earlier
 // posts). Same pager, a fixed one-hour cursor.
 let history = messages;
-if (residents) {
+if (residents && scansMentions) {   // #1608 — the pair cap only governs mention wakes
   try { history = (await fetchMentionWindow(getPage, { lastAnsweredAt: new Date(Date.now() - 3600_000).toISOString() })).messages; }
   catch (e) { console.error(`[#1411] ${agent.seatKey}: could not read the last hour for the pair cap (${e.message}) — counting over the scan window`); }
 }
