@@ -13,8 +13,8 @@
  *       content never see each other's cache.
  *   V3  oldestEvent EQUIVALENCE (and retentionGap, V6) on logs where seq grows with the segment name and within a segment: ordinary; the first segment empty; the first lines torn or garbage; a 3-byte
  *       character straddling the 64 KB read boundary; a first line longer than 64 KB; a last line with no newline; no segments; an absent directory.
- *   V3b NOT A CONTRACT, REPORTED (todo): a log where a LATER segment holds a lower seq than the first segment's first line. The old function returned the minimum seq; the new one returns the first
- *       valid line. Whether the invariant "seq grows with the segment name" always holds is the builder's to state; this row records the difference if there is one.
+ *   V3b THE DOCUMENTED ASSUMPTION, PINNED (ruled by the builder 12:50Z, was a todo): on an out-of-order log (a later-named segment holding a lower seq, or a lower seq after the first valid line within a
+ *       segment) the old function returned the minimum seq and the new one returns the first valid line of the earliest-named segment. That is the documented behaviour; the row pins it so it cannot change silently.
  *   V4  oldestEvent's cache is invalidated: the first segment is pruned; an EARLIER segment appears (a backfill); the only segment goes from empty to one line; the first segment is rewritten (the
  *       oldest event redacted in place) at a different size, and at the same size with a different mtime. Each answer equals the old function's.
  *   V5  POSITIVE CONTROLS, so a skip that never fires cannot pass: on a 16-segment, ~48 MB log, a second `readEvents` at sinceSeq = the highest seq is more than 5x faster than the first full read
@@ -209,9 +209,16 @@ test('V3 oldestEvent EQUIVALENCE: a 3-byte character straddling the 64 KB read b
   eq(NEW.oldestEvent(nonl), OLD.readEvents(nonl, { limit: 1 })[0], 'a single line with no newline');
 });
 
-test('V3b NOT A CONTRACT, REPORTED: a later segment holding a LOWER seq than the first segment\'s first line (old returned the minimum seq)', { todo: 'the invariant "seq grows with the segment name" is the builder to state; this records a difference if there is one' }, () => {
-  const d = shape('later segment holds lower seqs');
-  eq(NEW.oldestEvent(d), OLD.readEvents(d, { limit: 1 })[0], 'oldest by minimum seq');
+test('V3b THE DOCUMENTED ASSUMPTION, PINNED: oldestEvent returns the first valid line of the earliest-named segment, NOT the minimum seq, when the log is out of order (a regressed seq or a backward clock step: corruption by #1114)', () => {
+  assert.equal(typeof NEW.oldestEvent, 'function', 'the new module exports oldestEvent');
+  // segments 2026-09-01: 11..14, 2026-09-02: 5..8, 2026-09-03: 20..22. The old function answered the global minimum (5); the documented behaviour answers the earliest segment's first event (11).
+  const a = shape('later segment holds lower seqs');
+  assert.equal(OLD.readEvents(a, { limit: 1 })[0].seq, 5, 'CONTROL: the old function answered the global minimum');
+  assert.equal(NEW.oldestEvent(a).seq, 11, 'the new function answers the earliest segment\'s first valid event');
+  // the same inside ONE segment: a first valid line of 9 then a 3
+  const b = mkdir(); seg(b, '2026-09-01', [ev(9, '2026-09-01'), ev(3, '2026-09-01'), ev(10, '2026-09-01')]);
+  assert.equal(OLD.readEvents(b, { limit: 1 })[0].seq, 3, 'CONTROL: the old function answered 3');
+  assert.equal(NEW.oldestEvent(b).seq, 9, 'the new function answers the first valid line, 9');
 });
 
 test('V4 oldestEvent\'s cache is invalidated: the first segment is pruned, an EARLIER segment appears, the only segment goes from empty to one line, and the oldest event is rewritten at a different size and at the same size', () => {
