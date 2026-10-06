@@ -6839,6 +6839,9 @@ function handleHealth(req, res) {
   sendJSON(res, 200, {
     ok: true,
     pid: process.pid,
+    // #1574 attempt 3 — the read gate, visible: running/lost/waiting from the gate itself. null when the conversations
+    // unit is off (there is no gate), never a fabricated zero.
+    readGate: READ_GATE ? READ_GATE.stats() : null,
     uptimeMs: Math.round(process.uptime() * 1000),
     now: new Date().toISOString(),
     // #1343 — which auth mode is LIVE is a fact read here, not a belief about
