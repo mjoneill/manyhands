@@ -17,7 +17,7 @@
  *   Z2 STRICTNESS   One table of cases, evaluated in ONE pass, with the POSITIVE cases asserted first (so on a build without the form the row fails at a positive control, not by passing every "error" case for
  *                   the wrong reason). Positives: `<` true, `>` true, instants across offsets (+01:00 vs Z, where a lexical compare gives the opposite answer), equal instants (neither `<` nor `>`). Errors: zero
  *                   rows, two rows, an unbound value, two columns, a dateTime against a string, two strings, two strings SPELLED like dateTimes, an xsd:string literal spelled like one, an integer pair, `<=`, `=`,
- *                   an invalid dateTime, IMPOSSIBLE CALENDAR DATES (Feb 30, Feb 29 in a common year, April 31; plus a real leap day as a positive so the check is not just over-rejecting), an offset out of range, no
+ *                   an invalid dateTime (each field's range ON ITS OWN: month 13 with a valid day, hour 25, minute 61, second 61: added after a kill check showed the range check could be dropped unnoticed), IMPOSSIBLE CALENDAR DATES (Feb 30, Feb 29 in a common year, April 31; plus a real leap day as a positive so the check is not just over-rejecting), an offset out of range, no
  *                   timezone, more than three fractional digits. The datatype is the contract: the replica's `queryGraph` flattens a term to its value (graph-replica.mjs:2569), so a build has to read the raw store term.
  *                   Every error case yields status `error` with a non-empty `error`, and does NOT stop the pass: a plain ASK check beside them still HOLDS.
  *   Z3 PASS FRESHNESS  Two forced passes in a row: each is `servedFrom: fresh`, `passes` rises by exactly one each time and `evaluatedAt` moves forward. (Guard: a containment that serves a forced pass from a cache
@@ -109,6 +109,10 @@ const CASES = [
   ['an impossible calendar date, Feb 30 (a Date would roll it to Mar 2)', sel('<', dt('2026-02-30T00:00:00Z'), dt('2026-03-05T00:00:00Z'), true), 'error'],
   ['Feb 29 in a year that is not a leap year', sel('<', dt('2026-02-29T12:00:00Z'), dt('2026-03-05T00:00:00Z'), true), 'error'],
   ['April 31', sel('<', dt('2026-04-31T00:00:00Z'), dt('2026-05-05T00:00:00Z'), true), 'error'],
+  ['month 13 with a perfectly valid day (the month range, on its own)', sel('<', dt('2026-13-01T00:00:00Z'), dt('2027-02-01T00:00:00Z'), true), 'error'],
+  ['hour 25 (the hour range, on its own)', sel('<', dt('2026-01-01T25:00:00Z'), dt('2026-01-03T00:00:00Z'), true), 'error'],
+  ['minute 61 (the minute range, on its own)', sel('<', dt('2026-01-01T00:61:00Z'), dt('2026-01-03T00:00:00Z'), true), 'error'],
+  ['second 61 (the second range, on its own)', sel('<', dt('2026-01-01T00:00:61Z'), dt('2026-01-03T00:00:00Z'), true), 'error'],
   ['an offset out of range (+25:00)', sel('<', dt('2026-01-01T00:00:00+25:00'), dt('2026-01-02T00:00:00Z'), true), 'error'],
   ['an integer pair', sel('<', `"1"^^<${XSD}integer>`, `"2"^^<${XSD}integer>`, true), 'error'],
   ['operator <= is not supported', sel('<=', dt('2026-01-01T00:00:00Z'), dt('2026-01-02T00:00:00Z'), true), 'error'],
