@@ -30,7 +30,7 @@
  * event recording what/when/who — never the content. See `redactEvent`.
  */
 
-import { readFileSync, writeFileSync, appendFileSync, readdirSync, existsSync, mkdirSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, readdirSync, existsSync, mkdirSync, statSync, openSync, readSync, closeSync } from 'node:fs';
 import { join } from 'node:path';
 
 /** Closed vocabulary. An unknown op is a rejected write, not a logged curiosity. */
@@ -124,6 +124,57 @@ const segmentFor = (iso) => `events-${iso.slice(0, 10)}.jsonl`;
 
 const segments = (dir) =>
   (existsSync(dir) ? readdirSync(dir) : []).filter((f) => SEGMENT_RE.test(f)).sort();
+
+/**
+ * The log's OLDEST surviving event: the first valid line of the first segment that has one. The log is append-only and
+ * day-segmented, so that is the minimum seq — the same answer as `readEvents(dir, { limit: 1 })[0]`, which parses EVERY
+ * segment and sorts every event ever recorded to keep one (measured live 2026-10-06: 37-40% of REST's busy time, on the
+ * cursor service's inbound path). This reads a 64 KB chunk at a time and stops at the first valid event; a torn or
+ * unparseable line is skipped exactly as parseSegment skips it. Cached per directory against the segment list and the
+ * first segment's size and mtime, so a new segment, a pruned one, or an append to a still-only segment re-reads it.
+ * Returns null for an empty or absent log.
+ */
+const _oldestCache = new Map();   // dir -> { key, ev }
+export function oldestEvent(dir) {
+  const segs = segments(dir);
+  if (!segs.length) return null;
+  let st0;
+  try { st0 = statSync(join(dir, segs[0])); } catch { return null; }
+  const key = `${segs.join(',')}|${st0.size}|${st0.mtimeMs}`;
+  const hit = _oldestCache.get(dir);
+  if (hit && hit.key === key) return hit.ev;
+  let found = null;
+  for (const f of segs) {
+    const fd = openSync(join(dir, f), 'r');
+    try {
+      // Split on the newline BYTE before decoding: a 64 KB chunk can end inside a multi-byte UTF-8 character, and a
+      // per-chunk decode would corrupt that line into a "torn" one and silently skip the true oldest event.
+      const buf = Buffer.alloc(65536);
+      let pending = Buffer.alloc(0);
+      let pos = 0;
+      const tryLine = (b) => {
+        const line = b.toString('utf8');
+        if (!line.trim()) return null;
+        try { const ev = JSON.parse(line); return Number.isInteger(ev?.seq) ? ev : null; } catch { return null; }   // torn: skip, as parseSegment does
+      };
+      for (;;) {
+        const n = readSync(fd, buf, 0, buf.length, pos);
+        pos += n;
+        pending = n ? Buffer.concat([pending, buf.subarray(0, n)]) : pending;
+        let nl;
+        while (!found && (nl = pending.indexOf(0x0a)) >= 0) {
+          found = tryLine(pending.subarray(0, nl));
+          pending = pending.subarray(nl + 1);
+        }
+        if (found) break;
+        if (n === 0) { if (pending.length) found = tryLine(pending); break; }   // the last line has no newline
+      }
+    } finally { closeSync(fd); }
+    if (found) break;
+  }
+  _oldestCache.set(dir, { key, ev: found });
+  return found;
+}
 
 /**
  * Parse one segment, skipping unparseable lines. A torn tail (a crash mid-write)
@@ -753,6 +804,13 @@ export function advanceActivityCursor(prev, fresh) {
 }
 
 /** Read events in seq order. `sinceSeq` is exclusive; `limit` bounds the count. */
+// Per-segment max seq, keyed to the size and mtime it was measured at. A segment whose max seq is <= sinceSeq contributes
+// nothing after readEvents' filter, so skipping it returns exactly what parsing it would. Old day-segments never change,
+// so after one pass a "since my cursor" read parses only the segments that can hold newer events, instead of every
+// segment of the log on every call (measured live 2026-10-06: ~758 MB across 65 segments, on the cursor service's
+// inbound path). A segment appended between the stat and the parse is cached under the older size and simply re-read
+// next time: the cache can only make a read do MORE work, never return less.
+const _segMax = new Map();   // path -> { size, mtimeMs, maxSeq }
 export function readEvents(dir, { sinceSeq = 0, limit = Infinity, sinceDate = null } = {}) {
   const all = [];
   // #679 (additive): segments are day-named (YYYY-MM-DD.jsonl), so a
@@ -768,7 +826,14 @@ export function readEvents(dir, { sinceSeq = 0, limit = Infinity, sinceDate = nu
   for (const f of segments(dir)) {
     const day = f.match(/(\d{4}-\d{2}-\d{2})/)?.[1];
     if (cutoff && day && day < cutoff) continue;
-    all.push(...parseSegment(dir, f));
+    const path = join(dir, f);
+    let st = null;
+    try { st = statSync(path); } catch { /* vanished: parseSegment below decides */ }
+    const known = st && _segMax.get(path);
+    if (known && known.size === st.size && known.mtimeMs === st.mtimeMs && known.maxSeq <= sinceSeq) continue;
+    const evs = parseSegment(dir, f);
+    if (st) _segMax.set(path, { size: st.size, mtimeMs: st.mtimeMs, maxSeq: evs.reduce((m, e) => (e.seq > m ? e.seq : m), -Infinity) });
+    all.push(...evs);
   }
   all.sort((a, b) => a.seq - b.seq);
   const from = all.filter((e) => e.seq > sinceSeq);

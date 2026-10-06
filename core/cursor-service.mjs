@@ -68,7 +68,7 @@
  * with two live sessions has the same hazard and gets the same protection.
  */
 
-import { readEvents, nextSeq } from './event-log.mjs';
+import { readEvents, nextSeq, oldestEvent } from './event-log.mjs';
 import { mergeSources, epochChangedError, storeIdentityMismatch, incarnationTag, EPOCH_CHANGED, LEGACY_EPOCH } from './changes-log-query.mjs';
 import {
   loadCursors, saveCursors, registerSeat, recordServed, recordInbound,
@@ -195,7 +195,7 @@ export function envelopeFor(eventDir, key, { state = null, head = null, graph = 
  * that shape here and this is where it gets reused.
  */
 export function retentionGap(eventDir, acked) {
-  const first = readEvents(eventDir, { limit: 1 })[0];
+  const first = oldestEvent(eventDir);   // the same answer, without parsing every segment (see event-log.mjs)
   if (!first || first.seq <= acked + 1) return null;
   return { oldestSeq: first.seq, oldestAt: first.recorded_at ?? null, missingFrom: acked + 1, missingTo: first.seq - 1 };
 }
