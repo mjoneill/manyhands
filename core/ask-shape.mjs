@@ -91,6 +91,17 @@ export function runControls(detect = unbackedLookupClaims) {
 const hopsOf = (row) => (Array.isArray(row['scrum:toolHops']) ? row['scrum:toolHops'] : []);
 const storedFlags = (row) => (Array.isArray(row['scrum:unbackedLookupClaims']) ? row['scrum:unbackedLookupClaims'] : []);
 
+/**
+ * #1582 — the same rows from GET /api/model-calls (its `calls`), for a board whose ledger lives in the graph: the wire
+ * names mapped back to the row fields this report reads.
+ */
+export function modelCallRowsFromWire(calls) {
+  return (Array.isArray(calls) ? calls : []).map((w) => ({
+    'scrum:agent': w.agent, 'scrum:wakeKind': w.wake?.kind ?? null, 'scrum:toolHops': w.toolHops ?? [],
+    'scrum:postedText': w.postedText ?? null, 'scrum:unbackedLookupClaims': w.unbackedLookupClaims ?? [],
+  }));
+}
+
 /** The model-call rows of a JSON-LD board document. */
 export function modelCallRows(doc) {
   const graph = doc && Array.isArray(doc['@graph']) ? doc['@graph'] : [];
@@ -106,9 +117,9 @@ export function modelCallRows(doc) {
  * disagrees with `stored`, the RECORD is wrong — a flag computed once and
  * never again is a claim about the past that nothing re-checks.
  */
-export function askShapeReport(doc, { detect = unbackedLookupClaims } = {}) {
+export function askShapeReport(doc, { detect = unbackedLookupClaims, rows: given = null } = {}) {
   const controls = runControls(detect);
-  const rows = modelCallRows(doc);
+  const rows = given ?? modelCallRows(doc);
   const groups = new Map();
   const disagreements = [];
   const flagged = [];

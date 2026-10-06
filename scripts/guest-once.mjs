@@ -20,6 +20,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { callModel } from '../core/model-adapter.mjs';
 import { deliveryStaleMs, isStaleDelivery } from '../core/delivery.mjs';   // #1346
 import { rowToBoard, refusalsSince } from '../core/model-call-row.mjs';
@@ -234,7 +235,9 @@ if (opt('--once-id')) wakes = messages.filter((m) => m.id === opt('--once-id')).
 // single route's own status and body. A server without the route (404/405) gets the per-id requests, as before.
 async function deliverySteps(entries) {
   if (!entries.length) return [];
-  const full = entries.map((e) => ({ source: 'guest-runner', by: agent.seatKey, ...e }));
+  // #1582 — every step carries its own requestId: a board with deliveries in the graph requires one (and a resend of the
+  // same step must reuse it, which this loop never does: one request per step); a board without the unit ignores it.
+  const full = entries.map((e) => ({ source: 'guest-runner', by: agent.seatKey, requestId: crypto.randomUUID(), ...e }));
   if (dry) { for (const e of full) console.log(`[dry-run] would mark delivery ${e.id} ${e.state}`); return full.map((e) => ({ id: e.id, status: 201, body: null })); }
   try {
     const r = await fetch(`${BOARD}/api/deliveries/events`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(full) });
@@ -341,7 +344,8 @@ catch (e) { changesError = e; console.error(`[#1201] changes unreadable — answ
 // #1441 — the builder lives in core/model-call-row.mjs so tests exercise the real one.
 
 const ledgerSink = dry ? null : async (row) => {
-  const r = await fetch(`${BOARD}/api/model-calls`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(rowToBoard(row, agent)) });
+  // #1582 — one requestId per ledger row, so a board with model calls in the graph records it once.
+  const r = await fetch(`${BOARD}/api/model-calls`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...rowToBoard(row, agent), requestId: crypto.randomUUID() }) });
   if (!r.ok) throw new Error(`POST /api/model-calls → ${r.status}`);
   return r.json();
 };

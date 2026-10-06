@@ -414,7 +414,7 @@ export function staticCheck(sparql, opId) {
 // =====================================================================================
 
 export const RECORD_V = 2;   // 2: memory.revise records the identity it replaces (a MemoryRevision node)
-export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create', 'post.import', 'post.write', 'post.redact', 'delivery.create', 'delivery.step', 'modelcall.create']);
+export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create', 'post.import', 'post.write', 'post.redact', 'delivery.create', 'delivery.step', 'delivery.import', 'modelcall.create']);
 
 const RS = 'https://scrumboard.local/ns#';
 const RSC = 'https://schema.org/';
@@ -469,6 +469,7 @@ const RECORD_FIELDS = {
   'post.redact': ['post', 'authorityRef', 'occurredAt'],   // #1574 R4a — logical deletion of a post's content
   'delivery.create': ['delivery'],          // #1582 — a delivery and its `offered` step, both fresh
   'delivery.step': ['target', 'step'],      // #1582 — one step, guarded by the delivery's expected version (as memory.revise)
+  'delivery.import': ['delivery'],          // #1582 migration — a document delivery and ALL its steps, fresh, in one update
   'modelcall.create': ['call'],             // #1582 — one ledger row, fresh at its derived IRI
 };
 
@@ -632,6 +633,17 @@ function canonicalizeRecord(i) {
       offeredAt: rStr(d.offeredAt, 'delivery.offeredAt'), step: canonStep(d.step, 'delivery.step'),
     } };
     if (record.delivery.step.index !== '1') fail('delivery.step.index of a create is 1');
+  } else if (i.kind === 'delivery.import') {
+    // #1582 migration — a delivery moved from the document with its whole history: steps 1..n in order, version n.
+    const d = obj(i.delivery, ['iri', 'deliveredTo', 'ofConversation', 'source', 'offeredAt', 'steps'], 'delivery');
+    if (!Array.isArray(d.steps) || !d.steps.length) fail('delivery.steps is a non-empty array');
+    const steps = d.steps.map((x, k) => canonStep(x, `delivery.steps[${k}]`));
+    steps.forEach((x, k) => { if (x.index !== String(k + 1)) fail(`delivery.steps[${k}].index must be ${k + 1}`); });
+    record = { delivery: {
+      iri: checkIri(d.iri, 'delivery.iri'), deliveredTo: rStr(d.deliveredTo, 'delivery.deliveredTo'),
+      ofConversation: checkIri(d.ofConversation, 'delivery.ofConversation'), source: rStr(d.source, 'delivery.source'),
+      offeredAt: rStr(d.offeredAt, 'delivery.offeredAt'), steps,
+    } };
   } else if (i.kind === 'delivery.step') {
     // #1582 — the same expected-version guard as memory.revise: a step written against a stale read is PRECONDITION_FAILED.
     const t = obj(i.target, ['iri', 'expectedVersion'], 'target');
@@ -847,6 +859,23 @@ function planRecord(c) {
       add(A.iri, TM.recordedBy, ref(c.opId));
     }
     add(P.iri, TM.recordedBy, ref(c.opId));
+  } else if (c.kind === 'delivery.import') {
+    // #1582 migration — the delivery node at version n and its n steps, all fresh: a re-run replays the receipt, and a
+    // node already in the graph (a delivery created live since) is PRECONDITION_FAILED, never overwritten.
+    const X = R.delivery; const D = X.iri; target = null;
+    fresh.push(D);
+    add(D, TM.type, I(TM.Delivery)); add(D, TM.deliveredTo, L(X.deliveredTo)); add(D, TM.ofConversation, I(X.ofConversation));
+    add(D, TM.source, L(X.source)); add(D, TM.offeredAt, L(X.offeredAt)); add(D, TM.ver, String(X.steps.length)); add(D, TM.recordedBy, ref(c.opId));
+    for (const S of X.steps) {
+      fresh.push(S.iri);
+      add(S.iri, TM.type, I(TM.DeliveryStep)); add(S.iri, TM.stepOf, I(D)); add(S.iri, TM.stepIndex, S.index);
+      add(S.iri, TM.state, L(S.state)); add(S.iri, TM.at, L(S.at)); add(S.iri, TM.source, L(S.source));
+      add(S.iri, TM.creator, S.creator == null ? null : L(S.creator)); add(S.iri, TM.attempt, S.attempt == null ? null : S.attempt);
+      add(S.iri, TM.reason, S.reason == null ? null : L(S.reason)); add(S.iri, TM.text, S.text == null ? null : L(S.text));
+      add(S.iri, TM.traceId, S.traceId == null ? null : L(S.traceId)); add(S.iri, TM.ofModelCall, S.ofModelCall && I(S.ofModelCall));
+      if (S.ofModelCall) pre.push(`    ${I(S.ofModelCall)} ${I(TM.type)} ${I(TM.ModelCall)} .`);
+      add(S.iri, TM.recordedBy, ref(c.opId));
+    }
   } else if (c.kind === 'delivery.create' || c.kind === 'delivery.step') {
     // #1582 — a delivery node carries `urn:ex:ver` (its version = the index of its latest step). A create makes the node
     // at ver 1 with its `offered` step; a step is guarded on the expected version (the memory.revise shape), bumps it, and

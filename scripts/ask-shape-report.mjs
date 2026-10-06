@@ -13,38 +13,60 @@
  * of reporting a zero. Read-only: it opens the document and writes nothing.
  */
 import { readFileSync } from 'node:fs';
-import { askShapeReport } from '../core/ask-shape.mjs';
+import { askShapeReport, modelCallRows, modelCallRowsFromWire } from '../core/ask-shape.mjs';
 
 const args = process.argv.slice(2);
 const asJson = args.includes('--json');
 // #837 — no default that points at a live data tree or a home directory. The
 // path is named by the caller or the run does not happen: a tool that reads
 // live board data by default eventually prints live board data into a CI log.
-const file = args.find((a) => !a.startsWith('--')) || process.env.SCRUM_BOARD_DATA;
-if (!file) {
+// #1582 — `--board <url>` reads the ledger through REST (GET /api/model-calls), which is where it lives once
+// SCRUM_GRAPH_UNIT_DELIVERIES=1 moves model calls into the graph; a board document file then holds none.
+const boardAt = args.indexOf('--board');
+const board = boardAt >= 0 ? args[boardAt + 1] : null;
+const file = board ? null : (args.find((a) => !a.startsWith('--')) || process.env.SCRUM_BOARD_DATA);
+if (boardAt >= 0 && !board) { console.error('usage: node scripts/ask-shape-report.mjs --board <url> [--json]'); process.exit(2); }
+if (!file && !board) {
   console.error('usage: node scripts/ask-shape-report.mjs <path/to/board-data.json> [--json]');
   console.error('   or: SCRUM_BOARD_DATA=<path> node scripts/ask-shape-report.mjs');
   console.error('(no default path by design — see #837)');
   process.exit(2);
 }
 
-let doc;
-try {
-  doc = JSON.parse(readFileSync(file, 'utf8'));
-} catch (e) {
-  console.error(`cannot read ${file}: ${e.message}`);
-  console.error('(this is a read failure, NOT a report of zero model calls)');
-  process.exit(2);
+let doc = null;
+let rows = null;
+if (board) {
+  try {
+    const res = await fetch(`${board.replace(/\/$/, '')}/api/model-calls`);
+    if (!res.ok) throw new Error(`GET /api/model-calls → ${res.status}`);
+    rows = modelCallRowsFromWire((await res.json()).calls);
+  } catch (e) {
+    console.error(`cannot read the ledger from ${board}: ${e.message}`);
+    console.error('(this is a read failure, NOT a report of zero model calls)');
+    process.exit(2);
+  }
+} else {
+  try {
+    doc = JSON.parse(readFileSync(file, 'utf8'));
+  } catch (e) {
+    console.error(`cannot read ${file}: ${e.message}`);
+    console.error('(this is a read failure, NOT a report of zero model calls)');
+    process.exit(2);
+  }
+  if (modelCallRows(doc).length === 0) {
+    console.error(`${file} holds NO model-call rows. If this board runs with SCRUM_GRAPH_UNIT_DELIVERIES=1 its ledger is in the graph, not this file:`);
+    console.error('read it with --board <url> instead. A zero from this file is not a zero for the board.');
+  }
 }
 
-const r = askShapeReport(doc);
+const r = askShapeReport(doc, rows ? { rows } : {});
 
 if (asJson) {
-  console.log(JSON.stringify({ file, ...r }, null, 2));
+  console.log(JSON.stringify({ file: file ?? board, ...r }, null, 2));
   process.exit(r.controls.ok ? 0 : 1);
 }
 
-console.log(`#1251 ask-shape report — ${file}\n`);
+console.log(`#1251 ask-shape report — ${file ?? board}\n`);
 console.log('CONTROLS (a count below is only readable if these pass)');
 for (const c of r.controls.results) {
   const mark = c.pass ? 'ok  ' : 'FAIL';
