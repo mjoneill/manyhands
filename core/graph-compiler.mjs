@@ -414,7 +414,7 @@ export function staticCheck(sparql, opId) {
 // =====================================================================================
 
 export const RECORD_V = 2;   // 2: memory.revise records the identity it replaces (a MemoryRevision node)
-export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create', 'post.import', 'post.write', 'post.redact']);
+export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create', 'post.import', 'post.write', 'post.redact', 'delivery.create', 'delivery.step', 'modelcall.create']);
 
 const RS = 'https://scrumboard.local/ns#';
 const RSC = 'https://schema.org/';
@@ -445,6 +445,13 @@ export const LOGBORN_TERMS = Object.freeze({
   // #1574 U5 (decision f4940204) — an author-repair trail, kept as provenance literals: never an actor, never authority
   originalAuthorToken: `${RS}originalAuthorToken`, authorCorrectedAt: `${RS}authorCorrectedAt`, authorCorrectedBy: `${RS}authorCorrectedBy`,
   attachmentOf: `${RS}attachmentOf`, attachmentIndex: `${RS}attachmentIndex`, encodingFormat: `${RSC}encodingFormat`, contentSize: `${RSC}contentSize`,
+  // #1582 unit 3 — deliveries and model calls, in the replica's own `scrum:` terms (core/graph-replica.mjs projectDelivery /
+  // projectModelCall), so a reader of the graph form and a reader of the old projection name the same things.
+  Delivery: `${RS}Delivery`, DeliveryStep: `${RS}DeliveryStep`, deliveredTo: `${RS}deliveredTo`, ofConversation: `${RS}ofConversation`,
+  source: `${RS}source`, offeredAt: `${RS}offeredAt`, stepOf: `${RS}stepOf`, stepIndex: `${RS}stepIndex`, state: `${RS}state`,
+  at: `${RS}at`, attempt: `${RS}attempt`, reason: `${RS}reason`, traceId: `${RS}traceId`, ofModelCall: `${RS}ofModelCall`, creator: `${RS}creator`,
+  ModelCall: `${RS}ModelCall`, agent: `${RS}agent`, model: `${RS}model`, calledAt: `${RS}calledAt`, cost: `${RS}cost`,
+  producedPost: `${RS}producedPost`, postedText: `${RS}postedText`, requestId: `${RS}requestId`, entityJson: `${RS}entityJson`,
 });
 const TM = LOGBORN_TERMS;
 
@@ -460,6 +467,9 @@ const RECORD_FIELDS = {
   'post.import': ['post'],   // #1574 R0 — a document post copied into the graph
   'post.write': ['post'],    // #1574 R2 — an ordinary post written straight to the graph (the same node shape as post.import)
   'post.redact': ['post', 'authorityRef', 'occurredAt'],   // #1574 R4a — logical deletion of a post's content
+  'delivery.create': ['delivery'],          // #1582 — a delivery and its `offered` step, both fresh
+  'delivery.step': ['target', 'step'],      // #1582 — one step, guarded by the delivery's expected version (as memory.revise)
+  'modelcall.create': ['call'],             // #1582 — one ledger row, fresh at its derived IRI
 };
 
 const SAFE_CH = /^[A-Za-z0-9 _.,:/@#+=*!~%&$-]$/;
@@ -513,6 +523,17 @@ function canonMemoryState(s, what, withIdentity) {
     ...(withIdentity ? { iri: checkIri(s.iri, `${what}.iri`), identifier: rOpt(s.identifier, `${what}.identifier`), owner: rOptIri(s.owner, `${what}.owner`) } : {}),
     name: rOpt(s.name, `${what}.name`), tags: rList(s.tags, `${what}.tags`, rStr), priority: rOpt(s.priority, `${what}.priority`),
     currentVersion: rOptIri(s.currentVersion, `${what}.currentVersion`), relatedTo: rList(s.relatedTo, `${what}.relatedTo`, checkIri),
+  };
+}
+
+/** #1582 — one delivery step node. `index` is the delivery's version this step makes (1 for the `offered` step of a create). */
+function canonStep(s, what) {
+  obj(s, ['iri', 'index', 'state', 'at', 'source', 'creator', 'attempt', 'reason', 'text', 'traceId', 'ofModelCall'], what);
+  return {
+    iri: checkIri(s.iri, `${what}.iri`), index: intLit(s.index, `${what}.index`), state: rStr(s.state, `${what}.state`),
+    at: rStr(s.at, `${what}.at`), source: rStr(s.source, `${what}.source`), creator: rOpt(s.creator, `${what}.creator`),
+    attempt: rCount(s.attempt, `${what}.attempt`), reason: rOpt(s.reason, `${what}.reason`), text: rOpt(s.text, `${what}.text`),
+    traceId: rOpt(s.traceId, `${what}.traceId`), ofModelCall: rOptIri(s.ofModelCall, `${what}.ofModelCall`),
   };
 }
 
@@ -601,6 +622,31 @@ function canonicalizeRecord(i) {
     const p = obj(i.post, ['id'], 'post');
     record = { post: { iri: checkIri(`${ENTITY_IRI}${rStr(p.id, 'post.id')}`, 'post.id') },
       authorityRef: rStr(i.authorityRef, 'authorityRef'), occurredAt: rStr(i.occurredAt, 'occurredAt') };
+  } else if (i.kind === 'delivery.create') {
+    // #1582 — the delivery's IRI is DERIVED by the caller from (deliveredTo, ofConversation); fresh, so a second create of
+    // the same pair is PRECONDITION_FAILED here and the route answers the existing node instead.
+    const d = obj(i.delivery, ['iri', 'deliveredTo', 'ofConversation', 'source', 'offeredAt', 'step'], 'delivery');
+    record = { delivery: {
+      iri: checkIri(d.iri, 'delivery.iri'), deliveredTo: rStr(d.deliveredTo, 'delivery.deliveredTo'),
+      ofConversation: checkIri(d.ofConversation, 'delivery.ofConversation'), source: rStr(d.source, 'delivery.source'),
+      offeredAt: rStr(d.offeredAt, 'delivery.offeredAt'), step: canonStep(d.step, 'delivery.step'),
+    } };
+    if (record.delivery.step.index !== '1') fail('delivery.step.index of a create is 1');
+  } else if (i.kind === 'delivery.step') {
+    // #1582 — the same expected-version guard as memory.revise: a step written against a stale read is PRECONDITION_FAILED.
+    const t = obj(i.target, ['iri', 'expectedVersion'], 'target');
+    const target = { iri: checkIri(t.iri, 'target.iri'), expectedVersion: intLit(t.expectedVersion, 'target.expectedVersion') };
+    const step = canonStep(i.step, 'step');
+    if (BigInt(step.index) !== BigInt(target.expectedVersion) + 1n) fail('step.index must be target.expectedVersion + 1');
+    record = { target, step };
+  } else if (i.kind === 'modelcall.create') {
+    const m = obj(i.call, ['iri', 'agent', 'model', 'calledAt', 'cost', 'producedPost', 'postedText', 'requestId', 'entityJson'], 'call');
+    record = { call: {
+      iri: checkIri(m.iri, 'call.iri'), agent: rStr(m.agent, 'call.agent'), model: rOpt(m.model, 'call.model'),
+      calledAt: rStr(m.calledAt, 'call.calledAt'), cost: rStr(m.cost, 'call.cost'),
+      producedPost: rOptIri(m.producedPost, 'call.producedPost'), postedText: rOpt(m.postedText, 'call.postedText'),
+      requestId: rStr(m.requestId, 'call.requestId'), entityJson: rStr(m.entityJson, 'call.entityJson'),
+    } };
   } else if (i.kind === 'decision.relate') {
     const target = checkIri(i.target, 'target');
     const supersedes = rList(i.supersedes, 'supersedes', checkIri);
@@ -698,6 +744,7 @@ function planRecord(c) {
   const delAll = [];       // [{s, p, keep?:[subject, predicate]}]: every current value is removed (and, with keep, recorded there)
   const delAny = [];       // #1574 R4a [{s, keep:[predicate…]}]: every triple of s is removed except those predicates
   const delOwned = [];     // #1574 R4a [{owner, prefix}]: every triple of every node that is attachmentOf owner AND under prefix is removed
+  const delLinked = [];    // #1582 [{link, owner, type, pred}]: every `pred` value on every node of `type` that `link`s to owner is removed
   let verGuard = null;
   let target;
   const add = (s, p, o) => { if (o != null) ins.push([s, p, o]); };
@@ -799,6 +846,38 @@ function planRecord(c) {
       add(A.iri, TM.recordedBy, ref(c.opId));
     }
     add(P.iri, TM.recordedBy, ref(c.opId));
+  } else if (c.kind === 'delivery.create' || c.kind === 'delivery.step') {
+    // #1582 — a delivery node carries `urn:ex:ver` (its version = the index of its latest step). A create makes the node
+    // at ver 1 with its `offered` step; a step is guarded on the expected version (the memory.revise shape), bumps it, and
+    // adds ONE fresh step node whose stepIndex is the new version, so a delivery's steps are ordered by construction.
+    let D, S;
+    if (c.kind === 'delivery.create') {
+      const X = R.delivery; D = X.iri; S = X.step; target = null;
+      fresh.push(D);
+      add(D, TM.type, I(TM.Delivery)); add(D, TM.deliveredTo, L(X.deliveredTo)); add(D, TM.ofConversation, I(X.ofConversation));
+      add(D, TM.source, L(X.source)); add(D, TM.offeredAt, L(X.offeredAt)); add(D, TM.ver, '1'); add(D, TM.recordedBy, ref(c.opId));
+    } else {
+      D = R.target.iri; S = R.step; target = D;
+      pre.push(`    ${I(D)} ${I(TM.type)} ${I(TM.Delivery)} ; ${I(TM.ver)} ?xv .`, `    FILTER(?xv = ${R.target.expectedVersion})`);
+      verGuard = D;
+      if (S.ofModelCall) pre.push(`    ${I(S.ofModelCall)} ${I(TM.type)} ${I(TM.ModelCall)} .`);   // a step names a ledger row that exists
+    }
+    fresh.push(S.iri);
+    add(S.iri, TM.type, I(TM.DeliveryStep)); add(S.iri, TM.stepOf, I(D)); add(S.iri, TM.stepIndex, S.index);
+    add(S.iri, TM.state, L(S.state)); add(S.iri, TM.at, L(S.at)); add(S.iri, TM.source, L(S.source));
+    add(S.iri, TM.creator, S.creator == null ? null : L(S.creator)); add(S.iri, TM.attempt, S.attempt == null ? null : S.attempt);
+    add(S.iri, TM.reason, S.reason == null ? null : L(S.reason)); add(S.iri, TM.text, S.text == null ? null : L(S.text));
+    add(S.iri, TM.traceId, S.traceId == null ? null : L(S.traceId)); add(S.iri, TM.ofModelCall, S.ofModelCall && I(S.ofModelCall));
+    add(S.iri, TM.recordedBy, ref(c.opId));
+  } else if (c.kind === 'modelcall.create') {
+    const M = R.call; target = null;
+    fresh.push(M.iri);
+    add(M.iri, TM.type, I(TM.ModelCall)); add(M.iri, TM.agent, L(M.agent)); add(M.iri, TM.model, M.model == null ? null : L(M.model));
+    add(M.iri, TM.calledAt, L(M.calledAt)); add(M.iri, TM.cost, L(M.cost)); add(M.iri, TM.requestId, L(M.requestId));
+    add(M.iri, TM.producedPost, M.producedPost && I(M.producedPost));
+    // the redaction guard is the route's: it omits postedText for a post already redacted (#1582 point 6)
+    add(M.iri, TM.postedText, M.postedText == null ? null : L(M.postedText));
+    add(M.iri, TM.entityJson, L(M.entityJson)); add(M.iri, TM.recordedBy, ref(c.opId));
   } else if (c.kind === 'post.redact') {
     // #1574 R4a — LOGICAL deletion only: every content triple of the post is deleted and the node is left as a tombstone
     // (RedactedPost, its original postSeq and recordedBy, and redactedBy = this operation). The precondition is a LIVE
@@ -817,6 +896,9 @@ function planRecord(c) {
     pre.push(`    FILTER NOT EXISTS { ?xa1 ${I(TM.attachmentOf)} ${I(P)} FILTER(!STRSTARTS(STR(?xa1), ${JSON.stringify(AP)})) }`);
     pre.push(`    FILTER NOT EXISTS { ?xa2 ?xa2p ?xa2o FILTER(STRSTARTS(STR(?xa2), ${JSON.stringify(AP)})) FILTER NOT EXISTS { ?xa2 ${I(TM.attachmentOf)} ${I(P)} } }`);
     delOwned.push({ owner: P, prefix: AP });
+    // #1582 point 6 — a model call that quoted this post keeps no copy of its text: in the SAME update, every
+    // `postedText` on a ModelCall whose producedPost is this post is deleted.
+    delLinked.push({ link: TM.producedPost, owner: P, type: TM.ModelCall, pred: TM.postedText });
     add(P, TM.type, I(TM.RedactedPost));
     add(P, TM.redactedBy, ref(c.opId));
   } else if (c.kind === 'person.import') {
@@ -857,7 +939,7 @@ function planRecord(c) {
     for (const a of P.aliases) add(P.iri, TM.aliases, L(a));
     add(P.iri, TM.recordedBy, ref(c.opId));
   }
-  return { target, pre, fresh, ins, delAll, delAny, delOwned, verGuard };
+  return { target, pre, fresh, ins, delAll, delAny, delOwned, delLinked, verGuard };
 }
 
 function compileRecord(c) {
@@ -903,6 +985,11 @@ function compileRecord(c) {
     top.push(`  OPTIONAL { ?xs${k} ${ref(LOGBORN_TERMS.attachmentOf)} ${ref(owner)} . ?xs${k} ?xsp${k} ?xso${k} FILTER(STRSTARTS(STR(?xs${k}), ${JSON.stringify(prefix)})) }`);
     dBinds.push(ok(`?xs${k}`, `xs${k}`), ok(`?xsp${k}`, `xsp${k}`), ok(`?xso${k}`, `xso${k}`));
     del.push(`  ?d_xs${k} ?d_xsp${k} ?d_xso${k} .`);
+  });
+  (plan.delLinked || []).forEach(({ link, owner, type, pred }, k) => {
+    top.push(`  OPTIONAL { ?xl${k} ${ref(link)} ${ref(owner)} ; ${ref(LOGBORN_TERMS.type)} ${ref(type)} ; ${ref(pred)} ?xlo${k} }`);
+    dBinds.push(ok(`?xl${k}`, `xl${k}`), ok(`?xlo${k}`, `xlo${k}`));
+    del.push(`  ?d_xl${k} ${ref(pred)} ?d_xlo${k} .`);
   });
   for (const [s, p, o] of plan.ins) dIns.push(`  ${v(ref(s))} ${ref(p)} ${v(o)} .`);
 
