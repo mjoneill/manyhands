@@ -70,6 +70,7 @@ import { boardToDomain, domainToBoard, cardToNode } from './core/mapping.mjs';
 import { OUTBOX_FIELD, outboxOf, withAnnouncement, listOutbox, modeProblem, legacyProof, postMatchesEntry, opIdFor, announcePostId, postCreateIntention } from './core/announce-outbox.mjs';   // #1574 C3a/C3b/C3c
 import { createGraphClient } from './core/graph-client.mjs';   // #1574 C3b — the conversations unit's executor door
 import { postFeed, DiscoveryError } from './core/post-discovery.mjs';   // #1574 R3
+import { createReadGate } from './core/read-admission.mjs';   // #1574 A1–A5
 import { RESERVATIONS_FIELD, postWriteId, findReservation, reservationKey, pruneReservations, validRequestId, validAttachmentSize, postWriteIntention } from './core/post-write.mjs';   // #1574 R2
 import { NEXT_POST_SEQ, POST_SEQ_EPOCH, isEpoch, mintEpoch, stampPostSeq, postSeqState, assertPostSeqWritable, PostSeqStateCorrupt, migrationRequiredBody, parseSeqSyntax, checkSeqEpoch, selectSeqPage, SEQ_PARAMS } from './core/post-seq.mjs';   // #1592 — the document path's post sequence
 import { verifyShaIntegrity, readShaStamp, collectShas, SHA_POPULATION } from './core/sha-integrity.mjs';
@@ -10658,7 +10659,7 @@ async function handleListConversations(req, res) {
     // #1574 T3–T5 — the unit on and a PLAIN `?limit=N` (optionally author or attachedTo, nothing else): the newest N
     // matching visible posts and the matching total, without reading every post. Any other shape takes the bulk path below.
     if (ANNOUNCE_EXECUTOR && !seqReq.mode && typeof q.limit === 'string' && /^\d+$/.test(q.limit)
-      && Object.keys(q).every((k) => q[k] === undefined || ['limit', 'author', 'attachedTo'].includes(k))
+      && Object.keys(q).every((k) => q[k] === undefined || ['limit', 'author', 'attachedTo', 'since', 'mentions_me'].includes(k))
       && (q.attachedTo === undefined || q.attachedTo === 'null' || data.cards.some((c) => c.id === q.attachedTo))) {
       const capped = Math.min(parseInt(q.limit, 10), MAX_CONV_LIST_LIMIT);
       let t;
@@ -10666,6 +10667,8 @@ async function handleListConversations(req, res) {
         t = await targetedPosts(data.conversations, {
           limit: capped, ...(q.author !== undefined ? { author: q.author } : {}),
           ...(q.attachedTo !== undefined ? { attachedTo: q.attachedTo === 'null' ? null : q.attachedTo } : {}),
+          ...(typeof q.since === 'string' ? { since: q.since } : {}),
+          ...(typeof q.mentions_me === 'string' ? { mentions: q.mentions_me.toLowerCase() } : {}),
         });
       } catch (e) { if (e && e.unavailable) return sendJSON(res, 503, { error: `the graph could not be read: ${e.unavailable}`, code: 'GRAPH_UNAVAILABLE' }); throw e; }
       if (t) { res.setHeader('X-Total-Count', String(t.total)); return sendJSON(res, 200, t.posts); }
@@ -10910,9 +10913,16 @@ async function mergedConversations(docPosts) {
  */
 let DOC_HELD = null;   // { key, held: Set<doc post id> }
 const SAFE_ID = /^[A-Za-z0-9._~-]{1,200}$/;
+let DOC_HELD_BUILD = null;   // { key, promise }: concurrent first reads share ONE build (it is the costliest read REST makes)
 async function docHeldIds(docPosts) {
   const key = `${docPosts.length}:${docPosts[0]?.id ?? ''}:${docPosts[docPosts.length - 1]?.id ?? ''}`;
   if (DOC_HELD && DOC_HELD.key === key) return DOC_HELD.held;
+  if (DOC_HELD_BUILD && DOC_HELD_BUILD.key === key) return DOC_HELD_BUILD.promise;
+  const promise = buildDocHeld(docPosts, key).finally(() => { if (DOC_HELD_BUILD && DOC_HELD_BUILD.promise === promise) DOC_HELD_BUILD = null; });
+  DOC_HELD_BUILD = { key, promise };
+  return promise;
+}
+async function buildDocHeld(docPosts, key) {
   const held = new Set();
   const ids = docPosts.map((p) => p?.id).filter((id) => typeof id === 'string' && SAFE_ID.test(id));
   for (let i = 0; i < ids.length; i += 2000) {
@@ -10924,18 +10934,28 @@ async function docHeldIds(docPosts) {
   DOC_HELD = { key, held };
   return held;
 }
-async function targetedPosts(docPosts, { limit = Infinity, author, attachedTo, order = 'seq' } = {}) {
+// #1574 X1–X6 — `since` and `mentions` filter INSIDE the graph query, before the window: a newest-postSeq window filtered
+// afterwards misses posts committed late with old timestamps (and recent posts with low numbers). Values outside these
+// shapes cannot go into a query safely and take the bulk path.
+const SAFE_SINCE = /^[0-9TZ:.+-]{1,40}$/;
+async function targetedPosts(docPosts, { limit = Infinity, author, attachedTo, since, mentions, order = 'seq' } = {}) {
   if (author !== undefined && !SAFE_ID.test(author)) return null;
   if (attachedTo !== undefined && attachedTo !== null && !SAFE_ID.test(attachedTo)) return null;
+  if (since !== undefined && !SAFE_SINCE.test(since)) return null;
+  if (mentions !== undefined && !SAFE_ID.test(mentions)) return null;
   docPosts = Array.isArray(docPosts) ? docPosts : [];
   const held = await docHeldIds(docPosts);
   const match = (p) => (author === undefined || p.author === author)
-    && (attachedTo === undefined || (attachedTo === null ? p.attachedTo === null : p.attachedTo === attachedTo));
+    && (attachedTo === undefined || (attachedTo === null ? p.attachedTo === null : p.attachedTo === attachedTo))
+    && (since === undefined || (typeof p.createdAt === 'string' && p.createdAt >= since))
+    && (mentions === undefined || (Array.isArray(p.mentions) && p.mentions.includes(mentions)));
   const docVisible = docPosts.filter((p) => p && !held.has(p.id) && match(p));
   let where = `?s <${G.type}> <${G.S}Comment> ; <${G.NS}postSeq> ?n .`;
   if (author !== undefined) where += ` ?s <${G.S}author> <${G.PERSON}${author}> .`;
   if (attachedTo === null) where += ` FILTER NOT EXISTS { ?s <${G.S}about> ?ab }`;
   else if (attachedTo !== undefined) where += ` ?s <${G.S}about> <${G.ENTITY}${attachedTo}> .`;
+  if (mentions !== undefined) where += ` ?s <${G.NS}mentionsName> ${JSON.stringify(mentions)} .`;
+  if (since !== undefined) where += ` ?s <${G.S}dateCreated> ?sinceC . FILTER(STR(?sinceC) >= ${JSON.stringify(since)})`;
   const fail = (q) => { throw Object.assign(new Error('graph unavailable'), { unavailable: q.reason || 'unreadable' }); };
   const bounded = Number.isFinite(limit);
   const margin = order === 'created' ? 10 : 0;   // equal createdAt across the window edge: a few extra candidates settle it
@@ -11949,8 +11969,12 @@ if (process.env.SCRUM_GRAPH_UNIT_CONVERSATIONS === '1') {
   // long enough for a real write under load; past it the outcome is UNKNOWN, the entry stays pending, and the
   // identical intention is replayed on the next attempt (the receipt makes that idempotent).
   ANNOUNCE_EXECUTOR = createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: 15000 });
-  POSTS_READER = createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: POSTS_READ_TIMEOUT_MS });
-  POSTS_BULK_READER = createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: POSTS_BULK_READ_TIMEOUT_MS });
+  // #1574 A1–A5 — both readers share ONE gate on executor work: the deadlines below are what a CALLER waits; the graph
+  // request underneath is never aborted by them (the executor would keep computing anyway), and holds its slot until it ends.
+  const gate = createReadGate({ max: 8, queueMax: 128 });
+  const raw = createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: gate.hardTimeoutMs });
+  POSTS_READER = gate.reader(raw, POSTS_READ_TIMEOUT_MS);
+  POSTS_BULK_READER = gate.reader(raw, POSTS_BULK_READ_TIMEOUT_MS);
   console.error(`${new Date().toISOString()} #1574 conversations unit ON: publisher-mode announcements go through the graph executor (lock released during the call)`);
   console.error(`${new Date().toISOString()} #1574 conversations unit ON: standing checks stale-claims and role-expiry are DISABLED (${DOC_POST_CHECK_DISABLED})`);
 }
