@@ -745,6 +745,7 @@ function planRecord(c) {
   const delAny = [];       // #1574 R4a [{s, keep:[predicate…]}]: every triple of s is removed except those predicates
   const delOwned = [];     // #1574 R4a [{owner, prefix}]: every triple of every node that is attachmentOf owner AND under prefix is removed
   const delLinked = [];    // #1582 [{link, owner, type, pred}]: every `pred` value on every node of `type` that `link`s to owner is removed
+  const condIns = [];      // #1582 [{s, p, o, unless:[node, type]}]: inserted only where `node` is NOT of `type` when the update runs
   let verGuard = null;
   let target;
   const add = (s, p, o) => { if (o != null) ins.push([s, p, o]); };
@@ -875,8 +876,13 @@ function planRecord(c) {
     add(M.iri, TM.type, I(TM.ModelCall)); add(M.iri, TM.agent, L(M.agent)); add(M.iri, TM.model, M.model == null ? null : L(M.model));
     add(M.iri, TM.calledAt, L(M.calledAt)); add(M.iri, TM.cost, L(M.cost)); add(M.iri, TM.requestId, L(M.requestId));
     add(M.iri, TM.producedPost, M.producedPost && I(M.producedPost));
-    // the redaction guard is the route's: it omits postedText for a post already redacted (#1582 point 6)
-    add(M.iri, TM.postedText, M.postedText == null ? null : L(M.postedText));
+    // #1582 point 6 — THE REDACTION GUARD IS IN THIS UPDATE, not the route's: postedText is inserted only if, when this
+    // update executes, the produced post is NOT a RedactedPost. So a redaction landing between a route's read and this
+    // write cannot leave a copy (the executor serialises updates). The call itself is recorded either way, without the text.
+    if (M.postedText != null) {
+      if (M.producedPost) condIns.push({ s: M.iri, p: TM.postedText, o: L(M.postedText), unless: [M.producedPost, TM.RedactedPost] });
+      else add(M.iri, TM.postedText, L(M.postedText));
+    }
     add(M.iri, TM.entityJson, L(M.entityJson)); add(M.iri, TM.recordedBy, ref(c.opId));
   } else if (c.kind === 'post.redact') {
     // #1574 R4a — LOGICAL deletion only: every content triple of the post is deleted and the node is left as a tombstone
@@ -939,7 +945,7 @@ function planRecord(c) {
     for (const a of P.aliases) add(P.iri, TM.aliases, L(a));
     add(P.iri, TM.recordedBy, ref(c.opId));
   }
-  return { target, pre, fresh, ins, delAll, delAny, delOwned, delLinked, verGuard };
+  return { target, pre, fresh, ins, delAll, delAny, delOwned, delLinked, condIns, verGuard };
 }
 
 function compileRecord(c) {
@@ -990,6 +996,12 @@ function compileRecord(c) {
     top.push(`  OPTIONAL { ?xl${k} ${ref(link)} ${ref(owner)} ; ${ref(LOGBORN_TERMS.type)} ${ref(type)} ; ${ref(pred)} ?xlo${k} }`);
     dBinds.push(ok(`?xl${k}`, `xl${k}`), ok(`?xlo${k}`, `xlo${k}`));
     del.push(`  ?d_xl${k} ${ref(pred)} ?d_xlo${k} .`);
+  });
+  (plan.condIns || []).forEach(({ s, p, o, unless }, k) => {
+    // ?xcn is never bound, so IF(...) yields an UNBOUND ?xc (no triple) when the node IS of the type, else the literal
+    top.push(`  BIND(IF(EXISTS { ${ref(unless[0])} ${ref(LOGBORN_TERMS.type)} ${ref(unless[1])} }, ?xcn${k}, ${o}) AS ?xc${k})`);
+    dBinds.push(ok(`?xc${k}`, `xc${k}`));
+    dIns.push(`  ${v(ref(s))} ${ref(p)} ?d_xc${k} .`);
   });
   for (const [s, p, o] of plan.ins) dIns.push(`  ${v(ref(s))} ${ref(p)} ${v(o)} .`);
 
