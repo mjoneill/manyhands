@@ -14,6 +14,7 @@
  *   V3  oldestEvent EQUIVALENCE (and retentionGap, V6) on logs where seq grows with the segment name and within a segment: ordinary; the first segment empty; the first lines torn or garbage; a 3-byte
  *       character straddling the 64 KB read boundary; a first line longer than 64 KB; a last line with no newline; no segments; an absent directory.
  *   V3c AN UNREADABLE FIRST SEGMENT is not skipped: the old reader throws EACCES, and `oldestEvent` must too, not answer from the next segment (it would report a retention gap that is a permission error).
+ *   V3d A SEGMENT PRUNED BETWEEN THE LISTING AND THE READ is skipped (ENOENT only; a dangling entry stands in for it): the answer comes from the next segment that holds an event.
  *   V3b THE DOCUMENTED ASSUMPTION, PINNED (ruled by the builder 12:50Z, was a todo): on an out-of-order log (a later-named segment holding a lower seq, or a lower seq after the first valid line within a
  *       segment) the old function returned the minimum seq and the new one returns the first valid line of the earliest-named segment. That is the documented behaviour; the row pins it so it cannot change silently.
  *   V4  oldestEvent's cache is invalidated: the first segment is pruned; an EARLIER segment appears (a backfill); the only segment goes from empty to one line; the first segment is rewritten (the
@@ -220,6 +221,15 @@ test('V3c AN UNREADABLE FIRST SEGMENT IS NOT SKIPPED: the old reader throws EACC
     try { answered = NEW.oldestEvent(d); } catch (e) { threw = e; }
     assert.ok(threw && /EACCES|permission/i.test(String(threw.code ?? threw.message)), `oldestEvent fails loudly on an unreadable first segment instead of answering ${JSON.stringify(answered && { seq: answered.seq })} from the next one`);
   });
+});
+
+test('V3d A SEGMENT PRUNED BETWEEN THE LISTING AND THE READ IS SKIPPED (ENOENT only): a dangling entry between the first segment (no valid line) and the third (valid) is passed over, and the answer comes from the third', () => {
+  assert.equal(typeof NEW.oldestEvent, 'function', 'the new module exports oldestEvent');
+  const d = mkdir();
+  seg(d, '2026-09-01', ['not json', '{"torn":']);                       // lists, reads, holds no valid event
+  fs.symlinkSync(path.join(d, 'no-such-target.jsonl'), path.join(d, 'events-2026-09-02.jsonl'));   // lists; stat and read answer ENOENT, as a segment deleted a moment ago would
+  seg(d, '2026-09-03', [ev(31, '2026-09-03'), ev(32, '2026-09-03')]);
+  assert.equal(NEW.oldestEvent(d)?.seq, 31, 'the vanished segment is skipped and the next one answers');
 });
 
 test('V3b THE DOCUMENTED ASSUMPTION, PINNED: oldestEvent returns the first valid line of the earliest-named segment, NOT the minimum seq, when the log is out of order (a regressed seq or a backward clock step: corruption by #1114)', () => {
