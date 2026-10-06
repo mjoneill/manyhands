@@ -10675,7 +10675,8 @@ async function handleListConversations(req, res) {
       let t;
       try {
         t = await targetedPosts(data.conversations, {
-          limit: capped, ...(q.author !== undefined ? { author: q.author } : {}),
+          limit: capped, bulk: !hasLimit,   // #1609 — every match requested: the long budget
+          ...(q.author !== undefined ? { author: q.author } : {}),
           ...(q.attachedTo !== undefined ? { attachedTo: q.attachedTo === 'null' ? null : q.attachedTo } : {}),
           ...(typeof q.since === 'string' ? { since: q.since } : {}),
           ...(typeof q.before === 'string' ? { before: q.before } : {}),
@@ -10965,7 +10966,7 @@ async function buildDocHeld(docPosts, key) {
 // afterwards misses posts committed late with old timestamps (and recent posts with low numbers). Values outside these
 // shapes cannot go into a query safely and take the bulk path.
 const SAFE_SINCE = /^[0-9TZ:.+-]{1,40}$/;
-async function targetedPosts(docPosts, { limit = Infinity, author, attachedTo, since, before, mentions, order = 'seq' } = {}) {
+async function targetedPosts(docPosts, { limit = Infinity, author, attachedTo, since, before, mentions, order = 'seq', bulk = false } = {}) {
   if (author !== undefined && !SAFE_ID.test(author)) return null;
   if (attachedTo !== undefined && attachedTo !== null && !SAFE_ID.test(attachedTo)) return null;
   if (since !== undefined && !SAFE_SINCE.test(since)) return null;
@@ -10995,10 +10996,11 @@ async function targetedPosts(docPosts, { limit = Infinity, author, attachedTo, s
   const sel = order === 'created'
     ? `SELECT ?s WHERE { ${where} ?s <${G.S}dateCreated> ?c } ORDER BY DESC(?c) DESC(?n)`
     : `SELECT ?s WHERE { ${where} } ORDER BY DESC(?n)`;
-  // #1609 — an UNBOUNDED result (no limit: every match, as the bulk path answers) materializes up to the whole history, so it
-  // takes the bulk reader's budget; a bounded page keeps the short one. Measured on a 37k-post copy: the unbounded read sat at
-  // the 3 s bound (200 in 3.5 s, then 503 on the same call), a deadline and not an overload.
-  const reader = bounded ? POSTS_READER : (POSTS_BULK_READER || POSTS_READER);
+  // #1609 — the budget is chosen by the CALLER'S INTENT, not by the absence of a limit. The list route asking for every match
+  // (no limit: up to the whole history) passes `bulk` and gets the bulk reader's budget. A card page also sends no limit but is
+  // a hot interactive read, so it keeps the short one. (Measured on a 37k-post copy: the unbounded list read sat at the 3 s
+  // bound, 200 in 3.5 s, then 503 on the same call, a deadline and not an overload.)
+  const reader = bulk ? (POSTS_BULK_READER || POSTS_READER) : POSTS_READER;
   const [cq, wq] = await Promise.all([
     reader.query(`SELECT (COUNT(?s) AS ?c) WHERE { ${where} }`),
     reader.query(bounded ? `${sel} LIMIT ${limit + margin}` : sel),
