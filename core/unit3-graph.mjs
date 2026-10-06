@@ -77,11 +77,16 @@ export const splitDeliveryRows = (iri, rows) => ({ nodeRows: rows.filter((r) => 
  * #1582 hotfix (measured live, 2026-10-06 22:3xZ): the selector is repeated INSIDE each UNION branch. With it outside, the
  * first branch (`?d ?p ?o`) was evaluated unbound and joined afterwards, and one seat's list took 203 s and ~4 GB on the
  * executor (the same rows now take 5 s). `open` keeps only deliveries whose LATEST step (stepIndex = the node's version) is
- * offered, queued or failed; the caller still applies isOpenDelivery for the failed-attempt rule.
+ * offered, queued or failed; the caller still applies isOpenDelivery for the failed-attempt rule. `recentSince` (an ISO
+ * instant) keeps active deliveries plus those offered at/after it.
  */
-export function deliveriesForQuery({ to, conversation, open } = {}) {
+export function deliveriesForQuery({ to, conversation, open, recentSince } = {}) {
   const sel = `?d <${RDF_TYPE}> ${t('Delivery')}${to ? ` ; ${t('deliveredTo')} ${lit(to)}` : ''}${conversation ? ` ; ${t('ofConversation')} <${ENTITY_PREFIX}${conversation}>` : ''} .`
-    + (open ? ` ?d <urn:ex:ver> ?xv . ?xls ${t('stepOf')} ?d ; ${t('stepIndex')} ?xv ; ${t('state')} ?xst . FILTER(?xst IN ("offered", "queued", "failed"))` : '');
+    + (open ? ` ?d <urn:ex:ver> ?xv . ?xls ${t('stepOf')} ?d ; ${t('stepIndex')} ?xv ; ${t('state')} ?xst . FILTER(?xst IN ("offered", "queued", "failed"))` : '')
+    // #1582 hotfix 2: `recentSince` keeps deliveries that are still ACTIVE (latest step not published or declined) OR were
+    // offered at/after that instant. A seat's whole history is ~9,600 deliveries / 435k rows; the callers that list without
+    // `open` (MCP inbox counts, the direct tick, the runner) only ever use active or recent ones.
+    + (recentSince ? ` ?d <urn:ex:ver> ?xrv ; ${t('offeredAt')} ?xro . ?xrs ${t('stepOf')} ?d ; ${t('stepIndex')} ?xrv ; ${t('state')} ?xrst . FILTER(!(?xrst IN ("published", "declined")) || ?xro >= ${lit(recentSince)})` : '');
   return `SELECT ?d ?s ?p ?o WHERE { { ${sel} ?d ?p ?o . BIND(?d AS ?s) } UNION { ${sel} ?s ${t('stepOf')} ?d . ?s ?p ?o } }`;
 }
 

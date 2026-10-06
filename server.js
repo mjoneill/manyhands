@@ -6419,7 +6419,11 @@ async function graphDeliveryStep(id, input) {
 async function graphListDeliveries(q) {
   if (q.to && !U3.SEAT_RE.test(q.to)) return { status: 200, wire: { deliveries: [], count: 0 } };
   if (q.conversation && !U3.POST_ID_RE.test(q.conversation)) return { status: 200, wire: { deliveries: [], count: 0 } };
-  const r = await POSTS_BULK_READER.query(U3.deliveriesForQuery({ to: q.to, conversation: q.conversation, open: q.open === '1' || q.open === 'true' }));
+  // #1582 hotfix 2: a list without `open`, `conversation` or `all=1` is bounded to active deliveries plus the last 24 hours
+  // (a seat's full history costs the executor seconds to minutes; `all=1` still asks for it, explicitly).
+  const openOnly = q.open === '1' || q.open === 'true';
+  const recentSince = !openOnly && !q.conversation && q.all !== '1' ? new Date(Date.now() - 86400_000).toISOString() : undefined;
+  const r = await POSTS_BULK_READER.query(U3.deliveriesForQuery({ to: q.to, conversation: q.conversation, open: openOnly, recentSince }));
   if (!r.ok) return deliveryGraphDown(r.reason || 'unreadable');
   let out = U3.groupByDelivery(r.rows).map((d) => d.entity);
   if (q.open === '1' || q.open === 'true') out = out.filter(deliveryOpen);
