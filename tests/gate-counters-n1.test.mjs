@@ -14,6 +14,10 @@
  *               dispatched for it (at least 1) and each lost slot REMAINS COUNTED IN `running` (`lost` is a subset of `running`, as the contract owner read the gate at caa4398), and both STAY that
  *               number after the executor has finished: a lost slot is cleared only by the recorded recovery (an executor restart, then REST), never by the proxy draining. `waiting` is 0.
  *
+ *   N5 ABANDONED   Past the callers' own deadline (3 s for these reads) a queued read leaves the queue and is never sent (the admission rows pin that). The executor is held 10 s and 60 distinct reads arrive;
+ *               at 4.5 s every queued read has been abandoned: `waiting` is 0 (it counts LIVE waiters only, not abandoned entries), and `running` still equals the executor's outstanding queries (the slots
+ *               held by running reads stay held). Added after the kill checks on f698dc8: a mutant that counted abandoned entries survived N1-N4, because they only looked before any deadline had fired.
+ *
  * REAL executor behind the hold proxy, REAL REST; without a python with pyoxigraph every test is SKIPPED, and a skip is NOT a pass. Synthetic content only.
  * NOT COVERED, by name: event-loop lag (proposed beside the counters, not specified yet); the counters of any gate other than the posts gate; the recovery sequence itself (executor restart, then REST) and what clears a lost slot; the route's other fields; authentication of the route; whether the numbers are right under the live executor's real behaviour.
  */
@@ -164,5 +168,23 @@ test('N4 LOST: a connection dropped after dispatch is counted in lost, which equ
     assert.equal(g2?.lost, dispatched, `and it STAYS after the executor has finished (a lost slot is cleared only by recovery): ${JSON.stringify(g2)}`);
     assert.equal(g2?.running, dispatched, `the lost slot is still held in running after the proxy drained: draining the executor does not clear admission state: ${JSON.stringify(g2)}`);
     assert.equal(g2?.waiting, 0);
+  });
+});
+
+test('N5 ABANDONED: past the callers\' deadlines the queued reads are gone and waiting is 0, while running still equals the proxy\'s outstanding queries', { skip: SKIP, todo: NEEDS_DECLARATION, timeout: 180000 }, async () => {
+  needDeclared();
+  await stack(async ({ base, proxy }) => {
+    proxy.holdMs = 10000; proxy.resetCounts();
+    const flood = distinctReads(base, 60, 'n5');
+    await sleep(1500);
+    const early = (await health(base)).body?.readGate;
+    assert.ok(early && early.waiting > 0, `CONTROL: before any deadline the reads are waiting: ${JSON.stringify(early)}`);
+    await sleep(3000);
+    const outstanding = proxy.outstanding;
+    const g = (await health(base)).body?.readGate;
+    assert.equal(g?.waiting, 0, `4.5 s in, every queued read has passed its deadline and left the queue; waiting counts live waiters only: ${JSON.stringify(g)}`);
+    assert.equal(g?.running, outstanding, `and running (${g?.running}) still equals the executor's outstanding queries (${outstanding})`);
+    await Promise.all(flood);
+    proxy.holdMs = 0; await until(() => proxy.outstanding === 0, 60000);
   });
 });
