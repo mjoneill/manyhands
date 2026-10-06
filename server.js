@@ -37,6 +37,7 @@ import { fileURLToPath } from 'node:url';
 import { isOpenDelivery } from './core/delivery.mjs';   // #1346
 import { exportableSpaces, resolveSpaces, describeExportSet } from './core/export-spaces.mjs';   // #1321
 import { loadDomain, loadDomainShared, saveDomain } from './core/store.mjs';
+import { validateCompare, evaluateCompare } from './core/check-compare.mjs';   // #1610
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { countLegacy, setLegacyContext, installStructuredCloneCounter } from './core/legacy-counters.mjs';
 import { createGraphSlice } from './core/graph-slice-routes.mjs';
@@ -6913,6 +6914,13 @@ async function evaluateChecks() {
         const t0 = performance.now();
         const priced = (row) => { const ms = Math.round(performance.now() - t0); return { ...row, ms, ...(ms > CHECK_CEILING_MS ? { slow: true } : {}) }; };
         try {
+          if (c.compare) {   // #1610 — two cheap reads compared in code, instead of one ASK the engine cannot plan
+            const cmp = evaluateCompare((q) => queryGraph(store, q), c.compare);
+            if (!cmp.ok) { errors += 1; return priced({ claim: c.claim, status: 'error', error: cmp.error }); }
+            const holds = cmp.value === c.expect;
+            if (!holds) stale += 1;
+            return priced({ claim: c.claim, status: holds ? 'holds' : 'stale', expected: c.expect, actual: cmp.value, compared: { left: cmp.left, op: c.compare.op, right: cmp.right } });
+          }
           const r = queryGraph(store, c.ask);
           // ⚠️ The ASK boolean arrives as `ask`, NOT `boolean` — read from
           // core/graph-replica.mjs rather than assumed. The first version of
@@ -7661,6 +7669,17 @@ function validateChecks(checks) {
     if (!c || typeof c !== 'object' || Array.isArray(c)) return 'each check must be an object {claim, ask, expect}';
     if (typeof c.claim !== 'string' || !c.claim.trim()) {
       return 'each check needs a `claim`: the sentence in the author\'s own words that this check would falsify';
+    }
+    // #1610 — exactly one form: an `ask`, or a `compare` of two one-value SELECTs (core/check-compare.mjs)
+    if (c.compare !== undefined) {
+      if (c.ask !== undefined) return `check ${JSON.stringify(c.claim)}: give \`ask\` OR \`compare\`, not both`;
+      const cerr = validateCompare(c.compare);
+      if (cerr) return `check ${JSON.stringify(c.claim)}: ${cerr}`;
+      if (typeof c.expect !== 'boolean') {
+        return `check ${JSON.stringify(c.claim)} needs \`expect\` (true or false): without it the check can never fail, `
+          + 'and a check that cannot fail reports the claim as watched while watching nothing';
+      }
+      continue;
     }
     if (typeof c.ask !== 'string' || !c.ask.trim()) {
       return `check ${JSON.stringify(c.claim)} needs an \`ask\`: a SPARQL ASK whose answer would falsify the claim`;

@@ -131,6 +131,7 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:cardType', 'scrum:claimedAt', 'scrum:claimedBy', 'scrum:for',
   'scrum:assignee', 'scrum:blockedByAnyHuman', 'scrum:derivedFrom',
   'scrum:ofCard', 'scrum:blockedBy', 'scrum:expect', 'scrum:ask', 'scrum:claim',
+  'scrum:compareLeft', 'scrum:compareOp', 'scrum:compareRight',   // #1610 — a two-read tripwire's parts
   'scrum:hasCheck', 'scrum:supersededBy', 'scrum:supersedes',
   // #1322 — a decision recorded twice: the twin points at the original.
   // `scrum:supersedes` above is reused for decision → decision amendments.
@@ -1637,6 +1638,11 @@ function projectEntity(store, e) {
         add(chk, A, nn(S + 'Check'));
         if (c.claim != null) add(chk, nn(S + 'claim'), lit(c.claim));
         if (c.ask != null) add(chk, nn(S + 'ask'), lit(c.ask));
+        if (c.compare && typeof c.compare === 'object') {   // #1610 — the two reads and the operator, as authored
+          if (c.compare.left != null) add(chk, nn(S + 'compareLeft'), lit(c.compare.left));
+          if (c.compare.op != null) add(chk, nn(S + 'compareOp'), lit(c.compare.op));
+          if (c.compare.right != null) add(chk, nn(S + 'compareRight'), lit(c.compare.right));
+        }
         if (typeof c.expect === 'boolean') add(chk, nn(S + 'expect'), lit(c.expect));
       });
       // #656 — the DERIVED reference edge, beside the deliberate ones and
