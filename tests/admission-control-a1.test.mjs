@@ -46,6 +46,12 @@
  *               (`?afterCommit=start&limit=<unique>`) arrive. The executor's outstanding queries never exceed C: the feed's reads wait their turn or are refused. Only the executor's peak is
  *               pinned (the feed's own identity and failure shapes belong to its R3 rows). A TODO until C is declared. NOT PINNED HERE: the `/api/changes` first feed query on the log-born
  *               path: that unit supervises its own executor, so no proxy can stand in front of it; observing it needs a counter from the build (the gate's own stats, exposed), not a row.
+ *   A12 /api/changes IS BEHIND THE GATE, LOG-BORN UNIT ON (the contract owner's 02:06Z: "`/api/changes` with the log-born unit on, against a full gate"; its first feed query goes through the
+ *               log-born unit's own client, which a first build left around the gate). The log-born unit is switched on beside the conversations unit with the executor still EXTERNAL, so the
+ *               proxy stands in front of it. Gate full of unlimited-list reads, executor held 12 s, then 20 `GET /api/changes?since=...`: the executor's peak never exceeds C.
+ *   A12b /api/changes, A CONNECTION LOST AFTER DISPATCH ON THAT BRANCH. The build reaches the gate through an adapter that recovers the transport reason from the log-born unit's error text; if
+ *               that text ever stops matching, a lost connection is read as a finished query and the slot is freed. Same setup as A7 but on /api/changes: cap-many reads are lost after dispatch
+ *               (answered 503), then 12 more arrive with the executor still computing: none is served, and the executor's peak never exceeds C. A TODO until C is declared.
  *   A7 CONNECTION LOST AFTER DISPATCH (the contract owner's 01:01Z and 01:04Z corrections: "a timer is not evidence that executor work stopped"; "a connection failure after dispatch is not
  *               completion: a broken connection can leave the executor computing, the original BrokenPipe case"; the build declared NO hard timer, a slot lost to such a failure is kept
  *               until explicit recovery, and a gate with every slot lost fails closed). The proxy dispatches each query, then DROPS the REST-side socket 300 ms later while the executor
@@ -129,10 +135,10 @@ async function startHoldProxy(execUrl) {
   p.up = () => new Promise((r, j) => { p.server.once('error', j); p.server.listen(p.port, '127.0.0.1', r); });
   return p;
 }
-async function stack(body) {
+async function stack(body, extraEnv = {}) {
   const exec = await startExecutor({ store: tmpStore('adm-store-'), datasetId: DSID, create: true });
   const proxy = await startHoldProxy(exec.baseUrl);
-  const rest = await startRestServer({ board: makeBoardFixture({ conversations: [], postSeqEpoch: EPOCH_DOC, nextPostSeq: 1 }), env: { SCRUM_ROSTER_FILE: ROSTER_FILE, SCRUM_GRAPH_DATASET_ID: DSID, SCRUM_GRAPH_EXECUTOR_URL: proxy.url, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1' } });
+  const rest = await startRestServer({ board: makeBoardFixture({ conversations: [], postSeqEpoch: EPOCH_DOC, nextPostSeq: 1 }), env: { SCRUM_ROSTER_FILE: ROSTER_FILE, SCRUM_GRAPH_DATASET_ID: DSID, SCRUM_GRAPH_EXECUTOR_URL: proxy.url, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', ...extraEnv } });
   try {
     const card = await call(rest.baseUrl, 'POST', '/api/cards', { title: 'admission card', description: 'x', createdBy: 'ada' });
     assert.ok(card.status === 200 || card.status === 201, card.text);
@@ -366,4 +372,42 @@ test('A11 THE FEED IS BEHIND THE GATE: with the gate full, 20 distinct commit-or
     await Promise.all([...fillers, ...feeds]);
     proxy.holdMs = 0; await until(() => proxy.outstanding === 0, 60000);
   });
+});
+
+const changesUrl = () => `/api/changes?since=${encodeURIComponent(new Date().toISOString())}`;   // the log refuses a `since` older than its retention window, which starts at boot
+const LOGBORN_ON = { SCRUM_GRAPH_UNIT_LOGBORN: '1' };
+test('A12 /api/changes IS BEHIND THE GATE: with the log-born unit on and the gate full, 20 changes reads never lift the executor\'s outstanding queries above C', { skip: SKIP, todo: NEEDS_DECLARATION, timeout: 180000 }, async () => {
+  needDeclared();
+  await stack(async ({ base, proxy }) => {
+    const ok = await call(base, 'GET', changesUrl());
+    assert.equal(ok.status, 200, `CONTROL: /api/changes answers on a healthy executor with the log-born unit on: ${ok.status} ${ok.text.slice(0, 150)}`);
+    proxy.holdMs = 12000; proxy.resetCounts();
+    const fillers = Array.from({ length: 12 }, () => call(base, 'GET', '/api/conversations'));
+    await sleep(1500);
+    assert.ok(proxy.peak >= 1 && proxy.peak <= CAP, `CONTROL: the gate is full and within the cap (peak ${proxy.peak})`);
+    const reads = Array.from({ length: 20 }, () => call(base, 'GET', changesUrl()));
+    await sleep(2500);
+    assert.ok(proxy.peak <= CAP, `the executor peaked at ${proxy.peak} outstanding queries against the declared cap C=${CAP}: the changes feed's log-born query went around the gate`);
+    await Promise.all([...fillers, ...reads]);
+    proxy.holdMs = 0; await until(() => proxy.outstanding === 0, 60000);
+  }, LOGBORN_ON);
+});
+
+test('A12b /api/changes, A CONNECTION LOST AFTER DISPATCH: with the executor still computing, no further changes read is served and the executor never exceeds C', { skip: SKIP, todo: NEEDS_DECLARATION, timeout: 240000 }, async () => {
+  needDeclared();
+  await stack(async ({ base, proxy }) => {
+    const ok = await call(base, 'GET', changesUrl());
+    assert.equal(ok.status, 200, `CONTROL: /api/changes answers on a healthy executor with the log-born unit on: ${ok.status} ${ok.text.slice(0, 150)}`);
+    proxy.holdMs = 20000; proxy.dropAfterMs = 300; proxy.resetCounts();
+    const t0 = Date.now();
+    const fill = await Promise.all(Array.from({ length: CAP }, () => call(base, 'GET', changesUrl())));
+    assert.ok(fill.every((r) => r.status === 503), `CONTROL: the lost connections surface as refusals: ${fill.map((r) => r.status).join(',')}`);
+    assert.ok(proxy.outstanding >= 1, `CONTROL: the executor is STILL computing the abandoned queries (outstanding ${proxy.outstanding})`);
+    await sleep(3000 - (Date.now() - t0));
+    assert.ok(proxy.peak <= CAP, `CONTROL: the first wave stayed within the cap (peak ${proxy.peak})`);
+    const late = await Promise.all(Array.from({ length: 12 }, () => call(base, 'GET', changesUrl())));
+    assert.ok(late.every((r) => r.status === 503), `no late changes read is served while the executor still computes the lost ones: ${late.map((r) => `${r.status}/${r.ms}ms`).slice(0, 6).join(' ')}`);
+    assert.ok(proxy.peak <= CAP, `the executor peaked at ${proxy.peak} outstanding queries against the declared cap C=${CAP}: the gate freed a slot on a lost connection through the log-born adapter`);
+    proxy.dropAfterMs = 0; proxy.holdMs = 0; await until(() => proxy.outstanding === 0, 60000);
+  }, LOGBORN_ON);
 });
