@@ -10995,9 +10995,13 @@ async function targetedPosts(docPosts, { limit = Infinity, author, attachedTo, s
   const sel = order === 'created'
     ? `SELECT ?s WHERE { ${where} ?s <${G.S}dateCreated> ?c } ORDER BY DESC(?c) DESC(?n)`
     : `SELECT ?s WHERE { ${where} } ORDER BY DESC(?n)`;
+  // #1609 — an UNBOUNDED result (no limit: every match, as the bulk path answers) materializes up to the whole history, so it
+  // takes the bulk reader's budget; a bounded page keeps the short one. Measured on a 37k-post copy: the unbounded read sat at
+  // the 3 s bound (200 in 3.5 s, then 503 on the same call), a deadline and not an overload.
+  const reader = bounded ? POSTS_READER : (POSTS_BULK_READER || POSTS_READER);
   const [cq, wq] = await Promise.all([
-    POSTS_READER.query(`SELECT (COUNT(?s) AS ?c) WHERE { ${where} }`),
-    POSTS_READER.query(bounded ? `${sel} LIMIT ${limit + margin}` : sel),
+    reader.query(`SELECT (COUNT(?s) AS ?c) WHERE { ${where} }`),
+    reader.query(bounded ? `${sel} LIMIT ${limit + margin}` : sel),
   ]);
   if (!cq.ok) fail(cq);
   if (!wq.ok) fail(wq);
@@ -11007,8 +11011,8 @@ async function targetedPosts(docPosts, { limit = Infinity, author, attachedTo, s
   if (iris.length) {
     const values = iris.map((i) => `<${i}>`).join(' ');
     const [q, qa] = await Promise.all([
-      POSTS_READER.query(`SELECT ?s ?p ?o WHERE { VALUES ?s { ${values} } ?s ?p ?o }`),
-      POSTS_READER.query(`SELECT ?s ?p ?o ?post WHERE { VALUES ?post { ${values} } ?s <${G.NS}attachmentOf> ?post . ?s ?p ?o }`),
+      reader.query(`SELECT ?s ?p ?o WHERE { VALUES ?s { ${values} } ?s ?p ?o }`),
+      reader.query(`SELECT ?s ?p ?o ?post WHERE { VALUES ?post { ${values} } ?s <${G.NS}attachmentOf> ?post . ?s ?p ?o }`),
     ]);
     if (!q.ok) fail(q);
     if (!qa.ok) fail(qa);
