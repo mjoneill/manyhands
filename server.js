@@ -69,6 +69,7 @@ import { createPrompt, editPrompt, setEnabled, reorderPlaylist, removePrompt, se
 import { resolveProvenance } from './core/tending-provenance.mjs';
 import { boardToDomain, domainToBoard, cardToNode } from './core/mapping.mjs';
 import { OUTBOX_FIELD, outboxOf, withAnnouncement, listOutbox, modeProblem, legacyProof, postMatchesEntry, opIdFor, announcePostId, postCreateIntention, obligationIdOf } from './core/announce-outbox.mjs';   // #1574 C3a/C3b/C3c
+import * as U3 from './core/unit3-graph.mjs';   // #1582 — deliveries and model calls in the graph
 import { createGraphClient } from './core/graph-client.mjs';   // #1574 C3b — the conversations unit's executor door
 import { postFeed, DiscoveryError } from './core/post-discovery.mjs';   // #1574 R3
 import { createReadGate } from './core/read-admission.mjs';   // #1574 A1–A5
@@ -117,6 +118,10 @@ import { configureIdentities, usingDefaultRoster } from './core/identity.mjs';
 import { hostAllowed, parseAllowedHosts, refuseHost } from './core/host-guard.mjs';
 import { agentConstraints, unseenLayers } from './core/agent-constraints.mjs';   // #1350
 import { assembleMemories } from './core/memory-assemble.mjs';   // #1406
+
+// #1582 — deliveries and model calls live in the graph. Read once, at boot; the refusal without the conversations unit
+// is beside that unit's own block (C7′).
+const DELIVERIES_UNIT = process.env.SCRUM_GRAPH_UNIT_DELIVERIES === '1';
 
 let _documentWrites = 0;   // #1574 1b — successful writeBoard calls since boot; on /api/health as `documentWrites`
 // #1574 1b scope change — announcements whose inline attempt failed stay pending until a hand-run reconciler or the cards
@@ -4447,7 +4452,12 @@ const wakeToWire = (e) => ({ id: e['@id'], seat: e['scrum:wokeSeat'], at: e['scr
 // completed delivery, and a retry keeps its attempt number (the shape agreed
 // with the bridge side, so its trace and this record are one type).
 const DELIVERY_ID = () => `https://scrumboard.local/delivery/${crypto.randomUUID()}`;
-function deliveriesOf(data) { return Array.isArray(data.deliveries) ? data.deliveries : []; }
+// #1582 C8′ — with the deliveries unit on, the DOCUMENT's deliveries are not the record. Reading them is a defect, so it
+// THROWS rather than returning [] ("no deliveries"), which a caller would carry on with silently.
+function deliveriesOf(data) {
+  if (DELIVERIES_UNIT) throw new Error('#1582: deliveries live in the graph (SCRUM_GRAPH_UNIT_DELIVERIES=1); the document collection is not read');
+  return Array.isArray(data.deliveries) ? data.deliveries : [];
+}
 // ── #915 — ROLES the team uses, as entities (one per key; a grant is a seat declaration) ──
 function rolesOf(data) { return Array.isArray(data.roles) ? data.roles : []; }
 const roleEvent = (op, e, actor) => ({ op, actor, entity: { kind: 'role', id: e['@id'] }, state: e });
@@ -5247,7 +5257,11 @@ async function handlePatchAgent(req, res, seat) {
 
 // ── #1202 — THE PROVENANCE LEDGER: one row per model call, as a node ────────
 const MODEL_CALL_ID = () => `https://scrumboard.local/model-call/${crypto.randomUUID()}`;
-function modelCallsOf(data) { return Array.isArray(data.modelCalls) ? data.modelCalls : []; }
+// #1582 C8′ — the same guard as deliveriesOf: with the unit on, reading the document's model calls throws, never "0 spent".
+function modelCallsOf(data) {
+  if (DELIVERIES_UNIT) throw new Error('#1582: model calls live in the graph (SCRUM_GRAPH_UNIT_DELIVERIES=1); the document collection is not read');
+  return Array.isArray(data.modelCalls) ? data.modelCalls : [];
+}
 const modelCallEvent = (e, actor) => ({ op: 'create', actor, entity: { kind: 'model-call', id: e['@id'] }, state: e });
 const modelCallToWire = (e) => ({
   id: e['@id'], agent: e['scrum:agent'], model: e['scrum:model'], provider: e['scrum:provider'] ?? null,
@@ -6007,6 +6021,7 @@ async function handleCreateDelivery(req, res) {
     if (!conversation) return sendJSON(res, 400, { error: 'conversation is required — the id of the message offered.' });
     const source = typeof body.source === 'string' ? body.source : 'fanout';
     if (!DELIVERY_SOURCES.has(source)) return sendJSON(res, 400, { error: `source must be one of ${[...DELIVERY_SOURCES].join(' | ')} (got ${JSON.stringify(body.source)})` });
+    if (DELIVERIES_UNIT) { const r = await graphCreateDelivery({ by, to, conversation, source }); return sendJSON(res, r.status, r.wire); }
     // #1574 D1 — with the conversations unit ON the graph is authoritative, as for GET /api/conversations/:id: it is read
     // first (outside the lock), and a graph that cannot be read is a 503, never "not held", never a created delivery, and
     // never answered from a document copy instead. Only a post the graph does not hold falls back to the document.
@@ -6076,7 +6091,7 @@ function deliveryEventInput(body) {
 
 /** Under the lock: apply one validated step to `data` in memory. {status, wire, event?}; the caller writes. */
 function applyDeliveryEvent(data, id, input) {
-  const { by, state, source, body } = input;
+  const { body } = input;
   const idx = deliveriesOf(data).findIndex((d) => d['@id'] === id);
   if (idx < 0) return { status: 404, wire: { error: `no delivery ${id}` } };
   const cur = deliveriesOf(data)[idx];
@@ -6084,6 +6099,20 @@ function applyDeliveryEvent(data, id, input) {
   // hold is a 400 with nothing appended — never a dangling edge in the graph.
   const modelCall = body.modelCall == null ? null : (modelCallsOf(data).find((c) => c['@id'] === body.modelCall.trim() || c['@id'].endsWith(`/${body.modelCall.trim()}`))?.['@id'] ?? undefined);
   if (modelCall === undefined) return { status: 400, wire: { error: `modelCall ${JSON.stringify(body.modelCall)} names no scrum:ModelCall row on this board — post the ledger row first (POST /api/model-calls), then link it` } };
+  const next = deliveryNextEvent(cur, input, modelCall);
+  if (!next.ev) return next;
+  const entity = { ...cur, 'scrum:hasEvent': [...deliveryEventsOf(cur), next.ev] };
+  data.deliveries = deliveriesOf(data).map((d, i) => (i === idx ? entity : d));
+  return { status: 201, wire: deliveryToWire(entity), event: deliveryEvent('update', entity, input.by) };
+}
+
+/**
+ * #1582 — THE TRANSITION RULES, shared by the document path (applyDeliveryEvent) and the graph path (graphDeliveryStep):
+ * from a delivery as it stands and a validated step, either a refusal {status, wire} or the event {ev} to append.
+ * Pure: it reads no store and writes nothing, so both stores run exactly the same rules.
+ */
+function deliveryNextEvent(cur, input, modelCall) {
+  const { by, state, source, body } = input;
   const events = deliveryEventsOf(cur);
   const latest = deliveryState(cur);
   // THE ATOMIC STEP. Under the write lock, so two runners reading "offered"
@@ -6113,15 +6142,14 @@ function applyDeliveryEvent(data, id, input) {
     ...(typeof body.traceId === 'string' ? { 'scrum:traceId': body.traceId.trim() } : {}),   // #1372
     ...(modelCall ? { 'scrum:ofModelCall': modelCall } : {}),
   };
-  const entity = { ...cur, 'scrum:hasEvent': [...events, ev] };
-  data.deliveries = deliveriesOf(data).map((d, i) => (i === idx ? entity : d));
-  return { status: 201, wire: deliveryToWire(entity), event: deliveryEvent('update', entity, by) };
+  return { ev };
 }
 
 async function handleCreateDeliveryEvent(req, res, id) {
   try {
     const input = deliveryEventInput(JSON.parse(await readBody(req)));
     if (!input.ok) return sendJSON(res, input.status, input.wire);
+    if (DELIVERIES_UNIT) { const r = await graphDeliveryStep(id, input); return sendJSON(res, r.status, r.wire); }
     const result = await withWriteLock(async () => {
       const data = readBoard();
       const r = applyDeliveryEvent(data, id, input);
@@ -6152,6 +6180,16 @@ async function handleBatchDeliveryEvents(req, res) {
       const input = deliveryEventInput(e);
       return input.ok ? { id, input } : { id, refused: input };
     });
+    if (DELIVERIES_UNIT) {
+      // #1582 — PER ENTRY, in order: each entry is its own guarded executor update with its own receipt, so an executor
+      // error on one entry is a 503 for THAT entry and the others still apply (one-update batches are deferred).
+      const out = [];
+      for (const p of prepared) {
+        const r = p.refused ?? await graphDeliveryStep(p.id, p.input);
+        out.push({ id: p.id, status: r.status, body: r.wire });
+      }
+      return sendJSON(res, 200, { results: out });
+    }
     const results = await withWriteLock(async () => {
       const data = readBoard();
       const out = []; const events = [];
@@ -6171,8 +6209,151 @@ async function handleBatchDeliveryEvents(req, res) {
   }
 }
 
-function handleListDeliveries(req, res) {
+// ── #1582 — THE GRAPH PATH (SCRUM_GRAPH_UNIT_DELIVERIES=1): a delivery is a node in the graph and every step is ONE
+// executor update guarded by the delivery's version, so no write lock is taken and two racing claims cannot both land.
+// The transition rules are deliveryNextEvent's, unchanged. Every answer the graph cannot back is a 503, never "not found".
+const deliveryGraphDown = (why, extra = {}) => ({ status: 503, wire: { error: `the graph could not be read or written, so this delivery's state is unknown: ${why}`, code: 'GRAPH_UNAVAILABLE', ...extra } });
+const graphActor = (by) => `${G.PERSON}${encodeURIComponent(by)}`;
+
+/** One delivery from the graph, in one read: {unavailable} | {absent} | {entity, ver}. */
+async function graphDelivery(iri) {
+  const q = await POSTS_READER.query(U3.deliveryQuery(iri));
+  if (!q.ok) return { unavailable: q.reason || 'unreadable' };
+  const { nodeRows, stepRows } = U3.splitDeliveryRows(iri, q.rows);
+  return U3.deliveryFromRows(iri, nodeRows, stepRows) || { absent: true };
+}
+
+/** A delivery id as a caller sends it (the full IRI, or its uuid) → the IRI, or null for anything REST will not put in a query. */
+const deliveryIriFromId = (id) => {
+  const iri = typeof id === 'string' && !id.includes('/') ? `${U3.DELIVERY_PREFIX}${id}` : id;
+  return U3.deliverySuffix(iri) ? iri : null;
+};
+
+async function graphCreateDelivery({ by, to, conversation, source }) {
+  if (!U3.SEAT_RE.test(to)) return { status: 400, wire: { error: `to must be a seat key (got ${JSON.stringify(to)})` } };
+  if (!U3.POST_ID_RE.test(conversation)) return { status: 400, wire: { error: `conversation ${JSON.stringify(conversation)} is not a message this board holds. A delivery of nothing is refused.` } };
+  const g = await readGraphPost(conversation);
+  if (g.unavailable) return deliveryGraphDown(`whether this board holds conversation ${JSON.stringify(conversation)} is unknown: ${g.unavailable}`);
+  if (!(g.post || g.redacted)) {
+    const data = readBoard();
+    if (!(Array.isArray(data.conversations) && data.conversations.some((c) => c && c.id === conversation))) {
+      return { status: 400, wire: { error: `conversation ${JSON.stringify(conversation)} is not a message this board holds. A delivery of nothing is refused.` } };
+    }
+  }
+  // Idempotent on (seat, message), and the identity is DERIVED from the pair: a re-offer, or two producers offering the
+  // same post to the same seat, are the same node, on this board or any other.
+  const iri = U3.deliveryIriOf(to, conversation);
+  const cur = await graphDelivery(iri);
+  if (cur.unavailable) return deliveryGraphDown(cur.unavailable);
+  if (cur.entity) return { status: 200, wire: deliveryToWire(cur.entity) };
+  if (g.redacted) return { status: 409, wire: { error: `conversation ${JSON.stringify(conversation)} has been redacted; it is not offered to anyone new`, code: 'POST_REDACTED' } };
+  const now = new Date().toISOString();
+  const r = await ANNOUNCE_EXECUTOR.update({
+    kind: 'delivery.create', opId: U3.deliveryCreateOp(iri), actor: graphActor(by),
+    delivery: { iri, deliveredTo: to, ofConversation: `${G.ENTITY}${conversation}`, source, offeredAt: now,
+      step: { iri: U3.stepIri(iri, 1), index: '1', state: 'offered', at: now, source, creator: by } },
+  });
+  if (r.outcome === 'APPLIED') {
+    return { status: 201, wire: deliveryToWire({ '@id': iri, 'scrum:deliveredTo': to, 'scrum:ofConversation': conversation, 'scrum:offeredAt': now,
+      'scrum:hasEvent': [{ 'scrum:state': 'offered', 'scrum:at': now, 'scrum:source': source, creator: by }] }) };
+  }
+  // Someone else created the pair between the read and this write (or an earlier create holds this opId): answer theirs.
+  if (r.outcome === 'PRECONDITION_FAILED' || r.reason === 'intent-collision') {
+    const again = await graphDelivery(iri);
+    if (again.entity) return { status: 200, wire: deliveryToWire(again.entity) };
+    return deliveryGraphDown(again.unavailable || `the create was refused (${r.outcome}) and the delivery cannot be read back`);
+  }
+  if (r.outcome === 'REJECTED') return { status: 500, wire: { error: `the graph refused the create: ${r.reason ?? 'rejected'}` } };
+  return deliveryGraphDown(`${String(r.outcome).toLowerCase()}: ${r.reason ?? ''}`.trim());
+}
+
+/**
+ * ONE STEP, through the graph. The requestId names the caller's INTENT: its opId is derived from (delivery, requestId), so
+ * a retry of the same request reads its own stored outcome back (APPLIED → 200 with the delivery as it stands; refused →
+ * the 409 it got), and only a NEW requestId is a new attempt against the delivery's current version.
+ */
+async function graphDeliveryStep(id, input) {
+  const rid = input.body.requestId;
+  if (rid == null) return { status: 400, wire: { error: 'requestId is required: 8-64 of [A-Za-z0-9-], one per intent. A retry of the same step sends the same requestId.', code: 'REQUEST_ID_REQUIRED' } };
+  if (typeof rid !== 'string' || !U3.REQUEST_ID_RE.test(rid)) return { status: 400, wire: { error: `requestId must be 8-64 of [A-Za-z0-9-] (got ${JSON.stringify(rid)})`, code: 'REQUEST_ID_INVALID' } };
+  const iri = deliveryIriFromId(id);
+  if (!iri) return { status: 404, wire: { error: `no delivery ${id}` } };
+  const opId = U3.deliveryStepOp(iri, rid);
+  const rec = await POSTS_READER.query(U3.receiptQuery(opId));
+  if (!rec.ok) return deliveryGraphDown(rec.reason || 'unreadable', { requestId: rid });
+  const cur = await graphDelivery(iri);
+  if (cur.unavailable) return deliveryGraphDown(cur.unavailable, { requestId: rid });
+  if (rec.rows.length) {
+    if (!cur.entity) return deliveryGraphDown('this requestId has a stored outcome but its delivery cannot be read', { requestId: rid });
+    if (U3.isApplied(rec.rows)) return { status: 200, wire: deliveryToWire(cur.entity) };
+    return { status: 409, wire: { error: `this requestId was already refused: the delivery is ${deliveryState(cur.entity)}. Read it, and send a NEW requestId for a new step.`, state: deliveryState(cur.entity), requestId: rid } };
+  }
+  if (!cur.entity) return { status: 404, wire: { error: `no delivery ${id}` } };
+  let modelCall = null;
+  if (input.body.modelCall != null) {
+    const m = input.body.modelCall.trim();
+    const mIri = m.startsWith(U3.MODEL_CALL_PREFIX) ? m : `${U3.MODEL_CALL_PREFIX}${m}`;
+    const ok = /^https:\/\/scrumboard\.local\/model-call\/[A-Za-z0-9-]{1,64}$/.test(mIri) ? await POSTS_READER.query(U3.modelCallExistsQuery(mIri)) : { ok: true, rows: [] };
+    if (!ok.ok) return deliveryGraphDown(ok.reason || 'unreadable', { requestId: rid });
+    if (!ok.rows.length) return { status: 400, wire: { error: `modelCall ${JSON.stringify(input.body.modelCall)} names no scrum:ModelCall row on this board — post the ledger row first (POST /api/model-calls), then link it` } };
+    modelCall = mIri;
+  }
+  const next = deliveryNextEvent(cur.entity, input, modelCall);
+  if (!next.ev) return next;
+  const ev = next.ev; const index = cur.ver + 1;
+  const r = await ANNOUNCE_EXECUTOR.update({
+    kind: 'delivery.step', opId, actor: graphActor(input.by),
+    target: { iri, expectedVersion: String(cur.ver) },
+    step: { iri: U3.stepIri(iri, index), index: String(index), state: ev['scrum:state'], at: ev['scrum:at'], source: ev['scrum:source'], creator: ev.creator,
+      ...(ev['scrum:attempt'] != null ? { attempt: ev['scrum:attempt'] } : {}), ...(ev['scrum:reason'] != null ? { reason: ev['scrum:reason'] } : {}),
+      ...(ev.text != null ? { text: ev.text } : {}), ...(ev['scrum:traceId'] != null ? { traceId: ev['scrum:traceId'] } : {}),
+      ...(ev['scrum:ofModelCall'] != null ? { ofModelCall: ev['scrum:ofModelCall'] } : {}) },
+  });
+  if (r.outcome === 'APPLIED') return { status: 201, wire: deliveryToWire({ ...cur.entity, 'scrum:hasEvent': [...deliveryEventsOf(cur.entity), ev] }) };
+  if (r.outcome === 'PRECONDITION_FAILED') {
+    // Another step landed between this read and this write. Its opId now holds this refusal, so the answer is final.
+    const again = await graphDelivery(iri);
+    if (!again.entity) return deliveryGraphDown(again.unavailable || 'the delivery cannot be read back', { requestId: rid });
+    const st = deliveryState(again.entity);
+    const verdict = deliveryNextEvent(again.entity, input, modelCall);
+    return verdict.ev
+      ? { status: 409, wire: { error: `the delivery changed while this step was written (it is now ${st}); read it, and send a NEW requestId to try again`, state: st, code: 'DELIVERY_CHANGED' } }
+      : verdict;
+  }
+  if (r.reason === 'intent-collision') {
+    // The same requestId was written by a concurrent copy of this request: its stored outcome is this request's outcome.
+    const rec2 = await POSTS_READER.query(U3.receiptQuery(opId));
+    const again = await graphDelivery(iri);
+    if (rec2.ok && again.entity) {
+      if (U3.isApplied(rec2.rows)) return { status: 200, wire: deliveryToWire(again.entity) };
+      return { status: 409, wire: { error: `this requestId was already refused: the delivery is ${deliveryState(again.entity)}`, state: deliveryState(again.entity), requestId: rid } };
+    }
+    return deliveryGraphDown(rec2.reason || again.unavailable || 'the stored outcome cannot be read', { requestId: rid });
+  }
+  if (r.outcome === 'REJECTED') return { status: 500, wire: { error: `the graph refused the step: ${r.reason ?? 'rejected'}` } };
+  // UNKNOWN / UNAVAILABLE: it may or may not have landed. The same requestId, resent, reads the outcome back.
+  return deliveryGraphDown(`${String(r.outcome).toLowerCase()}: ${r.reason ?? ''}`.trim() + '; resend with the SAME requestId', { requestId: rid });
+}
+
+async function graphListDeliveries(q) {
+  if (q.to && !U3.SEAT_RE.test(q.to)) return { status: 200, wire: { deliveries: [], count: 0 } };
+  if (q.conversation && !U3.POST_ID_RE.test(q.conversation)) return { status: 200, wire: { deliveries: [], count: 0 } };
+  const r = await POSTS_BULK_READER.query(U3.deliveriesForQuery({ to: q.to, conversation: q.conversation }));
+  if (!r.ok) return deliveryGraphDown(r.reason || 'unreadable');
+  let out = U3.groupByDelivery(r.rows).map((d) => d.entity);
+  if (q.open === '1' || q.open === 'true') out = out.filter(deliveryOpen);
+  out = out.map(deliveryToWire).sort((a, b) => (a.offeredAt < b.offeredAt ? -1 : a.offeredAt > b.offeredAt ? 1 : 0));
+  const limit = Number.parseInt(q.limit, 10);
+  if (Number.isInteger(limit) && limit > 0) out = out.slice(0, limit);
+  return { status: 200, wire: { deliveries: out, count: out.length } };
+}
+
+async function handleListDeliveries(req, res) {
   const q = parseQuery(req.url);
+  if (DELIVERIES_UNIT) {
+    try { const r = await graphListDeliveries(q); return sendJSON(res, r.status, r.wire); }
+    catch (e) { console.error('GET /api/deliveries:', e.message); return sendJSON(res, 500, { error: e.message }); }
+  }
   let out = deliveriesOf(readBoard());
   if (q.to) out = out.filter((d) => d['scrum:deliveredTo'] === q.to);
   if (q.conversation) out = out.filter((d) => d['scrum:ofConversation'] === q.conversation);
@@ -8738,6 +8919,8 @@ async function handleBoardStatus(req, res) {
 function handleGetBoard(req, res) {
   try {
     const data = readBoard();
+    // #1582 — with the deliveries unit on, the document's copies are not the record: they are not served as if they were.
+    if (DELIVERIES_UNIT) { delete data.deliveries; delete data.modelCalls; }
     sendJSON(res, 200, data);
   } catch (e) {
     console.error('GET /api/board:', e.message);
@@ -12309,6 +12492,12 @@ if (process.env.SCRUM_GRAPH_UNIT_CONVERSATIONS === '1') {
   POSTS_BULK_READER = gate.reader(raw, POSTS_BULK_READ_TIMEOUT_MS);
   console.error(`${new Date().toISOString()} #1574 conversations unit ON: publisher-mode announcements go through the graph executor (lock released during the call)`);
   console.error(`${new Date().toISOString()} #1574 conversations unit ON: standing checks stale-claims and role-expiry are DISABLED (${DOC_POST_CHECK_DISABLED})`);
+}
+// #1582 C7′ — deliveries and model calls in the graph need the conversations unit: a delivery's "the post exists" check
+// and a model call's redaction guard read POSTS from the graph, so with that unit off there is no graph to read.
+if (DELIVERIES_UNIT) {
+  if (!ANNOUNCE_EXECUTOR) throw new Error('#1582: SCRUM_GRAPH_UNIT_DELIVERIES=1 requires SCRUM_GRAPH_UNIT_CONVERSATIONS=1 (deliveries and model calls read their posts from the graph)');
+  console.error(`${new Date().toISOString()} #1582 deliveries unit ON: deliveries and model calls are read from and written to the graph executor; the document collections are not read`);
 }
 if (GRAPH_SLICE.enabled) {
   installStructuredCloneCounter();
