@@ -69,7 +69,7 @@ export function withAnnouncement(outbox, { mutationId, origin, at, originActor, 
       obligationId, mutationId, slot: s.slot, status: 'pending', mode,
       ...(mode === 'legacy' && typeof s.legacyPostId === 'string' && s.legacyPostId ? { legacyPostId: s.legacyPostId } : {}),
       payload: {
-        author: 'board',
+        author: typeof s.author === 'string' && s.author ? s.author : 'board',   // #1574 1b — the wiki notice is authored `wiki`, as it always was
         body: s.body,
         mentions: Array.isArray(s.mentions) ? [...s.mentions] : [],
         notify: s.notify,

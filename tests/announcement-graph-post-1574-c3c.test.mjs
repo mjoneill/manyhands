@@ -164,15 +164,19 @@ async function withStack(board, { envExtra = {}, proxyDelayMs = 0 } = {}, body) 
       // every request header is forwarded except the two the fetch sets itself: the executor REQUIRES x-op-id on a write, and a proxy that drops it
       // turns a healthy publish into a pending one (found when the real build ran this row)
       const fwd = { ...req.headers }; delete fwd.host; delete fwd['content-length']; delete fwd.connection;
-      const f = await fetch(`${exec.baseUrl}${req.url}`, { method: req.method, headers: fwd, ...(req.method === 'POST' ? { body: Buffer.concat(chunks) } : {}) });
-      res.statusCode = f.status; res.end(await f.text());
+      // A forward that fails (the executor was killed at teardown while a background publish was still in flight: the server now publishes its own announcements after a claim, #1574 1b) must END
+      // the caller's connection, never throw out of the request handler: an unhandled rejection after the row ends fails the whole file.
+      try {
+        const f = await fetch(`${exec.baseUrl}${req.url}`, { method: req.method, headers: fwd, ...(req.method === 'POST' ? { body: Buffer.concat(chunks) } : {}) });
+        res.statusCode = f.status; res.end(await f.text());
+      } catch { try { req.socket.destroy(); } catch { /* gone */ } }
     });
     await new Promise((r) => proxy.listen(0, '127.0.0.1', r));
     url = `http://127.0.0.1:${proxy.address().port}`;
   }
   const s = await startRestServer({ board, env: { SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', SCRUM_GRAPH_DATASET_ID: DSID, SCRUM_GRAPH_EXECUTOR_URL: url, ...envExtra } });
   try { return await body({ s, exec, store, proxyState }); }
-  finally { await s.stop(); proxy?.close(); await killExecutor(exec); }
+  finally { await s.stop(); proxy?.closeAllConnections?.(); proxy?.close(); await killExecutor(exec); }
 }
 
 // ------------------------------------------------------------------ 1. the intention is pure and frozen

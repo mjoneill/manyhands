@@ -68,7 +68,7 @@ import { mintId } from './core/tending-ids.mjs';
 import { createPrompt, editPrompt, setEnabled, reorderPlaylist, removePrompt, setShuffle, readShuffle } from './core/tending-authoring.mjs';
 import { resolveProvenance } from './core/tending-provenance.mjs';
 import { boardToDomain, domainToBoard, cardToNode } from './core/mapping.mjs';
-import { OUTBOX_FIELD, outboxOf, withAnnouncement, listOutbox, modeProblem, legacyProof, postMatchesEntry, opIdFor, announcePostId, postCreateIntention } from './core/announce-outbox.mjs';   // #1574 C3a/C3b/C3c
+import { OUTBOX_FIELD, outboxOf, withAnnouncement, listOutbox, modeProblem, legacyProof, postMatchesEntry, opIdFor, announcePostId, postCreateIntention, obligationIdOf } from './core/announce-outbox.mjs';   // #1574 C3a/C3b/C3c
 import { createGraphClient } from './core/graph-client.mjs';   // #1574 C3b — the conversations unit's executor door
 import { postFeed, DiscoveryError } from './core/post-discovery.mjs';   // #1574 R3
 import { createReadGate } from './core/read-admission.mjs';   // #1574 A1–A5
@@ -117,6 +117,13 @@ import { configureIdentities, usingDefaultRoster } from './core/identity.mjs';
 import { hostAllowed, parseAllowedHosts, refuseHost } from './core/host-guard.mjs';
 import { agentConstraints, unseenLayers } from './core/agent-constraints.mjs';   // #1350
 import { assembleMemories } from './core/memory-assemble.mjs';   // #1406
+
+let _documentWrites = 0;   // #1574 1b — successful writeBoard calls since boot; on /api/health as `documentWrites`
+// #1574 1b scope change — announcements whose inline attempt failed stay pending until a hand-run reconciler or the cards
+// migration discharges them; this count makes them VISIBLE without a query. Recounted from the board each writeBoard
+// already holds (no extra read), and once at boot. null until the first count: unknown, never a fabricated zero.
+let _announcementsPending = null;
+const countPendingAnnouncements = (data) => Object.values(outboxOf(data).entries).filter((e) => e && e.status === 'pending').length;
 
 const PORT = process.env.SCRUM_PORT ? parseInt(process.env.SCRUM_PORT, 10) : 3141;
 // #1338 — extra local names this board may be reached by. Loopback names need
@@ -402,12 +409,15 @@ if (PORT !== DEFAULT_PORT && !declaresTarget) {
 // the reliability backstop. Critically, a down/absent MCP server must NEVER
 // break posting, so the fetch is not awaited and every error is swallowed.
 function notifyMcpOfPost(conversation) {
-  if (!MCP_NOTIFY_URL) return;
-  fetch(MCP_NOTIFY_URL, {
+  if (!MCP_NOTIFY_URL) return Promise.resolve(false);
+  // #1574 1b — returns a promise (true when the endpoint answered) so the announcement publisher can AWAIT its
+  // dispatch before recording completion. Every other caller still fires and forgets, exactly as before.
+  return fetch(MCP_NOTIFY_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ conversation }),
-  }).catch(() => { /* MCP down / no listener — posting still succeeded */ });
+    signal: AbortSignal.timeout(5000),
+  }).then((r) => r.ok, () => false);   // MCP down / no listener — posting still succeeded
 }
 
 // ── #578 — announcing a claim transition ────────────────────────────────
@@ -493,6 +503,42 @@ function commitCardObligation(data, card, actor, slot, action, announced = null)
     mode: 'legacy',
     slots: [{ slot, body, mentions: extractMentionsFromRoster(body, currentRoster(data)), notify: true, ...(announced ? { legacyPostId: announced.id } : {}) }],
   });
+}
+
+// #1574 1b — THE BOARD'S OWN POSTS LEAVE THE DOCUMENT. With the conversations unit on, an announcement is NOT a
+// document post: it is a publisher-mode obligation committed in the ORIGINATING write, and its post reaches the graph
+// after the lock is released (publishAnnouncements below). Its postSeq and publicationAt are fixed HERE, in that same
+// write, from the same NEXT_POST_SEQ counter and lock as an ordinary post's reservation (revision 1, c′): from this
+// moment the intention is fully determined by stored fields, so a retry, a restart or two reconcilers all build the
+// identical intention and the executor's idempotency gives one post. Nothing is pushed into data.conversations.
+//
+// Returns null when the publisher path does not apply (unit off, or an un-migrated board with no post sequence): the
+// caller then keeps today's document path, byte for byte. Otherwise {entry, events, nextMark}: the caller adds
+// `events` to its writeBoard, calls raisePostSeqMark(nextMark) only AFTER that write succeeded, and hands `entry` to
+// publishAnnouncements once the lock is released.
+function usesAnnouncementPublisher(data) {
+  return !!ANNOUNCE_EXECUTOR && postSeqState(data).state !== 'clean';
+}
+function commitPublisherAnnouncement(data, { slot, body, author = CLAIM_ANNOUNCER, notify, origin, actor }) {
+  if (!usesAnnouncementPublisher(data) || typeof body !== 'string' || !body) return null;
+  const mutationId = crypto.randomUUID();
+  const at = new Date().toISOString();
+  const events = [];
+  if (!isEpoch(data[POST_SEQ_EPOCH])) { data[POST_SEQ_EPOCH] = mintEpoch(); events.push(boardMetaEvent(POST_SEQ_EPOCH, data[POST_SEQ_EPOCH])); }
+  const stored = Number.isSafeInteger(data[NEXT_POST_SEQ]) && data[NEXT_POST_SEQ] > 0 ? data[NEXT_POST_SEQ] : 1;
+  // Never below the mark: a document counter behind the graph would hand out a number a graph post already holds.
+  const n = POST_SEQ_MARK != null && POST_SEQ_MARK > stored ? POST_SEQ_MARK : stored;
+  data[NEXT_POST_SEQ] = n + 1;
+  events.push(boardMetaEvent(NEXT_POST_SEQ, n + 1));
+  const ob = withAnnouncement(data[OUTBOX_FIELD], {
+    mutationId, origin, at, originActor: actor, mode: 'publisher',
+    slots: [{ slot, body, author, mentions: extractMentionsFromRoster(body, currentRoster(data)), notify: !!notify }],
+  });
+  const id = obligationIdOf(mutationId, slot);
+  const entry = { ...ob.entries[id], postSeq: n, publicationAt: at };
+  data[OUTBOX_FIELD] = { origins: ob.origins, entries: { ...ob.entries, [id]: entry } };
+  events.push(announcementEvent(entry, actor));
+  return { entry, events, nextMark: n + 1 };
 }
 
 // README block injected into every write so the warning is the first thing
@@ -1341,6 +1387,8 @@ function writeBoard(data, events) {
   // #686 — every server write is a ROSTERED save: Person nodes are
   // (re)materialized into @graph from this one authority on every write.
   saveDomain(BOARD_DATA_FILE, boardToDomain(data), { now: data.lastUpdated, roster: { seats: currentRoster(data) } });
+  _documentWrites++;    // #1574 1b — counted only once the save returned: a write that threw is not a write
+  try { _announcementsPending = countPendingAnnouncements(data); } catch { /* the count is advisory: a write never fails on it */ }
   _graphDirty = true;   // #694 — the replica rebuilds lazily on next query
   _graphGeneration++;   // #931 — and SAYS SO, so a sync in flight cannot clear it
   testBarrier('after-document');   // #1574 C3a — after the document write, before any caller responds
@@ -5111,7 +5159,9 @@ async function handlePatchAgent(req, res, seat) {
     if (body.contextPolicy != null && !AGENT_CONTEXT_POLICIES.has(body.contextPolicy)) return sendJSON(res, 400, { error: 'contextPolicy must be artifact-only or thread' });
     if (body.prompt !== undefined) return sendJSON(res, 400, { error: 'the prompt is not a field of the agent — POST /api/agents/:seat/prompt mints a new VERSION; overwriting would lose which prompt wrote which post' });
     if (body.sampling !== undefined && body.sampling !== null) { const err = samplingError(body.sampling); if (err) return sendJSON(res, 400, { error: err }); }
+    let agentPub = null;   // #1574 1b — the rest/retire notice as a publisher obligation (unit on)
     const result = await withWriteLock(async () => {
+      agentPub = null;   // reset per attempt
       const data = readBoard();
       assertPostSeqWritable(data);   // #1592 — a corrupt post sequence refuses the WHOLE write, before any change
       const agent = findAgent(data, seat);
@@ -5133,8 +5183,12 @@ async function handlePatchAgent(req, res, seat) {
           releasedCards.push(card); releasedEvents.push(cardEvent('update', card, by));
         }
         if (releasedCards.length) {
-          const conv = createConversationFromPayload({ author: CLAIM_ANNOUNCER, body: `🔔 ${seat} is ${body.state} (set by ${by}) — released ${releasedCards.map((c) => `#${c.shortId}`).join(', ')}; ${releasedCards.length === 1 ? 'it is' : 'they are'} free to pull` });
-          pushPost(data, conv); releasedEvents.push(convEvent(conv, by));
+          const restBody = `🔔 ${seat} is ${body.state} (set by ${by}) — released ${releasedCards.map((c) => `#${c.shortId}`).join(', ')}; ${releasedCards.length === 1 ? 'it is' : 'they are'} free to pull`;
+          // #1574 1b — unit on: an obligation in this write, published after the lock. NO notify for either slot: that
+          // is today's policy (this route has never called notify), frozen as-is.
+          agentPub = commitPublisherAnnouncement(data, { slot: body.state === 'retired' ? 'agent-retire' : 'agent-rest', body: restBody, notify: false, origin: { agent: seat, releasedCards: releasedCards.map((c) => c.id) }, actor: by });
+          if (agentPub) releasedEvents.push(...agentPub.events);
+          else { const conv = createConversationFromPayload({ author: CLAIM_ANNOUNCER, body: restBody }); pushPost(data, conv); releasedEvents.push(convEvent(conv, by)); }
           updated['scrum:releasedOnRest'] = releasedCards.map((c) => c.shortId);
         }
       }
@@ -5182,9 +5236,11 @@ async function handlePatchAgent(req, res, seat) {
       const warning = reconcilePromptGrants(data, updated, updated.dateModified); // #1242
       data.agents = agentsOf(data).map((a) => (a['@id'] === agent['@id'] ? updated : a));
       writeBoard(data, [agentEvent('update', updated, by), ...releasedEvents]);
+      if (agentPub) raisePostSeqMark(agentPub.nextMark);   // only after the write succeeded
       return { status: 200, wire: withWarning({ ...agentToWire(data, updated), released: releasedCards.map((c) => c.shortId) }, warning) };
     });
     sendJSON(res, result.status, result.wire);
+    if (result.status === 200 && agentPub) publishAnnouncements([agentPub.entry]);   // #1574 1b — after the answer
   } catch (e) { if (e instanceof PostSeqStateCorrupt) return sendJSON(res, 500, e.body);   // #1592
     console.error('PATCH /api/agents/:seat:', e.message); sendJSON(res, 500, { error: e.message }); }
 }
@@ -6843,6 +6899,12 @@ function handleHealth(req, res) {
     // #1574 attempt 3 — the read gate, visible: running/lost/waiting from the gate itself. null when the conversations
     // unit is off (there is no gate), never a fabricated zero.
     readGate: READ_GATE ? READ_GATE.stats() : null,
+    // #1574 1b — successful board-document writes since this process booted (one per writeBoard). Monotonic, starts
+    // at 0: the instrument for "exactly one document write" rows, and for #1617's write-load probes.
+    documentWrites: _documentWrites,
+    // #1574 1b — pending announcement obligations (legacy and publisher). Above zero means: run
+    // `scripts/announce-publisher.mjs --once` by hand, or the cards migration will discharge them.
+    announcementsPending: _announcementsPending,
     uptimeMs: Math.round(process.uptime() * 1000),
     now: new Date().toISOString(),
     // #1343 — which auth mode is LIVE is a fact read here, not a belief about
@@ -9513,6 +9575,7 @@ async function handleUpdateCard(req, res, idOrShortId) {
     // path can ring the doorbell for it. Reset per attempt inside the lock, so a
     // retried write can never notify with a stale nudge from an earlier pass.
     let nudge = null;
+    let nudgePub = null;   // #1574 1b — the done-nudge as a publisher obligation (unit on); reset per attempt like `nudge`
     let shifted = [];   // #1584 — neighbours makeRoom renumbered; reset per attempt
     // Phase 2 step 1 — a projection's comparand reads the posts GET reads. With the conversations unit on, a card's
     // comments live in the graph and the document's copy may be empty, so a comparand over `data.conversations` would
@@ -9573,6 +9636,7 @@ async function handleUpdateCard(req, res, idOrShortId) {
       const wasDone = card.column === 'done';
       let fanout = [];        // #669 — siblings this patch rewrites via #614
       nudge = null;           // #1081 — reset per attempt; declared above the lock
+      nudgePub = null;
       // #831 — mirror create's precedence: `assignees` (plural) wins over the
       // `assignee` alias when a caller sends both, so the result does not
       // depend on JSON key order.
@@ -9726,12 +9790,14 @@ async function handleUpdateCard(req, res, idOrShortId) {
       // don't. Best-effort like every announcement — never costs the PATCH.
       if (!wasDone && card.column === 'done') {
         try {
-          const conv = createConversationFromPayload({
-            body: `✅ #${card.shortId} done — what's the next pull? (every done has a next: claim it, or name its gate)`,
-            author: CLAIM_ANNOUNCER,
-          });
-          pushPost(data, conv);
-          nudge = conv;
+          const nudgeBody = `✅ #${card.shortId} done — what's the next pull? (every done has a next: claim it, or name its gate)`;
+          // #1574 1b — unit on: an obligation in this write, published to the graph after the lock; never a document post.
+          nudgePub = commitPublisherAnnouncement(data, { slot: 'done-nudge', body: nudgeBody, notify: true, origin: { cardId: card.id, version: card.version }, actor: typeof patch.by === 'string' && patch.by ? patch.by : null });
+          if (!nudgePub) {
+            const conv = createConversationFromPayload({ body: nudgeBody, author: CLAIM_ANNOUNCER });
+            pushPost(data, conv);
+            nudge = conv;
+          }
         } catch (e) {
           if (e instanceof PostSeqStateCorrupt) throw e;   // #1592 — never a silent drop
           console.error('#665 done-nudge skipped:', e.message);
@@ -9752,7 +9818,9 @@ async function handleUpdateCard(req, res, idOrShortId) {
         ...fanout.map((c) => cardEvent('update', c, by)),
         ...shifted.map((c) => cardEvent('update', c, by)),   // #1584 — each renumbered neighbour
         ...(nudge ? [convEvent(nudge)] : []),
+        ...(nudgePub ? nudgePub.events : []),   // #1574 1b
       ]);
+      if (nudgePub) raisePostSeqMark(nudgePub.nextMark);   // only after the write succeeded
       return card;
     });
     if (!updated) return sendJSON(res, 404, { error: 'Card not found' });
@@ -9803,6 +9871,7 @@ async function handleUpdateCard(req, res, idOrShortId) {
     // notifyMcpOfPost stays fire-and-forget, so a down MCP server still cannot
     // break a PATCH.
     if (nudge) notifyMcpOfPost(nudge);
+    if (nudgePub) publishAnnouncements([nudgePub.entry]);   // #1574 1b — not awaited: the publish never holds the PATCH
 
     const shiftedExcerptCap = (() => {
       const n = Number(parseQuery(req.url).excerpt);
@@ -9966,6 +10035,14 @@ async function handleClaimCard(req, res, idOrShortId) {
         card.claimedAt = now;
         card.updatedAt = now;
         bumpCardVersion(card);   // #534 — a claim is a card write
+        // #1574 1b — with the conversations unit on, the announcement is an obligation in this write and its post goes
+        // to the graph after the lock is released; nothing is written into data.conversations.
+        const pub = commitPublisherAnnouncement(data, { slot: 'claim', body: claimAnnouncement(card, by, 'claimed'), notify: true, origin: { cardId: card.id, version: card.version }, actor: by });
+        if (pub) {
+          writeBoard(data, [cardEvent('update', card, by), ...pub.events]);
+          raisePostSeqMark(pub.nextMark);
+          return { status: 200, payload: { claimed: true, holder: by, claimedAt: now }, publish: [pub.entry] };
+        }
         // #578 — the announcement rides the SAME write as the claim. Appending
         // it here rather than in a second write keeps the two atomic: there is
         // no window in which the card is claimed and the room was never told.
@@ -9991,6 +10068,7 @@ async function handleClaimCard(req, res, idOrShortId) {
     // post (#119): a down MCP server must never break claiming.
     if (result.announced) notifyMcpOfPost(result.announced);
     sendJSON(res, result.status, result.payload);
+    if (result.publish) publishAnnouncements(result.publish);   // #1574 1b — after the answer: a down executor never costs the claim
   } catch (e) {
     if (e instanceof PostSeqStateCorrupt) return sendJSON(res, 500, e.body);   // #1592
     console.error('POST /api/cards/:id/claim:', e.message);
@@ -10024,6 +10102,13 @@ async function handleReleaseCard(req, res, idOrShortId) {
       card.claimedAt = null;
       card.updatedAt = new Date().toISOString();
       bumpCardVersion(card);   // #534 — a release is a card write
+      // #1574 1b — the conversations unit on: a real transition's announcement is an obligation, never a document post.
+      const pub = wasHeld ? commitPublisherAnnouncement(data, { slot: 'release', body: claimAnnouncement(card, by, 'released'), notify: true, origin: { cardId: card.id, version: card.version }, actor: by }) : null;
+      if (pub) {
+        writeBoard(data, [cardEvent('update', card, by), ...pub.events]);
+        raisePostSeqMark(pub.nextMark);
+        return { status: 200, payload: { released: true }, publish: [pub.entry] };
+      }
       const announced = wasHeld ? appendClaimAnnouncement(data, card, by, 'released') : null;
       // #1574 C3a — only a real transition owes an announcement: an unheld
       // release mints no mutationId and writes no origin or entry.
@@ -10034,6 +10119,7 @@ async function handleReleaseCard(req, res, idOrShortId) {
     });
     if (result.announced) notifyMcpOfPost(result.announced);
     sendJSON(res, result.status, result.payload);
+    if (result.publish) publishAnnouncements(result.publish);   // #1574 1b
   } catch (e) {
     if (e instanceof PostSeqStateCorrupt) return sendJSON(res, 500, e.body);   // #1592
     console.error('DELETE /api/cards/:id/claim:', e.message);
@@ -10223,6 +10309,110 @@ async function publishThroughExecutor(entry) {
   return { applied: false, reason: `executor-${String(r.outcome).toLowerCase()}: ${r.reason ?? ''}`.trim() };
 }
 
+// ── #1574 1b — the board's own posts: ONE inline attempt, then the supervised publisher ──
+//
+// The originating write committed the obligation (commitPublisherAnnouncement). Here, with NO lock held, REST makes
+// exactly ONE attempt per announcement:
+//   publish → APPLIED → dispatch the notify (frozen policy) → barrier → queue the completion
+// and records completions in BATCHES, one document write per flush, never one per entry. REST does NOT retry and does
+// NOT drain at boot (C2 item 2, kept on purpose; #1574, 2026-10-06): an entry whose inline attempt failed stays `pending` in
+// the outbox for the separately supervised reconciler, scripts/announce-publisher.mjs, which has gate-12 backoff and
+// --batch. Order is the contract (d16467ba): the dispatch always precedes the completion write, so a crash between them
+// leaves the entry pending, the reconciler's replay re-dispatches, and a seat may be pinged twice, never zero times.
+// What is guaranteed is the board's dispatch, not a seat's receipt.
+const ANNOUNCE_INFLIGHT = new Set();   // obligationIds with an inline attempt outstanding in this process
+const ANNOUNCE_SETTLED = new Map();    // obligationId → {postId} | {block}, awaiting the batched completion write
+const ANNOUNCE_FLUSH_MS = 250;
+let _announceFlushTimer = null;
+let _announceFlushing = false;
+
+/** The post an announcement becomes, as the notify endpoint and a reader see it. Built from the stored entry only. */
+function announcementPostOf(entry) {
+  const p = postCreateIntention(entry).post;
+  return { id: p.id, body: p.body, author: p.author, createdAt: p.publicationAt, postSeq: p.postSeq, attachedTo: null, mentions: p.mentions || [], origin: p.origin, attachments: [] };
+}
+/** Awaited: the notify request has been answered (or failed/timed out) before the caller may record completion. */
+async function dispatchAnnouncement(entry) {
+  if (!entry?.payload?.notify) return;
+  try { await notifyMcpOfPost(announcementPostOf(entry)); } catch (e) { console.error(`#1574 1b: notify for ${entry.obligationId} not dispatched: ${e.message}`); }
+}
+
+/** The inline attempt for entries the caller just committed. Never awaited by a request: a down executor never costs the write. */
+function publishAnnouncements(entries) {
+  if (!ANNOUNCE_EXECUTOR) return;
+  for (const entry of entries) {
+    if (!entry?.obligationId || entry.mode !== 'publisher') continue;
+    void publishOneAnnouncement(entry);
+  }
+}
+
+async function publishOneAnnouncement(entry) {
+  const id = entry.obligationId;
+  if (ANNOUNCE_INFLIGHT.has(id) || ANNOUNCE_SETTLED.has(id)) return;
+  ANNOUNCE_INFLIGHT.add(id);
+  try {
+    const call = await publishThroughExecutor(entry);
+    if (call.applied) {
+      await dispatchAnnouncement(entry);
+      testBarrier('after-dispatch-before-complete');   // TEST-ONLY: dispatched, completion not yet recorded
+      ANNOUNCE_SETTLED.set(id, { postId: call.postId });
+      scheduleAnnouncementFlush();
+    } else if (call.block) {
+      console.error(`#1574 1b: announcement ${id} BLOCKED (${call.block}): ${call.reason ?? ''}`);
+      ANNOUNCE_SETTLED.set(id, { block: call.block });
+      scheduleAnnouncementFlush();
+    } else {
+      // UNKNOWN/UNAVAILABLE: nothing is guessed. The entry stays pending for the supervised reconciler.
+      console.error(`#1574 1b: announcement ${id} not published inline (${call.reason ?? 'unknown'}); left pending for the reconciler`);
+    }
+  } catch (e) {
+    console.error(`#1574 1b: announcement ${id} inline attempt failed (${e.message}); left pending for the reconciler`);
+  } finally {
+    ANNOUNCE_INFLIGHT.delete(id);
+  }
+}
+
+function scheduleAnnouncementFlush() {
+  if (_announceFlushTimer) return;
+  _announceFlushTimer = setTimeout(() => { _announceFlushTimer = null; void flushAnnouncementCompletions(); }, ANNOUNCE_FLUSH_MS);
+}
+
+/** ONE document write records every settled entry: published (with its post id) or blocked. */
+async function flushAnnouncementCompletions() {
+  if (_announceFlushing || ANNOUNCE_SETTLED.size === 0) return;
+  _announceFlushing = true;
+  const batch = new Map(ANNOUNCE_SETTLED);
+  try {
+    await withWriteLock(async () => {
+      const data = readBoard();
+      const ob = outboxOf(data);
+      const entries = { ...ob.entries };
+      const now = new Date().toISOString();
+      const events = [];
+      for (const [id, r] of batch) {
+        const e = entries[id];
+        if (!e || e.status !== 'pending') continue;   // already recorded (the reconciler, or a /publish call)
+        const next = r.block
+          ? { ...e, status: 'blocked', reason: r.block, blockedAt: now }
+          : { ...e, status: 'published', postId: r.postId, publishedAt: now, receipt: 'executor' };
+        entries[id] = next;
+        events.push(announcementEvent(next, CLAIM_ANNOUNCER));
+      }
+      if (!events.length) return;
+      data[OUTBOX_FIELD] = { origins: ob.origins, entries };
+      writeBoard(data, events);
+    });
+    for (const id of batch.keys()) ANNOUNCE_SETTLED.delete(id);
+  } catch (e) {
+    // Not lost: the entries are still pending in the outbox, and the reconciler's replay records them.
+    console.error(`#1574 1b: recording ${batch.size} announcement completion(s) failed (${e.message}); the reconciler will record them`);
+    for (const id of batch.keys()) ANNOUNCE_SETTLED.delete(id);
+  } finally {
+    _announceFlushing = false;
+    if (ANNOUNCE_SETTLED.size) scheduleAnnouncementFlush();
+  }
+}
+
 async function handlePublishOutbox(req, res, rawId) {
   try {
     await readBody(req);   // drained; nothing the caller sends is consulted
@@ -10248,6 +10438,9 @@ async function handlePublishOutbox(req, res, rawId) {
     const call = await publishThroughExecutor(first.viaExecutor.entry);
     testBarrier('after-executor-apply');   // TEST-ONLY: the executor answered, nothing recorded yet, no lock held
     if (!call.applied && !call.block) return sendJSON(res, 200, { status: 'pending', reason: call.reason });
+    // #1574 1b (b′, decision d16467ba) — DISPATCH BEFORE COMPLETION, on this path too: a reconciler that publishes an
+    // entry notifies per its frozen policy before the entry can read `published`. A replay may ping twice; never zero.
+    if (call.applied) await dispatchAnnouncement(first.viaExecutor.entry);
     // Lock again and revalidate against the CURRENT document before recording.
     const second = await withWriteLock(async () => {
       const data = readBoard();
@@ -11474,9 +11667,13 @@ function handleGetNode(req, res, idOrShortId) {
 function appendWikiNotice(data, verb, card) {
   const title = (card.title || 'untitled').trim();
   const body = `📄 page ${verb}: **${title}** (#${card.shortId})`;
+  // #1574 1b — unit on: an obligation in the caller's write (author `wiki`, NO notify: the frozen feed-only policy).
+  // The caller adds `pub.events` to its write and publishes `pub.entry` after the lock. Unit off: today's post.
+  const pub = commitPublisherAnnouncement(data, { slot: 'wiki', body, author: 'wiki', notify: false, origin: { cardId: card.id, version: card.version }, actor: card.createdBy ?? null });
+  if (pub) return { pub };
   const conv = createConversationFromPayload({ body, author: 'wiki' });
   pushPost(data, conv);
-  return conv;
+  return { conv };
 }
 
 // Create a node (wiki page). Node-shaped in (title/body/parent/type) and out.
@@ -11511,12 +11708,16 @@ async function handleCreateNode(req, res) {
       data.cards.push(card);
       if (card.parent != null) applyApexLabels(data.cards, card.id);   // #902 item 4 — born labelled
       data.nextShortId = (data.nextShortId || 1) + 1;
-      const notice = appendWikiNotice(data, 'created', card); // #223
+      const n = appendWikiNotice(data, 'created', card); // #223
       writeBoard(data, [cardEvent('create', card, card.createdBy),
-        ...(notice ? [convEvent(notice)] : [])]);
+        ...(n.conv ? [convEvent(n.conv)] : []),
+        ...(n.pub ? n.pub.events : [])]);   // #1574 1b
+      if (n.pub) raisePostSeqMark(n.pub.nextMark);
+      notice = n.pub ? n.pub.entry : null;
       return card;
     });
     sendJSON(res, 201, cardToNode(created));
+    if (notice) publishAnnouncements([notice]);   // #1574 1b — after the answer
   } catch (e) {
     if (e instanceof PostSeqStateCorrupt) return sendJSON(res, 500, e.body);   // #1592
     console.error('POST /api/nodes:', e.message);
@@ -11566,6 +11767,7 @@ async function handleUpdateNode(req, res, idOrShortId) {
     // which is how the diagnostic stops being read at all.
     const ignoredFields = Object.keys(patch).filter((k) => !NODE_PATCH_CONSUMED_FIELDS.has(k));
     let cycle = false;
+    let noticeEntry = null;   // #1574 1b — the wiki notice as a publisher obligation (unit on)
     // #223 — notice only on CONTENT change (title/body); a parent-only reparent
     // (e.g. a drag) is silent so tree-reorg doesn't spam the room.
     const contentChanged = ('title' in patch) || ('body' in patch);
@@ -11586,15 +11788,19 @@ async function handleUpdateNode(req, res, idOrShortId) {
       if ('attachments' in patch) card.attachments = sanitizeAttachments(patch.attachments); // #222
       card.updatedAt = new Date().toISOString();
       bumpCardVersion(card);   // #534 — a node update is a card write
-      const notice = contentChanged ? appendWikiNotice(data, 'updated', card) : null; // #223
+      const n = contentChanged ? appendWikiNotice(data, 'updated', card) : {}; // #223
       writeBoard(data, [cardEvent('update', card),
-        ...(notice ? [convEvent(notice)] : [])]);
+        ...(n.conv ? [convEvent(n.conv)] : []),
+        ...(n.pub ? n.pub.events : [])]);   // #1574 1b
+      if (n.pub) raisePostSeqMark(n.pub.nextMark);
+      noticeEntry = n.pub ? n.pub.entry : null;
       return card;
     });
     if (!updated) return sendJSON(res, 404, { error: 'Node not found' });
     if (cycle) return sendJSON(res, 409, { error: 'That move would make the page a descendant of itself.' });
     const node = cardToNode(updated);
     sendJSON(res, 200, ignoredFields.length ? { ...node, ignoredFields } : node);
+    if (noticeEntry) publishAnnouncements([noticeEntry]);   // #1574 1b — after the answer
   } catch (e) {
     if (e instanceof PostSeqStateCorrupt) return sendJSON(res, 500, e.body);   // #1592
     console.error('PATCH /api/nodes/:id:', e.message);
@@ -12673,6 +12879,7 @@ const server = http.createServer(handleRequest);
 server.keepAliveTimeout = 0;
 
 server.listen(PORT, '127.0.0.1', () => {
+  try { _announcementsPending = countPendingAnnouncements(readBoard()); } catch (e) { console.error(`#1574 1b: pending announcements could not be counted at boot: ${e.message}`); }
   BOUND_PORT = server.address().port;   // #1338 — the port the Host guard checks against
   // #683 — drop every served-but-unacked range at boot. NOT tidiness: the fence
   // discriminates on the registry epoch, and seat-registry keeps its counter in
