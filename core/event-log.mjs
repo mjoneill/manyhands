@@ -30,7 +30,7 @@
  * event recording what/when/who — never the content. See `redactEvent`.
  */
 
-import { readFileSync, writeFileSync, appendFileSync, readdirSync, existsSync, mkdirSync, statSync, openSync, readSync, closeSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, readdirSync, existsSync, mkdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 /** Closed vocabulary. An unknown op is a rejected write, not a logged curiosity. */
@@ -129,7 +129,7 @@ const segments = (dir) =>
  * The log's OLDEST surviving event: the first valid line of the first segment that has one. The log is append-only and
  * day-segmented, so that is the minimum seq — the same answer as `readEvents(dir, { limit: 1 })[0]`, which parses EVERY
  * segment and sorts every event ever recorded to keep one (measured live 2026-10-06: 37-40% of REST's busy time, on the
- * cursor service's inbound path). This reads a 64 KB chunk at a time and stops at the first valid event; a torn or
+ * cursor service's inbound path). This reads segments in order and stops at the first valid event; a torn or
  * unparseable line is skipped exactly as parseSegment skips it. Cached per directory against the segment list and the
  * first segment's size and mtime, so a new segment, a pruned one, or an append to a still-only segment re-reads it.
  * Returns null for an empty or absent log.
@@ -150,32 +150,25 @@ export function oldestEvent(dir) {
   const hit = _oldestCache.get(dir);
   if (hit && hit.key === key) return hit.ev;
   let found = null;
+  // Raw bytes, split on the newline BYTE before decoding, so a multi-byte character is never cut. Only
+  // readFileSync: the store-registry recorder (#1152) stands in for node:fs and must see every file this opens.
+  // This runs only on a cache miss (a new or pruned segment), and reads no segment past the first that has a
+  // valid event.
+  const tryLine = (b) => {
+    const line = b.toString('utf8');
+    if (!line.trim()) return null;
+    try { const ev = JSON.parse(line); return Number.isInteger(ev?.seq) ? ev : null; } catch { return null; }   // torn: skip, as parseSegment does
+  };
   for (const f of segs) {
-    const fd = openSync(join(dir, f), 'r');
-    try {
-      // Split on the newline BYTE before decoding: a 64 KB chunk can end inside a multi-byte UTF-8 character, and a
-      // per-chunk decode would corrupt that line into a "torn" one and silently skip the true oldest event.
-      const buf = Buffer.alloc(65536);
-      let pending = Buffer.alloc(0);
-      let pos = 0;
-      const tryLine = (b) => {
-        const line = b.toString('utf8');
-        if (!line.trim()) return null;
-        try { const ev = JSON.parse(line); return Number.isInteger(ev?.seq) ? ev : null; } catch { return null; }   // torn: skip, as parseSegment does
-      };
-      for (;;) {
-        const n = readSync(fd, buf, 0, buf.length, pos);
-        pos += n;
-        pending = n ? Buffer.concat([pending, buf.subarray(0, n)]) : pending;
-        let nl;
-        while (!found && (nl = pending.indexOf(0x0a)) >= 0) {
-          found = tryLine(pending.subarray(0, nl));
-          pending = pending.subarray(nl + 1);
-        }
-        if (found) break;
-        if (n === 0) { if (pending.length) found = tryLine(pending); break; }   // the last line has no newline
-      }
-    } finally { closeSync(fd); }
+    let buf;
+    try { buf = readFileSync(join(dir, f)); } catch { continue; }
+    let start = 0;
+    while (!found && start < buf.length) {
+      let nl = buf.indexOf(0x0a, start);
+      if (nl < 0) nl = buf.length;   // the last line may have no newline
+      found = tryLine(buf.subarray(start, nl));
+      start = nl + 1;
+    }
     if (found) break;
   }
   _oldestCache.set(dir, { key, ev: found });
