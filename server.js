@@ -771,7 +771,8 @@ function logRefused(req, statusCode, data) {
     // retained store. Its audit keeps the outcome and the identifiers: who, which requestId, which status and code. Not the
     // body, attachments, mentions, card or talk, and not the human-readable error, which can name the card or talk.
     const contentFree = req.method === 'POST' && /^\/api\/conversations\/?$/.test(url);
-    const ident = (o) => (o && typeof o === 'object' ? { ...(typeof o.requestId === 'string' ? { requestId: o.requestId } : {}), ...(typeof o.code === 'string' ? { code: o.code } : {}) } : null);
+    // The author is WHO (an identifier, as #1217 records for every refused write), never what was said.
+    const ident = (o) => (o && typeof o === 'object' ? { ...(typeof o.author === 'string' ? { author: o.author } : {}), ...(typeof o.requestId === 'string' ? { requestId: o.requestId } : {}), ...(typeof o.code === 'string' ? { code: o.code } : {}) } : null);
     appendEvent(EVENT_LOG_DIR, {
       op: 'refused',
       entity: { kind: kindEntry ? kindEntry[1] : 'request', id: tail || url },
