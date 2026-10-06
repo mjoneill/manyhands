@@ -2310,7 +2310,9 @@ export function censusByType(store) {
   return counts;
 }
 
-export function queryGraph(store, sparql, { limit } = {}) {
+// `terms: true` (internal; #1610) keeps each literal's datatype: a row value becomes {value, termType, datatype}. The
+// public surface leaves it off and answers exactly as before.
+export function queryGraph(store, sparql, { limit, terms = false } = {}) {
   if (typeof sparql !== 'string' || !sparql.trim()) throw Object.assign(new Error('empty query'), { code: 'EMPTY_QUERY' });
   // ⛔ #899 — STRIP STRING LITERALS BEFORE LOOKING FOR VERBS, or the board's own
   // event vocabulary becomes unqueryable in its own provenance log:
@@ -2572,7 +2574,9 @@ export function queryGraph(store, sparql, { limit } = {}) {
   for (const binding of out) {
     const row = {};
     for (const [k, v] of binding.entries()) {
-      row[k] = v.termType === 'NamedNode' ? shorten(v.value) : v.value;
+      row[k] = terms
+        ? { value: v.value, termType: v.termType, datatype: v.termType === 'Literal' ? v.datatype?.value ?? null : null }
+        : (v.termType === 'NamedNode' ? shorten(v.value) : v.value);
     }
     rows.push(row);
     if (rows.length > wanted) break;

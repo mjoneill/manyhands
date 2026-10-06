@@ -9,8 +9,9 @@
  *     or an UNBOUND value (what MAX over nothing returns) is an error, never a coerced verdict;
  *   - both values must be xsd:dateTime with an explicit timezone and at most millisecond precision, compared as
  *     INSTANTS, never as strings; anything else is an error (no permissive Date.parse).
- *   - ⚠️ queryGraph hands back row values as plain strings: the literal's datatype is not visible here, so the type is
- *     enforced by the strict lexical form above. A plain string literal spelled exactly like a dateTime would pass.
+ *   - the TYPE is checked, not just the spelling: each value must arrive as a literal whose datatype IS xsd:dateTime
+ *     (queryGraph's internal `terms` mode keeps it), so a string literal spelled like a dateTime is an error;
+ *   - an invalid calendar date (2026-02-30) is an error, whatever its datatype says.
  * ⚠️ An intentional difference from the ASK it replaces: where the ASK answered false because a premise was absent
  * (an unbound aggregate), this answers error, because a missing premise is not a verdict.
  */
@@ -54,9 +55,10 @@ function sideInstant(r, side) {
   const vars = Object.keys(rows[0] || {});
   if (vars.length !== 1) return { error: `${side}: expected exactly one bound value, got ${vars.length} (an unbound aggregate — MAX over nothing — is a missing premise, not a value)` };
   const v = rows[0][vars[0]];
-  const lex = typeof v === 'string' ? v : v?.value;
-  const dt = typeof v === 'object' && v ? (v.datatype?.value ?? v.datatype) : undefined;
-  if (dt !== undefined && dt !== XSD_DATETIME) return { error: `${side}: value is not an xsd:dateTime (datatype ${dt})` };
+  // the query function must hand over TERMS (queryGraph with `terms: true`); a bare string has lost its datatype
+  if (!v || typeof v !== 'object' || v.termType !== 'Literal') return { error: `${side}: the value is not a typed literal (the evaluator needs terms, and an IRI is not a timestamp)` };
+  if (v.datatype !== XSD_DATETIME) return { error: `${side}: value is not an xsd:dateTime (datatype ${v.datatype})` };
+  const lex = v.value;
   const t = dateTimeInstant(lex);
   if (t === null) return { error: `${side}: ${JSON.stringify(lex)} is not an xsd:dateTime with an explicit timezone and at most millisecond precision` };
   return { t };

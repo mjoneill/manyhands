@@ -6915,7 +6915,7 @@ async function evaluateChecks() {
         const priced = (row) => { const ms = Math.round(performance.now() - t0); return { ...row, ms, ...(ms > CHECK_CEILING_MS ? { slow: true } : {}) }; };
         try {
           if (c.compare) {   // #1610 — two cheap reads compared in code, instead of one ASK the engine cannot plan
-            const cmp = evaluateCompare((q) => queryGraph(store, q), c.compare);
+            const cmp = evaluateCompare((q) => queryGraph(store, q, { terms: true }), c.compare);
             if (!cmp.ok) { errors += 1; return priced({ claim: c.claim, status: 'error', error: cmp.error }); }
             const holds = cmp.value === c.expect;
             if (!holds) stale += 1;
