@@ -19,6 +19,8 @@
  *               that timed out did NOT free its slot while its query still ran. A cap counted on HTTP requests would admit wave two beside wave one's running queries (up to 2 x P1).
  *   A3 NO RETRY A single card read with the executor held 6 s: it is refused when the read bound fires, and the executor then receives no query body twice (no blind retry) and no more
  *               queries than the healthy read of the same card sent (no re-issue).
+ *   A3b NO RETRY AFTER A LOST CONNECTION: the build has no abort timer, so a held executor alone never FAILS a read and A3 cannot see a retry. The same row, but the proxy drops the caller's
+ *               connection 300 ms after dispatch: that is a failed read. The executor must still receive no query body twice and no more queries than the healthy read sent.
  *   A4 SHED     Hold 10 s, 300 distinct reads at once. The waiting queue is bounded: at least one read is refused with a 503 inside 1.5 s (a fast refusal, not a wait for the read bound),
  *               every answer is a 200 or a 503 (any other status is a rollback trigger on its own), and a route that needs no graph (GET /api/columns) still answers 200 within 2 s
  *               while the flood is in. ASSUMES the queue bound is below 300 outstanding requests; a larger bound is a decision for the contract owner, not an edit to this row.
@@ -30,18 +32,30 @@
  *               cap C and queue bound Q (environment ADMISSION_CAP and ADMISSION_QUEUE, integers, read from the build's own declaration, never chosen here): the executor's peak
  *               outstanding queries never exceed C, and at least 300 - C - Q reads are refused with a 503 inside 2 s (each admitted request needs at least one slot or queue place,
  *               so no more than C + Q can be admitted). UNTIL C AND Q ARE DECLARED this row runs as a TODO and fails with that message: visible, never a pass and never a skip.
+ *   A5b NOTHING IS ISSUED AFTER FAILED READS: the same drain row with the callers' connections dropped after dispatch (a failed read; a retry leaked later would show here). Within 60 s the
+ *               executor's outstanding queries reach 0 and the count of queries it has RECEIVED stops moving for 8 s. (No recovery claim: lost slots stay occupied by design.)
  *   A6 COLD START The held-ids read (REST's once-per-process question to the executor, "which document posts does the graph hold") is behind the same admission control. A REST that
  *               has not read anything yet, with the document holding 300 posts and the executor held 12 s, meets 60 distinct reads at once: the executor's peak outstanding queries
  *               never exceed the declared C, the held-ids query included. The other rows warm the fixture on purpose and prove nothing about cold start. A TODO until C is declared, as A4b.
  *
+ *   A6b GATE FULL, THEN THE COLD BUILD: a REST that has read nothing yet, its gate filled with unlimited-list reads (they need no held-ids build): the first targeted read then needs the build.
+ *               The build's query waits its turn: the executor's peak outstanding queries never exceed C (a first version of A6 could not see a build that bypassed the gate, because on a cold
+ *               start every read waits for the build and nothing else is running when it is sent). A TODO until C is declared.
+ *   A11 THE FEED IS BEHIND THE GATE (found by the kill checks on e263d6e and traced by the contract owner at 01:49Z: the commit-ordered discovery feed, `?afterCommit=`, which the unread badge
+ *               polls, reads through the 15 s write client and so around the gate). The executor is held 12 s; the gate is filled with unlimited-list reads; then 20 DISTINCT feed reads
+ *               (`?afterCommit=start&limit=<unique>`) arrive. The executor's outstanding queries never exceed C: the feed's reads wait their turn or are refused. Only the executor's peak is
+ *               pinned (the feed's own identity and failure shapes belong to its R3 rows). A TODO until C is declared. NOT PINNED HERE: the `/api/changes` first feed query on the log-born
+ *               path: that unit supervises its own executor, so no proxy can stand in front of it; observing it needs a counter from the build (the gate's own stats, exposed), not a row.
  *   A7 CONNECTION LOST AFTER DISPATCH (the contract owner's 01:01Z and 01:04Z corrections: "a timer is not evidence that executor work stopped"; "a connection failure after dispatch is not
  *               completion: a broken connection can leave the executor computing, the original BrokenPipe case"; the build declared NO hard timer, a slot lost to such a failure is kept
  *               until explicit recovery, and a gate with every slot lost fails closed). The proxy dispatches each query, then DROPS the REST-side socket 300 ms later while the executor
  *               goes on for 20 s. Cap-many reads fill the gate and are answered 503 (their connection is lost); at 3 s, with the executor still computing, 12 more distinct reads
  *               arrive. Not one is served; and the executor's outstanding queries NEVER exceed C: the gate did not take a lost connection for a finished query. After that no claim is made
  *               (the build clears lost slots by a REST restart; recovery is not pinned here). A TODO until C and Q are declared.
- *   A7b TRUNCATED, NOT FINISHED (the contract owner's 01:05Z: "a truncated response is not proof of completion; premature EOF or connection loss after headers remains ambiguous"). The same row, but the
- *               proxy sends the status line and the start of the body and then drops the connection: the executor's work still goes on, and the same outcomes hold.
+ *   A7b PREMATURE EOF, NOT FINISHED (the contract owner's 01:05Z: "a truncated response is not proof of completion; premature EOF or connection loss after headers remains ambiguous"). The same row, but the
+ *               proxy sends a status line and the start of a body with NO length and then closes the connection cleanly: the client sees a short body and no transport error (the case a
+ *               dropped socket does not reach: a first version of this row destroyed the socket mid-body, and a mutant that treated a short body as complete survived it). The executor's
+ *               work still goes on, and the same outcomes hold.
  *   A8 NOTHING DISPATCHED, NOTHING LOST (the build's stated exception: "a refused connection frees its slot, because nothing was ever dispatched"). The executor goes down (new
  *               connections are REFUSED); 30 distinct reads, more queries than C, are all answered 503; the executor comes back on the same port; a card read answers 200 inside 3 s, with
  *               no REST restart. A gate that kept those slots would be full of nothing and refuse forever. A TODO until C is declared.
@@ -88,15 +102,16 @@ const call = async (base, method, route, body) => {
 };
 /** A forwarding proxy that models an executor which does NOT cancel abandoned queries. */
 async function startHoldProxy(execUrl) {
-  const p = { holdMs: 0, dropAfterMs: 0, truncateAfterMs: 0, errorStatus: 0, outstanding: 0, peak: 0, received: 0, bodies: [], resetCounts() { p.peak = p.outstanding; p.received = 0; p.bodies = []; } };
+  const p = { holdMs: 0, dropAfterMs: 0, eofAfterMs: 0, errorStatus: 0, outstanding: 0, peak: 0, received: 0, bodies: [], resetCounts() { p.peak = p.outstanding; p.received = 0; p.bodies = []; } };
   p.server = http.createServer(async (req, res) => {
     const chunks = []; for await (const c of req) chunks.push(c);
     const buf = Buffer.concat(chunks);
     const isQ = req.method === 'POST' && req.url === '/query';
+    req.socket.on('error', () => {});
     if (isQ) { p.received++; p.outstanding++; p.peak = Math.max(p.peak, p.outstanding); p.bodies.push(crypto.createHash('sha1').update(buf).digest('hex')); }
     if (isQ && p.dropAfterMs) setTimeout(() => { try { req.socket.destroy(); } catch { /* gone */ } }, p.dropAfterMs);   // the caller's connection is lost AFTER dispatch; the executor's work goes on
     if (isQ && p.errorStatus) { try { res.statusCode = p.errorStatus; res.end('{"error":"executor refused"}'); } catch { /* gone */ } p.outstanding--; return; }   // a COMPLETE answer: the executor's own error response
-    if (isQ && p.truncateAfterMs) setTimeout(() => { try { res.writeHead(200, { 'Content-Type': 'application/json' }); res.write('{"head":{"vars":['); setTimeout(() => { try { req.socket.destroy(); } catch { /* gone */ } }, 50); } catch { /* gone */ } }, p.truncateAfterMs);   // headers, then a premature EOF: completion is NOT known
+    if (isQ && p.eofAfterMs) setTimeout(() => { try { req.socket.write('HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{"head":{"vars":['); req.socket.end(); } catch { /* gone */ } }, p.eofAfterMs);   // a premature EOF: a status line, a short body, NO length, then a clean close; the client reads a short body without any transport error
     try {
       if (isQ && p.holdMs) await sleep(p.holdMs);
       const fwd = { ...req.headers }; delete fwd.host; delete fwd['content-length']; delete fwd.connection;
@@ -254,7 +269,7 @@ test('A6 COLD START: a REST that has read nothing yet, the document holding 300 
 const connectionLost = (mode) => async () => {
   needDeclared();
   await stack(async ({ base, proxy }) => {
-    proxy.holdMs = 20000; if (mode === 'drop') proxy.dropAfterMs = 300; else proxy.truncateAfterMs = 300; proxy.resetCounts();
+    proxy.holdMs = 20000; if (mode === 'drop') proxy.dropAfterMs = 300; else proxy.eofAfterMs = 300; proxy.resetCounts();
     const t0 = Date.now();
     const fill = await Promise.all(distinctReads(base, CAP, 'a7fill'));
     assert.ok(fill.every((r) => r.status === 503), `CONTROL: the lost connections surface as refusals: ${fill.map((r) => r.status).join(',')}`);
@@ -264,11 +279,11 @@ const connectionLost = (mode) => async () => {
     const late = await Promise.all(distinctReads(base, 12, 'a7late'));
     assert.ok(late.every((r) => r.status === 503), `no late read is served while the executor still computes the lost ones: ${late.map((r) => `${r.status}/${r.ms}ms`).slice(0, 6).join(' ')}`);
     assert.ok(proxy.peak <= CAP, `the executor peaked at ${proxy.peak} outstanding queries against the declared cap C=${CAP}: the gate freed a slot on a lost or truncated connection`);
-    proxy.dropAfterMs = 0; proxy.truncateAfterMs = 0; proxy.holdMs = 0; await until(() => proxy.outstanding === 0, 60000);
+    proxy.dropAfterMs = 0; proxy.eofAfterMs = 0; proxy.holdMs = 0; await until(() => proxy.outstanding === 0, 60000);
   });
 };
 test('A7 CONNECTION LOST AFTER DISPATCH: with the executor still computing, no further read is served and the executor never exceeds C', { skip: SKIP, todo: NEEDS_DECLARATION, timeout: 240000 }, connectionLost('drop'));
-test('A7b TRUNCATED, NOT FINISHED: a response cut off after its headers keeps the slot: no further read is served while the executor computes and it never exceeds C', { skip: SKIP, todo: NEEDS_DECLARATION, timeout: 240000 }, connectionLost('truncate'));
+test('A7b PREMATURE EOF, NOT FINISHED: a response that ends early with no length (a short body, no transport error) keeps the slot: no further read is served while the executor computes and it never exceeds C', { skip: SKIP, todo: NEEDS_DECLARATION, timeout: 240000 }, connectionLost('truncate'));
 
 test('A8 NOTHING DISPATCHED, NOTHING LOST: with the executor down (connections refused) 30 reads are all refused, and when it is back a card read answers 200 with no REST restart', { skip: SKIP, todo: NEEDS_DECLARATION, timeout: 180000 }, async () => {
   needDeclared();
@@ -294,5 +309,61 @@ test('A10 AN ANSWER IS COMPLETION: with the executor answering every query with 
     const after = await call(base, 'GET', `/api/cards/${cardId}`);
     assert.equal(after.status, 200, `the executor answers again; finished work held no slot: ${after.status} ${after.text.slice(0, 150)}`);
     assert.ok(after.ms < 3000, `and the read is prompt (${after.ms} ms)`);
+  });
+});
+
+test('A3b NO RETRY AFTER A LOST CONNECTION: a card read whose connection is dropped after dispatch is refused; the executor receives no query body twice and no more queries than the healthy read sent', { skip: SKIP, timeout: 150000 }, async () => {
+  await stack(async ({ base, proxy, cardId }) => {
+    proxy.resetCounts(); const healthy = await call(base, 'GET', `/api/cards/${cardId}`); assert.equal(healthy.status, 200, healthy.text.slice(0, 200));
+    const q = proxy.received; assert.ok(q >= 1, 'CONTROL: the healthy card read sends queries');
+    proxy.holdMs = 4000; proxy.dropAfterMs = 300; proxy.resetCounts();
+    const lost = await call(base, 'GET', `/api/cards/${cardId}`);
+    assert.equal(lost.status, 503, `CONTROL: the read whose connection was lost is refused: ${lost.status} ${lost.text.slice(0, 150)}`);
+    await sleep(8000);
+    assert.equal(new Set(proxy.bodies).size, proxy.bodies.length, `no query body is sent to the executor twice after a lost connection (${proxy.bodies.length} received, ${new Set(proxy.bodies).size} distinct)`);
+    assert.ok(proxy.received <= q, `the executor received ${proxy.received} queries for the lost read against ${q} for the healthy one: nothing is re-issued`);
+  });
+});
+
+test('A5b NOTHING IS ISSUED AFTER FAILED READS: with the callers\' connections dropped after dispatch the executor drains and then receives nothing more for 8 s', { skip: SKIP, timeout: 180000 }, async () => {
+  await stack(async ({ base, proxy }) => {
+    proxy.holdMs = 6000; proxy.dropAfterMs = 300; proxy.resetCounts();
+    await Promise.all(distinctReads(base, 40, 'a5b'));
+    const drained = await until(() => proxy.outstanding === 0, 60000);
+    assert.ok(drained, `CONTROL FOR THE ROW: ${proxy.outstanding} queries still outstanding 60 s after the callers' connections were lost`);
+    const r0 = proxy.received; await sleep(8000);
+    assert.equal(proxy.received, r0, `nothing keeps being issued after failed reads (${proxy.received - r0} more queries in the last 8 s)`);
+  });
+});
+
+test('A6b GATE FULL, THEN THE COLD BUILD: with a cold REST and the gate filled by unlimited-list reads, the first targeted read\'s held-ids build waits its turn and the executor never exceeds C', { skip: SKIP, todo: NEEDS_DECLARATION, timeout: 180000 }, async () => {
+  needDeclared();
+  await coldStack(async ({ base, proxy }) => {
+    proxy.holdMs = 12000;
+    const fillers = Array.from({ length: 12 }, () => call(base, 'GET', '/api/conversations'));   // bulk reads: two gated queries each, no held-ids build needed
+    await sleep(1500);
+    assert.ok(proxy.peak >= 1 && proxy.peak <= CAP, `CONTROL: the gate is full of the bulk reads' queries and within the cap (peak ${proxy.peak})`);
+    const targeted = call(base, 'GET', `/api/conversations?limit=10&author=a6b-${++uniq}`);   // cold: needs the held-ids build first
+    await sleep(2500);
+    assert.ok(proxy.peak <= CAP, `the executor peaked at ${proxy.peak} outstanding queries against the declared cap C=${CAP}: the held-ids build went around the gate`);
+    await Promise.all([...fillers, targeted]);
+    proxy.holdMs = 0; await until(() => proxy.outstanding === 0, 60000);
+  });
+});
+
+test('A11 THE FEED IS BEHIND THE GATE: with the gate full, 20 distinct commit-ordered feed reads never lift the executor\'s outstanding queries above C', { skip: SKIP, todo: NEEDS_DECLARATION, timeout: 180000 }, async () => {
+  needDeclared();
+  await stack(async ({ base, proxy }) => {
+    const feed = await call(base, 'GET', '/api/conversations?afterCommit=start&limit=50');
+    assert.equal(feed.status, 200, `CONTROL: the feed answers on a healthy executor: ${feed.status} ${feed.text.slice(0, 150)}`);
+    proxy.holdMs = 12000; proxy.resetCounts();
+    const fillers = Array.from({ length: 12 }, () => call(base, 'GET', '/api/conversations'));
+    await sleep(1500);
+    assert.ok(proxy.peak >= 1 && proxy.peak <= CAP, `CONTROL: the gate is full and within the cap (peak ${proxy.peak})`);
+    const feeds = Array.from({ length: 20 }, (_, i) => call(base, 'GET', `/api/conversations?afterCommit=start&limit=${60 + i}`));
+    await sleep(2500);
+    assert.ok(proxy.peak <= CAP, `the executor peaked at ${proxy.peak} outstanding queries against the declared cap C=${CAP}: the discovery feed's reads went around the gate`);
+    await Promise.all([...fillers, ...feeds]);
+    proxy.holdMs = 0; await until(() => proxy.outstanding === 0, 60000);
   });
 });

@@ -8332,7 +8332,7 @@ async function handleChanges(req, res) {
     if (LOGBORN || convQuery) {
       try {
         const after = from.cursor ? from.graph : 0;
-        graph = feedRowsFromBindings(await (LOGBORN ? LOGBORN.query(feedQuery(after)) : convQuery(feedQuery(after))));
+        graph = feedRowsFromBindings(await (LOGBORN ? logbornFeedQuery(feedQuery(after)) : convQuery(feedQuery(after))));
         if (convQuery) {
           graph.rows = [...graph.rows, ...postFeedRows(await convQuery(postFeedQuery(after)), graph.through)];
           redactedPostIds = redactedIdsFrom(await convQuery(REDACTED_IDS_QUERY));
@@ -10074,6 +10074,10 @@ const POSTS_READ_TIMEOUT_MS = 3000;
 // #1574 T1–T6 — the BULK read (every post's triples: the unlimited list, load, people, search) is legitimately ~2 s on a
 // 36k corpus, so it gets its own longer per-request bound. The hot pages no longer take this path.
 let POSTS_BULK_READER = null;
+// #1574 attempt 2 — the shared gate itself, so OTHER recurring reads (the badge's discovery feed, the /api/changes feed
+// query through the log-born unit) take a slot too instead of reaching the executor around the cap.
+let READ_GATE = null;
+let LOGBORN_FEED_READER = null;
 const POSTS_BULK_READ_TIMEOUT_MS = 10000;
 const DOC_POST_CHECK_DISABLED = 'disabled under the graph conversations unit (#1574): it reads document posts and would misread a seat that posts only to the graph';
 
@@ -10630,7 +10634,7 @@ async function listByCommit(q, res) {
     conversation: typeof q.conversation === 'string' && q.conversation ? q.conversation : null,
   };
   try {
-    return sendJSON(res, 200, await postFeed(ANNOUNCE_EXECUTOR, { after: q.afterCommit, limit, filters }));
+    return sendJSON(res, 200, await postFeed(POSTS_BULK_READER || ANNOUNCE_EXECUTOR, { after: q.afterCommit, limit, filters }));   // #1574 attempt 2 — through the gate
   } catch (e) {
     if (e instanceof DiscoveryError) return sendJSON(res, e.status, e.body);
     throw e;
@@ -10894,6 +10898,22 @@ async function mergedConversations(docPosts) {
   const merged = [...(docPosts || []).filter((c) => c && !held.has(c.id)), ...live];
   const seqOf = (c) => (Number.isSafeInteger(c.postSeq) ? c.postSeq : Infinity);
   return merged.map((c, i) => [c, i]).sort((a, b) => (seqOf(a[0]) - seqOf(b[0])) || (a[1] - b[1])).map(([c]) => c);
+}
+
+// #1574 attempt 2 — the log-born unit's feed query, through the shared read gate when there is one. LOGBORN.query keeps
+// its own fence and throws its own GRAPH_EXECUTOR_UNAVAILABLE error; the adapter hands the gate the transport reason so a
+// connection lost after dispatch keeps its slot, exactly as for the posts readers.
+async function logbornFeedQuery(sparql) {
+  if (!READ_GATE) return LOGBORN.query(sparql);
+  LOGBORN_FEED_READER ??= READ_GATE.reader({
+    async query(q) {
+      try { return { ok: true, rows: await LOGBORN.query(q) }; }
+      catch (e) { const m = /:\s(transport:.*)$/.exec(String(e?.message || '')); return { ok: false, status: 'UNAVAILABLE', reason: m ? m[1] : String(e?.message || e), error: e }; }
+    },
+  }, POSTS_BULK_READ_TIMEOUT_MS);
+  const r = await LOGBORN_FEED_READER.query(sparql);
+  if (r.ok) return r.rows;
+  throw r.error || Object.assign(new Error(`graph executor unavailable: ${r.reason}`), { code: 'GRAPH_EXECUTOR_UNAVAILABLE' });
 }
 
 /**
@@ -11972,6 +11992,7 @@ if (process.env.SCRUM_GRAPH_UNIT_CONVERSATIONS === '1') {
   // #1574 A1–A5 — both readers share ONE gate on executor work: the deadlines below are what a CALLER waits; the graph
   // request underneath is never aborted by them (the executor would keep computing anyway), and holds its slot until it ends.
   const gate = createReadGate({ max: 8, queueMax: 128 });
+  READ_GATE = gate;
   const raw = createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: gate.hardTimeoutMs });
   POSTS_READER = gate.reader(raw, POSTS_READ_TIMEOUT_MS);
   POSTS_BULK_READER = gate.reader(raw, POSTS_BULK_READ_TIMEOUT_MS);
