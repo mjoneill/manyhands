@@ -39,6 +39,9 @@ test('P7 AN IDLE COMMONS TAB MAKES NO UNBOUNDED ?since= REQUEST: with commons.ht
       assert.ok(log.length >= 1, `CONTROL: the page read the conversations at all (${log.length} requests)`);
       const since = log.filter((u) => /[?&]since=/.test(u));
       assert.equal(since.length, 0, `an idle Commons tab sends no whole-history since poll (${since.length} in 20 s): ${since.slice(0, 2).join(' , ')}`);
-    }, { server: { board: makeBoardFixture({ postSeqEpoch: EPOCH_DOC, nextPostSeq: 1 }), env: { SCRUM_ROSTER_FILE: ROSTER_FILE, SCRUM_GRAPH_DATASET_ID: DSID, SCRUM_GRAPH_EXECUTOR_URL: exec.baseUrl, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1' } } });
+      // and no REPEATED full read either: the raised-hands panel reads the whole list once at boot (that one is outside this row) and must not do it again on a tick
+      const bare = log.filter((u) => u === '/api/conversations');
+      assert.ok(bare.length <= 1, `at most one full read of the list in 20 s, the boot read (${bare.length})`);
+    }, { server: { board: makeBoardFixture({ cards: [{ id: 'c1', shortId: 1, title: 'a card', description: '', type: 'task', column: 'backlog', order: 1, assignees: ['unassigned'], labels: [], priority: null, version: 1, createdAt: '2026-09-14T00:00:00.000Z', updatedAt: '2026-09-14T00:00:00.000Z', relationships: { relatedTo: [], blockedBy: [] } }], nextShortId: 2, postSeqEpoch: EPOCH_DOC, nextPostSeq: 1 }), env: { SCRUM_ROSTER_FILE: ROSTER_FILE, SCRUM_GRAPH_DATASET_ID: DSID, SCRUM_GRAPH_EXECUTOR_URL: exec.baseUrl, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1' } } });
   } finally { await killExecutor(exec); }
 });
