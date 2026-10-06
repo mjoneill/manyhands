@@ -24,7 +24,7 @@
  *                   would break #1404's rule that the clock-driven checks are never stale.)
  *   Z4 COST         A board of 3,000 cards where #900's real ASK is heavy (the engine's join of two aggregates through a property path: 3.4 to 4.6 s in my measurements, 7.4 to 7.6 s on the live board). The
  *                   ASK-form pass is the SEMANTIC ORACLE only (no minimum duration is asserted on it; a floor is unstable across machines, the contract owner ruled at 04:12Z). The same board with #900 authored as a compare: the check holds with the SAME verdict, costs under 500 ms, the whole pass is under 3,000 ms, and `/api/health`, probed every 100 ms
- *                   throughout, never takes over 1,000 ms (REST's main thread is not frozen by it).
+ *                   throughout, never takes over 1,000 ms, or, on a busy machine, at most half what the ASK form's pass allowed (REST's main thread is not frozen by it; revised 13:50Z after a load-induced failure).
  *
  * REAL REST servers, no executor needed (the checks run on the in-process replica). Synthetic content only.
  * NOT COVERED, by name: the write path (whether a malformed `compare` is refused when a card is written or only fails when evaluated: these rows load it as data and pin the EVALUATION); caching or backoff of any check
@@ -156,7 +156,7 @@ function heavy(compareForm) {
   return makeBoardFixture({ cards, nextShortId: 9000 });
 }
 test('Z4 COST: on a board where #900 as an ASK is heavy, the same check as a compare holds with the same verdict in under 500 ms and REST is never frozen over 1 s', { timeout: 240000 }, async () => {
-  const asAsk = await pass(heavy(false));
+  const asAsk = await pass(heavy(false), { probe: true });
   const ask = asAsk.rows['membership decays'];
   assert.equal(ask?.status, 'holds', `CONTROL: the ASK holds on the heavy board: ${JSON.stringify(ask)}`);
   // (No minimum duration is asserted on the old ASK: its blocking cost is measured elsewhere, and a duration floor is unstable across machines. It stays here as the SEMANTIC ORACLE, and its cost is printed in the messages.)
@@ -166,5 +166,7 @@ test('Z4 COST: on a board where #900 as an ASK is heavy, the same check as a com
   assert.equal(cmp.actual, ask.actual, 'with the SAME verdict as the ASK');
   assert.ok(cmp.ms < 500, `and costs ${cmp.ms} ms (the ASK cost ${ask.ms} ms)`);
   assert.ok(asCompare.json.evaluationMs < 3000, `the whole pass takes ${asCompare.json.evaluationMs} ms`);
-  assert.ok(asCompare.healthMax <= 1000, `REST was not frozen: /api/health took at most ${asCompare.healthMax} ms over ${asCompare.probes} probes (the ASK form took ${ask.ms} ms on this board)`);
+  // Load-robust (a full-suite run at load average 16-21 measured 1,961 ms on a compare that took 7 ms): either REST answered within 1 s in absolute terms, or its worst /api/health under the compare is at most
+  // HALF its worst under the ASK on the same board and machine, so a busy machine inflates both and a compare that froze REST like the ASK still fails.
+  assert.ok(asCompare.healthMax <= 1000 || asCompare.healthMax * 2 <= asAsk.healthMax, `REST was not frozen: /api/health took at most ${asCompare.healthMax} ms over ${asCompare.probes} probes under the compare, against ${asAsk.healthMax} ms under the ASK form (the ASK took ${ask.ms} ms on this board)`);
 });

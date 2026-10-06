@@ -161,7 +161,10 @@ export function oldestEvent(dir) {
   };
   for (const f of segs) {
     let buf;
-    try { buf = readFileSync(join(dir, f)); } catch { continue; }
+    // A segment pruned between the listing and the read (ENOENT) is skipped. Anything else (EACCES, EIO) THROWS,
+    // as the old full-parse reader did: answering from the next segment would report a retention gap that is
+    // really a permission error (row V3c).
+    try { buf = readFileSync(join(dir, f)); } catch (e) { if (e?.code === 'ENOENT') continue; throw e; }
     let start = 0;
     while (!found && start < buf.length) {
       let nl = buf.indexOf(0x0a, start);
