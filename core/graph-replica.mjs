@@ -131,6 +131,7 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:cardType', 'scrum:claimedAt', 'scrum:claimedBy', 'scrum:for',
   'scrum:assignee', 'scrum:blockedByAnyHuman', 'scrum:derivedFrom',
   'scrum:ofCard', 'scrum:blockedBy', 'scrum:expect', 'scrum:ask', 'scrum:claim',
+  'scrum:compareLeft', 'scrum:compareOp', 'scrum:compareRight',   // #1610 — a two-read tripwire's parts
   'scrum:hasCheck', 'scrum:supersededBy', 'scrum:supersedes',
   // #1322 — a decision recorded twice: the twin points at the original.
   // `scrum:supersedes` above is reused for decision → decision amendments.
@@ -1637,6 +1638,11 @@ function projectEntity(store, e) {
         add(chk, A, nn(S + 'Check'));
         if (c.claim != null) add(chk, nn(S + 'claim'), lit(c.claim));
         if (c.ask != null) add(chk, nn(S + 'ask'), lit(c.ask));
+        if (c.compare && typeof c.compare === 'object') {   // #1610 — the two reads and the operator, as authored
+          if (c.compare.left != null) add(chk, nn(S + 'compareLeft'), lit(c.compare.left));
+          if (c.compare.op != null) add(chk, nn(S + 'compareOp'), lit(c.compare.op));
+          if (c.compare.right != null) add(chk, nn(S + 'compareRight'), lit(c.compare.right));
+        }
         if (typeof c.expect === 'boolean') add(chk, nn(S + 'expect'), lit(c.expect));
       });
       // #656 — the DERIVED reference edge, beside the deliberate ones and
@@ -2304,7 +2310,9 @@ export function censusByType(store) {
   return counts;
 }
 
-export function queryGraph(store, sparql, { limit } = {}) {
+// `terms: true` (internal; #1610) keeps each literal's datatype: a row value becomes {value, termType, datatype}. The
+// public surface leaves it off and answers exactly as before.
+export function queryGraph(store, sparql, { limit, terms = false } = {}) {
   if (typeof sparql !== 'string' || !sparql.trim()) throw Object.assign(new Error('empty query'), { code: 'EMPTY_QUERY' });
   // ⛔ #899 — STRIP STRING LITERALS BEFORE LOOKING FOR VERBS, or the board's own
   // event vocabulary becomes unqueryable in its own provenance log:
@@ -2566,7 +2574,9 @@ export function queryGraph(store, sparql, { limit } = {}) {
   for (const binding of out) {
     const row = {};
     for (const [k, v] of binding.entries()) {
-      row[k] = v.termType === 'NamedNode' ? shorten(v.value) : v.value;
+      row[k] = terms
+        ? { value: v.value, termType: v.termType, datatype: v.termType === 'Literal' ? v.datatype?.value ?? null : null }
+        : (v.termType === 'NamedNode' ? shorten(v.value) : v.value);
     }
     rows.push(row);
     if (rows.length > wanted) break;

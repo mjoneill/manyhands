@@ -280,6 +280,9 @@ export const PREDICATE_SOURCE = Object.freeze({
   'schema:sameAs': 'labelAliases',              // declared synonyms (#857 §V)
   'scrum:claim': 'checks',                      // a Check node's own fields
   'scrum:ask': 'checks',
+  'scrum:compareLeft': 'checks',               // #1610
+  'scrum:compareOp': 'checks',
+  'scrum:compareRight': 'checks',
   'scrum:expect': 'checks',
 
   // ── MINTED BY THE PROJECTION. No store key exists. ─────────────────────
