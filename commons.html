@@ -631,7 +631,30 @@
     // flat 87 MB per tab (27k rows) — the churn was gone but the corpus had
     // moved in. The stamp still advances over EVERY row the server returned,
     // kept or not, so the next delta starts where this one ended.
-    const blocked = { convos: new Map(), cards: new Map(), convoSince: null, cardSince: null, loaded: false };
+    // #1607 P7 — with the graph unit on (the server injects window.__SCRUM_COMMIT_FEED__), the tick follows the
+    // commit-ordered feed from a cursor taken at boot, BEFORE the full read, so a post committed in between is covered
+    // (ids dedupe). A quiet tick is one marker read on the server, never the whole-store `?since=` scan. A 409 (another
+    // store) re-boots the panel. Without the unit, `convoCursor` stays null and the tick is the `since=` poll as before.
+    const blocked = { convos: new Map(), cards: new Map(), convoSince: null, cardSince: null, loaded: false, convoCursor: null };
+    const useFeed = window.__SCRUM_COMMIT_FEED__ === true;
+    async function feedTip() {
+      try { const r = await fetch('/api/conversations?afterCommit=tip'); if (!r.ok) return null; const p = await r.json(); return p && typeof p.nextAfterCommit === 'string' ? p.nextAfterCommit : null; }
+      catch { return null; }
+    }
+    /** Every row past the cursor, following pages until the feed is live and empty; null on a 409 (re-boot), throws otherwise. */
+    async function feedSince() {
+      const out = [];
+      for (let guard = 0; guard < 20; guard++) {
+        const r = await fetch('/api/conversations?afterCommit=' + encodeURIComponent(blocked.convoCursor) + '&limit=200');
+        if (r.status === 409) return null;
+        const page = await r.json();
+        if (!r.ok || !page || !Array.isArray(page.conversations) || typeof page.nextAfterCommit !== 'string') throw new Error('feed unavailable');
+        for (const c of page.conversations) if (c && !c.redacted && c.op !== 'redact') out.push(c);
+        blocked.convoCursor = page.nextAfterCommit;
+        if (page.phase === 'live' && page.conversations.length === 0) break;
+      }
+      return out;
+    }
     const maxStamp = (cur, rows, key) => rows.reduce((m, r) => (typeof r[key] === 'string' && (!m || r[key] > m) ? r[key] : m), cur);
     const raiseRow = (m) => m && typeof m.attachedTo === 'string' && m.attachedTo
       && (RAISE_RE.test(m.body || '') || RESOLVE_RE.test(m.body || ''));
@@ -639,6 +662,7 @@
       try {
         let changed = false;
         if (!blocked.loaded || !blocked.convoSince || !blocked.cardSince) {
+          if (useFeed) blocked.convoCursor = await feedTip();   // the tip FIRST, then the full read
           const [convos, cards] = await Promise.all([
             fetch('/api/conversations').then((r) => r.json()),
             fetchCardSummaries(),
@@ -652,9 +676,12 @@
           changed = true;
         } else {
           const [convos, res] = await Promise.all([
-            fetch('/api/conversations?since=' + encodeURIComponent(blocked.convoSince)).then((r) => r.json()),
+            blocked.convoCursor
+              ? feedSince()
+              : fetch('/api/conversations?since=' + encodeURIComponent(blocked.convoSince)).then((r) => r.json()),
             fetch('/api/cards?limit=500&updatedSince=' + encodeURIComponent(blocked.cardSince)).then((r) => r.json()),
           ]);
+          if (convos === null) { blocked.loaded = false; return; }   // 409: another store; re-boot on the next tick
           const cards = res && Array.isArray(res.cards) ? res.cards : [];
           for (const m of (Array.isArray(convos) ? convos : [])) {
             if (!raiseRow(m) || blocked.convos.has(m.id)) continue;

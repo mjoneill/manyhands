@@ -760,8 +760,41 @@ export function mountConversationView(opts = {}) {
     return fm;
   }
 
+  // #1607 P7 — with the graph unit on (the server injects __SCRUM_COMMIT_FEED__ into the page), the poll follows the
+  // commit-ordered feed from a cursor scoped to this view's thread, taken BEFORE each list load so a post committed in
+  // between is covered (ids dedupe). A quiet poll is one marker read on the server, never the whole-store `since=` scan.
+  // A 409 (another store) takes a fresh tip and merges a list; any other failure keeps the view. Without the unit the
+  // cursor stays null and the poll is the `since=` poll as before.
+  const useFeed = !!(doc.defaultView && doc.defaultView.__SCRUM_COMMIT_FEED__ === true);
+  let feedCursor = null;
+  const feedUrl = (after) => baseUrl + '/api/conversations?afterCommit=' + encodeURIComponent(after)
+    + (typeof attachedTo === 'string' && attachedTo ? '&attachedTo=' + encodeURIComponent(attachedTo) : '') + '&limit=200';
+  async function feedTip() {
+    try {
+      const res = await f(feedUrl('tip'));
+      if (!res.ok) return null;
+      const page = await res.json();
+      return page && typeof page.nextAfterCommit === 'string' ? page.nextAfterCommit : null;
+    } catch (_) { return null; }
+  }
+  /** Rows past the cursor, following pages until live and empty. null ⇒ a 409 (resync); throws on any other failure. */
+  async function feedRows() {
+    const out = [];
+    for (let guard = 0; guard < 20 && feedCursor; guard++) {
+      const res = await f(feedUrl(feedCursor));
+      if (res.status === 409) return null;
+      const page = await res.json();
+      if (!res.ok || !page || !Array.isArray(page.conversations) || typeof page.nextAfterCommit !== 'string') throw new Error('feed unavailable');
+      for (const c of page.conversations) if (c && !c.redacted && c.op !== 'redact') out.push(c);
+      feedCursor = page.nextAfterCommit;
+      if (page.phase === 'live' && page.conversations.length === 0) break;
+    }
+    return out;
+  }
+
   async function load() {
     let data = [];
+    if (useFeed) feedCursor = await feedTip();   // #1607 — the tip FIRST, then the list
     try {
       const res = await f(conversationsUrl({ baseUrl, attachedTo, limit }));
       if (res.ok) data = await res.json();
@@ -797,14 +830,25 @@ export function mountConversationView(opts = {}) {
   }
 
   async function pollOnce() {
-    const url = lastTs
-      ? conversationsUrl({ baseUrl, attachedTo, since: lastTs })
-      : conversationsUrl({ baseUrl, attachedTo, limit });
     let data = [];
-    try {
-      const res = await f(url);
-      if (res.ok) data = await res.json();
-    } catch (_) { return; }
+    if (feedCursor) {
+      try {
+        const rows = await feedRows();
+        if (rows === null) {   // 409: another store behind REST — a fresh tip, then the list, merged
+          feedCursor = await feedTip();
+          const res = await f(conversationsUrl({ baseUrl, attachedTo, limit }));
+          if (res.ok) data = await res.json();
+        } else data = rows;
+      } catch (_) { return; }   // 503 / offline: keep the view, next tick tries again
+    } else {
+      const url = lastTs
+        ? conversationsUrl({ baseUrl, attachedTo, since: lastTs })
+        : conversationsUrl({ baseUrl, attachedTo, limit });
+      try {
+        const res = await f(url);
+        if (res.ok) data = await res.json();
+      } catch (_) { return; }
+    }
     if (!Array.isArray(data) || !data.length) return;
     const before = new Set(messages.map((m) => m.id));
     messages = mergeMessages(messages, data);
