@@ -229,6 +229,30 @@ if (opt('--once-id')) wakes = messages.filter((m) => m.id === opt('--once-id')).
 // (offered by the fanout, one per post). Drain "offered to me, not yet
 // claimed" into ONE digest turn. Assignment wakes (above) come first — an
 // obligation before the room — so a busy room cannot starve an assigned card.
+// #1617 — every delivery step of one loop in ONE request: the batch route applies them in order under one lock with one
+// document write (one per step was 3N full-document writes per digest turn). The answer is per entry, in order, each the
+// single route's own status and body. A server without the route (404/405) gets the per-id requests, as before.
+async function deliverySteps(entries) {
+  if (!entries.length) return [];
+  const full = entries.map((e) => ({ source: 'guest-runner', by: agent.seatKey, ...e }));
+  if (dry) { for (const e of full) console.log(`[dry-run] would mark delivery ${e.id} ${e.state}`); return full.map((e) => ({ id: e.id, status: 201, body: null })); }
+  try {
+    const r = await fetch(`${BOARD}/api/deliveries/events`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(full) });
+    if (r.status !== 404 && r.status !== 405) {
+      const b = await r.json().catch(() => null);
+      if (r.ok && b && Array.isArray(b.results)) return b.results;
+      return full.map((e) => ({ id: e.id, status: r.status, body: b }));
+    }
+  } catch (e) { return full.map((x) => ({ id: x.id, status: 0, body: { error: e.message } })); }
+  const out = [];
+  for (const { id, ...body } of full) {
+    try {
+      const r = await fetch(`${BOARD}/api/deliveries/${encodeURIComponent(id)}/events`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      out.push({ id, status: r.status, body: await r.json().catch(() => null) });
+    } catch (e) { out.push({ id, status: 0, body: { error: e.message } }); }
+  }
+  return out;
+}
 const channelMode = agent.deliveryMode === 'channel' && !opt('--once-id');
 let claimed = [];
 if (channelMode && !wakes.length) {
@@ -240,11 +264,9 @@ if (channelMode && !wakes.length) {
     // window ⇒ failed (reason: stale), which makes it claimable again below
     // at attempt +1. Inside the window it is somebody's turn — untouched.
     const staleMs = deliveryStaleMs();
-    for (const d of mine.filter((x) => isStaleDelivery(x, { staleMs }))) {
-      if (dry) { console.log(`[dry-run] would mark delivery ${d.id} failed (stale)`); continue; }
-      const r = await fetch(`${BOARD}/api/deliveries/${encodeURIComponent(d.id)}/events`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state: 'failed', reason: 'stale', note: `no outcome ${Math.round(staleMs / 1000)}s after ${d.state}`, source: 'guest-runner', by: agent.seatKey }) });
-      console.log(`[#1346] ${agent.seatKey}: delivery ${d.id} was ${d.state} past the stale window — marked failed (${r.status}); reclaimable`);
-    }
+    const stale = mine.filter((x) => isStaleDelivery(x, { staleMs }));
+    const staleResults = await deliverySteps(stale.map((d) => ({ id: d.id, state: 'failed', reason: 'stale', note: `no outcome ${Math.round(staleMs / 1000)}s after ${d.state}` })));
+    for (const [i, d] of stale.entries()) console.log(`[#1346] ${agent.seatKey}: delivery ${d.id} was ${d.state} past the stale window — marked failed (${staleResults[i]?.status}); reclaimable`);
     openList = (await get(`/api/deliveries?to=${encodeURIComponent(agent.seatKey)}&open=1`)).deliveries ?? [];
   }
   catch (e) { console.error(`[#1346] ${agent.seatKey}: deliveries unreadable — nothing drained this run: ${e.message}`); }
@@ -257,14 +279,9 @@ if (channelMode && !wakes.length) {
       console.log(`[#1346] ${agent.seatKey}: ${openList.length} deliver${openList.length === 1 ? 'y' : 'ies'} open, left unclaimed — ${budget.reason}${budget.spent != null ? ` (spent ${budget.spent} of ${budget.budget})` : ''}`);
       process.exit(0);
     }
-    const step = async (id, body) => {
-      if (dry) { console.log(`[dry-run] would mark delivery ${id} ${body.state}`); return { status: 201, body: null }; }
-      const r = await fetch(`${BOARD}/api/deliveries/${encodeURIComponent(id)}/events`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source: 'guest-runner', by: agent.seatKey, ...body }) });
-      let b = null; try { b = await r.json(); } catch { /* none */ }
-      return { status: r.status, body: b };
-    };
-    for (const d of openList) {
-      const r = await step(d.id, { state: 'runner-claimed' });
+    const claims = await deliverySteps(openList.map((d) => ({ id: d.id, state: 'runner-claimed' })));
+    for (const [i, d] of openList.entries()) {
+      const r = claims[i] || { status: 0 };
       if (r.status === 201) claimed.push(d);
       else console.log(`[#1346] ${agent.seatKey}: delivery ${d.id} not claimed (${r.status}${r.body?.state ? ` — ${r.body.state}` : ''})`);
     }
@@ -293,7 +310,7 @@ if (channelMode && !wakes.length) {
       const talks = new Set(posts.map((m) => m.conversation || null));
       const conversation = talks.size === 1 ? [...talks][0] : null;
       wakes = [{ kind: 'channel', id: `channel:${newest?.id ?? new Date().toISOString()}`, createdAt: newest?.createdAt ?? new Date().toISOString(), author: null, body: '', posts, messageIds: posts.map((m) => m.id), deliveries: claimed.map((d) => d.id), attachedTo, conversation }];
-      for (const d of claimed) await step(d.id, { state: 'turn-started' });
+      await deliverySteps(claimed.map((d) => ({ id: d.id, state: 'turn-started' })));
     }
   }
 }
@@ -437,11 +454,9 @@ const r = await guestOnce({
 // silently left as a claim that never resolves.
 if (wake.kind === 'channel' && !dry) {
   const outcome = deliveryOutcome(r, wake.deliveries);   // #1372 — batch-ambiguous + modelCall
-  for (const id of wake.deliveries) {
-    try {
-      const x = await fetch(`${BOARD}/api/deliveries/${encodeURIComponent(id)}/events`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source: 'guest-runner', by: agent.seatKey, ...outcome }) });
-      if (!x.ok) console.error(`[#1346] ${agent.seatKey}: delivery ${id} outcome ${outcome.state} NOT recorded → ${x.status}`);
-    } catch (e) { console.error(`[#1346] ${agent.seatKey}: delivery ${id} outcome ${outcome.state} NOT recorded: ${e.message}`); }
+  const recorded = await deliverySteps(wake.deliveries.map((id) => ({ id, ...outcome })));
+  for (const x of recorded) {
+    if (!(x.status >= 200 && x.status < 300)) console.error(`[#1346] ${agent.seatKey}: delivery ${x.id} outcome ${outcome.state} NOT recorded → ${x.status}${x.body?.error ? ` (${x.body.error})` : ''}`);
   }
 }
 // Advance the cursor only on an outcome that settles the mention; a halt leaves

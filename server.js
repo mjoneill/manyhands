@@ -6047,73 +6047,126 @@ async function handleCreateDelivery(req, res) {
   }
 }
 
+// #1617 — ONE delivery step, split so the batch route runs the SAME logic: `deliveryEventInput` validates a body
+// before the lock (a 400 never takes the lock), `applyDeliveryEvent` applies it to the board UNDER the lock without
+// writing, and the caller writes once. The single route is exactly validate → apply → write; the batch applies its
+// entries in order inside one lock (an entry may depend on an earlier one in its batch) and writes once.
+function deliveryEventInput(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return { status: 400, wire: { error: 'each delivery step is a JSON object' } };
+  const by = typeof body.by === 'string' && body.by.trim() ? body.by.trim() : null;
+  if (!by) return { status: 400, wire: { error: 'by is required — who records this step. Declared, not authenticated.' } };
+  const state = deliveryStateName(body.state);   // #1373 — `runner-claimed` accepted, stored as `claimed`
+  if (!DELIVERY_STATES.includes(state)) {
+    return { status: 400, wire: { error: `state must be one of ${DELIVERY_STATES.join(' | ')} (got ${JSON.stringify(body.state)})` } };
+  }
+  const source = typeof body.source === 'string' ? body.source : 'guest-runner';
+  if (!DELIVERY_SOURCES.has(source)) return { status: 400, wire: { error: `source must be one of ${[...DELIVERY_SOURCES].join(' | ')} (got ${JSON.stringify(body.source)})` } };
+  // #1372 — an OPAQUE trace identity (the bridge's per-attempt id, the
+  // runner's turn id: the server assigns it no meaning) and the ModelCall row
+  // that produced this step. Both optional; a malformed one is refused, not
+  // dropped, so the record can never read "not traced" for a caller that traced.
+  if (body.traceId != null && (typeof body.traceId !== 'string' || !body.traceId.trim() || body.traceId.length > 128)) {
+    return { status: 400, wire: { error: 'traceId must be a non-empty string of at most 128 characters — an opaque id, not a payload' } };
+  }
+  if (body.modelCall != null && (typeof body.modelCall !== 'string' || !body.modelCall.trim())) {
+    return { status: 400, wire: { error: 'modelCall must be the id of a scrum:ModelCall row the board holds' } };
+  }
+  return { ok: true, by, state, source, body };
+}
+
+/** Under the lock: apply one validated step to `data` in memory. {status, wire, event?}; the caller writes. */
+function applyDeliveryEvent(data, id, input) {
+  const { by, state, source, body } = input;
+  const idx = deliveriesOf(data).findIndex((d) => d['@id'] === id);
+  if (idx < 0) return { status: 404, wire: { error: `no delivery ${id}` } };
+  const cur = deliveriesOf(data)[idx];
+  // Resolved UNDER the lock against the same read: a ref the board does not
+  // hold is a 400 with nothing appended — never a dangling edge in the graph.
+  const modelCall = body.modelCall == null ? null : (modelCallsOf(data).find((c) => c['@id'] === body.modelCall.trim() || c['@id'].endsWith(`/${body.modelCall.trim()}`))?.['@id'] ?? undefined);
+  if (modelCall === undefined) return { status: 400, wire: { error: `modelCall ${JSON.stringify(body.modelCall)} names no scrum:ModelCall row on this board — post the ledger row first (POST /api/model-calls), then link it` } };
+  const events = deliveryEventsOf(cur);
+  const latest = deliveryState(cur);
+  // THE ATOMIC STEP. Under the write lock, so two runners reading "offered"
+  // at once cannot both claim it: the second sees the first's claim here.
+  if (state === 'claimed' && !DELIVERY_CLAIMABLE.has(latest)) {
+    return { status: 409, wire: { error: `delivery is ${latest}; only an offered, queued or failed delivery can be claimed`, state: latest } };
+  }
+  // THE OTHER TRANSITIONS, guarded (slice 2 review): a step needs an open
+  // claim, a terminal state accepts nothing, and offered/queued may only
+  // precede a claim — so a retrying fanout's late `queued` cannot re-open
+  // a published delivery and hand the runner a second wake for it.
+  const allowed = DELIVERY_NEXT[state];
+  if (allowed && !allowed.has(latest)) {
+    return { status: 409, wire: { error: `delivery is ${latest}; ${state} may follow only ${[...allowed].join(' | ')}`, state: latest } };
+  }
+  const attempt = state === 'claimed'
+    ? events.filter((ev) => deliveryStateName(ev['scrum:state']) === 'claimed').length + 1
+    : (events.findLast((ev) => Number.isInteger(ev['scrum:attempt']))?.['scrum:attempt'] ?? null);
+  const ev = {
+    'scrum:state': state, 'scrum:at': new Date().toISOString(), 'scrum:source': source, creator: by,
+    ...(Number.isInteger(attempt) ? { 'scrum:attempt': attempt } : {}),
+    // "state answers WHAT happened; reason answers WHOSE act it was" — a
+    // deliberate decline (reason: explicit) must stay distinguishable from
+    // every boundary-generated non-publication in one query.
+    ...(typeof body.reason === 'string' && body.reason.trim() ? { 'scrum:reason': body.reason.trim() } : {}),
+    ...(typeof body.note === 'string' && body.note ? { text: body.note } : {}),
+    ...(typeof body.traceId === 'string' ? { 'scrum:traceId': body.traceId.trim() } : {}),   // #1372
+    ...(modelCall ? { 'scrum:ofModelCall': modelCall } : {}),
+  };
+  const entity = { ...cur, 'scrum:hasEvent': [...events, ev] };
+  data.deliveries = deliveriesOf(data).map((d, i) => (i === idx ? entity : d));
+  return { status: 201, wire: deliveryToWire(entity), event: deliveryEvent('update', entity, by) };
+}
+
 async function handleCreateDeliveryEvent(req, res, id) {
   try {
-    const body = JSON.parse(await readBody(req));
-    const by = typeof body.by === 'string' && body.by.trim() ? body.by.trim() : null;
-    if (!by) return sendJSON(res, 400, { error: 'by is required — who records this step. Declared, not authenticated.' });
-    body.state = deliveryStateName(body.state);   // #1373 — `runner-claimed` accepted, stored as `claimed`
-    if (!DELIVERY_STATES.includes(body.state)) {
-      return sendJSON(res, 400, { error: `state must be one of ${DELIVERY_STATES.join(' | ')} (got ${JSON.stringify(body.state)})` });
-    }
-    const source = typeof body.source === 'string' ? body.source : 'guest-runner';
-    if (!DELIVERY_SOURCES.has(source)) return sendJSON(res, 400, { error: `source must be one of ${[...DELIVERY_SOURCES].join(' | ')} (got ${JSON.stringify(body.source)})` });
-    // #1372 — an OPAQUE trace identity (the bridge's per-attempt id, the
-    // runner's turn id: the server assigns it no meaning) and the ModelCall row
-    // that produced this step. Both optional; a malformed one is refused, not
-    // dropped, so the record can never read "not traced" for a caller that traced.
-    if (body.traceId != null && (typeof body.traceId !== 'string' || !body.traceId.trim() || body.traceId.length > 128)) {
-      return sendJSON(res, 400, { error: 'traceId must be a non-empty string of at most 128 characters — an opaque id, not a payload' });
-    }
-    if (body.modelCall != null && (typeof body.modelCall !== 'string' || !body.modelCall.trim())) {
-      return sendJSON(res, 400, { error: 'modelCall must be the id of a scrum:ModelCall row the board holds' });
-    }
+    const input = deliveryEventInput(JSON.parse(await readBody(req)));
+    if (!input.ok) return sendJSON(res, input.status, input.wire);
     const result = await withWriteLock(async () => {
       const data = readBoard();
-      const idx = deliveriesOf(data).findIndex((d) => d['@id'] === id);
-      if (idx < 0) return { status: 404, wire: { error: `no delivery ${id}` } };
-      const cur = deliveriesOf(data)[idx];
-      // Resolved UNDER the lock against the same read: a ref the board does not
-      // hold is a 400 with nothing appended — never a dangling edge in the graph.
-      const modelCall = body.modelCall == null ? null : (modelCallsOf(data).find((c) => c['@id'] === body.modelCall.trim() || c['@id'].endsWith(`/${body.modelCall.trim()}`))?.['@id'] ?? undefined);
-      if (modelCall === undefined) return { status: 400, wire: { error: `modelCall ${JSON.stringify(body.modelCall)} names no scrum:ModelCall row on this board — post the ledger row first (POST /api/model-calls), then link it` } };
-      const events = deliveryEventsOf(cur);
-      const latest = deliveryState(cur);
-      // THE ATOMIC STEP. Under the write lock, so two runners reading "offered"
-      // at once cannot both claim it: the second sees the first's claim here.
-      if (body.state === 'claimed' && !DELIVERY_CLAIMABLE.has(latest)) {
-        return { status: 409, wire: { error: `delivery is ${latest}; only an offered, queued or failed delivery can be claimed`, state: latest } };
-      }
-      // THE OTHER TRANSITIONS, guarded (slice 2 review): a step needs an open
-      // claim, a terminal state accepts nothing, and offered/queued may only
-      // precede a claim — so a retrying fanout's late `queued` cannot re-open
-      // a published delivery and hand the runner a second wake for it.
-      const allowed = DELIVERY_NEXT[body.state];
-      if (allowed && !allowed.has(latest)) {
-        return { status: 409, wire: { error: `delivery is ${latest}; ${body.state} may follow only ${[...allowed].join(' | ')}`, state: latest } };
-      }
-      const attempt = body.state === 'claimed'
-        ? events.filter((ev) => deliveryStateName(ev['scrum:state']) === 'claimed').length + 1
-        : (events.findLast((ev) => Number.isInteger(ev['scrum:attempt']))?.['scrum:attempt'] ?? null);
-      const ev = {
-        'scrum:state': body.state, 'scrum:at': new Date().toISOString(), 'scrum:source': source, creator: by,
-        ...(Number.isInteger(attempt) ? { 'scrum:attempt': attempt } : {}),
-        // "state answers WHAT happened; reason answers WHOSE act it was" — a
-        // deliberate decline (reason: explicit) must stay distinguishable from
-        // every boundary-generated non-publication in one query.
-        ...(typeof body.reason === 'string' && body.reason.trim() ? { 'scrum:reason': body.reason.trim() } : {}),
-        ...(typeof body.note === 'string' && body.note ? { text: body.note } : {}),
-        ...(typeof body.traceId === 'string' ? { 'scrum:traceId': body.traceId.trim() } : {}),   // #1372
-        ...(modelCall ? { 'scrum:ofModelCall': modelCall } : {}),
-      };
-      const entity = { ...cur, 'scrum:hasEvent': [...events, ev] };
-      data.deliveries = deliveriesOf(data).map((d, i) => (i === idx ? entity : d));
-      writeBoard(data, [deliveryEvent('update', entity, by)]);
-      return { status: 201, wire: deliveryToWire(entity) };
+      const r = applyDeliveryEvent(data, id, input);
+      if (r.event) writeBoard(data, [r.event]);
+      return r;
     });
     sendJSON(res, result.status, result.wire);
   } catch (e) {
     console.error('POST /api/deliveries/:id/events:', e.message);
+    sendJSON(res, 500, { error: e.message });
+  }
+}
+
+// #1617 — POST /api/deliveries/events: a JSON ARRAY of steps, each the single route's body plus the delivery `id`.
+// Applied IN ORDER under ONE write lock with ONE document write for everything that applied; nothing applied, nothing
+// written. Answers 200 {results: [{id, status, body}]} in request order, each entry's status and body exactly what the
+// single route would have said at that point. One refusal never fails the others. Before this, a runner's digest turn
+// over N deliveries cost 3N full-document writes (claimed, turn-started, outcome: one request each).
+async function handleBatchDeliveryEvents(req, res) {
+  try {
+    let entries;
+    try { entries = JSON.parse(await readBody(req)); } catch { return sendJSON(res, 400, { error: 'invalid JSON' }); }
+    if (!Array.isArray(entries)) return sendJSON(res, 400, { error: 'the body is a JSON array of delivery steps, each {id, state, by, …}' });
+    if (entries.length === 0) return sendJSON(res, 400, { error: 'an empty batch records nothing — send at least one step' });
+    const prepared = entries.map((e) => {
+      const id = e && typeof e === 'object' && typeof e.id === 'string' && e.id ? e.id : null;
+      if (!id) return { id: e?.id ?? null, refused: { status: 400, wire: { error: 'each step names its delivery: id is required' } } };
+      const input = deliveryEventInput(e);
+      return input.ok ? { id, input } : { id, refused: input };
+    });
+    const results = await withWriteLock(async () => {
+      const data = readBoard();
+      const out = []; const events = [];
+      for (const p of prepared) {
+        if (p.refused) { out.push({ id: p.id, status: p.refused.status, body: p.refused.wire }); continue; }
+        const r = applyDeliveryEvent(data, p.id, p.input);
+        if (r.event) events.push(r.event);
+        out.push({ id: p.id, status: r.status, body: r.wire });
+      }
+      if (events.length) writeBoard(data, events);
+      return out;
+    });
+    sendJSON(res, 200, { results });
+  } catch (e) {
+    console.error('POST /api/deliveries/events:', e.message);
     sendJSON(res, 500, { error: e.message });
   }
 }
@@ -12153,6 +12206,7 @@ const API_ROUTES = [
   { method: 'GET',    re: /^\/api\/wakes$/,                fn: (req, res) => handleListWakes(req, res) },
   { method: 'POST',   re: /^\/api\/wakes$/,                fn: (req, res) => handleCreateWake(req, res) },
   { method: 'POST',   re: /^\/api\/deliveries$/,           fn: (req, res) => handleCreateDelivery(req, res) },                 // #1346
+  { method: 'POST',   re: /^\/api\/deliveries\/events$/,     fn: (req, res) => handleBatchDeliveryEvents(req, res) },                 // #1617 — before the per-id route
   { method: 'POST',   re: /^\/api\/deliveries\/([^/]+)\/events$/, fn: (req, res, m) => handleCreateDeliveryEvent(req, res, decodeURIComponent(m[1])) },
   { method: 'GET',    re: /^\/api\/deliveries$/,           fn: (req, res) => handleListDeliveries(req, res) },
   // #1207 — the research write verbs. A card PATCH cannot say "this run
