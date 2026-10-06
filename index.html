@@ -6533,6 +6533,7 @@ function conversationsSignature(convs) {
 //   _oldestConvTs = oldest loaded → load-older fetches ?before=this (walk back).
 let _lastConvTs = null;
 let _oldestConvTs = null;
+let _convFeedCursor = null;   // #1607 — gc1.… when the graph feed is served; null ⇒ the ?since= poll
 let _convsLoadingOlder = false;
 let _convsReachedStart = false;   // true once load-older hits an empty page
 let _convsScrollWired = false;
@@ -6550,7 +6551,10 @@ function _oldestLoadedTs() {
 // #210 — bounded initial load: pull only the recent window (not the whole
 // history), render it, set both cursors, wire scroll-up-loads-older. The
 // recurring 5s poll is pollConversations(); walking back is loadOlderConversations().
-function loadConversations() {
+async function loadConversations() {
+  // #1607 — the tip FIRST, then the list: the order is what covers a post committed in between (pinned by P1/P3). Only
+  // when the server said it serves the feed (injected flag): a board without the unit never sees an afterCommit request.
+  _convFeedCursor = window.__SCRUM_COMMIT_FEED__ === true ? await fetchConversationTip() : null;
   return fetch('/api/conversations?limit=' + CONVS_PAGE_SIZE)
     .then(r => r.ok ? r.json() : [])
     .catch(() => [])
@@ -6804,6 +6808,9 @@ function prependConversations(fresh) {
 // message itself comes back), appends the genuinely-new ones, advances the
 // cursor. Replaces "re-fetch + re-render the entire history every 5 seconds".
 function pollConversations() {
+  // #1607 — with the graph unit on, the poll follows the commit-ordered feed from a cursor: a quiet poll is one marker
+  // read on the server, never a whole-history scan. Without the unit (_convFeedCursor stays null) it is today's ?since= poll.
+  if (_convFeedCursor) return pollConversationFeed();
   const url = _lastConvTs
     ? '/api/conversations?since=' + encodeURIComponent(_lastConvTs)
     : '/api/conversations';
@@ -6819,6 +6826,56 @@ function pollConversations() {
       _lastConvTs = _newestConvTs() || _lastConvTs;
       appendConversations(fresh);
     });
+}
+
+// #1607 — the commit-ordered feed. `tip` hands out the CURRENT head with no posts and no scan; the page asks for it
+// BEFORE its initial list, so a post committed between the two is covered by the list or by the first poll (the id
+// dedupe drops the overlap). A 400 GRAPH_DISCOVERY_OFF means this board has no feed: the ?since= poll stays. A 409
+// (another store behind REST) resyncs: a fresh tip, then a short list merged in. Any other failure keeps the view
+// and tries again next tick.
+async function fetchConversationTip() {
+  try {
+    const r = await fetch('/api/conversations?afterCommit=tip');
+    if (!r.ok) return null;
+    const page = await r.json();
+    return page && typeof page.nextAfterCommit === 'string' ? page.nextAfterCommit : null;
+  } catch { return null; }
+}
+
+function _mergeFreshConversations(convs) {
+  if (!Array.isArray(convs) || convs.length === 0) return;
+  const have = new Set(conversations.map(c => c.id));
+  const fresh = convs.filter(c => c && c.id && !c.redacted && c.op !== 'redact' && !have.has(c.id));
+  if (fresh.length === 0) return;
+  fresh.forEach(c => conversations.push(c));
+  _lastConvTs = _newestConvTs() || _lastConvTs;
+  appendConversations(fresh);
+}
+
+let _convFeedBusy = false;
+async function pollConversationFeed() {
+  if (_convFeedBusy) return;
+  _convFeedBusy = true;
+  try {
+    for (let guard = 0; guard < 20 && _convFeedCursor; guard++) {
+      let r, page;
+      try {
+        r = await fetch('/api/conversations?afterCommit=' + encodeURIComponent(_convFeedCursor) + '&limit=200');
+        page = await r.json();
+      } catch { return; }   // network: keep the view, next tick tries again
+      if (r.status === 409) {
+        const tip = await fetchConversationTip();
+        if (!tip) return;
+        _convFeedCursor = tip;
+        try { _mergeFreshConversations(await (await fetch('/api/conversations?limit=' + CONVS_PAGE_SIZE)).json()); } catch { /* next tick */ }
+        return;
+      }
+      if (!r.ok || !page || !Array.isArray(page.conversations) || typeof page.nextAfterCommit !== 'string') return;   // 503 etc.
+      _mergeFreshConversations(page.conversations);
+      _convFeedCursor = page.nextAfterCommit;
+      if (page.phase === 'live' && page.conversations.length === 0) return;
+    }
+  } finally { _convFeedBusy = false; }
 }
 
 async function postConversation(body, author, attachments) {

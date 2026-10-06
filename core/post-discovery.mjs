@@ -66,9 +66,10 @@ export const isGraphToken = (t) => typeof t === 'string' && /^g[cb]1\./.test(t);
 export const formatLive = (inc, epoch, commit, scope) => `gc1.${inc}.${epoch}.${commit}.${scope}`;
 export const formatBoot = (inc, epoch, base, lastPostSeq, scope) => `gb1.${inc}.${epoch}.${base}.${lastPostSeq}.${scope}`;
 
-/** 'start' | {kind:'live', ...} | {kind:'boot', ...}; a document token is a 409, anything else unparseable a 400. */
+/** 'start' | 'tip' | {kind:'live', ...} | {kind:'boot', ...}; a document token is a 409, anything else unparseable a 400. */
 export function parseDiscoveryToken(raw) {
   if (raw === 'start') return { kind: 'start' };
+  if (raw === 'tip') return { kind: 'tip' };   // #1607 — the current head, no posts
   if (typeof raw === 'string' && raw.startsWith('ps1.')) resync('afterCommit takes a graph discovery cursor; a ps1 token is a document-path cursor and is never reinterpreted');
   let m = GC.exec(raw || '');
   if (m) return { kind: 'live', inc: m[1], epoch: m[2], commit: Number(m[3]), scope: m[4] };
@@ -163,7 +164,8 @@ function lowerBound(list, lastPs) { let lo = 0, hi = list.length; while (lo < hi
 export async function postFeed(client, args) {
   const tok = parseDiscoveryToken(args.after);
   const scope = scopeOf(args.filters || {});
-  if (tok.kind !== 'start' && tok.scope !== scope) refuse(400, 'CURSOR_FILTER_MISMATCH', 'this cursor was issued for different filters; start a new bootstrap (afterCommit=start) to change them');
+  const keyword = tok.kind === 'start' || tok.kind === 'tip';
+  if (!keyword && tok.scope !== scope) refuse(400, 'CURSOR_FILTER_MISMATCH', 'this cursor was issued for different filters; start a new bootstrap (afterCommit=start) to change them');
   const m = await marker(client);
   // THE IDENTITY FENCE: the marker and the batch are separate reads. If the store behind the executor changed between
   // them (another incarnation or epoch), the rows would belong to the new store while the cursor names the old one, so
@@ -179,6 +181,10 @@ export async function postFeed(client, args) {
 }
 
 async function pageOf(client, tok, scope, m, { limit, filters = {} }) {
+  // #1607 — TIP: the head as a live cursor, from the marker read alone. No post is matched or scanned, so an idle page
+  // can join the feed without replaying history (`start` replays every post). Posts committed before the tip are the
+  // caller's to load another way (the page's own list, fetched AFTER the tip so the gap between them is covered).
+  if (tok.kind === 'tip') return { conversations: [], phase: 'live', nextAfterCommit: formatLive(m.inc, m.epoch, m.commit, scope) };
   if (tok.kind !== 'start' && (tok.inc !== m.inc || tok.epoch !== m.epoch)) {
     resync(`this cursor belongs to another store (incarnation ${tok.inc}, epoch ${tok.epoch}; the executor is incarnation ${m.inc}, epoch ${m.epoch}): its positions are not comparable, so it is never jumped to the head`);
   }

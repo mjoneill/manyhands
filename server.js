@@ -12204,7 +12204,11 @@ function serveStaticFile(req, res) {
       const marker = html.includes('</head>') ? '</head>' : '<body>';
       // A replacer FUNCTION: the injected text is code, and a dollar sequence in a plain
       // replacement string would be expanded by String.replace (#1510).
-      const injected = `${rosterScript()}${deployWatchScript()}`;
+      // #1607 — whether the commit-ordered feed is served here, told to the page BEFORE it asks for anything: the board
+      // page's conversation poll uses `afterCommit=tip` only when this is true, so a board without the unit never sends an
+      // afterCommit request (which it would refuse with a 400 the browser logs as an error).
+      const commitFeed = `<script>window.__SCRUM_COMMIT_FEED__=${ANNOUNCE_EXECUTOR ? 'true' : 'false'};</script>`;
+      const injected = `${rosterScript()}${deployWatchScript()}${commitFeed}`;
       content = Buffer.from(
         html.includes(marker) ? html.replace(marker, () => `${injected}${marker}`) : injected + html,
         'utf8',
