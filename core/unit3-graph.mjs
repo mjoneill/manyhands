@@ -70,10 +70,19 @@ export const deliveryQuery = (iri) => `SELECT ?s ?p ?o WHERE { { BIND(<${iri}> A
 /** Split one deliveryQuery result into its node rows and its step rows. */
 export const splitDeliveryRows = (iri, rows) => ({ nodeRows: rows.filter((r) => r.s?.value === iri), stepRows: rows.filter((r) => r.s?.value !== iri) });
 
-/** Every delivery for a seat (optionally one conversation): node triples and step triples in ONE query. Rows: ?d ?s ?p ?o. */
-export function deliveriesForQuery({ to, conversation } = {}) {
-  const where = `?d <${RDF_TYPE}> ${t('Delivery')}${to ? ` ; ${t('deliveredTo')} ${lit(to)}` : ''}${conversation ? ` ; ${t('ofConversation')} <${ENTITY_PREFIX}${conversation}>` : ''} .`;
-  return `SELECT ?d ?s ?p ?o WHERE { ${where} { ?d ?p ?o . BIND(?d AS ?s) } UNION { ?s ${t('stepOf')} ?d . ?s ?p ?o } }`;
+/**
+ * Every delivery for a seat (optionally one conversation, optionally only OPEN ones): node triples and step triples in ONE
+ * query. Rows: ?d ?s ?p ?o.
+ *
+ * #1582 hotfix (measured live, 2026-10-06 22:3xZ): the selector is repeated INSIDE each UNION branch. With it outside, the
+ * first branch (`?d ?p ?o`) was evaluated unbound and joined afterwards, and one seat's list took 203 s and ~4 GB on the
+ * executor (the same rows now take 5 s). `open` keeps only deliveries whose LATEST step (stepIndex = the node's version) is
+ * offered, queued or failed; the caller still applies isOpenDelivery for the failed-attempt rule.
+ */
+export function deliveriesForQuery({ to, conversation, open } = {}) {
+  const sel = `?d <${RDF_TYPE}> ${t('Delivery')}${to ? ` ; ${t('deliveredTo')} ${lit(to)}` : ''}${conversation ? ` ; ${t('ofConversation')} <${ENTITY_PREFIX}${conversation}>` : ''} .`
+    + (open ? ` ?d <urn:ex:ver> ?xv . ?xls ${t('stepOf')} ?d ; ${t('stepIndex')} ?xv ; ${t('state')} ?xst . FILTER(?xst IN ("offered", "queued", "failed"))` : '');
+  return `SELECT ?d ?s ?p ?o WHERE { { ${sel} ?d ?p ?o . BIND(?d AS ?s) } UNION { ${sel} ?s ${t('stepOf')} ?d . ?s ?p ?o } }`;
 }
 
 /** Does an opId hold an APPLIED receipt? (Y4/Y10: a caller's own retry gets its own outcome back, not a conflict.) */

@@ -6419,7 +6419,7 @@ async function graphDeliveryStep(id, input) {
 async function graphListDeliveries(q) {
   if (q.to && !U3.SEAT_RE.test(q.to)) return { status: 200, wire: { deliveries: [], count: 0 } };
   if (q.conversation && !U3.POST_ID_RE.test(q.conversation)) return { status: 200, wire: { deliveries: [], count: 0 } };
-  const r = await POSTS_BULK_READER.query(U3.deliveriesForQuery({ to: q.to, conversation: q.conversation }));
+  const r = await POSTS_BULK_READER.query(U3.deliveriesForQuery({ to: q.to, conversation: q.conversation, open: q.open === '1' || q.open === 'true' }));
   if (!r.ok) return deliveryGraphDown(r.reason || 'unreadable');
   let out = U3.groupByDelivery(r.rows).map((d) => d.entity);
   if (q.open === '1' || q.open === 'true') out = out.filter(deliveryOpen);
