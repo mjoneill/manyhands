@@ -152,8 +152,16 @@ test('EM6 the daily keep-alive: the summary counts the day and says how to turn 
   } finally { await rest.stop(); await killExecutor(exec); }
 });
 
+// A delay histogram the test controls: the accounting is what EM7 tests, not node's sampler.
+function fakeLoop() {
+  const h = { max: 0, count: 0, enable() {}, disable() {}, reset() { h.max = 0; h.count = 0; }, percentile() { return h.max; }, stall(ms) { h.max = Math.max(h.max, ms * 1e6); h.count += 1; } };
+  return h;
+}
+
 test('EM7 a keep-alive that fails is retried with the SAME text and requestId, and the day is reset only after confirmed delivery', async () => {
-  const m = createExecutorMeter({ slowMs: 100, log: () => {} });
+  const loop = fakeLoop();
+  loop.stall(20);   // before the snapshot: belongs to the first post
+  const m = createExecutorMeter({ slowMs: 100, log: () => {}, loopFactory: () => loop });
   m.record({ label: 'cards', kind: 'query', outcome: '200', elapsedMs: 5 });
   const sent = [];
   let answer = [false, 'throw', true];
@@ -166,12 +174,18 @@ test('EM7 a keep-alive that fails is retried with the SAME text and requestId, a
   assert.ok(ka.pending(), 'the summary is kept');
   m.record({ label: 'posts', kind: 'query', outcome: '200', elapsedMs: 5 });   // keeps counting meanwhile
   assert.equal(await timers.shift()(), false, 'a thrown post is not delivery either');
+  loop.stall(150);   // a 150 ms stall AFTER the snapshot, during the retries
+  m.flush();         // the minute line takes it out of the histogram, as it does in production, before delivery is confirmed
   assert.equal(await timers.shift()(), true, 'the third attempt is confirmed');
   assert.equal(sent.length, 3);
   assert.ok(sent.every((x) => x.requestId === 'req-00000001' && x.text === sent[0].text), 'every retry is the same post');
   assert.match(sent[0].text, / 1 executor calls,/);
   assert.equal(ka.pending(), null);
-  assert.match(m.prepareDaily().text, / 1 executor calls,/, 'only the reported call was subtracted; the one made during the retries remains');
+  const next = m.prepareDaily().text;
+  assert.match(next, / 1 executor calls,/, 'only the reported call was subtracted; the one made during the retries remains');
+  const peak = Number(/worst event-loop delay (\d+) ms/.exec(next)[1]);
+  assert.equal(peak, 150, `the 150 ms stall during the retries survives the ack (${peak} ms)`);
+  assert.equal(Number(/worst event-loop delay (\d+) ms/.exec(sent[0].text)[1]), 20, 'and the acknowledged post reported only the stall before its snapshot');
   m.stop();
 });
 

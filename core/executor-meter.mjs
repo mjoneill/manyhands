@@ -20,12 +20,16 @@ import { monitorEventLoopDelay } from 'node:perf_hooks';
 
 const ms = (ns) => Math.round(ns / 1e6);
 
-export function createExecutorMeter({ routeOf = () => 'background', ridOf = () => null, extras = () => '', slowMs = 1000, log = (line) => console.error(line), now = () => new Date(), loopResolutionMs = 20 } = {}) {
+export function createExecutorMeter({ routeOf = () => 'background', ridOf = () => null, extras = () => '', slowMs = 1000, log = (line) => console.error(line), now = () => new Date(), loopResolutionMs = 20, loopFactory = () => monitorEventLoopDelay({ resolution: loopResolutionMs }) } = {}) {
   let buckets = new Map();
   // #1570 — the running totals the daily "still running" post reports (owner decision, 2026-10-07: so nobody forgets it is out there).
   let day = { since: now(), calls: 0, slow: 0, unavailable: 0, loopMaxMs: 0 };
+  // The worst loop delay seen AFTER the outstanding snapshot was taken: it belongs to the next post, so an ack keeps it.
+  let snapOutstanding = false;
+  let peakSinceSnap = 0;
+  const notePeak = (v) => { if (v > day.loopMaxMs) day.loopMaxMs = v; if (snapOutstanding && v > peakSinceSnap) peakSinceSnap = v; };
   let loop = null;
-  try { loop = monitorEventLoopDelay({ resolution: loopResolutionMs }); loop.enable(); } catch { loop = null; }
+  try { loop = loopFactory(); loop.enable(); } catch { loop = null; }   // loopFactory: injectable for tests
 
   function record({ label = 'unlabelled', kind, outcome, elapsedMs, body }) {
     try {
@@ -62,7 +66,7 @@ export function createExecutorMeter({ routeOf = () => 'background', ridOf = () =
     const rows = [...buckets.values()].sort((a, b) => b.totalMs - a.totalMs);
     buckets = new Map();
     const l = loopNow();
-    if (l && l.max > day.loopMaxMs) day.loopMaxMs = l.max;
+    if (l) notePeak(l.max);
     if (loop) loop.reset();
     const calls = rows.reduce((s, r) => s + r.n, 0);
     const parts = rows.map((r) => `${r.label}/${r.kind}/${r.outcome}@${r.route} n=${r.n} total=${Math.round(r.totalMs)}ms max=${Math.round(r.maxMs)}ms`);
@@ -80,13 +84,20 @@ export function createExecutorMeter({ routeOf = () => 'background', ridOf = () =
    */
   function prepareDaily({ pid = process.pid, off = 'set SCRUM_EXECUTOR_METER=0 in the REST launchd plist and restart REST' } = {}) {
     const l = loopNow();
-    if (l && l.max > day.loopMaxMs) day.loopMaxMs = l.max;
+    if (l) notePeak(l.max);
+    if (loop) loop.reset();   // what the histogram held is now in the snapshot; anything later is post-snapshot
     const snap = { ...day, until: now() };
+    snapOutstanding = true;
+    peakSinceSnap = 0;
     const text = `📈 #1570 executor meter is still running in REST (pid ${pid}). From ${snap.since.toISOString()} to ${snap.until.toISOString()}: ${snap.calls} executor calls, ${snap.slow} slow (>= ${slowMs} ms), ${snap.unavailable} graph-unavailable 503s, worst event-loop delay ${snap.loopMaxMs} ms. Per-minute detail: "executor-meter" lines in the REST log. To turn it off: ${off}.`;
     return { text, snap };
   }
   function ackDaily(snap) {
-    day = { since: snap.until, calls: Math.max(0, day.calls - snap.calls), slow: Math.max(0, day.slow - snap.slow), unavailable: Math.max(0, day.unavailable - snap.unavailable), loopMaxMs: 0 };
+    const l = loopNow();
+    if (l) notePeak(l.max);
+    day = { since: snap.until, calls: Math.max(0, day.calls - snap.calls), slow: Math.max(0, day.slow - snap.slow), unavailable: Math.max(0, day.unavailable - snap.unavailable), loopMaxMs: peakSinceSnap };
+    snapOutstanding = false;
+    peakSinceSnap = 0;
   }
 
   function stop() { try { loop?.disable(); } catch { /* already off */ } }
