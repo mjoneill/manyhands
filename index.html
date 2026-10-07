@@ -5809,6 +5809,26 @@ function enterColumnRenameMode(header) {
   });
 }
 
+// #1585 — A COLUMN CHANGE IS ONE WRITE TO ITS OWN ROUTE (POST/PATCH/DELETE /api/columns), never the whole-board save:
+// /api/save replaced the server's whole card list with this tab's, so a stale tab could revert other people's work.
+// The status line says when the write lands, and says so plainly when it does not.
+function _columnWrite(method, path, body) {
+  const pendingTimer = setTimeout(() => _setSaveStatus('saving', 'Saving…'), SAVE_PENDING_DELAY_MS);
+  const p = fetch(API_BASE + path, { method, headers: { 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
+    .then((r) => {
+      clearTimeout(pendingTimer);
+      if (!r.ok) throw new Error(`the server answered ${r.status}`);
+      _setSaveStatus('saved', 'Saved');
+      return r;
+    })
+    .catch((e) => {
+      clearTimeout(pendingTimer);
+      _setSaveStatus('failed', `Not saved — the column change did not reach the server (${e.message}). Reload to see the board as it is.`);
+      return null;
+    });
+  return _trackPendingWrite(p);
+}
+
 function commitColumnRename(header, columnId, newName) {
   if (!newName) {
     cancelColumnRename(header, columnId);
@@ -5821,7 +5841,7 @@ function commitColumnRename(header, columnId, newName) {
   const col = columns.find(c => c.id === columnId);
   if (col) col.name = newName;
   saveColumnNamesToStorage();
-  saveToJSONFile();
+  _columnWrite('PATCH', `/api/columns/${encodeURIComponent(columnId)}`, { name: newName });   // #1585
   _testHookMarkSaved();
   updateColumnHeader(columnId);
 }
@@ -5839,7 +5859,7 @@ function addColumn() {
   columns.push(newCol);
   syncColumnNamesFromColumns();
   saveColumnNamesToStorage();
-  saveToJSONFile();
+  _columnWrite('POST', '/api/columns', { id, name: newCol.name, order: newCol.order });   // #1585
   _testHookMarkSaved();
   renderBoard();
   // Enter rename mode on the new column header
@@ -5847,10 +5867,10 @@ function addColumn() {
   if (header) enterColumnRenameMode(header);
 }
 
-// Delete a column. If it has cards, they're moved to the Orphanage column
-// (auto-created if absent, reused if already exists). Orphaned cards get a
-// `sent-to-orphanage` label and a `previousColumn` field. Blocked when only
-// one column remains (can't have a board with zero columns).
+// Delete a column. #1585 — through DELETE /api/columns/:id, which re-homes the column's cards into BACKLOG (the first
+// remaining column if Backlog itself is deleted) in the same locked server write (a container's deletion never deletes what is inside it). This page mirrors that
+// rule locally and says where the cards went. Blocked when only one column remains (a board with zero columns shows
+// nothing).
 function deleteColumn(columnId) {
   if (columns.length <= 1) {
     console.warn('deleteColumn: cannot delete the last remaining column');
@@ -5858,35 +5878,17 @@ function deleteColumn(columnId) {
   }
   const colIdx = columns.findIndex(c => c.id === columnId);
   if (colIdx < 0) return false;
-
-  // Find cards in this column
-  const orphanedCards = cards.filter(c => c.column === columnId);
-
-  if (orphanedCards.length > 0) {
-    // Ensure Orphanage column exists
-    let orphanage = columns.find(c => c.id === 'orphanage');
-    if (!orphanage) {
-      orphanage = { id: 'orphanage', name: 'Orphanage', order: columns.length };
-      columns.push(orphanage);
-    }
-    // Move cards
-    orphanedCards.forEach(card => {
-      card.previousColumn = card.column;
-      card.column = 'orphanage';
-      if (!card.labels) card.labels = [];
-      if (!card.labels.includes('sent-to-orphanage')) {
-        card.labels.push('sent-to-orphanage');
-      }
-      card.updatedAt = new Date().toISOString();
-    });
-  }
-
-  // Remove the column from the array
+  const removed = columns[colIdx];
   columns.splice(colIdx, 1);
+  const fallback = columns.find(c => c.id === 'backlog') || columns[0];   // owner decision 22:11Z: deleted columns' cards go to Backlog
+  const moved = cards.filter(c => c.column === columnId);
+  moved.forEach((card) => { card.column = fallback.id; });
   syncColumnNamesFromColumns();
   saveColumnNamesToStorage();
   saveToLocalStorage();
-  saveToJSONFile();
+  _columnWrite('DELETE', `/api/columns/${encodeURIComponent(columnId)}`).then((r) => {
+    if (r && moved.length) _setSaveStatus('saved', `Column "${removed.name}" deleted — ${moved.length} card${moved.length === 1 ? '' : 's'} moved to "${fallback.name}"`);
+  });
   _testHookMarkSaved();
   renderBoard();
   return true;
@@ -7080,9 +7082,11 @@ if (_convsForm) {
     // it is settled every whole-board save is refused.
     if (_unconfirmedMoves.size > 0) _trackPendingWrite(_reconcileMoves());
   } else {
+    // #1585 — THE SERVER COULD NOT BE READ. Show this browser's cached board, and WRITE NOTHING: pushing the cache would
+    // replace the server's newer state with whatever this tab last saw. The status line says the board is offline.
     restoreFromLocalStorage();
     nextShortId = recomputeNextShortId(cards, null);
-    saveToJSONFile();
+    _setSaveStatus('failed', 'Offline — the server could not be read. Showing the board as this browser last saw it; nothing is saved until you reload.');
   }
   // Ensure columns has at least the defaults (no-op if already populated above)
   migrateColumnsIfNeeded();

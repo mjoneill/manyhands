@@ -10931,7 +10931,9 @@ async function handleDeleteColumn(req, res, columnId) {
       // reference is far worse than finding it in an unexpected column, so the
       // rule is simple: deleting a container never deletes what's inside it.
       const [removed] = data.columns.splice(idx, 1);
-      const fallback = data.columns[0].id;
+      // #1585 — owner decision, 2026-10-06T22:11Z: a deleted column's cards go to BACKLOG. If the backlog itself is the column
+      // being deleted (or the board has none), they go to the first remaining column.
+      const fallback = (data.columns.find((c) => c.id === 'backlog') || data.columns[0]).id;
       let moved = 0;
       const reassigned = [];
       for (const card of data.cards) {
