@@ -154,7 +154,7 @@ const FACET_TO_PROP = {
 const PROP_TO_FACET = Object.fromEntries(Object.entries(FACET_TO_PROP).map(([f, p]) => [p, f]));
 
 /** Card node (nested facet) → flat document entity. Lossless; pure. */
-function cardNodeToFlat(node, shortToId) {
+export function cardNodeToFlat(node, shortToId) {
   const { board, ...flat } = node;
   // #656 — the derived reference edge. Computed here, from the card text that
   // is its only authority, and DROPPED in flatToCardNode below. It is the one

@@ -417,7 +417,7 @@ export function staticCheck(sparql, opId) {
 // =====================================================================================
 
 export const RECORD_V = 2;   // 2: memory.revise records the identity it replaces (a MemoryRevision node)
-export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create', 'post.import', 'post.write', 'post.redact', 'delivery.create', 'delivery.step', 'delivery.import', 'modelcall.create']);
+export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create', 'post.import', 'post.write', 'post.redact', 'delivery.create', 'delivery.step', 'delivery.import', 'modelcall.create', 'card.write']);
 
 const RS = 'https://scrumboard.local/ns#';
 const RSC = 'https://schema.org/';
@@ -474,6 +474,7 @@ const RECORD_FIELDS = {
   'delivery.step': ['target', 'step'],      // #1582 — one step, guarded by the delivery's expected version (as memory.revise)
   'delivery.import': ['delivery'],          // #1582 migration — a document delivery and ALL its steps, fresh, in one update
   'modelcall.create': ['call'],             // #1582 — one ledger row, fresh at its derived IRI
+  'card.write': ['parts', 'counter'],       // #1598 — one or more cards, each guarded on its version, in ONE update
 };
 
 const SAFE_CH = /^[A-Za-z0-9 _.,:/@#+=*!~%&$-]$/;
@@ -662,6 +663,8 @@ function canonicalizeRecord(i) {
       producedPost: rOptIri(m.producedPost, 'call.producedPost'), postedText: rOpt(m.postedText, 'call.postedText'),
       requestId: rStr(m.requestId, 'call.requestId'), entityJson: rStr(m.entityJson, 'call.entityJson'),
     } };
+  } else if (i.kind === 'card.write') {
+    record = canonCardWrite(i);
   } else if (i.kind === 'decision.relate') {
     const target = checkIri(i.target, 'target');
     const supersedes = rList(i.supersedes, 'supersedes', checkIri);
@@ -985,6 +988,7 @@ function planRecord(c) {
 }
 
 function compileRecord(c) {
+  if (c.kind === 'card.write') return compileCardWrite(c);   // #1598
   const digest = recordDigest(c);
   const OP = ref(c.opId);
   const plan = planRecord(c);
@@ -1055,6 +1059,188 @@ function compileRecord(c) {
     `  ${OP} ${EX.outcome} ?n_outcome .`, `  ${OP} ${EX.digest} ?n_digest .`, `  ${OP} ${EX.actor} ?n_actor .`,
     `  ${OP} ${EX.at} ?n_at .`, `  ${OP} ${EX.commitSeq} ?s1 .`, ...(plan.target ? [`  ${OP} ${EX.target} ?n_target0 .`] : []), ...dIns];
 
+  const sparql = `DELETE {\n${del.join('\n')}\n}\nINSERT {\n${ins.join('\n')}\n}\nWHERE {\n${where.join('\n')}\n}\n`;
+  const check = staticCheck(sparql, c.opId);
+  if (!check.ok) fail(`compiler rejected its own output: ${check.errors.join('; ')}`);
+  return { sparql, digest, canonical: c };
+}
+
+// ---------- #1598: card.write — one or more cards in ONE guarded update ----------
+//
+// The server projects each card with the replica's own projection (core/cards-graph.mjs) and sends the quads; the
+// compiler VALIDATES that every quad belongs to the card it is written for, adds the version guard, and owns deletion.
+//
+//   GUARD (one conjunctive ?ok across all parts, review 05:56Z): each update part's `urn:ex:ver` equals its
+//   expectedVersion; each create part's subject holds nothing yet; the shortId counter (when present) equals its
+//   expected value. Any stale part means NOTHING lands.
+//   DELETE (one top-level OPTIONAL, a UNION over the owned triples of every update part, so rows are the SUM of the
+//   parts' triples, never their product): the card subject; derived Blocker/ReleaseCondition nodes reached by their
+//   back-link and under `<card>/`; check nodes reached by hasCheck; inbound `dependsOn`; RDF-list cells hanging off the
+//   card (blank nodes); and the part's PRIOR quads, which reach derived nodes with no back-link (DependencyRecord).
+//   SHARED nodes (concepts, commits, unresolved references) are inserted idempotently and NEVER deleted by a card write.
+//   INSERT: the new quads, `urn:ex:ver`, `entityJson` (the REST wire state) and recordedBy, all ok-guarded.
+// A card write never touches a column node: a quad naming a column as SUBJECT is refused.
+
+const CW = Object.freeze({
+  scrum: 'https://scrumboard.local/ns#', schema: 'https://schema.org/', rdfType: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+  rdfRest: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#rest',
+  check: 'https://scrumboard.local/check/', concept: 'https://scrumboard.local/concept/', commit: 'https://scrumboard.local/commit/',
+  unresolved: 'https://scrumboard.local/unresolved/', counter: 'https://scrumboard.local/counter/nextShortId',
+});
+const CW_SHARED_PREFIXES = [CW.concept, CW.commit, CW.unresolved];
+const CW_SHARED_PREDICATES = new Set([CW.rdfType, `${CW.schema}name`, `${CW.schema}identifier`]);
+const CW_RESERVED_PREDICATES = new Set([`${NS}ver`, `${NS}recordedBy`, `${CW.scrum}entityJson`]);
+const unref = (t) => (t.startsWith('<') ? t.slice(1, -1) : null);
+/**
+ * A card.write term: validated by canonTerm, then a plain or language-tagged literal is re-encoded with recLit, which
+ * escapes everything outside a safe ASCII set (`;` included). Card text is free text: "…; delete the old one" written
+ * as a raw literal makes staticCheck read a second operation (measured: 10 of 1,491 live cards in the #1598
+ * rehearsal). Typed literals (integer, boolean, dateTime) have lexical forms that cannot carry one.
+ */
+function cardTerm(term, what) {
+  const t = canonTerm(term, what);
+  if (term.type !== 'literal' || (term.datatype != null && term.datatype !== `${XSD}string`)) return t;
+  return term.lang != null ? `${recLit(term.value)}@${term.lang.toLowerCase()}` : recLit(term.value);
+}
+
+/** Classify one canonical quad for the card `iri`: 'owned' | 'shared' | 'dependsOn'. Refuses anything else. */
+function cardQuadClass([s, p, o], iri, id, what) {
+  const S = unref(s), P = unref(p);
+  if (S == null || P == null) fail(`${what}: subject and predicate must be IRIs`);
+  if (CW_RESERVED_PREDICATES.has(P)) fail(`${what}: ${P} is written by the compiler, not the caller`);
+  if (S === iri || S.startsWith(`${iri}/`) || S.startsWith(`${CW.check}${id}-`)) return 'owned';
+  if (CW_SHARED_PREFIXES.some((x) => S.startsWith(x))) {
+    if (!CW_SHARED_PREDICATES.has(P)) fail(`${what}: a shared node carries only type, name and identifier`);
+    return 'shared';
+  }
+  if (S.startsWith(PERSON_IRI) && P === `${CW.scrum}dependsOn` && o === ref(iri)) return 'dependsOn';
+  fail(`${what}: ${S} is not owned by ${iri}`);
+}
+
+function canonCardWrite(i) {
+  if (!Array.isArray(i.parts) || (!i.parts.length && i.counter == null)) fail('card.write.parts is a non-empty array (or empty, with a counter: the migration seeds it alone)');
+  const parts = i.parts.map((x, k) => {
+    const w = `parts[${k}]`;
+    obj(x, ['iri', 'expectedVersion', 'version', 'quads', 'prior', 'json', 'remove', 'importDigest'], w);
+    // A REMOVE part (a card deleted): guarded on its version, every owned triple deleted, nothing inserted.
+    if (x.remove === true) {
+      const iri = checkIri(x.iri, `${w}.iri`);
+      if (!iri.startsWith(ENTITY_IRI) || !/^[A-Za-z0-9-]{1,64}$/.test(iri.slice(ENTITY_IRI.length))) fail(`${w}.iri must be ${ENTITY_IRI}<card id>`);
+      const id = iri.slice(ENTITY_IRI.length);
+      if (x.quads != null || x.json != null || x.version != null) fail(`${w}: a remove part carries no quads, json or version`);
+      const expectedVersion = intLit(x.expectedVersion, `${w}.expectedVersion`);
+      if (!Array.isArray(x.prior)) fail(`${w}.prior must be an array`);
+      const prior = x.prior.map((q, n) => {
+        if (!Array.isArray(q) || q.length !== 3) fail(`${w}.prior[${n}] is [s, p, o]`);
+        const t = q.map((term, j) => cardTerm(term, `${w}.prior[${n}][${j}]`));
+        if (cardQuadClass(t, iri, id, `${w}.prior[${n}]`) === 'shared') fail(`${w}.prior[${n}]: a shared node is never deleted by a card write`);
+        return t;
+      });
+      return { iri, remove: true, expectedVersion, prior: [...new Map(prior.map((t) => [t.join(' '), t])).values()].sort((a, b) => (a.join(' ') < b.join(' ') ? -1 : 1)) };
+    }
+    if (x.remove != null && x.remove !== false) fail(`${w}.remove must be true or absent`);
+    const iri = checkIri(x.iri, `${w}.iri`);
+    if (!iri.startsWith(ENTITY_IRI) || !/^[A-Za-z0-9-]{1,64}$/.test(iri.slice(ENTITY_IRI.length))) fail(`${w}.iri must be ${ENTITY_IRI}<card id>`);
+    const id = iri.slice(ENTITY_IRI.length);
+    const expectedVersion = x.expectedVersion == null ? null : intLit(x.expectedVersion, `${w}.expectedVersion`);
+    const version = intLit(x.version, `${w}.version`);
+    if (expectedVersion != null && BigInt(version) <= BigInt(expectedVersion)) fail(`${w}.version must be above expectedVersion`);
+    const quadList = (list, label, allowShared) => {
+      if (!Array.isArray(list)) fail(`${w}.${label} must be an array`);
+      const out = list.map((q, n) => {
+        if (!Array.isArray(q) || q.length !== 3) fail(`${w}.${label}[${n}] is [s, p, o]`);
+        const t = q.map((term, j) => cardTerm(term, `${w}.${label}[${n}][${j}]`));
+        const cls = cardQuadClass(t, iri, id, `${w}.${label}[${n}]`);
+        if (cls === 'shared' && !allowShared) fail(`${w}.${label}[${n}]: a shared node is never deleted by a card write`);
+        return t;
+      });
+      return [...new Map(out.map((t) => [t.join(' '), t])).values()].sort((a, b) => (a.join(' ') < b.join(' ') ? -1 : 1));
+    };
+    const quads = quadList(x.quads, 'quads', true);
+    if (!quads.some(([s, p]) => s === ref(iri) && p === ref(CW.rdfType))) fail(`${w}.quads must type the card`);
+    const prior = expectedVersion == null ? (x.prior == null || (Array.isArray(x.prior) && !x.prior.length) ? [] : fail(`${w}.prior: a create has no prior state`)) : quadList(x.prior ?? [], 'prior', false);
+    // #1598 (review 06:27Z) — a migrated card records the sha-256 of the document card it came from, on its own node
+    // `<card>/import` (no card write deletes it), so the file's copy can later be removed only when its lineage matches.
+    let importDigest = null;
+    if (x.importDigest != null) {
+      if (expectedVersion != null) fail(`${w}.importDigest: only a create records where it came from`);
+      if (typeof x.importDigest !== 'string' || !/^[0-9a-f]{64}$/.test(x.importDigest)) fail(`${w}.importDigest must be a sha-256 hex digest`);
+      importDigest = x.importDigest;
+    }
+    return { iri, expectedVersion, version, quads, prior, json: rStr(x.json, `${w}.json`), ...(importDigest ? { importDigest } : {}) };
+  }).sort((a, b) => (a.iri < b.iri ? -1 : 1));
+  if (new Set(parts.map((p) => p.iri)).size !== parts.length) fail('card.write: a card appears in two parts');
+  let counter = null;
+  if (i.counter != null) {
+    const c = obj(i.counter, ['expected', 'next'], 'counter');
+    counter = { expected: c.expected == null ? null : intLit(c.expected, 'counter.expected'), next: intLit(c.next, 'counter.next') };
+    if (counter.expected != null && BigInt(counter.next) <= BigInt(counter.expected)) fail('counter.next must be above counter.expected');
+  }
+  return { parts, counter };
+}
+
+function compileCardWrite(c) {
+  const digest = recordDigest(c);
+  const OP = ref(c.opId);
+  const R = c.record;
+  const VER = ref(`${NS}ver`), REC = ref(`${NS}recordedBy`), JSONP = ref(`${CW.scrum}entityJson`), CTR = ref(CW.counter);
+  const where = [], pre = [], dBinds = [], del = [], dIns = [];
+  const names = new Map();
+  const v = (text) => {
+    let n = names.get(text);
+    if (!n) { n = `r${names.size}`; names.set(text, n); dBinds.push(ok(text, n)); }
+    return `?d_${n}`;
+  };
+  where.push(`  OPTIONAL { ${OP} ${EX.digest} ?dup }`, `  FILTER(!BOUND(?dup))`, `  ${EX.dataset} ${EX.commitSeq} ?s .`, `  BIND(?s + 1 AS ?s1)`);
+
+  const branches = [];
+  R.parts.forEach((P, k) => {
+    const I = ref(P.iri);
+    if (P.expectedVersion == null) pre.push(...freshSubject(I));
+    else {
+      pre.push(`    ${I} ${VER} ?xv${k} .`, `    FILTER(?xv${k} = ${P.expectedVersion})`);
+      const back = (pred, type) => `    { ?xs ${ref(`${CW.scrum}${pred}`)} ${I} ; ${ref(CW.rdfType)} ${ref(`${CW.scrum}${type}`)} . FILTER(STRSTARTS(STR(?xs), ${JSON.stringify(`${P.iri}/`)})) ?xs ?xp ?xo }`;
+      branches.push(
+        `    { ${I} ?xp ?xo BIND(${I} AS ?xs) }`,
+        back('blocks', 'Blocker'),
+        back('ofCard', 'ReleaseCondition'),
+        `    { ${I} ${ref(`${CW.scrum}hasCheck`)} ?xs . ?xs ?xp ?xo }`,
+        `    { ?xs ${ref(`${CW.scrum}dependsOn`)} ${I} BIND(${ref(`${CW.scrum}dependsOn`)} AS ?xp) BIND(${I} AS ?xo) }`,
+        `    { ${I} ?xl${k} ?xh${k} FILTER(isBlank(?xh${k})) ?xh${k} ${ref(CW.rdfRest)}* ?xs . ?xs ?xp ?xo }`,
+      );
+      if (P.prior.length) branches.push(`    { VALUES (?xs ?xp ?xo) {\n${P.prior.map((q) => `      (${q.join(' ')})`).join('\n')}\n    } }`);
+    }
+    if (P.remove) return;
+    if (P.importDigest) {
+      const IMP = ref(`${P.iri}/import`);
+      dIns.push(`  ${v(IMP)} ${ref(CW.rdfType)} ${v(ref(`${CW.scrum}CardImport`))} .`, `  ${v(IMP)} ${ref(`${CW.scrum}sourceDigest`)} ${v(recLit(P.importDigest))} .`);
+    }
+    for (const [s, p, o] of P.quads) dIns.push(`  ${v(s)} ${v(p)} ${v(o)} .`);
+    dIns.push(`  ${v(I)} ${VER} ${v(P.version)} .`, `  ${v(I)} ${REC} ${v(OP)} .`, `  ${v(I)} ${JSONP} ${v(recLit(P.json))} .`);
+  });
+  if (R.counter) {
+    if (R.counter.expected == null) pre.push(`    FILTER NOT EXISTS { ${CTR} ${VER} ?xcf }`);
+    else {
+      pre.push(`    ${CTR} ${VER} ?xc .`, `    FILTER(?xc = ${R.counter.expected})`);
+      dBinds.push(ok('?xc', 'xcOld'));
+      del.push(`  ${v(CTR)} ${VER} ?d_xcOld .`);
+    }
+    dIns.push(`  ${v(CTR)} ${VER} ${v(R.counter.next)} .`);
+  }
+  pre.push(`    BIND(true AS ?ok)`);
+  where.push(`  OPTIONAL {`, ...pre, `  }`);
+  if (branches.length) {
+    where.push(`  OPTIONAL {`, branches.join('\n    UNION\n'), `  }`);
+    dBinds.push(ok('?xs', 'xs'), ok('?xp', 'xp'), ok('?xo', 'xo'));
+    del.push(`  ?d_xs ?d_xp ?d_xo .`);
+  }
+  where.push(`  BIND(IF(BOUND(?ok), ${EX.APPLIED}, ${EX.PRECONDITION_FAILED}) AS ?n_outcome)`);
+  where.push(nb(JSON.stringify(digest), 'digest'), nb(ref(c.actor), 'actor'), nb('NOW()', 'at'), nb(ref(R.parts.length ? R.parts[0].iri : CW.counter), 'target0'));
+  where.push(...dBinds);
+  del.unshift(`  ${MARKER_SUBJECT} ${EX.commitSeq} ?s .`);
+  const ins = [`  ${MARKER_SUBJECT} ${EX.commitSeq} ?s1 .`,
+    `  ${OP} ${EX.outcome} ?n_outcome .`, `  ${OP} ${EX.digest} ?n_digest .`, `  ${OP} ${EX.actor} ?n_actor .`,
+    `  ${OP} ${EX.at} ?n_at .`, `  ${OP} ${EX.commitSeq} ?s1 .`, `  ${OP} ${EX.target} ?n_target0 .`, ...dIns];
   const sparql = `DELETE {\n${del.join('\n')}\n}\nINSERT {\n${ins.join('\n')}\n}\nWHERE {\n${where.join('\n')}\n}\n`;
   const check = staticCheck(sparql, c.opId);
   if (!check.ok) fail(`compiler rejected its own output: ${check.errors.join('; ')}`);

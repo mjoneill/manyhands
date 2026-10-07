@@ -1471,7 +1471,7 @@ export function replaceLogbornRecords(store, triples) {
 }
 
 /** Emit one entity's triples into `store`. The projection, per entity. */
-function projectEntity(store, e) {
+export function projectEntity(store, e) {
   const add = (s, p, o) => store.add(oxigraph.triple(s, p, o));
   const S = IRI.scrum, SC = IRI.schema, E = IRI.entity, P = IRI.person, C = IRI.column;
   const personRef = (k) => nn(String(k).startsWith('http') ? k : P + k);
