@@ -215,6 +215,9 @@ export function digestOf(c) {
 const ok = (expr, v) => `  BIND(IF(BOUND(?ok), ${expr}, ?u) AS ?d_${v})`;
 const nb = (expr, v) => `  BIND(${expr} AS ?n_${v})`;
 const fresh = (iri) => [`    FILTER NOT EXISTS { ${iri} ?fp ?fo }`, `    FILTER NOT EXISTS { ?fs ?fp2 ${iri} }`];
+// #1626 — fresh as a SUBJECT only: the node holds no triples, though other nodes may already point at it (an imported
+// post that deliveries or model calls referenced before it reached the graph). Used by post.import only.
+const freshSubject = (iri) => [`    FILTER NOT EXISTS { ${iri} ?fp ?fo }`];
 
 /**
  * Compile a validated intention to ONE SPARQL update. Returns
@@ -752,6 +755,7 @@ function planRecord(c) {
   const L = (s) => recLit(s);
   const pre = [];
   const fresh = [];
+  const freshSubject = [];   // #1626
   const ins = [];          // [subject IRI, predicate IRI, object TEXT]
   const delAll = [];       // [{s, p, keep?:[subject, predicate]}]: every current value is removed (and, with keep, recorded there)
   const delAny = [];       // #1574 R4a [{s, keep:[predicate…]}]: every triple of s is removed except those predicates
@@ -834,7 +838,10 @@ function planRecord(c) {
     add(P.iri, TM.recordedBy, ref(c.opId));
   } else if (c.kind === 'post.import' || c.kind === 'post.write') {
     const P = R.post; target = null;   // a create: the post IRI must be fresh
-    fresh.push(P.iri);
+    // #1626 — an IMPORT copies a post that already existed in the document, so other graph nodes may reference it already
+    // (a delivery's ofConversation, a model call's producedPost): it needs only to hold no triples itself. A WRITE (a
+    // brand-new post) keeps the full guard: nothing may point at an id that has never existed.
+    if (c.kind === 'post.import') freshSubject.push(P.iri); else fresh.push(P.iri);
     add(P.iri, TM.type, I(TM.Comment));
     add(P.iri, TM.text, L(P.body));
     add(P.iri, TM.author, I(P.author));
@@ -974,7 +981,7 @@ function planRecord(c) {
     for (const a of P.aliases) add(P.iri, TM.aliases, L(a));
     add(P.iri, TM.recordedBy, ref(c.opId));
   }
-  return { target, pre, fresh, ins, delAll, delAny, delOwned, delLinked, condIns, verGuard };
+  return { target, pre, fresh, freshSubject, ins, delAll, delAny, delOwned, delLinked, condIns, verGuard };
 }
 
 function compileRecord(c) {
@@ -1000,6 +1007,7 @@ function compileRecord(c) {
   where.push(`  BIND(?s + 1 AS ?s1)`);
 
   for (const iri of plan.fresh) pre.push(...fresh(ref(iri)));
+  for (const iri of plan.freshSubject || []) pre.push(...freshSubject(ref(iri)));   // #1626
   if (plan.verGuard) {
     dBinds.push(ok('?xv', 'xvOld'), ok('?xv + 1', 'xvNew'));
     del.push(`  ${v(ref(plan.verGuard))} ${EX.ver} ?d_xvOld .`);
