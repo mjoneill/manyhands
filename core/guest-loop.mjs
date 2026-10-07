@@ -1421,13 +1421,22 @@ function isSettled(state, m) {
  */
 export const SWEEP_EVERY_MS = 60 * 60_000;
 export const SWEEP_LOOKBACK_MS = 24 * 60 * 60_000;
-// A FAILED attempt is retried no sooner than SWEEP_RETRY_MS later (row S19): without it a sweep that keeps failing —
-// exactly what an executor stall causes — re-read up to 24 h of the room every minute, the load bug in its failure mode.
-export const SWEEP_RETRY_MS = 15 * 60_000;
+// THE RETRY RULE (review 2026-10-07T19:50:53Z; rows S19, S22–S26): an attempt that has not COMPLETED (failed, partial,
+// or killed mid-scan) is retried after a backoff that starts at 5 min and doubles per consecutive unfinished attempt, up
+// to 1 h; a completed sweep resets it. Without it a sweep that keeps failing — what an executor stall causes — re-read up
+// to 24 h of the room every minute, the load bug in its failure mode. Retry timing is kept apart from recovery coverage:
+// nothing here moves sweptAt or the anchor. --sweep-now bypasses it.
+export const SWEEP_BACKOFF_START_MS = 5 * 60_000;
+export const SWEEP_BACKOFF_MAX_MS = 60 * 60_000;
+export function sweepBackoffMs(unfinished = 0) {
+  if (!(unfinished > 0)) return 0;
+  return Math.min(SWEEP_BACKOFF_START_MS * 2 ** (unfinished - 1), SWEEP_BACKOFF_MAX_MS);
+}
 export function sweepDue(state = {}, now = new Date().toISOString(), { force = false } = {}) {
   if (force) return true;
   const t = Date.parse(now);
-  if (typeof state.sweepTriedAt === 'string' && t - Date.parse(state.sweepTriedAt) < SWEEP_RETRY_MS) return false;
+  const unfinished = Number(state.sweepUnfinished) || 0;
+  if (unfinished > 0 && typeof state.sweepTriedAt === 'string' && t - Date.parse(state.sweepTriedAt) < sweepBackoffMs(unfinished)) return false;
   return typeof state.sweptAt !== 'string' || t - Date.parse(state.sweptAt) >= SWEEP_EVERY_MS;
 }
 export function sweepSince(state = {}, now = new Date().toISOString()) {
@@ -1441,8 +1450,9 @@ export function withSweepAnchor(state = {}, now = new Date().toISOString()) {
   if (typeof state.sweptAt === 'string' || typeof state.sweepAnchor === 'string') return state;
   return { ...state, sweepAnchor: now };
 }
-/** Recorded before every attempt (with the anchor, in one write): what the retry spacing is measured from. */
-export const withSweepAttempt = (state = {}, now = new Date().toISOString()) => ({ ...withSweepAnchor(state, now), sweepTriedAt: now });
+/** Recorded BEFORE every attempt (with the anchor, in one write): the attempt counts as unfinished until it completes, so
+ * a run killed mid-scan still backs off (S24). */
+export const withSweepAttempt = (state = {}, now = new Date().toISOString()) => ({ ...withSweepAnchor(state, now), sweepTriedAt: now, sweepUnfinished: (Number(state.sweepUnfinished) || 0) + 1 });
 export function captureSweep(state = {}, window_ = {}, seatKey, { sweepStart = new Date().toISOString() } = {}) {
   if (!window_ || window_.complete !== true) return state;   // a partial sweep moves nothing
   state = withLegacyLine(state, sweepStart);
@@ -1451,7 +1461,7 @@ export function captureSweep(state = {}, window_ = {}, seatKey, { sweepStart = n
   for (const m of found) if (!byId.has(m.id)) byId.set(m.id, pendingRecord(m));
   const pending = [...byId.values()].sort((a, b) => (String(a.createdAt) < String(b.createdAt) ? -1 : 1));
   if (pending.length > PENDING_MAX) return { ...state, pendingOverflow: { owed: pending.length, max: PENDING_MAX } };
-  return pruneSettled({ ...state, pending, sweptAt: sweepStart });
+  return pruneSettled({ ...state, pending, sweptAt: sweepStart, sweepUnfinished: 0 });   // complete: the backoff resets
 }
 
 const pendingRecord = (m) => ({ id: m.id, author: m.author, body: m.body, createdAt: m.createdAt, attachedTo: m.attachedTo ?? null, conversation: m.conversation ?? null, mentions: Array.isArray(m.mentions) ? m.mentions : undefined });
