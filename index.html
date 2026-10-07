@@ -2634,12 +2634,17 @@ const CARD_PAGE_MAX = 50;
  * board slowly rather than a PARTIAL board quickly — a board silently missing
  * 518 cards is the worst outcome available, worse than the 6.9 MB it replaces.
  */
+// #1582 — returned when the status endpoint is ABSENT (404: a page over file://, an older server), as distinct from a
+// server that is failing (503, a timeout): only absence justifies the whole-board /api/load on a poll.
+const PROJECTION_ABSENT = Symbol('projection-absent');
 async function loadCardProjection() {
   const statusRes = await fetch(API_BASE + '/api/board/status');
+  if (statusRes.status === 404) return PROJECTION_ABSENT;
   if (!statusRes.ok) return null;
   const status = await statusRes.json();
   const total = status && status.cardsTotal;
-  if (!Number.isInteger(total) || !Array.isArray(status.columns)) return null;
+  // #1582 — a 200 without the projection's shape is a server that does not offer it (absent), not a failing one
+  if (!Number.isInteger(total) || !Array.isArray(status.columns)) return PROJECTION_ABSENT;
 
   // Keyed by id so an overlapping page cannot inflate the count into a false
   // pass — #209's cursor note: paging backwards on the WRONG end of the page
@@ -2688,10 +2693,17 @@ async function loadCardProjection() {
   };
 }
 
-async function loadFromJSONFile() {
+// #1582 — `{ poll: true }` (the 5-second board poll only): a projection that FAILS is a BLIP, so the poll keeps what is
+// on screen and asks again next tick, never the whole-board /api/load (an ABSENT projection endpoint still falls back). Measured 2026-10-06/07: with the graph slow,
+// the poll fell back to /api/load every tick, and /api/load builds the whole commons from the graph (5-90 s each),
+// which kept the graph slow, so the status read kept failing: one open tab sustained a board-wide outage.
+async function loadFromJSONFile({ poll = false } = {}) {
   try {
     const projected = await loadCardProjection();
-    if (projected) return projected;
+    if (projected && projected !== PROJECTION_ABSENT) return projected;
+    // #1582 — a poll falls back only when the projection endpoint is ABSENT; a failing server is a blip, and the next
+    // tick tries again (the whole-board read on every tick is what kept the graph saturated)
+    if (poll && projected !== PROJECTION_ABSENT) return null;
     // Coverage miss, or an endpoint that isn't there (a page opened over
     // file://, an older server). Correct and slow.
     console.warn('loadFromJSONFile: projection unavailable — falling back to /api/load');
@@ -6481,7 +6493,7 @@ async function pollBoard() {
   if (cards.some((c) => c && c._unsynced === 'unknown')) { _trackPendingWrite(_reconcileUnknownCreates()); return; }
   // #1584 — likewise a move whose outcome is unknown: read for it first.
   if (_unconfirmedMoves.size > 0) { _trackPendingWrite(_reconcileMoves()); return; }
-  const data = await loadFromJSONFile();
+  const data = await loadFromJSONFile({ poll: true });   // #1582 — a poll never falls back to /api/load
   if (!data) return;  // network blip; try again next tick
   const newSig = boardSignature(data.cards, data.columns);
   if (newSig === _boardRenderedSig) return;  // nothing changed server-side
