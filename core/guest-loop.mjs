@@ -1421,14 +1421,28 @@ function isSettled(state, m) {
  */
 export const SWEEP_EVERY_MS = 60 * 60_000;
 export const SWEEP_LOOKBACK_MS = 24 * 60 * 60_000;
+// A FAILED attempt is retried no sooner than SWEEP_RETRY_MS later (row S19): without it a sweep that keeps failing —
+// exactly what an executor stall causes — re-read up to 24 h of the room every minute, the load bug in its failure mode.
+export const SWEEP_RETRY_MS = 15 * 60_000;
 export function sweepDue(state = {}, now = new Date().toISOString(), { force = false } = {}) {
   if (force) return true;
-  return typeof state.sweptAt !== 'string' || Date.parse(now) - Date.parse(state.sweptAt) >= SWEEP_EVERY_MS;
+  const t = Date.parse(now);
+  if (typeof state.sweepTriedAt === 'string' && t - Date.parse(state.sweepTriedAt) < SWEEP_RETRY_MS) return false;
+  return typeof state.sweptAt !== 'string' || t - Date.parse(state.sweptAt) >= SWEEP_EVERY_MS;
 }
 export function sweepSince(state = {}, now = new Date().toISOString()) {
-  const from = typeof state.sweptAt === 'string' ? state.sweptAt : now;
+  // The lower bound must not move with the clock while no sweep has COMPLETED (review 2026-10-07T19:43Z): before the
+  // first complete sweep it is pinned to `sweepAnchor`, written before the first attempt and never advanced by failures.
+  const from = typeof state.sweptAt === 'string' ? state.sweptAt : (typeof state.sweepAnchor === 'string' ? state.sweepAnchor : now);
   return new Date(Date.parse(from) - SWEEP_LOOKBACK_MS).toISOString();
 }
+/** The first sweep's anchor, pinned before the first attempt; unchanged once set or once a sweep has completed. */
+export function withSweepAnchor(state = {}, now = new Date().toISOString()) {
+  if (typeof state.sweptAt === 'string' || typeof state.sweepAnchor === 'string') return state;
+  return { ...state, sweepAnchor: now };
+}
+/** Recorded before every attempt (with the anchor, in one write): what the retry spacing is measured from. */
+export const withSweepAttempt = (state = {}, now = new Date().toISOString()) => ({ ...withSweepAnchor(state, now), sweepTriedAt: now });
 export function captureSweep(state = {}, window_ = {}, seatKey, { sweepStart = new Date().toISOString() } = {}) {
   if (!window_ || window_.complete !== true) return state;   // a partial sweep moves nothing
   state = withLegacyLine(state, sweepStart);
@@ -1437,23 +1451,33 @@ export function captureSweep(state = {}, window_ = {}, seatKey, { sweepStart = n
   for (const m of found) if (!byId.has(m.id)) byId.set(m.id, pendingRecord(m));
   const pending = [...byId.values()].sort((a, b) => (String(a.createdAt) < String(b.createdAt) ? -1 : 1));
   if (pending.length > PENDING_MAX) return { ...state, pendingOverflow: { owed: pending.length, max: PENDING_MAX } };
-  return { ...state, pending, sweptAt: sweepStart };
+  return pruneSettled({ ...state, pending, sweptAt: sweepStart });
 }
 
 const pendingRecord = (m) => ({ id: m.id, author: m.author, body: m.body, createdAt: m.createdAt, attachedTo: m.attachedTo ?? null, conversation: m.conversation ?? null, mentions: Array.isArray(m.mentions) ? m.mentions : undefined });
 
 /**
- * #1631 — a settled mention leaves pending (answered, declined, or settled by #1201's model-failure rule), and its id is
- * remembered in `settled` so the rewind overlap can never capture or wake it again. `settled` keeps the newest
- * SETTLED_MAX ids, far more than a rewind window can hold.
+ * #1631 — a settled mention leaves pending (answered, declined, or settled by #1201's model-failure rule), and its
+ * settlement is remembered in `settled` as {id, at: the mention's stamp} for as long as ANY scan or sweep can still read
+ * it: an entry is pruned only once its stamp is older than the recovery sweep's lower bound minus the rewind (review
+ * 2026-10-07T19:43Z: a count cap let an hourly sweep re-capture answers whose ids had been evicted).
  */
-export const SETTLED_MAX = 500;
-export function settlePending(state = {}, id) {
+export function settlePending(state = {}, id, { at = null } = {}) {
+  const was = Array.isArray(state.pending) ? state.pending.find((m) => m.id === id) : null;
   const pending = Array.isArray(state.pending) ? state.pending.filter((m) => m.id !== id) : state.pending;
-  const settled = [...(Array.isArray(state.settled) ? state.settled.filter((x) => x !== id) : []), id].slice(-SETTLED_MAX);
-  return { ...state, ...(pending !== undefined ? { pending } : {}), settled };
+  const stamp = at ?? was?.createdAt ?? null;
+  const settled = [...settledEntries(state).filter((x) => x.id !== id), { id, at: stamp }];
+  return pruneSettled({ ...state, ...(pending !== undefined ? { pending } : {}), settled });
 }
-export const settledIds = (state = {}) => new Set(Array.isArray(state.settled) ? state.settled : []);
+const settledEntries = (state = {}) => (Array.isArray(state.settled) ? state.settled : []).map((x) => (typeof x === 'string' ? { id: x, at: null } : x)).filter((x) => x && x.id != null);
+export const settledIds = (state = {}) => new Set(settledEntries(state).map((x) => x.id));
+/** Keep every settlement a scan or a sweep could still read; drop only those stamped before the sweep's lower bound − rewind. */
+export function pruneSettled(state = {}, now = null) {
+  const floorFrom = typeof state.sweptAt === 'string' ? state.sweptAt : (typeof state.sweepAnchor === 'string' ? state.sweepAnchor : now);
+  if (!floorFrom) return state;
+  const floor = new Date(Date.parse(floorFrom) - SWEEP_LOOKBACK_MS - SCAN_REWIND_MS).toISOString();
+  return { ...state, settled: settledEntries(state).filter((x) => typeof x.at !== 'string' || x.at >= floor) };
+}
 export function mentionScanPath(state = {}, now = new Date().toISOString(), { before = null } = {}) {
   const since = scanWindowSince(state, now);
   // `before` walks BACKWARD through the same window: `since` is held fixed, so

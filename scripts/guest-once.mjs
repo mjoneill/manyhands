@@ -26,7 +26,7 @@ import { deliveryStaleMs, isStaleDelivery } from '../core/delivery.mjs';   // #1
 import { rowToBoard, refusalsSince } from '../core/model-call-row.mjs';
 import { handBackFromState, defaultWithheldStatePath } from '../core/withheld-state.mjs';   // #1428 — private per-seat withheld recovery
 import { annotateTalks } from '../core/guest-loop.mjs';   // #1446
-import { findMentions, findWakes, pairCapSuppressed, DEFAULT_PAIR_CAP_PER_HOUR, guestOnce, fetchBoundedChanges, shouldMarkAnswered, mentionScanPath, fetchMentionWindow, advanceScan, settlePending, sweepDue, sweepSince, captureSweep, acquireLock, releaseLock, effectiveWakeOn, budgetCheck, deliveryOutcome, bindingRulings } from '../core/guest-loop.mjs';
+import { findMentions, findWakes, pairCapSuppressed, DEFAULT_PAIR_CAP_PER_HOUR, guestOnce, fetchBoundedChanges, shouldMarkAnswered, mentionScanPath, fetchMentionWindow, advanceScan, settlePending, sweepDue, sweepSince, captureSweep, withSweepAttempt, acquireLock, releaseLock, effectiveWakeOn, budgetCheck, deliveryOutcome, bindingRulings } from '../core/guest-loop.mjs';
 import { makeExecutor } from '../core/board-tools.mjs';
 import { makeHandedCapture } from '../core/handed-dump.mjs';   // #1567 PC5
 const handedCapture = process.env.SCRUM_HANDED_DUMP
@@ -176,6 +176,10 @@ if (scansMentions && window_.complete && !opt('--once-id')) {
 // complete sweep whose captures were written; anything else leaves the interval to grow for the next one.
 if (scansMentions && !opt('--once-id') && sweepDue(state, NOW, { force: args.includes('--sweep-now') })) {
   const sweepStart = NOW;
+  // BEFORE attempting: pin the first sweep's lower bound (a failed first sweep cannot let it slide) and record the attempt
+  // (a failed sweep is retried no sooner than SWEEP_RETRY_MS), in one atomic write.
+  state = withSweepAttempt(state, NOW);
+  if (!dry) writeStateAtomic(stateFile, state);
   const sweepFrom = sweepSince(state, NOW);
   let swept = null;
   try { swept = await fetchMentionWindow(getPage, { lastAnsweredAt: sweepFrom }, NOW, { maxPages: 100 }); }
@@ -510,7 +514,7 @@ if (!dry && shouldMarkAnswered(r)) {
   if (wake.kind === 'assignment') next.assignmentsSeen = [...new Set([...(state.assignmentsSeen || []), wake.cardId])].slice(-200);
   if (wake.kind === 'schedule') next.lastScheduledAt = wake.createdAt;
   if (wake.kind === 'channel') next.lastChannelDrainAt = new Date().toISOString();   // #1346
-  writeStateAtomic(stateFile, wake.kind === 'mention' ? settlePending(next, wake.id) : next);   // #1631 — settled leaves pending
+  writeStateAtomic(stateFile, wake.kind === 'mention' ? settlePending(next, wake.id, { at: wake.createdAt ?? null }) : next);   // #1631 — settled leaves pending
 }
 else if (!dry) console.log(`[#1201] ${agent.seatKey}: mention ${wake.id} still owed (${r.reason ?? 'halted'}) — cursor not advanced`);
 console.log(JSON.stringify({ posted: r.posted, reason: r.reason ?? 'delivered', postId: r.postId ?? null, wake: wake.id }));

@@ -48,3 +48,21 @@ test('PO4 the cutover line is the cursor AT CUTOVER, not the cursor now: a post-
   const legacy = advanceScan(state, { complete: true, messages: [mention(1), plain(11)] }, 'pip');
   assert.deepEqual(legacy.pending, [], 'stamped before the cutover line: outside the guarantee, not captured');
 });
+
+test('PO5 more than 500 settlements, then a sweep: every answered mention in the recoverable interval stays settled (no re-capture)', async () => {
+  const { settlePending, captureSweep } = await import('../core/guest-loop.mjs');
+  let state = { ...CUTOVER, sweptAt: at(700), pending: [] };
+  const answered = Array.from({ length: 600 }, (_, i) => mention(i + 1));
+  for (const m of answered) state = settlePending({ ...state, pending: [m] }, m.id, { at: m.createdAt });
+  const next = captureSweep(state, { complete: true, messages: answered }, 'pip', { sweepStart: at(800) });
+  assert.deepEqual(next.pending, [], 'none of the 600 answered mentions is captured again');
+});
+
+test('PO6 a failing first sweep cannot slide its lower bound: the anchor is pinned before the first attempt', async () => {
+  const { withSweepAnchor, sweepSince } = await import('../core/guest-loop.mjs');
+  const t0 = '2026-10-07T12:00:00.000Z';
+  const s1 = withSweepAnchor({ ...CUTOVER }, t0);
+  const s2 = withSweepAnchor(s1, '2026-10-07T15:00:00.000Z');   // a later attempt after failures
+  assert.equal(s2.sweepAnchor, t0, 'the anchor does not move');
+  assert.equal(sweepSince(s2, '2026-10-07T15:00:00.000Z'), '2026-10-06T12:00:00.000Z', 'the bound is anchor - 24 h, not now - 24 h');
+});
