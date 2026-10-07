@@ -4256,12 +4256,19 @@ async function handleRunGenerated(req, res) {
   }
 }
 
+// #1624 — a procedure's versions are listed OLDEST FIRST (v1, v2, …), as the document always listed them. With the
+// collection in the graph the store hands entities back in no particular order, so the order is stated here: by the
+// version number in the name ("<procedure> v<n>", how the number is allocated), then by creation time.
+const procedureVersionNumber = (v) => { const m = /\sv(\d+)$/.exec(String(v?.name ?? '')); return m ? Number(m[1]) : Number.MAX_SAFE_INTEGER; };
+const byVersionAscending = (a, b) => (procedureVersionNumber(a) - procedureVersionNumber(b))
+  || String(a?.dateCreated ?? '').localeCompare(String(b?.dateCreated ?? ''));
+
 function handleListProcedures(req, res) {
   const data = readBoard();
   const all = proceduresOf(data);
   const out = all.filter((e) => e['@type'] === 'scrum:Procedure').map((p) => ({
     ...procedureToWire(p),
-    versions: all.filter((v) => v['scrum:ofProcedure'] === p['@id']).map(procedureVersionToWire),
+    versions: all.filter((v) => v['scrum:ofProcedure'] === p['@id']).sort(byVersionAscending).map(procedureVersionToWire),
   }));
   sendJSON(res, 200, out);
 }
