@@ -834,7 +834,7 @@ async function postFailureLine({ agent, wake, error, latencyMs, post, onError })
  *   post       ({author, body}) => Promise<{id?}>
  *   ledgerFile where the pre-ledger row goes
  */
-export async function guestOnce({ agent, wake, changes = () => [], memories = null, rulings = null, priorRefusals = null, priorWithheld = null, withheldStateFile = null, writeMemory = null, claimCard = null, callModel, execute = null, maxHops = undefined, post, ledgerFile = ledgerFilePath(), ledgerSink = null, spentToday = null, now = () => new Date().toISOString(), log = () => {}, onError = () => {} }) {
+export async function guestOnce({ agent, wake, changes = () => [], memories = null, rulings = null, priorRefusals = null, priorWithheld = null, withheldStateFile = null, writeMemory = null, claimCard = null, callModel, execute = null, maxHops = undefined, post, ledgerFile = ledgerFilePath(), ledgerSink = null, spentToday = null, now = () => new Date().toISOString(), log = () => {}, onError = () => {}, preparePost = null }) {
   if (!agent?.seatKey) throw new Error('guestOnce: agent.seatKey is required — a post with no seat is actor:null forever (#1193)');
   if (!agent?.model?.model || !agent?.model?.protocol) throw new Error('guestOnce: agent.model {model, protocol} is required');
   // #1202 — the budget gate, BEFORE any context is fetched or any call is made.
@@ -1096,7 +1096,16 @@ export async function guestOnce({ agent, wake, changes = () => [], memories = nu
   // #1401 — REPLY WHERE ASKED, second kind: a post tagged into a 1:1 talk is
   // answered with the same tag, so the answer lands in the asker's view. The
   // post stays board-level either way; the tag is only what the view filters.
-  try { if (publishBody) posted = await post({ author: agent.seatKey, body: publishBody, ...(typeof wake?.attachedTo === 'string' && wake.attachedTo ? { attachedTo: wake.attachedTo } : {}), ...(replyTalkFor(wake, agent.seatKey) ? { conversation: replyTalkFor(wake, agent.seatKey) } : {}) }); }   // #1446 — only into the seat's OWN talk
+  // #1631 — `preparePost` (optional) makes the publication durable BEFORE it is attempted: the runner stores the exact
+  // payload and its requestId, so a run killed after the POST (or before it lands) re-sends THAT payload instead of
+  // regenerating a different reply under the same key. If preparing fails, nothing is posted (post-failed, still owed).
+  try {
+    if (publishBody) {
+      let payload = { author: agent.seatKey, body: publishBody, ...(typeof wake?.attachedTo === 'string' && wake.attachedTo ? { attachedTo: wake.attachedTo } : {}), ...(replyTalkFor(wake, agent.seatKey) ? { conversation: replyTalkFor(wake, agent.seatKey) } : {}) };   // #1446 — only into the seat's OWN talk
+      if (typeof preparePost === 'function') payload = await preparePost(payload);
+      posted = await post(payload);
+    }
+  }
   catch (e) {
     const row = { ...base, ...toolRecord, ok: false, error: `post failed: ${e?.message ?? e}`, stopReason: result.stopReason, usage: result.usage, latencyMs: Date.now() - started };
     await recordLedger({ sink: ledgerSink, file: ledgerFile, row, onError });

@@ -121,13 +121,6 @@ const lock = dry ? { acquired: true } : acquireLock(lockPath);
 if (!lock.acquired) { console.log(`${new Date().toISOString()} ${agent.seatKey}: lock held by another run (pid ${lock.holder?.pid ?? '?'} since ${lock.holder?.at ?? '?'}) — doing nothing`); process.exit(0); }
 if (lock.broke) console.error(`[#1237] ${agent.seatKey}: broke a STALE lock (pid ${lock.broke.pid}, held ${Math.round(lock.heldMs / 1000)}s) — a run died mid-wake; check the log above this line`);
 if (!dry) { const done = () => releaseLock(lockPath); process.on('exit', done); for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { done(); process.exit(1); }); }
-// #1237 — scan by SINCE cursor, not the newest 60: a mention buried under a busy
-// night was invisible for good. mentionScanPath is tested.
-// #1274 — and the scan's OWN ceiling: the server clamps that limit to 200 and
-// returns the NEWEST 200, silently. On a busy stretch the rows nearest the
-// cursor — the unanswered ones — were the rows dropped. fetchMentionWindow
-// pages backward with `before` until the window is whole; a quiet tick still
-// costs exactly one request.
 const getPage = async (p) => {
   const r = await fetch(`${BOARD}${p}`);
   if (!r.ok) throw new Error(`GET ${p} → ${r.status}`);
@@ -136,6 +129,49 @@ const getPage = async (p) => {
   const total = r.headers.get('x-total-count');   // #1010's count, taken BEFORE the limit
   return { rows, total: total == null ? null : Number(total) };
 };
+// #1631 — settling a mention: its own pending entry leaves (settlePending) and the answer cursor moves only FORWARD.
+function settleMention(st, wakeId, createdAt) {
+  const next = { ...st };
+  if (!(typeof next.lastAnsweredAt === 'string' && typeof createdAt === 'string' && createdAt < next.lastAnsweredAt)) {
+    next.lastAnsweredId = wakeId; next.lastAnsweredAt = createdAt ?? next.lastAnsweredAt ?? null;
+  }
+  return settlePending(next, wakeId, { at: createdAt ?? null });
+}
+// #1631 — THE OUTBOX IS DRAINED FIRST. A reply prepared by an earlier run (stored before its POST) is re-sent exactly as
+// stored, with the same requestId (the board creates it or replays the existing post), BEFORE any new model turn. Only a
+// confirmed publication settles the mention and clears the outbox, in one atomic write. A refused or ambiguous POST keeps
+// it, and this run ends without starting another turn. A REQUEST_ID_CONFLICT means the stored payload and the board
+// disagree: kept, reported loudly, never regenerated.
+if (state.outbox && !dry && !opt('--once-id')) {
+  const ob = state.outbox;
+  try {
+    // The re-POST carries the STORED requestId: on a board whose post route is idempotent by requestId (the conversations
+    // unit's graph path, which production runs) it creates the post or replays the one already published. A board that
+    // ignores requestId (the document path) cannot give that guarantee: exactly-once publication is NOT claimed there.
+    const r = await fetch(`${BOARD}/api/conversations`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(ob.payload), signal: AbortSignal.timeout(60_000) });
+    const b = await r.json().catch(() => null);
+    if (r.status >= 200 && r.status < 300) {
+      state = { ...settleMention(state, ob.wakeId, ob.wakeCreatedAt ?? null), outbox: null };
+      writeStateAtomic(stateFile, state);
+      console.log(`[#1631] ${agent.seatKey}: outbox drained, reply ${b?.id ?? '?'} for mention ${ob.wakeId} confirmed (${r.status}); no model call`);
+      console.log(JSON.stringify({ posted: true, reason: 'outbox-drained', postId: b?.id ?? null, wake: ob.wakeId }));
+    } else if (b?.code === 'REQUEST_ID_CONFLICT') {
+      console.error(`[#1631] ${agent.seatKey}: REQUEST_ID_CONFLICT on the outbox re-POST for mention ${ob.wakeId} (requestId ${ob.requestId}): the board holds different content under this key — kept, not regenerated; needs a look`);
+    } else {
+      console.error(`[#1631] ${agent.seatKey}: outbox POST not confirmed (${r.status}) for mention ${ob.wakeId} — kept for the next run; no new turn this run`);
+    }
+  } catch (e) {
+    console.error(`[#1631] ${agent.seatKey}: outbox POST failed (${e.message}) for mention ${ob.wakeId} — kept for the next run; no new turn this run`);
+  }
+  process.exit(0);   // one publication per run; a new turn waits for the next run
+}
+// #1237 — scan by SINCE cursor, not the newest 60: a mention buried under a busy
+// night was invisible for good. mentionScanPath is tested.
+// #1274 — and the scan's OWN ceiling: the server clamps that limit to 200 and
+// returns the NEWEST 200, silently. On a busy stretch the rows nearest the
+// cursor — the unanswered ones — were the rows dropped. fetchMentionWindow
+// pages backward with `before` until the window is whole; a quiet tick still
+// costs exactly one request. (getPage itself is defined above, before the #1631 outbox drain that uses it.)
 // #1608 — A SEAT THAT CANNOT BE WOKEN BY A MENTION DOES NOT SCAN FOR MENTIONS. In channel mode effectiveWakeOn drops
 // `mention` (#1346): every post addressed to the seat arrives as a DELIVERY, a durable per-post record whose outcome
 // (published / declined / failed, claimable again) is the obligation ledger. The scan's rows were read and discarded:
@@ -433,6 +469,16 @@ const claimCard = dry ? async (n, seat) => console.log(`[dry-run] would claim #$
 };
 
 const r = await guestOnce({
+  // #1631 — a mention's reply is made durable BEFORE its POST: the exact payload and a requestId derived from the mention
+  // go into the state file's outbox (atomic), so a run killed after or during the POST re-sends THIS payload (drained
+  // at the top of the next run) instead of regenerating a different reply under the same key.
+  preparePost: (wake.kind === 'mention' && !dry) ? async (payload) => {
+    const requestId = `${agent.seatKey}-reply-${wake.id}`.replace(/[^A-Za-z0-9-]/g, '-').slice(0, 64);
+    const prepared = { ...payload, requestId };
+    state = { ...state, outbox: { wakeId: wake.id, wakeCreatedAt: wake.createdAt ?? null, requestId, payload: prepared, preparedAt: new Date().toISOString() } };
+    writeStateAtomic(stateFile, state);
+    return prepared;
+  } : null,
   agent, wake, changes: () => { if (changesError) throw changesError; return rows; }, ledgerSink, spentToday, memories, priorRefusals, priorWithheld, withheldStateFile, writeMemory, claimCard,
   // #1436 — the live decisions that name this seat, its held role, or its display name
   rulings: async (seatKey) => {
@@ -519,7 +565,7 @@ if (!dry && shouldMarkAnswered(r)) {
   if (wake.kind === 'assignment') next.assignmentsSeen = [...new Set([...(state.assignmentsSeen || []), wake.cardId])].slice(-200);
   if (wake.kind === 'schedule') next.lastScheduledAt = wake.createdAt;
   if (wake.kind === 'channel') next.lastChannelDrainAt = new Date().toISOString();   // #1346
-  writeStateAtomic(stateFile, wake.kind === 'mention' ? settlePending(next, wake.id, { at: wake.createdAt ?? null }) : next);   // #1631 — settled leaves pending
+  writeStateAtomic(stateFile, wake.kind === 'mention' ? { ...settlePending(next, wake.id, { at: wake.createdAt ?? null }), outbox: null } : next);   // #1631 — settled leaves pending; a confirmed or settled publication clears the outbox
 }
 else if (!dry) console.log(`[#1201] ${agent.seatKey}: mention ${wake.id} still owed (${r.reason ?? 'halted'}) — cursor not advanced`);
 console.log(JSON.stringify({ posted: r.posted, reason: r.reason ?? 'delivered', postId: r.postId ?? null, wake: wake.id }));
