@@ -417,7 +417,7 @@ export function staticCheck(sparql, opId) {
 // =====================================================================================
 
 export const RECORD_V = 2;   // 2: memory.revise records the identity it replaces (a MemoryRevision node)
-export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create', 'post.import', 'post.write', 'post.redact', 'delivery.create', 'delivery.step', 'delivery.import', 'modelcall.create', 'card.write']);
+export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create', 'post.import', 'post.write', 'post.redact', 'delivery.create', 'delivery.step', 'delivery.import', 'modelcall.create', 'card.write', 'entity.put']);
 
 const RS = 'https://scrumboard.local/ns#';
 const RSC = 'https://schema.org/';
@@ -455,6 +455,11 @@ export const LOGBORN_TERMS = Object.freeze({
   at: `${RS}at`, attempt: `${RS}attempt`, reason: `${RS}reason`, traceId: `${RS}traceId`, ofModelCall: `${RS}ofModelCall`, creator: `${RS}creator`,
   ModelCall: `${RS}ModelCall`, agent: `${RS}agent`, model: `${RS}model`, calledAt: `${RS}calledAt`, cost: `${RS}cost`,
   producedPost: `${RS}producedPost`, postedText: `${RS}postedText`, requestId: `${RS}requestId`, entityJson: `${RS}entityJson`,
+  // #1624 — the small-kinds entity.put primitive. Wake is the first projection; later kinds
+  // add a row here AND a canonicalizeRecord/planRecord block. Wakes mint a node + edges that
+  // mirror the replica's existing projectWake (graph-replica.mjs), so a reader of either store
+  // sees the same triples.
+  Wake: `${RS}Wake`, wokeSeat: `${RS}wokeSeat`, wokeAt: `${RS}wokeAt`,
 });
 const TM = LOGBORN_TERMS;
 
@@ -475,6 +480,7 @@ const RECORD_FIELDS = {
   'delivery.import': ['delivery'],          // #1582 migration — a document delivery and ALL its steps, fresh, in one update
   'modelcall.create': ['call'],             // #1582 — one ledger row, fresh at its derived IRI
   'card.write': ['parts', 'counter', 'pending'],       // #1598 — one or more cards, each guarded on its version, in ONE update
+  'entity.put': ['entity'],                 // #1624 — one generic storage primitive; the `kind` field selects the projection
 };
 
 const SAFE_CH = /^[A-Za-z0-9 _.,:/@#+=*!~%&$-]$/;
@@ -665,6 +671,25 @@ function canonicalizeRecord(i) {
     } };
   } else if (i.kind === 'card.write') {
     record = canonCardWrite(i);
+  } else if (i.kind === 'entity.put') {
+    // #1624 — ONE generic storage primitive. The `kind` field on the entity selects which
+    // allowlisted projection runs; only kinds explicitly listed here can be written through
+    // it. Adding a new family = one row in the canonicalizeRecord/planRecord blocks. No new
+    // authority is granted: the same actor + people + digest + fresh-IRI guards apply.
+    // `entityJson` is the canonical wire JSON the writer chooses to persist; the wake
+    // projection stores it on the node so a reader on either store reads the same wire.
+    const e = obj(i.entity, ['kind', 'iri', 'seat', 'at', 'note', 'entityJson'], 'entity');
+    if (e.kind === 'wake') {
+      record = { entity: {
+        kind: 'wake', iri: checkIri(e.iri, 'entity.iri'),
+        seat: rStr(e.seat, 'entity.seat'),
+        at: rStr(e.at, 'entity.at'),
+        note: rOpt(e.note, 'entity.note'),
+        entityJson: rStr(e.entityJson, 'entity.entityJson'),
+      } };
+    } else {
+      fail(`entity.kind must be one of wake (got ${JSON.stringify(e.kind)})`);
+    }
   } else if (i.kind === 'decision.relate') {
     const target = checkIri(i.target, 'target');
     const supersedes = rList(i.supersedes, 'supersedes', checkIri);
@@ -923,6 +948,22 @@ function planRecord(c) {
       else add(M.iri, TM.postedText, L(M.postedText));
     }
     add(M.iri, TM.entityJson, L(M.entityJson)); add(M.iri, TM.recordedBy, ref(c.opId));
+  } else if (c.kind === 'entity.put') {
+    // #1624 — the wake projection: ONE fresh node + FOUR domain triples + entityJson,
+    // mirroring the replica's projectWake (graph-replica.mjs) so a reader of either store
+    // reads the same triples. wokeSeat is a person IRI (the actor's `by`, declared at the
+    // route); wokeAt is an ISO timestamp; entityJson is the canonical wire JSON the writer
+    // chose to persist (the wake reader reads it as the document-shaped entity, so its wire
+    // is the wire the document path would have answered).
+    const W = R.entity;
+    target = null;
+    fresh.push(W.iri);
+    add(W.iri, TM.type, I(TM.Wake));
+    add(W.iri, TM.wokeSeat, I(`${PERSON_IRI}${encodeURIComponent(W.seat)}`));
+    add(W.iri, TM.wokeAt, L(W.at));
+    add(W.iri, TM.text, W.note == null ? null : L(W.note));
+    add(W.iri, TM.entityJson, L(W.entityJson));
+    add(W.iri, TM.recordedBy, ref(c.opId));
   } else if (c.kind === 'post.redact') {
     // #1574 R4a — LOGICAL deletion only: every content triple of the post is deleted and the node is left as a tombstone
     // (RedactedPost, its original postSeq and recordedBy, and redactedBy = this operation). The precondition is a LIVE

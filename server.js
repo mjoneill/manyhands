@@ -49,6 +49,7 @@ import {
   seatDeclareIntention, seatClearIntention, SEAT_DECL_BASE,
   collapseIdentities, identitiesFromEvents, identityOf,
 } from './core/logborn-unit.mjs';
+import { createSmallkindsUnit, wakeCreateIntention, wakeIri } from './core/smallkinds-unit.mjs';   // #1624
 import { BOARD_TOOLS } from './core/board-tools.mjs';
 import { resolveAttachedTo } from './core/attached-to.mjs'; // #761
 import { promptGrantConflict, promptGrantWarning } from './core/prompt-grants.mjs'; // #1242
@@ -130,6 +131,9 @@ const FILE_CARDS = Symbol('fileCards');           // the document's card list, p
 const FILE_NEXT_SHORT_ID = Symbol('fileNextShortId');
 const FILE_ORIGINS = Symbol('fileOutboxOrigins');   // #1598 K4 — the outbox mutations the document already held when read
 const cardWriteContext = new AsyncLocalStorage();   // #1598 — the write a locked closure stages for its lock to commit
+// #1624 — the small-kinds unit (wake first). Reads and writes go through the one generic
+// `entity.put` primitive; OFF ⇒ the document collection is the only store (today's path).
+const SMALLKINDS_UNIT = process.env.SCRUM_GRAPH_UNIT_SMALLKINDS === '1';
 
 let _documentWrites = 0;   // #1574 1b — successful writeBoard calls since boot; on /api/health as `documentWrites`
 // #1574 1b scope change — announcements whose inline attempt failed stay pending until a hand-run reconciler or the cards
@@ -4488,7 +4492,11 @@ function handleListRuns(req, res) {
 // Append-only: a wake is never edited or deleted, so "when did I last wake" is
 // the newest one, and "what changed since" is changes_since(its at).
 const WAKE_ID = () => `https://scrumboard.local/wake/${crypto.randomUUID()}`;
+// #1624 — with the small-kinds unit on, the DOCUMENT's wakes are not the record. Reading
+// them is a defect (a stale answer masquerading as fresh), so it THROWS — same shape as
+// deliveriesOf under DELIVERIES_UNIT. A caller that holds the lock will never reach here.
 function wakesOf(data) {
+  if (SMALLKINDS_UNIT) throw new Error('#1624: wakes live in the graph (SCRUM_GRAPH_UNIT_SMALLKINDS=1); the document collection is not read');
   return Array.isArray(data.wakes) ? data.wakes : [];
 }
 const wakeEvent = (e, actor) => ({ op: 'create', actor, entity: { kind: 'wake', id: e['@id'] }, state: e });
@@ -6116,6 +6124,22 @@ async function handleCreateWake(req, res) {
     const body = JSON.parse(await readBody(req));
     const by = typeof body.by === 'string' && body.by.trim() ? body.by.trim() : null;
     if (!by) return sendJSON(res, 400, { error: 'by is required — the seat that woke. Declared, not authenticated.' });
+    // #1624 — with the small-kinds unit on, the graph executor IS the store; the document
+    // collection is not read or written. No write lock: the duplicate guard + fresh IRI
+    // guarantee atomicity in the graph. An unreachable or indeterminate executor is 503
+    // GRAPH_UNAVAILABLE, never a 201 (W3): a wake must not be implied as written when
+    // the executor could not tell us. The canonical wire JSON is persisted on the node
+    // alongside the projection, so the reader on either store returns the same shape.
+    if (SMALLKINDS_UNIT) {
+      const iri = wakeIri();
+      const at = new Date().toISOString();
+      const note = typeof body.note === 'string' ? body.note : '';
+      const entityJson = JSON.stringify({ seat: by, at, note });
+      const r = await SMALLKINDS.writeWake(wakeCreateIntention({ actor: graphActor(by), iri, seat: by, at, note, entityJson }));
+      if (r.status === 'APPLIED') return sendJSON(res, 201, wakeToWire({ '@id': iri, '@type': 'scrum:Wake', 'scrum:wokeSeat': by, 'scrum:wokeAt': at, text: note }));
+      if (r.status === 'UNAVAILABLE') return sendJSON(res, 503, { error: `the graph could not be written, so the wake was refused: ${r.reason}`, code: 'GRAPH_UNAVAILABLE' });
+      return sendJSON(res, 500, { error: `the graph refused the wake: ${r.reason ?? 'rejected'}` });
+    }
     const result = await withWriteLock(async () => {
       const data = readBoard();
       const entity = {
@@ -6495,13 +6519,32 @@ async function handleListDeliveriesInner(req, res) {
   sendJSON(res, 200, { deliveries: out, count: out.length });
 }
 
-function handleListWakes(req, res) {
-  const q = parseQuery(req.url);
-  let out = wakesOf(readBoard()).map(wakeToWire).sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0)); // newest first
-  if (q.seat) out = out.filter((w) => w.seat === q.seat);
-  const limit = Number.parseInt(q.limit, 10);
-  if (Number.isInteger(limit) && limit > 0) out = out.slice(0, limit);
-  sendJSON(res, 200, out);
+async function handleListWakes(req, res) {
+  try {
+    const q = parseQuery(req.url);
+    // #1624 — with the small-kinds unit on, the executor is the store of record. An
+    // unreachable executor is 503, never an empty list dressed as "none" (W3). The
+    // unit module applies the same gate on `limit` (Number.isInteger && > 0) as the
+    // unit-off branch below, so a malformed query string answers the FULL list on
+    // either path.
+    if (SMALLKINDS_UNIT) {
+      const filter = {};
+      if (q.seat) filter.seat = String(q.seat);
+      const parsed = Number.parseInt(q.limit, 10);
+      if (Number.isInteger(parsed) && parsed > 0) filter.limit = parsed;
+      const r = await SMALLKINDS.readWakes(filter);
+      if (r.unavailable) return sendJSON(res, 503, { error: `the graph could not be read, so the wake list is unknown: ${r.unavailable}`, code: 'GRAPH_UNAVAILABLE' });
+      return sendJSON(res, 200, r.wakes.map(wakeToWire));
+    }
+    let out = wakesOf(readBoard()).map(wakeToWire).sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0)); // newest first
+    if (q.seat) out = out.filter((w) => w.seat === q.seat);
+    const limit = Number.parseInt(q.limit, 10);
+    if (Number.isInteger(limit) && limit > 0) out = out.slice(0, limit);
+    sendJSON(res, 200, out);
+  } catch (e) {
+    console.error('GET /api/wakes:', e.message);
+    if (!res.headersSent) sendJSON(res, 500, { error: e.message });
+  }
 }
 
 async function handleCreateObligation(req, res) {
@@ -12751,6 +12794,14 @@ if (CARDS_UNIT) {
     process.exit(1);
   }
   console.error(`${new Date().toISOString()} #1598 cards unit ON: cards are read from and written to the graph executor; the document's card list is not read`);
+}
+// #1624 — the small-kinds unit. Lives in the same family: needs the conversations unit (so
+// the executor exists), and reads requests when ANNOUNCE_EXECUTOR is built. OFF ⇒ today's path.
+let SMALLKINDS = null;   // { writeWake, readWakes }
+if (SMALLKINDS_UNIT) {
+  if (!ANNOUNCE_EXECUTOR) throw new Error('#1624: SCRUM_GRAPH_UNIT_SMALLKINDS=1 requires SCRUM_GRAPH_UNIT_CONVERSATIONS=1 (wakes live in the graph executor)');
+  SMALLKINDS = createSmallkindsUnit({ slice: GRAPH_SLICE });
+  console.error(`${new Date().toISOString()} #1624 small-kinds unit ON: wakes live in the graph executor; the document collection is not read`);
 }
 if (GRAPH_SLICE.enabled) {
   installStructuredCloneCounter();

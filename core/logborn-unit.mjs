@@ -353,7 +353,7 @@ export function plainRows(rows, shorten) {
 // event-loop delay before the error was built — it is not the executor's own failure time).
 // A blocked event loop can log the error much later; the message says when the call was
 // made, so a reader can CLASSIFY it against the replica-sync lines (overlap is not cause).
-const unavailable = (why, t0 = null) => {
+export const unavailable = (why, t0 = null) => {
   const at = t0 === null ? null : { startedAt: new Date(t0).toISOString(), elapsedMs: Date.now() - t0 };
   const msg = at ? `graph executor unavailable (call started ${at.startedAt}, failed after ${at.elapsedMs} ms): ${why}` : `graph executor unavailable: ${why}`;
   return Object.assign(new Error(msg), { code: 'GRAPH_EXECUTOR_UNAVAILABLE' }, at ?? {});
