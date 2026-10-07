@@ -142,7 +142,9 @@ function settleMention(st, wakeId, createdAt) {
 // confirmed publication settles the mention and clears the outbox, in one atomic write. A refused or ambiguous POST keeps
 // it, and this run ends without starting another turn. A REQUEST_ID_CONFLICT means the stored payload and the board
 // disagree: kept, reported loudly, never regenerated.
-if (state.outbox && !dry && !opt('--once-id')) {
+// The drain runs for EVERY run, a manual --once-id included: a new turn must never overwrite a prepared, unconfirmed
+// publication (review 2026-10-07T21:32Z). A manual run that finds one drains it and ends; run it again afterwards.
+if (state.outbox && !dry) {
   const ob = state.outbox;
   try {
     // The re-POST carries the STORED requestId: on a board whose post route is idempotent by requestId (the conversations
@@ -151,12 +153,20 @@ if (state.outbox && !dry && !opt('--once-id')) {
     const r = await fetch(`${BOARD}/api/conversations`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(ob.payload), signal: AbortSignal.timeout(60_000) });
     const b = await r.json().catch(() => null);
     if (r.status >= 200 && r.status < 300) {
-      state = { ...settleMention(state, ob.wakeId, ob.wakeCreatedAt ?? null), outbox: null };
+      state = { ...settleMention(state, ob.wakeId, ob.wakeCreatedAt ?? null), outbox: null, outboxBlocked: null };
       writeStateAtomic(stateFile, state);
       console.log(`[#1631] ${agent.seatKey}: outbox drained, reply ${b?.id ?? '?'} for mention ${ob.wakeId} confirmed (${r.status}); no model call`);
       console.log(JSON.stringify({ posted: true, reason: 'outbox-drained', postId: b?.id ?? null, wake: ob.wakeId }));
-    } else if (b?.code === 'REQUEST_ID_CONFLICT') {
-      console.error(`[#1631] ${agent.seatKey}: REQUEST_ID_CONFLICT on the outbox re-POST for mention ${ob.wakeId} (requestId ${ob.requestId}): the board holds different content under this key — kept, not regenerated; needs a look`);
+    } else if (r.status >= 400 && r.status < 500 && r.status !== 429) {
+      // PERMANENT refusal (REQUEST_ID_CONFLICT or another 4xx): FAIL CLOSED for this release (review 2026-10-07T21:32:20Z).
+      // The outbox is kept, untouched and never regenerated, and an explicit BLOCKED record is written so the state file
+      // says why the seat is not answering. Operator recovery: inspect `outbox` and `outboxBlocked`, fix the cause, and let
+      // the next run re-POST the SAME payload and key. Never delete the entry: if it must be set aside, move it (payload, key
+      // and failure metadata intact) into a disposition record with the reason and who decided — an audited disposition.
+      // --once-id regenerates content and is NOT a recovery of this prepared publication.
+      state = { ...state, outboxBlocked: { at: new Date().toISOString(), status: r.status, code: b?.code ?? null, wakeId: ob.wakeId, requestId: ob.requestId } };
+      writeStateAtomic(stateFile, state);
+      console.error(`[#1631] ${agent.seatKey}: OUTBOX BLOCKED — ${b?.code ?? 'http ' + r.status} on the re-POST for mention ${ob.wakeId} (requestId ${ob.requestId}); kept, not regenerated; the seat answers nothing until an operator resolves it (state: outbox + outboxBlocked)`);
     } else {
       console.error(`[#1631] ${agent.seatKey}: outbox POST not confirmed (${r.status}) for mention ${ob.wakeId} — kept for the next run; no new turn this run`);
     }
@@ -473,6 +483,8 @@ const r = await guestOnce({
   // go into the state file's outbox (atomic), so a run killed after or during the POST re-sends THIS payload (drained
   // at the top of the next run) instead of regenerating a different reply under the same key.
   preparePost: (wake.kind === 'mention' && !dry) ? async (payload) => {
+    // Belt to the drain-first rule: never overwrite another mention's prepared, unconfirmed publication.
+    if (state.outbox && state.outbox.wakeId !== wake.id) throw new Error(`outbox holds an unconfirmed reply for mention ${state.outbox.wakeId}; refusing to prepare one for ${wake.id}`);
     const requestId = `${agent.seatKey}-reply-${wake.id}`.replace(/[^A-Za-z0-9-]/g, '-').slice(0, 64);
     const prepared = { ...payload, requestId };
     state = { ...state, outbox: { wakeId: wake.id, wakeCreatedAt: wake.createdAt ?? null, requestId, payload: prepared, preparedAt: new Date().toISOString() } };
