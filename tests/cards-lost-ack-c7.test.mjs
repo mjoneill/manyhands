@@ -12,6 +12,8 @@
  *   CL2  LOST ACK, an edit (unit on): 200, the new title is there, and the version moved by exactly ONE.
  *   CL3  REQUEST NOT ARRIVED, a create (unit on): (201 and one card) or (503 and none); never 201 with none, never an error with one. If none, a later create of the same title lands once.
  *   CL4  REQUEST NOT ARRIVED, an edit (unit on): (200, new title, version +1) or (503, old title, version unchanged); never the mixed pair.
+ *   CL5  STILL UNKNOWN AFTER RECONCILING (unit on): the create's ack is lost AND the receipt reads are lost, so the outcome stays undetermined and the card cache is uncertain. The create answers 201 or 503 (never a bare 500); then a request to a route that is NOT a card route
+ *        (the column list) is answered 200, not dragged down by the uncertain cache; and the card list is then either 503 or exactly the executor's truth (the card once), never a short list that lacks a card the executor holds.
  *
  * NOT COVERED, by name: move, claim, delete and comment-attach under a lost ack; a write that carries a collection family as well (the combined card/collection path: its row belongs with that build); a lost ack on the second of several updates in one request; the executor restarting between write and
  * receipt; the document copy's state after a reconciled write.
@@ -38,11 +40,12 @@ const ALNUM = () => `${process.pid}x${Date.now().toString(36)}`.replace(/[^a-z0-
 
 /** a proxy that, once ARMED with 'ack' or 'req', drops exactly the next `POST /update` */
 async function startProxy(execUrl) {
-  const p = { mode: null, dropped: 0 };
+  const p = { mode: null, dropped: 0, dropReceipts: 0, receiptsDropped: 0 };
   p.server = http.createServer(async (req, res) => {
     const chunks = []; for await (const c of req) chunks.push(c);
     const fwd = { ...req.headers }; delete fwd.host; delete fwd['content-length']; delete fwd.connection;
     const isUpdate = req.method === 'POST' && req.url.split('?')[0] === '/update';
+    if (req.method === 'GET' && req.url.startsWith('/receipt/') && p.dropReceipts > 0) { p.receiptsDropped++; try { req.socket.destroy(); } catch { /* gone */ } return; }
     if (isUpdate && p.mode === 'req') { p.mode = null; p.dropped++; try { req.socket.destroy(); } catch { /* gone */ } return; }
     try {
       const f = await fetch(`${execUrl}${req.url}`, { method: req.method, headers: fwd, ...(req.method === 'POST' ? { body: Buffer.concat(chunks) } : {}) }); const t = await f.text();
@@ -113,5 +116,17 @@ test('CL4 REQUEST NOT ARRIVED, an edit: (200, new title, version +1) or (503, ol
     const tag = ALNUM(); const c = await mk(base, `${tag} card`); armed(proxy, 'req'); const r = await edit(base, c.id, `${tag} card edited`); assertDropped(proxy, 'request not arrived');
     const after = (await titlesHeld(base, tag))[0]; const moved = after.version - c.version; assert.equal(await storeN(exec.baseUrl, `${tag} card edited`), moved, `the served card (version moved by ${moved}) and the EXECUTOR's store must agree about the new title`);
     assert.ok((r.status === 200 && after.title === `${tag} card edited` && moved === 1) || (r.status === 503 && after.title === `${tag} card` && moved === 0), `answer and store must agree: got ${r.status} (${r.text.slice(0, 100)}), title "${after.title}", version moved by ${moved}`);
+  });
+});
+
+test('CL5 STILL UNKNOWN AFTER RECONCILING: create 201 or 503, then a non-card route answers 200, and the card list is the executor\'s truth or a 503', { skip: SKIP, timeout: 300000 }, async () => {
+  await unitOn(async ({ base, proxy, exec }) => {
+    const tag = ALNUM(); armed(proxy, 'ack'); proxy.dropReceipts = 1000; const r = await api(base, 'POST', '/api/cards', { title: `${tag} card`, description: 'x', createdBy: 'ada' }); proxy.dropReceipts = 0;
+    assertDropped(proxy, 'ack lost'); assert.ok(proxy.receiptsDropped >= 1, `PRECONDITION: at least one receipt read was dropped (${proxy.receiptsDropped}); otherwise the outcome was never left undetermined and this row proves nothing`);
+    assert.ok([201, 503].includes(r.status), `an undetermined create answers 201 or 503, never a bare error (got ${r.status} ${r.text.slice(0, 140)})`);
+    const cols = await api(base, 'GET', '/api/columns'); assert.equal(cols.status, 200, `a route that is not a card route is answered while the card cache is uncertain (got ${cols.status} ${cols.text.slice(0, 140)})`);
+    const list = await api(base, 'GET', '/api/cards?limit=500'); const truth = await storeN(exec.baseUrl, `${tag} card`);
+    if (list.status === 200) { const held = (Array.isArray(list.body) ? list.body : list.body.cards).filter((c) => String(c.title).startsWith(tag)).length; assert.equal(held, truth, `the served card list (${held}) equals the executor's store (${truth}): never a short list`); } else assert.equal(list.status, 503, `a card list that is not served is a 503 (got ${list.status})`);
+    assert.equal(truth, 1, "the create COMMITTED (only its ack and the receipt reads were lost): the executor holds the card once");
   });
 });
