@@ -14,6 +14,7 @@
  * compiler refuse any quad whose subject is not the entity's own IRI.
  */
 import oxigraph from 'oxigraph';
+import { durableUpdate } from './durable-update.mjs';
 import { projectEntity } from './graph-replica.mjs';
 
 const RS = 'https://scrumboard.local/ns#';
@@ -110,11 +111,12 @@ export function createCollectionsUnit({ client, families, mintId, actorIri = (wh
   async function commit(data, { actor, opId } = {}) {
     const parts = plan(data);
     if (!parts.length) return { outcome: 'NOOP' };
+    const intention = { kind: 'entity.put', opId: opId || `urn:ex:op/collections/${mintId()}`, actor: actorIri(actor), entity: { kind: 'collection', parts } };
     let r;
-    try { r = await client.update({ kind: 'entity.put', opId: opId || `urn:ex:op/collections/${mintId()}`, actor: actorIri(actor), entity: { kind: 'collection', parts } }); }
-    catch (e) { uncertain = true; throw new CollectionsUnavailable(e.message); }
+    try { r = await durableUpdate(client, intention); } catch (e) { uncertain = true; throw new CollectionsUnavailable(e.message); }
     if (r.outcome !== 'APPLIED') {
-      uncertain = true;
+      // UNAVAILABLE: nothing was sent, so the cache is still the graph's. Anything else leaves it to be re-read.
+      if (r.outcome !== 'UNAVAILABLE') uncertain = true;
       if (r.outcome === 'PRECONDITION_FAILED' || r.outcome === 'REJECTED') throw Object.assign(new Error(`collection write refused: ${r.outcome}${r.reason ? `: ${r.reason}` : ''}`), { code: 'CARD_WRITE_CONFLICT' });
       throw new CollectionsUnavailable(`the write's outcome is ${r.outcome}${r.reason ? `: ${r.reason}` : ''}`);
     }

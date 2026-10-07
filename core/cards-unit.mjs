@@ -12,6 +12,7 @@
  * one, whatever the handler did with the card's `version` field. The `ifVersion` precondition is still checked by the
  * handlers against the card's `version`, under the write lock, exactly as today.
  */
+import { durableUpdate } from './durable-update.mjs';
 import { cardQuads, priorQuads, cardIriOf, SHORTID_COUNTER_IRI, shortIdMap } from './cards-graph.mjs';
 import { parseCardRefs } from './references.mjs';
 
@@ -119,9 +120,10 @@ export function createCardsUnit({ client, actorIri = (who) => `https://scrumboar
     const ride = pending.filter((a) => inWrite.has(cardIriOf(a.cardId))).map((a) => ({ card: cardIriOf(a.cardId), mutationId: a.mutationId, json: a.json }));
     const intent = { kind: 'card.write', opId: opId || `urn:ex:op/card/${mintId()}`, actor: actorIri(actor), parts: p.parts, ...(p.counter ? { counter: p.counter } : {}), ...(ride.length ? { pending: ride } : {}), ...(collections.length ? { collections } : {}) };
     let r;
-    try { r = await client.update(intent); } catch (e) { uncertain = true; throw new CardsUnavailable(e.message); }
+    try { r = await durableUpdate(client, intent); } catch (e) { uncertain = true; throw new CardsUnavailable(e.message); }
     if (r.outcome !== 'APPLIED') {
-      uncertain = true;
+      // UNAVAILABLE: nothing was sent, so the cache is still the graph's. Anything else leaves it to be re-read.
+      if (r.outcome !== 'UNAVAILABLE') uncertain = true;
       if (r.outcome === 'PRECONDITION_FAILED' || r.outcome === 'REJECTED') throw new CardWriteConflict(`${r.outcome}${r.reason ? `: ${r.reason}` : ''}`);
       throw new CardsUnavailable(`the write's outcome is ${r.outcome}${r.reason ? `: ${r.reason}` : ''}`);
     }
