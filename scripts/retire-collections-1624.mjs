@@ -12,22 +12,23 @@
  * migration applied (core/collection-renames-1624.mjs). An entity counts as held when the graph has it, in its own
  * collection, with
  *   · the SAME wire JSON as the file's copy; or
- *   · a NEWER version (urn:ex:ver > 1) AND a receipt for this entity's import operation. The graph took it FROM the
- *     migration and moved on, so the file's copy is stale. A newer graph entity WITHOUT that lineage is refused: a
- *     file-only edit made after the import would otherwise be discarded.
+ *   · a NEWER version (urn:ex:ver > 1) AND an APPLIED receipt for the import of EXACTLY the file's copy (the receipt's
+ *     digest equals the digest of the import intention rebuilt from the file: core/collection-import-1624.mjs). The
+ *     graph took this content from the migration and moved on, so the file's copy is stale. A failed import, a
+ *     file-only edit after the import, or no import at all is refused: the file's edit would otherwise be discarded.
  * The file's decision copies (graph-held since #1561) are removed with them, each only when the graph has it.
  * With --apply, and only if EVERY entity is held, it drops exactly those nodes from the file's @graph in ONE atomic
  * write (tmp + rename) and appends ONE board-meta event naming what left. Every other node is kept as parsed, and it
  * refuses to write if the arithmetic does not add up.
  */
 import fs from 'node:fs';
-import { createHash } from 'node:crypto';
 import { createGraphClient } from '../core/graph-client.mjs';
 import { appendEvent } from '../core/event-log.mjs';
 import { jsonLdToDomain } from '../core/jsonld.mjs';
 import { domainToBoard } from '../core/mapping.mjs';
 import { collectionFamilies } from '../core/collection-families.mjs';
 import { renameEntity } from '../core/collection-renames-1624.mjs';
+import { importDigest, importOpId } from '../core/collection-import-1624.mjs';
 
 const args = process.argv.slice(2);
 const opt = (k) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : null; };
@@ -39,7 +40,6 @@ if (!file || !executor || !dataset) {
 const eventsDir = process.env.SCRUM_EVENT_LOG_DIR || `${file.replace(/\.json$/, '')}-events`;
 const RS = 'https://scrumboard.local/ns#';
 const T = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
-const sha = (s) => createHash('sha256').update(s).digest('hex').slice(0, 32);
 const lit = (s) => JSON.stringify(String(s));
 
 const doc = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -54,7 +54,7 @@ for (const fam of families) {
   for (const e of (Array.isArray(board[fam.key]) ? board[fam.key] : [])) {
     if (!e || typeof e['@id'] !== 'string') continue;
     const r = renameEntity(e);
-    want.push({ key: fam.key, fileId: e['@id'], iri: r['@id'], json: JSON.stringify(r), opId: `urn:ex:op/collection/import/${fam.key}/${sha(r['@id'])}` });
+    want.push({ key: fam.key, fam, renamed: r, fileId: e['@id'], iri: r['@id'], json: JSON.stringify(r), opId: importOpId(fam.key, r['@id']) });
   }
 }
 for (const w of (Array.isArray(board.wakes) ? board.wakes : [])) {
@@ -91,10 +91,19 @@ for (let i = 0; i < entities.length; i += 200) {
     if (w.wake) { if (!r.t || r.j.value !== w.json) missing.push({ ...w, reason: 'content-differs' }); continue; }
     if (r.k?.value !== w.key) { missing.push({ ...w, reason: `in collection ${JSON.stringify(r.k?.value ?? null)}` }); continue; }
     if (r.j.value === w.json) continue;
+    // Moved on FROM THIS CONTENT: the graph is newer AND the import of exactly the file's copy APPLIED. The receipt's
+    // digest is the compiler's digest of the import intention, rebuilt here from the file's copy, so a file-only edit
+    // after the import, a failed (PRECONDITION_FAILED/REJECTED) import, or no import at all is refused.
     const newer = Number(r.v?.value ?? 0) > 1;
-    const lineage = newer ? await g.query(`ASK { <${w.opId}> ?p ?o }`) : null;
-    if (newer && lineage?.ok && lineage.boolean === true) continue;   // moved on from THIS import
-    missing.push({ ...w, reason: newer ? 'newer in the graph without import lineage' : 'content-differs' });
+    if (newer) {
+      const rc = await g.query(`SELECT ?o ?d WHERE { <${w.opId}> <urn:ex:outcome> ?o ; <urn:ex:digest> ?d }`);
+      if (!rc.ok) { console.error(`the graph could not be read: ${rc.reason}`); process.exit(1); }
+      const applied = rc.rows.some((x) => x.o.value === 'urn:ex:APPLIED' && x.d.value === importDigest(w.fam, w.renamed));
+      if (applied) continue;
+      missing.push({ ...w, reason: rc.rows.length ? 'newer in the graph, but its import receipt is not an APPLIED import of this content' : 'newer in the graph without an import receipt' });
+      continue;
+    }
+    missing.push({ ...w, reason: 'content-differs' });
   }
 }
 
