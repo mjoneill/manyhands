@@ -137,7 +137,20 @@ const SMALLKINDS_UNIT = process.env.SCRUM_GRAPH_UNIT_SMALLKINDS === '1';
 // #1624 — the MUTABLE K13 families: graph-held collections through #1598's transaction machinery (review 08:37Z). Each
 // family registers { key (the board collection), unique(entity) → the values the graph must guard, routes (URL prefixes
 // that read or write it) }. With none registered nothing below runs. Wakes stay on their own lock-free path.
-const COLLECTION_FAMILIES = [];
+const RS_NS = 'https://scrumboard.local/ns#';
+const COLLECTION_FAMILIES = [
+  // #1624 definitions (rows: definitions-graph-d1). A predicate's and a kind's IRI is derived from its name, so a twin
+  // registration is the same entity (a revision), never a second node. A model key is unique among models. A procedure
+  // version is unique by its procedure AND its name ("<procedure> v<n>"), which is how the number is allocated.
+  { key: 'predicates', routes: ['/api/predicates'] },
+  { key: 'kinds', routes: ['/api/kinds'] },
+  { key: 'models', routes: ['/api/models'],
+    unique: (e) => (typeof e['scrum:modelKey'] === 'string' ? [{ predicate: `${RS_NS}modelKey`, value: { type: 'literal', value: e['scrum:modelKey'] } }] : []) },
+  { key: 'procedures', routes: ['/api/procedures', '/api/procedure-versions'],
+    unique: (e) => (e['@type'] === 'scrum:ProcedureVersion' && typeof e['scrum:ofProcedure'] === 'string' && typeof e.name === 'string'
+      ? [{ all: [{ predicate: `${RS_NS}ofProcedure`, value: { type: 'uri', value: e['scrum:ofProcedure'] } }, { predicate: 'https://schema.org/name', value: { type: 'literal', value: e.name } }] }] : []) },
+  { key: 'runs', routes: ['/api/runs'] },
+];
 let COLLECTIONS = null;
 const FILE_COLLS = Symbol('fileCollections');   // the document's own copies of the graph-held collections
 
@@ -917,6 +930,17 @@ async function handleReportRefusal(req, res) {
  * Send a JSON response
  */
 function sendJSON(res, statusCode, data) {
+  // #1624 — a write whose graph commit could not reach the executor (the request context says so) is a 503, never a
+  // 500: the handler's generic catch does not know the graph's language, so it is translated here, once.
+  const graphCtx = requestContext.getStore();
+  // Two signals, either enough: the request context was marked, or the error is one of the units' own "unavailable"
+  // errors (fixed prefixes, produced only by core/cards-unit.mjs and core/collections-unit.mjs), passed through a
+  // handler's generic catch as `e.message` — a shared read can run in another request's async context.
+  const unitUnavailable = statusCode === 500 && data && typeof data.error === 'string' && /^(cards|collections) are unavailable: /.test(data.error);
+  if (statusCode === 500 && ((graphCtx && graphCtx.graphUnavailable) || unitUnavailable)) {
+    statusCode = 503;
+    data = { error: `the graph executor is not answering, so nothing was written: ${unitUnavailable ? data.error : graphCtx.graphUnavailable}`, code: 'GRAPH_UNAVAILABLE' };
+  }
   // #1217 — every refusal on a write route keeps its payload. Here, not at the
   // call sites, so a refusal added later is covered without anyone remembering.
   if (statusCode >= 400) logRefused(res.req, statusCode, data);
@@ -1321,7 +1345,13 @@ function withUnitCards(board) {
   }
   if (COLLECTIONS) {
     // #1624 — the graph-held collections are the unit's; the document's own copies ride beside them, put back on write.
-    const snap = COLLECTIONS.snapshot();
+    // An uncertain cache (the executor did not answer the last write or reload) is "not answering" to the response
+    // layer too: the request's 500 becomes a 503 (sendJSON), never a board served without them.
+    let snap;
+    try { snap = COLLECTIONS.snapshot(); } catch (e) {
+      const ctx = requestContext.getStore(); if (ctx) ctx.graphUnavailable = e.message;
+      throw e;
+    }
     board[FILE_COLLS] = Object.fromEntries(COLLECTIONS.keys.map((k) => [k, board[k]]));
     for (const k of COLLECTIONS.keys) board[k] = snap[k];
   }
@@ -7654,8 +7684,14 @@ function withWriteLock(fn) {
  */
 async function lockedWithCards(fn) {
   for (let attempt = 1; ; attempt++) {
-    if (CARDS_UNIT) await CARDS.ensureFresh();
-    if (COLLECTIONS) await COLLECTIONS.ensureFresh();
+    try {
+      if (CARDS_UNIT) await CARDS.ensureFresh();
+      if (COLLECTIONS) await COLLECTIONS.ensureFresh();
+    } catch (e) {
+      // the cache could not be reloaded from the graph: the same "executor not answering" as a failed commit
+      if (e && (e.code === 'COLLECTIONS_UNAVAILABLE' || e.code === 'CARDS_UNAVAILABLE')) { const ctx = requestContext.getStore(); if (ctx) ctx.graphUnavailable = e.message; }
+      throw e;
+    }
     const staged = [];
     const result = await cardWriteContext.run(staged, () => fn());
     try {
@@ -7678,7 +7714,12 @@ async function lockedWithCards(fn) {
           } else if (collParts.length) {
             await COLLECTIONS.commit(data, { actor, opId });
           }
-        } catch (e) { if (COLLECTIONS) COLLECTIONS.markUncertain(); throw e; }
+        } catch (e) {
+          if (COLLECTIONS) COLLECTIONS.markUncertain();
+          // the outcome is unknown or the executor is away: say so to the response layer (see sendJSON)
+          if (e && (e.code === 'COLLECTIONS_UNAVAILABLE' || e.code === 'CARDS_UNAVAILABLE')) { const ctx = requestContext.getStore(); if (ctx) ctx.graphUnavailable = e.message; }
+          throw e;
+        }
         writeDocument(data, events);
       }
       return result;
@@ -12887,7 +12928,7 @@ function routeApi(method, urlPath, req, res) {
           (e) => sendJSON(res, 500, { error: e.message }));
         return true;
       }
-      if (COLLECTIONS && collectionDependent(urlPath)) {
+      if (COLLECTIONS && method === 'GET' && collectionDependent(urlPath)) {
         collectionsReady().then((ok) => (ok ? go() : sendJSON(res, 503, { error: 'the graph executor is not answering, so this collection is unavailable', code: 'GRAPH_UNAVAILABLE' })),
           (e) => sendJSON(res, 500, { error: e.message }));
         return true;

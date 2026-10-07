@@ -1147,6 +1147,14 @@ const unref = (t) => (t.startsWith('<') ? t.slice(1, -1) : null);
  * rehearsal). Typed literals (integer, boolean, dateTime) have lexical forms that cannot carry one.
  */
 function cardTerm(term, what) {
+  // Projections also carry decimals and doubles (a model's cost); canonTerm's slice domain does not, so they are checked
+  // here: a strict lexical form, never a value that could carry anything but a number.
+  if (term && term.type === 'literal' && (term.datatype === `${XSD}decimal` || term.datatype === `${XSD}double`)) {
+    const lex = typeof term.value === 'string' ? term.value.trim() : '';
+    const okLex = term.datatype === `${XSD}decimal` ? /^[+-]?(\d+(\.\d*)?|\.\d+)$/.test(lex) : /^([+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?|INF|-INF|NaN)$/.test(lex);
+    if (!okLex) fail(`${what}: not an ${term.datatype.slice(XSD.length)}: ${JSON.stringify(term.value)}`);
+    return `"${lex}"^^<${term.datatype}>`;
+  }
   const t = canonTerm(term, what);
   if (term.type !== 'literal' || (term.datatype != null && term.datatype !== `${XSD}string`)) return t;
   return term.lang != null ? `${recLit(term.value)}@${term.lang.toLowerCase()}` : recLit(term.value);
@@ -1358,9 +1366,17 @@ function canonCollectionWrite(e) {
     const expectedVersion = x.expectedVersion == null ? null : intLit(x.expectedVersion, `${w}.expectedVersion`);
     const version = intLit(x.version, `${w}.version`);
     if (expectedVersion != null && BigInt(version) <= BigInt(expectedVersion)) fail(`${w}.version must be above expectedVersion`);
+    // A unique entry is one {predicate, value} or a conjunction {all: [{predicate, value}, …]} (a procedure version is
+    // unique by its procedure AND its number, not by either alone).
+    const pair = (u, w2) => { obj(u, ['predicate', 'value'], w2); return { predicate: ref(checkIri(u.predicate, `${w2}.predicate`)), value: cardTerm(u.value, `${w2}.value`) }; };
     const unique = (x.unique ?? []).map((u, n) => {
-      obj(u, ['predicate', 'value'], `${w}.unique[${n}]`);
-      return { predicate: ref(checkIri(u.predicate, `${w}.unique[${n}].predicate`)), value: cardTerm(u.value, `${w}.unique[${n}].value`) };
+      const w2 = `${w}.unique[${n}]`;
+      if (u && Array.isArray(u.all)) {
+        obj(u, ['all'], w2);
+        if (!u.all.length) fail(`${w2}.all is a non-empty array`);
+        return { all: u.all.map((a, j) => pair(a, `${w2}.all[${j}]`)) };
+      }
+      return { all: [pair(u, w2)] };
     });
     return { collection: x.collection, iri, expectedVersion, version, quads: own(x.quads, 'quads'),
       prior: expectedVersion == null ? (x.prior == null || (Array.isArray(x.prior) && !x.prior.length) ? [] : fail(`${w}.prior: a create has no prior state`)) : own(x.prior ?? [], 'prior'),
@@ -1385,7 +1401,7 @@ function collectionClauses(parts, { OP, v, pre, branches, dIns, tag }) {
       branches.push(`    { ${I} ?xp ?xo BIND(${I} AS ?xs) }`);
       if (P.prior.length) branches.push(`    { VALUES (?xs ?xp ?xo) {\n${P.prior.map((q) => `      (${q.join(' ')})`).join('\n')}\n    } }`);
     }
-    for (const U of P.unique || []) pre.push(`    FILTER NOT EXISTS { ?xu ${INC} ${KEY} ; ${U.predicate} ${U.value} . FILTER(?xu != ${I}) }`);
+    for (const U of P.unique || []) pre.push(`    FILTER NOT EXISTS { ?xu ${INC} ${KEY} ; ${U.all.map((a) => `${a.predicate} ${a.value}`).join(' ; ')} . FILTER(?xu != ${I}) }`);
     if (P.remove) return;
     for (const [s, p, o] of P.quads) dIns.push(`  ${v(s)} ${v(p)} ${v(o)} .`);
     dIns.push(`  ${v(I)} ${INC} ${v(KEY)} .`, `  ${v(I)} ${VER} ${v(P.version)} .`, `  ${v(I)} ${REC} ${v(OP)} .`, `  ${v(I)} ${JSONP} ${v(recLit(P.json))} .`);
