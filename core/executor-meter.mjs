@@ -15,12 +15,12 @@
  *
  * It changes no behaviour: it observes calls that happen anyway, and a meter failure is swallowed.
  */
-import { createHash } from 'node:crypto';
+import crypto, { createHash } from 'node:crypto';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 
 const ms = (ns) => Math.round(ns / 1e6);
 
-export function createExecutorMeter({ routeOf = () => 'background', extras = () => '', slowMs = 1000, log = (line) => console.error(line), now = () => new Date(), loopResolutionMs = 20 } = {}) {
+export function createExecutorMeter({ routeOf = () => 'background', ridOf = () => null, extras = () => '', slowMs = 1000, log = (line) => console.error(line), now = () => new Date(), loopResolutionMs = 20 } = {}) {
   let buckets = new Map();
   // #1570 — the running totals the daily "still running" post reports (owner decision, 2026-10-07: so nobody forgets it is out there).
   let day = { since: now(), calls: 0, slow: 0, unavailable: 0, loopMaxMs: 0 };
@@ -38,7 +38,7 @@ export function createExecutorMeter({ routeOf = () => 'background', extras = () 
       if (elapsedMs >= slowMs) {
         day.slow += 1;
         const sha = typeof body === 'string' ? createHash('sha256').update(body).digest('hex').slice(0, 16) : '-';
-        log(`${now().toISOString()} executor-meter slow: ${Math.round(elapsedMs)}ms label=${label} kind=${kind} outcome=${outcome} route=${route} body=${sha}`);
+        log(`${now().toISOString()} executor-meter slow: ${Math.round(elapsedMs)}ms label=${label} kind=${kind} outcome=${outcome} route=${route} rid=${ridOf() || '-'} body=${sha}`);
       }
     } catch { /* a meter never breaks the call it observes */ }
   }
@@ -53,7 +53,7 @@ export function createExecutorMeter({ routeOf = () => 'background', extras = () 
     try {
       day.unavailable += 1;
       const l = loopNow();
-      log(`${now().toISOString()} executor-meter 503: code=${code} route=${routeOf() || 'background'} loopMaxThisMinuteMs=${l ? l.max : 'n/a'}`);
+      log(`${now().toISOString()} executor-meter 503: code=${code} route=${routeOf() || 'background'} rid=${ridOf() || '-'} loopMaxThisMinuteMs=${l ? l.max : 'n/a'}`);
     } catch { /* never breaks the response */ }
   }
 
@@ -73,18 +73,50 @@ export function createExecutorMeter({ routeOf = () => 'background', extras = () 
     return line;
   }
 
-  /** The daily keep-alive's text: what ran since the last one, and how to turn it off. Resets the day. */
-  function dailySummary({ pid = process.pid, off = 'set SCRUM_EXECUTOR_METER=0 in the REST launchd plist and restart REST' } = {}) {
+  /**
+   * The daily keep-alive: a SNAPSHOT of what ran since the last confirmed post, and how to turn it off. Nothing is reset
+   * here: the counters keep running, and only ackDaily(snap) — called once the post is CONFIRMED delivered — subtracts
+   * exactly what that post reported. A refused or failed post leaves the day intact for the retry (review 2026-10-07).
+   */
+  function prepareDaily({ pid = process.pid, off = 'set SCRUM_EXECUTOR_METER=0 in the REST launchd plist and restart REST' } = {}) {
     const l = loopNow();
     if (l && l.max > day.loopMaxMs) day.loopMaxMs = l.max;
-    const text = `📈 #1570 executor meter is still running in REST (pid ${pid}). Since ${day.since.toISOString()}: ${day.calls} executor calls, ${day.slow} slow (>= ${slowMs} ms), ${day.unavailable} graph-unavailable 503s, worst event-loop delay ${day.loopMaxMs} ms. Per-minute detail: "executor-meter" lines in the REST log. To turn it off: ${off}.`;
-    day = { since: now(), calls: 0, slow: 0, unavailable: 0, loopMaxMs: 0 };
-    return text;
+    const snap = { ...day, until: now() };
+    const text = `📈 #1570 executor meter is still running in REST (pid ${pid}). From ${snap.since.toISOString()} to ${snap.until.toISOString()}: ${snap.calls} executor calls, ${snap.slow} slow (>= ${slowMs} ms), ${snap.unavailable} graph-unavailable 503s, worst event-loop delay ${snap.loopMaxMs} ms. Per-minute detail: "executor-meter" lines in the REST log. To turn it off: ${off}.`;
+    return { text, snap };
+  }
+  function ackDaily(snap) {
+    day = { since: snap.until, calls: Math.max(0, day.calls - snap.calls), slow: Math.max(0, day.slow - snap.slow), unavailable: Math.max(0, day.unavailable - snap.unavailable), loopMaxMs: 0 };
   }
 
   function stop() { try { loop?.disable(); } catch { /* already off */ } }
 
-  return { record, unavailable, flush, dailySummary, stop, loopNow };
+  return { record, unavailable, flush, prepareDaily, ackDaily, stop, loopNow };
+}
+
+/**
+ * #1570 — the keep-alive's delivery loop, kept apart from the server so it can be tested with a failing `post`.
+ * `post(text, requestId)` resolves to true only when the board CONFIRMED the post. The meter's counters are reduced by
+ * what a post reported only after that confirmation; a refusal or failure keeps the SAME text and requestId and retries
+ * after `retryMs` (REST's post-create replays a known requestId, so a retry can never post twice).
+ */
+export function createKeepAlive({ meter, post, retryMs = 300_000, log = (line) => console.error(line), now = () => new Date(), setTimer = (fn, ms) => setTimeout(fn, ms).unref?.(), newId = () => crypto.randomUUID() }) {
+  let pending = null;
+  let inFlight = false;
+  async function fire() {
+    if (inFlight) return;
+    if (!pending) pending = { ...meter.prepareDaily(), requestId: newId() };
+    const p = pending;
+    inFlight = true;
+    let ok = false;
+    try { ok = (await post(p.text, p.requestId)) === true; } catch (e) { log(`${now().toISOString()} #1570 meter keep-alive post failed: ${e.message}`); }
+    inFlight = false;
+    if (ok) { meter.ackDaily(p.snap); pending = null; return true; }
+    log(`${now().toISOString()} #1570 meter keep-alive not confirmed; retrying in ${retryMs} ms with the same requestId`);
+    setTimer(fire, retryMs);
+    return false;
+  }
+  return { fire, pending: () => pending };
 }
 
 /**

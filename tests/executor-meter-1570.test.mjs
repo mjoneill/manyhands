@@ -17,7 +17,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { createExecutorMeter } from '../core/executor-meter.mjs';
+import { createExecutorMeter, createKeepAlive } from '../core/executor-meter.mjs';
 import { createGraphClient, setExecutorMeter } from '../core/graph-client.mjs';
 import { createReadGate } from '../core/read-admission.mjs';
 import { makeBoardFixture, startRestServer } from './helpers/harness.mjs';
@@ -38,7 +38,7 @@ test('EM1 the meter: counts by label/kind/outcome/route, loop delay, slow calls 
   m.record({ label: 'posts', kind: 'query', outcome: 'timeout', elapsedMs: 250, body: SECRET });
   const slow = lines.filter((l) => /executor-meter slow:/.test(l));
   assert.equal(slow.length, 1, 'only the call over slowMs gets its own line');
-  assert.match(slow[0], /250ms label=posts kind=query outcome=timeout route=background body=[0-9a-f]{16}$/);
+  assert.match(slow[0], /250ms label=posts kind=query outcome=timeout route=background rid=- body=[0-9a-f]{16}$/);
   const minute = m.flush();
   assert.match(minute, /executor-meter minute: calls=3 /);
   assert.match(minute, /cards\/query\/200@GET \^\\\/api\\\/cards\$ n=2 total=12ms max=7ms/);
@@ -129,11 +129,13 @@ test('EM6 the daily keep-alive: the summary counts the day and says how to turn 
   m.record({ label: 'cards', kind: 'query', outcome: '200', elapsedMs: 5 });
   m.record({ label: 'posts', kind: 'query', outcome: 'timeout', elapsedMs: 250 });
   m.unavailable('GRAPH_UNAVAILABLE');
-  const text = m.dailySummary({ pid: 4242 });
+  const { text, snap } = m.prepareDaily({ pid: 4242 });
   assert.match(text, /executor meter is still running in REST \(pid 4242\)/);
   assert.match(text, /2 executor calls, 1 slow \(>= 100 ms\), 1 graph-unavailable 503s/);
   assert.match(text, /To turn it off: set SCRUM_EXECUTOR_METER=0/);
-  assert.match(m.dailySummary(), / 0 executor calls, 0 slow/, 'the day resets');
+  m.record({ label: 'cards', kind: 'query', outcome: '200', elapsedMs: 5 });   // arrives between prepare and ack
+  m.ackDaily(snap);
+  assert.match(m.prepareDaily().text, / 1 executor calls, 0 slow/, 'the ack subtracts exactly what was reported; a later call survives');
   m.stop();
   const exec = await startExecutor({ store: tmpStore('em6-'), datasetId: 'em6-test', create: true });
   const env = { SCRUM_ROSTER_FILE: ROSTER_FILE, SCRUM_GRAPH_DATASET_ID: 'em6-test', SCRUM_GRAPH_EXECUTOR_URL: exec.baseUrl, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', SCRUM_EXECUTOR_METER_FIRST_POST_MS: '500', SCRUM_EXECUTOR_METER_DAILY_MS: '600000' };
@@ -148,4 +150,43 @@ test('EM6 the daily keep-alive: the summary counts the day and says how to turn 
     assert.ok(post, `the keep-alive reached the board (${rest.stderr().split('\n').filter((l) => /keep-alive/.test(l)).join(' | ')})`);
     assert.equal(post.author, 'board');
   } finally { await rest.stop(); await killExecutor(exec); }
+});
+
+test('EM7 a keep-alive that fails is retried with the SAME text and requestId, and the day is reset only after confirmed delivery', async () => {
+  const m = createExecutorMeter({ slowMs: 100, log: () => {} });
+  m.record({ label: 'cards', kind: 'query', outcome: '200', elapsedMs: 5 });
+  const sent = [];
+  let answer = [false, 'throw', true];
+  const timers = [];
+  const ka = createKeepAlive({
+    meter: m, retryMs: 1, log: () => {}, newId: () => 'req-00000001', setTimer: (fn) => timers.push(fn),
+    post: async (text, requestId) => { sent.push({ text, requestId }); const a = answer.shift(); if (a === 'throw') throw new Error('connection reset'); return a; },
+  });
+  assert.equal(await ka.fire(), false, 'a refusal is not delivery');
+  assert.ok(ka.pending(), 'the summary is kept');
+  m.record({ label: 'posts', kind: 'query', outcome: '200', elapsedMs: 5 });   // keeps counting meanwhile
+  assert.equal(await timers.shift()(), false, 'a thrown post is not delivery either');
+  assert.equal(await timers.shift()(), true, 'the third attempt is confirmed');
+  assert.equal(sent.length, 3);
+  assert.ok(sent.every((x) => x.requestId === 'req-00000001' && x.text === sent[0].text), 'every retry is the same post');
+  assert.match(sent[0].text, / 1 executor calls,/);
+  assert.equal(ka.pending(), null);
+  assert.match(m.prepareDaily().text, / 1 executor calls,/, 'only the reported call was subtracted; the one made during the retries remains');
+  m.stop();
+});
+
+test('EM8 a slow call and the 503 it caused carry the SAME server-generated request id', { skip: SKIP, timeout: 300000 }, async () => {
+  const exec = await startExecutor({ store: tmpStore('em8-'), datasetId: 'em8-test', create: true });
+  const env = { SCRUM_ROSTER_FILE: ROSTER_FILE, SCRUM_GRAPH_DATASET_ID: 'em8-test', SCRUM_GRAPH_EXECUTOR_URL: exec.baseUrl, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', SCRUM_EXECUTOR_METER_SLOW_MS: '0' };
+  const rest = await startRestServer({ board: makeBoardFixture(), env });
+  try {
+    await killExecutor(exec);
+    const r = await fetch(`${rest.baseUrl}/api/conversations/00000000-0000-0000-0000-000000000002`, { signal: AbortSignal.timeout(30000) });
+    assert.equal(r.status, 503, 'CONTROL: the read fails');
+    assert.ok(await rest.waitForStderr(/executor-meter 503: .* rid=[0-9a-f-]{36} /, 5000), 'the 503 line names its request');
+    const rid = /executor-meter 503: .* rid=([0-9a-f-]{36}) /.exec(rest.stderr())[1];
+    const slow = rest.stderr().split('\n').filter((l) => /executor-meter slow: /.test(l) && l.includes(`rid=${rid}`));
+    assert.ok(slow.length >= 1, `the executor call made for that request carries the same rid (${rid})`);
+    assert.ok(!/executor-meter minute: .*[0-9a-f]{8}-[0-9a-f]{4}-/.test(rest.stderr()), 'request ids never enter the aggregate buckets');
+  } finally { await rest.stop(); }
 });

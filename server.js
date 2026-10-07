@@ -73,7 +73,7 @@ import { boardToDomain, domainToBoard, cardToNode } from './core/mapping.mjs';
 import { OUTBOX_FIELD, outboxOf, withAnnouncement, listOutbox, modeProblem, legacyProof, postMatchesEntry, opIdFor, announcePostId, postCreateIntention, obligationIdOf } from './core/announce-outbox.mjs';   // #1574 C3a/C3b/C3c
 import * as U3 from './core/unit3-graph.mjs';   // #1582 — deliveries and model calls in the graph
 import { createGraphClient, setExecutorMeter } from './core/graph-client.mjs';   // #1574 C3b — the conversations unit's executor door
-import { createExecutorMeter, captureCpuProfile } from './core/executor-meter.mjs';   // #1570 — what REST asks the executor, and REST's own loop delay
+import { createExecutorMeter, createKeepAlive, captureCpuProfile } from './core/executor-meter.mjs';   // #1570 — what REST asks the executor, and REST's own loop delay
 import { postFeed, DiscoveryError } from './core/post-discovery.mjs';   // #1574 R3
 import { createReadGate } from './core/read-admission.mjs';   // #1574 A1–A5
 import { RESERVATIONS_FIELD, postWriteId, findReservation, reservationKey, pruneReservations, validRequestId, validAttachmentSize, postWriteIntention } from './core/post-write.mjs';   // #1574 R2
@@ -12565,7 +12565,7 @@ if (logbornUnitConfig(process.env, { sliceEnabled: GRAPH_SLICE.enabled }).enable
 // On by default wherever there is an executor; SCRUM_EXECUTOR_METER=0 turns it off. SIGUSR2 takes ONE bounded CPU profile
 // of this process in-process (no debugger port) into SCRUM_CPU_PROFILE_DIR (default: the OS temp dir).
 if (process.env.SCRUM_GRAPH_EXECUTOR_URL && process.env.SCRUM_EXECUTOR_METER !== '0') {
-  EXECUTOR_METER = createExecutorMeter({ routeOf: () => meterRoute.getStore() || 'background', extras: () => `hostLoad1m=${os.loadavg()[0].toFixed(2)}/${os.cpus().length}cpu${READ_GATE ? ` readGate=${JSON.stringify(READ_GATE.stats())}` : ''}`, slowMs: Number(process.env.SCRUM_EXECUTOR_METER_SLOW_MS ?? 1000) });
+  EXECUTOR_METER = createExecutorMeter({ routeOf: () => meterRoute.getStore()?.route || 'background', ridOf: () => meterRoute.getStore()?.rid || null, extras: () => `hostLoad1m=${os.loadavg()[0].toFixed(2)}/${os.cpus().length}cpu${READ_GATE ? ` readGate=${JSON.stringify(READ_GATE.stats())}` : ''}`, slowMs: Number(process.env.SCRUM_EXECUTOR_METER_SLOW_MS ?? 1000) });
   setExecutorMeter(EXECUTOR_METER);
   setInterval(() => EXECUTOR_METER.flush(), Number(process.env.SCRUM_EXECUTOR_METER_MS ?? 60_000)).unref();
   process.on('SIGUSR2', () => {
@@ -12578,12 +12578,19 @@ if (process.env.SCRUM_GRAPH_EXECUTOR_URL && process.env.SCRUM_EXECUTOR_METER !==
   console.error(`${new Date().toISOString()} #1570 executor meter ON: one "executor-meter minute:" line a minute; slow calls and graph 503s are logged as they happen`);
   // Owner decision, 2026-10-07: at least once a day it says on the board that it is still running, so nobody forgets it is out
   // there or forgets to turn it off. Posted through REST's own public route, as the board, like the fanout watch.
-  const postKeepAlive = () => {
-    const body = EXECUTOR_METER.dailySummary();
-    fetch(`http://127.0.0.1:${PORT}/api/conversations`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ body, author: 'board' }), signal: AbortSignal.timeout(30_000) })
-      .then((r) => { if (r.status >= 300) console.error(`${new Date().toISOString()} #1570 meter keep-alive post refused: http ${r.status}`); })
-      .catch((e) => console.error(`${new Date().toISOString()} #1570 meter keep-alive post failed: ${e.message}`));
-  };
+  // A post counts as delivered only when REST CONFIRMS it (core/executor-meter.mjs createKeepAlive); a refused or failed
+  // post is retried with the SAME requestId, which REST's post-create replays idempotently (no double post).
+  const keepAlive = createKeepAlive({
+    meter: EXECUTOR_METER,
+    retryMs: Number(process.env.SCRUM_EXECUTOR_METER_RETRY_MS ?? 300_000),
+    post: async (text, requestId) => {
+      const r = await fetch(`http://127.0.0.1:${PORT}/api/conversations`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ body: text, author: 'board', requestId }), signal: AbortSignal.timeout(30_000) });
+      if (r.status >= 200 && r.status < 300) return true;
+      console.error(`${new Date().toISOString()} #1570 meter keep-alive post refused: http ${r.status}`);
+      return false;
+    },
+  });
+  const postKeepAlive = () => { if (!keepAlive.pending()) keepAlive.fire(); };
   const dailyMs = Number(process.env.SCRUM_EXECUTOR_METER_DAILY_MS ?? 86_400_000);
   setTimeout(() => { postKeepAlive(); setInterval(postKeepAlive, dailyMs).unref(); }, Number(process.env.SCRUM_EXECUTOR_METER_FIRST_POST_MS ?? 600_000)).unref();
 }
@@ -12705,7 +12712,7 @@ function routeApi(method, urlPath, req, res) {
     if (r.method !== method) continue;
     const m = urlPath.match(r.re);
     // #1570 — every executor call made for this request, readiness checks included, is metered under its route pattern.
-    if (m) return meterRoute.run(`${method} ${r.re.source}`, () => {
+    if (m) return meterRoute.run({ route: `${method} ${r.re.source}`, rid: crypto.randomUUID() }, () => {
       // #715 — the method decides the read kind for everything this handler
       // does, including after its awaits.
       // ⛔ GET alone. A POST that looks read-only is not: search with a reader
