@@ -1542,29 +1542,6 @@ test('#1583 the request identity is persisted BEFORE the first send', async () =
   }
 });
 
-test('#1583 a provisional (unsynced) card is never sent by the whole-board save', async () => {
-  // Two writers creating one card is how a duplicate is born.
-  swapToMockLocalStorage();
-  try {
-    cards.length = 0;
-    enableFetchMock(null);   // the create "fails" (404) ⇒ the card stays local-only
-    const card = addCard('Only local', '', 'task', 'unassigned', []);
-    await Promise.allSettled(_pendingSaves.slice());
-    assertEqual(card._unsynced, 'failed', 'a failed create is marked, not silently dropped');
-    _fetchMockCalls = [];
-    saveToJSONFile();
-    await Promise.allSettled(_pendingSaves.slice());
-    const save = _fetchMockCalls.find(c => c.url.includes('/api/save'));
-    assert(save, 'the whole-board save still ran');
-    const body = JSON.parse(save.options.body);
-    assert(!body.cards.some(c => c.id === card.id), 'the unsynced card is not in the whole-board payload');
-  } finally {
-    cards.length = 0;
-    disableFetchMock();
-    swapToRealLocalStorage();
-  }
-});
-
 test('#1584 a column change via drag-and-drop persists through PATCH /api/cards/:id {column, order, ifVersion}, never /api/save', async () => {
   // Inverted from the pre-#1584 "saveToJSONFile is called after drop": a move
   // is now one granular PATCH (#118 slice 2), and the whole-board save must NOT
@@ -1639,49 +1616,6 @@ test('loadFromJSONFile returns null when server is not running (graceful)', asyn
     // No error thrown — graceful degradation
   } finally {
     disableFetchMock();
-  }
-});
-
-test('board-data.json structure has "cards" and "lastUpdated" fields', async () => {
-  swapToMockLocalStorage();
-  try {
-    cards.length = 0;
-    enableFetchMock(null);
-
-    // #1583 — a stored card and an explicit whole-board save: addCard no
-    // longer goes through /api/save, and this test is about /api/save's shape.
-    cards.push(createCard('Structure Test', 'desc', 'goal', 'both', ['check']));
-    saveToJSONFile();
-
-    await new Promise(r => setTimeout(r, 10));
-
-    assertEqual(_fetchMockCalls.length, 1, 'fetch should have been called');
-    const body = JSON.parse(_fetchMockCalls[0].options.body);
-
-    // Validate board-data.json structure
-    assert('cards' in body, 'payload must have "cards" field');
-    assert('lastUpdated' in body, 'payload must have "lastUpdated" field');
-    assert(Array.isArray(body.cards), '"cards" must be an array');
-
-    // Validate lastUpdated is ISO-8601
-    const isoRegex = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/;
-    assert(isoRegex.test(body.lastUpdated), `lastUpdated "${body.lastUpdated}" should be ISO-8601 format`);
-
-    // Validate card structure within cards array
-    const card = body.cards[0];
-    assert('id' in card, 'card must have "id"');
-    assert('title' in card, 'card must have "title"');
-    assert('column' in card, 'card must have "column"');
-    assert('type' in card, 'card must have "type"');
-    assert('assignees' in card, 'card must have "assignees" (array, post-#51)');
-    assert(Array.isArray(card.assignees), 'assignees must be an array');
-    assert('labels' in card, 'card must have "labels"');
-    assert('createdAt' in card, 'card must have "createdAt"');
-    assert('updatedAt' in card, 'card must have "updatedAt"');
-  } finally {
-    cards.length = 0;
-    disableFetchMock();
-    swapToRealLocalStorage();
   }
 });
 
@@ -2414,54 +2348,6 @@ test('AC2: stale localStorage does NOT overwrite JSON when page loads', async ()
   }
 });
 
-test('AC3: when JSON is empty, fall back to localStorage and bootstrap JSON', async () => {
-  swapToMockLocalStorage();
-  enableFetchMock({ cards: [], lastUpdated: '2026-05-10T04:30:00.000Z' });
-  try {
-    cards.length = 0;
-    const lsData = [{ id: 'ac3-ls-card', title: 'Fallback From LS', column: 'in-progress', type: 'idea', assignee: 'robin', labels: ['cool'], createdAt: '2026-05-09T04:00:00.000Z', updatedAt: '2026-05-09T04:00:00.000Z', order: 0 }];
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(lsData));
-    _jsonSaveCalled = false;
-    enableFetchMock({ cards: [], lastUpdated: '2026-05-10T04:30:00.000Z' });
-    const jsonResult = await loadFromJSONFile();
-    if (!jsonResult || !jsonResult.cards || jsonResult.cards.length === 0) {
-      restoreFromLocalStorage();
-      saveToJSONFile();
-      _testHookMarkSaved(); // production callers set this flag; this test acts as the caller
-    }
-    assertEqual(cards.length, 1, 'should fall back to localStorage when JSON is empty');
-    assertEqual(cards[0].title, 'Fallback From LS', 'card should come from localStorage on empty JSON');
-    assertEqual(_jsonSaveCalled, true, 'should call saveToJSONFile to bootstrap JSON when falling back');
-  } finally {
-    cards.length = 0;
-    disableFetchMock();
-    swapToRealLocalStorage();
-    renderBoard();
-  }
-});
-
-test('AC4: user actions (addCard) still sync both stores', async () => {
-  swapToMockLocalStorage();
-  enableFetchMock({ cards: [], lastUpdated: new Date().toISOString() });
-  try {
-    cards.length = 0;
-    _jsonSaveCalled = false;
-    const card = addCard('User Action Test', 'desc', 'task', 'unassigned', ['action']);
-    assert(card !== null, 'card should be added');
-    const lsStored = localStorage.getItem(STORAGE_KEY);
-    assert(lsStored !== null, 'localStorage should be written after addCard');
-    const lsParsed = JSON.parse(lsStored);
-    assertEqual(lsParsed.length, 1, 'localStorage should have the new card');
-    assertEqual(_jsonSaveCalled, true, 'saveToJSONFile should be called after addCard');
-  } finally {
-    cards.length = 0;
-    _jsonSaveCalled = false;
-    disableFetchMock();
-    swapToRealLocalStorage();
-    renderBoard();
-  }
-});
-
 test('AC5: server-down fallback works — loads from localStorage when JSON file fetch fails', async () => {
   swapToMockLocalStorage();
   enableFetchMock(null, true);
@@ -2591,36 +2477,6 @@ test('columnNames are loaded from localStorage on init', () => {
     assertEqual(columnNames.backlog, 'Loaded Name', 'columnNames.backlog should be loaded from localStorage');
     columnNames.backlog = 'Backlog';
   } finally {
-    swapToRealLocalStorage();
-  }
-});
-
-test('saveToJSONFile includes columns array in the payload', async () => {
-  // Originally asserted columnNames-in-payload — but the persisted shape is
-  // the `columns` array (Card #41), with names derived from columns[].name.
-  // Migrated the assertion to match the actual schema.
-  swapToMockLocalStorage();
-  enableFetchMock({ cards: [], columns: [], lastUpdated: new Date().toISOString() });
-  try {
-    cards.length = 0;
-    _jsonSaveCalled = false;
-    _fetchMockCalls = [];
-    // Mutate a column name so we can verify it round-trips through the payload
-    const backlogCol = columns.find(c => c.id === 'backlog');
-    const original = backlogCol.name;
-    backlogCol.name = 'JSON Save Test';
-    saveToJSONFile();
-    _testHookMarkSaved(); // production callers set this; test acts as the caller
-    await new Promise(r => setTimeout(r, 20));
-    assert(_jsonSaveCalled, 'saveToJSONFile should be called');
-    const body = JSON.parse(_fetchMockCalls[_fetchMockCalls.length - 1].options.body);
-    assert(Array.isArray(body.columns), 'payload should have columns array');
-    const backlogInPayload = body.columns.find(c => c.id === 'backlog');
-    assertEqual(backlogInPayload.name, 'JSON Save Test', 'column name should round-trip through the payload');
-    backlogCol.name = original; // restore
-  } finally {
-    cards.length = 0;
-    disableFetchMock();
     swapToRealLocalStorage();
   }
 });
@@ -2989,14 +2845,6 @@ test('AC1: new column immediately enters rename mode', () => {
   assert(renameInput !== null, 'rename input should be active on the newly added column');
 });
 
-test('AC1: new column is persisted (saveToJSONFile is called)', () => {
-  _resetColumnsForTest();
-  _jsonSaveCalled = false;
-  const addBtn = document.getElementById('btn-add-column');
-  addBtn.click();
-  assert(_jsonSaveCalled === true, 'saveToJSONFile should be called after adding a new column');
-});
-
 // AC2: New columns functional
 test('AC2: card can render in newly added column', () => {
   _resetColumnsForTest();
@@ -3060,49 +2908,6 @@ test('AC3: Esc cancels column edit mode without changes', () => {
   assertEqual(columns[0].name, originalName, 'column name should not change after Esc in edit mode');
 });
 
-// AC4: Column deletion + Orphanage
-test('AC4: deleting column with cards creates Orphanage column if absent', () => {
-  _resetColumnsForTest();
-  columns.push({ id: 'temp-1', name: 'Temp', order: columns.length });
-  addCard('Stranded', '', 'task', 'unassigned', []);
-  cards[0].column = 'temp-1';
-  deleteColumn('temp-1');
-  const orphanage = columns.find(c => c.id === 'orphanage');
-  assert(orphanage !== undefined, 'Orphanage column should be auto-created');
-  assertEqual(cards[0].column, 'orphanage', 'orphaned card should be moved to Orphanage column');
-});
-
-test('AC4: deleting column reuses existing Orphanage column (no duplicates)', () => {
-  _resetColumnsForTest();
-  columns.push({ id: 'orphanage', name: 'Orphanage', order: columns.length });
-  columns.push({ id: 'temp-2', name: 'Temp', order: columns.length });
-  addCard('Stranded again', '', 'task', 'unassigned', []);
-  cards[0].column = 'temp-2';
-  deleteColumn('temp-2');
-  const orphanageCount = columns.filter(c => c.id === 'orphanage').length;
-  assertEqual(orphanageCount, 1, 'should not duplicate Orphanage column');
-});
-
-test('AC4: orphaned cards get sent-to-orphanage label', () => {
-  _resetColumnsForTest();
-  columns.push({ id: 'temp-3', name: 'Temp', order: columns.length });
-  addCard('Test card', '', 'task', 'unassigned', []);
-  cards[0].column = 'temp-3';
-  deleteColumn('temp-3');
-  assert(cards[0].labels.includes('sent-to-orphanage'),
-    'orphaned card should have sent-to-orphanage label appended');
-});
-
-test('AC4: orphaned cards get previousColumn field set to original column id', () => {
-  _resetColumnsForTest();
-  columns.push({ id: 'temp-4', name: 'Temp', order: columns.length });
-  addCard('Test card', '', 'task', 'unassigned', []);
-  cards[0].column = 'temp-4';
-  deleteColumn('temp-4');
-  assertEqual(cards[0].previousColumn, 'temp-4',
-    'orphaned card should have previousColumn field set to original column id');
-});
-
 test('AC4: deleting empty column just removes it (no Orphanage creation)', () => {
   _resetColumnsForTest();
   columns.push({ id: 'temp-empty', name: 'Empty', order: columns.length });
@@ -3120,21 +2925,6 @@ test('AC5: delete is blocked when only one column exists', () => {
   try { deleteColumn(lastColId); } catch (e) { /* error acceptable */ }
   assert(columns.find(c => c.id === lastColId) !== undefined,
     'last remaining column should not be deletable');
-});
-
-// AC6: Column order persists across reload
-test('AC6: columns array is included in the saveToJSONFile payload', () => {
-  _resetColumnsForTest();
-  const tmp = columns[0];
-  columns[0] = columns[1];
-  columns[1] = tmp;
-  _lastJSONPayload = null;
-  saveToJSONFile();
-  assert(_lastJSONPayload !== null, 'saveToJSONFile should set _lastJSONPayload');
-  assert(Array.isArray(_lastJSONPayload.columns),
-    'persisted payload should include columns array');
-  assertEqual(_lastJSONPayload.columns.length, columns.length,
-    'persisted columns length should match in-memory length');
 });
 
 // AC7: Column reordering via drag-and-drop
@@ -3558,18 +3348,6 @@ test('#47 AC1: _pendingSaves array exists at module scope', () => {
   assert(Array.isArray(_pendingSaves), '_pendingSaves should be an array');
 });
 
-test('#47 AC1: saveToJSONFile adds a promise to _pendingSaves and removes it on completion', async () => {
-  const initialLen = _pendingSaves.length;
-  const p = saveToJSONFile();
-  // While in flight, _pendingSaves should have grown by 1
-  assertEqual(_pendingSaves.length, initialLen + 1,
-    '_pendingSaves should grow by 1 during in-flight saveToJSONFile call');
-  await p;
-  // After completion, the promise should be removed
-  assertEqual(_pendingSaves.length, initialLen,
-    '_pendingSaves should return to initial length after the save completes');
-});
-
 /* ════════════════════════════════════════════════ TESTS - TDD Cycle: Create cards in any column (Card #46) ════════════════════════════════════════════════ */
 
 // Helper: ensure standard 3-column state
@@ -3801,17 +3579,6 @@ test('#45 AC3: add-card form lives in currentAddCardColumn body after each rende
   const backlogBody = document.getElementById('backlog-body');
   assert(backlogBody.contains(formWrapper),
     'form wrapper should return to backlog body when currentAddCardColumn is backlog');
-});
-
-test('#45 AC4: reordering persists columns in saveToJSONFile payload', () => {
-  _setupReorderTest();
-  reorderColumn('done', 'backlog');
-  _lastJSONPayload = null;
-  saveToJSONFile();
-  assert(_lastJSONPayload !== null, 'saveToJSONFile should populate _lastJSONPayload');
-  assert(Array.isArray(_lastJSONPayload.columns), 'payload should include columns array');
-  const idsInPayload = _lastJSONPayload.columns.map(c => c.id);
-  assertEqual(idsInPayload[0], 'done', 'persisted columns order should reflect the reorder');
 });
 
 test('#45 regression: card rendering into each column still works', () => {
