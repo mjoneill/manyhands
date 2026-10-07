@@ -139,6 +139,6 @@ export function createCollectionsUnit({ client, families, mintId, actorIri = (wh
   return {
     keys: [...byKey.keys()], load, ensureFresh, snapshot, plan, applied, commit, reachable,
     markUncertain() { uncertain = true; },
-    get generation() { return gen; }, get loaded() { return cache != null; },
+    get generation() { return gen; }, get loaded() { return cache != null; }, get uncertain() { return uncertain; },
   };
 }

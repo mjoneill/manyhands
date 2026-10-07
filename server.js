@@ -150,6 +150,13 @@ const COLLECTION_FAMILIES = [
     unique: (e) => (e['@type'] === 'scrum:ProcedureVersion' && typeof e['scrum:ofProcedure'] === 'string' && typeof e.name === 'string'
       ? [{ all: [{ predicate: `${RS_NS}ofProcedure`, value: { type: 'uri', value: e['scrum:ofProcedure'] } }, { predicate: 'https://schema.org/name', value: { type: 'literal', value: e.name } }] }] : []) },
   { key: 'runs', routes: ['/api/runs'] },
+  // #1624 agents (rows: agents-graph-a1). An agent's IRI is derived from its seat key and a prompt version's from the
+  // seat and its number, so a twin is a fresh-subject collision; the seat key is also unique among agents. A rest/retire
+  // also releases the seat's cards: the graph write (the agent) commits FIRST, the document (cards, announcement) only
+  // after it is APPLIED, so a refused or unreachable graph changes neither.
+  { key: 'agents', routes: ['/api/agents'],
+    unique: (e) => (typeof e['scrum:seatKey'] === 'string' ? [{ predicate: `${RS_NS}seatKey`, value: { type: 'literal', value: e['scrum:seatKey'] } }] : []) },
+  { key: 'agentPrompts', routes: ['/api/agents'] },
 ];
 let COLLECTIONS = null;
 const FILE_COLLS = Symbol('fileCollections');   // the document's own copies of the graph-held collections
@@ -12928,6 +12935,16 @@ function routeApi(method, urlPath, req, res) {
           (e) => sendJSON(res, 500, { error: e.message }));
         return true;
       }
+      // #1624 — after an UNKNOWN write the collection cache is uncertain, and EVERY board read needs it (readBoard swaps
+      // the collections in): TRY to reload it before the handler runs. Either way the handler runs: it refuses a
+      // malformed request on its own grounds (400), and if it then reads the board while the cache is still uncertain
+      // the snapshot refuses, which sendJSON answers as 503 — never a board served without its collections.
+      if (COLLECTIONS && COLLECTIONS.uncertain) {
+        COLLECTIONS.ensureFresh().then(() => routeApiAfterFresh(), () => routeApiAfterFresh());
+        return true;
+      }
+      return routeApiAfterFresh();
+      function routeApiAfterFresh() {
       if (COLLECTIONS && method === 'GET' && collectionDependent(urlPath)) {
         collectionsReady().then((ok) => (ok ? go() : sendJSON(res, 503, { error: 'the graph executor is not answering, so this collection is unavailable', code: 'GRAPH_UNAVAILABLE' })),
           (e) => sendJSON(res, 500, { error: e.message }));
@@ -12935,6 +12952,7 @@ function routeApi(method, urlPath, req, res) {
       }
       go();
       return true;
+      }
     }
   }
   return false;
