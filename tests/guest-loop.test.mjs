@@ -229,7 +229,7 @@ test('#1201 FRONT DOOR: a mention on a real board → the agent\'s post appears 
 
 test('#1201 the runnable form exists and uses the loop: scripts/guest-once.mjs imports guestOnce and findMentions', () => {
   const src = fs.readFileSync(new URL('../scripts/guest-once.mjs', import.meta.url), 'utf8');
-  assert.match(src, /import \{ findMentions, findWakes, pairCapSuppressed, DEFAULT_PAIR_CAP_PER_HOUR, guestOnce, fetchBoundedChanges, shouldMarkAnswered, mentionScanPath, fetchMentionWindow, acquireLock, releaseLock, effectiveWakeOn, budgetCheck, deliveryOutcome, bindingRulings \} from '\.\.\/core\/guest-loop\.mjs'/);   // #1436 added the rulings   // #1237 widened the import; #1274 added the paged window; #1346 the channel drain; #1372 the outcome
+  assert.match(src, /import \{ findMentions, findWakes, pairCapSuppressed, DEFAULT_PAIR_CAP_PER_HOUR, guestOnce, fetchBoundedChanges, shouldMarkAnswered, mentionScanPath, fetchMentionWindow, advanceScan, settlePending, acquireLock, releaseLock, effectiveWakeOn, budgetCheck, deliveryOutcome, bindingRulings \} from '\.\.\/core\/guest-loop\.mjs'/);   // #1631 the pending discovery; #1436 added the rulings   // #1237 widened the import; #1274 added the paged window; #1346 the channel drain; #1372 the outcome
   assert.match(src, /guestOnce\(\{/);
   assert.match(src, /--dry-run/);
 });

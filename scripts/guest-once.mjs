@@ -26,7 +26,7 @@ import { deliveryStaleMs, isStaleDelivery } from '../core/delivery.mjs';   // #1
 import { rowToBoard, refusalsSince } from '../core/model-call-row.mjs';
 import { handBackFromState, defaultWithheldStatePath } from '../core/withheld-state.mjs';   // #1428 — private per-seat withheld recovery
 import { annotateTalks } from '../core/guest-loop.mjs';   // #1446
-import { findMentions, findWakes, pairCapSuppressed, DEFAULT_PAIR_CAP_PER_HOUR, guestOnce, fetchBoundedChanges, shouldMarkAnswered, mentionScanPath, fetchMentionWindow, acquireLock, releaseLock, effectiveWakeOn, budgetCheck, deliveryOutcome, bindingRulings } from '../core/guest-loop.mjs';
+import { findMentions, findWakes, pairCapSuppressed, DEFAULT_PAIR_CAP_PER_HOUR, guestOnce, fetchBoundedChanges, shouldMarkAnswered, mentionScanPath, fetchMentionWindow, advanceScan, settlePending, acquireLock, releaseLock, effectiveWakeOn, budgetCheck, deliveryOutcome, bindingRulings } from '../core/guest-loop.mjs';
 import { makeExecutor } from '../core/board-tools.mjs';
 import { makeHandedCapture } from '../core/handed-dump.mjs';   // #1567 PC5
 const handedCapture = process.env.SCRUM_HANDED_DUMP
@@ -95,6 +95,13 @@ try {
   agent.roleKey = rj?.role?.key ?? null;   // #1436 — the held role's key, for the rulings match
   console.log(`[#1376] role: ${rj?.role?.key ?? 'none'}${rj?.role?.key ? ` — section ${agent.roleSection.split('\n')[0].slice(0, 80)}` : ''}`);
 } catch (e) { agent.roleSection = ''; console.error(`[#1376] role section unreadable (${e?.message ?? e}) — waking without one`); }
+// #1631 — the state file now carries the pending mentions, so it is replaced whole (temp file + rename), never truncated
+// and rewritten in place: a run killed mid-write must not leave a half file that reads as "no state" and forgets them.
+function writeStateAtomic(file, value) {
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, JSON.stringify(value, null, 2));
+  fs.renameSync(tmp, file);
+}
 const stateFile = process.env.SCRUM_GUEST_STATE_FILE || (agentFile ? path.join(path.dirname(agentFile), `.${agent.seatKey}.guest-state.json`) : path.join(process.cwd(), `.${agent.seatKey}.guest-state.json`));
 
 const get = async (p) => { const r = await fetch(`${BOARD}${p}`); if (!r.ok) throw new Error(`GET ${p} → ${r.status}`); return r.json(); };
@@ -153,6 +160,14 @@ if (!window_.complete) {
 } else if (state.lastScanIncomplete) {
   state.lastScanIncomplete = null;
 }
+// #1631 — capture every unsettled mention the scan found into `pending`, and move `scannedThrough` to the newest post
+// read, in ONE atomic state write BEFORE anything else this wake does: the next wake then reads only what is new, and a
+// mention this wake fails to answer (a refused reply post, a killed run) is still owed from `pending`.
+if (scansMentions && window_.complete && !opt('--once-id')) {
+  const before = { n: (state.pending || []).length, through: state.scannedThrough ?? null };
+  state = advanceScan(state, window_, agent.seatKey);
+  if (!dry && (state.pending.length !== before.n || state.scannedThrough !== before.through)) writeStateAtomic(stateFile, state);
+}
 // #1226 — wake sources are the agent's data. Cards are fetched only when a
 // kind needs them; a mention-only agent costs what slice 1 cost.
 let cards = [];
@@ -203,7 +218,7 @@ if (residents && scansMentions) {   // #1608 — the pair cap only governs menti
   try { history = (await fetchMentionWindow(getPage, { lastAnsweredAt: new Date(Date.now() - 3600_000).toISOString() })).messages; }
   catch (e) { console.error(`[#1411] ${agent.seatKey}: could not read the last hour for the pair cap (${e.message}) — counting over the scan window`); }
 }
-let wakes = findWakes({ agent, messages, cards, state, residents, perHour, history });
+let wakes = findWakes({ agent, messages, cards, state, residents, perHour, history, pending: scansMentions && !opt('--once-id') ? (state.pending || []) : [] });   // #1631 — window ∪ pending
 // A capped mention is SAID ONCE, not silently dropped: one line from this seat
 // per hour, naming nobody (so it wakes nobody), so a reader of the commons can
 // see why a resident went quiet on another. The cap re-arms when the hour
@@ -471,7 +486,7 @@ if (!dry && shouldMarkAnswered(r)) {
   if (wake.kind === 'assignment') next.assignmentsSeen = [...new Set([...(state.assignmentsSeen || []), wake.cardId])].slice(-200);
   if (wake.kind === 'schedule') next.lastScheduledAt = wake.createdAt;
   if (wake.kind === 'channel') next.lastChannelDrainAt = new Date().toISOString();   // #1346
-  fs.writeFileSync(stateFile, JSON.stringify(next, null, 2));
+  writeStateAtomic(stateFile, wake.kind === 'mention' ? settlePending(next, wake.id) : next);   // #1631 — settled leaves pending
 }
 else if (!dry) console.log(`[#1201] ${agent.seatKey}: mention ${wake.id} still owed (${r.reason ?? 'halted'}) — cursor not advanced`);
 console.log(JSON.stringify({ posted: r.posted, reason: r.reason ?? 'delivered', postId: r.postId ?? null, wake: wake.id }));

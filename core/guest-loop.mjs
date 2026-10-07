@@ -500,11 +500,16 @@ function wakeIntro(wake, seatKey = null) {
  * Returns wakes in priority order: mention, assignment, schedule. ONE is taken
  * per run; the rest wait for the next.
  */
-export function findWakes({ agent, messages = [], cards = [], state = {}, now = new Date().toISOString(), residents = null, perHour = DEFAULT_PAIR_CAP_PER_HOUR, history = null }) {
+export function findWakes({ agent, messages = [], cards = [], state = {}, now = new Date().toISOString(), residents = null, perHour = DEFAULT_PAIR_CAP_PER_HOUR, history = null, pending = [] }) {
   const on = effectiveWakeOn(agent);   // #1346 — channel mode keeps only assignment
   const out = [];
   if (on.includes('mention')) {
-    for (const m of findMentions(messages, agent.seatKey, { sinceId: state.lastAnsweredId ?? null, residents, perHour, history })) out.push({ kind: 'mention', ...m });   // #1411 — residents handed in
+    // #1631 — the window's mentions (after the answer cursor, as before) PLUS every still-pending one, which the cursor
+    // must not hide: a pending mention is owed until its own settlement. Oldest first, one wake per id.
+    const byId = new Map();
+    for (const m of findMentions(pending, agent.seatKey, { residents, perHour, history })) byId.set(m.id, m);
+    for (const m of findMentions(messages, agent.seatKey, { sinceId: state.lastAnsweredId ?? null, residents, perHour, history })) byId.set(m.id, m);   // #1411 — residents handed in
+    for (const m of [...byId.values()].sort((x, y) => (String(x.createdAt) < String(y.createdAt) ? -1 : 1))) out.push({ kind: 'mention', ...m });
   }
   if (on.includes('assignment')) {
     const seen = new Set(state.assignmentsSeen || []);
@@ -1339,9 +1344,50 @@ export const SCAN_LIMIT = 500;
 // pin the two files together.
 export const CONV_LIST_CAP = 200;
 export function scanWindowSince(state = {}, now = new Date().toISOString()) {
-  return typeof state.lastAnsweredAt === 'string' && state.lastAnsweredAt
-    ? state.lastAnsweredAt
-    : new Date(Date.parse(now) - FIRST_RUN_WINDOW_MS).toISOString();
+  // #1631 — the window starts where the last COMPLETE scan ended, not at the last ANSWER: a seat that is never
+  // mentioned never answers, and a window pinned to its last answer re-read the room's whole history every minute
+  // (measured 2026-10-07: ~40 list calls a minute, 39.7 h of posts). What the cursor skips is not lost: every mention a
+  // complete scan found is kept in `state.pending` (advanceScan) until it is settled.
+  const answered = typeof state.lastAnsweredAt === 'string' && state.lastAnsweredAt ? state.lastAnsweredAt : null;
+  const scanned = typeof state.scannedThrough === 'string' && state.scannedThrough ? state.scannedThrough : null;
+  const latest = answered && scanned ? (scanned > answered ? scanned : answered) : (scanned || answered);
+  return latest || new Date(Date.parse(now) - FIRST_RUN_WINDOW_MS).toISOString();
+}
+
+/**
+ * #1631 — DISCOVERY PROGRESS, kept apart from ANSWER PROGRESS. Pure.
+ *
+ * After a COMPLETE scan, every mention of the seat it found that is not yet settled goes into `pending` (by post id,
+ * the post itself kept so a later wake can answer it without re-reading the room), and `scannedThrough` moves to the
+ * newest post the scan read. Both land in ONE state write, so the cursor never moves past a mention that was not
+ * captured (the invariant: persist the discovery before the cursor moves). An incomplete scan moves nothing.
+ *
+ * Capture is wider than waking: a mention held by the pair cap is captured too, so it is answered when the cap
+ * re-arms instead of being skipped by the moved cursor. A NEWLY found mention at or before lastAnsweredAt (or equal to
+ * lastAnsweredId) was settled under the old rule and is not captured; an already-pending one is never dropped here.
+ */
+export const PENDING_MAX = 500;
+export function advanceScan(state = {}, window_ = {}, seatKey) {
+  if (!window_ || window_.complete !== true) return state;
+  const messages = Array.isArray(window_.messages) ? window_.messages : [];
+  const settled = (m) => m.id === state.lastAnsweredId || (typeof state.lastAnsweredAt === 'string' && typeof m.createdAt === 'string' && m.createdAt <= state.lastAnsweredAt);
+  const found = findMentions(messages, seatKey, { residents: null }).filter((m) => !settled(m));
+  // A pending mention leaves ONLY by its own settlement (settlePending), never because the aggregate answer cursor
+  // passed it: an older reply can still be owed after a newer mention was answered (review 2026-10-07T19:21Z).
+  const byId = new Map((Array.isArray(state.pending) ? state.pending : []).filter((m) => m && m.id != null).map((m) => [m.id, m]));
+  for (const m of found) if (!byId.has(m.id)) byId.set(m.id, pendingRecord(m));
+  let pending = [...byId.values()].sort((a, b) => (String(a.createdAt) < String(b.createdAt) ? -1 : 1));
+  if (pending.length > PENDING_MAX) pending = pending.slice(-PENDING_MAX);
+  const newest = messages.reduce((a, m) => (typeof m.createdAt === 'string' && (!a || m.createdAt > a) ? m.createdAt : a), null);
+  const prev = typeof state.scannedThrough === 'string' ? state.scannedThrough : null;
+  return { ...state, pending, scannedThrough: newest && (!prev || newest > prev) ? newest : prev };
+}
+const pendingRecord = (m) => ({ id: m.id, author: m.author, body: m.body, createdAt: m.createdAt, attachedTo: m.attachedTo ?? null, conversation: m.conversation ?? null, mentions: Array.isArray(m.mentions) ? m.mentions : undefined });
+
+/** #1631 — a settled mention leaves pending (answered, declined, or settled by #1201's model-failure rule). */
+export function settlePending(state = {}, id) {
+  if (!Array.isArray(state.pending)) return state;
+  return { ...state, pending: state.pending.filter((m) => m.id !== id) };
 }
 export function mentionScanPath(state = {}, now = new Date().toISOString(), { before = null } = {}) {
   const since = scanWindowSince(state, now);
