@@ -967,7 +967,7 @@ function sendJSON(res, statusCode, data) {
   const unitUnavailable = statusCode === 500 && data && typeof data.error === 'string' && /^(cards|collections) are unavailable: /.test(data.error);
   if (statusCode === 500 && ((graphCtx && graphCtx.graphUnavailable) || unitUnavailable)) {
     statusCode = 503;
-    data = { error: `the graph executor is not answering, so nothing was written: ${unitUnavailable ? data.error : graphCtx.graphUnavailable}`, code: 'GRAPH_UNAVAILABLE' };
+    data = { error: `the graph executor is not answering, so the outcome is not known and nothing is reported as written: ${unitUnavailable ? data.error : graphCtx.graphUnavailable}`, code: 'GRAPH_UNAVAILABLE' };
   }
   // #1217 — every refusal on a write route keeps its payload. Here, not at the
   // call sites, so a refusal added later is covered without anyone remembering.
@@ -1366,7 +1366,8 @@ function readBoard() {
  */
 function withUnitCards(board) {
   if (CARDS_UNIT) {
-    const snap = CARDS.snapshot(board.nextShortId);
+    let snap;
+    try { snap = CARDS.snapshot(board.nextShortId); } catch (e) { markGraphUnavailable(e); throw e; }
     board[FILE_CARDS] = board.cards;
     board[FILE_NEXT_SHORT_ID] = board.nextShortId;
     board[FILE_ORIGINS] = new Set(Object.keys(outboxOf(board).origins));
@@ -7716,6 +7717,9 @@ function withWriteLock(fn) {
  * (reloaded before the next read). A PRECONDITION_FAILED means the cache was stale; the closure runs ONCE more on a
  * reloaded cache, since every handler re-reads the board inside its closure.
  */
+const markGraphUnavailable = (e) => {
+  if (e && (e.code === 'CARDS_UNAVAILABLE' || e.code === 'COLLECTIONS_UNAVAILABLE')) { const ctx = requestContext.getStore(); if (ctx) ctx.graphUnavailable = e.message; }
+};
 async function lockedWithCards(fn) {
   for (let attempt = 1; ; attempt++) {
     try {
@@ -7723,7 +7727,7 @@ async function lockedWithCards(fn) {
       if (COLLECTIONS) await COLLECTIONS.ensureFresh();
     } catch (e) {
       // the cache could not be reloaded from the graph: the same "executor not answering" as a failed commit
-      if (e && (e.code === 'COLLECTIONS_UNAVAILABLE' || e.code === 'CARDS_UNAVAILABLE')) { const ctx = requestContext.getStore(); if (ctx) ctx.graphUnavailable = e.message; }
+      markGraphUnavailable(e);
       throw e;
     }
     const staged = [];
@@ -7759,6 +7763,7 @@ async function lockedWithCards(fn) {
       return result;
     } catch (e) {
       if (e && e.code === 'CARD_WRITE_CONFLICT' && attempt === 1) continue;
+      markGraphUnavailable(e);   // an unresolved UNKNOWN (or an executor away): the response is 503, never a bare 500
       throw e;
     }
   }
