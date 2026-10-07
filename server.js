@@ -1290,7 +1290,9 @@ function readBoard() {
     const { key, domain } = loadDomainShared(BOARD_DATA_FILE);
     // Keyed by PATH as well as identity: one board file per process today, but
     // a key that could match a different file's identity is a latent stale read.
-    if (!_sharedBoard || _sharedBoard.file !== BOARD_DATA_FILE || _sharedBoard.key !== key || (CARDS_UNIT && _sharedBoard.cardsGen !== CARDS.generation)) {
+    // #1598 — an UNCERTAIN card cache is a miss, never a hit: the board built before an UNKNOWN write must not be served
+    // while the graph's outcome is undetermined (the rebuild's snapshot refuses, which the response layer answers 503).
+    if (!_sharedBoard || _sharedBoard.file !== BOARD_DATA_FILE || _sharedBoard.key !== key || (CARDS_UNIT && (CARDS.uncertain || _sharedBoard.cardsGen !== CARDS.generation))) {
       const board = deepFreeze(withUnitCards(finishBoard(domainToBoard(domain))));
       _sharedBoard = { file: BOARD_DATA_FILE, key, board, builtMs: Math.round(performance.now() - t0), builtAt: new Date().toISOString(), cardsGen: CARDS_UNIT ? CARDS.generation : null };
       ctx.read = `shared; rebuilt=${_sharedBoard.builtMs}ms; key=${key}; cards=${board.cards.length}`;
