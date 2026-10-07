@@ -26,7 +26,7 @@ import { deliveryStaleMs, isStaleDelivery } from '../core/delivery.mjs';   // #1
 import { rowToBoard, refusalsSince } from '../core/model-call-row.mjs';
 import { handBackFromState, defaultWithheldStatePath } from '../core/withheld-state.mjs';   // #1428 — private per-seat withheld recovery
 import { annotateTalks } from '../core/guest-loop.mjs';   // #1446
-import { findMentions, findWakes, pairCapSuppressed, DEFAULT_PAIR_CAP_PER_HOUR, guestOnce, fetchBoundedChanges, shouldMarkAnswered, mentionScanPath, fetchMentionWindow, advanceScan, settlePending, acquireLock, releaseLock, effectiveWakeOn, budgetCheck, deliveryOutcome, bindingRulings } from '../core/guest-loop.mjs';
+import { findMentions, findWakes, pairCapSuppressed, DEFAULT_PAIR_CAP_PER_HOUR, guestOnce, fetchBoundedChanges, shouldMarkAnswered, mentionScanPath, fetchMentionWindow, advanceScan, settlePending, sweepDue, sweepSince, captureSweep, acquireLock, releaseLock, effectiveWakeOn, budgetCheck, deliveryOutcome, bindingRulings } from '../core/guest-loop.mjs';
 import { makeExecutor } from '../core/board-tools.mjs';
 import { makeHandedCapture } from '../core/handed-dump.mjs';   // #1567 PC5
 const handedCapture = process.env.SCRUM_HANDED_DUMP
@@ -142,8 +142,11 @@ const getPage = async (p) => {
 // measured 2026-10-06, one channel-mode seat's cursor (advanced only by mention wakes it can never take) had frozen at
 // 09-13 and it read 25 pages × 200 posts every minute, 5,996 incomplete scans in its log. `--once-id` still scans.
 const scansMentions = effectiveWakeOn(agent).includes('mention') || Boolean(opt('--once-id'));
+// #1631 — the time every scan decision is made at. SCRUM_GUEST_NOW (an ISO instant) is the test seam for the clock: it
+// moves the runner's own time decisions (window, rewind, sweep due, sweep window), never the board's stamps.
+const NOW = (() => { const v = process.env.SCRUM_GUEST_NOW; if (v && Number.isFinite(Date.parse(v))) return new Date(Date.parse(v)).toISOString(); return new Date().toISOString(); })();
 const window_ = scansMentions
-  ? await fetchMentionWindow(getPage, state)
+  ? await fetchMentionWindow(getPage, state, NOW)
   : { messages: [], complete: true, pages: 0, truncated: null };
 if (!scansMentions) console.log(`[#1608] ${agent.seatKey}: no mention scan (wakeOn has no mention in ${agent.deliveryMode ?? 'wake'} mode; deliveries carry the obligations)`);
 const messages = window_.messages;
@@ -156,7 +159,7 @@ if (!window_.complete) {
   // Written NOW, not at the end: the run that finds nothing to wake for exits
   // before the state write, and that is exactly the run whose silence needs
   // explaining.
-  if (!dry) { try { fs.writeFileSync(stateFile, JSON.stringify(state, null, 2)); } catch (e) { console.error(`[#1274] could not record the incomplete scan: ${e.message}`); } }
+  if (!dry) { try { writeStateAtomic(stateFile, state); } catch (e) { console.error(`[#1274] could not record the incomplete scan: ${e.message}`); } }   // #1631 — whole-file replace: it holds owed mentions
 } else if (state.lastScanIncomplete) {
   state.lastScanIncomplete = null;
 }
@@ -165,8 +168,29 @@ if (!window_.complete) {
 // mention this wake fails to answer (a refused reply post, a killed run) is still owed from `pending`.
 if (scansMentions && window_.complete && !opt('--once-id')) {
   const before = { n: (state.pending || []).length, through: state.scannedThrough ?? null };
-  state = advanceScan(state, window_, agent.seatKey);
-  if (!dry && (state.pending.length !== before.n || state.scannedThrough !== before.through)) writeStateAtomic(stateFile, state);
+  state = advanceScan(state, window_, agent.seatKey, { now: NOW });
+  if (state.pendingOverflow) console.error(`[#1631] ${agent.seatKey}: PENDING FULL — ${state.pendingOverflow.owed} owed mentions over the ${state.pendingOverflow.max} cap; the scan cursor is NOT moved (no mention is dropped; the window stays wide until some are settled)`);
+  if (!dry && ((state.pending || []).length !== before.n || (state.scannedThrough ?? null) !== before.through)) writeStateAtomic(stateFile, state);
+}
+// #1631 — THE RECOVERY SWEEP (contract item 2): at most hourly, or now with --sweep-now. Its progress moves only on a
+// complete sweep whose captures were written; anything else leaves the interval to grow for the next one.
+if (scansMentions && !opt('--once-id') && sweepDue(state, NOW, { force: args.includes('--sweep-now') })) {
+  const sweepStart = NOW;
+  const sweepFrom = sweepSince(state, NOW);
+  let swept = null;
+  try { swept = await fetchMentionWindow(getPage, { lastAnsweredAt: sweepFrom }, NOW, { maxPages: 100 }); }
+  catch (e) { console.error(`[#1631] ${agent.seatKey}: recovery sweep failed (${e.message}) — progress NOT moved; the next sweep covers this interval too`); }
+  if (swept && !swept.complete) console.error(`[#1631] ${agent.seatKey}: recovery sweep INCOMPLETE (${swept.truncated?.seen ?? '?'} of ${swept.truncated?.total ?? '?'} posts) — progress NOT moved`);
+  if (swept && swept.complete) {
+    const n0 = (state.pending || []).length;
+    const next = captureSweep(state, swept, agent.seatKey, { sweepStart });
+    if (next.pendingOverflow) console.error(`[#1631] ${agent.seatKey}: recovery sweep found more owed mentions than pending can hold — progress NOT moved`);
+    else {
+      state = next;
+      if (!dry) writeStateAtomic(stateFile, state);
+      console.log(`[#1631] ${agent.seatKey}: recovery sweep complete (${swept.pages} page(s), ${swept.messages.length} posts since ${sweepFrom}, ${state.pending.length - n0} newly captured)`);
+    }
+  }
 }
 // #1226 — wake sources are the agent's data. Cards are fetched only when a
 // kind needs them; a mention-only agent costs what slice 1 cost.

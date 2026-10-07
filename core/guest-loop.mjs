@@ -507,8 +507,9 @@ export function findWakes({ agent, messages = [], cards = [], state = {}, now = 
     // #1631 — the window's mentions (after the answer cursor, as before) PLUS every still-pending one, which the cursor
     // must not hide: a pending mention is owed until its own settlement. Oldest first, one wake per id.
     const byId = new Map();
-    for (const m of findMentions(pending, agent.seatKey, { residents, perHour, history })) byId.set(m.id, m);
-    for (const m of findMentions(messages, agent.seatKey, { sinceId: state.lastAnsweredId ?? null, residents, perHour, history })) byId.set(m.id, m);   // #1411 — residents handed in
+    const done = settledIds(state);   // the rewind overlap re-reads posts already answered
+    for (const m of findMentions(pending, agent.seatKey, { residents, perHour, history })) if (!done.has(m.id)) byId.set(m.id, m);
+    for (const m of findMentions(messages, agent.seatKey, { sinceId: state.lastAnsweredId ?? null, residents, perHour, history })) if (!done.has(m.id)) byId.set(m.id, m);   // #1411 — residents handed in
     for (const m of [...byId.values()].sort((x, y) => (String(x.createdAt) < String(y.createdAt) ? -1 : 1))) out.push({ kind: 'mention', ...m });
   }
   if (on.includes('assignment')) {
@@ -1351,8 +1352,14 @@ export function scanWindowSince(state = {}, now = new Date().toISOString()) {
   const answered = typeof state.lastAnsweredAt === 'string' && state.lastAnsweredAt ? state.lastAnsweredAt : null;
   const scanned = typeof state.scannedThrough === 'string' && state.scannedThrough ? state.scannedThrough : null;
   const latest = answered && scanned ? (scanned > answered ? scanned : answered) : (scanned || answered);
-  return latest || new Date(Date.parse(now) - FIRST_RUN_WINDOW_MS).toISOString();
+  if (!latest) return new Date(Date.parse(now) - FIRST_RUN_WINDOW_MS).toISOString();
+  // A post is stamped when it is ACCEPTED and listed only when its write COMMITS, seconds later under load: a mention
+  // stamped before the newest post a scan read can become visible after that scan (row S11). The window therefore
+  // re-reads SCAN_REWIND_MS before the cursor; what it already captured or settled is deduped by id (advanceScan,
+  // state.settled), so the overlap costs a page, never a second answer.
+  return scanned ? new Date(Date.parse(latest) - SCAN_REWIND_MS).toISOString() : latest;
 }
+export const SCAN_REWIND_MS = 5 * 60_000;
 
 /**
  * #1631 — DISCOVERY PROGRESS, kept apart from ANSWER PROGRESS. Pure.
@@ -1367,28 +1374,86 @@ export function scanWindowSince(state = {}, now = new Date().toISOString()) {
  * lastAnsweredId) was settled under the old rule and is not captured; an already-pending one is never dropped here.
  */
 export const PENDING_MAX = 500;
-export function advanceScan(state = {}, window_ = {}, seatKey) {
+export function advanceScan(state = {}, window_ = {}, seatKey, { now = new Date().toISOString() } = {}) {
   if (!window_ || window_.complete !== true) return state;
+  state = withLegacyLine(state, now);
   const messages = Array.isArray(window_.messages) ? window_.messages : [];
-  const settled = (m) => m.id === state.lastAnsweredId || (typeof state.lastAnsweredAt === 'string' && typeof m.createdAt === 'string' && m.createdAt <= state.lastAnsweredAt);
-  const found = findMentions(messages, seatKey, { residents: null }).filter((m) => !settled(m));
+  const found = findMentions(messages, seatKey, { residents: null }).filter((m) => !isSettled(state, m));
   // A pending mention leaves ONLY by its own settlement (settlePending), never because the aggregate answer cursor
   // passed it: an older reply can still be owed after a newer mention was answered (review 2026-10-07T19:21Z).
   const byId = new Map((Array.isArray(state.pending) ? state.pending : []).filter((m) => m && m.id != null).map((m) => [m.id, m]));
   for (const m of found) if (!byId.has(m.id)) byId.set(m.id, pendingRecord(m));
-  let pending = [...byId.values()].sort((a, b) => (String(a.createdAt) < String(b.createdAt) ? -1 : 1));
-  if (pending.length > PENDING_MAX) pending = pending.slice(-PENDING_MAX);
+  const pending = [...byId.values()].sort((a, b) => (String(a.createdAt) < String(b.createdAt) ? -1 : 1));
+  // FAIL CLOSED on capacity (review 2026-10-07T19:31Z): never trim an owed mention, never move past an uncaptured one.
+  // Over capacity, NOTHING moves: pending and the cursor stay as they were, so the window still covers every mention not
+  // yet captured (the pre-#1631 behaviour, costly but lossless), and the caller reports the overflow.
+  if (pending.length > PENDING_MAX) return { ...state, pendingOverflow: { owed: pending.length, max: PENDING_MAX } };
   const newest = messages.reduce((a, m) => (typeof m.createdAt === 'string' && (!a || m.createdAt > a) ? m.createdAt : a), null);
   const prev = typeof state.scannedThrough === 'string' ? state.scannedThrough : null;
-  return { ...state, pending, scannedThrough: newest && (!prev || newest > prev) ? newest : prev };
+  const { pendingOverflow, ...rest } = state;
+  return { ...rest, pending, scannedThrough: newest && (!prev || newest > prev) ? newest : prev };
 }
+/**
+ * #1631 — THE CUTOVER LINE (contract item 4). Mentions at or before the answer cursor AS IT STOOD at a seat's first #1631
+ * scan were settled-or-lost under the old rule and stay outside the new guarantee (recovery: --once-id). It is recorded
+ * once, from the cursor, not from a clock, so an injected "now" cannot move it. A seat with no answer yet draws it at
+ * the old first-run window's start, which is what the old rule read from.
+ */
+function withLegacyLine(state, now) {
+  if (Object.prototype.hasOwnProperty.call(state, 'legacyBefore')) return state;
+  const line = typeof state.lastAnsweredAt === 'string' && state.lastAnsweredAt ? state.lastAnsweredAt : new Date(Date.parse(now) - FIRST_RUN_WINDOW_MS).toISOString();
+  return { ...state, legacyBefore: line };
+}
+/** Settled for capture: answered or settled by id, or before the cutover line. After the cutover, the aggregate answer
+ * cursor proves nothing (a capped or late mention can sit behind it) — only a mention's own settlement does. */
+function isSettled(state, m) {
+  if (m.id === state.lastAnsweredId) return true;
+  if (settledIds(state).has(m.id)) return true;
+  return typeof state.legacyBefore === 'string' && typeof m.createdAt === 'string' && m.createdAt <= state.legacyBefore;
+}
+
+/**
+ * #1631 — THE RECOVERY SWEEP (contract item 2). Due at most hourly, or now with --sweep-now. Reads from (start of the last
+ * COMPLETE sweep − 24 h) — or now − 24 h on the first — and captures every mention the bounded scan missed (a post that
+ * became visible after a newer one was scanned). Progress (`sweptAt`, the sweep's start instant) moves ONLY when the
+ * sweep was complete and its captures fit; a failed, partial or interrupted sweep moves nothing, so the next interval
+ * grows to cover it. Pure: the caller does the reading and the one atomic write.
+ */
+export const SWEEP_EVERY_MS = 60 * 60_000;
+export const SWEEP_LOOKBACK_MS = 24 * 60 * 60_000;
+export function sweepDue(state = {}, now = new Date().toISOString(), { force = false } = {}) {
+  if (force) return true;
+  return typeof state.sweptAt !== 'string' || Date.parse(now) - Date.parse(state.sweptAt) >= SWEEP_EVERY_MS;
+}
+export function sweepSince(state = {}, now = new Date().toISOString()) {
+  const from = typeof state.sweptAt === 'string' ? state.sweptAt : now;
+  return new Date(Date.parse(from) - SWEEP_LOOKBACK_MS).toISOString();
+}
+export function captureSweep(state = {}, window_ = {}, seatKey, { sweepStart = new Date().toISOString() } = {}) {
+  if (!window_ || window_.complete !== true) return state;   // a partial sweep moves nothing
+  state = withLegacyLine(state, sweepStart);
+  const found = findMentions(Array.isArray(window_.messages) ? window_.messages : [], seatKey, { residents: null }).filter((m) => !isSettled(state, m));
+  const byId = new Map((Array.isArray(state.pending) ? state.pending : []).filter((m) => m && m.id != null).map((m) => [m.id, m]));
+  for (const m of found) if (!byId.has(m.id)) byId.set(m.id, pendingRecord(m));
+  const pending = [...byId.values()].sort((a, b) => (String(a.createdAt) < String(b.createdAt) ? -1 : 1));
+  if (pending.length > PENDING_MAX) return { ...state, pendingOverflow: { owed: pending.length, max: PENDING_MAX } };
+  return { ...state, pending, sweptAt: sweepStart };
+}
+
 const pendingRecord = (m) => ({ id: m.id, author: m.author, body: m.body, createdAt: m.createdAt, attachedTo: m.attachedTo ?? null, conversation: m.conversation ?? null, mentions: Array.isArray(m.mentions) ? m.mentions : undefined });
 
-/** #1631 — a settled mention leaves pending (answered, declined, or settled by #1201's model-failure rule). */
+/**
+ * #1631 — a settled mention leaves pending (answered, declined, or settled by #1201's model-failure rule), and its id is
+ * remembered in `settled` so the rewind overlap can never capture or wake it again. `settled` keeps the newest
+ * SETTLED_MAX ids, far more than a rewind window can hold.
+ */
+export const SETTLED_MAX = 500;
 export function settlePending(state = {}, id) {
-  if (!Array.isArray(state.pending)) return state;
-  return { ...state, pending: state.pending.filter((m) => m.id !== id) };
+  const pending = Array.isArray(state.pending) ? state.pending.filter((m) => m.id !== id) : state.pending;
+  const settled = [...(Array.isArray(state.settled) ? state.settled.filter((x) => x !== id) : []), id].slice(-SETTLED_MAX);
+  return { ...state, ...(pending !== undefined ? { pending } : {}), settled };
 }
+export const settledIds = (state = {}) => new Set(Array.isArray(state.settled) ? state.settled : []);
 export function mentionScanPath(state = {}, now = new Date().toISOString(), { before = null } = {}) {
   const since = scanWindowSince(state, now);
   // `before` walks BACKWARD through the same window: `since` is held fixed, so
