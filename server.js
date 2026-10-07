@@ -28,6 +28,7 @@
  * Port:  3141
  */
 
+import { collectionFamilies } from './core/collection-families.mjs';   // #1624
 import http from 'node:http';
 import os from 'node:os';
 import fs from 'node:fs';
@@ -134,51 +135,8 @@ const cardWriteContext = new AsyncLocalStorage();   // #1598 — the write a loc
 // #1624 — the small-kinds unit (wake first). Reads and writes go through the one generic
 // `entity.put` primitive; OFF ⇒ the document collection is the only store (today's path).
 const SMALLKINDS_UNIT = process.env.SCRUM_GRAPH_UNIT_SMALLKINDS === '1';
-// #1624 — the MUTABLE K13 families: graph-held collections through #1598's transaction machinery (review 08:37Z). Each
-// family registers { key (the board collection), unique(entity) → the values the graph must guard, routes (URL prefixes
-// that read or write it) }. With none registered nothing below runs. Wakes stay on their own lock-free path.
-const RS_NS = 'https://scrumboard.local/ns#';
-const COLLECTION_FAMILIES = [
-  // #1624 definitions (rows: definitions-graph-d1). A predicate's and a kind's IRI is derived from its name, so a twin
-  // registration is the same entity (a revision), never a second node. A model key is unique among models. A procedure
-  // version is unique by its procedure AND its name ("<procedure> v<n>"), which is how the number is allocated.
-  { key: 'predicates', routes: ['/api/predicates'] },
-  { key: 'kinds', routes: ['/api/kinds'] },
-  { key: 'models', routes: ['/api/models'],
-    unique: (e) => (typeof e['scrum:modelKey'] === 'string' ? [{ predicate: `${RS_NS}modelKey`, value: { type: 'literal', value: e['scrum:modelKey'] } }] : []) },
-  { key: 'procedures', routes: ['/api/procedures', '/api/procedure-versions'],
-    unique: (e) => (e['@type'] === 'scrum:ProcedureVersion' && typeof e['scrum:ofProcedure'] === 'string' && typeof e.name === 'string'
-      ? [{ all: [{ predicate: `${RS_NS}ofProcedure`, value: { type: 'uri', value: e['scrum:ofProcedure'] } }, { predicate: 'https://schema.org/name', value: { type: 'literal', value: e.name } }] }] : []) },
-  { key: 'runs', routes: ['/api/runs'] },
-  // #1624 agents (rows: agents-graph-a1). An agent's IRI is derived from its seat key and a prompt version's from the
-  // seat and its number, so a twin is a fresh-subject collision; the seat key is also unique among agents. A rest/retire
-  // also releases the seat's cards: the graph write (the agent) commits FIRST, the document (cards, announcement) only
-  // after it is APPLIED, so a refused or unreachable graph changes neither.
-  { key: 'agents', routes: ['/api/agents'],
-    unique: (e) => (typeof e['scrum:seatKey'] === 'string' ? [{ predicate: `${RS_NS}seatKey`, value: { type: 'literal', value: e['scrum:seatKey'] } }] : []) },
-  { key: 'agentPrompts', routes: ['/api/agents'] },
-  // #1624 artifacts (rows: artifacts-graph-k1). Adding one also adds it to its run's prov:generated: the plan carries
-  // both entities as parts of ONE guarded update (the run on its version), so they land together or not at all.
-  { key: 'artifacts', routes: ['/api/artifacts'] },
-  // #1624 tending (rows: tending-graph-g1): prompts, versions, playlists and their versions, mints, state. Every IRI is
-  // derived (a slug, slug + version number, a mint's window), so a twin is a fresh-subject collision; a playlist
-  // version's ordered prompts are an RDF list, named under the version (see collections-unit entityQuads).
-  { key: 'tending', routes: ['/api/tending', '/api/tending-config'] },
-  // #1624 talks, roles and obligations. A role and its versions REFERENCE their defining card (`scrum:definedBy`); an
-  // obligation references what it is `about` (a card, memory, decision, predicate or obligation). A write that SETS such
-  // a reference requires its target in the same guarded update (see collections-unit `requires`); the target can still
-  // be deleted later. A card is a graph subject only with the cards unit on.
-  { key: 'talks', routes: ['/api/talks'] },
-  { key: 'roles', routes: ['/api/roles'], requires: (e) => referencedSubjects(e['scrum:definedBy']) },
-  { key: 'roleVersions', routes: ['/api/roles'], requires: (e) => referencedSubjects(e['scrum:definedBy']), inherits: (e) => e['scrum:ofRole'] },
-  { key: 'obligations', routes: ['/api/obligations'], requires: (e) => referencedSubjects(e.about) },
-];
-/** A stored reference → the graph subject that must exist: an IRI names itself; a bare id is a card (cards unit only). */
-function referencedSubjects(v) {
-  if (typeof v !== 'string' || !v) return [];
-  if (/^https?:\/\//.test(v)) return [v];
-  return CARDS_UNIT ? [`https://scrumboard.local/entity/${v}`] : [];
-}
+// #1624 — the MUTABLE K13 families (core/collection-families.mjs: one definition, shared with the migration scripts).
+const COLLECTION_FAMILIES = collectionFamilies({ cardsUnit: CARDS_UNIT });
 let COLLECTIONS = null;
 const FILE_COLLS = Symbol('fileCollections');   // the document's own copies of the graph-held collections
 

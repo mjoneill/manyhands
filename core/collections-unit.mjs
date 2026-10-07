@@ -19,10 +19,30 @@ import { projectEntity } from './graph-replica.mjs';
 
 const RS = 'https://scrumboard.local/ns#';
 const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
+const XSD_DECIMAL = 'http://www.w3.org/2001/XMLSchema#decimal';
+/**
+ * xsd:decimal has no exponent form, but a JavaScript number such as a model's per-token price serialises as `1.8e-7`.
+ * Rewrite it EXACTLY as plain decimal digits (string arithmetic on the digits, never a float round-trip):
+ * 1.8e-7 → 0.00000018, 2.5e3 → 2500.
+ */
+export function plainDecimal(lex) {
+  const m = /^([+-]?)(\d*)(?:\.(\d*))?[eE]([+-]?\d+)$/.exec(String(lex));
+  if (!m) return String(lex);
+  const [, sign, int = '', frac = '', expS] = m;
+  const digits = (int + frac).replace(/^0+(?=\d)/, '') || '0';
+  // where the decimal point falls in `digits`: after the integer part, moved by the exponent, less the leading zeros dropped
+  const point = int.length + Number(expS) - ((int + frac).length - digits.length);
+  let out;
+  if (point <= 0) out = `0.${'0'.repeat(-point)}${digits}`;
+  else if (point >= digits.length) out = `${digits}${'0'.repeat(point - digits.length)}`;
+  else out = `${digits.slice(0, point)}.${digits.slice(point)}`;
+  return `${sign === '-' ? '-' : ''}${out}`;
+}
 const termOf = (t) => {
   if (t.termType === 'NamedNode') return { type: 'uri', value: t.value };
   if (t.termType === 'Literal') {
     if (t.language) return { type: 'literal', value: t.value, lang: t.language };
+    if (t.datatype && t.datatype.value === XSD_DECIMAL) return { type: 'literal', value: plainDecimal(t.value), datatype: XSD_DECIMAL };
     return t.datatype && t.datatype.value !== XSD_STRING ? { type: 'literal', value: t.value, datatype: t.datatype.value } : { type: 'literal', value: t.value };
   }
   throw new Error(`a collection projection produced a ${t.termType} term; only named nodes and literals are carried`);
