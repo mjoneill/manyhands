@@ -66,7 +66,7 @@ import { readTendingConfig, writeTendingConfig } from './tending-config.mjs';
 import { buildTendingEntities, person as personIri } from './core/tending-bootstrap.mjs';
 import { resolvePool as resolveWhisperPool, bagState } from './core/tending-pool.mjs';
 import { mintId } from './core/tending-ids.mjs';
-import { createPrompt, editPrompt, setEnabled, reorderPlaylist, removePrompt, setShuffle, readShuffle } from './core/tending-authoring.mjs';
+import { createPrompt, editPrompt, setEnabled, reorderPlaylist, removePrompt, setShuffle, readShuffle, assertSlug } from './core/tending-authoring.mjs';
 import { resolveProvenance } from './core/tending-provenance.mjs';
 import { boardToDomain, domainToBoard, cardToNode } from './core/mapping.mjs';
 import { OUTBOX_FIELD, outboxOf, withAnnouncement, listOutbox, modeProblem, legacyProof, postMatchesEntry, opIdFor, announcePostId, postCreateIntention, obligationIdOf } from './core/announce-outbox.mjs';   // #1574 C3a/C3b/C3c
@@ -157,6 +157,13 @@ const COLLECTION_FAMILIES = [
   { key: 'agents', routes: ['/api/agents'],
     unique: (e) => (typeof e['scrum:seatKey'] === 'string' ? [{ predicate: `${RS_NS}seatKey`, value: { type: 'literal', value: e['scrum:seatKey'] } }] : []) },
   { key: 'agentPrompts', routes: ['/api/agents'] },
+  // #1624 artifacts (rows: artifacts-graph-k1). Adding one also adds it to its run's prov:generated: the plan carries
+  // both entities as parts of ONE guarded update (the run on its version), so they land together or not at all.
+  { key: 'artifacts', routes: ['/api/artifacts'] },
+  // #1624 tending (rows: tending-graph-g1): prompts, versions, playlists and their versions, mints, state. Every IRI is
+  // derived (a slug, slug + version number, a mint's window), so a twin is a fresh-subject collision; a playlist
+  // version's ordered prompts are an RDF list, named under the version (see collections-unit entityQuads).
+  { key: 'tending', routes: ['/api/tending', '/api/tending-config'] },
 ];
 let COLLECTIONS = null;
 const FILE_COLLS = Symbol('fileCollections');   // the document's own copies of the graph-held collections
@@ -4451,6 +4458,10 @@ async function handleAddArtifact(req, res) {
           + 'write, so a file pasted into a node is that file again on every write that follows it. '
           + 'Put the bytes on disk and pass contentUrl + contentHash.',
       });
+    }
+    // A missing run is the request's own fault: refused before any board read, so it stays a 400 while the graph is away.
+    if (typeof body.run !== 'string' || !body.run) {
+      return sendJSON(res, 400, { error: `no such run ${JSON.stringify(body.run ?? null)} — create the run first (POST /api/runs / run_create)` });
     }
     const result = await withWriteLock(async () => {
       const data = readBoard();
@@ -9424,11 +9435,15 @@ function sendWhispers(res, code = 200) {
   });
 }
 
-/** Apply a pure authoring op under the write lock, then answer with the pool. */
-async function applyTendingOp(req, res, op) {
+/**
+ * Apply a pure authoring op under the write lock, then answer with the pool. `pre` checks the request's SHAPE before
+ * any board read (#1624): a malformed request is a 400 on its own grounds even while the graph is away.
+ */
+async function applyTendingOp(req, res, op, pre) {
   try {
     const raw = await readBody(req);
     const body = raw ? JSON.parse(raw) : {};
+    if (pre) { try { pre(body); } catch (e) { return sendJSON(res, 400, { error: e?.message ?? String(e) }); } }
     const at = new Date().toISOString();
     const result = await withWriteLock(async () => {
       try {
@@ -12751,7 +12766,7 @@ const API_ROUTES = [
   // #953 — the tending silence threshold, same trust model as /api/config.
   { method: 'GET',    re: /^\/api\/tending-config$/,       fn: (req, res) => handleGetTendingConfig(req, res) },
   { method: 'GET',    re: /^\/api\/tending\/whispers$/,     fn: (req, res) => handleGetWhispers(req, res) },
-  { method: 'POST',   re: /^\/api\/tending\/whispers$/,     fn: (req, res) => applyTendingOp(req, res, (e, b, at) => createPrompt(e, { ...b, at })) },
+  { method: 'POST',   re: /^\/api\/tending\/whispers$/,     fn: (req, res) => applyTendingOp(req, res, (e, b, at) => createPrompt(e, { ...b, at }), (b) => assertSlug(b.slug)) },
   { method: 'PATCH',  re: /^\/api\/tending\/whispers\/([^\/]+)$/, fn: (req, res, m) => applyTendingOp(req, res, (e, b, at) => (
       b.enabled === undefined ? editPrompt(e, { ...b, slug: decodeURIComponent(m[1]), at })
                               : setEnabled(e, { slug: decodeURIComponent(m[1]), enabled: b.enabled === true }))) },

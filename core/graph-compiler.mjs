@@ -1352,7 +1352,8 @@ function canonCollectionWrite(e) {
       const out = list.map((q, n) => {
         if (!Array.isArray(q) || q.length !== 3) fail(`${w}.${label}[${n}] is [s, p, o]`);
         const t = q.map((term, j) => cardTerm(term, `${w}.${label}[${n}][${j}]`));
-        if (t[0] !== ref(iri)) fail(`${w}.${label}[${n}]: subject ${t[0]} is not ${ref(iri)}`);
+        // the entity's own subject, or a cell of a list it owns (`<iri>/list/…`, named by the server, see collections-unit)
+        if (t[0] !== ref(iri) && !t[0].startsWith(`<${iri}/list/`)) fail(`${w}.${label}[${n}]: subject ${t[0]} is not ${ref(iri)}`);
         if (CW_RESERVED_PREDICATES.has(unref(t[1])) || unref(t[1]) === `${CW.scrum}inCollection`) fail(`${w}.${label}[${n}]: ${t[1]} is written by the compiler`);
         return t;
       });

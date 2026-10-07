@@ -28,11 +28,29 @@ const termOf = (t) => {
   throw new Error(`a collection projection produced a ${t.termType} term; only named nodes and literals are carried`);
 };
 
-/** One entity → its projected quads (compiler terms). */
+const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
+/**
+ * One entity → its projected quads (compiler terms). An RDF list in the projection (a tending playlist's ordered
+ * prompts) is made of BLANK NODES with random names, which the compiler refuses and which would never match between a
+ * prior and a new projection; its cells are named deterministically under the entity: `<entity>/list/<predicate>/<i>`
+ * (walking rdf:rest from the head the entity points at). A query that walks rdf:first / rdf:rest reads the same list.
+ */
 export function entityQuads(entity) {
   const store = new oxigraph.Store();
   projectEntity(store, entity);
-  return store.match(null, null, null).map((q) => [termOf(q.subject), termOf(q.predicate), termOf(q.object)]);
+  const quads = store.match(null, null, null);
+  const names = new Map();
+  for (const q of quads) {
+    if (q.object.termType !== 'BlankNode' || q.subject.termType === 'BlankNode') continue;
+    const local = q.predicate.value.replace(/^.*[#/]/, '');
+    let cell = q.object, i = 0;
+    while (cell && cell.termType === 'BlankNode' && !names.has(cell.value)) {
+      names.set(cell.value, `${q.subject.value}/list/${encodeURIComponent(local)}/${i++}`);
+      cell = store.match(cell, oxigraph.namedNode(`${RDF}rest`), null)[0]?.object;
+    }
+  }
+  const sk = (t) => (t.termType === 'BlankNode' ? { type: 'uri', value: names.get(t.value) ?? (() => { throw new Error('a blank node outside any list the entity points at'); })() } : termOf(t));
+  return quads.map((q) => [sk(q.subject), termOf(q.predicate), sk(q.object)]);
 }
 
 export class CollectionsUnavailable extends Error {
