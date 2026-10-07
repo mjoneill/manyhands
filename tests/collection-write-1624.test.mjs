@@ -87,3 +87,19 @@ test('#1624 collection: a quad on another entity is refused before anything is s
   p.quads = [...p.quads, [{ type: 'uri', value: 'https://scrumboard.local/model/someone-else' }, { type: 'uri', value: 'https://schema.org/name' }, { type: 'literal', value: 'x' }]];
   assert.throws(() => compile(put([p])), /is not <https:\/\/scrumboard\.local\/model\/k5>/);
 });
+
+test('#1624 collection: a part that REQUIRES a subject lands only while that subject exists; a removal of the target is not blocked', { skip: SKIP }, async () => {
+  await withExec(async (g) => {
+    const target = model('target');
+    assert.equal((await g.update(put([part('models', target)]))).outcome, 'APPLIED');
+    const ref = (k) => ({ ...part('otherKinds', { '@id': `https://scrumboard.local/thing/${k}`, '@type': 'scrum:Model', name: k }, null, null, '1', []), requires: [target['@id']] });
+    assert.equal((await g.update(put([ref('a')]))).outcome, 'APPLIED', 'the target exists: the referencing write lands');
+    assert.equal((await g.update(put([{ collection: 'models', iri: target['@id'], remove: true, expectedVersion: '1', prior: entityQuads(target) }]))).outcome, 'APPLIED', 'deleting the target is never blocked by a reference');
+    assert.equal((await g.update(put([ref('b')]))).outcome, 'PRECONDITION_FAILED', 'the target is gone: a write that sets a reference to it is refused');
+    assert.deepEqual(await triplesOf(g, 'https://scrumboard.local/thing/b'), [], 'and nothing of it landed');
+  });
+});
+
+test('#1624 collection: a remove part carrying requires is refused before anything is sent', () => {
+  assert.throws(() => compile(put([{ collection: 'models', iri: model('r')['@id'], remove: true, expectedVersion: '1', prior: [], requires: ['https://scrumboard.local/x'] }])), /carries no quads, json, version, unique or requires/);
+});

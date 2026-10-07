@@ -164,7 +164,21 @@ const COLLECTION_FAMILIES = [
   // derived (a slug, slug + version number, a mint's window), so a twin is a fresh-subject collision; a playlist
   // version's ordered prompts are an RDF list, named under the version (see collections-unit entityQuads).
   { key: 'tending', routes: ['/api/tending', '/api/tending-config'] },
+  // #1624 talks, roles and obligations. A role and its versions REFERENCE their defining card (`scrum:definedBy`); an
+  // obligation references what it is `about` (a card, memory, decision, predicate or obligation). A write that SETS such
+  // a reference requires its target in the same guarded update (see collections-unit `requires`); the target can still
+  // be deleted later. A card is a graph subject only with the cards unit on.
+  { key: 'talks', routes: ['/api/talks'] },
+  { key: 'roles', routes: ['/api/roles'], requires: (e) => referencedSubjects(e['scrum:definedBy']) },
+  { key: 'roleVersions', routes: ['/api/roles'], requires: (e) => referencedSubjects(e['scrum:definedBy']) },
+  { key: 'obligations', routes: ['/api/obligations'], requires: (e) => referencedSubjects(e.about) },
 ];
+/** A stored reference → the graph subject that must exist: an IRI names itself; a bare id is a card (cards unit only). */
+function referencedSubjects(v) {
+  if (typeof v !== 'string' || !v) return [];
+  if (/^https?:\/\//.test(v)) return [v];
+  return CARDS_UNIT ? [`https://scrumboard.local/entity/${v}`] : [];
+}
 let COLLECTIONS = null;
 const FILE_COLLS = Symbol('fileCollections');   // the document's own copies of the graph-held collections
 

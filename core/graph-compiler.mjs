@@ -1344,7 +1344,7 @@ function canonCollectionWrite(e) {
   if (!Array.isArray(e.parts) || !e.parts.length) fail('entity.parts is a non-empty array');
   const parts = e.parts.map((x, k) => {
     const w = `entity.parts[${k}]`;
-    obj(x, ['collection', 'iri', 'expectedVersion', 'version', 'quads', 'prior', 'json', 'remove', 'unique'], w);
+    obj(x, ['collection', 'iri', 'expectedVersion', 'version', 'quads', 'prior', 'json', 'remove', 'unique', 'requires'], w);
     if (typeof x.collection !== 'string' || !COLL_KEY_RE.test(x.collection)) fail(`${w}.collection must name a collection`);
     const iri = checkIri(x.iri, `${w}.iri`);
     const own = (list, label) => {
@@ -1360,7 +1360,7 @@ function canonCollectionWrite(e) {
       return [...new Map(out.map((t) => [t.join(' '), t])).values()].sort((a, b) => (a.join(' ') < b.join(' ') ? -1 : 1));
     };
     if (x.remove === true) {
-      if (x.quads != null || x.json != null || x.version != null || x.unique != null) fail(`${w}: a remove part carries no quads, json, version or unique`);
+      if (x.quads != null || x.json != null || x.version != null || x.unique != null || x.requires != null) fail(`${w}: a remove part carries no quads, json, version, unique or requires`);
       return { collection: x.collection, iri, remove: true, expectedVersion: intLit(x.expectedVersion, `${w}.expectedVersion`), prior: own(x.prior ?? [], 'prior') };
     }
     if (x.remove != null && x.remove !== false) fail(`${w}.remove must be true or absent`);
@@ -1379,9 +1379,13 @@ function canonCollectionWrite(e) {
       }
       return { all: [pair(u, w2)] };
     });
+    // A reference this write SETS: the subject it names must exist in the graph when the update runs (a concurrent
+    // delete makes the write PRECONDITION_FAILED instead of leaving a dangling link). Never a lock on the target.
+    if (x.requires != null && !Array.isArray(x.requires)) fail(`${w}.requires must be an array`);
+    const requires = [...new Set((x.requires ?? []).map((r, n) => ref(checkIri(r, `${w}.requires[${n}]`))))].sort();
     return { collection: x.collection, iri, expectedVersion, version, quads: own(x.quads, 'quads'),
       prior: expectedVersion == null ? (x.prior == null || (Array.isArray(x.prior) && !x.prior.length) ? [] : fail(`${w}.prior: a create has no prior state`)) : own(x.prior ?? [], 'prior'),
-      json: rStr(x.json, `${w}.json`), ...(unique.length ? { unique } : {}) };
+      json: rStr(x.json, `${w}.json`), ...(unique.length ? { unique } : {}), ...(requires.length ? { requires } : {}) };
   }).sort((a, b) => (a.iri < b.iri ? -1 : 1));
   if (new Set(parts.map((p) => p.iri)).size !== parts.length) fail('entity.parts: an entity appears in two parts');
   return { kind: 'collection', parts };
@@ -1403,6 +1407,7 @@ function collectionClauses(parts, { OP, v, pre, branches, dIns, tag }) {
       if (P.prior.length) branches.push(`    { VALUES (?xs ?xp ?xo) {\n${P.prior.map((q) => `      (${q.join(' ')})`).join('\n')}\n    } }`);
     }
     for (const U of P.unique || []) pre.push(`    FILTER NOT EXISTS { ?xu ${INC} ${KEY} ; ${U.all.map((a) => `${a.predicate} ${a.value}`).join(' ; ')} . FILTER(?xu != ${I}) }`);
+    (P.requires || []).forEach((T, j) => pre.push(`    FILTER EXISTS { ${T} ?xrp${tag}${k}_${j} ?xro${tag}${k}_${j} }`));
     if (P.remove) return;
     for (const [s, p, o] of P.quads) dIns.push(`  ${v(s)} ${v(p)} ${v(o)} .`);
     dIns.push(`  ${v(I)} ${INC} ${v(KEY)} .`, `  ${v(I)} ${VER} ${v(P.version)} .`, `  ${v(I)} ${REC} ${v(OP)} .`, `  ${v(I)} ${JSONP} ${v(recLit(P.json))} .`);
