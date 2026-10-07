@@ -67,6 +67,12 @@ const SERVER_ASSIGNED = new Set([
   // PRODUCTION (#1051 after the first assertion), not from source.
   'dependentSeats',
   'claimedAt',    // ditto
+  // #1584 — idempotency keys the server copies from the request's own `requestId` (create: handleCreateCard; move: the
+  // move patch). Not settable by name and absent from PATCHABLE_CARD_FIELDS, so a probe that wrote either by name
+  // would store nothing; `keepServerOwned` restores lastMoveRequestId over any snapshot. Like `version`, they entered
+  // this universe from PRODUCTION. Reopens if a route ever accepts either name directly in a body.
+  'createRequestId',
+  'lastMoveRequestId',
   'ignoredFields', // the diagnostic itself, not a stored field
   // #1288 — READ DECORATIONS, and they are not stored AT ALL.
   //
