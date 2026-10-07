@@ -29,7 +29,8 @@ import { durableUpdate } from '../core/durable-update.mjs';
 import { jsonLdToDomain, isJsonLdDocument } from '../core/jsonld.mjs';
 import { domainToBoard } from '../core/mapping.mjs';
 import { collectionFamilies } from '../core/collection-families.mjs';
-import { createCollectionsUnit, entityQuads } from '../core/collections-unit.mjs';
+import { createCollectionsUnit } from '../core/collections-unit.mjs';
+import { importIntention } from '../core/collection-import-1624.mjs';
 import { wakeCreateIntention, wakesForQuery, wakeFromRow } from '../core/smallkinds-unit.mjs';
 import { renameEntity } from '../core/collection-renames-1624.mjs';
 
@@ -85,12 +86,7 @@ if (apply) {
   for (const fam of families) {
     for (const e of (Array.isArray(board[fam.key]) ? board[fam.key] : [])) {
       if (!e || typeof e['@id'] !== 'string') continue;
-      const json = JSON.stringify(e);
-      const unique = fam.unique ? fam.unique(e) : [];
-      const requires = fam.requires ? fam.requires(e) : [];
-      const part = { collection: fam.key, iri: e['@id'], expectedVersion: null, version: '1', quads: entityQuads(e), json,
-        ...(unique.length ? { unique } : {}), ...(requires.length ? { requires } : {}) };
-      await send(`${fam.key} ${e['@id']}`, { kind: 'entity.put', opId: `urn:ex:op/collection/import/${fam.key}/${sha(e['@id'])}`, actor: ACTOR, entity: { kind: 'collection', parts: [part] } });
+      await send(`${fam.key} ${e['@id']}`, importIntention(fam, e));
       if (++n % 200 === 0) console.error(`entities: ${n} (${Math.round((Date.now() - t0) / 1000)} s)`);
     }
   }
