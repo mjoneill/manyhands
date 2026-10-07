@@ -1,0 +1,177 @@
+/**
+ * #1624 — THE MUTABLE SMALL-KIND COLLECTIONS in the graph (procedures and their versions, runs, models, predicates,
+ * kinds, agents and their prompts; review 08:37Z: reuse #1598's transaction machinery through the single allowlisted
+ * entity.put). Same rules as the card cache (core/cards-unit.mjs):
+ *   · the cache is FILLED only from graph reads (at boot, and on reload);
+ *   · it is UPDATED only after the executor answers APPLIED;
+ *   · after any other answer it is marked UNCERTAIN and reloaded before the next read; a reload that fails is a 503.
+ * Each family registers a collection: the board key it lives under and the UNIQUE values the graph must guard (a model
+ * key, a predicate name, a procedure + version number). The document's lock still serialises REST's writes; the
+ * version and unique guards make the graph itself refuse a stale or colliding write.
+ *
+ * An entity's projection is the replica's own (`projectEntity`), so graph_query reads the same triples; for every
+ * family registered here the projection is subject-only (measured 2026-10-07 on the live board), which is what lets the
+ * compiler refuse any quad whose subject is not the entity's own IRI.
+ */
+import oxigraph from 'oxigraph';
+import { durableUpdate } from './durable-update.mjs';
+import { projectEntity } from './graph-replica.mjs';
+
+const RS = 'https://scrumboard.local/ns#';
+const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
+const termOf = (t) => {
+  if (t.termType === 'NamedNode') return { type: 'uri', value: t.value };
+  if (t.termType === 'Literal') {
+    if (t.language) return { type: 'literal', value: t.value, lang: t.language };
+    return t.datatype && t.datatype.value !== XSD_STRING ? { type: 'literal', value: t.value, datatype: t.datatype.value } : { type: 'literal', value: t.value };
+  }
+  throw new Error(`a collection projection produced a ${t.termType} term; only named nodes and literals are carried`);
+};
+
+const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
+/**
+ * One entity → its projected quads (compiler terms). An RDF list in the projection (a tending playlist's ordered
+ * prompts) is made of BLANK NODES with random names, which the compiler refuses and which would never match between a
+ * prior and a new projection; its cells are named deterministically under the entity: `<entity>/list/<predicate>/<i>`
+ * (walking rdf:rest from the head the entity points at). A query that walks rdf:first / rdf:rest reads the same list.
+ */
+export function entityQuads(entity) {
+  const store = new oxigraph.Store();
+  projectEntity(store, entity);
+  const quads = store.match(null, null, null);
+  const names = new Map();
+  for (const q of quads) {
+    if (q.object.termType !== 'BlankNode' || q.subject.termType === 'BlankNode') continue;
+    const local = q.predicate.value.replace(/^.*[#/]/, '');
+    let cell = q.object, i = 0;
+    while (cell && cell.termType === 'BlankNode' && !names.has(cell.value)) {
+      names.set(cell.value, `${q.subject.value}/list/${encodeURIComponent(local)}/${i++}`);
+      cell = store.match(cell, oxigraph.namedNode(`${RDF}rest`), null)[0]?.object;
+    }
+  }
+  const sk = (t) => (t.termType === 'BlankNode' ? { type: 'uri', value: names.get(t.value) ?? (() => { throw new Error('a blank node outside any list the entity points at'); })() } : termOf(t));
+  return quads.map((q) => [sk(q.subject), termOf(q.predicate), sk(q.object)]);
+}
+
+export class CollectionsUnavailable extends Error {
+  constructor(reason) { super(`collections are unavailable: ${reason}`); this.code = 'COLLECTIONS_UNAVAILABLE'; }
+}
+
+/**
+ * `families`: [{ key, unique?: (entity) => [{ predicate: IRI, value: term }], requires?: (entity) => [IRI], inherits?: (entity) => id }].
+ * `client` is a graph client. `requires` names the subjects the entity references; a write that sets one guards that it
+ * exists. `inherits` names the cached entity whose references this one copies (they count as already held).
+ */
+export function createCollectionsUnit({ client, families, mintId, actorIri = (who) => `https://scrumboard.local/person/${encodeURIComponent(who || 'board')}` }) {
+  const byKey = new Map(families.map((f) => [f.key, f]));
+  /** key → Map(id → { entity, json, ver }) */
+  let cache = null;
+  let uncertain = true;
+  let gen = 0;
+
+  async function load() {
+    const next = new Map([...byKey.keys()].map((k) => [k, new Map()]));
+    const q = await client.query(`SELECT ?s ?k ?v ?j WHERE { ?s <${RS}inCollection> ?k ; <urn:ex:ver> ?v ; <${RS}entityJson> ?j }`);
+    if (!q.ok) throw new CollectionsUnavailable(q.reason || 'the graph could not be read');
+    for (const r of q.rows) {
+      const m = next.get(r.k.value);
+      if (!m) continue;   // a collection no family here owns (a later unit's): not ours to serve
+      m.set(r.s.value, { entity: JSON.parse(r.j.value), json: r.j.value, ver: Number(r.v.value) });
+    }
+    cache = next; uncertain = false; gen++;
+  }
+  async function ensureFresh() {
+    if (cache && !uncertain) return;
+    try { await load(); } catch (e) { uncertain = true; throw e instanceof CollectionsUnavailable ? e : new CollectionsUnavailable(e.message); }
+  }
+  /** key → a fresh mutable array of that collection's entities. */
+  function snapshot() {
+    if (!cache || uncertain) throw new CollectionsUnavailable('the collection cache is not current');
+    return Object.fromEntries([...cache].map(([k, m]) => [k, [...m.values()].map((r) => JSON.parse(r.json))]));
+  }
+  /** The guarded parts that turn the cache into `data[key]` for every registered key ([] when nothing changed). */
+  function plan(data) {
+    if (!cache || uncertain) throw new CollectionsUnavailable('the collection cache is not current');
+    const parts = [];
+    const cachedById = (id) => { for (const m of cache.values()) { const r = m.get(id); if (r) return r; } return null; };
+    for (const [key, fam] of byKey) {
+      const was = cache.get(key);
+      const seen = new Set();
+      for (const e of Array.isArray(data[key]) ? data[key] : []) {
+        const id = e && e['@id'];
+        if (typeof id !== 'string') continue;
+        seen.add(id);
+        const json = JSON.stringify(e);
+        const prev = was.get(id);
+        if (prev && prev.json === json) continue;
+        const unique = fam.unique ? fam.unique(e) : [];
+        // Only a reference this write SETS is guarded: one the entity already held was checked when it was set, and
+        // guarding it again would make every later edit depend on the target living forever.
+        // `inherits` names another entity whose references this one copies (a role version copies its role's): what that
+        // entity already holds in the cache is held here too, so a new version that keeps the role's reference is not
+        // re-guarded, while one that changes it is.
+        const parent = fam.inherits ? cachedById(fam.inherits(e)) : null;
+        const held = new Set([...(prev && fam.requires ? fam.requires(prev.entity) : []), ...(parent && fam.requires ? fam.requires(parent.entity) : [])]);
+        const requires = (fam.requires ? fam.requires(e) : []).filter((r) => !held.has(r));
+        const extra = { ...(unique.length ? { unique } : {}), ...(requires.length ? { requires } : {}) };
+        parts.push(prev
+          ? { collection: key, iri: id, expectedVersion: String(prev.ver), version: String(prev.ver + 1), quads: entityQuads(e), prior: entityQuads(prev.entity), json, ...extra }
+          : { collection: key, iri: id, expectedVersion: null, version: '1', quads: entityQuads(e), json, ...extra });
+      }
+      for (const [id, prev] of was) if (!seen.has(id)) parts.push({ collection: key, iri: id, remove: true, expectedVersion: String(prev.ver), prior: entityQuads(prev.entity) });
+    }
+    return parts;
+  }
+  /** After APPLIED: the cache becomes `data` for every registered key. */
+  function applied(data, parts) {
+    const written = new Map(parts.filter((p) => !p.remove).map((p) => [p.iri, Number(p.version)]));
+    for (const [key, was] of cache) {
+      const next = new Map();
+      for (const e of Array.isArray(data[key]) ? data[key] : []) {
+        const id = e && e['@id'];
+        if (typeof id !== 'string') continue;
+        const ver = written.get(id);
+        next.set(id, ver == null && was.get(id) ? was.get(id) : { entity: JSON.parse(JSON.stringify(e)), json: JSON.stringify(e), ver: ver ?? 1 });
+      }
+      cache.set(key, next);
+    }
+    gen++;
+  }
+  /** A write of collection parts ALONE (no card changed): one entity.put kind 'collection'. */
+  async function commit(data, { actor, opId } = {}) {
+    const parts = plan(data);
+    if (!parts.length) return { outcome: 'NOOP' };
+    const intention = { kind: 'entity.put', opId: opId || `urn:ex:op/collections/${mintId()}`, actor: actorIri(actor), entity: { kind: 'collection', parts } };
+    let r;
+    try { r = await durableUpdate(client, intention); } catch (e) { uncertain = true; throw new CollectionsUnavailable(e.message); }
+    if (r.outcome !== 'APPLIED') {
+      // UNAVAILABLE: nothing was sent, so the cache is still the graph's. Anything else leaves it to be re-read.
+      if (r.outcome !== 'UNAVAILABLE') uncertain = true;
+      // A PRECONDITION_FAILED is the guards refusing (stale, taken, gone): a conflict the caller can act on. A REJECTED is
+      // the executor refusing the update itself: our defect, never reported as a conflict.
+      if (r.outcome === 'PRECONDITION_FAILED') throw Object.assign(new Error(`collection write refused: ${r.outcome}${r.reason ? `: ${r.reason}` : ''}`), { code: 'CARD_WRITE_CONFLICT' });
+      if (r.outcome === 'REJECTED') throw new Error(`the executor rejected a collection write: ${r.reason || 'no reason given'}`);
+      throw new CollectionsUnavailable(`the write's outcome is ${r.outcome}${r.reason ? `: ${r.reason}` : ''}`);
+    }
+    applied(data, parts);
+    return { outcome: 'APPLIED', parts: parts.length };
+  }
+  /** Single-flight, 2 s, nothing cached: the same K7 probe as the card unit. */
+  let probing = null;
+  function reachable() {
+    if (probing) return probing;
+    probing = (async () => {
+      let timer;
+      const timeout = new Promise((r) => { timer = setTimeout(() => r(false), 2000); });
+      const ok = await Promise.race([client.query('SELECT ?x WHERE { BIND(1 AS ?x) }').then((q) => q.ok, () => false), timeout]);
+      clearTimeout(timer);
+      return ok;
+    })().finally(() => { probing = null; });
+    return probing;
+  }
+  return {
+    keys: [...byKey.keys()], load, ensureFresh, snapshot, plan, applied, commit, reachable,
+    markUncertain() { uncertain = true; },
+    get generation() { return gen; }, get loaded() { return cache != null; }, get uncertain() { return uncertain; },
+  };
+}

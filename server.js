@@ -49,6 +49,7 @@ import {
   seatDeclareIntention, seatClearIntention, SEAT_DECL_BASE,
   collapseIdentities, identitiesFromEvents, identityOf,
 } from './core/logborn-unit.mjs';
+import { createSmallkindsUnit, wakeCreateIntention, wakeIri } from './core/smallkinds-unit.mjs';   // #1624
 import { BOARD_TOOLS } from './core/board-tools.mjs';
 import { resolveAttachedTo } from './core/attached-to.mjs'; // #761
 import { promptGrantConflict, promptGrantWarning } from './core/prompt-grants.mjs'; // #1242
@@ -65,7 +66,7 @@ import { readTendingConfig, writeTendingConfig } from './tending-config.mjs';
 import { buildTendingEntities, person as personIri } from './core/tending-bootstrap.mjs';
 import { resolvePool as resolveWhisperPool, bagState } from './core/tending-pool.mjs';
 import { mintId } from './core/tending-ids.mjs';
-import { createPrompt, editPrompt, setEnabled, reorderPlaylist, removePrompt, setShuffle, readShuffle } from './core/tending-authoring.mjs';
+import { createPrompt, editPrompt, setEnabled, reorderPlaylist, removePrompt, setShuffle, readShuffle, assertSlug } from './core/tending-authoring.mjs';
 import { resolveProvenance } from './core/tending-provenance.mjs';
 import { boardToDomain, domainToBoard, cardToNode } from './core/mapping.mjs';
 import { OUTBOX_FIELD, outboxOf, withAnnouncement, listOutbox, modeProblem, legacyProof, postMatchesEntry, opIdFor, announcePostId, postCreateIntention, obligationIdOf } from './core/announce-outbox.mjs';   // #1574 C3a/C3b/C3c
@@ -130,6 +131,56 @@ const FILE_CARDS = Symbol('fileCards');           // the document's card list, p
 const FILE_NEXT_SHORT_ID = Symbol('fileNextShortId');
 const FILE_ORIGINS = Symbol('fileOutboxOrigins');   // #1598 K4 — the outbox mutations the document already held when read
 const cardWriteContext = new AsyncLocalStorage();   // #1598 — the write a locked closure stages for its lock to commit
+// #1624 — the small-kinds unit (wake first). Reads and writes go through the one generic
+// `entity.put` primitive; OFF ⇒ the document collection is the only store (today's path).
+const SMALLKINDS_UNIT = process.env.SCRUM_GRAPH_UNIT_SMALLKINDS === '1';
+// #1624 — the MUTABLE K13 families: graph-held collections through #1598's transaction machinery (review 08:37Z). Each
+// family registers { key (the board collection), unique(entity) → the values the graph must guard, routes (URL prefixes
+// that read or write it) }. With none registered nothing below runs. Wakes stay on their own lock-free path.
+const RS_NS = 'https://scrumboard.local/ns#';
+const COLLECTION_FAMILIES = [
+  // #1624 definitions (rows: definitions-graph-d1). A predicate's and a kind's IRI is derived from its name, so a twin
+  // registration is the same entity (a revision), never a second node. A model key is unique among models. A procedure
+  // version is unique by its procedure AND its name ("<procedure> v<n>"), which is how the number is allocated.
+  { key: 'predicates', routes: ['/api/predicates'] },
+  { key: 'kinds', routes: ['/api/kinds'] },
+  { key: 'models', routes: ['/api/models'],
+    unique: (e) => (typeof e['scrum:modelKey'] === 'string' ? [{ predicate: `${RS_NS}modelKey`, value: { type: 'literal', value: e['scrum:modelKey'] } }] : []) },
+  { key: 'procedures', routes: ['/api/procedures', '/api/procedure-versions'],
+    unique: (e) => (e['@type'] === 'scrum:ProcedureVersion' && typeof e['scrum:ofProcedure'] === 'string' && typeof e.name === 'string'
+      ? [{ all: [{ predicate: `${RS_NS}ofProcedure`, value: { type: 'uri', value: e['scrum:ofProcedure'] } }, { predicate: 'https://schema.org/name', value: { type: 'literal', value: e.name } }] }] : []) },
+  { key: 'runs', routes: ['/api/runs'] },
+  // #1624 agents (rows: agents-graph-a1). An agent's IRI is derived from its seat key and a prompt version's from the
+  // seat and its number, so a twin is a fresh-subject collision; the seat key is also unique among agents. A rest/retire
+  // also releases the seat's cards: the graph write (the agent) commits FIRST, the document (cards, announcement) only
+  // after it is APPLIED, so a refused or unreachable graph changes neither.
+  { key: 'agents', routes: ['/api/agents'],
+    unique: (e) => (typeof e['scrum:seatKey'] === 'string' ? [{ predicate: `${RS_NS}seatKey`, value: { type: 'literal', value: e['scrum:seatKey'] } }] : []) },
+  { key: 'agentPrompts', routes: ['/api/agents'] },
+  // #1624 artifacts (rows: artifacts-graph-k1). Adding one also adds it to its run's prov:generated: the plan carries
+  // both entities as parts of ONE guarded update (the run on its version), so they land together or not at all.
+  { key: 'artifacts', routes: ['/api/artifacts'] },
+  // #1624 tending (rows: tending-graph-g1): prompts, versions, playlists and their versions, mints, state. Every IRI is
+  // derived (a slug, slug + version number, a mint's window), so a twin is a fresh-subject collision; a playlist
+  // version's ordered prompts are an RDF list, named under the version (see collections-unit entityQuads).
+  { key: 'tending', routes: ['/api/tending', '/api/tending-config'] },
+  // #1624 talks, roles and obligations. A role and its versions REFERENCE their defining card (`scrum:definedBy`); an
+  // obligation references what it is `about` (a card, memory, decision, predicate or obligation). A write that SETS such
+  // a reference requires its target in the same guarded update (see collections-unit `requires`); the target can still
+  // be deleted later. A card is a graph subject only with the cards unit on.
+  { key: 'talks', routes: ['/api/talks'] },
+  { key: 'roles', routes: ['/api/roles'], requires: (e) => referencedSubjects(e['scrum:definedBy']) },
+  { key: 'roleVersions', routes: ['/api/roles'], requires: (e) => referencedSubjects(e['scrum:definedBy']), inherits: (e) => e['scrum:ofRole'] },
+  { key: 'obligations', routes: ['/api/obligations'], requires: (e) => referencedSubjects(e.about) },
+];
+/** A stored reference → the graph subject that must exist: an IRI names itself; a bare id is a card (cards unit only). */
+function referencedSubjects(v) {
+  if (typeof v !== 'string' || !v) return [];
+  if (/^https?:\/\//.test(v)) return [v];
+  return CARDS_UNIT ? [`https://scrumboard.local/entity/${v}`] : [];
+}
+let COLLECTIONS = null;
+const FILE_COLLS = Symbol('fileCollections');   // the document's own copies of the graph-held collections
 
 let _documentWrites = 0;   // #1574 1b — successful writeBoard calls since boot; on /api/health as `documentWrites`
 // #1574 1b scope change — announcements whose inline attempt failed stay pending until a hand-run reconciler or the cards
@@ -916,12 +967,20 @@ async function handleReportRefusal(req, res) {
  * Send a JSON response
  */
 function sendJSON(res, statusCode, data) {
-  // #1598 — a handler's generic catch passes the cards unit's own "unavailable" error (a fixed prefix, produced only by
-  // core/cards-unit.mjs) as a 500; it means the graph executor is not answering, so it is answered as one: 503.
-  // Two signals, either enough: the request context was marked (a graph write or reload in THIS request could not be
-  // resolved: a handler's catch may send a fixed message like "Failed to create card"), or the error text is the unit's.
+  // #1624 — a write whose graph commit could not reach the executor (the request context says so) is a 503, never a
+  // 500: the handler's generic catch does not know the graph's language, so it is translated here, once.
   const graphCtx = requestContext.getStore();
-  const unitUnavailable = statusCode === 500 && data && typeof data.error === 'string' && /^cards are unavailable: /.test(data.error);
+  // Two signals, either enough: the request context was marked, or the error is one of the units' own "unavailable"
+  // errors (fixed prefixes, produced only by core/cards-unit.mjs and core/collections-unit.mjs), passed through a
+  // handler's generic catch as `e.message` — a shared read can run in another request's async context.
+  const unitUnavailable = statusCode === 500 && data && typeof data.error === 'string' && /^(cards|collections) are unavailable: /.test(data.error);
+  // A guarded write the graph REFUSED (a stale version, a unique value taken, a referenced subject gone), still refused
+  // after lockedWithCards' one retry, is a determinate answer: 409, never a bare 500.
+  const unitRefused = statusCode === 500 && data && typeof data.error === 'string' && /^(card|collection) write refused: /.test(data.error);
+  if (statusCode === 500 && ((graphCtx && graphCtx.writeRefused) || unitRefused)) {
+    statusCode = 409;
+    data = { error: `the graph refused this write as stale or conflicting; nothing was written: ${unitRefused ? data.error : graphCtx.writeRefused}`, code: 'WRITE_CONFLICT' };
+  }
   if (statusCode === 500 && ((graphCtx && graphCtx.graphUnavailable) || unitUnavailable)) {
     statusCode = 503;
     data = { error: `the graph executor is not answering, so the outcome is not known and nothing is reported as written: ${unitUnavailable ? data.error : graphCtx.graphUnavailable}`, code: 'GRAPH_UNAVAILABLE' };
@@ -1029,11 +1088,11 @@ function readBoard() {
     const { key, domain } = loadDomainShared(BOARD_DATA_FILE);
     // Keyed by PATH as well as identity: one board file per process today, but
     // a key that could match a different file's identity is a latent stale read.
-    // #1598 — an UNCERTAIN card cache is a miss, never a hit: the board built before an UNKNOWN write must not be served
-    // while the graph's outcome is undetermined (the rebuild's snapshot refuses, which the response layer answers 503).
-    if (!_sharedBoard || _sharedBoard.file !== BOARD_DATA_FILE || _sharedBoard.key !== key || (CARDS_UNIT && (CARDS.uncertain || _sharedBoard.cardsGen !== CARDS.generation))) {
+    // #1598/#1624 — an UNCERTAIN card or collection cache is a miss, never a hit: the board built before an UNKNOWN write
+    // must not be served while the graph's outcome is undetermined (the rebuild's snapshot refuses: a 503).
+    if (!_sharedBoard || _sharedBoard.file !== BOARD_DATA_FILE || _sharedBoard.key !== key || (CARDS_UNIT && (CARDS.uncertain || _sharedBoard.cardsGen !== CARDS.generation)) || (COLLECTIONS && (COLLECTIONS.uncertain || _sharedBoard.collGen !== COLLECTIONS.generation))) {
       const board = deepFreeze(withUnitCards(finishBoard(domainToBoard(domain))));
-      _sharedBoard = { file: BOARD_DATA_FILE, key, board, builtMs: Math.round(performance.now() - t0), builtAt: new Date().toISOString(), cardsGen: CARDS_UNIT ? CARDS.generation : null };
+      _sharedBoard = { file: BOARD_DATA_FILE, key, board, builtMs: Math.round(performance.now() - t0), builtAt: new Date().toISOString(), cardsGen: CARDS_UNIT ? CARDS.generation : null, collGen: COLLECTIONS ? COLLECTIONS.generation : null };
       ctx.read = `shared; rebuilt=${_sharedBoard.builtMs}ms; key=${key}; cards=${board.cards.length}`;
     } else {
       ctx.read = `shared; hit; built=${_sharedBoard.builtAt}; key=${_sharedBoard.key}; cards=${_sharedBoard.board.cards.length}`;
@@ -1052,14 +1111,27 @@ function readBoard() {
  * cache is not current: a board without its cards is never served as a board.
  */
 function withUnitCards(board) {
-  if (!CARDS_UNIT) return board;
-  let snap;
-  try { snap = CARDS.snapshot(board.nextShortId); } catch (e) { markGraphUnavailable(e); throw e; }
-  board[FILE_CARDS] = board.cards;
-  board[FILE_NEXT_SHORT_ID] = board.nextShortId;
-  board[FILE_ORIGINS] = new Set(Object.keys(outboxOf(board).origins));
-  board.cards = snap.cards;
-  board.nextShortId = snap.nextShortId;
+  if (CARDS_UNIT) {
+    let snap;
+    try { snap = CARDS.snapshot(board.nextShortId); } catch (e) { markGraphUnavailable(e); throw e; }
+    board[FILE_CARDS] = board.cards;
+    board[FILE_NEXT_SHORT_ID] = board.nextShortId;
+    board[FILE_ORIGINS] = new Set(Object.keys(outboxOf(board).origins));
+    board.cards = snap.cards;
+    board.nextShortId = snap.nextShortId;
+  }
+  if (COLLECTIONS) {
+    // #1624 — the graph-held collections are the unit's; the document's own copies ride beside them, put back on write.
+    // An uncertain cache (the executor did not answer the last write or reload) is "not answering" to the response
+    // layer too: the request's 500 becomes a 503 (sendJSON), never a board served without them.
+    let snap;
+    try { snap = COLLECTIONS.snapshot(); } catch (e) {
+      const ctx = requestContext.getStore(); if (ctx) ctx.graphUnavailable = e.message;
+      throw e;
+    }
+    board[FILE_COLLS] = Object.fromEntries(COLLECTIONS.keys.map((k) => [k, board[k]]));
+    for (const k of COLLECTIONS.keys) board[k] = snap[k];
+  }
   return board;
 }
 
@@ -1155,12 +1227,13 @@ function writeBoard(data, events) {
       + 'name its entities, derive the events by diffing — see handleSave.',
     );
   }
-  if (CARDS_UNIT && data[FILE_CARDS]) {
-    // #1598 — the cards go to the graph FIRST: stage this write for the lock to commit, and write the document (and the
-    // events) only after the executor answered APPLIED. A card change outside the lock has no one to commit it.
+  if ((CARDS_UNIT && data[FILE_CARDS]) || (COLLECTIONS && data[FILE_COLLS])) {
+    // #1598 / #1624 — the graph FIRST: stage this write for the lock to commit, and write the document (and the events)
+    // only after the executor answered APPLIED. A card or collection change outside the lock has no one to commit it.
     const staged = cardWriteContext.getStore();
     if (!staged) {
-      if (CARDS.plan(data.cards, data.nextShortId)) throw new Error('#1598: a card write outside withWriteLock cannot be committed to the graph');
+      if (CARDS_UNIT && data[FILE_CARDS] && CARDS.plan(data.cards, data.nextShortId)) throw new Error('#1598: a card write outside withWriteLock cannot be committed to the graph');
+      if (COLLECTIONS && data[FILE_COLLS] && COLLECTIONS.plan(data).length) throw new Error('#1624: a collection write outside withWriteLock cannot be committed to the graph');
     } else { staged.push({ data, events }); return; }
   }
   writeDocument(data, events);
@@ -1171,6 +1244,7 @@ function writeDocument(data, events) {
   if (CARDS_UNIT && data[FILE_CARDS]) {
     data = { ...data, cards: data[FILE_CARDS], nextShortId: data[FILE_NEXT_SHORT_ID] };
   }
+  if (COLLECTIONS && data[FILE_COLLS]) data = { ...data, ...data[FILE_COLLS] };   // #1624 — the document keeps its own copies
   data.lastUpdated = new Date().toISOString();
   data._README = BOARD_README;
   for (const ev of events) appendEvent(EVENT_LOG_DIR, ev, { now: data.lastUpdated });
@@ -1561,6 +1635,7 @@ async function warmGraphStoreOnce() {
     // #1598 — with cards in the graph the document's card list is not the cards: the replica projects the unit's cards
     // (graph_query must answer about the cards REST serves, not the file's frozen or removed copy).
     if (CARDS_UNIT) domain = { ...domain, nodes: CARDS.snapshot(domain.nextShortId).cards.map(cardToNode) };
+    if (COLLECTIONS) domain = { ...domain, ...COLLECTIONS.snapshot() };   // #1624 — graph_query reads the graph's collections, not the file's
     const docStamp = typeof domain?.lastUpdated === 'string' ? domain.lastUpdated : null;
     _graphDocStamp = docStamp;
     const doc = domainToJsonLd(domain);
@@ -4147,6 +4222,10 @@ async function handleAddArtifact(req, res) {
           + 'Put the bytes on disk and pass contentUrl + contentHash.',
       });
     }
+    // A missing run is the request's own fault: refused before any board read, so it stays a 400 while the graph is away.
+    if (typeof body.run !== 'string' || !body.run) {
+      return sendJSON(res, 400, { error: `no such run ${JSON.stringify(body.run ?? null)} — create the run first (POST /api/runs / run_create)` });
+    }
     const result = await withWriteLock(async () => {
       const data = readBoard();
       const runIdx = runsOf(data).findIndex((r) => r['@id'] === body.run);
@@ -4240,7 +4319,11 @@ function handleListRuns(req, res) {
 // Append-only: a wake is never edited or deleted, so "when did I last wake" is
 // the newest one, and "what changed since" is changes_since(its at).
 const WAKE_ID = () => `https://scrumboard.local/wake/${crypto.randomUUID()}`;
+// #1624 — with the small-kinds unit on, the DOCUMENT's wakes are not the record. Reading
+// them is a defect (a stale answer masquerading as fresh), so it THROWS — same shape as
+// deliveriesOf under DELIVERIES_UNIT. A caller that holds the lock will never reach here.
 function wakesOf(data) {
+  if (SMALLKINDS_UNIT) throw new Error('#1624: wakes live in the graph (SCRUM_GRAPH_UNIT_SMALLKINDS=1); the document collection is not read');
   return Array.isArray(data.wakes) ? data.wakes : [];
 }
 const wakeEvent = (e, actor) => ({ op: 'create', actor, entity: { kind: 'wake', id: e['@id'] }, state: e });
@@ -5868,6 +5951,22 @@ async function handleCreateWake(req, res) {
     const body = JSON.parse(await readBody(req));
     const by = typeof body.by === 'string' && body.by.trim() ? body.by.trim() : null;
     if (!by) return sendJSON(res, 400, { error: 'by is required — the seat that woke. Declared, not authenticated.' });
+    // #1624 — with the small-kinds unit on, the graph executor IS the store; the document
+    // collection is not read or written. No write lock: the duplicate guard + fresh IRI
+    // guarantee atomicity in the graph. An unreachable or indeterminate executor is 503
+    // GRAPH_UNAVAILABLE, never a 201 (W3): a wake must not be implied as written when
+    // the executor could not tell us. The canonical wire JSON is persisted on the node
+    // alongside the projection, so the reader on either store returns the same shape.
+    if (SMALLKINDS_UNIT) {
+      const iri = wakeIri();
+      const at = new Date().toISOString();
+      const note = typeof body.note === 'string' ? body.note : '';
+      const entityJson = JSON.stringify({ seat: by, at, note });
+      const r = await SMALLKINDS.writeWake(wakeCreateIntention({ actor: graphActor(by), iri, seat: by, at, note, entityJson }));
+      if (r.status === 'APPLIED') return sendJSON(res, 201, wakeToWire({ '@id': iri, '@type': 'scrum:Wake', 'scrum:wokeSeat': by, 'scrum:wokeAt': at, text: note }));
+      if (r.status === 'UNAVAILABLE') return sendJSON(res, 503, { error: `the graph could not be written, so the wake was refused: ${r.reason}`, code: 'GRAPH_UNAVAILABLE' });
+      return sendJSON(res, 500, { error: `the graph refused the wake: ${r.reason ?? 'rejected'}` });
+    }
     const result = await withWriteLock(async () => {
       const data = readBoard();
       const entity = {
@@ -6247,13 +6346,32 @@ async function handleListDeliveriesInner(req, res) {
   sendJSON(res, 200, { deliveries: out, count: out.length });
 }
 
-function handleListWakes(req, res) {
-  const q = parseQuery(req.url);
-  let out = wakesOf(readBoard()).map(wakeToWire).sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0)); // newest first
-  if (q.seat) out = out.filter((w) => w.seat === q.seat);
-  const limit = Number.parseInt(q.limit, 10);
-  if (Number.isInteger(limit) && limit > 0) out = out.slice(0, limit);
-  sendJSON(res, 200, out);
+async function handleListWakes(req, res) {
+  try {
+    const q = parseQuery(req.url);
+    // #1624 — with the small-kinds unit on, the executor is the store of record. An
+    // unreachable executor is 503, never an empty list dressed as "none" (W3). The
+    // unit module applies the same gate on `limit` (Number.isInteger && > 0) as the
+    // unit-off branch below, so a malformed query string answers the FULL list on
+    // either path.
+    if (SMALLKINDS_UNIT) {
+      const filter = {};
+      if (q.seat) filter.seat = String(q.seat);
+      const parsed = Number.parseInt(q.limit, 10);
+      if (Number.isInteger(parsed) && parsed > 0) filter.limit = parsed;
+      const r = await SMALLKINDS.readWakes(filter);
+      if (r.unavailable) return sendJSON(res, 503, { error: `the graph could not be read, so the wake list is unknown: ${r.unavailable}`, code: 'GRAPH_UNAVAILABLE' });
+      return sendJSON(res, 200, r.wakes.map(wakeToWire));
+    }
+    let out = wakesOf(readBoard()).map(wakeToWire).sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0)); // newest first
+    if (q.seat) out = out.filter((w) => w.seat === q.seat);
+    const limit = Number.parseInt(q.limit, 10);
+    if (Number.isInteger(limit) && limit > 0) out = out.slice(0, limit);
+    sendJSON(res, 200, out);
+  } catch (e) {
+    console.error('GET /api/wakes:', e.message);
+    if (!res.headersSent) sendJSON(res, 500, { error: e.message });
+  }
 }
 
 async function handleCreateObligation(req, res) {
@@ -7332,7 +7450,7 @@ async function handleReady(req, res) {
 // concurrent PATCH requests cannot interleave their read-modify-write.
 let _writeLock = Promise.resolve();
 function withWriteLock(fn) {
-  const run = CARDS_UNIT ? () => lockedWithCards(fn) : fn;
+  const run = (CARDS_UNIT || COLLECTIONS) ? () => lockedWithCards(fn) : fn;
   const next = _writeLock.then(() => run(), () => run());
   _writeLock = next.catch(() => {});
   return next;
@@ -7346,11 +7464,18 @@ function withWriteLock(fn) {
  * reloaded cache, since every handler re-reads the board inside its closure.
  */
 const markGraphUnavailable = (e) => {
-  if (e && e.code === 'CARDS_UNAVAILABLE') { const ctx = requestContext.getStore(); if (ctx) ctx.graphUnavailable = e.message; }
+  if (e && (e.code === 'CARDS_UNAVAILABLE' || e.code === 'COLLECTIONS_UNAVAILABLE')) { const ctx = requestContext.getStore(); if (ctx) ctx.graphUnavailable = e.message; }
 };
 async function lockedWithCards(fn) {
   for (let attempt = 1; ; attempt++) {
-    try { await CARDS.ensureFresh(); } catch (e) { markGraphUnavailable(e); throw e; }
+    try {
+      if (CARDS_UNIT) await CARDS.ensureFresh();
+      if (COLLECTIONS) await COLLECTIONS.ensureFresh();
+    } catch (e) {
+      // the cache could not be reloaded from the graph: the same "executor not answering" as a failed commit
+      markGraphUnavailable(e);
+      throw e;
+    }
     const staged = [];
     const result = await cardWriteContext.run(staged, () => fn());
     try {
@@ -7360,15 +7485,31 @@ async function lockedWithCards(fn) {
         const opId = staged.opId && k === 0 ? (attempt === 1 ? staged.opId : `${staged.opId}/r2`) : undefined;
         // K4 — the announcements this write committed (outbox origins the document did not hold when read) ride the
         // card write, so a crash between it and the document write cannot lose them (the boot re-queues them).
-        const ob = outboxOf(data);
-        const pending = Object.entries(ob.origins).filter(([mid, o]) => !data[FILE_ORIGINS]?.has(mid) && o?.origin?.cardId)
-          .map(([mid, o]) => ({ cardId: o.origin.cardId, mutationId: mid, json: JSON.stringify({ origin: o, entries: Object.fromEntries(Object.entries(ob.entries).filter(([, e]) => e?.mutationId === mid)) }) }));
-        await CARDS.commit(data.cards, data.nextShortId, { actor: events.find((e) => e && e.actor)?.actor ?? 'board', opId, pending });
+        const actor = events.find((e) => e && e.actor)?.actor ?? 'board';
+        // #1624 — collection entities this write changed ride the SAME update as its cards (one conjunctive guard).
+        const collParts = COLLECTIONS && data[FILE_COLLS] ? COLLECTIONS.plan(data) : [];
+        try {
+          if (CARDS_UNIT && data[FILE_CARDS]) {
+            const ob = outboxOf(data);
+            const pending = Object.entries(ob.origins).filter(([mid, o]) => !data[FILE_ORIGINS]?.has(mid) && o?.origin?.cardId)
+              .map(([mid, o]) => ({ cardId: o.origin.cardId, mutationId: mid, json: JSON.stringify({ origin: o, entries: Object.fromEntries(Object.entries(ob.entries).filter(([, e]) => e?.mutationId === mid)) }) }));
+            await CARDS.commit(data.cards, data.nextShortId, { actor, opId, pending, collections: collParts });
+            if (collParts.length) COLLECTIONS.applied(data, collParts);
+          } else if (collParts.length) {
+            await COLLECTIONS.commit(data, { actor, opId });
+          }
+        } catch (e) {
+          if (COLLECTIONS) COLLECTIONS.markUncertain();
+          // the outcome is unknown or the executor is away: say so to the response layer (see sendJSON)
+          if (e && (e.code === 'COLLECTIONS_UNAVAILABLE' || e.code === 'CARDS_UNAVAILABLE')) { const ctx = requestContext.getStore(); if (ctx) ctx.graphUnavailable = e.message; }
+          throw e;
+        }
         writeDocument(data, events);
       }
       return result;
     } catch (e) {
       if (e && e.code === 'CARD_WRITE_CONFLICT' && attempt === 1) continue;
+      if (e && e.code === 'CARD_WRITE_CONFLICT') { const ctx = requestContext.getStore(); if (ctx) ctx.writeRefused = e.message; }
       markGraphUnavailable(e);   // an unresolved UNKNOWN (or an executor away): the response is 503, never a bare 500
       throw e;
     }
@@ -9062,11 +9203,15 @@ function sendWhispers(res, code = 200) {
   });
 }
 
-/** Apply a pure authoring op under the write lock, then answer with the pool. */
-async function applyTendingOp(req, res, op) {
+/**
+ * Apply a pure authoring op under the write lock, then answer with the pool. `pre` checks the request's SHAPE before
+ * any board read (#1624): a malformed request is a 400 on its own grounds even while the graph is away.
+ */
+async function applyTendingOp(req, res, op, pre) {
   try {
     const raw = await readBody(req);
     const body = raw ? JSON.parse(raw) : {};
+    if (pre) { try { pre(body); } catch (e) { return sendJSON(res, 400, { error: e?.message ?? String(e) }); } }
     const at = new Date().toISOString();
     const result = await withWriteLock(async () => {
       try {
@@ -12391,7 +12536,7 @@ const API_ROUTES = [
   // #953 — the tending silence threshold, same trust model as /api/config.
   { method: 'GET',    re: /^\/api\/tending-config$/,       fn: (req, res) => handleGetTendingConfig(req, res) },
   { method: 'GET',    re: /^\/api\/tending\/whispers$/,     fn: (req, res) => handleGetWhispers(req, res) },
-  { method: 'POST',   re: /^\/api\/tending\/whispers$/,     fn: (req, res) => applyTendingOp(req, res, (e, b, at) => createPrompt(e, { ...b, at })) },
+  { method: 'POST',   re: /^\/api\/tending\/whispers$/,     fn: (req, res) => applyTendingOp(req, res, (e, b, at) => createPrompt(e, { ...b, at }), (b) => assertSlug(b.slug)) },
   { method: 'PATCH',  re: /^\/api\/tending\/whispers\/([^\/]+)$/, fn: (req, res, m) => applyTendingOp(req, res, (e, b, at) => (
       b.enabled === undefined ? editPrompt(e, { ...b, slug: decodeURIComponent(m[1]), at })
                               : setEnabled(e, { slug: decodeURIComponent(m[1]), enabled: b.enabled === true }))) },
@@ -12510,6 +12655,26 @@ if (CARDS_UNIT) {
   }
   console.error(`${new Date().toISOString()} #1598 cards unit ON: cards are read from and written to the graph executor; the document's card list is not read`);
 }
+// #1624 — the small-kinds unit. Lives in the same family: needs the conversations unit (so
+// the executor exists), and reads requests when ANNOUNCE_EXECUTOR is built. OFF ⇒ today's path.
+let SMALLKINDS = null;   // { writeWake, readWakes }
+if (SMALLKINDS_UNIT) {
+  if (!ANNOUNCE_EXECUTOR) throw new Error('#1624: SCRUM_GRAPH_UNIT_SMALLKINDS=1 requires SCRUM_GRAPH_UNIT_CONVERSATIONS=1 (wakes live in the graph executor)');
+  SMALLKINDS = createSmallkindsUnit({ slice: GRAPH_SLICE });
+  // #1624 — the mutable families, filled from the graph BEFORE the server listens (a board without them refuses to serve).
+  if (COLLECTION_FAMILIES.length) {
+    const { createCollectionsUnit } = await import('./core/collections-unit.mjs');   // lazily: oxigraph (#868)
+    COLLECTIONS = createCollectionsUnit({
+      client: createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: 30000 }),
+      families: COLLECTION_FAMILIES, mintId: () => crypto.randomUUID(),
+    });
+    try { await COLLECTIONS.load(); } catch (e) {
+      console.error(`#1624 small-kinds unit: the collections could not be read from the graph — refusing to serve: ${e.message}`);
+      process.exit(1);
+    }
+  }
+  console.error(`${new Date().toISOString()} #1624 small-kinds unit ON: wakes live in the graph executor; the document collection is not read`);
+}
 if (GRAPH_SLICE.enabled) {
   installStructuredCloneCounter();
   API_ROUTES.push(...GRAPH_SLICE.routes);
@@ -12529,6 +12694,12 @@ async function cardsReady() {
   if (!(await CARDS.reachable())) return false;   // a slow or absent executor; the cache itself is not made stale by that
   try { await CARDS.ensureFresh(); return true; } catch { return false; }
 }
+// #1624 — the same K7 rule for a graph-held collection's routes (each family names its own).
+const collectionDependent = (urlPath) => COLLECTION_FAMILIES.some((f) => (f.routes || []).some((p) => urlPath === p || urlPath.startsWith(`${p}/`) || urlPath.startsWith(`${p}?`)));
+async function collectionsReady() {
+  if (!(await COLLECTIONS.reachable())) return false;
+  try { await COLLECTIONS.ensureFresh(); return true; } catch { return false; }
+}
 
 function routeApi(method, urlPath, req, res) {
   for (const r of API_ROUTES) {
@@ -12542,21 +12713,23 @@ function routeApi(method, urlPath, req, res) {
       // line also broke the instrument that maps MCP tools to routes by parsing
       // this table (#1163). Measured, not reasoned: both failed in the suite.
       const go = () => requestContext.run({ method, shares: method === 'GET', read: null }, () => r.fn(req, res, m));
-      // #1598 — after an UNKNOWN write the card cache is uncertain, and EVERY board read needs it (readBoard swaps the
-      // cards in): TRY to reload it before the handler runs, then run it either way (a malformed request still answers
-      // 400; a board read with the cache still uncertain answers 503 through sendJSON).
-      if (CARDS_UNIT && CARDS.uncertain && !cardDependent(method, urlPath)) {
-        CARDS.ensureFresh().then(go, go);
-        return true;
-      }
-      // #1598 K7 — with cards in the graph, a board read or write is served only while the executor answers and the
-      // card cache is current: otherwise 503, never a board without its cards.
-      if (CARDS_UNIT && cardDependent(method, urlPath)) {
-        cardsReady().then((ok) => (ok ? go() : sendJSON(res, 503, { error: 'cards are unavailable: the graph executor is not answering', code: 'CARDS_UNAVAILABLE' })),
-          (e) => sendJSON(res, 500, { error: e.message }));
-        return true;
-      }
-      go();
+      const cardRoute = CARDS_UNIT && cardDependent(method, urlPath);
+      const collRoute = COLLECTIONS && method === 'GET' && collectionDependent(urlPath);
+      const cardsUncertain = CARDS_UNIT && CARDS.uncertain && !cardRoute;
+      const collsUncertain = COLLECTIONS && COLLECTIONS.uncertain;
+      if (!cardRoute && !collRoute && !cardsUncertain && !collsUncertain) { go(); return true; }
+      (async () => {
+        // #1598 / #1624 — after an UNKNOWN write a cache is uncertain, and EVERY board read needs it (readBoard swaps the
+        // cards and collections in): TRY to reload it before the handler runs, then run the handler either way (a
+        // malformed request still answers 400; a board read with a cache still uncertain refuses, answered 503).
+        if (cardsUncertain) await CARDS.ensureFresh().catch(() => {});
+        if (collsUncertain) await COLLECTIONS.ensureFresh().catch(() => {});
+        // #1598 K7 — with cards in the graph, a board read or write is served only while the executor answers and the
+        // card cache is current: otherwise 503, never a board without its cards. The same for a collection's GET.
+        if (cardRoute && !(await cardsReady())) return sendJSON(res, 503, { error: 'cards are unavailable: the graph executor is not answering', code: 'CARDS_UNAVAILABLE' });
+        if (collRoute && !(await collectionsReady())) return sendJSON(res, 503, { error: 'the graph executor is not answering, so this collection is unavailable', code: 'GRAPH_UNAVAILABLE' });
+        go();
+      })().catch((e) => sendJSON(res, 500, { error: e.message }));
       return true;
     }
   }

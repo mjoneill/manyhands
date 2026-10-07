@@ -417,7 +417,7 @@ export function staticCheck(sparql, opId) {
 // =====================================================================================
 
 export const RECORD_V = 2;   // 2: memory.revise records the identity it replaces (a MemoryRevision node)
-export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create', 'post.import', 'post.write', 'post.redact', 'delivery.create', 'delivery.step', 'delivery.import', 'modelcall.create', 'card.write']);
+export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create', 'post.import', 'post.write', 'post.redact', 'delivery.create', 'delivery.step', 'delivery.import', 'modelcall.create', 'card.write', 'entity.put']);
 
 const RS = 'https://scrumboard.local/ns#';
 const RSC = 'https://schema.org/';
@@ -455,6 +455,11 @@ export const LOGBORN_TERMS = Object.freeze({
   at: `${RS}at`, attempt: `${RS}attempt`, reason: `${RS}reason`, traceId: `${RS}traceId`, ofModelCall: `${RS}ofModelCall`, creator: `${RS}creator`,
   ModelCall: `${RS}ModelCall`, agent: `${RS}agent`, model: `${RS}model`, calledAt: `${RS}calledAt`, cost: `${RS}cost`,
   producedPost: `${RS}producedPost`, postedText: `${RS}postedText`, requestId: `${RS}requestId`, entityJson: `${RS}entityJson`,
+  // #1624 — the small-kinds entity.put primitive. Wake is the first projection; later kinds
+  // add a row here AND a canonicalizeRecord/planRecord block. Wakes mint a node + edges that
+  // mirror the replica's existing projectWake (graph-replica.mjs), so a reader of either store
+  // sees the same triples.
+  Wake: `${RS}Wake`, wokeSeat: `${RS}wokeSeat`, wokeAt: `${RS}wokeAt`,
 });
 const TM = LOGBORN_TERMS;
 
@@ -474,7 +479,8 @@ const RECORD_FIELDS = {
   'delivery.step': ['target', 'step'],      // #1582 — one step, guarded by the delivery's expected version (as memory.revise)
   'delivery.import': ['delivery'],          // #1582 migration — a document delivery and ALL its steps, fresh, in one update
   'modelcall.create': ['call'],             // #1582 — one ledger row, fresh at its derived IRI
-  'card.write': ['parts', 'counter', 'pending'],       // #1598 — one or more cards, each guarded on its version, in ONE update
+  'card.write': ['parts', 'counter', 'pending', 'collections'],       // #1598 — one or more cards, each guarded on its version, in ONE update
+  'entity.put': ['entity'],                 // #1624 — one generic storage primitive; the `kind` field selects the projection
 };
 
 const SAFE_CH = /^[A-Za-z0-9 _.,:/@#+=*!~%&$-]$/;
@@ -665,6 +671,32 @@ function canonicalizeRecord(i) {
     } };
   } else if (i.kind === 'card.write') {
     record = canonCardWrite(i);
+  } else if (i.kind === 'entity.put') {
+    // #1624 — ONE generic storage primitive. The `kind` field on the entity selects which
+    // allowlisted projection runs; only kinds explicitly listed here can be written through
+    // it. Adding a new family = one row in the canonicalizeRecord/planRecord blocks. No new
+    // authority is granted: the same actor + people + digest + fresh-IRI guards apply.
+    // `entityJson` is the canonical wire JSON the writer chooses to persist; the wake
+    // projection stores it on the node so a reader on either store reads the same wire.
+    if (i.entity && i.entity.kind === 'collection') {
+      // #1624 — the MUTABLE families (review 08:37Z): one or more collection entities in ONE guarded update, through the
+      // same allowlisted entity.put (no second generic write API). See canonCollectionWrite.
+      record = { entity: canonCollectionWrite(i.entity) };
+      if (people.length) record.people = people;
+      return { kind: i.kind, opId, actor, evidence, record, targets: [], newAssertion: null, authority: null, grant: null, rule: null };
+    }
+    const e = obj(i.entity, ['kind', 'iri', 'seat', 'at', 'note', 'entityJson'], 'entity');
+    if (e.kind === 'wake') {
+      record = { entity: {
+        kind: 'wake', iri: checkIri(e.iri, 'entity.iri'),
+        seat: rStr(e.seat, 'entity.seat'),
+        at: rStr(e.at, 'entity.at'),
+        note: rOpt(e.note, 'entity.note'),
+        entityJson: rStr(e.entityJson, 'entity.entityJson'),
+      } };
+    } else {
+      fail(`entity.kind must be one of wake (got ${JSON.stringify(e.kind)})`);
+    }
   } else if (i.kind === 'decision.relate') {
     const target = checkIri(i.target, 'target');
     const supersedes = rList(i.supersedes, 'supersedes', checkIri);
@@ -923,6 +955,22 @@ function planRecord(c) {
       else add(M.iri, TM.postedText, L(M.postedText));
     }
     add(M.iri, TM.entityJson, L(M.entityJson)); add(M.iri, TM.recordedBy, ref(c.opId));
+  } else if (c.kind === 'entity.put') {
+    // #1624 — the wake projection: ONE fresh node + FOUR domain triples + entityJson,
+    // mirroring the replica's projectWake (graph-replica.mjs) so a reader of either store
+    // reads the same triples. wokeSeat is a person IRI (the actor's `by`, declared at the
+    // route); wokeAt is an ISO timestamp; entityJson is the canonical wire JSON the writer
+    // chose to persist (the wake reader reads it as the document-shaped entity, so its wire
+    // is the wire the document path would have answered).
+    const W = R.entity;
+    target = null;
+    fresh.push(W.iri);
+    add(W.iri, TM.type, I(TM.Wake));
+    add(W.iri, TM.wokeSeat, I(`${PERSON_IRI}${encodeURIComponent(W.seat)}`));
+    add(W.iri, TM.wokeAt, L(W.at));
+    add(W.iri, TM.text, W.note == null ? null : L(W.note));
+    add(W.iri, TM.entityJson, L(W.entityJson));
+    add(W.iri, TM.recordedBy, ref(c.opId));
   } else if (c.kind === 'post.redact') {
     // #1574 R4a — LOGICAL deletion only: every content triple of the post is deleted and the node is left as a tombstone
     // (RedactedPost, its original postSeq and recordedBy, and redactedBy = this operation). The precondition is a LIVE
@@ -989,6 +1037,7 @@ function planRecord(c) {
 
 function compileRecord(c) {
   if (c.kind === 'card.write') return compileCardWrite(c);   // #1598
+  if (c.kind === 'entity.put' && c.record.entity.kind === 'collection') return compileCollectionWrite(c);   // #1624
   const digest = recordDigest(c);
   const OP = ref(c.opId);
   const plan = planRecord(c);
@@ -1098,6 +1147,14 @@ const unref = (t) => (t.startsWith('<') ? t.slice(1, -1) : null);
  * rehearsal). Typed literals (integer, boolean, dateTime) have lexical forms that cannot carry one.
  */
 function cardTerm(term, what) {
+  // Projections also carry decimals and doubles (a model's cost); canonTerm's slice domain does not, so they are checked
+  // here: a strict lexical form, never a value that could carry anything but a number.
+  if (term && term.type === 'literal' && (term.datatype === `${XSD}decimal` || term.datatype === `${XSD}double`)) {
+    const lex = typeof term.value === 'string' ? term.value.trim() : '';
+    const okLex = term.datatype === `${XSD}decimal` ? /^[+-]?(\d+(\.\d*)?|\.\d+)$/.test(lex) : /^([+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?|INF|-INF|NaN)$/.test(lex);
+    if (!okLex) fail(`${what}: not an ${term.datatype.slice(XSD.length)}: ${JSON.stringify(term.value)}`);
+    return `"${lex}"^^<${term.datatype}>`;
+  }
   const t = canonTerm(term, what);
   if (term.type !== 'literal' || (term.datatype != null && term.datatype !== `${XSD}string`)) return t;
   return term.lang != null ? `${recLit(term.value)}@${term.lang.toLowerCase()}` : recLit(term.value);
@@ -1118,7 +1175,7 @@ function cardQuadClass([s, p, o], iri, id, what) {
 }
 
 function canonCardWrite(i) {
-  if (!Array.isArray(i.parts) || (!i.parts.length && i.counter == null)) fail('card.write.parts is a non-empty array (or empty, with a counter: the migration seeds it alone)');
+  if (!Array.isArray(i.parts) || (!i.parts.length && i.counter == null && !(Array.isArray(i.collections) && i.collections.length))) fail('card.write.parts is a non-empty array (or empty, with a counter or collections)');
   const parts = i.parts.map((x, k) => {
     const w = `parts[${k}]`;
     obj(x, ['iri', 'expectedVersion', 'version', 'quads', 'prior', 'json', 'remove', 'importDigest'], w);
@@ -1187,7 +1244,10 @@ function canonCardWrite(i) {
     counter = { expected: c.expected == null ? null : intLit(c.expected, 'counter.expected'), next: intLit(c.next, 'counter.next') };
     if (counter.expected != null && BigInt(counter.next) <= BigInt(counter.expected)) fail('counter.next must be above counter.expected');
   }
-  return { parts, counter, ...(pending.length ? { pending } : {}) };
+  // #1624 — collection entities written in the SAME update as the cards (e.g. an agent's retire releases its cards).
+  const collections = i.collections == null ? [] : canonCollectionWrite({ kind: 'collection', parts: i.collections }).parts;
+  if (!parts.length && !collections.length && i.counter == null) fail('card.write carries no part');
+  return { parts, counter, ...(pending.length ? { pending } : {}), ...(collections.length ? { collections } : {}) };
 }
 
 function compileCardWrite(c) {
@@ -1229,6 +1289,7 @@ function compileCardWrite(c) {
     for (const [s, p, o] of P.quads) dIns.push(`  ${v(s)} ${v(p)} ${v(o)} .`);
     dIns.push(`  ${v(I)} ${VER} ${v(P.version)} .`, `  ${v(I)} ${REC} ${v(OP)} .`, `  ${v(I)} ${JSONP} ${v(recLit(P.json))} .`);
   });
+  collectionClauses(R.collections || [], { OP, v, pre, branches, dIns, tag: 'c' });
   for (const A of R.pending || []) {
     pre.push(...freshSubject(ref(A.iri)));
     dIns.push(`  ${v(ref(A.iri))} ${ref(CW.rdfType)} ${v(ref(`${CW.scrum}PendingAnnouncement`))} .`, `  ${v(ref(A.iri))} ${JSONP} ${v(recLit(A.json))} .`);
@@ -1250,7 +1311,131 @@ function compileCardWrite(c) {
     del.push(`  ?d_xs ?d_xp ?d_xo .`);
   }
   where.push(`  BIND(IF(BOUND(?ok), ${EX.APPLIED}, ${EX.PRECONDITION_FAILED}) AS ?n_outcome)`);
-  where.push(nb(JSON.stringify(digest), 'digest'), nb(ref(c.actor), 'actor'), nb('NOW()', 'at'), nb(ref(R.parts.length ? R.parts[0].iri : CW.counter), 'target0'));
+  where.push(nb(JSON.stringify(digest), 'digest'), nb(ref(c.actor), 'actor'), nb('NOW()', 'at'), nb(ref(R.parts.length ? R.parts[0].iri : (R.collections?.length ? R.collections[0].iri : CW.counter)), 'target0'));
+  where.push(...dBinds);
+  del.unshift(`  ${MARKER_SUBJECT} ${EX.commitSeq} ?s .`);
+  const ins = [`  ${MARKER_SUBJECT} ${EX.commitSeq} ?s1 .`,
+    `  ${OP} ${EX.outcome} ?n_outcome .`, `  ${OP} ${EX.digest} ?n_digest .`, `  ${OP} ${EX.actor} ?n_actor .`,
+    `  ${OP} ${EX.at} ?n_at .`, `  ${OP} ${EX.commitSeq} ?s1 .`, `  ${OP} ${EX.target} ?n_target0 .`, ...dIns];
+  const sparql = `DELETE {\n${del.join('\n')}\n}\nINSERT {\n${ins.join('\n')}\n}\nWHERE {\n${where.join('\n')}\n}\n`;
+  const check = staticCheck(sparql, c.opId);
+  if (!check.ok) fail(`compiler rejected its own output: ${check.errors.join('; ')}`);
+  return { sparql, digest, canonical: c };
+}
+
+// ---------- #1624: entity.put kind 'collection' — mutable small-kind entities in ONE guarded update ----------
+//
+// The K13 families that the document guarded with its write lock (procedures and their versions, runs, models,
+// predicates, kinds, agents and their prompts): REST stages a locked write and commits the touched entities here, the
+// same transaction shape as #1598's card.write (review 08:37Z: reuse that machinery through the single allowlisted
+// entity.put). Each part is one entity of one collection:
+//   GUARD   every part together: its `urn:ex:ver` equals expectedVersion (or its subject is fresh for a create), and
+//           every declared UNIQUE value (e.g. a model key, a predicate name, a procedure + version number) is held by no
+//           OTHER member of that collection. One stale or colliding part means nothing lands.
+//   DELETE  each update/remove part's own subject (its projection is subject-only: measured for every family here) and
+//           its prior quads.
+//   INSERT  the projection, `scrum:inCollection "<key>"`, `urn:ex:ver`, `entityJson` and recordedBy.
+// A quad whose subject is not the part's own IRI is refused: no part can write into another entity.
+
+const COLL_KEY_RE = /^[a-z][A-Za-z0-9]{0,40}$/;
+
+function canonCollectionWrite(e) {
+  obj(e, ['kind', 'parts'], 'entity');
+  if (!Array.isArray(e.parts) || !e.parts.length) fail('entity.parts is a non-empty array');
+  const parts = e.parts.map((x, k) => {
+    const w = `entity.parts[${k}]`;
+    obj(x, ['collection', 'iri', 'expectedVersion', 'version', 'quads', 'prior', 'json', 'remove', 'unique', 'requires'], w);
+    if (typeof x.collection !== 'string' || !COLL_KEY_RE.test(x.collection)) fail(`${w}.collection must name a collection`);
+    const iri = checkIri(x.iri, `${w}.iri`);
+    const own = (list, label) => {
+      if (!Array.isArray(list)) fail(`${w}.${label} must be an array`);
+      const out = list.map((q, n) => {
+        if (!Array.isArray(q) || q.length !== 3) fail(`${w}.${label}[${n}] is [s, p, o]`);
+        const t = q.map((term, j) => cardTerm(term, `${w}.${label}[${n}][${j}]`));
+        // the entity's own subject, or a cell of a list it owns (`<iri>/list/…`, named by the server, see collections-unit)
+        if (t[0] !== ref(iri) && !t[0].startsWith(`<${iri}/list/`)) fail(`${w}.${label}[${n}]: subject ${t[0]} is not ${ref(iri)}`);
+        if (CW_RESERVED_PREDICATES.has(unref(t[1])) || unref(t[1]) === `${CW.scrum}inCollection`) fail(`${w}.${label}[${n}]: ${t[1]} is written by the compiler`);
+        return t;
+      });
+      return [...new Map(out.map((t) => [t.join(' '), t])).values()].sort((a, b) => (a.join(' ') < b.join(' ') ? -1 : 1));
+    };
+    if (x.remove === true) {
+      if (x.quads != null || x.json != null || x.version != null || x.unique != null || x.requires != null) fail(`${w}: a remove part carries no quads, json, version, unique or requires`);
+      return { collection: x.collection, iri, remove: true, expectedVersion: intLit(x.expectedVersion, `${w}.expectedVersion`), prior: own(x.prior ?? [], 'prior') };
+    }
+    if (x.remove != null && x.remove !== false) fail(`${w}.remove must be true or absent`);
+    const expectedVersion = x.expectedVersion == null ? null : intLit(x.expectedVersion, `${w}.expectedVersion`);
+    const version = intLit(x.version, `${w}.version`);
+    if (expectedVersion != null && BigInt(version) <= BigInt(expectedVersion)) fail(`${w}.version must be above expectedVersion`);
+    // A unique entry is one {predicate, value} or a conjunction {all: [{predicate, value}, …]} (a procedure version is
+    // unique by its procedure AND its number, not by either alone).
+    const pair = (u, w2) => { obj(u, ['predicate', 'value'], w2); return { predicate: ref(checkIri(u.predicate, `${w2}.predicate`)), value: cardTerm(u.value, `${w2}.value`) }; };
+    const unique = (x.unique ?? []).map((u, n) => {
+      const w2 = `${w}.unique[${n}]`;
+      if (u && Array.isArray(u.all)) {
+        obj(u, ['all'], w2);
+        if (!u.all.length) fail(`${w2}.all is a non-empty array`);
+        return { all: u.all.map((a, j) => pair(a, `${w2}.all[${j}]`)) };
+      }
+      return { all: [pair(u, w2)] };
+    });
+    // A reference this write SETS: the subject it names must exist in the graph when the update runs (a concurrent
+    // delete makes the write PRECONDITION_FAILED instead of leaving a dangling link). Never a lock on the target.
+    if (x.requires != null && !Array.isArray(x.requires)) fail(`${w}.requires must be an array`);
+    const requires = [...new Set((x.requires ?? []).map((r, n) => ref(checkIri(r, `${w}.requires[${n}]`))))].sort();
+    return { collection: x.collection, iri, expectedVersion, version, quads: own(x.quads, 'quads'),
+      prior: expectedVersion == null ? (x.prior == null || (Array.isArray(x.prior) && !x.prior.length) ? [] : fail(`${w}.prior: a create has no prior state`)) : own(x.prior ?? [], 'prior'),
+      json: rStr(x.json, `${w}.json`), ...(unique.length ? { unique } : {}), ...(requires.length ? { requires } : {}) };
+  }).sort((a, b) => (a.iri < b.iri ? -1 : 1));
+  if (new Set(parts.map((p) => p.iri)).size !== parts.length) fail('entity.parts: an entity appears in two parts');
+  return { kind: 'collection', parts };
+}
+
+/**
+ * The clauses one set of collection parts contributes to an update: guards into `pre`, deletion branches into
+ * `branches`, inserts into `dIns` (through `v`, the update's ?d_ binder). Shared by entity.put kind 'collection' and by
+ * card.write's `collections` (a write that touches cards AND a collection entity is still ONE guarded update).
+ */
+function collectionClauses(parts, { OP, v, pre, branches, dIns, tag }) {
+  const VER = ref(`${NS}ver`), REC = ref(`${NS}recordedBy`), JSONP = ref(`${CW.scrum}entityJson`), INC = ref(`${CW.scrum}inCollection`);
+  parts.forEach((P, k) => {
+    const I = ref(P.iri), KEY = recLit(P.collection);
+    if (P.expectedVersion == null) pre.push(...freshSubject(I));
+    else {
+      pre.push(`    ${I} ${VER} ?xcv${tag}${k} ; ${INC} ${KEY} .`, `    FILTER(?xcv${tag}${k} = ${P.expectedVersion})`);
+      branches.push(`    { ${I} ?xp ?xo BIND(${I} AS ?xs) }`);
+      if (P.prior.length) branches.push(`    { VALUES (?xs ?xp ?xo) {\n${P.prior.map((q) => `      (${q.join(' ')})`).join('\n')}\n    } }`);
+    }
+    for (const U of P.unique || []) pre.push(`    FILTER NOT EXISTS { ?xu ${INC} ${KEY} ; ${U.all.map((a) => `${a.predicate} ${a.value}`).join(' ; ')} . FILTER(?xu != ${I}) }`);
+    (P.requires || []).forEach((T, j) => pre.push(`    FILTER EXISTS { ${T} ?xrp${tag}${k}_${j} ?xro${tag}${k}_${j} }`));
+    if (P.remove) return;
+    for (const [s, p, o] of P.quads) dIns.push(`  ${v(s)} ${v(p)} ${v(o)} .`);
+    dIns.push(`  ${v(I)} ${INC} ${v(KEY)} .`, `  ${v(I)} ${VER} ${v(P.version)} .`, `  ${v(I)} ${REC} ${v(OP)} .`, `  ${v(I)} ${JSONP} ${v(recLit(P.json))} .`);
+  });
+}
+
+function compileCollectionWrite(c) {
+  const digest = recordDigest(c);
+  const OP = ref(c.opId);
+  const R = c.record.entity;
+  const where = [], pre = [], dBinds = [], del = [], dIns = [], branches = [];
+  const names = new Map();
+  const v = (text) => {
+    let n = names.get(text);
+    if (!n) { n = `r${names.size}`; names.set(text, n); dBinds.push(ok(text, n)); }
+    return `?d_${n}`;
+  };
+  where.push(`  OPTIONAL { ${OP} ${EX.digest} ?dup }`, `  FILTER(!BOUND(?dup))`, `  ${EX.dataset} ${EX.commitSeq} ?s .`, `  BIND(?s + 1 AS ?s1)`);
+  collectionClauses(R.parts, { OP, v, pre, branches, dIns, tag: 'c' });
+  pre.push(`    BIND(true AS ?ok)`);
+  where.push(`  OPTIONAL {`, ...pre, `  }`);
+  if (branches.length) {
+    where.push(`  OPTIONAL {`, branches.join('\n    UNION\n'), `  }`);
+    dBinds.push(ok('?xs', 'xs'), ok('?xp', 'xp'), ok('?xo', 'xo'));
+    del.push(`  ?d_xs ?d_xp ?d_xo .`);
+  }
+  where.push(`  BIND(IF(BOUND(?ok), ${EX.APPLIED}, ${EX.PRECONDITION_FAILED}) AS ?n_outcome)`);
+  where.push(nb(JSON.stringify(digest), 'digest'), nb(ref(c.actor), 'actor'), nb('NOW()', 'at'), nb(ref(R.parts[0].iri), 'target0'));
   where.push(...dBinds);
   del.unshift(`  ${MARKER_SUBJECT} ${EX.commitSeq} ?s .`);
   const ins = [`  ${MARKER_SUBJECT} ${EX.commitSeq} ?s1 .`,
