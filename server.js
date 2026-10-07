@@ -907,6 +907,12 @@ async function handleReportRefusal(req, res) {
  * Send a JSON response
  */
 function sendJSON(res, statusCode, data) {
+  // #1598 — a handler's generic catch passes the cards unit's own "unavailable" error (a fixed prefix, produced only by
+  // core/cards-unit.mjs) as a 500; it means the graph executor is not answering, so it is answered as one: 503.
+  if (statusCode === 500 && data && typeof data.error === 'string' && /^cards are unavailable: /.test(data.error)) {
+    statusCode = 503;
+    data = { error: `the graph executor is not answering, so nothing was written: ${data.error}`, code: 'GRAPH_UNAVAILABLE' };
+  }
   // #1217 — every refusal on a write route keeps its payload. Here, not at the
   // call sites, so a refusal added later is covered without anyone remembering.
   if (statusCode >= 400) logRefused(res.req, statusCode, data);
@@ -12784,6 +12790,13 @@ function routeApi(method, urlPath, req, res) {
       // line also broke the instrument that maps MCP tools to routes by parsing
       // this table (#1163). Measured, not reasoned: both failed in the suite.
       const go = () => requestContext.run({ method, shares: method === 'GET', read: null }, () => r.fn(req, res, m));
+      // #1598 — after an UNKNOWN write the card cache is uncertain, and EVERY board read needs it (readBoard swaps the
+      // cards in): TRY to reload it before the handler runs, then run it either way (a malformed request still answers
+      // 400; a board read with the cache still uncertain answers 503 through sendJSON).
+      if (CARDS_UNIT && CARDS.uncertain && !cardDependent(method, urlPath)) {
+        CARDS.ensureFresh().then(go, go);
+        return true;
+      }
       // #1598 K7 — with cards in the graph, a board read or write is served only while the executor answers and the
       // card cache is current: otherwise 503, never a board without its cards.
       if (CARDS_UNIT && cardDependent(method, urlPath)) {
