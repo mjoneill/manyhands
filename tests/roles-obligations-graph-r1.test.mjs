@@ -161,7 +161,8 @@ test('R3 THE GUARDS HOLD WITH THE EXECUTOR AWAY, AND IT FAILS LOUD: creates and 
     await sleep(500); await proxy.up();
     assert.equal((await api(base, 'POST', '/api/roles', role)).status, 201, 'with it back the role is created');
     assert.equal((await api(base, 'POST', '/api/obligations', ob)).status, 201, 'and the obligation');
-    assert.equal(((await api(base, 'GET', '/api/roles')).body ?? []).filter((r) => r.key === key).length, 1, 'exactly one role with that key');
-    assert.equal(((await api(base, 'GET', '/api/obligations')).body ?? []).filter((o) => String(o.note ?? '').includes(`${tag} owed`)).length, 1, 'and exactly one obligation');
+    const itemsOf = (b, k) => (Array.isArray(b) ? b : (b?.[k] ?? []));   // the list routes answer {roles: [...]} / {obligations: [...]}, or a bare list
+    assert.equal(itemsOf((await api(base, 'GET', '/api/roles')).body, 'roles').filter((r) => r.key === key).length, 1, 'exactly one role with that key');
+    assert.equal(itemsOf((await api(base, 'GET', '/api/obligations')).body, 'obligations').filter((o) => String(o.note ?? '').includes(`${tag} owed`)).length, 1, 'and exactly one obligation');
   });
 });
