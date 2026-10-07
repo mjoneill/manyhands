@@ -909,9 +909,13 @@ async function handleReportRefusal(req, res) {
 function sendJSON(res, statusCode, data) {
   // #1598 — a handler's generic catch passes the cards unit's own "unavailable" error (a fixed prefix, produced only by
   // core/cards-unit.mjs) as a 500; it means the graph executor is not answering, so it is answered as one: 503.
-  if (statusCode === 500 && data && typeof data.error === 'string' && /^cards are unavailable: /.test(data.error)) {
+  // Two signals, either enough: the request context was marked (a graph write or reload in THIS request could not be
+  // resolved: a handler's catch may send a fixed message like "Failed to create card"), or the error text is the unit's.
+  const graphCtx = requestContext.getStore();
+  const unitUnavailable = statusCode === 500 && data && typeof data.error === 'string' && /^cards are unavailable: /.test(data.error);
+  if (statusCode === 500 && ((graphCtx && graphCtx.graphUnavailable) || unitUnavailable)) {
     statusCode = 503;
-    data = { error: `the graph executor is not answering, so nothing was written: ${data.error}`, code: 'GRAPH_UNAVAILABLE' };
+    data = { error: `the graph executor is not answering, so the outcome is not known and nothing is reported as written: ${unitUnavailable ? data.error : graphCtx.graphUnavailable}`, code: 'GRAPH_UNAVAILABLE' };
   }
   // #1217 — every refusal on a write route keeps its payload. Here, not at the
   // call sites, so a refusal added later is covered without anyone remembering.
@@ -1038,7 +1042,8 @@ function readBoard() {
  */
 function withUnitCards(board) {
   if (!CARDS_UNIT) return board;
-  const snap = CARDS.snapshot(board.nextShortId);
+  let snap;
+  try { snap = CARDS.snapshot(board.nextShortId); } catch (e) { markGraphUnavailable(e); throw e; }
   board[FILE_CARDS] = board.cards;
   board[FILE_NEXT_SHORT_ID] = board.nextShortId;
   board[FILE_ORIGINS] = new Set(Object.keys(outboxOf(board).origins));
@@ -7329,9 +7334,12 @@ function withWriteLock(fn) {
  * (reloaded before the next read). A PRECONDITION_FAILED means the cache was stale; the closure runs ONCE more on a
  * reloaded cache, since every handler re-reads the board inside its closure.
  */
+const markGraphUnavailable = (e) => {
+  if (e && e.code === 'CARDS_UNAVAILABLE') { const ctx = requestContext.getStore(); if (ctx) ctx.graphUnavailable = e.message; }
+};
 async function lockedWithCards(fn) {
   for (let attempt = 1; ; attempt++) {
-    await CARDS.ensureFresh();
+    try { await CARDS.ensureFresh(); } catch (e) { markGraphUnavailable(e); throw e; }
     const staged = [];
     const result = await cardWriteContext.run(staged, () => fn());
     try {
@@ -7350,6 +7358,7 @@ async function lockedWithCards(fn) {
       return result;
     } catch (e) {
       if (e && e.code === 'CARD_WRITE_CONFLICT' && attempt === 1) continue;
+      markGraphUnavailable(e);   // an unresolved UNKNOWN (or an executor away): the response is 503, never a bare 500
       throw e;
     }
   }
