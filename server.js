@@ -128,6 +128,7 @@ const CARDS_UNIT = process.env.SCRUM_GRAPH_UNIT_CARDS === '1';
 let CARDS = null;
 const FILE_CARDS = Symbol('fileCards');           // the document's card list, put back before the document is written
 const FILE_NEXT_SHORT_ID = Symbol('fileNextShortId');
+const FILE_ORIGINS = Symbol('fileOutboxOrigins');   // #1598 K4 — the outbox mutations the document already held when read
 const cardWriteContext = new AsyncLocalStorage();   // #1598 — the write a locked closure stages for its lock to commit
 
 let _documentWrites = 0;   // #1574 1b — successful writeBoard calls since boot; on /api/health as `documentWrites`
@@ -1304,6 +1305,7 @@ function withUnitCards(board) {
   const snap = CARDS.snapshot(board.nextShortId);
   board[FILE_CARDS] = board.cards;
   board[FILE_NEXT_SHORT_ID] = board.nextShortId;
+  board[FILE_ORIGINS] = new Set(Object.keys(outboxOf(board).origins));
   board.cards = snap.cards;
   board.nextShortId = snap.nextShortId;
   return board;
@@ -1803,7 +1805,10 @@ async function warmGraphStoreOnce() {
     // `lastUpdated` maps exactly onto a position in the event log. Capturing it
     // here, beside the read, is the point: a stamp fetched later would describe
     // a different file than the one we are about to project.
-    const domain = loadDomain(BOARD_DATA_FILE);
+    let domain = loadDomain(BOARD_DATA_FILE);
+    // #1598 — with cards in the graph the document's card list is not the cards: the replica projects the unit's cards
+    // (graph_query must answer about the cards REST serves, not the file's frozen or removed copy).
+    if (CARDS_UNIT) domain = { ...domain, nodes: CARDS.snapshot(domain.nextShortId).cards.map(cardToNode) };
     const docStamp = typeof domain?.lastUpdated === 'string' ? domain.lastUpdated : null;
     _graphDocStamp = docStamp;
     const doc = domainToJsonLd(domain);
@@ -7598,7 +7603,12 @@ async function lockedWithCards(fn) {
         // A caller's requestId names the FIRST staged write; a retry after a stale cache uses a second, derived id (the
         // first was consumed by its PRECONDITION_FAILED receipt).
         const opId = staged.opId && k === 0 ? (attempt === 1 ? staged.opId : `${staged.opId}/r2`) : undefined;
-        await CARDS.commit(data.cards, data.nextShortId, { actor: events.find((e) => e && e.actor)?.actor ?? 'board', opId });
+        // K4 — the announcements this write committed (outbox origins the document did not hold when read) ride the
+        // card write, so a crash between it and the document write cannot lose them (the boot re-queues them).
+        const ob = outboxOf(data);
+        const pending = Object.entries(ob.origins).filter(([mid, o]) => !data[FILE_ORIGINS]?.has(mid) && o?.origin?.cardId)
+          .map(([mid, o]) => ({ cardId: o.origin.cardId, mutationId: mid, json: JSON.stringify({ origin: o, entries: Object.fromEntries(Object.entries(ob.entries).filter(([, e]) => e?.mutationId === mid)) }) }));
+        await CARDS.commit(data.cards, data.nextShortId, { actor: events.find((e) => e && e.actor)?.actor ?? 'board', opId, pending });
         writeDocument(data, events);
       }
       return result;
@@ -12709,6 +12719,35 @@ if (CARDS_UNIT) {
   });
   try { await CARDS.load(); } catch (e) {
     console.error(`#1598 cards unit: the cards could not be read from the graph — refusing to serve: ${e.message}`);
+    process.exit(1);
+  }
+  // #1598 K4 — re-queue any announcement the graph recorded with a card write that the document never received (the
+  // process died between the two writes). Skipped when the document's outbox holds the mutation, or its post exists.
+  try {
+    const recorded = await CARDS.pendingAnnouncements();
+    const data = readBoard();
+    const ob = outboxOf(data);
+    const lost = [];
+    for (const r of recorded) {
+      if (ob.origins[r.mutationId]) continue;
+      const rec = JSON.parse(r.json);
+      let published = false;
+      for (const e of Object.values(rec.entries || {})) if (await CARDS.postExists(announcePostId(e.mutationId, e.slot))) published = true;
+      if (!published) lost.push(rec);
+    }
+    if (lost.length) {
+      const next = { origins: { ...ob.origins }, entries: { ...ob.entries } };
+      for (const rec of lost) { next.origins[rec.origin.mutationId] = rec.origin; Object.assign(next.entries, rec.entries); }
+      data[OUTBOX_FIELD] = next;
+      writeDocument(data, [{ op: 'update', actor: 'board', entity: { kind: 'board-meta', id: 'announce-outbox' }, state: { requeued: lost.map((r) => r.origin.mutationId), reason: '#1598 K4: recorded with a card write the document never received' } }]);
+      console.error(`#1598 K4: re-queued ${lost.length} announcement(s) the document lost: ${lost.map((r) => r.origin.mutationId).join(', ')}`);
+      // and published as the original write would have, once the server is up (a pending entry otherwise waits for a
+      // hand-run reconciler)
+      const entries = lost.flatMap((r) => Object.values(r.entries || {}));
+      setTimeout(() => publishAnnouncements(entries), 0);
+    }
+  } catch (e) {
+    console.error(`#1598 cards unit: the pending announcements could not be reconciled — refusing to serve: ${e.message}`);
     process.exit(1);
   }
   console.error(`${new Date().toISOString()} #1598 cards unit ON: cards are read from and written to the graph executor; the document's card list is not read`);

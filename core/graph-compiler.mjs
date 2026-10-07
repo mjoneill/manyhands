@@ -474,7 +474,7 @@ const RECORD_FIELDS = {
   'delivery.step': ['target', 'step'],      // #1582 — one step, guarded by the delivery's expected version (as memory.revise)
   'delivery.import': ['delivery'],          // #1582 migration — a document delivery and ALL its steps, fresh, in one update
   'modelcall.create': ['call'],             // #1582 — one ledger row, fresh at its derived IRI
-  'card.write': ['parts', 'counter'],       // #1598 — one or more cards, each guarded on its version, in ONE update
+  'card.write': ['parts', 'counter', 'pending'],       // #1598 — one or more cards, each guarded on its version, in ONE update
 };
 
 const SAFE_CH = /^[A-Za-z0-9 _.,:/@#+=*!~%&$-]$/;
@@ -1170,13 +1170,24 @@ function canonCardWrite(i) {
     return { iri, expectedVersion, version, quads, prior, json: rStr(x.json, `${w}.json`), ...(importDigest ? { importDigest } : {}) };
   }).sort((a, b) => (a.iri < b.iri ? -1 : 1));
   if (new Set(parts.map((p) => p.iri)).size !== parts.length) fail('card.write: a card appears in two parts');
+  // #1598 K4 — an announcement committed with a card change rides the SAME update as a PendingAnnouncement node under the
+  // card (`<card>/announce/<mutationId>`, never deleted by a card write), so a crash after this update cannot leave a
+  // claim whose announcement was never queued: the boot re-queues any the document does not know.
+  const pending = (i.pending ?? []).map((x, k) => {
+    const w = `pending[${k}]`;
+    obj(x, ['card', 'mutationId', 'json'], w);
+    const card = checkIri(x.card, `${w}.card`);
+    if (!parts.some((p) => p.iri === card && !p.remove)) fail(`${w}.card must be a card this write creates or updates`);
+    if (typeof x.mutationId !== 'string' || !/^[A-Za-z0-9-]{1,64}$/.test(x.mutationId)) fail(`${w}.mutationId must be 1-64 characters of [A-Za-z0-9-]`);
+    return { iri: `${card}/announce/${x.mutationId}`, json: rStr(x.json, `${w}.json`) };
+  }).sort((a, b) => (a.iri < b.iri ? -1 : 1));
   let counter = null;
   if (i.counter != null) {
     const c = obj(i.counter, ['expected', 'next'], 'counter');
     counter = { expected: c.expected == null ? null : intLit(c.expected, 'counter.expected'), next: intLit(c.next, 'counter.next') };
     if (counter.expected != null && BigInt(counter.next) <= BigInt(counter.expected)) fail('counter.next must be above counter.expected');
   }
-  return { parts, counter };
+  return { parts, counter, ...(pending.length ? { pending } : {}) };
 }
 
 function compileCardWrite(c) {
@@ -1218,6 +1229,10 @@ function compileCardWrite(c) {
     for (const [s, p, o] of P.quads) dIns.push(`  ${v(s)} ${v(p)} ${v(o)} .`);
     dIns.push(`  ${v(I)} ${VER} ${v(P.version)} .`, `  ${v(I)} ${REC} ${v(OP)} .`, `  ${v(I)} ${JSONP} ${v(recLit(P.json))} .`);
   });
+  for (const A of R.pending || []) {
+    pre.push(...freshSubject(ref(A.iri)));
+    dIns.push(`  ${v(ref(A.iri))} ${ref(CW.rdfType)} ${v(ref(`${CW.scrum}PendingAnnouncement`))} .`, `  ${v(ref(A.iri))} ${JSONP} ${v(recLit(A.json))} .`);
+  }
   if (R.counter) {
     if (R.counter.expected == null) pre.push(`    FILTER NOT EXISTS { ${CTR} ${VER} ?xcf }`);
     else {

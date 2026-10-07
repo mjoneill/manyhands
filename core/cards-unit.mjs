@@ -13,6 +13,16 @@
  * handlers against the card's `version`, under the write lock, exactly as today.
  */
 import { cardQuads, priorQuads, cardIriOf, SHORTID_COUNTER_IRI, shortIdMap } from './cards-graph.mjs';
+import { parseCardRefs } from './references.mjs';
+
+/** Does `card` name any of `shortIds` (a #N in its title or body, or a shortId in a relationship or a condition's blockers)? */
+function namesAny(card, shortIds) {
+  const named = new Set(parseCardRefs(`${card.title ?? ''}\n${card.description ?? ''}`).map(Number));
+  for (const arr of Object.values(card.relationships || {})) for (const v of arr || []) named.add(Number(v));
+  for (const a of card.acceptance || []) for (const v of a?.blockedBy || []) named.add(Number(v));
+  for (const n of shortIds) if (named.has(Number(n))) return true;
+  return false;
+}
 
 const RS = 'https://scrumboard.local/ns#';
 const T = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
@@ -75,6 +85,20 @@ export function createCardsUnit({ client, actorIri = (who) => `https://scrumboar
     for (const [id, was] of byId) {
       if (!seen.has(id)) parts.push({ iri: cardIriOf(id), remove: true, expectedVersion: String(was.ver), prior: priorQuads(was.card, before) });
     }
+    // #1598 C12 — a create or a remove changes which #N resolve. Every UNCHANGED card that names a shortId that appeared or
+    // disappeared is re-projected in the SAME write when its projection differs (the document model got this for free:
+    // the replica re-derived every card's references from the whole board).
+    const changed = [...after.keys()].filter((k) => !before.has(k)).concat([...before.keys()].filter((k) => !after.has(k)));
+    if (changed.length) {
+      const inParts = new Set(parts.map((p) => p.iri));
+      for (const card of cards) {
+        const was = card && byId.get(card.id);
+        if (!was || inParts.has(cardIriOf(card.id)) || !namesAny(was.card, changed)) continue;
+        const q0 = cardQuads(was.card, before), q1 = cardQuads(was.card, after);
+        if (JSON.stringify(q0) === JSON.stringify(q1)) continue;
+        parts.push({ iri: cardIriOf(card.id), expectedVersion: String(was.ver), version: String(was.ver + 1), quads: q1, prior: priorQuads(was.card, before), json: was.json });
+      }
+    }
     const counterPart = nextShortId != null && Number(nextShortId) !== (counter ?? null) && (parts.length || counter == null)
       ? { expected: counter == null ? null : String(counter), next: String(nextShortId) } : null;
     if (!parts.length && !counterPart) return null;
@@ -85,11 +109,14 @@ export function createCardsUnit({ client, actorIri = (who) => `https://scrumboar
    * Write the difference between the cache and `cards` as ONE guarded update. APPLIED → the cache becomes `cards`.
    * Anything else → the cache is marked uncertain (reloaded before the next read) and the write is refused.
    */
-  async function commit(cards, nextShortId, { actor, opId } = {}) {
+  async function commit(cards, nextShortId, { actor, opId, pending = [] } = {}) {
     if (!byId || uncertain) throw new CardsUnavailable('the card cache is not current');
     const p = plan(cards, nextShortId);
     if (!p) return { outcome: 'NOOP' };
-    const intent = { kind: 'card.write', opId: opId || `urn:ex:op/card/${mintId()}`, actor: actorIri(actor), parts: p.parts, ...(p.counter ? { counter: p.counter } : {}) };
+    // K4 — only announcements whose card is a part of THIS write ride it (the others have no window to close).
+    const inWrite = new Set(p.parts.filter((x) => !x.remove).map((x) => x.iri));
+    const ride = pending.filter((a) => inWrite.has(cardIriOf(a.cardId))).map((a) => ({ card: cardIriOf(a.cardId), mutationId: a.mutationId, json: a.json }));
+    const intent = { kind: 'card.write', opId: opId || `urn:ex:op/card/${mintId()}`, actor: actorIri(actor), parts: p.parts, ...(p.counter ? { counter: p.counter } : {}), ...(ride.length ? { pending: ride } : {}) };
     let r;
     try { r = await client.update(intent); } catch (e) { uncertain = true; throw new CardsUnavailable(e.message); }
     if (r.outcome !== 'APPLIED') {
@@ -97,12 +124,14 @@ export function createCardsUnit({ client, actorIri = (who) => `https://scrumboar
       if (r.outcome === 'PRECONDITION_FAILED' || r.outcome === 'REJECTED') throw new CardWriteConflict(`${r.outcome}${r.reason ? `: ${r.reason}` : ''}`);
       throw new CardsUnavailable(`the write's outcome is ${r.outcome}${r.reason ? `: ${r.reason}` : ''}`);
     }
+    const written = new Map(p.parts.filter((x) => !x.remove).map((x) => [x.iri, Number(x.version)]));
     const next = new Map();
     for (const card of cards) {
       if (!card || !card.id) continue;
       const json = JSON.stringify(card);
       const was = byId.get(card.id);
-      next.set(card.id, was && was.json === json ? was : { card: JSON.parse(json), json, ver: was ? was.ver + 1 : 1 });
+      const ver = written.get(cardIriOf(card.id));
+      next.set(card.id, ver == null && was ? was : { card: JSON.parse(json), json, ver: ver ?? 1 });
     }
     byId = next;
     if (p.counter) counter = Number(p.counter.next);
@@ -115,6 +144,19 @@ export function createCardsUnit({ client, actorIri = (who) => `https://scrumboar
     const q = await client.query(`SELECT ?o WHERE { <${opId}> <urn:ex:outcome> ?o }`);
     if (!q.ok) throw new CardsUnavailable(q.reason || 'the receipt could not be read');
     return q.rows.length ? q.rows[0].o.value.replace(/^urn:ex:/, '') : null;
+  }
+
+  /** K4 — every announcement recorded with a card write: [{ mutationId, json }]. Throws CardsUnavailable. */
+  async function pendingAnnouncements() {
+    const q = await client.query(`SELECT ?n ?j WHERE { ?n <${T}> <${RS}PendingAnnouncement> ; <${RS}entityJson> ?j }`);
+    if (!q.ok) throw new CardsUnavailable(q.reason || 'the pending announcements could not be read');
+    return q.rows.map((r) => ({ mutationId: r.n.value.split('/announce/')[1], json: r.j.value }));
+  }
+  /** Does a post with this id exist in the graph (live or redacted)? Throws CardsUnavailable. */
+  async function postExists(id) {
+    const q = await client.query(`SELECT ?t WHERE { <https://scrumboard.local/entity/${id}> <${T}> ?t } LIMIT 1`);
+    if (!q.ok) throw new CardsUnavailable(q.reason || 'the posts could not be read');
+    return q.rows.length > 0;
   }
 
   /**
@@ -139,7 +181,7 @@ export function createCardsUnit({ client, actorIri = (who) => `https://scrumboar
   }
 
   return {
-    load, ensureFresh, snapshot, plan, commit, reachable, receipt,
+    load, ensureFresh, snapshot, plan, commit, reachable, receipt, pendingAnnouncements, postExists,
     get generation() { return gen; }, get uncertain() { return uncertain; }, get loaded() { return byId != null; },
     markUncertain() { uncertain = true; },
   };
