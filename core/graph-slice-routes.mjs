@@ -55,7 +55,7 @@ export function createGraphSlice({ config = graphSliceConfig(), getContext = () 
   if (!config.enabled) return { enabled: false, routes: [] };
   // FENCING (#1567 PC3): the slice never serves a store it was not told to serve.
   if (!config.datasetId) throw new Error('graph slice: SCRUM_GRAPH_DATASET_ID is required when SCRUM_GRAPH_EXECUTOR_URL is set (fencing)');
-  const client = createGraphClient({ baseUrl: config.url, expectedDatasetId: config.datasetId });
+  const client = createGraphClient({ baseUrl: config.url, expectedDatasetId: config.datasetId, label: 'slice' });
   // #1559 WHO MAY WRITE: decided at startup (a flagged bypass without launcher isolation refuses
   // to start) and on every write (core/graph-auth.mjs).
   const trialBypass = (config.trialBypassFromEnv ?? trialBypassFromEnv)(config.env ?? process.env).active;

@@ -14,6 +14,8 @@
 // NO abort timer underneath (the contract owner's ruling, 2026-10-06 01:01Z): a timer is not evidence that executor work stopped. A slot is freed only by the
 // executor's answer or by the connection actually failing (the executor gone). The client below is built with a timeout so
 // long it never fires in practice; if completion becomes unknowable the capacity stays occupied and the gate fails closed.
+import { AsyncResource } from 'node:async_hooks';
+
 export const NO_ABORT_MS = 2147483647;
 export function createReadGate({ max = 8, queueMax = 128 } = {}) {
   let running = 0;
@@ -41,7 +43,9 @@ export function createReadGate({ max = 8, queueMax = 128 } = {}) {
           const answer = (r) => { if (!settled) { settled = true; resolve(r); } };
           const entry = {
             cancelled: false,
-            start: () => {
+            // #1570 — bound to the CALLER's async context: a queued read is started by whichever read freed its slot, and
+            // without this it would run (and be metered) as part of that other request.
+            start: AsyncResource.bind(() => {
               // the slot is held until the EXECUTOR answers, whatever the caller's deadline did
               // An ANSWER (ok or a refusal the executor itself sent) proves the work ended: the slot is freed. A failure of the
               // connection AFTER dispatch proves nothing about the executor (attempt 1's BrokenPipe case): the slot stays
@@ -56,7 +60,7 @@ export function createReadGate({ max = 8, queueMax = 128 } = {}) {
                 if (sent) { lost++; return; }
                 running--; next();
               }, (e) => { answer({ ok: false, status: 'UNAVAILABLE', reason: String(e?.message || e) }); lost++; });
-            },
+            }),
           };
           setTimeout(() => {
             if (settled) return;

@@ -72,7 +72,8 @@ import { resolveProvenance } from './core/tending-provenance.mjs';
 import { boardToDomain, domainToBoard, cardToNode } from './core/mapping.mjs';
 import { OUTBOX_FIELD, outboxOf, withAnnouncement, listOutbox, modeProblem, legacyProof, postMatchesEntry, opIdFor, announcePostId, postCreateIntention, obligationIdOf } from './core/announce-outbox.mjs';   // #1574 C3a/C3b/C3c
 import * as U3 from './core/unit3-graph.mjs';   // #1582 — deliveries and model calls in the graph
-import { createGraphClient } from './core/graph-client.mjs';   // #1574 C3b — the conversations unit's executor door
+import { createGraphClient, setExecutorMeter } from './core/graph-client.mjs';   // #1574 C3b — the conversations unit's executor door
+import { createExecutorMeter, captureCpuProfile } from './core/executor-meter.mjs';   // #1570 — what REST asks the executor, and REST's own loop delay
 import { postFeed, DiscoveryError } from './core/post-discovery.mjs';   // #1574 R3
 import { createReadGate } from './core/read-admission.mjs';   // #1574 A1–A5
 import { RESERVATIONS_FIELD, postWriteId, findReservation, reservationKey, pruneReservations, validRequestId, validAttachmentSize, postWriteIntention } from './core/post-write.mjs';   // #1574 R2
@@ -946,6 +947,8 @@ function sendJSON(res, statusCode, data) {
   // #1217 — every refusal on a write route keeps its payload. Here, not at the
   // call sites, so a refusal added later is covered without anyone remembering.
   if (statusCode >= 400) logRefused(res.req, statusCode, data);
+  // #1570 — every "the graph could not be read" 503, lined up against this minute's measured event-loop delay.
+  if (statusCode === 503 && EXECUTOR_METER && data && typeof data.code === 'string' && /UNAVAILABLE$/.test(data.code)) EXECUTOR_METER.unavailable(data.code);
   const body = JSON.stringify(data);
   const ctx = requestContext.getStore();
   res.writeHead(statusCode, {
@@ -1001,6 +1004,11 @@ const DEFAULT_COLUMNS = [
 // by routeApi from the HTTP method, carried across awaits, consulted by
 // readBoard. A GET may never write, so it may share; anything else clones.
 const requestContext = new AsyncLocalStorage();
+/** #1570 — the executor-call meter (core/executor-meter.mjs); null when there is no executor. */
+let EXECUTOR_METER = null;
+/** #1570 — the ROUTE an executor call was made for, kept apart from requestContext so it covers the readiness checks that
+ * run before a handler's own context exists, and changes nothing about how a request reads. */
+const meterRoute = new AsyncLocalStorage();
 /** #1561 — the log-born unit's runtime when SCRUM_GRAPH_UNIT_LOGBORN=1 (set beside GRAPH_SLICE); null = today's paths. */
 let LOGBORN = null;
 setLegacyContext(() => requestContext.getStore());   // #1558 — per-request legacy-path counters
@@ -12553,17 +12561,33 @@ if (logbornUnitConfig(process.env, { sliceEnabled: GRAPH_SLICE.enabled }).enable
 // Like the log-born unit it refuses to start without the fenced graph slice: a
 // publisher-mode post would otherwise have nowhere to go. OFF ⇒ /publish writes
 // the post into the board document, as before the flag.
+// #1570 — measure what REST asks the executor and REST's own event-loop delay, one line a minute (core/executor-meter.mjs).
+// On by default wherever there is an executor; SCRUM_EXECUTOR_METER=0 turns it off. SIGUSR2 takes ONE bounded CPU profile
+// of this process in-process (no debugger port) into SCRUM_CPU_PROFILE_DIR (default: the OS temp dir).
+if (process.env.SCRUM_GRAPH_EXECUTOR_URL && process.env.SCRUM_EXECUTOR_METER !== '0') {
+  EXECUTOR_METER = createExecutorMeter({ routeOf: () => meterRoute.getStore() || 'background', extras: () => `hostLoad1m=${os.loadavg()[0].toFixed(2)}/${os.cpus().length}cpu${READ_GATE ? ` readGate=${JSON.stringify(READ_GATE.stats())}` : ''}`, slowMs: Number(process.env.SCRUM_EXECUTOR_METER_SLOW_MS ?? 1000) });
+  setExecutorMeter(EXECUTOR_METER);
+  setInterval(() => EXECUTOR_METER.flush(), Number(process.env.SCRUM_EXECUTOR_METER_MS ?? 60_000)).unref();
+  process.on('SIGUSR2', () => {
+    const dir = process.env.SCRUM_CPU_PROFILE_DIR || os.tmpdir();
+    console.error(`${new Date().toISOString()} #1570 cpu profile: capturing up to 60 s into ${dir}`);
+    captureCpuProfile({ dir, maxMs: Number(process.env.SCRUM_CPU_PROFILE_MS ?? 60_000) })
+      .then((file) => console.error(`${new Date().toISOString()} #1570 cpu profile: ${file ? `written ${file}` : 'skipped: one is already running'}`))
+      .catch((e) => console.error(`${new Date().toISOString()} #1570 cpu profile: failed: ${e.message}`));
+  });
+  console.error(`${new Date().toISOString()} #1570 executor meter ON: one "executor-meter minute:" line a minute; slow calls and graph 503s are logged as they happen`);
+}
 if (process.env.SCRUM_GRAPH_UNIT_CONVERSATIONS === '1') {
   if (!GRAPH_SLICE.enabled) throw new Error('#1574: SCRUM_GRAPH_UNIT_CONVERSATIONS=1 requires the graph slice (SCRUM_GRAPH_EXECUTOR_URL + SCRUM_GRAPH_DATASET_ID)');
   // #1574 C3c — the call runs with the board lock RELEASED, so a slow executor costs only this publish. The bound is
   // long enough for a real write under load; past it the outcome is UNKNOWN, the entry stays pending, and the
   // identical intention is replayed on the next attempt (the receipt makes that idempotent).
-  ANNOUNCE_EXECUTOR = createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: 15000 });
+  ANNOUNCE_EXECUTOR = createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: 15000, label: 'announce' });
   // #1574 A1–A5 — both readers share ONE gate on executor work: the deadlines below are what a CALLER waits; the graph
   // request underneath is never aborted by them (the executor would keep computing anyway), and holds its slot until it ends.
   const gate = createReadGate({ max: 8, queueMax: 128 });
   READ_GATE = gate;
-  const raw = createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: gate.hardTimeoutMs });
+  const raw = createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: gate.hardTimeoutMs, label: 'posts' });
   POSTS_READER = gate.reader(raw, POSTS_READ_TIMEOUT_MS);
   POSTS_BULK_READER = gate.reader(raw, POSTS_BULK_READ_TIMEOUT_MS);
   console.error(`${new Date().toISOString()} #1574 conversations unit ON: publisher-mode announcements go through the graph executor (lock released during the call)`);
@@ -12582,7 +12606,7 @@ if (CARDS_UNIT) {
   // Imported HERE, not at the top: the cards unit needs oxigraph, and server.js boots with no npm dependencies (#868).
   const { createCardsUnit } = await import('./core/cards-unit.mjs');
   CARDS = createCardsUnit({
-    client: createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: 30000 }),
+    client: createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: 30000, label: 'cards' }),
     mintId: () => crypto.randomUUID(),
   });
   try { await CARDS.load(); } catch (e) {
@@ -12630,7 +12654,7 @@ if (SMALLKINDS_UNIT) {
   if (COLLECTION_FAMILIES.length) {
     const { createCollectionsUnit } = await import('./core/collections-unit.mjs');   // lazily: oxigraph (#868)
     COLLECTIONS = createCollectionsUnit({
-      client: createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: 30000 }),
+      client: createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: 30000, label: 'collections' }),
       families: COLLECTION_FAMILIES, mintId: () => crypto.randomUUID(),
     });
     try { await COLLECTIONS.load(); } catch (e) {
@@ -12670,7 +12694,8 @@ function routeApi(method, urlPath, req, res) {
   for (const r of API_ROUTES) {
     if (r.method !== method) continue;
     const m = urlPath.match(r.re);
-    if (m) {
+    // #1570 — every executor call made for this request, readiness checks included, is metered under its route pattern.
+    if (m) return meterRoute.run(`${method} ${r.re.source}`, () => {
       // #715 — the method decides the read kind for everything this handler
       // does, including after its awaits.
       // ⛔ GET alone. A POST that looks read-only is not: search with a reader
@@ -12696,7 +12721,7 @@ function routeApi(method, urlPath, req, res) {
         go();
       })().catch((e) => sendJSON(res, 500, { error: e.message }));
       return true;
-    }
+    });
   }
   return false;
 }

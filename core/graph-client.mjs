@@ -39,19 +39,31 @@ const refused = (e) => {
   return code === 'ECONNREFUSED';
 };
 
-export function createGraphClient({ baseUrl, expectedDatasetId = null, timeoutMs = 5000, fetchImpl = fetch } = {}) {
+// #1570 — one process-wide observer of every executor call (core/executor-meter.mjs), set by the server at boot. Absent
+// in tests and scripts, so nothing changes there. It sees label, kind, outcome, elapsed ms and the body (to hash).
+let meter = null;
+export function setExecutorMeter(m) { meter = m || null; }
+
+export function createGraphClient({ baseUrl, expectedDatasetId = null, timeoutMs = 5000, fetchImpl = fetch, label = 'unlabelled' } = {}) {
   if (!baseUrl) throw new Error('graph client: baseUrl required');
   const url = (p) => `${baseUrl.replace(/\/$/, '')}${p}`;
 
   async function send(path, body, headers = {}) {
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), timeoutMs);
+    const t0 = performance.now();
+    let outcome = 'error';
     try {
       const r = await fetchImpl(url(path), { method: body == null ? 'GET' : 'POST', body, headers, signal: ac.signal });
       const text = await r.text();
+      outcome = String(r.status);
       return { status: r.status, text };
+    } catch (e) {
+      outcome = ac.signal.aborted ? 'timeout' : (refused(e) ? 'refused' : 'error');
+      throw e;
     } finally {
       clearTimeout(timer);
+      if (meter) meter.record({ label, kind: path.replace(/^\//, '').split(/[/?]/)[0] || 'root', outcome, elapsedMs: performance.now() - t0, body: typeof body === 'string' ? body : undefined });
     }
   }
 
