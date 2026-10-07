@@ -378,7 +378,7 @@ test('D1 flag OFF: the document post carries the entry\'s publicationAt as its c
 });
 
 // ------------------------------------------------------------------ 3. the lock is free during a REAL, slow call
-test('H3 while a REAL executor write is demonstrably held, a create, claim, save and read complete in seconds, the write is still outstanding after them, and the publish then finishes published', { skip: SKIP }, async () => {
+test('H3 while a REAL executor write is demonstrably held, a create, claim, per-card edit and read complete in seconds, the write is still outstanding after them, and the publish then finishes published', { skip: SKIP }, async () => {
   await withStack(seeded('m-g'), { proxyDelayMs: 4500 }, async ({ s, exec, proxyState }) => {
     let settled = false;
     const pending = publish(s.baseUrl, 'm-g:claim').then((r) => { settled = true; return r; });
@@ -390,7 +390,7 @@ test('H3 while a REAL executor write is demonstrably held, a create, claim, save
     assert.ok(card.status < 400, card.text);
     assert.equal((await t('claim', () => api(s.baseUrl, 'POST', `/api/cards/${card.body.id}/claim`, { by: 'ada' }))).status, 200);
     const snap = (await t('read', () => api(s.baseUrl, 'GET', '/api/board'))).body;
-    assert.ok((await t('save', () => api(s.baseUrl, 'POST', '/api/save', { cards: snap.cards.map((c) => (c.id === card.body.id ? { ...c, title: 'saved during' } : c)), columns: snap.columns, nextShortId: snap.nextShortId }))).status < 400);
+    assert.ok((await t('edit', () => api(s.baseUrl, 'PATCH', `/api/cards/${card.body.id}`, { title: 'saved during', by: 'ada' }))).status < 400, 'a per-card edit completes while the executor write is held');
     assert.equal(settled, false, 'the executor write was STILL held after those operations: the isolation was real');
     const r = await pending;
     assert.equal(r.body.status, 'published', r.text);

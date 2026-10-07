@@ -484,53 +484,6 @@ test('Q9 a token from another EPOCH is 409 POST_CURSOR_EPOCH_CHANGED naming the 
   } finally { await s.stop(); }
 });
 
-// ------------------------------------------------------------------ 6. the counter survives a save, and a crash before the commit
-test('Q10 a real /api/save does not disturb the counter: numbering continues with no reuse, whatever the body carried', async () => {
-  const s = await startRestServer({ board: makeBoardFixture() });
-  try {
-    await post(s.baseUrl, 'one'); await post(s.baseUrl, 'two');
-    const c = (await api(s.baseUrl, 'POST', '/api/cards', { title: 'retitle me', description: 'x', createdBy: 'ada' })).body;
-    const snap = (await api(s.baseUrl, 'GET', '/api/board')).body;
-    const save = await api(s.baseUrl, 'POST', '/api/save', { cards: snap.cards.map((x) => (x.id === c.id ? { ...x, title: 'retitled' } : x)), columns: snap.columns, nextShortId: snap.nextShortId, nextPostSeq: 1, postSeqEpoch: 'forged' });
-    assert.ok(save.status < 400, save.text);
-    assert.equal((await api(s.baseUrl, 'GET', `/api/cards/${c.id}`)).body.title, 'retitled', 'the save really wrote');
-    assert.equal((await post(s.baseUrl, 'three')).body.postSeq, 3, 'no reuse, no reset');
-    assert.deepEqual(seqs(await list(s.baseUrl)), [1, 2, 3]);
-  } finally { await s.stop(); }
-});
-test('Q10b a /api/save body carrying extra, un-numbered or re-numbered conversations, and a forged counter and epoch, leaves the server\'s conversations, every postSeq, the epoch and the counter exactly as they were', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ps1592-save-'));
-  const file = path.join(dir, 'board.json'); fs.writeFileSync(file, JSON.stringify(makeBoardFixture(), null, 2));
-  const barrierDir = path.join(dir, 'barriers'); fs.mkdirSync(barrierDir);
-  let a;
-  try {
-    a = await spawnServer(file, barrierDir);
-    await post(a.base, 'one'); await post(a.base, 'two'); await post(a.base, 'three');
-    // The server rewrites a legacy file as JSON-LD on its first save, so the stored state is read in WHICHEVER shape the file now has:
-    // the posts are the document's Comment nodes (or its `conversations`), the counter and epoch live on `scrum:meta` (or top level).
-    const state = () => {
-      const d = readDoc(file), ld = Array.isArray(d['@graph']), meta = ld ? (d['scrum:meta'] || {}) : d;
-      return { posts: ld ? d['@graph'].filter((e) => e && e['@type'] === 'Comment') : d.conversations, nextPostSeq: meta.nextPostSeq, postSeqEpoch: meta.postSeqEpoch };
-    };
-    const before = state();
-    assert.equal(before.posts?.length, 3, 'precondition: the reader sees the three stored posts'); assert.ok(before.postSeqEpoch, 'and the epoch'); assert.equal(before.nextPostSeq, 4, 'and the counter');
-    const snap = (await api(a.base, 'GET', '/api/board')).body;
-    const seen = (await list(a.base)).body;
-    const hostile = [
-      conv('smuggled', 'an un-numbered post a snapshot tried to introduce', T(4)),
-      { ...seen[0], postSeq: 99 },
-      { ...seen[1], postSeq: 1 },
-    ];
-    for (const extra of [{ conversations: hostile }, { conversations: [] }, { conversations: null }, { conversations: hostile, nextPostSeq: 1, postSeqEpoch: 'forged' }]) {
-      const save = await api(a.base, 'POST', '/api/save', { cards: snap.cards, columns: snap.columns, nextShortId: snap.nextShortId, ...extra });
-      assert.ok(save.status < 500, save.text);   // refused or ignored are both fine; what matters is the state
-      assert.deepEqual(state(), before, `${JSON.stringify(Object.keys(extra))}: a save must not introduce, remove or renumber a post, or touch the epoch or counter`);
-    }
-    assert.deepEqual(seqs(await list(a.base)), [1, 2, 3]);
-    assert.equal((await post(a.base, 'four')).body.postSeq, 4, 'numbering carries on');
-  } finally { a?.stop(); }
-});
-
 async function spawnServer(file, barrierDir) {
   const port = await freePort();
   const env = { ...process.env, SCRUM_BOARD_FILE: file, SCRUM_PORT: String(port), SCRUM_MCP_NOTIFY_URL: '', SCRUM_ATTACHMENTS_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'ps1592-attach-')),

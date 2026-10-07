@@ -292,31 +292,6 @@ test('#1584 F3 committed and still the latest ⇒ COMMITTED (and nothing is fenc
   } finally { await s.stop(); }
 });
 
-test('#1584 F5 /api/save PRESERVES fences and lastMoveRequestId: a snapshot without (or with other) moveFences keeps the fence; a late PATCH with that id is still 409', async () => {
-  const s = await startRestServer({ board: board() });
-  try {
-    assert.equal((await fence(s.baseUrl, 'm6', 'save-0007-move')).body.outcome, 'fenced');
-    let n = 0;
-    for (const moveFences of [undefined, [], ['someone-else-0008']]) {
-      // A REAL change rides along (m2's title), so the save actually WRITES the
-      // board — a snapshot that changes nothing writes nothing and would prove nothing.
-      const load = (await req(s.baseUrl, 'GET', '/api/load')).body;
-      n += 1;
-      const cards = load.cards.map((c) => (c.id === 'm1' ? { ...c, lastMoveRequestId: 'forged-0009-move' }
-        : c.id === 'm2' ? { ...c, title: `edited by snapshot ${n}` } : c));
-      const snap = { cards, columns: load.columns, nextShortId: load.nextShortId, ...(moveFences ? { moveFences } : {}) };
-      const saved = await req(s.baseUrl, 'POST', '/api/save', snap);
-      assert.equal(saved.status, 200, JSON.stringify(saved.body));
-      assert.equal((await req(s.baseUrl, 'GET', '/api/cards/m2')).body.title, `edited by snapshot ${n}`, 'precondition: the snapshot was written');
-    }
-    const late = await req(s.baseUrl, 'PATCH', '/api/cards/m6', moveTo('save-0007-move', 1));
-    assert.deepEqual([late.status, late.body.code], [409, 'MOVE_FENCED'], 'the fence survived every snapshot');
-    assert.equal((await fence(s.baseUrl, 'm1', 'forged-0009-move')).body.outcome, 'fenced',
-      'a snapshot cannot plant a commit proof (lastMoveRequestId is server-owned)');
-    assert.deepEqual(Object.fromEntries(Object.entries(await orders(s.baseUrl, 'backlog')).map(([k, [o]]) => [k, o])), { m1: 1, m2: 2, m3: 3, m4: 7 }, 'nothing moved');
-  } finally { await s.stop(); }
-});
-
 test('#1584 fence: malformed requestId is 400 and writes nothing', async () => {
   const s = await startRestServer({ board: board() });
   try {

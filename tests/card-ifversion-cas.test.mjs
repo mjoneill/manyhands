@@ -120,56 +120,6 @@ test('#534 a MALFORMED ifVersion is refused at the TYPE boundary with 400, never
   } finally { await s.stop(); }
 });
 
-test('#534 ⭐⭐ THE COUPLING: a whole-board SAVE between read and write cannot produce a FALSE PASS', async () => {
-  // ⭐⭐⭐ This is the reason slice 1 had to land first, as an executable
-  // assertion rather than an argument. The sequence, every step of which this
-  // board has already reproduced:
-  //
-  //   1 card at vN            2 a seat reads it, holds vN
-  //   3 another seat PATCHes  ⇒ vN+1
-  //   4 the browser whole-board saves — WITHOUT slice 1 this writes the
-  //     client's stale version back, or erases the field entirely
-  //   5 the seat holding vN sends ifVersion: vN
-  //
-  // Before slice 1, step 5 PASSES against a card that moved twice — a
-  // precondition reporting "you are current" in exactly the case it exists to
-  // catch. This test fails loudly if handleSave ever stops computing the version.
-  const s = await startRestServer({ board: makeBoardFixture() });
-  try {
-    const c = await api(s.baseUrl, 'POST', '/api/cards', NEW_CARD);
-    const id = c.body.id;
-    const versionSeatHolds = c.body.version;
-
-    // 3 — another seat PATCHes.
-    await api(s.baseUrl, 'PATCH', `/api/cards/${id}`, { descriptionAppend: ' +OTHER SEAT' });
-
-    // 4 — the browser saves a board it hydrated BEFORE that PATCH: its copy of
-    // the card still carries the old version and the old body.
-    const board = await api(s.baseUrl, 'GET', '/api/board');
-    const staleBoard = JSON.parse(JSON.stringify(board.body));
-    for (const card of staleBoard.cards) {
-      if (card.id === id) { card.version = versionSeatHolds; card.description = 'ORIGINAL'; }
-    }
-    const save = await api(s.baseUrl, 'POST', '/api/save', {
-      cards: staleBoard.cards, columns: staleBoard.columns, nextShortId: staleBoard.nextShortId,
-    });
-    // #466 — since the whole-board save COMPARES the declared version, this
-    // stale save is refused at the door (409) instead of being accepted with a
-    // recomputed version. Either way the property under test holds: the stale
-    // seat's precondition below must still fail. Pinning the 409 here so a
-    // regression to "accepted and recomputed" is visible rather than silent.
-    assert.equal(save.status, 409,
-      `a stale whole-board save is refused under #466: ${JSON.stringify(save.body)}`);
-
-    // 5 — the seat still holding the ORIGINAL version tries to write.
-    const attempt = await api(s.baseUrl, 'PATCH', `/api/cards/${id}`,
-      { description: 'CLOBBER FROM STALE SEAT', ifVersion: versionSeatHolds });
-    assert.equal(attempt.status, 409,
-      'a save must not be able to make a stale precondition pass. '
-      + `Got ${attempt.status}: ${JSON.stringify(attempt.body)}`);
-  } finally { await s.stop(); }
-});
-
 test('#534 ifVersion is a VERB, not a field — never stored, never reported as ignored', async () => {
   // #864's lesson, applied before it can bite: a verb in a field allowlist gets
   // stored as a noun. And reporting a field that WAS consumed in `ignoredFields`

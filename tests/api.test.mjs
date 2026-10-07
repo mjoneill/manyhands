@@ -280,77 +280,10 @@ test('#210: a non-numeric ?limit is ignored, not an error', async () => {
 
 // ── Regression: /api/save must not clobber conversations (#117) ──────────
 
-apiTest('POST /api/save preserves conversations the payload omits (#117)', async ({ baseUrl }) => {
-  // Seed a conversation through the API.
-  await fetch(`${baseUrl}/api/conversations`, json({
-    method: 'POST', body: JSON.stringify({ body: 'do not clobber me', author: 'sage' }),
-  }));
-
-  // Legacy whole-board save with NO conversations field — the exact shape
-  // the browser sends. Pre-fix, this wiped the commons.
-  const board = await (await fetch(`${baseUrl}/api/board`)).json();
-  const legacyPayload = {
-    cards: board.cards,
-    columns: board.columns,
-    nextShortId: board.nextShortId,
-    lastUpdated: new Date().toISOString(),
-  };
-  const save = await fetch(`${baseUrl}/api/save`, json({
-    method: 'POST', body: JSON.stringify(legacyPayload),
-  }));
-  assert.equal(save.status, 200);
-
-  const convs = await (await fetch(`${baseUrl}/api/conversations`)).json();
-  assert.equal(convs.length, 1, 'conversation survived the legacy save');
-  assert.equal(convs[0].body, 'do not clobber me');
-});
-
 // ── Regression: /api/save must not let a stale client clobber cards (#230) ──
 // 2026-06-15: a stale browser tab saved its old localStorage and rolled back 8
 // cards. The browser deletes ONE card per save, so a save vanishing many cards
 // is a stale-state clobber, never a legit action — refuse it.
-
-apiTest('POST /api/save refuses a stale wholesale card-delete (clobber guard #230)', async ({ baseUrl }) => {
-  for (const t of ['a', 'b', 'c', 'd']) {
-    await fetch(`${baseUrl}/api/cards`, json({ method: 'POST', body: JSON.stringify({ title: t }) }));
-  }
-  const before = await (await fetch(`${baseUrl}/api/board`)).json();
-  assert.equal(before.cards.length, 4);
-
-  // A stale client saves a board missing 3 of the 4 cards.
-  const stale = {
-    cards: [before.cards[0]],
-    columns: before.columns,
-    nextShortId: before.nextShortId,
-    lastUpdated: new Date().toISOString(),
-  };
-  const res = await fetch(`${baseUrl}/api/save`, json({ method: 'POST', body: JSON.stringify(stale) }));
-  assert.equal(res.status, 409, 'a save vanishing 3 cards is refused');
-
-  const after = await (await fetch(`${baseUrl}/api/board`)).json();
-  assert.equal(after.cards.length, 4, 'no cards were deleted — the clobber was prevented');
-});
-
-apiTest('POST /api/save still allows a normal single-card delete', async ({ baseUrl }) => {
-  for (const t of ['a', 'b', 'c']) {
-    await fetch(`${baseUrl}/api/cards`, json({ method: 'POST', body: JSON.stringify({ title: t }) }));
-  }
-  const before = await (await fetch(`${baseUrl}/api/board`)).json();
-  assert.equal(before.cards.length, 3);
-
-  // Drop exactly one card — the normal browser delete-by-save.
-  const payload = {
-    cards: before.cards.slice(0, 2),
-    columns: before.columns,
-    nextShortId: before.nextShortId,
-    lastUpdated: new Date().toISOString(),
-  };
-  const res = await fetch(`${baseUrl}/api/save`, json({ method: 'POST', body: JSON.stringify(payload) }));
-  assert.equal(res.status, 200, 'dropping one card is a legit delete');
-
-  const after = await (await fetch(`${baseUrl}/api/board`)).json();
-  assert.equal(after.cards.length, 2, 'the single delete persisted');
-});
 
 apiTest('GET /api/load returns the legacy {cards} shape even when on-disk is JSON-LD (#235)', async ({ baseUrl }) => {
   // Any write flips the on-disk format to schema.org JSON-LD (saveDomain, #227).

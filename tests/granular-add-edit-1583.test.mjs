@@ -292,25 +292,6 @@ test('#1583 409: a seat edits after the tab loaded → the browser edit is refus
   }, { server: { board: fixture() }, launch: { headless: 'new' } });
 });
 
-test('#1583 a whole-board save fired while a create is still on the wire does not delete the new card', async () => {
-  // /api/save replaces the stored card list with the tab's. A provisional card
-  // is (rightly) kept out of that list — so a save serialized before the
-  // create's 201 is adopted would wipe the card the server just made. The
-  // remaining whole-board callers (moves, columns) can fire in that window.
-  await withBrowserServer(async ({ server, browser }) => {
-    const page = await openBoard(browser, server.baseUrl);
-    await page.evaluate(() => {
-      addCard('created during a save', '', 'task', 'unassigned', [], 'backlog', null);
-      saveToJSONFile();   // e.g. a drag landing in the same tick
-    });
-    await page.waitForFunction(() => _pendingSaves.length === 0, { timeout: 8000 });
-    const all = (await api(server.baseUrl, 'GET', '/api/cards?limit=50')).body.cards;
-    const made = all.filter((c) => c.title === 'created during a save');
-    assert.equal(made.length, 1, 'the new card exists exactly once on the server: ' + JSON.stringify(all.map((c) => c.title)));
-    assert.equal(all.length, 4, 'and nothing else was lost or duplicated');
-  }, { server: { board: fixture() }, launch: { headless: 'new' } });
-});
-
 // ── Review round: a lost create reply, and 409 recovery ─────────────────────
 
 /**
@@ -376,50 +357,6 @@ test('#1583 lost create reply: the POST committed but the reply was dropped → 
     assert.ok(creates.length >= 2, 'the create was re-asked');
     assert.ok(creates.every((w) => w.body.requestId === creates[0].body.requestId && /^[0-9a-f-]{36}$/.test(w.body.requestId)),
       'every retry carried the SAME client-generated request id');
-  }, { server: { board: fixture() }, launch: { headless: 'new' } });
-});
-
-test('#1583 create outcome UNKNOWN blocks whole-board saves (visibly) until it is confirmed; then the tab converges', async () => {
-  await withBrowserServer(async ({ server, browser }) => {
-    const page = await openBoard(browser, server.baseUrl);
-    const lost = await loseCreateReplies(page, server.baseUrl, { dropAll: true });
-    const writes = recordWrites(page);
-    await addViaForm(page, 'never confirmed');
-    await page.waitForFunction(() => _pendingSaves.length === 0, { timeout: 15000 });
-    assert.equal(lost.committed, 1);
-    assert.ok(lost.dropped >= 2, 'every retry failed too');
-    assert.equal(await page.evaluate(() => cards.find((c) => c.title === 'never confirmed')?._unsynced), 'unknown',
-      'no reply is "unknown", not "failed"');
-
-    // #1584 — a MOVE is no longer a whole-board save (it is one PATCH of the
-    // moved card), so it cannot delete the unconfirmed card and is not
-    // blocked. The remaining whole-board callers (column rename/add/delete,
-    // slices 3–4) still are; saveToJSONFile() stands in for them here.
-    await clickMove(page, 'k1');
-    await page.waitForFunction(() => _pendingSaves.length === 0, { timeout: 15000 });
-    assert.equal(writes.filter((w) => w.method === 'PATCH' && w.path === '/api/cards/k1').length, 1, 'the move went out as its own PATCH');
-    await page.evaluate(() => { saveToJSONFile(); });
-    await page.waitForFunction(() => _pendingSaves.length === 0, { timeout: 15000 });
-    assert.equal(writes.filter((w) => w.path === '/api/save').length, 0, 'the whole-board save was BLOCKED, not sent');
-    const msg = await page.$eval('.save-status', (e) => e.textContent);
-    assert.match(msg, /not saved/i, msg);
-    let all = (await api(server.baseUrl, 'GET', '/api/cards?limit=50')).body.cards;
-    assert.equal(all.filter((c) => c.title === 'never confirmed').length, 1, 'the committed card is still there, once');
-    assert.equal(all.find((c) => c.id === 'k1').column, 'planned', 'and the granular move landed');
-
-    // The network heals; the next whole-board save re-asks by request id, then saves.
-    lost.active = false;
-    await clickMove(page, 'k2');
-    await page.waitForFunction(() => _pendingSaves.length === 0, { timeout: 15000 });
-    await page.evaluate(() => { saveToJSONFile(); });
-    await page.waitForFunction(() => _pendingSaves.length === 0, { timeout: 15000 });
-    all = (await api(server.baseUrl, 'GET', '/api/cards?limit=50')).body.cards;
-    const made = all.filter((c) => c.title === 'never confirmed');
-    assert.equal(made.length, 1, 'still exactly once after the save went through');
-    assert.equal(all.length, 4);
-    assert.equal(all.find((c) => c.id === 'k2').column, 'planned', 'the second move landed');
-    assert.equal(await page.evaluate((id) => !!cards.find((c) => c.id === id && !c._unsynced), made[0].id), true,
-      'the tab converged on the server card');
   }, { server: { board: fixture() }, launch: { headless: 'new' } });
 });
 

@@ -69,29 +69,6 @@ test('#1288 ⛔ THE CONTROL ON THE EXCLUSION — neither decoration is caller-se
   });
 });
 
-test('#1288 ⛔ …nor through /api/save, which takes the cards array WHOLESALE', async () => {
-  // The likelier leak: the browser reads decorated cards and saves them back.
-  // #1039's carryForward is `{...stored, ...incoming}`, so an incoming key is
-  // kept — which is exactly how a read projection could become durable state.
-  await withServer(async (s) => {
-    const id = await makeCard(s.baseUrl);
-    const card = await stored(s.baseUrl, id);
-
-    const r = await post(s.baseUrl, '/api/save', {
-      cards: [{ ...card, descriptionExcerpt: 'INJECTED…', legacyArrayIndex: 99 }],
-    });
-    assert.ok(r.status === 200 || r.status === 409 || r.status === 400, `unexpected ${r.status}`);
-
-    if (r.status === 200) {
-      const after = await stored(s.baseUrl, id);
-      for (const field of DECORATIONS) {
-        assert.ok(!(field in after) || after[field] === undefined,
-          `${field} must not become durable state via /api/save — a read projection that round-trips into the store is how a computed field turns into a stale one`);
-      }
-    }
-  });
-});
-
 test('#1288 — the decorations are ABSENT unless asked for (the paged path)', async () => {
   await withServer(async (s) => {
     await makeCard(s.baseUrl);

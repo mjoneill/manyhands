@@ -145,48 +145,6 @@ test('O3 every entry names an origin that exists and lists its slot; the two fil
 const titleOf = async (base, id) => (await api(base, 'GET', `/api/cards/${id}`)).body.title;
 const retitled = (snapshot, id, title) => ({ cards: snapshot.cards.map((c) => (c.id === id ? { ...c, title } : c)), columns: snapshot.columns, nextShortId: snapshot.nextShortId });
 
-test('S1 a snapshot /api/save that really writes does not erase an obligation created after the snapshot was first read (the lost-update race)', async () => {
-  const s = await startRestServer({ board: makeBoardFixture() });
-  try {
-    const a = await newCard(s.baseUrl, 'one'), b = await newCard(s.baseUrl, 'two');
-    await api(s.baseUrl, 'POST', `/api/cards/${a.id}/claim`, { by: 'ada' });
-    const snapshot = (await api(s.baseUrl, 'GET', '/api/board')).body;               // the browser reads here
-    await api(s.baseUrl, 'POST', `/api/cards/${b.id}/claim`, { by: 'bea' });          // a seat acts AFTER the read: a new obligation
-    const bNow = (await api(s.baseUrl, 'GET', `/api/cards/${b.id}`)).body;            // the client refreshes b only: its save is not a stale-version refusal
-    const before = await outbox(s.baseUrl);
-    assert.equal(before.entries.length, 2);
-    const body = retitled({ ...snapshot, cards: snapshot.cards.map((c) => (c.id === b.id ? bNow : c)) }, a.id, 'one (retitled by the snapshot)');
-    const save = await api(s.baseUrl, 'POST', '/api/save', body);
-    assert.ok(save.status < 400, `the save must succeed: ${save.status} ${save.text}`);
-    assert.equal(await titleOf(s.baseUrl, a.id), 'one (retitled by the snapshot)', 'the save really wrote: otherwise this test cannot see a sabotaged save path');
-    assert.deepEqual(await outbox(s.baseUrl), before, 'the snapshot carried no outbox and must not have changed the server\'s');
-  } finally { await s.stop(); }
-});
-
-test('S2 a client cannot FORGE, edit or remove outbox state through an /api/save that really writes', async () => {
-  const s = await startRestServer({ board: makeBoardFixture() });
-  try {
-    const a = await newCard(s.baseUrl);
-    await api(s.baseUrl, 'POST', `/api/cards/${a.id}/claim`, { by: 'ada' });
-    const before = await outbox(s.baseUrl);
-    const forged = {
-      origins: { 'forged-mutation': { mutationId: 'forged-mutation', slots: ['claim'], origin: { cardId: a.id, version: 99 }, committedAt: new Date().toISOString() } },
-      entries: { 'forged-obligation': { obligationId: 'forged-obligation', mutationId: 'forged-mutation', slot: 'claim', status: 'published', payload: { author: 'board', body: 'forged', mentions: [], notify: 'none', occurredAt: new Date().toISOString(), originActor: 'mallory', slot: 'claim' } } },
-    };
-    const variants = [['a forged outbox', { announcementOutbox: forged }], ['an emptied outbox', { announcementOutbox: { origins: {}, entries: {} } }], ['a null outbox', { announcementOutbox: null }]];
-    for (const [label, variant] of variants) {
-      const snapshot = (await api(s.baseUrl, 'GET', '/api/board')).body;               // fresh each time: the card versions are current
-      const title = `retitled under ${label}`;
-      const save = await api(s.baseUrl, 'POST', '/api/save', { ...retitled(snapshot, a.id, title), ...variant });
-      assert.ok(save.status < 500, `${label}: ${save.text}`);
-      assert.equal(await titleOf(s.baseUrl, a.id), title, `${label}: the save really wrote`);
-      assert.deepEqual(await outbox(s.baseUrl), before, `${label}: the server's outbox must be unchanged`);
-    }
-    const ghost = await outbox(s.baseUrl, '?mutationId=forged-mutation');
-    assert.deepEqual(ghost, { origins: [], entries: [] });
-  } finally { await s.stop(); }
-});
-
 // ------------------------------------------------------------------ 3. completion is verified, never trusted
 test('K0 /complete trusts nothing the caller sends: an unknown obligation is refused, and with the graph lookup unavailable a real one stays PENDING', async () => {
   const s = await startRestServer({ board: makeBoardFixture() });

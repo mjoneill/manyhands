@@ -306,7 +306,7 @@ test('X3 a crash AFTER the single publish write and BEFORE the response: after r
 // ------------------------------------------------------------------ 5. the executor path: unlocked, bounded, nothing guessed
 // the server refuses to build the graph slice without a dataset id when an executor URL is set (#1567 fencing), so the executor tests name one
 const FLAG = { SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', SCRUM_GRAPH_DATASET_ID: 'c3b-test' };
-test('H1 a HUNG executor does not stall the board: the executor call is OUTSTANDING (the stand-in saw it, the publish has not answered), and meanwhile a create, claim, save and board read complete in seconds, the save is verified without posts, and the card PAGE (which reads posts from the graph) answers a fast 503', async () => {
+test('H1 a HUNG executor does not stall the board: the executor call is OUTSTANDING (the stand-in saw it, the publish has not answered), and meanwhile a create, claim, per-card edit and board read complete in seconds, the save is verified without posts, and the card PAGE (which reads posts from the graph) answers a fast 503', async () => {
   let connections = 0;
   const hung = net.createServer((sock) => { connections++; sock.on('error', () => {}); /* accepts, never answers */ });
   await new Promise((r) => hung.listen(0, '127.0.0.1', r));
@@ -326,7 +326,7 @@ test('H1 a HUNG executor does not stall the board: the executor call is OUTSTAND
       const claim = await t('claim', () => api(s.baseUrl, 'POST', `/api/cards/${card.body.id}/claim`, { by: 'ada' }));
       assert.equal(claim.status, 200, claim.text);
       const snap = (await t('read', () => api(s.baseUrl, 'GET', '/api/board'))).body;
-      const save = await t('save', () => api(s.baseUrl, 'POST', '/api/save', { cards: snap.cards.map((c) => (c.id === card.body.id ? { ...c, title: 'saved during' } : c)), columns: snap.columns, nextShortId: snap.nextShortId }));
+      const save = await t('edit', () => api(s.baseUrl, 'PATCH', `/api/cards/${card.body.id}`, { title: 'saved during', by: 'ada' }));
       assert.ok(save.status < 400, save.text);
       // H1 REVISED 2026-10-05 (the contract owner's ruling 22:12Z, on the builder's measurement at 22:11Z that this row failed on f0e69fc and passed on the live bb26a95): with the
       // unit ON a card page reads its comments from the graph (the shared post view, S1-S6), so with the executor HUNG the page must neither serve a document-only 200 (S6: fail

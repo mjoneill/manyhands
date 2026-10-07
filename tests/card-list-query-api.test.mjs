@@ -166,33 +166,6 @@ test('GET /api/load no longer ships conversations, and flags the omission', asyn
   }
 });
 
-test('a browser load→save round-trip cannot wipe conversations off disk', async () => {
-  // /api/save already allowlists {cards, columns, nextShortId, lastUpdated}
-  // (2026-05-19 data-loss fix). This asserts the seam at #657's granularity:
-  // the exact payload a browser now HOLDS (conversations: []) written back
-  // through /api/save leaves the on-disk conversations intact.
-  const srv = await startRestServer({ board: board(5) });
-  try {
-    const loaded = await (await fetch(`${srv.baseUrl}/api/load`)).json();
-    const r = await fetch(`${srv.baseUrl}/api/save`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(loaded),
-    });
-    assert.equal(r.status, 200);
-    // The store may persist either JSON-LD (@graph, Comment nodes) or the
-    // legacy shape depending on migration state — count conversations in
-    // whichever shape is on disk.
-    const onDisk = srv.readBoardFile();
-    const convCount = Array.isArray(onDisk['@graph'])
-      ? onDisk['@graph'].filter((n) => n['@type'] === 'Comment').length
-      : (onDisk.conversations || []).length;
-    assert.equal(convCount, 2, 'conversations survived the round-trip');
-  } finally {
-    await srv.stop();
-  }
-});
-
 // ── #659 filters over the wire ─────────────────────────────────────────────
 
 test('column filter works over the wire; typo refuses naming valid columns; composes with fields', async () => {

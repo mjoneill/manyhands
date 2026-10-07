@@ -107,15 +107,6 @@ apiTest('POST with a text/plain body is rejected 415 and does not persist', asyn
   assert.equal((await listCards(baseUrl)).length, 0, 'the text/plain write did not persist');
 });
 
-apiTest('POST /api/save with text/plain is rejected 415', async ({ baseUrl }) => {
-  const res = await fetch(`${baseUrl}/api/save`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'text/plain' },
-    body: JSON.stringify({ cards: [], columns: [], conversations: [] }),
-  });
-  assert.equal(res.status, 415);
-});
-
 apiTest('POST with application/json still works (201)', async ({ baseUrl }) => {
   const res = await post(baseUrl, '/api/cards', { title: 'fine' });
   assert.equal(res.status, 201);
