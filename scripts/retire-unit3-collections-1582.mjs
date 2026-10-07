@@ -43,42 +43,51 @@ const want = [
   ...dels.map((e) => ({ id: e['@id'], type: 'Delivery', iri: U3.SEAT_RE.test(String(e['scrum:deliveredTo'])) && U3.POST_ID_RE.test(String(e['scrum:ofConversation'])) ? U3.deliveryIriOf(e['scrum:deliveredTo'], e['scrum:ofConversation']) : null })),
   ...calls.map((e) => ({ id: e['@id'], type: 'ModelCall', iri: /^https:\/\/scrumboard\.local\/model-call\/[A-Za-z0-9-]{1,64}$/.test(String(e['@id'])) ? e['@id'] : null })),
   // #1626 — a post is held when the graph has it as a live Comment OR a redacted tombstone (a redaction is the graph's answer)
-  ...posts.map((e) => { const id = String(e['@id']).startsWith(ENTITY) ? String(e['@id']).slice(ENTITY.length) : String(e['@id']); return { id, type: 'Post', iri: U3.POST_ID_RE.test(id) ? `${ENTITY}${id}` : null }; }),
+  ...posts.map((e) => { const id = String(e['@id']).startsWith(ENTITY) ? String(e['@id']).slice(ENTITY.length) : String(e['@id']); return { id, type: 'Post', text: typeof e.text === 'string' ? e.text : '', iri: U3.POST_ID_RE.test(id) ? `${ENTITY}${id}` : null }; }),
 ];
 const g = createGraphClient({ baseUrl: executor, expectedDatasetId: dataset, timeoutMs: 60000 });
 const missing = want.filter((w) => !w.iri);
-const typeTest = { Delivery: (v) => `?s <${T}> <${RS}Delivery>`, ModelCall: (v) => `?s <${T}> <${RS}ModelCall>`, Post: (v) => `?s <${T}> ?xt FILTER(?xt IN (<https://schema.org/Comment>, <${RS}RedactedPost>))` };
+const typeTest = { Delivery: `?s <${T}> <${RS}Delivery>`, ModelCall: `?s <${T}> <${RS}ModelCall>` };
 for (const type of ['Delivery', 'ModelCall', 'Post']) {
   const rows = want.filter((w) => w.iri && w.type === type);
   for (let i = 0; i < rows.length; i += 500) {
     const batch = rows.slice(i, i + 500);
-    const q = await g.query(`SELECT DISTINCT ?s WHERE { VALUES ?s { ${batch.map((w) => `<${w.iri}>`).join(' ')} } ${typeTest[type]()} }`);
+    const values = `VALUES ?s { ${batch.map((w) => `<${w.iri}>`).join(' ')} }`;
+    // #1626 — a post is held when the graph has it REDACTED (the graph's answer wins) or LIVE with the SAME text: an id that
+    // exists with different content is not the file's post, so the file's copy is not removed on its say-so.
+    const q = await g.query(type === 'Post'
+      ? `SELECT ?s ?t ?txt WHERE { ${values} ?s <${T}> ?t FILTER(?t IN (<https://schema.org/Comment>, <${RS}RedactedPost>)) OPTIONAL { ?s <https://schema.org/text> ?txt } }`
+      : `SELECT DISTINCT ?s WHERE { ${values} ${typeTest[type]} }`);
     if (!q.ok) { console.error(`the graph could not be read: ${q.reason}`); process.exit(1); }
-    const held = new Set(q.rows.map((r) => r.s.value));
-    missing.push(...batch.filter((w) => !held.has(w.iri)));
+    const held = new Map();
+    for (const r of q.rows) held.set(r.s.value, r);
+    for (const w of batch) {
+      const r = held.get(w.iri);
+      if (!r) { missing.push(w); continue; }
+      if (type === 'Post' && r.t.value !== `${RS}RedactedPost` && (r.txt?.value ?? '') !== w.text) missing.push({ ...w, reason: 'content-differs' });
+    }
   }
 }
 console.log(`${file}: ${dels.length} deliveries, ${calls.length} model calls, ${posts.length} posts in the file (kinds: ${[...kinds].join(',')}); ${want.length - missing.length} of ${want.length} verified in the graph · ${apply ? 'APPLY' : 'DRY RUN (nothing written)'}`);
 if (missing.length) {
-  for (const m of missing.slice(0, 10)) console.log(`  NOT IN THE GRAPH: ${m.type} ${m.id}`);
+  for (const m of missing.slice(0, 10)) console.log(`  ${m.reason === 'content-differs' ? 'IN THE GRAPH WITH DIFFERENT CONTENT' : 'NOT IN THE GRAPH'}: ${m.type} ${m.id}`);
   console.log('REFUSED: run scripts/migrate-unit3-1582.mjs --apply first; nothing was written.');
   process.exit(1);
 }
 if (!dels.length && !calls.length && !posts.length) { console.log('nothing to remove.'); process.exit(0); }
 if (!apply) process.exit(0);
 
-const countBy = (nodes) => { const c = {}; for (const n of nodes) { const t = JSON.stringify(n?.['@type'] ?? null); c[t] = (c[t] || 0) + 1; } return c; };
 const kept = graph.filter((n) => !isDelivery(n) && !isCall(n) && !isPost(n));
-const before = countBy(graph.filter((n) => !isDelivery(n) && !isCall(n) && !isPost(n))); const after = countBy(kept);
-if (JSON.stringify(Object.entries(before).sort()) !== JSON.stringify(Object.entries(after).sort())) {
-  console.error('REFUSED: a node count other than deliveries and model calls would change; nothing was written.'); process.exit(1);
+const removing = dels.length + calls.length + posts.length;
+if (kept.length + removing !== graph.length) {
+  console.error(`REFUSED: ${graph.length} nodes, ${removing} to remove, but ${kept.length} would remain; nothing was written.`); process.exit(1);
 }
 const now = new Date().toISOString();
 appendEvent(eventsDir, { op: 'update', actor: 'board', entity: { kind: 'board-meta', id: 'unit3-collections' },
-  state: { retired: { deliveries: dels.length, modelCalls: calls.length }, movedTo: 'graph executor', verifiedInGraph: true, reason: '#1582: deliveries and model calls live in the graph' } }, { now });
+  state: { retired: { deliveries: dels.length, modelCalls: calls.length, posts: posts.length }, movedTo: 'graph executor', verifiedInGraph: true, reason: '#1582 / #1626: these live in the graph' } }, { now });
 const out = { ...doc, '@graph': kept };
 const tmp = `${file}.tmp`;
 fs.writeFileSync(tmp, JSON.stringify(out, null, 2), 'utf8');
 fs.renameSync(tmp, file);
 const reread = JSON.parse(fs.readFileSync(file, 'utf8'))['@graph'];
-console.log(`REMOVED ${dels.length} deliveries and ${calls.length} model calls; ${reread.length} nodes remain (was ${graph.length}); read back: ${reread.filter(isDelivery).length} deliveries, ${reread.filter(isCall).length} model calls.`);
+console.log(`REMOVED ${dels.length} deliveries, ${calls.length} model calls and ${posts.length} posts; ${reread.length} nodes remain (was ${graph.length}); read back: ${reread.filter(isDelivery).length} deliveries, ${reread.filter(isCall).length} model calls, ${reread.filter(isPost).length} posts.`);

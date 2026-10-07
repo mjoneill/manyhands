@@ -8811,7 +8811,20 @@ async function handleChanges(req, res) {
  * counts are null, and `declared` and `registered` still answer in full. The
  * failure is visible in the payload rather than inferred from a missing field.
  */
-function kindsSummary(data) {
+// #1626 — the kinds whose RECORD is the graph (posts with the conversations unit; deliveries and model calls with the
+// deliveries unit). The replica census counts the board FILE, which no longer holds them (or holds stale copies), so
+// their instance counts come from the executor instead: one aggregate query. null = could not be read (unknown, not 0).
+const GRAPH_HELD_KINDS = { 'schema:Comment': 'https://schema.org/Comment', 'scrum:Delivery': 'https://scrumboard.local/ns#Delivery', 'scrum:ModelCall': 'https://scrumboard.local/ns#ModelCall' };
+async function graphKindCounts() {
+  const held = Object.entries(GRAPH_HELD_KINDS).filter(([k]) => (k === 'schema:Comment' ? !!ANNOUNCE_EXECUTOR : DELIVERIES_UNIT));
+  if (!held.length || !POSTS_READER) return null;
+  const q = await POSTS_READER.query(`SELECT ?t (COUNT(?s) AS ?n) WHERE { VALUES ?t { ${held.map(([, iri]) => `<${iri}>`).join(' ')} } ?s <${G.type}> ?t } GROUP BY ?t`);
+  const out = Object.fromEntries(held.map(([k]) => [k, q.ok ? 0 : null]));
+  if (q.ok) for (const r of q.rows) { const k = held.find(([, iri]) => iri === r.t.value)?.[0]; if (k) out[k] = Number(r.n.value); }
+  return out;
+}
+
+function kindsSummary(data, graphCounts = null) {
   const registeredRows = (Array.isArray(data.kinds) ? data.kinds : [])
     .filter((e) => e['@type'] === 'scrum:KindDefinition');
   const registered = new Set(registeredRows.map((r) => r.name));
@@ -8842,6 +8855,12 @@ function kindsSummary(data) {
       }
       census = 'live';
       censusNote = null;
+    }
+    // #1626 — graph-held kinds: the executor's count REPLACES the file's (never added to it, so stale copies cannot
+    // double it); a count the graph could not answer is null, said so in the note.
+    if (counts && graphCounts) {
+      for (const [k, n] of Object.entries(graphCounts)) counts[k] = n;
+      if (Object.values(graphCounts).some((n) => n == null)) censusNote = 'graph-held kinds (posts, deliveries, model calls) could not be counted: the graph did not answer';
     }
   } catch (e) {
     // A census that throws is reported as one that did not run. It must never
@@ -8988,7 +9007,7 @@ async function handleBoardStatus(req, res) {
       // `declared` is what the runtime accepts; `registered` is what the graph
       // has been told; `instantiated` is the census. A kind declared with ZERO
       // instances is the one a census can never show, and it is visible here.
-      kinds: kindsSummary(data),
+      kinds: kindsSummary(data, await graphKindCounts()),
       // #1208 — "what has this room researched" as a NUMBER a stranger can see
       // without knowing a card number or a filename. Counted from the runs
       // collection rather than the graph, so it answers on a cold replica too:
@@ -9007,9 +9026,16 @@ async function handleBoardStatus(req, res) {
 function handleGetBoard(req, res) {
   try {
     const data = readBoard();
-    // #1582 — with the deliveries unit on, the document's copies are not the record: they are not served as if they were.
-    // A COPY without the two keys: a GET's board is the shared, deep-frozen read, and deleting a key it holds throws.
-    if (DELIVERIES_UNIT) { const { deliveries: _d, modelCalls: _m, ...rest } = data; return sendJSON(res, 200, rest); }
+    // #1582 / #1626 — a collection whose record is the graph is not served from the document as if it were: deliveries
+    // and model calls with the deliveries unit, posts (`conversations`) with the conversations unit. Read them through their
+    // own routes (/api/deliveries, /api/model-calls, /api/conversations). A COPY without the keys: a GET's board is the
+    // shared, deep-frozen read, and deleting a key it holds throws.
+    if (DELIVERIES_UNIT || ANNOUNCE_EXECUTOR) {
+      const rest = { ...data };
+      if (DELIVERIES_UNIT) { delete rest.deliveries; delete rest.modelCalls; }
+      if (ANNOUNCE_EXECUTOR) delete rest.conversations;
+      return sendJSON(res, 200, rest);
+    }
     sendJSON(res, 200, data);
   } catch (e) {
     console.error('GET /api/board:', e.message);
