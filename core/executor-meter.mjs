@@ -22,6 +22,8 @@ const ms = (ns) => Math.round(ns / 1e6);
 
 export function createExecutorMeter({ routeOf = () => 'background', extras = () => '', slowMs = 1000, log = (line) => console.error(line), now = () => new Date(), loopResolutionMs = 20 } = {}) {
   let buckets = new Map();
+  // #1570 — the running totals the daily "still running" post reports (owner decision, 2026-10-07: so nobody forgets it is out there).
+  let day = { since: now(), calls: 0, slow: 0, unavailable: 0, loopMaxMs: 0 };
   let loop = null;
   try { loop = monitorEventLoopDelay({ resolution: loopResolutionMs }); loop.enable(); } catch { loop = null; }
 
@@ -32,7 +34,9 @@ export function createExecutorMeter({ routeOf = () => 'background', extras = () 
       const b = buckets.get(key) || { label, kind, outcome, route, n: 0, totalMs: 0, maxMs: 0 };
       b.n += 1; b.totalMs += elapsedMs; if (elapsedMs > b.maxMs) b.maxMs = elapsedMs;
       buckets.set(key, b);
+      day.calls += 1;
       if (elapsedMs >= slowMs) {
+        day.slow += 1;
         const sha = typeof body === 'string' ? createHash('sha256').update(body).digest('hex').slice(0, 16) : '-';
         log(`${now().toISOString()} executor-meter slow: ${Math.round(elapsedMs)}ms label=${label} kind=${kind} outcome=${outcome} route=${route} body=${sha}`);
       }
@@ -47,6 +51,7 @@ export function createExecutorMeter({ routeOf = () => 'background', extras = () 
   /** A 503 the server sent because the graph could not be read; `code` is the response's code. */
   function unavailable(code) {
     try {
+      day.unavailable += 1;
       const l = loopNow();
       log(`${now().toISOString()} executor-meter 503: code=${code} route=${routeOf() || 'background'} loopMaxThisMinuteMs=${l ? l.max : 'n/a'}`);
     } catch { /* never breaks the response */ }
@@ -57,6 +62,7 @@ export function createExecutorMeter({ routeOf = () => 'background', extras = () 
     const rows = [...buckets.values()].sort((a, b) => b.totalMs - a.totalMs);
     buckets = new Map();
     const l = loopNow();
+    if (l && l.max > day.loopMaxMs) day.loopMaxMs = l.max;
     if (loop) loop.reset();
     const calls = rows.reduce((s, r) => s + r.n, 0);
     const parts = rows.map((r) => `${r.label}/${r.kind}/${r.outcome}@${r.route} n=${r.n} total=${Math.round(r.totalMs)}ms max=${Math.round(r.maxMs)}ms`);
@@ -67,9 +73,18 @@ export function createExecutorMeter({ routeOf = () => 'background', extras = () 
     return line;
   }
 
+  /** The daily keep-alive's text: what ran since the last one, and how to turn it off. Resets the day. */
+  function dailySummary({ pid = process.pid, off = 'set SCRUM_EXECUTOR_METER=0 in the REST launchd plist and restart REST' } = {}) {
+    const l = loopNow();
+    if (l && l.max > day.loopMaxMs) day.loopMaxMs = l.max;
+    const text = `📈 #1570 executor meter is still running in REST (pid ${pid}). Since ${day.since.toISOString()}: ${day.calls} executor calls, ${day.slow} slow (>= ${slowMs} ms), ${day.unavailable} graph-unavailable 503s, worst event-loop delay ${day.loopMaxMs} ms. Per-minute detail: "executor-meter" lines in the REST log. To turn it off: ${off}.`;
+    day = { since: now(), calls: 0, slow: 0, unavailable: 0, loopMaxMs: 0 };
+    return text;
+  }
+
   function stop() { try { loop?.disable(); } catch { /* already off */ } }
 
-  return { record, unavailable, flush, stop, loopNow };
+  return { record, unavailable, flush, dailySummary, stop, loopNow };
 }
 
 /**

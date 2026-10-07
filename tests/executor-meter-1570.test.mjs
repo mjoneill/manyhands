@@ -123,3 +123,29 @@ test('EM5 a graph 503 is one "executor-meter 503:" line; SCRUM_EXECUTOR_METER=0 
     assert.ok(!/executor-meter|#1570 executor meter ON/.test(off.stderr()), 'off means off');
   } finally { await off.stop(); await killExecutor(exec2); }
 });
+
+test('EM6 the daily keep-alive: the summary counts the day and says how to turn it off; REST posts it to the board as "board"', { skip: SKIP, timeout: 300000 }, async () => {
+  const m = createExecutorMeter({ slowMs: 100, log: () => {} });
+  m.record({ label: 'cards', kind: 'query', outcome: '200', elapsedMs: 5 });
+  m.record({ label: 'posts', kind: 'query', outcome: 'timeout', elapsedMs: 250 });
+  m.unavailable('GRAPH_UNAVAILABLE');
+  const text = m.dailySummary({ pid: 4242 });
+  assert.match(text, /executor meter is still running in REST \(pid 4242\)/);
+  assert.match(text, /2 executor calls, 1 slow \(>= 100 ms\), 1 graph-unavailable 503s/);
+  assert.match(text, /To turn it off: set SCRUM_EXECUTOR_METER=0/);
+  assert.match(m.dailySummary(), / 0 executor calls, 0 slow/, 'the day resets');
+  m.stop();
+  const exec = await startExecutor({ store: tmpStore('em6-'), datasetId: 'em6-test', create: true });
+  const env = { SCRUM_ROSTER_FILE: ROSTER_FILE, SCRUM_GRAPH_DATASET_ID: 'em6-test', SCRUM_GRAPH_EXECUTOR_URL: exec.baseUrl, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', SCRUM_EXECUTOR_METER_FIRST_POST_MS: '500', SCRUM_EXECUTOR_METER_DAILY_MS: '600000' };
+  const rest = await startRestServer({ board: makeBoardFixture(), env });
+  try {
+    let post = null;
+    for (let i = 0; i < 60 && !post; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      const list = await (await fetch(`${rest.baseUrl}/api/conversations?limit=20`, { signal: AbortSignal.timeout(30000) })).json();
+      post = (Array.isArray(list) ? list : list.conversations || []).find((c) => /#1570 executor meter is still running/.test(c.body || ''));
+    }
+    assert.ok(post, `the keep-alive reached the board (${rest.stderr().split('\n').filter((l) => /keep-alive/.test(l)).join(' | ')})`);
+    assert.equal(post.author, 'board');
+  } finally { await rest.stop(); await killExecutor(exec); }
+});

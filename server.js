@@ -12576,6 +12576,16 @@ if (process.env.SCRUM_GRAPH_EXECUTOR_URL && process.env.SCRUM_EXECUTOR_METER !==
       .catch((e) => console.error(`${new Date().toISOString()} #1570 cpu profile: failed: ${e.message}`));
   });
   console.error(`${new Date().toISOString()} #1570 executor meter ON: one "executor-meter minute:" line a minute; slow calls and graph 503s are logged as they happen`);
+  // Owner decision, 2026-10-07: at least once a day it says on the board that it is still running, so nobody forgets it is out
+  // there or forgets to turn it off. Posted through REST's own public route, as the board, like the fanout watch.
+  const postKeepAlive = () => {
+    const body = EXECUTOR_METER.dailySummary();
+    fetch(`http://127.0.0.1:${PORT}/api/conversations`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ body, author: 'board' }), signal: AbortSignal.timeout(30_000) })
+      .then((r) => { if (r.status >= 300) console.error(`${new Date().toISOString()} #1570 meter keep-alive post refused: http ${r.status}`); })
+      .catch((e) => console.error(`${new Date().toISOString()} #1570 meter keep-alive post failed: ${e.message}`));
+  };
+  const dailyMs = Number(process.env.SCRUM_EXECUTOR_METER_DAILY_MS ?? 86_400_000);
+  setTimeout(() => { postKeepAlive(); setInterval(postKeepAlive, dailyMs).unref(); }, Number(process.env.SCRUM_EXECUTOR_METER_FIRST_POST_MS ?? 600_000)).unref();
 }
 if (process.env.SCRUM_GRAPH_UNIT_CONVERSATIONS === '1') {
   if (!GRAPH_SLICE.enabled) throw new Error('#1574: SCRUM_GRAPH_UNIT_CONVERSATIONS=1 requires the graph slice (SCRUM_GRAPH_EXECUTOR_URL + SCRUM_GRAPH_DATASET_ID)');
