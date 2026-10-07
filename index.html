@@ -6231,7 +6231,10 @@ function _loadTests() {
   return _testsLoadedPromise;
 }
 
-if (window.location.search.includes('test')) {
+// #1630 — EXACT `?test`, and never on the live board: the in-page suite drives production code paths that now write
+// through the API (#1585), so on the live origin it would edit the live board. `has('test')` (not a substring match),
+// and the live server's port is refused.
+if (_IS_TEST_MODE && window.location.port !== '3141') {
   _loadTests().then(() => setTimeout(showTestRunner, 100));
 }
 

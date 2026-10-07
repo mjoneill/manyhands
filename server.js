@@ -139,6 +139,15 @@ let _announcementsPending = null;
 const countPendingAnnouncements = (data) => Object.values(outboxOf(data).entries).filter((e) => e && e.status === 'pending').length;
 
 const PORT = process.env.SCRUM_PORT ? parseInt(process.env.SCRUM_PORT, 10) : 3141;
+// #1630 — a MISLAUNCH guard, opt-in: when the environment says a launchd marker is REQUIRED (bc-build sets
+// SCRUM_REQUIRE_LAUNCHD_MARKER for every builder) and the marker the live plist sets (SCRUM_LAUNCHD) is absent, this
+// server refuses to start at all. It is not a security boundary (any process can set the marker); the builder sandbox
+// (scripts/builder-sandbox.mjs) is. It stops the accident of a builder starting a server, as one did on 2026-10-07.
+if (process.env.SCRUM_REQUIRE_LAUNCHD_MARKER && !process.env.SCRUM_LAUNCHD) {
+  console.error('#1630: refusing to start: SCRUM_REQUIRE_LAUNCHD_MARKER is set and this server was not launched by launchd '
+    + '(SCRUM_LAUNCHD is absent). A builder must not start the board server; use the test harness, which picks its own port.');
+  process.exit(78);
+}
 // #1338 — extra local names this board may be reached by. Loopback names need
 // no entry. See core/host-guard.mjs.
 const ALLOWED_HOSTS = parseAllowedHosts(process.env.SCRUM_ALLOWED_HOSTS);
