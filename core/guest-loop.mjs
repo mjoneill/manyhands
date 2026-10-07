@@ -1481,11 +1481,18 @@ export function settlePending(state = {}, id, { at = null } = {}) {
 }
 const settledEntries = (state = {}) => (Array.isArray(state.settled) ? state.settled : []).map((x) => (typeof x === 'string' ? { id: x, at: null } : x)).filter((x) => x && x.id != null);
 export const settledIds = (state = {}) => new Set(settledEntries(state).map((x) => x.id));
-/** Keep every settlement a scan or a sweep could still read; drop only those stamped before the sweep's lower bound − rewind. */
+/**
+ * Keep every settlement that EITHER scan path could still read (review 2026-10-07T19:58Z): drop one only when its stamp
+ * is older than BOTH the recovery sweep's lower bound and the ordinary scan's window start. In a quiet room the ordinary
+ * window (scannedThrough − rewind) can sit far behind the sweep's, so pruning by the sweep alone let the ordinary rewind
+ * re-capture an answer whose evidence a sweep had just pruned.
+ */
 export function pruneSettled(state = {}, now = null) {
-  const floorFrom = typeof state.sweptAt === 'string' ? state.sweptAt : (typeof state.sweepAnchor === 'string' ? state.sweepAnchor : now);
-  if (!floorFrom) return state;
-  const floor = new Date(Date.parse(floorFrom) - SWEEP_LOOKBACK_MS - SCAN_REWIND_MS).toISOString();
+  const sweepFrom = typeof state.sweptAt === 'string' ? state.sweptAt : (typeof state.sweepAnchor === 'string' ? state.sweepAnchor : now);
+  if (!sweepFrom) return state;
+  const sweepFloor = new Date(Date.parse(sweepFrom) - SWEEP_LOOKBACK_MS - SCAN_REWIND_MS).toISOString();
+  const scanFloor = scanWindowSince(state, now ?? sweepFrom);
+  const floor = scanFloor < sweepFloor ? scanFloor : sweepFloor;
   return { ...state, settled: settledEntries(state).filter((x) => typeof x.at !== 'string' || x.at >= floor) };
 }
 export function mentionScanPath(state = {}, now = new Date().toISOString(), { before = null } = {}) {

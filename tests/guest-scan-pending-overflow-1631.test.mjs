@@ -66,3 +66,18 @@ test('PO6 a failing first sweep cannot slide its lower bound: the anchor is pinn
   assert.equal(s2.sweepAnchor, t0, 'the anchor does not move');
   assert.equal(sweepSince(s2, '2026-10-07T15:00:00.000Z'), '2026-10-06T12:00:00.000Z', 'the bound is anchor - 24 h, not now - 24 h');
 });
+
+test('PO7 two mentions answered, the room quiet for over 24 h, a sweep completes: ordinary wakes still never re-capture either (pruning respects BOTH scan paths)', async () => {
+  const { settlePending, captureSweep, scanWindowSince, findWakes } = await import('../core/guest-loop.mjs');
+  const a = mention(10), b = mention(20);
+  let state = { ...CUTOVER, pending: [a, b], scannedThrough: at(30) };
+  state = settlePending(state, a.id, { at: a.createdAt });
+  state = { ...settlePending(state, b.id, { at: b.createdAt }), lastAnsweredId: b.id, lastAnsweredAt: b.createdAt };
+  const later = new Date(Date.parse(at(30)) + 25 * 3600_000).toISOString();   // quiet for 25 h
+  state = captureSweep(state, { complete: true, messages: [] }, 'pip', { sweepStart: later });
+  assert.ok(Date.parse(scanWindowSince(state, later)) <= Date.parse(a.createdAt), 'CONTROL: the ordinary window still reaches back to the answered mentions');
+  const next = advanceScan(state, { complete: true, messages: [a, b] }, 'pip');
+  assert.deepEqual(next.pending, [], 'neither is captured again');
+  const wakes = findWakes({ agent: { seatKey: 'pip', wakeOn: ['mention'] }, messages: [a, b], state: next, pending: next.pending });
+  assert.deepEqual(wakes, [], 'and neither wakes the seat again');
+});
