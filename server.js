@@ -170,7 +170,7 @@ const COLLECTION_FAMILIES = [
   // be deleted later. A card is a graph subject only with the cards unit on.
   { key: 'talks', routes: ['/api/talks'] },
   { key: 'roles', routes: ['/api/roles'], requires: (e) => referencedSubjects(e['scrum:definedBy']) },
-  { key: 'roleVersions', routes: ['/api/roles'], requires: (e) => referencedSubjects(e['scrum:definedBy']) },
+  { key: 'roleVersions', routes: ['/api/roles'], requires: (e) => referencedSubjects(e['scrum:definedBy']), inherits: (e) => e['scrum:ofRole'] },
   { key: 'obligations', routes: ['/api/obligations'], requires: (e) => referencedSubjects(e.about) },
 ];
 /** A stored reference → the graph subject that must exist: an IRI names itself; a bare id is a card (cards unit only). */
@@ -965,6 +965,13 @@ function sendJSON(res, statusCode, data) {
   // errors (fixed prefixes, produced only by core/cards-unit.mjs and core/collections-unit.mjs), passed through a
   // handler's generic catch as `e.message` — a shared read can run in another request's async context.
   const unitUnavailable = statusCode === 500 && data && typeof data.error === 'string' && /^(cards|collections) are unavailable: /.test(data.error);
+  // A guarded write the graph REFUSED (a stale version, a unique value taken, a referenced subject gone), still refused
+  // after lockedWithCards' one retry, is a determinate answer: 409, never a bare 500.
+  const unitRefused = statusCode === 500 && data && typeof data.error === 'string' && /^(card|collection) write refused: /.test(data.error);
+  if (statusCode === 500 && ((graphCtx && graphCtx.writeRefused) || unitRefused)) {
+    statusCode = 409;
+    data = { error: `the graph refused this write as stale or conflicting; nothing was written: ${unitRefused ? data.error : graphCtx.writeRefused}`, code: 'WRITE_CONFLICT' };
+  }
   if (statusCode === 500 && ((graphCtx && graphCtx.graphUnavailable) || unitUnavailable)) {
     statusCode = 503;
     data = { error: `the graph executor is not answering, so the outcome is not known and nothing is reported as written: ${unitUnavailable ? data.error : graphCtx.graphUnavailable}`, code: 'GRAPH_UNAVAILABLE' };
@@ -7763,6 +7770,7 @@ async function lockedWithCards(fn) {
       return result;
     } catch (e) {
       if (e && e.code === 'CARD_WRITE_CONFLICT' && attempt === 1) continue;
+      if (e && e.code === 'CARD_WRITE_CONFLICT') { const ctx = requestContext.getStore(); if (ctx) ctx.writeRefused = e.message; }
       markGraphUnavailable(e);   // an unresolved UNKNOWN (or an executor away): the response is 503, never a bare 500
       throw e;
     }

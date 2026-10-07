@@ -58,8 +58,9 @@ export class CollectionsUnavailable extends Error {
 }
 
 /**
- * `families`: [{ key, unique?: (entity) => [{ predicate: IRI, value: term }], requires?: (entity) => [IRI] }]. `client` is a
- * graph client. `requires` names the subjects the entity references; a write that sets one guards that it exists.
+ * `families`: [{ key, unique?: (entity) => [{ predicate: IRI, value: term }], requires?: (entity) => [IRI], inherits?: (entity) => id }].
+ * `client` is a graph client. `requires` names the subjects the entity references; a write that sets one guards that it
+ * exists. `inherits` names the cached entity whose references this one copies (they count as already held).
  */
 export function createCollectionsUnit({ client, families, mintId, actorIri = (who) => `https://scrumboard.local/person/${encodeURIComponent(who || 'board')}` }) {
   const byKey = new Map(families.map((f) => [f.key, f]));
@@ -92,6 +93,7 @@ export function createCollectionsUnit({ client, families, mintId, actorIri = (wh
   function plan(data) {
     if (!cache || uncertain) throw new CollectionsUnavailable('the collection cache is not current');
     const parts = [];
+    const cachedById = (id) => { for (const m of cache.values()) { const r = m.get(id); if (r) return r; } return null; };
     for (const [key, fam] of byKey) {
       const was = cache.get(key);
       const seen = new Set();
@@ -105,7 +107,11 @@ export function createCollectionsUnit({ client, families, mintId, actorIri = (wh
         const unique = fam.unique ? fam.unique(e) : [];
         // Only a reference this write SETS is guarded: one the entity already held was checked when it was set, and
         // guarding it again would make every later edit depend on the target living forever.
-        const held = new Set(prev && fam.requires ? fam.requires(prev.entity) : []);
+        // `inherits` names another entity whose references this one copies (a role version copies its role's): what that
+        // entity already holds in the cache is held here too, so a new version that keeps the role's reference is not
+        // re-guarded, while one that changes it is.
+        const parent = fam.inherits ? cachedById(fam.inherits(e)) : null;
+        const held = new Set([...(prev && fam.requires ? fam.requires(prev.entity) : []), ...(parent && fam.requires ? fam.requires(parent.entity) : [])]);
         const requires = (fam.requires ? fam.requires(e) : []).filter((r) => !held.has(r));
         const extra = { ...(unique.length ? { unique } : {}), ...(requires.length ? { requires } : {}) };
         parts.push(prev
@@ -141,7 +147,10 @@ export function createCollectionsUnit({ client, families, mintId, actorIri = (wh
     if (r.outcome !== 'APPLIED') {
       // UNAVAILABLE: nothing was sent, so the cache is still the graph's. Anything else leaves it to be re-read.
       if (r.outcome !== 'UNAVAILABLE') uncertain = true;
-      if (r.outcome === 'PRECONDITION_FAILED' || r.outcome === 'REJECTED') throw Object.assign(new Error(`collection write refused: ${r.outcome}${r.reason ? `: ${r.reason}` : ''}`), { code: 'CARD_WRITE_CONFLICT' });
+      // A PRECONDITION_FAILED is the guards refusing (stale, taken, gone): a conflict the caller can act on. A REJECTED is
+      // the executor refusing the update itself: our defect, never reported as a conflict.
+      if (r.outcome === 'PRECONDITION_FAILED') throw Object.assign(new Error(`collection write refused: ${r.outcome}${r.reason ? `: ${r.reason}` : ''}`), { code: 'CARD_WRITE_CONFLICT' });
+      if (r.outcome === 'REJECTED') throw new Error(`the executor rejected a collection write: ${r.reason || 'no reason given'}`);
       throw new CollectionsUnavailable(`the write's outcome is ${r.outcome}${r.reason ? `: ${r.reason}` : ''}`);
     }
     applied(data, parts);

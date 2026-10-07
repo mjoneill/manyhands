@@ -40,3 +40,16 @@ test('a removal requires nothing', async () => {
   assert.equal(p.remove, true);
   assert.equal(p.requires, undefined);
 });
+
+test('a new entity that INHERITS its parent\'s reference (a role version) is not re-guarded; one that changes it is', async () => {
+  const roleRow = rowOf(role('c1'));
+  const u = createCollectionsUnit({ client: stub([roleRow, { ...rowOf({ '@id': 'https://scrumboard.local/role/r/v1', 'scrum:ofRole': 'https://scrumboard.local/role/r', 'scrum:definedBy': 'c1' }), k: { value: 'roleVersions' } }]),
+    families: [{ key: 'roles', requires: (e) => (e['scrum:definedBy'] ? [`https://scrumboard.local/entity/${e['scrum:definedBy']}`] : []) },
+      { key: 'roleVersions', requires: (e) => (e['scrum:definedBy'] ? [`https://scrumboard.local/entity/${e['scrum:definedBy']}`] : []), inherits: (e) => e['scrum:ofRole'] }], mintId: () => 'x' });
+  await u.load();
+  const v1 = u.snapshot().roleVersions[0];
+  const keep = u.plan({ roles: [role('c1', 'renamed')], roleVersions: [v1, { '@id': 'https://scrumboard.local/role/r/v2', 'scrum:ofRole': 'https://scrumboard.local/role/r', 'scrum:definedBy': 'c1' }] });
+  assert.deepEqual(keep.map((p) => p.requires), [undefined, undefined], 'the role keeps its card and the new version copies it: nothing re-guarded');
+  const change = u.plan({ roles: [role('c2')], roleVersions: [v1, { '@id': 'https://scrumboard.local/role/r/v2', 'scrum:ofRole': 'https://scrumboard.local/role/r', 'scrum:definedBy': 'c2' }] });
+  assert.deepEqual(change.map((p) => p.requires), [['https://scrumboard.local/entity/c2'], ['https://scrumboard.local/entity/c2']], 'a changed reference is guarded on both');
+});
