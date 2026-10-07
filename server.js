@@ -12959,31 +12959,24 @@ function routeApi(method, urlPath, req, res) {
       // line also broke the instrument that maps MCP tools to routes by parsing
       // this table (#1163). Measured, not reasoned: both failed in the suite.
       const go = () => requestContext.run({ method, shares: method === 'GET', read: null }, () => r.fn(req, res, m));
-      // #1598 K7 — with cards in the graph, a board read or write is served only while the executor answers and the
-      // card cache is current: otherwise 503, never a board without its cards.
-      if (CARDS_UNIT && cardDependent(method, urlPath)) {
-        cardsReady().then((ok) => (ok ? go() : sendJSON(res, 503, { error: 'cards are unavailable: the graph executor is not answering', code: 'CARDS_UNAVAILABLE' })),
-          (e) => sendJSON(res, 500, { error: e.message }));
-        return true;
-      }
-      // #1624 — after an UNKNOWN write the collection cache is uncertain, and EVERY board read needs it (readBoard swaps
-      // the collections in): TRY to reload it before the handler runs. Either way the handler runs: it refuses a
-      // malformed request on its own grounds (400), and if it then reads the board while the cache is still uncertain
-      // the snapshot refuses, which sendJSON answers as 503 — never a board served without its collections.
-      if (COLLECTIONS && COLLECTIONS.uncertain) {
-        COLLECTIONS.ensureFresh().then(() => routeApiAfterFresh(), () => routeApiAfterFresh());
-        return true;
-      }
-      return routeApiAfterFresh();
-      function routeApiAfterFresh() {
-      if (COLLECTIONS && method === 'GET' && collectionDependent(urlPath)) {
-        collectionsReady().then((ok) => (ok ? go() : sendJSON(res, 503, { error: 'the graph executor is not answering, so this collection is unavailable', code: 'GRAPH_UNAVAILABLE' })),
-          (e) => sendJSON(res, 500, { error: e.message }));
-        return true;
-      }
-      go();
+      const cardRoute = CARDS_UNIT && cardDependent(method, urlPath);
+      const collRoute = COLLECTIONS && method === 'GET' && collectionDependent(urlPath);
+      const cardsUncertain = CARDS_UNIT && CARDS.uncertain && !cardRoute;
+      const collsUncertain = COLLECTIONS && COLLECTIONS.uncertain;
+      if (!cardRoute && !collRoute && !cardsUncertain && !collsUncertain) { go(); return true; }
+      (async () => {
+        // #1598 / #1624 — after an UNKNOWN write a cache is uncertain, and EVERY board read needs it (readBoard swaps the
+        // cards and collections in): TRY to reload it before the handler runs, then run the handler either way (a
+        // malformed request still answers 400; a board read with a cache still uncertain refuses, answered 503).
+        if (cardsUncertain) await CARDS.ensureFresh().catch(() => {});
+        if (collsUncertain) await COLLECTIONS.ensureFresh().catch(() => {});
+        // #1598 K7 — with cards in the graph, a board read or write is served only while the executor answers and the
+        // card cache is current: otherwise 503, never a board without its cards. The same for a collection's GET.
+        if (cardRoute && !(await cardsReady())) return sendJSON(res, 503, { error: 'cards are unavailable: the graph executor is not answering', code: 'CARDS_UNAVAILABLE' });
+        if (collRoute && !(await collectionsReady())) return sendJSON(res, 503, { error: 'the graph executor is not answering, so this collection is unavailable', code: 'GRAPH_UNAVAILABLE' });
+        go();
+      })().catch((e) => sendJSON(res, 500, { error: e.message }));
       return true;
-      }
     }
   }
   return false;
