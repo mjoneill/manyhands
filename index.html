@@ -6219,7 +6219,15 @@ document.addEventListener('click', (e) => {
 //   ?test in URL  → auto-load + auto-run tests after init settles
 //   Ctrl+Shift+T  → lazy-load (if not already), toggle runner overlay
 let _testsLoadedPromise = null;
+// #1630 — the in-page suite drives production code paths that write through the API (#1585), so it must never load on
+// the LIVE board. The refusal lives HERE, in the one function every door (the ?test auto-run, Ctrl+Shift+T) calls, so a
+// new door cannot forget it.
+const _isLiveBoard = () => window.location.port === '3141';
 function _loadTests() {
+  if (_isLiveBoard()) {
+    console.warn('#1630: the in-page test suite does not load on the live board (port 3141); run it on a test server.');
+    return Promise.reject(new Error('the in-page test suite does not load on the live board'));
+  }
   if (_testsLoadedPromise) return _testsLoadedPromise;
   _testsLoadedPromise = new Promise((resolve, reject) => {
     const s = document.createElement('script');
@@ -6231,11 +6239,9 @@ function _loadTests() {
   return _testsLoadedPromise;
 }
 
-// #1630 — EXACT `?test`, and never on the live board: the in-page suite drives production code paths that now write
-// through the API (#1585), so on the live origin it would edit the live board. `has('test')` (not a substring match),
-// and the live server's port is refused.
-if (_IS_TEST_MODE && window.location.port !== '3141') {
-  _loadTests().then(() => setTimeout(showTestRunner, 100));
+// #1630 — EXACT `?test` (`has('test')`, never a substring match); the live-board refusal is inside _loadTests.
+if (_IS_TEST_MODE) {
+  _loadTests().then(() => setTimeout(showTestRunner, 100), () => {});
 }
 
 document.addEventListener('keydown', (e) => {
@@ -6245,7 +6251,7 @@ document.addEventListener('keydown', (e) => {
       const runner = document.getElementById('test-runner');
       if (runner.classList.contains('visible')) hideTestRunner();
       else showTestRunner();
-    });
+    }, () => {});   // #1630 — refused on the live board (logged by _loadTests)
   }
 });
 
