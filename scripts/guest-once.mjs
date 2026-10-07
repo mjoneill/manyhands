@@ -510,7 +510,12 @@ if (wake.kind === 'channel' && !dry) {
 // it owed, so the next run finds it again (shouldMarkAnswered, tested).
 if (!dry && shouldMarkAnswered(r)) {
   const next = { ...state, at: new Date().toISOString(), posted: r.posted, reason: r.reason ?? null };
-  if (wake.kind === 'mention') { next.lastAnsweredId = wake.id; next.lastAnsweredAt = wake.createdAt ?? next.lastAnsweredAt ?? null; }   // #1237 the cursor
+  // #1237 the cursor. #1631 — it never moves BACKWARD: answering an older pending mention after a newer one (a cap-held or
+  // late-visible mention) keeps the later stamp and its id, so a rollback to a runner that wakes everything after the
+  // cursor cannot re-answer the newer one (row S28). This build reads `settled` and the cutover line, not this order.
+  if (wake.kind === 'mention' && !(typeof next.lastAnsweredAt === 'string' && typeof wake.createdAt === 'string' && wake.createdAt < next.lastAnsweredAt)) {
+    next.lastAnsweredId = wake.id; next.lastAnsweredAt = wake.createdAt ?? next.lastAnsweredAt ?? null;
+  }
   if (wake.kind === 'assignment') next.assignmentsSeen = [...new Set([...(state.assignmentsSeen || []), wake.cardId])].slice(-200);
   if (wake.kind === 'schedule') next.lastScheduledAt = wake.createdAt;
   if (wake.kind === 'channel') next.lastChannelDrainAt = new Date().toISOString();   // #1346
