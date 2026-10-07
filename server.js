@@ -134,6 +134,12 @@ const cardWriteContext = new AsyncLocalStorage();   // #1598 — the write a loc
 // #1624 — the small-kinds unit (wake first). Reads and writes go through the one generic
 // `entity.put` primitive; OFF ⇒ the document collection is the only store (today's path).
 const SMALLKINDS_UNIT = process.env.SCRUM_GRAPH_UNIT_SMALLKINDS === '1';
+// #1624 — the MUTABLE K13 families: graph-held collections through #1598's transaction machinery (review 08:37Z). Each
+// family registers { key (the board collection), unique(entity) → the values the graph must guard, routes (URL prefixes
+// that read or write it) }. With none registered nothing below runs. Wakes stay on their own lock-free path.
+const COLLECTION_FAMILIES = [];
+let COLLECTIONS = null;
+const FILE_COLLS = Symbol('fileCollections');   // the document's own copies of the graph-held collections
 
 let _documentWrites = 0;   // #1574 1b — successful writeBoard calls since boot; on /api/health as `documentWrites`
 // #1574 1b scope change — announcements whose inline attempt failed stay pending until a hand-run reconciler or the cards
@@ -1284,9 +1290,9 @@ function readBoard() {
     const { key, domain } = loadDomainShared(BOARD_DATA_FILE);
     // Keyed by PATH as well as identity: one board file per process today, but
     // a key that could match a different file's identity is a latent stale read.
-    if (!_sharedBoard || _sharedBoard.file !== BOARD_DATA_FILE || _sharedBoard.key !== key || (CARDS_UNIT && _sharedBoard.cardsGen !== CARDS.generation)) {
+    if (!_sharedBoard || _sharedBoard.file !== BOARD_DATA_FILE || _sharedBoard.key !== key || (CARDS_UNIT && _sharedBoard.cardsGen !== CARDS.generation) || (COLLECTIONS && _sharedBoard.collGen !== COLLECTIONS.generation)) {
       const board = deepFreeze(withUnitCards(finishBoard(domainToBoard(domain))));
-      _sharedBoard = { file: BOARD_DATA_FILE, key, board, builtMs: Math.round(performance.now() - t0), builtAt: new Date().toISOString(), cardsGen: CARDS_UNIT ? CARDS.generation : null };
+      _sharedBoard = { file: BOARD_DATA_FILE, key, board, builtMs: Math.round(performance.now() - t0), builtAt: new Date().toISOString(), cardsGen: CARDS_UNIT ? CARDS.generation : null, collGen: COLLECTIONS ? COLLECTIONS.generation : null };
       ctx.read = `shared; rebuilt=${_sharedBoard.builtMs}ms; key=${key}; cards=${board.cards.length}`;
     } else {
       ctx.read = `shared; hit; built=${_sharedBoard.builtAt}; key=${_sharedBoard.key}; cards=${_sharedBoard.board.cards.length}`;
@@ -1305,13 +1311,20 @@ function readBoard() {
  * cache is not current: a board without its cards is never served as a board.
  */
 function withUnitCards(board) {
-  if (!CARDS_UNIT) return board;
-  const snap = CARDS.snapshot(board.nextShortId);
-  board[FILE_CARDS] = board.cards;
-  board[FILE_NEXT_SHORT_ID] = board.nextShortId;
-  board[FILE_ORIGINS] = new Set(Object.keys(outboxOf(board).origins));
-  board.cards = snap.cards;
-  board.nextShortId = snap.nextShortId;
+  if (CARDS_UNIT) {
+    const snap = CARDS.snapshot(board.nextShortId);
+    board[FILE_CARDS] = board.cards;
+    board[FILE_NEXT_SHORT_ID] = board.nextShortId;
+    board[FILE_ORIGINS] = new Set(Object.keys(outboxOf(board).origins));
+    board.cards = snap.cards;
+    board.nextShortId = snap.nextShortId;
+  }
+  if (COLLECTIONS) {
+    // #1624 — the graph-held collections are the unit's; the document's own copies ride beside them, put back on write.
+    const snap = COLLECTIONS.snapshot();
+    board[FILE_COLLS] = Object.fromEntries(COLLECTIONS.keys.map((k) => [k, board[k]]));
+    for (const k of COLLECTIONS.keys) board[k] = snap[k];
+  }
   return board;
 }
 
@@ -1407,12 +1420,13 @@ function writeBoard(data, events) {
       + 'name its entities, derive the events by diffing — see handleSave.',
     );
   }
-  if (CARDS_UNIT && data[FILE_CARDS]) {
-    // #1598 — the cards go to the graph FIRST: stage this write for the lock to commit, and write the document (and the
-    // events) only after the executor answered APPLIED. A card change outside the lock has no one to commit it.
+  if ((CARDS_UNIT && data[FILE_CARDS]) || (COLLECTIONS && data[FILE_COLLS])) {
+    // #1598 / #1624 — the graph FIRST: stage this write for the lock to commit, and write the document (and the events)
+    // only after the executor answered APPLIED. A card or collection change outside the lock has no one to commit it.
     const staged = cardWriteContext.getStore();
     if (!staged) {
-      if (CARDS.plan(data.cards, data.nextShortId)) throw new Error('#1598: a card write outside withWriteLock cannot be committed to the graph');
+      if (CARDS_UNIT && data[FILE_CARDS] && CARDS.plan(data.cards, data.nextShortId)) throw new Error('#1598: a card write outside withWriteLock cannot be committed to the graph');
+      if (COLLECTIONS && data[FILE_COLLS] && COLLECTIONS.plan(data).length) throw new Error('#1624: a collection write outside withWriteLock cannot be committed to the graph');
     } else { staged.push({ data, events }); return; }
   }
   writeDocument(data, events);
@@ -1423,6 +1437,7 @@ function writeDocument(data, events) {
   if (CARDS_UNIT && data[FILE_CARDS]) {
     data = { ...data, cards: data[FILE_CARDS], nextShortId: data[FILE_NEXT_SHORT_ID] };
   }
+  if (COLLECTIONS && data[FILE_COLLS]) data = { ...data, ...data[FILE_COLLS] };   // #1624 — the document keeps its own copies
   data.lastUpdated = new Date().toISOString();
   data._README = BOARD_README;
   for (const ev of events) appendEvent(EVENT_LOG_DIR, ev, { now: data.lastUpdated });
@@ -1813,6 +1828,7 @@ async function warmGraphStoreOnce() {
     // #1598 — with cards in the graph the document's card list is not the cards: the replica projects the unit's cards
     // (graph_query must answer about the cards REST serves, not the file's frozen or removed copy).
     if (CARDS_UNIT) domain = { ...domain, nodes: CARDS.snapshot(domain.nextShortId).cards.map(cardToNode) };
+    if (COLLECTIONS) domain = { ...domain, ...COLLECTIONS.snapshot() };   // #1624 — graph_query reads the graph's collections, not the file's
     const docStamp = typeof domain?.lastUpdated === 'string' ? domain.lastUpdated : null;
     _graphDocStamp = docStamp;
     const doc = domainToJsonLd(domain);
@@ -7623,7 +7639,7 @@ async function handleReady(req, res) {
 // concurrent PATCH requests cannot interleave their read-modify-write.
 let _writeLock = Promise.resolve();
 function withWriteLock(fn) {
-  const run = CARDS_UNIT ? () => lockedWithCards(fn) : fn;
+  const run = (CARDS_UNIT || COLLECTIONS) ? () => lockedWithCards(fn) : fn;
   const next = _writeLock.then(() => run(), () => run());
   _writeLock = next.catch(() => {});
   return next;
@@ -7638,7 +7654,8 @@ function withWriteLock(fn) {
  */
 async function lockedWithCards(fn) {
   for (let attempt = 1; ; attempt++) {
-    await CARDS.ensureFresh();
+    if (CARDS_UNIT) await CARDS.ensureFresh();
+    if (COLLECTIONS) await COLLECTIONS.ensureFresh();
     const staged = [];
     const result = await cardWriteContext.run(staged, () => fn());
     try {
@@ -7648,10 +7665,20 @@ async function lockedWithCards(fn) {
         const opId = staged.opId && k === 0 ? (attempt === 1 ? staged.opId : `${staged.opId}/r2`) : undefined;
         // K4 — the announcements this write committed (outbox origins the document did not hold when read) ride the
         // card write, so a crash between it and the document write cannot lose them (the boot re-queues them).
-        const ob = outboxOf(data);
-        const pending = Object.entries(ob.origins).filter(([mid, o]) => !data[FILE_ORIGINS]?.has(mid) && o?.origin?.cardId)
-          .map(([mid, o]) => ({ cardId: o.origin.cardId, mutationId: mid, json: JSON.stringify({ origin: o, entries: Object.fromEntries(Object.entries(ob.entries).filter(([, e]) => e?.mutationId === mid)) }) }));
-        await CARDS.commit(data.cards, data.nextShortId, { actor: events.find((e) => e && e.actor)?.actor ?? 'board', opId, pending });
+        const actor = events.find((e) => e && e.actor)?.actor ?? 'board';
+        // #1624 — collection entities this write changed ride the SAME update as its cards (one conjunctive guard).
+        const collParts = COLLECTIONS && data[FILE_COLLS] ? COLLECTIONS.plan(data) : [];
+        try {
+          if (CARDS_UNIT && data[FILE_CARDS]) {
+            const ob = outboxOf(data);
+            const pending = Object.entries(ob.origins).filter(([mid, o]) => !data[FILE_ORIGINS]?.has(mid) && o?.origin?.cardId)
+              .map(([mid, o]) => ({ cardId: o.origin.cardId, mutationId: mid, json: JSON.stringify({ origin: o, entries: Object.fromEntries(Object.entries(ob.entries).filter(([, e]) => e?.mutationId === mid)) }) }));
+            await CARDS.commit(data.cards, data.nextShortId, { actor, opId, pending, collections: collParts });
+            if (collParts.length) COLLECTIONS.applied(data, collParts);
+          } else if (collParts.length) {
+            await COLLECTIONS.commit(data, { actor, opId });
+          }
+        } catch (e) { if (COLLECTIONS) COLLECTIONS.markUncertain(); throw e; }
         writeDocument(data, events);
       }
       return result;
@@ -12801,6 +12828,18 @@ let SMALLKINDS = null;   // { writeWake, readWakes }
 if (SMALLKINDS_UNIT) {
   if (!ANNOUNCE_EXECUTOR) throw new Error('#1624: SCRUM_GRAPH_UNIT_SMALLKINDS=1 requires SCRUM_GRAPH_UNIT_CONVERSATIONS=1 (wakes live in the graph executor)');
   SMALLKINDS = createSmallkindsUnit({ slice: GRAPH_SLICE });
+  // #1624 — the mutable families, filled from the graph BEFORE the server listens (a board without them refuses to serve).
+  if (COLLECTION_FAMILIES.length) {
+    const { createCollectionsUnit } = await import('./core/collections-unit.mjs');   // lazily: oxigraph (#868)
+    COLLECTIONS = createCollectionsUnit({
+      client: createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: 30000 }),
+      families: COLLECTION_FAMILIES, mintId: () => crypto.randomUUID(),
+    });
+    try { await COLLECTIONS.load(); } catch (e) {
+      console.error(`#1624 small-kinds unit: the collections could not be read from the graph — refusing to serve: ${e.message}`);
+      process.exit(1);
+    }
+  }
   console.error(`${new Date().toISOString()} #1624 small-kinds unit ON: wakes live in the graph executor; the document collection is not read`);
 }
 if (GRAPH_SLICE.enabled) {
@@ -12822,6 +12861,12 @@ async function cardsReady() {
   if (!(await CARDS.reachable())) return false;   // a slow or absent executor; the cache itself is not made stale by that
   try { await CARDS.ensureFresh(); return true; } catch { return false; }
 }
+// #1624 — the same K7 rule for a graph-held collection's routes (each family names its own).
+const collectionDependent = (urlPath) => COLLECTION_FAMILIES.some((f) => (f.routes || []).some((p) => urlPath === p || urlPath.startsWith(`${p}/`) || urlPath.startsWith(`${p}?`)));
+async function collectionsReady() {
+  if (!(await COLLECTIONS.reachable())) return false;
+  try { await COLLECTIONS.ensureFresh(); return true; } catch { return false; }
+}
 
 function routeApi(method, urlPath, req, res) {
   for (const r of API_ROUTES) {
@@ -12839,6 +12884,11 @@ function routeApi(method, urlPath, req, res) {
       // card cache is current: otherwise 503, never a board without its cards.
       if (CARDS_UNIT && cardDependent(method, urlPath)) {
         cardsReady().then((ok) => (ok ? go() : sendJSON(res, 503, { error: 'cards are unavailable: the graph executor is not answering', code: 'CARDS_UNAVAILABLE' })),
+          (e) => sendJSON(res, 500, { error: e.message }));
+        return true;
+      }
+      if (COLLECTIONS && collectionDependent(urlPath)) {
+        collectionsReady().then((ok) => (ok ? go() : sendJSON(res, 503, { error: 'the graph executor is not answering, so this collection is unavailable', code: 'GRAPH_UNAVAILABLE' })),
           (e) => sendJSON(res, 500, { error: e.message }));
         return true;
       }

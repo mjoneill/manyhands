@@ -109,14 +109,15 @@ export function createCardsUnit({ client, actorIri = (who) => `https://scrumboar
    * Write the difference between the cache and `cards` as ONE guarded update. APPLIED → the cache becomes `cards`.
    * Anything else → the cache is marked uncertain (reloaded before the next read) and the write is refused.
    */
-  async function commit(cards, nextShortId, { actor, opId, pending = [] } = {}) {
+  async function commit(cards, nextShortId, { actor, opId, pending = [], collections = [] } = {}) {
     if (!byId || uncertain) throw new CardsUnavailable('the card cache is not current');
-    const p = plan(cards, nextShortId);
+    // #1624 — collection parts (a K13 family's entities) ride the SAME update when this write also changed them.
+    const p = plan(cards, nextShortId) ?? (collections.length ? { parts: [], counter: null } : null);
     if (!p) return { outcome: 'NOOP' };
     // K4 — only announcements whose card is a part of THIS write ride it (the others have no window to close).
     const inWrite = new Set(p.parts.filter((x) => !x.remove).map((x) => x.iri));
     const ride = pending.filter((a) => inWrite.has(cardIriOf(a.cardId))).map((a) => ({ card: cardIriOf(a.cardId), mutationId: a.mutationId, json: a.json }));
-    const intent = { kind: 'card.write', opId: opId || `urn:ex:op/card/${mintId()}`, actor: actorIri(actor), parts: p.parts, ...(p.counter ? { counter: p.counter } : {}), ...(ride.length ? { pending: ride } : {}) };
+    const intent = { kind: 'card.write', opId: opId || `urn:ex:op/card/${mintId()}`, actor: actorIri(actor), parts: p.parts, ...(p.counter ? { counter: p.counter } : {}), ...(ride.length ? { pending: ride } : {}), ...(collections.length ? { collections } : {}) };
     let r;
     try { r = await client.update(intent); } catch (e) { uncertain = true; throw new CardsUnavailable(e.message); }
     if (r.outcome !== 'APPLIED') {
