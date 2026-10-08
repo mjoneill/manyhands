@@ -307,6 +307,17 @@ test('T15 A ROW\'S OWN DIAGNOSTICS ARE NOT ROWS: TAP-looking lines quoted inside
   assert.deepEqual(t.failing, ['tests/meta.test.mjs']);
 });
 
+test('T16 A HUNG REQUIRED FILE is both RED and INCOMPLETE (reviewer ruling 14:08:08Z): the runner\'s `# ⛔ HUNG:` line makes it a failing file, and its partial rows do not count as a completed run', { timeout: 120000 }, async () => {
+  N = 0; const u = universe({ required: ['tests/graph-executor.test.mjs'] });
+  const hung = '# ⛔ HUNG: tests/graph-executor.test.mjs exceeded 300000ms and was killed with its process group.\n#    This is NOT a failing test — the file never exited.\n';
+  const text = tap([hung, file('tests/graph-executor.test.mjs'), tOk('e1'), tOk('e2')], clean(2));   // the file DID print passing rows before it hung, and the runner still emits its completed-file marker
+  const t = await tick(u, text, 1);
+  assert.deepEqual(t.failing, ['tests/graph-executor.test.mjs'], `the hung file must be a FAILING file: ${JSON.stringify(t.failing)}`);
+  assert.equal(t.v?.required, '0/1', `and must NOT count as a completed required run even though it printed passing rows and a marker: ${JSON.stringify(t.v)}`);
+  const body = t.posts.join(' || '); assert.match(body, /RED/, 'RED'); assert.match(body, /INCOMPLETE/, 'and INCOMPLETE'); assert.match(body, /graph-executor\.test\.mjs/);
+  assert.match(body, /HUNG/i, 'the required-file reason says it hung');
+});
+
 test('T8 CONTROL ON A REAL ARTIFACT: a reduced copy of the 10-08 nightly TAP (real markers, titles, locations, directives; summary recomputed) classifies as RED + INCOMPLETE; files and every count equal an INDEPENDENT parse of the same TAP', { timeout: 300000 }, async () => {
   const text = fs.readFileSync(REAL_TAP, 'utf8');
   // independent parse: walk rows, the NEXT yaml block's `location:` names the file; the `# file:` marker names the file of a skip row
