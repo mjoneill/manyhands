@@ -68,7 +68,9 @@ async function storeEpoch(executorUrl) {
  * once the batch is full.
  *
  * ONE exception, and it is not corruption: the final line of the NEWEST segment with no trailing newline is
- * an append still in flight. It is reported as `pendingTail` (waiting), never projected and never refused.
+ * an append still in flight. It is reported as `pendingTail` (waiting) and never projected, EVEN IF it already
+ * parses: a record is complete when its newline is written. A non-newest segment's unterminated last line
+ * is read like any other line (projected if valid, refused if not), because nothing appends there any more.
  *
  * REFUSES, nothing sent: an unreadable line (naming segment and line); a missing log directory (MISSING
  * SOURCE); a cursor ahead of everything the log holds (SOURCE REGRESSION).
@@ -82,13 +84,15 @@ function parseSegmentStrict(logDir, f, isNewest) {
     const l = lines[i];
     if (!l.trim()) continue;
     const inFlightTail = isNewest && i === lines.length - 1 && !text.endsWith('\n');
+    // THE COMPLETION RULE (#1641 review): a record is complete only when its newline is written. The
+    // newest segment's unterminated last line is WAITING, even when it already parses as JSON, so it is
+    // never projected half-way; an appender writes line + newline together, so the newline is the signal.
+    if (inFlightTail) { pendingTail = { segment: f, line: i + 1 }; continue; }
     let ev;
     try { ev = JSON.parse(l); } catch {
-      if (inFlightTail) { pendingTail = { segment: f, line: i + 1 }; continue; }
       throw new Error(`UNREADABLE line ${i + 1} of ${f} in ${logDir}: not JSON — not skipped; nothing sent, cursor unchanged`);
     }
     if (!Number.isInteger(ev?.seq)) {
-      if (inFlightTail) { pendingTail = { segment: f, line: i + 1 }; continue; }
       throw new Error(`UNREADABLE line ${i + 1} of ${f} in ${logDir}: no integer seq — not skipped; nothing sent, cursor unchanged`);
     }
     events.push(ev);
@@ -125,7 +129,8 @@ export function readLogStrict(logDir, sinceSeq, limit) {
 /**
  * STRICT, SINGLE READ of the work ledger, for the same reason: the ledger cursor is a ROW INDEX, so a
  * skipped line would shift every later index. Read once, every line validated (id, seq, transition.type),
- * and the batch projects these parsed rows. An unterminated LAST line is an append in flight: waiting.
+ * and the batch projects these parsed rows. An unterminated LAST line is an append in flight: waiting, never
+ * projected, even if it already parses (the same completion rule as the log).
  * REFUSES: a missing work directory; a missing ledger file (at any cursor); a cursor
  * past the ledger's row count (SOURCE REGRESSION).
  */
@@ -144,13 +149,12 @@ export function readLedgerStrict(workDir, cursorRows) {
     const l = lines[i];
     if (!l.trim()) continue;
     const inFlightTail = i === lines.length - 1 && !text.endsWith('\n');
+    if (inFlightTail) { pendingTail = { segment: WORK_FILE, line: i + 1 }; continue; }   // the same completion rule as the log
     let r;
     try { r = JSON.parse(l); } catch {
-      if (inFlightTail) { pendingTail = { segment: WORK_FILE, line: i + 1 }; continue; }
       throw new Error(`UNREADABLE line ${i + 1} of ${WORK_FILE} in ${workDir}: not JSON — not skipped; nothing sent, cursor unchanged`);
     }
     if (typeof r?.id !== 'string' || r.seq == null || !r.transition || !r.transition.type) {
-      if (inFlightTail) { pendingTail = { segment: WORK_FILE, line: i + 1 }; continue; }
       throw new Error(`UNREADABLE line ${i + 1} of ${WORK_FILE} in ${workDir}: missing id, seq or transition.type — not skipped; nothing sent, cursor unchanged`);
     }
     rows.push(r);
@@ -213,7 +217,10 @@ export async function projectBatch({ logDir, workDir, executorUrl, graph = BOOK_
   if (r.status !== 200) throw new Error(`update refused: HTTP ${r.status} ${r.text.slice(0, 300)}`);
   const after = await readCursor(executorUrl);
   if (after.seq !== next.seq || after.workRows !== next.workRows) {
-    throw new Error(`CURSOR CONFLICT: expected the cursor to move to seq=${next.seq} workRows=${next.workRows}, found seq=${after.seq} workRows=${after.workRows} — another writer moved it; this batch applied nothing and will be retried from the executor's cursor`);
+    // NOT "this batch applied nothing": another projector can advance the cursor after this batch committed
+    // and before this read-back. What is known is that the cursor is not where this batch left it; the
+    // compare-and-set guarantees it never moved backwards, and the next batch starts from what the executor says.
+    throw new Error(`CURSOR CONFLICT: after this batch the cursor reads seq=${after.seq} workRows=${after.workRows}, not this batch's seq=${next.seq} workRows=${next.workRows} — another writer is advancing it; whether this batch applied is not known from here (compare-and-set prevents regression); continuing from the executor's cursor`);
   }
   return { projected: items, cursor: next, pendingTail };
 }

@@ -2646,21 +2646,24 @@ const RDF_LANG_STRING = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#langString';
 export async function queryGraphExecutor(executorUrl, sparql, { limit, terms = false, timeoutMs = 30_000, fetchImpl = fetch } = {}) {
   const { text, wanted } = prepareGraphQuery(sparql, { limit, vocabulary: EXECUTOR_VOCABULARY });
   const t = performance.now();
-  let res;
+  let res; let raw;
   try {
     res = await fetchImpl(`${executorUrl}/query?dataset=public`, { method: 'POST', body: text, signal: AbortSignal.timeout(timeoutMs) });
+    raw = await res.text();   // a body that fails mid-read is the same outage as no answer at all
   } catch (e) {
     // An executor that cannot be reached is an OUTAGE (503), not a bad query (400): without a code this
     // fell through to the generic handler and told the caller their SPARQL was wrong.
     throw Object.assign(new Error(`the executor could not be reached: ${e?.cause?.code || e?.name || e?.message}`), { code: 'GRAPH_UNAVAILABLE' });
   }
-  const raw = await res.text();
   const ms = performance.now() - t;
   let j = null; try { j = JSON.parse(raw); } catch { /* reported below */ }
   if (res.status !== 200 || !j) {
     throw Object.assign(new Error(`the executor refused the query: HTTP ${res.status} ${(j?.error ?? raw).slice(0, 300)}`), { code: res.status === 400 ? 'QUERY_ERROR' : 'GRAPH_UNAVAILABLE' });
   }
   if (typeof j.boolean === 'boolean') return { ask: j.boolean, rows: [], returned: 0, truncated: false, ms };
+  if (!Array.isArray(j?.results?.bindings)) {
+    throw Object.assign(new Error('the executor answered 200 without a result set (no results.bindings)'), { code: 'GRAPH_UNAVAILABLE' });
+  }
   const rows = [];
   for (const b of j.results.bindings) {
     const row = {};
