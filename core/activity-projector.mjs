@@ -25,8 +25,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import oxigraph from 'oxigraph';
-import { readEvents, SEGMENT_RE } from './event-log.mjs';
-import { readWorkObjectRows } from './work-store.mjs';
+import { SEGMENT_RE } from './event-log.mjs';
 import { projectActivityItem, isProjectableEvent, projectWorkLedger } from './graph-replica.mjs';
 
 export const BOOK_GRAPH = 'urn:scrum:bookkeeping:activity-projector';
@@ -49,7 +48,7 @@ export async function readCursor(executorUrl) {
   const seen = { [P_SEQ]: [], [P_WORK]: [] };
   for (const b of r.json.results.bindings) if (seen[b.p.value]) seen[b.p.value].push(Number(b.o.value));
   for (const [p, v] of Object.entries(seen)) if (v.length > 1) throw new Error(`cursor is ambiguous: ${v.length} values for ${p}`);
-  return { seq: seen[P_SEQ][0] ?? 0, workRows: seen[P_WORK][0] ?? 0 };
+  return { seq: seen[P_SEQ][0] ?? 0, workRows: seen[P_WORK][0] ?? 0, present: seen[P_SEQ].length > 0 || seen[P_WORK].length > 0 };
 }
 
 async function storeEpoch(executorUrl) {
@@ -59,98 +58,125 @@ async function storeEpoch(executorUrl) {
 }
 
 /**
- * STRICT READ of the history the next batch could touch. The shared log reader skips a line it cannot
- * parse (right for the old copy's rebuild); this projector must not advance past history it could not
- * read, so it checks the segments first and refuses, naming the segment and line.
+ * STRICT, SINGLE READ of the log. Each segment the next batch could touch is read ONCE, every line is
+ * validated, and the batch is projected from exactly those parsed objects: validation and projection see
+ * the same bytes (#1641 review). The shared log reader skips a line it cannot parse, which is right for the
+ * old copy's rebuild and wrong here, so it is not used.
  *
- * Bounded: segments are day-named and seq is monotonic with day, so walking NEWEST first and stopping
- * after the first segment whose every seq is at or below the cursor covers everything past the cursor.
+ * Bounded: segments are day-named and seq is monotonic with day, so segments are read in ascending order,
+ * a segment already validated and wholly at or below the cursor is skipped by its memo, and reading stops
+ * once the batch is full.
  *
- * ONE exception, and it is not corruption: the final line of the newest segment with no trailing newline
- * is an append still in flight. It is treated as not-yet-written (readEvents skips it the same way, so it
- * cannot be projected), never as a refusal.
+ * ONE exception, and it is not corruption: the final line of the NEWEST segment with no trailing newline is
+ * an append still in flight. It is reported as `pendingTail` (waiting), never projected and never refused.
+ *
+ * REFUSES, nothing sent: an unreadable line (naming segment and line); a missing log directory (MISSING
+ * SOURCE); a cursor ahead of everything the log holds (SOURCE REGRESSION).
  */
-const _checked = new Map();   // path -> {size, mtimeMs, maxSeq}: a segment unchanged since it passed is not re-read
-export function strictCheckSegments(logDir, sinceSeq) {
-  const files = (fs.existsSync(logDir) ? fs.readdirSync(logDir) : []).filter((f) => SEGMENT_RE.test(f)).sort();
-  let pendingTail = null;
-  for (let fi = files.length - 1; fi >= 0; fi--) {
-    const f = files[fi];
-    const full = path.join(logDir, f);
-    const st = fs.statSync(full);
-    const memo = _checked.get(full);
-    if (memo && memo.size === st.size && memo.mtimeMs === st.mtimeMs) { if (memo.maxSeq <= sinceSeq) return { pendingTail }; continue; }
-    const text = fs.readFileSync(full, 'utf8');
-    const lines = text.split('\n');
-    let maxSeq = -Infinity;
-    for (let i = 0; i < lines.length; i++) {
-      const l = lines[i];
-      if (!l.trim()) continue;
-      const inFlightTail = fi === files.length - 1 && i === lines.length - 1 && !text.endsWith('\n');
-      let ev;
-      try { ev = JSON.parse(l); } catch {
-        if (inFlightTail) { pendingTail = { segment: f, line: i + 1 }; continue; }
-        throw new Error(`UNREADABLE line ${i + 1} of ${f} in ${logDir}: not JSON — not skipped; nothing sent, cursor unchanged`);
-      }
-      if (!Number.isInteger(ev?.seq)) {
-        if (inFlightTail) { pendingTail = { segment: f, line: i + 1 }; continue; }
-        throw new Error(`UNREADABLE line ${i + 1} of ${f} in ${logDir}: no integer seq — not skipped; nothing sent, cursor unchanged`);
-      }
-      if (ev.seq > maxSeq) maxSeq = ev.seq;
+const _segMemo = new Map();   // path -> {size, mtimeMs, maxSeq}: validated, complete segments
+function parseSegmentStrict(logDir, f, isNewest) {
+  const text = fs.readFileSync(path.join(logDir, f), 'utf8');
+  const lines = text.split('\n');
+  const events = []; let maxSeq = -Infinity; let pendingTail = null;
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (!l.trim()) continue;
+    const inFlightTail = isNewest && i === lines.length - 1 && !text.endsWith('\n');
+    let ev;
+    try { ev = JSON.parse(l); } catch {
+      if (inFlightTail) { pendingTail = { segment: f, line: i + 1 }; continue; }
+      throw new Error(`UNREADABLE line ${i + 1} of ${f} in ${logDir}: not JSON — not skipped; nothing sent, cursor unchanged`);
     }
-    if (text.endsWith('\n') || fi < files.length - 1) _checked.set(full, { size: st.size, mtimeMs: st.mtimeMs, maxSeq });
-    if (maxSeq <= sinceSeq) return { pendingTail };
+    if (!Number.isInteger(ev?.seq)) {
+      if (inFlightTail) { pendingTail = { segment: f, line: i + 1 }; continue; }
+      throw new Error(`UNREADABLE line ${i + 1} of ${f} in ${logDir}: no integer seq — not skipped; nothing sent, cursor unchanged`);
+    }
+    events.push(ev);
+    if (ev.seq > maxSeq) maxSeq = ev.seq;
   }
-  return { pendingTail };
+  return { events, maxSeq, pendingTail, complete: !pendingTail };
+}
+
+export function readLogStrict(logDir, sinceSeq, limit) {
+  let st = null; try { st = fs.statSync(logDir); } catch { /* reported below */ }
+  if (!st || !st.isDirectory()) throw new Error(`MISSING SOURCE: the event log directory ${logDir} does not exist — nothing sent`);
+  const files = fs.readdirSync(logDir).filter((f) => SEGMENT_RE.test(f)).sort();
+  const out = []; let pendingTail = null; let maxSeen = -Infinity;
+  for (let fi = 0; fi < files.length; fi++) {
+    const f = files[fi]; const full = path.join(logDir, f); const isNewest = fi === files.length - 1;
+    const fst = fs.statSync(full);
+    const memo = _segMemo.get(full);
+    if (memo && memo.size === fst.size && memo.mtimeMs === fst.mtimeMs && memo.maxSeq <= sinceSeq) { maxSeen = Math.max(maxSeen, memo.maxSeq); continue; }
+    const seg = parseSegmentStrict(logDir, f, isNewest);
+    if (seg.complete) _segMemo.set(full, { size: fst.size, mtimeMs: fst.mtimeMs, maxSeq: seg.maxSeq });
+    else _segMemo.delete(full);
+    maxSeen = Math.max(maxSeen, seg.maxSeq);
+    if (seg.pendingTail) pendingTail = seg.pendingTail;
+    for (const ev of seg.events) if (ev.seq > sinceSeq) out.push(ev);
+    if (out.length >= limit && !isNewest) break;
+  }
+  out.sort((a, b) => a.seq - b.seq);
+  if (!out.length && sinceSeq > 0 && maxSeen < sinceSeq) {
+    throw new Error(`SOURCE REGRESSION: the cursor is at seq ${sinceSeq} but the log in ${logDir} holds nothing past seq ${maxSeen === -Infinity ? 'none' : maxSeen} — nothing sent`);
+  }
+  return { events: out.slice(0, limit), pendingTail };
 }
 
 /**
- * STRICT READ of the work ledger, for the same reason as the log: the shared reader skips a line it cannot
- * parse, and the ledger cursor is a ROW INDEX into what that reader returns, so a skipped line shifts every
- * later index and a line repaired in place afterwards is never projected. A line that is not JSON, or lacks
- * the id / seq / transition.type every projected row needs, is refused naming the file and line; nothing is
- * sent. An unterminated LAST line is an append in flight: reported as waiting, never as caught up.
+ * STRICT, SINGLE READ of the work ledger, for the same reason: the ledger cursor is a ROW INDEX, so a
+ * skipped line would shift every later index. Read once, every line validated (id, seq, transition.type),
+ * and the batch projects these parsed rows. An unterminated LAST line is an append in flight: waiting.
+ * REFUSES: a missing work directory; a missing ledger file once rows were already projected; a cursor
+ * past the ledger's row count (SOURCE REGRESSION).
  */
 export const WORK_FILE = 'work-objects.jsonl';
-export function strictCheckLedger(workDir) {
+export function readLedgerStrict(workDir, cursorRows) {
+  let st = null; try { st = fs.statSync(workDir); } catch { /* reported below */ }
+  if (!st || !st.isDirectory()) throw new Error(`MISSING SOURCE: the work store directory ${workDir} does not exist — nothing sent`);
   const full = path.join(workDir, WORK_FILE);
-  if (!fs.existsSync(full)) return { pendingTail: null };
+  if (!fs.existsSync(full)) {
+    if (cursorRows > 0) throw new Error(`MISSING SOURCE: ${WORK_FILE} is missing from ${workDir} but ${cursorRows} ledger row(s) were already projected — nothing sent`);
+    return { rows: [], pendingTail: null };
+  }
   const text = fs.readFileSync(full, 'utf8');
   const lines = text.split('\n');
+  const rows = []; let pendingTail = null;
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i];
     if (!l.trim()) continue;
     const inFlightTail = i === lines.length - 1 && !text.endsWith('\n');
     let r;
     try { r = JSON.parse(l); } catch {
-      if (inFlightTail) return { pendingTail: { segment: WORK_FILE, line: i + 1 } };
+      if (inFlightTail) { pendingTail = { segment: WORK_FILE, line: i + 1 }; continue; }
       throw new Error(`UNREADABLE line ${i + 1} of ${WORK_FILE} in ${workDir}: not JSON — not skipped; nothing sent, cursor unchanged`);
     }
     if (typeof r?.id !== 'string' || r.seq == null || !r.transition || !r.transition.type) {
-      if (inFlightTail) return { pendingTail: { segment: WORK_FILE, line: i + 1 } };
+      if (inFlightTail) { pendingTail = { segment: WORK_FILE, line: i + 1 }; continue; }
       throw new Error(`UNREADABLE line ${i + 1} of ${WORK_FILE} in ${workDir}: missing id, seq or transition.type — not skipped; nothing sent, cursor unchanged`);
     }
+    rows.push(r);
   }
-  return { pendingTail: null };
+  if (rows.length < cursorRows) throw new Error(`SOURCE REGRESSION: the ledger cursor is at row ${cursorRows} but ${WORK_FILE} holds ${rows.length} row(s) — nothing sent`);
+  return { rows, pendingTail };
 }
 
 const nTriples = (store) => store.match(null, null, null, oxigraph.defaultGraph()).map((q) => `${q.subject} ${q.predicate} ${q.object} .`);
 
 /**
- * One batch: up to `batchSize` events after the cursor and up to `batchSize` work rows after it, in one
- * update with the cursor move. Returns {projected, cursor} — projected 0 means caught up and NOTHING was
- * sent. Throws on a refused or failed request; the caller re-reads the cursor before trying again.
+ * One batch: up to `batchSize` events after the cursor and up to `batchSize` work rows after it, in ONE
+ * update with the cursor move, applied only if the cursor is still what this batch read (compare-and-set):
+ * a second projector on the same executor applies nothing and is told so. Returns {projected, cursor} —
+ * projected 0 means caught up and NOTHING was sent.
  */
 export async function projectBatch({ logDir, workDir, executorUrl, graph = BOOK_GRAPH, batchSize = 500 }) {
   for (const [k, v] of Object.entries({ logDir, workDir, executorUrl })) if (!v) throw new Error(`projectBatch: ${k} is required (no default)`);
   if (graph !== BOOK_GRAPH) throw new Error(`projectBatch: the cursor graph is ${BOOK_GRAPH}`);
   const cursor = await readCursor(executorUrl);
-  const logCheck = strictCheckSegments(logDir, cursor.seq);
-  const ledgerCheck = strictCheckLedger(workDir);
-  const pendingTail = logCheck.pendingTail ?? ledgerCheck.pendingTail;
-  const events = readEvents(logDir, { sinceSeq: cursor.seq, limit: batchSize });
-  const rows = readWorkObjectRows(workDir);
-  const workSlice = rows.slice(cursor.workRows, cursor.workRows + batchSize);
+  const log = readLogStrict(logDir, cursor.seq, batchSize);
+  const ledger = readLedgerStrict(workDir, cursor.workRows);
+  const pendingTail = log.pendingTail ?? ledger.pendingTail;
+  const events = log.events;
+  const workSlice = ledger.rows.slice(cursor.workRows, cursor.workRows + batchSize);
   if (!events.length && !workSlice.length) return { projected: 0, cursor, pendingTail };
 
   // MALFORMED INPUT FAILS CLOSED, naming the event. The old copy skips such events silently; here a
@@ -169,12 +195,16 @@ export async function projectBatch({ logDir, workDir, executorUrl, graph = BOOK_
   items += workSlice.length;
   const next = { seq: events.length ? events.at(-1).seq : cursor.seq, workRows: cursor.workRows + workSlice.length };
 
+  const guard = cursor.present
+    ? `GRAPH <${BOOK_GRAPH}> { <${CURSOR}> <${P_SEQ}> ?s . <${CURSOR}> <${P_WORK}> ?w . <${CURSOR}> ?p ?o } FILTER(?s = ${cursor.seq} && ?w = ${cursor.workRows})`
+    : `FILTER NOT EXISTS { GRAPH <${BOOK_GRAPH}> { <${CURSOR}> ?p0 ?o0 } }`;
   const sparql = [
-    `DELETE WHERE { GRAPH <${BOOK_GRAPH}> { <${CURSOR}> ?p ?o } } ;`,
-    'INSERT DATA {',
+    `DELETE { GRAPH <${BOOK_GRAPH}> { <${CURSOR}> ?p ?o } }`,
+    'INSERT {',
     ...nTriples(scratch),
     `GRAPH <${BOOK_GRAPH}> { <${CURSOR}> <${P_SEQ}> ${next.seq} . <${CURSOR}> <${P_WORK}> ${next.workRows} . }`,
     '}',
+    `WHERE { ${guard} }`,
   ].join('\n');
   const epoch = await storeEpoch(executorUrl);
   const opId = `urn:ex:op/activity-projector/${crypto.randomUUID()}`;
@@ -182,6 +212,10 @@ export async function projectBatch({ logDir, workDir, executorUrl, graph = BOOK_
     'content-type': 'application/sparql-update', 'x-op-id': opId, ...(epoch != null ? { 'x-epoch': epoch } : {}),
   });
   if (r.status !== 200) throw new Error(`update refused: HTTP ${r.status} ${r.text.slice(0, 300)}`);
+  const after = await readCursor(executorUrl);
+  if (after.seq !== next.seq || after.workRows !== next.workRows) {
+    throw new Error(`CURSOR CONFLICT: expected the cursor to move to seq=${next.seq} workRows=${next.workRows}, found seq=${after.seq} workRows=${after.workRows} — another writer moved it; this batch applied nothing and will be retried from the executor's cursor`);
+  }
   return { projected: items, cursor: next, pendingTail };
 }
 
