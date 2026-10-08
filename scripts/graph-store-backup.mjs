@@ -52,6 +52,12 @@ const PY_READ = `
 import json, sys, pyoxigraph as px
 s = px.Store.read_only(sys.argv[1])
 rows = list(s.query('SELECT ?id ?e ?s WHERE { GRAPH ${BK} { <urn:ex:dataset> <urn:ex:datasetId> ?id ; <urn:ex:epoch> ?e ; <urn:ex:commitSeq> ?s } }'))
+if not rows and bool(s.query('ASK { <urn:ex:dataset> ?p ?o }')):
+    # #1638 B12b — a backup taken BEFORE the cutover keeps its marker in the default graph. This build does not verify
+    # that layout; it says so by name and points at the tool that does, rather than reporting a missing marker.
+    print(json.dumps({'error': 'PRE_1638_LAYOUT: this backup is in the pre-#1638 layout (marker in the default graph); '
+        'verify it with scripts/graph-store-backup.mjs from a pre-#1638 build (e.g. git show af51a5d:scripts/graph-store-backup.mjs), '
+        'or migrate a COPY with graph-executor/migrate_bookkeeping.py --forward'})); sys.exit(4)
 if len(rows) != 1:
     print(json.dumps({'error': f'{len(rows)} marker rows'})); sys.exit(3)
 r = rows[0]
