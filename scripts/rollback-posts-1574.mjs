@@ -35,7 +35,6 @@ const NS = 'https://scrumboard.local/ns#';
 const ENTITY = 'https://scrumboard.local/entity/';
 const PERSON = 'https://scrumboard.local/person/';
 const TALK = 'https://scrumboard.local/talk/';
-const RECORDED_BY = 'urn:ex:recordedBy';
 // #1574 U5 — graph predicate (under NS) → document key, the author-repair trail
 const TRAIL = [['originalAuthorToken', '_originalAuthorToken'], ['authorCorrectedAt', '_authorCorrectedAt'], ['authorCorrectedBy', '_authorCorrectedBy']];
 
@@ -78,13 +77,11 @@ const tombstoneRows = await read('redacted posts', `SELECT ?s ?seq WHERE { ?s <$
 const idOf = (iri) => (iri.startsWith(ENTITY) ? iri.slice(ENTITY.length) : null);
 const triples = new Map();   // post IRI → { predicate: [term] }
 for (const b of commentRows) {
-  if (b.p.value === RECORDED_BY) continue;
   const t = triples.get(b.s.value) || triples.set(b.s.value, {}).get(b.s.value);
   (t[b.p.value] ||= []).push(b.o);
 }
 const attachments = new Map();   // post IRI → index → { predicate: value }
 for (const b of attachmentRows) {
-  if (b.p.value === RECORDED_BY) continue;
   const byIndex = attachments.get(b.post.value) || attachments.set(b.post.value, new Map()).get(b.post.value);
   const k = b.a.value;
   (byIndex.get(k) || byIndex.set(k, {}).get(k))[b.p.value] = b.o.value;

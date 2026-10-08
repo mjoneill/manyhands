@@ -43,7 +43,6 @@ const SCHEMA = 'https://schema.org/';
 const NS = 'https://scrumboard.local/ns#';
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const XSD_INT = 'http://www.w3.org/2001/XMLSchema#integer';
-const RECORDED_BY = 'urn:ex:recordedBy';
 
 // The settled fields (#1574 U1–U4, the owner's "go with your proposal"). A key not here refuses the run; so does a settled
 // key whose VALUE has a shape the vocabulary does not cover (an origin with an extra key, an attachment with an extra field).
@@ -109,7 +108,7 @@ if (!ident.ok) finish(2, `executor not usable (${ident.reason}); nothing was wri
 // #1574 U5 — document key → graph predicate (under NS) for the author-repair trail
 const TRAIL = [['_originalAuthorToken', 'originalAuthorToken'], ['_authorCorrectedAt', 'authorCorrectedAt'], ['_authorCorrectedBy', 'authorCorrectedBy']];
 
-/** The triples a post must carry, as sorted "predicate\ttype|value|datatype" lines (the provenance link excluded). */
+/** The triples a post must carry, as sorted "predicate\ttype|value|datatype" lines (the provenance link is bookkeeping, in its own graph: #1638). */
 function expected(p) {
   const rows = [
     `${RDF_TYPE}\turi|${SCHEMA}Comment|`,
@@ -144,11 +143,10 @@ function expectedAttachments(p) {
   return rows.sort();
 }
 
-const existing = new Map();   // subject IRI → sorted triple lines (provenance link excluded)
+const existing = new Map();   // subject IRI → sorted triple lines (the provenance link lives in the bookkeeping graph, not read here)
 const q = await client.query(`SELECT ?s ?p ?o WHERE { ?s <${RDF_TYPE}> <${SCHEMA}Comment> . ?s ?p ?o }`);
 if (!q.ok) finish(2, `cannot read the graph's existing posts (${q.reason}); nothing was written`);
 for (const b of q.rows) {
-  if (b.p.value === RECORDED_BY) continue;
   const line = `${b.p.value}\t${b.o.type}|${b.o.value}|${b.o.datatype || ''}`;
   (existing.get(b.s.value) || existing.set(b.s.value, []).get(b.s.value)).push(line);
 }
@@ -158,7 +156,6 @@ const existingAtt = new Map();   // post IRI → sorted "index\tpredicate\tterm"
 const aq = await client.query(`SELECT ?a ?post ?p ?o WHERE { ?a <${NS}attachmentOf> ?post . ?a ?p ?o }`);
 if (!aq.ok) finish(2, `cannot read the graph's existing attachments (${aq.reason}); nothing was written`);
 for (const b of aq.rows) {
-  if (b.p.value === RECORDED_BY) continue;
   const k = b.a.value.slice(b.a.value.lastIndexOf('/') + 1);
   (existingAtt.get(b.post.value) || existingAtt.set(b.post.value, []).get(b.post.value)).push(`${k}\t${b.p.value}\t${b.o.type}|${b.o.value}|${b.o.datatype || ''}`);
 }

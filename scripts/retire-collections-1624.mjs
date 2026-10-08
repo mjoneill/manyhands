@@ -29,6 +29,7 @@ import { domainToBoard } from '../core/mapping.mjs';
 import { collectionFamilies } from '../core/collection-families.mjs';
 import { renameEntity } from '../core/collection-renames-1624.mjs';
 import { importDigest, importOpId } from '../core/collection-import-1624.mjs';
+import { BK } from '../core/graph-vocab.mjs';
 
 const args = process.argv.slice(2);
 const opt = (k) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : null; };
@@ -82,7 +83,7 @@ const entities = want.filter((w) => !w.decision);
 for (let i = 0; i < entities.length; i += 200) {
   const batch = entities.slice(i, i + 200);
   const values = `VALUES ?s { ${batch.map((w) => `<${w.iri}>`).join(' ')} }`;
-  const q = await g.query(`SELECT ?s ?k ?v ?j ?t WHERE { ${values} ?s <${RS}entityJson> ?j OPTIONAL { ?s <${RS}inCollection> ?k } OPTIONAL { ?s <urn:ex:ver> ?v } OPTIONAL { ?s <${T}> ?t FILTER(?t = <${RS}Wake>) } }`);
+  const q = await g.query(`SELECT ?s ?k ?v ?j ?t WHERE { ${values} GRAPH ${BK} { ?s <${RS}entityJson> ?j } OPTIONAL { ?s <${RS}inCollection> ?k } OPTIONAL { GRAPH ${BK} { ?s <urn:ex:ver> ?v } } OPTIONAL { ?s <${T}> ?t FILTER(?t = <${RS}Wake>) } }`);
   if (!q.ok) { console.error(`the graph could not be read: ${q.reason}`); process.exit(1); }
   const held = new Map(q.rows.map((r) => [r.s.value, r]));
   for (const w of batch) {
@@ -96,7 +97,7 @@ for (let i = 0; i < entities.length; i += 200) {
     // after the import, a failed (PRECONDITION_FAILED/REJECTED) import, or no import at all is refused.
     const newer = Number(r.v?.value ?? 0) > 1;
     if (newer) {
-      const rc = await g.query(`SELECT ?o ?d WHERE { <${w.opId}> <urn:ex:outcome> ?o ; <urn:ex:digest> ?d }`);
+      const rc = await g.query(`SELECT ?o ?d WHERE { GRAPH ${BK} { <${w.opId}> <urn:ex:outcome> ?o ; <urn:ex:digest> ?d } }`);
       if (!rc.ok) { console.error(`the graph could not be read: ${rc.reason}`); process.exit(1); }
       const applied = rc.rows.some((x) => x.o.value === 'urn:ex:APPLIED' && x.d.value === importDigest(w.fam, w.renamed));
       if (applied) continue;

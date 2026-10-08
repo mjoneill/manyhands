@@ -20,6 +20,7 @@ import { appendEvent } from '../core/event-log.mjs';
 import * as U3 from '../core/unit3-graph.mjs';
 import { jsonLdToDomain } from '../core/jsonld.mjs';
 import { domainToBoard } from '../core/mapping.mjs';
+import { BK } from '../core/graph-vocab.mjs';
 
 const args = process.argv.slice(2);
 const opt = (k) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : null; };
@@ -70,7 +71,7 @@ for (const type of ['Delivery', 'ModelCall', 'Post', 'Card']) {
     const q = await g.query(type === 'Post'
       ? `SELECT ?s ?t ?txt WHERE { ${values} ?s <${T}> ?t FILTER(?t IN (<https://schema.org/Comment>, <${RS}RedactedPost>)) OPTIONAL { ?s <https://schema.org/text> ?txt } }`
       : type === 'Card'
-        ? `SELECT ?s ?v ?j ?dg WHERE { ${values} ?s <${T}> <${RS}Card> ; <urn:ex:ver> ?v ; <${RS}entityJson> ?j OPTIONAL { ?imp <${RS}sourceDigest> ?dg FILTER(STR(?imp) = CONCAT(STR(?s), "/import")) } }`
+        ? `SELECT ?s ?v ?j ?dg WHERE { ${values} ?s <${T}> <${RS}Card> . GRAPH ${BK} { ?s <urn:ex:ver> ?v ; <${RS}entityJson> ?j } OPTIONAL { ?imp <${RS}sourceDigest> ?dg FILTER(STR(?imp) = CONCAT(STR(?s), "/import")) } }`
         : `SELECT DISTINCT ?s WHERE { ${values} ${typeTest[type]} }`);
     if (!q.ok) { console.error(`the graph could not be read: ${q.reason}`); process.exit(1); }
     const held = new Map();

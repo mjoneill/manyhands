@@ -19,6 +19,7 @@ import { createGraphClient } from '../core/graph-client.mjs';
 import { jsonLdToDomain, isJsonLdDocument } from '../core/jsonld.mjs';
 import { domainToBoard } from '../core/mapping.mjs';
 import { cardQuads, cardIriOf, shortIdMap, SHORTID_COUNTER_IRI } from '../core/cards-graph.mjs';
+import { BK } from '../core/graph-vocab.mjs';
 
 const args = process.argv.slice(2);
 const opt = (k) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : null; };
@@ -35,12 +36,12 @@ const ids = shortIdMap(board.cards || []);
 const g = createGraphClient({ baseUrl: executor, expectedDatasetId: dataset, timeoutMs: 120000 });
 
 async function count() {
-  const q = await g.query('SELECT (COUNT(?s) AS ?n) WHERE { ?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://scrumboard.local/ns#Card> ; <urn:ex:ver> ?v }');
+  const q = await g.query(`SELECT (COUNT(?s) AS ?n) WHERE { ?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://scrumboard.local/ns#Card> . GRAPH ${BK} { ?s <urn:ex:ver> ?v } }`);
   if (!q.ok) throw new Error(`the graph could not be read: ${q.reason}`);
   return Number(q.rows[0]?.n?.value ?? 0);
 }
 async function counter() {
-  const q = await g.query(`SELECT ?n WHERE { <${SHORTID_COUNTER_IRI}> <urn:ex:ver> ?n }`);
+  const q = await g.query(`SELECT ?n WHERE { GRAPH ${BK} { <${SHORTID_COUNTER_IRI}> <urn:ex:ver> ?n } }`);
   if (!q.ok) throw new Error(`the graph could not be read: ${q.reason}`);
   return q.rows.length ? Number(q.rows[0].n.value) : null;
 }

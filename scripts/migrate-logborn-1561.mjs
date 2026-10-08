@@ -72,8 +72,8 @@ import { readEvents } from '../core/event-log.mjs';
 import { buildGraphStore, projectActivities, IRI } from '../core/graph-replica.mjs';
 import { createGraphClient } from '../core/graph-client.mjs';
 import { LOGBORN_TERMS as TM } from '../core/graph-compiler.mjs';
-import { NS } from '../core/graph-vocab.mjs';
-import { memoriesFromRows, decisionsFromRows, makeShorten, identitiesFromEvents, identitiesFromRows, identityOf, collapseIdentities, peopleFromRows, Q_PEOPLE, Q_PERSON_IRI_TYPES } from '../core/logborn-unit.mjs';
+import { NS, BK } from '../core/graph-vocab.mjs';
+import { memoriesFromRows, decisionsFromRows, makeShorten, identitiesFromEvents, identitiesFromRows, identityOf, collapseIdentities, peopleFromRows, Q_PERSON_IRI_TYPES } from '../core/logborn-unit.mjs';
 import { declarationsFromRows } from '../core/seat-state.mjs';
 import { planPersonRetention } from '../core/graph-people.mjs';
 import { loadRoster } from '../core/roster-config.mjs';
@@ -81,6 +81,11 @@ import { loadRoster } from '../core/roster-config.mjs';
 const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
 const TYPES = { [TM.Memory]: 'memory', [TM.MemoryVersion]: 'version', [TM.Decision]: 'decision', [TM.SeatDeclaration]: 'seat' };
 const Q_RECORDS = `SELECT ?s ?p ?o WHERE { ?s <${TM.type}> ?t ; ?p ?o . VALUES ?t { ${Object.keys(TYPES).map((t) => `<${t}>`).join(' ')} } }`;
+// #1638 — the TARGET lives in an executor, where a record's domain triples are in the default graph and its write revision
+// and provenance (ver, recordedBy, retiredBy) are bookkeeping in the named graph. The SOURCE is an in-memory store with no
+// named graph, so it keeps Q_RECORDS; the target reads the same rows through this two-branch union (same shape).
+const Q_RECORDS_TARGET = `SELECT ?s ?p ?o WHERE { { ?s <${TM.type}> ?t ; ?p ?o . VALUES ?t { ${Object.keys(TYPES).map((t) => `<${t}>`).join(' ')} } }
+  UNION { ?s <${TM.type}> ?t . VALUES ?t { ${Object.keys(TYPES).map((t) => `<${t}>`).join(' ')} } GRAPH ${BK} { ?s ?p ?o FILTER(?p IN (<${TM.ver}>, <${TM.recordedBy}>, <${NS}retiredBy>)) } } }`;
 
 // predicate → 'one' | 'many', per record type. Anything else on a record is REFUSED.
 const SHAPE = {
@@ -109,7 +114,7 @@ export function buildSource({ board, events }) {
   return out;
 }
 export async function readTarget(client) {
-  const r = await client.query(Q_RECORDS);
+  const r = await client.query(Q_RECORDS_TARGET);
   if (!r.ok) throw new Error(`target unreadable: ${r.reason}`);
   return r.rows.map((b) => ({ s: b.s.value, p: b.p.value,
     o: b.o.type === 'uri' ? { kind: 'uri', value: b.o.value } : b.o.type === 'literal' ? { kind: 'lit', value: b.o.value, datatype: b.o.datatype, lang: b.o['xml:lang'] || null } : { kind: 'bnode', value: b.o.value } }));
@@ -253,8 +258,12 @@ export function firstUnitEntitiesOf(recs) {
 }
 
 /** The target's Person identities: canonical nodes, Person-IRI types (occupied), and which import op recorded each. */
+// #1638 — Q_PEOPLE (core) reads the default graph only; this script also needs each Person's recordedBy (which import op
+// wrote it), now bookkeeping in the named graph. Same rows as before: the domain triples plus ver/recordedBy/retiredBy.
+const Q_PEOPLE_TARGET = `SELECT ?s ?p ?o WHERE { { ?s <${TM.type}> <${TM.Person}> ; ?p ?o }
+  UNION { ?s <${TM.type}> <${TM.Person}> . GRAPH ${BK} { ?s ?p ?o FILTER(?p IN (<${TM.ver}>, <${TM.recordedBy}>, <${NS}retiredBy>)) } } }`;
 export async function readTargetPeople(client) {
-  const pr = await client.query(Q_PEOPLE);
+  const pr = await client.query(Q_PEOPLE_TARGET);
   if (!pr.ok) throw new Error(`target unreadable: ${pr.reason}`);
   const tr = await client.query(Q_PERSON_IRI_TYPES);
   if (!tr.ok) throw new Error(`target unreadable: ${tr.reason}`);
