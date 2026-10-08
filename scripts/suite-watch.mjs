@@ -34,6 +34,7 @@ import path from 'node:path';
 import { runBoundedProcessTree } from './run-process-tree.mjs';
 import { newRunId } from './verdict-ledger.mjs';
 import { rmTreeForce, withSystemBins } from './watch-env.mjs';   // #1417
+import { parseTap, classify, loadExclusions, loadRequired, verdictLine } from './suite-watch-verdict.mjs';   // #1637
 
 const REPO = process.env.SUITE_WATCH_REPO
   || path.join(path.dirname(new URL(import.meta.url).pathname), '..');
@@ -71,6 +72,8 @@ function treeIdentity(repo) {
   return `${repo} (sha UNRESOLVABLE — no .git and no DEPLOYED-SHA)`;
 }
 const STATE_FILE = process.env.SUITE_WATCH_STATE || path.join(os.homedir(), '.claude', 'scrum-suite-watch.state');
+/** #1637 — the latest run's required-coverage proof: one file, overwritten every run (see the artifact block) */
+const COVERAGE_FILE = process.env.SUITE_WATCH_COVERAGE || path.join(path.dirname(STATE_FILE), 'scrum-suite-watch-coverage.json');
 const COOLDOWN_MS = Number(process.env.SUITE_WATCH_COOLDOWN_MS ?? 6 * 3600 * 1000);
 const DRYRUN = process.env.SUITE_WATCH_DRYRUN === '1';
 /**
@@ -175,11 +178,20 @@ for (const line of out.split('\n')) {
   if (line.startsWith('# WARNING: verdict ledger')) console.log(`${now} ${line.replace(/^# /, '')}`);
 }
 
-// The signature: which test FILES failed. Parsed from the runner's failure
-// section; a parse that finds nothing on a red run still fires (sig 'unparsed')
-// — an unreadable red must not be a silent one.
-const files = [...new Set([...out.matchAll(/location: '([^']*\/tests\/[^']+\.test\.mjs)/g)]
-  .map((m) => path.basename(m[1])))].sort();
+// #1637 — THE VERDICT: one parse of the merged TAP, three independent states (FAILED / TODO / INCOMPLETE) plus DOCUMENTED. The earlier signature was "every file named by any `location:` line", which also
+// matched `# TODO` rows: on 2026-10-08 it listed 9 files for one real failure and a new TODO-only file fired as a new failing file. See scripts/suite-watch-verdict.mjs for the rules.
+const parsed = parseTap(out, { suiteDir });
+const exclPath = process.env.SUITE_WATCH_EXCLUSIONS || path.join(suiteDir, 'scripts', 'suite-watch-exclusions.json');
+const reqPath = process.env.SUITE_WATCH_REQUIRED || path.join(suiteDir, 'scripts', 'suite-watch-required.json');
+const excl = loadExclusions(exclPath); const req = loadRequired(reqPath);
+const verdict = classify(parsed, { exclusions: excl.entries, required: req.files, problems: [...excl.problems, ...req.problems] });
+console.log(`${now} ${verdictLine(verdict)}`);
+if (verdict.todo) console.log(`${now} TODO rows (expected failures, not red): ${verdict.todo} in ${verdict.todoFiles.length} file(s): ${verdict.todoFiles.join(', ') || 'none beyond the failing files'}`);
+if (verdict.documented) console.log(`${now} documented exclusions applied: ${verdict.documented} skip(s)`);
+for (const p of verdict.problems) console.log(`${now} PROBLEM: ${p}`);
+if (verdict.unclassified) console.log(`${now} unclassified skips (INCOMPLETE until documented in ${path.relative(suiteDir, exclPath)}): ${verdict.unclassified}`);
+const files = verdict.failingFiles;
+if (!red && verdict.failed > 0) red = true;          // the exit code said success but the TAP holds a leaf failure: believe the rows
 const completedFiles = timedOut
   ? new Set([...out.matchAll(/^# file: (.+) complete$/gm)].map((m) => path.basename(m[1])))
   : new Set();
@@ -219,7 +231,7 @@ if (red && !timedOut && files.length) {
   process.env.RUN_TESTS_PARENT_RUN_ID = runId;
   delete process.env.RUN_TESTS_RUN_ID; // the child mints its own
   const isolated = await runBoundedProcessTree({
-    file: 'node', args: ['scripts/run-test-files.mjs', ...files.map((f) => path.join('tests', f))],
+    file: 'node', args: ['scripts/run-test-files.mjs', ...files.filter((f) => /\.test\.mjs$/.test(f))],   // #1637: checkout-relative paths already
     cwd: suiteDir, timeout: ISOLATION_TIMEOUT_MS,
   });
   isolationOut = isolated.stdout + isolated.stderr;
@@ -251,15 +263,32 @@ if (red && !timedOut && files.length) {
  * and it is exactly the case the ledger reduces to a verdict and a filename.
  * Ordering is load-bearing — this runs BEFORE cleanup(), because the isolation
  * TAP is only reconstructible from a tree that is about to stop existing.
+ *
+ * #1637: an INCOMPLETE run keeps its TAP too (a green night with missing coverage left no evidence at
+ * all), and EVERY run leaves the proof that the required tests RAN (a lower skip count is not that proof)
+ * in one overwritten file; full.tap / isolation.tap stay confined to runs that have something to explain.
  */
-if (fullRunRed && ARTIFACT_DIR) {
+// The proof that the required tests RAN is ONE overwritten file beside the state file, written on EVERY run: per-run directories for green nights would push the red evidence out of the bounded
+// ARTIFACT_KEEP window (#746: "a green run writes no artifacts"). A run that fails or is incomplete ALSO keeps coverage.json in its own run directory, next to the TAP it explains.
+const coverageDoc = {
+  runId, at: now, required: verdict.coverage.map(({ file, executed, passed, failed, skipped }) => ({ file, executed, passed, failed, skipped })),
+  ran: verdict.required, truncated: verdict.truncated, failed: verdict.failed, incomplete: verdict.incomplete,
+};
+try {
+  fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
+  fs.writeFileSync(COVERAGE_FILE, `${JSON.stringify(coverageDoc, null, 2)}\n`);
+} catch (e) { console.log(`${now} WARNING: could not write ${COVERAGE_FILE}: ${e.message}`); }
+if (ARTIFACT_DIR && (fullRunRed || verdict.incomplete)) {
   try {
     const runDir = path.join(ARTIFACT_DIR, runId);
     fs.mkdirSync(runDir, { recursive: true });
+    fs.writeFileSync(path.join(runDir, 'coverage.json'), `${JSON.stringify(coverageDoc, null, 2)}\n`);
     fs.writeFileSync(path.join(runDir, 'full.tap'), out);
     if (isolationOut !== null) fs.writeFileSync(path.join(runDir, 'isolation.tap'), isolationOut);
     fs.writeFileSync(path.join(runDir, 'meta.json'), `${JSON.stringify({
       runId, at: now, files, timedOut, flake, survivedIsolation: !flake && isolationOut !== null,
+      incomplete: verdict.incomplete, unavailable: verdict.unavailable, unclassified: verdict.unclassified, documented: verdict.documented,
+      todo: verdict.todo, failed: verdict.failed, required: verdict.required, truncated: verdict.truncated, problems: verdict.problems,
     }, null, 2)}\n`);
     // Bounded: newest-first by name, since run ids sort chronologically.
     const kept = fs.readdirSync(ARTIFACT_DIR).sort().reverse();
@@ -275,45 +304,74 @@ if (fullRunRed && ARTIFACT_DIR) {
   }
 }
 cleanup();
-// #735 — a killed run is a TIMEOUT, never 'unparsed'. 'unparsed' claims the
-// output was unreadable and aims the reader at the parser; the run never
-// finished, which aims them at the hang.
-const sig = red ? (timedOut ? 'timeout' : (files.join(',') || 'unparsed')) : null;
 if (flake) console.log(`${now} full-run red did NOT survive isolation — flake, silent: [${files.join(', ')}]`);
+
+/**
+ * #1637 — STATES ARE INDEPENDENT, so are their signatures and their mutes. Members, not one composite key:
+ *   red:<file>   one per really failing file (or red:timeout / red:unparsed)
+ *   inc:<member> one per gap: a file with UNAVAILABLE or unclassified skips, a required file not run, a problem, truncation
+ * A state posts when ANY of its members is new (not muted); members that merely LEAVE do not re-fire it. The count of skips is deliberately NOT part of the key: a night that adds three more
+ * skips in a file already known is the same gap. Recovery of one state clears only that state's members.
+ */
+const redMembers = red ? (timedOut ? ['timeout'] : (files.length ? files : ['unparsed'])) : [];
+const incMembers = verdict.incomplete ? [
+  ...verdict.incompleteFiles.map((f) => `skips:${f}`),
+  ...verdict.requiredMissing.map((c) => `required:${c.file}`),
+  ...verdict.problems.map((p) => `problem:${p.slice(0, 80)}`),
+  ...(verdict.truncated ? ['truncated'] : []),
+] : [];
 
 let st = { sigTimes: {} };
 try { st = { sigTimes: {}, ...JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) }; } catch { /* first run */ }
 for (const [k, at] of Object.entries(st.sigTimes)) {
-  if (Date.now() - at >= COOLDOWN_MS) delete st.sigTimes[k];
+  // pre-#1637 keys (a bare comma-joined basename list) can never match a member again; let them go
+  if (Date.now() - at >= COOLDOWN_MS || !/^(red|inc):/.test(k)) delete st.sigTimes[k];
 }
-
-if (!red) {
-  st.sigTimes = {}; // recovery clears every signature — the next red is news
-  fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
-  fs.writeFileSync(STATE_FILE, JSON.stringify(st));
-  console.log(`${now} suite green — silent`);
-  process.exit(0);
-}
+if (!red) for (const k of Object.keys(st.sigTimes)) if (k.startsWith('red:')) delete st.sigTimes[k];
+if (!verdict.incomplete) for (const k of Object.keys(st.sigTimes)) if (k.startsWith('inc:')) delete st.sigTimes[k];
 
 const summary = (out.match(/# (tests|pass|fail) \d+/g) || []).join(' · ');
-const muted = st.sigTimes[sig] != null;
-console.log(`${now} suite RED sig=[${sig}] ${muted ? 'muted' : 'FIRING'} ${summary}`);
+const fresh = (prefix, members) => members.filter((m) => st.sigTimes[`${prefix}:${m}`] == null);
+const bodies = [];
+if (red) {
+  const news = fresh('red', redMembers);
+  console.log(`${now} suite RED sig=[${redMembers.join(',')}] ${news.length ? 'FIRING' : 'muted'} ${summary}`);
+  if (news.length) {
+    const todoSentence = verdict.todo ? `TODO rows (expected failures, NOT failures): ${verdict.todo} in ${verdict.todoFiles.length} file(s)${verdict.todoFiles.length ? `: ${verdict.todoFiles.join(', ')}` : ''}. ` : '';
+    bodies.push(timedOut
+      ? `🔴 suite watch: the FULL suite did not FINISH — killed after ${Math.round(RUN_TIMEOUT_MS / 1000)}s `
+        + `${full.terminationVerified ? 'and its process tree terminated' : 'but cleanup could not be verified'}. This is a HANG, not a failing assertion: `
+        + `Incomplete test file(s): ${incompleteFiles.join(', ') || 'none'}. `
+        + `${summary || 'no summary — it never reached one'}. `
+      : `🔴 suite watch: the FULL test suite is RED in ${treeIdentity(REPO)} `
+        + `(${summary || 'summary unparsed'}). `
+        + `Failing file(s): ${files.length ? files.join(', ') : 'unparsed — read the log'}. `
+        + todoSentence
+        + `A red suite invalidates every "no regressions" claim until it is green (the #465 lesson: `
+        + `the rail worked and nobody read it — this post is the subscription). `
+        + `Repro: sh scripts/run-tests.sh in THAT tree — not in yours; they may differ. `
+        + `(A failing file now mutes for ${Math.round(COOLDOWN_MS / 3600000)}h; a NEW failing file fires immediately.)`);
+    for (const m of redMembers) if (st.sigTimes[`red:${m}`] == null) st.sigTimes[`red:${m}`] = Date.now();
+  }
+}
+if (verdict.incomplete) {
+  const news = fresh('inc', incMembers);
+  console.log(`${now} suite INCOMPLETE members=${incMembers.length} ${news.length ? 'FIRING' : 'muted'} unavailable=${verdict.unavailable} unclassified=${verdict.unclassified}`);
+  if (news.length) {
+    const reqLine = verdict.requiredMissing.length ? `Required test file(s) that did NOT run: ${verdict.requiredMissing.map((c) => `${c.file} (${c.why})`).join('; ')}. ` : '';
+    const probLine = verdict.problems.length ? `Problem(s): ${verdict.problems.join('; ')}. ` : '';
+    bodies.push(`🟠 suite watch: the run is INCOMPLETE in ${treeIdentity(REPO)} — required coverage is missing, so this is NOT a pass even with zero failures. `
+      + `Unavailable (environment) skips: ${verdict.unavailable}; unclassified skips: ${verdict.unclassified}${verdict.incompleteFiles.length ? ` — in ${verdict.incompleteFiles.length} file(s), e.g. ${verdict.incompleteFiles.slice(0, 5).join(', ')}` : ''}. `
+      + reqLine + probLine + (verdict.truncated ? 'The TAP was truncated (no summary line): the run did not finish reporting. ' : '')
+      + `Failures: ${verdict.failed}, reported separately. An UNAVAILABLE skip is never a pass; fix the environment (e.g. GRAPH_EXECUTOR_PYTHON) or document an intentional exclusion `
+      + `(exact file + test + reason + scope) in scripts/suite-watch-exclusions.json. `
+      + `(This gap mutes for ${Math.round(COOLDOWN_MS / 3600000)}h; a NEW gap fires immediately, and it does not depend on the red state.)`);
+    for (const m of incMembers) if (st.sigTimes[`inc:${m}`] == null) st.sigTimes[`inc:${m}`] = Date.now();
+  }
+}
+if (!red && !verdict.incomplete) console.log(`${now} suite green — silent`);
 
-if (!muted) {
-  st.sigTimes[sig] = Date.now();
-  const body = timedOut
-    ? `🔴 suite watch: the FULL suite did not FINISH — killed after ${Math.round(RUN_TIMEOUT_MS / 1000)}s `
-      + `${full.terminationVerified ? 'and its process tree terminated' : 'but cleanup could not be verified'}. This is a HANG, not a failing assertion: `
-      + `Incomplete test file(s): ${incompleteFiles.join(', ') || 'none'}. `
-      + `${summary || 'no summary — it never reached one'}. `
-    : `🔴 suite watch: the FULL test suite is RED in ${treeIdentity(REPO)} `
-      + `(${summary || 'summary unparsed'}). `
-      + `Failing file(s): ${files.length ? files.join(', ') : 'unparsed — read the log'}. `
-    + `A red suite invalidates every "no regressions" claim until it is green (the #465 lesson: `
-    + `the rail worked and nobody read it — this post is the subscription). `
-    + `Repro: sh scripts/run-tests.sh in THAT tree — not in yours; they may differ. `
-    + `(This signature now mutes for `
-    + `${Math.round(COOLDOWN_MS / 3600000)}h; a NEW failing file fires immediately.)`;
+for (const body of bodies) {
   if (DRYRUN) {
     console.log(`${now} DRYRUN would post: ${body}`);
   } else {

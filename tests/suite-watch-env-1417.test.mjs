@@ -68,6 +68,8 @@ test('#1417 the suite the watcher spawns can find lsof — the plist PATH withou
     if (fs.existsSync(src)) fs.copyFileSync(src, path.join(dir, 'scripts', f));
   }
   fs.chmodSync(path.join(dir, 'scripts', 'run-tests.sh'), 0o755);
+  // #1637 — the watch fails closed without a required-coverage manifest; this universe is about the PATH, so it states an explicit empty list
+  fs.writeFileSync(path.join(dir, 'scripts', 'suite-watch-required.json'), '[]\n');
   fs.writeFileSync(path.join(dir, 'tests', 'lsof.test.mjs'),
     'import { test } from "node:test"; import a from "node:assert/strict"; import { execSync } from "node:child_process";\n'
     + 'test("lsof resolves on this PATH", () => { a.doesNotThrow(() => execSync("lsof -v", { stdio: "pipe" }), "lsof must be findable"); a.ok(process.env.PATH.split(":").includes("/usr/sbin"), process.env.PATH); });\n');

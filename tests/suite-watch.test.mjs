@@ -64,6 +64,8 @@ function makeUniverse() {
   const ledger = path.join(ROOT, 'scripts', 'verdict-ledger.mjs');
   if (fs.existsSync(ledger)) fs.copyFileSync(ledger, path.join(dir, 'scripts', 'verdict-ledger.mjs'));
   fs.chmodSync(path.join(dir, 'scripts', 'run-tests.sh'), 0o755);
+  // #1637 — the watch FAILS CLOSED without a required-coverage manifest; a fixture universe states its choice explicitly (an empty list: these tests are about the alarm, not about coverage)
+  fs.writeFileSync(path.join(dir, 'scripts', 'suite-watch-required.json'), '[]\n');
   fs.writeFileSync(path.join(dir, 'tests', 'green.test.mjs'),
     'import { test } from "node:test"; test("g", () => {});\n');
   return { dir, state: path.join(dir, 'watch.state') };
@@ -233,13 +235,14 @@ test('#735 watcher consumes one aggregate runner verdict for a multi-file red', 
   const out = await tick(u);
   const summary = out.split('\n').find((line) => /suite RED sig=/.test(line));
   assert.ok(summary, `the watcher must emit its parsed verdict:\n${out}`);
-  assert.match(summary, /sig=\[failing-file\.test\.mjs\]/,
+  // #1637 — files are CHECKOUT-RELATIVE (two files may share a basename); was the bare basename
+  assert.match(summary, /sig=\[tests\/failing-file\.test\.mjs\]/,
     `the watcher signature must name the failure, never unparsed:\n${out}`);
   assert.match(summary, /# tests 2 · # pass 1 · # fail 1/,
     `the watcher must parse exactly the combined totals:\n${out}`);
   assert.equal((summary.match(/# (tests|pass|fail) \d+/g) || []).length, 3,
     `the watcher summary must contain one tests/pass/fail triple:\n${out}`);
-  assert.match(out, /Failing file\(s\): failing-file\.test\.mjs/,
+  assert.match(out, /Failing file\(s\): tests\/failing-file\.test\.mjs/,
     `the watcher consumer output must retain its parsed files list:\n${out}`);
   assert.ok(posted(out), 'the hermetic dry-run watcher must alarm without contacting a board');
 });
@@ -487,7 +490,7 @@ test('#746 a RED preserves BOTH the full-run and isolation TAP, with the failure
   // one can reach the other.
   const meta = JSON.parse(fs.readFileSync(path.join(runDir, 'meta.json'), 'utf8'));
   assert.equal(typeof meta.runId, 'string');
-  assert.deepEqual(meta.files, ['red.test.mjs']);
+  assert.deepEqual(meta.files, ['tests/red.test.mjs']);
 });
 
 test('#746 a GREEN run writes NO artifacts — evidence retention is for reds only', async () => {
