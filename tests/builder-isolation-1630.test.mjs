@@ -135,7 +135,7 @@ test('I5 THE LEGITIMATE WORK STILL WORKS: fixture server, node --test, git in a 
   const serve = `const http=require('http');const s=http.createServer((q,r)=>r.end('fixture-ok'));s.listen(0,'127.0.0.1',async()=>{const p=s.address().port;const t=await (await fetch('http://127.0.0.1:'+p+'/')).text();console.log(t);s.close()})`;
   let r = wrap(d.port, wt, tmp, [process.execPath, '-e', serve]); assert.equal(r.stdout.trim(), 'fixture-ok', `a fixture server on a random port starts and answers inside the sandbox (${(r.stderr || '').slice(0, 200)})`);
   fs.writeFileSync(path.join(wt, 'trivial.test.mjs'), "import { test } from 'node:test'; import assert from 'node:assert/strict'; test('trivial', () => assert.equal(1 + 1, 2));\n");
-  r = wrap(d.port, wt, tmp, [process.execPath, '--test', path.join(wt, 'trivial.test.mjs')]); assert.match(r.stdout, /# pass 1/, `node --test runs inside the sandbox (${r.stdout.slice(-200)} ${(r.stderr || '').slice(0, 200)})`);
+  r = wrap(d.port, wt, tmp, [process.execPath, '--test', '--test-reporter=tap', path.join(wt, 'trivial.test.mjs')]); assert.match(r.stdout, /# pass 1/, `node --test runs inside the sandbox (${r.stdout.slice(-200)} ${(r.stderr || '').slice(0, 200)})`);
   const gitIdent = ['-c', 'user.email=x@example.invalid', '-c', 'user.name=x', '-c', 'commit.gpgsign=false'];
   sh('git', ['init', '-q'], { cwd: wt });
   r = wrap(d.port, wt, tmp, ['sh', '-c', `cd '${wt}' && git status --short && git add -A && git ${gitIdent.join(' ')} commit -q -m t && git log --oneline | wc -l`]); assert.match(r.stdout.trim().split('\n').pop().trim(), /^1$/, `git status and commit work in a plain repository (${r.stdout.slice(-160)} ${(r.stderr || '').slice(0, 200)})`);
