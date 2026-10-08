@@ -13,7 +13,7 @@
  * So, in order:
  *   1. CHECKPOINT  POST /checkpoint on the running executor. It calls Store.backup()
  *                  INSIDE its write lock and reports, from the same instant, the quad
- *                  count and the commit marker (<urn:ex:dataset> <urn:ex:commitSeq>).
+ *                  count and the commit marker (<urn:ex:dataset> <urn:ex:commitSeq>, read from the bookkeeping graph, #1638).
  *   2. COPY        every file of the checkpoint is copied BYTE BY BYTE (read + write +
  *                  fsync, never link or clone) into DEST/graph-store-<stamp>.partial,
  *                  with a sha256 per file recorded in backup-manifest.json.
@@ -40,6 +40,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { BK } from '../core/graph-vocab.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const DEFAULT_PYTHON = process.env.GRAPH_EXECUTOR_PYTHON || path.join(ROOT, 'graph-executor', '.venv', 'bin', 'python');
@@ -50,7 +51,7 @@ export const MANIFEST = 'backup-manifest.json';
 const PY_READ = `
 import json, sys, pyoxigraph as px
 s = px.Store.read_only(sys.argv[1])
-rows = list(s.query('SELECT ?id ?e ?s WHERE { <urn:ex:dataset> <urn:ex:datasetId> ?id ; <urn:ex:epoch> ?e ; <urn:ex:commitSeq> ?s }'))
+rows = list(s.query('SELECT ?id ?e ?s WHERE { GRAPH ${BK} { <urn:ex:dataset> <urn:ex:datasetId> ?id ; <urn:ex:epoch> ?e ; <urn:ex:commitSeq> ?s } }'))
 if len(rows) != 1:
     print(json.dumps({'error': f'{len(rows)} marker rows'})); sys.exit(3)
 r = rows[0]

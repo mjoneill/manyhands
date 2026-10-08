@@ -13,6 +13,7 @@
  * handlers against the card's `version`, under the write lock, exactly as today.
  */
 import { durableUpdate } from './durable-update.mjs';
+import { BK } from './graph-vocab.mjs';
 import { cardQuads, priorQuads, cardIriOf, SHORTID_COUNTER_IRI, shortIdMap } from './cards-graph.mjs';
 import { parseCardRefs } from './references.mjs';
 
@@ -44,9 +45,9 @@ export function createCardsUnit({ client, actorIri = (who) => `https://scrumboar
   let gen = 0;               // moves on every cache change, so a shared read can key on it
 
   async function load() {
-    const q = await client.query(`SELECT ?s ?v ?j WHERE { ?s <${T}> <${RS}Card> ; <${VER}> ?v ; <${RS}entityJson> ?j }`);
+    const q = await client.query(`SELECT ?s ?v ?j WHERE { ?s <${T}> <${RS}Card> . GRAPH ${BK} { ?s <${VER}> ?v ; <${RS}entityJson> ?j } }`);
     if (!q.ok) throw new CardsUnavailable(q.reason || 'the graph could not be read');
-    const c = await client.query(`SELECT ?n WHERE { <${SHORTID_COUNTER_IRI}> <${VER}> ?n }`);
+    const c = await client.query(`SELECT ?n WHERE { GRAPH ${BK} { <${SHORTID_COUNTER_IRI}> <${VER}> ?n } }`);
     if (!c.ok) throw new CardsUnavailable(c.reason || 'the shortId counter could not be read');
     const rows = q.rows.map((r) => ({ card: JSON.parse(r.j.value), json: r.j.value, ver: Number(r.v.value) }));
     rows.sort((a, b) => (Number(a.card.shortId) || 0) - (Number(b.card.shortId) || 0));
@@ -144,14 +145,14 @@ export function createCardsUnit({ client, actorIri = (who) => `https://scrumboar
 
   /** K5 — the outcome recorded for `opId` ('APPLIED', 'PRECONDITION_FAILED', …), or null when there is no receipt. Throws CardsUnavailable. */
   async function receipt(opId) {
-    const q = await client.query(`SELECT ?o WHERE { <${opId}> <urn:ex:outcome> ?o }`);
+    const q = await client.query(`SELECT ?o WHERE { GRAPH ${BK} { <${opId}> <urn:ex:outcome> ?o } }`);
     if (!q.ok) throw new CardsUnavailable(q.reason || 'the receipt could not be read');
     return q.rows.length ? q.rows[0].o.value.replace(/^urn:ex:/, '') : null;
   }
 
   /** K4 — every announcement recorded with a card write: [{ mutationId, json }]. Throws CardsUnavailable. */
   async function pendingAnnouncements() {
-    const q = await client.query(`SELECT ?n ?j WHERE { ?n <${T}> <${RS}PendingAnnouncement> ; <${RS}entityJson> ?j }`);
+    const q = await client.query(`SELECT ?n ?j WHERE { ?n <${T}> <${RS}PendingAnnouncement> . GRAPH ${BK} { ?n <${RS}entityJson> ?j } }`);
     if (!q.ok) throw new CardsUnavailable(q.reason || 'the pending announcements could not be read');
     return q.rows.map((r) => ({ mutationId: r.n.value.split('/announce/')[1], json: r.j.value }));
   }

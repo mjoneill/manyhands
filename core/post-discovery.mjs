@@ -20,6 +20,7 @@
  * Tokens are fenced by the executor's incarnation and epoch: another store, a promoted copy or a rewrite is a resync.
  */
 import { createHash } from 'node:crypto';
+import { BK } from './graph-vocab.mjs';
 
 const NS = 'urn:ex:';
 const DATASET = `${NS}dataset`;
@@ -85,7 +86,7 @@ async function read(client, sparql) {
 }
 
 async function marker(client) {
-  const rows = await read(client, `SELECT ?e ?s ?i WHERE { <${DATASET}> <${EPOCH}> ?e ; <${COMMIT}> ?s ; <${INCARNATION}> ?i }`);
+  const rows = await read(client, `SELECT ?e ?s ?i WHERE { GRAPH ${BK} { <${DATASET}> <${EPOCH}> ?e ; <${COMMIT}> ?s ; <${INCARNATION}> ?i } }`);
   if (rows.length !== 1) refuse(503, 'GRAPH_DISCOVERY_INCONSISTENT', `the executor's marker has ${rows.length} rows (expected 1)`);
   return { epoch: rows[0].e.value, commit: Number(rows[0].s.value), inc: rows[0].i.value };
 }
@@ -127,9 +128,9 @@ async function opBatch(client, { prefixes, where, order, limit }) {
   // a writing op finds its post through recordedBy (a live Comment, or the tombstone it became); a REDACTION op finds the
   // tombstone it made through redactedBy
   const raw = await read(client, `SELECT ?op ?c ?p ?ps ?q ?qs WHERE {
-  ?op <${COMMIT}> ?c ; <${OUTCOME}> ?out .
+  GRAPH ${BK} { ?op <${COMMIT}> ?c ; <${OUTCOME}> ?out }
   FILTER(STR(?out) = ${JSON.stringify(APPLIED)} && (${prefixFilter(prefixes)}) && ${where})
-  OPTIONAL { ?p <${RECORDED_BY}> ?op ; <${RDF_TYPE}> ?pt . FILTER(?pt = <${SCHEMA}Comment> || ?pt = <${REDACTED_TYPE}>) OPTIONAL { ?p <${RS}postSeq> ?ps } }
+  OPTIONAL { GRAPH ${BK} { ?p <${RECORDED_BY}> ?op } ?p <${RDF_TYPE}> ?pt . FILTER(?pt = <${SCHEMA}Comment> || ?pt = <${REDACTED_TYPE}>) OPTIONAL { ?p <${RS}postSeq> ?ps } }
   OPTIONAL { ?q <${RS}redactedBy> ?op . OPTIONAL { ?q <${RS}postSeq> ?qs } }
 } ORDER BY ${order} LIMIT ${limit}`);
   const rows = raw.map((b) => (b.p || !b.q ? b : { ...b, p: b.q, ps: b.qs, redact: true }));

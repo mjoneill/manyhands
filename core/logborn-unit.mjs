@@ -36,6 +36,7 @@ import { seatActor, authorizeWrite } from './graph-auth.mjs';
 import { authDecision } from './credentials.mjs';
 import { declarationsFromRows } from './seat-state.mjs';
 import { planPersonRetention } from './graph-people.mjs';
+import { BK } from './graph-vocab.mjs';
 
 export const PERSON_BASE = 'https://scrumboard.local/person/';
 export const DECISION_BASE = 'https://scrumboard.local/decision/';
@@ -319,7 +320,9 @@ export function seatClearIntention({ actor, seat, ends, at, opId = opIri('seat')
 const I = (x) => `<${x}>`;
 export const Q_MEMORIES = `SELECT ?s ?t ?p ?o WHERE { ?s ${I(TM.type)} ?t ; ?p ?o . VALUES ?t { ${I(TM.Memory)} ${I(TM.MemoryVersion)} } }`;
 export const qOneMemory = (identifier) => `SELECT ?s ?t ?p ?o WHERE { ?m ${I(TM.type)} ${I(TM.Memory)} ; ${I(TM.identifier)} ${recLit(String(identifier))} . `
-  + `{ BIND(?m AS ?s) } UNION { ?s ${I(TM.ofMemory)} ?m } ?s ${I(TM.type)} ?t ; ?p ?o . VALUES ?t { ${I(TM.Memory)} ${I(TM.MemoryVersion)} } }`;
+  // #1638 — `ver` is bookkeeping (named graph): the write revision readMemory needs is read from GRAPH <bk> explicitly and comes
+  // back as a `?s urn:ex:ver ?o` row, the shape the default-graph `?s ?p ?o` gave it before.
+  + `{ BIND(?m AS ?s) } UNION { ?s ${I(TM.ofMemory)} ?m } ?s ${I(TM.type)} ?t . { ?s ?p ?o } UNION { GRAPH ${BK} { ?s ${I(TM.ver)} ?o } BIND(${I(TM.ver)} AS ?p) } VALUES ?t { ${I(TM.Memory)} ${I(TM.MemoryVersion)} } }`;
 /** One memory, its versions AND its revision nodes, in one query (one snapshot). */
 export const qOneMemoryHistory = (identifier) => `SELECT ?s ?t ?p ?o WHERE { ?m ${I(TM.type)} ${I(TM.Memory)} ; ${I(TM.identifier)} ${recLit(String(identifier))} . `
   + `{ BIND(?m AS ?s) } UNION { ?s ${I(TM.ofMemory)} ?m } ?s ${I(TM.type)} ?t ; ?p ?o . VALUES ?t { ${I(TM.Memory)} ${I(TM.MemoryVersion)} ${I(TM.MemoryRevision)} } }`;
@@ -330,9 +333,12 @@ export const Q_OPEN_SEAT_DECLS = `SELECT ?d ?p ?o WHERE { ?d ${I(TM.type)} ${I(T
 // core/graph-replica.mjs). The executor's bookkeeping (`urn:ex:ver`,
 // `urn:ex:recordedBy`) is excluded: the flag-OFF graph never carried it, and an
 // unchanged query must return the same rows with the flag ON.
+// #1638 — bookkeeping now lives in GRAPH <bk>, so the default-graph record read below no longer SEES it; the `urn:ex:`
+// predicate filter is kept as a harmless belt (nothing a record carries in the default graph starts with it). The commit
+// marker (position) is bookkeeping and is read from GRAPH <bk>.
 const MARKER = '<urn:ex:dataset>';
-export const Q_POSITION = `SELECT ?e ?seq WHERE { ${MARKER} <urn:ex:epoch> ?e ; <urn:ex:commitSeq> ?seq }`;
-export const Q_RECORD_TRIPLES = `SELECT ?s ?p ?o ?e ?seq WHERE { { ${MARKER} <urn:ex:epoch> ?e ; <urn:ex:commitSeq> ?seq } UNION `
+export const Q_POSITION = `SELECT ?e ?seq WHERE { GRAPH ${BK} { ${MARKER} <urn:ex:epoch> ?e ; <urn:ex:commitSeq> ?seq } }`;
+export const Q_RECORD_TRIPLES = `SELECT ?s ?p ?o ?e ?seq WHERE { { GRAPH ${BK} { ${MARKER} <urn:ex:epoch> ?e ; <urn:ex:commitSeq> ?seq } } UNION `
   + `{ ?s ${I(TM.type)} ?t ; ?p ?o . VALUES ?t { ${I(TM.Memory)} ${I(TM.MemoryVersion)} ${I(TM.Decision)} ${I(TM.SeatDeclaration)} } `
   + 'FILTER(!STRSTARTS(STR(?p), "urn:ex:")) } }';
 

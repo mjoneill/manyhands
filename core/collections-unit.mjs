@@ -16,6 +16,7 @@
 import oxigraph from 'oxigraph';
 import { durableUpdate } from './durable-update.mjs';
 import { projectEntity } from './graph-replica.mjs';
+import { BK } from './graph-vocab.mjs';
 
 const RS = 'https://scrumboard.local/ns#';
 const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
@@ -91,7 +92,7 @@ export function createCollectionsUnit({ client, families, mintId, actorIri = (wh
 
   async function load() {
     const next = new Map([...byKey.keys()].map((k) => [k, new Map()]));
-    const q = await client.query(`SELECT ?s ?k ?v ?j WHERE { ?s <${RS}inCollection> ?k ; <urn:ex:ver> ?v ; <${RS}entityJson> ?j }`);
+    const q = await client.query(`SELECT ?s ?k ?v ?j WHERE { ?s <${RS}inCollection> ?k . GRAPH ${BK} { ?s <urn:ex:ver> ?v ; <${RS}entityJson> ?j } }`);
     if (!q.ok) throw new CollectionsUnavailable(q.reason || 'the graph could not be read');
     for (const r of q.rows) {
       const m = next.get(r.k.value);

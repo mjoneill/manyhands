@@ -39,7 +39,7 @@
  *                   contradictory marker, incomplete transport, or a
  *                   candidate count mismatch (rows were clipped)
  */
-import { EX, NS } from './graph-vocab.mjs';
+import { EX, NS, BK, isBookkeeping } from './graph-vocab.mjs';
 
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
 const TERM_TYPES = new Set(['uri', 'literal', 'bnode']);
@@ -115,31 +115,49 @@ export function buildAuthorityQuery({ topic, predicate, scope }) {
   void predicate; void scope;   // eligibility is decided in the reducer, so ineligible assertions still surface
   const T = `<${topic}>`;
   const ex = (l) => `<${NS}${l}>`;
+  // #1638 — BOOKKEEPING LIVES IN ITS OWN NAMED GRAPH. The marker, every receipt field and the ex:ver / ex:recordedBy /
+  // ex:retiredBy stamps are read inside GRAPH <bk>; the Assertion, grant and rule domain triples stay in the default graph.
+  // The two are joined by shared variables. A field is routed by the ONE definition (isBookkeeping), never by a local list.
+  const inBk = (body) => `GRAPH ${BK} { ${body} }`;
+  const fieldIsBk = (f) => isBookkeeping('urn:ex:any', ex(f));
+  // distinct (?k1 ?k2 ?k3) triples of `?k1 ?k2 ?k3 FILTER(?k2 IN fields)`, domain fields default-graph, bookkeeping fields in BK
+  const fieldSet = (fields) => {
+    const dom = fields.filter((f) => !fieldIsBk(f)); const bk = fields.filter(fieldIsBk);
+    const parts = [];
+    if (dom.length) parts.push(`{ ?k1 ?k2 ?k3 FILTER(?k2 IN (${dom.map(ex).join(', ')})) }`);
+    if (bk.length) parts.push(`{ ${inBk(`?k1 ?k2 ?k3 FILTER(?k2 IN (${bk.map(ex).join(', ')}))`)} }`);
+    return parts.join(' UNION ');
+  };
   // Subject-first pattern order: puts `?var ex:subject <T>` first in each block so the
   // measured pyoxigraph0.5.11 fixture avoids unrelated-Assertion scans. Triple set and
   // checks unchanged; ordering is engine/version dependent.
   const anchor = `?candidate ${ex('subject')} ${T} ; a ${ex('Assertion')} .`;
-  const rOpts = (v) => R_FIELDS.map((f) => `OPTIONAL { ${v} ${ex(f)} ?r_${f} }`).join('\n        ');
+  const rOpts = (v) => R_FIELDS.map((f) => `OPTIONAL { ${inBk(`${v} ${ex(f)} ?r_${f}`)} }`).join('\n        ');
   return `SELECT * WHERE {
-  ${ex('dataset')} ${ex('commitSeq')} ?marker .
-  OPTIONAL { ${ex('dataset')} ${ex('datasetId')} ?m_datasetId }
-  OPTIONAL { ${ex('dataset')} ${ex('epoch')} ?m_epoch }
+  ${inBk(`${ex('dataset')} ${ex('commitSeq')} ?marker .
+    OPTIONAL { ${ex('dataset')} ${ex('datasetId')} ?m_datasetId }
+    OPTIONAL { ${ex('dataset')} ${ex('epoch')} ?m_epoch }`)}
   { SELECT (COUNT(DISTINCT ?cc) AS ?candidateCount) WHERE { ?cc ${ex('subject')} ${T} ; a ${ex('Assertion')} } }
   # COVERAGE (a reviewer review 3): distinct supporting triples per block, counted in the SAME snapshot,
   # so a response that keeps every candidate id but drops a supporting row is detected as incomplete.
   { SELECT (COUNT(*) AS ?nCandTriples) WHERE { SELECT DISTINCT ?k1 ?k2 ?k3 WHERE {
-      ?k1 ${ex('subject')} ${T} ; a ${ex('Assertion')} ; ?k2 ?k3 . FILTER(?k2 IN (${C_FIELDS.map(ex).join(', ')})) } } }
+      ?k1 ${ex('subject')} ${T} ; a ${ex('Assertion')} .
+      ${fieldSet(C_FIELDS)} } } }
   { SELECT (COUNT(*) AS ?nRecTriples) WHERE { SELECT DISTINCT ?k1 ?k2 ?k3 WHERE {
-      ?kc ${ex('subject')} ${T} ; a ${ex('Assertion')} . { ?kc ${ex('recordedBy')} ?k1 } UNION { ?kc ${ex('retiredBy')} ?k1 }
-      ?k1 ?k2 ?k3 . FILTER(?k2 IN (${R_FIELDS.map(ex).join(', ')})) } } }
+      ?kc ${ex('subject')} ${T} ; a ${ex('Assertion')} .
+      ${inBk(`{ ?kc ${ex('recordedBy')} ?k1 } UNION { ?kc ${ex('retiredBy')} ?k1 }
+      ?k1 ?k2 ?k3 FILTER(?k2 IN (${R_FIELDS.map(ex).join(', ')}))`)} } } }
   { SELECT (COUNT(*) AS ?nGrantTriples) WHERE { SELECT DISTINCT ?k1 ?k2 ?k3 WHERE {
-      ?kc ${ex('subject')} ${T} ; a ${ex('Assertion')} ; ${ex('recordedBy')} ?kr . ?kr ${ex('grant')} ?k1 .
-      ?k1 ?k2 ?k3 . FILTER(?k2 IN (${G_FIELDS.map(ex).join(', ')})) } } }
+      ?kc ${ex('subject')} ${T} ; a ${ex('Assertion')} .
+      ${inBk(`?kc ${ex('recordedBy')} ?kr . ?kr ${ex('grant')} ?k1`)}
+      ${fieldSet(G_FIELDS)} } } }
   { SELECT (COUNT(*) AS ?nRuleTriples) WHERE { SELECT DISTINCT ?k1 ?k3 WHERE {
-      ?kc ${ex('subject')} ${T} ; a ${ex('Assertion')} ; ${ex('recordedBy')} ?kr . ?kr ${ex('rule')} ?k1 . ?k1 ${ex('rev')} ?k3 } } }
+      ?kc ${ex('subject')} ${T} ; a ${ex('Assertion')} .
+      ${inBk(`?kc ${ex('recordedBy')} ?kr . ?kr ${ex('rule')} ?k1`)}
+      ?k1 ${ex('rev')} ?k3 } } }
   { SELECT (COUNT(*) AS ?nTargetTriples) WHERE { SELECT DISTINCT ?k1 ?k2 ?k3 WHERE {
       ?kc ${ex('subject')} ${T} ; a ${ex('Assertion')} ; ${ex('supersedes')} ?k1 .
-      ?k1 ?k2 ?k3 . FILTER(?k2 IN (${T_FIELDS.map(ex).join(', ')})) } } }
+      ${fieldSet(T_FIELDS)} } } }
   OPTIONAL {
     {
       ${anchor} BIND("cand" AS ?kind)
@@ -148,22 +166,22 @@ export function buildAuthorityQuery({ topic, predicate, scope }) {
       OPTIONAL { ?candidate ${ex('status')} ?c_status }
       OPTIONAL { ?candidate ${ex('value')} ?c_value }
       OPTIONAL { ?candidate ${ex('binding')} ?c_binding }
-      OPTIONAL { ?candidate ${ex('ver')} ?c_ver }
+      OPTIONAL { ${inBk(`?candidate ${ex('ver')} ?c_ver`)} }
       OPTIONAL { ?candidate ${ex('author')} ?c_author }
-      OPTIONAL { ?candidate ${ex('recordedBy')} ?c_recordedBy }
+      OPTIONAL { ${inBk(`?candidate ${ex('recordedBy')} ?c_recordedBy`)} }
       OPTIONAL { ?candidate ${ex('supersedes')} ?c_supersedes }
-      OPTIONAL { ?candidate ${ex('retiredBy')} ?c_retiredBy }
+      OPTIONAL { ${inBk(`?candidate ${ex('retiredBy')} ?c_retiredBy`)} }
       OPTIONAL { ?candidate ${ex('evidence')} ?c_evidence }
     } UNION {
-      ${anchor} ?candidate ${ex('recordedBy')} ?rec . BIND("prov" AS ?kind)
+      ${anchor} ${inBk(`?candidate ${ex('recordedBy')} ?rec`)} BIND("prov" AS ?kind)
         ${rOpts('?rec')}
-      OPTIONAL { ?rec ${ex('grant')} ?grant .
+      OPTIONAL { ${inBk(`?rec ${ex('grant')} ?grant`)}
         OPTIONAL { ?grant ${ex('grantee')} ?g_grantee }
         OPTIONAL { ?grant ${ex('scope')} ?g_scope }
         OPTIONAL { ?grant ${ex('mayRetire')} ?g_mayRetire }
         OPTIONAL { ?grant ${ex('active')} ?g_active }
         OPTIONAL { ?grant ${ex('rev')} ?g_rev } }
-      OPTIONAL { ?rec ${ex('rule')} ?rule . OPTIONAL { ?rule ${ex('rev')} ?rr_rev } }
+      OPTIONAL { ${inBk(`?rec ${ex('rule')} ?rule`)} OPTIONAL { ?rule ${ex('rev')} ?rr_rev } }
     } UNION {
       ${anchor} ?candidate ${ex('supersedes')} ?target . BIND("sup" AS ?kind)
       OPTIONAL { ?target ${ex('subject')} ?old_subject }
@@ -172,10 +190,10 @@ export function buildAuthorityQuery({ topic, predicate, scope }) {
       OPTIONAL { ?target ${ex('status')} ?old_status }
       OPTIONAL { ?target ${ex('value')} ?old_value }
       OPTIONAL { ?target ${ex('binding')} ?old_binding }
-      OPTIONAL { ?target ${ex('ver')} ?old_ver }
-      OPTIONAL { ?target ${ex('retiredBy')} ?old_retiredBy }
+      OPTIONAL { ${inBk(`?target ${ex('ver')} ?old_ver`)} }
+      OPTIONAL { ${inBk(`?target ${ex('retiredBy')} ?old_retiredBy`)} }
     } UNION {
-      ${anchor} ?candidate ${ex('retiredBy')} ?rec . BIND("ret" AS ?kind)
+      ${anchor} ${inBk(`?candidate ${ex('retiredBy')} ?rec`)} BIND("ret" AS ?kind)
         ${rOpts('?rec')}
     }
   }

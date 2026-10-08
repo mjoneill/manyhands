@@ -60,7 +60,8 @@ EPORT=$(node -e "const s=require('net').createServer().listen(0,'127.0.0.1',()=>
 "$PY" - "$DATA/graph-store" "$DATASET_ID" <<'EOF'
 import sys, pyoxigraph as px, json
 s = px.Store(sys.argv[1])
-s.update('INSERT DATA { <urn:ex:dataset> <urn:ex:datasetId> %s ; <urn:ex:epoch> 1 ; <urn:ex:commitSeq> 0 }' % json.dumps(sys.argv[2]))
+# #1638 — the marker is bookkeeping: it lives in the named graph core/graph-vocab.mjs calls BOOKKEEPING_GRAPH
+s.update('INSERT DATA { GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:dataset> <urn:ex:datasetId> %s ; <urn:ex:epoch> 1 ; <urn:ex:commitSeq> 0 } }' % json.dumps(sys.argv[2]))
 s.flush()
 EOF
 

@@ -2375,6 +2375,14 @@ export function prepareGraphQuery(sparql, { limit, vocabulary = GRAPH_VOCABULARY
     throw Object.assign(new Error('graph_query is READ-ONLY: SELECT or ASK. Writes go through the board API, which is what gives them events, actors and rails.'), { code: 'READ_ONLY' });
   }
 
+  // #1638 — REFUSE `SERVICE`. A federated sub-query would send this one's text to another endpoint (and can name the
+  // executor's own /query, which is NOT confined to the public dataset), so it can reach the bookkeeping graph the public
+  // read path keeps out of reach. Checked on the literal- and IRI-stripped text like the keyword check above; the lookbehind
+  // / lookahead keep a prefixed name (`ex:service`, `service:x`) or a variable (`?service`) from being read as the keyword.
+  if (/(?<![:\w?$-])SERVICE(?![:\w-])/i.test(withoutLiterals)) {
+    throw Object.assign(new Error('graph_query refuses SERVICE: a query is answered from this store alone, never forwarded to another endpoint. Rewrite it without a SERVICE clause.'), { code: 'SERVICE_REFUSED' });
+  }
+
   // #885 — REFUSE AN UNBOUNDED PROPERTY PATH, BEFORE IT RUNS.
   //
   // ⚰️ Measured by doing it: `?a !<urn:none>* ?c` — "reachable by ANY predicate"

@@ -29,7 +29,7 @@
  * and inventing one would be a second, colliding sequence.
  */
 import { LOGBORN_TERMS as TM } from './graph-compiler.mjs';
-import { NS } from './graph-vocab.mjs';
+import { NS, BK } from './graph-vocab.mjs';
 import { PERSON_BASE } from './logborn-unit.mjs';
 import { incarnationTag, INCARNATION_TAG } from './changes-log-query.mjs';   // #1577
 
@@ -47,15 +47,15 @@ export function feedQuery(afterCommitSeq = 0) {
   if (!Number.isSafeInteger(n) || n < 0) throw new Error(`feedQuery: afterCommitSeq must be a non-negative integer (got ${afterCommitSeq})`);
   const keep = [TM.type, TM.ofMemory, TM.version, TM.author, TM.decidedBy, TM.declaredSeat].map(I).join(', ');
   return `SELECT ?hw ?ep ?eb ?inc ?incf ?op ?seq ?at ?actor ?target ?tseat ?towner ?rec ?rp ?ro WHERE {
-  { ${RX('dataset')} ${RX('commitSeq')} ?hw ; ${RX('epoch')} ?ep . OPTIONAL { ${RX('dataset')} ${RX('epochBase')} ?eb }
-    OPTIONAL { ${RX('dataset')} ${RX('incarnation')} ?inc } OPTIONAL { ${RX('dataset')} ${RX('incarnationFrom')} ?incf } }
+  { GRAPH ${BK} { ${RX('dataset')} ${RX('commitSeq')} ?hw ; ${RX('epoch')} ?ep . OPTIONAL { ${RX('dataset')} ${RX('epochBase')} ?eb }
+      OPTIONAL { ${RX('dataset')} ${RX('incarnation')} ?inc } OPTIONAL { ${RX('dataset')} ${RX('incarnationFrom')} ?incf } } }
   UNION
-  { ?op ${RX('outcome')} ${RX('APPLIED')} ; ${RX('commitSeq')} ?seq ; ${RX('at')} ?at ; ${RX('actor')} ?actor .
+  { GRAPH ${BK} { ?op ${RX('outcome')} ${RX('APPLIED')} ; ${RX('commitSeq')} ?seq ; ${RX('at')} ?at ; ${RX('actor')} ?actor }
     FILTER(STRSTARTS(STR(?op), ${JSON.stringify(LIVE_OP_PREFIX)}) && ?seq > ${n})
-    OPTIONAL { ?op ${RX('target')} ?target .
+    OPTIONAL { GRAPH ${BK} { ?op ${RX('target')} ?target }
       OPTIONAL { ?target ${I(TM.declaredSeat)} ?tseat }
       OPTIONAL { ?target ${I(TM.owner)} ?towner } }
-    OPTIONAL { ?rec ${I(TM.recordedBy)} ?op ; ?rp ?ro . FILTER(?rp IN (${keep})) } }
+    OPTIONAL { GRAPH ${BK} { ?rec ${I(TM.recordedBy)} ?op } ?rec ?rp ?ro . FILTER(?rp IN (${keep})) } }
 }`;
 }
 
@@ -175,9 +175,9 @@ export function postFeedQuery(afterCommitSeq = 0) {
   if (!Number.isSafeInteger(n) || n < 0) throw new Error(`postFeedQuery: afterCommitSeq must be a non-negative integer (got ${afterCommitSeq})`);
   const pre = POST_OP_PREFIXES.map((p) => `STRSTARTS(STR(?op), ${JSON.stringify(p)})`).join(' || ');
   return `SELECT ?op ?seq ?at ?actor ?p ?t ?text ?author WHERE {
-  ?op ${RX('outcome')} ${RX('APPLIED')} ; ${RX('commitSeq')} ?seq ; ${RX('at')} ?at ; ${RX('actor')} ?actor .
+  GRAPH ${BK} { ?op ${RX('outcome')} ${RX('APPLIED')} ; ${RX('commitSeq')} ?seq ; ${RX('at')} ?at ; ${RX('actor')} ?actor }
   FILTER((${pre}) && ?seq > ${n})
-  { ?p <${T_RECBY}> ?op } UNION { ?p <${T_REDBY}> ?op }
+  { GRAPH ${BK} { ?p <${T_RECBY}> ?op } } UNION { ?p <${T_REDBY}> ?op }
   ?p <${T_POSTSEQ}> ?ps .
   OPTIONAL { ?p <${RDF_T}> ?t } OPTIONAL { ?p <${S_TEXT}> ?text } OPTIONAL { ?p <${S_AUTHOR}> ?author }
 }`;

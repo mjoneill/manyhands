@@ -75,7 +75,7 @@ import { loadDomain } from '../core/store.mjs';
 import { readEvents, appendEvent, nextSeq } from '../core/event-log.mjs';
 import { createGraphClient } from '../core/graph-client.mjs';
 import { LOGBORN_TERMS as TM, canonicalize, digestOf } from '../core/graph-compiler.mjs';
-import { NS } from '../core/graph-vocab.mjs';
+import { NS, BK } from '../core/graph-vocab.mjs';
 import { Q_POSITION, DECISION_BASE } from '../core/logborn-unit.mjs';
 import { feedQuery, feedRowsFromBindings, isoAt, LIVE_OP_PREFIX } from '../core/logborn-feed.mjs';
 import { snapshotPaths } from '../core/graph-snapshot.mjs';
@@ -103,7 +103,7 @@ export async function readExecutor(client) {
   const position = `${pos[0].e.value}:${pos[0].seq.value}`;
 
   const receipts = new Map();
-  for (const b of await q(`SELECT ?op ?p ?o WHERE { ?op <${R('commitSeq')}> ?seq ; ?p ?o . FILTER(STRSTARTS(STR(?op), "${NS}op/")) }`)) {
+  for (const b of await q(`SELECT ?op ?p ?o WHERE { GRAPH ${BK} { ?op <${R('commitSeq')}> ?seq ; ?p ?o . FILTER(STRSTARTS(STR(?op), "${NS}op/")) } }`)) {
     const r = receipts.get(b.op.value) || { opId: b.op.value };
     receipts.set(b.op.value, r);
     const p = b.p.value.startsWith(NS) ? b.p.value.slice(NS.length) : null;
@@ -112,7 +112,8 @@ export async function readExecutor(client) {
   }
   const nodes = new Map();
   const seen = new Set();
-  for (const b of await q(`SELECT ?s ?p ?o WHERE { ?s <${TM.type}> ?t . VALUES ?t { ${UNIT_TYPES.map((t) => `<${t}>`).join(' ')} } ?s ?p ?o }`)) {
+  for (const b of await q(`SELECT ?s ?p ?o WHERE { { ?s <${TM.type}> ?t . VALUES ?t { ${UNIT_TYPES.map((t) => `<${t}>`).join(' ')} } ?s ?p ?o }
+    UNION { ?s <${TM.type}> ?t . VALUES ?t { ${UNIT_TYPES.map((t) => `<${t}>`).join(' ')} } GRAPH ${BK} { ?s ?p ?o FILTER(?p IN (<${TM.ver}>, <${TM.recordedBy}>, <${R('retiredBy')}>)) } } }`)) {
     const key = `${b.s.value}\u0000${b.p.value}\u0000${b.o.type}\u0000${b.o.value}`;
     if (seen.has(key)) continue;   // a node with two unit types comes back twice
     seen.add(key);
@@ -121,7 +122,7 @@ export async function readExecutor(client) {
     if (b.p.value === TM.type) n.types.add(b.o.value);
     else (n.props.get(b.p.value) || n.props.set(b.p.value, []).get(b.p.value)).push(b.o.value);
   }
-  const livePeople = (await q(`SELECT ?s ?op WHERE { ?s <${TM.type}> <${TM.Person}> ; <${TM.recordedBy}> ?op FILTER(STRSTARTS(STR(?op), ${JSON.stringify(LIVE_OP_PREFIX)})) }`))
+  const livePeople = (await q(`SELECT ?s ?op WHERE { ?s <${TM.type}> <${TM.Person}> . GRAPH ${BK} { ?s <${TM.recordedBy}> ?op } FILTER(STRSTARTS(STR(?op), ${JSON.stringify(LIVE_OP_PREFIX)})) }`))
     .map((b) => ({ person: b.s.value, opId: b.op.value }));
   const feed = feedRowsFromBindings(await q(feedQuery(0)));
   // #1561 lanes — the store INCARNATION (#1577), from the feed's marker row (the same snapshot,

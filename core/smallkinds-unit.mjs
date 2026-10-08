@@ -31,6 +31,7 @@
 import crypto from 'node:crypto';
 import { LOGBORN_TERMS as TM } from './graph-compiler.mjs';
 import { unavailable } from './logborn-unit.mjs';
+import { BK } from './graph-vocab.mjs';
 
 const PERSON_IRI = 'https://scrumboard.local/person/';
 
@@ -61,10 +62,11 @@ const seatIriForFilter = (seat) => `<${PERSON_IRI}${encodeURIComponent(String(se
  * so a malformed query string is a 200 with the full list, never a `LIMIT 1` floor.
  */
 export function wakesForQuery({ seat, limit } = {}) {
-  const head = `?w <${TM.type}> <${TM.Wake}> ; <${TM.entityJson}> ?j ; <${TM.wokeAt}> ?at`;
+  // #1638 — the entityJson copy is bookkeeping (named graph); type and wokeAt are domain (default graph)
+  const head = `?w <${TM.type}> <${TM.Wake}> ; <${TM.wokeAt}> ?at . GRAPH ${BK} { ?w <${TM.entityJson}> ?j }`;
   const body = seat
-    ? `SELECT ?w ?j ?at WHERE { ${head} . ?w <${TM.wokeSeat}> ${seatIriForFilter(seat)} . }`
-    : `SELECT ?w ?j ?at WHERE { ${head} . }`;
+    ? `SELECT ?w ?j ?at WHERE { ${head} ?w <${TM.wokeSeat}> ${seatIriForFilter(seat)} . }`
+    : `SELECT ?w ?j ?at WHERE { ${head} }`;
   const limitClause = (Number.isInteger(limit) && limit > 0) ? ` LIMIT ${limit}` : '';
   return `${body} ORDER BY DESC(?at)${limitClause}`;
 }

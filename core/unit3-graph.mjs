@@ -15,6 +15,7 @@
  */
 import { createHash } from 'node:crypto';
 import { LOGBORN_TERMS as TM } from './graph-compiler.mjs';
+import { BK } from './graph-vocab.mjs';
 
 // Chosen once, NEVER changed: a different namespace derives a different id for the same pair.
 export const DELIVERY_NAMESPACE = 'd301e56c-6e8a-45e0-a348-a63ab5295c8e';
@@ -66,7 +67,9 @@ const t = (local) => `<${RS}${local}>`;
  * One delivery's own triples AND its steps' triples in ONE query, so the version and the step list come from one snapshot
  * (two reads could see a step whose version bump the first read missed). Rows: ?s ?p ?o, where ?s is the node or a step.
  */
-export const deliveryQuery = (iri) => `SELECT ?s ?p ?o WHERE { { BIND(<${iri}> AS ?s) <${iri}> ?p ?o } UNION { ?s ${t('stepOf')} <${iri}> . ?s ?p ?o } }`;
+// #1638 — `ver` is bookkeeping (named graph), so the node's version is read from GRAPH <bk> explicitly and surfaces as a
+// `<iri> urn:ex:ver ?o` row, exactly the shape the default-graph `<iri> ?p ?o` branch used to give it.
+export const deliveryQuery = (iri) => `SELECT ?s ?p ?o WHERE { { BIND(<${iri}> AS ?s) <${iri}> ?p ?o } UNION { BIND(<${iri}> AS ?s) BIND(<${TM.ver}> AS ?p) GRAPH ${BK} { <${iri}> <${TM.ver}> ?o } } UNION { ?s ${t('stepOf')} <${iri}> . ?s ?p ?o } }`;
 /** Split one deliveryQuery result into its node rows and its step rows. */
 export const splitDeliveryRows = (iri, rows) => ({ nodeRows: rows.filter((r) => r.s?.value === iri), stepRows: rows.filter((r) => r.s?.value !== iri) });
 
@@ -82,16 +85,17 @@ export const splitDeliveryRows = (iri, rows) => ({ nodeRows: rows.filter((r) => 
  */
 export function deliveriesForQuery({ to, conversation, open, recentSince } = {}) {
   const sel = `?d <${RDF_TYPE}> ${t('Delivery')}${to ? ` ; ${t('deliveredTo')} ${lit(to)}` : ''}${conversation ? ` ; ${t('ofConversation')} <${ENTITY_PREFIX}${conversation}>` : ''} .`
-    + (open ? ` ?d <urn:ex:ver> ?xv . ?xls ${t('stepOf')} ?d ; ${t('stepIndex')} ?xv ; ${t('state')} ?xst . FILTER(?xst IN ("offered", "queued", "failed"))` : '')
+    + (open ? ` GRAPH ${BK} { ?d <urn:ex:ver> ?xv } ?xls ${t('stepOf')} ?d ; ${t('stepIndex')} ?xv ; ${t('state')} ?xst . FILTER(?xst IN ("offered", "queued", "failed"))` : '')
     // #1582 hotfix 2: `recentSince` keeps deliveries that are still ACTIVE (latest step not published or declined) OR were
     // offered at/after that instant. A seat's whole history is ~9,600 deliveries / 435k rows; the callers that list without
     // `open` (MCP inbox counts, the direct tick, the runner) only ever use active or recent ones.
-    + (recentSince ? ` ?d <urn:ex:ver> ?xrv ; ${t('offeredAt')} ?xro . ?xrs ${t('stepOf')} ?d ; ${t('stepIndex')} ?xrv ; ${t('state')} ?xrst . FILTER(!(?xrst IN ("published", "declined")) || ?xro >= ${lit(recentSince)})` : '');
-  return `SELECT ?d ?s ?p ?o WHERE { { ${sel} ?d ?p ?o . BIND(?d AS ?s) } UNION { ${sel} ?s ${t('stepOf')} ?d . ?s ?p ?o } }`;
+    + (recentSince ? ` GRAPH ${BK} { ?d <urn:ex:ver> ?xrv } ?d ${t('offeredAt')} ?xro . ?xrs ${t('stepOf')} ?d ; ${t('stepIndex')} ?xrv ; ${t('state')} ?xrst . FILTER(!(?xrst IN ("published", "declined")) || ?xro >= ${lit(recentSince)})` : '');
+  // #1638 — the third branch re-reads the node's `ver` from the bookkeeping graph (it no longer sits beside `?d ?p ?o`)
+  return `SELECT ?d ?s ?p ?o WHERE { { ${sel} ?d ?p ?o . BIND(?d AS ?s) } UNION { ${sel} GRAPH ${BK} { ?d <${TM.ver}> ?o } BIND(<${TM.ver}> AS ?p) BIND(?d AS ?s) } UNION { ${sel} ?s ${t('stepOf')} ?d . ?s ?p ?o } }`;
 }
 
 /** Does an opId hold an APPLIED receipt? (Y4/Y10: a caller's own retry gets its own outcome back, not a conflict.) */
-export const receiptQuery = (opId) => `SELECT ?o WHERE { <${opId}> <urn:ex:outcome> ?o }`;
+export const receiptQuery = (opId) => `SELECT ?o WHERE { GRAPH ${BK} { <${opId}> <urn:ex:outcome> ?o } }`;
 export const isApplied = (rows) => rows.some((r) => r.o?.value === 'urn:ex:APPLIED');
 
 /** Is this post node live (a Comment) or redacted? */
@@ -162,7 +166,7 @@ export const SINCE_RE = /^[0-9][0-9A-Za-z:.+-]{0,39}$/;
  * only ever passed already checked against SEAT_RE and SINCE_RE.
  */
 export function modelCallsQuery({ iri, agent, since } = {}) {
-  return `SELECT ?c ?j ?t WHERE { ${iri ? `VALUES ?c { <${iri}> } ` : ''}?c <${RDF_TYPE}> ${t('ModelCall')} ; ${t('entityJson')} ?j ; ${t('calledAt')} ?at ; ${t('agent')} ?ag . `
+  return `SELECT ?c ?j ?t WHERE { ${iri ? `VALUES ?c { <${iri}> } ` : ''}?c <${RDF_TYPE}> ${t('ModelCall')} ; ${t('calledAt')} ?at ; ${t('agent')} ?ag . GRAPH ${BK} { ?c ${t('entityJson')} ?j } `
     + `OPTIONAL { ?c ${t('postedText')} ?t }${agent ? ` FILTER(?ag = ${lit(agent)})` : ''}${since ? ` FILTER(?at >= ${lit(since)})` : ''} }`;
 }
 
