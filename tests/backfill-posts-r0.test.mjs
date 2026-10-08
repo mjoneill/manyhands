@@ -107,7 +107,8 @@ function expectedTriples(p) {
 }
 const client = (exec) => createGraphClient({ baseUrl: exec.baseUrl, expectedDatasetId: DSID });
 async function nodeTriples(exec, id) {
-  const r = await client(exec).query(`SELECT ?p ?o WHERE { <${ENTITY}${id}> ?p ?o }`);
+  // #1638: a node is its domain triples (default graph) PLUS its bookkeeping (`recordedBy`, the bookkeeping graph). Every assertion below still speaks of the WHOLE node, exactly as before; where the layout itself is pinned, see R2.
+  const r = await client(exec).query(`SELECT ?p ?o WHERE { { <${ENTITY}${id}> ?p ?o } UNION { GRAPH <urn:scrum:bookkeeping:executor> { <${ENTITY}${id}> ?p ?o } } }`);
   assert.equal(r.ok, true, JSON.stringify(r));
   const out = {};
   for (const b of r.rows) (out[b.p.value] ||= []).push(`${b.o.type}|${b.o.value}|${b.o.datatype || ''}`);
@@ -191,6 +192,7 @@ test('R2 every post is preserved, not regenerated: the node carries EXACTLY the 
       const got = await nodeTriples(exec, p.id);
       const by = got['urn:ex:recordedBy'] || []; delete got['urn:ex:recordedBy'];
       assert.equal(by.length, 1, `${p.id}: exactly one recordedBy`);
+      const inDefault = await client(exec).ask(`ASK { <${ENTITY}${p.id}> <urn:ex:recordedBy> ?x }`); assert.deepEqual([inDefault.ok, inDefault.boolean], [true, false], `#1638: ${p.id}: recordedBy is bookkeeping and is NOT a default-graph triple of the node`);
       const want = expectedTriples(p);
       for (const k of Object.keys(want)) want[k].sort();
       assert.deepEqual(got, want, `post ${p.id} (seq ${p.postSeq}) must carry exactly the pinned triples`);

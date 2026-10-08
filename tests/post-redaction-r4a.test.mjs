@@ -148,12 +148,13 @@ async function markerRows(s) {
   assert.equal(r.ok, true, JSON.stringify(r)); return r.rows.length;
 }
 async function nodeOf_(s, mut) {
-  const r = await clientFor(s).query(`SELECT ?p ?o WHERE { <${ENTITY}${idOf(mut)}> ?p ?o }`);
+  // #1638: the node is its domain triples (default graph) PLUS its bookkeeping (the bookkeeping graph). The allow-list assertions below speak of the WHOLE node and are unchanged.
+  const r = await clientFor(s).query(`SELECT ?p ?o WHERE { { <${ENTITY}${idOf(mut)}> ?p ?o } UNION { GRAPH <urn:scrum:bookkeeping:executor> { <${ENTITY}${idOf(mut)}> ?p ?o } } }`);
   assert.equal(r.ok, true, JSON.stringify(r));
   const out = {}; for (const b of r.rows) (out[b.p.value] ||= []).push(`${b.o.type}|${b.o.value}|${b.o.datatype || ''}`);
   for (const k of Object.keys(out)) out[k].sort(); return out;
 }
-const commitMark = async (s) => { const r = await clientFor(s).query(`SELECT ?c WHERE { <urn:ex:dataset> <urn:ex:commitSeq> ?c }`); return Number(r.rows[0].c.value); };
+const commitMark = async (s) => { const r = await clientFor(s).query(`SELECT ?c WHERE { GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:dataset> <urn:ex:commitSeq> ?c } }`); return Number(r.rows[0].c.value); };
 
 test('X0 CONTROL: before redaction the marker IS present in the store (body, mention) and the R3 feed serves it; so nothing below can pass on a missing source', { skip: SKIP }, async () => {
   await stack(withMarker(['m-a', 'm-b']), async (s) => {

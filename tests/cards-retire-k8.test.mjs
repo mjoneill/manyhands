@@ -47,7 +47,7 @@ const readGraphNodes = (file) => JSON.parse(fs.readFileSync(file, 'utf8'))['@gra
 const sha = (file) => fs.readFileSync(file);
 const eventLines = (dir) => { if (!fs.existsSync(dir)) return []; return fs.readdirSync(dir).filter((f) => !f.startsWith('.')).flatMap((f) => { const p = path.join(dir, f); return fs.statSync(p).isFile() ? fs.readFileSync(p, 'utf8').split('\n').filter(Boolean) : []; }); };
 const query = async (exec, sparql) => { const res = await fetch(`${exec.baseUrl}/query`, { method: 'POST', headers: { 'content-type': 'application/sparql-query' }, body: sparql, signal: AbortSignal.timeout(30000) }); assert.equal(res.status, 200, `the store answers a query (${res.status})`); return (await res.json()).results.bindings; };
-const graphCards = async (exec) => Number((await query(exec, 'SELECT (COUNT(DISTINCT ?s) AS ?n) WHERE { ?s a <https://scrumboard.local/ns#Card> ; <urn:ex:ver> ?v }'))[0].n.value);
+const graphCards = async (exec) => Number((await query(exec, 'SELECT (COUNT(DISTINCT ?s) AS ?n) WHERE { ?s a <https://scrumboard.local/ns#Card> . GRAPH <urn:scrum:bookkeeping:executor> { ?s <urn:ex:ver> ?v } }'))[0].n.value);   // #1638: `ver` is bookkeeping and lives in the bookkeeping graph; the question asked is unchanged
 async function holders(exec, needle) { return (await query(exec, `SELECT ?s WHERE { { ?s ?p ?o FILTER(isLiteral(?o) && CONTAINS(STR(?o), ${JSON.stringify(needle)})) } UNION { GRAPH ?g { ?s ?p ?o FILTER(isLiteral(?o) && CONTAINS(STR(?o), ${JSON.stringify(needle)})) } } }`)).length; }
 const HOSTILE = 'before; delete where { ?s ?p ?o } ; CLEAR GRAPH <urn:g> " \' \\ 🔒 after';
 const KEYS = ['id', 'shortId', 'title', 'description', 'column', 'order', 'version', 'labels', 'claimedBy', 'checks', 'acceptance'];

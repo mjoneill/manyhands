@@ -241,7 +241,13 @@ test('G1 publishing a publisher-mode entry writes ONE node with exactly its froz
     const e = await entryOf(s.baseUrl, 'm-g:claim');
     assert.ok(Date.parse(e.publicationAt) >= t0 - 1000 && Date.parse(e.publicationAt) <= t1 + 1000, `publicationAt is the time of this publish, not the frozen time: ${e.publicationAt}`);
     const f = await nodeFields(exec, nodeOf('m-g'));
-    assert.deepEqual(Object.keys(f).sort(), [RDF_TYPE, `${SCHEMA}author`, `${SCHEMA}dateCreated`, `${SCHEMA}text`, `${NS}originActor`, `${NS}originMutation`, `${NS}originOccurredAt`, `${NS}originSlot`, `${NS}postSeq`, 'urn:ex:recordedBy'].sort(), `the node carries exactly these triples: ${JSON.stringify(f)}`);
+    // #1638 — the node is the UNION of its domain triples (default graph) and its bookkeeping (the bookkeeping graph): `recordedBy` moved. The pin is unchanged as a whole: exactly these predicates, and exactly one of them is bookkeeping.
+    const bkq = await createGraphClient({ baseUrl: exec.baseUrl, expectedDatasetId: DSID }).query(`SELECT ?p ?o WHERE { GRAPH <urn:scrum:bookkeeping:executor> { <${nodeOf('m-g')}> ?p ?o } }`);
+    assert.equal(bkq.ok, true, `the bookkeeping graph must be readable: ${JSON.stringify(bkq)}`);
+    const bkKeys = [...new Set(bkq.rows.map((b) => b.p.value))].sort();
+    assert.deepEqual(bkKeys, ['urn:ex:recordedBy'], `the node's bookkeeping is exactly one recordedBy: ${JSON.stringify(bkKeys)}`); assert.equal(bkq.rows.length, 1, 'and exactly one such triple');
+    assert.deepEqual([...Object.keys(f), ...bkKeys].sort(), [RDF_TYPE, `${SCHEMA}author`, `${SCHEMA}dateCreated`, `${SCHEMA}text`, `${NS}originActor`, `${NS}originMutation`, `${NS}originOccurredAt`, `${NS}originSlot`, `${NS}postSeq`, 'urn:ex:recordedBy'].sort(), `the node carries exactly these triples: ${JSON.stringify(f)} + bookkeeping ${JSON.stringify(bkKeys)}`);
+    assert.ok(!('urn:ex:recordedBy' in f), '#1638: recordedBy is no longer a default-graph triple of the node');
     assert.deepEqual(f[RDF_TYPE].map((o) => o.value), [`${SCHEMA}Comment`]);
     assert.deepEqual(f[`${SCHEMA}text`], [{ type: 'literal', value: 'claimed m-g' }]);
     assert.deepEqual(f[`${SCHEMA}author`], [{ type: 'uri', value: `${PERSON}board` }], 'the author is an IRI, not a literal');
@@ -250,7 +256,7 @@ test('G1 publishing a publisher-mode entry writes ONE node with exactly its froz
     assert.deepEqual(f[`${NS}originMutation`], [{ type: 'literal', value: 'm-g' }]);
     assert.deepEqual(f[`${NS}originSlot`], [{ type: 'literal', value: 'claim' }]);
     assert.deepEqual(f[`${NS}originActor`], [{ type: 'uri', value: `${PERSON}ada` }], 'the origin actor is an IRI');
-    assert.deepEqual(f['urn:ex:recordedBy'].map((o) => o.value), ['urn:ex:op/announce/m-g/claim'], 'the compiler\'s own op link');
+    assert.deepEqual(bkq.rows.map((b) => b.o.value), ['urn:ex:op/announce/m-g/claim'], 'the compiler\'s own op link (#1638: read from the bookkeeping graph)');
     assert.equal(e.status, 'published'); assert.equal(e.postId, idOf('m-g'));
     assert.equal(e.postSeq, 1, 'an EMPTY board: the first reservation mints the epoch and counter and takes 1');
     assert.deepEqual(f[`${NS}postSeq`], [{ type: 'literal', value: '1', datatype: XSD_INT }], 'the node carries the reserved postSeq as an xsd:integer');

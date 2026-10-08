@@ -80,7 +80,7 @@ const obsNamed = async (base, marker) => { const r = (await api(base, 'GET', '/a
 /** delete a card the way a second writer would: a guarded `card.write` remove sent straight to the executor, read-then-remove at the stored version */
 async function deleteCardDirect(ctx, card) {
   const client = createGraphClient({ baseUrl: ctx.exec.baseUrl, expectedDatasetId: ctx.dsid, timeoutMs: 30000 }); const iri = cardIriOf(card.id);
-  const q = await client.query(`SELECT ?v ?j WHERE { <${iri}> <urn:ex:ver> ?v ; <https://scrumboard.local/ns#entityJson> ?j }`);
+  const q = await client.query(`SELECT ?v ?j WHERE { GRAPH <urn:scrum:bookkeeping:executor> { <${iri}> <urn:ex:ver> ?v ; <https://scrumboard.local/ns#entityJson> ?j } }`);
   assert.ok(q.ok && q.rows.length === 1, `CONTROL: the stored card is read back from the executor (${JSON.stringify(q).slice(0, 160)})`);
   const stored = JSON.parse(q.rows[0].j.value);
   return client.update({ kind: 'card.write', opId: `urn:ex:op/card/${randomUUID()}`, actor: 'https://scrumboard.local/person/board', parts: [{ iri, remove: true, expectedVersion: String(Number(q.rows[0].v.value)), prior: priorQuads(stored, shortIdMap([stored])) }] });
