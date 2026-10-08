@@ -119,7 +119,7 @@ import { countLegacy } from './legacy-counters.mjs';
 // pre-existing kind loses its collection.
 const COLLECTION = COLLECTION_OF;
 
-const SEGMENT_RE = /^events-\d{4}-\d{2}-\d{2}\.jsonl$/;
+export const SEGMENT_RE = /^events-\d{4}-\d{2}-\d{2}\.jsonl$/;
 const segmentFor = (iso) => `events-${iso.slice(0, 10)}.jsonl`;
 
 const segments = (dir) =>

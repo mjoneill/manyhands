@@ -410,67 +410,89 @@ export function projectLabelAliases(store, aliases) {
  * ~8,120 triples against a store already holding ~70,748 — about 11%, so this
  * is unfiltered. There was no decision to make.
  */
+/** #1570 — the activity's IRI, derived from `seq` alone so a replay re-derives the same node. */
+export const activityIri = (seq) => nn(IRI.activity + `seq-${seq}`);
+
+/** #1570 — true when the event can be projected as an activity at all. */
+export function isProjectableEvent(ev) {
+  if (!ev || typeof ev !== 'object') return false;
+  const ent = ev.entity;
+  // seq is identity (without it the activity doubles on every rebuild), op is
+  // what happened, entity is what it happened to. All three are required.
+  //
+  // ⚠️ ACTOR IS NOT REQUIRED, and that was a real defect caught on live data.
+  // A first cut dropped any event with `actor: null` — which turned out to be
+  // 23 genuine card updates whose actor simply was not recorded. Skipping them
+  // undercounted "who moved cards" by 23 and said nothing about it: silently
+  // discarding a population and reporting a clean number, which is the defect
+  // class this whole card exists to remove. An activity with an unknown actor
+  // still HAPPENED. It is projected without wasAssociatedWith, which makes
+  // "activities nobody is accountable for" a query rather than an absence.
+  return !(ev.seq == null || !ev.op || !ent || !ent.id);
+}
+
+/**
+ * #1570 — ONE event's activity triples, and nothing else: no identity guard and none of the
+ * declaration / decision / memory side projections `projectActivities` adds. The executor projector
+ * writes exactly this, so the old copy and the executor share one projection rather than two copies of it.
+ */
+export function projectActivityItem(store, ev) {
+  if (!isProjectableEvent(ev)) return false;
+  const { seq, actor, op } = ev;
+  const ent = ev.entity;
+  const a = activityIri(seq);
+  store.add(oxigraph.triple(a, A, nn(IRI.prov + 'Activity')));
+  if (actor) store.add(oxigraph.triple(a, nn(IRI.prov + 'wasAssociatedWith'), nn(IRI.person + actor)));
+  store.add(oxigraph.triple(a, nn(IRI.scrum + 'op'), lit(op)));
+  store.add(oxigraph.triple(a, nn(IRI.prov + 'used'), nn(IRI.entity + ent.id)));
+  // `entityKind` is projected as its own literal so "card activity only" is a
+  // triple pattern rather than an IRI-prefix string match — the difference
+  // between a query anyone can write and one only its author can.
+  if (ent.kind) store.add(oxigraph.triple(a, nn(IRI.scrum + 'entityKind'), lit(ent.kind)));
+  // ⭐⭐⭐ #891 — THE SHORTID IS THE ACTIVITY'S OWN PROPERTY, not a join.
+  //
+  // This line was missing, and the omission had a measured cost: 34 production
+  // activities whose target card had been deleted, so `prov:used entity:<uuid>`
+  // pointed at nothing and the graph could no longer say what those events were
+  // about. The raw log knew the whole time — `entity.shortId` is in every one
+  // of the 2,014 card events, and was simply never projected.
+  //
+  // ⚠️ "It is derivable in one hop" is true only while the card EXISTS, which
+  // is exactly the case where you most want the provenance: the record of what
+  // happened must outlive the thing it happened to. Deriving through a node
+  // that can vanish is not the same as keeping the fact.
+  //
+  // ⛔ ABSENT, NEVER ZERO, for an entity that has no shortId — 4,661 of the
+  // log's events are conversations. A placeholder would join to a card under
+  // any loose comparison; absence reads correctly in SPARQL as "no match".
+  if (ent.shortId != null) store.add(oxigraph.triple(a, nn(IRI.scrum + 'shortId'), lit(String(ent.shortId))));
+  const when = ev.occurred_at || ev.recorded_at;
+  if (when) store.add(oxigraph.triple(a, nn(IRI.prov + 'startedAtTime'), lit(when)));
+
+  // #1217 — a REFUSED activity carries its reason and status so the recovery
+  // query is answerable in the graph. ⛔ The `request` body is deliberately NOT
+  // projected: it is unvalidated caller input, it can be large, and the graph is
+  // a retrieval surface rather than a store. The activity tells a seat THAT it
+  // was refused, WHY and WHEN; the event log holds the payload, fetched by seq.
+  if (op === 'refused') {
+    if (ev.reason) store.add(oxigraph.triple(a, nn(IRI.scrum + 'reason'), lit(String(ev.reason))));
+    if (ev.status != null) store.add(oxigraph.triple(a, nn(IRI.scrum + 'httpStatus'), lit(String(ev.status))));
+  }
+  return true;
+}
+
 export function projectActivities(store, events) {
   for (const ev of events || []) {
-    if (!ev || typeof ev !== 'object') continue;
-    const { seq, actor, op } = ev;
+    if (!isProjectableEvent(ev)) continue;
+    const { op } = ev;
     const ent = ev.entity;
-    // seq is identity (without it the activity doubles on every rebuild), op is
-    // what happened, entity is what it happened to. All three are required.
-    //
-    // ⚠️ ACTOR IS NOT REQUIRED, and that was a real defect caught on live data.
-    // A first cut dropped any event with `actor: null` — which turned out to be
-    // 23 genuine card updates whose actor simply was not recorded. Skipping them
-    // undercounted "who moved cards" by 23 and said nothing about it: silently
-    // discarding a population and reporting a clean number, which is the defect
-    // class this whole card exists to remove. An activity with an unknown actor
-    // still HAPPENED. It is projected without wasAssociatedWith, which makes
-    // "activities nobody is accountable for" a query rather than an absence.
-    if (seq == null || !op || !ent || !ent.id) continue;
-
-    const a = nn(IRI.activity + `seq-${seq}`);
+    const a = activityIri(ev.seq);
     // Identity check BEFORE writing: `store.add` is set-semantics per triple,
     // but re-deriving the IRI each rebuild is what keeps that true. Guarding
     // here also makes the idempotence explicit rather than incidental.
     if (store.match(a, A, nn(IRI.prov + 'Activity')).length) continue;
-
-    store.add(oxigraph.triple(a, A, nn(IRI.prov + 'Activity')));
-    if (actor) store.add(oxigraph.triple(a, nn(IRI.prov + 'wasAssociatedWith'), nn(IRI.person + actor)));
-    store.add(oxigraph.triple(a, nn(IRI.scrum + 'op'), lit(op)));
-    store.add(oxigraph.triple(a, nn(IRI.prov + 'used'), nn(IRI.entity + ent.id)));
-    // `entityKind` is projected as its own literal so "card activity only" is a
-    // triple pattern rather than an IRI-prefix string match — the difference
-    // between a query anyone can write and one only its author can.
-    if (ent.kind) store.add(oxigraph.triple(a, nn(IRI.scrum + 'entityKind'), lit(ent.kind)));
-    // ⭐⭐⭐ #891 — THE SHORTID IS THE ACTIVITY'S OWN PROPERTY, not a join.
-    //
-    // This line was missing, and the omission had a measured cost: 34 production
-    // activities whose target card had been deleted, so `prov:used entity:<uuid>`
-    // pointed at nothing and the graph could no longer say what those events were
-    // about. The raw log knew the whole time — `entity.shortId` is in every one
-    // of the 2,014 card events, and was simply never projected.
-    //
-    // ⚠️ "It is derivable in one hop" is true only while the card EXISTS, which
-    // is exactly the case where you most want the provenance: the record of what
-    // happened must outlive the thing it happened to. Deriving through a node
-    // that can vanish is not the same as keeping the fact.
-    //
-    // ⛔ ABSENT, NEVER ZERO, for an entity that has no shortId — 4,661 of the
-    // log's events are conversations. A placeholder would join to a card under
-    // any loose comparison; absence reads correctly in SPARQL as "no match".
-    if (ent.shortId != null) store.add(oxigraph.triple(a, nn(IRI.scrum + 'shortId'), lit(String(ent.shortId))));
+    projectActivityItem(store, ev);
     const when = ev.occurred_at || ev.recorded_at;
-    if (when) store.add(oxigraph.triple(a, nn(IRI.prov + 'startedAtTime'), lit(when)));
-
-    // #1217 — a REFUSED activity carries its reason and status so the recovery
-    // query is answerable in the graph. ⛔ The `request` body is deliberately NOT
-    // projected: it is unvalidated caller input, it can be large, and the graph is
-    // a retrieval surface rather than a store. The activity tells a seat THAT it
-    // was refused, WHY and WHEN; the event log holds the payload, fetched by seq.
-    if (op === 'refused') {
-      if (ev.reason) store.add(oxigraph.triple(a, nn(IRI.scrum + 'reason'), lit(String(ev.reason))));
-      if (ev.status != null) store.add(oxigraph.triple(a, nn(IRI.scrum + 'httpStatus'), lit(String(ev.status))));
-    }
 
     // #1110 — a seat-state event ALSO projects the declaration itself, as an
     // INTERVAL (the card's design constraint: a bare present-tense predicate
