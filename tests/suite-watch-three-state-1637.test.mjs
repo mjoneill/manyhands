@@ -76,7 +76,9 @@ function universe({ isolationCode = 1, exclusions = null, required = [] } = {}) 
 async function tick(u, tapText, code) {
   const tapFile = path.join(u.dir, `fake-${Date.now()}-${Math.random().toString(36).slice(2)}.tap`); fs.writeFileSync(tapFile, tapText);
   const env = { ...process.env, SUITE_WATCH_REPO: u.dir, SUITE_WATCH_STATE: u.state, SUITE_WATCH_DRYRUN: '1', SUITE_WATCH_NO_CLONE: '1', SCRUM_VERDICT_LEDGER: LEDGER, SUITE_WATCH_ARTIFACTS: ARTIFACTS, FAKE_TAP: tapFile, FAKE_CODE: String(code) };
-  for (const k of Object.keys(env)) if (k.startsWith('NODE_TEST')) delete env[k]; delete env.NODE_OPTIONS;
+  // a fixture run must see ONLY what it sets: a SUITE_WATCH_* variable inherited from the process running the suite (the nightly, or a verification run of the whole suite through the watch) would redirect
+  // the fixture's state, coverage or manifests to the OUTER run's files. Found by exactly that: the first real executor-backed run failed T12 because SUITE_WATCH_COVERAGE leaked in.
+  for (const k of Object.keys(env)) if (k.startsWith('NODE_TEST') || (k.startsWith('SUITE_WATCH_') && !['SUITE_WATCH_REPO', 'SUITE_WATCH_STATE', 'SUITE_WATCH_DRYRUN', 'SUITE_WATCH_NO_CLONE', 'SUITE_WATCH_ARTIFACTS'].includes(k))) delete env[k]; delete env.NODE_OPTIONS;
   const r = await run(process.execPath, [WATCH()], { env, maxBuffer: 64 * 1024 * 1024 }).catch((e) => e);
   const out = (r.stdout ?? '') + (r.stderr ?? '');
   const posts = [...out.matchAll(/DRYRUN would post: (.*)/g)].map((m) => m[1]);
