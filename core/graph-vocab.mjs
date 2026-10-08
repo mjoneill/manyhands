@@ -116,3 +116,40 @@ export const LG = Object.freeze({
 });
 /** The projected-metadata predicate for one top-level metadata key (list filters). */
 export const lgMetaPredicate = (key) => `<${LG_NS}meta/${encodeURIComponent(key)}>`;
+
+/**
+ * #1638 — WHERE BOOKKEEPING LIVES, and the ONE definition of what it is.
+ *
+ * Every write records bookkeeping beside its domain triples: the receipt (the op IRI and its outcome,
+ * digest, actor…), the graph-owned commit marker, the per-entity version stamp (`ver`), provenance
+ * (`recordedBy`, `retiredBy`) and the whole-entity JSON copy (`scrum:entityJson`). Before #1638 all of
+ * it shared the DEFAULT graph with the domain, so any public read of the default graph returned it.
+ * It now lives in the named graph BOOKKEEPING_GRAPH, which the public query dataset (the executor's
+ * `?dataset=public`) cannot reach. Domain triples stay in the default graph.
+ *
+ * A triple is bookkeeping when its PREDICATE is in BOOKKEEPING_PREDICATES, OR its SUBJECT starts with
+ * one of BOOKKEEPING_SUBJECT_PREFIXES or is one of BOOKKEEPING_SUBJECTS (routing is by subject as well
+ * as predicate: every predicate on a receipt is bookkeeping, even one that looks like domain).
+ * Everything else is DOMAIN. These lists are the only definition: the compiler's static check, the
+ * executor, the offline migration and the rows all read them.
+ */
+export const BOOKKEEPING_GRAPH = 'urn:scrum:bookkeeping:executor';
+export const BK = `<${BOOKKEEPING_GRAPH}>`;
+export const MARKER_PREDICATES_ALL = Object.freeze([
+  iri('datasetId'), iri('epoch'), iri('commitSeq'), iri('epochBase'),
+  iri('incarnation'), iri('incarnationFrom'), iri('storeHome'), iri('storeHomeInode'),
+]);
+export const ENTITY_JSON = '<https://scrumboard.local/ns#entityJson>';
+export const BOOKKEEPING_PREDICATES = Object.freeze([...new Set([
+  ...RECEIPT_PREDICATES,
+  ...MARKER_PREDICATES_ALL,
+  EX.ver, EX.recordedBy, EX.retiredBy, ENTITY_JSON, iri('selfCheck'),
+])]);
+export const BOOKKEEPING_SUBJECT_PREFIXES = Object.freeze([`${NS}op/`, `${NS}selfcheck/`]);
+export const BOOKKEEPING_SUBJECTS = Object.freeze([`${NS}dataset`]);
+const BK_PRED_SET = new Set(BOOKKEEPING_PREDICATES.map((p) => p.replace(/^<|>$/g, '')));
+/** Is this (subject IRI, predicate IRI) bookkeeping? Bare IRIs or <angle> form both accepted. */
+export function isBookkeeping(subject, predicate) {
+  const s = String(subject).replace(/^<|>$/g, ''); const p = String(predicate).replace(/^<|>$/g, '');
+  return BK_PRED_SET.has(p) || BOOKKEEPING_SUBJECTS.includes(s) || BOOKKEEPING_SUBJECT_PREFIXES.some((x) => s.startsWith(x));
+}
