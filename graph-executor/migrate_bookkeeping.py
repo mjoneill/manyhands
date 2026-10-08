@@ -12,7 +12,10 @@ Contract (card #1638, v4 + C9/C10):
   * The SOURCE must not be held open by any process (C10): its RocksDB LOCK file is taken here, exclusively, for the
     whole run, so a live executor is refused before anything is written and none can start mid-copy. A quiet
     commitSeq is not proof that a store is stopped; the lock is.
-  * The DEST must not exist. The copy is one streaming pass; nothing is moved in place.
+  * The DEST must not exist, and nothing is ever written AT it until the copy is complete and verified: the store is
+    built at <dest>.partial and renamed onto <dest> as the last step (C7). A run killed at any point leaves either no
+    <dest> or a complete, verified one; a leftover <dest>.partial is never served and blocks a rerun until removed.
+  * The copy is one streaming pass; nothing is moved in place.
   * The SOURCE must be in the layout the direction starts from, or nothing is written (exit 1, named).
   * What is bookkeeping is read from core/graph-vocab.mjs (BOOKKEEPING_PREDICATES, _SUBJECT_PREFIXES, _SUBJECTS)
     through node: there is ONE definition, and this script holds no copy of it.
@@ -104,6 +107,11 @@ def main(argv):
         die(2, f'--source {src} is not a store directory (no CURRENT)')
     if os.path.exists(dst):
         die(2, f'--dest {dst} already exists: the migration writes a NEW store and never overwrites one')
+    part = dst + '.partial'
+    if os.path.exists(part):
+        die(2, f'{part} exists: a previous run did not finish. It was never served; inspect it, remove it, then rerun.')
+    if not os.path.isdir(os.path.dirname(dst)):
+        die(2, f'the parent of --dest ({os.path.dirname(dst)}) does not exist')
     # C10 — the source must be STOPPED, proven by its lock, and kept stopped until the copy is verified. RocksDB holds
     # an fcntl write lock on <dir>/LOCK for as long as a read-write open lasts; a read-only open takes none, which is
     # why this check exists. The lock is held (not just probed) so no executor can open the source mid-copy.
@@ -136,7 +144,7 @@ def main(argv):
             return bkg if isinstance(q.graph_name, px.DefaultGraph) and is_bk(q, preds, prefixes, subjects) else q.graph_name
         return px.DefaultGraph() if q.graph_name == bkg else q.graph_name
 
-    out = px.Store(dst)
+    out = px.Store(part)   # C7 — built aside; it becomes <dest> only by the rename at the very end
     batch, moved, total = [], 0, 0
     src_lines = []
     for q in ro.quads_for_pattern(None, None, None, None):
@@ -168,12 +176,23 @@ def main(argv):
     if hs != hd or len(dst_lines) != total:
         print(json.dumps(report, indent=1))
         die(1, f'VERIFY FAILED: the dest multiset ({hd[:16]}, {len(dst_lines)} quads) differs from the mapped source '
-               f'({hs[:16]}, {total} quads). The dest at {dst} must not be used.')
+               f'({hs[:16]}, {total} quads). Nothing was placed at {dst}; the incomplete copy is {part}.')
     after_default = bool(out.query(f'ASK {{ <{DATASET}> ?p ?o }}'))
     after_bk = bool(out.query(f'ASK {{ GRAPH <{BK}> {{ <{DATASET}> ?p ?o }} }}'))
     want_bk = a['direction'] == 'forward'
     if after_bk != want_bk or after_default == want_bk:
-        die(1, f'VERIFY FAILED: the dest marker is in default={after_default}, bookkeeping graph={after_bk}')
+        die(1, f'VERIFY FAILED: the dest marker is in default={after_default}, bookkeeping graph={after_bk}; '
+               f'nothing was placed at {dst}')
+    # C7 — PUBLISH: close the store (flushed above), then one rename on the same filesystem. Until this line runs there
+    # is no <dest>; after it, <dest> is the complete, verified copy. fsync the parent so the rename itself is durable.
+    del out
+    import gc; gc.collect()
+    os.rename(part, dst)
+    pfd = os.open(os.path.dirname(dst), os.O_RDONLY)
+    try:
+        os.fsync(pfd)
+    finally:
+        os.close(pfd)
     print(json.dumps(report, indent=1))
     print('migrate_bookkeeping: OK. Start the executor on the dest ONCE with --promote-epoch before serving it.')
 
