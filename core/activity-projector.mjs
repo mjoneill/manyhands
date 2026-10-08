@@ -104,6 +104,36 @@ export function strictCheckSegments(logDir, sinceSeq) {
   return { pendingTail };
 }
 
+/**
+ * STRICT READ of the work ledger, for the same reason as the log: the shared reader skips a line it cannot
+ * parse, and the ledger cursor is a ROW INDEX into what that reader returns, so a skipped line shifts every
+ * later index and a line repaired in place afterwards is never projected. A line that is not JSON, or lacks
+ * the id / seq / transition.type every projected row needs, is refused naming the file and line; nothing is
+ * sent. An unterminated LAST line is an append in flight: reported as waiting, never as caught up.
+ */
+export const WORK_FILE = 'work-objects.jsonl';
+export function strictCheckLedger(workDir) {
+  const full = path.join(workDir, WORK_FILE);
+  if (!fs.existsSync(full)) return { pendingTail: null };
+  const text = fs.readFileSync(full, 'utf8');
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (!l.trim()) continue;
+    const inFlightTail = i === lines.length - 1 && !text.endsWith('\n');
+    let r;
+    try { r = JSON.parse(l); } catch {
+      if (inFlightTail) return { pendingTail: { segment: WORK_FILE, line: i + 1 } };
+      throw new Error(`UNREADABLE line ${i + 1} of ${WORK_FILE} in ${workDir}: not JSON — not skipped; nothing sent, cursor unchanged`);
+    }
+    if (typeof r?.id !== 'string' || r.seq == null || !r.transition || !r.transition.type) {
+      if (inFlightTail) return { pendingTail: { segment: WORK_FILE, line: i + 1 } };
+      throw new Error(`UNREADABLE line ${i + 1} of ${WORK_FILE} in ${workDir}: missing id, seq or transition.type — not skipped; nothing sent, cursor unchanged`);
+    }
+  }
+  return { pendingTail: null };
+}
+
 const nTriples = (store) => store.match(null, null, null, oxigraph.defaultGraph()).map((q) => `${q.subject} ${q.predicate} ${q.object} .`);
 
 /**
@@ -115,7 +145,9 @@ export async function projectBatch({ logDir, workDir, executorUrl, graph = BOOK_
   for (const [k, v] of Object.entries({ logDir, workDir, executorUrl })) if (!v) throw new Error(`projectBatch: ${k} is required (no default)`);
   if (graph !== BOOK_GRAPH) throw new Error(`projectBatch: the cursor graph is ${BOOK_GRAPH}`);
   const cursor = await readCursor(executorUrl);
-  const { pendingTail } = strictCheckSegments(logDir, cursor.seq);
+  const logCheck = strictCheckSegments(logDir, cursor.seq);
+  const ledgerCheck = strictCheckLedger(workDir);
+  const pendingTail = logCheck.pendingTail ?? ledgerCheck.pendingTail;
   const events = readEvents(logDir, { sinceSeq: cursor.seq, limit: batchSize });
   const rows = readWorkObjectRows(workDir);
   const workSlice = rows.slice(cursor.workRows, cursor.workRows + batchSize);
