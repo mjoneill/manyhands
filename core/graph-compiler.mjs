@@ -28,7 +28,7 @@
  * anything else is a pre-dispatch REJECTED.
  */
 import { createHash } from 'node:crypto';
-import { EX, NS, RECEIPT_PREDICATES, MARKER_SUBJECT, MARKER_PREDICATES, LG, LG_NS, lgMetaPredicate } from './graph-vocab.mjs';
+import { EX, NS, RECEIPT_PREDICATES, MARKER_SUBJECT, MARKER_PREDICATES, LG, LG_NS, lgMetaPredicate, BK, BOOKKEEPING_PREDICATES, isBookkeeping } from './graph-vocab.mjs';
 
 export const DIGEST_V = 1;
 /** The literal canonicalization policy (A5). Bound into every digest; bump it if a canonical form changes. */
@@ -214,10 +214,27 @@ export function digestOf(c) {
 
 const ok = (expr, v) => `  BIND(IF(BOUND(?ok), ${expr}, ?u) AS ?d_${v})`;
 const nb = (expr, v) => `  BIND(${expr} AS ?n_${v})`;
-const fresh = (iri) => [`    FILTER NOT EXISTS { ${iri} ?fp ?fo }`, `    FILTER NOT EXISTS { ?fs ?fp2 ${iri} }`];
+// #1638 — a node is fresh only when it holds NO triples in EITHER graph: its domain triples live in the default graph,
+// its bookkeeping (ver, recordedBy, entityJson, a receipt that named it as target) in the bookkeeping graph.
+const inEither = (pattern) => `{ ${pattern} } UNION { GRAPH ${BK} { ${pattern} } }`;
+const fresh = (iri) => [`    FILTER NOT EXISTS { ${inEither(`${iri} ?fp ?fo`)} }`, `    FILTER NOT EXISTS { ${inEither(`?fs ?fp2 ${iri}`)} }`];
 // #1626 — fresh as a SUBJECT only: the node holds no triples, though other nodes may already point at it (an imported
 // post that deliveries or model calls referenced before it reached the graph). Used by post.import only.
-const freshSubject = (iri) => [`    FILTER NOT EXISTS { ${iri} ?fp ?fo }`];
+const freshSubject = (iri) => [`    FILTER NOT EXISTS { ${inEither(`${iri} ?fp ?fo`)} }`];
+
+// #1638 — WHERE BOOKKEEPING LIVES. Every bookkeeping triple (isBookkeeping, core/graph-vocab.mjs) sits inside
+// `GRAPH <BOOKKEEPING_GRAPH> { … }`, in the DELETE and INSERT templates and in every WHERE read of it; domain triples stay
+// outside. Each update is still ONE request. staticCheck reads the graph of every template triple back from the TEXT.
+/** The top of every guarded update's WHERE: the duplicate guard (a receipt for this opId) and the commit-marker read. */
+const dupGuard = (OP) => [
+  `  OPTIONAL { GRAPH ${BK} { ${OP} ${EX.digest} ?dup } }`,
+  `  FILTER(!BOUND(?dup))`,
+  `  GRAPH ${BK} { ${EX.dataset} ${EX.commitSeq} ?s . }`,
+  `  BIND(?s + 1 AS ?s1)`,
+];
+/** Template lines (domain, then bookkeeping inside its GRAPH block) for one DELETE or INSERT. */
+const template = (domain, bk) => [...domain, ...(bk.length ? [`  GRAPH ${BK} {`, ...bk.map((l) => `  ${l}`), `  }`] : [])].join('\n');
+const assemble = (del, bDel, ins, bIns, where) => `DELETE {\n${template(del, bDel)}\n}\nINSERT {\n${template(ins, bIns)}\n}\nWHERE {\n${where.join('\n')}\n}\n`;
 
 /**
  * Compile a validated intention to ONE SPARQL update. Returns
@@ -237,12 +254,11 @@ export function compile(intention) {
   const dBinds = [];
   const nBinds = [];
   const dIns = [];
+  const bDel = [];   // #1638 — bookkeeping templates (inside GRAPH <bk>)
+  const bIns = [];
 
   // --- duplicate guard (top level) + marker ---
-  where.push(`  OPTIONAL { ${OP} ${EX.digest} ?dup }`);
-  where.push(`  FILTER(!BOUND(?dup))`);
-  where.push(`  ${EX.dataset} ${EX.commitSeq} ?s .`);
-  where.push(`  BIND(?s + 1 AS ?s1)`);
+  where.push(...dupGuard(OP));
 
   dBinds.push(ok(OP, 'op'));
   c.evidence.forEach((e, k) => dBinds.push(ok(ref(e), `ev${k}`)));
@@ -253,19 +269,21 @@ export function compile(intention) {
     dBinds.push(ok(ref(G.iri), 'g'), ok(EX.Grant, 'Grant'), ok(ref(G.grantee), 'grantee'), ok(ref(G.scope), 'scope'),
       ok(String(G.mayRetire), 'mayRetire'), ok('true', 'active'), ok(G.rev, 'rev'));
     dIns.push(`  ?d_g a ?d_Grant .`, `  ?d_g ${EX.grantee} ?d_grantee .`, `  ?d_g ${EX.scope} ?d_scope .`,
-      `  ?d_g ${EX.mayRetire} ?d_mayRetire .`, `  ?d_g ${EX.active} ?d_active .`, `  ?d_g ${EX.rev} ?d_rev .`,
-      `  ?d_g ${EX.recordedBy} ?d_op .`);
+      `  ?d_g ${EX.mayRetire} ?d_mayRetire .`, `  ?d_g ${EX.active} ?d_active .`, `  ?d_g ${EX.rev} ?d_rev .`);
+    bIns.push(`  ?d_g ${EX.recordedBy} ?d_op .`);
     c.evidence.forEach((_, k) => dIns.push(`  ?d_g ${EX.evidence} ?d_ev${k} .`));
   } else if (c.rule) {
     pre.push(...fresh(ref(c.rule.iri)));
     dBinds.push(ok(ref(c.rule.iri), 'r'), ok('1', 'one'));
-    dIns.push(`  ?d_r ${EX.rev} ?d_one .`, `  ?d_r ${EX.recordedBy} ?d_op .`);
+    dIns.push(`  ?d_r ${EX.rev} ?d_one .`);
+    bIns.push(`  ?d_r ${EX.recordedBy} ?d_op .`);
     c.evidence.forEach((_, k) => dIns.push(`  ?d_r ${EX.evidence} ?d_ev${k} .`));
   } else {
     const N = c.newAssertion;
     const T = c.targets;
     T.forEach((t, k) => {
-      pre.push(`    ${ref(t.iri)} ${EX.ver} ?v${k} ; ${EX.status} ${EX.current} ; ${EX.scope} ${ref(N.scope)} ;`);
+      pre.push(`    GRAPH ${BK} { ${ref(t.iri)} ${EX.ver} ?v${k} . }`);   // #1638 — the version stamp is bookkeeping
+      pre.push(`    ${ref(t.iri)} ${EX.status} ${EX.current} ; ${EX.scope} ${ref(N.scope)} ;`);
       pre.push(`      ${EX.subject} ${ref(N.subject)} ; ${EX.predicate} ${ref(N.predicate)} ; ${EX.binding} true .`);
       pre.push(`    FILTER(?v${k} = ${t.expectedVersion})`);
     });
@@ -289,14 +307,15 @@ export function compile(intention) {
 
     dIns.push(`  ?d_new a ?d_Assertion .`, `  ?d_new ${EX.subject} ?d_subject .`, `  ?d_new ${EX.predicate} ?d_predicate .`,
       `  ?d_new ${EX.value} ?d_value .`, `  ?d_new ${EX.scope} ?d_scope .`, `  ?d_new ${EX.binding} ?d_binding .`,
-      `  ?d_new ${EX.status} ?d_current .`, `  ?d_new ${EX.ver} ?d_one .`, `  ?d_new ${EX.author} ?d_author .`,
-      `  ?d_new ${EX.recordedBy} ?d_op .`);
+      `  ?d_new ${EX.status} ?d_current .`, `  ?d_new ${EX.author} ?d_author .`);
+    bIns.push(`  ?d_new ${EX.ver} ?d_one .`, `  ?d_new ${EX.recordedBy} ?d_op .`);
     c.evidence.forEach((_, k) => dIns.push(`  ?d_new ${EX.evidence} ?d_ev${k} .`));
     T.forEach((_, k) => {
       dIns.push(`  ?d_new ${EX.supersedes} ?d_t${k} .`);
       del.push(`  ?d_t${k} ${EX.status} ?d_current .`);
-      del.push(`  ?d_t${k} ${EX.ver} ?d_oldv${k} .`);
-      dIns.push(`  ?d_t${k} ${EX.status} ?d_retired .`, `  ?d_t${k} ${EX.ver} ?d_nv${k} .`, `  ?d_t${k} ${EX.retiredBy} ?d_op .`);
+      bDel.push(`  ?d_t${k} ${EX.ver} ?d_oldv${k} .`);
+      dIns.push(`  ?d_t${k} ${EX.status} ?d_retired .`);
+      bIns.push(`  ?d_t${k} ${EX.ver} ?d_nv${k} .`, `  ?d_t${k} ${EX.retiredBy} ?d_op .`);
     });
   }
 
@@ -316,18 +335,19 @@ export function compile(intention) {
   where.push(...dBinds);
 
   // --- templates: one triple per line, IRIs and variables only ---
-  del.unshift(`  ${MARKER_SUBJECT} ${EX.commitSeq} ?s .`);
-  ins.push(`  ${MARKER_SUBJECT} ${EX.commitSeq} ?s1 .`);
-  ins.push(`  ${OP} ${EX.outcome} ?n_outcome .`, `  ${OP} ${EX.digest} ?n_digest .`, `  ${OP} ${EX.actor} ?n_actor .`,
+  // the marker and the receipt are bookkeeping: they go in the bookkeeping graph block
+  bDel.unshift(`  ${MARKER_SUBJECT} ${EX.commitSeq} ?s .`);
+  bIns.unshift(`  ${MARKER_SUBJECT} ${EX.commitSeq} ?s1 .`);
+  bIns.push(`  ${OP} ${EX.outcome} ?n_outcome .`, `  ${OP} ${EX.digest} ?n_digest .`, `  ${OP} ${EX.actor} ?n_actor .`,
     `  ${OP} ${EX.at} ?n_at .`, `  ${OP} ${EX.commitSeq} ?s1 .`);
   if (c.authority) {
-    ins.push(`  ${OP} ${EX.grant} ?n_grant .`, `  ${OP} ${EX.grantRev} ?n_grantRev .`,
+    bIns.push(`  ${OP} ${EX.grant} ?n_grant .`, `  ${OP} ${EX.grantRev} ?n_grantRev .`,
       `  ${OP} ${EX.rule} ?n_rule .`, `  ${OP} ${EX.ruleRev} ?n_ruleRev .`);
   }
-  c.targets.forEach((_, k) => ins.push(`  ${OP} ${EX.target} ?n_target${k} .`));
+  c.targets.forEach((_, k) => bIns.push(`  ${OP} ${EX.target} ?n_target${k} .`));
   ins.push(...dIns);
 
-  const sparql = `DELETE {\n${del.join('\n')}\n}\nINSERT {\n${ins.join('\n')}\n}\nWHERE {\n${where.join('\n')}\n}\n`;
+  const sparql = assemble(del, bDel, ins, bIns, where);
   const check = staticCheck(sparql, c.opId);
   if (!check.ok) fail(`compiler rejected its own output: ${check.errors.join('; ')}`);
   return { sparql, digest, canonical: c };
@@ -336,13 +356,32 @@ export function compile(intention) {
 // ---------- the static checker: categories from the TEXT, by its own rules ----------
 
 const TRIPLE_RE = /^\s*(\S+) (\S+) (\S+) \.$/;
+const GRAPH_OPEN_RE = /^\s*GRAPH (\S+) \{$/;
+const escRe = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const angle = (t) => (/^<[^<>\s]+>$/.test(t) ? t : null);
+/**
+ * #1638 — which graph a template triple belongs in, from its CONSTANT terms (the same isBookkeeping the executor and the
+ * migration use): 'BK' (bookkeeping graph), 'DOMAIN' (default graph), or 'WILD' (subject AND predicate are variables: a
+ * wildcard that deletes or reads whatever the variables bind to, allowed in either graph).
+ */
+function graphOf(s, p) {
+  const sc = angle(s), pc = angle(p);
+  if (!sc && !pc) return 'WILD';
+  return isBookkeeping(sc || '', pc || '') ? 'BK' : 'DOMAIN';
+}
+/** The term that made graphOf say 'BK': the predicate when it is a bookkeeping predicate, else the subject. */
+const bkReason = (s, p) => (angle(p) && isBookkeeping('', p) ? `predicate ${p}` : `subject ${s}`);
 
 /**
  * Read a compiled update back and check every template triple carries its
- * category's guard. The category is derived from (subject, predicate) alone:
+ * category's guard AND sits in its graph. The category is derived from (subject, predicate) alone:
  *   RECEIPT  subject is the op IRI and predicate is a receipt predicate
  *   MARKER   subject is ex:dataset and predicate is a marker predicate
  *   DOMAIN   everything else
+ * #1638 — and the graph is derived from the same pair (isBookkeeping, core/graph-vocab.mjs): a bookkeeping triple
+ * (receipt, marker, ver, recordedBy, retiredBy, entityJson, anything on an op/selfcheck/dataset subject) must be inside
+ * `GRAPH <urn:scrum:bookkeeping:executor> { … }`; a domain triple must NOT be; no other named graph is accepted anywhere.
+ * (A triple whose subject and predicate are both variables is a wildcard and may sit in either graph.)
  */
 export function staticCheck(sparql, opId) {
   const errors = [];
@@ -359,12 +398,46 @@ export function staticCheck(sparql, opId) {
     if (!/^IF\(BOUND\(\?ok\), .+, \?u\)$/.test(expr)) errors.push(`?${v} is not ok-guarded`);
   }
   if ((where.match(/BIND\(true AS \?ok\)/g) || []).length !== 1) errors.push('?ok must be bound exactly once');
-  if (!/^\s*OPTIONAL \{ <[^>]+> <urn:ex:digest> \?dup \}\n\s*FILTER\(!BOUND\(\?dup\)\)/.test(where)) errors.push('duplicate guard missing or not first');
+  if (!new RegExp(`^\\s*OPTIONAL \\{ GRAPH ${escRe(BK)} \\{ <[^>]+> <urn:ex:digest> \\?dup \\} \\}\\n\\s*FILTER\\(!BOUND\\(\\?dup\\)\\)`).test(where)) errors.push(`duplicate guard missing, not first, or not read from GRAPH ${BK}`);
   if (/;\s*(INSERT|DELETE)/i.test(sparql)) errors.push('multi-operation request');
+  // one plain DELETE { } INSERT { } WHERE { } request: no WITH / USING / FROM redirecting the default graph
+  if (!/^DELETE \{\n[\s\S]*?\n\}\nINSERT \{\n[\s\S]*?\n\}\nWHERE \{\n/.test(sparql)) errors.push('not a plain DELETE/INSERT/WHERE request (WITH, USING and FROM are not accepted)');
+  // the only named graph anywhere in the request is the bookkeeping graph
+  for (const m of sparql.matchAll(/\bGRAPH\s+(\S+)\s*\{/g)) {
+    if (m[1] !== BK) errors.push(`named graph ${m[1]} is not accepted: the only named graph is ${BK}`);
+  }
+  // WHERE: a bookkeeping predicate is read only inside GRAPH <bk> { … } (strip those blocks, then look for it in triple position)
+  {
+    const open = `GRAPH ${BK} {`;
+    let rest = '';
+    for (let i = 0; i < where.length;) {
+      const j = where.indexOf(open, i);
+      if (j < 0) { rest += where.slice(i); break; }
+      rest += where.slice(i, j);
+      let d = 1; let k = j + open.length;
+      while (k < where.length && d > 0) { if (where[k] === '{') d++; else if (where[k] === '}') d--; k++; }
+      i = k;
+    }
+    for (const p of BOOKKEEPING_PREDICATES) {
+      if (new RegExp(`(?:\\?\\w+|<[^<>\\s]+>|;) ${escRe(p)} `).test(rest)) errors.push(`WHERE reads bookkeeping predicate ${p} outside GRAPH ${BK}`);
+    }
+  }
 
   const triples = [];
   for (const [name, lines] of [['DELETE', block('DELETE')], ['INSERT', block('INSERT')]]) {
+    let graph = null;   // null = default graph; else the GRAPH term currently open
     for (const l of lines) {
+      const g = GRAPH_OPEN_RE.exec(l);
+      if (g) {
+        if (graph !== null) errors.push(`${name}: nested GRAPH block: ${l.trim()}`);
+        graph = g[1];
+        continue;
+      }
+      if (l.trim() === '}') {
+        if (graph === null) errors.push(`${name}: unbalanced '}' in template`);
+        graph = null;
+        continue;
+      }
       const m = TRIPLE_RE.exec(l);
       if (!m) { errors.push(`${name}: unparseable template line: ${l.trim()}`); continue; }
       const [, s, p, o] = m;
@@ -379,8 +452,19 @@ export function staticCheck(sparql, opId) {
       for (const term of [s, p, o]) {
         if (!(term.startsWith('?') || /^<[^>]+>$/.test(term) || term === 'a')) errors.push(`${name}: literal in template: ${l.trim()}`);
       }
-      triples.push({ block: name, s, p, o, cat });
+      // #1638 — the receipt/marker subjects take only receipt/marker predicates, and sit in the bookkeeping graph with the rest
+      const sc = angle(s);
+      if (sc && cat === 'DOMAIN' && isBookkeeping(sc, '') ) {
+        errors.push(`${name}: bookkeeping subject ${s} carries a non-receipt predicate ${p}: ${l.trim()}`);
+      }
+      const want = graphOf(s, p);
+      const inBk = graph === BK;
+      if (graph !== null && graph !== BK) { /* the named-graph error above already names it */ }
+      else if (want === 'BK' && !inBk) errors.push(`${name}: bookkeeping triple (${bkReason(s, p)}) is in the default graph; it belongs in GRAPH ${BK}: ${l.trim()}`);
+      else if (want === 'DOMAIN' && inBk) errors.push(`${name}: domain triple (${angle(p) ? `predicate ${p}` : `subject ${s}`}) is inside GRAPH ${BK}; bookkeeping only: ${l.trim()}`);
+      triples.push({ block: name, s, p, o, cat, graph: graph === null ? 'default' : graph });
     }
+    if (graph !== null) errors.push(`${name}: GRAPH block is not closed`);
   }
   return { ok: errors.length === 0, errors, triples };
 }
@@ -827,7 +911,7 @@ function planRecord(c) {
     versionNodes(M, R.versions);
   } else if (c.kind === 'memory.revise') {
     const M = R.target.iri; target = M;
-    pre.push(`    ${I(M)} ${I(TM.type)} ${I(TM.Memory)} ; ${I(TM.ver)} ?xv .`, `    FILTER(?xv = ${R.target.expectedVersion})`);
+    pre.push(`    ${I(M)} ${I(TM.type)} ${I(TM.Memory)} .`, `    GRAPH ${BK} { ${I(M)} ${I(TM.ver)} ?xv . }`, `    FILTER(?xv = ${R.target.expectedVersion})`);   // #1638 — the version stamp is bookkeeping
     verGuard = M;
     // the identity this revise replaces, kept on a revision node (see the header: RECORD_V 2)
     const REV = memoryRevisionIri(M, R.target.expectedVersion);
@@ -930,7 +1014,7 @@ function planRecord(c) {
       add(D, TM.source, L(X.source)); add(D, TM.offeredAt, L(X.offeredAt)); add(D, TM.ver, '1'); add(D, TM.recordedBy, ref(c.opId));
     } else {
       D = R.target.iri; S = R.step; target = D;
-      pre.push(`    ${I(D)} ${I(TM.type)} ${I(TM.Delivery)} ; ${I(TM.ver)} ?xv .`, `    FILTER(?xv = ${R.target.expectedVersion})`);
+      pre.push(`    ${I(D)} ${I(TM.type)} ${I(TM.Delivery)} .`, `    GRAPH ${BK} { ${I(D)} ${I(TM.ver)} ?xv . }`, `    FILTER(?xv = ${R.target.expectedVersion})`);   // #1638
       verGuard = D;
       if (S.ofModelCall) pre.push(`    ${I(S.ofModelCall)} ${I(TM.type)} ${I(TM.ModelCall)} .`);   // a step names a ledger row that exists
     }
@@ -978,16 +1062,17 @@ function planRecord(c) {
     // the text physically unrecoverable from the store's files; that is the physical slice, not this kind.
     const P = R.post.iri; target = P;
     pre.push(`    ${I(P)} ${I(TM.type)} ${I(TM.Comment)} ; ${I(TM.postSeq)} ?xps .`);
-    // An ALLOW-list, not a deny-list: every triple of the post goes except the two the tombstone keeps, so a field added
+    // An ALLOW-list, not a deny-list: every default-graph triple of the post goes except the one the tombstone keeps, so a field added
     // later (or one this list never knew) cannot survive a redaction; and every node under the post's attachment prefix
     // goes with it (attachments go with a redacted post).
-    delAny.push({ s: P, keep: [TM.postSeq, TM.recordedBy] });
+    // #1638 — the tombstone's recordedBy lives in the bookkeeping graph, where this default-graph wipe never reaches; it stays.
+    delAny.push({ s: P, keep: [TM.postSeq] });
     // Attachment nodes go only when ownership is PROVEN twice (attachmentOf the post AND under the post's attachment prefix).
     // Anything ambiguous refuses the whole redaction rather than widening what is deleted: a node under the prefix that
     // does not say it belongs to this post, or a node that says it belongs to this post but lives elsewhere.
     const AP = `${P}/attachment/`;
     pre.push(`    FILTER NOT EXISTS { ?xa1 ${I(TM.attachmentOf)} ${I(P)} FILTER(!STRSTARTS(STR(?xa1), ${JSON.stringify(AP)})) }`);
-    pre.push(`    FILTER NOT EXISTS { ?xa2 ?xa2p ?xa2o FILTER(STRSTARTS(STR(?xa2), ${JSON.stringify(AP)})) FILTER NOT EXISTS { ?xa2 ${I(TM.attachmentOf)} ${I(P)} } }`);
+    pre.push(`    FILTER NOT EXISTS { ${inEither('?xa2 ?xa2p ?xa2o')} FILTER(STRSTARTS(STR(?xa2), ${JSON.stringify(AP)})) FILTER NOT EXISTS { ?xa2 ${I(TM.attachmentOf)} ${I(P)} } }`);   // #1638 — a node under the prefix in EITHER graph
     delOwned.push({ owner: P, prefix: AP });
     // #1582 point 6 — a model call that quoted this post keeps no copy of its text: in the SAME update, every
     // `postedText` on a ModelCall whose producedPost is this post is deleted.
@@ -1047,6 +1132,8 @@ function compileRecord(c) {
   const dBinds = [];
   const del = [];
   const dIns = [];
+  const bDel = [];   // #1638 — bookkeeping templates (inside GRAPH <bk>)
+  const bIns = [];
   const names = new Map();
   const v = (text) => {
     let n = names.get(text);
@@ -1054,17 +1141,14 @@ function compileRecord(c) {
     return `?d_${n}`;
   };
 
-  where.push(`  OPTIONAL { ${OP} ${EX.digest} ?dup }`);
-  where.push(`  FILTER(!BOUND(?dup))`);
-  where.push(`  ${EX.dataset} ${EX.commitSeq} ?s .`);
-  where.push(`  BIND(?s + 1 AS ?s1)`);
+  where.push(...dupGuard(OP));
 
   for (const iri of plan.fresh) pre.push(...fresh(ref(iri)));
   for (const iri of plan.freshSubject || []) pre.push(...freshSubject(ref(iri)));   // #1626
   if (plan.verGuard) {
     dBinds.push(ok('?xv', 'xvOld'), ok('?xv + 1', 'xvNew'));
-    del.push(`  ${v(ref(plan.verGuard))} ${EX.ver} ?d_xvOld .`);
-    dIns.push(`  ${v(ref(plan.verGuard))} ${EX.ver} ?d_xvNew .`);
+    bDel.push(`  ${v(ref(plan.verGuard))} ${EX.ver} ?d_xvOld .`);
+    bIns.push(`  ${v(ref(plan.verGuard))} ${EX.ver} ?d_xvNew .`);
   }
   plan.delAll.forEach(({ s, p, keep }, k) => {
     top.push(`  OPTIONAL { ${ref(s)} ${ref(p)} ?xd${k} }`);
@@ -1078,9 +1162,12 @@ function compileRecord(c) {
     del.push(`  ${v(ref(s))} ?d_xap${k} ?d_xao${k} .`);
   });
   (plan.delOwned || []).forEach(({ owner, prefix }, k) => {
-    top.push(`  OPTIONAL { ?xs${k} ${ref(LOGBORN_TERMS.attachmentOf)} ${ref(owner)} . ?xs${k} ?xsp${k} ?xso${k} FILTER(STRSTARTS(STR(?xs${k}), ${JSON.stringify(prefix)})) }`);
-    dBinds.push(ok(`?xs${k}`, `xs${k}`), ok(`?xsp${k}`, `xsp${k}`), ok(`?xso${k}`, `xso${k}`));
+    // #1638 — the attachment's default-graph triples go (wildcard), and so does its recordedBy in the bookkeeping graph
+    // (read INSIDE this optional, where ?xs is bound: a free read would bind every recordedBy in the store).
+    top.push(`  OPTIONAL { ?xs${k} ${ref(LOGBORN_TERMS.attachmentOf)} ${ref(owner)} . ?xs${k} ?xsp${k} ?xso${k} FILTER(STRSTARTS(STR(?xs${k}), ${JSON.stringify(prefix)})) OPTIONAL { GRAPH ${BK} { ?xs${k} ${EX.recordedBy} ?xsr${k} } } }`);
+    dBinds.push(ok(`?xs${k}`, `xs${k}`), ok(`?xsp${k}`, `xsp${k}`), ok(`?xso${k}`, `xso${k}`), ok(`?xsr${k}`, `xsr${k}`));
     del.push(`  ?d_xs${k} ?d_xsp${k} ?d_xso${k} .`);
+    bDel.push(`  ?d_xs${k} ${EX.recordedBy} ?d_xsr${k} .`);
   });
   (plan.delLinked || []).forEach(({ link, owner, type, pred }, k) => {
     top.push(`  OPTIONAL { ?xl${k} ${ref(link)} ${ref(owner)} ; ${ref(LOGBORN_TERMS.type)} ${ref(type)} ; ${ref(pred)} ?xlo${k} }`);
@@ -1093,7 +1180,8 @@ function compileRecord(c) {
     dBinds.push(ok(`?xc${k}`, `xc${k}`));
     dIns.push(`  ${v(ref(s))} ${ref(p)} ?d_xc${k} .`);
   });
-  for (const [s, p, o] of plan.ins) dIns.push(`  ${v(ref(s))} ${ref(p)} ${v(o)} .`);
+  // #1638 — route each planned triple by the one definition of bookkeeping (ver, recordedBy, entityJson… go to the bk graph)
+  for (const [s, p, o] of plan.ins) (isBookkeeping(s, p) ? bIns : dIns).push(`  ${v(ref(s))} ${ref(p)} ${v(o)} .`);
 
   pre.push(`    BIND(true AS ?ok)`);
   where.push(`  OPTIONAL {`, ...pre, `  }`);
@@ -1103,12 +1191,12 @@ function compileRecord(c) {
   if (plan.target) where.push(nb(ref(plan.target), 'target0'));
   where.push(...dBinds);
 
-  del.unshift(`  ${MARKER_SUBJECT} ${EX.commitSeq} ?s .`);
-  const ins = [`  ${MARKER_SUBJECT} ${EX.commitSeq} ?s1 .`,
+  bDel.unshift(`  ${MARKER_SUBJECT} ${EX.commitSeq} ?s .`);
+  bIns.unshift(`  ${MARKER_SUBJECT} ${EX.commitSeq} ?s1 .`,
     `  ${OP} ${EX.outcome} ?n_outcome .`, `  ${OP} ${EX.digest} ?n_digest .`, `  ${OP} ${EX.actor} ?n_actor .`,
-    `  ${OP} ${EX.at} ?n_at .`, `  ${OP} ${EX.commitSeq} ?s1 .`, ...(plan.target ? [`  ${OP} ${EX.target} ?n_target0 .`] : []), ...dIns];
+    `  ${OP} ${EX.at} ?n_at .`, `  ${OP} ${EX.commitSeq} ?s1 .`, ...(plan.target ? [`  ${OP} ${EX.target} ?n_target0 .`] : []));
 
-  const sparql = `DELETE {\n${del.join('\n')}\n}\nINSERT {\n${ins.join('\n')}\n}\nWHERE {\n${where.join('\n')}\n}\n`;
+  const sparql = assemble(del, bDel, dIns, bIns, where);
   const check = staticCheck(sparql, c.opId);
   if (!check.ok) fail(`compiler rejected its own output: ${check.errors.join('; ')}`);
   return { sparql, digest, canonical: c };
@@ -1138,7 +1226,8 @@ const CW = Object.freeze({
 });
 const CW_SHARED_PREFIXES = [CW.concept, CW.commit, CW.unresolved];
 const CW_SHARED_PREDICATES = new Set([CW.rdfType, `${CW.schema}name`, `${CW.schema}identifier`]);
-const CW_RESERVED_PREDICATES = new Set([`${NS}ver`, `${NS}recordedBy`, `${CW.scrum}entityJson`]);
+// #1638 — a caller never writes bookkeeping: every predicate the one definition lists is reserved to the compiler
+const CW_RESERVED_PREDICATES = new Set([`${NS}ver`, `${NS}recordedBy`, `${CW.scrum}entityJson`, ...BOOKKEEPING_PREDICATES.map((p) => p.slice(1, -1))]);
 const unref = (t) => (t.startsWith('<') ? t.slice(1, -1) : null);
 /**
  * A card.write term: validated by canonTerm, then a plain or language-tagged literal is re-encoded with recLit, which
@@ -1255,21 +1344,25 @@ function compileCardWrite(c) {
   const OP = ref(c.opId);
   const R = c.record;
   const VER = ref(`${NS}ver`), REC = ref(`${NS}recordedBy`), JSONP = ref(`${CW.scrum}entityJson`), CTR = ref(CW.counter);
-  const where = [], pre = [], dBinds = [], del = [], dIns = [];
+  const where = [], pre = [], top = [], dBinds = [], del = [], dIns = [], bDel = [], bIns = [];
   const names = new Map();
   const v = (text) => {
     let n = names.get(text);
     if (!n) { n = `r${names.size}`; names.set(text, n); dBinds.push(ok(text, n)); }
     return `?d_${n}`;
   };
-  where.push(`  OPTIONAL { ${OP} ${EX.digest} ?dup }`, `  FILTER(!BOUND(?dup))`, `  ${EX.dataset} ${EX.commitSeq} ?s .`, `  BIND(?s + 1 AS ?s1)`);
+  where.push(...dupGuard(OP));
 
   const branches = [];
   R.parts.forEach((P, k) => {
     const I = ref(P.iri);
     if (P.expectedVersion == null) pre.push(...freshSubject(I));
     else {
-      pre.push(`    ${I} ${VER} ?xv${k} .`, `    FILTER(?xv${k} = ${P.expectedVersion})`);
+      pre.push(`    GRAPH ${BK} { ${I} ${VER} ?xv${k} . }`, `    FILTER(?xv${k} = ${P.expectedVersion})`);   // #1638 — the version stamp is bookkeeping
+      // #1638 — the card's bookkeeping (ver, recordedBy, entityJson) goes with it: read inside the bk graph, deleted there
+      top.push(`  OPTIONAL { GRAPH ${BK} { ${I} ?xbp${k} ?xbo${k} } }`);
+      dBinds.push(ok(`?xbp${k}`, `xbp${k}`), ok(`?xbo${k}`, `xbo${k}`));
+      bDel.push(`  ${v(I)} ?d_xbp${k} ?d_xbo${k} .`);
       const back = (pred, type) => `    { ?xs ${ref(`${CW.scrum}${pred}`)} ${I} ; ${ref(CW.rdfType)} ${ref(`${CW.scrum}${type}`)} . FILTER(STRSTARTS(STR(?xs), ${JSON.stringify(`${P.iri}/`)})) ?xs ?xp ?xo }`;
       branches.push(
         `    { ${I} ?xp ?xo BIND(${I} AS ?xs) }`,
@@ -1287,24 +1380,26 @@ function compileCardWrite(c) {
       dIns.push(`  ${v(IMP)} ${ref(CW.rdfType)} ${v(ref(`${CW.scrum}CardImport`))} .`, `  ${v(IMP)} ${ref(`${CW.scrum}sourceDigest`)} ${v(recLit(P.importDigest))} .`);
     }
     for (const [s, p, o] of P.quads) dIns.push(`  ${v(s)} ${v(p)} ${v(o)} .`);
-    dIns.push(`  ${v(I)} ${VER} ${v(P.version)} .`, `  ${v(I)} ${REC} ${v(OP)} .`, `  ${v(I)} ${JSONP} ${v(recLit(P.json))} .`);
+    bIns.push(`  ${v(I)} ${VER} ${v(P.version)} .`, `  ${v(I)} ${REC} ${v(OP)} .`, `  ${v(I)} ${JSONP} ${v(recLit(P.json))} .`);
   });
-  collectionClauses(R.collections || [], { OP, v, pre, branches, dIns, tag: 'c' });
+  collectionClauses(R.collections || [], { OP, v, pre, top, branches, dIns, bIns, bDel, dBinds, tag: 'c' });
   for (const A of R.pending || []) {
     pre.push(...freshSubject(ref(A.iri)));
-    dIns.push(`  ${v(ref(A.iri))} ${ref(CW.rdfType)} ${v(ref(`${CW.scrum}PendingAnnouncement`))} .`, `  ${v(ref(A.iri))} ${JSONP} ${v(recLit(A.json))} .`);
+    dIns.push(`  ${v(ref(A.iri))} ${ref(CW.rdfType)} ${v(ref(`${CW.scrum}PendingAnnouncement`))} .`);
+    bIns.push(`  ${v(ref(A.iri))} ${JSONP} ${v(recLit(A.json))} .`);   // #1638 — the announcement's entityJson copy is bookkeeping
   }
   if (R.counter) {
-    if (R.counter.expected == null) pre.push(`    FILTER NOT EXISTS { ${CTR} ${VER} ?xcf }`);
+    if (R.counter.expected == null) pre.push(`    FILTER NOT EXISTS { GRAPH ${BK} { ${CTR} ${VER} ?xcf } }`);
     else {
-      pre.push(`    ${CTR} ${VER} ?xc .`, `    FILTER(?xc = ${R.counter.expected})`);
+      pre.push(`    GRAPH ${BK} { ${CTR} ${VER} ?xc . }`, `    FILTER(?xc = ${R.counter.expected})`);
       dBinds.push(ok('?xc', 'xcOld'));
-      del.push(`  ${v(CTR)} ${VER} ?d_xcOld .`);
+      bDel.push(`  ${v(CTR)} ${VER} ?d_xcOld .`);
     }
-    dIns.push(`  ${v(CTR)} ${VER} ${v(R.counter.next)} .`);
+    bIns.push(`  ${v(CTR)} ${VER} ${v(R.counter.next)} .`);
   }
   pre.push(`    BIND(true AS ?ok)`);
   where.push(`  OPTIONAL {`, ...pre, `  }`);
+  where.push(...top);
   if (branches.length) {
     where.push(`  OPTIONAL {`, branches.join('\n    UNION\n'), `  }`);
     dBinds.push(ok('?xs', 'xs'), ok('?xp', 'xp'), ok('?xo', 'xo'));
@@ -1313,11 +1408,11 @@ function compileCardWrite(c) {
   where.push(`  BIND(IF(BOUND(?ok), ${EX.APPLIED}, ${EX.PRECONDITION_FAILED}) AS ?n_outcome)`);
   where.push(nb(JSON.stringify(digest), 'digest'), nb(ref(c.actor), 'actor'), nb('NOW()', 'at'), nb(ref(R.parts.length ? R.parts[0].iri : (R.collections?.length ? R.collections[0].iri : CW.counter)), 'target0'));
   where.push(...dBinds);
-  del.unshift(`  ${MARKER_SUBJECT} ${EX.commitSeq} ?s .`);
-  const ins = [`  ${MARKER_SUBJECT} ${EX.commitSeq} ?s1 .`,
+  bDel.unshift(`  ${MARKER_SUBJECT} ${EX.commitSeq} ?s .`);
+  bIns.unshift(`  ${MARKER_SUBJECT} ${EX.commitSeq} ?s1 .`,
     `  ${OP} ${EX.outcome} ?n_outcome .`, `  ${OP} ${EX.digest} ?n_digest .`, `  ${OP} ${EX.actor} ?n_actor .`,
-    `  ${OP} ${EX.at} ?n_at .`, `  ${OP} ${EX.commitSeq} ?s1 .`, `  ${OP} ${EX.target} ?n_target0 .`, ...dIns];
-  const sparql = `DELETE {\n${del.join('\n')}\n}\nINSERT {\n${ins.join('\n')}\n}\nWHERE {\n${where.join('\n')}\n}\n`;
+    `  ${OP} ${EX.at} ?n_at .`, `  ${OP} ${EX.commitSeq} ?s1 .`, `  ${OP} ${EX.target} ?n_target0 .`);
+  const sparql = assemble(del, bDel, dIns, bIns, where);
   const check = staticCheck(sparql, c.opId);
   if (!check.ok) fail(`compiler rejected its own output: ${check.errors.join('; ')}`);
   return { sparql, digest, canonical: c };
@@ -1396,13 +1491,17 @@ function canonCollectionWrite(e) {
  * `branches`, inserts into `dIns` (through `v`, the update's ?d_ binder). Shared by entity.put kind 'collection' and by
  * card.write's `collections` (a write that touches cards AND a collection entity is still ONE guarded update).
  */
-function collectionClauses(parts, { OP, v, pre, branches, dIns, tag }) {
+function collectionClauses(parts, { OP, v, pre, top, branches, dIns, bIns, bDel, dBinds, tag }) {
   const VER = ref(`${NS}ver`), REC = ref(`${NS}recordedBy`), JSONP = ref(`${CW.scrum}entityJson`), INC = ref(`${CW.scrum}inCollection`);
   parts.forEach((P, k) => {
     const I = ref(P.iri), KEY = recLit(P.collection);
     if (P.expectedVersion == null) pre.push(...freshSubject(I));
     else {
-      pre.push(`    ${I} ${VER} ?xcv${tag}${k} ; ${INC} ${KEY} .`, `    FILTER(?xcv${tag}${k} = ${P.expectedVersion})`);
+      pre.push(`    GRAPH ${BK} { ${I} ${VER} ?xcv${tag}${k} . }`, `    ${I} ${INC} ${KEY} .`, `    FILTER(?xcv${tag}${k} = ${P.expectedVersion})`);   // #1638 — ver is bookkeeping
+      // #1638 — the entity's bookkeeping (ver, recordedBy, entityJson) is deleted from the bk graph with its domain triples
+      top.push(`  OPTIONAL { GRAPH ${BK} { ${I} ?xbp${tag}${k} ?xbo${tag}${k} } }`);
+      dBinds.push(ok(`?xbp${tag}${k}`, `xbp${tag}${k}`), ok(`?xbo${tag}${k}`, `xbo${tag}${k}`));
+      bDel.push(`  ${v(I)} ?d_xbp${tag}${k} ?d_xbo${tag}${k} .`);
       branches.push(`    { ${I} ?xp ?xo BIND(${I} AS ?xs) }`);
       if (P.prior.length) branches.push(`    { VALUES (?xs ?xp ?xo) {\n${P.prior.map((q) => `      (${q.join(' ')})`).join('\n')}\n    } }`);
     }
@@ -1410,7 +1509,8 @@ function collectionClauses(parts, { OP, v, pre, branches, dIns, tag }) {
     (P.requires || []).forEach((T, j) => pre.push(`    FILTER EXISTS { ${T} ?xrp${tag}${k}_${j} ?xro${tag}${k}_${j} }`));
     if (P.remove) return;
     for (const [s, p, o] of P.quads) dIns.push(`  ${v(s)} ${v(p)} ${v(o)} .`);
-    dIns.push(`  ${v(I)} ${INC} ${v(KEY)} .`, `  ${v(I)} ${VER} ${v(P.version)} .`, `  ${v(I)} ${REC} ${v(OP)} .`, `  ${v(I)} ${JSONP} ${v(recLit(P.json))} .`);
+    dIns.push(`  ${v(I)} ${INC} ${v(KEY)} .`);
+    bIns.push(`  ${v(I)} ${VER} ${v(P.version)} .`, `  ${v(I)} ${REC} ${v(OP)} .`, `  ${v(I)} ${JSONP} ${v(recLit(P.json))} .`);
   });
 }
 
@@ -1418,17 +1518,18 @@ function compileCollectionWrite(c) {
   const digest = recordDigest(c);
   const OP = ref(c.opId);
   const R = c.record.entity;
-  const where = [], pre = [], dBinds = [], del = [], dIns = [], branches = [];
+  const where = [], pre = [], top = [], dBinds = [], del = [], dIns = [], bDel = [], bIns = [], branches = [];
   const names = new Map();
   const v = (text) => {
     let n = names.get(text);
     if (!n) { n = `r${names.size}`; names.set(text, n); dBinds.push(ok(text, n)); }
     return `?d_${n}`;
   };
-  where.push(`  OPTIONAL { ${OP} ${EX.digest} ?dup }`, `  FILTER(!BOUND(?dup))`, `  ${EX.dataset} ${EX.commitSeq} ?s .`, `  BIND(?s + 1 AS ?s1)`);
-  collectionClauses(R.parts, { OP, v, pre, branches, dIns, tag: 'c' });
+  where.push(...dupGuard(OP));
+  collectionClauses(R.parts, { OP, v, pre, top, branches, dIns, bIns, bDel, dBinds, tag: 'c' });
   pre.push(`    BIND(true AS ?ok)`);
   where.push(`  OPTIONAL {`, ...pre, `  }`);
+  where.push(...top);
   if (branches.length) {
     where.push(`  OPTIONAL {`, branches.join('\n    UNION\n'), `  }`);
     dBinds.push(ok('?xs', 'xs'), ok('?xp', 'xp'), ok('?xo', 'xo'));
@@ -1437,11 +1538,11 @@ function compileCollectionWrite(c) {
   where.push(`  BIND(IF(BOUND(?ok), ${EX.APPLIED}, ${EX.PRECONDITION_FAILED}) AS ?n_outcome)`);
   where.push(nb(JSON.stringify(digest), 'digest'), nb(ref(c.actor), 'actor'), nb('NOW()', 'at'), nb(ref(R.parts[0].iri), 'target0'));
   where.push(...dBinds);
-  del.unshift(`  ${MARKER_SUBJECT} ${EX.commitSeq} ?s .`);
-  const ins = [`  ${MARKER_SUBJECT} ${EX.commitSeq} ?s1 .`,
+  bDel.unshift(`  ${MARKER_SUBJECT} ${EX.commitSeq} ?s .`);
+  bIns.unshift(`  ${MARKER_SUBJECT} ${EX.commitSeq} ?s1 .`,
     `  ${OP} ${EX.outcome} ?n_outcome .`, `  ${OP} ${EX.digest} ?n_digest .`, `  ${OP} ${EX.actor} ?n_actor .`,
-    `  ${OP} ${EX.at} ?n_at .`, `  ${OP} ${EX.commitSeq} ?s1 .`, `  ${OP} ${EX.target} ?n_target0 .`, ...dIns];
-  const sparql = `DELETE {\n${del.join('\n')}\n}\nINSERT {\n${ins.join('\n')}\n}\nWHERE {\n${where.join('\n')}\n}\n`;
+    `  ${OP} ${EX.at} ?n_at .`, `  ${OP} ${EX.commitSeq} ?s1 .`, `  ${OP} ${EX.target} ?n_target0 .`);
+  const sparql = assemble(del, bDel, dIns, bIns, where);
   const check = staticCheck(sparql, c.opId);
   if (!check.ok) fail(`compiler rejected its own output: ${check.errors.join('; ')}`);
   return { sparql, digest, canonical: c };
@@ -1587,10 +1688,7 @@ function compileLg(c, digest) {
   const D = (name, expr) => { dBinds.push(ok(expr, name)); return `?d_${name}`; };
   const T = (list, s, p, o) => list.push(`  ${s} ${p} ${o} .`);
 
-  where.push(`  OPTIONAL { ${OP} ${EX.digest} ?dup }`);
-  where.push(`  FILTER(!BOUND(?dup))`);
-  where.push(`  ${EX.dataset} ${EX.commitSeq} ?s .`);
-  where.push(`  BIND(?s + 1 AS ?s1)`);
+  where.push(...dupGuard(OP));
   D('op', OP);
 
   // precondition: the thread generation the caller read (deleteThread bumps it). This is the
@@ -1781,11 +1879,12 @@ function compileLg(c, digest) {
   where.push(nb(JSON.stringify(digest), 'digest'), nb(ref(c.actor), 'actor'), nb('NOW()', 'at'));
   where.push(...dBinds);
 
-  del.unshift(`  ${MARKER_SUBJECT} ${EX.commitSeq} ?s .`);
+  // #1638 — the lg.* triples are all DOMAIN (urn:ex:lg/…, default graph); the marker and the receipt are the only bookkeeping
+  const bDel = [`  ${MARKER_SUBJECT} ${EX.commitSeq} ?s .`];
   const rec = [`  ${MARKER_SUBJECT} ${EX.commitSeq} ?s1 .`,
     `  ${OP} ${EX.outcome} ?n_outcome .`, `  ${OP} ${EX.digest} ?n_digest .`, `  ${OP} ${EX.actor} ?n_actor .`,
     `  ${OP} ${EX.at} ?n_at .`, `  ${OP} ${EX.commitSeq} ?s1 .`];
-  const sparql = `DELETE {\n${del.join('\n')}\n}\nINSERT {\n${[...rec, ...ins].join('\n')}\n}\nWHERE {\n${where.join('\n')}\n}\n`;
+  const sparql = assemble(del, bDel, ins, rec, where);
   const check = staticCheck(sparql, c.opId);
   if (!check.ok) fail(`compiler rejected its own output: ${check.errors.join('; ')}`);
   return { sparql, digest, canonical: c };
