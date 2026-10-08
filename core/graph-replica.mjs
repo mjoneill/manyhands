@@ -2646,7 +2646,14 @@ const RDF_LANG_STRING = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#langString';
 export async function queryGraphExecutor(executorUrl, sparql, { limit, terms = false, timeoutMs = 30_000, fetchImpl = fetch } = {}) {
   const { text, wanted } = prepareGraphQuery(sparql, { limit, vocabulary: EXECUTOR_VOCABULARY });
   const t = performance.now();
-  const res = await fetchImpl(`${executorUrl}/query?dataset=public`, { method: 'POST', body: text, signal: AbortSignal.timeout(timeoutMs) });
+  let res;
+  try {
+    res = await fetchImpl(`${executorUrl}/query?dataset=public`, { method: 'POST', body: text, signal: AbortSignal.timeout(timeoutMs) });
+  } catch (e) {
+    // An executor that cannot be reached is an OUTAGE (503), not a bad query (400): without a code this
+    // fell through to the generic handler and told the caller their SPARQL was wrong.
+    throw Object.assign(new Error(`the executor could not be reached: ${e?.cause?.code || e?.name || e?.message}`), { code: 'GRAPH_UNAVAILABLE' });
+  }
   const raw = await res.text();
   const ms = performance.now() - t;
   let j = null; try { j = JSON.parse(raw); } catch { /* reported below */ }
