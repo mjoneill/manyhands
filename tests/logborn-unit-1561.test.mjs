@@ -37,7 +37,7 @@ const SKIP = HAVE_PY ? false : `UNAVAILABLE: no python with pyoxigraph at ${PY}`
 
 function initStore(dsid) {
   const store = fs.mkdtempSync(path.join(os.tmpdir(), 'lb-store-'));
-  const init = spawnSync(PY, ['-c', `import pyoxigraph as px\ns = px.Store(${JSON.stringify(store)})\ns.update('INSERT DATA { <urn:ex:dataset> <urn:ex:datasetId> "${dsid}" ; <urn:ex:epoch> 1 ; <urn:ex:commitSeq> 0 }')\ns.flush()`]);
+  const init = spawnSync(PY, ['-c', `import pyoxigraph as px\ns = px.Store(${JSON.stringify(store)})\ns.update('INSERT DATA { GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:dataset> <urn:ex:datasetId> "${dsid}" ; <urn:ex:epoch> 1 ; <urn:ex:commitSeq> 0 } }')\ns.flush()`]);
   assert.equal(init.status, 0, String(init.stderr));
   return store;
 }
@@ -183,7 +183,7 @@ test('#1561 WHO: the receipt names the AUTHENTICATED seat, not a body-declared a
   assert.equal(m.status, 201);
   const r = spawnSync(PY, ['-c', `import pyoxigraph as px, sys
 s = px.Store.read_only(${JSON.stringify(ON.store)})
-q = 'SELECT ?a WHERE { ?op <urn:ex:actor> ?a . ?v <urn:ex:recordedBy> ?op ; <https://scrumboard.local/ns#ofMemory> <https://scrumboard.local/memory/${m.body.id}> }'
+q = 'SELECT ?a WHERE { GRAPH <urn:scrum:bookkeeping:executor> { ?op <urn:ex:actor> ?a . ?v <urn:ex:recordedBy> ?op } ?v <https://scrumboard.local/ns#ofMemory> <https://scrumboard.local/memory/${m.body.id}> }'
 print([r['a'].value for r in s.query(q)])`]);
   assert.equal(r.status, 0, String(r.stderr));
   assert.match(String(r.stdout), /urn:ex:seat\/ada/);

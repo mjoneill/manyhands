@@ -60,7 +60,7 @@ before(async () => {
   const init = spawnSync(PY, ['-c', `
 import pyoxigraph as px
 s = px.Store(${JSON.stringify(store)})
-s.update('INSERT DATA { <urn:ex:dataset> <urn:ex:datasetId> "trial-routes" ; <urn:ex:epoch> 1 ; <urn:ex:commitSeq> 0 }')
+s.update('INSERT DATA { GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:dataset> <urn:ex:datasetId> "trial-routes" ; <urn:ex:epoch> 1 ; <urn:ex:commitSeq> 0 } }')
 s.flush()`]);
   assert.equal(init.status, 0, String(init.stderr));
   execUrl = `http://127.0.0.1:${await freePort()}`;

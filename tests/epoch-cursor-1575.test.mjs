@@ -45,7 +45,7 @@ function tokensFile() {
 }
 function initStore(dsid) {
   const store = tmpdir('store');
-  const init = spawnSync(PY, ['-c', `import pyoxigraph as px\ns = px.Store(${JSON.stringify(store)})\ns.update('INSERT DATA { <urn:ex:dataset> <urn:ex:datasetId> "${dsid}" ; <urn:ex:epoch> 1 ; <urn:ex:commitSeq> 0 }')\ns.flush()`]);
+  const init = spawnSync(PY, ['-c', `import pyoxigraph as px\ns = px.Store(${JSON.stringify(store)})\ns.update('INSERT DATA { GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:dataset> <urn:ex:datasetId> "${dsid}" ; <urn:ex:epoch> 1 ; <urn:ex:commitSeq> 0 } }')\ns.flush()`]);
   assert.equal(init.status, 0, String(init.stderr));
   return store;
 }
@@ -279,7 +279,7 @@ test('#1575 restore of a restore: epochBase is overwritten by the second promoti
   const eventDir = tmpdir('events');
   const LANE = 'registry:twice1575.t';
   const epochBaseOf = async (srv) => {
-    const r = await fetch(`${srv.executorUrl}/query`, { method: 'POST', body: 'SELECT ?e ?b ?s WHERE { <urn:ex:dataset> <urn:ex:epoch> ?e ; <urn:ex:commitSeq> ?s . OPTIONAL { <urn:ex:dataset> <urn:ex:epochBase> ?b } }' });
+    const r = await fetch(`${srv.executorUrl}/query`, { method: 'POST', body: 'SELECT ?e ?b ?s WHERE { GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:dataset> <urn:ex:epoch> ?e ; <urn:ex:commitSeq> ?s . OPTIONAL { <urn:ex:dataset> <urn:ex:epochBase> ?b } } }' });
     const b = (await r.json()).results.bindings;
     assert.equal(b.length, 1, 'exactly one marker row (an overwrite, not a second epochBase)');
     return { epoch: Number(b[0].e.value), epochBase: b[0].b ? Number(b[0].b.value) : null, commitSeq: Number(b[0].s.value) };

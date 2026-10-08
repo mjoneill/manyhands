@@ -30,11 +30,14 @@ function start(args) {
   });
 }
 
+// #1638: bookkeeping (the per-entity ver stamp) lives in the bookkeeping graph; the domain stays in the default graph.
+const BK = '<urn:scrum:bookkeeping:executor>';
 const SEED = `INSERT DATA {
   <urn:ex:A1> a <urn:ex:Assertion> ; <urn:ex:subject> <urn:ex:topic1> ; <urn:ex:predicate> <urn:ex:policy> ;
-    <urn:ex:value> "old" ; <urn:ex:scope> <urn:ex:scopeX> ; <urn:ex:binding> true ; <urn:ex:status> <urn:ex:current> ; <urn:ex:ver> 1 .
+    <urn:ex:value> "old" ; <urn:ex:scope> <urn:ex:scopeX> ; <urn:ex:binding> true ; <urn:ex:status> <urn:ex:current> .
   <urn:ex:A2> a <urn:ex:Assertion> ; <urn:ex:subject> <urn:ex:topic1> ; <urn:ex:predicate> <urn:ex:policy> ;
-    <urn:ex:value> "old2" ; <urn:ex:scope> <urn:ex:scopeX> ; <urn:ex:binding> true ; <urn:ex:status> <urn:ex:current> ; <urn:ex:ver> 4 .
+    <urn:ex:value> "old2" ; <urn:ex:scope> <urn:ex:scopeX> ; <urn:ex:binding> true ; <urn:ex:status> <urn:ex:current> .
+  GRAPH ${BK} { <urn:ex:A1> <urn:ex:ver> 1 . <urn:ex:A2> <urn:ex:ver> 4 . }
   <urn:ex:G1> a <urn:ex:Grant> ; <urn:ex:grantee> <urn:ex:bob> ; <urn:ex:scope> <urn:ex:scopeX> ; <urn:ex:mayRetire> true ; <urn:ex:active> true ; <urn:ex:rev> 3 .
   <urn:ex:G2> a <urn:ex:Grant> ; <urn:ex:grantee> <urn:ex:carol> ; <urn:ex:scope> <urn:ex:scopeX> ; <urn:ex:mayRetire> false ; <urn:ex:active> true ; <urn:ex:rev> 1 .
   <urn:ex:R1> <urn:ex:rev> 1 .
@@ -67,12 +70,24 @@ const correction = (over = {}) => ({
 });
 
 async function rows(q) { const r = await client.query(q); assert.ok(r.ok, r.reason); return r.rows; }
-async function seq() { return (await rows('SELECT ?s WHERE { <urn:ex:dataset> <urn:ex:commitSeq> ?s }'))[0].s.value; }
+async function seq() { return (await rows(`SELECT ?s WHERE { GRAPH ${BK} { <urn:ex:dataset> <urn:ex:commitSeq> ?s } }`))[0].s.value; }
+// an entity's triples, each read ONLY from the graph it must live in: its bookkeeping stamps (ver, recordedBy, retiredBy,
+// entityJson) from the bookkeeping graph, everything else from the default graph. A stamp that landed in the default graph
+// (or a domain triple in the bookkeeping graph) is therefore MISSING here, so every `includes` below still checks placement.
+const STAMPS = '<urn:ex:ver>, <urn:ex:recordedBy>, <urn:ex:retiredBy>, <https://scrumboard.local/ns#entityJson>';
 async function triplesOf(iri) {
-  return (await rows(`SELECT ?p ?o WHERE { <${iri}> ?p ?o }`)).map((r) => `${r.p.value} ${r.o.value}`).sort();
+  // and NO bookkeeping stamp may remain on it in the default graph, nor a domain triple in the bookkeeping graph
+  const stray = await rows(`SELECT ?p ?o WHERE { { <${iri}> ?p ?o FILTER(?p IN (${STAMPS})) } UNION { GRAPH ${BK} { <${iri}> ?p ?o } FILTER(?p NOT IN (${STAMPS})) } }`);
+  assert.deepEqual(stray.map((r) => `${r.p.value} ${r.o.value}`), [], `${iri}: a triple sits in the wrong graph`);
+  return (await rows(`SELECT ?p ?o WHERE { { <${iri}> ?p ?o FILTER(?p NOT IN (${STAMPS})) } UNION { GRAPH ${BK} { <${iri}> ?p ?o } FILTER(?p IN (${STAMPS})) } }`)).map((r) => `${r.p.value} ${r.o.value}`).sort();
 }
+// a receipt lives only in the bookkeeping graph
+async function receiptOf(iri) {
+  return (await rows(`SELECT ?p ?o WHERE { GRAPH ${BK} { <${iri}> ?p ?o } }`)).map((r) => `${r.p.value} ${r.o.value}`).sort();
+}
+// every quad in the store, both graphs, graph included
 async function allQuads() {
-  return (await rows('SELECT ?s ?p ?o WHERE { ?s ?p ?o }')).map((r) => JSON.stringify([r.s, r.p, r.o])).sort();
+  return (await rows('SELECT ?g ?s ?p ?o WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }')).map((r) => JSON.stringify([r.g, r.s, r.p, r.o])).sort();
 }
 
 // ---------- pure: literals, digest, static checker ----------
@@ -173,7 +188,7 @@ test('#1558 authorized correction: APPLIED, target retired with explanation, new
   for (const want of ['urn:ex:status urn:ex:current', 'urn:ex:value new', 'urn:ex:supersedes urn:ex:A1', `urn:ex:recordedBy ${c.opId}`, 'urn:ex:evidence urn:ex:evidence/1', 'urn:ex:author urn:ex:bob', 'urn:ex:ver 1']) {
     assert.ok(na.includes(want), `new assertion missing ${want}`);
   }
-  const rec = await triplesOf(c.opId);
+  const rec = await receiptOf(c.opId);
   for (const want of ['urn:ex:grant urn:ex:G1', 'urn:ex:grantRev 3', 'urn:ex:rule urn:ex:R1', 'urn:ex:ruleRev 1', 'urn:ex:target urn:ex:A1', 'urn:ex:outcome urn:ex:APPLIED']) {
     assert.ok(rec.includes(want), `receipt missing ${want}`);
   }
@@ -311,7 +326,7 @@ test('#1558 non-binding observation: needs no grant; binding vs non-binding dige
   assert.equal(r.outcome, 'APPLIED', r.reason);
   const t = await triplesOf(obs.newAssertion.iri);
   assert.ok(t.includes('urn:ex:binding false') && t.includes('urn:ex:status urn:ex:current'));
-  const rec = await triplesOf(obs.opId);
+  const rec = await receiptOf(obs.opId);
   assert.ok(!rec.some((x) => x.startsWith('urn:ex:grant ')), 'no authority basis is invented on the receipt');
   // a BINDING assertion without an authority is a validation rejection
   const bad = structuredClone(obs); bad.opId = fresh('op'); bad.newAssertion.iri = fresh('N'); bad.newAssertion.binding = true;

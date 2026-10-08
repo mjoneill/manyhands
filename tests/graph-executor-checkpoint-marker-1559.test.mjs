@@ -43,7 +43,7 @@ test('#1559 a checkpoint on a contradictory marker is REFUSED, and the executor 
   const e = await start(store);
   let exited = false; e.p.on('exit', () => { exited = true; });
   try {
-    const plant = await fetch(`${e.base}/update`, { method: 'POST', body: 'INSERT DATA { <urn:ex:dataset> <urn:ex:epoch> 7 }', headers: { 'x-op-id': 'urn:ex:op/plant' } });
+    const plant = await fetch(`${e.base}/update`, { method: 'POST', body: 'INSERT DATA { GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:dataset> <urn:ex:epoch> 7 } }', headers: { 'x-op-id': 'urn:ex:op/plant' } });
     assert.equal(plant.status, 200);
     const r = await fetch(`${e.base}/checkpoint`, { method: 'POST' }).catch((err) => ({ status: 'NO-RESPONSE', err }));
     assert.notEqual(r.status, 'NO-RESPONSE', 'the request got an answer');

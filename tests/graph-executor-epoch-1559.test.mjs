@@ -107,7 +107,7 @@ test('#1559 a contradictory marker never kills the executor mid-request: writes 
   const store = fs.mkdtempSync(path.join(os.tmpdir(), 'ep-'));
   const e = await start(store, ['--create']);
   try {
-    const plant = await fetch(`${e.base}/update`, { method: 'POST', body: 'INSERT DATA { <urn:ex:dataset> <urn:ex:epoch> 7 }', headers: { 'x-op-id': 'urn:ex:op/plant' } });
+    const plant = await fetch(`${e.base}/update`, { method: 'POST', body: 'INSERT DATA { GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:dataset> <urn:ex:epoch> 7 } }', headers: { 'x-op-id': 'urn:ex:op/plant' } });
     assert.equal(plant.status, 200);
     const h = await (await fetch(`${e.base}/health`)).json();
     assert.match(h.markerError, /marker rows/);

@@ -73,11 +73,11 @@ test('#1559 a stale self-check probe (a crash between insert and delete) is clea
   let e = await start(store, true);
   e.p.kill('SIGKILL'); await new Promise((r) => e.p.on('exit', r));
   // a stale probe in the reserved namespace, AND a lookalike outside it that cleanup must NOT touch
-  const plant = spawnSync(PY, ['-c', `import pyoxigraph as px\ns = px.Store(${JSON.stringify(store)})\ns.update('INSERT DATA { <urn:ex:selfcheck/1> <urn:ex:selfCheck> true . <urn:ex:other/1> <urn:ex:selfCheck> true }')\ns.flush()`]);
+  const plant = spawnSync(PY, ['-c', `import pyoxigraph as px\ns = px.Store(${JSON.stringify(store)})\ns.update('INSERT DATA { GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:selfcheck/1> <urn:ex:selfCheck> true . <urn:ex:other/1> <urn:ex:selfCheck> true } }')\ns.flush()`]);
   assert.equal(plant.status, 0, String(plant.stderr));
   e = await start(store, false);
   try {
-    const left = (await (await fetch(`${e.base}/query`, { method: 'POST', body: 'SELECT ?s WHERE { ?s <urn:ex:selfCheck> true }' })).json()).results.bindings.map((b) => b.s.value);
+    const left = (await (await fetch(`${e.base}/query`, { method: 'POST', body: 'SELECT ?s WHERE { GRAPH <urn:scrum:bookkeeping:executor> { ?s <urn:ex:selfCheck> true } }' })).json()).results.bindings.map((b) => b.s.value);
     assert.deepEqual(left, ['urn:ex:other/1'], 'only the reserved-namespace probe is removed');
   } finally { e.p.kill('SIGKILL'); }
 });
