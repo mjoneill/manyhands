@@ -126,7 +126,7 @@ export function readLogStrict(logDir, sinceSeq, limit) {
  * STRICT, SINGLE READ of the work ledger, for the same reason: the ledger cursor is a ROW INDEX, so a
  * skipped line would shift every later index. Read once, every line validated (id, seq, transition.type),
  * and the batch projects these parsed rows. An unterminated LAST line is an append in flight: waiting.
- * REFUSES: a missing work directory; a missing ledger file once rows were already projected; a cursor
+ * REFUSES: a missing work directory; a missing ledger file (at any cursor); a cursor
  * past the ledger's row count (SOURCE REGRESSION).
  */
 export const WORK_FILE = 'work-objects.jsonl';
@@ -134,10 +134,9 @@ export function readLedgerStrict(workDir, cursorRows) {
   let st = null; try { st = fs.statSync(workDir); } catch { /* reported below */ }
   if (!st || !st.isDirectory()) throw new Error(`MISSING SOURCE: the work store directory ${workDir} does not exist — nothing sent`);
   const full = path.join(workDir, WORK_FILE);
-  if (!fs.existsSync(full)) {
-    if (cursorRows > 0) throw new Error(`MISSING SOURCE: ${WORK_FILE} is missing from ${workDir} but ${cursorRows} ledger row(s) were already projected — nothing sent`);
-    return { rows: [], pendingTail: null };
-  }
+  // A missing ledger is refused even before the first projected row: a wrong path would otherwise read
+  // as an empty ledger and look caught up (#1641 review). There is no "no-ledger" mode; nothing needs one.
+  if (!fs.existsSync(full)) throw new Error(`MISSING SOURCE: ${WORK_FILE} is missing from ${workDir} (ledger cursor at row ${cursorRows}) — nothing sent`);
   const text = fs.readFileSync(full, 'utf8');
   const lines = text.split('\n');
   const rows = []; let pendingTail = null;
