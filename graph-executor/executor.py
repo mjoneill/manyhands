@@ -383,8 +383,11 @@ class Executor:
             self.store.backup(target)
             return {'path': target, 'quads': len(self.store), **marker}
 
-    def query(self, sparql):
-        r = self.store.query(sparql)
+    def query(self, sparql, public=False):
+        # #1570 PUBLIC DATASET: the default graph only, and NO named graphs. Passed as an override, it wins
+        # over the query's own FROM / FROM NAMED / GRAPH <...> (measured on pyoxigraph 0.5.11), so bookkeeping
+        # kept in a named graph cannot be reached through a public read however the query is written.
+        r = self.store.query(sparql, default_graph=px.DefaultGraph(), named_graphs=[]) if public else self.store.query(sparql)
         if isinstance(r, (bool, px.QueryBoolean)):
             return {'head': {}, 'boolean': bool(r)}
         if isinstance(r, px.QueryTriples):
@@ -470,9 +473,9 @@ def make_handler(ex):
                     return self._send(500, {'error': str(e)[:300]})
                 ex.log(op, 'checkpoint', 'OK', (time.perf_counter() - t0) * 1000, sha)
                 return self._send(200, cp)
-            if self.path == '/query':
+            if self.path in ('/query', '/query?dataset=public'):
                 try:
-                    out = ex.query(body)
+                    out = ex.query(body, public=self.path == '/query?dataset=public')
                 except Exception as e:
                     ex.log(op, 'query', 'ERROR', (time.perf_counter() - t0) * 1000, sha)
                     return self._send(400, {'error': str(e)[:300]})

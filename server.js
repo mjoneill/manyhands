@@ -2150,6 +2150,16 @@ async function handleGraphNeighbors(req, res) {
   }
 }
 
+/**
+ * #1570 — WHICH STORE ANSWERS graph_query. `SCRUM_GRAPH_QUERY_SOURCE=executor` reads the executor directly
+ * (requires SCRUM_GRAPH_EXECUTOR_URL); anything else, or unset, is the in-process copy as before. Read once
+ * at start: flipping it is a restart, and flipping it back is the revert.
+ */
+const GRAPH_QUERY_SOURCE = process.env.SCRUM_GRAPH_QUERY_SOURCE === 'executor' ? 'executor' : 'replica';
+if (GRAPH_QUERY_SOURCE === 'executor' && !process.env.SCRUM_GRAPH_EXECUTOR_URL) {
+  throw new Error('#1570: SCRUM_GRAPH_QUERY_SOURCE=executor requires SCRUM_GRAPH_EXECUTOR_URL');
+}
+
 async function handleGraphQuery(req, res) {
   try {
     const body = JSON.parse(await readBody(req));
@@ -2165,14 +2175,23 @@ async function handleGraphQuery(req, res) {
     // #898 — event-loop utilization is sampled as a DELTA over this call, so a
     // slow row can say whether the loop was busy or the store was.
     const eluStart = performance.eventLoopUtilization();
-    const { queryGraph } = await loadGraphModules();
-    const { store, rebuiltMs, projectedThrough, executorPosition } = await warmGraphView();   // #1570
-    const result = queryGraph(store, body.query, { limit: body.limit });
-    if (executorPosition) result.executorPosition = executorPosition;   // #1570 — the executor records this answer includes
-    // #949 — read AFTER the sync, so `storeHead` reflects anything that landed
-    // during it. That ordering is the whole point: a write arriving mid-sync is
-    // the #931 window, and it must widen the gap rather than disappear into it.
-    result.watermark = graphWatermark(projectedThrough);
+    const { queryGraph, queryGraphExecutor } = await loadGraphModules();
+    let result; let rebuiltMs = null;
+    if (GRAPH_QUERY_SOURCE === 'executor') {
+      // #1570 — the switch: answered by the executor's PUBLIC dataset (default graph, no named graphs),
+      // with the same checks first. No replica, no sync, so no rebuild time and no replica watermark.
+      result = await queryGraphExecutor(process.env.SCRUM_GRAPH_EXECUTOR_URL, body.query, { limit: body.limit });
+      result.source = 'executor';
+    } else {
+      const view = await warmGraphView();   // #1570
+      rebuiltMs = view.rebuiltMs;
+      result = queryGraph(view.store, body.query, { limit: body.limit });
+      if (view.executorPosition) result.executorPosition = view.executorPosition;   // #1570 — the executor records this answer includes
+      // #949 — read AFTER the sync, so `storeHead` reflects anything that landed
+      // during it. That ordering is the whole point: a write arriving mid-sync is
+      // the #931 window, and it must widen the gap rather than disappear into it.
+      result.watermark = graphWatermark(view.projectedThrough);
+    }
     const totalMs = Math.round(performance.now() - tCall);
     // #898 — WHAT THESE NUMBERS MEASURE, said beside them. Two production rows
     // (9,443ms and 28,610ms) reproduce in 1ms and 53ms and cannot be explained,
@@ -2215,6 +2234,7 @@ async function handleGraphQuery(req, res) {
     sendJSON(res, 200, result);
   } catch (e) {
     if (e.code === 'GRAPH_DEPS_MISSING' || e.code === 'GRAPH_EXECUTOR_UNAVAILABLE') return sendJSON(res, 503, { error: e.message, code: e.code });   // #1570: never the replica alone
+    if (e.code === 'GRAPH_UNAVAILABLE') return sendJSON(res, 503, { error: e.message, code: e.code });   // #1570: the executor could not answer; never a fallback to the replica
     if (e.code === 'READ_ONLY' || e.code === 'EMPTY_QUERY') return sendJSON(res, 400, { error: e.message, code: e.code });
     // #885 — an unbounded path refusal carries its OWN hint naming the query
     // that works, and it must survive to the caller. The generic branch below

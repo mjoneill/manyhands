@@ -2334,7 +2334,11 @@ export function censusByType(store) {
 
 // `terms: true` (internal; #1610) keeps each literal's datatype: a row value becomes {value, termType, datatype}. The
 // public surface leaves it off and answers exactly as before.
-export function queryGraph(store, sparql, { limit, terms = false } = {}) {
+/**
+ * #1570 — every check graph_query makes BEFORE it runs (read-only, unbounded path, prefixes, vocabulary)
+ * and the LIMIT probe, independent of WHICH store answers. Returns the text to run and the row cap.
+ */
+export function prepareGraphQuery(sparql, { limit } = {}) {
   if (typeof sparql !== 'string' || !sparql.trim()) throw Object.assign(new Error('empty query'), { code: 'EMPTY_QUERY' });
   // ⛔ #899 — STRIP STRING LITERALS BEFORE LOOKING FOR VERBS, or the board's own
   // event vocabulary becomes unqueryable in its own provenance log:
@@ -2587,8 +2591,13 @@ export function queryGraph(store, sparql, { limit, terms = false } = {}) {
   const probe = wanted + 1;
   const body = declared ? sparql.replace(/\bLIMIT\s+\d+/i, `LIMIT ${probe}`) : `${sparql}\nLIMIT ${probe}`;
 
+  return { text: `${SPARQL_PREFIXES}\n${body}`, wanted };
+}
+
+export function queryGraph(store, sparql, { limit, terms = false } = {}) {
+  const { text, wanted } = prepareGraphQuery(sparql, { limit });
   const t = performance.now();
-  const out = store.query(`${SPARQL_PREFIXES}\n${body}`);
+  const out = store.query(text);
   const ms = performance.now() - t;
 
   if (typeof out === 'boolean') return { ask: out, rows: [], returned: 0, truncated: false, ms };
@@ -2599,6 +2608,42 @@ export function queryGraph(store, sparql, { limit, terms = false } = {}) {
       row[k] = terms
         ? { value: v.value, termType: v.termType, datatype: v.termType === 'Literal' ? v.datatype?.value ?? null : null }
         : (v.termType === 'NamedNode' ? shorten(v.value) : v.value);
+    }
+    rows.push(row);
+    if (rows.length > wanted) break;
+  }
+  const truncated = rows.length > wanted;
+  if (truncated) rows.length = wanted;
+  return { rows, returned: rows.length, truncated, limit: wanted, ms: Math.round(ms * 10) / 10 };
+}
+
+/**
+ * #1570 — the same answer shape as `queryGraph`, from the EXECUTOR instead of the in-process copy.
+ * The same checks run first (prepareGraphQuery). The read goes to the executor's PUBLIC dataset
+ * (`/query?dataset=public`: the default graph and no named graphs, enforced by the executor itself),
+ * so bookkeeping kept in a named graph cannot be reached however the query is phrased.
+ */
+const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
+const RDF_LANG_STRING = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#langString';
+export async function queryGraphExecutor(executorUrl, sparql, { limit, terms = false, timeoutMs = 30_000, fetchImpl = fetch } = {}) {
+  const { text, wanted } = prepareGraphQuery(sparql, { limit });
+  const t = performance.now();
+  const res = await fetchImpl(`${executorUrl}/query?dataset=public`, { method: 'POST', body: text, signal: AbortSignal.timeout(timeoutMs) });
+  const raw = await res.text();
+  const ms = performance.now() - t;
+  let j = null; try { j = JSON.parse(raw); } catch { /* reported below */ }
+  if (res.status !== 200 || !j) {
+    throw Object.assign(new Error(`the executor refused the query: HTTP ${res.status} ${(j?.error ?? raw).slice(0, 300)}`), { code: res.status === 400 ? 'QUERY_ERROR' : 'GRAPH_UNAVAILABLE' });
+  }
+  if (typeof j.boolean === 'boolean') return { ask: j.boolean, rows: [], returned: 0, truncated: false, ms };
+  const rows = [];
+  for (const b of j.results.bindings) {
+    const row = {};
+    for (const [k, v] of Object.entries(b)) {
+      const termType = v.type === 'uri' ? 'NamedNode' : v.type === 'bnode' ? 'BlankNode' : 'Literal';
+      row[k] = terms
+        ? { value: v.value, termType, datatype: termType === 'Literal' ? (v.datatype ?? (v['xml:lang'] ? RDF_LANG_STRING : XSD_STRING)) : null }
+        : (termType === 'NamedNode' ? shorten(v.value) : v.value);
     }
     rows.push(row);
     if (rows.length > wanted) break;
