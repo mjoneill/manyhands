@@ -11,7 +11,7 @@ Contract (D2 v1 §3, #1565; evidence #1555 T10/T11/T13):
   * localhost only; the dataset identity is checked at startup (fencing)
 
 usage: python executor.py --store DIR --port N --dataset-id ID [--create] [--log FILE] [--exit-on-stdin-eof]
-                           [--checkpoint-dir DIR] [--promote-epoch] [--adopt-home]
+                           [--checkpoint-dir DIR] [--promote-epoch] [--adopt-home] [--read-only]
 """
 import argparse, hashlib, json, os, sys, threading, time, urllib.parse, uuid
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
@@ -19,6 +19,13 @@ import pyoxigraph as px
 
 NS = 'urn:ex:'
 DATASET = px.NamedNode(NS + 'dataset')
+# #1638 — every bookkeeping triple (the marker, receipts, the self-check probe, ver/recordedBy/entityJson)
+# lives in this NAMED graph, which the public query dataset cannot reach. Domain stays in the default graph.
+BK = 'urn:scrum:bookkeeping:executor'
+def in_bk(pattern):
+    return f'GRAPH <{BK}> {{ {pattern} }}'
+LAYOUT_REFUSAL = ('REFUSED: store is in the pre-#1638 layout (its marker is in the default graph); '
+                  'run graph-executor/migrate_bookkeeping.py --forward into a new store, then promote that store')
 P_DATASET_ID = px.NamedNode(NS + 'datasetId')
 P_EPOCH = px.NamedNode(NS + 'epoch')
 P_COMMIT_SEQ = px.NamedNode(NS + 'commitSeq')
@@ -65,6 +72,11 @@ def parse_args(argv):
                     help='#1577: this store was MOVED (not copied): record its current path as its home and keep its '
                          'incarnation. Refused while a store still exists at the recorded home (that is a copy: '
                          'promote it with --promote-epoch instead)')
+    ap.add_argument('--read-only', action='store_true',
+                    help='#1638: serve reads only. Opens the store read-only (nothing in the directory changes), skips '
+                         'the startup self-check, and refuses every /update with 503 READ-ONLY. A fence for a store '
+                         'that must not change (a cutover, a rollback copy). Not combinable with --create, '
+                         '--promote-epoch or --adopt-home.')
     ap.add_argument('--exit-on-stdin-eof', action='store_true',
                     help='exit when stdin closes: a parent that dies (even by SIGKILL) takes the executor with it')
     ap.add_argument('--checkpoint-dir', default=None,
@@ -132,8 +144,10 @@ def home_refusal_readonly(store_dir, promote_epoch, adopt_home):
     except Exception:
         return None
     try:
+        if old_layout(ro):
+            return LAYOUT_REFUSAL
         def one(pred):
-            rows = list(ro.query(f'SELECT ?v WHERE {{ <{DATASET.value}> <{pred.value}> ?v }}'))
+            rows = list(ro.query(f'SELECT ?v WHERE {{ {in_bk(f"<{DATASET.value}> <{pred.value}> ?v")} }}'))
             return rows[0]['v'].value if len(rows) == 1 else None
         recorded_home, recorded_inode = one(P_STORE_HOME), one(P_STORE_HOME_INODE)
     except Exception:
@@ -144,9 +158,18 @@ def home_refusal_readonly(store_dir, promote_epoch, adopt_home):
     return home_refusal(recorded_home, recorded_inode, home, str(os.stat(home).st_ino), promote_epoch, adopt_home)
 
 
+def old_layout(store):
+    """#1638 — True when the marker sits in the DEFAULT graph (the pre-#1638 layout). Such a store is refused,
+    read-only or not: the new code never reads the old layout, and the migration is the only way across."""
+    return bool(store.query(f'ASK {{ <{DATASET.value}> ?p ?o }}'))
+
+
 class Executor:
     def __init__(self, store_dir, dataset_id, create=False, log=None, promote_epoch=False, checkpoint_dir=None,
-                 adopt_home=False):
+                 adopt_home=False, read_only=False):
+        self.read_only = bool(read_only)
+        if self.read_only and (create or promote_epoch or adopt_home):
+            raise SystemExit('REFUSED: --read-only cannot be combined with --create, --promote-epoch or --adopt-home')
         self.checkpoint_dir = os.path.abspath(checkpoint_dir or (os.path.abspath(store_dir).rstrip('/') + '.checkpoints'))
         # #1577 (a reviewer's v2.9 C0): the HOME check decides through a READ-ONLY open, BEFORE the
         # read-write open. A read-write open rewrites LOCK/LOG/WAL/MANIFEST/OPTIONS/CURRENT even when
@@ -157,9 +180,11 @@ class Executor:
             if refusal:
                 raise SystemExit(refusal)
         try:
-            self.store = px.Store(store_dir)
+            self.store = px.Store.read_only(store_dir) if self.read_only else px.Store(store_dir)
         except OSError as e:
-            raise SystemExit(f'REFUSED: store could not be opened for writing (durability fault): {e}')
+            raise SystemExit(f'REFUSED: store could not be opened{" read-only" if self.read_only else " for writing (durability fault)"}: {e}')
+        if old_layout(self.store):
+            raise SystemExit(LAYOUT_REFUSAL)
         # #1577 where this store is (after the open: it creates the directory)
         self.home = os.path.realpath(store_dir)
         self.home_inode = str(os.stat(self.home).st_ino)
@@ -179,10 +204,10 @@ class Executor:
             if len(self.store) != 0:
                 raise SystemExit('REFUSED: --create on a non-empty store')
             self.store.update(
-                f'INSERT DATA {{ <{DATASET.value}> <{P_DATASET_ID.value}> {json.dumps(dataset_id)} ; '
+                f'INSERT DATA {{ GRAPH <{BK}> {{ <{DATASET.value}> <{P_DATASET_ID.value}> {json.dumps(dataset_id)} ; '
                 f'<{P_EPOCH.value}> 1 ; <{P_COMMIT_SEQ.value}> 0 ; '
                 f'<{P_INCARNATION.value}> {json.dumps(str(uuid.uuid4()))} ; <{P_STORE_HOME.value}> {json.dumps(self.home)} ; '
-                f'<{P_STORE_HOME_INODE.value}> {json.dumps(self.home_inode)} }}')   # #1577
+                f'<{P_STORE_HOME_INODE.value}> {json.dumps(self.home_inode)} }} }}')   # #1577, #1638
             self.store.flush()
             marker = self._marker()
         elif create:
@@ -208,19 +233,21 @@ class Executor:
         # It must DIRTY the store: a flush with nothing pending can succeed without touching
         # the disk (a reviewer, #1559 13:28Z). So: write a self-check triple, flush, delete it,
         # flush. The store's logical content is unchanged.
+        self.promoted = None
+        if self.read_only:
+            return   # #1638 a read-only fence writes nothing: no self-check, no promotion, no identity backfill
         probe = f'<{NS}selfcheck/{int(time.time() * 1000)}>'
         try:
             # a crash between an earlier self-check's insert and delete would leave its probe behind
-            self.store.update(f'DELETE {{ ?stale <{NS}selfCheck> true }} WHERE {{ ?stale <{NS}selfCheck> true . FILTER(STRSTARTS(STR(?stale), "{NS}selfcheck/")) }}')   # reserved namespace AND predicate only
-            self.store.update(f'INSERT DATA {{ {probe} <{NS}selfCheck> true }}')
+            self.store.update(f'DELETE {{ GRAPH <{BK}> {{ ?stale <{NS}selfCheck> true }} }} WHERE {{ GRAPH <{BK}> {{ ?stale <{NS}selfCheck> true }} FILTER(STRSTARTS(STR(?stale), "{NS}selfcheck/")) }}')   # reserved namespace AND predicate only
+            self.store.update(f'INSERT DATA {{ GRAPH <{BK}> {{ {probe} <{NS}selfCheck> true }} }}')
             self.store.flush()
-            self.store.update(f'DELETE DATA {{ {probe} <{NS}selfCheck> true }}')
+            self.store.update(f'DELETE DATA {{ GRAPH <{BK}> {{ {probe} <{NS}selfCheck> true }} }}')
             self.store.flush()
         except OSError as e:
             raise SystemExit(f'REFUSED: startup self-check write+flush failed (durability fault): {e}')
         # #1559 restore PROMOTION: a new epoch, visible before any write is served. Never a rollback
         # of the commit sequence (D1 v0.2): commitSeq is left as the restored store recorded it.
-        self.promoted = None
         if promote_epoch:
             before_marker = self._marker()
             before = int(before_marker['epoch'])
@@ -235,15 +262,15 @@ class Executor:
             # would leave two promoted copies of one backup on the same epoch AND the same incarnation.
             D = DATASET.value
             self.store.update(
-                f'DELETE {{ <{D}> <{P_EPOCH.value}> ?e . <{D}> <{P_EPOCH_BASE.value}> ?b . <{D}> <{P_INCARNATION.value}> ?i . '
-                f'<{D}> <{P_INCARNATION_FROM.value}> ?f . <{D}> <{P_STORE_HOME.value}> ?h . <{D}> <{P_STORE_HOME_INODE.value}> ?n }} '
-                f'INSERT {{ <{D}> <{P_EPOCH.value}> ?e1 . <{D}> <{P_EPOCH_BASE.value}> ?s . '
+                f'DELETE {{ GRAPH <{BK}> {{ <{D}> <{P_EPOCH.value}> ?e . <{D}> <{P_EPOCH_BASE.value}> ?b . <{D}> <{P_INCARNATION.value}> ?i . '
+                f'<{D}> <{P_INCARNATION_FROM.value}> ?f . <{D}> <{P_STORE_HOME.value}> ?h . <{D}> <{P_STORE_HOME_INODE.value}> ?n }} }} '
+                f'INSERT {{ GRAPH <{BK}> {{ <{D}> <{P_EPOCH.value}> ?e1 . <{D}> <{P_EPOCH_BASE.value}> ?s . '
                 f'<{D}> <{P_INCARNATION.value}> {json.dumps(new_inc)} . <{D}> <{P_INCARNATION_FROM.value}> ?i . '
-                f'<{D}> <{P_STORE_HOME.value}> {json.dumps(self.home)} . <{D}> <{P_STORE_HOME_INODE.value}> {json.dumps(self.home_inode)} }} '
-                f'WHERE {{ <{D}> <{P_EPOCH.value}> ?e ; <{P_COMMIT_SEQ.value}> ?s . '
+                f'<{D}> <{P_STORE_HOME.value}> {json.dumps(self.home)} . <{D}> <{P_STORE_HOME_INODE.value}> {json.dumps(self.home_inode)} }} }} '
+                f'WHERE {{ GRAPH <{BK}> {{ <{D}> <{P_EPOCH.value}> ?e ; <{P_COMMIT_SEQ.value}> ?s . '
                 f'OPTIONAL {{ <{D}> <{P_EPOCH_BASE.value}> ?b }} OPTIONAL {{ <{D}> <{P_INCARNATION.value}> ?i }} '
                 f'OPTIONAL {{ <{D}> <{P_INCARNATION_FROM.value}> ?f }} OPTIONAL {{ <{D}> <{P_STORE_HOME.value}> ?h }} '
-                f'OPTIONAL {{ <{D}> <{P_STORE_HOME_INODE.value}> ?n }} '
+                f'OPTIONAL {{ <{D}> <{P_STORE_HOME_INODE.value}> ?n }} }} '
                 f'BIND(?e + 1 AS ?e1) }}')
             self.store.flush()
             self.promoted = {'from': before, 'to': int(self._marker()['epoch']), 'incarnationFrom': prev,
@@ -265,9 +292,9 @@ class Executor:
 
     def _set_identity(self, pred, value):
         """Replace the single marker value of `pred` (or remove it when value is None)."""
-        ins = f'INSERT {{ <{DATASET.value}> <{pred.value}> {json.dumps(value)} }} ' if value is not None else ''
-        self.store.update(f'DELETE {{ <{DATASET.value}> <{pred.value}> ?v }} {ins}'
-                          f'WHERE {{ OPTIONAL {{ <{DATASET.value}> <{pred.value}> ?v }} }}')
+        ins = f'INSERT {{ GRAPH <{BK}> {{ <{DATASET.value}> <{pred.value}> {json.dumps(value)} }} }} ' if value is not None else ''
+        self.store.update(f'DELETE {{ GRAPH <{BK}> {{ <{DATASET.value}> <{pred.value}> ?v }} }} {ins}'
+                          f'WHERE {{ OPTIONAL {{ GRAPH <{BK}> {{ <{DATASET.value}> <{pred.value}> ?v }} }} }}')
 
     def _identity(self):
         """#1577 incarnation / incarnationFrom / storeHome / epochBase, each None when absent. Never raises."""
@@ -275,7 +302,7 @@ class Executor:
         for key, pred in (('incarnation', P_INCARNATION), ('incarnationFrom', P_INCARNATION_FROM),
                           ('storeHome', P_STORE_HOME), ('storeHomeInode', P_STORE_HOME_INODE), ('epochBase', P_EPOCH_BASE)):
             try:
-                rows = list(self.store.query(f'SELECT ?v WHERE {{ <{DATASET.value}> <{pred.value}> ?v }}'))
+                rows = list(self.store.query(f'SELECT ?v WHERE {{ {in_bk(f"<{DATASET.value}> <{pred.value}> ?v")} }}'))
                 out[key] = rows[0]['v'].value if len(rows) == 1 else (None if not rows else f'CONTRADICTORY ({len(rows)} values)')
             except Exception:
                 out[key] = None
@@ -286,15 +313,15 @@ class Executor:
         integer. Never raises: _marker() refuses (SystemExit) on a contradictory marker, which is
         right at startup and fatal mid-request (it killed the process in the resolver suite)."""
         try:
-            rows = list(self.store.query(f'SELECT ?e WHERE {{ <{DATASET.value}> <{P_EPOCH.value}> ?e }}'))
+            rows = list(self.store.query(f'SELECT ?e WHERE {{ {in_bk(f"<{DATASET.value}> <{P_EPOCH.value}> ?e")} }}'))
             return int(rows[0]['e'].value) if len(rows) == 1 else None
         except Exception:
             return None
 
     def _marker(self):
         rows = list(self.store.query(
-            f'SELECT ?id ?e ?s WHERE {{ <{DATASET.value}> <{P_DATASET_ID.value}> ?id ; '
-            f'<{P_EPOCH.value}> ?e ; <{P_COMMIT_SEQ.value}> ?s }}'))
+            f'SELECT ?id ?e ?s WHERE {{ GRAPH <{BK}> {{ <{DATASET.value}> <{P_DATASET_ID.value}> ?id ; '
+            f'<{P_EPOCH.value}> ?e ; <{P_COMMIT_SEQ.value}> ?s }} }}'))
         if not rows:
             return None
         if len(rows) != 1:
@@ -308,7 +335,7 @@ class Executor:
             self.log_file.write(f'{ts} {op_id or "-"} {kind} {status} {ms:.3f} {body_sha}\n')
 
     def receipt(self, op_iri):
-        rows = list(self.store.query(f'SELECT ?p ?o WHERE {{ <{op_iri}> ?p ?o }}'))
+        rows = list(self.store.query(f'SELECT ?p ?o WHERE {{ {in_bk(f"<{op_iri}> ?p ?o")} }}'))
         if not rows:
             return None
         out = {}
@@ -410,6 +437,7 @@ class Executor:
         except SystemExit as e:
             m = {'markerError': str(e)}
         return {**m, **self._identity(), 'status': 'DEGRADED' if self.degraded else 'OK', 'degraded': self.degraded, 'promoted': self.promoted,
+                'readOnly': self.read_only, 'layout': 'bookkeeping-graph',
                 'flushes': self.flushes, 'updates': self.updates, 'syncMode': SYNC_MODE, 'listenBacklog': LISTEN_BACKLOG}
 
 
@@ -441,6 +469,9 @@ def make_handler(ex):
             body = raw.decode()
             op = self.headers.get('x-op-id')
             if self.path == '/update':
+                if ex.read_only:   # #1638 the fence: nothing is written, and the writer is TOLD, never silently dropped
+                    ex.log(op, 'update', 'REFUSED-READ-ONLY', 0, sha)
+                    return self._send(503, {'error': 'READ-ONLY: this executor serves reads only (a cutover or rollback fence); writes are refused', 'readOnly': True})
                 if not op:
                     ex.log(None, 'update', 'REFUSED-NO-OPID', 0, sha)
                     return self._send(400, {'error': 'x-op-id header required'})
@@ -488,7 +519,7 @@ def make_handler(ex):
 def main(argv):
     a = parse_args(argv)
     ex = Executor(a.store, a.dataset_id, create=a.create, log=a.log, promote_epoch=a.promote_epoch,
-                  checkpoint_dir=a.checkpoint_dir, adopt_home=a.adopt_home)
+                  checkpoint_dir=a.checkpoint_dir, adopt_home=a.adopt_home, read_only=a.read_only)
     srv = Server(('127.0.0.1', a.port), make_handler(ex))
     if a.exit_on_stdin_eof:
         def watch():
