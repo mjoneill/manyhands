@@ -173,7 +173,7 @@ test('#1559 END TO END: a real storage fault latches the executor; the healthche
     const rec = await c.reconcile(failed);
     assert.ok(['APPLIED', 'ABSENT'].includes(rec.outcome), rec.outcome);
     assert.equal((await c.update(failed)).outcome, 'APPLIED');
-    const n = (await c.query(`SELECT ?o WHERE { <${failed.opId}> <urn:ex:outcome> ?o }`)).rows.length;
+    const n = (await c.query(`SELECT ?o WHERE { GRAPH <urn:scrum:bookkeeping:executor> { <${failed.opId}> <urn:ex:outcome> ?o } }`)).rows.length;
     assert.equal(n, 1, 'exactly one receipt for the failed op');
 
     // a SECOND fault inside the min interval: logged, HELD, the process is not touched

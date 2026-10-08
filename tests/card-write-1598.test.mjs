@@ -25,8 +25,17 @@ async function withExec(body) {
   try { return await body(createGraphClient({ baseUrl: x.baseUrl, expectedDatasetId: 'cw-test', timeoutMs: 30000 })); } finally { await killExecutor(x); }
 }
 const rows = async (g, sparql) => { const q = await g.query(sparql); assert.ok(q.ok, q.reason); return q.rows; };
-const triplesOf = async (g, iri) => (await rows(g, `SELECT ?p ?o WHERE { <${iri}> ?p ?o }`)).map((r) => `${r.p.value} ${r.o.value}`).sort();
-const verOf = async (g, iri) => Number((await rows(g, `SELECT ?v WHERE { <${iri}> <urn:ex:ver> ?v }`))[0]?.v.value);
+// #1638: ver / entityJson are BOOKKEEPING and live in the named graph; triplesOf is the card's DOMAIN triples (default graph).
+const BK = '<urn:scrum:bookkeeping:executor>';
+// #1638: the DEFAULT-graph triples of a node; a bookkeeping stamp found among them is a misrouted write and fails here
+const STAMP_PREDICATES = ['urn:ex:ver', 'urn:ex:recordedBy', 'urn:ex:retiredBy', 'https://scrumboard.local/ns#entityJson'];
+const triplesOf = async (g, iri) => {
+  const t = (await rows(g, `SELECT ?p ?o WHERE { <${iri}> ?p ?o }`)).map((r) => `${r.p.value} ${r.o.value}`).sort();
+  assert.deepEqual(t.filter((x) => STAMP_PREDICATES.includes(x.split(' ')[0])), [], `${iri}: bookkeeping left in the default graph`);
+  return t;
+};
+const bkTriplesOf = async (g, iri) => (await rows(g, `SELECT ?p ?o WHERE { GRAPH ${BK} { <${iri}> ?p ?o } }`)).map((r) => `${r.p.value} ${r.o.value}`).sort();
+const verOf = async (g, iri) => Number((await rows(g, `SELECT ?v WHERE { GRAPH ${BK} { <${iri}> <urn:ex:ver> ?v } }`))[0]?.v.value);
 
 test('#1598 card.write: a create lands the projection, the version and the counter; a second create on the same id is PRECONDITION_FAILED', { skip: SKIP }, async () => {
   await withExec(async (g) => {
@@ -37,7 +46,7 @@ test('#1598 card.write: a create lands the projection, the version and the count
     assert.equal(await verOf(g, 'https://scrumboard.local/counter/nextShortId'), 2);
     const t = await triplesOf(g, cardIriOf('a1'));
     assert.ok(t.includes('https://schema.org/name card 1'), 'the projected name is there');
-    assert.ok(t.some((x) => x.startsWith('https://scrumboard.local/ns#entityJson ')), 'the wire JSON is there');
+    assert.ok((await bkTriplesOf(g, cardIriOf('a1'))).some((x) => x.startsWith('https://scrumboard.local/ns#entityJson ')), 'the wire JSON is there');
     const again = await g.update({ kind: 'card.write', opId: op(), actor: ACTOR, parts: [part(a, null)], counter: { expected: '2', next: '3' } });
     assert.equal(again.outcome, 'PRECONDITION_FAILED');
     assert.equal(await verOf(g, 'https://scrumboard.local/counter/nextShortId'), 2, 'a refused create burns no number');
@@ -96,7 +105,8 @@ test('#1598 card.write: a REMOVE part deletes every owned triple on the right ve
     const r = await g.update({ kind: 'card.write', opId: op(), actor: ACTOR, parts: [{ iri: cardIriOf('a5'), remove: true, expectedVersion: '1', prior: priorQuads(a, new Map()) }] });
     assert.equal(r.outcome, 'APPLIED', JSON.stringify(r));
     assert.deepEqual(await triplesOf(g, cardIriOf('a5')), [], 'the card subject holds nothing');
-    assert.equal((await rows(g, `SELECT ?s WHERE { ?s ?p ?o FILTER(STRSTARTS(STR(?s), "${cardIriOf('a5')}/")) }`)).length, 0, 'no derived node survives');
+    assert.deepEqual(await bkTriplesOf(g, cardIriOf('a5')), [], 'the card subject holds no bookkeeping either');
+    assert.equal((await rows(g, `SELECT ?s WHERE { { ?s ?p ?o } UNION { GRAPH ${BK} { ?s ?p ?o } } FILTER(STRSTARTS(STR(?s), "${cardIriOf('a5')}/")) }`)).length, 0, 'no derived node survives');
     assert.equal((await rows(g, 'SELECT ?t WHERE { <https://scrumboard.local/concept/keep-me> a ?t }')).length, 1, 'the shared concept stays');
   });
 });
@@ -107,7 +117,7 @@ test('#1598 card.write: card text that reads like SPARQL ("…; delete …", "; 
     const a = card('a6', 1, { title: 'x; DELETE WHERE { ?s ?p ?o }', description: text });
     const r = await g.update({ kind: 'card.write', opId: op(), actor: ACTOR, parts: [part(a, null)] });
     assert.equal(r.outcome, 'APPLIED', JSON.stringify(r));
-    const got = await rows(g, `SELECT ?t ?j WHERE { <${cardIriOf('a6')}> <https://schema.org/text> ?t ; <https://scrumboard.local/ns#entityJson> ?j }`);
+    const got = await rows(g, `SELECT ?t ?j WHERE { <${cardIriOf('a6')}> <https://schema.org/text> ?t . GRAPH ${BK} { <${cardIriOf('a6')}> <https://scrumboard.local/ns#entityJson> ?j } }`);
     assert.equal(got[0].t.value, text, 'the text reads back byte-for-byte');
     assert.deepEqual(JSON.parse(got[0].j.value), a, 'the wire JSON reads back as the same card');
   });

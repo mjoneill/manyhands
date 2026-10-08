@@ -234,7 +234,7 @@ test('#1561 ROLLBACK reconciles outstanding UNKNOWN writes by receipt, and refus
   const ex = await startExecutor(dsid, c.store);
   let applied;
   try {
-    const rows = (await ex.client.query('SELECT ?op WHERE { ?op <urn:ex:outcome> <urn:ex:APPLIED> FILTER(STRSTARTS(STR(?op), "urn:ex:op/logborn/memory/")) }')).rows;
+    const rows = (await ex.client.query('SELECT ?op WHERE { GRAPH <urn:scrum:bookkeeping:executor> { ?op <urn:ex:outcome> <urn:ex:APPLIED> } FILTER(STRSTARTS(STR(?op), "urn:ex:op/logborn/memory/")) }')).rows;
     applied = rows[0].op.value;
     const absent = 'urn:ex:op/logborn/memory/00000000-0000-4000-8000-00000000dead';
     const r = await rollback({ board: c.board, events: c.events, client: ex.client, mode: 'run', pending: [{ opId: applied, kind: 'memory.revise' }, { opId: absent, kind: 'memory.create' }] });

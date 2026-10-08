@@ -43,6 +43,8 @@ async function freshStore() {
   await ok({ kind: 'grant', opId: 'urn:ex:op/g', actor: 'urn:ex:admin', grant: { iri: 'urn:ex:G', grantee: 'urn:ex:bob', scope: 'urn:ex:scopeX', mayRetire: true, rev: '1' } });
   return { client, raw, resolve, ok };
 }
+// #1638: bookkeeping (receipts, ver, retiredBy, recordedBy) lives in its own named graph; raw faults on it go there.
+const BKG = 'GRAPH <urn:scrum:bookkeeping:executor>';
 const A = { grant: 'urn:ex:G', grantRev: '1', rule: 'urn:ex:R', ruleRev: '1' };
 const asrt = (iri, value, extra = {}) => ({ kind: 'assertion', opId: `urn:ex:op/${iri.split(':').pop()}`, actor: 'urn:ex:bob',
   newAssertion: { iri, subject: 'urn:ex:topic1', predicate: 'urn:ex:policy', value: { type: 'literal', value }, scope: 'urn:ex:scopeX' }, authority: A, ...extra });
@@ -105,15 +107,15 @@ test('#1558 R2: an unrelated op carrying a conflicting grant does not touch this
 // ONE labelled raw fault on top of compiled data; each must NOT certify CURRENT, and must name why.
 const FAULTS = [
   ['F1 grant scope moved after a plain assertion', 'DELETE DATA { <urn:ex:G> <urn:ex:scope> <urn:ex:scopeX> } ; INSERT DATA { <urn:ex:G> <urn:ex:scope> <urn:ex:scopeY> }', /grant-scope-mismatch/],
-  ['F2 provenance receipt outcome is PRECONDITION_FAILED', 'DELETE DATA { <urn:ex:op/A1> <urn:ex:outcome> <urn:ex:APPLIED> } ; INSERT DATA { <urn:ex:op/A1> <urn:ex:outcome> <urn:ex:PRECONDITION_FAILED> }', /receipt-not-applied/],
+  ['F2 provenance receipt outcome is PRECONDITION_FAILED', `DELETE DATA { ${BKG} { <urn:ex:op/A1> <urn:ex:outcome> <urn:ex:APPLIED> } } ; INSERT DATA { ${BKG} { <urn:ex:op/A1> <urn:ex:outcome> <urn:ex:PRECONDITION_FAILED> } }`, /receipt-not-applied/],
   ['F3 grantee is not the receipt actor', 'DELETE DATA { <urn:ex:G> <urn:ex:grantee> <urn:ex:bob> } ; INSERT DATA { <urn:ex:G> <urn:ex:grantee> <urn:ex:mallory> }', /grantee-mismatch/],
   ['F4 the only assertion raw-retired with no replacement', 'DELETE DATA { <urn:ex:A1> <urn:ex:status> <urn:ex:current> } ; INSERT DATA { <urn:ex:A1> <urn:ex:status> <urn:ex:retired> }', /retired-without-basis/],
   ['F5 the binding assertion carries an unknown status IRI', 'DELETE DATA { <urn:ex:A1> <urn:ex:status> <urn:ex:current> } ; INSERT DATA { <urn:ex:A1> <urn:ex:status> <urn:ex:bogus> }', /status-invalid/],
   ['F6 the receipt names a grant that does not exist', 'DELETE WHERE { <urn:ex:G> ?p ?o }', /grant-missing/],
-  ['F7 the receipt has no grantRev', 'DELETE WHERE { <urn:ex:op/A1> <urn:ex:grantRev> ?o }', /missing-receipt-grantRev/],
-  ['F8 the receipt has two actors', 'INSERT DATA { <urn:ex:op/A1> <urn:ex:actor> <urn:ex:mallory> }', /receipt-actor-conflict/],
+  ['F7 the receipt has no grantRev', `DELETE WHERE { ${BKG} { <urn:ex:op/A1> <urn:ex:grantRev> ?o } }`, /missing-receipt-grantRev/],
+  ['F8 the receipt has two actors', `INSERT DATA { ${BKG} { <urn:ex:op/A1> <urn:ex:actor> <urn:ex:mallory> } }`, /receipt-actor-conflict/],
   ['F9 the rule the receipt names does not exist', 'DELETE WHERE { <urn:ex:R> ?p ?o }', /rule-missing/],
-  ['F10 the receipt itself is gone (recordedBy dangles)', 'DELETE WHERE { <urn:ex:op/A1> ?p ?o }', /missing-receipt/],
+  ['F10 the receipt itself is gone (recordedBy dangles)', `DELETE WHERE { ${BKG} { <urn:ex:op/A1> ?p ?o } }`, /missing-receipt/],
   ['F11 grant inactive', 'DELETE DATA { <urn:ex:G> <urn:ex:active> true } ; INSERT DATA { <urn:ex:G> <urn:ex:active> false }', /grant-inactive/],
   ['F12 assertion author differs from the receipt actor', 'DELETE DATA { <urn:ex:A1> <urn:ex:author> <urn:ex:bob> } ; INSERT DATA { <urn:ex:A1> <urn:ex:author> <urn:ex:mallory> }', /author-actor-mismatch/],
 ];
@@ -154,9 +156,9 @@ test('#1558 R2 (cost): the query\'s rows for a topic do not grow with unrelated 
 
 // ---------- a reviewer review 3 ----------
 const correctionFaults = [
-  ['retiredBy missing on the retired target', 'DELETE WHERE { <urn:ex:A1> <urn:ex:retiredBy> ?o }', /retiredBy-missing/],
-  ['retiredBy has a second value', 'INSERT DATA { <urn:ex:A1> <urn:ex:retiredBy> <urn:ex:op/other> }', /retiredBy-conflict/],
-  ['retiredBy points at another receipt', 'DELETE WHERE { <urn:ex:A1> <urn:ex:retiredBy> ?o } ; INSERT DATA { <urn:ex:A1> <urn:ex:retiredBy> <urn:ex:op/other> }', /retiredBy-mismatch/],
+  ['retiredBy missing on the retired target', `DELETE WHERE { ${BKG} { <urn:ex:A1> <urn:ex:retiredBy> ?o } }`, /retiredBy-missing/],
+  ['retiredBy has a second value', `INSERT DATA { ${BKG} { <urn:ex:A1> <urn:ex:retiredBy> <urn:ex:op/other> } }`, /retiredBy-conflict/],
+  ['retiredBy points at another receipt', `DELETE WHERE { ${BKG} { <urn:ex:A1> <urn:ex:retiredBy> ?o } } ; INSERT DATA { ${BKG} { <urn:ex:A1> <urn:ex:retiredBy> <urn:ex:op/other> } }`, /retiredBy-mismatch/],
 ];
 for (const [label, fault, want] of correctionFaults) {
   test(`#1558 review3 #1: ${label} → UNRESOLVED (${want.source})`, { skip: SKIP }, async () => {
@@ -177,8 +179,8 @@ const fieldFaults = [
   ['binding missing (would otherwise read as an observation)', 'DELETE WHERE { <urn:ex:A1> <urn:ex:binding> ?o }', /candidate-malformed:urn:ex:A1:binding-missing/],
   ['scope missing (would otherwise read as ineligible)', 'DELETE WHERE { <urn:ex:A1> <urn:ex:scope> ?o }', /candidate-malformed:urn:ex:A1:scope-missing/],
   ['value missing', 'DELETE WHERE { <urn:ex:A1> <urn:ex:value> ?o }', /candidate-malformed:urn:ex:A1:value-missing/],
-  ['ver is not an integer', 'DELETE WHERE { <urn:ex:A1> <urn:ex:ver> ?o } ; INSERT DATA { <urn:ex:A1> <urn:ex:ver> "one" }', /candidate-malformed:urn:ex:A1:ver-invalid/],
-  ['a malformed OTHER candidate blocks NO_AUTHORITY too', 'DELETE WHERE { <urn:ex:A1> ?p ?o } ; INSERT DATA { <urn:ex:B> a <urn:ex:Assertion> ; <urn:ex:subject> <urn:ex:topic1> }', /candidate-malformed:urn:ex:B:/],
+  ['ver is not an integer', `DELETE WHERE { ${BKG} { <urn:ex:A1> <urn:ex:ver> ?o } } ; INSERT DATA { ${BKG} { <urn:ex:A1> <urn:ex:ver> "one" } }`, /candidate-malformed:urn:ex:A1:ver-invalid/],
+  ['a malformed OTHER candidate blocks NO_AUTHORITY too', `DELETE WHERE { <urn:ex:A1> ?p ?o } ; DELETE WHERE { ${BKG} { <urn:ex:A1> ?p ?o } } ; INSERT DATA { <urn:ex:B> a <urn:ex:Assertion> ; <urn:ex:subject> <urn:ex:topic1> }`, /candidate-malformed:urn:ex:B:/],
 ];
 for (const [label, fault, want] of fieldFaults) {
   test(`#1558 review3 #2: ${label} → UNRESOLVED`, { skip: SKIP }, async () => {

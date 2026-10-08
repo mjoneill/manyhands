@@ -67,7 +67,7 @@ test('#1559 a storage fault LATCHES: the failing write is UNKNOWN, health says D
     assert.ok(['APPLIED', 'ABSENT'].includes(rec.outcome), `reconciled: ${rec.outcome}`);
     const replay = await c2.update(failed);   // the same intention: applies once at most, never twice
     assert.equal(replay.outcome, 'APPLIED');
-    const n = (await c2.query(`SELECT ?o WHERE { <${failed.opId}> <urn:ex:outcome> ?o }`)).rows.length;
+    const n = (await c2.query(`SELECT ?o WHERE { GRAPH <urn:scrum:bookkeeping:executor> { <${failed.opId}> <urn:ex:outcome> ?o } }`)).rows.length;
     assert.equal(n, 1, 'exactly one receipt for the failed op after reconcile + replay');
     assert.equal((await c2.update(rule(3))).outcome, 'APPLIED', 'writes are open again');
   } finally {

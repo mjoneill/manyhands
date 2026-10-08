@@ -30,14 +30,26 @@ async function withExec(body) {
   try { return await body(createGraphClient({ baseUrl: x.baseUrl, expectedDatasetId: 'cl-test', timeoutMs: 30000 })); } finally { await killExecutor(x); }
 }
 const rows = async (g, q) => { const r = await g.query(q); assert.ok(r.ok, r.reason); return r.rows; };
-const triplesOf = async (g, iri) => (await rows(g, `SELECT ?p ?o WHERE { <${iri}> ?p ?o }`)).map((r) => `${r.p.value} ${r.o.value}`).sort();
+// #1638: ver / entityJson are BOOKKEEPING (named graph); triplesOf = the entity's DOMAIN triples (default graph),
+// bkTriplesOf = its bookkeeping, allTriplesOf = both (used where the test says "nothing of it is left / landed").
+const BK = '<urn:scrum:bookkeeping:executor>';
+// #1638: the DEFAULT-graph triples of a node; a bookkeeping stamp found among them is a misrouted write and fails here
+const STAMP_PREDICATES = ['urn:ex:ver', 'urn:ex:recordedBy', 'urn:ex:retiredBy', 'https://scrumboard.local/ns#entityJson'];
+const triplesOf = async (g, iri) => {
+  const t = (await rows(g, `SELECT ?p ?o WHERE { <${iri}> ?p ?o }`)).map((r) => `${r.p.value} ${r.o.value}`).sort();
+  assert.deepEqual(t.filter((x) => STAMP_PREDICATES.includes(x.split(' ')[0])), [], `${iri}: bookkeeping left in the default graph`);
+  return t;
+};
+const bkTriplesOf = async (g, iri) => (await rows(g, `SELECT ?p ?o WHERE { GRAPH ${BK} { <${iri}> ?p ?o } }`)).map((r) => `${r.p.value} ${r.o.value}`).sort();
+const allTriplesOf = async (g, iri) => [...(await triplesOf(g, iri)), ...(await bkTriplesOf(g, iri))].sort();
 
 test('#1624 collection: a create lands with its membership, version and wire JSON; a second create of the same entity is PRECONDITION_FAILED', { skip: SKIP }, async () => {
   await withExec(async (g) => {
     const m = model('k1');
     assert.equal((await g.update(put([part('models', m)]))).outcome, 'APPLIED');
-    const t = await triplesOf(g, m['@id']);
-    assert.ok(t.includes(`${RS}inCollection models`) && t.includes('urn:ex:ver 1') && t.some((x) => x.startsWith(`${RS}entityJson `)), JSON.stringify(t));
+    // membership is domain (default graph); version and wire JSON are bookkeeping (named graph): each is read ONLY where it must live
+    const t = await triplesOf(g, m['@id']); const bk = await bkTriplesOf(g, m['@id']);
+    assert.ok(t.includes(`${RS}inCollection models`) && bk.includes('urn:ex:ver 1') && bk.some((x) => x.startsWith(`${RS}entityJson `)), JSON.stringify({ t, bk }));
     assert.equal((await g.update(put([part('models', m)]))).outcome, 'PRECONDITION_FAILED');
   });
 });
@@ -63,7 +75,7 @@ test('#1624 collection: a stale version lands nothing; the right one replaces th
     const t = await triplesOf(g, a['@id']);
     assert.ok(t.includes('https://schema.org/name second name') && !t.includes('https://schema.org/name first name'), JSON.stringify(t));
     assert.equal((await g.update(put([{ collection: 'models', iri: a['@id'], remove: true, expectedVersion: '2', prior: entityQuads(b) }]))).outcome, 'APPLIED');
-    assert.deepEqual(await triplesOf(g, a['@id']), []);
+    assert.deepEqual(await allTriplesOf(g, a['@id']), []);
   });
 });
 
@@ -74,7 +86,7 @@ test('#1624 card.write with collections is ONE update: a stale card part means t
     const m = model('with-card');
     const stale = { iri: cardIriOf('cw1'), expectedVersion: '9', version: '10', quads: cardQuads({ ...c, title: 'c2' }, new Map()), prior: [], json: JSON.stringify({ ...c, title: 'c2' }) };
     assert.equal((await g.update({ kind: 'card.write', opId: op(), actor: ACTOR, parts: [stale], collections: [part('models', m)] })).outcome, 'PRECONDITION_FAILED');
-    assert.deepEqual(await triplesOf(g, m['@id']), [], 'the collection entity did not land');
+    assert.deepEqual(await allTriplesOf(g, m['@id']), [], 'the collection entity did not land');
     const good = { ...stale, expectedVersion: '1', version: '2' };
     assert.equal((await g.update({ kind: 'card.write', opId: op(), actor: ACTOR, parts: [good], collections: [part('models', m)] })).outcome, 'APPLIED');
     assert.ok((await triplesOf(g, m['@id'])).includes(`${RS}inCollection models`), 'both landed together');
@@ -96,7 +108,7 @@ test('#1624 collection: a part that REQUIRES a subject lands only while that sub
     assert.equal((await g.update(put([ref('a')]))).outcome, 'APPLIED', 'the target exists: the referencing write lands');
     assert.equal((await g.update(put([{ collection: 'models', iri: target['@id'], remove: true, expectedVersion: '1', prior: entityQuads(target) }]))).outcome, 'APPLIED', 'deleting the target is never blocked by a reference');
     assert.equal((await g.update(put([ref('b')]))).outcome, 'PRECONDITION_FAILED', 'the target is gone: a write that sets a reference to it is refused');
-    assert.deepEqual(await triplesOf(g, 'https://scrumboard.local/thing/b'), [], 'and nothing of it landed');
+    assert.deepEqual(await allTriplesOf(g, 'https://scrumboard.local/thing/b'), [], 'and nothing of it landed');
   });
 });
 

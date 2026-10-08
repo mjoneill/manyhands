@@ -83,10 +83,18 @@ async function startExecutor(dsid, store = fs.mkdtempSync(path.join(os.tmpdir(),
 const seqOf = async (url) => Number((await (await fetch(`${url}/health`)).json()).commitSeq);
 const rawUpdate = (url, sparql) => fetch(`${url}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/tamper/${Math.random()}` }, body: sparql }).then((r) => r.status);
 /** Every triple on every Person node, receipts' recordedBy included: the identity surface, as text. */
+// #1638: recordedBy is bookkeeping (named graph), so the surface is the Person nodes' default-graph triples PLUS their bookkeeping triples.
+const Q_PEOPLE_BK = 'SELECT ?s ?p ?o WHERE { ?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://schema.org/Person> . GRAPH <urn:scrum:bookkeeping:executor> { ?s ?p ?o } }';
 const personSurface = async (client) => {
   const r = await client.query(Q_PEOPLE);
   assert.ok(r.ok, r.reason);
-  return r.rows.map((b) => `${b.s.value} ${b.p.value} ${b.o.value}`).sort();
+  const bk = await client.query(Q_PEOPLE_BK);
+  assert.ok(bk.ok, bk.reason);
+  // no bookkeeping stamp may sit on a Person in the DEFAULT graph at all (consistently wrong placement would pass equality),
+  // and each row names its graph so a stamp that MOVED between graphs fails the equality too
+  const STAMPS = ['urn:ex:ver', 'urn:ex:recordedBy', 'urn:ex:retiredBy', 'https://scrumboard.local/ns#entityJson'];
+  assert.deepEqual(r.rows.filter((b) => STAMPS.includes(b.p.value)).map((b) => `${b.s.value} ${b.p.value}`), [], 'bookkeeping left on a Person in the default graph');
+  return [...r.rows.map((b) => `${b.s.value} ${b.p.value} ${b.o.value}`), ...bk.rows.map((b) => `[bk] ${b.s.value} ${b.p.value} ${b.o.value}`)].sort();
 };
 const isPerson = async (client, k) => (await client.query(`SELECT ?t WHERE { <${P(k)}> a ?t }`)).rows.length > 0;
 
@@ -163,9 +171,9 @@ test('#1561 IMPORT: one receipted person.import of plan.create; unresolved refer
     for (const u of ['author nobody', 'scrum:decidedBy nodecider', 'scrum:owner nobody']) assert.ok(unresolved.includes(u), `${u} in ${unresolved}`);
 
     // the receipt: ONE op recorded every imported identity
-    const rec = await ex.client.query(`SELECT ?s WHERE { ?s <urn:ex:recordedBy> <${run.people.opId}> }`);
+    const rec = await ex.client.query(`SELECT ?s WHERE { GRAPH <urn:scrum:bookkeeping:executor> { ?s <urn:ex:recordedBy> <${run.people.opId}> } }`);
     assert.equal(rec.rows.length, run.people.create);
-    const receipt = await ex.client.query(`SELECT ?o WHERE { <${run.people.opId}> <urn:ex:outcome> ?o }`);
+    const receipt = await ex.client.query(`SELECT ?o WHERE { GRAPH <urn:scrum:bookkeeping:executor> { <${run.people.opId}> <urn:ex:outcome> ?o } }`);
     assert.deepEqual(receipt.rows.map((b) => b.o.value), ['urn:ex:APPLIED']);
     for (const k of ['dave', 'erin']) assert.equal(await isPerson(ex.client, k), true, `${k} imported`);
     for (const k of ['nobody', 'nodecider']) assert.equal(await isPerson(ex.client, k), false, `${k} NOT minted (a reference, not a source)`);

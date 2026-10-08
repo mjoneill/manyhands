@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { EX, NS } from '../core/graph-vocab.mjs';
+import { EX, NS, BK } from '../core/graph-vocab.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const EXEC = path.join(ROOT, 'graph-executor', 'executor.py');
@@ -76,7 +76,7 @@ before(async () => {
 after(() => { srv?.proc.kill('SIGKILL'); });
 
 async function seq() {
-  const r = await rows(`SELECT ?s WHERE { <${NS}dataset> <${NS}commitSeq> ?s }`);
+  const r = await rows(`SELECT ?s WHERE { GRAPH ${BK} { <${NS}dataset> <${NS}commitSeq> ?s } }`);
   return r[0].s.value;
 }
 
@@ -93,12 +93,15 @@ function recordA(iriV, value, status = 'current', ver = '1', binding = true, rec
   tails.push(`<${NS}binding> ${binding}`);
   tails.push(`<${NS}status> <${NS}${status}>`);
   tails.push(`<${NS}ver> ${ver}`);
-  if (recordedBy) tails.push(`<${NS}recordedBy> <${recordedBy}>`);
-  if (supersedes) tails.push(`<${NS}supersedes> <${supersedes}>`);
-  if (retiredBy) tails.push(`<${NS}retiredBy> <${retiredBy}>`);
-  if (author) tails.push(`<${NS}author> <${author}>`);
-  const joined = tails.map((t, i) => i === tails.length - 1 ? `${t} .` : `${t} ;`).join(' ');
-  return `INSERT DATA { ${subj} ${joined} }`;
+  // #1638 layout: ver / recordedBy / retiredBy are BOOKKEEPING (named graph); the rest of the node is domain.
+  const bk = [`<${NS}ver> ${ver}`];
+  const domain = tails.filter((t) => !t.startsWith(`<${NS}ver>`));
+  if (recordedBy) bk.push(`<${NS}recordedBy> <${recordedBy}>`);
+  if (supersedes) domain.push(`<${NS}supersedes> <${supersedes}>`);
+  if (retiredBy) bk.push(`<${NS}retiredBy> <${retiredBy}>`);
+  if (author) domain.push(`<${NS}author> <${author}>`);
+  const join = (ts) => ts.map((t, i) => i === ts.length - 1 ? `${t} .` : `${t} ;`).join(' ');
+  return `INSERT DATA { ${subj} ${join(domain)} } ; INSERT DATA { GRAPH ${BK} { ${subj} ${join(bk)} } }`;
 }
 
 function receiptIri(rid, grant, grantRev, rule, ruleRev, target, actor, outcome = 'APPLIED') {
@@ -112,7 +115,7 @@ function receiptIri(rid, grant, grantRev, rule, ruleRev, target, actor, outcome 
   tails.push(`<${NS}ruleRev> ${ruleRev}`);
   tails.push(`<${NS}target> <${target}>`);
   const joined = tails.map((t, i) => i === tails.length - 1 ? `${t} .` : `${t} ;`).join(' ');
-  return `INSERT DATA { ${subj} ${joined} }`;
+  return `INSERT DATA { GRAPH ${BK} { ${subj} ${joined} } }`; // #1638: a receipt is bookkeeping
 }
 
 function grantIri(gid, grantee, scope, mayRetire, rev) {
@@ -131,15 +134,16 @@ function ruleIri(rid, rev) {
 }
 
 function datasetMarker(datasetId = 'dev-resolver-fixture') {
-  return `INSERT DATA {
+  return `INSERT DATA { GRAPH ${BK} {
     <${NS}dataset> <${NS}datasetId> ${JSON.stringify(datasetId)} ;
       <${NS}epoch> 1 ;
       <${NS}commitSeq> 0 .
-  }`;
+  } }`;
 }
 
 async function resetGraph({ extras = [] } = {}) {
   await execUpdate('DELETE WHERE { ?s ?p ?o }');
+  await execUpdate(`DELETE WHERE { GRAPH ${BK} { ?s ?p ?o } }`); // #1638: the bookkeeping graph is wiped too
   await execUpdate(datasetMarker());
   for (const e of extras) await execUpdate(e);
 }
@@ -286,8 +290,8 @@ test('CURRENT: newer non-binding observation does not override prior binding aut
   await execUpdate(recordA(a1, 'alpha', 'current', '1', true, rec1));
   // bump seq so a2 is "newer" — replace the previous commitSeq atomically so
   // the marker remains a single value (not contradictory)
-  await execUpdate(`DELETE WHERE { <${NS}dataset> <${NS}commitSeq> ?o }`);
-  await execUpdate(`INSERT DATA { <${NS}dataset> <${NS}commitSeq> 5 . }`);
+  await execUpdate(`DELETE WHERE { GRAPH ${BK} { <${NS}dataset> <${NS}commitSeq> ?o } }`);
+  await execUpdate(`INSERT DATA { GRAPH ${BK} { <${NS}dataset> <${NS}commitSeq> 5 . } }`);
   await execUpdate(recordA(a2, 'stale-numeric-observer', 'current', '1', false));
   await execUpdate(receiptIri(rec1, g, '1', r, '1', a1, 'urn:ex:t/bob'));
   await execUpdate(grantIri(g, 'urn:ex:t/bob', SCOPE, true, '1'));
@@ -390,7 +394,7 @@ test('UNRESOLVED: non-retroactive — current grant rev advanced, receipt at old
 test('UNAVAILABLE: missing marker yields UNAVAILABLE, never empty', { skip: SKIP }, async () => {
   await resetGraph();
   // delete the marker
-  await execUpdate(`DELETE WHERE { <${NS}dataset> ?p ?o }`);
+  await execUpdate(`DELETE WHERE { GRAPH ${BK} { <${NS}dataset> ?p ?o } }`);
   const env = await client.resolve({ topic: TOPIC, predicate: PRED, scope: SCOPE, evaluationTime: '2026-10-04T03:21:14Z' });
   assert.equal(env.status, 'UNAVAILABLE');
   assert.match(env.reason, /marker/);
@@ -398,7 +402,7 @@ test('UNAVAILABLE: missing marker yields UNAVAILABLE, never empty', { skip: SKIP
 
 test('UNAVAILABLE: contradictory marker (multiple commitSeq) yields UNAVAILABLE', { skip: SKIP }, async () => {
   await resetGraph();
-  await execUpdate(`INSERT DATA { <${NS}dataset> <${NS}commitSeq> 7 . }`);
+  await execUpdate(`INSERT DATA { GRAPH ${BK} { <${NS}dataset> <${NS}commitSeq> 7 . } }`);
   const env = await client.resolve({ topic: TOPIC, predicate: PRED, scope: SCOPE, evaluationTime: '2026-10-04T03:21:14Z' });
   assert.equal(env.status, 'UNAVAILABLE');
   assert.match(env.reason, /marker/);
@@ -406,8 +410,8 @@ test('UNAVAILABLE: contradictory marker (multiple commitSeq) yields UNAVAILABLE'
 
 test('UNAVAILABLE: malformed marker literal (non-integer) yields UNAVAILABLE', { skip: SKIP }, async () => {
   await resetGraph();
-  await execUpdate(`DELETE WHERE { <${NS}dataset> <${NS}commitSeq> ?o }`);
-  await execUpdate(`INSERT DATA { <${NS}dataset> <${NS}commitSeq> "not-int" . }`);
+  await execUpdate(`DELETE WHERE { GRAPH ${BK} { <${NS}dataset> <${NS}commitSeq> ?o } }`);
+  await execUpdate(`INSERT DATA { GRAPH ${BK} { <${NS}dataset> <${NS}commitSeq> "not-int" . } }`);
   const env = await client.resolve({ topic: TOPIC, predicate: PRED, scope: SCOPE, evaluationTime: '2026-10-04T03:21:14Z' });
   assert.equal(env.status, 'UNAVAILABLE');
   assert.match(env.reason, /marker/);
@@ -491,8 +495,8 @@ test('UNAVAILABLE: missing evaluationTime is rejected', async () => {
 test('CURRENT: large integer marker preserved as exact integer string (no JS Number coercion)', { skip: SKIP }, async () => {
   await resetGraph();
   // overwrite marker with a large integer
-  await execUpdate(`DELETE WHERE { <${NS}dataset> <${NS}commitSeq> ?o }`);
-  await execUpdate(`INSERT DATA { <${NS}dataset> <${NS}commitSeq> 9007199254740993 . }`);
+  await execUpdate(`DELETE WHERE { GRAPH ${BK} { <${NS}dataset> <${NS}commitSeq> ?o } }`);
+  await execUpdate(`INSERT DATA { GRAPH ${BK} { <${NS}dataset> <${NS}commitSeq> 9007199254740993 . } }`);
   const env = await client.resolve({ topic: TOPIC, predicate: PRED, scope: SCOPE, evaluationTime: '2026-10-04T03:21:14Z' });
   assert.equal(env.status, 'NO_AUTHORITY');
   assert.equal(env.observedRevision.commitSeq, '9007199254740993');
@@ -605,9 +609,8 @@ test('CURRENT: legacy bootstrap with no recordedBy/retiredBy is reported (not fa
       <${NS}value> "alpha" ;
       <${NS}scope> <${SCOPE}> ;
       <${NS}binding> true ;
-      <${NS}status> <${NS}current> ;
-      <${NS}ver> 1 .
-  }`);
+      <${NS}status> <${NS}current> .
+  } ; INSERT DATA { GRAPH ${BK} { <${a1}> <${NS}ver> 1 . } }`);
   await execUpdate(grantIri(g, 'urn:ex:t/bob', SCOPE, true, '1'));
   await execUpdate(ruleIri(r, '1'));
   // bootstrap style — explicit fabricated receipt + grant exists but is not linked via recordedBy

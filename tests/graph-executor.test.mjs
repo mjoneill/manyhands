@@ -81,7 +81,8 @@ test('#1558 an update without an opId is refused and changes nothing', { skip: S
 
 test('#1558 an update is flushed before its acknowledgement, and the receipt is read back from the store', { skip: SKIP }, async () => {
   const before = await (await fetch(`http://127.0.0.1:${port}/health`)).json();
-  const body = 'INSERT DATA { <urn:ex:op/t1> <urn:ex:outcome> <urn:ex:APPLIED> ; <urn:ex:digest> "d1" }';
+  // #1638: a receipt is bookkeeping, so the fixture writes it into the bookkeeping graph
+  const body = 'INSERT DATA { GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:op/t1> <urn:ex:outcome> <urn:ex:APPLIED> ; <urn:ex:digest> "d1" } }';
   const r = await post(port, '/update', body, { 'x-op-id': 'urn:ex:op/t1' });
   assert.equal(r.status, 200);
   const j = await r.json();

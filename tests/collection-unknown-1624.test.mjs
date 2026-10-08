@@ -50,12 +50,13 @@ async function world(body) {
   try { return await body({ unit, p, direct }); } finally { p.close(); await killExecutor(x); }
 }
 const model = (key) => ({ '@id': `https://scrumboard.local/model/${key}`, '@type': 'scrum:Model', 'scrum:modelKey': key, name: key });
+// #1638: ver / recordedBy are bookkeeping and live in the named graph.
 const writesOf = async (direct, iri) => {
-  const q = await direct.query(`SELECT ?op WHERE { <${iri}> <urn:ex:recordedBy> ?op }`);
+  const q = await direct.query(`SELECT ?op WHERE { GRAPH <urn:scrum:bookkeeping:executor> { <${iri}> <urn:ex:recordedBy> ?op } }`);
   assert.ok(q.ok, q.reason); return q.rows.length;
 };
 const verOf = async (direct, iri) => {
-  const q = await direct.query(`SELECT ?v WHERE { <${iri}> <urn:ex:ver> ?v }`);
+  const q = await direct.query(`SELECT ?v WHERE { GRAPH <urn:scrum:bookkeeping:executor> { <${iri}> <urn:ex:ver> ?v } }`);
   assert.ok(q.ok, q.reason); return q.rows.map((r) => Number(r.v.value));
 };
 

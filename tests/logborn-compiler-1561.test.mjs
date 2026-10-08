@@ -175,16 +175,20 @@ before(async () => {
 });
 after(() => { proc?.kill('SIGKILL'); });
 
-const DOMAIN_Q = 'SELECT ?s ?p ?o WHERE { ?s ?p ?o FILTER(!STRSTARTS(STR(?s), "urn:ex:op/") && ?s != <urn:ex:dataset>) }';
+// #1638: ver / recordedBy / entityJson are bookkeeping (named graph), but this fixture still wants them in the "nothing changed"
+// comparison, so it reads BOTH graphs (receipts and the marker are excluded by the same filter as before).
+const BK = '<urn:scrum:bookkeeping:executor>';
+const DOMAIN_Q = `SELECT ?s ?p ?o WHERE { { ?s ?p ?o } UNION { GRAPH ${BK} { ?s ?p ?o } } FILTER(!STRSTARTS(STR(?s), "urn:ex:op/") && ?s != <urn:ex:dataset>) }`;
 const domain = async () => (await client.query(DOMAIN_Q)).rows.map((b) => `${b.s.value} ${b.p.value} ${b.o.value}`).sort();
 const seq = async () => Number((await (await fetch(`${base}/health`)).json()).commitSeq);
+const bkVals = async (s, p) => (await client.query(`SELECT ?o WHERE { GRAPH ${BK} { <${s}> <${p}> ?o } }`)).rows.map((b) => b.o.value).sort();
 const vals = async (s, p) => (await client.query(`SELECT ?o WHERE { <${s}> <${p}> ?o }`)).rows.map((b) => b.o.value).sort();
 
 test('#1561 executor: memory.create applies; a replay changes nothing; a changed intention under the same opId is an intent-collision', { skip: SKIP }, async () => {
   const i = memCreate({ versions: [{ ...memCreate().versions[0], body: HOSTILE }] });
   assert.equal((await client.update(i)).outcome, 'APPLIED');
   assert.deepEqual(await vals(`${M}/v1`, 'https://scrumboard.local/ns#body'), [HOSTILE], 'hostile text round-trips byte-exact');
-  assert.deepEqual(await vals(M, 'urn:ex:ver'), ['1']);
+  assert.deepEqual(await bkVals(M, 'urn:ex:ver'), ['1']);
   const s0 = await seq(); const d0 = await domain();
   const again = await client.update(i);
   assert.equal(again.outcome, 'APPLIED', 'the replay reports the recorded outcome');
@@ -205,7 +209,7 @@ test('#1561 executor: a STALE memory.revise is PRECONDITION_FAILED and changes n
   assert.deepEqual(await vals(M, 'https://scrumboard.local/ns#tag'), ['c'], 'tags REPLACED, not added to');
   assert.deepEqual(await vals(M, 'https://schema.org/name'), ['retitled']);
   assert.deepEqual(await vals(M, 'https://scrumboard.local/ns#priority'), [], 'priority unset');
-  assert.deepEqual(await vals(M, 'urn:ex:ver'), ['2']);
+  assert.deepEqual(await bkVals(M, 'urn:ex:ver'), ['2']);
   assert.deepEqual(await vals(`${M}/v1`, 'https://scrumboard.local/ns#body'), [HOSTILE], 'v1 untouched');
   // the SAME expected version again (a writer who read before the last write) is refused
   const late = await client.update(memRevise('1', { set: { name: 'late', tags: [], currentVersion: `${M}/v2` }, versions: [] }));
@@ -247,7 +251,7 @@ test('#1561 executor: Person effects land on APPLIED and NOWHERE on PRECONDITION
   assert.deepEqual(await vals(P('hooked'), 'https://schema.org/name'), ['HOOKED']);
   assert.deepEqual(await vals(P('hooked'), 'https://scrumboard.local/ns#resolved'), ['true']);
   assert.deepEqual(await vals(P('hooked'), 'https://scrumboard.local/ns#aliases'), ['hk']);
-  assert.deepEqual(await vals(P('hooked'), 'urn:ex:recordedBy'), [good.opId]);
+  assert.deepEqual(await bkVals(P('hooked'), 'urn:ex:recordedBy'), [good.opId]);
   const s0 = await seq();
   const collide = await client.update({ ...good, people: [person('hooked', { name: 'Impostor' })] });
   assert.equal(collide.outcome, 'REJECTED'); assert.equal(collide.reason, 'intent-collision', 'same opId, different Person effects: detected');

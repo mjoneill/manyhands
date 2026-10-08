@@ -98,11 +98,12 @@ const call = async (method, p, body) => {
 /** Every receipt in the store whose op recorded something about memory `id` (direct to the executor, past the proxy). */
 async function receiptsFor(id) {
   const M = `https://scrumboard.local/memory/${id}`;
-  const q = `SELECT DISTINCT ?op ?out WHERE { ?op <urn:ex:outcome> ?out . { ?op <urn:ex:target> <${M}> } UNION { ?v <urn:ex:recordedBy> ?op ; <https://scrumboard.local/ns#ofMemory> <${M}> } }`;
+  // #1638: receipts (outcome, target) and the recordedBy stamp are bookkeeping, read from their named graph; ofMemory is domain.
+  const q = `SELECT DISTINCT ?op ?out WHERE { GRAPH <urn:scrum:bookkeeping:executor> { ?op <urn:ex:outcome> ?out } { GRAPH <urn:scrum:bookkeeping:executor> { ?op <urn:ex:target> <${M}> } } UNION { GRAPH <urn:scrum:bookkeeping:executor> { ?v <urn:ex:recordedBy> ?op } ?v <https://scrumboard.local/ns#ofMemory> <${M}> } }`;
   const r = await (await fetch(`${EXE.base}/query`, { method: 'POST', body: q })).json();
   return r.results.bindings.map((b) => ({ op: b.op.value, outcome: b.out.value.replace(/^.*[#/:]/, '') }));
 }
-const allReceipts = async () => (await (await fetch(`${EXE.base}/query`, { method: 'POST', body: 'SELECT ?op WHERE { ?op <urn:ex:outcome> ?o }' })).json()).results.bindings.length;
+const allReceipts = async () => (await (await fetch(`${EXE.base}/query`, { method: 'POST', body: 'SELECT ?op WHERE { GRAPH <urn:scrum:bookkeeping:executor> { ?op <urn:ex:outcome> ?o } }' })).json()).results.bindings.length;
 
 test('#1561 UNKNOWN (applied, reply lost): memory.create is reconciled by its receipt — one memory, one receipt, one dispatch', { skip: SKIP }, async () => {
   const r0 = await allReceipts();
