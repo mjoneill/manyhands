@@ -170,6 +170,11 @@ class Executor:
         self.read_only = bool(read_only)
         if self.read_only and (create or promote_epoch or adopt_home):
             raise SystemExit('REFUSED: --read-only cannot be combined with --create, --promote-epoch or --adopt-home')
+        # #1638 C7 — a migration builds its copy at <dest>.partial and renames it onto <dest> only once it is complete and
+        # verified. A directory still named *.partial is an INTERRUPTED copy: never served, read-only or not.
+        if os.path.basename(os.path.abspath(store_dir).rstrip('/')).endswith('.partial'):
+            raise SystemExit(f'REFUSED: {store_dir} is an unpublished migration staging directory (*.partial): an interrupted '
+                             'copy is never served; remove it and rerun graph-executor/migrate_bookkeeping.py')
         self.checkpoint_dir = os.path.abspath(checkpoint_dir or (os.path.abspath(store_dir).rstrip('/') + '.checkpoints'))
         # #1577 (a reviewer's v2.9 C0): the HOME check decides through a READ-ONLY open, BEFORE the
         # read-write open. A read-write open rewrites LOCK/LOG/WAL/MANIFEST/OPTIONS/CURRENT even when
