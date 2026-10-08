@@ -115,6 +115,8 @@ def main(argv):
     except OSError:
         die(1, f'REFUSED: --source {src} is held open by another process (its LOCK is taken): stop the executor and '
                'confirm it has exited before migrating. Nothing written.')
+    # a stated, greppable moment: from here until exit no other process can open the source (a row waits for this line)
+    print(f'migrate_bookkeeping: SOURCE LOCKED {src} (held until exit)', file=sys.stderr, flush=True)
     preds, prefixes, subjects = load_definition()
     bkg = px.NamedNode(BK)
     t0 = time.time()
