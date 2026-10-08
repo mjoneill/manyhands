@@ -1,0 +1,2562 @@
+TAP version 13
+# file: tests/admission-control-a1.test.mjs complete
+# Subtest: A0 CONTROL: with no hold, 40 concurrent distinct reads all answer 200, and the healthy card read's queries are counted
+ok 1 - A0 CONTROL: with no hold, 40 concurrent distinct reads all answer 200, and the healthy card read's queries are counted # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 1.567625
+  type: 'test'
+  ...
+# Subtest: A1 CAP: with the executor held 12 s, 60 distinct reads at once leave between 1 and 16 queries outstanding at the executor two seconds in
+ok 2 - A1 CAP: with the executor held 12 s, 60 distinct reads at once leave between 1 and 16 queries outstanding at the executor two seconds in # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.060791
+  type: 'test'
+  ...
+# Subtest: A2 SLOT: a request that timed out does not free its slot while its query still runs: wave two never lifts the executor's outstanding queries above wave one's peak
+ok 3 - A2 SLOT: a request that timed out does not free its slot while its query still runs: wave two never lifts the executor's outstanding queries above wave one's peak # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.037666
+  type: 'test'
+  ...
+# Subtest: A3 NO RETRY: a card read with the executor held 6 s is refused and the executor receives no query body twice and no more queries than the healthy read sent
+ok 4 - A3 NO RETRY: a card read with the executor held 6 s is refused and the executor receives no query body twice and no more queries than the healthy read sent # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.036375
+  type: 'test'
+  ...
+# Subtest: A4 SHED: with the executor held 10 s, 300 distinct reads at once: a fast 503 exists, every answer is a 200 or a 503, and a route that needs no graph still answers
+ok 5 - A4 SHED: with the executor held 10 s, 300 distinct reads at once: a fast 503 exists, every answer is a 200 or a 503, and a route that needs no graph still answers # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.102125
+  type: 'test'
+  ...
+# Subtest: A5 DRAIN: after the callers have gone the executor's outstanding queries reach 0 within 60 s, nothing more is issued, and a card read then answers 200
+ok 6 - A5 DRAIN: after the callers have gone the executor's outstanding queries reach 0 within 60 s, nothing more is issued, and a card read then answers 200 # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.032833
+  type: 'test'
+  ...
+# Subtest: A4b BOUNDED QUEUE: with the declared cap C and queue bound Q, the executor never has more than C queries outstanding and at least 300 - C - Q of 300 distinct reads are refused with a 503 inside 2 s
+ok 7 - A4b BOUNDED QUEUE: with the declared cap C and queue bound Q, the executor never has more than C queries outstanding and at least 300 - C - Q of 300 distinct reads are refused with a 503 inside 2 s # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.073416
+  type: 'test'
+  ...
+# Subtest: A6 COLD START: a REST that has read nothing yet, the document holding 300 posts, the executor held 12 s, 60 distinct reads at once: the executor never has more than the declared C queries outstanding, the held-ids read included
+ok 8 - A6 COLD START: a REST that has read nothing yet, the document holding 300 posts, the executor held 12 s, 60 distinct reads at once: the executor never has more than the declared C queries outstanding, the held-ids read included # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.028
+  type: 'test'
+  ...
+# Subtest: A7 CONNECTION LOST AFTER DISPATCH: with the executor still computing, no further read is served and the executor never exceeds C
+ok 9 - A7 CONNECTION LOST AFTER DISPATCH: with the executor still computing, no further read is served and the executor never exceeds C # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.278917
+  type: 'test'
+  ...
+# Subtest: A7b PREMATURE EOF, NOT FINISHED: a response that ends early with no length (a short body, no transport error) keeps the slot: no further read is served while the executor computes and it never exceeds C
+ok 10 - A7b PREMATURE EOF, NOT FINISHED: a response that ends early with no length (a short body, no transport error) keeps the slot: no further read is served while the executor computes and it never exceeds C # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.24025
+  type: 'test'
+  ...
+# Subtest: A8 NOTHING DISPATCHED, NOTHING LOST: with the executor down (connections refused) 30 reads are all refused, and when it is back a card read answers 200 with no REST restart
+ok 11 - A8 NOTHING DISPATCHED, NOTHING LOST: with the executor down (connections refused) 30 reads are all refused, and when it is back a card read answers 200 with no REST restart # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.072041
+  type: 'test'
+  ...
+# Subtest: A10 AN ANSWER IS COMPLETION: with the executor answering every query with a complete HTTP 500, 30 reads are refused, and once it answers normally a card read returns 200
+ok 12 - A10 AN ANSWER IS COMPLETION: with the executor answering every query with a complete HTTP 500, 30 reads are refused, and once it answers normally a card read returns 200 # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.027
+  type: 'test'
+  ...
+# Subtest: A3b NO RETRY AFTER A LOST CONNECTION: a card read whose connection is dropped after dispatch is refused; the executor receives no query body twice and no more queries than the healthy read sent
+ok 13 - A3b NO RETRY AFTER A LOST CONNECTION: a card read whose connection is dropped after dispatch is refused; the executor receives no query body twice and no more queries than the healthy read sent # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.02125
+  type: 'test'
+  ...
+# Subtest: A5b NOTHING IS ISSUED AFTER FAILED READS: with the callers' connections dropped after dispatch the executor drains and then receives nothing more for 8 s
+ok 14 - A5b NOTHING IS ISSUED AFTER FAILED READS: with the callers' connections dropped after dispatch the executor drains and then receives nothing more for 8 s # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.022792
+  type: 'test'
+  ...
+# Subtest: A6b GATE FULL, THEN THE COLD BUILD: with a cold REST and the gate filled by unlimited-list reads, the first targeted read's held-ids build waits its turn and the executor never exceeds C
+ok 15 - A6b GATE FULL, THEN THE COLD BUILD: with a cold REST and the gate filled by unlimited-list reads, the first targeted read's held-ids build waits its turn and the executor never exceeds C # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.11625
+  type: 'test'
+  ...
+# Subtest: A11 THE FEED IS BEHIND THE GATE: with the gate full, 20 distinct commit-ordered feed reads never lift the executor's outstanding queries above C
+ok 16 - A11 THE FEED IS BEHIND THE GATE: with the gate full, 20 distinct commit-ordered feed reads never lift the executor's outstanding queries above C # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.048042
+  type: 'test'
+  ...
+# Subtest: A12 /api/changes IS BEHIND THE GATE: with the log-born unit on and the gate full, 20 changes reads never lift the executor's outstanding queries above C
+ok 17 - A12 /api/changes IS BEHIND THE GATE: with the log-born unit on and the gate full, 20 changes reads never lift the executor's outstanding queries above C # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.042125
+  type: 'test'
+  ...
+# Subtest: A12b /api/changes, A CONNECTION LOST AFTER DISPATCH: with the executor still computing, no further changes read is served and the executor never exceeds C
+ok 18 - A12b /api/changes, A CONNECTION LOST AFTER DISPATCH: with the executor still computing, no further changes read is served and the executor never exceeds C # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.038792
+  type: 'test'
+  ...
+# file: tests/agent-thinking-wire-1260.test.mjs complete
+# Subtest: \#1260 the agent's thinking OVERRIDES the model's — the seat said false, the wire says false
+ok 19 - \#1260 the agent's thinking OVERRIDES the model's — the seat said false, the wire says false
+  ---
+  duration_ms: 5.129875
+  type: 'test'
+  ...
+# Subtest: \#1260 the override works in BOTH directions — a seat can turn thinking ON as well as off
+ok 20 - \#1260 the override works in BOTH directions — a seat can turn thinking ON as well as off
+  ---
+  duration_ms: 0.915459
+  type: 'test'
+  ...
+# Subtest: \#1260 the agent supplies the flag when the model has none — set is set, whichever side sets it
+ok 21 - \#1260 the agent supplies the flag when the model has none — set is set, whichever side sets it
+  ---
+  duration_ms: 0.397042
+  type: 'test'
+  ...
+# Subtest: \#1260 with NEITHER side setting it, the wire sends no think flag — unset is still a third state
+ok 22 - \#1260 with NEITHER side setting it, the wire sends no think flag — unset is still a third state
+  ---
+  duration_ms: 0.479125
+  type: 'test'
+  ...
+# Subtest: \#1260 THE TOOL PATH carries the agent's thinking too — the branch production actually runs
+ok 23 - \#1260 THE TOOL PATH carries the agent's thinking too — the branch production actually runs
+  ---
+  duration_ms: 1.055625
+  type: 'test'
+  ...
+# Subtest: \#1260 the tool path sends NO think flag when neither agent nor model sets one
+ok 24 - \#1260 the tool path sends NO think flag when neither agent nor model sets one
+  ---
+  duration_ms: 0.631583
+  type: 'test'
+  ...
+# file: tests/agent-constraints-1350.test.mjs complete
+# Subtest: \#1350 ACCEPTANCE 1 — one value at two layers: the agent record wins over the model spec and the layer is NAMED; drop the override and the model spec wins, named
+ok 25 - \#1350 ACCEPTANCE 1 — one value at two layers: the agent record wins over the model spec and the layer is NAMED; drop the override and the model spec wins, named
+  ---
+  duration_ms: 2.023416
+  type: 'test'
+  ...
+# Subtest: \#1350 ACCEPTANCE 2 — the hop-cap specimen is answerable from the surface: a record with maxHops 8 says 8 / agent record; a record without says the loop default / code default
+ok 26 - \#1350 ACCEPTANCE 2 — the hop-cap specimen is answerable from the surface: a record with maxHops 8 says 8 / agent record; a record without says the loop default / code default
+  ---
+  duration_ms: 0.153625
+  type: 'test'
+  ...
+# Subtest: \#1350 ACCEPTANCE 3 NEGATIVE CONTROL — set nowhere reads `unset`; a code-applied default reads `code default`, never blank
+ok 27 - \#1350 ACCEPTANCE 3 NEGATIVE CONTROL — set nowhere reads `unset`; a code-applied default reads `code default`, never blank
+  ---
+  duration_ms: 0.220708
+  type: 'test'
+  ...
+# Subtest: \#1350 everyMinutes becomes a live code default the moment schedule is in wakeOn — the value the loop would actually use
+ok 28 - \#1350 everyMinutes becomes a live code default the moment schedule is in wakeOn — the value the loop would actually use
+  ---
+  duration_ms: 0.058292
+  type: 'test'
+  ...
+# Subtest: \#1350 spent today comes from the ledger and is stated against the budget; holds come from the board
+ok 29 - \#1350 spent today comes from the ledger and is stated against the budget; holds come from the board
+  ---
+  duration_ms: 0.080791
+  type: 'test'
+  ...
+# Subtest: \#1350 ACCEPTANCE 4 — the layers the board cannot read are LISTED with a reason; delivery mode LEFT the list when \#1346 made it a field
+ok 30 - \#1350 ACCEPTANCE 4 — the layers the board cannot read are LISTED with a reason; delivery mode LEFT the list when \#1346 made it a field
+  ---
+  duration_ms: 0.098
+  type: 'test'
+  ...
+# Subtest: \#1350 wire — GET /api/agents/:seat/constraints serves the inspector; an unknown seat is a 404 that still names the blind spot
+ok 31 - \#1350 wire — GET /api/agents/:seat/constraints serves the inspector; an unknown seat is a 404 that still names the blind spot
+  ---
+  duration_ms: 236.479042
+  type: 'test'
+  ...
+# file: tests/agents-graph-a1.test.mjs complete
+# Subtest: A0 CONTROL: with the unit OFF every step of the script answers as listed in the header
+ok 32 - A0 CONTROL: with the unit OFF every step of the script answers as listed in the header
+  ---
+  duration_ms: 307.629875
+  type: 'test'
+  ...
+# Subtest: A1 PARITY OF ANSWERS AND REFUSALS: the script on a unit-on server answers the same statuses and masked wire
+ok 33 - A1 PARITY OF ANSWERS AND REFUSALS: the script on a unit-on server answers the same statuses and masked wire # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.103708
+  type: 'test'
+  ...
+# Subtest: A2 REST RELEASES THE CLAIMS, ONCE: both cards freed, named in the answer, ONE announcement; resting again releases nothing (unit off, then unit on, identical)
+ok 34 - A2 REST RELEASES THE CLAIMS, ONCE: both cards freed, named in the answer, ONE announcement; resting again releases nothing (unit off, then unit on, identical) # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.089583
+  type: 'test'
+  ...
+# Subtest: A3 NO PARTIAL EFFECT WITH THE EXECUTOR AWAY: the rest answers 503, the cards stay CLAIMED, nothing is announced; back, the same rest works
+ok 35 - A3 NO PARTIAL EFFECT WITH THE EXECUTOR AWAY: the rest answers 503, the cards stay CLAIMED, nothing is announced; back, the same rest works # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.031708
+  type: 'test'
+  ...
+# Subtest: A4 CONCURRENCY KEEPS THE IDENTITY (unit OFF is the control): versions 2..7 once each, current is the highest, one agent per seat key
+ok 36 - A4 CONCURRENCY KEEPS THE IDENTITY (unit OFF is the control): versions 2..7 once each, current is the highest, one agent per seat key
+  ---
+  duration_ms: 205.585834
+  type: 'test'
+  ...
+# Subtest: A4b CONCURRENCY KEEPS THE IDENTITY (unit ON): the same, through the graph
+ok 37 - A4b CONCURRENCY KEEPS THE IDENTITY (unit ON): the same, through the graph # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.163
+  type: 'test'
+  ...
+# Subtest: A5 THE GRAPH HOLDS IT, THE DOCUMENT DOES NOT: the prompt and the revised prompt are in the executor and not in the board file
+ok 38 - A5 THE GRAPH HOLDS IT, THE DOCUMENT DOES NOT: the prompt and the revised prompt are in the executor and not in the board file # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.0715
+  type: 'test'
+  ...
+# Subtest: A6 FAIL LOUD: executor away: create, prompt version and patch 503, the list 503, a malformed request still 400; back: the create lands once
+ok 39 - A6 FAIL LOUD: executor away: create, prompt version and patch 503, the list 503, a malformed request still 400; back: the create lands once # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.046125
+  type: 'test'
+  ...
+# file: tests/agent-persona.test.mjs complete
+# Subtest: \#1199 create → the node exists with prompt VERSION 1; a duplicate seat key is refused; the prompt cannot be overwritten by PATCH
+ok 40 - \#1199 create → the node exists with prompt VERSION 1; a duplicate seat key is refused; the prompt cannot be overwritten by PATCH
+  ---
+  duration_ms: 228.712292
+  type: 'test'
+  ...
+# Subtest: \#1199 REFUSALS that protect the record: no prompt · no model · a model spec carrying a key · a bad seat key · no by
+ok 41 - \#1199 REFUSALS that protect the record: no prompt · no model · a model spec carrying a key · a bad seat key · no by
+  ---
+  duration_ms: 198.588334
+  type: 'test'
+  ...
+# Subtest: \#1199 re-versioning keeps version 1 intact, moves currentPrompt, and the graph answers the card's own query with the CURRENT version
+ok 42 - \#1199 re-versioning keeps version 1 intact, moves currentPrompt, and the graph answers the card's own query with the CURRENT version
+  ---
+  duration_ms: 264.425083
+  type: 'test'
+  ...
+# Subtest: \#1199 PATCH sets state, grants, budget and model; a bad state is refused; retired is queryable
+ok 43 - \#1199 PATCH sets state, grants, budget and model; a bad state is refused; retired is queryable
+  ---
+  duration_ms: 184.251917
+  type: 'test'
+  ...
+# Subtest: \#1199 DISCLOSURE is mechanical: a guest is told it will not persist; a resident is told it persists and where its memory lives
+ok 44 - \#1199 DISCLOSURE is mechanical: a guest is told it will not persist; a resident is told it persists and where its memory lives
+  ---
+  duration_ms: 0.601541
+  type: 'test'
+  ...
+# Subtest: \#1199 → \#1202: a run from a BOARD agent records its prompt VERSION on the model-call row, so "which prompt wrote that post" is one hop
+ok 45 - \#1199 → \#1202: a run from a BOARD agent records its prompt VERSION on the model-call row, so "which prompt wrote that post" is one hop
+  ---
+  duration_ms: 253.208125
+  type: 'test'
+  ...
+# Subtest: \#1199 the Settings page carries the Agents panel: create, list, and save-as-new-version — wired to the routes above
+ok 46 - \#1199 the Settings page carries the Agents panel: create, list, and save-as-new-version — wired to the routes above
+  ---
+  duration_ms: 0.797542
+  type: 'test'
+  ...
+# file: tests/agent-thinking.test.mjs complete
+# Subtest: \#1196 thinking is stored and reads back — storage only; the wire is \#1260's file
+ok 47 - \#1196 thinking is stored and reads back — storage only; the wire is \#1260's file
+  ---
+  duration_ms: 245.702208
+  type: 'test'
+  ...
+# Subtest: \#1196 an agent write REFUSES an unknown field by name instead of dropping it
+ok 48 - \#1196 an agent write REFUSES an unknown field by name instead of dropping it
+  ---
+  duration_ms: 193.723458
+  type: 'test'
+  ...
+# Subtest: \#1196 a tool grant is checked against the REAL tools — a typo cannot read back as a grant
+ok 49 - \#1196 a tool grant is checked against the REAL tools — a typo cannot read back as a grant
+  ---
+  duration_ms: 186.24575
+  type: 'test'
+  ...
+# Subtest: \#1196 maxHops is settable per seat, reads back, clears to null, and refuses a ceiling that is not one
+ok 50 - \#1196 maxHops is settable per seat, reads back, clears to null, and refuses a ceiling that is not one
+  ---
+  duration_ms: 202.325292
+  type: 'test'
+  ...
+# file: tests/acceptance-upsert-replaces.test.mjs complete
+# Subtest: \#1158 `replaces` renames a condition IN PLACE: one entry after, evidence and note kept, slot kept
+ok 51 - \#1158 `replaces` renames a condition IN PLACE: one entry after, evidence and note kept, slot kept
+  ---
+  duration_ms: 178.994959
+  type: 'test'
+  ...
+# Subtest: \#1158 ⛔ NEGATIVE CONTROL — a reworded condition WITHOUT `replaces` is refused naming the twin; nothing written — including a rewording that CHANGES THE OPENING
+ok 52 - \#1158 ⛔ NEGATIVE CONTROL — a reworded condition WITHOUT `replaces` is refused naming the twin; nothing written — including a rewording that CHANGES THE OPENING
+  ---
+  duration_ms: 196.912291
+  type: 'test'
+  ...
+# Subtest: \#1158 a genuinely NEW condition still inserts, and an EXACT-text upsert still replaces (the \#1137 contract is unchanged)
+ok 53 - \#1158 a genuinely NEW condition still inserts, and an EXACT-text upsert still replaces (the \#1137 contract is unchanged)
+  ---
+  duration_ms: 194.254708
+  type: 'test'
+  ...
+# Subtest: \#1158 `replaces` naming a condition that does not exist is refused; `replaces` on a whole-array write is refused
+ok 54 - \#1158 `replaces` naming a condition that does not exist is refused; `replaces` on a whole-array write is refused
+  ---
+  duration_ms: 241.67625
+  type: 'test'
+  ...
+# Subtest: \#1158 REACHABILITY — `replaces` is declared on card_update over MCP and the description names the fork
+ok 55 - \#1158 REACHABILITY — `replaces` is declared on card_update over MCP and the description names the fork
+  ---
+  duration_ms: 520.512333
+  type: 'test'
+  ...
+# file: tests/announcement-graph-post-1574-c3c-addendum.test.mjs complete
+# Subtest: E1 a pending entry that already has a publicationAt but no postSeq KEEPS that publicationAt when the reservation adds the postSeq (it is never re-fixed): the node carries the kept time and the reserved number
+ok 72 - E1 a pending entry that already has a publicationAt but no postSeq KEEPS that publicationAt when the reservation adds the postSeq (it is never re-fixed): the node carries the kept time and the reserved number # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.556584
+  type: 'test'
+  ...
+# Subtest: E2 flag OFF: the document post's createdAt is the entry's STORED publicationAt (a time fixed earlier), not the moment of this write
+ok 73 - E2 flag OFF: the document post's createdAt is the entry's STORED publicationAt (a time fixed earlier), not the moment of this write
+  ---
+  duration_ms: 203.98225
+  type: 'test'
+  ...
+# file: tests/announcement-graph-post-1574-c3c.test.mjs complete
+# Subtest: I1 the module exports postCreateIntention, announcePostId and the namespace
+ok 74 - I1 the module exports postCreateIntention, announcePostId and the namespace
+  ---
+  duration_ms: 1.711583
+  type: 'test'
+  ...
+# Subtest: I1b the post id is a deterministic RFC 4122 version-5 UUID of `<mutationId>:<slot>`, distinct per mutation and per slot
+ok 75 - I1b the post id is a deterministic RFC 4122 version-5 UUID of `<mutationId>:<slot>`, distinct per mutation and per slot
+  ---
+  duration_ms: 0.647792
+  type: 'test'
+  ...
+# Subtest: I2 two builds from the same stored entry are byte-identical after canonicalisation, with a deterministic id and the frozen time
+ok 76 - I2 two builds from the same stored entry are byte-identical after canonicalisation, with a deterministic id and the frozen time
+  ---
+  duration_ms: 2.804875
+  type: 'test'
+  ...
+# Subtest: I3 the intention is built ONLY from the frozen payload: status, receipt, postId and publication fields do not change it, and the body does
+ok 77 - I3 the intention is built ONLY from the frozen payload: status, receipt, postId and publication fields do not change it, and the body does
+  ---
+  duration_ms: 1.48025
+  type: 'test'
+  ...
+# Subtest: I4 an entry with no valid postSeq, or no publicationAt, has no intention: absent, zero, negative, fractional, a string and an unsafe integer all THROW (neither a number nor a time is ever synthesised)
+ok 78 - I4 an entry with no valid postSeq, or no publicationAt, has no intention: absent, zero, negative, fractional, a string and an unsafe integer all THROW (neither a number nor a time is ever synthesised)
+  ---
+  duration_ms: 0.445542
+  type: 'test'
+  ...
+# Subtest: G1 publishing a publisher-mode entry writes ONE node with exactly its frozen fields, and only then marks it published
+ok 79 - G1 publishing a publisher-mode entry writes ONE node with exactly its frozen fields, and only then marks it published # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.072708
+  type: 'test'
+  ...
+# Subtest: G2 a repeat, and five simultaneous calls, leave exactly ONE node and the same published postId
+ok 80 - G2 a repeat, and five simultaneous calls, leave exactly ONE node and the same published postId # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.161667
+  type: 'test'
+  ...
+# Subtest: G3 a pre-planted opId with DIFFERENT content is blocked, never published, and the planted node is untouched
+ok 81 - G3 a pre-planted opId with DIFFERENT content is blocked, never published, and the planted node is untouched # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.052459
+  type: 'test'
+  ...
+# Subtest: G4 an executor that is DOWN leaves the entry pending (never blocked, never published), and the SAME entry publishes once the executor is back
+ok 82 - G4 an executor that is DOWN leaves the entry pending (never blocked, never published), and the SAME entry publishes once the executor is back # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.37525
+  type: 'test'
+  ...
+# Subtest: G5 caller input never reaches the node: a body, author and postId in the request are ignored
+ok 83 - G5 caller input never reaches the node: a body, author and postId in the request are ignored # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.468833
+  type: 'test'
+  ...
+# Subtest: G7 frozen MENTIONS are part of the node: the same set under ns\#mentionsName, and they are part of the digest
+ok 84 - G7 frozen MENTIONS are part of the node: the same set under ns\#mentionsName, and they are part of the digest # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.142625
+  type: 'test'
+  ...
+# Subtest: G6 a LEGACY-mode entry is still verified against the document and makes NO executor write, flag on
+ok 85 - G6 a LEGACY-mode entry is still verified against the document and makes NO executor write, flag on # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.046708
+  type: 'test'
+  ...
+# Subtest: D1 flag OFF: the document post carries the entry's publicationAt as its createdAt (one rule for both paths) and the frozen occurredAt as origin.occurredAt; this does NOT show it is discoverable
+ok 86 - D1 flag OFF: the document post carries the entry's publicationAt as its createdAt (one rule for both paths) and the frozen occurredAt as origin.occurredAt; this does NOT show it is discoverable
+  ---
+  duration_ms: 212.2555
+  type: 'test'
+  ...
+# Subtest: H3 while a REAL executor write is demonstrably held, a create, claim, per-card edit and read complete in seconds, the write is still outstanding after them, and the publish then finishes published
+ok 87 - H3 while a REAL executor write is demonstrably held, a create, claim, per-card edit and read complete in seconds, the write is still outstanding after them, and the publish then finishes published # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.139958
+  type: 'test'
+  ...
+# Subtest: X4 a crash AFTER the executor applied and BEFORE the entry is marked published: after restart a repeat is published, with ONE node and the same postId
+ok 88 - X4 a crash AFTER the executor applied and BEFORE the entry is marked published: after restart a repeat is published, with ONE node and the same postId # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.0705
+  type: 'test'
+  ...
+# Subtest: G8 ONE counter for two paths: a graph post takes the next number, a document post after it takes the one after, a second graph post the one after that, and no number is shared
+ok 89 - G8 ONE counter for two paths: a graph post takes the next number, a document post after it takes the one after, a second graph post the one after that, and no number is shared # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.044541
+  type: 'test'
+  ...
+# Subtest: G9 the reservation SURVIVES an unfinished attempt: executor down for two attempts, then reachable again; an ORDINARY post lands meanwhile and gets a HIGHER number (with the unit on an ordinary post is a graph post and takes its number from the same counter), then the same obligation publishes under its RESERVED number and digest, and the counter was consumed once
+ok 90 - G9 the reservation SURVIVES an unfinished attempt: executor down for two attempts, then reachable again; an ORDINARY post lands meanwhile and gets a HIGHER number (with the unit on an ordinary post is a graph post and takes its number from the same counter), then the same obligation publishes under its RESERVED number and digest, and the counter was consumed once # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.042959
+  type: 'test'
+  ...
+# Subtest: X5 a crash AFTER the reservation and BEFORE any executor contact: after restart the same obligation keeps its number and time, a document post made meanwhile got a higher number, and the publish then writes ONE node under the reserved number
+ok 91 - X5 a crash AFTER the reservation and BEFORE any executor contact: after restart the same obligation keeps its number and time, a document post made meanwhile got a higher number, and the publish then writes ONE node under the reserved number # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.079334
+  type: 'test'
+  ...
+# Subtest: G10 a CLEAN unmigrated board: a publisher-mode entry stays PENDING with POST_SEQ_MIGRATION_REQUIRED in the response, no number reserved, the executor never contacted and the board file byte-identical; after the stopped-file migration the same entry publishes with the next number
+ok 92 - G10 a CLEAN unmigrated board: a publisher-mode entry stays PENDING with POST_SEQ_MIGRATION_REQUIRED in the response, no number reserved, the executor never contacted and the board file byte-identical; after the stopped-file migration the same entry publishes with the next number # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.938291
+  type: 'test'
+  ...
+# Subtest: G11 a CORRUPT board refuses a publisher-mode publish: 500 POST_SEQ_STATE_CORRUPT, the executor never contacted, the file byte-identical, the entry still pending
+ok 93 - G11 a CORRUPT board refuses a publisher-mode publish: 500 POST_SEQ_STATE_CORRUPT, the executor never contacted, the file byte-identical, the entry still pending # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.067708
+  type: 'test'
+  ...
+# file: tests/announcements-pending-h7.test.mjs complete
+# Subtest: H7a AT BOOT, NO WRITE NEEDED: a fresh board reads announcementsPending 0, a real number, straight after boot
+ok 98 - H7a AT BOOT, NO WRITE NEEDED: a fresh board reads announcementsPending 0, a real number, straight after boot # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.674666
+  type: 'test'
+  ...
+# Subtest: H7b LEGACY AND PUBLISHER BOTH COUNT: a board that already holds one pending legacy entry and one pending publisher entry reads 2 at boot
+ok 99 - H7b LEGACY AND PUBLISHER BOTH COUNT: a board that already holds one pending legacy entry and one pending publisher entry reads 2 at boot # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.046916
+  type: 'test'
+  ...
+# Subtest: H7c IT TRACKS THE STUCK ONES: with the executor down a claim raises the count by 1; the executor back and one --once run drops it back; a second run changes nothing
+ok 100 - H7c IT TRACKS THE STUCK ONES: with the executor down a claim raises the count by 1; the executor back and one --once run drops it back; a second run changes nothing # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.0505
+  type: 'test'
+  ...
+# Subtest: H7d IT DROPS BY ITSELF WHEN THE INLINE ATTEMPT SUCCEEDS: with the executor up a claim's entry is counted and then, once the inline publish and the batched completion have landed, the count is back to its start
+ok 101 - H7d IT DROPS BY ITSELF WHEN THE INLINE ATTEMPT SUCCEEDS: with the executor up a claim's entry is counted and then, once the inline publish and the batched completion have landed, the count is back to its start # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.040167
+  type: 'test'
+  ...
+# Subtest: H7e A BOARD WITHOUT THE UNIT STILL COUNTS ITS LEGACY ENTRIES: with the unit off a claim leaves a legacy entry pending and the count says 1
+ok 102 - H7e A BOARD WITHOUT THE UNIT STILL COUNTS ITS LEGACY ENTRIES: with the unit off a claim leaves a legacy entry pending and the count says 1
+  ---
+  duration_ms: 229.800833
+  type: 'test'
+  ...
+# file: tests/artifacts-graph-k1.test.mjs complete
+# Subtest: AR0 CONTROL: with the unit OFF the artifact script answers as listed and concurrent artifacts for one run are all kept
+ok 153 - AR0 CONTROL: with the unit OFF the artifact script answers as listed and concurrent artifacts for one run are all kept
+  ---
+  duration_ms: 280.510167
+  type: 'test'
+  ...
+# Subtest: AR1 PARITY: the artifact script on a unit-on server answers the same statuses and masked wire as the unit-off server
+ok 154 - AR1 PARITY: the artifact script on a unit-on server answers the same statuses and masked wire as the unit-off server # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.085
+  type: 'test'
+  ...
+# Subtest: AR2 THE GRAPH HOLDS IT, THE DOCUMENT DOES NOT: a marker from an artifact's contentUrl is in the executor and not in the board file
+ok 155 - AR2 THE GRAPH HOLDS IT, THE DOCUMENT DOES NOT: a marker from an artifact's contentUrl is in the executor and not in the board file # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.036041
+  type: 'test'
+  ...
+# Subtest: AR3 ONE WRITE ACROSS TWO ENTITIES (unit ON): six concurrent artifacts for one run are all accepted, distinct, and ALL in the run's generated list
+ok 156 - AR3 ONE WRITE ACROSS TWO ENTITIES (unit ON): six concurrent artifacts for one run are all accepted, distinct, and ALL in the run's generated list # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.030375
+  type: 'test'
+  ...
+# Subtest: AR4 FAIL LOUD AND ALL-OR-NOTHING (unit ON): executor away: 503 and the run's generated list unchanged; back: the same create lands once
+ok 157 - AR4 FAIL LOUD AND ALL-OR-NOTHING (unit ON): executor away: 503 and the run's generated list unchanged; back: the same create lands once # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.032709
+  type: 'test'
+  ...
+# file: tests/authority-resolver-compiled.test.mjs complete
+# Subtest: \#1558 R1: a COMPILED plain binding assertion is CURRENT, with its recorded basis
+ok 193 - \#1558 R1: a COMPILED plain binding assertion is CURRENT, with its recorded basis # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.72975
+  type: 'test'
+  ...
+# Subtest: \#1558 a COMPILED correction: CURRENT new value, the retirement explained in the same envelope
+ok 194 - \#1558 a COMPILED correction: CURRENT new value, the retirement explained in the same envelope # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.222166
+  type: 'test'
+  ...
+# Subtest: \#1558 a COMPILED ungranted non-binding observation sits beside the governing assertion; CURRENT stays
+ok 195 - \#1558 a COMPILED ungranted non-binding observation sits beside the governing assertion; CURRENT stays # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.163667
+  type: 'test'
+  ...
+# Subtest: \#1558 R2: an unrelated op carrying a conflicting grant does not touch this topic (the grant join is anchored)
+ok 196 - \#1558 R2: an unrelated op carrying a conflicting grant does not touch this topic (the grant join is anchored) # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.068916
+  type: 'test'
+  ...
+# Subtest: \#1558 F1 grant scope moved after a plain assertion → UNRESOLVED (grant-scope-mismatch)
+ok 197 - \#1558 F1 grant scope moved after a plain assertion → UNRESOLVED (grant-scope-mismatch) # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.06625
+  type: 'test'
+  ...
+# Subtest: \#1558 F2 provenance receipt outcome is PRECONDITION_FAILED → UNRESOLVED (receipt-not-applied)
+ok 198 - \#1558 F2 provenance receipt outcome is PRECONDITION_FAILED → UNRESOLVED (receipt-not-applied) # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.075666
+  type: 'test'
+  ...
+# Subtest: \#1558 F3 grantee is not the receipt actor → UNRESOLVED (grantee-mismatch)
+ok 199 - \#1558 F3 grantee is not the receipt actor → UNRESOLVED (grantee-mismatch) # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.037833
+  type: 'test'
+  ...
+# Subtest: \#1558 F4 the only assertion raw-retired with no replacement → UNRESOLVED (retired-without-basis)
+ok 200 - \#1558 F4 the only assertion raw-retired with no replacement → UNRESOLVED (retired-without-basis) # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.03
+  type: 'test'
+  ...
+# Subtest: \#1558 F5 the binding assertion carries an unknown status IRI → UNRESOLVED (status-invalid)
+ok 201 - \#1558 F5 the binding assertion carries an unknown status IRI → UNRESOLVED (status-invalid) # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.210833
+  type: 'test'
+  ...
+# Subtest: \#1558 F6 the receipt names a grant that does not exist → UNRESOLVED (grant-missing)
+ok 202 - \#1558 F6 the receipt names a grant that does not exist → UNRESOLVED (grant-missing) # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.2285
+  type: 'test'
+  ...
+# Subtest: \#1558 F7 the receipt has no grantRev → UNRESOLVED (missing-receipt-grantRev)
+ok 203 - \#1558 F7 the receipt has no grantRev → UNRESOLVED (missing-receipt-grantRev) # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.549583
+  type: 'test'
+  ...
+# Subtest: \#1558 F8 the receipt has two actors → UNRESOLVED (receipt-actor-conflict)
+ok 204 - \#1558 F8 the receipt has two actors → UNRESOLVED (receipt-actor-conflict) # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.024459
+  type: 'test'
+  ...
+# Subtest: \#1558 F9 the rule the receipt names does not exist → UNRESOLVED (rule-missing)
+ok 205 - \#1558 F9 the rule the receipt names does not exist → UNRESOLVED (rule-missing) # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.01725
+  type: 'test'
+  ...
+# Subtest: \#1558 F10 the receipt itself is gone (recordedBy dangles) → UNRESOLVED (missing-receipt)
+ok 206 - \#1558 F10 the receipt itself is gone (recordedBy dangles) → UNRESOLVED (missing-receipt) # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.015875
+  type: 'test'
+  ...
+# Subtest: \#1558 F11 grant inactive → UNRESOLVED (grant-inactive)
+ok 207 - \#1558 F11 grant inactive → UNRESOLVED (grant-inactive) # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.015208
+  type: 'test'
+  ...
+# Subtest: \#1558 F12 assertion author differs from the receipt actor → UNRESOLVED (author-actor-mismatch)
+ok 208 - \#1558 F12 assertion author differs from the receipt actor → UNRESOLVED (author-actor-mismatch) # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.014666
+  type: 'test'
+  ...
+# Subtest: \#1558 a revision bumped AFTER the receipt does not invalidate it (non-retroactive, a reviewer D1 04:01Z)
+ok 209 - \#1558 a revision bumped AFTER the receipt does not invalidate it (non-retroactive, a reviewer D1 04:01Z) # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.01475
+  type: 'test'
+  ...
+# Subtest: \#1558 R2 (cost): the query's rows for a topic do not grow with unrelated authorized ops elsewhere in the store
+ok 210 - \#1558 R2 (cost): the query's rows for a topic do not grow with unrelated authorized ops elsewhere in the store # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.014625
+  type: 'test'
+  ...
+# Subtest: \#1558 review3 \#1: retiredBy missing on the retired target → UNRESOLVED (retiredBy-missing)
+ok 211 - \#1558 review3 \#1: retiredBy missing on the retired target → UNRESOLVED (retiredBy-missing) # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.014542
+  type: 'test'
+  ...
+# Subtest: \#1558 review3 \#1: retiredBy has a second value → UNRESOLVED (retiredBy-conflict)
+ok 212 - \#1558 review3 \#1: retiredBy has a second value → UNRESOLVED (retiredBy-conflict) # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.014625
+  type: 'test'
+  ...
+# Subtest: \#1558 review3 \#1: retiredBy points at another receipt → UNRESOLVED (retiredBy-mismatch)
+ok 213 - \#1558 review3 \#1: retiredBy points at another receipt → UNRESOLVED (retiredBy-mismatch) # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.0145
+  type: 'test'
+  ...
+# Subtest: \#1558 review3 \#2: governing assertion has no author → UNRESOLVED
+ok 214 - \#1558 review3 \#2: governing assertion has no author → UNRESOLVED # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.015625
+  type: 'test'
+  ...
+# Subtest: \#1558 review3 \#2: binding is not a boolean → UNRESOLVED
+ok 215 - \#1558 review3 \#2: binding is not a boolean → UNRESOLVED # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.016667
+  type: 'test'
+  ...
+# Subtest: \#1558 review3 \#2: binding missing (would otherwise read as an observation) → UNRESOLVED
+ok 216 - \#1558 review3 \#2: binding missing (would otherwise read as an observation) → UNRESOLVED # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.015709
+  type: 'test'
+  ...
+# Subtest: \#1558 review3 \#2: scope missing (would otherwise read as ineligible) → UNRESOLVED
+ok 217 - \#1558 review3 \#2: scope missing (would otherwise read as ineligible) → UNRESOLVED # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.016
+  type: 'test'
+  ...
+# Subtest: \#1558 review3 \#2: value missing → UNRESOLVED
+ok 218 - \#1558 review3 \#2: value missing → UNRESOLVED # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.016167
+  type: 'test'
+  ...
+# Subtest: \#1558 review3 \#2: ver is not an integer → UNRESOLVED
+ok 219 - \#1558 review3 \#2: ver is not an integer → UNRESOLVED # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.014417
+  type: 'test'
+  ...
+# Subtest: \#1558 review3 \#2: a malformed OTHER candidate blocks NO_AUTHORITY too → UNRESOLVED
+ok 220 - \#1558 review3 \#2: a malformed OTHER candidate blocks NO_AUTHORITY too → UNRESOLVED # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.016167
+  type: 'test'
+  ...
+# Subtest: \#1558 review3 \#3 (E1): CURRENT says WHY it governs, and the newer observation says why it does not
+ok 221 - \#1558 review3 \#3 (E1): CURRENT says WHY it governs, and the newer observation says why it does not # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.015667
+  type: 'test'
+  ...
+# Subtest: \#1558 review3 \#3 (E2): a retired assertion says what retired it and under which grant
+ok 222 - \#1558 review3 \#3 (E2): a retired assertion says what retired it and under which grant # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.016125
+  type: 'test'
+  ...
+# Subtest: \#1558 review3 \#4: evidence IRIs reach the envelope for the governing, retired and observation entries
+ok 223 - \#1558 review3 \#4: evidence IRIs reach the envelope for the governing, retired and observation entries # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.015542
+  type: 'test'
+  ...
+# Subtest: \#1558 review3 coverage: dropping the provenance rows while keeping every candidate id → UNAVAILABLE incomplete-result
+ok 224 - \#1558 review3 coverage: dropping the provenance rows while keeping every candidate id → UNAVAILABLE incomplete-result # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.016583
+  type: 'test'
+  ...
+# Subtest: \#1558 review3 coverage: dropping the superseded-target rows while keeping every candidate id → UNAVAILABLE incomplete-result
+ok 225 - \#1558 review3 coverage: dropping the superseded-target rows while keeping every candidate id → UNAVAILABLE incomplete-result # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.016
+  type: 'test'
+  ...
+# Subtest: \#1558 review3 coverage: dropping one candidate-field row (evidence) while keeping every candidate id → UNAVAILABLE incomplete-result
+ok 226 - \#1558 review3 coverage: dropping one candidate-field row (evidence) while keeping every candidate id → UNAVAILABLE incomplete-result # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.014875
+  type: 'test'
+  ...
+# Subtest: \#1558 review3 coverage: the retiredBy-receipt rows are REDUNDANT in a compiled correction (same receipt as the replacement's provenance), so dropping them changes nothing and is correctly NOT incomplete
+ok 227 - \#1558 review3 coverage: the retiredBy-receipt rows are REDUNDANT in a compiled correction (same receipt as the replacement's provenance), so dropping them changes nothing and is correctly NOT incomplete # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.016459
+  type: 'test'
+  ...
+# Subtest: \#1558/\#1559 every envelope says what its status MEANS; NO_AUTHORITY has a reason (G1: the empty reason told the reader nothing)
+ok 228 - \#1558/\#1559 every envelope says what its status MEANS; NO_AUTHORITY has a reason (G1: the empty reason told the reader nothing) # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.017375
+  type: 'test'
+  ...
+# file: tests/authority-resolver.test.mjs complete
+# Subtest: CURRENT: one authorized unretired binding produces CURRENT with basis
+ok 229 - CURRENT: one authorized unretired binding produces CURRENT with basis # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.50425
+  type: 'test'
+  ...
+# Subtest: CURRENT: corrected-and-retired shows old retired authority and supersession relationship in same envelope
+ok 230 - CURRENT: corrected-and-retired shows old retired authority and supersession relationship in same envelope # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.04125
+  type: 'test'
+  ...
+# Subtest: CURRENT: same-value binding assertion corroborates preserving identities
+ok 231 - CURRENT: same-value binding assertion corroborates preserving identities # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.0355
+  type: 'test'
+  ...
+# Subtest: NO_AUTHORITY: complete successful zero-authority query yields NO_AUTHORITY
+ok 232 - NO_AUTHORITY: complete successful zero-authority query yields NO_AUTHORITY # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.07725
+  type: 'test'
+  ...
+# Subtest: UNRESOLVED: two incompatible eligible binding assertions with no resolved supersession yields UNRESOLVED with both
+ok 233 - UNRESOLVED: two incompatible eligible binding assertions with no resolved supersession yields UNRESOLVED with both # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.036791
+  type: 'test'
+  ...
+# Subtest: CURRENT: non-binding observation with no retirement alongside old CURRENT is side by side, NOT automatic conflict
+ok 234 - CURRENT: non-binding observation with no retirement alongside old CURRENT is side by side, NOT automatic conflict # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.072458
+  type: 'test'
+  ...
+# Subtest: CURRENT: newer non-binding observation does not override prior binding authority
+ok 235 - CURRENT: newer non-binding observation does not override prior binding authority # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.030125
+  type: 'test'
+  ...
+# Subtest: UNRESOLVED: dangling retirement edge (target points to non-existent predecessor) yields UNRESOLVED
+ok 236 - UNRESOLVED: dangling retirement edge (target points to non-existent predecessor) yields UNRESOLVED # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.13025
+  type: 'test'
+  ...
+# Subtest: UNRESOLVED: retirement cycle (a supersedes b supersedes a) yields UNRESOLVED
+ok 237 - UNRESOLVED: retirement cycle (a supersedes b supersedes a) yields UNRESOLVED # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.210375
+  type: 'test'
+  ...
+# Subtest: UNRESOLVED: raw retired status without replacement edge is preserved (not silently CURRENT)
+ok 238 - UNRESOLVED: raw retired status without replacement edge is preserved (not silently CURRENT) # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.189875
+  type: 'test'
+  ...
+# Subtest: UNRESOLVED: invalid grant scope basis (grant scope mismatches the resolver scope) yields UNRESOLVED
+ok 239 - UNRESOLVED: invalid grant scope basis (grant scope mismatches the resolver scope) yields UNRESOLVED # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.029041
+  type: 'test'
+  ...
+# Subtest: UNRESOLVED: non-retroactive — current grant rev advanced, receipt at older grant rev still authorizes historical retirement
+ok 240 - UNRESOLVED: non-retroactive — current grant rev advanced, receipt at older grant rev still authorizes historical retirement # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.022333
+  type: 'test'
+  ...
+# Subtest: UNAVAILABLE: missing marker yields UNAVAILABLE, never empty
+ok 241 - UNAVAILABLE: missing marker yields UNAVAILABLE, never empty # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.019792
+  type: 'test'
+  ...
+# Subtest: UNAVAILABLE: contradictory marker (multiple commitSeq) yields UNAVAILABLE
+ok 242 - UNAVAILABLE: contradictory marker (multiple commitSeq) yields UNAVAILABLE # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.018875
+  type: 'test'
+  ...
+# Subtest: UNAVAILABLE: malformed marker literal (non-integer) yields UNAVAILABLE
+ok 243 - UNAVAILABLE: malformed marker literal (non-integer) yields UNAVAILABLE # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.019
+  type: 'test'
+  ...
+# Subtest: UNAVAILABLE: query transport failure yields UNAVAILABLE
+ok 244 - UNAVAILABLE: query transport failure yields UNAVAILABLE # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.018
+  type: 'test'
+  ...
+# Subtest: UNAVAILABLE: candidate truncation control (caller limits results) yields UNAVAILABLE
+ok 245 - UNAVAILABLE: candidate truncation control (caller limits results) yields UNAVAILABLE # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.018292
+  type: 'test'
+  ...
+# Subtest: UNAVAILABLE: malformed result (ok:true but rows empty when candidateCount says there are rows) yields UNAVAILABLE
+ok 246 - UNAVAILABLE: malformed result (ok:true but rows empty when candidateCount says there are rows) yields UNAVAILABLE # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.018
+  type: 'test'
+  ...
+# Subtest: UNAVAILABLE: malicious IRI with quote injection is rejected without invoking query
+ok 247 - UNAVAILABLE: malicious IRI with quote injection is rejected without invoking query
+  ---
+  duration_ms: 1.428209
+  type: 'test'
+  ...
+# Subtest: UNAVAILABLE: missing evaluationTime is rejected
+ok 248 - UNAVAILABLE: missing evaluationTime is rejected
+  ---
+  duration_ms: 0.827917
+  type: 'test'
+  ...
+# Subtest: CURRENT: large integer marker preserved as exact integer string (no JS Number coercion)
+ok 249 - CURRENT: large integer marker preserved as exact integer string (no JS Number coercion) # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.060375
+  type: 'test'
+  ...
+# Subtest: UNRESOLVED: wrong-scope assertion is excluded by exact-scope semantics
+ok 250 - UNRESOLVED: wrong-scope assertion is excluded by exact-scope semantics # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.027167
+  type: 'test'
+  ...
+# Subtest: UNRESOLVED: cross-topic assertion is excluded by exact-topic semantics
+ok 251 - UNRESOLVED: cross-topic assertion is excluded by exact-topic semantics # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.020291
+  type: 'test'
+  ...
+# Subtest: query call counter: exactly one SELECT per resolve (no pre-reads, no pagination)
+ok 252 - query call counter: exactly one SELECT per resolve (no pre-reads, no pagination) # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.018459
+  type: 'test'
+  ...
+# Subtest: UNRESOLVED: control — newest-wins stub (high ver binding) must NOT override an unresolved older conflict
+ok 253 - UNRESOLVED: control — newest-wins stub (high ver binding) must NOT override an unresolved older conflict # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.01825
+  type: 'test'
+  ...
+# Subtest: CURRENT: malformed candidates surfaced by OPTIONAL/UNION are validated, not silently dropped
+ok 254 - CURRENT: malformed candidates surfaced by OPTIONAL/UNION are validated, not silently dropped # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.017
+  type: 'test'
+  ...
+# Subtest: CURRENT: integrity failure when receipt is absent for an asserted retirement is UNRESOLVED with reason
+ok 255 - CURRENT: integrity failure when receipt is absent for an asserted retirement is UNRESOLVED with reason # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.016583
+  type: 'test'
+  ...
+# Subtest: CURRENT: legacy bootstrap with no recordedBy/retiredBy is reported (not fabricated) as basis absent
+ok 256 - CURRENT: legacy bootstrap with no recordedBy/retiredBy is reported (not fabricated) as basis absent # SKIP UNAVAILABLE: no python with pyoxigraph at /tmp/suite-watch-XXXX/tree/graph-executor/.venv/bin/python
+  ---
+  duration_ms: 0.0165
+  type: 'test'
+  ...
+# file: tests/backfill-posts-r0-addendum.test.mjs complete
+# Subtest: A1 the stored postSeq is copied exactly: gaps and an array order that is not the numeric order survive (never renumbered by index, never sorted)
+ok 280 - A1 the stored postSeq is copied exactly: gaps and an array order that is not the numeric order survive (never renumbered by index, never sorted) # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.525792
+  type: 'test'
+  ...
+# Subtest: A2 a write the executor refuses: exit 2, failed >= 1, the run STOPS at it (it does not keep writing), nothing is reported written, and the same command succeeds once writes work
+ok 281 - A2 a write the executor refuses: exit 2, failed >= 1, the run STOPS at it (it does not keep writing), nothing is reported written, and the same command succeeds once writes work # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.041042
+  type: 'test'
+  ...
+# Subtest: A3 an operation's receipt that cannot be READ is exit 2 with zero writes, not the receipt-without-node conflict
+ok 282 - A3 an operation's receipt that cannot be READ is exit 2 with zero writes, not the receipt-without-node conflict # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.067583
+  type: 'test'
+  ...
+# Subtest: A4 --limit counts posts WRITTEN: a resume with --limit 3 over five already-present posts writes three more and reports five alreadyPresent
+ok 283 - A4 --limit counts posts WRITTEN: a resume with --limit 3 over five already-present posts writes three more and reports five alreadyPresent # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.032709
+  type: 'test'
+  ...
+# Subtest: A5 a post that lists the same mention twice is PRESENT on a re-run, not a conflict with itself
+ok 284 - A5 a post that lists the same mention twice is PRESENT on a re-run, not a conflict with itself # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.031375
+  type: 'test'
+  ...
+# Subtest: A6 the unsupported-fields refusal names EVERY offending post (60 of them), with no cap and no "and N more"
+ok 285 - A6 the unsupported-fields refusal names EVERY offending post (60 of them), with no cap and no "and N more" # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.027084
+  type: 'test'
+  ...
+# file: tests/backfill-posts-r0-shape.test.mjs complete
+# Subtest: S1 THE MEASURED INVENTORY IMPORTS: every inventory row (minus the one author-correction post, pinned by the U5 file) becomes a node; the run is complete, exit 0, none refused, none conflicting
+ok 286 - S1 THE MEASURED INVENTORY IMPORTS: every inventory row (minus the one author-correction post, pinned by the U5 file) becomes a node; the run is complete, exit 0, none refused, none conflicting # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 1.520709
+  type: 'test'
+  ...
+# Subtest: S2 THE WRITE RULE, exactly: every post node and every attachment node carries EXACTLY the pinned predicates and values, for the whole inventory
+ok 287 - S2 THE WRITE RULE, exactly: every post node and every attachment node carries EXACTLY the pinned predicates and values, for the whole inventory # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.049709
+  type: 'test'
+  ...
+# Subtest: S3 THE ROUND TRIP: reading the triples back with the pinned read-back rule gives exactly the NORMALISED original, for the whole inventory AND the edge corpus (empty body, duplicate and unmatched mentions, a shared first-occurrence tie, a case-sensitive match, 12 attachments in numeric index order, a missing onBehalfOf key)
+ok 288 - S3 THE ROUND TRIP: reading the triples back with the pinned read-back rule gives exactly the NORMALISED original, for the whole inventory AND the edge corpus (empty body, duplicate and unmatched mentions, a shared first-occurrence tie, a case-sensitive match, 12 attachments in numeric index order, a missing onBehalfOf key) # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.032625
+  type: 'test'
+  ...
+# Subtest: S4 IDEMPOTENT AND DIVERGENCE-AWARE ON THE NEW FIELDS: a re-run is all alreadyPresent with ZERO writes, and a change to ONE new-field value (an attachment size or name, a conversation tag, an onBehalfOf name, a _recovered string, an attachment ADDED) after the snapshot is a NAMED content-differs conflict, never overwritten
+ok 289 - S4 IDEMPOTENT AND DIVERGENCE-AWARE ON THE NEW FIELDS: a re-run is all alreadyPresent with ZERO writes, and a change to ONE new-field value (an attachment size or name, a conversation tag, an onBehalfOf name, a _recovered string, an attachment ADDED) after the snapshot is a NAMED content-differs conflict, never overwritten # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.029791
+  type: 'test'
+  ...
+# Subtest: S5 STILL REFUSED, by name and before any write: a post carrying an `origin` with any key beyond mutationId/slot/occurredAt (an originActor, say), an unknown key, or an `origin` with an extra key or an unknown key refuses the whole run (exit 3, UNSUPPORTED_POST_FIELDS, id and key named), and the token VALUE never appears in the output
+ok 290 - S5 STILL REFUSED, by name and before any write: a post carrying an `origin` with any key beyond mutationId/slot/occurredAt (an originActor, say), an unknown key, or an `origin` with an extra key or an unknown key refuses the whole run (exit 3, UNSUPPORTED_POST_FIELDS, id and key named), and the token VALUE never appears in the output # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.073833
+  type: 'test'
+  ...
+# Subtest: S6 A MALFORMED ATTACHMENT IS REFUSED BY THE TOOL, BY NAME, BEFORE ANY WRITE (not left for the compiler to fail on at write time): an attachment with an extra field, a negative / fractional / string / missing `size`, a non-object element, or an `attachments` that is not an array: exit 3, UNSUPPORTED_POST_FIELDS naming the post and `attachments`, zero updates, an empty graph, no value echoed, and the same refusal with a DEAD executor
+ok 291 - S6 A MALFORMED ATTACHMENT IS REFUSED BY THE TOOL, BY NAME, BEFORE ANY WRITE (not left for the compiler to fail on at write time): an attachment with an extra field, a negative / fractional / string / missing `size`, a non-object element, or an `attachments` that is not an array: exit 3, UNSUPPORTED_POST_FIELDS naming the post and `attachments`, zero updates, an empty graph, no value echoed, and the same refusal with a DEAD executor # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.025958
+  type: 'test'
+  ...
+# Subtest: T3 R1's READER implements the read-back rule above (this file pins the function, not R1)
+not ok 292 - T3 R1's READER implements the read-back rule above (this file pins the function, not R1) # TODO NOT IN THIS FILE: R1
+  ---
+  duration_ms: 0.297417
+  type: 'test'
+  location: '/tmp/suite-watch-XXXX/tree/tests/backfill-posts-r0-shape.test.mjs:361:1'
+  failureType: 'testCodeFailure'
+  error: 'NOT IN THIS FILE'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  operator: 'fail'
+  stack: |-
+    TestContext.<anonymous> (file:///tmp/suite-watch-XXXX/tree/tests/backfill-posts-r0-shape.test.mjs:361:146)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# file: tests/backfill-posts-r0-u5.test.mjs complete
+# Subtest: U5a THE TRAIL IS STORED: the run is complete, the post keeps its current author as the author triple, every ordinary predicate, and exactly the three values as extra literals, never as IRIs
+ok 293 - U5a THE TRAIL IS STORED: the run is complete, the post keeps its current author as the author triple, every ordinary predicate, and exactly the three values as extra literals, never as IRIs # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.508833
+  type: 'test'
+  ...
+# Subtest: U5b IDEMPOTENT: a second run is alreadyPresent for every post, writes nothing and names no conflict
+ok 294 - U5b IDEMPOTENT: a second run is alreadyPresent for every post, writes nothing and names no conflict # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.040416
+  type: 'test'
+  ...
+# Subtest: U5c A MALFORMED TRAIL STILL REFUSES: a trail field that is not a string (an object, a number) refuses the whole run before any write, the offending id and key named, the value never printed
+ok 295 - U5c A MALFORMED TRAIL STILL REFUSES: a trail field that is not a string (an object, a number) refuses the whole run before any write, the offending id and key named, the value never printed # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.032333
+  type: 'test'
+  ...
+# Subtest: U5d THE TRAIL IS NO LONGER AN OFFENDER: a valid trail post and a post with an unknown key refuse the run naming only the unknown-key post
+ok 296 - U5d THE TRAIL IS NO LONGER AN OFFENDER: a valid trail post and a post with an unknown key refuse the run naming only the unknown-key post # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.033584
+  type: 'test'
+  ...
+# Subtest: U5e the three fields survive the ROLLBACK export (the document post stays as it is)
+not ok 297 - U5e the three fields survive the ROLLBACK export (the document post stays as it is) # TODO OWED once scripts/rollback-posts-1574.mjs exists: a row, not a pass
+  ---
+  duration_ms: 0.297041
+  type: 'test'
+  location: '/tmp/suite-watch-XXXX/tree/tests/backfill-posts-r0-u5.test.mjs:168:1'
+  failureType: 'testCodeFailure'
+  error: 'OWED'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  operator: 'fail'
+  stack: |-
+    TestContext.<anonymous> (file:///tmp/suite-watch-XXXX/tree/tests/backfill-posts-r0-u5.test.mjs:168:187)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# file: tests/backfill-posts-r0.test.mjs complete
+# Subtest: R1 a full run on a fresh scratch dataset: exactly one Comment node per post, keyed by the post id, no other Comment node; the summary adds up; the board file is byte-identical
+ok 298 - R1 a full run on a fresh scratch dataset: exactly one Comment node per post, keyed by the post id, no other Comment node; the summary adds up; the board file is byte-identical # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 1.533916
+  type: 'test'
+  ...
+# Subtest: R2 every post is preserved, not regenerated: the node carries EXACTLY the pinned triples (id, body byte-for-byte, author, stored createdAt, about, mentions, stored postSeq as xsd:integer) and one recordedBy
+ok 299 - R2 every post is preserved, not regenerated: the node carries EXACTLY the pinned triples (id, body byte-for-byte, author, stored createdAt, about, mentions, stored postSeq as xsd:integer) and one recordedBy # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.058083
+  type: 'test'
+  ...
+# Subtest: R3 a second run on a COMPLETE graph writes nothing: written 0, alreadyPresent N, ZERO /update calls at the executor, the graph unchanged
+ok 300 - R3 a second run on a COMPLETE graph writes nothing: written 0, alreadyPresent N, ZERO /update calls at the executor, the graph unchanged # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.070833
+  type: 'test'
+  ...
+# Subtest: R4 --limit: the first run writes exactly N0 posts, the second completes, and the final graph is IDENTICAL to an uninterrupted run, every post recorded by exactly ONE operation
+ok 301 - R4 --limit: the first run writes exactly N0 posts, the second completes, and the final graph is IDENTICAL to an uninterrupted run, every post recorded by exactly ONE operation # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.033875
+  type: 'test'
+  ...
+# Subtest: R5 a SIGKILL DURING a write: the write was applied but never acknowledged; the re-run ends identical to an uninterrupted run, no post under two operations, and at most ONE extra /update (the re-sent in-flight write)
+ok 302 - R5 a SIGKILL DURING a write: the write was applied but never acknowledged; the re-run ends identical to an uninterrupted run, no post under two operations, and at most ONE extra /update (the re-sent in-flight write) # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.298292
+  type: 'test'
+  ...
+# Subtest: R6 posts added to the live board AFTER the snapshot: a re-run against a fresh copy writes exactly those and touches nothing else
+ok 303 - R6 posts added to the live board AFTER the snapshot: a re-run against a fresh copy writes exactly those and touches nothing else # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.09625
+  type: 'test'
+  ...
+# Subtest: R7 an existing id whose content DIFFERS (a changed body, then a changed postSeq) is a NAMED CONFLICT: exit 4, {id, reason: "content-differs"}, never overwritten, never reported as present; the unchanged posts still proceed
+ok 304 - R7 an existing id whose content DIFFERS (a changed body, then a changed postSeq) is a NAMED CONFLICT: exit 4, {id, reason: "content-differs"}, never overwritten, never reported as present; the unchanged posts still proceed # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.0945
+  type: 'test'
+  ...
+# Subtest: R12 an APPLIED receipt whose node is ABSENT (a restore, a deletion) is a NAMED RECONCILIATION CONFLICT, not a successful import: exit 4, {id, reason: "receipt-without-node"}, the node is NOT recreated, nothing is sent for it, and the other posts are alreadyPresent
+ok 305 - R12 an APPLIED receipt whose node is ABSENT (a restore, a deletion) is a NAMED RECONCILIATION CONFLICT, not a successful import: exit 4, {id, reason: "receipt-without-node"}, the node is NOT recreated, nothing is sent for it, and the other posts are alreadyPresent # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.033792
+  type: 'test'
+  ...
+# Subtest: R13 if the executor's READS fail, the tool cannot know what is present or already applied: exit 2, ZERO writes, nothing reported written
+ok 306 - R13 if the executor's READS fail, the tool cannot know what is present or already applied: exit 2, ZERO writes, nothing reported written # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.214666
+  type: 'test'
+  ...
+# Subtest: R11 a board with ANY post carrying a field that has no defined graph shape (an unknown key, an origin with an extra key, `reach`) is REFUSED before any write: exit 3, UNSUPPORTED_POST_FIELDS, every offending id and key named, nothing written (not even the supported posts), and the refusal comes BEFORE the executor is contacted
+ok 307 - R11 a board with ANY post carrying a field that has no defined graph shape (an unknown key, an origin with an extra key, `reach`) is REFUSED before any write: exit 3, UNSUPPORTED_POST_FIELDS, every offending id and key named, nothing written (not even the supported posts), and the refusal comes BEFORE the executor is contacted # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.240959
+  type: 'test'
+  ...
+# Subtest: R11b the ORDER of refusals: an unmigrated board that ALSO carries unsupported fields is refused for its migration state first (POST_SEQ_MIGRATION_REQUIRED), and empty `attachments: []` / null `onBehalfOf` / null `attachedTo` import (the settled fixtures run)
+ok 308 - R11b the ORDER of refusals: an unmigrated board that ALSO carries unsupported fields is refused for its migration state first (POST_SEQ_MIGRATION_REQUIRED), and empty `attachments: []` / null `onBehalfOf` / null `attachedTo` import (the settled fixtures run) # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.071292
+  type: 'test'
+  ...
+# Subtest: R8 an UNMIGRATED board is refused: exit 3, POST_SEQ_MIGRATION_REQUIRED, zero writes, an empty graph (R0 never numbers anything)
+ok 309 - R8 an UNMIGRATED board is refused: exit 3, POST_SEQ_MIGRATION_REQUIRED, zero writes, an empty graph (R0 never numbers anything) # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.025875
+  type: 'test'
+  ...
+# Subtest: R9 a CORRUPT board is refused: exit 3, POST_SEQ_STATE_CORRUPT, zero writes (mixed numbering with no epoch; an epoch with a post un-numbered; a duplicate)
+ok 310 - R9 a CORRUPT board is refused: exit 3, POST_SEQ_STATE_CORRUPT, zero writes (mixed numbering with no epoch; an epoch with a post un-numbered; a duplicate) # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.019667
+  type: 'test'
+  ...
+# Subtest: R10 a WRONG dataset id, and an executor that cannot be reached: exit 2 (an operational failure), and no post is reported written
+ok 311 - R10 a WRONG dataset id, and an executor that cannot be reached: exit 2 (an operational failure), and no post is reported written # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.632583
+  type: 'test'
+  ...
+# Subtest: U5 a post REMOVED or REDACTED after the snapshot: the backfill must never resurrect redacted content, and the final cutover reconciliation must DETECT removals (R4 owns redaction; the interface is not defined)
+not ok 312 - U5 a post REMOVED or REDACTED after the snapshot: the backfill must never resurrect redacted content, and the final cutover reconciliation must DETECT removals (R4 owns redaction; the interface is not defined) # TODO UNFROZEN: decided with the shape of ordinary writes (R2) and the cutover reconciliation; nothing in this file invents it
+  ---
+  duration_ms: 0.628334
+  type: 'test'
+  location: '/tmp/suite-watch-XXXX/tree/tests/backfill-posts-r0.test.mjs:423:1'
+  failureType: 'testCodeFailure'
+  error: 'UNFROZEN: decided with the shape of ordinary writes (R2) and the cutover reconciliation; nothing in this file invents it'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  operator: 'fail'
+  stack: |-
+    TestContext.<anonymous> (file:///tmp/suite-watch-XXXX/tree/tests/backfill-posts-r0.test.mjs:423:252)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: U6 a PRODUCTION graph that already holds executor-born posts: "no other Comment node" does not hold there; what R0 must leave alone is not defined
+not ok 313 - U6 a PRODUCTION graph that already holds executor-born posts: "no other Comment node" does not hold there; what R0 must leave alone is not defined # TODO UNFROZEN: decided with the shape of ordinary writes (R2) and the cutover reconciliation; nothing in this file invents it
+  ---
+  duration_ms: 0.086334
+  type: 'test'
+  location: '/tmp/suite-watch-XXXX/tree/tests/backfill-posts-r0.test.mjs:424:1'
+  failureType: 'testCodeFailure'
+  error: 'UNFROZEN: decided with the shape of ordinary writes (R2) and the cutover reconciliation; nothing in this file invents it'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  operator: 'fail'
+  stack: |-
+    TestContext.<anonymous> (file:///tmp/suite-watch-XXXX/tree/tests/backfill-posts-r0.test.mjs:424:189)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# file: tests/board-file-guard-g1.test.mjs complete
+# Subtest: G1 A MISSING BOARD FILE IS REFUSED, NOT READ AS AN EMPTY BOARD: both scripts exit non-zero, name the path, and create no file there; the backfill adds no post to the graph
+ok 395 - G1 A MISSING BOARD FILE IS REFUSED, NOT READ AS AN EMPTY BOARD: both scripts exit non-zero, name the path, and create no file there; the backfill adds no post to the graph # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.543208
+  type: 'test'
+  ...
+# Subtest: G2 A FILE THAT IS NOT A BOARD (not JSON, truncated JSON) IS REFUSED: both scripts exit non-zero, name the path, and leave the bytes untouched; the graph gains nothing
+ok 396 - G2 A FILE THAT IS NOT A BOARD (not JSON, truncated JSON) IS REFUSED: both scripts exit non-zero, name the path, and leave the bytes untouched; the graph gains nothing # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.042333
+  type: 'test'
+  ...
+# Subtest: G3 A ZERO-BYTE BOARD FILE IS REFUSED: both scripts exit non-zero, name the path, and the file stays zero bytes; the graph gains nothing
+ok 397 - G3 A ZERO-BYTE BOARD FILE IS REFUSED: both scripts exit non-zero, name the path, and the file stays zero bytes; the graph gains nothing # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.033
+  type: 'test'
+  ...
+# Subtest: G4 CONTROL: the same invocations on a VALID board file exit 0 (so G1-G3 refused the FILE, not the executor, the dataset or the flags)
+ok 398 - G4 CONTROL: the same invocations on a VALID board file exit 0 (so G1-G3 refused the FILE, not the executor, the dataset or the flags) # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.030791
+  type: 'test'
+  ...
+# Subtest: G5 VALID JSON THAT IS NOT A BOARD IS REFUSED: `{}`, `[]`, `null`, a string and an object of unrelated keys are each refused by both scripts (non-zero, path named, bytes untouched, graph untouched)
+ok 399 - G5 VALID JSON THAT IS NOT A BOARD IS REFUSED: `{}`, `[]`, `null`, a string and an object of unrelated keys are each refused by both scripts (non-zero, path named, bytes untouched, graph untouched) # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.033792
+  type: 'test'
+  ...
+# Subtest: G6 A GENUINELY EMPTY BOARD IS NOT REFUSED: the legacy fixture with its epoch and counter and no posts, and the JSON-LD file a real server writes for a board with no posts, are each accepted by both scripts (backfill: 0 posts; rollback against an empty graph: the file is byte-identical)
+ok 400 - G6 A GENUINELY EMPTY BOARD IS NOT REFUSED: the legacy fixture with its epoch and counter and no posts, and the JSON-LD file a real server writes for a board with no posts, are each accepted by both scripts (backfill: 0 posts; rollback against an empty graph: the file is byte-identical) # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.025
+  type: 'test'
+  ...
+# file: tests/authenticated-author.test.mjs complete
+# Subtest: \#125 a BOUND seat cannot post as another seat — re-attributed to the authenticated seat, declaration preserved
+ok 415 - \#125 a BOUND seat cannot post as another seat — re-attributed to the authenticated seat, declaration preserved
+  ---
+  duration_ms: 599.482375
+  type: 'test'
+  ...
+# Subtest: \#125 positive control — a correctly-bound seat posting under its OWN name still succeeds
+ok 416 - \#125 positive control — a correctly-bound seat posting under its OWN name still succeeds
+  ---
+  duration_ms: 496.182708
+  type: 'test'
+  ...
+# Subtest: \#125 positive control — the post still reaches the OTHER seats (fan-out is not collateral damage)
+ok 417 - \#125 positive control — the post still reaches the OTHER seats (fan-out is not collateral damage)
+  ---
+  duration_ms: 479.0095
+  type: 'test'
+  ...
+# Subtest: \#125 an UNBOUND session still posts — under its declared name, VISIBLY unproven
+ok 418 - \#125 an UNBOUND session still posts — under its declared name, VISIBLY unproven
+  ---
+  duration_ms: 535.713
+  type: 'test'
+  ...
+# Subtest: \#125 a BOUND seat posting as itself records NO onBehalfOf
+ok 419 - \#125 a BOUND seat posting as itself records NO onBehalfOf
+  ---
+  duration_ms: 510.187959
+  type: 'test'
+  ...
+# Subtest: \#125 criterion 4b — an unbound post is VISIBLY unproven
+not ok 420 - \#125 criterion 4b — an unbound post is VISIBLY unproven # TODO blocked: REST cannot verify the caller is the MCP server (no shared secret on apiCall). A payload-supplied proof flag would be forgeable.
+  ---
+  duration_ms: 466.378791
+  type: 'test'
+  location: '/tmp/suite-watch-XXXX/tree/tests/authenticated-author.test.mjs:176:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+    + actual - expected
+    
+    + undefined
+    - false
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: false
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///tmp/suite-watch-XXXX/tree/tests/authenticated-author.test.mjs:182:12)
+    process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# file: tests/board-tip-poll-t1.test.mjs complete
+# Subtest: T0 CONTROL: start pages to live, a quiet poll is empty and echoes its cursor, a new post is delivered exactly once
+ok 596 - T0 CONTROL: start pages to live, a quiet poll is empty and echoes its cursor, a new post is delivered exactly once # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 1.690917
+  type: 'test'
+  ...
+# Subtest: T1 TIP COSTS NO POST SCAN: tip answers 200 with no posts and a gc1 cursor, and neither it nor the quiet poll after it sends the executor a query that touches Comments
+ok 597 - T1 TIP COSTS NO POST SCAN: tip answers 200 with no posts and a gc1 cursor, and neither it nor the quiet poll after it sends the executor a query that touches Comments # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.26375
+  type: 'test'
+  ...
+# Subtest: T2 EXACTLY ONCE: a post published between tip and the next poll is delivered by that poll and never again
+ok 598 - T2 EXACTLY ONCE: a post published between tip and the next poll is delivered by that poll and never again # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.046666
+  type: 'test'
+  ...
+# Subtest: T4 ANOTHER STORE IS A RESYNC: the old cursor answers 409 POST_CURSOR_EPOCH_CHANGED after the executor is replaced, and tip answers a fresh cursor
+ok 599 - T4 ANOTHER STORE IS A RESYNC: the old cursor answers 409 POST_CURSOR_EPOCH_CHANGED after the executor is replaced, and tip answers a fresh cursor # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.037292
+  type: 'test'
+  ...
+# Subtest: T5 A BOARD WITHOUT THE UNIT: afterCommit=tip answers 400 GRAPH_DISCOVERY_OFF, as start does
+ok 600 - T5 A BOARD WITHOUT THE UNIT: afterCommit=tip answers 400 GRAPH_DISCOVERY_OFF, as start does
+  ---
+  duration_ms: 376.291583
+  type: 'test'
+  ...
+# Subtest: T6 A TIP CURSOR IS FILTER-SCOPED: issued for attachedTo=A it is refused for B (400 CURSOR_FILTER_MISMATCH) and works for A
+ok 601 - T6 A TIP CURSOR IS FILTER-SCOPED: issued for attachedTo=A it is refused for B (400 CURSOR_FILTER_MISMATCH) and works for A # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.210541
+  type: 'test'
+  ...
+# Subtest: P1 ORDER: the page requests afterCommit=tip BEFORE its initial list; a page that swaps them must fail
+ok 602 - P1 ORDER: the page requests afterCommit=tip BEFORE its initial list; a page that swaps them must fail # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.088167
+  type: 'test'
+  ...
+# Subtest: P2 NO WHOLE-HISTORY POLL: with the panel open for 12 s the page sends no /api/conversations?since= request and polls afterCommit=gc1.…
+ok 603 - P2 NO WHOLE-HISTORY POLL: with the panel open for 12 s the page sends no /api/conversations?since= request and polls afterCommit=gc1.… # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.264042
+  type: 'test'
+  ...
+# Subtest: P3 THE GAP BETWEEN TIP AND LIST: a post published while the initial list is held back is shown exactly once, and still once after the next poll
+ok 604 - P3 THE GAP BETWEEN TIP AND LIST: a post published while the initial list is held back is shown exactly once, and still once after the next poll # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.277583
+  type: 'test'
+  ...
+# Subtest: P4 CONTROL: a post published after the page loaded appears in the panel within 12 s, once
+ok 605 - P4 CONTROL: a post published after the page loaded appears in the panel within 12 s, once # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.281292
+  type: 'test'
+  ...
+# Subtest: P5 CONTROL: on a board without the unit the page still polls ?since= and a new post appears once
+ok 606 - P5 CONTROL: on a board without the unit the page still polls ?since= and a new post appears once
+  ---
+  duration_ms: 12621.789042
+  type: 'test'
+  ...
+# Subtest: P6 RESYNC: when one poll is answered 409 POST_CURSOR_EPOCH_CHANGED the page fetches tip again and a post published afterwards still appears once
+ok 607 - P6 RESYNC: when one poll is answered 409 POST_CURSOR_EPOCH_CHANGED the page fetches tip again and a post published afterwards still appears once # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.18675
+  type: 'test'
+  ...
+# file: tests/card-lost-ack-1628.test.mjs complete
+# Subtest: \#1628 K1 LOST ACK on a card create: 201 and exactly one card, never a 500 after a committed write
+ok 628 - \#1628 K1 LOST ACK on a card create: 201 and exactly one card, never a 500 after a committed write # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.737375
+  type: 'test'
+  ...
+# Subtest: \#1628 K2 REQUEST NOT ARRIVED on a card create: 201 and exactly one card, never a 500 after a committed write
+ok 629 - \#1628 K2 REQUEST NOT ARRIVED on a card create: 201 and exactly one card, never a 500 after a committed write # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.0655
+  type: 'test'
+  ...
+# file: tests/card-move-make-room-1584.test.mjs complete
+# Subtest: \#1584 makeRoom: a card placed on an occupied order shifts exactly the collision chain, atomically
+ok 693 - \#1584 makeRoom: a card placed on an occupied order shifts exactly the collision chain, atomically
+  ---
+  duration_ms: 159.489042
+  type: 'test'
+  ...
+# Subtest: \#1584 makeRoom: a stale ifVersion refuses the WHOLE move — no neighbour is shifted
+ok 694 - \#1584 makeRoom: a stale ifVersion refuses the WHOLE move — no neighbour is shifted
+  ---
+  duration_ms: 198.910125
+  type: 'test'
+  ...
+# Subtest: \#1584 makeRoom: a free slot shifts nothing; without makeRoom a collision is stored as sent (negative control)
+ok 695 - \#1584 makeRoom: a free slot shifts nothing; without makeRoom a collision is stored as sent (negative control)
+  ---
+  duration_ms: 196.962541
+  type: 'test'
+  ...
+# Subtest: \#1584 makeRoom: malformed requests are 400 and write nothing
+ok 696 - \#1584 makeRoom: malformed requests are 400 and write nothing
+  ---
+  duration_ms: 228.24175
+  type: 'test'
+  ...
+# Subtest: \#1584 after: a card dropped BETWEEN TWO TIED cards lands between them — the tied cards after the anchor are renumbered below it
+ok 697 - \#1584 after: a card dropped BETWEEN TWO TIED cards lands between them — the tied cards after the anchor are renumbered below it
+  ---
+  duration_ms: 132.733
+  type: 'test'
+  ...
+# Subtest: \#1584 after:null puts the card at the TOP of a tied column, ahead of every tied card
+ok 698 - \#1584 after:null puts the card at the TOP of a tied column, ahead of every tied card
+  ---
+  duration_ms: 119.749875
+  type: 'test'
+  ...
+# Subtest: \#1584 after: an anchor that is no longer where the tab saw it is a 409 (NEIGHBOUR_MOVED) and writes nothing
+ok 699 - \#1584 after: an anchor that is no longer where the tab saw it is a 409 (NEIGHBOUR_MOVED) and writes nothing
+  ---
+  duration_ms: 123.133792
+  type: 'test'
+  ...
+# Subtest: \#1584 requestId: recorded on the moved card; a REPLAY of the same move is a 409 and shifts nobody twice
+ok 700 - \#1584 requestId: recorded on the moved card; a REPLAY of the same move is a 409 and shifts nobody twice
+  ---
+  duration_ms: 126.422292
+  type: 'test'
+  ...
+# Subtest: \#1584 shifted: each renumbered neighbour comes back WHOLE (current content, not just order+version), body left out, excerpt on request
+ok 701 - \#1584 shifted: each renumbered neighbour comes back WHOLE (current content, not just order+version), body left out, excerpt on request
+  ---
+  duration_ms: 117.418083
+  type: 'test'
+  ...
+# Subtest: \#1584 F1 crash gap (simulated): event appended, board write fails ⇒ 500; the fence says FENCED, never committed; a replay is 409 MOVE_FENCED
+ok 702 - \#1584 F1 crash gap (simulated): event appended, board write fails ⇒ 500; the fence says FENCED, never committed; a replay is 409 MOVE_FENCED
+  ---
+  duration_ms: 124.633792
+  type: 'test'
+  ...
+# Subtest: \#1584 F1b crash gap (REAL): SIGKILL inside the gap, restart on the same data ⇒ the board lacks the move, the fence says FENCED, a replay is 409; no process left behind
+ok 703 - \#1584 F1b crash gap (REAL): SIGKILL inside the gap, restart on the same data ⇒ the board lacks the move, the fence says FENCED, a replay is 409; no process left behind
+  ---
+  duration_ms: 484.063125
+  type: 'test'
+  ...
+# Subtest: \#1584 F2 fence and move SERIALISE on the lock: a move fired into the fence's read→write gap waits, then is 409 MOVE_FENCED; nothing shifts
+ok 704 - \#1584 F2 fence and move SERIALISE on the lock: a move fired into the fence's read→write gap waits, then is 409 MOVE_FENCED; nothing shifts
+  ---
+  duration_ms: 1095.718667
+  type: 'test'
+  ...
+# Subtest: \#1584 F3 committed and still the latest ⇒ COMMITTED (and nothing is fenced); committed then SUPERSEDED by a later move ⇒ FENCED, never committed-by-guess
+ok 705 - \#1584 F3 committed and still the latest ⇒ COMMITTED (and nothing is fenced); committed then SUPERSEDED by a later move ⇒ FENCED, never committed-by-guess
+  ---
+  duration_ms: 183.184167
+  type: 'test'
+  ...
+# Subtest: \#1584 fence: malformed requestId is 400 and writes nothing
+ok 706 - \#1584 fence: malformed requestId is 400 and writes nothing
+  ---
+  duration_ms: 189.92775
+  type: 'test'
+  ...
+# Subtest: \#1584 F1c crash gap, UNPAUSED race (best effort, reported): SIGKILL fired from a watch on the event log's append; when it lands in the gap, the fence must say FENCED
+ok 707 - \#1584 F1c crash gap, UNPAUSED race (best effort, reported): SIGKILL fired from a watch on the event log's append; when it lands in the gap, the fence must say FENCED # TODO best effort: reported, never fails the run
+  ---
+  duration_ms: 2732.688458
+  type: 'test'
+  ...
+# unpaused race: the kill landed inside the gap in 0 of 5 attempts
+# file: tests/field-triple-coverage.test.mjs complete
+# \#831 RC0b coverage — universe assembled from artifacts, not from memory
+#   MODE                  : FULL (declared ∪ stored)
+#   source of stored keys : LIVE board (1501 cards)
+#   declared in MCP schema: 31
+#   present on stored cards: 33
+#   caller-settable universe: 34
+#   probes written          : 33
+#   ── schema → consumer ── declared but never stored (11): acceptanceUpsert, blockersUpsert, by, checksUpsert, descriptionAppend, descriptionPrepend, ifVersion, relationshipsAdd, relationshipsRemove, requestId, return
+#   ── consumer → schema ── stored but never declared (4): assignee, attachments, createRequestId, lastMoveRequestId
+#   ── UNCOVERED BY ANY PROBE (2): createRequestId, lastMoveRequestId
+# Subtest: \#831 RC0b — every caller-settable field in the universe has a probe
+not ok 1741 - \#831 RC0b — every caller-settable field in the universe has a probe
+  ---
+  duration_ms: 282.97325
+  type: 'test'
+  location: '/tmp/suite-watch-XXXX/tree/tests/field-triple-coverage.test.mjs:136:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    2 field(s) in the universe have no probe, so the audit cannot see them:
+      - createRequestId
+      - lastMoveRequestId
+    
+    Add a probe to tools/field-probes.mjs, or add the field to SERVER_ASSIGNED with a reason. Silently narrowing the universe is the failure this condition exists to prevent.
+    
+    ⚠️ SUBJECT: LIVE board — this red describes PRODUCTION RIGHT NOW, not necessarily your commit. A field deployed by someone else reds here on a branch that never touched it. Check whether it fails on a clean main before changing anything.
+    + actual - expected
+    
+    + [
+    +   'createRequestId',
+    +   'lastMoveRequestId'
+    + ]
+    - []
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+  actual:
+    0: 'createRequestId'
+    1: 'lastMoveRequestId'
+  operator: 'deepStrictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///tmp/suite-watch-XXXX/tree/tests/field-triple-coverage.test.mjs:207:10)
+    process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
+# file: tests/graph-post-discovery-r3.test.mjs complete
+# Subtest: D0 flag OFF: afterCommit is a 400 and the executor is NEVER contacted
+ok 1990 - D0 flag OFF: afterCommit is a 400 and the executor is NEVER contacted # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.6605
+  type: 'test'
+  ...
+# Subtest: D1 afterCommit combined with since, before, afterSeq, beforeSeq or tail is a 400 that NAMES both parameters
+ok 1991 - D1 afterCommit combined with since, before, afterSeq, beforeSeq or tail is a 400 that NAMES both parameters # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.042333
+  type: 'test'
+  ...
+# Subtest: D2 an EMPTY graph bootstraps straight to live: no rows, phase live, a gc1 cursor at the baseline, and an empty page ECHOES its cursor
+ok 1992 - D2 an EMPTY graph bootstraps straight to live: no rows, phase live, a gc1 cursor at the baseline, and an empty page ECHOES its cursor # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.035125
+  type: 'test'
+  ...
+# Subtest: D3 THE HEADLINE: A reserves postSeq 41 and is HELD before the executor, B reserves 42 and commits and is consumed, then A commits: the next page delivers A ONCE, with its LOWER postSeq and HIGHER commitSeq, and nothing is lost or repeated
+ok 1993 - D3 THE HEADLINE: A reserves postSeq 41 and is HELD before the executor, B reserves 42 and commits and is consumed, then A commits: the next page delivers A ONCE, with its LOWER postSeq and HIGHER commitSeq, and nothing is lost or repeated # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.034375
+  type: 'test'
+  ...
+# Subtest: D4 paging: five posts at limit 2 give 2,2,1,0 in commit order with no skip and no repeat, and each page's cursor is the LAST DELIVERED commit, never the head; limit 1 reaches all five
+ok 1994 - D4 paging: five posts at limit 2 give 2,2,1,0 in commit order with no skip and no repeat, and each page's cursor is the LAST DELIVERED commit, never the head; limit 1 reaches all five # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.092583
+  type: 'test'
+  ...
+# Subtest: D5 BOOTSTRAP over existing posts: pages of at most `limit` in postSeq order under gb1 tokens, then phase live with a gc1 cursor at the baseline; a post committed afterwards is delivered by live discovery ONCE
+ok 1995 - D5 BOOTSTRAP over existing posts: pages of at most `limit` in postSeq order under gb1 tokens, then phase live with a gc1 cursor at the baseline; a post committed afterwards is delivered by live discovery ONCE # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.025375
+  type: 'test'
+  ...
+# Subtest: D6 THE BASELINE BOUNDS MEMBERSHIP: a post whose postSeq lies INSIDE the not-yet-paged range but which commits AFTER the baseline is never a bootstrap row; live discovery delivers it once after the drain
+ok 1996 - D6 THE BASELINE BOUNDS MEMBERSHIP: a post whose postSeq lies INSIDE the not-yet-paged range but which commits AFTER the baseline is never a bootstrap row; live discovery delivers it once after the drain # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.061209
+  type: 'test'
+  ...
+# Subtest: D7 IMPORTS: a backfill is part of the BOOTSTRAP (committed at or below the baseline) and is NEVER live activity: a live cursor taken before the import sees nothing from it, and a bootstrap taken after sees the imported posts
+ok 1997 - D7 IMPORTS: a backfill is part of the BOOTSTRAP (committed at or below the baseline) and is NEVER live activity: a live cursor taken before the import sees nothing from it, and a bootstrap taken after sees the imported posts # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.024709
+  type: 'test'
+  ...
+# Subtest: D5b BOOTSTRAP ORDER is postSeq, NOT commit order: when a low-postSeq post committed LAST (and before the baseline), the bootstrap lists it FIRST, and a limit-2 page boundary does not repeat or skip it
+ok 1998 - D5b BOOTSTRAP ORDER is postSeq, NOT commit order: when a low-postSeq post committed LAST (and before the baseline), the bootstrap lists it FIRST, and a limit-2 page boundary does not repeat or skip it # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.2055
+  type: 'test'
+  ...
+# Subtest: D8 RESTART: after B was consumed and before A commits the executor AND the server restart on the same store: the cursor is still valid and A is delivered once; and a restart MID-BOOTSTRAP resumes from the same gb1 token with the same remaining rows
+ok 1999 - D8 RESTART: after B was consumed and before A commits the executor AND the server restart on the same store: the cursor is still valid and A is delivered once; and a restart MID-BOOTSTRAP resumes from the same gb1 token with the same remaining rows # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.256334
+  type: 'test'
+  ...
+# Subtest: D9 tokens: malformed is 400 UNKNOWN_CURSOR; a ps1 document token, or a gc1 token on afterSeq, is 409 POST_CURSOR_EPOCH_CHANGED with resync; a forged incarnation or epoch is the same 409; a token whose scope differs from the request's filters is 400 CURSOR_FILTER_MISMATCH
+ok 2000 - D9 tokens: malformed is 400 UNKNOWN_CURSOR; a ps1 document token, or a gc1 token on afterSeq, is 409 POST_CURSOR_EPOCH_CHANGED with resync; a forged incarnation or epoch is the same 409; a token whose scope differs from the request's filters is 400 CURSOR_FILTER_MISMATCH # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.074625
+  type: 'test'
+  ...
+# Subtest: D10 FILTERS across page boundaries (and mentions match case-insensitively: m1 mentions `Bea`, the filter is `bea`): with mentions_me and limit 1, a matching post that follows three excluded ones is still reached, and the cursor crosses an excluded row only after it was examined for THAT filter
+ok 2001 - D10 FILTERS across page boundaries (and mentions match case-insensitively: m1 mentions `Bea`, the filter is `bea`): with mentions_me and limit 1, a matching post that follows three excluded ones is still reached, and the cursor crosses an excluded row only after it was examined for THAT filter # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.02275
+  type: 'test'
+  ...
+# Subtest: D11 NOT ITEMS: a reservation, an UNKNOWN outcome (executor down) and a repeated publish of the same operation produce NO extra item (a REJECTED collision leaves no receipt to discover and is not exercised here)
+ok 2002 - D11 NOT ITEMS: a reservation, an UNKNOWN outcome (executor down) and a repeated publish of the same operation produce NO extra item (a REJECTED collision leaves no receipt to discover and is not exercised here) # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.017791
+  type: 'test'
+  ...
+# Subtest: D12 FAILURES: the executor unreachable is 503 GRAPH_DISCOVERY_UNAVAILABLE and moves nothing; the same cursor, retried when readable, still delivers the owed post; a receipt whose node is gone is 503 GRAPH_DISCOVERY_INCONSISTENT and moves nothing
+ok 2003 - D12 FAILURES: the executor unreachable is 503 GRAPH_DISCOVERY_UNAVAILABLE and moves nothing; the same cursor, retried when readable, still delivers the owed post; a receipt whose node is gone is 503 GRAPH_DISCOVERY_INCONSISTENT and moves nothing # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.018042
+  type: 'test'
+  ...
+# Subtest: D13 AN IDENTITY SWITCH BETWEEN THE TWO READS: the store behind the executor is replaced (another incarnation, other posts) after the marker is read and before the batch: the answer is 503 GRAPH_DISCOVERY_UNAVAILABLE with NO rows and NO cursor (so no new-store row ever carries an old-store token), and a client that retries against the real store still gets exactly what it was owed
+ok 2004 - D13 AN IDENTITY SWITCH BETWEEN THE TWO READS: the store behind the executor is replaced (another incarnation, other posts) after the marker is read and before the batch: the answer is 503 GRAPH_DISCOVERY_UNAVAILABLE with NO rows and NO cursor (so no new-store row ever carries an old-store token), and a client that retries against the real store still gets exactly what it was owed # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.015958
+  type: 'test'
+  ...
+# Subtest: D13b A SWAPPED-IN STORE THAT IS ITSELF INCONSISTENT: the executor behind the proxy is replaced, after the marker read, by a store that holds a receipt whose node is gone: the answer is 503 GRAPH_DISCOVERY_UNAVAILABLE (the store changed), NOT an INCONSISTENCY attributed to the old store; no rows, no cursor
+ok 2005 - D13b A SWAPPED-IN STORE THAT IS ITSELF INCONSISTENT: the executor behind the proxy is replaced, after the marker read, by a store that holds a receipt whose node is gone: the answer is 503 GRAPH_DISCOVERY_UNAVAILABLE (the store changed), NOT an INCONSISTENCY attributed to the old store; no rows, no cursor # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.016041
+  type: 'test'
+  ...
+# Subtest: D14 A POST NODE WITH NO VALID postSeq is a NAMED INCONSISTENCY in a bootstrap: 503 GRAPH_DISCOVERY_INCONSISTENT with no cursor; missing, zero, negative, non-numeric, a numeric string and a decimal postSeq alike; never silently omitted and never listed again on every page
+ok 2006 - D14 A POST NODE WITH NO VALID postSeq is a NAMED INCONSISTENCY in a bootstrap: 503 GRAPH_DISCOVERY_INCONSISTENT with no cursor; missing, zero, negative, non-numeric, a numeric string and a decimal postSeq alike; never silently omitted and never listed again on every page # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.015333
+  type: 'test'
+  ...
+# Subtest: D14b THE LIVE FEED applies the same validation: a post with a missing, zero, negative, non-numeric or numeric-STRING postSeq is 503 GRAPH_DISCOVERY_INCONSISTENT on a LIVE page too (never delivered with a null postSeq), with no cursor
+ok 2007 - D14b THE LIVE FEED applies the same validation: a post with a missing, zero, negative, non-numeric or numeric-STRING postSeq is 503 GRAPH_DISCOVERY_INCONSISTENT on a LIVE page too (never delivered with a null postSeq), with no cursor # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.016666
+  type: 'test'
+  ...
+# Subtest: T1 the commons READER (conversation-view) discovers a late-committed low-postSeq post on a real runtime
+not ok 2008 - T1 the commons READER (conversation-view) discovers a late-committed low-postSeq post on a real runtime # TODO NOT IN THIS FILE: a separate addendum, and R3 is not Done without it
+  ---
+  duration_ms: 0.31525
+  type: 'test'
+  location: '/tmp/suite-watch-XXXX/tree/tests/graph-post-discovery-r3.test.mjs:502:1'
+  failureType: 'testCodeFailure'
+  error: 'NOT IN THIS FILE: a separate addendum, and R3 is not Done without it'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  operator: 'fail'
+  stack: |-
+    TestContext.<anonymous> (file:///tmp/suite-watch-XXXX/tree/tests/graph-post-discovery-r3.test.mjs:502:142)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: T2 the unread BADGE (commons-panel) counts a late-committed low-postSeq post exactly once
+not ok 2009 - T2 the unread BADGE (commons-panel) counts a late-committed low-postSeq post exactly once # TODO NOT IN THIS FILE: a separate addendum, and R3 is not Done without it
+  ---
+  duration_ms: 0.041208
+  type: 'test'
+  location: '/tmp/suite-watch-XXXX/tree/tests/graph-post-discovery-r3.test.mjs:503:1'
+  failureType: 'testCodeFailure'
+  error: 'NOT IN THIS FILE: a separate addendum, and R3 is not Done without it'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  operator: 'fail'
+  stack: |-
+    TestContext.<anonymous> (file:///tmp/suite-watch-XXXX/tree/tests/graph-post-discovery-r3.test.mjs:503:128)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: T3 the resident MENTION SCAN (guest-loop) finds a late-committed mentioning post and does not re-process it after a restart
+not ok 2010 - T3 the resident MENTION SCAN (guest-loop) finds a late-committed mentioning post and does not re-process it after a restart # TODO NOT IN THIS FILE: a separate addendum, and R3 is not Done without it
+  ---
+  duration_ms: 0.035167
+  type: 'test'
+  location: '/tmp/suite-watch-XXXX/tree/tests/graph-post-discovery-r3.test.mjs:504:1'
+  failureType: 'testCodeFailure'
+  error: 'NOT IN THIS FILE: a separate addendum, and R3 is not Done without it'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  operator: 'fail'
+  stack: |-
+    TestContext.<anonymous> (file:///tmp/suite-watch-XXXX/tree/tests/graph-post-discovery-r3.test.mjs:504:162)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: T4 R4 JOINT: a redaction-driven fresh store is a new incarnation, so every cursor resyncs; and a legitimately REDACTED post is not a permanent GRAPH_DISCOVERY_INCONSISTENT
+not ok 2011 - T4 R4 JOINT: a redaction-driven fresh store is a new incarnation, so every cursor resyncs; and a legitimately REDACTED post is not a permanent GRAPH_DISCOVERY_INCONSISTENT # TODO UNFROZEN: R4's representation is not defined
+  ---
+  duration_ms: 0.0365
+  type: 'test'
+  location: '/tmp/suite-watch-XXXX/tree/tests/graph-post-discovery-r3.test.mjs:505:1'
+  failureType: 'testCodeFailure'
+  error: 'UNFROZEN'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  operator: 'fail'
+  stack: |-
+    TestContext.<anonymous> (file:///tmp/suite-watch-XXXX/tree/tests/graph-post-discovery-r3.test.mjs:505:253)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: T5 the item's `by` reflects the declared mutation actor, not the post author or onBehalfOf
+not ok 2012 - T5 the item's `by` reflects the declared mutation actor, not the post author or onBehalfOf # TODO UNFROZEN: attribution source not settled
+  ---
+  duration_ms: 0.034083
+  type: 'test'
+  location: '/tmp/suite-watch-XXXX/tree/tests/graph-post-discovery-r3.test.mjs:506:1'
+  failureType: 'testCodeFailure'
+  error: 'UNFROZEN'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  operator: 'fail'
+  stack: |-
+    TestContext.<anonymous> (file:///tmp/suite-watch-XXXX/tree/tests/graph-post-discovery-r3.test.mjs:506:168)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: T6 the served/acked lane and /api/changes represent the same committed write; served-but-unacked replay is not suppressed
+not ok 2013 - T6 the served/acked lane and /api/changes represent the same committed write; served-but-unacked replay is not suppressed # TODO NOT IN THIS FILE: a separate addendum, and R3 is not Done without it
+  ---
+  duration_ms: 0.032625
+  type: 'test'
+  location: '/tmp/suite-watch-XXXX/tree/tests/graph-post-discovery-r3.test.mjs:507:1'
+  failureType: 'testCodeFailure'
+  error: 'NOT IN THIS FILE: a separate addendum, and R3 is not Done without it'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  operator: 'fail'
+  stack: |-
+    TestContext.<anonymous> (file:///tmp/suite-watch-XXXX/tree/tests/graph-post-discovery-r3.test.mjs:507:160)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# file: tests/graph-post-discovery-r3-badge.test.mjs complete
+# Subtest: B0 CONTROL, the document path as it is today: a first visit adopts the room's end and counts 0; one new post counts 1; opening the panel clears it; nothing is recounted
+ok 2014 - B0 CONTROL, the document path as it is today: a first visit adopts the room's end and counts 0; one new post counts 1; opening the panel clears it; nothing is recounted # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.596875
+  type: 'test'
+  ...
+# Subtest: B1 THE HELD POST (T2): a post whose graph write is HELD is reserved first (earlier createdAt) and commits last; a later post commits meanwhile; the reader opens the panel (the cursor moves past the later post); then the held post commits. The badge counts the held post EXACTLY ONCE and a further refresh does not repeat it
+ok 2015 - B1 THE HELD POST (T2): a post whose graph write is HELD is reserved first (earlier createdAt) and commits last; a later post commits meanwhile; the reader opens the panel (the cursor moves past the later post); then the held post commits. The badge counts the held post EXACTLY ONCE and a further refresh does not repeat it # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.076417
+  type: 'test'
+  ...
+# Subtest: B2 MORE THAN A PAGE OF UNSEEN POSTS: 150 posts after the last look show 99+; opening clears it with nothing lost; then exactly five more posts show 5 (not 0, not 105)
+ok 2016 - B2 MORE THAN A PAGE OF UNSEEN POSTS: 150 posts after the last look show 99+; opening clears it with nothing lost; then exactly five more posts show 5 (not 0, not 105) # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.029583
+  type: 'test'
+  ...
+# Subtest: B3 A POST REDACTED BEFORE THE BADGE LOOKS IS NOT COUNTED, and redacting an UNREAD post that was already counted REMOVES it from the count (the owner's decision dd472a5f: a redacted post is hidden from lists and counts)
+ok 2017 - B3 A POST REDACTED BEFORE THE BADGE LOOKS IS NOT COUNTED, and redacting an UNREAD post that was already counted REMOVES it from the count (the owner's decision dd472a5f: a redacted post is hidden from lists and counts) # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.0275
+  type: 'test'
+  ...
+# Subtest: B4 LEGACY-CURSOR MIGRATION KEEPS THE READER'S UNREAD POSTS (reconciled with the owner's 15-minute grace, `edf8f91c`, which supersedes the strict-after rule this row first pinned): a timestamp cursor already in a browser's storage is not stranded and not treated as "everything seen"; with the cursor set to the FIRST of three fresh posts, all three are inside the grace and count 3 (the first is a seen post counted once: the accepted cost, pinned by B9a); a post made after the upgrade counts on top; opening clears them once
+ok 2018 - B4 LEGACY-CURSOR MIGRATION KEEPS THE READER'S UNREAD POSTS (reconciled with the owner's 15-minute grace, `edf8f91c`, which supersedes the strict-after rule this row first pinned): a timestamp cursor already in a browser's storage is not stranded and not treated as "everything seen"; with the cursor set to the FIRST of three fresh posts, all three are inside the grace and count 3 (the first is a seen post counted once: the accepted cost, pinned by B9a); a post made after the upgrade counts on top; opening clears them once # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.030833
+  type: 'test'
+  ...
+# Subtest: B5 A SERVER RESTART between polls loses nothing: posts made before the restart that the reader has not seen are still counted after it, once
+ok 2019 - B5 A SERVER RESTART between polls loses nothing: posts made before the restart that the reader has not seen are still counted after it, once # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.03075
+  type: 'test'
+  ...
+# Subtest: B6 NO CAP, EXACT COUNT: with MORE unread posts than any fixed list could hold (1,040), the count stays exact as most are redacted: redacting all but 90 scattered across the whole range leaves exactly `90`, whichever end a bounded list would have dropped
+ok 2020 - B6 NO CAP, EXACT COUNT: with MORE unread posts than any fixed list could hold (1,040), the count stays exact as most are redacted: redacting all but 90 scattered across the whole range leaves exactly `90`, whichever end a bounded list would have dropped # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.024041
+  type: 'test'
+  ...
+# Subtest: B7 STORE RESYNC RECONCILES BY POST IDENTITY: the executor is replaced by a store with a NEW incarnation that holds some of the same posts (same ids and numbers) but not all; the badge recovers without marking unread posts seen: the posts still held are still counted, the missing one is dropped, a post made afterwards counts on top, opening clears them once
+ok 2021 - B7 STORE RESYNC RECONCILES BY POST IDENTITY: the executor is replaced by a store with a NEW incarnation that holds some of the same posts (same ids and numbers) but not all; the badge recovers without marking unread posts seen: the posts still held are still counted, the missing one is dropped, a post made afterwards counts on top, opening clears them once # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.063666
+  type: 'test'
+  ...
+# Subtest: B7b A REBUILT STORE MUST NOT ALIAS A SEEN POST: after the reader has SEEN a post, a store with a new incarnation holds a DIFFERENT post (another id) carrying the same postSeq; that post is NEW to the reader and is counted (matching on the number alone would read it as the post already seen)
+ok 2022 - B7b A REBUILT STORE MUST NOT ALIAS A SEEN POST: after the reader has SEEN a post, a store with a new incarnation holds a DIFFERENT post (another id) carrying the same postSeq; that post is NEW to the reader and is counted (matching on the number alone would read it as the post already seen) # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.184875
+  type: 'test'
+  ...
+# Subtest: B7c IDENTITY IS EXACT, NOT PROBABILISTIC: after the reader has SEEN five posts and the store is replaced, the new store puts a DIFFERENT post at each seen number except one: an id that a 24-bit hash of the first build merges with the seen id (a deliberate collision), the same id in UPPERCASE, the id with `=` appended, the id with `=` prepended; the fifth is the very same post (control). The four different posts are counted; the identical one is not. Nothing canonicalizes, truncates or hashes an id into a seen set
+ok 2023 - B7c IDENTITY IS EXACT, NOT PROBABILISTIC: after the reader has SEEN five posts and the store is replaced, the new store puts a DIFFERENT post at each seen number except one: an id that a 24-bit hash of the first build merges with the seen id (a deliberate collision), the same id in UPPERCASE, the id with `=` appended, the id with `=` prepended; the fifth is the very same post (control). The four different posts are counted; the identical one is not. Nothing canonicalizes, truncates or hashes an id into a seen set # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.227125
+  type: 'test'
+  ...
+# Subtest: B8 A FAILING STORAGE WRITE does not break the badge: when setItem throws (private mode, quota), the badge still mounts, polls and shows the right count for the session, and never throws into the page
+ok 2024 - B8 A FAILING STORAGE WRITE does not break the badge: when setItem throws (private mode, quota), the badge still mounts, polls and shows the right count for the session, and never throws into the page # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.07125
+  type: 'test'
+  ...
+# Subtest: B9a LEGACY-CURSOR MIGRATION, THE OWNER'S GRACE OF 15 MINUTES (decision edf8f91c): a legacy cursor is a TIME, so the badge counts the posts created within 15 minutes BEFORE it as well as after it. A held write across the migration is the case it exists for: a post reserved before the reader's last look and committed after it IS counted, and so is the post that overtook it (up to the grace of SEEN posts are counted once per browser: the accepted cost)
+ok 2025 - B9a LEGACY-CURSOR MIGRATION, THE OWNER'S GRACE OF 15 MINUTES (decision edf8f91c): a legacy cursor is a TIME, so the badge counts the posts created within 15 minutes BEFORE it as well as after it. A held write across the migration is the case it exists for: a post reserved before the reader's last look and committed after it IS counted, and so is the post that overtook it (up to the grace of SEEN posts are counted once per browser: the accepted cost) # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.022834
+  type: 'test'
+  ...
+# Subtest: B9b THE GRACE IS A WINDOW, NOT ALL HISTORY: posts created more than 15 minutes before the legacy cursor are NOT counted (a cursor 16 minutes ahead of three fresh posts counts 0), and a cursor 14 minutes ahead still counts them; the residual (a post delayed longer than the grace) is the owner's accepted loss and is named, not tested
+ok 2026 - B9b THE GRACE IS A WINDOW, NOT ALL HISTORY: posts created more than 15 minutes before the legacy cursor are NOT counted (a cursor 16 minutes ahead of three fresh posts counts 0), and a cursor 14 minutes ahead still counts them; the residual (a post delayed longer than the grace) is the owner's accepted loss and is named, not tested # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.017416
+  type: 'test'
+  ...
+# Subtest: B10 TODO (measurement, not a row): the one-off walk from the start for a legacy cursor is a full bootstrap per browser, and the serialized unread state has a size: measured at 36k posts in the real browser, with the page-visible cost and the localStorage bytes, before acceptance
+ok 2027 - B10 TODO (measurement, not a row): the one-off walk from the start for a legacy cursor is a full bootstrap per browser, and the serialized unread state has a size: measured at 36k posts in the real browser, with the page-visible cost and the localStorage bytes, before acceptance # TODO measure: per-browser migration cost and stored size at 36k
+  ---
+  duration_ms: 0.019625
+  type: 'test'
+  ...
+# file: tests/outbox-board-key-g6.test.mjs complete
+# Subtest: B0 CONTROL: auth is enforced, and the board credential reaches /publish and /complete
+ok 2896 - B0 CONTROL: auth is enforced, and the board credential reaches /publish and /complete
+  ---
+  duration_ms: 213.383916
+  type: 'test'
+  ...
+# Subtest: B1 /publish: a non-board act seat is refused with 403; the board credential is not
+not ok 2897 - B1 /publish: a non-board act seat is refused with 403; the board credential is not # TODO DEFERRED to \#1343 (decision 012168e4; confirmed by the builder 17:03Z, the contract owner may say a row should block sooner): the standing, executable statement of board-key-only; RED by design until \#1343 enforces it, and not a \#1574 cutover blocker
+  ---
+  duration_ms: 124.700958
+  type: 'test'
+  location: '/tmp/suite-watch-XXXX/tree/tests/outbox-board-key-g6.test.mjs:73:3'
+  failureType: 'testCodeFailure'
+  error: |-
+    an act-scoped seat that is not board is refused at the door (it answered 404: {"error":"Obligation not found","obligationId":"no-such:claim"})
+    
+    404 !== 403
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 403
+  actual: 404
+  operator: 'strictEqual'
+  stack: |-
+    file:///tmp/suite-watch-XXXX/tree/tests/outbox-board-key-g6.test.mjs:78:14
+    process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    async enforced (file:///tmp/suite-watch-XXXX/tree/tests/outbox-board-key-g6.test.mjs:53:16)
+    async TestContext.<anonymous> (file:///tmp/suite-watch-XXXX/tree/tests/outbox-board-key-g6.test.mjs:74:5)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: B2 /complete: a non-board act seat is refused with 403; the board credential is not
+not ok 2898 - B2 /complete: a non-board act seat is refused with 403; the board credential is not # TODO DEFERRED to \#1343 (decision 012168e4; confirmed by the builder 17:03Z, the contract owner may say a row should block sooner): the standing, executable statement of board-key-only; RED by design until \#1343 enforces it, and not a \#1574 cutover blocker
+  ---
+  duration_ms: 179.928625
+  type: 'test'
+  location: '/tmp/suite-watch-XXXX/tree/tests/outbox-board-key-g6.test.mjs:73:3'
+  failureType: 'testCodeFailure'
+  error: |-
+    an act-scoped seat that is not board is refused at the door (it answered 404: {"error":"Obligation not found","obligationId":"no-such:claim"})
+    
+    404 !== 403
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 403
+  actual: 404
+  operator: 'strictEqual'
+  stack: |-
+    file:///tmp/suite-watch-XXXX/tree/tests/outbox-board-key-g6.test.mjs:78:14
+    process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    async enforced (file:///tmp/suite-watch-XXXX/tree/tests/outbox-board-key-g6.test.mjs:53:16)
+    async TestContext.<anonymous> (file:///tmp/suite-watch-XXXX/tree/tests/outbox-board-key-g6.test.mjs:74:5)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: B4 STRICT READING (separate row): an admin-scoped human is refused on /publish too, since the gate says "board key only"
+not ok 2899 - B4 STRICT READING (separate row): an admin-scoped human is refused on /publish too, since the gate says "board key only" # TODO DEFERRED to \#1343 (decision 012168e4; confirmed by the builder 17:03Z, the contract owner may say a row should block sooner): the standing, executable statement of board-key-only; RED by design until \#1343 enforces it, and not a \#1574 cutover blocker
+  ---
+  duration_ms: 178.060125
+  type: 'test'
+  location: '/tmp/suite-watch-XXXX/tree/tests/outbox-board-key-g6.test.mjs:83:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    an admin human is not the board key (404: {"error":"Obligation not found","obligationId":"no-such:claim"})
+    
+    404 !== 403
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 403
+  actual: 404
+  operator: 'strictEqual'
+  stack: |-
+    file:///tmp/suite-watch-XXXX/tree/tests/outbox-board-key-g6.test.mjs:86:12
+    process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    async enforced (file:///tmp/suite-watch-XXXX/tree/tests/outbox-board-key-g6.test.mjs:53:16)
+    async TestContext.<anonymous> (file:///tmp/suite-watch-XXXX/tree/tests/outbox-board-key-g6.test.mjs:84:3)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: B5 THE LISTING (separate row, from the C3a Access paragraph): a non-board act seat reading GET /api/outbox is refused with 403
+not ok 2900 - B5 THE LISTING (separate row, from the C3a Access paragraph): a non-board act seat reading GET /api/outbox is refused with 403 # TODO DEFERRED to \#1343 (decision 012168e4; confirmed by the builder 17:03Z, the contract owner may say a row should block sooner): the standing, executable statement of board-key-only; RED by design until \#1343 enforces it, and not a \#1574 cutover blocker
+  ---
+  duration_ms: 178.732792
+  type: 'test'
+  location: '/tmp/suite-watch-XXXX/tree/tests/outbox-board-key-g6.test.mjs:90:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    C3a: "both routes require the board key" (200)
+    
+    200 !== 403
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 403
+  actual: 200
+  operator: 'strictEqual'
+  stack: |-
+    file:///tmp/suite-watch-XXXX/tree/tests/outbox-board-key-g6.test.mjs:94:12
+    process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    async enforced (file:///tmp/suite-watch-XXXX/tree/tests/outbox-board-key-g6.test.mjs:53:16)
+    async TestContext.<anonymous> (file:///tmp/suite-watch-XXXX/tree/tests/outbox-board-key-g6.test.mjs:91:3)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# file: tests/post-redaction-r4a.test.mjs complete
+# Subtest: X0 CONTROL: before redaction the marker IS present in the store (body, mention) and the R3 feed serves it; so nothing below can pass on a missing source
+ok 3001 - X0 CONTROL: before redaction the marker IS present in the store (body, mention) and the R3 feed serves it; so nothing below can pass on a missing source # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.623375
+  type: 'test'
+  ...
+# Subtest: X1 THE DELETE: after post.redact the marker is in NO triple of the store (any subject, any graph), the post keeps EXACTLY the tombstone triples, and the unrelated post is byte-for-byte unchanged
+ok 3002 - X1 THE DELETE: after post.redact the marker is in NO triple of the store (any subject, any graph), the post keeps EXACTLY the tombstone triples, and the unrelated post is byte-for-byte unchanged # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.038542
+  type: 'test'
+  ...
+# Subtest: X2 NOTHING THE OPERATION EMITS CARRIES THE REMOVED TEXT: the intention, the update result, the reconcile result and the receipt triples are free of the marker
+ok 3003 - X2 NOTHING THE OPERATION EMITS CARRIES THE REMOVED TEXT: the intention, the update result, the reconcile result and the receipt triples are free of the marker # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.031875
+  type: 'test'
+  ...
+# Subtest: X3 IDEMPOTENT: the same opId again is the same APPLIED receipt and the commit counter does not move; a second operation id for an already-redacted post is not a second redaction
+ok 3004 - X3 IDEMPOTENT: the same opId again is the same APPLIED receipt and the commit counter does not move; a second operation id for an already-redacted post is not a second redaction # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.030541
+  type: 'test'
+  ...
+# Subtest: X4 REFUSALS: an unknown target is a NAMED refusal (not APPLIED) and creates no tombstone; a wrong dataset is refused
+ok 3005 - X4 REFUSALS: an unknown target is a NAMED refusal (not APPLIED) and creates no tombstone; a wrong dataset is refused # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.086
+  type: 'test'
+  ...
+# Subtest: X5 NO RECREATION: after redaction, post.create and post.import of the SAME post id under a NEW opId are not APPLIED and the node stays a tombstone with no body
+ok 3006 - X5 NO RECREATION: after redaction, post.create and post.import of the SAME post id under a NEW opId are not APPLIED and the node stays a tombstone with no body # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.02625
+  type: 'test'
+  ...
+# Subtest: X6 R0 NEVER RE-IMPORTS A REDACTED ID from an older board snapshot: {id, reason: "redacted-post"}, exit 4, nothing written, the marker absent
+ok 3007 - X6 R0 NEVER RE-IMPORTS A REDACTED ID from an older board snapshot: {id, reason: "redacted-post"}, exit 4, nothing written, the marker absent # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.060583
+  type: 'test'
+  ...
+# Subtest: X7 A PUBLISHER RETRY OF A REDACTED POST IS BLOCKED, never published: an entry that still says pending (its recording write was lost) while the graph holds a tombstone is POST_REDACTED, and the old create receipt is not read as current visibility
+ok 3008 - X7 A PUBLISHER RETRY OF A REDACTED POST IS BLOCKED, never published: an entry that still says pending (its recording write was lost) while the graph holds a tombstone is POST_REDACTED, and the old create receipt is not read as current visibility # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.026166
+  type: 'test'
+  ...
+# Subtest: X8 R3 READS A REDACTED POST CONTENT-FREE: a live cursor that already delivered it receives ONE redact item at the redaction commit, a fresh bootstrap keeps its slot as {id, postSeq, body: null, redacted: true}, and neither is a GRAPH_DISCOVERY_INCONSISTENT nor carries the old text
+ok 3009 - X8 R3 READS A REDACTED POST CONTENT-FREE: a live cursor that already delivered it receives ONE redact item at the redaction commit, a fresh bootstrap keeps its slot as {id, postSeq, body: null, redacted: true}, and neither is a GRAPH_DISCOVERY_INCONSISTENT nor carries the old text # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.191583
+  type: 'test'
+  ...
+# Subtest: X9 A FILTERED CONSUMER STILL GETS THE REDACTION: a mentions_me consumer that received the post still receives its redact item after the mention triple is deleted
+ok 3010 - X9 A FILTERED CONSUMER STILL GETS THE REDACTION: a mentions_me consumer that received the post still receives its redact item after the mention triple is deleted # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.222958
+  type: 'test'
+  ...
+# Subtest: P1 PHYSICAL ABSENCE: the removed text is not recoverable from the store's own files (WAL, SST, any other) after the chosen mechanism and a reopen; DELETE plus optimize() is already measured NOT to do this
+not ok 3011 - P1 PHYSICAL ABSENCE: the removed text is not recoverable from the store's own files (WAL, SST, any other) after the chosen mechanism and a reopen; DELETE plus optimize() is already measured NOT to do this # TODO NOT IN THIS FILE: owner decision and a separate physical-slice file; R4 is not complete without it
+  ---
+  duration_ms: 0.557959
+  type: 'test'
+  location: '/tmp/suite-watch-XXXX/tree/tests/post-redaction-r4a.test.mjs:315:1'
+  failureType: 'testCodeFailure'
+  error: 'NOT IN THIS FILE: owner decision and a separate physical-slice file; R4 is not complete without it'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  operator: 'fail'
+  stack: |-
+    TestContext.<anonymous> (file:///tmp/suite-watch-XXXX/tree/tests/post-redaction-r4a.test.mjs:315:244)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: P2 the verified sanitised-store REWRITE: preserves unrelated data, dataset identity, receipts and monotonic commit positions; is a NEW incarnation; crash outcomes before and after the switch are named
+not ok 3012 - P2 the verified sanitised-store REWRITE: preserves unrelated data, dataset identity, receipts and monotonic commit positions; is a NEW incarnation; crash outcomes before and after the switch are named # TODO NOT IN THIS FILE: owner decision and a separate physical-slice file; R4 is not complete without it
+  ---
+  duration_ms: 0.052709
+  type: 'test'
+  location: '/tmp/suite-watch-XXXX/tree/tests/post-redaction-r4a.test.mjs:316:1'
+  failureType: 'testCodeFailure'
+  error: 'NOT IN THIS FILE: owner decision and a separate physical-slice file; R4 is not complete without it'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  operator: 'fail'
+  stack: |-
+    TestContext.<anonymous> (file:///tmp/suite-watch-XXXX/tree/tests/post-redaction-r4a.test.mjs:316:239)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: P3 EVERY cursor carrying the old incarnation resyncs after a rewrite, including a late owed post across that boundary (the R3/R4 joint)
+not ok 3013 - P3 EVERY cursor carrying the old incarnation resyncs after a rewrite, including a late owed post across that boundary (the R3/R4 joint) # TODO NOT IN THIS FILE: owner decision and a separate physical-slice file; R4 is not complete without it
+  ---
+  duration_ms: 0.039125
+  type: 'test'
+  location: '/tmp/suite-watch-XXXX/tree/tests/post-redaction-r4a.test.mjs:317:1'
+  failureType: 'testCodeFailure'
+  error: 'NOT IN THIS FILE: owner decision and a separate physical-slice file; R4 is not complete without it'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  operator: 'fail'
+  stack: |-
+    TestContext.<anonymous> (file:///tmp/suite-watch-XXXX/tree/tests/post-redaction-r4a.test.mjs:317:174)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: P4 retained copies: pre-redaction checkpoints and backups, the document and event-log copies, attachment bytes and exports each have a stated disposition
+not ok 3014 - P4 retained copies: pre-redaction checkpoints and backups, the document and event-log copies, attachment bytes and exports each have a stated disposition # TODO NOT IN THIS FILE: owner decision and a separate physical-slice file; R4 is not complete without it
+  ---
+  duration_ms: 0.034583
+  type: 'test'
+  location: '/tmp/suite-watch-XXXX/tree/tests/post-redaction-r4a.test.mjs:318:1'
+  failureType: 'testCodeFailure'
+  error: 'NOT IN THIS FILE: owner decision and a separate physical-slice file; R4 is not complete without it'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  operator: 'fail'
+  stack: |-
+    TestContext.<anonymous> (file:///tmp/suite-watch-XXXX/tree/tests/post-redaction-r4a.test.mjs:318:192)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: P5 the durable redaction-decision ledger outside both restore sets: a restore of an older store is reconciled with it BEFORE serving
+not ok 3015 - P5 the durable redaction-decision ledger outside both restore sets: a restore of an older store is reconciled with it BEFORE serving # TODO NOT IN THIS FILE: owner decision and a separate physical-slice file; R4 is not complete without it
+  ---
+  duration_ms: 0.033916
+  type: 'test'
+  location: '/tmp/suite-watch-XXXX/tree/tests/post-redaction-r4a.test.mjs:319:1'
+  failureType: 'testCodeFailure'
+  error: 'NOT IN THIS FILE: owner decision and a separate physical-slice file; R4 is not complete without it'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  operator: 'fail'
+  stack: |-
+    TestContext.<anonymous> (file:///tmp/suite-watch-XXXX/tree/tests/post-redaction-r4a.test.mjs:319:171)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: P6 the host-only, human-authorised coordinator: dry run by default, explicit confirmation, partial failure is a named INCOMPLETE state
+not ok 3016 - P6 the host-only, human-authorised coordinator: dry run by default, explicit confirmation, partial failure is a named INCOMPLETE state # TODO NOT IN THIS FILE: owner decision and a separate physical-slice file; R4 is not complete without it
+  ---
+  duration_ms: 0.032375
+  type: 'test'
+  location: '/tmp/suite-watch-XXXX/tree/tests/post-redaction-r4a.test.mjs:320:1'
+  failureType: 'testCodeFailure'
+  error: 'NOT IN THIS FILE: owner decision and a separate physical-slice file; R4 is not complete without it'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  operator: 'fail'
+  stack: |-
+    TestContext.<anonymous> (file:///tmp/suite-watch-XXXX/tree/tests/post-redaction-r4a.test.mjs:320:173)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# file: tests/post-write-r2.test.mjs complete
+# Subtest: W0 flag OFF: a post is the document path as today (201, in the document, the executor NEVER contacted)
+ok 3041 - W0 flag OFF: a post is the document path as today (201, in the document, the executor NEVER contacted) # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.71325
+  type: 'test'
+  ...
+# Subtest: W0b flag ON: the write reaches the executor (the contrast that makes W0 mean something)
+ok 3042 - W0b flag ON: the write reaches the executor (the contrast that makes W0 mean something) # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.038667
+  type: 'test'
+  ...
+# Subtest: W1 flag ON: 201 with the post, NO document conversation, the node has the R0 shape (type, text, author, dateCreated, postSeq, mentions), postSeq above the migrated counter and the counter advanced
+ok 3043 - W1 flag ON: 201 with the post, NO document conversation, the node has the R0 shape (type, text, author, dateCreated, postSeq, mentions), postSeq above the migrated counter and the counter advanced # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.030625
+  type: 'test'
+  ...
+# Subtest: W2 postSeq is ONE counter: strictly increasing across posts, every node carries the number the response named, gaps allowed but never a duplicate
+ok 3044 - W2 postSeq is ONE counter: strictly increasing across posts, every node carries the number the response named, gaps allowed but never a duplicate # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.028667
+  type: 'test'
+  ...
+# Subtest: W3 a retry of the same (author, requestId, content) is the SAME post: same id, same postSeq, one node, not a 409
+ok 3045 - W3 a retry of the same (author, requestId, content) is the SAME post: same id, same postSeq, one node, not a 409 # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.720625
+  type: 'test'
+  ...
+# Subtest: W4 the SAME requestId with a DIFFERENT body, attachedTo or conversation is a 409 and the first post stays byte-identical (the graph arbitrates; a replay would swallow the second message)
+ok 3046 - W4 the SAME requestId with a DIFFERENT body, attachedTo or conversation is a 409 and the first post stays byte-identical (the graph arbitrates; a replay would swallow the second message) # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.089542
+  type: 'test'
+  ...
+# Subtest: W5 with NO requestId nothing is deduplicated: two identical posts are two posts with different ids and postSeqs
+ok 3047 - W5 with NO requestId nothing is deduplicated: two identical posts are two posts with different ids and postSeqs # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.153167
+  type: 'test'
+  ...
+# Subtest: W6 two AUTHORS using the same requestId are two different posts (a reservation keyed by requestId alone would hand one author the other's post)
+ok 3048 - W6 two AUTHORS using the same requestId are two different posts (a reservation keyed by requestId alone would hand one author the other's post) # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.050875
+  type: 'test'
+  ...
+# Subtest: W7 UNKNOWN: the write never reaches the executor → 503 GRAPH_WRITE_UNKNOWN carrying the requestId, a reservation in the document, no node, no document conversation; the retry of the same key lands ONE node with the RESERVED postSeq
+ok 3049 - W7 UNKNOWN: the write never reaches the executor → 503 GRAPH_WRITE_UNKNOWN carrying the requestId, a reservation in the document, no node, no document conversation; the retry of the same key lands ONE node with the RESERVED postSeq # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.395
+  type: 'test'
+  ...
+# Subtest: W7b UNKNOWN the other way: the write APPLIED but the answer was lost → 503, and the retry replays the receipt: ONE node, the same postSeq, no second number
+ok 3050 - W7b UNKNOWN the other way: the write APPLIED but the answer was lost → 503, and the retry replays the receipt: ONE node, the same postSeq, no second number # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.255875
+  type: 'test'
+  ...
+# Subtest: W8 the reservation survives a SERVER restart: the retry after the restart lands the reserved post, and the counter never reissues the reserved number
+ok 3051 - W8 the reservation survives a SERVER restart: the retry after the restart lands the reserved post, and the counter never reissues the reserved number # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.073334
+  type: 'test'
+  ...
+# Subtest: W9 the executor is entirely DOWN before the write: 503, NOTHING consumed (counter unchanged, no reservation), and the key is still usable afterwards
+ok 3052 - W9 the executor is entirely DOWN before the write: 503, NOTHING consumed (counter unchanged, no reservation), and the key is still usable afterwards # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.023291
+  type: 'test'
+  ...
+# Subtest: W10 NO reservation (compacted), the node EXISTS: same content is an exact replay (200, the stored post, its ORIGINAL postSeq, NO number consumed); different content is a 409
+ok 3053 - W10 NO reservation (compacted), the node EXISTS: same content is an exact replay (200, the stored post, its ORIGINAL postSeq, NO number consumed); different content is a 409 # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.0175
+  type: 'test'
+  ...
+# Subtest: W11 NO reservation and the pre-mint READ FAILS: 503, no number consumed, no reservation, no node. Unreadable must never fall through to "absent, so mint"
+ok 3054 - W11 NO reservation and the pre-mint READ FAILS: 503, no number consumed, no reservation, no node. Unreadable must never fall through to "absent, so mint" # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.015917
+  type: 'test'
+  ...
+# Subtest: W12 CONCURRENT retries of one requestId after compaction (and of a brand-new one): ONE node, ONE postSeq, every caller gets the same post
+ok 3055 - W12 CONCURRENT retries of one requestId after compaction (and of a brand-new one): ONE node, ONE postSeq, every caller gets the same post # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.015292
+  type: 'test'
+  ...
+# Subtest: W13 the existing checks are unchanged: a post the flag-OFF route refuses is refused with the SAME status with the flag ON, and nothing is consumed, reserved or written
+ok 3056 - W13 the existing checks are unchanged: a post the flag-OFF route refuses is refused with the SAME status with the flag ON, and nothing is consumed, reserved or written # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.017666
+  type: 'test'
+  ...
+# Subtest: W14 the document lock is released BEFORE the executor: a post whose graph write is HELD does not block another post
+ok 3057 - W14 the document lock is released BEFORE the executor: a post whose graph write is HELD does not block another post # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.014667
+  type: 'test'
+  ...
+# Subtest: W15 live discovery: an ordinary post reaches the R3 afterCommit stream exactly once, in COMMIT order. The stream is NOT postSeq-monotonic
+ok 3058 - W15 live discovery: an ordinary post reaches the R3 afterCommit stream exactly once, in COMMIT order. The stream is NOT postSeq-monotonic # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.014334
+  type: 'test'
+  ...
+# Subtest: W16 a document REWOUND under a RUNNING server (older version copied over the file, no restart): the next post-creating write is 409 POST_SEQ_BEHIND_GRAPH, no node, no duplicate postSeq
+ok 3059 - W16 a document REWOUND under a RUNNING server (older version copied over the file, no restart): the next post-creating write is 409 POST_SEQ_BEHIND_GRAPH, no node, no duplicate postSeq # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.017334
+  type: 'test'
+  ...
+# Subtest: W17 the same rewind with the old file's MTIME PRESERVED (cp -p, rsync -t, tar) is still refused: identity and mtime play no part
+ok 3060 - W17 the same rewind with the old file's MTIME PRESERVED (cp -p, rsync -t, tar) is still refused: identity and mtime play no part # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.014416
+  type: 'test'
+  ...
+# Subtest: W18 a rewind then a RESTART is still refused (the startup mark is the graph max + 1), and the reconcile (counter raised above the graph max) reopens writes with a number ABOVE every existing one
+ok 3061 - W18 a rewind then a RESTART is still refused (the startup mark is the graph max + 1), and the reconcile (counter raised above the graph max) reopens writes with a number ABOVE every existing one # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.014458
+  type: 'test'
+  ...
+# Subtest: W19 an ordinary write costs a BOUNDED number of graph reads that does not grow with history: at most one /query per post, the same for the 1st and the 12th
+ok 3062 - W19 an ordinary write costs a BOUNDED number of graph reads that does not grow with history: at most one /query per post, the same for the 1st and the 12th # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.014709
+  type: 'test'
+  ...
+# Subtest: W21 the executor is DOWN at server STARTUP: the server starts, document-backed reads work, every post write is a 503 with NOTHING minted and NOTHING reserved (fail closed), and once the executor is reachable the first post lands ABOVE the graph max with no restart
+ok 3063 - W21 the executor is DOWN at server STARTUP: the server starts, document-backed reads work, every post write is a 503 with NOTHING minted and NOTHING reserved (fail closed), and once the executor is reachable the first post lands ABOVE the graph max with no restart # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.015959
+  type: 'test'
+  ...
+# Subtest: W22 an ordinary write with attachments and a card writes the SAME shape R0 writes: the post node carries schema:about, and each attachment is one node `<post>/attachment/<k>` with attachmentOf, attachmentIndex, identifier, name, encodingFormat and contentSize; the bytes are not in the graph
+ok 3064 - W22 an ordinary write with attachments and a card writes the SAME shape R0 writes: the post node carries schema:about, and each attachment is one node `<post>/attachment/<k>` with attachmentOf, attachmentIndex, identifier, name, encodingFormat and contentSize; the bytes are not in the graph # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.014541
+  type: 'test'
+  ...
+# Subtest: W23 an attachment whose `size` is not a non-negative integer (fractional, negative) can never leave a stuck write: never a 5xx and never an UNKNOWN that a client would retry forever. Either it is refused with a 4xx and NO node, or it is stored with a valid integer contentSize that the response agrees with. Then the same key retried with a good size lands
+ok 3065 - W23 an attachment whose `size` is not a non-negative integer (fractional, negative) can never leave a stuck write: never a 5xx and never an UNKNOWN that a client would retry forever. Either it is refused with a 4xx and NO node, or it is stored with a valid integer contentSize that the response agrees with. Then the same key retried with a good size lands # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.017958
+  type: 'test'
+  ...
+# Subtest: W24 PRUNING NEVER LOSES AN UNRESOLVED RESERVATION: a reservation whose write never applied, aged past 7 days, SURVIVES the prune that another post triggers, and its retry lands the SAME post and postSeq (nothing reminted, no duplicate). The aged APPLIED one may be pruned or kept, but its retry replays with the original number either way
+ok 3066 - W24 PRUNING NEVER LOSES AN UNRESOLVED RESERVATION: a reservation whose write never applied, aged past 7 days, SURVIVES the prune that another post triggers, and its retry lands the SAME post and postSeq (nothing reminted, no duplicate). The aged APPLIED one may be pruned or kept, but its retry replays with the original number either way # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.014834
+  type: 'test'
+  ...
+# Subtest: W25 an aged UNRESOLVED reservation with the graph UNAVAILABLE: the retry is a 503, the reservation and the counter are untouched, and once the graph is back the retry lands the reserved number
+ok 3067 - W25 an aged UNRESOLVED reservation with the graph UNAVAILABLE: the retry is a 503, the reservation and the counter are untouched, and once the graph is back the retry lands the reserved number # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.014458
+  type: 'test'
+  ...
+# Subtest: W26 CONCURRENT retries of an aged UNRESOLVED reservation: every caller gets the reserved post, one node, one postSeq equal to the reserved one
+ok 3068 - W26 CONCURRENT retries of an aged UNRESOLVED reservation: every caller gets the reserved post, one node, one postSeq equal to the reserved one # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.014208
+  type: 'test'
+  ...
+# Subtest: W27 A REWIND BY EXACTLY ONE POST IS STILL REFUSED: the document restored to the version just before the LAST post (its counter equals the number that last post already took) refuses the next write, because the guard mark advances on every mint, not only on every read; no duplicate postSeq
+ok 3069 - W27 A REWIND BY EXACTLY ONE POST IS STILL REFUSED: the document restored to the version just before the LAST post (its counter equals the number that last post already took) refuses the next write, because the guard mark advances on every mint, not only on every read; no duplicate postSeq # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.014083
+  type: 'test'
+  ...
+# Subtest: W28 TWO AUTHORS ONE KEY, THE FIRST UNRESOLVED: author B using the same requestId neither overwrites nor inherits author A's outstanding reservation; A's retry still lands A's RESERVED number and post, B has its own, and nothing is reminted
+ok 3070 - W28 TWO AUTHORS ONE KEY, THE FIRST UNRESOLVED: author B using the same requestId neither overwrites nor inherits author A's outstanding reservation; A's retry still lands A's RESERVED number and post, B has its own, and nothing is reminted # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.014625
+  type: 'test'
+  ...
+# Subtest: W29 requestId: ANY string of 1-256 characters without control characters is accepted (the room's `<deliveryId>:<slot>` and anything else a client may send: slashes, at-signs, hashes, spaces, non-ASCII), and everything else is a 400, not a 5xx and never a stuck write, consuming nothing
+ok 3071 - W29 requestId: ANY string of 1-256 characters without control characters is accepted (the room's `<deliveryId>:<slot>` and anything else a client may send: slashes, at-signs, hashes, spaces, non-ASCII), and everything else is a 400, not a 5xx and never a stuck write, consuming nothing # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.014166
+  type: 'test'
+  ...
+# Subtest: W33 A HOSTILE KEY IS JUST A KEY: `__proto__`, `constructor`, `toString`, `hasOwnProperty` and a key shaped like another author's composite (`k@ada`) each post, replay as themselves, and are never handed to the other author; an ordinary key afterwards is unaffected
+ok 3072 - W33 A HOSTILE KEY IS JUST A KEY: `__proto__`, `constructor`, `toString`, `hasOwnProperty` and a key shaped like another author's composite (`k@ada`) each post, replay as themselves, and are never handed to the other author; an ordinary key afterwards is unaffected # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.013916
+  type: 'test'
+  ...
+# Subtest: W35 EXACT COMPARISON, NO NORMALIZATION: the composed and the decomposed spelling of the same visible key are two different keys and two different posts; a retry of either replays only itself
+ok 3073 - W35 EXACT COMPARISON, NO NORMALIZATION: the composed and the decomposed spelling of the same visible key are two different keys and two different posts; a retry of either replays only itself # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.014291
+  type: 'test'
+  ...
+# Subtest: W30a A REDACTED POST IS NEVER RESURRECTED BY ITS KEY, reservation still held: after the post is redacted, a retry of the same requestId is a 409 (not a 201 that re-announces content), and no body text comes back into the graph
+ok 3074 - W30a A REDACTED POST IS NEVER RESURRECTED BY ITS KEY, reservation still held: after the post is redacted, a retry of the same requestId is a 409 (not a 201 that re-announces content), and no body text comes back into the graph # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.01425
+  type: 'test'
+  ...
+# Subtest: W30b the same with the reservation COMPACTED away: the key still names a redacted post and is refused with a 409; no node, no text
+ok 3075 - W30b the same with the reservation COMPACTED away: the key still names a redacted post and is refused with a 409; no node, no text # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.016167
+  type: 'test'
+  ...
+# Subtest: W37 PUSHES CARRY THE POST ID ONLY (the owner's decision 3dc9df18, 2026-10-05): the announcement of a created post is EXACTLY `{conversation:{id}}` (the shape `/internal/notify` acts on) and names the post and nothing else the post said: no body, no author, no attachment metadata, no mentions, no card or talk reference; the seat reads the post through discovery, which serves the tombstone. Exactly one announcement, and it names the right post
+ok 3076 - W37 PUSHES CARRY THE POST ID ONLY (the owner's decision 3dc9df18, 2026-10-05): the announcement of a created post is EXACTLY `{conversation:{id}}` (the shape `/internal/notify` acts on) and names the post and nothing else the post said: no body, no author, no attachment metadata, no mentions, no card or talk reference; the seat reads the post through discovery, which serves the tombstone. Exactly one announcement, and it names the right post # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.016375
+  type: 'test'
+  ...
+# Subtest: W38 HINT, THEN REDACTION, THEN RESOLUTION: a seat that receives the id-only hint and resolves it AFTER the post was redacted gets the tombstone and no text: through discovery (the bootstrap and the live stream) the post is served as redacted with a null body, and no announcement it received carried text
+ok 3077 - W38 HINT, THEN REDACTION, THEN RESOLUTION: a seat that receives the id-only hint and resolves it AFTER the post was redacted gets the tombstone and no text: through discovery (the bootstrap and the live stream) the post is served as redacted with a null body, and no announcement it received carried text # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.020375
+  type: 'test'
+  ...
+# Subtest: W34a THE ORDERING RULE AT DISPATCH, redaction first: a post whose graph write applied and which is REDACTED before the route dispatches its announcement is never announced (the answer may be 201, it was created, or 409 POST_REDACTED); no text is in the graph and discovery serves it only as redacted, the redact item once
+ok 3078 - W34a THE ORDERING RULE AT DISPATCH, redaction first: a post whose graph write applied and which is REDACTED before the route dispatches its announcement is never announced (the answer may be 201, it was created, or 409 POST_REDACTED); no text is in the graph and discovery serves it only as redacted, the redact item once # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.01425
+  type: 'test'
+  ...
+# Subtest: W34b THE ORDERING RULE AT DISPATCH, dispatch first: a post announced BEFORE it is redacted was delivered (a retained copy: a later redaction cannot recall it); discovery then carries the redact item exactly once so a consumer can drop it, and the graph holds no text
+ok 3079 - W34b THE ORDERING RULE AT DISPATCH, dispatch first: a post announced BEFORE it is redacted was delivered (a retained copy: a later redaction cannot recall it); discovery then carries the redact item exactly once so a consumer can drop it, and the graph holds no text # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.015917
+  type: 'test'
+  ...
+# Subtest: W34c NO CHECK-THEN-SEND RACE: if the route reads the graph after APPLIED to decide whether to announce, a redaction that commits while that read's answer is in flight still suppresses the announcement (the read was answered before the redaction, so "not redacted" is stale: the decision and the send must be ordered against redactions, not merely sequenced). If the build makes no such read the row has nothing to hold and records that
+ok 3080 - W34c NO CHECK-THEN-SEND RACE: if the route reads the graph after APPLIED to decide whether to announce, a redaction that commits while that read's answer is in flight still suppresses the announcement (the read was answered before the redaction, so "not redacted" is stale: the decision and the send must be ordered against redactions, not merely sequenced). If the build makes no such read the row has nothing to hold and records that # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.014
+  type: 'test'
+  ...
+# Subtest: W34d THE DISPATCH POINT IS ORDERED AT THE EXECUTOR, redaction first: whatever write the route sends AFTER the post is applied and BEFORE it announces (a dispatch commit, if the build has one), if it is held and a redaction commits first, the post is NOT announced. If the build sends no second write the row has nothing to hold and records that
+ok 3081 - W34d THE DISPATCH POINT IS ORDERED AT THE EXECUTOR, redaction first: whatever write the route sends AFTER the post is applied and BEFORE it announces (a dispatch commit, if the build has one), if it is held and a redaction commits first, the post is NOT announced. If the build sends no second write the row has nothing to hold and records that # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.015208
+  type: 'test'
+  ...
+# Subtest: W34e THE SEND ITSELF IS ORDERED AGAINST A REDACTION (the current promise, not a weaker one): if ANY write between APPLIED and the announcement has COMMITTED and a redaction then commits BEFORE the announcement is actually sent, the post is NOT announced with its text. A no-op ticket followed by an unordered send cannot pass this; what can is an announcement that carries no text (an id-only hint resolved through discovery, which serves the redaction), or a handoff the executor itself orders. The row does not pick one. If the build sends no write between APPLIED and the announcement, the row records that and W34a/W34d cover the window
+ok 3082 - W34e THE SEND ITSELF IS ORDERED AGAINST A REDACTION (the current promise, not a weaker one): if ANY write between APPLIED and the announcement has COMMITTED and a redaction then commits BEFORE the announcement is actually sent, the post is NOT announced with its text. A no-op ticket followed by an unordered send cannot pass this; what can is an announcement that carries no text (an id-only hint resolved through discovery, which serves the redaction), or a handoff the executor itself orders. The row does not pick one. If the build sends no write between APPLIED and the announcement, the row records that and W34a/W34d cover the window # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.014167
+  type: 'test'
+  ...
+# Subtest: W36 A REPLAY IS NOT A NEW CREATION: a retry of a post that was applied and announced does not announce it again (the announcement is a push hint; R3 discovery is the authority, so a duplicate retry must not duplicate the room's notification)
+ok 3083 - W36 A REPLAY IS NOT A NEW CREATION: a retry of a post that was applied and announced does not announce it again (the announcement is a push hint; R3 discovery is the authority, so a duplicate retry must not duplicate the room's notification) # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.014042
+  type: 'test'
+  ...
+# Subtest: W39 A REFUSAL MUST NOT BRING REDACTED TEXT BACK INTO A RETAINED COPY: `logRefused` appends the REQUEST of every refused write to the append-only event log, so a retry of a redacted post (the same key and body, answered 409 POST_REDACTED) would write the redacted text into the log again. After the post is redacted and its key retried, the event log holds no copy of the text (control: the log scan finds a marker that IS there, so an empty result means something)
+ok 3084 - W39 A REFUSAL MUST NOT BRING REDACTED TEXT BACK INTO A RETAINED COPY: `logRefused` appends the REQUEST of every refused write to the append-only event log, so a retry of a redacted post (the same key and body, answered 409 POST_REDACTED) would write the redacted text into the log again. After the post is redacted and its key retried, the event log holds no copy of the text (control: the log scan finds a marker that IS there, so an empty result means something) # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.01475
+  type: 'test'
+  ...
+# Subtest: W40 REFUSAL AUDITS ARE CONTENT-FREE FOR EVERY REFUSAL STATUS OF A CONVERSATION WRITE, not just POST_REDACTED: a 400 for a malformed requestId, a 400 for a bad attachment size, a 400 for an unknown card, a 400 for an unknown talk, a 409 for a requestId reused with different content and a 409 for a redacted key each leave an audit row (outcome, status, route) but NO copy of the refused post's text, attachment names or card ids; the audit is still useful (control: a refusal row exists for each)
+ok 3085 - W40 REFUSAL AUDITS ARE CONTENT-FREE FOR EVERY REFUSAL STATUS OF A CONVERSATION WRITE, not just POST_REDACTED: a 400 for a malformed requestId, a 400 for a bad attachment size, a 400 for an unknown card, a 400 for an unknown talk, a 409 for a requestId reused with different content and a 409 for a redacted key each leave an audit row (outcome, status, route) but NO copy of the refused post's text, attachment names or card ids; the audit is still useful (control: a refusal row exists for each) # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.014083
+  type: 'test'
+  ...
+# Subtest: W31 COMPACTION HAPPENS: an APPLIED reservation older than 7 days is dropped by the next reservation write (the map does not grow forever for keys the server confirmed), and its retry still replays with the original number. The server restarts between the confirmation and the aging, so this does not depend on anything held only in memory
+ok 3086 - W31 COMPACTION HAPPENS: an APPLIED reservation older than 7 days is dropped by the next reservation write (the map does not grow forever for keys the server confirmed), and its retry still replays with the original number. The server restarts between the confirmation and the aging, so this does not depend on anything held only in memory # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)
+  ---
+  duration_ms: 0.014875
+  type: 'test'
+  ...
+# Subtest: W32 TODO (not a row): the reservation map has a stated bound. Today an APPLIED key is only stamped by the NEXT reservation write in the same process, so applied keys not yet stamped at a restart are kept forever: the growth is unmeasured, not bounded. A row or a count on a copy replaces this
+ok 3087 - W32 TODO (not a row): the reservation map has a stated bound. Today an APPLIED key is only stamped by the NEXT reservation write in the same process, so applied keys not yet stamped at a restart are kept forever: the growth is unmeasured, not bounded. A row or a count on a copy replaces this # TODO retained-reservation growth: unmeasured
+  ---
+  duration_ms: 0.022458
+  type: 'test'
+  ...
+# Subtest: W20 TODO (not a row): measured post latency at the live post population, flag ON, with the reservation map holding 7 days of traffic. The number is required before R5; no estimate stands in for it
+ok 3088 - W20 TODO (not a row): measured post latency at the live post population, flag ON, with the reservation map holding 7 days of traffic. The number is required before R5; no estimate stands in for it # TODO measured at live size before R5 (the \#1596 shape)
+  ---
+  duration_ms: 0.031708
+  type: 'test'
+  ...
+# file: tests/work-store.test.mjs complete
+# Subtest: \#755-2d a written work object comes back identical
+ok 4442 - \#755-2d a written work object comes back identical
+  ---
+  duration_ms: 1.816291
+  type: 'test'
+  ...
+# Subtest: \#755-2d ⭐⭐ DERIVED STATE SURVIVES THE ROUND TRIP — design B, against a real file
+ok 4443 - \#755-2d ⭐⭐ DERIVED STATE SURVIVES THE ROUND TRIP — design B, against a real file
+  ---
+  duration_ms: 1.025667
+  type: 'test'
+  ...
+# Subtest: \#755-2d appending a LATER transition preserves the earlier ones — append-only, never rewrite
+ok 4444 - \#755-2d appending a LATER transition preserves the earlier ones — append-only, never rewrite
+  ---
+  duration_ms: 0.530208
+  type: 'test'
+  ...
+# Subtest: \#755-2d ⭐ appending twice does not duplicate transitions — the log is a SET by (id, seq)
+ok 4445 - \#755-2d ⭐ appending twice does not duplicate transitions — the log is a SET by (id, seq)
+  ---
+  duration_ms: 0.299792
+  type: 'test'
+  ...
+# Subtest: \#755-2d several work objects coexist and stay separate
+ok 4446 - \#755-2d several work objects coexist and stay separate
+  ---
+  duration_ms: 0.417417
+  type: 'test'
+  ...
+# Subtest: \#755-2d ⭐⭐ openWorkObjectsAt returns only the ones still in play
+ok 4447 - \#755-2d ⭐⭐ openWorkObjectsAt returns only the ones still in play
+  ---
+  duration_ms: 0.328125
+  type: 'test'
+  ...
+# Subtest: \#755-2d a window that has timed out is no longer OPEN — derived, not written
+ok 4448 - \#755-2d a window that has timed out is no longer OPEN — derived, not written
+  ---
+  duration_ms: 0.321041
+  type: 'test'
+  ...
+# Subtest: \#755-2d ⛔ openWorkObjectsAt REFUSES without a clock, like everything else here
+ok 4449 - \#755-2d ⛔ openWorkObjectsAt REFUSES without a clock, like everything else here
+  ---
+  duration_ms: 0.195083
+  type: 'test'
+  ...
+# Subtest: \#755-2d an ABSENT store is empty, not an error — the gate must not break the board
+ok 4450 - \#755-2d an ABSENT store is empty, not an error — the gate must not break the board
+  ---
+  duration_ms: 0.275458
+  type: 'test'
+  ...
+# Subtest: \#755-2d a corrupt line is SKIPPED and COUNTED, never silently dropped
+ok 4451 - \#755-2d a corrupt line is SKIPPED and COUNTED, never silently dropped
+  ---
+  duration_ms: 0.507458
+  type: 'test'
+  ...
+# Subtest: \#755-2d foldLines is PURE — same text, same objects, no filesystem
+ok 4452 - \#755-2d foldLines is PURE — same text, same objects, no filesystem
+  ---
+  duration_ms: 0.094042
+  type: 'test'
+  ...
+# Subtest: \#755-2d ⛔ NO FREE TEXT REACHES DISK — the stored line has only known keys
+ok 4453 - \#755-2d ⛔ NO FREE TEXT REACHES DISK — the stored line has only known keys
+  ---
+  duration_ms: 0.219375
+  type: 'test'
+  ...
+# Subtest: \#755-2d ⛔ a work object is not "open" at a time before it was declared
+ok 4454 - \#755-2d ⛔ a work object is not "open" at a time before it was declared
+  ---
+  duration_ms: 0.254667
+  type: 'test'
+  ...
+# Subtest: \#755-2d an object is in play from the instant of its declaration, not later
+ok 4455 - \#755-2d an object is in play from the instant of its declaration, not later
+  ---
+  duration_ms: 0.184375
+  type: 'test'
+  ...
+# Subtest: \#797 openWorkObjectsAt REFUSES a non-string `now`, like stateAt
+ok 4456 - \#797 openWorkObjectsAt REFUSES a non-string `now`, like stateAt
+  ---
+  duration_ms: 0.092791
+  type: 'test'
+  ...
+# Subtest: \#797 two stale callers submitting different answers must BOTH survive
+not ok 4457 - \#797 two stale callers submitting different answers must BOTH survive # TODO
+  ---
+  duration_ms: 0.538459
+  type: 'test'
+  location: '/tmp/suite-watch-XXXX/tree/tests/work-store.test.mjs:238:1'
+  failureType: 'testCodeFailure'
+  error: 'the second answer was ACCEPTED by the API and is absent from the log — indistinguishable, from both ends, from never having answered at all'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: '=='
+  stack: |-
+    TestContext.<anonymous> (file:///tmp/suite-watch-XXXX/tree/tests/work-store.test.mjs:256:10)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: \#797 ⭐⭐ settlement does not move ANY production-shaped object
+ok 4458 - \#797 ⭐⭐ settlement does not move ANY production-shaped object
+  ---
+  duration_ms: 0.292083
+  type: 'test'
+  ...
+# Subtest: \#797 the fixture carries the three timeout-with-pending grants that make it worth having
+ok 4459 - \#797 the fixture carries the three timeout-with-pending grants that make it worth having
+  ---
+  duration_ms: 0.508542
+  type: 'test'
+  ...
+1..352
+# tests 352
+# suites 0
+# pass 81
+# fail 1
+# cancelled 0
+# skipped 244
+# todo 26
+# duration_ms 1000.0
+
+not ok 1741 - \#831 RC0b — every caller-settable field in the universe has a probe
+  ---
+  duration_ms: 282.97325
+  type: 'test'
+  location: '/tmp/suite-watch-XXXX/tree/tests/field-triple-coverage.test.mjs:136:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    2 field(s) in the universe have no probe, so the audit cannot see them:
+      - createRequestId
+      - lastMoveRequestId
+    
+    Add a probe to tools/field-probes.mjs, or add the field to SERVER_ASSIGNED with a reason. Silently narrowing the universe is the failure this condition exists to prevent.
+    
+    ⚠️ SUBJECT: LIVE board — this red describes PRODUCTION RIGHT NOW, not necessarily your commit. A field deployed by someone else reds here on a branch that never touched it. Check whether it fails on a clean main before changing anything.
+    + actual - expected
+    
+    + [
+    +   'createRequestId',
+    +   'lastMoveRequestId'
+    + ]
+    - []
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+  actual:
+    0: 'createRequestId'
+    1: 'lastMoveRequestId'
+  operator: 'deepStrictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///tmp/suite-watch-XXXX/tree/tests/field-triple-coverage.test.mjs:207:10)
+    process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
