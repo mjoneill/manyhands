@@ -42,6 +42,7 @@ import { freePort, waitForHttp, makeBoardFixture, startRestServer, PROJECT_DIR }
 import { HAVE_PY, tmpStore, startExecutor, killExecutor, PY } from './helpers/graph-executor-proc.mjs';
 import { announcePostId, postCreateIntention } from '../core/announce-outbox.mjs';
 import { createGraphClient } from '../core/graph-client.mjs';
+import { readNodeWhole } from './helpers/node-placement-1638.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SKIP = HAVE_PY ? false : 'UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)';
@@ -148,8 +149,8 @@ async function markerRows(s) {
   assert.equal(r.ok, true, JSON.stringify(r)); return r.rows.length;
 }
 async function nodeOf_(s, mut) {
-  // #1638: the node is its domain triples (default graph) PLUS its bookkeeping (the bookkeeping graph). The allow-list assertions below speak of the WHOLE node and are unchanged.
-  const r = await clientFor(s).query(`SELECT ?p ?o WHERE { { <${ENTITY}${idOf(mut)}> ?p ?o } UNION { GRAPH <urn:scrum:bookkeeping:executor> { <${ENTITY}${idOf(mut)}> ?p ?o } } }`);
+  // #1638: the node is its domain triples (default graph) PLUS its bookkeeping; readNodeWhole asserts each part is in the RIGHT graph, then returns the whole node. The allow-list assertions below speak of the WHOLE node and are unchanged.
+  const r = await readNodeWhole(clientFor(s), `${ENTITY}${idOf(mut)}`);
   assert.equal(r.ok, true, JSON.stringify(r));
   const out = {}; for (const b of r.rows) (out[b.p.value] ||= []).push(`${b.o.type}|${b.o.value}|${b.o.datatype || ''}`);
   for (const k of Object.keys(out)) out[k].sort(); return out;

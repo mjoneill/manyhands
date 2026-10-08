@@ -66,6 +66,7 @@ import { fileURLToPath } from 'node:url';
 import { makeBoardFixture, PROJECT_DIR } from './helpers/harness.mjs';
 import { HAVE_PY, tmpStore, startExecutor, killExecutor } from './helpers/graph-executor-proc.mjs';
 import { createGraphClient } from '../core/graph-client.mjs';
+import { readNodeWhole } from './helpers/node-placement-1638.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const TOOL = process.env.BACKFILL_SCRIPT || path.join(HERE, '..', 'scripts', 'backfill-posts-r0.mjs');
@@ -107,9 +108,8 @@ function expectedTriples(p) {
 }
 const client = (exec) => createGraphClient({ baseUrl: exec.baseUrl, expectedDatasetId: DSID });
 async function nodeTriples(exec, id) {
-  // #1638: a node is its domain triples (default graph) PLUS its bookkeeping (`recordedBy`, the bookkeeping graph). Every assertion below still speaks of the WHOLE node, exactly as before; where the layout itself is pinned, see R2.
-  const r = await client(exec).query(`SELECT ?p ?o WHERE { { <${ENTITY}${id}> ?p ?o } UNION { GRAPH <urn:scrum:bookkeeping:executor> { <${ENTITY}${id}> ?p ?o } } }`);
-  assert.equal(r.ok, true, JSON.stringify(r));
+  // #1638: a node is its domain triples (default graph) PLUS its bookkeeping. readNodeWhole asserts each part is in the RIGHT graph, then returns the whole node: every assertion below still speaks of the WHOLE node.
+  const r = await readNodeWhole(client(exec), `${ENTITY}${id}`);
   const out = {};
   for (const b of r.rows) (out[b.p.value] ||= []).push(`${b.o.type}|${b.o.value}|${b.o.datatype || ''}`);
   for (const k of Object.keys(out)) out[k].sort();
