@@ -2338,7 +2338,7 @@ export function censusByType(store) {
  * #1570 — every check graph_query makes BEFORE it runs (read-only, unbounded path, prefixes, vocabulary)
  * and the LIMIT probe, independent of WHICH store answers. Returns the text to run and the row cap.
  */
-export function prepareGraphQuery(sparql, { limit } = {}) {
+export function prepareGraphQuery(sparql, { limit, vocabulary = GRAPH_VOCABULARY } = {}) {
   if (typeof sparql !== 'string' || !sparql.trim()) throw Object.assign(new Error('empty query'), { code: 'EMPTY_QUERY' });
   // ⛔ #899 — STRIP STRING LITERALS BEFORE LOOKING FOR VERBS, or the board's own
   // event vocabulary becomes unqueryable in its own provenance log:
@@ -2560,7 +2560,7 @@ export function prepareGraphQuery(sparql, { limit } = {}) {
   // not added here would be refused while working. That is what the drift test
   // in tests/graph-unknown-term.test.mjs exists to catch, and the refusal says
   // so out loud so a caller who hits it knows where to look.
-  const missing = [...vocabTerms].filter((t) => !GRAPH_VOCABULARY.has(t));
+  const missing = [...vocabTerms].filter((t) => !vocabulary.has(t));
   if (missing.length) {
     const hints = missing.map(hintFor).filter(Boolean);
     throw Object.assign(
@@ -2623,10 +2623,28 @@ export function queryGraph(store, sparql, { limit, terms = false } = {}) {
  * (`/query?dataset=public`: the default graph and no named graphs, enforced by the executor itself),
  * so bookkeeping kept in a named graph cannot be reached however the query is phrased.
  */
+/**
+ * #1570 — domain terms the EXECUTOR holds that the old copy never projected, so its vocabulary gate would
+ * refuse a fair question about them. Source: the predicate and type census of the 2026-10-08T03:17:06Z
+ * executor checkpoint (diagnostics/unit12-projector-1570-20261008/census-predicates-20261008T0319Z.json),
+ * every scrum:/schema: term absent from GRAPH_VOCABULARY. ⛔ scrum:entityJson is deliberately NOT here: it
+ * is bookkeeping on its way out of the public dataset, and admitting it would make it a query surface.
+ * Used ONLY when graph_query reads the executor; the old copy's gate is unchanged.
+ */
+export const EXECUTOR_ONLY_VOCABULARY = new Set([
+  'scrum:creator', 'scrum:stepIndex', 'scrum:stepOf', 'scrum:postSeq', 'scrum:requestId', 'scrum:postedText',
+  'scrum:sourceDigest', 'scrum:priorTag', 'scrum:inCollection', 'scrum:originMutation', 'scrum:originSlot',
+  'scrum:originOccurredAt', 'scrum:originActor', 'scrum:priorName', 'scrum:priorCurrentVersion', 'scrum:revision',
+  'scrum:priorPriority', 'schema:contentSize', 'scrum:attachmentOf', 'scrum:attachmentIndex', 'scrum:recovered',
+  'scrum:onBehalfOf', 'scrum:glyph', 'scrum:aliases', 'scrum:originalAuthorToken', 'scrum:authorCorrectedBy',
+  'scrum:authorCorrectedAt',
+  'scrum:DeliveryStep', 'scrum:CardImport', 'scrum:MemoryRevision', 'scrum:PendingAnnouncement',
+]);
+const EXECUTOR_VOCABULARY = new Set([...GRAPH_VOCABULARY, ...EXECUTOR_ONLY_VOCABULARY]);
 const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
 const RDF_LANG_STRING = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#langString';
 export async function queryGraphExecutor(executorUrl, sparql, { limit, terms = false, timeoutMs = 30_000, fetchImpl = fetch } = {}) {
-  const { text, wanted } = prepareGraphQuery(sparql, { limit });
+  const { text, wanted } = prepareGraphQuery(sparql, { limit, vocabulary: EXECUTOR_VOCABULARY });
   const t = performance.now();
   const res = await fetchImpl(`${executorUrl}/query?dataset=public`, { method: 'POST', body: text, signal: AbortSignal.timeout(timeoutMs) });
   const raw = await res.text();
