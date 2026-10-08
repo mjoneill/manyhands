@@ -9,6 +9,9 @@ usage: python migrate_bookkeeping.py --source DIR --dest DIR (--forward | --reve
 
 Contract (card #1638, v4 + C9/C10):
   * The SOURCE is opened READ-ONLY and never written: nothing in its directory changes.
+  * The SOURCE must not be held open by any process (C10): its RocksDB LOCK file is taken here, exclusively, for the
+    whole run, so a live executor is refused before anything is written and none can start mid-copy. A quiet
+    commitSeq is not proof that a store is stopped; the lock is.
   * The DEST must not exist. The copy is one streaming pass; nothing is moved in place.
   * The SOURCE must be in the layout the direction starts from, or nothing is written (exit 1, named).
   * What is bookkeeping is read from core/graph-vocab.mjs (BOOKKEEPING_PREDICATES, _SUBJECT_PREFIXES, _SUBJECTS)
@@ -20,7 +23,7 @@ Contract (card #1638, v4 + C9/C10):
 
 No flag has a default that points at a live path. Exit 2 = a usage error (named); exit 1 = refused or failed.
 """
-import argparse, hashlib, json, os, shutil, subprocess, sys, time
+import argparse, fcntl, hashlib, json, os, shutil, subprocess, sys, time
 
 import pyoxigraph as px
 
@@ -101,6 +104,17 @@ def main(argv):
         die(2, f'--source {src} is not a store directory (no CURRENT)')
     if os.path.exists(dst):
         die(2, f'--dest {dst} already exists: the migration writes a NEW store and never overwrites one')
+    # C10 — the source must be STOPPED, proven by its lock, and kept stopped until the copy is verified. RocksDB holds
+    # an fcntl write lock on <dir>/LOCK for as long as a read-write open lasts; a read-only open takes none, which is
+    # why this check exists. The lock is held (not just probed) so no executor can open the source mid-copy.
+    try:
+        lock_fd = os.open(os.path.join(src, 'LOCK'), os.O_RDWR)
+        fcntl.lockf(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except FileNotFoundError:
+        die(2, f'--source {src} has no LOCK file: not a RocksDB store directory')
+    except OSError:
+        die(1, f'REFUSED: --source {src} is held open by another process (its LOCK is taken): stop the executor and '
+               'confirm it has exited before migrating. Nothing written.')
     preds, prefixes, subjects = load_definition()
     bkg = px.NamedNode(BK)
     t0 = time.time()
