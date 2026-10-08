@@ -84,7 +84,16 @@ const Q_RECORDS = `SELECT ?s ?p ?o WHERE { ?s <${TM.type}> ?t ; ?p ?o . VALUES ?
 // #1638 — the TARGET lives in an executor, where a record's domain triples are in the default graph and its write revision
 // and provenance (ver, recordedBy, retiredBy) are bookkeeping in the named graph. The SOURCE is an in-memory store with no
 // named graph, so it keeps Q_RECORDS; the target reads the same rows through this two-branch union (same shape).
-const Q_RECORDS_TARGET = `SELECT ?s ?p ?o WHERE { { ?s <${TM.type}> ?t ; ?p ?o . VALUES ?t { ${Object.keys(TYPES).map((t) => `<${t}>`).join(' ')} } }
+// #1638 — the stamps live ONLY in the bookkeeping graph: the default-graph branch excludes them, the bookkeeping branch is
+// the only place they are read from, and refuseMisplacedStamps() refuses a target that carries one in the default graph.
+const STAMP_IN = `<${TM.ver}>, <${TM.recordedBy}>, <${NS}retiredBy>`;
+const RECORD_TYPES = `VALUES ?t { ${Object.keys(TYPES).map((t) => `<${t}>`).join(' ')} }`;
+async function refuseMisplacedStamps(client, typeClause, what) {
+  const r = await client.query(`SELECT ?s ?p WHERE { ${typeClause} ?s ?p ?o FILTER(?p IN (${STAMP_IN})) } LIMIT 5`);
+  if (!r.ok) throw new Error(`target unreadable: ${r.reason}`);
+  if (r.rows.length) throw new Error(`target has bookkeeping in the DEFAULT graph on ${what} (misplaced; it belongs in ${BK}): ${r.rows.map((b) => `${b.s.value} ${b.p.value}`).join('; ')}`);
+}
+const Q_RECORDS_TARGET = `SELECT ?s ?p ?o WHERE { { ?s <${TM.type}> ?t ; ?p ?o . ${RECORD_TYPES} FILTER(?p NOT IN (${STAMP_IN})) }
   UNION { ?s <${TM.type}> ?t . VALUES ?t { ${Object.keys(TYPES).map((t) => `<${t}>`).join(' ')} } GRAPH ${BK} { ?s ?p ?o FILTER(?p IN (<${TM.ver}>, <${TM.recordedBy}>, <${NS}retiredBy>)) } } }`;
 
 // predicate → 'one' | 'many', per record type. Anything else on a record is REFUSED.
@@ -114,6 +123,7 @@ export function buildSource({ board, events }) {
   return out;
 }
 export async function readTarget(client) {
+  await refuseMisplacedStamps(client, `?s <${TM.type}> ?t . ${RECORD_TYPES}`, 'a log-born record');
   const r = await client.query(Q_RECORDS_TARGET);
   if (!r.ok) throw new Error(`target unreadable: ${r.reason}`);
   return r.rows.map((b) => ({ s: b.s.value, p: b.p.value,
@@ -260,9 +270,10 @@ export function firstUnitEntitiesOf(recs) {
 /** The target's Person identities: canonical nodes, Person-IRI types (occupied), and which import op recorded each. */
 // #1638 — Q_PEOPLE (core) reads the default graph only; this script also needs each Person's recordedBy (which import op
 // wrote it), now bookkeeping in the named graph. Same rows as before: the domain triples plus ver/recordedBy/retiredBy.
-const Q_PEOPLE_TARGET = `SELECT ?s ?p ?o WHERE { { ?s <${TM.type}> <${TM.Person}> ; ?p ?o }
+const Q_PEOPLE_TARGET = `SELECT ?s ?p ?o WHERE { { ?s <${TM.type}> <${TM.Person}> ; ?p ?o FILTER(?p NOT IN (${STAMP_IN})) }
   UNION { ?s <${TM.type}> <${TM.Person}> . GRAPH ${BK} { ?s ?p ?o FILTER(?p IN (<${TM.ver}>, <${TM.recordedBy}>, <${NS}retiredBy>)) } } }`;
 export async function readTargetPeople(client) {
+  await refuseMisplacedStamps(client, `?s <${TM.type}> <${TM.Person}> .`, 'a Person');
   const pr = await client.query(Q_PEOPLE_TARGET);
   if (!pr.ok) throw new Error(`target unreadable: ${pr.reason}`);
   const tr = await client.query(Q_PERSON_IRI_TYPES);
