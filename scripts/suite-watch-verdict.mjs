@@ -54,9 +54,12 @@ export function parseTap(text, { suiteDir = null } = {}) {
     // the yaml block that follows this row
     const meta = {};
     if (lines[i + 1] === `${indent}  ---`) {
-      for (let j = i + 2; j < lines.length && lines[j] !== `${indent}  ...`; j++) {
+      let j = i + 2;
+      for (; j < lines.length && lines[j] !== `${indent}  ...`; j++) {
         const kv = /^\s+(\w+): (.*)$/.exec(lines[j]); if (kv && !(kv[1] in meta)) meta[kv[1]] = kv[2].replace(/^'|'$/g, '');
       }
+      // everything up to the closing `...` is this row's own diagnostics (an `error: |-` block may quote TAP-looking lines): never parse it as rows
+      i = j;
     }
     const d = DIRECTIVE.exec(rest);
     const title = unescapeTitle(d ? d[1] : rest);

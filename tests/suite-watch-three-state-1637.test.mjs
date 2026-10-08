@@ -296,6 +296,15 @@ test('T14 THE CHECKED-IN MANIFEST EQUALS THE DISCOVERED EXECUTOR-BACKED TESTS (a
   const missing = [...seeds].filter((f) => !listed.includes(f)).sort(); assert.deepEqual(missing, [], `files that skipped UNAVAILABLE on 10-08 and are not in the manifest: ${missing.join(', ')}`);
 });
 
+test('T15 A ROW\'S OWN DIAGNOSTICS ARE NOT ROWS: TAP-looking lines quoted inside a failing test\'s error block (the suite-watch tests do exactly this) add no failure, no skip, no UNAVAILABLE', { timeout: 120000 }, async () => {
+  N = 0; const u = universe();
+  const quoted = `  error: |-\n    expected the child output to be clean but it said:\n    ok 1 - embedded passing # SKIP UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)\n    not ok 2 - embedded failing\n    not ok 3 - embedded owed # TODO later\n`;
+  const text = tap([file('tests/meta.test.mjs'), tOk('a'), `# Subtest: outer\nnot ok ${++N} - outer\n${yaml(`  location: '${DIR}/tests/meta.test.mjs:9:1'\n  failureType: 'testCodeFailure'\n${quoted}  code: 'ERR_ASSERTION'\n`)}`], { tests: 2, pass: 1, fail: 1, skipped: 0, todo: 0 });
+  const t = await tick(u, text, 1);
+  assert.deepEqual([t.v?.failed, t.v?.unavailable, t.v?.todo, t.v?.unclassified], ['1', '0', '0', '0'], `rows quoted inside a diagnostics block were counted: ${JSON.stringify(t.v)}`);
+  assert.deepEqual(t.failing, ['tests/meta.test.mjs']);
+});
+
 test('T8 CONTROL ON A REAL ARTIFACT: a reduced copy of the 10-08 nightly TAP (real markers, titles, locations, directives; summary recomputed) classifies as RED + INCOMPLETE; files and every count equal an INDEPENDENT parse of the same TAP', { timeout: 300000 }, async () => {
   const text = fs.readFileSync(REAL_TAP, 'utf8');
   // independent parse: walk rows, the NEXT yaml block's `location:` names the file; the `# file:` marker names the file of a skip row
