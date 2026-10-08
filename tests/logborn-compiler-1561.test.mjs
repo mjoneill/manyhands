@@ -178,8 +178,15 @@ after(() => { proc?.kill('SIGKILL'); });
 // #1638: ver / recordedBy / entityJson are bookkeeping (named graph), but this fixture still wants them in the "nothing changed"
 // comparison, so it reads BOTH graphs (receipts and the marker are excluded by the same filter as before).
 const BK = '<urn:scrum:bookkeeping:executor>';
-const DOMAIN_Q = `SELECT ?s ?p ?o WHERE { { ?s ?p ?o } UNION { GRAPH ${BK} { ?s ?p ?o } } FILTER(!STRSTARTS(STR(?s), "urn:ex:op/") && ?s != <urn:ex:dataset>) }`;
-const domain = async () => (await client.query(DOMAIN_Q)).rows.map((b) => `${b.s.value} ${b.p.value} ${b.o.value}`).sort();
+// Each row KEEPS ITS GRAPH ("bk " prefix for the bookkeeping graph), so a triple that moves between graphs is a change.
+const DOMAIN_Q = `SELECT ?g ?s ?p ?o WHERE { { ?s ?p ?o BIND("" AS ?g) } UNION { GRAPH ${BK} { ?s ?p ?o } BIND("bk " AS ?g) } FILTER(!STRSTARTS(STR(?s), "urn:ex:op/") && ?s != <urn:ex:dataset>) }`;
+// and placement is asserted outright on every read: no bookkeeping stamp in the default graph, nothing but stamps in the bookkeeping graph
+const STAMPS = ['urn:ex:ver', 'urn:ex:recordedBy', 'urn:ex:retiredBy', 'https://scrumboard.local/ns#entityJson'];
+const domain = async () => {
+  const rows = (await client.query(DOMAIN_Q)).rows;
+  assert.deepEqual(rows.filter((b) => (b.g.value === '') === STAMPS.includes(b.p.value)).map((b) => `${b.g.value}${b.s.value} ${b.p.value}`), [], 'a triple sits in the wrong graph');
+  return rows.map((b) => `${b.g.value}${b.s.value} ${b.p.value} ${b.o.value}`).sort();
+};
 const seq = async () => Number((await (await fetch(`${base}/health`)).json()).commitSeq);
 const bkVals = async (s, p) => (await client.query(`SELECT ?o WHERE { GRAPH ${BK} { <${s}> <${p}> ?o } }`)).rows.map((b) => b.o.value).sort();
 const vals = async (s, p) => (await client.query(`SELECT ?o WHERE { <${s}> <${p}> ?o }`)).rows.map((b) => b.o.value).sort();
