@@ -7,7 +7,8 @@ import http from 'node:http';
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { makeBoardFixture, startRestServer } from './harness.mjs';
-import { HAVE_PY, tmpStore, startExecutor, killExecutor } from './graph-executor-proc.mjs';
+import { spawn } from 'node:child_process';
+import { HAVE_PY, tmpStore, startExecutor, killExecutor, EXEC, PY } from './graph-executor-proc.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const MIGRATE = path.join(HERE, '..', '..', 'scripts', 'migrate-cards-1598.mjs');
@@ -41,7 +42,7 @@ export async function startProxy(execUrl) {
   const p = { queries: 0, readyQueries: 0, mode: 'pass', injecting: false, onQuery: null, rewrite: null };
   p.server = http.createServer(async (req, res) => {
     const chunks = []; for await (const c of req) chunks.push(c);
-    const isQuery = req.method === 'POST' && req.url === '/query';
+    const isQuery = req.method === 'POST' && (req.url === '/query' || req.url.startsWith('/query?'));   // the graph client posts to /query, queryGraphExecutor to /query?dataset=public: a build may use either
     const isReadyRead = isQuery && /parkedUntil/.test(Buffer.concat(chunks).toString('utf8'));   // the modes below hit ONLY readiness reads, so a build that ignores the switch is not failed by the unrelated currency query
     if (isQuery && !p.injecting) { p.queries += 1; if (isReadyRead) p.readyQueries += 1; if (p.onQuery) { p.injecting = true; try { await p.onQuery(p.queries); } finally { p.injecting = false; } } }
     if (isReadyRead && p.mode === 'hold') return;   // never answers
@@ -83,4 +84,15 @@ export async function world(board, body) {
     const m = await migrate(boardFile, exec.baseUrl); assert.equal(m.code, 0, `precondition: the cards are copied into the executor (exit ${m.code}): ${m.out.slice(0, 300)}`);
     return await body(w);
   } finally { if (rest) await rest.stop(); try { await proxy.down(); } catch { /* down */ } await killExecutor(exec); }
+}
+
+/** Start the executor on a COPY of a seeded store: since #1638 an executor refuses a copied store unless it is told to promote it (--promote-epoch). Same contract as startExecutor otherwise. */
+export function startExecutorOnCopy({ store, datasetId }) {
+  return new Promise((resolve, reject) => {
+    const p = spawn(PY, [EXEC, '--store', store, '--port', '0', '--dataset-id', datasetId, '--promote-epoch'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = ''; let err = ''; let done = false;
+    p.stdout.on('data', (d) => { out += d; if (!done && out.includes('\n')) { done = true; try { const ready = JSON.parse(out.split('\n')[0]); resolve({ proc: p, ready, port: ready.port, baseUrl: `http://127.0.0.1:${ready.port}` }); } catch (e) { reject(e); } } });
+    p.stderr.on('data', (d) => { err += d; });
+    p.on('exit', (code, sig) => { if (!done) { done = true; reject(new Error(`executor exited ${code ?? sig}: ${err}`)); } });
+  });
 }
