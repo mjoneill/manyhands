@@ -9503,7 +9503,9 @@ function handleListCards(req, res) {
       // board's most honest signal about its own gaps was being written where
       // nobody reads and nothing keeps. Measured on the live log: `q` — free-text
       // search — wanted four times, by seats who then went elsewhere.
-      // #1570 — at the persistence boundary: the seat (#801 records who needed it, on purpose) and each param NAME as safe tokens, the URL as its shape; no query value is stored
+      // #1570 — at the persistence boundary: URL query values are removed (the URL is stored as its shape); `as` is deliberately
+      // retained as a sanitized seat token (#801 records who needed it), and each param NAME is a safe token. Sanitizing is not
+      // redaction: a value of allowed characters survives unchanged.
       recordMisses(unsupported.map(logToken), q.as ? logToken(q.as) : null, urlShapeForLog(req.url));
       if (q.bestEffort !== 'true') {
         return sendJSON(res, 400, {
