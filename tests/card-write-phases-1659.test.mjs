@@ -19,6 +19,7 @@
  *   P5             default threshold: a 500 ms write writes no line; a 1400 ms write writes one
  *   P6             the line joins the executor meter's slow line by rid, and rid is not '-'
  *   P7             no card content in the line, and the line is bounded (< 400 chars)
+ *   P8             a client that gives up while the write is held (its socket closes before the response) still gets its line: the slow writes an impatient client abandons are the ones that matter most
  *
  * NOT covered, by name: the readGate state field (the harness REST may run without a read gate), reads, the executor meter's own lines (unchanged), a conflict that survives its retry
  * (the write is refused: attempts would be 2 on a refused write; no row), COLLECTIONS/COLUMNS-only writes (they share the phases but have no row), what the 6-15 s turns out to be.
@@ -193,5 +194,17 @@ test('P7 the line holds no card content and is bounded', { skip: SKIP, timeout: 
     const ls = await waitLines(rest, 1); assert.equal(ls.length, 1);
     assert.ok(!ls[0].includes(secret), 'neither the title nor the description is in the line'); assert.ok(!/SELECT|INSERT|\{|\}/.test(ls[0]), 'and no query text or JSON');
     assert.ok(ls[0].length < 400, `bounded (${ls[0].length} chars)`);
+  });
+});
+
+test('P8 a client that closes its socket while the write is held still gets its line, once, when the write completes', { skip: SKIP, timeout: 300000 }, async () => {
+  await world({ cardSlow: 300, meterSlow: 300 }, async ({ rest, base, proxy }) => {
+    const c = await mkCard(base, 'p8'); proxy.state.holdUpdate = 900;
+    const gone = await fetch(`${base}/api/cards/${c.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ by: 'ada', title: 'p8 abandoned' }), signal: AbortSignal.timeout(250) }).then(() => 'answered', (e) => e.name);
+    assert.match(gone, /Abort|Timeout/, `CONTROL: the client gave up before the answer (${gone})`);
+    let landed = null; for (let i = 0; i < 60 && landed !== 'p8 abandoned'; i++) { await sleep(100); const b = (await api(base, 'GET', `/api/cards/${c.id}`)).body; landed = b?.title ?? b?.card?.title ?? null; }
+    assert.equal(landed, 'p8 abandoned', 'CONTROL: the write still landed server-side after the client left');
+    const ls = await waitLines(rest, 1, 3000); assert.equal(ls.length, 1, `the abandoned slow write is still logged, once: ${ls.join(' | ').slice(0, 300)}`);
+    const p = parse(ls[0]); const ph = phases(p); assert.ok(ph.executorUpdate >= 600, `and says where the time went (${JSON.stringify(ph)})`);
   });
 });
