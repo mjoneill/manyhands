@@ -38,7 +38,7 @@ test('EM1 the meter: counts by label/kind/outcome/route, loop delay, slow calls 
   m.record({ label: 'posts', kind: 'query', outcome: 'timeout', elapsedMs: 250, body: SECRET });
   const slow = lines.filter((l) => /executor-meter slow:/.test(l));
   assert.equal(slow.length, 1, 'only the call over slowMs gets its own line');
-  assert.match(slow[0], /250ms label=posts kind=query outcome=timeout route=background rid=- body=[0-9a-f]{16}$/);
+  assert.match(slow[0], /250ms label=posts kind=query outcome=timeout route=background rid=- caller=- peer=- body=[0-9a-f]{16}$/);
   const minute = m.flush();
   assert.match(minute, /executor-meter minute: calls=3 /);
   assert.match(minute, /cards\/query\/200@GET \^\\\/api\\\/cards\$ n=2 total=12ms max=7ms/);

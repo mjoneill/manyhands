@@ -1015,6 +1015,16 @@ let EXECUTOR_METER = null;
 /** #1570 — the ROUTE an executor call was made for, kept apart from requestContext so it covers the readiness checks that
  * run before a handler's own context exists, and changes nothing about how a request reads. */
 const meterRoute = new AsyncLocalStorage();
+
+// #1570 — what a request-shape log line may echo: the PATH and the parameter NAMES, never a value (a query string can
+// carry a token or a secret), every echoed piece reduced to a safe token so a crafted name can't break or forge a line.
+const logToken = (v) => String(v ?? '').replace(/[^A-Za-z0-9._/:+()-]/g, '_').slice(0, 64) || '-';
+function urlShapeForLog(url) {
+  const [path, qs] = String(url ?? '').split('?');
+  const names = qs ? [...new URLSearchParams(qs).keys()].map(logToken) : [];
+  return `${logToken(path)}${names.length ? `?${names.map((k) => `${k}=_`).join('&')}` : ''}`;
+}
+
 /** #1561 — the log-born unit's runtime when SCRUM_GRAPH_UNIT_LOGBORN=1 (set beside GRAPH_SLICE); null = today's paths. */
 let LOGBORN = null;
 setLegacyContext(() => requestContext.getStore());   // #1558 — per-request legacy-path counters
@@ -8676,7 +8686,7 @@ async function handleChanges(req, res) {
     const unsupported = Object.keys(q).filter((k) => !CHANGES_PARAMS.has(k));
     if (unsupported.length) {
       console.warn(
-        `[changes-query] seat=${q.as || 'unknown'} unsupported=${unsupported.join(',')} url=${req.url}`,
+        `[changes-query] seat=${logToken(q.as || 'unknown')} unsupported=${unsupported.map(logToken).join(',')} url=${urlShapeForLog(req.url)}`,
       );
       if (q.bestEffort !== 'true') {
         return sendJSON(res, 400, {
@@ -9462,7 +9472,7 @@ function handleListCards(req, res) {
       // request captured at the moment of real need, with the seat that
       // needed it. Logged on BOTH the refusal and the best-effort path.
       console.warn(
-        `[card-query] seat=${q.as || 'unknown'} unsupported=${unsupported.join(',')} url=${req.url}`,
+        `[card-query] seat=${logToken(q.as || 'unknown')} unsupported=${unsupported.map(logToken).join(',')} url=${urlShapeForLog(req.url)}`,
       );
       // #801 — AND PERSIST IT. The line above has captured real retrieval needs
       // since #656 step 2 shipped, which means #801's premise ("automatic
@@ -9471,7 +9481,7 @@ function handleListCards(req, res) {
       // board's most honest signal about its own gaps was being written where
       // nobody reads and nothing keeps. Measured on the live log: `q` — free-text
       // search — wanted four times, by seats who then went elsewhere.
-      recordMisses(unsupported, q.as || null, req.url);
+      recordMisses(unsupported, q.as || null, urlShapeForLog(req.url));   // #1570 — names only: a stored miss never keeps a query value
       if (q.bestEffort !== 'true') {
         return sendJSON(res, 400, {
           // #659 verification finding: this string is the only place a seat
@@ -12613,7 +12623,7 @@ if (logbornUnitConfig(process.env, { sliceEnabled: GRAPH_SLICE.enabled }).enable
 // On by default wherever there is an executor; SCRUM_EXECUTOR_METER=0 turns it off. SIGUSR2 takes ONE bounded CPU profile
 // of this process in-process (no debugger port) into SCRUM_CPU_PROFILE_DIR (default: the OS temp dir).
 if (process.env.SCRUM_GRAPH_EXECUTOR_URL && process.env.SCRUM_EXECUTOR_METER !== '0') {
-  EXECUTOR_METER = createExecutorMeter({ routeOf: () => meterRoute.getStore()?.route || 'background', ridOf: () => meterRoute.getStore()?.rid || null, extras: () => `hostLoad1m=${os.loadavg()[0].toFixed(2)}/${os.cpus().length}cpu${READ_GATE ? ` readGate=${JSON.stringify(READ_GATE.stats())}` : ''}`, slowMs: Number(process.env.SCRUM_EXECUTOR_METER_SLOW_MS ?? 1000) });
+  EXECUTOR_METER = createExecutorMeter({ routeOf: () => meterRoute.getStore()?.route || 'background', ridOf: () => meterRoute.getStore()?.rid || null, callerOf: () => meterRoute.getStore()?.caller, peerOf: () => meterRoute.getStore()?.peer, extras: () => `hostLoad1m=${os.loadavg()[0].toFixed(2)}/${os.cpus().length}cpu${READ_GATE ? ` readGate=${JSON.stringify(READ_GATE.stats())}` : ''}`, slowMs: Number(process.env.SCRUM_EXECUTOR_METER_SLOW_MS ?? 1000) });
   setExecutorMeter(EXECUTOR_METER);
   setInterval(() => EXECUTOR_METER.flush(), Number(process.env.SCRUM_EXECUTOR_METER_MS ?? 60_000)).unref();
   process.on('SIGUSR2', () => {
@@ -12786,7 +12796,7 @@ function routeApi(method, urlPath, req, res) {
     if (r.method !== method) continue;
     const m = urlPath.match(r.re);
     // #1570 — every executor call made for this request, readiness checks included, is metered under its route pattern.
-    if (m) return meterRoute.run({ route: `${method} ${r.re.source}`, rid: crypto.randomUUID() }, () => {
+    if (m) return meterRoute.run({ route: `${method} ${r.re.source}`, rid: crypto.randomUUID(), caller: req.headers['user-agent'], peer: req.socket?.remotePort }, () => {
       // #715 — the method decides the read kind for everything this handler
       // does, including after its awaits.
       // ⛔ GET alone. A POST that looks read-only is not: search with a reader
