@@ -9481,7 +9481,8 @@ function handleListCards(req, res) {
       // board's most honest signal about its own gaps was being written where
       // nobody reads and nothing keeps. Measured on the live log: `q` — free-text
       // search — wanted four times, by seats who then went elsewhere.
-      recordMisses(unsupported, q.as || null, urlShapeForLog(req.url));   // #1570 — names only: a stored miss never keeps a query value
+      // #1570 — at the persistence boundary: the seat (#801 records who needed it, on purpose) and each param NAME as safe tokens, the URL as its shape; no query value is stored
+      recordMisses(unsupported.map(logToken), q.as ? logToken(q.as) : null, urlShapeForLog(req.url));
       if (q.bestEffort !== 'true') {
         return sendJSON(res, 400, {
           // #659 verification finding: this string is the only place a seat
