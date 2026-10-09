@@ -2236,9 +2236,10 @@ function buildMcpServer() {
       query: z.string().describe('SPARQL SELECT or ASK. Prefixes are pre-declared; results return prefixed short IRIs.'),
       limit: z.number().int().min(1).optional().describe('Row bound (default 100, ceiling 1000); truncation is confessed'),
       by: z.string().optional().describe('Your seat key — logged with the query (#654: usage is the experiment)'),
+      source: z.enum(['replica', 'executor']).optional().describe('Which store answers (#1658): omit for the server default; the result names the source that answered'),
     },
-  }, async ({ query, limit, by } = {}) => {
-    return jsonResult(await apiCall('POST', '/api/graph', { query, limit, by }));
+  }, async ({ query, limit, by, source } = {}) => {
+    return jsonResult(await apiCall('POST', '/api/graph', { query, limit, by, source }));
   });
 
   // ── #1559 remainder (2) — graph_authority: the SAME shared resolver resident seats reach
