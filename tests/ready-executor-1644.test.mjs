@@ -32,6 +32,8 @@
  *   AND on explain. Each differential row (R0, R1, R3, R6, R9) reads `source` from each leg's response, cross-checks it against the counting proxy (the executor was asked for readiness facts exactly
  *   when `source` is 'executor': 0 queries for 'replica', >= 1 for 'executor'), PRINTS both before comparing anything, and ignores `source` and `watermark` in the whole-object comparisons. Zero
  *   executor readiness queries alone does NOT prove the old path (it proves only that no executor readiness read was observed); that is why the response field is required and the proxy is the cross-check.
+ *   R8e AN UNEXPECTED FAILURE inside the reader (a binding whose value is null, so building a row throws a TypeError, not an executor outage) is also loud: non-200 and no queue, never a clean empty
+ *       200 (found by a surviving mutant: 'an unexpected error answers an empty queue'). A 500 or a 503 are both acceptable here; a 200 is not.
  *   R9  A RICHER BOARD, full parity (found by asking which mutants my 5-card fixture could not kill): parked, superseded, a blocker on a card that does not exist, related and derived-from members. The WHOLE queue object
  *       (every ready item with its context, every excluded item), the replica watermark aside, equals the old path's; and the verdicts that only these kinds can produce are asserted, taken from the OLD PATH'S OWN
  *       behaviour (my first hand-derivation said 'dangling-blocker:999' for a blocker on a card that does not exist; the old path says 'open-blocker:999', and the row now says what the code does):
@@ -179,6 +181,7 @@ test('R9 a richer board: the WHOLE queue (context members included) equals the o
     assert.ok(oracle.json.ready.some((c) => (c.context?.relatedTo?.total ?? 0) > 0), 'CONTROL: the board really has related members in the queue');
     assert.match(ex(oracle.json, 11) ?? '', /^person-blocker:/, 'CONTROL: the oracle holds #11 on a person'); assert.match(ex(oracle.json, 12) ?? '', /^person-blocker:/, 'CONTROL: the oracle holds #12 on any human');
     const seen13 = oracle.json.ready.find((c) => c.shortId === 13) ?? oracle.json.excluded.find((c) => c.shortId === 13); assert.ok(seen13, 'CONTROL: the oracle has a verdict for #13 (the condition-scoped blocker card)'); console.log(`R9 oracle #13: ${JSON.stringify(seen13).slice(0, 220)}`);
+    assert.ok(JSON.stringify(seen13).includes('blocked-condition:4'), 'CONTROL: the oracle OFFERS #13 and names its blocked condition (blocked-condition:4); the condition-blocker facts decide this verdict');
     await w.start({ ready: true }); const on = await readyCounted(w, '/api/ready?limit=100');
     assert.equal(on.status, 200, on.text.slice(0, 300)); assert.ok(on.queries >= 1, 'PRECONDITION: the switched call read readiness facts from the executor');
     console.log(`R9 sources read: oracle leg says ${oracle.json.source} (${oracle.queries} observed); switched leg says ${on.json.source} (${on.queries} observed)`);
@@ -202,5 +205,16 @@ test('R8d a readyKind that names an object-prototype property is refused loudly 
       assert.ok(!Array.isArray(r.json?.ready), `${name}: and carries no queue`);
     }
     w.proxy.rewrite = null; const back = await w.get('/api/ready'); assert.equal(back.status, 200, 'CONTROL: undamaged again, it answers');
+  });
+});
+test('R8e an unexpected failure inside the reader (a null binding value) is loud: non-200 and no queue, never an empty 200', { skip: SKIP, timeout: 300000 }, async () => {
+  await world(smallBoard(), async (w) => {
+    await w.start({ ready: true });
+    const ok = await readyCounted(w); assert.equal(ok.status, 200); assert.ok(ok.queries >= 1, 'CONTROL: undamaged, it answers from the executor');
+    let applied = 0; w.proxy.rewrite = (j) => { if (readyShaped(j) && j.results.bindings.length) { const b = j.results.bindings[0]; const k = Object.keys(b)[0]; b[k] = null; applied++; } };
+    const r = await w.get('/api/ready');
+    assert.ok(applied >= 1, 'PRECONDITION: the damage was applied to the readiness answer');
+    assert.notEqual(r.status, 200, `an unexpected failure must not become a queue (got ${r.status}: ${r.text.slice(0, 200)})`);
+    assert.ok(!Array.isArray(r.json?.ready), 'and carries no queue');
   });
 });

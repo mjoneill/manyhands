@@ -50,7 +50,8 @@ export const richBoard = () => makeBoardFixture({
     // human blockers and release conditions are card fields (blockers / acceptance) that the projection turns into scrum:Blocker and scrum:ReleaseCondition nodes
     card(11, 'waits on a person', { priority: 'p2', blockers: [{ person: 'ada', status: 'open', note: 'fixture' }] }),
     card(12, 'waits on any human', { priority: 'p2', blockers: [{ anyHuman: true, status: 'open', note: 'fixture' }] }),
-    card(13, 'has a condition blocked by an open card', { priority: 'p2', acceptance: [{ condition: 'the fixture condition', evidence: [], blockedBy: [4] }] }),
+    // a card-level blocker (#4, open) that the card's own condition CLAIMS: the queue offers the card and names the blocked condition (blocked-condition:4); without the condition-blocker facts it would read open-blocker:4
+    card(13, 'has a condition blocked by an open card', { priority: 'p2', relationships: { relatedTo: [], blockedBy: [4], supersedes: [], derivedFrom: [] }, acceptance: [{ condition: 'the fixture condition', evidence: [], blockedBy: [4] }] }),
     card(14, 'has a met condition', { priority: 'p2', acceptance: [{ condition: 'another fixture condition', evidence: ['0123456789012345678901234567890123456789'] }] }),
   ],
   nextShortId: 15, conversations: [],
