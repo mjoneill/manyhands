@@ -355,7 +355,8 @@ test('#1562 a lost acknowledgement converges by replaying the SAME intention (on
       return r;
     },
   });
-  const seq = async () => Number((await client.query('SELECT ?s WHERE { <urn:ex:dataset> <urn:ex:commitSeq> ?s }')).rows[0].s.value);
+  // #1656 — since #1638 the dataset marker and every receipt live in the bookkeeping graph, not the default graph
+  const seq = async () => Number((await client.query('SELECT ?s WHERE { GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:dataset> <urn:ex:commitSeq> ?s } }')).rows[0].s.value);
   const s = new OxigraphSaver({ client: lossy, scope: `lossy${process.pid}` });
   await s._readGen('la'); // so the first update is the put itself
   const s0 = await seq();
@@ -373,16 +374,16 @@ test('#1562 deleteThread is a receipted mutation; the same ids can be written ag
   await s.deleteThread('del');
   assert.equal(await s.getTuple(L.at(1)), undefined);
   assert.equal(await s.getProcess(L.at(1)), undefined);
-  const rec = await client.query(`SELECT ?o WHERE { <urn:ex:op/lg/${s.scope}/delete/del/g0> <urn:ex:outcome> ?o }`);
+  const rec = await client.query(`SELECT ?o WHERE { GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:op/lg/${s.scope}/delete/del/g0> <urn:ex:outcome> ?o } }`);
   assert.equal(rec.rows[0].o.value, 'urn:ex:APPLIED');
   // the SAME put replayed after the delete is written again (generation 1 → a fresh opId), even
   // by another saver instance — never answered from generation 0's old APPLIED receipt
   const s2 = new OxigraphSaver({ client, scope: s.scope });
   await L.P0.run(s2);
   assert.equal((await s2.getTuple(L.at(0))).checkpoint.id, L.ids[0]);
-  const again = await client.query(`ASK { <urn:ex:op/lg/${s.scope}/put/del/g1/ns%3A/${L.ids[0]}> <urn:ex:outcome> <urn:ex:APPLIED> }`);
+  const again = await client.query(`ASK { GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:op/lg/${s.scope}/put/del/g1/ns%3A/${L.ids[0]}> <urn:ex:outcome> <urn:ex:APPLIED> } }`);
   assert.equal(again.ok, false); // ask() is the ASK door; query() refuses a non-SELECT result
-  const g1 = await client.ask(`ASK { <urn:ex:op/lg/${s.scope}/put/del/g1/ns%3A/${L.ids[0]}> <urn:ex:outcome> <urn:ex:APPLIED> }`);
+  const g1 = await client.ask(`ASK { GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:op/lg/${s.scope}/put/del/g1/ns%3A/${L.ids[0]}> <urn:ex:outcome> <urn:ex:APPLIED> } }`);
   assert.equal(g1.boolean, true);
 });
 
