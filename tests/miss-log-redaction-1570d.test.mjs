@@ -7,7 +7,9 @@
  *
  *   M0 CONTROL  an unsupported filter is still recorded, with its NAME and the seat, and the stored url names the param but not its value
  *   M1          a secret value in a param value or in a second, unknown param (token=...): absent from the miss FILE, from /api/misses, and from REST's stderr; the NAMES are kept
- *   M2          crafted names (%0A, %0D%0A) cannot forge or split a record: every line of the file is one JSON record, no field holds a line break or whitespace, one warn line per request
+ *   M2          crafted names (%0A, %0D%0A) are stored as SAFE TOKENS: no stored field holds a line break or whitespace. (The FILE cannot be split by a newline whatever is stored, because records are
+ *               JSON.stringify'd and a newline is escaped; so this row does NOT demonstrate a record split and must not be read as one. What CAN be split by a raw newline is the stderr warn line, which
+ *               it also pins: one warn line per request.)
  *   M3          the seat exception: as=ada is kept as "ada"; a crafted seat (a newline, a quote, a forged JSON object) is ONE safe token and creates no extra record
  *   M4          bounded: a 5,000-character parameter name and a 500-character seat are cut to at most 64 characters each in what is stored
  *   M5          the /api/changes warn line: the name is kept, the value is absent
@@ -53,12 +55,12 @@ test('M1 a secret value is absent from the miss file on disk, from /api/misses a
   });
 });
 
-test('M2 crafted names cannot forge or split a record: one JSON record per line, no line break or whitespace in any field, one warn line per request', async () => {
+test('M2 crafted names are stored as safe tokens (no line break or whitespace in any stored field) and a name with a newline does not split the stderr warn line', async () => {
   await withRest(async (rest) => {
     await get(rest, '/api/cards?bad%0Aname=1&x%0D%0Ay=2&as=ada');
     await sleep(300);
     const text = fileOf(rest); const lines = text.split('\n').filter(Boolean);
-    const recs = lines.map((l) => JSON.parse(l)); assert.equal(recs.length, 2, `two names -> two records (${lines.length} lines)`);
+    const recs = lines.map((l) => JSON.parse(l)); assert.equal(recs.length, 2, `two names -> two records (${lines.length} lines; the file is JSON-per-line, so this holds even when the stored name is raw)`);
     for (const r of recs) for (const [k, v] of Object.entries(r)) if (typeof v === 'string' && k !== 'at') assert.ok(!/[\r\n\s]/.test(v), `field ${k} holds whitespace or a line break: ${JSON.stringify(v)}`);
     const warns = rest.stderr().split('\n').filter((l) => l.includes('[card-query]'));
     assert.equal(warns.length, 1, `one warn line for one request (got ${warns.length}): a name with a newline must not split it`);
