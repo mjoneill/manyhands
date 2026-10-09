@@ -21,7 +21,7 @@
 import oxigraph from 'oxigraph';
 import { performance } from 'node:perf_hooks';
 import { createHash } from 'node:crypto';
-import { REL_TYPES, MENTIONS_CARD, POST_MENTIONS_CARD } from './jsonld.mjs';
+import { REL_TYPES, MENTIONS_CARD, POST_MENTIONS_CARD, columnIri } from './jsonld.mjs';
 import { APEX_PREFIX } from './apex-labels.mjs';
 
 export const IRI = Object.freeze({
@@ -1530,7 +1530,7 @@ export function projectEntity(store, e) {
       if (e.dateCreated) add(s, nn(SC + 'dateCreated'), lit(e.dateCreated));
       if (e.dateModified) add(s, nn(SC + 'dateModified'), lit(e.dateModified));
       if (e.creator) add(s, nn(SC + 'creator'), personRef(e.creator));
-      if (e.column) add(s, nn(S + 'column'), nn(C + e.column));
+      if (e.column) add(s, nn(S + 'column'), nn(columnIri(e.column)));   // #1639 — the column node's own rule, so they join
       if (e['scrum:priority']) add(s, nn(S + 'priority'), lit(e['scrum:priority']));
       if (e['scrum:order'] != null) add(s, nn(S + 'order'), intLit(e['scrum:order']));
       if (e.claimedBy) add(s, nn(S + 'claimedBy'), personRef(e.claimedBy));

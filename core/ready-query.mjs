@@ -34,6 +34,7 @@
  */
 
 import { queryGraph } from './graph-replica.mjs';
+import { columnIdOf } from './jsonld.mjs';
 
 /**
  * Per-card facts. Witness partner for its absence claims: anyCardWitness in
@@ -327,7 +328,7 @@ export function computeReady(factRows, blockerRows, supersededRows, contextRows,
   const verdicts = [];
   for (const r of factRows || []) {
     const shortId = Number(r.id);
-    const column = tail(r.col);
+    const column = columnIdOf(r.col) ?? tail(r.col);   // #1639 — decode, not the text after the last '/' (an id may hold one)
     const claimed = tail(r.claimed);
     const base = {
       shortId, title: r.title, type: r.type ?? null,
@@ -387,7 +388,7 @@ export function computeReady(factRows, blockerRows, supersededRows, contextRows,
     }
 
     const edges = blockersByCard.get(shortId) || [];
-    const open = edges.filter((e) => e.tid != null && tail(e.tcol) !== 'done')
+    const open = edges.filter((e) => e.tid != null && (columnIdOf(e.tcol) ?? tail(e.tcol)) !== 'done')
       .map((e) => Number(e.tid)).sort((a, b) => a - b);
 
     // #1041 — RULED 2026-08-24, recorded on the card before this was written:

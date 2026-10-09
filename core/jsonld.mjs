@@ -38,6 +38,21 @@ export const PERSON_IRI_BASE = 'https://scrumboard.local/person/';
  * the same strings-become-edges-by-declaration move as #686's people.
  */
 export const COLUMN_IRI_BASE = 'https://scrumboard.local/column/';
+/**
+ * #1639 — THE one rule for a column's IRI, used for the column node AND every reference to it (a card's scrum:column):
+ * the id percent-encoded, because the board accepts any string as a column id and an IRI does not. A plain id (the
+ * board's four) is unchanged. Never build `COLUMN_IRI_BASE + id` by hand: a subject and a reference built two ways
+ * stop joining.
+ */
+export const columnIri = (id) => COLUMN_IRI_BASE + encodeURIComponent(id);
+/** The inverse of columnIri: a column IRI → its id (null for anything else). A malformed escape is returned undecoded. */
+export const columnIdOf = (iri) => {
+  if (iri == null) return null;
+  const s = String(iri);
+  if (!s.startsWith(COLUMN_IRI_BASE)) return null;
+  const rest = s.slice(COLUMN_IRI_BASE.length);
+  try { return decodeURIComponent(rest); } catch { return rest; }
+};
 // #814 — commits get their own namespace. They are not board entities and must
 // never be mistaken for one; the sha is the identity and git holds the rest.
 export const COMMIT_IRI_BASE = 'https://scrumboard.local/commit/';
@@ -389,7 +404,7 @@ const isCard = (entity) => !!entity && (
 // #687 — plain {id, name, order, …} ↔ typed graph node. Lossless both ways:
 // unmodelled fields ride through verbatim (the slice-1 keystone).
 const columnToNode = ({ id, name, order, ...rest }) => ({
-  '@type': 'scrum:Column', '@id': COLUMN_IRI_BASE + id,
+  '@type': 'scrum:Column', '@id': columnIri(id),
   identifier: id, name, 'scrum:order': order, ...rest,
 });
 const nodeToColumn = ({ '@type': _t, '@id': _i, identifier, name, 'scrum:order': order, ...rest }) => ({
