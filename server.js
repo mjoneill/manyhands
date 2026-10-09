@@ -2195,9 +2195,18 @@ async function handleGraphQuery(req, res) {
     // #898 — event-loop utilization is sampled as a DELTA over this call, so a
     // slow row can say whether the loop was busy or the store was.
     const eluStart = performance.eventLoopUtilization();
+    // #1658 — a request may ASK for a store ('replica' | 'executor'); absent means the process default. Anything else, or
+    // the executor on a process that has none, is refused: never answered from the other side.
+    if (body.source !== undefined && body.source !== 'replica' && body.source !== 'executor') {
+      return sendJSON(res, 400, { error: `source must be "replica" or "executor" (got ${JSON.stringify(body.source).slice(0, 40)})`, code: 'BAD_SOURCE' });
+    }
+    const source = body.source ?? GRAPH_QUERY_SOURCE;
+    if (source === 'executor' && !process.env.SCRUM_GRAPH_EXECUTOR_URL) {
+      return sendJSON(res, 503, { error: 'the executor was asked for, but this process has no SCRUM_GRAPH_EXECUTOR_URL; not answering from the replica instead', code: 'SOURCE_UNAVAILABLE' });
+    }
     const { queryGraph, queryGraphExecutor } = await loadGraphModules();
     let result; let rebuiltMs = null;
-    if (GRAPH_QUERY_SOURCE === 'executor') {
+    if (source === 'executor') {
       // #1570 — the switch: answered by the executor's PUBLIC dataset (default graph, no named graphs),
       // with the same checks first. No replica, no sync, so no rebuild time and no replica watermark.
       result = await queryGraphExecutor(process.env.SCRUM_GRAPH_EXECUTOR_URL, body.query, { limit: body.limit });
@@ -2211,6 +2220,7 @@ async function handleGraphQuery(req, res) {
       // during it. That ordering is the whole point: a write arriving mid-sync is
       // the #931 window, and it must widen the gap rather than disappear into it.
       result.watermark = graphWatermark(view.projectedThrough);
+      result.source = 'replica';   // #1658 — every answer names the store that answered
     }
     const totalMs = Math.round(performance.now() - tCall);
     // #898 — WHAT THESE NUMBERS MEASURE, said beside them. Two production rows
