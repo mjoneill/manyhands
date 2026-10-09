@@ -34,6 +34,9 @@
  *   executor readiness queries alone does NOT prove the old path (it proves only that no executor readiness read was observed); that is why the response field is required and the proxy is the cross-check.
  *   R8e AN UNEXPECTED FAILURE inside the reader (a binding whose value is null, so building a row throws a TypeError, not an executor outage) is also loud: non-200 and no queue, never a clean empty
  *       200 (found by a surviving mutant: 'an unexpected error answers an empty queue'). A 500 or a 503 are both acceptable here; a 200 is not.
+ *   R10 THE ROW GUARD (the last surviving mutant, X06; the reviewer's recipe): the real `selectExecutorAll` with `maxRows: 2` and a controlled response: two rows come back, three rows are refused with
+ *       code ROW_CAP and NOTHING is returned (never a partial result); zero rows come back empty. No executor needed. LIMIT OF THE GUARD, pinned as a fact and not a row: the cap is checked AFTER the full
+ *       response has been received and parsed, so it is not an upstream memory or work bound.
  *   R9  A RICHER BOARD, full parity (found by asking which mutants my 5-card fixture could not kill): parked, superseded, a blocker on a card that does not exist, related and derived-from members. The WHOLE queue object
  *       (every ready item with its context, every excluded item), the replica watermark aside, equals the old path's; and the verdicts that only these kinds can produce are asserted, taken from the OLD PATH'S OWN
  *       behaviour (my first hand-derivation said 'dangling-blocker:999' for a blocker on a card that does not exist; the old path says 'open-blocker:999', and the row now says what the code does):
@@ -217,4 +220,17 @@ test('R8e an unexpected failure inside the reader (a null binding value) is loud
     assert.notEqual(r.status, 200, `an unexpected failure must not become a queue (got ${r.status}: ${r.text.slice(0, 200)})`);
     assert.ok(!Array.isArray(r.json?.ready), 'and carries no queue');
   });
+});
+
+test('R10 the row guard: with maxRows 2, two rows pass, three are refused with ROW_CAP and nothing partial is returned', async () => {
+  const mod = await import('../core/graph-replica.mjs');
+  assert.equal(typeof mod.selectExecutorAll, 'function', 'core/graph-replica.mjs exports selectExecutorAll');
+  const answer = (n) => async () => ({ status: 200, text: async () => JSON.stringify({ head: { vars: ['a'] }, results: { bindings: Array.from({ length: n }, (_, i) => ({ a: { type: 'literal', value: `row-${i}` } })) } }) });
+  const run = (n, maxRows) => mod.selectExecutorAll('http://127.0.0.1:1', 'SELECT ?a WHERE { ?s ?p ?a }', { maxRows, fetchImpl: answer(n) });
+  assert.deepEqual(await run(0, 2), [], 'CONTROL: no rows is an empty answer');
+  assert.deepEqual((await run(2, 2)).map((r) => r.a), ['row-0', 'row-1'], 'exactly maxRows rows pass');
+  let got = 'RESOLVED'; let err = null;
+  try { got = await run(3, 2); } catch (e) { err = e; }
+  assert.ok(err, `three rows with maxRows 2 must be refused, not returned (got ${JSON.stringify(got)})`);
+  assert.equal(err.code, 'ROW_CAP'); assert.equal(got, 'RESOLVED', 'and nothing partial came back');
 });
