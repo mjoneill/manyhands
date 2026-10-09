@@ -140,6 +140,12 @@ const SMALLKINDS_UNIT = process.env.SCRUM_GRAPH_UNIT_SMALLKINDS === '1';
 const COLLECTION_FAMILIES = collectionFamilies({ cardsUnit: CARDS_UNIT });
 let COLLECTIONS = null;
 const FILE_COLLS = Symbol('fileCollections');   // the document's own copies of the graph-held collections
+// #1639 — the board's columns live in the graph (core/columns-unit.mjs), read from the unit's cache (filled only from
+// graph reads) and written in the same guarded update as the write's cards and collections. OFF ⇒ the document's
+// `columns` are the only store (today's path, unchanged).
+const COLUMNS_UNIT = process.env.SCRUM_GRAPH_UNIT_COLUMNS === '1';
+let COLUMNS = null;
+const FILE_COLUMNS = Symbol('fileColumns');   // the document's own columns, put back before the document is written
 
 let _documentWrites = 0;   // #1574 1b — successful writeBoard calls since boot; on /api/health as `documentWrites`
 // #1574 1b scope change — announcements whose inline attempt failed stay pending until a hand-run reconciler or the cards
@@ -1056,9 +1062,9 @@ function readBoard() {
     // a key that could match a different file's identity is a latent stale read.
     // #1598/#1624 — an UNCERTAIN card or collection cache is a miss, never a hit: the board built before an UNKNOWN write
     // must not be served while the graph's outcome is undetermined (the rebuild's snapshot refuses: a 503).
-    if (!_sharedBoard || _sharedBoard.file !== BOARD_DATA_FILE || _sharedBoard.key !== key || (CARDS_UNIT && (CARDS.uncertain || _sharedBoard.cardsGen !== CARDS.generation)) || (COLLECTIONS && (COLLECTIONS.uncertain || _sharedBoard.collGen !== COLLECTIONS.generation))) {
+    if (!_sharedBoard || _sharedBoard.file !== BOARD_DATA_FILE || _sharedBoard.key !== key || (CARDS_UNIT && (CARDS.uncertain || _sharedBoard.cardsGen !== CARDS.generation)) || (COLLECTIONS && (COLLECTIONS.uncertain || _sharedBoard.collGen !== COLLECTIONS.generation)) || (COLUMNS && (COLUMNS.uncertain || _sharedBoard.colGen !== COLUMNS.generation))) {
       const board = deepFreeze(withUnitCards(finishBoard(domainToBoard(domain))));
-      _sharedBoard = { file: BOARD_DATA_FILE, key, board, builtMs: Math.round(performance.now() - t0), builtAt: new Date().toISOString(), cardsGen: CARDS_UNIT ? CARDS.generation : null, collGen: COLLECTIONS ? COLLECTIONS.generation : null };
+      _sharedBoard = { file: BOARD_DATA_FILE, key, board, builtMs: Math.round(performance.now() - t0), builtAt: new Date().toISOString(), cardsGen: CARDS_UNIT ? CARDS.generation : null, collGen: COLLECTIONS ? COLLECTIONS.generation : null, colGen: COLUMNS ? COLUMNS.generation : null };
       ctx.read = `shared; rebuilt=${_sharedBoard.builtMs}ms; key=${key}; cards=${board.cards.length}`;
     } else {
       ctx.read = `shared; hit; built=${_sharedBoard.builtAt}; key=${_sharedBoard.key}; cards=${_sharedBoard.board.cards.length}`;
@@ -1097,6 +1103,17 @@ function withUnitCards(board) {
     }
     board[FILE_COLLS] = Object.fromEntries(COLLECTIONS.keys.map((k) => [k, board[k]]));
     for (const k of COLLECTIONS.keys) board[k] = snap[k];
+  }
+  if (COLUMNS) {
+    // #1639 — the columns are the unit's, from the graph; the document's own ride beside them, put back on write. Not
+    // current ⇒ the same 503 as the collections (never a board served without its columns, never the file's).
+    let cols;
+    try { cols = COLUMNS.snapshot(); } catch (e) {
+      const ctx = requestContext.getStore(); if (ctx) ctx.graphUnavailable = e.message;
+      throw e;
+    }
+    board[FILE_COLUMNS] = board.columns;
+    board.columns = cols;
   }
   return board;
 }
@@ -1193,13 +1210,14 @@ function writeBoard(data, events) {
       + 'name its entities, derive the events by diffing — see handleSave.',
     );
   }
-  if ((CARDS_UNIT && data[FILE_CARDS]) || (COLLECTIONS && data[FILE_COLLS])) {
+  if ((CARDS_UNIT && data[FILE_CARDS]) || (COLLECTIONS && data[FILE_COLLS]) || (COLUMNS && data[FILE_COLUMNS])) {
     // #1598 / #1624 — the graph FIRST: stage this write for the lock to commit, and write the document (and the events)
     // only after the executor answered APPLIED. A card or collection change outside the lock has no one to commit it.
     const staged = cardWriteContext.getStore();
     if (!staged) {
       if (CARDS_UNIT && data[FILE_CARDS] && CARDS.plan(data.cards, data.nextShortId)) throw new Error('#1598: a card write outside withWriteLock cannot be committed to the graph');
       if (COLLECTIONS && data[FILE_COLLS] && COLLECTIONS.plan(data).length) throw new Error('#1624: a collection write outside withWriteLock cannot be committed to the graph');
+      if (COLUMNS && data[FILE_COLUMNS] && COLUMNS.plan(data.columns).length) throw new Error('#1639: a column write outside withWriteLock cannot be committed to the graph');
     } else { staged.push({ data, events }); return; }
   }
   writeDocument(data, events);
@@ -1211,6 +1229,7 @@ function writeDocument(data, events) {
     data = { ...data, cards: data[FILE_CARDS], nextShortId: data[FILE_NEXT_SHORT_ID] };
   }
   if (COLLECTIONS && data[FILE_COLLS]) data = { ...data, ...data[FILE_COLLS] };   // #1624 — the document keeps its own copies
+  if (COLUMNS && data[FILE_COLUMNS]) data = { ...data, columns: data[FILE_COLUMNS] };   // #1639 — and its own columns
   data.lastUpdated = new Date().toISOString();
   data._README = BOARD_README;
   for (const ev of events) appendEvent(EVENT_LOG_DIR, ev, { now: data.lastUpdated });
@@ -1602,6 +1621,7 @@ async function warmGraphStoreOnce() {
     // (graph_query must answer about the cards REST serves, not the file's frozen or removed copy).
     if (CARDS_UNIT) domain = { ...domain, nodes: CARDS.snapshot(domain.nextShortId).cards.map(cardToNode) };
     if (COLLECTIONS) domain = { ...domain, ...COLLECTIONS.snapshot() };   // #1624 — graph_query reads the graph's collections, not the file's
+    if (COLUMNS) domain = { ...domain, columns: COLUMNS.snapshot() };   // #1639 — and the graph's columns
     const docStamp = typeof domain?.lastUpdated === 'string' ? domain.lastUpdated : null;
     _graphDocStamp = docStamp;
     const doc = domainToJsonLd(domain);
@@ -7443,7 +7463,7 @@ async function handleReady(req, res) {
 // concurrent PATCH requests cannot interleave their read-modify-write.
 let _writeLock = Promise.resolve();
 function withWriteLock(fn) {
-  const run = (CARDS_UNIT || COLLECTIONS) ? () => lockedWithCards(fn) : fn;
+  const run = (CARDS_UNIT || COLLECTIONS || COLUMNS) ? () => lockedWithCards(fn) : fn;
   const next = _writeLock.then(() => run(), () => run());
   _writeLock = next.catch(() => {});
   return next;
@@ -7464,6 +7484,7 @@ async function lockedWithCards(fn) {
     try {
       if (CARDS_UNIT) await CARDS.ensureFresh();
       if (COLLECTIONS) await COLLECTIONS.ensureFresh();
+      if (COLUMNS) await COLUMNS.ensureFresh();
     } catch (e) {
       // the cache could not be reloaded from the graph: the same "executor not answering" as a failed commit
       markGraphUnavailable(e);
@@ -7481,18 +7502,25 @@ async function lockedWithCards(fn) {
         const actor = events.find((e) => e && e.actor)?.actor ?? 'board';
         // #1624 — collection entities this write changed ride the SAME update as its cards (one conjunctive guard).
         const collParts = COLLECTIONS && data[FILE_COLLS] ? COLLECTIONS.plan(data) : [];
+        // #1639 — and the columns it changed (a column delete moves its cards: both halves in ONE guarded update).
+        const colParts = COLUMNS && data[FILE_COLUMNS] ? COLUMNS.plan(data.columns) : [];
         try {
           if (CARDS_UNIT && data[FILE_CARDS]) {
             const ob = outboxOf(data);
             const pending = Object.entries(ob.origins).filter(([mid, o]) => !data[FILE_ORIGINS]?.has(mid) && o?.origin?.cardId)
               .map(([mid, o]) => ({ cardId: o.origin.cardId, mutationId: mid, json: JSON.stringify({ origin: o, entries: Object.fromEntries(Object.entries(ob.entries).filter(([, e]) => e?.mutationId === mid)) }) }));
-            await CARDS.commit(data.cards, data.nextShortId, { actor, opId, pending, collections: collParts });
+            await CARDS.commit(data.cards, data.nextShortId, { actor, opId, pending, collections: [...collParts, ...colParts] });
+            if (collParts.length) COLLECTIONS.applied(data, collParts);
+            if (colParts.length) COLUMNS.applied(data.columns, colParts);
+          } else if (colParts.length) {
+            await COLUMNS.commit(data.columns, { actor, opId, extraParts: collParts });
             if (collParts.length) COLLECTIONS.applied(data, collParts);
           } else if (collParts.length) {
             await COLLECTIONS.commit(data, { actor, opId });
           }
         } catch (e) {
           if (COLLECTIONS) COLLECTIONS.markUncertain();
+          if (COLUMNS) COLUMNS.markUncertain();
           // the outcome is unknown or the executor is away: say so to the response layer (see sendJSON)
           if (e && (e.code === 'COLLECTIONS_UNAVAILABLE' || e.code === 'CARDS_UNAVAILABLE')) { const ctx = requestContext.getStore(); if (ctx) ctx.graphUnavailable = e.message; }
           throw e;
@@ -12701,6 +12729,26 @@ if (SMALLKINDS_UNIT) {
   }
   console.error(`${new Date().toISOString()} #1624 small-kinds unit ON: wakes live in the graph executor; the document collection is not read`);
 }
+// #1639 — the columns in the graph. Needs the conversations unit (so the executor exists), like every graph unit. The
+// cache is filled from the graph BEFORE the server listens; a graph with no columns is a migration not yet run
+// (scripts/migrate-columns-1639.mjs), and a board without its columns refuses to serve rather than show the file's.
+if (COLUMNS_UNIT) {
+  if (!ANNOUNCE_EXECUTOR) throw new Error('#1639: SCRUM_GRAPH_UNIT_COLUMNS=1 requires SCRUM_GRAPH_UNIT_CONVERSATIONS=1 (the columns live in the graph executor)');
+  const { createColumnsUnit } = await import('./core/columns-unit.mjs');   // lazily: oxigraph (#868)
+  COLUMNS = createColumnsUnit({
+    client: createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: 30000, label: 'columns' }),
+    mintId: () => crypto.randomUUID(),
+  });
+  try { await COLUMNS.load(); } catch (e) {
+    console.error(`#1639 columns unit: the columns could not be read from the graph — refusing to serve: ${e.message}`);
+    process.exit(1);
+  }
+  if (!COLUMNS.snapshot().length) {
+    console.error('#1639 columns unit: the graph holds no columns — refusing to serve. Run scripts/migrate-columns-1639.mjs --apply (with the server stopped) first.');
+    process.exit(1);
+  }
+  console.error(`${new Date().toISOString()} #1639 columns unit ON: columns are read from and written to the graph executor; the document's columns are not read or written`);
+}
 if (GRAPH_SLICE.enabled) {
   installStructuredCloneCounter();
   API_ROUTES.push(...GRAPH_SLICE.routes);
@@ -12726,6 +12774,12 @@ async function collectionsReady() {
   if (!(await COLLECTIONS.reachable())) return false;
   try { await COLLECTIONS.ensureFresh(); return true; } catch { return false; }
 }
+// #1639 — the same rule for the columns' reads: a GET of /api/columns is served only while the executor answers.
+const columnsDependent = (urlPath) => urlPath === '/api/columns' || urlPath.startsWith('/api/columns/') || urlPath.startsWith('/api/columns?');
+async function columnsReady() {
+  if (!(await COLUMNS.reachable())) return false;
+  try { await COLUMNS.ensureFresh(); return true; } catch { return false; }
+}
 
 function routeApi(method, urlPath, req, res) {
   for (const r of API_ROUTES) {
@@ -12744,17 +12798,21 @@ function routeApi(method, urlPath, req, res) {
       const collRoute = COLLECTIONS && method === 'GET' && collectionDependent(urlPath);
       const cardsUncertain = CARDS_UNIT && CARDS.uncertain && !cardRoute;
       const collsUncertain = COLLECTIONS && COLLECTIONS.uncertain;
-      if (!cardRoute && !collRoute && !cardsUncertain && !collsUncertain) { go(); return true; }
+      const colRoute = COLUMNS && method === 'GET' && columnsDependent(urlPath);
+      const colsUncertain = COLUMNS && COLUMNS.uncertain && !colRoute;
+      if (!cardRoute && !collRoute && !cardsUncertain && !collsUncertain && !colRoute && !colsUncertain) { go(); return true; }
       (async () => {
         // #1598 / #1624 — after an UNKNOWN write a cache is uncertain, and EVERY board read needs it (readBoard swaps the
         // cards and collections in): TRY to reload it before the handler runs, then run the handler either way (a
         // malformed request still answers 400; a board read with a cache still uncertain refuses, answered 503).
         if (cardsUncertain) await CARDS.ensureFresh().catch(() => {});
         if (collsUncertain) await COLLECTIONS.ensureFresh().catch(() => {});
+        if (colsUncertain) await COLUMNS.ensureFresh().catch(() => {});
         // #1598 K7 — with cards in the graph, a board read or write is served only while the executor answers and the
         // card cache is current: otherwise 503, never a board without its cards. The same for a collection's GET.
         if (cardRoute && !(await cardsReady())) return sendJSON(res, 503, { error: 'cards are unavailable: the graph executor is not answering', code: 'CARDS_UNAVAILABLE' });
         if (collRoute && !(await collectionsReady())) return sendJSON(res, 503, { error: 'the graph executor is not answering, so this collection is unavailable', code: 'GRAPH_UNAVAILABLE' });
+        if (colRoute && !(await columnsReady())) return sendJSON(res, 503, { error: 'the graph executor is not answering, so the columns are unavailable', code: 'GRAPH_UNAVAILABLE' });
         go();
       })().catch((e) => sendJSON(res, 500, { error: e.message }));
       return true;
