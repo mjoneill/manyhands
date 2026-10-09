@@ -23,6 +23,7 @@
  *       fails here: this is the pinned mutant "dummy call, then replica fallback".
  *   R8  A DAMAGED BUT PARSEABLE answer is rejected loudly (review of 9489d4c, 15:58Z): the proxy adds a row that belongs to no branch of the executor's answer; the call must be a non-200 with a string
  *       code and no queue, never a 200 built from the rest. (The reader may not silently drop a row it cannot place: a dropped row is a successful empty or partial queue.)
+ *   R8c The same for a tag with an UNKNOWN value (a renamed kind): the proxy rewrites the value of `readyKind` on two real rows to a name no branch uses.
  *   R8b The same for the row's own tag removed: the proxy deletes the `readyKind` variable from two real rows (named here because the review names it; a builder who renames the tag renames it here).
  *   R6  FLIP BACK: restarting REST without the switch on the same executor and board gives the R0 answer byte for byte (the replica `watermark` aside, which must be back).
  *
@@ -145,4 +146,7 @@ test('R8 a row that belongs to no branch of the executor answer is rejected loud
 });
 test('R8b a real row whose readyKind tag is missing is rejected loudly, not dropped', { skip: SKIP, timeout: 300000 }, async () => {
   await damaged((j) => { for (const b of j.results.bindings.slice(0, 2)) delete b.readyKind; });
+});
+test('R8c a real row whose readyKind names no branch (a renamed kind) is rejected loudly, not dropped', { skip: SKIP, timeout: 300000 }, async () => {
+  await damaged((j) => { for (const b of j.results.bindings.slice(0, 2)) if (b.readyKind) b.readyKind = { ...b.readyKind, value: `${b.readyKind.value}-renamed` }; });
 });
