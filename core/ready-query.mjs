@@ -537,6 +537,35 @@ function pagedRows(store, query) {
   return out;
 }
 
+/**
+ * #1644 — the same verdicts, read from the EXECUTOR in ONE query. Over HTTP, readyFromStore's separate, paged reads
+ * (LIMIT/OFFSET with no ORDER BY, 6–7 queries) could each see a different moment and compose an answer that never
+ * existed. Here every sub-query is a branch of ONE UNION, tagged with ?readyKind, so the whole answer is read from one
+ * snapshot; the rows are split by kind and fed to the unchanged computeReady. `select(sparql)` resolves to the rows
+ * (graph-replica's selectExecutorAll), with no row ceiling and a runaway guard that refuses.
+ */
+export async function readyFromExecutor(select, { shippedShas = null } = {}) {
+  const kinds = [
+    ['facts', readyFactsQuery()], ['blockers', readyBlockersQuery()], ['superseded', readySupersededQuery()],
+    ['human', readyHumanBlockersQuery()], ['context', readyContextQuery()], ['condition', readyConditionBlockersQuery()],
+    ...(shippedShas ? [['implementedBy', readyImplementedByQuery()]] : []),
+  ];
+  const branch = ([kind, q]) => {
+    if (!/^SELECT /.test(q)) throw new Error(`#1644: a ready sub-query must start with SELECT: ${q.slice(0, 40)}`);
+    return `{ ${q.replace(/^SELECT /, `SELECT ("${kind}" AS ?readyKind) `)} }`;
+  };
+  const rows = await select(`SELECT * WHERE { ${kinds.map(branch).join(' UNION ')} }`);
+  const by = Object.fromEntries(kinds.map(([kind]) => [kind, []]));
+  for (const r of rows) {
+    const { readyKind, ...rest } = r;
+    if (by[readyKind]) by[readyKind].push(rest);
+  }
+  return computeReady(
+    by.facts, by.blockers, by.superseded, by.context, by.human, by.condition,
+    { implementedByRows: shippedShas ? by.implementedBy : null, shippedShas },
+  );
+}
+
 export function readyFromStore(store, { shippedShas = null } = {}) {
   const facts = pagedRows(store, readyFactsQuery());
   const blockers = pagedRows(store, readyBlockersQuery());

@@ -2176,6 +2176,12 @@ async function handleGraphNeighbors(req, res) {
  * at start: flipping it is a restart, and flipping it back is the revert.
  */
 const GRAPH_QUERY_SOURCE = process.env.SCRUM_GRAPH_QUERY_SOURCE === 'executor' ? 'executor' : 'replica';
+// #1644 — WHICH STORE ANSWERS board_ready (GET /api/ready). `executor` reads the executor's public dataset in ONE query
+// (core/ready-query.mjs readyFromExecutor), so the answer is one real moment; unset is today's in-process path.
+const READY_SOURCE = process.env.SCRUM_GRAPH_READY_SOURCE === 'executor' ? 'executor' : 'replica';
+if (READY_SOURCE === 'executor' && !process.env.SCRUM_GRAPH_EXECUTOR_URL) {
+  throw new Error('#1644: SCRUM_GRAPH_READY_SOURCE=executor requires SCRUM_GRAPH_EXECUTOR_URL');
+}
 if (GRAPH_QUERY_SOURCE === 'executor' && !process.env.SCRUM_GRAPH_EXECUTOR_URL) {
   throw new Error('#1570: SCRUM_GRAPH_QUERY_SOURCE=executor requires SCRUM_GRAPH_EXECUTOR_URL');
 }
@@ -7422,7 +7428,22 @@ function deployedShaSet() {
 async function handleReady(req, res) {
   try {
     const url = new URL(req.url, 'http://localhost');
-    const { readyFromStore, pageReady, READY_EXPLAIN } = await loadGraphModules();
+    const { readyFromStore, readyFromExecutor, selectExecutorAll, pageReady, READY_EXPLAIN } = await loadGraphModules();
+    if (READY_SOURCE === 'executor') {
+      // #1644 — one query, one snapshot, from the executor. No replica, so no replica watermark: the field is absent on
+      // this path rather than describing a projection this answer was not read from. Any executor failure is a 503 with
+      // a code, never a 200 with an empty or partial queue.
+      let verdicts;
+      try {
+        verdicts = await readyFromExecutor((q) => selectExecutorAll(process.env.SCRUM_GRAPH_EXECUTOR_URL, q, { timeoutMs: 20_000 }), { shippedShas: deployedShaSet() });
+      } catch (e) {
+        if (e.code === 'GRAPH_UNAVAILABLE' || e.code === 'ROW_CAP') return sendJSON(res, 503, { error: e.message, code: 'READY_SOURCE_UNAVAILABLE' });
+        throw e;
+      }
+      const explainX = url.searchParams.get('explain');
+      if (explainX != null && explainX !== '') return sendJSON(res, 200, READY_EXPLAIN(verdicts, explainX));
+      return sendJSON(res, 200, pageReady(verdicts, { limit: url.searchParams.get('limit') ?? undefined }));
+    }
     // #949 (scope extension) — see the note on /api/checks. A readiness verdict
     // is acted on, not re-run.
     const { store, projectedThrough } = await warmGraphStore();

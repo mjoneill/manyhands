@@ -2651,6 +2651,35 @@ export const EXECUTOR_ONLY_VOCABULARY = new Set([
 const EXECUTOR_VOCABULARY = new Set([...GRAPH_VOCABULARY, ...EXECUTOR_ONLY_VOCABULARY]);
 const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
 const RDF_LANG_STRING = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#langString';
+/**
+ * #1644 — an INTERNAL read of the executor's PUBLIC dataset with no row ceiling: for the server's own complete
+ * computations (board_ready), never for a caller's query. LIMIT_CEILING protects callers from an unbounded answer; a
+ * computation that needs the whole answer must not be silently cut to 1,000 rows, so instead of a ceiling it has a
+ * runaway guard that REFUSES (code ROW_CAP) rather than returning part. Rows are shaped exactly as queryGraph's are
+ * (NamedNode → shortened IRI, literal → its value), so the same computation runs on either source.
+ */
+export async function selectExecutorAll(executorUrl, sparql, { maxRows = 500_000, timeoutMs = 30_000, fetchImpl = fetch } = {}) {
+  let res; let raw;
+  try {
+    res = await fetchImpl(`${executorUrl}/query?dataset=public`, { method: 'POST', body: `${SPARQL_PREFIXES}\n${sparql}`, signal: AbortSignal.timeout(timeoutMs) });
+    raw = await res.text();
+  } catch (e) {
+    throw Object.assign(new Error(`the executor could not be reached: ${e?.cause?.code || e?.name || e?.message}`), { code: 'GRAPH_UNAVAILABLE' });
+  }
+  let j = null; try { j = JSON.parse(raw); } catch { /* reported below */ }
+  if (res.status !== 200 || !Array.isArray(j?.results?.bindings)) {
+    throw Object.assign(new Error(`the executor did not answer with a result set: HTTP ${res.status} ${String(j?.error ?? raw).slice(0, 200)}`), { code: 'GRAPH_UNAVAILABLE' });
+  }
+  if (j.results.bindings.length > maxRows) {
+    throw Object.assign(new Error(`the answer has more than ${maxRows} rows; refusing a partial read`), { code: 'ROW_CAP' });
+  }
+  return j.results.bindings.map((b) => {
+    const row = {};
+    for (const [k, v] of Object.entries(b)) row[k] = v.type === 'uri' ? shorten(v.value) : v.value;
+    return row;
+  });
+}
+
 export async function queryGraphExecutor(executorUrl, sparql, { limit, terms = false, timeoutMs = 30_000, fetchImpl = fetch } = {}) {
   const { text, wanted } = prepareGraphQuery(sparql, { limit, vocabulary: EXECUTOR_VOCABULARY });
   const t = performance.now();
