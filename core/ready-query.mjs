@@ -558,7 +558,10 @@ export async function readyFromExecutor(select, { shippedShas = null } = {}) {
   const by = Object.fromEntries(kinds.map(([kind]) => [kind, []]));
   for (const r of rows) {
     const { readyKind, ...rest } = r;
-    if (by[readyKind]) by[readyKind].push(rest);
+    // A row with no kind, or a kind this query never asked for, is a DAMAGED answer: refuse it loudly rather than
+    // drop it, or a broken response could become a successful, silently partial queue.
+    if (!by[readyKind]) throw Object.assign(new Error(`#1644: a ready row carries ${readyKind === undefined ? 'no readyKind' : `an unknown readyKind ${JSON.stringify(String(readyKind).slice(0, 40))}`}; refusing a partial queue`), { code: 'GRAPH_UNAVAILABLE' });
+    by[readyKind].push(rest);
   }
   return computeReady(
     by.facts, by.blockers, by.superseded, by.context, by.human, by.condition,
