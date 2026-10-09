@@ -7441,8 +7441,8 @@ async function handleReady(req, res) {
         throw e;
       }
       const explainX = url.searchParams.get('explain');
-      if (explainX != null && explainX !== '') return sendJSON(res, 200, READY_EXPLAIN(verdicts, explainX));
-      return sendJSON(res, 200, pageReady(verdicts, { limit: url.searchParams.get('limit') ?? undefined }));
+      if (explainX != null && explainX !== '') return sendJSON(res, 200, { ...READY_EXPLAIN(verdicts, explainX), source: 'executor' });
+      return sendJSON(res, 200, { ...pageReady(verdicts, { limit: url.searchParams.get('limit') ?? undefined }), source: 'executor' });
     }
     // #949 (scope extension) — see the note on /api/checks. A readiness verdict
     // is acted on, not re-run.
@@ -7467,9 +7467,10 @@ async function handleReady(req, res) {
     // nobody checked.
     const watermark = graphWatermark(projectedThrough);
     if (explain != null && explain !== '') {
-      return sendJSON(res, 200, { ...READY_EXPLAIN(verdicts, explain), watermark });
+      return sendJSON(res, 200, { ...READY_EXPLAIN(verdicts, explain), watermark, source: 'replica' });
     }
-    sendJSON(res, 200, { ...pageReady(verdicts, { limit: url.searchParams.get('limit') ?? undefined }), watermark });
+    // #1644 — every answer names the store it was read from, so a comparison can check its legs' sources from the response
+    sendJSON(res, 200, { ...pageReady(verdicts, { limit: url.searchParams.get('limit') ?? undefined }), watermark, source: 'replica' });
   } catch (e) {
     if (e.code === 'GRAPH_DEPS_MISSING') return sendJSON(res, 503, { error: e.message, code: e.code });
     if (e.code === 'UNKNOWN_CARD') return sendJSON(res, 404, { error: e.message, code: e.code });
