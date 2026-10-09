@@ -24,6 +24,12 @@
  * LIMIT OF A ONE-QUERY BUILD: if the reader issues ONE readiness query the sweep has only its two ends (the write before it, the write after it); atomicity DURING that one query is the executor's snapshot
  * property, which these rows do not exercise (the naive control shows the multi-request hazard is real; nothing here makes a write land inside a single running query).
  *
+ * S3  THE SINGLE QUERY'S OWN SNAPSHOT (the review's first point: atomicity DURING one query is the core promise, so it is shown, not assumed). At the EXECUTOR, no REST, no builder code: a deliberately slow
+ *     read (a 1,200 x 1,200 cross count with a string filter, about 2 s) is running; while it runs, ONE update that removes the type triple of 100 cards commits. The count must be the full BEFORE
+ *     (1,200^2) or the full AFTER (1,100^2), never a torn number in between, in three rounds. Preconditions: the read is long enough (>= 800 ms alone); the update STARTED while the read was in flight.
+ *     The row records which of the two mechanisms the engine used (the write COMMITTED while the read ran = snapshot isolation; the write WAITED until the read finished = serialization) and the
+ *     pyoxigraph version, because the answer belongs to that version.
+ *
  * NOT covered, by name: writes of other kinds mid-read (a conversation post); a batch BEFORE the card write (it would have no event to project); two card writers; the
  * shipped-commits argument; MCP-level latency (transport adds its own); a board larger than 1,500 cards; production's real data shape (the fixture is synthetic).
  */
@@ -32,11 +38,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { SKIP, READY_ENV, DSID, ROSTER_FILE, card, makeBoardFixture, startRestServer, startProxy, migrate, tmpStore, startExecutor, startExecutorOnCopy, killExecutor } from './helpers/ready-world-1644.mjs';
 import { queryGraphExecutor } from '../core/graph-replica.mjs';
 import { projectBatch } from '../core/activity-projector.mjs';
 import * as rq from '../core/ready-query.mjs';
+import { PY as PY_FOR_S3 } from './helpers/graph-executor-proc.mjs';
 
 const relCard = (i, N) => card(i, `card-${i}`, {
   priority: 'p2',
@@ -187,4 +194,37 @@ test('S2-CONTROL the NAIVE reader under the same two-writer sweep (k = the page 
   const valid = new Set([sig(s.before.answer), sig(s.after.answer)]); const mixed = s.results.filter((r) => !valid.has(sig(r.answer)));
   console.log(`S2-CONTROL naive reader, card delete before k=2 plus a projector batch before m=2..${s.n}: mixtures at ${mixed.map((r) => `m=${r.m}`).join(', ') || 'none'} of ${s.results.length} runs`);
   assert.ok(mixed.length >= 1, 'the naive reader must still be caught when a second writer is also active');
+});
+
+// ---- S3: the single query's own snapshot, at the executor ----
+test('S3 SNAPSHOT WITHIN ONE QUERY: a write that commits while a slow read runs never produces a torn count (snapshot isolation or serialization, said which, for this pyoxigraph)', { skip: SKIP, timeout: 600000 }, async () => {
+  const ver = spawnSync(PY_FOR_S3, ['-c', 'import pyoxigraph; print(pyoxigraph.__version__)'], { encoding: 'utf8' }).stdout.trim();
+  const sd = await seedOnce();
+  const store = fs.mkdtempSync(path.join(os.tmpdir(), 'r44s3-')); fs.cpSync(sd.store, store, { recursive: true });
+  const exec = await startExecutorOnCopy({ store, datasetId: DSID });
+  const CW = '<https://schema.org/CreativeWork>';
+  const READ = `SELECT (COUNT(*) AS ?n) WHERE { ?a a ${CW} . ?b a ${CW} . FILTER(STRLEN(CONCAT(STR(?a), STR(?b))) > 0) }`;
+  const count = async () => { const t = performance.now(); const r = await fetch(`${exec.baseUrl}/query`, { method: 'POST', body: READ, signal: AbortSignal.timeout(120000) }); const j = await r.json(); return { n: Number(j.results.bindings[0].n.value), ms: performance.now() - t }; };
+  try {
+    const alone = await count();
+    assert.ok(alone.ms >= 800, `PRECONDITION: the slow read must be slow enough for a write to land inside it (${Math.round(alone.ms)} ms alone, ${alone.n} rows)`);
+    let have = alone.n; const rounds = []; assert.equal(have, sd.N * sd.N, 'PRECONDITION: the read counts the full cross product before any write');
+    for (let round = 1; round <= 3; round++) {
+      const epoch = (await (await fetch(`${exec.baseUrl}/health`)).json()).epoch;
+      const victims = Array.from({ length: 100 }, (_, i) => `"${sd.N - (round - 1) * 100 - i}"`).join(' ');
+      const UPDATE = `DELETE { ?c a ${CW} } WHERE { ?c a ${CW} ; <https://schema.org/identifier> ?id . VALUES ?id { ${victims} } }`;
+      const before = have; const after = (before === sd.N * sd.N ? (sd.N - 100) * (sd.N - 100) : (Math.sqrt(before) - 100) ** 2);
+      const t0 = performance.now(); const reading = count();
+      await new Promise((r) => setTimeout(r, 250));
+      const w0 = performance.now(); const wr = await fetch(`${exec.baseUrl}/update`, { method: 'POST', body: UPDATE, headers: { 'content-type': 'application/sparql-update', 'x-op-id': `urn:ex:op/r44s3/${round}/${Date.now()}`, ...(epoch != null ? { 'x-epoch': String(epoch) } : {}) }, signal: AbortSignal.timeout(120000) }); const wDone = performance.now(); await wr.text();
+      const got = await reading; const readDone = performance.now();
+      assert.equal(wr.status, 200, `PRECONDITION: the update is accepted (${wr.status})`);
+      assert.ok(w0 - t0 < got.ms, `PRECONDITION: the update STARTED while the read was in flight (started ${Math.round(w0 - t0)} ms in, read took ${Math.round(got.ms)} ms)`);
+      const mechanism = wDone < readDone - 5 ? 'snapshot isolation (the write committed while the read was still running)' : 'serialization (the write waited for the read)';
+      assert.ok(got.n === before || got.n === after, `round ${round}: a TORN read: ${got.n} is neither BEFORE (${before}) nor AFTER (${after}); ${mechanism}`);
+      const settled = await count(); assert.equal(settled.n, after, `round ${round}: after both finished the count is AFTER (the write really landed)`);
+      rounds.push(`${round}: read ${got.n === before ? 'BEFORE' : 'AFTER'} (${Math.round(got.ms)} ms), ${mechanism}`); have = after;
+    }
+    console.log(`S3 pyoxigraph ${ver}; ${rounds.join(' | ')}`);
+  } finally { await killExecutor(exec); }
 });
