@@ -15,7 +15,7 @@
  *   R0  CONTROL, switch UNSET: GET /api/ready gives the hand-derived verdicts, and the executor is NOT asked (the proxy counts 0 queries): the oracle is the old path.
  *   R1  PARITY, switch ON: the executor IS asked (>= 1 query), and ready, readyTotal and excluded equal R0's answer; the response has the same keys.
  *   R2  the queue is LIVE: closing the blocker through the API admits the waiter on the next call with the switch on: hand-derived [3, 1]; #4 leaves with column:done.
- *   R3  `explain` with the switch on: a ready card, an excluded card and an unknown card answer exactly as the switch-off path does (same status, same body).
+ *   R3  `explain` with the switch on: a ready card, an excluded card and an unknown card answer exactly as the switch-off path does (same status, same body, the replica `watermark` aside as in R1 and R6).
  *   R4  the executor CANNOT BE READ: the answer is a loud failure (HTTP 503 with an error code), never a 200 with an empty or partial `ready`. CONTROL: the same call with the executor up is 200 with ready [1, 4].
  *   R5  an executor that answers GARBAGE or times out (a proxy returning a truncated body / holding the request) is also a loud failure, not a partial queue.
  *   R7  AUTHORITY (the executor's verdict is USED, not only contacted): the proxy rewrites the executor's answer so that card #1 reads column done; with the switch ON the queue must exclude #1
@@ -71,7 +71,8 @@ test('R3 explain with the switch on answers exactly as the old path does: a read
     await w.start(); const old = {}; for (const id of [1, 3, 999]) old[id] = await w.get(`/api/ready?explain=${id}`);
     assert.equal(old[1].status, 200); assert.equal(old[3].status, 200); assert.notEqual(old[999].status, 200, 'CONTROL: the old path refuses an unknown card');
     await w.start({ ready: true });
-    for (const id of [1, 3, 999]) { const r = await readyCounted(w, `/api/ready?explain=${id}`); assert.equal(r.status, old[id].status, `explain ${id}: same status`); assert.deepEqual(r.json, old[id].json, `explain ${id}: same body`); if (id !== 999) assert.ok(r.queries >= 1, `explain ${id} read the executor`); }
+    for (const id of [1, 3, 999]) { const r = await readyCounted(w, `/api/ready?explain=${id}`); assert.equal(r.status, old[id].status, `explain ${id}: same status`); const noWm = (j) => { if (!j || typeof j !== 'object') return j; const { watermark, ...rest } = j; return rest; };
+      assert.deepEqual(noWm(r.json), noWm(old[id].json), `explain ${id}: same body, the replica watermark aside (a statement about the replica projection; the executor path may drop or replace it, as R1 and R6 allow)`); if (id !== 999) assert.ok(r.queries >= 1, `explain ${id} read the executor`); }
   });
 });
 
