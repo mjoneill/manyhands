@@ -28,6 +28,7 @@
   "tests/collection-unknown-1624.test.mjs",
   "tests/collection-write-1624.test.mjs",
   "tests/collections-migrate-retire-k13.test.mjs",
+  "tests/columns-graph-c1.test.mjs",
   "tests/commons-page-poll-p7.test.mjs",
   "tests/conversations-list-r1.test.mjs",
   "tests/copy-guard-bytes-1577.test.mjs",
