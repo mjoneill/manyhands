@@ -57,6 +57,7 @@
   "tests/graph-post-discovery-r3-idle.test.mjs",
   "tests/graph-post-discovery-r3.test.mjs",
   "tests/graph-query-logborn-1570.test.mjs",
+  "tests/graph-query-source-1658.test.mjs",
   "tests/graph-slice-routes.test.mjs",
   "tests/graph-store-backup-1559.test.mjs",
   "tests/graph-store-backup-schedule-1566.test.mjs",
