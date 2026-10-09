@@ -1016,6 +1016,26 @@ let EXECUTOR_METER = null;
  * run before a handler's own context exists, and changes nothing about how a request reads. */
 const meterRoute = new AsyncLocalStorage();
 
+// #1659 — where a slow card write's time went. The write lock times four phases into the request's meterRoute store
+// (lockWait → refresh → executorUpdate → postCommit, summed over a conflict's retry; the handler's own staging is the
+// unnamed rest), and when the response finishes ONE line is written for a request that committed cards and took at least
+// the threshold. Integers floored from one clock, so the phases never sum past the total; no content, no query text.
+const CARD_WRITE_SLOW_MS = Number(process.env.SCRUM_CARD_WRITE_SLOW_MS ?? process.env.SCRUM_EXECUTOR_METER_SLOW_MS ?? 1000);
+const cardWritePhases = () => {
+  const st = meterRoute.getStore();
+  return st ? (st.cardWrite ??= { lockWait: 0, refresh: 0, executorUpdate: 0, postCommit: 0, attempts: 0, cards: false }) : null;
+};
+function logCardWriteIfSlow(st) {
+  const cw = st?.cardWrite;
+  if (!cw?.cards || st.t0 == null) return;
+  const total = Math.floor(performance.now() - st.t0);
+  if (total < CARD_WRITE_SLOW_MS) return;
+  const ms = (n) => Math.max(0, Math.floor(n));
+  const g = READ_GATE ? READ_GATE.stats() : null;
+  const gate = g ? `running:${Number(g.running) || 0}/waiting:${Number(g.waiting) || 0}/lost:${Number(g.lost) || 0}` : '-';
+  console.error(`${new Date().toISOString()} card-write slow: ${total}ms rid=${st.rid || '-'} lockWait=${ms(cw.lockWait)} refresh=${ms(cw.refresh)} executorUpdate=${ms(cw.executorUpdate)} postCommit=${ms(cw.postCommit)} attempts=${cw.attempts} readGate=${gate}`);
+}
+
 // #1570 — what a request-shape log line may echo: the PATH and the parameter NAMES, never a value (a query string can
 // carry a token or a secret), every echoed piece reduced to a safe token so a crafted name can't break or forge a line.
 const logToken = (v) => String(v ?? '').replace(/[^A-Za-z0-9._/:+()-]/g, '_').slice(0, 64) || '-';
@@ -7505,7 +7525,10 @@ async function handleReady(req, res) {
 // concurrent PATCH requests cannot interleave their read-modify-write.
 let _writeLock = Promise.resolve();
 function withWriteLock(fn) {
-  const run = (CARDS_UNIT || COLLECTIONS || COLUMNS) ? () => lockedWithCards(fn) : fn;
+  const locked = (CARDS_UNIT || COLLECTIONS || COLUMNS) ? () => lockedWithCards(fn) : fn;
+  // #1659 — lockWait: from asking for the lock to holding it (summed if a request takes the lock more than once)
+  const asked = performance.now();
+  const run = () => { const cw = cardWritePhases(); if (cw) cw.lockWait += performance.now() - asked; return locked(); };
   const next = _writeLock.then(() => run(), () => run());
   _writeLock = next.catch(() => {});
   return next;
@@ -7522,7 +7545,11 @@ const markGraphUnavailable = (e) => {
   if (e && (e.code === 'CARDS_UNAVAILABLE' || e.code === 'COLLECTIONS_UNAVAILABLE')) { const ctx = requestContext.getStore(); if (ctx) ctx.graphUnavailable = e.message; }
 };
 async function lockedWithCards(fn) {
+  const cw = cardWritePhases();   // #1659 — null outside a request (boot, background work): nothing is timed
+  const since = (t0, phase) => { if (cw) cw[phase] += performance.now() - t0; };
   for (let attempt = 1; ; attempt++) {
+    if (cw) cw.attempts++;
+    const tRefresh = performance.now();
     try {
       if (CARDS_UNIT) await CARDS.ensureFresh();
       if (COLLECTIONS) await COLLECTIONS.ensureFresh();
@@ -7531,7 +7558,7 @@ async function lockedWithCards(fn) {
       // the cache could not be reloaded from the graph: the same "executor not answering" as a failed commit
       markGraphUnavailable(e);
       throw e;
-    }
+    } finally { since(tRefresh, 'refresh'); }
     const staged = [];
     const result = await cardWriteContext.run(staged, () => fn());
     try {
@@ -7546,8 +7573,10 @@ async function lockedWithCards(fn) {
         const collParts = COLLECTIONS && data[FILE_COLLS] ? COLLECTIONS.plan(data) : [];
         // #1639 — and the columns it changed (a column delete moves its cards: both halves in ONE guarded update).
         const colParts = COLUMNS && data[FILE_COLUMNS] ? COLUMNS.plan(data.columns) : [];
+        const tUpdate = performance.now();
         try {
           if (CARDS_UNIT && data[FILE_CARDS]) {
+            if (cw) cw.cards = true;   // #1659 — this request writes cards, so a slow one gets a line
             const ob = outboxOf(data);
             const pending = Object.entries(ob.origins).filter(([mid, o]) => !data[FILE_ORIGINS]?.has(mid) && o?.origin?.cardId)
               .map(([mid, o]) => ({ cardId: o.origin.cardId, mutationId: mid, json: JSON.stringify({ origin: o, entries: Object.fromEntries(Object.entries(ob.entries).filter(([, e]) => e?.mutationId === mid)) }) }));
@@ -7566,8 +7595,9 @@ async function lockedWithCards(fn) {
           // the outcome is unknown or the executor is away: say so to the response layer (see sendJSON)
           if (e && (e.code === 'COLLECTIONS_UNAVAILABLE' || e.code === 'CARDS_UNAVAILABLE')) { const ctx = requestContext.getStore(); if (ctx) ctx.graphUnavailable = e.message; }
           throw e;
-        }
-        writeDocument(data, events);
+        } finally { since(tUpdate, 'executorUpdate'); }
+        const tDocument = performance.now();
+        try { writeDocument(data, events); } finally { since(tDocument, 'postCommit'); }
       }
       return result;
     } catch (e) {
@@ -12831,7 +12861,9 @@ function routeApi(method, urlPath, req, res) {
     if (r.method !== method) continue;
     const m = urlPath.match(r.re);
     // #1570 — every executor call made for this request, readiness checks included, is metered under its route pattern.
-    if (m) return meterRoute.run({ route: `${method} ${r.re.source}`, rid: crypto.randomUUID(), caller: req.headers['user-agent'], peer: req.socket?.remotePort }, () => {
+    if (m) return meterRoute.run({ route: `${method} ${r.re.source}`, rid: crypto.randomUUID(), caller: req.headers['user-agent'], peer: req.socket?.remotePort, t0: performance.now() }, () => {
+      const st = meterRoute.getStore();
+      res.once('finish', () => logCardWriteIfSlow(st));   // #1659
       // #715 — the method decides the read kind for everything this handler
       // does, including after its awaits.
       // ⛔ GET alone. A POST that looks read-only is not: search with a reader
