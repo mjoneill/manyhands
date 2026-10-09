@@ -12,6 +12,10 @@
  *   - one line per slow call (>= slowMs) with the request body's sha256 prefix, which matches the executor's own log
  *     line for that body. NEVER the query text: a body can carry card or post content.
  *   - one line per 503 the server sends for an unreadable graph, with the loop delay max so far this minute.
+ *   - on both of those lines, WHO asked: `caller=` (the request's User-Agent, sanitised to [A-Za-z0-9._/:+()-], at most 64
+ *     characters) and `peer=` (the socket's remote port, so `lsof -iTCP:<port>` names the process while the connection
+ *     lives, since every Node client's User-Agent is just "node"). Never in the minute line's buckets: callers are
+ *     unbounded, and the minute line must stay bounded.
  *
  * It changes no behaviour: it observes calls that happen anyway, and a meter failure is swallowed.
  */
@@ -20,8 +24,20 @@ import { monitorEventLoopDelay } from 'node:perf_hooks';
 
 const ms = (ns) => Math.round(ns / 1e6);
 
-export function createExecutorMeter({ routeOf = () => 'background', ridOf = () => null, extras = () => '', slowMs = 1000, log = (line) => console.error(line), now = () => new Date(), loopResolutionMs = 20, loopFactory = () => monitorEventLoopDelay({ resolution: loopResolutionMs }) } = {}) {
+export function createExecutorMeter({ routeOf = () => 'background', ridOf = () => null, callerOf = () => null, peerOf = () => null, extras = () => '', slowMs = 1000, log = (line) => console.error(line), now = () => new Date(), loopResolutionMs = 20, loopFactory = () => monitorEventLoopDelay({ resolution: loopResolutionMs }) } = {}) {
   let buckets = new Map();
+  // #1570 — who asked, as a single safe token: anything outside the allowed set becomes "_" (so a header can't forge a
+  // field or break the line), at most 64 characters, "-" when absent or when reading it throws.
+  const callerToken = () => {
+    try {
+      const c = callerOf();
+      if (c == null || c === '') return '-';
+      return String(c).replace(/[^A-Za-z0-9._/:+()-]/g, '_').slice(0, 64) || '-';
+    } catch { return '-'; }
+  };
+  const peerToken = () => {
+    try { const p = peerOf(); return Number.isInteger(p) && p >= 1 && p <= 65535 ? String(p) : '-'; } catch { return '-'; }
+  };
   // #1570 — the running totals the daily "still running" post reports (owner decision, 2026-10-07: so nobody forgets it is out there).
   let day = { since: now(), calls: 0, slow: 0, unavailable: 0, loopMaxMs: 0 };
   // The worst loop delay seen AFTER the outstanding snapshot was taken: it belongs to the next post, so an ack keeps it.
@@ -42,7 +58,7 @@ export function createExecutorMeter({ routeOf = () => 'background', ridOf = () =
       if (elapsedMs >= slowMs) {
         day.slow += 1;
         const sha = typeof body === 'string' ? createHash('sha256').update(body).digest('hex').slice(0, 16) : '-';
-        log(`${now().toISOString()} executor-meter slow: ${Math.round(elapsedMs)}ms label=${label} kind=${kind} outcome=${outcome} route=${route} rid=${ridOf() || '-'} body=${sha}`);
+        log(`${now().toISOString()} executor-meter slow: ${Math.round(elapsedMs)}ms label=${label} kind=${kind} outcome=${outcome} route=${route} rid=${ridOf() || '-'} caller=${callerToken()} peer=${peerToken()} body=${sha}`);
       }
     } catch { /* a meter never breaks the call it observes */ }
   }
@@ -57,7 +73,7 @@ export function createExecutorMeter({ routeOf = () => 'background', ridOf = () =
     try {
       day.unavailable += 1;
       const l = loopNow();
-      log(`${now().toISOString()} executor-meter 503: code=${code} route=${routeOf() || 'background'} rid=${ridOf() || '-'} loopMaxThisMinuteMs=${l ? l.max : 'n/a'}`);
+      log(`${now().toISOString()} executor-meter 503: code=${code} route=${routeOf() || 'background'} rid=${ridOf() || '-'} caller=${callerToken()} peer=${peerToken()} loopMaxThisMinuteMs=${l ? l.max : 'n/a'}`);
     } catch { /* never breaks the response */ }
   }
 
