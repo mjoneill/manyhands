@@ -17,9 +17,11 @@
  *             limits, evidence }. verdict = CURRENT detected health only.
  *   LIMITS  derived from the INSTALLED configuration, never defaulted:
  *             stateMin    = stateStalenessIntervals x monitor StartInterval
- *             copyMin     = tick StartInterval + checkpoint + copy + verify of the LAST SUCCESSFUL
- *                           tick in DEST/backup-schedule-state.json (the monitor's T4 derivation,
- *                           computed here from DEST's own record, not from the deliverer's file)
+ *             copyMin     = tick StartInterval + max(checkpoint + copy + verify of the LAST SUCCESSFUL
+ *                           tick in DEST/backup-schedule-state.json, FLOOR) + JITTER, FLOOR = JITTER =
+ *                           60 s (the monitor's T4 derivation plus the #1590 tolerance, computed here
+ *                           from DEST's own record and this file's own constants, not from the
+ *                           deliverer's file or the monitor's code)
  *             snapshotMin = freshnessK x this watcher's own StartInterval (what a consumer of the
  *                           status file uses with statusFresh to see that THIS job has died)
  *           The plists are found in --plist-dir by the script named in ProgramArguments; only
@@ -50,6 +52,8 @@ import { fileURLToPath } from 'node:url';
 import { scanDest, stampOf, STATE_FILE } from './graph-store-backup-schedule.mjs';
 
 const MIN = 60_000, SEC = 1000;
+// #1590 — the copy limit's tolerance, defined HERE (not imported from the monitor): an independent check keeps its own copy.
+const COPY_FLOOR_MS = 60 * SEC, COPY_JITTER_MS = 60 * SEC;
 export const SCHEMA = 1;
 export const SCRIPTS = Object.freeze({
   'graph-store-backup-schedule.mjs': 'tick',
@@ -290,8 +294,8 @@ export function evaluate({ dest, alertState, plistDir, configFile, statusFile, a
     const m = sched.ok ? lastGoodTimings(sched.value) : null;
     if (!m) hit('timing-missing', sched.ok ? `${STATE_FILE} records no successful tick with finite timings: no copy limit can be derived` : `${STATE_FILE} unreadable (${sched.error}): no copy limit can be derived`);
     else if (iv.tick) {
-      copyLimitMs = iv.tick * SEC + m.checkpointMs + m.copyMs + m.verifyMs;
-      evidence.push(`copy limit = tick ${iv.tick} s + checkpoint ${m.checkpointMs} + copy ${m.copyMs} + verify ${m.verifyMs} ms (last successful tick ${m.at})`);
+      copyLimitMs = iv.tick * SEC + Math.max(m.checkpointMs + m.copyMs + m.verifyMs, COPY_FLOOR_MS) + COPY_JITTER_MS;
+      evidence.push(`copy limit = tick ${iv.tick} s + max(checkpoint ${m.checkpointMs} + copy ${m.copyMs} + verify ${m.verifyMs} ms, ${COPY_FLOOR_MS} ms floor) + ${COPY_JITTER_MS} ms jitter (last successful tick ${m.at})`);
       if (newest && nowMs - newest.atMs > copyLimitMs) hit('copy-stale', `newest verified copy ${newest.name} is ${newestCopyMin.toFixed(2)} min old > ${copyLimitMs / MIN} min`);
     }
   }
