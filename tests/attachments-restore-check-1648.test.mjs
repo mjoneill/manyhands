@@ -34,6 +34,7 @@
  *   A16 an entry the manifest NAMES that is a symlink (or a directory) is not a restored file: file-missing for that name, and the link is NEVER FOLLOWED (a link to a live file with the right bytes must not pass the hash).
  *   A17 manifest SHAPE, one case per guard: a fence whose readings are malformed, a files field that is not an array (schema correct), and an empty manifest next to real references each fail with their own code.
  *   A18 the CLI on unreadable input: a manifest file that is not JSON, and a refs file that does not exist, each exit 1 with a last stdout line that parses (never a crash with no result).
+ *   A19 a SIMULATED swap after the listing: the directory listing says a1.png is a regular file but the path on disk is a symlink to a file holding exactly the right bytes (and, second, a directory): the open must refuse it as file-missing, never read through the link. Proves the OPEN refuses a link; it is NOT a timing test and says nothing about a real concurrent race.
  *
  * NOT COVERED, by name: how the backup job copies the directory or takes the manifest (the fence is checked only as evidence in the manifest, not as a property of the job); reading the references
  * from a restored executor store (needs pyoxigraph; a separate row once the build has it); the event log, the work ledger and the rest of #1648's record set; restore time.
@@ -222,4 +223,22 @@ test('A18 the CLI on unreadable input: a manifest that is not JSON and a refs fi
   const b = go(mf, path.join(w.dir, 'no-such-refs.json')); assert.equal(b.status, 1, b.stderr);
   const jb = JSON.parse(b.stdout.trim().split('\n').pop()); assert.equal(jb.ok, false); assert.ok(jb.failures.some((f) => f.code === 'no-references'), b.stdout);
   assert.equal(go(mf, rf).status, 0, 'CONTROL: the same two valid files exit 0');
+});
+
+test('A19 a SIMULATED swap after the listing: the listing says "regular file", the path is a symlink to the right bytes (or a directory): refused at the open, never read through', () => {
+  const realReaddir = fs.readdirSync;
+  const lie = (restored, names) => { fs.readdirSync = function (dir, opts) { const out = realReaddir.call(fs, dir, opts); if (dir !== restored) return out;
+    return out.map((e) => (names.includes(e.name) ? { name: e.name, isFile: () => true, isDirectory: () => false, isSymbolicLink: () => false } : e)); }; };
+  try {
+    const w = world(); const target = path.join(w.dir, 'live-copy.png'); fs.writeFileSync(target, w.files['a1.png']);
+    fs.rmSync(path.join(w.restored, 'a1.png')); fs.symlinkSync(target, path.join(w.restored, 'a1.png'));
+    lie(w.restored, ['a1.png']);
+    const r = run(w); assert.equal(r.ok, false, 'a link to the exact right bytes must not verify: ' + JSON.stringify(r)); assert.ok(has(r, 'file-missing', 'a1.png'), JSON.stringify(r.failures));
+    assert.ok(!has(r, 'hash-mismatch', 'a1.png') && !has(r, 'size-mismatch', 'a1.png'), 'it was refused at the open, not read and compared');
+    const w2 = world(); fs.rmSync(path.join(w2.restored, 'b2.jpg')); fs.mkdirSync(path.join(w2.restored, 'b2.jpg'));
+    lie(w2.restored, ['b2.jpg']);
+    const r2 = run(w2); assert.equal(r2.ok, false, 'a directory swapped in'); assert.ok(has(r2, 'file-missing', 'b2.jpg'), JSON.stringify(r2.failures));
+    // CONTROL: the same lying listing over an honest regular file changes nothing
+    const w3 = world(); lie(w3.restored, ['a1.png']); assert.equal(run(w3).ok, true, 'CONTROL: an honest file under the same wrapper passes');
+  } finally { fs.readdirSync = realReaddir; }
 });
