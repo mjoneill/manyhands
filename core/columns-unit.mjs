@@ -18,8 +18,12 @@ import { COLUMN_IRI_BASE } from './jsonld.mjs';
 export const COLUMNS_KEY = 'columns';
 export const COLUMNS_FAMILY = Object.freeze({ key: COLUMNS_KEY, routes: ['/api/columns'] });
 
-/** {id, name, order, …rest} → the typed node the graph stores (the document's columnToNode). */
-export const columnToNode = ({ id, name, order, ...rest }) => ({ '@type': 'scrum:Column', '@id': COLUMN_IRI_BASE + id, identifier: id, name, 'scrum:order': order, ...rest });
+/**
+ * {id, name, order, …rest} → the typed node the graph stores (the document's columnToNode). The IRI carries the id
+ * PERCENT-ENCODED: the file accepts any string as an id (a space, a slash, `<`), and an IRI does not. The id itself is
+ * kept whole in `identifier`, which is what a read gives back; for a plain id (the board's four) the IRI is unchanged.
+ */
+export const columnToNode = ({ id, name, order, ...rest }) => ({ '@type': 'scrum:Column', '@id': COLUMN_IRI_BASE + encodeURIComponent(id), identifier: id, name, 'scrum:order': order, ...rest });
 /** The typed node → the plain column the board and the wire use (the document's nodeToColumn). */
 export const nodeToColumn = ({ '@type': _t, '@id': _i, identifier, name, 'scrum:order': order, ...rest }) => ({ id: identifier, name, order, ...rest });
 
