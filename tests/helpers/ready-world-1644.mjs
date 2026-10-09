@@ -35,6 +35,27 @@ export const smallBoard = () => makeBoardFixture({
   nextShortId: 6, conversations: [],
 });
 
+export const richBoard = () => makeBoardFixture({
+  cards: [
+    card(1, 'free', { priority: 'p2', relationships: { relatedTo: [4], blockedBy: [], supersedes: [], derivedFrom: [] } }),
+    card(2, 'held', { priority: 'p0', claimedBy: 'ada', claimedAt: '2026-08-02T00:00:00.000Z' }),
+    card(3, 'waiting', { priority: 'p1', relationships: { relatedTo: [], blockedBy: [4], supersedes: [], derivedFrom: [] } }),
+    card(4, 'blocker', { priority: 'p3', column: 'in-progress', relationships: { relatedTo: [1], blockedBy: [], supersedes: [], derivedFrom: [] } }),
+    card(5, 'finished', { priority: 'p0', column: 'done' }),
+    card(6, 'parked', { priority: 'p1', parkedBy: 'ada', parkedAt: '2026-08-03T00:00:00.000Z', parkedUntil: '2099-01-01T00:00:00.000Z', parkedReason: 'fixture' }),
+    card(7, 'successor', { priority: 'p2', relationships: { relatedTo: [], blockedBy: [], supersedes: [8], derivedFrom: [] } }),
+    card(8, 'old', { priority: 'p2', relationships: { relatedTo: [], blockedBy: [], supersedes: [], derivedFrom: [], supersededBy: [7] } }),
+    card(9, 'child', { priority: 'p2', relationships: { relatedTo: [], blockedBy: [], supersedes: [], derivedFrom: [1] } }),
+    card(10, 'dangling', { priority: 'p2', relationships: { relatedTo: [], blockedBy: [999], supersedes: [], derivedFrom: [] } }),
+    // human blockers and release conditions are card fields (blockers / acceptance) that the projection turns into scrum:Blocker and scrum:ReleaseCondition nodes
+    card(11, 'waits on a person', { priority: 'p2', blockers: [{ person: 'ada', status: 'open', note: 'fixture' }] }),
+    card(12, 'waits on any human', { priority: 'p2', blockers: [{ anyHuman: true, status: 'open', note: 'fixture' }] }),
+    card(13, 'has a condition blocked by an open card', { priority: 'p2', acceptance: [{ condition: 'the fixture condition', evidence: [], blockedBy: [4] }] }),
+    card(14, 'has a met condition', { priority: 'p2', acceptance: [{ condition: 'another fixture condition', evidence: ['0123456789012345678901234567890123456789'] }] }),
+  ],
+  nextShortId: 15, conversations: [],
+});
+
 /** A proxy in front of the executor that COUNTS /query requests (and can hold, corrupt or stop answering). */
 export async function startProxy(execUrl) {
   // `queries` counts EVERY /query request outside an injection; `readyQueries` counts the ones that read READY facts (the text names scrum:parkedUntil, which only a readiness read needs).

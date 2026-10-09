@@ -25,6 +25,14 @@
  *       code and no queue, never a 200 built from the rest. (The reader may not silently drop a row it cannot place: a dropped row is a successful empty or partial queue.)
  *   R8c The same for a tag with an UNKNOWN value (a renamed kind): the proxy rewrites the value of `readyKind` on two real rows to a name no branch uses.
  *   R8b The same for the row's own tag removed: the proxy deletes the `readyKind` variable from two real rows (named here because the review names it; a builder who renames the tag renames it here).
+ *   R8d A readyKind that is the NAME OF AN OBJECT PROTOTYPE PROPERTY ('constructor', '__proto__', 'toString', 'hasOwnProperty', 'valueOf') is an unknown kind like any other: a lookup in a plain object finds it, so it
+ *       must be refused by an own-property check or a Map; 503 with a code, no queue (the reviewer's 16:12Z catch: a plain-object `by[tag]` is truthy for these and then dies at `.push` without the 503 code).
+ *   R9  A RICHER BOARD, full parity (found by asking which mutants my 5-card fixture could not kill): parked, superseded, a blocker on a card that does not exist, related and derived-from members. The WHOLE queue object
+ *       (every ready item with its context, every excluded item), the replica watermark aside, equals the old path's; and the verdicts that only these kinds can produce are asserted, taken from the OLD PATH'S OWN
+ *       behaviour (my first hand-derivation said 'dangling-blocker:999' for a blocker on a card that does not exist; the old path says 'open-blocker:999', and the row now says what the code does):
+ *       parked-by:..., superseded-by:7, open-blocker:999, and person-blocker for a named person and for any human. Human blockers and release conditions ARE card fields (blockers / acceptance);
+ *       cards 11-14 carry them (a person, any human, a condition blocked by an open card, a condition with evidence), and the whole-object compare covers them. (An earlier cut of this header said the format
+ *       could not express them; that was wrong, the reviewer asked for them at 16:13Z.)
  *   R6  FLIP BACK: restarting REST without the switch on the same executor and board gives the R0 answer byte for byte (the replica `watermark` aside, which must be back).
  *
  * NOT covered, by name: `limit` and paging arguments beyond what R3 touches; the shipped-commits argument (#1020); the MCP tool path (it calls the same endpoint); a switch value other than
@@ -32,7 +40,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { SKIP, READY_ENV, smallBoard, world } from './helpers/ready-world-1644.mjs';
+import { SKIP, READY_ENV, smallBoard, richBoard, world } from './helpers/ready-world-1644.mjs';
 import { killExecutor } from './helpers/graph-executor-proc.mjs';
 
 /** One /api/ready call, with the number of READY-reading executor /query requests it caused (see startProxy: a call makes one unrelated currency query even with the switch off). */
@@ -149,4 +157,37 @@ test('R8b a real row whose readyKind tag is missing is rejected loudly, not drop
 });
 test('R8c a real row whose readyKind names no branch (a renamed kind) is rejected loudly, not dropped', { skip: SKIP, timeout: 300000 }, async () => {
   await damaged((j) => { for (const b of j.results.bindings.slice(0, 2)) if (b.readyKind) b.readyKind = { ...b.readyKind, value: `${b.readyKind.value}-renamed` }; });
+});
+
+test('R9 a richer board: the WHOLE queue (context members included) equals the old path\'s, and the parked / superseded / person-blocker / open-blocker-on-a-missing-card verdicts are the old path\'s own', { skip: SKIP, timeout: 300000 }, async () => {
+  await world(richBoard(), async (w) => {
+    const noWm = (j) => { const { watermark, ...rest } = j; return rest; };
+    const ex = (j, n) => j.excluded.find((c) => c.shortId === n)?.reason;
+    await w.start(); const oracle = await readyCounted(w, '/api/ready?limit=100'); assert.equal(oracle.status, 200);
+    assert.match(ex(oracle.json, 6) ?? '', /^parked-by:/, 'CONTROL: the oracle parks #6'); assert.equal(ex(oracle.json, 8), 'superseded-by:7', 'CONTROL: the oracle supersedes #8'); assert.equal(ex(oracle.json, 10), 'open-blocker:999', 'CONTROL: the oracle flags #10');
+    assert.ok(oracle.json.ready.some((c) => (c.context?.relatedTo?.total ?? 0) > 0), 'CONTROL: the board really has related members in the queue');
+    assert.match(ex(oracle.json, 11) ?? '', /^person-blocker:/, 'CONTROL: the oracle holds #11 on a person'); assert.match(ex(oracle.json, 12) ?? '', /^person-blocker:/, 'CONTROL: the oracle holds #12 on any human');
+    const seen13 = oracle.json.ready.find((c) => c.shortId === 13) ?? oracle.json.excluded.find((c) => c.shortId === 13); assert.ok(seen13, 'CONTROL: the oracle has a verdict for #13 (the condition-scoped blocker card)'); console.log(`R9 oracle #13: ${JSON.stringify(seen13).slice(0, 220)}`);
+    await w.start({ ready: true }); const on = await readyCounted(w, '/api/ready?limit=100');
+    assert.equal(on.status, 200, on.text.slice(0, 300)); assert.ok(on.queries >= 1, 'PRECONDITION: the switched call read readiness facts from the executor');
+    assert.match(ex(on.json, 6) ?? '', /^parked-by:/); assert.equal(ex(on.json, 8), 'superseded-by:7'); assert.equal(ex(on.json, 10), 'open-blocker:999');
+    assert.match(ex(on.json, 11) ?? '', /^person-blocker:/); assert.match(ex(on.json, 12) ?? '', /^person-blocker:/);
+    assert.deepEqual(noWm(on.json), noWm(oracle.json), 'every ready item with its context, and every excluded item, equals the old path\'s');
+  });
+});
+
+test('R8d a readyKind that names an object-prototype property is refused loudly like any unknown kind (503 + code, no queue)', { skip: SKIP, timeout: 600000 }, async () => {
+  await world(smallBoard(), async (w) => {
+    await w.start({ ready: true });
+    const ok = await readyCounted(w); assert.equal(ok.status, 200, 'CONTROL: undamaged, the call answers'); assert.ok(ok.queries >= 1);
+    for (const name of ['constructor', '__proto__', 'toString', 'hasOwnProperty', 'valueOf']) {
+      let applied = 0; w.proxy.rewrite = (j) => { if (readyShaped(j)) { for (const b of j.results.bindings.slice(0, 2)) if (b.readyKind) b.readyKind = { ...b.readyKind, value: name }; applied++; } };
+      const r = await w.get('/api/ready');
+      assert.ok(applied >= 1, `PRECONDITION (${name}): the damage was applied to the readiness answer`);
+      assert.equal(r.status, 503, `${name}: a prototype-name tag must be a 503 (got ${r.status}: ${r.text.slice(0, 160)})`);
+      assert.equal(r.json?.code, 'READY_SOURCE_UNAVAILABLE', `${name}: with the room's 503 code`);
+      assert.ok(!Array.isArray(r.json?.ready), `${name}: and carries no queue`);
+    }
+    w.proxy.rewrite = null; const back = await w.get('/api/ready'); assert.equal(back.status, 200, 'CONTROL: undamaged again, it answers');
+  });
 });
