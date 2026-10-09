@@ -95,6 +95,7 @@ test('G5 source "executor" on a process with NO executor configured is refused l
   await withRest({ switchOn: false, executor: false }, async (rest) => {
     const r = await ask(rest, { source: 'executor' });   // the refusal is asserted FIRST, so a build that lacks the `source` field cannot hide this row's own assertion behind its control
     assert.notEqual(r.status, 200, `an executor request with no executor must be refused (got ${r.status}: ${r.text.slice(0, 160)})`); assert.equal(typeof r.json?.error, 'string'); assert.ok(!('rows' in (r.json ?? {})), 'and carries no rows');
+    assert.equal(r.json.code, 'SOURCE_UNAVAILABLE', 'and says WHY: not configured is a different fact from the executor being unreachable (GRAPH_UNAVAILABLE, with a misleading ERR_INVALID_URL when the URL is empty)');
     const ok = await ask(rest); assert.equal(ok.status, 200, 'CONTROL: the default replica answer still works on the same process'); assert.equal(ok.json.source, 'replica');
   });
 });
