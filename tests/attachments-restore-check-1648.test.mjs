@@ -35,6 +35,7 @@
  *   A17 manifest SHAPE, one case per guard: a fence whose readings are malformed, a files field that is not an array (schema correct), and an empty manifest next to real references each fail with their own code.
  *   A18 the CLI on unreadable input: a manifest file that is not JSON, and a refs file that does not exist, each exit 1 with a last stdout line that parses (never a crash with no result).
  *   A19 a SIMULATED swap after the listing: the directory listing says a1.png is a regular file but the path on disk is a symlink to a file holding exactly the right bytes (and, second, a directory): the open must refuse it as file-missing, never read through the link. Proves the OPEN refuses a link; it is NOT a timing test and says nothing about a real concurrent race.
+ *   A20 a FIFO swapped in under a manifest name after the listing must not HANG the checker: opening a FIFO with no writer blocks until one appears, and fstat runs only after the open. Run in a child process with a hard timeout; the checker must answer file-missing for that name within the bound.
  *
  * NOT COVERED, by name: how the backup job copies the directory or takes the manifest (the fence is checked only as evidence in the manifest, not as a property of the job); reading the references
  * from a restored executor store (needs pyoxigraph; a separate row once the build has it); the event log, the work ledger and the rest of #1648's record set; restore time.
@@ -241,4 +242,23 @@ test('A19 a SIMULATED swap after the listing: the listing says "regular file", t
     // CONTROL: the same lying listing over an honest regular file changes nothing
     const w3 = world(); lie(w3.restored, ['a1.png']); assert.equal(run(w3).ok, true, 'CONTROL: an honest file under the same wrapper passes');
   } finally { fs.readdirSync = realReaddir; }
+});
+
+test('A20 a FIFO swapped in under a manifest name after the listing does not hang the checker: it answers file-missing within the bound', () => {
+  const w = world(); const fifo = path.join(w.restored, 'b2.jpg'); fs.rmSync(fifo);
+  const mk = spawnSync('mkfifo', [fifo], { encoding: 'utf8' }); assert.equal(mk.status, 0, 'precondition: mkfifo ' + mk.stderr);
+  const mf = path.join(w.dir, 'manifest.json'); const rf = path.join(w.dir, 'refs.json');
+  fs.writeFileSync(mf, JSON.stringify(w.manifest)); fs.writeFileSync(rf, JSON.stringify(w.refs));
+  // the child makes the listing lie ("b2.jpg is a regular file") so the open is reached, then runs the real checker
+  const child = `import fs from 'node:fs'; const real = fs.readdirSync; const restored = ${JSON.stringify(w.restored)};
+    fs.readdirSync = function (d, o) { const out = real.call(fs, d, o); return d !== restored ? out : out.map((e) => (e.name === 'b2.jpg' ? { name: e.name, isFile: () => true, isDirectory: () => false, isSymbolicLink: () => false } : e)); };
+    const { checkRestore } = await import(${JSON.stringify(pathToFileURL(SCRIPT).href)});
+    const r = checkRestore({ manifest: JSON.parse(fs.readFileSync(${JSON.stringify(mf)}, 'utf8')), restoredDir: restored, refs: JSON.parse(fs.readFileSync(${JSON.stringify(rf)}, 'utf8')) });
+    console.log(JSON.stringify(r));`;
+  const t0 = Date.now();
+  const p = spawnSync(process.execPath, ['--input-type=module', '-e', child], { encoding: 'utf8', timeout: 10000, killSignal: 'SIGKILL' });
+  const ms = Date.now() - t0;
+  assert.notEqual(p.error?.code, 'ETIMEDOUT', `the checker HUNG on a FIFO (killed after ${ms} ms): open() on a FIFO with no writer blocks, and fstat runs only after it`);
+  const r = JSON.parse(p.stdout.trim().split('\n').pop());
+  assert.equal(r.ok, false); assert.ok(r.failures.some((f) => f.code === 'file-missing' && f.id === 'b2.jpg'), JSON.stringify(r.failures));
 });
