@@ -7,13 +7,17 @@
  *
  * It reports the AGE of the NEWEST VERIFIED copy and ALERTS when that age is beyond the
  * NOMINAL limit:
- *     nominal = interval (15 min) + c + v
+ *     nominal = interval (15 min) + max(c + v, FLOOR) + JITTER        FLOOR = 1 min, JITTER = 1 min
  * c = checkpoint + copy time and v = verification time, both MEASURED by the most recent
  * SUCCESSFUL tick and read from its record in DEST/backup-schedule-state.json (the output
  * line names that tick). With no successful tick on record, c and v are UNMEASURED and the
  * limit is the interval alone (stricter, and said so). The threshold is ALWAYS the nominal
  * limit: missed or failed ticks never widen it — a missed tick is exactly what it must
- * catch. --limit-min overrides the whole limit (and the line says so).
+ * catch. #1590 — FLOOR and JITTER are the tolerance: the tick's interval is counted from the END of
+ * its previous run (~2 s), so each copy is 15 min + ~2 s old when the next lands, and this monitor
+ * runs on its own 5-min schedule; with no slack, a healthy copy read in that window alarmed. Both
+ * are CLOCK units (never time-scaled). The UNMEASURED limit and --limit-min carry no tolerance.
+ * --limit-min overrides the whole limit (and the line says so).
  * --time-scale K multiplies the recorded (real) durations into clock units when the clock
  * is SIMULATED at K x real time (default 1).
  *
@@ -38,6 +42,8 @@ import { verifyBackup, DEFAULT_PYTHON } from './graph-store-backup.mjs';
 
 const MIN = 60_000;
 export const DEFAULT_INTERVAL_MS = 15 * MIN;
+export const LIMIT_FLOOR_MS = 60 * 1000;    // #1590 — c + v counts as at least this (clock units)
+export const LIMIT_JITTER_MS = 60 * 1000;   // #1590 — one tick's lateness (clock units)
 const fmtMin = (ms) => (ms / MIN).toFixed(1);
 const iso = (ms) => new Date(ms).toISOString();
 
@@ -59,8 +65,8 @@ export function assess({ copies, state, nowMs, intervalMs = DEFAULT_INTERVAL_MS,
     limitMs = override; why = `limit ${fmtMin(limitMs)} min (OVERRIDDEN by --limit-min; not derived from measurements)`;
   } else if (m) {
     const c = ((m.checkpointMs || 0) + m.copyMs) * timeScale, v = m.verifyMs * timeScale;
-    limitMs = intervalMs + c + v;
-    why = `nominal limit ${fmtMin(limitMs)} min = ${fmtMin(intervalMs)} min interval + copy ${fmtMin(c)} min + verify ${fmtMin(v)} min (measured by the tick at ${m.at}${timeScale !== 1 ? `, x${timeScale} time scale` : ''})`;
+    limitMs = intervalMs + Math.max(c + v, LIMIT_FLOOR_MS) + LIMIT_JITTER_MS;
+    why = `nominal limit ${fmtMin(limitMs)} min = ${fmtMin(intervalMs)} min interval + max(copy ${fmtMin(c)} min + verify ${fmtMin(v)} min, ${fmtMin(LIMIT_FLOOR_MS)} min floor) + ${fmtMin(LIMIT_JITTER_MS)} min jitter (measured by the tick at ${m.at}${timeScale !== 1 ? `, x${timeScale} time scale` : ''})`;
   } else {
     limitMs = intervalMs; why = `nominal limit ${fmtMin(limitMs)} min = ${fmtMin(intervalMs)} min interval; copy and verify time UNMEASURED (no successful tick on record)`;
   }
