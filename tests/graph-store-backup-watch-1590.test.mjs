@@ -29,8 +29,11 @@
  *         all four required, finite numbers; freshnessK and stateStalenessIntervals > 0,
  *         maxClockSkewSec and graceIntervals >= 0. Anything else is ALERT `config-invalid`, never a default.
  *   LIMITS stateMin = stateStalenessIntervals x monitor interval (min)
- *          copyMin  = tick interval (min) + (checkpointMs + copyMs + verifyMs) / 60000 of the LAST
- *                     SUCCESSFUL tick in DEST/backup-schedule-state.json (the T4 derivation)
+ *          copyMin  = tick interval (min) + max((checkpointMs + copyMs + verifyMs) / 60000 of the LAST
+ *                     SUCCESSFUL tick in DEST/backup-schedule-state.json, FLOOR) + JITTER, with FLOOR = 1 min and
+ *                     JITTER = 1 min (the T4 derivation plus the #1590 tolerance, changed 2026-10-09 by the
+ *                     test author at the builder's proposal and the fallback owner's agreement: the monitor reads
+ *                     a healthy copy at 15 min + 2 s of drift, and a limit with no slack alarmed on it)
  *          snapshotMin = freshnessK x watcher interval (min)
  *          Every comparison is strict (>): a value exactly AT its limit is OK.
  *   CODES  config-invalid · state-unreadable · state-timestamp-invalid · state-verdict-invalid ·
@@ -95,8 +98,8 @@ const iso = (ms) => new Date(ms).toISOString();
 const stampOf = (ms) => iso(ms).replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
 const CFG = { freshnessK: 3, maxClockSkewSec: 60, graceIntervals: 1, stateStalenessIntervals: 3 };
 // tick 900 s, monitor 300 s, watcher 300 s; one successful tick recorded 600+1800+600 ms
-//   => stateMin 15, copyMin 15 + 3000/60000 = 15.05 (= 903 s), snapshotMin 15
-const STATE_LIMIT_S = 900, COPY_LIMIT_S = 903;
+//   => stateMin 15, copyMin 15 + max(3000/60000, 1 floor) + 1 jitter = 17 (= 1020 s), snapshotMin 15
+const STATE_LIMIT_S = 900, COPY_LIMIT_S = 1020;
 
 function writeCopy(dest, stamp, kind = 'verified') {
   const name = kind === 'partial' ? `graph-store-${stamp}.partial` : kind === 'unverified' ? `graph-store-${stamp}-UNVERIFIED` : `graph-store-${stamp}`;
@@ -202,7 +205,7 @@ test('C1 healthy twin: exit 0, OK, the full snapshot shape, limits derived from 
   assert.ok(Math.abs(s.ages.stateMin - 1) < 1e-9, `stateMin ${s.ages.stateMin}`);
   assert.ok(Math.abs(s.ages.newestCopyMin - 2) < 1e-9, `newestCopyMin ${s.ages.newestCopyMin}`);
   assert.equal(s.limits.stateMin, 15);
-  assert.ok(Math.abs(s.limits.copyMin - 15.05) < 1e-9, `copyMin ${s.limits.copyMin}`);
+  assert.ok(Math.abs(s.limits.copyMin - 17) < 1e-9, `copyMin ${s.limits.copyMin}`);
   assert.equal(s.limits.snapshotMin, 15);
   assert.equal(typeof s.limits.source, 'string');
 });
@@ -341,8 +344,8 @@ test('C6c the limit comes from the LAST SUCCESSFUL tick; a later failed tick (hu
   const t = (at, ok, cp, cy, v) => ({ at: iso(at), ok, timings: { checkpointMs: cp, copyMs: cy, verifyMs: v } });
   const f = fx({ copies: [NOW - 20 * MIN], schedule: { ticks: [t(NOW - 90 * MIN, true, 0, 0, 0), t(NOW - 60 * MIN, true, 120000, 480000, 300000), t(NOW - 30 * MIN, false, 900000, 900000, 900000)] } });
   const r = run(f, NOW);
-  ok(r, ' (limit 30 from the middle tick: 15 + 15)');
-  assert.ok(Math.abs(r.status.limits.copyMin - 30) < 1e-9, `copyMin ${r.status.limits.copyMin}`);
+  ok(r, ' (limit 31 from the middle tick: 15 + 15 + 1 jitter; 15 min of timings is above the 1 min floor)');
+  assert.ok(Math.abs(r.status.limits.copyMin - 31) < 1e-9, `copyMin ${r.status.limits.copyMin}`);
 });
 
 test('C6d DEST missing or not a directory is ALERT dest-unreadable (not healthy, not a crash)', () => {
@@ -354,9 +357,9 @@ test('C6d DEST missing or not a directory is ALERT dest-unreadable (not healthy,
 });
 
 // ---------------------------------------------------------------- 7. the copy limit, derived independently of the implementation (T4)
-test('C7 copy limit = tick interval + checkpoint + copy + verify of the last good tick, recomputed here from the same inputs and checked at both sides', () => {
-  for (const [tickS, cp, cy, v] of [[900, 600, 1800, 600], [900, 120000, 480000, 300000], [1800, 0, 0, 0], [600, 90000, 90000, 90000], [900, 1000, 2000, 3000]]) {
-    const limitS = tickS + (cp + cy + v) / 1000;           // seconds, exact in these cases
+test('C7 copy limit = tick interval + max(checkpoint + copy + verify of the last good tick, 60 s floor) + 60 s jitter, recomputed here from the same inputs and checked at both sides', () => {
+  for (const [tickS, cp, cy, v] of [[900, 600, 1800, 600], [900, 120000, 480000, 300000], [1800, 0, 0, 0], [600, 90000, 90000, 90000], [900, 1000, 2000, 3000], [900, 20000, 20000, 19000], [900, 20000, 20000, 20000], [900, 30000, 30000, 30000]]) {
+    const limitS = tickS + Math.max((cp + cy + v) / 1000, 60) + 60;   // seconds, exact in these cases; the last three rows sit just below (59 s), exactly AT (60 s) and above (90 s) the floor
     const sched = { ticks: [{ at: iso(NOW - MIN), ok: true, timings: { checkpointMs: cp, copyMs: cy, verifyMs: v } }] };
     const at = Math.floor(limitS);
     if (at !== limitS) continue;                            // keep every boundary on a whole second
@@ -365,11 +368,16 @@ test('C7 copy limit = tick interval + checkpoint + copy + verify of the last goo
   }
 });
 
-test('C7b the copy limit is NOT widened by missed ticks or an old copy: only the plist and the last good tick feed it', () => {
-  const f = fx({ copies: [NOW - 16 * MIN] });            // 16 min > 15.05: stale, however many ticks "should" have run
+test('C7b the copy limit is NOT widened by missed ticks or an old copy: only the plist, the last good tick, the floor and the jitter feed it', () => {
+  const f = fx({ copies: [NOW - 18 * MIN] });            // 18 min > 17.0: stale, however many ticks "should" have run
   const r = run(f, NOW);
   alert(r, 'copy-stale');
-  assert.ok(Math.abs(r.status.limits.copyMin - 15.05) < 1e-9);
+  assert.ok(Math.abs(r.status.limits.copyMin - 17) < 1e-9);
+});
+
+test('C7c (the #1590 tolerance) a HEALTHY copy at tick + the measured drift is OK on the watcher: 15 min + 2 s, 15 min + 3 s, 16.9 min', () => {
+  for (const ageS of [900 + 2, 900 + 3, 16.9 * 60]) ok(run(fx({ copies: [NOW - ageS * SEC] }), NOW), ` at ${ageS}s`);
+  alert(run(fx({ copies: [NOW - (COPY_LIMIT_S + 1) * SEC] }), NOW), 'copy-stale', ' one second past 17 min');
 });
 
 // ---------------------------------------------------------------- 8. lastVerdict beyond a grace, and the watcher's own since
@@ -660,9 +668,9 @@ test('C12 (control 12) every limit follows the plist intervals and the config: c
   alert(run(f, NOW), 'state-stale');
   // the default fixture (900 s) must have flagged the same 1200 s age: the two boundaries differ
   alert(run(fx({ alertState: { lastRunAt: iso(NOW - 1200 * SEC) } }), NOW), 'state-stale');
-  // tick 1800 s moves copyMin to 30.05 (1803 s)
-  ok(run(fx({ intervals: { tick: 1800 }, copies: [NOW - 1803 * SEC] }), NOW));
-  alert(run(fx({ intervals: { tick: 1800 }, copies: [NOW - 1804 * SEC] }), NOW), 'copy-stale');
+  // tick 1800 s moves copyMin to 32 (1920 s = 1800 + 60 floor + 60 jitter)
+  ok(run(fx({ intervals: { tick: 1800 }, copies: [NOW - 1920 * SEC] }), NOW));
+  alert(run(fx({ intervals: { tick: 1800 }, copies: [NOW - 1921 * SEC] }), NOW), 'copy-stale');
   // grace follows graceIntervals x monitor interval
   const g = fx({ intervals: { monitor: 600 }, config: { graceIntervals: 2 }, alertState: { lastVerdict: 'STALE' } });
   run(g, NOW);
