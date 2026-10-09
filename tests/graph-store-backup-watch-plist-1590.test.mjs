@@ -65,7 +65,7 @@ test('W1 ROUND TRIP: rendered tick + monitor + watch plists in one directory; th
   assert.ok(!st.causes.some((c) => c.code === 'config-invalid'), JSON.stringify(st.causes));
   assert.equal(st.limits.snapshotMin, 12, 'freshnessK 3 x the RENDERED watcher interval 240 s');
   assert.equal(st.limits.stateMin, 15, '3 x the rendered monitor interval 300 s');
-  assert.ok(Math.abs(st.limits.copyMin - 15.05) < 1e-9, 'the rendered tick interval 900 s + 3 s of timings');
+  assert.ok(Math.abs(st.limits.copyMin - 17) < 1e-9, 'the rendered tick interval 900 s + max(3 s of timings, 60 s floor) + 60 s jitter');
 });
 
 test('W2 the watcher\'s own reader identifies the rendered plist as the watch job with the given interval', () => {

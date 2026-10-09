@@ -251,30 +251,32 @@ test('#1566 steady-state retention count is DERIVED from the rule by simulation 
 
 const STATE = (copyMs, verifyMs, checkpointMs = 0) => ({ ticks: [{ at: new Date(T0).toISOString(), ok: true, timings: { checkpointMs, copyMs, verifyMs } }] });
 
-test('#1566 monitor (pure): fresh → OK; age beyond the NOMINAL limit (15 + c + v) → STALE alert; the limit and its c, v are in the line', () => {
+test('#1566 monitor (pure): fresh → OK; age beyond the NOMINAL limit (15 + max(c + v, 1 min floor) + 1 min jitter) → STALE alert; the limit, its c, v, the floor and the jitter are in the line', () => {
   const copies = [at(T0)];
-  const st = STATE(60_000, 30_000);   // c = 1 min, v = 0.5 min → limit 16.5 min
+  const st = STATE(60_000, 30_000);   // c = 1 min, v = 0.5 min → c + v = 1.5 min (above the 1 min floor) → limit 15 + 1.5 + 1 = 17.5 min
   const ok = assess({ copies, state: st, nowMs: T0 + 16 * MIN });
   assert.equal(ok.verdict, 'OK'); assert.equal(ok.alert, false);
-  assert.equal(ok.limitMs, 16.5 * MIN);
-  assert.match(ok.line, /nominal limit 16\.5 min = 15\.0 min interval \+ copy 1\.0 min \+ verify 0\.5 min/);
+  assert.equal(ok.limitMs, 17.5 * MIN);
+  assert.match(ok.line, /nominal limit 17\.5 min/);
+  assert.match(ok.line, /15\.0 min interval/); assert.match(ok.line, /copy 1\.0 min/); assert.match(ok.line, /verify 0\.5 min/);
+  assert.match(ok.line, /floor/); assert.match(ok.line, /jitter/);
   assert.match(ok.line, /measured by the tick at 2026-10-04T00:00:00\.000Z/);
-  const edge = assess({ copies, state: st, nowMs: T0 + 16.5 * MIN });
+  const edge = assess({ copies, state: st, nowMs: T0 + 17.5 * MIN });
   assert.equal(edge.alert, false, 'age == limit is not beyond it');
-  const stale = assess({ copies, state: st, nowMs: T0 + 16.5 * MIN + 1000 });
+  const stale = assess({ copies, state: st, nowMs: T0 + 17.5 * MIN + 1000 });
   assert.equal(stale.verdict, 'STALE'); assert.equal(stale.alert, true);
   assert.match(stale.line, /^ALERT STALE/);
   // one missed tick (age 15 + 15 + c + v) is caught at the NOMINAL limit — never widened by misses
   const missed = assess({ copies, state: { ...st, ticks: [...st.ticks, { at: 'x', ok: false, error: 'missed' }, { at: 'y', ok: false }] }, nowMs: T0 + 20 * MIN });
   assert.equal(missed.alert, true);
-  assert.equal(missed.limitMs, 16.5 * MIN, 'failed/missed ticks do not widen the threshold');
+  assert.equal(missed.limitMs, 17.5 * MIN, 'failed/missed ticks do not widen the threshold');
 });
 
 test('#1566 monitor (pure): the alert must fire inside the FIRST miss — threshold + 20 min would be a false negative', () => {
   const copies = [at(T0)];
-  const st = STATE(6_000, 6_000);     // c + v = 0.2 min
-  for (const m of [15.3, 20, 25, 30, 35]) assert.equal(assess({ copies, state: st, nowMs: T0 + m * MIN }).alert, true, `age ${m} min`);
-  for (const m of [0, 5, 15.1, 15.2]) assert.equal(assess({ copies, state: st, nowMs: T0 + m * MIN }).alert, false, `age ${m} min`);
+  const st = STATE(6_000, 6_000);     // c + v = 0.2 min, below the 1 min floor → limit 15 + 1 + 1 = 17 min
+  for (const m of [17.1, 20, 25, 30, 35]) assert.equal(assess({ copies, state: st, nowMs: T0 + m * MIN }).alert, true, `age ${m} min`);
+  for (const m of [0, 5, 15.1, 15.2, 15.3, 16.9, 17]) assert.equal(assess({ copies, state: st, nowMs: T0 + m * MIN }).alert, false, `age ${m} min`);
 });
 
 test('#1566 monitor (pure): no verified copy → NO-COPY alert; only unverified/partial/incomplete copies still → NO-COPY', () => {
@@ -295,7 +297,7 @@ test('#1566 monitor (pure): no recorded timings → limit is the interval alone,
   assert.equal(r.limitMs, 15 * MIN);
   assert.match(r.line, /UNMEASURED/);
   const s = assess({ copies: [at(T0)], state: STATE(1000, 1000), nowMs: T0, timeScale: 60 });
-  assert.equal(s.limitMs, 15 * MIN + 2 * MIN);
+  assert.equal(s.limitMs, 15 * MIN + 2 * MIN + 1 * MIN, 'c + v = 2 s x 60 = 2 min, above the 1 min floor, plus the 1 min jitter (floor and jitter are in CLOCK units and are not time-scaled)');
 });
 
 test('#1566 monitor (on disk): fresh DEST → exit 0; stale → exit 4; empty → exit 5; unreadable / missing DEST → UNAVAILABLE exit 3, never healthy', () => {
