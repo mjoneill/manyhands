@@ -83,7 +83,7 @@ test('G3 switch unset but an executor configured: source "executor" is answered 
 });
 test('G4 an unknown source value is refused: not 200, an error string, no rows', { skip: SKIP, timeout: 200000 }, async () => {
   await withRest({ switchOn: true }, async (rest) => {
-    for (const bad of ['both', 'Replica', '', 42, { x: 1 }, ['replica']]) {
+    for (const bad of ['both', 'Replica', '', 42, null, { x: 1 }, ['replica']]) {   // null is refused too: an explicit null is not "absent"
       const r = await ask(rest, { source: bad });
       assert.notEqual(r.status, 200, `source ${JSON.stringify(bad)} must be refused (got ${r.status}: ${r.text.slice(0, 120)})`);
       assert.equal(typeof r.json?.error, 'string', `${JSON.stringify(bad)}: an error string`); assert.ok(!('rows' in (r.json ?? {})), `${JSON.stringify(bad)}: no rows`);
