@@ -12,6 +12,7 @@
  *               it also pins: one warn line per request.)
  *   M3          the seat exception: as=ada is kept as "ada"; a crafted seat (a newline, a quote, a forged JSON object) is ONE safe token and creates no extra record
  *   M4          bounded: a 5,000-character parameter name and a 500-character seat are cut to at most 64 characters each in what is stored
+ *   M6          a plain SPACE in a seat or a name cannot forge a field: the stderr warn line is `key=value` pairs, so a seat `ada unsupported=forged` must not add a second `unsupported=` field; stored without whitespace
  *   M5          the /api/changes warn line: the name is kept, the value is absent
  *
  * NOT covered, by name: records already in the file (the fix is forward-only; historical entries are not touched), other routes that log req.url, the miss log's ranking in /api/misses beyond M0.
@@ -96,5 +97,18 @@ test('M5 the /api/changes warn line keeps the name and drops the value', async (
     assert.ok(await rest.waitForStderr(/\[changes-query\]/, 10000), 'CONTROL: the unsupported-parameter warn line is written');
     const line = rest.stderr().split('\n').find((l) => l.includes('[changes-query]'));
     assert.ok(line.includes('bogus'), `the name is kept: ${line}`); assert.ok(!line.includes('CHANGESECRET-9'), `the value is not: ${line}`);
+  });
+});
+
+test('M6 a plain space in the seat or in a name cannot forge a field in the stderr warn line, and is stored without whitespace', async () => {
+  await withRest(async (rest) => {
+    await get(rest, `/api/cards?${encodeURIComponent('bad name=x')}=1&as=${encodeURIComponent('ada unsupported=forged seat=root')}`);
+    await sleep(300);
+    const warns = rest.stderr().split('\n').filter((l) => l.includes('[card-query]'));
+    assert.equal(warns.length, 1, 'one warn line');
+    assert.equal((warns[0].match(/\bseat=/g) || []).length, 1, `exactly one seat= field in: ${warns[0]}`);
+    assert.equal((warns[0].match(/\bunsupported=/g) || []).length, 1, `exactly one unsupported= field in: ${warns[0]}`);
+    const recs = recordsOf(rest); assert.ok(recs.length >= 1);
+    for (const r of recs) for (const [k, v] of Object.entries(r)) if (typeof v === 'string' && k !== 'at') assert.ok(!/\s/.test(v), `field ${k} holds a space: ${JSON.stringify(v)}`);
   });
 });
