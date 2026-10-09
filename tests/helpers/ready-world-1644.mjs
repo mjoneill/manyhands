@@ -42,7 +42,13 @@ export async function startProxy(execUrl) {
   const p = { queries: 0, readyQueries: 0, mode: 'pass', injecting: false, onQuery: null, rewrite: null };
   p.server = http.createServer(async (req, res) => {
     const chunks = []; for await (const c of req) chunks.push(c);
-    const isQuery = req.method === 'POST' && (req.url === '/query' || req.url.startsWith('/query?'));   // the graph client posts to /query, queryGraphExecutor to /query?dataset=public: a build may use either
+    const isQuery0 = req.method === 'POST' && (req.url === '/query' || req.url.startsWith('/query?'));
+    // REST's OWN executor ping (the cards-currency check at the start of every GET /api/ready with the cards unit on, `SELECT ?x WHERE { BIND(1 AS ?x) }`) is never the reader's: it is passed through at once,
+    // not counted, not hooked, never held or corrupted. Holding it while an injected card write waits on the same single-flight currency check deadlocks REST against itself (measured 15:46Z: the injected
+    // DELETE died UND_ERR_SOCKET while the GET answered a correct 503); that is a failure-path observation, recorded in the snapshot file's header, not the property S1 measures.
+    const isPing = isQuery0 && Buffer.concat(chunks).toString('utf8').trim() === 'SELECT ?x WHERE { BIND(1 AS ?x) }';
+    const isQuery = isQuery0 && !isPing;   // the graph client posts to /query, queryGraphExecutor to /query?dataset=public: a build may use either
+    if (isQuery && p.bodies && !p.injecting) p.bodies.push(Buffer.concat(chunks).toString('utf8'));   // diagnostic: keep every query text when asked
     const isReadyRead = isQuery && /parkedUntil/.test(Buffer.concat(chunks).toString('utf8'));   // the modes below hit ONLY readiness reads, so a build that ignores the switch is not failed by the unrelated currency query
     if (isQuery && !p.injecting) { p.queries += 1; if (isReadyRead) p.readyQueries += 1; if (p.onQuery) { p.injecting = true; try { await p.onQuery(p.queries); } finally { p.injecting = false; } } }
     if (isReadyRead && p.mode === 'hold') return;   // never answers

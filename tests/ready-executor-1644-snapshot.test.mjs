@@ -14,7 +14,17 @@
  *     timed calls, after 3 warm-ups, is <= 1.0 s (hard ceiling) AND <= 2x the in-process path's p95 measured in the same run on the same host, in two phases: idle, and with 6 CPU-burning processes running
  *     (a loaded host; load average is printed). The sample sizes and the p95s are printed in the assertion messages and on stdout. Precondition: the switched run really read the executor.
  *
- * NOT covered, by name: writes of other kinds mid-read (a conversation post, a projector batch): the sweep injects one card DELETE, the case that skips or duplicates rows; two writers at once; the
+ * S2  THE CARD'S OWN WORDING ("a card write AND a projector batch are injected mid-read"): the same sweep with BOTH writers: the card delete before query k and a REAL projector batch
+ *     (core/activity-projector.mjs projectBatch, production code, one /update that adds prov:Activity triples and moves the cursor) before query m, for every k <= m. Valid answers are still BEFORE or AFTER
+ *     (the batch changes no card fact); a run in which the batch wrote nothing is a precondition failure. S2-CONTROL: the naive reader is still caught with both writers active.
+ *
+ * SCOPE OF THE SWEEP (changed 15:50Z after the builder's first run): the injection points are the READER's own queries. REST's own cards-currency ping, which opens every /api/ready call with the cards unit on,
+ * is passed through untouched and is not an injection point. FAILURE-PATH OBSERVATION, recorded here and not asserted: injecting a card write while that ping was HELD made the GET answer a correct 503
+ * (never a partial queue) and killed the injected DELETE's socket, because both wait on one single-flight currency check. A bounded 503 can be correct failure behaviour; it does not prove the snapshot property.
+ * LIMIT OF A ONE-QUERY BUILD: if the reader issues ONE readiness query the sweep has only its two ends (the write before it, the write after it); atomicity DURING that one query is the executor's snapshot
+ * property, which these rows do not exercise (the naive control shows the multi-request hazard is real; nothing here makes a write land inside a single running query).
+ *
+ * NOT covered, by name: writes of other kinds mid-read (a conversation post); a batch BEFORE the card write (it would have no event to project); two card writers; the
  * shipped-commits argument; MCP-level latency (transport adds its own); a board larger than 1,500 cards; production's real data shape (the fixture is synthetic).
  */
 import { test } from 'node:test';
@@ -25,6 +35,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { SKIP, READY_ENV, DSID, ROSTER_FILE, card, makeBoardFixture, startRestServer, startProxy, migrate, tmpStore, startExecutor, startExecutorOnCopy, killExecutor } from './helpers/ready-world-1644.mjs';
 import { queryGraphExecutor } from '../core/graph-replica.mjs';
+import { projectBatch } from '../core/activity-projector.mjs';
 import * as rq from '../core/ready-query.mjs';
 
 const relCard = (i, N) => card(i, `card-${i}`, {
@@ -69,16 +80,22 @@ async function restAnswer(base) {
 const sig = (a) => (a.failed ? `FAILED ${a.failed}` : `${a.total}/${a.excludedTotal}:${a.ready.length}:${a.ready.slice(0, 2)}..${a.ready.slice(-2)}:${a.ready.reduce((h, x) => (h * 31 + x) % 1000003, 7)}`);
 
 /** One run on a fresh executor (a copy of the seeded store) and a fresh REST. k = 0: no injection. k >= 1: delete the target card through REST just before the k-th /query request of the read. */
-async function run(sd, { k, reader }) {
+async function run(sd, { k, reader, m = 0 }) {
   const store = fs.mkdtempSync(path.join(os.tmpdir(), 'r44s-run-')); fs.cpSync(sd.store, store, { recursive: true });
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'r44s-rboard-')); const boardFile = path.join(dir, 'board.json'); fs.copyFileSync(sd.boardFile, boardFile);
   const exec = await startExecutorOnCopy({ store, datasetId: DSID }); const proxy = await startProxy(exec.baseUrl);
   const rest = await startRestServer({ boardFile, env: { SCRUM_ROSTER_FILE: ROSTER_FILE, SCRUM_GRAPH_DATASET_ID: DSID, SCRUM_GRAPH_EXECUTOR_URL: proxy.url, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', SCRUM_GRAPH_UNIT_CARDS: '1', ...(reader === 'rest' ? { [READY_ENV]: 'executor' } : {}) } });
   try {
     proxy.queries = 0;
-    if (k >= 1) proxy.onQuery = async (n) => { if (n === k) { const r = await fetch(`${rest.baseUrl}/api/cards/${sd.target}`, { method: 'DELETE', signal: AbortSignal.timeout(60000) }); assert.ok(r.status === 200 || r.status === 204, `precondition: the injected card write is accepted (${r.status})`); } };
+    let projected = null;
+    const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'r44s-work-')); fs.writeFileSync(path.join(workDir, 'work-objects.jsonl'), '');
+    if (k >= 1 || m >= 1) proxy.onQuery = async (n) => {
+      if (n === k) { const r = await fetch(`${rest.baseUrl}/api/cards/${sd.target}`, { method: 'DELETE', signal: AbortSignal.timeout(60000) }); assert.ok(r.status === 200 || r.status === 204, `precondition: the injected card write is accepted (${r.status})`); }
+      // a REAL projector batch (core/activity-projector.mjs, the production code): the card delete above appended an event to REST's log; this projects it into the executor as prov:Activity triples + a cursor move, in ONE /update
+      if (n === m) projected = await projectBatch({ logDir: `${boardFile.replace(/\.json$/, '')}-events`, workDir, executorUrl: exec.baseUrl, batchSize: 500 });
+    };
     const answer = reader === 'rest' ? await restAnswer(rest.baseUrl) : await naiveAnswer(proxy.url);
-    return { answer, queries: proxy.queries, readyQueries: proxy.readyQueries };
+    return { answer, queries: proxy.queries, readyQueries: proxy.readyQueries, projected };
   } finally { await rest.stop(); try { await proxy.down(); } catch { /* down */ } await killExecutor(exec); }
 }
 async function sweep(sd, reader) {
@@ -86,6 +103,13 @@ async function sweep(sd, reader) {
   const after = await run(sd, { k: 1, reader });
   const results = [{ k: 0, ...before }, { k: 1, ...after }];
   for (let k = 2; k <= n; k++) results.push({ k, ...(await run(sd, { k, reader })) });
+  return { before, after, n, results };
+}
+
+/** The two-writer sweep: the card delete before query k AND a real projector batch before query m >= k (the delete's event must exist for the batch to have anything to write). */
+async function sweepPairs(sd, reader, ks) {
+  const before = await run(sd, { k: 0, reader }); const n = before.queries; const after = await run(sd, { k: 1, reader }); const results = [];
+  for (const k of ks(n)) for (let m = k; m <= n; m++) results.push({ k, m, ...(await run(sd, { k, m, reader })) });
   return { before, after, n, results };
 }
 
@@ -143,4 +167,24 @@ test('L1 LATENCY on a production-sized board: executor p95 <= 1.0 s AND <= 2x th
   check(await phase(sd, 'idle'));
   const burners = Array.from({ length: 6 }, () => spawn(process.execPath, ['-e', 'for(;;){}'], { stdio: 'ignore' }));
   try { await new Promise((r) => setTimeout(r, 3000)); check(await phase(sd, 'loaded (6 CPU burners)')); } finally { for (const b of burners) b.kill('SIGKILL'); }
+});
+
+test('S2 TWO WRITERS: a card write AND a real projector batch injected mid-read (every k <= m), `GET /api/ready` (switch on) still answers the full before or the full after', { skip: SKIP, timeout: 1500000 }, async () => {
+  const sd = await seedOnce(); const s = await sweepPairs(sd, 'rest', (n) => Array.from({ length: n }, (_, i) => i + 1));
+  assert.ok(s.before.readyQueries >= 1, `PRECONDITION: the switched /api/ready read READY FACTS from the executor (${s.before.readyQueries} such queries, ${s.before.queries} in all)`);
+  assert.notEqual(sig(s.before.answer), sig(s.after.answer), 'PRECONDITION: BEFORE != AFTER');
+  const noBatch = s.results.filter((r) => !r.projected || !(r.projected.projected >= 1));
+  assert.deepEqual(noBatch.map((r) => ({ k: r.k, m: r.m })), [], 'PRECONDITION: in every run the projector batch really wrote (projected >= 1): a batch that wrote nothing is not a second writer');
+  const valid = new Set([sig(s.before.answer), sig(s.after.answer)]);
+  const bad = s.results.filter((r) => !valid.has(sig(r.answer)));
+  assert.deepEqual(bad.map((r) => ({ k: r.k, m: r.m, answer: sig(r.answer) })), [], `every (card write before query k, projector batch before query m>=k) over the ${s.n} queries of the read must give BEFORE or AFTER, and must not fail or hang`);
+});
+
+test('S2-CONTROL the NAIVE reader under the same two-writer sweep (k = the page boundary) is still caught, and the batch really wrote', { skip: SKIP, timeout: 1500000 }, async () => {
+  const sd = await seedOnce(); const s = await sweepPairs(sd, 'naive', () => [2]);
+  assert.ok(s.n >= 7, `precondition: the naive read made its ${s.n} requests`);
+  assert.ok(s.results.length >= 1 && s.results.every((r) => r.projected && r.projected.projected >= 1), 'precondition: the projector batch wrote in every control run');
+  const valid = new Set([sig(s.before.answer), sig(s.after.answer)]); const mixed = s.results.filter((r) => !valid.has(sig(r.answer)));
+  console.log(`S2-CONTROL naive reader, card delete before k=2 plus a projector batch before m=2..${s.n}: mixtures at ${mixed.map((r) => `m=${r.m}`).join(', ') || 'none'} of ${s.results.length} runs`);
+  assert.ok(mixed.length >= 1, 'the naive reader must still be caught when a second writer is also active');
 });
