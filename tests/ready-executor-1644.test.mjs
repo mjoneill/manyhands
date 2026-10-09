@@ -27,6 +27,9 @@
  *   R8b The same for the row's own tag removed: the proxy deletes the `readyKind` variable from two real rows (named here because the review names it; a builder who renames the tag renames it here).
  *   R8d A readyKind that is the NAME OF AN OBJECT PROTOTYPE PROPERTY ('constructor', '__proto__', 'toString', 'hasOwnProperty', 'valueOf') is an unknown kind like any other: a lookup in a plain object finds it, so it
  *       must be refused by an own-property check or a Map; 503 with a code, no queue (the reviewer's 16:12Z catch: a plain-object `by[tag]` is truthy for these and then dies at `.push` without the 503 code).
+ *   SOURCE IDENTITY (the retro's adopted guard, applied to this file's differentials R1 and R9): each leg's source is established from an independent observation, the counting proxy, never from the
+ *   flag that was set: the oracle leg must have asked the executor for NO readiness facts, the switched leg for at least one, and both counts are printed before anything is compared. /api/ready itself
+ *   returns no `source` field (graph_query does); whether it should is left to the builder, and a `source` field would need R1/R9's whole-object compare to ignore it.
  *   R9  A RICHER BOARD, full parity (found by asking which mutants my 5-card fixture could not kill): parked, superseded, a blocker on a card that does not exist, related and derived-from members. The WHOLE queue object
  *       (every ready item with its context, every excluded item), the replica watermark aside, equals the old path's; and the verdicts that only these kinds can produce are asserted, taken from the OLD PATH'S OWN
  *       behaviour (my first hand-derivation said 'dangling-blocker:999' for a blocker on a card that does not exist; the old path says 'open-blocker:999', and the row now says what the code does):
@@ -59,7 +62,9 @@ test('R0 CONTROL, switch unset: the hand-derived verdicts, and the executor is N
 test('R1 PARITY, switch on: the executor IS asked, and the answer equals the old path\'s', { skip: SKIP, timeout: 300000 }, async () => {
   await world(smallBoard(), async (w) => {
     await w.start(); const oracle = await readyCounted(w); assert.deepEqual(verdicts(oracle.json), HAND, 'CONTROL: the oracle is the hand-derived answer');
+    assert.equal(oracle.queries, 0, 'SOURCE OF THE ORACLE LEG, read from the proxy and never from the flag: the old path asked the executor for no readiness facts');
     await w.start({ ready: true }); const r = await readyCounted(w);
+    console.log(`R1 sources read: oracle leg ${oracle.queries} readiness queries to the executor (in-process copy); switched leg ${r.queries} (executor)`);
     assert.equal(r.status, 200, r.text.slice(0, 300));
     assert.ok(r.queries >= 1, `the switch must make /api/ready read the EXECUTOR (the proxy counted ${r.queries} queries): a build that ignores the switch passes every comparison below`);
     assert.deepEqual(verdicts(r.json), verdicts(oracle.json), 'ready, readyTotal and excluded equal the old path\'s');
@@ -164,12 +169,14 @@ test('R9 a richer board: the WHOLE queue (context members included) equals the o
     const noWm = (j) => { const { watermark, ...rest } = j; return rest; };
     const ex = (j, n) => j.excluded.find((c) => c.shortId === n)?.reason;
     await w.start(); const oracle = await readyCounted(w, '/api/ready?limit=100'); assert.equal(oracle.status, 200);
+    assert.equal(oracle.queries, 0, 'SOURCE OF THE ORACLE LEG, read from the proxy and never from the flag: the old path asked the executor for no readiness facts');
     assert.match(ex(oracle.json, 6) ?? '', /^parked-by:/, 'CONTROL: the oracle parks #6'); assert.equal(ex(oracle.json, 8), 'superseded-by:7', 'CONTROL: the oracle supersedes #8'); assert.equal(ex(oracle.json, 10), 'open-blocker:999', 'CONTROL: the oracle flags #10');
     assert.ok(oracle.json.ready.some((c) => (c.context?.relatedTo?.total ?? 0) > 0), 'CONTROL: the board really has related members in the queue');
     assert.match(ex(oracle.json, 11) ?? '', /^person-blocker:/, 'CONTROL: the oracle holds #11 on a person'); assert.match(ex(oracle.json, 12) ?? '', /^person-blocker:/, 'CONTROL: the oracle holds #12 on any human');
     const seen13 = oracle.json.ready.find((c) => c.shortId === 13) ?? oracle.json.excluded.find((c) => c.shortId === 13); assert.ok(seen13, 'CONTROL: the oracle has a verdict for #13 (the condition-scoped blocker card)'); console.log(`R9 oracle #13: ${JSON.stringify(seen13).slice(0, 220)}`);
     await w.start({ ready: true }); const on = await readyCounted(w, '/api/ready?limit=100');
     assert.equal(on.status, 200, on.text.slice(0, 300)); assert.ok(on.queries >= 1, 'PRECONDITION: the switched call read readiness facts from the executor');
+    console.log(`R9 sources read: oracle leg ${oracle.queries} readiness queries to the executor (in-process copy); switched leg ${on.queries} (executor)`);
     assert.match(ex(on.json, 6) ?? '', /^parked-by:/); assert.equal(ex(on.json, 8), 'superseded-by:7'); assert.equal(ex(on.json, 10), 'open-blocker:999');
     assert.match(ex(on.json, 11) ?? '', /^person-blocker:/); assert.match(ex(on.json, 12) ?? '', /^person-blocker:/);
     assert.deepEqual(noWm(on.json), noWm(oracle.json), 'every ready item with its context, and every excluded item, equals the old path\'s');
