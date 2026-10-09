@@ -45,12 +45,16 @@ export const COLUMN_IRI_BASE = 'https://scrumboard.local/column/';
  * stop joining.
  */
 export const columnIri = (id) => COLUMN_IRI_BASE + encodeURIComponent(id);
-/** The inverse of columnIri: a column IRI → its id (null for anything else). A malformed escape is returned undecoded. */
+/**
+ * The inverse of columnIri: a column IRI → its id (null for anything else). Accepts the full IRI AND the prefixed
+ * `column:<encoded>` form, which is what graph-replica's queryGraph hands back (it shortens every IRI). A malformed
+ * escape is returned undecoded.
+ */
 export const columnIdOf = (iri) => {
   if (iri == null) return null;
   const s = String(iri);
-  if (!s.startsWith(COLUMN_IRI_BASE)) return null;
-  const rest = s.slice(COLUMN_IRI_BASE.length);
+  const rest = s.startsWith(COLUMN_IRI_BASE) ? s.slice(COLUMN_IRI_BASE.length) : s.startsWith('column:') ? s.slice('column:'.length) : null;
+  if (rest == null) return null;
   try { return decodeURIComponent(rest); } catch { return rest; }
 };
 // #814 — commits get their own namespace. They are not board entities and must
