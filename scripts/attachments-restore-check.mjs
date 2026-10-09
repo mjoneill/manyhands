@@ -43,6 +43,19 @@ function manifestProblem(m) {
   return null;
 }
 
+/**
+ * Read a REGULAR file without following a symlink at any moment: open with O_NOFOLLOW (a symlink fails to open, ELOOP),
+ * check the OPENED descriptor with fstat (a directory or device fails), then read through that same descriptor. No
+ * check-then-read gap: an entry swapped for a link after the listing is refused, never read through.
+ */
+function readRegularNoFollow(p) {
+  const fd = fs.openSync(p, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    if (!fs.fstatSync(fd).isFile()) throw Object.assign(new Error('not a regular file'), { code: 'ENOTFILE' });
+    return fs.readFileSync(fd);
+  } finally { fs.closeSync(fd); }
+}
+
 /** Pure apart from reading `restoredDir`. Returns { ok, failures: [{code, id, detail}], orphans, counts }. */
 export function checkRestore({ manifest, restoredDir, refs } = {}) {
   const failures = [];
@@ -67,24 +80,31 @@ export function checkRestore({ manifest, restoredDir, refs } = {}) {
   if (!refList.length) fail('no-references', null, 'no references to resolve');
   if (!manifest.files.length) fail('manifest-empty', null, 'the manifest lists no files');
 
-  // the restored directory as it is
-  let present;
-  try { present = new Set(fs.readdirSync(restoredDir, { withFileTypes: true }).filter((d) => d.isFile()).map((d) => d.name)); }
-  catch (e) { fail('file-missing', null, `the restored directory ${restoredDir} cannot be read (${e.code || e.message})`); present = new Set(); }
+  // the restored directory as it is. Entry types come from readdir, which does NOT follow symlinks: a restore holds
+  // REGULAR files only, so a symlink or a directory is never a restored file and is never read through.
+  let present, notRegular;
+  try {
+    const entries = fs.readdirSync(restoredDir, { withFileTypes: true });
+    present = new Set(entries.filter((d) => d.isFile()).map((d) => d.name));
+    notRegular = new Map(entries.filter((d) => !d.isFile()).map((d) => [d.name, d.isSymbolicLink() ? 'a symlink' : d.isDirectory() ? 'a directory' : 'not a regular file']));
+  } catch (e) { fail('file-missing', null, `the restored directory ${restoredDir} cannot be read (${e.code || e.message})`); present = new Set(); notRegular = new Map(); }
   counts.restoredFiles = present.size;
 
   // every manifest entry, referenced or not: present, then size, then (only on an equal size) hash
   const byName = new Map(manifest.files.map((f) => [f.name, f]));
   for (const f of manifest.files) {
+    if (notRegular.has(f.name)) { fail('file-missing', f.name, `listed in the manifest, but the restore holds ${notRegular.get(f.name)} under that name (not a regular file; never followed)`); continue; }
     if (!present.has(f.name)) { fail('file-missing', f.name, 'listed in the manifest, absent from the restore'); continue; }
     let bytes;
-    try { bytes = fs.readFileSync(path.join(restoredDir, f.name)); } catch (e) { fail('file-missing', f.name, `unreadable (${e.code || e.message})`); continue; }
+    try { bytes = readRegularNoFollow(path.join(restoredDir, f.name)); }
+    catch (e) { fail('file-missing', f.name, `unreadable (${e.code || e.message})`); continue; }
     if (bytes.length !== f.size) { fail('size-mismatch', f.name, `restored ${bytes.length} bytes, the manifest says ${f.size}`); continue; }
     const got = crypto.createHash('sha256').update(bytes).digest('hex');
     if (got !== f.sha256) fail('hash-mismatch', f.name, `restored sha-256 ${got}, the manifest says ${f.sha256}`);
   }
   // a file the manifest does not list: a dirty restore target
   for (const name of present) if (!byName.has(name)) fail('unexpected-file', name, 'in the restore, not in the manifest');
+  for (const [name, kind] of notRegular) if (!byName.has(name)) fail('unexpected-file', name, `${kind} in the restore, not in the manifest`);
 
   // references: each resolves to a manifest entry; a nonzero contentSize must agree with it (0 = unknown, counted)
   const referenced = new Set();
