@@ -27,9 +27,11 @@
  *   R8b The same for the row's own tag removed: the proxy deletes the `readyKind` variable from two real rows (named here because the review names it; a builder who renames the tag renames it here).
  *   R8d A readyKind that is the NAME OF AN OBJECT PROTOTYPE PROPERTY ('constructor', '__proto__', 'toString', 'hasOwnProperty', 'valueOf') is an unknown kind like any other: a lookup in a plain object finds it, so it
  *       must be refused by an own-property check or a Map; 503 with a code, no queue (the reviewer's 16:12Z catch: a plain-object `by[tag]` is truthy for these and then dies at `.push` without the 503 code).
- *   SOURCE IDENTITY (the retro's adopted guard, applied to this file's differentials R1 and R9): each leg's source is established from an independent observation, the counting proxy, never from the
- *   flag that was set: the oracle leg must have asked the executor for NO readiness facts, the switched leg for at least one, and both counts are printed before anything is compared. /api/ready itself
- *   returns no `source` field (graph_query does); whether it should is left to the builder, and a `source` field would need R1/R9's whole-object compare to ignore it.
+ *   SOURCE IDENTITY (the retro's adopted guard, applied to this file's differentials): the contract is that each leg REPORTS its own source in its RESPONSE, taken from the response and never from
+ *   the flag, and that an independent observation agrees. For `GET /api/ready` that means a top-level string field `source`: `'executor'` when the switch is on, `'replica'` otherwise, on the queue
+ *   AND on explain. Each differential row (R0, R1, R3, R6, R9) reads `source` from each leg's response, cross-checks it against the counting proxy (the executor was asked for readiness facts exactly
+ *   when `source` is 'executor': 0 queries for 'replica', >= 1 for 'executor'), PRINTS both before comparing anything, and ignores `source` and `watermark` in the whole-object comparisons. Zero
+ *   executor readiness queries alone does NOT prove the old path (it proves only that no executor readiness read was observed); that is why the response field is required and the proxy is the cross-check.
  *   R9  A RICHER BOARD, full parity (found by asking which mutants my 5-card fixture could not kill): parked, superseded, a blocker on a card that does not exist, related and derived-from members. The WHOLE queue object
  *       (every ready item with its context, every excluded item), the replica watermark aside, equals the old path's; and the verdicts that only these kinds can produce are asserted, taken from the OLD PATH'S OWN
  *       behaviour (my first hand-derivation said 'dangling-blocker:999' for a blocker on a card that does not exist; the old path says 'open-blocker:999', and the row now says what the code does):
@@ -55,20 +57,22 @@ test('R0 CONTROL, switch unset: the hand-derived verdicts, and the executor is N
   await world(smallBoard(), async (w) => {
     await w.start();
     const r = await readyCounted(w); assert.equal(r.status, 200); assert.deepEqual(verdicts(r.json), HAND);
-    assert.equal(r.queries, 0, 'the old path answers from the in-process copy: no executor query');
+    assert.equal(r.json.source, 'replica', 'the response reports its own source: the old path says replica');
+    assert.equal(r.queries, 0, 'and the proxy agrees: no executor readiness read was observed');
   });
 });
 
 test('R1 PARITY, switch on: the executor IS asked, and the answer equals the old path\'s', { skip: SKIP, timeout: 300000 }, async () => {
   await world(smallBoard(), async (w) => {
     await w.start(); const oracle = await readyCounted(w); assert.deepEqual(verdicts(oracle.json), HAND, 'CONTROL: the oracle is the hand-derived answer');
-    assert.equal(oracle.queries, 0, 'SOURCE OF THE ORACLE LEG, read from the proxy and never from the flag: the old path asked the executor for no readiness facts');
     await w.start({ ready: true }); const r = await readyCounted(w);
-    console.log(`R1 sources read: oracle leg ${oracle.queries} readiness queries to the executor (in-process copy); switched leg ${r.queries} (executor)`);
+    console.log(`R1 sources read: oracle leg says ${oracle.json.source} (${oracle.queries} readiness queries observed); switched leg says ${r.json?.source} (${r.queries} observed)`);
+    assert.equal(oracle.json.source, 'replica', 'the oracle leg REPORTS replica'); assert.equal(oracle.queries, 0, 'and the proxy saw no executor readiness read');
+    assert.equal(r.json?.source, 'executor', 'the switched leg REPORTS executor in its response');
     assert.equal(r.status, 200, r.text.slice(0, 300));
     assert.ok(r.queries >= 1, `the switch must make /api/ready read the EXECUTOR (the proxy counted ${r.queries} queries): a build that ignores the switch passes every comparison below`);
     assert.deepEqual(verdicts(r.json), verdicts(oracle.json), 'ready, readyTotal and excluded equal the old path\'s');
-    const keys = (j) => Object.keys(j).filter((k) => k !== 'watermark').sort();
+    const keys = (j) => Object.keys(j).filter((k) => k !== 'watermark' && k !== 'source').sort();
     assert.deepEqual(keys(r.json), keys(oracle.json), 'the response has the same keys (the replica\'s `watermark` is a statement about the replica projection; the builder may drop or replace it, and that choice is not pinned here)');
   });
 });
@@ -88,8 +92,8 @@ test('R3 explain with the switch on answers exactly as the old path does: a read
     await w.start(); const old = {}; for (const id of [1, 3, 999]) old[id] = await w.get(`/api/ready?explain=${id}`);
     assert.equal(old[1].status, 200); assert.equal(old[3].status, 200); assert.notEqual(old[999].status, 200, 'CONTROL: the old path refuses an unknown card');
     await w.start({ ready: true });
-    for (const id of [1, 3, 999]) { const r = await readyCounted(w, `/api/ready?explain=${id}`); assert.equal(r.status, old[id].status, `explain ${id}: same status`); const noWm = (j) => { if (!j || typeof j !== 'object') return j; const { watermark, ...rest } = j; return rest; };
-      assert.deepEqual(noWm(r.json), noWm(old[id].json), `explain ${id}: same body, the replica watermark aside (a statement about the replica projection; the executor path may drop or replace it, as R1 and R6 allow)`); if (id !== 999) assert.ok(r.queries >= 1, `explain ${id} read the executor`); }
+    for (const id of [1, 3, 999]) { const r = await readyCounted(w, `/api/ready?explain=${id}`); assert.equal(r.status, old[id].status, `explain ${id}: same status`); const noWm = (j) => { if (!j || typeof j !== 'object') return j; const { watermark, source, ...rest } = j; return rest; };
+      assert.deepEqual(noWm(r.json), noWm(old[id].json), `explain ${id}: same body, the replica watermark aside (a statement about the replica projection; the executor path may drop or replace it, as R1 and R6 allow)`); if (id !== 999) { assert.ok(r.queries >= 1, `explain ${id} read the executor`); assert.equal(r.json.source, 'executor', `explain ${id}: the response reports its own source`); assert.equal(old[id].json.source, 'replica', `explain ${id}: and the old path reports replica`); } }
   });
 });
 
@@ -122,7 +126,8 @@ test('R6 FLIP BACK: restarting without the switch on the same executor and board
     await w.start({ ready: true }); const on = await readyCounted(w); assert.ok(on.queries >= 1, 'CONTROL: the middle run really used the executor');
     await w.start(); const b = await readyCounted(w);
     assert.equal(b.queries, 0, 'flipped back: the executor is not asked');
-    const strip = (t) => { const j = JSON.parse(t); const wm = j.watermark; delete j.watermark; return { rest: JSON.stringify(j), hasWatermark: wm != null }; };
+    const strip = (t) => { const j = JSON.parse(t); const wm = j.watermark; delete j.watermark; delete j.source; return { rest: JSON.stringify(j), hasWatermark: wm != null, source: JSON.parse(t).source }; };
+    assert.equal(strip(b.text).source, 'replica', 'flipped back, the response reports replica again'); assert.equal(strip(a.text).source, 'replica');
     assert.equal(strip(b.text).rest, strip(a.text).rest, 'and the response is identical to the first, byte for byte, apart from the replica watermark');
     assert.ok(strip(b.text).hasWatermark, 'and the old path\'s currency statement (the watermark) is back');
   });
@@ -166,17 +171,18 @@ test('R8c a real row whose readyKind names no branch (a renamed kind) is rejecte
 
 test('R9 a richer board: the WHOLE queue (context members included) equals the old path\'s, and the parked / superseded / person-blocker / open-blocker-on-a-missing-card verdicts are the old path\'s own', { skip: SKIP, timeout: 300000 }, async () => {
   await world(richBoard(), async (w) => {
-    const noWm = (j) => { const { watermark, ...rest } = j; return rest; };
+    const noWm = (j) => { const { watermark, source, ...rest } = j; return rest; };
     const ex = (j, n) => j.excluded.find((c) => c.shortId === n)?.reason;
     await w.start(); const oracle = await readyCounted(w, '/api/ready?limit=100'); assert.equal(oracle.status, 200);
-    assert.equal(oracle.queries, 0, 'SOURCE OF THE ORACLE LEG, read from the proxy and never from the flag: the old path asked the executor for no readiness facts');
+    assert.equal(oracle.json.source, 'replica', 'the oracle leg REPORTS replica'); assert.equal(oracle.queries, 0, 'and the proxy saw no executor readiness read');
     assert.match(ex(oracle.json, 6) ?? '', /^parked-by:/, 'CONTROL: the oracle parks #6'); assert.equal(ex(oracle.json, 8), 'superseded-by:7', 'CONTROL: the oracle supersedes #8'); assert.equal(ex(oracle.json, 10), 'open-blocker:999', 'CONTROL: the oracle flags #10');
     assert.ok(oracle.json.ready.some((c) => (c.context?.relatedTo?.total ?? 0) > 0), 'CONTROL: the board really has related members in the queue');
     assert.match(ex(oracle.json, 11) ?? '', /^person-blocker:/, 'CONTROL: the oracle holds #11 on a person'); assert.match(ex(oracle.json, 12) ?? '', /^person-blocker:/, 'CONTROL: the oracle holds #12 on any human');
     const seen13 = oracle.json.ready.find((c) => c.shortId === 13) ?? oracle.json.excluded.find((c) => c.shortId === 13); assert.ok(seen13, 'CONTROL: the oracle has a verdict for #13 (the condition-scoped blocker card)'); console.log(`R9 oracle #13: ${JSON.stringify(seen13).slice(0, 220)}`);
     await w.start({ ready: true }); const on = await readyCounted(w, '/api/ready?limit=100');
     assert.equal(on.status, 200, on.text.slice(0, 300)); assert.ok(on.queries >= 1, 'PRECONDITION: the switched call read readiness facts from the executor');
-    console.log(`R9 sources read: oracle leg ${oracle.queries} readiness queries to the executor (in-process copy); switched leg ${on.queries} (executor)`);
+    console.log(`R9 sources read: oracle leg says ${oracle.json.source} (${oracle.queries} observed); switched leg says ${on.json.source} (${on.queries} observed)`);
+    assert.equal(on.json.source, 'executor', 'the switched leg REPORTS executor in its response');
     assert.match(ex(on.json, 6) ?? '', /^parked-by:/); assert.equal(ex(on.json, 8), 'superseded-by:7'); assert.equal(ex(on.json, 10), 'open-blocker:999');
     assert.match(ex(on.json, 11) ?? '', /^person-blocker:/); assert.match(ex(on.json, 12) ?? '', /^person-blocker:/);
     assert.deepEqual(noWm(on.json), noWm(oracle.json), 'every ready item with its context, and every excluded item, equals the old path\'s');
