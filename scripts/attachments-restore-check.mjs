@@ -44,12 +44,14 @@ function manifestProblem(m) {
 }
 
 /**
- * Read a REGULAR file without following a symlink at any moment: open with O_NOFOLLOW (a symlink fails to open, ELOOP),
+ * Read a REGULAR file without following a symlink at any moment: open with O_NOFOLLOW (a symlink fails to open, ELOOP)
+ * and O_NONBLOCK (a FIFO with no writer would otherwise block the open forever),
  * check the OPENED descriptor with fstat (a directory or device fails), then read through that same descriptor. No
  * check-then-read gap: an entry swapped for a link after the listing is refused, never read through.
  */
 function readRegularNoFollow(p) {
-  const fd = fs.openSync(p, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  // O_NONBLOCK: a FIFO (or device) under a manifest name must not hang the open; fstat below then refuses it before any read
+  const fd = fs.openSync(p, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
   try {
     if (!fs.fstatSync(fd).isFile()) throw Object.assign(new Error('not a regular file'), { code: 'ENOTFILE' });
     return fs.readFileSync(fd);
