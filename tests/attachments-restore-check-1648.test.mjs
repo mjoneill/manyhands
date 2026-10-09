@@ -29,6 +29,11 @@
  *   A11 the CLI: exit 0 / 1 / 2 and a last stdout line that parses, carrying the codes.
  *   A12 several defects at once are ALL reported (no stop at the first), each naming its own id.
  *   A13 EVERY MANIFEST ENTRY IS VERIFIED, ORPHANS INCLUDED (reviewer, 10:01Z): a missing, truncated or one-byte-flipped file that NO reference points at fails exactly as a referenced one does.
+ *   A14 a manifest file NAME that is a path ('../x', 'sub/x', '..', '.') is manifest-invalid and nothing outside the restored directory is read (a name is a file, never a route).
+ *   A15 a stray DIRECTORY or SYMLINK in the restored directory is unexpected-file: a dirty restore target is not a restore, whatever kind of entry made it dirty.
+ *   A16 an entry the manifest NAMES that is a symlink (or a directory) is not a restored file: file-missing for that name, and the link is NEVER FOLLOWED (a link to a live file with the right bytes must not pass the hash).
+ *   A17 manifest SHAPE, one case per guard: a fence whose readings are malformed, a files field that is not an array (schema correct), and an empty manifest next to real references each fail with their own code.
+ *   A18 the CLI on unreadable input: a manifest file that is not JSON, and a refs file that does not exist, each exit 1 with a last stdout line that parses (never a crash with no result).
  *
  * NOT COVERED, by name: how the backup job copies the directory or takes the manifest (the fence is checked only as evidence in the manifest, not as a property of the job); reading the references
  * from a restored executor store (needs pyoxigraph; a separate row once the build has it); the event log, the work ledger and the rest of #1648's record set; restore time.
@@ -78,6 +83,7 @@ test('A1 a missing restored file fails naming its id', () => {
 test('A2 a truncated file fails as a size-mismatch', () => {
   const w = world(); fs.writeFileSync(path.join(w.restored, 'b2.jpg'), w.files['b2.jpg'].subarray(0, 5));
   const r = run(w); assert.equal(r.ok, false); assert.ok(has(r, 'size-mismatch', 'b2.jpg'), JSON.stringify(r.failures));
+  assert.ok(!has(r, 'hash-mismatch', 'b2.jpg'), 'one defect, one code: a truncation is not also a hash problem');
 });
 
 test('A3 a one-byte flip of the SAME size fails on the hash alone: the failure a size check cannot see', () => {
@@ -159,4 +165,61 @@ test('A13 an UNREFERENCED manifest entry is verified too: missing, truncated and
   const w3 = world(); const b = Buffer.from(w3.files[orphan]); b[1] ^= 0xff; fs.writeFileSync(path.join(w3.restored, orphan), b);
   const r3 = run(w3); assert.equal(r3.ok, false); assert.ok(has(r3, 'hash-mismatch', orphan), JSON.stringify(r3.failures)); assert.ok(!has(r3, 'size-mismatch', orphan));
   assert.deepEqual(run(world()).orphans, [orphan], 'CONTROL: the untouched orphan is still just reported as an orphan');
+});
+
+test('A14 a manifest file name that is a path is manifest-invalid, and a file outside the restored directory is never read', () => {
+  const w = world();
+  // a file OUTSIDE the restore whose bytes and hash the manifest could "verify" if the name were followed as a path
+  const outside = Buffer.from('secret-outside-the-restore'); fs.writeFileSync(path.join(w.dir, 'outside.bin'), outside);
+  for (const name of ['../outside.bin', 'sub/x', '..', '.', '']) {
+    const m = JSON.parse(JSON.stringify(w.manifest)); m.files.push({ name, size: outside.length, sha256: sha(outside) });
+    let r; assert.doesNotThrow(() => { r = run(w, { manifest: m }); }, JSON.stringify(name));
+    assert.equal(r.ok, false, `name ${JSON.stringify(name)} must not pass`); assert.ok(has(r, 'manifest-invalid'), `${JSON.stringify(name)}: ${JSON.stringify(r.failures)}`);
+  }
+  assert.equal(run(w).ok, true, 'CONTROL: the same world with plain names passes');
+});
+
+test('A15 a stray directory or symlink in the restored directory is unexpected-file (a dirty target is dirty whatever the entry)', () => {
+  const w1 = world(); fs.mkdirSync(path.join(w1.restored, 'stray-dir'));
+  const r1 = run(w1); assert.equal(r1.ok, false, 'a stray directory'); assert.ok(has(r1, 'unexpected-file', 'stray-dir'), JSON.stringify(r1.failures));
+  const w2 = world(); fs.symlinkSync(path.join(w2.dir, 'nowhere'), path.join(w2.restored, 'stray-link'));
+  const r2 = run(w2); assert.equal(r2.ok, false, 'a stray (dangling) symlink'); assert.ok(has(r2, 'unexpected-file', 'stray-link'), JSON.stringify(r2.failures));
+  assert.equal(run(world()).ok, true, 'CONTROL: the clean world passes');
+});
+
+test('A16 a manifest-named entry that is a symlink (or a directory) fails as file-missing and is never followed for hashing', () => {
+  const w = world();
+  // the link points at a file OUTSIDE the restore that holds exactly the right bytes: a checker that follows it passes the hash
+  const target = path.join(w.dir, 'live-copy.png'); fs.writeFileSync(target, w.files['a1.png']);
+  fs.rmSync(path.join(w.restored, 'a1.png')); fs.symlinkSync(target, path.join(w.restored, 'a1.png'));
+  const r = run(w); assert.equal(r.ok, false, 'a symlink to the right bytes must not be a restore');
+  assert.ok(has(r, 'file-missing', 'a1.png'), JSON.stringify(r.failures)); assert.ok(!has(r, 'hash-mismatch', 'a1.png'), 'and it is not hashed through the link');
+  const w2 = world(); fs.rmSync(path.join(w2.restored, 'b2.jpg')); fs.mkdirSync(path.join(w2.restored, 'b2.jpg'));
+  const r2 = run(w2); assert.equal(r2.ok, false, 'a directory in place of a file'); assert.ok(has(r2, 'file-missing', 'b2.jpg'), JSON.stringify(r2.failures));
+  assert.equal(run(world()).ok, true, 'CONTROL: plain files pass');
+});
+
+test('A17 manifest shape, one case per guard: malformed fence readings, files not an array (schema correct), an empty manifest beside real references', () => {
+  for (const fence of [{}, { before: { count: 3, newestMtimeMs: 1000 } }, { before: { count: 'x', newestMtimeMs: 1000 }, after: { count: 3, newestMtimeMs: 1000 } }, { before: null, after: null }]) {
+    const w = world(); w.manifest.fence = fence;
+    let r; assert.doesNotThrow(() => { r = run(w); }, JSON.stringify(fence));
+    assert.equal(r.ok, false, JSON.stringify(fence)); assert.ok(has(r, 'manifest-fence-missing'), `${JSON.stringify(fence)}: ${JSON.stringify(r.failures)}`);
+  }
+  const w2 = world(); w2.manifest.files = 'nope';
+  let r2; assert.doesNotThrow(() => { r2 = run(w2); }); assert.equal(r2.ok, false); assert.ok(has(r2, 'manifest-invalid'), JSON.stringify(r2.failures));
+  const w3 = world(); w3.manifest.files = [];
+  const r3 = run(w3); assert.equal(r3.ok, false); assert.ok(has(r3, 'manifest-empty'), 'an empty manifest is named as such even when references exist: ' + JSON.stringify(r3.failures));
+  assert.equal(run(world()).ok, true, 'CONTROL: the well-formed world passes');
+});
+
+test('A18 the CLI on unreadable input: a manifest that is not JSON and a refs file that does not exist each exit 1 with a parseable last line', () => {
+  const w = world(); const mf = path.join(w.dir, 'manifest.json'); const rf = path.join(w.dir, 'refs.json');
+  fs.writeFileSync(mf, JSON.stringify(w.manifest)); fs.writeFileSync(rf, JSON.stringify(w.refs));
+  const go = (m, r) => spawnSync(process.execPath, [SCRIPT, '--manifest', m, '--restored', w.restored, '--refs-json', r], { encoding: 'utf8', timeout: 20000 });
+  const garbage = path.join(w.dir, 'garbage.json'); fs.writeFileSync(garbage, '{not json');
+  const a = go(garbage, rf); assert.equal(a.status, 1, a.stderr);
+  const ja = JSON.parse(a.stdout.trim().split('\n').pop()); assert.equal(ja.ok, false); assert.ok(ja.failures.some((f) => f.code === 'manifest-invalid'), a.stdout);
+  const b = go(mf, path.join(w.dir, 'no-such-refs.json')); assert.equal(b.status, 1, b.stderr);
+  const jb = JSON.parse(b.stdout.trim().split('\n').pop()); assert.equal(jb.ok, false); assert.ok(jb.failures.some((f) => f.code === 'no-references'), b.stdout);
+  assert.equal(go(mf, rf).status, 0, 'CONTROL: the same two valid files exit 0');
 });
