@@ -41,6 +41,7 @@
   "tests/epoch-cursor-1575.test.mjs",
   "tests/executor-batch-atomicity-x1.test.mjs",
   "tests/executor-meter-1570.test.mjs",
+  "tests/executor-meter-caller-1570c.test.mjs",
   "tests/gate-counters-n1.test.mjs",
   "tests/graph-auth-1559.test.mjs",
   "tests/graph-auth-wiring-1559.test.mjs",
