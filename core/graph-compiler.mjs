@@ -1359,10 +1359,9 @@ function compileCardWrite(c) {
     if (P.expectedVersion == null) pre.push(...freshSubject(I));
     else {
       pre.push(`    GRAPH ${BK} { ${I} ${VER} ?xv${k} . }`, `    FILTER(?xv${k} = ${P.expectedVersion})`);   // #1638 — the version stamp is bookkeeping
-      // #1638 — the card's bookkeeping (ver, recordedBy, entityJson) goes with it: read inside the bk graph, deleted there
-      top.push(`  OPTIONAL { GRAPH ${BK} { ${I} ?xbp${k} ?xbo${k} } }`);
-      dBinds.push(ok(`?xbp${k}`, `xbp${k}`), ok(`?xbo${k}`, `xbo${k}`));
-      bDel.push(`  ${v(I)} ?d_xbp${k} ?d_xbo${k} .`);
+      // #1638 — the card's bookkeeping (ver, recordedBy, entityJson) goes with it: read inside the bk graph, deleted there.
+      // #1666 — as one more UNION branch, so its rows ADD; a top-level OPTIONAL per card multiplied them (3^N × the rest).
+      branches.push(bkBranch(I));
       const back = (pred, type) => `    { ?xs ${ref(`${CW.scrum}${pred}`)} ${I} ; ${ref(CW.rdfType)} ${ref(`${CW.scrum}${type}`)} . FILTER(STRSTARTS(STR(?xs), ${JSON.stringify(`${P.iri}/`)})) ?xs ?xp ?xo }`;
       branches.push(
         `    { ${I} ?xp ?xo BIND(${I} AS ?xs) }`,
@@ -1404,6 +1403,10 @@ function compileCardWrite(c) {
     where.push(`  OPTIONAL {`, branches.join('\n    UNION\n'), `  }`);
     dBinds.push(ok('?xs', 'xs'), ok('?xp', 'xp'), ok('?xo', 'xo'));
     del.push(`  ?d_xs ?d_xp ?d_xo .`);
+    if (branches.some(isBkBranch)) {   // #1666 — a bk row leaves ?xs unbound and a data row leaves ?xbs unbound: each template skips the other's
+      dBinds.push(ok('?xbs', 'xbs'), ok('?xbp', 'xbp'), ok('?xbo', 'xbo'));
+      bDel.push(`  ?d_xbs ?d_xbp ?d_xbo .`);
+    }
   }
   where.push(`  BIND(IF(BOUND(?ok), ${EX.APPLIED}, ${EX.PRECONDITION_FAILED}) AS ?n_outcome)`);
   where.push(nb(JSON.stringify(digest), 'digest'), nb(ref(c.actor), 'actor'), nb('NOW()', 'at'), nb(ref(R.parts.length ? R.parts[0].iri : (R.collections?.length ? R.collections[0].iri : CW.counter)), 'target0'));
@@ -1486,6 +1489,10 @@ function canonCollectionWrite(e) {
   return { kind: 'collection', parts };
 }
 
+// #1666 — one update part's bookkeeping triples, as a branch of the deletion UNION (shared ?xbs ?xbp ?xbo).
+const bkBranch = (I) => `    { GRAPH ${BK} { ${I} ?xbp ?xbo } BIND(${I} AS ?xbs) }`;
+const isBkBranch = (b) => b.endsWith(' AS ?xbs) }');
+
 /**
  * The clauses one set of collection parts contributes to an update: guards into `pre`, deletion branches into
  * `branches`, inserts into `dIns` (through `v`, the update's ?d_ binder). Shared by entity.put kind 'collection' and by
@@ -1499,9 +1506,7 @@ function collectionClauses(parts, { OP, v, pre, top, branches, dIns, bIns, bDel,
     else {
       pre.push(`    GRAPH ${BK} { ${I} ${VER} ?xcv${tag}${k} . }`, `    ${I} ${INC} ${KEY} .`, `    FILTER(?xcv${tag}${k} = ${P.expectedVersion})`);   // #1638 — ver is bookkeeping
       // #1638 — the entity's bookkeeping (ver, recordedBy, entityJson) is deleted from the bk graph with its domain triples
-      top.push(`  OPTIONAL { GRAPH ${BK} { ${I} ?xbp${tag}${k} ?xbo${tag}${k} } }`);
-      dBinds.push(ok(`?xbp${tag}${k}`, `xbp${tag}${k}`), ok(`?xbo${tag}${k}`, `xbo${tag}${k}`));
-      bDel.push(`  ${v(I)} ?d_xbp${tag}${k} ?d_xbo${tag}${k} .`);
+      branches.push(bkBranch(I));   // #1666 — a UNION branch, never a top-level OPTIONAL (rows add, not multiply)
       branches.push(`    { ${I} ?xp ?xo BIND(${I} AS ?xs) }`);
       if (P.prior.length) branches.push(`    { VALUES (?xs ?xp ?xo) {\n${P.prior.map((q) => `      (${q.join(' ')})`).join('\n')}\n    } }`);
     }
@@ -1534,6 +1539,10 @@ function compileCollectionWrite(c) {
     where.push(`  OPTIONAL {`, branches.join('\n    UNION\n'), `  }`);
     dBinds.push(ok('?xs', 'xs'), ok('?xp', 'xp'), ok('?xo', 'xo'));
     del.push(`  ?d_xs ?d_xp ?d_xo .`);
+    if (branches.some(isBkBranch)) {   // #1666 — a bk row leaves ?xs unbound and a data row leaves ?xbs unbound: each template skips the other's
+      dBinds.push(ok('?xbs', 'xbs'), ok('?xbp', 'xbp'), ok('?xbo', 'xbo'));
+      bDel.push(`  ?d_xbs ?d_xbp ?d_xbo .`);
+    }
   }
   where.push(`  BIND(IF(BOUND(?ok), ${EX.APPLIED}, ${EX.PRECONDITION_FAILED}) AS ?n_outcome)`);
   where.push(nb(JSON.stringify(digest), 'digest'), nb(ref(c.actor), 'actor'), nb('NOW()', 'at'), nb(ref(R.parts[0].iri), 'target0'));
