@@ -2241,7 +2241,13 @@ async function readExecutorPosition(executorUrl, { timeoutMs = 10_000 } = {}) {
   if (res.status !== 200 || !Array.isArray(b) || b.length !== 1 || !b[0]?.e || !b[0]?.seq) {
     throw Object.assign(new Error(`the executor's commit marker read did not return one row (HTTP ${res.status}, ${Array.isArray(b) ? `${b.length} rows` : 'no result set'})`), { code: 'GRAPH_UNAVAILABLE' });
   }
-  return `${b[0].e.value}:${b[0].seq.value}`;
+  // the VALUES, not just the slots: a marker with an empty or non-numeric epoch or commitSeq is no currency at all, and
+  // must never be published as "undefined:undefined" (review of ff6994c)
+  const epoch = b[0].e.value, seq = b[0].seq.value;
+  if (typeof epoch !== 'string' || !/^\d+$/.test(epoch) || typeof seq !== 'string' || !/^\d+$/.test(seq)) {
+    throw Object.assign(new Error(`the executor's commit marker is malformed (epoch ${JSON.stringify(epoch)}, commitSeq ${JSON.stringify(seq)})`), { code: 'GRAPH_UNAVAILABLE' });
+  }
+  return `${epoch}:${seq}`;
 }
 
 async function handleGraphQuery(req, res) {
@@ -7460,12 +7466,13 @@ async function evaluateChecks() {
       source: CHECKS_SOURCE,
       ...(onExecutor ? {
         executorPosition,
-        // #1643 review — the position the pass STARTED at, not a snapshot every verdict shares: the checks run one by
+        // #1643 review — the position the pass STARTED at, not a snapshot every result shares: the checks run one by
         // one, so a later one may see commits made during the pass. A lower bound on what was read, never proof of
-        // pass-wide consistency.
-        executorPositionMeans: 'the executor position read BEFORE this pass (epoch:commitSeq): every verdict reflects at '
-          + 'least this state; checks run one at a time, so later ones may also reflect commits made during the pass — it is '
-          + 'a lower bound, not one snapshot shared by every verdict',
+        // pass-wide consistency, and only for results read FROM the executor.
+        executorPositionMeans: 'the executor position read BEFORE this pass (epoch:commitSeq): every executor-backed result '
+          + '(each authored ASK, each compare side, each standing check with a query) reflects at least this state; they run '
+          + 'one at a time, so later ones may also reflect commits made during the pass — a lower bound, not one shared '
+          + 'snapshot. It does not cover the standing checks that read files or measure the in-process copy',
       } : {}),
       watermark: onExecutor ? null : graphWatermark(projectedThrough),
       cardsWatched: watched,
