@@ -75,3 +75,19 @@ export function evaluateCompare(query, cmp) {
   const value = cmp.op === '<' ? l.t < r.t : l.t > r.t;
   return { ok: true, value, left: new Date(l.t).toISOString(), right: new Date(r.t).toISOString() };
 }
+
+/**
+ * #1643 — the same evaluation over a query function that answers ASYNCHRONOUSLY (the executor, over HTTP). The same
+ * rules in the same order: validation, the left side, then the right. A query that throws propagates, exactly as it does
+ * from the synchronous form, so the caller reports it as an error and never as a value.
+ */
+export async function evaluateCompareAsync(query, cmp) {
+  const bad = validateCompare(cmp);
+  if (bad) return { ok: false, error: bad };
+  const l = sideInstant(await query(cmp.left), 'left');
+  if (l.error) return { ok: false, error: l.error };
+  const r = sideInstant(await query(cmp.right), 'right');
+  if (r.error) return { ok: false, error: r.error };
+  const value = cmp.op === '<' ? l.t < r.t : l.t > r.t;
+  return { ok: true, value, left: new Date(l.t).toISOString(), right: new Date(r.t).toISOString() };
+}

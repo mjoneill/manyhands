@@ -67,6 +67,23 @@ export const KIND_DECLARATIONS = Object.freeze([
       + 'Decision 7b80418f, gated on the incremental-projection floor.',
   },
   {
+    name: 'scrum:CardImport', eventKind: null, collection: null,
+    createdBy: 'the cards migration (#1598): a card.write that imports a card from the document writes one at `<card>/import`',
+    definition: 'The PROVENANCE of a card that entered the executor by migration rather than by a live write: '
+      + '`scrum:sourceDigest` is the digest of the document copy it was imported from, so a re-run of the '
+      + 'import can prove it is replaying the same source rather than overwriting newer state. One per '
+      + 'imported card; cards created live after the cutover have none. Executor-only.',
+  },
+  {
+    name: 'scrum:PendingAnnouncement', eventKind: null, collection: null,
+    createdBy: 'a card write that commits an announcement (a claim, release, done-nudge or wiki post) in the SAME guarded update (#1598 K4)',
+    definition: 'An announcement a card change has committed to but not yet published, at '
+      + '`<card>/announce/<mutationId>`, written in the same guarded update as the card change so a crash '
+      + 'between them cannot lose it: the boot re-queues any the document does not know. Its JSON copy is '
+      + 'bookkeeping (#1638); the type triple is public. Expected to move into bookkeeping with #1629, '
+      + 'at which point this declaration leaves with it (decision 53fe6fef). Executor-only.',
+  },
+  {
     name: 'schema:Comment', eventKind: 'conversation', collection: 'conversations',
     createdBy: 'conversation_post / POST /api/conversations',
     definition: 'One message in the commons or on a card thread. Board-level when `attachedTo` is '
@@ -99,10 +116,21 @@ export const KIND_DECLARATIONS = Object.freeze([
   },
   {
     name: 'scrum:MemoryVersion', eventKind: null, collection: null,
-    createdBy: 'implicitly, by memory_update',
+    createdBy: 'implicitly, by a memory_update that changes the body (a retitle or retag writes none)',
     definition: 'One historical revision of a Memory, carrying the bytes as they stood. This is '
-      + 'what makes a memory edit non-destructive: a version is written on every update, so a '
-      + 'clobbered body can be restored to an earlier byte-exact state.',
+      + 'what makes a memory edit non-destructive: a version is written whenever the BODY changes, so a '
+      + 'clobbered body can be restored to an earlier byte-exact state. Retitling or retagging mints no '
+      + 'version of unchanged text; that history is kept by MemoryRevision instead (#1643).',
+  },
+  {
+    name: 'scrum:MemoryRevision', eventKind: null, collection: null,
+    createdBy: 'implicitly, by every memory_update (PATCH /api/memories/:id) on the log-born executor path, one per update',
+    definition: 'The IDENTITY history of a Memory, beside MemoryVersion\'s body history (#1561, RECORD_V 2). '
+      + 'Before a revise replaces a memory\'s name, tags, priority, current version or related memories, it '
+      + 'records the values it replaces on `<memory>/revision/<n>` (`scrum:ofMemory`, `scrum:revision`, the '
+      + '`scrum:prior*` values, `scrum:recordedBy` the op), read from the store inside the same guarded update '
+      + 'and never sent by the caller. Every successful update appends one; none is ever rewritten. It keeps '
+      + 'the history the event log used to keep. Executor-only: the old in-process copy never projects it.',
   },
   // ── decisions and their scaffolding ───────────────────────────────────────
   {
@@ -210,6 +238,15 @@ export const KIND_DECLARATIONS = Object.freeze([
       + 'several messages, #1372). Optional `scrum:traceId` (an opaque consumer-side id, ≤128 chars) and '
       + '`scrum:ofModelCall` (an edge to the scrum:ModelCall row that produced the step; a ref the board '
       + 'does not hold is refused, never dangling). Never edited: the latest by `scrum:at` is the current state.',
+  },
+  {
+    name: 'scrum:DeliveryStep', eventKind: null, collection: null,
+    createdBy: 'the deliveries unit\'s guarded update on every delivery event (POST /api/deliveries/:id/events), and the #1582 migration',
+    definition: 'ONE STEP of a Delivery as the EXECUTOR holds it (#1582): the same fact the old in-process copy '
+      + 'projects as scrum:DeliveryEvent, under the executor\'s name for it. `scrum:stepOf` points home, '
+      + '`scrum:stepIndex` orders the steps, and `scrum:state` / `scrum:at` / `scrum:source` / `scrum:attempt` / '
+      + '`scrum:reason` / `scrum:creator` carry what happened. The delivery node is versioned and each step is '
+      + 'appended under its expected version, never rewritten. Two names, one fact, until the old copy retires.',
   },
   {
     name: 'scrum:Model', eventKind: 'model', collection: 'models',

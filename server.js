@@ -38,7 +38,7 @@ import { fileURLToPath } from 'node:url';
 import { isOpenDelivery } from './core/delivery.mjs';   // #1346
 import { exportableSpaces, resolveSpaces, describeExportSet } from './core/export-spaces.mjs';   // #1321
 import { loadDomain, loadDomainShared, saveDomain } from './core/store.mjs';
-import { validateCompare, evaluateCompare } from './core/check-compare.mjs';   // #1610
+import { validateCompare, evaluateCompareAsync } from './core/check-compare.mjs';   // #1610; #1643 one async form serves both sources
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { countLegacy, setLegacyContext, installStructuredCloneCounter } from './core/legacy-counters.mjs';
 import { createGraphSlice } from './core/graph-slice-routes.mjs';
@@ -49,6 +49,7 @@ import {
   memoryCreateIntention, memoryReviseIntention, decisionCreateIntention, decisionRelateIntention,
   seatDeclareIntention, seatClearIntention, SEAT_DECL_BASE,
   collapseIdentities, identitiesFromEvents, identityOf,
+  Q_POSITION,   // #1643 — the executor's commit marker, read for the checks' stated currency
 } from './core/logborn-unit.mjs';
 import { createSmallkindsUnit, wakeCreateIntention, wakeIri } from './core/smallkinds-unit.mjs';   // #1624
 import { BOARD_TOOLS } from './core/board-tools.mjs';
@@ -2215,6 +2216,32 @@ if (READY_SOURCE === 'executor' && !process.env.SCRUM_GRAPH_EXECUTOR_URL) {
 }
 if (GRAPH_QUERY_SOURCE === 'executor' && !process.env.SCRUM_GRAPH_EXECUTOR_URL) {
   throw new Error('#1570: SCRUM_GRAPH_QUERY_SOURCE=executor requires SCRUM_GRAPH_EXECUTOR_URL');
+}
+// #1643 — WHICH STORE ANSWERS the card checks (GET /api/checks, the MCP tick, the digest). `executor` runs every authored
+// ASK, every compare side and every standing query against the executor's public dataset; unset is today's in-process path.
+const CHECKS_SOURCE = process.env.SCRUM_GRAPH_CHECKS_SOURCE === 'executor' ? 'executor' : 'replica';
+if (CHECKS_SOURCE === 'executor' && !process.env.SCRUM_GRAPH_EXECUTOR_URL) {
+  throw new Error('#1643: SCRUM_GRAPH_CHECKS_SOURCE=executor requires SCRUM_GRAPH_EXECUTOR_URL');
+}
+/**
+ * #1643 — where the executor stands, `epoch:commitSeq` (the form LOGBORN.position() reports), read from its commit marker.
+ * The marker lives in the bookkeeping graph, which the public dataset cannot reach by design, so this one fixed query goes
+ * to the full `/query`; it reads nothing but the marker. Exactly one row, or GRAPH_UNAVAILABLE: a pass never states a
+ * currency it did not read.
+ */
+async function readExecutorPosition(executorUrl, { timeoutMs = 10_000 } = {}) {
+  let res; let j = null;
+  try {
+    res = await fetch(`${executorUrl}/query`, { method: 'POST', body: Q_POSITION, signal: AbortSignal.timeout(timeoutMs) });
+    try { j = JSON.parse(await res.text()); } catch { /* reported below */ }
+  } catch (e) {
+    throw Object.assign(new Error(`the executor's position could not be read: ${e?.cause?.code || e?.name || e?.message}`), { code: 'GRAPH_UNAVAILABLE' });
+  }
+  const b = j?.results?.bindings;
+  if (res.status !== 200 || !Array.isArray(b) || b.length !== 1 || !b[0]?.e || !b[0]?.seq) {
+    throw Object.assign(new Error(`the executor's commit marker read did not return one row (HTTP ${res.status}, ${Array.isArray(b) ? `${b.length} rows` : 'no result set'})`), { code: 'GRAPH_UNAVAILABLE' });
+  }
+  return `${b[0].e.value}:${b[0].seq.value}`;
 }
 
 async function handleGraphQuery(req, res) {
@@ -6957,11 +6984,17 @@ const STANDING_CHECKS = [
     // unregistered on every new board — caught by the negative control the
     // moment it was made able to fail. So: runtime-declared kinds are excluded
     // by name here, and registry-declared kinds by the NOT EXISTS join.
-    query: 'SELECT ?type (COUNT(?x) AS ?n) (SAMPLE(?x) AS ?example) WHERE { ?x a ?type . '
+    // #1643 — AGGREGATE FIRST, then the registry join. The original form ran the NOT EXISTS once per INSTANCE before
+    // grouping: fine on the old copy (~0.2 s, 0 rows), but on the executor's public dataset (48k DeliveryStep nodes
+    // alone) it did not finish in 60 s, measured on a restored copy of the live store (2026-10-10 04:33Z, #1643). Grouping
+    // first leaves ~40 rows for the join: 0.2 s there. Same answer on the old copy (both 0 rows), so ONE query serves both
+    // sources and their standing rows stay comparable text for text.
+    query: 'SELECT ?type ?n ?example WHERE { { SELECT ?type (COUNT(?x) AS ?n) (SAMPLE(?x) AS ?example) WHERE { ?x a ?type . '
       + `FILTER(STRSTARTS(STR(?type), "${SCRUM_NS}")) `
       + `FILTER(?type NOT IN (${KIND_DECLARATIONS.filter((k) => typeof k?.name === 'string' && k.name.startsWith('scrum:')).map((k) => `<${SCRUM_NS}${k.name.slice('scrum:'.length)}>`).join(', ')})) `
+      + '} GROUP BY ?type } '
       + 'FILTER NOT EXISTS { ?k a scrum:KindDefinition ; schema:name ?name . '
-      + 'FILTER(?name = CONCAT("scrum:", STRAFTER(STR(?type), "#"))) } } GROUP BY ?type ORDER BY DESC(?n)',
+      + 'FILTER(?name = CONCAT("scrum:", STRAFTER(STR(?type), "#"))) } } ORDER BY DESC(?n)',
   },
   {
     // #1381 (#1380 item 3) — THE FILE, not the save path. The history gate
@@ -7015,7 +7048,9 @@ const STANDING_CHECKS = [
     readsDocumentPosts: true,   // #1574 — disabled under the graph conversations unit (see the standing loop)
     claim: 'no held role is within 24 h of lapsing unannounced, and no seat is acting on a role that lapsed in the last 7 days (#1400)',
     run: (data, ctx) => roleExpiryRows({
-      decls: seatDeclsFromGraph(ctx.queryGraphAll, ctx.store),
+      // #1643 — on the executor pass the declarations come from liveSeatDecls() (the log-born reader when that unit is
+      // on), prefetched by the caller because this runner is synchronous; on the old path, the replica as before.
+      decls: ctx.seatDecls ?? seatDeclsFromGraph(ctx.queryGraphAll, ctx.store),
       conversations: data.conversations || [],
       now: new Date().toISOString(),
     }),
@@ -7036,6 +7071,9 @@ const STANDING_CHECKS = [
     // beside standing[]; a replica that is not built yet throws here, which
     // the runner reports as `error` — never as zero rows.
     id: 'graph-store-meter',
+    // #1643 — this check measures the in-process copy ITSELF, not the board, so an executor pass still builds the copy
+    // for it (and only for it); it retires with the copy (#1645), never by reading the executor.
+    measuresReplica: true,
     claim: 'the in-process graph store is within the ceilings decision d0c5839d named — resident store ≤ 1.5 GB, '
       + 'warm start ≤ 10 s, replay tail ≤ 60 s — so (b) stays a measured choice and (a1)/#1389 is reached by a number',
     run: () => graphStoreMeter().crossed,
@@ -7167,6 +7205,8 @@ async function handleChecks(req, res) {
     });
   } catch (e) {
     if (e?.code === 'GRAPH_DEPS_MISSING') return sendJSON(res, 503, { error: e.message, code: e.code });
+    // #1643 — an executor pass that could not read the executor's position states no verdicts at all: a retryable 503
+    if (e?.code === 'GRAPH_UNAVAILABLE') return sendJSON(res, 503, { error: e.message, code: 'CHECKS_SOURCE_UNAVAILABLE' });
     console.error('GET /api/checks:', e.message);
     sendJSON(res, 500, { error: e.message });
   }
@@ -7228,9 +7268,23 @@ async function evaluateChecks() {
     // #949 (scope extension) — a VERDICT surface needs currency more than a
     // query surface does. A seat reading /api/graph re-runs a surprising number;
     // "this tripwire holds" and "this card is ready" get BELIEVED.
-    const { store, projectedThrough } = await warmGraphStore();
+    //
+    // #1643 — WHERE the verdicts are read. With SCRUM_GRAPH_CHECKS_SOURCE=executor every authored ASK, every compare
+    // side and every standing query goes to the executor's public dataset; the old copy is neither built nor read for a
+    // verdict (only the store meter, which measures the copy itself, builds it). The pass states the executor position
+    // it read at as `executorPosition`, read BEFORE the queries; an executor that cannot answer that read fails the pass
+    // (503 via handleChecks), never a pass with no stated currency.
+    const onExecutor = CHECKS_SOURCE === 'executor';
+    const executorUrl = process.env.SCRUM_GRAPH_EXECUTOR_URL;
+    const { queryGraph, queryGraphAll, queryGraphExecutor } = await loadGraphModules();
+    let store = null, projectedThrough = null, executorPosition = null, seatDecls;
+    if (onExecutor) executorPosition = await readExecutorPosition(executorUrl);
+    else ({ store, projectedThrough } = await warmGraphStore());
     const generation = _graphGeneration;   // #1404 — the board these verdicts describe
-    const { queryGraph, queryGraphAll } = await loadGraphModules();
+    // ONE query function for both sources, with queryGraph's answer shape (`ask` for an ASK, `rows` for a SELECT).
+    const runQuery = onExecutor
+      ? (q, opts) => queryGraphExecutor(executorUrl, q, opts)
+      : async (q, opts) => queryGraph(store, q, opts);
     const data = readBoard();
     const results = [];
     let stale = 0, errors = 0, watched = 0, unwatched = 0;
@@ -7266,19 +7320,22 @@ async function evaluateChecks() {
       }
       watched += 1;
       await _yield();   // #1404 — a cheap door gets served between cards
-      const evaluated = checks.map((c) => {
+      // #1643 — one check at a time, awaited: the executor's answer is HTTP, and a card's checks must not all land on it at
+      // once. `ms` is now network plus engine on the executor path (engine alone on the old copy, as before).
+      const evaluated = [];
+      for (const c of checks) evaluated.push(await (async () => {
         checksTotal += 1;
         const t0 = performance.now();
         const priced = (row) => { const ms = Math.round(performance.now() - t0); return { ...row, ms, ...(ms > CHECK_CEILING_MS ? { slow: true } : {}) }; };
         try {
           if (c.compare) {   // #1610 — two cheap reads compared in code, instead of one ASK the engine cannot plan
-            const cmp = evaluateCompare((q) => queryGraph(store, q, { terms: true }), c.compare);
+            const cmp = await evaluateCompareAsync((q) => runQuery(q, { terms: true }), c.compare);
             if (!cmp.ok) { errors += 1; return priced({ claim: c.claim, status: 'error', error: cmp.error }); }
             const holds = cmp.value === c.expect;
             if (!holds) stale += 1;
             return priced({ claim: c.claim, status: holds ? 'holds' : 'stale', expected: c.expect, actual: cmp.value, compared: { left: cmp.left, op: c.compare.op, right: cmp.right } });
           }
-          const r = queryGraph(store, c.ask);
+          const r = await runQuery(c.ask);
           // ⚠️ The ASK boolean arrives as `ask`, NOT `boolean` — read from
           // core/graph-replica.mjs rather than assumed. The first version of
           // this line guessed `.boolean`, which is always undefined, so every
@@ -7303,7 +7360,7 @@ async function evaluateChecks() {
           errors += 1;
           return priced({ claim: c.claim, status: 'error', error: e?.message || String(e) });
         }
-      });
+      })());
       results.push({ shortId: card.shortId, title: card.title, checks: evaluated });
     }
 
@@ -7312,7 +7369,8 @@ async function evaluateChecks() {
     // tripwire for?" and `standing` answers "which claims does the SYSTEM check
     // because nobody would think to". Summing them would make `stale` mean two
     // things at once, which is the confusion this endpoint exists to refuse.
-    const standing = STANDING_CHECKS.map((c) => {
+    const standing = [];
+    for (const c of STANDING_CHECKS) standing.push(await (async () => {
       // #1574 — A DECISION-MAKER THAT CANNOT SEE GRAPH POSTS IS SWITCHED OFF, SAYING SO. With the conversations unit on,
       // a seat may post only to the graph; a check that reads the document's posts would read it as silent and nudge it
       // (stale-claims) or act on its role (role-expiry). It answers `disabled` with the reason, never an empty "nothing
@@ -7321,17 +7379,21 @@ async function evaluateChecks() {
       const t0 = performance.now();
       const priced = (row) => { const ms = Math.round(performance.now() - t0); return { ...row, ms, ...(ms > CHECK_CEILING_MS ? { slow: true } : {}) }; };   // #1404
       try {
+        // #1643 — on the executor pass: the meter that measures the old copy builds it (only it), and role-expiry's
+        // declarations come from liveSeatDecls() (the log-born reader when that unit is on), fetched once, here.
+        if (onExecutor && c.measuresReplica) ({ store } = await warmGraphStore());
+        if (onExecutor && c.id === 'role-expiry' && seatDecls === undefined) seatDecls = (await liveSeatDecls()).decls;
         // #1381 — a check may READ A FILE instead of the replica (`run`); same
         // shape out, same digest line, same "an error is not an empty result".
-        if (typeof c.run === 'function') return priced({ id: c.id, claim: c.claim, rows: c.run(data, { store, queryGraph, queryGraphAll }) ?? [] });   // #1400 — a check may read the replica too; #1405 — folds use queryGraphAll
-        const r = queryGraph(store, c.query);
+        if (typeof c.run === 'function') return priced({ id: c.id, claim: c.claim, rows: c.run(data, { store, queryGraph, queryGraphAll, seatDecls }) ?? [] });   // #1400 — a check may read the replica too; #1405 — folds use queryGraphAll
+        const r = await runQuery(c.query);
         return priced({ id: c.id, claim: c.claim, query: c.query, rows: r.rows ?? [] });
       } catch (e) {
         // An error is NOT an empty result. A standing check that cannot run must
         // never read as "nothing found" — the #792 lesson, on a second surface.
         return priced({ id: c.id, claim: c.claim, query: c.query, error: e?.message || String(e) });
       }
-    });
+    })());
 
     // ⛔⛔ #896 — DOES EVERY SHA ON THE BOARD NAME A REAL COMMIT?
     //
@@ -7392,7 +7454,20 @@ async function evaluateChecks() {
       checkCeilingMs: CHECK_CEILING_MS,
       // #949 — WHICH STORE STATE THESE VERDICTS DESCRIBE. `stale: 0` computed
       // from a lagging projection is a true statement about the wrong board.
-      watermark: graphWatermark(projectedThrough),
+      // #1643 — and WHICH STORE: `source` names the one that answered (as /api/ready and /api/graph do). An executor
+      // pass states its currency as `executorPosition` (`epoch:commitSeq`, read before its queries) and has no
+      // watermark, because no projection stood between the board and these verdicts.
+      source: CHECKS_SOURCE,
+      ...(onExecutor ? {
+        executorPosition,
+        // #1643 review — the position the pass STARTED at, not a snapshot every verdict shares: the checks run one by
+        // one, so a later one may see commits made during the pass. A lower bound on what was read, never proof of
+        // pass-wide consistency.
+        executorPositionMeans: 'the executor position read BEFORE this pass (epoch:commitSeq): every verdict reflects at '
+          + 'least this state; checks run one at a time, so later ones may also reflect commits made during the pass — it is '
+          + 'a lower bound, not one snapshot shared by every verdict',
+      } : {}),
+      watermark: onExecutor ? null : graphWatermark(projectedThrough),
       cardsWatched: watched,
       cardsUnwatched: unwatched,
       // #902 — of the checks that ARE armed, how many can only see card identity
