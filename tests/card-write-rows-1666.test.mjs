@@ -11,6 +11,7 @@ import { HAVE_PY, tmpStore, startExecutor, killExecutor } from './helpers/graph-
 import { createGraphClient } from '../core/graph-client.mjs';
 import { compile } from '../core/graph-compiler.mjs';
 import { cardQuads, priorQuads, cardIriOf } from '../core/cards-graph.mjs';
+import { entityQuads } from '../core/collections-unit.mjs';
 
 const SKIP = HAVE_PY ? false : 'UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)';
 const ACTOR = 'https://scrumboard.local/person/ada';
@@ -49,6 +50,35 @@ test('#1666 card.write: the rows a 6-card update evaluates grow with the cards t
       const vers = bk.rows.filter((row) => row.p.value === 'urn:ex:ver').map((row) => row.o.value);
       assert.deepEqual(vers, ['2'], `${c.id}: the old version stamp is replaced, not added to`);
       assert.equal(bk.rows.filter((row) => row.p.value.endsWith('entityJson')).length, 1, `${c.id}: one entityJson`);
+    }
+  } finally { await killExecutor(x); }
+});
+
+test('#1666 entity.put collection: the rows a 6-entity update evaluates grow with the entities touched, not as their product', { skip: SKIP }, async () => {
+  const x = await startExecutor({ store: tmpStore('rowsc-'), datasetId: 'rowsc-test', create: true });
+  try {
+    const g = createGraphClient({ baseUrl: x.baseUrl, expectedDatasetId: 'rowsc-test', timeoutMs: 30000 });
+    const model = (k, name) => ({ '@id': `https://scrumboard.local/model/rows${k}`, '@type': 'scrum:Model', 'scrum:modelKey': `rows${k}`, name });
+    const cpart = (e, expectedVersion, prior, version) => ({ collection: 'models', iri: e['@id'], expectedVersion, version, quads: entityQuads(e), ...(prior ? { prior: entityQuads(prior) } : {}), json: JSON.stringify(e) });
+    const put = (parts) => ({ kind: 'entity.put', opId: op(), actor: ACTOR, entity: { kind: 'collection', parts } });
+    const N = 6;
+    const olds = Array.from({ length: N }, (_, k) => model(k, `model ${k}`));
+    assert.equal((await g.update(put(olds.map((e) => cpart(e, null, null, '1'))))).outcome, 'APPLIED');
+    const intention = put(olds.map((e, k) => cpart(model(k, `renamed ${k}`), '1', e, '2')));
+
+    const visited = await g.query(`SELECT (COUNT(*) AS ?n) WHERE { { ?s ?p ?o } UNION { GRAPH ${BK} { ?s ?p ?o } } FILTER(STRSTARTS(STR(?s), "https://scrumboard.local/model/rows")) }`);
+    assert.ok(visited.ok, visited.reason);
+    const triples = Number(visited.rows[0].n.value);
+    const counted = await g.query(`SELECT (COUNT(*) AS ?n) ${whereOf(compile(intention).sparql)}`);
+    assert.ok(counted.ok, counted.reason);
+    const solutions = Number(counted.rows[0].n.value);
+    assert.ok(solutions <= 3 * triples, `the update evaluates ${solutions} solutions for ${triples} triples on ${N} entities — a cross product`);
+
+    const r = await g.update(intention);
+    assert.equal(r.outcome, 'APPLIED', JSON.stringify(r));
+    for (let k = 0; k < N; k++) {
+      const bk = await g.query(`SELECT ?p ?o WHERE { GRAPH ${BK} { <https://scrumboard.local/model/rows${k}> ?p ?o } }`);
+      assert.deepEqual(bk.rows.filter((row) => row.p.value === 'urn:ex:ver').map((row) => row.o.value), ['2'], `rows${k}: the old version stamp is replaced, not added to`);
     }
   } finally { await killExecutor(x); }
 });
