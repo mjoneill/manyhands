@@ -19,6 +19,8 @@
  *   V3 HAZARDS      on the executor leg the wildcard ASK holds; the cast compare holds; the uncast compare is an error (status only; the engines word their errors differently); the phantom-block standing check returns its row
  *   V4 COST         every per-card check row and every standing row on the executor leg carries an integer `ms` >= 0 (network plus engine, "reported", not bounded: the one-minute-tick bound is a load figure, see NOT covered)
  *   V5 FAILURE      with the flag on and the executor unable to answer queries, the endpoint never reports a verdict it did not read: not 200 with any holds/stale, and no standing check with empty rows and no error
+ *   V6 CURRENCY     the position the executor pass states is the one it READ: a well-formed commit marker is published as epoch:commitSeq exactly; a marker whose values are missing, empty or not digits is refused (503 CHECKS_SOURCE_UNAVAILABLE) and
+ *                   no payload carries a made-up position such as "undefined:undefined" (added after the ff6994c review)
  *
  * Normalisation (stated so no row hides a difference behind it): dropped = per-row `ms` and `slow`, `evaluatedAt`, `evaluationMs`, `passes`, `generation`, `watermark`, `storeMeter`, `executorPosition`, `source`,
  * `servedFrom`/`ageMs`, `note`, `checkCeilingMs`, `shaIntegrity` (git, same on both), the TEXT of an `error` (replaced by "error: <non-empty>"), and the ORDER of a standing check's rows (its queries have no ORDER BY;
@@ -54,11 +56,12 @@ const PROBE_CLAIM = 'v8 executor-only probe: a fact that exists only in the exec
 
 /** A proxy in front of the executor that can answer every query with a 503 (for V5). */
 async function failProxy(execUrl) {
-  const state = { failQueries: false };
+  const state = { failQueries: false, marker: null };   // marker: null = pass through; else the bindings the commit-marker read is answered with (for V6)
   const srv = http.createServer((req, res) => {
     const chunks = []; req.on('data', (c) => chunks.push(c));
     req.on('end', async () => {
       if (state.failQueries && req.method === 'POST' && req.url.startsWith('/query')) { res.writeHead(503, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ error: 'test: executor cannot answer' })); }
+      if (state.marker && req.method === 'POST' && req.url.startsWith('/query') && Buffer.concat(chunks).toString().includes('urn:ex:commitSeq')) { res.writeHead(200, { 'content-type': 'application/sparql-results+json' }); return res.end(JSON.stringify({ head: { vars: ['e', 'seq'] }, results: { bindings: state.marker } })); }
       const headers = Object.fromEntries(Object.entries(req.headers).filter(([k]) => !['host', 'connection', 'content-length'].includes(k)));
       try {
         const f = await fetch(`${execUrl}${req.url}`, { method: req.method, headers, body: req.method === 'GET' ? undefined : Buffer.concat(chunks) });
@@ -186,5 +189,32 @@ test('V5 FAILURE: with the flag on and the executor unable to answer queries, th
       assert.ok(rows.length > 0 && rows.every((c) => c.status === 'error'), `a 200 may only carry errors, never a verdict it could not read: ${JSON.stringify(rows.map((c) => c.status))}`);
       for (const s of (r.body.standing ?? []).filter((x) => x.query)) assert.ok(s.disabled || s.error, `a standing check that reads the store and could not says so, never empty rows: ${JSON.stringify(s).slice(0, 200)}`);   // the file-reading checks (roster, claims) never touch the store
     } else { assert.ok([502, 503, 504].includes(r.status), `a refusal is a 5xx the caller can retry (got ${r.status})`); assert.ok(r.body?.code || r.body?.error, 'and says why'); }
+  });
+});
+
+test('V6 CURRENCY: the stated executorPosition is the marker that was read; a malformed marker is refused, never published as a position', { skip: SKIP, timeout: 900000 }, async () => {
+  await world(async ({ start, proxy }) => {
+    const B = await start({ SCRUM_GRAPH_CHECKS_SOURCE: 'executor' });
+    const lit = (value) => ({ type: 'literal', value });
+    proxy.state.marker = [{ e: lit('7'), seq: lit('424242') }];
+    const ok = await get(B);
+    assert.equal(ok.status, 200, `CONTROL: a well-formed marker is served: ${ok.text.slice(0, 200)}`);
+    assert.equal(ok.body.executorPosition, '7:424242', 'CONTROL: the position stated is the one the marker carried, not one computed elsewhere');
+    const BAD = {
+      'objects with no values': [{ e: {}, seq: {} }],
+      'empty strings': [{ e: lit(''), seq: lit('') }],
+      'non-numeric epoch': [{ e: lit('abc'), seq: lit('9') }],
+      'non-numeric commitSeq': [{ e: lit('2'), seq: lit('12x') }],
+      'negative commitSeq': [{ e: lit('2'), seq: lit('-1') }],
+      'spaces around the digits': [{ e: lit('2'), seq: lit(' 9 ') }],
+      'two rows': [{ e: lit('2'), seq: lit('9') }, { e: lit('2'), seq: lit('10') }],
+    };
+    for (const [name, marker] of Object.entries(BAD)) {
+      proxy.state.marker = marker; const r = await get(B);
+      assert.equal(r.status, 503, `${name}: refused, not served (got ${r.status}: ${r.text.slice(0, 160)})`);
+      assert.equal(r.body?.code, 'CHECKS_SOURCE_UNAVAILABLE', `${name}: refused with the documented code`);
+      assert.ok(!/undefined:|NaN|\[object/.test(r.text), `${name}: no made-up position anywhere in the answer`);
+      assert.ok(!('executorPosition' in (r.body ?? {})), `${name}: the refusal carries no position at all`);
+    }
   });
 });
