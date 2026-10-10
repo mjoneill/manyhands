@@ -18,9 +18,8 @@
  *   N6 TRUNCATION  a group cut at limit=2 shows the SAME members on both legs (sorted by id), `total` 3, `truncated` true
  *   N7 FAILURE     with the flag on and the executor unable to answer queries, the endpoint reports no neighbours it did not read: a 5xx with a code, never a 200 with `exists: true`
  *
- * Normalisation (so no row hides a difference behind it): dropped = `rebuiltMs`, `watermark`, `source`, `executorPosition`; `kinds` compared as a SET and groups in `edges` compared as a set keyed by (direction, predicate), because
- * the code sorts groups by `total` only (ties come out in the engine's iteration order, which differs between engines); but the documented key IS checked on each leg (totals never increase within a direction). Members inside
- * a group keep their order (the code sorts them by id). Everything else is compared as is.
+ * Normalisation (so no row hides a difference behind it): dropped = `rebuiltMs`, `watermark`, `source`, `executorPosition`; `kinds` and `edges` are compared AS LISTS, in the order each leg returned them (PO ruling on #1642: groups by total descending then predicate ascending within a direction, `kinds` sorted lexically, on BOTH legs;
+ * each leg's own order is asserted in norm()). Members inside a group keep their order (the code sorts them by id). Everything else is compared as is. NOTE: the ruling says 'predicate IRI'; the payload shows the compact name, so the rows assert on that.
  *
  * NOT covered, by name: label aliases (#1640 has not moved: the card's named difference for `sameAs` edges is not exercised because the fixture has no alias); conversation posts as in-edges (`schema:about`) and the
  * `Comment` label rule; the real board's data distribution and the 1000+-child apex (the live cost of labelling); AMBIGUOUS_NODE (two cards with one identifier); blank-node list cells; the MCP tool's own argument.
@@ -122,9 +121,10 @@ const DROP = new Set(['rebuiltMs', 'watermark', 'source', 'executorPosition']);
 function norm(r) {
   if (r.status !== 200) return { status: r.status, code: r.body?.code ?? null, tried: r.body?.tried ?? null };
   const b = r.body;
-  for (const dir of ['out', 'in']) { const t = (b.edges ?? []).filter((g) => g.direction === dir).map((g) => g.total); assert.deepEqual([...t], [...t].sort((x, y) => y - x), `the documented key holds on this leg: totals never increase within "${dir}" (${t})`); }
+  for (const dir of ['out', 'in']) { const k = (b.edges ?? []).filter((g) => g.direction === dir).map((g) => [g.total, g.predicate]); const want = [...k].sort((x, y) => (y[0] - x[0]) || (x[1] < y[1] ? -1 : x[1] > y[1] ? 1 : 0)); assert.deepEqual(k, want, `the documented key holds on this leg (#1642 ruling): within "${dir}", total descending, ties by predicate ascending (${JSON.stringify(k)})`); }
+  assert.deepEqual(b.kinds ?? [], [...(b.kinds ?? [])].sort(), 'kinds are sorted lexically on this leg (#1642 ruling)');
   const o = Object.fromEntries(Object.entries(b).filter(([k]) => !DROP.has(k)));
-  return { status: 200, ...o, kinds: [...(b.kinds ?? [])].sort(), edges: [...(b.edges ?? [])].sort((p, q) => (p.direction + p.predicate).localeCompare(q.direction + q.predicate)) };
+  return { status: 200, ...o, kinds: b.kinds ?? [], edges: b.edges ?? [] };
 }
 const canon = (v) => (Array.isArray(v) ? v.map(canon) : (v && typeof v === 'object') ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canon(v[k])])) : v);
 const firstDiff = (a, b, p = '$') => { if (JSON.stringify(canon(a)) === JSON.stringify(canon(b))) return null; if (a && b && typeof a === 'object' && typeof b === 'object') { for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) { const d = firstDiff(a[k], b[k], `${p}.${k}`); if (d) return d; } } return `${p}: replica ${JSON.stringify(a)?.slice(0, 160)} | executor ${JSON.stringify(b)?.slice(0, 160)}`; };
