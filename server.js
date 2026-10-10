@@ -1018,7 +1018,7 @@ const meterRoute = new AsyncLocalStorage();
 
 // #1659 — where a slow card write's time went. The write lock times four phases into the request's meterRoute store
 // (lockWait → refresh → executorUpdate → postCommit, summed over a conflict's retry; the handler's own staging is the
-// unnamed rest), and when the response finishes ONE line is written for a request that committed cards and took at least
+// unnamed rest), and when the write completes ONE line is written for a request that attempted a card commit and took at least
 // the threshold. Integers floored from one clock, so the phases never sum past the total; no content, no query text.
 const CARD_WRITE_SLOW_MS = Number(process.env.SCRUM_CARD_WRITE_SLOW_MS ?? process.env.SCRUM_EXECUTOR_METER_SLOW_MS ?? 1000);
 const cardWritePhases = () => {
@@ -1027,9 +1027,10 @@ const cardWritePhases = () => {
 };
 function logCardWriteIfSlow(st) {
   const cw = st?.cardWrite;
-  if (!cw?.cards || st.t0 == null) return;
+  if (!cw?.cards || st.t0 == null || cw.logged) return;
   const total = Math.floor(performance.now() - st.t0);
   if (total < CARD_WRITE_SLOW_MS) return;
+  cw.logged = true;   // one line per request, even if it takes the lock again
   const ms = (n) => Math.max(0, Math.floor(n));
   const g = READ_GATE ? READ_GATE.stats() : null;
   const gate = g ? `running:${Number(g.running) || 0}/waiting:${Number(g.waiting) || 0}/lost:${Number(g.lost) || 0}` : '-';
@@ -7531,7 +7532,10 @@ function withWriteLock(fn) {
   const run = () => { const cw = cardWritePhases(); if (cw) cw.lockWait += performance.now() - asked; return locked(); };
   const next = _writeLock.then(() => run(), () => run());
   _writeLock = next.catch(() => {});
-  return next;
+  // #1659 — the line is written when the WRITE completes, not when the response does: a client that gave up on a slow
+  // write never sees 'finish', and that abandoned write is exactly the one worth a line.
+  const st = meterRoute.getStore();
+  return next.then((v) => { logCardWriteIfSlow(st); return v; }, (e) => { logCardWriteIfSlow(st); throw e; });
 }
 
 /**
@@ -12862,8 +12866,6 @@ function routeApi(method, urlPath, req, res) {
     const m = urlPath.match(r.re);
     // #1570 — every executor call made for this request, readiness checks included, is metered under its route pattern.
     if (m) return meterRoute.run({ route: `${method} ${r.re.source}`, rid: crypto.randomUUID(), caller: req.headers['user-agent'], peer: req.socket?.remotePort, t0: performance.now() }, () => {
-      const st = meterRoute.getStore();
-      res.once('finish', () => logCardWriteIfSlow(st));   // #1659
       // #715 — the method decides the read kind for everything this handler
       // does, including after its awaits.
       // ⛔ GET alone. A POST that looks read-only is not: search with a reader
