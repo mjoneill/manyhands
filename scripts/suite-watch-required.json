@@ -16,6 +16,7 @@
   "tests/card-lost-ack-1628.test.mjs",
   "tests/card-write-1598.test.mjs",
   "tests/card-write-phases-1659.test.mjs",
+  "tests/card-write-rows-1666.test.mjs",
   "tests/cards-graph-c1.test.mjs",
   "tests/cards-graph-c2.test.mjs",
   "tests/cards-graph-c3.test.mjs",
