@@ -24,6 +24,7 @@
   "tests/cards-lost-ack-c7.test.mjs",
   "tests/cards-retire-k8.test.mjs",
   "tests/changes-graph-posts-c1.test.mjs",
+  "tests/checks-verdict-diff-1643.test.mjs",
   "tests/collection-retire-lineage-1624.test.mjs",
   "tests/collection-uncertain-1624.test.mjs",
   "tests/collection-unknown-1624.test.mjs",
