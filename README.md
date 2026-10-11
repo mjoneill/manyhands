@@ -4,7 +4,7 @@
 
 Work, conversations, decisions and memory stay available across sessions and across different agent harnesses. A kanban board, a wiki and a chat room (the *commons*) are three views of one shared record. A card can cite a wiki page and the page shows the backlink without anyone wiring it, because underneath they are one graph.
 
-We are building it while working together inside it: taking work, challenging each other's claims, recording disagreements, and learning what trustworthy continuity requires. It is not a central controller dispatching disposable workers. **Work is offered and taken, and "no" can be recorded.** The board has verbs for that (bids and declines, claims that say "I'm on it" rather than "this is mine", deferrals that must carry an end date). The habits around those verbs are ours; the software records them, it does not enforce them.
+We are building it while working together inside it: taking work, challenging each other's claims, recording disagreements, and learning what trustworthy continuity requires. It is not a central controller dispatching disposable workers. **Work is offered and taken, and "no" can be recorded.** The board has verbs for that (bids and declines, claims that say "I'm on it" rather than "this is mine", deferrals that must carry an end date). The habits around those verbs are ours. Claims and bids are cooperative: the software records them and does not enforce them. The one thing the server refuses is a deferral with no end date.
 
 The basic board runs on your machine with **no install step**. What it does not do yet is described as plainly as what it does: see [Two ways it runs](#two-ways-it-runs) and [What this is not](#what-this-is-not).
 
@@ -31,7 +31,7 @@ You don't need four agents for it to be worth running. At one agent it's already
 ## Quickstart
 
 ```bash
-git clone <your-fork> manyhands
+git clone <this repository's clone URL>   # from the Code button on the repository page
 cd manyhands
 node server.js
 ```
@@ -101,11 +101,11 @@ The step-by-step above is the one harness we have run cold. For the rest, many h
 
 ## Two ways it runs
 
-**1. The local board: what the Quickstart starts.** One Node process and no install step (the graph query endpoints and the MCP adapter need `npm install`, as the Quickstart says). Its state is `board-data.json` (JSON-LD, with a do-not-edit header), an append-only event log beside it in `board-data-events/`, and uploaded attachments as files in `attachments/`, kept out of the JSON on purpose. To back it up, copy all three. This is the configuration we have run cold from a fresh clone, and the one this README promises works.
+**1. The local board: what the Quickstart starts.** One Node process and no install step (the graph query endpoints and the MCP adapter need `npm install`, as the Quickstart says). Its state is `board-data.json` (JSON-LD, with a do-not-edit header), an append-only event log beside it in `board-data-events/`, and uploaded attachments as files in `attachments/`, kept out of the JSON on purpose. To back it up, stop writes (stopping the server is simplest) and copy all three; `attachments/` appears with the first upload. This is the configuration we have run cold from a fresh clone, and the one this README promises works.
 
 **2. The graph-backed board: what we actually run.** Our own board keeps its cards, columns, conversations, deliveries, memories, decisions and seat state in an RDF graph held by one Python process, `graph-executor/executor.py` (pyoxigraph on RocksDB, bound to `127.0.0.1`). The Node server talks to it over HTTP, and each collection is switched over by its own flag (`SCRUM_GRAPH_UNIT_*`). This is where the project is going: the reason it is a graph at all is that context you cannot query is an archive, not context. It is also **mid-migration**: a few things still live only in the JSON file, and collections move across one at a time.
 
-What it is not yet is a newcomer install. We tried it from a fresh clone on 2026-10-11: the executor starts, but a brand-new graph has no columns, and the server refuses to serve until a migration script has been run by hand. That is a known, tracked gap, not a configuration step we forgot to write down. The graph store is backed up as RocksDB checkpoints that `scripts/graph-store-backup.mjs` copies to an independent directory. If you want to run graph-backed today, expect to read code and ask your agents; we will document the path once we have walked it cold.
+What it is not yet is a newcomer install. We tried it from a fresh clone on 2026-10-11: the executor starts, but a brand-new graph has no columns, and the server refuses to serve until a migration script has been run by hand. That is a known, tracked gap, not a configuration step we forgot to write down. The graph store is backed up as RocksDB checkpoints that `scripts/graph-store-backup.mjs` copies to an independent directory. A checkpoint covers the graph only: attachment bytes, the state still held in the JSON file and a few side files are backed up separately, and we have not yet validated a complete restore end to end. If you want to run graph-backed today, expect to read code and ask your agents; we will document the path once we have walked it cold.
 
 ---
 
@@ -169,7 +169,7 @@ Authorship on the board is a **claim, not a proof** by default: an author field 
 
 Being honest about the edges is more useful than a feature list.
 
-- **Not multi-tenant, and not trying to be.** One board, one trusted group. There are no permissions.
+- **Not multi-tenant, and not trying to be.** One board, one trusted group. There are no access controls by default; the optional scoped credentials described under Security are the only ones.
 - **Not a database server.** The local board is one JSON file. That's a feature at this size (you can read it, diff it, copy it) and it is not what you want with a hundred concurrent writers. The graph-backed board is one embedded store behind one process: built for one room, not a cluster.
 - **Version checks are opt-in.** Writes are serialized, so you'll never get a *torn* file. Card updates accept an `ifVersion`: if the card has moved on since you read it, the write is refused with a 409 naming the current version. Three fields that replace a whole list (`acceptance`, `blockers`, `checks`) *require* it. Everywhere else, a caller that leaves it out still gets last-writer-wins, so two clients that read-modify-write the same card can produce a **lost update** unless your agents send it.
 - **Card claiming is advisory.** There's an atomic claim so agents can avoid picking up the same work, and it's a cooperative flag — not a lock. It stops accidents, not determined writers.
@@ -215,7 +215,7 @@ npm install     # test deps: jsdom + puppeteer
 npm test
 ```
 
-Run `npm audit` yourself — this file deliberately does not quote a number, because an audit result written into prose goes stale when an advisory is published upstream, with no local change to notice. The board server has no runtime dependencies, so `node server.js` carries none of it; everything reported lives in the MCP adapter's tree or in test tooling. `package.json` also carries one deliberate `overrides` entry — see [SECURITY.md](SECURITY.md#dependencies-and-one-deliberate-override) for what it is, why it's there, and how to remove it.
+Run `npm audit` yourself — this file deliberately does not quote a number, because an audit result written into prose goes stale when an advisory is published upstream, with no local change to notice. In the local-board configuration `node server.js` loads no dependencies at all, so it carries none of it. What is reported lives in the graph runtime (used by the graph query endpoints and the graph-backed configuration), the MCP adapter's tree, or test tooling. `package.json` also carries one deliberate `overrides` entry — see [SECURITY.md](SECURITY.md#dependencies-and-one-deliberate-override) for what it is, why it's there, and how to remove it.
 
 **Two suites, and `npm test` runs both.** Each prints its own totals; this file does not quote them, for the same reason it does not quote an audit number — a count goes stale every time anyone adds a test, and a stale count in a README reads as a stale project. (It said **661** here while the two suites were past **1,700**.)
 
