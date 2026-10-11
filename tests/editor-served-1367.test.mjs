@@ -58,6 +58,14 @@ test('#1367 served: 20 KB + three refs create → saved whole → preview links 
 
   await withBrowserServer(async ({ server, browser }) => {
     const page = await browser.newPage();
+    // #1674 — passive observers only (no waits, no assertions), so a miss names its state instead of failing as a bare timeout
+    const pageErrors = []; page.on('pageerror', (e) => pageErrors.push(String((e && e.message) || e).slice(0, 300)));
+    // the create's own fate, observed from outside the page: sent, answered (with its status) or failed. An absent API card can be an unfinished or failed save, not only a lost click
+    const creates = [];
+    const isCreate = (r) => r.method() === 'POST' && /\/api\/cards(\?|$)/.test(new URL(r.url()).pathname + new URL(r.url()).search);
+    page.on('request', (r) => { if (isCreate(r)) creates.push({ state: 'pending', url: r.url(), status: null, failure: null, req: r }); });
+    page.on('response', (res) => { const c = creates.find((x) => x.req === res.request()); if (c) { c.state = 'answered'; c.status = res.status(); } });
+    page.on('requestfailed', (r) => { const c = creates.find((x) => x.req === r); if (c) { c.state = 'failed'; c.failure = (r.failure() || {}).errorText || 'failed'; } });
     await page.goto(`${server.baseUrl}/`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('.board-header', { timeout: 5000 });
 
@@ -99,8 +107,29 @@ test('#1367 served: 20 KB + three refs create → saved whole → preview links 
       'preview renders the three refs with their titles');
     await clickWhenOnTop(page, '.mh-editor:has(#card-desc) [data-editor-write]');
 
+    // #1674 — record, passively, which element the add click reaches and when the 4th card appears; the bound below is unchanged (5 s)
+    await page.evaluate(() => {
+      window.__1674 = { clicks: [], fourthAt: null, clickAt: null };
+      document.addEventListener('click', (e) => { const t = e.target; window.__1674.clicks.push({ id: (t && t.id) || '', cls: String((t && t.className) || '').slice(0, 60) }); if (t && t.id === 'btn-add-card') window.__1674.clickAt = performance.now(); }, true);
+      new MutationObserver(() => { if (window.__1674.fourthAt === null && document.querySelectorAll('.card').length >= 4) window.__1674.fourthAt = performance.now(); })
+        .observe(document.body, { childList: true, subtree: true });
+    });
     await clickWhenOnTop(page, '#btn-add-card');
-    await page.waitForFunction(() => document.querySelectorAll('.card').length === 4, { timeout: 5000 });
+    try {
+      await page.waitForFunction(() => document.querySelectorAll('.card').length === 4, { timeout: 5000 });
+    } catch (e) {
+      const state = await page.evaluate(() => ({
+        cardsInDom: document.querySelectorAll('.card').length,
+        observed: window.__1674,
+        formExpanded: !!document.querySelector('#add-card-form-wrapper.expanded'),
+        titleValue: (document.getElementById('card-title') || {}).value,
+      })).catch((err) => ({ stateUnreadable: String(err) }));
+      // the discriminator: if the server has the card but the DOM does not, the render never ran; if it has none, the click or the POST was lost
+      const api = await fetch(`${server.baseUrl}/api/cards`).then(async (r) => { const j = await r.json(); const list = Array.isArray(j) ? j : (j.cards || []); return { status: r.status, shortIds: list.map((c) => c.shortId) }; }).catch((err) => ({ unreadable: String(err) }));
+      throw new Error(`#1674 the 4th card did not render within 5 s of the add click (bound unchanged): ${JSON.stringify({ ...state, api, creates: creates.map(({ req, ...c }) => c), pageErrors })} — original: ${e.message}`);
+    }
+    const seen = await page.evaluate(() => window.__1674);
+    console.log(`#1674 add click → 4th card in ${seen.fourthAt !== null && seen.clickAt !== null ? Math.round(seen.fourthAt - seen.clickAt) : '?'} ms; clicks: ${JSON.stringify(seen.clicks.map((c) => c.id || c.cls))}; creates: ${JSON.stringify(creates.map((c) => `${c.state}${c.status ? ' ' + c.status : ''}`))}; page errors: ${pageErrors.length}`);
 
     // saved whole — read from the API, not the DOM
     const res = await fetch(`${server.baseUrl}/api/cards/4`);
