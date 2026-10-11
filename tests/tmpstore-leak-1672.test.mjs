@@ -40,6 +40,13 @@
  *                        is not the runner's: it is never killed. Ownership is the environment entry, not a substring of anything that mentions it.
  *   RM  an env-value impostor   a detached process whose environment holds `OTHER="x MANYHANDS_SUITE_RUN=<this run's token> y"` but NOT the entry itself, and which names a store under the folder in its argv:
  *                        the token text inside another variable's value is not the entry, so it is not the runner's: never killed, the run FAILS, the folder is RETAINED and named
+ *   RN  a descendant spawned between inspections   a surviving owned process that keeps spawning new detached owned children every 20 ms: whatever the runner inspects, new ones appear after it. The
+ *                        property is safety, not a particular remedy: either every process the fixture recorded is gone when the runner exits, or the run FAILED and the suite folder was RETAINED. A folder
+ *                        deleted from under a live owned process is the failure.
+ *   RO  an owned process with an EMPTY argv[0] and the token as the FIRST environment entry   its argv does not name the folder, so only the environment can identify it. Measured on the macOS helper at c4a767d:
+ *                        called directly it reads this process as NOT owned (the empty argv[0] is swallowed as padding, which shifts the split by one and drops the first environment entry). It needs BOTH an empty
+ *                        argv[0] and the token first: the runner's own children have the token LAST, and the same process with a normal environment WAS found and killed (measured). The same safety property as
+ *                        RN: either it is gone when the runner exits, or the run FAILED and the folder was RETAINED.
  *   RL  inspection fails   the runner cannot list processes (a `ps` that exits 1 is first on PATH): it cannot establish that the folder is unused, so the run FAILS, the suite folder is RETAINED and named,
  *                        and the output says inspection failed. macOS only: on Linux the runner reads /proc, which a row cannot make fail, so the row is skipped there with that reason.
  *
@@ -109,6 +116,21 @@ test('envimpostor', () => {
   const c = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 300000)', '--', '--store', s], { stdio: 'ignore', detached: true, env: { OTHER: 'x MANYHANDS_SUITE_RUN=' + tok + ' y' } });
   fs.writeFileSync(process.env.ENVIMPOSTOR_PID_FILE, String(c.pid)); c.unref();
 });\n`,
+  // an owned survivor that keeps making new owned (token-inheriting) detached children, each naming a store under TMPDIR; every pid is appended to a file
+  'spawner.test.mjs': `import { test } from 'node:test'; import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path'; import { spawn } from 'node:child_process';
+test('spawner', () => {
+  const s = fs.mkdtempSync(path.join(os.tmpdir(), 'fx-spawner-'));
+  const code = \`const { spawn } = require('child_process'), fs = require('fs');
+    setInterval(() => { const c = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 300000)', '--', '--store', \${JSON.stringify(s)}], { stdio: 'ignore', detached: true }); c.unref(); fs.appendFileSync(process.env.SPAWNED_PIDS_FILE, c.pid + '\\\\n'); }, 20);\`;
+  const sp = spawn(process.execPath, ['-e', code], { stdio: 'ignore', detached: true }); sp.unref();
+  fs.writeFileSync(process.env.SPAWNER_PID_FILE, String(sp.pid));
+});\n`,
+  // an owned process with an EMPTY argv[0] (inherits the token), whose argv does not name any folder
+  'emptyargv0.test.mjs': `import { test } from 'node:test'; import fs from 'node:fs'; import { spawn } from 'node:child_process';
+test('emptyargv0', () => {
+  const c = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 300000)'], { stdio: 'ignore', detached: true, argv0: '', env: { MANYHANDS_SUITE_RUN: process.env.MANYHANDS_SUITE_RUN } });   // the token is the FIRST (only) environment entry
+  fs.writeFileSync(process.env.EMPTYARGV0_PID_FILE, String(c.pid)); c.unref();
+});\n`,
   // keeps the runner alive past the child's read
   'holder.test.mjs': `import { test } from 'node:test'; test('holder', async () => { await new Promise((r) => setTimeout(r, 5000)); });\n`,
   'killed.test.mjs': `import { test } from 'node:test'; import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path';
@@ -130,8 +152,9 @@ async function withWorld(body) {
     for (const d of [fx, outer, res]) fs.mkdirSync(d);
     for (const [name, src] of Object.entries(FIXTURES)) fs.writeFileSync(path.join(fx, name), src);
     const f = (name) => path.join(fx, name);
+    own.adopt(async () => { try { for (const l of fs.readFileSync(path.join(res, 'spawned.pids'), 'utf8').split('\n')) { if (l) { try { process.kill(Number(l), 'SIGKILL'); } catch { /* gone */ } } } } catch { /* none */ } });   // registered first, so it runs LAST: after the spawner itself is killed
     // a survivor the runner failed to reap is killed here, by the pid its fixture recorded, never by pattern
-    own.adopt(async () => { for (const n of ['survivor.pid', 'hang-survivor.pid', 'stranger.pid', 'hang.pid', 'impostor.pid', 'envimpostor.pid']) { try { process.kill(Number(fs.readFileSync(path.join(res, n), 'utf8')), 'SIGKILL'); } catch { /* none, or gone */ } } });
+    own.adopt(async () => { for (const n of ['survivor.pid', 'hang-survivor.pid', 'stranger.pid', 'hang.pid', 'impostor.pid', 'envimpostor.pid', 'spawner.pid', 'emptyargv0.pid']) { try { process.kill(Number(fs.readFileSync(path.join(res, n), 'utf8')), 'SIGKILL'); } catch { /* none, or gone */ } } });
     /** Start the runner on `files` with TMPDIR = the outer directory. Resolves a handle; `done` settles when the runner has exited. */
     const start = (files, extraEnv = {}) => {
       const env = { ...process.env, TMPDIR: outer, RUN_TESTS_CONCURRENCY: '2', RUN_TESTS_FILE_TIMEOUT_MS: '90000', ...extraEnv };
@@ -314,6 +337,35 @@ test('RM a process that only quotes the run\'s token inside another variable\'s 
   assert.deepEqual({ runFails: r.code !== 0, impostorStillAlive: alive(pid), suiteFolderKept: kept.length === 1, pidNamed: new RegExp(`\\b${pid}\\b`).test(h.out()), folderNamed: kept.length === 1 && h.out().includes(kept[0]) },
     { runFails: true, impostorStillAlive: true, suiteFolderKept: true, pidNamed: true, folderNamed: true },
     `outer TMPDIR holds ${JSON.stringify(w.left())}; output tail: ${h.out().slice(-500)}`);
+}));
+
+test('RN a descendant spawned between the runner\'s inspections: no owned process outlives the deletion of the folder it uses', { timeout: 120000 }, () => withWorld(async (w) => {
+  const spawnerPidFile = path.join(w.res, 'spawner.pid'); const spawnedFile = path.join(w.res, 'spawned.pids');
+  const h = w.start([w.f('spawner.test.mjs'), w.f('holder.test.mjs')], { SPAWNER_PID_FILE: spawnerPidFile, SPAWNED_PIDS_FILE: spawnedFile, ...w.baseline([w.f('spawner.test.mjs')]) });
+  const r = await finish(h, 90000);
+  assert.notEqual(r.code, 'TIMEOUT', `the runner ends (output tail: ${h.out().slice(-300)})`);
+  assert.ok(fs.existsSync(spawnerPidFile), 'CONTROL: the fixture started the spawner');
+  await sleep(1500);
+  const spawnerPid = Number(fs.readFileSync(spawnerPidFile, 'utf8'));
+  const spawned = fs.existsSync(spawnedFile) ? fs.readFileSync(spawnedFile, 'utf8').split('\n').filter(Boolean).map(Number) : [];
+  assert.ok(spawned.length >= 20, `CONTROL: the spawner made children while the runner ran (${spawned.length})`);
+  const aliveNow = [spawnerPid, ...spawned].filter(alive);
+  const kept = w.left().filter((n) => n.startsWith('manyhands-suite.'));
+  const safe = aliveNow.length === 0 || (r.code !== 0 && kept.length === 1);
+  assert.equal(safe, true, `${aliveNow.length} of ${spawned.length + 1} owned processes are still alive after the runner exited (run exit ${JSON.stringify(r)}, suite folder kept: ${kept.length === 1}): the folder was deleted from under them, or the run did not fail`);
+}));
+
+test('RO an owned process with an empty argv[0] is not left alive beneath a deleted folder', { timeout: 120000 }, () => withWorld(async (w) => {
+  const pidFile = path.join(w.res, 'emptyargv0.pid');
+  const h = w.start([w.f('emptyargv0.test.mjs'), w.f('holder.test.mjs')], { EMPTYARGV0_PID_FILE: pidFile, ...w.baseline([]) });
+  const r = await finish(h, 90000);
+  assert.notEqual(r.code, 'TIMEOUT', `the runner ends (output tail: ${h.out().slice(-300)})`);
+  assert.ok(fs.existsSync(pidFile), 'CONTROL: the fixture started the process');
+  const pid = Number(fs.readFileSync(pidFile, 'utf8'));
+  await sleep(1000);
+  const kept = w.left().filter((n) => n.startsWith('manyhands-suite.'));
+  const safe = !alive(pid) || (r.code !== 0 && kept.length === 1);
+  assert.equal(safe, true, `the owned process ${pid} (token in its environment, empty argv[0]) is alive after the runner exited and the run ${r.code === 0 ? 'PASSED' : 'failed'} with the suite folder ${kept.length === 1 ? 'kept' : 'removed'}: owned, and invisible to the inspection`);
 }));
 
 const ON_MAC = process.platform === 'darwin';
