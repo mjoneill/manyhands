@@ -36,8 +36,8 @@ const RDF_TYPE = IRI.rdf + 'type';
 const DEFAULT_PROPERTIES = new Set([IRI.schema + 'name', IRI.schema + 'identifier']);
 const S = IRI.schema, SC = IRI.scrum;
 const HISTORY_TIMES = [IRI.prov + 'startedAtTime', IRI.prov + 'endedAtTime', S + 'dateCreated'];
-/** Every predicate a label or a history time is read from: one `facts` read fetches all of them for a set of nodes. */
-const FACT_PREDICATES = [RDF_TYPE, S + 'identifier', S + 'name', S + 'author', S + 'text', SC + 'note', SC + 'status', SC + 'statement', ...HISTORY_TIMES];
+/** Every predicate a label is read from: one `facts` read fetches all of them for a set of nodes (the SHOWN members only). */
+const FACT_PREDICATES = [RDF_TYPE, S + 'identifier', S + 'name', S + 'author', S + 'text', SC + 'note', SC + 'status', SC + 'statement'];
 
 const nn = (v) => oxigraph.namedNode(v);
 const shorten = (v) => {
@@ -63,6 +63,8 @@ function unknown(node, tried) {
 // { op: 'out', iri }        -> [{ p, o, t }]   t: 'NamedNode' | 'BlankNode' | 'Literal'
 // { op: 'in', iri }         -> [{ s, p }]
 // { op: 'facts', iris }     -> Map(iri -> Map(pred -> [{ v, t }]))   FACT_PREDICATES only
+// { op: 'historyTimes', iri } -> Map(s -> Map(pred -> [{ v, t }]))   HISTORY_TIMES of every subject with a prov:* edge INTO iri
+//   (#1642 apex: a seat has ~13k of these; they must cost ONE read, never a facts batch per 200, and never the label predicates)
 
 function* resolveNodeG(node) {
   const raw = String(node ?? '').trim();
@@ -171,6 +173,7 @@ function* neighborsG(opts) {
   const historySubjects = !includeHistory && history.count
     ? [...new Set(inEdges.filter((e) => isHistory(e.p)).map((e) => e.s))]
     : [];
+  const times = historySubjects.length ? yield { op: 'historyTimes', iri } : new Map();
 
   // Sorted by id so a truncated group shows the SAME first members every call (store iteration order is not a
   // contract), and only the members SHOWN are labelled: labelling all 277 of an apex's children to show 10 cost 940 ms.
@@ -178,13 +181,13 @@ function* neighborsG(opts) {
     const all = [...g.iris].sort(byString);
     return { g, all, shown: all.slice(0, limit) };
   });
-  const facts = yield { op: 'facts', iris: [...new Set([iri, ...cut.flatMap((c) => c.shown), ...historySubjects])] };
+  const facts = yield { op: 'facts', iris: [...new Set([iri, ...cut.flatMap((c) => c.shown)])] };
 
   if (historySubjects.length) {
     // latest = the history-bearing neighbour with the greatest prov:startedAtTime / endedAtTime / dateCreated literal
     let best = null;
     for (const s of historySubjects) {
-      const t = firstLiteral(facts.get(s), HISTORY_TIMES);
+      const t = firstLiteral(times.get(s), HISTORY_TIMES);
       if (t && (!best || t > best.at)) best = { node: shorten(s), at: t };
     }
     history.latest = best;
@@ -233,6 +236,20 @@ function storeAnswer(store, req) {
           if (vals.length) f.set(p, vals);
         }
         out.set(i, f);
+      }
+      return out;
+    }
+    case 'historyTimes': {
+      // the #1484 cost: only the three time predicates, only for subjects whose prov:* edge points at the node
+      const out = new Map();
+      for (const q of store.match(null, null, nn(req.iri))) {
+        if (!q.predicate.value.startsWith(IRI.prov) || out.has(q.subject.value)) continue;
+        const f = new Map();
+        for (const p of HISTORY_TIMES) {
+          const vals = store.match(q.subject, nn(p), null).map((x) => ({ v: x.object.value, t: termTypeOf(x.object) }));
+          if (vals.length) f.set(p, vals);
+        }
+        out.set(q.subject.value, f);
       }
       return out;
     }
@@ -319,6 +336,19 @@ async function executorAnswer(url, req, o) {
           if (!f.has(r.p.v)) f.set(r.p.v, []);
           f.get(r.p.v).push({ v: r.o.v, t: r.o.t });
         }
+      }
+      return out;
+    }
+    case 'historyTimes': {
+      // ONE read keyed on the node, however many history subjects it has
+      const rows = await executorRead(url, `SELECT ?s ?q ?o WHERE { ?s ?p ${sparqlIri(req.iri)} . FILTER(STRSTARTS(STR(?p), ${JSON.stringify(IRI.prov)})) `
+        + `VALUES ?q { ${HISTORY_TIMES.map((p) => `<${p}>`).join(' ')} } ?s ?q ?o }`, o);
+      const out = new Map();
+      for (const r of rows) {
+        if (!out.has(r.s.v)) out.set(r.s.v, new Map());
+        const f = out.get(r.s.v);
+        if (!f.has(r.q.v)) f.set(r.q.v, []);
+        if (!f.get(r.q.v).some((x) => x.v === r.o.v)) f.get(r.q.v).push({ v: r.o.v, t: r.o.t });   // one ?p per prov edge: dedupe repeats
       }
       return out;
     }
