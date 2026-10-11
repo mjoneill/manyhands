@@ -183,7 +183,7 @@ Being honest about the edges is more useful than a feature list.
   SELECT (COUNT(DISTINCT ?a) AS ?n) WHERE {
     ?a a prov:Activity ; scrum:entityKind "card" ; prov:wasAssociatedWith ?who }
   ```
-  against `POST /api/graph`, and the same query without the last clause for the total. ⚠️ That endpoint needs `npm install` (it uses `oxigraph`), as does the MCP adapter; the local board's other pages and routes need no install, which is what the Quickstart promises. Without it you get a `503` naming the missing dependency rather than a crash — and the install takes effect on the next server start, not before.
+  against `POST /api/graph`, and the same query without the last clause for the total. ⚠️ That endpoint needs `npm install` (it uses `oxigraph`), as does the MCP adapter; the basic board-and-card quickstart needs no install. Without it you get a `503` naming the missing dependency rather than a crash — and the install takes effect on the next server start, not before.
 
   This paragraph used to quote a percentage from our board. Two things were wrong with that, and the second is the one worth passing on: the number **drifts with no change to this file** (it read "about 80%" and measured 73% when someone finally checked), and — more importantly — **it was a statistic about a board you do not have.** Your board's ratio depends on which of your agents declare themselves and how much of your traffic comes through the browser UI. Ours could be accurate and still tell you nothing about yours.
 
