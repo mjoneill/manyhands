@@ -31,6 +31,11 @@
  *   RG2 a baselined file that leaks: green, still reported by name
  *   RG3 a baselined file that is clean: reported as a "candidate" for removal from the baseline, and the run stays green (decided 16:43Z: a flapping leaker must not block a landing)
  *
+ *   RI  another run's files   a second, concurrent run (its own token) finishes while the first run's file is still hanging: the first run's file process is NOT killed and its folder is intact. A guard
+ *                        against over-reach: it passes on a runner with no teardown at all, so it means something only against the build (a mutant that matches any token must fail it).
+ *   RJ  an early TERM  SIGTERM to the runner at 0, 30, 60, 100, 160 and 250 ms after it starts (before and around the moment its node process has recorded its pid): the runner is gone within 20 s each
+ *                        time, no file process or survivor outlives it, and nothing is left in the outer TMPDIR
+ *
  * Not covered: SIGKILL of the runner itself (it leaves one `manyhands-suite.<pid>.*` folder by design, recorded not swept); the browser entry point (`node run-tests.js`); paths outside TMPDIR;
  * a leak that appears only under suite load; and which FILE leaks (scripts/tmp-leak-check-1672.mjs does that, on demand).
  */
@@ -227,6 +232,41 @@ test('RH a process that is not the runner\'s holds the folder: never killed, the
     folderNamed: kept.length === 1 && h.out().includes(kept[0]) }, { runFails: true, strangerStillAlive: true, suiteFolderKept: true, pidNamed: true, folderNamed: true },
   `outer TMPDIR holds ${JSON.stringify(w.left())}; output tail: ${h.out().slice(-500)}`);
 }));
+
+test('RI a second run finishing does not kill the first run\'s hanging file (different token) or touch its folder', { timeout: 120000 }, async () => {
+  await withWorld(async (a) => {
+    await withWorld(async (b) => {
+      const pidFile = path.join(a.res, 'hang.pid'); const survPidFile = path.join(a.res, 'hang-survivor.pid');
+      const ha = a.start([a.f('hang.test.mjs')], { PID_FILE: pidFile, SURVIVOR_PID_FILE: survPidFile });
+      for (let t = 0; t < 30000 && !fs.existsSync(pidFile); t += 100) await sleep(100);
+      assert.ok(fs.existsSync(pidFile), 'CONTROL: run A\'s hanging file started');
+      const hangPid = Number(fs.readFileSync(pidFile, 'utf8'));
+      const hb = b.start([b.f('clean.test.mjs')]);
+      const rb = await finish(hb, 60000);
+      assert.equal(rb.code, 0, `CONTROL: run B (a clean fixture, its own outer TMPDIR and token) passes (got ${JSON.stringify(rb)})`);
+      assert.equal(alive(hangPid), true, 'run A\'s hanging file is still alive after run B has finished and torn down');
+      assert.ok(a.left().some((n) => n.startsWith('manyhands-suite.') || n.startsWith('fx-hang-')), `and run A\'s temp space is still there (outer A holds ${JSON.stringify(a.left())})`);
+      try { process.kill(ha.child.pid, 'SIGTERM'); } catch { /* gone */ }
+      await finish(ha, 20000);
+    });
+  });
+});
+
+test('RJ SIGTERM at 0..250 ms after the runner starts: gone within 20 s, nothing outlives it, nothing left', { timeout: 300000 }, async () => {
+  for (const delay of [0, 30, 60, 100, 160, 250]) {
+    await withWorld(async (w) => {
+      const pidFile = path.join(w.res, 'hang.pid'); const survPidFile = path.join(w.res, 'hang-survivor.pid');
+      const h = w.start([w.f('hang.test.mjs')], { PID_FILE: pidFile, SURVIVOR_PID_FILE: survPidFile });
+      await sleep(delay);
+      try { process.kill(h.child.pid, 'SIGTERM'); } catch { /* gone already */ }
+      const r = await finish(h, 20000);
+      await sleep(1500);   // a file that was started at the last moment records its pid late
+      const pids = [pidFile, survPidFile].filter((p) => fs.existsSync(p)).map((p) => Number(fs.readFileSync(p, 'utf8')));
+      assert.deepEqual({ delay, runnerGone: r.code !== 'TIMEOUT', stillAlive: pids.filter(alive), outerLeft: w.left() }, { delay, runnerGone: true, stillAlive: [], outerLeft: [] },
+        `SIGTERM ${delay} ms after the runner started`);
+    });
+  }
+});
 
 const namedLine = (out, name) => out.split('\n').find((l) => l.includes(name) && /\d+\s+entr/i.test(l));
 
