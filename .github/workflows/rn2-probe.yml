@@ -1,0 +1,77 @@
+# #1672 — a THROWAWAY probe for RN2's intermittent Linux red. Lives only on the exp/1672-rn2-linux branch; never merged.
+# No artifact upload (ci.yml's rule): a failing row already writes every `# tmp:` report line and RN2's survivor facts
+# into its assertion message, which lands in the job log.
+name: rn2-probe
+
+on:
+  push:
+    branches: ['exp/1672-rn2-linux']
+
+permissions:
+  contents: read
+
+env:
+  PREREG: |
+    ## How to read the first RN2 red (written BEFORE the run)
+    For the 4 survivors, the nested run's `# tmp:` lines say which of these happened:
+    - `still alive after N ms of kills` → STUBBORN: seen as owned, killed, still alive at the bound.
+    - `ownership could not be decided … NOT killed` → the runner could not read the process's environment (suspect, unverified: a child caught between fork and exec).
+    - `is not this run's but uses … NOT killed` → read as TOKENLESS (a stranger).
+    - no line naming the 4 → a GAP to investigate, NOT a cause.
+    A green across every job is a bounded sample at one sha, not proof the race is absent.
+
+jobs:
+  suite:
+    name: full server suite ${{ matrix.n }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Allow Chromium's sandbox on the runner
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Pre-registered reading
+        run: printf '%s\n' "$PREREG" >> "$GITHUB_STEP_SUMMARY"
+      - name: Run the server suite
+        run: npm run test:server
+
+  rn2-loop:
+    name: RN2 alone x30 (${{ matrix.load }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        load: [quiet, burn]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Pre-registered reading
+        run: printf '%s\n' "$PREREG" >> "$GITHUB_STEP_SUMMARY"
+      - name: RN2, 30 times, stopping at the first red
+        run: |
+          if [ "${{ matrix.load }}" = burn ]; then
+            for c in $(seq 1 "$(nproc)"); do (yes > /dev/null &) ; done
+            echo "burners: $(nproc)"
+          fi
+          rc=0
+          for i in $(seq 1 30); do
+            echo "=== RN2 loop $i at $(date -u +%H:%M:%SZ) load $(cut -d' ' -f1-3 /proc/loadavg)"
+            if ! node --test --test-reporter=tap --test-name-pattern='RN2 ' tests/tmpstore-leak-1672.test.mjs; then
+              echo "=== RED on loop $i"; rc=1; break
+            fi
+          done
+          pkill -x yes || true
+          exit $rc
