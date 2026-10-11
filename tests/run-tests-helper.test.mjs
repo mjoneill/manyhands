@@ -97,6 +97,9 @@ function copyHelper(dir) {
   // fail to start the runner at all, which reads as "the pipeline is broken"
   // rather than "the fixture is incomplete".
   if (fs.existsSync(LEDGER)) fs.copyFileSync(LEDGER, path.join(dir, 'scripts', 'verdict-ledger.mjs'));
+  // #1672 — run-test-files.mjs imports the suite's temp owner too
+  const SUITE_TMP = path.join(ROOT, 'scripts', 'suite-tmp.mjs');
+  if (fs.existsSync(SUITE_TMP)) fs.copyFileSync(SUITE_TMP, path.join(dir, 'scripts', 'suite-tmp.mjs'));
 }
 
 test('positive control: a deliberately failing fixture exits nonzero and shows the failure', async () => {

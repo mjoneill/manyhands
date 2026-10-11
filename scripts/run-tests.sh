@@ -73,6 +73,10 @@ pidfile=$(mktemp "${TMPDIR:-/tmp}/run-tests-pid.XXXXXX")
 RUN_TESTS_PIDFILE=$pidfile
 export RUN_TESTS_PIDFILE
 on_signal() {
+  # node writes its pid within tens of ms of starting; a signal in that window waits for it (bounded) instead of
+  # finding nothing to forward and then waiting out the whole suite
+  i=0
+  while [ ! -s "$pidfile" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
   if [ -s "$pidfile" ]; then kill -TERM "$(cat "$pidfile")" 2>/dev/null; fi
   wait "$pipeline" 2>/dev/null
   rm -f "$out" "$rcfile" "$pidfile"
