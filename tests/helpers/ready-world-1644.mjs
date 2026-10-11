@@ -16,6 +16,8 @@ export const SKIP = HAVE_PY ? false : 'UNAVAILABLE: no python with pyoxigraph (a
 export const READY_ENV = 'SCRUM_GRAPH_READY_SOURCE';
 export const DSID = 'r44-test';
 export const ROSTER_FILE = path.join(os.tmpdir(), `r44-roster-${process.pid}.json`);
+// #1669 — the roster file is made at import; every test process that imports this helper removes it on exit
+process.once('exit', () => { try { fs.rmSync(ROSTER_FILE, { force: true }); } catch { /* best effort */ } });
 fs.writeFileSync(ROSTER_FILE, JSON.stringify({ seats: { ada: { name: 'Ada', glyph: 'a', color: '#7cc4a0' }, board: { name: 'Board', glyph: 'o', color: '#8899aa', kind: 'system' } } }));
 export { tmpStore, startExecutor, killExecutor, startRestServer, makeBoardFixture };
 
@@ -93,7 +95,8 @@ export const migrate = (boardFile, execUrl) => new Promise((resolve) => {
 
 /** A world: a real executor holding the board's cards, a counting proxy in front of it, and REST (cards unit ON) with the switch as asked. Restartable with a different switch on the SAME executor and board. */
 export async function world(board, body) {
-  const exec = await startExecutor({ store: tmpStore('r44-store-'), datasetId: DSID, create: true });
+  const store = tmpStore('r44-store-');
+  const exec = await startExecutor({ store, datasetId: DSID, create: true });
   const proxy = await startProxy(exec.baseUrl);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'r44-board-')); const boardFile = path.join(dir, 'board.json');
   fs.writeFileSync(boardFile, JSON.stringify(board, null, 2));
@@ -111,7 +114,11 @@ export async function world(board, body) {
   try {
     const m = await migrate(boardFile, exec.baseUrl); assert.equal(m.code, 0, `precondition: the cards are copied into the executor (exit ${m.code}): ${m.out.slice(0, 300)}`);
     return await body(w);
-  } finally { if (rest) await rest.stop(); try { await proxy.down(); } catch { /* down */ } await killExecutor(exec); }
+  } finally {
+    if (rest) await rest.stop(); try { await proxy.down(); } catch { /* down */ } await killExecutor(exec);
+    // #1669 — the world's own temp directories go with it (never anything it did not make)
+    for (const d of [store, dir]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ } }
+  }
 }
 
 /** Start the executor on a COPY of a seeded store: since #1638 an executor refuses a copied store unless it is told to promote it (--promote-epoch). Same contract as startExecutor otherwise. */

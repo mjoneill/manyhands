@@ -33,7 +33,7 @@
  * NOT covered, by name: writes of other kinds mid-read (a conversation post); a batch BEFORE the card write (it would have no event to project); two card writers; the
  * shipped-commits argument; MCP-level latency (transport adds its own); a board larger than 1,500 cards; production's real data shape (the fixture is synthetic).
  */
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -54,8 +54,12 @@ const relCard = (i, N) => card(i, `card-${i}`, {
 const bigBoard = (N) => makeBoardFixture({ cards: Array.from({ length: N }, (_, i) => relCard(i + 1, N)), nextShortId: N + 1, conversations: [] });
 const isPlainReady = (i) => i % 13 !== 0 && i % 17 !== 0 && i % 10 !== 0 && (i + 1) % 10 !== 0;   // ready, and nothing blocked on it, so deleting it changes only its own presence
 
+// #1669 — every temp directory this file makes is removed by the code that made it: per-run copies in that run's own `finally`, the shared seeds once the file is done.
+const rmTemp = (...dirs) => { for (const d of dirs) { try { if (d) fs.rmSync(d, { recursive: true, force: true }); } catch { /* best effort: a leftover temp dir must not fail a test */ } } };
+const SEEDED = [];
+after(() => rmTemp(...SEEDED));
 async function seed(N) {
-  const store = tmpStore('r44s-seed-'); const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'r44s-board-')); const boardFile = path.join(dir, 'board.json');
+  const store = tmpStore('r44s-seed-'); const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'r44s-board-')); const boardFile = path.join(dir, 'board.json'); SEEDED.push(store, dir);
   fs.writeFileSync(boardFile, JSON.stringify(bigBoard(N)));
   const exec = await startExecutor({ store, datasetId: DSID, create: true });
   try {
@@ -90,12 +94,13 @@ const sig = (a) => (a.failed ? `FAILED ${a.failed}` : `${a.total}/${a.excludedTo
 async function run(sd, { k, reader, m = 0 }) {
   const store = fs.mkdtempSync(path.join(os.tmpdir(), 'r44s-run-')); fs.cpSync(sd.store, store, { recursive: true });
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'r44s-rboard-')); const boardFile = path.join(dir, 'board.json'); fs.copyFileSync(sd.boardFile, boardFile);
+  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'r44s-work-'));
   const exec = await startExecutorOnCopy({ store, datasetId: DSID }); const proxy = await startProxy(exec.baseUrl);
   const rest = await startRestServer({ boardFile, env: { SCRUM_ROSTER_FILE: ROSTER_FILE, SCRUM_GRAPH_DATASET_ID: DSID, SCRUM_GRAPH_EXECUTOR_URL: proxy.url, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', SCRUM_GRAPH_UNIT_CARDS: '1', ...(reader === 'rest' ? { [READY_ENV]: 'executor' } : {}) } });
   try {
     proxy.queries = 0;
     let projected = null;
-    const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'r44s-work-')); fs.writeFileSync(path.join(workDir, 'work-objects.jsonl'), '');
+    fs.writeFileSync(path.join(workDir, 'work-objects.jsonl'), '');
     if (k >= 1 || m >= 1) proxy.onQuery = async (n) => {
       if (n === k) { const r = await fetch(`${rest.baseUrl}/api/cards/${sd.target}`, { method: 'DELETE', signal: AbortSignal.timeout(60000) }); assert.ok(r.status === 200 || r.status === 204, `precondition: the injected card write is accepted (${r.status})`); }
       // a REAL projector batch (core/activity-projector.mjs, the production code): the card delete above appended an event to REST's log; this projects it into the executor as prov:Activity triples + a cursor move, in ONE /update
@@ -103,7 +108,7 @@ async function run(sd, { k, reader, m = 0 }) {
     };
     const answer = reader === 'rest' ? await restAnswer(rest.baseUrl) : await naiveAnswer(proxy.url);
     return { answer, queries: proxy.queries, readyQueries: proxy.readyQueries, projected };
-  } finally { await rest.stop(); try { await proxy.down(); } catch { /* down */ } await killExecutor(exec); }
+  } finally { await rest.stop(); try { await proxy.down(); } catch { /* down */ } await killExecutor(exec); rmTemp(store, dir, workDir); }
 }
 async function sweep(sd, reader) {
   const before = await run(sd, { k: 0, reader }); const n = before.queries;
@@ -159,7 +164,7 @@ async function phase(sd, label) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'r44l-board-')); const boardFile = path.join(dir, 'board.json'); fs.copyFileSync(sd.boardFile, boardFile);
     const exec = await startExecutorOnCopy({ store, datasetId: DSID }); const proxy = await startProxy(exec.baseUrl);
     const rest = await startRestServer({ boardFile, env: { SCRUM_ROSTER_FILE: ROSTER_FILE, SCRUM_GRAPH_DATASET_ID: DSID, SCRUM_GRAPH_EXECUTOR_URL: proxy.url, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', SCRUM_GRAPH_UNIT_CARDS: '1', ...(ready ? { [READY_ENV]: 'executor' } : {}) } });
-    return { rest, proxy, exec, stop: async () => { await rest.stop(); try { await proxy.down(); } catch { /* down */ } await killExecutor(exec); } };
+    return { rest, proxy, exec, stop: async () => { await rest.stop(); try { await proxy.down(); } catch { /* down */ } await killExecutor(exec); rmTemp(store, dir); } };
   };
   const off = await mk(false); const on = await mk(true);
   try {
@@ -238,5 +243,5 @@ test('S3 SNAPSHOT WITHIN ONE QUERY: a write that commits while a slow read runs 
       rounds.push(`${round}: read ${got.n === before ? 'BEFORE' : 'AFTER'} (${Math.round(got.ms)} ms), ${mechanism}`); have = after;
     }
     console.log(`S3 pyoxigraph ${ver}; ${rounds.join(' | ')}`);
-  } finally { await killExecutor(exec); }
+  } finally { await killExecutor(exec); rmTemp(store); }
 });
