@@ -72,21 +72,30 @@ rcfile=$(mktemp "${TMPDIR:-/tmp}/run-tests-rc.XXXXXX")
 pidfile=$(mktemp "${TMPDIR:-/tmp}/run-tests-pid.XXXXXX")
 RUN_TESTS_PIDFILE=$pidfile
 export RUN_TESTS_PIDFILE
-on_signal() {
-  # node writes its pid within tens of ms of starting; a signal in that window waits for it (bounded) instead of
-  # finding nothing to forward and then waiting out the whole suite
-  i=0
-  while [ ! -s "$pidfile" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
-  if [ -s "$pidfile" ]; then kill -TERM "$(cat "$pidfile")" 2>/dev/null; fi
-  wait "$pipeline" 2>/dev/null
-  rm -f "$out" "$rcfile" "$pidfile"
-  exit "$1"
-}
-trap 'on_signal 143' TERM
-trap 'on_signal 130' INT
+# The trap only RECORDS the signal. All the work (wait for node's pid, forward, wait, clean up) runs in the main flow,
+# outside the trap: a handler that ran commands could fire before `pipeline=$!` was assigned, and in that window the
+# shell was seen to stall inside the handler (#1672 RJ: SIGTERM 30 ms after start hung the run in 2 of 80 tries). With a
+# flag, a signal that lands at any point, before the pipeline exists or during `wait`, is seen by the check below.
+got=''
+trap 'got=143' TERM
+trap 'got=130' INT
 { node scripts/run-test-files.mjs "$@" 2>&1; echo $? >"$rcfile"; } | tee "$out" &
 pipeline=$!
-wait "$pipeline"
+while :; do
+  if [ -n "$got" ]; then
+    # node writes its pid within tens of ms of starting; wait for it (bounded) rather than find nothing to forward
+    i=0
+    while [ ! -s "$pidfile" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+    if [ -s "$pidfile" ]; then kill -TERM "$(cat "$pidfile")" 2>/dev/null; fi
+    # node now runs its ordered teardown; a second signal can interrupt this wait, so wait until the pipeline is gone
+    while kill -0 "$pipeline" 2>/dev/null; do wait "$pipeline" 2>/dev/null; done
+    rm -f "$out" "$rcfile" "$pidfile"
+    exit "$got"
+  fi
+  wait "$pipeline"
+  # a trapped signal makes `wait` return early: go round and handle it; otherwise the pipeline has ended
+  [ -n "$got" ] || break
+done
 trap - TERM INT
 rc=$(cat "$rcfile" 2>/dev/null || echo 1)
 rm -f "$rcfile" "$pidfile"
