@@ -11,7 +11,7 @@
  *       contains query text.
  *   EM5 a graph 503 is logged as one "executor-meter 503:" line with its code; SCRUM_EXECUTOR_METER=0 → no meter lines.
  */
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -25,6 +25,10 @@ import { HAVE_PY, tmpStore, startExecutor, killExecutor } from './helpers/graph-
 
 const SKIP = HAVE_PY ? false : 'UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)';
 const ROSTER_FILE = path.join(os.tmpdir(), `em1570-roster-${process.pid}.json`);
+// #1672 — everything this file makes under TMPDIR is removed when the file is done (each test kills its executor first)
+const made = [ROSTER_FILE];
+const store = (prefix) => { const d = tmpStore(prefix); made.push(d); return d; };
+after(() => { for (const p of made) { try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* best effort */ } } });
 fs.writeFileSync(ROSTER_FILE, JSON.stringify({ seats: { ada: { name: 'Ada', glyph: 'a', color: '#7cc4a0' }, board: { name: 'Board', glyph: 'o', color: '#8899aa', kind: 'system' } } }));
 const SECRET = 'SELECT ?s WHERE { ?s ?p "a card body nobody should see in a log" }';
 
@@ -90,7 +94,7 @@ test('EM3 a queued read is metered under its own caller, not the read that freed
 });
 
 test('EM4 real REST + executor: a card read is metered under its route; no query text in any meter line', { skip: SKIP, timeout: 300000 }, async () => {
-  const exec = await startExecutor({ store: tmpStore('em-'), datasetId: 'em-test', create: true });
+  const exec = await startExecutor({ store: store('em-'), datasetId: 'em-test', create: true });
   const env = { SCRUM_ROSTER_FILE: ROSTER_FILE, SCRUM_GRAPH_DATASET_ID: 'em-test', SCRUM_GRAPH_EXECUTOR_URL: exec.baseUrl, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', SCRUM_GRAPH_UNIT_CARDS: '1', SCRUM_EXECUTOR_METER_MS: '300', SCRUM_EXECUTOR_METER_SLOW_MS: '0' };
   const rest = await startRestServer({ board: makeBoardFixture(), env });
   try {
@@ -105,7 +109,7 @@ test('EM4 real REST + executor: a card read is metered under its route; no query
 });
 
 test('EM5 a graph 503 is one "executor-meter 503:" line; SCRUM_EXECUTOR_METER=0 means no meter', { skip: SKIP, timeout: 300000 }, async () => {
-  const exec = await startExecutor({ store: tmpStore('em5-'), datasetId: 'em5-test', create: true });
+  const exec = await startExecutor({ store: store('em5-'), datasetId: 'em5-test', create: true });
   const env = { SCRUM_ROSTER_FILE: ROSTER_FILE, SCRUM_GRAPH_DATASET_ID: 'em5-test', SCRUM_GRAPH_EXECUTOR_URL: exec.baseUrl, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', SCRUM_EXECUTOR_METER_MS: '300' };
   const rest = await startRestServer({ board: makeBoardFixture(), env });
   try {
@@ -115,7 +119,7 @@ test('EM5 a graph 503 is one "executor-meter 503:" line; SCRUM_EXECUTOR_METER=0 
     const code = (await r.json()).code;
     assert.ok(await rest.waitForStderr(new RegExp(`executor-meter 503: code=${code} route=GET `), 5000), `the 503 is logged with its code (${code})`);
   } finally { await rest.stop(); }
-  const exec2 = await startExecutor({ store: tmpStore('em5b-'), datasetId: 'em5b-test', create: true });
+  const exec2 = await startExecutor({ store: store('em5b-'), datasetId: 'em5b-test', create: true });
   const off = await startRestServer({ board: makeBoardFixture(), env: { ...env, SCRUM_GRAPH_DATASET_ID: 'em5b-test', SCRUM_GRAPH_EXECUTOR_URL: exec2.baseUrl, SCRUM_EXECUTOR_METER: '0' } });
   try {
     await fetch(`${off.baseUrl}/api/conversations?limit=1`, { signal: AbortSignal.timeout(30000) });
@@ -137,7 +141,7 @@ test('EM6 the daily keep-alive: the summary counts the day and says how to turn 
   m.ackDaily(snap);
   assert.match(m.prepareDaily().text, / 1 executor calls, 0 slow/, 'the ack subtracts exactly what was reported; a later call survives');
   m.stop();
-  const exec = await startExecutor({ store: tmpStore('em6-'), datasetId: 'em6-test', create: true });
+  const exec = await startExecutor({ store: store('em6-'), datasetId: 'em6-test', create: true });
   const env = { SCRUM_ROSTER_FILE: ROSTER_FILE, SCRUM_GRAPH_DATASET_ID: 'em6-test', SCRUM_GRAPH_EXECUTOR_URL: exec.baseUrl, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', SCRUM_EXECUTOR_METER_FIRST_POST_MS: '500', SCRUM_EXECUTOR_METER_DAILY_MS: '600000' };
   const rest = await startRestServer({ board: makeBoardFixture(), env });
   try {
@@ -190,7 +194,7 @@ test('EM7 a keep-alive that fails is retried with the SAME text and requestId, a
 });
 
 test('EM8 a slow call and the 503 it caused carry the SAME server-generated request id', { skip: SKIP, timeout: 300000 }, async () => {
-  const exec = await startExecutor({ store: tmpStore('em8-'), datasetId: 'em8-test', create: true });
+  const exec = await startExecutor({ store: store('em8-'), datasetId: 'em8-test', create: true });
   const env = { SCRUM_ROSTER_FILE: ROSTER_FILE, SCRUM_GRAPH_DATASET_ID: 'em8-test', SCRUM_GRAPH_EXECUTOR_URL: exec.baseUrl, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', SCRUM_EXECUTOR_METER_SLOW_MS: '0' };
   const rest = await startRestServer({ board: makeBoardFixture(), env });
   try {
