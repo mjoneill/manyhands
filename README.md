@@ -30,15 +30,17 @@ You don't need four agents for it to be worth running. At one agent it's already
 
 ## Quickstart
 
+Copy the clone URL from the **Code** button on this repository's page, then:
+
 ```bash
-git clone <this repository's clone URL>   # from the Code button on the repository page
+git clone <the URL you copied> manyhands
 cd manyhands
 node server.js
 ```
 
 Open **http://localhost:3141**. That's it — **no install step** for the board itself. The board server has no dependencies at all. (Port taken? A board is already running on 3141 — set `SCRUM_PORT` and `MCP_PORT` on both processes, as [Making it yours](#making-it-yours) shows, so the two never talk to each other.)
 
-Two surfaces do need one: the **graph** (`/api/graph`, `/api/checks`, `/api/seats/state` — seat availability lives in the graph — and the SPARQL examples further down) and the **MCP adapter**. Both come from the same `npm install` in the next section — and the graph endpoints answer `503 GRAPH_DEPS_MISSING` until you have run it *and restarted the server*.
+Two surfaces do need one: the **graph** (`/api/graph`, `/api/checks`, `/api/seats/state` — seat availability lives in the graph — and the SPARQL examples on this page and in [docs/field-notes.md](docs/field-notes.md)) and the **MCP adapter**. Both come from the same `npm install` in the next section — and the graph endpoints answer `503 GRAPH_DEPS_MISSING` until you have run it *and restarted the server*.
 
 Make your first card:
 
@@ -105,7 +107,7 @@ The step-by-step above is the one harness we have run cold. For the rest, many h
 
 **2. The graph-backed board: what we actually run.** Our own board keeps its cards, columns, conversations, deliveries, memories, decisions and seat state in an RDF graph held by one Python process, `graph-executor/executor.py` (pyoxigraph on RocksDB, bound to `127.0.0.1`). The Node server talks to it over HTTP, and each collection is switched over by its own flag (`SCRUM_GRAPH_UNIT_*`). This is where the project is going: the reason it is a graph at all is that context you cannot query is an archive, not context. It is also **mid-migration**: a few things still live only in the JSON file, and collections move across one at a time.
 
-What it is not yet is a newcomer install. We tried it from a fresh clone on 2026-10-11: the executor starts, but a brand-new graph has no columns, and the server refuses to serve until a migration script has been run by hand. That is a known, tracked gap, not a configuration step we forgot to write down. The graph store is backed up as RocksDB checkpoints that `scripts/graph-store-backup.mjs` copies to an independent directory. A checkpoint covers the graph only: attachment bytes, the state still held in the JSON file and a few side files are backed up separately, and we have not yet validated a complete restore end to end. If you want to run graph-backed today, expect to read code and ask your agents; we will document the path once we have walked it cold.
+What it is not yet is a newcomer install. We tried it from a fresh clone on 2026-10-11: the executor starts, but a brand-new graph has no columns, and the server refuses to serve until a migration script has been run by hand. That is a known, tracked gap, not a configuration step we forgot to write down. The graph store is backed up as RocksDB checkpoints that `scripts/graph-store-backup.mjs` copies to an independent directory. A checkpoint covers the graph only: attachment bytes, the state still held in the JSON file and a few side files must be backed up separately, and we have not yet validated a complete restore end to end. If you want to run graph-backed today, expect to read code and ask your agents; we will document the path once we have walked it cold.
 
 ---
 
@@ -181,7 +183,7 @@ Being honest about the edges is more useful than a feature list.
   SELECT (COUNT(DISTINCT ?a) AS ?n) WHERE {
     ?a a prov:Activity ; scrum:entityKind "card" ; prov:wasAssociatedWith ?who }
   ```
-  against `POST /api/graph`, and the same query without the last clause for the total. ⚠️ That endpoint is the one part of the board that needs `npm install` — it uses `oxigraph`, which is why the Quickstart above can promise no install step for everything else. Without it you get a `503` naming the missing dependency rather than a crash — and the install takes effect on the next server start, not before.
+  against `POST /api/graph`, and the same query without the last clause for the total. ⚠️ That endpoint needs `npm install` (it uses `oxigraph`), as does the MCP adapter; the local board's other pages and routes need no install, which is what the Quickstart promises. Without it you get a `503` naming the missing dependency rather than a crash — and the install takes effect on the next server start, not before.
 
   This paragraph used to quote a percentage from our board. Two things were wrong with that, and the second is the one worth passing on: the number **drifts with no change to this file** (it read "about 80%" and measured 73% when someone finally checked), and — more importantly — **it was a statistic about a board you do not have.** Your board's ratio depends on which of your agents declare themselves and how much of your traffic comes through the browser UI. Ours could be accurate and still tell you nothing about yours.
 
