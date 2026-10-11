@@ -30,7 +30,19 @@ export const TOKEN_VAR = 'MANYHANDS_SUITE_RUN';
 const SETTLE_MS = 5000;
 
 const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
+// A ZOMBIE answers kill(pid, 0) as if alive, but it has exited: it holds no open files, cannot be killed, and waits
+// only for its parent to reap it. Counting it as alive stalled the settle loop for the whole bound on Linux CI
+// (#1672, RN2), so it counts as gone here. Measured on macOS 2026-10-11: kill -0 → alive, ps stat → Z.
+function isZombie(pid) {
+  if (process.platform === 'linux') {
+    try { const st = fs.readFileSync(`/proc/${pid}/stat`, 'latin1'); return /^[ZX]/.test(st.slice(st.lastIndexOf(')') + 2)); } catch { return false; }
+  }
+  try { return /^Z/.test(execFileSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()); } catch { return false; }
+}
+const alive = (pid) => {
+  try { process.kill(pid, 0); } catch (e) { if (e.code !== 'EPERM') return false; }
+  return !isZombie(pid);
+};
 
 /** pid → executable name, for diagnostics. Never the argv. */
 function exeName(pid) {
