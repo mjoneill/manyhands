@@ -7,8 +7,9 @@
  *   H1 EXECUTOR READS  one call on a node with 2,000 history in-edges makes a bounded number of executor queries,
  *                      independent of how many history subjects it has (the batch-per-200 shape made 11+ for this fixture
  *                      and ~66 for a seat)
- *   H2 STORE MATCHES   the in-process path reads only the three time predicates per history subject, the #1484 cost:
- *                      at most 1 + 3 matches per subject, never the 11 label predicates
+ *   H2 STORE MATCHES   the in-process path costs what #1484 cost: ONE match per history subject (its first time
+ *                      predicate holding a literal, then stop), plus a small constant for the node and the shown members.
+ *                      Measured on this fixture (2,000 subjects): #1484 baseline 2,007; 61456fe 22,025; bound N + 30
  *   H3 SAME ANSWER     both drivers give the same history { count, latest } on that node, and latest is the newest time
  */
 import { test } from 'node:test';
@@ -48,11 +49,11 @@ function storeWithCount() {
   return { store: proxy, counted };
 }
 
-test('H2 STORE MATCHES: the in-process path reads at most 1 + 3 matches per history subject, never the label predicates', () => {
+test('H2 STORE MATCHES: the in-process path costs the #1484 baseline, one match per history subject plus a constant', () => {
   const { store, counted } = storeWithCount();
   const r = graphNeighbors(store, { node: 'person:hist1642' });
   assert.equal(r.history.count, N, 'CONTROL: the fixture has its history');
-  assert.ok(counted.matches <= 50 + 4 * N, `${counted.matches} store matches for ${N} history subjects (bound ${50 + 4 * N}; reading 11 label predicates each would be ~${12 * N})`);
+  assert.ok(counted.matches <= N + 30, `${counted.matches} store matches for ${N} history subjects (bound ${N + 30}; the #1484 baseline was 2,007, all three time predicates would be ~${3 * N}, the 11 label predicates ~${11 * N})`);
 });
 
 test('H1 EXECUTOR READS + H3 SAME ANSWER: a bounded number of executor queries, and the same history as the in-process path', { skip: SKIP }, async () => {

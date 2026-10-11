@@ -244,10 +244,13 @@ function storeAnswer(store, req) {
       const out = new Map();
       for (const q of store.match(null, null, nn(req.iri))) {
         if (!q.predicate.value.startsWith(IRI.prov) || out.has(q.subject.value)) continue;
+        // #1484's firstLiteral: STOP at the first predicate that holds a literal (nearly always startedAtTime), so one
+        // match per history subject, not three
         const f = new Map();
         for (const p of HISTORY_TIMES) {
           const vals = store.match(q.subject, nn(p), null).map((x) => ({ v: x.object.value, t: termTypeOf(x.object) }));
           if (vals.length) f.set(p, vals);
+          if (vals.some((x) => x.t === 'Literal')) break;
         }
         out.set(q.subject.value, f);
       }
