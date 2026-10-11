@@ -100,6 +100,9 @@ function copyHelper(dir) {
   // #1672 — run-test-files.mjs imports the suite's temp owner too
   const SUITE_TMP = path.join(ROOT, 'scripts', 'suite-tmp.mjs');
   if (fs.existsSync(SUITE_TMP)) fs.copyFileSync(SUITE_TMP, path.join(dir, 'scripts', 'suite-tmp.mjs'));
+  // ...and suite-tmp.mjs runs proc-env-owned.py on macOS to decide which processes are the run's
+  const PROC_ENV = path.join(ROOT, 'scripts', 'proc-env-owned.py');
+  if (fs.existsSync(PROC_ENV)) fs.copyFileSync(PROC_ENV, path.join(dir, 'scripts', 'proc-env-owned.py'));
 }
 
 test('positive control: a deliberately failing fixture exits nonzero and shows the failure', async () => {
