@@ -39,6 +39,8 @@ export function startExecutor({ store, datasetId, create = false, port = 0, read
       if (!done && out.includes('\n')) {
         let ready;
         try { ready = JSON.parse(out.split('\n')[0]); } catch (e) { return fail(e); }
+        // valid JSON is not yet a ready line (`null`, `[]`, `{}` all parse): it must carry a usable port, or this is a failed startup like any other
+        if (ready === null || typeof ready !== 'object' || !Number.isInteger(ready.port) || ready.port <= 0) return fail(new Error(`executor's first line is not a ready line: ${out.split('\n')[0].slice(0, 200)}`));
         done = true; clearTimeout(timer);
         resolve({ proc: p, ready, port: ready.port, baseUrl: `http://127.0.0.1:${ready.port}` });
       }
