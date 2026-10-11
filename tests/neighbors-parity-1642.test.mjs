@@ -11,7 +11,7 @@
  *   N0 CONTROL     two flag-unset REST processes agree on every query in the node set; the fixture reaches the shapes that can differ (several edge groups in both directions, a truncated group, history, a decision, a seat)
  *   N1 SOURCES     the flag-unset payload names the replica; the flag-on payload names the executor
  *   N1b CURRENCY   the executor leg states `executorPosition` as `epoch:commitSeq` (digits) on every 200 answer; the replica leg states none (added after the PR #44 review: N1 checked `source` only and the normaliser drops this key)
- *   N2 PARITY      flag-on vs flag-unset, every query in the set, normalised (below): EQUAL. The named differences are exactly the ones listed in NAMED below, each with its reason; there are none besides the probe row
+ *   N8 APEX        a person-sized node (6,000 history in-edges, executor-only) is answered by a BOUNDED number of executor reads (<= 12) and under 3,000 ms, with the exact history count and latest (added after the apex measurement)\n *   N2 PARITY      flag-on vs flag-unset, every query in the set, normalised (below): EQUAL. The named differences are exactly the ones listed in NAMED below, each with its reason; there are none besides the probe row
  *   N3 PROBE       the executor-only probe person answers 200 on the executor leg and 404 UNKNOWN_NODE on the replica leg: the flag moved the reads (the control the card asks for)
  *   N4 ISOLATION   `properties=all` and the edge lists on the executor leg carry no bookkeeping vocabulary (entityJson, recordedBy, receipts, `urn:ex:` predicates, a version stamp) for the card, the decision and the seat
  *   N5 ERRORS      an unknown card, a bad direction and a memory addressed by its uuid get the SAME status, code and `tried` list on both legs (a memory is NOT addressable today: the accepted forms reach cards, persons, decisions and
@@ -51,6 +51,9 @@ const api = async (base, method, route, body) => {
 };
 const PROBE = 'person:probe1642';
 const PROBE_IRI = 'https://scrumboard.local/person/probe1642';
+const APEX = 'person:apex1642';
+const APEX_IRI = 'https://scrumboard.local/person/apex1642';
+const APEX_N = 6000;
 const NAMED = [
   { query: PROBE, reason: 'seeded into the executor only: the replica cannot know it (the control that the flag moved the reads)' },
   { query: 'person:ada (a seat that authored a log-born decision and memory)', reason: 'the same blindness seen from the other end: the executor has THREE more in-edge groups on the seat (scrum:decidedBy from the decision, scrum:owner and schema:author from the memory and its version); the replica has none of them. Everything else on the seat is equal' },
@@ -62,6 +65,7 @@ async function failProxy(execUrl) {
   const srv = http.createServer((req, res) => {
     const chunks = []; req.on('data', (c) => chunks.push(c));
     req.on('end', async () => {
+      if (req.method === 'POST' && req.url.includes('dataset=public')) state.publicQueries = (state.publicQueries ?? 0) + 1;   // N8 counts the reads one call makes
       if (state.failQueries && req.method === 'POST' && req.url !== '/update' && !/entityJson|BIND\(1 AS|urn:ex:|urn:scrum:bookkeeping/.test(Buffer.concat(chunks).toString()) /* the READ doors a neighbours answer uses (SELECT and ASK), NOT the cards unit's own machinery (its cache load, counter and currency ping): otherwise REST's own 503 gate answers first and the row would pass for any build */) { res.writeHead(503, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ error: 'test: executor cannot answer' })); }
       const headers = Object.fromEntries(Object.entries(req.headers).filter(([k]) => !['host', 'connection', 'content-length'].includes(k)));
       try {
@@ -79,7 +83,9 @@ const ENV = (extra) => ({ SCRUM_ROSTER_FILE: ROSTER_FILE, SCRUM_GRAPH_DATASET_ID
 async function seededExecutor() {
   const store = tmpStore('npar-');
   const first = await startExecutor({ store, datasetId: 'npar', create: true }); await killExecutor(first);
-  const seed = spawnSync(PY, ['-c', `import pyoxigraph as px\ns = px.Store(${JSON.stringify(store)})\ns.update('INSERT DATA { <${PROBE_IRI}> a <https://schema.org/Person> ; <https://schema.org/name> "probe 1642" ; <https://schema.org/knows> <urn:ex:probe-target-1642> }')\ns.flush()`]);
+  // N8's apex: a person with APEX_N history in-edges (prov:wasAssociatedWith from APEX_N activities, each with a prov:startedAtTime, strictly increasing), executor-only like the probe
+  const apexPy = `lines = []\nfor i in range(${APEX_N}):\n    lines.append('<urn:ex:act1642/%d> <http://www.w3.org/ns/prov#wasAssociatedWith> <${APEX_IRI}> ; <http://www.w3.org/ns/prov#startedAtTime> "2026-10-10T%02d:%02d:%02dZ"^^<http://www.w3.org/2001/XMLSchema#dateTime> .' % (i, i // 3600, (i // 60) % 60, i % 60))\ns.update('INSERT DATA { <${APEX_IRI}> a <https://schema.org/Person> ; <https://schema.org/name> "apex 1642" . ' + ' '.join(lines) + ' }')\n`;
+  const seed = spawnSync(PY, ['-c', `import pyoxigraph as px\ns = px.Store(${JSON.stringify(store)})\ns.update('INSERT DATA { <${PROBE_IRI}> a <https://schema.org/Person> ; <https://schema.org/name> "probe 1642" ; <https://schema.org/knows> <urn:ex:probe-target-1642> }')\n${apexPy}s.flush()`]);
   assert.equal(seed.status, 0, `the probe was seeded: ${String(seed.stderr)}`);
   return startExecutor({ store, datasetId: 'npar', create: false });
 }
@@ -163,6 +169,24 @@ test('N1b CURRENCY: the executor leg states executorPosition (epoch:commitSeq, d
       assert.match(String(rb.body.executorPosition), /^\d+:\d+$/, `${name}: the executor leg states executorPosition as epoch:commitSeq, digits only (got ${JSON.stringify(rb.body.executorPosition)})`);
     }
     assert.ok(n200 >= 10, `CONTROL: the check ran over the node set (${n200} executor answers were 200)`);
+  });
+});
+
+test('N8 APEX: a person-sized node (6,000 history in-edges) is answered by a BOUNDED number of executor reads, in under the REST read-gate time, with the exact history count and latest', { skip: SKIP, timeout: 900000 }, async () => {
+  // MEASURED CAUSE (restored copy, 2026-10-11): the largest person node has 23,753 in-edges, 9,849 of them history; graph_neighbors took ~76 s because its history step asked for the label facts of EVERY history neighbour in batches of 200
+  // (50 batches, ~1.55 s each in a 1.8M-quad store). A single query keyed on the node returned the same 9,849 rows in 251 ms.
+  // FIRST VERSION OF THIS ROW (pre-registered, time bound only, N = 3,000) PASSED on the defective head 61456fe: a test store is tiny, so a batch costs milliseconds there and the same defect never shows as time. My prediction (RED at ~16 s) was wrong,
+  // and the row had no teeth. What does not depend on the store's size is HOW MANY READS the call makes: the defect makes one batch per 200 history neighbours, a fixed-shape fix makes a constant number.
+  // So: public-dataset reads made by ONE call <= 12 (a bounded fix makes ~6; the defect makes 6,000/200 + 4 = 34), plus the time bound (3,000 ms, the REST read gate) kept as the symptom the size-independent count stands for.
+  await world(async ({ start, proxy }) => {
+    const B = await start({ SCRUM_GRAPH_NEIGHBORS_SOURCE: 'executor' });
+    await get(B, `node=${PROBE}`);   // warm: the first call may do one-off work
+    proxy.state.publicQueries = 0; const t0 = performance.now(); const r = await get(B, `node=${APEX}`); const ms = Math.round(performance.now() - t0); const reads = proxy.state.publicQueries;
+    assert.equal(r.status, 200, `the apex answers: ${r.status} ${r.text.slice(0, 200)}`);
+    assert.equal(r.body.history.count, APEX_N, 'every history in-edge is counted');
+    assert.equal(r.body.history.latest?.node, `urn:ex:act1642/${APEX_N - 1}`, 'latest is the activity with the greatest prov:startedAtTime');
+    assert.ok(reads <= 12, `one call made ${reads} executor reads for ${APEX_N} history in-edges; a bounded design makes a constant number (<= 12), a batch-per-200 design makes ${Math.ceil(APEX_N / 200) + 4}`);
+    assert.ok(ms <= 3000, `the call took ${ms} ms for ${APEX_N} history in-edges; the bound is 3,000 ms (the REST read gate)`);
   });
 });
 
