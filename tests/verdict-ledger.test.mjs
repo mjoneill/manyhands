@@ -38,7 +38,7 @@ function universe(files) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger746-'));
   fs.mkdirSync(path.join(dir, 'scripts'));
   fs.mkdirSync(path.join(dir, 'tests'));
-  for (const name of ['run-tests.sh', 'run-test-files.mjs', 'verdict-ledger.mjs', 'suite-tmp.mjs']) {   // #1672 — the runner imports suite-tmp.mjs
+  for (const name of ['run-tests.sh', 'run-test-files.mjs', 'verdict-ledger.mjs', 'suite-tmp.mjs', 'proc-env-owned.py']) {   // #1672 — the runner imports suite-tmp.mjs, which runs proc-env-owned.py on macOS
     fs.copyFileSync(path.join(ROOT, 'scripts', name), path.join(dir, 'scripts', name));
   }
   for (const [name, body] of Object.entries(files)) {

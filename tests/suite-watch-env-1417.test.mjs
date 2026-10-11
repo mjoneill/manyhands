@@ -63,7 +63,7 @@ test('#1417 withSystemBins puts /usr/sbin and /sbin on a PATH that lacks them, o
 test('#1417 the suite the watcher spawns can find lsof — the plist PATH without /usr/sbin is repaired in the watcher, not the plist', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sw1417-'));
   fs.mkdirSync(path.join(dir, 'tests')); fs.mkdirSync(path.join(dir, 'scripts'));
-  for (const f of ['run-tests.sh', 'run-test-files.mjs', 'verdict-ledger.mjs', 'suite-tmp.mjs']) {   // #1672 — the runner imports suite-tmp.mjs
+  for (const f of ['run-tests.sh', 'run-test-files.mjs', 'verdict-ledger.mjs', 'suite-tmp.mjs', 'proc-env-owned.py']) {   // #1672 — the runner imports suite-tmp.mjs, which runs proc-env-owned.py on macOS
     const src = path.join(ROOT, 'scripts', f);
     if (fs.existsSync(src)) fs.copyFileSync(src, path.join(dir, 'scripts', f));
   }

@@ -66,6 +66,9 @@ function makeUniverse() {
   // #1672 — run-test-files.mjs imports the suite's temp owner too
   const suiteTmp = path.join(ROOT, 'scripts', 'suite-tmp.mjs');
   if (fs.existsSync(suiteTmp)) fs.copyFileSync(suiteTmp, path.join(dir, 'scripts', 'suite-tmp.mjs'));
+  // ...and suite-tmp.mjs runs proc-env-owned.py on macOS to decide which processes are the run's
+  const procEnv = path.join(ROOT, 'scripts', 'proc-env-owned.py');
+  if (fs.existsSync(procEnv)) fs.copyFileSync(procEnv, path.join(dir, 'scripts', 'proc-env-owned.py'));
   fs.chmodSync(path.join(dir, 'scripts', 'run-tests.sh'), 0o755);
   // #1637 — the watch FAILS CLOSED without a required-coverage manifest; a fixture universe states its choice explicitly (an empty list: these tests are about the alarm, not about coverage)
   fs.writeFileSync(path.join(dir, 'scripts', 'suite-watch-required.json'), '[]\n');
