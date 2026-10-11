@@ -172,12 +172,12 @@ test('N1b CURRENCY: the executor leg states executorPosition (epoch:commitSeq, d
   });
 });
 
-test('N8 APEX: a person-sized node (6,000 history in-edges) is answered by a BOUNDED number of executor reads, in under the REST read-gate time, with the exact history count and latest', { skip: SKIP, timeout: 900000 }, async () => {
+test('N8 APEX: a person-sized node (6,000 history in-edges) is answered by a BOUNDED number of executor reads, in under the proposed neighbours acceptance budget, with the exact history count and latest', { skip: SKIP, timeout: 900000 }, async () => {
   // MEASURED CAUSE (restored copy, 2026-10-11): the largest person node has 23,753 in-edges, 9,849 of them history; graph_neighbors took ~76 s because its history step asked for the label facts of EVERY history neighbour in batches of 200
   // (50 batches, ~1.55 s each in a 1.8M-quad store). A single query keyed on the node returned the same 9,849 rows in 251 ms.
   // FIRST VERSION OF THIS ROW (pre-registered, time bound only, N = 3,000) PASSED on the defective head 61456fe: a test store is tiny, so a batch costs milliseconds there and the same defect never shows as time. My prediction (RED at ~16 s) was wrong,
   // and the row had no teeth. What does not depend on the store's size is HOW MANY READS the call makes: the defect makes one batch per 200 history neighbours, a fixed-shape fix makes a constant number.
-  // So: public-dataset reads made by ONE call <= 12 (a bounded fix makes ~6; the defect makes 6,000/200 + 4 = 34), plus the time bound (3,000 ms, the REST read gate) kept as the symptom the size-independent count stands for.
+  // So: public-dataset reads made by ONE call <= 12 (a bounded fix makes ~6; the defect makes 6,000/200 + 4 = 34), plus the time bound (3,000 ms, a PROPOSED neighbours acceptance budget; the REST read gate does not enforce this endpoint's duration, which uses its own fetch timeout) kept as the symptom the size-independent count stands for.
   await world(async ({ start, proxy }) => {
     const B = await start({ SCRUM_GRAPH_NEIGHBORS_SOURCE: 'executor' });
     await get(B, `node=${PROBE}`);   // warm: the first call may do one-off work
@@ -186,7 +186,7 @@ test('N8 APEX: a person-sized node (6,000 history in-edges) is answered by a BOU
     assert.equal(r.body.history.count, APEX_N, 'every history in-edge is counted');
     assert.equal(r.body.history.latest?.node, `urn:ex:act1642/${APEX_N - 1}`, 'latest is the activity with the greatest prov:startedAtTime');
     assert.ok(reads <= 12, `one call made ${reads} executor reads for ${APEX_N} history in-edges; a bounded design makes a constant number (<= 12), a batch-per-200 design makes ${Math.ceil(APEX_N / 200) + 4}`);
-    assert.ok(ms <= 3000, `the call took ${ms} ms for ${APEX_N} history in-edges; the bound is 3,000 ms (the REST read gate)`);
+    assert.ok(ms <= 3000, `the call took ${ms} ms for ${APEX_N} history in-edges; the bound is 3,000 ms (the proposed neighbours acceptance budget)`);
   });
 });
 
