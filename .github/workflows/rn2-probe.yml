@@ -22,7 +22,8 @@ env:
     HYPOTHESES (unverified, kept separate): on Linux an unreadable or empty /proc/<pid>/environ is silently
     treated as NOT OWNED, so a child caught mid-exec could be read as tokenless (a stranger line) or skipped (no line).
     The suite jobs run WITHOUT the AppArmor sysctl that ci.yml uses, so served-browser rows may fail here; only RN/RN2
-    lines are evidence for this probe.
+    lines are evidence for this probe. Browser failures are labelled separately, and their early exit may change the
+    suite's load, so a suite job here is not load-equivalent to a ci.yml run. Only an informative RN2 red stops the probe.
     A green across every job is a bounded sample at one sha, not proof the race is absent, and does not clear the hold.
 
 jobs:
