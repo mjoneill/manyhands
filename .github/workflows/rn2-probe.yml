@@ -67,7 +67,10 @@ jobs:
       - name: RN2, 30 times, stopping at the first red
         run: |
           burners=''
-          trap 'for b in $burners; do kill "$b" 2>/dev/null; done' EXIT TERM INT
+          cleanup() { for b in $burners; do kill "$b" 2>/dev/null || true; done; }
+          trap cleanup EXIT
+          trap 'exit 143' TERM
+          trap 'exit 130' INT
           if [ "${{ matrix.load }}" = burn ]; then
             for c in $(seq 1 "$(nproc)"); do yes > /dev/null & burners="$burners $!"; done
             echo "burners:$burners"
