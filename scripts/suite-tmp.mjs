@@ -217,13 +217,22 @@ export function teardown(suite, { root }) {
   };
   let strangers = strangersIn(view);
   let lookFailed = false;
+  // every fresh look is judged WHOLE: one taken during this wait can show an owned or undecidable process that the
+  // settle step above never saw. Those are not killed here (the settle step is over); they keep the folder and fail.
+  const lateOwned = new Set();
+  const lateUndecided = new Set();
   const recheckUntil = Date.now() + SETTLE_MS;
   while (strangers.length && Date.now() < recheckUntil) {
     sleepSync(100);
     const v = inspectProcesses(marker);
     if (v === null) { lookFailed = true; break; }
     strangers = strangersIn(v);
+    for (const pid of v.owned) if (pid !== self && !stubborn.includes(pid) && alive(pid)) lateOwned.add(pid);
+    for (const pid of v.undecidable) if (pid !== self && !undecided.includes(pid) && alive(pid)) lateUndecided.add(pid);
   }
+  const late = [...lateOwned].filter(alive).concat([...lateUndecided].filter(alive));
+  for (const pid of lateOwned) if (alive(pid)) lines.push(`# tmp: ⛔ owned process pid ${pid} (${exeName(pid)}) appeared while waiting on a process that is not this run's: NOT killed, the folder is kept`);
+  for (const pid of lateUndecided) if (alive(pid)) lines.push(`# tmp: ⛔ process pid ${pid} (${exeName(pid)}) appeared while waiting, and its ownership could not be decided: NOT killed`);
   for (const [pid, s] of seen) {
     if (strangers.includes(pid)) lines.push(`# tmp: ⛔ process pid ${pid} (${s.exe}, parent ${s.ppid}) is not this run's but uses ${s.where}: NOT killed`);
     else lines.push(`# tmp: process pid ${pid} (${s.exe}, parent ${s.ppid}) was not this run's and used ${s.where}: observed, then exited (not killed)`);
@@ -251,7 +260,7 @@ export function teardown(suite, { root }) {
   }
 
   // 4. REMOVE — only when nothing we cannot account for still holds the folder.
-  if (strangers.length || lookFailed || stubborn.length || undecided.length) {
+  if (strangers.length || lookFailed || late.length || stubborn.length || undecided.length) {
     failed = true;
     lines.push(`# tmp: ⛔ folder RETAINED, not removed: ${suite.dir} (${entries} entries, ${bytes} bytes inside the file folders)`);
   } else {
