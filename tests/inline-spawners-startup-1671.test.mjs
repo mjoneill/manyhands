@@ -18,7 +18,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { withOwned } from './helpers/ready-world-1644.mjs';
 
@@ -42,6 +42,10 @@ done
 exec "$REAL_PY" "$@"
 `;
 const REAL_PY = process.env.GRAPH_EXECUTOR_PYTHON || path.join(ROOT, 'graph-executor', '.venv', 'bin', 'python');
+// P1-P3 run the probe files against the REAL executor (all but the probe's own start), so they need a python with pyoxigraph; F0-F2 are stub-only and need none. Without it the nested file skips its own tests,
+// no stub pid ever appears, and the row would wait out its bound and fail: that is an unavailable prerequisite, reported as a skip like the probe files' own.
+const HAVE_REAL_PY = fs.existsSync(REAL_PY) && spawnSync(REAL_PY, ['-c', 'import pyoxigraph'], { stdio: 'ignore' }).status === 0;
+const SKIP_P = HAVE_REAL_PY ? false : `UNAVAILABLE: no python with pyoxigraph at ${REAL_PY}`;
 
 /** Run `argv` (node arguments) with the stub as the executor's python. Resolves { exited, pids, survivors }; the stub processes are killed after the check. */
 async function withStub(argv, { boundMs }) {
@@ -100,7 +104,7 @@ async function silentStart(file, flag, { appearBoundMs, waitMs }) {
 }
 
 for (const [tag, file, flag] of [['P1', 'tests/copy-guard-bytes-1577.test.mjs', '--create'], ['P2', 'tests/epoch-cursor-1575.test.mjs', '--promote-epoch'], ['P3', 'tests/incarnation-1577.test.mjs', '--promote-epoch']]) {
-  test(`${tag} ${file}: a probe start that never prints is killed by the file itself (~15 s), not left running`, { timeout: 240000 }, async () => {
+  test(`${tag} ${file}: a probe start that never prints is killed by the file itself (~15 s), not left running`, { timeout: 240000, skip: SKIP_P }, async () => {
     const r = await silentStart(file, flag, { appearBoundMs: 150000, waitMs: 19000 });
     assert.equal(r.appeared, true, `CONTROL: the file reached its silent-able start (${flag}) within 150 s`);
     assert.equal(r.aliveAfter, false, `${file}: the process ${r.pid} that printed nothing was still running 19 s after it started`);
