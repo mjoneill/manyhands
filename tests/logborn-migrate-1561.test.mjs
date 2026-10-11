@@ -16,11 +16,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { startRestServer, freePort, makeBoardFixture, PROJECT_DIR } from './helpers/harness.mjs';
 import { mintToken, hashToken } from '../core/credentials.mjs';
 import { createGraphClient } from '../core/graph-client.mjs';
 import { migrate } from '../scripts/migrate-logborn-1561.mjs';
+import { spawnExecutor } from './helpers/graph-executor-proc.mjs';
 
 const PY = process.env.GRAPH_EXECUTOR_PYTHON || path.join(PROJECT_DIR, 'graph-executor', '.venv', 'bin', 'python');
 const HAVE_PY = fs.existsSync(PY) && spawnSync(PY, ['-c', 'import pyoxigraph'], { stdio: 'ignore' }).status === 0;
@@ -40,13 +41,8 @@ const LEGACY_FIXTURE = () => makeBoardFixture({
 
 async function startExecutor(dsid, store = fs.mkdtempSync(path.join(os.tmpdir(), 'lbm-store-')), create = true) {
   const port = await freePort();
-  const proc = spawn(PY, [path.join(PROJECT_DIR, 'graph-executor', 'executor.py'), '--store', store, '--port', String(port), '--dataset-id', dsid, ...(create ? ['--create'] : []), '--exit-on-stdin-eof'], { stdio: ['pipe', 'pipe', 'pipe'] });
-  let err = '';
-  proc.stderr.on('data', (d) => { err += d; });
-  await new Promise((resolve, reject) => {
-    let out = ''; proc.stdout.on('data', (d) => { out += d; if (out.includes('\n')) resolve(); });
-    proc.on('exit', (c) => reject(new Error(`executor exited ${c}: ${err}`)));
-  });
+  // #1671 — through the shared helper: a failed startup never leaves the executor running; stdin stays open for --exit-on-stdin-eof
+  const { proc } = await spawnExecutor(['--store', store, '--port', String(port), '--dataset-id', dsid, ...(create ? ['--create'] : []), '--exit-on-stdin-eof'], { stdin: 'pipe' });
   const url = `http://127.0.0.1:${port}`;
   return { proc, store, url, client: createGraphClient({ baseUrl: url, expectedDatasetId: dsid }), stop: () => new Promise((r) => { proc.once('exit', r); proc.kill('SIGKILL'); }) };
 }

@@ -21,9 +21,9 @@ import {
 } from '../scripts/graph-store-backup-schedule.mjs';
 import { assess, monitor } from '../scripts/graph-store-backup-monitor.mjs';
 import { renderPlist } from '../scripts/graph-store-backup-plist.mjs';
+import { spawnExecutor } from './helpers/graph-executor-proc.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const EXEC = path.join(ROOT, 'graph-executor', 'executor.py');
 const TICK = path.join(ROOT, 'scripts', 'graph-store-backup-schedule.mjs');
 const MON = path.join(ROOT, 'scripts', 'graph-store-backup-monitor.mjs');
 const PY = process.env.GRAPH_EXECUTOR_PYTHON || path.join(ROOT, 'graph-executor', '.venv', 'bin', 'python');
@@ -359,15 +359,8 @@ test('#1566 plist renderer: tick every 900 s and the monitor; prints only; the d
 
 // ───────────────────────── one REAL tick, real executor ─────────────────────────
 
-function start(store, ckpt) {
-  return new Promise((resolve, reject) => {
-    const p = spawn(PY, [EXEC, '--store', store, '--port', '0', '--dataset-id', 'bks', '--create', '--checkpoint-dir', ckpt], { stdio: ['ignore', 'pipe', 'pipe'] });
-    let out = '', err = '';
-    p.stdout.on('data', (d) => { out += d; if (out.includes('\n')) resolve({ p, base: `http://127.0.0.1:${JSON.parse(out.split('\n')[0]).port}` }); });
-    p.stderr.on('data', (d) => { err += d; });
-    p.on('exit', (code) => reject(new Error(`exited ${code}: ${err}`)));
-  });
-}
+// #1671 — through the shared helper, so a failed startup never leaves the executor running
+const start = (store, ckpt) => spawnExecutor(['--store', store, '--port', '0', '--dataset-id', 'bks', '--create', '--checkpoint-dir', ckpt]).then((x) => ({ p: x.proc, base: x.baseUrl }));
 const rule = (n) => ({ kind: 'rule', opId: `urn:ex:op/bks-${n}`, actor: 'urn:ex:admin', rule: { iri: `urn:ex:R/bks-${n}` } });
 
 let real;

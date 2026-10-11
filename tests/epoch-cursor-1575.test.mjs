@@ -78,11 +78,13 @@ async function down(srv) { LIVE.delete(srv); await srv.stop(); await released(sr
 /** The restore is PROMOTED the way an operator does it (#1559): one executor start with --promote-epoch. */
 function promote(store, dsid) {
   return new Promise((resolve, reject) => {
+    // #1671 — deliberately inline: a one-shot promote that kills the executor on its first line (any line); a junk line therefore cannot orphan it, and a silent start is killed after 15 s
     const p = spawn(PY, [EXEC, '--store', store, '--port', '0', '--dataset-id', dsid, '--promote-epoch'], { stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '', err = '';
     p.stdout.on('data', (d) => { out += d; if (out.includes('\n')) { p.kill('SIGKILL'); } });
     p.stderr.on('data', (d) => { err += d; });
-    p.on('exit', () => (out.includes('\n') ? resolve() : reject(new Error(err))));
+    const silent = setTimeout(() => p.kill('SIGKILL'), 15_000);   // #1671: a start that never prints is killed, not left running
+    p.on('exit', () => { clearTimeout(silent); (out.includes('\n') ? resolve() : reject(new Error(err))); });
   }).then(() => released(store));
 }
 
