@@ -15,11 +15,14 @@ env:
     ## How to read the first RN2 red (written BEFORE the run)
     OBSERVATIONS to look for, about the survivors, in the nested run's `# tmp:` lines:
     - `still alive after N ms of kills` naming them: STUBBORN, seen as owned, killed, still alive at the bound.
-    - `is not this run's but uses ... NOT killed` naming them: read as TOKENLESS (a stranger).
+    - `is not this run's but uses ... NOT killed` naming them: NOT IDENTIFIED AS OWNED (a stranger). On Linux that
+      includes a process whose environment could not be read at that moment.
     - no line naming them: a GAP to investigate, NOT a cause.
     - (`ownership could not be decided` cannot appear on Linux: the Linux path never marks a process undecidable.)
     HYPOTHESES (unverified, kept separate): on Linux an unreadable or empty /proc/<pid>/environ is silently
     treated as NOT OWNED, so a child caught mid-exec could be read as tokenless (a stranger line) or skipped (no line).
+    The suite jobs run WITHOUT the AppArmor sysctl that ci.yml uses, so served-browser rows may fail here; only RN/RN2
+    lines are evidence for this probe.
     A green across every job is a bounded sample at one sha, not proof the race is absent, and does not clear the hold.
 
 jobs:
@@ -28,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         n: [1, 2, 3, 4, 5, 6]
     steps:
@@ -38,8 +41,6 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
-      - name: Allow Chromium's sandbox on the runner
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Pre-registered reading
         run: printf '%s\n' "$PREREG" >> "$GITHUB_STEP_SUMMARY"
       - name: Run the server suite
@@ -50,7 +51,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         load: [quiet, burn]
     steps:
@@ -64,10 +65,11 @@ jobs:
         run: printf '%s\n' "$PREREG" >> "$GITHUB_STEP_SUMMARY"
       - name: RN2, 30 times, stopping at the first red
         run: |
-          trap 'pkill -x yes || true' EXIT
+          burners=''
+          trap 'for b in $burners; do kill "$b" 2>/dev/null; done' EXIT TERM INT
           if [ "${{ matrix.load }}" = burn ]; then
-            for c in $(seq 1 "$(nproc)"); do (yes > /dev/null &) ; done
-            echo "burners: $(nproc)"
+            for c in $(seq 1 "$(nproc)"); do yes > /dev/null & burners="$burners $!"; done
+            echo "burners:$burners"
           fi
           rc=0
           for i in $(seq 1 30); do
@@ -76,5 +78,4 @@ jobs:
               echo "=== RED on loop $i"; rc=1; break
             fi
           done
-          pkill -x yes || true
           exit $rc
