@@ -10,6 +10,7 @@
  *
  *   N0 CONTROL     two flag-unset REST processes agree on every query in the node set; the fixture reaches the shapes that can differ (several edge groups in both directions, a truncated group, history, a decision, a seat)
  *   N1 SOURCES     the flag-unset payload names the replica; the flag-on payload names the executor
+ *   N1b CURRENCY   the executor leg states `executorPosition` as `epoch:commitSeq` (digits) on every 200 answer; the replica leg states none (added after the PR #44 review: N1 checked `source` only and the normaliser drops this key)
  *   N2 PARITY      flag-on vs flag-unset, every query in the set, normalised (below): EQUAL. The named differences are exactly the ones listed in NAMED below, each with its reason; there are none besides the probe row
  *   N3 PROBE       the executor-only probe person answers 200 on the executor leg and 404 UNKNOWN_NODE on the replica leg: the flag moved the reads (the control the card asks for)
  *   N4 ISOLATION   `properties=all` and the edge lists on the executor leg carry no bookkeeping vocabulary (entityJson, recordedBy, receipts, `urn:ex:` predicates, a version stamp) for the card, the decision and the seat
@@ -147,6 +148,21 @@ test('N1 SOURCES: the flag-unset payload names the replica; the flag-on payload 
   await world(async ({ A, start, QUERIES }) => {
     const B = await start({ SCRUM_GRAPH_NEIGHBORS_SOURCE: 'executor' }); const [sa, sb] = await sources(A, B, QUERIES['subject, both']);
     assert.equal(sa, 'replica', 'each leg names the store that answered, read from the response'); assert.equal(sb, 'executor', `the flag moved the reads (a build that ignores it still says replica or nothing): ${String(sb)}`);
+  });
+});
+
+test('N1b CURRENCY: the executor leg states executorPosition (epoch:commitSeq, digits) on every 200 answer; the replica leg states none', { skip: SKIP, timeout: 900000 }, async () => {
+  // the accepted contract on #1642 (PO, 07:07Z 10-10): "source + executorPosition on every answer, the same as #1643". A reader of an executor answer must be able to tell how current it is.
+  await world(async ({ A, start, QUERIES }) => {
+    const B = await start({ SCRUM_GRAPH_NEIGHBORS_SOURCE: 'executor' }); let n200 = 0;
+    for (const [name, qs] of Object.entries(QUERIES)) {
+      const [ra, rb] = [await get(A, qs), await get(B, qs)];
+      if (rb.status !== 200) continue;
+      n200++;
+      assert.ok(!('executorPosition' in (ra.body ?? {})), `${name}: the replica leg states no executor position (it did not read the executor)`);
+      assert.match(String(rb.body.executorPosition), /^\d+:\d+$/, `${name}: the executor leg states executorPosition as epoch:commitSeq, digits only (got ${JSON.stringify(rb.body.executorPosition)})`);
+    }
+    assert.ok(n200 >= 10, `CONTROL: the check ran over the node set (${n200} executor answers were 200)`);
   });
 });
 
