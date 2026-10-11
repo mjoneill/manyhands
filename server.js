@@ -1515,7 +1515,7 @@ async function loadGraphModules() {
       import('./core/ready-query.mjs'),
       import('./core/graph-neighbors.mjs'),   // #1484
     ]);
-    _graphModules = { ...replica, ...ready, graphNeighbors: neighbors.graphNeighbors };
+    _graphModules = { ...replica, ...ready, graphNeighbors: neighbors.graphNeighbors, graphNeighborsFromExecutor: neighbors.graphNeighborsFromExecutor };
     return _graphModules;
   } catch (e) {
     if (e?.code === 'ERR_MODULE_NOT_FOUND') {
@@ -2180,20 +2180,28 @@ async function handleGraphNeighbors(req, res) {
     const q = new URL(req.url, 'http://localhost').searchParams;
     const node = q.get('node');
     if (!node) return sendJSON(res, 400, { error: 'node is required: a card shortId, a full uuid, person:<key> or decision:<uuid>' });
-    const { graphNeighbors } = await loadGraphModules();
-    const { store, rebuiltMs, projectedThrough } = await warmGraphStore();
+    const { graphNeighbors, graphNeighborsFromExecutor } = await loadGraphModules();
     const predicates = q.get('predicates') ? q.get('predicates').split(',').map((x) => x.trim()).filter(Boolean) : null;
-    const result = graphNeighbors(store, {
+    const opts = {
       node,
       direction: q.get('direction') || 'both',
       predicates,
       limit: q.get('limit') ? Number(q.get('limit')) : undefined,
       properties: q.get('properties') === 'all' ? 'all' : 'default',
       includeHistory: q.get('includeHistory') === 'true' || q.get('includeHistory') === '1',
-    });
-    sendJSON(res, 200, { ...result, rebuiltMs: rebuiltMs ?? null, watermark: graphWatermark(projectedThrough) });
+    };
+    // #1642 — the executor's public dataset answers when SCRUM_GRAPH_NEIGHBORS_SOURCE=executor; every answer names its source.
+    if (NEIGHBORS_SOURCE === 'executor') {
+      const result = await graphNeighborsFromExecutor(process.env.SCRUM_GRAPH_EXECUTOR_URL, opts);
+      return sendJSON(res, 200, { ...result, source: 'executor', rebuiltMs: null, watermark: null });
+    }
+    const { store, rebuiltMs, projectedThrough } = await warmGraphStore();
+    const result = graphNeighbors(store, opts);
+    sendJSON(res, 200, { ...result, source: 'replica', rebuiltMs: rebuiltMs ?? null, watermark: graphWatermark(projectedThrough) });
   } catch (e) {
     if (e.code === 'GRAPH_DEPS_MISSING') return sendJSON(res, 503, { error: e.message, code: e.code });
+    // #1642 — a read the executor could not answer is a refusal the caller can retry, never a 404 for a node it never looked up
+    if (e.code === 'GRAPH_UNAVAILABLE') return sendJSON(res, 503, { error: e.message, code: 'NEIGHBORS_SOURCE_UNAVAILABLE' });
     if (e.code === 'UNKNOWN_NODE') return sendJSON(res, 404, { error: e.message, code: e.code, tried: e.tried });
     if (e.code === 'AMBIGUOUS_NODE') return sendJSON(res, 409, { error: e.message, code: e.code, candidates: e.candidates });
     if (e.code === 'BAD_DIRECTION') return sendJSON(res, 400, { error: e.message, code: e.code });
@@ -2222,6 +2230,12 @@ if (GRAPH_QUERY_SOURCE === 'executor' && !process.env.SCRUM_GRAPH_EXECUTOR_URL) 
 const CHECKS_SOURCE = process.env.SCRUM_GRAPH_CHECKS_SOURCE === 'executor' ? 'executor' : 'replica';
 if (CHECKS_SOURCE === 'executor' && !process.env.SCRUM_GRAPH_EXECUTOR_URL) {
   throw new Error('#1643: SCRUM_GRAPH_CHECKS_SOURCE=executor requires SCRUM_GRAPH_EXECUTOR_URL');
+}
+// #1642 — WHICH STORE ANSWERS graph_neighbors (GET /api/graph/neighbors). `executor` reads the executor's public dataset
+// (core/graph-neighbors.mjs graphNeighborsFromExecutor); unset is today's in-process path. Read once at start.
+const NEIGHBORS_SOURCE = process.env.SCRUM_GRAPH_NEIGHBORS_SOURCE === 'executor' ? 'executor' : 'replica';
+if (NEIGHBORS_SOURCE === 'executor' && !process.env.SCRUM_GRAPH_EXECUTOR_URL) {
+  throw new Error('#1642: SCRUM_GRAPH_NEIGHBORS_SOURCE=executor requires SCRUM_GRAPH_EXECUTOR_URL');
 }
 /**
  * #1643 — where the executor stands, `epoch:commitSeq` (the form LOGBORN.position() reports), read from its commit marker.

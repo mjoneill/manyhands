@@ -5,9 +5,6 @@
  * `decision:<uuid>`) and returns its edges grouped by predicate AND direction,
  * every neighbour labelled, every cut confessed.
  *
- * Pure over an oxigraph store (ADR-002 D1): no I/O, no sync. The caller hands in
- * a warm store, the same one graph_query reads.
- *
  * Decisions, recorded on #1484 at 13:00Z:
  *   - IRI objects are `edges`; literal objects are `properties` (by default only
  *     name and identifier, so a card's body is never its first "neighbour").
@@ -18,6 +15,16 @@
  *   - `rdf:type` becomes `kinds`.
  *   - 10 members per group by default (max 100), always with `total` and
  *     `truncated`, because a result whose size equals the limit is a cut.
+ *
+ * #1642 — ONE algorithm, TWO stores. The computation is a generator that YIELDS the reads it needs (a card by its
+ * identifier, does a node exist, a node's out-edges, its in-edges, the label facts of a set of nodes) and a driver
+ * answers them: `graphNeighbors(store, opts)` answers from a warm in-process oxigraph store, synchronously, exactly as
+ * before; `graphNeighborsFromExecutor(url, opts)` answers the same reads with a handful of SPARQL queries against the
+ * executor's PUBLIC dataset (bookkeeping is not reachable there, #1638). Because both legs run the same code over the
+ * same facts, a difference between them is a difference in the DATA, never in the rules.
+ *
+ * Ordering (PO ruling on #1642, 2026-10-10): groups are out before in; within a direction by total DESCENDING, ties by
+ * the compact predicate name ASCENDING; `kinds` sorted lexically. Members within a group are sorted by id.
  */
 import oxigraph from 'oxigraph';
 import { IRI } from './graph-replica.mjs';
@@ -27,6 +34,10 @@ export const MAX_GROUP_LIMIT = 100;
 const DECISION_BASE = 'https://scrumboard.local/decision/';   // matches projectDecision
 const RDF_TYPE = IRI.rdf + 'type';
 const DEFAULT_PROPERTIES = new Set([IRI.schema + 'name', IRI.schema + 'identifier']);
+const S = IRI.schema, SC = IRI.scrum;
+const HISTORY_TIMES = [IRI.prov + 'startedAtTime', IRI.prov + 'endedAtTime', S + 'dateCreated'];
+/** Every predicate a label or a history time is read from: one `facts` read fetches all of them for a set of nodes. */
+const FACT_PREDICATES = [RDF_TYPE, S + 'identifier', S + 'name', S + 'author', S + 'text', SC + 'note', SC + 'status', SC + 'statement', ...HISTORY_TIMES];
 
 const nn = (v) => oxigraph.namedNode(v);
 const shorten = (v) => {
@@ -35,6 +46,7 @@ const shorten = (v) => {
   return v;
 };
 const tail = (v) => v.replace(/^.*[/#:]/, '');
+const byString = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
 function unknown(node, tried) {
   return Object.assign(
@@ -45,16 +57,17 @@ function unknown(node, tried) {
   );
 }
 
-const mentioned = (store, iri) =>
-  store.match(nn(iri), null, null).length > 0 || store.match(null, null, nn(iri)).length > 0;
+// ---------- the reads, as requests a driver answers ----------
+// { op: 'cards', id }       -> [iri]   subjects typed schema:CreativeWork with schema:identifier "<id>"
+// { op: 'exists', iri }     -> bool    the iri is the subject or the object of any triple
+// { op: 'out', iri }        -> [{ p, o, t }]   t: 'NamedNode' | 'BlankNode' | 'Literal'
+// { op: 'in', iri }         -> [{ s, p }]
+// { op: 'facts', iris }     -> Map(iri -> Map(pred -> [{ v, t }]))   FACT_PREDICATES only
 
-/** The node-id grammar #1485 emits verbatim. Returns the node IRI or throws UNKNOWN_NODE. */
-export function resolveNode(store, node) {
+function* resolveNodeG(node) {
   const raw = String(node ?? '').trim();
   if (/^\d+$/.test(raw)) {
-    const hits = store.match(null, nn(IRI.schema + 'identifier'), oxigraph.literal(raw))
-      .map((q) => q.subject.value)
-      .filter((s) => store.match(nn(s), nn(RDF_TYPE), nn(IRI.schema + 'CreativeWork')).length > 0);
+    const hits = yield { op: 'cards', id: raw };
     if (hits.length === 1) return hits[0];
     if (hits.length > 1) {
       throw Object.assign(
@@ -69,61 +82,56 @@ export function resolveNode(store, node) {
   if (m) {
     const iri = (m[1] === 'decision' ? DECISION_BASE : IRI[m[1]]) + m[2];
     tried.push(iri);
-    if (mentioned(store, iri)) return iri;
+    if (yield { op: 'exists', iri }) return iri;
     throw unknown(raw, tried);
   }
-  if (/^[\w-]+$/.test(raw) && !/^\d+$/.test(raw)) {
+  if (/^[\w-]+$/.test(raw)) {
     for (const base of [IRI.entity, DECISION_BASE]) {
       tried.push(base + raw);
-      if (mentioned(store, base + raw)) return base + raw;
+      if (yield { op: 'exists', iri: base + raw }) return base + raw;
     }
   }
   throw unknown(raw, tried);
 }
 
-function firstLiteral(store, iri, preds) {
+const firstLiteral = (f, preds) => {
   for (const p of preds) {
-    const q = store.match(nn(iri), nn(p), null).find((x) => x.object.termType === 'Literal');
-    if (q) return q.object.value;
+    const hit = (f?.get(p) ?? []).find((x) => x.t === 'Literal');
+    if (hit) return hit.v;
   }
   return null;
-}
+};
 
-/** The label rule from #1484 decision 4. */
-export function labelFor(store, iri) {
-  const S = IRI.schema, SC = IRI.scrum;
-  const types = store.match(nn(iri), nn(RDF_TYPE), null).map((q) => q.object.value);
+/** The label rule from #1484 decision 4, over a node's gathered facts. */
+function labelFromFacts(iri, f) {
+  const types = (f?.get(RDF_TYPE) ?? []).map((x) => x.v);
   if (types.includes(S + 'CreativeWork')) {
-    const id = firstLiteral(store, iri, [S + 'identifier']);
-    const name = firstLiteral(store, iri, [S + 'name']) ?? '';
+    const id = firstLiteral(f, [S + 'identifier']);
+    const name = firstLiteral(f, [S + 'name']) ?? '';
     return id ? `#${id} ${name}`.trim() : name || tail(iri);
   }
   if (types.includes(S + 'Comment')) {
-    const author = store.match(nn(iri), nn(S + 'author'), null)[0]?.object.value;
-    const text = (firstLiteral(store, iri, [S + 'text']) ?? '').replace(/\s+/g, ' ').slice(0, 80);
+    const author = (f?.get(S + 'author') ?? [])[0]?.v;
+    const text = (firstLiteral(f, [S + 'text']) ?? '').replace(/\s+/g, ' ').slice(0, 80);
     return `${author ? tail(author) : '?'}: ${text}`;
   }
   if (types.includes(S + 'Person')) {
-    return firstLiteral(store, iri, [S + 'name', S + 'identifier']) ?? tail(iri);
+    return firstLiteral(f, [S + 'name', S + 'identifier']) ?? tail(iri);
   }
   if (types.length) {
-    const key = firstLiteral(store, iri, [S + 'name', S + 'identifier', SC + 'note', SC + 'status', SC + 'statement']);
+    const key = firstLiteral(f, [S + 'name', S + 'identifier', SC + 'note', SC + 'status', SC + 'statement']);
     return `${tail(types[0])}: ${key ? key.replace(/\s+/g, ' ').slice(0, 80) : tail(iri)}`;
   }
   return tail(iri);
 }
 
-/**
- * @param {object} store  a warm oxigraph store
- * @param {object} opts   { node, direction='both', predicates, limit=10, properties='default'|'all', includeHistory=false }
- */
-export function graphNeighbors(store, opts = {}) {
+function* neighborsG(opts) {
   const { node, direction = 'both', predicates = null, properties = 'default', includeHistory = false } = opts;
   if (!['in', 'out', 'both'].includes(direction)) {
     throw Object.assign(new Error(`direction must be in|out|both, got ${JSON.stringify(direction)}`), { code: 'BAD_DIRECTION' });
   }
   const limit = Math.max(1, Math.min(MAX_GROUP_LIMIT, Number.isFinite(+opts.limit) && +opts.limit > 0 ? Math.floor(+opts.limit) : DEFAULT_GROUP_LIMIT));
-  const iri = resolveNode(store, node);
+  const iri = yield* resolveNodeG(node);
   const wantPred = predicates && predicates.length ? new Set(predicates.map(String)) : null;
   const isHistory = (p) => p.startsWith(IRI.prov);
 
@@ -146,49 +154,185 @@ export function graphNeighbors(store, opts = {}) {
   };
 
   if (direction !== 'in') {
-    for (const q of store.match(nn(iri), null, null)) {
-      const p = q.predicate.value;
-      if (p === RDF_TYPE) { kinds.push(shorten(q.object.value)); continue; }
-      if (q.object.termType === 'Literal') {
-        if (properties === 'all' || DEFAULT_PROPERTIES.has(p)) props[shorten(p)] = q.object.value;
+    for (const { p, o, t } of yield { op: 'out', iri }) {
+      if (p === RDF_TYPE) { kinds.push(shorten(o)); continue; }
+      if (t === 'Literal') {
+        if (properties === 'all' || DEFAULT_PROPERTIES.has(p)) props[shorten(p)] = o;
         continue;
       }
-      push('out', p, q.object.value);
+      push('out', p, o);
     }
   }
-  if (direction !== 'out') {
-    for (const q of store.match(null, null, nn(iri))) push('in', q.predicate.value, q.subject.value);
-  }
-  if (!includeHistory && history.count) {
-    // latest = the history-bearing neighbour with the greatest prov:startedAtTime / dateCreated literal
+  // The in-edges are read for the in-groups and, whenever history is collapsed, for the history's latest entry
+  // (which the #1484 code always scanned among the in-edges, whatever the direction asked for).
+  const inEdges = direction !== 'out' || !includeHistory ? yield { op: 'in', iri } : [];
+  if (direction !== 'out') for (const { s, p } of inEdges) push('in', p, s);
+
+  const historySubjects = !includeHistory && history.count
+    ? [...new Set(inEdges.filter((e) => isHistory(e.p)).map((e) => e.s))]
+    : [];
+
+  // Sorted by id so a truncated group shows the SAME first members every call (store iteration order is not a
+  // contract), and only the members SHOWN are labelled: labelling all 277 of an apex's children to show 10 cost 940 ms.
+  const cut = [...groups.values()].map((g) => {
+    const all = [...g.iris].sort(byString);
+    return { g, all, shown: all.slice(0, limit) };
+  });
+  const facts = yield { op: 'facts', iris: [...new Set([iri, ...cut.flatMap((c) => c.shown), ...historySubjects])] };
+
+  if (historySubjects.length) {
+    // latest = the history-bearing neighbour with the greatest prov:startedAtTime / endedAtTime / dateCreated literal
     let best = null;
-    for (const q of store.match(null, null, nn(iri))) {
-      if (!isHistory(q.predicate.value)) continue;
-      const t = firstLiteral(store, q.subject.value, [IRI.prov + 'startedAtTime', IRI.prov + 'endedAtTime', IRI.schema + 'dateCreated']);
-      if (t && (!best || t > best.at)) best = { node: shorten(q.subject.value), at: t };
+    for (const s of historySubjects) {
+      const t = firstLiteral(facts.get(s), HISTORY_TIMES);
+      if (t && (!best || t > best.at)) best = { node: shorten(s), at: t };
     }
     history.latest = best;
   }
 
-  const edges = [...groups.values()]
-    .map((g) => {
-      // Sorted by id so a truncated group shows the SAME first members every
-      // call (store iteration order is not a contract), and only the members
-      // SHOWN are labelled: labelling all 277 of an apex's children to show 10
-      // cost 940 ms on the live board.
-      const all = [...g.iris].sort();
-      const members = all.slice(0, limit).map((o) => ({ id: shorten(o), label: labelFor(store, o) }));
-      return { direction: g.direction, predicate: g.predicate, total: all.length, truncated: all.length > limit, members };
-    })
-    .sort((a, b) => (a.direction === b.direction ? b.total - a.total : a.direction === 'out' ? -1 : 1));
+  const edges = cut
+    .map(({ g, all, shown }) => ({
+      direction: g.direction, predicate: g.predicate, total: all.length, truncated: all.length > limit,
+      members: shown.map((o) => ({ id: shorten(o), label: labelFromFacts(o, facts.get(o)) })),
+    }))
+    .sort((a, b) => (a.direction !== b.direction ? (a.direction === 'out' ? -1 : 1) : (b.total - a.total) || byString(a.predicate, b.predicate)));
 
   return {
-    node: { id: shorten(iri), label: labelFor(store, iri) },
+    node: { id: shorten(iri), label: labelFromFacts(iri, facts.get(iri)) },
     exists: true,
-    kinds,
+    kinds: kinds.sort(byString),
     properties: props,
     edges,
     ...(includeHistory ? {} : { history }),
     limitPerGroup: limit,
   };
+}
+
+// ---------- driver 1: a warm in-process oxigraph store (synchronous, as before) ----------
+
+const termTypeOf = (term) => (term.termType === 'NamedNode' ? 'NamedNode' : term.termType === 'BlankNode' ? 'BlankNode' : 'Literal');
+
+function storeAnswer(store, req) {
+  switch (req.op) {
+    case 'cards':
+      return store.match(null, nn(S + 'identifier'), oxigraph.literal(req.id))
+        .map((q) => q.subject.value)
+        .filter((s) => store.match(nn(s), nn(RDF_TYPE), nn(S + 'CreativeWork')).length > 0);
+    case 'exists':
+      return store.match(nn(req.iri), null, null).length > 0 || store.match(null, null, nn(req.iri)).length > 0;
+    case 'out':
+      return store.match(nn(req.iri), null, null).map((q) => ({ p: q.predicate.value, o: q.object.value, t: termTypeOf(q.object) }));
+    case 'in':
+      return store.match(null, null, nn(req.iri)).map((q) => ({ s: q.subject.value, p: q.predicate.value }));
+    case 'facts': {
+      const out = new Map();
+      for (const i of req.iris) {
+        const f = new Map();
+        for (const p of FACT_PREDICATES) {
+          const vals = store.match(nn(i), nn(p), null).map((q) => ({ v: q.object.value, t: termTypeOf(q.object) }));
+          if (vals.length) f.set(p, vals);
+        }
+        out.set(i, f);
+      }
+      return out;
+    }
+    default: throw new Error(`graph-neighbors: unknown read ${req.op}`);
+  }
+}
+
+function runSync(gen, answer) {
+  let step = gen.next();
+  while (!step.done) step = gen.next(answer(step.value));
+  return step.value;
+}
+
+/**
+ * @param {object} store  a warm oxigraph store
+ * @param {object} opts   { node, direction='both', predicates, limit=10, properties='default'|'all', includeHistory=false }
+ */
+export function graphNeighbors(store, opts = {}) {
+  return runSync(neighborsG(opts), (req) => storeAnswer(store, req));
+}
+
+/** Kept for callers of the #1484 API: resolve a node name to its IRI against a warm store. */
+export function resolveNode(store, node) {
+  return runSync(resolveNodeG(node), (req) => storeAnswer(store, req));
+}
+
+/** Kept for callers of the #1484 API: one node's label against a warm store. */
+export function labelFor(store, iri) {
+  return labelFromFacts(iri, storeAnswer(store, { op: 'facts', iris: [iri] }).get(iri));
+}
+
+// ---------- driver 2: the executor's public dataset over HTTP ----------
+
+/** A name that cannot be an IRI cannot be in the store: the read answers "nothing" rather than sending broken SPARQL. */
+const sparqlIri = (v) => (/[\s<>"{}|^`\\]/.test(v) ? null : `<${v}>`);
+
+async function executorRead(url, sparql, { timeoutMs, fetchImpl }) {
+  let res; let raw;
+  try {
+    res = await fetchImpl(`${url}/query?dataset=public`, { method: 'POST', body: sparql, signal: AbortSignal.timeout(timeoutMs) });
+    raw = await res.text();
+  } catch (e) {
+    throw Object.assign(new Error(`the executor could not be reached: ${e?.cause?.code || e?.name || e?.message}`), { code: 'GRAPH_UNAVAILABLE' });
+  }
+  let j = null; try { j = JSON.parse(raw); } catch { /* reported below */ }
+  if (res.status !== 200 || !j) {
+    throw Object.assign(new Error(`the executor did not answer: HTTP ${res.status} ${String(j?.error ?? raw).slice(0, 200)}`), { code: 'GRAPH_UNAVAILABLE' });
+  }
+  if (typeof j.boolean === 'boolean') return j.boolean;
+  if (!Array.isArray(j?.results?.bindings)) {
+    throw Object.assign(new Error('the executor answered 200 without a result set'), { code: 'GRAPH_UNAVAILABLE' });
+  }
+  return j.results.bindings.map((b) => Object.fromEntries(Object.entries(b).map(([k, x]) => [k, {
+    v: x.value, t: x.type === 'uri' ? 'NamedNode' : x.type === 'bnode' ? 'BlankNode' : 'Literal',
+  }])));
+}
+
+async function executorAnswer(url, req, o) {
+  switch (req.op) {
+    case 'cards': {
+      const rows = await executorRead(url, `SELECT DISTINCT ?s WHERE { ?s <${S}identifier> ${JSON.stringify(req.id)} ; <${RDF_TYPE}> <${S}CreativeWork> . }`, o);
+      return rows.map((r) => r.s.v);
+    }
+    case 'exists': {
+      const i = sparqlIri(req.iri);
+      return i ? executorRead(url, `ASK { { ${i} ?p ?o } UNION { ?s ?p ${i} } }`, o) : false;
+    }
+    case 'out': {
+      const rows = await executorRead(url, `SELECT ?p ?o WHERE { ${sparqlIri(req.iri)} ?p ?o }`, o);
+      return rows.map((r) => ({ p: r.p.v, o: r.o.v, t: r.o.t }));
+    }
+    case 'in': {
+      const rows = await executorRead(url, `SELECT ?s ?p WHERE { ?s ?p ${sparqlIri(req.iri)} }`, o);
+      return rows.map((r) => ({ s: r.s.v, p: r.p.v }));
+    }
+    case 'facts': {
+      const out = new Map(req.iris.map((i) => [i, new Map()]));
+      const named = req.iris.map(sparqlIri).filter(Boolean);   // a blank node has no facts we can ask for by name
+      const preds = FACT_PREDICATES.map((p) => `<${p}>`).join(' ');
+      for (let k = 0; k < named.length; k += 200) {
+        const rows = await executorRead(url, `SELECT ?s ?p ?o WHERE { VALUES ?s { ${named.slice(k, k + 200).join(' ')} } VALUES ?p { ${preds} } ?s ?p ?o }`, o);
+        for (const r of rows) {
+          const f = out.get(r.s.v); if (!f) continue;
+          if (!f.has(r.p.v)) f.set(r.p.v, []);
+          f.get(r.p.v).push({ v: r.o.v, t: r.o.t });
+        }
+      }
+      return out;
+    }
+    default: throw new Error(`graph-neighbors: unknown read ${req.op}`);
+  }
+}
+
+/**
+ * #1642 — the same answer, read from the executor's public dataset. An executor that cannot answer throws
+ * GRAPH_UNAVAILABLE from whichever read failed: never a 404 for a node it could not look up, never a partial 200.
+ */
+export async function graphNeighborsFromExecutor(executorUrl, opts = {}, { timeoutMs = 15_000, fetchImpl = fetch } = {}) {
+  const gen = neighborsG(opts);
+  let step = gen.next();
+  while (!step.done) step = gen.next(await executorAnswer(executorUrl, step.value, { timeoutMs, fetchImpl }));
+  return step.value;
 }
