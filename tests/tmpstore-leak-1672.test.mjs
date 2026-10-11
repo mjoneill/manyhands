@@ -36,6 +36,11 @@
  *   RJ  an early TERM  SIGTERM to the runner at 0, 30, 60, 100, 160 and 250 ms after it starts (before and around the moment its node process has recorded its pid): the runner is gone within 20 s each
  *                        time, no file process or survivor outlives it, and nothing is left in the outer TMPDIR
  *
+ *   RK  an argv impostor   a detached process with NO token in its environment whose argv merely contains the text `MANYHANDS_SUITE_RUN=<this run's token>` (it is read from the fixture's own environment)
+ *                        is not the runner's: it is never killed. Ownership is the environment entry, not a substring of anything that mentions it.
+ *   RL  inspection fails   the runner cannot list processes (a `ps` that exits 1 is first on PATH): it cannot establish that the folder is unused, so the run FAILS, the suite folder is RETAINED and named,
+ *                        and the output says inspection failed. macOS only: on Linux the runner reads /proc, which a row cannot make fail, so the row is skipped there with that reason.
+ *
  * Not covered: SIGKILL of the runner itself (it leaves one `manyhands-suite.<pid>.*` folder by design, recorded not swept); the browser entry point (`node run-tests.js`); paths outside TMPDIR;
  * a leak that appears only under suite load; and which FILE leaks (scripts/tmp-leak-check-1672.mjs does that, on demand).
  */
@@ -85,6 +90,14 @@ test('stranger', () => {
   const c = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 300000)', '--', '--store', s], { stdio: 'ignore', detached: true, env: { PATH: process.env.PATH } });
   fs.writeFileSync(process.env.STRANGER_PID_FILE, String(c.pid)); c.unref();
 });\n`,
+  // a process whose environment has NO token but whose argv quotes this run's token (read from the fixture's own environment, which the runner marked)
+  'impostor.test.mjs': `import { test } from 'node:test'; import fs from 'node:fs'; import { spawn } from 'node:child_process';
+test('impostor', () => {
+  const tok = process.env.MANYHANDS_SUITE_RUN;
+  if (!tok) throw new Error('CONTROL: the file\\'s own environment carries no MANYHANDS_SUITE_RUN token');
+  const c = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 300000)', '--', 'MANYHANDS_SUITE_RUN=' + tok], { stdio: 'ignore', detached: true, env: {} });   // an EMPTY environment: where a parser splits argv from environment by position, the process line then ENDS with the quoted token
+  fs.writeFileSync(process.env.IMPOSTOR_PID_FILE, String(c.pid)); c.unref();
+});\n`,
   // keeps the runner alive past the child's read
   'holder.test.mjs': `import { test } from 'node:test'; test('holder', async () => { await new Promise((r) => setTimeout(r, 5000)); });\n`,
   'killed.test.mjs': `import { test } from 'node:test'; import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path';
@@ -107,7 +120,7 @@ async function withWorld(body) {
     for (const [name, src] of Object.entries(FIXTURES)) fs.writeFileSync(path.join(fx, name), src);
     const f = (name) => path.join(fx, name);
     // a survivor the runner failed to reap is killed here, by the pid its fixture recorded, never by pattern
-    own.adopt(async () => { for (const n of ['survivor.pid', 'hang-survivor.pid', 'stranger.pid', 'hang.pid']) { try { process.kill(Number(fs.readFileSync(path.join(res, n), 'utf8')), 'SIGKILL'); } catch { /* none, or gone */ } } });
+    own.adopt(async () => { for (const n of ['survivor.pid', 'hang-survivor.pid', 'stranger.pid', 'hang.pid', 'impostor.pid']) { try { process.kill(Number(fs.readFileSync(path.join(res, n), 'utf8')), 'SIGKILL'); } catch { /* none, or gone */ } } });
     /** Start the runner on `files` with TMPDIR = the outer directory. Resolves a handle; `done` settles when the runner has exited. */
     const start = (files, extraEnv = {}) => {
       const env = { ...process.env, TMPDIR: outer, RUN_TESTS_CONCURRENCY: '2', RUN_TESTS_FILE_TIMEOUT_MS: '90000', ...extraEnv };
@@ -267,6 +280,30 @@ test('RJ SIGTERM at 0..250 ms after the runner starts: gone within 20 s, nothing
     });
   }
 });
+
+test('RK a process that only quotes the run\'s token in its argv is not the runner\'s and is never killed', { timeout: 120000 }, () => withWorld(async (w) => {
+  const pidFile = path.join(w.res, 'impostor.pid');
+  const h = w.start([w.f('impostor.test.mjs'), w.f('holder.test.mjs')], { IMPOSTOR_PID_FILE: pidFile, ...w.baseline([]) });
+  const r = await finish(h, 90000);
+  assert.notEqual(r.code, 'TIMEOUT', `the runner ends (output tail: ${h.out().slice(-300)})`);
+  assert.ok(fs.existsSync(pidFile), `CONTROL: the fixture started the impostor (its file saw the run's token); output tail: ${h.out().slice(-400)}`);
+  const pid = Number(fs.readFileSync(pidFile, 'utf8'));
+  await sleep(1000);
+  assert.equal(alive(pid), true, `the impostor ${pid} (token only in its argv, none in its environment) is still alive after the runner exits: ownership is the environment entry, not any text that mentions it`);
+}));
+
+const ON_MAC = process.platform === 'darwin';
+test('RL the runner cannot inspect processes: the run fails, the suite folder is retained and named, and the output says why', { timeout: 120000, skip: ON_MAC ? false : 'UNAVAILABLE: inspection failure can only be injected through `ps` on macOS; on Linux the runner reads /proc' }, () => withWorld(async (w) => {
+  const bin = path.join(w.base, 'bin'); fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'ps'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+  const h = w.start([w.f('clean.test.mjs')], { PATH: `${bin}:${process.env.PATH}`, ...w.baseline([]) });
+  const r = await finish(h, 90000);
+  const kept = w.left().filter((n) => n.startsWith('manyhands-suite.'));
+  const said = h.out().split('\n').some((l) => /tmp:/.test(l) && /(inspect|enumerat|process (table|list)|\bps\b)/i.test(l));
+  assert.deepEqual({ runFails: r.code !== 0 && r.code !== 'TIMEOUT', suiteFolderKept: kept.length === 1, folderNamed: kept.length === 1 && h.out().includes(kept[0]), saysInspectionFailed: said },
+    { runFails: true, suiteFolderKept: true, folderNamed: true, saysInspectionFailed: true },
+    `a runner that cannot list processes cannot know the folder is unused (outer holds ${JSON.stringify(w.left())}; output tail: ${h.out().slice(-500)})`);
+}));
 
 const namedLine = (out, name) => out.split('\n').find((l) => l.includes(name) && /\d+\s+entr/i.test(l));
 
