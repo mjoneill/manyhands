@@ -54,6 +54,9 @@
  *                        as long as that parent lives. A zombie holds no file and runs nothing, and `kill(pid, 0)` still answers "alive" for it, so a runner that waits for it to "exit" cannot succeed. The run must END
  *                        as a normal one (exit 0, folder removed). CONTROL: the owned child really is a zombie afterwards, or the row proved nothing. Reproduces a CI-shaped situation (no init to reap orphans) on a
  *                        machine that has one, by giving the zombie a living parent.
+ *   RZ2 a zombie that exists BEFORE teardown   the same parent kills its own owned child after a second and still never reaps it, so the zombie is already there while the run is going. The control is
+ *                        asserted DURING the run, before the runner's teardown: `kill(pid, 0)` succeeds AND an independent kernel-state read says Z. If the parent reaped it, or was killed before that
+ *                        observation, the fixture proved nothing and the row fails on the control. Then the run must end as a normal one (exit 0, folder removed).
  *   RL  inspection fails   the runner cannot list processes (a `ps` that exits 1 is first on PATH): it cannot establish that the folder is unused, so the run FAILS, the suite folder is RETAINED and named,
  *                        and the output says inspection failed. macOS only: on Linux the runner reads /proc, which a row cannot make fail, so the row is skipped there with that reason.
  *
@@ -159,6 +162,15 @@ test('zombiemaker', () => {
   const tok = process.env.MANYHANDS_SUITE_RUN;
   if (!tok) throw new Error('CONTROL: the file\\'s own environment carries no MANYHANDS_SUITE_RUN token');
   const py = 'import os, sys, time\\ntok, node, childfile = sys.argv[1], sys.argv[2], sys.argv[3]\\npid = os.fork()\\nif pid == 0:\\n    os.execve(node, [node, "-e", "setTimeout(() => {}, 300000)"], {"MANYHANDS_SUITE_RUN": tok})\\nopen(childfile, "w").write(str(pid))\\ntime.sleep(300)';
+  const p = spawn('/usr/bin/python3', ['-c', py, tok, process.execPath, process.env.ZOMBIE_CHILD_PID_FILE], { stdio: 'ignore', detached: true, env: {} });
+  fs.writeFileSync(process.env.ZOMBIE_PARENT_PID_FILE, String(p.pid)); p.unref();
+});\n`,
+  // as zombiemaker, but the token-less parent kills its owned child itself after a second (still never reaping it): the zombie exists before the runner's teardown
+  'zombiemaker2.test.mjs': `import { test } from 'node:test'; import fs from 'node:fs'; import { spawn } from 'node:child_process';
+test('zombiemaker2', () => {
+  const tok = process.env.MANYHANDS_SUITE_RUN;
+  if (!tok) throw new Error('CONTROL: the file\\'s own environment carries no MANYHANDS_SUITE_RUN token');
+  const py = 'import os, sys, time\\ntok, node, childfile = sys.argv[1], sys.argv[2], sys.argv[3]\\npid = os.fork()\\nif pid == 0:\\n    os.execve(node, [node, "-e", "setTimeout(() => {}, 300000)"], {"MANYHANDS_SUITE_RUN": tok})\\nopen(childfile, "w").write(str(pid))\\ntime.sleep(1)\\nos.kill(pid, 9)\\ntime.sleep(300)';
   const p = spawn('/usr/bin/python3', ['-c', py, tok, process.execPath, process.env.ZOMBIE_CHILD_PID_FILE], { stdio: 'ignore', detached: true, env: {} });
   fs.writeFileSync(process.env.ZOMBIE_PARENT_PID_FILE, String(p.pid)); p.unref();
 });\n`,
@@ -440,6 +452,26 @@ test('RZ a zombie of an owned process (its parent keeps it) does not fail the ru
   assert.equal(procState(child), 'Z', 'CONTROL: the owned child is a ZOMBIE after the run (killed by the runner, kept by its token-less parent); otherwise this row proves nothing');
   assert.deepEqual({ childRunning: alive(child), exit: r.code, suiteFolderKept: w.left().some((n) => n.startsWith('manyhands-suite.')) }, { childRunning: false, exit: 0, suiteFolderKept: false },
     `a zombie holds no file and cannot be killed again, so it must not fail the run (output tail: ${h.out().slice(-500)})`);
+}));
+
+test('RZ2 a zombie that already exists before the runner\'s teardown: the control is asserted during the run, and the run still ends as a normal one', { timeout: 120000 }, () => withWorld(async (w) => {
+  const parentFile = path.join(w.res, 'zombie-parent.pid'); const childFile = path.join(w.res, 'zombie-child.pid');
+  const h = w.start([w.f('zombiemaker2.test.mjs'), w.f('holder.test.mjs')], { ZOMBIE_PARENT_PID_FILE: parentFile, ZOMBIE_CHILD_PID_FILE: childFile, ...w.baseline([]) });
+  let sawZombie = false; let sawPlainKillOk = false; let observedAt = null; let ended = false;
+  h.done.then(() => { ended = true; });
+  for (let t = 0; t < 30000 && !ended && !sawZombie; t += 100) {
+    if (fs.existsSync(childFile)) {
+      const child = Number(fs.readFileSync(childFile, 'utf8'));
+      let k = false; try { process.kill(child, 0); k = true; } catch { /* gone */ }
+      if (k && procState(child) === 'Z') { sawZombie = true; sawPlainKillOk = k; observedAt = t; }
+    }
+    await sleep(100);
+  }
+  const r = await finish(h, 90000);
+  assert.equal(sawZombie && sawPlainKillOk, true, 'CONTROL, asserted DURING the run before the runner\'s teardown: kill(pid, 0) succeeded AND an independent kernel-state read said Z for the owned child; otherwise the fixture proved nothing');
+  assert.equal(ended || r.code !== 'TIMEOUT', true, `the runner ends (output tail: ${h.out().slice(-300)})`);
+  assert.deepEqual({ exit: r.code, suiteFolderKept: w.left().some((n) => n.startsWith('manyhands-suite.')) }, { exit: 0, suiteFolderKept: false },
+    `a zombie that was already there when the teardown started must not fail the run or keep the folder (observed ${observedAt} ms into the run; output tail: ${h.out().slice(-400)})`);
 }));
 
 const ON_MAC = process.platform === 'darwin';
