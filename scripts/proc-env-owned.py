@@ -3,8 +3,10 @@
 #1672 -- macOS only. Which of the given pids hold an EXACT environment entry?
 
 stdin:  line 1 is the entry (NAME=value); every following line is a pid.
-stdout: the pids whose environment contains that entry as one whole entry, one per line. Nothing else, ever: no
-        argv, no environment text (it can hold credentials).
+stdout: the pids whose environment contains that entry as one whole entry, one per line; and `?<pid>` for a process
+        whose record does not have the expected layout, so ownership cannot be decided (the caller then never kills
+        it, and fails the run and keeps the folder). Nothing else, ever: no argv, no environment text (it can hold
+        credentials).
 exit:   0 when the table was read; 2 when the kernel interface itself is unusable (the caller fails closed).
 
 Why not `ps -E`: it prints argv and environment joined by spaces, so an entry boundary cannot be told from a space
@@ -49,15 +51,25 @@ def main():
         if len(raw) < 4:
             continue
         argc = struct.unpack('i', raw[:4])[0]
-        rest = raw[4:]
-        # the exec path, then NUL padding, then argc argv strings, then the environment strings
-        end = rest.find(b'\0')
-        if end < 0:
+        # The record: argc (4 bytes), the exec path and its NUL, NUL padding so that argv starts 8-byte aligned
+        # counting from just after argc, then argc argv strings, then the environment strings. The start of argv is
+        # COMPUTED from that alignment, not found by skipping NULs: an EMPTY argv[0] is itself a lone NUL, and skipping
+        # it would shift the argv/environment split by one (measured 2026-10-11: a token as the first environment entry
+        # of a process with argv0 '' then read as not owned).
+        end = raw.find(b'\0', 4)
+        if end < 0 or argc < 0:
+            out.append('?' + str(pid))
             continue
-        i = end
-        while i < len(rest) and rest[i:i + 1] == b'\0':
-            i += 1
-        strings = rest[i:].split(b'\0')
+        start = end + 1
+        while (start - 4) % 8 != 0:
+            start += 1
+        if any(raw[end + 1:start]) or start > len(raw):
+            out.append('?' + str(pid))  # the padding is not all NUL: not the layout we know, so undecidable
+            continue
+        strings = raw[start:].split(b'\0')
+        if len(strings) < argc:
+            out.append('?' + str(pid))
+            continue
         env = strings[argc:]
         for e in env:
             if e == b'':

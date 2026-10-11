@@ -50,6 +50,7 @@ function exeName(pid) {
 function inspectProcesses(marker) {
   const argv = new Map();
   const owned = new Set();
+  const undecidable = new Set();   // macOS: a record whose layout we do not recognise — never killed, and the run fails
   if (process.platform === 'linux') {
     let pids;
     try { pids = fs.readdirSync('/proc').filter((n) => /^\d+$/.test(n)); } catch { return null; }
@@ -57,7 +58,7 @@ function inspectProcesses(marker) {
       try { argv.set(Number(p), fs.readFileSync(`/proc/${p}/cmdline`, 'latin1').replace(/\0/g, ' ')); } catch { continue; }
       try { if (fs.readFileSync(`/proc/${p}/environ`, 'latin1').split('\0').includes(marker)) owned.add(Number(p)); } catch { /* not ours to read */ }
     }
-    return { argv, owned };
+    return { argv, owned, undecidable };
   }
   try {
     const raw = execFileSync('ps', ['-axww', '-o', 'pid=,command='], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] });
@@ -65,9 +66,12 @@ function inspectProcesses(marker) {
     // the marker goes in on stdin, never on the helper's argv (that would make the helper an argv holder of the token)
     const out = execFileSync('/usr/bin/python3', [path.join(path.dirname(fileURLToPath(import.meta.url)), 'proc-env-owned.py')],
       { input: `${marker}\n${[...argv.keys()].join('\n')}\n`, encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
-    for (const line of out.split('\n')) if (/^\d+$/.test(line)) owned.add(Number(line));
+    for (const line of out.split('\n')) {
+      if (/^\d+$/.test(line)) owned.add(Number(line));
+      else if (/^\?\d+$/.test(line)) undecidable.add(Number(line.slice(1)));
+    }
   } catch { return null; }
-  return { argv, owned };
+  return { argv, owned, undecidable };
 }
 
 /** Bytes under `p`, not following links. */
@@ -136,26 +140,41 @@ export function teardown(suite, { root }) {
     return { failed: true, lines };
   }
 
-  // 1. OURS: every process whose own ENVIRONMENT (never its argv) holds this run's exact token entry. Report, kill, wait.
-  const owned = new Set([...table.owned].filter((pid) => pid !== self));
-  for (const pid of owned) {
-    lines.push(`# tmp: owned process pid ${pid} (${exeName(pid)}) outlived its test file: a leak; killing it`);
-    try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+  // 1. OURS, to a FIXED POINT: kill every process whose own ENVIRONMENT (never its argv) holds this run's exact token
+  // entry, wait, and look again — a descendant can spawn another between two looks, and the folder must not be removed
+  // under one. Repeat until a look finds no owned process left, within SETTLE_MS overall; anything still owned then is
+  // reported, and the run fails and keeps the folder.
+  const killed = new Set();
+  let view = table;
+  const deadline = Date.now() + SETTLE_MS;
+  for (;;) {
+    const owned = [...view.owned].filter((pid) => pid !== self && alive(pid));
+    if (owned.length === 0) break;
+    for (const pid of owned) {
+      if (!killed.has(pid)) lines.push(`# tmp: owned process pid ${pid} (${exeName(pid)}) outlived its test file: a leak; killing it`);
+      killed.add(pid);
+      try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+    }
+    while (Date.now() < deadline && owned.some(alive)) sleepSync(100);
+    view = inspectProcesses(marker);
+    if (view === null) {
+      lines.push(`# tmp: ⛔ could not re-inspect processes after the kill: nothing more killed, folder RETAINED: ${suite.dir}`);
+      return { failed: true, lines };
+    }
+    if (Date.now() >= deadline) break;
   }
-  for (let t = 0; t < SETTLE_MS && [...owned].some(alive); t += 100) sleepSync(100);
-  const stubborn = [...owned].filter(alive);
-  for (const pid of stubborn) lines.push(`# tmp: ⛔ owned process pid ${pid} (${exeName(pid)}) did not exit within ${SETTLE_MS} ms`);
+  const stubborn = [...view.owned].filter((pid) => pid !== self && alive(pid));
+  // a process whose ownership could not be decided is never killed, and the folder is not removed while it lives
+  const undecided = [...view.undecidable].filter((pid) => pid !== self && alive(pid));
+  for (const pid of undecided) lines.push(`# tmp: ⛔ process pid ${pid} (${exeName(pid)}): ownership could not be decided from its record: NOT killed`);
+  for (const pid of stubborn) lines.push(`# tmp: ⛔ owned process pid ${pid} (${exeName(pid)}) still alive after ${SETTLE_MS} ms of kills`);
 
-  // 2. NOT OURS: a process that names the folder in its argv but carries no token in its environment. Never killed.
+  // 2. NOT OURS, judged on the LAST look: a process that names the folder in its argv but holds no token in its
+  // environment. Never killed.
   let real = suite.dir;
   try { real = fs.realpathSync(suite.dir); } catch { /* keep the given path */ }
-  const after = inspectProcesses(marker);
-  if (after === null) {
-    lines.push(`# tmp: ⛔ could not re-inspect processes after the kill: folder RETAINED: ${suite.dir}`);
-    return { failed: true, lines };
-  }
-  const strangers = [...after.argv]
-    .filter(([pid, text]) => pid !== self && !owned.has(pid) && !after.owned.has(pid) && (text.includes(suite.dir) || text.includes(real)))
+  const strangers = [...view.argv]
+    .filter(([pid, text]) => pid !== self && !view.owned.has(pid) && (text.includes(suite.dir) || text.includes(real)))
     .map(([pid]) => pid);
   for (const pid of strangers) lines.push(`# tmp: ⛔ process pid ${pid} (${exeName(pid)}) is not this run's but uses its folder: NOT killed`);
 
@@ -180,7 +199,7 @@ export function teardown(suite, { root }) {
   }
 
   // 4. REMOVE — only when nothing we cannot account for still holds the folder.
-  if (strangers.length || stubborn.length) {
+  if (strangers.length || stubborn.length || undecided.length) {
     failed = true;
     lines.push(`# tmp: ⛔ folder RETAINED, not removed: ${suite.dir} (${entries} entries, ${bytes} bytes inside the file folders)`);
   } else {
