@@ -65,9 +65,27 @@ fi
 # file — portable, and it keeps the verdict the runner's own.
 out=$(mktemp "${TMPDIR:-/tmp}/run-tests.XXXXXX")
 rcfile=$(mktemp "${TMPDIR:-/tmp}/run-tests-rc.XXXXXX")
-{ node scripts/run-test-files.mjs "$@" 2>&1; echo $? >"$rcfile"; } | tee "$out"
+# #1672 — node's pid, written by run-test-files.mjs, so a signal to THIS shell reaches it. A shell does not forward
+# signals, and it defers a trap until its FOREGROUND job ends; so the pipeline runs in the background and the shell
+# waits on it, which a trap can interrupt. On TERM/INT node runs the same ordered teardown as a normal finish (settle
+# the process tree, report, remove the suite folder), and this shell then removes its own temp files.
+pidfile=$(mktemp "${TMPDIR:-/tmp}/run-tests-pid.XXXXXX")
+RUN_TESTS_PIDFILE=$pidfile
+export RUN_TESTS_PIDFILE
+on_signal() {
+  if [ -s "$pidfile" ]; then kill -TERM "$(cat "$pidfile")" 2>/dev/null; fi
+  wait "$pipeline" 2>/dev/null
+  rm -f "$out" "$rcfile" "$pidfile"
+  exit "$1"
+}
+trap 'on_signal 143' TERM
+trap 'on_signal 130' INT
+{ node scripts/run-test-files.mjs "$@" 2>&1; echo $? >"$rcfile"; } | tee "$out" &
+pipeline=$!
+wait "$pipeline"
+trap - TERM INT
 rc=$(cat "$rcfile" 2>/dev/null || echo 1)
-rm -f "$rcfile"
+rm -f "$rcfile" "$pidfile"
 
 # The TAP above already carried the counts (we tee it now), so re-printing the
 # summary here would DOUBLE it — and the suite watch builds its summary by
