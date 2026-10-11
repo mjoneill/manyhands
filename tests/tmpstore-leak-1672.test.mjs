@@ -50,6 +50,10 @@
  *                        called directly it reads this process as NOT owned (the empty argv[0] is swallowed as padding, which shifts the split by one and drops the first environment entry). It needs BOTH an empty
  *                        argv[0] and the token first: the runner's own children have the token LAST, and the same process with a normal environment WAS found and killed (measured). The same safety property as
  *                        RN: either it is gone when the runner exits, or the run FAILED and the folder was RETAINED.
+ *   RZ  a zombie of an owned process   an owned process whose parent is NOT the runner's (a token-less process that never reaps its children) is killed by the runner and becomes a zombie that stays one
+ *                        as long as that parent lives. A zombie holds no file and runs nothing, and `kill(pid, 0)` still answers "alive" for it, so a runner that waits for it to "exit" cannot succeed. The run must END
+ *                        as a normal one (exit 0, folder removed). CONTROL: the owned child really is a zombie afterwards, or the row proved nothing. Reproduces a CI-shaped situation (no init to reap orphans) on a
+ *                        machine that has one, by giving the zombie a living parent.
  *   RL  inspection fails   the runner cannot list processes (a `ps` that exits 1 is first on PATH): it cannot establish that the folder is unused, so the run FAILS, the suite folder is RETAINED and named,
  *                        and the output says inspection failed. macOS only: on Linux the runner reads /proc, which a row cannot make fail, so the row is skipped there with that reason.
  *
@@ -60,7 +64,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { withOwned } from './helpers/ready-world-1644.mjs';
 import { HAVE_PY } from './helpers/graph-executor-proc.mjs';
@@ -68,7 +72,22 @@ import { HAVE_PY } from './helpers/graph-executor-proc.mjs';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const RUNNER = path.join(ROOT, 'scripts', 'run-tests.sh');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+// A process that has exited but not yet been reaped (a zombie: state Z, or X on Linux) answers `kill(pid, 0)` like a live one, yet holds no file and runs nothing; in a container with no init to reap
+// orphans it can stay that way indefinitely. "Alive" here means RUNNING, so a zombie is gone. (T0c below pins both halves of that.)
+const procState = (pid) => {   // a state letter, 'gone' (no such process), or 'unknown' (could not be read: treated as ALIVE by the caller, the safe direction for a row that asserts nothing survives)
+  try {
+    if (process.platform === 'linux') {
+      try { const st = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); return st.slice(st.lastIndexOf(')') + 2, st.lastIndexOf(')') + 3) || 'unknown'; } catch (e) { return e.code === 'ENOENT' || e.code === 'ESRCH' ? 'gone' : 'unknown'; }
+    }
+    const r = execFileSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim().slice(0, 1);
+    return r || 'unknown';
+  } catch (e) { return e && e.status === 1 ? 'gone' : 'unknown'; }   // ps exits 1 for a pid that does not exist
+};
+const alive = (pid) => {
+  try { process.kill(pid, 0); } catch (e) { if (e.code !== 'EPERM') return false; }
+  const state = procState(pid);
+  return state !== 'gone' && state !== 'Z' && state !== 'X';
+};
 const entries = (dir) => { try { return fs.readdirSync(dir).sort(); } catch { return []; } };
 const SKIP_PY = HAVE_PY ? false : 'UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)';
 
@@ -134,6 +153,15 @@ test('emptyargv0', () => {
   const c = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 300000)'], { stdio: 'ignore', detached: true, argv0: '', env: { MANYHANDS_SUITE_RUN: process.env.MANYHANDS_SUITE_RUN } });   // the token is the FIRST (only) environment entry
   fs.writeFileSync(process.env.EMPTYARGV0_PID_FILE, String(c.pid)); c.unref();
 });\n`,
+  // a token-less python parent that forks an OWNED child (exec'd with the token in its environment) and then never waits for it
+  'zombiemaker.test.mjs': `import { test } from 'node:test'; import fs from 'node:fs'; import { spawn } from 'node:child_process';
+test('zombiemaker', () => {
+  const tok = process.env.MANYHANDS_SUITE_RUN;
+  if (!tok) throw new Error('CONTROL: the file\\'s own environment carries no MANYHANDS_SUITE_RUN token');
+  const py = 'import os, sys, time\\ntok, node, childfile = sys.argv[1], sys.argv[2], sys.argv[3]\\npid = os.fork()\\nif pid == 0:\\n    os.execve(node, [node, "-e", "setTimeout(() => {}, 300000)"], {"MANYHANDS_SUITE_RUN": tok})\\nopen(childfile, "w").write(str(pid))\\ntime.sleep(300)';
+  const p = spawn('/usr/bin/python3', ['-c', py, tok, process.execPath, process.env.ZOMBIE_CHILD_PID_FILE], { stdio: 'ignore', detached: true, env: {} });
+  fs.writeFileSync(process.env.ZOMBIE_PARENT_PID_FILE, String(p.pid)); p.unref();
+});\n`,
   // keeps the runner alive past the child's read
   'holder.test.mjs': `import { test } from 'node:test'; test('holder', async () => { await new Promise((r) => setTimeout(r, 5000)); });\n`,
   'killed.test.mjs': `import { test } from 'node:test'; import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path';
@@ -157,7 +185,7 @@ async function withWorld(body) {
     const f = (name) => path.join(fx, name);
     own.adopt(async () => { try { for (const l of fs.readFileSync(path.join(res, 'spawned.pids'), 'utf8').split('\n')) { if (l) { try { process.kill(Number(l), 'SIGKILL'); } catch { /* gone */ } } } } catch { /* none */ } });   // registered first, so it runs LAST: after the spawner itself is killed
     // a survivor the runner failed to reap is killed here, by the pid its fixture recorded, never by pattern
-    own.adopt(async () => { for (const n of ['survivor.pid', 'hang-survivor.pid', 'stranger.pid', 'hang.pid', 'impostor.pid', 'envimpostor.pid', 'spawner.pid', 'emptyargv0.pid']) { try { process.kill(Number(fs.readFileSync(path.join(res, n), 'utf8')), 'SIGKILL'); } catch { /* none, or gone */ } } });
+    own.adopt(async () => { for (const n of ['survivor.pid', 'hang-survivor.pid', 'stranger.pid', 'hang.pid', 'impostor.pid', 'envimpostor.pid', 'spawner.pid', 'emptyargv0.pid', 'zombie-parent.pid', 'zombie-child.pid']) { try { process.kill(Number(fs.readFileSync(path.join(res, n), 'utf8')), 'SIGKILL'); } catch { /* none, or gone */ } } });
     /** Start the runner on `files` with TMPDIR = the outer directory. Resolves a handle; `done` settles when the runner has exited. */
     const start = (files, extraEnv = {}) => {
       const env = { ...process.env, TMPDIR: outer, RUN_TESTS_CONCURRENCY: '2', RUN_TESTS_FILE_TIMEOUT_MS: '90000', ...extraEnv };
@@ -177,6 +205,22 @@ const finish = async (h, boundMs) => {
   let timer;
   try { return await Promise.race([h.done, new Promise((r) => { timer = setTimeout(() => r({ code: 'TIMEOUT' }), boundMs); })]); } finally { clearTimeout(timer); }
 };
+
+test('T0c CONTROL: the rows\' `alive` says a running process is alive and an exited-but-unreaped one (a zombie) is not', { timeout: 30000 }, async () => {
+  // a python parent forks a child that exits at once and then does not wait for it for 5 s: the child is a zombie for that time
+  const py = spawn('python3', ['-c', 'import os, sys, time\npid = os.fork()\nif pid == 0:\n    os._exit(0)\nprint(pid, flush=True)\ntime.sleep(5)'], { stdio: ['ignore', 'pipe', 'ignore'] });
+  let out = ''; py.stdout.on('data', (d) => { out += d; });
+  try {
+    for (let t = 0; t < 5000 && !out.includes('\n'); t += 50) await sleep(50);
+    const zombiePid = Number(out.trim());
+    assert.ok(zombiePid > 0, 'CONTROL: the helper forked a child');
+    await sleep(300);
+    let raw = true; try { process.kill(zombiePid, 0); } catch { raw = false; }
+    assert.equal(raw, true, 'CONTROL: plain kill(pid, 0) still answers "alive" for the zombie (this is the trap)');
+    assert.equal(alive(zombiePid), false, 'the rows\' alive() reads the zombie as gone');
+    assert.equal(alive(py.pid), true, 'and a running process (the zombie\'s parent) as alive');
+  } finally { try { py.kill('SIGKILL'); } catch { /* gone */ } }
+});
 
 const CHECK = path.join(ROOT, 'scripts', 'tmp-leak-check-1672.mjs');
 const runCheck = (file) => new Promise((resolve) => {
@@ -383,6 +427,19 @@ test('RO an owned process with an empty argv[0] is not left alive beneath a dele
   const kept = w.left().filter((n) => n.startsWith('manyhands-suite.'));
   const safe = !alive(pid) || (r.code !== 0 && kept.length === 1);
   assert.equal(safe, true, `the owned process ${pid} (token in its environment, empty argv[0]) is alive after the runner exited and the run ${r.code === 0 ? 'PASSED' : 'failed'} with the suite folder ${kept.length === 1 ? 'kept' : 'removed'}: owned, and invisible to the inspection`);
+}));
+
+test('RZ a zombie of an owned process (its parent keeps it) does not fail the run or keep the folder', { timeout: 120000 }, () => withWorld(async (w) => {
+  const parentFile = path.join(w.res, 'zombie-parent.pid'); const childFile = path.join(w.res, 'zombie-child.pid');
+  const h = w.start([w.f('zombiemaker.test.mjs'), w.f('holder.test.mjs')], { ZOMBIE_PARENT_PID_FILE: parentFile, ZOMBIE_CHILD_PID_FILE: childFile, ...w.baseline([]) });
+  const r = await finish(h, 90000);
+  assert.notEqual(r.code, 'TIMEOUT', `the runner ends (output tail: ${h.out().slice(-300)})`);
+  assert.ok(fs.existsSync(parentFile) && fs.existsSync(childFile), `CONTROL: the fixture started the parent and its owned child (output tail: ${h.out().slice(-300)})`);
+  const child = Number(fs.readFileSync(childFile, 'utf8'));
+  await sleep(500);
+  assert.equal(procState(child), 'Z', 'CONTROL: the owned child is a ZOMBIE after the run (killed by the runner, kept by its token-less parent); otherwise this row proves nothing');
+  assert.deepEqual({ childRunning: alive(child), exit: r.code, suiteFolderKept: w.left().some((n) => n.startsWith('manyhands-suite.')) }, { childRunning: false, exit: 0, suiteFolderKept: false },
+    `a zombie holds no file and cannot be killed again, so it must not fail the run (output tail: ${h.out().slice(-500)})`);
 }));
 
 const ON_MAC = process.platform === 'darwin';
