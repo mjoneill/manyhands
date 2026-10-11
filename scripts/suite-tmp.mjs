@@ -13,8 +13,9 @@
  * ⛔ SECRETS. Reading another process's environment means reading whatever credentials it holds. It is read for exactly
  * one thing, whether this run's token is one of its entries (/proc on Linux; scripts/proc-env-owned.py, which returns
  * pids only, on macOS), and argv only for this folder's path. Nothing read is ever printed, logged or written.
- * Diagnostics name a process by pid, executable name and parent pid, and, for a process that is not ours, the test file
- * whose own folder it uses, found by testing the runner's own list of folders against it; never its argv, never its
+ * Diagnostics name a process by pid and parent pid only, never an executable name (see the #1672 note below), and,
+ * for a process that is not ours, the test file whose own folder it uses, found by testing the runner's own list of
+ * folders against it; never its argv, never its
  * environment, never text cut out of either.
  *
  * Limits, stated: a process that holds the folder open without naming it in its argv is not seen (no lsof); a runner
@@ -48,17 +49,9 @@ const alive = (pid) => {
   return !isZombie(pid);
 };
 
-/** pid → executable name from a look's own argv record (its first word, basename only), for diagnostics; no fork. */
-function nameIn(view, pid) {
-  const text = view && view.argv.get(pid);
-  const first = text ? text.trim().split(/\s+/)[0] : '';
-  return first ? path.basename(first) : '?';
-}
-
-/** pid → executable name, for diagnostics. Never the argv. */
-function exeName(pid) {
-  try { return path.basename(execFileSync('ps', ['-o', 'comm=', '-p', String(pid)], { encoding: 'utf8' }).trim()) || '?'; } catch { return '?'; }
-}
+// #1672: report lines name a process by PID ONLY. `ps -o comm=` on macOS prints argv[0] (measured 2026-10-11: a
+// child spawned with argv0 'ARGV0-SECRET-TEXT' listed as exactly that), and on Linux a process can rename its own
+// comm, so neither is safe to print: both are text the process or its caller controls.
 
 /** pid → parent pid, for diagnostics; '?' when it cannot be read. */
 function parentOf(pid) {
@@ -179,36 +172,34 @@ export function teardown(suite, { root }) {
   // last signal), reported apart. Both fail the run and keep the folder.
   const settleStart = Date.now();
   const killed = new Set();
-  const order = [];   // first-signal order, for the report; names come from the look's own argv (no fork)
+  const order = [];   // first-signal order, for the report (pids only)
   let view = table;
-  const signal = (pids, v) => {
-    for (const pid of pids) {
-      if (!killed.has(pid)) { killed.add(pid); order.push([pid, nameIn(v, pid)]); }
-      try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
-    }
+  const signal = (pids) => {
+    for (const pid of pids) if (!killed.has(pid)) { killed.add(pid); order.push(pid); }
+    for (const pid of pids) { try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ } }
   };
   const ownedIn = (v) => [...v.owned].filter((pid) => pid !== self && alive(pid));
   const deadline = Date.now() + SETTLE_MS;
   for (;;) {
     const owned = ownedIn(view);
     if (owned.length === 0) break;
-    signal(owned, view);
+    signal(owned);
     while (Date.now() < deadline && owned.some(alive)) sleepSync(100);
     view = inspectProcesses(marker);
     if (view === null) {
-      for (const [pid, name] of order) lines.push(`# tmp: owned process pid ${pid} (${name}) outlived its test file: a leak; killing it`);
+      for (const pid of order) lines.push(`# tmp: owned process pid ${pid} outlived its test file: a leak; killing it`);
       lines.push(`# tmp: ⛔ could not re-inspect processes after the kill: nothing more killed, folder RETAINED: ${suite.dir}`);
       return { failed: true, lines };
     }
     if (Date.now() >= deadline) {
       // the look taken at the deadline: signal what it shows, give it a bounded drain, and look once more
       const last = ownedIn(view);
-      signal(last, view);
+      signal(last);
       const drainUntil = Date.now() + FINAL_DRAIN_MS;
       while (Date.now() < drainUntil && last.some(alive)) sleepSync(50);
       const after = inspectProcesses(marker);
       if (after === null) {
-        for (const [pid, name] of order) lines.push(`# tmp: owned process pid ${pid} (${name}) outlived its test file: a leak; killing it`);
+        for (const pid of order) lines.push(`# tmp: owned process pid ${pid} outlived its test file: a leak; killing it`);
         lines.push(`# tmp: ⛔ could not re-inspect processes after the kill: nothing more killed, folder RETAINED: ${suite.dir}`);
         return { failed: true, lines };
       }
@@ -216,16 +207,16 @@ export function teardown(suite, { root }) {
       break;
     }
   }
-  for (const [pid, name] of order) lines.push(`# tmp: owned process pid ${pid} (${name}) outlived its test file: a leak; killing it`);
-  if (order.length) lines.push(`# tmp: settled ${order.length} owned process(es) in ${Date.now() - settleStart} ms (bound ${SETTLE_MS} ms + ${FINAL_DRAIN_MS} ms drain)`);
+  for (const pid of order) lines.push(`# tmp: owned process pid ${pid} outlived its test file: a leak; killing it`);
+  if (order.length) lines.push(`# tmp: kill attempted for ${order.length} owned process(es); settling took ${Date.now() - settleStart} ms (its waits are bounded by ${SETTLE_MS} ms + ${FINAL_DRAIN_MS} ms; process-table looks and liveness checks add to that)`);
   const stillOwned = ownedIn(view);
   const stubborn = stillOwned.filter((pid) => killed.has(pid));
   const unsignalled = stillOwned.filter((pid) => !killed.has(pid));
   // a process whose ownership could not be decided is never killed, and the folder is not removed while it lives
   const undecided = [...view.undecidable].filter((pid) => pid !== self && alive(pid));
-  for (const pid of undecided) lines.push(`# tmp: ⛔ process pid ${pid} (${exeName(pid)}): ownership could not be decided from its record: NOT killed`);
-  for (const pid of stubborn) lines.push(`# tmp: ⛔ owned process pid ${pid} (${exeName(pid)}) still alive after it was signalled (bound ${SETTLE_MS} ms + ${FINAL_DRAIN_MS} ms drain)`);
-  for (const pid of unsignalled) lines.push(`# tmp: ⛔ owned process pid ${pid} (${exeName(pid)}) appeared after the last signal, within the bound: NOT YET SIGNALLED`);
+  for (const pid of undecided) lines.push(`# tmp: ⛔ process pid ${pid}: ownership could not be decided from its record: NOT killed`);
+  for (const pid of stubborn) lines.push(`# tmp: ⛔ owned process pid ${pid} still alive after it was signalled (waits bounded by ${SETTLE_MS} ms + ${FINAL_DRAIN_MS} ms)`);
+  for (const pid of unsignalled) lines.push(`# tmp: ⛔ owned process pid ${pid} appeared after the last signal, within the bound: NOT YET SIGNALLED`);
 
   // 2. NOT OURS: a process that names the folder in its argv but holds no token in its environment. Never killed and
   // never claimed. One may still be exiting when first seen (a test that kills its own processes without waiting for
@@ -248,7 +239,7 @@ export function teardown(suite, { root }) {
     const now = [];
     for (const [pid, text] of v.argv) {
       if (pid === self || v.owned.has(pid) || !usesFolder(text) || !alive(pid)) continue;
-      if (!seen.has(pid)) seen.set(pid, { exe: exeName(pid), ppid: parentOf(pid), where: whose(text), at: Date.now() });
+      if (!seen.has(pid)) seen.set(pid, { ppid: parentOf(pid), where: whose(text), at: Date.now() });
       now.push(pid);
     }
     return now;
@@ -269,11 +260,11 @@ export function teardown(suite, { root }) {
     for (const pid of v.undecidable) if (pid !== self && !undecided.includes(pid) && alive(pid)) lateUndecided.add(pid);
   }
   const late = [...lateOwned].filter(alive).concat([...lateUndecided].filter(alive));
-  for (const pid of lateOwned) if (alive(pid)) lines.push(`# tmp: ⛔ owned process pid ${pid} (${exeName(pid)}) appeared while waiting on a process that is not this run's: NOT killed, the folder is kept`);
-  for (const pid of lateUndecided) if (alive(pid)) lines.push(`# tmp: ⛔ process pid ${pid} (${exeName(pid)}) appeared while waiting, and its ownership could not be decided: NOT killed`);
+  for (const pid of lateOwned) if (alive(pid)) lines.push(`# tmp: ⛔ owned process pid ${pid} appeared while waiting on a process that is not this run's: NOT killed, the folder is kept`);
+  for (const pid of lateUndecided) if (alive(pid)) lines.push(`# tmp: ⛔ process pid ${pid} appeared while waiting, and its ownership could not be decided: NOT killed`);
   for (const [pid, s] of seen) {
-    if (strangers.includes(pid)) lines.push(`# tmp: ⛔ process pid ${pid} (${s.exe}, parent ${s.ppid}) is not this run's but uses ${s.where}: NOT killed`);
-    else lines.push(`# tmp: process pid ${pid} (${s.exe}, parent ${s.ppid}) was not this run's and used ${s.where}: observed, then exited (not killed)`);
+    if (strangers.includes(pid)) lines.push(`# tmp: ⛔ process pid ${pid} (parent ${s.ppid}) is not this run's but uses ${s.where}: NOT killed`);
+    else lines.push(`# tmp: process pid ${pid} (parent ${s.ppid}) was not this run's and used ${s.where}: observed, then exited (not killed)`);
   }
   if (lookFailed) lines.push(`# tmp: ⛔ could not re-inspect processes while ${strangers.length} not this run's still used the folder`);
 
