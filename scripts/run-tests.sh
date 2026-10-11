@@ -99,8 +99,14 @@ while :; do
     rm -f "$out" "$rcfile" "$pidfile"
     exit "$got"
   fi
+  # Poll for the flag instead of blocking in `wait`: a TERM that lands after the check above and before `wait` begins
+  # has already run its trap, and a `wait` started after that is not woken by it, so it blocks until the pipeline
+  # ends on its own (a lost wakeup; on bash 3.2, a TERM before `wait` left it waiting 6 s for its child; widened between
+  # check and wait, 8 of 8 runs hung). The poll sees the flag within one interval; a normal finish is noticed up to 50 ms late.
+  while kill -0 "$pipeline" 2>/dev/null && [ -z "$got" ]; do sleep 0.05; done
+  [ -n "$got" ] && continue
+  # the pipeline has ended: collect it
   wait "$pipeline"
-  # a trapped signal makes `wait` return early: go round and handle it; otherwise the pipeline has ended
   [ -n "$got" ] || break
 done
 trap - TERM INT
