@@ -92,9 +92,15 @@ export function measure(dir) {
 /** The set of test files a run tolerates leaking: the JSON array at TMP_LEAK_BASELINE, else the checked-in one. */
 export function loadBaseline(root) {
   const file = process.env.TMP_LEAK_BASELINE || path.join(root, 'scripts', 'tmp-leak-baseline.json');
-  let list = [];
-  try { list = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { list = []; }
-  return new Set((Array.isArray(list) ? list : []).map((f) => path.resolve(root, f)));
+  let list;
+  let problem = null;
+  try { list = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { problem = e.code === 'ENOENT' ? 'missing' : 'unreadable'; }
+  if (!problem && !Array.isArray(list)) problem = 'not a JSON array';
+  // Fail-closed: an unusable baseline is treated as EMPTY, so every leaker reads as new and fails by name. The report
+  // says why, so that reads as "the baseline is broken", not as forty new leaks.
+  const set = new Set((problem ? [] : list).map((f) => path.resolve(root, f)));
+  set.problem = problem ? `${path.relative(root, file) || file}: ${problem}` : null;
+  return set;
 }
 
 /** Create this run's folder under the outer TMPDIR and its token. */
@@ -141,6 +147,7 @@ export function teardown(suite, { root }) {
 
   // 3. COUNT, per file, then the ratchet.
   const baseline = loadBaseline(root);
+  if (baseline.problem) lines.push(`# tmp: ⛔ the leak baseline is ${baseline.problem}: treated as empty, so every leaking file below reads as new`);
   let entries = 0;
   let bytes = 0;
   for (const [file, dir] of suite.files) {
