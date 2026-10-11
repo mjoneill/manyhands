@@ -67,6 +67,7 @@
   "tests/graph-store-backup-1559.test.mjs",
   "tests/graph-store-backup-schedule-1566.test.mjs",
   "tests/incarnation-1577.test.mjs",
+  "tests/inline-spawners-startup-1671.test.mjs",
   "tests/langgraph-saver-fences.test.mjs",
   "tests/langgraph-saver.test.mjs",
   "tests/logborn-change-feed-1561.test.mjs",
