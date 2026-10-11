@@ -22,6 +22,14 @@
 #                                           # that may be reported as "green"
 #   scripts/run-tests.sh tests/foo.test.mjs # subset — banner names the narrowing
 
+# #1672 — the signal traps go in FIRST, before anything is created: a TERM/INT that lands while the script is still
+# listing tests or making its temp files would otherwise kill the shell by its default action and leave those files
+# (RJ: the runner's own run-tests.* files left in 7 of 300 driver runs, SIGTERM at 10-29 ms, at cee194d). The traps
+# only record the signal; every check of `got` below acts on it.
+got=''
+trap 'got=143' TERM
+trap 'got=130' INT
+
 cd "$(dirname "$0")/.." || exit 2
 
 total=$(ls tests/*.test.mjs 2>/dev/null | wc -l | tr -d ' ')
@@ -76,9 +84,8 @@ export RUN_TESTS_PIDFILE
 # outside the trap: a handler that ran commands could fire before `pipeline=$!` was assigned, and in that window the
 # shell was seen to stall inside the handler (#1672 RJ: SIGTERM 30 ms after start hung the run in 2 of 80 tries). With a
 # flag, a signal that lands at any point, before the pipeline exists or during `wait`, is seen by the check below.
-got=''
-trap 'got=143' TERM
-trap 'got=130' INT
+# a signal that arrived while the temp files were being made: remove them and stop before anything is started
+if [ -n "$got" ]; then rm -f "$out" "$rcfile" "$pidfile"; exit "$got"; fi
 { node scripts/run-test-files.mjs "$@" 2>&1; echo $? >"$rcfile"; } | tee "$out" &
 pipeline=$!
 while :; do
