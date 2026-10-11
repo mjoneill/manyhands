@@ -43,6 +43,9 @@
  *   RN  a descendant spawned between inspections   a surviving owned process that keeps spawning new detached owned children every 20 ms: whatever the runner inspects, new ones appear after it. The
  *                        property is safety, not a particular remedy: either every process the fixture recorded is gone when the runner exits, or the run FAILED and the suite folder was RETAINED. A folder
  *                        deleted from under a live owned process is the failure.
+ *   RN2 a converging tree passes   the same spawner: once its owner is killed no more are made, so the tree CONVERGES. The runner then settles it and the run is a normal one: exit 0, every recorded
+ *                        process gone, the suite folder removed. This pins the behaviour the settle loop exists for (a first look that misses a late child must not turn into a failed run); RN alone accepts
+ *                        either a pass or a failure with the folder kept, so a runner that only looks once passes RN and fails RN2.
  *   RO  an owned process with an EMPTY argv[0] and the token as the FIRST environment entry   its argv does not name the folder, so only the environment can identify it. Measured on the macOS helper at c4a767d:
  *                        called directly it reads this process as NOT owned (the empty argv[0] is swallowed as padding, which shifts the split by one and drops the first environment entry). It needs BOTH an empty
  *                        argv[0] and the token first: the runner's own children have the token LAST, and the same process with a normal environment WAS found and killed (measured). The same safety property as
@@ -353,6 +356,20 @@ test('RN a descendant spawned between the runner\'s inspections: no owned proces
   const kept = w.left().filter((n) => n.startsWith('manyhands-suite.'));
   const safe = aliveNow.length === 0 || (r.code !== 0 && kept.length === 1);
   assert.equal(safe, true, `${aliveNow.length} of ${spawned.length + 1} owned processes are still alive after the runner exited (run exit ${JSON.stringify(r)}, suite folder kept: ${kept.length === 1}): the folder was deleted from under them, or the run did not fail`);
+}));
+
+test('RN2 a converging tree of owned descendants is settled and the run passes: all gone, exit 0, folder removed', { timeout: 120000 }, () => withWorld(async (w) => {
+  const spawnerPidFile = path.join(w.res, 'spawner.pid'); const spawnedFile = path.join(w.res, 'spawned.pids');
+  const h = w.start([w.f('spawner.test.mjs'), w.f('holder.test.mjs')], { SPAWNER_PID_FILE: spawnerPidFile, SPAWNED_PIDS_FILE: spawnedFile, ...w.baseline([w.f('spawner.test.mjs')]) });
+  const r = await finish(h, 90000);
+  assert.notEqual(r.code, 'TIMEOUT', `the runner ends (output tail: ${h.out().slice(-300)})`);
+  await sleep(1500);
+  const spawnerPid = Number(fs.readFileSync(spawnerPidFile, 'utf8'));
+  const spawned = fs.existsSync(spawnedFile) ? fs.readFileSync(spawnedFile, 'utf8').split('\n').filter(Boolean).map(Number) : [];
+  assert.ok(spawned.length >= 20, `CONTROL: the spawner made children while the runner ran (${spawned.length})`);
+  const kept = w.left().filter((n) => n.startsWith('manyhands-suite.'));
+  assert.deepEqual({ alive: [spawnerPid, ...spawned].filter(alive).length, exit: r.code, suiteFolderKept: kept.length === 1 }, { alive: 0, exit: 0, suiteFolderKept: false },
+    `a tree that converges once its owner is killed ends as a normal run (output tail: ${h.out().slice(-400)})`);
 }));
 
 test('RO an owned process with an empty argv[0] is not left alive beneath a deleted folder', { timeout: 120000 }, () => withWorld(async (w) => {
