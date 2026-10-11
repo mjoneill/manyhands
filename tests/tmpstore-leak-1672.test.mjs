@@ -106,6 +106,17 @@ const alive = (pid) => {
   const state = procState(pid);
   return state !== 'gone' && state !== 'Z' && state !== 'X';
 };
+/** What a failing row prints of a nested run's output: EVERY runner-report line (`# tmp:`), in order, then the last 300 characters. A bare tail shows that a run kept its folder but not WHY (RN2 on Linux CI, 2026-10-11); the report lines say it. */
+const diag = (text) => {
+  const lines = String(text).split('\n').filter((l) => /^\s*#?\s*tmp:/.test(l));
+  const shown = lines.length > 80 ? [...lines.slice(0, 40), `... ${lines.length - 80} lines omitted ...`, ...lines.slice(-40)] : lines;
+  return `\n--- runner report lines (${lines.length}) ---\n${shown.join('\n')}\n--- last 300 characters ---\n${String(text).slice(-300)}`;
+};
+/** One line per pid: its kernel state and parent, for a row that found processes alive and must say what kind. */
+const pidFacts = (pids) => pids.map((pid) => {
+  let ppid = '?'; try { ppid = execFileSync('ps', ['-o', 'ppid=', '-p', String(pid)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() || '?'; } catch { /* gone */ }
+  return `${pid}:${procState(pid)}:ppid ${ppid}`;
+}).join(' ');
 /** Pids currently in process group `pgid` (best effort: [] when ps cannot say). */
 const groupPids = (pgid) => {
   try { return execFileSync('ps', ['-A', '-o', 'pid=,pgid='], { encoding: 'utf8' }).split('\n').map((l) => l.trim().split(/\s+/).map(Number)).filter((x) => x.length === 2 && x[1] === pgid).map((x) => x[0]); } catch { return []; }
@@ -301,21 +312,21 @@ const runCheck = (file) => new Promise((resolve) => {
 
 test('T0a CONTROL: the on-demand detector sees the 3 entries a leaking file leaves, with their bytes, and exits 1', { timeout: 120000 }, () => withWorld(async (w) => {
   const r = await runCheck(w.f('leak.test.mjs'));
-  assert.equal(r.code, 1, `a leaking file makes the detector exit 1 (got ${r.code}); output: ${r.out.slice(-400)}`);
+  assert.equal(r.code, 1, `a leaking file makes the detector exit 1 (got ${r.code}); output: ${diag(r.out)}`);
   const m = /: (\d+) entr\w+ left, (\d+) bytes/.exec(r.out);
-  assert.ok(m && Number(m[1]) === 3 && Number(m[2]) >= 2048, `it reports 3 entries and at least 2048 bytes (got ${m && m[0]}); output: ${r.out.slice(-400)}`);
+  assert.ok(m && Number(m[1]) === 3 && Number(m[2]) >= 2048, `it reports 3 entries and at least 2048 bytes (got ${m && m[0]}); output: ${diag(r.out)}`);
 }));
 
 test('T0b CONTROL: the on-demand detector reports 0 entries for a clean file and exits 0', { timeout: 120000 }, () => withWorld(async (w) => {
   const r = await runCheck(w.f('clean.test.mjs'));
-  assert.equal(r.code, 0, `a clean file makes the detector exit 0 (got ${r.code}); output: ${r.out.slice(-400)}`);
-  assert.ok(/: 0 entr\w+ left/.test(r.out), `it says 0 entries: ${r.out.slice(-300)}`);
+  assert.equal(r.code, 0, `a clean file makes the detector exit 0 (got ${r.code}); output: ${diag(r.out)}`);
+  assert.ok(/: 0 entr\w+ left/.test(r.out), `it says 0 entries: ${diag(r.out)}`);
 }));
 
 test('R0 CONTROL: the runner on a clean fixture exits 0 and leaves the outer TMPDIR empty', { timeout: 120000 }, () => withWorld(async (w) => {
   const h = w.start([w.f('clean.test.mjs')]);
   const r = await finish(h, 90000);
-  assert.equal(r.code, 0, `the runner passes a clean fixture (got ${JSON.stringify(r)}); output tail: ${h.out().slice(-300)}`);
+  assert.equal(r.code, 0, `the runner passes a clean fixture (got ${JSON.stringify(r)}); output tail: ${diag(h.out())}`);
   assert.deepEqual(w.left(), [], 'a clean run leaves nothing in the outer TMPDIR (the runner removes its own temp files)');
 }));
 
@@ -325,9 +336,9 @@ const removedCount = (line) => Number(/removed\s+(\d+)\s+entr/i.exec(line)[1]);
 test('RA the light real file, run through the runner with an EMPTY baseline, passes and reports 0 removed entries', { timeout: 600000, skip: SKIP_PY }, () => withWorld(async (w) => {
   const h = w.start(['tests/executor-meter-1570.test.mjs'], w.baseline([]));
   const r = await finish(h, 540000);
-  assert.equal(r.code, 0, `the file passes under the runner with nothing baselined (got ${JSON.stringify(r)}); output tail: ${h.out().slice(-300)}`);
+  assert.equal(r.code, 0, `the file passes under the runner with nothing baselined (got ${JSON.stringify(r)}); output tail: ${diag(h.out())}`);
   const line = removedLine(h.out());
-  assert.ok(line, `the runner prints a removal line (none found in: ${h.out().slice(-300)})`);
+  assert.ok(line, `the runner prints a removal line (none found in: ${diag(h.out())})`);
   assert.equal(removedCount(line), 0, `executor-meter-1570 leaves nothing for the runner to remove (it leaks 11 entries when run bare): ${line}`);
   assert.deepEqual(w.left(), [], 'and nothing is left in the outer TMPDIR');
 }));
@@ -336,7 +347,7 @@ test('RB0 a store outlives its creator: still readable by its child 2 s later, a
   const resultFile = path.join(w.res, 'child-read');
   const h = w.start([w.f('creator.test.mjs'), w.f('holder.test.mjs')], { RESULT_FILE: resultFile });
   const r = await finish(h, 90000);
-  assert.notEqual(r.code, 'TIMEOUT', `the runner ends (output tail: ${h.out().slice(-300)})`);
+  assert.notEqual(r.code, 'TIMEOUT', `the runner ends (output tail: ${diag(h.out())})`);
   await sleep(500);
   const seen = fs.existsSync(resultFile) ? fs.readFileSync(resultFile, 'utf8') : '(the child recorded nothing)';
   assert.equal(seen, 'present', 'the store a finished file made was still there when its child read it 2 s later (creator-exit cleanup would have removed it)');
@@ -350,12 +361,12 @@ test('RB a detached survivor: the runner finds it, names its pid, kills it, and 
   const argvSecret = 'SECRET-ARGV-1672-' + rnd();  // sits in the survivor's argv; diagnostics show pid, executable and folder-relative path, not the full argv
   const h = w.start([w.f('survivor.test.mjs'), w.f('holder.test.mjs')], { SURVIVOR_PID_FILE: pidFile, FIXTURE_SECRET_1672: secret, FIXTURE_ARGV_SECRET_1672: argvSecret });
   const r = await finish(h, 90000);
-  assert.notEqual(r.code, 'TIMEOUT', `the runner ends (output tail: ${h.out().slice(-300)})`);
+  assert.notEqual(r.code, 'TIMEOUT', `the runner ends (output tail: ${diag(h.out())})`);
   assert.ok(fs.existsSync(pidFile), 'CONTROL: the fixture started a detached survivor and recorded its pid');
   const pid = Number(fs.readFileSync(pidFile, 'utf8'));
   for (let t = 0; t < 5000 && alive(pid); t += 100) await sleep(100);
   assert.equal(alive(pid), false, `the detached survivor ${pid} is gone when the runner exits`);
-  assert.ok(new RegExp(`\\b${pid}\\b`).test(h.out()), `the runner names the survivor's pid ${pid} in its output as a leak (output tail: ${h.out().slice(-400)})`);
+  assert.ok(new RegExp(`\\b${pid}\\b`).test(h.out()), `the runner names the survivor's pid ${pid} in its output as a leak (output tail: ${diag(h.out())})`);
   assert.equal(h.out().includes(secret), false, 'the runner never prints a descendant\'s environment (a value that only the environment holds does not appear in the output)');
   assert.equal(h.out().includes(argvSecret), false, 'and never its full argv (a value that only the argv holds does not appear in the output)');
   assert.deepEqual(w.left(), [], 'nothing is left in the outer TMPDIR when the runner exits');
@@ -386,14 +397,14 @@ test('RH a process that is not the runner\'s holds the folder: never killed, the
   const pidFile = path.join(w.res, 'stranger.pid');
   const h = w.start([w.f('stranger.test.mjs'), w.f('holder.test.mjs')], { STRANGER_PID_FILE: pidFile, ...w.baseline([w.f('stranger.test.mjs')]) });
   const r = await finish(h, 90000);
-  assert.notEqual(r.code, 'TIMEOUT', `the runner ends (output tail: ${h.out().slice(-300)})`);
+  assert.notEqual(r.code, 'TIMEOUT', `the runner ends (output tail: ${diag(h.out())})`);
   assert.ok(fs.existsSync(pidFile), 'CONTROL: the fixture started the stranger and recorded its pid');
   const pid = Number(fs.readFileSync(pidFile, 'utf8'));
   const stillAlive = alive(pid);
   const kept = w.left().filter((n) => n.startsWith('manyhands-suite.'));
   assert.deepEqual({ runFails: r.code !== 0, strangerStillAlive: stillAlive, suiteFolderKept: kept.length === 1, pidNamed: new RegExp(`\\b${pid}\\b`).test(h.out()),
     folderNamed: kept.length === 1 && h.out().includes(kept[0]) }, { runFails: true, strangerStillAlive: true, suiteFolderKept: true, pidNamed: true, folderNamed: true },
-  `outer TMPDIR holds ${JSON.stringify(w.left())}; output tail: ${h.out().slice(-500)}`);
+  `outer TMPDIR holds ${JSON.stringify(w.left())}; output tail: ${diag(h.out())}`);
 }));
 
 test('RI a second run finishing does not kill the first run\'s hanging file (different token) or touch its folder', { timeout: 120000 }, async () => {
@@ -435,8 +446,8 @@ test('RK a process that only quotes the run\'s token in its argv is not the runn
   const pidFile = path.join(w.res, 'impostor.pid');
   const h = w.start([w.f('impostor.test.mjs'), w.f('holder.test.mjs')], { IMPOSTOR_PID_FILE: pidFile, ...w.baseline([]) });
   const r = await finish(h, 90000);
-  assert.notEqual(r.code, 'TIMEOUT', `the runner ends (output tail: ${h.out().slice(-300)})`);
-  assert.ok(fs.existsSync(pidFile), `CONTROL: the fixture started the impostor (its file saw the run's token); output tail: ${h.out().slice(-400)}`);
+  assert.notEqual(r.code, 'TIMEOUT', `the runner ends (output tail: ${diag(h.out())})`);
+  assert.ok(fs.existsSync(pidFile), `CONTROL: the fixture started the impostor (its file saw the run's token); output tail: ${diag(h.out())}`);
   const pid = Number(fs.readFileSync(pidFile, 'utf8'));
   await sleep(1000);
   assert.equal(alive(pid), true, `the impostor ${pid} (token only in its argv, none in its environment) is still alive after the runner exits: ownership is the environment entry, not any text that mentions it`);
@@ -446,20 +457,20 @@ test('RM a process that only quotes the run\'s token inside another variable\'s 
   const pidFile = path.join(w.res, 'envimpostor.pid');
   const h = w.start([w.f('envimpostor.test.mjs'), w.f('holder.test.mjs')], { ENVIMPOSTOR_PID_FILE: pidFile, ...w.baseline([w.f('envimpostor.test.mjs')]) });
   const r = await finish(h, 90000);
-  assert.notEqual(r.code, 'TIMEOUT', `the runner ends (output tail: ${h.out().slice(-300)})`);
-  assert.ok(fs.existsSync(pidFile), `CONTROL: the fixture started the impostor (its file saw the run's token); output tail: ${h.out().slice(-400)}`);
+  assert.notEqual(r.code, 'TIMEOUT', `the runner ends (output tail: ${diag(h.out())})`);
+  assert.ok(fs.existsSync(pidFile), `CONTROL: the fixture started the impostor (its file saw the run's token); output tail: ${diag(h.out())}`);
   const pid = Number(fs.readFileSync(pidFile, 'utf8'));
   const kept = w.left().filter((n) => n.startsWith('manyhands-suite.'));
   assert.deepEqual({ runFails: r.code !== 0, impostorStillAlive: alive(pid), suiteFolderKept: kept.length === 1, pidNamed: new RegExp(`\\b${pid}\\b`).test(h.out()), folderNamed: kept.length === 1 && h.out().includes(kept[0]) },
     { runFails: true, impostorStillAlive: true, suiteFolderKept: true, pidNamed: true, folderNamed: true },
-    `outer TMPDIR holds ${JSON.stringify(w.left())}; output tail: ${h.out().slice(-500)}`);
+    `outer TMPDIR holds ${JSON.stringify(w.left())}; output tail: ${diag(h.out())}`);
 }));
 
 test('RN a descendant spawned between the runner\'s inspections: no owned process outlives the deletion of the folder it uses', { timeout: 120000 }, () => withWorld(async (w) => {
   const spawnerPidFile = path.join(w.res, 'spawner.pid'); const spawnedFile = path.join(w.res, 'spawned.pids');
   const h = w.start([w.f('spawner.test.mjs'), w.f('holder.test.mjs')], { SPAWNER_PID_FILE: spawnerPidFile, SPAWNED_PIDS_FILE: spawnedFile, ...w.baseline([w.f('spawner.test.mjs')]) });
   const r = await finish(h, 90000);
-  assert.notEqual(r.code, 'TIMEOUT', `the runner ends (output tail: ${h.out().slice(-300)})`);
+  assert.notEqual(r.code, 'TIMEOUT', `the runner ends (output tail: ${diag(h.out())})`);
   assert.ok(fs.existsSync(spawnerPidFile), 'CONTROL: the fixture started the spawner');
   await sleep(1500);
   const spawnerPid = Number(fs.readFileSync(spawnerPidFile, 'utf8'));
@@ -475,21 +486,22 @@ test('RN2 a converging tree of owned descendants is settled and the run passes: 
   const spawnerPidFile = path.join(w.res, 'spawner.pid'); const spawnedFile = path.join(w.res, 'spawned.pids');
   const h = w.start([w.f('spawner.test.mjs'), w.f('holder.test.mjs')], { SPAWNER_PID_FILE: spawnerPidFile, SPAWNED_PIDS_FILE: spawnedFile, ...w.baseline([w.f('spawner.test.mjs')]) });
   const r = await finish(h, 90000);
-  assert.notEqual(r.code, 'TIMEOUT', `the runner ends (output tail: ${h.out().slice(-300)})`);
+  assert.notEqual(r.code, 'TIMEOUT', `the runner ends (output tail: ${diag(h.out())})`);
   await sleep(1500);
   const spawnerPid = Number(fs.readFileSync(spawnerPidFile, 'utf8'));
   const spawned = fs.existsSync(spawnedFile) ? fs.readFileSync(spawnedFile, 'utf8').split('\n').filter(Boolean).map(Number) : [];
   assert.ok(spawned.length >= 20, `CONTROL: the spawner made children while the runner ran (${spawned.length})`);
   const kept = w.left().filter((n) => n.startsWith('manyhands-suite.'));
-  assert.deepEqual({ alive: [spawnerPid, ...spawned].filter(alive).length, exit: r.code, suiteFolderKept: kept.length === 1 }, { alive: 0, exit: 0, suiteFolderKept: false },
-    `a tree that converges once its owner is killed ends as a normal run (output tail: ${h.out().slice(-400)})`);
+  const aliveNow = [spawnerPid, ...spawned].filter(alive);
+  assert.deepEqual({ alive: aliveNow.length, exit: r.code, suiteFolderKept: kept.length === 1 }, { alive: 0, exit: 0, suiteFolderKept: false },
+    `a tree that converges once its owner is killed ends as a normal run (alive at the check: ${pidFacts(aliveNow)}; spawner ${spawnerPid}, ${spawned.length} recorded; output: ${diag(h.out())})`);
 }));
 
 test('RO an owned process with an empty argv[0] is not left alive beneath a deleted folder', { timeout: 120000 }, () => withWorld(async (w) => {
   const pidFile = path.join(w.res, 'emptyargv0.pid');
   const h = w.start([w.f('emptyargv0.test.mjs'), w.f('holder.test.mjs')], { EMPTYARGV0_PID_FILE: pidFile, ...w.baseline([]) });
   const r = await finish(h, 90000);
-  assert.notEqual(r.code, 'TIMEOUT', `the runner ends (output tail: ${h.out().slice(-300)})`);
+  assert.notEqual(r.code, 'TIMEOUT', `the runner ends (output tail: ${diag(h.out())})`);
   assert.ok(fs.existsSync(pidFile), 'CONTROL: the fixture started the process');
   const pid = Number(fs.readFileSync(pidFile, 'utf8'));
   await sleep(1000);
@@ -502,13 +514,13 @@ test('RZ a zombie of an owned process (its parent keeps it) does not fail the ru
   const parentFile = path.join(w.res, 'zombie-parent.pid'); const childFile = path.join(w.res, 'zombie-child.pid');
   const h = w.start([w.f('zombiemaker.test.mjs'), w.f('holder.test.mjs')], { ZOMBIE_PARENT_PID_FILE: parentFile, ZOMBIE_CHILD_PID_FILE: childFile, ...w.baseline([]) });
   const r = await finish(h, 90000);
-  assert.notEqual(r.code, 'TIMEOUT', `the runner ends (output tail: ${h.out().slice(-300)})`);
-  assert.ok(fs.existsSync(parentFile) && fs.existsSync(childFile), `CONTROL: the fixture started the parent and its owned child (output tail: ${h.out().slice(-300)})`);
+  assert.notEqual(r.code, 'TIMEOUT', `the runner ends (output tail: ${diag(h.out())})`);
+  assert.ok(fs.existsSync(parentFile) && fs.existsSync(childFile), `CONTROL: the fixture started the parent and its owned child (output tail: ${diag(h.out())})`);
   const child = Number(fs.readFileSync(childFile, 'utf8'));
   await sleep(500);
   assert.equal(procState(child), 'Z', 'CONTROL: the owned child is a ZOMBIE after the run (killed by the runner, kept by its token-less parent); otherwise this row proves nothing');
   assert.deepEqual({ childRunning: alive(child), exit: r.code, suiteFolderKept: w.left().some((n) => n.startsWith('manyhands-suite.')) }, { childRunning: false, exit: 0, suiteFolderKept: false },
-    `a zombie holds no file and cannot be killed again, so it must not fail the run (output tail: ${h.out().slice(-500)})`);
+    `a zombie holds no file and cannot be killed again, so it must not fail the run (output tail: ${diag(h.out())})`);
 }));
 
 test('RZ2 a zombie that already exists before the runner\'s teardown: the control is asserted during the run, and the run still ends as a normal one', { timeout: 120000 }, () => withWorld(async (w) => {
@@ -526,23 +538,23 @@ test('RZ2 a zombie that already exists before the runner\'s teardown: the contro
   }
   const r = await finish(h, 90000);
   assert.equal(sawZombie && sawPlainKillOk, true, 'CONTROL, asserted DURING the run before the runner\'s teardown: kill(pid, 0) succeeded AND an independent kernel-state read said Z for the owned child; otherwise the fixture proved nothing');
-  assert.equal(ended || r.code !== 'TIMEOUT', true, `the runner ends (output tail: ${h.out().slice(-300)})`);
+  assert.equal(ended || r.code !== 'TIMEOUT', true, `the runner ends (output tail: ${diag(h.out())})`);
   assert.deepEqual({ exit: r.code, suiteFolderKept: w.left().some((n) => n.startsWith('manyhands-suite.')) }, { exit: 0, suiteFolderKept: false },
-    `a zombie that was already there when the teardown started must not fail the run or keep the folder (observed ${observedAt} ms into the run; output tail: ${h.out().slice(-400)})`);
+    `a zombie that was already there when the teardown started must not fail the run or keep the folder (observed ${observedAt} ms into the run; output tail: ${diag(h.out())})`);
 }));
 
 test('RS a token-less process that is exiting on its own is not reported as a stranger, and the run is green', { timeout: 120000 }, () => withWorld(async (w) => {
   const pidFile = path.join(w.res, 'transient.pid');
   const h = w.start([w.f('transient.test.mjs')], { TRANSIENT_PID_FILE: pidFile, ...w.baseline([w.f('transient.test.mjs')]) });
   const r = await finish(h, 90000);
-  assert.notEqual(r.code, 'TIMEOUT', `the runner ends (output tail: ${h.out().slice(-300)})`);
+  assert.notEqual(r.code, 'TIMEOUT', `the runner ends (output tail: ${diag(h.out())})`);
   assert.ok(fs.existsSync(pidFile), 'CONTROL: the fixture started the short-lived process');
   const pid = Number(fs.readFileSync(pidFile, 'utf8'));
   const failLines = h.out().split('\n').filter((l) => /tmp:/.test(l) && /(NOT killed|RETAINED|⛔)/.test(l));
   // reported, not hidden: a holder that was seen and then went away is printed as "observed, then exited" with its pid
   const reported = h.out().split('\n').some((l) => /tmp:/.test(l) && new RegExp(`\\b${pid}\\b`).test(l) && /observed, then exited/i.test(l));
   assert.deepEqual({ exit: r.code, suiteFolderKept: w.left().some((n) => n.startsWith('manyhands-suite.')), failLines: failLines.length, reportedAsObservedThenExited: reported }, { exit: 0, suiteFolderKept: false, failLines: 0, reportedAsObservedThenExited: true },
-    `a process that exits by itself within the settle bound is not a stranger, and it is reported, not hidden (output tail: ${h.out().slice(-500)})`);
+    `a process that exits by itself within the settle bound is not a stranger, and it is reported, not hidden (output tail: ${diag(h.out())})`);
 }));
 
 // ── RT / RT0: the lost-wakeup window, made deterministic with a pause inserted into a COPY of the script (nothing is added to the shipped script)
@@ -673,9 +685,9 @@ async function lateOwnedRun(w) {
   const parentFile = path.join(w.res, 'late-parent.pid'); const childFile = path.join(w.res, 'late-child.pid'); const waitFile = path.join(w.res, 'ru-wait');
   const h = w.start([w.f('lateowned.test.mjs')], { LATE_PARENT_PID_FILE: parentFile, LATE_CHILD_PID_FILE: childFile, RU_WAIT_FILE: waitFile, ...w.baseline([w.f('lateowned.test.mjs')]) }, runner);
   const r = await finish(h, 90000);
-  assert.notEqual(r.code, 'TIMEOUT', `the runner ends (output tail: ${h.out().slice(-300)})`);
+  assert.notEqual(r.code, 'TIMEOUT', `the runner ends (output tail: ${diag(h.out())})`);
   assert.ok(fs.existsSync(waitFile), 'CONTROL: the runner reached the stranger wait (the handshake file was written)');
-  assert.ok(fs.existsSync(childFile), `CONTROL: the stranger started its owned child (output tail: ${h.out().slice(-300)})`);
+  assert.ok(fs.existsSync(childFile), `CONTROL: the stranger started its owned child (output tail: ${diag(h.out())})`);
   assert.ok(fs.statSync(childFile).mtimeMs >= fs.statSync(waitFile).mtimeMs, 'CONTROL, ordering: the owned child was started AFTER the runner entered the stranger wait');
   const child = Number(fs.readFileSync(childFile, 'utf8'));
   await sleep(500);
@@ -703,7 +715,7 @@ test('RL the runner cannot inspect processes: the run fails, the suite folder is
   const said = h.out().split('\n').some((l) => /tmp:/.test(l) && /(inspect|enumerat|process (table|list)|\bps\b)/i.test(l));
   assert.deepEqual({ runFails: r.code !== 0 && r.code !== 'TIMEOUT', suiteFolderKept: kept.length === 1, folderNamed: kept.length === 1 && h.out().includes(kept[0]), saysInspectionFailed: said },
     { runFails: true, suiteFolderKept: true, folderNamed: true, saysInspectionFailed: true },
-    `a runner that cannot list processes cannot know the folder is unused (outer holds ${JSON.stringify(w.left())}; output tail: ${h.out().slice(-500)})`);
+    `a runner that cannot list processes cannot know the folder is unused (outer holds ${JSON.stringify(w.left())}; output tail: ${diag(h.out())})`);
 }));
 
 const namedLine = (out, name) => out.split('\n').find((l) => l.includes(name) && /\d+\s+entr/i.test(l));
@@ -713,7 +725,7 @@ test('RG1 a new leaking file that is not on the baseline fails the run by name, 
   const r = await finish(h, 90000);
   assert.ok(r.code !== 0 && r.code !== 'TIMEOUT', `a leaking file that is not baselined fails the run (got ${JSON.stringify(r)})`);
   const line = namedLine(h.out(), 'leak.test.mjs');
-  assert.ok(line, `the output names leak.test.mjs with its entry count (output tail: ${h.out().slice(-500)})`);
+  assert.ok(line, `the output names leak.test.mjs with its entry count (output tail: ${diag(h.out())})`);
   assert.equal(Number(/(\d+)\s+entr/i.exec(line)[1]), 3, `the file left 3 entries: ${line}`);
   const bytes = /(\d+)\s*bytes/i.exec(line);
   assert.ok(bytes && Number(bytes[1]) >= 2048, `and at least 2048 bytes: ${line}`);
@@ -724,16 +736,16 @@ test('RG1 a new leaking file that is not on the baseline fails the run by name, 
 test('RG2 a baselined file that leaks is reported by name and the run stays green', { timeout: 120000 }, () => withWorld(async (w) => {
   const h = w.start([w.f('leak.test.mjs')], w.baseline([w.f('leak.test.mjs')]));
   const r = await finish(h, 90000);
-  assert.equal(r.code, 0, `a baselined leaker does not fail the run (got ${JSON.stringify(r)}); output tail: ${h.out().slice(-400)}`);
-  assert.ok(namedLine(h.out(), 'leak.test.mjs'), `it is still reported by name with its entry count (output tail: ${h.out().slice(-500)})`);
+  assert.equal(r.code, 0, `a baselined leaker does not fail the run (got ${JSON.stringify(r)}); output tail: ${diag(h.out())}`);
+  assert.ok(namedLine(h.out(), 'leak.test.mjs'), `it is still reported by name with its entry count (output tail: ${diag(h.out())})`);
   assert.deepEqual(w.left(), [], 'nothing is left in the outer TMPDIR');
 }));
 
 test('RG3 a baselined file that comes back clean is reported as a candidate for removal and does NOT fail the run', { timeout: 120000 }, () => withWorld(async (w) => {
   const h = w.start([w.f('clean.test.mjs')], w.baseline([w.f('clean.test.mjs')]));
   const r = await finish(h, 90000);
-  assert.equal(r.code, 0, `a flapping leaker must not block a landing: a stale baseline entry is reported, not failed (got ${JSON.stringify(r)}); output tail: ${h.out().slice(-400)}`);
-  assert.ok(h.out().split('\n').some((l) => l.includes('clean.test.mjs') && /candidate/i.test(l)), `the output names clean.test.mjs as a candidate for removal from the baseline (output tail: ${h.out().slice(-500)})`);
+  assert.equal(r.code, 0, `a flapping leaker must not block a landing: a stale baseline entry is reported, not failed (got ${JSON.stringify(r)}); output tail: ${diag(h.out())}`);
+  assert.ok(h.out().split('\n').some((l) => l.includes('clean.test.mjs') && /candidate/i.test(l)), `the output names clean.test.mjs as a candidate for removal from the baseline (output tail: ${diag(h.out())})`);
 }));
 
 test('RE SIGTERM to the runner while a file hangs: the runner, the file and its detached survivor are gone within 20 s and no suite folder is left', { timeout: 120000 }, () => withWorld(async (w) => {
