@@ -118,14 +118,16 @@ test('#1367 served: 20 KB + three refs create → saved whole → preview links 
     try {
       await page.waitForFunction(() => document.querySelectorAll('.card').length === 4, { timeout: 5000 });
     } catch (e) {
-      const state = await page.evaluate(() => ({
+      // each read is bounded: a page whose main thread is blocked would otherwise hang the dump for puppeteer's protocol timeout, and "did not answer" is itself the specimen
+      const bounded = (pr, what) => Promise.race([pr, new Promise((r) => setTimeout(() => r({ unreadable: `${what} did not answer in 3 s` }), 3000))]);
+      const state = await bounded(page.evaluate(() => ({
         cardsInDom: document.querySelectorAll('.card').length,
         observed: window.__1674,
         formExpanded: !!document.querySelector('#add-card-form-wrapper.expanded'),
         titleValue: (document.getElementById('card-title') || {}).value,
-      })).catch((err) => ({ stateUnreadable: String(err) }));
-      // the discriminator: if the server has the card but the DOM does not, the render never ran; if it has none, the click or the POST was lost
-      const api = await fetch(`${server.baseUrl}/api/cards`).then(async (r) => { const j = await r.json(); const list = Array.isArray(j) ? j : (j.cards || []); return { status: r.status, shortIds: list.map((c) => c.shortId) }; }).catch((err) => ({ unreadable: String(err) }));
+      })), 'the page').catch((err) => ({ unreadable: String(err) }));
+      // what the server holds next to what the DOM shows: this records what was observed at that moment. An absent card can be an unfinished or failed save; a present one with no DOM card is a mismatch at that moment, not its cause
+      const api = await fetch(`${server.baseUrl}/api/cards`, { signal: AbortSignal.timeout(3000) }).then(async (r) => { const j = await r.json(); const list = Array.isArray(j) ? j : (j.cards || []); return { status: r.status, shortIds: list.map((c) => c.shortId) }; }).catch((err) => ({ unreadable: String(err) }));
       throw new Error(`#1674 the 4th card did not render within 5 s of the add click (bound unchanged): ${JSON.stringify({ ...state, api, creates: creates.map(({ req, ...c }) => c), pageErrors })} — original: ${e.message}`);
     }
     const seen = await page.evaluate(() => window.__1674);
