@@ -31,8 +31,9 @@ const SETTLE_MS = 5000;
 
 const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 // A ZOMBIE answers kill(pid, 0) as if alive, but it has exited: it holds no open files, cannot be killed, and waits
-// only for its parent to reap it. Counting it as alive stalled the settle loop for the whole bound on Linux CI
-// (#1672, RN2), so it counts as gone here. Measured on macOS 2026-10-11: kill -0 → alive, ps stat → Z.
+// only for its parent to reap it. Counting it as alive COULD stall the settle loop for its whole bound, a possible
+// mechanism for RN2's red on Linux CI at 8a3bb80 (#1672), not established. So it counts as gone here.
+// Measured on macOS 2026-10-11: kill -0 → alive, ps stat → Z.
 function isZombie(pid) {
   if (process.platform === 'linux') {
     try { const st = fs.readFileSync(`/proc/${pid}/stat`, 'latin1'); return /^[ZX]/.test(st.slice(st.lastIndexOf(')') + 2)); } catch { return false; }
