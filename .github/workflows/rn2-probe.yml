@@ -1,0 +1,83 @@
+# #1672 — the VALIDATION probe for the RN2 fix (50b0062): same shape as the 2eaa59b probe (RN2 red in 5 of 8 jobs).
+# Lives only on the exp/1672-rn2-linux-fix branch; never merged. FINITE: every job runs to completion, no mid-run cancel.
+# No artifact upload (ci.yml's rule): a failing row already writes every `# tmp:` report line and RN2's survivor facts
+# into its assertion message, which lands in the job log.
+name: rn2-probe
+
+on:
+  push:
+    branches: ['exp/1672-rn2-linux-fix']
+
+permissions:
+  contents: read
+
+env:
+  PREREG: |
+    ## How to read this run (written BEFORE it)
+    BEFORE (2eaa59b, run 38177146225): RN2 not ok in 5 of 8 jobs (both loops on loop 1; suites 1, 3, 6); 22 reported
+    survivors, none ever signalled.
+    THIS RUN is finite: every job completes; all logs are counted afterwards with one checked script (rn2-analyze.mjs).
+    OBSERVATIONS to record per job: RN2 ok / not ok; any `still alive after it was signalled` (STUBBORN) lines; any
+    `NOT YET SIGNALLED` lines; the `kill attempted for N ...; settling took T ms` line.
+    The fix is SUPPORTED only if RN2 is ok in every job; any RN2 red is read from its own report lines, not explained away.
+    The suite jobs run WITHOUT the AppArmor sysctl that ci.yml uses, so served-browser rows fail here; only RN/RN2
+    lines are evidence. Browser early exits may change the suite's load.
+    A green across every job is a bounded sample at one sha, not proof the race is absent.
+
+jobs:
+  suite:
+    name: full server suite ${{ matrix.n }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Pre-registered reading
+        run: printf '%s\n' "$PREREG" >> "$GITHUB_STEP_SUMMARY"
+      - name: Run the server suite
+        run: npm run test:server
+
+  rn2-loop:
+    name: RN2 alone x30 (${{ matrix.load }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        load: [quiet, burn]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Pre-registered reading
+        run: printf '%s\n' "$PREREG" >> "$GITHUB_STEP_SUMMARY"
+      - name: RN2, 30 times (stops its own loop at a red; the run is not cancelled)
+        run: |
+          burners=''
+          cleanup() { for b in $burners; do kill "$b" 2>/dev/null || true; done; }
+          trap cleanup EXIT
+          trap 'exit 143' TERM
+          trap 'exit 130' INT
+          if [ "${{ matrix.load }}" = burn ]; then
+            for c in $(seq 1 "$(nproc)"); do yes > /dev/null & burners="$burners $!"; done
+            echo "burners:$burners"
+          fi
+          rc=0
+          for i in $(seq 1 30); do
+            echo "=== RN2 loop $i at $(date -u +%H:%M:%SZ) load $(cut -d' ' -f1-3 /proc/loadavg)"
+            if ! node --test --test-reporter=tap --test-name-pattern='RN2 ' tests/tmpstore-leak-1672.test.mjs; then
+              echo "=== RED on loop $i"; rc=1; break
+            fi
+          done
+          exit $rc
