@@ -30,6 +30,7 @@ import { fileURLToPath } from 'node:url';
 
 export const TOKEN_VAR = 'MANYHANDS_SUITE_RUN';
 const SETTLE_MS = 5000;
+const FINAL_DRAIN_MS = 1000;   // #1672: the bounded drain for what the look at the deadline finds
 
 const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 // A ZOMBIE answers kill(pid, 0) as if alive, but it has exited: it holds no open files, cannot be killed, and waits
@@ -46,6 +47,13 @@ const alive = (pid) => {
   try { process.kill(pid, 0); } catch (e) { if (e.code !== 'EPERM') return false; }
   return !isZombie(pid);
 };
+
+/** pid → executable name from a look's own argv record (its first word, basename only), for diagnostics; no fork. */
+function nameIn(view, pid) {
+  const text = view && view.argv.get(pid);
+  const first = text ? text.trim().split(/\s+/)[0] : '';
+  return first ? path.basename(first) : '?';
+}
 
 /** pid → executable name, for diagnostics. Never the argv. */
 function exeName(pid) {
@@ -162,32 +170,62 @@ export function teardown(suite, { root }) {
 
   // 1. OURS, to a FIXED POINT: kill every process whose own ENVIRONMENT (never its argv) holds this run's exact token
   // entry, wait, and look again — a descendant can spawn another between two looks, and the folder must not be removed
-  // under one. Repeat until a look finds no owned process left, within SETTLE_MS overall; anything still owned then is
-  // reported, and the run fails and keeps the folder.
+  // under one. Repeat until a look finds no owned process left, within SETTLE_MS overall.
+  // #1672 RN2 (Linux CI): each look's owned batch is SIGNALLED FIRST, with no lookup in between; the old loop ran one
+  // `ps` per pid before its kill (~250 forks for a spawner's tree), spent the bound, and broke on the deadline BEFORE
+  // killing what its last look had found, then reported those never-signalled pids as "still alive after ... of
+  // kills". Now the look taken at the deadline is signalled too and drained for at most FINAL_DRAIN_MS; whatever is
+  // owned and alive after that is either STUBBORN (signalled, still alive) or NOT YET SIGNALLED (appeared after the
+  // last signal), reported apart. Both fail the run and keep the folder.
+  const settleStart = Date.now();
   const killed = new Set();
+  const order = [];   // first-signal order, for the report; names come from the look's own argv (no fork)
   let view = table;
-  const deadline = Date.now() + SETTLE_MS;
-  for (;;) {
-    const owned = [...view.owned].filter((pid) => pid !== self && alive(pid));
-    if (owned.length === 0) break;
-    for (const pid of owned) {
-      if (!killed.has(pid)) lines.push(`# tmp: owned process pid ${pid} (${exeName(pid)}) outlived its test file: a leak; killing it`);
-      killed.add(pid);
+  const signal = (pids, v) => {
+    for (const pid of pids) {
+      if (!killed.has(pid)) { killed.add(pid); order.push([pid, nameIn(v, pid)]); }
       try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
     }
+  };
+  const ownedIn = (v) => [...v.owned].filter((pid) => pid !== self && alive(pid));
+  const deadline = Date.now() + SETTLE_MS;
+  for (;;) {
+    const owned = ownedIn(view);
+    if (owned.length === 0) break;
+    signal(owned, view);
     while (Date.now() < deadline && owned.some(alive)) sleepSync(100);
     view = inspectProcesses(marker);
     if (view === null) {
+      for (const [pid, name] of order) lines.push(`# tmp: owned process pid ${pid} (${name}) outlived its test file: a leak; killing it`);
       lines.push(`# tmp: ⛔ could not re-inspect processes after the kill: nothing more killed, folder RETAINED: ${suite.dir}`);
       return { failed: true, lines };
     }
-    if (Date.now() >= deadline) break;
+    if (Date.now() >= deadline) {
+      // the look taken at the deadline: signal what it shows, give it a bounded drain, and look once more
+      const last = ownedIn(view);
+      signal(last, view);
+      const drainUntil = Date.now() + FINAL_DRAIN_MS;
+      while (Date.now() < drainUntil && last.some(alive)) sleepSync(50);
+      const after = inspectProcesses(marker);
+      if (after === null) {
+        for (const [pid, name] of order) lines.push(`# tmp: owned process pid ${pid} (${name}) outlived its test file: a leak; killing it`);
+        lines.push(`# tmp: ⛔ could not re-inspect processes after the kill: nothing more killed, folder RETAINED: ${suite.dir}`);
+        return { failed: true, lines };
+      }
+      view = after;
+      break;
+    }
   }
-  const stubborn = [...view.owned].filter((pid) => pid !== self && alive(pid));
+  for (const [pid, name] of order) lines.push(`# tmp: owned process pid ${pid} (${name}) outlived its test file: a leak; killing it`);
+  if (order.length) lines.push(`# tmp: settled ${order.length} owned process(es) in ${Date.now() - settleStart} ms (bound ${SETTLE_MS} ms + ${FINAL_DRAIN_MS} ms drain)`);
+  const stillOwned = ownedIn(view);
+  const stubborn = stillOwned.filter((pid) => killed.has(pid));
+  const unsignalled = stillOwned.filter((pid) => !killed.has(pid));
   // a process whose ownership could not be decided is never killed, and the folder is not removed while it lives
   const undecided = [...view.undecidable].filter((pid) => pid !== self && alive(pid));
   for (const pid of undecided) lines.push(`# tmp: ⛔ process pid ${pid} (${exeName(pid)}): ownership could not be decided from its record: NOT killed`);
-  for (const pid of stubborn) lines.push(`# tmp: ⛔ owned process pid ${pid} (${exeName(pid)}) still alive after ${SETTLE_MS} ms of kills`);
+  for (const pid of stubborn) lines.push(`# tmp: ⛔ owned process pid ${pid} (${exeName(pid)}) still alive after it was signalled (bound ${SETTLE_MS} ms + ${FINAL_DRAIN_MS} ms drain)`);
+  for (const pid of unsignalled) lines.push(`# tmp: ⛔ owned process pid ${pid} (${exeName(pid)}) appeared after the last signal, within the bound: NOT YET SIGNALLED`);
 
   // 2. NOT OURS: a process that names the folder in its argv but holds no token in its environment. Never killed and
   // never claimed. One may still be exiting when first seen (a test that kills its own processes without waiting for
@@ -260,7 +298,7 @@ export function teardown(suite, { root }) {
   }
 
   // 4. REMOVE — only when nothing we cannot account for still holds the folder.
-  if (strangers.length || lookFailed || late.length || stubborn.length || undecided.length) {
+  if (strangers.length || lookFailed || late.length || stubborn.length || unsignalled.length || undecided.length) {
     failed = true;
     lines.push(`# tmp: ⛔ folder RETAINED, not removed: ${suite.dir} (${entries} entries, ${bytes} bytes inside the file folders)`);
   } else {
