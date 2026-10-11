@@ -46,6 +46,11 @@
  *   RN2 a converging tree passes   the same spawner: once its owner is killed no more are made, so the tree CONVERGES. The runner then settles it and the run is a normal one: exit 0, every recorded
  *                        process gone, the suite folder removed. This pins the behaviour the settle loop exists for (a first look that misses a late child must not turn into a failed run); RN alone accepts
  *                        either a pass or a failure with the folder kept, so a runner that only looks once passes RN and fails RN2.
+ *   RN3 / RN3p  a slow `ps` (added after Linux CI probe run 38177146225)   RN2 went red on Linux with survivors reported as "still alive after 5000 ms of kills" that carry no "killing it" line: the kill pass names each pid with one `ps` before
+ *                        signalling it, and on a slow host that eats the settle bound, so the last look's new owned pids are never signalled. These rows slow only the per-pid naming call (`ps -o comm=`, a shim on PATH, 100 ms) so the same
+ *                        thing happens on any host. RN3 (safety, either remedy acceptable): a pid the report calls "still alive after ... ms of kills" had an earlier "killing it" line, and at exit either every recorded process is gone or the
+ *                        run failed with the folder retained. NOTE: a head that no longer names pids with `ps` passes these for that reason; the check that they can still fail on such a head is a mutant that restores a per-pid
+ *                        naming call before signalling (see the #1672 landing evidence), not anything in this file. RN3p (design pin): the same tree still ends as a normal run (exit 0, all gone, folder removed). Both record the whole run's duration in their messages; RN3p also bounds it.
  *   RO  an owned process with an EMPTY argv[0] and the token as the FIRST environment entry   its argv does not name the folder, so only the environment can identify it. Measured on the macOS helper at c4a767d:
  *                        called directly it reads this process as NOT owned (the empty argv[0] is swallowed as padding, which shifts the split by one and drops the first environment entry). It needs BOTH an empty
  *                        argv[0] and the token first: the runner's own children have the token LAST, and the same process with a normal environment WAS found and killed (measured). The same safety property as
@@ -177,6 +182,16 @@ test('envimpostor', () => {
   'spawner.test.mjs': `import { test } from 'node:test'; import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path'; import { spawn } from 'node:child_process';
 test('spawner', () => {
   const s = fs.mkdtempSync(path.join(os.tmpdir(), 'fx-spawner-'));
+  const code = \`const { spawn } = require('child_process'), fs = require('fs');
+    setInterval(() => { const c = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 300000)', '--', '--store', \${JSON.stringify(s)}], { stdio: 'ignore', detached: true }); c.unref(); fs.appendFileSync(process.env.SPAWNED_PIDS_FILE, c.pid + '\\\\n'); }, 20);\`;
+  const sp = spawn(process.execPath, ['-e', code], { stdio: 'ignore', detached: true }); sp.unref();
+  fs.writeFileSync(process.env.SPAWNER_PID_FILE, String(sp.pid));
+});\n`,
+  // 80 sleeping owned children FIRST, then a spawner that keeps making more every 20 ms: the spawner has the highest pid of the tree, so a pass that signals in pid order reaches it LAST. Every child pid is appended to SPAWNED_PIDS_FILE (the first 80 lines are the burst).
+  'burstspawner.test.mjs': `import { test } from 'node:test'; import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path'; import { spawn } from 'node:child_process';
+test('burstspawner', () => {
+  const s = fs.mkdtempSync(path.join(os.tmpdir(), 'fx-burst-'));
+  for (let i = 0; i < 80; i++) { const c = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 300000)', '--', '--store', s], { stdio: 'ignore', detached: true }); c.unref(); fs.appendFileSync(process.env.SPAWNED_PIDS_FILE, c.pid + '\\n'); }
   const code = \`const { spawn } = require('child_process'), fs = require('fs');
     setInterval(() => { const c = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 300000)', '--', '--store', \${JSON.stringify(s)}], { stdio: 'ignore', detached: true }); c.unref(); fs.appendFileSync(process.env.SPAWNED_PIDS_FILE, c.pid + '\\\\n'); }, 20);\`;
   const sp = spawn(process.execPath, ['-e', code], { stdio: 'ignore', detached: true }); sp.unref();
@@ -495,6 +510,60 @@ test('RN2 a converging tree of owned descendants is settled and the run passes: 
   const aliveNow = [spawnerPid, ...spawned].filter(alive);
   assert.deepEqual({ alive: aliveNow.length, exit: r.code, suiteFolderKept: kept.length === 1 }, { alive: 0, exit: 0, suiteFolderKept: false },
     `a tree that converges once its owner is killed ends as a normal run (alive at the check: ${pidFacts(aliveNow)}; spawner ${spawnerPid}, ${spawned.length} recorded; output: ${diag(h.out())})`);
+}));
+
+// RN3/RN3p (added after the Linux CI probe, run 38177146225): RN2's Linux reds had survivors that the report calls "still alive after 5000 ms of kills" but that carry no "killing it" line. The suspect is the cost of the kill pass itself (a
+// `ps` per pid to name it, before each kill) pushing the settle loop past its deadline, so that the last look's new owned pids are never signalled. The macOS `ps` is fast enough that RN2 never shows it, so the rows slow the one `ps` call
+// the kill pass makes per pid (`-o comm=`) with a shim on PATH that sleeps 100 ms and delegates to the real ps. The slowdown is a property of the row's world, not of any head; every other `ps` call is untouched.
+const slowPsShim = (w) => {
+  const dir = path.join(w.res, 'slowps'); fs.mkdirSync(dir, { recursive: true });
+  const realPs = execFileSync('sh', ['-c', 'command -v ps'], { encoding: 'utf8' }).trim();
+  const log = path.join(w.res, 'slowps.calls');
+  fs.writeFileSync(path.join(dir, 'ps'), `#!/bin/sh\ncase "$*" in *comm=*) echo x >> "${log}"; sleep 0.1;; esac\nexec "${realPs}" "$@"\n`, { mode: 0o755 });
+  return { env: { PATH: `${dir}:${process.env.PATH}` }, calls: () => { try { return fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).length; } catch { return 0; } } };
+};
+const runSlowSpawner = async (w) => {
+  const spawnerPidFile = path.join(w.res, 'spawner.pid'); const spawnedFile = path.join(w.res, 'spawned.pids');
+  const shim = slowPsShim(w);
+  const t0 = Date.now();
+  const h = w.start([w.f('burstspawner.test.mjs'), w.f('holder.test.mjs')], { SPAWNER_PID_FILE: spawnerPidFile, SPAWNED_PIDS_FILE: spawnedFile, ...shim.env, ...w.baseline([w.f('burstspawner.test.mjs')]) });
+  const r = await finish(h, 150000);
+  const elapsedMs = Date.now() - t0;   // whole run, files included: recorded in every message so a fix that moves the slow naming after the kills is seen to cost what it costs
+  assert.notEqual(r.code, 'TIMEOUT', `the runner ends (output: ${diag(h.out())})`);
+  await sleep(1500);
+  const spawnerPid = Number(fs.readFileSync(spawnerPidFile, 'utf8'));
+  const spawned = fs.existsSync(spawnedFile) ? fs.readFileSync(spawnedFile, 'utf8').split('\n').filter(Boolean).map(Number) : [];
+  const kept = w.left().filter((n) => n.startsWith('manyhands-suite.'));
+  const burst = spawned.slice(0, 80);
+  return { h, r, elapsedMs, burst, spawnerPid, spawned, kept, aliveNow: [spawnerPid, ...spawned].filter(alive), psCalls: shim.calls() };
+};
+
+test('RN3 a report never says an owned process "survived kills" that was never sent one, and nothing is deleted from under a live owned process (kill pass slowed by a slow ps)', { timeout: 200000 }, () => withWorld(async (w) => {
+  const x = await runSlowSpawner(w);
+  assert.ok(x.burst.length === 80 && x.spawnerPid > Math.max(...x.burst), `CONTROL: the spawner (${x.spawnerPid}) has a higher pid than all 80 burst children, so a pid-ordered pass reaches it last`);
+  assert.ok(x.spawned.length > 80, `CONTROL: the spawner kept making children (${x.spawned.length} recorded in all)`);
+  const lines = x.h.out().split('\n').filter((l) => /tmp:/.test(l));
+  const killing = new Set(); const liars = [];
+  for (const l of lines) {
+    let m = /owned process pid (\d+)(?: \([^)]*\))? outlived its test file: a leak; killing it/.exec(l); if (m) { killing.add(Number(m[1])); continue; }
+    // any wording of "still alive after ...": the claim is that it was signalled and survived
+    m = /⛔ owned process pid (\d+)(?: \([^)]*\))? still alive after/.exec(l);
+    if (m && !killing.has(Number(m[1]))) liars.push(Number(m[1]));
+  }
+  assert.deepEqual(liars, [], `every pid the report calls "still alive after ... ms of kills" had an earlier "killing it" line; these did not: ${liars.join(' ')} (alive at the check: ${pidFacts(x.aliveNow)}; recorded ${x.spawned.length}; slow-ps naming calls ${x.psCalls}; run took ${x.elapsedMs} ms; ${diag(x.h.out())})`);
+  const safe = x.aliveNow.length === 0 || (x.r.code !== 0 && x.kept.length === 1);
+  assert.equal(safe, true, `${x.aliveNow.length} owned processes are alive after the runner exited (exit ${x.r.code}, suite folder kept: ${x.kept.length === 1}, run took ${x.elapsedMs} ms): ${pidFacts(x.aliveNow)}`);
+}));
+
+test('RN3p the same tree with a slow ps still ends as a normal run: exit 0, every recorded process gone, folder removed (design pin: the kill pass must not eat the settle bound)', { timeout: 200000 }, () => withWorld(async (w) => {
+  const x = await runSlowSpawner(w);
+  assert.ok(x.burst.length === 80 && x.spawnerPid > Math.max(...x.burst), `CONTROL: the spawner (${x.spawnerPid}) has a higher pid than all 80 burst children, so a pid-ordered pass reaches it last`);
+  assert.ok(x.spawned.length > 80, `CONTROL: the spawner kept making children (${x.spawned.length} recorded in all)`);
+  assert.deepEqual({ alive: x.aliveNow.length, exit: x.r.code, suiteFolderKept: x.kept.length === 1 }, { alive: 0, exit: 0, suiteFolderKept: false },
+    `a converging tree must settle even when naming each process is slow (alive at the check: ${pidFacts(x.aliveNow)}; spawner ${x.spawnerPid}, ${x.spawned.length} recorded; slow-ps naming calls ${x.psCalls}; run took ${x.elapsedMs} ms; output: ${diag(x.h.out())})`);
+  // design pins (not safety): the kill pass must not fork a naming call per process, and the whole run (this fixture needs ~9 s with a fast ps) must not grow with the number of processes times the cost of naming one
+  assert.ok(x.psCalls <= 10, `the run made ${x.psCalls} slow naming calls (cap 10): naming belongs off the kill path`);
+  assert.ok(x.elapsedMs < 60000, `the run, naming included, took ${x.elapsedMs} ms (bound 60000): moving the slow lookups after the kills must not make the diagnostic phase unbounded`);
 }));
 
 test('RO an owned process with an empty argv[0] is not left alive beneath a deleted folder', { timeout: 120000 }, () => withWorld(async (w) => {
