@@ -59,7 +59,8 @@ const rmTemp = (...dirs) => { for (const d of dirs) { try { if (d) fs.rmSync(d, 
 const SEEDED = [];
 after(() => rmTemp(...SEEDED));
 async function seed(N) {
-  const store = tmpStore('r44s-seed-'); const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'r44s-board-')); const boardFile = path.join(dir, 'board.json'); SEEDED.push(store, dir);
+  const store = tmpStore('r44s-seed-'); SEEDED.push(store);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'r44s-board-')); SEEDED.push(dir); const boardFile = path.join(dir, 'board.json');
   fs.writeFileSync(boardFile, JSON.stringify(bigBoard(N)));
   const exec = await startExecutor({ store, datasetId: DSID, create: true });
   try {
@@ -225,13 +226,14 @@ test('S2-CONTROL the NAIVE reader under the same two-writer sweep (k = the page 
 test('S3 SNAPSHOT WITHIN ONE QUERY: a write that commits while a slow read runs never produces a torn count (snapshot isolation or serialization, said which, for this pyoxigraph)', { skip: SKIP, timeout: 600000 }, async () => {
   const ver = spawnSync(PY_FOR_S3, ['-c', 'import pyoxigraph; print(pyoxigraph.__version__)'], { encoding: 'utf8' }).stdout.trim();
   const sd = await seedOnce();
-  const store = fs.mkdtempSync(path.join(os.tmpdir(), 'r44s3-')); fs.cpSync(sd.store, store, { recursive: true });
+  await withOwned(async (own) => {
+  const store = own.dir('r44s3-'); fs.cpSync(sd.store, store, { recursive: true });
   let exec = null;
   const CW = '<https://schema.org/CreativeWork>';
   const READ = `SELECT (COUNT(*) AS ?n) WHERE { ?a a ${CW} . ?b a ${CW} . FILTER(STRLEN(CONCAT(STR(?a), STR(?b))) > 0) }`;
   const count = async () => { const t = performance.now(); const r = await fetch(`${exec.baseUrl}/query`, { method: 'POST', body: READ, signal: AbortSignal.timeout(120000) }); const j = await r.json(); return { n: Number(j.results.bindings[0].n.value), ms: performance.now() - t }; };
-  try {
-    exec = await startExecutorOnCopy({ store, datasetId: DSID });
+  {
+    exec = await startExecutorOnCopy({ store, datasetId: DSID }); own.adopt(() => killExecutor(exec));
     const alone = await count();
     assert.ok(alone.ms >= 800, `PRECONDITION: the slow read must be slow enough for a write to land inside it (${Math.round(alone.ms)} ms alone, ${alone.n} rows)`);
     let have = alone.n; const rounds = []; assert.equal(have, sd.N * sd.N, 'PRECONDITION: the read counts the full cross product before any write');
@@ -252,5 +254,6 @@ test('S3 SNAPSHOT WITHIN ONE QUERY: a write that commits while a slow read runs 
       rounds.push(`${round}: read ${got.n === before ? 'BEFORE' : 'AFTER'} (${Math.round(got.ms)} ms), ${mechanism}`); have = after;
     }
     console.log(`S3 pyoxigraph ${ver}; ${rounds.join(' | ')}`);
-  } finally { if (exec) await killExecutor(exec); rmTemp(store); }
+  }
+  });
 });
