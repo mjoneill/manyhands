@@ -32,7 +32,8 @@ for (const file of args) {
   try {
     const env = { ...process.env, TMPDIR: tmp }; delete env.NODE_TEST_CONTEXT;
     let tap = '';
-    const child = spawn(process.execPath, ['--test', path.resolve(ROOT, file)], { cwd: ROOT, env, stdio: ['ignore', 'pipe', 'ignore'] });
+    const child = spawn(process.execPath, ['--test', '--test-reporter=tap', path.resolve(ROOT, file)],   // the counts below are read from TAP; a piped default reporter is not TAP on every node version
+    { cwd: ROOT, env, stdio: ['ignore', 'pipe', 'ignore'] });
     child.stdout.on('data', (d) => { tap += d; });
     let peak = 0; const timer = setInterval(() => { peak = Math.max(peak, entries(tmp).length); }, 200);
     const code = await Promise.race([new Promise((r) => child.once('exit', (c) => r(c))), sleep(boundMs).then(() => 'TIMEOUT')]);
