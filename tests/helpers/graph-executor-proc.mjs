@@ -21,12 +21,22 @@ export const tmpStore = (prefix = 'lg-') => fs.mkdtempSync(path.join(os.tmpdir()
  * the promise rejects: the caller never received a handle, so nothing else can clean it up, and its RocksDB lock must be released before anyone reopens the store.
  * A real executor prints its ready line in a second or two; 15 s is well over that and under the #1670 rows' 20 s outer bound.
  */
-export function startExecutor({ store, datasetId, create = false, port = 0, readyTimeoutMs = 15_000, extraArgs = [] }) {
-  const args = [EXEC, '--store', store, '--port', String(port), '--dataset-id', datasetId];
+export function startExecutor({ store, datasetId, create = false, port = 0, readyTimeoutMs = 15_000, extraArgs = [], stdin = 'ignore' }) {
+  const args = ['--store', store, '--port', String(port), '--dataset-id', datasetId];
   if (create) args.push('--create');
   args.push(...extraArgs);
+  return spawnExecutor(args, { readyTimeoutMs, stdin });
+}
+
+/**
+ * #1671 — the same startup contract as startExecutor, for a caller that builds its own executor arguments (everything after executor.py).
+ * `stdin: 'pipe'` keeps the executor's stdin open for its whole life, which `--exit-on-stdin-eof` needs (with 'ignore' that flag exits at once);
+ * it also means the executor dies with the test process. An exit before the ready line rejects with an Error whose message contains
+ * `exited <code>: <stderr>` and which carries `.code` and `.stderr`, so a test that expects a refused start can assert on either.
+ */
+export function spawnExecutor(args, { readyTimeoutMs = 15_000, stdin = 'ignore' } = {}) {
   return new Promise((resolve, reject) => {
-    const p = spawn(PY, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const p = spawn(PY, [EXEC, ...args], { stdio: [stdin, 'pipe', 'pipe'] });
     let out = '', err = '', done = false;
     const fail = (e) => {
       if (done) return; done = true; clearTimeout(timer);
@@ -47,7 +57,7 @@ export function startExecutor({ store, datasetId, create = false, port = 0, read
     });
     p.stderr.on('data', (d) => { err += d; });
     p.on('error', (e) => fail(e));
-    p.on('exit', (code, sig) => { if (!done) { done = true; clearTimeout(timer); reject(new Error(`executor exited ${code ?? sig}: ${err}`)); } });
+    p.on('exit', (code, sig) => { if (!done) { done = true; clearTimeout(timer); reject(Object.assign(new Error(`executor exited ${code ?? sig}: ${err}`), { code, stderr: err })); } });
   });
 }
 
