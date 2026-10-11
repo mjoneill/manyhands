@@ -13,7 +13,9 @@
  * ⛔ SECRETS. Reading another process's environment means reading whatever credentials it holds. It is read for exactly
  * one thing, whether this run's token is one of its entries (/proc on Linux; scripts/proc-env-owned.py, which returns
  * pids only, on macOS), and argv only for this folder's path. Nothing read is ever printed, logged or written.
- * Diagnostics name a process by pid and executable name only; never its argv, never its environment.
+ * Diagnostics name a process by pid, executable name and parent pid, and, for a process that is not ours, the test file
+ * whose own folder it uses, found by testing the runner's own list of folders against it; never its argv, never its
+ * environment, never text cut out of either.
  *
  * Limits, stated: a process that holds the folder open without naming it in its argv is not seen (no lsof); a runner
  * killed with SIGKILL runs none of this and leaves one identifiable `manyhands-suite.<pid>.*` folder; paths outside
@@ -48,6 +50,11 @@ const alive = (pid) => {
 /** pid → executable name, for diagnostics. Never the argv. */
 function exeName(pid) {
   try { return path.basename(execFileSync('ps', ['-o', 'comm=', '-p', String(pid)], { encoding: 'utf8' }).trim()) || '?'; } catch { return '?'; }
+}
+
+/** pid → parent pid, for diagnostics; '?' when it cannot be read. */
+function parentOf(pid) {
+  try { return execFileSync('ps', ['-o', 'ppid=', '-p', String(pid)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() || '?'; } catch { return '?'; }
 }
 
 /**
@@ -182,14 +189,46 @@ export function teardown(suite, { root }) {
   for (const pid of undecided) lines.push(`# tmp: ⛔ process pid ${pid} (${exeName(pid)}): ownership could not be decided from its record: NOT killed`);
   for (const pid of stubborn) lines.push(`# tmp: ⛔ owned process pid ${pid} (${exeName(pid)}) still alive after ${SETTLE_MS} ms of kills`);
 
-  // 2. NOT OURS, judged on the LAST look: a process that names the folder in its argv but holds no token in its
-  // environment. Never killed.
+  // 2. NOT OURS: a process that names the folder in its argv but holds no token in its environment. Never killed and
+  // never claimed. One may still be exiting when first seen (a test that kills its own processes without waiting for
+  // them), so look again until each is gone or SETTLE_MS passes. One that leaves is still REPORTED, as observed then
+  // exited; one still there, or a look that could not be taken, fails the run and keeps the folder.
   let real = suite.dir;
   try { real = fs.realpathSync(suite.dir); } catch { /* keep the given path */ }
-  const strangers = [...view.argv]
-    .filter(([pid, text]) => pid !== self && !view.owned.has(pid) && (text.includes(suite.dir) || text.includes(real)))
-    .map(([pid]) => pid);
-  for (const pid of strangers) lines.push(`# tmp: ⛔ process pid ${pid} (${exeName(pid)}) is not this run's but uses its folder: NOT killed`);
+  const usesFolder = (text) => text.includes(suite.dir) || text.includes(real);
+  // which file's folder a process uses: the runner's own folders tested against it, never a path read out of its argv
+  const whose = (text) => {
+    for (const [file, dir] of suite.files) {
+      let r = dir;
+      try { r = fs.realpathSync(dir); } catch { /* keep the given path */ }
+      if (text.includes(dir + path.sep) || text.includes(r + path.sep) || text.endsWith(dir) || text.endsWith(r)) return `${file}'s folder`;
+    }
+    return 'the suite folder';
+  };
+  const seen = new Map();
+  const strangersIn = (v) => {
+    const now = [];
+    for (const [pid, text] of v.argv) {
+      if (pid === self || v.owned.has(pid) || !usesFolder(text) || !alive(pid)) continue;
+      if (!seen.has(pid)) seen.set(pid, { exe: exeName(pid), ppid: parentOf(pid), where: whose(text), at: Date.now() });
+      now.push(pid);
+    }
+    return now;
+  };
+  let strangers = strangersIn(view);
+  let lookFailed = false;
+  const recheckUntil = Date.now() + SETTLE_MS;
+  while (strangers.length && Date.now() < recheckUntil) {
+    sleepSync(100);
+    const v = inspectProcesses(marker);
+    if (v === null) { lookFailed = true; break; }
+    strangers = strangersIn(v);
+  }
+  for (const [pid, s] of seen) {
+    if (strangers.includes(pid)) lines.push(`# tmp: ⛔ process pid ${pid} (${s.exe}, parent ${s.ppid}) is not this run's but uses ${s.where}: NOT killed`);
+    else lines.push(`# tmp: process pid ${pid} (${s.exe}, parent ${s.ppid}) was not this run's and used ${s.where}: observed, then exited (not killed)`);
+  }
+  if (lookFailed) lines.push(`# tmp: ⛔ could not re-inspect processes while ${strangers.length} not this run's still used the folder`);
 
   // 3. COUNT, per file, then the ratchet.
   const baseline = loadBaseline(root);
@@ -212,7 +251,7 @@ export function teardown(suite, { root }) {
   }
 
   // 4. REMOVE — only when nothing we cannot account for still holds the folder.
-  if (strangers.length || stubborn.length || undecided.length) {
+  if (strangers.length || lookFailed || stubborn.length || undecided.length) {
     failed = true;
     lines.push(`# tmp: ⛔ folder RETAINED, not removed: ${suite.dir} (${entries} entries, ${bytes} bytes inside the file folders)`);
   } else {
