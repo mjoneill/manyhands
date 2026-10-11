@@ -109,7 +109,11 @@ traversalTest('a nonexistent path returns 404', async ({ baseUrl }) => {
 });
 
 traversalTest('a raw ../ escape to a system path is blocked (403)', async ({ baseUrl }) => {
-  const res = await rawGet(baseUrl, '/../../../../../../../etc/hosts');
+  // #1672 — enough `..` to reach / from any static root (resolution clamps at /). Seven only worked while the root sat
+  // exactly seven levels deep; under the runner's per-file TMPDIR it landed on a path that does not exist, which the
+  // server answers 404 BEFORE its containment check, and the row silently stopped testing an escape.
+  assert.ok(fs.existsSync('/etc/hosts'), 'precondition: the escape target /etc/hosts exists on this machine, so a 404 cannot pass for a refusal');
+  const res = await rawGet(baseUrl, `/${'../'.repeat(40)}etc/hosts`);
   assert.equal(res.status, 403);
 });
 
