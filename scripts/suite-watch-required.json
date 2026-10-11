@@ -55,6 +55,7 @@
   "tests/graph-executor-epoch-1559.test.mjs",
   "tests/graph-executor-latch-1559.test.mjs",
   "tests/graph-executor-latch-review-1559.test.mjs",
+  "tests/graph-executor-proc-startup-1670.test.mjs",
   "tests/graph-executor-supervisor-1559.test.mjs",
   "tests/graph-executor.test.mjs",
   "tests/graph-post-discovery-r3-badge.test.mjs",
