@@ -4,6 +4,8 @@ import { spawn } from 'node:child_process';
 import {
   appendVerdict, ledgerPath, ledgerScope, newRunId, treeState,
 } from './verdict-ledger.mjs';
+import fs from 'node:fs';
+import { createSuiteTmp, fileTmp, teardown, TOKEN_VAR } from './suite-tmp.mjs';
 
 const files = process.argv.slice(2);
 const startedAt = Date.now();
@@ -44,6 +46,20 @@ let testNumber = 0;
 // period. This handler is the half we can own.
 const live = new Set();
 
+// #1672 — this run owns its temp space: one folder under the outer TMPDIR, one sub-folder per test file, a token on
+// every process it starts. teardown() settles the process tree, reports what each file left and removes the folder.
+// `run-tests.sh` reads our pid from RUN_TESTS_PIDFILE so a SIGTERM to it reaches us (a shell does not forward signals).
+const suite = createSuiteTmp();
+if (process.env.RUN_TESTS_PIDFILE) { try { fs.writeFileSync(process.env.RUN_TESTS_PIDFILE, String(process.pid)); } catch { /* the runner then cannot forward a signal; the run itself is unaffected */ } }
+let tornDown = false;
+function settleTmp() {
+  if (tornDown) return false;
+  tornDown = true;
+  const { failed: tmpFailed, lines } = teardown(suite, { root: process.cwd() });
+  for (const line of lines) process.stdout.write(`${line}\n`);
+  return tmpFailed;
+}
+
 function reapAll() {
   for (const pid of live) {
     try { process.kill(-pid, 'SIGKILL'); } catch { /* already gone */ }
@@ -54,6 +70,7 @@ function reapAll() {
 for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
   process.on(sig, () => {
     reapAll();
+    settleTmp();   // #1672 — the same ordered teardown on a signal: settle, report, remove
     // Exit non-zero and by signal convention: we did not complete the run.
     process.exit(128 + (sig === 'SIGINT' ? 2 : sig === 'SIGHUP' ? 1 : 15));
   });
@@ -145,6 +162,7 @@ function record() {
 }
 
 function finish() {
+  if (settleTmp()) failed = true;   // #1672 — a new leak or a retained folder is part of the verdict
   emitSummary();
   record();
   process.exitCode = failed || totals.fail > 0 ? 1 : 0;
@@ -161,6 +179,8 @@ function launch() {
     const child = spawn(process.execPath, ['--test', '--test-reporter=tap', file], {
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: true,
+      // #1672 — the file's own TMPDIR inside this run's folder, and the run's token on everything it starts
+      env: { ...process.env, TMPDIR: fileTmp(suite, file), [TOKEN_VAR]: suite.token },
     });
     live.add(child.pid); // #998 — we are the only process that knows this pgid
     let stdout = '';

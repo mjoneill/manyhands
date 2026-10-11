@@ -181,6 +181,17 @@ async function startOnPort({ port: explicitPort, allocatePort = freePort, readyP
  * Start an isolated REST server (server.js) on a free port with a temp board
  * file. Returns { baseUrl, boardFile, readBoardFile, stop }.
  */
+// #1672 — a board directory is kept after stop() on purpose (tests read server artifacts from it afterwards, see
+// stop() below), so it is removed when this test file's PROCESS exits, after every test in the file is done with it.
+// Synchronous, because 'exit' handlers cannot wait. The suite runner's own folder is the backstop for a killed process.
+const boardDirsToRemove = new Set();
+function ownBoardDirAtExit(dir) {
+  if (boardDirsToRemove.size === 0) {
+    process.once('exit', () => { for (const d of boardDirsToRemove) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ } } });
+  }
+  boardDirsToRemove.add(dir);
+}
+
 export async function startRestServer({ board, boardFile: sharedBoardFile, staticDir, port, mcpNotifyUrl = '', env: extraEnv, allocatePort } = {}) {
   const explicitPort = port;
   // #988 — the board file gets its OWN directory, not a bare file in the shared
@@ -199,6 +210,7 @@ export async function startRestServer({ board, boardFile: sharedBoardFile, stati
   let boardFile = sharedBoardFile;
   if (!boardFile) {
     const boardDir = fs.mkdtempSync(path.join(os.tmpdir(), 'scrum-test-board-'));
+    ownBoardDirAtExit(boardDir);
     boardFile = path.join(boardDir, 'board.json');
     fs.writeFileSync(boardFile, JSON.stringify(board ?? makeBoardFixture(), null, 2));
   }
