@@ -8,6 +8,7 @@
  *   E2 SILENT   the stub never prints and never exits: the helper must settle (reject) within 20 s, and leave no surviving process. PRE-REGISTERED 2026-10-11, before any run: 20 s is the outer bound on this row, NOT the
  *               helper's own timeout (the fix chooses that; a real executor prints its ready line in about a second or two, so a helper timeout well under 20 s and well over real startup is the intent)
  *   E4 ARGS     the arguments the executor is started with: the copy helper adds --promote-epoch and never --create; the plain helper adds neither (a delegation that drops the flag would otherwise be invisible to a stub that ignores arguments)
+ *   E5 NOT READY  a first line that parses as JSON but is not a ready line (null, [], {}, a string port, port 0) must reject and leave no process
  *   E3 CONTROL  the stub's first line is a valid ready line: the helper resolves with that port and a live process (so the seam works and a fix cannot break the healthy path)
  */
 import { test } from 'node:test';
@@ -34,18 +35,19 @@ echo "$@" > "$STUB_ARGS_FILE"
 case "$STUB_MODE" in
   junk) echo "this first line is not json" ;;
   ready) echo '{"port": 59999}' ;;
+  line) printf '%s\n' "$STUB_LINE" ;;
 esac
 while true; do sleep 1; done
 `;
 
 /** Run startExecutor against a stub in a child process. Resolves { outcome, text, stubPid, ms } where outcome is RESOLVED | REJECTED | NEVER_SETTLED (the child had to be killed). */
-async function runStartup(mode, { settleWithinMs, helper }) {
+async function runStartup(mode, { settleWithinMs, helper, line = '' }) {
   return withOwned(async (own) => {
     const dir = own.dir('r44u-1670-');
     const stub = path.join(dir, 'python-stub'); fs.writeFileSync(stub, STUB, { mode: 0o755 });
     const pidFile = path.join(dir, 'stub.pid'); const argsFile = path.join(dir, 'stub.args');
     const script = `import { ${helper} } from ${JSON.stringify(HELPERS[helper].file)};\ntry { const x = await ${HELPERS[helper].call(path.join(dir, 'store'))}; console.log('RESOLVED ' + x.port); } catch (e) { console.log('REJECTED ' + String(e.message).slice(0, 100)); }\nprocess.exit(0);`;
-    const child = spawn(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, GRAPH_EXECUTOR_PYTHON: stub, STUB_MODE: mode, STUB_PID_FILE: pidFile, STUB_ARGS_FILE: argsFile }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, GRAPH_EXECUTOR_PYTHON: stub, STUB_MODE: mode, STUB_PID_FILE: pidFile, STUB_ARGS_FILE: argsFile, STUB_LINE: line }, stdio: ['ignore', 'pipe', 'pipe'] });
     own.adopt(async () => { try { child.kill('SIGKILL'); } catch { /* gone */ } });
     own.adopt(async () => { try { const pid = Number(fs.readFileSync(pidFile, 'utf8')); if (pid) process.kill(pid, 'SIGKILL'); } catch { /* never started or gone */ } });
     let text = ''; child.stdout.on('data', (d) => { text += d; }); child.stderr.on('data', (d) => { text += d; });
@@ -104,5 +106,21 @@ for (const [tag, helper] of [['A', 'startExecutor'], ['B', 'startExecutorOnCopy'
       if (helper === 'startExecutorOnCopy') { assert.ok(flag('--promote-epoch'), `a COPY must be started with --promote-epoch, or the executor refuses to serve it (got ${a.join(' ')})`); assert.ok(!flag('--create'), 'and never with --create'); }
       else { assert.ok(!flag('--promote-epoch'), `the plain helper must NOT promote an epoch (got ${a.join(' ')})`); assert.ok(!flag('--create'), 'create is off unless asked for'); }
     } finally { if (pid && alive(pid)) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } } }
+  });
+
+  test(`${tag} E5 NOT READY: ${helper} rejects, and kills the process, on a first line that PARSES as JSON but is not a ready line`, { timeout: 120000 }, async () => {
+    // found in review of the #1670 fix: a ready line that is valid JSON but not a ready line resolved as if healthy ([] {} a string port port 0) or threw uncaught (null), and left the process running
+    const LINES = ['null', '[]', '{}', '{"port":"x"}', '{"port":0}'];
+    const bad = [];
+    for (const line of LINES) {
+      let pid = 0;
+      try {
+        const r = await runStartup('line', { settleWithinMs: 15000, helper, line }); pid = r.stubPid;
+        if (r.outcome !== 'REJECTED') bad.push(`${line}: ${r.outcome === 'RESOLVED' ? 'RESOLVED as if healthy' : `${r.outcome} (${r.text.slice(0, 60)})`}`);
+        else if (r.survived) bad.push(`${line}: rejected but the process survived`);
+        assert.ok(pid > 0, `CONTROL: the stub really started for ${line}`);
+      } finally { if (pid && alive(pid)) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } } }
+    }
+    assert.deepEqual(bad, [], `every parsable-but-not-ready first line must reject and leave no process: ${bad.join(' | ')}`);
   });
 }
