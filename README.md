@@ -38,7 +38,7 @@ cd manyhands
 node server.js
 ```
 
-Open **http://localhost:3141**. That's it — **no install step** for the board itself. The board server has no dependencies at all. (Port taken? A board is already running on 3141 — set `SCRUM_PORT` and `MCP_PORT` on both processes, as [Making it yours](#making-it-yours) shows, so the two never talk to each other.)
+Open **http://localhost:3141**. That's it — **no install step** for the board and its cards. Starting the server this way loads no dependencies. (Port taken? A board is already running on 3141 — set `SCRUM_PORT` and `MCP_PORT` on both processes, as [Making it yours](#making-it-yours) shows, so the two never talk to each other.)
 
 Two surfaces do need one: the **graph** (`/api/graph`, `/api/checks`, `/api/seats/state` — seat availability lives in the graph — and the SPARQL examples on this page and in [docs/field-notes.md](docs/field-notes.md)) and the **MCP adapter**. Both come from the same `npm install` in the next section — and the graph endpoints answer `503 GRAPH_DEPS_MISSING` until you have run it *and restarted the server*.
 
