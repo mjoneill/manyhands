@@ -7,8 +7,7 @@ import http from 'node:http';
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { makeBoardFixture, startRestServer } from './harness.mjs';
-import { spawn } from 'node:child_process';
-import { HAVE_PY, tmpStore, startExecutor, killExecutor, EXEC, PY } from './graph-executor-proc.mjs';
+import { HAVE_PY, tmpStore, startExecutor, killExecutor } from './graph-executor-proc.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const MIGRATE = path.join(HERE, '..', '..', 'scripts', 'migrate-cards-1598.mjs');
@@ -136,12 +135,7 @@ export async function world(board, body) {
 }
 
 /** Start the executor on a COPY of a seeded store: since #1638 an executor refuses a copied store unless it is told to promote it (--promote-epoch). Same contract as startExecutor otherwise. */
+// #1670 — delegates to startExecutor, so a failed startup (a bad ready line, no ready line) kills the process before rejecting, as there
 export function startExecutorOnCopy({ store, datasetId }) {
-  return new Promise((resolve, reject) => {
-    const p = spawn(PY, [EXEC, '--store', store, '--port', '0', '--dataset-id', datasetId, '--promote-epoch'], { stdio: ['ignore', 'pipe', 'pipe'] });
-    let out = ''; let err = ''; let done = false;
-    p.stdout.on('data', (d) => { out += d; if (!done && out.includes('\n')) { done = true; try { const ready = JSON.parse(out.split('\n')[0]); resolve({ proc: p, ready, port: ready.port, baseUrl: `http://127.0.0.1:${ready.port}` }); } catch (e) { reject(e); } } });
-    p.stderr.on('data', (d) => { err += d; });
-    p.on('exit', (code, sig) => { if (!done) { done = true; reject(new Error(`executor exited ${code ?? sig}: ${err}`)); } });
-  });
+  return startExecutor({ store, datasetId, extraArgs: ['--promote-epoch'] });
 }
