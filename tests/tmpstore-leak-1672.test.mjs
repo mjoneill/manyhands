@@ -65,6 +65,13 @@
  *                        not a fixed delay, so a loaded machine cannot make it miss the window), so the TERM lands after the check and before the wait. Required: the runner exits within 5 s,
  *                        nothing survives, nothing is left. If the marker is not found the row FAILS (it never passes without having exercised the window). RT0 is its control, and the reason RT can be
  *                        trusted: the same transform on a MODEL of the earlier structure (check, then a blocking `wait`) must HANG, so the pause does expose the defect.
+ *   RU / RU2  an owned child that appears DURING the stranger wait   a token-less process naming a store under the folder keeps the runner waiting for it to go (RS). A copy of the runner's scripts is
+ *                        made for the row and ONE line is inserted in its suite-tmp.mjs, just before `const recheckUntil = Date.now() + SETTLE_MS;` (the entry to the stranger wait): it writes a handshake
+ *                        file. The stranger polls for that file, then 0.2 s later starts an OWNED child (token passed in as an argument, made the child's whole environment) and exits ~1 s after. So the owned
+ *                        child appears AFTER the runner has entered the stranger wait and the stranger is gone before the removal verdict. If the insertion marker is absent the row FAILS loudly.
+ *                        RU asserts SAFETY (as RN does): the child is gone when the runner exits, or the run failed and the folder was kept. RU2 pins the DESIGN (report, do not kill): the child is ALIVE when the
+ *                        runner exits, the run FAILED, and the folder was RETAINED. Both exist because the two reviewers' instructions crossed; either can be deleted. The control: the same handshake on
+ *                        3381d1a (owned lists read before the wait) must fail both.
  *   RL  inspection fails   the runner cannot list processes (a `ps` that exits 1 is first on PATH): it cannot establish that the folder is unused, so the run FAILS, the suite folder is RETAINED and named,
  *                        and the output says inspection failed. macOS only: on Linux the runner reads /proc, which a row cannot make fail, so the row is skipped there with that reason.
  *
@@ -195,6 +202,17 @@ test('transient', () => {
   const c = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 600)', '--', '--store', s], { stdio: 'ignore', detached: true, env: { PATH: process.env.PATH } });
   fs.writeFileSync(process.env.TRANSIENT_PID_FILE, String(c.pid)); c.unref();
 });\n`,
+  // a token-less python process that names a store under TMPDIR. It waits for the HANDSHAKE FILE the row's doctored copy of the runner writes on entering the stranger wait, then 0.2 s later starts an
+  // OWNED child (token passed in as an argument, made the child's whole environment) and exits ~1 s after that
+  'lateowned.test.mjs': `import { test } from 'node:test'; import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path'; import { spawn } from 'node:child_process';
+test('lateowned', () => {
+  const tok = process.env.MANYHANDS_SUITE_RUN;
+  if (!tok) throw new Error('CONTROL: the file\\'s own environment carries no MANYHANDS_SUITE_RUN token');
+  const store = fs.mkdtempSync(path.join(os.tmpdir(), 'fx-lateowned-'));
+  const py = 'import os, sys, time\\ntok, node, childfile, store, waitfile = sys.argv[1:6]\\nt0 = time.time()\\nwhile not os.path.exists(waitfile) and time.time() - t0 < 8:\\n    time.sleep(0.01)\\ntime.sleep(0.2)\\npid = os.fork()\\nif pid == 0:\\n    os.execve(node, [node, "-e", "setTimeout(() => {}, 300000)"], {"MANYHANDS_SUITE_RUN": tok})\\nopen(childfile, "w").write(str(pid))\\ntime.sleep(1.0)';
+  const p = spawn('/usr/bin/python3', ['-c', py, tok, process.execPath, process.env.LATE_CHILD_PID_FILE, store, process.env.RU_WAIT_FILE], { stdio: 'ignore', detached: true, env: {} });
+  fs.writeFileSync(process.env.LATE_PARENT_PID_FILE, String(p.pid)); p.unref();
+});\n`,
   // keeps the runner alive past the child's read
   'holder.test.mjs': `import { test } from 'node:test'; test('holder', async () => { await new Promise((r) => setTimeout(r, 5000)); });\n`,
   'killed.test.mjs': `import { test } from 'node:test'; import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path';
@@ -225,16 +243,16 @@ async function withWorld(body) {
     // a survivor the runner failed to reap is killed here, by the pid its fixture recorded, never by pattern
     own.adopt(async () => {
       const pids = [];
-      for (const n of ['survivor.pid', 'hang-survivor.pid', 'stranger.pid', 'hang.pid', 'impostor.pid', 'envimpostor.pid', 'spawner.pid', 'emptyargv0.pid', 'zombie-parent.pid', 'zombie-child.pid', 'transient.pid']) {
+      for (const n of ['survivor.pid', 'hang-survivor.pid', 'stranger.pid', 'hang.pid', 'impostor.pid', 'envimpostor.pid', 'spawner.pid', 'emptyargv0.pid', 'zombie-parent.pid', 'zombie-child.pid', 'transient.pid', 'late-parent.pid', 'late-child.pid']) {
         try { const pid = Number(fs.readFileSync(path.join(res, n), 'utf8')); pids.push(pid); process.kill(pid, 'SIGKILL'); } catch { /* none, or gone */ }
       }
       const left = await waitGone(pids); if (left.length) stragglers.push(...left);
     });
     /** Start the runner on `files` with TMPDIR = the outer directory. Resolves a handle; `done` settles when the runner has exited. */
-    const start = (files, extraEnv = {}) => {
+    const start = (files, extraEnv = {}, runnerPath = RUNNER) => {
       const env = { ...process.env, TMPDIR: outer, RUN_TESTS_CONCURRENCY: '2', RUN_TESTS_FILE_TIMEOUT_MS: '90000', ...extraEnv };
       for (const k of ['NODE_TEST_CONTEXT', 'RUN_TESTS_LEDGER', 'RUN_TESTS_RUN_ID', 'RUN_TESTS_PARENT_RUN_ID']) delete env[k];
-      const child = spawn('sh', [RUNNER, ...files], { cwd: ROOT, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+      const child = spawn('sh', [runnerPath, ...files], { cwd: ROOT, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
       let output = ''; child.stdout.on('data', (d) => { output += d; }); child.stderr.on('data', (d) => { output += d; });
       // the whole group by the captured pid; the pipes are destroyed too, because an orphan that kept them open would otherwise keep THIS process alive after the row has ended
       own.adopt(async () => {
@@ -591,11 +609,17 @@ async function termInsidePause(pw, exitBoundMs) {
   const h = pw.run();
   for (let t = 0; t < 15000 && !fs.existsSync(pw.gapFile); t += 10) await sleep(10);
   assert.ok(fs.existsSync(pw.gapFile), 'CONTROL: the script reached the marked gap (it created the "gap reached" file); if not, the row exercised nothing');
-  const stubPidFile = pw.left().find((n) => n.startsWith('run-tests-pid.'));
+  // the stub's pid is read BEFORE the TERM, while the file still exists (the runner removes it on the way out): a survivor check that reads it afterwards can only ever see "no file" and pass
+  let stubPid = null;
+  for (let t = 0; t < 5000 && !stubPid; t += 20) {
+    const name = pw.left().find((n) => n.startsWith('run-tests-pid.'));
+    const v = name ? Number(fs.readFileSync(path.join(pw.outer, name), 'utf8').trim()) : NaN;
+    if (v > 0) stubPid = v; else await sleep(20);
+  }
+  assert.ok(stubPid > 0 && alive(stubPid), 'CONTROL: the stub node recorded its pid and is running before the TERM is sent');
   try { process.kill(h.child.pid, 'SIGTERM'); } catch { /* gone */ }
   const r = await finish(h, exitBoundMs);
   await sleep(300);
-  const stubPid = stubPidFile && fs.existsSync(path.join(pw.outer, stubPidFile)) ? Number(fs.readFileSync(path.join(pw.outer, stubPidFile), 'utf8')) : null;
   return { r, h, stubPid, left: pw.left() };
 }
 
@@ -604,6 +628,23 @@ test('RT0 CONTROL: the same pause applied to the EARLIER structure (check, then 
   assert.equal(r.code, 'TIMEOUT', 'the earlier structure does not exit within 4 s of a TERM that lands in the pause: a lost wakeup. (If this ever passes, the model no longer exposes the window and RT proves nothing.)');
 }, withPauseAtMarker(OLD_STRUCTURE_MODEL)));
 
+/** Remove the TERM forwarding and the wait-for-the-pipeline loop from a copy of the script, so the runner can exit while the stub node lives. Throws if either anchor is missing. */
+function withoutForwarding(text) {
+  const fwd = /^\s*if \[ -s "\$pidfile" \]; then kill -TERM "\$\(cat "\$pidfile"\)" 2>\/dev\/null; fi\s*$/m;
+  const waitLoop = /^\s*while kill -0 "\$pipeline" 2>\/dev\/null; do wait "\$pipeline" 2>\/dev\/null; done\s*$/m;
+  if (!fwd.test(text)) throw new Error('ANCHOR NOT FOUND: the TERM forwarding line');
+  if (!waitLoop.test(text)) throw new Error('ANCHOR NOT FOUND: the wait-for-the-pipeline loop');
+  return text.replace(fwd, '    : # RT2: forwarding removed').replace(waitLoop, '    : # RT2: wait removed');
+}
+test('RT2 CONTROL: with the TERM forwarding and the wait removed the runner exits and the stub node SURVIVES, so the survivor check can fail', { timeout: 60000 }, () => {
+  const patched = withPauseAtMarker(withoutForwarding(fs.readFileSync(RUNNER, 'utf8')));
+  return pausedWorld(async (pw) => {
+    const { r, stubPid } = await termInsidePause(pw, 8000);
+    assert.notEqual(r.code, 'TIMEOUT', 'the doctored runner exits (it no longer waits for anything)');
+    assert.equal(alive(stubPid), true, `the stub node ${stubPid} is still running: a survivor the RT check would catch`);
+  }, patched);
+});
+
 test('RT a TERM that lands after the flag check and before the wait is still acted on: exit within 5 s, no survivors, no leftovers', { timeout: 60000 }, () => {
   const real = fs.readFileSync(RUNNER, 'utf8');
   const patched = withPauseAtMarker(real);   // throws (the row fails loudly) when the marker is absent
@@ -611,10 +652,46 @@ test('RT a TERM that lands after the flag check and before the wait is still act
   return pausedWorld(async (pw) => {
     const { r, stubPid, left } = await termInsidePause(pw, 5000);
     assert.notEqual(r.code, 'TIMEOUT', 'the runner exits within 5 s of a TERM that arrived during the check-to-wait gap');
-    assert.ok(stubPid === null || !alive(stubPid), `no survivor: the stub node ${stubPid} is gone`);
+    assert.equal(alive(stubPid), false, `no survivor: the stub node ${stubPid}, whose pid was read before the TERM, is gone`);
     assert.deepEqual(left, [], 'nothing is left in the outer TMPDIR (the runner\'s own files included)');
   }, patched);
 });
+
+/** A copy of the runner's scripts directory with ONE line inserted into its suite-tmp.mjs, just before the stranger wait: it writes $RU_WAIT_FILE. Throws if the marker is not there exactly once. */
+function runnerWithHandshake(w) {
+  const root = path.join(w.base, 'uni-ru'); fs.mkdirSync(path.join(root, 'tests'), { recursive: true });
+  fs.cpSync(path.join(ROOT, 'scripts'), path.join(root, 'scripts'), { recursive: true });
+  const file = path.join(root, 'scripts', 'suite-tmp.mjs');
+  const text = fs.readFileSync(file, 'utf8');
+  const marker = 'const recheckUntil = Date.now() + SETTLE_MS;';
+  if (text.split(marker).length !== 2) throw new Error(`MARKER NOT FOUND exactly once in suite-tmp.mjs: ${marker}`);
+  fs.writeFileSync(file, text.replace(marker, `try { fs.writeFileSync(process.env.RU_WAIT_FILE, String(Date.now())); } catch { /* RU handshake */ }\n  ${marker}`));
+  return path.join(root, 'scripts', 'run-tests.sh');
+}
+async function lateOwnedRun(w) {
+  const runner = runnerWithHandshake(w);
+  const parentFile = path.join(w.res, 'late-parent.pid'); const childFile = path.join(w.res, 'late-child.pid'); const waitFile = path.join(w.res, 'ru-wait');
+  const h = w.start([w.f('lateowned.test.mjs')], { LATE_PARENT_PID_FILE: parentFile, LATE_CHILD_PID_FILE: childFile, RU_WAIT_FILE: waitFile, ...w.baseline([w.f('lateowned.test.mjs')]) }, runner);
+  const r = await finish(h, 90000);
+  assert.notEqual(r.code, 'TIMEOUT', `the runner ends (output tail: ${h.out().slice(-300)})`);
+  assert.ok(fs.existsSync(waitFile), 'CONTROL: the runner reached the stranger wait (the handshake file was written)');
+  assert.ok(fs.existsSync(childFile), `CONTROL: the stranger started its owned child (output tail: ${h.out().slice(-300)})`);
+  assert.ok(fs.statSync(childFile).mtimeMs >= fs.statSync(waitFile).mtimeMs, 'CONTROL, ordering: the owned child was started AFTER the runner entered the stranger wait');
+  const child = Number(fs.readFileSync(childFile, 'utf8'));
+  await sleep(500);
+  const kept = w.left().filter((n) => n.startsWith('manyhands-suite.'));
+  return { r, child, childAlive: alive(child), kept: kept.length === 1, out: h.out() };
+}
+test('RU an owned child that appears after the runner enters the stranger wait is not left alive beneath a deleted folder (safety)', { timeout: 120000 }, () => withWorld(async (w) => {
+  const o = await lateOwnedRun(w);
+  const safe = !o.childAlive || (o.r.code !== 0 && o.kept);
+  assert.equal(safe, true, `the owned child ${o.child} is alive after the runner exited and the run ${o.r.code === 0 ? 'PASSED' : 'failed'} with the suite folder ${o.kept ? 'kept' : 'removed'} (output tail: ${o.out.slice(-500)})`);
+}));
+test('RU2 the same child: reported, not killed. It is alive when the runner exits, the run FAILED and the folder was RETAINED (the design)', { timeout: 120000 }, () => withWorld(async (w) => {
+  const o = await lateOwnedRun(w);
+  assert.deepEqual({ childAlive: o.childAlive, runFailed: o.r.code !== 0, folderKept: o.kept }, { childAlive: true, runFailed: true, folderKept: true },
+    `the design is report-not-kill: a late owned child keeps the folder and fails the run (output tail: ${o.out.slice(-500)})`);
+}));
 
 const ON_MAC = process.platform === 'darwin';
 test('RL the runner cannot inspect processes: the run fails, the suite folder is retained and named, and the output says why', { timeout: 120000, skip: ON_MAC ? false : 'UNAVAILABLE: inspection failure can only be injected through `ps` on macOS; on Linux the runner reads /proc' }, () => withWorld(async (w) => {
