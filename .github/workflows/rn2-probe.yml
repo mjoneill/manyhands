@@ -13,12 +13,14 @@ permissions:
 env:
   PREREG: |
     ## How to read the first RN2 red (written BEFORE the run)
-    For the 4 survivors, the nested run's `# tmp:` lines say which of these happened:
-    - `still alive after N ms of kills` → STUBBORN: seen as owned, killed, still alive at the bound.
-    - `ownership could not be decided … NOT killed` → the runner could not read the process's environment (suspect, unverified: a child caught between fork and exec).
-    - `is not this run's but uses … NOT killed` → read as TOKENLESS (a stranger).
-    - no line naming the 4 → a GAP to investigate, NOT a cause.
-    A green across every job is a bounded sample at one sha, not proof the race is absent.
+    OBSERVATIONS to look for, about the survivors, in the nested run's `# tmp:` lines:
+    - `still alive after N ms of kills` naming them: STUBBORN, seen as owned, killed, still alive at the bound.
+    - `is not this run's but uses ... NOT killed` naming them: read as TOKENLESS (a stranger).
+    - no line naming them: a GAP to investigate, NOT a cause.
+    - (`ownership could not be decided` cannot appear on Linux: the Linux path never marks a process undecidable.)
+    HYPOTHESES (unverified, kept separate): on Linux an unreadable or empty /proc/<pid>/environ is silently
+    treated as NOT OWNED, so a child caught mid-exec could be read as tokenless (a stranger line) or skipped (no line).
+    A green across every job is a bounded sample at one sha, not proof the race is absent, and does not clear the hold.
 
 jobs:
   suite:
@@ -26,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         n: [1, 2, 3, 4, 5, 6]
     steps:
@@ -46,9 +48,9 @@ jobs:
   rn2-loop:
     name: RN2 alone x30 (${{ matrix.load }})
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 15
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         load: [quiet, burn]
     steps:
@@ -62,6 +64,7 @@ jobs:
         run: printf '%s\n' "$PREREG" >> "$GITHUB_STEP_SUMMARY"
       - name: RN2, 30 times, stopping at the first red
         run: |
+          trap 'pkill -x yes || true' EXIT
           if [ "${{ matrix.load }}" = burn ]; then
             for c in $(seq 1 "$(nproc)"); do (yes > /dev/null &) ; done
             echo "burners: $(nproc)"
