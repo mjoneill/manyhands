@@ -93,32 +93,46 @@ export const migrate = (boardFile, execUrl) => new Promise((resolve) => {
   execFile(process.execPath, [MIGRATE, '--board-data', boardFile, '--executor', execUrl, '--dataset', DSID, '--apply'], { timeout: 180000 }, (err, stdout, stderr) => resolve({ code: err ? (err.code ?? 1) : 0, out: `${stdout}${stderr}` }));
 });
 
+/**
+ * #1669 — ownership of everything a test acquires. `own.dir(prefix)` makes a temp directory and `own.adopt(fn)` registers a cleanup, each AT THE MOMENT it is acquired,
+ * so a failure half-way through setup still releases what was already taken. Cleanups run in reverse order, each on its own: one that throws never skips the rest, and the
+ * body's own error (if any) is the one that propagates. Nothing is removed that was not made through `own.dir`.
+ */
+export async function withOwned(body) {
+  const cleanups = [];
+  const own = {
+    dir(prefix) { const d = fs.mkdtempSync(path.join(os.tmpdir(), prefix)); cleanups.push(async () => { fs.rmSync(d, { recursive: true, force: true }); }); return d; },
+    adopt(fn) { cleanups.push(fn); },
+  };
+  try { return await body(own); } finally {
+    for (const fn of cleanups.reverse()) { try { await fn(); } catch (e) { console.error(`#1669 cleanup step failed (later steps still ran): ${e?.message ?? e}`); } }
+  }
+}
+
 /** A world: a real executor holding the board's cards, a counting proxy in front of it, and REST (cards unit ON) with the switch as asked. Restartable with a different switch on the SAME executor and board. */
 export async function world(board, body) {
-  const store = tmpStore('r44-store-');
-  const exec = await startExecutor({ store, datasetId: DSID, create: true });
-  const proxy = await startProxy(exec.baseUrl);
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'r44-board-')); const boardFile = path.join(dir, 'board.json');
-  fs.writeFileSync(boardFile, JSON.stringify(board, null, 2));
-  let rest = null;
-  const w = {
-    exec, proxy, boardFile,
-    async start({ ready = false } = {}) {
-      if (rest) await rest.stop();
-      rest = await startRestServer({ boardFile, env: { SCRUM_ROSTER_FILE: ROSTER_FILE, SCRUM_GRAPH_DATASET_ID: DSID, SCRUM_GRAPH_EXECUTOR_URL: proxy.url, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', SCRUM_GRAPH_UNIT_CARDS: '1', ...(ready ? { [READY_ENV]: 'executor' } : {}) } });
-      w.base = rest.baseUrl; w.rest = rest; return w;
-    },
-    async get(route) { const r = await fetch(`${w.base}${route}`, { signal: AbortSignal.timeout(40000) }); const text = await r.text(); let json = null; try { json = JSON.parse(text); } catch { /* not json */ } return { status: r.status, text, json }; },
-    async patch(id, b) { const r = await fetch(`${w.base}/api/cards/${id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ by: 'ada', ...b }), signal: AbortSignal.timeout(40000) }); return r.status; },
-  };
-  try {
-    const m = await migrate(boardFile, exec.baseUrl); assert.equal(m.code, 0, `precondition: the cards are copied into the executor (exit ${m.code}): ${m.out.slice(0, 300)}`);
-    return await body(w);
-  } finally {
-    if (rest) await rest.stop(); try { await proxy.down(); } catch { /* down */ } await killExecutor(exec);
-    // #1669 — the world's own temp directories go with it (never anything it did not make)
-    for (const d of [store, dir]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ } }
-  }
+  return withOwned(async (own) => {
+    const store = own.dir('r44-store-');
+    const exec = await startExecutor({ store, datasetId: DSID, create: true }); own.adopt(() => killExecutor(exec));
+    const proxy = await startProxy(exec.baseUrl); own.adopt(async () => { try { await proxy.down(); } catch { /* down */ } });
+    const dir = own.dir('r44-board-'); const boardFile = path.join(dir, 'board.json');
+    fs.writeFileSync(boardFile, JSON.stringify(board, null, 2));
+    let rest = null; own.adopt(async () => { if (rest) await rest.stop(); });
+    const w = {
+      exec, proxy, boardFile,
+      async start({ ready = false } = {}) {
+        if (rest) await rest.stop();
+        rest = await startRestServer({ boardFile, env: { SCRUM_ROSTER_FILE: ROSTER_FILE, SCRUM_GRAPH_DATASET_ID: DSID, SCRUM_GRAPH_EXECUTOR_URL: proxy.url, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', SCRUM_GRAPH_UNIT_CARDS: '1', ...(ready ? { [READY_ENV]: 'executor' } : {}) } });
+        w.base = rest.baseUrl; w.rest = rest; return w;
+      },
+      async get(route) { const r = await fetch(`${w.base}${route}`, { signal: AbortSignal.timeout(40000) }); const text = await r.text(); let json = null; try { json = JSON.parse(text); } catch { /* not json */ } return { status: r.status, text, json }; },
+      async patch(id, b) { const r = await fetch(`${w.base}/api/cards/${id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ by: 'ada', ...b }), signal: AbortSignal.timeout(40000) }); return r.status; },
+    };
+    {
+      const m = await migrate(boardFile, exec.baseUrl); assert.equal(m.code, 0, `precondition: the cards are copied into the executor (exit ${m.code}): ${m.out.slice(0, 300)}`);
+      return await body(w);
+    }
+  });
 }
 
 /** Start the executor on a COPY of a seeded store: since #1638 an executor refuses a copied store unless it is told to promote it (--promote-epoch). Same contract as startExecutor otherwise. */

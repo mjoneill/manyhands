@@ -39,7 +39,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { SKIP, READY_ENV, DSID, ROSTER_FILE, card, makeBoardFixture, startRestServer, startProxy, migrate, tmpStore, startExecutor, startExecutorOnCopy, killExecutor } from './helpers/ready-world-1644.mjs';
+import { SKIP, READY_ENV, DSID, ROSTER_FILE, card, makeBoardFixture, startRestServer, startProxy, migrate, tmpStore, startExecutor, startExecutorOnCopy, killExecutor, withOwned } from './helpers/ready-world-1644.mjs';
 import { queryGraphExecutor } from '../core/graph-replica.mjs';
 import { projectBatch } from '../core/activity-projector.mjs';
 import * as rq from '../core/ready-query.mjs';
@@ -92,12 +92,15 @@ const sig = (a) => (a.failed ? `FAILED ${a.failed}` : `${a.total}/${a.excludedTo
 
 /** One run on a fresh executor (a copy of the seeded store) and a fresh REST. k = 0: no injection. k >= 1: delete the target card through REST just before the k-th /query request of the read. */
 async function run(sd, { k, reader, m = 0 }) {
-  const store = fs.mkdtempSync(path.join(os.tmpdir(), 'r44s-run-')); fs.cpSync(sd.store, store, { recursive: true });
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'r44s-rboard-')); const boardFile = path.join(dir, 'board.json'); fs.copyFileSync(sd.boardFile, boardFile);
-  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'r44s-work-'));
-  const exec = await startExecutorOnCopy({ store, datasetId: DSID }); const proxy = await startProxy(exec.baseUrl);
+  return withOwned(async (own) => {
+  const store = own.dir('r44s-run-'); fs.cpSync(sd.store, store, { recursive: true });
+  const dir = own.dir('r44s-rboard-'); const boardFile = path.join(dir, 'board.json'); fs.copyFileSync(sd.boardFile, boardFile);
+  const workDir = own.dir('r44s-work-');
+  const exec = await startExecutorOnCopy({ store, datasetId: DSID }); own.adopt(() => killExecutor(exec));
+  const proxy = await startProxy(exec.baseUrl); own.adopt(async () => { try { await proxy.down(); } catch { /* down */ } });
   const rest = await startRestServer({ boardFile, env: { SCRUM_ROSTER_FILE: ROSTER_FILE, SCRUM_GRAPH_DATASET_ID: DSID, SCRUM_GRAPH_EXECUTOR_URL: proxy.url, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', SCRUM_GRAPH_UNIT_CARDS: '1', ...(reader === 'rest' ? { [READY_ENV]: 'executor' } : {}) } });
-  try {
+  own.adopt(() => rest.stop());
+  {
     proxy.queries = 0;
     let projected = null;
     fs.writeFileSync(path.join(workDir, 'work-objects.jsonl'), '');
@@ -108,7 +111,8 @@ async function run(sd, { k, reader, m = 0 }) {
     };
     const answer = reader === 'rest' ? await restAnswer(rest.baseUrl) : await naiveAnswer(proxy.url);
     return { answer, queries: proxy.queries, readyQueries: proxy.readyQueries, projected };
-  } finally { await rest.stop(); try { await proxy.down(); } catch { /* down */ } await killExecutor(exec); rmTemp(store, dir, workDir); }
+  }
+  });
 }
 async function sweep(sd, reader) {
   const before = await run(sd, { k: 0, reader }); const n = before.queries;
@@ -157,17 +161,20 @@ async function timeCalls(base, n = 20, warm = 3) {
   return ms;
 }
 async function phase(sd, label) {
+  return withOwned(async (own) => {
   // BOTH instances run at once and their calls are INTERLEAVED (off, on, then on, off, ...): a sequential off-then-on run lets the host's load drift between the two legs, and the 2x ratio is
   // measured at ~100-200 ms where a few ms of drift decides it (the builder's 16:24Z run: executor p95 230 ms against a 236 ms bound). Interleaving gives both legs the same moments.
   const mk = async (ready) => {
-    const store = fs.mkdtempSync(path.join(os.tmpdir(), 'r44l-run-')); fs.cpSync(sd.store, store, { recursive: true });
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'r44l-board-')); const boardFile = path.join(dir, 'board.json'); fs.copyFileSync(sd.boardFile, boardFile);
-    const exec = await startExecutorOnCopy({ store, datasetId: DSID }); const proxy = await startProxy(exec.baseUrl);
+    const store = own.dir('r44l-run-'); fs.cpSync(sd.store, store, { recursive: true });
+    const dir = own.dir('r44l-board-'); const boardFile = path.join(dir, 'board.json'); fs.copyFileSync(sd.boardFile, boardFile);
+    const exec = await startExecutorOnCopy({ store, datasetId: DSID }); own.adopt(() => killExecutor(exec));
+    const proxy = await startProxy(exec.baseUrl); own.adopt(async () => { try { await proxy.down(); } catch { /* down */ } });
     const rest = await startRestServer({ boardFile, env: { SCRUM_ROSTER_FILE: ROSTER_FILE, SCRUM_GRAPH_DATASET_ID: DSID, SCRUM_GRAPH_EXECUTOR_URL: proxy.url, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', SCRUM_GRAPH_UNIT_CARDS: '1', ...(ready ? { [READY_ENV]: 'executor' } : {}) } });
-    return { rest, proxy, exec, stop: async () => { await rest.stop(); try { await proxy.down(); } catch { /* down */ } await killExecutor(exec); rmTemp(store, dir); } };
+    own.adopt(() => rest.stop());
+    return { rest, proxy, exec };
   };
   const off = await mk(false); const on = await mk(true);
-  try {
+  {
     const call = async (x) => { const t = performance.now(); const r = await fetch(`${x.rest.baseUrl}/api/ready?limit=20`, { signal: AbortSignal.timeout(60000) }); const body = await r.text(); const ms = performance.now() - t; assert.equal(r.status, 200); return { ms, source: JSON.parse(body).source }; };
     for (let i = 0; i < 3; i++) { await call(off); await call(on); }
     off.proxy.readyQueries = 0; on.proxy.readyQueries = 0;
@@ -178,7 +185,8 @@ async function phase(sd, label) {
     }
     const line = `L1 ${label}: load1=${os.loadavg()[0].toFixed(2)}  in-process n=${offMs.length} p50=${Math.round(med(offMs))} p95=${Math.round(p95(offMs))} ms | executor n=${onMs.length} p50=${Math.round(med(onMs))} p95=${Math.round(p95(onMs))} ms (ratio ${(p95(onMs) / p95(offMs)).toFixed(2)}; ${on.proxy.readyQueries} readiness queries on the executor leg, ${off.proxy.readyQueries} on the in-process leg; responses said ${[...sources].sort().join(', ')})`;
     console.log(line); return { off: { ms: offMs, queries: off.proxy.readyQueries }, on: { ms: onMs, queries: on.proxy.readyQueries }, line };
-  } finally { await off.stop(); await on.stop(); }
+  }
+  });
 }
 test('L1 LATENCY on a production-sized board: executor p95 <= 1.0 s AND <= 2x the in-process p95, idle and under CPU load', { skip: SKIP, timeout: 1500000 }, async () => {
   const sd = await seed(1500);
@@ -218,11 +226,12 @@ test('S3 SNAPSHOT WITHIN ONE QUERY: a write that commits while a slow read runs 
   const ver = spawnSync(PY_FOR_S3, ['-c', 'import pyoxigraph; print(pyoxigraph.__version__)'], { encoding: 'utf8' }).stdout.trim();
   const sd = await seedOnce();
   const store = fs.mkdtempSync(path.join(os.tmpdir(), 'r44s3-')); fs.cpSync(sd.store, store, { recursive: true });
-  const exec = await startExecutorOnCopy({ store, datasetId: DSID });
+  let exec = null;
   const CW = '<https://schema.org/CreativeWork>';
   const READ = `SELECT (COUNT(*) AS ?n) WHERE { ?a a ${CW} . ?b a ${CW} . FILTER(STRLEN(CONCAT(STR(?a), STR(?b))) > 0) }`;
   const count = async () => { const t = performance.now(); const r = await fetch(`${exec.baseUrl}/query`, { method: 'POST', body: READ, signal: AbortSignal.timeout(120000) }); const j = await r.json(); return { n: Number(j.results.bindings[0].n.value), ms: performance.now() - t }; };
   try {
+    exec = await startExecutorOnCopy({ store, datasetId: DSID });
     const alone = await count();
     assert.ok(alone.ms >= 800, `PRECONDITION: the slow read must be slow enough for a write to land inside it (${Math.round(alone.ms)} ms alone, ${alone.n} rows)`);
     let have = alone.n; const rounds = []; assert.equal(have, sd.N * sd.N, 'PRECONDITION: the read counts the full cross product before any write');
@@ -243,5 +252,5 @@ test('S3 SNAPSHOT WITHIN ONE QUERY: a write that commits while a slow read runs 
       rounds.push(`${round}: read ${got.n === before ? 'BEFORE' : 'AFTER'} (${Math.round(got.ms)} ms), ${mechanism}`); have = after;
     }
     console.log(`S3 pyoxigraph ${ver}; ${rounds.join(' | ')}`);
-  } finally { await killExecutor(exec); rmTemp(store); }
+  } finally { if (exec) await killExecutor(exec); rmTemp(store); }
 });
