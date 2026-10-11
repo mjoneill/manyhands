@@ -5,29 +5,22 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createGraphClient } from '../core/graph-client.mjs';
+import { spawnExecutor } from './helpers/graph-executor-proc.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const EXEC = path.join(ROOT, 'graph-executor', 'executor.py');
 const PY = process.env.GRAPH_EXECUTOR_PYTHON || path.join(ROOT, 'graph-executor', '.venv', 'bin', 'python');
 const HAVE_PY = fs.existsSync(PY) && spawnSync(PY, ['-c', 'import pyoxigraph'], { stdio: 'ignore' }).status === 0;
 const ROOTUSER = process.getuid?.() === 0;   // chmod does not bite for root
 const SKIP = !HAVE_PY ? `UNAVAILABLE: no python with pyoxigraph at ${PY}` : ROOTUSER ? 'UNAVAILABLE: running as root, a read-only directory is no fault' : false;
 
-function start(store, create) {
-  return new Promise((resolve, reject) => {
-    const p = spawn(PY, [EXEC, '--store', store, '--port', '0', '--dataset-id', 'latch', ...(create ? ['--create'] : [])], { stdio: ['ignore', 'pipe', 'pipe'] });
-    let out = '', err = '';
-    p.stdout.on('data', (d) => { out += d; if (out.includes('\n')) resolve({ p, base: `http://127.0.0.1:${JSON.parse(out.split('\n')[0]).port}` }); });
-    p.stderr.on('data', (d) => { err += d; });
-    p.on('exit', (code) => reject(Object.assign(new Error(`exited ${code}: ${err}`), { stderr: err })));
-  });
-}
+// #1671 — through the shared helper, so a failed startup never leaves the executor running
+const start = (store, create) => spawnExecutor(['--store', store, '--port', '0', '--dataset-id', 'latch', ...(create ? ['--create'] : [])]).then((x) => ({ p: x.proc, base: x.baseUrl }));
 const health = async (base) => (await fetch(`${base}/health`)).json();
 const rule = (n) => ({ kind: 'rule', opId: `urn:ex:op/latch-${n}`, actor: 'urn:ex:admin', rule: { iri: `urn:ex:R/latch-${n}` } });
 

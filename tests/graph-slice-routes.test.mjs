@@ -10,6 +10,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { spawnExecutor } from './helpers/graph-executor-proc.mjs';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -212,10 +213,9 @@ test('#1558 D1 envelope shape: executor unreadable (stopped) with NO evaluationT
 
 test('#1558 D1 envelope shape: dataset-identity-mismatch returns the SAME D1 keys as resolver UNAVAILABLE', { skip: SKIP }, async () => {
   if (!fs.existsSync(path.join(PROJECT_DIR, 'core', 'authority-resolver.mjs'))) return;
-  const { spawn } = await import('node:child_process');
   const other = fs.mkdtempSync(path.join(os.tmpdir(), 'gs-other-env-'));
-  const p = spawn(PY, [path.join(PROJECT_DIR, 'graph-executor', 'executor.py'), '--store', other, '--port', '0', '--dataset-id', 'NOT-the-trial', '--create'], { stdio: ['ignore', 'pipe', 'ignore'] });
-  const eport = await new Promise((r) => { let o = ''; p.stdout.on('data', (d) => { o += d; if (o.includes('\n')) r(JSON.parse(o).port); }); });
+  // #1671 — through the shared helper, so a failed startup never leaves the executor running
+  const { proc: p, port: eport } = await spawnExecutor(['--store', other, '--port', '0', '--dataset-id', 'NOT-the-trial', '--create']);
   const srv = await startRestServer({ env: { SCRUM_GRAPH_EXECUTOR_URL: `http://127.0.0.1:${eport}`, SCRUM_GRAPH_DATASET_ID: 'trial-x-env', GRAPH_EXECUTOR_PYTHON: PY } });
   try {
     const ET = '2026-10-04T00:00:00.000Z';
@@ -374,10 +374,9 @@ test('#1558 the slice is OFF without its flag: no graph write routes exist', asy
 });
 
 test('#1567 PC3 fencing: a server pointed at an executor holding ANOTHER dataset refuses every write and read before dispatch', { skip: SKIP }, async () => {
-  const { spawn } = await import('node:child_process');
   const other = fs.mkdtempSync(path.join(os.tmpdir(), 'gs-other-'));
-  const p = spawn(PY, [path.join(PROJECT_DIR, 'graph-executor', 'executor.py'), '--store', other, '--port', '0', '--dataset-id', 'NOT-the-trial', '--create'], { stdio: ['ignore', 'pipe', 'ignore'] });
-  const eport = await new Promise((r) => { let o = ''; p.stdout.on('data', (d) => { o += d; if (o.includes('\n')) r(JSON.parse(o).port); }); });
+  // #1671 — through the shared helper, so a failed startup never leaves the executor running
+  const { proc: p, port: eport } = await spawnExecutor(['--store', other, '--port', '0', '--dataset-id', 'NOT-the-trial', '--create']);
   const srv = await startRestServer({ env: { SCRUM_GRAPH_EXECUTOR_URL: `http://127.0.0.1:${eport}`, SCRUM_GRAPH_DATASET_ID: 'trial-x', GRAPH_EXECUTOR_PYTHON: PY } });
   try {
     const w = await (await fetch(`${srv.baseUrl}/api/graph/rule`, { method: 'POST', headers: { 'content-type': 'application/json' },

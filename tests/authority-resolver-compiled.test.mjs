@@ -8,16 +8,16 @@
  */
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createGraphClient } from '../core/graph-client.mjs';
 import { createAuthorityResolver } from '../core/authority-resolver.mjs';
+import { spawnExecutor } from './helpers/graph-executor-proc.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const EXEC = path.join(ROOT, 'graph-executor', 'executor.py');
 const PY = process.env.GRAPH_EXECUTOR_PYTHON || path.join(ROOT, 'graph-executor', '.venv', 'bin', 'python');
 const HAVE_PY = fs.existsSync(PY) && spawnSync(PY, ['-c', 'import pyoxigraph'], { stdio: 'ignore' }).status === 0;
 const SKIP = HAVE_PY ? false : `UNAVAILABLE: no python with pyoxigraph at ${PY}`;
@@ -26,12 +26,8 @@ const live = [];
 after(() => { for (const p of live) p.kill('SIGKILL'); });
 async function freshStore() {
   const store = fs.mkdtempSync(path.join(os.tmpdir(), 'arc-'));
-  const { proc, port } = await new Promise((resolve, reject) => {
-    const p = spawn(PY, [EXEC, '--store', store, '--port', '0', '--dataset-id', 'dev-resolver-compiled', '--create'], { stdio: ['ignore', 'pipe', 'pipe'] });
-    let out = '';
-    p.stdout.on('data', (d) => { out += d; if (out.includes('\n')) resolve({ proc: p, port: JSON.parse(out.split('\n')[0]).port }); });
-    p.on('exit', (c) => reject(new Error(`executor exited ${c}`)));
-  });
+  // #1671 — through the shared helper, so a failed startup never leaves the executor running
+  const { proc, port } = await spawnExecutor(['--store', store, '--port', '0', '--dataset-id', 'dev-resolver-compiled', '--create']);
   live.push(proc);
   const base = `http://127.0.0.1:${port}`;
   const client = createGraphClient({ baseUrl: base });

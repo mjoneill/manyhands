@@ -20,14 +20,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { startRestServer, PROJECT_DIR } from './helpers/harness.mjs';
 import { mintToken, hashToken } from '../core/credentials.mjs';
 import { createGraphClient } from '../core/graph-client.mjs';
 import { readExecutor, parsePending, reconcilePending } from '../scripts/rollback-logborn-1561.mjs';
+import { spawnExecutor } from './helpers/graph-executor-proc.mjs';
 
 const PY = process.env.GRAPH_EXECUTOR_PYTHON || path.join(PROJECT_DIR, 'graph-executor', '.venv', 'bin', 'python');
-const EXEC = path.join(PROJECT_DIR, 'graph-executor', 'executor.py');
 const HAVE_PY = fs.existsSync(PY) && spawnSync(PY, ['-c', 'import pyoxigraph'], { stdio: 'ignore' }).status === 0;
 const SKIP = HAVE_PY ? false : `UNAVAILABLE: no python with pyoxigraph at ${PY}`;
 const DSID = 'lb-unknown';
@@ -40,15 +40,8 @@ function tokensFile() {
   fs.writeFileSync(f, JSON.stringify({ seats: { bob: { credentials: [{ tokenHash: hashToken(TOK), scope: 'admin', issuedAt: at(-1), expiresAt: at(24), issuedBy: 'test', revokedAt: null, note: null }] } } }));
   return f;
 }
-function startExecutor(store) {
-  return new Promise((resolve, reject) => {
-    const p = spawn(PY, [EXEC, '--store', store, '--port', '0', '--dataset-id', DSID, '--create'], { stdio: ['ignore', 'pipe', 'pipe'] });
-    let out = '', err = '';
-    p.stdout.on('data', (d) => { out += d; if (out.includes('\n')) resolve({ p, base: `http://127.0.0.1:${JSON.parse(out.split('\n')[0]).port}` }); });
-    p.stderr.on('data', (d) => { err += d; });
-    p.on('exit', (code) => reject(new Error(`executor exited ${code}: ${err}`)));
-  });
-}
+// #1671 — through the shared helper, so a failed startup never leaves the executor running
+const startExecutor = (store) => spawnExecutor(['--store', store, '--port', '0', '--dataset-id', DSID, '--create']).then((x) => ({ p: x.proc, base: x.baseUrl }));
 /** A forwarding proxy that can fault exactly one armed /update. `log` records every /update's opId and fate. */
 function startProxy(target) {
   const state = { armed: null, log: [], receiptReads: 0, failReceipts: 0 };

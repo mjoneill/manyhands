@@ -84,11 +84,13 @@ async function down(srv) { LIVE.delete(srv); await srv.stop(); await released(sr
 /** One executor start; resolves with its ready line (and kills it), or rejects with its stderr. */
 function startOnce(store, dsid, extra = []) {
   return new Promise((resolve, reject) => {
+    // #1671 — deliberately inline: a one-shot start that kills the executor on its first line (any line) and rejects with stderr's last line; a junk line therefore cannot orphan it, and a silent start is killed after 15 s
     const p = spawn(PY, [EXEC, '--store', store, '--port', '0', '--dataset-id', dsid, ...extra], { stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '', err = '';
     p.stdout.on('data', (d) => { out += d; if (out.includes('\n')) p.kill('SIGKILL'); });
     p.stderr.on('data', (d) => { err += d; });
-    p.on('exit', () => (out.includes('\n') ? resolve(JSON.parse(out.split('\n')[0])) : reject(new Error(err.trim().split('\n').pop()))));
+    const silent = setTimeout(() => p.kill('SIGKILL'), 15_000);   // #1671: a start that never prints is killed, not left running
+    p.on('exit', () => { clearTimeout(silent); (out.includes('\n') ? resolve(JSON.parse(out.split('\n')[0])) : reject(new Error(err.trim().split('\n').pop()))); });
   }).then(async (ready) => { await released(store); return ready; });
 }
 const promote = (store, dsid) => startOnce(store, dsid, ['--promote-epoch']);

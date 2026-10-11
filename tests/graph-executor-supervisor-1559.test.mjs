@@ -104,6 +104,7 @@ function keepAlive(store, port, create) {
   const ka = { launches: 0, pid: null, stopping: false, child: null };
   const launch = (first) => {
     if (ka.stopping) return;   // a relaunch scheduled before stop() must not outlive the test
+    // #1671 — deliberately inline: this IS the restart loop under test (relaunch on exit until stop()), not a startup; stop() kills the live child
     const c = spawn(PY, [EXEC, '--store', store, '--port', String(port), '--dataset-id', 'sup', ...(first && create ? ['--create'] : [])], { stdio: ['ignore', 'pipe', 'pipe'] });
     ka.launches++; ka.pid = c.pid; ka.child = c;
     c.stdout.resume(); c.stderr.resume();

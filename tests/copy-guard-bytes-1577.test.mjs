@@ -24,12 +24,14 @@ const SKIP = HAVE_PY ? false : `UNAVAILABLE: no python with pyoxigraph at ${PY}`
 
 function run(store, extra = []) {
   return new Promise((resolve) => {
+    // #1671 — deliberately inline: a one-shot probe that wants the exit code and stderr of a start that may be refused; it kills the executor on ITS first line; a junk line therefore cannot orphan it, and a silent start is killed after 15 s
     const p = spawn(PY, [EXEC, '--store', store, '--port', '0', '--dataset-id', 'cgb', ...extra], { stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '', err = '', done = false;
     const finish = (r) => { if (!done) { done = true; resolve(r); } };
     p.stdout.on('data', (d) => { out += d; if (out.includes('\n')) { p.kill('SIGTERM'); } });
     p.stderr.on('data', (d) => { err += d; });
-    p.on('exit', (code) => finish({ served: out.includes('\n'), code, err }));
+    const silent = setTimeout(() => p.kill('SIGKILL'), 15_000);   // #1671: a start that never prints is killed, not left running
+    p.on('exit', (code) => { clearTimeout(silent); finish({ served: out.includes('\n'), code, err }); });
   });
 }
 /** name → sha256 of every file in the directory (names included, so an added or removed file counts). */

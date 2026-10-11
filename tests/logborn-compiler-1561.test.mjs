@@ -19,11 +19,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { compile, staticCheck, ValidationError, digestOf, canonicalize, PERSON_PAYLOAD_FIELDS } from '../core/graph-compiler.mjs';
 import { PERSON_NODE_FIELDS } from '../core/graph-people.mjs';
 import { createGraphClient } from '../core/graph-client.mjs';
 import { PROJECT_DIR, freePort } from './helpers/harness.mjs';
+import { spawnExecutor } from './helpers/graph-executor-proc.mjs';
 
 const M = 'https://scrumboard.local/memory/m1';
 const P = (k) => `https://scrumboard.local/person/${k}`;
@@ -165,11 +166,8 @@ before(async () => {
   if (SKIP) return;
   const store = fs.mkdtempSync(path.join(os.tmpdir(), 'lb-exec-'));
   const port = await freePort();
-  proc = spawn(PY, [path.join(PROJECT_DIR, 'graph-executor', 'executor.py'), '--store', store, '--port', String(port), '--dataset-id', 'lb-1561', '--create', '--exit-on-stdin-eof'], { stdio: ['pipe', 'pipe', 'pipe'] });
-  await new Promise((resolve, reject) => {
-    let out = ''; proc.stdout.on('data', (d) => { out += d; if (out.includes('\n')) resolve(); });
-    proc.on('exit', (c) => reject(new Error(`executor exited ${c}`)));
-  });
+  // #1671 — through the shared helper: a failed startup never leaves the executor running; stdin stays open for --exit-on-stdin-eof
+  ({ proc } = await spawnExecutor(['--store', store, '--port', String(port), '--dataset-id', 'lb-1561', '--create', '--exit-on-stdin-eof'], { stdin: 'pipe' }));
   base = `http://127.0.0.1:${port}`;
   client = createGraphClient({ baseUrl: base, expectedDatasetId: 'lb-1561' });
 });
