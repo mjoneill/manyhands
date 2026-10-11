@@ -2192,8 +2192,11 @@ async function handleGraphNeighbors(req, res) {
     };
     // #1642 — the executor's public dataset answers when SCRUM_GRAPH_NEIGHBORS_SOURCE=executor; every answer names its source.
     if (NEIGHBORS_SOURCE === 'executor') {
+      // as #1643: `executorPosition` (epoch:commitSeq) is read BEFORE the neighbour reads, so it is a LOWER BOUND on what
+      // the answer reflects: the answer takes several reads, and later ones may also see commits made between them
+      const executorPosition = await readExecutorPosition(process.env.SCRUM_GRAPH_EXECUTOR_URL);
       const result = await graphNeighborsFromExecutor(process.env.SCRUM_GRAPH_EXECUTOR_URL, opts);
-      return sendJSON(res, 200, { ...result, source: 'executor', rebuiltMs: null, watermark: null });
+      return sendJSON(res, 200, { ...result, source: 'executor', rebuiltMs: null, watermark: null, executorPosition });
     }
     const { store, rebuiltMs, projectedThrough } = await warmGraphStore();
     const result = graphNeighbors(store, opts);
