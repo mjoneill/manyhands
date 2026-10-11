@@ -63,6 +63,9 @@ function makeUniverse() {
   // The runner imports the ledger — a universe without it cannot start.
   const ledger = path.join(ROOT, 'scripts', 'verdict-ledger.mjs');
   if (fs.existsSync(ledger)) fs.copyFileSync(ledger, path.join(dir, 'scripts', 'verdict-ledger.mjs'));
+  // #1672 — run-test-files.mjs imports the suite's temp owner too
+  const suiteTmp = path.join(ROOT, 'scripts', 'suite-tmp.mjs');
+  if (fs.existsSync(suiteTmp)) fs.copyFileSync(suiteTmp, path.join(dir, 'scripts', 'suite-tmp.mjs'));
   fs.chmodSync(path.join(dir, 'scripts', 'run-tests.sh'), 0o755);
   // #1637 — the watch FAILS CLOSED without a required-coverage manifest; a fixture universe states its choice explicitly (an empty list: these tests are about the alarm, not about coverage)
   fs.writeFileSync(path.join(dir, 'scripts', 'suite-watch-required.json'), '[]\n');
