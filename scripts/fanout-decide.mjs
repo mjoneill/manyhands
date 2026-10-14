@@ -203,7 +203,7 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
       const who = !loss
         ? `receiver loss not attributable: no per-key reading from before the drop. `
         : loss.lines.length === 0
-          ? `unattributed receiver loss: ${dropped} stream(s) fell and no bound key's count changed, so no client is named and no cause is claimed (#1546). `
+          ? `unattributed receiver loss: ${dropped} stream(s) fell and no bound key's count fell, so no client is named and no cause is claimed (#1546). `
           : `stream(s) lost by ${loss.lines.join(', ')}`
             + `${unattributed > 0 ? `, plus ${unattributed} unattributed receiver loss` : ''}. `
             + `A client whose stream died under a live session receives NOTHING pushed until it reconnects — no queue, no replay (#624). `
