@@ -1,0 +1,32 @@
+[
+  {
+    "file": "tests/builder-isolation-1630.test.mjs",
+    "name": "I1 NO REACH: inside the sandbox the decoy is unreachable on three addresses, from the command, a child and a grandchild; it still answers from outside",
+    "reason": "UNAVAILABLE: no sandbox-exec on this machine (a skip is not a pass)"
+  },
+  {
+    "file": "tests/builder-isolation-1630.test.mjs",
+    "name": "I2 NO KILL: inside the sandbox every way of signalling the decoy leaves it alive and answering, judged by state; a sandboxed process can still signal its own child",
+    "reason": "UNAVAILABLE: no sandbox-exec on this machine (a skip is not a pass)"
+  },
+  {
+    "file": "tests/builder-isolation-1630.test.mjs",
+    "name": "I3 NO BIND: with the port free, a sandboxed process cannot listen on it (127.0.0.1 or ::); an unprotected random port can be bound",
+    "reason": "UNAVAILABLE: no sandbox-exec on this machine (a skip is not a pass)"
+  },
+  {
+    "file": "tests/builder-isolation-1630.test.mjs",
+    "name": "I4 NO WRITE OUTSIDE: a write outside the worktree, tmp and --write-also fails and leaves no file; writes inside each work",
+    "reason": "UNAVAILABLE: no sandbox-exec on this machine (a skip is not a pass)"
+  },
+  {
+    "file": "tests/builder-isolation-1630.test.mjs",
+    "name": "I5 THE LEGITIMATE WORK STILL WORKS: fixture server, node --test, git in a plain AND a linked worktree, per-run data/cache dirs, reading outside",
+    "reason": "UNAVAILABLE: no sandbox-exec on this machine (a skip is not a pass)"
+  },
+  {
+    "file": "tests/tmpstore-leak-1672.test.mjs",
+    "name": "RL the runner cannot inspect processes: the run fails, the suite folder is retained and named, and the output says why",
+    "reason": "UNAVAILABLE: inspection failure can only be injected through `ps` on macOS; on Linux the runner reads /proc"
+  }
+]

@@ -67,7 +67,8 @@ jobs:
   server:
     name: server suite
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # #1690 — the executor-backed tests now run here instead of skipping; the trial took 17 min against 20.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -82,8 +83,32 @@ jobs:
       # including locally, to work around a CI-only policy.
       - name: Allow Chromium's sandbox on the runner
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      # #1690 (decision 45a5d8e4) — CI runs every test it can, so the graph executor's tests need its python.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Graph executor venv (pinned requirements)
+        run: python -m venv graph-executor/.venv && graph-executor/.venv/bin/pip install -r graph-executor/requirements.txt
       - name: Run the server suite
-        run: npm run test:server
+        run: |
+          set -o pipefail
+          npm run test:server 2>&1 | tee server-suite.tap
+      # The only skips allowed are the manifest's platform-only tests, skipped as UNAVAILABLE; those run on the Mac
+      # leg (scripts/run-platform-only.mjs). Runs even when the suite failed, so a red run still says what skipped.
+      - name: Platform-only skips equal the manifest
+        if: always()
+        run: >-
+          node scripts/check-platform-skips.mjs server-suite.tap
+          --manifest tests/platform-only-manifest.json
+          --sha "${{ github.event.pull_request.head.sha || github.sha }}"
+          --receipt ci-platform-receipt.json
+      - name: Keep the CI leg's receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-platform-receipt
+          path: ci-platform-receipt.json
+          if-no-files-found: warn
 
   browser:
     name: browser suite
