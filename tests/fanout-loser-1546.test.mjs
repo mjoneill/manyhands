@@ -45,15 +45,15 @@ const seat = (streams) => ({ streams, sessions: streams || 1, lastBeatAt: null }
 
 /** A /channel/status payload. `streams` is per seat key; `unboundStreams` is
  *  how many of `receivers` belong to no bound key. receivers = sum + unbound. */
-function status({ healthcheck = 1, alpha = 1, beta = 4, gamma = 1, unboundStreams = 2 }) {
+function status({ healthcheck = 1, alpha = 1, beta = 4, gamma = 1, unboundStreams = 2 }, { rawSeats = {}, receivers } = {}) {
   return {
-    receivers: healthcheck + alpha + beta + gamma + unboundStreams,
+    receivers: receivers ?? healthcheck + alpha + beta + gamma + unboundStreams,
     sessions: SESSIONS,
     binding: 'active',
     unbound: unboundStreams,
     mode: 'soft',
     pending: 0,
-    seats: { healthcheck: seat(healthcheck), alpha: seat(alpha), beta: seat(beta), gamma: seat(gamma) },
+    seats: { healthcheck: seat(healthcheck), alpha: seat(alpha), beta: seat(beta), gamma: seat(gamma), ...rawSeats },
   };
 }
 
@@ -89,13 +89,13 @@ const loss = (name, from, to) => new RegExp(`\\b${name}\\s*:\\s*${from}\\s*(?:�
 const anyLoss = (name) => new RegExp(`\\b${name}\\s*:\\s*\\d+\\s*(?:→|->)\\s*\\d+\\b`);
 
 /** baseline, then the drop twice (arm, fire). Returns { armed, fired } bodies. */
-async function drop(before, after) {
+async function drop(before, after, afterOpts = {}) {
   const state = tmpState();
   const base = await tick(state, status(before));
   assert.equal(posted(base), null, 'the baseline tick posts nothing');
-  const armed = await tick(state, status(after));
+  const armed = await tick(state, status(after, afterOpts));
   assert.equal(posted(armed), null, 'the first tick of a drop only arms');
-  const fired = await tick(state, status(after));
+  const fired = await tick(state, status(after, afterOpts));
   return { fired: posted(fired), firedRaw: fired };
 }
 
@@ -170,4 +170,47 @@ test('#1546 the loss is read against the reading BEFORE the drop, not the arming
   const third = posted(await tick(state, status({ healthcheck: 0 })));
   assert.ok(third);
   assert.match(third, loss('healthcheck', 1, 0), 'the firing tick names the key that fell at the drop');
+});
+
+// ------------------------------------------------- review findings, 6616feb
+//
+// Two defects found on review of the first build, each asserted on the PRINTED
+// warning, which is what a seat reads.
+
+test('#1546 (e) a PARTIAL loss (4→3) is named as a loss and does not declare the seat deaf', async () => {
+  const { fired } = await drop({}, { beta: 3 });
+  assert.ok(fired);
+  assert.match(fired, loss('beta', 4, 3), 'the loss is still named, with its counts');
+  // beta still holds three streams. The sentence under test is the one that says a
+  // named seat "is deaf until it reconnects"; the generic caution about a seat
+  // quiet since the last restart is a different sentence and is not asserted on.
+  assert.doesNotMatch(fired, /seat is deaf|is deaf until|deaf until (it|they) reconnect/i,
+    'a seat that still holds streams must not be called deaf');
+});
+
+// An UNKNOWN count is not a ZERO count. A key whose measurement is missing
+// (no `streams` field) or explicitly null must not be rendered as having fallen
+// to 0, and the line must not claim a count it does not have.
+// Accepts a word saying so, or an unknown marker in place of the count (`4→?`).
+const UNKNOWN_WORDING = /unknown|not attributable|unmeasured|unread|could not be (?:read|measured)|:\s*\d+\s*(?:→|->)\s*\?/i;
+async function unknownCount(rawBeta) {
+  // receivers fall 9→8 through the unbound streams, with sessions flat; beta's
+  // seat object is replaced by `rawBeta`.
+  return drop({}, { unboundStreams: 1 }, { rawSeats: { beta: rawBeta }, receivers: 8 });
+}
+async function assertUnknownIsNotZero(rawBeta) {
+  const { fired } = await unknownCount(rawBeta);
+  assert.ok(fired, 'the receivers drop still posts');
+  assert.doesNotMatch(fired, loss('beta', 4, 0), 'an unread count must not be printed as a fall to 0');
+  assert.doesNotMatch(fired, anyLoss('beta'), 'beta must not be named as having lost anything on an unread count');
+  assert.doesNotMatch(fired, /no bound key's count fell/i, 'must not assert that no count fell when one could not be read');
+  assert.match(fired, UNKNOWN_WORDING, 'the line says the count is unknown rather than staying silent');
+}
+
+test('#1546 (f) a present key whose `streams` field is missing is not reported as 4→0', async () => {
+  await assertUnknownIsNotZero({ sessions: 1, lastBeatAt: null });
+});
+
+test('#1546 (f2) a key with explicit `streams: null` is not reported as 4→0', async () => {
+  await assertUnknownIsNotZero({ streams: null, sessions: 1, lastBeatAt: null });
 });
