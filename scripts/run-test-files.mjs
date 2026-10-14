@@ -165,6 +165,7 @@ function finish() {
   if (settleTmp()) failed = true;   // #1672 — a new leak or a retained folder is part of the verdict
   emitSummary();
   record();
+  process.stdout.write(`# FAILED-FILES ${JSON.stringify([...new Set(failedFiles)])}\n`);
   process.exitCode = failed || totals.fail > 0 ? 1 : 0;
 }
 
