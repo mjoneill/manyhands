@@ -50,7 +50,7 @@ import fs from 'node:fs';
 // #726 — the decision lives in a pure, tested module. See fanout-decide.mjs for
 // why: six production fixes, no test, and the seventh change had a failure mode
 // (a watch that stops warning) indistinguishable from a healthy room.
-import { decide, seatSuffix, seatBracket, staleSeats, staleFacts, stoppedSeats, answeredSeatsFrom, lastWriteBySeatFrom, maintenanceFrom } from './fanout-decide.mjs';
+import { decide, keyStreamsFrom, seatSuffix, seatBracket, staleSeats, staleFacts, stoppedSeats, answeredSeatsFrom, lastWriteBySeatFrom, maintenanceFrom } from './fanout-decide.mjs';
 
 const STATUS_URL = process.env.SCRUM_STATUS_URL || 'http://127.0.0.1:3001/channel/status';
 const POST_URL = process.env.SCRUM_POST_URL || 'http://127.0.0.1:3141/api/conversations';
@@ -197,6 +197,7 @@ const { state: st, warnBody } = decide({
   writesUnreadableReason: writesUnreadable,
   stoppedRefireMs: STOPPED_REFIRE_MS,
   maintenance,
+  keyStreams: keyStreamsFrom(status),   // #1546 — name the key whose stream count fell
 });
 
 fs.writeFileSync(STATE_FILE, JSON.stringify(st));
