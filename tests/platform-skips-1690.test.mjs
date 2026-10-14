@@ -16,6 +16,18 @@
  *   scripts/check-gate-pair.mjs <ci-receipt> <mac-receipt>
  *   Exit 0 clean · 1 mismatch (stdout or stderr NAMES the test, file or sha) · 2 could not check (fails closed).
  *
+
+ * ADDED AFTER REVIEW OF THE FIRST BUILD (1c1a6de): the first build trusted what it was told. Three findings, each
+ * asserted below on the PRINTED output and the receipt:
+ *   · the Mac leg read only the TAP of the named tests, so a child that exited non-zero (or was killed) after they
+ *     passed still read clean
+ *   · the CI leg judged skips only, so a failing suite, a `# fail N` summary or a non-zero suite exit still read clean
+ *   · the commit was whatever string the caller declared; now the declared sha must equal the checked-out HEAD, the
+ *     receipt carries the TREE hash, tracked changes are refused, and the pair must agree on the tree
+ *   Interface additions: `--suite-exit <n>` and `--root <dir>` on check-platform-skips.mjs (required); receipts gain
+ *   `tree` (git HEAD^{tree}) and, for the CI leg, `suiteExit`. A declared sha that is not the checked-out HEAD, a
+ *   missing or malformed sha, or modified tracked files exit 2 (the tool cannot attest what was tested).
+ *
  * Every row that expects exit 1 also asserts the output names the offender. node itself exits 1 for a missing
  * script, so a row that only looked at the exit code would pass before anything is built; each script's existence
  * is asserted first, and the named-offender assertion cannot be met by a stack trace.
@@ -26,7 +38,7 @@
  */
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -59,6 +71,19 @@ async function exec(script, args, opts = {}) {
   }
 }
 
+const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' } }).trim();
+/** Commit everything currently in `dir` as a tiny repo; returns its HEAD and tree. */
+function commitAll(dir) {
+  git(dir, 'init', '-q');
+  git(dir, 'add', '-A');
+  git(dir, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-q', '-m', 'fixture');
+  return { head: git(dir, 'rev-parse', 'HEAD'), tree: git(dir, 'rev-parse', 'HEAD^{tree}') };
+}
+function repoDir() {
+  const d = mk();
+  fs.writeFileSync(path.join(d, 'tracked.txt'), 'one\n');
+  return { dir: d, ...commitAll(d) };
+}
 const SHA_A = 'a'.repeat(40);
 const SHA_B = 'b'.repeat(40);
 const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
@@ -91,9 +116,12 @@ function setup({ tapText = tap(), manifest = PLATFORM.map((t) => ({ file: 'tests
   const manPath = path.join(d, 'manifest.json');
   fs.writeFileSync(tapPath, tapText);
   fs.writeFileSync(manPath, typeof manifest === 'string' ? manifest : JSON.stringify(manifest));
-  return { d, tapPath, manPath, receipt: path.join(d, 'ci-receipt.json') };
+  const repo = repoDir();
+  return { d, tapPath, manPath, receipt: path.join(d, 'ci-receipt.json'), repo, sha: repo.head };
 }
-const check = (s, extra = []) => exec(CHECK, [s.tapPath, '--manifest', s.manPath, '--sha', SHA_A, '--receipt', s.receipt, ...extra]);
+// the suite's own exit status is a required input of the CI leg; 0 here unless a row says otherwise
+const check = (s, extra = []) => exec(CHECK, [s.tapPath, '--manifest', s.manPath, '--root', s.repo.dir, '--sha', s.sha, '--suite-exit', '0', '--receipt', s.receipt, ...extra]);
+const checkWith = (s, args) => exec(CHECK, [s.tapPath, '--manifest', s.manPath, '--receipt', s.receipt, ...args]);
 
 test('#1690 (C1) CONTROL — the skip set equals the manifest, with UNAVAILABLE-named tests that ran and TODO rows in the stream: clean', async () => {
   const s = setup();
@@ -178,7 +206,7 @@ test('#1690 (C8) the receipt records the commit, the manifest’s content hash, 
   const r = await check(s);
   assert.equal(r.code, 0, r.out);
   const rec = JSON.parse(fs.readFileSync(s.receipt, 'utf8'));
-  assert.equal(rec.sha, SHA_A);
+  assert.equal(rec.sha, s.sha);
   assert.equal(rec.manifestSha256, sha256(fs.readFileSync(s.manPath)));
   assert.equal(rec.ok, true);
   assert.equal(typeof rec.leg, 'string', 'says which leg wrote it');
@@ -193,9 +221,10 @@ function fixtureRoot(files, manifestEntries) {
   for (const [f, src] of Object.entries(files)) fs.writeFileSync(path.join(root, f), `import { test } from 'node:test';\nimport fs from 'node:fs';\n${src}\n`);
   const manPath = path.join(root, 'manifest.json');
   fs.writeFileSync(manPath, JSON.stringify(manifestEntries));
-  return { root, manPath, receipt: path.join(root, 'mac-receipt.json'), marker: path.join(root, 'ran-outside-manifest') };
+  const { head, tree } = commitAll(root);
+  return { root, manPath, receipt: path.join(root, 'mac-receipt.json'), marker: path.join(root, 'ran-outside-manifest'), sha: head, tree };
 }
-const mac = (f, extra = []) => exec(MAC, ['--manifest', f.manPath, '--root', f.root, '--sha', SHA_A, '--receipt', f.receipt, ...extra], { env: { MARKER: f.marker } });
+const mac = (f, extra = []) => exec(MAC, ['--manifest', f.manPath, '--root', f.root, '--sha', f.sha, '--receipt', f.receipt, ...extra], { env: { MARKER: f.marker } });
 
 test('#1690 (M1) CONTROL — the named tests run and pass: clean, and the receipt lists exactly the files it ran', async () => {
   const f = fixtureRoot(
@@ -206,7 +235,7 @@ test('#1690 (M1) CONTROL — the named tests run and pass: clean, and the receip
   assert.equal(r.code, 0, r.out);
   const rec = JSON.parse(fs.readFileSync(f.receipt, 'utf8'));
   assert.deepEqual(rec.files, ['tests/a.test.mjs']);
-  assert.equal(rec.sha, SHA_A);
+  assert.equal(rec.sha, f.sha);
   assert.equal(rec.manifestSha256, sha256(fs.readFileSync(f.manPath)));
   assert.equal(rec.ok, true);
 });
@@ -287,10 +316,10 @@ test('#1690 (M8) FAILS CLOSED: an empty or unreadable manifest is never clean (e
 
 function receipts({ ci = {}, macR = {} } = {}) {
   const d = mk();
-  const base = { sha: SHA_A, manifestSha256: 'm'.repeat(64), ok: true };
+  const base = { sha: SHA_A, tree: 't'.repeat(40), manifestSha256: 'm'.repeat(64), ok: true };
   const a = path.join(d, 'ci.json');
   const b = path.join(d, 'mac.json');
-  fs.writeFileSync(a, JSON.stringify({ leg: 'ci', ...base, ...ci }));
+  fs.writeFileSync(a, JSON.stringify({ leg: 'ci', ...base, suiteExit: 0, ...ci }));
   fs.writeFileSync(b, JSON.stringify({ leg: 'mac', ...base, ...macR }));
   return [a, b];
 }
@@ -357,4 +386,183 @@ test('#1690 (W2) the workflow wires the executor venv and the skip check into th
   const t = Number((server.match(/timeout-minutes:\s*(\d+)/) || [])[1]);
   // the trial run took 17 minutes against a 20-minute cap; 25 leaves 8 minutes, not 3
   assert.ok(t >= 25, `server job timeout-minutes is ${t}; the 17-minute trial needs at least 25`);
+});
+
+
+// ======================================================================= ADDED AFTER REVIEW OF 1c1a6de
+
+// ---- (1) the Mac leg judges the child process, not only the named tests' TAP
+
+test('#1690 (N1) the child exits NON-ZERO after the named test passed: the Mac leg is not clean, and names the file', async () => {
+  const f = fixtureRoot(
+    { 'tests/a.test.mjs': `${T('N1 named test passes')}\nprocess.on('exit', () => { process.exitCode = 1; });` },
+    [{ file: 'tests/a.test.mjs', name: 'N1 named test passes', reason: 'UNAVAILABLE: needs a mac' }],
+  );
+  const r = await mac(f);
+  assert.equal(r.code, 1, r.out);
+  assert.ok(r.out.includes('tests/a.test.mjs'), 'names the file whose process failed');
+  assert.equal(JSON.parse(fs.readFileSync(f.receipt, 'utf8')).ok, false);
+});
+
+test('#1690 (N2) the child is KILLED BY A SIGNAL after the named test passed: the Mac leg is not clean, and names the file', async () => {
+  const f = fixtureRoot(
+    // the kill comes AFTER the TAP is complete and flushed, so the named test's row reads ok and only the child's
+    // status says it did not end cleanly (a kill inside the run would also truncate the TAP and be caught by that)
+    { 'tests/a.test.mjs': `${T('N2 named test passes')}\nimport { after } from 'node:test';\nafter(() => { setTimeout(() => process.kill(process.pid, 'SIGKILL'), 800); });` },
+    [{ file: 'tests/a.test.mjs', name: 'N2 named test passes', reason: 'UNAVAILABLE: needs a mac' }],
+  );
+  const r = await mac(f);
+  assert.equal(r.code, 1, r.out);
+  assert.ok(r.out.includes('tests/a.test.mjs'));
+});
+
+// ---- (2) a CI leg is only ok if the suite itself finished clean
+
+const FAILING = 'not ok 7 - X1 an ordinary test that FAILS';
+test('#1690 (N3) the expected skips AND a failing test in the TAP: refused, the failing test is named, the receipt is not ok', async () => {
+  const s = setup({ tapText: tap({ extra: [FAILING] }) });
+  const r = await check(s);
+  assert.equal(r.code, 1, r.out);
+  assert.ok(r.out.includes('X1 an ordinary test that FAILS'));
+  assert.equal(JSON.parse(fs.readFileSync(s.receipt, 'utf8')).ok, false);
+});
+
+test('#1690 (N4) a clean-looking TAP but a NON-ZERO suite exit (the "fail 0, exit 1" run): refused, and the receipt says why', async () => {
+  const s = setup();
+  const r = await checkWith(s, ['--root', s.repo.dir, '--sha', s.sha, '--suite-exit', '1']);
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /exit/i, 'says it is the suite exit status');
+  const rec = JSON.parse(fs.readFileSync(s.receipt, 'utf8'));
+  assert.equal(rec.ok, false);
+  assert.equal(rec.suiteExit, 1);
+});
+
+test('#1690 (N5) a `# fail N` summary with N above zero is refused even when no single line is a plain failure', async () => {
+  const s = setup({ tapText: tap().replace('# pass 1', '# pass 1\n# fail 2') });
+  const r = await check(s);
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /fail/i);
+});
+
+test('#1690 (N6) FAILS CLOSED: no --suite-exit, or one that is not a number, cannot be checked (exit 2)', async () => {
+  const s = setup();
+  assert.equal((await checkWith(s, ['--root', s.repo.dir, '--sha', s.sha])).code, 2, 'no --suite-exit');
+  assert.equal((await checkWith(s, ['--root', s.repo.dir, '--sha', s.sha, '--suite-exit', 'zero'])).code, 2, 'not a number');
+});
+
+test('#1690 (N7) a green receipt records the suite exit it was given', async () => {
+  const s = setup();
+  assert.equal((await check(s)).code, 0);
+  assert.equal(JSON.parse(fs.readFileSync(s.receipt, 'utf8')).suiteExit, 0);
+});
+
+// ---- (3) the commit is VERIFIED against the checked-out tree, not asserted
+
+test('#1690 (N8) the CI leg: a declared sha that is not the checked-out HEAD exits 2, naming both', async () => {
+  const s = setup();
+  const r = await checkWith(s, ['--root', s.repo.dir, '--sha', SHA_B, '--suite-exit', '0']);
+  assert.equal(r.code, 2, r.out);
+  assert.ok(r.out.includes(SHA_B) && r.out.includes(s.sha), 'names the declared sha and the real HEAD');
+});
+
+test('#1690 (N9) the Mac leg: a declared sha that is not the checked-out HEAD exits 2, naming both', async () => {
+  const f = fixtureRoot({ 'tests/a.test.mjs': T('N9 passes') }, [{ file: 'tests/a.test.mjs', name: 'N9 passes', reason: 'UNAVAILABLE: needs a mac' }]);
+  const r = await exec(MAC, ['--manifest', f.manPath, '--root', f.root, '--sha', SHA_B, '--receipt', f.receipt], { env: { MARKER: f.marker } });
+  assert.equal(r.code, 2, r.out);
+  assert.ok(r.out.includes(SHA_B) && r.out.includes(f.sha));
+});
+
+test('#1690 (N10) both receipts carry the TREE of the checked-out commit', async () => {
+  const s = setup();
+  assert.equal((await check(s)).code, 0);
+  assert.equal(JSON.parse(fs.readFileSync(s.receipt, 'utf8')).tree, s.repo.tree);
+  const f = fixtureRoot({ 'tests/a.test.mjs': T('N10 passes') }, [{ file: 'tests/a.test.mjs', name: 'N10 passes', reason: 'UNAVAILABLE: needs a mac' }]);
+  assert.equal((await mac(f)).code, 0);
+  assert.equal(JSON.parse(fs.readFileSync(f.receipt, 'utf8')).tree, f.tree);
+});
+
+test('#1690 (N11) a MODIFIED tracked file means the tested tree is not the commit: both legs exit 2, naming the file', async () => {
+  const s = setup();
+  fs.writeFileSync(path.join(s.repo.dir, 'tracked.txt'), 'changed\n');
+  const r = await check(s);
+  assert.equal(r.code, 2, r.out);
+  assert.ok(r.out.includes('tracked.txt'));
+  const f = fixtureRoot({ 'tests/a.test.mjs': T('N11 passes') }, [{ file: 'tests/a.test.mjs', name: 'N11 passes', reason: 'UNAVAILABLE: needs a mac' }]);
+  fs.appendFileSync(path.join(f.root, 'tests/a.test.mjs'), '// edited after the commit\n');
+  const m = await mac(f);
+  assert.equal(m.code, 2, m.out);
+  assert.ok(m.out.includes('tests/a.test.mjs'));
+});
+
+test('#1690 (N12) CONTROL — an UNTRACKED file (the TAP, a receipt, a venv) does not count as a modified tree', async () => {
+  const s = setup();
+  fs.writeFileSync(path.join(s.repo.dir, 'server-suite.tap'), 'untracked output\n');
+  const r = await check(s);
+  assert.equal(r.code, 0, r.out);
+});
+
+test('#1690 (N13) a missing or malformed --sha cannot be checked (exit 2) on both legs', async () => {
+  const s = setup();
+  assert.equal((await checkWith(s, ['--root', s.repo.dir, '--suite-exit', '0'])).code, 2, 'CI leg, no sha');
+  assert.equal((await checkWith(s, ['--root', s.repo.dir, '--sha', 'abc123', '--suite-exit', '0'])).code, 2, 'CI leg, short sha');
+  const f = fixtureRoot({ 'tests/a.test.mjs': T('N13 passes') }, [{ file: 'tests/a.test.mjs', name: 'N13 passes', reason: 'UNAVAILABLE: needs a mac' }]);
+  assert.equal((await exec(MAC, ['--manifest', f.manPath, '--root', f.root, '--receipt', f.receipt])).code, 2, 'Mac leg, no sha');
+  assert.equal((await exec(MAC, ['--manifest', f.manPath, '--root', f.root, '--sha', 'zzz', '--receipt', f.receipt])).code, 2, 'Mac leg, short sha');
+});
+
+test('#1690 (N14) a root that is not a git checkout cannot attest a commit (exit 2) on both legs', async () => {
+  const s = setup();
+  const plain = mk();
+  assert.equal((await checkWith(s, ['--root', plain, '--sha', s.sha, '--suite-exit', '0'])).code, 2, 'CI leg');
+  const f = fixtureRoot({ 'tests/a.test.mjs': T('N14 passes') }, [{ file: 'tests/a.test.mjs', name: 'N14 passes', reason: 'UNAVAILABLE: needs a mac' }]);
+  fs.rmSync(path.join(f.root, '.git'), { recursive: true, force: true });
+  assert.equal((await mac(f)).code, 2, 'Mac leg');
+});
+
+// ---- the pair judges the tree and the suite exit too
+
+test('#1690 (N15) the legs tested DIFFERENT TREES (the same sha label can hide a merge ref): refused, naming both trees', async () => {
+  const other = 'u'.repeat(40);
+  const r = await exec(PAIR, receipts({ macR: { tree: other } }));
+  assert.equal(r.code, 1, r.out);
+  assert.ok(r.out.includes('t'.repeat(40)) && r.out.includes(other));
+});
+
+test('#1690 (N16) a CI receipt whose suite exit was non-zero cannot complete the pair, even marked ok', async () => {
+  const r = await exec(PAIR, receipts({ ci: { suiteExit: 1 } }));
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /exit/i);
+});
+
+test('#1690 (N17) FAILS CLOSED: a receipt with no tree, or a CI receipt with no suite exit, or none for ok, exits 2', async () => {
+  const noTree = receipts();
+  const m = JSON.parse(fs.readFileSync(noTree[1], 'utf8')); delete m.tree; fs.writeFileSync(noTree[1], JSON.stringify(m));
+  assert.equal((await exec(PAIR, noTree)).code, 2, 'Mac receipt without a tree');
+  const noExit = receipts();
+  const c = JSON.parse(fs.readFileSync(noExit[0], 'utf8')); delete c.suiteExit; fs.writeFileSync(noExit[0], JSON.stringify(c));
+  assert.equal((await exec(PAIR, noExit)).code, 2, 'CI receipt without a suite exit');
+  const noOk = receipts();
+  const k = JSON.parse(fs.readFileSync(noOk[1], 'utf8')); delete k.ok; fs.writeFileSync(noOk[1], JSON.stringify(k));
+  assert.equal((await exec(PAIR, noOk)).code, 2, 'a receipt without a verdict');
+});
+
+// ---- survivors from the mutants run against 1c1a6de
+
+test('#1690 (N18) a manifest path that climbs out of the root is refused and never run, naming the path', async () => {
+  const f = fixtureRoot({ 'tests/a.test.mjs': T('N18 passes') }, [{ file: 'tests/a.test.mjs', name: 'N18 passes', reason: 'UNAVAILABLE: needs a mac' }]);
+  const outside = mk();
+  fs.writeFileSync(path.join(outside, 'escape.test.mjs'), "import { test } from 'node:test';\nimport fs from 'node:fs';\ntest('E1 escaped', () => { fs.writeFileSync(process.env.MARKER, 'ran'); });\n");
+  const rel = path.relative(f.root, path.join(outside, 'escape.test.mjs'));
+  assert.ok(rel.startsWith('..'), 'the fixture file really is outside the root');
+  fs.writeFileSync(f.manPath, JSON.stringify([
+    { file: 'tests/a.test.mjs', name: 'N18 passes', reason: 'UNAVAILABLE: needs a mac' },
+    { file: rel, name: 'E1 escaped', reason: 'UNAVAILABLE: x' },
+  ]));
+  git(f.root, 'add', '-A');
+  git(f.root, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-q', '-m', 'manifest with an escaping path');
+  f.sha = git(f.root, 'rev-parse', 'HEAD');
+  const r = await mac(f);
+  assert.notEqual(r.code, 0, r.out);
+  assert.ok(r.out.includes('escape.test.mjs'), 'names the path');
+  assert.equal(fs.existsSync(f.marker), false, 'a file outside the root was executed');
 });
