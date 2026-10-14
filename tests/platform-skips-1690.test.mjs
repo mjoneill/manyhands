@@ -566,3 +566,74 @@ test('#1690 (N18) a manifest path that climbs out of the root is refused and nev
   assert.ok(r.out.includes('escape.test.mjs'), 'names the path');
   assert.equal(fs.existsSync(f.marker), false, 'a file outside the root was executed');
 });
+
+
+// ======================================================================= ADDED AFTER REVIEW OF 8e4cbc4
+
+// ---- the pair judges WHICH leg is in which slot
+
+test('#1690 (G6) the SAME receipt in both slots cannot complete the pair (one CI run is not both legs): refused, naming the legs', async () => {
+  const [ci] = receipts();
+  const r = await exec(PAIR, [ci, ci]);
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /leg/i);
+});
+
+test('#1690 (G6b) the slots SWAPPED (Mac receipt first, CI second) are refused', async () => {
+  const [ci, macR] = receipts();
+  const r = await exec(PAIR, [macR, ci]);
+  // refused either as a mismatch (1) or because the "CI" slot holds a receipt that lacks a CI suite exit (2); what
+  // matters is that it is never complete
+  assert.notEqual(r.code, 0, r.out);
+  assert.doesNotMatch(r.out, /gate complete|pair complete/i);
+});
+
+test('#1690 (G6c) FAILS CLOSED: a receipt that does not say which leg it is cannot be paired (exit 2)', async () => {
+  const [ci, macR] = receipts();
+  const c = JSON.parse(fs.readFileSync(ci, 'utf8')); delete c.leg; fs.writeFileSync(ci, JSON.stringify(c));
+  assert.equal((await exec(PAIR, [ci, macR])).code, 2);
+});
+
+// ---- the Mac leg wants an ORDINARY pass
+
+test('#1690 (M9) a named test marked TODO is not a pass: the Mac leg fails and names it', async () => {
+  const f = fixtureRoot(
+    { 'tests/a.test.mjs': T('M9 named test is a todo', '', "{ todo: 'not implemented' }") },
+    [{ file: 'tests/a.test.mjs', name: 'M9 named test is a todo', reason: 'UNAVAILABLE: needs a mac' }],
+  );
+  const r = await mac(f);
+  assert.equal(r.code, 1, r.out);
+  assert.ok(r.out.includes('M9 named test is a todo'));
+  assert.equal(JSON.parse(fs.readFileSync(f.receipt, 'utf8')).ok, false);
+});
+
+// ---- the workflow passes the suite's real status, not a constant (a hole no row pinned in 8e4cbc4)
+
+function serverJob() {
+  const yml = fs.readFileSync(path.join(REPO, '.github', 'workflows', 'ci.yml'), 'utf8');
+  return yml.slice(yml.indexOf('server:'), yml.indexOf('browser:'));
+}
+
+test('#1690 (W3) the server job records the suite’s exit status and hands THAT to the checker, which also gets the checkout and the sha', () => {
+  const job = serverJob();
+  assert.match(job, /SUITE_EXIT=\$rc|SUITE_EXIT=\$\{?\??/, 'the suite step records its exit status for the next step');
+  assert.match(job, />>\s*"?\$GITHUB_ENV"?/, 'in the job environment');
+  const step = job.slice(job.indexOf('check-platform-skips.mjs'));
+  assert.match(step, /--suite-exit\s+"?\$\{?SUITE_EXIT/, 'the checker is given the recorded status, not a literal');
+  assert.doesNotMatch(step, /--suite-exit\s+"?\d/, 'and never a numeric literal');
+  assert.match(step, /--root\s+\./, 'the checkout that was tested');
+  assert.match(step, /--sha\s+"?\$\{\{\s*github\.event\.pull_request\.head\.sha/, 'the commit the event names');
+});
+
+test('#1690 (W4) the check runs even when the suite failed, and the suite step still fails the job on a red suite', () => {
+  const job = serverJob();
+  const at = job.indexOf('Platform-only skips');
+  assert.ok(at > 0, 'a named step runs the checker');
+  assert.match(job.slice(at, at + 400), /if:\s*always\(\)/, 'the check step runs on a red suite');
+  assert.match(job, /exit\s+\$rc/, 'the suite step re-raises the suite’s own status');
+});
+
+test('#1690 (W5) the checkout tests the pull request’s head commit, so the sha handed to the checker names the tree that was tested', () => {
+  const job = serverJob();
+  assert.match(job, /actions\/checkout@v4\s+with:\s+ref:\s*\$\{\{\s*github\.event\.pull_request\.head\.sha/, 'checkout ref is the PR head');
+});
