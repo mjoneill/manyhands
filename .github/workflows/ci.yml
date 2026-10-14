@@ -82,6 +82,13 @@ jobs:
       # including locally, to work around a CI-only policy.
       - name: Allow Chromium's sandbox on the runner
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      # TRIAL (#1546 diag, not for main): give the runner the graph executor's
+      # python so the executor-backed tests run instead of skipping.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Graph executor venv (pyoxigraph)
+        run: python -m venv graph-executor/.venv && graph-executor/.venv/bin/pip install -r graph-executor/requirements.txt
       - name: Run the server suite
         run: npm run test:server
 
