@@ -72,7 +72,7 @@ jobs:
     steps:
       # #1690 — test the PR HEAD, not GitHub's merge ref, so the receipt's sha can be verified against the tree that
       # was tested. That is the tree that lands ONLY if the head is rebased onto current main and main fast-forwards
-      # to it: the landing rule since 10-06, though origin/main still holds 30 older merge commits. A head tested
+      # to it: the practice since 10-06 (not a written rule), though origin/main still holds 30 older merge commits. A head tested
       # alone says nothing about main + head if main has moved; rebase and re-run before landing.
       - uses: actions/checkout@v4
         with:
@@ -117,13 +117,8 @@ jobs:
           --sha "${{ github.event.pull_request.head.sha || github.sha }}"
           --suite-exit "${SUITE_EXIT:-}"
           --receipt ci-platform-receipt.json
-      - name: Keep the CI leg's receipt
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ci-platform-receipt
-          path: ci-platform-receipt.json
-          if-no-files-found: warn
+      # The receipt stays on the runner: #837 forbids uploading artifacts from this public workflow. The check's own
+      # log line carries the sha, tree, manifest hash and verdict that a landing reads.
 
   browser:
     name: browser suite
