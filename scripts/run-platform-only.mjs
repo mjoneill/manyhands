@@ -62,7 +62,9 @@ function main(argv) {
     for (const name of names) {
       const t = tests.find((x) => x.name === name);
       if (!t) problems.push(`named test did not run (renamed or removed?): ${name} (${file})`);
+      // Named coverage means an ordinary pass: a SKIP or a TODO ran nothing that counts (review of 8e4cbc4).
       else if (t.directive === 'SKIP') problems.push(`named test was skipped (${t.reason || 'no reason given'}): ${name} (${file})`);
+      else if (t.directive === 'TODO') problems.push(`named test is marked TODO, which is not a pass (${t.reason || 'no reason given'}): ${name} (${file})`);
       else if (!t.ok) problems.push(`named test failed: ${name} (${file})`);
     }
     // The named rows passing is not enough: a child that exits non-zero or is killed after them did not end clean

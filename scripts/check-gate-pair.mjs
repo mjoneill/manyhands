@@ -17,11 +17,12 @@ function read(file, leg) {
   if (!file) throw new CannotCheck(`no ${leg} receipt given`);
   let r;
   try { r = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { throw new CannotCheck(`cannot read ${leg} receipt ${file}: ${e.code ?? e.message}`); }
+  if (r?.leg !== 'ci' && r?.leg !== 'mac') throw new CannotCheck(`${leg} receipt ${file} does not say which leg it is`);
   if (typeof r?.sha !== 'string' || !/^[0-9a-f]{40}$/i.test(r.sha)) throw new CannotCheck(`${leg} receipt ${file} has no sha`);
   if (typeof r.manifestSha256 !== 'string' || !r.manifestSha256) throw new CannotCheck(`${leg} receipt ${file} has no manifest hash`);
   if (typeof r.tree !== 'string' || !r.tree) throw new CannotCheck(`${leg} receipt ${file} has no tree`);
   if (typeof r.ok !== 'boolean') throw new CannotCheck(`${leg} receipt ${file} has no verdict`);
-  if (leg === 'CI' && !Number.isInteger(r.suiteExit)) throw new CannotCheck(`CI receipt ${file} has no suite exit status`);
+  if (r.leg === 'ci' && !Number.isInteger(r.suiteExit)) throw new CannotCheck(`CI receipt ${file} has no suite exit status`);
   return r;
 }
 
@@ -29,6 +30,10 @@ function main([ciFile, macFile]) {
   const ci = read(ciFile, 'CI');
   const mac = read(macFile, 'Mac');
   const problems = [];
+  // Each slot must hold its own leg: one CI receipt passed twice, or the two swapped, would otherwise "complete"
+  // the gate with no Mac run at all (review of 8e4cbc4).
+  if (ci.leg !== 'ci') problems.push(`the first receipt must be the CI leg, but it is the ${ci.leg} leg (${ciFile})`);
+  if (mac.leg !== 'mac') problems.push(`the second receipt must be the Mac leg, but it is the ${mac.leg} leg (${macFile})`);
   if (ci.sha.toLowerCase() !== mac.sha.toLowerCase()) problems.push(`the legs tested different commits: CI ${ci.sha}, Mac ${mac.sha}`);
   // The sha is a label; the tree is what was tested. A PR's merge ref can carry a head-sha label over another tree.
   if (ci.tree !== mac.tree) problems.push(`the legs tested different trees: CI ${ci.tree}, Mac ${mac.tree}`);
