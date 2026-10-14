@@ -200,14 +200,21 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
       const loss = keyLoss(st.pendingKeysFrom, keyStreams);
       const dropped = st.pendingFrom - receivers;
       const unattributed = loss ? dropped - loss.total : null;
+      const unread = loss?.unknown.length ? `count unknown for ${loss.unknown.join(', ')}` : '';
       const who = !loss
         ? `receiver loss not attributable: no per-key reading from before the drop. `
-        : loss.lines.length === 0
-          ? `unattributed receiver loss: ${dropped} stream(s) fell and no bound key's count fell, so no client is named and no cause is claimed (#1546). `
-          : `stream(s) lost by ${loss.lines.join(', ')}`
-            + `${unattributed > 0 ? `, plus ${unattributed} unattributed receiver loss` : ''}. `
-            + `A client whose stream died under a live session receives NOTHING pushed until it reconnects — no queue, no replay (#624). `
-            + `If a named key is a seat, that seat is deaf until it reconnects; a key that is not a seat says nothing about seat delivery (#1546). `;
+        : loss.lines.length === 0 && unread
+          ? `receiver loss not attributable: ${dropped} stream(s) fell and ${unread}, so no client is named and no cause is claimed (#1546). `
+          : loss.lines.length === 0
+            ? `unattributed receiver loss: ${dropped} stream(s) fell and no bound key's count fell, so no client is named and no cause is claimed (#1546). `
+            : `stream(s) lost by ${loss.lines.join(', ')}`
+              + `${unattributed > 0 ? `, plus ${unattributed} unattributed receiver loss` : ''}`
+              + `${unread ? `; ${unread}` : ''}. `
+              + `A session whose stream died receives NOTHING pushed until it reconnects — no queue, no replay (#624). `
+              // #1546 review — a named key that still holds streams may still hear:
+              // which of its sessions lost the stream is not in this payload, so the
+              // line names the loss and claims no seat's delivery state.
+              + `Which of a named key's sessions lost its stream is not visible here, so this line does not say whether that key can still hear (#1546). `;
       warnBody = `⚠️ fanout watch: receivers dropped ${st.pendingFrom} → ${receivers} and stayed there `
         + `across two ticks while sessions held (${st.pendingSessionsFrom} → ${sessions}), so streams died under live sessions rather than clients leaving (#726) — `
         + who
@@ -700,8 +707,11 @@ export function keyStreamsFrom(status) {
   if (!seats || typeof seats !== 'object') return null;
   const out = {};
   for (const [name, s] of Object.entries(seats)) {
-    const n = Number(s?.streams);
-    if (Number.isFinite(n)) out[name] = n;
+    // An unread count is UNKNOWN, never zero: Number(null) is 0, so a missing or
+    // null `streams` must be caught before conversion, and the key must stay
+    // present, or keyLoss would read its absence as "no longer listed".
+    const n = s?.streams == null ? NaN : Number(s.streams);
+    out[name] = Number.isFinite(n) ? n : null;
   }
   return out;
 }
@@ -711,24 +721,30 @@ export function keyStreamsFrom(status) {
  *
  * A key present before and absent after counts as falling to 0: it no longer
  * holds a stream the room can push to. A key that rose or held is never named.
+ * A key whose count is UNKNOWN (null) after is listed separately as `name: 4→?`
+ * and never counted as a loss; one unknown before cannot be compared at all.
  * Null when either reading is missing, so "cannot attribute" is never rendered
  * as "nobody lost anything".
  *
- * @returns {{lines: string[], total: number}|null}  lines like 'alpha: 4→3'
+ * @returns {{lines: string[], unknown: string[], total: number}|null}
+ *          lines like 'alpha: 4→3', unknown like 'beta: 4→?'
  */
 export function keyLoss(before, after) {
   if (!before || !after) return null;
   const lines = [];
+  const unknown = [];
   let total = 0;
   for (const name of Object.keys(before).sort()) {
     const from = before[name];
     const gone = !(name in after);
     const to = gone ? 0 : after[name];
+    if (from == null) continue;
+    if (to == null) { unknown.push(`${name}: ${from}→?`); continue; }
     if (!(to < from)) continue;
     total += from - to;
     lines.push(`${name}: ${from}→${to}${gone ? ' (no longer listed)' : ''}`);
   }
-  return { lines, total };
+  return { lines, unknown, total };
 }
 
 /**
