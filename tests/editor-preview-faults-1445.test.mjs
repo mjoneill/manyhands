@@ -4,10 +4,13 @@
  * synchronous, so that state means the handler never ran, not that it was slow. These rows inject each candidate cause into the real page and show what the old wait and the
  * new `openPreview` (helpers/preview-ready.mjs) do with it. A fault is injected by a capture-phase listener on the document, which runs before the editor's own handler.
  *
- *   F0  CONTROL: no fault. `openPreview` opens it on the first activation.
+ *   F0  CONTROL: no fault. `openPreview` opens it on the first activation. The retry window is widened to 10 s for THIS row only: with the default 1.5 s, "attempts === 1" was a
+ *       claim about how fast a loaded runner delivers the first click, and it failed in CI on 10-07, 10-09 and 10-14 ("attempts":2, 1,705 ms and 1,691 ms) with the click neither lost nor wrong.
+ *   F0b A SLOW BUT NOT LOST first click (delivered 2.5 s late, past the default 1.5 s retry window, inside F0's 10 s): one activation is enough. This is the deterministic form of the CI
+ *       failures above; with the default window it needs a second activation, which is correct behaviour for the helper and is what F0 must not assert against.
  *   F1  THE MECHANISM: the FIRST click on the preview button never reaches its handler (what a layout shift between measuring the position and dispatching the mouse event does).
  *       The old shape (one click, then wait 5 s) fails with EXACTLY the CI state `previewing:false, previewHidden:true, previewLinks:0`; a longer wait would not change it (checked:
- *       the old shape with a 12 s wait fails the same way). The new helper opens it on the second activation and reports attempts = 2.
+ *       the old shape with a 12 s wait fails the same way). The new helper opens it on a later activation (attempts >= 2: the second click can itself be late on a loaded runner).
  *   F2  A SLOW HANDLER: the first click is held back and delivered 7 s later (past the old 5 s). The old shape fails; the new helper opens it, waiting on the page's signal; and once the late original
  *       click HAS arrived (after the retry already opened it) the preview is still open with its three refs, because the Preview button opens, it does not toggle (core/editor.mjs: click -> showPreview(true)).
  *   F3  THE SABOTAGE CLAUSE: no click ever reaches the button. `openPreview` THROWS at its ceiling (6 s here), names `never opened`, the attempt count and the editor's state, and the
@@ -64,6 +67,13 @@ async function oldShape(page, ms) {
 
 const SWALLOW_FIRST = () => { let n = 0; document.addEventListener('click', (e) => { if (e.target.closest && e.target.closest('[data-editor-preview]') && n++ === 0) { e.stopImmediatePropagation(); e.preventDefault(); } }, true); };
 const SWALLOW_ALL = () => { document.addEventListener('click', (e) => { if (e.target.closest && e.target.closest('[data-editor-preview]')) { e.stopImmediatePropagation(); e.preventDefault(); } }, true); };
+const DELAY_FIRST_2_5S = () => {
+  let n = 0;
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest && e.target.closest('[data-editor-preview]');
+    if (b && n++ === 0) { e.stopImmediatePropagation(); e.preventDefault(); setTimeout(() => { n = 99; b.click(); }, 2500); }
+  }, true);
+};
 const DELAY_FIRST_7S = () => {
   let n = 0;
   document.addEventListener('click', (e) => {
@@ -74,9 +84,19 @@ const DELAY_FIRST_7S = () => {
 
 test('F0 CONTROL: with no fault, openPreview opens the preview on the first activation', { timeout: 120_000 }, async () => {
   await withForm(null, async ({ page }) => {
-    const r = await openPreview(page, { buttonSelector: BTN, editorSelector: ED, clickFirst: clickFirst(page) });
+    // retryAfterMs 10 s: this row asserts that the FIRST click works, with margin for a loaded runner, not that it is delivered within the helper's default 1.5 s
+    const r = await openPreview(page, { buttonSelector: BTN, editorSelector: ED, clickFirst: clickFirst(page), retryAfterMs: 10_000 });
     assert.equal(r.attempts, 1, `one activation was enough (${JSON.stringify(r)})`);
     assert.equal((await stateOf(page)).previewLinks, 3, 'and the three refs are rendered');
+  });
+});
+
+test('F0b A SLOW BUT NOT LOST first click (2.5 s late): inside a 10 s retry window one activation is enough, and the preview opens with its three refs', { timeout: 120_000 }, async () => {
+  await withForm(DELAY_FIRST_2_5S, async ({ page }) => {
+    const r = await openPreview(page, { buttonSelector: BTN, editorSelector: ED, clickFirst: clickFirst(page), retryAfterMs: 10_000 });
+    assert.equal(r.attempts, 1, `a click that is only late is not a retry (${JSON.stringify(r)})`);
+    assert.ok(r.ms >= 2000, `and it really was held back (${JSON.stringify(r)})`);
+    assert.equal((await stateOf(page)).previewLinks, 3);
   });
 });
 
@@ -93,7 +113,8 @@ test('F1 THE MECHANISM: when the first click never reaches the handler, the old 
   });
   await withForm(SWALLOW_FIRST, async ({ page }) => {
     const r = await openPreview(page, { buttonSelector: BTN, editorSelector: ED, clickFirst: clickFirst(page) });
-    assert.equal(r.attempts, 2, `openPreview opened it on the second activation (${JSON.stringify(r)})`);
+    // "a later activation", not "exactly the second": on a loaded runner the second click can itself be late and the helper activates a third time; what F1 shows is that the swallowed first click needed one
+    assert.ok(r.attempts >= 2, `openPreview opened it on a later activation (${JSON.stringify(r)})`);
     assert.equal((await stateOf(page)).previewLinks, 3);
   });
 });
