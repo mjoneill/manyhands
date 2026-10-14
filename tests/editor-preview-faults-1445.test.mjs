@@ -82,13 +82,12 @@ const DELAY_FIRST_7S = () => {
   }, true);
 };
 
-test('F0 CONTROL: with no fault, openPreview opens the preview on the first activation', { timeout: 120_000 }, async () => {
+test('F0 CONTROL: with no fault, openPreview opens the preview with its three refs (the activation count is reported, not asserted)', { timeout: 120_000 }, async () => {
   await withForm(null, async ({ page }) => {
     // With no fault injected the preview must open with its three refs. How many activations it took is REPORTED, not asserted: the first, coordinate click can be lost on a loaded
     // runner (F0b failed on CI with the first click evidently lost: a 2.5 s hold-back that only started at the helper's retry, 12.8 s in), and that is the case the helper exists to absorb.
     const r = await openPreview(page, { buttonSelector: BTN, editorSelector: ED, clickFirst: clickFirst(page) });
     console.log(`# F0 activations: ${r.attempts} in ${r.ms} ms`);
-    assert.ok(r.ms < 30_000, `it opened (${JSON.stringify(r)})`);
     assert.equal((await stateOf(page)).previewLinks, 3, 'and the three refs are rendered');
   });
 });
