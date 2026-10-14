@@ -27,7 +27,7 @@
  * beta:4,gamma:1] unbound=2, receivers 9→8, sessions flat. The fixtures use
  * those numbers.
  */
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -79,7 +79,15 @@ async function tick(stateFile, payload) {
   }
 }
 
-const tmpState = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'fanout-1546-')), 'watch.state');
+// Every scenario makes its own state directory. The suite runner counts what a file leaves in its TMPDIR (#1672)
+// and fails the run on a new leak, so each directory is recorded and removed once the file's tests are done.
+const stateDirs = [];
+const tmpState = () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fanout-1546-'));
+  stateDirs.push(dir);
+  return path.join(dir, 'watch.state');
+};
+after(() => { for (const dir of stateDirs) fs.rmSync(dir, { recursive: true, force: true }); });
 const posted = (out) => {
   const m = out.match(/DRYRUN would post: ([\s\S]*)$/m);
   return m ? m[1] : null;
