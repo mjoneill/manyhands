@@ -89,9 +89,9 @@ const loss = (name, from, to) => new RegExp(`\\b${name}\\s*:\\s*${from}\\s*(?:�
 const anyLoss = (name) => new RegExp(`\\b${name}\\s*:\\s*\\d+\\s*(?:→|->)\\s*\\d+\\b`);
 
 /** baseline, then the drop twice (arm, fire). Returns { armed, fired } bodies. */
-async function drop(before, after, afterOpts = {}) {
+async function drop(before, after, afterOpts = {}, beforeOpts = {}) {
   const state = tmpState();
-  const base = await tick(state, status(before));
+  const base = await tick(state, status(before, beforeOpts));
   assert.equal(posted(base), null, 'the baseline tick posts nothing');
   const armed = await tick(state, status(after, afterOpts));
   assert.equal(posted(armed), null, 'the first tick of a drop only arms');
@@ -191,8 +191,8 @@ test('#1546 (e) a PARTIAL loss (4→3) is named as a loss and does not declare t
 // An UNKNOWN count is not a ZERO count. A key whose measurement is missing
 // (no `streams` field) or explicitly null must not be rendered as having fallen
 // to 0, and the line must not claim a count it does not have.
-// Accepts a word saying so, or an unknown marker in place of the count (`4→?`).
-const UNKNOWN_WORDING = /unknown|not attributable|unmeasured|unread|could not be (?:read|measured)|:\s*\d+\s*(?:→|->)\s*\?/i;
+// Accepts a word saying so, or an unknown marker in place of the count (`4→?` or `?→3`).
+const UNKNOWN_WORDING = /unknown|not attributable|unmeasured|unread|could not be (?:read|measured)|:\s*\d+\s*(?:→|->)\s*\?|:\s*\?\s*(?:→|->)\s*\d+/i;
 async function unknownCount(rawBeta) {
   // receivers fall 9→8 through the unbound streams, with sessions flat; beta's
   // seat object is replaced by `rawBeta`.
@@ -213,4 +213,39 @@ test('#1546 (f) a present key whose `streams` field is missing is not reported a
 
 test('#1546 (f2) a key with explicit `streams: null` is not reported as 4→0', async () => {
   await assertUnknownIsNotZero({ streams: null, sessions: 1, lastBeatAt: null });
+});
+
+// ------------------------------------------------- the same defect, other side
+//
+// The rows above leave the count unknown AFTER the drop. An unknown count
+// BEFORE it is the mirror: nothing can be compared, so the line must not claim
+// that no count fell. (The first set of rows left this side out.)
+async function unknownBaseline(rawBeta, after = { beta: 3 }, afterOpts = {}) {
+  return drop({}, after, afterOpts, { rawSeats: { beta: rawBeta } });
+}
+
+test('#1546 (g) a key whose count was UNKNOWN before the drop is not read as "no count fell"', async () => {
+  const { fired } = await unknownBaseline({ sessions: 1, lastBeatAt: null }); // `streams` missing before, 3 after
+  assert.ok(fired, 'the receivers drop still posts');
+  assert.doesNotMatch(fired, /no bound key's count fell/i, 'a comparison that could not be made is not evidence that nothing fell');
+  assert.doesNotMatch(fired, anyLoss('beta'), 'nothing is known about beta before the drop, so it is not named as having lost anything');
+  assert.match(fired, UNKNOWN_WORDING, 'the line says the count is unknown');
+});
+
+test('#1546 (g2) the same with explicit `streams: null` before the drop', async () => {
+  const { fired } = await unknownBaseline({ streams: null, sessions: 1, lastBeatAt: null });
+  assert.ok(fired);
+  assert.doesNotMatch(fired, /no bound key's count fell/i);
+  assert.doesNotMatch(fired, anyLoss('beta'));
+  assert.match(fired, UNKNOWN_WORDING);
+});
+
+test('#1546 (g3) an unknown baseline for one key does not hide a known loss by another', async () => {
+  // beta unread before; gamma falls 1→0 (receivers 9→8). The known loss is named
+  // and the unknown key is still reported as unknown.
+  const { fired } = await unknownBaseline({ sessions: 1, lastBeatAt: null }, { beta: 3, gamma: 0 }, { receivers: 8 });
+  assert.ok(fired);
+  assert.match(fired, loss('gamma', 1, 0), 'the known loss is named');
+  assert.doesNotMatch(fired, /no bound key's count fell/i);
+  assert.match(fired, UNKNOWN_WORDING, 'beta is reported as unknown, not silently dropped');
 });
