@@ -82,7 +82,7 @@ export function maintenanceFrom(changes, { now = Date.now(), windowMs = 10 * 60 
   return best;
 }
 
-export function decide({ receivers, sessions, floor, cooldownMs, now, state, staleSeats: stale = [], stoppedSeats: stopped = [], answeredSeats: answered = [], unconfirmedSeats: unconfirmed = null, writesUnreadableReason = null, stoppedRefireMs = 60 * 60 * 1000, staleFacts = null, maintenance = null }) {
+export function decide({ receivers, sessions, floor, cooldownMs, now, state, staleSeats: stale = [], stoppedSeats: stopped = [], answeredSeats: answered = [], unconfirmedSeats: unconfirmed = null, writesUnreadableReason = null, stoppedRefireMs = 60 * 60 * 1000, staleFacts = null, maintenance = null, keyStreams = null }) {
   // Deep-copy the two containers. A spread alone leaves `sigTimes` and `hist`
   // ALIASED to the caller's objects, so decide() would edit state it was only
   // asked to read — invisible in production (each run reads fresh state off
@@ -109,6 +109,10 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
   // itself. Absent means "no baseline yet", so adopt the current reading.
   const prevReceivers = st.r;
   const prevSessions = st.s ?? sessions;
+  // #1546 — the per-key stream counts from the previous tick. Absent (a state
+  // file from before #1546, or a payload with no seats map) means the loss
+  // cannot be attributed, never that nothing fell.
+  const prevKeys = st.k ?? null;
 
   st.sigTimes ??= {};
   // #690 migration: legacy pair keys (`7->4`) become destination keys
@@ -139,7 +143,7 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
   let warnBody = null;
 
   if (st.pendingFrom != null && receivers >= st.pendingFrom) {
-    st.pendingFrom = null; st.pendingSessionsFrom = null; st.warned = false;   // recovered
+    st.pendingFrom = null; st.pendingSessionsFrom = null; st.pendingKeysFrom = null; st.warned = false;   // recovered
     // #1395 — a drop-branch suppression record belongs to the episode it
     // recorded; left behind, a later unrelated drop below that stale number
     // would re-arm a cooldown-set `warned` and post once too often.
@@ -187,11 +191,26 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
       };
       st.warned = true;                                   // gated once, exactly like a cooldown-suppressed drop
     } else if (!st.warned && !inCooldown && !clientsLeft) {
+      // #1546 — NAME THE LOSER. Four firings (10-03 ×2, 10-10, 10-14) said "which
+      // is deafness" while every seat held its stream; the `bound=` bracket is a
+      // post-drop snapshot, so it could not say which stream went. The diff
+      // against the pre-drop per-key reading can. A key with no change is never
+      // named, and a loss no key accounts for is said to be unattributed, with no
+      // cause claimed for it.
+      const loss = keyLoss(st.pendingKeysFrom, keyStreams);
+      const dropped = st.pendingFrom - receivers;
+      const unattributed = loss ? dropped - loss.total : null;
+      const who = !loss
+        ? `receiver loss not attributable: no per-key reading from before the drop. `
+        : loss.lines.length === 0
+          ? `unattributed receiver loss: ${dropped} stream(s) fell and no bound key's count changed, so no client is named and no cause is claimed (#1546). `
+          : `stream(s) lost by ${loss.lines.join(', ')}`
+            + `${unattributed > 0 ? `, plus ${unattributed} unattributed receiver loss` : ''}. `
+            + `A client whose stream died under a live session receives NOTHING pushed until it reconnects — no queue, no replay (#624). `
+            + `If a named key is a seat, that seat is deaf until it reconnects; a key that is not a seat says nothing about seat delivery (#1546). `;
       warnBody = `⚠️ fanout watch: receivers dropped ${st.pendingFrom} → ${receivers} and stayed there `
-        + `across two ticks while sessions held (${st.pendingSessionsFrom} → ${sessions}) — `
-        + `${st.pendingFrom - receivers} stream(s) died under live sessions, which is deafness `
-        + `rather than a client leaving (#726). `
-        + `mode-independent: seats without a stream receive NOTHING — no queue, no replay (#624). `
+        + `across two ticks while sessions held (${st.pendingSessionsFrom} → ${sessions}), so streams died under live sessions rather than clients leaving (#726) — `
+        + who
         // ⛔ 2026-08-12 — TWO REMEDIES REMOVED, both FALSE. Not scoped wrong: false.
         //
         // 1. "any single MCP tool call re-registers it" — a tool call is a POST;
@@ -223,7 +242,7 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
     } else if (clientsLeft) {
       // Benign turnover: stand down entirely rather than staying armed, so the
       // next genuine drop arms from a current baseline instead of a stale one.
-      st.pendingFrom = null; st.pendingSessionsFrom = null; st.warned = false;
+      st.pendingFrom = null; st.pendingSessionsFrom = null; st.pendingKeysFrom = null; st.warned = false;
       if (st.maintenanceSuppressed?.signature?.startsWith('drop:')) delete st.maintenanceSuppressed;   // #1395
     }
   } else if (receivers < prevReceivers) {
@@ -236,6 +255,10 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
     } else {
       st.pendingFrom = prevReceivers;                     // first tick of a drop — arm, don't warn
       st.pendingSessionsFrom = prevSessions;
+      // #1546 — the per-key baseline is the reading from BEFORE the drop. At the
+      // firing tick the map equals this arming tick's, so a previous-tick diff
+      // would name nobody.
+      st.pendingKeysFrom = prevKeys;
     }
   }
 
@@ -426,6 +449,7 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
     }
     st.r = receivers;
     st.s = sessions;
+    st.k = keyStreams ?? null;
     return { state: st, warnBody };
   }
   const stoppedNow = new Set();
@@ -488,6 +512,7 @@ export function decide({ receivers, sessions, floor, cooldownMs, now, state, sta
 
   st.r = receivers;
   st.s = sessions;
+  st.k = keyStreams ?? null;
   return { state: st, warnBody };
 }
 
@@ -661,6 +686,49 @@ export function renderSeats(seats) {
     const streams = Number(seats[name]?.streams);
     return `${name}:${Number.isFinite(streams) ? streams : '?'}`;
   });
+}
+
+/**
+ * #1546 — the per-key stream counts from one /channel/status payload, or null
+ * when the payload carries no seats map (nothing to attribute against).
+ *
+ * @param {object} status  /channel/status
+ * @returns {Object<string, number>|null}  e.g. { healthcheck: 1, alpha: 4 }
+ */
+export function keyStreamsFrom(status) {
+  const seats = status?.seats;
+  if (!seats || typeof seats !== 'object') return null;
+  const out = {};
+  for (const [name, s] of Object.entries(seats)) {
+    const n = Number(s?.streams);
+    if (Number.isFinite(n)) out[name] = n;
+  }
+  return out;
+}
+
+/**
+ * #1546 — which keys' stream counts FELL between two per-key readings.
+ *
+ * A key present before and absent after counts as falling to 0: it no longer
+ * holds a stream the room can push to. A key that rose or held is never named.
+ * Null when either reading is missing, so "cannot attribute" is never rendered
+ * as "nobody lost anything".
+ *
+ * @returns {{lines: string[], total: number}|null}  lines like 'alpha: 4→3'
+ */
+export function keyLoss(before, after) {
+  if (!before || !after) return null;
+  const lines = [];
+  let total = 0;
+  for (const name of Object.keys(before).sort()) {
+    const from = before[name];
+    const gone = !(name in after);
+    const to = gone ? 0 : after[name];
+    if (!(to < from)) continue;
+    total += from - to;
+    lines.push(`${name}: ${from}→${to}${gone ? ' (no longer listed)' : ''}`);
+  }
+  return { lines, total };
 }
 
 /**
