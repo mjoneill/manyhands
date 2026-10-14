@@ -2,27 +2,32 @@
 /**
  * #1690 — the CI leg of the platform-split landing gate (decision 45a5d8e4).
  *
- *   node scripts/check-platform-skips.mjs <tap-file> --manifest <path> --sha <40-hex> [--receipt <path>]
+ *   node scripts/check-platform-skips.mjs <tap-file> --manifest <path> --root <checkout> --sha <40-hex>
+ *                                         --suite-exit <n> [--receipt <path>]
  *
- * CI runs every test it can. The only skips it may show are the manifest's platform-only tests, each skipped as
- * UNAVAILABLE, and the manifest must equal that set exactly:
- *   · a manifest test that RAN, or does not appear at all, is refused (it is no longer platform-only, or it moved)
- *   · an UNAVAILABLE skip the manifest does not list is refused (the list grew without anyone deciding it)
- *   · a skip for ANY other reason, including a bare `# SKIP`, is refused (a skip is not a pass)
- * TODO rows are not skips and are not judged here.
+ * A CI leg is clean only if the suite itself finished clean AND its skips are exactly the platform-only ones:
+ *   · the suite's exit status (--suite-exit, required) is 0, no test line fails (TODO rows excepted), and no
+ *     `# fail N` summary is above zero — skip compliance alone is not a green run (review of the first build)
+ *   · the manifest equals the UNAVAILABLE skip set: a listed test that RAN or is absent, an UNAVAILABLE skip that is
+ *     not listed, and a skip for ANY other reason (a bare `# SKIP` included) are refused and named
+ *   · the commit is verified, not declared: --root must be a git checkout whose HEAD is --sha with no modified
+ *     tracked file; the receipt carries that HEAD's tree
  *
- * Exit 0 clean · 1 mismatch, naming each test · 2 could not check (empty or missing TAP, a TAP with no test
- * lines, a missing, empty or malformed manifest). The receipt records the leg, the sha, the manifest's content
- * hash and the verdict, for check-gate-pair.mjs.
+ * Exit 0 clean · 1 mismatch, naming each test or the exit · 2 could not check (empty, missing or test-less TAP; a
+ * missing, empty or malformed manifest; a missing or non-numeric suite exit; a sha that is not the checkout).
  */
 import fs from 'node:fs';
-import { EXIT, CannotCheck, parseArgs, readManifest, parseTap, isPlatformSkip, writeReceipt, requireSha } from './platform-gate-lib.mjs';
+import { EXIT, CannotCheck, parseArgs, readManifest, parseTap, isPlatformSkip, writeReceipt, verifyCheckout } from './platform-gate-lib.mjs';
 
 function main(argv) {
   const { flags, positional } = parseArgs(argv);
   const tapFile = positional[0];
   if (!tapFile) throw new CannotCheck('no TAP file given');
-  const sha = requireSha(flags.sha);
+  if (flags['suite-exit'] === undefined || !/^\d+$/.test(flags['suite-exit'])) {
+    throw new CannotCheck(`--suite-exit must be the suite's numeric exit status, got ${flags['suite-exit'] === undefined ? 'nothing' : `"${flags['suite-exit']}"`}`);
+  }
+  const suiteExit = Number(flags['suite-exit']);
+  const { sha, tree } = verifyCheckout(flags.root, flags.sha);
   const manifest = readManifest(flags.manifest);
 
   let text;
@@ -30,17 +35,23 @@ function main(argv) {
   const tests = parseTap(text);
   if (tests.length === 0) throw new CannotCheck(`TAP ${tapFile} has no test lines`);
 
-  const listed = new Set(manifest.entries.map((e) => e.name));
   const problems = [];
 
-  // The runner reprints failing rows in a FAILURES section, so a name can appear twice; judge each name once,
-  // and a name that skipped as UNAVAILABLE anywhere counts as skipped.
+  // ── the suite finished clean
+  if (suiteExit !== 0) problems.push(`the suite exited ${suiteExit}, not 0`);
+  const failSummaries = [...text.matchAll(/^# fail (\d+)\s*$/gm)].map((m) => Number(m[1])).filter((n) => n > 0);
+  if (failSummaries.length) problems.push(`the TAP reports failures: # fail ${Math.max(...failSummaries)}`);
+  const failed = new Set(tests.filter((t) => !t.ok && t.directive !== 'TODO').map((t) => t.name));
+  for (const name of failed) problems.push(`test failed: ${name}`);
+
+  // ── the skips are exactly the manifest. The runner reprints failing rows in a FAILURES section, so a name can
+  // appear twice; judge each name once, and a name that skipped as UNAVAILABLE anywhere counts as skipped.
+  const listed = new Set(manifest.entries.map((e) => e.name));
   const byName = new Map();
   for (const t of tests) {
     const prev = byName.get(t.name);
     if (!prev || (isPlatformSkip(t) && !isPlatformSkip(prev))) byName.set(t.name, t);
   }
-
   for (const name of listed) {
     const t = byName.get(name);
     if (!t) problems.push(`manifest test did not appear in the run: ${name}`);
@@ -54,22 +65,22 @@ function main(argv) {
 
   const ok = problems.length === 0;
   writeReceipt(flags.receipt, {
-    leg: 'ci', sha, manifestSha256: manifest.sha256, ok,
+    leg: 'ci', sha, tree, manifestSha256: manifest.sha256, suiteExit, ok,
     matched: ok ? listed.size : null, problems, at: new Date().toISOString(),
   });
   if (ok) {
-    console.log(`platform skips: ${listed.size} of ${listed.size} manifest tests skipped as UNAVAILABLE, and no other skips (sha ${sha}, manifest ${manifest.sha256})`);
+    console.log(`CI leg clean: suite exit 0, no failures, and ${listed.size} of ${listed.size} manifest tests skipped as UNAVAILABLE with no other skips (sha ${sha}, tree ${tree}, manifest ${manifest.sha256})`);
     return EXIT.CLEAN;
   }
   for (const p of problems) console.log(`⛔ ${p}`);
-  console.log(`platform skips: ${problems.length} mismatch(es) against the manifest (sha ${sha})`);
+  console.log(`CI leg not clean: ${problems.length} problem(s) (sha ${sha})`);
   return EXIT.MISMATCH;
 }
 
 try {
   process.exitCode = main(process.argv.slice(2));
 } catch (e) {
-  console.error(`⛔ could not check platform skips: ${e.message}`);
+  console.error(`⛔ could not check the CI leg: ${e.message}`);
   // Any failure to finish the check, expected or not, fails closed.
   process.exitCode = EXIT.CANNOT_CHECK;
 }

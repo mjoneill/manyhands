@@ -70,7 +70,11 @@ jobs:
     # #1690 — the executor-backed tests now run here instead of skipping; the trial took 17 min against 20.
     timeout-minutes: 30
     steps:
+      # #1690 — test the PR HEAD, not GitHub's merge ref: main only ever moves by fast-forward to a PR head, so the
+      # head is exactly what lands, and the receipt's sha can be verified against the tree that was tested.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -91,16 +95,25 @@ jobs:
         run: python -m venv graph-executor/.venv && graph-executor/.venv/bin/pip install -r graph-executor/requirements.txt
       - name: Run the server suite
         run: |
+          set +e
           set -o pipefail
           npm run test:server 2>&1 | tee server-suite.tap
+          rc=$?
+          echo "SUITE_EXIT=$rc" >> "$GITHUB_ENV"
+          exit $rc
       # The only skips allowed are the manifest's platform-only tests, skipped as UNAVAILABLE; those run on the Mac
       # leg (scripts/run-platform-only.mjs). Runs even when the suite failed, so a red run still says what skipped.
       - name: Platform-only skips equal the manifest
         if: always()
+        # The suite's own exit status is an input: skip compliance alone is not a green run. If the suite step never
+        # recorded one, SUITE_EXIT is empty and the check fails closed (exit 2).
+        # --sha is the commit the event says should be tested; the checker verifies the checkout really is it.
         run: >-
           node scripts/check-platform-skips.mjs server-suite.tap
           --manifest tests/platform-only-manifest.json
+          --root .
           --sha "${{ github.event.pull_request.head.sha || github.sha }}"
+          --suite-exit "${SUITE_EXIT:-}"
           --receipt ci-platform-receipt.json
       - name: Keep the CI leg's receipt
         if: always()

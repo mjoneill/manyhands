@@ -8,6 +8,7 @@
  * "Could not check" is never "clean": an empty TAP, an empty manifest or an unreadable receipt is the state in
  * which a gate most easily prints its own all-clear.
  */
+import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 
@@ -83,4 +84,26 @@ export function writeReceipt(file, receipt) {
 export function requireSha(sha) {
   if (!sha || !/^[0-9a-f]{40}$/i.test(sha)) throw new CannotCheck(`--sha must be a full 40-character commit sha, got ${sha ? `"${sha}"` : 'nothing'}`);
   return sha.toLowerCase();
+}
+
+/**
+ * The commit is VERIFIED, not declared (review of the first build): `root` must be a git checkout whose HEAD is
+ * the declared sha, with no modified TRACKED file, or the tool cannot attest what it tested and exits 2. Untracked
+ * files (the suite's TAP, a receipt, the executor venv) are not part of the commit and do not count. Returns the
+ * HEAD's tree hash, which both receipts carry so the pair can compare what was actually tested, not a label.
+ */
+export function verifyCheckout(root, declared) {
+  const sha = requireSha(declared);
+  if (!root) throw new CannotCheck('no --root given (the checkout that was tested)');
+  const git = (...args) => {
+    const r = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
+    if (r.status !== 0) throw new CannotCheck(`${root} is not a git checkout this tool can read (git ${args[0]}: ${(r.stderr || r.error?.message || '').trim()})`);
+    return r.stdout;
+  };
+  const head = git('rev-parse', 'HEAD').trim().toLowerCase();
+  if (head !== sha) throw new CannotCheck(`declared sha ${sha} is not the checked-out HEAD ${head} in ${root}`);
+  // -z keeps porcelain's leading status columns intact (a trimmed " M path" would lose its first column).
+  const dirty = git('status', '--porcelain', '-z', '--untracked-files=no').split('\0').filter(Boolean).map((l) => l.slice(3));
+  if (dirty.length) throw new CannotCheck(`tracked files differ from ${sha}, so the tested tree is not that commit: ${dirty.join(', ')}`);
+  return { sha, tree: git('rev-parse', 'HEAD^{tree}').trim() };
 }
