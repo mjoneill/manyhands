@@ -721,13 +721,14 @@ export function keyStreamsFrom(status) {
  *
  * A key present before and absent after counts as falling to 0: it no longer
  * holds a stream the room can push to. A key that rose or held is never named.
- * A key whose count is UNKNOWN (null) after is listed separately as `name: 4→?`
- * and never counted as a loss; one unknown before cannot be compared at all.
+ * A key whose count is UNKNOWN (null) on either side is listed separately as
+ * `name: 4→?` or `name: ?→3` and never counted as a loss, so an unread count
+ * can neither assert a fall nor support "nothing fell".
  * Null when either reading is missing, so "cannot attribute" is never rendered
  * as "nobody lost anything".
  *
  * @returns {{lines: string[], unknown: string[], total: number}|null}
- *          lines like 'alpha: 4→3', unknown like 'beta: 4→?'
+ *          lines like 'alpha: 4→3', unknown like 'beta: 4→?' or 'beta: ?→3'
  */
 export function keyLoss(before, after) {
   if (!before || !after) return null;
@@ -738,7 +739,12 @@ export function keyLoss(before, after) {
     const from = before[name];
     const gone = !(name in after);
     const to = gone ? 0 : after[name];
-    if (from == null) continue;
+    if (from == null) {
+      // An unread BASELINE is as unknown as an unread reading: comparing against
+      // it is no evidence that nothing fell (#1546 review, 42002).
+      unknown.push(`${name}: ?→${to == null ? '?' : to}${gone ? ' (no longer listed)' : ''}`);
+      continue;
+    }
     if (to == null) { unknown.push(`${name}: ${from}→?`); continue; }
     if (!(to < from)) continue;
     total += from - to;
