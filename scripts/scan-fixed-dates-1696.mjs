@@ -228,8 +228,9 @@ function flagFile(file, src, fields) {
       }
       if (!field) continue;
     }
-    // The fingerprint binds an acceptance to the source it was read against: this statement and every statement on its date and consumer chains, by text (not by line).
-    const chain = [...new Set([...reach(s, dateDerived).map((x) => x.at), ...reach(s, reaches).map((x) => x.at)])].sort((a, b) => a.line - b.line);
+    // The fingerprint binds an acceptance to the source it was read against: this statement and EVERY local statement it depends on, by text (not by line). That closure is wider than the
+    // date and consumer chains on purpose: a number the expiry is computed from (WHEN + DAYS) is on neither chain, yet changing it moves the expiry. Flag eligibility is unchanged.
+    const chain = [...new Set([...reach(s, new Set(stmts)).map((x) => x.at)])].sort((a, b) => a.line - b.line);
     const fingerprint = crypto.createHash('sha256').update(JSON.stringify(chain.map((c) => c.text))).digest('hex').slice(0, 16);
     const dateLiterals = []; const seenLines = new Set();
     for (const x of dates) for (const d of x.at.dates) if (!seenLines.has(d.line)) { seenLines.add(d.line); dateLiterals.push(d); }
