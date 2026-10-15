@@ -249,6 +249,28 @@ test('#1690 (X6) FAILS CLOSED on shape: a key outside the allowlist, a missing k
   }
 });
 
+test('#1690 (X6b) INHERITED property names are not allowlisted fields: `constructor`, `__proto__`, `toString`, `hasOwnProperty`, `valueOf` as extra keys: exit 2, naming the field, nothing written', async () => {
+  for (const name of ['constructor', '__proto__', 'toString', 'hasOwnProperty', 'valueOf', 'isPrototypeOf']) {
+    // built as text: assigning `__proto__` on an object would set the prototype instead of making the key
+    const base = JSON.stringify(receipt());
+    const text = `${base.slice(0, -1)},${JSON.stringify(name)}:{"x":1}}`;
+    assert.ok(Object.keys(JSON.parse(text)).includes(name), `the fixture really carries an own key ${name}`);
+    const l = makeLog([...noise, logLine(JOB, STEP, marker(text), 3)]);
+    const r = await extract(l);
+    assert.equal(r.code, 2, `${name}: ${r.out}`);
+    assert.ok(r.out.includes(name), `${name}: the message names the field`);
+    assert.ok(!fs.existsSync(l.out), `${name}: nothing written`);
+  }
+});
+
+test('#1690 (X6c) CONTROL — the same shape with an ordinary extra key is refused too, so X6b’s refusal is about the allowlist and not the fixture', async () => {
+  const text = `${JSON.stringify(receipt()).slice(0, -1)},"notAField":{"x":1}}`;
+  const l = makeLog([...noise, logLine(JOB, STEP, marker(text), 3)]);
+  const r = await extract(l);
+  assert.equal(r.code, 2, r.out);
+  assert.ok(r.out.includes('notAField'));
+});
+
 test('#1690 (X7) FAILS CLOSED: a marker followed by something that is not JSON, an empty log, or a missing file: exit 2', async () => {
   const notJson = makeLog([...noise, logLine(JOB, STEP, marker('{ not json'), 3)]);
   assert.equal((await extract(notJson)).code, 2, 'not JSON');
