@@ -21,6 +21,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
@@ -180,7 +181,7 @@ function analyse(file, src) {
         if (name && CONSUMERS.has(name)) calls.push({ name, line: n.loc.start.line });
       }
     });
-    return { file, line: stmt.loc.start.line, title: titleOf(stmt, src), declares: declaredNames(stmt), refs, dates, calls, props };
+    return { file, line: stmt.loc.start.line, title: titleOf(stmt, src), text: src.slice(stmt.start, stmt.end), declares: declaredNames(stmt), refs, dates, calls, props };
   });
   return stmts;
 }
@@ -227,10 +228,13 @@ function flagFile(file, src, fields) {
       }
       if (!field) continue;
     }
+    // The fingerprint binds an acceptance to the source it was read against: this statement and every statement on its date and consumer chains, by text (not by line).
+    const chain = [...new Set([...reach(s, dateDerived).map((x) => x.at), ...reach(s, reaches).map((x) => x.at)])].sort((a, b) => a.line - b.line);
+    const fingerprint = crypto.createHash('sha256').update(JSON.stringify(chain.map((c) => c.text))).digest('hex').slice(0, 16);
     const dateLiterals = []; const seenLines = new Set();
     for (const x of dates) for (const d of x.at.dates) if (!seenLines.has(d.line)) { seenLines.add(d.line); dateLiterals.push(d); }
     flagged.push({
-      file, line: s.line, statement: s.title, ...(field ? { field: field.name, fieldLine: field.line } : {}), dateLiteral: dateLiterals[0], dateLiterals, consumer: calls[0].at.calls[0],
+      file, line: s.line, statement: s.title, ...(field ? { field: field.name, fieldLine: field.line } : {}), dateLiteral: dateLiterals[0], dateLiterals, dates: [...new Set(dateLiterals.map((d) => d.value))].sort(), fingerprint, consumer: calls[0].at.calls[0],
       via: [...new Set([...dates.flatMap((x) => x.names), ...calls[0].names])],
     });
   }
@@ -284,34 +288,50 @@ function main(argv) {
     if (baselineFile) {
       const doc = loadJson(baselineFile, 'accepted-sites list');
       if (!doc || !Array.isArray(doc.accepted)) throw new Error(`accepted-sites list ${baselineFile}: it has no accepted array`);
-      for (const e of doc.accepted) if (!e || typeof e.file !== 'string' || typeof e.statement !== 'string' || typeof e.reason !== 'string' || !e.reason.trim()) throw new Error(`accepted-sites list ${baselineFile}: every entry needs a file, a statement and a reason`);
+      for (const e of doc.accepted) {
+        if (!e || typeof e.file !== 'string' || typeof e.statement !== 'string' || typeof e.reason !== 'string' || !e.reason.trim()) throw new Error(`accepted-sites list ${baselineFile}: every entry needs a file, a statement and a reason`);
+        for (const k of ['field', 'consumer', 'fingerprint']) if (typeof e[k] !== 'string' || !e[k]) throw new Error(`accepted-sites list ${baselineFile}: an entry for "${e.statement}" has no ${k}; an acceptance is bound to its dates, field, consumer and a source fingerprint`);
+        if (!Array.isArray(e.dates) || !e.dates.length || e.dates.some((x) => typeof x !== 'string')) throw new Error(`accepted-sites list ${baselineFile}: an entry for "${e.statement}" has no dates; an acceptance is bound to its dates, field, consumer and a source fingerprint`);
+      }
       baseline = doc.accepted;
     }
   } catch (e) { console.error(String(e.message)); return 2; }
   const r = scan(paths, fields);
   const uncovered = fields ? `Fields not on the list are uncovered, not safe: this covers only ${fieldNames.join(', ')} (list: ${fieldsFile}).` : undefined;
-  let accepted = []; let staleBaseline = [];
+  let accepted = []; let staleBaseline = []; const changed = [];
   if (baseline) {
     const used = new Set(); const keep = [];
+    const same = (e, f) => e.file === f.file && e.statement === f.statement && e.field === f.field && e.consumer === f.consumer.name && JSON.stringify(e.dates) === JSON.stringify(f.dates) && e.fingerprint === f.fingerprint;
     for (const f of r.flagged) {
-      const i = baseline.findIndex((e, k) => !used.has(k) && e.file === f.file && e.statement === f.statement && (e.field === undefined || e.field === f.field));
-      if (i >= 0) { used.add(i); accepted.push({ ...f, reason: baseline[i].reason }); } else keep.push(f);
+      const i = baseline.findIndex((e, k) => !used.has(k) && same(e, f));
+      if (i >= 0) { used.add(i); accepted.push({ ...f, reason: baseline[i].reason }); continue; }
+      keep.push(f);
+    }
+    // A flagged site whose entry exists but no longer matches is CHANGED (needs review), never inherited as safe and never merely stale.
+    for (const f of keep) {
+      const k = baseline.findIndex((e, kk) => !used.has(kk) && e.file === f.file && e.statement === f.statement);
+      if (k < 0) continue;
+      used.add(k); const e = baseline[k]; const differs = [];
+      if (e.field !== f.field) differs.push('field'); if (e.consumer !== f.consumer.name) differs.push('consumer');
+      if (JSON.stringify(e.dates) !== JSON.stringify(f.dates)) differs.push('dates'); if (e.fingerprint !== f.fingerprint) differs.push('fingerprint');
+      changed.push({ file: f.file, statement: f.statement, differs, accepted: { dates: e.dates, consumer: e.consumer, field: e.field, fingerprint: e.fingerprint, reason: e.reason }, now: { dates: f.dates, consumer: f.consumer.name, field: f.field, fingerprint: f.fingerprint } });
     }
     r.flagged = keep; staleBaseline = baseline.filter((_, k) => !used.has(k));
   }
-  const code = r.unreadable.length || r.filesRequested === 0 ? 2 : (r.flagged.length || staleBaseline.length ? 1 : 0);
+  const code = r.unreadable.length || r.filesRequested === 0 ? 2 : (r.flagged.length || staleBaseline.length || changed.length ? 1 : 0);
   if (json) {
     const { filesRequested, ...out } = r;
-    process.stdout.write(`${JSON.stringify({ ...out, ...(fields ? { fields: fieldNames, uncovered } : {}), ...(baseline ? { accepted, staleBaseline } : {}) }, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify({ ...out, ...(fields ? { fields: fieldNames, uncovered } : {}), ...(baseline ? { accepted, changed, staleBaseline } : {}) }, null, 2)}\n`);
     if (r.filesRequested === 0) process.stderr.write('no test file was found: nothing was checked\n');
     return code;
   }
   for (const f of r.flagged) console.log(`${f.file}:${f.dateLiteral.line} fixed date ${JSON.stringify(f.dateLiteral.value)} reaches ${f.consumer.name} (${f.file}:${f.consumer.line}) in "${f.statement}" (${f.file}:${f.line})${f.field ? ` through the field ${f.field} (${f.file}:${f.fieldLine})` : ''} via ${f.via.join(' -> ') || '(directly)'}`);
   for (const a of accepted) console.log(`accepted: "${a.statement}" (${a.file}:${a.line}) - ${a.reason}`);
+  for (const c of changed) console.log(`CHANGED since accepted (${c.differs.join(', ')} differ): needs review, not inherited as safe: "${c.statement}" in ${c.file}`);
   for (const b of staleBaseline) console.log(`STALE accepted-sites entry, it matches no site (remove it): "${b.statement}" in ${b.file}`);
   for (const u of r.unreadable) console.log(`COULD NOT CHECK ${u.file}: ${u.error}`);
   if (r.filesRequested === 0) console.log('COULD NOT CHECK: no test file was found; nothing was checked');
-  console.log(`${r.flagged.length} flagged site(s) in ${r.files} file(s) read; ${accepted.length} accepted; ${staleBaseline.length} stale; ${r.unreadable.length} unreadable.`);
+  console.log(`${r.flagged.length} flagged site(s) in ${r.files} file(s) read; ${accepted.length} accepted; ${changed.length} changed; ${staleBaseline.length} stale; ${r.unreadable.length} unreadable.`);
   if (uncovered) console.log(uncovered);
   console.log(GUARD);
   return code;
