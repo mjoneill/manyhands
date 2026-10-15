@@ -92,6 +92,23 @@ async function phase(sd, label) {
       const f = (k) => `p50=${med(rows.map((r) => r[k])).toFixed(1)} p95=${p95(rows.map((r) => r[k])).toFixed(1)}`;
       return `calls=${rows.length}, calls with no matched handler line=${rows.filter((r) => r.n === 0).length}, handler lines per call min=${Math.min(...rows.map((r) => r.n))} max=${Math.max(...rows.map((r) => r.n))}; per-call handler sum ${f('handler')} ms; per-call residual ${f('residual')} ms; end-to-end ${f('e2e')} ms`;
     };
+    // DIAGNOSTIC (#1694): the executor's own `query-phases` lines (setup, iterate_convert, encode, write, rows), attributed to the measured call whose start precedes them
+    // (calls on a leg are sequential), then summed over the 2 to 3 queries each call makes. End-to-end minus the phase-line totals is the residual, never a p95 difference.
+    const phaseRows = (x) => {
+      const all = logLines(x).slice(x.mark).map((l) => l.split(' '));
+      const ph = all.filter((t) => t[2] === 'query-phases' && t[3] === 'OK').map((t) => ({ at: Date.parse(t[0]), total: Number(t[4]), p: Object.fromEntries(t.slice(6).map((q) => q.split('=')).map(([k, v]) => [k, Number(v)])) }));
+      const starts = x.calls.map((c) => c.t0 - 2);
+      const owner = (at) => { let k = -1; for (let i = 0; i < starts.length; i++) if (starts[i] <= at) k = i; return k; };
+      return x.calls.map((c, i) => {
+        const q = ph.filter((e) => owner(e.at) === i); const sum = (f) => q.reduce((acc, e) => acc + f(e), 0);
+        return { n: q.length, setup: sum((e) => e.p.setup ?? 0), iterate_convert: sum((e) => e.p.iterate_convert ?? 0), encode: sum((e) => e.p.encode ?? 0), write: sum((e) => e.p.write ?? 0), rows: sum((e) => e.p.rows ?? 0), phase_total: sum((e) => e.total), e2e: c.ms, residual: c.ms - sum((e) => e.total) };
+      });
+    };
+    const phaseSummary = (x) => {
+      const rows = phaseRows(x); const f = (k) => `${k}=${med(rows.map((r) => r[k])).toFixed(1)}/${p95(rows.map((r) => r[k])).toFixed(1)}`;
+      return `calls=${rows.length}, calls with no phase line=${rows.filter((r) => r.n === 0).length}, phase lines per call min=${Math.min(...rows.map((r) => r.n))} max=${Math.max(...rows.map((r) => r.n))}; per-call sums p50/p95 ms: ${['setup', 'iterate_convert', 'encode', 'write', 'phase_total', 'residual', 'e2e'].map(f).join(' ')}; rows per call p50=${med(rows.map((r) => r.rows))}`;
+    };
+    console.log(`L1DIAG2 ${label}: executor query-phases (residual = end-to-end minus the phase-line totals: combined unmeasured overhead, not a proven split) | executor leg: ${phaseSummary(on)}`);
     console.log(`L1DIAG ${label}: PER-CALL correlation (residual = combined unmeasured overhead, not a proven queue/transport/serialization split) | executor leg: ${perCall(on)} | in-process leg's executor: ${perCall(off)}`);
     const line = `L1 ${label}: load1=${os.loadavg()[0].toFixed(2)}  in-process n=${offMs.length} p50=${Math.round(med(offMs))} p95=${Math.round(p95(offMs))} ms | executor n=${onMs.length} p50=${Math.round(med(onMs))} p95=${Math.round(p95(onMs))} ms (ratio ${(p95(onMs) / p95(offMs)).toFixed(2)}; ${on.proxy.readyQueries} readiness queries on the executor leg, ${off.proxy.readyQueries} on the in-process leg; responses said ${[...sources].sort().join(', ')})`;
     console.log(line); return { off: { ms: offMs, queries: off.proxy.readyQueries }, on: { ms: onMs, queries: on.proxy.readyQueries }, line };
