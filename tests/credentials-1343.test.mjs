@@ -213,10 +213,12 @@ const fixture = () => makeBoardFixture({ cards: [{ id: 'c1', shortId: 1, title: 
 
 function tokensFile() {
   const t = { ada: mintToken(), read: mintToken(), admin: mintToken(), expired: mintToken(), soon: mintToken() };
+  // These rows run a real server, which judges expiry by the real clock, so every expiry here is relative to now
+  // (inH). cred()'s default is fixed to NOW + 30 d (2026-10-18), and from 2026-10-15 that read as `expiring`.
   const file = tmpFile('seat-tokens.json', { seats: {
-    ada: { credentials: [cred({ plain: t.ada, scope: 'act' })] },
-    probe: { credentials: [cred({ plain: t.read, scope: 'read' })] },
-    owner: { credentials: [cred({ plain: t.admin, scope: 'admin' })] },
+    ada: { credentials: [cred({ plain: t.ada, scope: 'act', expiresAt: inH(24 * 30) })] },
+    probe: { credentials: [cred({ plain: t.read, scope: 'read', expiresAt: inH(24 * 30) })] },
+    owner: { credentials: [cred({ plain: t.admin, scope: 'admin', expiresAt: inH(24 * 30) })] },
     gone: { credentials: [cred({ plain: t.expired, expiresAt: inH(-2) })] },
     soon: { credentials: [cred({ plain: t.soon, expiresAt: inH(10), note: 'rotating' })] },
   } });
