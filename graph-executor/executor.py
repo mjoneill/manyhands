@@ -334,10 +334,10 @@ class Executor:
         r = rows[0]
         return {'datasetId': r['id'].value, 'epoch': r['e'].value, 'commitSeq': r['s'].value}
 
-    def log(self, op_id, kind, status, ms, body_sha):
+    def log(self, op_id, kind, status, ms, body_sha, extra=''):
         if self.log_file:
             ts = time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime()) + f'.{int(time.time()*1000)%1000:03d}Z'
-            self.log_file.write(f'{ts} {op_id or "-"} {kind} {status} {ms:.3f} {body_sha}\n')
+            self.log_file.write(f'{ts} {op_id or "-"} {kind} {status} {ms:.3f} {body_sha}{" " + extra if extra else ""}\n')
 
     def receipt(self, op_iri):
         rows = list(self.store.query(f'SELECT ?p ?o WHERE {{ {in_bk(f"<{op_iri}> ?p ?o")} }}'))
@@ -415,13 +415,24 @@ class Executor:
             self.store.backup(target)
             return {'path': target, 'quads': len(self.store), **marker}
 
-    def query(self, sparql, public=False):
+    def query(self, sparql, public=False, phases=None):
         # #1570 PUBLIC DATASET: the default graph only, and NO named graphs. Passed as an override, it wins
         # over the query's own FROM / FROM NAMED / GRAPH <...> (measured on pyoxigraph 0.5.11), so bookkeeping
         # kept in a named graph cannot be reached through a public read however the query is written.
+        # #1694: `phases`, when given (only under --log), receives the time of the store.query call ("setup") and of
+        # the row loop ("iterate_convert": evaluation, if pyoxigraph evaluates lazily, and term conversion, which this
+        # cannot separate), plus the row count. Without it nothing here is timed.
+        t = time.perf_counter() if phases is not None else 0
         r = self.store.query(sparql, default_graph=px.DefaultGraph(), named_graphs=[]) if public else self.store.query(sparql)
+        if phases is not None:
+            phases['setup'] = (time.perf_counter() - t) * 1000
+            t = time.perf_counter()
         if isinstance(r, (bool, px.QueryBoolean)):
-            return {'head': {}, 'boolean': bool(r)}
+            out = {'head': {}, 'boolean': bool(r)}
+            if phases is not None:
+                phases['iterate_convert'] = (time.perf_counter() - t) * 1000
+                phases['rows'] = 0
+            return out
         if isinstance(r, px.QueryTriples):
             raise ValueError('CONSTRUCT/DESCRIBE not supported')
         vs = [v.value for v in r.variables]
@@ -429,10 +440,13 @@ class Executor:
         for row in r:
             b = {}
             for k in vs:
-                t = row[k]
-                if t is not None:
-                    b[k] = term_json(t)
+                t_ = row[k]
+                if t_ is not None:
+                    b[k] = term_json(t_)
             bs.append(b)
+        if phases is not None:
+            phases['iterate_convert'] = (time.perf_counter() - t) * 1000
+            phases['rows'] = len(bs)
         return {'head': {'vars': vs}, 'results': {'bindings': bs}}
 
     def health(self):
@@ -510,13 +524,31 @@ def make_handler(ex):
                 ex.log(op, 'checkpoint', 'OK', (time.perf_counter() - t0) * 1000, sha)
                 return self._send(200, cp)
             if self.path in ('/query', '/query?dataset=public'):
+                phases = {} if ex.log_file else None
                 try:
-                    out = ex.query(body, public=self.path == '/query?dataset=public')
+                    out = ex.query(body, public=self.path == '/query?dataset=public', phases=phases)
                 except Exception as e:
                     ex.log(op, 'query', 'ERROR', (time.perf_counter() - t0) * 1000, sha)
                     return self._send(400, {'error': str(e)[:300]})
                 ex.log(op, 'query', 'OK', (time.perf_counter() - t0) * 1000, sha)
-                return self._send(200, out)
+                if phases is None:
+                    return self._send(200, out)
+                # #1694: under --log only, the same bytes _send would produce, with encode and write timed apart. The
+                # `query OK` line above is unchanged (pre-response); this line's total runs from the same t0 through
+                # the write, so it is never smaller. The phases do not cover reading the body or hashing it.
+                t = time.perf_counter()
+                data = json.dumps(out).encode()
+                phases['encode'] = (time.perf_counter() - t) * 1000
+                t = time.perf_counter()
+                self.send_response(200)
+                self.send_header('content-type', 'application/json')
+                self.send_header('content-length', str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                phases['write'] = (time.perf_counter() - t) * 1000
+                pairs = ' '.join(f'{k}={phases[k]:.3f}' for k in ('setup', 'iterate_convert', 'encode', 'write'))
+                ex.log(op, 'query-phases', 'OK', (time.perf_counter() - t0) * 1000, sha, f'{pairs} rows={phases["rows"]}')
+                return
             self._send(404, {'error': 'not found'})
     return H
 
