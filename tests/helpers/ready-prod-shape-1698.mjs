@@ -112,9 +112,9 @@ export async function worldWithEnv(board, extraEnv, body) {
     let rest = null; own.adopt(async () => { if (rest) await rest.stop(); });
     const w = {
       exec, proxy, boardFile, dir,
-      async start({ ready = false } = {}) {
+      async start({ ready = false, env = {} } = {}) {   // `env` overrides the world's REST env for THIS start only (a stamp on or off), so one executor serves rows that need either
         if (rest) await rest.stop();
-        rest = await startRestServer({ boardFile, env: { SCRUM_ROSTER_FILE: ROSTER_FILE, SCRUM_GRAPH_DATASET_ID: DSID, SCRUM_GRAPH_EXECUTOR_URL: proxy.url, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', SCRUM_GRAPH_UNIT_CARDS: '1', ...extraEnv, ...(ready ? { [READY_ENV]: 'executor' } : {}) } });
+        rest = await startRestServer({ boardFile, env: { SCRUM_ROSTER_FILE: ROSTER_FILE, SCRUM_GRAPH_DATASET_ID: DSID, SCRUM_GRAPH_EXECUTOR_URL: proxy.url, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', SCRUM_GRAPH_UNIT_CARDS: '1', ...extraEnv, ...env, ...(ready ? { [READY_ENV]: 'executor' } : {}) } });
         w.base = rest.baseUrl; w.rest = rest; return w;
       },
       async get(route) { const r = await fetch(`${w.base}${route}`, { signal: AbortSignal.timeout(120000) }); const text = await r.text(); let json = null; try { json = JSON.parse(text); } catch { /* not json */ } return { status: r.status, text, json }; },

@@ -14,6 +14,9 @@
  *        them. RED on today's code, which reads every context edge on both paths. Done cards are never offered and their context is dropped from the page, so none of the 2,000+ rows
  *        read for them is part of the answer. Everything else here must keep passing unchanged.
  *
+ * SHAPE OF THE FILE (revision after the first CI run): every row that needs an executor shares ONE world, restarted behind REST with or without a stamp file and with the switch on or off. The
+ * first version built nine worlds and was killed by the suite runner's 300 s bound on the CI runner (about 8 to 10 times slower than a laptop at building a world). The rows that change the board (PS4, PS8) run last.
+ *
  * NOT covered, by name: the one-snapshot controls (tests/ready-executor-1644-snapshot.test.mjs S1-S3 already run the injected-write sweep; a candidate must pass them unchanged, and that is
  * the snapshot half of the DONE WHEN); latency (the L1 test, unchanged bounds; no ceiling is extrapolated from row counts); the live board.
  */
@@ -44,111 +47,6 @@ test('#1698 (PS0) the generated board has the measured production shape, and the
   assert.notEqual(JSON.stringify(prodShapeBoard({ seed: 7 }).board), JSON.stringify(a.board), 'CONTROL: another seed gives another board, so the comparison above can fail');
 });
 
-/** Run both paths on one world and return what each said. */
-async function bothPaths(w, route) {
-  await w.start(); const oracle = await w.get(route);
-  await w.start({ ready: true }); const on = await w.get(route);
-  assert.equal(oracle.status, 200, oracle.text.slice(0, 300)); assert.equal(on.status, 200, on.text.slice(0, 300));
-  assert.equal(oracle.json.source, 'replica', 'the oracle leg REPORTS replica'); assert.equal(on.json.source, 'executor', 'the switched leg REPORTS executor');
-  return { oracle, on };
-}
-
-for (const withStamp of [false, true]) {
-  const tag = withStamp ? 'shipped shas PRESENT' : 'shipped shas ABSENT';
-  test(`#1698 (${withStamp ? 'PS2' : 'PS1'}) PARITY on the production-shaped board, ${tag}: the whole queue equals the in-process answer`, { skip: SKIP, timeout: 1500000 }, async () => {
-    const { board, shas, declared } = prodShapeBoard();
-    await withStampEnv(withStamp, shas, async (env) => {
-      await worldWithEnv(board, env, async (w) => {
-        const { oracle, on } = await bothPaths(w, FULL);
-        assert.ok(oracle.json.readyTotal > 100, `PRECONDITION: a real queue (${oracle.json.readyTotal} ready) so an empty-equals-empty pass is impossible`);
-        assert.ok(oracle.json.excluded.length > 100, `PRECONDITION: a real excluded list (${oracle.json.excluded.length})`);
-        assert.ok(oracle.json.ready.some((c) => (c.context?.relatedTo?.total ?? 0) > 5), 'PRECONDITION: ready items carry related members');
-        assert.deepEqual(noWm(on.json), noWm(oracle.json), 'every ready item with its context, and every excluded item, in the same order');
-        assert.equal(on.json.readyTotal, oracle.json.readyTotal, 'readyTotal'); assert.equal(on.json.excludedTotal, oracle.json.excludedTotal, 'excludedTotal');
-        assert.equal(on.json.excluded.length, on.json.excludedTotal, 'PRECONDITION: the whole excluded list is on the page, so a dropped excluded card cannot hide beyond it');
-        assert.equal(on.json.excluded.filter((c) => c.reason === 'column:done').length, declared.doneCards, 'every done card is still listed as excluded (their facts are still read)');
-        assert.ok(on.json.excluded.every((c) => Object.keys(c).sort().join() === 'reason,shortId,title'), 'and the excluded list keeps its shape: shortId, title, reason, and no context');
-      });
-    });
-  });
-}
-
-test('#1698 (PS2-CONTROL) the stamp changes the answer: with shipped shas the queue differs from without, so PS2 cannot pass on a path that ignores them', { skip: SKIP, timeout: 1500000 }, async () => {
-  const { board, shas } = prodShapeBoard();
-  let without, withShas;
-  await worldWithEnv(board, {}, async (w) => { await w.start(); without = (await w.get(FULL)).json; });
-  await withStampEnv(true, shas, async (env) => { await worldWithEnv(board, env, async (w) => { await w.start(); withShas = (await w.get(FULL)).json; }); });
-  assert.notDeepEqual(noWm(withShas), noWm(without), 'shipped shas must change at least one verdict on this board (cards whose commits are not all deployed)');
-});
-
-test('#1698 (PS3, PS4) explain parity on the cards that stress the shape, and a state change moves the answer on both paths and they still agree', { skip: SKIP, timeout: 1500000 }, async () => {
-  const { board, cardsList, shas } = prodShapeBoard();
-  const busiest = cardsList.reduce((m, c) => (c.relationships.relatedTo.length > m.relationships.relatedTo.length ? c : m));
-  const pickBy = (f) => cardsList.find(f);
-  const busiestDone = cardsList.filter((c) => c.column === 'done').reduce((m, c) => (c.relationships.relatedTo.length > m.relationships.relatedTo.length ? c : m));
-  const sample = [busiest, busiestDone, pickBy((c) => c.parkedBy), pickBy((c) => c.relationships.supersededBy.length), pickBy((c) => c.blockers?.length), pickBy((c) => c.implementedBy?.length)];
-  assert.ok(sample.every(Boolean), 'PRECONDITION: the board has a card of every stressing kind');
-  await withStampEnv(true, shas, async (env) => {
-    await worldWithEnv(board, env, async (w) => {
-      await w.start(); const oracleExplain = []; for (const c of sample) { const r = await w.get(`/api/ready?explain=${c.shortId}`); assert.equal(r.status, 200, r.text.slice(0, 200)); oracleExplain.push(noWm(r.json)); }
-      const before = (await w.get(FULL)).json;
-      await w.start({ ready: true }); const onExplain = []; for (const c of sample) { const r = await w.get(`/api/ready?explain=${c.shortId}`); assert.equal(r.status, 200, r.text.slice(0, 200)); onExplain.push(noWm(r.json)); }
-      assert.deepEqual(onExplain, oracleExplain, 'explain for the busiest, done, parked, superseded, person-blocked and commit-carrying cards equals the in-process answer');
-      const doneExplain = onExplain[1];
-      assert.equal(doneExplain.context?.relatedTo?.total, busiestDone.relationships.relatedTo.length, `an explanation of the done card #${busiestDone.shortId} carries its FULL context (${busiestDone.relationships.relatedTo.length} relatedTo edges), whatever the normal path leaves out`);
-      assert.ok(busiestDone.relationships.relatedTo.length >= 5, 'PRECONDITION: that done card has real context');
-      // PS4: close a plain ready card; both paths must move, and agree
-      const target = noWm(before).ready.find((c) => !c.context?.relatedTo?.total)?.shortId ?? before.ready[0].shortId;
-      const beforeOn = (await w.get(FULL)).json;
-      assert.deepEqual(noWm(beforeOn), noWm(before), 'PRECONDITION: the two paths agreed before the change');
-      const p = await w.patch(target, { column: 'done' }); assert.ok(p.status === 200, `the state change applied (${p.status}): ${p.text.slice(0, 200)}`);
-      const afterOn = (await w.get(FULL)).json;
-      await w.start(); const afterOracle = (await w.get(FULL)).json;
-      assert.notDeepEqual(noWm(afterOn), noWm(beforeOn), 'CONTROL: closing a ready card changes the executor path\'s answer');
-      assert.deepEqual(noWm(afterOn), noWm(afterOracle), 'and the two paths still agree after the change');
-    });
-  });
-});
-
-test('#1698 (PS5) the readiness read\'s facts, blockers and implementedBy rows, counted by ?readyKind, equal what the board declares and all kinds add up to the total', { skip: SKIP, timeout: 1500000 }, async () => {
-  const { board, declared, shas } = prodShapeBoard();
-  for (const withStamp of [false, true]) {
-    await withStampEnv(withStamp, shas, async (env) => {
-      await worldWithEnv(board, env, async (w) => {
-        const counts = {}; let total = 0; let seen = 0;
-        w.proxy.rewrite = (j) => { const rows = j?.results?.bindings; if (!Array.isArray(rows) || !rows.some((r) => r.readyKind)) return; seen++; for (const r of rows) { const k = r.readyKind.value; counts[k] = (counts[k] ?? 0) + 1; total++; } };
-        await w.start({ ready: true }); const r = await w.get(FULL); assert.equal(r.status, 200, r.text.slice(0, 200));
-        assert.equal(seen, 1, `PRECONDITION: exactly one readiness UNION was read (${seen})`);
-        assert.equal(Object.values(counts).reduce((a, b) => a + b, 0), total, 'the kinds add up to the total rows');
-        assert.equal(counts.facts, declared.cards, 'facts: one row per card');
-        assert.equal(counts.blockers, declared.blockedByEdges, 'blockers: one row per blockedBy edge');
-        assert.equal(counts.implementedBy ?? 0, withStamp ? declared.implementedByRows : 0, `implementedBy: ${withStamp ? 'one row per commit link' : 'the branch is absent without a stamp'}`);
-        console.log(`PS5 ${withStamp ? 'stamp' : 'no stamp'}: ${total} rows ${JSON.stringify(counts)}`);
-      });
-    });
-  }
-});
-
-test('#1698 (PS6, DESIGN) the normal path reads the context edges of cards that are not done and no others; an explanation request reads all of them', { skip: SKIP, timeout: 1500000 }, async () => {
-  const { board, declared, cardsList } = prodShapeBoard();
-  assert.ok(declared.contextRowsOpen < declared.contextRows, `PRECONDITION: some context belongs to done cards (${declared.contextRows - declared.contextRowsOpen} rows), so the design has something to leave out`);
-  const doneWithContext = cardsList.find((c) => c.column === 'done' && c.relationships.relatedTo.length > 3);
-  assert.ok(doneWithContext, 'PRECONDITION: a done card that carries context');
-  await worldWithEnv(board, {}, async (w) => {
-    let kinds = null;
-    w.proxy.rewrite = (j) => { const rows = j?.results?.bindings; if (!Array.isArray(rows) || !rows.some((r) => r.readyKind)) return; kinds = {}; for (const r of rows) kinds[r.readyKind.value] = (kinds[r.readyKind.value] ?? 0) + 1; };
-    await w.start({ ready: true });
-    const normal = await w.get(FULL); assert.equal(normal.status, 200, normal.text.slice(0, 200));
-    assert.ok(kinds, 'PRECONDITION: the normal call read the readiness UNION'); const normalKinds = kinds; kinds = null;
-    const ex = await w.get(`/api/ready?explain=${doneWithContext.shortId}`); assert.equal(ex.status, 200, ex.text.slice(0, 200));
-    assert.ok(kinds, 'PRECONDITION: the explanation call read the readiness UNION'); const explainKinds = kinds;
-    assert.equal(normalKinds.context, declared.contextRowsOpen, `normal path: the context rows are those of cards that are not done (${declared.contextRowsOpen}), not all ${declared.contextRows}`);
-    assert.equal(explainKinds.context, declared.contextRows, 'explanation path: every context edge is still read');
-    assert.equal(normalKinds.facts, declared.cards, 'and the facts of done cards are still read (they count in excludedTotal)');
-    assert.ok(ex.json.context?.relatedTo?.total >= 1 || JSON.stringify(ex.json).includes('relatedTo'), 'and the explanation of a done card still carries its context');
-  });
-});
-
 // ---- PS8: a card moving INTO done while the (single) readiness query runs ----
 // The design reads a card's context only when the SAME snapshot says the card is not done. The one-query shape is what keeps those two facts from coming from different moments, and the
 // executor's own snapshot property (S3 in the #1644 snapshot file) is what keeps ONE query whole. This row puts the two together on the candidate's own query text: the text the REST sends is
@@ -171,34 +69,132 @@ test('#1698 (PS8-CONTROL) the torn-read check can fail: facts read before a card
   assert.equal(torn({ done: true, ctx: 5 }, 5, false), false, 'without the filter the context is always there: not torn');
 });
 
-test('#1698 (PS8) a card with context moved to done while the single readiness query runs: its rows agree with each other, before or after, never mixed', { skip: SKIP, timeout: 1500000 }, async () => {
-  const { board, cardsList } = prodShapeBoard();
-  const victims = cardsList.filter((c) => c.column !== 'done' && c.relationships.relatedTo.length >= 3 && !c.claimedBy && !c.parkedBy).slice(0, 3);
-  assert.equal(victims.length, 3, 'PRECONDITION: three cards with context to move, one per round');
-  await worldWithEnv(board, {}, async (w) => {
-    w.proxy.bodies = [];
-    await w.start({ ready: true }); const first = await w.get(FULL); assert.equal(first.status, 200, first.text.slice(0, 200));
-    const text = w.proxy.bodies.find((b) => /readyKind/.test(b)); assert.ok(text, 'PRECONDITION: the readiness UNION text was captured');
-    const filtered = FILTER_RE.test(text);
-    const SLOW = ' UNION { SELECT ("slow" AS ?readyKind) (COUNT(*) AS ?n) WHERE { ?a a schema:CreativeWork . ?b a schema:CreativeWork . FILTER(STRLEN(CONCAT(STR(?a), STR(?b))) > 0) } } }';
-    const slow = text.replace(/\}\s*$/, SLOW); assert.notEqual(slow, text, 'PRECONDITION: the slow branch was appended to the candidate\'s own text');
-    const read = async () => { const t0 = performance.now(); const r = await fetch(`${w.exec.baseUrl}/query?dataset=public`, { method: 'POST', body: slow, signal: AbortSignal.timeout(180000) }); const j = await r.json(); assert.equal(r.status, 200, JSON.stringify(j).slice(0, 200)); return { rows: j.results.bindings, ms: performance.now() - t0 }; };
-    const alone = await read(); assert.ok(alone.ms >= 600, `PRECONDITION: the read is slow enough for a write to land inside it (${Math.round(alone.ms)} ms alone)`);
-    const log = [];
-    for (const [i, v] of victims.entries()) {
-      const edges = v.relationships.relatedTo.length + v.relationships.derivedFrom.length + v.relationships.supersedes.length + v.relationships.supersededBy.length;
-      const t0 = performance.now(); const reading = read(); await new Promise((r) => setTimeout(r, 200));
-      const w0 = performance.now(); const p = await w.patch(v.shortId, { column: 'done' }); const got = await reading;
-      assert.equal(p.status, 200, `PRECONDITION: the move to done is accepted (${p.status}) ${p.text.slice(0, 120)}`);
-      assert.ok(w0 - t0 < got.ms, `PRECONDITION: the write started while the read was in flight (it started ${Math.round(w0 - t0)} ms in, the read took ${Math.round(got.ms)} ms)`);
-      const im = impliedBy(got.rows, v.shortId);
-      assert.equal(torn(im, edges, filtered), false, `round ${i + 1}: card #${v.shortId} (${edges} context edges): the facts rows say done=${im.done} and ${im.ctx} context rows came with them; the filter is ${filtered ? 'on' : 'off'}, so this is a torn read`);
-      const settled = impliedBy((await read()).rows, v.shortId);
-      assert.equal(settled.done, true, `round ${i + 1}: afterwards the card reads as done (the write really landed)`);
-      assert.equal(torn(settled, edges, filtered), false, `round ${i + 1}: and the settled rows agree`);
-      log.push(`${i + 1}: during=${im.done ? 'AFTER' : 'BEFORE'}`);
-    }
-    console.log(`PS8 filter ${filtered ? 'on' : 'off'}; ${log.join(' | ')}`);
+// ---- The rows that need an executor share ONE world ----
+// The first version made nine worlds (an executor and a 1,600-card migration each) and took 117 to 135 s on a laptop and more than 300 s on the CI runner, where the suite runner killed the file
+// ("HUNG ... exceeded 300000ms") in both runs on PR #63. One world (one executor, one migration) is restarted behind REST with or without a stamp file and with the switch on or off. The rows that
+// CHANGE the board (PS4, PS8) run last, and PS8 skips the card PS4 closed. The assertions are the same ones; only the sharing changed.
+test('#1698 production-shaped board, one world: PS1 and PS2 parity, PS2-CONTROL, PS3 explain, PS5 accounting, PS6 the design, then PS4 a state change and PS8 a mid-read move', { skip: SKIP, timeout: 1500000 }, async (t) => {
+  const { board, shas, declared, cardsList } = prodShapeBoard();
+  await withStampEnv(true, shas, async (stampEnv) => {
+    await worldWithEnv(board, {}, async (w) => {
+      /** Both paths on this world, with the stamp on or off. */
+      const bothPaths = async (stamped, route) => {
+        const env = stamped ? stampEnv : {};
+        await w.start({ env }); const oracle = await w.get(route);
+        await w.start({ ready: true, env }); const on = await w.get(route);
+        assert.equal(oracle.status, 200, oracle.text.slice(0, 300)); assert.equal(on.status, 200, on.text.slice(0, 300));
+        assert.equal(oracle.json.source, 'replica', 'the oracle leg REPORTS replica'); assert.equal(on.json.source, 'executor', 'the switched leg REPORTS executor');
+        return { oracle, on };
+      };
+      const saved = {};
+      for (const stamped of [false, true]) {
+        await t.test(`#1698 (${stamped ? 'PS2' : 'PS1'}) PARITY on the production-shaped board, ${stamped ? 'shipped shas PRESENT' : 'shipped shas ABSENT'}: the whole queue equals the in-process answer`, async () => {
+          const { oracle, on } = await bothPaths(stamped, FULL); saved[stamped ? 'stamp' : 'plain'] = oracle.json;
+          assert.ok(oracle.json.readyTotal > 100, `PRECONDITION: a real queue (${oracle.json.readyTotal} ready) so an empty-equals-empty pass is impossible`);
+          assert.ok(oracle.json.excluded.length > 100, `PRECONDITION: a real excluded list (${oracle.json.excluded.length})`);
+          assert.ok(oracle.json.ready.some((c) => (c.context?.relatedTo?.total ?? 0) > 5), 'PRECONDITION: ready items carry related members');
+          assert.deepEqual(noWm(on.json), noWm(oracle.json), 'every ready item with its context, and every excluded item, in the same order');
+          assert.equal(on.json.readyTotal, oracle.json.readyTotal, 'readyTotal'); assert.equal(on.json.excludedTotal, oracle.json.excludedTotal, 'excludedTotal');
+          assert.equal(on.json.excluded.length, on.json.excludedTotal, 'PRECONDITION: the whole excluded list is on the page, so a dropped excluded card cannot hide beyond it');
+          assert.equal(on.json.excluded.filter((c) => c.reason === 'column:done').length, declared.doneCards, 'every done card is still listed as excluded (their facts are still read)');
+          assert.ok(on.json.excluded.every((c) => Object.keys(c).sort().join() === 'reason,shortId,title'), 'and the excluded list keeps its shape: shortId, title, reason, and no context');
+        });
+      }
+
+      await t.test('#1698 (PS2-CONTROL) the stamp changes the answer: with shipped shas the queue differs from without, so PS2 cannot pass on a path that ignores them', async () => {
+        assert.ok(saved.plain && saved.stamp, 'PRECONDITION: PS1 and PS2 produced their in-process answers');
+        assert.notDeepEqual(noWm(saved.stamp), noWm(saved.plain), 'shipped shas must change at least one verdict on this board (cards whose commits are not all deployed)');
+      });
+
+      await t.test('#1698 (PS3) explain parity on the cards that stress the shape, including a done card\'s FULL context', async () => {
+        const busiest = cardsList.reduce((m, c) => (c.relationships.relatedTo.length > m.relationships.relatedTo.length ? c : m));
+        const pickBy = (f) => cardsList.find(f);
+        const busiestDone = cardsList.filter((c) => c.column === 'done').reduce((m, c) => (c.relationships.relatedTo.length > m.relationships.relatedTo.length ? c : m));
+        const sample = [busiest, busiestDone, pickBy((c) => c.parkedBy), pickBy((c) => c.relationships.supersededBy.length), pickBy((c) => c.blockers?.length), pickBy((c) => c.implementedBy?.length)];
+        assert.ok(sample.every(Boolean), 'PRECONDITION: the board has a card of every stressing kind');
+        const explainAll = async () => { const out = []; for (const c of sample) { const r = await w.get(`/api/ready?explain=${c.shortId}`); assert.equal(r.status, 200, r.text.slice(0, 200)); out.push(noWm(r.json)); } return out; };
+        await w.start({ env: stampEnv }); const oracleExplain = await explainAll();
+        await w.start({ ready: true, env: stampEnv }); const onExplain = await explainAll();
+        assert.deepEqual(onExplain, oracleExplain, 'explain for the busiest, done, parked, superseded, person-blocked and commit-carrying cards equals the in-process answer');
+        assert.equal(onExplain[1].context?.relatedTo?.total, busiestDone.relationships.relatedTo.length, `an explanation of the done card #${busiestDone.shortId} carries its FULL context (${busiestDone.relationships.relatedTo.length} relatedTo edges), whatever the normal path leaves out`);
+        assert.ok(busiestDone.relationships.relatedTo.length >= 5, 'PRECONDITION: that done card has real context');
+      });
+
+      await t.test('#1698 (PS5) the readiness read\'s facts, blockers and implementedBy rows, counted by ?readyKind, equal what the board declares and all kinds add up to the total', async () => {
+        for (const withStamp of [false, true]) {
+          const counts = {}; let total = 0; let seen = 0;
+          w.proxy.rewrite = (j) => { const rows = j?.results?.bindings; if (!Array.isArray(rows) || !rows.some((r) => r.readyKind)) return; seen++; for (const r of rows) { const k = r.readyKind.value; counts[k] = (counts[k] ?? 0) + 1; total++; } };
+          try { await w.start({ ready: true, env: withStamp ? stampEnv : {} }); const r = await w.get(FULL); assert.equal(r.status, 200, r.text.slice(0, 200)); } finally { w.proxy.rewrite = null; }
+          assert.equal(seen, 1, `PRECONDITION: exactly one readiness UNION was read (${seen})`);
+          assert.equal(Object.values(counts).reduce((a, b) => a + b, 0), total, 'the kinds add up to the total rows');
+          assert.equal(counts.facts, declared.cards, 'facts: one row per card');
+          assert.equal(counts.blockers, declared.blockedByEdges, 'blockers: one row per blockedBy edge');
+          assert.equal(counts.implementedBy ?? 0, withStamp ? declared.implementedByRows : 0, `implementedBy: ${withStamp ? 'one row per commit link' : 'the branch is absent without a stamp'}`);
+          console.log(`PS5 ${withStamp ? 'stamp' : 'no stamp'}: ${total} rows ${JSON.stringify(counts)}`);
+        }
+      });
+
+      await t.test('#1698 (PS6, DESIGN) the normal path reads the context edges of cards that are not done and no others; an explanation request reads all of them', async () => {
+        assert.ok(declared.contextRowsOpen < declared.contextRows, `PRECONDITION: some context belongs to done cards (${declared.contextRows - declared.contextRowsOpen} rows), so the design has something to leave out`);
+        const doneWithContext = cardsList.find((c) => c.column === 'done' && c.relationships.relatedTo.length > 3);
+        assert.ok(doneWithContext, 'PRECONDITION: a done card that carries context');
+        let kinds = null;
+        w.proxy.rewrite = (j) => { const rows = j?.results?.bindings; if (!Array.isArray(rows) || !rows.some((r) => r.readyKind)) return; kinds = {}; for (const r of rows) kinds[r.readyKind.value] = (kinds[r.readyKind.value] ?? 0) + 1; };
+        try {
+          await w.start({ ready: true });
+          const normal = await w.get(FULL); assert.equal(normal.status, 200, normal.text.slice(0, 200));
+          assert.ok(kinds, 'PRECONDITION: the normal call read the readiness UNION'); const normalKinds = kinds; kinds = null;
+          const ex = await w.get(`/api/ready?explain=${doneWithContext.shortId}`); assert.equal(ex.status, 200, ex.text.slice(0, 200));
+          assert.ok(kinds, 'PRECONDITION: the explanation call read the readiness UNION'); const explainKinds = kinds;
+          assert.equal(normalKinds.context, declared.contextRowsOpen, `normal path: the context rows are those of cards that are not done (${declared.contextRowsOpen}), not all ${declared.contextRows}`);
+          assert.equal(explainKinds.context, declared.contextRows, 'explanation path: every context edge is still read');
+          assert.equal(normalKinds.facts, declared.cards, 'and the facts of done cards are still read (they count in excludedTotal)');
+          assert.ok(ex.json.context?.relatedTo?.total >= 1 || JSON.stringify(ex.json).includes('relatedTo'), 'and the explanation of a done card still carries its context');
+        } finally { w.proxy.rewrite = null; }
+      });
+
+      // ---- from here the rows CHANGE the board ----
+      let closedByPS4 = null;
+      await t.test('#1698 (PS4) CONTROL: a state change to one card moves the answer, on both paths, and they still agree (so the parity comparison CAN fail)', async () => {
+        await w.start({ env: stampEnv }); const before = (await w.get(FULL)).json;
+        await w.start({ ready: true, env: stampEnv }); const beforeOn = (await w.get(FULL)).json;
+        assert.deepEqual(noWm(beforeOn), noWm(before), 'PRECONDITION: the two paths agreed before the change');
+        const target = noWm(before).ready.find((c) => !c.context?.relatedTo?.total)?.shortId ?? before.ready[0].shortId; closedByPS4 = target;
+        const p = await w.patch(target, { column: 'done' }); assert.ok(p.status === 200, `the state change applied (${p.status}): ${p.text.slice(0, 200)}`);
+        const afterOn = (await w.get(FULL)).json;
+        await w.start({ env: stampEnv }); const afterOracle = (await w.get(FULL)).json;
+        assert.notDeepEqual(noWm(afterOn), noWm(beforeOn), 'CONTROL: closing a ready card changes the executor path\'s answer');
+        assert.deepEqual(noWm(afterOn), noWm(afterOracle), 'and the two paths still agree after the change');
+      });
+
+      await t.test('#1698 (PS8) a card with context moved to done while the single readiness query runs: its rows agree with each other, before or after, never mixed', async () => {
+        const victims = cardsList.filter((c) => c.column !== 'done' && c.shortId !== closedByPS4 && c.relationships.relatedTo.length >= 3 && !c.claimedBy && !c.parkedBy).slice(0, 3);
+        assert.equal(victims.length, 3, 'PRECONDITION: three cards with context to move, one per round');
+        w.proxy.bodies = [];
+        await w.start({ ready: true }); const first = await w.get(FULL); assert.equal(first.status, 200, first.text.slice(0, 200));
+        const text = w.proxy.bodies.find((b) => /readyKind/.test(b)); assert.ok(text, 'PRECONDITION: the readiness UNION text was captured'); w.proxy.bodies = null;
+        const filtered = FILTER_RE.test(text);
+        const SLOW = ' UNION { SELECT ("slow" AS ?readyKind) (COUNT(*) AS ?n) WHERE { { SELECT ?a WHERE { ?a a schema:CreativeWork } LIMIT 800 } { SELECT ?b WHERE { ?b a schema:CreativeWork } LIMIT 800 } FILTER(STRLEN(CONCAT(STR(?a), STR(?b))) > 0) } } }';
+        const slow = text.replace(/\}\s*$/, SLOW); assert.notEqual(slow, text, 'PRECONDITION: the slow branch was appended to the candidate\'s own text');
+        const run = async (q) => { const t0 = performance.now(); const r = await fetch(`${w.exec.baseUrl}/query?dataset=public`, { method: 'POST', body: q, signal: AbortSignal.timeout(180000) }); const j = await r.json(); assert.equal(r.status, 200, JSON.stringify(j).slice(0, 200)); return { rows: j.results.bindings, ms: performance.now() - t0 }; };
+        const alone = await run(slow); assert.ok(alone.ms >= 400, `PRECONDITION: the read is slow enough for a write to land inside it (${Math.round(alone.ms)} ms alone)`);
+        const log = [];
+        for (const [i, v] of victims.entries()) {
+          const edges = v.relationships.relatedTo.length + v.relationships.derivedFrom.length + v.relationships.supersedes.length + v.relationships.supersededBy.length;
+          const t0 = performance.now(); const reading = run(slow); await new Promise((r) => setTimeout(r, 200));
+          const w0 = performance.now(); const p = await w.patch(v.shortId, { column: 'done' }); const got = await reading;
+          assert.equal(p.status, 200, `PRECONDITION: the move to done is accepted (${p.status}) ${p.text.slice(0, 120)}`);
+          assert.ok(w0 - t0 < got.ms, `PRECONDITION: the write started while the read was in flight (it started ${Math.round(w0 - t0)} ms in, the read took ${Math.round(got.ms)} ms)`);
+          const im = impliedBy(got.rows, v.shortId);
+          assert.equal(torn(im, edges, filtered), false, `round ${i + 1}: card #${v.shortId} (${edges} context edges): the facts rows say done=${im.done} and ${im.ctx} context rows came with them; the filter is ${filtered ? 'on' : 'off'}, so this is a torn read`);
+          const settled = impliedBy((await run(text)).rows, v.shortId);   // the candidate's own text, without the slow branch: cheap, and the same rows
+          assert.equal(settled.done, true, `round ${i + 1}: afterwards the card reads as done (the write really landed)`);
+          assert.equal(torn(settled, edges, filtered), false, `round ${i + 1}: and the settled rows agree`);
+          log.push(`${i + 1}: during=${im.done ? 'AFTER' : 'BEFORE'}`);
+        }
+        console.log(`PS8 filter ${filtered ? 'on' : 'off'}; ${log.join(' | ')}`);
+      });
+    });
   });
 });
 
