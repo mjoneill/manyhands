@@ -1,0 +1,17 @@
+// FIXTURE for the #1696 scan: a fixed date plus a NUMERIC constant make an expiry; the number is neither date-derived nor a starter.
+import { test } from 'node:test';
+import { startRestServer } from './helpers/harness.mjs';
+
+const WHEN = '2026-09-18T12:00:00.000Z';
+const DAYS = 30;
+const UNRELATED = 5;
+const expiry = () => new Date(Date.parse(WHEN) + DAYS * 86400000).toISOString();
+
+test('numeric dependency: the expiry is WHEN + DAYS and reaches a real server', async () => {
+  const srv = await startRestServer({ board: { cards: [{ id: 'c1', expiresAt: expiry() }] } });
+  await srv.stop();
+});
+
+test('control, same file: a pure row that uses the unrelated constant', () => {
+  if (UNRELATED < 0) throw new Error('never');
+});

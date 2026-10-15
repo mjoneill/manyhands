@@ -1,0 +1,10 @@
+// FIXTURE for the #1696 scan: a fixed date that only a pure function ever sees.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { ageInDays } from '../core/age.mjs';
+
+const THEN = '2026-05-01T00:00:00.000Z';
+
+test('pure: the age of a fixed instant against another fixed instant', () => {
+  assert.equal(ageInDays(THEN, '2026-05-11T00:00:00.000Z'), 10);
+});
