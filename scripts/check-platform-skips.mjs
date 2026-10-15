@@ -13,11 +13,18 @@
  *   · the commit is verified, not declared: --root must be a git checkout whose HEAD is --sha with no modified
  *     tracked file; the receipt carries that HEAD's tree
  *
+ * Whenever it reaches a verdict (exit 0 or 1) it prints the receipt as one line, `PLATFORM-RECEIPT <json>`; when it
+ * cannot check (exit 2) it prints none.
+ *
  * Exit 0 clean · 1 mismatch, naming each test or the exit · 2 could not check (empty, missing or test-less TAP; a
  * missing, empty or malformed manifest; a missing or non-numeric suite exit; a sha that is not the checkout).
  */
 import fs from 'node:fs';
-import { EXIT, CannotCheck, parseArgs, readManifest, parseTap, isPlatformSkip, writeReceipt, verifyCheckout } from './platform-gate-lib.mjs';
+import { EXIT, CannotCheck, parseArgs, readManifest, parseTap, isPlatformSkip, writeReceipt, verifyCheckout, RECEIPT_MARKER, MAX_PROBLEM } from './platform-gate-lib.mjs';
+
+// A problem names a test, and a test name has no length limit; the printed receipt does.
+// The cut never splits a surrogate pair.
+const clip = (p) => (p.length <= MAX_PROBLEM ? p : `${p.slice(0, MAX_PROBLEM - 1).replace(/[\uD800-\uDBFF]$/, '')}…`);
 
 function main(argv) {
   const { flags, positional } = parseArgs(argv);
@@ -64,10 +71,14 @@ function main(argv) {
   }
 
   const ok = problems.length === 0;
-  writeReceipt(flags.receipt, {
+  const receipt = {
     leg: 'ci', sha, tree, manifestSha256: manifest.sha256, suiteExit, ok,
-    matched: ok ? listed.size : null, problems, at: new Date().toISOString(),
-  });
+    matched: ok ? listed.size : null, problems: problems.map(clip), at: new Date().toISOString(),
+  };
+  writeReceipt(flags.receipt, receipt);
+  // #837: the receipt file never leaves the runner, so the verdict is also printed as one marked line that a landing
+  // recovers from this step's log (scripts/extract-ci-receipt.mjs). It holds only the allowlisted receipt fields.
+  console.log(`${RECEIPT_MARKER} ${JSON.stringify(receipt)}`);
   if (ok) {
     console.log(`CI leg clean: suite exit 0, no failures, and ${listed.size} of ${listed.size} manifest tests skipped as UNAVAILABLE with no other skips (sha ${sha}, tree ${tree}, manifest ${manifest.sha256})`);
     return EXIT.CLEAN;

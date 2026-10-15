@@ -16,6 +16,11 @@ export const EXIT = Object.freeze({ CLEAN: 0, MISMATCH: 1, CANNOT_CHECK: 2 });
 
 export class CannotCheck extends Error {}
 
+/** The CI leg prints its receipt on one line with this prefix (#837 keeps the file on the runner). */
+export const RECEIPT_MARKER = 'PLATFORM-RECEIPT';
+/** The longest problem text a CI receipt may carry. */
+export const MAX_PROBLEM = 400;
+
 /** Parse `--flag value` pairs and positionals. A flag given with no value is an error the caller reports as 2. */
 export function parseArgs(argv) {
   const flags = {};

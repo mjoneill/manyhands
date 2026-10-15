@@ -117,8 +117,9 @@ jobs:
           --sha "${{ github.event.pull_request.head.sha || github.sha }}"
           --suite-exit "${SUITE_EXIT:-}"
           --receipt ci-platform-receipt.json
-      # The receipt stays on the runner: #837 forbids uploading artifacts from this public workflow. The check's own
-      # log line carries the sha, tree, manifest hash and verdict that a landing reads.
+      # The receipt stays on the runner: #837 forbids uploading artifacts from this public workflow. The check prints
+      # it as one `PLATFORM-RECEIPT {json}` line of allowlisted fields, and a landing recovers it from THIS step's log
+      # of a named run attempt with scripts/extract-ci-receipt.mjs (whose defaults are this job's and step's names).
 
   browser:
     name: browser suite
