@@ -1,0 +1,17 @@
+// FIXTURE for the #1696 scan: a helper holds a fixed date, and the real server is reached only through two more helpers.
+import { test } from 'node:test';
+import { startRestServer } from './helpers/harness.mjs';
+
+const WHEN = '2026-09-18T12:00:00.000Z';
+const seedCard = () => ({ id: 'c1', shortId: 1, title: 't', parkedUntil: WHEN });
+const boot = (board) => startRestServer({ board });
+const withWorld = async (fn) => { const srv = await boot({ cards: [seedCard()], nextShortId: 2 }); try { return await fn(srv); } finally { await srv.stop(); } };
+
+test('indirect: the date reaches the server through seedCard -> withWorld -> boot -> startRestServer', async () => {
+  await withWorld(async () => {});
+});
+
+test('control, same file: a served row that never touches the fixed date', async () => {
+  const srv = await boot({ cards: [], nextShortId: 1 });
+  await srv.stop();
+});
