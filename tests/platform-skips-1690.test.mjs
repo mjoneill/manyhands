@@ -212,6 +212,25 @@ test('#1690 (C8) the receipt records the commit, the manifest’s content hash, 
   assert.equal(typeof rec.leg, 'string', 'says which leg wrote it');
 });
 
+test('#1690 (C8b) the receipt’s `matched` is the number of manifest entries on a clean run', async () => {
+  const s = setup();
+  const r = await check(s);
+  assert.equal(r.code, 0, r.out);
+  const rec = JSON.parse(fs.readFileSync(s.receipt, 'utf8'));
+  assert.equal(rec.ok, true);
+  assert.equal(rec.matched, PLATFORM.length, 'one per manifest entry');
+  assert.ok(PLATFORM.length > 1, 'the fixture has more than one entry, so a constant 0 or 1 cannot pass');
+});
+
+test('#1690 (C8c) the receipt’s `matched` is null, not a count, when the leg is not clean', async () => {
+  const s = setup({ tapText: tap({ skips: PLATFORM.slice(0, 2), extra: [`ok 700 - ${PLATFORM[2].name}`] }) });
+  const r = await check(s);
+  assert.equal(r.code, 1, r.out);
+  const rec = JSON.parse(fs.readFileSync(s.receipt, 'utf8'));
+  assert.equal(rec.ok, false);
+  assert.equal(rec.matched, null);
+});
+
 // ------------------------------------------------------------------- the Mac leg
 
 const T = (name, body = '', opts = '') => `test(${JSON.stringify(name)}, ${opts ? opts + ', ' : ''}async () => { ${body} });`;
