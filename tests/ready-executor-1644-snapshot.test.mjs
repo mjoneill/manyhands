@@ -10,9 +10,7 @@
  *   S1-CONTROL  the same sweep with a deliberately NAIVE reader written in this file (the 6 ready sub-queries, paged LIMIT/OFFSET with no ORDER BY, one request at a time over HTTP): it MUST produce at
  *     least one answer that is neither BEFORE nor AFTER, a card skipped or duplicated when a row is deleted between pages. If it cannot, the injection is not able to produce a mixture and S1 proves nothing.
  *
- * L1  LATENCY (the steward's bound, on the card): on a production-sized board (1,500 cards, a relatedTo edge on all but the first, a blockedBy edge on one in ten) the executor path's p95 over >= 20
- *     timed calls, after 3 warm-ups, is <= 1.0 s (hard ceiling) AND <= 2x the in-process path's p95 measured in the same run on the same host, in two phases: idle, and with 6 CPU-burning processes running (n = 40 per leg, the two legs run at once and their calls are interleaved so they see the same load)
- *     (a loaded host; load average is printed). The sample sizes and the p95s are printed in the assertion messages and on stdout. Precondition: the switched run really read the executor.
+ * L1  LATENCY moved to tests/latency/ready-executor-1644-latency.test.mjs (#1693): it runs alone in its own sequential CI step, with both bounds unchanged.
  *
  * S2  THE CARD'S OWN WORDING ("a card write AND a projector batch are injected mid-read"): the same sweep with BOTH writers: the card delete before query k and a REAL projector batch
  *     (core/activity-projector.mjs projectBatch, production code, one /update that adds prov:Activity triples and moves the cursor) before query m, for every k <= m. Valid answers are still BEFORE or AFTER
@@ -151,55 +149,6 @@ test('S1-CONTROL the NAIVE paged reader, under the same sweep, produces an answe
   const mixed = s.results.filter((r) => !valid.has(sig(r.answer)));
   console.log(`S1-CONTROL naive reader: ${s.n} requests per read; BEFORE ${sig(s.before.answer)}; AFTER ${sig(s.after.answer)}; mixtures at k=${mixed.map((r) => `${r.k} (${sig(r.answer)})`).join(', ') || 'none'}`);
   assert.ok(mixed.length >= 1, `the naive reader must be caught by the sweep: it gave only BEFORE/AFTER at every k (${s.results.map((r) => `${r.k}:${sig(r.answer)}`).join(' | ')}); if it cannot produce a mixture, S1 proves nothing and the injection must change`);
-});
-
-// ---- L1 latency ----
-const p95 = (xs) => { const s = [...xs].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.ceil(0.95 * s.length) - 1)]; };
-const med = (xs) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
-async function timeCalls(base, n = 20, warm = 3) {
-  for (let i = 0; i < warm; i++) { const r = await fetch(`${base}/api/ready?limit=20`, { signal: AbortSignal.timeout(60000) }); await r.text(); }
-  const ms = []; for (let i = 0; i < n; i++) { const t = performance.now(); const r = await fetch(`${base}/api/ready?limit=20`, { signal: AbortSignal.timeout(60000) }); await r.text(); assert.equal(r.status, 200); ms.push(performance.now() - t); }
-  return ms;
-}
-async function phase(sd, label) {
-  return withOwned(async (own) => {
-  // BOTH instances run at once and their calls are INTERLEAVED (off, on, then on, off, ...): a sequential off-then-on run lets the host's load drift between the two legs, and the 2x ratio is
-  // measured at ~100-200 ms where a few ms of drift decides it (the builder's 16:24Z run: executor p95 230 ms against a 236 ms bound). Interleaving gives both legs the same moments.
-  const mk = async (ready) => {
-    const store = own.dir('r44l-run-'); fs.cpSync(sd.store, store, { recursive: true });
-    const dir = own.dir('r44l-board-'); const boardFile = path.join(dir, 'board.json'); fs.copyFileSync(sd.boardFile, boardFile);
-    const exec = await startExecutorOnCopy({ store, datasetId: DSID }); own.adopt(() => killExecutor(exec));
-    const proxy = await startProxy(exec.baseUrl); own.adopt(async () => { try { await proxy.down(); } catch { /* down */ } });
-    const rest = await startRestServer({ boardFile, env: { SCRUM_ROSTER_FILE: ROSTER_FILE, SCRUM_GRAPH_DATASET_ID: DSID, SCRUM_GRAPH_EXECUTOR_URL: proxy.url, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', SCRUM_GRAPH_UNIT_CARDS: '1', ...(ready ? { [READY_ENV]: 'executor' } : {}) } });
-    own.adopt(() => rest.stop());
-    return { rest, proxy, exec };
-  };
-  const off = await mk(false); const on = await mk(true);
-  {
-    const call = async (x) => { const t = performance.now(); const r = await fetch(`${x.rest.baseUrl}/api/ready?limit=20`, { signal: AbortSignal.timeout(60000) }); const body = await r.text(); const ms = performance.now() - t; assert.equal(r.status, 200); return { ms, source: JSON.parse(body).source }; };
-    for (let i = 0; i < 3; i++) { await call(off); await call(on); }
-    off.proxy.readyQueries = 0; on.proxy.readyQueries = 0;
-    const offMs = []; const onMs = []; let sources = new Set();
-    for (let i = 0; i < 40; i++) {
-      const order = i % 2 === 0 ? [off, on] : [on, off];
-      for (const x of order) { const r = await call(x); (x === off ? offMs : onMs).push(r.ms); sources.add(`${x === off ? 'off' : 'on'}:${r.source}`); }
-    }
-    const line = `L1 ${label}: load1=${os.loadavg()[0].toFixed(2)}  in-process n=${offMs.length} p50=${Math.round(med(offMs))} p95=${Math.round(p95(offMs))} ms | executor n=${onMs.length} p50=${Math.round(med(onMs))} p95=${Math.round(p95(onMs))} ms (ratio ${(p95(onMs) / p95(offMs)).toFixed(2)}; ${on.proxy.readyQueries} readiness queries on the executor leg, ${off.proxy.readyQueries} on the in-process leg; responses said ${[...sources].sort().join(', ')})`;
-    console.log(line); return { off: { ms: offMs, queries: off.proxy.readyQueries }, on: { ms: onMs, queries: on.proxy.readyQueries }, line };
-  }
-  });
-}
-test('L1 LATENCY on a production-sized board: executor p95 <= 1.0 s AND <= 2x the in-process p95, idle and under CPU load', { skip: SKIP, timeout: 1500000 }, async () => {
-  const sd = await seed(1500);
-  const check = (ph) => {
-    assert.ok(ph.on.queries >= 1, `PRECONDITION: the switched run read the executor (${ph.on.queries} queries)`);
-    const a = p95(ph.on.ms); const b = p95(ph.off.ms);
-    assert.ok(a <= 1000, `executor p95 ${Math.round(a)} ms must be <= 1000 ms (hard ceiling); ${ph.line}`);
-    assert.ok(a <= 2 * b, `executor p95 ${Math.round(a)} ms must be <= 2x the in-process p95 ${Math.round(b)} ms; ${ph.line}`);
-  };
-  check(await phase(sd, 'idle'));
-  const burners = Array.from({ length: 6 }, () => spawn(process.execPath, ['-e', 'for(;;){}'], { stdio: 'ignore' }));
-  try { await new Promise((r) => setTimeout(r, 3000)); check(await phase(sd, 'loaded (6 CPU burners)')); } finally { for (const b of burners) b.kill('SIGKILL'); }
 });
 
 test('S2 TWO WRITERS: a card write AND a real projector batch injected mid-read (every k <= m), `GET /api/ready` (switch on) still answers the full before or the full after', { skip: SKIP, timeout: 1500000 }, async () => {
