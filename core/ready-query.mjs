@@ -150,10 +150,14 @@ export const anyBlockedCardWitness = () =>
  * it resolves, the UnresolvedReference's identifier when it doesn't — so
  * ordering never depends on resolution.
  */
-export const readyContextQuery = () =>
+// #1698 — `openOnly` leaves out the edges of cards in column done. A done card's verdict is always excluded, and the
+// queue's excluded list carries no context, so the normal response never shows those edges; only an explanation does.
+// A card with no column at all is kept, as before.
+export const readyContextQuery = ({ openOnly = false } = {}) =>
   `SELECT ?id ?p ?sid ?title WHERE { ` +
   `?card a schema:CreativeWork ; schema:identifier ?id ; ?p ?o . ` +
   `FILTER(?p IN (scrum:relatedTo, scrum:derivedFrom, scrum:supersedes, scrum:supersededBy)) ` +
+  (openOnly ? `FILTER NOT EXISTS { ?card scrum:column column:done } ` : '') +
   `OPTIONAL { ?o schema:identifier ?sid } ` +
   `OPTIONAL { ?o a schema:CreativeWork ; schema:name ?title } }`;
 
@@ -544,10 +548,14 @@ function pagedRows(store, query) {
  * snapshot; the rows are split by kind and fed to the unchanged computeReady. `select(sparql)` resolves to the rows
  * (graph-replica's selectExecutorAll), with no row ceiling and a runaway guard that refuses.
  */
-export async function readyFromExecutor(select, { shippedShas = null } = {}) {
+export async function readyFromExecutor(select, { shippedShas = null, contextOf = 'all' } = {}) {
+  // #1698 — `contextOf: 'open'` is OPT-IN: it reads the context edges of cards that are not done, which is all the
+  // paged queue shows. The default stays every edge, so a caller that needs a done card's context (an explanation,
+  // or any future caller) keeps today's answer unless it asks. Still one UNION, so still one snapshot.
+  if (contextOf !== 'all' && contextOf !== 'open') throw new Error(`#1698: contextOf must be 'all' or 'open', got ${JSON.stringify(contextOf)}`);
   const kinds = [
     ['facts', readyFactsQuery()], ['blockers', readyBlockersQuery()], ['superseded', readySupersededQuery()],
-    ['human', readyHumanBlockersQuery()], ['context', readyContextQuery()], ['condition', readyConditionBlockersQuery()],
+    ['human', readyHumanBlockersQuery()], ['context', readyContextQuery({ openOnly: contextOf === 'open' })], ['condition', readyConditionBlockersQuery()],
     ...(shippedShas ? [['implementedBy', readyImplementedByQuery()]] : []),
   ];
   const branch = ([kind, q]) => {

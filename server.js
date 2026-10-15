@@ -7573,15 +7573,18 @@ async function handleReady(req, res) {
       // #1644 — one query, one snapshot, from the executor. No replica, so no replica watermark: the field is absent on
       // this path rather than describing a projection this answer was not read from. Any executor failure is a 503 with
       // a code, never a 200 with an empty or partial queue.
+      // #1698 — an explanation needs any card's full context (a done card's included). The paged queue shows context only
+      // on ready cards, never done ones, so it reads the edges of open cards only.
+      const explainX = url.searchParams.get('explain');
+      const explaining = explainX != null && explainX !== '';
       let verdicts;
       try {
-        verdicts = await readyFromExecutor((q) => selectExecutorAll(process.env.SCRUM_GRAPH_EXECUTOR_URL, q, { timeoutMs: 20_000 }), { shippedShas: deployedShaSet() });
+        verdicts = await readyFromExecutor((q) => selectExecutorAll(process.env.SCRUM_GRAPH_EXECUTOR_URL, q, { timeoutMs: 20_000 }), { shippedShas: deployedShaSet(), contextOf: explaining ? 'all' : 'open' });
       } catch (e) {
         if (e.code === 'GRAPH_UNAVAILABLE' || e.code === 'ROW_CAP') return sendJSON(res, 503, { error: e.message, code: 'READY_SOURCE_UNAVAILABLE' });
         throw e;
       }
-      const explainX = url.searchParams.get('explain');
-      if (explainX != null && explainX !== '') return sendJSON(res, 200, { ...READY_EXPLAIN(verdicts, explainX), source: 'executor' });
+      if (explaining) return sendJSON(res, 200, { ...READY_EXPLAIN(verdicts, explainX), source: 'executor' });
       return sendJSON(res, 200, { ...pageReady(verdicts, { limit: url.searchParams.get('limit') ?? undefined }), source: 'executor' });
     }
     // #949 (scope extension) — see the note on /api/checks. A readiness verdict
