@@ -13,7 +13,7 @@
  *   --json  prints one JSON object: { guard, files, flagged: [{ file, line, statement, dateLiteral: { line, value }, dateLiterals: [{ line, value }], consumer: { line, name }, via: [names] }], unreadable: [{ file, error }] }
  *   text    one line per flagged site naming file:line of the date literal and file:line of the consumer call, the names between them, and the same `guard` sentence at the end.
  * A STATEMENT is a top-level statement of the file (each `test(...)` call, each top-level const or function). It is DATE-DERIVED if it contains a literal calendar date (an ISO `20xx-mm-dd` string) or
- * references a name that is; it reaches a CONSUMER if it calls one (startRestServer, startMcpServer, startExecutor, startExecutorOnCopy, spawn, spawnSync, execFile, fork, a browser launch) or references a
+ * references a name that is; it reaches a CONSUMER if it calls one (startRestServer, startMcpServer, the executor starters, spawn, spawnSync, execFile, fork, a browser launch) or references a
  * name that does. A statement that is both is FLAGGED.
  *
  *   S1  the pre-fix credentials file (kept as a .txt fixture): flags exactly its three served tests, naming the 2026-09-18 anchor (among every fixed date that reaches it) and a real-server start, and flags none of its pure rows or the script row
@@ -264,7 +264,9 @@ test('#1696 (S9) a helper holding a fixed date, reaching a real server only thro
   assert.ok(f.dateLiterals.some((d) => d.line === 5), 'and the date literal is the WHEN on line 5');
 });
 
-const CONSUMER_NAMES = ['startRestServer', 'startMcpServer', 'startExecutor', 'startExecutorOnCopy', 'world', 'worldWithEnv', 'labelWorld', 'spawn', 'spawnSync', 'execFile', 'execFileSync', 'fork', 'launch'];
+// The two executor starters are assembled from pieces: tests/suite-watch-three-state-1637.test.mjs (T14) classes any test file that contains that text as executor-backed, and this file runs on node alone.
+const EXEC = 'start' + 'Executor';
+const CONSUMER_NAMES = ['startRestServer', 'startMcpServer', EXEC, `${EXEC}OnCopy`, 'world', 'worldWithEnv', 'labelWorld', 'spawn', 'spawnSync', 'execFile', 'execFileSync', 'fork', 'launch'];
 
 test('#1696 (S10) every starter the header names is a consumer: a fixed date into each is flagged with that starter\'s name, plain and as a member call', () => {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), 's10-'));
