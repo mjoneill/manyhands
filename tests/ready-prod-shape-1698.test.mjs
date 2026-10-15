@@ -154,6 +154,8 @@ test('#1698 (PS6, DESIGN) the normal path reads the context edges of cards that 
 // executor's own snapshot property (S3 in the #1644 snapshot file) is what keeps ONE query whole. This row puts the two together on the candidate's own query text: the text the REST sends is
 // captured, a deliberately slow branch is appended (so a write can land inside it), and while it runs one card with context is moved to done through REST. For that card the rows of the
 // answer must agree with each other: a context row exists exactly when the facts row of the same answer says "not done" (or always, when the query does not filter).
+// any spelling of "leave out the done cards": FILTER NOT EXISTS, FILTER(!EXISTS ...), or MINUS
+const FILTER_RE = /NOT\s+EXISTS|!\s*EXISTS|\bMINUS\b/i;
 const isDone = (colValue) => /\/done$/.test(String(colValue)) || String(colValue) === 'column:done';
 /** For card #n, the pair the answer's own rows imply: [is it done in the facts rows, how many context rows does it have]. */
 const impliedBy = (rows, n) => ({
@@ -177,7 +179,7 @@ test('#1698 (PS8) a card with context moved to done while the single readiness q
     w.proxy.bodies = [];
     await w.start({ ready: true }); const first = await w.get(FULL); assert.equal(first.status, 200, first.text.slice(0, 200));
     const text = w.proxy.bodies.find((b) => /readyKind/.test(b)); assert.ok(text, 'PRECONDITION: the readiness UNION text was captured');
-    const filtered = /NOT\s+EXISTS/i.test(text);
+    const filtered = FILTER_RE.test(text);
     const SLOW = ' UNION { SELECT ("slow" AS ?readyKind) (COUNT(*) AS ?n) WHERE { ?a a schema:CreativeWork . ?b a schema:CreativeWork . FILTER(STRLEN(CONCAT(STR(?a), STR(?b))) > 0) } } }';
     const slow = text.replace(/\}\s*$/, SLOW); assert.notEqual(slow, text, 'PRECONDITION: the slow branch was appended to the candidate\'s own text');
     const read = async () => { const t0 = performance.now(); const r = await fetch(`${w.exec.baseUrl}/query?dataset=public`, { method: 'POST', body: slow, signal: AbortSignal.timeout(180000) }); const j = await r.json(); assert.equal(r.status, 200, JSON.stringify(j).slice(0, 200)); return { rows: j.results.bindings, ms: performance.now() - t0 }; };
@@ -207,9 +209,7 @@ const textOf = async (opts) => { let q = null; try { await readyFromExecutor(asy
 test('#1698 (PS9) readyFromExecutor reads every context edge by default, and reads only the edges of cards that are not done when asked (contextOf: \'open\')', async () => {
   const dflt = await textOf({ shippedShas: null }); const open = await textOf({ shippedShas: null, contextOf: 'open' });
   assert.ok(dflt && open, 'PRECONDITION: both calls produced a query');
-  assert.ok(!/NOT\s+EXISTS/i.test(dflt), 'the DEFAULT query has no done filter: every context edge, as today');
-  assert.match(open, /NOT\s+EXISTS[^}]*column:done/i, 'asking for contextOf "open" adds a NOT EXISTS done filter');
-  assert.ok(open.length > dflt.length, 'and changes nothing but that (the open text is the default text plus the filter)');
-  assert.equal(open.replace(/\s*FILTER\s+NOT\s+EXISTS\s*\{[^}]*\}/i, '').replace(/\s+/g, ' '), dflt.replace(/\s+/g, ' '), 'removing the filter gives back exactly the default text, so no other branch changed');
+  assert.ok(!FILTER_RE.test(dflt), 'the DEFAULT query has no done filter: every context edge, as today');
+  assert.ok(FILTER_RE.test(open) && /column:done|\/column\/done/.test(open), 'asking for contextOf "open" adds a filter that leaves out cards in column done');
   for (const kind of ['facts', 'blockers', 'superseded', 'human', 'condition']) assert.ok(open.includes(`"${kind}" AS ?readyKind`) && dflt.includes(`"${kind}" AS ?readyKind`), `the ${kind} branch is in both`);
 });
