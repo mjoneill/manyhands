@@ -154,6 +154,7 @@ function l1tap({ status = 'ok', idle = true, loaded = true, name = L1_NAME } = {
     skip: `ok 1 - ${name} # SKIP the executor venv is missing`,
     fail: `not ok 1 - ${name}`,
     todo: `not ok 1 - ${name} # TODO not yet`,
+    todoOk: `ok 1 - ${name} # TODO not yet`,
     absent: 'ok 1 - some other test entirely',
   }[status];
   return ['TAP version 13', ...(idle ? [IDLE] : []), ...(loaded ? [LOADED] : []), `# Subtest: ${name}`, result, '# tests 1', '# pass 1', ''].join('\n');
@@ -217,8 +218,8 @@ test('#1693 (C4) the L1 test SKIPPED is not a pass: exit 1, l1Ok:false, overall 
   assert.ok(printed(r).problems.some((p) => p.includes('L1 LATENCY')), 'names the L1 test');
 });
 
-test('#1693 (C5) the L1 test FAILED, or marked TODO: exit 1, l1Ok:false, naming it', async () => {
-  for (const status of ['fail', 'todo']) {
+test('#1693 (C5) the L1 test FAILED, or marked TODO (as `not ok` or as plain `ok`): exit 1, l1Ok:false, naming it', async () => {
+  for (const status of ['fail', 'todo', 'todoOk']) {
     const s = setup({ l1: l1tap({ status }) });
     const r = await exec(CHECK, s.args);
     assert.equal(r.code, 1, `${status}: ${r.out}`);
