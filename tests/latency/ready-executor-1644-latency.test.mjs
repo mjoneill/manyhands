@@ -63,7 +63,9 @@ async function phase(sd, label) {
   const mk = async (ready) => {
     const store = own.dir('r44l-run-'); fs.cpSync(sd.store, store, { recursive: true });
     const dir = own.dir('r44l-board-'); const boardFile = path.join(dir, 'board.json'); fs.copyFileSync(sd.boardFile, boardFile);
-    const exec = await startExecutorOnCopy({ store, datasetId: DSID }); own.adopt(() => killExecutor(exec));
+    // DIAGNOSTIC (#1644 / #1693): the executor logs each query's handler time to this file (`executor.py --log`); read below, never asserted.
+    const logFile = path.join(own.dir('r44l-log-'), 'exec.log');
+    const exec = await startExecutor({ store, datasetId: DSID, extraArgs: ['--promote-epoch', '--log', logFile] }); exec.logFile = logFile; own.adopt(() => killExecutor(exec));
     const proxy = await startProxy(exec.baseUrl); own.adopt(async () => { try { await proxy.down(); } catch { /* down */ } });
     const rest = await startRestServer({ boardFile, env: { SCRUM_ROSTER_FILE: ROSTER_FILE, SCRUM_GRAPH_DATASET_ID: DSID, SCRUM_GRAPH_EXECUTOR_URL: proxy.url, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', SCRUM_GRAPH_UNIT_CARDS: '1', ...(ready ? { [READY_ENV]: 'executor' } : {}) } });
     own.adopt(() => rest.stop());
@@ -74,11 +76,23 @@ async function phase(sd, label) {
     const call = async (x) => { const t = performance.now(); const r = await fetch(`${x.rest.baseUrl}/api/ready?limit=20`, { signal: AbortSignal.timeout(60000) }); const body = await r.text(); const ms = performance.now() - t; assert.equal(r.status, 200); return { ms, source: JSON.parse(body).source }; };
     for (let i = 0; i < 3; i++) { await call(off); await call(on); }
     off.proxy.readyQueries = 0; on.proxy.readyQueries = 0;
+    const logLines = (x) => fs.readFileSync(x.exec.logFile, 'utf8').split('\n').filter(Boolean);
+    off.mark = logLines(off).length; on.mark = logLines(on).length;   // DIAGNOSTIC: only the measured calls, not the warm-ups
     const offMs = []; const onMs = []; let sources = new Set();
     for (let i = 0; i < 40; i++) {
       const order = i % 2 === 0 ? [off, on] : [on, off];
-      for (const x of order) { const r = await call(x); (x === off ? offMs : onMs).push(r.ms); sources.add(`${x === off ? 'off' : 'on'}:${r.source}`); }
+      for (const x of order) { const t0 = Date.now(); const r = await call(x); (x.calls ??= []).push({ t0, t1: Date.now(), ms: r.ms }); (x === off ? offMs : onMs).push(r.ms); sources.add(`${x === off ? 'off' : 'on'}:${r.source}`); }
     }
+    // DIAGNOSTIC: for EACH measured call, the executor's logged query handler times that fall inside that call's wall-clock window (same host, so one clock),
+    // then the per-call residual = end-to-end minus those handler times. Summarised per call, never as p95(end-to-end) minus p95(handler).
+    const stamp = (l) => Date.parse(l.split(' ')[0]);
+    const perCall = (x) => {
+      const q = logLines(x).slice(x.mark).map((l) => l.split(' ')).filter((t) => t[2] === 'query' && t[3] === 'OK').map((t) => ({ at: Date.parse(t[0]), ms: Number(t[4]) }));
+      const rows = x.calls.map((c) => { const hit = q.filter((e) => e.at >= c.t0 - 2 && e.at <= c.t1 + 2); const sum = hit.reduce((acc, e) => acc + e.ms, 0); return { n: hit.length, handler: sum, residual: c.ms - sum, e2e: c.ms }; });
+      const f = (k) => `p50=${med(rows.map((r) => r[k])).toFixed(1)} p95=${p95(rows.map((r) => r[k])).toFixed(1)}`;
+      return `calls=${rows.length}, calls with no matched handler line=${rows.filter((r) => r.n === 0).length}, handler lines per call min=${Math.min(...rows.map((r) => r.n))} max=${Math.max(...rows.map((r) => r.n))}; per-call handler sum ${f('handler')} ms; per-call residual ${f('residual')} ms; end-to-end ${f('e2e')} ms`;
+    };
+    console.log(`L1DIAG ${label}: PER-CALL correlation (residual = combined unmeasured overhead, not a proven queue/transport/serialization split) | executor leg: ${perCall(on)} | in-process leg's executor: ${perCall(off)}`);
     const line = `L1 ${label}: load1=${os.loadavg()[0].toFixed(2)}  in-process n=${offMs.length} p50=${Math.round(med(offMs))} p95=${Math.round(p95(offMs))} ms | executor n=${onMs.length} p50=${Math.round(med(onMs))} p95=${Math.round(p95(onMs))} ms (ratio ${(p95(onMs) / p95(offMs)).toFixed(2)}; ${on.proxy.readyQueries} readiness queries on the executor leg, ${off.proxy.readyQueries} on the in-process leg; responses said ${[...sources].sort().join(', ')})`;
     console.log(line); return { off: { ms: offMs, queries: off.proxy.readyQueries }, on: { ms: onMs, queries: on.proxy.readyQueries }, line };
   }
@@ -93,6 +107,7 @@ test('L1 LATENCY on a production-sized board: executor p95 <= 1.0 s AND <= 2x th
     assert.ok(a <= 2 * b, `executor p95 ${Math.round(a)} ms must be <= 2x the in-process p95 ${Math.round(b)} ms; ${ph.line}`);
   };
   check(await phase(sd, 'idle'));
+  if (process.env.L1DIAG_IDLE_ONLY === '1') return;   // DIAGNOSTIC: the Mac run stops after the idle phase (no burners)
   const burners = Array.from({ length: 6 }, () => spawn(process.execPath, ['-e', 'for(;;){}'], { stdio: 'ignore' }));
   try { await new Promise((r) => setTimeout(r, 3000)); check(await phase(sd, 'loaded (6 CPU burners)')); } finally { for (const b of burners) b.kill('SIGKILL'); }
 });
