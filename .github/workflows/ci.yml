@@ -83,6 +83,10 @@ jobs:
       - name: Allow Chromium's sandbox on the runner
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Run the server suite
+        # DIAGNOSTIC (#1696), DO NOT LAND: the whole suite under a clock moved 30 days forward, to find rows that go red when a fixed date crosses a window.
+        env:
+          NODE_OPTIONS: --import ${{ github.workspace }}/scripts/shift-clock-1696.mjs
+          SHIFT_DAYS: '30'
         run: npm run test:server
 
   browser:
