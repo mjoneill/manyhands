@@ -141,6 +141,9 @@ test('#1696 (S7) it never passes a check it could not make: an unparseable file,
 //       This is a LEXICAL check that the citation still points at a comparison; it cannot verify the comparison's meaning, and says so.
 //   N6  a malformed list, an entry without a name, and a missing list file: exit 2
 //   N7  the accepted-sites list: accepted is exit 0 and lists the reason; unlisted is exit 1; a stale entry is exit 1; an entry without a reason is exit 2
+//   N8  an accepted entry is BOUND to its fixed dates, consumer, field and a fingerprint of the source it depends on: a changed date at the same location is NOT inherited (exit 1, reported as changed)
+//   N9  the fingerprint covers the whole chain, not only the flagged statement: editing a helper on the chain (the tokensFile-reverted case) un-accepts the site; editing an unrelated statement does not
+//   N10 an entry missing its dates, consumer, field or fingerprint is refused (exit 2); a changed entry is never reported as merely stale
 const LIST = path.join(HERE, '..', 'scripts', 'windowed-fields-1696.json');
 const withTmp = (fn) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'scan1696-')); try { return fn(d); } finally { fs.rmSync(d, { recursive: true, force: true }); } };
 
@@ -211,9 +214,12 @@ test('#1696 (N6) a malformed list, an entry without a name, and a missing list f
   }
 }));
 
+/** An accepted-sites entry bound to a flagged site: its file, statement, field, consumer, the fixed dates it carries and the chain fingerprint the scan reported. */
+const bind = (site, reason) => ({ file: site.file, statement: site.statement, field: site.field, consumer: site.consumer.name, dates: site.dates, fingerprint: site.fingerprint, reason });
+
 test('#1696 (N7) the accepted-sites list: accepted is exit 0 with its reason, unlisted is exit 1, a stale entry is exit 1, an entry without a reason is exit 2', () => withTmp((d) => {
   const first = json('--fields', LIST, FX('planted-expiresat.txt')); assert.ok(first.j && first.j.flagged.length === 1, 'PRECONDITION: one flagged site');
-  const site = first.j.flagged[0]; const entry = { file: site.file, statement: site.statement, field: site.field, reason: 'the expiry is overridden by the caller in the one row that matters' };
+  const site = first.j.flagged[0]; const entry = bind(site, 'the expiry is overridden by the caller in the one row that matters');
   const write = (name, doc) => { const p = path.join(d, name); fs.writeFileSync(p, JSON.stringify(doc)); return p; };
   const ok = json('--fields', LIST, '--baseline', write('ok.json', { accepted: [entry] }), FX('planted-expiresat.txt'));
   assert.equal(ok.r.status, 0, `accepted: exit 0 (got ${ok.r.status}): ${ok.r.stderr.slice(0, 200)}`); assert.equal(ok.j.flagged.length, 0);
@@ -319,3 +325,40 @@ test('#1696 (S12) THE LIMIT, pinned: a date written as numbers is not seen, and 
     }
   } finally { fs.rmSync(d, { recursive: true, force: true }); }
 });
+
+test('#1696 (N8) an accepted entry is bound to its dates, consumer, field and a source fingerprint: a changed date at the same location is not inherited as safe', () => withTmp((d) => {
+  const f = path.join(d, 'site.txt'); const orig = fs.readFileSync(FX('planted-expiresat.txt'), 'utf8'); fs.writeFileSync(f, orig);
+  const a = json('--fields', LIST, f); assert.equal(a.j.flagged.length, 1, 'PRECONDITION: one flagged site');
+  assert.ok(Array.isArray(a.j.flagged[0].dates) && a.j.flagged[0].dates.includes('2026-09-18T12:00:00.000Z'), `the report carries the fixed dates: ${JSON.stringify(a.j.flagged[0].dates)}`);
+  assert.match(String(a.j.flagged[0].fingerprint), /^[0-9a-f]{16,}$/, 'and a chain fingerprint');
+  const base = path.join(d, 'accepted.json'); fs.writeFileSync(base, JSON.stringify({ accepted: [bind(a.j.flagged[0], 'reviewed')] }));
+  const ok = json('--fields', LIST, '--baseline', base, f); assert.equal(ok.r.status, 0, `CONTROL: the unchanged site is accepted (exit ${ok.r.status}): ${ok.r.stdout.slice(0, 200)}`);
+  fs.writeFileSync(f, orig.replace('2026-09-18T12:00:00.000Z', '2027-01-05T12:00:00.000Z'));   // same file, same statement, same line: a different date
+  const moved = json('--fields', LIST, '--baseline', base, f);
+  assert.equal(moved.r.status, 1, `a changed date at the same location is NOT accepted (exit ${moved.r.status})`); assert.equal(moved.j.flagged.length, 1);
+  assert.equal(moved.j.changed.length, 1, 'and it is reported as CHANGED, needing review'); assert.ok(moved.j.changed[0].differs.includes('dates'), `naming what differs: ${JSON.stringify(moved.j.changed[0].differs)}`);
+  assert.equal(moved.j.staleBaseline.length, 0, 'a changed entry is not also reported stale');
+  const text = run('--fields', LIST, '--baseline', base, f); assert.equal(text.status, 1); assert.match(text.stdout, /CHANGED since accepted \([^)]*\bdates\b[^)]*differ\)/, 'the text report says so, naming what differs');
+}));
+
+test('#1696 (N9) the fingerprint covers the whole chain: editing a helper the site depends on un-accepts it; editing an unrelated statement does not', () => withTmp((d) => {
+  const f = path.join(d, 'chain.txt'); const orig = fs.readFileSync(FX('planted-expiresat.txt'), 'utf8'); fs.writeFileSync(f, orig);
+  const a = json('--fields', LIST, f); const base = path.join(d, 'accepted.json'); fs.writeFileSync(base, JSON.stringify({ accepted: [bind(a.j.flagged[0], 'reviewed')] }));
+  // the flagged statement itself is untouched; the helper that feeds expiresAt changes (the case where a caller's override is reverted)
+  fs.writeFileSync(f, orig.replace("expiresAt: at(24 * 30)", "expiresAt: at(24 * 3)"));
+  const edited = json('--fields', LIST, '--baseline', base, f);
+  assert.equal(edited.r.status, 1, `a change on the chain un-accepts the site (exit ${edited.r.status})`); assert.ok(edited.j.changed.length === 1 && edited.j.changed[0].differs.includes('fingerprint'), JSON.stringify(edited.j.changed));
+  // CONTROL: an edit to the pure row, which is NOT on the chain, leaves the acceptance standing
+  fs.writeFileSync(f, orig.replace("throw new Error('never')", "throw new Error('still never')"));
+  const unrelated = json('--fields', LIST, '--baseline', base, f);
+  assert.equal(unrelated.r.status, 0, `CONTROL: an unrelated edit does not un-accept (exit ${unrelated.r.status}): ${unrelated.r.stdout.slice(0, 200)}`);
+}));
+
+test('#1696 (N10) an accepted entry missing its dates, consumer, field or fingerprint is refused (exit 2), naming the list', () => withTmp((d) => {
+  const a = json('--fields', LIST, FX('planted-expiresat.txt')); const full = bind(a.j.flagged[0], 'reviewed');
+  for (const missing of ['dates', 'consumer', 'field', 'fingerprint']) {
+    const { [missing]: _drop, ...partial } = full; const p = path.join(d, `no-${missing}.json`); fs.writeFileSync(p, JSON.stringify({ accepted: [partial] }));
+    const r = run('--json', '--fields', LIST, '--baseline', p, FX('planted-expiresat.txt'));
+    assert.equal(r.status, 2, `an entry without ${missing}: exit 2 (got ${r.status}): ${r.stdout.slice(0, 120)}`); assert.match(r.stderr, new RegExp(`no-${missing}\\.json`), 'the message names the list file');
+  }
+}));
