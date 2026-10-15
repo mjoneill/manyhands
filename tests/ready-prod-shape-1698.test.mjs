@@ -213,3 +213,12 @@ test('#1698 (PS9) readyFromExecutor reads every context edge by default, and rea
   assert.ok(FILTER_RE.test(open) && /column:done|\/column\/done/.test(open), 'asking for contextOf "open" adds a filter that leaves out cards in column done');
   for (const kind of ['facts', 'blockers', 'superseded', 'human', 'condition']) assert.ok(open.includes(`"${kind}" AS ?readyKind`) && dflt.includes(`"${kind}" AS ?readyKind`), `the ${kind} branch is in both`);
 });
+
+test('#1698 (PS9b) readyFromExecutor refuses a contextOf it does not know, before it asks the executor anything', async () => {
+  let asked = 0;
+  for (const bad of ['everything', 'OPEN', '', 0, true, {}]) {
+    await assert.rejects(() => readyFromExecutor(async () => { asked++; return []; }, { shippedShas: null, contextOf: bad }), undefined, `contextOf ${JSON.stringify(bad)} is refused`);
+  }
+  assert.equal(asked, 0, 'and the executor was never asked: a mistyped option must not quietly fall back to either read');
+  for (const good of ['all', 'open']) await readyFromExecutor(async () => [], { shippedShas: null, contextOf: good });   // CONTROL: the two known values are accepted
+});
