@@ -6,7 +6,11 @@
  *   · L1 moves out of the suite and nothing notices. The suite glob is tests/*.test.mjs (scripts/run-tests.sh), so a
  *     test moved out of it leaves NO skip line, and the #1690 skip gate (which only sees skips) cannot see it missing.
  *     A skip-based exclusion is no way out either: that gate refuses every skip that is not in its manifest.
- *   · the snapshot tests (S1 to S3 and their controls) leave with it, or the nightly stops requiring the L1 file
+ *   · the snapshot tests (S1 to S3 and their controls) leave with it, or the nightly's required list names a file the
+ *     nightly never runs. The nightly (scripts/suite-watch.mjs) runs `run-tests.sh` with no arguments, i.e. only
+ *     tests/*.test.mjs, and an unrun required file makes its verdict INCOMPLETE every night. So the new L1 file is NOT
+ *     listed: L1 is gated at landings (the CI step and the oracle), not by the nightly. That narrowing is a recorded
+ *     coverage change on the card, not a silent one.
  *   · the CI receipt, hence the landing verdict, completes with L1 never having run, skipped, red, or half-run
  *   · an old-format CI receipt (no L1 field) still completes the pair
  *   · GitHub enforces nothing on main (no required status checks, no rulesets; read with `gh api` on 2026-10-15), so the
@@ -103,11 +107,17 @@ test('#1693 (F3) no file the suite runs (tests/*.test.mjs) contains the L1 LATEN
   assert.deepEqual(holders, [], 'a suite file still carries the L1 test');
 });
 
-test('#1693 (F4) the nightly suite watch requires the new L1 file, and still requires the snapshot file', () => {
+test('#1693 (F4a) the nightly suite watch still requires the snapshot file', () => {
   const required = JSON.parse(read('scripts/suite-watch-required.json'));
   assert.ok(Array.isArray(required), 'the required list is an array');
-  assert.ok(required.includes(L1_FILE), `the required list names ${L1_FILE}`);
-  assert.ok(required.includes(SNAPSHOT), 'and still names the snapshot file');
+  assert.ok(required.includes(SNAPSHOT), 'the snapshot file stays required');
+});
+
+test('#1693 (F4b) every file the nightly requires exists and is inside the glob it runs (tests/*.test.mjs): no required file can leave the nightly INCOMPLETE forever', () => {
+  const required = JSON.parse(read('scripts/suite-watch-required.json'));
+  const inGlob = new Set(fs.readdirSync(path.join(REPO, 'tests')).filter((f) => f.endsWith('.test.mjs')).map((f) => `tests/${f}`));
+  assert.ok(required.length > 100, `the list is read (${required.length} entries)`);
+  assert.deepEqual(required.filter((f) => !inGlob.has(f)), [], 'a required file that the nightly cannot run');
 });
 
 // ------------------------------------------------------------------- W: the workflow runs it as its own step
