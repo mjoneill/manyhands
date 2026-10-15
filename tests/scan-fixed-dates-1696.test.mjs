@@ -143,6 +143,7 @@ test('#1696 (S7) it never passes a check it could not make: an unparseable file,
 //   N7  the accepted-sites list: accepted is exit 0 and lists the reason; unlisted is exit 1; a stale entry is exit 1; an entry without a reason is exit 2
 //   N8  an accepted entry is BOUND to its fixed dates, consumer, field and a fingerprint of the source it depends on: a changed date at the same location is NOT inherited (exit 1, reported as changed)
 //   N9  the fingerprint covers the whole chain, not only the flagged statement: editing a helper on the chain (the tokensFile-reverted case) un-accepts the site; editing an unrelated statement does not
+//   N11 the fingerprint covers the full local dependency closure, not only the date and consumer chains: a NUMBER the expiry is computed from (WHEN + DAYS) changing from 30 to 3 un-accepts the site; an unrelated constant changing does not
 //   N10 an entry missing its dates, consumer, field or fingerprint is refused (exit 2); a changed entry is never reported as merely stale
 const LIST = path.join(HERE, '..', 'scripts', 'windowed-fields-1696.json');
 const withTmp = (fn) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'scan1696-')); try { return fn(d); } finally { fs.rmSync(d, { recursive: true, force: true }); } };
@@ -361,4 +362,16 @@ test('#1696 (N10) an accepted entry missing its dates, consumer, field or finger
     const r = run('--json', '--fields', LIST, '--baseline', p, FX('planted-expiresat.txt'));
     assert.equal(r.status, 2, `an entry without ${missing}: exit 2 (got ${r.status}): ${r.stdout.slice(0, 120)}`); assert.match(r.stderr, new RegExp(`no-${missing}\\.json`), 'the message names the list file');
   }
+}));
+
+test('#1696 (N11) the fingerprint covers the full local dependency closure: changing a number an accepted expiry is computed from un-accepts it; changing an unrelated constant does not', () => withTmp((d) => {
+  const f = path.join(d, 'numeric.txt'); const orig = fs.readFileSync(FX('numeric-dependency.txt'), 'utf8'); fs.writeFileSync(f, orig);
+  const a = json('--fields', LIST, f); assert.equal(a.j.flagged.length, 1, `PRECONDITION: the numeric-dependency site is flagged (${a.r.stdout.slice(0, 200)})`); assert.ok(a.j.flagged[0].dates.includes('2026-09-18T12:00:00.000Z'));
+  const base = path.join(d, 'accepted.json'); fs.writeFileSync(base, JSON.stringify({ accepted: [bind(a.j.flagged[0], 'reviewed')] }));
+  assert.equal(json('--fields', LIST, '--baseline', base, f).r.status, 0, 'CONTROL: unchanged, accepted');
+  fs.writeFileSync(f, orig.replace('const DAYS = 30;', 'const DAYS = 3;'));
+  const slid = json('--fields', LIST, '--baseline', base, f);
+  assert.equal(slid.r.status, 1, `the expiry moved from +30 d to +3 d with the SAME fixed date: it must need review (exit ${slid.r.status})`); assert.equal(slid.j.changed.length, 1); assert.ok(slid.j.changed[0].differs.includes('fingerprint'), JSON.stringify(slid.j.changed));
+  fs.writeFileSync(f, orig.replace('const UNRELATED = 5;', 'const UNRELATED = 6;'));
+  assert.equal(json('--fields', LIST, '--baseline', base, f).r.status, 0, 'CONTROL: a constant the site does not depend on may change without un-accepting it');
 }));
