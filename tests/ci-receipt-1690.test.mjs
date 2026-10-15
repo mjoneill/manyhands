@@ -68,7 +68,14 @@ function tap({ extra = [], skips = PLATFORM } = {}) {
   let n = 600;
   return ['TAP version 13', 'ok 1 - an ordinary test', ...skips.map((t) => `ok ${n++} - ${t.name} # SKIP ${t.reason}`), ...extra, '# tests 3', '# pass 1', ''].join('\n');
 }
-const ALLOWED = ['leg', 'sha', 'tree', 'manifestSha256', 'suiteExit', 'ok', 'matched', 'problems', 'at'];
+const ALLOWED = ['leg', 'sha', 'tree', 'manifestSha256', 'suiteExit', 'ok', 'matched', 'l1Ok', 'problems', 'at'];
+// #1693 — the CI leg also takes the L1 step's TAP and exit status (--l1-tap, --l1-exit) and its receipt carries `l1Ok`.
+// A clean L1 TAP, shaped like the real one: node's TAP reporter prints the test's console output as `# ` comment lines.
+const L1_TAP = ['TAP version 13', '# L1 idle: load1=2.00  in-process n=40 p50=80 p95=120 ms | executor n=40 p50=150 p95=210 ms (ratio 1.75)',
+  '# L1 loaded (6 CPU burners): load1=9.00  in-process n=40 p50=200 p95=300 ms | executor n=40 p50=380 p95=520 ms (ratio 1.73)',
+  '# Subtest: L1 LATENCY on a production-sized board: executor p95 <= 1.0 s AND <= 2x the in-process p95, idle and under CPU load',
+  'ok 1 - L1 LATENCY on a production-sized board: executor p95 <= 1.0 s AND <= 2x the in-process p95, idle and under CPU load', '# tests 1', '# pass 1', ''].join('\n');
+
 
 function setup({ tapText = tap(), env = {}, suiteExit = '0' } = {}) {
   const d = mk();
@@ -78,7 +85,9 @@ function setup({ tapText = tap(), env = {}, suiteExit = '0' } = {}) {
   fs.writeFileSync(tapPath, tapText);
   fs.writeFileSync(manPath, JSON.stringify(PLATFORM.map((t) => ({ file: 'tests/x.test.mjs', name: t.name, reason: t.reason }))));
   const receipt = path.join(d, 'ci-receipt.json');
-  const args = [tapPath, '--manifest', manPath, '--root', repo.dir, '--sha', repo.head, '--suite-exit', suiteExit, '--receipt', receipt];
+  const l1Path = path.join(d, 'l1.tap');
+  fs.writeFileSync(l1Path, L1_TAP);
+  const args = [tapPath, '--manifest', manPath, '--root', repo.dir, '--sha', repo.head, '--suite-exit', suiteExit, '--l1-tap', l1Path, '--l1-exit', '0', '--receipt', receipt];
   return { d, repo, tapPath, manPath, receipt, args, env, sha: repo.head };
 }
 const markedLines = (stdout) => stdout.split('\n').filter((l) => l.startsWith('PLATFORM-RECEIPT '));
@@ -92,7 +101,7 @@ test('#1690 (P1) CONTROL — a clean verdict prints exactly one marked line whos
   const printed = JSON.parse(lines[0].slice('PLATFORM-RECEIPT '.length));
   assert.deepEqual(printed, JSON.parse(fs.readFileSync(s.receipt, 'utf8')), 'the printed receipt is the file’s receipt');
   assert.deepEqual(Object.keys(printed).filter((k) => !ALLOWED.includes(k)), [], 'no key outside the allowlist');
-  for (const k of ['leg', 'sha', 'tree', 'manifestSha256', 'suiteExit', 'ok', 'problems']) assert.ok(k in printed, `has ${k}`);
+  for (const k of ['leg', 'sha', 'tree', 'manifestSha256', 'suiteExit', 'ok', 'l1Ok', 'problems']) assert.ok(k in printed, `has ${k}`);
   assert.equal(printed.leg, 'ci');
   assert.equal(printed.sha, s.sha);
   assert.equal(printed.ok, true);
@@ -158,7 +167,7 @@ const STEP = 'Platform-only skips equal the manifest';
 const ts = (i) => `2026-10-14T21:${String(10 + i).padStart(2, '0')}:00.0000000Z`;
 const logLine = (job, step, text, i = 0) => `${job}\t${step}\t${ts(i)} ${text}`;
 const receipt = (over = {}) => ({
-  leg: 'ci', sha: HEAD, tree: 'c'.repeat(40), manifestSha256: 'd'.repeat(64), suiteExit: 0, ok: true, matched: 2, problems: [], at: '2026-10-14T21:30:00.000Z', ...over,
+  leg: 'ci', sha: HEAD, tree: 'c'.repeat(40), manifestSha256: 'd'.repeat(64), suiteExit: 0, ok: true, matched: 2, l1Ok: true, problems: [], at: '2026-10-14T21:30:00.000Z', ...over,
 });
 const marker = (r) => `PLATFORM-RECEIPT ${typeof r === 'string' ? r : JSON.stringify(r)}`;
 

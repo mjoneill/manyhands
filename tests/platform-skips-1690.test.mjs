@@ -110,18 +110,26 @@ function tap({ skips = PLATFORM, extra = [] } = {}) {
   let n = 600;
   return [`TAP version 13`, ...NOISE, ...skips.map((t) => skipLine(n++, t)), ...extra, `# tests ${NOISE.length + skips.length + extra.length}`, `# pass 1`].join('\n') + '\n';
 }
+// #1693 — the CI leg also takes the L1 step's TAP and exit status (--l1-tap, --l1-exit) and its receipt carries `l1Ok`.
+// A clean L1 TAP, shaped like the real one: node's TAP reporter prints the test's console output as `# ` comment lines.
+const L1_TAP = ['TAP version 13', '# L1 idle: load1=2.00  in-process n=40 p50=80 p95=120 ms | executor n=40 p50=150 p95=210 ms (ratio 1.75)',
+  '# L1 loaded (6 CPU burners): load1=9.00  in-process n=40 p50=200 p95=300 ms | executor n=40 p50=380 p95=520 ms (ratio 1.73)',
+  '# Subtest: L1 LATENCY on a production-sized board: executor p95 <= 1.0 s AND <= 2x the in-process p95, idle and under CPU load',
+  'ok 1 - L1 LATENCY on a production-sized board: executor p95 <= 1.0 s AND <= 2x the in-process p95, idle and under CPU load', '# tests 1', '# pass 1', ''].join('\n');
 function setup({ tapText = tap(), manifest = PLATFORM.map((t) => ({ file: 'tests/x.test.mjs', name: t.name, reason: t.reason })) } = {}) {
   const d = mk();
   const tapPath = path.join(d, 'out.tap');
   const manPath = path.join(d, 'manifest.json');
   fs.writeFileSync(tapPath, tapText);
   fs.writeFileSync(manPath, typeof manifest === 'string' ? manifest : JSON.stringify(manifest));
+  const l1Path = path.join(d, 'l1.tap');
+  fs.writeFileSync(l1Path, L1_TAP);
   const repo = repoDir();
-  return { d, tapPath, manPath, receipt: path.join(d, 'ci-receipt.json'), repo, sha: repo.head };
+  return { d, tapPath, manPath, l1Path, receipt: path.join(d, 'ci-receipt.json'), repo, sha: repo.head };
 }
 // the suite's own exit status is a required input of the CI leg; 0 here unless a row says otherwise
-const check = (s, extra = []) => exec(CHECK, [s.tapPath, '--manifest', s.manPath, '--root', s.repo.dir, '--sha', s.sha, '--suite-exit', '0', '--receipt', s.receipt, ...extra]);
-const checkWith = (s, args) => exec(CHECK, [s.tapPath, '--manifest', s.manPath, '--receipt', s.receipt, ...args]);
+const check = (s, extra = []) => exec(CHECK, [s.tapPath, '--manifest', s.manPath, '--root', s.repo.dir, '--sha', s.sha, '--suite-exit', '0', '--l1-tap', s.l1Path, '--l1-exit', '0', '--receipt', s.receipt, ...extra]);
+const checkWith = (s, args) => exec(CHECK, [s.tapPath, '--manifest', s.manPath, '--receipt', s.receipt, '--l1-tap', s.l1Path, '--l1-exit', '0', ...args]);
 
 test('#1690 (C1) CONTROL — the skip set equals the manifest, with UNAVAILABLE-named tests that ran and TODO rows in the stream: clean', async () => {
   const s = setup();
@@ -338,7 +346,7 @@ function receipts({ ci = {}, macR = {} } = {}) {
   const base = { sha: SHA_A, tree: 't'.repeat(40), manifestSha256: 'm'.repeat(64), ok: true };
   const a = path.join(d, 'ci.json');
   const b = path.join(d, 'mac.json');
-  fs.writeFileSync(a, JSON.stringify({ leg: 'ci', ...base, suiteExit: 0, ...ci }));
+  fs.writeFileSync(a, JSON.stringify({ leg: 'ci', ...base, suiteExit: 0, l1Ok: true, ...ci }));
   fs.writeFileSync(b, JSON.stringify({ leg: 'mac', ...base, ...macR }));
   return [a, b];
 }
