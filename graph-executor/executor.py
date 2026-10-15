@@ -420,8 +420,9 @@ class Executor:
         # over the query's own FROM / FROM NAMED / GRAPH <...> (measured on pyoxigraph 0.5.11), so bookkeeping
         # kept in a named graph cannot be reached through a public read however the query is written.
         # #1694: `phases`, when given (only under --log), receives the time of the store.query call ("setup") and of
-        # the row loop ("iterate_convert": evaluation, if pyoxigraph evaluates lazily, and term conversion, which this
-        # cannot separate), plus the row count. Without it nothing here is timed.
+        # the row loop ("iterate_convert"), split into its two sub-phases: the iterator's next() ("iterate_convert.advance",
+        # where a lazily evaluated query does its evaluating) and term_json plus row construction ("iterate_convert.convert").
+        # It also receives the row count. Without it nothing here is timed, and the loop below is the original one.
         t = time.perf_counter() if phases is not None else 0
         r = self.store.query(sparql, default_graph=px.DefaultGraph(), named_graphs=[]) if public else self.store.query(sparql)
         if phases is not None:
@@ -431,22 +432,45 @@ class Executor:
             out = {'head': {}, 'boolean': bool(r)}
             if phases is not None:
                 phases['iterate_convert'] = (time.perf_counter() - t) * 1000
+                phases['iterate_convert.advance'] = 0.0
+                phases['iterate_convert.convert'] = 0.0
                 phases['rows'] = 0
             return out
         if isinstance(r, px.QueryTriples):
             raise ValueError('CONSTRUCT/DESCRIBE not supported')
         vs = [v.value for v in r.variables]
         bs = []
-        for row in r:
+        if phases is None:
+            for row in r:
+                b = {}
+                for k in vs:
+                    t_ = row[k]
+                    if t_ is not None:
+                        b[k] = term_json(t_)
+                bs.append(b)
+            return {'head': {'vars': vs}, 'results': {'bindings': bs}}
+        adv = conv = 0.0
+        it = iter(r)
+        while True:
+            ta = time.perf_counter()
+            try:
+                row = next(it)
+            except StopIteration:
+                adv += time.perf_counter() - ta
+                break
+            tc = time.perf_counter()
+            adv += tc - ta
             b = {}
             for k in vs:
                 t_ = row[k]
                 if t_ is not None:
                     b[k] = term_json(t_)
             bs.append(b)
-        if phases is not None:
-            phases['iterate_convert'] = (time.perf_counter() - t) * 1000
-            phases['rows'] = len(bs)
+            conv += time.perf_counter() - tc
+        phases['iterate_convert'] = (time.perf_counter() - t) * 1000
+        phases['iterate_convert.advance'] = adv * 1000
+        phases['iterate_convert.convert'] = conv * 1000
+        phases['rows'] = len(bs)
         return {'head': {'vars': vs}, 'results': {'bindings': bs}}
 
     def health(self):
@@ -546,7 +570,8 @@ def make_handler(ex):
                 self.end_headers()
                 self.wfile.write(data)
                 phases['write'] = (time.perf_counter() - t) * 1000
-                pairs = ' '.join(f'{k}={phases[k]:.3f}' for k in ('setup', 'iterate_convert', 'encode', 'write'))
+                # a dotted name is a sub-phase of the one before it, so a reader summing phases sums the undotted ones only
+                pairs = ' '.join(f'{k}={phases[k]:.3f}' for k in ('setup', 'iterate_convert', 'iterate_convert.advance', 'iterate_convert.convert', 'encode', 'write'))
                 ex.log(op, 'query-phases', 'OK', (time.perf_counter() - t0) * 1000, sha, f'{pairs} rows={phases["rows"]}')
                 return
             self._send(404, {'error': 'not found'})
