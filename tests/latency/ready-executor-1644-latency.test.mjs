@@ -101,12 +101,12 @@ async function phase(sd, label) {
       const owner = (at) => { let k = -1; for (let i = 0; i < starts.length; i++) if (starts[i] <= at) k = i; return k; };
       return x.calls.map((c, i) => {
         const q = ph.filter((e) => owner(e.at) === i); const sum = (f) => q.reduce((acc, e) => acc + f(e), 0);
-        return { n: q.length, setup: sum((e) => e.p.setup ?? 0), iterate_convert: sum((e) => e.p.iterate_convert ?? 0), encode: sum((e) => e.p.encode ?? 0), write: sum((e) => e.p.write ?? 0), rows: sum((e) => e.p.rows ?? 0), phase_total: sum((e) => e.total), e2e: c.ms, residual: c.ms - sum((e) => e.total) };
+        return { n: q.length, setup: sum((e) => e.p.setup ?? 0), iterate_convert: sum((e) => e.p.iterate_convert ?? 0), advance: sum((e) => e.p['iterate_convert.advance'] ?? 0), convert: sum((e) => e.p['iterate_convert.convert'] ?? 0), encode: sum((e) => e.p.encode ?? 0), write: sum((e) => e.p.write ?? 0), rows: sum((e) => e.p.rows ?? 0), phase_total: sum((e) => e.total), e2e: c.ms, residual: c.ms - sum((e) => e.total) };
       });
     };
     const phaseSummary = (x) => {
       const rows = phaseRows(x); const f = (k) => `${k}=${med(rows.map((r) => r[k])).toFixed(1)}/${p95(rows.map((r) => r[k])).toFixed(1)}`;
-      return `calls=${rows.length}, calls with no phase line=${rows.filter((r) => r.n === 0).length}, phase lines per call min=${Math.min(...rows.map((r) => r.n))} max=${Math.max(...rows.map((r) => r.n))}; per-call sums p50/p95 ms: ${['setup', 'iterate_convert', 'encode', 'write', 'phase_total', 'residual', 'e2e'].map(f).join(' ')}; rows per call p50=${med(rows.map((r) => r.rows))}`;
+      return `calls=${rows.length}, calls with no phase line=${rows.filter((r) => r.n === 0).length}, phase lines per call min=${Math.min(...rows.map((r) => r.n))} max=${Math.max(...rows.map((r) => r.n))}; per-call sums p50/p95 ms: ${['setup', 'iterate_convert', 'advance', 'convert', 'encode', 'write', 'phase_total', 'residual', 'e2e'].map(f).join(' ')}; rows per call p50=${med(rows.map((r) => r.rows))}`;
     };
     console.log(`L1DIAG2 ${label}: executor query-phases (residual = end-to-end minus the phase-line totals: combined unmeasured overhead, not a proven split) | executor leg: ${phaseSummary(on)}`);
     console.log(`L1DIAG ${label}: PER-CALL correlation (residual = combined unmeasured overhead, not a proven queue/transport/serialization split) | executor leg: ${perCall(on)} | in-process leg's executor: ${perCall(off)}`);
