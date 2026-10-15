@@ -1,0 +1,16 @@
+// FIXTURE for the #1696 scan: a fixed date into a field the product compares with the clock (expiresAt), reaching a real server.
+import { test } from 'node:test';
+import { startRestServer } from './helpers/harness.mjs';
+
+const NOW = '2026-09-18T12:00:00.000Z';
+const at = (h) => new Date(Date.parse(NOW) + h * 3600_000).toISOString();
+const cred = () => ({ tokenHash: 'x', scope: 'act', expiresAt: at(24 * 30) });
+
+test('planted expiresAt: a fixed expiry reaches a real server', async () => {
+  const srv = await startRestServer({ board: { cards: [] }, env: { CREDS: JSON.stringify({ ada: [cred()] }) } });
+  await srv.stop();
+});
+
+test('planted expiresAt control, same file: the same anchor in a pure row', () => {
+  if (cred().expiresAt < '2000') throw new Error('never');
+});

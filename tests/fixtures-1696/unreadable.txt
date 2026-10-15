@@ -1,0 +1,3 @@
+// FIXTURE for the #1696 scan: this file does not parse.
+const a = ;
+test(
