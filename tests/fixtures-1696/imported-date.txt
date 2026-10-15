@@ -1,0 +1,9 @@
+// FIXTURE for the #1696 scan: the fixed date lives in an imported helper, in another file.
+import { test } from 'node:test';
+import { startRestServer } from './helpers/harness.mjs';
+import { ANCHOR } from './helpers/anchor.mjs';
+
+test('imported: the anchor is defined in a helper file', async () => {
+  const srv = await startRestServer({ board: { cards: [{ id: 'c1', createdAt: ANCHOR }] } });
+  await srv.stop();
+});

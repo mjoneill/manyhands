@@ -1,0 +1,16 @@
+// FIXTURE for the #1696 scan: a fixed calendar date flows into a fixture that a real server consumes.
+import { test } from 'node:test';
+import { startRestServer } from './helpers/harness.mjs';
+
+const WHEN = '2026-08-01T00:00:00.000Z';
+const card = () => ({ id: 'c1', shortId: 1, title: 'planted', createdAt: WHEN, claimedAt: WHEN });
+
+test('planted: a fixed date reaches a real server', async () => {
+  const srv = await startRestServer({ board: { cards: [card()], nextShortId: 2 } });
+  await srv.stop();
+});
+
+test('planted control, same file: a pure row on the same anchor', () => {
+  if (Date.parse(WHEN) > 0) return;
+  throw new Error('never');
+});

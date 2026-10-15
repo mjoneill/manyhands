@@ -1,0 +1,10 @@
+// FIXTURE for the #1696 scan: a fixed date into a field the product only stores (createdAt), reaching a real server.
+import { test } from 'node:test';
+import { startRestServer } from './helpers/harness.mjs';
+
+const WHEN = '2026-08-01T00:00:00.000Z';
+
+test('planted createdAt: a fixed creation time reaches a real server', async () => {
+  const srv = await startRestServer({ board: { cards: [{ id: 'c1', shortId: 1, title: 'x', createdAt: WHEN, updatedAt: WHEN }], nextShortId: 2 } });
+  await srv.stop();
+});

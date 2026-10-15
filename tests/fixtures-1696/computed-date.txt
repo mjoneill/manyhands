@@ -1,0 +1,10 @@
+// FIXTURE for the #1696 scan: the date is read from data at run time, which a lexical scan cannot follow.
+import fs from 'node:fs';
+import { test } from 'node:test';
+import { startRestServer } from './helpers/harness.mjs';
+
+test('computed: the anchor comes from a file', async () => {
+  const anchor = JSON.parse(fs.readFileSync('anchor.json', 'utf8')).at;
+  const srv = await startRestServer({ board: { cards: [{ id: 'c1', createdAt: new Date(anchor).toISOString() }] } });
+  await srv.stop();
+});
