@@ -33,6 +33,8 @@ const FIELDS = {
   suiteExit: (v) => Number.isInteger(v),
   ok: (v) => typeof v === 'boolean',
   matched: (v) => v === null || Number.isInteger(v),
+  // #1693: the L1 step's verdict. Required, so a receipt from before L1 left the suite cannot be extracted.
+  l1Ok: (v) => typeof v === 'boolean',
   problems: (v) => Array.isArray(v) && v.every((p) => typeof p === 'string' && p.length <= MAX_PROBLEM),
   at: (v) => typeof v === 'string',
 };

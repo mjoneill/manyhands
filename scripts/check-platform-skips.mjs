@@ -3,7 +3,7 @@
  * #1690 — the CI leg of the platform-split landing gate (decision 45a5d8e4).
  *
  *   node scripts/check-platform-skips.mjs <tap-file> --manifest <path> --root <checkout> --sha <40-hex>
- *                                         --suite-exit <n> [--receipt <path>]
+ *                                         --suite-exit <n> --l1-tap <file> --l1-exit <n> [--receipt <path>]
  *
  * A CI leg is clean only if the suite itself finished clean AND its skips are exactly the platform-only ones:
  *   · the suite's exit status (--suite-exit, required) is 0, no test line fails (TODO rows excepted), and no
@@ -12,12 +12,16 @@
  *     not listed, and a skip for ANY other reason (a bare `# SKIP` included) are refused and named
  *   · the commit is verified, not declared: --root must be a git checkout whose HEAD is --sha with no modified
  *     tracked file; the receipt carries that HEAD's tree
+ *   · #1693: the L1 latency test, which runs in its own step outside the suite, passed: the step exited 0
+ *     (--l1-exit), its TAP (--l1-tap) has the L1 LATENCY test as a plain `ok` (not skipped, not TODO), and both
+ *     phases printed a result. The receipt carries this as `l1Ok`, and a false one makes the leg not clean.
  *
  * Whenever it reaches a verdict (exit 0 or 1) it prints the receipt as one line, `PLATFORM-RECEIPT <json>`; when it
  * cannot check (exit 2) it prints none.
  *
  * Exit 0 clean · 1 mismatch, naming each test or the exit · 2 could not check (empty, missing or test-less TAP; a
- * missing, empty or malformed manifest; a missing or non-numeric suite exit; a sha that is not the checkout).
+ * missing, empty or malformed manifest; a missing or non-numeric suite exit; a missing --l1-tap, a missing, empty or
+ * test-less L1 TAP, or a missing or non-numeric --l1-exit; a sha that is not the checkout).
  */
 import fs from 'node:fs';
 import { EXIT, CannotCheck, parseArgs, readManifest, parseTap, isPlatformSkip, writeReceipt, verifyCheckout, RECEIPT_MARKER, MAX_PROBLEM } from './platform-gate-lib.mjs';
@@ -25,6 +29,7 @@ import { EXIT, CannotCheck, parseArgs, readManifest, parseTap, isPlatformSkip, w
 // A problem names a test, and a test name has no length limit; the printed receipt does.
 // The cut never splits a surrogate pair.
 const clip = (p) => (p.length <= MAX_PROBLEM ? p : `${p.slice(0, MAX_PROBLEM - 1).replace(/[\uD800-\uDBFF]$/, '')}…`);
+const L1_PREFIX = 'L1 LATENCY';
 
 function main(argv) {
   const { flags, positional } = parseArgs(argv);
@@ -34,6 +39,11 @@ function main(argv) {
     throw new CannotCheck(`--suite-exit must be the suite's numeric exit status, got ${flags['suite-exit'] === undefined ? 'nothing' : `"${flags['suite-exit']}"`}`);
   }
   const suiteExit = Number(flags['suite-exit']);
+  if (!flags['l1-tap']) throw new CannotCheck('no --l1-tap given (the L1 step\'s TAP)');
+  if (flags['l1-exit'] === undefined || !/^\d+$/.test(flags['l1-exit'])) {
+    throw new CannotCheck(`--l1-exit must be the L1 step's numeric exit status, got ${flags['l1-exit'] === undefined ? 'nothing' : `"${flags['l1-exit']}"`}`);
+  }
+  const l1Exit = Number(flags['l1-exit']);
   const { sha, tree } = verifyCheckout(flags.root, flags.sha);
   const manifest = readManifest(flags.manifest);
 
@@ -41,6 +51,11 @@ function main(argv) {
   try { text = fs.readFileSync(tapFile, 'utf8'); } catch (e) { throw new CannotCheck(`cannot read TAP ${tapFile}: ${e.code ?? e.message}`); }
   const tests = parseTap(text);
   if (tests.length === 0) throw new CannotCheck(`TAP ${tapFile} has no test lines`);
+
+  let l1Text;
+  try { l1Text = fs.readFileSync(flags['l1-tap'], 'utf8'); } catch (e) { throw new CannotCheck(`cannot read L1 TAP ${flags['l1-tap']}: ${e.code ?? e.message}`); }
+  const l1Tests = parseTap(l1Text);
+  if (l1Tests.length === 0) throw new CannotCheck(`L1 TAP ${flags['l1-tap']} has no test lines`);
 
   const problems = [];
 
@@ -70,10 +85,25 @@ function main(argv) {
     else if (!listed.has(t.name)) problems.push(`UNAVAILABLE skip not listed in the manifest: ${t.name}`);
   }
 
+  // ── #1693: the L1 latency step ran clean. It runs alone, outside the suite, so nothing above can see it.
+  const l1Problems = [];
+  if (l1Exit !== 0) l1Problems.push(`the L1 step exited ${l1Exit}, not 0`);
+  const l1 = l1Tests.find((t) => t.name.startsWith(L1_PREFIX));
+  if (!l1) l1Problems.push(`the ${L1_PREFIX} test did not appear in the L1 step`);
+  else if (l1.directive === 'SKIP') l1Problems.push(`the ${L1_PREFIX} test was skipped (${l1.reason || 'no reason given'})`);
+  else if (l1.directive === 'TODO') l1Problems.push(`the ${L1_PREFIX} test is marked TODO, which is not a pass`);
+  else if (!l1.ok) l1Problems.push(`the ${L1_PREFIX} test failed`);
+  // A pass with a phase missing is half a measurement: the test prints one line per phase.
+  for (const [phase, re] of [['idle', /^\s*#\s*L1 idle:/m], ['loaded', /^\s*#\s*L1 loaded\b/m]]) {
+    if (!re.test(l1Text)) l1Problems.push(`the L1 ${phase} phase did not report a result`);
+  }
+  const l1Ok = l1Problems.length === 0;
+  problems.push(...l1Problems);
+
   const ok = problems.length === 0;
   const receipt = {
     leg: 'ci', sha, tree, manifestSha256: manifest.sha256, suiteExit, ok,
-    matched: ok ? listed.size : null, problems: problems.map(clip), at: new Date().toISOString(),
+    matched: ok ? listed.size : null, l1Ok, problems: problems.map(clip), at: new Date().toISOString(),
   };
   writeReceipt(flags.receipt, receipt);
   // #837: the receipt file never leaves the runner, so the verdict is also printed as one marked line that a landing

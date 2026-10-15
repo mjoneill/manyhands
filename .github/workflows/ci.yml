@@ -103,12 +103,25 @@ jobs:
           rc=$?
           echo "SUITE_EXIT=$rc" >> "$GITHUB_ENV"
           exit $rc
+      # #1693 (the #1644 rescope, option A) — L1 latency runs ALONE, after the suite, with no other test sharing the
+      # runner. It lives outside the suite glob, so the suite cannot see it missing; the checker below reads this step's
+      # TAP and recorded exit and puts the verdict in the receipt as `l1Ok`. Runs even when the suite failed, so a red
+      # suite still yields an L1 measurement. Bounds are unchanged: p95 <= 1.0 s and <= 2x the in-process p95.
+      - name: L1 latency, alone
+        if: always()
+        run: |
+          set +e
+          set -o pipefail
+          sh scripts/run-tests.sh tests/latency/ready-executor-1644-latency.test.mjs 2>&1 | tee l1.tap
+          rc=$?
+          echo "L1_EXIT=$rc" >> "$GITHUB_ENV"
+          exit $rc
       # The only skips allowed are the manifest's platform-only tests, skipped as UNAVAILABLE; those run on the Mac
       # leg (scripts/run-platform-only.mjs). Runs even when the suite failed, so a red run still says what skipped.
       - name: Platform-only skips equal the manifest
         if: always()
         # The suite's own exit status is an input: skip compliance alone is not a green run. If the suite step never
-        # recorded one, SUITE_EXIT is empty and the check fails closed (exit 2).
+        # recorded one, SUITE_EXIT is empty and the check fails closed (exit 2). The same holds for the L1 step and L1_EXIT.
         # --sha is the commit the event says should be tested; the checker verifies the checkout really is it.
         run: >-
           node scripts/check-platform-skips.mjs server-suite.tap
@@ -116,6 +129,8 @@ jobs:
           --root .
           --sha "${{ github.event.pull_request.head.sha || github.sha }}"
           --suite-exit "${SUITE_EXIT:-}"
+          --l1-tap l1.tap
+          --l1-exit "${L1_EXIT:-}"
           --receipt ci-platform-receipt.json
       # The receipt stays on the runner: #837 forbids uploading artifacts from this public workflow. The check prints
       # it as one `PLATFORM-RECEIPT {json}` line of allowlisted fields, and a landing recovers it from THIS step's log
