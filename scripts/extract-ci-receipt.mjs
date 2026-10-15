@@ -39,10 +39,11 @@ const FIELDS = {
 
 function validate(r) {
   if (r === null || typeof r !== 'object' || Array.isArray(r)) throw new CannotCheck('the marked line is not a JSON object');
-  const extra = Object.keys(r).filter((k) => !(k in FIELDS));
+  // Own keys only: `in` would also accept every name an object inherits (constructor, toString, __proto__, ...).
+  const extra = Object.keys(r).filter((k) => !Object.hasOwn(FIELDS, k));
   if (extra.length) throw new CannotCheck(`the receipt has fields outside the allowlist: ${extra.join(', ')}`);
   for (const [k, ok] of Object.entries(FIELDS)) {
-    if (!(k in r)) throw new CannotCheck(`the receipt has no ${k}`);
+    if (!Object.hasOwn(r, k)) throw new CannotCheck(`the receipt has no ${k}`);
     if (!ok(r[k])) throw new CannotCheck(`the receipt's ${k} is not valid`);
   }
   return r;
