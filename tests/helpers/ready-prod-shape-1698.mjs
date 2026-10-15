@@ -18,7 +18,7 @@ import {
 /** What was measured on the production copy. Documented, never read by the code that builds a board; the self-check row compares the board to it. */
 export const PROD_MEASURED = Object.freeze({
   cards: 1620, relatedToRows: 6127, derivedFromRows: 213, supersedesRows: 25, supersededByRows: 25, cardsWithContext: 1181, maxDegree: 56,
-  blockersRows: 47, humanBlockerRows: 101, implementedByRows: 610,
+  blockersRows: 47, humanBlockerRows: 101, implementedByRows: 610, doneCards: 496, doneContextRows: 2642,
 });
 
 function mulberry32(seed) {
@@ -33,11 +33,14 @@ function mulberry32(seed) {
 export function prodShapeBoard({ seed = 1698, cards: N = 1600 } = {}) {
   const rnd = mulberry32(seed);
   const pick = (xs) => xs[Math.floor(rnd() * xs.length)];
-  const COLS = ['done', 'done', 'done', 'done', 'done', 'done', 'backlog', 'backlog', 'planned', 'in-progress'];
+  // Production: 496 of 1,620 cards are done (31%) and they carry 2,642 of the 6,390 context rows (41%): older cards are done more often and are also the busiest. Done is 55% likely among the
+  // first 500 cards and 20% after that, which lands near both figures.
+  const OPEN = ['backlog', 'backlog', 'backlog', 'backlog', 'backlog', 'backlog', 'planned', 'planned', 'planned', 'in-progress'];
+  const columnFor = (i) => (rnd() < (i <= 500 ? 0.55 : 0.2) ? 'done' : pick(OPEN));
   const cs = Array.from({ length: N }, (_, k) => {
     const i = k + 1;
     return card(i, `shape-${i}`, {
-      priority: pick(['p0', 'p1', 'p2', 'p2', 'p3']), column: pick(COLS),
+      priority: pick(['p0', 'p1', 'p2', 'p2', 'p3']), column: columnFor(i),
       relationships: { relatedTo: [], blockedBy: [], supersedes: [], derivedFrom: [], supersededBy: [] },
     });
   });
@@ -76,6 +79,8 @@ export function prodShapeBoard({ seed = 1698, cards: N = 1600 } = {}) {
   const declared = {
     cards: N, relatedToRows: count('relatedTo'), derivedFromRows: count('derivedFrom'), supersedesRows: count('supersedes'), supersededByRows: count('supersededBy'),
     contextRows: count('relatedTo') + count('derivedFrom') + count('supersedes') + count('supersededBy'),
+    doneCards: cs.filter((c) => c.column === 'done').length,
+    contextRowsOpen: cs.filter((c) => c.column !== 'done').reduce((n, c) => n + ['relatedTo', 'derivedFrom', 'supersedes', 'supersededBy'].reduce((m, t) => m + c.relationships[t].length, 0), 0),
     blockedByEdges: count('blockedBy'), humanBlockerCards: cs.filter((c) => c.blockers?.length).length,
     implementedByRows: cs.reduce((n, c) => n + (c.implementedBy?.length ?? 0), 0),
     cardsWithContext: cs.filter((c) => ['relatedTo', 'derivedFrom', 'supersedes', 'supersededBy'].some((t) => c.relationships[t].length)).length,
