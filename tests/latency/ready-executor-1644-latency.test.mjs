@@ -3,11 +3,12 @@
  * CI step, outside the suite glob (tests/*.test.mjs), so nothing else is running alongside it. Moved from
  * tests/ready-executor-1644-snapshot.test.mjs byte for byte: the test, `phase`, `timeCalls`, `p95` and `med`. The fixture helpers
  * (`relCard`, `bigBoard`, `isPlainReady`, the temp-dir cleanup and `seed`) are COPIES of that file's, because it still needs its own.
- * Both bounds are unchanged. The original description of the row follows, unchanged.
+ * #1703 (decision a74dc60a, the owner's yes of 2026-10-16) replaced the bounds: the verdict is tests/helpers/l1-gate-1644.mjs, and its rows are tests/l1-ceilings-1703.test.mjs.
  *
- * L1  LATENCY (the steward's bound, on the card): on a production-sized board (1,500 cards, a relatedTo edge on all but the first, a blockedBy edge on one in ten) the executor path's p95 over >= 20
- *     timed calls, after 3 warm-ups, is <= 1.0 s (hard ceiling) AND <= 2x the in-process path's p95 measured in the same run on the same host, in two phases: idle, and with 6 CPU-burning processes running (n = 40 per leg, the two legs run at once and their calls are interleaved so they see the same load)
- *     (a loaded host; load average is printed). The sample sizes and the p95s are printed in the assertion messages and on stdout. Precondition: the switched run really read the executor.
+ * L1  LATENCY: on a production-sized board (1,500 cards, a relatedTo edge on all but the first, a blockedBy edge on one in ten) the executor path's p95 over 40
+ *     timed calls, after 3 warm-ups, is at most the phase's usability ceiling: 1.5 s idle, 3.0 s with 6 CPU-burning processes running (the two legs run at once and their calls are interleaved
+ *     so they see the same load; load average is printed). The in-process path is still measured in the same run on the same host, and the ratio between them is PRINTED, not asserted.
+ *     These are chosen ceilings, not a regression gate (that is #1702). Precondition: the switched run really read the executor.
  */
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -18,6 +19,7 @@ import { spawn } from 'node:child_process';
 import { SKIP, READY_ENV, DSID, ROSTER_FILE, card, makeBoardFixture, startRestServer, startProxy, migrate, tmpStore, startExecutor, startExecutorOnCopy, killExecutor, withOwned } from '../helpers/ready-world-1644.mjs';
 import { queryGraphExecutor } from '../../core/graph-replica.mjs';
 import * as rq from '../../core/ready-query.mjs';
+import { p95, l1Verdict } from '../helpers/l1-gate-1644.mjs';
 
 const relCard = (i, N) => card(i, `card-${i}`, {
   priority: 'p2',
@@ -49,7 +51,6 @@ async function seed(N) {
 }
 
 // ---- L1 latency ----
-const p95 = (xs) => { const s = [...xs].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.ceil(0.95 * s.length) - 1)]; };
 const med = (xs) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
 async function timeCalls(base, n = 20, warm = 3) {
   for (let i = 0; i < warm; i++) { const r = await fetch(`${base}/api/ready?limit=20`, { signal: AbortSignal.timeout(60000) }); await r.text(); }
@@ -84,15 +85,14 @@ async function phase(sd, label) {
   }
   });
 }
-test('L1 LATENCY on a production-sized board: executor p95 <= 1.0 s AND <= 2x the in-process p95, idle and under CPU load', { skip: SKIP, timeout: 1500000 }, async () => {
+test('L1 LATENCY on a production-sized board: executor p95 <= 1.5 s idle and <= 3.0 s under CPU load (the ratio to the in-process p95 is printed, not asserted)', { skip: SKIP, timeout: 1500000 }, async () => {
   const sd = await seed(1500);
-  const check = (ph) => {
-    assert.ok(ph.on.queries >= 1, `PRECONDITION: the switched run read the executor (${ph.on.queries} queries)`);
-    const a = p95(ph.on.ms); const b = p95(ph.off.ms);
-    assert.ok(a <= 1000, `executor p95 ${Math.round(a)} ms must be <= 1000 ms (hard ceiling); ${ph.line}`);
-    assert.ok(a <= 2 * b, `executor p95 ${Math.round(a)} ms must be <= 2x the in-process p95 ${Math.round(b)} ms; ${ph.line}`);
-  };
-  check(await phase(sd, 'idle'));
+  const idle = l1Verdict('idle', await phase(sd, 'idle'));
+  assert.ok(idle.ok, idle.failures.join('; '));
   const burners = Array.from({ length: 6 }, () => spawn(process.execPath, ['-e', 'for(;;){}'], { stdio: 'ignore' }));
-  try { await new Promise((r) => setTimeout(r, 3000)); check(await phase(sd, 'loaded (6 CPU burners)')); } finally { for (const b of burners) b.kill('SIGKILL'); }
+  try {
+    await new Promise((r) => setTimeout(r, 3000));
+    const loaded = l1Verdict('loaded', await phase(sd, 'loaded (6 CPU burners)'));
+    assert.ok(loaded.ok, loaded.failures.join('; '));
+  } finally { for (const b of burners) b.kill('SIGKILL'); }
 });

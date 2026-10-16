@@ -106,7 +106,8 @@ jobs:
       # #1693 (the #1644 rescope, option A) — L1 latency runs ALONE, after the suite, with no other test sharing the
       # runner. It lives outside the suite glob, so the suite cannot see it missing; the checker below reads this step's
       # TAP and recorded exit and puts the verdict in the receipt as `l1Ok`. Runs even when the suite failed, so a red
-      # suite still yields an L1 measurement. Bounds are unchanged: p95 <= 1.0 s and <= 2x the in-process p95.
+      # suite still yields an L1 measurement. The gate (#1703, decision a74dc60a): executor p95 at most 1.5 s idle and 3.0 s
+      # under six CPU burners (tests/helpers/l1-gate-1644.mjs); the ratio to the in-process p95 is printed, not asserted.
       - name: L1 latency, alone
         if: always()
         run: |
