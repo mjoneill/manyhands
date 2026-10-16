@@ -145,7 +145,7 @@ test('#1703 (V10) empty executor samples fail and never throw; an unknown phase 
   const ph = flat(50, 50); ph.on.ms = [];
   let v; assert.doesNotThrow(() => { v = l1Verdict('loaded', ph); });
   assert.equal(v.ok, false); assert.ok(v.failures.some((f) => /no executor samples/i.test(f)), JSON.stringify(v.failures));
-  for (const bad of ['night', 'Idle', 'LOADED', '', undefined, null]) assert.throws(() => l1Verdict(bad, flat(50, 50)), `phase ${JSON.stringify(bad)} is not idle or loaded`);
+  for (const bad of ['night', 'Idle', 'LOADED', '', undefined, null, 'constructor', 'toString', 'hasOwnProperty', '__proto__']) assert.throws(() => l1Verdict(bad, flat(50, 50)), `phase ${JSON.stringify(bad)} is not idle or loaded`);
 });
 
 test('#1703 (V11) the verdict does not reorder or change the sample arrays it is given', async () => {
