@@ -44,11 +44,13 @@
  * to an independent writable directory first (the manifest's `restore` field says so on every set).
  *
  * One JSON report on stdout: { stage, published, setDir, files, cursorsCapturedAt, budget, pruned, findings,
- * notCovered, ok, error }. Exit 0 exactly when ok · 1 not ok · 2 refusal · 7 skipped (another run holds DEST/.records.lock).
+ * notCovered, ok, error }. Exit 0 exactly when ok · 1 not ok · 2 refusal · 7 skipped (DEST/.records.lock is held: by
+ * another run, or by a dead one, which is never reaped and needs an operator).
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { stampOf, parseStamp, removeWithin } from './graph-store-backup-schedule.mjs';
 import { NOT_COVERED as DRILL_NOT_COVERED, resolveSource, sourceExecutor } from './attachments-drill.mjs';
@@ -198,20 +200,47 @@ function prune(dest, { keepHourly, keepDaily }) {
   return { kept: plan.keep, deleted, refused };
 }
 
-function takeLock(dest) {
+/**
+ * The destination lock. FAIL CLOSED: acquiring is one atomic step, a hard link of a temp file that ALREADY holds the
+ * owner record ({pid, nonce, host, startedAt}) to DEST/.records.lock. link(2) fails with EEXIST when the lock exists, so
+ * two contenders can never both acquire, and the lock never exists without its owner. A lock whose owner is dead is
+ * NEVER reaped here: reading the owner, judging it dead and removing it is a check-then-act race between two
+ * contenders, so a stale lock stops every run until an operator removes it. Release removes the lock only while it
+ * still holds THIS run's nonce, and leaves anyone else's in place.
+ * Returns { release } or { held: sentence }.
+ */
+export function takeLock(dest) {
   const f = path.join(dest, LOCK);
-  for (let i = 0; i < 2; i++) {
-    try { fs.writeFileSync(f, String(process.pid), { flag: 'wx' }); return () => { try { fs.unlinkSync(f); } catch { /* gone */ } }; }
-    catch (e) {
-      if (e.code !== 'EEXIST') throw e;
-      const pid = Number(fs.readFileSync(f, 'utf8'));
-      let alive = false;
-      try { process.kill(pid, 0); alive = true; } catch (k) { alive = k.code === 'EPERM'; }
-      if (alive) return null;
-      fs.unlinkSync(f);   // the holder is dead: a stale lock
+  const owner = { pid: process.pid, nonce: crypto.randomBytes(16).toString('hex'), host: os.hostname(), startedAt: new Date().toISOString() };
+  const tmp = `${f}.${process.pid}.${owner.nonce}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(owner)}\n`, { flag: 'wx' });
+  try { fs.linkSync(tmp, f); }
+  catch (e) {
+    if (e.code !== 'EEXIST') throw e;
+    let held = null;
+    try {
+      const text = fs.readFileSync(f, 'utf8').trim();
+      // a legacy lock holds a bare pid (graph-store-backup-schedule's .tick.lock shape): still a lock, judged the same way
+      held = /^\d+$/.test(text) ? { pid: Number(text) } : JSON.parse(text);
+      if (!held || typeof held !== 'object') held = null;
+    } catch { /* unreadable: reported as such */ }
+    let alive = null;
+    if (Number.isSafeInteger(held?.pid) && held.pid > 0) {
+      try { process.kill(held.pid, 0); alive = true; } catch (k) { alive = k.code === 'EPERM'; }
     }
-  }
-  return null;
+    const who = held ? `pid ${held.pid} on ${held.host ?? '?'} since ${held.startedAt ?? '?'}` : 'an owner record that cannot be read';
+    return { held: alive
+      ? `another run holds ${f} (${who})`
+      : `${f} is held by ${who}, which is ${alive === false ? 'not running' : 'unknown'}: a lock is never removed automatically, so an operator must check that no run is in progress and remove ${f}` };
+  } finally { try { fs.unlinkSync(tmp); } catch { /* gone */ } }
+  return {
+    release() {
+      let cur = null;
+      try { cur = JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return false; }
+      if (cur?.nonce !== owner.nonce) return false;   // not ours any more: left exactly as it is
+      try { fs.unlinkSync(f); return true; } catch { return false; }
+    },
+  };
 }
 
 const REQUIRED = ['--dest', '--event-log-dir', '--work-store', '--config', '--min-free-bytes'];
@@ -460,13 +489,13 @@ export async function main(argv) {
   const refuse = (msg) => { console.error(`${USAGE}\nREFUSED: ${msg}`); console.log(JSON.stringify({ stage: 'refused', published: false, setDir: null, ok: false, error: msg })); return 2; };
   let o; let pre;
   try { o = parseArgs(argv); pre = await preflight(o); } catch (e) { if (e instanceof Refusal) return refuse(e.message); throw e; }
-  const release = takeLock(o.dest);
-  if (!release) { console.log(JSON.stringify({ stage: 'skipped', published: false, setDir: null, ok: false, error: `another run holds ${path.join(o.dest, LOCK)}` })); return 7; }
+  const lock = takeLock(o.dest);
+  if (lock.held) { console.error(`SKIPPED: ${lock.held}`); console.log(JSON.stringify({ stage: 'skipped', published: false, setDir: null, ok: false, error: lock.held })); return 7; }
   try {
     const report = await runBackup(o, pre);
     console.log(JSON.stringify(report));
     return report.ok ? 0 : 1;
-  } finally { release(); }
+  } finally { lock.release(); }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) process.exitCode = await main(process.argv.slice(2));
