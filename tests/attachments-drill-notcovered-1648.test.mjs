@@ -13,13 +13,19 @@
  *   F8b  it exports NOT_COVERED, an array of strings that holds the exact sentence once   (PROPOSED export: the builder may rename it; the row follows)
  *        F8b IMPORTS the module, so the drill must not run itself on import: its entry point is guarded (for example by comparing import.meta.url).
  *
- * OWED, NOT WRITTEN: F8c, that the drill's printed JSON `notCovered` carries the sentence on a real run, and a mutant dropping it fails. That needs the
- * drill's command line (which arguments take the source and scratch paths), which no one has named. I will not guess it. F8b is not a substitute: a
- * constant that is exported but never printed would pass it. Until F8c exists, F8 pins the sentence and the field's home, not that the report prints it.
+ *   F8c  a real run prints it: `node scripts/attachments-drill.mjs --source-attachments <dir> --source-executor <dir> --scratch <empty dir>` prints ONE
+ *        JSON object on stdout whose `notCovered` is NOT_COVERED as is, ON EVERY OUTCOME past the argument checks, a failed check included (a failure report
+ *        that drops "not covered" is exactly where a reader infers coverage), and exits 0 only when `check.ok`. Run here against FIXTURE directories only.
+ *   F8d  refusals (the command line named by the PO, 43060 and 43062): each of the three flags is required, there is no default and no env fallback; with one
+ *        missing the drill exits 2, says which flag, reads nothing and creates nothing; a scratch that is not empty is refused and left untouched.
+ *
+ * NOT covered, by name: environment variables other than the nine names F8d offers (a fallback under a name it does not try would not be seen); a CLEAN run (a real executor store, `check.ok` true): it needs the executor-backed fixture helpers, which would put this file in the suite-watch
+ * executor manifest, so it is owed as its own row once the drill exists; what `check` contains; the capture, the restore and the fence themselves (F1 to F7).
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -40,4 +46,72 @@ test('#1648 (F8b) the drill exports NOT_COVERED, and it holds the out-of-band-wr
   assert.ok(Array.isArray(mod.NOT_COVERED), 'NOT_COVERED is an array');
   assert.ok(mod.NOT_COVERED.every((x) => typeof x === 'string'), 'of strings');
   assert.equal(mod.NOT_COVERED.filter((x) => x === SENTENCE).length, 1, `with the exact sentence once (got ${JSON.stringify(mod.NOT_COVERED)})`);
+});
+
+// ---- F8c and F8d: the command line, run against FIXTURES in a temp directory, never a live path ----
+const FLAGS = ['--source-attachments', '--source-executor', '--scratch'];
+function fixture() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'drill1648-'));
+  const att = path.join(root, 'att'); const exe = path.join(root, 'exe'); const scratch = path.join(root, 'scratch'); const cwd = path.join(root, 'cwd');
+  for (const d of [att, exe, scratch, cwd]) fs.mkdirSync(d);
+  fs.writeFileSync(path.join(att, '11111111-1111-4111-8111-111111111111.txt'), 'fixture bytes');
+  return { root, att, exe, scratch, cwd, args: { '--source-attachments': att, '--source-executor': exe, '--scratch': scratch } };
+}
+const listing = (d) => fs.readdirSync(d, { recursive: true }).sort();
+const drill = (fx, flags) => spawnSync(process.execPath, [DRILL, ...flags.flatMap((f) => [f, fx.args[f]])], { cwd: fx.cwd, encoding: 'utf8', timeout: 20000 });
+
+test('#1648 (F8d) each flag is required: one missing -> exit 2, names the flag, creates nothing, reads nothing it was not given', () => {
+  assert.ok(fs.existsSync(DRILL), 'PRECONDITION: scripts/attachments-drill.mjs exists');
+  for (const missing of FLAGS) {
+    const fx = fixture();
+    try {
+      const before = { att: listing(fx.att), exe: listing(fx.exe), scratch: listing(fx.scratch), cwd: listing(fx.cwd) };
+      const envNames = { ATTACHMENTS_DIR: fx.att, ATTACHMENTS_PATH: fx.att, SCRUM_ATTACHMENTS_DIR: fx.att, SOURCE_ATTACHMENTS: fx.att, SOURCE_EXECUTOR: fx.exe, EXECUTOR_STORE: fx.exe, EXECUTOR_DIR: fx.exe, SCRATCH: fx.scratch, SCRATCH_DIR: fx.scratch };
+      const r = spawnSync(process.execPath, [DRILL, ...FLAGS.filter((f) => f !== missing).flatMap((f) => [f, fx.args[f]])], { cwd: fx.cwd, encoding: 'utf8', timeout: 20000, env: { ...process.env, ...envNames } });
+      assert.equal(r.status, 2, `${missing} missing, with the environment offering a valid directory under the usual names: exit 2, no environment fallback (got ${r.status}, signal ${r.signal}): ${r.stderr.slice(0, 200)}`);
+      assert.ok((r.stdout + r.stderr).includes(missing), `and the output names the missing flag ${missing}`);
+      assert.deepEqual({ att: listing(fx.att), exe: listing(fx.exe), scratch: listing(fx.scratch), cwd: listing(fx.cwd) }, before, `${missing} missing: nothing created or changed anywhere`);
+    } finally { fs.rmSync(fx.root, { recursive: true, force: true }); }
+  }
+  const fx = fixture();
+  try {
+    const r = spawnSync(process.execPath, [DRILL], { cwd: fx.cwd, encoding: 'utf8', timeout: 20000, env: { ...process.env, SCRUM_BOARD_FILE: '', ATTACHMENTS_DIR: fx.att, SCRATCH: fx.scratch } });
+    assert.equal(r.status, 2, `no arguments at all: exit 2, no default and no environment fallback (got ${r.status})`);
+    assert.deepEqual(listing(fx.cwd), [], 'and nothing was created in the working directory');
+    assert.deepEqual(listing(fx.scratch), [], 'or in the scratch directory the environment pointed at');
+  } finally { fs.rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test('#1648 (F8d2) a scratch directory that is not empty is refused and left exactly as it was', () => {
+  assert.ok(fs.existsSync(DRILL), 'PRECONDITION: scripts/attachments-drill.mjs exists');
+  const fx = fixture();
+  try {
+    fs.writeFileSync(path.join(fx.scratch, 'precious.txt'), 'not the drill\'s to touch');
+    const before = listing(fx.scratch); const attBefore = listing(fx.att);
+    const r = drill(fx, FLAGS);
+    assert.notEqual(r.status, 0, 'a non-empty --scratch is refused (non-zero exit)');
+    assert.ok(!/"check"/.test(r.stdout), `a refusal is not a run: no check result is printed (got ${JSON.stringify(r.stdout.slice(0, 120))})`);
+    assert.match(r.stdout + r.stderr, /empty/i, 'and the output says the directory must be empty');
+    assert.deepEqual(listing(fx.scratch), before, 'and nothing was added to it, removed from it or changed in it');
+    assert.equal(fs.readFileSync(path.join(fx.scratch, 'precious.txt'), 'utf8'), 'not the drill\'s to touch', 'the file in it is intact');
+    assert.deepEqual(listing(fx.att), attBefore, 'and the source was not touched');
+  } finally { fs.rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test('#1648 (F8c) a run prints ONE JSON object whose notCovered is NOT_COVERED as is, on a failed check too, and exits 0 only when check.ok', async () => {
+  assert.ok(fs.existsSync(DRILL), 'PRECONDITION: scripts/attachments-drill.mjs exists');
+  const { NOT_COVERED } = await import(pathToFileURL(DRILL).href);
+  const fx = fixture();   // an attachments directory with one file and an EMPTY executor directory: a source the check cannot pass on
+  try {
+    const r = drill(fx, FLAGS);
+    assert.equal(r.signal, null, `it finished (no timeout): ${r.stderr.slice(0, 200)}`);
+    const text = r.stdout.trim();
+    let json; try { json = JSON.parse(text); } catch (e) { assert.fail(`stdout is exactly one JSON object (a failed check must still print it): ${e.message}; got ${JSON.stringify(text.slice(0, 200))}`); }
+    assert.ok(json && typeof json === 'object' && !Array.isArray(json), 'an object');
+    assert.deepEqual(json.notCovered, NOT_COVERED, 'notCovered is NOT_COVERED as is');
+    assert.equal(json.notCovered.filter((x) => x === SENTENCE).length, 1, 'with the out-of-band-writer sentence exactly once');
+    assert.ok(json.check && typeof json.check === 'object', 'and the checker\'s result rides along as `check`');
+    assert.equal(r.status === 0, json.check.ok === true, `exit 0 exactly when check.ok (exit ${r.status}, check.ok ${json.check.ok})`);
+    assert.notEqual(json.check.ok, true, 'CONTROL: this fixture has no real executor store, so the check must not pass; otherwise the exit rule above proved nothing');
+  } finally { fs.rmSync(fx.root, { recursive: true, force: true }); }
 });
