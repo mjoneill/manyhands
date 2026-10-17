@@ -54,6 +54,7 @@ import {
 import { createSmallkindsUnit, wakeCreateIntention, wakeIri } from './core/smallkinds-unit.mjs';   // #1624
 import { BOARD_TOOLS } from './core/board-tools.mjs';
 import { resolveAttachedTo } from './core/attached-to.mjs'; // #761
+import { withAttachmentFence, FENCE_BUSY, DEFAULT_WAIT_MS as DEFAULT_FENCE_WAIT_MS } from './core/attachment-fence.mjs';   // #1648
 import { promptGrantConflict, promptGrantWarning } from './core/prompt-grants.mjs'; // #1242
 import { cardContentKey } from './core/card-content-key.mjs';
 import { applyApexLabels, APEX_PREFIX, descendantIds as apexDescendantIds } from './core/apex-labels.mjs';
@@ -646,6 +647,8 @@ const ATTACHMENTS_DIR = process.env.SCRUM_ATTACHMENTS_DIR || path.join(PROJECT_D
 const MAX_ATTACHMENT_BYTES = Number(process.env.SCRUM_MAX_ATTACHMENT_BYTES ?? 25 * 1024 * 1024);
 // An attachment id is exactly "<token>.<ext>": no slashes, no `..`.
 const ATTACHMENT_ID_RE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9]+$/;
+// #1648 — how long an upload waits for a paired capture to release the attachment fence before a retryable 503.
+const ATTACHMENT_FENCE_WAIT_MS = ((n) => (Number.isFinite(n) && n >= 0 ? n : DEFAULT_FENCE_WAIT_MS))(Number(process.env.SCRUM_ATTACHMENT_FENCE_WAIT_MS ?? DEFAULT_FENCE_WAIT_MS));
 // Only these render INLINE (served with their real image content-type). Anything
 // else is forced to download as octet-stream — which neutralises stored-XSS from
 // an html/svg/js upload regardless of what got stored.
@@ -12105,8 +12108,18 @@ async function handleCreateAttachment(req, res) {
     }
     const ext = MIME_TO_EXT[mime] || 'bin';
     const id = `${crypto.randomUUID()}.${ext}`;
-    fs.mkdirSync(ATTACHMENTS_DIR, { recursive: true });
-    fs.writeFileSync(path.join(ATTACHMENTS_DIR, id), bytes);
+    // #1648 — the byte write is inside the attachment fence, so it never begins or finishes inside a paired capture. A
+    // capture that outlasts the wait is a retryable 503 that says why, never a socket held open for the whole capture.
+    try {
+      await withAttachmentFence(async () => {
+        fs.mkdirSync(ATTACHMENTS_DIR, { recursive: true });
+        fs.writeFileSync(path.join(ATTACHMENTS_DIR, id), bytes);
+      }, { attachmentsDir: ATTACHMENTS_DIR, waitMs: ATTACHMENT_FENCE_WAIT_MS, owner: 'attachment upload' });
+    } catch (e) {
+      if (e.code !== FENCE_BUSY) throw e;
+      res.setHeader('Retry-After', String(Math.max(1, Math.ceil(ATTACHMENT_FENCE_WAIT_MS / 1000))));
+      return sendJSON(res, 503, { error: 'attachments are being captured for a backup right now; nothing was stored, retry in a moment', code: FENCE_BUSY, retryable: true });
+    }
     sendJSON(res, 201, { id, name, mime, size: bytes.length });
   } catch (e) {
     console.error('POST /api/attachments:', e.message);
