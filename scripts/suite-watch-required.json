@@ -6,6 +6,7 @@
   "tests/announcements-pending-h7.test.mjs",
   "tests/artifacts-graph-k1.test.mjs",
   "tests/attachments-drill-paired-1648.test.mjs",
+  "tests/attachments-drill-size-conflict-1648.test.mjs",
   "tests/authority-resolver-compiled.test.mjs",
   "tests/authority-resolver.test.mjs",
   "tests/backfill-posts-r0-addendum.test.mjs",

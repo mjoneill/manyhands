@@ -48,7 +48,9 @@ export const NOT_COVERED = Object.freeze([
 const FLAGS = ['--source-attachments', '--source-executor', '--scratch'];
 const USAGE = 'usage: node scripts/attachments-drill.mjs --source-attachments DIR --source-executor URL|BACKUP_DIR --scratch EMPTY_DIR [--python PY]';
 
-// Every attachment reference in the snapshot, in both shapes, de-duplicated by id (a nonzero size wins over 0 = unknown).
+// Every attachment reference in the snapshot, in both shapes, grouped by id. 0 = unknown and yields to a known size, but
+// two DIFFERENT nonzero sizes for one id are a conflict: each is emitted as its own reference, so the checker compares
+// every one with the manifest (at least one must fail) and the drill reports the id in sizeConflicts.
 const PY_REFS = `
 import json, sys, pyoxigraph as px
 s = px.Store.read_only(sys.argv[1])
@@ -59,7 +61,8 @@ def add(i, size, shape):
     try: size = int(size)
     except (TypeError, ValueError): size = 0
     shapes[shape] += 1
-    if i not in refs or (refs[i] == 0 and size): refs[i] = size
+    sizes = refs.setdefault(i, set())
+    if size: sizes.add(size)
 def val(r, k):
     try: t = r[k]
     except KeyError: return None
@@ -73,7 +76,11 @@ for r in s.query('SELECT ?j WHERE { GRAPH ${BK} { ?s <https://scrumboard.local/n
     if isinstance(atts, list):
         for a in atts:
             if isinstance(a, dict): add(a.get('id'), a.get('size'), 'entityJson')
-print(json.dumps({'refs': [{'id': k, 'size': v} for k, v in sorted(refs.items())], 'shapes': shapes}))
+out = []
+for k in sorted(refs):
+    out += [{'id': k, 'size': z} for z in sorted(refs[k])] or [{'id': k, 'size': 0}]
+conflicts = [{'id': k, 'sizes': sorted(refs[k])} for k in sorted(refs) if len(refs[k]) > 1]
+print(json.dumps({'refs': out, 'ids': len(refs), 'shapes': shapes, 'sizeConflicts': conflicts}))
 `;
 
 function readReferences(dir, python) {
@@ -128,7 +135,7 @@ function sourceExecutor(source, { scratch, python, state }) {
     },
     async references(snap) {
       const got = readReferences(snap.dir, python);
-      state.references = { count: got.refs.length, shapes: got.shapes };
+      state.references = { count: got.ids, shapes: got.shapes, sizeConflicts: got.sizeConflicts };
       return got.refs;
     },
   };
