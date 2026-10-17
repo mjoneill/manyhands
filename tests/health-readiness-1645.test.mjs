@@ -30,6 +30,9 @@
  *              the count). The executor-refusing half also covers the fallback the design rules out (43164): reading the file when the executor fails.
  *   P6b H5     the board document made unreadable after boot: health still says ready, and no replica build is logged (the red row for H5)
  *
+ * P5's LIMIT, stated (the code reviewer, 43355): the gate opens when all ten requests are fully written to their sockets plus 100 ms. That is the
+ * client-side edge of arrival, NOT proof that all ten REST handlers have entered; and "inside the 800 ms bound" is a timer target, not a
+ * guarantee under event-loop delay. A slow enough REST could still let a probe arrive after the read ends, and P5 would then fail a correct join.
  * NOT covered, by name: what the reason says (only that one is given); a blocked REST event loop; the deploy loop itself (its grep for
  * `"ready":true` is unchanged by this contract); the other #1645 consumers (vocabulary, shapes, census, meter, snapshots); a cold start with
  * board-data.json absent (the card's DONE WHEN, later); how the position read is implemented.
