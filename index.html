@@ -765,6 +765,8 @@ body::before {
 .conv-attach-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
 .conv-attach-chip button { background: none; border: none; color: var(--text-secondary, #94a3b8); cursor: pointer; font-size: 1rem; line-height: 1; padding: 0 2px; }
 .conv-attach-held { border-style: dashed; }   /* #1648 — kept after a retryable refusal */
+.convs-attach-guard { font-size: 0.78rem; color: var(--text-primary, #e2e8f0); }   /* #1648 — why a Post was refused */
+.convs-attach-guard:empty { display: none; }
 .conv-attach-chip .conv-attach-reason { color: var(--text-secondary, #94a3b8); font-size: 0.75rem; max-width: 260px; white-space: normal; }
 .conv-attach-chip .conv-attach-retry { border: 1px solid currentColor; border-radius: 8px; font-size: 0.75rem; padding: 0 6px; }
 .btn-attach-conv {
@@ -1654,6 +1656,7 @@ body::before {
   <form id="convs-form" class="convs-form">
     <textarea id="convs-body" class="convs-body" placeholder="Say something to the commons… (paste or drop a file to attach)" rows="3"></textarea>
     <div id="convs-attachments" class="convs-attachments" aria-live="polite"></div>
+    <div id="convs-attach-guard" class="convs-attach-guard" role="status"></div>
     <div class="convs-form-row">
       <select id="convs-author" class="convs-author" aria-label="Post as">
       </select>
@@ -6806,6 +6809,9 @@ function closeConvsPanelBody() { stopConvsPolling(); }
 let _pendingAttachments = [];
 // #1648 — files a RETRYABLE refusal (503 while a capture holds the attachment fence) kept for Retry: { name, mime, data, reason }
 let _heldAttachments = [];
+// #1648 — files whose upload request has not settled yet (a first upload or a Retry): not held, not landed
+let _uploadingAttachments = [];
+let _attachGuardShown = false;   // #1648 — the persistent "not posted" reason is up until the files that blocked it settle
 
 function fileToBase64(file) {
   return new Promise((resolve, reject) => {
@@ -6865,6 +6871,25 @@ function renderPendingAttachments() {
     chip.append(label, reason, retry, rm);
     el.appendChild(chip);
   });
+  refreshAttachGuard();
+}
+
+// #1648 — while a file is held or still uploading, a Post would go without it while its chip stays on screen, which reads
+// as "the file went with it". So Post is refused, and this reason, which names the files, stays until they are retried
+// (and land) or removed.
+function attachBlockedReason() {
+  const names = (xs) => xs.map((x) => x.name || 'file').join(', ');
+  const parts = [];
+  if (_heldAttachments.length) parts.push(`${names(_heldAttachments)} ${_heldAttachments.length === 1 ? 'is' : 'are'} still waiting to upload (Retry or remove ${_heldAttachments.length === 1 ? 'it' : 'them'})`);
+  if (_uploadingAttachments.length) parts.push(`${names(_uploadingAttachments)} ${_uploadingAttachments.length === 1 ? 'is' : 'are'} still uploading`);
+  return parts.length ? `Not posted: ${parts.join('; ')}. Post again once the file has landed or been removed.` : '';
+}
+function refreshAttachGuard() {
+  const g = document.getElementById('convs-attach-guard');
+  if (!g || !_attachGuardShown) return;
+  const why = attachBlockedReason();
+  g.textContent = why;
+  if (!why) _attachGuardShown = false;
 }
 
 // #1648 — a refusal the server marks retryable (503, or any retry-after) keeps the file; any other drops it, as before.
@@ -6880,6 +6905,7 @@ async function uploadCommonsFile(file) {
 }
 
 async function sendCommonsAttachment(item) {
+  _uploadingAttachments.push(item);
   try {
     const res = await fetch('/api/attachments', {
       method: 'POST',
@@ -6890,7 +6916,7 @@ async function sendCommonsAttachment(item) {
       let body = null;
       try { body = await res.json(); } catch (e) { /* keep status */ }
       const msg = (body && body.error) || res.status;
-      if (isRetryableRefusal(res, body)) { _heldAttachments.push({ ...item, reason: String(msg) }); renderPendingAttachments(); return; }
+      if (isRetryableRefusal(res, body)) { _heldAttachments.push({ ...item, reason: String(msg) }); return; }
       // Non-blocking on purpose: a native alert() freezes the page for an agent
       // driving this board through a browser — every subsequent command times
       // out and Escape can't reach the dialog. On a board whose whole premise is
@@ -6900,9 +6926,11 @@ async function sendCommonsAttachment(item) {
       return;
     }
     _pendingAttachments.push(await res.json());
-    renderPendingAttachments();
   } catch (e) {
     showUndoToast('Upload failed: ' + (e && e.message ? e.message : e));
+  } finally {
+    const at = _uploadingAttachments.indexOf(item); if (at >= 0) _uploadingAttachments.splice(at, 1);
+    renderPendingAttachments();
   }
 }
 
@@ -6914,6 +6942,8 @@ if (_convsForm) {
     const authorEl = document.getElementById('convs-author');
     const body = bodyEl ? bodyEl.value : '';
     const author = authorEl ? authorEl.value : '';
+    // #1648 — never post without a file still in play: say why, and keep the file
+    if (_heldAttachments.length || _uploadingAttachments.length) { _attachGuardShown = true; refreshAttachGuard(); return; }
     if ((!body || !body.trim()) && _pendingAttachments.length === 0) return;  // body OR attachment
     const ok = await postConversation(body, author, _pendingAttachments);
     if (ok) {

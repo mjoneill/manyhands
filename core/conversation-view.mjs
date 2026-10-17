@@ -194,6 +194,8 @@ export function mountConversationView(opts = {}) {
   let pending = [];   // #238 — uploaded-but-not-yet-sent attachments
   let held = [];      // #1648 — files a RETRYABLE refusal kept for Retry: { name, mime, data, reason }
   let attachStatusEl = null;   // #1648 — the composer's non-modal notice line (a native dialog freezes the page for an agent)
+  let uploading = [];   // #1648 — files whose upload request has not settled yet (a first upload or a Retry): not held, not landed
+  let guardEl = null; let guardShown = false;   // #1648 — the persistent "not posted" reason, until the files that blocked it settle
   let query = '';     // #303-6 — the search term, lower-cased; local filter until the corpus answers
   // #1010 — the corpus-wide search. The box promised "Search the commons" and
   // filtered the loaded window, so a term in 654 messages read as absent and
@@ -600,6 +602,23 @@ export function mountConversationView(opts = {}) {
 
   function attachNotice(msg) { if (attachStatusEl) attachStatusEl.textContent = msg || ''; }
 
+  // #1648 — while a file is held or still uploading, a Post would go without it while its chip stays on screen, which reads
+  // as "the file went with it". So Post is refused, and this reason, which names the files, stays until they are retried
+  // (and land) or removed.
+  function blockedReason() {
+    const names = (xs) => xs.map((x) => x.name || 'file').join(', ');
+    const parts = [];
+    if (held.length) parts.push(`${names(held)} ${held.length === 1 ? 'is' : 'are'} still waiting to upload (Retry or remove ${held.length === 1 ? 'it' : 'them'})`);
+    if (uploading.length) parts.push(`${names(uploading)} ${uploading.length === 1 ? 'is' : 'are'} still uploading`);
+    return parts.length ? `Not posted: ${parts.join('; ')}. Post again once the file has landed or been removed.` : '';
+  }
+  function refreshGuard() {
+    if (!guardEl || !guardShown) return;
+    const why = blockedReason();
+    guardEl.textContent = why;
+    if (!why) guardShown = false;
+  }
+
   // #1648 — a refusal the server marks retryable (503 while a capture holds the attachment fence, or any retry-after)
   // keeps the file for Retry; any other refusal drops it with its message, as before.
   function retryableRefusal(res, body) {
@@ -609,23 +628,28 @@ export function mountConversationView(opts = {}) {
 
   // #238 — send one file's bytes to /api/attachments and queue the result as a pending attachment.
   async function sendAttachment(item, chipsEl) {
-    let res;
+    uploading.push(item);
     try {
-      res = await f(baseUrl + '/api/attachments', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: item.name, mime: item.mime, data: item.data }),
-      });
-    } catch (e) { attachNotice('Upload failed: ' + (e && e.message ? e.message : e)); return; }
-    if (!res.ok) {
-      let body = null; try { body = await res.json(); } catch (_) { /* keep status */ }
-      const msg = (body && body.error) || res.status;
-      if (retryableRefusal(res, body)) { held.push({ ...item, reason: String(msg) }); renderPending(chipsEl); return; }
-      attachNotice('Attachment rejected: ' + msg);
-      return;
+      let res;
+      try {
+        res = await f(baseUrl + '/api/attachments', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: item.name, mime: item.mime, data: item.data }),
+        });
+      } catch (e) { attachNotice('Upload failed: ' + (e && e.message ? e.message : e)); return; }
+      if (!res.ok) {
+        let body = null; try { body = await res.json(); } catch (_) { /* keep status */ }
+        const msg = (body && body.error) || res.status;
+        if (retryableRefusal(res, body)) { held.push({ ...item, reason: String(msg) }); return; }
+        attachNotice('Attachment rejected: ' + msg);
+        return;
+      }
+      pending.push(await res.json());
+      attachNotice('');
+    } finally {
+      const at = uploading.indexOf(item); if (at >= 0) uploading.splice(at, 1);
+      renderPending(chipsEl);
     }
-    pending.push(await res.json());
-    attachNotice('');
-    renderPending(chipsEl);
   }
 
   // #238 — upload a file and queue it as a pending attachment.
@@ -662,6 +686,7 @@ export function mountConversationView(opts = {}) {
       chip.append(retry, rm);
       chipsEl.appendChild(chip);
     });
+    refreshGuard();
   }
 
   // #1368 — the ruling form: the comment as the statement (editable), the
@@ -733,7 +758,8 @@ export function mountConversationView(opts = {}) {
     send.type = 'submit';
     row.append(who, attachBtn, send);
     attachStatusEl = el('div', 'cv-attach-status'); attachStatusEl.setAttribute('role', 'status');   // #1648
-    fm.append(ta, chips, attachStatusEl, fileInput, row);
+    guardEl = el('div', 'cv-attach-guard'); guardEl.setAttribute('role', 'status');   // #1648
+    fm.append(ta, chips, guardEl, attachStatusEl, fileInput, row);
     // #1367 — grows with content, previews through the SAME chat renderer the
     // feed uses, Cmd/Ctrl+Enter posts. Mounted after append so the wrapper
     // lands inside the form; the paste/drop listeners below bind to `ta`
@@ -785,6 +811,7 @@ export function mountConversationView(opts = {}) {
     fm.addEventListener('submit', async (e) => {
       e.preventDefault();
       if (sending) return;
+      if (held.length || uploading.length) { guardShown = true; refreshGuard(); return; }   // #1648 — never post without a file still in play
       const body = ta.value.trim();
       if (!body && pending.length === 0) return;   // body OR attachment required
       sending = true; send.disabled = true;

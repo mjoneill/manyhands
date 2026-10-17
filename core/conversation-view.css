@@ -86,6 +86,8 @@
 .cv-attach-retry:hover { border-color: var(--ink); }
 .cv-attach-status { color: var(--muted); font-size: 12px; }
 .cv-attach-status:empty { display: none; }
+.cv-attach-guard { color: var(--ink); font-size: 12px; }   /* #1648 — why a Post was refused */
+.cv-attach-guard:empty { display: none; }
 .cv-form.cv-dragover { outline: 2px dashed var(--accent); outline-offset: -3px; border-radius: 8px; }
 
 /* #291/#303-1 — clickable #NNN card references inside a message body */
