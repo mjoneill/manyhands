@@ -115,7 +115,10 @@ test('#1404 /api/health answers from memory WHILE a checks pass runs — within 
     await new Promise((r) => setTimeout(r, 150));          // the pass is under way
     const health = await get(s.baseUrl, '/api/health');
     const pass = await passP;
-    assert.equal(health.body.graph.ready, true, 'the replica is built by the time a pass is running — the field a deploy verify waits for');
+    // #1645 — `graph.ready` no longer means "the replica is built"; it means the executor answered a position read, and this fixture runs
+    // with no executor. What it means is pinned in tests/health-readiness-1645.test.mjs; this row keeps its own subject: the cheap door
+    // answers mid-pass.
+    assert.equal(typeof health.body.graph?.ready, 'boolean', 'health still reports graph.ready (its meaning is #1645\'s)');
     const oneCheck = Math.max(...pass.body.results.map((r) => r.checks[0].ms));
     assert.ok(pass.body.evaluationMs > 2500, `the pass must be long enough to be caught mid-way (${pass.body.evaluationMs} ms)`);
     assert.ok(health.ms < oneCheck + 400,
@@ -146,13 +149,7 @@ test('#1404 a write invalidates the cached pass — a seat that writes a tripwir
   } finally { await s.stop(); }
 });
 
-test('#1404 /api/health KICKS the replica build when it is not ready — a verify loop alone reaches ready:true', async () => {
-  const s = await startRestServer({ board: makeBoardFixture({ cards: [card(1, [quickCheck])] }) });
-  try {
-    const first = await get(s.baseUrl, '/api/health');
-    assert.equal(first.body.graph.ready, false, 'control: a fresh process has not built its replica (nothing has read the graph)');
-    let ready = false;
-    for (let i = 0; i < 40 && !ready; i++) { await new Promise((r) => setTimeout(r, 250)); ready = (await get(s.baseUrl, '/api/health')).body.graph.ready; }
-    assert.equal(ready, true, 'health alone — no graph read, no checks pass — drives the replica to ready');
-  } finally { await s.stop(); }
-});
+// RETIRED by #1645 (2026-10-17, its author): "/api/health KICKS the replica build when it is not ready" pinned the 1707572 warm kick, so a
+// deploy's verify loop could reach ready:true on a quiet box. #1645 redefines readiness as "the executor answered a position read" and
+// removes the kick on purpose. The OPPOSITE is now pinned: tests/health-readiness-1645.test.mjs P6b (no replica build is logged while health
+// is probed) and P1 (a quiet box reaches ready:true from the executor alone, which is what the kick existed to make possible).

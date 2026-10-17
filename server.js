@@ -7238,21 +7238,31 @@ async function handleChecks(req, res) {
   }
 }
 
-// #1404 — the door that costs nothing. Answers from memory: no document read,
-// no SPARQL, no git. THIS is what a liveness probe polls; /api/checks is not.
-let _healthWarmKicked = false;
-function handleHealth(req, res) {
-  // The replica is built LAZILY, on the first graph read. A probe that reads
-  // nothing would therefore report ready:false forever on a quiet box — and a
-  // deploy's verify loop, which now waits for ready:true, would die at 80 s
-  // for want of a caller (measured on a copy of prod: 5 min of ready:false
-  // with no other traffic). The old /api/board/status poll warmed the store
-  // by accident; this door does it on purpose, once, without awaiting: the
-  // probe stays free, and the NEXT probe sees the build land.
-  if (_graphStore == null && !_healthWarmKicked) {
-    _healthWarmKicked = true;
-    warmGraphStore().catch((e) => { _healthWarmKicked = false; console.error(`${new Date().toISOString()} /api/health: warm kick failed (${e?.message || e})`); });
-  }
+// #1404 — the door that costs nothing. No document read, no replica, no git.
+// THIS is what a liveness probe polls; /api/checks is not.
+//
+// #1645 — `graph.ready` is the EXECUTOR's answer, not the replica's: true exactly
+// when a position read (readExecutorPosition, the one marker SELECT) came back
+// with a well-formed epoch:commitSeq. Each probe reads it FRESH — no cache, so no
+// staleness policy — bounded at HEALTH_POSITION_MS, so an executor that accepts
+// and never answers costs a probe at most that, never a hang. Probes that arrive
+// while a read is in flight JOIN it and share its original deadline: a burst
+// makes one read, and a joiner never extends or retries past it. Health builds
+// no replica and reads no board document, not even as a fallback when the
+// executor fails: a failure is ready:false with the reason.
+const HEALTH_POSITION_MS = 800;
+let _healthPositionInflight = null;   // Promise<{ position, readAt } | { reason }> while one read runs
+function healthPosition() {
+  if (_healthPositionInflight) return _healthPositionInflight;
+  const executorUrl = process.env.SCRUM_GRAPH_EXECUTOR_URL;
+  if (!executorUrl) return Promise.resolve({ reason: 'no executor is configured (SCRUM_GRAPH_EXECUTOR_URL is unset)' });
+  _healthPositionInflight = readExecutorPosition(executorUrl, { timeoutMs: HEALTH_POSITION_MS })
+    .then((position) => ({ position, readAt: Date.now() }), (e) => ({ reason: e?.message || String(e) }))
+    .finally(() => { _healthPositionInflight = null; });
+  return _healthPositionInflight;
+}
+async function handleHealth(req, res) {
+  const pos = await healthPosition();
   const creds = seatCredentials();
   sendJSON(res, 200, {
     ok: true,
@@ -7277,13 +7287,20 @@ function handleHealth(req, res) {
       seats: req.auth?.seat ? [...creds.seats.keys()] : creds.seats.size,
       legacy: req.auth?.seat ? creds.legacy : creds.legacy.length,
       ...authStats },
-    // `ready` = the replica's FIRST SYNC COMPLETED. Not `_graphStore != null`:
-    // the cold path creates an EMPTY store first and fills it in the sync that
-    // follows, so the store existed 4 s before it held a triple (measured on a
-    // copy of prod: ready:true at +5 s, first synced line at +9 s, 32k entities
-    // in 5.2 s). A process answers /api/health the instant it listens; a
-    // deploy's verify waits for THIS, not for 200 and not for an object.
-    graph: { ready: _graphStore != null && _graphSyncCount > 0, generation: _graphGeneration, projectedThrough: _graphProjectedThrough ?? null, boot: _graphBoot, syncs: _graphSyncCount },
+    // #1645 — `ready` = the executor answered THIS probe's position read (or the
+    // read it joined). position is the executor's own marker, "E:S"; positionReadAt
+    // is when that answer arrived, and positionAgeMs its age as this response is
+    // written. Not ready: all three null, and `reason` says why. A deploy's verify
+    // waits for ready:true. The other fields describe the in-process replica and
+    // play no part in `ready`.
+    graph: {
+      ready: pos.position != null,
+      position: pos.position ?? null,
+      positionReadAt: pos.readAt != null ? new Date(pos.readAt).toISOString() : null,
+      positionAgeMs: pos.readAt != null ? Math.max(0, Date.now() - pos.readAt) : null,
+      ...(pos.position == null ? { reason: pos.reason } : {}),
+      generation: _graphGeneration, projectedThrough: _graphProjectedThrough ?? null, boot: _graphBoot, syncs: _graphSyncCount,
+    },
     checks: { passes: _checksPasses, inflight: !!_checksInflight, cachedAt: _checksCache ? new Date(_checksCache.at).toISOString() : null },
   });
 }
