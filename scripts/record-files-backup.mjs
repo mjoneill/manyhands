@@ -34,6 +34,11 @@
  * is given only after verification, and a cheap completeness check must pass) is hard-linked FROM THAT SET, after the
  * counterpart's own bytes are re-hashed; never from a live file and never from an -UNVERIFIED or .partial set. Every
  * hash in the manifest is of the bytes written to the backup (or of the linked backup file), never a re-read of a source.
+ * The paired capture's files are deduped the same way AFTER the capture wrote them (the drill's capture is reused as is):
+ * an attachment against the same path, a snapshot file against the same file name in the previous set's snapshot, so
+ * immutable SSTs are linked and CURRENT, MANIFEST, OPTIONS and the WAL are copied. The capture's full size is therefore
+ * written once per run and counted in budget.peakPartialBytes; only the files that differ stay. The manifest lists the
+ * linked files under snapshots[].linked and attachments.linked.
  *
  * RESTORE: a set's files may be hard links shared with other sets. An executor is never run on them: copy the snapshot
  * to an independent writable directory first (the manifest's `restore` field says so on every set).
@@ -128,6 +133,33 @@ export function dedupeSource(dest) {
     } catch { /* not a usable source */ }
   }
   return null;
+}
+
+/** The key a captured file is matched on across sets: an attachment by its path, a snapshot file by its name in the snapshot. */
+const captureKey = (f) => (f.role === 'executor-snapshot' ? `snapshot:${path.basename(f.name)}` : f.role === 'attachment-capture' ? `capture:${f.name}` : null);
+
+/**
+ * Replace each captured file that has an identical counterpart (size + sha256, the counterpart RE-HASHED now) in the previous
+ * published set with a hard link to that counterpart. Never links to anything outside that set. Returns the linked entries.
+ */
+export function dedupeCaptured(entries, prev, partial, finding = () => {}) {
+  if (!prev) return [];
+  const byKey = new Map();
+  for (const f of prev.files.values()) { const k = captureKey(f); if (k) byKey.set(k, f); }
+  const out = [];
+  for (const e of entries) {
+    const p = byKey.get(captureKey(e));
+    if (!p || p.bytes !== e.bytes || p.sha256 !== e.sha256) continue;
+    const from = path.join(prev.dir, p.name);
+    try {
+      const st = fs.lstatSync(from);
+      if (!st.isFile() || sha256File(from) !== e.sha256) { finding('dedupe-source-damaged', e.name, `${from} no longer matches its manifest; kept the copy`); continue; }
+      const dst = path.join(partial, e.name); const tmp = `${dst}.link-${process.pid}`;
+      fs.linkSync(from, tmp); fs.renameSync(tmp, dst);
+      e.linkedFrom = from; out.push(e);
+    } catch (err) { finding('dedupe-link-failed', e.name, `${from}: ${err.message}; kept the copy`); }
+  }
+  return out;
 }
 
 /** Pure. sets: [{name, atMs}] (published only). Keeps the newest; the newest of each of the last N hours and D days with a set. */
@@ -338,17 +370,25 @@ export async function runBackup(o, { source, free }) {
       report.attachments = manifest.attachments;
       if (got.status !== 'COMPLETE') finding('attachments-degraded', captureDir, `dangling references: ${got.manifest.dangling.join(', ')}`);
       for (const s of DRILL_NOT_COVERED) report.notCovered.push(`attachments: ${s}`);
-      // every file the capture wrote joins the set manifest, hashed from the backup's own bytes
+      // every file the capture wrote joins the set manifest, hashed from the backup's own bytes; then each one whose size and
+      // sha256 equal its counterpart in the previous published set is REPLACED by a hard link to that counterpart (re-hashed
+      // first). An attachment's counterpart has the same name; a snapshot file's has the same name inside the previous set's
+      // snapshot (immutable SSTs are shared by consecutive checkpoints; CURRENT, MANIFEST, OPTIONS and the WAL differ).
+      const captured = [];
       const add = (rel) => {
         const abs = path.join(partial, rel);
         for (const e of fs.readdirSync(abs, { withFileTypes: true }).sort((x, y) => (x.name < y.name ? -1 : 1))) {
           const r = `${rel}/${e.name}`;
           if (e.isDirectory()) add(r);
-          else { const st = fs.lstatSync(path.join(partial, r)); const entry = { name: r, role: rel.startsWith('executor-snapshot') ? 'executor-snapshot' : 'attachment-capture', bytes: st.size, sha256: sha256File(path.join(partial, r)), linkedFrom: null }; counted(entry); report.files.push(entry); }
+          else { const st = fs.lstatSync(path.join(partial, r)); const entry = { name: r, role: rel.startsWith('executor-snapshot') ? 'executor-snapshot' : 'attachment-capture', bytes: st.size, sha256: sha256File(path.join(partial, r)), linkedFrom: null }; counted(entry); report.files.push(entry); captured.push(entry); }
         }
       };
       add(captureDir);
       if (fs.existsSync(path.join(partial, 'executor-snapshot'))) add('executor-snapshot');
+      const linked = dedupeCaptured(captured, prev, partial, finding);
+      for (const e of linked) { report.budget.copiedBytes -= e.bytes; report.budget.linkedBytes += e.bytes; }
+      manifest.attachments.linked = linked.filter((e) => e.role === 'attachment-capture').map((e) => e.name);
+      for (const snap of manifest.snapshots) snap.linked = linked.filter((e) => e.name.startsWith(`${snap.dir}/`)).map((e) => path.basename(e.name));
     } else {
       report.notCovered.push('attachments: not captured (no --source-attachments, --source-executor and --python): the paired attachment and executor capture did not run');
     }
