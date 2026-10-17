@@ -2274,25 +2274,32 @@ function shorten(value) {
  *                only home is the dictionary is the shape a stale entry takes
  * Only schema:/scrum: terms are judged (rdf:, prov:, xsd: are not the guard's
  * business). Pure over the store; O(quads), so call it on demand, not per query.
+ * `vocabulary` is the set the drift is judged against: the old copy's gate by
+ * default; the executor route passes the executor gate's own set (#1645).
  */
-export function vocabularyDrift(store) {
-  const judged = (t) => t.startsWith('schema:') || t.startsWith('scrum:');
+export function vocabularyDrift(store, { vocabulary = GRAPH_VOCABULARY } = {}) {
   const predicates = new Set();
   const classes = new Set();
   for (const q of store.match(null, null, null)) {
-    const p = shorten(q.predicate.value);
-    if (judged(p)) predicates.add(p);
-    if (q.predicate.equals(A) && q.object.termType === 'NamedNode') {
-      const t = shorten(q.object.value);
-      if (judged(t)) classes.add(t);
-    }
+    predicates.add(shorten(q.predicate.value));
+    if (q.predicate.equals(A) && q.object.termType === 'NamedNode') classes.add(shorten(q.object.value));
   }
-  const emitted = new Set([...predicates, ...classes]);
-  const undeclared = [...emitted].filter((t) => !GRAPH_VOCABULARY.has(t)).sort();
-  const unused = [...GRAPH_VOCABULARY].filter((t) => !emitted.has(t)).sort();
+  return vocabularyDriftOfTerms({ predicates, classes }, { vocabulary });
+}
+
+/**
+ * #1645 — the same judgement over TERM LISTS rather than a store: the predicates in use and the IRI
+ * classes in use, already in prefixed form, from any source (the executor's census answers it here).
+ * The same terms give the same body as vocabularyDrift, field for field and in the same order.
+ */
+export function vocabularyDriftOfTerms({ predicates = [], classes = [] } = {}, { vocabulary = GRAPH_VOCABULARY } = {}) {
+  const judged = (t) => t.startsWith('schema:') || t.startsWith('scrum:');
+  const emitted = new Set([...predicates, ...classes].filter(judged));
+  const undeclared = [...emitted].filter((t) => !vocabulary.has(t)).sort();
+  const unused = [...vocabulary].filter((t) => !emitted.has(t)).sort();
   return {
     ok: undeclared.length === 0,
-    emitted: emitted.size, declared: GRAPH_VOCABULARY.size,
+    emitted: emitted.size, declared: vocabulary.size,
     undeclared, unused,
     means: {
       undeclared: 'terms the projection EMITS that the guard does not know — a working query naming one is refused today',
@@ -2648,7 +2655,9 @@ export const EXECUTOR_ONLY_VOCABULARY = new Set([
   'scrum:authorCorrectedAt',
   'scrum:DeliveryStep', 'scrum:CardImport', 'scrum:MemoryRevision', 'scrum:PendingAnnouncement',
 ]);
-const EXECUTOR_VOCABULARY = new Set([...GRAPH_VOCABULARY, ...EXECUTOR_ONLY_VOCABULARY]);
+// the executor gate's own set: graph_query on the executor is judged against it, and so is the vocabulary drift the
+// executor route reports (#1645), so the two can never disagree about which terms are known
+export const EXECUTOR_VOCABULARY = new Set([...GRAPH_VOCABULARY, ...EXECUTOR_ONLY_VOCABULARY]);
 const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
 const RDF_LANG_STRING = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#langString';
 /**
@@ -2678,6 +2687,19 @@ export async function selectExecutorAll(executorUrl, sparql, { maxRows = 500_000
     for (const [k, v] of Object.entries(b)) row[k] = v.type === 'uri' ? shorten(v.value) : v.value;
     return row;
   });
+}
+
+/**
+ * #1645 — THE VOCABULARY CENSUS, on the executor's PUBLIC dataset: every predicate in use and every IRI class in use,
+ * in one query (so one moment), judged against the executor gate's own set. Read whole through selectExecutorAll, so a
+ * census too large to read refuses (ROW_CAP) rather than reporting drift over part of the vocabulary.
+ */
+export const VOCABULARY_CENSUS_QUERY = 'SELECT DISTINCT ?p ?t WHERE { { ?s ?p ?o } UNION { ?s a ?t FILTER(isIRI(?t)) } }';
+export async function vocabularyDriftFromExecutor(executorUrl, opts = {}) {
+  const rows = await selectExecutorAll(executorUrl, VOCABULARY_CENSUS_QUERY, opts);
+  const predicates = rows.map((r) => r.p).filter((x) => typeof x === 'string');
+  const classes = rows.map((r) => r.t).filter((x) => typeof x === 'string');
+  return vocabularyDriftOfTerms({ predicates, classes }, { vocabulary: EXECUTOR_VOCABULARY });
 }
 
 export async function queryGraphExecutor(executorUrl, sparql, { limit, terms = false, timeoutMs = 30_000, fetchImpl = fetch } = {}) {
