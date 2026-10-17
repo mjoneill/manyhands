@@ -16,13 +16,14 @@
  *
  * The bounds are written so that a cached design would pass too (the design was still open when they were drafted): ready turns false within 5 s of
  * the executor failing and true within 5 s of its recovery, a ready:true never carries a position older than 10 s, and a burst of concurrent probes
- * makes AT MOST one position read.
+ * makes AT MOST one position read (P5 now pins EXACTLY one: the design settled on a fresh read per probe, 43167).
  *
  *   P1  H1+H2  reachable executor: ready, and the position equals the executor's own marker (read directly), with its read time and age
  *   P2  H3     the executor refuses connections: false with a reason; it comes back: true, same REST pid
  *   P3  H3     the marker read returns no row (malformed): false with a reason; it is well-formed again: true
  *   P4  H4     the executor hangs: every probe still answers within 1 s, and ready is false; released: true
- *   P5  SF     ten concurrent probes: every one says ready with the executor's position, and the executor saw at most one position read
+ *   P5  SF     ten concurrent probes, the position read GATED until all ten are written (CI 034c761 showed an ungated read can finish before a slow
+ *              runner's last probes arrive): every one says ready with the executor's position, and the executor saw EXACTLY one position read
  *   P6a H5     every file attempt recorded (tests/helpers/fs-store-recorder.mjs with SCRUM_FS_RECORD_ALL=1): ten probes after boot, then ten with the
  *              executor refusing, make ZERO attempts on the board document FILE, caught errors included (43169). RED at 5571451 once its window opens
  *              before the first probe (an earlier draft opened it after a precondition probe and passed there: the first probe's attempts fell outside
@@ -43,9 +44,9 @@ import { SKIP, DSID, ROSTER_FILE, smallBoard, migrate, withOwned, startExecutor,
 
 const isPositionRead = (body) => /commitSeq/.test(body);
 
-/** A proxy in front of the executor. mode: 'pass' | 'refuse' (every connection destroyed) | 'hold' (nothing is answered) | 'malformed' (a position read answers zero rows). Counts position reads. */
+/** A proxy in front of the executor. mode: 'pass' | 'refuse' (every connection destroyed) | 'hold' (nothing is answered) | 'malformed' (a position read answers zero rows) | 'gate' (a position read waits for openGate(), then is answered normally). Counts position reads. */
 async function startExecProxy(execUrl) {
-  const p = { mode: 'pass', positionReads: 0, held: [] };
+  const p = { mode: 'pass', positionReads: 0, held: [], gateWaiters: [] };
   p.server = http.createServer(async (req, res) => {
     if (p.mode === 'refuse') { req.socket.destroy(); return; }
     const chunks = []; for await (const c of req) chunks.push(c);
@@ -53,6 +54,7 @@ async function startExecProxy(execUrl) {
     const pos = req.method === 'POST' && req.url.startsWith('/query') && isPositionRead(body);
     if (pos) p.positionReads += 1;
     if (p.mode === 'hold') { p.held.push(res); return; }
+    if (p.mode === 'gate' && pos) await new Promise((r) => p.gateWaiters.push(r));   // in flight until the row opens the gate
     if (p.mode === 'malformed' && pos) { res.writeHead(200, { 'content-type': 'application/sparql-results+json' }); res.end(JSON.stringify({ head: { vars: ['e', 'seq'] }, results: { bindings: [] } })); return; }
     const fwd = { ...req.headers }; delete fwd.host; delete fwd['content-length']; delete fwd.connection;
     try {
@@ -63,6 +65,7 @@ async function startExecProxy(execUrl) {
   });
   await new Promise((r) => p.server.listen(0, '127.0.0.1', r));
   p.url = `http://127.0.0.1:${p.server.address().port}`;
+  p.openGate = () => { p.mode = 'pass'; for (const r of p.gateWaiters.splice(0)) r(); };
   p.release = () => { const hs = p.held.splice(0); for (const r of hs) { try { r.destroy(); } catch { /* gone */ } } };
   p.down = () => new Promise((r) => { p.release(); p.server.closeAllConnections?.(); p.server.close(() => r()); });
   return p;
@@ -160,15 +163,32 @@ test('#1645 (P4, H4) an executor that never answers does not hang health: every 
 });
 
 test('#1645 (P5, SF) ten concurrent probes share one position read, and each says ready with the executor\'s position', { skip: SKIP, timeout: 180000 }, async () => {
-  await setup(async ({ exec, proxy, health, until }) => {
+  await setup(async ({ exec, proxy, rest, until }) => {
     await until((x) => x?.graph?.ready === true, 5000, 'PRECONDITION: ready');
     const want = await executorMarker(exec.baseUrl);
     await new Promise((r) => setTimeout(r, 1500));   // let any read already under way finish
+    // the position read is GATED, so it stays in flight while all ten probes arrive (CI 034c761 failed this row with the read answered in a
+    // few ms: a slow runner's later probes came after it finished and correctly started a second one; the row measured runner timing,
+    // not the join). The gate opens 400 ms after the first read reaches the executor, well inside health's 800 ms bound, so a correct
+    // join makes exactly one read on any runner, and no single-flight still makes up to ten.
+    // The gate opens once every probe has been fully WRITTEN to its socket (the client-side edge of "arrived at REST", 43353), plus 100 ms
+    // for REST to parse them, and never later than 700 ms after the first read, so always inside the 800 ms bound.
     const before = proxy.positionReads;
-    const hs = await Promise.all(Array.from({ length: 10 }, () => health()));
+    proxy.mode = 'gate';
+    const t0 = Date.now(); let written = 0;
+    const probe = () => new Promise((resolve, reject) => {
+      const rq = http.request(`${rest.baseUrl}/api/health`, { method: 'GET', agent: false }, (res) => { let b = ''; res.on('data', (d) => { b += d; }); res.on('end', () => { try { resolve({ j: JSON.parse(b) }); } catch (e) { reject(e); } }); });
+      rq.on('finish', () => { written += 1; }); rq.on('error', reject); rq.end();
+    });
+    const burst = Promise.all(Array.from({ length: 10 }, probe));
+    while (written < 10 && Date.now() - t0 < 600) await new Promise((r) => setTimeout(r, 5));
+    assert.equal(written, 10, `PRECONDITION: all ten probes were written within 600 ms (${written})`);
+    await new Promise((r) => setTimeout(r, Math.max(0, Math.min(100, 700 - (Date.now() - t0)))));
+    proxy.openGate();
+    const hs = await burst;
     const reads = proxy.positionReads - before;
     assert.ok(hs.every((h) => h.j?.graph?.ready === true && h.j.graph.position === want), `every concurrent probe says ready at ${want} (got ${JSON.stringify(hs.map((h) => [h.j?.graph?.ready, h.j?.graph?.position]))})`);
-    assert.ok(reads <= 1, `a burst of 10 concurrent probes made at most one position read on the executor (made ${reads})`);
+    assert.equal(reads, 1, `a burst of 10 concurrent probes made exactly one position read on the executor (made ${reads})`);
   });
 });
 
