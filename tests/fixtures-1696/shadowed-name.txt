@@ -1,0 +1,22 @@
+// FIXTURE for the #1696 scan: a top-level name holds a fixed date, but the served test binds its OWN local name with the same spelling.
+import { test } from 'node:test';
+import { startRestServer } from './helpers/harness.mjs';
+
+const NOW = '2026-09-18T12:00:00.000Z';
+const pure = () => Date.parse(NOW);
+
+test('shadowed const: the served test declares its own NOW from the real clock', async () => {
+  const NOW = new Date().toISOString();
+  const srv = await startRestServer({ board: { cards: [{ id: 'c', createdAt: NOW }] } });
+  await srv.stop();
+});
+
+test('shadowed parameter: the served helper takes NOW as an argument', async () => {
+  const boot = async (NOW) => startRestServer({ board: { cards: [{ id: 'c', createdAt: NOW }] } });
+  const srv = await boot(new Date().toISOString());
+  await srv.stop();
+});
+
+test('control, same file: the pure row that really uses the fixed NOW', () => {
+  if (pure() < 0) throw new Error('never');
+});

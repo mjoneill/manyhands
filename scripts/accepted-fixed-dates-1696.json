@@ -1,0 +1,450 @@
+{
+ "about": "Fixed-date sites in tests/ that the #1696 scan flags and that have been READ and accepted. Each entry is bound to the site's file and statement, the field, the consumer, the fixed dates and a fingerprint of the source it depends on (the statement and every local statement it depends on, by text), so a changed date, field or chain un-accepts the site and the scan reports it CHANGED for review. An entry that matches nothing is stale and fails. The reasons are readings, not proofs: the scan is a lexical guard.",
+ "accepted": [
+  {
+   "file": "tests/board-status.test.mjs",
+   "statement": "GET /api/board is UNCHANGED \u2014 full legacy payload, conversations included (resource contract)",
+   "field": "claimedAt",
+   "consumer": "startRestServer",
+   "dates": [
+    "2026-08-01T00:00:",
+    "2026-08-01T00:00:00.000Z",
+    "2026-08-02T00:00:00.000Z"
+   ],
+   "fingerprint": "637f53cad9cf8630",
+   "reason": "claimedAt is a fixed date in the past. The product windows on a claim's age are monotone, 'older than N hours means stale' (core/in-flight.mjs, core/stale-claims.mjs), and no upper bound on a claim's age was found, so an old fixed claim cannot cross a window by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/board-status.test.mjs",
+   "statement": "GET /api/board/status returns the orientation projection, not the history",
+   "field": "claimedAt",
+   "consumer": "startRestServer",
+   "dates": [
+    "2026-08-01T00:00:",
+    "2026-08-01T00:00:00.000Z",
+    "2026-08-02T00:00:00.000Z"
+   ],
+   "fingerprint": "382013bd8cf63b8b",
+   "reason": "claimedAt is a fixed date in the past. The product windows on a claim's age are monotone, 'older than N hours means stale' (core/in-flight.mjs, core/stale-claims.mjs), and no upper bound on a claim's age was found, so an old fixed claim cannot cross a window by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/board-status.test.mjs",
+   "statement": "the status payload is size-invariant to corpus growth \u2014 the property whose absence caused #573",
+   "field": "claimedAt",
+   "consumer": "startRestServer",
+   "dates": [
+    "2026-08-01T00:00:",
+    "2026-08-01T00:00:00.000Z",
+    "2026-08-02T00:00:00.000Z"
+   ],
+   "fingerprint": "2d4d997ccd59bb8e",
+   "reason": "claimedAt is a fixed date in the past. The product windows on a claim's age are monotone, 'older than N hours means stale' (core/in-flight.mjs, core/stale-claims.mjs), and no upper bound on a claim's age was found, so an old fixed claim cannot cross a window by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/board-status.test.mjs",
+   "statement": "MCP board_status now answers on a board whose full payload would be huge",
+   "field": "claimedAt",
+   "consumer": "startRestServer",
+   "dates": [
+    "2026-08-01T00:00:",
+    "2026-08-01T00:00:00.000Z",
+    "2026-08-02T00:00:00.000Z"
+   ],
+   "fingerprint": "267b6df58a8d3f00",
+   "reason": "claimedAt is a fixed date in the past. The product windows on a claim's age are monotone, 'older than N hours means stale' (core/in-flight.mjs, core/stale-claims.mjs), and no upper bound on a claim's age was found, so an old fixed claim cannot cross a window by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/board-status.test.mjs",
+   "statement": "type \"bug\" is now expressible: create accepts it and the type= filter serves it",
+   "field": "claimedAt",
+   "consumer": "startRestServer",
+   "dates": [
+    "2026-08-01T00:00:",
+    "2026-08-01T00:00:00.000Z",
+    "2026-08-02T00:00:00.000Z"
+   ],
+   "fingerprint": "42aa0c9dbfd86535",
+   "reason": "claimedAt is a fixed date in the past. The product windows on a claim's age are monotone, 'older than N hours means stale' (core/in-flight.mjs, core/stale-claims.mjs), and no upper bound on a claim's age was found, so an old fixed claim cannot cross a window by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/card-create-declared-fields.test.mjs",
+   "statement": "apiTest('#830 a park sent to create is reported and dropped,",
+   "field": "parkedUntil",
+   "consumer": "startRestServer",
+   "dates": [
+    "2026-09-16T00:00:00.000Z"
+   ],
+   "fingerprint": "efc4ed489d770eea",
+   "reason": "parkedUntil is already past (2026-09-16). Create drops the park and reports it; PATCH answers 400 for an orphan expiry whatever the date. These rows do not depend on the date being future. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/card-create-declared-fields.test.mjs",
+   "statement": "apiTest('#830 an orphan expiry is ACCEPTED at create, and RE",
+   "field": "parkedUntil",
+   "consumer": "startRestServer",
+   "dates": [
+    "2026-09-16T00:00:00.000Z"
+   ],
+   "fingerprint": "c8fc98de31e29dad",
+   "reason": "parkedUntil is already past (2026-09-16). Create drops the park and reports it; PATCH answers 400 for an orphan expiry whatever the date. These rows do not depend on the date being future. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/card-create-park-fields.test.mjs",
+   "statement": "#830 create no longer VALIDATES the park fields",
+   "field": "parkedUntil",
+   "consumer": "startRestServer",
+   "dates": [
+    "2026-12-01T00:00:00.000Z"
+   ],
+   "fingerprint": "02c60b5c268070e1",
+   "reason": "parkedUntil 2026-12-01 is validated only as an ISO-8601 string (server.js:8747); the one comparison with the clock is core/ready-query.mjs:349, which this file never reaches (no readiness call). From 2026-12-01 the date is past; nothing these rows assert changes. If create or PATCH ever starts comparing it with the clock, this entry is wrong. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/card-create-park-fields.test.mjs",
+   "statement": "#830 create REPORTS the park fields as ignored, and stores nothing",
+   "field": "parkedUntil",
+   "consumer": "startRestServer",
+   "dates": [
+    "2026-12-01T00:00:00.000Z"
+   ],
+   "fingerprint": "a704b1814226c4d8",
+   "reason": "parkedUntil 2026-12-01 is validated only as an ISO-8601 string (server.js:8747); the one comparison with the clock is core/ready-query.mjs:349, which this file never reaches (no readiness call). From 2026-12-01 the date is past; nothing these rows assert changes. If create or PATCH ever starts comparing it with the clock, this entry is wrong. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/card-create-park-fields.test.mjs",
+   "statement": "#830 PATCH is still the parking surface, with its rules intact",
+   "field": "parkedUntil",
+   "consumer": "startRestServer",
+   "dates": [
+    "2026-12-01T00:00:00.000Z"
+   ],
+   "fingerprint": "fc3bc7b9a11e4ac5",
+   "reason": "parkedUntil 2026-12-01 is validated only as an ISO-8601 string (server.js:8747); the one comparison with the clock is core/ready-query.mjs:349, which this file never reaches (no readiness call). From 2026-12-01 the date is past; nothing these rows assert changes. If create or PATCH ever starts comparing it with the clock, this entry is wrong. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/card-parked.test.mjs",
+   "statement": "PARKED over the wire: parking removes the card from the queue",
+   "field": "parkedUntil",
+   "consumer": "startRestServer",
+   "dates": [
+    "2020-01-01T00:00:00.000Z",
+    "2099-01-01T00:00:00.000Z"
+   ],
+   "fingerprint": "dc26d1d4244481f2",
+   "reason": "parkedUntil is 2099-01-01 (parked) or 2020-01-01 (lapsed), far from the present on both sides, so the ready verdict at core/ready-query.mjs:349 cannot flip by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/card-parked.test.mjs",
+   "statement": "PARKED over the wire: the MCP tool schema CARRIES the fields (zod strips what it omits)",
+   "field": "parkedUntil",
+   "consumer": "startRestServer",
+   "dates": [
+    "2020-01-01T00:00:00.000Z",
+    "2099-01-01T00:00:00.000Z"
+   ],
+   "fingerprint": "0fa6798e91c6ff76",
+   "reason": "parkedUntil is 2099-01-01 (parked) or 2020-01-01 (lapsed), far from the present on both sides, so the ready verdict at core/ready-query.mjs:349 cannot flip by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/card-parked.test.mjs",
+   "statement": "PARKED over the wire: an end date with NO author is refused too",
+   "field": "parkedUntil",
+   "consumer": "startRestServer",
+   "dates": [
+    "2020-01-01T00:00:00.000Z",
+    "2099-01-01T00:00:00.000Z"
+   ],
+   "fingerprint": "4e51fd1466817e26",
+   "reason": "parkedUntil is 2099-01-01 (parked) or 2020-01-01 (lapsed), far from the present on both sides, so the ready verdict at core/ready-query.mjs:349 cannot flip by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/claim-notification.test.mjs",
+   "statement": "claimTest( 'a release announces itself once, naming card a",
+   "field": "claimedAt",
+   "consumer": "startRestServer",
+   "dates": [
+    "2026-07-31T00:00:00.000Z"
+   ],
+   "fingerprint": "db1caf8939eedcdd",
+   "reason": "claimedAt is a fixed date in the past. The product windows on a claim's age are monotone, 'older than N hours means stale' (core/in-flight.mjs, core/stale-claims.mjs), and no upper bound on a claim's age was found, so an old fixed claim cannot cross a window by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/claim-notification.test.mjs",
+   "statement": "claimTest( 'a refused claim (409, already held) announces ",
+   "field": "claimedAt",
+   "consumer": "startRestServer",
+   "dates": [
+    "2026-07-31T00:00:00.000Z"
+   ],
+   "fingerprint": "b7f4a7031aab77f1",
+   "reason": "claimedAt is a fixed date in the past. The product windows on a claim's age are monotone, 'older than N hours means stale' (core/in-flight.mjs, core/stale-claims.mjs), and no upper bound on a claim's age was found, so an old fixed claim cannot cross a window by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/claim-notification.test.mjs",
+   "statement": "claimTest( 'a refused release (409, held by other) announc",
+   "field": "claimedAt",
+   "consumer": "startRestServer",
+   "dates": [
+    "2026-07-31T00:00:00.000Z"
+   ],
+   "fingerprint": "be1d1615421a042b",
+   "reason": "claimedAt is a fixed date in the past. The product windows on a claim's age are monotone, 'older than N hours means stale' (core/in-flight.mjs, core/stale-claims.mjs), and no upper bound on a claim's age was found, so an old fixed claim cannot cross a window by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/credentials-1343.test.mjs",
+   "statement": "#1343 served (observe) \u2014 /api/health names the mode; an unauthenticated write is admitted; a known bearer binds without rewriting the actor; scope is not enforced; the credential-expiry standing row rides /api/checks",
+   "field": "expiresAt",
+   "consumer": "startRestServer",
+   "dates": [
+    "2026-06-24T00:00:00.000Z",
+    "2026-09-18T12:00:00.000Z"
+   ],
+   "fingerprint": "3021be8119412f4a",
+   "reason": "After the #1343 fix (5835c9c) every cred() call in tokensFile() overrides expiresAt with inH(...), a time relative to now (tests/credentials-1343.test.mjs, tokensFile), and these three served rows use only tokensFile(). The scan still flags them because cred()'s DEFAULT expiresAt (at(24 * 30), fixed to 2026-09-18) is lexically on the chain, the 'default every caller overrides' limit; issuedAt at(-1) is a fixed past date and not a windowed field; 2026-06-24 is the board-fixture card's createdAt/updatedAt. The fingerprint covers cred(), at(), NOW and tokensFile() and everything else in the file they depend on, so reverting the override changes it and un-accepts these rows. Read in full on 2026-10-15."
+  },
+  {
+   "file": "tests/credentials-1343.test.mjs",
+   "statement": "#1343 served (required) \u2014 absent 401; unknown 401 (a); expired 401 naming the seat (b); read token reads and cannot post (c); act token posts AS ITSELF with a disagreeing author as onBehalfOf; admin is needed for /api/roles; /api/health stays open; the bearer is never logged",
+   "field": "expiresAt",
+   "consumer": "startRestServer",
+   "dates": [
+    "2026-06-24T00:00:00.000Z",
+    "2026-09-18T12:00:00.000Z"
+   ],
+   "fingerprint": "0423a42af011d80e",
+   "reason": "After the #1343 fix (5835c9c) every cred() call in tokensFile() overrides expiresAt with inH(...), a time relative to now (tests/credentials-1343.test.mjs, tokensFile), and these three served rows use only tokensFile(). The scan still flags them because cred()'s DEFAULT expiresAt (at(24 * 30), fixed to 2026-09-18) is lexically on the chain, the 'default every caller overrides' limit; issuedAt at(-1) is a fixed past date and not a windowed field; 2026-06-24 is the board-fixture card's createdAt/updatedAt. The fingerprint covers cred(), at(), NOW and tokensFile() and everything else in the file they depend on, so reverting the override changes it and un-accepts these rows. Read in full on 2026-10-15."
+  },
+  {
+   "file": "tests/credentials-1343.test.mjs",
+   "statement": "#1343 served (required, MCP) \u2014 initialize without a bearer is refused at the door; with an act bearer the session binds and a tool call reaches REST carrying that credential (inherited, never re-declared)",
+   "field": "expiresAt",
+   "consumer": "startRestServer",
+   "dates": [
+    "2026-06-24T00:00:00.000Z",
+    "2026-09-18T12:00:00.000Z"
+   ],
+   "fingerprint": "0962c29bbd7a1245",
+   "reason": "After the #1343 fix (5835c9c) every cred() call in tokensFile() overrides expiresAt with inH(...), a time relative to now (tests/credentials-1343.test.mjs, tokensFile), and these three served rows use only tokensFile(). The scan still flags them because cred()'s DEFAULT expiresAt (at(24 * 30), fixed to 2026-09-18) is lexically on the chain, the 'default every caller overrides' limit; issuedAt at(-1) is a fixed past date and not a windowed field; 2026-06-24 is the board-fixture card's createdAt/updatedAt. The fingerprint covers cred(), at(), NOW and tokensFile() and everything else in the file they depend on, so reverting the override changes it and un-accepts these rows. Read in full on 2026-10-15."
+  },
+  {
+   "file": "tests/field-triple-audit.test.mjs",
+   "statement": "#831 RC0a \u2014 the auditor reproduces every known verdict in the control",
+   "field": "parkedUntil",
+   "consumer": "startRestServer",
+   "dates": [
+    "2026-12-01T00:00:00.000Z"
+   ],
+   "fingerprint": "9d5a69803b1fde5c",
+   "reason": "parkedUntil 2026-12-01 is passed to the create-field auditor as the companion value of the parkedBy probe, which expects AGREE_ABSENT (create ignores the park fields); no readiness call, nothing compares it with the clock. If create ever starts consuming the park fields, this entry is wrong. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/field-triple-audit.test.mjs",
+   "statement": "#831 RC0a \u2014 the control probes actually exercised the surface",
+   "field": "parkedUntil",
+   "consumer": "startRestServer",
+   "dates": [
+    "2026-12-01T00:00:00.000Z"
+   ],
+   "fingerprint": "41d828b102cb9a43",
+   "reason": "parkedUntil 2026-12-01 is passed to the create-field auditor as the companion value of the parkedBy probe, which expects AGREE_ABSENT (create ignores the park fields); no readiness call, nothing compares it with the clock. If create ever starts consuming the park fields, this entry is wrong. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/in-flight-status.test.mjs",
+   "statement": "GET /api/board/status carries inFlight \u2014 claim-authoritative, disagreements named, existing `claims` untouched",
+   "field": "claimedAt",
+   "consumer": "startRestServer",
+   "dates": [
+    "2026-01-01T00:00:00.000Z",
+    "2026-08-01T00:00:00.000Z"
+   ],
+   "fingerprint": "505ef5a10a937421",
+   "reason": "claimedAt is a fixed date in the past. The product windows on a claim's age are monotone, 'older than N hours means stale' (core/in-flight.mjs, core/stale-claims.mjs), and no upper bound on a claim's age was found, so an old fixed claim cannot cross a window by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/in-flight-status.test.mjs",
+   "statement": "MCP board_status carries inFlight and a workLedger read from the same store work_list reads",
+   "field": "claimedAt",
+   "consumer": "startRestServer",
+   "dates": [
+    "2026-01-01T00:00:00.000Z",
+    "2026-08-01T00:00:00.000Z",
+    "2026-08-10T00:00:00.000Z",
+    "2026-08-10T00:20:00.000Z"
+   ],
+   "fingerprint": "0088f4e2824e3fa3",
+   "reason": "claimedAt is a fixed date in the past. The product windows on a claim's age are monotone, 'older than N hours means stale' (core/in-flight.mjs, core/stale-claims.mjs), and no upper bound on a claim's age was found, so an old fixed claim cannot cross a window by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/in-flight-status.test.mjs",
+   "statement": "MCP board_status without a work store says so \u2014 available:false, not a zero",
+   "field": "claimedAt",
+   "consumer": "startRestServer",
+   "dates": [
+    "2026-01-01T00:00:00.000Z",
+    "2026-08-01T00:00:00.000Z"
+   ],
+   "fingerprint": "24cb9cecf0799625",
+   "reason": "claimedAt is a fixed date in the past. The product windows on a claim's age are monotone, 'older than N hours means stale' (core/in-flight.mjs, core/stale-claims.mjs), and no upper bound on a claim's age was found, so an old fixed claim cannot cross a window by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/ready-api.test.mjs",
+   "statement": "GET /api/ready serves the hand-derived verdicts from a real board file",
+   "field": "claimedAt",
+   "consumer": "startRestServer",
+   "dates": [
+    "2026-08-01T00:00:00.000Z",
+    "2026-08-02T00:00:00.000Z"
+   ],
+   "fingerprint": "81dac95b55b7123a",
+   "reason": "claimedAt is a fixed date in the past. The product windows on a claim's age are monotone, 'older than N hours means stale' (core/in-flight.mjs, core/stale-claims.mjs), and no upper bound on a claim's age was found, so an old fixed claim cannot cross a window by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/ready-api.test.mjs",
+   "statement": "the queue is live: closing the blocker admits the waiter on the next call",
+   "field": "claimedAt",
+   "consumer": "startRestServer",
+   "dates": [
+    "2026-08-01T00:00:00.000Z",
+    "2026-08-02T00:00:00.000Z"
+   ],
+   "fingerprint": "68a4e8074a210946",
+   "reason": "claimedAt is a fixed date in the past. The product windows on a claim's age are monotone, 'older than N hours means stale' (core/in-flight.mjs, core/stale-claims.mjs), and no upper bound on a claim's age was found, so an old fixed claim cannot cross a window by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/ready-api.test.mjs",
+   "statement": "?explain answers for one card either way; unknown shortIds 404, not empty",
+   "field": "claimedAt",
+   "consumer": "startRestServer",
+   "dates": [
+    "2026-08-01T00:00:00.000Z",
+    "2026-08-02T00:00:00.000Z"
+   ],
+   "fingerprint": "8433bceeb072349b",
+   "reason": "claimedAt is a fixed date in the past. The product windows on a claim's age are monotone, 'older than N hours means stale' (core/in-flight.mjs, core/stale-claims.mjs), and no upper bound on a claim's age was found, so an old fixed claim cannot cross a window by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/ready-api.test.mjs",
+   "statement": "REGRESSION bb2ccee6 over the wire: explain ignores limit; bad limits 400",
+   "field": "claimedAt",
+   "consumer": "startRestServer",
+   "dates": [
+    "2026-08-01T00:00:00.000Z",
+    "2026-08-02T00:00:00.000Z"
+   ],
+   "fingerprint": "f83b1ec883e821f6",
+   "reason": "claimedAt is a fixed date in the past. The product windows on a claim's age are monotone, 'older than N hours means stale' (core/in-flight.mjs, core/stale-claims.mjs), and no upper bound on a claim's age was found, so an old fixed claim cannot cross a window by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/ready-api.test.mjs",
+   "statement": "MCP board_ready rides the same surface and returns the same verdicts",
+   "field": "claimedAt",
+   "consumer": "startRestServer",
+   "dates": [
+    "2026-08-01T00:00:00.000Z",
+    "2026-08-02T00:00:00.000Z"
+   ],
+   "fingerprint": "686425b7c76b75b1",
+   "reason": "claimedAt is a fixed date in the past. The product windows on a claim's age are monotone, 'older than N hours means stale' (core/in-flight.mjs, core/stale-claims.mjs), and no upper bound on a claim's age was found, so an old fixed claim cannot cross a window by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/ready-executor-1644-snapshot.test.mjs",
+   "statement": "function seed",
+   "field": "claimedAt",
+   "consumer": "startExecutor",
+   "dates": [
+    "2026-08-02T00:00:00.000Z"
+   ],
+   "fingerprint": "e8b9a24cbde8996c",
+   "reason": "claimedAt is a fixed date in the past. The product windows on a claim's age are monotone, 'older than N hours means stale' (core/in-flight.mjs, core/stale-claims.mjs), and no upper bound on a claim's age was found, so an old fixed claim cannot cross a window by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/ready-executor-1644-snapshot.test.mjs",
+   "statement": "const seedOnce",
+   "field": "claimedAt",
+   "consumer": "startExecutor",
+   "dates": [
+    "2026-08-02T00:00:00.000Z"
+   ],
+   "fingerprint": "0a665c4f8ae3c6e1",
+   "reason": "claimedAt is a fixed date in the past. The product windows on a claim's age are monotone, 'older than N hours means stale' (core/in-flight.mjs, core/stale-claims.mjs), and no upper bound on a claim's age was found, so an old fixed claim cannot cross a window by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/ready-executor-1644-snapshot.test.mjs",
+   "statement": "S1 SNAPSHOT: with a card write injected before every query of the read, `GET /api/ready` (switch on) answers the full before or the full after, never a mixture",
+   "field": "claimedAt",
+   "consumer": "startExecutor",
+   "dates": [
+    "2026-08-02T00:00:00.000Z"
+   ],
+   "fingerprint": "5c5a5ec1a240d341",
+   "reason": "claimedAt is a fixed date in the past. The product windows on a claim's age are monotone, 'older than N hours means stale' (core/in-flight.mjs, core/stale-claims.mjs), and no upper bound on a claim's age was found, so an old fixed claim cannot cross a window by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/ready-executor-1644-snapshot.test.mjs",
+   "statement": "S1-CONTROL the NAIVE paged reader, under the same sweep, produces an answer that is neither before nor after (so the sweep CAN fail)",
+   "field": "claimedAt",
+   "consumer": "startExecutor",
+   "dates": [
+    "2026-08-02T00:00:00.000Z"
+   ],
+   "fingerprint": "4aa09597741ac2cc",
+   "reason": "claimedAt is a fixed date in the past. The product windows on a claim's age are monotone, 'older than N hours means stale' (core/in-flight.mjs, core/stale-claims.mjs), and no upper bound on a claim's age was found, so an old fixed claim cannot cross a window by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/ready-executor-1644-snapshot.test.mjs",
+   "statement": "L1 LATENCY on a production-sized board: executor p95 <= 1.0 s AND <= 2x the in-process p95, idle and under CPU load",
+   "field": "claimedAt",
+   "consumer": "spawn",
+   "dates": [
+    "2026-08-02T00:00:00.000Z"
+   ],
+   "fingerprint": "242249ba8d8b4497",
+   "reason": "claimedAt is a fixed date in the past. The product windows on a claim's age are monotone, 'older than N hours means stale' (core/in-flight.mjs, core/stale-claims.mjs), and no upper bound on a claim's age was found, so an old fixed claim cannot cross a window by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/ready-executor-1644-snapshot.test.mjs",
+   "statement": "S2 TWO WRITERS: a card write AND a real projector batch injected mid-read (every k <= m), `GET /api/ready` (switch on) still answers the full before or the full after",
+   "field": "claimedAt",
+   "consumer": "startExecutor",
+   "dates": [
+    "2026-08-02T00:00:00.000Z"
+   ],
+   "fingerprint": "67e4a42b8bfb5825",
+   "reason": "claimedAt is a fixed date in the past. The product windows on a claim's age are monotone, 'older than N hours means stale' (core/in-flight.mjs, core/stale-claims.mjs), and no upper bound on a claim's age was found, so an old fixed claim cannot cross a window by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/ready-executor-1644-snapshot.test.mjs",
+   "statement": "S2-CONTROL the NAIVE reader under the same two-writer sweep (k = the page boundary) is still caught, and the batch really wrote",
+   "field": "claimedAt",
+   "consumer": "startExecutor",
+   "dates": [
+    "2026-08-02T00:00:00.000Z"
+   ],
+   "fingerprint": "752eb6548931dd0c",
+   "reason": "claimedAt is a fixed date in the past. The product windows on a claim's age are monotone, 'older than N hours means stale' (core/in-flight.mjs, core/stale-claims.mjs), and no upper bound on a claim's age was found, so an old fixed claim cannot cross a window by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/ready-executor-1644-snapshot.test.mjs",
+   "statement": "S3 SNAPSHOT WITHIN ONE QUERY: a write that commits while a slow read runs never produces a torn count (snapshot isolation or serialization, said which, for this pyoxigraph)",
+   "field": "claimedAt",
+   "consumer": "spawnSync",
+   "dates": [
+    "2026-08-02T00:00:00.000Z"
+   ],
+   "fingerprint": "64cf9902aa373884",
+   "reason": "claimedAt is a fixed date in the past. The product windows on a claim's age are monotone, 'older than N hours means stale' (core/in-flight.mjs, core/stale-claims.mjs), and no upper bound on a claim's age was found, so an old fixed claim cannot cross a window by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
+  },
+  {
+   "file": "tests/system-posts-1b-s2.test.mjs",
+   "statement": "for (const [verb, state, slot, notifies] of [['REST', 'resti",
+   "field": "claimedAt",
+   "consumer": "startExecutor",
+   "dates": [
+    "2026-09-14T00:00:00.000Z",
+    "2026-09-14T01:00:00.000Z"
+   ],
+   "fingerprint": "0cfce81c5cc93d7c",
+   "reason": "claimedAt is a fixed date in the past. The product windows on a claim's age are monotone, 'older than N hours means stale' (core/in-flight.mjs, core/stale-claims.mjs), and no upper bound on a claim's age was found, so an old fixed claim cannot cross a window by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
+  }
+ ]
+}

@@ -1,0 +1,11 @@
+// FIXTURE for the #1696 scan: a real server, and only times computed from the clock.
+import { test } from 'node:test';
+import { startRestServer } from './helpers/harness.mjs';
+
+const H = 3600_000;
+const inH = (h) => new Date(Date.now() + h * H).toISOString();
+
+test('relative: every time is now plus an offset', async () => {
+  const srv = await startRestServer({ board: { cards: [{ id: 'c1', createdAt: inH(-5), claimedAt: inH(-1) }] } });
+  await srv.stop();
+});
