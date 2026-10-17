@@ -31,13 +31,15 @@
  *   7. PRUNE           only with --keep-hourly and --keep-daily, and only after a run that published and whose findings
  *                      are none or only attachment-check-failed (that one repeats every run until the board's
  *                      references are fixed; withholding pruning for it would fill DEST). Never the newest set, and
- *                      never the newest set a CLEAN run published (`last-clean`, keptLastClean), nor the newest set a
- *                      clean PAIRED run published (`last-clean-paired`, keptLastCleanPaired: a records-only clean
- *                      run is no attachment recovery point); every
- *                      kept set is then byte-checked against its manifest (kept-set-damaged otherwise).
+ *                      never the newest set whose own manifest records setOk (`last-clean`, keptLastClean), nor the
+ *                      newest with setOk AND setPaired (`last-clean-paired`, keptLastCleanPaired: a records-only clean
+ *                      set is no attachment recovery point). FAIL CLOSED: a set whose manifest cannot be read is never
+ *                      pruned and is named in a set-manifest-unreadable finding. Every other kept set is then
+ *                      byte-checked against its manifest (kept-set-damaged otherwise).
  *
  * Every report carries redRuns (consecutive red runs) and redSince (the ISO start time of the streak's first run, or
- * null when green), kept in DEST/.records-state.json, which pruning never touches.
+ * null when green), kept in DEST/.records-state.json, which pruning never touches; when that file is missing or corrupt
+ * the streak is rebuilt from the sets' own manifests and the report says streakRebuilt:true.
  *
  * DEDUPE: a file whose size and sha256 equal its counterpart in the most recent PUBLISHED set (the name records-<stamp>
  * is given only after verification, and a cheap completeness check must pass) is hard-linked FROM THAT SET, after the
@@ -195,10 +197,39 @@ export function planRetention({ sets, keepHourly, keepDaily, lastClean = null, l
   return { keep, delete: del, lastClean: clean ? clean.name : null, lastCleanPaired: cleanPaired ? cleanPaired.name : null };
 }
 
-function prune(dest, { keepHourly, keepDaily, lastClean = null, lastCleanPaired = null }) {
-  const sets = fs.readdirSync(dest).map((name) => ({ name, m: PUBLISHED_RE.exec(name) }))
-    .filter((x) => x.m && fs.lstatSync(path.join(dest, x.name)).isDirectory()).map((x) => ({ name: x.name, atMs: parseStamp(x.m[1]) }));
-  const plan = planRetention({ sets, keepHourly, keepDaily, lastClean, lastCleanPaired });
+/**
+ * Every published set under dest with what its OWN manifest says of its run: { name, atMs, manifest|null, why }. A set
+ * whose manifest is missing, unreadable or not a records-set manifest has manifest null and the reason in `why`.
+ */
+export function publishedSets(dest) {
+  return fs.readdirSync(dest).map((name) => ({ name, m: PUBLISHED_RE.exec(name) }))
+    .filter((x) => { try { return x.m && fs.lstatSync(path.join(dest, x.name)).isDirectory(); } catch { return false; } })
+    .map((x) => {
+      const s = { name: x.name, atMs: parseStamp(x.m[1]), manifest: null, why: null };
+      try {
+        const m = JSON.parse(fs.readFileSync(path.join(dest, x.name, SET_MANIFEST), 'utf8'));
+        if (m?.kind !== 'records-set' || !Array.isArray(m.files)) s.why = `${SET_MANIFEST} is not a records-set manifest`;
+        else s.manifest = m;
+      } catch (e) { s.why = `${SET_MANIFEST} ${e.code === 'ENOENT' ? 'is missing' : `cannot be read (${e.code || e.message})`}`; }
+      return s;
+    })
+    .sort((a, b) => b.atMs - a.atMs || (a.name < b.name ? 1 : -1));
+}
+
+/**
+ * Retention from the sets' OWN manifests. last-clean is the newest set whose manifest records setOk:true;
+ * last-clean-paired the newest whose manifest records setOk:true AND setPaired:true. A set from before these flags
+ * existed has neither and is never last-clean. FAIL CLOSED: a set whose manifest cannot be read is never
+ * deleted (it could be the last clean one, and nothing else can say), and each is returned in `unreadable` for a finding.
+ */
+function prune(dest, { keepHourly, keepDaily }) {
+  const all = publishedSets(dest);
+  const unreadable = all.filter((s) => !s.manifest);
+  const readable = all.filter((s) => s.manifest);
+  const lastClean = readable.find((s) => s.manifest.setOk === true)?.name ?? null;
+  const lastCleanPaired = readable.find((s) => s.manifest.setOk === true && s.manifest.setPaired === true)?.name ?? null;
+  const plan = planRetention({ sets: readable.map((s) => ({ name: s.name, atMs: s.atMs })), keepHourly, keepDaily, lastClean, lastCleanPaired });
+  for (const s of unreadable) plan.keep.push({ name: s.name, reasons: ['manifest-unreadable: never pruned'], reason: 'manifest-unreadable: never pruned' });
   const deleted = []; const refused = [];
   for (const v of plan.delete) {
     try {
@@ -212,7 +243,8 @@ function prune(dest, { keepHourly, keepDaily, lastClean = null, lastCleanPaired 
     } catch (e) { refused.push({ name: v.name, error: e.message }); }
   }
   try { fs.rmdirSync(path.join(dest, '.pruning')); } catch { /* absent, or holds a leftover: kept for a human */ }
-  return { kept: plan.keep, deleted, refused, lastClean: plan.lastClean, lastCleanPaired: plan.lastCleanPaired };
+  return { kept: plan.keep, deleted, refused, lastClean: plan.lastClean, lastCleanPaired: plan.lastCleanPaired,
+    unreadable: unreadable.map((s) => ({ name: s.name, why: s.why })) };
 }
 
 /**
@@ -238,31 +270,60 @@ export function keptSetsByteCheck(dest, names) {
 }
 
 /**
- * The red streak, kept in DEST/.records-state.json (a dot name: never a set, never pruned, so it survives pruning). Every
+ * The red streak, kept in DEST/.records-state.json (a dot name: never a set, never pruned, so it survives pruning). It holds
+ * the streak ONLY: a missing or CORRUPT file is treated the same way, the streak rebuilt from the sets' manifests and the
+ * report saying streakRebuilt:true. Every
  * run that held the lock records itself: a green run resets the streak to 0 and null; a red run (ok:false, whether it
  * published or not) adds one, and the first red run's start time (ISO-8601) is redSince until the next green run.
  */
 export const STATE = '.records-state.json';
-export function readRedState(dest) {
+
+/** The streak from the state file, or null when it is missing or unreadable. */
+function readStateFile(dest) {
   try {
     const st = JSON.parse(fs.readFileSync(path.join(dest, STATE), 'utf8'));
     if (Number.isSafeInteger(st.redRuns) && st.redRuns >= 0) return { redRuns: st.redRuns, redSince: st.redRuns ? (st.redSince ?? null) : null };
-  } catch { /* none yet, or unreadable: a fresh streak */ }
-  return { redRuns: 0, redSince: null };
+  } catch { /* missing or unreadable */ }
+  return null;
 }
-/** The name of the newest set published by an ok:true run (field lastClean), or by an ok:true PAIRED run (lastCleanPaired). */
-export function readLastClean(dest, field = 'lastClean') {
-  try { const n = JSON.parse(fs.readFileSync(path.join(dest, STATE), 'utf8'))[field]; return typeof n === 'string' && PUBLISHED_RE.test(n) ? n : null; } catch { return null; }
+
+/**
+ * The streak WITHOUT the state file, from the published sets' own manifests: the consecutive newest sets whose manifest
+ * records setOk:false, redSince the oldest of them's startedAt. A lower bound: a red run that published nothing, or a red set
+ * already pruned, is not there to count.
+ */
+export function rebuildStreak(dest, { exclude = null } = {}) {
+  let redRuns = 0; let redSince = null;
+  for (const s of publishedSets(dest)) {
+    if (s.name === exclude) continue;
+    if (!s.manifest || typeof s.manifest.setOk !== 'boolean') break;
+    if (s.manifest.setOk) break;
+    redRuns += 1; redSince = s.manifest.startedAt ?? s.manifest.takenAt ?? null;
+  }
+  return { redRuns, redSince: redRuns ? redSince : null };
 }
-export function recordRun(dest, { ok, at, stamp, published = false, setName = null, paired = false }) {
-  const prev = readRedState(dest);
-  const lastClean = ok && published && setName ? setName : readLastClean(dest);
-  const lastCleanPaired = ok && published && setName && paired ? setName : readLastClean(dest, 'lastCleanPaired');
+
+/**
+ * The streak as it stands before this run: the state file, or (missing/unreadable) rebuilt from the sets. streakRebuilt
+ * is true when a rebuild was needed and there was something to rebuild from (a fresh DEST with no state and no set is a
+ * fresh streak, not a rebuilt one).
+ */
+export function readRedState(dest, { exclude = null } = {}) {
+  const st = readStateFile(dest);
+  if (st) return { ...st, streakRebuilt: false };
+  const hadFile = fs.existsSync(path.join(dest, STATE));
+  const hadSets = publishedSets(dest).some((s) => s.name !== exclude);
+  return { ...rebuildStreak(dest, { exclude }), streakRebuilt: hadFile || hadSets };
+}
+
+/** Record this run in the streak. Only redRuns/redSince are kept in the state file: last-clean lives in the sets. */
+export function recordRun(dest, { ok, at, stamp, setName = null }) {
+  const prev = readRedState(dest, { exclude: setName });
   const next = ok ? { redRuns: 0, redSince: null } : { redRuns: prev.redRuns + 1, redSince: prev.redRuns ? prev.redSince : at };
   const tmp = path.join(dest, `${STATE}.${process.pid}.tmp`);
-  fs.writeFileSync(tmp, `${JSON.stringify({ ...next, lastClean, lastCleanPaired, lastStamp: stamp, lastOk: ok, updatedAt: new Date().toISOString() })}\n`);
+  fs.writeFileSync(tmp, `${JSON.stringify({ ...next, lastStamp: stamp, lastOk: ok, updatedAt: new Date().toISOString() })}\n`);
   fs.renameSync(tmp, path.join(dest, STATE));
-  return next;
+  return { ...next, streakRebuilt: prev.streakRebuilt };
 }
 
 /**
@@ -434,7 +495,7 @@ export async function runBackup(o, { source, free }) {
     } finally { fs.closeSync(fd); }
   };
 
-  const manifest = { schema: 1, kind: 'records-set', stamp, takenAt: new Date().toISOString(), cursorsCapturedAt: null,
+  const manifest = { schema: 1, kind: 'records-set', stamp, startedAt: report.startedAt, takenAt: new Date().toISOString(), cursorsCapturedAt: null,
     files: report.files, snapshots: [], attachments: null, restore: RESTORE_NOTE };
   try {
     // 1. cursors FIRST
@@ -525,8 +586,16 @@ export async function runBackup(o, { source, free }) {
     return report;
   }
 
-  // 6. publish: read-only, then the verified name
+  // 6. publish: the set's own verdict into its manifest, then read-only, then the verified name. setOk: this set's own
+  // capture and verification were clean (no finding at publish); setPaired: it holds a paired attachment capture. The
+  // RUN's report ok can still turn red later (prune-refused, kept-set-damaged, set-manifest-unreadable concern OTHER
+  // sets), so the names differ. Retention reads these flags from the sets themselves, never from a file outside them.
   report.stage = 'publish';
+  Object.assign(manifest, { setOk: report.findings.length === 0, setPaired: report.attachments?.paired === true });
+  const mtmp = path.join(partial, `${SET_MANIFEST}.${process.pid}.tmp`);
+  fs.writeFileSync(mtmp, `${JSON.stringify(manifest, null, 2)}\n`, { flag: 'wx' });
+  fs.renameSync(mtmp, path.join(partial, SET_MANIFEST));
+  fsyncDir(partial);
   const dirs = [partial];
   for (let i = 0; i < dirs.length; i++) {
     for (const e of fs.readdirSync(dirs[i], { withFileTypes: true })) {
@@ -547,15 +616,14 @@ export async function runBackup(o, { source, free }) {
   if (o.retention) {
     report.stage = 'prune';
     // this run's own set is the last clean one when it has no finding so far; otherwise the newest set a clean run published
-    const cleanNow = report.findings.length === 0;
-    const lastClean = cleanNow ? path.basename(final) : readLastClean(o.dest);
-    const lastCleanPaired = cleanNow && report.attachments?.paired ? path.basename(final) : readLastClean(o.dest, 'lastCleanPaired');
-    report.pruned = prunable ? prune(o.dest, { ...o.retention, lastClean, lastCleanPaired }) : { skipped: 'this run has a finding other than attachment-check-failed: every existing set is kept' };
+    report.pruned = prunable ? prune(o.dest, o.retention) : { skipped: 'this run has a finding other than attachment-check-failed: every existing set is kept' };
     report.keptLastClean = prunable && report.pruned.lastClean ? PUBLISHED_RE.exec(report.pruned.lastClean)[1] : null;
     report.keptLastCleanPaired = prunable && report.pruned.lastCleanPaired ? PUBLISHED_RE.exec(report.pruned.lastCleanPaired)[1] : null;
     if (prunable && report.pruned.refused.length) finding('prune-refused', null, report.pruned.refused.map((r) => `${r.name}: ${r.error}`).join('; '));
     if (prunable) {
-      const damaged = keptSetsByteCheck(o.dest, report.pruned.kept.map((k) => k.name));
+      for (const u of report.pruned.unreadable) finding('set-manifest-unreadable', u.name, `${u.name}: ${u.why}; never pruned (it may be the last clean recovery point)`);
+      const unreadableNames = new Set(report.pruned.unreadable.map((u) => u.name));
+      const damaged = keptSetsByteCheck(o.dest, report.pruned.kept.map((k) => k.name).filter((n) => !unreadableNames.has(n)));
       report.pruned.keptByteCheck = damaged.length ? damaged : 'every kept set matches its manifest';
       for (const d of damaged) finding('kept-set-damaged', d.file, `${d.set}/${d.file}: ${d.why}`);
     }
@@ -566,16 +634,18 @@ export async function runBackup(o, { source, free }) {
   return report;
 }
 
+const streakForRefusal = (dest) => { try { return dest ? readRedState(dest) : { redRuns: null, redSince: null }; } catch { return { redRuns: null, redSince: null }; } };
+
 export async function main(argv) {
   let o; let pre;
   // a refusal writes nothing; it reports the streak as it stands (read only) when --dest can be read
-  const refuse = (msg) => { console.error(`${USAGE}\nREFUSED: ${msg}`); console.log(JSON.stringify({ stage: 'refused', published: false, setDir: null, ok: false, error: msg, ...(o?.dest ? readRedState(o.dest) : { redRuns: null, redSince: null }) })); return 2; };
+  const refuse = (msg) => { console.error(`${USAGE}\nREFUSED: ${msg}`); console.log(JSON.stringify({ stage: 'refused', published: false, setDir: null, ok: false, error: msg, ...streakForRefusal(o?.dest) })); return 2; };
   try { o = parseArgs(argv); pre = await preflight(o); } catch (e) { if (e instanceof Refusal) return refuse(e.message); throw e; }
   const lock = takeLock(o.dest);
-  if (lock.held) { console.error(`SKIPPED: ${lock.held}`); console.log(JSON.stringify({ stage: 'skipped', published: false, setDir: null, ok: false, error: lock.held, ...readRedState(o.dest) })); return 7; }
+  if (lock.held) { console.error(`SKIPPED: ${lock.held}`); console.log(JSON.stringify({ stage: 'skipped', published: false, setDir: null, ok: false, error: lock.held, ...streakForRefusal(o.dest) })); return 7; }
   try {
     const report = await runBackup(o, pre);
-    Object.assign(report, recordRun(o.dest, { ok: report.ok, at: report.startedAt, stamp: report.stamp, published: report.published, setName: report.setDir ? path.basename(report.setDir) : null, paired: report.attachments?.paired === true }));
+    Object.assign(report, recordRun(o.dest, { ok: report.ok, at: report.startedAt, stamp: report.stamp, setName: report.published ? path.basename(report.setDir) : null }));
     console.log(JSON.stringify(report));
     return report.ok ? 0 : 1;
   } finally { lock.release(); }
