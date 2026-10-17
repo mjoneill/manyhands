@@ -408,12 +408,23 @@ export async function runBackup(o, { source, free }) {
   report.stage = 'verify';
   const v = verifySet({ set: partial, liveFiles, python: o.attachments?.python ?? null, published: false });
   report.verify = { ok: v.ok, checks: v.checks };
-  if (!v.ok) {
-    for (const f of v.failures) finding('verify-failed', f.file, `${f.check}: ${f.file}: ${f.why}`);
+  // The attachment-refs check judges the SOURCE's references against the copy: a contradiction there (two references
+  // disagreeing on a file's size, a reference to no file) is a true copy of a contradictory board. It makes the run
+  // RED (ok:false, a named finding per failure) without withholding the set, like closed-history-changed. Every other
+  // verification failure means the copy itself is not trustworthy, and the set is not published.
+  const refFailures = v.failures.filter((f) => f.check === 'attachment-refs');
+  const copyFailures = v.failures.filter((f) => f.check !== 'attachment-refs');
+  for (const f of refFailures) finding('attachment-check-failed', f.file, `${f.file}: ${f.why}`);
+  if (report.attachments && v.coverage) {
+    report.attachments.coverage = v.coverage;
+    if (v.coverage.vacuous.length) report.notCovered.push(`attachments: nothing to check (${v.coverage.vacuous.join(', ')}): the capture holds no attachments or no references`);
+  }
+  if (copyFailures.length) {
+    for (const f of copyFailures) finding('verify-failed', f.file, `${f.check}: ${f.file}: ${f.why}`);
     report.setDir = `${final}-UNVERIFIED`;
     fs.renameSync(partial, report.setDir);
     fsyncDir(o.dest);
-    report.error = `the set did not verify: ${v.failures.map((f) => `${f.file}: ${f.why}`).join('; ')}`;
+    report.error = `the set did not verify: ${copyFailures.map((f) => `${f.file}: ${f.why}`).join('; ')}`;
     report.budget.freeAfter = freeBytes(o.dest);
     return report;
   }
