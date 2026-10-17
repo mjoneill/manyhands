@@ -28,7 +28,16 @@
  *   6. PUBLISH         a verified set is made read-only (a-w on every file and directory) and renamed records-<stamp>; a
  *                      set that fails verification is renamed records-<stamp>-UNVERIFIED and is never a dedupe source.
  *                      A capture that FAILED leaves no set (its partial is removed): it is not a recovery point.
- *   7. PRUNE           only with --keep-hourly and --keep-daily, and only after a run that published and is ok.
+ *   7. PRUNE           only with --keep-hourly and --keep-daily, and only after a run that published and whose findings
+ *                      are none or only attachment-check-failed (that one repeats every run until the board's
+ *                      references are fixed; withholding pruning for it would fill DEST). Never the newest set, and
+ *                      never the newest set a CLEAN run published (`last-clean`, keptLastClean), nor the newest set a
+ *                      clean PAIRED run published (`last-clean-paired`, keptLastCleanPaired: a records-only clean
+ *                      run is no attachment recovery point); every
+ *                      kept set is then byte-checked against its manifest (kept-set-damaged otherwise).
+ *
+ * Every report carries redRuns (consecutive red runs) and redSince (the ISO start time of the streak's first run, or
+ * null when green), kept in DEST/.records-state.json, which pruning never touches.
  *
  * DEDUPE: a file whose size and sha256 equal its counterpart in the most recent PUBLISHED set (the name records-<stamp>
  * is given only after verification, and a cheap completeness check must pass) is hard-linked FROM THAT SET, after the
@@ -165,25 +174,31 @@ export function dedupeCaptured(entries, prev, partial, finding = () => {}) {
 }
 
 /** Pure. sets: [{name, atMs}] (published only). Keeps the newest; the newest of each of the last N hours and D days with a set. */
-export function planRetention({ sets, keepHourly, keepDaily }) {
+export function planRetention({ sets, keepHourly, keepDaily, lastClean = null, lastCleanPaired = null }) {
   const sorted = [...sets].sort((a, b) => b.atMs - a.atMs || (a.name < b.name ? 1 : -1));
   const reasons = new Map(); const add = (s, r) => { if (!reasons.has(s.name)) reasons.set(s.name, []); reasons.get(s.name).push(r); };
   if (sorted.length) add(sorted[0], 'newest');
+  // the newest set whose own run was ok:true: the last clean recovery point is kept through any red streak
+  const clean = lastClean && sorted.find((s) => s.name === lastClean);
+  if (clean) add(clean, 'last-clean');
+  // and the newest clean PAIRED set: a records-only clean run is no attachment recovery point
+  const cleanPaired = lastCleanPaired && sorted.find((s) => s.name === lastCleanPaired);
+  if (cleanPaired) add(cleanPaired, 'last-clean-paired');
   const tier = (label, keyOf, n) => {
     const seen = new Set();
-    for (const s of sorted) { const k = keyOf(s.atMs); if (seen.has(k)) continue; if (seen.size >= n) break; seen.add(k); add(s, `${label}:${k}`); }
+    for (const s of sorted) { const k = keyOf(s.atMs); if (seen.has(k)) continue; if (seen.size >= n) break; seen.add(k); add(s, `${label} ${k}`); }
   };
   tier('hourly', (ms) => new Date(ms).toISOString().slice(0, 13), keepHourly);
   tier('daily', (ms) => new Date(ms).toISOString().slice(0, 10), keepDaily);
   const keep = []; const del = [];
-  for (const s of sorted) reasons.has(s.name) ? keep.push({ name: s.name, reasons: reasons.get(s.name) }) : del.push({ name: s.name, reason: 'held by no tier' });
-  return { keep, delete: del };
+  for (const s of sorted) reasons.has(s.name) ? keep.push({ name: s.name, reasons: reasons.get(s.name), reason: reasons.get(s.name).join(', ') }) : del.push({ name: s.name, reason: 'held by no tier' });
+  return { keep, delete: del, lastClean: clean ? clean.name : null, lastCleanPaired: cleanPaired ? cleanPaired.name : null };
 }
 
-function prune(dest, { keepHourly, keepDaily }) {
+function prune(dest, { keepHourly, keepDaily, lastClean = null, lastCleanPaired = null }) {
   const sets = fs.readdirSync(dest).map((name) => ({ name, m: PUBLISHED_RE.exec(name) }))
     .filter((x) => x.m && fs.lstatSync(path.join(dest, x.name)).isDirectory()).map((x) => ({ name: x.name, atMs: parseStamp(x.m[1]) }));
-  const plan = planRetention({ sets, keepHourly, keepDaily });
+  const plan = planRetention({ sets, keepHourly, keepDaily, lastClean, lastCleanPaired });
   const deleted = []; const refused = [];
   for (const v of plan.delete) {
     try {
@@ -197,7 +212,57 @@ function prune(dest, { keepHourly, keepDaily }) {
     } catch (e) { refused.push({ name: v.name, error: e.message }); }
   }
   try { fs.rmdirSync(path.join(dest, '.pruning')); } catch { /* absent, or holds a leftover: kept for a human */ }
-  return { kept: plan.keep, deleted, refused };
+  return { kept: plan.keep, deleted, refused, lastClean: plan.lastClean, lastCleanPaired: plan.lastCleanPaired };
+}
+
+/**
+ * After a prune, every KEPT set is checked against its own manifest: each file present at its size and sha256. Kept sets
+ * share inodes through dedupe links, so each inode is hashed once. Returns [{set, file, why}] (empty when all match).
+ */
+export function keptSetsByteCheck(dest, names) {
+  const out = []; const byInode = new Map();
+  for (const name of names) {
+    const dir = path.join(dest, name);
+    let m;
+    try { m = JSON.parse(fs.readFileSync(path.join(dir, SET_MANIFEST), 'utf8')); } catch (e) { out.push({ set: name, file: SET_MANIFEST, why: `unreadable (${e.message})` }); continue; }
+    for (const f of m.files) {
+      const p = path.join(dir, f.name);
+      let st; try { st = fs.lstatSync(p); } catch { out.push({ set: name, file: f.name, why: 'missing' }); continue; }
+      if (!st.isFile() || st.size !== f.bytes) { out.push({ set: name, file: f.name, why: `size ${st.size} != recorded ${f.bytes}` }); continue; }
+      const k = `${st.dev}:${st.ino}`;
+      if (!byInode.has(k)) byInode.set(k, sha256File(p));
+      if (byInode.get(k) !== f.sha256) out.push({ set: name, file: f.name, why: 'sha256 differs from the manifest' });
+    }
+  }
+  return out;
+}
+
+/**
+ * The red streak, kept in DEST/.records-state.json (a dot name: never a set, never pruned, so it survives pruning). Every
+ * run that held the lock records itself: a green run resets the streak to 0 and null; a red run (ok:false, whether it
+ * published or not) adds one, and the first red run's start time (ISO-8601) is redSince until the next green run.
+ */
+export const STATE = '.records-state.json';
+export function readRedState(dest) {
+  try {
+    const st = JSON.parse(fs.readFileSync(path.join(dest, STATE), 'utf8'));
+    if (Number.isSafeInteger(st.redRuns) && st.redRuns >= 0) return { redRuns: st.redRuns, redSince: st.redRuns ? (st.redSince ?? null) : null };
+  } catch { /* none yet, or unreadable: a fresh streak */ }
+  return { redRuns: 0, redSince: null };
+}
+/** The name of the newest set published by an ok:true run (field lastClean), or by an ok:true PAIRED run (lastCleanPaired). */
+export function readLastClean(dest, field = 'lastClean') {
+  try { const n = JSON.parse(fs.readFileSync(path.join(dest, STATE), 'utf8'))[field]; return typeof n === 'string' && PUBLISHED_RE.test(n) ? n : null; } catch { return null; }
+}
+export function recordRun(dest, { ok, at, stamp, published = false, setName = null, paired = false }) {
+  const prev = readRedState(dest);
+  const lastClean = ok && published && setName ? setName : readLastClean(dest);
+  const lastCleanPaired = ok && published && setName && paired ? setName : readLastClean(dest, 'lastCleanPaired');
+  const next = ok ? { redRuns: 0, redSince: null } : { redRuns: prev.redRuns + 1, redSince: prev.redRuns ? prev.redSince : at };
+  const tmp = path.join(dest, `${STATE}.${process.pid}.tmp`);
+  fs.writeFileSync(tmp, `${JSON.stringify({ ...next, lastClean, lastCleanPaired, lastStamp: stamp, lastOk: ok, updatedAt: new Date().toISOString() })}\n`);
+  fs.renameSync(tmp, path.join(dest, STATE));
+  return next;
 }
 
 /**
@@ -302,11 +367,13 @@ async function preflight(o) {
 export async function runBackup(o, { source, free }) {
   const report = { stage: 'capture', published: false, setDir: null, files: [], cursorsCapturedAt: null,
     budget: { copiedBytes: 0, linkedBytes: 0, setBytes: 0, peakPartialBytes: 0, freeBefore: free, freeAfter: null },
-    pruned: o.retention ? null : 'not requested', findings: [], notCovered: [], ok: false, error: null };
+    pruned: o.retention ? null : 'not requested', keptLastClean: null, keptLastCleanPaired: null, findings: [], notCovered: [], ok: false, error: null };
   const finding = (code, name, detail) => report.findings.push({ code, name, detail });
 
   let stamp = stampOf(Date.now());
   for (let i = 0; i < 3 && fs.readdirSync(o.dest).some((n) => n.startsWith(`records-${stamp}`)); i++) { sleepSync(1000 - (Date.now() % 1000) + 5); stamp = stampOf(Date.now()); }
+  report.stamp = stamp;
+  report.startedAt = new Date().toISOString();
   const final = path.join(o.dest, `records-${stamp}`);
   const partial = `${final}.partial`;
   fs.mkdirSync(partial);
@@ -471,13 +538,27 @@ export async function runBackup(o, { source, free }) {
   fs.renameSync(partial, final);
   fsyncDir(o.dest);
   report.published = true; report.setDir = final;
-  const clean = report.findings.length === 0;
+  // A run whose only red is attachment-check-failed still prunes: that finding repeats on EVERY run until the board's
+  // references are corrected, and withholding pruning for it would fill DEST to the free-space floor. The set itself
+  // verified on every other check. Any other finding keeps every existing set.
+  const prunable = report.findings.every((f) => f.code === 'attachment-check-failed');
 
   // 7. prune
   if (o.retention) {
     report.stage = 'prune';
-    report.pruned = clean ? prune(o.dest, o.retention) : { skipped: 'this run is not ok: every existing set is kept' };
-    if (clean && report.pruned.refused.length) finding('prune-refused', null, report.pruned.refused.map((r) => `${r.name}: ${r.error}`).join('; '));
+    // this run's own set is the last clean one when it has no finding so far; otherwise the newest set a clean run published
+    const cleanNow = report.findings.length === 0;
+    const lastClean = cleanNow ? path.basename(final) : readLastClean(o.dest);
+    const lastCleanPaired = cleanNow && report.attachments?.paired ? path.basename(final) : readLastClean(o.dest, 'lastCleanPaired');
+    report.pruned = prunable ? prune(o.dest, { ...o.retention, lastClean, lastCleanPaired }) : { skipped: 'this run has a finding other than attachment-check-failed: every existing set is kept' };
+    report.keptLastClean = prunable && report.pruned.lastClean ? PUBLISHED_RE.exec(report.pruned.lastClean)[1] : null;
+    report.keptLastCleanPaired = prunable && report.pruned.lastCleanPaired ? PUBLISHED_RE.exec(report.pruned.lastCleanPaired)[1] : null;
+    if (prunable && report.pruned.refused.length) finding('prune-refused', null, report.pruned.refused.map((r) => `${r.name}: ${r.error}`).join('; '));
+    if (prunable) {
+      const damaged = keptSetsByteCheck(o.dest, report.pruned.kept.map((k) => k.name));
+      report.pruned.keptByteCheck = damaged.length ? damaged : 'every kept set matches its manifest';
+      for (const d of damaged) finding('kept-set-damaged', d.file, `${d.set}/${d.file}: ${d.why}`);
+    }
   }
   report.stage = 'done';
   report.budget.freeAfter = freeBytes(o.dest);
@@ -486,13 +567,15 @@ export async function runBackup(o, { source, free }) {
 }
 
 export async function main(argv) {
-  const refuse = (msg) => { console.error(`${USAGE}\nREFUSED: ${msg}`); console.log(JSON.stringify({ stage: 'refused', published: false, setDir: null, ok: false, error: msg })); return 2; };
   let o; let pre;
+  // a refusal writes nothing; it reports the streak as it stands (read only) when --dest can be read
+  const refuse = (msg) => { console.error(`${USAGE}\nREFUSED: ${msg}`); console.log(JSON.stringify({ stage: 'refused', published: false, setDir: null, ok: false, error: msg, ...(o?.dest ? readRedState(o.dest) : { redRuns: null, redSince: null }) })); return 2; };
   try { o = parseArgs(argv); pre = await preflight(o); } catch (e) { if (e instanceof Refusal) return refuse(e.message); throw e; }
   const lock = takeLock(o.dest);
-  if (lock.held) { console.error(`SKIPPED: ${lock.held}`); console.log(JSON.stringify({ stage: 'skipped', published: false, setDir: null, ok: false, error: lock.held })); return 7; }
+  if (lock.held) { console.error(`SKIPPED: ${lock.held}`); console.log(JSON.stringify({ stage: 'skipped', published: false, setDir: null, ok: false, error: lock.held, ...readRedState(o.dest) })); return 7; }
   try {
     const report = await runBackup(o, pre);
+    Object.assign(report, recordRun(o.dest, { ok: report.ok, at: report.startedAt, stamp: report.stamp, published: report.published, setName: report.setDir ? path.basename(report.setDir) : null, paired: report.attachments?.paired === true }));
     console.log(JSON.stringify(report));
     return report.ok ? 0 : 1;
   } finally { lock.release(); }
