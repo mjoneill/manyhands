@@ -2076,10 +2076,10 @@ async function handleSearch(req, res) {
 }
 
 // ── GET /api/graph/vocabulary — #1104: is the unknown-term guard refusing a
-// WORKING query right now? Runs vocabularyDrift over the SERVED replica (after
-// the same sync every query gets), so the number is about production, not a
-// fixture. `undeclared` non-empty means the dictionary fell behind the
-// projection and the guard is worse than no guard until someone adds the term.
+// WORKING query right now? #1645: measured on the executor's PUBLIC dataset and
+// judged against the executor gate's own set, so the number is about the store
+// graph_query reads. `undeclared` non-empty means the dictionary fell behind the
+// data and the guard is worse than no guard until someone adds the term.
 // ── POST /api/search/all — #1485: "have we said anything about X, anywhere?"
 // Cards (dense, board_search's own index), posts and decisions (BM25) in ONE
 // call, each surface ranked by itself — scores are never fused — and a
@@ -2164,12 +2164,17 @@ async function handleSearchAll(req, res) {
 
 async function handleGraphVocabulary(req, res) {
   try {
-    const { vocabularyDrift } = await loadGraphModules();
-    const { store, rebuiltMs, projectedThrough } = await warmGraphStore();
-    const drift = vocabularyDrift(store);
-    sendJSON(res, 200, { ...drift, rebuiltMs: rebuiltMs ?? null, watermark: graphWatermark(projectedThrough) });
+    // #1645 — the executor answers, or the route refuses: never the in-process copy instead
+    const executorUrl = process.env.SCRUM_GRAPH_EXECUTOR_URL;
+    if (!executorUrl) return sendJSON(res, 503, { error: 'the vocabulary is measured on the executor, and this process has no SCRUM_GRAPH_EXECUTOR_URL; not answering from the replica instead', code: 'SOURCE_UNAVAILABLE' });
+    const { vocabularyDriftFromExecutor } = await loadGraphModules();
+    // as #1643: read BEFORE the census, so it is a lower bound on what the answer reflects
+    const executorPosition = await readExecutorPosition(executorUrl);
+    const drift = await vocabularyDriftFromExecutor(executorUrl);
+    sendJSON(res, 200, { ...drift, rebuiltMs: null, executorPosition, source: 'executor' });
   } catch (e) {
     if (e.code === 'GRAPH_DEPS_MISSING') return sendJSON(res, 503, { error: e.message, code: e.code });
+    if (e.code === 'GRAPH_UNAVAILABLE' || e.code === 'ROW_CAP') return sendJSON(res, 503, { error: e.message, code: e.code });
     console.error('GET /api/graph/vocabulary:', e.message);
     sendJSON(res, 500, { error: 'Failed to measure vocabulary drift' });
   }
@@ -3438,15 +3443,17 @@ async function handleListPredicates(req, res) {
   // its hop budget (`scrum:column`) is exactly that. Filtering happens after
   // shaping, so the sample can supply what the registry does not.
   if (wantName && !(q.shapes === 'true' || q.shapes === '1')) out = out.filter((p) => p.name === wantName);
-  // #1244 — WHAT SHAPE THE OBJECT TAKES, sampled from the live store on
+  // #1244 — WHAT SHAPE THE OBJECT TAKES, sampled from the live store (#1645: the executor) on
   // request. Opt-in because it costs a graph query (~270ms over the whole
   // store); the definitions alone are the cheap common case. A seat that got
   // a clean zero from the right predicate needs this and nothing else.
   if (q.shapes === 'true' || q.shapes === '1') {
     try {
-      const { queryGraph } = await loadGraphModules();
-      const { store } = await warmGraphStore();
-      const sampled = queryGraph(store, SHAPE_QUERY, { limit: 5000 });
+      // #1645 — sampled from the executor's PUBLIC dataset, never the in-process copy
+      const executorUrl = process.env.SCRUM_GRAPH_EXECUTOR_URL;
+      if (!executorUrl) throw Object.assign(new Error('this process has no SCRUM_GRAPH_EXECUTOR_URL'), { code: 'SOURCE_UNAVAILABLE' });
+      const { queryGraphExecutor } = await loadGraphModules();
+      const sampled = await queryGraphExecutor(executorUrl, SHAPE_QUERY, { limit: 5000 });
       // A named lookup reaches the whole emitted vocabulary; an unnamed list
       // stays the curated registry, because ~190 predicates would spend a small
       // model's entire budget on a directory it did not ask for.
