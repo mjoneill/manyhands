@@ -69,6 +69,7 @@
   "tests/graph-slice-routes.test.mjs",
   "tests/graph-store-backup-1559.test.mjs",
   "tests/graph-store-backup-schedule-1566.test.mjs",
+  "tests/graph-vocabulary-route.test.mjs",
   "tests/health-readiness-1645.test.mjs",
   "tests/incarnation-1577.test.mjs",
   "tests/inline-spawners-startup-1671.test.mjs",
@@ -121,6 +122,7 @@
   "tests/tending-graph-g1.test.mjs",
   "tests/tmpstore-leak-1672.test.mjs",
   "tests/unbounded-budget-u1.test.mjs",
+  "tests/vocabulary-shapes-executor-1645.test.mjs",
   "tests/wake-graph-w1.test.mjs",
   "tests/wake-unknown-w2.test.mjs"
 ]
