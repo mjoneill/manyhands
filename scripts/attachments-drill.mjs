@@ -120,7 +120,7 @@ export async function resolveSource(source, { python = DEFAULT_PYTHON, fetchImpl
 }
 
 /** The executor stand-in capture() calls: snapshot() runs INSIDE the fence; references() reads that snapshot only. */
-function sourceExecutor(source, { scratch, python, state }) {
+export function sourceExecutor(source, { scratch, python, state }) {
   return {
     async snapshot() {
       if (source.kind === 'backup') {
