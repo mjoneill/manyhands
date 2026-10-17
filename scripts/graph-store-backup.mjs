@@ -48,7 +48,7 @@ export const MANIFEST = 'backup-manifest.json';
 
 // The verifier runs in its own process and knows nothing the backup told it except the
 // directory. It prints the observed numbers; the comparison happens in verifyBackup.
-const PY_READ = `
+export const PY_READ = `
 import json, sys, pyoxigraph as px
 s = px.Store.read_only(sys.argv[1])
 rows = list(s.query('SELECT ?id ?e ?s WHERE { GRAPH ${BK} { <urn:ex:dataset> <urn:ex:datasetId> ?id ; <urn:ex:epoch> ?e ; <urn:ex:commitSeq> ?s } }'))
