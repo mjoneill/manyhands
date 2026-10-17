@@ -29,6 +29,9 @@
  *   SC-H2 the held file REMOVED: Post works without it                                                                                passes today
  *   SC-U  a Retry IN FLIGHT: Post refused with a reason; when it lands, Post works and carries the landed file                        RED today
  *
+ *   SV-R1 / SV-R2 (wiki) and SC-R1 / SC-R2 (each composer): the reason GOES once nothing is held or uploading, because the file was removed (R1) or the Retry landed (R2)
+ *         (a reason that outlives its cause tells the person something false)
+ *
  * NOT covered, by name: the older in-flight Post race with no held file ever involved (out of scope, agreed); what the reason says beyond mentioning posting
  * (or saving), the file, and for the in-flight case that an upload is under way; Cancel (which discards by intent); more than one file in the wiki editor
  * (it takes one); a save or post request that fails.
@@ -266,6 +269,55 @@ for (const c of COMPOSERS) {
       assert.equal(ctl.posts.length, 1, 'after it landed, Post works: one post request');
       assert.equal((ctl.posts[0].attachments || []).length, 1, 'and it carries the file that landed');
       assert.equal(ctl.posts[0].attachments[0].name, NAME);
+    });
+  });
+}
+
+
+// ---- the reason must not outlive its cause (R1: the file was removed; R2: the Retry landed) ----
+const linesWith = async (page, re) => (await bodyText(page)).split('\n').filter((l) => l.includes(NAME) && re.test(l));
+const WAITY = /not saved|not posted|save|post|send|wait|upload/i;
+
+test('#1648 (SV-R1) wiki: the Save reason goes when the held file is removed', { timeout: 120000 }, async () => {
+  await onEditor(['held'], async ({ page, file }) => {
+    await pick(page, file); await settle(page, 1000); await clickSave(page); await settle(page, 600);
+    assert.ok((await linesWith(page, /save/i)).length >= 1, 'PRECONDITION: the reason is showing');
+    assert.equal(await clickByText(page, /^×$|remove/), true);
+    await settle(page, 800);
+    assert.deepEqual(await linesWith(page, WAITY), [], 'the file is gone, so is the reason about it');
+  });
+});
+
+test('#1648 (SV-R2) wiki: the Save reason goes when the Retry lands', { timeout: 120000 }, async () => {
+  await onEditor(['held', 'real'], async ({ page, file }) => {
+    await pick(page, file); await settle(page, 1000); await clickSave(page); await settle(page, 600);
+    assert.ok((await linesWith(page, /save/i)).length >= 1, 'PRECONDITION: the reason is showing');
+    assert.equal(await clickByText(page, /retry/), true);
+    await page.waitForFunction((n) => document.querySelector('.attach-grid')?.textContent.includes(n) && ![...document.querySelectorAll('.attach-grid button')].some((b) => /retry/i.test(b.textContent)), { timeout: 8000 }, NAME);
+    await settle(page, 600);
+    assert.deepEqual((await linesWith(page, WAITY)).filter((l) => l.trim() !== `${NAME}×` && l.trim() !== NAME), [], 'the file landed, so the reason that it is held or uploading is gone');
+  });
+});
+
+for (const c of COMPOSERS) {
+  test(`#1648 (SC-R1, ${c.key}) the Post reason goes when the held file is removed`, { timeout: 120000 }, async () => {
+    await onComposer(c, ['held'], async ({ page, file }) => {
+      await pickIn(page, c, file); await settle(page, 1000); await typeText(page, c.input, 'text'); await c.post(page); await settle(page, 600);
+      assert.ok((await linesWith(page, /post|send/i)).length >= 1, 'PRECONDITION: the reason is showing');
+      assert.equal(await pressIn(page, c.chips, /^×$|remove/), true);
+      await settle(page, 800);
+      assert.deepEqual(await linesWith(page, WAITY), [], 'the file is gone, so is the reason about it');
+    });
+  });
+
+  test(`#1648 (SC-R2, ${c.key}) the Post reason goes when the Retry lands`, { timeout: 120000 }, async () => {
+    await onComposer(c, ['held', 'real'], async ({ page, file }) => {
+      await pickIn(page, c, file); await settle(page, 1000); await typeText(page, c.input, 'text'); await c.post(page); await settle(page, 600);
+      assert.ok((await linesWith(page, /post|send/i)).length >= 1, 'PRECONDITION: the reason is showing');
+      assert.equal(await pressIn(page, c.chips, /retry/), true);
+      await page.waitForFunction((sel, n) => document.querySelector(sel)?.textContent.includes(n) && ![...document.querySelectorAll(`${sel} button`)].some((b) => /retry/i.test(b.textContent)), { timeout: 8000 }, c.chips, NAME);
+      await settle(page, 600);
+      assert.deepEqual((await linesWith(page, WAITY)).filter((l) => l.trim() !== `${NAME}×` && l.trim() !== NAME), [], 'the file landed, so the reason that it is held or uploading is gone');
     });
   });
 }
