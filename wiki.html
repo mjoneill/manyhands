@@ -93,6 +93,8 @@
   .attach-reason { color:var(--muted); font-family:inherit; }
   .attach-retry { background:none; border:1px solid var(--line); border-radius:6px; color:var(--ink); cursor:pointer; font:11px var(--mono); padding:1px 6px; }
   .attach-retry:hover { border-color:var(--violet); }
+  .attach-guard { font:12px var(--mono); color:var(--ink); margin:6px 0 10px; }
+  .attach-guard:empty { display:none; }
   .attach-file-input { font:12px var(--mono); color:var(--muted); }
   @media (prefers-reduced-motion:reduce) { .page-rise { animation:none; } #tree a, .btn { transition:none; } }
   /* nav appearance in core/header.css (#303-2) */
@@ -494,6 +496,22 @@
       // #222 — attachments editor: a working copy, add via upload, remove per item.
       let workingAttachments = Array.isArray(node.attachments) ? [...node.attachments] : [];
       let heldAttachments = [];   // #1648 — files a RETRYABLE refusal kept for Retry: { name, mime, data, reason }
+      let uploadingAttachments = [];   // #1648 — files whose upload has not settled yet (a first upload or a Retry)
+      // #1648 — why a Save was refused, kept on the page (not the notice toast, which hides itself) until the files settle
+      const saveGuard = el('div', 'attach-guard'); saveGuard.setAttribute('role', 'status'); let saveGuardShown = false;
+      function saveBlockedReason() {
+        const names = (xs) => xs.map((x) => x.name || 'file').join(', ');
+        const parts = [];
+        if (heldAttachments.length) parts.push(`${names(heldAttachments)} ${heldAttachments.length === 1 ? 'is' : 'are'} still waiting to upload (Retry or remove ${heldAttachments.length === 1 ? 'it' : 'them'})`);
+        if (uploadingAttachments.length) parts.push(`${names(uploadingAttachments)} ${uploadingAttachments.length === 1 ? 'is' : 'are'} still uploading`);
+        return parts.length ? `Not saved: ${parts.join('; ')}. Save again once the file has landed or been removed.` : '';
+      }
+      function refreshSaveGuard() {
+        if (!saveGuardShown) return;
+        const why = saveBlockedReason();
+        saveGuard.textContent = why;
+        if (!why) saveGuardShown = false;
+      }
       const attachRow = el('div', 'edit-row');
       const attachList = el('div', 'attach-grid');
       const fileInput = el('input', 'attach-file-input'); fileInput.type = 'file';
@@ -520,19 +538,25 @@
           rm.onclick = () => { const at = heldAttachments.indexOf(h); if (at >= 0) heldAttachments.splice(at, 1); renderAttachList(); };
           item.append(retry, rm); attachList.appendChild(item);
         });
+        refreshSaveGuard();
       }
       // #1648 — a refusal the server marks retryable (503, or any retry-after) keeps the file; any other drops it, as before.
       async function sendAttachment(item) {
+        uploadingAttachments.push(item);
         try {
           const res = await fetch('/api/attachments', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name: item.name, mime: item.mime, data: item.data }),
           });
-          if (res.ok) { workingAttachments.push(await res.json()); renderAttachList(); return; }
+          if (res.ok) { workingAttachments.push(await res.json()); return; }
           const e = await res.json().catch(() => ({}));
-          if (res.status === 503 || res.headers.get('retry-after') || e.retryable === true) { heldAttachments.push({ ...item, reason: String(e.error || res.status) }); renderAttachList(); return; }
+          if (res.status === 503 || res.headers.get('retry-after') || e.retryable === true) { heldAttachments.push({ ...item, reason: String(e.error || res.status) }); return; }
           notify('Attachment rejected: ' + (e.error || res.status));
         } catch (e) { notify('Upload failed: ' + (e && e.message ? e.message : e)); }
+        finally {
+          const at = uploadingAttachments.indexOf(item); if (at >= 0) uploadingAttachments.splice(at, 1);
+          renderAttachList();
+        }
       }
       fileInput.onchange = async () => {
         const f = fileInput.files && fileInput.files[0]; if (!f) return;
@@ -547,6 +571,8 @@
 
       const save = el('button', 'btn primary', 'Save');
       save.onclick = async () => {
+        // #1648 — a held or still-uploading file is not in workingAttachments yet; saving would re-render and lose it without a word
+        if (heldAttachments.length || uploadingAttachments.length) { saveGuardShown = true; refreshSaveGuard(); return; }
         await fetch('/api/nodes/' + encodeURIComponent(node['@id']), {
           method: 'PATCH', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ title: title.value, body: body.value, parent: parentSel.value || null, attachments: workingAttachments }),
@@ -557,7 +583,7 @@
       };
       const cancel = el('button', 'btn', 'Cancel'); cancel.onclick = () => { try { draft?.clearDraft(); draft?.stop(); draft?.unregister?.(); } catch { /* ignore */ } openNode(node['@id']); };
       const bar = el('div', 'toolbar'); bar.append(save, cancel);
-      main.append(el('div', 'meta', 'Editing'), title, parentRow, attachRow, attachList, body, bar);
+      main.append(el('div', 'meta', 'Editing'), title, parentRow, attachRow, attachList, saveGuard, body, bar);
     }
 
     /**
