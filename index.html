@@ -764,6 +764,9 @@ body::before {
 }
 .conv-attach-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
 .conv-attach-chip button { background: none; border: none; color: var(--text-secondary, #94a3b8); cursor: pointer; font-size: 1rem; line-height: 1; padding: 0 2px; }
+.conv-attach-held { border-style: dashed; }   /* #1648 — kept after a retryable refusal */
+.conv-attach-chip .conv-attach-reason { color: var(--text-secondary, #94a3b8); font-size: 0.75rem; max-width: 260px; white-space: normal; }
+.conv-attach-chip .conv-attach-retry { border: 1px solid currentColor; border-radius: 8px; font-size: 0.75rem; padding: 0 6px; }
 .btn-attach-conv {
   padding: 6px 10px; background: rgba(148, 163, 184, 0.12);
   border: 1px solid rgba(148, 163, 184, 0.3); border-radius: 6px; cursor: pointer; font-size: 1rem;
@@ -6801,6 +6804,8 @@ function closeConvsPanelBody() { stopConvsPolling(); }
 
 // #113 — attachments uploaded and awaiting send with the next post.
 let _pendingAttachments = [];
+// #1648 — files a RETRYABLE refusal (503 while a capture holds the attachment fence) kept for Retry: { name, mime, data, reason }
+let _heldAttachments = [];
 
 function fileToBase64(file) {
   return new Promise((resolve, reject) => {
@@ -6833,20 +6838,59 @@ function renderPendingAttachments() {
     chip.appendChild(rm);
     el.appendChild(chip);
   });
+  // #1648 — a held file: its name, the server's reason, and Retry, which resends the same name and bytes
+  _heldAttachments.forEach((h) => {
+    const chip = document.createElement('span');
+    chip.className = 'conv-attach-chip conv-attach-held';
+    const label = document.createElement('span');
+    label.textContent = h.name;
+    const reason = document.createElement('span');
+    reason.className = 'conv-attach-reason';
+    reason.textContent = h.reason;
+    const retry = document.createElement('button');
+    retry.type = 'button';
+    retry.className = 'conv-attach-retry';
+    retry.textContent = 'Retry';
+    retry.title = 'Upload this file again';
+    retry.addEventListener('click', async () => {
+      const at = _heldAttachments.indexOf(h); if (at < 0) return;
+      _heldAttachments.splice(at, 1); renderPendingAttachments();
+      await sendCommonsAttachment(h);
+    });
+    const rm = document.createElement('button');
+    rm.type = 'button';
+    rm.textContent = '×';
+    rm.title = 'Remove';
+    rm.addEventListener('click', () => { const at = _heldAttachments.indexOf(h); if (at >= 0) _heldAttachments.splice(at, 1); renderPendingAttachments(); });
+    chip.append(label, reason, retry, rm);
+    el.appendChild(chip);
+  });
+}
+
+// #1648 — a refusal the server marks retryable (503, or any retry-after) keeps the file; any other drops it, as before.
+function isRetryableRefusal(res, body) {
+  return res.status === 503 || !!res.headers.get('retry-after') || !!(body && body.retryable === true);
 }
 
 async function uploadCommonsFile(file) {
   if (!file) return;
+  let data;
+  try { data = await fileToBase64(file); } catch (e) { showUndoToast('Upload failed: ' + (e && e.message ? e.message : e)); return; }
+  await sendCommonsAttachment({ name: file.name || 'pasted', mime: file.type || 'application/octet-stream', data });
+}
+
+async function sendCommonsAttachment(item) {
   try {
-    const data = await fileToBase64(file);
     const res = await fetch('/api/attachments', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: file.name || 'pasted', mime: file.type || 'application/octet-stream', data }),
+      body: JSON.stringify({ name: item.name, mime: item.mime, data: item.data }),
     });
     if (!res.ok) {
-      let msg = res.status;
-      try { msg = (await res.json()).error || msg; } catch (e) { /* keep status */ }
+      let body = null;
+      try { body = await res.json(); } catch (e) { /* keep status */ }
+      const msg = (body && body.error) || res.status;
+      if (isRetryableRefusal(res, body)) { _heldAttachments.push({ ...item, reason: String(msg) }); renderPendingAttachments(); return; }
       // Non-blocking on purpose: a native alert() freezes the page for an agent
       // driving this board through a browser — every subsequent command times
       // out and Escape can't reach the dialog. On a board whose whole premise is

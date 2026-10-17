@@ -88,6 +88,11 @@
   .attach-edit-item { display:inline-flex; align-items:center; gap:7px; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:5px 7px 5px 11px; font:12px var(--mono); }
   .attach-rm { background:none; border:none; color:var(--muted); cursor:pointer; font-size:15px; line-height:1; padding:0; }
   .attach-rm:hover { color:var(--ink); }
+  /* #1648 — a file kept after a retryable refusal */
+  .attach-held { border-style:dashed; }
+  .attach-reason { color:var(--muted); font-family:inherit; }
+  .attach-retry { background:none; border:1px solid var(--line); border-radius:6px; color:var(--ink); cursor:pointer; font:11px var(--mono); padding:1px 6px; }
+  .attach-retry:hover { border-color:var(--violet); }
   .attach-file-input { font:12px var(--mono); color:var(--muted); }
   @media (prefers-reduced-motion:reduce) { .page-rise { animation:none; } #tree a, .btn { transition:none; } }
   /* nav appearance in core/header.css (#303-2) */
@@ -488,6 +493,7 @@
 
       // #222 — attachments editor: a working copy, add via upload, remove per item.
       let workingAttachments = Array.isArray(node.attachments) ? [...node.attachments] : [];
+      let heldAttachments = [];   // #1648 — files a RETRYABLE refusal kept for Retry: { name, mime, data, reason }
       const attachRow = el('div', 'edit-row');
       const attachList = el('div', 'attach-grid');
       const fileInput = el('input', 'attach-file-input'); fileInput.type = 'file';
@@ -500,17 +506,39 @@
           rm.onclick = () => { workingAttachments.splice(i, 1); renderAttachList(); };
           item.appendChild(rm); attachList.appendChild(item);
         });
+        // #1648 — a held file: its name, the server's reason, and Retry, which resends the same name and bytes
+        heldAttachments.forEach((h) => {
+          const item = el('div', 'attach-edit-item attach-held');
+          item.append(el('span', '', '⏸'), el('span', '', h.name || 'file'), el('span', 'attach-reason', h.reason));
+          const retry = el('button', 'attach-retry', 'Retry'); retry.type = 'button'; retry.title = 'Upload this file again';
+          retry.onclick = async () => {
+            const at = heldAttachments.indexOf(h); if (at < 0) return;
+            heldAttachments.splice(at, 1); renderAttachList();
+            await sendAttachment(h);
+          };
+          const rm = el('button', 'attach-rm', '×'); rm.type = 'button'; rm.title = 'Remove';
+          rm.onclick = () => { const at = heldAttachments.indexOf(h); if (at >= 0) heldAttachments.splice(at, 1); renderAttachList(); };
+          item.append(retry, rm); attachList.appendChild(item);
+        });
+      }
+      // #1648 — a refusal the server marks retryable (503, or any retry-after) keeps the file; any other drops it, as before.
+      async function sendAttachment(item) {
+        try {
+          const res = await fetch('/api/attachments', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: item.name, mime: item.mime, data: item.data }),
+          });
+          if (res.ok) { workingAttachments.push(await res.json()); renderAttachList(); return; }
+          const e = await res.json().catch(() => ({}));
+          if (res.status === 503 || res.headers.get('retry-after') || e.retryable === true) { heldAttachments.push({ ...item, reason: String(e.error || res.status) }); renderAttachList(); return; }
+          notify('Attachment rejected: ' + (e.error || res.status));
+        } catch (e) { notify('Upload failed: ' + (e && e.message ? e.message : e)); }
       }
       fileInput.onchange = async () => {
         const f = fileInput.files && fileInput.files[0]; if (!f) return;
         try {
           const data = await fileToBase64(f);
-          const res = await fetch('/api/attachments', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: f.name, mime: f.type || 'application/octet-stream', data }),
-          });
-          if (res.ok) { workingAttachments.push(await res.json()); renderAttachList(); }
-          else { const e = await res.json().catch(() => ({})); notify('Attachment rejected: ' + (e.error || res.status)); }
+          await sendAttachment({ name: f.name, mime: f.type || 'application/octet-stream', data });
         } catch (e) { notify('Upload failed: ' + (e && e.message ? e.message : e)); }
         fileInput.value = '';
       };

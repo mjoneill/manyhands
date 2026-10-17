@@ -192,6 +192,8 @@ export function mountConversationView(opts = {}) {
   let lastTs = null;
   let timer = null;
   let pending = [];   // #238 — uploaded-but-not-yet-sent attachments
+  let held = [];      // #1648 — files a RETRYABLE refusal kept for Retry: { name, mime, data, reason }
+  let attachStatusEl = null;   // #1648 — the composer's non-modal notice line (a native dialog freezes the page for an agent)
   let query = '';     // #303-6 — the search term, lower-cased; local filter until the corpus answers
   // #1010 — the corpus-wide search. The box promised "Search the commons" and
   // filtered the loaded window, so a term in 654 messages read as absent and
@@ -596,25 +598,42 @@ export function mountConversationView(opts = {}) {
     });
   }
 
-  // #238 — upload a file to /api/attachments and queue it as a pending attachment.
+  function attachNotice(msg) { if (attachStatusEl) attachStatusEl.textContent = msg || ''; }
+
+  // #1648 — a refusal the server marks retryable (503 while a capture holds the attachment fence, or any retry-after)
+  // keeps the file for Retry; any other refusal drops it with its message, as before.
+  function retryableRefusal(res, body) {
+    const ra = res.headers && typeof res.headers.get === 'function' ? res.headers.get('retry-after') : null;
+    return res.status === 503 || !!ra || !!(body && body.retryable === true);
+  }
+
+  // #238 — send one file's bytes to /api/attachments and queue the result as a pending attachment.
+  async function sendAttachment(item, chipsEl) {
+    let res;
+    try {
+      res = await f(baseUrl + '/api/attachments', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: item.name, mime: item.mime, data: item.data }),
+      });
+    } catch (e) { attachNotice('Upload failed: ' + (e && e.message ? e.message : e)); return; }
+    if (!res.ok) {
+      let body = null; try { body = await res.json(); } catch (_) { /* keep status */ }
+      const msg = (body && body.error) || res.status;
+      if (retryableRefusal(res, body)) { held.push({ ...item, reason: String(msg) }); renderPending(chipsEl); return; }
+      attachNotice('Attachment rejected: ' + msg);
+      return;
+    }
+    pending.push(await res.json());
+    attachNotice('');
+    renderPending(chipsEl);
+  }
+
+  // #238 — upload a file and queue it as a pending attachment.
   async function uploadFile(file, chipsEl) {
     if (!file) return;
-    try {
-      const data = await fileToBase64(file);
-      const res = await f(baseUrl + '/api/attachments', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: file.name || 'pasted', mime: file.type || 'application/octet-stream', data }),
-      });
-      if (!res.ok) {
-        let msg = res.status; try { msg = (await res.json()).error || msg; } catch (_) { /* keep status */ }
-        if (doc.defaultView) doc.defaultView.alert('Attachment rejected: ' + msg);
-        return;
-      }
-      pending.push(await res.json());
-      renderPending(chipsEl);
-    } catch (e) {
-      if (doc.defaultView) doc.defaultView.alert('Upload failed: ' + (e && e.message ? e.message : e));
-    }
+    let data;
+    try { data = await fileToBase64(file); } catch (e) { attachNotice('Upload failed: ' + (e && e.message ? e.message : e)); return; }
+    await sendAttachment({ name: file.name || 'pasted', mime: file.type || 'application/octet-stream', data }, chipsEl);
   }
 
   function renderPending(chipsEl) {
@@ -625,6 +644,22 @@ export function mountConversationView(opts = {}) {
       const rm = el('button', 'cv-attach-rm', '×'); rm.type = 'button'; rm.title = 'Remove';
       rm.addEventListener('click', () => { pending.splice(i, 1); renderPending(chipsEl); });
       chip.appendChild(rm);
+      chipsEl.appendChild(chip);
+    });
+    // #1648 — a held file: its name, the server's reason, and Retry, which resends the same name and bytes
+    held.forEach((h) => {
+      const chip = el('span', 'cv-attach-chip cv-attach-held');
+      chip.appendChild(el('span', '', h.name || 'file'));
+      chip.appendChild(el('span', 'cv-attach-reason', h.reason));
+      const retry = el('button', 'cv-attach-retry', 'Retry'); retry.type = 'button'; retry.title = 'Upload this file again';
+      retry.addEventListener('click', async () => {
+        const at = held.indexOf(h); if (at < 0) return;
+        held.splice(at, 1); renderPending(chipsEl);
+        await sendAttachment(h, chipsEl);
+      });
+      const rm = el('button', 'cv-attach-rm', '×'); rm.type = 'button'; rm.title = 'Remove';
+      rm.addEventListener('click', () => { const at = held.indexOf(h); if (at >= 0) held.splice(at, 1); renderPending(chipsEl); });
+      chip.append(retry, rm);
       chipsEl.appendChild(chip);
     });
   }
@@ -697,7 +732,8 @@ export function mountConversationView(opts = {}) {
     const send = el('button', 'cv-send', 'Post');
     send.type = 'submit';
     row.append(who, attachBtn, send);
-    fm.append(ta, chips, fileInput, row);
+    attachStatusEl = el('div', 'cv-attach-status'); attachStatusEl.setAttribute('role', 'status');   // #1648
+    fm.append(ta, chips, attachStatusEl, fileInput, row);
     // #1367 — grows with content, previews through the SAME chat renderer the
     // feed uses, Cmd/Ctrl+Enter posts. Mounted after append so the wrapper
     // lands inside the form; the paste/drop listeners below bind to `ta`
