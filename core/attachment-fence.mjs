@@ -21,10 +21,11 @@
  * resolution, so a pid reused inside the same second as the dead owner's start would read as the owner and stay held
  * (the safe side).
  *
- * ONE RECOVERER. Recovery runs under a second lock, `<attachmentsDir>.fence.recover`, taken the same atomic way. Inside
- * it the recoverer re-reads the record and removes the lock only if it still carries the dead owner's nonce, so two
- * recoverers can never both act, and no recoverer can remove a lock a live owner took after the dead one. A recover
- * lock whose own owner is proven gone is cleared by renaming it aside and checking the renamed record's nonce.
+ * ONE RECOVERER. Recovery runs under a second lock, the recovery guard `<attachmentsDir>.fence.recover`, taken the same
+ * atomic way. Inside it the recoverer reads the record AT THE LOCK PATH and moves the lock aside only if that record
+ * still carries the observed nonce and its owner is proven gone; it never renames first and checks after. A normal
+ * release likewise reads its own nonce at the path before it moves anything. The guard itself is NEVER reaped: a guard
+ * whose owner is gone fails the fence closed, with a retryable error naming the guard, until an operator clears it.
  *
  * COOPERATIVE: it fences writers that call it. A direct filesystem write by an operator, a script or another process is
  * not fenced (scripts/attachments-drill.mjs reports that under "not covered").
@@ -84,33 +85,69 @@ function tryTake(lock, owner) {
   } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 }
 
-/** Remove `lock` only if it still carries `nonce`. Rename aside first, so the check and the removal see the same record. */
-function removeIfNonce(lock, nonce) {
+export const FENCE_INVARIANT = 'ATTACHMENT_FENCE_INVARIANT';
+
+/**
+ * Move `lock` aside and remove it. The CALLER has already read the record AT THE LOCK PATH and decided on that
+ * record: this never decides. The re-read of the moved record is an INVARIANT check: a different record means the
+ * lock changed hands between the read and the rename, which the rules below make impossible; it is put back if it
+ * can be, and the error is thrown whatever happened, so the breach is loud and never quietly treated as "not ours".
+ */
+function moveAsideAndRemove(lock, nonce) {
   const aside = `${lock}.${process.pid}.${crypto.randomUUID()}.reaped`;
-  try { fs.renameSync(lock, aside); } catch { return false; }
+  try { fs.renameSync(lock, aside); } catch (e) { if (e.code === 'ENOENT') return false; throw e; }
   const rec = readRecord(aside);
   if (rec?.nonce === nonce) { fs.rmSync(aside, { recursive: true, force: true }); return true; }
-  // not the record we meant: put it back (the lock path is empty again unless a third party took it in this instant)
-  try { fs.renameSync(aside, lock); } catch { /* left aside: its owner's release finds nothing and its holder is told nothing */ }
-  return false;
+  let restored = false;
+  try { fs.renameSync(aside, lock); restored = true; } catch { /* reported below */ }
+  throw Object.assign(new Error(`attachment fence invariant broken: ${lock} changed between reading its owner record (nonce ${nonce}) and moving it aside `
+    + `(it held ${rec ? `${rec.owner}, nonce ${rec.nonce}` : 'no readable record'}); ${restored ? 'it was put back' : `it could NOT be put back and is at ${aside}`}. Operator action needed.`),
+  { code: FENCE_INVARIANT, lock, aside: restored ? null : aside });
 }
 
-/** One attempt at recovering a lock whose owner is proven gone. Synchronous: no other caller in this process interleaves. */
-function tryRecover(lock, staleNonce) {
-  const recover = `${lock}.recover`;
-  let mine = tryTake(recover, 'attachment fence recovery');
-  if (!mine) {
-    const r = readRecord(recover);
-    if (r && ownerState(r) === 'dead') removeIfNonce(recover, r.nonce);
-    mine = tryTake(recover, 'attachment fence recovery');
-    if (!mine) return false;
+/** A normal release: read OUR nonce at the path before touching it. A lock that is not ours is never moved. */
+function releaseLock(lock, nonce) {
+  const rec = readRecord(lock);
+  if (rec?.nonce !== nonce) {
+    throw Object.assign(new Error(`attachment fence invariant broken: on release, ${lock} does not carry this holder's record (nonce ${nonce}; found ${rec ? `${rec.owner}, nonce ${rec.nonce}` : 'none'}). It was left as it is. Operator action needed.`),
+      { code: FENCE_INVARIANT, lock });
   }
-  try {
-    const rec = readRecord(lock);
-    if (rec?.nonce !== staleNonce || ownerState(rec) !== 'dead') return false;
-    return removeIfNonce(lock, staleNonce);
-  } finally { removeIfNonce(recover, mine.nonce); }
+  return moveAsideAndRemove(lock, nonce);
 }
+
+/**
+ * Under the recovery guard: remove `lock` only if the record AT THE PATH still carries `observedNonce` AND its owner is
+ * proven gone. Anything else (another nonce, a live owner, an unreadable record) leaves it exactly as it is.
+ * Safe between the read and the rename because nothing else may remove a lock whose owner is gone except a holder of
+ * the guard, a lock that exists cannot be taken, and a dead owner cannot release.
+ */
+function reapIfDead(lock, observedNonce) {
+  const rec = readRecord(lock);
+  if (!rec || rec.nonce !== observedNonce || ownerState(rec) !== 'dead') return false;
+  return moveAsideAndRemove(lock, observedNonce);
+}
+
+/**
+ * One attempt at recovering a lock whose owner looked gone. Synchronous: no other caller in this process interleaves.
+ * The recovery guard is NEVER cleared automatically: a guard whose owner is gone means a recoverer died mid-recovery,
+ * and the fence then fails closed (the retryable busy error, naming the guard) until an operator clears it.
+ */
+function tryRecover(lock, staleNonce) {
+  const guard = `${lock}.recover`;
+  const mine = tryTake(guard, 'attachment fence recovery');
+  if (!mine) {
+    const g = readRecord(guard);
+    if (g && ownerState(g) === 'dead') {
+      throw Object.assign(new Error(`the attachment fence cannot be recovered: its recovery guard ${guard} belongs to ${g.owner} (pid ${g.pid}), which is gone. `
+        + `The guard is never cleared automatically; an operator must check that nothing is recovering and remove ${guard}`), { code: FENCE_BUSY, retryable: true, guard });
+    }
+    return false;   // another recoverer is at work, or its record cannot be read yet: wait
+  }
+  try { return reapIfDead(lock, staleNonce); } finally { releaseLock(guard, mine.nonce); }
+}
+
+/** For the race rows only: the guarded reaping step and the guard's path. Nothing in the app calls these. */
+export const _fenceInternalsForTests = Object.freeze({ reapIfDead, recoveryGuardPath: (dir) => `${fenceLockPath(dir)}.recover` });
 
 function busyError(rec, waitMs) {
   const who = rec ? `${rec.owner} (pid ${rec.pid}, since ${rec.acquiredAt})` : 'an owner whose record cannot be read';
@@ -137,5 +174,5 @@ export async function withAttachmentFence(fn, { attachmentsDir, waitMs = DEFAULT
     if (Date.now() - t0 >= wait) throw busyError(rec, wait);
     await sleep(Math.min(POLL_MS, Math.max(1, wait - (Date.now() - t0))));
   }
-  try { return await fn(); } finally { removeIfNonce(lock, held.nonce); }
+  try { return await fn(); } finally { releaseLock(lock, held.nonce); }
 }

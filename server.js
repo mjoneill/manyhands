@@ -12118,7 +12118,11 @@ async function handleCreateAttachment(req, res) {
     } catch (e) {
       if (e.code !== FENCE_BUSY) throw e;
       res.setHeader('Retry-After', String(Math.max(1, Math.ceil(ATTACHMENT_FENCE_WAIT_MS / 1000))));
-      return sendJSON(res, 503, { error: 'attachments are being captured for a backup right now; nothing was stored, retry in a moment', code: FENCE_BUSY, retryable: true });
+      // the holder is named by its owner label and pid only (the record carries nothing else a client should see)
+      const error = e.guard
+        ? 'attachment uploads are paused: a capture or its recovery stopped mid-way and the fence needs an operator; nothing was stored, retry later'
+        : `attachments are being captured for a backup right now (the fence is held by ${e.holder ? `${String(e.holder.owner).slice(0, 80)}, pid ${Number(e.holder.pid)}` : 'an owner whose record cannot be read'}); nothing was stored, retry in a moment`;
+      return sendJSON(res, 503, { error, code: FENCE_BUSY, retryable: true });
     }
     sendJSON(res, 201, { id, name, mime, size: bytes.length });
   } catch (e) {
