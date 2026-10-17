@@ -91,10 +91,13 @@ test('#1648 (B0) refusals: a missing flag, or free space below the floor, exits 
   }
   const w = world();
   try {
-    const args = w.args.map((a, i) => (w.args[i - 1] === '--min-free-bytes' ? String(10 ** 18) : a));
+    // Number.MAX_SAFE_INTEGER, NOT 10 ** 18: found by mutation (W13, the floor check removed, survived). 1e18 is not a safe integer, so the job
+    // refused it as a malformed flag, and that message ("--min-free-bytes must be an integer") matched /free/: the row passed without the floor.
+    const args = w.args.map((a, i) => (w.args[i - 1] === '--min-free-bytes' ? String(Number.MAX_SAFE_INTEGER) : a));
     const r = run(w, args);
     assert.equal(r.status, 2, `free space below the floor: exit 2 (got ${r.status})`);
-    assert.match(r.stdout + r.stderr, /free|floor|space/i, 'and it says why');
+    assert.match(r.stdout + r.stderr, /below|floor/i, 'and it says the free space is below the floor');
+    assert.doesNotMatch(r.stdout + r.stderr, /must be an integer/i, 'and it is the floor that refused, not the flag\'s format');
     assert.deepEqual(listing(w.dest), [], 'and nothing is written');
   } finally { clean(w); }
 });
