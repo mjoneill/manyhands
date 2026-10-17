@@ -10,6 +10,12 @@
  *   G3  a release removes only ITS OWN lock: if the lock was recovered and re-taken meanwhile, it stays   kills: release removes whoever holds it
  *   G4  a lock whose OWN RECORD says it is a day old is still held while its owner lives (F3b ages only mtimes)   kills: age read from the record steals
  *   G5  the DEFAULT wait is about 3 s (no env override): a held upload answers 503 in 2.5 to 5.5 s     kills: a ten-minute default
+ *   G7  a recovery leaves NOTHING beside the attachments directory: no moved-aside copy, no temp directory, no lock           kills: a reaped lock left aside
+ *   G8  a refused contender leaves nothing either: only the live holder's lock sits there                                      kills: a failed take leaving its temp directory
+ *   G9  a capture that fails at ANY step leaves its output directory EMPTY, not just without a COMPLETE marker                   kills: a failed capture leaving its outputs
+ *   G10 a capture notices the attachments directory changing under it (a file added or removed while the fence is held) and fails    kills: a moved directory not noticed
+ *   G11 the maintenance removal refuses anything that is not an attachment file name, and removes nothing outside the directory      kills: any name accepted as an id
+ *   G12 an upload that fails for a reason that is NOT a capture hold (an unwritable directory) is not answered as a retryable 503     kills: every upload error becoming a 503
  *   G6  a recovery guard whose owner is DEAD is NEVER auto-reaped: with the main lock stale too, nobody gets in and nothing is moved   RED on 798a26b
  *
  * G6 comes from the fix the builder proposed on the card (43080) after the reviewer's finding that recovery could admit two holders: recovery
@@ -179,4 +185,78 @@ test('#1648 (G6) a recovery guard whose owner is DEAD is never auto-reaped: with
   assert.deepEqual({ lock: snap(lock), guard: snap(guard) }, before, 'the stale lock and the stale guard are exactly as they were: nothing reaped, moved or rewritten');
   assert.deepEqual(fs.readdirSync(path.dirname(att.dir)).filter((n) => n.includes('.reaped')), [], 'and no moved-aside leftovers');
   fs.rmSync(guard, { recursive: true, force: true }); fs.rmSync(lock, { recursive: true, force: true });
+});
+
+const fenceLeftovers = (att) => fs.readdirSync(path.dirname(att.dir)).filter((n) => n.startsWith(`${path.basename(att.dir)}.fence`)).sort();
+
+test('#1648 (G7) a recovery leaves nothing beside the attachments directory: the dead owner\'s lock is gone, and so is every copy and temp directory made on the way', { timeout: 60000 }, async () => {
+  await need(FENCE);
+  const deadPid = Number(execFileSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' }));
+  const att = mkAttachments(); const lock = lockDir(att.dir);
+  fs.mkdirSync(lock); fs.writeFileSync(path.join(lock, 'owner.json'), JSON.stringify({ owner: 'crashed', pid: deadPid, startedAt: 'Mon Jan  1 00:00:00 2001', nonce: 'stale', acquiredAt: new Date().toISOString() }));
+  assert.deepEqual(fenceLeftovers(att), [path.basename(lock)], 'PRECONDITION: only the stale lock is there');
+  assert.equal(contend(att, { waitMs: 3000 }).outcome, 'got-in', 'the stale lock is recovered and the contender runs');
+  assert.deepEqual(fenceLeftovers(att), [], 'and afterwards nothing named for the fence is left beside the attachments directory');
+});
+
+test('#1648 (G8) a refused contender leaves nothing behind: only the live holder\'s lock is there while it holds, and nothing after', { timeout: 60000 }, async () => {
+  await need(FENCE);
+  const att = mkAttachments(); const owner = await held(att);
+  for (let i = 0; i < 3; i++) assert.equal(contend(att, { waitMs: 300 }).code, 'ATTACHMENT_FENCE_BUSY', `contender ${i + 1} is refused`);
+  assert.deepEqual(fenceLeftovers(att), [path.basename(lockDir(att.dir))], 'while the owner holds, the only fence entry is its lock: no temp directory from a take that failed');
+  owner.c.kill('SIGKILL'); await owner.exited;
+  assert.equal(contend(att, { waitMs: 3000 }).outcome, 'got-in');
+  assert.deepEqual(fenceLeftovers(att), [], 'and nothing at all once it is recovered and released');
+});
+
+// ---- G9 and G10: the capture's own failure contract ----
+function mkExecutor() { return { async snapshot() { return { id: 's' }; }, async references() { return []; } }; }
+
+test('#1648 (G9) a capture that fails at any step leaves its output directory EMPTY: nothing written, nothing half-done, and the fence is free', { timeout: 60000 }, async () => {
+  const { capture } = await need(CAPTURE); const { withAttachmentFence } = await need(FENCE);
+  for (const step of ['snapshot', 'copy', 'manifest', 'refs']) {
+    const att = mkAttachments(); const outDir = mk('outg9-1648-');
+    await assert.rejects(() => capture({ attachmentsDir: att.dir, outDir, executor: mkExecutor(), waitMs: 2000, hooks: { async before(s) { if (s === step) throw new Error(`injected at ${step}`); } } }), new RegExp(`injected at ${step}`));
+    assert.deepEqual(fs.readdirSync(outDir), [], `failing at ${step} leaves the output directory empty`);
+    assert.equal(await withAttachmentFence(async () => 'free', { attachmentsDir: att.dir, waitMs: 500, owner: 'after' }), 'free', `and the fence is free after a failure at ${step}`);
+  }
+});
+
+test('#1648 (G10) a capture notices the attachments directory changing while the fence is held (a file added, one removed, or one swapped for another) and fails, leaving nothing', { timeout: 60000 }, async () => {
+  const { capture } = await need(CAPTURE);
+  for (const [what, change] of [['a file added', (dir) => fs.writeFileSync(path.join(dir, `${crypto.randomUUID()}.png`), 'a stranger')], ['a file removed', (dir) => fs.rmSync(path.join(dir, fs.readdirSync(dir)[0]))], ['one file swapped for another (the count does not change)', (dir) => { fs.rmSync(path.join(dir, fs.readdirSync(dir)[0])); fs.writeFileSync(path.join(dir, `${crypto.randomUUID()}.png`), 'a swap'); }]]) {
+    const att = mkAttachments(); fs.writeFileSync(path.join(att.dir, `${crypto.randomUUID()}.png`), 'second'); const outDir = mk('outg10-1648-');
+    await assert.rejects(() => capture({ attachmentsDir: att.dir, outDir, executor: mkExecutor(), waitMs: 2000, hooks: { async before(s) { if (s === 'manifest') change(att.dir); } } }), /changed|moved|outside/i, `${what} during the hold fails the capture`);
+    assert.deepEqual(fs.readdirSync(outDir), [], `${what}: and nothing is left in the output directory`);
+  }
+  // CONTROL: with no change the same capture succeeds, so the failures above are the change and not the fixture
+  const ok = mkAttachments(); const out = mk('outg10c-1648-');
+  assert.equal((await capture({ attachmentsDir: ok.dir, outDir: out, executor: mkExecutor(), waitMs: 2000 })).status, 'COMPLETE');
+});
+
+test('#1648 (G11) the maintenance removal refuses anything that is not an attachment file name, removes nothing outside the directory, and still removes a real one', { timeout: 60000 }, async () => {
+  const { removeAttachment } = await need(path.join(REPO, 'core', 'attachment-maintenance.mjs'));
+  const att = mkAttachments(); const parent = path.dirname(att.dir);
+  fs.writeFileSync(path.join(parent, 'victim.txt'), 'outside the attachments directory'); fs.writeFileSync(path.join(att.dir, 'plain'), 'no extension');
+  for (const bad of ['../victim.txt', 'a/b.png', '..', '.', '', 'plain', '.hidden', 'x.png/../../victim.txt', undefined, 42]) {
+    await assert.rejects(() => removeAttachment(att.dir, bad, { waitMs: 300 }), `${JSON.stringify(bad)} is refused`);
+  }
+  assert.equal(fs.readFileSync(path.join(parent, 'victim.txt'), 'utf8'), 'outside the attachments directory', 'nothing outside the directory was removed');
+  assert.ok(fs.existsSync(path.join(att.dir, 'plain')), 'and a name without an extension was not removed');
+  const real = fs.readdirSync(att.dir).find((n) => n.endsWith('.png'));
+  await removeAttachment(att.dir, real, { waitMs: 1000 });
+  assert.ok(!fs.existsSync(path.join(att.dir, real)), 'CONTROL: a real attachment id is removed');
+});
+
+test('#1648 (G12) an upload that fails for a reason that is NOT a capture hold is not answered as a retryable 503 that blames a backup', { timeout: 60000 }, async () => {
+  const rest = await startRestServer({});
+  try {
+    fs.mkdirSync(rest.attachmentsDir, { recursive: true }); fs.chmodSync(rest.attachmentsDir, 0o555);
+    const r = await fetch(`${rest.baseUrl}/api/attachments`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'shot.png', mime: 'image/png', data: PNG_B64 }) });
+    const text = await r.text();
+    assert.ok(r.status >= 400, `PRECONDITION: the write fails (${r.status})`);
+    assert.notEqual(r.status, 503, `a disk error is not a capture hold: ${text.slice(0, 160)}`);
+    assert.equal(r.headers.get('retry-after'), null, 'and does not say to retry shortly');
+    assert.ok(!/capture|backup/i.test(text), `and does not claim a backup is running: ${text.slice(0, 160)}`);
+  } finally { try { fs.chmodSync(rest.attachmentsDir, 0o755); } catch { /* gone */ } await rest.stop(); }
 });

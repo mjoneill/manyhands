@@ -13,14 +13,13 @@
  *   F8b  it exports NOT_COVERED, an array of strings that holds the exact sentence once   (PROPOSED export: the builder may rename it; the row follows)
  *        F8b IMPORTS the module, so the drill must not run itself on import: its entry point is guarded (for example by comparing import.meta.url).
  *
- *   F8c  a real run prints it: `node scripts/attachments-drill.mjs --source-attachments <dir> --source-executor <dir> --scratch <empty dir>` prints ONE
- *        JSON object on stdout whose `notCovered` is NOT_COVERED as is, ON EVERY OUTCOME past the argument checks, a failed check included (a failure report
- *        that drops "not covered" is exactly where a reader infers coverage), and exits 0 only when `check.ok`. Run here against FIXTURE directories only.
+ *   F8c  MOVED to tests/attachments-drill-source-1648.test.mjs (S2). It ran the drill on an empty raw executor directory and expected a JSON report with a failed
+ *        check; the source rule changed (a raw directory is now an unsafe source, refused), so it is re-based there on a verified backup as the source.
  *   F8d  refusals (the command line named by the PO, 43060 and 43062): each of the three flags is required, there is no default and no env fallback; with one
  *        missing the drill exits 2, says which flag, reads nothing and creates nothing; a scratch that is not empty is refused and left untouched.
  *
- * NOT covered, by name: environment variables other than the nine names F8d offers (a fallback under a name it does not try would not be seen); a CLEAN run (a real executor store, `check.ok` true): it needs the executor-backed fixture helpers, which would put this file in the suite-watch
- * executor manifest, so it is owed as its own row once the drill exists; what `check` contains; the capture, the restore and the fence themselves (F1 to F7).
+ * NOT covered, by name: environment variables other than the nine names F8d offers (a fallback under a name it does not try would not be seen); a CLEAN run on a real executor store
+ * (tests/attachments-drill-source-1648.test.mjs, S1); what `check` contains; the capture, the restore and the fence themselves (F1 to F7, G1 to G6).
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -95,23 +94,5 @@ test('#1648 (F8d2) a scratch directory that is not empty is refused and left exa
     assert.deepEqual(listing(fx.scratch), before, 'and nothing was added to it, removed from it or changed in it');
     assert.equal(fs.readFileSync(path.join(fx.scratch, 'precious.txt'), 'utf8'), 'not the drill\'s to touch', 'the file in it is intact');
     assert.deepEqual(listing(fx.att), attBefore, 'and the source was not touched');
-  } finally { fs.rmSync(fx.root, { recursive: true, force: true }); }
-});
-
-test('#1648 (F8c) a run prints ONE JSON object whose notCovered is NOT_COVERED as is, on a failed check too, and exits 0 only when check.ok', async () => {
-  assert.ok(fs.existsSync(DRILL), 'PRECONDITION: scripts/attachments-drill.mjs exists');
-  const { NOT_COVERED } = await import(pathToFileURL(DRILL).href);
-  const fx = fixture();   // an attachments directory with one file and an EMPTY executor directory: a source the check cannot pass on
-  try {
-    const r = drill(fx, FLAGS);
-    assert.equal(r.signal, null, `it finished (no timeout): ${r.stderr.slice(0, 200)}`);
-    const text = r.stdout.trim();
-    let json; try { json = JSON.parse(text); } catch (e) { assert.fail(`stdout is exactly one JSON object (a failed check must still print it): ${e.message}; got ${JSON.stringify(text.slice(0, 200))}`); }
-    assert.ok(json && typeof json === 'object' && !Array.isArray(json), 'an object');
-    assert.deepEqual(json.notCovered, NOT_COVERED, 'notCovered is NOT_COVERED as is');
-    assert.equal(json.notCovered.filter((x) => x === SENTENCE).length, 1, 'with the out-of-band-writer sentence exactly once');
-    assert.ok(json.check && typeof json.check === 'object', 'and the checker\'s result rides along as `check`');
-    assert.equal(r.status === 0, json.check.ok === true, `exit 0 exactly when check.ok (exit ${r.status}, check.ok ${json.check.ok})`);
-    assert.notEqual(json.check.ok, true, 'CONTROL: this fixture has no real executor store, so the check must not pass; otherwise the exit rule above proved nothing');
   } finally { fs.rmSync(fx.root, { recursive: true, force: true }); }
 });
