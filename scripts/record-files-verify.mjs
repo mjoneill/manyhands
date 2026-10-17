@@ -45,11 +45,15 @@ export function sha256File(p) {
   return h.digest('hex');
 }
 
-/** Every entry under dir, relative names, symlinks reported as such and never followed. */
-function walk(dir, { skip = () => false } = {}) {
+/**
+ * Every entry under dir, relative names, symlinks reported as such and never followed. A directory that cannot be read
+ * (the root itself included) is reported through onError and never silently skipped: an inventory with a hole in it
+ * is not an inventory.
+ */
+function walk(dir, { skip = () => false, onError = () => {} } = {}) {
   const out = [];
   const go = (abs, rel) => {
-    let ents; try { ents = fs.readdirSync(abs, { withFileTypes: true }); } catch { return; }
+    let ents; try { ents = fs.readdirSync(abs, { withFileTypes: true }); } catch (e) { onError(abs, e); return; }
     for (const e of ents) {
       const a = path.join(abs, e.name); const r = rel ? `${rel}/${e.name}` : e.name;
       if (e.isSymbolicLink()) { out.push({ abs: a, rel: r, kind: 'symlink' }); continue; }
@@ -126,7 +130,7 @@ export function verifySet({ set, liveRoots = [], liveFiles = [], python = null, 
 
   // complete
   n0 = failures.length;
-  const tree = walk(dir);
+  const tree = walk(dir, { onError: (a, e) => failed('complete', path.relative(dir, a) || path.basename(dir), `cannot be read (${e.code || e.message})`) });
   for (const e of tree) {
     if (e.kind === 'dir') continue;
     if (e.rel === SET_MANIFEST) continue;
@@ -139,9 +143,23 @@ export function verifySet({ set, liveRoots = [], liveFiles = [], python = null, 
   n0 = failures.length;
   const tiers = real(path.dirname(dir));
   const live = new Map();
-  const addLive = (p) => { try { const st = fs.lstatSync(p); if (st.isFile()) live.set(`${st.dev}:${st.ino}`, p); } catch { /* gone */ } };
-  for (const r of liveRoots) for (const e of walk(path.resolve(r), { skip: (a) => real(a) === tiers || real(a) === real(dir) })) if (e.kind === 'file') addLive(e.abs);
-  for (const p of liveFiles) addLive(p);
+  // A file that vanished between the listing and its stat is a live tree moving (ENOENT, ignored); any other stat error
+  // is a hole in the inventory and fails, named.
+  const addLive = (p, root) => {
+    try { const st = fs.lstatSync(p); if (st.isFile()) live.set(`${st.dev}:${st.ino}`, p); }
+    catch (e) { if (e.code !== 'ENOENT') failed('live-inode', root, `live file ${p} cannot be examined (${e.code || e.message}): the live inventory is incomplete`); }
+  };
+  for (const r of liveRoots) {
+    const root = path.resolve(r);
+    let st;
+    try { st = fs.statSync(root); } catch (e) { failed('live-inode', root, `live root ${root} is ${e.code === 'ENOENT' ? 'missing' : `unreadable (${e.code || e.message})`}: no inode can be compared against it`); continue; }
+    if (st.isFile()) { addLive(root, root); continue; }
+    if (!st.isDirectory()) { failed('live-inode', root, `live root ${root} is neither a directory nor a file`); continue; }
+    const entries = walk(root, { skip: (a) => real(a) === tiers || real(a) === real(dir),
+      onError: (a, e) => failed('live-inode', root, `live root ${root}: ${a} cannot be read (${e.code || e.message}): the live inventory is incomplete`) });
+    for (const e of entries) if (e.kind === 'file') addLive(e.abs, root);
+  }
+  for (const p of liveFiles) addLive(p, p);
   for (const [name, st] of stats) {
     const hit = live.get(`${st.dev}:${st.ino}`);
     if (hit) failed('live-inode', name, `shares an inode with the live file ${hit}`);
