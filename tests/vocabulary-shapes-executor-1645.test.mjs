@@ -23,6 +23,10 @@
  *       It needs #1645 slice 1 underneath: before slice 1, /api/health ITSELF kicks the replica build, so the probe would build what it counts
  *       (measured on a scratch implementation: red without slice 1's kick removal, green with it)
  *   V6  the PUBLIC dataset only: a predicate planted ONLY in the bookkeeping graph is in neither answer (CONTROL: the planted triple is there)
+ *   V7  NO BOARD DOCUMENT: after boot, the vocabulary route and named and unnamed shapes lookups make ZERO board-document attempts, every attempt
+ *       recorded (43340; the half of the 43287 pin that V5 had left out)
+ *   V8  the unnamed shapes list still RETURNS the registry, read from the executor: a definition registered with the small-kinds unit on is
+ *       in the list with its text, and the call makes zero board-document attempts (43343: [] must not pass by dropping the registry)
  *
  * NOT covered, by name: the unnamed /api/predicates list (the registry): this fixture has no predicate definitions, so that row waits on a
  * collections-bearing fixture; the 5000-row SHAPE_QUERY cap (this fixture is far under it, on purpose, 43289); the terms of kinds not in the
@@ -136,4 +140,53 @@ test('#1645 (V6) the PUBLIC dataset only: a predicate planted only in the bookke
     assert.ok(!JSON.stringify(v).includes(planted), 'the vocabulary does not count it');
     assert.deepEqual((await get(w, `/api/predicates?name=${encodeURIComponent(planted)}&shapes=1`)).j, [], 'and the shapes route does not see it');
   });
+});
+
+test('#1645 (V7) NO BOARD DOCUMENT: after boot, the vocabulary route and named and unnamed shapes lookups make ZERO attempts on the board document', { skip: SKIP, timeout: 240000 }, async () => {
+  // the half of the pin promised at 43287 and missing from V5 (the code reviewer's finding at ca25209, 43340: two document attempts on the
+  // shapes route). Every attempt is recorded (tests/helpers/fs-store-recorder.mjs, SCRUM_FS_RECORD_ALL=1), so a caught read still counts.
+  const os = await import('node:os');
+  const recDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v7rec-')); const rec = path.join(recDir, 'opened.txt'); fs.writeFileSync(rec, '');
+  const RECORDER = path.join(HERE, 'helpers', 'fs-store-recorder.mjs');
+  // the small-kinds unit ON, as prod runs it: predicate definitions are a collection family, held in the executor when that unit is on (43342)
+  const w = await wholeBoardWorld({ env: { SCRUM_GRAPH_UNIT_SMALLKINDS: '1', SCRUM_FS_RECORD: rec, SCRUM_FS_RECORD_ALL: '1', NODE_OPTIONS: `--import ${RECORDER}` } });
+  try {
+    await new Promise((r) => setTimeout(r, 1500));   // boot's own reads settle; the window opens BEFORE the first probe
+    const board = [w.boardFile, fs.realpathSync(w.boardFile)];
+    const attempts = () => fs.readFileSync(rec, 'utf8').split('\n').filter((l) => board.includes(l.trim())).length;
+    assert.ok(fs.readFileSync(rec, 'utf8').split('\n').filter(Boolean).length > 0, 'CONTROL: the recorder is live in this process');
+    const before = attempts();
+    assert.equal((await get(w, '/api/graph/vocabulary')).status, 200, 'the vocabulary route answered');
+    assert.equal((await get(w, '/api/predicates?name=schema%3Aname&shapes=1')).status, 200, 'a named shapes lookup answered');
+    assert.equal((await get(w, '/api/predicates?shapes=1')).status, 200, 'the unnamed shapes list answered');
+    const during = attempts() - before;
+    assert.equal(during, 0, `the three calls made ${during} attempt(s) on the board document (counted per attempt, caught errors included)`);
+  } finally { await w.stop(); fs.rmSync(recDir, { recursive: true, force: true }); }
+});
+
+test('#1645 (V8) the unnamed shapes list still RETURNS the registry from the executor, with zero board-document attempts', { skip: SKIP, timeout: 240000 }, async () => {
+  // the code reviewer's point (43343): with no definitions in the fixture, a route that returns [] passes V7 by dropping the registry. So a
+  // definition is registered through REST with the small-kinds unit on (it is then held in the executor), and the list must return it.
+  const os = await import('node:os');
+  const recDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8rec-')); const rec = path.join(recDir, 'opened.txt'); fs.writeFileSync(rec, '');
+  const RECORDER = path.join(HERE, 'helpers', 'fs-store-recorder.mjs');
+  const w = await wholeBoardWorld({ env: { SCRUM_GRAPH_UNIT_SMALLKINDS: '1', SCRUM_FS_RECORD: rec, SCRUM_FS_RECORD_ALL: '1', NODE_OPTIONS: `--import ${RECORDER}` } });
+  try {
+    const NAME = 'scrum:plantedForV8'; const DEF = 'a predicate registered by the #1645 V8 row, to prove the registry is read from the executor';
+    const reg = await fetch(`${w.rest.baseUrl}/api/predicates`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: NAME, definition: DEF, by: 'ada' }) });
+    assert.ok(reg.status === 200 || reg.status === 201, `PRECONDITION: the definition registers (${reg.status} ${(await reg.text()).slice(0, 200)})`);
+    const held = await askExec(w, `ASK { ?d a ${iri('scrum:PredicateDefinition')} . ?d ?p ?n FILTER(STR(?n) = ${JSON.stringify(NAME)}) }`);
+    assert.equal(held, true, 'CONTROL: the definition is held in the executor\'s public dataset');
+    await new Promise((r) => setTimeout(r, 1500));
+    const board = [w.boardFile, fs.realpathSync(w.boardFile)];
+    const attempts = () => fs.readFileSync(rec, 'utf8').split('\n').filter((l) => board.includes(l.trim())).length;
+    const before = attempts();
+    const { status, j } = await get(w, '/api/predicates?shapes=1');
+    const during = attempts() - before;
+    assert.equal(status, 200, 'the unnamed list answered');
+    const mine = (Array.isArray(j) ? j : []).find((p) => p.name === NAME);
+    assert.ok(mine, `the list includes the definition held in the executor (names: ${JSON.stringify((Array.isArray(j) ? j : []).map((p) => p.name)).slice(0, 300)})`);
+    assert.equal(mine.definition, DEF, 'with its definition text');
+    assert.equal(during, 0, `and the call made ${during} attempt(s) on the board document`);
+  } finally { await w.stop(); fs.rmSync(recDir, { recursive: true, force: true }); }
 });
