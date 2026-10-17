@@ -99,6 +99,8 @@
   "tests/procedure-version-order-1624.test.mjs",
   "tests/ready-executor-1644-snapshot.test.mjs",
   "tests/ready-executor-1644.test.mjs",
+  "tests/record-files-gaps-1648.test.mjs",
+  "tests/record-files-restore-1648.test.mjs",
   "tests/references-guard-graph-r2.test.mjs",
   "tests/replay-lane-rollback-1561.test.mjs",
   "tests/replay-pull-logborn-1571.test.mjs",
