@@ -2,7 +2,7 @@
 /**
  * #1648 — RESTORE A RECORD-FILES SET INTO AN INDEPENDENT, WRITABLE COPY.
  *
- *   node scripts/record-files-restore.mjs --set DIR --to EMPTY_DIR [--python PY]
+ *   node scripts/record-files-restore.mjs --set DIR --to EMPTY_DIR [--python PY] [--port N]
  *
  * --set and --to are required: no default, no environment fallback. Every REFUSAL exits 2 and writes nothing: a missing
  * flag; a --to that is not an existing EMPTY directory (left exactly as it is); a set that is not published (its name is
@@ -24,9 +24,12 @@
  * restore is the independent copy an executor runs on.
  *
  * ONE JSON object on stdout: { ok, set, to, files:[{name, role, bytes, sha256}], layout:{executorStore, attachments,
- * eventLog, workStore, config}, snapshotEpoch, notRestored, failures, next }. `next` is the one-line executor start command
- * on layout.executorStore with --promote-epoch, and says that the promoted store refuses a write that does not carry its
- * NEW epoch (x-epoch, read back with Q_POSITION); this command never starts an executor. Exit 0 exactly when ok, 1 when the
+ * eventLog, workStore, config}, snapshotEpoch, notRestored, failures, next, nextTemplate, nextNote, notCovered }. With
+ * --port N (an integer 1024-65535; anything else is a refusal), `next` is the executor start command on
+ * layout.executorStore with --promote-epoch, runnable VERBATIM (no placeholder, no comment). Without --port, `next` is null
+ * and nextTemplate holds the PORT-placeholder form, which is never presented as a command (notCovered says to pass
+ * --port). nextNote says that the promoted store refuses a write that does not carry its
+ * NEW epoch (x-epoch, read back with Q_POSITION). This command never starts an executor. Exit 0 exactly when ok, 1 when the
  * copy or its checks failed, 2 on a refusal.
  */
 import fs from 'node:fs';
@@ -37,7 +40,7 @@ import { verifySet, SET_MANIFEST, PUBLISHED_RE } from './record-files-verify.mjs
 import { MANIFEST as BACKUP_MANIFEST } from './graph-store-backup.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const USAGE = 'usage: node scripts/record-files-restore.mjs --set DIR --to EMPTY_DIR [--python PY]';
+const USAGE = 'usage: node scripts/record-files-restore.mjs --set DIR --to EMPTY_DIR [--python PY] [--port N]';
 export const LAYOUT = Object.freeze({ executorStore: 'executor-store', attachments: 'attachments', eventLog: 'board-data-events', workStore: 'work-store', config: 'config' });
 
 class Refusal extends Error {}
@@ -129,7 +132,7 @@ export function plan({ set, to, python = null }) {
   return { dir, target, backupRoot, copies, notRestored, datasetId, epoch, hasSnapshot: Boolean(snapshotDir) };
 }
 
-export function restore(p, { python = null } = {}) {
+export function restore(p, { python = null, port = null } = {}) {
   const layout = Object.fromEntries(Object.entries(LAYOUT).map(([k, rel]) => [k, path.join(p.target, rel)]));
   for (const d of Object.values(layout)) fs.mkdirSync(d, { recursive: true, mode: 0o755 });
   const files = []; const failures = [];
@@ -153,12 +156,20 @@ export function restore(p, { python = null } = {}) {
     if (hit) failures.push({ file: r.name, why: `shares an inode with ${hit} in the backup root` });
     if (!(st.mode & 0o200)) failures.push({ file: r.name, why: 'not writable' });
   }
-  const py = python || 'PYTHON';
-  const next = p.hasSnapshot
-    ? `${q(py)} ${q(path.join(ROOT, 'graph-executor', 'executor.py'))} --store ${q(layout.executorStore)} --dataset-id ${q(p.datasetId ?? 'DATASET_ID')} --port PORT --promote-epoch`
-      + `   # promotion moves the epoch past the snapshot's ${p.epoch ?? '?'}: read the new one back (Q_POSITION, core/logborn-unit.mjs) and send it as x-epoch on every write; a write without it is refused "reconcile required"`
-    : null;
-  return { ok: failures.length === 0, set: p.dir, to: p.target, files, layout, snapshotEpoch: p.epoch, notRestored: p.notRestored, failures, next };
+  // `next` is runnable VERBATIM (sh -c 'exec …', or split to argv): one command, no placeholder, no comment, no `&&`. It
+  // exists only with --port; without it `next` is null and nextTemplate is the PORT-placeholder form, which is never a
+  // command. A snapshot is only restored with --python (plan refuses otherwise), so the interpreter is always known.
+  let next = null; let nextTemplate = null; let nextNote = null; const notCovered = [];
+  if (p.hasSnapshot) {
+    const cmd = (portArg) => `${q(python)} ${q(path.join(ROOT, 'graph-executor', 'executor.py'))} --store ${q(layout.executorStore)} --dataset-id ${q(p.datasetId ?? 'DATASET_ID')} --port ${portArg} --promote-epoch`;
+    nextTemplate = cmd('PORT');
+    if (port && p.datasetId) next = cmd(port);
+    else notCovered.push(p.datasetId
+      ? 'next: no --port was given, so there is no runnable start line; nextTemplate holds PORT and is not a command: pass --port N for a runnable next'
+      : 'next: the snapshot\'s datasetId could not be read from its backup-manifest.json, so there is no runnable start line');
+    nextNote = `promotion moves the epoch past the snapshot's ${p.epoch ?? '?'}: read the new one back (Q_POSITION, core/logborn-unit.mjs) and send it as x-epoch on every write; a write without it is refused "reconcile required"`;
+  }
+  return { ok: failures.length === 0, set: p.dir, to: p.target, files, layout, snapshotEpoch: p.epoch, notRestored: p.notRestored, failures, next, nextTemplate, nextNote, notCovered };
 }
 
 function flag(argv, name) {
@@ -167,15 +178,21 @@ function flag(argv, name) {
 }
 
 export function main(argv) {
-  const known = new Set(['--set', '--to', '--python']);
+  const known = new Set(['--set', '--to', '--python', '--port']);
   const refuse = (msg) => { console.error(`${USAGE}\nREFUSED: ${msg}`); console.log(JSON.stringify({ ok: false, refused: true, error: msg })); return 2; };
   for (let i = 0; i < argv.length; i += 2) if (!known.has(argv[i])) return refuse(`unknown argument: ${argv[i]}`);
   const missing = ['--set', '--to'].filter((f) => !flag(argv, f));
   if (missing.length) return refuse(`missing required flag${missing.length > 1 ? 's' : ''}: ${missing.join(', ')} (no default, no environment fallback)`);
   const python = flag(argv, '--python');
+  let port = null;
+  if (argv.includes('--port')) {
+    const v = flag(argv, '--port');
+    if (!v || !/^\d+$/.test(v) || Number(v) < 1024 || Number(v) > 65535) return refuse(`--port must be an integer from 1024 to 65535 (got ${JSON.stringify(v)})`);
+    port = Number(v);
+  }
   let p;
   try { p = plan({ set: flag(argv, '--set'), to: flag(argv, '--to'), python }); } catch (e) { if (e instanceof Refusal) return refuse(e.message); throw e; }
-  const r = restore(p, { python });
+  const r = restore(p, { python, port });
   for (const f of r.failures) console.error(`RESTORE FAILED: ${f.file}: ${f.why}`);
   console.log(JSON.stringify(r));
   return r.ok ? 0 : 1;
