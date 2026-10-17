@@ -258,7 +258,12 @@ test('#1648 (B10) the verifier on its own: a flipped byte and a link to a live f
     const v1 = verify(); assert.notEqual(v1.status, 0, 'a flipped byte fails'); assert.ok((v1.stdout + v1.stderr).includes('events-2026-10-16.jsonl'), 'by name');
     b[5] ^= 1; fs.chmodSync(flip, 0o644); fs.writeFileSync(flip, b); fs.chmodSync(flip, 0o444);
     assert.equal(verify().status, 0, 'restored, it verifies again');
-    const swapped = setFile(r.rep, 'roster.json'); fs.chmodSync(r.rep.setDir, 0o755); fs.rmSync(swapped); fs.linkSync(w.cfgA, swapped);   // same bytes, but a live inode
+    // same bytes AND read-only (the live file is made 0444 before it is linked, so the link shares that mode), but a live inode: ONLY the
+    // live-inode rule can catch this one (the builder's note, 43195: with a writable live file the read-only check caught it too)
+    const swapped = setFile(r.rep, 'roster.json'); fs.chmodSync(r.rep.setDir, 0o755); fs.rmSync(swapped);
+    fs.chmodSync(w.cfgA, 0o444); fs.linkSync(w.cfgA, swapped);
+    assert.equal(fs.statSync(swapped).mode & 0o222, 0, 'PRECONDITION: the swapped-in file is read-only, as a published file is');
+    assert.equal(sha(swapped), byName(r.rep, 'roster.json').sha256, 'PRECONDITION: and holds the recorded bytes');
     const v2 = verify(); assert.notEqual(v2.status, 0, 'a file that is a hard link to a live file fails, even with the right bytes'); assert.ok((v2.stdout + v2.stderr).includes('roster.json'), 'by name');
   } finally { clean(w); }
 });
