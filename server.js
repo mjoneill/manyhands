@@ -3432,7 +3432,17 @@ async function handleRegisterPredicate(req, res) {
 
 async function handleListPredicates(req, res) {
   const q = parseQuery(req.url);
-  let out = predicatesOf(readBoard())
+  // #1645 2a — with the collections unit holding predicates, the definitions are the executor's: the board document
+  // is never opened for this route (a cold start must answer it with board-data.json unavailable).
+  let defs;
+  if (COLLECTIONS && COLLECTIONS.keys.includes('predicates')) {
+    try { await COLLECTIONS.ensureFresh(); defs = predicatesOf(COLLECTIONS.snapshot()); } catch (e) {
+      return sendJSON(res, 503, { error: `predicate definitions are unavailable: ${e.message}`, code: 'SOURCE_UNAVAILABLE' });
+    }
+  } else {
+    defs = predicatesOf(readBoard());
+  }
+  let out = defs
     .filter((e) => e['@type'] === 'scrum:PredicateDefinition')
     .map(predicateToWire);
   // An unknown name returns an EMPTY LIST, never an error: "unregistered" is
