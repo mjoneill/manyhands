@@ -74,10 +74,13 @@ const closed = (o, allowed, what) => { for (const k of Object.keys(o)) if (!allo
 function canonAttachment(a, what) {
   if (!isObj(a)) throw new TypeError(`${what} must be an object`);
   closed(a, ['id', 'mime', 'name', 'size'], what);
-  if (!isStr(a.id)) throw new TypeError(`${what}.id is required`);
-  const mime = a.mime == null ? null : (isStr(a.mime) ? a.mime : (() => { throw new TypeError(`${what}.mime must be a string or null`); })());
-  const name = a.name == null ? null : (isStr(a.name) ? a.name : (() => { throw new TypeError(`${what}.name must be a string or null`); })());
-  const size = a.size == null ? null : (Number.isSafeInteger(a.size) && a.size >= 0 ? a.size : (() => { throw new TypeError(`${what}.size must be a non-negative safe integer or null`); })());
+  // the same members post.write requires: all four present, strings well-formed, size a non-negative safe integer
+  // (no null member is accepted, so nothing reserved here can be refused when it is later published)
+  if (!isStr(a.id)) throw new TypeError(`${what}.id must be a well-formed string`);
+  if (!isStr(a.mime)) throw new TypeError(`${what}.mime must be a well-formed string`);
+  if (!isStr(a.name)) throw new TypeError(`${what}.name must be a well-formed string`);
+  if (!Number.isSafeInteger(a.size) || a.size < 0) throw new TypeError(`${what}.size must be a non-negative safe integer`);
+  const { mime, name, size } = a;
   return { id: a.id, mime, name, size };
 }
 
