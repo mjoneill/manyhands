@@ -7445,9 +7445,14 @@ async function evaluateChecks() {
       const t0 = performance.now();
       const priced = (row) => { const ms = Math.round(performance.now() - t0); return { ...row, ms, ...(ms > CHECK_CEILING_MS ? { slow: true } : {}) }; };   // #1404
       try {
-        // #1643 — on the executor pass: the meter that measures the old copy builds it (only it), and role-expiry's
-        // declarations come from liveSeatDecls() (the log-born reader when that unit is on), fetched once, here.
-        if (onExecutor && c.measuresReplica) ({ store } = await warmGraphStore());
+        // #1643 — on the executor pass, role-expiry's declarations come from liveSeatDecls() (the log-born reader when
+        // that unit is on), fetched once, here.
+        // #1645 2d — on the executor pass the meter that measures the old copy is NOT RUN: running it would mean building
+        // the copy it measures, and the copy is being retired. It answers `disabled` with the reason, never an error and
+        // never an empty "nothing crossed" (#792). Always, not "only when no copy exists": an answer that depended on which
+        // route happened to build the copy first would differ between two identical boards. The hourly meter log line
+        // still records the copy's readings whenever one exists.
+        if (onExecutor && c.measuresReplica) return { id: c.id, claim: c.claim, disabled: true, reason: REPLICA_NOT_MEASURED };
         if (onExecutor && c.id === 'role-expiry' && seatDecls === undefined) seatDecls = (await liveSeatDecls()).decls;
         // #1381 — a check may READ A FILE instead of the replica (`run`); same
         // shape out, same digest line, same "an error is not an empty result".
@@ -10831,6 +10836,7 @@ let READ_GATE = null;
 let LOGBORN_FEED_READER = null;
 const POSTS_BULK_READ_TIMEOUT_MS = 10000;
 const DOC_POST_CHECK_DISABLED = 'disabled under the graph conversations unit (#1574): it reads document posts and would misread a seat that posts only to the graph';
+const REPLICA_NOT_MEASURED = 'not measured on the executor pass (#1645 2d): it measures the in-process copy, which checks no longer build or read';
 
 function decidePublish(data, obligationId) {
   const { origins, entries } = outboxOf(data);

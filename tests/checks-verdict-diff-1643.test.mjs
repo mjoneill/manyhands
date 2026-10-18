@@ -15,7 +15,12 @@
  *
  *   V0 CONTROL      two REST processes with the flag UNSET agree on the whole normalised list; the list carries every verdict kind (holds, stale, error) and a non-empty standing row; so the diff is not noise and the fixture can fail
  *   V1 SOURCES      the flag-unset payload says `source: "replica"`; the flag-on payload says `source: "executor"` and states the executor's currency as `executorPosition` (present, not null)
- *   V2 VERDICT DIFF flag-on vs flag-unset, FULL normalised lists: the ONLY difference is the named one (the executor-only probe: stale on the replica, holds on the executor); every other check, standing check and counter is equal
+ *   V2 VERDICT DIFF flag-on vs flag-unset, FULL normalised lists: the ONLY differences are the NAMED ones; every other check, standing check and counter is equal. The named list:
+ *                   (1) the executor-only probe: stale on the replica, holds on the executor (the proof the flag moved the reads);
+ *                   (2) the standing check graph-store-meter (added 2026-10-18 for #1645 2d): flag-unset it measures the in-process copy as before (rows, not disabled);
+ *                       flag-on it reports `disabled: true` with a reason that names #1645, and carries neither an error nor rows, because on the executor pass nothing
+ *                       builds the copy for it to measure. Both sides of (2) are ASSERTED, not just excluded, so a meter that errors, or answers rows: [] ("nothing crossed")
+ *                       for a copy that does not exist, is red here.
  *   V3 HAZARDS      on the executor leg the wildcard ASK holds; the cast compare holds; the uncast compare is an error (status only; the engines word their errors differently); the phantom-block standing check returns its row
  *   V4 COST         every per-card check row and every standing row on the executor leg carries an integer `ms` >= 0 (network plus engine, "reported", not bounded: the one-minute-tick bound is a load figure, see NOT covered)
  *   V5 FAILURE      with the flag on and the executor unable to answer queries, the endpoint never reports a verdict it did not read: not 200 with any holds/stale, and no standing check with empty rows and no error
@@ -126,6 +131,8 @@ function norm(payload) {
 }
 const flat = (n) => Object.fromEntries(n.byCard.flatMap((c) => c.checks).map((c) => [c.claim, c]));
 const withoutProbe = (n) => ({ ...n, byCard: n.byCard.map((c) => ({ ...c, checks: c.checks.filter((r) => r.claim !== PROBE_CLAIM) })), counters: {} });
+const METER = 'graph-store-meter';   // V2's second named difference (#1645 2d)
+const withoutNamed = (n) => ({ ...withoutProbe(n), standing: n.standing.filter((s) => s.id !== METER) });
 
 test('V0 CONTROL: two flag-unset REST processes agree on the whole normalised list, and the list holds every verdict kind and a non-empty standing row', { skip: SKIP, timeout: 900000 }, async () => {
   await world(async ({ A, start }) => {
@@ -149,14 +156,17 @@ test('V1 SOURCES: the flag-unset payload names the replica; the flag-on payload 
   });
 });
 
-test('V2 VERDICT DIFF: flag-on vs flag-unset, the FULL normalised lists are equal except the one named difference (the executor-only probe)', { skip: SKIP, timeout: 900000 }, async () => {
+test('V2 VERDICT DIFF: flag-on vs flag-unset, the FULL normalised lists are equal except the named differences (the executor-only probe; the graph-store meter, #1645 2d)', { skip: SKIP, timeout: 900000 }, async () => {
   await world(async ({ A, start }) => {
     const B = await start({ SCRUM_GRAPH_CHECKS_SOURCE: 'executor' }); const [a, b] = [await get(A), await get(B)];
     assert.equal(a.status, 200); assert.equal(b.status, 200, b.text.slice(0, 300));
     assert.equal(a.body.source, 'replica', 'REFUSED to compare: the replica leg does not say replica'); assert.equal(b.body.source, 'executor', 'REFUSED to compare: the executor leg does not say executor');
     const [na, nb] = [norm(a.body), norm(b.body)];
     assert.equal(flat(na)[PROBE_CLAIM]?.status, 'stale', 'the named difference, replica side: stale'); assert.equal(flat(nb)[PROBE_CLAIM]?.status, 'holds', 'the named difference, executor side: holds (only the executor has the fact)');
-    assert.deepEqual(withoutProbe(nb), withoutProbe(na), 'EVERY other verdict, standing check and counter is equal (the named list has one entry, and it is not this)');
+    const [ma, mb] = [na.standing.find((s) => s.id === METER), nb.standing.find((s) => s.id === METER)];
+    assert.ok(ma && Array.isArray(ma.rows) && !ma.disabled && !ma.error, `the second named difference, flag-unset side: the meter measures the in-process copy as before (${JSON.stringify(ma)})`);
+    assert.ok(mb && mb.disabled === true && typeof mb.reason === 'string' && /#1645/.test(mb.reason) && !mb.error && !('rows' in mb), `the second named difference, flag-on side: disabled with a reason naming #1645, no error and no rows (${JSON.stringify(mb)})`);
+    assert.deepEqual(withoutNamed(nb), withoutNamed(na), 'EVERY other verdict, standing check and counter is equal (the named list has two entries, and this is neither)');
     assert.equal(nb.counters.stale, na.counters.stale - 1, 'the one named difference is the only thing that moved the stale count'); assert.equal(nb.counters.errors, na.counters.errors);
   });
 });
