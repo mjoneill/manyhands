@@ -2,7 +2,7 @@
   "about": "Fields the product compares with the clock, for the #1696 scan (scripts/scan-fixed-dates-1696.mjs --fields). A fixed date that reaches one of these fields in a test that also reaches a real server or process is flagged. Fields NOT on this list are uncovered, not safe. Each entry cites the line that compares it with the clock; a test checks that the line still names the field beside a clock expression, which does not verify what the comparison means.",
   "fields": [
     { "name": "expiresAt", "source": "core/credentials.mjs:138", "why": "A credential whose expiresAt is at or before now is refused as expired, and one inside the expiry window is reported as expiring." },
-    { "name": "parkedUntil", "source": "core/ready-query.mjs:349", "why": "A card is parked, and left out of the ready queue, while parkedUntil is later than now." },
+    { "name": "parkedUntil", "source": "core/ready-query.mjs:353", "why": "A card is parked, and left out of the ready queue, while parkedUntil is later than now." },
     { "name": "claimedAt", "source": "core/stale-claims.mjs:82", "why": "A claim older than the stale limit (hours since claimedAt) is flagged stale; core/in-flight.mjs:65 windows the same field." },
     { "name": "quietUntil", "source": "core/stale-claims.mjs:109", "why": "A stale claim whose holder said when they would be back is skipped while now is before quietUntil." }
   ]
