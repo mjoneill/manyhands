@@ -73,6 +73,9 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:RoleVersion': null,                // #1387 — the type; a state a role has held
   'scrum:Talk': null,                       // #1401 — the type; a 1:1 conversation tag
   'scrum:MoveFence': null,                  // #1707 — the type; a settled move id that can never land
+  'scrum:LabelAlias': null,                 // #1640 — the type; one label spelling declared to mean another
+  'scrum:aliasLabel': 'scrum:aliasLabel',   // #1640 → the alias spelling (a literal)
+  'scrum:canonicalLabel': 'scrum:canonicalLabel',   // #1640 → the label it means (a literal)
   'scrum:fencedMove': 'scrum:fencedMove',   // #1707 → the fenced move's requestId (a literal)
   'scrum:fencedAt': 'scrum:fencedAt',       // #1707 → when it was fenced (absent on an imported legacy fence)
   'scrum:with': 'scrum:with',               // → the seat a talk is with

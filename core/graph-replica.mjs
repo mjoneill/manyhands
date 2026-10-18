@@ -193,6 +193,7 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:RoleVersion', 'scrum:ofRole',   // #1387 — a revised role keeps its history
   'scrum:Talk', 'scrum:with', 'scrum:conversation', 'scrum:closedAt',   // #1401 — a 1:1 conversation tag and the posts that carry it
   'scrum:MoveFence', 'scrum:fencedMove', 'scrum:fencedAt',   // #1707 — a settled move id that can never land
+  'scrum:LabelAlias', 'scrum:aliasLabel', 'scrum:canonicalLabel',   // #1640 — an alias record (no sameAs)
   // #1202 — the provenance ledger row
   'scrum:ModelCall', 'scrum:agent', 'scrum:model', 'scrum:provider', 'scrum:protocol',
   'scrum:promptVersion', 'scrum:tokensIn', 'scrum:tokensOut', 'scrum:reasoningTokens', 'scrum:cachedPromptTokens', 'scrum:cost', 'scrum:costMeasured', 'scrum:costCategories', 'scrum:stopReason',
@@ -1167,6 +1168,17 @@ function projectRoleVersion(store, e) {
 }
 
 // #1707 — a move fence: the requestId that can never land, and when it was fenced (an imported legacy fence has no time).
+// #1640 — a label alias as a RECORD: the alias spelling and the label it means. Its own subject only: concept nodes are shared
+// and carry no sameAs from this projection (that is #1640's open (a)/(b)/(c) choice).
+function projectLabelAlias(store, e) {
+  const S = IRI.scrum;
+  const s = nn(e['@id']);
+  const add = (p, o) => store.add(oxigraph.triple(s, p, o));
+  add(A, nn(S + 'LabelAlias'));
+  if (e['scrum:aliasLabel']) add(nn(S + 'aliasLabel'), lit(String(e['scrum:aliasLabel'])));
+  if (e['scrum:canonicalLabel']) add(nn(S + 'canonicalLabel'), lit(String(e['scrum:canonicalLabel'])));
+}
+
 function projectMoveFence(store, e) {
   const S = IRI.scrum;
   const s = nn(e['@id']);
@@ -1958,6 +1970,8 @@ export function projectEntity(store, e) {
       projectTalk(store, e);          // #1401
     } else if (t === 'scrum:MoveFence') {
       projectMoveFence(store, e);     // #1707
+    } else if (t === 'scrum:LabelAlias') {
+      projectLabelAlias(store, e);    // #1640
     } else if (t === 'scrum:RoleVersion') {
       projectRoleVersion(store, e);   // #1387
     } else if (t === 'scrum:Agent') {

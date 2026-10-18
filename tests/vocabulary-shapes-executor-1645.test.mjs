@@ -51,7 +51,10 @@ const EXTRA_TERMS = ['scrum:CardImport', 'scrum:sourceDigest', 'scrum:postSeq', 
 const EXTRA_PREDICATES = ['scrum:sourceDigest', 'scrum:postSeq', 'scrum:inCollection'];
 // Terms DECLARED after the golden was taken (3b690b5) that this fixture does not emit, so they land in `unused`, each named with
 // its card. A term added here is a reviewed vocabulary change; a term that appears in `unused` without being listed still fails V1.
-const DECLARED_SINCE_GOLDEN = ['scrum:MoveFence', 'scrum:fencedMove', 'scrum:fencedAt'];   // #1707 — the move fences
+const DECLARED_SINCE_GOLDEN = [
+  'scrum:MoveFence', 'scrum:fencedMove', 'scrum:fencedAt',   // #1707 — the move fences
+  'scrum:LabelAlias', 'scrum:aliasLabel', 'scrum:canonicalLabel',   // #1640 — label aliases as records
+];
 const PREFIX = { scrum: 'https://scrumboard.local/ns#', schema: 'https://schema.org/', entity: 'https://scrumboard.local/entity/', column: 'https://scrumboard.local/column/' };
 const iri = (pfx) => { const [p, l] = pfx.split(':'); return PREFIX[p] ? `<${PREFIX[p]}${l}>` : null; };
 const get = async (w, route) => { const r = await fetch(`${w.rest.baseUrl}${route}`, { signal: AbortSignal.timeout(30000) }); return { status: r.status, j: await r.json() }; };

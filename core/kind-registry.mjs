@@ -192,6 +192,12 @@ export const KIND_DECLARATIONS = Object.freeze([
       + 'holder is the OPEN interval, never the newest node by date.',
   },
   {
+    name: 'scrum:LabelAlias', eventKind: null, collection: null,
+    createdBy: 'POST /api/labels/aliases (a seat declaring that one label spelling means another, #857/#1640)',
+    definition: 'One label spelling declared to mean another: card creation stores an aliased label on its canonical, and '
+      + 'GET /api/labels/aliases serves the map. A RECORD only: it adds no schema:sameAs between concept nodes (#1640 (a)/(b)/(c)).',
+  },
+  {
     name: 'scrum:MoveFence', eventKind: null, collection: null,
     createdBy: 'POST /api/cards/:id/move-fence (a tab settling a move whose outcome it never learned, #1584/#1707)',
     definition: 'A move requestId that can NEVER land: its tab lost the reply, could not tell whether the move committed, '

@@ -51,5 +51,8 @@ export function collectionFamilies({ cardsUnit = false } = {}) {
     // fence is a fresh-subject collision. No routes: the card routes read it through readBoard, and must not become
     // collection-dependent for it.
     { key: 'moveFences', routes: [] },
+    // #1640 — the label aliases (core/label-aliases.mjs): one entity per alias spelling, its IRI derived from the alias. The alias
+    // routes are collection-dependent: with the collections unreadable they answer 503, never an empty map read as "none".
+    { key: 'labelAliases', routes: ['/api/labels/aliases'] },
   ];
 }

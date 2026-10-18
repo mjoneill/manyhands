@@ -34,6 +34,7 @@ import { importIntention } from '../core/collection-import-1624.mjs';
 import { wakeCreateIntention, wakesForQuery, wakeFromRow } from '../core/smallkinds-unit.mjs';
 import { renameEntity } from '../core/collection-renames-1624.mjs';
 import { asMoveFenceEntities } from '../core/move-fences.mjs';
+import { asLabelAliasEntities } from '../core/label-aliases.mjs';
 
 const args = process.argv.slice(2);
 const opt = (k) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : null; };
@@ -50,6 +51,8 @@ const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
 const board = renameEntity(domainToBoard(isJsonLdDocument(raw) ? jsonLdToDomain(raw) : raw));
 // #1707 — the document's move fences are requestId STRINGS; the graph's family holds one ENTITY per fence (core/move-fences.mjs)
 board.moveFences = asMoveFenceEntities(board.moveFences);
+// #1640 — the document's label aliases are ROWS; the graph's family holds one ENTITY per alias (core/label-aliases.mjs)
+board.labelAliases = asLabelAliasEntities(board.labelAliases);
 // The live configuration runs with the cards unit on, so a reference to a card is a graph subject.
 const families = collectionFamilies({ cardsUnit: true });
 const g = createGraphClient({ baseUrl: executor, expectedDatasetId: dataset, timeoutMs: 120000 });

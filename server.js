@@ -73,6 +73,7 @@ import { createPrompt, editPrompt, setEnabled, reorderPlaylist, removePrompt, se
 import { resolveProvenance } from './core/tending-provenance.mjs';
 import { boardToDomain, domainToBoard, cardToNode } from './core/mapping.mjs';
 import { moveFenceIds, moveFenceEntity } from './core/move-fences.mjs';   // #1707
+import { labelAliasRows, labelAliasEntity, labelAliasIri } from './core/label-aliases.mjs';   // #1640
 import { OUTBOX_FIELD, outboxOf, withAnnouncement, listOutbox, modeProblem, legacyProof, postMatchesEntry, opIdFor, announcePostId, postCreateIntention, obligationIdOf } from './core/announce-outbox.mjs';   // #1574 C3a/C3b/C3c
 import * as U3 from './core/unit3-graph.mjs';   // #1582 — deliveries and model calls in the graph
 import { createGraphClient, setExecutorMeter } from './core/graph-client.mjs';   // #1574 C3b — the conversations unit's executor door
@@ -147,7 +148,8 @@ const BOARD_DOCUMENT = process.env.SCRUM_BOARD_DOCUMENT ?? 'on';
 // the fields no unit holds yet, each with the card that gives it an owner; `owned` flips when that card's build lands
 const DOCUMENT_ONLY_FIELDS = [
   { field: 'outbox (announcement origins and entries)', card: '#1629', owned: () => false },
-  { field: 'labelAliases', card: '#1640', owned: () => false },
+  // #1640 — the labelAliases collection family is held by the collections unit, which the smallkinds unit turns on
+  { field: 'labelAliases', card: '#1640', owned: () => SMALLKINDS_UNIT },
   // #1707 — the moveFences collection family is held by the collections unit, which the smallkinds unit turns on
   { field: 'moveFences', card: '#1707', owned: () => SMALLKINDS_UNIT },
 ];
@@ -2531,8 +2533,10 @@ function handleLabelCollisions(req, res) {
 
 /** Rows → the {alias: canonical} map callers actually want to read. */
 function aliasMap(data) {
-  return Object.fromEntries((data.labelAliases || []).map((r) => [r.alias, r.canonical]));
+  return Object.fromEntries(labelAliasRows(data.labelAliases).map((r) => [r.alias, r.canonical]));   // #1640 — rows or entities
 }
+// #1640 — the alias map is the graph-held `labelAliases` collection when the collections unit is on
+const aliasesInGraph = () => !!(COLLECTIONS && COLLECTIONS.keys.includes('labelAliases'));
 
 function handleGetLabelAliases(req, res) {
   sendJSON(res, 200, { aliases: aliasMap(readBoard()) });
@@ -2565,16 +2569,27 @@ async function handleDeclareLabelAlias(req, res) {
       const seen = new Set([alias]);
       while (existing[target] && !seen.has(target)) { seen.add(target); target = existing[target]; }
 
-      const rows = [...(data.labelAliases || [])];
-      const at = rows.findIndex((r) => r.alias === alias);
-      const row = {
-        id: at >= 0 ? rows[at].id : crypto.randomUUID(),
-        alias, canonical: target, by: body.by || null, at: new Date().toISOString(),
-      };
-      if (at >= 0) rows[at] = row; else rows.push(row);
-      data.labelAliases = rows;
+      const when = new Date().toISOString();
+      let row; let op;
+      if (aliasesInGraph()) {
+        // #1640 — an entity of the graph-held collection, committed by this same guarded write; a re-declaration of the same
+        // spelling is the same entity (its IRI is derived from the alias), so the map stays one row per alias
+        const list = [...(Array.isArray(data.labelAliases) ? data.labelAliases : [])];
+        const iri = labelAliasIri(alias);
+        const at = list.findIndex((x) => x && x['@id'] === iri);
+        const entity = labelAliasEntity({ alias, canonical: target });
+        if (at >= 0) list[at] = entity; else list.push(entity);
+        data.labelAliases = list;
+        row = { id: iri, alias, canonical: target, by: body.by || null, at: when }; op = at >= 0 ? 'update' : 'create';
+      } else {
+        const rows = [...(data.labelAliases || [])];
+        const at = rows.findIndex((r) => r.alias === alias);
+        row = { id: at >= 0 ? rows[at].id : crypto.randomUUID(), alias, canonical: target, by: body.by || null, at: when };
+        if (at >= 0) rows[at] = row; else rows.push(row);
+        data.labelAliases = rows; op = at >= 0 ? 'update' : 'create';
+      }
       writeBoard(data, [{
-        op: at >= 0 ? 'update' : 'create', actor: body.by || null,
+        op, actor: body.by || null,
         entity: { kind: 'label', id: row.id }, state: row,
       }]);
       return { alias, canonical: target };
@@ -13071,6 +13086,19 @@ if (SMALLKINDS_UNIT) {
     }
     // #1707 — a fence the DOCUMENT still holds and the graph does not would silently stop refusing its move the moment the unit
     // serves fences from the graph. Refuse to start until the migration has copied every one (scripts/migrate-collections-1624.mjs).
+    // #1640 — an alias the DOCUMENT still holds and the graph does not would silently stop canonicalising its label the moment
+    // the unit serves aliases from the graph. Refuse to start until the migration has copied every one. Not under read-off/off,
+    // where the document is never read (#1563).
+    if (DOCUMENT_READS && COLLECTIONS.keys.includes('labelAliases')) {
+      let docAliases = [];
+      try { docAliases = labelAliasRows(domainToBoard(loadDomain(BOARD_DATA_FILE)).labelAliases).map((r) => r.alias); } catch { /* no readable document: nothing it could hold */ }
+      const inGraph = new Set(labelAliasRows(COLLECTIONS.snapshot().labelAliases).map((r) => r.alias));
+      const missingAliases = docAliases.filter((a) => !inGraph.has(a));
+      if (missingAliases.length) {
+        console.error(`#1640 label aliases: the document holds ${missingAliases.length} alias(es) the graph does not (e.g. ${JSON.stringify(missingAliases[0])}); serving would stop canonicalising them. Run scripts/migrate-collections-1624.mjs first — refusing to serve.`);
+        process.exit(1);
+      }
+    }
     if (COLLECTIONS.keys.includes('moveFences')) {
       let docFences = [];
       // #1563 — under read-off/off the document is never read, so it cannot be the source of a fence: no check, no open
