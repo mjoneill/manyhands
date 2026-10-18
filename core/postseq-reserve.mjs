@@ -65,6 +65,25 @@ const ANNOUNCEMENT_KEYS = ['body', 'author', 'originActor', 'occurredAt', 'menti
 const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 const isStr = (v) => typeof v === 'string' && v.isWellFormed();
 
+function canonAttachment(a, what) {
+  if (!isObj(a)) throw new TypeError(`${what} must be an object`);
+  const ok = { id: 'id', mime: 'mime', name: 'name', size: 'size' };
+  for (const k of Object.keys(a)) if (!(k in ok)) throw new TypeError(`${what}: unknown key ${k}`);
+  if (typeof a.id !== 'string') throw new TypeError(`${what}.id is required`);
+  const mime = a.mime == null ? null : (typeof a.mime === 'string' ? a.mime : (() => { throw new TypeError(`${what}.mime must be a string or null`); })());
+  const name = a.name == null ? null : (typeof a.name === 'string' ? a.name : (() => { throw new TypeError(`${what}.name must be a string or null`); })());
+  const size = a.size == null ? null : (Number.isSafeInteger(a.size) && a.size >= 0 ? a.size : (() => { throw new TypeError(`${what}.size must be a non-negative safe integer or null`); })());
+  return { id: a.id, mime, name, size };
+}
+
+function canonOrigin(o, what) {
+  if (!isObj(o)) throw new TypeError(`${what} must be an object`);
+  for (const k of Object.keys(o)) if (!['mutationId', 'slot'].includes(k)) throw new TypeError(`${what}: unknown key ${k}`);
+  if (typeof o.mutationId !== 'string') throw new TypeError(`${what}.mutationId is required`);
+  if (typeof o.slot !== 'string') throw new TypeError(`${what}.slot is required`);
+  return { mutationId: o.mutationId, slot: o.slot };
+}
+
 function validateOrdinaryDraft(d, what) {
   if (!isObj(d)) throw new TypeError(`${what} must be an object`);
   for (const k of Object.keys(d)) if (!ORDINARY_KEYS.includes(k)) throw new TypeError(`${what}: unknown key ${k}`);
@@ -72,21 +91,12 @@ function validateOrdinaryDraft(d, what) {
   if (d.attachedTo != null && !isStr(d.attachedTo)) throw new TypeError(`${what}.attachedTo must be a string or null`);
   if (d.mentions != null && (!Array.isArray(d.mentions) || d.mentions.some((m) => !isStr(m)))) throw new TypeError(`${what}.mentions must be an array of strings`);
   if (d.attachments != null && (!Array.isArray(d.attachments))) throw new TypeError(`${what}.attachments must be an array`);
-  if (d.attachments) d.attachments.forEach((a, k) => {
-    if (!isObj(a)) throw new TypeError(`${what}.attachments[${k}] must be an object`);
-    for (const ak of Object.keys(a)) if (!['id', 'mime', 'name', 'size'].includes(ak)) throw new TypeError(`${what}.attachments[${k}]: unknown key ${ak}`);
-    if (typeof a.id !== 'string') throw new TypeError(`${what}.attachments[${k}].id is required`);
-  });
+  if (d.attachments) d.attachments.forEach((a, k) => canonAttachment(a, `${what}.attachments[${k}]`));
   if (d.conversation != null && !isStr(d.conversation)) throw new TypeError(`${what}.conversation must be a string or null`);
   if (d.onBehalfOf != null && !isStr(d.onBehalfOf)) throw new TypeError(`${what}.onBehalfOf must be a string or null`);
   if (d.recovered != null && !isStr(d.recovered)) throw new TypeError(`${what}.recovered must be a string or null`);
   if (d.opId != null && !isStr(d.opId)) throw new TypeError(`${what}.opId must be a string or null`);
-  if (d.origin != null) {
-    if (!isObj(d.origin)) throw new TypeError(`${what}.origin must be an object`);
-    for (const k of Object.keys(d.origin)) if (!['mutationId', 'slot'].includes(k)) throw new TypeError(`${what}.origin: unknown key ${k}`);
-    if (typeof d.origin.mutationId !== 'string') throw new TypeError(`${what}.origin.mutationId is required`);
-    if (typeof d.origin.slot !== 'string') throw new TypeError(`${what}.origin.slot is required`);
-  }
+  if (d.origin != null) canonOrigin(d.origin, `${what}.origin`);
   if (d.originalAuthorToken != null && !isStr(d.originalAuthorToken)) throw new TypeError(`${what}.originalAuthorToken must be a string or null`);
   if (d.authorCorrectedAt != null && !isStr(d.authorCorrectedAt)) throw new TypeError(`${what}.authorCorrectedAt must be a string or null`);
   if (d.authorCorrectedBy != null && !isStr(d.authorCorrectedBy)) throw new TypeError(`${what}.authorCorrectedBy must be a string or null`);
@@ -104,9 +114,47 @@ function validateAnnouncementDraft(d, what) {
 }
 
 /**
+ * The FROZEN canonical ordinary draft — every accepted field, normalized, key order FIXED so two intentions with
+ * the same content (key order independent) canonicalize to the same bytes. attachments are PRESERVED IN INPUT ORDER
+ * (the contract says nothing reorders them by default; mentions are the only documented-unordered array). The SAME
+ * shape is what the compiler stores as `draftJson` and what the reader surfaces — the stored reservation is the
+ * FROZEN draft, never a digest-only object.
+ */
+export function canonOrdinaryDraft(d) {
+  const mentions = d.mentions ? [...d.mentions].sort() : [];
+  const attachments = (d.attachments ?? []).map((a, k) => canonAttachment(a, `attachments[${k}]`));
+  return {
+    body: d.body,
+    attachedTo: d.attachedTo ?? null,
+    mentions,
+    attachments,
+    conversation: d.conversation ?? null,
+    onBehalfOf: d.onBehalfOf ?? null,
+    recovered: d.recovered ?? null,
+    opId: d.opId ?? null,
+    origin: d.origin ? canonOrigin(d.origin, 'origin') : null,
+    originalAuthorToken: d.originalAuthorToken ?? null,
+    authorCorrectedAt: d.authorCorrectedAt ?? null,
+    authorCorrectedBy: d.authorCorrectedBy ?? null,
+  };
+}
+
+export function canonAnnouncementDraft(d) {
+  return {
+    body: d.body,
+    author: d.author,
+    originActor: d.originActor,
+    occurredAt: d.occurredAt,
+    mentions: [...d.mentions].sort(),
+    notify: d.notify,
+  };
+}
+
+/**
  * Validate a single reservation item and return a canonical form. Ordinary carries `author`+`requestId` at the item
  * (per the shape); announcement carries `mutationId`+`slot`. The id is the derived postId. Derived/canonical fields are
- * NOT inputs (forbidden by the schema).
+ * NOT inputs (forbidden by the schema). The stored draft is the FROZEN canonical form returned here (every accepted
+ * field, normalized), so a roundtrip read surfaces exactly what was sent.
  */
 export function canonReservationItem(it, what) {
   if (!isObj(it)) throw new TypeError(`${what} must be an object`);
@@ -115,23 +163,25 @@ export function canonReservationItem(it, what) {
     if (typeof it.author !== 'string' || !it.author) throw new TypeError(`${what}.author is required`);
     if (typeof it.requestId !== 'string' || !it.requestId) throw new TypeError(`${what}.requestId is required`);
     validateOrdinaryDraft(it.draft, `${what}.draft`);
-    return { mode: 'ordinary', author: it.author, requestId: it.requestId, draft: it.draft, postId: postWriteId(it.author, it.requestId) };
+    const draft = canonOrdinaryDraft(it.draft);
+    return { mode: 'ordinary', author: it.author, requestId: it.requestId, draft, postId: postWriteId(it.author, it.requestId) };
   }
   if (it.mode === 'announcement') {
     for (const k of Object.keys(it)) if (!['mode', 'mutationId', 'slot', 'draft'].includes(k)) throw new TypeError(`${what}: unknown key ${k}`);
     if (typeof it.mutationId !== 'string' || !it.mutationId) throw new TypeError(`${what}.mutationId is required`);
     if (typeof it.slot !== 'string' || !it.slot) throw new TypeError(`${what}.slot is required`);
     validateAnnouncementDraft(it.draft, `${what}.draft`);
-    return { mode: 'announcement', mutationId: it.mutationId, slot: it.slot, draft: it.draft, postId: announcePostId(it.mutationId, it.slot) };
+    const draft = canonAnnouncementDraft(it.draft);
+    return { mode: 'announcement', mutationId: it.mutationId, slot: it.slot, draft, postId: announcePostId(it.mutationId, it.slot) };
   }
   throw new TypeError(`${what}.mode must be ordinary or announcement`);
 }
 
 /**
- * Canonical form of a reservation batch — same items, the same opId, and a canonical, sorted-by-postId identity map for
- * the digest. The batch identity the shape names is the ORDERED [mode, postId] vector (NOT sorted); the digest binds
- * that ordered vector, so a draft change for the same identities is the same digest. The reader never sees the sorted
- * form; it is purely for the hash input.
+ * Canonical form of a reservation batch: the items in INPUT order, each validated and canonicalized, with duplicate
+ * derived postIds refused. The opId binds the ordered [mode, postId] vector only, so a changed draft for the same
+ * identities keeps the SAME opId; the digest binds the ordered identities AND every canonical draft field, so that
+ * changed draft has a DIFFERENT digest and collides at the receipt (DS1). Nothing here is sorted except `mentions`.
  */
 export function canonReservationBatch(reservations, what = 'reservations') {
   if (!Array.isArray(reservations) || reservations.length === 0) throw new TypeError(`${what} must be a non-empty array`);
@@ -145,32 +195,12 @@ export function canonReservationBatch(reservations, what = 'reservations') {
 }
 
 // ── the canonical digest body: ordered [mode, postId] + every canonical draft field, no executor-assigned values ──
+//
+// The digest body BINDs EVERY accepted field (P1, REVIEW-FIX-1629): a changed attachment id, a changed nested
+// origin field, a recovered token — all change the digest (DS1: a changed draft for the same identities is a
+// different digest, the same opId; intent-collision). The shape of each draft here is the SAME frozen shape the
+// compiler stores as `draftJson` and the reader surfaces — content-bound, not digest-only.
 
-function canonDraftForDigest(d, mode) {
-  if (mode === 'ordinary') {
-    return {
-      body: d.body,
-      attachedTo: d.attachedTo ?? null,
-      mentions: [...(d.mentions ?? [])].sort(),
-      conversation: d.conversation ?? null,
-      onBehalfOf: d.onBehalfOf ?? null,
-    };
-  }
-  return {
-    body: d.body,
-    author: d.author,
-    originActor: d.originActor,
-    occurredAt: d.occurredAt,
-    mentions: [...(d.mentions ?? [])].sort(),
-    notify: d.notify,
-  };
-}
-
-/**
- * The digest body of a postseq.reserve intention. Excludes executor-assigned fields (postSeq, createdAt, allocator
- * version, etc.) so the executor's published reserveDigest is unchanged by any of those. Includes the opId so the digest
- * is content-bound: two intentions with the same opId and different drafts collide at compile time (DS1).
- */
 export function reserveDigestBody(items) {
   return {
     items: items.map((it) => ({
@@ -179,16 +209,31 @@ export function reserveDigestBody(items) {
       identity: it.mode === 'ordinary'
         ? { author: it.author, requestId: it.requestId }
         : { mutationId: it.mutationId, slot: it.slot },
-      draft: canonDraftForDigest(it.draft, it.mode),
+      draft: it.draft,
     })),
   };
 }
 
 // ── reader helpers: typed reads, no defaulting, no repair, no clock substitution ──
+//
+// The readers are STRICT on cardinality, term identity, JSON content and exact datatype. A partially present
+// Reservation (the type triple but not the predicates the contract binds) is INVALID, never `{ok:true, reservation:null}` —
+// a missing row and a partial row are different observations. Mismatched identity/draft in the stored JSON is INVALID —
+// the reader does not accept arbitrary parsed JSON. Multiple allocator subjects are INVALID — never pick one.
 
 function val(b, name) {
   const t = b?.[name];
   if (!t || t.type !== 'literal' || typeof t.value !== 'string') throw new Error(`binding ${name} is missing or not a plain literal`);
+  return t.value;
+}
+// postSeqEpoch is a PLAIN string literal: no language tag, no datatype other than xsd:string (an IRI, a
+// lang-tagged literal or a typed number is a different term and is INVALID, never coerced to its lexical form).
+function epochOf(b, name) {
+  const t = b?.[name];
+  if (!t || t.type !== 'literal' || typeof t.value !== 'string') throw new Error(`binding ${name} is missing or not a literal`);
+  if (t['xml:lang'] != null) throw new Error(`binding ${name} is language-tagged; a plain string literal is required`);
+  if (t.datatype != null && t.datatype !== `${XSD}string`) throw new Error(`binding ${name} is typed ${t.datatype}; a plain string literal is required`);
+  if (!t.value) throw new Error(`binding ${name} is empty`);
   return t.value;
 }
 function iriOf(b, name) {
@@ -201,7 +246,8 @@ const XSD_DT = 'http://www.w3.org/2001/XMLSchema#dateTime';
 function intOf(b, name) {
   const t = b?.[name];
   if (!t || t.type !== 'literal' || typeof t.value !== 'string') throw new Error(`binding ${name} is missing or not a literal`);
-  if (t.datatype != null && t.datatype !== XSD_INT) throw new Error(`binding ${name} is typed ${t.datatype}, not xsd:integer`);
+  if (t.datatype == null) throw new Error(`binding ${name} has no datatype; an exact xsd:integer term is required (no bare numeric literals, no xsd:string, no xsd:long)`);
+  if (t.datatype !== XSD_INT) throw new Error(`binding ${name} is typed ${t.datatype}, not xsd:integer`);
   if (!/^-?\d+$/.test(t.value) || !Number.isSafeInteger(Number(t.value))) throw new Error(`binding ${name} is not a safe integer: ${t.value}`);
   return Number(t.value);
 }
@@ -219,9 +265,20 @@ function isPosSafeInt(n) {
   return typeof n === 'number' && Number.isSafeInteger(n) && n > 0;
 }
 
+// The full reservation row pattern: every predicate the contract binds must be present. A partial row (only the type
+// triple, or only some of the predicates) will not match this pattern → the partial-shape query below will catch it.
 const RESERVATION_SPARQL = (postIdTerm) => `SELECT ?mode ?postId ?reserveOpId ?reserveDigest ?postSeqEpoch ?postSeq ?createdAt ?index ?identityJson ?draftJson WHERE {
   GRAPH ${BK} {
     ${postIdTerm} a ${POSTSEQ_TERMS.Reservation} ; ${POSTSEQ_TERMS.mode} ?mode ; ${POSTSEQ_TERMS.postId} ?postId ; ${POSTSEQ_TERMS.reserveOpId} ?reserveOpId ; ${POSTSEQ_TERMS.reserveDigest} ?reserveDigest ; ${POSTSEQ_TERMS.postSeqEpoch} ?postSeqEpoch ; ${POSTSEQ_TERMS.postSeq} ?postSeq ; ${POSTSEQ_TERMS.createdAt} ?createdAt ; ${POSTSEQ_TERMS.index} ?index ; ${POSTSEQ_TERMS.identityJson} ?identityJson ; ${POSTSEQ_TERMS.draftJson} ?draftJson .
+  }
+}`;
+
+// Partial-shape: asks whether ANY triple has the reservation SUBJECT in the bookkeeping graph. Run only when the
+// full-row pattern found nothing, so `true` means a partial row (with or without the type triple): a writer bug,
+// never "missing".
+const RESERVATION_PARTIAL_SPARQL = (postIdTerm) => `ASK {
+  GRAPH ${BK} {
+    ${postIdTerm} ?p ?o .
   }
 }`;
 
@@ -229,10 +286,29 @@ const ALLOCATOR_SPARQL = `SELECT ?postSeqEpoch ?nextPostSeq ?version WHERE {
   GRAPH ${BK} { ${POSTSEQ_TERMS.allocator} a ${POSTSEQ_TERMS.Allocator} ; ${POSTSEQ_TERMS.postSeqEpoch} ?postSeqEpoch ; ${POSTSEQ_TERMS.nextPostSeq} ?nextPostSeq ; ${POSTSEQ_TERMS.version} ?version . }
 }`;
 
+// Multi-subject detection: the cardinality MUST be over TERM identity (different allocator subjects are different
+// terms, never value-equal). This SELECT returns one row per distinct Allocator subject.
+const ALLOCATOR_SUBJECTS_SPARQL = `SELECT ?x_alloc WHERE { GRAPH ${BK} { ?x_alloc a ${POSTSEQ_TERMS.Allocator} . } }`;
+
+// Per-predicate cardinality on the single allocator subject: one row per (predicate, object) pair, so a duplicate
+// nextPostSeq/version/postSeqEpoch triple with a different OBJECT term yields TWO rows for that predicate. Counts
+// > 1 on any of the three are a writer bug — a partial / duplicated allocator must NEVER silently coerce. The
+// comparison is over TERM IDENTITY (`!sameTerm`), so a different numeric datatype with the same lexical value
+// cannot evade the duplicate check (P2: sameTerm, not value inequality).
+const ALLOCATOR_TUPLE_CARD_SPARQL = `SELECT ?pred WHERE {
+  GRAPH ${BK} {
+    { ${POSTSEQ_TERMS.allocator} ${POSTSEQ_TERMS.nextPostSeq} ?nx1 . ${POSTSEQ_TERMS.allocator} ${POSTSEQ_TERMS.nextPostSeq} ?nx2 FILTER(!sameTerm(?nx1, ?nx2)) BIND(${POSTSEQ_TERMS.nextPostSeq} AS ?pred) }
+    UNION
+    { ${POSTSEQ_TERMS.allocator} ${POSTSEQ_TERMS.version} ?vx1 . ${POSTSEQ_TERMS.allocator} ${POSTSEQ_TERMS.version} ?vx2 FILTER(!sameTerm(?vx1, ?vx2)) BIND(${POSTSEQ_TERMS.version} AS ?pred) }
+    UNION
+    { ${POSTSEQ_TERMS.allocator} ${POSTSEQ_TERMS.postSeqEpoch} ?ex1 . ${POSTSEQ_TERMS.allocator} ${POSTSEQ_TERMS.postSeqEpoch} ?ex2 FILTER(!sameTerm(?ex1, ?ex2)) BIND(${POSTSEQ_TERMS.postSeqEpoch} AS ?pred) }
+  }
+}`;
+
 /**
- * One reservation row. `{ok:true, reservation: null}` when the postId has no reservation; `{ok:false, status:'INVALID', reason}`
- * when the row is malformed/duplicate (a writer bug); `{ok:false, status:'UNAVAILABLE', reason}` when the read itself
- * failed. Strict on cardinality: one row → ok, zero rows → null, two rows → INVALID (never silently picks one).
+ * One reservation row. `{ok:true, reservation: null}` when the postId has no reservation AT ALL (no partial, no
+ * duplicates); `{ok:false, status:'INVALID', reason}` when the row is malformed/duplicate/partial/mismatched-identity-or-draft
+ * (a writer bug); `{ok:false, status:'UNAVAILABLE', reason}` when the read itself failed. Never silently picks one.
  */
 export async function readPostSeqReservation(client, postId) {
   if (!isStr(postId)) return { ok: false, status: 'INVALID', reason: 'postId is not a well-formed string' };
@@ -240,47 +316,85 @@ export async function readPostSeqReservation(client, postId) {
   const r = await client.query(RESERVATION_SPARQL(subj));
   if (!r.ok) return { ok: false, status: 'UNAVAILABLE', reason: r.reason };
   const rows = r.rows;
-  if (rows.length === 0) return { ok: true, reservation: null };
   if (rows.length > 1) return { ok: false, status: 'INVALID', reason: `reservation for ${postId} has ${rows.length} rows (duplicate stored reservation)` };
-  try {
-    const b = rows[0];
-    const mode = val(b, 'mode');
-    if (mode !== 'ordinary' && mode !== 'announcement') return { ok: false, status: 'INVALID', reason: `reservation mode ${mode} is not ordinary or announcement` };
-    const storedPostId = val(b, 'postId');
-    if (storedPostId !== postId) return { ok: false, status: 'INVALID', reason: `stored postId ${storedPostId} does not match subject ${postId}` };
-    const reserveOpId = iriOf(b, 'reserveOpId');
-    const reserveDigest = val(b, 'reserveDigest');
-    const postSeqEpoch = val(b, 'postSeqEpoch');
-    const postSeq = intOf(b, 'postSeq');
-    if (!isPosSafeInt(postSeq)) return { ok: false, status: 'INVALID', reason: `postSeq ${postSeq} is not a positive safe integer` };
-    const createdAt = dateOf(b, 'createdAt');
-    const index = intOf(b, 'index');
-    if (index < 0) return { ok: false, status: 'INVALID', reason: `index ${index} must be >= 0` };
-    const identityJson = val(b, 'identityJson');
-    const draftJson = val(b, 'draftJson');
-    let identity, draft;
-    try { identity = JSON.parse(identityJson); } catch (e) { return { ok: false, status: 'INVALID', reason: `identityJson is not parseable JSON: ${e.message}` }; }
-    try { draft = JSON.parse(draftJson); } catch (e) { return { ok: false, status: 'INVALID', reason: `draftJson is not parseable JSON: ${e.message}` }; }
-    return { ok: true, reservation: { postId: storedPostId, mode, reserveOpId, reserveDigest, postSeqEpoch, postSeq, createdAt, index, draft, identity } };
-  } catch (e) {
-    return { ok: false, status: 'INVALID', reason: e.message };
+  if (rows.length === 1) {
+    try {
+      const b = rows[0];
+      const mode = val(b, 'mode');
+      if (mode !== 'ordinary' && mode !== 'announcement') return { ok: false, status: 'INVALID', reason: `reservation mode ${mode} is not ordinary or announcement` };
+      const storedPostId = val(b, 'postId');
+      if (storedPostId !== postId) return { ok: false, status: 'INVALID', reason: `stored postId ${storedPostId} does not match subject ${postId}` };
+      const reserveOpId = iriOf(b, 'reserveOpId');
+      const reserveDigest = val(b, 'reserveDigest');
+      const postSeqEpoch = epochOf(b, 'postSeqEpoch');
+      const postSeq = intOf(b, 'postSeq');
+      if (!isPosSafeInt(postSeq)) return { ok: false, status: 'INVALID', reason: `postSeq ${postSeq} is not a positive safe integer` };
+      const createdAt = dateOf(b, 'createdAt');
+      const index = intOf(b, 'index');
+      if (index < 0) return { ok: false, status: 'INVALID', reason: `index ${index} must be >= 0` };
+      const identityJson = val(b, 'identityJson');
+      const draftJson = val(b, 'draftJson');
+      let identity, draft;
+      try { identity = JSON.parse(identityJson); } catch (e) { return { ok: false, status: 'INVALID', reason: `identityJson is not parseable JSON: ${e.message}` }; }
+      try { draft = JSON.parse(draftJson); } catch (e) { return { ok: false, status: 'INVALID', reason: `draftJson is not parseable JSON: ${e.message}` }; }
+      // The identity is a CLOSED object: exactly {author, requestId} (ordinary) or {mutationId, slot} (announcement),
+      // non-empty well-formed strings, and the postId it derives must be the stored postId. The draft is the FROZEN
+      // canonical form: it must pass the same closed schema as an input draft AND be byte-identical to its own
+      // canonicalization, so a draft the compiler could not have written is INVALID rather than surfaced.
+      const idKeys = mode === 'ordinary' ? ['author', 'requestId'] : ['mutationId', 'slot'];
+      if (!isObj(identity) || Object.keys(identity).length !== idKeys.length || !idKeys.every((k) => isStr(identity[k]) && identity[k] !== '')) {
+        return { ok: false, status: 'INVALID', reason: `${mode} identity must be exactly {${idKeys.join(', ')}} with non-empty strings; got ${JSON.stringify(identity)}` };
+      }
+      const derived = mode === 'ordinary' ? postWriteId(identity.author, identity.requestId) : announcePostId(identity.mutationId, identity.slot);
+      if (derived !== storedPostId) return { ok: false, status: 'INVALID', reason: `identity derives postId ${derived}, not the stored ${storedPostId}` };
+      try {
+        if (mode === 'ordinary') validateOrdinaryDraft(draft, 'stored draft'); else validateAnnouncementDraft(draft, 'stored draft');
+      } catch (e) { return { ok: false, status: 'INVALID', reason: `stored draft fails the closed schema: ${e.message}` }; }
+      const frozen = JSON.stringify(mode === 'ordinary' ? canonOrdinaryDraft(draft) : canonAnnouncementDraft(draft));
+      if (frozen !== draftJson) return { ok: false, status: 'INVALID', reason: 'stored draft is not the frozen canonical draft (its bytes differ from its own canonicalization)' };
+      return { ok: true, reservation: { postId: storedPostId, mode, reserveOpId, reserveDigest, postSeqEpoch, postSeq, createdAt, index, draft, identity } };
+    } catch (e) {
+      return { ok: false, status: 'INVALID', reason: e.message };
+    }
   }
+  // rows.length === 0: probe whether the partial-shape IS present (only the type triple), so partial ≠ missing.
+  const pr = await client.ask(RESERVATION_PARTIAL_SPARQL(subj));
+  if (!pr.ok) return { ok: false, status: 'UNAVAILABLE', reason: pr.reason };
+  if (pr.boolean) return { ok: false, status: 'INVALID', reason: `reservation for ${postId} is partially present (the type triple exists but the bound predicates are missing — a writer bug, never treated as missing)` };
+  return { ok: true, reservation: null };
 }
 
 /**
- * One allocator row. Returns `{ok:true, allocator}` or `{ok:false, status:'INVALID'|'UNAVAILABLE'}`. Strict: one row only,
- * `nextPostSeq` positive safe integer, `version` positive safe integer, `postSeqEpoch` non-empty. No defaulting.
+ * One allocator tuple. Returns `{ok:true, allocator}` or `{ok:false, status:'INVALID'|'UNAVAILABLE'}`. Strict: exactly
+ * ONE allocator subject in the bookkeeping graph (multiple -> INVALID, never silently pick one), `nextPostSeq` and
+ * `version` are exact xsd:integer (no value-inequality escape), positive and safe, `postSeqEpoch` non-empty.
  */
 export async function readPostSeqAllocator(client) {
+  // multi-subject detection FIRST, before any single-tuple read, so a duplicate allocator subject is named even when
+  // the canonical subject's predicate set is empty.
+  const ms = await client.query(ALLOCATOR_SUBJECTS_SPARQL);
+  if (!ms.ok) return { ok: false, status: 'UNAVAILABLE', reason: ms.reason };
+  if (ms.rows.length > 1) return { ok: false, status: 'INVALID', reason: `allocator graph has ${ms.rows.length} allocator subjects (multiple stored allocators); never picks one` };
+  if (ms.rows.length === 0) return { ok: false, status: 'INVALID', reason: 'no allocator tuple' };
+  // Per-predicate cardinality (single subject, but two distinct nextPostSeq / version / postSeqEpoch objects):
+  // a duplicate predicate value is a writer bug — the SELECT returns one row per such predicate, and any non-empty
+  // row set is INVALID.
+  const card = await client.query(ALLOCATOR_TUPLE_CARD_SPARQL);
+  if (!card.ok) return { ok: false, status: 'UNAVAILABLE', reason: card.reason };
+  if (card.rows.length > 0) {
+    const preds = card.rows.map((r) => iriOf(r, 'pred'));
+    return { ok: false, status: 'INVALID', reason: `allocator subject has duplicate ${[...new Set(preds)].join(', ')} triples (term-identity cardinality failed); never picks one` };
+  }
   const r = await client.query(ALLOCATOR_SPARQL);
   if (!r.ok) return { ok: false, status: 'UNAVAILABLE', reason: r.reason };
   const rows = r.rows;
-  if (rows.length === 0) return { ok: false, status: 'INVALID', reason: 'no allocator tuple' };
-  if (rows.length > 1) return { ok: false, status: 'INVALID', reason: `allocator has ${rows.length} tuples (multiple stored allocators)` };
+  // The subjects query already proved exactly one subject; a single-row SELECT over the canonical allocator
+  // confirms the predicate set is well-formed end to end.
+  if (rows.length === 0) return { ok: false, status: 'INVALID', reason: `allocator subject has a type triple but no predicate values (partial stored allocator; a writer bug)` };
+  if (rows.length > 1) return { ok: false, status: 'INVALID', reason: `allocator tuple has ${rows.length} rows (duplicate stored allocator values); never picks one` };
   try {
     const b = rows[0];
-    const postSeqEpoch = val(b, 'postSeqEpoch');
-    if (!postSeqEpoch) return { ok: false, status: 'INVALID', reason: 'postSeqEpoch is empty' };
+    const postSeqEpoch = epochOf(b, 'postSeqEpoch');
     const nextPostSeq = intOf(b, 'nextPostSeq');
     if (!isPosSafeInt(nextPostSeq)) return { ok: false, status: 'INVALID', reason: `nextPostSeq ${nextPostSeq} is not a positive safe integer` };
     const version = intOf(b, 'version');

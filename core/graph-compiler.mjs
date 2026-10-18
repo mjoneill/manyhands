@@ -1983,18 +1983,24 @@ function compilePostseqReserve(c, digest) {
 
   const ALLOC = POSTSEQ_TERMS.allocator;
   pre.push(`    GRAPH ${[BK]} { ${ALLOC} a ${POSTSEQ_TERMS.Allocator} ; ${POSTSEQ_TERMS.postSeqEpoch} ?x_epoch ; ${POSTSEQ_TERMS.nextPostSeq} ?x_next ; ${POSTSEQ_TERMS.version} ?x_version . }`);
-  pre.push(`    FILTER(STR(?x_epoch) != "")`);
+  // the epoch is a non-empty PLAIN string literal: an IRI, a language-tagged literal or a typed value refuses.
+  pre.push(`    FILTER(isLiteral(?x_epoch) && DATATYPE(?x_epoch) = <${XSD_PSQ}string> && LANG(?x_epoch) = "" && STR(?x_epoch) != "")`);
+  // overflow guards (P2): the advance of NEXT and VERSION are EACH independently checked against MAX_SAFE_INTEGER,
+  // refuses otherwise. The postSeq allocations per-item are intrinsically bounded (next + k <= next + N).
   pre.push(`    FILTER(?x_next + ${psqSafeInt(N)} <= ${psqInt(MAX_SAFE.toString())})`);
+  pre.push(`    FILTER(?x_version + 1 <= ${psqInt(MAX_SAFE.toString())})`);
+  pre.push(`    FILTER(?x_version + 1 > 0)`);
   // datatype / sign / single-tuple checks INSIDE the OPTIONAL { all preconditions } so a failure leaves ?ok unbound
   // (and the receipt still records PRECONDITION_FAILED) instead of dropping the whole WHERE solution.
   pre.push(`    FILTER(DATATYPE(?x_next) = <${XSD_PSQ}integer> && DATATYPE(?x_version) = <${XSD_PSQ}integer>)`);
   pre.push(`    FILTER(?x_next > 0 && ?x_version > 0)`);
   // exactly one allocator SUBJECT: any other node typed Allocator in the bookkeeping graph refuses the whole batch.
   pre.push(`    FILTER NOT EXISTS { GRAPH ${[BK]} { ?x_alloc2 a ${POSTSEQ_TERMS.Allocator} FILTER(?x_alloc2 != ${ALLOC}) } }`);
-  // and exactly one nextPostSeq / version / postSeqEpoch value on the allocator subject: a second binding refuses.
-  pre.push(`    FILTER NOT EXISTS { GRAPH ${[BK]} { ${ALLOC} ${POSTSEQ_TERMS.nextPostSeq} ?xn2 FILTER(?xn2 != ?x_next) } }`);
-  pre.push(`    FILTER NOT EXISTS { GRAPH ${[BK]} { ${ALLOC} ${POSTSEQ_TERMS.version} ?xv2 FILTER(?xv2 != ?x_version) } }`);
-  pre.push(`    FILTER NOT EXISTS { GRAPH ${[BK]} { ${ALLOC} ${POSTSEQ_TERMS.postSeqEpoch} ?xe2 FILTER(?xe2 != ?x_epoch) } }`);
+  // exactly one nextPostSeq / version / postSeqEpoch value on the allocator subject — TERM identity (sameTerm), not
+  // value inequality, so a different numeric datatype with the same lexical value cannot evade the duplicate check.
+  pre.push(`    FILTER NOT EXISTS { GRAPH ${[BK]} { ${ALLOC} ${POSTSEQ_TERMS.nextPostSeq} ?xn2 FILTER(!sameTerm(?xn2, ?x_next)) } }`);
+  pre.push(`    FILTER NOT EXISTS { GRAPH ${[BK]} { ${ALLOC} ${POSTSEQ_TERMS.version} ?xv2 FILTER(!sameTerm(?xv2, ?x_version)) } }`);
+  pre.push(`    FILTER NOT EXISTS { GRAPH ${[BK]} { ${ALLOC} ${POSTSEQ_TERMS.postSeqEpoch} ?xe2 FILTER(!sameTerm(?xe2, ?x_epoch)) } }`);
   items.forEach((it, k) => {
     const SUBJ = POSTSEQ_TERMS.reservation(it.postId);
     pre.push(`    FILTER NOT EXISTS { ${inEither(`${SUBJ} ?xp ?xo`)} }`);
@@ -2016,7 +2022,7 @@ function compilePostseqReserve(c, digest) {
     const ident = it.mode === 'ordinary'
       ? JSON.stringify({ author: it.author, requestId: it.requestId })
       : JSON.stringify({ mutationId: it.mutationId, slot: it.slot });
-    const draftJson = JSON.stringify(_reserveDigestBody([it]).items[0].draft);
+    const draftJson = JSON.stringify(it.draft);
     bIns.push(
       `  ${v(SUBJ)} a ${v(POSTSEQ_TERMS.Reservation)} .`,
       `  ${v(SUBJ)} ${POSTSEQ_TERMS.mode} ${v(psqLit(it.mode))} .`,

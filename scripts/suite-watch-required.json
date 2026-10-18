@@ -108,6 +108,8 @@
   "tests/posts-retire-1626.test.mjs",
   "tests/postseq-compat-1629.test.mjs",
   "tests/postseq-reserve-1629.test.mjs",
+  "tests/postseq-reserve-gaps-1629.test.mjs",
+  "tests/postseq-reserve-review-1629.test.mjs",
   "tests/postseq-reserve-supplemental-1629.test.mjs",
   "tests/procedure-order-graph-po1.test.mjs",
   "tests/procedure-version-order-1624.test.mjs",
