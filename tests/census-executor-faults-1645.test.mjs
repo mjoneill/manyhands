@@ -13,6 +13,9 @@
  *   CF3  one row's count is negative ("-1")           }  note says why (non-empty censusNote). The rewritten row is scrum:Card's.
  *   CF4  one row's count is not an integer ("2.5")    }
  *   CF5  one row's count is past Number.MAX_SAFE_INTEGER ("9007199254740993", which a Number silently rounds): added from review (43497)
+ *   CF6  one row's count is the empty string ("", which Number() reads as 0): unavailable, like CF1-CF5. Added from review (43502)
+ *   CF7  CONTROL against over-refusal: a count of "0" is a well-formed count, so the census stays live and reports exactly what the executor
+ *        said (Card 0). A check so strict it refuses every count would pass CF1-CF6; it fails here. Added from review (43502)
  *
  * NOT covered, by name: a malformed TYPE binding (?t not an IRI: the query filters isIRI, so the executor cannot send one honestly); a truncated
  * page (selectExecutorAll's own paging).
@@ -75,6 +78,7 @@ const FAULTS = [
   ['CF3', 'a negative count', (b) => { b.n = { ...b.n, value: '-1' }; }],
   ['CF4', 'a count that is not an integer', (b) => { b.n = { ...b.n, value: '2.5' }; }],
   ['CF5', 'a count past the safe-integer range', (b) => { b.n = { ...b.n, value: '9007199254740993' }; }],
+  ['CF6', 'an empty-string count', (b) => { b.n = { ...b.n, value: '' }; }],
 ];
 for (const [id, label, fault] of FAULTS) {
   test(`#1645 (${id}) ${label} in the census aggregate makes the census unavailable, never live with a made-up count`, { skip: SKIP, timeout: 240000 }, async () => {
@@ -86,3 +90,10 @@ for (const [id, label, fault] of FAULTS) {
     assert.ok(typeof kinds?.censusNote === 'string' && kinds.censusNote.length > 0, `${label}: and the note says why (${JSON.stringify(kinds?.censusNote)})`);
   });
 }
+
+test('#1645 (CF7 CONTROL) a count of "0" is well formed: the census stays live and reports exactly what the executor said', { skip: SKIP, timeout: 240000 }, async () => {
+  const { kinds, proxy } = await census((b) => { b.n = { ...b.n, value: '0' }; });
+  assert.ok(proxy.rewritten >= 1 && proxy.cardSeen, `PRECONDITION: the rewrite reached the census aggregate (rewrote ${proxy.rewritten})`);
+  assert.equal(kinds?.census, 'live', `a well-formed count is not refused (${JSON.stringify(kinds).slice(0, 300)})`);
+  assert.equal(cardKind(kinds)?.instances, 0, 'and the census reports the executor\'s 0, not a substitute');
+});
