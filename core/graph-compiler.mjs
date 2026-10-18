@@ -28,7 +28,8 @@
  * anything else is a pre-dispatch REJECTED.
  */
 import { createHash } from 'node:crypto';
-import { EX, NS, RECEIPT_PREDICATES, MARKER_SUBJECT, MARKER_PREDICATES, LG, LG_NS, lgMetaPredicate, BK, BOOKKEEPING_PREDICATES, isBookkeeping } from './graph-vocab.mjs';
+import { EX, NS, RECEIPT_PREDICATES, MARKER_SUBJECT, MARKER_PREDICATES, LG, LG_NS, lgMetaPredicate, BK, BOOKKEEPING_PREDICATES, isBookkeeping, POSTSEQ_TERMS } from './graph-vocab.mjs';
+import { reserveOpId as _reserveOpId, canonReservationBatch as _canonReservationBatch, reserveDigestBody as _reserveDigestBody } from './postseq-reserve.mjs';
 
 export const DIGEST_V = 1;
 /** The literal canonicalization policy (A5). Bound into every digest; bump it if a canonical form changes. */
@@ -129,8 +130,9 @@ function canonAuthority(a) {
 export function canonicalize(intention) {
   const i = intention || {};
   if (typeof i.kind === 'string' && LG_KINDS.includes(i.kind)) return canonicalizeLg(i); // #1562
+  if (POSTSEQ_KINDS.includes(i.kind)) return canonicalizePostseqReserve(i);   // #1629 slice 1
   if (RECORD_KINDS.includes(i.kind)) return canonicalizeRecord(i);   // #1561 — the log-born unit's kinds
-  if (!KINDS.includes(i.kind)) fail(`kind must be one of ${[...KINDS, ...RECORD_KINDS, ...LG_KINDS].join(', ')}`);
+  if (!KINDS.includes(i.kind)) fail(`kind must be one of ${[...KINDS, ...RECORD_KINDS, ...LG_KINDS, ...POSTSEQ_KINDS].join(', ')}`);
   for (const k of Object.keys(i)) if (!FIELDS[i.kind].includes(k)) fail(`unknown field ${k} for kind ${i.kind}`);
   const opId = checkIri(i.opId, 'opId');
   if (!opId.startsWith(`${NS}op/`)) fail(`opId must be under ${NS}op/`);
@@ -191,6 +193,7 @@ export function canonicalize(intention) {
 /** The digest binds EVERY caller-controlled semantic input; nothing system-generated. */
 export function digestOf(c) {
   if (c.lg) return digestLg(c); // #1562
+  if (c.postseq) return digestPostseq(c);   // #1629 slice 1
   if (c.record) return recordDigest(c);   // #1561
   const lines = [`digestV ${DIGEST_V}`, `canonV ${CANON_V}`, `kind ${c.kind}`, `opId ${ref(c.opId)}`, `actor ${ref(c.actor)}`];
   if (c.grant) {
@@ -243,6 +246,7 @@ const assemble = (del, bDel, ins, bIns, where) => `DELETE {\n${template(del, bDe
 export function compile(intention) {
   const c = canonicalize(intention);
   if (c.lg) return compileLg(c, digestOf(c)); // #1562: same template, same staticCheck
+  if (c.postseq) return compilePostseqReserve(c, digestOf(c));   // #1629 slice 1: same template, same staticCheck
   if (c.record) return compileRecord(c);   // #1561
   const digest = digestOf(c);
   const OP = ref(c.opId);
@@ -1580,6 +1584,15 @@ function compileCollectionWrite(c) {
 // SPARQL syntax that the static checker would have to parse around.
 
 export const LG_KINDS = Object.freeze(['lg.put', 'lg.putWrites', 'lg.deleteThread', 'lg.runTransition', 'lg.reap']);
+/**
+ * #1629 slice 1 — the postseq.reserve primitive: ONE compiler-owned guarded executor update that reserves N consecutive
+ * numbers for an ordered batch of derived postIds (ordinary + announcement modes share the allocator). Compiles through
+ * the SAME three-category discipline as every other kind: a top-level duplicate guard, a commit-marker bump, a receipt
+ * bound whenever the guard passes, and EVERY DOMAIN template triple carrying a `?d_` (ok-guarded). The allocator and
+ * reservations live in the bookkeeping graph, classified by the shared POSTSEQ_TERMS vocabulary (core/graph-vocab.mjs).
+ */
+export const POSTSEQ_RESERVE_KIND = 'postseq.reserve';
+export const POSTSEQ_KINDS = Object.freeze([POSTSEQ_RESERVE_KIND]);
 /** WRITES_IDX_MAP of @langchain/langgraph-checkpoint 1.1.5, pinned (a special write's idx is its channel's). */
 export const LG_SPECIAL_IDX = Object.freeze({ __error__: -1, __scheduled__: -2, __interrupt__: -3, __resume__: -4 });
 const LG_FIELDS = {
@@ -1894,6 +1907,149 @@ function compileLg(c, digest) {
     `  ${OP} ${EX.outcome} ?n_outcome .`, `  ${OP} ${EX.digest} ?n_digest .`, `  ${OP} ${EX.actor} ?n_actor .`,
     `  ${OP} ${EX.at} ?n_at .`, `  ${OP} ${EX.commitSeq} ?s1 .`];
   const sparql = assemble(del, bDel, ins, rec, where);
+  const check = staticCheck(sparql, c.opId);
+  if (!check.ok) fail(`compiler rejected its own output: ${check.errors.join('; ')}`);
+  return { sparql, digest, canonical: c };
+}
+
+// =====================================================================================
+// #1629 slice 1 — THE POSTSEQ.RESERVE PRIMITIVE: one compiler-owned guarded executor update that reserves
+// N consecutive numbers for an ordered batch of derived postIds (ordinary + announcement modes share the allocator).
+//
+//   Compile path:  the same three-category discipline as every other kind, the unchanged staticCheck, no raw-update API.
+//   One request:  DELETE/INSERT/WHERE. Duplicate guard (op-receipt), commit-marker bump, receipt binding.
+//
+//   ALLOCATOR precondition (read INSIDE WHERE, ok-guarded, single typed tuple):
+//     exactly one <urn:ex:postseq/allocator> typed <urn:ex:postseq/Allocator>, with one epoch (a non-empty string),
+//     one positive safe-integer nextPostSeq, one positive safe-integer version — all required, all duplicated -> ?ok
+//     stays unbound and the request is PRECONDITION_FAILED with nothing written.
+//
+//   IDENTITY-ABSENCE precondition: each derived postId <urn:ex:postseq/reservation/postId> has no triples in either
+//   graph (an existing reservation OR a stray reference). A duplicate identity -> ?ok stays unbound.
+//
+//   ADVANCE: when every guard holds, ?ok binds, every per-item `?d_postSeq_k = ?d_next + k` is ?d_guarded (no MAX-safe
+//   overflow allowed: both the next and the postSeq+N are checked against MAX_SAFE_INTEGER, refuses otherwise), the
+//   nextPostSeq and version are advanced atomically (nextPostSeq += N, version += 1), and N reservation nodes (in
+//   frozen item order, one executor-side NOW() per batch) are inserted into the bookkeeping graph.
+//
+//   RECEIPT: only on APPLIED (?n_outcome), bound by the same ok-guard, exactly as for every other kind.
+//
+// Replay of the same opId lands APPLIED via the stored receipt (no allocation; nothing changes). A changed draft for
+// the same identities has the same opId, a different digest, and is REJECTED/intent-collision at the receipt step
+// (DS1). A bad allocator (no tuple / two tuples / non-integer nextPostSeq / nextPostSeq == 0 / decimal typed / advance
+// past MAX / a fresh identity that already exists) is PRECONDITION_FAILED and NOTHING is written (A2).
+
+const POSTSEQ_OP_PREFIX = POSTSEQ_TERMS.OP_PREFIX;
+const PERSON_IRI_PSQ = 'https://scrumboard.local/person/';
+const XSD_PSQ = 'http://www.w3.org/2001/XMLSchema#';
+
+const psqLit = (s) => `"${String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+const psqInt = (n) => `"${n}"^^<${XSD_PSQ}integer>`;
+
+const psqSafeInt = (n) => (Number.isSafeInteger(n) ? String(n) : fail(`unsafe integer: ${n}`));
+const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
+
+function canonicalizePostseqReserve(i) {
+  for (const k of Object.keys(i)) if (!['kind', 'opId', 'actor', 'reservations'].includes(k)) fail(`unknown field ${k} for kind ${i.kind}`);
+  if (!Array.isArray(i.reservations) || i.reservations.length === 0) fail('reservations must be a non-empty array');
+  const actor = checkIri(i.actor, 'actor');
+  const opId = checkIri(i.opId, 'opId');
+  if (!opId.startsWith(POSTSEQ_OP_PREFIX)) fail(`opId must start with ${POSTSEQ_OP_PREFIX}`);
+  const items = _canonReservationBatch(i.reservations, 'reservations');
+  const want = _reserveOpId(items);
+  if (opId !== want) fail(`opId ${opId} does not equal reserveOpId(reservations) ${want} (a closed schema picks the opId from the identities; a different opId is refused)`);
+  return { kind: i.kind, opId, actor, evidence: [], targets: [], newAssertion: null, authority: null, grant: null, rule: null, postseq: { items } };
+}
+
+function digestPostseq(c) {
+  const lines = [`digestV ${DIGEST_V}`, `canonV ${CANON_V}`, `kind ${c.kind}`, `opId ${ref(c.opId)}`, `actor ${ref(c.actor)}`,
+    `postseq ${JSON.stringify(_reserveDigestBody(c.postseq.items))}`];
+  return createHash('sha256').update(lines.join('\n') + '\n').digest('hex');
+}
+
+function compilePostseqReserve(c, digest) {
+  const items = c.postseq.items;
+  const N = items.length;
+  const OP = ref(c.opId);
+  const where = [], pre = [], top = [], dBinds = [], del = [], dIns = [], bDel = [], bIns = [];
+  const names = new Map();
+  const v = (text) => {
+    let n = names.get(text);
+    if (!n) { n = `r${names.size}`; names.set(text, n); dBinds.push(ok(text, n)); }
+    return `?d_${n}`;
+  };
+
+  where.push(...dupGuard(OP));
+
+  const ALLOC = POSTSEQ_TERMS.allocator;
+  pre.push(`    GRAPH ${[BK]} { ${ALLOC} a ${POSTSEQ_TERMS.Allocator} ; ${POSTSEQ_TERMS.postSeqEpoch} ?x_epoch ; ${POSTSEQ_TERMS.nextPostSeq} ?x_next ; ${POSTSEQ_TERMS.version} ?x_version . }`);
+  // the epoch is a non-empty PLAIN string literal: an IRI, a language-tagged literal or a typed value refuses.
+  pre.push(`    FILTER(isLiteral(?x_epoch) && DATATYPE(?x_epoch) = <${XSD_PSQ}string> && LANG(?x_epoch) = "" && STR(?x_epoch) != "")`);
+  // overflow guards (P2): the advance of NEXT and VERSION are EACH independently checked against MAX_SAFE_INTEGER,
+  // refuses otherwise. The postSeq allocations per-item are intrinsically bounded (next + k <= next + N).
+  pre.push(`    FILTER(?x_next + ${psqSafeInt(N)} <= ${psqInt(MAX_SAFE.toString())})`);
+  pre.push(`    FILTER(?x_version + 1 <= ${psqInt(MAX_SAFE.toString())})`);
+  pre.push(`    FILTER(?x_version + 1 > 0)`);
+  // datatype / sign / single-tuple checks INSIDE the OPTIONAL { all preconditions } so a failure leaves ?ok unbound
+  // (and the receipt still records PRECONDITION_FAILED) instead of dropping the whole WHERE solution.
+  pre.push(`    FILTER(DATATYPE(?x_next) = <${XSD_PSQ}integer> && DATATYPE(?x_version) = <${XSD_PSQ}integer>)`);
+  pre.push(`    FILTER(?x_next > 0 && ?x_version > 0)`);
+  // exactly one allocator SUBJECT: any other node typed Allocator in the bookkeeping graph refuses the whole batch.
+  pre.push(`    FILTER NOT EXISTS { GRAPH ${[BK]} { ?x_alloc2 a ${POSTSEQ_TERMS.Allocator} FILTER(?x_alloc2 != ${ALLOC}) } }`);
+  // exactly one nextPostSeq / version / postSeqEpoch value on the allocator subject — TERM identity (sameTerm), not
+  // value inequality, so a different numeric datatype with the same lexical value cannot evade the duplicate check.
+  pre.push(`    FILTER NOT EXISTS { GRAPH ${[BK]} { ${ALLOC} ${POSTSEQ_TERMS.nextPostSeq} ?xn2 FILTER(!sameTerm(?xn2, ?x_next)) } }`);
+  pre.push(`    FILTER NOT EXISTS { GRAPH ${[BK]} { ${ALLOC} ${POSTSEQ_TERMS.version} ?xv2 FILTER(!sameTerm(?xv2, ?x_version)) } }`);
+  pre.push(`    FILTER NOT EXISTS { GRAPH ${[BK]} { ${ALLOC} ${POSTSEQ_TERMS.postSeqEpoch} ?xe2 FILTER(!sameTerm(?xe2, ?x_epoch)) } }`);
+  items.forEach((it, k) => {
+    const SUBJ = POSTSEQ_TERMS.reservation(it.postId);
+    pre.push(`    FILTER NOT EXISTS { ${inEither(`${SUBJ} ?xp ?xo`)} }`);
+  });
+
+  dBinds.push(ok('?x_next', 'next'), ok('?x_version', 'verOld'), ok('?x_version + 1', 'verNew'));
+  dBinds.push(ok(`?x_next + ${psqSafeInt(N)}`, 'nextNew'));
+  items.forEach((it, k) => {
+    dBinds.push(ok(`?x_next + ${psqSafeInt(k)}`, `ps${k}`));
+  });
+
+  bDel.push(`  ${v(ALLOC)} ${POSTSEQ_TERMS.nextPostSeq} ?d_next .`,
+            `  ${v(ALLOC)} ${POSTSEQ_TERMS.version} ?d_verOld .`);
+  bIns.push(`  ${v(ALLOC)} ${POSTSEQ_TERMS.nextPostSeq} ?d_nextNew .`,
+            `  ${v(ALLOC)} ${POSTSEQ_TERMS.version} ?d_verNew .`);
+
+  items.forEach((it, k) => {
+    const SUBJ = POSTSEQ_TERMS.reservation(it.postId);
+    const ident = it.mode === 'ordinary'
+      ? JSON.stringify({ author: it.author, requestId: it.requestId })
+      : JSON.stringify({ mutationId: it.mutationId, slot: it.slot });
+    const draftJson = JSON.stringify(it.draft);
+    bIns.push(
+      `  ${v(SUBJ)} a ${v(POSTSEQ_TERMS.Reservation)} .`,
+      `  ${v(SUBJ)} ${POSTSEQ_TERMS.mode} ${v(psqLit(it.mode))} .`,
+      `  ${v(SUBJ)} ${POSTSEQ_TERMS.postId} ${v(psqLit(it.postId))} .`,
+      `  ${v(SUBJ)} ${POSTSEQ_TERMS.reserveOpId} ${v(OP)} .`,
+      `  ${v(SUBJ)} ${POSTSEQ_TERMS.reserveDigest} ${v(psqLit(digest))} .`,
+      `  ${v(SUBJ)} ${POSTSEQ_TERMS.postSeqEpoch} ${v('?x_epoch')} .`,
+      `  ${v(SUBJ)} ${POSTSEQ_TERMS.postSeq} ?d_ps${k} .`,
+      `  ${v(SUBJ)} ${POSTSEQ_TERMS.createdAt} ${v('?n_at')} .`,
+      `  ${v(SUBJ)} ${POSTSEQ_TERMS.index} ${v(psqSafeInt(k))} .`,
+      `  ${v(SUBJ)} ${POSTSEQ_TERMS.identityJson} ${v(psqLit(ident))} .`,
+      `  ${v(SUBJ)} ${POSTSEQ_TERMS.draftJson} ${v(psqLit(draftJson))} .`,
+    );
+  });
+
+  pre.push(`    BIND(true AS ?ok)`);
+  where.push(`  OPTIONAL {`, ...pre, `  }`);
+  where.push(...top);
+  where.push(`  BIND(IF(BOUND(?ok), ${EX.APPLIED}, ${EX.PRECONDITION_FAILED}) AS ?n_outcome)`);
+  where.push(nb(JSON.stringify(digest), 'digest'), nb(ref(c.actor), 'actor'), nb('NOW()', 'at'));
+  where.push(...dBinds);
+
+  bDel.unshift(`  ${MARKER_SUBJECT} ${EX.commitSeq} ?s .`);
+  bIns.unshift(`  ${MARKER_SUBJECT} ${EX.commitSeq} ?s1 .`,
+    `  ${OP} ${EX.outcome} ?n_outcome .`, `  ${OP} ${EX.digest} ?n_digest .`, `  ${OP} ${EX.actor} ?n_actor .`,
+    `  ${OP} ${EX.at} ?n_at .`, `  ${OP} ${EX.commitSeq} ?s1 .`);
+  const sparql = assemble(del, bDel, dIns, bIns, where);
   const check = staticCheck(sparql, c.opId);
   if (!check.ok) fail(`compiler rejected its own output: ${check.errors.join('; ')}`);
   return { sparql, digest, canonical: c };
