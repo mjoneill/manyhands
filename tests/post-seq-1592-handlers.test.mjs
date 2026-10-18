@@ -20,6 +20,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { freePort, waitForHttp, makeBoardFixture, PROJECT_DIR } from './helpers/harness.mjs';
 
 const T0 = '2026-10-04T12:00:00.000Z';
@@ -30,12 +31,16 @@ async function api(base, method, route, body) {
 }
 async function spawnServer(file, barrierDir) {
   const port = await freePort();
+  const instance = `ps1592h-${randomUUID()}`;
   const env = { ...process.env, SCRUM_BOARD_FILE: file, SCRUM_PORT: String(port), SCRUM_MCP_NOTIFY_URL: '', SCRUM_ATTACHMENTS_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'ps1592h-attach-')),
-    SCRUM_CHANNEL_CONFIG_FILE: path.join(os.tmpdir(), `ps1592h-chan-${process.pid}-${port}.json`), SCRUM_INSTANCE_ID: `ps1592h-${port}`, SCRUM_TEST_BARRIER_DIR: barrierDir };
+    SCRUM_CHANNEL_CONFIG_FILE: path.join(os.tmpdir(), `ps1592h-chan-${process.pid}-${port}.json`), SCRUM_INSTANCE_ID: instance, SCRUM_TEST_BARRIER_DIR: barrierDir };
   const child = spawn('node', ['server.js'], { cwd: PROJECT_DIR, env, stdio: ['ignore', 'pipe', 'pipe'] });
   const err = []; child.stderr.on('data', (d) => err.push(String(d)));
   const base = `http://127.0.0.1:${port}`;
-  await waitForHttp(`${base}/api/board`, 15000);
+  // #1713 — readiness means OUR child answered (#1259): freePort() hands the number back unheld, so without the
+  // instance check a stranger already on the port satisfies the poll and every request below goes to its board.
+  try { await waitForHttp(`${base}/api/board`, 15000, { expectHeader: ['x-scrum-instance', instance] }); }
+  catch (e) { child.kill('SIGKILL'); e.message += `\n--- child stderr ---\n${err.join('')}`; throw e; }
   return { base, stop: () => { try { child.kill('SIGKILL'); } catch { /* gone */ } }, stderr: () => err.join('') };
 }
 const posts = async (base) => (await api(base, 'GET', '/api/conversations')).body;
@@ -105,7 +110,10 @@ async function scenario(h, damaged) {
   let a, b; let ctx;
   try {
     a = await spawnServer(file, barrierDir);
-    assert.equal((await post(a.base, 'seed one')).status, 201); assert.equal((await post(a.base, 'seed two')).status, 201);
+    for (const seed of ['seed one', 'seed two']) {
+      const r = await post(a.base, seed);   // #1713 — a refusal here names its body and the child's stderr, so a recurrence carries its cause
+      assert.equal(r.status, 201, `${seed}: ${r.status} ${r.text}\n--- child stderr ---\n${a.stderr()}`);
+    }
     ctx = await h.setup(a.base);
     a.stop(); a = null;
     if (damaged) corrupt(file);
