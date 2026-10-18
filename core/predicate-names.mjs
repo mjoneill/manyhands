@@ -72,6 +72,9 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:definedBy': 'scrum:definedBy',     // → entity: the card holding the full definition
   'scrum:RoleVersion': null,                // #1387 — the type; a state a role has held
   'scrum:Talk': null,                       // #1401 — the type; a 1:1 conversation tag
+  'scrum:MoveFence': null,                  // #1707 — the type; a settled move id that can never land
+  'scrum:fencedMove': 'scrum:fencedMove',   // #1707 → the fenced move's requestId (a literal)
+  'scrum:fencedAt': 'scrum:fencedAt',       // #1707 → when it was fenced (absent on an imported legacy fence)
   'scrum:with': 'scrum:with',               // → the seat a talk is with
   'scrum:conversation': 'scrum:conversation', // → the talk a post is tagged into (#1401)
   'scrum:closedAt': 'scrum:closedAt',       // → when a talk was closed (#1401 slice 3; null while open)

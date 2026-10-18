@@ -33,6 +33,7 @@ import { createCollectionsUnit } from '../core/collections-unit.mjs';
 import { importIntention } from '../core/collection-import-1624.mjs';
 import { wakeCreateIntention, wakesForQuery, wakeFromRow } from '../core/smallkinds-unit.mjs';
 import { renameEntity } from '../core/collection-renames-1624.mjs';
+import { asMoveFenceEntities } from '../core/move-fences.mjs';
 
 const args = process.argv.slice(2);
 const opt = (k) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : null; };
@@ -47,6 +48,8 @@ const sha = (s) => createHash('sha256').update(s).digest('hex').slice(0, 32);
 const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
 // Identifiers that cannot be IRIs are renamed on the way in (core/collection-renames-1624.mjs, owner decision).
 const board = renameEntity(domainToBoard(isJsonLdDocument(raw) ? jsonLdToDomain(raw) : raw));
+// #1707 — the document's move fences are requestId STRINGS; the graph's family holds one ENTITY per fence (core/move-fences.mjs)
+board.moveFences = asMoveFenceEntities(board.moveFences);
 // The live configuration runs with the cards unit on, so a reference to a card is a graph subject.
 const families = collectionFamilies({ cardsUnit: true });
 const g = createGraphClient({ baseUrl: executor, expectedDatasetId: dataset, timeoutMs: 120000 });

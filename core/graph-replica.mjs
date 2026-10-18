@@ -192,6 +192,7 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:Role', 'scrum:roleKey', 'scrum:definedBy', 'scrum:role',
   'scrum:RoleVersion', 'scrum:ofRole',   // #1387 — a revised role keeps its history
   'scrum:Talk', 'scrum:with', 'scrum:conversation', 'scrum:closedAt',   // #1401 — a 1:1 conversation tag and the posts that carry it
+  'scrum:MoveFence', 'scrum:fencedMove', 'scrum:fencedAt',   // #1707 — a settled move id that can never land
   // #1202 — the provenance ledger row
   'scrum:ModelCall', 'scrum:agent', 'scrum:model', 'scrum:provider', 'scrum:protocol',
   'scrum:promptVersion', 'scrum:tokensIn', 'scrum:tokensOut', 'scrum:reasoningTokens', 'scrum:cachedPromptTokens', 'scrum:cost', 'scrum:costMeasured', 'scrum:costCategories', 'scrum:stopReason',
@@ -1165,6 +1166,16 @@ function projectRoleVersion(store, e) {
   if (e.dateCreated) add(nn(SC + 'dateCreated'), lit(String(e.dateCreated)));
 }
 
+// #1707 — a move fence: the requestId that can never land, and when it was fenced (an imported legacy fence has no time).
+function projectMoveFence(store, e) {
+  const S = IRI.scrum;
+  const s = nn(e['@id']);
+  const add = (p, o) => store.add(oxigraph.triple(s, p, o));
+  add(A, nn(S + 'MoveFence'));
+  if (e['scrum:fencedMove']) add(nn(S + 'fencedMove'), lit(String(e['scrum:fencedMove'])));
+  if (e['scrum:fencedAt']) add(nn(S + 'fencedAt'), lit(String(e['scrum:fencedAt'])));
+}
+
 // #1401 — a talk: the tag a 1:1 view filters by. Small on purpose.
 function projectTalk(store, e) {
   const S = IRI.scrum, SC = IRI.schema, P = IRI.person;
@@ -1945,6 +1956,8 @@ export function projectEntity(store, e) {
       projectRole(store, e);
     } else if (t === 'scrum:Talk') {
       projectTalk(store, e);          // #1401
+    } else if (t === 'scrum:MoveFence') {
+      projectMoveFence(store, e);     // #1707
     } else if (t === 'scrum:RoleVersion') {
       projectRoleVersion(store, e);   // #1387
     } else if (t === 'scrum:Agent') {

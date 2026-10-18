@@ -49,6 +49,9 @@ const SKIP = HAVE_PY ? false : 'UNAVAILABLE: no python with pyoxigraph (a skip i
 const BK = 'urn:scrum:bookkeeping:executor';
 const EXTRA_TERMS = ['scrum:CardImport', 'scrum:sourceDigest', 'scrum:postSeq', 'scrum:inCollection'];
 const EXTRA_PREDICATES = ['scrum:sourceDigest', 'scrum:postSeq', 'scrum:inCollection'];
+// Terms DECLARED after the golden was taken (3b690b5) that this fixture does not emit, so they land in `unused`, each named with
+// its card. A term added here is a reviewed vocabulary change; a term that appears in `unused` without being listed still fails V1.
+const DECLARED_SINCE_GOLDEN = ['scrum:MoveFence', 'scrum:fencedMove', 'scrum:fencedAt'];   // #1707 — the move fences
 const PREFIX = { scrum: 'https://scrumboard.local/ns#', schema: 'https://schema.org/', entity: 'https://scrumboard.local/entity/', column: 'https://scrumboard.local/column/' };
 const iri = (pfx) => { const [p, l] = pfx.split(':'); return PREFIX[p] ? `<${PREFIX[p]}${l}>` : null; };
 const get = async (w, route) => { const r = await fetch(`${w.rest.baseUrl}${route}`, { signal: AbortSignal.timeout(30000) }); return { status: r.status, j: await r.json() }; };
@@ -69,7 +72,8 @@ test('#1645 (V1) the vocabulary drift body equals the replica\'s, judged against
     const g = GOLDEN.drift;
     const union = new Set([...GRAPH_VOCABULARY, ...EXECUTOR_ONLY_VOCABULARY]);
     for (const t of EXTRA_TERMS) assert.ok(EXECUTOR_ONLY_VOCABULARY.has(t) && !GRAPH_VOCABULARY.has(t), `PRECONDITION: ${t} is an executor-only term`);
-    const expectUnused = [...new Set([...g.unused, ...[...EXECUTOR_ONLY_VOCABULARY].filter((t) => !EXTRA_TERMS.includes(t))])].sort();
+    for (const t of DECLARED_SINCE_GOLDEN) assert.ok(GRAPH_VOCABULARY.has(t) && !g.unused.includes(t), `PRECONDITION: ${t} is declared now and was not in the golden`);
+    const expectUnused = [...new Set([...g.unused, ...DECLARED_SINCE_GOLDEN, ...[...EXECUTOR_ONLY_VOCABULARY].filter((t) => !EXTRA_TERMS.includes(t))])].sort();
     const body = Object.fromEntries(Object.keys(g).map((k) => [k, j[k]]));
     assert.deepEqual(body, { ...g, emitted: g.emitted + EXTRA_TERMS.length, declared: union.size, undeclared: [], unused: expectUnused, ok: true },
       'the drift body: the golden one, plus exactly the listed extras, judged against the union');

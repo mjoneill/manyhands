@@ -47,5 +47,9 @@ export function collectionFamilies({ cardsUnit = false } = {}) {
     { key: 'roles', routes: ['/api/roles'], requires: (e) => refs(e['scrum:definedBy']) },
     { key: 'roleVersions', routes: ['/api/roles'], requires: (e) => refs(e['scrum:definedBy']), inherits: (e) => e['scrum:ofRole'] },
     { key: 'obligations', routes: ['/api/obligations'], requires: (e) => refs(e.about) },
+    // #1707 — the move fences (core/move-fences.mjs). An entity per fenced requestId, its IRI derived from the id, so a twin
+    // fence is a fresh-subject collision. No routes: the card routes read it through readBoard, and must not become
+    // collection-dependent for it.
+    { key: 'moveFences', routes: [] },
   ];
 }

@@ -72,6 +72,7 @@ import { mintId } from './core/tending-ids.mjs';
 import { createPrompt, editPrompt, setEnabled, reorderPlaylist, removePrompt, setShuffle, readShuffle, assertSlug } from './core/tending-authoring.mjs';
 import { resolveProvenance } from './core/tending-provenance.mjs';
 import { boardToDomain, domainToBoard, cardToNode } from './core/mapping.mjs';
+import { moveFenceIds, moveFenceEntity } from './core/move-fences.mjs';   // #1707
 import { OUTBOX_FIELD, outboxOf, withAnnouncement, listOutbox, modeProblem, legacyProof, postMatchesEntry, opIdFor, announcePostId, postCreateIntention, obligationIdOf } from './core/announce-outbox.mjs';   // #1574 C3a/C3b/C3c
 import * as U3 from './core/unit3-graph.mjs';   // #1582 — deliveries and model calls in the graph
 import { createGraphClient, setExecutorMeter } from './core/graph-client.mjs';   // #1574 C3b — the conversations unit's executor door
@@ -10628,7 +10629,11 @@ async function handleMoveFence(req, res, idOrShortId) {
       if (Number.isFinite(pause) && pause > 0) await new Promise((r) => setTimeout(r, Math.min(pause, 5000)));
       const fences = moveFencesOf(data);
       if (!fences.includes(requestId)) {
-        data.moveFences = [...fences, requestId];
+        // #1707 — with the unit on, the fence is an entity of the graph-held `moveFences` collection, committed by this same
+        // guarded write; a lost or re-seeded document cannot forget it. With the unit off, the document's string, as before.
+        data.moveFences = fencesInGraph()
+          ? [...(Array.isArray(data.moveFences) ? data.moveFences : []), moveFenceEntity(requestId, new Date().toISOString())]
+          : [...fences, requestId];
         const target = card || { id: String(idOrShortId), shortId: null };
         writeBoard(data, [{ op: 'update', actor: null, entity: { kind: 'card', id: target.id, shortId: target.shortId ?? null }, state: card || { id: target.id, moveFenced: requestId } }]);
       }
@@ -10640,7 +10645,9 @@ async function handleMoveFence(req, res, idOrShortId) {
     sendJSON(res, 500, { error: 'Failed to fence the move' });
   }
 }
-const moveFencesOf = (data) => (Array.isArray(data.moveFences) ? data.moveFences.filter((x) => typeof x === 'string') : []);
+// #1707 — either shape: the document's strings (unit off) or the graph-held collection's entities (unit on)
+const moveFencesOf = (data) => moveFenceIds(data.moveFences);
+const fencesInGraph = () => !!(COLLECTIONS && COLLECTIONS.keys.includes('moveFences'));
 
 // ── /api/cards/:id/claim — atomic first-write-wins claim (#348) ──
 // The coordination primitive: two agents racing to claim the same card must
@@ -13014,6 +13021,18 @@ if (SMALLKINDS_UNIT) {
     try { await COLLECTIONS.load(); } catch (e) {
       console.error(`#1624 small-kinds unit: the collections could not be read from the graph — refusing to serve: ${e.message}`);
       process.exit(1);
+    }
+    // #1707 — a fence the DOCUMENT still holds and the graph does not would silently stop refusing its move the moment the unit
+    // serves fences from the graph. Refuse to start until the migration has copied every one (scripts/migrate-collections-1624.mjs).
+    if (COLLECTIONS.keys.includes('moveFences')) {
+      let docFences = [];
+      try { docFences = moveFenceIds(domainToBoard(loadDomain(BOARD_DATA_FILE)).moveFences); } catch { /* no readable document: nothing it could hold */ }
+      const inGraph = new Set(moveFenceIds(COLLECTIONS.snapshot().moveFences));
+      const missing = docFences.filter((id) => !inGraph.has(id));
+      if (missing.length) {
+        console.error(`#1707 move fences: the document holds ${missing.length} fence(s) the graph does not (e.g. ${missing[0]}); serving would let those moves land. Run scripts/migrate-collections-1624.mjs first — refusing to serve.`);
+        process.exit(1);
+      }
     }
   }
   console.error(`${new Date().toISOString()} #1624 small-kinds unit ON: wakes live in the graph executor; the document collection is not read`);

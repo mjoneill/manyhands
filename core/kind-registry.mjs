@@ -192,6 +192,13 @@ export const KIND_DECLARATIONS = Object.freeze([
       + 'holder is the OPEN interval, never the newest node by date.',
   },
   {
+    name: 'scrum:MoveFence', eventKind: null, collection: null,
+    createdBy: 'POST /api/cards/:id/move-fence (a tab settling a move whose outcome it never learned, #1584/#1707)',
+    definition: 'A move requestId that can NEVER land: its tab lost the reply, could not tell whether the move committed, '
+      + 'and settled it by fencing. From the fence on, a makeRoom PATCH carrying that id is refused 409 MOVE_FENCED. '
+      + 'Permanent by design (an id carries no trustworthy age). Not proof the move never applied: only that it cannot apply now.',
+  },
+  {
     name: 'scrum:Talk', eventKind: 'talk', collection: 'talks',
     createdBy: 'POST /api/talks (the commons header\'s "Talk with…")',
     definition: 'A 1:1 conversation TAG (#1401, ruled by the owner 2026-09-17): title, the seat it is with, '
