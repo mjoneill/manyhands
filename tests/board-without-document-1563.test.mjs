@@ -100,24 +100,34 @@ async function world(body) {
     if (file === 'present') fs.writeFileSync(w.boardFile, kept);   // 'as-is' leaves the file exactly as the last REST left it
     if (file === 'absent') fs.rmSync(w.boardFile, { force: true });
     if (file === 'unreadable') { fs.writeFileSync(w.boardFile, kept); fs.chmodSync(w.boardFile, 0o000); }
-    const rec = record ? path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'r1563-rec-')), 'fs.txt') : null;
+    // EVERY start gets a PRIVATE temp directory, removed on stop or on a refused start: the recorder's file lives in it, and the
+    // harness's attachments dir and channel config (made under os.tmpdir(), read at call time) land in it too, so a start the
+    // server refuses leaves nothing in the suite's shared folder (CI found 20 entries left at e862122)
+    const priv = fs.mkdtempSync(path.join(os.tmpdir(), 'r1563-'));
+    const rec = record ? path.join(priv, 'fs.txt') : null;
     const recEnv = rec ? { SCRUM_FS_RECORD: rec, SCRUM_FS_RECORD_ALL: '1', NODE_OPTIONS: `--import ${RECORDER}` } : {};
-    const r = await startRestServer({ boardFile: w.boardFile, env: { SCRUM_GRAPH_DATASET_ID: WB_DATASET, SCRUM_GRAPH_EXECUTOR_URL: executorUrl, SCRUM_ROSTER_FILE: ROSTER, ...UNITS, ...SOURCES, ...(mode ? { [MODE_ENV]: mode } : {}), ...recEnv, ...env } });
-    running.push(r);
+    const savedTmp = process.env.TMPDIR; process.env.TMPDIR = priv;
+    let r;
+    try {
+      r = await startRestServer({ boardFile: w.boardFile, env: { SCRUM_GRAPH_DATASET_ID: WB_DATASET, SCRUM_GRAPH_EXECUTOR_URL: executorUrl, SCRUM_ROSTER_FILE: ROSTER, ...UNITS, ...SOURCES, ...(mode ? { [MODE_ENV]: mode } : {}), ...recEnv, ...env } });
+    } catch (e) { fs.rmSync(priv, { recursive: true, force: true }); throw e; } finally {
+      if (savedTmp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = savedTmp;
+    }
+    running.push(r); r.priv = priv;
     const boardOpens = () => (rec && fs.existsSync(rec) ? fs.readFileSync(rec, 'utf8').split('\n').filter((l) => l === w.boardFile || l === fs.realpathSync.native(path.dirname(w.boardFile)) + '/' + path.basename(w.boardFile)).length : 0);
     const recorded = () => (rec && fs.existsSync(rec) ? fs.readFileSync(rec, 'utf8').split('\n').filter(Boolean).length : 0);
     const call = async (method, route, payload) => {
       const x = await fetch(`${r.baseUrl}${route}`, { method, ...(payload ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) } : {}), signal: AbortSignal.timeout(60000) });
       const t = await x.text(); let j = null; try { j = JSON.parse(t); } catch { /* not json */ } return { status: x.status, text: t, json: j };
     };
-    const stop = async () => { const i = running.indexOf(r); if (i >= 0) running.splice(i, 1); try { fs.chmodSync(w.boardFile, 0o644); } catch { /* absent */ } const had = fs.existsSync(w.boardFile) ? fs.readFileSync(w.boardFile) : null; await r.stop(); if (had) fs.writeFileSync(w.boardFile, had); };
+    const stop = async () => { const i = running.indexOf(r); if (i >= 0) running.splice(i, 1); try { fs.chmodSync(w.boardFile, 0o644); } catch { /* absent */ } const had = fs.existsSync(w.boardFile) ? fs.readFileSync(w.boardFile) : null; await r.stop(); if (had) fs.writeFileSync(w.boardFile, had); fs.rmSync(priv, { recursive: true, force: true }); };
     return { r, call, boardOpens, recorded, stop };
   };
   try { await body({ w, rest, kept }); } finally {
     // the executor MUST be stopped whatever failed above: a leaked executor keeps the test runner alive forever (found 2026-10-18:
     // a row that left the board file chmod 000 made the restore below throw before w.stop(), and the run hung 50 min)
     try { fs.chmodSync(w.boardFile, 0o644); } catch { /* absent */ }
-    for (const r of [...running]) await r.stop().catch(() => {});
+    for (const r of [...running]) { await r.stop().catch(() => {}); if (r.priv) fs.rmSync(r.priv, { recursive: true, force: true }); }
     try { fs.writeFileSync(w.boardFile, kept); } catch { /* the world is going anyway */ }
     await w.stop();
   }
