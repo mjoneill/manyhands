@@ -133,6 +133,40 @@ export const lgMetaPredicate = (key) => `<${LG_NS}meta/${encodeURIComponent(key)
  * Everything else is DOMAIN. These lists are the only definition: the compiler's static check, the
  * executor, the offline migration and the rows all read them.
  */
+/**
+ * #1629 slice 1 — the SHARED vocabulary for the postseq.reserve primitive: subjects, types, and predicates the
+ * compiler, the readers, and the authority classify IDENTICALLY (so a write and a read cannot drift apart). Every term
+ * below is BOOKKEEPING — the allocator and the reservations sit in the bookkeeping graph (the same one the receipt and
+ * the marker live in) and never reach the public domain projection.
+ *
+ *   allocator    <urn:ex:postseq/allocator>                       type <urn:ex:postseq/Allocator>
+ *   reservation  <urn:ex:postseq/reservation/<derived-UUID>>      type <urn:ex:postseq/Reservation>
+ *
+ * Integer mirrors (nextPostSeq, version, postSeq, index) are xsd:integer; createdAt is xsd:dateTime; reserveOpId is an
+ * IRI; epoch, postId, mode, reserveDigest, identityJson, draftJson are plain string literals.
+ */
+export const POSTSEQ_NS = `${NS}postseq/`;
+const psi = (local) => `<${POSTSEQ_NS}${local}>`;
+export const POSTSEQ_TERMS = Object.freeze({
+  allocator: psi('allocator'),
+  Allocator: psi('Allocator'),
+  reservation: (postId) => psi(`reservation/${postId}`),
+  Reservation: psi('Reservation'),
+  postSeqEpoch: psi('postSeqEpoch'),
+  nextPostSeq: psi('nextPostSeq'),
+  version: psi('version'),
+  postId: psi('postId'),
+  mode: psi('mode'),
+  reserveOpId: psi('reserveOpId'),
+  reserveDigest: psi('reserveDigest'),
+  postSeq: psi('postSeq'),
+  createdAt: psi('createdAt'),
+  index: psi('index'),
+  identityJson: psi('identityJson'),
+  draftJson: psi('draftJson'),
+  OP_PREFIX: `${NS}op/postseq/reserve/`,
+});
+
 export const BOOKKEEPING_GRAPH = 'urn:scrum:bookkeeping:executor';
 export const BK = `<${BOOKKEEPING_GRAPH}>`;
 export const MARKER_PREDICATES_ALL = Object.freeze([
@@ -144,8 +178,12 @@ export const BOOKKEEPING_PREDICATES = Object.freeze([...new Set([
   ...RECEIPT_PREDICATES,
   ...MARKER_PREDICATES_ALL,
   EX.ver, EX.recordedBy, EX.retiredBy, ENTITY_JSON, iri('selfCheck'),
+  POSTSEQ_TERMS.postSeqEpoch, POSTSEQ_TERMS.nextPostSeq, POSTSEQ_TERMS.version,
+  POSTSEQ_TERMS.postId, POSTSEQ_TERMS.mode, POSTSEQ_TERMS.reserveOpId,
+  POSTSEQ_TERMS.reserveDigest, POSTSEQ_TERMS.postSeq, POSTSEQ_TERMS.createdAt,
+  POSTSEQ_TERMS.index, POSTSEQ_TERMS.identityJson, POSTSEQ_TERMS.draftJson,
 ])]);
-export const BOOKKEEPING_SUBJECT_PREFIXES = Object.freeze([`${NS}op/`, `${NS}selfcheck/`]);
+export const BOOKKEEPING_SUBJECT_PREFIXES = Object.freeze([`${NS}op/`, `${NS}selfcheck/`, POSTSEQ_NS]);
 export const BOOKKEEPING_SUBJECTS = Object.freeze([`${NS}dataset`]);
 const BK_PRED_SET = new Set(BOOKKEEPING_PREDICATES.map((p) => p.replace(/^<|>$/g, '')));
 /** Is this (subject IRI, predicate IRI) bookkeeping? Bare IRIs or <angle> form both accepted. */
