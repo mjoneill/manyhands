@@ -391,15 +391,26 @@
    "reason": "claimedAt is a fixed date in the past. The product windows on a claim's age are monotone, 'older than N hours means stale' (core/in-flight.mjs, core/stale-claims.mjs), and no upper bound on a claim's age was found, so an old fixed claim cannot cross a window by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
   },
   {
-   "file": "tests/ready-executor-1644-snapshot.test.mjs",
-   "statement": "L1 LATENCY on a production-sized board: executor p95 <= 1.0 s AND <= 2x the in-process p95, idle and under CPU load",
+   "file": "tests/latency/ready-executor-1644-latency.test.mjs",
+   "statement": "function seed",
+   "field": "claimedAt",
+   "consumer": "startExecutor",
+   "dates": [
+    "2026-08-02T00:00:00.000Z"
+   ],
+   "fingerprint": "2d862b546ba1ae0f",
+   "reason": "claimedAt is a fixed date in the past. The product windows on a claim's age are monotone, 'older than N hours means stale' (core/in-flight.mjs, core/stale-claims.mjs), and no upper bound on a claim's age was found, so an old fixed claim cannot cross a window by time passing. Read as a group on 2026-10-15 (#1696), not line by line. Re-read 2026-10-17 at c008b76 for the move of L1 (#1693) from tests/ready-executor-1644-snapshot.test.mjs to tests/latency/: the date is the same fixture literal (line 27, a card held by ada), and the only product comparisons of claimedAt against the clock are still 'age >= N hours means stale' (core/in-flight.mjs:67, core/stale-claims.mjs:82), with no upper bound."
+  },
+  {
+   "file": "tests/latency/ready-executor-1644-latency.test.mjs",
+   "statement": "L1 LATENCY on a production-sized board: executor p95 <= 1.5 s idle and <= 3.0 s under CPU load (the ratio to the in-process p95 is printed, not asserted)",
    "field": "claimedAt",
    "consumer": "spawn",
    "dates": [
     "2026-08-02T00:00:00.000Z"
    ],
-   "fingerprint": "242249ba8d8b4497",
-   "reason": "claimedAt is a fixed date in the past. The product windows on a claim's age are monotone, 'older than N hours means stale' (core/in-flight.mjs, core/stale-claims.mjs), and no upper bound on a claim's age was found, so an old fixed claim cannot cross a window by time passing. Read as a group on 2026-10-15 (#1696), not line by line."
+   "fingerprint": "82a57866fa6e36de",
+   "reason": "claimedAt is a fixed date in the past. The product windows on a claim's age are monotone, 'older than N hours means stale' (core/in-flight.mjs, core/stale-claims.mjs), and no upper bound on a claim's age was found, so an old fixed claim cannot cross a window by time passing. Read as a group on 2026-10-15 (#1696), not line by line. Re-read 2026-10-17 at c008b76 for the move of L1 (#1693) from tests/ready-executor-1644-snapshot.test.mjs to tests/latency/: the date is the same fixture literal (line 27, a card held by ada), and the only product comparisons of claimedAt against the clock are still 'age >= N hours means stale' (core/in-flight.mjs:67, core/stale-claims.mjs:82), with no upper bound."
   },
   {
    "file": "tests/ready-executor-1644-snapshot.test.mjs",
