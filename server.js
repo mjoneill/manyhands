@@ -148,7 +148,8 @@ const BOARD_DOCUMENT = process.env.SCRUM_BOARD_DOCUMENT ?? 'on';
 const DOCUMENT_ONLY_FIELDS = [
   { field: 'outbox (announcement origins and entries)', card: '#1629', owned: () => false },
   { field: 'labelAliases', card: '#1640', owned: () => false },
-  { field: 'moveFences', card: '#1707', owned: () => false },
+  // #1707 — the moveFences collection family is held by the collections unit, which the smallkinds unit turns on
+  { field: 'moveFences', card: '#1707', owned: () => SMALLKINDS_UNIT },
 ];
 if (!['on', 'read-off', 'off'].includes(BOARD_DOCUMENT)) {
   console.error(`#1563 SCRUM_BOARD_DOCUMENT=${JSON.stringify(BOARD_DOCUMENT)} is not one of on, read-off, off — refusing to start`);
@@ -13072,7 +13073,8 @@ if (SMALLKINDS_UNIT) {
     // serves fences from the graph. Refuse to start until the migration has copied every one (scripts/migrate-collections-1624.mjs).
     if (COLLECTIONS.keys.includes('moveFences')) {
       let docFences = [];
-      try { docFences = moveFenceIds(domainToBoard(loadDomain(BOARD_DATA_FILE)).moveFences); } catch { /* no readable document: nothing it could hold */ }
+      // #1563 — under read-off/off the document is never read, so it cannot be the source of a fence: no check, no open
+      if (DOCUMENT_READS) try { docFences = moveFenceIds(domainToBoard(loadDomain(BOARD_DATA_FILE)).moveFences); } catch { /* no readable document: nothing it could hold */ }
       const inGraph = new Set(moveFenceIds(COLLECTIONS.snapshot().moveFences));
       const missing = docFences.filter((id) => !inGraph.has(id));
       if (missing.length) {
