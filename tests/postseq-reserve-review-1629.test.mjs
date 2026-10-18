@@ -344,7 +344,7 @@ test('#1629 review (R12) the allocator read detects MULTIPLE allocator subjects 
 test('#1629 review (D6) EACH accepted ordinary draft field, changed alone, changes the canonical digest and keeps the opId', () => {
   const base = { body: 'b', attachedTo: null, mentions: [], attachments: [], conversation: null, onBehalfOf: null };
   const changed = {
-    body: 'b2', attachedTo: 'card-x', mentions: ['grace'], attachments: [{ id: 'z', mime: null, name: null, size: null }],
+    body: 'b2', attachedTo: 'card-x', mentions: ['grace'], attachments: [{ id: 'z', mime: 'image/png', name: 'z.png', size: 1 }],
     conversation: 'talk-x', onBehalfOf: 'grace', recovered: 'rec', opId: 'urn:ex:op/post/write/x', origin: { mutationId: 'm', slot: 's' },
     originalAuthorToken: 'tok', authorCorrectedAt: '2026-10-18T00:00:00.000Z', authorCorrectedBy: 'grace',
   };
@@ -357,7 +357,7 @@ test('#1629 review (D6) EACH accepted ordinary draft field, changed alone, chang
   }
   // and each nested attachment field
   for (const [k, v] of Object.entries({ id: 'q', mime: 'text/plain', name: 'n', size: 7 })) {
-    const att = { id: 'z', mime: null, name: null, size: null };
+    const att = { id: 'z', mime: 'image/png', name: 'z.png', size: 1 };
     const a1 = digestOf(canonicalize(intent({ ...base, attachments: [att] })));
     const a2 = digestOf(canonicalize(intent({ ...base, attachments: [{ ...att, [k]: v }] })));
     assert.notEqual(a1, a2, `attachments[].${k}: bound in the digest`);
@@ -459,13 +459,13 @@ test('#1629 review (D8) origin.occurredAt is accepted like post.write, bound in 
 });
 
 test('#1629 review (D9) prototype-named own keys (constructor, toString, __proto__) are refused in every closed object, not silently dropped', () => {
-  const att = '{"id":"a","mime":null,"name":null,"size":null}';
+  const att = '{"id":"a","mime":"image/png","name":"a.png","size":1}';
   const good = JSON.parse(`[{"mode":"ordinary","author":"ada","requestId":"d9","draft":{"body":"b","attachments":[${att}]}}]`);
   assert.doesNotThrow(() => canonReservationBatch(good, 'r'), 'CONTROL: a valid JSON-parsed attachment is accepted');
   for (const key of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
     const bad = (where) => JSON.parse(where.replace('@', `"${key}":"discarded",`));
     for (const [what, src] of [
-      ['attachment', `[{"mode":"ordinary","author":"ada","requestId":"d9","draft":{"body":"b","attachments":[{@"id":"a","mime":null,"name":null,"size":null}]}}]`],
+      ['attachment', `[{"mode":"ordinary","author":"ada","requestId":"d9","draft":{"body":"b","attachments":[{@"id":"a","mime":"image/png","name":"a.png","size":1}]}}]`],
       ['draft', `[{"mode":"ordinary","author":"ada","requestId":"d9","draft":{@"body":"b"}}]`],
       ['origin', `[{"mode":"ordinary","author":"ada","requestId":"d9","draft":{"body":"b","origin":{@"mutationId":"m","slot":"s"}}}]`],
       ['item', `[{@"mode":"ordinary","author":"ada","requestId":"d9","draft":{"body":"b"}}]`],
@@ -500,4 +500,17 @@ test('#1629 review (R15) a malformed identity string is refused BEFORE anything 
     const back = await M.readPostSeqReservation(client, postWriteId('adá', 'r15-ünï'));
     assert.equal(back.ok, true, `CONTROL: and reads back (${JSON.stringify(back)})`);
   });
+});
+
+test('#1629 review (D10) attachment members follow post.write: mime, name and size are required, never null or missing', () => {
+  const item = (att) => [{ mode: 'ordinary', author: 'ada', requestId: 'd10', draft: { body: 'b', attachments: [att] } }];
+  const full = { id: 'a', mime: 'image/png', name: 'a.png', size: 1 };
+  assert.doesNotThrow(() => canonReservationBatch(item(full), 'r'), 'CONTROL: a complete attachment is accepted');
+  assert.doesNotThrow(() => canonReservationBatch([{ mode: 'ordinary', author: 'ada', requestId: 'd10', draft: { body: 'b', attachments: null } }], 'r'), 'CONTROL: a null attachments ARRAY still defaults to empty');
+  for (const k of ['id', 'mime', 'name', 'size']) {
+    const missing = { ...full }; delete missing[k];
+    assert.throws(() => canonReservationBatch(item(missing), 'r'), new RegExp(k), `missing ${k} is refused`);
+    assert.throws(() => canonReservationBatch(item({ ...full, [k]: null }), 'r'), new RegExp(k), `null ${k} is refused`);
+  }
+  for (const size of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, '1']) assert.throws(() => canonReservationBatch(item({ ...full, size }), 'r'), /size/, `size ${size} is refused`);
 });
