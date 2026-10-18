@@ -15,6 +15,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -45,7 +46,12 @@ test('#1707 (MM1–MM3) fences recorded in the document before the switch: boot 
 
     // MM1 — the unit ON over a graph that does not hold the document's fence: must not serve
     let err = null;
+    // a start the server REFUSES leaves the harness's attachments directory behind (it is made before the process runs and only
+    // stop() removes it): note what exists, and remove exactly what the refused start made
+    const attach = () => new Set(fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('scrum-test-attach-')));
+    const attachBefore = attach();
     try { rest = await startRestServer({ boardFile: w.boardFile, env: { ...env, ...SMALL } }); } catch (e) { err = e; }
+    if (!rest) for (const n of attach()) if (!attachBefore.has(n)) fs.rmSync(path.join(os.tmpdir(), n), { recursive: true, force: true });
     if (rest) { const k = fs.readFileSync(w.boardFile); await rest.stop(); fs.writeFileSync(w.boardFile, k); rest = null; assert.fail('MM1: REST served with the document\'s fence missing from the graph'); }
     assert.match(String(err?.message), /migrate-collections-1624/, `MM1: the refusal names the migration (${String(err?.message).slice(-300)})`);
 
