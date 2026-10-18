@@ -12284,7 +12284,9 @@ function serveAttachment(req, res, rawId) {
 // buildChildIndex (children), buildLinkIndex (backlinks). Read-only.
 function handleListNodes(req, res) {
   try {
-    const { nodes } = loadDomain(BOARD_DATA_FILE);
+    // #1709 — the nodes come from readBoard()'s domain (the units overlaid), never the file's: with the cards unit on, the document holds
+    // no cards (or a frozen copy of the migrated ones), and the wiki listed an empty board on prod
+    const { nodes } = boardToDomain(readBoard());
     sendJSON(res, 200, { nodes, tree: buildTree(nodes) });
   } catch (e) {
     console.error('GET /api/nodes:', e.message);
@@ -12294,7 +12296,7 @@ function handleListNodes(req, res) {
 
 function handleGetNode(req, res, idOrShortId) {
   try {
-    const { nodes } = loadDomain(BOARD_DATA_FILE);
+    const { nodes } = boardToDomain(readBoard());   // #1709 — the same source as the list, never the file's
     const node = nodes.find(
       (n) => n['@id'] === idOrShortId || String(n.identifier) === idOrShortId,
     );
