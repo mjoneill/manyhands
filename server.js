@@ -12167,7 +12167,10 @@ async function createPostThroughGraph(res, body) {
         if (postSeqState(data).state === 'clean') return { migration: true };
         const events = [];
         if (!isEpoch(data[POST_SEQ_EPOCH])) { data[POST_SEQ_EPOCH] = mintEpoch(); events.push(boardMetaEvent(POST_SEQ_EPOCH, data[POST_SEQ_EPOCH])); }
-        const n = Number.isSafeInteger(data[NEXT_POST_SEQ]) && data[NEXT_POST_SEQ] > 0 ? data[NEXT_POST_SEQ] : 1;
+        // #1710 — never below the graph: the mark was raised to the graph's MAX(postSeq)+1 in step 2 of this request, so a
+        // document with no counter (absent, re-seeded, or never read under #1563's read-off/off) cannot mint a used number.
+        const docNext = Number.isSafeInteger(data[NEXT_POST_SEQ]) && data[NEXT_POST_SEQ] > 0 ? data[NEXT_POST_SEQ] : 1;
+        const n = Math.max(docNext, POST_SEQ_MARK ?? 1);
         data[NEXT_POST_SEQ] = n + 1;
         const reservation = { postId, postSeq: n, createdAt: new Date().toISOString() };
         const key = reservationKey(data, requestId, author);
