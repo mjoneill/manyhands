@@ -61,10 +61,10 @@ const REPLICA_RETIRED = 'REPLICA_RETIRED';   // D6: the replica's cold build in 
 const SKIP = HAVE_PY ? false : 'UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)';
 const T = { skip: SKIP, timeout: 300000 };
 // Rows that need a REST BOOTED in mode off or read-off. The build's fail-closed boot refuses until every document-only field has an
-// owner, and two do not yet: outbox (#1629) and labelAliases (#1640). So these are TODO (reported on every run, never failing CI)
-// until both land; then delete OWNERS_PENDING and every row must pass as a plain test. Measured 2026-10-18 on the build with both
-// marked owned: 9/9 (the PO's scratch check at 30b32f4).
-const OWNERS_PENDING = { todo: 'mode off cannot boot until outbox (#1629) and labelAliases (#1640) have owners: delete OWNERS_PENDING when they land' };
+// owner, and one does not yet: the outbox (#1629; labelAliases got its owner in #1640's shared part). So these are TODO (reported
+// on every run, never failing CI) until it lands; then delete OWNERS_PENDING and every row must pass as a plain test. Measured
+// 2026-10-18 by the PO on the build with the outbox marked owned in a scratch copy: 10/10.
+const OWNERS_PENDING = { todo: 'mode off cannot boot until the outbox (#1629) has its owner: delete OWNERS_PENDING when it lands' };
 const TO = { ...T, ...OWNERS_PENDING };
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const RECORDER = path.join(HERE, 'helpers', 'fs-store-recorder.mjs');

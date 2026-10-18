@@ -77,6 +77,7 @@
   "tests/health-readiness-1645.test.mjs",
   "tests/incarnation-1577.test.mjs",
   "tests/inline-spawners-startup-1671.test.mjs",
+  "tests/label-aliases-executor-1640.test.mjs",
   "tests/langgraph-saver-fences.test.mjs",
   "tests/langgraph-saver.test.mjs",
   "tests/logborn-change-feed-1561.test.mjs",
