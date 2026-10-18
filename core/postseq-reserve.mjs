@@ -63,31 +63,39 @@ const ORDINARY_KEYS = ['body', 'attachedTo', 'mentions', 'attachments', 'convers
 const ANNOUNCEMENT_KEYS = ['body', 'author', 'originActor', 'occurredAt', 'mentions', 'notify'];
 
 const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
+// every input string is well-formed text, the same rule post.write's rStr applies (a lone surrogate is refused BEFORE
+// anything is sent, so the allocator can never commit a reservation its own reader would call INVALID).
 const isStr = (v) => typeof v === 'string' && v.isWellFormed();
+const isNonEmpty = (v) => isStr(v) && v !== '';
+// closed keysets compare OWN keys against an array, never `k in obj`: a JSON-parsed `constructor`/`toString`/`__proto__`
+// key is an own key that must be refused, not matched against Object.prototype.
+const closed = (o, allowed, what) => { for (const k of Object.keys(o)) if (!allowed.includes(k)) throw new TypeError(`${what}: unknown key ${k}`); };
 
 function canonAttachment(a, what) {
   if (!isObj(a)) throw new TypeError(`${what} must be an object`);
-  const ok = { id: 'id', mime: 'mime', name: 'name', size: 'size' };
-  for (const k of Object.keys(a)) if (!(k in ok)) throw new TypeError(`${what}: unknown key ${k}`);
-  if (typeof a.id !== 'string') throw new TypeError(`${what}.id is required`);
-  const mime = a.mime == null ? null : (typeof a.mime === 'string' ? a.mime : (() => { throw new TypeError(`${what}.mime must be a string or null`); })());
-  const name = a.name == null ? null : (typeof a.name === 'string' ? a.name : (() => { throw new TypeError(`${what}.name must be a string or null`); })());
+  closed(a, ['id', 'mime', 'name', 'size'], what);
+  if (!isStr(a.id)) throw new TypeError(`${what}.id is required`);
+  const mime = a.mime == null ? null : (isStr(a.mime) ? a.mime : (() => { throw new TypeError(`${what}.mime must be a string or null`); })());
+  const name = a.name == null ? null : (isStr(a.name) ? a.name : (() => { throw new TypeError(`${what}.name must be a string or null`); })());
   const size = a.size == null ? null : (Number.isSafeInteger(a.size) && a.size >= 0 ? a.size : (() => { throw new TypeError(`${what}.size must be a non-negative safe integer or null`); })());
   return { id: a.id, mime, name, size };
 }
 
 function canonOrigin(o, what) {
   if (!isObj(o)) throw new TypeError(`${what} must be an object`);
-  for (const k of Object.keys(o)) if (!['mutationId', 'slot'].includes(k)) throw new TypeError(`${what}: unknown key ${k}`);
-  if (typeof o.mutationId !== 'string') throw new TypeError(`${what}.mutationId is required`);
-  if (typeof o.slot !== 'string') throw new TypeError(`${what}.slot is required`);
-  return { mutationId: o.mutationId, slot: o.slot };
+  // the same keyset post.write accepts (graph-compiler.mjs post.import/post.write: mutationId, slot, optional occurredAt).
+  // occurredAt is bound and stored when present; absent and null are the same (rOpt there), so both canonicalize to absent.
+  closed(o, ['mutationId', 'slot', 'occurredAt'], what);
+  if (!isStr(o.mutationId)) throw new TypeError(`${what}.mutationId is required`);
+  if (!isStr(o.slot)) throw new TypeError(`${what}.slot is required`);
+  if (o.occurredAt != null && !isStr(o.occurredAt)) throw new TypeError(`${what}.occurredAt must be a string or null`);
+  return o.occurredAt == null ? { mutationId: o.mutationId, slot: o.slot } : { mutationId: o.mutationId, slot: o.slot, occurredAt: o.occurredAt };
 }
 
 function validateOrdinaryDraft(d, what) {
   if (!isObj(d)) throw new TypeError(`${what} must be an object`);
-  for (const k of Object.keys(d)) if (!ORDINARY_KEYS.includes(k)) throw new TypeError(`${what}: unknown key ${k}`);
-  if (typeof d.body !== 'string' || !d.body) throw new TypeError(`${what}.body is required`);
+  closed(d, ORDINARY_KEYS, what);
+  if (!isNonEmpty(d.body)) throw new TypeError(`${what}.body is required`);
   if (d.attachedTo != null && !isStr(d.attachedTo)) throw new TypeError(`${what}.attachedTo must be a string or null`);
   if (d.mentions != null && (!Array.isArray(d.mentions) || d.mentions.some((m) => !isStr(m)))) throw new TypeError(`${what}.mentions must be an array of strings`);
   if (d.attachments != null && (!Array.isArray(d.attachments))) throw new TypeError(`${what}.attachments must be an array`);
@@ -104,11 +112,11 @@ function validateOrdinaryDraft(d, what) {
 
 function validateAnnouncementDraft(d, what) {
   if (!isObj(d)) throw new TypeError(`${what} must be an object`);
-  for (const k of Object.keys(d)) if (!ANNOUNCEMENT_KEYS.includes(k)) throw new TypeError(`${what}: unknown key ${k}`);
-  if (typeof d.body !== 'string' || !d.body) throw new TypeError(`${what}.body is required`);
-  if (typeof d.author !== 'string' || !d.author) throw new TypeError(`${what}.author is required`);
-  if (typeof d.originActor !== 'string' || !d.originActor) throw new TypeError(`${what}.originActor is required`);
-  if (typeof d.occurredAt !== 'string' || !d.occurredAt) throw new TypeError(`${what}.occurredAt is required`);
+  closed(d, ANNOUNCEMENT_KEYS, what);
+  if (!isNonEmpty(d.body)) throw new TypeError(`${what}.body is required`);
+  if (!isNonEmpty(d.author)) throw new TypeError(`${what}.author is required`);
+  if (!isNonEmpty(d.originActor)) throw new TypeError(`${what}.originActor is required`);
+  if (!isNonEmpty(d.occurredAt)) throw new TypeError(`${what}.occurredAt is required`);
   if (!Array.isArray(d.mentions) || d.mentions.some((m) => !isStr(m))) throw new TypeError(`${what}.mentions must be an array of strings`);
   if (typeof d.notify !== 'boolean') throw new TypeError(`${what}.notify must be a boolean`);
 }
@@ -159,17 +167,17 @@ export function canonAnnouncementDraft(d) {
 export function canonReservationItem(it, what) {
   if (!isObj(it)) throw new TypeError(`${what} must be an object`);
   if (it.mode === 'ordinary') {
-    for (const k of Object.keys(it)) if (!['mode', 'author', 'requestId', 'draft'].includes(k)) throw new TypeError(`${what}: unknown key ${k}`);
-    if (typeof it.author !== 'string' || !it.author) throw new TypeError(`${what}.author is required`);
-    if (typeof it.requestId !== 'string' || !it.requestId) throw new TypeError(`${what}.requestId is required`);
+    closed(it, ['mode', 'author', 'requestId', 'draft'], what);
+    if (!isNonEmpty(it.author)) throw new TypeError(`${what}.author must be a non-empty well-formed string`);
+    if (!isNonEmpty(it.requestId)) throw new TypeError(`${what}.requestId must be a non-empty well-formed string`);
     validateOrdinaryDraft(it.draft, `${what}.draft`);
     const draft = canonOrdinaryDraft(it.draft);
     return { mode: 'ordinary', author: it.author, requestId: it.requestId, draft, postId: postWriteId(it.author, it.requestId) };
   }
   if (it.mode === 'announcement') {
-    for (const k of Object.keys(it)) if (!['mode', 'mutationId', 'slot', 'draft'].includes(k)) throw new TypeError(`${what}: unknown key ${k}`);
-    if (typeof it.mutationId !== 'string' || !it.mutationId) throw new TypeError(`${what}.mutationId is required`);
-    if (typeof it.slot !== 'string' || !it.slot) throw new TypeError(`${what}.slot is required`);
+    closed(it, ['mode', 'mutationId', 'slot', 'draft'], what);
+    if (!isNonEmpty(it.mutationId)) throw new TypeError(`${what}.mutationId must be a non-empty well-formed string`);
+    if (!isNonEmpty(it.slot)) throw new TypeError(`${what}.slot must be a non-empty well-formed string`);
     validateAnnouncementDraft(it.draft, `${what}.draft`);
     const draft = canonAnnouncementDraft(it.draft);
     return { mode: 'announcement', mutationId: it.mutationId, slot: it.slot, draft, postId: announcePostId(it.mutationId, it.slot) };
@@ -342,7 +350,7 @@ export async function readPostSeqReservation(client, postId) {
       // canonical form: it must pass the same closed schema as an input draft AND be byte-identical to its own
       // canonicalization, so a draft the compiler could not have written is INVALID rather than surfaced.
       const idKeys = mode === 'ordinary' ? ['author', 'requestId'] : ['mutationId', 'slot'];
-      if (!isObj(identity) || Object.keys(identity).length !== idKeys.length || !idKeys.every((k) => isStr(identity[k]) && identity[k] !== '')) {
+      if (!isObj(identity) || Object.keys(identity).length !== idKeys.length || !idKeys.every((k) => isNonEmpty(identity[k]))) {
         return { ok: false, status: 'INVALID', reason: `${mode} identity must be exactly {${idKeys.join(', ')}} with non-empty strings; got ${JSON.stringify(identity)}` };
       }
       const derived = mode === 'ordinary' ? postWriteId(identity.author, identity.requestId) : announcePostId(identity.mutationId, identity.slot);

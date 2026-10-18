@@ -435,3 +435,69 @@ test('#1629 review (A2o) postSeqEpoch must be a PLAIN string literal: IRI, langu
     assert.equal(r.outcome, 'APPLIED', `CONTROL: a plain string epoch applies (${JSON.stringify(r).slice(0, 200)})`);
   });
 });
+
+// ──────────────────────── code-review rows (R1–R3, #1629 changes requested at 86d77d2) ────────────────────────
+
+test('#1629 review (D8) origin.occurredAt is accepted like post.write, bound in the digest, stored, and a change to it alone collides', T, async () => {
+  const at1 = '2026-10-18T01:00:00.000Z', at2 = '2026-10-18T02:00:00.000Z';
+  const intent = (origin) => { const r = [ordinary('d8-1', { origin })]; return { kind: 'postseq.reserve', opId: reserveOpId(r), actor: 'urn:ex:seat/ada', reservations: r }; };
+  const withAt = intent({ mutationId: 'm', slot: 's', occurredAt: at1 });
+  assert.notEqual(digestOf(canonicalize(withAt)), digestOf(canonicalize(intent({ mutationId: 'm', slot: 's', occurredAt: at2 }))), 'occurredAt is bound in the digest');
+  assert.equal(digestOf(canonicalize(intent({ mutationId: 'm', slot: 's', occurredAt: null }))), digestOf(canonicalize(intent({ mutationId: 'm', slot: 's' }))), 'null and absent occurredAt are the same, as in post.write');
+  assert.throws(() => canonicalize(intent({ mutationId: 'm', slot: 's', occurredAt: 5 })), /occurredAt/, 'a non-string occurredAt is refused');
+  await world(allocatorTriples(), async ({ client }) => {
+    const r1 = await client.update(withAt);
+    assert.equal(r1.outcome, 'APPLIED', `origin with occurredAt applies (${JSON.stringify(r1).slice(0, 200)})`);
+    const got = await M.readPostSeqReservation(client, postWriteId('ada', 'd8-1'));
+    assert.equal(got.ok, true, `and reads back (${JSON.stringify(got)})`);
+    assert.deepEqual(got.reservation.draft.origin, { mutationId: 'm', slot: 's', occurredAt: at1 }, 'occurredAt roundtrips');
+    const al = await M.readPostSeqAllocator(client);
+    const r2 = await client.update(intent({ mutationId: 'm', slot: 's', occurredAt: at2 }));
+    assert.notEqual(r2.outcome, 'APPLIED', 'a changed occurredAt alone collides');
+    assert.deepEqual(await M.readPostSeqAllocator(client), al, 'and allocates nothing');
+  });
+});
+
+test('#1629 review (D9) prototype-named own keys (constructor, toString, __proto__) are refused in every closed object, not silently dropped', () => {
+  const att = '{"id":"a","mime":null,"name":null,"size":null}';
+  const good = JSON.parse(`[{"mode":"ordinary","author":"ada","requestId":"d9","draft":{"body":"b","attachments":[${att}]}}]`);
+  assert.doesNotThrow(() => canonReservationBatch(good, 'r'), 'CONTROL: a valid JSON-parsed attachment is accepted');
+  for (const key of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+    const bad = (where) => JSON.parse(where.replace('@', `"${key}":"discarded",`));
+    for (const [what, src] of [
+      ['attachment', `[{"mode":"ordinary","author":"ada","requestId":"d9","draft":{"body":"b","attachments":[{@"id":"a","mime":null,"name":null,"size":null}]}}]`],
+      ['draft', `[{"mode":"ordinary","author":"ada","requestId":"d9","draft":{@"body":"b"}}]`],
+      ['origin', `[{"mode":"ordinary","author":"ada","requestId":"d9","draft":{"body":"b","origin":{@"mutationId":"m","slot":"s"}}}]`],
+      ['item', `[{@"mode":"ordinary","author":"ada","requestId":"d9","draft":{"body":"b"}}]`],
+      ['announcement draft', `[{"mode":"announcement","mutationId":"m","slot":"s","draft":{@"body":"b","author":"board","originActor":"ada","occurredAt":"2026-10-18T00:00:00.000Z","mentions":[],"notify":false}}]`],
+    ]) {
+      const parsed = bad(src);
+      assert.throws(() => canonReservationBatch(parsed, 'r'), /unknown key/, `${what} with own key ${key} is refused`);
+    }
+  }
+});
+
+test('#1629 review (R15) a malformed identity string is refused BEFORE anything is sent: no reservation, no allocation', T, async () => {
+  const lone = String.fromCharCode(0xd800);
+  await world(allocatorTriples(), async ({ client }) => {
+    const a0 = await M.readPostSeqAllocator(client);
+    for (const [why, items] of [
+      ['ordinary author', [{ mode: 'ordinary', author: lone, requestId: 'r15', draft: { body: 'b' } }]],
+      ['ordinary requestId', [{ mode: 'ordinary', author: 'ada', requestId: `r15${lone}`, draft: { body: 'b' } }]],
+      ['announcement mutationId', [{ mode: 'announcement', mutationId: lone, slot: 's', draft: { body: 'b', author: 'board', originActor: 'ada', occurredAt: '2026-10-18T00:00:00.000Z', mentions: [], notify: false } }]],
+      ['announcement slot', [{ mode: 'announcement', mutationId: 'm', slot: lone, draft: { body: 'b', author: 'board', originActor: 'ada', occurredAt: '2026-10-18T00:00:00.000Z', mentions: [], notify: false } }]],
+    ]) {
+      assert.throws(() => canonicalize({ kind: 'postseq.reserve', opId: reserveOpId(items), actor: 'urn:ex:seat/ada', reservations: items }), /well-formed/, `${why}: refused at canonicalize`);
+      let threw = false;
+      try { await client.update({ kind: 'postseq.reserve', opId: reserveOpId(items), actor: 'urn:ex:seat/ada', reservations: items }); } catch { threw = true; }
+      assert.ok(threw, `${why}: the client refuses to send it`);
+    }
+    assert.deepEqual(await M.readPostSeqAllocator(client), a0, 'nothing allocated');
+    // CONTROL: a well-formed non-ASCII identity roundtrips
+    const ok = [{ mode: 'ordinary', author: 'adá', requestId: 'r15-ünï', draft: { body: 'b' } }];
+    const r = await client.update({ kind: 'postseq.reserve', opId: reserveOpId(ok), actor: 'urn:ex:seat/ada', reservations: ok });
+    assert.equal(r.outcome, 'APPLIED', `CONTROL: a well-formed identity applies (${JSON.stringify(r).slice(0, 200)})`);
+    const back = await M.readPostSeqReservation(client, postWriteId('adá', 'r15-ünï'));
+    assert.equal(back.ok, true, `CONTROL: and reads back (${JSON.stringify(back)})`);
+  });
+});
