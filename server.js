@@ -1358,7 +1358,13 @@ let _graphSnapshotSeq = 0;
 // which path (warm|cold), how long, and the first sync after it (the replay
 // tail). Set once per process, at the boot, so /api/checks can report the
 // warm-start ceiling from the event rather than from a log grep.
-let _graphBoot = null;          // { path: 'warm'|'cold', ms, seq, at }
+let _graphBoot = null;          // { path: 'warm'|'cold', ms, seq, at, trigger }
+// #1706 — WHAT built the copy, not only when: the request whose handler got here first (its method and path), or
+// 'background' for a build no request started. /api/health shows it, so live can tell which route still pulls the copy in.
+function bootTrigger() {
+  const st = meterRoute.getStore();
+  return st ? { method: st.method ?? null, path: st.path ?? null } : { method: null, path: null, background: true };
+}
 let _graphReplayTailMs = null;  // ms of the first sync after boot, null until it has run
 let _graphSnapshotWriting = false;
 let _graphDocStamp = null;   // the document `lastUpdated` the store was last synced from; travels in the sidecar
@@ -1638,11 +1644,11 @@ async function warmGraphStoreOnce() {
       if (snap.ok) {
         _graphStore = snap.store; _graphHashes = snap.hashes; _graphSignals = snap.signals;
         _activitySeq = snap.seq; _activityAt = snap.at; _graphSnapshotSeq = snap.seq;
-        _graphBoot = { path: 'warm', ms: Math.round(snap.ms), seq: snap.seq, at: new Date().toISOString() };   // #1386
+        _graphBoot = { path: 'warm', ms: Math.round(snap.ms), seq: snap.seq, at: new Date().toISOString(), trigger: bootTrigger() };   // #1386, #1706
         console.error(`${new Date().toISOString()} graph-replica: boot WARM from snapshot seq=${snap.seq} (${snap.triples} triples, ${snap.hashes.size} cached entities) in ${Math.round(snap.ms)}ms`);
       } else {
         _graphStore = buildGraphStore({ '@graph': [] }); _activitySeq = 0; _activityAt = null;
-        _graphBoot = { path: 'cold', ms: 0, seq: 0, at: new Date().toISOString(), reason: snap.reason };   // #1386 — cold's cost is the first sync, recorded as the replay tail below
+        _graphBoot = { path: 'cold', ms: 0, seq: 0, at: new Date().toISOString(), reason: snap.reason, trigger: bootTrigger() };   // #1386 — cold's cost is the first sync, recorded as the replay tail below
         console.error(`${new Date().toISOString()} graph-replica: boot COLD — ${snap.reason}: ${snap.detail}`);
       }
     }
@@ -13061,7 +13067,7 @@ function routeApi(method, urlPath, req, res) {
     if (r.method !== method) continue;
     const m = urlPath.match(r.re);
     // #1570 — every executor call made for this request, readiness checks included, is metered under its route pattern.
-    if (m) return meterRoute.run({ route: `${method} ${r.re.source}`, rid: crypto.randomUUID(), caller: req.headers['user-agent'], peer: req.socket?.remotePort, t0: performance.now() }, () => {
+    if (m) return meterRoute.run({ route: `${method} ${r.re.source}`, method, path: urlPath, rid: crypto.randomUUID(), caller: req.headers['user-agent'], peer: req.socket?.remotePort, t0: performance.now() }, () => {
       // #715 — the method decides the read kind for everything this handler
       // does, including after its awaits.
       // ⛔ GET alone. A POST that looks read-only is not: search with a reader
