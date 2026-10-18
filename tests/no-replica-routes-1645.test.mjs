@@ -14,8 +14,8 @@
  * decisions and seat state with log-born data. TODO (reported, never failing CI; the slice that fixes the route deletes its line in TODO):
  *   checks          the graph-store meter (measuresReplica) builds the replica: 2d
  *   graph_neighbors prod does not set NEIGHBORS_SOURCE: 2c
- *   census (both)   without the replica the census answers "unavailable" with null instance counts: 2b is NOT done
- * A todo that starts passing does not fail either: delete its line, and the row must then pass as a plain test.
+ * A todo that starts passing does not fail either: delete its line, and the row must then pass as a plain test. The census rows' two lines were
+ * deleted for 2b (2026-10-18), when the census began counting on the executor: those rows are plain tests now.
  *
  * NOT covered, by name: deliveries and model calls (unit3) and the small-kind collections, which no fixture here holds; boot itself (a replica
  * built at boot by something other than these routes is caught by the precondition, which reads graph.boot before any route is called); write
@@ -51,8 +51,6 @@ const ROUTES = [
 const TODO = {
   checks: '2d: the graph-store meter (measuresReplica) builds the replica',
   graph_neighbors: '2c: prod does not set NEIGHBORS_SOURCE',
-  'board status census': '2b: without the replica the census answers "unavailable" with null instance counts',
-  'board status census, log-born data present': '2b: without the replica the census answers "unavailable" with null instance counts',
 };
 
 async function measure(w, label, method, route, body, serves, setup) {

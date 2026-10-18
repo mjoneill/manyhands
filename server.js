@@ -9034,7 +9034,29 @@ async function graphKindCounts() {
   return out;
 }
 
-function kindsSummary(data, graphCounts = null) {
+// #1645 2b — the census from the EXECUTOR: one aggregate over the public dataset, which holds every kind (cards, posts,
+// deliveries, model calls, log-born memories...), so it replaces both the replica walk and graphKindCounts. Measured on
+// prod 2026-10-18T03:0xZ: 45 types, 186 ms. The position is read BEFORE the count, so it is a lower bound on what the
+// counts reflect. Never throws: an executor that cannot answer is `{ error }`, and the census says unavailable.
+const Q_CENSUS_BY_TYPE = 'SELECT ?t (COUNT(?s) AS ?n) WHERE { ?s a ?t . FILTER(isIRI(?t)) } GROUP BY ?t';
+async function executorCensus(executorUrl) {
+  try {
+    const { selectExecutorAll } = await loadGraphModules();
+    const executorPosition = await readExecutorPosition(executorUrl);
+    const rows = await selectExecutorAll(executorUrl, Q_CENSUS_BY_TYPE, { timeoutMs: 10_000, maxRows: 10_000 });
+    const counts = {};
+    for (const r of rows) {
+      const n = Number(r.n);
+      if (typeof r.t !== 'string' || !Number.isFinite(n)) continue;
+      counts[r.t] = (counts[r.t] ?? 0) + n;
+    }
+    return { counts, executorPosition };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+function kindsSummary(data, graphCounts = null, fromExecutor = null) {
   const registeredRows = (Array.isArray(data.kinds) ? data.kinds : [])
     .filter((e) => e['@type'] === 'scrum:KindDefinition');
   const registered = new Set(registeredRows.map((r) => r.name));
@@ -9043,8 +9065,22 @@ function kindsSummary(data, graphCounts = null) {
   let census = 'unavailable';
   let censusNote = 'the graph replica is not warm yet — declared and registered are still exact, '
     + 'and instantiated counts appear once the replica has been built';
+  let censusSource = null;
+  let executorPosition;
   try {
-    if (_graphStore) {
+    if (fromExecutor) {
+      // #1645 2b — with an executor configured the census is the executor's or nothing: never the replica instead.
+      censusSource = 'executor';
+      if (fromExecutor.counts) {
+        counts = fromExecutor.counts;
+        executorPosition = fromExecutor.executorPosition;
+        census = 'live';
+        censusNote = null;
+      } else {
+        censusNote = `the executor could not be counted: ${fromExecutor.error} — declared and registered are still exact`;
+      }
+    } else if (_graphStore) {
+      censusSource = 'replica';
       counts = {};
       // #1397 — ONE aggregate query, never `match(null, null, null)`: the walk
       // materialised every quad of the replica per call and wedged REST on
@@ -9068,7 +9104,7 @@ function kindsSummary(data, graphCounts = null) {
     }
     // #1626 — graph-held kinds: the executor's count REPLACES the file's (never added to it, so stale copies cannot
     // double it); a count the graph could not answer is null, said so in the note.
-    if (counts && graphCounts) {
+    if (counts && graphCounts && !fromExecutor) {
       for (const [k, n] of Object.entries(graphCounts)) counts[k] = n;
       if (Object.values(graphCounts).some((n) => n == null)) censusNote = 'graph-held kinds (posts, deliveries, model calls) could not be counted: the graph did not answer';
     }
@@ -9087,6 +9123,8 @@ function kindsSummary(data, graphCounts = null) {
   return {
     census,
     ...(censusNote ? { censusNote } : {}),
+    ...(censusSource ? { censusSource } : {}),
+    ...(executorPosition ? { executorPosition } : {}),
     declaredCount: KIND_DECLARATIONS.filter((k) => k.name).length,
     registeredCount: registered.size,
     kinds: KIND_DECLARATIONS.filter((k) => k.name).map((k) => ({
@@ -9217,7 +9255,9 @@ async function handleBoardStatus(req, res) {
       // `declared` is what the runtime accepts; `registered` is what the graph
       // has been told; `instantiated` is the census. A kind declared with ZERO
       // instances is the one a census can never show, and it is visible here.
-      kinds: kindsSummary(data, await graphKindCounts()),
+      kinds: process.env.SCRUM_GRAPH_EXECUTOR_URL
+        ? kindsSummary(data, null, await executorCensus(process.env.SCRUM_GRAPH_EXECUTOR_URL))
+        : kindsSummary(data, await graphKindCounts()),
       // #1208 — "what has this room researched" as a NUMBER a stranger can see
       // without knowing a card number or a filename. Counted from the runs
       // collection rather than the graph, so it answers on a cold replica too:
