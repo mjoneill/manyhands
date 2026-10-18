@@ -91,6 +91,7 @@
   "tests/modelcall-redaction-guard-r1.test.mjs",
   "tests/neighbors-history-cost-1642.test.mjs",
   "tests/neighbors-parity-1642.test.mjs",
+  "tests/no-replica-routes-1645.test.mjs",
   "tests/post-import-referenced-1626.test.mjs",
   "tests/post-redaction-r4a-addendum.test.mjs",
   "tests/post-redaction-r4a.test.mjs",

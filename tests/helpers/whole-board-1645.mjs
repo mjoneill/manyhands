@@ -41,8 +41,29 @@ const step = (script, args) => {
   catch (e) { return { script, code: e.status ?? 1, out: `${e.stdout ?? ''}${e.stderr ?? ''}` }; }
 };
 
+/**
+ * LOG-BORN DATA (#1645 2b, opt-in with { logborn: true }): one memory, one decision and one seat state, written through REST with the logborn unit
+ * OFF (so they land in the document and its event log, as prod's did before its cutover), REST stopped, then migrate-logborn-1561 --run, and
+ * the returned REST started with SCRUM_GRAPH_UNIT_LOGBORN=1. Measured by a scratch probe at bca80e3 (2026-10-18T00:26Z): all three are served
+ * from the executor afterwards. The seat state's expiresAt is computed relative to now, never a fixed date (#1696).
+ */
+async function writeLogborn(boardFile, baseEnv) {
+  const rest = await startRestServer({ boardFile, env: baseEnv });
+  try {
+    const send = async (method, route, body) => {
+      const r = await fetch(`${rest.baseUrl}${route}`, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+      const t = await r.text(); if (r.status >= 300) throw new Error(`PRECONDITION: ${method} ${route} answered ${r.status}: ${t.slice(0, 200)}`);
+      return JSON.parse(t);
+    };
+    const memory = await send('POST', '/api/memories', { title: 'a fixture memory', body: 'remembered for the #1645 2b fixture', by: 'ada' });
+    const decision = await send('POST', '/api/decisions', { statement: 'a fixture decision', decidedBy: 'ada', constrains: ['fixture'], reopensIf: 'the fixture changes', by: 'ada' });
+    const seat = await send('PUT', '/api/seats/ada/state', { mode: 'available', acceptsRoutineWork: true, expiresAt: new Date(Date.now() + 24 * 3600 * 1000).toISOString(), note: 'the #1645 2b fixture', by: 'ada' });
+    return { memoryId: memory.id, decisionId: decision.id, seat: seat.seat };
+  } finally { await rest.stop(); }
+}
+
 /** Build the fixture, run the chain into a fresh executor, start REST (cards, columns and conversations units on). Every step must exit 0. */
-export async function wholeBoardWorld({ env = {} } = {}) {
+export async function wholeBoardWorld({ env = {}, logborn = false } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wb1645-')); const boardFile = path.join(dir, 'board.json');
   fs.writeFileSync(boardFile, JSON.stringify(wholeBoard(), null, 2));
   const store = tmpStore('wb1645-store-'); fs.rmSync(store, { recursive: true });
@@ -58,7 +79,15 @@ export async function wholeBoardWorld({ env = {} } = {}) {
     ];
     const bad = steps.find((s) => s.code !== 0);
     if (bad) throw new Error(`PRECONDITION: ${bad.script} exited ${bad.code}: ${bad.out.slice(-400)}`);
-    const rest = await startRestServer({ boardFile, env: { SCRUM_GRAPH_DATASET_ID: WB_DATASET, SCRUM_GRAPH_EXECUTOR_URL: exec.baseUrl, SCRUM_GRAPH_UNIT_CARDS: '1', SCRUM_GRAPH_UNIT_COLUMNS: '1', SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', ...env } });
-    return { exec, rest, boardFile, steps, stop: () => cleanup(rest) };
+    const baseEnv = { SCRUM_GRAPH_DATASET_ID: WB_DATASET, SCRUM_GRAPH_EXECUTOR_URL: exec.baseUrl, SCRUM_GRAPH_UNIT_CARDS: '1', SCRUM_GRAPH_UNIT_COLUMNS: '1', SCRUM_GRAPH_UNIT_CONVERSATIONS: '1' };
+    let records = null;
+    if (logborn) {
+      records = await writeLogborn(boardFile, baseEnv);
+      const m = step('migrate-logborn-1561.mjs', ['--board', boardFile, '--executor', exec.baseUrl, '--dataset-id', WB_DATASET, '--actor', 'urn:ex:seat/ada', '--run', '--audit', path.join(dir, 'logborn-audit.json')]);
+      steps.push(m);
+      if (m.code !== 0) throw new Error(`PRECONDITION: migrate-logborn-1561 exited ${m.code}: ${m.out.slice(-400)}`);
+    }
+    const rest = await startRestServer({ boardFile, env: { ...baseEnv, ...(logborn ? { SCRUM_GRAPH_UNIT_LOGBORN: '1' } : {}), ...env } });
+    return { exec, rest, boardFile, steps, records, stop: () => cleanup(rest) };
   } catch (e) { await cleanup(null); throw e; }
 }
