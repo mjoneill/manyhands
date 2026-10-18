@@ -12,10 +12,14 @@
  *
  * MEASURED at 5a22fd2 (2026-10-18T00:40Z): green for graph_query, ready, vocabulary and both predicate-shapes lookups, and for memories,
  * decisions and seat state with log-born data. TODO (reported, never failing CI; the slice that fixes the route deletes its line in TODO):
- *   checks          the graph-store meter (measuresReplica) builds the replica: 2d
  *   graph_neighbors prod does not set NEIGHBORS_SOURCE: 2c
  * A todo that starts passing does not fail either: delete its line, and the row must then pass as a plain test. The census rows' two lines were
- * deleted for 2b (2026-10-18), when the census began counting on the executor: those rows are plain tests now.
+ * deleted for 2b (2026-10-18), when the census began counting on the executor; the checks line for 2d (2026-10-18), when the graph-store meter
+ * stopped measuring on the executor pass. Those rows are plain tests now.
+ *
+ * NR-M (2d, the already-WARM branch the fresh-REST rows cannot reach; asked for in review, 43467): something else builds the copy first
+ * (neighbors, still a builder until 2c), then /api/checks?fresh=1. The meter's standing entry must still say `disabled` with a reason naming #1645,
+ * carry neither an error nor rows, and the checks call must cause no further build or sync (syncs unchanged across it).
  *
  * NOT covered, by name: deliveries and model calls (unit3) and the small-kind collections, which no fixture here holds; boot itself (a replica
  * built at boot by something other than these routes is caught by the precondition, which reads graph.boot before any route is called); write
@@ -49,7 +53,6 @@ const ROUTES = [
 ];
 // the known reds, as node:test TODO (reported on every run, never failing CI); the slice that fixes the route deletes its line here
 const TODO = {
-  checks: '2d: the graph-store meter (measuresReplica) builds the replica',
   graph_neighbors: '2c: prod does not set NEIGHBORS_SOURCE',
 };
 
@@ -90,3 +93,23 @@ for (const [label, route, serves] of LOGBORN_ROUTES) {
     try { await measure(w, label, 'GET', route, null, serves); } finally { await w.stop(); }
   });
 }
+
+// ---- 2d: the meter on an ALREADY-WARM copy (the branch a fresh REST cannot reach) ----
+test('#1645 (NR-M, meter on a warm copy) with the copy already built by another route, /api/checks still reports the meter disabled and causes no further sync', { skip: SKIP, timeout: 240000 }, async () => {
+  const w = await wholeBoardWorld({ env: PROD });
+  try {
+    const h = async () => (await (await fetch(`${w.rest.baseUrl}/api/health`, { signal: AbortSignal.timeout(5000) })).json()).graph;
+    const warm = await send(w, 'GET', '/api/graph/neighbors?node=1'); const wt = await warm.text(); assert.equal(warm.status, 200, `PRECONDITION: the warming route answered (${wt.slice(0, 200)})`);
+    await new Promise((res) => setTimeout(res, 1500));
+    const h0 = await h();
+    assert.ok(h0.boot, `PRECONDITION: the copy is warm before /api/checks is called (graph ${JSON.stringify(h0)}); without it this row tests the fresh branch again`);
+    const r = await send(w, 'GET', '/api/checks?fresh=1'); const t = await r.text();
+    assert.equal(r.status, 200, `checks answered 200 (${t.slice(0, 200)})`);
+    const meter = (JSON.parse(t).standing ?? []).find((s) => s.id === 'graph-store-meter');
+    assert.ok(meter && meter.disabled === true && typeof meter.reason === 'string' && /#1645/.test(meter.reason) && !meter.error && !('rows' in meter),
+      `the meter on the executor pass is disabled with a reason naming #1645, no error and no rows, even with a warm copy to measure (${JSON.stringify(meter)})`);
+    await new Promise((res) => setTimeout(res, 1500));
+    const h1 = await h();
+    assert.equal(h1.syncs, h0.syncs, `and the checks call caused no further sync of the copy (syncs ${h0.syncs} -> ${h1.syncs})`);
+  } finally { await w.stop(); }
+});
