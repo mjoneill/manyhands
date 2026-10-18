@@ -59,7 +59,13 @@ async function writeLogborn(boardFile, baseEnv) {
     const decision = await send('POST', '/api/decisions', { statement: 'a fixture decision', decidedBy: 'ada', constrains: ['fixture'], reopensIf: 'the fixture changes', by: 'ada' });
     const seat = await send('PUT', '/api/seats/ada/state', { mode: 'available', acceptsRoutineWork: true, expiresAt: new Date(Date.now() + 24 * 3600 * 1000).toISOString(), note: 'the #1645 2b fixture', by: 'ada' });
     return { memoryId: memory.id, decisionId: decision.id, seat: seat.seat };
-  } finally { await rest.stop(); }
+  } finally {
+    // the harness's stop() UNLINKS the board file even when it was shared in (found 2026-10-18 by #1710's probe): keep the
+    // document across it, or every log-born world runs with NO document, which production never does
+    const kept = fs.readFileSync(boardFile);
+    await rest.stop();
+    fs.writeFileSync(boardFile, kept);
+  }
 }
 
 /** Build the fixture, run the chain into a fresh executor, start REST (cards, columns and conversations units on). Every step must exit 0.
