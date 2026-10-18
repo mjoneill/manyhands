@@ -156,6 +156,10 @@ if (!['on', 'read-off', 'off'].includes(BOARD_DOCUMENT)) {
 if (BOARD_DOCUMENT !== 'on') {
   const UNIT_ENV = { cards: 'SCRUM_GRAPH_UNIT_CARDS', columns: 'SCRUM_GRAPH_UNIT_COLUMNS', conversations: 'SCRUM_GRAPH_UNIT_CONVERSATIONS', deliveries: 'SCRUM_GRAPH_UNIT_DELIVERIES', logborn: 'SCRUM_GRAPH_UNIT_LOGBORN', smallkinds: 'SCRUM_GRAPH_UNIT_SMALLKINDS' };
   const missingUnits = Object.entries(UNIT_ENV).filter(([, e]) => process.env[e] !== '1').map(([k, e]) => `${k} (${e}=1)`);
+  // and every read source on the executor: in these modes no route may reach the in-process copy (it reads the file)
+  for (const e of ['SCRUM_GRAPH_QUERY_SOURCE', 'SCRUM_GRAPH_READY_SOURCE', 'SCRUM_GRAPH_CHECKS_SOURCE', 'SCRUM_GRAPH_NEIGHBORS_SOURCE']) {
+    if (process.env[e] !== 'executor') missingUnits.push(`${e.replace('SCRUM_GRAPH_', '').toLowerCase()} (${e}=executor)`);
+  }
   const unowned = DOCUMENT_ONLY_FIELDS.filter((f) => !f.owned()).map((f) => `${f.field} (owner ${f.card}, not built)`);
   if (missingUnits.length || unowned.length) {
     console.error(`#1563 SCRUM_BOARD_DOCUMENT=${BOARD_DOCUMENT} refuses to start: `
@@ -163,6 +167,12 @@ if (BOARD_DOCUMENT !== 'on') {
     process.exit(1);
   }
 }
+// #1563 — in read-off/off the document is never READ: a board starts from the empty domain (the same one an absent file
+// gives) and the units overlay everything. `lastUpdated` is this process's last write (the one document field a route
+// still serves); null until the first write.
+const DOCUMENT_READS = BOARD_DOCUMENT === 'on';
+let _documentlessLastUpdated = null;
+const emptyDomain = () => ({ nodes: [], messages: [], columns: [], nextShortId: 1, lastUpdated: _documentlessLastUpdated });
 // #1624 — the MUTABLE K13 families (core/collection-families.mjs: one definition, shared with the migration scripts).
 const COLLECTION_FAMILIES = collectionFamilies({ cardsUnit: CARDS_UNIT });
 let COLLECTIONS = null;
@@ -307,7 +317,7 @@ let _rosterComputing = false;   // re-entrancy guard: readBoard → mentions →
 function fileKey(file) { if (file === BOARD_DATA_FILE) countLegacy('boardStat'); try { const st = fs.statSync(file); return `${st.mtimeMs}:${st.size}`; } catch { return 'absent'; } }   // #1563 — a stat of the board file is a touch, counted
 function currentRoster(data = null) {
   if (!data) {
-    const key = `${fileKey(BOARD_DATA_FILE)}|${fileKey(rosterFilePath())}`;
+    const key = `${DOCUMENT_READS ? fileKey(BOARD_DATA_FILE) : `collections-${COLLECTIONS?.generation ?? 0}`}|${fileKey(rosterFilePath())}`;   // #1563 — invalidated by the agents collection, not the file
     if (_rosterCache.key === key && _rosterCache.seats) return configureIdentities(_rosterCache.seats);
     if (_rosterComputing) return configureIdentities(loadRoster(undefined, warnRosterOnce));   // never recurse into readBoard
     let board = null;
@@ -1117,7 +1127,7 @@ function readBoard() {
     // rebuilds once. Frozen so a handler that tries to write through a read
     // fails loudly here instead of corrupting every later reader silently.
     const t0 = performance.now();
-    const { key, domain } = loadDomainShared(BOARD_DATA_FILE);
+    const { key, domain } = DOCUMENT_READS ? loadDomainShared(BOARD_DATA_FILE) : { key: `document-${BOARD_DOCUMENT}:${_documentlessLastUpdated}`, domain: emptyDomain() };   // #1563
     // Keyed by PATH as well as identity: one board file per process today, but
     // a key that could match a different file's identity is a latent stale read.
     // #1598/#1624 — an UNCERTAIN card or collection cache is a miss, never a hit: the board built before an UNKNOWN write
@@ -1132,7 +1142,7 @@ function readBoard() {
     return _sharedBoard.board;
   }
   const t0 = performance.now();
-  const data = withUnitCards(finishBoard(domainToBoard(loadDomain(BOARD_DATA_FILE))));
+  const data = withUnitCards(finishBoard(domainToBoard(DOCUMENT_READS ? loadDomain(BOARD_DATA_FILE) : emptyDomain())));   // #1563
   if (ctx) ctx.read = `clone; ${Math.round(performance.now() - t0)}ms`;
   return data;
 }
@@ -1302,7 +1312,8 @@ function writeDocument(data, events) {
   testBarrier('after-events');     // #1574 C3a — test-only; a no-op unless SCRUM_TEST_BARRIER_DIR is set
   // #686 — every server write is a ROSTERED save: Person nodes are
   // (re)materialized into @graph from this one authority on every write.
-  saveDomain(BOARD_DATA_FILE, boardToDomain(data), { now: data.lastUpdated, roster: { seats: currentRoster(data) } });
+  if (BOARD_DOCUMENT !== 'off') saveDomain(BOARD_DATA_FILE, boardToDomain(data), { now: data.lastUpdated, roster: { seats: currentRoster(data) } });   // #1563 — off writes no mirror
+  if (!DOCUMENT_READS) _documentlessLastUpdated = data.lastUpdated;
   _documentWrites++;    // #1574 1b — counted only once the save returned: a write that threw is not a write
   try { _announcementsPending = countPendingAnnouncements(data); } catch { /* the count is advisory: a write never fails on it */ }
   _graphDirty = true;   // #694 — the replica rebuilds lazily on next query
@@ -1626,6 +1637,9 @@ let _activityAt = null;
 let _graphSyncInFlight = null;
 
 async function warmGraphStore() {
+  // #1563 — the in-process copy reads the document; in read-off/off it is retired, never built (boot already requires
+  // every read source on the executor, so only an explicit replica request can reach here)
+  if (!DOCUMENT_READS) throw Object.assign(new Error(`the in-process copy is retired under SCRUM_BOARD_DOCUMENT=${BOARD_DOCUMENT}`), { code: 'REPLICA_RETIRED' });
   // Nothing to do: answer immediately rather than joining a sync we do not need.
   if (!_graphDirty && _graphStore) {
     return { store: _graphStore, rebuiltMs: null, projectedThrough: _graphProjectedThrough };
@@ -2327,6 +2341,7 @@ async function handleGraphQuery(req, res) {
       return sendJSON(res, 400, { error: `source must be "replica" or "executor" (got ${JSON.stringify(body.source).slice(0, 40)})`, code: 'BAD_SOURCE' });
     }
     const source = body.source ?? GRAPH_QUERY_SOURCE;
+    if (source === 'replica' && !DOCUMENT_READS) return sendJSON(res, 503, { error: `the in-process copy is retired under SCRUM_BOARD_DOCUMENT=${BOARD_DOCUMENT}; ask source "executor"`, code: 'REPLICA_RETIRED' });   // #1563
     if (source === 'executor' && !process.env.SCRUM_GRAPH_EXECUTOR_URL) {
       return sendJSON(res, 503, { error: 'the executor was asked for, but this process has no SCRUM_GRAPH_EXECUTOR_URL; not answering from the replica instead', code: 'SOURCE_UNAVAILABLE' });
     }
