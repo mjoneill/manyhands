@@ -40,7 +40,7 @@ import { exportableSpaces, resolveSpaces, describeExportSet } from './core/expor
 import { loadDomain, loadDomainShared, saveDomain } from './core/store.mjs';
 import { validateCompare, evaluateCompareAsync } from './core/check-compare.mjs';   // #1610; #1643 one async form serves both sources
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { countLegacy, setLegacyContext, installStructuredCloneCounter } from './core/legacy-counters.mjs';
+import { countLegacy, setLegacyContext, installStructuredCloneCounter, legacyCounters } from './core/legacy-counters.mjs';
 import { createGraphSlice } from './core/graph-slice-routes.mjs';
 // #1561 — the log-born unit (memory, decision, seat-state) on the graph executor, behind
 // SCRUM_GRAPH_UNIT_LOGBORN=1. The folds live there now; with the flag OFF they are the only part used.
@@ -139,6 +139,31 @@ const cardWriteContext = new AsyncLocalStorage();   // #1598 — the write a loc
 // #1624 — the small-kinds unit (wake first). Reads and writes go through the one generic
 // `entity.put` primitive; OFF ⇒ the document collection is the only store (today's path).
 const SMALLKINDS_UNIT = process.env.SCRUM_GRAPH_UNIT_SMALLKINDS === '1';
+// #1563 — THE BOARD WITHOUT board-data.json (design v3, docs/1563-board-without-document-design-v3.md). Three states:
+// `on` (today), `read-off` (reads never open the file; the mirror is still saved) and `off` (no reads, no saves).
+// FAIL-CLOSED: read-off and off refuse to start unless every authoritative unit is on AND every field that only the
+// document holds has an owner. The refusal names everything missing, in one line, before the server listens.
+const BOARD_DOCUMENT = process.env.SCRUM_BOARD_DOCUMENT ?? 'on';
+// the fields no unit holds yet, each with the card that gives it an owner; `owned` flips when that card's build lands
+const DOCUMENT_ONLY_FIELDS = [
+  { field: 'outbox (announcement origins and entries)', card: '#1629', owned: () => false },
+  { field: 'labelAliases', card: '#1640', owned: () => false },
+  { field: 'moveFences', card: '#1707', owned: () => false },
+];
+if (!['on', 'read-off', 'off'].includes(BOARD_DOCUMENT)) {
+  console.error(`#1563 SCRUM_BOARD_DOCUMENT=${JSON.stringify(BOARD_DOCUMENT)} is not one of on, read-off, off — refusing to start`);
+  process.exit(1);
+}
+if (BOARD_DOCUMENT !== 'on') {
+  const UNIT_ENV = { cards: 'SCRUM_GRAPH_UNIT_CARDS', columns: 'SCRUM_GRAPH_UNIT_COLUMNS', conversations: 'SCRUM_GRAPH_UNIT_CONVERSATIONS', deliveries: 'SCRUM_GRAPH_UNIT_DELIVERIES', logborn: 'SCRUM_GRAPH_UNIT_LOGBORN', smallkinds: 'SCRUM_GRAPH_UNIT_SMALLKINDS' };
+  const missingUnits = Object.entries(UNIT_ENV).filter(([, e]) => process.env[e] !== '1').map(([k, e]) => `${k} (${e}=1)`);
+  const unowned = DOCUMENT_ONLY_FIELDS.filter((f) => !f.owned()).map((f) => `${f.field} (owner ${f.card}, not built)`);
+  if (missingUnits.length || unowned.length) {
+    console.error(`#1563 SCRUM_BOARD_DOCUMENT=${BOARD_DOCUMENT} refuses to start: `
+      + [missingUnits.length ? `authoritative unit(s) off: ${missingUnits.join(', ')}` : '', unowned.length ? `document-only field(s) without an owner: ${unowned.join('; ')}` : ''].filter(Boolean).join(' · '));
+    process.exit(1);
+  }
+}
 // #1624 — the MUTABLE K13 families (core/collection-families.mjs: one definition, shared with the migration scripts).
 const COLLECTION_FAMILIES = collectionFamilies({ cardsUnit: CARDS_UNIT });
 let COLLECTIONS = null;
@@ -280,7 +305,7 @@ function agentSeats(data) {
 // the newer document by definition.
 let _rosterCache = { key: null, seats: null };
 let _rosterComputing = false;   // re-entrancy guard: readBoard → mentions → roster → readBoard
-function fileKey(file) { try { const st = fs.statSync(file); return `${st.mtimeMs}:${st.size}`; } catch { return 'absent'; } }
+function fileKey(file) { if (file === BOARD_DATA_FILE) countLegacy('boardStat'); try { const st = fs.statSync(file); return `${st.mtimeMs}:${st.size}`; } catch { return 'absent'; } }   // #1563 — a stat of the board file is a touch, counted
 function currentRoster(data = null) {
   if (!data) {
     const key = `${fileKey(BOARD_DATA_FILE)}|${fileKey(rosterFilePath())}`;
@@ -7294,6 +7319,9 @@ async function handleHealth(req, res) {
     // #1574 attempt 3 — the read gate, visible: running/lost/waiting from the gate itself. null when the conversations
     // unit is off (there is no gate), never a fabricated zero.
     readGate: READ_GATE ? READ_GATE.stats() : null,
+    // #1563 — the board file's touches since boot, from #1558's always-on counters: what `read-off`/`off` must keep at 0.
+    // attemptedOpens = every load, shared load and save of the document, plus every stat of it.
+    document: (() => { const c = legacyCounters(); return { mode: BOARD_DOCUMENT, attemptedOpens: (c.loadDomain || 0) + (c.loadDomainShared || 0) + (c.saveDomain || 0) + (c.boardStat || 0), counters: { loadDomain: c.loadDomain || 0, loadDomainShared: c.loadDomainShared || 0, saveDomain: c.saveDomain || 0, boardStat: c.boardStat || 0 } }; })(),
     // #1574 1b — successful board-document writes since this process booted (one per writeBoard). Monotonic, starts
     // at 0: the instrument for "exactly one document write" rows, and for #1617's write-load probes.
     documentWrites: _documentWrites,
