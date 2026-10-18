@@ -16,6 +16,7 @@
   "tests/backfill-posts-r0.test.mjs",
   "tests/board-file-guard-g1.test.mjs",
   "tests/board-tip-poll-t1.test.mjs",
+  "tests/board-without-document-1563.test.mjs",
   "tests/boot-trigger-1706.test.mjs",
   "tests/card-lost-ack-1628.test.mjs",
   "tests/card-write-1598.test.mjs",
