@@ -25,7 +25,7 @@
  *
  * NOT covered: which test's REST was the stranger in CI; the 503's remaining causes (#1713); timing of freePort reuse.
  */
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -44,8 +44,12 @@ let W = null, wErr = null;
 try { W = await import(pathToFileURL(path.join(PROJECT_DIR, 'tests', 'helpers', 'executor-ready.mjs')).href); } catch (e) { wErr = e; }
 const ready = () => { assert.ok(W?.waitExecutorReady, `tests/helpers/executor-ready.mjs does not export waitExecutorReady yet (${wErr?.message?.slice(0, 100)})`); return W.waitExecutorReady; };
 
+// every store this file makes is removed when the file ends (the suite's tmp check fails a run on a new leak — #1716 CI
+// 39172892165 caught this file leaving 6 stores behind)
+const STORES = [];
+after(() => { for (const d of STORES) fs.rmSync(d, { recursive: true, force: true }); });
 function initStore(dsid) {
-  const store = fs.mkdtempSync(path.join(os.tmpdir(), 'er1716-store-'));
+  const store = fs.mkdtempSync(path.join(os.tmpdir(), 'er1716-store-')); STORES.push(store);
   const r = spawnSync(PY, ['-c', `import pyoxigraph as px\ns = px.Store(${JSON.stringify(store)})\ns.update('INSERT DATA { GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:dataset> <urn:ex:datasetId> "${dsid}" ; <urn:ex:epoch> 1 ; <urn:ex:commitSeq> 0 } }')\ns.flush()`]);
   assert.equal(r.status, 0, String(r.stderr)); return store;
 }
