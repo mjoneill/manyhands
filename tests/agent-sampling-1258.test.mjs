@@ -106,7 +106,12 @@ test('#1258 the agent editor: set temperature, max tokens and keep-alive, save â
     await page.$eval(`${row} [data-agent-temperature]`, (i) => { i.value = '0.3'; });
     await page.$eval(`${row} [data-agent-maxtokens]`, (i) => { i.value = '512'; });
     await page.$eval(`${row} [data-agent-keepalive]`, (i) => { i.value = '5m'; });
+    // #1714 â€” wait for THIS save's PATCH to be answered before reading the API. The 'ok' message alone is not enough:
+    // after the first save the re-rendered row already carries an 'ok' message, so on the second save that wait was
+    // satisfied by the STALE message and the read could beat the PATCH (reproduced with a 1500 ms server delay).
+    const saved = page.waitForResponse((r) => r.request().method() === 'PATCH' && r.url().endsWith('/api/agents/warm'), { timeout: 10000 });
     await page.click(`${row} [data-agent-save]`);
+    assert.equal((await saved).status(), 200, 'the save was accepted');
     await page.waitForFunction((sel) => document.querySelector(sel)?.classList.contains('ok'), { timeout: 5000 }, `${row} [data-agent-msg]`);
     let a = (await j(await fetch(`${server.baseUrl}/api/agents`))).find((x) => x.seatKey === 'warm');
     assert.deepEqual(a.model.sampling, { temperature: 0.3, maxTokens: 512, keepAlive: '5m' });
@@ -116,7 +121,12 @@ test('#1258 the agent editor: set temperature, max tokens and keep-alive, save â
     await page.waitForSelector(`${row} [data-agent-temperature]`, { timeout: 5000 });
     await page.$eval(`${row} [data-agent-editor]`, (d) => { d.open = true; });
     await page.$eval(`${row} [data-agent-temperature]`, (i) => { i.value = ''; });
+    // #1714 â€” wait for THIS save's PATCH to be answered before reading the API. The 'ok' message alone is not enough:
+    // after the first save the re-rendered row already carries an 'ok' message, so on the second save that wait was
+    // satisfied by the STALE message and the read could beat the PATCH (reproduced with a 1500 ms server delay).
+    const saved2 = page.waitForResponse((r) => r.request().method() === 'PATCH' && r.url().endsWith('/api/agents/warm'), { timeout: 10000 });
     await page.click(`${row} [data-agent-save]`);
+    assert.equal((await saved2).status(), 200, 'the second save was accepted');
     await page.waitForFunction((sel) => document.querySelector(sel)?.classList.contains('ok'), { timeout: 5000 }, `${row} [data-agent-msg]`);
     a = (await j(await fetch(`${server.baseUrl}/api/agents`))).find((x) => x.seatKey === 'warm');
     assert.deepEqual(a.model.sampling, { maxTokens: 512, keepAlive: '5m' }, 'temperature absent, the rest kept');
