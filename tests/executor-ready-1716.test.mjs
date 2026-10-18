@@ -20,6 +20,8 @@
  *   R3a a stranger that serves a real executor's /health body with ANOTHER dataset id: REJECTS (a shape-only check passes it)
  *   R3b a stranger that serves a real executor's /health body WITH OUR dataset id, while our own child could not bind: REJECTS
  *       (a dataset-id-only check passes it; executorRunning is the fact a stranger cannot supply — commons 43905)
+ *   R5  SYNTHETIC contract coverage: counters say executorRunning true but name ANOTHER dataset: REJECTS. No real backend
+ *       reaches this state; it exists so a running-only check cannot pass (commons 43909)
  *
  * NOT covered: which test's REST was the stranger in CI; the 503's remaining causes (#1713); timing of freePort reuse.
  */
@@ -116,4 +118,16 @@ test('#1716 (R3b) a stranger serving a real /health body WITH OUR dataset id, wh
     assert.equal(c?.executorRunning, false, `PRECONDITION: our own child is NOT running, so only executorRunning can tell (${JSON.stringify({ executorRunning: c?.executorRunning, trialControl: c?.trialControl })})`);
     await rejects(ready()(rest.baseUrl, FAST), /executorRunning|identity/i, 'R3b');
   } finally { await rest.stop(); await s.close(); }
+});
+
+// R5 — SYNTHETIC CONTRACT COVERAGE, not a demonstrated real-executor state (commons 43909): a fake REST whose counters say
+// our child IS running but name ANOTHER dataset. No real backend reaches this state (a running child holds the port), so
+// it is the only row that forces the identity half of the check; the real backends above stay the port-race evidence.
+test('#1716 (R5) SYNTHETIC: counters reporting executorRunning true with ANOTHER dataset id are NOT ready', async () => {
+  const fake = http.createServer((req, res) => {
+    if (req.url === '/api/trial/counters') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ executor: { status: 'OK', datasetId: 'ds-1716-someone-else' }, identity: { ok: true, datasetId: 'ds-1716-someone-else', epoch: '1' }, trialControl: true, executorRunning: true })); return; }
+    res.writeHead(404); res.end();
+  });
+  await new Promise((r) => fake.listen(0, '127.0.0.1', r));
+  try { await rejects(ready()(`http://127.0.0.1:${fake.address().port}`, FAST), /identity/i, 'R5'); } finally { await new Promise((r) => fake.close(r)); }
 });
