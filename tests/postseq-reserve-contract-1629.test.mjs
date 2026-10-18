@@ -18,8 +18,11 @@
  *   K4  on a REAL executor: origin.occurredAt is stored and read back exactly; two drafts differing ONLY in it collide
  *       (intent-collision), and so do one with it and one without
  *
- * NOT covered: whether a reservation's attachment may carry a null mime/name/size (post.write requires each; the reserve accepts
- * null) — that is a contract question for the owner, not asserted here; the outbox/publish path (later slices); REST.
+ *   K5  a present attachment object needs EVERY member: a missing or null id / mime / name / size is refused, as post.write
+ *       refuses it (the interface owner's ruling on #1629 v60: match post.write, no publisher-side mapping); an omitted or
+ *       null attachments ARRAY is still accepted and defaults to empty (control)
+ *
+ * NOT covered: the outbox/publish path (later slices); REST.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -151,6 +154,25 @@ for (const [label, item] of K2A) {
     assert.equal(reserveAccepts(item), false, `the reserve accepted an announcement post.create would refuse (${label})`);
   });
 }
+// ── K5: every member of a present attachment is required ──
+for (const k of Object.keys(ATT_VALID)) {
+  for (const [how, att] of [['missing', (() => { const a = { ...ATT_VALID }; delete a[k]; return a; })()], ['null', { ...ATT_VALID, [k]: null }]]) {
+    test(`#1629 (K5) an attachment with ${k} ${how} is refused, as post.write refuses it`, () => {
+      const item = ordinary('ada', `k5-${k}-${how}`, { attachments: [att] });
+      assert.equal(writeAccepts(item), false, `PRECONDITION: post.write canonicalize refuses an attachment with ${k} ${how}`);
+      assert.equal(reserveAccepts(item), false, `the reserve accepted an attachment with ${k} ${how}`);
+    });
+  }
+}
+test('#1629 (K5 CONTROL) an omitted or null attachments array is accepted and defaults to empty, by both contracts', () => {
+  const omitted = ordinary('ada', 'k5-omitted'); delete omitted.draft.attachments;
+  const nul = ordinary('ada', 'k5-null', { attachments: null });
+  for (const [label, item] of [['omitted', omitted], ['null', nul]]) {
+    assert.equal(writeAccepts(item), true, `PRECONDITION: post.write accepts attachments ${label}`);
+    assert.equal(reserveAccepts(item), true, `the reserve accepts attachments ${label}`);
+    assert.deepEqual(M.canonReservationBatch([item])[0].draft.attachments, [], `attachments ${label} canonicalizes to []`);
+  }
+});
 test('#1629 (K2 CONTROL) a well-formed announcement and a well-formed ordinary item are accepted by both contracts', () => {
   const a = announcement('m', '0'), o = ordinary('ada', 'k2-ok', { origin: { ...VALID.origin }, attachments: [{ ...ATT_VALID }] });   // no occurredAt: that is K1's row, not the control's
   assert.equal(createAccepts(a), true); assert.equal(reserveAccepts(a), true);
