@@ -62,8 +62,10 @@ async function writeLogborn(boardFile, baseEnv) {
   } finally { await rest.stop(); }
 }
 
-/** Build the fixture, run the chain into a fresh executor, start REST (cards, columns and conversations units on). Every step must exit 0. */
-export async function wholeBoardWorld({ env = {}, logborn = false } = {}) {
+/** Build the fixture, run the chain into a fresh executor, start REST (cards, columns and conversations units on). Every step must exit 0.
+ *  `front` (optional): given the executor's URL once the chain has run, returns the URL REST should use instead (a fault-injecting proxy, #84's
+ *  fault rows); the migrations always talk to the executor itself. The world returns it as `frontUrl`. */
+export async function wholeBoardWorld({ env = {}, logborn = false, front = null } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wb1645-')); const boardFile = path.join(dir, 'board.json');
   fs.writeFileSync(boardFile, JSON.stringify(wholeBoard(), null, 2));
   const store = tmpStore('wb1645-store-'); fs.rmSync(store, { recursive: true });
@@ -87,7 +89,8 @@ export async function wholeBoardWorld({ env = {}, logborn = false } = {}) {
       steps.push(m);
       if (m.code !== 0) throw new Error(`PRECONDITION: migrate-logborn-1561 exited ${m.code}: ${m.out.slice(-400)}`);
     }
-    const rest = await startRestServer({ boardFile, env: { ...baseEnv, ...(logborn ? { SCRUM_GRAPH_UNIT_LOGBORN: '1' } : {}), ...env } });
-    return { exec, rest, boardFile, steps, records, stop: () => cleanup(rest) };
+    const frontUrl = front ? await front(exec.baseUrl) : null;
+    const rest = await startRestServer({ boardFile, env: { ...baseEnv, ...(logborn ? { SCRUM_GRAPH_UNIT_LOGBORN: '1' } : {}), ...(frontUrl ? { SCRUM_GRAPH_EXECUTOR_URL: frontUrl } : {}), ...env } });
+    return { exec, rest, boardFile, steps, records, frontUrl, stop: () => cleanup(rest) };
   } catch (e) { await cleanup(null); throw e; }
 }

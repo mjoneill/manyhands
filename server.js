@@ -9046,9 +9046,12 @@ async function executorCensus(executorUrl) {
     const rows = await selectExecutorAll(executorUrl, Q_CENSUS_BY_TYPE, { timeoutMs: 10_000, maxRows: 10_000 });
     const counts = {};
     for (const r of rows) {
-      const n = Number(r.n);
-      if (typeof r.t !== 'string' || !Number.isFinite(n)) continue;
-      counts[r.t] = (counts[r.t] ?? 0) + n;
+      // A row that is not a type and a whole count is a census that cannot be trusted, never one to skip: a skipped row
+      // would leave that kind at a false 0 under census "live". The whole census is then unavailable, and says why.
+      if (typeof r.t !== 'string' || !r.t || typeof r.n !== 'string' || !/^\d+$/.test(r.n) || !Number.isSafeInteger(Number(r.n))) {
+        return { error: `the executor's census answered a row that is not a type and a count (${JSON.stringify(r).slice(0, 120)})` };
+      }
+      counts[r.t] = (counts[r.t] ?? 0) + Number(r.n);
     }
     return { counts, executorPosition };
   } catch (e) {
