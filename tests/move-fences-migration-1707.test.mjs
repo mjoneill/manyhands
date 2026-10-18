@@ -46,12 +46,15 @@ test('#1707 (MM1–MM3) fences recorded in the document before the switch: boot 
 
     // MM1 — the unit ON over a graph that does not hold the document's fence: must not serve
     let err = null;
-    // a start the server REFUSES leaves the harness's attachments directory behind (it is made before the process runs and only
-    // stop() removes it): note what exists, and remove exactly what the refused start made
-    const attach = () => new Set(fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('scrum-test-attach-')));
-    const attachBefore = attach();
-    try { rest = await startRestServer({ boardFile: w.boardFile, env: { ...env, ...SMALL } }); } catch (e) { err = e; }
-    if (!rest) for (const n of attach()) if (!attachBefore.has(n)) fs.rmSync(path.join(os.tmpdir(), n), { recursive: true, force: true });
+    // a start the server REFUSES leaves the harness's attachments directory behind (made before the process runs; only stop()
+    // removes it). The harness makes it under os.tmpdir(), which reads TMPDIR at call time: give the refused start a PRIVATE temp
+    // directory and remove that, so nothing another test file made in the shared suite folder can be touched
+    const privateTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mm1707-'));
+    const savedTmp = process.env.TMPDIR; process.env.TMPDIR = privateTmp;
+    try { rest = await startRestServer({ boardFile: w.boardFile, env: { ...env, ...SMALL } }); } catch (e) { err = e; } finally {
+      if (savedTmp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = savedTmp;
+    }
+    if (!rest) fs.rmSync(privateTmp, { recursive: true, force: true });
     if (rest) { const k = fs.readFileSync(w.boardFile); await rest.stop(); fs.writeFileSync(w.boardFile, k); rest = null; assert.fail('MM1: REST served with the document\'s fence missing from the graph'); }
     assert.match(String(err?.message), /migrate-collections-1624/, `MM1: the refusal names the migration (${String(err?.message).slice(-300)})`);
 
