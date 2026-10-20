@@ -1575,11 +1575,26 @@ export function admitStoredOriginPlan(descriptor, plan) {
     if (want.some((n) => !k.includes(n)) || k.some((n) => !want.includes(n) && !opt.includes(n))) fail(`${w} has keys ${JSON.stringify(k)}`);
   };
   const int = (s, w) => { if (typeof s !== 'string' || canonInteger(s) !== s || s.startsWith('-')) fail(`${w} is not a canonical integer`); };
-  const TERM = /^(<[^<>"{}|^`\\\s]*>|"(?:[^"\\]|\\.)*"(?:@[a-z]+(?:-[a-z0-9]+)*|\^\^<[^<>"{}|^`\\\s]*>)?)$/;
+  // a stored term is canonical only if the FORWARD rules (cardTerm) reproduce it byte for byte from its own parse
+  const LIT = /^"((?:[^"\\]|\\.)*)"(?:@([^"]+)|\^\^<([^<>]*)>)?$/;
+  const parseTerm = (t) => {
+    if (t.startsWith('<') && t.endsWith('>')) return { type: 'uri', value: t.slice(1, -1) };
+    const m = LIT.exec(t);
+    if (!m) return null;
+    let value;
+    try { value = JSON.parse(`"${m[1]}"`); } catch { return null; }
+    return { type: 'literal', value, ...(m[2] != null ? { lang: m[2] } : {}), ...(m[3] != null ? { datatype: m[3] } : {}) };
+  };
+  const isTerm = (t) => {
+    if (typeof t !== 'string') return false;
+    const p = parseTerm(t);
+    if (!p) return false;
+    try { return cardTerm(p, 'stored term') === t; } catch (e) { if (e instanceof ValidationError) return false; throw e; }
+  };
   const quads = (list, w, each) => {
     if (!Array.isArray(list)) fail(`${w} is an array`);
     list.forEach((q, n) => {
-      if (!Array.isArray(q) || q.length !== 3 || q.some((t) => typeof t !== 'string' || !TERM.test(t))) fail(`${w}[${n}] is three canonical terms`);
+      if (!Array.isArray(q) || q.length !== 3 || q.some((t) => !isTerm(t))) fail(`${w}[${n}] is three canonical terms`);
       if (n && !(list[n - 1].join(' ') < q.join(' '))) fail(`${w}[${n}] is out of canonical order`);
       each(q, `${w}[${n}]`);
     });
@@ -1617,7 +1632,7 @@ export function admitStoredOriginPlan(descriptor, plan) {
       };
       quads(p.quads, `${w}.quads`, own);
       quads(p.prior, `${w}.prior`, own);
-      const iriTerm = (t, wt) => { if (typeof t !== 'string' || !TERM.test(t) || unref(t) == null) fail(`${wt} is an IRI term`); };
+      const iriTerm = (t, wt) => { if (!isTerm(t) || unref(t) == null) fail(`${wt} is an IRI term`); };
       if (p.unique != null) {
         if (!Array.isArray(p.unique) || !p.unique.length) fail(`${w}.unique, when present, is a non-empty array`);
         p.unique.forEach((u, n) => {
@@ -1626,7 +1641,7 @@ export function admitStoredOriginPlan(descriptor, plan) {
           u.all.forEach((a, j) => {
             keys(a, ['predicate', 'value'], [], `${w}.unique[${n}].all[${j}]`);
             iriTerm(a.predicate, `${w}.unique[${n}].all[${j}].predicate`);
-            if (typeof a.value !== 'string' || !TERM.test(a.value)) fail(`${w}.unique[${n}].all[${j}].value is a canonical term`);
+            if (!isTerm(a.value)) fail(`${w}.unique[${n}].all[${j}].value is a canonical term`);
           });
         });
       }

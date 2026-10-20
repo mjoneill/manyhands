@@ -101,6 +101,7 @@
   "tests/no-replica-routes-1645.test.mjs",
   "tests/nodes-from-units-1709.test.mjs",
   "tests/origin-commit-1629-s2-supp.test.mjs",
+  "tests/origin-commit-1629-s2-supp2.test.mjs",
   "tests/origin-commit-1629-s2.test.mjs",
   "tests/post-import-referenced-1626.test.mjs",
   "tests/post-redaction-r4a-addendum.test.mjs",
