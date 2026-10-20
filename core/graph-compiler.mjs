@@ -1653,7 +1653,11 @@ export function admitStoredOriginPlan(descriptor, plan) {
     ordered(plan.collections, 'plan.collections');
   }
   bindOriginPlan(descriptor, plan);
-  return plan;
+  // rebuilt in canonCardWrite's own key order, so a caller comparing its JSON to the stored bytes refuses a reordering
+  const cardPart = (p) => ({ iri: p.iri, expectedVersion: p.expectedVersion, version: p.version, quads: p.quads, prior: p.prior, json: p.json });
+  const collPart = (p) => ({ collection: p.collection, iri: p.iri, expectedVersion: p.expectedVersion, version: p.version, quads: p.quads, prior: p.prior, json: p.json,
+    ...(p.unique ? { unique: p.unique.map((u) => ({ all: u.all.map((a) => ({ predicate: a.predicate, value: a.value })) })) } : {}), ...(p.requires ? { requires: p.requires } : {}) });
+  return { parts: plan.parts.map(cardPart), counter: plan.counter, ...(plan.collections ? { collections: plan.collections.map(collPart) } : {}) };
 }
 
 function canonOriginPrepare(i, common) {
