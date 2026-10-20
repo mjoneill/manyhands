@@ -516,7 +516,7 @@ test('#1629 s2 (O2) an agent rest releases two GENUINELY held cards with the age
     for (const c of [held1, held2, held3]) assert.ok((await cardDomain(client, c.id)).some((t) => t.includes('claimedBy') && t.endsWith('/person/zoe')), `PRECONDITION: ${c.id} is held by zoe in the graph`);
     assert.ok((await cardDomain(client, yanOnly.id)).some((t) => t.includes('claimedBy') && t.endsWith('/person/yan')), 'PRECONDITION: yan holds its one card');
     // g1 — ISOLATED (review 44433): yan releases every card it holds (so g2 is satisfied) plus one card it does NOT hold. Only g1 can refuse.
-    const g1 = restOrigin('yan', [yanOnly, free], 'k-g1');
+    const g1 = restOrigin('yan', [free, yanOnly], 'k-g1');
     const p1 = await prepared(client, g1);   // prepare checks no claims; the guard lives in the commit
     await refusedWithNoEffect(client, commitIntention(g1, p1.occurredAt), [yanOnly.id, free.id], 'g1 held (only g1 violated)', [AGENT_ID('yan')]);
     // g1 CONTROL: the same agent releasing exactly what it holds is not refused by g1 or g2 (so the refusal above was g1's)

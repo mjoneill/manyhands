@@ -1548,8 +1548,8 @@ function bindOriginPlan(descriptor, plan) {
   const C = plan.collections ?? [];
   if (C.length !== 1 || C[0].collection !== 'agents' || C[0].iri !== originAgentIri(descriptor.subject)) fail(`an agent-route origin plan holds exactly one collection part: the agents entity ${originAgentIri(descriptor.subject)}`);
   live(C[0], 'collections[0]');
-  const want = new Set(descriptor.provenance.releasedCards.map((id) => `${ENTITY_IRI}${id}`));
-  if (plan.parts.length !== want.size || plan.parts.some((p) => !want.has(p.iri))) fail('the card parts must be exactly origin.provenance.releasedCards');
+  const want = descriptor.provenance.releasedCards.map((id) => `${ENTITY_IRI}${id}`);
+  if (plan.parts.length !== want.length || plan.parts.some((p, k) => p.iri !== want[k])) fail('the card parts must be exactly origin.provenance.releasedCards, in that order');
   const claimed = ref(`${CW.scrum}claimedBy`);
   plan.parts.forEach((p, k) => {
     live(p, `parts[${k}]`);
@@ -1561,6 +1561,84 @@ function bindOriginPlan(descriptor, plan) {
 function canonOriginPlan(plan) {
   obj(plan, ['parts', 'counter', 'collections'], 'plan');
   return canonCardWrite({ parts: plan.parts ?? [], counter: plan.counter, collections: plan.collections });
+}
+
+/**
+ * A STORED origin plan re-admitted (review v122): the reader's twin of canonOriginPlan + bindOriginPlan. The stored plan
+ * holds canonical term strings, which canonCardWrite does not take as input, so this checks that form directly: exact
+ * keys, canonical integers, sorted unique quads each owned by its part, parts in iri order, then the route binding.
+ */
+export function admitStoredOriginPlan(descriptor, plan) {
+  const keys = (x, want, opt, w) => {
+    if (!x || typeof x !== 'object' || Array.isArray(x)) fail(`${w} is an object`);
+    const k = Object.keys(x);
+    if (want.some((n) => !k.includes(n)) || k.some((n) => !want.includes(n) && !opt.includes(n))) fail(`${w} has keys ${JSON.stringify(k)}`);
+  };
+  const int = (s, w) => { if (typeof s !== 'string' || canonInteger(s) !== s || s.startsWith('-')) fail(`${w} is not a canonical integer`); };
+  const TERM = /^(<[^<>"{}|^`\\\s]*>|"(?:[^"\\]|\\.)*"(?:@[a-z]+(?:-[a-z0-9]+)*|\^\^<[^<>"{}|^`\\\s]*>)?)$/;
+  const quads = (list, w, each) => {
+    if (!Array.isArray(list)) fail(`${w} is an array`);
+    list.forEach((q, n) => {
+      if (!Array.isArray(q) || q.length !== 3 || q.some((t) => typeof t !== 'string' || !TERM.test(t))) fail(`${w}[${n}] is three canonical terms`);
+      if (n && !(list[n - 1].join(' ') < q.join(' '))) fail(`${w}[${n}] is out of canonical order`);
+      each(q, `${w}[${n}]`);
+    });
+  };
+  const versions = (p, w) => {
+    int(p.expectedVersion, `${w}.expectedVersion`); int(p.version, `${w}.version`);
+    if (BigInt(p.version) <= BigInt(p.expectedVersion)) fail(`${w}.version must be above expectedVersion`);
+    rStr(p.json, `${w}.json`);
+  };
+  const ordered = (list, w) => list.forEach((p, k) => { if (k && !(list[k - 1].iri < p.iri)) fail(`${w}[${k}] is out of iri order`); });
+  keys(plan, ['parts', 'counter'], ['collections'], 'plan');
+  if (!Array.isArray(plan.parts)) fail('plan.parts is an array');
+  plan.parts.forEach((p, k) => {
+    const w = `plan.parts[${k}]`;
+    keys(p, ['iri', 'expectedVersion', 'version', 'quads', 'prior', 'json'], [], w);
+    const iri = checkIri(p.iri, `${w}.iri`), id = iri.slice(ENTITY_IRI.length);
+    if (!iri.startsWith(ENTITY_IRI) || !/^[A-Za-z0-9-]{1,64}$/.test(id)) fail(`${w}.iri must be ${ENTITY_IRI}<card id>`);
+    versions(p, w);
+    quads(p.quads, `${w}.quads`, (t, wq) => cardQuadClass(t, iri, id, wq));
+    if (!p.quads.some(([s, pr]) => s === ref(iri) && pr === ref(CW.rdfType))) fail(`${w}.quads must type the card`);
+    quads(p.prior, `${w}.prior`, (t, wq) => { if (cardQuadClass(t, iri, id, wq) === 'shared') fail(`${wq}: a shared node is never deleted by a card write`); });
+  });
+  ordered(plan.parts, 'plan.parts');
+  if (plan.collections != null) {
+    if (!Array.isArray(plan.collections) || !plan.collections.length) fail('plan.collections, when present, is a non-empty array');
+    plan.collections.forEach((p, k) => {
+      const w = `plan.collections[${k}]`;
+      keys(p, ['collection', 'iri', 'expectedVersion', 'version', 'quads', 'prior', 'json'], ['unique', 'requires'], w);
+      if (typeof p.collection !== 'string' || !COLL_KEY_RE.test(p.collection)) fail(`${w}.collection must name a collection`);
+      const iri = checkIri(p.iri, `${w}.iri`);
+      versions(p, w);
+      const own = (t, wq) => {
+        if (t[0] !== ref(iri) && !t[0].startsWith(`<${iri}/list/`)) fail(`${wq}: subject ${t[0]} is not ${ref(iri)}`);
+        if (CW_RESERVED_PREDICATES.has(unref(t[1])) || unref(t[1]) === `${CW.scrum}inCollection`) fail(`${wq}: ${t[1]} is written by the compiler`);
+      };
+      quads(p.quads, `${w}.quads`, own);
+      quads(p.prior, `${w}.prior`, own);
+      const iriTerm = (t, wt) => { if (typeof t !== 'string' || !TERM.test(t) || unref(t) == null) fail(`${wt} is an IRI term`); };
+      if (p.unique != null) {
+        if (!Array.isArray(p.unique) || !p.unique.length) fail(`${w}.unique, when present, is a non-empty array`);
+        p.unique.forEach((u, n) => {
+          keys(u, ['all'], [], `${w}.unique[${n}]`);
+          if (!Array.isArray(u.all) || !u.all.length) fail(`${w}.unique[${n}].all is a non-empty array`);
+          u.all.forEach((a, j) => {
+            keys(a, ['predicate', 'value'], [], `${w}.unique[${n}].all[${j}]`);
+            iriTerm(a.predicate, `${w}.unique[${n}].all[${j}].predicate`);
+            if (typeof a.value !== 'string' || !TERM.test(a.value)) fail(`${w}.unique[${n}].all[${j}].value is a canonical term`);
+          });
+        });
+      }
+      if (p.requires != null) {
+        if (!Array.isArray(p.requires) || !p.requires.length) fail(`${w}.requires, when present, is a non-empty array`);
+        p.requires.forEach((r, n) => { iriTerm(r, `${w}.requires[${n}]`); if (n && !(p.requires[n - 1] < r)) fail(`${w}.requires[${n}] is out of order`); });
+      }
+    });
+    ordered(plan.collections, 'plan.collections');
+  }
+  bindOriginPlan(descriptor, plan);
+  return plan;
 }
 
 function canonOriginPrepare(i, common) {

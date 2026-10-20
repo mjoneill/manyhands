@@ -20,7 +20,7 @@
 import { ORIGIN_TERMS, EX, BK, POSTSEQ_TERMS } from './graph-vocab.mjs';
 import {
   originKeyOf as _originKeyOf, mutationIdOf as _mutationIdOf, canonOriginDescriptor, originDescriptorDigest, originPlanDigest,
-  originCommitDigest, originCommitOp, ValidationError,
+  originCommitDigest, originCommitOp, admitStoredOriginPlan, ValidationError,
 } from './graph-compiler.mjs';
 import { readPostSeqReservation, canonAnnouncementDraft } from './postseq-reserve.mjs';
 import { announcePostId } from './announce-outbox.mjs';
@@ -130,10 +130,13 @@ function validatePrepared(rows, mutationId) {
   if (JSON.stringify(descriptor) !== prepared.descriptorJson) bad(`${w}.descriptorJson is not its own canonical form`);
   if (descriptor.mutationId !== mid || descriptor.route !== key[1] || descriptor.subject !== key[2] || descriptor.requestKey !== key[3] || descriptor.originActor !== key[4]) bad(`${w}.descriptorJson names a different identity`);
   if (originDescriptorDigest(descriptor) !== prepared.descriptorDigest) bad(`${w}.descriptorDigest is not the digest of descriptorJson`);
-  // the plan: JSON in normal form, its digest recomputed
+  // the plan: re-admitted exactly as prepare admits it (schema, canonical form, route binding), its digest recomputed
   let plan;
   try { plan = JSON.parse(prepared.planJson); } catch (e) { bad(`${w}.planJson is not JSON: ${e.message}`); }
-  if (!plan || typeof plan !== 'object' || Array.isArray(plan) || !Array.isArray(plan.parts) || JSON.stringify(plan) !== prepared.planJson) bad(`${w}.planJson is not a canonical plan`);
+  if (!plan || typeof plan !== 'object' || Array.isArray(plan)) bad(`${w}.planJson is not a plan object`);
+  let canon;
+  try { canon = admitStoredOriginPlan(descriptor, plan); } catch (e) { bad(`${w}.planJson is not an admissible plan: ${e.message}`); }
+  if (JSON.stringify(canon) !== prepared.planJson) bad(`${w}.planJson is not its own canonical form`);
   if (originPlanDigest(plan) !== prepared.planDigest) bad(`${w}.planDigest is not the digest of planJson`);
   if (prepared.committedBy != null && prepared.committedBy !== originCommitOp(mid)) bad(`${w}.committedBy is not ${originCommitOp(mid)}`);
   return { prepared, descriptor, plan };
