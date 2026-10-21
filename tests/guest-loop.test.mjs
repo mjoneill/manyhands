@@ -158,6 +158,26 @@ test('#1677 a CHANNEL wake\'s failure line does not say "I was named" or ask to 
   assert.doesNotMatch(posts[0].body, /@/);
 });
 
+test('#1677 an ASSIGNMENT or SCHEDULE wake\'s failure line does not say "I was named" either — only a mention is a naming', async () => {
+  // 2026-10-21: the channel case was fixed, but the line still fell through to "I was named" for every other kind.
+  const bad = { status: 500, body: null, rawBody: 'boom' };
+  const wakes = {
+    assignment: { kind: 'assignment', id: 'assignment:c-1', cardId: 'c-1', shortId: 9, title: 'a card', body: '', createdAt: 't', author: null },
+    schedule: { kind: 'schedule', id: 'schedule:t', createdAt: 't', author: null, body: '' },
+  };
+  const expected = { assignment: /^⚠️ Gizmo: a card assigned to me woke me but my model call failed/, schedule: /^⚠️ Gizmo: my scheduled check-in woke me but my model call failed/ };
+  for (const [kind, wake] of Object.entries(wakes)) {
+    const file = tmp(); const posts = [];
+    const r = await guestOnce({ agent: AGENT, wake, callModel: (a, m, o) => callModel(a, m, { ...o, retries: 0, transport: async () => bad }),
+      post: async (b) => { posts.push(b); return { id: 'f-1' }; }, ledgerFile: file });
+    assert.equal(r.posted, false, kind); assert.equal(r.reason, 'model-failed', kind);
+    assert.equal(posts.length, 1, `${kind}: exactly one failure line`);
+    assert.match(posts[0].body, expected[kind], kind);
+    assert.doesNotMatch(posts[0].body, /I was named|name me again/, kind);
+    assert.doesNotMatch(posts[0].body, /@/, kind);
+  }
+});
+
 test('#1420 the failure line goes WHERE the mention came from (card trail or talk), and a failure of the line itself is logged, never thrown', async () => {
   const file = tmp(); const posts = []; const errs = [];
   const bad = { status: 500, body: null, rawBody: 'boom' };
