@@ -30,6 +30,8 @@
  *   L4a APPLIED, completion unrecorded, explicit route: killed at after-executor-apply during --once, restart, --once again: same
  *       mutation/slot/postId/postSeq, exactly one post, no extra postSeq consumed.
  *   L4b the same gap on the inline path (after-dispatch-before-complete; #1574 H5's pattern).
+ *   BRa/BR0/BRb/BRc  a REDACTED announcement settles BLOCKED through the real --once, on each of the publisher's two block calls
+ *       (R1b gate, 45195–45197); see the BR block below for which state reaches which call, measured.
  *   L5  READ PURITY: three GET /api/outbox reads while an entry is pending change nothing; the next post takes the expected number.
  *   Every L1–L5 row: zero board-file attempts in EVERY REST incarnation on the recorder (whose log must be non-empty), and the runtime's
  *   /api/health document counter is 0.
@@ -689,5 +691,110 @@ test('#1629 GDR2 (mode off): the true post\'s receipt ACTOR not the author\'s pe
     const t = await receiptTerms(ex, truePost.opId, 'urn:ex:actor');
     assert.deepEqual(t.map((x) => x.value), ['https://scrumboard.local/person/ada'], `PRECONDITION (GDR2): read-back: the actor is ada's person (${JSON.stringify(t)})`);
     await noDispatchNoSettle(s, snap, 'GDR2');
+  });
+});
+
+// ── BR: a REDACTED announcement is settled BLOCKED by the real publisher (review R1b gate, 45195–45197) ──
+// xoPublish has two block calls, and since R1b each must carry the origin candidate or the settle is refused at canonicalization and
+// the entry stays pending for ever. 45195 measured that no REST row reached either (both server mutants survived). Each row below
+// drives ONE of them through the real --once, against a fresh REST, and reads the outcome back three ways: the outbox entry, the
+// Obligation's own status in the executor, and zero dispatches to the notify sink.
+// Which call a state reaches was MEASURED on a bare executor at c2fd7d3 (20:28Z): a redacted post whose op keeps its receipt replays
+// post.create as APPLIED (→ the second call); with the op's receipt gone, post.create at the tombstone is PRECONDITION_FAILED (→ the
+// first call). A reserved post that was never written cannot be redacted (PRECONDITION_FAILED). So the first call is reached only
+// through a LOST post receipt, which BRa injects beneath the compiler and reads back, as GD injects its state.
+//   BRa  INJECTED: the true post created and redacted, then its op's receipt deleted → post.create refused at a tombstone (FIRST call)
+//   BR0  CONTROL for BRb: --once held at after-executor-apply (post.create APPLIED), released untouched → dispatched, published
+//   BRb  the same hold, and the post redacted in the executor WHILE REST is held → a tombstone after the APPLIED post.create (SECOND)
+//   BRc  the true post created and redacted before --once, its receipt kept → post.create replays APPLIED, then the tombstone (SECOND)
+// GDR0 is the control for BRa and BRc: the identical pre-created true post, NOT redacted, is dispatched and reads published.
+const PERSON_ADA = 'https://scrumboard.local/person/ada';
+async function redactInExecutor(ex, postId, label) {
+  const r = await ex.update({ kind: 'post.redact', opId: `urn:ex:op/redact/${postId}`, actor: PERSON_ADA, post: { id: postId }, authorityRef: 'test-authority-ref', occurredAt: '2026-10-22T12:00:00.000Z' });
+  assert.equal(r.outcome, 'APPLIED', `PRECONDITION (${label}): the post was redacted through the compiler (${JSON.stringify(r).slice(0, 200)})`);
+  const t = (await ex.query(`SELECT ?t WHERE { <https://scrumboard.local/entity/${postId}> a ?t }`)).rows.map((x) => x.t.value);
+  assert.ok(t.includes('https://scrumboard.local/ns#RedactedPost'), `PRECONDITION (${label}): read-back: the reserved post is a RedactedPost (${JSON.stringify(t)})`);
+}
+/** The obligation's own status triple in the executor, independent of REST. */
+async function obligationStatusIn(ex, snap) {
+  return (await ex.query(`SELECT ?st WHERE { GRAPH <urn:scrum:bookkeeping:executor> { ?ob a <urn:ex:origin/Obligation> ; <urn:ex:origin/obligationId> ${JSON.stringify(snap.obligationId)} ; <urn:ex:origin/status> ?st } }`)).rows.map((x) => x.st.value);
+}
+async function blockedOnRedaction(s, ex, snap, run, label) {
+  assert.equal(run.code, 0, `${label}: --once completed (${run.code}) ${run.err.slice(0, 300)}`);
+  assert.ok(await until(async () => entriesOf((await s.call('GET', `/api/outbox?mutationId=${encodeURIComponent(snap.mutationId)}`)).json).some((e) => e.slot === 'claim' && e.status === 'blocked'), 20000),
+    `${label}: read-back: the outbox entry reads blocked (${(await s.call('GET', `/api/outbox?mutationId=${encodeURIComponent(snap.mutationId)}`)).text.slice(0, 300)})`);
+  assert.deepEqual(await obligationStatusIn(ex, snap), ['blocked'], `${label}: read-back: the Obligation's own status in the executor is exactly 'blocked'`);
+  await sleep(1500);
+  assert.equal(s.sink.forPost(snap.postId).length, 0, `${label}: ZERO dispatches for the redacted post (got ${s.sink.forPost(snap.postId).length})`);
+  await documentUntouched(s, 'off', label);
+}
+/** Hold --once's publish at after-executor-apply, run `during` while REST is held, then RELEASE (REST is not killed). */
+async function publishHeldAtApply(s, during) {
+  const fifo = path.join(s.barrierDir, 'after-executor-apply');
+  assert.equal(spawnSync('mkfifo', [fifo]).status, 0, 'PRECONDITION: mkfifo after-executor-apply');
+  const runP = s.publishOnce();
+  let fh = null;
+  const reached = await Promise.race([fsp.open(fifo, 'w').then((h) => { fh = h; return true; }), sleep(20000).then(() => false)]);
+  try {
+    assert.equal(reached, true, 'PRECONDITION: REST reached after-executor-apply during --once (post.create APPLIED, nothing settled)');
+    await during();
+  } finally {
+    try { await fh?.close(); } catch { /* ignore */ }
+    if (!reached) { try { fs.closeSync(fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK)); } catch { /* none */ } }
+    fs.rmSync(fifo, { force: true });
+  }
+  return runP;
+}
+
+test('#1629 BRa (mode off, INJECTED: a lost post receipt): the reserved post is a tombstone and its op holds no receipt, so the publisher\'s post.create is refused at the tombstone: it settles the entry BLOCKED, never dispatches', TB, async () => {
+  await world('off', async (s) => {
+    await s.start();
+    const { snap, truePost, ex } = await preparedTruePost(s, 'BRa');
+    await redactInExecutor(ex, snap.postId, 'BRa');
+    const r = await fetch(`${s.w.exec.baseUrl}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/l1629-bra-${process.pid}-${Date.now()}` }, body: `DELETE WHERE { GRAPH <urn:scrum:bookkeeping:executor> { <${truePost.opId}> ?p ?o } }` });
+    assert.equal(r.status, 200, `PRECONDITION (BRa): the post op's receipt was deleted (${await r.text()})`);
+    assert.equal((await ex.query(`SELECT ?p WHERE { GRAPH <urn:scrum:bookkeeping:executor> { <${truePost.opId}> ?p ?o } }`)).rows.length, 0, 'PRECONDITION (BRa): read-back: no receipt triple remains at the deterministic op');
+    assert.deepEqual(await obligationStatusIn(ex, snap), ['pending'], 'PRECONDITION (BRa): read-back: still pending before --once');
+    await s.start();
+    await blockedOnRedaction(s, ex, snap, await s.publishOnce(), 'BRa');
+  });
+});
+
+test('#1629 BR0 CONTROL (mode off): --once held after its APPLIED post.create and released untouched: dispatched, and the entry reads published', TB, async () => {
+  await world('off', async (s) => {
+    await s.start();
+    const snap = await pendingAfterOriginCrash(s, 'BR0');
+    await s.start();
+    const run = await publishHeldAtApply(s, async () => {});
+    assert.equal(run.code, 0, `BR0: --once completed (${run.code}) ${run.err.slice(0, 300)}`);
+    assert.ok(await until(async () => s.sink.forPost(snap.postId).length >= 1, 20000), `BR0: the sink received a dispatch for ${snap.postId}`);
+    assert.ok(await until(async () => entriesOf((await s.call('GET', `/api/outbox?mutationId=${encodeURIComponent(snap.mutationId)}`)).json).some((e) => e.slot === 'claim' && e.status === 'published'), 20000), 'BR0: read-back: published');
+    await documentUntouched(s, 'off', 'BR0');
+  });
+});
+
+test('#1629 BRb (mode off): the reserved post REDACTED while --once is held after its APPLIED post.create: released, the publisher settles BLOCKED, never dispatches', TB, async () => {
+  await world('off', async (s) => {
+    await s.start();
+    const snap = await pendingAfterOriginCrash(s, 'BRb');
+    await s.start();
+    const ex = createGraphClient({ baseUrl: s.w.exec.baseUrl, expectedDatasetId: WB_DATASET, timeoutMs: 30000, label: 'l1629-brb' });
+    const run = await publishHeldAtApply(s, async () => {
+      const live = (await ex.query(`SELECT ?t WHERE { <https://scrumboard.local/entity/${snap.postId}> a ?t }`)).rows.map((x) => x.t.value);
+      assert.ok(live.includes('https://schema.org/Comment'), `PRECONDITION (BRb): read-back at the hold: the publisher's post exists and is live (${JSON.stringify(live)})`);
+      await redactInExecutor(ex, snap.postId, 'BRb');
+    });
+    await blockedOnRedaction(s, ex, snap, run, 'BRb');
+  });
+});
+
+test('#1629 BRc (mode off): the reserved post created and REDACTED before --once, its receipt kept: post.create replays APPLIED, and the publisher settles BLOCKED, never dispatches', TB, async () => {
+  await world('off', async (s) => {
+    await s.start();
+    const { snap, ex } = await preparedTruePost(s, 'BRc');
+    await redactInExecutor(ex, snap.postId, 'BRc');
+    assert.deepEqual(await obligationStatusIn(ex, snap), ['pending'], 'PRECONDITION (BRc): read-back: still pending before --once');
+    await s.start();
+    await blockedOnRedaction(s, ex, snap, await s.publishOnce(), 'BRc');
   });
 });
