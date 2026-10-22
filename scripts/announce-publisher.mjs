@@ -202,7 +202,8 @@ export async function scan(call, batch, state, nowMs) {
     if (r.status >= 500) { fail(id, `HTTP ${r.status}`, true); continue; }
     const outcome = r.body && typeof r.body.status === 'string' ? r.body.status : null;
     if (outcome === 'published' || outcome === 'blocked') { settle(id); continue; }
-    if (outcome === 'pending') { fail(id, `pending${r.body.reason ? `: ${r.body.reason}` : ''}`, false); continue; }
+    // #1629 s3 — an integrity fault is an ERROR, so it is reported (stderr, lastError); a plain pending is just a retry
+    if (outcome === 'pending') { fail(id, `pending${r.body.reason ? `: ${r.body.reason}` : ''}`, r.body.integrity === true); continue; }
     fail(id, `HTTP ${r.status}: unparseable answer`, true);
   }
   return counts;

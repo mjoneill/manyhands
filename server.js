@@ -133,6 +133,8 @@ const DELIVERIES_UNIT = process.env.SCRUM_GRAPH_UNIT_DELIVERIES === '1';
 // `card.write` per locked write. The document's own card list is neither read nor written while the flag is on.
 const CARDS_UNIT = process.env.SCRUM_GRAPH_UNIT_CARDS === '1';
 let CARDS = null;
+let ORIGIN_MOD = null;   // #1629 s3 — core/origin-commit.mjs, loaded at boot in executor-owned mode only
+let COMPILER_MOD = null;   // #1629 s3 — core/graph-compiler.mjs (the publication digest, settleOpId), same
 const FILE_CARDS = Symbol('fileCards');           // the document's card list, put back before the document is written
 const FILE_NEXT_SHORT_ID = Symbol('fileNextShortId');
 const FILE_ORIGINS = Symbol('fileOutboxOrigins');   // #1598 K4 — the outbox mutations the document already held when read
@@ -145,9 +147,17 @@ const SMALLKINDS_UNIT = process.env.SCRUM_GRAPH_UNIT_SMALLKINDS === '1';
 // FAIL-CLOSED: read-off and off refuse to start unless every authoritative unit is on AND every field that only the
 // document holds has an owner. The refusal names everything missing, in one line, before the server listens.
 const BOARD_DOCUMENT = process.env.SCRUM_BOARD_DOCUMENT ?? 'on';
+// #1629 slice 3 — EXECUTOR-OWNED ANNOUNCEMENTS. In read-off/off (which the gate below admits only with every unit on) the
+// announcement outbox lives in the executor: an origin route commits its Origin, Obligations and reservations in its own
+// card.write (slice 2's primitive), GET /api/outbox and /publish read the executor, settlement is obligation.settle, and
+// boot never requeues into the document or drains inline. In `on` nothing here runs: today's document path, unchanged.
+// ⚠️ ISOLATED AND INCOMPLETE (commons 45032): owning the outbox is CODE COVERAGE, not migrated-state readiness or cutover
+// permission. Two origin shapes still refuse here until #1629 slice 4 — a page create (wiki-create) and a done-move that
+// shifts a sibling — and existing document outbox entries are not migrated (M1/M2 deferred).
+const ORIGIN_EXECUTOR = BOARD_DOCUMENT !== 'on';
 // the fields no unit holds yet, each with the card that gives it an owner; `owned` flips when that card's build lands
 const DOCUMENT_ONLY_FIELDS = [
-  { field: 'outbox (announcement origins and entries)', card: '#1629', owned: () => false },
+  { field: 'outbox (announcement origins and entries)', card: '#1629', owned: () => ORIGIN_EXECUTOR },
   // #1640 — the labelAliases collection family is held by the collections unit, which the smallkinds unit turns on
   { field: 'labelAliases', card: '#1640', owned: () => SMALLKINDS_UNIT },
   // #1707 — the moveFences collection family is held by the collections unit, which the smallkinds unit turns on
@@ -571,6 +581,7 @@ function appendClaimAnnouncement(data, card, actor, action) {
 // If the direct post was skipped (it is best-effort), the entry has no proof
 // and /publish blocks it as legacy-proof-missing rather than guessing.
 function commitCardObligation(data, card, actor, slot, action, announced = null) {
+  if (ORIGIN_EXECUTOR) throw new OriginShapeRefused('a legacy-mode announcement is not created when the executor owns the outbox (#1629 s3, S2)', 'LEGACY_ORIGIN_REFUSED');
   const mutationId = crypto.randomUUID();
   const body = announced?.body || claimAnnouncement(card, actor, action) || `${actor} ${action} #${card.shortId}`;
   if (announced) announced.origin = { mutationId, slot };
@@ -599,6 +610,7 @@ function usesAnnouncementPublisher(data) {
   return !!ANNOUNCE_EXECUTOR && postSeqState(data).state !== 'clean';
 }
 function commitPublisherAnnouncement(data, { slot, body, author = CLAIM_ANNOUNCER, notify, origin, actor }) {
+  if (ORIGIN_EXECUTOR) return stageOriginAnnouncement(data, { slot, body, author, notify, origin, actor });   // #1629 s3
   if (!usesAnnouncementPublisher(data) || typeof body !== 'string' || !body) return null;
   const mutationId = crypto.randomUUID();
   const at = new Date().toISOString();
@@ -618,6 +630,35 @@ function commitPublisherAnnouncement(data, { slot, body, author = CLAIM_ANNOUNCE
   data[OUTBOX_FIELD] = { origins: ob.origins, entries: { ...ob.entries, [id]: entry } };
   events.push(announcementEvent(entry, actor));
   return { entry, events, nextMark: n + 1 };
+}
+
+/**
+ * #1629 s3 — executor-owned mode: the announcement is NOT written into the document. It is STAGED on this locked write's
+ * context, and the lock commits it as slice 2's origin (origin.prepare, then the card.write that carries the business
+ * change, the Origin, its Obligation and the reserved postSeq — CARDS.commitOrigin). The route keeps its shape: `entry`
+ * is a handle the lock fills with the committed identity, `events` add nothing, and there is no document mark to raise.
+ * originActor is the seat that caused the write when the route names one, else the system actor `board` (r2 §2, A1);
+ * the post's author stays the route's. The slot names the route (claim, release, done-nudge, wiki, agent-rest/-retire).
+ */
+function stageOriginAnnouncement(data, { slot, body, author, notify, origin, actor }) {
+  if (typeof body !== 'string' || !body) throw new OriginShapeRefused('an executor-owned announcement needs a body (#1629 s3)');
+  const staged = cardWriteContext.getStore();
+  if (!staged) throw new Error('#1629 s3: an announcement outside withWriteLock cannot be committed to the graph');
+  if (staged.origin) throw new OriginShapeRefused('one origin per write (#1629 s3)');
+  const handle = { mode: 'publisher', executorOwned: true, slot, mutationId: null, obligationId: null };
+  staged.origin = {
+    route: slot, slot, body, author, notify: !!notify, provenance: origin,
+    originActor: typeof actor === 'string' && ASSIGNEE_KEY_RE.test(actor) ? actor : 'board',
+    mentions: extractMentionsFromRoster(body, currentRoster(data)), handle,
+  };
+  return { entry: handle, events: [], nextMark: null };
+}
+/** #1629 s3 — an origin shape this slice does not migrate, or a legacy creation, refused BEFORE any durable effect. */
+class OriginShapeRefused extends Error {
+  constructor(m, code = 'ORIGIN_SHAPE_NOT_MIGRATED') {
+    super(m); this.code = code;
+    const ctx = requestContext.getStore(); if (ctx) ctx.originRefused = { code, message: m };
+  }
 }
 
 // README block injected into every write so the warning is the first thing
@@ -988,6 +1029,11 @@ function sendJSON(res, statusCode, data) {
   if (statusCode === 500 && ((graphCtx && graphCtx.writeRefused) || unitRefused)) {
     statusCode = 409;
     data = { error: `the graph refused this write as stale or conflicting; nothing was written: ${unitRefused ? data.error : graphCtx.writeRefused}`, code: 'WRITE_CONFLICT' };
+  }
+  // #1629 s3 — an origin shape refused in executor-owned mode, BEFORE any durable effect: 503 with its code, never a 500
+  if (statusCode === 500 && graphCtx && graphCtx.originRefused) {
+    statusCode = 503;
+    data = { error: graphCtx.originRefused.message, code: graphCtx.originRefused.code };
   }
   if (statusCode === 500 && ((graphCtx && graphCtx.graphUnavailable) || unitUnavailable)) {
     statusCode = 503;
@@ -7789,7 +7835,17 @@ async function lockedWithCards(fn) {
         const colParts = COLUMNS && data[FILE_COLUMNS] ? COLUMNS.plan(data.columns) : [];
         const tUpdate = performance.now();
         try {
-          if (CARDS_UNIT && data[FILE_CARDS]) {
+          if (CARDS_UNIT && data[FILE_CARDS] && staged.origin && !staged.origin.done) {
+            // #1629 s3 — executor-owned: the staged announcement commits as an ORIGIN with this write (prepare, then ONE
+            // card.write carrying the business change, the Origin, its Obligation and the reservation). No K4 envelope.
+            if (cw) cw.cards = true;
+            const o = staged.origin;
+            if (colParts.length) throw new OriginShapeRefused('an origin write moves no columns (#1629 s3)');
+            const r = await CARDS.commitOrigin(data.cards, data.nextShortId, { collections: collParts, describe: (parts) => originDescriptor(o, parts, collParts) });
+            if (r.outcome === 'APPLIED') { o.handle.mutationId = r.mutationId; o.handle.obligationId = `${r.mutationId}:${o.slot}`; }
+            o.done = true;
+            if (collParts.length) COLLECTIONS.applied(data, collParts);
+          } else if (CARDS_UNIT && data[FILE_CARDS]) {
             if (cw) cw.cards = true;   // #1659 — this request writes cards, so a slow one gets a line
             const ob = outboxOf(data);
             const pending = Object.entries(ob.origins).filter(([mid, o]) => !data[FILE_ORIGINS]?.has(mid) && o?.origin?.cardId)
@@ -7821,6 +7877,34 @@ async function lockedWithCards(fn) {
       throw e;
     }
   }
+}
+
+/**
+ * #1629 s3 — the origin descriptor of a staged announcement, built from the ORDERED parts the cards unit will send.
+ * requestKey is "v" + the subject's NEW version: the card's for a card route, the agents entity's for an agent route —
+ * the identity of ONE preparation, never a retry key (r2 R-A0..A3). An agent route's releasedCards follow the card parts.
+ */
+function originDescriptor(o, parts, collParts) {
+  const { originKeyOf, mutationIdOf } = ORIGIN_MOD;
+  const slots = [{ slot: o.slot, author: o.author, body: o.body, mentions: o.mentions, notify: o.notify }];
+  if (o.route === 'agent-rest' || o.route === 'agent-retire') {
+    const agent = o.provenance?.agent;
+    const part = collParts.find((p) => p.collection === 'agents');
+    if (!agent || !part) throw new OriginShapeRefused('an agent origin needs the agent entity in the same write (#1629 s3)');
+    const releasedCards = parts.map((p) => decodeURIComponent(String(p.iri).split('/').pop()));
+    const requestKey = `v${part.version}`;
+    const mutationId = mutationIdOf(originKeyOf(o.route, agent, requestKey, o.originActor));
+    return { route: o.route, subject: agent, requestKey, originActor: o.originActor, mutationId, provenance: { agent, releasedCards }, slots };
+  }
+  // the card part's version is the cards unit's GRAPH write counter (urn:ex:ver), not the card JSON's `version`: slice 2
+  // binds provenance.version to the part, so both it and the requestKey come from the part this write sends
+  const cardId = o.provenance?.cardId;
+  const part = parts.find((p) => decodeURIComponent(String(p.iri).split('/').pop()) === cardId);
+  if (!cardId || !part) throw new OriginShapeRefused('a card origin names a card this write changes (#1629 s3)');
+  const version = Number(part.version);
+  const requestKey = `v${version}`;
+  const mutationId = mutationIdOf(originKeyOf(o.route, cardId, requestKey, o.originActor));
+  return { route: o.route, subject: cardId, requestKey, originActor: o.originActor, mutationId, provenance: { cardId, version }, slots };
 }
 
 // Lookup helper: :id can be the card's UUID (data.id) or its shortId (numeric).
@@ -10476,6 +10560,10 @@ async function handleUpdateCard(req, res, idOrShortId) {
           }
         }
         shifted = makeRoomInColumn(data.cards, card, anchor);
+        // #1629 s3 D1 — executor-owned: a move INTO done that shifts a sibling would put sibling parts in the done-nudge's
+        // origin plan, which this slice does not admit (slice 4). Refused before anything is written (the edits above are
+        // in this request's copy only); the same move into a free slot shifts nothing and goes through.
+        if (ORIGIN_EXECUTOR && !wasDone && card.column === 'done' && shifted.length) throw new OriginShapeRefused('a move into done that shifts other cards is not available while the executor owns announcements (#1629 slice 4)');
         // #1584 — the move's identity, on the stored card, so the fence can
         // tell a committed move from one that may still arrive (handleMoveFence).
         if (typeof patch.requestId === 'string') card.lastMoveRequestId = patch.requestId;
@@ -10841,6 +10929,12 @@ async function handleGetOutbox(req, res) {
     const q = new URL(req.url, 'http://x').searchParams;
     const status = q.get('status') || undefined;
     const mutationId = q.get('mutationId') || undefined;
+    if (ORIGIN_EXECUTOR) {   // #1629 s3 — from the executor; a read never allocates, repairs or republishes (§5, L5)
+      try { return sendJSON(res, 200, await xoListOutbox({ status, mutationId })); } catch (e) {
+        if (e instanceof OutboxUnavailable) return sendJSON(res, 503, { error: `the outbox could not be read from the graph executor: ${e.message}`, code: 'OUTBOX_UNAVAILABLE' });
+        throw e;
+      }
+    }
     const listed = await withWriteLock(async () => listOutbox(readBoard(), { status, mutationId }));
     sendJSON(res, 200, listed);
   } catch (e) {
@@ -10859,7 +10953,14 @@ async function handleCompleteOutbox(req, res, rawId) {
     await readBody(req);   // drained, and deliberately not consulted
     let obligationId;
     try { obligationId = decodeURIComponent(rawId); } catch { return sendJSON(res, 400, { error: 'malformed obligation id' }); }
-    const known = await withWriteLock(async () => Boolean(outboxOf(readBoard()).entries[obligationId]));
+    let known;
+    if (ORIGIN_EXECUTOR) {   // #1629 s3 — known means committed in the executor; a caller's receipt is still never accepted
+      const m = XO_RE.exec(obligationId);
+      try { known = Boolean(m && (await xoOrigin(m[1]))?.entries?.some((e) => e.slot === m[2])); } catch (e) {
+        if (e instanceof OutboxUnavailable) return sendJSON(res, 503, { error: `the outbox could not be read: ${e.message}`, code: 'OUTBOX_UNAVAILABLE' });
+        throw e;
+      }
+    } else known = await withWriteLock(async () => Boolean(outboxOf(readBoard()).entries[obligationId]));
     if (!known) return sendJSON(res, 404, { error: 'Obligation not found', obligationId });
     sendJSON(res, 503, {
       error: 'The post cannot be verified: no graph lookup is available. A caller-supplied receipt is never accepted; the obligation stays pending.',
@@ -11045,6 +11146,18 @@ async function dispatchAnnouncement(entry) {
 /** The inline attempt for entries the caller just committed. Never awaited by a request: a down executor never costs the write. */
 function publishAnnouncements(entries) {
   if (!ANNOUNCE_EXECUTOR) return;
+  if (ORIGIN_EXECUTOR) {   // #1629 s3 — the one after-write attempt; a failure leaves it pending for the supervised publisher
+    for (const h of entries) {
+      const id = h?.obligationId;
+      if (!id || ANNOUNCE_INFLIGHT.has(id)) continue;
+      ANNOUNCE_INFLIGHT.add(id);
+      void xoPublish(id, { inline: true })
+        .then((r) => { if (r.status === 'pending') console.error(`#1629 s3: announcement ${id} not settled inline (${r.reason ?? 'pending'}); left pending for the publisher`); })
+        .catch((e) => console.error(`#1629 s3: announcement ${id} inline attempt failed (${e.message}); left pending for the publisher`))
+        .finally(() => ANNOUNCE_INFLIGHT.delete(id));
+    }
+    return;
+  }
   for (const entry of entries) {
     if (!entry?.obligationId || entry.mode !== 'publisher') continue;
     void publishOneAnnouncement(entry);
@@ -11118,12 +11231,122 @@ async function flushAnnouncementCompletions() {
   }
 }
 
+// ── #1629 s3 — EXECUTOR-OWNED OUTBOX (ORIGIN_EXECUTOR): the same routes, read from and settled in the executor ──
+// An entry is built from the committed origin join (slice 2's readers): the Prepared descriptor, the Obligation and its
+// reservation. Only COMMITTED origins are listed (PR1: nothing is visible before origin commit). A publish is:
+//   post.create from the frozen reservation (G-R refuses anything else) → [after-executor-apply] → VERIFY the proof in
+//   the executor (the post op's receipt APPLIED with this intention's digest, the post a live Comment) → dispatch the
+//   frozen notify policy → [after-dispatch-before-complete] → obligation.settle publish.
+// The obligation stays pending through dispatch (r3 C2): a crash anywhere before settle leaves it recoverable, and a
+// replay re-dispatches (a ping may repeat; a post never does). A proof that does not verify is an INTEGRITY FAULT
+// (G-D): no dispatch, no settle, the entry stays pending, and the answer says so (`integrity: true`).
+const BOARD_PERSON = 'https://scrumboard.local/person/board';
+class OutboxUnavailable extends Error {}
+const XO_RE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}):([a-z][a-z0-9-]{0,31})$/;
+
+/** One committed origin as outbox records, or {integrity} / null. Throws OutboxUnavailable when the executor does not answer. */
+async function xoOrigin(mutationId) {
+  const c = ANNOUNCE_EXECUTOR;
+  const P = await ORIGIN_MOD.readPreparedOrigin(c, mutationId);
+  if (!P.ok) { if (P.status === 'UNAVAILABLE') throw new OutboxUnavailable(P.reason); return { integrity: P.reason }; }
+  const J = await ORIGIN_MOD.readCommittedOrigin(c, mutationId);
+  if (!J.ok) { if (J.status === 'UNAVAILABLE') throw new OutboxUnavailable(J.reason); return { integrity: J.reason }; }
+  if (!P.prepared || !J.committed) return null;
+  const d = JSON.parse(P.prepared.descriptorJson);
+  const { origin: O, obligations, reservations } = J.committed;
+  const origin = { mutationId, slots: d.slots.map((x) => x.slot), origin: d.provenance, committedAt: O.committedAt, occurredAt: P.prepared.occurredAt, originActor: d.originActor, mode: 'publisher' };
+  const entries = d.slots.map((x, i) => {
+    const ob = obligations[i], res = reservations[i];
+    return {
+      obligationId: ob.obligationId, mutationId, slot: ob.slot, status: ob.status, mode: 'publisher',
+      postSeq: res.postSeq, publicationAt: res.createdAt, ...(ob.status === 'published' ? { postId: res.postId } : {}),
+      payload: { author: x.author, body: x.body, mentions: [...x.mentions], notify: x.notify, occurredAt: P.prepared.occurredAt, originActor: d.originActor, origin: d.provenance, mutationId, slot: x.slot },
+    };
+  });
+  return { origin, entries };
+}
+
+/** GET /api/outbox's shape, from the executor. `integrity` lists committed origins whose join did not validate. */
+async function xoListOutbox({ status, mutationId } = {}) {
+  const R = await ORIGIN_MOD.enumerateOriginRecords(ANNOUNCE_EXECUTOR);
+  if (!R.ok) throw new OutboxUnavailable(R.reason);
+  const mids = [...new Set(R.records.filter((x) => x.type === 'Origin' && x.mutationId && (!mutationId || x.mutationId === mutationId)).map((x) => x.mutationId))];
+  const origins = [], entries = [], integrity = [];
+  for (const mid of mids) {
+    const o = await xoOrigin(mid);
+    if (!o) continue;
+    if (o.integrity) { integrity.push({ mutationId: mid, reason: o.integrity }); continue; }
+    origins.push(o.origin);
+    for (const e of o.entries) if (!status || e.status === status) entries.push(e);
+  }
+  return { origins, entries, ...(integrity.length ? { integrity } : {}) };
+}
+
+/** An integrity fault: logged by name, never dispatched, never settled; the entry stays pending. */
+function xoIntegrity(obligationId, why) {
+  console.error(`#1629 s3 INTEGRITY FAULT on ${obligationId}: ${why} — not dispatched, not settled, left pending`);
+  return { status: 'pending', integrity: true, reason: `integrity fault: ${why}` };
+}
+
+/** Publish ONE executor-owned obligation. `inline` = the after-write attempt (its barrier), else the explicit route. */
+async function xoPublish(obligationId, { inline = false } = {}) {
+  const m = XO_RE.exec(obligationId);
+  if (!m) return { unknown: true };
+  const [, mutationId, slot] = m;
+  const c = ANNOUNCE_EXECUTOR;
+  let o;
+  try { o = await xoOrigin(mutationId); } catch (e) { return { status: 'pending', reason: `executor-unavailable: ${e.message}` }; }
+  if (!o) return { unknown: true };
+  if (o.integrity) return xoIntegrity(obligationId, `the committed origin does not validate (${o.integrity})`);
+  const entry = o.entries.find((e) => e.slot === slot);
+  if (!entry) return { unknown: true };
+  if (entry.status === 'published') return { status: 'published', postId: entry.postId };
+  if (entry.status === 'blocked') return { status: 'blocked', reason: 'blocked' };
+  const intention = postCreateIntention(entry);
+  const settle = async (transition, extra) => c.update({ kind: 'obligation.settle', opId: COMPILER_MOD.settleOpId(obligationId, transition), actor: BOARD_PERSON, obligationId, transition, ...extra });
+  const r = await c.update(intention);
+  if (r.outcome === 'REJECTED' && r.reason === 'intent-collision') return xoIntegrity(obligationId, 'the deterministic post op already holds a different publication');
+  if (r.outcome === 'PRECONDITION_FAILED' || r.outcome === 'REJECTED') {
+    const t = await c.query(`SELECT ?t WHERE { <https://scrumboard.local/entity/${intention.post.id}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> ?t }`);
+    if (t.ok && t.rows.some((x) => x.t.value === 'https://scrumboard.local/ns#RedactedPost')) {
+      const b = await settle('block', { reason: 'tombstoned' });
+      return b.outcome === 'APPLIED' ? { status: 'blocked', reason: 'POST_REDACTED' } : { status: 'pending', reason: `settle-${b.outcome}` };
+    }
+    return xoIntegrity(obligationId, `the reserved post could not be written (${r.outcome}${r.reason ? `: ${r.reason}` : ''})`);
+  }
+  if (r.outcome !== 'APPLIED') return { status: 'pending', reason: `executor-${String(r.outcome).toLowerCase()}${r.reason ? `: ${r.reason}` : ''}` };
+  if (!inline) testBarrier('after-executor-apply');   // TEST-ONLY: the executor answered, nothing recorded, no lock held
+  // G-D — the proof, read from the executor, BEFORE any dispatch
+  const want = COMPILER_MOD.compile(intention).digest;
+  const q = await c.query(`SELECT ?o ?d WHERE { GRAPH <urn:scrum:bookkeeping:executor> { <${intention.opId}> <urn:ex:outcome> ?o ; <urn:ex:digest> ?d } }`);
+  const ty = await c.query(`SELECT ?t WHERE { <https://scrumboard.local/entity/${intention.post.id}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> ?t }`);
+  if (!q.ok || !ty.ok) return { status: 'pending', reason: 'executor-unavailable: the publication proof could not be read' };
+  if (q.rows.length !== 1 || q.rows[0].o.value !== 'urn:ex:APPLIED' || q.rows[0].d.value !== want) return xoIntegrity(obligationId, 'the post op\'s receipt is not this publication\'s (digest or outcome differs)');
+  const types = ty.rows.map((x) => x.t.value);
+  if (types.includes('https://scrumboard.local/ns#RedactedPost')) {
+    const b = await settle('block', { reason: 'tombstoned' });
+    return b.outcome === 'APPLIED' ? { status: 'blocked', reason: 'POST_REDACTED' } : { status: 'pending', reason: `settle-${b.outcome}` };
+  }
+  if (!types.includes('https://schema.org/Comment')) return xoIntegrity(obligationId, 'the reserved post is not a live post');
+  await dispatchAnnouncement(entry);
+  if (inline) testBarrier('after-dispatch-before-complete');   // TEST-ONLY: dispatched, settlement not yet recorded
+  const p = entry.payload;
+  const s = await settle('publish', { publication: { payload: { author: p.author, body: p.body, originActor: p.originActor, occurredAt: p.occurredAt, mentions: p.mentions, notify: p.notify }, postSeq: entry.postSeq, publicationAt: entry.publicationAt } });
+  if (s.outcome === 'APPLIED') return { status: 'published', postId: intention.post.id };
+  return { status: 'pending', reason: `settle-${String(s.outcome).toLowerCase()}${s.reason ? `: ${s.reason}` : ''}` };
+}
+
 async function handlePublishOutbox(req, res, rawId) {
   try {
     await readBody(req);   // drained; nothing the caller sends is consulted
     let obligationId;
     try { obligationId = decodeURIComponent(rawId); } catch { return sendJSON(res, 400, { error: 'malformed obligation id' }); }
     const actor = req.auth?.seat ?? null;
+    if (ORIGIN_EXECUTOR) {   // #1629 s3 — no document: post, verify, dispatch, settle, all against the executor
+      const r = await xoPublish(obligationId, { inline: false });
+      if (r.unknown) return sendJSON(res, 404, { error: 'Obligation not found', obligationId });
+      return sendJSON(res, 200, r);
+    }
     const first = await withWriteLock(async () => {
       const data = readBoard();
       assertPostSeqWritable(data);   // #1592 — a corrupt post sequence refuses the WHOLE write, before any change
@@ -12395,7 +12618,8 @@ function appendWikiNotice(data, verb, card) {
   const body = `📄 page ${verb}: **${title}** (#${card.shortId})`;
   // #1574 1b — unit on: an obligation in the caller's write (author `wiki`, NO notify: the frozen feed-only policy).
   // The caller adds `pub.events` to its write and publishes `pub.entry` after the lock. Unit off: today's post.
-  const pub = commitPublisherAnnouncement(data, { slot: 'wiki', body, author: 'wiki', notify: false, origin: { cardId: card.id, version: card.version }, actor: card.createdBy ?? null });
+  // #1629 s3 (Q-B): executor-owned, the origin actor is who CAUSED the write; the page's creator is not that, so `board`
+  const pub = commitPublisherAnnouncement(data, { slot: 'wiki', body, author: 'wiki', notify: false, origin: { cardId: card.id, version: card.version }, actor: ORIGIN_EXECUTOR ? null : (card.createdBy ?? null) });
   if (pub) return { pub };
   const conv = createConversationFromPayload({ body, author: 'wiki' });
   pushPost(data, conv);
@@ -12410,6 +12634,9 @@ async function handleCreateNode(req, res) {
     if (!body.title || !body.title.trim()) return sendJSON(res, 400, { error: 'title is required' });
     const verr = validateCardFields({ type: body.type });
     if (verr) return sendJSON(res, 400, { error: verr });
+    // #1629 s3 D1 — executor-owned: a page create (wiki-create) is not migrated until slice 4. Refused HERE, before the
+    // lock and before any durable effect: no card, no counter, no origin, no reservation.
+    if (ORIGIN_EXECUTOR) return sendJSON(res, 503, { error: 'a page create is not available while the executor owns announcements (wiki-create is #1629 slice 4)', code: 'ORIGIN_SHAPE_NOT_MIGRATED' });
     let notice = null;
     const created = await withWriteLock(async () => {
       const data = readBoard();
@@ -13036,9 +13263,16 @@ if (CARDS_UNIT) {
     console.error(`#1598 cards unit: the cards could not be read from the graph — refusing to serve: ${e.message}`);
     process.exit(1);
   }
+  // #1629 s3 — executor-owned: the origin readers, and NO K4 block. Boot enumerates nothing into the document and drains
+  // nothing inline (contract v1 §5): a pending obligation waits for the supervised publisher (scripts/announce-publisher).
+  if (ORIGIN_EXECUTOR) {
+    ORIGIN_MOD = await import('./core/origin-commit.mjs');
+    COMPILER_MOD = await import('./core/graph-compiler.mjs');
+    console.error(`${new Date().toISOString()} #1629 s3 announcements are EXECUTOR-OWNED (SCRUM_BOARD_DOCUMENT=${BOARD_DOCUMENT}): ISOLATED AND INCOMPLETE — wiki-create and sibling-shifting done-moves refuse until #1629 slice 4; document outbox entries are not migrated`);
+  }
   // #1598 K4 — re-queue any announcement the graph recorded with a card write that the document never received (the
   // process died between the two writes). Skipped when the document's outbox holds the mutation, or its post exists.
-  try {
+  if (!ORIGIN_EXECUTOR) try {
     const recorded = await CARDS.pendingAnnouncements();
     const data = readBoard();
     const ob = outboxOf(data);

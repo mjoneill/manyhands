@@ -16,6 +16,8 @@ import { durableUpdate } from './durable-update.mjs';
 import { BK } from './graph-vocab.mjs';
 import { cardQuads, priorQuads, cardIriOf, SHORTID_COUNTER_IRI, shortIdMap } from './cards-graph.mjs';
 import { parseCardRefs } from './references.mjs';
+import { readPreparedOrigin } from './origin-commit.mjs';
+import { originPrepareOp, originCommitOp } from './graph-compiler.mjs';
 
 /** Does `card` name any of `shortIds` (a #N in its title or body, or a shortId in a relationship or a condition's blockers)? */
 function namesAny(card, shortIds) {
@@ -128,6 +130,12 @@ export function createCardsUnit({ client, actorIri = (who) => `https://scrumboar
       if (r.outcome === 'PRECONDITION_FAILED' || r.outcome === 'REJECTED') throw new CardWriteConflict(`${r.outcome}${r.reason ? `: ${r.reason}` : ''}`);
       throw new CardsUnavailable(`the write's outcome is ${r.outcome}${r.reason ? `: ${r.reason}` : ''}`);
     }
+    applied(cards, p);
+    return { outcome: 'APPLIED', parts: p.parts.length };
+  }
+
+  /** The cache becomes `cards` after an APPLIED write of plan `p`. */
+  function applied(cards, p) {
     const written = new Map(p.parts.filter((x) => !x.remove).map((x) => [x.iri, Number(x.version)]));
     const next = new Map();
     for (const card of cards) {
@@ -140,7 +148,46 @@ export function createCardsUnit({ client, actorIri = (who) => `https://scrumboar
     byId = next;
     if (p.counter) counter = Number(p.counter.next);
     gen++;
-    return { outcome: 'APPLIED', parts: p.parts.length };
+  }
+
+  /**
+   * #1629 s3 — the write of an ORIGIN-bearing route (claim, release, done-nudge, wiki-update, agent-rest/retire) in
+   * executor-owned mode: `origin.prepare` (its own guarded update: the descriptor and the frozen plan), then ONE
+   * card.write carrying the origin — the business change, the Origin, its Obligations, the reservations and the
+   * allocator advance under one guard (slice 2). The plan is this cache's own (`plan`), so the card parts are exactly
+   * what an ordinary write would send; card parts go in IRI order, as the origin plan requires. `describe(parts)` builds
+   * the descriptor from the ordered parts (an agent route's releasedCards follow them). A replayed prepare (the same
+   * mutationId) returns its original receipt, and the commit then uses the STORED occurredAt. UNKNOWN on either update is
+   * reconciled by durableUpdate under the same opId, never re-prepared under a new key (r2 R-A2). Returns
+   * {outcome:'APPLIED', mutationId}; PRECONDITION_FAILED/REJECTED throw CardWriteConflict; anything else CardsUnavailable.
+   */
+  async function commitOrigin(cards, nextShortId, { describe, collections = [] } = {}) {
+    if (!byId || uncertain) throw new CardsUnavailable('the card cache is not current');
+    const p0 = plan(cards, nextShortId) ?? (collections.length ? { parts: [], counter: null } : null);
+    if (!p0) return { outcome: 'NOOP' };
+    if (p0.counter) throw new CardWriteConflict('REJECTED: an origin write advances no shortId counter (#1629 s3)');
+    const parts = [...p0.parts].sort((a, b) => (a.iri < b.iri ? -1 : a.iri > b.iri ? 1 : 0));
+    const descriptor = describe(parts);
+    const originPlan = { parts, ...(collections.length ? { collections } : {}) };
+    const actor = actorIri(descriptor.originActor);
+    const send = async (intent) => {
+      let r;
+      try { r = await durableUpdate(client, intent); } catch (e) { uncertain = true; throw new CardsUnavailable(e.message); }
+      return r;
+    };
+    const fail = (r) => {
+      if (r.outcome !== 'UNAVAILABLE') uncertain = true;
+      if (r.outcome === 'PRECONDITION_FAILED' || r.outcome === 'REJECTED') throw new CardWriteConflict(`${r.outcome}${r.reason ? `: ${r.reason}` : ''}`);
+      throw new CardsUnavailable(`the write's outcome is ${r.outcome}${r.reason ? `: ${r.reason}` : ''}`);
+    };
+    const prep = await send({ kind: 'origin.prepare', opId: originPrepareOp(descriptor.mutationId), actor, origin: descriptor, plan: originPlan });
+    if (prep.outcome !== 'APPLIED') fail(prep);
+    const P = await readPreparedOrigin(client, descriptor.mutationId);
+    if (!P.ok || !P.prepared) { uncertain = true; throw new CardsUnavailable(`the prepared origin could not be read back (${P.reason ?? 'absent'})`); }
+    const r = await send({ kind: 'card.write', opId: originCommitOp(descriptor.mutationId), actor, ...originPlan, origin: { ...descriptor, occurredAt: P.prepared.occurredAt } });
+    if (r.outcome !== 'APPLIED') fail(r);
+    applied(cards, { parts, counter: null });
+    return { outcome: 'APPLIED', mutationId: descriptor.mutationId, occurredAt: P.prepared.occurredAt };
   }
 
   /** K5 — the outcome recorded for `opId` ('APPLIED', 'PRECONDITION_FAILED', …), or null when there is no receipt. Throws CardsUnavailable. */
@@ -185,7 +232,7 @@ export function createCardsUnit({ client, actorIri = (who) => `https://scrumboar
   }
 
   return {
-    load, ensureFresh, snapshot, plan, commit, reachable, receipt, pendingAnnouncements, postExists,
+    load, ensureFresh, snapshot, plan, commit, commitOrigin, reachable, receipt, pendingAnnouncements, postExists,
     get generation() { return gen; }, get uncertain() { return uncertain; }, get loaded() { return byId != null; },
     markUncertain() { uncertain = true; },
   };
