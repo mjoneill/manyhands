@@ -49,13 +49,14 @@ import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
+import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { HAVE_PY } from './helpers/graph-executor-proc.mjs';
 import { wholeBoardWorld, WB_DATASET } from './helpers/whole-board-1645.mjs';
 import { startRestServer } from './helpers/harness.mjs';
 import { createGraphClient } from '../core/graph-client.mjs';
 import { createCardsUnit } from '../core/cards-unit.mjs';
-import { announcePostId } from '../core/announce-outbox.mjs';
+import { announcePostId, opIdFor } from '../core/announce-outbox.mjs';
 
 const SKIP = HAVE_PY ? false : 'UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)';
 const T = { skip: SKIP, timeout: 300000 };
@@ -82,6 +83,11 @@ async function world(mode, body) {
   const kept = fs.readFileSync(w.boardFile);
   await w.rest.stop(); fs.writeFileSync(w.boardFile, kept);   // the harness unlinks the board file on stop
   const barrierDir = fs.mkdtempSync(path.join(os.tmpdir(), 'l1629-barrier-'));
+  // a notify sink: every dispatch REST makes lands here, so a row can count them (the #1574 H5 pattern)
+  const sink = { events: [] };
+  sink.server = http.createServer(async (req, res) => { const chunks = []; for await (const ch of req) chunks.push(ch); try { sink.events.push(JSON.parse(Buffer.concat(chunks).toString('utf8')).conversation); } catch { /* not ours */ } res.statusCode = 200; res.end('{}'); });
+  await new Promise((r) => sink.server.listen(0, '127.0.0.1', r)); sink.url = `http://127.0.0.1:${sink.server.address().port}/internal/notify`;
+  sink.forPost = (id) => sink.events.filter((ev) => ev && ev.id === id);
   const exec = createCardsUnit({ client: createGraphClient({ baseUrl: w.exec.baseUrl, expectedDatasetId: WB_DATASET, timeoutMs: 30000, label: 'l1629-test' }), mintId: () => 'unused' });
   const incarnations = [];
   let current = null;
@@ -98,7 +104,7 @@ async function world(mode, body) {
     const savedTmp = process.env.TMPDIR; process.env.TMPDIR = priv;
     let r;
     try {
-      r = await startRestServer({ boardFile: w.boardFile, env: { SCRUM_GRAPH_DATASET_ID: WB_DATASET, SCRUM_GRAPH_EXECUTOR_URL: w.exec.baseUrl, SCRUM_ROSTER_FILE: ROSTER, ...UNITS, ...SOURCES, ...(mode === 'off' ? { SCRUM_BOARD_DOCUMENT: 'off' } : {}), SCRUM_TEST_BARRIER_DIR: barrierDir, SCRUM_FS_RECORD: rec, SCRUM_FS_RECORD_ALL: '1', NODE_OPTIONS: `--import ${RECORDER}` } });
+      r = await startRestServer({ boardFile: w.boardFile, mcpNotifyUrl: sink.url, env: { SCRUM_GRAPH_DATASET_ID: WB_DATASET, SCRUM_GRAPH_EXECUTOR_URL: w.exec.baseUrl, SCRUM_ROSTER_FILE: ROSTER, ...UNITS, ...SOURCES, ...(mode === 'off' ? { SCRUM_BOARD_DOCUMENT: 'off' } : {}), SCRUM_TEST_BARRIER_DIR: barrierDir, SCRUM_FS_RECORD: rec, SCRUM_FS_RECORD_ALL: '1', NODE_OPTIONS: `--import ${RECORDER}` } });
     } catch (e) { fs.rmSync(priv, { recursive: true, force: true }); throw e; } finally {
       if (savedTmp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = savedTmp;
     }
@@ -150,12 +156,13 @@ async function world(mode, body) {
     return { reached, inflight, returned: () => returned, release };
   };
   try {
-    await body({ w, start, call, kill, restart, stopCurrent, publishOnce, claimPosts, claimRecords, holdAt, incarnations, barrierDir });
+    await body({ w, start, call, kill, restart, stopCurrent, publishOnce, claimPosts, claimRecords, holdAt, incarnations, barrierDir, sink });
   } finally {
     try { fs.chmodSync(w.boardFile, 0o644); } catch { /* absent */ }
     for (const inc of incarnations) { await inc.r.stop().catch(() => {}); fs.rmSync(inc.priv, { recursive: true, force: true }); }
     try { fs.writeFileSync(w.boardFile, kept); } catch { /* going anyway */ }
     fs.rmSync(barrierDir, { recursive: true, force: true });
+    await new Promise((r) => { sink.server.closeAllConnections?.(); sink.server.close(() => r()); });
     await w.stop();
   }
 }
@@ -403,5 +410,57 @@ test('#1629 D1b (mode off, file unreadable): a done-move that would shift a sibl
     assert.equal((await cardNow(s, 'uuid-1')).column, 'done', 'read-back: card 1 is in done');
     assert.deepEqual([(await cardNow(s, 'uuid-3')).order], [c3.order], 'read-back: the sibling was not touched');
     await documentUntouched(s, 'off', 'D1b');
+  });
+});
+
+// ── G-D: dispatch only after the proof checks out against the executor (r5; 45046) ──
+// The INJECTED condition is deliberate store corruption: after the origin commit, raw triples put a post with OTHER content at the
+// reserved post IRI and an APPLIED receipt with a foreign digest at the deterministic post op, beneath the compiler. The row demonstrates
+// what the publisher does when it meets that state; it does not claim corruption is the only way such a state could arise.
+const INTEGRITY_RX = /integrity/i;   // the builder's name: how --once reports an integrity fault (stderr), one place
+async function pendingAfterOriginCrash(s, label) {
+  const before = new Set((await s.claimRecords()).map((x) => x.obligationId));
+  const held = await s.holdAt('after-document', () => s.call('POST', '/api/cards/uuid-1/claim', { by: 'ada' }));
+  let snap;
+  try {
+    assert.equal(held.reached, true, `${label}: PRECONDITION: the claim reached after-document`);
+    assert.equal(held.returned(), false, `${label}: blocked a different write: the claim had returned`);
+    const fresh = (await s.claimRecords()).filter((x) => !before.has(x.obligationId));
+    assert.equal(fresh.length, 1, `${label}: blocked a different write: ${fresh.length} new claim record(s)`);
+    snap = fresh[0];
+  } finally { s.kill(); await held.release(); await Promise.race([held.inflight, sleep(5000)]); }
+  await sleep(300);
+  return snap;
+}
+
+test('#1629 GD0 CONTROL (mode on, today): the uncorrupted recovery dispatches the reserved post to the notify sink, so the sink can see what GD asserts is absent', T, async () => {
+  await world('on', async (s) => {
+    await s.start();
+    const snap = await pendingAfterOriginCrash(s, 'GD0');
+    await s.start();
+    const run = await s.publishOnce();
+    assert.equal(run.code, 0, `--once completed (${run.code}) ${run.err.slice(0, 200)}`);
+    assert.ok(await until(async () => s.sink.forPost(snap.postId).length >= 1, 20000), `GD0: the sink received a dispatch for the reserved post ${snap.postId} (events: ${s.sink.events.length})`);
+    assert.equal((await s.claimPosts()).length, 1, 'GD0: read-back: exactly one post');
+  });
+});
+
+test('#1629 GD (mode off, INJECTED STORE CORRUPTION): an APPLIED receipt for other content never dispatches, never settles, leaves the entry pending, and is reported as an integrity fault', TB, async () => {
+  await world('off', async (s) => {
+    await s.start();
+    const snap = await pendingAfterOriginCrash(s, 'GD');
+    const POST = `<https://scrumboard.local/entity/${snap.postId}>`;
+    const corrupt = `INSERT DATA { ${POST} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://schema.org/Comment> ; <https://schema.org/text> "corrupted content, not the frozen draft" . `
+      + `GRAPH <urn:scrum:bookkeeping:executor> { <${opIdFor(snap.mutationId, 'claim')}> <urn:ex:outcome> <urn:ex:APPLIED> ; <urn:ex:digest> "${'0'.repeat(64)}" . } }`;
+    const r = await fetch(`${s.w.exec.baseUrl}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/l1629-gd-${process.pid}` }, body: corrupt });
+    assert.equal(r.status, 200, `PRECONDITION: the injected corruption was written (${await r.text()})`);
+    await s.start();
+    const run = await s.publishOnce();
+    await sleep(3000);
+    assert.equal(s.sink.forPost(snap.postId).length, 0, `GD: ZERO dispatches for the reserved post (got ${s.sink.forPost(snap.postId).length})`);
+    const ob = await s.call('GET', `/api/outbox?mutationId=${encodeURIComponent(snap.mutationId)}`);
+    assert.ok(entriesOf(ob.json).some((e) => e.slot === 'claim' && e.status === 'pending'), `GD: read-back: the entry is still pending, not settled (${ob.text.slice(0, 300)})`);
+    assert.match(run.err, INTEGRITY_RX, `GD: --once reports an integrity fault (exit ${run.code}; stderr ${run.err.slice(0, 300)})`);
+    await documentUntouched(s, 'off', 'GD');
   });
 });

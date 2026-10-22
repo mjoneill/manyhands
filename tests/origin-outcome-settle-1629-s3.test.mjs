@@ -39,7 +39,11 @@
  *       canonical reservation IRI's own postId field missing or wrong (45037), even the CORRECT post is refused and none is written.
  *       Duplicate-field cases use DISTINCT values, since identical RDF triples collapse.
  *
- * Every row except S0, GR1 and GR5 is TODO until the build lands the outcome read and the settle kind (today the read is not exported and the
+ * NOTHING ALREADY AT THE SLOT'S POST (G-P, narrow amendment 45046): GP0 CONTROL an unobstructed commit (today and after); GP1 a triple at
+ *   the derived post IRI in the domain graph, GP1b the same in the bookkeeping graph only, GP2 any triple at the deterministic post op:
+ *   each refuses the origin commit with business state, allocator, reservations and obligations unchanged and Prepared still readable.
+ *
+ * Every row except S0, GR1, GR5 and GP0 is TODO until the build lands the outcome read and the settle kind (today the read is not exported and the
  * kind is not in RECORD_KINDS). Each is reported on every run and never fails CI; then delete PENDING_BUILD and each must pass.
  *
  * NOT covered, by name: the REST diagnostic route and /api/outbox's exclusion of Prepared records (C3; REST-level, owed with the
@@ -57,7 +61,7 @@ import { HAVE_PY, tmpStore, startExecutor, killExecutor } from './helpers/graph-
 import { createGraphClient } from '../core/graph-client.mjs';
 import { canonicalize } from '../core/graph-compiler.mjs';
 import { cardQuads, priorQuads, cardIriOf } from '../core/cards-graph.mjs';
-import { postCreateIntention, announcePostId } from '../core/announce-outbox.mjs';
+import { postCreateIntention, announcePostId, opIdFor } from '../core/announce-outbox.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 let M = null, modErr = null;
@@ -74,7 +78,7 @@ const BLOCK_REASONS = ['tombstoned'];
 
 const SKIP = HAVE_PY ? false : 'UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)';
 const T = { skip: SKIP, timeout: 300000 };
-const PENDING_BUILD = { todo: 'needs the slice-3 build: the outcome read (r2 R-A1/r3 C1), the obligation.settle kind (r2 §4/r3 C2) and the reservation-binds-the-post guard (r5 G-R) are not built; delete PENDING_BUILD when they land' };
+const PENDING_BUILD = { todo: 'needs the slice-3 build: the outcome read (r2 R-A1/r3 C1), the obligation.settle kind (r2 §4/r3 C2) and the reservation-binds-the-post guard (r5 G-R) and the nothing-at-the-slot commit guard (G-P) are not built; delete PENDING_BUILD when they land' };
 const TP = { ...T, ...PENDING_BUILD };
 const DSID = 'og1629o';
 const BK = 'urn:scrum:bookkeeping:executor';
@@ -475,4 +479,68 @@ test('#1629 s3 (GR6) FAIL CLOSED: a reservation that is missing a field, duplica
       await refusedNoPost(client, o, j, pc, `GR6 ${label}`);
     }
   }, cards);
+});
+
+// ── G-P: nothing may already sit at a slot's derived post IRI or its deterministic publication op (narrow amendment, 45044/45046) ──
+// Inside the origin commit's shared atomic precondition, for every slot: ANY triple at the derived post IRI (domain or bookkeeping
+// graph) or at the deterministic post op IRI refuses the commit. On refusal the business state, allocator, reservations and obligations
+// are unchanged (the refusal receipt and commitSeq may change) and the Prepared record stays readable. Ordinary standalone reservations
+// are untouched by this guard (slice 2's B1 pins postseq.reserve's compiled form; this file does not repeat it).
+const rawInsert = async (exec, graph, triples) => {
+  const body = graph ? `INSERT DATA { GRAPH <${graph}> { ${triples} } }` : `INSERT DATA { ${triples} }`;
+  const r = await fetch(`${exec.baseUrl}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/og1629o-gp-${process.pid}-${seedN++}` }, body });
+  assert.equal(r.status, 200, `PRECONDITION: the test's obstruction was written (${await r.text()})`);
+};
+const cardTriples = async (client, id) => (await rows(client, `SELECT ?p ?o WHERE { <${cardIriOf(id)}> ?p ?o }`)).map((r) => `${r.p.value} ${r.o.value}`).sort();
+async function refusedCommit(client, o, c, p, label) {
+  const before = { card: await cardTriples(client, c.id), alloc: await allocatorNext(client), res: (await rows(client, `SELECT ?s WHERE { GRAPH <${BK}> { ?s a <${PS('Reservation')}> } }`)).length };
+  const r = await client.update(commitIntention(o, p.occurredAt));
+  assert.equal(r.outcome, 'PRECONDITION_FAILED', `${label}: the origin commit is refused (${JSON.stringify(r).slice(0, 300)})`);
+  assert.deepEqual(await cardTriples(client, c.id), before.card, `${label}: read-back: the card is unchanged`);
+  assert.deepEqual(await allocatorNext(client), before.alloc, `${label}: read-back: the allocator is unchanged`);
+  assert.equal((await rows(client, `SELECT ?s WHERE { GRAPH <${BK}> { ?s a <${PS('Reservation')}> } }`)).length, before.res, `${label}: read-back: no reservation was added`);
+  const got = await M.readCommittedOrigin(client, o.mid);
+  assert.equal(got.committed, null, `${label}: read-back: no committed origin and no obligation (${JSON.stringify(got).slice(0, 160)})`);
+  assert.equal((await M.readPreparedOrigin(client, o.mid)).ok, true, `${label}: read-back: the Prepared record is still readable for diagnosis`);
+}
+
+test('#1629 s3 (GP0 CONTROL, today and after) an unobstructed origin commit is APPLIED and its reservation reads back at the derived postId', T, async () => {
+  const c = card('gp0', 1);
+  await world(async ({ client }) => {
+    const o = claimOrigin(c, 'k-gp0');
+    const j = await committed(client, o);
+    assert.equal(j.reservations[0].postId, announcePostId(o.mid, 'claim'), 'GP0: read-back: the reservation sits at the derived postId');
+    assert.equal(j.obligations[0].status, 'pending', 'GP0: read-back: its obligation is pending');
+  }, [c]);
+});
+
+test('#1629 s3 (GP1) a triple already at the slot\'s derived post IRI, in the DOMAIN graph, refuses the origin commit with no effect', TP, async () => {
+  const c = card('gp1', 1);
+  await world(async ({ client, exec }) => {
+    const o = claimOrigin(c, 'k-gp1');
+    const p = await prepared(client, o);
+    await rawInsert(exec(), null, `<https://scrumboard.local/entity/${announcePostId(o.mid, 'claim')}> <https://schema.org/text> "a stranger's post" .`);
+    await refusedCommit(client, o, c, p, 'GP1 domain');
+  }, [c]);
+});
+
+test('#1629 s3 (GP1b) a triple already at the slot\'s derived post IRI, in the BOOKKEEPING graph only, refuses the origin commit with no effect', TP, async () => {
+  const c = card('gp1b', 1);
+  await world(async ({ client, exec }) => {
+    const o = claimOrigin(c, 'k-gp1b');
+    const p = await prepared(client, o);
+    await rawInsert(exec(), BK, `<https://scrumboard.local/entity/${announcePostId(o.mid, 'claim')}> <urn:ex:recordedBy> <urn:ex:op/someone-else> .`);
+    await refusedCommit(client, o, c, p, 'GP1b bookkeeping');
+  }, [c]);
+});
+
+test('#1629 s3 (GP2) ANY triple at the slot\'s deterministic publication op (not only a well-formed receipt) refuses the origin commit with no effect', TP, async () => {
+  const c = card('gp2', 1);
+  await world(async ({ client, exec }) => {
+    const o = claimOrigin(c, 'k-gp2');
+    const p = await prepared(client, o);
+    const op = opIdFor(o.mid, 'claim');   // the announcement's deterministic post op (core/announce-outbox.mjs)
+    await rawInsert(exec(), BK, `<${op}> <urn:ex:outcome> <urn:ex:APPLIED> .`);   // a partial receipt: outcome only, no digest
+    await refusedCommit(client, o, c, p, 'GP2 op');
+  }, [c]);
 });
