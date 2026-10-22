@@ -51,12 +51,13 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
-import { HAVE_PY } from './helpers/graph-executor-proc.mjs';
+import { HAVE_PY, tmpStore, startExecutor, killExecutor } from './helpers/graph-executor-proc.mjs';
 import { wholeBoardWorld, WB_DATASET } from './helpers/whole-board-1645.mjs';
 import { startRestServer } from './helpers/harness.mjs';
 import { createGraphClient } from '../core/graph-client.mjs';
 import { createCardsUnit } from '../core/cards-unit.mjs';
-import { announcePostId, opIdFor } from '../core/announce-outbox.mjs';
+import { announcePostId, opIdFor, postCreateIntention } from '../core/announce-outbox.mjs';
+import { canonicalize, digestOf } from '../core/graph-compiler.mjs';
 
 const SKIP = HAVE_PY ? false : 'UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)';
 const T = { skip: SKIP, timeout: 300000 };
@@ -138,7 +139,7 @@ async function world(mode, body) {
       let rec; try { rec = JSON.parse(r.json); } catch { continue; }
       for (const e of Object.values(rec.entries || {})) {
         if (e?.slot !== 'claim') continue;
-        out.push({ mutationId: e.mutationId ?? r.mutationId, slot: e.slot, opId: e.opId ?? null, obligationId: e.obligationId, postId: announcePostId(e.mutationId ?? r.mutationId, e.slot), postSeq: e.postSeq, status: e.status, mode: e.mode });
+        out.push({ mutationId: e.mutationId ?? r.mutationId, slot: e.slot, opId: e.opId ?? null, obligationId: e.obligationId, postId: announcePostId(e.mutationId ?? r.mutationId, e.slot), postSeq: e.postSeq, status: e.status, mode: e.mode, payload: e.payload, publicationAt: e.publicationAt });
       }
     }
     return out;
@@ -445,15 +446,65 @@ test('#1629 GD0 CONTROL (mode on, today): the uncorrupted recovery dispatches th
   });
 });
 
-test('#1629 GD (mode off, INJECTED STORE CORRUPTION): an APPLIED receipt for other content never dispatches, never settles, leaves the entry pending, and is reported as an integrity fault', TB, async () => {
+/**
+ * A WELL-FORMED forged post and receipt, made by the REAL compiler and executor rather than hand-written triples (45050): the foreign
+ * post.create (the reserved identity, op and postSeq, a foreign body) is applied on a THROWAWAY executor that holds no reservation, so
+ * every guard there is vacuous; every triple at its post IRI and op IRI, in every graph, is then copied term for term into the world's
+ * executor beneath the compiler. What lands is exactly what a compiler-written publication of that content looks like.
+ */
+async function forgeWellFormed(targetExecUrl, foreign) {
+  const store = tmpStore('l1629-forge-'); fs.rmSync(store, { recursive: true });
+  const ex = await startExecutor({ store, datasetId: 'l1629-forge', create: true });
+  try {
+    const c = createGraphClient({ baseUrl: ex.baseUrl, expectedDatasetId: 'l1629-forge', timeoutMs: 30000, label: 'l1629-forge' });
+    const w = await c.update(foreign);
+    assert.equal(w.outcome, 'APPLIED', `PRECONDITION: the foreign publication applies where no reservation exists (${JSON.stringify(w).slice(0, 200)})`);
+    const subjects = [`https://scrumboard.local/entity/${foreign.post.id}`, foreign.opId];
+    const term = (t) => {
+      if (t.type === 'uri') return `<${t.value}>`;
+      assert.equal(t.type, 'literal', `PRECONDITION: the forged triples hold no blank node (${JSON.stringify(t)})`);
+      const lex = JSON.stringify(t.value);
+      if (t['xml:lang']) return `${lex}@${t['xml:lang']}`;
+      return t.datatype && t.datatype !== 'http://www.w3.org/2001/XMLSchema#string' ? `${lex}^^<${t.datatype}>` : lex;
+    };
+    const lines = { default: [], graphs: {} };
+    for (const iri of subjects) {
+      const dq = await c.query(`SELECT ?p ?o WHERE { <${iri}> ?p ?o }`);
+      const gq = await c.query(`SELECT ?g ?p ?o WHERE { GRAPH ?g { <${iri}> ?p ?o } }`);
+      assert.ok(dq.ok && gq.ok, 'PRECONDITION: the throwaway executor answered');
+      const inNamed = new Set(gq.rows.map((r) => `${r.p.value} ${JSON.stringify(r.o)}`));
+      for (const r of dq.rows) if (!inNamed.has(`${r.p.value} ${JSON.stringify(r.o)}`)) lines.default.push(`<${iri}> <${r.p.value}> ${term(r.o)} .`);
+      for (const r of gq.rows) (lines.graphs[r.g.value] ??= []).push(`<${iri}> <${r.p.value}> ${term(r.o)} .`);
+    }
+    const body = `INSERT DATA { ${lines.default.join(' ')} ${Object.entries(lines.graphs).map(([g, ts]) => `GRAPH <${g}> { ${ts.join(' ')} }`).join(' ')} }`;
+    const r = await fetch(`${targetExecUrl}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/l1629-forge-${process.pid}` }, body });
+    assert.equal(r.status, 200, `PRECONDITION: the forged triples were copied in (${await r.text()})`);
+    return { copied: lines.default.length + Object.values(lines.graphs).reduce((n, ts) => n + ts.length, 0) };
+  } finally { await killExecutor(ex); fs.rmSync(store, { recursive: true, force: true }); }
+}
+
+test('#1629 GD (mode off, INJECTED STORE CORRUPTION): a well-formed APPLIED publication of OTHER content never dispatches, never settles, leaves the entry pending, and is reported as an integrity fault', TB, async () => {
   await world('off', async (s) => {
     await s.start();
     const snap = await pendingAfterOriginCrash(s, 'GD');
-    const POST = `<https://scrumboard.local/entity/${snap.postId}>`;
-    const corrupt = `INSERT DATA { ${POST} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://schema.org/Comment> ; <https://schema.org/text> "corrupted content, not the frozen draft" . `
-      + `GRAPH <urn:scrum:bookkeeping:executor> { <${opIdFor(snap.mutationId, 'claim')}> <urn:ex:outcome> <urn:ex:APPLIED> ; <urn:ex:digest> "${'0'.repeat(64)}" . } }`;
-    const r = await fetch(`${s.w.exec.baseUrl}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/l1629-gd-${process.pid}` }, body: corrupt });
-    assert.equal(r.status, 200, `PRECONDITION: the injected corruption was written (${await r.text()})`);
+    const entry = { mutationId: snap.mutationId, slot: 'claim', postSeq: snap.postSeq, publicationAt: snap.publicationAt, payload: snap.payload };
+    const frozen = postCreateIntention(entry);
+    const foreign = postCreateIntention({ ...entry, payload: { ...entry.payload, body: 'corrupted content, not the frozen draft' } });
+    assert.equal(foreign.opId, frozen.opId, 'PRECONDITION: the foreign publication uses the deterministic op');
+    assert.equal(foreign.post.id, snap.postId, 'PRECONDITION: at the reserved postId');
+    const forged = await forgeWellFormed(s.w.exec.baseUrl, foreign);
+    assert.ok(forged.copied > 0, 'PRECONDITION: triples were forged');
+    // READ THE INJECTED STATE BACK, in the row, before recovery (45050)
+    const ex = createGraphClient({ baseUrl: s.w.exec.baseUrl, expectedDatasetId: WB_DATASET, timeoutMs: 30000, label: 'l1629-gd-read' });
+    const post = Object.fromEntries((await ex.query(`SELECT ?p ?o WHERE { <https://scrumboard.local/entity/${snap.postId}> ?p ?o }`)).rows.map((r) => [r.p.value.split(/[#/]/).pop(), r.o.value]));
+    assert.equal(post.text, foreign.post.body, `injected read-back: the foreign body (${JSON.stringify(post)})`);
+    assert.equal(post.postSeq, String(snap.postSeq), 'injected read-back: at the reserved postSeq');
+    assert.equal(post.originMutation, snap.mutationId, 'injected read-back: claiming the reserved identity');
+    const rc = Object.fromEntries((await ex.query(`SELECT ?p ?o WHERE { GRAPH <urn:scrum:bookkeeping:executor> { <${frozen.opId}> ?p ?o } }`)).rows.map((r) => [r.p.value, r.o.value]));
+    assert.equal(rc['urn:ex:outcome'], 'urn:ex:APPLIED', `injected read-back: the receipt at the deterministic op says APPLIED (${JSON.stringify(rc)})`);
+    assert.equal(rc['urn:ex:digest'], digestOf(canonicalize(foreign)), 'injected read-back: its digest is the FOREIGN publication\'s');
+    assert.notEqual(rc['urn:ex:digest'], digestOf(canonicalize(frozen)), 'injected read-back: and not the frozen draft\'s');
+    // recovery
     await s.start();
     const run = await s.publishOnce();
     await sleep(3000);
