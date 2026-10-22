@@ -2534,13 +2534,14 @@ function canonicalizeSettle(i) {
   } else {
     if (i.reason !== undefined) fail('a publish carries no reason');
     const p = obj(i.publication, ['payload', 'postSeq', 'publicationAt'], 'publication');
-    const pl = obj(p.payload, ['author', 'body', 'originActor', 'occurredAt', 'mentions'], 'publication.payload');
+    const pl = obj(p.payload, ['author', 'body', 'originActor', 'occurredAt', 'mentions', 'notify'], 'publication.payload');
+    if (pl.notify !== undefined && typeof pl.notify !== 'boolean') fail('publication.payload.notify, when present, is a boolean');
     // the post the publisher would build from these values: built by the SAME function, canonicalized by the SAME rules
     const intent = announcePostCreateIntention({ mutationId, slot, postSeq: p.postSeq, publicationAt: p.publicationAt,
       payload: { author: pl.author, body: pl.body, originActor: pl.originActor, occurredAt: pl.occurredAt, mentions: pl.mentions } });
     const post = canonicalizeRecord(intent);
     publication = { postSeq: p.postSeq, publicationAt: p.publicationAt, author: pl.author, body: pl.body, originActor: pl.originActor,
-      occurredAt: pl.occurredAt, mentions: [...pl.mentions], postOp: post.opId, postActor: post.actor, postDigest: recordDigest(post) };
+      occurredAt: pl.occurredAt, mentions: [...pl.mentions], notify: pl.notify ?? null, postOp: post.opId, postActor: post.actor, postDigest: recordDigest(post) };
   }
   return { kind: i.kind, opId, actor, evidence: [], targets: [], newAssertion: null, authority: null, grant: null, rule: null,
     settle: { obligationId: i.obligationId, mutationId, slot, transition: i.transition, reason, publication } };
@@ -2582,7 +2583,9 @@ function compileSettle(c, digest) {
     const P = S.publication;
     const draft = (notify) => strLit(JSON.stringify(canonAnnouncementDraft({ body: P.body, author: P.author, originActor: P.originActor, occurredAt: P.occurredAt, mentions: P.mentions, notify })));
     // the reservation the obligation names: its draft, postSeq and createdAt are the candidate's, each single-valued
-    pre.push(...single(RES, PT.draftJson, '?xs_dj'), `    FILTER(sameTerm(?xs_dj, ${draft(true)}) || sameTerm(?xs_dj, ${draft(false)}))`);
+    // notify given: the frozen draft must match EXACTLY; absent: under either value (as G-R, whose post carries no notify)
+    const drafts = P.notify == null ? [draft(true), draft(false)] : [draft(P.notify)];
+    pre.push(...single(RES, PT.draftJson, '?xs_dj'), `    FILTER(${drafts.map((d) => `sameTerm(?xs_dj, ${d})`).join(' || ')})`);
     pre.push(...single(RES, PT.identityJson, '?xs_ij'), `    FILTER(sameTerm(?xs_ij, ${strLit(JSON.stringify({ mutationId: S.mutationId, slot: S.slot }))}))`);
     pre.push(...single(RES, PT.postSeq, '?xs_ps'), `    FILTER(isLiteral(?xs_ps) && DATATYPE(?xs_ps) = <${XSD_PSQ}integer> && ?xs_ps = ${psqSafeInt(P.postSeq)})`);
     pre.push(...single(RES, PT.createdAt, '?xs_ca'), `    FILTER(isLiteral(?xs_ca) && DATATYPE(?xs_ca) = <${XSD_PSQ}dateTime> && STR(?xs_ca) = ${strLit(P.publicationAt)})`);
