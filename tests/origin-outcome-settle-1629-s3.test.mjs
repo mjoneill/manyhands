@@ -27,6 +27,10 @@
  *   S5  terminal: after published, settle block → PRECONDITION_FAILED, status stays published (never overwritten)
  *   S6  block(tombstoned): the deterministic post exists and is redacted → APPLIED, the obligation reads blocked
  *   S7  block(tombstoned) with no tombstone → PRECONDITION_FAILED; block with a reason outside the closed set is refused before sending
+ *   S8  publish where the caller LIES about one candidate value at a time (body, author, postSeq, publicationAt) → each refused, still
+ *       pending; then the true values settle (CONTROL in the same world). Settle publish carries CANDIDATE publication values the executor
+ *       verifies against the bound obligation and reservation (amendment 45062/45064); S3 tries both candidates (true and foreign).
+ *   S9  a malformed stored proof (the reservation's draft removed) never settles, even with the true values
  *
  * THE RESERVATION BINDS THE POST (r5 G-R; scoped to a postId that names a slice-1 reservation):
  *   GR1 POSITIVE (today and after): the reservation's own draft at its own postSeq is APPLIED and READS BACK with the frozen body
@@ -74,6 +78,8 @@ const OUTCOME_READ = () => M?.readOriginOutcome;   // (client, mutationId) → {
 const OUTCOME = { committed: 'committed', refused: 'refused', unresolved: 'unresolved' };
 const NEVER_APPLIED_WORDS = /never.?applied|abandon/i;   // C1: an unresolved origin is never reported in these words
 const SETTLE_KIND = 'obligation.settle';
+// publish carries `publication: {payload, postSeq, publicationAt}`: CANDIDATE values the executor verifies against the bound obligation
+// and reservation before accepting the rebuilt receipt digest (amendment 45062/45064); block carries none
 const settleIntention = (obligationId, transition, extra = {}) => ({ kind: SETTLE_KIND, opId: `urn:ex:op/obligation/settle/${obligationId}/${transition}`, actor: PERSON('board'), obligationId, transition, ...extra });
 const BLOCK_REASONS = ['tombstoned'];
 
@@ -170,6 +176,10 @@ function postFor(o, committedJoin, override = {}) {
   const d = res.draft;
   return postCreateIntention({ mutationId: o.mid, slot: ob.slot, postSeq: res.postSeq, publicationAt: res.createdAt, payload: { author: d.author, body: d.body, originActor: d.originActor, occurredAt: d.occurredAt, mentions: d.mentions, ...override } });
 }
+/** The publication values the publisher built its post.create from: the reservation's frozen draft, postSeq and createdAt. */
+const publicationOf = (j, override = {}) => { const r = j.reservations[0]; return { payload: { ...r.draft, ...(override.payload || {}) }, postSeq: override.postSeq ?? r.postSeq, publicationAt: override.publicationAt ?? r.createdAt }; };
+/** The Obligation's OWN status triple(s), independent of the reservation join (45059). */
+const obligationStatusDirect = async (client, obligationId) => (await rows(client, `SELECT ?st WHERE { GRAPH <${BK}> { ?ob a <urn:ex:origin/Obligation> ; <urn:ex:origin/obligationId> ${JSON.stringify(obligationId)} ; <urn:ex:origin/status> ?st } }`)).map((x) => x.st.value);
 const obligationStatus = async (client, o) => (await M.readCommittedOrigin(client, o.mid)).committed?.obligations?.[0]?.status;
 async function outcome(client, mid) {
   const read = OUTCOME_READ();
@@ -277,7 +287,7 @@ test('#1629 s3 (S1) settle publish with the post receipt APPLIED: APPLIED, the o
     const o = claimOrigin(c, 'k-s1');
     const j = await committed(client, o);
     assert.equal((await client.update(postFor(o, j))).outcome, 'APPLIED', 'PRECONDITION: the post exists');
-    const r = await client.update(settleIntention(j.obligations[0].obligationId, 'publish'));
+    const r = await client.update(settleIntention(j.obligations[0].obligationId, 'publish', { publication: publicationOf(j) }));
     assert.equal(r.outcome, 'APPLIED', JSON.stringify(r).slice(0, 300));
     assert.equal(await obligationStatus(client, o), 'published');
   }, [c]);
@@ -289,7 +299,7 @@ test('#1629 s3 (S2) settle publish with NO post receipt: refused, the obligation
     const o = claimOrigin(c, 'k-s2');
     const j = await committed(client, o);
     const before = await bkState(client);
-    const r = await client.update(settleIntention(j.obligations[0].obligationId, 'publish'));
+    const r = await client.update(settleIntention(j.obligations[0].obligationId, 'publish', { publication: publicationOf(j) }));
     assert.equal(r.outcome, 'PRECONDITION_FAILED', JSON.stringify(r).slice(0, 300));
     assert.equal(await obligationStatus(client, o), 'pending');
     const after = (await bkState(client)).filter((t) => !t.startsWith('urn:ex:op/') && !t.includes('urn:ex:commitSeq'));
@@ -331,26 +341,31 @@ async function forgeWellFormed(targetExecUrl, foreign) {
   } finally { await killExecutor(ex); }
 }
 
-test('#1629 s3 (S3) a well-formed APPLIED publication of a DIFFERENT body at the deterministic op (forged beneath the compiler): settle publish is refused', TP, async () => {
-  const c = card('s3', 1);
+test('#1629 s3 (S3) a well-formed APPLIED publication of a DIFFERENT body at the deterministic op (forged beneath the compiler): settle publish is refused with EITHER candidate', TP, async () => {
+  // two candidates (45064), each on its OWN origin so each settle uses the deterministic op once: (true) the reservation's values,
+  // which the foreign receipt's digest does not match; (foreign) the forged post's values, which the reservation does not match
+  const CANDIDATES = [['true values, foreign receipt', {}], ['foreign values, true reservation', { payload: { body: 'not what was frozen' } }]];
+  const cards = CANDIDATES.map((_, k) => card(`s3-${k}`, k + 1));
   await world(async ({ client, exec }) => {
-    const o = claimOrigin(c, 'k-s3');
-    const j = await committed(client, o);
-    const frozen = postFor(o, j);
-    const foreign = postFor(o, j, { body: 'not what was frozen' });
-    await forgeWellFormed(exec().baseUrl, foreign);
-    // the injected state, read back before settle: foreign content at the reserved identity, an APPLIED receipt with the FOREIGN digest
-    const post = Object.fromEntries((await rows(client, `SELECT ?p ?o WHERE { <https://scrumboard.local/entity/${foreign.post.id}> ?p ?o }`)).map((x) => [x.p.value.split(/[#/]/).pop(), x.o.value]));
-    assert.equal(post.text, foreign.post.body, `injected read-back: the foreign body (${JSON.stringify(post)})`);
-    assert.equal(post.postSeq, String(j.reservations[0].postSeq), 'injected read-back: at the reserved postSeq');
-    const rc = Object.fromEntries((await rows(client, `SELECT ?p ?o WHERE { GRAPH <${BK}> { <${frozen.opId}> ?p ?o } }`)).map((x) => [x.p.value, x.o.value]));
-    assert.equal(rc['urn:ex:outcome'], 'urn:ex:APPLIED', `injected read-back: the receipt says APPLIED (${JSON.stringify(rc)})`);
-    assert.equal(rc['urn:ex:digest'], digestOf(canonicalize(foreign)), 'injected read-back: with the foreign publication\'s digest');
-    assert.notEqual(rc['urn:ex:digest'], digestOf(canonicalize(frozen)), 'injected read-back: not the frozen payload\'s');
-    const r = await client.update(settleIntention(j.obligations[0].obligationId, 'publish'));
-    assert.equal(r.outcome, 'PRECONDITION_FAILED', `S3: post existence and an APPLIED receipt alone never satisfy the proof (${JSON.stringify(r).slice(0, 300)})`);
-    assert.equal(await obligationStatus(client, o), 'pending', 'S3: read-back: the obligation stays pending');
-  }, [c]);
+    for (const [k, [label, candidate]] of CANDIDATES.entries()) {
+      const o = claimOrigin(cards[k], `k-s3-${k}`);
+      const j = await committed(client, o);
+      const frozen = postFor(o, j);
+      const foreign = postFor(o, j, { body: 'not what was frozen' });
+      await forgeWellFormed(exec().baseUrl, foreign);
+      // the injected state, read back before settle: foreign content at the reserved identity, an APPLIED receipt with the FOREIGN digest
+      const post = Object.fromEntries((await rows(client, `SELECT ?p ?o WHERE { <https://scrumboard.local/entity/${foreign.post.id}> ?p ?o }`)).map((x) => [x.p.value.split(/[#/]/).pop(), x.o.value]));
+      assert.equal(post.text, foreign.post.body, `${label}: injected read-back: the foreign body (${JSON.stringify(post)})`);
+      assert.equal(post.postSeq, String(j.reservations[0].postSeq), `${label}: injected read-back: at the reserved postSeq`);
+      const rc = Object.fromEntries((await rows(client, `SELECT ?p ?o WHERE { GRAPH <${BK}> { <${frozen.opId}> ?p ?o } }`)).map((x) => [x.p.value, x.o.value]));
+      assert.equal(rc['urn:ex:outcome'], 'urn:ex:APPLIED', `${label}: injected read-back: the receipt says APPLIED (${JSON.stringify(rc)})`);
+      assert.equal(rc['urn:ex:digest'], digestOf(canonicalize(foreign)), `${label}: injected read-back: with the foreign publication's digest`);
+      assert.notEqual(rc['urn:ex:digest'], digestOf(canonicalize(frozen)), `${label}: injected read-back: not the frozen payload's`);
+      const r = await client.update(settleIntention(j.obligations[0].obligationId, 'publish', { publication: publicationOf(j, candidate) }));
+      assert.equal(r.outcome, 'PRECONDITION_FAILED', `S3 (${label}): post existence and an APPLIED receipt never satisfy the proof alone (${JSON.stringify(r).slice(0, 300)})`);
+      assert.deepEqual(await obligationStatusDirect(client, j.obligations[0].obligationId), ['pending'], `S3 (${label}): read-back: the obligation stays pending`);
+    }
+  }, cards);
 });
 
 test('#1629 s3 (S4) replay of settle publish: APPLIED again, nothing changes', TP, async () => {
@@ -359,7 +374,7 @@ test('#1629 s3 (S4) replay of settle publish: APPLIED again, nothing changes', T
     const o = claimOrigin(c, 'k-s4');
     const j = await committed(client, o);
     assert.equal((await client.update(postFor(o, j))).outcome, 'APPLIED');
-    const s = settleIntention(j.obligations[0].obligationId, 'publish');
+    const s = settleIntention(j.obligations[0].obligationId, 'publish', { publication: publicationOf(j) });
     assert.equal((await client.update(s)).outcome, 'APPLIED');
     const before = await bkState(client);
     assert.equal((await client.update(s)).outcome, 'APPLIED', 'the replay returns the original receipt');
@@ -373,7 +388,7 @@ test('#1629 s3 (S5) terminal: after published, settle block is refused and the s
     const o = claimOrigin(c, 'k-s5');
     const j = await committed(client, o);
     assert.equal((await client.update(postFor(o, j))).outcome, 'APPLIED');
-    assert.equal((await client.update(settleIntention(j.obligations[0].obligationId, 'publish'))).outcome, 'APPLIED');
+    assert.equal((await client.update(settleIntention(j.obligations[0].obligationId, 'publish', { publication: publicationOf(j) }))).outcome, 'APPLIED');
     const pid = announcePostId(o.mid, 'claim');
     assert.equal((await client.update({ kind: 'post.redact', opId: `urn:ex:op/redact/${pid}`, actor: PERSON('ada'), post: { id: pid }, authorityRef: 'test-authority-ref', occurredAt: '2026-10-22T12:00:00.000Z' })).outcome, 'APPLIED', 'PRECONDITION: a tombstone exists, so only the terminal state can refuse the block');
     const r = await client.update(settleIntention(j.obligations[0].obligationId, 'block', { reason: 'tombstoned' }));
@@ -406,6 +421,51 @@ test('#1629 s3 (S7) block(tombstoned) without a tombstone is refused; a reason o
     assert.equal(await obligationStatus(client, o), 'pending');
     assert.ok(!BLOCK_REASONS.includes('because-i-said-so'));
     assert.throws(() => canonicalize(settleIntention(j.obligations[0].obligationId, 'block', { reason: 'because-i-said-so' })), 'a reason outside the closed set is refused at canonicalization');
+  }, [c]);
+});
+
+test('#1629 s3 (S8) the caller LIES about one publication value at a time (body, author, postSeq, publicationAt): each refused, still pending; the true values settle', TP, async () => {
+  // each lie gets its OWN origin, so every settle uses the deterministic settle op exactly once: a refusal's receipt at that op can
+  // never be what refuses the next attempt, and the outcome asserted is the guard's, PRECONDITION_FAILED, not a shape refusal
+  const LIES = [
+    ['a body that is not the reservation draft\'s', (res) => ({ payload: { body: 'a lie' } })],
+    ['an author that is not the reservation draft\'s', (res) => ({ payload: { author: 'ada' } })],
+    ['a postSeq that is not the reservation\'s', (res) => ({ postSeq: res.postSeq + 1 })],
+    ['a publicationAt that is not the reservation\'s createdAt', (res) => ({ publicationAt: '2026-10-22T00:00:00.000Z' })],
+  ];
+  const cards = [...LIES.map((_, k) => card(`s8-${k}`, k + 1)), card('s8-ok', LIES.length + 1)];
+  await world(async ({ client }) => {
+    for (const [k, [label, lie]] of LIES.entries()) {
+      const o = claimOrigin(cards[k], `k-s8-${k}`);
+      const j = await committed(client, o);
+      assert.equal((await client.update(postFor(o, j))).outcome, 'APPLIED', `PRECONDITION (${label}): the real post exists`);
+      const r = await client.update(settleIntention(j.obligations[0].obligationId, 'publish', { publication: publicationOf(j, lie(j.reservations[0])) }));
+      assert.equal(r.outcome, 'PRECONDITION_FAILED', `S8 (${label}): refused by the guard (${JSON.stringify(r).slice(0, 300)})`);
+      assert.deepEqual(await obligationStatusDirect(client, j.obligations[0].obligationId), ['pending'], `S8 (${label}): read-back: still pending`);
+    }
+    // CONTROL in the same world: an untouched origin's true values settle, so each lie above was refused for its lie
+    const o = claimOrigin(cards[LIES.length], 'k-s8-ok');
+    const j = await committed(client, o);
+    assert.equal((await client.update(postFor(o, j))).outcome, 'APPLIED');
+    const ok = await client.update(settleIntention(j.obligations[0].obligationId, 'publish', { publication: publicationOf(j) }));
+    assert.equal(ok.outcome, 'APPLIED', `S8 CONTROL: the true values settle (${JSON.stringify(ok).slice(0, 300)})`);
+    assert.deepEqual(await obligationStatusDirect(client, j.obligations[0].obligationId), ['published'], 'S8 CONTROL: read-back: published');
+  }, cards);
+});
+
+test('#1629 s3 (S9) a MALFORMED stored proof (the reservation\'s draft removed) never settles, even with the true publication values', TP, async () => {
+  const c = card('s9', 1);
+  await world(async ({ client, exec }) => {
+    const o = claimOrigin(c, 'k-s9');
+    const j = await committed(client, o);
+    const pc = postFor(o, j);
+    assert.equal((await client.update(pc)).outcome, 'APPLIED', 'PRECONDITION: the real post exists');
+    const r0 = await fetch(`${exec().baseUrl}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/og1629o-s9-${process.pid}-${seedN++}` }, body: `DELETE WHERE { GRAPH <${BK}> { <urn:ex:postseq/reservation/${pc.post.id}> <urn:ex:postseq/draftJson> ?d } }` });
+    assert.equal(r0.status, 200, `PRECONDITION: the reservation's draft was removed (${await r0.text()})`);
+    assert.equal((await rows(client, `SELECT ?d WHERE { GRAPH <${BK}> { <urn:ex:postseq/reservation/${pc.post.id}> <urn:ex:postseq/draftJson> ?d } }`)).length, 0, 'PRECONDITION: read-back: no draft remains');
+    const r = await client.update(settleIntention(j.obligations[0].obligationId, 'publish', { publication: publicationOf(j) }));
+    assert.equal(r.outcome, 'PRECONDITION_FAILED', `S9: refused (${JSON.stringify(r).slice(0, 300)})`);
+    assert.deepEqual(await obligationStatusDirect(client, j.obligations[0].obligationId), ['pending'], 'S9: read-back: still pending');
   }, [c]);
 });
 
