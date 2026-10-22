@@ -20,7 +20,8 @@
  *       (APPLIED, at the derived postId and reserved postSeq), so S1's proof exists to be read
  *   S1  publish: with the post.create receipt APPLIED for the deterministic op, settle publish → APPLIED, the obligation reads published
  *   S2  publish with NO post receipt → PRECONDITION_FAILED, the obligation stays pending, nothing changed
- *   S3  publish when the deterministic op was written with a DIFFERENT body (receipt APPLIED, digest not the frozen payload's) →
+ *   S3  publish when a WELL-FORMED publication of a DIFFERENT body sits at the deterministic op (receipt APPLIED, foreign digest),
+ *       forged beneath the compiler on a throwaway executor (G-R refuses it at the compiler) and read back before settle →
  *       PRECONDITION_FAILED: post existence and an APPLIED receipt alone never satisfy the proof
  *   S4  replay: the same settle publish again → APPLIED, nothing changes, commitSeq unchanged
  *   S5  terminal: after published, settle block → PRECONDITION_FAILED, status stays published (never overwritten)
@@ -59,7 +60,7 @@ import crypto from 'node:crypto';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { HAVE_PY, tmpStore, startExecutor, killExecutor } from './helpers/graph-executor-proc.mjs';
 import { createGraphClient } from '../core/graph-client.mjs';
-import { canonicalize } from '../core/graph-compiler.mjs';
+import { canonicalize, digestOf } from '../core/graph-compiler.mjs';
 import { cardQuads, priorQuads, cardIriOf } from '../core/cards-graph.mjs';
 import { postCreateIntention, announcePostId, opIdFor } from '../core/announce-outbox.mjs';
 
@@ -296,17 +297,59 @@ test('#1629 s3 (S2) settle publish with NO post receipt: refused, the obligation
   }, [c]);
 });
 
-test('#1629 s3 (S3) the deterministic op written with a DIFFERENT body: receipt APPLIED but not the frozen payload\'s digest, so settle publish is refused', TP, async () => {
+/**
+ * A WELL-FORMED forged publication, made by the REAL compiler on a THROWAWAY executor that holds no reservation (so G-R is vacuous
+ * there), then copied term for term beneath the compiler into the world's executor (the GD pattern; 45050, 45056). Once G-R is built a
+ * mismatched post.create is refused at the compiler, so S3's state can only be reached beneath it.
+ */
+async function forgeWellFormed(targetExecUrl, foreign) {
+  const store = tmpStore('og1629o-forge-'); STORES.push(store); fs.rmSync(store, { recursive: true });
+  const ex = await startExecutor({ store, datasetId: 'og1629o-forge', create: true });
+  try {
+    const c = createGraphClient({ baseUrl: ex.baseUrl, expectedDatasetId: 'og1629o-forge', timeoutMs: 30000, label: 'og1629o-forge' });
+    const w = await c.update(foreign);
+    assert.equal(w.outcome, 'APPLIED', `PRECONDITION: the foreign publication applies where no reservation exists (${JSON.stringify(w).slice(0, 200)})`);
+    const term = (t) => {
+      if (t.type === 'uri') return `<${t.value}>`;
+      assert.equal(t.type, 'literal', `PRECONDITION: the forged triples hold no blank node (${JSON.stringify(t)})`);
+      const lex = JSON.stringify(t.value);
+      if (t['xml:lang']) return `${lex}@${t['xml:lang']}`;
+      return t.datatype && t.datatype !== `${XSD}string` ? `${lex}^^<${t.datatype}>` : lex;
+    };
+    const lines = { default: [], graphs: {} };
+    for (const iri of [`https://scrumboard.local/entity/${foreign.post.id}`, foreign.opId]) {
+      const dq = await c.query(`SELECT ?p ?o WHERE { <${iri}> ?p ?o }`);
+      const gq = await c.query(`SELECT ?g ?p ?o WHERE { GRAPH ?g { <${iri}> ?p ?o } }`);
+      assert.ok(dq.ok && gq.ok, 'PRECONDITION: the throwaway executor answered');
+      const inNamed = new Set(gq.rows.map((r) => `${r.p.value} ${JSON.stringify(r.o)}`));
+      for (const r of dq.rows) if (!inNamed.has(`${r.p.value} ${JSON.stringify(r.o)}`)) lines.default.push(`<${iri}> <${r.p.value}> ${term(r.o)} .`);
+      for (const r of gq.rows) (lines.graphs[r.g.value] ??= []).push(`<${iri}> <${r.p.value}> ${term(r.o)} .`);
+    }
+    const body = `INSERT DATA { ${lines.default.join(' ')} ${Object.entries(lines.graphs).map(([g, ts]) => `GRAPH <${g}> { ${ts.join(' ')} }`).join(' ')} }`;
+    const r = await fetch(`${targetExecUrl}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/og1629o-forge-${process.pid}-${seedN++}` }, body });
+    assert.equal(r.status, 200, `PRECONDITION: the forged triples were copied in (${await r.text()})`);
+  } finally { await killExecutor(ex); }
+}
+
+test('#1629 s3 (S3) a well-formed APPLIED publication of a DIFFERENT body at the deterministic op (forged beneath the compiler): settle publish is refused', TP, async () => {
   const c = card('s3', 1);
-  await world(async ({ client }) => {
+  await world(async ({ client, exec }) => {
     const o = claimOrigin(c, 'k-s3');
     const j = await committed(client, o);
-    const forged = postFor(o, j, { body: 'not what was frozen' });
-    const w = await client.update(forged);
-    assert.equal(w.outcome, 'APPLIED', `PRECONDITION: a post was written under the deterministic op with a different body (${JSON.stringify(w).slice(0, 200)}); if the executor already refuses this, S3 needs a different forgery`);
+    const frozen = postFor(o, j);
+    const foreign = postFor(o, j, { body: 'not what was frozen' });
+    await forgeWellFormed(exec().baseUrl, foreign);
+    // the injected state, read back before settle: foreign content at the reserved identity, an APPLIED receipt with the FOREIGN digest
+    const post = Object.fromEntries((await rows(client, `SELECT ?p ?o WHERE { <https://scrumboard.local/entity/${foreign.post.id}> ?p ?o }`)).map((x) => [x.p.value.split(/[#/]/).pop(), x.o.value]));
+    assert.equal(post.text, foreign.post.body, `injected read-back: the foreign body (${JSON.stringify(post)})`);
+    assert.equal(post.postSeq, String(j.reservations[0].postSeq), 'injected read-back: at the reserved postSeq');
+    const rc = Object.fromEntries((await rows(client, `SELECT ?p ?o WHERE { GRAPH <${BK}> { <${frozen.opId}> ?p ?o } }`)).map((x) => [x.p.value, x.o.value]));
+    assert.equal(rc['urn:ex:outcome'], 'urn:ex:APPLIED', `injected read-back: the receipt says APPLIED (${JSON.stringify(rc)})`);
+    assert.equal(rc['urn:ex:digest'], digestOf(canonicalize(foreign)), 'injected read-back: with the foreign publication\'s digest');
+    assert.notEqual(rc['urn:ex:digest'], digestOf(canonicalize(frozen)), 'injected read-back: not the frozen payload\'s');
     const r = await client.update(settleIntention(j.obligations[0].obligationId, 'publish'));
     assert.equal(r.outcome, 'PRECONDITION_FAILED', `S3: post existence and an APPLIED receipt alone never satisfy the proof (${JSON.stringify(r).slice(0, 300)})`);
-    assert.equal(await obligationStatus(client, o), 'pending');
+    assert.equal(await obligationStatus(client, o), 'pending', 'S3: read-back: the obligation stays pending');
   }, [c]);
 });
 
