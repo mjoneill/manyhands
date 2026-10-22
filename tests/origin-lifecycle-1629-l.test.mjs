@@ -93,6 +93,8 @@ async function world(mode, body, { allocator = mode === 'off' } = {}) {
   const epoch = (/"postSeqEpoch"\s*:\s*"([^"]+)"/.exec(kept.toString('utf8')) || [])[1] || 'e-l1629';
   const allocatorTriples = (next) => `<urn:ex:postseq/allocator> a <urn:ex:postseq/Allocator> ; <urn:ex:postseq/postSeqEpoch> ${JSON.stringify(epoch)} ; <urn:ex:postseq/nextPostSeq> "${next}"^^<http://www.w3.org/2001/XMLSchema#integer> ; <urn:ex:postseq/version> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .`;
   const allocatorNext = async () => (await xq(`SELECT ?n WHERE { GRAPH <${BKG}> { <urn:ex:postseq/allocator> <urn:ex:postseq/nextPostSeq> ?n } }`)).map((r) => Number(r.n.value));
+  /** The stored postSeq of a post, read from the executor (45078: the response alone is what REST said, not what was stored). */
+  const storedPostSeq = async (id) => (await xq(`SELECT ?n WHERE { { <https://scrumboard.local/entity/${id}> ?p ?n } UNION { GRAPH ?g { <https://scrumboard.local/entity/${id}> ?p ?n } } FILTER(STRENDS(STR(?p), "/postSeq") || STRENDS(STR(?p), "#postSeq")) }`)).map((r) => Number(r.n.value));
   const removeAllocator = () => xu(`DELETE WHERE { GRAPH <${BKG}> { <urn:ex:postseq/allocator> ?p ?o } }`, 'allocator-removed');
   const seedAllocator = async (next) => { await xu(`INSERT DATA { GRAPH <${BKG}> { ${allocatorTriples(next)} } }`, 'allocator-seeded'); assert.deepEqual(await allocatorNext(), [next], 'PRECONDITION: read-back: exactly one allocator, at the seeded next'); };
   if (allocator) {
@@ -194,7 +196,7 @@ async function world(mode, body, { allocator = mode === 'off' } = {}) {
     return { reached, inflight, returned: () => returned, release };
   };
   try {
-    await body({ w, start, call, kill, restart, stopCurrent, publishOnce, claimPosts, claimRecords, holdAt, incarnations, barrierDir, sink, allocatorNext, removeAllocator, seedAllocator, maxSeq, gclient });
+    await body({ w, start, call, kill, restart, stopCurrent, publishOnce, claimPosts, claimRecords, holdAt, incarnations, barrierDir, sink, allocatorNext, removeAllocator, seedAllocator, maxSeq, gclient, storedPostSeq });
   } finally {
     try { fs.chmodSync(w.boardFile, 0o644); } catch { /* absent */ }
     for (const inc of incarnations) { await inc.r.stop().catch(() => {}); fs.rmSync(inc.priv, { recursive: true, force: true }); }
@@ -276,6 +278,7 @@ test('#1629 L1a ONE ALLOCATOR (mode off, file unreadable): an ordinary post take
     const a = await s.call('POST', '/api/conversations', { body: 'an L1a post', author: 'ada' });
     assert.equal(a.status, 201, a.text.slice(0, 200));
     assert.equal(a.json?.postSeq, before, `L1a: the post took the allocator's old next (${a.json?.postSeq} vs ${before})`);
+    assert.deepEqual(await s.storedPostSeq(a.json?.id), [before], `L1a: read-back: the STORED post carries exactly that postSeq (${a.json?.id})`);
     assert.deepEqual(await s.allocatorNext(), [before + 1], 'L1a: read-back: next is old next + 1');
     await documentUntouched(s, 'off', 'L1a');
   });
@@ -291,7 +294,9 @@ test('#1629 L1b ONE ALLOCATOR, INTERLEAVED (mode off): a claim, an ordinary post
     assert.equal((await s.call('POST', '/api/cards/uuid-2/claim', { by: 'ada' })).status, 200, 'the second claim');
     const claims = (await s.claimRecords()).map((x) => x.postSeq);
     assert.equal(claims.length, 2, `read-back: two claim reservations (${JSON.stringify(claims)})`);
-    const all = [...claims, p.json?.postSeq].sort((x, y) => x - y);
+    const stored = await s.storedPostSeq(p.json?.id);
+    assert.deepEqual(stored, [p.json?.postSeq], `L1b: read-back: the STORED ordinary post carries the postSeq REST answered (${JSON.stringify(stored)})`);
+    const all = [...claims, stored[0]].sort((x, y) => x - y);
     assert.equal(new Set(all).size, 3, `L1b: three DISTINCT numbers (${JSON.stringify(all)})`);
     assert.deepEqual(all, [before, before + 1, before + 2], `L1b: consecutive from the allocator's old next ${before} (${JSON.stringify(all)})`);
     assert.deepEqual(await s.allocatorNext(), [before + 3], 'L1b: read-back: next advanced by exactly three');
