@@ -255,3 +255,35 @@ export async function enumerateOriginRecords(client) {
   const name = { [bare(T.Prepared)]: 'Prepared', [bare(T.Origin)]: 'Origin', [bare(T.Obligation)]: 'Obligation' };
   return { ok: true, records: r.rows.map((b) => ({ type: name[b.t.value], subject: b.s.value, mutationId: b.m?.value ?? null })) };
 }
+
+/**
+ * #1629 s3 (r2 R-A1, corrected by r3 C1) — an origin's OUTCOME, a pure read keyed by its mutationId. Nothing here writes,
+ * retries or repairs: recovering what happened is a read, never a re-execution.
+ *   committed    the Prepared record names its commit op AND that op's receipt is APPLIED (this is also how an UNKNOWN that
+ *                actually committed reads: the link and the receipt are written by the same update), and the join validates
+ *   refused      no link, and the commit op's receipt is PRECONDITION_FAILED
+ *   unresolved   no link and no receipt: NOT proven committed — an update that was sent may still be in flight (C1)
+ *   unprepared   nothing at the Prepared subject
+ * Any read that fails is returned as it failed (UNAVAILABLE / INVALID), with no outcome: a state is never guessed.
+ */
+export async function readOriginOutcome(client, mutationId) {
+  const P = await readPreparedOrigin(client, mutationId);
+  if (!P.ok) return P;
+  if (!P.prepared) return { ok: true, outcome: 'unprepared', mutationId };
+  const commitOp = originCommitOp(mutationId);
+  const r = await client.query(`SELECT ?o WHERE { GRAPH ${BK} { <${commitOp}> ${EX.outcome} ?o } }`);
+  if (!r.ok) return { ok: false, status: 'UNAVAILABLE', reason: r.reason };
+  if (r.rows.length > 1) return invalid(`the commit op ${commitOp} carries ${r.rows.length} outcomes`);
+  const receipt = r.rows[0]?.o?.value ?? null;
+  if (P.prepared.committedBy != null) {
+    if (receipt !== bare(EX.APPLIED)) return invalid(`the Prepared record names its commit, but the commit receipt is ${receipt ?? 'absent'}`);
+    const C = await readCommittedOrigin(client, mutationId);
+    if (!C.ok) return C;
+    if (!C.committed) return invalid('the Prepared record names its commit, but no committed origin reads back');
+    return { ok: true, outcome: 'committed', mutationId, commitOp };
+  }
+  if (receipt === bare(EX.APPLIED)) return invalid('the commit receipt is APPLIED, but the Prepared record names no commit');
+  if (receipt === bare(EX.PRECONDITION_FAILED)) return { ok: true, outcome: 'refused', mutationId, commitOp };
+  if (receipt == null) return { ok: true, outcome: 'unresolved', mutationId, commitOp, note: 'prepared, with no commit link and no commit receipt: not proven committed (an update that was sent may still be in flight)' };
+  return invalid(`the commit receipt carries an unknown outcome ${receipt}`);
+}
