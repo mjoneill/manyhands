@@ -11268,7 +11268,8 @@ async function xoOrigin(mutationId) {
       payload: { author: x.author, body: x.body, mentions: [...x.mentions], notify: x.notify, occurredAt: P.prepared.occurredAt, originActor: d.originActor, origin: d.provenance, mutationId, slot: x.slot },
     };
   });
-  return { origin, entries };
+  // R1 — the frozen preparation, carried to obligation.settle as candidates (the update re-verifies every byte)
+  return { origin, entries, proof: { descriptor: d, plan: JSON.parse(P.prepared.planJson), occurredAt: P.prepared.occurredAt } };
 }
 
 /** GET /api/outbox's shape, from the executor. `integrity` lists committed origins whose join did not validate. */
@@ -11323,10 +11324,18 @@ async function xoPublish(obligationId, { inline = false } = {}) {
   if (!inline) testBarrier('after-executor-apply');   // TEST-ONLY: the executor answered, nothing recorded, no lock held
   // G-D — the proof, read from the executor, BEFORE any dispatch
   const want = COMPILER_MOD.compile(intention).digest;
-  const q = await c.query(`SELECT ?o ?d WHERE { GRAPH <urn:scrum:bookkeeping:executor> { <${intention.opId}> <urn:ex:outcome> ?o ; <urn:ex:digest> ?d } }`);
+  // R2 — the receipt is read WHOLE and every proof term checked exactly: one outcome (the APPLIED IRI), one digest (a plain
+  // xsd:string equal to this intention's), one actor (the author's person). Anything else is an integrity fault.
+  const q = await c.query(`SELECT ?p ?o WHERE { GRAPH <urn:scrum:bookkeeping:executor> { <${intention.opId}> ?p ?o } }`);
   const ty = await c.query(`SELECT ?t WHERE { <https://scrumboard.local/entity/${intention.post.id}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> ?t }`);
   if (!q.ok || !ty.ok) return { status: 'pending', reason: 'executor-unavailable: the publication proof could not be read' };
-  if (q.rows.length !== 1 || q.rows[0].o.value !== 'urn:ex:APPLIED' || q.rows[0].d.value !== want) return xoIntegrity(obligationId, 'the post op\'s receipt is not this publication\'s (digest or outcome differs)');
+  const terms = (pred) => q.rows.filter((x) => x.p.value === pred).map((x) => x.o);
+  const [outs, digs, acts] = ['urn:ex:outcome', 'urn:ex:digest', 'urn:ex:actor'].map(terms);
+  const plainStr = (t) => t.type === 'literal' && t['xml:lang'] == null && (t.datatype == null || t.datatype === 'http://www.w3.org/2001/XMLSchema#string');
+  const proofOk = outs.length === 1 && outs[0].type === 'uri' && outs[0].value === 'urn:ex:APPLIED'
+    && digs.length === 1 && plainStr(digs[0]) && digs[0].value === want
+    && acts.length === 1 && acts[0].type === 'uri' && acts[0].value === intention.actor;
+  if (!proofOk) return xoIntegrity(obligationId, 'the post op\'s receipt is not this publication\'s (its outcome, digest or actor is not the exact expected term)');
   const types = ty.rows.map((x) => x.t.value);
   if (types.includes('https://scrumboard.local/ns#RedactedPost')) {
     const b = await settle('block', { reason: 'tombstoned' });
@@ -11336,7 +11345,7 @@ async function xoPublish(obligationId, { inline = false } = {}) {
   await dispatchAnnouncement(entry);
   if (inline) testBarrier('after-dispatch-before-complete');   // TEST-ONLY: dispatched, settlement not yet recorded
   const p = entry.payload;
-  const s = await settle('publish', { publication: { payload: { author: p.author, body: p.body, originActor: p.originActor, occurredAt: p.occurredAt, mentions: p.mentions, notify: p.notify }, postSeq: entry.postSeq, publicationAt: entry.publicationAt } });
+  const s = await settle('publish', { publication: { payload: { author: p.author, body: p.body, originActor: p.originActor, occurredAt: p.occurredAt, mentions: p.mentions, notify: p.notify }, postSeq: entry.postSeq, publicationAt: entry.publicationAt }, origin: o.proof });
   if (s.outcome === 'APPLIED') return { status: 'published', postId: intention.post.id };
   return { status: 'pending', reason: `settle-${String(s.outcome).toLowerCase()}${s.reason ? `: ${s.reason}` : ''}` };
 }

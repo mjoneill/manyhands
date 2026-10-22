@@ -624,3 +624,70 @@ test('#1629 GD (mode off, INJECTED STORE CORRUPTION): a well-formed APPLIED publ
     await documentUntouched(s, 'off', 'GD');
   });
 });
+
+// ── G-D, the receipt's TERMS before dispatch (review R2, 45094): the publisher validates outcome, digest and actor as exact terms ──
+// The TRUE post is created through the compiler (it matches the reservation, so G-R admits it); then ONE term of its receipt is
+// tampered beneath the compiler and read back. A fresh REST's --once must not dispatch, must not settle, and must report an integrity
+// fault. The control: the same pre-created true post, untampered, is dispatched and settled.
+async function preparedTruePost(s, label) {
+  const snap = await pendingAfterOriginCrash(s, label);
+  const entry = { mutationId: snap.mutationId, slot: 'claim', postSeq: snap.postSeq, publicationAt: snap.publicationAt, payload: snap.payload };
+  const truePost = postCreateIntention(entry);
+  const ex = createGraphClient({ baseUrl: s.w.exec.baseUrl, expectedDatasetId: WB_DATASET, timeoutMs: 30000, label: 'l1629-gdr' });
+  const w = await ex.update(truePost);
+  assert.equal(w.outcome, 'APPLIED', `PRECONDITION (${label}): the true post is created through the compiler (${JSON.stringify(w).slice(0, 200)})`);
+  return { snap, truePost, ex };
+}
+const receiptTerms = async (ex, op, p) => (await ex.query(`SELECT ?x WHERE { GRAPH <urn:scrum:bookkeeping:executor> { <${op}> <${p}> ?x } }`)).rows.map((r) => r.x);
+async function swapReceiptTerm(s, op, p, bind, label) {
+  const r = await fetch(`${s.w.exec.baseUrl}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/l1629-gdr-${process.pid}-${Date.now()}` },
+    body: `DELETE { GRAPH <urn:scrum:bookkeeping:executor> { <${op}> <${p}> ?x } } INSERT { GRAPH <urn:scrum:bookkeeping:executor> { <${op}> <${p}> ?n } } WHERE { GRAPH <urn:scrum:bookkeeping:executor> { <${op}> <${p}> ?x } BIND(${bind} AS ?n) }` });
+  assert.equal(r.status, 200, `PRECONDITION (${label}): the receipt tamper was written (${await r.text()})`);
+}
+async function noDispatchNoSettle(s, snap, label) {
+  await s.start();
+  const run = await s.publishOnce();
+  await sleep(3000);
+  assert.equal(s.sink.forPost(snap.postId).length, 0, `${label}: ZERO dispatches for the reserved post (got ${s.sink.forPost(snap.postId).length})`);
+  const ob = await s.call('GET', `/api/outbox?mutationId=${encodeURIComponent(snap.mutationId)}`);
+  assert.ok(entriesOf(ob.json).some((e) => e.slot === 'claim' && e.status === 'pending'), `${label}: read-back: the entry is still pending, not settled (${ob.text.slice(0, 300)})`);
+  assert.match(run.err, INTEGRITY_RX, `${label}: --once reports an integrity fault (exit ${run.code}; stderr ${run.err.slice(0, 300)})`);
+  await documentUntouched(s, 'off', label);
+}
+
+test('#1629 GDR0 CONTROL (mode off): the TRUE post already created, its receipt untouched: --once dispatches it and the entry reads published', TB, async () => {
+  await world('off', async (s) => {
+    await s.start();
+    const { snap } = await preparedTruePost(s, 'GDR0');
+    await s.start();
+    const run = await s.publishOnce();
+    assert.equal(run.code, 0, `--once completed (${run.code}) ${run.err.slice(0, 200)}`);
+    assert.ok(await until(async () => s.sink.forPost(snap.postId).length >= 1, 20000), `GDR0: the sink received a dispatch for ${snap.postId}`);
+    const ob = await s.call('GET', `/api/outbox?mutationId=${encodeURIComponent(snap.mutationId)}`);
+    assert.ok(await until(async () => entriesOf((await s.call('GET', `/api/outbox?mutationId=${encodeURIComponent(snap.mutationId)}`)).json).some((e) => e.slot === 'claim' && e.status === 'published'), 20000), `GDR0: read-back: published (${ob.text.slice(0, 200)})`);
+    await documentUntouched(s, 'off', 'GDR0');
+  });
+});
+
+test('#1629 GDR1 (mode off): the true post\'s receipt DIGEST language-tagged @en (same lexical hash): no dispatch, no settle, integrity fault', TB, async () => {
+  await world('off', async (s) => {
+    await s.start();
+    const { snap, truePost, ex } = await preparedTruePost(s, 'GDR1');
+    await swapReceiptTerm(s, truePost.opId, 'urn:ex:digest', 'STRLANG(STR(?x), "en")', 'GDR1');
+    const t = await receiptTerms(ex, truePost.opId, 'urn:ex:digest');
+    assert.deepEqual(t.map((x) => [x.value, x['xml:lang'] ?? null]), [[digestOf(canonicalize(truePost)), 'en']], `PRECONDITION (GDR1): read-back: one digest, the TRUE hash, tagged @en (${JSON.stringify(t)})`);
+    await noDispatchNoSettle(s, snap, 'GDR1');
+  });
+});
+
+test('#1629 GDR2 (mode off): the true post\'s receipt ACTOR not the author\'s person: no dispatch, no settle, integrity fault', TB, async () => {
+  await world('off', async (s) => {
+    await s.start();
+    const { snap, truePost, ex } = await preparedTruePost(s, 'GDR2');
+    assert.notEqual(truePost.actor, 'https://scrumboard.local/person/ada', 'PRECONDITION (GDR2): the author is not ada');
+    await swapReceiptTerm(s, truePost.opId, 'urn:ex:actor', '<https://scrumboard.local/person/ada>', 'GDR2');
+    const t = await receiptTerms(ex, truePost.opId, 'urn:ex:actor');
+    assert.deepEqual(t.map((x) => x.value), ['https://scrumboard.local/person/ada'], `PRECONDITION (GDR2): read-back: the actor is ada's person (${JSON.stringify(t)})`);
+    await noDispatchNoSettle(s, snap, 'GDR2');
+  });
+});

@@ -33,6 +33,10 @@
  *   S9  a malformed stored proof (the reservation's draft removed) never settles, even with the true values
  *   S11 a well-formed forged publication whose postSeq or publicationAt differs from the reservation, sent by a caller whose values match
  *       its receipt digest, is refused by the reservation alone
+ *   S12 settle is bound to the COMMITTED ORIGIN (review R1, 45097): nine stored-proof tampers (the Origin gone; commitOp, committedBy or
+ *       reserveOpId foreign; the commit receipt not APPLIED, or APPLIED with a foreign digest; Origin/Prepared digests disagreeing), each
+ *       on its own origin with its real post, settled with the TRUE values: refused, still pending; an untouched origin settles
+ *   S13 the publication receipt's TERMS are strict (review R2): digest @en, digest typed, two digests, actor not the author's person
  *   S10 the proof is the one BOUND to the origin: A's obligation re-linked to B's reservation (B's post real, receipt APPLIED) is refused with B's values
  *       and with A's (45066: no caller identity field exists to lie about, so the binding is tested by a stored-binding tamper)
  *
@@ -84,7 +88,15 @@ const NEVER_APPLIED_WORDS = /never.?applied|abandon/i;   // C1: an unresolved or
 const SETTLE_KIND = 'obligation.settle';
 // publish carries `publication: {payload, postSeq, publicationAt}`: CANDIDATE values the executor verifies against the bound obligation
 // and reservation before accepting the rebuilt receipt digest (amendment 45062/45064); block carries none
-const settleIntention = (obligationId, transition, extra = {}) => ({ kind: SETTLE_KIND, opId: `urn:ex:op/obligation/settle/${obligationId}/${transition}`, actor: PERSON('board'), obligationId, transition, ...extra });
+// publish ALSO carries `origin: {descriptor, plan, occurredAt}` (R1 interface, 45098): the frozen preparation of the obligation's own
+// origin, as CANDIDATES the update verifies against the stored Prepared/Origin/commit receipt. It is attached here from the registry the
+// fixture fills when it prepares an origin, keyed by the obligation's mutationId, so a row cannot accidentally send another origin's.
+const ORIGIN_CANDIDATES = new Map();   // mutationId → { descriptor, plan, occurredAt }
+const settleIntention = (obligationId, transition, extra = {}) => {
+  const mid = String(obligationId).split(':')[0];
+  const origin = transition === 'publish' && ORIGIN_CANDIDATES.has(mid) ? { origin: ORIGIN_CANDIDATES.get(mid) } : {};
+  return { kind: SETTLE_KIND, opId: `urn:ex:op/obligation/settle/${obligationId}/${transition}`, actor: PERSON('board'), obligationId, transition, ...origin, ...extra };
+};
 const BLOCK_REASONS = ['tombstoned'];
 
 const SKIP = HAVE_PY ? false : 'UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)';
@@ -164,6 +176,7 @@ async function prepared(client, o) {
   assert.equal((await client.update(prepareIntention(o))).outcome, 'APPLIED', 'PRECONDITION: prepare APPLIED');
   const p = await M.readPreparedOrigin(client, o.mid);
   assert.equal(p.ok, true, `PRECONDITION: the Prepared record reads ok (${JSON.stringify(p).slice(0, 200)})`);
+  ORIGIN_CANDIDATES.set(o.mid, { descriptor: o.descriptor, plan: o.plan, occurredAt: p.prepared.occurredAt });
   return p.prepared;
 }
 async function committed(client, o) {
@@ -519,6 +532,86 @@ test('#1629 s3 (S11) a well-formed publication whose postSeq or publicationAt is
       assert.deepEqual(await obligationStatusDirect(client, j.obligations[0].obligationId), ['pending'], `S11 (${label}): read-back: still pending`);
     }
   }, cards);
+});
+
+/** One raw tamper beneath the compiler. */
+async function tamper(exec, sparql, label) {
+  const r = await fetch(`${exec.baseUrl}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/og1629o-tamper-${process.pid}-${seedN++}` }, body: sparql });
+  assert.equal(r.status, 200, `PRECONDITION (${label}): the tamper was written (${await r.text()})`);
+}
+/** Each case on its OWN committed origin with its real, matching post: tamper ONE proof field, read the tampered state back, then settle
+ *  with the TRUE values. It must be PRECONDITION_FAILED and the Obligation's own status triple must stay pending. An untouched origin's
+ *  true values then settle in the same world (the control: each refusal is for its tamper). `readBack(ids, label, q)` asserts the
+ *  tampered state through `q(sparql) → rows`. */
+async function settleRefusedUnder(cases, prefix) {
+  const cards = [...cases.map((_, k) => card(`${prefix}-${k}`, k + 1)), card(`${prefix}-ok`, cases.length + 1)];
+  const NAME = prefix.toUpperCase();
+  await world(async ({ client, exec }) => {
+    const q = (sparql) => rows(client, sparql);
+    for (const [k, [label, sparqlOf, readBack]] of cases.entries()) {
+      const o = claimOrigin(cards[k], `k-${prefix}-${k}`);
+      const j = await committed(client, o);
+      const pc = postFor(o, j);
+      assert.equal((await client.update(pc)).outcome, 'APPLIED', `PRECONDITION (${label}): the real, matching post exists`);
+      const ids = { mid: o.mid, postOp: pc.opId, postId: pc.post.id };
+      await tamper(exec(), sparqlOf(ids), label);
+      await readBack(ids, label, q);
+      const r = await client.update(settleIntention(j.obligations[0].obligationId, 'publish', { publication: publicationOf(j) }));
+      assert.equal(r.outcome, 'PRECONDITION_FAILED', `${NAME} (${label}): refused (${JSON.stringify(r).slice(0, 300)})`);
+      assert.deepEqual(await obligationStatusDirect(client, j.obligations[0].obligationId), ['pending'], `${NAME} (${label}): read-back: still pending`);
+    }
+    const o = claimOrigin(cards[cases.length], `k-${prefix}-ok`);
+    const j = await committed(client, o);
+    assert.equal((await client.update(postFor(o, j))).outcome, 'APPLIED');
+    const ok = await client.update(settleIntention(j.obligations[0].obligationId, 'publish', { publication: publicationOf(j) }));
+    assert.equal(ok.outcome, 'APPLIED', `${NAME} CONTROL: the untouched origin's true values settle (${JSON.stringify(ok).slice(0, 300)})`);
+    assert.deepEqual(await obligationStatusDirect(client, j.obligations[0].obligationId), ['published'], `${NAME} CONTROL: read-back: published`);
+  }, cards);
+}
+const objectsOf = async (q, subject, p) => (await q(`SELECT ?x WHERE { GRAPH <${BK}> { ${subject} ${p} ?x } }`)).map((r) => r.x);
+
+test('#1629 s3 (S12) settle is bound to the COMMITTED ORIGIN (review R1, 45097): the Origin gone; commitOp, committedBy or reserveOpId foreign; the commit receipt not APPLIED or APPLIED with a foreign digest; Origin and Prepared digests disagreeing: each refused, still pending', T, async () => {
+  const ORIGIN = (mid) => `<urn:ex:origin/origin/${mid}>`, PREP = (mid) => `<urn:ex:origin/prepared/${mid}>`, COMMIT = (mid) => `<urn:ex:op/origin/commit/${mid}>`;
+  const RES = (postId) => `<urn:ex:postseq/reservation/${postId}>`;
+  const FOREIGN = 'urn:ex:op/origin/commit/someone-else';
+  const repoint = (s, p, to) => `DELETE { GRAPH <${BK}> { ${s} ${p} ?x } } INSERT { GRAPH <${BK}> { ${s} ${p} ${to} } } WHERE { GRAPH <${BK}> { ${s} ${p} ?x } }`;
+  const values = async (q, s, p) => (await objectsOf(q, s, p)).map((x) => x.value);
+  await settleRefusedUnder([
+    ['the Origin subject deleted', ({ mid }) => `DELETE WHERE { GRAPH <${BK}> { ${ORIGIN(mid)} ?p ?o } }`,
+      async ({ mid }, label, q) => assert.equal((await q(`SELECT ?p WHERE { GRAPH <${BK}> { ${ORIGIN(mid)} ?p ?o } }`)).length, 0, `PRECONDITION (${label}): read-back: no Origin triple remains`)],
+    ['the Origin\'s commitOp pointing at a foreign op', ({ mid }) => repoint(ORIGIN(mid), '<urn:ex:origin/commitOp>', `<${FOREIGN}>`),
+      async ({ mid }, label, q) => assert.deepEqual(await values(q, ORIGIN(mid), '<urn:ex:origin/commitOp>'), [FOREIGN], `PRECONDITION (${label}): read-back`)],
+    ['the Prepared committedBy link removed', ({ mid }) => `DELETE WHERE { GRAPH <${BK}> { ${PREP(mid)} <urn:ex:origin/committedBy> ?x } }`,
+      async ({ mid }, label, q) => assert.deepEqual(await values(q, PREP(mid), '<urn:ex:origin/committedBy>'), [], `PRECONDITION (${label}): read-back`)],
+    ['the commit receipt\'s outcome not APPLIED', ({ mid }) => repoint(COMMIT(mid), '<urn:ex:outcome>', '<urn:ex:PRECONDITION_FAILED>'),
+      async ({ mid }, label, q) => assert.deepEqual(await values(q, COMMIT(mid), '<urn:ex:outcome>'), ['urn:ex:PRECONDITION_FAILED'], `PRECONDITION (${label}): read-back`)],
+    ['the reservation\'s reserveOpId pointing at a foreign op', ({ postId }) => repoint(RES(postId), '<urn:ex:postseq/reserveOpId>', `<${FOREIGN}>`),
+      async ({ postId }, label, q) => assert.deepEqual(await values(q, RES(postId), '<urn:ex:postseq/reserveOpId>'), [FOREIGN], `PRECONDITION (${label}): read-back`)],
+    // 45097: the further layer — links alone are not the binding
+    ['the Prepared committedBy pointing at a foreign op', ({ mid }) => repoint(PREP(mid), '<urn:ex:origin/committedBy>', `<${FOREIGN}>`),
+      async ({ mid }, label, q) => assert.deepEqual(await values(q, PREP(mid), '<urn:ex:origin/committedBy>'), [FOREIGN], `PRECONDITION (${label}): read-back`)],
+    ['the commit receipt APPLIED but with a digest that is not the preparation\'s', ({ mid }) => repoint(COMMIT(mid), '<urn:ex:digest>', `"${'f'.repeat(64)}"`),
+      async ({ mid }, label, q) => { assert.deepEqual(await values(q, COMMIT(mid), '<urn:ex:digest>'), ['f'.repeat(64)], `PRECONDITION (${label}): read-back: the digest`); assert.deepEqual(await values(q, COMMIT(mid), '<urn:ex:outcome>'), ['urn:ex:APPLIED'], `PRECONDITION (${label}): read-back: still APPLIED`); }],
+    ['the Origin\'s descriptorDigest not the Prepared\'s', ({ mid }) => repoint(ORIGIN(mid), '<urn:ex:origin/descriptorDigest>', `"${'e'.repeat(64)}"`),
+      async ({ mid }, label, q) => { const o = await values(q, ORIGIN(mid), '<urn:ex:origin/descriptorDigest>'), pr = await values(q, PREP(mid), '<urn:ex:origin/descriptorDigest>'); assert.deepEqual(o, ['e'.repeat(64)], `PRECONDITION (${label}): read-back`); assert.notDeepEqual(o, pr, `PRECONDITION (${label}): read-back: Origin and Prepared now disagree`); }],
+    ['the Origin\'s planDigest not the Prepared\'s', ({ mid }) => repoint(ORIGIN(mid), '<urn:ex:origin/planDigest>', `"${'d'.repeat(64)}"`),
+      async ({ mid }, label, q) => { const o = await values(q, ORIGIN(mid), '<urn:ex:origin/planDigest>'), pr = await values(q, PREP(mid), '<urn:ex:origin/planDigest>'); assert.deepEqual(o, ['d'.repeat(64)], `PRECONDITION (${label}): read-back`); assert.notDeepEqual(o, pr, `PRECONDITION (${label}): read-back: Origin and Prepared now disagree`); }],
+  ], 's12');
+});
+
+test('#1629 s3 (S13) the publication receipt\'s TERMS are strict (review R2): its digest language-tagged, given a datatype, or doubled, or its actor not the author\'s person: each refused, still pending', T, async () => {
+  const D = '<urn:ex:digest>', A = '<urn:ex:actor>';
+  const swap = (op, p, bind) => `DELETE { GRAPH <${BK}> { <${op}> ${p} ?x } } INSERT { GRAPH <${BK}> { <${op}> ${p} ?n } } WHERE { GRAPH <${BK}> { <${op}> ${p} ?x } BIND(${bind} AS ?n) }`;
+  await settleRefusedUnder([
+    ['the digest language-tagged @en', ({ postOp }) => swap(postOp, D, 'STRLANG(STR(?x), "en")'),
+      async ({ postOp }, label, q) => { const t = await objectsOf(q, `<${postOp}>`, D); assert.deepEqual(t.map((x) => x['xml:lang'] ?? null), ['en'], `PRECONDITION (${label}): read-back: one digest, tagged @en (${JSON.stringify(t)})`); }],
+    ['the digest given a datatype (xsd:token)', ({ postOp }) => swap(postOp, D, 'STRDT(STR(?x), <http://www.w3.org/2001/XMLSchema#token>)'),
+      async ({ postOp }, label, q) => { const t = await objectsOf(q, `<${postOp}>`, D); assert.deepEqual(t.map((x) => x.datatype ?? null), ['http://www.w3.org/2001/XMLSchema#token'], `PRECONDITION (${label}): read-back: one digest, typed (${JSON.stringify(t)})`); }],
+    ['a second, different digest', ({ postOp }) => `INSERT DATA { GRAPH <${BK}> { <${postOp}> ${D} "${'f'.repeat(64)}" } }`,
+      async ({ postOp }, label, q) => assert.equal((await objectsOf(q, `<${postOp}>`, D)).length, 2, `PRECONDITION (${label}): read-back: two digests`)],
+    ['the actor not the author\'s person', ({ postOp }) => swap(postOp, A, '<https://scrumboard.local/person/ada>'),
+      async ({ postOp }, label, q) => assert.deepEqual((await objectsOf(q, `<${postOp}>`, A)).map((x) => x.value), ['https://scrumboard.local/person/ada'], `PRECONDITION (${label}): read-back: the actor is ada's person, not the author board's`)],
+  ], 's13');
 });
 
 // ── G-R: the reservation binds the post (r5, from the 45028/45030 finding; non-builder ruling 45032) ──
