@@ -52,8 +52,8 @@
  *   the derived post IRI in the domain graph, GP1b the same in the bookkeeping graph only, GP2 any triple at the deterministic post op:
  *   each refuses the origin commit with business state, allocator, reservations and obligations unchanged and Prepared still readable.
  *
- * Every row except S0, GR1, GR5 and GP0 is TODO until the build lands the outcome read and the settle kind (today the read is not exported and the
- * kind is not in RECORD_KINDS). Each is reported on every run and never fails CI; then delete PENDING_BUILD and each must pass.
+ * Every row except S0, GR1, GR5 and GP0 was TODO until the slice-3 build landed the outcome read, the settle kind and the guards; the marker
+ * was lifted on 2026-10-22 (45084) once every row was ok at aab78f5, so each is now a plain test that fails CI.
  *
  * NOT covered, by name: the REST diagnostic route and /api/outbox's exclusion of Prepared records (C3; REST-level, owed with the
  * wiring); RECONCILE_REQUIRED after a restore (B1, out of scope); the publisher's dispatch ordering (row L4a/L4b at REST); the
@@ -89,8 +89,7 @@ const BLOCK_REASONS = ['tombstoned'];
 
 const SKIP = HAVE_PY ? false : 'UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)';
 const T = { skip: SKIP, timeout: 300000 };
-const PENDING_BUILD = { todo: 'needs the slice-3 build: the outcome read (r2 R-A1/r3 C1), the obligation.settle kind (r2 §4/r3 C2) and the reservation-binds-the-post guard (r5 G-R) and the nothing-at-the-slot commit guard (G-P) are not built; delete PENDING_BUILD when they land' };
-const TP = { ...T, ...PENDING_BUILD };
+const TP = T;   // PENDING_BUILD lifted 2026-10-22 (45084): every row was ok at aab78f5; these rows now enforce CI as plain tests
 const DSID = 'og1629o';
 const BK = 'urn:scrum:bookkeeping:executor';
 const XSD = 'http://www.w3.org/2001/XMLSchema#';

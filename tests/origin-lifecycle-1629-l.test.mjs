@@ -34,9 +34,9 @@
  *   Every L1–L5 row: zero board-file attempts in EVERY REST incarnation on the recorder (whose log must be non-empty), and the runtime's
  *   /api/health document counter is 0.
  *
- * L1–L5 are TODO, BLOCKED BY THE MEASURED BOOT REFUSAL (row B, #1733 v2: mode off refuses "outbox … owner #1629, not built"). They are
- * reported on every run and never fail CI until the build lands; then delete BLOCKED and each must pass as a plain test. Every row,
- * L0 included, is UNMEASURED until it has been run; mutant outcomes are measured, never inferred from a mutant's name.
+ * The mode-off rows were TODO, blocked by the measured boot refusal (row B, #1733 v2), until the slice-3 build; the marker was lifted on
+ * 2026-10-22 (45084) once every row was ok at aab78f5, so each is now a plain test that fails CI. Mutant outcomes are measured, never
+ * inferred from a mutant's name.
  *
  * NOT covered, by name: production's data shape and size; a crash between the executor commit and writeDocument (no barrier there
  * today); the batch-complete route; notification policy beyond "a replay may dispatch twice, never post twice"; REST integration of any
@@ -62,8 +62,7 @@ import { canonicalize, digestOf } from '../core/graph-compiler.mjs';
 
 const SKIP = HAVE_PY ? false : 'UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)';
 const T = { skip: SKIP, timeout: 300000 };
-const BLOCKED = { todo: 'blocked by the measured boot refusal (row B, #1733 v2): mode off cannot boot until the outbox (#1629) has its owner; delete BLOCKED when it lands' };
-const TB = { ...T, ...BLOCKED };
+const TB = T;   // BLOCKED lifted 2026-10-22 (45084): every row was ok at aab78f5; these rows now enforce CI as plain tests
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const RECORDER = path.join(HERE, 'helpers', 'fs-store-recorder.mjs');
 const PUBLISHER = path.join(HERE, '..', 'scripts', 'announce-publisher.mjs');
@@ -343,7 +342,9 @@ test('#1629 RS REFUSED THEN FRESH (mode off): a claim refused without the card m
     assert.equal(new Set(mine.map((x) => x.mid)).size, mine.length, `RS: every preparation has its OWN mutationId (${JSON.stringify(mine)})`);
     assert.equal(outcomes.filter((o) => o === 'committed').length, 1, `RS: exactly one committed (${JSON.stringify(outcomes)})`);
     assert.ok(outcomes.filter((o) => o === 'refused').length >= 1, `RS: at least one refused (${JSON.stringify(outcomes)})`);
-    assert.ok(outcomes.every((o) => o === 'committed' || o === 'refused'), `RS: none unresolved or unprepared (${JSON.stringify(outcomes)})`);
+    // every preparation is RESOLVED afterwards; that does NOT show no nonce was minted while an earlier attempt was UNKNOWN (45084):
+    // RS covers the definitive-refusal case only; temporal UNKNOWN reuse stays with implementation review
+    assert.ok(outcomes.every((o) => o === 'committed' || o === 'refused'), `RS: every preparation is resolved afterwards (${JSON.stringify(outcomes)})`);
     assert.ok(mine.length <= REQUESTS * ATTEMPTS_PER_REQUEST, `RS: no more preparations than requests × attempts (${mine.length} > ${REQUESTS * ATTEMPTS_PER_REQUEST})`);
     await documentUntouched(s, 'off', 'RS');
   });
