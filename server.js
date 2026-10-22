@@ -135,6 +135,7 @@ const CARDS_UNIT = process.env.SCRUM_GRAPH_UNIT_CARDS === '1';
 let CARDS = null;
 let ORIGIN_MOD = null;   // #1629 s3 — core/origin-commit.mjs, loaded at boot in executor-owned mode only
 let COMPILER_MOD = null;   // #1629 s3 — core/graph-compiler.mjs (the publication digest, settleOpId), same
+let POSTSEQ_MOD = null;   // #1629 s3 G1 — core/postseq-reserve.mjs (ordinary posts reserve from the one allocator), same
 const FILE_CARDS = Symbol('fileCards');           // the document's card list, put back before the document is written
 const FILE_NEXT_SHORT_ID = Symbol('fileNextShortId');
 const FILE_ORIGINS = Symbol('fileOutboxOrigins');   // #1598 K4 — the outbox mutations the document already held when read
@@ -650,6 +651,9 @@ function stageOriginAnnouncement(data, { slot, body, author, notify, origin, act
     route: slot, slot, body, author, notify: !!notify, provenance: origin,
     originActor: typeof actor === 'string' && ASSIGNEE_KEY_RE.test(actor) ? actor : 'board',
     mentions: extractMentionsFromRoster(body, currentRoster(data)), handle,
+    // G2 — minted ONCE per staged origin (one lock attempt) and frozen into the Prepared identity via requestKey. UNKNOWN
+    // is reconciled under the same intention (durableUpdate); only a new attempt after a definitive refusal mints anew.
+    nonce: crypto.randomUUID(),
   };
   return { entry: handle, events: [], nextMark: null };
 }
@@ -7881,8 +7885,9 @@ async function lockedWithCards(fn) {
 
 /**
  * #1629 s3 — the origin descriptor of a staged announcement, built from the ORDERED parts the cards unit will send.
- * requestKey is "v" + the subject's NEW version: the card's for a card route, the agents entity's for an agent route —
- * the identity of ONE preparation, never a retry key (r2 R-A0..A3). An agent route's releasedCards follow the card parts.
+ * requestKey is "v" + the subject's NEW version + ":" + the staged origin's nonce (G2, 45075): the identity of ONE
+ * attempt's preparation, never a retry key (r2 R-A0..A3) — so a preparation refused without the subject moving can never
+ * wedge the next attempt. An agent route's releasedCards follow the card parts.
  */
 function originDescriptor(o, parts, collParts) {
   const { originKeyOf, mutationIdOf } = ORIGIN_MOD;
@@ -7892,7 +7897,7 @@ function originDescriptor(o, parts, collParts) {
     const part = collParts.find((p) => p.collection === 'agents');
     if (!agent || !part) throw new OriginShapeRefused('an agent origin needs the agent entity in the same write (#1629 s3)');
     const releasedCards = parts.map((p) => decodeURIComponent(String(p.iri).split('/').pop()));
-    const requestKey = `v${part.version}`;
+    const requestKey = `v${part.version}:${o.nonce}`;
     const mutationId = mutationIdOf(originKeyOf(o.route, agent, requestKey, o.originActor));
     return { route: o.route, subject: agent, requestKey, originActor: o.originActor, mutationId, provenance: { agent, releasedCards }, slots };
   }
@@ -7902,7 +7907,7 @@ function originDescriptor(o, parts, collParts) {
   const part = parts.find((p) => decodeURIComponent(String(p.iri).split('/').pop()) === cardId);
   if (!cardId || !part) throw new OriginShapeRefused('a card origin names a card this write changes (#1629 s3)');
   const version = Number(part.version);
-  const requestKey = `v${version}`;
+  const requestKey = `v${version}:${o.nonce}`;
   const mutationId = mutationIdOf(originKeyOf(o.route, cardId, requestKey, o.originActor));
   return { route: o.route, subject: cardId, requestKey, originActor: o.originActor, mutationId, provenance: { cardId, version }, slots };
 }
@@ -12393,6 +12398,31 @@ async function createPostThroughGraph(res, body) {
       replay = true;
     } else if (q.rows.length) {
       return sendJSON(res, 409, { error: 'this requestId names a node that is not a readable post', code: 'POST_NODE_UNREADABLE', requestId });
+    } else if (ORIGIN_EXECUTOR) {
+      // 3′. #1629 s3 G1(b) — executor-owned: the number comes from slice 1's ONE allocator (postseq.reserve, ordinary
+      // mode, keyed by author + requestId), the same allocator every announcement slot reserves from. A re-sent request
+      // with the same content replays the original reservation (its number and time); different content under the same
+      // requestId is an intent-collision and is refused, as the document path's receipt would refuse it.
+      const c = ANNOUNCE_EXECUTOR;
+      const before = await POSTSEQ_MOD.readPostSeqReservation(c, postId);
+      if (!before.ok) return before.status === 'UNAVAILABLE'
+        ? sendJSON(res, 503, unknownBody(requestId, `the reservation could not be read: ${before.reason}`))
+        : sendJSON(res, 409, { error: `this requestId's reservation does not read back well-formed: ${before.reason}`, code: 'POST_SEQ_RESERVATION_INVALID', requestId });
+      const item = { mode: 'ordinary', author, requestId, draft: {
+        body: post.body, attachedTo: post.attachedTo ?? null, mentions: Array.isArray(post.mentions) ? [...post.mentions] : [],
+        attachments: (post.attachments || []).map((a) => ({ id: a.id, mime: a.mime, name: a.name, size: a.size })),
+        conversation: post.conversation ?? null, onBehalfOf: post.onBehalfOf ?? null,
+      } };
+      let opId;
+      try { opId = POSTSEQ_MOD.reserveOpId(POSTSEQ_MOD.canonReservationBatch([item], 'reservations')); } catch (e) { return sendJSON(res, 400, { error: e.message, code: 'INVALID_POST' }); }
+      const rr = await c.update({ kind: 'postseq.reserve', opId, actor: `https://scrumboard.local/person/${author}`, reservations: [item] });
+      if (rr.outcome === 'REJECTED' && rr.reason === 'intent-collision') return sendJSON(res, 409, { error: 'this requestId was reserved for different content', code: 'INTENT_COLLISION', requestId });
+      if (rr.outcome === 'PRECONDITION_FAILED') return sendJSON(res, 503, { error: 'the post-sequence allocator refused the reservation (missing, malformed or ambiguous); nothing was written', code: 'POST_SEQ_ALLOCATOR_REFUSED', requestId });
+      if (rr.outcome !== 'APPLIED') return sendJSON(res, 503, unknownBody(requestId, `the reservation's outcome is ${rr.outcome}${rr.reason ? `: ${rr.reason}` : ''}`));
+      const got = await POSTSEQ_MOD.readPostSeqReservation(c, postId);
+      if (!got.ok || !got.reservation) return sendJSON(res, 503, unknownBody(requestId, `the reservation did not read back: ${got.reason ?? 'absent'}`));
+      post = { ...post, postSeq: got.reservation.postSeq, createdAt: got.reservation.createdAt };
+      heldBefore = !!before.reservation;
     } else {
       // 3. mint, under the lock, re-checked
       const minted = await withWriteLock(async () => {
@@ -13268,6 +13298,15 @@ if (CARDS_UNIT) {
   if (ORIGIN_EXECUTOR) {
     ORIGIN_MOD = await import('./core/origin-commit.mjs');
     COMPILER_MOD = await import('./core/graph-compiler.mjs');
+    POSTSEQ_MOD = await import('./core/postseq-reserve.mjs');
+    // G1(a) — ONE allocator serves ordinary posts and announcement slots. Boot refuses a missing, malformed or ambiguous
+    // allocator (slice 1's strict reader): it is never created here, never derived from MAX(postSeq), never read from a
+    // document. An isolated world seeds it explicitly, above every post and tombstone (G1(c)).
+    const A = await POSTSEQ_MOD.readPostSeqAllocator(ANNOUNCE_EXECUTOR);
+    if (!A.ok) {
+      console.error(`#1629 s3 SCRUM_BOARD_DOCUMENT=${BOARD_DOCUMENT} refuses to start: the post-sequence allocator is ${A.status} (${A.reason}); it is never created or repaired at runtime — seed exactly one, above every post and tombstone`);
+      process.exit(1);
+    }
     console.error(`${new Date().toISOString()} #1629 s3 announcements are EXECUTOR-OWNED (SCRUM_BOARD_DOCUMENT=${BOARD_DOCUMENT}): ISOLATED AND INCOMPLETE — wiki-create and sibling-shifting done-moves refuse until #1629 slice 4; document outbox entries are not migrated`);
   }
   // #1598 K4 — re-queue any announcement the graph recorded with a card write that the document never received (the
