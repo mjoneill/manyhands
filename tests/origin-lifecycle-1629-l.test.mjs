@@ -56,7 +56,7 @@ import { wholeBoardWorld, WB_DATASET } from './helpers/whole-board-1645.mjs';
 import { startRestServer } from './helpers/harness.mjs';
 import { createGraphClient } from '../core/graph-client.mjs';
 import { createCardsUnit } from '../core/cards-unit.mjs';
-import { enumerateOriginRecords, readCommittedOrigin } from '../core/origin-commit.mjs';
+import { enumerateOriginRecords, readCommittedOrigin, readPreparedOrigin, readOriginOutcome } from '../core/origin-commit.mjs';
 import { announcePostId, opIdFor, postCreateIntention } from '../core/announce-outbox.mjs';
 import { canonicalize, digestOf } from '../core/graph-compiler.mjs';
 
@@ -80,10 +80,25 @@ async function until(fn, ms, step = 250) { const t0 = Date.now(); for (;;) { con
 const entriesOf = (ob) => (Array.isArray(ob?.entries) ? ob.entries : Object.values(ob?.entries || {}));
 
 /** One fixture world. `rest(n)` starts REST incarnation n with its own recorder file; every incarnation is recorded. */
-async function world(mode, body) {
+async function world(mode, body, { allocator = mode === 'off' } = {}) {
   const w = await wholeBoardWorld({ env: { ...UNITS, ...SOURCES } });
   const kept = fs.readFileSync(w.boardFile);
   await w.rest.stop(); fs.writeFileSync(w.boardFile, kept);   // the harness unlinks the board file on stop
+  // G1(c), 45075: ONE allocator for ordinary posts and announcement slots, seeded EXPLICITLY by the fixture (never created by the
+  // runtime), above every existing postSeq in the store, posts and tombstones alike. Mode off only: mode on keeps today's world.
+  const BKG = 'urn:scrum:bookkeeping:executor';
+  const xq = async (sparql) => { const q = await createGraphClient({ baseUrl: w.exec.baseUrl, expectedDatasetId: WB_DATASET, timeoutMs: 30000, label: 'l1629-alloc' }).query(sparql); assert.ok(q.ok, `PRECONDITION: the executor answered (${q.reason})`); return q.rows; };
+  const xu = async (sparql, label) => { const r = await fetch(`${w.exec.baseUrl}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/l1629-${label}-${process.pid}-${Date.now()}` }, body: sparql }); assert.equal(r.status, 200, `PRECONDITION: ${label} (${await r.text()})`); };
+  const maxSeq = async () => Math.max(0, ...(await xq(`SELECT ?n WHERE { { ?s ?p ?n } UNION { GRAPH ?g { ?s ?p ?n } } FILTER(STRENDS(STR(?p), "/postSeq") || STRENDS(STR(?p), "#postSeq")) }`)).map((r) => Number(r.n.value)).filter(Number.isSafeInteger));
+  const epoch = (/"postSeqEpoch"\s*:\s*"([^"]+)"/.exec(kept.toString('utf8')) || [])[1] || 'e-l1629';
+  const allocatorTriples = (next) => `<urn:ex:postseq/allocator> a <urn:ex:postseq/Allocator> ; <urn:ex:postseq/postSeqEpoch> ${JSON.stringify(epoch)} ; <urn:ex:postseq/nextPostSeq> "${next}"^^<http://www.w3.org/2001/XMLSchema#integer> ; <urn:ex:postseq/version> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .`;
+  const allocatorNext = async () => (await xq(`SELECT ?n WHERE { GRAPH <${BKG}> { <urn:ex:postseq/allocator> <urn:ex:postseq/nextPostSeq> ?n } }`)).map((r) => Number(r.n.value));
+  const removeAllocator = () => xu(`DELETE WHERE { GRAPH <${BKG}> { <urn:ex:postseq/allocator> ?p ?o } }`, 'allocator-removed');
+  const seedAllocator = async (next) => { await xu(`INSERT DATA { GRAPH <${BKG}> { ${allocatorTriples(next)} } }`, 'allocator-seeded'); assert.deepEqual(await allocatorNext(), [next], 'PRECONDITION: read-back: exactly one allocator, at the seeded next'); };
+  if (allocator) {
+    assert.deepEqual(await allocatorNext(), [], 'PRECONDITION: the fixture holds no allocator before the test seeds one');
+    await seedAllocator((await maxSeq()) + 1);
+  }
   const barrierDir = fs.mkdtempSync(path.join(os.tmpdir(), 'l1629-barrier-'));
   // a notify sink: every dispatch REST makes lands here, so a row can count them (the #1574 H5 pattern)
   const sink = { events: [] };
@@ -179,7 +194,7 @@ async function world(mode, body) {
     return { reached, inflight, returned: () => returned, release };
   };
   try {
-    await body({ w, start, call, kill, restart, stopCurrent, publishOnce, claimPosts, claimRecords, holdAt, incarnations, barrierDir, sink });
+    await body({ w, start, call, kill, restart, stopCurrent, publishOnce, claimPosts, claimRecords, holdAt, incarnations, barrierDir, sink, allocatorNext, removeAllocator, seedAllocator, maxSeq, gclient });
   } finally {
     try { fs.chmodSync(w.boardFile, 0o644); } catch { /* absent */ }
     for (const inc of incarnations) { await inc.r.stop().catch(() => {}); fs.rmSync(inc.priv, { recursive: true, force: true }); }
@@ -251,15 +266,75 @@ test('#1629 L0 CONTROL (mode on, file present): killed at after-document with th
   await crashAfterOriginThenRecover('on', 'L0');
 });
 
-test('#1629 L1 RESERVATION (mode off, file unreadable): two new posts take postSeq 3 then 4, no board-file attempt in any incarnation', TB, async () => {
+test('#1629 L1a ONE ALLOCATOR (mode off, file unreadable): an ordinary post takes the allocator\'s OLD next, and next becomes old next + 1', TB, async () => {
+  // 45075: the old L1 (postSeq 3 then 4) could not tell one counter from two; a mark counter gives 3 and 4 as well. This row reads the
+  // allocator itself before and after.
   await world('off', async (s) => {
     await s.start();
-    const a = await s.call('POST', '/api/conversations', { body: 'an L1 post', author: 'ada' });
-    const b = await s.call('POST', '/api/conversations', { body: 'a second L1 post', author: 'ada' });
-    assert.equal(a.status, 201, a.text.slice(0, 200)); assert.equal(b.status, 201, b.text.slice(0, 200));
-    assert.equal(a.json?.postSeq, 3, `continues from the graph's 1 and 2 (#1710) (${a.json?.postSeq})`);
-    assert.equal(b.json?.postSeq, 4, `and then 4 (${b.json?.postSeq})`);
-    await documentUntouched(s, 'off', 'L1');
+    const [before] = await s.allocatorNext();
+    assert.ok(Number.isSafeInteger(before), `PRECONDITION: exactly one allocator (${before})`);
+    const a = await s.call('POST', '/api/conversations', { body: 'an L1a post', author: 'ada' });
+    assert.equal(a.status, 201, a.text.slice(0, 200));
+    assert.equal(a.json?.postSeq, before, `L1a: the post took the allocator's old next (${a.json?.postSeq} vs ${before})`);
+    assert.deepEqual(await s.allocatorNext(), [before + 1], 'L1a: read-back: next is old next + 1');
+    await documentUntouched(s, 'off', 'L1a');
+  });
+});
+
+test('#1629 L1b ONE ALLOCATOR, INTERLEAVED (mode off): a claim, an ordinary post, a claim take distinct, consecutive numbers from the one allocator', TB, async () => {
+  await world('off', async (s) => {
+    await s.start();
+    const [before] = await s.allocatorNext();
+    assert.equal((await s.call('POST', '/api/cards/uuid-1/claim', { by: 'ada' })).status, 200, 'the first claim');
+    const p = await s.call('POST', '/api/conversations', { body: 'an L1b post', author: 'ada' });
+    assert.equal(p.status, 201, p.text.slice(0, 200));
+    assert.equal((await s.call('POST', '/api/cards/uuid-2/claim', { by: 'ada' })).status, 200, 'the second claim');
+    const claims = (await s.claimRecords()).map((x) => x.postSeq);
+    assert.equal(claims.length, 2, `read-back: two claim reservations (${JSON.stringify(claims)})`);
+    const all = [...claims, p.json?.postSeq].sort((x, y) => x - y);
+    assert.equal(new Set(all).size, 3, `L1b: three DISTINCT numbers (${JSON.stringify(all)})`);
+    assert.deepEqual(all, [before, before + 1, before + 2], `L1b: consecutive from the allocator's old next ${before} (${JSON.stringify(all)})`);
+    assert.deepEqual(await s.allocatorNext(), [before + 3], 'L1b: read-back: next advanced by exactly three');
+    await documentUntouched(s, 'off', 'L1b');
+  });
+});
+
+test('#1629 A0 BOOT CONTROL (mode off): with NO allocator in the store, REST refuses to start and names the allocator', TB, async () => {
+  await world('off', async (s) => {
+    let started = null, err = null;
+    try { started = await s.start(); } catch (e) { err = e; }
+    assert.equal(started, null, 'REST must not start without an allocator in executor-owned mode');
+    assert.match(String(err?.message), /allocator/i, `and its refusal names the allocator (${String(err?.message).slice(-300)})`);
+  }, { allocator: false });
+});
+
+test('#1629 RS REFUSED THEN FRESH (mode off): a claim refused without the card moving (allocator gone mid-run) leaves a refused origin; once restored, a fresh claim commits under a NEW mutationId; both are discoverable for the card', TB, async () => {
+  // G2 (45075): the nonce is minted per new staged origin, so a definitive refusal does not wedge the card's next attempt; the refused
+  // preparation stays as diagnostic evidence. The outcomes are found by enumerating Prepared records for (route claim, subject card).
+  await world('off', async (s) => {
+    await s.start();
+    const [next] = await s.allocatorNext();
+    await s.removeAllocator();
+    const refused = await s.call('POST', '/api/cards/uuid-1/claim', { by: 'ada' });
+    assert.notEqual(refused.status, 200, `the claim is refused while the allocator is gone (${refused.status} ${refused.text.slice(0, 200)})`);
+    assert.ok(!(await s.call('GET', '/api/cards/uuid-1')).json?.claimedBy, 'read-back: the card was not claimed');
+    await s.seedAllocator(next);
+    const ok = await s.call('POST', '/api/cards/uuid-1/claim', { by: 'ada' });
+    assert.equal(ok.status, 200, `a fresh claim succeeds once the allocator is back (${ok.text.slice(0, 200)})`);
+    assert.equal((await s.call('GET', '/api/cards/uuid-1')).json?.claimedBy, 'ada', 'read-back: the card is claimed');
+    const e = await enumerateOriginRecords(s.gclient);
+    assert.equal(e.ok, true);
+    const mids = [...new Set(e.records.filter((r) => r.type === 'Prepared' && r.mutationId).map((r) => r.mutationId))];
+    const mine = [];
+    for (const mid of mids) {
+      const p = await readPreparedOrigin(s.gclient, mid);
+      const d = p.ok && p.prepared ? JSON.parse(p.prepared.descriptorJson) : null;
+      if (d && d.route === 'claim' && d.subject === 'uuid-1') mine.push({ mid, outcome: (await readOriginOutcome(s.gclient, mid)).outcome });
+    }
+    assert.equal(mine.length, 2, `RS: two preparations for (claim, uuid-1) (${JSON.stringify(mine)})`);
+    assert.notEqual(mine[0].mid, mine[1].mid, 'RS: under two DIFFERENT mutationIds (a fresh nonce per attempt)');
+    assert.deepEqual(mine.map((x) => x.outcome).sort(), ['committed', 'refused'], `RS: one refused, one committed (${JSON.stringify(mine)})`);
+    await documentUntouched(s, 'off', 'RS');
   });
 });
 
