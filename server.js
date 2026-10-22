@@ -11315,7 +11315,7 @@ async function xoPublish(obligationId, { inline = false } = {}) {
   if (r.outcome === 'PRECONDITION_FAILED' || r.outcome === 'REJECTED') {
     const t = await c.query(`SELECT ?t WHERE { <https://scrumboard.local/entity/${intention.post.id}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> ?t }`);
     if (t.ok && t.rows.some((x) => x.t.value === 'https://scrumboard.local/ns#RedactedPost')) {
-      const b = await settle('block', { reason: 'tombstoned' });
+      const b = await settle('block', { reason: 'tombstoned', origin: o.proof });
       return b.outcome === 'APPLIED' ? { status: 'blocked', reason: 'POST_REDACTED' } : { status: 'pending', reason: `settle-${b.outcome}` };
     }
     return xoIntegrity(obligationId, `the reserved post could not be written (${r.outcome}${r.reason ? `: ${r.reason}` : ''})`);
@@ -11338,7 +11338,7 @@ async function xoPublish(obligationId, { inline = false } = {}) {
   if (!proofOk) return xoIntegrity(obligationId, 'the post op\'s receipt is not this publication\'s (its outcome, digest or actor is not the exact expected term)');
   const types = ty.rows.map((x) => x.t.value);
   if (types.includes('https://scrumboard.local/ns#RedactedPost')) {
-    const b = await settle('block', { reason: 'tombstoned' });
+    const b = await settle('block', { reason: 'tombstoned', origin: o.proof });
     return b.outcome === 'APPLIED' ? { status: 'blocked', reason: 'POST_REDACTED' } : { status: 'pending', reason: `settle-${b.outcome}` };
   }
   if (!types.includes('https://schema.org/Comment')) return xoIntegrity(obligationId, 'the reserved post is not a live post');

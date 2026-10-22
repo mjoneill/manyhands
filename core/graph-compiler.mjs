@@ -2509,7 +2509,10 @@ function compilePostseqReserve(c, digest) {
 //            notify, as in G-R), postSeq and createdAt (= publicationAt); the post op's receipt APPLIED with exactly that
 //            digest and the author's person as actor; the post a live Comment. Dispatch comes before settlement (r3 C2):
 //            this record is written only after the notify policy was dispatched.
-//   block    reason in a closed set; 'tombstoned' is proved by the derived post IRI being a RedactedPost.
+//   block    reason in a closed set; 'tombstoned' is proved by the derived post IRI being a RedactedPost. No publication
+//            candidate or post receipt is asked for.
+// Both carry `origin` {descriptor, plan, occurredAt} (R1, and R1b for block): either terminal status is written only for an
+// obligation bound to its committed origin, verified in the update against the stored Prepared, Origin and commit receipt.
 // Every stored proof field is read single-valued and well-formed; malformed or unavailable proof never settles.
 export const SETTLE_KIND = 'obligation.settle';
 export const SETTLE_TRANSITIONS = Object.freeze(['publish', 'block']);
@@ -2526,14 +2529,31 @@ function canonicalizeSettle(i) {
   if (!SETTLE_TRANSITIONS.includes(i.transition)) fail(`transition must be one of ${SETTLE_TRANSITIONS.join(', ')}`);
   const opId = checkIri(i.opId, 'opId');
   if (opId !== settleOpId(i.obligationId, i.transition)) fail(`opId must be ${settleOpId(i.obligationId, i.transition)}`);
-  let reason = null, publication = null, originProof = null;
+  // R1b (bbf3344 re-review) — BOTH terminal transitions carry the origin candidates: a terminal status is written only
+  // for an obligation bound to its committed origin, so block proves that binding exactly as publish does
+  if (i.origin === undefined) fail(`a ${i.transition} carries its origin candidates: {descriptor, plan, occurredAt}`);
+  const og = obj(i.origin, ['descriptor', 'plan', 'occurredAt'], 'origin');
+  if (typeof og.occurredAt !== 'string' || !og.occurredAt) fail('origin.occurredAt is the Prepared record\'s stored lexical time');
+  const { descriptor } = canonOriginDescriptor(og.descriptor);
+  if (descriptor.mutationId !== mutationId) fail('origin.descriptor names another mutation than obligationId');
+  // the plan arrives in either of its two forms — the intention form origin.prepare took, or the STORED form a reader
+  // parsed from planJson — and both reduce to the one canonical plan; the update then compares its bytes to planJson,
+  // so a plan that is not the stored one refuses whichever way it came
+  let plan;
+  try { plan = canonOriginPlan(og.plan); } catch (e) { if (!(e instanceof ValidationError)) throw e; plan = admitStoredOriginPlan(descriptor, og.plan); }
+  bindOriginPlan(descriptor, plan);
+  const index = descriptor.slots.findIndex((x) => x.slot === slot);
+  if (index < 0) fail('origin.descriptor has no slot for obligationId');
+  const originProof = { descriptorJson: JSON.stringify(descriptor), planJson: JSON.stringify(plan), occurredAt: og.occurredAt,
+    descriptorDigest: originDescriptorDigest(descriptor), planDigest: originPlanDigest(plan),
+    commitOp: originCommitOp(mutationId), commitDigest: originCommitDigest(descriptor, plan, og.occurredAt), index, consistent: true };
+  let reason = null, publication = null;
   if (i.transition === 'block') {
     if (!SETTLE_BLOCK_REASONS.includes(i.reason)) fail(`a block reason must be one of ${SETTLE_BLOCK_REASONS.join(', ')}`);
-    if (i.publication !== undefined || i.origin !== undefined) fail('a block carries no publication or origin');
+    if (i.publication !== undefined) fail('a block carries no publication');
     reason = i.reason;
   } else {
     if (i.reason !== undefined) fail('a publish carries no reason');
-    if (i.origin === undefined) fail('a publish carries its origin candidates: {descriptor, plan, occurredAt}');
     const p = obj(i.publication, ['payload', 'postSeq', 'publicationAt'], 'publication');
     const pl = obj(p.payload, ['author', 'body', 'originActor', 'occurredAt', 'mentions', 'notify'], 'publication.payload');
     if (pl.notify !== undefined && typeof pl.notify !== 'boolean') fail('publication.payload.notify, when present, is a boolean');
@@ -2543,27 +2563,10 @@ function canonicalizeSettle(i) {
     const post = canonicalizeRecord(intent);
     publication = { postSeq: p.postSeq, publicationAt: p.publicationAt, author: pl.author, body: pl.body, originActor: pl.originActor,
       occurredAt: pl.occurredAt, mentions: [...pl.mentions], notify: pl.notify ?? null, postOp: post.opId, postActor: post.actor, postDigest: recordDigest(post) };
-    // R1 (commons 45097) — the frozen PREPARATION as candidates, canonicalized by the same rules origin.prepare used, so the
-    // update can compare stored bytes and the commit digest RECONSTRUCTED from them (as readCommittedOrigin does)
-    const og = obj(i.origin, ['descriptor', 'plan', 'occurredAt'], 'origin');
-    if (typeof og.occurredAt !== 'string' || !og.occurredAt) fail('origin.occurredAt is the Prepared record\'s stored lexical time');
-    const { descriptor } = canonOriginDescriptor(og.descriptor);
-    if (descriptor.mutationId !== mutationId) fail('origin.descriptor names another mutation than obligationId');
-    // the plan arrives in either of its two forms — the intention form origin.prepare took, or the STORED form a reader
-    // parsed from planJson — and both reduce to the one canonical plan; the update then compares its bytes to planJson,
-    // so a plan that is not the stored one refuses whichever way it came
-    let plan;
-    try { plan = canonOriginPlan(og.plan); } catch (e) { if (!(e instanceof ValidationError)) throw e; plan = admitStoredOriginPlan(descriptor, og.plan); }
-    bindOriginPlan(descriptor, plan);
-    const index = descriptor.slots.findIndex((x) => x.slot === slot);
-    if (index < 0) fail('origin.descriptor has no slot for obligationId');
     // the payload must be this slot's frozen content: a mismatch is decided in the update (PRECONDITION_FAILED), not here
     const fs = descriptor.slots[index];
-    const consistent = pl.author === fs.author && pl.body === fs.body && pl.originActor === descriptor.originActor && pl.occurredAt === og.occurredAt
+    originProof.consistent = pl.author === fs.author && pl.body === fs.body && pl.originActor === descriptor.originActor && pl.occurredAt === og.occurredAt
       && JSON.stringify([...pl.mentions].sort()) === JSON.stringify(fs.mentions) && (pl.notify === undefined || pl.notify === fs.notify);
-    originProof = { descriptorJson: JSON.stringify(descriptor), planJson: JSON.stringify(plan), occurredAt: og.occurredAt,
-      descriptorDigest: originDescriptorDigest(descriptor), planDigest: originPlanDigest(plan),
-      commitOp: originCommitOp(mutationId), commitDigest: originCommitDigest(descriptor, plan, og.occurredAt), index, consistent };
   }
   return { kind: i.kind, opId, actor, evidence: [], targets: [], newAssertion: null, authority: null, grant: null, rule: null,
     settle: { obligationId: i.obligationId, mutationId, slot, transition: i.transition, reason, publication, origin: originProof } };
@@ -2599,6 +2602,21 @@ function compileSettle(c, digest) {
     [T.slot, '?xs_slot', strLit(S.slot)], [T.reservation, '?xs_res', RES], [T.status, '?xs_st', strLit('pending')]]) {
     pre.push(...single(OB, p, x), `    FILTER(sameTerm(${x}, ${want}))`);
   }
+  // R1 + R1b — BOTH transitions are bound to the COMMITTED origin: the Prepared record holds exactly the candidate
+  // preparation, the Origin holds its digests and names the commit op, Prepared.committedBy and the reservation's
+  // reserveOpId are that op, and the op's receipt is APPLIED with the commit digest RECONSTRUCTED from the frozen preparation
+  const G = S.origin, PREP = T.preparedSubject(S.mutationId), ORIG = T.originSubject(S.mutationId), COP = ref(G.commitOp);
+  pre.push(`    GRAPH ${BK} { ${PREP} a ${T.Prepared} . ${ORIG} a ${T.Origin} . }`);
+  for (const [subj, p, x, want] of [
+    [PREP, T.descriptorJson, '?xo_dj', strLit(G.descriptorJson)], [PREP, T.planJson, '?xo_pj', strLit(G.planJson)],
+    [PREP, T.descriptorDigest, '?xo_dd', strLit(G.descriptorDigest)], [PREP, T.planDigest, '?xo_pd', strLit(G.planDigest)],
+    [PREP, T.committedBy, '?xo_cb', COP],
+    [ORIG, T.mutationId, '?xo_om', strLit(S.mutationId)], [ORIG, T.descriptorDigest, '?xo_odd', strLit(G.descriptorDigest)],
+    [ORIG, T.planDigest, '?xo_opd', strLit(G.planDigest)], [ORIG, T.commitOp, '?xo_oc', COP],
+    [RES, PT.reserveOpId, '?xo_ro', COP], [RES, PT.index, '?xo_ri', psqSafeInt(G.index)],
+    [COP, EX.outcome, '?xo_co', EX.APPLIED], [COP, EX.digest, '?xo_cd', strLit(G.commitDigest)],
+  ]) pre.push(...single(subj, p, x), `    FILTER(sameTerm(${x}, ${want}))`);
+  pre.push(...single(PREP, T.occurredAt, '?xo_oa'), `    FILTER(isLiteral(?xo_oa) && DATATYPE(?xo_oa) = <${XSD_PSQ}dateTime> && STR(?xo_oa) = ${strLit(G.occurredAt)})`);
   if (S.transition === 'block') {
     pre.push(`    ${POST} ${ref(TM.type)} ${ref(TM.RedactedPost)} .`);   // reason 'tombstoned': the deterministic post is a tombstone
   } else {
@@ -2617,22 +2635,7 @@ function compileSettle(c, digest) {
     pre.push(...single(POP, EX.digest, '?xs_dg'), `    FILTER(sameTerm(?xs_dg, ${strLit(P.postDigest)}))`);   // R2: the exact plain-string term
     pre.push(...single(POP, EX.actor, '?xs_ac'), `    FILTER(sameTerm(?xs_ac, ${ref(P.postActor)}))`);
     pre.push(`    ${POST} ${ref(TM.type)} ${ref(TM.Comment)} .`, `    FILTER NOT EXISTS { ${POST} ${ref(TM.type)} ${ref(TM.RedactedPost)} }`);
-    // R1 — bound to the COMMITTED origin: the Prepared record holds exactly the candidate preparation, the Origin holds its
-    // digests and names the commit op, Prepared.committedBy and the reservation's reserveOpId are that op, and the op's
-    // receipt is APPLIED with the commit digest RECONSTRUCTED from the frozen preparation
-    const G = S.origin, PREP = T.preparedSubject(S.mutationId), ORIG = T.originSubject(S.mutationId), COP = ref(G.commitOp);
-    if (!G.consistent) pre.push('    FILTER(false)');   // the payload is not this slot's frozen content
-    pre.push(`    GRAPH ${BK} { ${PREP} a ${T.Prepared} . ${ORIG} a ${T.Origin} . }`);
-    for (const [subj, p, x, want] of [
-      [PREP, T.descriptorJson, '?xo_dj', strLit(G.descriptorJson)], [PREP, T.planJson, '?xo_pj', strLit(G.planJson)],
-      [PREP, T.descriptorDigest, '?xo_dd', strLit(G.descriptorDigest)], [PREP, T.planDigest, '?xo_pd', strLit(G.planDigest)],
-      [PREP, T.committedBy, '?xo_cb', COP],
-      [ORIG, T.mutationId, '?xo_om', strLit(S.mutationId)], [ORIG, T.descriptorDigest, '?xo_odd', strLit(G.descriptorDigest)],
-      [ORIG, T.planDigest, '?xo_opd', strLit(G.planDigest)], [ORIG, T.commitOp, '?xo_oc', COP],
-      [RES, PT.reserveOpId, '?xo_ro', COP], [RES, PT.index, '?xo_ri', psqSafeInt(G.index)],
-      [COP, EX.outcome, '?xo_co', EX.APPLIED], [COP, EX.digest, '?xo_cd', strLit(G.commitDigest)],
-    ]) pre.push(...single(subj, p, x), `    FILTER(sameTerm(${x}, ${want}))`);
-    pre.push(...single(PREP, T.occurredAt, '?xo_oa'), `    FILTER(isLiteral(?xo_oa) && DATATYPE(?xo_oa) = <${XSD_PSQ}dateTime> && STR(?xo_oa) = ${strLit(G.occurredAt)})`);
+    if (!S.origin.consistent) pre.push('    FILTER(false)');   // the payload is not this slot's frozen content
   }
   const next = S.transition === 'publish' ? 'published' : 'blocked';
   bDel.push(`  ${v(OB)} ${T.status} ${v(strLit('pending'))} .`);
