@@ -30,7 +30,7 @@
 import { createHash } from 'node:crypto';
 import { EX, NS, RECEIPT_PREDICATES, MARKER_SUBJECT, MARKER_PREDICATES, LG, LG_NS, lgMetaPredicate, BK, BOOKKEEPING_PREDICATES, isBookkeeping, POSTSEQ_TERMS, ORIGIN_TERMS } from './graph-vocab.mjs';
 import { reserveOpId as _reserveOpId, canonReservationBatch as _canonReservationBatch, reserveDigestBody as _reserveDigestBody, canonAnnouncementDraft } from './postseq-reserve.mjs';
-import { announcePostId } from './announce-outbox.mjs';
+import { announcePostId, opIdFor as announceOpIdFor } from './announce-outbox.mjs';
 
 export const DIGEST_V = 1;
 /** The literal canonicalization policy (A5). Bound into every digest; bump it if a canonical form changes. */
@@ -964,6 +964,7 @@ function planRecord(c) {
     add(P.iri, TM.originActor, I(P.originActor));
     for (const m of P.mentions) add(P.iri, TM.mentionsName, L(m));
     add(P.iri, TM.recordedBy, ref(c.opId));
+    pre.push(...reservedPostGuard(P));   // #1629 s3 G-R — a reservation behind this postId binds the post, in this update
   } else if (c.kind === 'post.import' || c.kind === 'post.write') {
     const P = R.post; target = null;   // a create: the post IRI must be fresh
     // #1626 — an IMPORT copies a post that already existed in the document, so other graph nodes may reference it already
@@ -1773,6 +1774,14 @@ function originCommitClauses(c, digest, { OP, v, pre, dBinds, bDel, bIns }) {
   // guard 4 — origin absence: no Origin and no Obligation subject for any slot
   pre.push(`    FILTER NOT EXISTS { ${inEither(`${ORIG} ?xq_op ?xq_oo`)} }`);
   D.slots.forEach((s, k) => pre.push(`    FILTER NOT EXISTS { ${inEither(`${T.obligationSubject(mid, s.slot)} ?xq_bp${k} ?xq_bo${k}`)} }`));
+  // #1629 s3 G-P — nothing may already sit at a slot's derived post IRI or at its deterministic publication op, in either
+  // graph, as subject or object: a post written first at that postId would otherwise be reserved beside, not refused.
+  // (Origin clauses only: a standalone postseq.reserve is unchanged.)
+  D.slots.forEach((s, k) => {
+    for (const [x, iri] of [['xg_p', ref(`${ENTITY_IRI}${announcePostId(mid, s.slot)}`)], ['xg_o', ref(announceOpIdFor(mid, s.slot))]]) {
+      pre.push(`    FILTER NOT EXISTS { ${inEither(`${iri} ?${x}a${k} ?${x}b${k}`)} }`, `    FILTER NOT EXISTS { ${inEither(`?${x}c${k} ?${x}d${k} ${iri}`)} }`);
+    }
+  });
   // guards 5 and 6, and the reservations + allocator advance: the slice-1 clauses, unchanged (variables tagged `o`)
   const items = D.slots.map((s) => ({
     mode: 'announcement', mutationId: mid, slot: s.slot, postId: announcePostId(mid, s.slot),
@@ -2331,6 +2340,45 @@ const psqInt = (n) => `"${n}"^^<${XSD_PSQ}integer>`;
 
 const psqSafeInt = (n) => (Number.isSafeInteger(n) ? String(n) : fail(`unsafe integer: ${n}`));
 const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
+
+/**
+ * #1629 s3 G-R — a post.create whose postId names a slice-1 reservation must be the post that reservation froze. Decided
+ * INSIDE the post's own update (the pure compiler cannot know whether the executor holds a reservation): when nothing
+ * reserves this postId the clause is vacuous; when ANYTHING does — any triple at the canonical reservation IRI, in either
+ * graph, or any subject claiming this postId in the bookkeeping graph — the reservation must be well-formed and match, or the update refuses.
+ * Well-formed and matching: typed Reservation, mode "announcement", exactly one postId (this one), exactly one integer
+ * postSeq equal to the post's, exactly one identityJson naming this mutation and slot, exactly one draftJson equal to this
+ * post's canonical announcement draft, nothing at the reservation IRI in the default graph, and no other subject claiming
+ * the postId. A post.create carries no `notify`, so the draft is matched under both notify values: every CONTENT field is
+ * bound, and notify (which governs dispatch, not the post) is not on the post to compare.
+ */
+function reservedPostGuard(P) {
+  const id = P.iri.slice(ENTITY_IRI.length);
+  const seatOf = (iri) => iri.slice(PERSON_IRI.length);
+  const R = POSTSEQ_TERMS.reservation(id), PT = POSTSEQ_TERMS;
+  const pid = strLit(id);
+  const draft = (notify) => strLit(JSON.stringify(canonAnnouncementDraft({ body: P.body, author: seatOf(P.author), originActor: seatOf(P.originActor), occurredAt: P.occurredAt, mentions: P.mentions, notify })));
+  const ident = strLit(JSON.stringify({ mutationId: P.mutationId, slot: P.slot }));
+  const claims = (s, o) => `${s} ${PT.postId} ${o} . FILTER(isLiteral(${o}) && STR(${o}) = ${pid})`;
+  // a CLAIM is read in the bookkeeping graph only: the static check refuses any read of a bookkeeping predicate (postId)
+  // outside it, and no compiler path writes one there. The canonical IRI is checked in BOTH graphs (a variable predicate).
+  const detected = `${inEither(`${R} ?xr_p ?xr_o`)} UNION { GRAPH ${BK} { ${claims('?xr_s', '?xr_v')} } }`;
+  const fields = [['Reservation type', ref(CW.rdfType), '?xr_t'], ['mode', PT.mode, '?xr_m'], ['postId', PT.postId, '?xr_pi'],
+    ['postSeq', PT.postSeq, '?xr_ps'], ['identityJson', PT.identityJson, '?xr_ij'], ['draftJson', PT.draftJson, '?xr_dj']];
+  const wf = [
+    `GRAPH ${BK} { ${fields.map(([, p, x]) => `${R} ${p} ${x} .`).join(' ')} }`,
+    `FILTER(sameTerm(?xr_t, ${PT.Reservation}))`,
+    `FILTER(sameTerm(?xr_m, ${strLit('announcement')}))`,
+    `FILTER(sameTerm(?xr_pi, ${pid}))`,
+    `FILTER(isLiteral(?xr_ps) && DATATYPE(?xr_ps) = <${XSD_PSQ}integer> && ?xr_ps = ${psqSafeInt(P.postSeq)})`,
+    `FILTER(sameTerm(?xr_ij, ${ident}))`,
+    `FILTER(sameTerm(?xr_dj, ${draft(true)}) || sameTerm(?xr_dj, ${draft(false)}))`,
+    ...fields.map(([, p, x], k) => `FILTER NOT EXISTS { GRAPH ${BK} { ${R} ${p} ?xr_d${k} FILTER(!sameTerm(?xr_d${k}, ${x})) } }`),
+    `FILTER NOT EXISTS { ${R} ?xr_dp ?xr_do }`,
+    `FILTER NOT EXISTS { GRAPH ${BK} { ${claims('?xr_s2', '?xr_v2')} FILTER(!sameTerm(?xr_s2, ${R})) } }`,
+  ];
+  return [`    FILTER(NOT EXISTS { ${detected} } || EXISTS { ${wf.join(' ')} })`];
+}
 
 function canonicalizePostseqReserve(i) {
   for (const k of Object.keys(i)) if (!['kind', 'opId', 'actor', 'reservations'].includes(k)) fail(`unknown field ${k} for kind ${i.kind}`);
