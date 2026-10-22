@@ -31,6 +31,10 @@
  *       pending; then the true values settle (CONTROL in the same world). Settle publish carries CANDIDATE publication values the executor
  *       verifies against the bound obligation and reservation (amendment 45062/45064); S3 tries both candidates (true and foreign).
  *   S9  a malformed stored proof (the reservation's draft removed) never settles, even with the true values
+ *   S11 a well-formed forged publication whose postSeq or publicationAt differs from the reservation, sent by a caller whose values match
+ *       its receipt digest, is refused by the reservation alone
+ *   S10 the proof is the one BOUND to the origin: A's obligation re-linked to B's reservation (B's post real, receipt APPLIED) is refused with B's values
+ *       and with A's (45066: no caller identity field exists to lie about, so the binding is tested by a stored-binding tamper)
  *
  * THE RESERVATION BINDS THE POST (r5 G-R; scoped to a postId that names a slice-1 reservation):
  *   GR1 POSITIVE (today and after): the reservation's own draft at its own postSeq is APPLIED and READS BACK with the frozen body
@@ -467,6 +471,55 @@ test('#1629 s3 (S9) a MALFORMED stored proof (the reservation\'s draft removed) 
     assert.equal(r.outcome, 'PRECONDITION_FAILED', `S9: refused (${JSON.stringify(r).slice(0, 300)})`);
     assert.deepEqual(await obligationStatusDirect(client, j.obligations[0].obligationId), ['pending'], 'S9: read-back: still pending');
   }, [c]);
+});
+
+test('#1629 s3 (S10) settle uses the proof BOUND to its own origin: with A\'s obligation re-linked to B\'s reservation (B\'s post real, its receipt APPLIED), settling A is refused with either candidate', TP, async () => {
+  // 45066: identities are derived from the committed origin, so there is no caller field to lie about; what must be shown is that the
+  // implementation reads THIS obligation's own derived postId/op, not whatever record a link points at. The tamper re-points A's stored
+  // `reservation` link at B's reservation, whose post and APPLIED receipt are real and well-formed. Each candidate on its own origin pair.
+  const CANDIDATES = [['B\'s values (match the linked proof)', 'b'], ['A\'s values (match A\'s own draft)', 'a']];
+  const cards = CANDIDATES.flatMap((_, k) => [card(`s10a-${k}`, 2 * k + 1), card(`s10b-${k}`, 2 * k + 2)]);
+  await world(async ({ client, exec }) => {
+    for (const [k, [label, which]] of CANDIDATES.entries()) {
+      const oa = claimOrigin(cards[2 * k], `k-s10a-${k}`), ob = claimOrigin(cards[2 * k + 1], `k-s10b-${k}`);
+      const ja = await committed(client, oa), jb = await committed(client, ob);
+      assert.equal((await client.update(postFor(ob, jb))).outcome, 'APPLIED', `PRECONDITION (${label}): B's real post exists`);
+      // A's real post too: with A's own values every proof field is A's and well-formed, so only the stored link can refuse it
+      assert.equal((await client.update(postFor(oa, ja))).outcome, 'APPLIED', `PRECONDITION (${label}): A's real post exists`);
+      const resB = `urn:ex:postseq/reservation/${announcePostId(ob.mid, 'claim')}`;
+      const obA = `urn:ex:origin/obligation/${oa.mid}/claim`;
+      const t = await fetch(`${exec().baseUrl}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/og1629o-s10-${process.pid}-${seedN++}` }, body: `DELETE { GRAPH <${BK}> { <${obA}> <urn:ex:origin/reservation> ?r } } INSERT { GRAPH <${BK}> { <${obA}> <urn:ex:origin/reservation> <${resB}> } } WHERE { GRAPH <${BK}> { <${obA}> <urn:ex:origin/reservation> ?r } }` });
+      assert.equal(t.status, 200, `PRECONDITION (${label}): the link was re-pointed (${await t.text()})`);
+      const link = (await rows(client, `SELECT ?r WHERE { GRAPH <${BK}> { <${obA}> <urn:ex:origin/reservation> ?r } }`)).map((x) => x.r.value);
+      assert.deepEqual(link, [resB], `PRECONDITION (${label}): read-back: A's obligation now links B's reservation only`);
+      const r = await client.update(settleIntention(ja.obligations[0].obligationId, 'publish', { publication: publicationOf(which === 'b' ? jb : ja) }));
+      assert.equal(r.outcome, 'PRECONDITION_FAILED', `S10 (${label}): refused (${JSON.stringify(r).slice(0, 300)})`);
+      assert.deepEqual(await obligationStatusDirect(client, ja.obligations[0].obligationId), ['pending'], `S10 (${label}): read-back: A stays pending`);
+      assert.deepEqual(await obligationStatusDirect(client, jb.obligations[0].obligationId), ['pending'], `S10 (${label}): read-back: B is untouched`);
+    }
+  }, cards);
+});
+
+test('#1629 s3 (S11) a well-formed publication whose postSeq or publicationAt is NOT the reservation\'s, with the caller sending those same values (so the receipt digest MATCHES): refused by the reservation, still pending', TP, async () => {
+  // the reservation's postSeq and createdAt checks are otherwise shadowed by the receipt digest (measured 12:42Z: those two mutants
+  // survived S8, whose lies change the digest). Here the forged receipt is consistent with the caller's lie, so only the reservation refuses.
+  const CASES = [['postSeq', (res) => ({ postSeq: res.postSeq + 7 })], ['publicationAt', (res) => ({ publicationAt: '2026-10-22T01:02:03.000Z' })]];
+  const cards = CASES.map((_, k) => card(`s11-${k}`, k + 1));
+  await world(async ({ client, exec }) => {
+    for (const [k, [label, lie]] of CASES.entries()) {
+      const o = claimOrigin(cards[k], `k-s11-${k}`);
+      const j = await committed(client, o);
+      const res = j.reservations[0], d = res.draft;
+      const pub = publicationOf(j, lie(res));
+      const forged = postCreateIntention({ mutationId: o.mid, slot: 'claim', postSeq: pub.postSeq, publicationAt: pub.publicationAt, payload: { author: d.author, body: d.body, originActor: d.originActor, occurredAt: d.occurredAt, mentions: d.mentions } });
+      await forgeWellFormed(exec().baseUrl, forged);
+      const rc = Object.fromEntries((await rows(client, `SELECT ?p ?o WHERE { GRAPH <${BK}> { <${forged.opId}> ?p ?o } }`)).map((x) => [x.p.value, x.o.value]));
+      assert.equal(rc['urn:ex:digest'], digestOf(canonicalize(forged)), `${label}: injected read-back: the receipt's digest is the forged publication's, which the caller's values rebuild`);
+      const r = await client.update(settleIntention(j.obligations[0].obligationId, 'publish', { publication: pub }));
+      assert.equal(r.outcome, 'PRECONDITION_FAILED', `S11 (${label}): refused by the reservation (${JSON.stringify(r).slice(0, 300)})`);
+      assert.deepEqual(await obligationStatusDirect(client, j.obligations[0].obligationId), ['pending'], `S11 (${label}): read-back: still pending`);
+    }
+  }, cards);
 });
 
 // ── G-R: the reservation binds the post (r5, from the 45028/45030 finding; non-builder ruling 45032) ──

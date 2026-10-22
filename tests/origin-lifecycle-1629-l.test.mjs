@@ -56,6 +56,7 @@ import { wholeBoardWorld, WB_DATASET } from './helpers/whole-board-1645.mjs';
 import { startRestServer } from './helpers/harness.mjs';
 import { createGraphClient } from '../core/graph-client.mjs';
 import { createCardsUnit } from '../core/cards-unit.mjs';
+import { enumerateOriginRecords, readCommittedOrigin } from '../core/origin-commit.mjs';
 import { announcePostId, opIdFor, postCreateIntention } from '../core/announce-outbox.mjs';
 import { canonicalize, digestOf } from '../core/graph-compiler.mjs';
 
@@ -131,8 +132,29 @@ async function world(mode, body) {
   });
   /** The claim's posts, read from REST (author `board` or any non-ada system author). */
   const claimPosts = async () => { const l = await call('GET', '/api/conversations?limit=200'); const xs = Array.isArray(l.json) ? l.json : (l.json?.conversations || []); return xs.filter((c) => CLAIM_RX.test(String(c.body)) && c.author !== 'ada'); };
-  /** Directly from the executor (REST may be frozen): this claim's pending announcement records. */
+  const gclient = createGraphClient({ baseUrl: w.exec.baseUrl, expectedDatasetId: WB_DATASET, timeoutMs: 30000, label: 'l1629-origins' });
+  /** Mode OFF: the claim's durable record is slice 2's Origin + Obligation + reservation, committed in the claim's own card.write
+   *  (r2 §2 step 4); no K4 envelope is written there (45069). Read each committed Origin's join and keep its `claim` obligation. */
+  const originClaimRecords = async () => {
+    const e = await enumerateOriginRecords(gclient);
+    assert.equal(e.ok, true, `the origin records are readable (${JSON.stringify(e).slice(0, 200)})`);
+    const mids = [...new Set(e.records.filter((r) => r.type === 'Origin' && r.mutationId).map((r) => r.mutationId))];
+    const out = [];
+    for (const mid of mids) {
+      const got = await readCommittedOrigin(gclient, mid);
+      if (!got.ok || !got.committed) continue;
+      for (const [i, ob] of got.committed.obligations.entries()) {
+        if (ob.slot !== 'claim') continue;
+        const res = got.committed.reservations[i];
+        out.push({ mutationId: mid, slot: ob.slot, opId: opIdFor(mid, ob.slot), obligationId: ob.obligationId, postId: announcePostId(mid, ob.slot), postSeq: res?.postSeq, status: ob.status, mode: ob.mode, payload: res?.draft, publicationAt: res?.createdAt });
+      }
+    }
+    return out;
+  };
+  /** Directly from the executor (REST may be frozen): this claim's durable records. Mode ON (L0, GD0, the D1 control): K4's
+   *  PendingAnnouncement envelopes, as today's code writes them. Mode OFF: the committed Origin join (45069). */
   const claimRecords = async () => {
+    if (mode === 'off') return originClaimRecords();
     const recs = await exec.pendingAnnouncements();
     const out = [];
     for (const r of recs) {
