@@ -424,7 +424,10 @@ async function refusedNoPost(client, o, j, intention, label) {
   assert.deepEqual(await storedPost(client, intention.post.id), {}, `${label}: NO post exists at the reserved postId (read back)`);
   assert.equal(await postsAtSeq(client, j.reservations[0].postSeq), before.atSeq, `${label}: nothing new carries the reserved postSeq`);
   assert.deepEqual(await allocatorNext(client), before.alloc, `${label}: no sequence was consumed (allocator unchanged)`);
-  assert.equal(await obligationStatus(client, o), 'pending', `${label}: the obligation stays pending`);
+  // read the Obligation's OWN status triple, not through readCommittedOrigin: that read validates the whole join, reservation included,
+  // so the tamper GR6 makes would make it unreadable and 'stays pending' would be tested through a broken join (45059)
+  const st = (await rows(client, `SELECT ?st WHERE { GRAPH <${BK}> { ?ob a <urn:ex:origin/Obligation> ; <urn:ex:origin/obligationId> ${JSON.stringify(j.obligations[0].obligationId)} ; <urn:ex:origin/status> ?st } }`)).map((x) => x.st.value);
+  assert.deepEqual(st, ['pending'], `${label}: read-back: the obligation's own status triple is exactly one 'pending' (${JSON.stringify(st)})`);
 }
 
 test('#1629 s3 (GR1 POSITIVE, today and after) the reservation\'s own draft at its own postSeq is APPLIED and reads back exactly', T, async () => {
