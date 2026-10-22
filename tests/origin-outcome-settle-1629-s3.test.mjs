@@ -596,7 +596,58 @@ test('#1629 s3 (S12) settle is bound to the COMMITTED ORIGIN (review R1, 45097):
       async ({ mid }, label, q) => { const o = await values(q, ORIGIN(mid), '<urn:ex:origin/descriptorDigest>'), pr = await values(q, PREP(mid), '<urn:ex:origin/descriptorDigest>'); assert.deepEqual(o, ['e'.repeat(64)], `PRECONDITION (${label}): read-back`); assert.notDeepEqual(o, pr, `PRECONDITION (${label}): read-back: Origin and Prepared now disagree`); }],
     ['the Origin\'s planDigest not the Prepared\'s', ({ mid }) => repoint(ORIGIN(mid), '<urn:ex:origin/planDigest>', `"${'d'.repeat(64)}"`),
       async ({ mid }, label, q) => { const o = await values(q, ORIGIN(mid), '<urn:ex:origin/planDigest>'), pr = await values(q, PREP(mid), '<urn:ex:origin/planDigest>'); assert.deepEqual(o, ['d'.repeat(64)], `PRECONDITION (${label}): read-back`); assert.notDeepEqual(o, pr, `PRECONDITION (${label}): read-back: Origin and Prepared now disagree`); }],
+    // measured 13:30Z at 3efeedd: each clause below SURVIVED its own mutant because no case tampered that stored field alone (the commit
+    // digest is rebuilt from the TRUE candidate, so a stored-only tamper leaves only that field's own clause to refuse it)
+    ['the Prepared descriptorJson bytes not the candidate\'s', ({ mid }) => `DELETE { GRAPH <${BK}> { ${PREP(mid)} <urn:ex:origin/descriptorJson> ?x } } INSERT { GRAPH <${BK}> { ${PREP(mid)} <urn:ex:origin/descriptorJson> ?n } } WHERE { GRAPH <${BK}> { ${PREP(mid)} <urn:ex:origin/descriptorJson> ?x } BIND(CONCAT(STR(?x), " ") AS ?n) }`,
+      async ({ mid }, label, q) => assert.ok((await values(q, PREP(mid), '<urn:ex:origin/descriptorJson>'))[0].endsWith(' '), `PRECONDITION (${label}): read-back: the stored bytes changed`)],
+    ['the Prepared planJson bytes not the candidate\'s', ({ mid }) => `DELETE { GRAPH <${BK}> { ${PREP(mid)} <urn:ex:origin/planJson> ?x } } INSERT { GRAPH <${BK}> { ${PREP(mid)} <urn:ex:origin/planJson> ?n } } WHERE { GRAPH <${BK}> { ${PREP(mid)} <urn:ex:origin/planJson> ?x } BIND(CONCAT(STR(?x), " ") AS ?n) }`,
+      async ({ mid }, label, q) => assert.ok((await values(q, PREP(mid), '<urn:ex:origin/planJson>'))[0].endsWith(' '), `PRECONDITION (${label}): read-back: the stored bytes changed`)],
+    ['the Prepared descriptorDigest not the recomputed one', ({ mid }) => repoint(PREP(mid), '<urn:ex:origin/descriptorDigest>', `"${'c'.repeat(64)}"`),
+      async ({ mid }, label, q) => assert.deepEqual(await values(q, PREP(mid), '<urn:ex:origin/descriptorDigest>'), ['c'.repeat(64)], `PRECONDITION (${label}): read-back`)],
+    ['the Prepared planDigest not the recomputed one', ({ mid }) => repoint(PREP(mid), '<urn:ex:origin/planDigest>', `"${'b'.repeat(64)}"`),
+      async ({ mid }, label, q) => assert.deepEqual(await values(q, PREP(mid), '<urn:ex:origin/planDigest>'), ['b'.repeat(64)], `PRECONDITION (${label}): read-back`)],
+    ['the Prepared occurredAt not the candidate\'s', ({ mid }) => repoint(PREP(mid), '<urn:ex:origin/occurredAt>', '"2026-01-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>'),
+      async ({ mid }, label, q) => assert.deepEqual(await values(q, PREP(mid), '<urn:ex:origin/occurredAt>'), ['2026-01-01T00:00:00Z'], `PRECONDITION (${label}): read-back`)],
+    ['the Prepared type triple removed', ({ mid }) => `DELETE WHERE { GRAPH <${BK}> { ${PREP(mid)} a ?t } }`,
+      async ({ mid }, label, q) => assert.equal((await q(`SELECT ?t WHERE { GRAPH <${BK}> { ${PREP(mid)} a ?t } }`)).length, 0, `PRECONDITION (${label}): read-back: untyped`)],
+    ['the Origin\'s mutationId not the obligation\'s', ({ mid }) => repoint(ORIGIN(mid), '<urn:ex:origin/mutationId>', '"some-other-mutation"'),
+      async ({ mid }, label, q) => assert.deepEqual(await values(q, ORIGIN(mid), '<urn:ex:origin/mutationId>'), ['some-other-mutation'], `PRECONDITION (${label}): read-back`)],
+    ['the reservation\'s index not the slot\'s', ({ postId }) => repoint(RES(postId), '<urn:ex:postseq/index>', '"5"^^<http://www.w3.org/2001/XMLSchema#integer>'),
+      async ({ postId }, label, q) => assert.deepEqual(await values(q, RES(postId), '<urn:ex:postseq/index>'), ['5'], `PRECONDITION (${label}): read-back`)],
   ], 's12');
+});
+
+test('#1629 s3 (S14) the reservation draft AND its publication rewritten, consistently, to OTHER content: the origin\'s frozen slot still refuses the settle', T, async () => {
+  // the deepest corruption the payload-consistency clause alone stands against (its mutant SURVIVED 13:31Z): the reservation's draft is
+  // rewritten to a foreign body, a well-formed publication of that foreign body is forged beneath the compiler, and the caller sends the
+  // foreign values, so the reservation, the receipt digest and the commit digest (from the TRUE origin candidate) all agree; only the
+  // descriptor's frozen slot content disagrees
+  const c = card('s14', 1), ok = card('s14-ok', 2);
+  await world(async ({ client, exec }) => {
+    const o = claimOrigin(c, 'k-s14');
+    const j = await committed(client, o);
+    const FOREIGN = 'a body the origin never froze';
+    const res = j.reservations[0];
+    const foreignDraft = { ...res.draft, body: FOREIGN };
+    const RES = `<urn:ex:postseq/reservation/${res.postId}>`;
+    const { canonAnnouncementDraft } = await import('../core/postseq-reserve.mjs');
+    const draftLit = JSON.stringify(JSON.stringify(canonAnnouncementDraft(foreignDraft)));
+    await tamper(exec(), `DELETE { GRAPH <${BK}> { ${RES} <urn:ex:postseq/draftJson> ?x } } INSERT { GRAPH <${BK}> { ${RES} <urn:ex:postseq/draftJson> ${draftLit} } } WHERE { GRAPH <${BK}> { ${RES} <urn:ex:postseq/draftJson> ?x } }`, 'S14 draft');
+    const stored = (await rows(client, `SELECT ?d WHERE { GRAPH <${BK}> { ${RES} <urn:ex:postseq/draftJson> ?d } }`)).map((r) => JSON.parse(r.d.value).body);
+    assert.deepEqual(stored, [FOREIGN], `PRECONDITION: read-back: the reservation's draft now says the foreign body (${JSON.stringify(stored)})`);
+    const foreignPost = postFor(o, j, { body: FOREIGN });
+    await forgeWellFormed(exec().baseUrl, foreignPost);
+    const rc = (await rows(client, `SELECT ?d WHERE { GRAPH <${BK}> { <${foreignPost.opId}> <urn:ex:digest> ?d } }`)).map((r) => r.d.value);
+    assert.deepEqual(rc, [digestOf(canonicalize(foreignPost))], 'PRECONDITION: read-back: the receipt carries the foreign publication\'s digest');
+    const r = await client.update(settleIntention(j.obligations[0].obligationId, 'publish', { publication: publicationOf(j, { payload: { body: FOREIGN } }) }));
+    assert.equal(r.outcome, 'PRECONDITION_FAILED', `S14: refused by the origin's frozen slot (${JSON.stringify(r).slice(0, 300)})`);
+    assert.deepEqual(await obligationStatusDirect(client, j.obligations[0].obligationId), ['pending'], 'S14: read-back: still pending');
+    // CONTROL: an untouched origin settles
+    const o2 = claimOrigin(ok, 'k-s14-ok');
+    const j2 = await committed(client, o2);
+    assert.equal((await client.update(postFor(o2, j2))).outcome, 'APPLIED');
+    assert.equal((await client.update(settleIntention(j2.obligations[0].obligationId, 'publish', { publication: publicationOf(j2) }))).outcome, 'APPLIED', 'S14 CONTROL: settles');
+  }, [c, ok]);
 });
 
 test('#1629 s3 (S13) the publication receipt\'s TERMS are strict (review R2): its digest language-tagged, given a datatype, or doubled, or its actor not the author\'s person: each refused, still pending', T, async () => {
