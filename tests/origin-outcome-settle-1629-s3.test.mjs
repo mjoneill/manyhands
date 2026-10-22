@@ -27,7 +27,19 @@
  *   S6  block(tombstoned): the deterministic post exists and is redacted → APPLIED, the obligation reads blocked
  *   S7  block(tombstoned) with no tombstone → PRECONDITION_FAILED; block with a reason outside the closed set is refused before sending
  *
- * Every row except S0 is TODO until the build lands the outcome read and the settle kind (today the read is not exported and the
+ * THE RESERVATION BINDS THE POST (r5 G-R; scoped to a postId that names a slice-1 reservation):
+ *   GR1 POSITIVE (today and after): the reservation's own draft at its own postSeq is APPLIED and READS BACK with the frozen body
+ *   GR2 a different body → PRECONDITION_FAILED, NO post at the postId (read back), nothing new at the postSeq, allocator unchanged, pending
+ *   GR3 a different author, or different mentions → refused the same way
+ *   GR4 the frozen draft at a different postSeq → refused the same way
+ *   GR5 CONTROL (today and after): an UNRESERVED post.create applies and reads back as sent, with intention and receipt digests equal to
+ *       3e98961's (r6 §2: its compiled SPARQL is EXPECTED to change, so SPARQL bytes are not the instrument)
+ *   GR6 FAIL CLOSED (r6 §1): with the reservation's draft missing, its postSeq missing, two drafts, two postSeq values, the draft
+ *       language-tagged or typed (a non-xsd:string datatype), postSeq a string literal, two reservation subjects for the postId, or the
+ *       canonical reservation IRI's own postId field missing or wrong (45037), even the CORRECT post is refused and none is written.
+ *       Duplicate-field cases use DISTINCT values, since identical RDF triples collapse.
+ *
+ * Every row except S0, GR1 and GR5 is TODO until the build lands the outcome read and the settle kind (today the read is not exported and the
  * kind is not in RECORD_KINDS). Each is reported on every run and never fails CI; then delete PENDING_BUILD and each must pass.
  *
  * NOT covered, by name: the REST diagnostic route and /api/outbox's exclusion of Prepared records (C3; REST-level, owed with the
@@ -62,7 +74,7 @@ const BLOCK_REASONS = ['tombstoned'];
 
 const SKIP = HAVE_PY ? false : 'UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)';
 const T = { skip: SKIP, timeout: 300000 };
-const PENDING_BUILD = { todo: 'needs the slice-3 build: the outcome read (r2 R-A1/r3 C1) and the obligation.settle kind (r2 §4/r3 C2) are not built; delete PENDING_BUILD when they land' };
+const PENDING_BUILD = { todo: 'needs the slice-3 build: the outcome read (r2 R-A1/r3 C1), the obligation.settle kind (r2 §4/r3 C2) and the reservation-binds-the-post guard (r5 G-R) are not built; delete PENDING_BUILD when they land' };
 const TP = { ...T, ...PENDING_BUILD };
 const DSID = 'og1629o';
 const BK = 'urn:scrum:bookkeeping:executor';
@@ -246,6 +258,10 @@ test('#1629 s3 (S0 CONTROL, today) a committed origin\'s reserved post is create
     assert.equal(pc.post.postSeq, j.reservations[0].postSeq, 'with the reserved postSeq');
     const r = await client.update(pc);
     assert.equal(r.outcome, 'APPLIED', `S0: the reserved post is created (${JSON.stringify(r).slice(0, 300)})`);
+    // the #1629 row convention (#1733 v20): an outcome claim names its read-back; the receipt alone is only what the executor answered
+    const got = Object.fromEntries((await rows(client, `SELECT ?p ?o WHERE { <https://scrumboard.local/entity/${pc.post.id}> ?p ?o }`)).map((x) => [x.p.value.split(/[#/]/).pop(), x.o.value]));
+    assert.equal(got.text, j.reservations[0].draft.body, `S0: the stored post reads back with the frozen body (${JSON.stringify(got)})`);
+    assert.equal(got.postSeq, String(j.reservations[0].postSeq), 'S0: at the reserved postSeq');
     assert.equal(await obligationStatus(client, o), 'pending', 'S0: and the obligation still reads pending (nothing settles it on today\'s code)');
   }, [c]);
 });
@@ -344,4 +360,119 @@ test('#1629 s3 (S7) block(tombstoned) without a tombstone is refused; a reason o
     assert.ok(!BLOCK_REASONS.includes('because-i-said-so'));
     assert.throws(() => canonicalize(settleIntention(j.obligations[0].obligationId, 'block', { reason: 'because-i-said-so' })), 'a reason outside the closed set is refused at canonicalization');
   }, [c]);
+});
+
+// ── G-R: the reservation binds the post (r5, from the 45028/45030 finding; non-builder ruling 45032) ──
+// Scoped ONLY to a post.create whose postId names a slice-1 reservation: the reservation's draft must equal this post's canonical
+// announcement draft and its postSeq must match, or PRECONDITION_FAILED with no post, no sequence consumed. Read back, never inferred
+// from a receipt (45029). Measured on today's code (3e98961, 2026-10-22T12:11:56Z probe): a forged body under the deterministic op is
+// APPLIED and stored at the reserved postSeq, which is what GR2 must turn into a refusal.
+const allocatorNext = async (client) => (await rows(client, `SELECT ?n WHERE { GRAPH <${BK}> { <${PS('allocator')}> <${PS('nextPostSeq')}> ?n } }`)).map((r) => r.n.value);
+const storedPost = async (client, id) => Object.fromEntries((await rows(client, `SELECT ?p ?o WHERE { <https://scrumboard.local/entity/${id}> ?p ?o }`)).map((r) => [r.p.value.split(/[#/]/).pop(), r.o.value]));
+const postsAtSeq = async (client, n) => (await rows(client, `SELECT ?s WHERE { ?s ?p ?n FILTER(STRENDS(STR(?p), "postSeq") && STR(?n) = "${n}") }`)).length;
+async function refusedNoPost(client, o, j, intention, label) {
+  const before = { alloc: await allocatorNext(client), atSeq: await postsAtSeq(client, j.reservations[0].postSeq) };
+  const r = await client.update(intention);
+  assert.equal(r.outcome, 'PRECONDITION_FAILED', `${label}: refused (${JSON.stringify(r).slice(0, 300)})`);
+  assert.deepEqual(await storedPost(client, intention.post.id), {}, `${label}: NO post exists at the reserved postId (read back)`);
+  assert.equal(await postsAtSeq(client, j.reservations[0].postSeq), before.atSeq, `${label}: nothing new carries the reserved postSeq`);
+  assert.deepEqual(await allocatorNext(client), before.alloc, `${label}: no sequence was consumed (allocator unchanged)`);
+  assert.equal(await obligationStatus(client, o), 'pending', `${label}: the obligation stays pending`);
+}
+
+test('#1629 s3 (GR1 POSITIVE, today and after) the reservation\'s own draft at its own postSeq is APPLIED and reads back exactly', T, async () => {
+  const c = card('gr1', 1);
+  await world(async ({ client }) => {
+    const o = claimOrigin(c, 'k-gr1');
+    const j = await committed(client, o);
+    const pc = postFor(o, j);
+    assert.equal((await client.update(pc)).outcome, 'APPLIED');
+    const got = await storedPost(client, pc.post.id);
+    assert.equal(got.text, j.reservations[0].draft.body, `GR1: the stored body is the frozen one (${JSON.stringify(got)})`);
+    assert.equal(got.postSeq, String(j.reservations[0].postSeq), 'GR1: at the reserved postSeq');
+    assert.equal(got.originMutation, o.mid, 'GR1: for this origin');
+  }, [c]);
+});
+
+test('#1629 s3 (GR2) a DIFFERENT BODY under the reserved postId is refused: no post, no sequence consumed, still pending', TP, async () => {
+  const c = card('gr2', 1);
+  await world(async ({ client }) => {
+    const o = claimOrigin(c, 'k-gr2');
+    const j = await committed(client, o);
+    await refusedNoPost(client, o, j, postFor(o, j, { body: 'not what was frozen' }), 'GR2 body');
+  }, [c]);
+});
+
+test('#1629 s3 (GR3) a DIFFERENT AUTHOR or MENTIONS under the reserved postId is refused the same way', TP, async () => {
+  const a = card('gr3a', 1), b = card('gr3b', 2);
+  await world(async ({ client }) => {
+    const oa = claimOrigin(a, 'k-gr3a'), ob = claimOrigin(b, 'k-gr3b');
+    const ja = await committed(client, oa), jb = await committed(client, ob);
+    await refusedNoPost(client, oa, ja, postFor(oa, ja, { author: 'ada' }), 'GR3 author');
+    await refusedNoPost(client, ob, jb, postFor(ob, jb, { mentions: ['grace'] }), 'GR3 mentions');
+  }, [a, b]);
+});
+
+test('#1629 s3 (GR4) the frozen draft at a DIFFERENT postSeq under the reserved postId is refused the same way', TP, async () => {
+  const c = card('gr4', 1);
+  await world(async ({ client }) => {
+    const o = claimOrigin(c, 'k-gr4');
+    const j = await committed(client, o);
+    const pc = postFor(o, j); pc.post.postSeq = j.reservations[0].postSeq + 50;
+    await refusedNoPost(client, o, j, pc, 'GR4 postSeq');
+  }, [c]);
+});
+
+test('#1629 s3 (GR5 CONTROL, today and after) an UNRESERVED post.create still applies and reads back as sent, with intention and receipt digests equal to 3e98961\'s', T, async () => {
+  // r6 §2: the compiled SPARQL is EXPECTED to change for every post.create (detection lives in the update); behaviour and digests are what
+  // is preserved. The digest below was measured at 3e98961 on 2026-10-22 (twice, identical); the receipt's digest equalled the intention's.
+  const UNRELATED = { kind: 'post.create', opId: 'urn:ex:op/announce/00000000-0000-5000-8000-000000000001/claim', actor: 'https://scrumboard.local/person/board',
+    post: { id: 'unrelated-legacy-post-1', body: 'a legacy announcement with no reservation', author: 'board', originActor: 'ada',
+      origin: { mutationId: '00000000-0000-5000-8000-000000000001', slot: 'claim' }, occurredAt: '2026-10-22T06:00:00.000Z', publicationAt: '2026-10-22T06:00:01.000Z', postSeq: 7, mentions: [] } };
+  const DIGEST_AT_3E98961 = 'bd8191dfd7ebddf3d9ceda999979452ef528e25fed33a248fa17cd83da1272e4';
+  const { digestOf } = await import('../core/graph-compiler.mjs');
+  assert.equal(digestOf(canonicalize(UNRELATED)), DIGEST_AT_3E98961, 'GR5: the intention digest is unchanged');
+  await world(async ({ client }) => {
+    const r = await client.update(UNRELATED);
+    assert.equal(r.outcome, 'APPLIED', `GR5: an unreserved post.create is APPLIED (${JSON.stringify(r).slice(0, 200)})`);
+    assert.equal(r.receipt?.digest?.[0]?.value ?? r.digest, DIGEST_AT_3E98961, 'GR5: and its receipt carries the same digest');
+    const got = await storedPost(client, 'unrelated-legacy-post-1');
+    assert.equal(got.text, UNRELATED.post.body, 'GR5: it reads back with the body it was sent');
+    assert.equal(got.postSeq, '7', 'GR5: at the postSeq it was sent');
+    assert.equal(got.originMutation, UNRELATED.post.origin.mutationId, 'GR5: for the origin it named');
+  }, []);
+});
+
+test('#1629 s3 (GR6) FAIL CLOSED: a reservation that is missing a field, duplicated, mistyped or conflicting refuses even the CORRECT post, writing none', TP, async () => {
+  // r6 §1: if ANY reservation subject names this postId it must be well-formed: exactly one subject, exactly one plain-string draftJson
+  // sameTerm-equal to the post's draft, exactly one xsd:integer postSeq equal to the post's. Each case below tampers ONE thing, then sends
+  // the post the publisher would send (the reservation's own frozen draft at its own postSeq), which GR1 shows is APPLIED when well-formed.
+  const RES = (postId) => `<urn:ex:postseq/reservation/${postId}>`;
+  const D = '<urn:ex:postseq/draftJson>', S = '<urn:ex:postseq/postSeq>', PID = '<urn:ex:postseq/postId>', TYPE = '<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>';
+  const INT = `<${XSD}integer>`;
+  const CASES = [
+    ['draft missing', (id) => `DELETE WHERE { GRAPH <${BK}> { ${RES(id)} ${D} ?d } }`],
+    ['postSeq missing', (id) => `DELETE WHERE { GRAPH <${BK}> { ${RES(id)} ${S} ?n } }`],
+    ['two drafts', (id) => `INSERT DATA { GRAPH <${BK}> { ${RES(id)} ${D} "{\\"body\\":\\"a second draft\\"}" } }`],
+    ['two postSeq values', (id, seq) => `INSERT DATA { GRAPH <${BK}> { ${RES(id)} ${S} "${seq + 1}"^^${INT} } }`],
+    ['draft language-tagged', (id) => `DELETE { GRAPH <${BK}> { ${RES(id)} ${D} ?d } } INSERT { GRAPH <${BK}> { ${RES(id)} ${D} ?nd } } WHERE { GRAPH <${BK}> { ${RES(id)} ${D} ?d } BIND(STRLANG(STR(?d), "en") AS ?nd) }`],
+    ['draft typed', (id) => `DELETE { GRAPH <${BK}> { ${RES(id)} ${D} ?d } } INSERT { GRAPH <${BK}> { ${RES(id)} ${D} ?nd } } WHERE { GRAPH <${BK}> { ${RES(id)} ${D} ?d } BIND(STRDT(STR(?d), <http://www.w3.org/1999/02/22-rdf-syntax-ns#JSON>) AS ?nd) }`],
+    ['postSeq as a string literal', (id) => `DELETE { GRAPH <${BK}> { ${RES(id)} ${S} ?n } } INSERT { GRAPH <${BK}> { ${RES(id)} ${S} ?ns } } WHERE { GRAPH <${BK}> { ${RES(id)} ${S} ?n } BIND(STR(?n) AS ?ns) }`],
+    // 45037: detection covers ANY triples at the canonical reservation IRI, so a corrupted postId field never makes it 'unreserved'
+    ['postId field missing at the canonical reservation IRI', (id) => `DELETE WHERE { GRAPH <${BK}> { ${RES(id)} ${PID} ?x } }`],
+    ['postId field wrong at the canonical reservation IRI', (id) => `DELETE { GRAPH <${BK}> { ${RES(id)} ${PID} ?x } } INSERT { GRAPH <${BK}> { ${RES(id)} ${PID} "some-other-post" } } WHERE { GRAPH <${BK}> { ${RES(id)} ${PID} ?x } }`],
+    ['two reservation subjects for the postId', (id, seq, draftLit) => `INSERT DATA { GRAPH <${BK}> { <urn:ex:postseq/reservation/${id}-twin> ${TYPE} <urn:ex:postseq/Reservation> ; ${PID} "${id}" ; ${D} ${draftLit} ; ${S} "${seq}"^^${INT} . } }`],
+  ];
+  const cards = CASES.map((_, k) => card(`gr6-${k}`, k + 1));
+  await world(async ({ client, exec }) => {
+    for (const [k, [label, tamper]] of CASES.entries()) {
+      const o = claimOrigin(cards[k], `k-gr6-${k}`);
+      const j = await committed(client, o);
+      const pc = postFor(o, j);
+      const draftLit = JSON.stringify(JSON.stringify(j.reservations[0].draft));
+      const r = await fetch(`${exec().baseUrl}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/og1629o-gr6-${process.pid}-${seedN++}` }, body: tamper(pc.post.id, j.reservations[0].postSeq, draftLit) });
+      assert.equal(r.status, 200, `PRECONDITION (${label}): the test's tamper was written (${await r.text()})`);
+      await refusedNoPost(client, o, j, pc, `GR6 ${label}`);
+    }
+  }, cards);
 });
