@@ -336,9 +336,15 @@ test('#1629 RS REFUSED THEN FRESH (mode off): a claim refused without the card m
       const d = p.ok && p.prepared ? JSON.parse(p.prepared.descriptorJson) : null;
       if (d && d.route === 'claim' && d.subject === 'uuid-1') mine.push({ mid, outcome: (await readOriginOutcome(s.gclient, mid)).outcome });
     }
-    assert.equal(mine.length, 2, `RS: two preparations for (claim, uuid-1) (${JSON.stringify(mine)})`);
-    assert.notEqual(mine[0].mid, mine[1].mid, 'RS: under two DIFFERENT mutationIds (a fresh nonce per attempt)');
-    assert.deepEqual(mine.map((x) => x.outcome).sort(), ['committed', 'refused'], `RS: one refused, one committed (${JSON.stringify(mine)})`);
+    // the count is BOUNDED, not exact (45080): the write lock retries a refused card write once (server.js lockedWithCards, `attempt === 1`),
+    // and each attempt stages a fresh origin with its own nonce (G2). Two claim requests here → at most 2 × 2 = 4 preparations.
+    const REQUESTS = 2, ATTEMPTS_PER_REQUEST = 2;
+    const outcomes = mine.map((x) => x.outcome);
+    assert.equal(new Set(mine.map((x) => x.mid)).size, mine.length, `RS: every preparation has its OWN mutationId (${JSON.stringify(mine)})`);
+    assert.equal(outcomes.filter((o) => o === 'committed').length, 1, `RS: exactly one committed (${JSON.stringify(outcomes)})`);
+    assert.ok(outcomes.filter((o) => o === 'refused').length >= 1, `RS: at least one refused (${JSON.stringify(outcomes)})`);
+    assert.ok(outcomes.every((o) => o === 'committed' || o === 'refused'), `RS: none unresolved or unprepared (${JSON.stringify(outcomes)})`);
+    assert.ok(mine.length <= REQUESTS * ATTEMPTS_PER_REQUEST, `RS: no more preparations than requests × attempts (${mine.length} > ${REQUESTS * ATTEMPTS_PER_REQUEST})`);
     await documentUntouched(s, 'off', 'RS');
   });
 });
