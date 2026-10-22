@@ -30,7 +30,7 @@
 import { createHash } from 'node:crypto';
 import { EX, NS, RECEIPT_PREDICATES, MARKER_SUBJECT, MARKER_PREDICATES, LG, LG_NS, lgMetaPredicate, BK, BOOKKEEPING_PREDICATES, isBookkeeping, POSTSEQ_TERMS, ORIGIN_TERMS } from './graph-vocab.mjs';
 import { reserveOpId as _reserveOpId, canonReservationBatch as _canonReservationBatch, reserveDigestBody as _reserveDigestBody, canonAnnouncementDraft } from './postseq-reserve.mjs';
-import { announcePostId, opIdFor as announceOpIdFor } from './announce-outbox.mjs';
+import { announcePostId, opIdFor as announceOpIdFor, postCreateIntention as announcePostCreateIntention } from './announce-outbox.mjs';
 
 export const DIGEST_V = 1;
 /** The literal canonicalization policy (A5). Bound into every digest; bump it if a canonical form changes. */
@@ -132,8 +132,9 @@ export function canonicalize(intention) {
   const i = intention || {};
   if (typeof i.kind === 'string' && LG_KINDS.includes(i.kind)) return canonicalizeLg(i); // #1562
   if (POSTSEQ_KINDS.includes(i.kind)) return canonicalizePostseqReserve(i);   // #1629 slice 1
+  if (i.kind === SETTLE_KIND) return canonicalizeSettle(i);   // #1629 slice 3
   if (RECORD_KINDS.includes(i.kind)) return canonicalizeRecord(i);   // #1561 — the log-born unit's kinds
-  if (!KINDS.includes(i.kind)) fail(`kind must be one of ${[...KINDS, ...RECORD_KINDS, ...LG_KINDS, ...POSTSEQ_KINDS].join(', ')}`);
+  if (!KINDS.includes(i.kind)) fail(`kind must be one of ${[...KINDS, ...RECORD_KINDS, ...LG_KINDS, ...POSTSEQ_KINDS, SETTLE_KIND].join(', ')}`);
   for (const k of Object.keys(i)) if (!FIELDS[i.kind].includes(k)) fail(`unknown field ${k} for kind ${i.kind}`);
   const opId = checkIri(i.opId, 'opId');
   if (!opId.startsWith(`${NS}op/`)) fail(`opId must be under ${NS}op/`);
@@ -195,6 +196,7 @@ export function canonicalize(intention) {
 export function digestOf(c) {
   if (c.lg) return digestLg(c); // #1562
   if (c.postseq) return digestPostseq(c);   // #1629 slice 1
+  if (c.settle) return digestSettle(c);   // #1629 slice 3
   if (c.record) return recordDigest(c);   // #1561
   const lines = [`digestV ${DIGEST_V}`, `canonV ${CANON_V}`, `kind ${c.kind}`, `opId ${ref(c.opId)}`, `actor ${ref(c.actor)}`];
   if (c.grant) {
@@ -248,6 +250,7 @@ export function compile(intention) {
   const c = canonicalize(intention);
   if (c.lg) return compileLg(c, digestOf(c)); // #1562: same template, same staticCheck
   if (c.postseq) return compilePostseqReserve(c, digestOf(c));   // #1629 slice 1: same template, same staticCheck
+  if (c.settle) return compileSettle(c, digestOf(c));   // #1629 slice 3: same template, same staticCheck
   if (c.record) return compileRecord(c);   // #1561
   const digest = digestOf(c);
   const OP = ref(c.opId);
@@ -2489,6 +2492,121 @@ function compilePostseqReserve(c, digest) {
   bIns.unshift(`  ${MARKER_SUBJECT} ${EX.commitSeq} ?s1 .`,
     `  ${OP} ${EX.outcome} ?n_outcome .`, `  ${OP} ${EX.digest} ?n_digest .`, `  ${OP} ${EX.actor} ?n_actor .`,
     `  ${OP} ${EX.at} ?n_at .`, `  ${OP} ${EX.commitSeq} ?s1 .`);
+  const sparql = assemble(del, bDel, dIns, bIns, where);
+  const check = staticCheck(sparql, c.opId);
+  if (!check.ok) fail(`compiler rejected its own output: ${check.errors.join('; ')}`);
+  return { sparql, digest, canonical: c };
+}
+// ---------- #1629 slice 3: obligation.settle — an announcement obligation's ONE terminal transition ----------
+//
+// Frozen settle interface (#1629 v162, commons 45064): { kind, opId 'urn:ex:op/obligation/settle/<obligationId>/<transition>',
+// actor, obligationId '<mutationId>:<slot>', transition 'publish' | 'block', reason?, publication? }. Every identity the
+// guard touches is DERIVED from obligationId (the obligation subject, the reservation, the deterministic postId and post op);
+// nothing names them separately. Only the Obligation's status moves, and only from pending: a terminal status is never
+// overwritten (a conflicting transition is PRECONDITION_FAILED; the same one replays through the duplicate-op guard).
+//   publish  the caller's `publication` values are CANDIDATES: the compiler rebuilds the deterministic post.create from them
+//            and its digest, and the update verifies every one against the executor — the reservation's draft (under either
+//            notify, as in G-R), postSeq and createdAt (= publicationAt); the post op's receipt APPLIED with exactly that
+//            digest and the author's person as actor; the post a live Comment. Dispatch comes before settlement (r3 C2):
+//            this record is written only after the notify policy was dispatched.
+//   block    reason in a closed set; 'tombstoned' is proved by the derived post IRI being a RedactedPost.
+// Every stored proof field is read single-valued and well-formed; malformed or unavailable proof never settles.
+export const SETTLE_KIND = 'obligation.settle';
+export const SETTLE_TRANSITIONS = Object.freeze(['publish', 'block']);
+export const SETTLE_BLOCK_REASONS = Object.freeze(['tombstoned']);
+export const settleOpId = (obligationId, transition) => `${NS}op/obligation/settle/${obligationId}/${transition}`;
+const OBLIGATION_ID_RE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}):([a-z][a-z0-9-]{0,31})$/;
+
+function canonicalizeSettle(i) {
+  for (const k of Object.keys(i)) if (!['kind', 'opId', 'actor', 'obligationId', 'transition', 'reason', 'publication'].includes(k)) fail(`unknown field ${k} for kind ${i.kind}`);
+  const actor = checkIri(i.actor, 'actor');
+  const m = typeof i.obligationId === 'string' ? OBLIGATION_ID_RE.exec(i.obligationId) : null;
+  if (!m) fail('obligationId must be <mutationId>:<slot>');
+  const [, mutationId, slot] = m;
+  if (!SETTLE_TRANSITIONS.includes(i.transition)) fail(`transition must be one of ${SETTLE_TRANSITIONS.join(', ')}`);
+  const opId = checkIri(i.opId, 'opId');
+  if (opId !== settleOpId(i.obligationId, i.transition)) fail(`opId must be ${settleOpId(i.obligationId, i.transition)}`);
+  let reason = null, publication = null;
+  if (i.transition === 'block') {
+    if (!SETTLE_BLOCK_REASONS.includes(i.reason)) fail(`a block reason must be one of ${SETTLE_BLOCK_REASONS.join(', ')}`);
+    if (i.publication !== undefined) fail('a block carries no publication');
+    reason = i.reason;
+  } else {
+    if (i.reason !== undefined) fail('a publish carries no reason');
+    const p = obj(i.publication, ['payload', 'postSeq', 'publicationAt'], 'publication');
+    const pl = obj(p.payload, ['author', 'body', 'originActor', 'occurredAt', 'mentions'], 'publication.payload');
+    // the post the publisher would build from these values: built by the SAME function, canonicalized by the SAME rules
+    const intent = announcePostCreateIntention({ mutationId, slot, postSeq: p.postSeq, publicationAt: p.publicationAt,
+      payload: { author: pl.author, body: pl.body, originActor: pl.originActor, occurredAt: pl.occurredAt, mentions: pl.mentions } });
+    const post = canonicalizeRecord(intent);
+    publication = { postSeq: p.postSeq, publicationAt: p.publicationAt, author: pl.author, body: pl.body, originActor: pl.originActor,
+      occurredAt: pl.occurredAt, mentions: [...pl.mentions], postOp: post.opId, postActor: post.actor, postDigest: recordDigest(post) };
+  }
+  return { kind: i.kind, opId, actor, evidence: [], targets: [], newAssertion: null, authority: null, grant: null, rule: null,
+    settle: { obligationId: i.obligationId, mutationId, slot, transition: i.transition, reason, publication } };
+}
+
+function digestSettle(c) {
+  const lines = [`digestV ${DIGEST_V}`, `canonV ${CANON_V}`, `kind ${c.kind}`, `opId ${ref(c.opId)}`, `actor ${ref(c.actor)}`,
+    `settle ${JSON.stringify(c.settle)}`];
+  return createHash('sha256').update(lines.join('\n') + '\n').digest('hex');
+}
+
+function compileSettle(c, digest) {
+  const S = c.settle, T = ORIGIN_TERMS, PT = POSTSEQ_TERMS;
+  const OP = ref(c.opId);
+  const OB = T.obligationSubject(S.mutationId, S.slot);
+  const postId = announcePostId(S.mutationId, S.slot);
+  const RES = PT.reservation(postId);
+  const POST = ref(`${ENTITY_IRI}${postId}`);
+  const where = [], pre = [], top = [], dBinds = [], del = [], dIns = [], bDel = [], bIns = [];
+  const names = new Map();
+  const v = (text) => {
+    let n = names.get(text);
+    if (!n) { n = `r${names.size}`; names.set(text, n); dBinds.push(ok(text, n)); }
+    return `?d_${n}`;
+  };
+  where.push(...dupGuard(OP));
+  /** `subject p ?x`, with ?x the ONLY value of p on subject, in the bookkeeping graph */
+  const single = (subject, p, x) => [`    GRAPH ${BK} { ${subject} ${p} ${x} . }`,
+    `    FILTER NOT EXISTS { GRAPH ${BK} { ${subject} ${p} ${x}_2 FILTER(!sameTerm(${x}_2, ${x})) } }`];
+  // the obligation: typed, its stored identity equal to the derived one, single-valued, and PENDING
+  pre.push(`    GRAPH ${BK} { ${OB} a ${T.Obligation} . }`);
+  for (const [p, x, want] of [[T.obligationId, '?xs_oid', strLit(S.obligationId)], [T.mutationId, '?xs_mid', strLit(S.mutationId)],
+    [T.slot, '?xs_slot', strLit(S.slot)], [T.reservation, '?xs_res', RES], [T.status, '?xs_st', strLit('pending')]]) {
+    pre.push(...single(OB, p, x), `    FILTER(sameTerm(${x}, ${want}))`);
+  }
+  if (S.transition === 'block') {
+    pre.push(`    ${POST} ${ref(TM.type)} ${ref(TM.RedactedPost)} .`);   // reason 'tombstoned': the deterministic post is a tombstone
+  } else {
+    const P = S.publication;
+    const draft = (notify) => strLit(JSON.stringify(canonAnnouncementDraft({ body: P.body, author: P.author, originActor: P.originActor, occurredAt: P.occurredAt, mentions: P.mentions, notify })));
+    // the reservation the obligation names: its draft, postSeq and createdAt are the candidate's, each single-valued
+    pre.push(...single(RES, PT.draftJson, '?xs_dj'), `    FILTER(sameTerm(?xs_dj, ${draft(true)}) || sameTerm(?xs_dj, ${draft(false)}))`);
+    pre.push(...single(RES, PT.identityJson, '?xs_ij'), `    FILTER(sameTerm(?xs_ij, ${strLit(JSON.stringify({ mutationId: S.mutationId, slot: S.slot }))}))`);
+    pre.push(...single(RES, PT.postSeq, '?xs_ps'), `    FILTER(isLiteral(?xs_ps) && DATATYPE(?xs_ps) = <${XSD_PSQ}integer> && ?xs_ps = ${psqSafeInt(P.postSeq)})`);
+    pre.push(...single(RES, PT.createdAt, '?xs_ca'), `    FILTER(isLiteral(?xs_ca) && DATATYPE(?xs_ca) = <${XSD_PSQ}dateTime> && STR(?xs_ca) = ${strLit(P.publicationAt)})`);
+    // the post op's receipt: APPLIED, with exactly the rebuilt digest and the author's person as actor
+    const POP = ref(P.postOp);
+    pre.push(...single(POP, EX.outcome, '?xs_out'), `    FILTER(sameTerm(?xs_out, ${EX.APPLIED}))`);
+    pre.push(...single(POP, EX.digest, '?xs_dg'), `    FILTER(isLiteral(?xs_dg) && STR(?xs_dg) = ${strLit(P.postDigest)})`);
+    pre.push(...single(POP, EX.actor, '?xs_ac'), `    FILTER(sameTerm(?xs_ac, ${ref(P.postActor)}))`);
+    pre.push(`    ${POST} ${ref(TM.type)} ${ref(TM.Comment)} .`, `    FILTER NOT EXISTS { ${POST} ${ref(TM.type)} ${ref(TM.RedactedPost)} }`);
+  }
+  const next = S.transition === 'publish' ? 'published' : 'blocked';
+  bDel.push(`  ${v(OB)} ${T.status} ${v(strLit('pending'))} .`);
+  bIns.push(`  ${v(OB)} ${T.status} ${v(strLit(next))} .`);
+
+  pre.push(`    BIND(true AS ?ok)`);
+  where.push(`  OPTIONAL {`, ...pre, `  }`);
+  where.push(...top);
+  where.push(`  BIND(IF(BOUND(?ok), ${EX.APPLIED}, ${EX.PRECONDITION_FAILED}) AS ?n_outcome)`);
+  where.push(nb(JSON.stringify(digest), 'digest'), nb(ref(c.actor), 'actor'), nb('NOW()', 'at'), nb(OB, 'target0'));
+  where.push(...dBinds);
+  bDel.unshift(`  ${MARKER_SUBJECT} ${EX.commitSeq} ?s .`);
+  bIns.unshift(`  ${MARKER_SUBJECT} ${EX.commitSeq} ?s1 .`,
+    `  ${OP} ${EX.outcome} ?n_outcome .`, `  ${OP} ${EX.digest} ?n_digest .`, `  ${OP} ${EX.actor} ?n_actor .`,
+    `  ${OP} ${EX.at} ?n_at .`, `  ${OP} ${EX.commitSeq} ?s1 .`, `  ${OP} ${EX.target} ?n_target0 .`);
   const sparql = assemble(del, bDel, dIns, bIns, where);
   const check = staticCheck(sparql, c.opId);
   if (!check.ok) fail(`compiler rejected its own output: ${check.errors.join('; ')}`);

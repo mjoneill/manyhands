@@ -143,6 +143,7 @@ function validatePrepared(rows, mutationId) {
 }
 
 const ORIGIN_FIELDS = ['mutationId', 'originKeyJson', 'descriptorDigest', 'planDigest', 'committedAt', 'commitOp', 'slotCount'];
+const OBLIGATION_STATUSES = Object.freeze(['pending', 'published', 'blocked']);
 const OBLIGATION_FIELDS = ['obligationId', 'mutationId', 'slot', 'index', 'status', 'mode', 'provenanceJson', 'reservation'];
 
 /**
@@ -210,7 +211,8 @@ export async function readCommittedOrigin(client, mutationId) {
       };
       const postId = announcePostId(mutationId, s.slot);
       if (ob.slot !== s.slot || ob.index !== i || ob.mutationId !== mutationId || ob.obligationId !== `${mutationId}:${s.slot}`) bad(`${ow} does not match descriptor slot ${i}`);
-      if (ob.status !== 'pending' || ob.mode !== 'publisher') bad(`${ow} must be pending / publisher in this slice`);
+      // #1629 s3 — obligation.settle moves status to exactly one terminal value (#1629 v162); nothing else is admitted
+      if (!OBLIGATION_STATUSES.includes(ob.status) || ob.mode !== 'publisher') bad(`${ow} must be ${OBLIGATION_STATUSES.join(' | ')} / publisher`);
       if (ob.provenanceJson !== provenanceJson) bad(`${ow}.provenanceJson is not the descriptor's provenance`);
       if (ob.reservation !== bare(POSTSEQ_TERMS.reservation(postId))) bad(`${ow}.reservation is not the reservation at ${postId}`);
       obligations.push(ob);
