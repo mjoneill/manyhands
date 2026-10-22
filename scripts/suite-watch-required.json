@@ -104,6 +104,7 @@
   "tests/origin-commit-1629-s2-supp2.test.mjs",
   "tests/origin-commit-1629-s2-supp3.test.mjs",
   "tests/origin-commit-1629-s2.test.mjs",
+  "tests/origin-lifecycle-1629-l.test.mjs",
   "tests/post-import-referenced-1626.test.mjs",
   "tests/post-redaction-r4a-addendum.test.mjs",
   "tests/post-redaction-r4a.test.mjs",
