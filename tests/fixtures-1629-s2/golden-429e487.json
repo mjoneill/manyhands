@@ -1,0 +1,1614 @@
+{
+ "note": "compile(intention).sparql captured from main 429e48763690fba34b76ce90b35b7dd370f28528 core/graph-compiler.mjs (byte-identical to the GitHub blob) by the test author, 2026-10-20, for #1629 slice 2 row B1. Regenerating it from a NEW build defeats its purpose.",
+ "cases": [
+  {
+   "label": "card.write create with counter",
+   "intention": {
+    "kind": "card.write",
+    "opId": "urn:ex:op/card/golden-1",
+    "actor": "https://scrumboard.local/person/ada",
+    "parts": [
+     {
+      "iri": "https://scrumboard.local/entity/ga",
+      "expectedVersion": null,
+      "version": 1,
+      "quads": [
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/concept/x"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/name"
+        },
+        {
+         "type": "literal",
+         "value": "x"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/concept/x"
+        },
+        {
+         "type": "uri",
+         "value": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/DefinedTerm"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/keywords"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/concept/x"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#label"
+        },
+        {
+         "type": "literal",
+         "value": "x"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#column"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/column/backlog"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/creator"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/person/ada"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/dateCreated"
+        },
+        {
+         "type": "literal",
+         "value": "2026-10-20T06:00:00.000Z"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/text"
+        },
+        {
+         "type": "literal",
+         "value": "body"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/name"
+        },
+        {
+         "type": "literal",
+         "value": "card 1"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/identifier"
+        },
+        {
+         "type": "literal",
+         "value": "1"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#Card"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/CreativeWork"
+        }
+       ]
+      ],
+      "json": "{\"id\":\"ga\",\"shortId\":1,\"title\":\"card 1\",\"description\":\"body\",\"column\":\"backlog\",\"createdAt\":\"2026-10-20T06:00:00.000Z\",\"createdBy\":\"ada\",\"version\":1,\"labels\":[\"x\"]}"
+     }
+    ],
+    "counter": {
+     "expected": null,
+     "next": "2"
+    }
+   },
+   "compiled": "DELETE {\n  GRAPH <urn:scrum:bookkeeping:executor> {\n    <urn:ex:dataset> <urn:ex:commitSeq> ?s .\n  }\n}\nINSERT {\n  ?d_r0 ?d_r1 ?d_r2 .\n  ?d_r0 ?d_r3 ?d_r4 .\n  ?d_r5 ?d_r1 ?d_r6 .\n  ?d_r5 ?d_r1 ?d_r7 .\n  ?d_r5 ?d_r8 ?d_r9 .\n  ?d_r5 ?d_r10 ?d_r11 .\n  ?d_r5 ?d_r12 ?d_r13 .\n  ?d_r5 ?d_r14 ?d_r0 .\n  ?d_r5 ?d_r3 ?d_r15 .\n  ?d_r5 ?d_r16 ?d_r17 .\n  ?d_r5 ?d_r18 ?d_r19 .\n  ?d_r5 ?d_r20 ?d_r4 .\n  GRAPH <urn:scrum:bookkeeping:executor> {\n    <urn:ex:dataset> <urn:ex:commitSeq> ?s1 .\n    <urn:ex:op/card/golden-1> <urn:ex:outcome> ?n_outcome .\n    <urn:ex:op/card/golden-1> <urn:ex:digest> ?n_digest .\n    <urn:ex:op/card/golden-1> <urn:ex:actor> ?n_actor .\n    <urn:ex:op/card/golden-1> <urn:ex:at> ?n_at .\n    <urn:ex:op/card/golden-1> <urn:ex:commitSeq> ?s1 .\n    <urn:ex:op/card/golden-1> <urn:ex:target> ?n_target0 .\n    ?d_r5 <urn:ex:ver> ?d_r21 .\n    ?d_r5 <urn:ex:recordedBy> ?d_r22 .\n    ?d_r5 <https://scrumboard.local/ns#entityJson> ?d_r23 .\n    ?d_r24 <urn:ex:ver> ?d_r25 .\n  }\n}\nWHERE {\n  OPTIONAL { GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:op/card/golden-1> <urn:ex:digest> ?dup } }\n  FILTER(!BOUND(?dup))\n  GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:dataset> <urn:ex:commitSeq> ?s . }\n  BIND(?s + 1 AS ?s1)\n  OPTIONAL {\n    FILTER NOT EXISTS { { <https://scrumboard.local/entity/ga> ?fp ?fo } UNION { GRAPH <urn:scrum:bookkeeping:executor> { <https://scrumboard.local/entity/ga> ?fp ?fo } } }\n    FILTER NOT EXISTS { GRAPH <urn:scrum:bookkeeping:executor> { <https://scrumboard.local/counter/nextShortId> <urn:ex:ver> ?xcf } }\n    BIND(true AS ?ok)\n  }\n  BIND(IF(BOUND(?ok), <urn:ex:APPLIED>, <urn:ex:PRECONDITION_FAILED>) AS ?n_outcome)\n  BIND(\"45bb05530814850620d9e255c4a37c64f179930f73e1fadc296653a049bcf505\" AS ?n_digest)\n  BIND(<https://scrumboard.local/person/ada> AS ?n_actor)\n  BIND(NOW() AS ?n_at)\n  BIND(<https://scrumboard.local/entity/ga> AS ?n_target0)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/concept/x>, ?u) AS ?d_r0)\n  BIND(IF(BOUND(?ok), <http://www.w3.org/1999/02/22-rdf-syntax-ns#type>, ?u) AS ?d_r1)\n  BIND(IF(BOUND(?ok), <https://schema.org/DefinedTerm>, ?u) AS ?d_r2)\n  BIND(IF(BOUND(?ok), <https://schema.org/name>, ?u) AS ?d_r3)\n  BIND(IF(BOUND(?ok), \"x\", ?u) AS ?d_r4)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/entity/ga>, ?u) AS ?d_r5)\n  BIND(IF(BOUND(?ok), <https://schema.org/CreativeWork>, ?u) AS ?d_r6)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/ns#Card>, ?u) AS ?d_r7)\n  BIND(IF(BOUND(?ok), <https://schema.org/creator>, ?u) AS ?d_r8)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/person/ada>, ?u) AS ?d_r9)\n  BIND(IF(BOUND(?ok), <https://schema.org/dateCreated>, ?u) AS ?d_r10)\n  BIND(IF(BOUND(?ok), \"2026-10-20T06:00:00.000Z\", ?u) AS ?d_r11)\n  BIND(IF(BOUND(?ok), <https://schema.org/identifier>, ?u) AS ?d_r12)\n  BIND(IF(BOUND(?ok), \"1\", ?u) AS ?d_r13)\n  BIND(IF(BOUND(?ok), <https://schema.org/keywords>, ?u) AS ?d_r14)\n  BIND(IF(BOUND(?ok), \"card 1\", ?u) AS ?d_r15)\n  BIND(IF(BOUND(?ok), <https://schema.org/text>, ?u) AS ?d_r16)\n  BIND(IF(BOUND(?ok), \"body\", ?u) AS ?d_r17)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/ns#column>, ?u) AS ?d_r18)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/column/backlog>, ?u) AS ?d_r19)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/ns#label>, ?u) AS ?d_r20)\n  BIND(IF(BOUND(?ok), 1, ?u) AS ?d_r21)\n  BIND(IF(BOUND(?ok), <urn:ex:op/card/golden-1>, ?u) AS ?d_r22)\n  BIND(IF(BOUND(?ok), \"\\u007B\\u0022id\\u0022:\\u0022ga\\u0022,\\u0022shortId\\u0022:1,\\u0022title\\u0022:\\u0022card 1\\u0022,\\u0022description\\u0022:\\u0022body\\u0022,\\u0022column\\u0022:\\u0022backlog\\u0022,\\u0022createdAt\\u0022:\\u00222026-10-20T06:00:00.000Z\\u0022,\\u0022createdBy\\u0022:\\u0022ada\\u0022,\\u0022version\\u0022:1,\\u0022labels\\u0022:\\u005B\\u0022x\\u0022\\u005D\\u007D\", ?u) AS ?d_r23)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/counter/nextShortId>, ?u) AS ?d_r24)\n  BIND(IF(BOUND(?ok), 2, ?u) AS ?d_r25)\n}\n"
+  },
+  {
+   "label": "card.write update with prior",
+   "intention": {
+    "kind": "card.write",
+    "opId": "urn:ex:op/card/golden-2",
+    "actor": "https://scrumboard.local/person/ada",
+    "parts": [
+     {
+      "iri": "https://scrumboard.local/entity/ga",
+      "expectedVersion": "1",
+      "version": 2,
+      "quads": [
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/concept/x"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/name"
+        },
+        {
+         "type": "literal",
+         "value": "x"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/concept/x"
+        },
+        {
+         "type": "uri",
+         "value": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/DefinedTerm"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/keywords"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/concept/x"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#label"
+        },
+        {
+         "type": "literal",
+         "value": "x"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#column"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/column/backlog"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/creator"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/person/ada"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/dateCreated"
+        },
+        {
+         "type": "literal",
+         "value": "2026-10-20T06:00:00.000Z"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/text"
+        },
+        {
+         "type": "literal",
+         "value": "body"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/name"
+        },
+        {
+         "type": "literal",
+         "value": "renamed"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/identifier"
+        },
+        {
+         "type": "literal",
+         "value": "1"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#Card"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/CreativeWork"
+        }
+       ]
+      ],
+      "prior": [
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/keywords"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/concept/x"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#label"
+        },
+        {
+         "type": "literal",
+         "value": "x"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#column"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/column/backlog"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/creator"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/person/ada"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/dateCreated"
+        },
+        {
+         "type": "literal",
+         "value": "2026-10-20T06:00:00.000Z"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/text"
+        },
+        {
+         "type": "literal",
+         "value": "body"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/name"
+        },
+        {
+         "type": "literal",
+         "value": "card 1"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/identifier"
+        },
+        {
+         "type": "literal",
+         "value": "1"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#Card"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/CreativeWork"
+        }
+       ]
+      ],
+      "json": "{\"id\":\"ga\",\"shortId\":1,\"title\":\"renamed\",\"description\":\"body\",\"column\":\"backlog\",\"createdAt\":\"2026-10-20T06:00:00.000Z\",\"createdBy\":\"ada\",\"version\":2,\"labels\":[\"x\"]}"
+     }
+    ]
+   },
+   "compiled": "DELETE {\n  ?d_xs ?d_xp ?d_xo .\n  GRAPH <urn:scrum:bookkeeping:executor> {\n    <urn:ex:dataset> <urn:ex:commitSeq> ?s .\n    ?d_xbs ?d_xbp ?d_xbo .\n  }\n}\nINSERT {\n  ?d_r0 ?d_r1 ?d_r2 .\n  ?d_r0 ?d_r3 ?d_r4 .\n  ?d_r5 ?d_r1 ?d_r6 .\n  ?d_r5 ?d_r1 ?d_r7 .\n  ?d_r5 ?d_r8 ?d_r9 .\n  ?d_r5 ?d_r10 ?d_r11 .\n  ?d_r5 ?d_r12 ?d_r13 .\n  ?d_r5 ?d_r14 ?d_r0 .\n  ?d_r5 ?d_r3 ?d_r15 .\n  ?d_r5 ?d_r16 ?d_r17 .\n  ?d_r5 ?d_r18 ?d_r19 .\n  ?d_r5 ?d_r20 ?d_r4 .\n  GRAPH <urn:scrum:bookkeeping:executor> {\n    <urn:ex:dataset> <urn:ex:commitSeq> ?s1 .\n    <urn:ex:op/card/golden-2> <urn:ex:outcome> ?n_outcome .\n    <urn:ex:op/card/golden-2> <urn:ex:digest> ?n_digest .\n    <urn:ex:op/card/golden-2> <urn:ex:actor> ?n_actor .\n    <urn:ex:op/card/golden-2> <urn:ex:at> ?n_at .\n    <urn:ex:op/card/golden-2> <urn:ex:commitSeq> ?s1 .\n    <urn:ex:op/card/golden-2> <urn:ex:target> ?n_target0 .\n    ?d_r5 <urn:ex:ver> ?d_r21 .\n    ?d_r5 <urn:ex:recordedBy> ?d_r22 .\n    ?d_r5 <https://scrumboard.local/ns#entityJson> ?d_r23 .\n  }\n}\nWHERE {\n  OPTIONAL { GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:op/card/golden-2> <urn:ex:digest> ?dup } }\n  FILTER(!BOUND(?dup))\n  GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:dataset> <urn:ex:commitSeq> ?s . }\n  BIND(?s + 1 AS ?s1)\n  OPTIONAL {\n    GRAPH <urn:scrum:bookkeeping:executor> { <https://scrumboard.local/entity/ga> <urn:ex:ver> ?xv0 . }\n    FILTER(?xv0 = 1)\n    BIND(true AS ?ok)\n  }\n  OPTIONAL {\n    { GRAPH <urn:scrum:bookkeeping:executor> { <https://scrumboard.local/entity/ga> ?xbp ?xbo } BIND(<https://scrumboard.local/entity/ga> AS ?xbs) }\n    UNION\n    { <https://scrumboard.local/entity/ga> ?xp ?xo BIND(<https://scrumboard.local/entity/ga> AS ?xs) }\n    UNION\n    { ?xs <https://scrumboard.local/ns#blocks> <https://scrumboard.local/entity/ga> ; <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://scrumboard.local/ns#Blocker> . FILTER(STRSTARTS(STR(?xs), \"https://scrumboard.local/entity/ga/\")) ?xs ?xp ?xo }\n    UNION\n    { ?xs <https://scrumboard.local/ns#ofCard> <https://scrumboard.local/entity/ga> ; <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://scrumboard.local/ns#ReleaseCondition> . FILTER(STRSTARTS(STR(?xs), \"https://scrumboard.local/entity/ga/\")) ?xs ?xp ?xo }\n    UNION\n    { <https://scrumboard.local/entity/ga> <https://scrumboard.local/ns#hasCheck> ?xs . ?xs ?xp ?xo }\n    UNION\n    { ?xs <https://scrumboard.local/ns#dependsOn> <https://scrumboard.local/entity/ga> BIND(<https://scrumboard.local/ns#dependsOn> AS ?xp) BIND(<https://scrumboard.local/entity/ga> AS ?xo) }\n    UNION\n    { <https://scrumboard.local/entity/ga> ?xl0 ?xh0 FILTER(isBlank(?xh0)) ?xh0 <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest>* ?xs . ?xs ?xp ?xo }\n    UNION\n    { VALUES (?xs ?xp ?xo) {\n      (<https://scrumboard.local/entity/ga> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://schema.org/CreativeWork>)\n      (<https://scrumboard.local/entity/ga> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://scrumboard.local/ns#Card>)\n      (<https://scrumboard.local/entity/ga> <https://schema.org/creator> <https://scrumboard.local/person/ada>)\n      (<https://scrumboard.local/entity/ga> <https://schema.org/dateCreated> \"2026-10-20T06:00:00.000Z\")\n      (<https://scrumboard.local/entity/ga> <https://schema.org/identifier> \"1\")\n      (<https://scrumboard.local/entity/ga> <https://schema.org/keywords> <https://scrumboard.local/concept/x>)\n      (<https://scrumboard.local/entity/ga> <https://schema.org/name> \"card 1\")\n      (<https://scrumboard.local/entity/ga> <https://schema.org/text> \"body\")\n      (<https://scrumboard.local/entity/ga> <https://scrumboard.local/ns#column> <https://scrumboard.local/column/backlog>)\n      (<https://scrumboard.local/entity/ga> <https://scrumboard.local/ns#label> \"x\")\n    } }\n  }\n  BIND(IF(BOUND(?ok), <urn:ex:APPLIED>, <urn:ex:PRECONDITION_FAILED>) AS ?n_outcome)\n  BIND(\"ebba3017ef5307710413eff59e8d50b83a8de5b31714e484ca1d268b2df6efc9\" AS ?n_digest)\n  BIND(<https://scrumboard.local/person/ada> AS ?n_actor)\n  BIND(NOW() AS ?n_at)\n  BIND(<https://scrumboard.local/entity/ga> AS ?n_target0)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/concept/x>, ?u) AS ?d_r0)\n  BIND(IF(BOUND(?ok), <http://www.w3.org/1999/02/22-rdf-syntax-ns#type>, ?u) AS ?d_r1)\n  BIND(IF(BOUND(?ok), <https://schema.org/DefinedTerm>, ?u) AS ?d_r2)\n  BIND(IF(BOUND(?ok), <https://schema.org/name>, ?u) AS ?d_r3)\n  BIND(IF(BOUND(?ok), \"x\", ?u) AS ?d_r4)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/entity/ga>, ?u) AS ?d_r5)\n  BIND(IF(BOUND(?ok), <https://schema.org/CreativeWork>, ?u) AS ?d_r6)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/ns#Card>, ?u) AS ?d_r7)\n  BIND(IF(BOUND(?ok), <https://schema.org/creator>, ?u) AS ?d_r8)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/person/ada>, ?u) AS ?d_r9)\n  BIND(IF(BOUND(?ok), <https://schema.org/dateCreated>, ?u) AS ?d_r10)\n  BIND(IF(BOUND(?ok), \"2026-10-20T06:00:00.000Z\", ?u) AS ?d_r11)\n  BIND(IF(BOUND(?ok), <https://schema.org/identifier>, ?u) AS ?d_r12)\n  BIND(IF(BOUND(?ok), \"1\", ?u) AS ?d_r13)\n  BIND(IF(BOUND(?ok), <https://schema.org/keywords>, ?u) AS ?d_r14)\n  BIND(IF(BOUND(?ok), \"renamed\", ?u) AS ?d_r15)\n  BIND(IF(BOUND(?ok), <https://schema.org/text>, ?u) AS ?d_r16)\n  BIND(IF(BOUND(?ok), \"body\", ?u) AS ?d_r17)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/ns#column>, ?u) AS ?d_r18)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/column/backlog>, ?u) AS ?d_r19)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/ns#label>, ?u) AS ?d_r20)\n  BIND(IF(BOUND(?ok), 2, ?u) AS ?d_r21)\n  BIND(IF(BOUND(?ok), <urn:ex:op/card/golden-2>, ?u) AS ?d_r22)\n  BIND(IF(BOUND(?ok), \"\\u007B\\u0022id\\u0022:\\u0022ga\\u0022,\\u0022shortId\\u0022:1,\\u0022title\\u0022:\\u0022renamed\\u0022,\\u0022description\\u0022:\\u0022body\\u0022,\\u0022column\\u0022:\\u0022backlog\\u0022,\\u0022createdAt\\u0022:\\u00222026-10-20T06:00:00.000Z\\u0022,\\u0022createdBy\\u0022:\\u0022ada\\u0022,\\u0022version\\u0022:2,\\u0022labels\\u0022:\\u005B\\u0022x\\u0022\\u005D\\u007D\", ?u) AS ?d_r23)\n  BIND(IF(BOUND(?ok), ?xs, ?u) AS ?d_xs)\n  BIND(IF(BOUND(?ok), ?xp, ?u) AS ?d_xp)\n  BIND(IF(BOUND(?ok), ?xo, ?u) AS ?d_xo)\n  BIND(IF(BOUND(?ok), ?xbs, ?u) AS ?d_xbs)\n  BIND(IF(BOUND(?ok), ?xbp, ?u) AS ?d_xbp)\n  BIND(IF(BOUND(?ok), ?xbo, ?u) AS ?d_xbo)\n}\n"
+  },
+  {
+   "label": "card.write two parts",
+   "intention": {
+    "kind": "card.write",
+    "opId": "urn:ex:op/card/golden-3",
+    "actor": "https://scrumboard.local/person/ada",
+    "parts": [
+     {
+      "iri": "https://scrumboard.local/entity/ga",
+      "expectedVersion": "1",
+      "version": 2,
+      "quads": [
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/concept/x"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/name"
+        },
+        {
+         "type": "literal",
+         "value": "x"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/concept/x"
+        },
+        {
+         "type": "uri",
+         "value": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/DefinedTerm"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/keywords"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/concept/x"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#label"
+        },
+        {
+         "type": "literal",
+         "value": "x"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#claimedBy"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/person/ada"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#column"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/column/backlog"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/creator"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/person/ada"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/dateCreated"
+        },
+        {
+         "type": "literal",
+         "value": "2026-10-20T06:00:00.000Z"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/text"
+        },
+        {
+         "type": "literal",
+         "value": "body"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/name"
+        },
+        {
+         "type": "literal",
+         "value": "card 1"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/identifier"
+        },
+        {
+         "type": "literal",
+         "value": "1"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#Card"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/CreativeWork"
+        }
+       ]
+      ],
+      "prior": [
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/keywords"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/concept/x"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#label"
+        },
+        {
+         "type": "literal",
+         "value": "x"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#column"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/column/backlog"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/creator"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/person/ada"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/dateCreated"
+        },
+        {
+         "type": "literal",
+         "value": "2026-10-20T06:00:00.000Z"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/text"
+        },
+        {
+         "type": "literal",
+         "value": "body"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/name"
+        },
+        {
+         "type": "literal",
+         "value": "card 1"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/identifier"
+        },
+        {
+         "type": "literal",
+         "value": "1"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#Card"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/CreativeWork"
+        }
+       ]
+      ],
+      "json": "{\"id\":\"ga\",\"shortId\":1,\"title\":\"card 1\",\"description\":\"body\",\"column\":\"backlog\",\"createdAt\":\"2026-10-20T06:00:00.000Z\",\"createdBy\":\"ada\",\"version\":2,\"labels\":[\"x\"],\"claimedBy\":\"ada\"}"
+     },
+     {
+      "iri": "https://scrumboard.local/entity/gb",
+      "expectedVersion": "1",
+      "version": 2,
+      "quads": [
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/gb/blocker/0"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#status"
+        },
+        {
+         "type": "literal",
+         "value": "open"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/gb/blocker/0"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#blockedByPerson"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/person/ada"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/gb/blocker/0"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#blocks"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/gb"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/gb/blocker/0"
+        },
+        {
+         "type": "uri",
+         "value": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#Blocker"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/gb"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#column"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/column/backlog"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/gb"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/creator"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/person/ada"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/gb"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/dateCreated"
+        },
+        {
+         "type": "literal",
+         "value": "2026-10-20T06:00:00.000Z"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/gb"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/text"
+        },
+        {
+         "type": "literal",
+         "value": "body"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/gb"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/name"
+        },
+        {
+         "type": "literal",
+         "value": "card 2"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/gb"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/identifier"
+        },
+        {
+         "type": "literal",
+         "value": "2"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/gb"
+        },
+        {
+         "type": "uri",
+         "value": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#Card"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/gb"
+        },
+        {
+         "type": "uri",
+         "value": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/CreativeWork"
+        }
+       ]
+      ],
+      "prior": [
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/gb/blocker/0"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#status"
+        },
+        {
+         "type": "literal",
+         "value": "open"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/gb/blocker/0"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#blockedByPerson"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/person/ada"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/gb/blocker/0"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#blocks"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/gb"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/gb/blocker/0"
+        },
+        {
+         "type": "uri",
+         "value": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#Blocker"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/gb"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#column"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/column/backlog"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/gb"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/creator"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/person/ada"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/gb"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/dateCreated"
+        },
+        {
+         "type": "literal",
+         "value": "2026-10-20T06:00:00.000Z"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/gb"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/text"
+        },
+        {
+         "type": "literal",
+         "value": "body"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/gb"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/name"
+        },
+        {
+         "type": "literal",
+         "value": "card 2"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/gb"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/identifier"
+        },
+        {
+         "type": "literal",
+         "value": "2"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/gb"
+        },
+        {
+         "type": "uri",
+         "value": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#Card"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/gb"
+        },
+        {
+         "type": "uri",
+         "value": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/CreativeWork"
+        }
+       ]
+      ],
+      "json": "{\"id\":\"gb\",\"shortId\":2,\"title\":\"card 2\",\"description\":\"body\",\"column\":\"backlog\",\"createdAt\":\"2026-10-20T06:00:00.000Z\",\"createdBy\":\"ada\",\"version\":2,\"blockers\":[{\"person\":\"ada\",\"status\":\"open\"}]}"
+     }
+    ]
+   },
+   "compiled": "DELETE {\n  ?d_xs ?d_xp ?d_xo .\n  GRAPH <urn:scrum:bookkeeping:executor> {\n    <urn:ex:dataset> <urn:ex:commitSeq> ?s .\n    ?d_xbs ?d_xbp ?d_xbo .\n  }\n}\nINSERT {\n  ?d_r0 ?d_r1 ?d_r2 .\n  ?d_r0 ?d_r3 ?d_r4 .\n  ?d_r5 ?d_r1 ?d_r6 .\n  ?d_r5 ?d_r1 ?d_r7 .\n  ?d_r5 ?d_r8 ?d_r9 .\n  ?d_r5 ?d_r10 ?d_r11 .\n  ?d_r5 ?d_r12 ?d_r13 .\n  ?d_r5 ?d_r14 ?d_r0 .\n  ?d_r5 ?d_r3 ?d_r15 .\n  ?d_r5 ?d_r16 ?d_r17 .\n  ?d_r5 ?d_r18 ?d_r9 .\n  ?d_r5 ?d_r19 ?d_r20 .\n  ?d_r5 ?d_r21 ?d_r4 .\n  ?d_r25 ?d_r1 ?d_r26 .\n  ?d_r25 ?d_r27 ?d_r9 .\n  ?d_r25 ?d_r28 ?d_r29 .\n  ?d_r25 ?d_r30 ?d_r31 .\n  ?d_r29 ?d_r1 ?d_r6 .\n  ?d_r29 ?d_r1 ?d_r7 .\n  ?d_r29 ?d_r8 ?d_r9 .\n  ?d_r29 ?d_r10 ?d_r11 .\n  ?d_r29 ?d_r12 ?d_r32 .\n  ?d_r29 ?d_r3 ?d_r33 .\n  ?d_r29 ?d_r16 ?d_r17 .\n  ?d_r29 ?d_r19 ?d_r20 .\n  GRAPH <urn:scrum:bookkeeping:executor> {\n    <urn:ex:dataset> <urn:ex:commitSeq> ?s1 .\n    <urn:ex:op/card/golden-3> <urn:ex:outcome> ?n_outcome .\n    <urn:ex:op/card/golden-3> <urn:ex:digest> ?n_digest .\n    <urn:ex:op/card/golden-3> <urn:ex:actor> ?n_actor .\n    <urn:ex:op/card/golden-3> <urn:ex:at> ?n_at .\n    <urn:ex:op/card/golden-3> <urn:ex:commitSeq> ?s1 .\n    <urn:ex:op/card/golden-3> <urn:ex:target> ?n_target0 .\n    ?d_r5 <urn:ex:ver> ?d_r22 .\n    ?d_r5 <urn:ex:recordedBy> ?d_r23 .\n    ?d_r5 <https://scrumboard.local/ns#entityJson> ?d_r24 .\n    ?d_r29 <urn:ex:ver> ?d_r22 .\n    ?d_r29 <urn:ex:recordedBy> ?d_r23 .\n    ?d_r29 <https://scrumboard.local/ns#entityJson> ?d_r34 .\n  }\n}\nWHERE {\n  OPTIONAL { GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:op/card/golden-3> <urn:ex:digest> ?dup } }\n  FILTER(!BOUND(?dup))\n  GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:dataset> <urn:ex:commitSeq> ?s . }\n  BIND(?s + 1 AS ?s1)\n  OPTIONAL {\n    GRAPH <urn:scrum:bookkeeping:executor> { <https://scrumboard.local/entity/ga> <urn:ex:ver> ?xv0 . }\n    FILTER(?xv0 = 1)\n    GRAPH <urn:scrum:bookkeeping:executor> { <https://scrumboard.local/entity/gb> <urn:ex:ver> ?xv1 . }\n    FILTER(?xv1 = 1)\n    BIND(true AS ?ok)\n  }\n  OPTIONAL {\n    { GRAPH <urn:scrum:bookkeeping:executor> { <https://scrumboard.local/entity/ga> ?xbp ?xbo } BIND(<https://scrumboard.local/entity/ga> AS ?xbs) }\n    UNION\n    { <https://scrumboard.local/entity/ga> ?xp ?xo BIND(<https://scrumboard.local/entity/ga> AS ?xs) }\n    UNION\n    { ?xs <https://scrumboard.local/ns#blocks> <https://scrumboard.local/entity/ga> ; <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://scrumboard.local/ns#Blocker> . FILTER(STRSTARTS(STR(?xs), \"https://scrumboard.local/entity/ga/\")) ?xs ?xp ?xo }\n    UNION\n    { ?xs <https://scrumboard.local/ns#ofCard> <https://scrumboard.local/entity/ga> ; <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://scrumboard.local/ns#ReleaseCondition> . FILTER(STRSTARTS(STR(?xs), \"https://scrumboard.local/entity/ga/\")) ?xs ?xp ?xo }\n    UNION\n    { <https://scrumboard.local/entity/ga> <https://scrumboard.local/ns#hasCheck> ?xs . ?xs ?xp ?xo }\n    UNION\n    { ?xs <https://scrumboard.local/ns#dependsOn> <https://scrumboard.local/entity/ga> BIND(<https://scrumboard.local/ns#dependsOn> AS ?xp) BIND(<https://scrumboard.local/entity/ga> AS ?xo) }\n    UNION\n    { <https://scrumboard.local/entity/ga> ?xl0 ?xh0 FILTER(isBlank(?xh0)) ?xh0 <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest>* ?xs . ?xs ?xp ?xo }\n    UNION\n    { VALUES (?xs ?xp ?xo) {\n      (<https://scrumboard.local/entity/ga> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://schema.org/CreativeWork>)\n      (<https://scrumboard.local/entity/ga> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://scrumboard.local/ns#Card>)\n      (<https://scrumboard.local/entity/ga> <https://schema.org/creator> <https://scrumboard.local/person/ada>)\n      (<https://scrumboard.local/entity/ga> <https://schema.org/dateCreated> \"2026-10-20T06:00:00.000Z\")\n      (<https://scrumboard.local/entity/ga> <https://schema.org/identifier> \"1\")\n      (<https://scrumboard.local/entity/ga> <https://schema.org/keywords> <https://scrumboard.local/concept/x>)\n      (<https://scrumboard.local/entity/ga> <https://schema.org/name> \"card 1\")\n      (<https://scrumboard.local/entity/ga> <https://schema.org/text> \"body\")\n      (<https://scrumboard.local/entity/ga> <https://scrumboard.local/ns#column> <https://scrumboard.local/column/backlog>)\n      (<https://scrumboard.local/entity/ga> <https://scrumboard.local/ns#label> \"x\")\n    } }\n    UNION\n    { GRAPH <urn:scrum:bookkeeping:executor> { <https://scrumboard.local/entity/gb> ?xbp ?xbo } BIND(<https://scrumboard.local/entity/gb> AS ?xbs) }\n    UNION\n    { <https://scrumboard.local/entity/gb> ?xp ?xo BIND(<https://scrumboard.local/entity/gb> AS ?xs) }\n    UNION\n    { ?xs <https://scrumboard.local/ns#blocks> <https://scrumboard.local/entity/gb> ; <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://scrumboard.local/ns#Blocker> . FILTER(STRSTARTS(STR(?xs), \"https://scrumboard.local/entity/gb/\")) ?xs ?xp ?xo }\n    UNION\n    { ?xs <https://scrumboard.local/ns#ofCard> <https://scrumboard.local/entity/gb> ; <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://scrumboard.local/ns#ReleaseCondition> . FILTER(STRSTARTS(STR(?xs), \"https://scrumboard.local/entity/gb/\")) ?xs ?xp ?xo }\n    UNION\n    { <https://scrumboard.local/entity/gb> <https://scrumboard.local/ns#hasCheck> ?xs . ?xs ?xp ?xo }\n    UNION\n    { ?xs <https://scrumboard.local/ns#dependsOn> <https://scrumboard.local/entity/gb> BIND(<https://scrumboard.local/ns#dependsOn> AS ?xp) BIND(<https://scrumboard.local/entity/gb> AS ?xo) }\n    UNION\n    { <https://scrumboard.local/entity/gb> ?xl1 ?xh1 FILTER(isBlank(?xh1)) ?xh1 <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest>* ?xs . ?xs ?xp ?xo }\n    UNION\n    { VALUES (?xs ?xp ?xo) {\n      (<https://scrumboard.local/entity/gb/blocker/0> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://scrumboard.local/ns#Blocker>)\n      (<https://scrumboard.local/entity/gb/blocker/0> <https://scrumboard.local/ns#blockedByPerson> <https://scrumboard.local/person/ada>)\n      (<https://scrumboard.local/entity/gb/blocker/0> <https://scrumboard.local/ns#blocks> <https://scrumboard.local/entity/gb>)\n      (<https://scrumboard.local/entity/gb/blocker/0> <https://scrumboard.local/ns#status> \"open\")\n      (<https://scrumboard.local/entity/gb> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://schema.org/CreativeWork>)\n      (<https://scrumboard.local/entity/gb> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://scrumboard.local/ns#Card>)\n      (<https://scrumboard.local/entity/gb> <https://schema.org/creator> <https://scrumboard.local/person/ada>)\n      (<https://scrumboard.local/entity/gb> <https://schema.org/dateCreated> \"2026-10-20T06:00:00.000Z\")\n      (<https://scrumboard.local/entity/gb> <https://schema.org/identifier> \"2\")\n      (<https://scrumboard.local/entity/gb> <https://schema.org/name> \"card 2\")\n      (<https://scrumboard.local/entity/gb> <https://schema.org/text> \"body\")\n      (<https://scrumboard.local/entity/gb> <https://scrumboard.local/ns#column> <https://scrumboard.local/column/backlog>)\n    } }\n  }\n  BIND(IF(BOUND(?ok), <urn:ex:APPLIED>, <urn:ex:PRECONDITION_FAILED>) AS ?n_outcome)\n  BIND(\"608194b57a204abdb70f26eb4939ece88a625031ead01299945f617a98095b30\" AS ?n_digest)\n  BIND(<https://scrumboard.local/person/ada> AS ?n_actor)\n  BIND(NOW() AS ?n_at)\n  BIND(<https://scrumboard.local/entity/ga> AS ?n_target0)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/concept/x>, ?u) AS ?d_r0)\n  BIND(IF(BOUND(?ok), <http://www.w3.org/1999/02/22-rdf-syntax-ns#type>, ?u) AS ?d_r1)\n  BIND(IF(BOUND(?ok), <https://schema.org/DefinedTerm>, ?u) AS ?d_r2)\n  BIND(IF(BOUND(?ok), <https://schema.org/name>, ?u) AS ?d_r3)\n  BIND(IF(BOUND(?ok), \"x\", ?u) AS ?d_r4)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/entity/ga>, ?u) AS ?d_r5)\n  BIND(IF(BOUND(?ok), <https://schema.org/CreativeWork>, ?u) AS ?d_r6)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/ns#Card>, ?u) AS ?d_r7)\n  BIND(IF(BOUND(?ok), <https://schema.org/creator>, ?u) AS ?d_r8)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/person/ada>, ?u) AS ?d_r9)\n  BIND(IF(BOUND(?ok), <https://schema.org/dateCreated>, ?u) AS ?d_r10)\n  BIND(IF(BOUND(?ok), \"2026-10-20T06:00:00.000Z\", ?u) AS ?d_r11)\n  BIND(IF(BOUND(?ok), <https://schema.org/identifier>, ?u) AS ?d_r12)\n  BIND(IF(BOUND(?ok), \"1\", ?u) AS ?d_r13)\n  BIND(IF(BOUND(?ok), <https://schema.org/keywords>, ?u) AS ?d_r14)\n  BIND(IF(BOUND(?ok), \"card 1\", ?u) AS ?d_r15)\n  BIND(IF(BOUND(?ok), <https://schema.org/text>, ?u) AS ?d_r16)\n  BIND(IF(BOUND(?ok), \"body\", ?u) AS ?d_r17)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/ns#claimedBy>, ?u) AS ?d_r18)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/ns#column>, ?u) AS ?d_r19)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/column/backlog>, ?u) AS ?d_r20)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/ns#label>, ?u) AS ?d_r21)\n  BIND(IF(BOUND(?ok), 2, ?u) AS ?d_r22)\n  BIND(IF(BOUND(?ok), <urn:ex:op/card/golden-3>, ?u) AS ?d_r23)\n  BIND(IF(BOUND(?ok), \"\\u007B\\u0022id\\u0022:\\u0022ga\\u0022,\\u0022shortId\\u0022:1,\\u0022title\\u0022:\\u0022card 1\\u0022,\\u0022description\\u0022:\\u0022body\\u0022,\\u0022column\\u0022:\\u0022backlog\\u0022,\\u0022createdAt\\u0022:\\u00222026-10-20T06:00:00.000Z\\u0022,\\u0022createdBy\\u0022:\\u0022ada\\u0022,\\u0022version\\u0022:2,\\u0022labels\\u0022:\\u005B\\u0022x\\u0022\\u005D,\\u0022claimedBy\\u0022:\\u0022ada\\u0022\\u007D\", ?u) AS ?d_r24)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/entity/gb/blocker/0>, ?u) AS ?d_r25)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/ns#Blocker>, ?u) AS ?d_r26)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/ns#blockedByPerson>, ?u) AS ?d_r27)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/ns#blocks>, ?u) AS ?d_r28)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/entity/gb>, ?u) AS ?d_r29)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/ns#status>, ?u) AS ?d_r30)\n  BIND(IF(BOUND(?ok), \"open\", ?u) AS ?d_r31)\n  BIND(IF(BOUND(?ok), \"2\", ?u) AS ?d_r32)\n  BIND(IF(BOUND(?ok), \"card 2\", ?u) AS ?d_r33)\n  BIND(IF(BOUND(?ok), \"\\u007B\\u0022id\\u0022:\\u0022gb\\u0022,\\u0022shortId\\u0022:2,\\u0022title\\u0022:\\u0022card 2\\u0022,\\u0022description\\u0022:\\u0022body\\u0022,\\u0022column\\u0022:\\u0022backlog\\u0022,\\u0022createdAt\\u0022:\\u00222026-10-20T06:00:00.000Z\\u0022,\\u0022createdBy\\u0022:\\u0022ada\\u0022,\\u0022version\\u0022:2,\\u0022blockers\\u0022:\\u005B\\u007B\\u0022person\\u0022:\\u0022ada\\u0022,\\u0022status\\u0022:\\u0022open\\u0022\\u007D\\u005D\\u007D\", ?u) AS ?d_r34)\n  BIND(IF(BOUND(?ok), ?xs, ?u) AS ?d_xs)\n  BIND(IF(BOUND(?ok), ?xp, ?u) AS ?d_xp)\n  BIND(IF(BOUND(?ok), ?xo, ?u) AS ?d_xo)\n  BIND(IF(BOUND(?ok), ?xbs, ?u) AS ?d_xbs)\n  BIND(IF(BOUND(?ok), ?xbp, ?u) AS ?d_xbp)\n  BIND(IF(BOUND(?ok), ?xbo, ?u) AS ?d_xbo)\n}\n"
+  },
+  {
+   "label": "card.write with K4 pending",
+   "intention": {
+    "kind": "card.write",
+    "opId": "urn:ex:op/card/golden-4",
+    "actor": "https://scrumboard.local/person/ada",
+    "parts": [
+     {
+      "iri": "https://scrumboard.local/entity/ga",
+      "expectedVersion": "1",
+      "version": 2,
+      "quads": [
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/concept/x"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/name"
+        },
+        {
+         "type": "literal",
+         "value": "x"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/concept/x"
+        },
+        {
+         "type": "uri",
+         "value": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/DefinedTerm"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/keywords"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/concept/x"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#label"
+        },
+        {
+         "type": "literal",
+         "value": "x"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#claimedBy"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/person/ada"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#column"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/column/backlog"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/creator"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/person/ada"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/dateCreated"
+        },
+        {
+         "type": "literal",
+         "value": "2026-10-20T06:00:00.000Z"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/text"
+        },
+        {
+         "type": "literal",
+         "value": "body"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/name"
+        },
+        {
+         "type": "literal",
+         "value": "card 1"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/identifier"
+        },
+        {
+         "type": "literal",
+         "value": "1"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#Card"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/CreativeWork"
+        }
+       ]
+      ],
+      "prior": [
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/keywords"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/concept/x"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#label"
+        },
+        {
+         "type": "literal",
+         "value": "x"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#column"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/column/backlog"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/creator"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/person/ada"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/dateCreated"
+        },
+        {
+         "type": "literal",
+         "value": "2026-10-20T06:00:00.000Z"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/text"
+        },
+        {
+         "type": "literal",
+         "value": "body"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/name"
+        },
+        {
+         "type": "literal",
+         "value": "card 1"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/identifier"
+        },
+        {
+         "type": "literal",
+         "value": "1"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+        },
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/ns#Card"
+        }
+       ],
+       [
+        {
+         "type": "uri",
+         "value": "https://scrumboard.local/entity/ga"
+        },
+        {
+         "type": "uri",
+         "value": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+        },
+        {
+         "type": "uri",
+         "value": "https://schema.org/CreativeWork"
+        }
+       ]
+      ],
+      "json": "{\"id\":\"ga\",\"shortId\":1,\"title\":\"card 1\",\"description\":\"body\",\"column\":\"backlog\",\"createdAt\":\"2026-10-20T06:00:00.000Z\",\"createdBy\":\"ada\",\"version\":2,\"labels\":[\"x\"],\"claimedBy\":\"ada\"}"
+     }
+    ],
+    "pending": [
+     {
+      "card": "https://scrumboard.local/entity/ga",
+      "mutationId": "mut-golden",
+      "json": "{\"x\":1}"
+     }
+    ]
+   },
+   "compiled": "DELETE {\n  ?d_xs ?d_xp ?d_xo .\n  GRAPH <urn:scrum:bookkeeping:executor> {\n    <urn:ex:dataset> <urn:ex:commitSeq> ?s .\n    ?d_xbs ?d_xbp ?d_xbo .\n  }\n}\nINSERT {\n  ?d_r0 ?d_r1 ?d_r2 .\n  ?d_r0 ?d_r3 ?d_r4 .\n  ?d_r5 ?d_r1 ?d_r6 .\n  ?d_r5 ?d_r1 ?d_r7 .\n  ?d_r5 ?d_r8 ?d_r9 .\n  ?d_r5 ?d_r10 ?d_r11 .\n  ?d_r5 ?d_r12 ?d_r13 .\n  ?d_r5 ?d_r14 ?d_r0 .\n  ?d_r5 ?d_r3 ?d_r15 .\n  ?d_r5 ?d_r16 ?d_r17 .\n  ?d_r5 ?d_r18 ?d_r9 .\n  ?d_r5 ?d_r19 ?d_r20 .\n  ?d_r5 ?d_r21 ?d_r4 .\n  ?d_r25 <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> ?d_r26 .\n  GRAPH <urn:scrum:bookkeeping:executor> {\n    <urn:ex:dataset> <urn:ex:commitSeq> ?s1 .\n    <urn:ex:op/card/golden-4> <urn:ex:outcome> ?n_outcome .\n    <urn:ex:op/card/golden-4> <urn:ex:digest> ?n_digest .\n    <urn:ex:op/card/golden-4> <urn:ex:actor> ?n_actor .\n    <urn:ex:op/card/golden-4> <urn:ex:at> ?n_at .\n    <urn:ex:op/card/golden-4> <urn:ex:commitSeq> ?s1 .\n    <urn:ex:op/card/golden-4> <urn:ex:target> ?n_target0 .\n    ?d_r5 <urn:ex:ver> ?d_r22 .\n    ?d_r5 <urn:ex:recordedBy> ?d_r23 .\n    ?d_r5 <https://scrumboard.local/ns#entityJson> ?d_r24 .\n    ?d_r25 <https://scrumboard.local/ns#entityJson> ?d_r27 .\n  }\n}\nWHERE {\n  OPTIONAL { GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:op/card/golden-4> <urn:ex:digest> ?dup } }\n  FILTER(!BOUND(?dup))\n  GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:dataset> <urn:ex:commitSeq> ?s . }\n  BIND(?s + 1 AS ?s1)\n  OPTIONAL {\n    GRAPH <urn:scrum:bookkeeping:executor> { <https://scrumboard.local/entity/ga> <urn:ex:ver> ?xv0 . }\n    FILTER(?xv0 = 1)\n    FILTER NOT EXISTS { { <https://scrumboard.local/entity/ga/announce/mut-golden> ?fp ?fo } UNION { GRAPH <urn:scrum:bookkeeping:executor> { <https://scrumboard.local/entity/ga/announce/mut-golden> ?fp ?fo } } }\n    BIND(true AS ?ok)\n  }\n  OPTIONAL {\n    { GRAPH <urn:scrum:bookkeeping:executor> { <https://scrumboard.local/entity/ga> ?xbp ?xbo } BIND(<https://scrumboard.local/entity/ga> AS ?xbs) }\n    UNION\n    { <https://scrumboard.local/entity/ga> ?xp ?xo BIND(<https://scrumboard.local/entity/ga> AS ?xs) }\n    UNION\n    { ?xs <https://scrumboard.local/ns#blocks> <https://scrumboard.local/entity/ga> ; <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://scrumboard.local/ns#Blocker> . FILTER(STRSTARTS(STR(?xs), \"https://scrumboard.local/entity/ga/\")) ?xs ?xp ?xo }\n    UNION\n    { ?xs <https://scrumboard.local/ns#ofCard> <https://scrumboard.local/entity/ga> ; <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://scrumboard.local/ns#ReleaseCondition> . FILTER(STRSTARTS(STR(?xs), \"https://scrumboard.local/entity/ga/\")) ?xs ?xp ?xo }\n    UNION\n    { <https://scrumboard.local/entity/ga> <https://scrumboard.local/ns#hasCheck> ?xs . ?xs ?xp ?xo }\n    UNION\n    { ?xs <https://scrumboard.local/ns#dependsOn> <https://scrumboard.local/entity/ga> BIND(<https://scrumboard.local/ns#dependsOn> AS ?xp) BIND(<https://scrumboard.local/entity/ga> AS ?xo) }\n    UNION\n    { <https://scrumboard.local/entity/ga> ?xl0 ?xh0 FILTER(isBlank(?xh0)) ?xh0 <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest>* ?xs . ?xs ?xp ?xo }\n    UNION\n    { VALUES (?xs ?xp ?xo) {\n      (<https://scrumboard.local/entity/ga> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://schema.org/CreativeWork>)\n      (<https://scrumboard.local/entity/ga> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://scrumboard.local/ns#Card>)\n      (<https://scrumboard.local/entity/ga> <https://schema.org/creator> <https://scrumboard.local/person/ada>)\n      (<https://scrumboard.local/entity/ga> <https://schema.org/dateCreated> \"2026-10-20T06:00:00.000Z\")\n      (<https://scrumboard.local/entity/ga> <https://schema.org/identifier> \"1\")\n      (<https://scrumboard.local/entity/ga> <https://schema.org/keywords> <https://scrumboard.local/concept/x>)\n      (<https://scrumboard.local/entity/ga> <https://schema.org/name> \"card 1\")\n      (<https://scrumboard.local/entity/ga> <https://schema.org/text> \"body\")\n      (<https://scrumboard.local/entity/ga> <https://scrumboard.local/ns#column> <https://scrumboard.local/column/backlog>)\n      (<https://scrumboard.local/entity/ga> <https://scrumboard.local/ns#label> \"x\")\n    } }\n  }\n  BIND(IF(BOUND(?ok), <urn:ex:APPLIED>, <urn:ex:PRECONDITION_FAILED>) AS ?n_outcome)\n  BIND(\"1b9460bbe14596e280d95b803352cdf1aba9867dbb4e7d2bd9c0646ad364b8f1\" AS ?n_digest)\n  BIND(<https://scrumboard.local/person/ada> AS ?n_actor)\n  BIND(NOW() AS ?n_at)\n  BIND(<https://scrumboard.local/entity/ga> AS ?n_target0)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/concept/x>, ?u) AS ?d_r0)\n  BIND(IF(BOUND(?ok), <http://www.w3.org/1999/02/22-rdf-syntax-ns#type>, ?u) AS ?d_r1)\n  BIND(IF(BOUND(?ok), <https://schema.org/DefinedTerm>, ?u) AS ?d_r2)\n  BIND(IF(BOUND(?ok), <https://schema.org/name>, ?u) AS ?d_r3)\n  BIND(IF(BOUND(?ok), \"x\", ?u) AS ?d_r4)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/entity/ga>, ?u) AS ?d_r5)\n  BIND(IF(BOUND(?ok), <https://schema.org/CreativeWork>, ?u) AS ?d_r6)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/ns#Card>, ?u) AS ?d_r7)\n  BIND(IF(BOUND(?ok), <https://schema.org/creator>, ?u) AS ?d_r8)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/person/ada>, ?u) AS ?d_r9)\n  BIND(IF(BOUND(?ok), <https://schema.org/dateCreated>, ?u) AS ?d_r10)\n  BIND(IF(BOUND(?ok), \"2026-10-20T06:00:00.000Z\", ?u) AS ?d_r11)\n  BIND(IF(BOUND(?ok), <https://schema.org/identifier>, ?u) AS ?d_r12)\n  BIND(IF(BOUND(?ok), \"1\", ?u) AS ?d_r13)\n  BIND(IF(BOUND(?ok), <https://schema.org/keywords>, ?u) AS ?d_r14)\n  BIND(IF(BOUND(?ok), \"card 1\", ?u) AS ?d_r15)\n  BIND(IF(BOUND(?ok), <https://schema.org/text>, ?u) AS ?d_r16)\n  BIND(IF(BOUND(?ok), \"body\", ?u) AS ?d_r17)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/ns#claimedBy>, ?u) AS ?d_r18)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/ns#column>, ?u) AS ?d_r19)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/column/backlog>, ?u) AS ?d_r20)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/ns#label>, ?u) AS ?d_r21)\n  BIND(IF(BOUND(?ok), 2, ?u) AS ?d_r22)\n  BIND(IF(BOUND(?ok), <urn:ex:op/card/golden-4>, ?u) AS ?d_r23)\n  BIND(IF(BOUND(?ok), \"\\u007B\\u0022id\\u0022:\\u0022ga\\u0022,\\u0022shortId\\u0022:1,\\u0022title\\u0022:\\u0022card 1\\u0022,\\u0022description\\u0022:\\u0022body\\u0022,\\u0022column\\u0022:\\u0022backlog\\u0022,\\u0022createdAt\\u0022:\\u00222026-10-20T06:00:00.000Z\\u0022,\\u0022createdBy\\u0022:\\u0022ada\\u0022,\\u0022version\\u0022:2,\\u0022labels\\u0022:\\u005B\\u0022x\\u0022\\u005D,\\u0022claimedBy\\u0022:\\u0022ada\\u0022\\u007D\", ?u) AS ?d_r24)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/entity/ga/announce/mut-golden>, ?u) AS ?d_r25)\n  BIND(IF(BOUND(?ok), <https://scrumboard.local/ns#PendingAnnouncement>, ?u) AS ?d_r26)\n  BIND(IF(BOUND(?ok), \"\\u007B\\u0022x\\u0022:1\\u007D\", ?u) AS ?d_r27)\n  BIND(IF(BOUND(?ok), ?xs, ?u) AS ?d_xs)\n  BIND(IF(BOUND(?ok), ?xp, ?u) AS ?d_xp)\n  BIND(IF(BOUND(?ok), ?xo, ?u) AS ?d_xo)\n  BIND(IF(BOUND(?ok), ?xbs, ?u) AS ?d_xbs)\n  BIND(IF(BOUND(?ok), ?xbp, ?u) AS ?d_xbp)\n  BIND(IF(BOUND(?ok), ?xbo, ?u) AS ?d_xbo)\n}\n"
+  },
+  {
+   "label": "postseq.reserve ordinary",
+   "intention": {
+    "kind": "postseq.reserve",
+    "opId": "urn:ex:op/postseq/reserve/79f3f18a9eb101abb4eea675bfcc3184ddfc9d3971f4e97215e103dfef9e6de3",
+    "actor": "urn:ex:seat/ada",
+    "reservations": [
+     {
+      "mode": "ordinary",
+      "author": "ada",
+      "requestId": "r-golden",
+      "draft": {
+       "body": "golden",
+       "attachedTo": null,
+       "mentions": [],
+       "attachments": [],
+       "conversation": null,
+       "onBehalfOf": null
+      }
+     }
+    ]
+   },
+   "compiled": "DELETE {\n  GRAPH <urn:scrum:bookkeeping:executor> {\n    <urn:ex:dataset> <urn:ex:commitSeq> ?s .\n    ?d_r0 <urn:ex:postseq/nextPostSeq> ?d_next .\n    ?d_r0 <urn:ex:postseq/version> ?d_verOld .\n  }\n}\nINSERT {\n  GRAPH <urn:scrum:bookkeeping:executor> {\n    <urn:ex:dataset> <urn:ex:commitSeq> ?s1 .\n    <urn:ex:op/postseq/reserve/79f3f18a9eb101abb4eea675bfcc3184ddfc9d3971f4e97215e103dfef9e6de3> <urn:ex:outcome> ?n_outcome .\n    <urn:ex:op/postseq/reserve/79f3f18a9eb101abb4eea675bfcc3184ddfc9d3971f4e97215e103dfef9e6de3> <urn:ex:digest> ?n_digest .\n    <urn:ex:op/postseq/reserve/79f3f18a9eb101abb4eea675bfcc3184ddfc9d3971f4e97215e103dfef9e6de3> <urn:ex:actor> ?n_actor .\n    <urn:ex:op/postseq/reserve/79f3f18a9eb101abb4eea675bfcc3184ddfc9d3971f4e97215e103dfef9e6de3> <urn:ex:at> ?n_at .\n    <urn:ex:op/postseq/reserve/79f3f18a9eb101abb4eea675bfcc3184ddfc9d3971f4e97215e103dfef9e6de3> <urn:ex:commitSeq> ?s1 .\n    ?d_r0 <urn:ex:postseq/nextPostSeq> ?d_nextNew .\n    ?d_r0 <urn:ex:postseq/version> ?d_verNew .\n    ?d_r1 a ?d_r2 .\n    ?d_r1 <urn:ex:postseq/mode> ?d_r3 .\n    ?d_r1 <urn:ex:postseq/postId> ?d_r4 .\n    ?d_r1 <urn:ex:postseq/reserveOpId> ?d_r5 .\n    ?d_r1 <urn:ex:postseq/reserveDigest> ?d_r6 .\n    ?d_r1 <urn:ex:postseq/postSeqEpoch> ?d_r7 .\n    ?d_r1 <urn:ex:postseq/postSeq> ?d_ps0 .\n    ?d_r1 <urn:ex:postseq/createdAt> ?d_r8 .\n    ?d_r1 <urn:ex:postseq/index> ?d_r9 .\n    ?d_r1 <urn:ex:postseq/identityJson> ?d_r10 .\n    ?d_r1 <urn:ex:postseq/draftJson> ?d_r11 .\n  }\n}\nWHERE {\n  OPTIONAL { GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:op/postseq/reserve/79f3f18a9eb101abb4eea675bfcc3184ddfc9d3971f4e97215e103dfef9e6de3> <urn:ex:digest> ?dup } }\n  FILTER(!BOUND(?dup))\n  GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:dataset> <urn:ex:commitSeq> ?s . }\n  BIND(?s + 1 AS ?s1)\n  OPTIONAL {\n    GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:postseq/allocator> a <urn:ex:postseq/Allocator> ; <urn:ex:postseq/postSeqEpoch> ?x_epoch ; <urn:ex:postseq/nextPostSeq> ?x_next ; <urn:ex:postseq/version> ?x_version . }\n    FILTER(isLiteral(?x_epoch) && DATATYPE(?x_epoch) = <http://www.w3.org/2001/XMLSchema#string> && LANG(?x_epoch) = \"\" && STR(?x_epoch) != \"\")\n    FILTER(?x_next + 1 <= \"9007199254740991\"^^<http://www.w3.org/2001/XMLSchema#integer>)\n    FILTER(?x_version + 1 <= \"9007199254740991\"^^<http://www.w3.org/2001/XMLSchema#integer>)\n    FILTER(?x_version + 1 > 0)\n    FILTER(DATATYPE(?x_next) = <http://www.w3.org/2001/XMLSchema#integer> && DATATYPE(?x_version) = <http://www.w3.org/2001/XMLSchema#integer>)\n    FILTER(?x_next > 0 && ?x_version > 0)\n    FILTER NOT EXISTS { GRAPH <urn:scrum:bookkeeping:executor> { ?x_alloc2 a <urn:ex:postseq/Allocator> FILTER(?x_alloc2 != <urn:ex:postseq/allocator>) } }\n    FILTER NOT EXISTS { GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:postseq/allocator> <urn:ex:postseq/nextPostSeq> ?xn2 FILTER(!sameTerm(?xn2, ?x_next)) } }\n    FILTER NOT EXISTS { GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:postseq/allocator> <urn:ex:postseq/version> ?xv2 FILTER(!sameTerm(?xv2, ?x_version)) } }\n    FILTER NOT EXISTS { GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:postseq/allocator> <urn:ex:postseq/postSeqEpoch> ?xe2 FILTER(!sameTerm(?xe2, ?x_epoch)) } }\n    FILTER NOT EXISTS { { <urn:ex:postseq/reservation/d09981b0-6e3b-5941-9b6b-18929717f692> ?xp ?xo } UNION { GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:postseq/reservation/d09981b0-6e3b-5941-9b6b-18929717f692> ?xp ?xo } } }\n    BIND(true AS ?ok)\n  }\n  BIND(IF(BOUND(?ok), <urn:ex:APPLIED>, <urn:ex:PRECONDITION_FAILED>) AS ?n_outcome)\n  BIND(\"4d17b1d06dd39b66c0561dd4225d0770b9bcf7c89adad189f27e6b0a462ab166\" AS ?n_digest)\n  BIND(<urn:ex:seat/ada> AS ?n_actor)\n  BIND(NOW() AS ?n_at)\n  BIND(IF(BOUND(?ok), ?x_next, ?u) AS ?d_next)\n  BIND(IF(BOUND(?ok), ?x_version, ?u) AS ?d_verOld)\n  BIND(IF(BOUND(?ok), ?x_version + 1, ?u) AS ?d_verNew)\n  BIND(IF(BOUND(?ok), ?x_next + 1, ?u) AS ?d_nextNew)\n  BIND(IF(BOUND(?ok), ?x_next + 0, ?u) AS ?d_ps0)\n  BIND(IF(BOUND(?ok), <urn:ex:postseq/allocator>, ?u) AS ?d_r0)\n  BIND(IF(BOUND(?ok), <urn:ex:postseq/reservation/d09981b0-6e3b-5941-9b6b-18929717f692>, ?u) AS ?d_r1)\n  BIND(IF(BOUND(?ok), <urn:ex:postseq/Reservation>, ?u) AS ?d_r2)\n  BIND(IF(BOUND(?ok), \"ordinary\", ?u) AS ?d_r3)\n  BIND(IF(BOUND(?ok), \"d09981b0-6e3b-5941-9b6b-18929717f692\", ?u) AS ?d_r4)\n  BIND(IF(BOUND(?ok), <urn:ex:op/postseq/reserve/79f3f18a9eb101abb4eea675bfcc3184ddfc9d3971f4e97215e103dfef9e6de3>, ?u) AS ?d_r5)\n  BIND(IF(BOUND(?ok), \"4d17b1d06dd39b66c0561dd4225d0770b9bcf7c89adad189f27e6b0a462ab166\", ?u) AS ?d_r6)\n  BIND(IF(BOUND(?ok), ?x_epoch, ?u) AS ?d_r7)\n  BIND(IF(BOUND(?ok), ?n_at, ?u) AS ?d_r8)\n  BIND(IF(BOUND(?ok), 0, ?u) AS ?d_r9)\n  BIND(IF(BOUND(?ok), \"{\\\"author\\\":\\\"ada\\\",\\\"requestId\\\":\\\"r-golden\\\"}\", ?u) AS ?d_r10)\n  BIND(IF(BOUND(?ok), \"{\\\"body\\\":\\\"golden\\\",\\\"attachedTo\\\":null,\\\"mentions\\\":[],\\\"attachments\\\":[],\\\"conversation\\\":null,\\\"onBehalfOf\\\":null,\\\"recovered\\\":null,\\\"opId\\\":null,\\\"origin\\\":null,\\\"originalAuthorToken\\\":null,\\\"authorCorrectedAt\\\":null,\\\"authorCorrectedBy\\\":null}\", ?u) AS ?d_r11)\n}\n"
+  },
+  {
+   "label": "postseq.reserve announcement",
+   "intention": {
+    "kind": "postseq.reserve",
+    "opId": "urn:ex:op/postseq/reserve/8bf43355fed0e303a422a4ec21b6e1be688e82a78c13ed0358759a507f4f7f37",
+    "actor": "urn:ex:seat/ada",
+    "reservations": [
+     {
+      "mode": "announcement",
+      "mutationId": "mut-golden",
+      "slot": "claim",
+      "draft": {
+       "body": "announce",
+       "author": "board",
+       "originActor": "ada",
+       "occurredAt": "2026-10-20T06:00:00.000Z",
+       "mentions": [
+        "ada"
+       ],
+       "notify": false
+      }
+     }
+    ]
+   },
+   "compiled": "DELETE {\n  GRAPH <urn:scrum:bookkeeping:executor> {\n    <urn:ex:dataset> <urn:ex:commitSeq> ?s .\n    ?d_r0 <urn:ex:postseq/nextPostSeq> ?d_next .\n    ?d_r0 <urn:ex:postseq/version> ?d_verOld .\n  }\n}\nINSERT {\n  GRAPH <urn:scrum:bookkeeping:executor> {\n    <urn:ex:dataset> <urn:ex:commitSeq> ?s1 .\n    <urn:ex:op/postseq/reserve/8bf43355fed0e303a422a4ec21b6e1be688e82a78c13ed0358759a507f4f7f37> <urn:ex:outcome> ?n_outcome .\n    <urn:ex:op/postseq/reserve/8bf43355fed0e303a422a4ec21b6e1be688e82a78c13ed0358759a507f4f7f37> <urn:ex:digest> ?n_digest .\n    <urn:ex:op/postseq/reserve/8bf43355fed0e303a422a4ec21b6e1be688e82a78c13ed0358759a507f4f7f37> <urn:ex:actor> ?n_actor .\n    <urn:ex:op/postseq/reserve/8bf43355fed0e303a422a4ec21b6e1be688e82a78c13ed0358759a507f4f7f37> <urn:ex:at> ?n_at .\n    <urn:ex:op/postseq/reserve/8bf43355fed0e303a422a4ec21b6e1be688e82a78c13ed0358759a507f4f7f37> <urn:ex:commitSeq> ?s1 .\n    ?d_r0 <urn:ex:postseq/nextPostSeq> ?d_nextNew .\n    ?d_r0 <urn:ex:postseq/version> ?d_verNew .\n    ?d_r1 a ?d_r2 .\n    ?d_r1 <urn:ex:postseq/mode> ?d_r3 .\n    ?d_r1 <urn:ex:postseq/postId> ?d_r4 .\n    ?d_r1 <urn:ex:postseq/reserveOpId> ?d_r5 .\n    ?d_r1 <urn:ex:postseq/reserveDigest> ?d_r6 .\n    ?d_r1 <urn:ex:postseq/postSeqEpoch> ?d_r7 .\n    ?d_r1 <urn:ex:postseq/postSeq> ?d_ps0 .\n    ?d_r1 <urn:ex:postseq/createdAt> ?d_r8 .\n    ?d_r1 <urn:ex:postseq/index> ?d_r9 .\n    ?d_r1 <urn:ex:postseq/identityJson> ?d_r10 .\n    ?d_r1 <urn:ex:postseq/draftJson> ?d_r11 .\n  }\n}\nWHERE {\n  OPTIONAL { GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:op/postseq/reserve/8bf43355fed0e303a422a4ec21b6e1be688e82a78c13ed0358759a507f4f7f37> <urn:ex:digest> ?dup } }\n  FILTER(!BOUND(?dup))\n  GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:dataset> <urn:ex:commitSeq> ?s . }\n  BIND(?s + 1 AS ?s1)\n  OPTIONAL {\n    GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:postseq/allocator> a <urn:ex:postseq/Allocator> ; <urn:ex:postseq/postSeqEpoch> ?x_epoch ; <urn:ex:postseq/nextPostSeq> ?x_next ; <urn:ex:postseq/version> ?x_version . }\n    FILTER(isLiteral(?x_epoch) && DATATYPE(?x_epoch) = <http://www.w3.org/2001/XMLSchema#string> && LANG(?x_epoch) = \"\" && STR(?x_epoch) != \"\")\n    FILTER(?x_next + 1 <= \"9007199254740991\"^^<http://www.w3.org/2001/XMLSchema#integer>)\n    FILTER(?x_version + 1 <= \"9007199254740991\"^^<http://www.w3.org/2001/XMLSchema#integer>)\n    FILTER(?x_version + 1 > 0)\n    FILTER(DATATYPE(?x_next) = <http://www.w3.org/2001/XMLSchema#integer> && DATATYPE(?x_version) = <http://www.w3.org/2001/XMLSchema#integer>)\n    FILTER(?x_next > 0 && ?x_version > 0)\n    FILTER NOT EXISTS { GRAPH <urn:scrum:bookkeeping:executor> { ?x_alloc2 a <urn:ex:postseq/Allocator> FILTER(?x_alloc2 != <urn:ex:postseq/allocator>) } }\n    FILTER NOT EXISTS { GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:postseq/allocator> <urn:ex:postseq/nextPostSeq> ?xn2 FILTER(!sameTerm(?xn2, ?x_next)) } }\n    FILTER NOT EXISTS { GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:postseq/allocator> <urn:ex:postseq/version> ?xv2 FILTER(!sameTerm(?xv2, ?x_version)) } }\n    FILTER NOT EXISTS { GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:postseq/allocator> <urn:ex:postseq/postSeqEpoch> ?xe2 FILTER(!sameTerm(?xe2, ?x_epoch)) } }\n    FILTER NOT EXISTS { { <urn:ex:postseq/reservation/00a8c7dd-2440-53df-959e-1418347eafdf> ?xp ?xo } UNION { GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:postseq/reservation/00a8c7dd-2440-53df-959e-1418347eafdf> ?xp ?xo } } }\n    BIND(true AS ?ok)\n  }\n  BIND(IF(BOUND(?ok), <urn:ex:APPLIED>, <urn:ex:PRECONDITION_FAILED>) AS ?n_outcome)\n  BIND(\"85154dbbe2332547010e05e1d523f06d9f9beaf1b5599dea64d3e985e1f412bb\" AS ?n_digest)\n  BIND(<urn:ex:seat/ada> AS ?n_actor)\n  BIND(NOW() AS ?n_at)\n  BIND(IF(BOUND(?ok), ?x_next, ?u) AS ?d_next)\n  BIND(IF(BOUND(?ok), ?x_version, ?u) AS ?d_verOld)\n  BIND(IF(BOUND(?ok), ?x_version + 1, ?u) AS ?d_verNew)\n  BIND(IF(BOUND(?ok), ?x_next + 1, ?u) AS ?d_nextNew)\n  BIND(IF(BOUND(?ok), ?x_next + 0, ?u) AS ?d_ps0)\n  BIND(IF(BOUND(?ok), <urn:ex:postseq/allocator>, ?u) AS ?d_r0)\n  BIND(IF(BOUND(?ok), <urn:ex:postseq/reservation/00a8c7dd-2440-53df-959e-1418347eafdf>, ?u) AS ?d_r1)\n  BIND(IF(BOUND(?ok), <urn:ex:postseq/Reservation>, ?u) AS ?d_r2)\n  BIND(IF(BOUND(?ok), \"announcement\", ?u) AS ?d_r3)\n  BIND(IF(BOUND(?ok), \"00a8c7dd-2440-53df-959e-1418347eafdf\", ?u) AS ?d_r4)\n  BIND(IF(BOUND(?ok), <urn:ex:op/postseq/reserve/8bf43355fed0e303a422a4ec21b6e1be688e82a78c13ed0358759a507f4f7f37>, ?u) AS ?d_r5)\n  BIND(IF(BOUND(?ok), \"85154dbbe2332547010e05e1d523f06d9f9beaf1b5599dea64d3e985e1f412bb\", ?u) AS ?d_r6)\n  BIND(IF(BOUND(?ok), ?x_epoch, ?u) AS ?d_r7)\n  BIND(IF(BOUND(?ok), ?n_at, ?u) AS ?d_r8)\n  BIND(IF(BOUND(?ok), 0, ?u) AS ?d_r9)\n  BIND(IF(BOUND(?ok), \"{\\\"mutationId\\\":\\\"mut-golden\\\",\\\"slot\\\":\\\"claim\\\"}\", ?u) AS ?d_r10)\n  BIND(IF(BOUND(?ok), \"{\\\"body\\\":\\\"announce\\\",\\\"author\\\":\\\"board\\\",\\\"originActor\\\":\\\"ada\\\",\\\"occurredAt\\\":\\\"2026-10-20T06:00:00.000Z\\\",\\\"mentions\\\":[\\\"ada\\\"],\\\"notify\\\":false}\", ?u) AS ?d_r11)\n}\n"
+  }
+ ]
+}

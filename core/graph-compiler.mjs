@@ -28,8 +28,9 @@
  * anything else is a pre-dispatch REJECTED.
  */
 import { createHash } from 'node:crypto';
-import { EX, NS, RECEIPT_PREDICATES, MARKER_SUBJECT, MARKER_PREDICATES, LG, LG_NS, lgMetaPredicate, BK, BOOKKEEPING_PREDICATES, isBookkeeping, POSTSEQ_TERMS } from './graph-vocab.mjs';
-import { reserveOpId as _reserveOpId, canonReservationBatch as _canonReservationBatch, reserveDigestBody as _reserveDigestBody } from './postseq-reserve.mjs';
+import { EX, NS, RECEIPT_PREDICATES, MARKER_SUBJECT, MARKER_PREDICATES, LG, LG_NS, lgMetaPredicate, BK, BOOKKEEPING_PREDICATES, isBookkeeping, POSTSEQ_TERMS, ORIGIN_TERMS } from './graph-vocab.mjs';
+import { reserveOpId as _reserveOpId, canonReservationBatch as _canonReservationBatch, reserveDigestBody as _reserveDigestBody, canonAnnouncementDraft } from './postseq-reserve.mjs';
+import { announcePostId } from './announce-outbox.mjs';
 
 export const DIGEST_V = 1;
 /** The literal canonicalization policy (A5). Bound into every digest; bump it if a canonical form changes. */
@@ -505,7 +506,7 @@ export function staticCheck(sparql, opId) {
 // =====================================================================================
 
 export const RECORD_V = 2;   // 2: memory.revise records the identity it replaces (a MemoryRevision node)
-export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create', 'post.import', 'post.write', 'post.redact', 'delivery.create', 'delivery.step', 'delivery.import', 'modelcall.create', 'card.write', 'entity.put']);
+export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create', 'post.import', 'post.write', 'post.redact', 'delivery.create', 'delivery.step', 'delivery.import', 'modelcall.create', 'card.write', 'entity.put', 'origin.prepare']);
 
 const RS = 'https://scrumboard.local/ns#';
 const RSC = 'https://schema.org/';
@@ -567,8 +568,9 @@ const RECORD_FIELDS = {
   'delivery.step': ['target', 'step'],      // #1582 — one step, guarded by the delivery's expected version (as memory.revise)
   'delivery.import': ['delivery'],          // #1582 migration — a document delivery and ALL its steps, fresh, in one update
   'modelcall.create': ['call'],             // #1582 — one ledger row, fresh at its derived IRI
-  'card.write': ['parts', 'counter', 'pending', 'collections'],       // #1598 — one or more cards, each guarded on its version, in ONE update
+  'card.write': ['parts', 'counter', 'pending', 'collections', 'origin'],       // #1598 — one or more cards, each guarded on its version, in ONE update; #1629 s2 — `origin` makes it an origin commit
   'entity.put': ['entity'],                 // #1624 — one generic storage primitive; the `kind` field selects the projection
+  'origin.prepare': ['origin', 'plan'],     // #1629 s2 — the Prepared record of one origin: its descriptor and its frozen business plan
 };
 
 const SAFE_CH = /^[A-Za-z0-9 _.,:/@#+=*!~%&$-]$/;
@@ -759,6 +761,9 @@ function canonicalizeRecord(i) {
     } };
   } else if (i.kind === 'card.write') {
     record = canonCardWrite(i);
+    if (i.origin != null) record = canonOriginCommit(i, record, { opId, actor, evidence, people });   // #1629 s2
+  } else if (i.kind === 'origin.prepare') {
+    record = canonOriginPrepare(i, { opId, actor, evidence, people });   // #1629 s2
   } else if (i.kind === 'entity.put') {
     // #1624 — ONE generic storage primitive. The `kind` field on the entity selects which
     // allowlisted projection runs; only kinds explicitly listed here can be written through
@@ -1125,6 +1130,7 @@ function planRecord(c) {
 }
 
 function compileRecord(c) {
+  if (c.kind === 'origin.prepare') return compileOriginPrepare(c);   // #1629 s2
   if (c.kind === 'card.write') return compileCardWrite(c);   // #1598
   if (c.kind === 'entity.put' && c.record.entity.kind === 'collection') return compileCollectionWrite(c);   // #1624
   const digest = recordDigest(c);
@@ -1400,6 +1406,7 @@ function compileCardWrite(c) {
     }
     bIns.push(`  ${v(CTR)} ${VER} ${v(R.counter.next)} .`);
   }
+  if (R.origin) originCommitClauses(c, digest, { OP, v, pre, dBinds, bDel, bIns });   // #1629 s2 — absent, nothing here runs
   pre.push(`    BIND(true AS ?ok)`);
   where.push(`  OPTIONAL {`, ...pre, `  }`);
   where.push(...top);
@@ -1423,6 +1430,382 @@ function compileCardWrite(c) {
   const check = staticCheck(sparql, c.opId);
   if (!check.ok) fail(`compiler rejected its own output: ${check.errors.join('; ')}`);
   return { sparql, digest, canonical: c };
+}
+
+// ---------- #1629 slice 2: origin.prepare, and the origin-bearing card.write commit ----------
+//
+// r3 on #1629 (frozen with the rows, card v117). One origin = one business change that owes N announcements:
+//   origin.prepare   writes ONE Prepared node: the canonical descriptor and plan, their digests, the identity, and
+//                    occurredAt = the executor's NOW(). Nothing else: no allocator, no business quad, no Origin.
+//   card.write+origin the commit: the plan's business change, the Origin, N Obligations, N slice-1 reservations, the
+//                    allocator advance and `prepared committedBy <op>`, all under the ONE ?ok guard, which also holds the
+//                    COMPLETE prepared match (§4 guard 3: byte-equal stored JSON, every field singular, no committedBy).
+// The receipt is card.write's, unchanged; its digest binds the origin. Every digest is derived here, never sent.
+
+/** r3 §1: the permanent mutation namespace. Generated once (Python uuid4, 2026-10-20T03:46:33Z); never regenerated. */
+export const ORIGIN_NAMESPACE = 'cd807138-eefc-40d2-9a80-525e666e6269';
+export const ORIGIN_CARD_ROUTES = Object.freeze(['claim', 'release', 'done-nudge', 'wiki']);
+export const ORIGIN_AGENT_ROUTES = Object.freeze(['agent-rest', 'agent-retire']);
+export const ORIGIN_ROUTES = Object.freeze([...ORIGIN_CARD_ROUTES, ...ORIGIN_AGENT_ROUTES]);
+const ORIGIN_SLOT_RE = /^[a-z][a-z0-9-]{0,31}$/;
+/** The agent entity IRI for a seat: the rule #1624's agent route uses (server.js:5003 at 429e487). */
+export const originAgentIri = (seat) => `https://scrumboard.local/agent/${encodeURIComponent(seat)}`;
+const nonEmpty = (v) => typeof v === 'string' && v !== '' && v.isWellFormed();
+
+/** r3 §1: the closed 5-tuple key, a JSON array (never a slash join). Throws ValidationError on any bad field. */
+export function originKeyOf(route, subject, requestKey, originActor) {
+  if (!ORIGIN_ROUTES.includes(route)) fail(`origin route must be one of ${ORIGIN_ROUTES.join(', ')}`);
+  for (const [k, x] of [['subject', subject], ['requestKey', requestKey], ['originActor', originActor]]) {
+    if (!nonEmpty(x)) fail(`origin ${k} must be a non-empty well-formed string`);
+  }
+  return JSON.stringify(['origin-v1', route, subject, requestKey, originActor]);
+}
+/** UUIDv5 of the origin key under ORIGIN_NAMESPACE (RFC 4122, sha-1). */
+export function mutationIdOf(originKey) {
+  if (!nonEmpty(originKey)) fail('originKey must be a non-empty well-formed string');
+  const ns = Buffer.from(ORIGIN_NAMESPACE.replace(/-/g, ''), 'hex');
+  const h = createHash('sha1').update(ns).update(Buffer.from(originKey, 'utf8')).digest();
+  const b = Buffer.from(h.subarray(0, 16));
+  b[6] = (b[6] & 0x0f) | 0x50;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  const x = b.toString('hex');
+  return `${x.slice(0, 8)}-${x.slice(8, 12)}-${x.slice(12, 16)}-${x.slice(16, 20)}-${x.slice(20)}`;
+}
+export const originPrepareOp = (mutationId) => `${ORIGIN_TERMS.PREPARE_OP_PREFIX}${mutationId}`;
+export const originCommitOp = (mutationId) => `${ORIGIN_TERMS.COMMIT_OP_PREFIX}${mutationId}`;
+export const originDescriptorDigest = (desc) => createHash('sha256').update(`originDescriptorV 1\n${JSON.stringify(desc)}`).digest('hex');
+export const originPlanDigest = (plan) => createHash('sha256').update(`originPlanV 1\n${JSON.stringify(plan)}`).digest('hex');
+
+/**
+ * r3 §3: the closed descriptor, canonicalized (fixed key order, mentions sorted). `commit` admits the one commit-only
+ * member, occurredAt (Q4 option (a)), and returns it beside the descriptor it is projected out of.
+ */
+export function canonOriginDescriptor(d, { commit = false } = {}) {
+  obj(d, ['route', 'subject', 'requestKey', 'originActor', 'mutationId', 'provenance', 'slots', ...(commit ? ['occurredAt'] : [])], 'origin');
+  const key = originKeyOf(d.route, d.subject, d.requestKey, d.originActor);
+  const mutationId = mutationIdOf(key);
+  if (d.mutationId !== mutationId) fail(`origin.mutationId ${JSON.stringify(d.mutationId)} is not the recomputed ${mutationId}`);
+  let provenance;
+  if (ORIGIN_CARD_ROUTES.includes(d.route)) {
+    const p = obj(d.provenance, ['cardId', 'version'], 'origin.provenance');
+    if (p.cardId !== d.subject) fail('origin.provenance.cardId must equal origin.subject');
+    if (!Number.isSafeInteger(p.version) || p.version < 1) fail('origin.provenance.version must be a positive safe integer');
+    provenance = { cardId: p.cardId, version: p.version };
+  } else {
+    const p = obj(d.provenance, ['agent', 'releasedCards'], 'origin.provenance');
+    if (p.agent !== d.subject) fail('origin.provenance.agent must equal origin.subject');
+    if (!Array.isArray(p.releasedCards) || !p.releasedCards.length) fail('origin.provenance.releasedCards is a non-empty array (zero released means no prepare)');
+    if (p.releasedCards.some((x) => !nonEmpty(x))) fail('origin.provenance.releasedCards holds non-empty card ids');
+    if (new Set(p.releasedCards).size !== p.releasedCards.length) fail('origin.provenance.releasedCards: a card appears twice');
+    provenance = { agent: p.agent, releasedCards: [...p.releasedCards] };
+  }
+  if (!Array.isArray(d.slots) || !d.slots.length) fail('origin.slots is a non-empty array');
+  const slots = d.slots.map((s, k) => {
+    const w = `origin.slots[${k}]`;
+    obj(s, ['slot', 'author', 'body', 'mentions', 'notify'], w);
+    if (typeof s.slot !== 'string' || !ORIGIN_SLOT_RE.test(s.slot)) fail(`${w}.slot must match ${ORIGIN_SLOT_RE}`);
+    if (!nonEmpty(s.author)) fail(`${w}.author is required`);
+    if (!nonEmpty(s.body)) fail(`${w}.body is required`);
+    if (!Array.isArray(s.mentions) || s.mentions.some((m) => typeof m !== 'string' || !m.isWellFormed())) fail(`${w}.mentions must be an array of strings`);
+    if (typeof s.notify !== 'boolean') fail(`${w}.notify must be a boolean`);
+    return { slot: s.slot, author: s.author, body: s.body, mentions: [...s.mentions].sort(), notify: s.notify };
+  });
+  if (new Set(slots.map((s) => s.slot)).size !== slots.length) fail('origin.slots: a slot appears twice');
+  const descriptor = { route: d.route, subject: d.subject, requestKey: d.requestKey, originActor: d.originActor, mutationId, provenance, slots };
+  if (!commit) return { descriptor, key };
+  if (!nonEmpty(d.occurredAt) || !/^-?\d{4,}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/.test(d.occurredAt)) fail('origin.occurredAt must be an xsd:dateTime lexical form, copied from readPreparedOrigin');
+  return { descriptor, key, occurredAt: d.occurredAt };
+}
+
+/** The common fields of an origin intention (r3 §3 correction 3): people and evidence absent or empty, the actor frozen. */
+function originCommon(descriptor, { actor, evidence, people }, opId, wantOp) {
+  if (people.length) fail('an origin intention carries no people (Person effects would bypass planDigest)');
+  if (evidence.length) fail('an origin intention carries no evidence');
+  if (actor !== `${PERSON_IRI}${descriptor.originActor}`) fail(`actor must be ${PERSON_IRI}${descriptor.originActor}, the person of origin.originActor`);
+  if (opId !== wantOp) fail(`opId must be ${wantOp}`);
+}
+
+/**
+ * r3 §3 route-shape binding, STRUCTURAL: the descriptor's identity and provenance tie to the plan's parts. Plus g3, the
+ * canonical-plan refusal: on an agent route, no released card's NEW quads may keep a claimedBy edge, to anyone.
+ */
+function bindOriginPlan(descriptor, plan) {
+  if (plan.pending) fail('an origin plan carries no K4 pending announcement');
+  if (plan.counter != null) fail('an origin plan carries no counter');
+  const live = (p, w) => {
+    if (p.remove) fail(`${w}: an origin plan removes nothing`);
+    if (p.expectedVersion == null) fail(`${w}: an origin plan updates an existing entity (an expectedVersion), never creates one`);
+  };
+  if (ORIGIN_CARD_ROUTES.includes(descriptor.route)) {
+    if (plan.parts.length !== 1) fail('a card-route origin plan holds exactly one card part');
+    if (plan.collections?.length) fail('a card-route origin plan holds no collections');
+    const [P] = plan.parts;
+    live(P, 'parts[0]');
+    if (P.iri !== `${ENTITY_IRI}${descriptor.subject}`) fail(`the card part must be ${ENTITY_IRI}${descriptor.subject}`);
+    if (Number(P.version) !== descriptor.provenance.version) fail('origin.provenance.version must equal the card part\'s new version');
+    return;
+  }
+  const C = plan.collections ?? [];
+  if (C.length !== 1 || C[0].collection !== 'agents' || C[0].iri !== originAgentIri(descriptor.subject)) fail(`an agent-route origin plan holds exactly one collection part: the agents entity ${originAgentIri(descriptor.subject)}`);
+  live(C[0], 'collections[0]');
+  const want = descriptor.provenance.releasedCards.map((id) => `${ENTITY_IRI}${id}`);
+  if (plan.parts.length !== want.length || plan.parts.some((p, k) => p.iri !== want[k])) fail('the card parts must be exactly origin.provenance.releasedCards, in that order');
+  const claimed = ref(`${CW.scrum}claimedBy`);
+  plan.parts.forEach((p, k) => {
+    live(p, `parts[${k}]`);
+    if (p.quads.some(([s, pr]) => s === ref(p.iri) && pr === claimed)) fail(`g3: released card ${p.iri} keeps a claimedBy edge`);
+  });
+}
+
+/** A plan canonicalized by canonCardWrite itself, with pending and origin refused (r3 §3). */
+function canonOriginPlan(plan) {
+  obj(plan, ['parts', 'counter', 'collections'], 'plan');
+  return canonCardWrite({ parts: plan.parts ?? [], counter: plan.counter, collections: plan.collections });
+}
+
+/**
+ * A STORED origin plan re-admitted (review v122): the reader's twin of canonOriginPlan + bindOriginPlan. The stored plan
+ * holds canonical term strings, which canonCardWrite does not take as input, so this checks that form directly: exact
+ * keys, canonical integers, sorted unique quads each owned by its part, parts in iri order, then the route binding.
+ */
+export function admitStoredOriginPlan(descriptor, plan) {
+  const keys = (x, want, opt, w) => {
+    if (!x || typeof x !== 'object' || Array.isArray(x)) fail(`${w} is an object`);
+    const k = Object.keys(x);
+    if (want.some((n) => !k.includes(n)) || k.some((n) => !want.includes(n) && !opt.includes(n))) fail(`${w} has keys ${JSON.stringify(k)}`);
+  };
+  const int = (s, w) => { if (typeof s !== 'string' || canonInteger(s) !== s || s.startsWith('-')) fail(`${w} is not a canonical integer`); };
+  // a stored term is canonical only if the FORWARD rules (cardTerm) reproduce it byte for byte from its own parse
+  const LIT = /^"((?:[^"\\]|\\.)*)"(?:@([^"]+)|\^\^<([^<>]*)>)?$/;
+  const parseTerm = (t) => {
+    if (t.startsWith('<') && t.endsWith('>')) return { type: 'uri', value: t.slice(1, -1) };
+    const m = LIT.exec(t);
+    if (!m) return null;
+    let value;
+    try { value = JSON.parse(`"${m[1]}"`); } catch { return null; }
+    return { type: 'literal', value, ...(m[2] != null ? { lang: m[2] } : {}), ...(m[3] != null ? { datatype: m[3] } : {}) };
+  };
+  const isTerm = (t) => {
+    if (typeof t !== 'string') return false;
+    const p = parseTerm(t);
+    if (!p) return false;
+    try { return cardTerm(p, 'stored term') === t; } catch (e) { if (e instanceof ValidationError) return false; throw e; }
+  };
+  const quads = (list, w, each) => {
+    if (!Array.isArray(list)) fail(`${w} is an array`);
+    list.forEach((q, n) => {
+      if (!Array.isArray(q) || q.length !== 3 || q.some((t) => !isTerm(t))) fail(`${w}[${n}] is three canonical terms`);
+      if (n && !(list[n - 1].join(' ') < q.join(' '))) fail(`${w}[${n}] is out of canonical order`);
+      each(q, `${w}[${n}]`);
+    });
+  };
+  const versions = (p, w) => {
+    int(p.expectedVersion, `${w}.expectedVersion`); int(p.version, `${w}.version`);
+    if (BigInt(p.version) <= BigInt(p.expectedVersion)) fail(`${w}.version must be above expectedVersion`);
+    rStr(p.json, `${w}.json`);
+  };
+  const ordered = (list, w) => list.forEach((p, k) => { if (k && !(list[k - 1].iri < p.iri)) fail(`${w}[${k}] is out of iri order`); });
+  keys(plan, ['parts', 'counter'], ['collections'], 'plan');
+  if (!Array.isArray(plan.parts)) fail('plan.parts is an array');
+  plan.parts.forEach((p, k) => {
+    const w = `plan.parts[${k}]`;
+    keys(p, ['iri', 'expectedVersion', 'version', 'quads', 'prior', 'json'], [], w);
+    const iri = checkIri(p.iri, `${w}.iri`), id = iri.slice(ENTITY_IRI.length);
+    if (!iri.startsWith(ENTITY_IRI) || !/^[A-Za-z0-9-]{1,64}$/.test(id)) fail(`${w}.iri must be ${ENTITY_IRI}<card id>`);
+    versions(p, w);
+    quads(p.quads, `${w}.quads`, (t, wq) => cardQuadClass(t, iri, id, wq));
+    if (!p.quads.some(([s, pr]) => s === ref(iri) && pr === ref(CW.rdfType))) fail(`${w}.quads must type the card`);
+    quads(p.prior, `${w}.prior`, (t, wq) => { if (cardQuadClass(t, iri, id, wq) === 'shared') fail(`${wq}: a shared node is never deleted by a card write`); });
+  });
+  ordered(plan.parts, 'plan.parts');
+  if (plan.collections != null) {
+    if (!Array.isArray(plan.collections) || !plan.collections.length) fail('plan.collections, when present, is a non-empty array');
+    plan.collections.forEach((p, k) => {
+      const w = `plan.collections[${k}]`;
+      keys(p, ['collection', 'iri', 'expectedVersion', 'version', 'quads', 'prior', 'json'], ['unique', 'requires'], w);
+      if (typeof p.collection !== 'string' || !COLL_KEY_RE.test(p.collection)) fail(`${w}.collection must name a collection`);
+      const iri = checkIri(p.iri, `${w}.iri`);
+      versions(p, w);
+      const own = (t, wq) => {
+        if (t[0] !== ref(iri) && !t[0].startsWith(`<${iri}/list/`)) fail(`${wq}: subject ${t[0]} is not ${ref(iri)}`);
+        if (CW_RESERVED_PREDICATES.has(unref(t[1])) || unref(t[1]) === `${CW.scrum}inCollection`) fail(`${wq}: ${t[1]} is written by the compiler`);
+      };
+      quads(p.quads, `${w}.quads`, own);
+      quads(p.prior, `${w}.prior`, own);
+      const iriTerm = (t, wt) => { if (!isTerm(t) || unref(t) == null) fail(`${wt} is an IRI term`); };
+      if (p.unique != null) {
+        if (!Array.isArray(p.unique) || !p.unique.length) fail(`${w}.unique, when present, is a non-empty array`);
+        p.unique.forEach((u, n) => {
+          keys(u, ['all'], [], `${w}.unique[${n}]`);
+          if (!Array.isArray(u.all) || !u.all.length) fail(`${w}.unique[${n}].all is a non-empty array`);
+          u.all.forEach((a, j) => {
+            keys(a, ['predicate', 'value'], [], `${w}.unique[${n}].all[${j}]`);
+            iriTerm(a.predicate, `${w}.unique[${n}].all[${j}].predicate`);
+            if (!isTerm(a.value)) fail(`${w}.unique[${n}].all[${j}].value is a canonical term`);
+          });
+        });
+      }
+      if (p.requires != null) {
+        if (!Array.isArray(p.requires) || !p.requires.length) fail(`${w}.requires, when present, is a non-empty array`);
+        p.requires.forEach((r, n) => { iriTerm(r, `${w}.requires[${n}]`); if (n && !(p.requires[n - 1] < r)) fail(`${w}.requires[${n}] is out of order`); });
+      }
+    });
+    ordered(plan.collections, 'plan.collections');
+  }
+  bindOriginPlan(descriptor, plan);
+  // rebuilt in canonCardWrite's own key order, so a caller comparing its JSON to the stored bytes refuses a reordering
+  const cardPart = (p) => ({ iri: p.iri, expectedVersion: p.expectedVersion, version: p.version, quads: p.quads, prior: p.prior, json: p.json });
+  const collPart = (p) => ({ collection: p.collection, iri: p.iri, expectedVersion: p.expectedVersion, version: p.version, quads: p.quads, prior: p.prior, json: p.json,
+    ...(p.unique ? { unique: p.unique.map((u) => ({ all: u.all.map((a) => ({ predicate: a.predicate, value: a.value })) })) } : {}), ...(p.requires ? { requires: p.requires } : {}) });
+  return { parts: plan.parts.map(cardPart), counter: plan.counter, ...(plan.collections ? { collections: plan.collections.map(collPart) } : {}) };
+}
+
+function canonOriginPrepare(i, common) {
+  const { descriptor } = canonOriginDescriptor(i.origin);
+  const plan = canonOriginPlan(i.plan);
+  bindOriginPlan(descriptor, plan);
+  originCommon(descriptor, common, common.opId, originPrepareOp(descriptor.mutationId));
+  return { origin: descriptor, plan };
+}
+
+function canonOriginCommit(i, record, common) {
+  if (record.pending) fail('origin and pending are mutually exclusive on a card.write');
+  const { descriptor, occurredAt } = canonOriginDescriptor(i.origin, { commit: true });
+  bindOriginPlan(descriptor, record);
+  originCommon(descriptor, common, common.opId, originCommitOp(descriptor.mutationId));
+  return originCommitRecord(descriptor, record, occurredAt);
+}
+/** The canonical record of an origin commit: the plan's own fields, then the origin (descriptor + occurredAt). */
+const originCommitRecord = (descriptor, plan, occurredAt) => ({ parts: plan.parts, counter: plan.counter, ...(plan.collections?.length ? { collections: plan.collections } : {}), origin: { ...descriptor, occurredAt } });
+/** The plan half of an origin commit's record: what planDigest binds. */
+const originPlanOf = (record) => ({ parts: record.parts, counter: record.counter, ...(record.collections?.length ? { collections: record.collections } : {}) });
+
+/**
+ * r3 §2a.5a: the digest of the origin commit RECONSTRUCTED from stored canonical parts — the descriptor, the plan and the
+ * Prepared occurredAt, the derived op and the frozen actor — with card.write's own digest function. A reader compares a
+ * stored receipt digest to THIS, never to another stored string.
+ */
+export function originCommitDigest(descriptor, plan, occurredAt) {
+  return recordDigest({ kind: 'card.write', opId: originCommitOp(descriptor.mutationId), actor: `${PERSON_IRI}${descriptor.originActor}`, evidence: [], record: originCommitRecord(descriptor, plan, occurredAt) });
+}
+
+const strLit = (s) => recLit(s);
+const XSD_STRING = `<${XSD}string>`, XSD_DATETIME = `<${XSD}dateTime>`;
+/** An exact plain string literal equal to `want` (no language tag, no other datatype). */
+const plainEq = (x, want) => `    FILTER(isLiteral(${x}) && DATATYPE(${x}) = ${XSD_STRING} && LANG(${x}) = "" && STR(${x}) = ${strLit(want)})`;
+
+function compileOriginPrepare(c) {
+  const digest = recordDigest(c);
+  const OP = ref(c.opId);
+  const { origin: D, plan } = c.record;
+  const T = ORIGIN_TERMS;
+  const PREP = T.preparedSubject(D.mutationId);
+  const where = [], pre = [], top = [], dBinds = [], del = [], dIns = [], bDel = [], bIns = [];
+  const names = new Map();
+  const v = (text) => {
+    let n = names.get(text);
+    if (!n) { n = `r${names.size}`; names.set(text, n); dBinds.push(ok(text, n)); }
+    return `?d_${n}`;
+  };
+  where.push(...dupGuard(OP));
+  pre.push(`    FILTER NOT EXISTS { ${inEither(`${PREP} ?xq_p ?xq_o`)} }`);   // Prepared absent (one per mutationId)
+  bIns.push(
+    `  ${v(PREP)} a ${v(T.Prepared)} .`,
+    `  ${v(PREP)} ${T.mutationId} ${v(strLit(D.mutationId))} .`,
+    `  ${v(PREP)} ${T.originKeyJson} ${v(strLit(originKeyOf(D.route, D.subject, D.requestKey, D.originActor)))} .`,
+    `  ${v(PREP)} ${T.route} ${v(strLit(D.route))} .`,
+    `  ${v(PREP)} ${T.originActor} ${v(strLit(D.originActor))} .`,
+    `  ${v(PREP)} ${T.descriptorJson} ${v(strLit(JSON.stringify(D)))} .`,
+    `  ${v(PREP)} ${T.descriptorDigest} ${v(strLit(originDescriptorDigest(D)))} .`,
+    `  ${v(PREP)} ${T.planJson} ${v(strLit(JSON.stringify(plan)))} .`,
+    `  ${v(PREP)} ${T.planDigest} ${v(strLit(originPlanDigest(plan)))} .`,
+    `  ${v(PREP)} ${T.occurredAt} ${v('?n_at')} .`,   // r3 §0 A: the prepare update's own NOW()
+  );
+  pre.push(`    BIND(true AS ?ok)`);
+  where.push(`  OPTIONAL {`, ...pre, `  }`);
+  where.push(...top);
+  where.push(`  BIND(IF(BOUND(?ok), ${EX.APPLIED}, ${EX.PRECONDITION_FAILED}) AS ?n_outcome)`);
+  where.push(nb(JSON.stringify(digest), 'digest'), nb(ref(c.actor), 'actor'), nb('NOW()', 'at'), nb(PREP, 'target0'));
+  where.push(...dBinds);
+  bDel.unshift(`  ${MARKER_SUBJECT} ${EX.commitSeq} ?s .`);
+  bIns.unshift(`  ${MARKER_SUBJECT} ${EX.commitSeq} ?s1 .`,
+    `  ${OP} ${EX.outcome} ?n_outcome .`, `  ${OP} ${EX.digest} ?n_digest .`, `  ${OP} ${EX.actor} ?n_actor .`,
+    `  ${OP} ${EX.at} ?n_at .`, `  ${OP} ${EX.commitSeq} ?s1 .`, `  ${OP} ${EX.target} ?n_target0 .`);
+  const sparql = assemble(del, bDel, dIns, bIns, where);
+  const check = staticCheck(sparql, c.opId);
+  if (!check.ok) fail(`compiler rejected its own output: ${check.errors.join('; ')}`);
+  return { sparql, digest, canonical: c };
+}
+
+/**
+ * The origin half of an origin commit, added to compileCardWrite's ONE update (r3 §4). Guards go into `pre` (the same
+ * ?ok as every business guard); effects into the bookkeeping templates through `v` (ok-guarded).
+ */
+function originCommitClauses(c, digest, { OP, v, pre, dBinds, bDel, bIns }) {
+  const R = c.record;
+  const { occurredAt, ...D } = R.origin;
+  const plan = originPlanOf(R);
+  const T = ORIGIN_TERMS;
+  const mid = D.mutationId;
+  const PREP = T.preparedSubject(mid), ORIG = T.originSubject(mid);
+  const N = D.slots.length;
+  // guard 3 — the COMPLETE Prepared shape (§2a.7): typed, every field exactly once, byte-equal to THIS commit, uncommitted
+  const fields = [['mutationId', 'xq_m', mid], ['originKeyJson', 'xq_k', originKeyOf(D.route, D.subject, D.requestKey, D.originActor)],
+    ['route', 'xq_r', D.route], ['originActor', 'xq_a', D.originActor], ['descriptorJson', 'xq_d', JSON.stringify(D)],
+    ['descriptorDigest', 'xq_dd', originDescriptorDigest(D)], ['planJson', 'xq_p', JSON.stringify(plan)], ['planDigest', 'xq_pd', originPlanDigest(plan)]];
+  pre.push(`    GRAPH ${BK} { ${PREP} a ${T.Prepared} ; ${[...fields.map(([p, x]) => `${T[p]} ?${x}`), `${T.occurredAt} ?xq_o`].join(' ; ')} . }`);
+  for (const [, x, want] of fields) pre.push(plainEq(`?${x}`, want));
+  // Q4: the copied occurredAt equals the ONE stored xsd:dateTime, as its lexical form — no normalization, no clock
+  pre.push(`    FILTER(isLiteral(?xq_o) && DATATYPE(?xq_o) = ${XSD_DATETIME} && STR(?xq_o) = ${strLit(occurredAt)})`);
+  for (const [p, x] of [...fields.map(([p, x]) => [p, x]), ['occurredAt', 'xq_o']]) {
+    pre.push(`    FILTER NOT EXISTS { GRAPH ${BK} { ${PREP} ${T[p]} ?${x}2 FILTER(!sameTerm(?${x}2, ?${x})) } }`);
+  }
+  pre.push(`    FILTER NOT EXISTS { GRAPH ${BK} { ${PREP} ${T.committedBy} ?xq_cb } }`);
+  // closed shape, as the reader holds it: one rdf:type and no predicate outside the nine fields
+  pre.push(`    FILTER NOT EXISTS { GRAPH ${BK} { ${PREP} a ?xq_t2 FILTER(!sameTerm(?xq_t2, ${T.Prepared})) } }`);
+  pre.push(`    FILTER NOT EXISTS { GRAPH ${BK} { ${PREP} ?xq_x ?xq_y FILTER(?xq_x NOT IN (${[ref(CW.rdfType), ...fields.map(([p]) => T[p]), T.occurredAt].join(', ')})) } }`);
+  // guard 3a — the agent routes' executor pre-state guards against the actual domain graph (g1 held, g2 complete)
+  if (ORIGIN_AGENT_ROUTES.includes(D.route)) {
+    const HOLDER = ref(`${PERSON_IRI}${D.subject}`), CLAIMED = ref(`${CW.scrum}claimedBy`);
+    for (const P of R.parts) pre.push(`    ${ref(P.iri)} ${CLAIMED} ${HOLDER} .`);   // g1
+    pre.push(`    FILTER NOT EXISTS { ?xq_h ${CLAIMED} ${HOLDER} ; ${ref(CW.rdfType)} ${ref(`${CW.scrum}Card`)} . FILTER(?xq_h NOT IN (${R.parts.map((P) => ref(P.iri)).join(', ')})) }`);   // g2
+  }
+  // guard 4 — origin absence: no Origin and no Obligation subject for any slot
+  pre.push(`    FILTER NOT EXISTS { ${inEither(`${ORIG} ?xq_op ?xq_oo`)} }`);
+  D.slots.forEach((s, k) => pre.push(`    FILTER NOT EXISTS { ${inEither(`${T.obligationSubject(mid, s.slot)} ?xq_bp${k} ?xq_bo${k}`)} }`));
+  // guards 5 and 6, and the reservations + allocator advance: the slice-1 clauses, unchanged (variables tagged `o`)
+  const items = D.slots.map((s) => ({
+    mode: 'announcement', mutationId: mid, slot: s.slot, postId: announcePostId(mid, s.slot),
+    draft: canonAnnouncementDraft({ body: s.body, author: s.author, originActor: D.originActor, occurredAt, mentions: s.mentions, notify: s.notify }),
+  }));
+  allocationClauses({ items, N, OP, digest, v, pre, dBinds, bDel, bIns, t: 'o' });
+  // the Origin, its Obligations, and the prepared link
+  bIns.push(
+    `  ${v(ORIG)} a ${v(T.Origin)} .`,
+    `  ${v(ORIG)} ${T.mutationId} ${v(strLit(mid))} .`,
+    `  ${v(ORIG)} ${T.originKeyJson} ${v(strLit(fields[1][2]))} .`,
+    `  ${v(ORIG)} ${T.descriptorDigest} ${v(strLit(originDescriptorDigest(D)))} .`,
+    `  ${v(ORIG)} ${T.planDigest} ${v(strLit(originPlanDigest(plan)))} .`,
+    `  ${v(ORIG)} ${T.committedAt} ${v('?n_at')} .`,
+    `  ${v(ORIG)} ${T.commitOp} ${v(OP)} .`,
+    `  ${v(ORIG)} ${T.slotCount} ${v(psqSafeInt(N))} .`,
+  );
+  const provenanceJson = JSON.stringify(D.provenance);
+  D.slots.forEach((s, k) => {
+    const OB = T.obligationSubject(mid, s.slot);
+    bIns.push(
+      `  ${v(OB)} a ${v(T.Obligation)} .`,
+      `  ${v(OB)} ${T.obligationId} ${v(strLit(`${mid}:${s.slot}`))} .`,
+      `  ${v(OB)} ${T.mutationId} ${v(strLit(mid))} .`,
+      `  ${v(OB)} ${T.slot} ${v(strLit(s.slot))} .`,
+      `  ${v(OB)} ${T.index} ${v(psqSafeInt(k))} .`,
+      `  ${v(OB)} ${T.status} ${v(strLit('pending'))} .`,
+      `  ${v(OB)} ${T.mode} ${v(strLit('publisher'))} .`,
+      `  ${v(OB)} ${T.provenanceJson} ${v(strLit(provenanceJson))} .`,
+      `  ${v(OB)} ${T.reservation} ${v(POSTSEQ_TERMS.reservation(items[k].postId))} .`,
+    );
+  });
+  bIns.push(`  ${v(PREP)} ${T.committedBy} ${v(OP)} .`);
 }
 
 // ---------- #1624: entity.put kind 'collection' — mutable small-kind entities in ONE guarded update ----------
@@ -1967,6 +2350,70 @@ function digestPostseq(c) {
   return createHash('sha256').update(lines.join('\n') + '\n').digest('hex');
 }
 
+/**
+ * #1629 slice 2 — the slice-1 ALLOCATION clauses, extracted unchanged so an origin commit composes the SAME allocator guard,
+ * advance and reservation nodes inside its own update (r3 §4: compilePostseqReserve stays byte-identical). `t` prefixes every
+ * variable this adds; slice 1 passes "" and compiles exactly the text it always did.
+ */
+function allocationClauses({ items, N, OP, digest, v, pre, dBinds, bDel, bIns, t = '' }) {
+  const ALLOC = POSTSEQ_TERMS.allocator;
+  pre.push(`    GRAPH ${[BK]} { ${ALLOC} a ${POSTSEQ_TERMS.Allocator} ; ${POSTSEQ_TERMS.postSeqEpoch} ?${t}x_epoch ; ${POSTSEQ_TERMS.nextPostSeq} ?${t}x_next ; ${POSTSEQ_TERMS.version} ?${t}x_version . }`);
+  // the epoch is a non-empty PLAIN string literal: an IRI, a language-tagged literal or a typed value refuses.
+  pre.push(`    FILTER(isLiteral(?${t}x_epoch) && DATATYPE(?${t}x_epoch) = <${XSD_PSQ}string> && LANG(?${t}x_epoch) = "" && STR(?${t}x_epoch) != "")`);
+  // overflow guards (P2): the advance of NEXT and VERSION are EACH independently checked against MAX_SAFE_INTEGER,
+  // refuses otherwise. The postSeq allocations per-item are intrinsically bounded (next + k <= next + N).
+  pre.push(`    FILTER(?${t}x_next + ${psqSafeInt(N)} <= ${psqInt(MAX_SAFE.toString())})`);
+  pre.push(`    FILTER(?${t}x_version + 1 <= ${psqInt(MAX_SAFE.toString())})`);
+  pre.push(`    FILTER(?${t}x_version + 1 > 0)`);
+  // datatype / sign / single-tuple checks INSIDE the OPTIONAL { all preconditions } so a failure leaves ?ok unbound
+  // (and the receipt still records PRECONDITION_FAILED) instead of dropping the whole WHERE solution.
+  pre.push(`    FILTER(DATATYPE(?${t}x_next) = <${XSD_PSQ}integer> && DATATYPE(?${t}x_version) = <${XSD_PSQ}integer>)`);
+  pre.push(`    FILTER(?${t}x_next > 0 && ?${t}x_version > 0)`);
+  // exactly one allocator SUBJECT: any other node typed Allocator in the bookkeeping graph refuses the whole batch.
+  pre.push(`    FILTER NOT EXISTS { GRAPH ${[BK]} { ?${t}x_alloc2 a ${POSTSEQ_TERMS.Allocator} FILTER(?${t}x_alloc2 != ${ALLOC}) } }`);
+  // exactly one nextPostSeq / version / postSeqEpoch value on the allocator subject — TERM identity (sameTerm), not
+  // value inequality, so a different numeric datatype with the same lexical value cannot evade the duplicate check.
+  pre.push(`    FILTER NOT EXISTS { GRAPH ${[BK]} { ${ALLOC} ${POSTSEQ_TERMS.nextPostSeq} ?${t}xn2 FILTER(!sameTerm(?${t}xn2, ?${t}x_next)) } }`);
+  pre.push(`    FILTER NOT EXISTS { GRAPH ${[BK]} { ${ALLOC} ${POSTSEQ_TERMS.version} ?${t}xv2 FILTER(!sameTerm(?${t}xv2, ?${t}x_version)) } }`);
+  pre.push(`    FILTER NOT EXISTS { GRAPH ${[BK]} { ${ALLOC} ${POSTSEQ_TERMS.postSeqEpoch} ?${t}xe2 FILTER(!sameTerm(?${t}xe2, ?${t}x_epoch)) } }`);
+  items.forEach((it, k) => {
+    const SUBJ = POSTSEQ_TERMS.reservation(it.postId);
+    pre.push(`    FILTER NOT EXISTS { ${inEither(`${SUBJ} ?${t}xp ?${t}xo`)} }`);
+  });
+
+  dBinds.push(ok(`?${t}x_next`, `${t}next`), ok(`?${t}x_version`, `${t}verOld`), ok(`?${t}x_version + 1`, `${t}verNew`));
+  dBinds.push(ok(`?${t}x_next + ${psqSafeInt(N)}`, `${t}nextNew`));
+  items.forEach((it, k) => {
+    dBinds.push(ok(`?${t}x_next + ${psqSafeInt(k)}`, `${t}ps${k}`));
+  });
+
+  bDel.push(`  ${v(ALLOC)} ${POSTSEQ_TERMS.nextPostSeq} ?d_${t}next .`,
+            `  ${v(ALLOC)} ${POSTSEQ_TERMS.version} ?d_${t}verOld .`);
+  bIns.push(`  ${v(ALLOC)} ${POSTSEQ_TERMS.nextPostSeq} ?d_${t}nextNew .`,
+            `  ${v(ALLOC)} ${POSTSEQ_TERMS.version} ?d_${t}verNew .`);
+
+  items.forEach((it, k) => {
+    const SUBJ = POSTSEQ_TERMS.reservation(it.postId);
+    const ident = it.mode === 'ordinary'
+      ? JSON.stringify({ author: it.author, requestId: it.requestId })
+      : JSON.stringify({ mutationId: it.mutationId, slot: it.slot });
+    const draftJson = JSON.stringify(it.draft);
+    bIns.push(
+      `  ${v(SUBJ)} a ${v(POSTSEQ_TERMS.Reservation)} .`,
+      `  ${v(SUBJ)} ${POSTSEQ_TERMS.mode} ${v(psqLit(it.mode))} .`,
+      `  ${v(SUBJ)} ${POSTSEQ_TERMS.postId} ${v(psqLit(it.postId))} .`,
+      `  ${v(SUBJ)} ${POSTSEQ_TERMS.reserveOpId} ${v(OP)} .`,
+      `  ${v(SUBJ)} ${POSTSEQ_TERMS.reserveDigest} ${v(psqLit(digest))} .`,
+      `  ${v(SUBJ)} ${POSTSEQ_TERMS.postSeqEpoch} ${v(`?${t}x_epoch`)} .`,
+      `  ${v(SUBJ)} ${POSTSEQ_TERMS.postSeq} ?d_${t}ps${k} .`,
+      `  ${v(SUBJ)} ${POSTSEQ_TERMS.createdAt} ${v('?n_at')} .`,
+      `  ${v(SUBJ)} ${POSTSEQ_TERMS.index} ${v(psqSafeInt(k))} .`,
+      `  ${v(SUBJ)} ${POSTSEQ_TERMS.identityJson} ${v(psqLit(ident))} .`,
+      `  ${v(SUBJ)} ${POSTSEQ_TERMS.draftJson} ${v(psqLit(draftJson))} .`,
+    );
+  });
+}
+
 function compilePostseqReserve(c, digest) {
   const items = c.postseq.items;
   const N = items.length;
@@ -1981,62 +2428,7 @@ function compilePostseqReserve(c, digest) {
 
   where.push(...dupGuard(OP));
 
-  const ALLOC = POSTSEQ_TERMS.allocator;
-  pre.push(`    GRAPH ${[BK]} { ${ALLOC} a ${POSTSEQ_TERMS.Allocator} ; ${POSTSEQ_TERMS.postSeqEpoch} ?x_epoch ; ${POSTSEQ_TERMS.nextPostSeq} ?x_next ; ${POSTSEQ_TERMS.version} ?x_version . }`);
-  // the epoch is a non-empty PLAIN string literal: an IRI, a language-tagged literal or a typed value refuses.
-  pre.push(`    FILTER(isLiteral(?x_epoch) && DATATYPE(?x_epoch) = <${XSD_PSQ}string> && LANG(?x_epoch) = "" && STR(?x_epoch) != "")`);
-  // overflow guards (P2): the advance of NEXT and VERSION are EACH independently checked against MAX_SAFE_INTEGER,
-  // refuses otherwise. The postSeq allocations per-item are intrinsically bounded (next + k <= next + N).
-  pre.push(`    FILTER(?x_next + ${psqSafeInt(N)} <= ${psqInt(MAX_SAFE.toString())})`);
-  pre.push(`    FILTER(?x_version + 1 <= ${psqInt(MAX_SAFE.toString())})`);
-  pre.push(`    FILTER(?x_version + 1 > 0)`);
-  // datatype / sign / single-tuple checks INSIDE the OPTIONAL { all preconditions } so a failure leaves ?ok unbound
-  // (and the receipt still records PRECONDITION_FAILED) instead of dropping the whole WHERE solution.
-  pre.push(`    FILTER(DATATYPE(?x_next) = <${XSD_PSQ}integer> && DATATYPE(?x_version) = <${XSD_PSQ}integer>)`);
-  pre.push(`    FILTER(?x_next > 0 && ?x_version > 0)`);
-  // exactly one allocator SUBJECT: any other node typed Allocator in the bookkeeping graph refuses the whole batch.
-  pre.push(`    FILTER NOT EXISTS { GRAPH ${[BK]} { ?x_alloc2 a ${POSTSEQ_TERMS.Allocator} FILTER(?x_alloc2 != ${ALLOC}) } }`);
-  // exactly one nextPostSeq / version / postSeqEpoch value on the allocator subject — TERM identity (sameTerm), not
-  // value inequality, so a different numeric datatype with the same lexical value cannot evade the duplicate check.
-  pre.push(`    FILTER NOT EXISTS { GRAPH ${[BK]} { ${ALLOC} ${POSTSEQ_TERMS.nextPostSeq} ?xn2 FILTER(!sameTerm(?xn2, ?x_next)) } }`);
-  pre.push(`    FILTER NOT EXISTS { GRAPH ${[BK]} { ${ALLOC} ${POSTSEQ_TERMS.version} ?xv2 FILTER(!sameTerm(?xv2, ?x_version)) } }`);
-  pre.push(`    FILTER NOT EXISTS { GRAPH ${[BK]} { ${ALLOC} ${POSTSEQ_TERMS.postSeqEpoch} ?xe2 FILTER(!sameTerm(?xe2, ?x_epoch)) } }`);
-  items.forEach((it, k) => {
-    const SUBJ = POSTSEQ_TERMS.reservation(it.postId);
-    pre.push(`    FILTER NOT EXISTS { ${inEither(`${SUBJ} ?xp ?xo`)} }`);
-  });
-
-  dBinds.push(ok('?x_next', 'next'), ok('?x_version', 'verOld'), ok('?x_version + 1', 'verNew'));
-  dBinds.push(ok(`?x_next + ${psqSafeInt(N)}`, 'nextNew'));
-  items.forEach((it, k) => {
-    dBinds.push(ok(`?x_next + ${psqSafeInt(k)}`, `ps${k}`));
-  });
-
-  bDel.push(`  ${v(ALLOC)} ${POSTSEQ_TERMS.nextPostSeq} ?d_next .`,
-            `  ${v(ALLOC)} ${POSTSEQ_TERMS.version} ?d_verOld .`);
-  bIns.push(`  ${v(ALLOC)} ${POSTSEQ_TERMS.nextPostSeq} ?d_nextNew .`,
-            `  ${v(ALLOC)} ${POSTSEQ_TERMS.version} ?d_verNew .`);
-
-  items.forEach((it, k) => {
-    const SUBJ = POSTSEQ_TERMS.reservation(it.postId);
-    const ident = it.mode === 'ordinary'
-      ? JSON.stringify({ author: it.author, requestId: it.requestId })
-      : JSON.stringify({ mutationId: it.mutationId, slot: it.slot });
-    const draftJson = JSON.stringify(it.draft);
-    bIns.push(
-      `  ${v(SUBJ)} a ${v(POSTSEQ_TERMS.Reservation)} .`,
-      `  ${v(SUBJ)} ${POSTSEQ_TERMS.mode} ${v(psqLit(it.mode))} .`,
-      `  ${v(SUBJ)} ${POSTSEQ_TERMS.postId} ${v(psqLit(it.postId))} .`,
-      `  ${v(SUBJ)} ${POSTSEQ_TERMS.reserveOpId} ${v(OP)} .`,
-      `  ${v(SUBJ)} ${POSTSEQ_TERMS.reserveDigest} ${v(psqLit(digest))} .`,
-      `  ${v(SUBJ)} ${POSTSEQ_TERMS.postSeqEpoch} ${v('?x_epoch')} .`,
-      `  ${v(SUBJ)} ${POSTSEQ_TERMS.postSeq} ?d_ps${k} .`,
-      `  ${v(SUBJ)} ${POSTSEQ_TERMS.createdAt} ${v('?n_at')} .`,
-      `  ${v(SUBJ)} ${POSTSEQ_TERMS.index} ${v(psqSafeInt(k))} .`,
-      `  ${v(SUBJ)} ${POSTSEQ_TERMS.identityJson} ${v(psqLit(ident))} .`,
-      `  ${v(SUBJ)} ${POSTSEQ_TERMS.draftJson} ${v(psqLit(draftJson))} .`,
-    );
-  });
+  allocationClauses({ items, N, OP, digest, v, pre, dBinds, bDel, bIns });
 
   pre.push(`    BIND(true AS ?ok)`);
   where.push(`  OPTIONAL {`, ...pre, `  }`);
