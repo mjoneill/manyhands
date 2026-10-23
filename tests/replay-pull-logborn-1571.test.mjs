@@ -28,6 +28,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { startRestServer, freePort, PROJECT_DIR } from './helpers/harness.mjs';
+import { waitExecutorReady } from './helpers/executor-ready.mjs';
 import { mintToken, hashToken } from '../core/credentials.mjs';
 import { createGraphClient } from '../core/graph-client.mjs';
 import { memoryReviseIntention, decisionCreateIntention } from '../core/logborn-unit.mjs';
@@ -235,19 +236,14 @@ async function boot({ dsid, unit }) {
     SCRUM_TRIAL_EXECUTOR_STORE: initStore(dsid), GRAPH_EXECUTOR_PYTHON: PY, SCRUM_SEAT_TOKENS: tokensFile(),
     SCRUM_AUTH: 'required', ...(unit ? { SCRUM_GRAPH_UNIT_LOGBORN: '1' } : {}),
   } });
+  srv.dsid = dsid;
   await executorUp(srv);
   srv.executorUrl = executorUrl;
   srv.eventDir = eventDir;
   return srv;
 }
-async function executorUp(srv) {
-  for (let i = 0; i < 200; i++) {
-    const c = await (await fetch(`${srv.baseUrl}/api/trial/counters`, { headers: { authorization: `Bearer ${TOK.bob}` } })).json();
-    if (c.executor) return;
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  throw new Error('executor never came up');
-}
+// #1716 — ready means OUR executor (our dataset, our own child running), not whatever answers /health on an unheld port.
+const executorUp = (srv) => waitExecutorReady(srv.baseUrl, { dsid: srv.dsid, headers: { authorization: `Bearer ${TOK.bob}` }, tries: 200, intervalMs: 50 });
 const H = { 'content-type': 'application/json', authorization: `Bearer ${TOK.bob}` };
 const call = async (srv, method, p, body) => {
   const r = await fetch(`${srv.baseUrl}${p}`, { method, headers: H, body: body === undefined ? undefined : JSON.stringify(body) });
