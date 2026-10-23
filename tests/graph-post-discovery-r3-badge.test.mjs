@@ -319,8 +319,9 @@ const fnv24 = (id) => { let h = 0x811c9dc5; const t = String(id); for (let i = 0
 const FNV_P = 0x01000193;
 const FNV_INV = (() => { let x = FNV_P; for (let i = 0; i < 6; i++) x = Math.imul(x, (2 - Math.imul(FNV_P, x)) | 0) >>> 0; return x >>> 0; })();   // the multiplicative inverse mod 2^32
 const ALPHA36 = 'abcdefghijklmnopqrstuvwxyz0123456789';
-/** An id `<prefix><5 chars>` whose 24-bit fingerprint equals `target`, found by meeting in the middle (3 free bytes forward, 2 backward over the free low 8 bits). */
-const collidingId = (target, prefix) => {
+/** An id `<prefix><5 chars>` whose 24-bit fingerprint equals `target`, found by meeting in the middle (3 free bytes forward, 2 backward over the free low 8 bits), or null.
+ *  One search expects ~3.6 matches (36^3 forward x 256*36^2 backward over 2^32), so about 2.7% of TARGETS have none at all (#1724: 79 of 3000 measured, not a timing flake). */
+const collisionWithPrefix = (target, prefix) => {
   let h0 = 0x811c9dc5; for (const ch of prefix) { h0 ^= ch.charCodeAt(0); h0 = Math.imul(h0, FNV_P) >>> 0; }
   const fwd = new Map();
   for (const a of ALPHA36) for (const b of ALPHA36) for (const c of ALPHA36) { let h = h0; for (const ch of a + b + c) { h ^= ch.charCodeAt(0); h = Math.imul(h, FNV_P) >>> 0; } if (!fwd.has(h)) fwd.set(h, a + b + c); }
@@ -331,7 +332,14 @@ const collidingId = (target, prefix) => {
       const hit = fwd.get(h); if (hit) return prefix + hit + d + e;
     }
   }
-  throw new Error('no collision found');
+  return null;
+};
+/** #1724: a miss is a property of the (target, prefix) pair, so try fresh prefixes, each an independent ~2.7% miss: 8 tries miss with p ~ 3e-13. It still THROWS if
+ *  every prefix misses: the collision variant is never skipped. */
+const collidingId = (target, prefix) => {
+  const tried = [];
+  for (let k = 0; k < 8; k++) { const p = k === 0 ? prefix : `${prefix}${k}-`; tried.push(p); const id = collisionWithPrefix(target, p); if (id !== null) return id; }
+  throw new Error(`no collision found for target 0x${target.toString(16)} under prefixes ${tried.join(', ')}`);
 };
 
 test('B7c IDENTITY IS EXACT, NOT PROBABILISTIC: after the reader has SEEN five posts and the store is replaced, the new store puts a DIFFERENT post at each seen number except one: an id that a 24-bit hash of the first build merges with the seen id (a deliberate collision), the same id in UPPERCASE, the id with `=` appended, the id with `=` prepended; the fifth is the very same post (control). The four different posts are counted; the identical one is not. Nothing canonicalizes, truncates or hashes an id into a seen set', { skip: SKIP }, async () => {
