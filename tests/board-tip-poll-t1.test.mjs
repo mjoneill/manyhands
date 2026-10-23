@@ -245,16 +245,29 @@ test('P5 CONTROL: on a board without the unit the page still polls ?since= and a
   });
 });
 
+/** #1711 — who issued a request, read from the frame that CALLED fetch (the innermost initiator frame): 'badge' when it is core/commons-panel.mjs, 'page'
+ *  when it is the board page itself, else 'unknown'. Only that frame counts: the page's own afterCommit=tip is reached THROUGH the panel module (its open
+ *  handler), so "any frame" labels it 'badge' (measured). An 'unknown' never receives the injection, so a missing stack fails P6 loudly
+ *  ("one of its polls was answered 409") rather than hitting the wrong poll. */
+function pollOwner(req) {
+  const top = req.initiator()?.stack?.callFrames?.[0]?.url || '';
+  if (/\/core\/commons-panel\.mjs(\?|$)/.test(top)) return 'badge';
+  try { if (['/', '/index.html'].includes(new URL(top).pathname)) return 'page'; } catch { /* no frame */ }
+  return 'unknown';
+}
+const INJECT_INTO = 'page';   // a mutant that sets 'badge' must fail P6 every time (#1711 DONE WHEN)
 test('P6 RESYNC: when one poll is answered 409 POST_CURSOR_EPOCH_CHANGED the page fetches tip again and a post published afterwards still appears once', { skip: SKIP, timeout: 240000 }, async () => {
   await pageStack(true, async ({ base, browser }) => {
     const page = await browser.newPage(); const log = [];
     await page.setRequestInterception(true);
-    let injected = false; let listSeen = false;
+    let injected = false;
     page.on('request', (req) => {
       const u = req.url();
-      if (u.includes('/api/conversations') && req.method() === 'GET') { log.push(u.replace(base, '')); if (PANEL_LIST.test(u)) listSeen = true; }
-      // the badge also polls afterCommit; the 409 goes to the first commit-ordered poll AFTER the panel's own list, which is the panel's poll
-      if (!injected && listSeen && /afterCommit=gc1\./.test(u)) { injected = true; req.respond({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: 'another store', code: 'POST_CURSOR_EPOCH_CHANGED', resync: 'afterCommit=start' }) }).catch(() => {}); return; }
+      if (u.includes('/api/conversations') && req.method() === 'GET') { log.push(`${u.replace(base, '')} [${pollOwner(req)}]`); }
+      // #1711: the badge ALSO polls afterCommit=gc1.…&limit=200, the same query shape as the panel, and its cursor can equal the panel's (measured: one
+      // token for both). ORDER picked the victim before ("the first poll after the panel's list"), and the badge sometimes won. The 409 now goes to the
+      // first commit-ordered poll whose INITIATOR is the page's own script; no ordering condition is needed, because the page polls only after its tip.
+      if (!injected && /afterCommit=gc1\./.test(u) && pollOwner(req) === INJECT_INTO) { injected = true; req.respond({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: 'another store', code: 'POST_CURSOR_EPOCH_CHANGED', resync: 'afterCommit=start' }) }).catch(() => {}); return; }
       req.continue().catch(() => {});
     });
     await page.goto(`${base}/`, { waitUntil: 'domcontentloaded' }); await page.waitForSelector('.board-header', { timeout: 30000 });
