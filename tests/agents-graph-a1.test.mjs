@@ -6,9 +6,20 @@
  *   A0  CONTROL (green today): with the unit OFF every step of the script answers as listed below, and a rest releases the seat's claims.
  *   A1  PARITY OF ANSWERS AND REFUSALS: the same script on a unit-on server answers the same statuses and masked wire (uuids and times masked, the list compared as a set).
  *   A2  REST RELEASES THE CLAIMS, ONCE: a seat holding two cards is set to resting: the answer names both, both cards are unclaimed afterwards, ONE announcement names them; resting it again releases nothing and posts nothing. Unit off is the
- *       control; unit on must be identical.
+ *       control (the document path posts in the same write, so one read right after the 200 is the contract there).
+ *       UNIT ON, REVISED (#1721, contract (b) under #1574's 1b scope change): the 200 promises the state change AND a durable obligation, NOT a readable
+ *       post: the announcement is published after the answer, un-awaited. So at the 200 the row reads the OBLIGATION (GET /api/outbox: exactly one
+ *       publisher entry for this seat, pending or published, never blocked, its postSeq an integer and its publicationAt a string, its body naming both
+ *       cards), then drives publication itself through POST /api/outbox/:id/publish (idempotent: it races the inline attempt on purpose) and only then
+ *       counts posts: exactly ONE. The old row read the posts once, right after the 200; with publication delayed 1500 ms it failed 3 of 3 (commons 44093).
+ *   A2p THE PENDING PATH: with the executor refusing ONLY the announcement's write, the rest still answers 200 and releases both cards, the obligation is
+ *       PENDING (never blocked, never published) and no post exists; a publish call while refused answers pending; with the refusal lifted the same call
+ *       publishes, and exactly ONE post names the cards. Nothing here waits on a clock: no sleep, and no promise of eventual delivery.
+ *   A2d THE LATE INLINE ATTEMPT: the inline attempt's write is HELD at the proxy, publication is driven and lands, then the held write is let through
+ *       and answered: still exactly ONE post, the one the obligation names. (Gives "exactly ONE" both attempts, which A2 alone cannot.)
  *   A3  NO PARTIAL EFFECT, WITH THE EXECUTOR AWAY: the same rest while the executor is away answers 503 (never 200), and afterwards the cards are STILL CLAIMED and NO announcement was posted (a refused write changed nothing: the
- *       cross-store atomicity); with the executor back, the same rest works and releases both.
+ *       cross-store atomicity); with the executor back, the same rest works and releases both. (#1721: its final "exactly one announcement" now reads
+ *       the obligation and drives its publication, as A2 does, instead of reading the posts once after the 200.)
  *   A4  CONCURRENCY KEEPS THE IDENTITY: six concurrent prompt versions answer versions 2..7, each number ONCE, and the agent ends with seven versions and the CURRENT prompt is the highest (never an older one over a newer); two concurrent
  *       creates of one seat key are exactly [201, 409] and one agent. (Unit off is the control: the document's lock makes it true today.)
  *   A5  THE GRAPH HOLDS IT, THE DOCUMENT DOES NOT: after the script the executor's store holds the prompt text and the revised prompt text and the board file holds neither.
@@ -21,7 +32,7 @@
  * NOT COVERED, by name: the prompt/grant conflict warning (#1242); `GET /api/agents/:seat/constraints`; the seat-declaration and wake side effects of a state change; a card claimed by the seat between the rest's read and its write (a race:
  * the atomicity row A3 is its deterministic cousin); migration of the existing 2 agents and 2 prompts (its read-back compares them by id and field); the order of the list.
  */
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -33,6 +44,7 @@ import { HAVE_PY, tmpStore, startExecutor, killExecutor } from './helpers/graph-
 const SKIP = HAVE_PY ? false : 'UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)';
 const UNIT_ENV = 'SCRUM_GRAPH_UNIT_SMALLKINDS';
 const ROSTER_FILE = path.join(os.tmpdir(), `a1k-roster-${process.pid}.json`);
+after(() => fs.rmSync(ROSTER_FILE, { force: true }));
 fs.writeFileSync(ROSTER_FILE, JSON.stringify({ seats: { ada: { name: 'Ada', glyph: 'a', color: '#7cc4a0' }, gizmo: { name: 'Gizmo', glyph: 'g', color: '#c4a07c' }, board: { name: 'Board', glyph: 'o', color: '#8899aa', kind: 'system' } } }));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const api = async (base, method, route, body) => {
@@ -56,8 +68,13 @@ async function startProxy(execUrl) {
   const p = {};
   p.server = http.createServer(async (req, res) => {
     const chunks = []; for await (const c of req) chunks.push(c);
+    const text = Buffer.concat(chunks).toString('utf8');
+    if (p.refuse && p.refuse(text)) { try { req.socket.destroy(); } catch { /* gone */ } return; }   // A2p: refuse ONE kind of write
+    // A2d: HOLD the first request matching `hold.match` until `hold.release()`; `hold.done` resolves with its status once answered
+    const held = p.hold && !p.hold.taken && p.hold.match(text) ? p.hold : null;
+    if (held) { held.taken = true; held.arrived(); await held.gate; }
     const fwd = { ...req.headers }; delete fwd.host; delete fwd['content-length']; delete fwd.connection;
-    try { const f = await fetch(`${execUrl}${req.url}`, { method: req.method, headers: fwd, ...(req.method === 'POST' ? { body: Buffer.concat(chunks) } : {}) }); const t = await f.text(); res.statusCode = f.status; res.end(t); } catch { try { req.socket.destroy(); } catch { /* gone */ } }
+    try { const f = await fetch(`${execUrl}${req.url}`, { method: req.method, headers: fwd, ...(req.method === 'POST' ? { body: Buffer.concat(chunks) } : {}) }); const t = await f.text(); res.statusCode = f.status; res.end(t); held?.finish(f.status); } catch { try { req.socket.destroy(); } catch { /* gone */ } held?.finish(null); }
   });
   await new Promise((r) => p.server.listen(0, '127.0.0.1', r)); p.port = p.server.address().port; p.url = `http://127.0.0.1:${p.port}`;
   p.down = () => new Promise((r) => { p.server.closeAllConnections?.(); p.server.close(() => r()); });
@@ -65,10 +82,12 @@ async function startProxy(execUrl) {
   return p;
 }
 async function unitOn(body, dsid = 'a1k-test') {
-  const exec = await startExecutor({ store: tmpStore('a1k-store-'), datasetId: dsid, create: true });
+  // #1721 — the executor's store is removed when the row ends: the suite's tmp check excuses this FILE as a known leak, so a new leak here would pass unflagged
+  const store = tmpStore('a1k-store-');
+  const exec = await startExecutor({ store, datasetId: dsid, create: true });
   const proxy = await startProxy(exec.baseUrl);
   const rest = await startRestServer({ board: makeBoardFixture(), env: { SCRUM_ROSTER_FILE: ROSTER_FILE, SCRUM_GRAPH_DATASET_ID: dsid, SCRUM_GRAPH_EXECUTOR_URL: proxy.url, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', [UNIT_ENV]: '1' } });
-  try { return await body({ base: rest.baseUrl, rest, proxy, exec }); } finally { await rest.stop(); try { await proxy.down(); } catch { /* down */ } await killExecutor(exec); }
+  try { return await body({ base: rest.baseUrl, rest, proxy, exec }); } finally { await rest.stop(); try { await proxy.down(); } catch { /* down */ } await killExecutor(exec); fs.rmSync(store, { recursive: true, force: true }); }
 }
 async function holders(execUrl, needle) {
   const res = await fetch(`${execUrl}/query`, { method: 'POST', headers: { 'content-type': 'application/sparql-query' }, body: `SELECT ?s ?p WHERE { { ?s ?p ?o FILTER(isLiteral(?o) && CONTAINS(STR(?o), ${JSON.stringify(needle)})) } UNION { GRAPH ?g { ?s ?p ?o FILTER(isLiteral(?o) && CONTAINS(STR(?o), ${JSON.stringify(needle)})) } } }`, signal: AbortSignal.timeout(30000) });
@@ -141,6 +160,35 @@ async function restScenario(base, tag, { expectDown = null } = {}) {
 }
 const holderOf = async (base, id) => (await api(base, 'GET', `/api/cards/${id}`)).body?.claimedBy ?? null;
 const announcements = async (base, seat) => ((await api(base, 'GET', '/api/conversations?limit=200')).body ?? []).filter((c) => String(c.body ?? '').includes(`${seat} is resting`));
+/** #1721 — this seat's rest obligations, as the outbox stores them (read under the write lock, so never across a write) */
+const obligationsOf = async (base, seat) => {
+  const r = await api(base, 'GET', '/api/outbox');
+  assert.equal(r.status, 200, `the outbox is readable (${r.status} ${r.text.slice(0, 120)})`);
+  return (r.body?.entries ?? []).filter((e) => e?.payload?.origin?.agent === seat);
+};
+/** #1721 — the obligation the 200 promised: ONE publisher entry, pending or published (never blocked), sequenced, naming both cards */
+async function assertObligation(base, seat, cards, label) {
+  const obs = await obligationsOf(base, seat);
+  assert.equal(obs.length, 1, `${label}: exactly ONE obligation for the rest (${JSON.stringify(obs.map((e) => [e.slot, e.status]))})`);
+  const [ob] = obs;
+  assert.equal(ob.mode, 'publisher', `${label}: a publisher obligation (the post is written after the answer)`);
+  assert.ok(['pending', 'published'].includes(ob.status), `${label}: pending or published, never ${ob.status} (${ob.reason ?? ''})`);
+  assert.ok(Number.isSafeInteger(ob.postSeq) && ob.postSeq > 0, `${label}: its postSeq is reserved in the same write (${JSON.stringify(ob.postSeq)})`);
+  assert.equal(typeof ob.publicationAt, 'string', `${label}: its publicationAt is fixed in the same write`);
+  for (const c of cards) assert.ok(String(ob.payload?.body ?? '').includes(`#${c.shortId}`), `${label}: the frozen body names #${c.shortId}`);
+  return ob;
+}
+/** #1721 — drive publication through the idempotent verb; bounded, and ends on the verb's own answer, not on a clock */
+async function publishNow(base, obligationId, label) {
+  let last = null;
+  for (let i = 0; i < 20; i++) {
+    last = await api(base, 'POST', `/api/outbox/${encodeURIComponent(obligationId)}/publish`, {});
+    assert.equal(last.status, 200, `${label}: the publish verb answers (${last.status} ${last.text.slice(0, 160)})`);
+    if (last.body?.status !== 'pending') break;
+  }
+  assert.equal(last.body?.status, 'published', `${label}: publication completes when driven (${last.text.slice(0, 160)})`);
+  return last.body;
+}
 
 test('A2 REST RELEASES THE CLAIMS, ONCE: both cards freed, named in the answer, ONE announcement; resting again releases nothing (unit off, then unit on, identical)', { skip: SKIP, timeout: 300000 }, async () => {
   const observe = async (base, tag) => {
@@ -159,12 +207,82 @@ test('A2 REST RELEASES THE CLAIMS, ONCE: both cards freed, named in the answer, 
     assert.deepEqual(expected.released1.map(String), expected.shortIds, 'CONTROL (unit off): the answer names both cards');
     assert.deepEqual(expected.holders1, [null, null], 'CONTROL: both cards are unclaimed'); assert.equal(expected.posts1, 1, 'CONTROL: one announcement'); assert.deepEqual([expected.released2, expected.posts2], [[], 1], 'CONTROL: resting again releases nothing and posts nothing');
   } finally { await off.stop(); }
+  // UNIT ON (#1721, contract (b)): the 200 promises the state and the obligation; publication is driven, then counted
   await unitOn(async ({ base }) => {
-    const got = await observe(base, ALNUM());
-    assert.deepEqual(got.released1.map(String), got.shortIds, 'unit on: the answer names both cards');
-    assert.deepEqual(got.holders1, [null, null], 'unit on: both cards are unclaimed (the cards are in the document, the agent in the graph)');
-    assert.equal(got.posts1, 1, 'unit on: exactly ONE announcement'); assert.equal(got.state, 'resting');
-    assert.deepEqual([got.released2, got.posts2], [[], 1], 'unit on: resting again releases nothing and posts nothing');
+    const { seat, cards } = await restScenario(base, ALNUM());
+    const r1 = await api(base, 'PATCH', `/api/agents/${seat}`, { by: 'ada', state: 'resting' });
+    assert.equal(r1.status, 200, `unit on: the rest is accepted (${r1.status} ${r1.text.slice(0, 120)})`);
+    assert.deepEqual([...(r1.body.released ?? [])].map(String).sort(), cards.map((c) => String(c.shortId)).sort(), 'unit on: the answer names both cards');
+    assert.equal(r1.body.state, 'resting');
+    assert.deepEqual([await holderOf(base, cards[0].id), await holderOf(base, cards[1].id)], [null, null], 'unit on: both cards are unclaimed (the cards are in the document, the agent in the graph)');
+    const ob = await assertObligation(base, seat, cards, 'unit on, at the 200');
+    const pub = await publishNow(base, ob.obligationId, 'unit on');
+    const posts = await announcements(base, seat);
+    assert.equal(posts.length, 1, `unit on: exactly ONE announcement once published (${posts.length}; the inline attempt and the driven one are the same post)`);
+    assert.equal(posts[0].id, pub.postId, 'unit on: and it is the post the obligation names');
+    const r2 = await api(base, 'PATCH', `/api/agents/${seat}`, { by: 'ada', state: 'resting' });
+    assert.deepEqual(r2.body.released ?? [], [], 'unit on: resting again releases nothing');
+    assert.equal((await obligationsOf(base, seat)).length, 1, 'unit on: and raises no second obligation');
+    assert.equal((await announcements(base, seat)).length, 1, 'unit on: and posts nothing');
+  });
+});
+
+test('A2p THE PENDING PATH: the announcement write refused, the rest still answers 200 with both cards free, the obligation PENDING and no post; lifted, a publish lands exactly ONE', { skip: SKIP, timeout: 300000 }, async () => {
+  await unitOn(async ({ base, proxy }) => {
+    const { seat, cards } = await restScenario(base, ALNUM());
+    const marker = `${seat} is resting`;
+    proxy.refuse = (body) => body.includes(marker);   // only a write carrying the announcement's text; the agent write does not
+    try {
+      const r1 = await api(base, 'PATCH', `/api/agents/${seat}`, { by: 'ada', state: 'resting' });
+      assert.equal(r1.status, 200, `the rest does not wait on its announcement (${r1.status} ${r1.text.slice(0, 120)})`);
+      assert.deepEqual([await holderOf(base, cards[0].id), await holderOf(base, cards[1].id)], [null, null], 'both cards are unclaimed');
+      const ob = await assertObligation(base, seat, cards, 'refused');
+      assert.equal(ob.status, 'pending', 'PENDING: an announcement the executor would not take is neither published nor blocked');
+      const tried = await api(base, 'POST', `/api/outbox/${encodeURIComponent(ob.obligationId)}/publish`, {});
+      assert.equal(tried.status, 200, `the publish verb answers while refused (${tried.status} ${tried.text.slice(0, 160)})`);
+      assert.equal(tried.body?.status, 'pending', `while refused, a publish leaves it pending (${tried.text.slice(0, 160)})`);
+      assert.equal((await obligationsOf(base, seat))[0]?.status, 'pending', 'and the stored entry is still pending');
+      assert.equal((await announcements(base, seat)).length, 0, 'and no post exists');
+      proxy.refuse = null;
+      const pub = await publishNow(base, ob.obligationId, 'lifted');
+      const posts = await announcements(base, seat);
+      assert.equal(posts.length, 1, `lifted: exactly ONE announcement (${posts.length})`);
+      assert.equal(posts[0].id, pub.postId, 'lifted: the post the obligation names');
+    } finally { proxy.refuse = null; }
+  });
+});
+
+/** a one-shot hold for startProxy: the first matching request waits until release() */
+function holdFirst(match) {
+  const h = { match, taken: false };
+  h.reached = new Promise((r) => { h.arrived = r; });
+  h.gate = new Promise((r) => { h.release = r; });
+  h.done = new Promise((r) => { h.finish = r; });
+  return h;
+}
+
+test('A2d THE LATE INLINE ATTEMPT: publication driven while the inline attempt is held, then the inline attempt lands: still exactly ONE post, and the obligation stays published', { skip: SKIP, timeout: 300000 }, async () => {
+  await unitOn(async ({ base, proxy }) => {
+    const { seat, cards } = await restScenario(base, ALNUM());
+    const hold = holdFirst((body) => body.includes(`${seat} is resting`));
+    proxy.hold = hold;
+    try {
+      const r1 = await api(base, 'PATCH', `/api/agents/${seat}`, { by: 'ada', state: 'resting' });
+      assert.equal(r1.status, 200, `the rest is accepted (${r1.status} ${r1.text.slice(0, 120)})`);
+      await hold.reached;   // PRECONDITION by construction: the inline attempt's write is at the proxy, unanswered
+      const ob = await assertObligation(base, seat, cards, 'inline held');
+      assert.equal(ob.status, 'pending', 'PRECONDITION: with the inline attempt held, the entry is still pending');
+      const pub = await publishNow(base, ob.obligationId, 'driven first');
+      assert.equal((await announcements(base, seat)).length, 1, 'driven: one post');
+      hold.release();
+      const inlineStatus = await hold.done;   // the late inline write has been answered by the executor
+      assert.notEqual(inlineStatus, null, 'PRECONDITION: the late inline write reached the executor and was answered');
+      const posts = await announcements(base, seat);
+      assert.equal(posts.length, 1, `after the late inline attempt: still exactly ONE post (${posts.length}; executor answered it ${inlineStatus})`);
+      assert.equal(posts[0].id, pub.postId, 'and it is the driven post');
+      const again = await publishNow(base, ob.obligationId, 'after the late attempt');
+      assert.equal(again.postId, pub.postId, 'the obligation still names that post');
+    } finally { hold.release(); proxy.hold = null; }   // never leave a request parked at the proxy on a failed row
   });
 });
 
@@ -180,7 +298,9 @@ test('A3 NO PARTIAL EFFECT WITH THE EXECUTOR AWAY: the rest answers 503, the car
     const again = await api(base, 'PATCH', `/api/agents/${seat}`, { by: 'ada', state: 'resting' });
     assert.equal(again.status, 200, `with the executor back the same rest works (${again.status} ${again.text.slice(0, 120)})`);
     assert.deepEqual([await holderOf(base, cards[0].id), await holderOf(base, cards[1].id)], [null, null], 'and releases both');
-    assert.equal((await announcements(base, seat)).length, 1, 'with exactly one announcement');
+    const ob = await assertObligation(base, seat, cards, 'back');   // #1721: the refused attempt left none, this one exactly one
+    await publishNow(base, ob.obligationId, 'back');
+    assert.equal((await announcements(base, seat)).length, 1, 'with exactly one announcement once published');
   });
 });
 
