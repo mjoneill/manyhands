@@ -66,13 +66,14 @@ const raw = async (x, sparql) => {
 const health = async (x) => (await fetch(`${x.baseUrl}/health`)).json();
 
 /** The bookkeeping graph as sorted canonical lines: the restore is compared on CONTENT, never on a count. */
-const bk = async (x) => {
-  const r = await fetch(`${x.baseUrl}/query`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/b1q-${opN++}` }, body: `SELECT ?s ?p ?o WHERE { GRAPH <${BK}> { ?s ?p ?o } }` });
+const bk = async (x, graph = BK) => {
+  const r = await fetch(`${x.baseUrl}/query`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/b1q-${opN++}` }, body: `SELECT ?s ?p ?o WHERE { GRAPH <${graph}> { ?s ?p ?o } }` });
   assert.equal(r.status, 200);
   const t = (b) => `${b.type}:${b.value}:${b.datatype || ''}`;
   return (await r.json()).results.bindings.map((b) => [t(b.s), t(b.p), t(b.o)].join(' ')).sort();
 };
-// the RecoveryHold (contract v2 V2-1) lives under the same prefix but is written BY the promotion, so it is compared on its own
+// the RecoveryHold (contract v2 V2-1) is written BY the promotion, into its own recovery graph (A7 v2, P2), so it is checked on its own
+const RECOVERY = 'urn:ex:postseq/recovery';
 const isHold = (line) => line.startsWith('uri:urn:ex:postseq/recovery-hold');
 const isPostseq = (line) => line.startsWith('uri:urn:ex:postseq/') && !isHold(line);
 const seqsOf = async (c, items) => {
@@ -123,7 +124,8 @@ test('#1749 (B0) CONTROL: a promoted restore\'s allocator and reservations are b
     assert.ok(s.postseqAtBackup.length > 0, 'PRECONDITION: the comparison is not of two empty sets');
     // promotion rewrites the store's own epoch marker, so the comparison is of the postseq records, all of them, by content
     assert.deepEqual((await bk(x)).filter(isPostseq), s.postseqAtBackup, 'allocator and reservations restored exactly');
-    assert.ok((await bk(x)).some(isHold), 'the promotion wrote its RecoveryHold (V2-1), beside the restored records');
+    assert.ok((await bk(x, RECOVERY)).some(isHold), 'the promotion wrote its RecoveryHold (V2-1) into the recovery graph (A7 v2, P2)');
+    assert.ok(!(await bk(x)).some(isHold), 'and none into the bookkeeping graph');
     assert.deepEqual(await M.readPostSeqAllocator(client(x)), { ok: false, status: 'RECOVERY_HOLD' },
       'the allocator does not read as usable until reconciled (H6, V2-2): its next, 102, may be the lost store\'s number');
   } finally { await stopX(x); }
