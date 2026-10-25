@@ -20,8 +20,8 @@
  *   B3  RED today: a NEW reservation from a fresh client on the promoted restore is NOT allocated (it would reuse a lost number);
  *       the allocator and the reservation set are unchanged
  *   B4  NEGATIVE CONTROL: a backup that lost its allocator refuses every reservation, with no side effects
- *   B5  todo (interface open): after a reconciliation that records the externally observed high-water, a new reservation is
- *       allocated ABOVE it. The reconciliation's interface is a design question for #1749's builder and the contract owner's review.
+ *   B5  RETIRED here: reconciliation is the frozen interface's maintenance start, tested by tests/recovery-hold-1749.test.mjs
+ *       (B5a: the next allocation is exactly R = high-water + gap + 1; B5b–B5p its refusals).
  */
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -179,6 +179,6 @@ test('#1749 (B4) NEGATIVE CONTROL: a backup that lost its allocator refuses ever
   } finally { await stopX(x); }
 });
 
-test('#1749 (B5) after reconciliation against the externally observed high-water, a new reservation is allocated ABOVE it', { ...T, todo: 'the reconciliation interface is not designed yet: it is #1749\'s first build question' }, async () => {
-  assert.fail('not written: needs the reconciliation interface (who supplies the observed high-water, and how it is recorded)');
-});
+// B5 (after reconciliation a new reservation is allocated ABOVE the restored high-water) is RETIRED here: the frozen recovery
+// interface (#1749 v2 + v3 A1–A7, P1–P4) made reconciliation an executor maintenance start, and the hold rows test it there
+// (tests/recovery-hold-1749.test.mjs B5a: the next allocation is exactly R = high-water + gap + 1; B5b–B5p its refusals).
