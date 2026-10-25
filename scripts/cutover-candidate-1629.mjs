@@ -46,6 +46,8 @@ const query = async (sparql) => {
   if (!r.ok) refuse('UNAVAILABLE', `query ${r.status}`);
   return (await r.json()).results.bindings;
 };
+// a READY candidate is FROZEN (#1747 §6 step 5): not even an identical re-mark answers, because READY means nothing moves
+if ((await query(`SELECT ?p WHERE { GRAPH <${BOOKKEEPING_GRAPH}> { <urn:ex:cutover/ready> ?p ?o } } LIMIT 1`)).length) refuse('READY_FROZEN', 'the candidate is READY; it may not be marked again');
 const have = (await query(`SELECT ?v WHERE { GRAPH <${BOOKKEEPING_GRAPH}> { <${CANDIDATE_MARKER}> <${P_MANIFEST_SHA}> ?v } }`)).map((b) => b.v.value);
 if (have.length === 1 && have[0] === manifestSha) { console.log(`ALREADY ${manifestSha}`); process.exit(0); }
 if (have.length) refuse('MARKER_MISMATCH', `the candidate is already marked for ${have.join(', ')}`);

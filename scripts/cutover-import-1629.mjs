@@ -35,6 +35,7 @@ import { readCommittedOrigin } from '../core/origin-commit.mjs';
 
 const SCHEMA_VERSION = 'cutover-import-1629/v1';
 const CRASH_AFTER = Number(process.env.SCRUM_CUTOVER_CRASH_AFTER_APPLY || 0);   // test seam; 0 = off
+const READY_BARRIER = process.env.SCRUM_CUTOVER_READY_BARRIER || '';   // test seam; unset = off
 const BK = BOOKKEEPING_GRAPH;
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
 const NS = 'https://scrumboard.local/ns#';
@@ -416,14 +417,23 @@ async function markReady({ X, id, captureSha, reservations, origins, entries, pl
   const seqRows = await X.query(`SELECT ?s WHERE { GRAPH <${BK}> { <urn:ex:dataset> <urn:ex:commitSeq> ?s } }`);
   if (seqRows.length !== 1) refuse('UNAVAILABLE', `the store marker carries ${seqRows.length} commitSeq values`);
   const seq = seqRows[0].s.value;
+  // commitSeq moves only for COMPILED writes; a raw /update (a migration tool, a direct client) leaves it alone. So the
+  // position is ALSO the store's total quad count: that catches a raw insert or delete in the window. It cannot see a
+  // raw swap that keeps the count; §6 step 1's stopped writers and the #1748 floor are the fence for those.
+  const COUNT_ALL = `SELECT (COUNT(*) AS ?n) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }`;
+  const quads = (await X.query(COUNT_ALL))[0]?.n?.value;
+  if (!/^\d+$/.test(String(quads))) refuse('UNAVAILABLE', 'the store quad count did not read');
+  // TEST-ONLY seam: hold between verification and the mark (a FIFO opened for reading blocks until a writer closes it)
+  if (READY_BARRIER) fs.readFileSync(READY_BARRIER);
   await X.update(`INSERT { GRAPH <${BK}> { <${READY_MARKER}> <${P_READY_MIGRATION}> ${lit(id)} ; <${P_MANIFEST_SHA}> ${lit(captureSha)} ; <${P_VERIFIED_SEQ}> ${typedLit(seq, 'integer')} ; <${P_READY_AT}> ?now . } }
-WHERE { GRAPH <${BK}> { <urn:ex:dataset> <urn:ex:commitSeq> ?s . FILTER(STR(?s) = ${lit(seq)}) <${CANDIDATE_MARKER}> <${P_MANIFEST_SHA}> ${lit(captureSha)} . } FILTER NOT EXISTS { GRAPH <${BK}> { <${READY_MARKER}> ?rp ?ro } } BIND(NOW() AS ?now) }`,
+WHERE { GRAPH <${BK}> { <urn:ex:dataset> <urn:ex:commitSeq> ?s . FILTER(STR(?s) = ${lit(seq)}) <${CANDIDATE_MARKER}> <${P_MANIFEST_SHA}> ${lit(captureSha)} . } FILTER NOT EXISTS { GRAPH <${BK}> { <${READY_MARKER}> ?rp ?ro } }
+  { SELECT (COUNT(*) AS ?qn) WHERE { { ?qs ?qp ?qo } UNION { GRAPH ?qg { ?qs ?qp ?qo } } } } FILTER(?qn = ${quads}) BIND(NOW() AS ?now) }`,
     `urn:ex:op/cutover/ready/${id}`);
   // a 200 describes the request: read the marker back
   const back = await X.query(`SELECT ?p ?o WHERE { GRAPH <${BK}> { <${READY_MARKER}> ?p ?o } }`);
   const val = (p) => back.filter((b) => b.p.value === p).map((b) => b.o.value);
   if (JSON.stringify(val(P_READY_MIGRATION)) !== JSON.stringify([id]) || JSON.stringify(val(P_MANIFEST_SHA)) !== JSON.stringify([captureSha])) {
-    if (!back.length) hold('MOVED', `the candidate changed after verification (commitSeq was ${seq}); nothing was marked`);
+    if (!back.length) hold('MOVED', `the candidate changed after verification (commitSeq was ${seq}, quads ${quads}); nothing was marked`);
     refuse('READY_CONFLICT', `the READY marker reads back for ${val(P_READY_MIGRATION).join(', ')}`);
   }
   return `READY id=${id} commitSeq=${seq}`;
