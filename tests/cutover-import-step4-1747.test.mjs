@@ -912,6 +912,9 @@ test(`#1747 (R1-i) a prepare whose mutationId is an IMPORTED origin's is refused
 /** REST on the candidate after COMPLETE, document mode OFF (the post-cutover runtime). `notify` routes REST's dispatches to the
  *  counting stub (R1-g); otherwise nowhere, so a native post here cannot move S4-N. */
 async function restOn(w, { notify = false } = {}) {
+  // #1744: mode off refuses to START unless the card reference index is exact under complete true, as the activation does it
+  // (backfill with writers stopped: no REST is running on the candidate yet), so a REST row reaches its own question
+  if (JSON.stringify(await indexMarker(w.cand)) !== '["true"]') await backfillIndex(w);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cut1747-rest-'));
   const boardFile = path.join(dir, 'board.json'); fs.writeFileSync(boardFile, '{}'); fs.chmodSync(boardFile, 0o000);
   const roster = path.join(dir, 'roster.json'); fs.writeFileSync(roster, JSON.stringify({ seats: { ada: { name: 'Ada', glyph: 'a', color: '#7cc4a0' }, board: { name: 'Board', glyph: 'o', color: '#8899aa', kind: 'system' } } }));
@@ -975,7 +978,18 @@ test('#1747 (R1-g) GET /api/outbox lists every imported obligation with its STOR
 // that window; and the step-3 tool refusing a READY store (v56). Every row keeps S4-N's "no notify".
 const RC = { MOVED: 'MOVED', READBACK: 'READBACK', EXTRA_RECORD: 'EXTRA_RECORD', INCOMPLETE: 'INCOMPLETE', READY_FROZEN: 'READY_FROZEN', READY_CONFLICT: 'READY_CONFLICT' };
 const RM = { s: 'urn:ex:cutover/ready', migration: 'urn:ex:cutover/readyMigration', sha: 'urn:ex:cutover/captureManifestSha256', seq: 'urn:ex:cutover/verifiedCommitSeq', at: 'urn:ex:cutover/readyAt' };
-async function ready(w, { env = {}, capture = w.captureManifest } = {}) {
+// r11 (46840; the ruled sequence, 46830): READY requires the card reference index exact under complete true, so the fixture
+// backfills it (writers stopped) BEFORE --ready, exactly once: a candidate already reading complete true is left alone, so a
+// READY replay never backfills. `index: 'none'` skips it, for the rows about READY's own index step.
+const INDEX_TOOL = path.join(REPO, 'scripts', 'card-ref-index-1744.mjs');
+const indexMarker = async (x) => (await typed(x, `SELECT ?v WHERE { GRAPH <${BK}> { <urn:ex:card-ref-index/coverage> <urn:ex:card-ref-index/complete> ?v } }`)).map((v) => v.value);
+async function backfillIndex(w) {
+  const b = await run([INDEX_TOOL, '--executor', w.cand.baseUrl, '--dataset', DS, '--backfill'], {});
+  assert.equal(b.status, 0, `PRECONDITION: the card reference index was backfilled before --ready (exit ${b.status}: ${b.out.slice(-240)} ${b.err.slice(-160)})`);
+  assert.match(b.out, /^COMPLETE$/m, 'PRECONDITION: the backfill reports COMPLETE');
+}
+async function ready(w, { env = {}, capture = w.captureManifest, index = 'backfill' } = {}) {
+  if (index === 'backfill' && JSON.stringify(await indexMarker(w.cand)) !== '["true"]') await backfillIndex(w);
   const r = await run([IMPORTER, '--board-data', w.docFile, '--executor', w.cand.baseUrl, '--dataset', DS, '--outbox-manifest', w.outboxManifest, '--capture-manifest', capture, '--ready'], env);
   importerRuns++;
   const line = r.out.split('\n').map((l) => l.trim()).find((l) => /^(READY|ALREADY_READY|HOLD|REFUSED|COMPLETE|INCOMPLETE) ?/.test(l)) ?? '';
@@ -1574,6 +1588,63 @@ for (const [field, what, sparql] of [
     }, { mark: false });
   });
 }
+// ── r11 (46840): READY's card-reference-index step (rulings 46773/46781, sequence 46830). Each a HOLD with NO ready marker. ──
+// The step-4 world holds no cards, so its backfilled index is EXACT and EMPTY. The damage is therefore an ORPHAN coverage node
+// (coverage for a card that does not exist), which the full verifier refuses by name ("orphan coverage").
+const ORPHAN = `<urn:ex:card-ref-index/card/uuid-ghost-1747>`;
+const plantOrphan = (x, tag) => rawOn(x, `INSERT DATA { GRAPH <${BK}> { ${ORPHAN} <urn:ex:card-ref-index/indexedVersion> "1"^^<${XSD}integer> } }`, tag);
+test(`#1747 (IX1, r11) READY over a VIOLATED index (an orphan coverage node planted after the backfill) → HOLD INDEX_INCOMPLETE naming the violation; no ready marker`, T, async () => {
+  await imported(async (w) => {
+    await backfillIndex(w);
+    await plantOrphan(w.cand, 'ix1-damage');
+    const r = await ready(w);   // the marker still reads true, so ready() does not re-backfill: the damage stands
+    await expectNoMark(w, r, 'HOLD', 'INDEX_INCOMPLETE', 'a violated index');
+    assert.match(r.out, /violation.*orphan coverage/, 'naming the violation');
+  });
+});
+test(`#1747 (IX2, r11) READY over an EXACT index that was never backfilled (no completion marker) → HOLD INDEX_INCOMPLETE naming the marker; no ready marker`, T, async () => {
+  await imported(async (w) => {
+    assert.deepEqual(await indexMarker(w.cand), [], 'PRECONDITION: no completion marker');
+    const r = await ready(w, { index: 'none' });
+    await expectNoMark(w, r, 'HOLD', 'INDEX_INCOMPLETE', 'no marker');
+    assert.match(r.out, /marker reads \[\]/, 'naming the marker');
+  });
+});
+test(`#1747 (IX3, r11) READY over an exact index whose marker is LATCHED false → HOLD INDEX_INCOMPLETE; READY never re-opens the latch; no ready marker`, T, async () => {
+  await imported(async (w) => {
+    await backfillIndex(w);
+    await rawOn(w.cand, `DELETE { GRAPH <${BK}> { <urn:ex:card-ref-index/coverage> <urn:ex:card-ref-index/complete> ?v } } INSERT { GRAPH <${BK}> { <urn:ex:card-ref-index/coverage> <urn:ex:card-ref-index/complete> "false"^^<${XSD}boolean> } } WHERE { GRAPH <${BK}> { <urn:ex:card-ref-index/coverage> <urn:ex:card-ref-index/complete> ?v } }`, 'ix3-latch');
+    const r = await ready(w, { index: 'none' });
+    await expectNoMark(w, r, 'HOLD', 'INDEX_INCOMPLETE', 'a latched marker');
+    assert.match(r.out, /marker reads \["false"\]/, 'naming the latched marker');
+    assert.deepEqual(await indexMarker(w.cand), ['false'], 'READY wrote nothing to the latch');
+  });
+});
+test(`#1747 (IX4, r11) the index DAMAGED after READY's index check and before its mark (at the test-only pause) → HOLD MOVED, no ready marker: the write revision binds the index result`, T, async () => {
+  await imported(async (w) => {
+    await backfillIndex(w);
+    const fifo = path.join(w.dir, 'ready-barrier-ix4'); assert.equal(spawnSync('mkfifo', [fifo]).status, 0, 'PRECONDITION: mkfifo');
+    const p = ready(w, { env: { SCRUM_CUTOVER_READY_BARRIER: fifo } });
+    const fh = await Promise.race([fs.promises.open(fifo, 'w'), new Promise((res) => setTimeout(() => res(null), 60000))]);
+    if (!fh) { try { fs.closeSync(fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK)); } catch { /* none */ } await p; }
+    assert.ok(fh, 'PRECONDITION: the tool reached its pause, AFTER its index check (the seam sits before the mark)');
+    await plantOrphan(w.cand, 'ix4-damage');
+    await fh.close();
+    await expectNoMark(w, await p, 'HOLD', RC.MOVED, 'the index damaged after its check');
+  });
+});
+test(`#1747 (IX5, r11) a READY REPLAY after the index is damaged re-verifies: never ALREADY_READY, refused`, T, async () => {
+  await imported(async (w) => {
+    const first = await ready(w);
+    assert.equal(first.kind, 'READY', `CONTROL: the backfilled candidate goes READY (${first.line})`);
+    await plantOrphan(w.cand, 'ix5-damage');
+    const again = await ready(w);
+    assert.notEqual(again.kind, 'ALREADY_READY', `never ALREADY_READY over a damaged index (${again.line})`);
+    // the replay re-verifies; whichever check meets the damage first (the index step, or the frozen-candidate check) must refuse
+    assert.ok(again.kind === 'HOLD' || again.kind === 'REFUSED', `a HOLD or REFUSED, not a pass (${again.line})`);
+    assert.notEqual(again.status, 0, 'a non-zero exit');
+  });
+});
 test('#1747 (S4-N) no importer run called the notify endpoint (and the importer really ran)', () => {
   assert.ok(importerRuns >= 10, `the importer really ran in this file (${importerRuns} runs): zero calls from zero runs proves nothing`);
   assert.equal(notifyCalls(), 1, `only the harness control's one deliberate call reached the stub (got ${notifyCalls()})`);
