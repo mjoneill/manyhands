@@ -1719,6 +1719,9 @@ function compileOriginPrepare(c) {
   };
   where.push(...dupGuard(OP));
   pre.push(`    FILTER NOT EXISTS { ${inEither(`${PREP} ?xq_p ?xq_o`)} }`);   // Prepared absent (one per mutationId)
+  // #1747 R1 — and no Origin: a native Origin follows its Prepared node, so one without it is an IMPORTED origin, which is
+  // settled history and is never prepared again
+  pre.push(`    FILTER NOT EXISTS { ${inEither(`${T.originSubject(D.mutationId)} ?xq_op ?xq_oo`)} }`);
   bIns.push(
     `  ${v(PREP)} a ${v(T.Prepared)} .`,
     `  ${v(PREP)} ${T.mutationId} ${v(strLit(D.mutationId))} .`,

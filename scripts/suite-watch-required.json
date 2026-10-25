@@ -43,6 +43,8 @@
   "tests/conversations-list-r1.test.mjs",
   "tests/copy-guard-bytes-1577.test.mjs",
   "tests/cursor-explicit-ack-1576.test.mjs",
+  "tests/cutover-capture-step2-1747.test.mjs",
+  "tests/cutover-import-step4-1747.test.mjs",
   "tests/decision-makers-disabled-r1.test.mjs",
   "tests/definitions-graph-d1.test.mjs",
   "tests/delivery-graph-post-d1.test.mjs",

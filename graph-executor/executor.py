@@ -127,7 +127,9 @@ INSTANT_RE = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{
 
 def canonical_json(v):
     """#1749 P8-1 the agreed canonical JSON: object keys sorted recursively, arrays and every scalar as stored, no whitespace,
-    UTF-8 (the JSON.stringify of the key-sorted value, which is what json.dumps with these options produces for JSON values)."""
+    UTF-8 (the JSON.stringify of the key-sorted value, which is what json.dumps with these options produces for JSON values).
+    CAVEAT (#1758): sort_keys orders keys by code point, the JS canonicalJson by UTF-16 code unit; they agree for every key in the
+    Basic Multilingual Plane and differ above U+FFFF. Every payload key today is an ASCII field name; #1758 makes both refuse."""
     return json.dumps(v, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
 
 

@@ -23,7 +23,8 @@ import {
   originKeyOf as _originKeyOf, mutationIdOf as _mutationIdOf, canonOriginDescriptor, originDescriptorDigest, originPlanDigest,
   originCommitDigest, originCommitOp, admitStoredOriginPlan, ValidationError,
 } from './graph-compiler.mjs';
-import { readPostSeqReservation, canonAnnouncementDraft } from './postseq-reserve.mjs';
+import { readPostSeqReservation, canonAnnouncementDraft, allocatorMigrationId } from './postseq-reserve.mjs';
+import { IMPORTED_TERMS, isImportedRows, validateImportedOrigin, canonicalJson } from './imported-records.mjs';   // ONE JS canonicaliser (P8-1; #1758 for the non-BMP key caveat)
 import { announcePostId } from './announce-outbox.mjs';
 
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
@@ -159,6 +160,7 @@ export async function readCommittedOrigin(client, mutationId) {
   if (!pr.ok) return pr;
   const orr = await triplesOf(client, T.originSubject(mutationId));
   if (!orr.ok) return orr;
+  if (isImportedRows(orr.rows)) return readImportedOrigin(client, mutationId, pr.rows, orr.rows);
   try {
     const P = pr.rows.length ? validatePrepared(pr.rows, mutationId) : null;
     if (!orr.rows.length) {
@@ -240,7 +242,7 @@ export async function readCommittedOrigin(client, mutationId) {
       if (x.postSeq !== reservations[0].postSeq + i) bad('the reservations\' postSeqs are not consecutive in index order');
       if (x.createdAt !== origin.committedAt) bad(`reservation ${x.postId}'s createdAt is not Origin.committedAt`);
     }
-    return { ok: true, committed: { origin, obligations, reservations } };
+    return { ok: true, committed: { kind: 'native', origin, obligations, reservations } };
   } catch (e) {
     if (e instanceof Unavailable) return { ok: false, status: 'UNAVAILABLE', reason: e.message };
     if (e instanceof Bad || e instanceof ValidationError) return invalid(e.message);
@@ -248,7 +250,6 @@ export async function readCommittedOrigin(client, mutationId) {
   }
 }
 
-const canonJson = (v) => (Array.isArray(v) ? v.map(canonJson) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canonJson(v[k])])) : v);
 const RG = '<urn:ex:postseq/recovery>';
 const PSQ = (k) => `<urn:ex:postseq/${k}>`;
 /**
@@ -258,10 +259,42 @@ const PSQ = (k) => `<urn:ex:postseq/${k}>`;
  * the reason the status cannot be accepted. A read failure throws Unavailable.
  */
 async function retiredByDisposition(client, obligationId, payload) {
-  const sha = createHash('sha256').update(JSON.stringify(canonJson(payload)), 'utf8').digest('hex');
+  const sha = createHash('sha256').update(canonicalJson(payload), 'utf8').digest('hex');
   const r = await client.query(`SELECT ?r WHERE { GRAPH ${RG} { ?r a ${PSQ('DispositionRecord')} ; ${PSQ('obligationId')} ?o ; ${PSQ('payloadSha256')} ?h ; ${PSQ('decision')} ?d ; ${PSQ('obligationStatusAfter')} ?a . FILTER(STR(?o) = ${JSON.stringify(obligationId)} && STR(?h) = ${JSON.stringify(sha)} && STR(?d) = "retire-unsent-unknown" && STR(?a) = "retired") } }`);
   if (!r.ok) throw new Unavailable(r.reason);
   return r.rows.length ? null : 'no DispositionRecord in the recovery graph binds this obligation, its payload and retire-unsent-unknown (#1749 A8)';
+}
+
+/**
+ * #1747 R1 — an origin the cutover IMPORTED: no Prepared node, no reservations of its own (the document's numbers were
+ * imported as reservations in their own right), validated against its stored source records. A Prepared node beside it
+ * is INVALID: an imported origin is never re-prepared.
+ */
+async function readImportedOrigin(client, mutationId, preparedRows, originRows) {
+  if (preparedRows.length) return invalid(`an imported origin ${mutationId} has a Prepared node beside it`);
+  const mig = await allocatorMigrationId(client);
+  if (!mig.ok) return mig;
+  // its obligations: every Obligation whose obligationId names this mutationId (imported ones carry no mutationId
+  // predicate), plus any triple on a subject derived from the source's slots, so an extra or a partial one is seen.
+  // The slots are read from the source JSON only to NAME subjects; validateImportedOrigin checks that JSON in full.
+  let slots = [];
+  try {
+    const j = originRows.find((x) => x.p.value === IMPORTED_TERMS.sourceOriginJson);
+    const v = j ? JSON.parse(j.o.value) : null;
+    if (Array.isArray(v?.slots)) slots = v.slots.filter((x) => typeof x === 'string' && /^[a-z][a-z0-9-]{0,31}$/.test(x));   // only a slot that can NAME an IRI; any other fails validation below
+  } catch { /* unparseable: the validator names it */ }
+  const derived = slots.map((x) => T.obligationSubject(mutationId, x));
+  const r = await client.query(`SELECT ?s ?p ?o WHERE { GRAPH ${BK} { { ?s a ${T.Obligation} ; ${T.obligationId} ?id . FILTER(STRSTARTS(STR(?id), ${JSON.stringify(`${mutationId}:`)})) }${derived.length ? ` UNION { VALUES ?s { ${derived.join(' ')} } }` : ''} ?s ?p ?o . } }`);
+  if (!r.ok) return { ok: false, status: 'UNAVAILABLE', reason: r.reason };
+  const obs = new Map(), seen = new Set();
+  for (const b of r.rows) {
+    const key = `${b.s.value}\u0000${b.p.value}\u0000${b.o.type}\u0000${b.o.value}\u0000${b.o.datatype ?? ''}\u0000${b.o['xml:lang'] ?? ''}`;
+    if (seen.has(key)) continue;   // the two UNION arms can both bind one triple
+    seen.add(key);
+    if (!obs.has(b.s.value)) obs.set(b.s.value, []);
+    obs.get(b.s.value).push({ p: b.p, o: b.o });
+  }
+  return validateImportedOrigin(originRows, obs, mutationId, mig.migrationId);
 }
 
 /** Every Obligation subject of this mutationId: typed ones naming it, plus any triple on a derived slot subject. */
@@ -275,10 +308,12 @@ async function obligationSubjects(client, mutationId, slots) {
 
 /** PR1's named control: one bookkeeping SELECT over the three origin types, sorted by subject. */
 export async function enumerateOriginRecords(client) {
-  const r = await client.query(`SELECT ?s ?t ?m WHERE { GRAPH ${BK} { ?s a ?t . FILTER(?t IN (${T.Prepared}, ${T.Origin}, ${T.Obligation})) OPTIONAL { ?s ${T.mutationId} ?m } } } ORDER BY ?s`);
+  // `imported` (#1747 R1): the record carries a migrationId. It lets a pending-only scan skip settled history without
+  // reading it; it is never a validation (every reader still validates what it reads)
+  const r = await client.query(`SELECT ?s ?t ?m ?mig WHERE { GRAPH ${BK} { ?s a ?t . FILTER(?t IN (${T.Prepared}, ${T.Origin}, ${T.Obligation})) OPTIONAL { ?s ${T.mutationId} ?m } OPTIONAL { ?s <${IMPORTED_TERMS.migrationId}> ?mig } } } ORDER BY ?s`);
   if (!r.ok) return { ok: false, status: 'UNAVAILABLE', reason: r.reason };
   const name = { [bare(T.Prepared)]: 'Prepared', [bare(T.Origin)]: 'Origin', [bare(T.Obligation)]: 'Obligation' };
-  return { ok: true, records: r.rows.map((b) => ({ type: name[b.t.value], subject: b.s.value, mutationId: b.m?.value ?? null })) };
+  return { ok: true, records: r.rows.map((b) => ({ type: name[b.t.value], subject: b.s.value, mutationId: b.m?.value ?? null, imported: b.mig !== undefined })) };
 }
 
 /**
@@ -292,6 +327,15 @@ export async function enumerateOriginRecords(client) {
  * Any read that fails is returned as it failed (UNAVAILABLE / INVALID), with no outcome: a state is never guessed.
  */
 export async function readOriginOutcome(client, mutationId) {
+  // #1747 R1 — an IMPORTED origin is its own outcome, decided BEFORE the Prepared read: it is never 'unprepared' (which
+  // would let a retry prepare it again) and never re-planned, committed or settled
+  const orr = await triplesOf(client, T.originSubject(mutationId));
+  if (!orr.ok) return orr;
+  if (isImportedRows(orr.rows)) {
+    const C = await readCommittedOrigin(client, mutationId);
+    if (!C.ok) return C;
+    return { ok: true, outcome: 'imported', mutationId };
+  }
   const P = await readPreparedOrigin(client, mutationId);
   if (!P.ok) return P;
   if (!P.prepared) return { ok: true, outcome: 'unprepared', mutationId };
