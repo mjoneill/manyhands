@@ -320,9 +320,13 @@ class Executor:
                  adopt_home=False, read_only=False, install_write_floor=None, reconcile_postseq=None):
         self.read_only = bool(read_only)
         self.reconciled = None
-        if reconcile_postseq is not None and (self.read_only or create or promote_epoch):
+        if reconcile_postseq is not None and (self.read_only or create or promote_epoch or adopt_home
+                                              or install_write_floor is not None):
+            # refused before the store is even opened: each of those writes something of its own, and a reconcile start that
+            # refuses must leave the store byte-unchanged (review finding 1). Run them as separate starts.
             raise SystemExit('REFUSED: --reconcile-postseq is a maintenance start of an existing, already promoted store: it '
-                             'cannot be combined with --read-only, --create or --promote-epoch')
+                             'cannot be combined with --read-only, --create, --promote-epoch, --adopt-home or '
+                             '--install-write-floor (run those as their own start, before or after)')
         if self.read_only and (create or promote_epoch or adopt_home):
             raise SystemExit('REFUSED: --read-only cannot be combined with --create, --promote-epoch or --adopt-home')
         if self.read_only and install_write_floor is not None:
@@ -396,6 +400,12 @@ class Executor:
         # It must DIRTY the store: a flush with nothing pending can succeed without touching
         # the disk (a reviewer, #1559 13:28Z). So: write a self-check triple, flush, delete it,
         # flush. The store's logical content is unchanged.
+        # #1749 everything that can refuse a start because of the RECOVERY GRAPH or the reconcile file is decided HERE, before
+        # the first write of this start (the self-check below): a refusal leaves the store unchanged.
+        self._check_recovery_graph_sound()
+        if promote_epoch and not self.read_only and self._hold_present():
+            self._prior_hold()   # a re-promotion replaces only a COMPLETE, well-formed hold (review finding 2)
+        reconcile_plan = self._reconcile_check(reconcile_postseq) if reconcile_postseq is not None else None
         self.promoted = None
         if self.read_only:
             self.write_floor = self._floor_value()
@@ -487,7 +497,7 @@ class Executor:
             raise SystemExit(f'REFUSED: the store holds the graph <{HOLD_VIOLATION}>, which the recovery-hold guard needs to '
                              'be absent; remove it offline')
         if reconcile_postseq is not None:
-            self.reconciled = self._reconcile_postseq(reconcile_postseq)
+            self.reconciled = self._reconcile_apply(reconcile_plan)
 
     # ── #1749 the recovery hold ──────────────────────────────────────────────────────────────────────────────────────
 
@@ -532,13 +542,9 @@ class Executor:
         hw = self._restored_high_water()
         prior_epoch = None
         if prior:
-            for t in self._rg_values(HOLD_S, HOLD_HIGH_WATER):
-                hw = max(hw, self._int_term(t, 'the prior hold\'s restoredHighWater'))
-            epochs = self._rg_values(HOLD_S, HOLD_EPOCH)
-            if len(epochs) != 1 or not isinstance(epochs[0], px.Literal):
-                raise SystemExit(f'REFUSED: HOLD_UNSOUND: the recovery hold being replaced has {len(epochs)} epoch values '
-                                 '(expected exactly one literal); repair it offline before promoting')
-            prior_epoch = epochs[0].value
+            old = self._prior_hold()
+            hw = max(hw, old['restoredHighWater'])
+            prior_epoch = old['epoch']
         if hw > MAX_SAFE:
             raise SystemExit(f'REFUSED: the restored high-water {hw} is not a safe integer')
         prior_t = f' ; <{HOLD_PRIOR_EPOCH}> {json.dumps(prior_epoch)}' if prior_epoch is not None else ''
@@ -546,6 +552,52 @@ class Executor:
                 f'INSERT DATA {{ GRAPH <{RG}> {{ <{HOLD_S}> a <{HOLD_T}> ; <{HOLD_EPOCH}> {json.dumps(new_epoch)} ; '
                 f'<{HOLD_INCARNATION}> {json.dumps(new_inc)} ; <{HOLD_COMMIT_SEQ}> "{int(commit_seq)}"^^<{XSD_INTEGER}> ; '
                 f'<{HOLD_HIGH_WATER}> "{hw}"^^<{XSD_INTEGER}>{prior_t} }} }}')
+
+    def _check_recovery_graph_sound(self):
+        """#1749 (review finding 3, the contract author's choice) the hold and the records use named terms only, so a blank
+        node anywhere in the recovery graph is planted or corrupt state: refuse to start, naming the quad. With this, the
+        /update snapshot guard only ever sees named quads, every one of which it can name."""
+        for q in self.store.quads_for_pattern(None, None, None, px.NamedNode(RG)):
+            if any(isinstance(t, px.BlankNode) for t in (q.subject, q.predicate, q.object)):
+                raise SystemExit(f'REFUSED: HOLD_UNSOUND: the recovery graph <{RG}> holds a blank-node quad, {q}; the hold '
+                                 'and the reconciliation records are named terms only, so this is planted or corrupt state. '
+                                 'Inspect and repair it offline (the store is unchanged)')
+
+    def _prior_hold(self):
+        """#1749 (review finding 2) the stored hold, validated COMPLETE before anything replaces it: typed RecoveryHold exactly
+        once; exactly one plain-string epoch and incarnation; exactly one xsd:integer restoredCommitSeq and restoredHighWater,
+        each a safe integer >= 0; at most one priorHoldEpoch; nothing else. Anything less refuses HOLD_UNSOUND, so a missing
+        field is never filled in from recomputed values."""
+        rows = self._hold_rows() or {}
+        def unsound(why):
+            return SystemExit(f'REFUSED: HOLD_UNSOUND: the recovery hold <{HOLD_S}> {why}; a re-promotion replaces only a '
+                              'complete hold. Inspect and repair it offline (the store is unchanged)')
+        allowed = {RDF_TYPE, *HOLD_PREDICATES}
+        extra = sorted(set(rows) - allowed)
+        if extra:
+            raise unsound(f'carries predicate(s) a hold never has: {extra}')
+        if rows.get(RDF_TYPE, []) != [px.NamedNode(HOLD_T)]:
+            raise unsound(f'is not typed <{HOLD_T}> exactly once')
+        out = {}
+        for key, pred in (('epoch', HOLD_EPOCH), ('incarnation', HOLD_INCARNATION)):
+            vs = rows.get(pred, [])
+            if len(vs) != 1 or not isinstance(vs[0], px.Literal) or vs[0].datatype.value != XSD_STRING or not vs[0].value:
+                raise unsound(f'has {len(vs)} {key} value(s); exactly one non-empty plain string is required')
+            out[key] = vs[0].value
+        for key, pred in (('restoredCommitSeq', HOLD_COMMIT_SEQ), ('restoredHighWater', HOLD_HIGH_WATER)):
+            vs = rows.get(pred, [])
+            if len(vs) != 1 or not isinstance(vs[0], px.Literal) or vs[0].datatype.value != XSD_INTEGER:
+                raise unsound(f'has {len(vs)} {key} value(s); exactly one xsd:integer is required')
+            try:
+                n = int(vs[0].value)
+            except ValueError:
+                raise unsound(f'has a {key} that is not an integer ({vs[0].value!r})')
+            if not 0 <= n <= MAX_SAFE:
+                raise unsound(f'has a {key} outside the safe integers >= 0 ({n})')
+            out[key] = n
+        if len(rows.get(HOLD_PRIOR_EPOCH, [])) > 1:
+            raise unsound('has more than one priorHoldEpoch')
+        return out
 
     def _recovery_snapshot(self):
         """#1749 (P1) every quad of the recovery graph, read under the update lock before an /update (empty when unheld)."""
@@ -575,7 +627,7 @@ class Executor:
             out.setdefault(r['p'].value, []).append(r['o'])
         return out
 
-    def _reconcile_postseq(self, path):
+    def _reconcile_check(self, path):
         """#1749 (A2, A3, A5, A6) the ONLY path that clears the recovery hold. Checks in A6's order; success is ONE store
         transaction (the hold deleted, nextPostSeq := R with version + 1, the ReconciliationRecord written), flushed
         before serving. approvedBy and approvalRef are RECORDED and form-checked only: the approval is the act of running
@@ -586,7 +638,7 @@ class Executor:
         # (1) no hold: the replay branch. A record is consulted ONLY here, so an old file can never clear a new hold.
         if hold is None:
             if bool(self.store.query(f'ASK {{ {in_rg(f"<{record}> a <{REC_T}> ; <{REC["fileSha256"]}> {json.dumps(digest)}")} }}')):
-                return {'result': 'ALREADY', 'record': record}
+                return {'already': True, 'record': record}
             raise ReconcileRefused('NO_HOLD', 'this store holds no recovery hold, and no ReconciliationRecord for this file')
         def one(pred, kind):
             vs = hold.get(pred, [])
@@ -632,6 +684,20 @@ class Executor:
             raise ReconcileRefused('BELOW_NEXT', f'nextPostSeq {R} is below the allocator\'s next {nxt}')
         if ver + 1 > MAX_SAFE:
             raise ReconcileRefused('BELOW_NEXT', f'the allocator\'s version {ver} cannot advance')
+        if bool(self.store.query(f'ASK {{ {in_rg(f"<{record}> ?p ?o")} }}')):
+            raise ReconcileRefused('BAD_FILE', f'a record already sits at {record} while a hold is present; repair it offline')
+        return {'already': False, 'record': record, 'digest': digest, 'doc': doc, 'hold': hold, 'stored': stored,
+                'nxt_t': nxt_t, 'ver_t': ver_t, 'nxt': nxt, 'ver': ver}
+
+    def _reconcile_apply(self, plan):
+        """#1749 the write half of --reconcile-postseq, run only after _reconcile_check passed (before this start's first
+        write) and the start's own self-check: ONE transaction, the exact hold quads the check read deleted, the allocator
+        advanced from the exact terms it read, the record written."""
+        if plan['already']:
+            return {'result': 'ALREADY', 'record': plan['record']}
+        record, digest, doc, hold, stored = plan['record'], plan['digest'], plan['doc'], plan['hold'], plan['stored']
+        nxt_t, ver_t, nxt, ver = plan['nxt_t'], plan['ver_t'], plan['nxt'], plan['ver']
+        R, G, hw = doc['nextPostSeq'], doc['declaredGap'], stored['restoredHighWater']
         # ONE transaction: the exact hold triples read above deleted, the allocator advanced, the record written
         hold_del = ' . '.join(f'<{HOLD_S}> <{p}> {sparql_term(o)}' for p, os_ in hold.items() for o in os_)
         evidence_json = json.dumps(doc['evidence'], sort_keys=True, separators=(',', ':'), ensure_ascii=False)
@@ -645,8 +711,6 @@ class Executor:
                f'<{REC["clearedHoldEpoch"]}> {json.dumps(stored["epoch"])} ; <{REC["clearedHoldIncarnation"]}> {json.dumps(stored["incarnation"])} ; '
                f'<{REC["clearedHoldCommitSeq"]}> {I(stored["restoredCommitSeq"])} ; <{REC["clearedHoldHighWater"]}> {I(hw)} ; '
                f'<{REC["priorNextPostSeq"]}> {I(nxt)}')
-        if bool(self.store.query(f'ASK {{ {in_rg(f"<{record}> ?p ?o")} }}')):
-            raise ReconcileRefused('BAD_FILE', f'a record already sits at {record} while a hold is present; repair it offline')
         try:
             self.store.update(
                 f'DELETE DATA {{ GRAPH <{RG}> {{ {hold_del} }} GRAPH <{BK}> {{ <{ALLOC_S}> <{ALLOC_NEXT}> {sparql_term(nxt_t)} . '
