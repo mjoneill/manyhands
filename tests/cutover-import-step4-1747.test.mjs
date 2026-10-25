@@ -1342,7 +1342,9 @@ for (const [what, sparql] of [
     }, { mark: false });
   });
 }
-test('#1747 (C-PIN-4, r9) OWED at #1749 integration: a promoted copy WITH the promotion\'s exact RecoveryHold → MARKED; a hold that is not the exact delta, or a changed reconciliation record → NOT_COPY', { todo: 'needs restore safety (card/1749-build) on the same head as the importer' }, () => {});
+// C-PIN-4 RETIRED (r9b, ruling 46687): a held-copy delta cannot reach step 3 in a valid cutover. A candidate's promotion writes a
+// RecoveryHold only when its SOURCE has an allocator, and step 4 refuses such a source (ALLOCATOR_PRESENT, cutover-import-1629.mjs).
+// So the content pin's delta is EMPTY for every cutover, and any recovery-graph quad is NOT_COPY: C-PIN-3 pins that.
 test('#1747 (S1, r9) step 3 against the SOURCE promoted IN PLACE (a new incarnation, the captured epoch and commitSeq, the same content) → NOT_CANDIDATE: its home is the source store', T, async () => {
   await world(async (w) => {
     const p = await startExecutor({ store: w.srcStore, datasetId: DS, extraArgs: ['--promote-epoch'] });
