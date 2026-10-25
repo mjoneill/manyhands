@@ -44,6 +44,8 @@ import { fileURLToPath } from 'node:url';
 import { createGraphClient } from '../core/graph-client.mjs';
 import { compile } from '../core/graph-compiler.mjs';
 import { spawnExecutor, killExecutor } from './helpers/graph-executor-proc.mjs';
+import http from 'node:http';
+import { durableUpdate } from '../core/durable-update.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PY = process.env.GRAPH_EXECUTOR_PYTHON || path.join(ROOT, 'graph-executor', '.venv', 'bin', 'python');
@@ -318,5 +320,105 @@ test('#1748 M2l (#1622): with the floor, the apply-then-fail request (no header,
     const r = await update(x, INSERT('m2l'), { op: 'not an iri m2l' });
     await assertRefused(x, r, before, 'the #1622 path (C2 shows it applies without a floor)');
     assert.equal((await query(x, 'SELECT ?o WHERE { <urn:ex:floor/m2l> ?p ?o }')).length, 0, 'the data is not there');
+  } finally { await stop(x); }
+});
+
+// ── r2 (the first code review, 46367): the shapes a probe cannot see, and the guards no row pinned ──
+
+/** The floor's exact TERM(S): a rewrite to the same lexical value with a language tag or a datatype is still a rewrite. */
+const floorTerms = async (x) => (await query(x, `SELECT ?v WHERE { GRAPH <${BK}> { <${FLOOR_S}> <${FLOOR_P}> ?v } }`))
+  .map((r) => `${r.v.type}:${r.v.value}:${r.v.datatype || ''}:${r.v['xml:lang'] || ''}`).sort();
+
+test('#1748 M2e2 TAMPERING the probe cannot see: data-dependent, probe-skipping, probe-raising and term-rewriting shapes are refused BEFORE application, never applied-then-restored', T, async () => {
+  const x = await start(freshStore('m2e2'), ['--create', ...INSTALL]);
+  try {
+    const seed = await update(x, `INSERT DATA { <urn:ex:card/1> <urn:ex:floor/p> "a card" . GRAPH <urn:ex:g/data> { <urn:ex:d> <urn:ex:floor/p> "data" } }`, { protocol: PROTOCOL });
+    assert.equal(seed.status, 200, `PRECONDITION: the seed applies with the protocol (${seed.status} ${JSON.stringify(seed.body)})`);
+    const terms0 = await floorTerms(x);
+    assert.equal(terms0.length, 1, 'PRECONDITION: exactly one floor term');
+    const F = `<${FLOOR_S}> <${FLOOR_P}>`;
+    const attacks = {
+      // the floor's removal depends on OTHER data, so a store holding only the floor cannot show it
+      'data-dependent delete': `DELETE { GRAPH <${BK}> { ${F} ?v } } WHERE { <urn:ex:card/1> ?q ?r . GRAPH <${BK}> { ${F} ?v } }`,
+      'FILTER EXISTS on data': `DELETE { GRAPH <${BK}> { ${F} ?v } } WHERE { GRAPH <${BK}> { ${F} ?v } FILTER EXISTS { <urn:ex:card/1> ?q ?r } }`,
+      'a second value conditioned on data': `INSERT { GRAPH <${BK}> { ${F} "postseq-v0" } } WHERE { <urn:ex:card/1> ?q ?r }`,
+      // the words LOAD / SERVICE appear only in a comment or a literal: a text match must not switch the guard off
+      'SERVICE in a comment': `DELETE WHERE { GRAPH <${BK}> { ${F} ?v } } # SERVICE`,
+      'load in a literal': `INSERT DATA { <urn:ex:floor/t> <urn:ex:floor/p> "load test" } ; DELETE WHERE { GRAPH <${BK}> { ${F} ?v } }`,
+      // a graph the probe store does not hold: the guard must not fail OPEN
+      'DROP of a data graph, then delete': `DROP GRAPH <urn:ex:g/data> ; DELETE WHERE { GRAPH <${BK}> { ${F} ?v } }`,
+      // same lexical value, a different TERM
+      'rewrite to a language-tagged value': `DELETE { GRAPH <${BK}> { ${F} ?v } } INSERT { GRAPH <${BK}> { ${F} "${PROTOCOL}"@en } } WHERE { GRAPH <${BK}> { ${F} ?v } }`,
+      'rewrite to a typed value': `DELETE { GRAPH <${BK}> { ${F} ?v } } INSERT { GRAPH <${BK}> { ${F} "${PROTOCOL}"^^<urn:ex:type> } } WHERE { GRAPH <${BK}> { ${F} ?v } }`,
+    };
+    for (const [why, sparql] of Object.entries(attacks)) {
+      const before = await state(x);
+      const r = await update(x, sparql, { protocol: PROTOCOL });
+      assert.ok(r.status >= 400 && r.status < 500, `${why}: refused with a 4xx (got ${r.status} ${JSON.stringify(r.body)})`);
+      assert.equal(r.body?.applied, false, `${why}: applied:false`);
+      assert.deepEqual(await floorTerms(x), terms0, `${why}: the floor reads back as the SAME term`);
+      await assertUntouched(x, before, `${why} (refused BEFORE application: a restore after applying moves the updates counter)`);
+      assert.equal(await receipt(x, r.op), null, `${why}: no receipt`);
+    }
+  } finally { await stop(x); }
+});
+
+/** A raw request that can send the SAME header twice (fetch joins duplicates into one comma-separated value). */
+const rawUpdate = (x, sparql, headers) => new Promise((resolve, reject) => {
+  const u = new URL(`${x.baseUrl}/update`);
+  const req = http.request({ host: u.hostname, port: u.port, path: u.pathname, method: 'POST', headers }, (res) => {
+    let b = ''; res.on('data', (c) => { b += c; }); res.on('end', () => { let j = null; try { j = JSON.parse(b); } catch { /* not JSON */ } resolve({ status: res.statusCode, body: j, op: headers['x-op-id'] }); });
+  });
+  req.on('error', reject); req.end(sparql);
+});
+
+test('#1748 M2m: the header sent TWICE (two lines, both the right value) is refused 428 — exactly ONE declaration', T, async () => {
+  const x = await start(freshStore('m2m'), ['--create', ...INSTALL]);
+  try {
+    const before = await state(x);
+    const r = await rawUpdate(x, INSERT('m2m'), { 'x-op-id': opId('m2m'), [HEADER]: [PROTOCOL, PROTOCOL] });
+    await assertRefused(x, r, before, 'a duplicated declaration');
+  } finally { await stop(x); }
+});
+
+test('#1748 M2n ORDERING: a receipted op id re-sent WITHOUT the header is refused 428, not answered from its receipt (the protocol is checked first)', T, async () => {
+  const x = await start(freshStore('m2n'), ['--create', ...INSTALL]);
+  try {
+    // a COMPILED intention writes a receipt (C1); a raw INSERT does not
+    const { sparql, canonical } = compile(rule('m2n'));
+    const op = canonical.opId;
+    const epoch = String((await health(x)).epoch);
+    const ok = await update(x, sparql, { protocol: PROTOCOL, op, extraHeaders: { 'x-epoch': epoch, 'content-type': 'application/sparql-update' } });
+    assert.equal(ok.status, 200, `PRECONDITION: applied with the protocol (${ok.status} ${JSON.stringify(ok.body)})`);
+    assert.ok(await receipt(x, op), 'PRECONDITION: its receipt exists');
+    const before = await state(x);
+    const r = await update(x, sparql, { op, extraHeaders: { 'x-epoch': epoch, 'content-type': 'application/sparql-update' } });
+    assert.equal(r.status, 428, `the replay without the header is 428 (got ${r.status} ${JSON.stringify(r.body)})`);
+    assert.equal(r.body?.applied, false, 'applied:false');
+    await assertUntouched(x, before, 'the replay without the header');
+  } finally { await stop(x); }
+});
+
+test('#1748 M2o CLIENT: 409 WRITE_FLOOR_PROTECTED maps to REJECTED, and durableUpdate sends a refused intention EXACTLY ONCE (428 and 409 alike)', T, async () => {
+  const x = await start(freshStore('m2o'), ['--create', ...INSTALL]);
+  try {
+    let updates = 0;
+    const count = (mode) => async (url, init = {}) => {
+      if (String(url).endsWith('/update')) {
+        updates++;
+        if (mode === '409') return new Response(JSON.stringify({ error: 'WRITE_FLOOR_PROTECTED', applied: false }), { status: 409, headers: { 'content-type': 'application/json' } });
+        if (mode === 'strip') { const h = new Headers(init.headers); h.delete(HEADER); return fetch(url, { ...init, headers: h }); }
+      }
+      return fetch(url, init);
+    };
+    for (const mode of ['409', 'strip']) {
+      updates = 0;
+      const client = createGraphClient({ baseUrl: x.baseUrl, expectedDatasetId: DSID, fetchImpl: count(mode), label: `m2o-${mode}` });
+      const before = await state(x);
+      const r = await durableUpdate(client, rule(`m2o-${mode}`));
+      assert.equal(r.outcome, 'REJECTED', `${mode}: a definitive REJECTED, never UNKNOWN (${JSON.stringify(r).slice(0, 200)})`);
+      assert.equal(updates, 1, `${mode}: durableUpdate sent the /update exactly once (sent ${updates})`);
+      await assertUntouched(x, before, `${mode}: nothing applied`);
+    }
   } finally { await stop(x); }
 });
