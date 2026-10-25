@@ -227,6 +227,13 @@ async function run({ id, base, dataset, docBytes, outboxBytes, captureBytes, cap
   // an allocator that THIS migration did not write is refused, never overwritten (#1747, interface v1)
   const alloc = await X.query(`SELECT ?m WHERE { GRAPH <${BK}> { ${POSTSEQ_TERMS.allocator} ?p ?o . OPTIONAL { ${POSTSEQ_TERMS.allocator} <${T.migrationId}> ?m } } }`);
   if (alloc.length && !alloc.some((b) => b.m?.value === id)) refuse('ALLOCATOR_PRESENT', 'the candidate already has an allocator this migration did not write');
+  if (alloc.length) {
+    // this migration's own allocator must still carry EXACTLY the document's values: a matching id is not a matching state
+    const vals = await X.query(`SELECT ?p ?o WHERE { GRAPH <${BK}> { ${POSTSEQ_TERMS.allocator} ?p ?o } }`);
+    const of = (p) => vals.filter((b) => `<${b.p.value}>` === p).map((b) => `${b.o.value}|${b.o.datatype || ''}`).sort();
+    const want = { [POSTSEQ_TERMS.nextPostSeq]: [`${next}|${XSD}integer`], [POSTSEQ_TERMS.postSeqEpoch]: [`${epoch}|`], [POSTSEQ_TERMS.version]: [`1|${XSD}integer`] };
+    for (const [p, w] of Object.entries(want)) if (JSON.stringify(of(p)) !== JSON.stringify(w)) refuse('ALLOCATOR_MISMATCH', `this migration's allocator holds ${p} ${JSON.stringify(of(p))}, the document says ${JSON.stringify(w)}`);
+  }
 
   if (!APPLY) return `PLAN reservations=${reservations.length} origins=${Object.keys(origins).length} entries=${Object.keys(entries).length} retire=${plan.length} next=${next}`;
 
