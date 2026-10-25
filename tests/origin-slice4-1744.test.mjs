@@ -260,7 +260,9 @@ async function committedOrigins(s) {
 /** everything D9 says a refusal must leave unchanged (a Prepared record is allowed to remain) */
 async function effects(s) {
   const cards = await liveCards(s);
-  return { cards: cards.map((c) => `${c.iri} ${c.ver} ${sha256(c.json)}`).sort(), counter: await counterNow(s), allocator: await allocatorNow(s), posts: await postCount(s), origins: (await committedOrigins(s)).map((o) => o.mid).sort() };
+  // r4 (row review 46400, finding 7): the index subtree too, every triple, so a refusal that touched the index is seen
+  const index = (await s.q(`SELECT ?s ?p ?o WHERE { GRAPH <${BK}> { ?s ?p ?o } FILTER(STRSTARTS(STR(?s), "${IX.ns}")) }`)).map((r) => `${r.s.value} ${r.p.value} ${r.o.type}:${r.o.value}:${r.o.datatype ?? ''}`).sort();
+  return { cards: cards.map((c) => `${c.iri} ${c.ver} ${sha256(c.json)}`).sort(), counter: await counterNow(s), allocator: await allocatorNow(s), posts: await postCount(s), origins: (await committedOrigins(s)).map((o) => o.mid).sort(), index };
 }
 /** the index state of one card: every value of every coverage predicate, typed */
 async function coverageOf(s, id) {
@@ -406,7 +408,9 @@ test('#1744 (W2, mode off) the same request again (trim and type default equival
     assert.ok(await until(async () => (await notices(s, 4)).length === 1, 20000), 'PRECONDITION: the first notice is published (it follows the answer)');
     const e1 = await effects(s);
     const b = await createPage(s, { ...REQ_A, title: 'A page', body: 'text', type: 'reference' });
-    assert.ok(ok2xx(b.status), `the replay is a success, not a conflict (${b.status} ${b.text.slice(0, 200)})`);
+    assert.equal(b.status, 200, `the replay is a success (200, the committed replay), not a conflict or a second 201 (${b.status} ${b.text.slice(0, 200)})`);
+    // r4 (46400 finding 5): V2-1 "returns the ORIGINAL card": the replay's RESPONSE names the same card
+    assert.deepEqual([b.json?.id, b.json?.shortId, b.json?.requestId], [a.json?.id, a.json?.shortId, REQ_A.requestId], 'the replay answers with the original card');
     await sleep(2000);
     assert.deepEqual(await effects(s), e1, 'nothing changed: the same card, counter, allocator, posts and origins');
     assert.equal((await notices(s, 4)).length, 1, 'still exactly one notice');
@@ -452,7 +456,8 @@ test('#1744 (W5, mode off) with NO requestId the server mints one and returns it
     assert.ok(await until(async () => (await notices(s, 4)).length === 1, 20000), 'PRECONDITION: the first notice is published (it follows the answer)');
     const e1 = await effects(s);
     const b = await createPage(s, { title: 'Minted', createdBy: 'ada', requestId: rid });
-    assert.ok(ok2xx(b.status), `the keyed retry succeeds (${b.status})`);
+    assert.equal(b.status, 200, `the keyed retry succeeds as a committed replay (${b.status} ${b.text.slice(0, 200)})`);
+    assert.deepEqual([b.json?.id, b.json?.shortId], [a.json?.id, a.json?.shortId], 'and answers with the original card (46400 finding 5)');
     assert.deepEqual(await effects(s), e1, 'and changes nothing');
     const derived = mutationIdOf(`${mutationIdOf(keyOf(rid))}:card`);
     assert.ok((await cardRow(s, derived))?.card, 'the page has the id derived from the minted requestId');
@@ -479,7 +484,7 @@ test('#1744 (W6, D8) the same create in mode on and mode off yields the same bus
  *  beyond the interleaved write, and a keyed retry gets 409 STALE_PREPARED (never a silent replan) */
 async function heldCreate(s, req, interleave, label) {
   const held = await s.holdAt(BARRIER, () => createPage(s, req));
-  let first;
+  let first, midFx;
   try {
     assert.equal(held.reached, true, `${label}: PRECONDITION: the create reached ${BARRIER}`);
     assert.equal(held.returned(), false, `${label}: the create had not returned at the barrier`);
@@ -487,9 +492,12 @@ async function heldCreate(s, req, interleave, label) {
     const P = await readPreparedOrigin(s.gc, mid);
     assert.ok(P.ok && P.prepared && !P.prepared.committedBy, `${label}: DISCRIMINATOR: the executor holds THIS create's Prepared record, uncommitted`);
     await interleave();
+    midFx = await effects(s);   // r4 (46400 finding 6): the world after the interleaved write, before the commit is released
   } finally { await held.release(); first = await held.inflight; }
   const after = await effects(s);
-  assert.ok(!ok2xx(first.status ?? 0), `${label}: the held create was REFUSED at commit (${first.status} ${String(first.text).slice(0, 200)})`);
+  assert.equal(first.status, 409, `${label}: the held create was REFUSED at commit with a 409, never a 500 (${first.status} ${String(first.text).slice(0, 200)})`);
+  assert.ok(typeof first.json?.code === 'string' && first.json.code.length > 0, `${label}: the refusal is named (${String(first.text).slice(0, 200)})`);
+  assert.deepEqual(after, midFx, `${label}: the refused commit had NO effect beyond the interleaved write (cards, counter, allocator, posts, origins, index)`);
   assert.equal(await cardRow(s, mutationIdOf(`${mutationIdOf(keyOf(req.requestId))}:card`)), null, `${label}: no card was created`);
   assert.ok(!(await committedOrigins(s)).some((o) => o.mid === mutationIdOf(keyOf(req.requestId))), `${label}: no Origin was committed`);
   const retry = await createPage(s, req);
@@ -631,7 +639,7 @@ const DAMAGE = [
   ['an EXTRA name', async ({ xu }) => xu(`INSERT DATA { GRAPH <${BK}> { ${COV('uuid-1')} <${IX.namesShortId}> "9"^^<${XSD}integer> } }`, 'name-extra')],
   ['a MISTYPED name (a plain string)', async ({ xu }) => xu(`DELETE DATA { GRAPH <${BK}> { ${COV('uuid-2')} <${IX.namesShortId}> "1"^^<${XSD}integer> } } ; INSERT DATA { GRAPH <${BK}> { ${COV('uuid-2')} <${IX.namesShortId}> "1" } }`, 'name-mistyped')],
   // a WELL-FORMED orphan (every coverage field, zero names), so only the orphan clause (S13, review 46326) can refuse it
-  ['an ORPHAN coverage node (no such card)', async ({ xu }) => xu(`INSERT DATA { GRAPH <${BK}> { ${COV('uuid-ghost')} <${IX.indexedVersion}> "1"^^<${XSD}integer> ; <${IX.indexedJsonDigest}> "${'0'.repeat(64)}" ; <urn:ex:card-ref-index/namesCount> "0"^^<${XSD}integer> ; <urn:ex:card-ref-index/namesSum> "0"^^<${XSD}integer> } }`, 'orphan')],
+  ['an ORPHAN coverage node (no such card)', async ({ xu }) => xu(`INSERT DATA { GRAPH <${BK}> { ${COV('uuid-ghost')} <${IX.indexedVersion}> "1"^^<${XSD}integer> ; <${IX.indexedJsonDigest}> "${'0'.repeat(64)}" ; <urn:ex:card-ref-index/namesCount> "0"^^<${XSD}integer> ; <urn:ex:card-ref-index/namesSum> "0"^^<${XSD}integer> ; <urn:ex:card-ref-index/namesList> "" } }`, 'orphan')],   // r4 (46400 finding 1): with namesList, so the missing-list clause cannot refuse it first
   ['a DUPLICATE watermark', async ({ xu }) => xu(`INSERT DATA { GRAPH <${BK}> { ${COV('uuid-1')} <${IX.indexedVersion}> "99"^^<${XSD}integer> } }`, 'dup-version')],
   ['a MISMATCHED JSON digest', async ({ q, xu }) => { const ds = await q(`SELECT ?d WHERE { GRAPH <${BK}> { ${COV('uuid-1')} <${IX.indexedJsonDigest}> ?d } }`); assert.equal(ds.length, 1, 'PRECONDITION: the backfill wrote card 1\'s digest'); const d = ds[0].d.value; await xu(`DELETE DATA { GRAPH <${BK}> { ${COV('uuid-1')} <${IX.indexedJsonDigest}> "${d}" } } ; INSERT DATA { GRAPH <${BK}> { ${COV('uuid-1')} <${IX.indexedJsonDigest}> "${'f'.repeat(64)}" } }`, 'bad-digest'); }],
   ['NO completion marker (a partial backfill)', async ({ xu }) => xu(`DELETE WHERE { GRAPH <${BK}> { <${IX.marker}> ?p ?o } }`, 'no-marker')],
@@ -768,6 +776,8 @@ const FORGE = [
   // S17: one of the referrer's OWN existing triples REMOVED (it never pointed at the unresolved node)
   ['one of the referrer\'s own triples REMOVED', (o) => { const p = o.plan.parts.find((x) => x.reason === 'reference-resolve'); const k = p.quads.findIndex((q) => q[0].value === p.iri && q[2].value !== cardIriOf(o.cardId) && q[1].value !== `${RS}mentionsCard`); assert.ok(k >= 0, 'PRECONDITION: the referrer has a triple to remove'); p.quads = p.quads.filter((_, i) => i !== k); }],
   ['a CALLER-SUPPLIED index quad', (o) => { const p = o.plan.parts.find((x) => x.iri === cardIriOf(o.cardId)); p.quads = [...p.quads, [{ type: 'uri', value: IX.card(o.cardId) }, { type: 'uri', value: IX.namesShortId }, { type: 'literal', value: '1', datatype: `${XSD}integer` }]]; }],
+  // r4 (46400 finding 9): an index predicate on the CARD'S OWN subject, not on its coverage node
+  ['a CALLER-SUPPLIED index predicate on the card\'s own subject', (o) => { const p = o.plan.parts.find((x) => x.iri === cardIriOf(o.cardId)); p.quads = [...p.quads, [{ type: 'uri', value: p.iri }, { type: 'uri', value: IX.namesShortId }, { type: 'literal', value: '1', datatype: `${XSD}integer` }]]; }],
   ['a subject part that is NOT the derived card id', (o) => { const p = o.plan.parts.find((x) => x.iri === cardIriOf(o.cardId)); p.iri = cardIriOf('uuid-not-derived'); }],
   ['provenance.cardId that is NOT the derived card id', (o) => { o.descriptor.provenance.cardId = 'uuid-not-derived'; }],
   ['a DUPLICATE part', (o) => { const p = o.plan.parts.find((x) => x.reason === 'reference-resolve'); o.plan.parts = [...o.plan.parts, { ...p }].sort((a, b) => (a.iri < b.iri ? -1 : a.iri > b.iri ? 1 : 0)); }],
@@ -1080,6 +1090,77 @@ test('#1744 (R6, r3, finding 4) a coverage node TRIMMED CONSISTENTLY (a name, it
     o.plan.parts = o.plan.parts.filter((x) => x.iri !== cardIriOf('uuid-1'));   // #1 still names #N in its JSON; only the index forgot
     await expectRefused(s, o, () => wikiCreateOrigin(s, 'req-1744-r6-ctl'), 'a referrer omitted under a consistently trimmed index');
   });
+});
+
+// ── r4 (the builder-launched row review, 46400): isolation and the NO ROW list ──
+test(`#1744 (R3b, r4, finding 8) a names SWAP among OTHER names ({2,6} → {3,5}; the new #4 untouched) → a page create refuses ${CODES.INDEX_INCOMPLETE}, no effect`, T, async () => {
+  await world('off', async (s) => {
+    await s.start();
+    const c1 = (await s.call('GET', '/api/cards/uuid-1')).json;
+    assert.equal((await s.call('PATCH', '/api/cards/uuid-1', { description: 'see #2 and #6', ifVersion: c1.version, by: 'ada' })).status, 200, 'PRECONDITION: #1 names #2 and #6');
+    assert.deepEqual((await coverageOf(s, 'uuid-1')).names, [INT(2), INT(6)], 'PRECONDITION: indexed as {2, 6}');
+    // count 2 and sum 8 kept, namesList "2,6" kept: only the list-membership (CONTAINS) clause can see it, and #4 is not involved
+    await s.xu(`DELETE DATA { GRAPH <${BK}> { ${COV('uuid-1')} <${IX.namesShortId}> "2"^^<${XSD}integer> . ${COV('uuid-1')} <${IX.namesShortId}> "6"^^<${XSD}integer> } } ; INSERT DATA { GRAPH <${BK}> { ${COV('uuid-1')} <${IX.namesShortId}> "3"^^<${XSD}integer> . ${COV('uuid-1')} <${IX.namesShortId}> "5"^^<${XSD}integer> } }`, 'swap-other');
+    const e0 = await effects(s);
+    const p = await createPage(s, { title: 'Refused page', createdBy: 'ada', requestId: 'req-1744-r3b-other' });
+    assert.equal(p.status, 409, `refused (${p.status} ${p.text.slice(0, 200)})`);
+    assert.equal(p.json?.code, CODES.INDEX_INCOMPLETE, 'with the named code');
+    assert.deepEqual(await effects(s), e0, 'no effect');
+  });
+});
+
+test('#1744 (W11, r4, finding 4) a create PREPARED but never committed (REST killed at the barrier) retried in an UNCHANGED world commits its FROZEN plan: the prepared timestamps, one counter advance, one card', T, async () => {
+  await world('off', async (s) => {
+    const r0 = await s.start();
+    const req = { title: 'Frozen page', createdBy: 'ada', requestId: 'req-1744-w11' };
+    const mid = mutationIdOf(keyOf(req.requestId)), cardId = mutationIdOf(`${mid}:card`);
+    const [n0] = await counterNow(s);
+    const held = await s.holdAt(BARRIER, () => createPage(s, req));
+    let frozen;
+    try {
+      assert.equal(held.reached, true, 'PRECONDITION: the create reached the barrier');
+      const P = await readPreparedOrigin(s.gc, mid);
+      assert.ok(P.ok && P.prepared && !P.prepared.committedBy, 'PRECONDITION: the executor holds this create\'s Prepared record, uncommitted');
+      frozen = JSON.parse(JSON.parse(P.prepared.planJson).parts.find((x) => x.iri === cardIriOf(cardId)).json);
+      r0.kill('SIGKILL');   // the commit is never sent: the contract's "a prepare that never committed"
+    } finally { await held.release(); await held.inflight; }
+    assert.equal(await cardRow(s, cardId), null, 'PRECONDITION: nothing was committed');
+    assert.deepEqual(await counterNow(s), [n0], 'PRECONDITION: the world is as it was at prepare');
+    await sleep(1100);   // so a re-rendered plan could not share the frozen timestamps by accident
+    await s.start();
+    const r = await createPage(s, req);
+    assert.ok(ok2xx(r.status), `the keyed retry of a prepared, never-committed request COMMITS (${r.status} ${r.text.slice(0, 200)})`);
+    const row = await cardRow(s, cardId);
+    assert.ok(row?.card, 'the derived card exists');
+    assert.deepEqual([row.card.createdAt, row.card.updatedAt, row.card.shortId], [frozen.createdAt, frozen.updatedAt, frozen.shortId], 'with the FROZEN plan\'s timestamps and shortId, never re-rendered');
+    assert.deepEqual(await counterNow(s), [n0 + 1], 'one counter advance');
+    assert.equal((await liveCards(s)).filter((c) => c.card.title === 'Frozen page').length, 1, 'one card');
+  });
+});
+
+test('#1744 (R5, r4) a DELETE planned before a NEW namer appears (#3 starts naming #1) is REFUSED, no effect beyond the namer\'s own write', T, async () => {
+  await world('off', async (s) => {
+    const stale = await deleteOneIntent(s, 'stale');
+    assert.ok(!stale.parts.some((x) => x.iri === cardIriOf('uuid-3')), 'PRECONDITION: when planned, #3 did not name #1');
+    const u = createCardsUnit({ client: s.gc, mintId: () => crypto.randomUUID() }); await u.load();
+    const snap = u.snapshot(); snap.cards.find((c) => c.id === 'uuid-3').description = 'now names #1';
+    assert.equal((await u.commit(snap.cards, snap.nextShortId, { actor: 'ada' })).outcome, 'APPLIED', 'PRECONDITION: #3 now names #1');
+    const e0 = await effects(s);
+    let r; try { r = await durableUpdate(s.gc, stale); } catch (e) { assert.fail(`the compiler CRASHED instead of refusing (${e?.name}: ${String(e?.message || e).slice(0, 200)})`); }
+    assert.ok(REFUSAL.has(r.outcome), `refused (${JSON.stringify(r).slice(0, 240)})`);
+    assert.deepEqual(await effects(s), e0, 'no effect: #1 is still live, #3 still names it');
+  });
+});
+
+test(`#1744 (R3, r4, NO ROW) an ORDINARY card create (POST /api/cards) under a damaged index refuses ${CODES.INDEX_INCOMPLETE}, no effect (V2-2: ordinary writes are in scope)`, T, async () => {
+  await world('off', async (s) => {
+    await s.start();
+    const e0 = await effects(s);
+    const c = await s.call('POST', '/api/cards', { title: 'Refused card', createdBy: 'ada', requestId: `req-1744-r3-card-${process.pid}` });
+    assert.ok(!ok2xx(c.status), `refused (${c.status} ${c.text.slice(0, 200)})`);
+    assert.equal(c.json?.code, CODES.INDEX_INCOMPLETE, `with the named code (${c.text.slice(0, 200)})`);
+    assert.deepEqual(await effects(s), e0, 'no effect');
+  }, { plant: DAMAGE[0][1] });
 });
 
 // ── D8: mode on's only store delta is the receipt, the graph versions and the index subtree (F5: validated positively above) ──
