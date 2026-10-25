@@ -23,6 +23,7 @@ import { createHash } from 'node:crypto';
 import { postWriteId } from './post-write.mjs';
 import { announcePostId } from './announce-outbox.mjs';
 import { POSTSEQ_TERMS } from './graph-vocab.mjs';
+import { IMPORTED_TERMS, isImportedRows, validateImportedReservation } from './imported-records.mjs';
 
 const PERSON_IRI = 'https://scrumboard.local/person/';
 const BK = `<urn:scrum:bookkeeping:executor>`;
@@ -278,9 +279,10 @@ function isPosSafeInt(n) {
 
 // The full reservation row pattern: every predicate the contract binds must be present. A partial row (only the type
 // triple, or only some of the predicates) will not match this pattern → the partial-shape query below will catch it.
-const RESERVATION_SPARQL = (postIdTerm) => `SELECT ?mode ?postId ?reserveOpId ?reserveDigest ?postSeqEpoch ?postSeq ?createdAt ?index ?identityJson ?draftJson WHERE {
+const RESERVATION_SPARQL = (postIdTerm) => `SELECT ?mode ?postId ?reserveOpId ?reserveDigest ?postSeqEpoch ?postSeq ?createdAt ?index ?identityJson ?draftJson ?mig WHERE {
   GRAPH ${BK} {
     ${postIdTerm} a ${POSTSEQ_TERMS.Reservation} ; ${POSTSEQ_TERMS.mode} ?mode ; ${POSTSEQ_TERMS.postId} ?postId ; ${POSTSEQ_TERMS.reserveOpId} ?reserveOpId ; ${POSTSEQ_TERMS.reserveDigest} ?reserveDigest ; ${POSTSEQ_TERMS.postSeqEpoch} ?postSeqEpoch ; ${POSTSEQ_TERMS.postSeq} ?postSeq ; ${POSTSEQ_TERMS.createdAt} ?createdAt ; ${POSTSEQ_TERMS.index} ?index ; ${POSTSEQ_TERMS.identityJson} ?identityJson ; ${POSTSEQ_TERMS.draftJson} ?draftJson .
+    OPTIONAL { ${postIdTerm} <${IMPORTED_TERMS.migrationId}> ?mig }
   }
 }`;
 
@@ -363,7 +365,9 @@ export async function readPostSeqReservation(client, postId) {
       } catch (e) { return { ok: false, status: 'INVALID', reason: `stored draft fails the closed schema: ${e.message}` }; }
       const frozen = JSON.stringify(mode === 'ordinary' ? canonOrdinaryDraft(draft) : canonAnnouncementDraft(draft));
       if (frozen !== draftJson) return { ok: false, status: 'INVALID', reason: 'stored draft is not the frozen canonical draft (its bytes differ from its own canonicalization)' };
-      return { ok: true, reservation: { postId: storedPostId, mode, reserveOpId, reserveDigest, postSeqEpoch, postSeq, createdAt, index, draft, identity } };
+      // a native row that ALSO carries migrationId is the overlap the imported discriminator forbids (#1747 R1)
+      if (b.mig !== undefined) return { ok: false, status: 'INVALID', reason: `reservation for ${postId} is native and also carries a migrationId` };
+      return { ok: true, reservation: { kind: 'native', postId: storedPostId, mode, reserveOpId, reserveDigest, postSeqEpoch, postSeq, createdAt, index, draft, identity } };
     } catch (e) {
       return { ok: false, status: 'INVALID', reason: e.message };
     }
@@ -371,8 +375,32 @@ export async function readPostSeqReservation(client, postId) {
   // rows.length === 0: probe whether the partial-shape IS present (only the type triple), so partial ≠ missing.
   const pr = await client.ask(RESERVATION_PARTIAL_SPARQL(subj));
   if (!pr.ok) return { ok: false, status: 'UNAVAILABLE', reason: pr.reason };
-  if (pr.boolean) return { ok: false, status: 'INVALID', reason: `reservation for ${postId} is partially present (the type triple exists but the bound predicates are missing — a writer bug, never treated as missing)` };
+  if (pr.boolean) {
+    // #1747 R1 — a reservation the cutover IMPORTED has no mode, receipt or draft by design; it is recognised by its
+    // migrationId and validated against its own source record, never treated as a partial native row or as missing.
+    const t = await client.query(`SELECT ?p ?o WHERE { GRAPH ${BK} { ${subj} ?p ?o } }`);
+    if (!t.ok) return { ok: false, status: 'UNAVAILABLE', reason: t.reason };
+    if (isImportedRows(t.rows)) {
+      const mig = await allocatorMigrationId(client);
+      if (!mig.ok) return mig;
+      return validateImportedReservation(t.rows, postId, mig.migrationId);
+    }
+    return { ok: false, status: 'INVALID', reason: `reservation for ${postId} is partially present (the type triple exists but the bound predicates are missing — a writer bug, never treated as missing)` };
+  }
   return { ok: true, reservation: null };
+}
+
+/**
+ * #1747 R1 — the migrationId on the ONE allocator: the identity every imported record must name. A missing allocator, or
+ * one with no migrationId (a store no cutover wrote), cannot vouch for an imported record: INVALID, never a default.
+ */
+export async function allocatorMigrationId(client) {
+  const r = await client.query(`SELECT ?a ?m WHERE { GRAPH ${BK} { ?a a ${POSTSEQ_TERMS.Allocator} . OPTIONAL { ?a <${IMPORTED_TERMS.migrationId}> ?m } } }`);
+  if (!r.ok) return { ok: false, status: 'UNAVAILABLE', reason: r.reason };
+  if (r.rows.length !== 1) return { ok: false, status: 'INVALID', reason: `an imported record needs exactly one allocator with one migrationId (found ${r.rows.length} rows)` };
+  const m = r.rows[0].m;
+  if (!m || m.type !== 'literal' || !m.value || m['xml:lang'] != null || (m.datatype != null && m.datatype !== `${XSD}string`)) return { ok: false, status: 'INVALID', reason: 'an imported record exists, but the allocator names no migrationId' };
+  return { ok: true, migrationId: m.value };
 }
 
 /**

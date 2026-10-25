@@ -11256,6 +11256,14 @@ async function xoOrigin(mutationId) {
   if (!P.ok) { if (P.status === 'UNAVAILABLE') throw new OutboxUnavailable(P.reason); return { integrity: P.reason }; }
   const J = await ORIGIN_MOD.readCommittedOrigin(c, mutationId);
   if (!J.ok) { if (J.status === 'UNAVAILABLE') throw new OutboxUnavailable(J.reason); return { integrity: J.reason }; }
+  if (J.committed?.kind === 'imported') {
+    // #1747 R1 — an origin the cutover imported: its history as the outbox showed it before cutover (the SOURCE mode, the
+    // STORED status), marked imported. It has no preparation to prove, so nothing here can dispatch or settle it.
+    const { origin: O, obligations } = J.committed;
+    const origin = { mutationId, slots: obligations.map((x) => x.slot), committedAt: O.committedAt, occurredAt: O.occurredAt, originActor: O.originActor, mode: O.mode, imported: true };
+    const entries = obligations.map((ob) => ({ obligationId: ob.obligationId, mutationId, slot: ob.slot, status: ob.status, mode: ob.mode, imported: true, ...(ob.postId ? { postId: ob.postId } : {}) }));
+    return { imported: true, origin, entries };
+  }
   if (!P.prepared || !J.committed) return null;
   const d = JSON.parse(P.prepared.descriptorJson);
   const { origin: O, obligations, reservations } = J.committed;
@@ -11276,7 +11284,10 @@ async function xoOrigin(mutationId) {
 async function xoListOutbox({ status, mutationId } = {}) {
   const R = await ORIGIN_MOD.enumerateOriginRecords(ANNOUNCE_EXECUTOR);
   if (!R.ok) throw new OutboxUnavailable(R.reason);
-  const mids = [...new Set(R.records.filter((x) => x.type === 'Origin' && x.mutationId && (!mutationId || x.mutationId === mutationId)).map((x) => x.mutationId))];
+  // #1747 R1 — an imported origin is never pending (its reader refuses a pending one), so a pending-only scan skips it
+  // unread; every other listing reads and validates it like any origin
+  const skipImported = status === 'pending';
+  const mids = [...new Set(R.records.filter((x) => x.type === 'Origin' && x.mutationId && (!mutationId || x.mutationId === mutationId) && !(skipImported && x.imported)).map((x) => x.mutationId))];
   const origins = [], entries = [], integrity = [];
   for (const mid of mids) {
     const o = await xoOrigin(mid);
@@ -11306,6 +11317,8 @@ async function xoPublish(obligationId, { inline = false } = {}) {
   if (o.integrity) return xoIntegrity(obligationId, `the committed origin does not validate (${o.integrity})`);
   const entry = o.entries.find((e) => e.slot === slot);
   if (!entry) return { unknown: true };
+  // #1747 R1 — an imported obligation is settled history: never dispatched, never settled, whatever its status says
+  if (o.imported) return { status: entry.status, code: 'IMPORTED_SETTLED', ...(entry.postId ? { postId: entry.postId } : {}) };
   if (entry.status === 'published') return { status: 'published', postId: entry.postId };
   if (entry.status === 'blocked') return { status: 'blocked', reason: 'blocked' };
   const intention = postCreateIntention(entry);
@@ -12417,6 +12430,9 @@ async function createPostThroughGraph(res, body) {
       if (!before.ok) return before.status === 'UNAVAILABLE'
         ? sendJSON(res, 503, unknownBody(requestId, `the reservation could not be read: ${before.reason}`))
         : sendJSON(res, 409, { error: `this requestId's reservation does not read back well-formed: ${before.reason}`, code: 'POST_SEQ_RESERVATION_INVALID', requestId });
+      // #1747 R1 — the number was reserved by the document before cutover and its post never landed. The original
+      // content was not kept, so the board can neither replay it nor reserve again: hold, with nothing consumed.
+      if (before.reservation?.kind === 'imported') return sendJSON(res, 409, { error: 'this requestId was reserved before the cutover and its post was never written; its original content is not recoverable, so it is held, not re-reserved', code: 'LEGACY_HOLD', requestId });
       const item = { mode: 'ordinary', author, requestId, draft: {
         body: post.body, attachedTo: post.attachedTo ?? null, mentions: Array.isArray(post.mentions) ? [...post.mentions] : [],
         attachments: (post.attachments || []).map((a) => ({ id: a.id, mime: a.mime, name: a.name, size: a.size })),
