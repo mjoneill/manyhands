@@ -243,6 +243,12 @@ export async function startRestServer({ board, boardFile: sharedBoardFile, stati
   // #1140 — SCRUM_PORT is set per ATTEMPT, after the isolation vars, so a retry
   // moves the port and nothing else. The isolation guarantee above is unchanged:
   // a caller's extraEnv still cannot reach the board file or the attachments dir.
+  // #1672's leak ratchet: a REFUSED start (a boot gate, a hold, a missing allocator) throws before any stop() exists, so
+  // the attachments dir and channel config made above are removed here, or every refused start leaks them
+  const cleanupOnRefusal = () => {
+    try { fs.rmSync(attachmentsDir, { recursive: true, force: true }); } catch { /* already gone */ }
+    try { fs.unlinkSync(configFile); } catch { /* never written */ }
+  };
   const { proc, stderr, baseUrl } = await startOnPort({
     port: explicitPort,
     allocatePort,
@@ -258,7 +264,7 @@ export async function startRestServer({ board, boardFile: sharedBoardFile, stati
       child.stderr.on('data', (d) => err.push(d.toString()));
       return { proc: child, stderr: err };
     },
-  });
+  }).catch((e) => { cleanupOnRefusal(); throw e; });
   void port;
 
   return {
