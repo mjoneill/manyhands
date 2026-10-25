@@ -132,12 +132,21 @@ function executor(base, label) {
     if (!r.ok) refuse('UNAVAILABLE', `ask ${r.status}: ${(await r.text()).slice(0, 160)}`);
     return (await r.json()).boolean === true;
   };
-  const update = async (sparql, op) => {
+  const update = async (sparql, op, { ifRevision } = {}) => {
     if (epoch == null) epoch = String((await health()).epoch);
-    const r = await fetch(`${base}/update`, { method: 'POST', body: sparql, headers: { 'x-op-id': op, 'x-epoch': epoch, 'content-type': 'application/sparql-update', 'x-manyhands-write-protocol': WRITE_PROTOCOL } });
+    const r = await fetch(`${base}/update`, { method: 'POST', body: sparql, headers: { 'x-op-id': op, 'x-epoch': epoch, 'content-type': 'application/sparql-update', 'x-manyhands-write-protocol': WRITE_PROTOCOL, ...(ifRevision ? { 'x-if-write-revision': ifRevision } : {}) } });
+    if (r.status === 409 && ifRevision) { const t = await r.text(); if (t.includes('WRITE_REVISION_MOVED')) return { moved: true }; refuse('WRITE_FAILED', `${op}: 409 ${t.slice(0, 200)}`); }
     if (!r.ok) refuse('WRITE_FAILED', `${op}: ${r.status} ${(await r.text()).slice(0, 200)}`);
+    return { moved: false };
   };
-  return { health, query, ask, update };
+  // #1747 the executor's write revision (see executor.py): any write of any kind moves it
+  const revision = async () => {
+    let h;
+    try { h = await health(); } catch (e) { refuse('UNAVAILABLE', `/health could not be read: ${e.message}`); }
+    if (typeof h.writeRevision !== 'string' || !/^[0-9a-f-]{36}:\d+$/.test(h.writeRevision)) refuse('UNAVAILABLE', 'the executor reports no write revision');
+    return h.writeRevision;
+  };
+  return { health, query, ask, update, revision };
 }
 
 async function run({ id, base, dataset, docBytes, outboxBytes, captureBytes, captureSha }) {
@@ -421,6 +430,9 @@ async function run({ id, base, dataset, docBytes, outboxBytes, captureBytes, cap
   }
 
   // ── 7. read-back: every imported value, typed, exactly; anything else is INCOMPLETE, named ──
+  // the write revision BEFORE any of it is read (#122 re-review finding 3, 46815): READY marks only at this revision, so no
+  // write of any kind between the verification and the mark (a count-preserving raw swap included) is marked READY
+  const verifiedRevision = READY ? await X.revision() : null;
   const bad = [];
   const expect = async (subject, pred, value, datatype, label) => {
     // an xsd:dateTime compares by INSTANT: the store canonicalises its lexical form, and the exact form is kept in the source JSON
@@ -465,7 +477,7 @@ async function run({ id, base, dataset, docBytes, outboxBytes, captureBytes, cap
   await readersReadBack({ X, id, reservations, origins, entries, plan });
   if (!READY) return 'COMPLETE';
   if (alreadyReady) return alreadyReady;
-  return markReady({ X, id, captureSha });
+  return markReady({ X, id, captureSha, verifiedRevision });
 }
 
 /**
@@ -506,23 +518,23 @@ async function readersReadBack({ X, id, reservations, origins, entries, plan }) 
  * #1747 step 5 — after the readers' read-back, ONE guarded update marks the candidate READY, tied to the capture and to the
  * position verified here: any write in between fails the guard.
  */
-async function markReady({ X, id, captureSha }) {
+async function markReady({ X, id, captureSha, verifiedRevision }) {
   // the verified position, and the mark guarded on it in the SAME update
   const seqRows = await X.query(`SELECT ?s WHERE { GRAPH <${BK}> { <urn:ex:dataset> <urn:ex:commitSeq> ?s } }`);
   if (seqRows.length !== 1) refuse('UNAVAILABLE', `the store marker carries ${seqRows.length} commitSeq values`);
   const seq = seqRows[0].s.value;
-  // commitSeq moves only for COMPILED writes; a raw /update (a migration tool, a direct client) leaves it alone. So the
-  // position is ALSO the store's total quad count: that catches a raw insert or delete in the window. It cannot see a
-  // raw swap that keeps the count; §6 step 1's stopped writers and the #1748 floor are the fence for those.
+  // the CONTENT binding is the write revision read before step 7 (x-if-write-revision below): ANY write since then refuses
+  // the mark. commitSeq and the total quad count stay as sanity checks on the same store, not as a content proof.
   const COUNT_ALL = `SELECT (COUNT(*) AS ?n) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }`;
   const quads = (await X.query(COUNT_ALL))[0]?.n?.value;
   if (!/^\d+$/.test(String(quads))) refuse('UNAVAILABLE', 'the store quad count did not read');
   // TEST-ONLY seam: hold between verification and the mark (a FIFO opened for reading blocks until a writer closes it)
   if (READY_BARRIER) fs.readFileSync(READY_BARRIER);
-  await X.update(`INSERT { GRAPH <${BK}> { <${READY_MARKER}> <${P_READY_MIGRATION}> ${lit(id)} ; <${P_MANIFEST_SHA}> ${lit(captureSha)} ; <${P_VERIFIED_SEQ}> ${typedLit(seq, 'integer')} ; <${P_READY_AT}> ?now . } }
+  const w = await X.update(`INSERT { GRAPH <${BK}> { <${READY_MARKER}> <${P_READY_MIGRATION}> ${lit(id)} ; <${P_MANIFEST_SHA}> ${lit(captureSha)} ; <${P_VERIFIED_SEQ}> ${typedLit(seq, 'integer')} ; <${P_READY_AT}> ?now . } }
 WHERE { GRAPH <${BK}> { <urn:ex:dataset> <urn:ex:commitSeq> ?s . FILTER(STR(?s) = ${lit(seq)}) <${CANDIDATE_MARKER}> <${P_MANIFEST_SHA}> ${lit(captureSha)} . } FILTER NOT EXISTS { GRAPH <${BK}> { <${READY_MARKER}> ?rp ?ro } }
   { SELECT (COUNT(*) AS ?qn) WHERE { { ?qs ?qp ?qo } UNION { GRAPH ?qg { ?qs ?qp ?qo } } } } FILTER(?qn = ${quads}) BIND(NOW() AS ?now) }`,
-    `urn:ex:op/cutover/ready/${id}`);
+    `urn:ex:op/cutover/ready/${id}`, { ifRevision: verifiedRevision });
+  if (w.moved) hold('MOVED', `the candidate took a write after verification began (revision ${verifiedRevision}); nothing was marked`);
   // a 200 describes the request: read the marker back
   const back = await X.query(`SELECT ?p ?o WHERE { GRAPH <${BK}> { <${READY_MARKER}> ?p ?o } }`);
   const val = (p) => back.filter((b) => b.p.value === p).map((b) => b.o.value);
