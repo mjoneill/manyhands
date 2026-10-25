@@ -13,7 +13,7 @@ Contract (D2 v1 §3, #1565; evidence #1555 T10/T11/T13):
 usage: python executor.py --store DIR --port N --dataset-id ID [--create] [--log FILE] [--exit-on-stdin-eof]
                            [--checkpoint-dir DIR] [--promote-epoch] [--adopt-home] [--read-only]
 """
-import argparse, hashlib, json, os, re, sys, threading, time, urllib.parse, uuid
+import argparse, hashlib, json, os, sys, threading, time, urllib.parse, uuid
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import pyoxigraph as px
 
@@ -51,7 +51,7 @@ SYNC_MODE = 'flush'  # the observed acknowledgement level; F_FULLFSYNC is D3's, 
 FLOOR_S = px.NamedNode('urn:ex:write-floor')
 FLOOR_P = px.NamedNode('urn:ex:write-floor/minProtocol')
 PROTOCOL_HEADER = 'x-manyhands-write-protocol'
-NETWORKED = re.compile(r'\b(LOAD|SERVICE)\b', re.IGNORECASE)   # an update that could reach the network is never probed
+FLOOR_VIOLATION = 'urn:ex:write-floor/violation'   # #1748 a sentinel graph: never exists outside a refused update
 # The stdlib default listen backlog is 5. Measured in the D2 proofs (P5, 2026-10-04): with
 # 8 concurrent writers, 5 connected at once and 3 waited ~30 ms for the OS to retry the
 # connection. Correctness held, but concurrency was not exercised and latency carried a
@@ -347,20 +347,23 @@ class Executor:
             return None
         if len(rows) != 1:
             raise SystemExit(f'REFUSED: the store holds {len(rows)} write floor values (expected at most 1)')
-        return rows[0]['v'].value
+        v = rows[0]['v']
+        if not isinstance(v, px.Literal) or v.language is not None or v.datatype.value != 'http://www.w3.org/2001/XMLSchema#string':
+            raise SystemExit(f'REFUSED: the write floor is not a plain string literal ({v})')
+        return v.value
 
-    def _floor_survives(self, sparql):
-        """#1748 would `sparql` leave the floor exactly as installed? Decided BEFORE the real store is touched, by applying
-        the update to a throwaway in-memory store holding only the floor: a named delete, a rewrite, a wildcard wipe,
-        CLEAR, or a second value all show there. (An update whose effect on the floor depends on OTHER data cannot show
-        in this probe; update() re-checks the real store after applying and restores the floor, as a backstop.)"""
-        if NETWORKED.search(sparql):
-            return True   # never let the probe reach the network; the real store decides and the backstop below holds
-        probe = px.Store()
-        probe.update(f'INSERT DATA {{ GRAPH <{BK}> {{ <{FLOOR_S.value}> <{FLOOR_P.value}> {json.dumps(self.write_floor)} }} }}')
-        probe.update(sparql)
-        rows = list(probe.query(f'SELECT ?v WHERE {{ {in_bk(f"<{FLOOR_S.value}> <{FLOOR_P.value}> ?v")} }}'))
-        return [r['v'].value for r in rows] == [self.write_floor]
+    def _floor_guarded(self, sparql):
+        """#1748 `sparql` followed, in the SAME update, by operations that fail the whole update unless the floor is still
+        exactly the installed term afterwards. Store.update is all-or-nothing, so a delete, a rewrite (to another value, a
+        language tag or a datatype), a wipe, a second value, or an effect that depends on other data is never applied, and
+        nothing has to be restored. The check reads the store state the update produced; it never parses the body."""
+        floor = f'<{FLOOR_S.value}> <{FLOOR_P.value}>'
+        want = json.dumps(self.write_floor)
+        return (f'{sparql.rstrip().rstrip(";")}\n;\n'
+                f'INSERT {{ GRAPH <{FLOOR_VIOLATION}> {{ <{FLOOR_VIOLATION}> <{FLOOR_VIOLATION}> <{FLOOR_VIOLATION}> }} }} WHERE {{ '
+                f'{{ FILTER NOT EXISTS {{ GRAPH <{BK}> {{ {floor} ?v0 . FILTER(sameTerm(?v0, {want})) }} }} }} UNION '
+                f'{{ GRAPH <{BK}> {{ {floor} ?v1 . FILTER(!sameTerm(?v1, {want})) }} }} }} ;\n'
+                f'CREATE GRAPH <{FLOOR_VIOLATION}> ;\nDROP GRAPH <{FLOOR_VIOLATION}>')
 
     def _identity(self):
         """#1577 incarnation / incarnationFrom / storeHome / epochBase, each None when absent. Never raises."""
@@ -416,20 +419,15 @@ class Executor:
         latched; raises ReconcileRequired when the caller's epoch is not the store's and
         this opId has no receipt here; raises on engine or flush error (UNKNOWN).
         #1748: with a write floor installed, raises ProtocolRequired unless `protocol` (the request's declared
-        protocol, a list of every header value) is exactly [floor], and FloorProtected when the update would
-        change the floor; both BEFORE anything is applied or flushed, before even a receipt replay."""
+        protocol, a list of every header value) is exactly [floor], before even a receipt replay; and FloorProtected
+        when the update would leave the floor anything but the installed term, decided inside the same all-or-nothing
+        update (_floor_guarded), so nothing of it is applied or flushed."""
         with self.lock:
             if self.degraded:
                 raise Degraded(self.degraded)
             if self.write_floor is not None:
                 if protocol != [self.write_floor]:
                     raise ProtocolRequired(self.write_floor)
-                try:
-                    survives = self._floor_survives(sparql)
-                except Exception:
-                    survives = True   # the probe could not run it: the real store decides, and the backstop below holds
-                if not survives:
-                    raise FloorProtected(self.write_floor)
             store_epoch = self._epoch_or_none()
             # a store with no readable marker cannot be epoch-fenced (startup guarantees one;
             # raw fixtures that wipe the store must not crash every write)
@@ -453,14 +451,18 @@ class Executor:
                 raise ReconcileRequired({'reason': 'caller epoch differs from the store epoch and this opId has no receipt here',
                                          'storeEpoch': store_epoch, 'callerEpoch': caller_epoch})
             try:
-                self.store.update(sparql)
+                if self.write_floor is None:
+                    self.store.update(sparql)
+                else:
+                    try:
+                        self.store.update(self._floor_guarded(sparql))
+                    except OSError:
+                        raise
+                    except Exception as e:
+                        if FLOOR_VIOLATION in str(e):   # the guard failed the whole update: nothing was applied
+                            raise FloorProtected(self.write_floor)
+                        raise
                 self.updates += 1
-                if self.write_floor is not None and self._floor_value_safe() != self.write_floor:
-                    # #1748 BACKSTOP: an update whose effect on the floor depended on other data got past the probe.
-                    # Restore the floor before flushing, so it is never durably absent; the caller is told it applied.
-                    self.store.update(f'DELETE {{ GRAPH <{BK}> {{ <{FLOOR_S.value}> <{FLOOR_P.value}> ?v }} }} '
-                                      f'INSERT {{ GRAPH <{BK}> {{ <{FLOOR_S.value}> <{FLOOR_P.value}> {json.dumps(self.write_floor)} }} }} '
-                                      f'WHERE {{ OPTIONAL {{ GRAPH <{BK}> {{ <{FLOOR_S.value}> <{FLOOR_P.value}> ?v }} }} }}')
                 self.store.flush()
                 self.flushes += 1
             except OSError as e:
@@ -470,13 +472,6 @@ class Executor:
                                  'recovery': 'restart the executor; reconcile failedOpId by its receipt before any retry'}
                 raise
             return self.receipt(op_iri)
-
-    def _floor_value_safe(self):
-        try:
-            rows = list(self.store.query(f'SELECT ?v WHERE {{ {in_bk(f"<{FLOOR_S.value}> <{FLOOR_P.value}> ?v")} }}'))
-            return rows[0]['v'].value if len(rows) == 1 else None
-        except Exception:
-            return None
 
     def checkpoint(self):
         """#1559 a consistent snapshot for the backup script. Taken INSIDE the write lock, so no
