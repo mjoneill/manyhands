@@ -55,8 +55,9 @@ async function violations() {
   const cov = await query(`SELECT ?s ?p ?o WHERE { GRAPH <${BK}> { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "${CARD_REF_INDEX_NS}card/")) } }`);
   const nodes = new Map();
   for (const b of cov) {
-    const n = nodes.get(b.s.value) || { versions: [], digests: [], names: [], other: [] };
+    const n = nodes.get(b.s.value) || { versions: [], digests: [], names: [], counts: [], sums: [], other: [] };
     if (b.p.value === CRI.indexedVersion) n.versions.push(b.o); else if (b.p.value === CRI.indexedJsonDigest) n.digests.push(b.o);
+    else if (b.p.value === CRI.namesCount) n.counts.push(b.o); else if (b.p.value === CRI.namesSum) n.sums.push(b.o);
     else if (b.p.value === CRI.namesShortId) n.names.push(b.o); else n.other.push(b.p.value);
     nodes.set(b.s.value, n);
   }
@@ -70,6 +71,8 @@ async function violations() {
     if (n.names.some((x) => x.datatype !== XSD_INT)) bad.push(`card ${c.id}: a namesShortId is not an xsd:integer`);
     const got = n.names.map((x) => Number(x.value)).sort((a, b) => a - b).join(',');
     if (got !== want) bad.push(`card ${c.id}: names {${got}}, it names {${want}}`);
+    const ws = cardNames(JSON.parse(c.json));
+    if (n.counts.length !== 1 || Number(n.counts[0].value) !== ws.length || n.sums.length !== 1 || Number(n.sums[0].value) !== ws.reduce((a, b) => a + b, 0)) bad.push(`card ${c.id}: the names' count/sum watermark is not exact`);
     if (n.other.length) bad.push(`card ${c.id}: unexpected predicates ${n.other.join(' ')}`);
   }
   for (const s of nodes.keys()) if (!byIri.has(`${ENTITY}${s.slice(`${CARD_REF_INDEX_NS}card/`.length)}`)) bad.push(`orphan coverage ${s}`);

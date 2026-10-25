@@ -156,6 +156,19 @@ const BOARD_DOCUMENT = process.env.SCRUM_BOARD_DOCUMENT ?? 'on';
 // permission. Two origin shapes still refuse here until #1629 slice 4 — a page create (wiki-create) and a done-move that
 // shifts a sibling — and existing document outbox entries are not migrated (M1/M2 deferred).
 const ORIGIN_EXECUTOR = BOARD_DOCUMENT !== 'on';
+// #1744 — a card create or delete must prove the derived reference index complete (core/card-ref-index.mjs): always in
+// executor-owned mode, and in mode on once its backfill has run and SCRUM_CARD_REF_INDEX=enforce (F3: backfill BEFORE
+// enforcement, so no mode-on write is stranded on a missing index). Every card write maintains the index either way.
+const CARD_REF_INDEX_ENFORCE = ORIGIN_EXECUTOR || process.env.SCRUM_CARD_REF_INDEX === 'enforce';
+/** #1744 — after a guarded write is refused: is the INDEX the reason (true), or a stale version (false)? null = unknown. */
+async function cardRefIndexIncomplete() {
+  try {
+    const { cardRefIndexHealthySparql } = await import('./core/graph-compiler.mjs');
+    const c = createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: 15000, label: 'card-ref-index' });
+    const r = await c.query(cardRefIndexHealthySparql());
+    return r.ok ? r.rows.length === 0 : null;
+  } catch { return null; }
+}
 // the fields no unit holds yet, each with the card that gives it an owner; `owned` flips when that card's build lands
 const DOCUMENT_ONLY_FIELDS = [
   { field: 'outbox (announcement origins and entries)', card: '#1629', owned: () => ORIGIN_EXECUTOR },
@@ -1032,7 +1045,9 @@ function sendJSON(res, statusCode, data) {
   const unitRefused = statusCode === 500 && data && typeof data.error === 'string' && /^(card|collection) write refused: /.test(data.error);
   if (statusCode === 500 && ((graphCtx && graphCtx.writeRefused) || unitRefused)) {
     statusCode = 409;
-    data = { error: `the graph refused this write as stale or conflicting; nothing was written: ${unitRefused ? data.error : graphCtx.writeRefused}`, code: 'WRITE_CONFLICT' };
+    data = graphCtx && graphCtx.indexIncomplete
+      ? { error: 'the card reference index is incomplete or damaged, so a card create or delete cannot prove which cards it must re-project; nothing was written (run scripts/card-ref-index-1744.mjs --backfill with writers stopped)', code: 'INDEX_INCOMPLETE' }
+      : { error: `the graph refused this write as stale or conflicting; nothing was written: ${unitRefused ? data.error : graphCtx.writeRefused}`, code: 'WRITE_CONFLICT' };
   }
   // #1629 s3 — an origin shape refused in executor-owned mode, BEFORE any durable effect: 503 with its code, never a 500
   if (statusCode === 500 && graphCtx && graphCtx.originRefused) {
@@ -7854,7 +7869,7 @@ async function lockedWithCards(fn) {
             const ob = outboxOf(data);
             const pending = Object.entries(ob.origins).filter(([mid, o]) => !data[FILE_ORIGINS]?.has(mid) && o?.origin?.cardId)
               .map(([mid, o]) => ({ cardId: o.origin.cardId, mutationId: mid, json: JSON.stringify({ origin: o, entries: Object.fromEntries(Object.entries(ob.entries).filter(([, e]) => e?.mutationId === mid)) }) }));
-            await CARDS.commit(data.cards, data.nextShortId, { actor, opId, pending, collections: [...collParts, ...colParts] });
+            await CARDS.commit(data.cards, data.nextShortId, { actor, opId, pending, collections: [...collParts, ...colParts], indexGuard: CARD_REF_INDEX_ENFORCE });
             if (collParts.length) COLLECTIONS.applied(data, collParts);
             if (colParts.length) COLUMNS.applied(data.columns, colParts);
           } else if (colParts.length) {
@@ -7876,7 +7891,12 @@ async function lockedWithCards(fn) {
       return result;
     } catch (e) {
       if (e && e.code === 'CARD_WRITE_CONFLICT' && attempt === 1) continue;
-      if (e && e.code === 'CARD_WRITE_CONFLICT') { const ctx = requestContext.getStore(); if (ctx) ctx.writeRefused = e.message; }
+      if (e && e.code === 'CARD_WRITE_CONFLICT') {
+        const ctx = requestContext.getStore();
+        if (ctx) ctx.writeRefused = e.message;
+        // #1744 — a refusal BECAUSE the reference index is incomplete is named as such, never a plain stale-write conflict
+        if (ctx && CARD_REF_INDEX_ENFORCE && (await cardRefIndexIncomplete()) === true) ctx.indexIncomplete = true;
+      }
       markGraphUnavailable(e);   // an unresolved UNKNOWN (or an executor away): the response is 503, never a bare 500
       throw e;
     }

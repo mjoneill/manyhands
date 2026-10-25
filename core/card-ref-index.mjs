@@ -6,6 +6,7 @@
  *   <urn:ex:card-ref-index/card/<cardId>>  indexedVersion    xsd:integer  = the card's current graph version (urn:ex:ver)
  *                                          indexedJsonDigest              = sha256 of the card's stored entityJson
  *                                          namesShortId      xsd:integer  one per distinct #N the card names
+ *                                          namesCount / namesSum         how many names, and their sum (the names' watermark)
  * and, once a verified backfill has finished, the marker <urn:ex:card-ref-index/coverage> complete true.
  * An ABSENT node is a violation, never "no references". The index is bookkeeping: no public, traversable triple.
  *
@@ -20,6 +21,9 @@ export const CRI = Object.freeze({
   indexedVersion: `${CARD_REF_INDEX_NS}indexedVersion`,
   indexedJsonDigest: `${CARD_REF_INDEX_NS}indexedJsonDigest`,
   namesShortId: `${CARD_REF_INDEX_NS}namesShortId`,
+  // the names' own watermark: a removed or extra name is seen even when version and JSON digest are intact (F2)
+  namesCount: `${CARD_REF_INDEX_NS}namesCount`,
+  namesSum: `${CARD_REF_INDEX_NS}namesSum`,
   marker: `${CARD_REF_INDEX_NS}coverage`,
   complete: `${CARD_REF_INDEX_NS}complete`,
 });
@@ -43,10 +47,13 @@ export const jsonDigest = (entityJson) => crypto.createHash('sha256').update(ent
 /** The coverage node's triples as SPARQL text (inside a GRAPH block), for one card at one version and stored JSON. */
 export function coverageTriplesText(cardId, version, entityJson, card = JSON.parse(entityJson)) {
   const s = `<${CRI.card(cardId)}>`;
+  const names = cardNames(card);
   const lines = [
     `${s} <${CRI.indexedVersion}> "${version}"^^<${XSD_INT}> .`,
     `${s} <${CRI.indexedJsonDigest}> ${JSON.stringify(jsonDigest(entityJson))} .`,
-    ...cardNames(card).map((n) => `${s} <${CRI.namesShortId}> "${n}"^^<${XSD_INT}> .`),
+    `${s} <${CRI.namesCount}> "${names.length}"^^<${XSD_INT}> .`,
+    `${s} <${CRI.namesSum}> "${names.reduce((a, b) => a + b, 0)}"^^<${XSD_INT}> .`,
+    ...names.map((n) => `${s} <${CRI.namesShortId}> "${n}"^^<${XSD_INT}> .`),
   ];
   return lines.join('\n');
 }

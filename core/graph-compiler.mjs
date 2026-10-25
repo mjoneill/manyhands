@@ -572,7 +572,7 @@ const RECORD_FIELDS = {
   'delivery.step': ['target', 'step'],      // #1582 — one step, guarded by the delivery's expected version (as memory.revise)
   'delivery.import': ['delivery'],          // #1582 migration — a document delivery and ALL its steps, fresh, in one update
   'modelcall.create': ['call'],             // #1582 — one ledger row, fresh at its derived IRI
-  'card.write': ['parts', 'counter', 'pending', 'collections', 'origin'],       // #1598 — one or more cards, each guarded on its version, in ONE update; #1629 s2 — `origin` makes it an origin commit
+  'card.write': ['parts', 'counter', 'pending', 'collections', 'origin', 'indexGuard'],       // #1598 — one or more cards, each guarded on its version, in ONE update; #1629 s2 — `origin` makes it an origin commit
   'entity.put': ['entity'],                 // #1624 — one generic storage primitive; the `kind` field selects the projection
   'origin.prepare': ['origin', 'plan'],     // #1629 s2 — the Prepared record of one origin: its descriptor and its frozen business plan
 };
@@ -1351,7 +1351,62 @@ function canonCardWrite(i) {
   // #1624 — collection entities written in the SAME update as the cards (e.g. an agent's retire releases its cards).
   const collections = i.collections == null ? [] : canonCollectionWrite({ kind: 'collection', parts: i.collections }).parts;
   if (!parts.length && !collections.length && i.counter == null) fail('card.write carries no part');
-  return { parts, counter, ...(pending.length ? { pending } : {}), ...(collections.length ? { collections } : {}) };
+  // #1744 — `indexGuard: true` makes a write that adds or removes a shortId prove the reference index is complete and that it
+  // re-projects EVERY card naming that shortId (contract v2 V2-2, F2). Absent = maintained but not enforced (F3 rollout).
+  if (i.indexGuard != null && i.indexGuard !== true) fail('indexGuard must be true or absent');
+  return { parts, counter, ...(pending.length ? { pending } : {}), ...(collections.length ? { collections } : {}), ...(i.indexGuard === true ? { indexGuard: true } : {}) };
+}
+
+/**
+ * #1744 — the reference-index completeness guard, as WHERE clauses inside the write's one ?ok OPTIONAL (contract v2 V2-2, F2).
+ * It binds ?ok only if: the completion marker is true; every live card has exactly one coverage node whose version and JSON
+ * digest equal its current ones (the digest recomputed here from the stored JSON); no coverage node is an orphan or carries
+ * a duplicate watermark; every name is an xsd:integer and each node's names re-aggregate to its stored count and sum (so a
+ * removed or extra name is seen even under an intact watermark); and, for every shortId this write adds or removes, every
+ * card whose coverage names it is a part of this write (so a new, changed or deleted referrer since prepare refuses).
+ */
+function indexInvariantClauses() {
+  const VER = ref(`${NS}ver`), JSONP = ref(`${CW.scrum}entityJson`), CARD = ref(`${CW.scrum}Card`), TYPE = ref(CW.rdfType);
+  const IV = ref(CRI.indexedVersion), ID = ref(CRI.indexedJsonDigest), IN = ref(CRI.namesShortId), IC = ref(CRI.namesCount), IS = ref(CRI.namesSum);
+  const INT = `<http://www.w3.org/2001/XMLSchema#integer>`;
+  const covOf = (cardVar, out) => `BIND(IRI(CONCAT(${JSON.stringify(CRI.card(''))}, STRAFTER(STR(${cardVar}), ${JSON.stringify(ENTITY_IRI)}))) AS ${out})`;
+  const out = [
+    `    GRAPH ${BK} { ${ref(CRI.marker)} ${ref(CRI.complete)} "true"^^<http://www.w3.org/2001/XMLSchema#boolean> . }`,
+    `    FILTER NOT EXISTS { ?ixc ${TYPE} ${CARD} . GRAPH ${BK} { ?ixc ${VER} ?ixv ; ${JSONP} ?ixj . } ${covOf('?ixc', '?ixn')}`,
+    `      FILTER NOT EXISTS { GRAPH ${BK} { ?ixn ${IV} ?ixv2 ; ${ID} ?ixd . } FILTER(?ixv2 = ?ixv && ?ixd = SHA256(STR(?ixj))) } }`,
+    `    FILTER NOT EXISTS { GRAPH ${BK} { ?ixa ${IV} ?ixa1 , ?ixa2 . } FILTER(!sameTerm(?ixa1, ?ixa2)) }`,
+    `    FILTER NOT EXISTS { GRAPH ${BK} { ?ixb ${ID} ?ixb1 , ?ixb2 . } FILTER(!sameTerm(?ixb1, ?ixb2)) }`,
+    `    FILTER NOT EXISTS { GRAPH ${BK} { ?ixo ${IV} ?ixov . } BIND(IRI(CONCAT(${JSON.stringify(ENTITY_IRI)}, STRAFTER(STR(?ixo), ${JSON.stringify(CRI.card(''))}))) AS ?ixoc) FILTER NOT EXISTS { ?ixoc ${TYPE} ${CARD} } }`,
+    `    FILTER NOT EXISTS { GRAPH ${BK} { ?ixt ${IN} ?ixtn . } FILTER(DATATYPE(?ixtn) != ${INT}) }`,
+    `    FILTER NOT EXISTS { GRAPH ${BK} { ?ixm ${IV} ?ixmv . } FILTER NOT EXISTS { GRAPH ${BK} { ?ixm ${IC} ?ixmc ; ${IS} ?ixms . } } }`,
+    `    FILTER NOT EXISTS { { SELECT ?ixg (COUNT(?ixgn) AS ?ixgk) (SUM(?ixgn) AS ?ixgs) WHERE { GRAPH ${BK} { ?ixg ${IV} ?ixgv . OPTIONAL { ?ixg ${IN} ?ixgn . } } } GROUP BY ?ixg }`,
+    `      GRAPH ${BK} { ?ixg ${IC} ?ixgc ; ${IS} ?ixgt . } FILTER(?ixgk != ?ixgc || ?ixgs != ?ixgt) }`,
+  ];
+  return out;
+}
+
+/** #1744 — the index's health alone, as a read: one row when the invariant holds, none when it does not (the server's diagnosis). */
+export const cardRefIndexHealthySparql = () => `SELECT ?ixok WHERE {\n${indexInvariantClauses().join('\n')}\n    BIND(true AS ?ixok)\n} LIMIT 1`;
+
+function indexGuardClauses(R) {
+  // only a write that ADDS or REMOVES a shortId depends on the index; a plain update maintains it but is not held by it
+  if (!R.parts.some((P) => P.remove || P.expectedVersion == null)) return [];
+  const IN = ref(CRI.namesShortId), INT = `<http://www.w3.org/2001/XMLSchema#integer>`;
+  const out = indexInvariantClauses();
+  const covs = R.parts.map((P) => ref(CRI.card(P.iri.slice(ENTITY_IRI.length))));
+  const notIn = covs.length ? ` FILTER(?ixr NOT IN (${covs.join(', ')}))` : '';
+  R.parts.forEach((P, k) => {
+    let S = null;
+    if (P.remove) {   // the removed card's shortId, from its public identifier
+      out.push(`    ${ref(P.iri)} ${ref('https://schema.org/identifier')} ?ixrm${k} .`);
+      S = `xsd:integer(?ixrm${k})`.replace('xsd:integer', INT);
+    } else if (P.expectedVersion == null) {
+      const sid = JSON.parse(P.json).shortId;
+      if (Number.isSafeInteger(sid)) S = `"${sid}"^^${INT}`;
+    }
+    if (S) out.push(`    FILTER NOT EXISTS { GRAPH ${BK} { ?ixr ${IN} ?ixrs . } FILTER(?ixrs = ${S})${notIn} }`);
+  });
+  return out;
 }
 
 function compileCardWrite(c) {
@@ -1377,8 +1432,10 @@ function compileCardWrite(c) {
     const COV = ref(CRI.card(P.iri.slice(ENTITY_IRI.length)));
     branches.push(bkBranch(COV));
     if (!P.remove) {
-      bIns.push(`  ${v(COV)} ${ref(CRI.indexedVersion)} ${v(P.version)} .`, `  ${v(COV)} ${ref(CRI.indexedJsonDigest)} ${v(recLit(jsonDigest(P.json)))} .`);
-      for (const n of cardNames(JSON.parse(P.json))) bIns.push(`  ${v(COV)} ${ref(CRI.namesShortId)} ${v(intLit(String(n), 'namesShortId'))} .`);
+      const nms = cardNames(JSON.parse(P.json));
+      bIns.push(`  ${v(COV)} ${ref(CRI.indexedVersion)} ${v(P.version)} .`, `  ${v(COV)} ${ref(CRI.indexedJsonDigest)} ${v(recLit(jsonDigest(P.json)))} .`,
+        `  ${v(COV)} ${ref(CRI.namesCount)} ${v(intLit(String(nms.length), 'namesCount'))} .`, `  ${v(COV)} ${ref(CRI.namesSum)} ${v(intLit(String(nms.reduce((a, b) => a + b, 0)), 'namesSum'))} .`);
+      for (const n of nms) bIns.push(`  ${v(COV)} ${ref(CRI.namesShortId)} ${v(intLit(String(n), 'namesShortId'))} .`);
     }
     if (P.expectedVersion == null) pre.push(...freshSubject(I));
     else {
@@ -1420,6 +1477,7 @@ function compileCardWrite(c) {
     }
     bIns.push(`  ${v(CTR)} ${VER} ${v(R.counter.next)} .`);
   }
+  if (R.indexGuard) pre.push(...indexGuardClauses(R));   // #1744
   if (R.origin) originCommitClauses(c, digest, { OP, v, pre, dBinds, bDel, bIns });   // #1629 s2 — absent, nothing here runs
   pre.push(`    BIND(true AS ?ok)`);
   where.push(`  OPTIONAL {`, ...pre, `  }`);

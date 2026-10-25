@@ -71,7 +71,7 @@ export function createCardsUnit({ client, actorIri = (who) => `https://scrumboar
   }
 
   /** The parts of ONE card.write that turn the cached cards into `cards` (null when nothing changed). */
-  function plan(cards, nextShortId) {
+  function plan(cards, nextShortId, { allNamers = false } = {}) {
     const before = shortIdMap([...byId.values()].map((r) => r.card));
     const after = shortIdMap(cards);
     const parts = [];
@@ -99,7 +99,9 @@ export function createCardsUnit({ client, actorIri = (who) => `https://scrumboar
         const was = card && byId.get(card.id);
         if (!was || inParts.has(cardIriOf(card.id)) || !namesAny(was.card, changed)) continue;
         const q0 = cardQuads(was.card, before), q1 = cardQuads(was.card, after);
-        if (JSON.stringify(q0) === JSON.stringify(q1)) continue;
+        // #1744 — under the index guard EVERY card naming the shortId rides the write (the guard requires exactly that set);
+        // its JSON is unchanged and only its graph version moves. Without the guard: today's projection-diff rule.
+        if (!allNamers && JSON.stringify(q0) === JSON.stringify(q1)) continue;
         parts.push({ iri: cardIriOf(card.id), expectedVersion: String(was.ver), version: String(was.ver + 1), quads: q1, prior: priorQuads(was.card, before), json: was.json });
       }
     }
@@ -113,15 +115,15 @@ export function createCardsUnit({ client, actorIri = (who) => `https://scrumboar
    * Write the difference between the cache and `cards` as ONE guarded update. APPLIED → the cache becomes `cards`.
    * Anything else → the cache is marked uncertain (reloaded before the next read) and the write is refused.
    */
-  async function commit(cards, nextShortId, { actor, opId, pending = [], collections = [] } = {}) {
+  async function commit(cards, nextShortId, { actor, opId, pending = [], collections = [], indexGuard = false } = {}) {
     if (!byId || uncertain) throw new CardsUnavailable('the card cache is not current');
     // #1624 — collection parts (a K13 family's entities) ride the SAME update when this write also changed them.
-    const p = plan(cards, nextShortId) ?? (collections.length ? { parts: [], counter: null } : null);
+    const p = plan(cards, nextShortId, { allNamers: indexGuard }) ?? (collections.length ? { parts: [], counter: null } : null);
     if (!p) return { outcome: 'NOOP' };
     // K4 — only announcements whose card is a part of THIS write ride it (the others have no window to close).
     const inWrite = new Set(p.parts.filter((x) => !x.remove).map((x) => x.iri));
     const ride = pending.filter((a) => inWrite.has(cardIriOf(a.cardId))).map((a) => ({ card: cardIriOf(a.cardId), mutationId: a.mutationId, json: a.json }));
-    const intent = { kind: 'card.write', opId: opId || `urn:ex:op/card/${mintId()}`, actor: actorIri(actor), parts: p.parts, ...(p.counter ? { counter: p.counter } : {}), ...(ride.length ? { pending: ride } : {}), ...(collections.length ? { collections } : {}) };
+    const intent = { kind: 'card.write', opId: opId || `urn:ex:op/card/${mintId()}`, actor: actorIri(actor), parts: p.parts, ...(p.counter ? { counter: p.counter } : {}), ...(ride.length ? { pending: ride } : {}), ...(collections.length ? { collections } : {}), ...(indexGuard ? { indexGuard: true } : {}) };
     let r;
     try { r = await durableUpdate(client, intent); } catch (e) { uncertain = true; throw new CardsUnavailable(e.message); }
     if (r.outcome !== 'APPLIED') {
