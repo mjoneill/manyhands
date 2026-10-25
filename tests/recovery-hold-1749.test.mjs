@@ -401,9 +401,9 @@ for (const [what, extra] of [['an unknown top-level key', { approvedByy: 'x' }],
 }
 
 // 46528: every numeric field keeps safe-integer validation, including overflow on highWater + gap + 1
-// codes per this row author's reading of A6/v2-3, for the contract author to pin: a field that is not a (positive, for the gap)
+// codes accepted by the contract reviewer (46533): a field that is not a (positive, for the gap)
 // safe JSON integer is a schema refusal, BAD_FILE; a well-typed gap whose R = highWater + G + 1 cannot be a safe integer is BAD_GAP
-for (const [what, R, G, code] of [['a declaredGap so large that highWater + gap + 1 overflows the safe integers', Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER - 50, 'BAD_GAP'], ['a declaredGap that is not an integer', 112, 10.5, 'BAD_FILE'], ['a negative declaredGap', 100, -2, 'BAD_FILE'], ['a nextPostSeq given as a string', '112', 10, 'BAD_FILE']]) {
+for (const [what, R, G, code] of [['a declaredGap so large that highWater + gap + 1 overflows the safe integers', Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER - 50, 'BAD_GAP'], ['a declaredGap that is not an integer', 112, 10.5, 'BAD_FILE'], ['a negative declaredGap', 100, -2, 'BAD_FILE'], ['a ZERO declaredGap (the gap is positive; only commitSeq and high-water may be zero, 46533)', 102, 0, 'BAD_FILE'], ['a nextPostSeq given as a string', '112', 10, 'BAD_FILE']]) {
   test(`#1749 (B5j, r3) a reconcile file with ${what} → refuses to start, ${code}; the store unchanged, still held`, T, async () => {
     const s = await scenario();
     let x = await start(s.backup, ['--promote-epoch']);
