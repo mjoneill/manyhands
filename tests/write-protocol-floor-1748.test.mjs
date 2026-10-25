@@ -312,7 +312,7 @@ test('#1748 M2l (#1622): with the floor, the apply-then-fail request (no header,
   try {
     const before = await state(x);
     const r = await update(x, INSERT('m2l'), { op: 'not an iri m2l' });
-    await assertRefused(x, r, before, 'the #1622 path (C2 shows it applies without a floor)');
+    await assertRefused(x, r, before, 'the #1622 path (a non-IRI op id with no header: the protocol check answers first)');
     assert.equal((await query(x, 'SELECT ?o WHERE { <urn:ex:floor/m2l> ?p ?o }')).length, 0, 'the data is not there');
   } finally { await stop(x); }
 });
