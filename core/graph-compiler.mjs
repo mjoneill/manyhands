@@ -2431,6 +2431,12 @@ function allocationClauses({ items, N, OP, digest, v, pre, dBinds, bDel, bIns, t
     const SUBJ = POSTSEQ_TERMS.reservation(it.postId);
     pre.push(`    FILTER NOT EXISTS { ${inEither(`${SUBJ} ?${t}xp ?${t}xo`)} }`);
   });
+  // #1749 the RECOVERY HOLD: while a promoted restore is unreconciled, the allocator does not bind (both paths share this),
+  // and the receipt names the refusal by code. A hold present means ?ok is unbound, so the code is only ever on a refusal.
+  const HOLD_HERE = `GRAPH ${[BK]} { ${POSTSEQ_TERMS.recoveryHold} ?${t}xh_p ?${t}xh_o }`;
+  pre.push(`    FILTER NOT EXISTS { ${HOLD_HERE} }`);
+  dBinds.push(nb(`IF(EXISTS { ${HOLD_HERE} }, ${JSON.stringify(POSTSEQ_TERMS.RECOVERY_HOLD_CODE)}, ?u)`, 'reason'));
+  bIns.push(`  ${OP} ${EX.reason} ?n_reason .`);
 
   dBinds.push(ok(`?${t}x_next`, `${t}next`), ok(`?${t}x_version`, `${t}verOld`), ok(`?${t}x_version + 1`, `${t}verNew`));
   dBinds.push(ok(`?${t}x_next + ${psqSafeInt(N)}`, `${t}nextNew`));

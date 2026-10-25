@@ -5,7 +5,7 @@
  *
  *   reserveOpId(reservations)             the deterministic opId (lowercase SHA256 of the ordered [mode, postId] vector)
  *   readPostSeqReservation(client, postId) typed reservation readback (ok/UNAVAILABLE/INVALID — never default)
- *   readPostSeqAllocator(client)          typed allocator readback (ok/UNAVAILABLE/INVALID — never default)
+ *   readPostSeqAllocator(client)          typed allocator readback (ok/UNAVAILABLE/INVALID/RECOVERY_HOLD — never default)
  *
  * Compile is wired into core/graph-compiler.mjs; the production compile path goes through `compile(intention)` and the
  * existing staticCheck guard discipline (S1). The executor carries the state: one allocator + reservations under
@@ -381,6 +381,11 @@ export async function readPostSeqReservation(client, postId) {
  * `version` are exact xsd:integer (no value-inequality escape), positive and safe, `postSeqEpoch` non-empty.
  */
 export async function readPostSeqAllocator(client) {
+  // #1749 a promoted restore that is not yet reconciled: the allocator is NOT usable, whatever it holds, so it is never
+  // reported as if it were (the allocator guard refuses the same state with RECOVERY_HOLD)
+  const held = await client.ask(`ASK { GRAPH ${BK} { ${POSTSEQ_TERMS.recoveryHold} ?p ?o } }`);
+  if (!held.ok) return { ok: false, status: 'UNAVAILABLE', reason: held.reason };
+  if (held.boolean) return { ok: false, status: POSTSEQ_TERMS.RECOVERY_HOLD_CODE, reason: 'a recovery hold is in place: this store was promoted from a restore and is not reconciled (executor --reconcile-postseq)' };
   // multi-subject detection FIRST, before any single-tuple read, so a duplicate allocator subject is named even when
   // the canonical subject's predicate set is empty.
   const ms = await client.query(ALLOCATOR_SUBJECTS_SPARQL);

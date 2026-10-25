@@ -56,6 +56,7 @@ export const EX = Object.freeze({
   grantRev: iri('grantRev'),
   rule: iri('rule'),
   ruleRev: iri('ruleRev'),
+  reason: iri('reason'),   // #1749 a refusal's named code on its receipt (only RECOVERY_HOLD today)
 
   // outcome values
   APPLIED: iri('APPLIED'),
@@ -74,7 +75,7 @@ export const EX = Object.freeze({
  */
 export const RECEIPT_PREDICATES = Object.freeze([
   EX.outcome, EX.digest, EX.actor, EX.target, EX.expected, EX.observed,
-  EX.commitSeq, EX.at, EX.grant, EX.grantRev, EX.rule, EX.ruleRev,
+  EX.commitSeq, EX.at, EX.grant, EX.grantRev, EX.rule, EX.ruleRev, EX.reason,
 ]);
 export const MARKER_SUBJECT = EX.dataset;
 export const MARKER_PREDICATES = Object.freeze([EX.commitSeq]);
@@ -165,6 +166,11 @@ export const POSTSEQ_TERMS = Object.freeze({
   identityJson: psi('identityJson'),
   draftJson: psi('draftJson'),
   OP_PREFIX: `${NS}op/postseq/reserve/`,
+  // #1749 the RECOVERY HOLD: written by the executor's --promote-epoch on a store with an allocator, cleared only by its
+  // --reconcile-postseq maintenance start. While it exists, the ONE allocator guard below does not bind (RECOVERY_HOLD).
+  recoveryHold: psi('recovery-hold'),
+  RecoveryHold: psi('RecoveryHold'),
+  RECOVERY_HOLD_CODE: 'RECOVERY_HOLD',
 });
 
 /**

@@ -117,7 +117,11 @@ export function createGraphClient({ baseUrl, expectedDatasetId = null, timeoutMs
     if (stored !== digest) return { outcome: 'REJECTED', reason: 'intent-collision', receipt };
     const o = receipt.outcome?.[0]?.value;
     if (o === `${NS}APPLIED`) return { outcome: 'APPLIED', receipt };
-    if (o === `${NS}PRECONDITION_FAILED`) return { outcome: 'PRECONDITION_FAILED', receipt };
+    if (o === `${NS}PRECONDITION_FAILED`) {
+      // #1749 a refusal the update named by code (RECOVERY_HOLD) carries it, so a caller never guesses why from "not APPLIED"
+      const code = receipt.reason?.length === 1 && receipt.reason[0].type === 'literal' ? receipt.reason[0].value : null;
+      return code ? { outcome: 'PRECONDITION_FAILED', code, receipt } : { outcome: 'PRECONDITION_FAILED', receipt };
+    }
     return { outcome: 'UNKNOWN', reason: `receipt has unrecognised outcome ${o}`, receipt };
   }
 
@@ -177,6 +181,7 @@ export function createGraphClient({ baseUrl, expectedDatasetId = null, timeoutMs
     if (res.status === 409) {
       let j = null; try { j = JSON.parse(res.text); } catch { /* not the fence */ }
       if (j?.error === 'WRITE_FLOOR_PROTECTED' && j.applied === false) return { outcome: 'REJECTED', reason: 'WRITE_FLOOR_PROTECTED: an update may not change the write floor; nothing was applied', digest };
+      if (j?.error === 'HOLD_PROTECTED' && j.applied === false) return { outcome: 'REJECTED', reason: 'HOLD_PROTECTED: an update may not change the recovery hold or a reconciliation record; nothing was applied', digest };
       if (j?.reconcileRequired) return { outcome: 'RECONCILE_REQUIRED', reason: `epoch changed (store ${j.reconcileRequired.storeEpoch}, this write ${j.reconcileRequired.callerEpoch}) and this opId has no receipt here: reconcile downstream, then refresh the epoch and use a fresh opId`, reconcileRequired: j.reconcileRequired, digest };
     }
     // #1559: a latched executor refuses BEFORE applying anything, so this is provably not applied

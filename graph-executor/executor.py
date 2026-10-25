@@ -12,6 +12,7 @@ Contract (D2 v1 §3, #1565; evidence #1555 T10/T11/T13):
 
 usage: python executor.py --store DIR --port N --dataset-id ID [--create] [--log FILE] [--exit-on-stdin-eof]
                            [--checkpoint-dir DIR] [--promote-epoch] [--adopt-home] [--read-only]
+                           [--install-write-floor PROTOCOL] [--reconcile-postseq FILE]
 """
 import argparse, hashlib, json, os, sys, threading, time, urllib.parse, uuid
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
@@ -54,6 +55,35 @@ PROTOCOL_HEADER = 'x-manyhands-write-protocol'
 FLOOR_VIOLATION = 'urn:ex:write-floor/violation'   # #1748 a sentinel graph: never exists outside a refused update
 FLOOR_INSTALLED_BY = px.NamedNode('urn:ex:write-floor/installedBy')   # #1748 written only by --install-write-floor
 FLOOR_INSTALLER = 'install-write-floor'
+# #1749 RESTORE SAFETY. A promoted restore of a store with a post-number allocator must not hand out a number until a
+# recorded, human-approved reconciliation says where numbering resumes: the numbers issued after the backup died with the
+# lost store, and may already be on posts. --promote-epoch writes the RECOVERY HOLD (in the same update as the epoch bump);
+# the allocator guard refuses while it exists; only --reconcile-postseq <file>, a maintenance start on a stopped store,
+# clears it, writing a ReconciliationRecord. The hold and every record are PROTECTED from /update (HOLD_PROTECTED).
+PS = 'urn:ex:postseq/'
+XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer'
+XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string'
+HOLD_S = PS + 'recovery-hold'
+HOLD_T = PS + 'RecoveryHold'
+HOLD_EPOCH, HOLD_INCARNATION = PS + 'epoch', PS + 'incarnation'
+HOLD_COMMIT_SEQ, HOLD_HIGH_WATER, HOLD_PRIOR_EPOCH = PS + 'restoredCommitSeq', PS + 'restoredHighWater', PS + 'priorHoldEpoch'
+HOLD_PREDICATES = (HOLD_EPOCH, HOLD_INCARNATION, HOLD_COMMIT_SEQ, HOLD_HIGH_WATER, HOLD_PRIOR_EPOCH)
+ALLOC_S, ALLOC_T = PS + 'allocator', PS + 'Allocator'
+ALLOC_NEXT, ALLOC_VERSION = PS + 'nextPostSeq', PS + 'version'
+RESERVATION_POSTSEQ = PS + 'postSeq'
+POST_POSTSEQ = 'https://scrumboard.local/ns#postSeq'   # posts and their tombstones (RedactedPost) keep their number here
+REC_T = PS + 'ReconciliationRecord'
+REC_PREFIX = PS + 'reconciliation/'
+REC = {k: PS + k for k in ('nextPostSeq', 'declaredGap', 'approvedBy', 'approvalRef', 'evidenceJson', 'evidenceSha256',
+                           'fileSha256', 'reconciledAt', 'clearedHoldEpoch', 'clearedHoldIncarnation',
+                           'clearedHoldCommitSeq', 'clearedHoldHighWater', 'priorNextPostSeq')}
+RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type'
+HOLD_VIOLATION = 'urn:ex:postseq/hold-violation'   # #1749 a sentinel graph: never exists outside a refused update
+PERSON_IRI = 'https://scrumboard.local/person/'
+MAX_SAFE = 2 ** 53 - 1
+RECONCILE_KEYS = ('nextPostSeq', 'declaredGap', 'approvedBy', 'approvalRef', 'evidence', 'hold')
+RECONCILE_HOLD_KEYS = ('datasetId', 'epoch', 'incarnation', 'restoredCommitSeq', 'restoredHighWater')
+RECONCILE_EVIDENCE_KEYS = ('kind', 'location', 'sha256', 'maxPostSeqSeen')
 # The stdlib default listen backlog is 5. Measured in the D2 proofs (P5, 2026-10-04): with
 # 8 concurrent writers, 5 connected at once and 3 waited ~30 ms for the OS to retry the
 # connection. Correctness held, but concurrency was not exercised and latency carried a
@@ -91,6 +121,12 @@ def parse_args(argv):
                          'on every /update must declare it in x-manyhands-write-protocol, or is refused 428 before anything is '
                          'applied. Installing the SAME protocol again is a no-op; a different one on a floored store refuses '
                          'to start. The floor survives restart, backup and promoted restore.')
+    ap.add_argument('--reconcile-postseq', default=None, metavar='FILE',
+                    help='#1749: a MAINTENANCE START on a stopped store: clear the recovery hold a promoted restore wrote, by the '
+                         'human-approved declared gap in FILE (closed schema), in ONE store transaction that sets nextPostSeq '
+                         'and writes a ReconciliationRecord, then serve. Any refusal (NO_HOLD, WRONG_LINEAGE, WRONG_HOLD, '
+                         'BAD_GAP, BELOW_EVIDENCE, BELOW_NEXT, BAD_FILE) refuses to start with the store unchanged. Rerunning '
+                         'the SAME file on the reconciled store writes nothing and serves (ALREADY reconciled).')
     ap.add_argument('--exit-on-stdin-eof', action='store_true',
                     help='exit when stdin closes: a parent that dies (even by SIGKILL) takes the executor with it')
     ap.add_argument('--checkpoint-dir', default=None,
@@ -129,6 +165,93 @@ class ProtocolRequired(Exception):
 
 class FloorProtected(Exception):
     """#1748 — the update would delete, rewrite or contradict the installed floor: refused before anything is applied."""
+
+
+class HoldProtected(Exception):
+    """#1749 — the update would delete, rewrite or add a triple on the recovery hold or a reconciliation record: refused
+    before anything is applied, whatever protocol it declares."""
+
+
+class ReconcileRefused(SystemExit):
+    """#1749 — a --reconcile-postseq start that refuses: the store is unchanged and the process does not serve."""
+    def __init__(self, code, detail):
+        super().__init__(f'REFUSED: {code}: {detail} (--reconcile-postseq; the store is unchanged)')
+        self.code = code
+
+
+def _safe_int(v, minimum):
+    """A JSON integer (never a bool, a float or a string) that is a safe integer at or above `minimum`."""
+    return type(v) is int and minimum <= v <= MAX_SAFE
+
+
+def _plain_str(v):
+    return isinstance(v, str) and v != '' and v == v.strip() and not any(ord(ch) < 0x20 for ch in v)
+
+
+def parse_reconcile_file(path):
+    """#1749 (contract A6) the CLOSED reconcile schema. Returns (doc, canonical sha256) or raises ReconcileRefused BAD_FILE.
+    The canonical form is the parsed document as JSON with sorted keys, no whitespace and UTF-8: it binds every field,
+    the `hold` block included, so a ReconciliationRecord names exactly the file it applied."""
+    bad = lambda why: ReconcileRefused('BAD_FILE', why)
+    try:
+        with open(path, 'rb') as f:
+            raw = f.read()
+        doc = json.loads(raw.decode('utf-8'), parse_constant=lambda c: (_ for _ in ()).throw(ValueError(f'{c} is not JSON')))
+    except (OSError, UnicodeDecodeError, ValueError) as e:
+        raise bad(f'the file could not be read as JSON: {e}')
+    if not isinstance(doc, dict):
+        raise bad('the file is not a JSON object')
+    def closed(obj, keys, what):
+        extra, missing = sorted(set(obj) - set(keys)), sorted(set(keys) - set(obj))
+        if extra or missing:
+            raise bad(f'{what}: ' + '; '.join(x for x in (f'unknown key(s) {extra}' if extra else '',
+                                                          f'missing key(s) {missing}' if missing else '') if x))
+    closed(doc, RECONCILE_KEYS, 'the reconcile file')
+    if not _safe_int(doc['nextPostSeq'], 1):
+        raise bad('nextPostSeq must be a safe JSON integer >= 1')
+    if not _safe_int(doc['declaredGap'], 1):
+        raise bad('declaredGap must be a safe JSON integer >= 1')
+    ab = doc['approvedBy']
+    if not (_plain_str(ab) and ab.startswith(PERSON_IRI) and len(ab) > len(PERSON_IRI)
+            and not any(ch in ab[len(PERSON_IRI):] for ch in '/<>"{}|\\^` ')):
+        raise bad(f'approvedBy must be a person IRI ({PERSON_IRI}<seat>)')
+    if not _plain_str(doc['approvalRef']) or any(ch.isspace() for ch in doc['approvalRef']):
+        raise bad('approvalRef must be a non-empty decision id string')
+    if not isinstance(doc['evidence'], list):
+        raise bad('evidence must be an array')
+    for k, ev in enumerate(doc['evidence']):
+        if not isinstance(ev, dict):
+            raise bad(f'evidence[{k}] must be an object')
+        closed(ev, RECONCILE_EVIDENCE_KEYS, f'evidence[{k}]')
+        if not _plain_str(ev['kind']) or not _plain_str(ev['location']):
+            raise bad(f'evidence[{k}].kind and .location must be non-empty strings')
+        if not (isinstance(ev['sha256'], str) and len(ev['sha256']) == 64 and all(ch in '0123456789abcdef' for ch in ev['sha256'])):
+            raise bad(f'evidence[{k}].sha256 must be 64 lowercase hex characters')
+        if not _safe_int(ev['maxPostSeqSeen'], 0):
+            raise bad(f'evidence[{k}].maxPostSeqSeen must be a safe JSON integer >= 0')
+    h = doc['hold']
+    if not isinstance(h, dict):
+        raise bad('hold must be an object')
+    closed(h, RECONCILE_HOLD_KEYS, 'hold')
+    for key in ('datasetId', 'epoch', 'incarnation'):
+        if not _plain_str(h[key]):
+            raise bad(f'hold.{key} must be a non-empty string')
+    for key in ('restoredCommitSeq', 'restoredHighWater'):
+        if not _safe_int(h[key], 0):
+            raise bad(f'hold.{key} must be a safe JSON integer >= 0')
+    canon = json.dumps(doc, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
+    return doc, hashlib.sha256(canon).hexdigest()
+
+
+def sparql_term(t):
+    """An N-Triples term for a stored IRI or literal (blank nodes are not expressible in a guard and are never written here)."""
+    if isinstance(t, px.NamedNode):
+        return f'<{t.value}>'
+    if isinstance(t, px.Literal):
+        if t.language:
+            return f'{json.dumps(t.value)}@{t.language}'
+        return f'{json.dumps(t.value)}^^<{t.datatype.value}>'
+    return None
 
 
 class ReconcileRequired(Exception):
@@ -188,8 +311,12 @@ def old_layout(store):
 
 class Executor:
     def __init__(self, store_dir, dataset_id, create=False, log=None, promote_epoch=False, checkpoint_dir=None,
-                 adopt_home=False, read_only=False, install_write_floor=None):
+                 adopt_home=False, read_only=False, install_write_floor=None, reconcile_postseq=None):
         self.read_only = bool(read_only)
+        self.reconciled = None
+        if reconcile_postseq is not None and (self.read_only or create or promote_epoch):
+            raise SystemExit('REFUSED: --reconcile-postseq is a maintenance start of an existing, already promoted store: it '
+                             'cannot be combined with --read-only, --create or --promote-epoch')
         if self.read_only and (create or promote_epoch or adopt_home):
             raise SystemExit('REFUSED: --read-only cannot be combined with --create, --promote-epoch or --adopt-home')
         if self.read_only and install_write_floor is not None:
@@ -293,6 +420,7 @@ class Executor:
             # store had none) and this path as its home. ONE update with the bump: a crash between them
             # would leave two promoted copies of one backup on the same epoch AND the same incarnation.
             D = DATASET.value
+            hold_ops = self._hold_promotion_ops(str(before + 1), new_inc, before_marker['commitSeq'])
             self.store.update(
                 f'DELETE {{ GRAPH <{BK}> {{ <{D}> <{P_EPOCH.value}> ?e . <{D}> <{P_EPOCH_BASE.value}> ?b . <{D}> <{P_INCARNATION.value}> ?i . '
                 f'<{D}> <{P_INCARNATION_FROM.value}> ?f . <{D}> <{P_STORE_HOME.value}> ?h . <{D}> <{P_STORE_HOME_INODE.value}> ?n }} }} '
@@ -303,8 +431,11 @@ class Executor:
                 f'OPTIONAL {{ <{D}> <{P_EPOCH_BASE.value}> ?b }} OPTIONAL {{ <{D}> <{P_INCARNATION.value}> ?i }} '
                 f'OPTIONAL {{ <{D}> <{P_INCARNATION_FROM.value}> ?f }} OPTIONAL {{ <{D}> <{P_STORE_HOME.value}> ?h }} '
                 f'OPTIONAL {{ <{D}> <{P_STORE_HOME_INODE.value}> ?n }} }} '
-                f'BIND(?e + 1 AS ?e1) }}')
+                f'BIND(?e + 1 AS ?e1) }}' + hold_ops)
             self.store.flush()
+            if hold_ops and self._marker()['epoch'] != str(before + 1):
+                raise SystemExit('REFUSED: the promotion bumped the epoch to an unexpected value, so the recovery hold names '
+                                 'the wrong one; this should be impossible')
             self.promoted = {'from': before, 'to': int(self._marker()['epoch']), 'incarnationFrom': prev,
                              'at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}
         # #1577 IDENTITY outside create / promotion (each of those wrote it in its own update above).
@@ -345,6 +476,189 @@ class Executor:
                                  'would change it (a floor is never replaced or downgraded by a relaunch)')
         self._check_floor_provenance(held)
         self.write_floor = held
+        # #1749 a store holding the hold guard's sentinel graph would refuse every write: refuse to start instead
+        if self.store.contains_named_graph(px.NamedNode(HOLD_VIOLATION)):
+            raise SystemExit(f'REFUSED: the store holds the graph <{HOLD_VIOLATION}>, which the recovery-hold guard needs to '
+                             'be absent; remove it offline')
+        if reconcile_postseq is not None:
+            self.reconciled = self._reconcile_postseq(reconcile_postseq)
+
+    # ── #1749 the recovery hold ──────────────────────────────────────────────────────────────────────────────────────
+
+    def _bk_values(self, subject, predicate):
+        return [r['v'] for r in self.store.query(f'SELECT ?v WHERE {{ {in_bk(f"<{subject}> <{predicate}> ?v")} }}')]
+
+    def _hold_present(self):
+        return bool(self.store.query(f'ASK {{ {in_bk(f"<{HOLD_S}> ?p ?o")} }}'))
+
+    def _has_allocator(self):
+        return bool(self.store.query(f'ASK {{ {in_bk(f"<{ALLOC_S}> a <{ALLOC_T}>")} }}'))
+
+    @staticmethod
+    def _int_term(t, what):
+        if not isinstance(t, px.Literal) or t.datatype.value != XSD_INTEGER:
+            raise SystemExit(f'REFUSED: {what} is not an xsd:integer ({t})')
+        try:
+            return int(t.value)
+        except ValueError:
+            raise SystemExit(f'REFUSED: {what} is not an integer ({t.value!r})')
+
+    def _restored_high_water(self):
+        """The max postSeq over posts and tombstones (default graph) and reservations (bookkeeping); 0 when none."""
+        hw = 0
+        for q, what in ((f'SELECT ?n WHERE {{ ?x <{POST_POSTSEQ}> ?n }}', 'a post\'s postSeq'),
+                        (f'SELECT ?n WHERE {{ {in_bk(f"?x <{RESERVATION_POSTSEQ}> ?n")} }}', 'a reservation\'s postSeq')):
+            for r in self.store.query(q):
+                hw = max(hw, self._int_term(r['n'], what))
+        return hw
+
+    def _hold_promotion_ops(self, new_epoch, new_inc, commit_seq):
+        """#1749 (V2-1, A4) the operations that REPLACE the hold, appended to the promotion's own update, or '' when this
+        promotion writes none: a store with no allocator and no hold gets none (a cutover candidate is promoted before
+        its import writes the allocator). A held store keeps a hold whatever it holds, re-bound to this promotion:
+        restoredHighWater := max(the prior hold's, the recomputed one) and priorHoldEpoch := the replaced hold's epoch."""
+        prior = self._hold_present()
+        if not prior and not self._has_allocator():
+            return ''
+        hw = self._restored_high_water()
+        prior_epoch = None
+        if prior:
+            for t in self._bk_values(HOLD_S, HOLD_HIGH_WATER):
+                hw = max(hw, self._int_term(t, 'the prior hold\'s restoredHighWater'))
+            epochs = self._bk_values(HOLD_S, HOLD_EPOCH)
+            if len(epochs) != 1 or not isinstance(epochs[0], px.Literal):
+                raise SystemExit(f'REFUSED: HOLD_UNSOUND: the recovery hold being replaced has {len(epochs)} epoch values '
+                                 '(expected exactly one literal); repair it offline before promoting')
+            prior_epoch = epochs[0].value
+        if hw > MAX_SAFE:
+            raise SystemExit(f'REFUSED: the restored high-water {hw} is not a safe integer')
+        prior_t = f' ; <{HOLD_PRIOR_EPOCH}> {json.dumps(prior_epoch)}' if prior_epoch is not None else ''
+        return (f' ;\nDELETE WHERE {{ GRAPH <{BK}> {{ <{HOLD_S}> ?hp ?ho }} }} ;\n'
+                f'INSERT DATA {{ GRAPH <{BK}> {{ <{HOLD_S}> a <{HOLD_T}> ; <{HOLD_EPOCH}> {json.dumps(new_epoch)} ; '
+                f'<{HOLD_INCARNATION}> {json.dumps(new_inc)} ; <{HOLD_COMMIT_SEQ}> "{int(commit_seq)}"^^<{XSD_INTEGER}> ; '
+                f'<{HOLD_HIGH_WATER}> "{hw}"^^<{XSD_INTEGER}>{prior_t} }} }}')
+
+    def _protected_triples(self):
+        """#1749 every bookkeeping triple on a PROTECTED subject: the hold, and every typed ReconciliationRecord."""
+        q = (f'SELECT ?s ?p ?o WHERE {{ GRAPH <{BK}> {{ {{ <{HOLD_S}> ?p ?o BIND(<{HOLD_S}> AS ?s) }} UNION '
+             f'{{ ?s a <{REC_T}> . ?s ?p ?o }} }} }}')
+        return [(r['s'], r['p'], r['o']) for r in self.store.query(q)]
+
+    def _hold_violated(self, snapshot):
+        """#1749 (A1) the pattern that matches when the protected subjects are not EXACTLY `snapshot` after an update: a
+        triple of it gone, a triple added on the hold or on a record, or a new subject typed ReconciliationRecord."""
+        rows = [(sparql_term(s), sparql_term(p), sparql_term(o)) for s, p, o in snapshot]
+        rows = [r for r in rows if None not in r]
+        branches = [f'{{ FILTER NOT EXISTS {{ GRAPH <{BK}> {{ {s} {p} {o} }} }} }}' for s, p, o in rows]
+        subjects = sorted({f'<{HOLD_S}>', *(s for s, _, _ in rows)})
+        for k, subj in enumerate(subjects):
+            known = [f'(sameTerm(?hp{k}, {p}) && sameTerm(?ho{k}, {o}))' for s, p, o in rows if s == subj]
+            keep = f' FILTER(!({" || ".join(known)}))' if known else ''
+            branches.append(f'{{ GRAPH <{BK}> {{ {subj} ?hp{k} ?ho{k} }}{keep} }}')
+        records = sorted({s for s, p, o in rows if p == f'<{RDF_TYPE}>' and o == f'<{REC_T}>'})
+        keep = f' FILTER(?hr NOT IN ({", ".join(records)}))' if records else ''
+        branches.append(f'{{ GRAPH <{BK}> {{ ?hr a <{REC_T}> }}{keep} }}')
+        return ' UNION '.join(branches)
+
+    def _guard_ops_hold(self, snapshot):
+        return (f'INSERT {{ GRAPH <{HOLD_VIOLATION}> {{ <{HOLD_VIOLATION}> <{HOLD_VIOLATION}> <{HOLD_VIOLATION}> }} }} '
+                f'WHERE {{ {self._hold_violated(snapshot)} }} ;\n'
+                f'CREATE GRAPH <{HOLD_VIOLATION}> ;\nDROP GRAPH <{HOLD_VIOLATION}>')
+
+    def _hold_rows(self):
+        """The stored hold as {predicate: [terms]}, or None when there is none."""
+        rows = list(self.store.query(f'SELECT ?p ?o WHERE {{ {in_bk(f"<{HOLD_S}> ?p ?o")} }}'))
+        if not rows:
+            return None
+        out = {}
+        for r in rows:
+            out.setdefault(r['p'].value, []).append(r['o'])
+        return out
+
+    def _reconcile_postseq(self, path):
+        """#1749 (A2, A3, A5, A6) the ONLY path that clears the recovery hold. Checks in A6's order; success is ONE store
+        transaction (the hold deleted, nextPostSeq := R with version + 1, the ReconciliationRecord written), flushed
+        before serving. approvedBy and approvalRef are RECORDED and form-checked only: the approval is the act of running
+        this maintenance start, and the record is its audit trail, not its proof."""
+        doc, digest = parse_reconcile_file(path)
+        record = REC_PREFIX + digest
+        hold = self._hold_rows()
+        # (1) no hold: the replay branch. A record is consulted ONLY here, so an old file can never clear a new hold.
+        if hold is None:
+            if bool(self.store.query(f'ASK {{ {in_bk(f"<{record}> a <{REC_T}> ; <{REC["fileSha256"]}> {json.dumps(digest)}")} }}')):
+                return {'result': 'ALREADY', 'record': record}
+            raise ReconcileRefused('NO_HOLD', 'this store holds no recovery hold, and no ReconciliationRecord for this file')
+        def one(pred, kind):
+            vs = hold.get(pred, [])
+            if len(vs) != 1 or not isinstance(vs[0], px.Literal):
+                raise ReconcileRefused('WRONG_LINEAGE', f'the stored hold has {len(vs)} {pred} values (expected exactly one literal)')
+            if kind == 'int':
+                if vs[0].datatype.value != XSD_INTEGER:
+                    raise ReconcileRefused('WRONG_LINEAGE', f'the stored hold\'s {pred} is not an xsd:integer')
+                return int(vs[0].value)
+            return vs[0].value
+        if hold.get(RDF_TYPE, []) != [px.NamedNode(HOLD_T)]:
+            raise ReconcileRefused('WRONG_LINEAGE', 'the stored hold is not typed RecoveryHold exactly once')
+        stored = {'epoch': one(HOLD_EPOCH, 'str'), 'incarnation': one(HOLD_INCARNATION, 'str'),
+                  'restoredCommitSeq': one(HOLD_COMMIT_SEQ, 'int'), 'restoredHighWater': one(HOLD_HIGH_WATER, 'int')}
+        # (2) the stored hold names THIS store's epoch and incarnation (a hold copied from another lineage never unlocks)
+        ident, marker = self._identity(), self._marker()
+        if stored['epoch'] != str(marker['epoch']) or stored['incarnation'] != ident.get('incarnation'):
+            raise ReconcileRefused('WRONG_LINEAGE', f'the stored hold names epoch {stored["epoch"]!r}, incarnation '
+                                   f'{stored["incarnation"]!r}; this store is epoch {marker["epoch"]!r}, incarnation '
+                                   f'{ident.get("incarnation")!r}')
+        # (3) the file was approved for THIS hold, field by field (and so for this store's identity)
+        want = {'datasetId': self.dataset_id, **stored}
+        for key in RECONCILE_HOLD_KEYS:
+            if doc['hold'][key] != want[key]:
+                raise ReconcileRefused('WRONG_HOLD', f'the file\'s hold.{key} is {doc["hold"][key]!r}; the stored hold\'s is {want[key]!r}')
+        R, G, hw = doc['nextPostSeq'], doc['declaredGap'], stored['restoredHighWater']
+        # (4) R is exactly restoredHighWater + G + 1, and a safe integer
+        if hw + G + 1 > MAX_SAFE:
+            raise ReconcileRefused('BAD_GAP', f'restoredHighWater {hw} + declaredGap {G} + 1 is not a safe integer')
+        if R != hw + G + 1:
+            raise ReconcileRefused('BAD_GAP', f'nextPostSeq {R} is not restoredHighWater {hw} + declaredGap {G} + 1 = {hw + G + 1}')
+        # (5) above every number any evidence saw
+        for k, ev in enumerate(doc['evidence']):
+            if ev['maxPostSeqSeen'] >= R:
+                raise ReconcileRefused('BELOW_EVIDENCE', f'evidence[{k}] saw postSeq {ev["maxPostSeqSeen"]}, not below {R}')
+        # (6) never below the allocator's own next
+        rows = list(self.store.query(f'SELECT ?n ?v WHERE {{ {in_bk(f"<{ALLOC_S}> a <{ALLOC_T}> ; <{ALLOC_NEXT}> ?n ; <{ALLOC_VERSION}> ?v")} }}'))
+        if len(rows) != 1:
+            raise ReconcileRefused('BELOW_NEXT', f'the allocator cannot be read as exactly one (next, version) tuple ({len(rows)} rows)')
+        nxt_t, ver_t = rows[0]['n'], rows[0]['v']
+        nxt, ver = self._int_term(nxt_t, 'the allocator\'s nextPostSeq'), self._int_term(ver_t, 'the allocator\'s version')
+        if R < nxt:
+            raise ReconcileRefused('BELOW_NEXT', f'nextPostSeq {R} is below the allocator\'s next {nxt}')
+        if ver + 1 > MAX_SAFE:
+            raise ReconcileRefused('BELOW_NEXT', f'the allocator\'s version {ver} cannot advance')
+        # ONE transaction: the exact hold triples read above deleted, the allocator advanced, the record written
+        hold_del = ' . '.join(f'<{HOLD_S}> <{p}> {sparql_term(o)}' for p, os_ in hold.items() for o in os_)
+        evidence_json = json.dumps(doc['evidence'], sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+        I = lambda n: f'"{int(n)}"^^<{XSD_INTEGER}>'
+        rec = (f'<{record}> a <{REC_T}> ; <{REC["nextPostSeq"]}> {I(R)} ; <{REC["declaredGap"]}> {I(G)} ; '
+               f'<{REC["approvedBy"]}> <{doc["approvedBy"]}> ; <{REC["approvalRef"]}> {json.dumps(doc["approvalRef"])} ; '
+               f'<{REC["evidenceJson"]}> {json.dumps(evidence_json)} ; '
+               f'<{REC["evidenceSha256"]}> {json.dumps(hashlib.sha256(evidence_json.encode("utf-8")).hexdigest())} ; '
+               f'<{REC["fileSha256"]}> {json.dumps(digest)} ; '
+               f'<{REC["reconciledAt"]}> "{time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}"^^<http://www.w3.org/2001/XMLSchema#dateTime> ; '
+               f'<{REC["clearedHoldEpoch"]}> {json.dumps(stored["epoch"])} ; <{REC["clearedHoldIncarnation"]}> {json.dumps(stored["incarnation"])} ; '
+               f'<{REC["clearedHoldCommitSeq"]}> {I(stored["restoredCommitSeq"])} ; <{REC["clearedHoldHighWater"]}> {I(hw)} ; '
+               f'<{REC["priorNextPostSeq"]}> {I(nxt)}')
+        if bool(self.store.query(f'ASK {{ {in_bk(f"<{record}> ?p ?o")} }}')):
+            raise ReconcileRefused('BAD_FILE', f'a record already sits at {record} while a hold is present; repair it offline')
+        try:
+            self.store.update(
+                f'DELETE DATA {{ GRAPH <{BK}> {{ {hold_del} . <{ALLOC_S}> <{ALLOC_NEXT}> {sparql_term(nxt_t)} . '
+                f'<{ALLOC_S}> <{ALLOC_VERSION}> {sparql_term(ver_t)} }} }} ;\n'
+                f'INSERT DATA {{ GRAPH <{BK}> {{ <{ALLOC_S}> <{ALLOC_NEXT}> {I(R)} . <{ALLOC_S}> <{ALLOC_VERSION}> {I(ver + 1)} . {rec} }} }}')
+            self.store.flush()
+        except OSError as e:
+            raise SystemExit(f'REFUSED: the reconciliation write or its flush failed (durability fault; reconcile by reading the '
+                             f'store before any rerun): {e}')
+        if self._hold_present() or self._bk_values(ALLOC_S, ALLOC_NEXT) != [px.Literal(str(R), datatype=px.NamedNode(XSD_INTEGER))]:
+            raise SystemExit('REFUSED: the reconciliation transaction did not leave the state it wrote; inspect the store offline')
+        return {'result': 'RECONCILED', 'record': record, 'nextPostSeq': R}
 
     def _set_identity(self, pred, value):
         """Replace the single marker value of `pred` (or remove it when value is None)."""
@@ -409,7 +723,7 @@ class Executor:
         install record are still exactly the installed terms afterwards (_violated). Store.update is all-or-nothing, so a
         delete, a rewrite (to another value, a language tag or a datatype), a wipe, a second value, or an effect that
         depends on other data is never applied, and nothing has to be restored. The check reads the store state the update
-        produced; it never parses the body. Floored stores only: an unfloored store runs the body exactly as it is.
+        produced; it never parses the body. Floored stores only; the #1749 hold guard (_update_guarded) runs on every store.
         The join is always `;`, which ends the body's last operation, so nothing of the guard can fuse into it. A body
         whose own text leaves `;` nothing to follow (a comment after a final `;`, a comment-only or prologue-only body) is
         therefore a syntax error with nothing applied, like any malformed body: an honest 500, never a false success."""
@@ -419,17 +733,31 @@ class Executor:
                 f'WHERE {{ {self._violated(self.write_floor)} }} ;\n'
                 f'CREATE GRAPH <{FLOOR_VIOLATION}> ;\nDROP GRAPH <{FLOOR_VIOLATION}>')
 
-    def _update_floored(self, sparql):
-        """#1748 one guarded, all-or-nothing update, never retried (a retry joined differently could fuse a body that is
-        invalid on its own with the guard into something valid, and report a false success)."""
+    def _update_guarded(self, sparql):
+        """#1748 + #1749 one guarded, all-or-nothing update, never retried (a retry joined differently could fuse a body
+        that is invalid on its own with the guard into something valid, and report a false success). The recovery-hold
+        guard (A1) runs on EVERY update, floored or not: the body, then the floor's operations when a floor is installed,
+        then the hold's, joined exactly as _floor_guarded joins them."""
+        guarded = self._floor_guarded(sparql) if self.write_floor is not None else (
+            (lambda body: f'{body}\n;\n' if body.strip() else '')(sparql.rstrip().rstrip(';')))
+        sep = ' ;\n' if self.write_floor is not None else ''
+        guarded = f'{guarded}{sep}{self._guard_ops_hold(self._protected_triples())}'
         try:
-            self.store.update(self._floor_guarded(sparql))
+            self.store.update(guarded)
         except OSError:
             raise
         except Exception as e:
-            if FLOOR_VIOLATION in str(e):   # the guard failed the whole update: nothing was applied
+            if FLOOR_VIOLATION in str(e):   # the floor guard failed the whole update: nothing was applied
                 raise FloorProtected(self.write_floor)
+            if HOLD_VIOLATION in str(e):    # the hold guard failed the whole update: nothing was applied
+                raise HoldProtected()
             raise
+
+    def _hold_present_or_none(self):
+        try:
+            return self._hold_present()
+        except Exception:
+            return None
 
     def _identity(self):
         """#1577 incarnation / incarnationFrom / storeHome / epochBase, each None when absent. Never raises."""
@@ -487,8 +815,9 @@ class Executor:
         #1748: with a write floor installed, raises ProtocolRequired unless `protocol` (the request's declared
         protocol, a list of every header value) is exactly [floor], before even a receipt replay; and FloorProtected
         when the update would leave the floor or its install record anything but the installed terms, decided inside the
-        same all-or-nothing update (_floor_guarded), so nothing of it is applied or flushed. An unfloored store runs the
-        body unguarded, byte for byte as before #1748."""
+        same all-or-nothing update (_floor_guarded), so nothing of it is applied or flushed. #1749: on EVERY store, floored
+        or not, raises HoldProtected when the update would leave the recovery hold or a reconciliation record anything but
+        what it was, decided the same way inside the same update (_update_guarded)."""
         with self.lock:
             if self.degraded:
                 raise Degraded(self.degraded)
@@ -518,10 +847,7 @@ class Executor:
                 raise ReconcileRequired({'reason': 'caller epoch differs from the store epoch and this opId has no receipt here',
                                          'storeEpoch': store_epoch, 'callerEpoch': caller_epoch})
             try:
-                if self.write_floor is None:
-                    self.store.update(sparql)   # unfloored: the body exactly as sent, unguarded (a stray floor is refused at START)
-                else:
-                    self._update_floored(sparql)
+                self._update_guarded(sparql)
                 self.updates += 1
                 self.store.flush()
                 self.flushes += 1
@@ -584,6 +910,7 @@ class Executor:
             m = {'markerError': str(e)}
         return {**m, **self._identity(), 'status': 'DEGRADED' if self.degraded else 'OK', 'degraded': self.degraded, 'promoted': self.promoted,
                 'readOnly': self.read_only, 'layout': 'bookkeeping-graph', 'writeFloor': self.write_floor,
+                'recoveryHold': self._hold_present_or_none(), 'reconciled': self.reconciled,
                 'flushes': self.flushes, 'updates': self.updates, 'syncMode': SYNC_MODE, 'listenBacklog': LISTEN_BACKLOG}
 
 
@@ -633,6 +960,12 @@ def make_handler(ex):
                     return self._send(409, {'error': 'WRITE_FLOOR_PROTECTED', 'applied': False, 'floor': f.args[0],
                                             'reason': 'an /update may not delete, rewrite or contradict the installed write floor or its '
                                                       'install record'})
+                except HoldProtected:  # #1749 refused whole inside the update: the hold and records are not writable here
+                    ex.log(op, 'update', 'REFUSED-HOLD-PROTECTED', (time.perf_counter() - t0) * 1000, sha)
+                    return self._send(409, {'error': 'HOLD_PROTECTED', 'applied': False,
+                                            'reason': 'an /update may not delete, rewrite or add to the recovery hold or a '
+                                                      'reconciliation record, whatever protocol it declares; only the '
+                                                      'executor\'s --reconcile-postseq maintenance start clears the hold'})
                 except ReconcileRequired as r:  # refused before update(): applied nothing
                     ex.log(op, 'update', 'RECONCILE-REQUIRED', (time.perf_counter() - t0) * 1000, sha)
                     return self._send(409, {'error': 'reconcile required', 'reconcileRequired': r.info})
@@ -676,7 +1009,11 @@ def main(argv):
     a = parse_args(argv)
     ex = Executor(a.store, a.dataset_id, create=a.create, log=a.log, promote_epoch=a.promote_epoch,
                   checkpoint_dir=a.checkpoint_dir, adopt_home=a.adopt_home, read_only=a.read_only,
-                  install_write_floor=a.install_write_floor)
+                  install_write_floor=a.install_write_floor, reconcile_postseq=a.reconcile_postseq)
+    if ex.reconciled is not None:   # stdout's first line is the ready line; the maintenance result goes to stderr
+        r = ex.reconciled
+        print(f'ALREADY reconciled {r["record"]}' if r['result'] == 'ALREADY'
+              else f'RECONCILED {r["record"]}: allocation resumes at {r["nextPostSeq"]}', file=sys.stderr, flush=True)
     srv = Server(('127.0.0.1', a.port), make_handler(ex))
     if a.exit_on_stdin_eof:
         def watch():
