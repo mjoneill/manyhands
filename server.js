@@ -7860,7 +7860,14 @@ async function lockedWithCards(fn) {
             if (cw) cw.cards = true;
             const o = staged.origin;
             if (colParts.length) throw new OriginShapeRefused('an origin write moves no columns (#1629 s3)');
-            const r = await CARDS.commitOrigin(data.cards, data.nextShortId, { collections: collParts, describe: (parts) => originDescriptor(o, parts, collParts) });
+            // #1744 — a done-move's shifted siblings are sibling-order parts, with the walk's anchor; every origin may pause at
+            // the test-only after-origin-prepare barrier (a no-op unless a test armed it)
+            const subjectIri = o.provenance?.cardId ? `https://scrumboard.local/entity/${o.provenance.cardId}` : null;
+            const siblingOrder = o.route === 'done-nudge' && staged.walk;
+            if (siblingOrder) staged.noReplan = true;   // #1744 D9 — a refused done-move with siblings is never silently replanned
+            const r = await CARDS.commitOrigin(data.cards, data.nextShortId, { collections: collParts, describe: (parts) => originDescriptor(o, parts, collParts),
+              ...(siblingOrder ? { decorate: (parts) => parts.map((x) => (x.iri === subjectIri ? x : { ...x, reason: 'sibling-order' })), walk: staged.walk } : {}),
+              afterPrepare: () => testBarrier('after-origin-prepare') });
             if (r.outcome === 'APPLIED') { o.handle.mutationId = r.mutationId; o.handle.obligationId = `${r.mutationId}:${o.slot}`; }
             o.done = true;
             if (collParts.length) COLLECTIONS.applied(data, collParts);
@@ -7890,7 +7897,7 @@ async function lockedWithCards(fn) {
       }
       return result;
     } catch (e) {
-      if (e && e.code === 'CARD_WRITE_CONFLICT' && attempt === 1) continue;
+      if (e && e.code === 'CARD_WRITE_CONFLICT' && attempt === 1 && !staged.noReplan) continue;
       if (e && e.code === 'CARD_WRITE_CONFLICT') {
         const ctx = requestContext.getStore();
         if (ctx) ctx.writeRefused = e.message;
@@ -10107,7 +10114,9 @@ function makeRoomInColumn(cardsArr, moved, anchor) {
     if (!c || c === moved || c.column !== moved.column) return;
     seq.push({ c, o: Number(c.order) || 0, i });
   });
-  seq.sort((a, b) => (a.o - b.o) || (a.i - b.i));
+  // #1744 (F1) — with the cards unit the tie-break is (order, shortId), the same rule the compiler checks the walk by; the
+  // document-only path keeps its array order
+  seq.sort((a, b) => (a.o - b.o) || (CARDS_UNIT ? (Number(a.c.shortId) || 0) - (Number(b.c.shortId) || 0) : 0) || (a.i - b.i));
   let walk;
   if (anchor === undefined) walk = seq.filter(({ o }) => o >= at);
   else if (anchor === null) walk = seq;
@@ -10585,10 +10594,9 @@ async function handleUpdateCard(req, res, idOrShortId) {
           }
         }
         shifted = makeRoomInColumn(data.cards, card, anchor);
-        // #1629 s3 D1 — executor-owned: a move INTO done that shifts a sibling would put sibling parts in the done-nudge's
-        // origin plan, which this slice does not admit (slice 4). Refused before anything is written (the edits above are
-        // in this request's copy only); the same move into a free slot shifts nothing and goes through.
-        if (ORIGIN_EXECUTOR && !wasDone && card.column === 'done' && shifted.length) throw new OriginShapeRefused('a move into done that shifts other cards is not available while the executor owns announcements (#1629 slice 4)');
+        // #1744 (#1629 slice 4) — executor-owned: the shifted siblings ride the done-nudge origin as sibling-order parts,
+        // and the walk's anchor rides with it so the compiler can prove the shifted set is exactly the walk
+        { const st = cardWriteContext.getStore(); if (st) st.walk = { anchor: anchor === undefined ? undefined : anchor === null ? null : `https://scrumboard.local/entity/${anchor.id}` }; }
         // #1584 — the move's identity, on the stored card, so the fence can
         // tell a committed move from one that may still arrive (handleMoveFence).
         if (typeof patch.requestId === 'string') card.lastMoveRequestId = patch.requestId;

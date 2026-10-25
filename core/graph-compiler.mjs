@@ -572,7 +572,7 @@ const RECORD_FIELDS = {
   'delivery.step': ['target', 'step'],      // #1582 — one step, guarded by the delivery's expected version (as memory.revise)
   'delivery.import': ['delivery'],          // #1582 migration — a document delivery and ALL its steps, fresh, in one update
   'modelcall.create': ['call'],             // #1582 — one ledger row, fresh at its derived IRI
-  'card.write': ['parts', 'counter', 'pending', 'collections', 'origin', 'indexGuard', 'reads'],       // #1598 — one or more cards, each guarded on its version, in ONE update; #1629 s2 — `origin` makes it an origin commit
+  'card.write': ['parts', 'counter', 'pending', 'collections', 'origin', 'indexGuard', 'reads', 'walk'],       // #1598 — one or more cards, each guarded on its version, in ONE update; #1629 s2 — `origin` makes it an origin commit
   'entity.put': ['entity'],                 // #1624 — one generic storage primitive; the `kind` field selects the projection
   'origin.prepare': ['origin', 'plan'],     // #1629 s2 — the Prepared record of one origin: its descriptor and its frozen business plan
 };
@@ -1369,7 +1369,17 @@ function canonCardWrite(i, { origin = i.origin != null } = {}) {
     }).sort((a, b) => (a.iri < b.iri ? -1 : 1));
     if (new Set(reads.map((r) => r.iri)).size !== reads.length) fail('reads: an entity appears twice');
   }
-  return { parts, counter, ...(pending.length ? { pending } : {}), ...(collections.length ? { collections } : {}), ...(i.indexGuard === true ? { indexGuard: true } : {}), ...(reads.length ? { reads } : {}) };
+  // #1744 — a done-move's sibling walk names its anchor (absent: siblings at or after the new order; null: from the top;
+  // an iri: after that card), so the compiler can prove the shifted set is the walk, exactly (contract v2 V2-3)
+  let walk = null;
+  if (i.walk != null) {
+    if (!origin) fail('walk rides an origin plan only');
+    obj(i.walk, ['anchor'], 'walk');
+    walk = { anchor: i.walk.anchor === null ? null : i.walk.anchor === undefined ? undefined : checkIri(i.walk.anchor, 'walk.anchor') };
+    if (walk.anchor !== null && walk.anchor !== undefined && !walk.anchor.startsWith(ENTITY_IRI)) fail('walk.anchor must be a card iri');
+    if (walk.anchor === undefined) walk = {};
+  }
+  return { parts, counter, ...(pending.length ? { pending } : {}), ...(collections.length ? { collections } : {}), ...(i.indexGuard === true ? { indexGuard: true } : {}), ...(reads.length ? { reads } : {}), ...(walk ? { walk } : {}) };
 }
 
 /**
@@ -1452,6 +1462,47 @@ function referenceResolveClauses(R) {
   return out;
 }
 
+/** #1744 — the stored-state half of a done-move's proof (V2-3): see bindDoneMovePlan for the half checked from the parts. */
+function doneMoveClauses(R) {
+  const JSONP = ref(`${CW.scrum}entityJson`), COLP = ref('https://scrumboard.local/ns#column'), IDP = ref('https://schema.org/identifier');
+  const CARD = ref(`${CW.scrum}Card`), TYPE = ref(CW.rdfType), INT = `<http://www.w3.org/2001/XMLSchema#integer>`;
+  const subject = R.parts.find((P) => P.reason == null);
+  const sj = JSON.parse(subject.json);
+  const at = Number(sj.order);
+  const COL = ref(`https://scrumboard.local/column/${encodeURIComponent(sj.column)}`);   // core/jsonld.mjs columnIri
+  const sibs = R.parts.filter((P) => P.reason === 'sibling-order');
+  const out = [];
+  sibs.forEach((P, k) => {
+    const I = ref(P.iri);
+    const j = JSON.parse(P.json);
+    const old = priorOrderOf(P);
+    // the stored JSON is the new JSON with ONLY order and version reverted. bumpCardVersion maps an integer v ≥ 0 to v + 1 and
+    // anything else to 1, so a new version of 1 may come from 0, null, or no version key at all (it was appended last): an
+    // exact comparison against that closed set, never a looser one
+    const candidates = [JSON.stringify({ ...j, order: old, version: j.version - 1 })];
+    if (j.version === 1) {
+      candidates.push(JSON.stringify({ ...j, order: old, version: null }));
+      const { version: _v, ...rest } = j; candidates.push(JSON.stringify({ ...rest, order: old }));
+    }
+    out.push(`    GRAPH ${BK} { ${I} ${JSONP} ?wsj${k} . } FILTER(STR(?wsj${k}) IN (${[...new Set(candidates)].map(recLit).join(', ')}))`);
+    // only its order triple changes
+    out.push(`    FILTER NOT EXISTS { VALUES (?wqs${k} ?wqp${k} ?wqo${k}) { ${P.quads.map((q) => `(${q.join(' ')})`).join(' ')} } FILTER NOT EXISTS { ?wqs${k} ?wqp${k} ?wqo${k} } FILTER(!(sameTerm(?wqs${k}, ${I}) && sameTerm(?wqp${k}, ${ORDER_P}) && sameTerm(?wqo${k}, "${j.order}"^^${INT}))) }`);
+    out.push(`    FILTER NOT EXISTS { ${I} ?wep${k} ?weo${k} . FILTER NOT EXISTS { VALUES (?wvp${k} ?wvo${k}) { ${P.quads.filter((q) => q[0] === I).map((q) => `(${q[1]} ${q[2]})`).join(' ')} } FILTER(sameTerm(?wvp${k}, ?wep${k}) && sameTerm(?wvo${k}, ?weo${k})) } FILTER(!(sameTerm(?wep${k}, ${ORDER_P}) && sameTerm(?weo${k}, "${old}"^^${INT}))) }`);
+  });
+  // no card outside the plan sits where the walk would reach: order in [lower, at + m], lower by the anchor
+  const top = at + sibs.length;
+  const listed = R.parts.map((P) => ref(P.iri)).join(', ');
+  const anchor = R.walk?.anchor;
+  let range;
+  if (anchor === null) range = `FILTER(?wyo <= ${top})`;
+  else if (anchor) {
+    out.push(`    ${ref(anchor)} ${ORDER_P} ?wao ; ${IDP} ?was .`);
+    range = `FILTER(?wyo <= ${top} && (?wyo > ?wao || (?wyo = ?wao && ${INT}(?wys) > ${INT}(?was))))`;
+  } else range = `FILTER(?wyo >= ${at} && ?wyo <= ${top})`;
+  out.push(`    FILTER NOT EXISTS { ?wy ${TYPE} ${CARD} ; ${COLP} ${COL} ; ${ORDER_P} ?wyo ; ${IDP} ?wys . FILTER(?wy NOT IN (${listed})) ${range} }`);
+  return out;
+}
+
 function compileCardWrite(c) {
   const digest = recordDigest(c);
   const OP = ref(c.opId);
@@ -1527,6 +1578,7 @@ function compileCardWrite(c) {
   if (R.indexGuard || wikiCreate) pre.push(...indexGuardClauses(R));
   (R.reads || []).forEach((r, k) => pre.push(`    GRAPH ${BK} { ${ref(r.iri)} ${VER} ?xrd${k} . }`, `    FILTER(?xrd${k} = ${r.version})`));
   if (wikiCreate) pre.push(...referenceResolveClauses(R));
+  if (R.origin?.route === 'done-nudge' && R.parts.some((P) => P.reason === 'sibling-order')) pre.push(...doneMoveClauses(R));   // #1744
   if (R.origin) originCommitClauses(c, digest, { OP, v, pre, dBinds, bDel, bIns });   // #1629 s2 — absent, nothing here runs
   pre.push(`    BIND(true AS ?ok)`);
   where.push(`  OPTIONAL {`, ...pre, `  }`);
@@ -1667,6 +1719,8 @@ function bindOriginPlan(descriptor, plan) {
   if (descriptor.route === WIKI_CREATE_ROUTE) return bindWikiCreatePlan(descriptor, plan);
   if (plan.reads?.length) fail('only a wiki-create origin plan carries reads');
   if (plan.parts.some((p) => p.reason != null && p.reason !== 'sibling-order')) fail('a reference-resolve part rides a wiki-create origin only');
+  if (descriptor.route === 'done-nudge' && plan.parts.length > 1) return bindDoneMovePlan(descriptor, plan);   // #1744
+  if (plan.walk) fail('only a done-move origin plan carries a walk');
   if (plan.counter != null) fail('an origin plan carries no counter');
   const live = (p, w) => {
     if (p.remove) fail(`${w}: an origin plan removes nothing`);
@@ -1719,10 +1773,54 @@ function bindWikiCreatePlan(descriptor, plan) {
   }
 }
 
+/** #1744 — the old order a sibling part's PRIOR quads give (the stored JSON comparison at commit proves it), or null. */
+const ORDER_P = `<https://scrumboard.local/ns#order>`;
+function priorOrderOf(P) {
+  const q = (P.prior || []).find(([s, pr]) => s === ref(P.iri) && pr === ORDER_P);
+  const m = q && /^"(-?\d+)"\^\^<http:\/\/www\.w3\.org\/2001\/XMLSchema#integer>$/.exec(q[2]);
+  return m ? Number(m[1]) : null;
+}
+/**
+ * #1744 (V2-3, F1) — a done-move's plan: the subject (into done at order `at`) plus its shifted siblings, each a
+ * `sibling-order` part. Checked here from the parts alone: every sibling is an existing card staying in the subject's
+ * column, its old order (from its prior quads) and shortId give the walk order (order asc, shortId asc), the new orders
+ * are exactly at+1 … at+m in that order, and each old order is at most its new order − 1 (no gap was jumped). The rest is
+ * proved against the STORED state at commit (doneMoveClauses): each sibling's stored JSON is its new JSON with only order and
+ * version reverted, only its order triple changes, and no unlisted card sits where the walk would have reached.
+ */
+function bindDoneMovePlan(descriptor, plan) {
+  if (plan.counter != null) fail('an origin plan carries no counter');
+  if (plan.collections?.length) fail('a card-route origin plan holds no collections');
+  const subject = `${ENTITY_IRI}${descriptor.subject}`;
+  const S = plan.parts.filter((p) => p.iri === subject);
+  if (S.length !== 1) fail(`a done-move plan holds exactly one part for its subject ${subject}`);
+  const [P] = S;
+  if (P.remove || P.expectedVersion == null) fail('the done-move subject is an existing card');
+  if (P.reason != null) fail('the done-move subject part carries no reason');
+  if (Number(P.version) !== descriptor.provenance.version) fail('origin.provenance.version must equal the card part\'s new version');
+  const sj = JSON.parse(P.json);
+  const at = Number(sj.order);
+  if (!Number.isSafeInteger(at)) fail('the done-move subject has an integer order');
+  const sibs = plan.parts.filter((p) => p.iri !== subject).map((p, k) => {
+    if (p.remove || p.expectedVersion == null) fail(`sibling ${k}: a done-move shifts existing cards only`);
+    if (p.reason !== 'sibling-order') fail(`sibling ${k}: every other part of a done-move rides as sibling-order`);
+    const j = JSON.parse(p.json);
+    if (j.column !== sj.column) fail(`sibling ${p.iri} is not in the subject's column`);
+    const old = priorOrderOf(p);
+    if (old == null) fail(`sibling ${p.iri}: its prior state carries no order`);
+    if (!Number.isSafeInteger(j.order) || !Number.isSafeInteger(j.shortId)) fail(`sibling ${p.iri}: an integer order and shortId`);
+    return { p, old, now: j.order, shortId: j.shortId };
+  }).sort((a, b) => (a.old - b.old) || (a.shortId - b.shortId));
+  sibs.forEach((x, k) => {
+    if (x.now !== at + k + 1) fail(`the walk gives sibling ${x.p.iri} order ${at + k + 1}, not ${x.now}`);
+    if (x.old > x.now - 1) fail(`sibling ${x.p.iri} was past a gap (order ${x.old}): it does not shift`);
+  });
+}
+
 /** A plan canonicalized by canonCardWrite itself, with pending and origin refused (r3 §3). */
 function canonOriginPlan(plan) {
-  obj(plan, ['parts', 'counter', 'collections', 'reads'], 'plan');
-  return canonCardWrite({ parts: plan.parts ?? [], counter: plan.counter, collections: plan.collections, reads: plan.reads }, { origin: true });
+  obj(plan, ['parts', 'counter', 'collections', 'reads', 'walk'], 'plan');
+  return canonCardWrite({ parts: plan.parts ?? [], counter: plan.counter, collections: plan.collections, reads: plan.reads, walk: plan.walk }, { origin: true });
 }
 
 /**
@@ -1769,7 +1867,8 @@ export function admitStoredOriginPlan(descriptor, plan) {
     rStr(p.json, `${w}.json`);
   };
   const ordered = (list, w) => list.forEach((p, k) => { if (k && !(list[k - 1].iri < p.iri)) fail(`${w}[${k}] is out of iri order`); });
-  keys(plan, ['parts', 'counter'], ['collections', 'reads'], 'plan');
+  keys(plan, ['parts', 'counter'], ['collections', 'reads', 'walk'], 'plan');
+  if (plan.walk != null) { keys(plan.walk, [], ['anchor'], 'plan.walk'); if (plan.walk.anchor != null) checkIri(plan.walk.anchor, 'plan.walk.anchor'); }
   if (plan.counter != null) { keys(plan.counter, ['expected', 'next'], [], 'plan.counter'); int(plan.counter.expected, 'plan.counter.expected'); int(plan.counter.next, 'plan.counter.next'); }
   if (plan.reads != null) { if (!Array.isArray(plan.reads) || !plan.reads.length) fail('plan.reads, when present, is a non-empty array'); plan.reads.forEach((r, k) => { keys(r, ['iri', 'version'], [], `plan.reads[${k}]`); checkIri(r.iri, `plan.reads[${k}].iri`); int(r.version, `plan.reads[${k}].version`); if (k && !(plan.reads[k - 1].iri < r.iri)) fail(`plan.reads[${k}] is out of iri order`); }); }
   if (!Array.isArray(plan.parts)) fail('plan.parts is an array');
@@ -1824,7 +1923,7 @@ export function admitStoredOriginPlan(descriptor, plan) {
   const cardPart = (p) => ({ iri: p.iri, expectedVersion: p.expectedVersion, version: p.version, quads: p.quads, prior: p.prior, json: p.json, ...(p.reason != null ? { reason: p.reason } : {}) });
   const collPart = (p) => ({ collection: p.collection, iri: p.iri, expectedVersion: p.expectedVersion, version: p.version, quads: p.quads, prior: p.prior, json: p.json,
     ...(p.unique ? { unique: p.unique.map((u) => ({ all: u.all.map((a) => ({ predicate: a.predicate, value: a.value })) })) } : {}), ...(p.requires ? { requires: p.requires } : {}) });
-  return { parts: plan.parts.map(cardPart), counter: plan.counter, ...(plan.collections ? { collections: plan.collections.map(collPart) } : {}), ...(plan.reads ? { reads: plan.reads.map((r) => ({ iri: r.iri, version: r.version })) } : {}) };
+  return { parts: plan.parts.map(cardPart), counter: plan.counter, ...(plan.collections ? { collections: plan.collections.map(collPart) } : {}), ...(plan.reads ? { reads: plan.reads.map((r) => ({ iri: r.iri, version: r.version })) } : {}), ...(plan.walk ? { walk: { ...plan.walk } } : {}) };
 }
 
 function canonOriginPrepare(i, common) {
@@ -1843,9 +1942,9 @@ function canonOriginCommit(i, record, common) {
   return originCommitRecord(descriptor, record, occurredAt);
 }
 /** The canonical record of an origin commit: the plan's own fields, then the origin (descriptor + occurredAt). */
-const originCommitRecord = (descriptor, plan, occurredAt) => ({ parts: plan.parts, counter: plan.counter, ...(plan.collections?.length ? { collections: plan.collections } : {}), ...(plan.reads?.length ? { reads: plan.reads } : {}), origin: { ...descriptor, occurredAt } });
+const originCommitRecord = (descriptor, plan, occurredAt) => ({ parts: plan.parts, counter: plan.counter, ...(plan.collections?.length ? { collections: plan.collections } : {}), ...(plan.reads?.length ? { reads: plan.reads } : {}), ...(plan.walk ? { walk: plan.walk } : {}), origin: { ...descriptor, occurredAt } });
 /** The plan half of an origin commit's record: what planDigest binds. */
-const originPlanOf = (record) => ({ parts: record.parts, counter: record.counter, ...(record.collections?.length ? { collections: record.collections } : {}), ...(record.reads?.length ? { reads: record.reads } : {}) });
+const originPlanOf = (record) => ({ parts: record.parts, counter: record.counter, ...(record.collections?.length ? { collections: record.collections } : {}), ...(record.reads?.length ? { reads: record.reads } : {}), ...(record.walk ? { walk: record.walk } : {}) });
 
 /**
  * r3 §2a.5a: the digest of the origin commit RECONSTRUCTED from stored canonical parts — the descriptor, the plan and the

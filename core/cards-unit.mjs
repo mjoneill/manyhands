@@ -169,7 +169,7 @@ export function createCardsUnit({ client, actorIri = (who) => `https://scrumboar
    * reconciled by durableUpdate under the same opId, never re-prepared under a new key (r2 R-A2). Returns
    * {outcome:'APPLIED', mutationId}; PRECONDITION_FAILED/REJECTED throw CardWriteConflict; anything else CardsUnavailable.
    */
-  async function commitOrigin(cards, nextShortId, { describe, collections = [], create = false, decorate = (parts) => parts, reads = [], afterPrepare = null } = {}) {
+  async function commitOrigin(cards, nextShortId, { describe, collections = [], create = false, decorate = (parts) => parts, reads = [], walk = null, afterPrepare = null } = {}) {
     if (!byId || uncertain) throw new CardsUnavailable('the card cache is not current');
     // #1744 — a `create` origin (wiki-create) carries its counter advance and EVERY card naming the new shortId (the
     // compiler's index guard requires exactly that set); any other origin still advances no counter
@@ -178,7 +178,7 @@ export function createCardsUnit({ client, actorIri = (who) => `https://scrumboar
     if (p0.counter && !create) throw new CardWriteConflict('REJECTED: an origin write advances no shortId counter (#1629 s3)');
     const parts = decorate([...p0.parts].sort((a, b) => (a.iri < b.iri ? -1 : a.iri > b.iri ? 1 : 0)));
     const descriptor = describe(parts);
-    const originPlan = { parts, ...(p0.counter ? { counter: p0.counter } : {}), ...(collections.length ? { collections } : {}), ...(reads.length ? { reads } : {}) };
+    const originPlan = { parts, ...(p0.counter ? { counter: p0.counter } : {}), ...(collections.length ? { collections } : {}), ...(reads.length ? { reads } : {}), ...(walk && parts.some((x) => x.reason === 'sibling-order') ? { walk } : {}) };
     const actor = actorIri(descriptor.originActor);
     const send = async (intent) => {
       let r;
