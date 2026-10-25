@@ -691,11 +691,11 @@ for (const [what, pre, edit] of [
 
 // ── C: the compiler, fed hand-built wiki-create origin plans ──
 /** Build a valid wiki-create origin from the EXISTING cards unit's plan: a new card #N plus every C12 re-projection part. */
-async function wikiCreateOrigin(s, requestId, { title = 'Hand-built page' } = {}) {
+async function wikiCreateOrigin(s, requestId, { title = 'Hand-built page', cardId: forcedId = null } = {}) {
   const u = createCardsUnit({ client: s.gc, mintId: () => crypto.randomUUID() });
   await u.load();
   const snap = u.snapshot();
-  const key = keyOf(requestId), mid = mutationIdOf(key), cardId = mutationIdOf(`${mid}:card`);
+  const key = keyOf(requestId), mid = mutationIdOf(key), cardId = forcedId ?? mutationIdOf(`${mid}:card`);
   const req = { title, body: '', createdBy: 'ada' };
   const at = '2026-10-25T03:00:00.000Z';   // F4 (b): the plan's own frozen timestamps
   const card = { version: 1, id: cardId, shortId: snap.nextShortId, title, description: '', type: 'reference', assignees: ['unassigned'], labels: [], for: '', priority: null, column: 'backlog', order: 0, createdAt: at, updatedAt: at, createdBy: 'ada', relationships: { relatedTo: [], blockedBy: [], supersedes: [], derivedFrom: [] }, claimedBy: null, claimedAt: null };
@@ -977,6 +977,108 @@ test('#1744 (E7) a hand-built done-nudge with a SURPLUS sibling (a done card pas
     const extra = u.plan(u.snapshot().cards.map((c) => (c.id === sibs[1] ? { ...c, order: 10, version: c.version + 1 } : c)), null).parts.find((x) => x.iri === cardIriOf(sibs[1]));
     o.plan.parts = [...o.plan.parts, { ...extra, reason: 'sibling-order' }].sort((a, b) => (a.iri < b.iri ? -1 : a.iri > b.iri ? 1 : 0));
     await expectRefused(s, o, () => doneNudgeOrigin(s, 3, 'req-1744-e7-surplus-ctl'), 'a surplus sibling');
+  });
+});
+
+// ── r3 (review 46387, reproduced 46391): forgeries the first two row sets admitted, and guards no row reached ──
+/** a world where #1 names the NEXT shortId as a STRUCTURED reference (relatedTo), so its stored projection holds an edge into the
+ *  unresolved node: the shape C1's prose-mention world never has (finding 1) */
+async function sWorld(body) {
+  await world('off', async (s) => {
+    const u = createCardsUnit({ client: s.gc, mintId: () => crypto.randomUUID() }); await u.load();
+    const snap = u.snapshot(); const c1 = snap.cards.find((c) => c.id === 'uuid-1');
+    c1.relationships = { ...(c1.relationships || {}), relatedTo: [...((c1.relationships || {}).relatedTo || []), snap.nextShortId] };
+    assert.equal((await u.commit(snap.cards, snap.nextShortId, { actor: 'ada' })).outcome, 'APPLIED', 'PRECONDITION: #1 relatedTo the next shortId (structured)');
+    assert.deepEqual(await relEdges(s, 'uuid-1', 'relatedTo'), [`${UNRESOLVED}${snap.nextShortId}`], 'PRECONDITION: the edge points at the unresolved node');
+    await body(s);
+  });
+}
+test('#1744 (C3 CONTROL, r3) a hand-built VALID wiki-create resolving a STRUCTURED reference is admitted, and the edge MOVES (none left at the unresolved node)', T, async () => {
+  await sWorld(async (s) => {
+    const o = await wikiCreateOrigin(s, 'req-1744-c3');
+    const r = await submit(s, o);
+    assert.equal(r.prep.outcome, 'APPLIED', `prepare admitted (${JSON.stringify(r.prep).slice(0, 240)})`);
+    assert.equal(r.commit.outcome, 'APPLIED', `commit admitted (${JSON.stringify(r.commit).slice(0, 240)})`);
+    assert.deepEqual(await relEdges(s, 'uuid-1', 'relatedTo'), [cardIriOf(o.cardId)], 'the edge points at the new card, and only there');
+  });
+});
+test('#1744 (C3, r3, finding 1) a reference-resolve part that KEEPS the stale unresolved edge beside the resolved one is REFUSED, no effect', T, async () => {
+  await sWorld(async (s) => {
+    const o = await wikiCreateOrigin(s, 'req-1744-c3-stale');
+    const p = o.plan.parts.find((x) => x.reason === 'reference-resolve' && x.iri === cardIriOf('uuid-1'));
+    assert.ok(p, 'PRECONDITION: #1 rides as reference-resolve');
+    const stale = p.prior.filter((q) => q[0].value === p.iri && q[2].value === `${UNRESOLVED}${o.shortId}`);
+    assert.equal(stale.length, 1, 'PRECONDITION: the stored projection has exactly one edge into the unresolved node');
+    p.quads = [...p.quads, ...stale];
+    await expectRefused(s, o, () => wikiCreateOrigin(s, 'req-1744-c3-stale-ctl'), 'the stale unresolved edge kept');
+  });
+});
+test('#1744 (C1, r3, S17) a hand-built wiki-create whose card id is NOT the derived one, CONSISTENTLY (part, provenance and JSON) is REFUSED, no effect', T, async () => {
+  await cWorld(async (s) => {
+    const forged = 'uuid-not-derived-r3';
+    const o = await wikiCreateOrigin(s, 'req-1744-c1-s17', { cardId: forged });
+    const sp = o.plan.parts.find((x) => x.iri === cardIriOf(forged));
+    assert.ok(sp && JSON.parse(sp.json).id === forged && o.descriptor.provenance.cardId === forged, 'PRECONDITION: the non-derived id is used everywhere, so only the derivation check can refuse it');
+    await expectRefused(s, o, () => wikiCreateOrigin(s, 'req-1744-c1-s17-ctl'), 'a consistently non-derived card id');
+  });
+});
+test('#1744 (E7, r3, finding 2) a hand-built done-nudge whose sibling part DROPS one of its CHILD triples (a blocker node) is REFUSED, no effect', T, async () => {
+  await world('off', async (s) => {
+    await s.start(); const sibs = await doneColumn(s, [4]);
+    const c = (await s.call('GET', `/api/cards/${sibs[0]}`)).json;
+    const b = await s.call('PATCH', `/api/cards/${sibs[0]}`, { blockers: [{ anyHuman: true, status: 'open' }], ifVersion: c.version, by: 'ada' });
+    assert.equal(b.status, 200, `PRECONDITION: blocker added (${b.status} ${b.text.slice(0, 200)})`);
+    const o = await doneNudgeOrigin(s, 3, 'req-1744-e7-child');
+    const p = o.plan.parts.find((x) => x.iri === cardIriOf(sibs[0]));
+    assert.ok(p && p.reason === 'sibling-order', 'PRECONDITION: the blocked sibling shifts');
+    const child = p.quads.filter((q) => q[0].value.startsWith(`${p.iri}/blocker/`));
+    assert.ok(child.length > 1, `PRECONDITION: the sibling projects a blocker node with several triples (${child.length})`);
+    const drop = child.find((q) => q[1].value.endsWith('blockedByAnyHuman')) || child[0];
+    p.quads = p.quads.filter((q) => q !== drop);
+    await expectRefused(s, o, () => doneNudgeOrigin(s, 3, 'req-1744-e7-child-ctl'), 'a sibling child triple dropped');
+  });
+});
+/** a hand-built DELETE of #1 (which #2 names) as the cards unit plans it: the removed card plus every namer re-projected */
+async function deleteOneIntent(s, tag) {
+  const u = createCardsUnit({ client: s.gc, mintId: () => crypto.randomUUID() }); await u.load();
+  const snap = u.snapshot();
+  const p = u.plan(snap.cards.filter((c) => c.id !== 'uuid-1'), snap.nextShortId, { allNamers: true });
+  return { kind: 'card.write', opId: `urn:ex:op/test/s4-1744-del-${tag}-${process.pid}`, actor: 'https://scrumboard.local/person/ada', parts: p.parts, ...(p.counter ? { counter: p.counter } : {}), indexGuard: true };
+}
+test('#1744 (R5, r3, S16) a hand-built index-guarded DELETE of #1 that OMITS a card naming it (#2) is REFUSED, no effect; the same delete with #2 is admitted', T, async () => {
+  await world('off', async (s) => {
+    const full = await deleteOneIntent(s, 'probe');
+    assert.ok(full.parts.some((x) => x.remove && x.iri === cardIriOf('uuid-1')), 'PRECONDITION: the plan removes #1');
+    assert.ok(full.parts.some((x) => !x.remove && x.iri === cardIriOf('uuid-2')), 'PRECONDITION: #2 (which names #1) is re-projected in the same write');
+    const forged = await deleteOneIntent(s, 'forged');
+    forged.parts = forged.parts.filter((x) => x.iri !== cardIriOf('uuid-2'));
+    const e0 = await effects(s);
+    let r; try { r = await durableUpdate(s.gc, forged); } catch (e) { assert.fail(`the compiler CRASHED instead of refusing (${e?.name}: ${String(e?.message || e).slice(0, 200)})`); }
+    assert.ok(REFUSAL.has(r.outcome), `refused (${JSON.stringify(r).slice(0, 240)})`);
+    assert.deepEqual(await effects(s), e0, 'no effect: #1 is still live');
+    // the control AFTER the refusal (it deletes #1): the same shape, unforged, is admitted, so the refusal above can fail
+    const ctl = await durableUpdate(s.gc, await deleteOneIntent(s, 'ctl'));
+    assert.equal(ctl.outcome, 'APPLIED', `CONTROL: the unforged delete is admitted (${JSON.stringify(ctl).slice(0, 240)})`);
+    await assertIndexComplete(s, 'after the admitted delete');
+  });
+});
+test('#1744 (R6, r3, finding 4) a coverage node TRIMMED CONSISTENTLY (a name, its count, sum and list removed; digest intact) lets no create omit that referrer: REFUSED, no effect', T, async () => {
+  await cWorld(async (s) => {
+    const o = await wikiCreateOrigin(s, 'req-1744-r6');
+    const N = o.shortId, cov = `<${IX.card('uuid-1')}>`;
+    const get = async (p) => (await s.q(`SELECT ?o WHERE { GRAPH <${BK}> { ${cov} <${p}> ?o } }`)).map((r) => r.o.value);
+    const names = (await get(IX.namesShortId)).map(Number).sort((a, b) => a - b);
+    assert.ok(names.includes(N), `PRECONDITION: the index records that #1 names #${N} (${JSON.stringify(names)})`);
+    const [cnt] = await get(`${IX.ns}namesCount`), [sum] = await get(`${IX.ns}namesSum`), [list] = await get(`${IX.ns}namesList`);
+    assert.ok(cnt !== undefined && sum !== undefined && list !== undefined, 'PRECONDITION: the node has count, sum and list');
+    const kept = names.filter((n) => n !== N);
+    const I = (n) => `"${n}"^^<${XSD}integer>`;
+    await s.xu(`DELETE DATA { GRAPH <${BK}> { ${cov} <${IX.namesShortId}> ${I(N)} ; <${IX.ns}namesCount> ${I(cnt)} ; <${IX.ns}namesSum> ${I(sum)} ; <${IX.ns}namesList> ${JSON.stringify(list)} } } ;
+      INSERT DATA { GRAPH <${BK}> { ${cov} <${IX.ns}namesCount> ${I(kept.length)} ; <${IX.ns}namesSum> ${I(kept.reduce((a, b) => a + b, 0))} ; <${IX.ns}namesList> ${JSON.stringify(kept.join(','))} } }`, 'trim');
+    const after = (await get(IX.namesShortId)).map(Number).sort((a, b) => a - b);
+    assert.deepEqual(after, kept, 'PRECONDITION: the trim applied, and the node is internally consistent');
+    o.plan.parts = o.plan.parts.filter((x) => x.iri !== cardIriOf('uuid-1'));   // #1 still names #N in its JSON; only the index forgot
+    await expectRefused(s, o, () => wikiCreateOrigin(s, 'req-1744-r6-ctl'), 'a referrer omitted under a consistently trimmed index');
   });
 });
 
