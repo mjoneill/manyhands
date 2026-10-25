@@ -13439,7 +13439,7 @@ if (CARDS_UNIT) {
     let full;
     try {
       full = await verifyIndex({ query: async (q) => { const r = await vc.query(q); if (!r.ok) throw new Error(r.reason); return r.rows; },
-        health: async () => (await fetch(`${process.env.SCRUM_GRAPH_EXECUTOR_URL}/health`)).json() });
+        health: async () => (await fetch(`${process.env.SCRUM_GRAPH_EXECUTOR_URL}/health`)).json(), dataset: process.env.SCRUM_GRAPH_DATASET_ID });
     } catch (e) { full = { status: 'UNAVAILABLE', bad: [String(e?.message || e)] }; }
     if (full.status !== 'EXACT' || full.marker.length !== 1 || full.marker[0] !== 'true') {
       const why = full.status === 'EXACT' ? `the completion marker reads ${JSON.stringify(full.marker)}` : full.status === 'VIOLATED' ? `${full.bad.length} violation(s) of the full JSON check: ${full.bad.slice(0, 3).join('; ')}` : full.status === 'UNSTABLE' ? 'the store never held still for a consistent full check' : `the full check could not run: ${full.bad[0]}`;

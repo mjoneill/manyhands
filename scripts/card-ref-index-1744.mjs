@@ -23,7 +23,8 @@
  *   exit 0  COMPLETE                     the index is exact (a latched marker stays latched: exit 1, LATCHED)
  *   exit 1  LATCHED <n> violation(s)     the latch is written AND read back as false
  *   exit 2  CLOSURE UNCONFIRMED <why>    a violation was found but the latch could not be confirmed, or the executor could
- *                                        not be read: NEVER reported as fail-closed
+ *                                        not be read, or the index is exact under an ABSENT or malformed marker (index-keyed
+ *                                        writes are admitted with no marker): NEVER reported as fail-closed
  *   exit 3  UNSTABLE                     the store never held still for a consistent read; nothing judged, nothing written
  * --verify stays strictly read-only: it reports the same statuses and writes nothing.
  */
@@ -57,8 +58,12 @@ async function update(sparql, tag) {
   if (!r.ok) refuse('WRITE_FAILED', `${tag}: ${r.status} ${(await r.text()).slice(0, 200)}`);
 }
 
-const liveCards = async () => (await query(liveCardsSparql))
-  .map((b) => ({ iri: b.c.value, id: b.c.value.slice(ENTITY.length), ver: Number(b.v.value), json: b.j.value }));
+const liveCards = async () => {
+  const rows = await query(liveCardsSparql);
+  const missing = rows.filter((b) => !b.v || !b.j).map((b) => b.c.value.slice(ENTITY.length));
+  if (missing.length) refuse('CARD_INCOMPLETE', `${missing.length} live card(s) without a version or stored JSON: ${missing.slice(0, 5).join(', ')}`);
+  return rows.map((b) => ({ iri: b.c.value, id: b.c.value.slice(ENTITY.length), ver: Number(b.v.value), json: b.j.value }));
+};
 
 async function main() {
   if (!base || !dataset) refuse('USAGE', 'node scripts/card-ref-index-1744.mjs --executor <url> --dataset <id> --backfill|--verify|--verify-and-latch');
@@ -83,7 +88,7 @@ WHERE {\n  ${guard}\n  OPTIONAL { VALUES ?s { ${subjects} } GRAPH <${BK}> { ?s ?
       refuse('CARDS_CHANGED', 'a card changed during the backfill: stop the writers and run it again (the marker stays absent)');
     }
   }
-  const v = await verifyIndex({ query, health });
+  const v = await verifyIndex({ query, health, dataset });
   if (LATCH) return latch(v);
   if (v.status === 'UNSTABLE') { console.log('UNSTABLE the store never held still for a consistent read; nothing judged'); process.exit(3); }
   const { bad, cards } = v;
@@ -100,8 +105,12 @@ async function latch(v) {
   if (v.status === 'UNSTABLE') { console.log('UNSTABLE the store never held still for a consistent read; nothing judged, nothing written'); process.exit(3); }
   if (v.status === 'EXACT') {
     if (v.marker.length === 1 && v.marker[0] === 'true') { console.log(`cards ${v.cards.length}`); console.log('COMPLETE'); process.exit(0); }
-    // an exact index under a latched (or absent) marker stays as it is: re-opening is --backfill's job, with writers stopped
-    console.log(`LATCHED the marker reads ${JSON.stringify(v.marker)}; it stays until an explicit --backfill`); process.exit(1);
+    // an exact index under a latched marker stays latched: re-opening is --backfill's job, with writers stopped
+    if (v.marker.length === 1 && v.marker[0] === 'false') { console.log(`LATCHED the marker reads ["false"]; it stays until an explicit --backfill`); process.exit(1); }
+    // an ABSENT or malformed marker is not a closure: index-keyed writes are admitted while no marker exists, and nothing
+    // here wrote one, so the closure is reported as unconfirmed, never as LATCHED
+    console.log(`CLOSURE UNCONFIRMED the index is exact but the marker reads ${JSON.stringify(v.marker)}: writes keyed to it are not confirmed closed; run --backfill with writers stopped`);
+    process.exit(2);
   }
   const reason = `${v.bad.length} violation(s) at commitSeq ${v.commitSeq}: ${v.bad.slice(0, 5).join('; ')}`.slice(0, 900);
   const at = new Date().toISOString();

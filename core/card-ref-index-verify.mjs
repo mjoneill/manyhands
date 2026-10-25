@@ -7,7 +7,12 @@
  * CONSISTENT POSITION (ruling 46781): the cards and the coverage are read at one store position. The executor's
  * commitSeq is read before and after the reads; if a compiled write moved it in between, the reads are retried, and a
  * store that never holds still for long enough answers UNSTABLE, never a corruption report. (A raw /update does not move
- * commitSeq; the index is maintained only by compiled card writes, so those are what can race it.)
+ * commitSeq; the index is maintained only by compiled card writes, so those are what can race it.) The position is the
+ * whole identity, dataset · epoch · incarnation · commitSeq, and each part must be PRESENT and well-formed: a health body
+ * that lacks one cannot prove two reads were at one position (two missing values are not equal), so it throws.
+ *
+ * CENSUS: every live Card is enumerated first, and its version, its JSON and its coverage are then each required: a card
+ * missing its metadata is a violation by name, never a card the check silently skipped.
  *
  * Pure of I/O beyond the `query` and `health` functions it is given.
  */
@@ -20,16 +25,21 @@ const ENTITY = 'https://scrumboard.local/entity/';
 const VER = 'urn:ex:ver';
 const XSD_INT = 'http://www.w3.org/2001/XMLSchema#integer';
 
-export const liveCardsSparql = `SELECT ?c ?v ?j WHERE { ?c a <${RS}Card> . GRAPH <${BK}> { ?c <${VER}> ?v ; <${RS}entityJson> ?j } }`;
+// every live Card, whether or not its metadata is present: OPTIONAL, so a card without a version or JSON is still a row
+export const liveCardsSparql = `SELECT ?c ?v ?j WHERE { ?c a <${RS}Card> . OPTIONAL { GRAPH <${BK}> { ?c <${VER}> ?v } } OPTIONAL { GRAPH <${BK}> { ?c <${RS}entityJson> ?j } } }`;
 const coverageSparql = `SELECT ?s ?p ?o WHERE { GRAPH <${BK}> { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "${CARD_REF_INDEX_NS}card/")) } }`;
 export const markerSparql = `SELECT ?v WHERE { GRAPH <${BK}> { <${CRI.marker}> <${CRI.complete}> ?v } }`;
 
 /** Every invariant violation in one consistent read, by name; [] means the index is exact. */
 function judge(cardRows, cov) {
   const bad = [];
-  const cards = cardRows.map((b) => ({ iri: b.c.value, id: b.c.value.slice(ENTITY.length), ver: Number(b.v.value), json: b.j.value }));
+  const cards = cardRows.map((b) => ({ iri: b.c.value, id: b.c.value.slice(ENTITY.length), ver: b.v ? Number(b.v.value) : undefined, json: b.j?.value }));
   const byIri = new Map();
   for (const c of cards) { if (byIri.has(c.iri)) bad.push(`card ${c.id} has more than one version or JSON`); byIri.set(c.iri, c); }
+  for (const c of cards) {
+    if (c.ver === undefined) bad.push(`card ${c.id} has no version`);
+    if (c.json === undefined) bad.push(`card ${c.id} has no stored JSON`);
+  }
   const nodes = new Map();
   for (const b of cov) {
     const n = nodes.get(b.s.value) || { versions: [], digests: [], names: [], counts: [], sums: [], lists: [], other: [] };
@@ -39,6 +49,7 @@ function judge(cardRows, cov) {
     nodes.set(b.s.value, n);
   }
   for (const c of cards) {
+    if (c.ver === undefined || c.json === undefined) continue;   // named above; its coverage cannot be judged against nothing
     const n = nodes.get(CRI.card(c.id));
     if (!n) { bad.push(`card ${c.id} has no coverage node`); continue; }
     if (n.versions.length !== 1 || n.versions[0].datatype !== XSD_INT || Number(n.versions[0].value) !== c.ver) bad.push(`card ${c.id}: indexedVersion is not exactly ${c.ver}`);
@@ -57,21 +68,37 @@ function judge(cardRows, cov) {
   return { bad, cards };
 }
 
+const DIGITS = /^\d+$/;
+/** The store position a /health body names, or a throw: every part present, single-valued and well-formed. */
+export function storePosition(h, dataset) {
+  const why = [];
+  if (!h || typeof h !== 'object') throw new Error('the executor health body is not an object');
+  if (h.markerError) why.push(`markerError ${h.markerError}`);
+  if (typeof h.datasetId !== 'string' || !h.datasetId) why.push('no datasetId');
+  else if (dataset !== undefined && h.datasetId !== dataset) why.push(`datasetId ${h.datasetId}, not ${dataset}`);
+  for (const k of ['epoch', 'commitSeq']) if (typeof h[k] !== 'string' || !DIGITS.test(h[k])) why.push(`${k} ${JSON.stringify(h[k] ?? null)} is not an integer`);
+  if (typeof h.incarnation !== 'string' || !h.incarnation || h.incarnation.startsWith('CONTRADICTORY')) why.push(`incarnation ${JSON.stringify(h.incarnation ?? null)}`);
+  if (why.length) throw new Error(`the executor health does not name one store position: ${why.join('; ')}`);
+  return { datasetId: h.datasetId, epoch: h.epoch, incarnation: h.incarnation, commitSeq: h.commitSeq };
+}
+const samePosition = (a, b) => a.datasetId === b.datasetId && a.epoch === b.epoch && a.incarnation === b.incarnation && a.commitSeq === b.commitSeq;
+
 /**
  * Verify the index at one consistent position. `query(sparql)` returns bindings (it throws on failure); `health()` returns
- * the executor's /health body. Returns { status: 'EXACT'|'VIOLATED'|'UNSTABLE', bad, cards, commitSeq, marker } where
- * `marker` is the completion marker's values as read at that position.
+ * the executor's /health body; `dataset`, when given, is the dataset the position must name. Returns
+ * { status: 'EXACT'|'VIOLATED'|'UNSTABLE', bad, cards, commitSeq, position, marker } where `marker` is the completion
+ * marker's values as read at that position. A health body that names no well-formed position THROWS (storePosition).
  */
-export async function verifyIndex({ query, health, attempts = 5 }) {
+export async function verifyIndex({ query, health, dataset, attempts = 5 }) {
   for (let i = 0; i < attempts; i++) {
-    const before = String((await health()).commitSeq);
+    const before = storePosition(await health(), dataset);
     const cardRows = await query(liveCardsSparql);
     const cov = await query(coverageSparql);
     const marker = (await query(markerSparql)).map((b) => b.v.value);
-    const after = String((await health()).commitSeq);
-    if (before !== after) continue;
+    const after = storePosition(await health(), dataset);
+    if (!samePosition(before, after)) continue;
     const { bad, cards } = judge(cardRows, cov);
-    return { status: bad.length ? 'VIOLATED' : 'EXACT', bad, cards, commitSeq: before, marker };
+    return { status: bad.length ? 'VIOLATED' : 'EXACT', bad, cards, commitSeq: before.commitSeq, position: before, marker };
   }
-  return { status: 'UNSTABLE', bad: [], cards: [], commitSeq: null, marker: [] };
+  return { status: 'UNSTABLE', bad: [], cards: [], commitSeq: null, position: null, marker: [] };
 }
