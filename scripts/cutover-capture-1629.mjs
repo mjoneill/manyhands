@@ -35,7 +35,8 @@ const REPO = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const PY = process.env.GRAPH_EXECUTOR_PYTHON || path.join(REPO, 'graph-executor', '.venv', 'bin', 'python');
 const EXECUTOR = path.join(REPO, 'graph-executor', 'executor.py');
 
-const BETWEEN_PASSES = process.env.SCRUM_CUTOVER_CAPTURE_BETWEEN_PASSES || '';   // test seam: a file appended to between the passes; unset = off
+const BETWEEN_PASSES = process.env.SCRUM_CUTOVER_CAPTURE_BETWEEN_PASSES || '';
+const DIGEST_TIMEOUT_MS = Number(process.env.SCRUM_CUTOVER_DIGEST_TIMEOUT_MS || 2 * 60 * 60 * 1000);   // 2 h by default; the source is stopped, so time is the only cost   // test seam: a file appended to between the passes; unset = off
 
 const arg = (name) => { const i = process.argv.indexOf(name); return i > 0 ? process.argv[i + 1] : undefined; };
 const refuse = (code, why) => { console.log(`REFUSED ${code} ${why}`); process.exit(1); };
@@ -91,7 +92,8 @@ const content = await new Promise((resolve) => {
   const p = spawn(PY, [EXECUTOR, '--store', store, '--port', '0', '--dataset-id', ident.datasetId, '--read-only'], { stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '', err = '', done = false;
   const finish = (v) => { if (done) return; done = true; clearTimeout(timer); p.once('exit', () => resolve(v)); if (p.exitCode !== null || p.signalCode !== null) resolve(v); else p.kill('SIGKILL'); };
-  const timer = setTimeout(() => finish({ error: `the read-only executor printed no ready line: ${err.slice(-300)}` }), 30000);
+  // two separate bounds (#1747 46635): the READY line within 30 s, then the digest within DIGEST_TIMEOUT_MS, each named honestly
+  let timer = setTimeout(() => finish({ error: `the read-only executor printed no ready line within 30 s: ${err.slice(-300)}` }), 30000);
   p.on('error', (e) => finish({ error: `the read-only executor did not start: ${e.message}` }));
   p.stderr.on('data', (d) => { err += d; });
   p.stdout.on('data', async (d) => {
@@ -99,7 +101,10 @@ const content = await new Promise((resolve) => {
     if (done || !out.includes('\n')) return;
     let port;
     try { port = JSON.parse(out.split('\n')[0]).port; } catch { return finish({ error: `the read-only executor's first line is not a ready line` }); }
-    try { finish(await contentDigest(`http://127.0.0.1:${port}`)); } catch (e) { finish({ error: e.message }); }
+    clearTimeout(timer);
+    timer = setTimeout(() => finish({ error: `the content digest did not finish within ${DIGEST_TIMEOUT_MS} ms` }), DIGEST_TIMEOUT_MS);
+    const t0 = Date.now();
+    try { const d = await contentDigest(`http://127.0.0.1:${port}`); console.error(`content digest: ${d.quads} quads in ${Date.now() - t0} ms`); finish(d); } catch (e) { finish({ error: e.message }); }
   });
 });
 if (content.error) refuse('STORE_SHAPE', `the source's content could not be digested: ${content.error}`);
