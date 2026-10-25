@@ -33,7 +33,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { HAVE_PY, PY, tmpStore, spawnExecutor, killExecutor } from './helpers/graph-executor-proc.mjs';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createGraphClient } from '../core/graph-client.mjs';
 import { postWriteId } from '../core/post-write.mjs';
 
@@ -43,6 +43,7 @@ const SKIP = HAVE_PY ? false : 'UNAVAILABLE: no python with pyoxigraph (a skip i
 const T = { skip: SKIP, timeout: 240000 };
 const DSID = 'hold-1749';
 const BK = 'urn:scrum:bookkeeping:executor';
+const RG = 'urn:ex:postseq/recovery';   // #1749 v3 A7 v2: the hold and every ReconciliationRecord live in their OWN named graph
 const P = (x) => `<urn:ex:postseq/${x}>`;
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
 const EPOCH = 'e-1749-hold';
@@ -82,10 +83,25 @@ const bk = async (x) => {
   const t = (b) => `${b.type}:${b.value}:${b.datatype || ''}`;
   return (await r.json()).results.bindings.map((b) => [t(b.s), t(b.p), t(b.o)].join(' ')).sort();
 };
+const rg = async (x) => {
+  const r = await fetch(`${x.baseUrl}/query`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/holdrg-${opN++}` }, body: `SELECT ?s ?p ?o WHERE { GRAPH <${RG}> { ?s ?p ?o } }` });
+  assert.equal(r.status, 200);
+  const t = (b) => `${b.type}:${b.value}:${b.datatype || ''}`;
+  return (await r.json()).results.bindings.map((b) => [t(b.s), t(b.p), t(b.o)].join(' ')).sort();
+};
+/** one raw /update, its status and body text (for the protection and P3 v3 rows) */
+const post = async (x, body, header = { 'x-manyhands-write-protocol': 'postseq-v1' }) => {
+  const r = await fetch(`${x.baseUrl}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/hold-post-${opN++}`, 'x-epoch': String((await health(x)).epoch), ...header }, body });
+  return { status: r.status, text: await r.text() };
+};
+const askQ = async (x, q) => {
+  const r = await fetch(`${x.baseUrl}/query`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/holdask-${opN++}` }, body: q });
+  return (await r.json()).boolean;
+};
 const isPostseq = (line) => line.startsWith('uri:urn:ex:postseq/') && !line.startsWith(`uri:${HOLD.subject} `);
 /** every value of every predicate on the hold subject, typed */
 async function holdOf(x) {
-  const r = await fetch(`${x.baseUrl}/query`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/holdr-${opN++}` }, body: `SELECT ?s ?p ?o WHERE { GRAPH <${BK}> { ?s a <${HOLD.type}> ; ?p ?o } }` });
+  const r = await fetch(`${x.baseUrl}/query`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/holdr-${opN++}` }, body: `SELECT ?s ?p ?o WHERE { GRAPH <${RG}> { ?s a <${HOLD.type}> ; ?p ?o } }` });
   assert.equal(r.status, 200);
   const rows = (await r.json()).results.bindings;
   return { subjects: [...new Set(rows.map((b) => b.s.value))], get: (p) => rows.filter((b) => b.p.value === p).map((b) => ({ value: b.o.value, datatype: b.o.datatype ?? null })) };
@@ -250,7 +266,8 @@ const holdBlock = async (x) => {
   return { datasetId: DSID, epoch: one(HOLD.epoch), incarnation: one(HOLD.incarnation), restoredCommitSeq: Number(one(HOLD.restoredCommitSeq)), restoredHighWater: Number(one(HOLD.restoredHighWater)) };
 };
 const reconcileFile = (dir, R, G, hold, extra = {}) => {
-  const f = path.join(fs.mkdtempSync(path.join(path.dirname(dir), 'recon-')), 'reconcile.json');
+  const d = fs.mkdtempSync(path.join(path.dirname(dir), 'recon-')); owned.stores.add(d);   // removed by after(), like the stores
+  const f = path.join(d, 'reconcile.json');
   fs.writeFileSync(f, JSON.stringify({ nextPostSeq: R, declaredGap: G, approvedBy: APPROVER, approvalRef: 'decision:00000000-0000-4000-8000-0000000017a9', evidence: [], hold, ...extra }));
   return f;
 };
@@ -259,7 +276,7 @@ const refusedStart = async (dir, file, code, what) => {
   await assert.rejects(reconcileStart(dir, file), (e) => new RegExp(`\\b${code}\\b`).test(String(e?.stderr ?? e?.message)), `${what}: the maintenance start refuses with ${code}`);
 };
 const recordsOf = async (x) => {
-  const r = await fetch(`${x.baseUrl}/query`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/holdrec-${opN++}` }, body: `SELECT ?r ?ref WHERE { GRAPH <${BK}> { ?r a <${RECONCILE.record}> ; <${RECONCILE.approvalRef}> ?ref } }` });
+  const r = await fetch(`${x.baseUrl}/query`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/holdrec-${opN++}` }, body: `SELECT ?r ?ref WHERE { GRAPH <${RG}> { ?r a <${RECONCILE.record}> ; <${RECONCILE.approvalRef}> ?ref } }` });
   return (await r.json()).results.bindings.map((b) => [b.r.value, b.ref.value]);
 };
 
@@ -299,7 +316,7 @@ test('#1749 (B5c) a hold naming ANOTHER incarnation (a copied lineage), planted 
   await stopX(x);
   // r2 (review 46506): the lineage is rewritten in the STOPPED store, as a hold copied from another store's promotion would read;
   // an /update cannot do it, because the hold is protected (B5e)
-  plantOffline(s.backup, `DELETE { GRAPH <${BK}> { <${HOLD.subject}> <${HOLD.incarnation}> ?i } } INSERT { GRAPH <${BK}> { <${HOLD.subject}> <${HOLD.incarnation}> "another-incarnation" } } WHERE { GRAPH <${BK}> { <${HOLD.subject}> <${HOLD.incarnation}> ?i } }`);
+  plantOffline(s.backup, `DELETE { GRAPH <${RG}> { <${HOLD.subject}> <${HOLD.incarnation}> ?i } } INSERT { GRAPH <${RG}> { <${HOLD.subject}> <${HOLD.incarnation}> "another-incarnation" } } WHERE { GRAPH <${RG}> { <${HOLD.subject}> <${HOLD.incarnation}> ?i } }`);
   x = await start(s.backup);
   let hb;
   try {
@@ -319,7 +336,7 @@ test('#1749 (H7b) a re-promotion keeps the PRIOR hold\'s high-water when it exce
   const h1 = await holdOf(x); const firstEpoch = String((await health(x)).epoch);
   assert.deepEqual(h1.get(HOLD.restoredHighWater), [{ value: '101', datatype: `${XSD}integer` }], 'PRECONDITION: the first hold recomputed 101');
   await stopX(x);
-  plantOffline(s.backup, `DELETE { GRAPH <${BK}> { <${HOLD.subject}> <${HOLD.restoredHighWater}> ?h } } INSERT { GRAPH <${BK}> { <${HOLD.subject}> <${HOLD.restoredHighWater}> "150"^^<${XSD}integer> } } WHERE { GRAPH <${BK}> { <${HOLD.subject}> <${HOLD.restoredHighWater}> ?h } }`);
+  plantOffline(s.backup, `DELETE { GRAPH <${RG}> { <${HOLD.subject}> <${HOLD.restoredHighWater}> ?h } } INSERT { GRAPH <${RG}> { <${HOLD.subject}> <${HOLD.restoredHighWater}> "150"^^<${XSD}integer> } } WHERE { GRAPH <${RG}> { <${HOLD.subject}> <${HOLD.restoredHighWater}> ?h } }`);
   const second = store('hold-backup-max-');
   fs.cpSync(s.backup, second, { recursive: true });
   x = await start(second, ['--promote-epoch']);
@@ -453,8 +470,8 @@ test('#1749 (B5h, r3) a ReconciliationRecord is PROTECTED too: an /update that d
     assert.equal(recs0.length, 1, 'PRECONDITION: one record');
     const epoch = String((await health(x)).epoch);
     for (const [what, body] of [
-      ['a delete', `DELETE WHERE { GRAPH <${BK}> { <${recs0[0][0]}> ?p ?o } }`],
-      ['a rewrite of its approvalRef', `DELETE { GRAPH <${BK}> { <${recs0[0][0]}> <${RECONCILE.approvalRef}> ?v } } INSERT { GRAPH <${BK}> { <${recs0[0][0]}> <${RECONCILE.approvalRef}> "decision:forged" } } WHERE { GRAPH <${BK}> { <${recs0[0][0]}> <${RECONCILE.approvalRef}> ?v } }`],
+      ['a delete', `DELETE WHERE { GRAPH <${RG}> { <${recs0[0][0]}> ?p ?o } }`],
+      ['a rewrite of its approvalRef', `DELETE { GRAPH <${RG}> { <${recs0[0][0]}> <${RECONCILE.approvalRef}> ?v } } INSERT { GRAPH <${RG}> { <${recs0[0][0]}> <${RECONCILE.approvalRef}> "decision:forged" } } WHERE { GRAPH <${RG}> { <${recs0[0][0]}> <${RECONCILE.approvalRef}> ?v } }`],
     ]) {
       const r = await fetch(`${x.baseUrl}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/rec-tamper-${opN++}`, 'x-epoch': epoch, 'x-manyhands-write-protocol': 'postseq-v1' }, body });
       const t = await r.text();
@@ -472,8 +489,8 @@ test('#1749 (B5e, r2) an update that deletes OR rewrites the hold is refused eve
     const epoch = String((await health(x)).epoch);
     const h0 = await holdOf(x);
     for (const [what, body] of [
-      ['a delete', `DELETE WHERE { GRAPH <${BK}> { <${HOLD.subject}> ?p ?o } }`],
-      ['a rewrite of its high-water', `DELETE { GRAPH <${BK}> { <${HOLD.subject}> <${HOLD.restoredHighWater}> ?h } } INSERT { GRAPH <${BK}> { <${HOLD.subject}> <${HOLD.restoredHighWater}> "1"^^<${XSD}integer> } } WHERE { GRAPH <${BK}> { <${HOLD.subject}> <${HOLD.restoredHighWater}> ?h } }`],
+      ['a delete', `DELETE WHERE { GRAPH <${RG}> { <${HOLD.subject}> ?p ?o } }`],
+      ['a rewrite of its high-water', `DELETE { GRAPH <${RG}> { <${HOLD.subject}> <${HOLD.restoredHighWater}> ?h } } INSERT { GRAPH <${RG}> { <${HOLD.subject}> <${HOLD.restoredHighWater}> "1"^^<${XSD}integer> } } WHERE { GRAPH <${RG}> { <${HOLD.subject}> <${HOLD.restoredHighWater}> ?h } }`],
     ]) {
       for (const header of [{ 'x-manyhands-write-protocol': 'postseq-v1' }, {}]) {
         const r = await fetch(`${x.baseUrl}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/hold-tamper-${opN++}`, 'x-epoch': epoch, ...header }, body });
@@ -486,4 +503,116 @@ test('#1749 (B5e, r2) an update that deletes OR rewrites the hold is refused eve
     assert.deepEqual((await holdOf(x)).subjects, [HOLD.subject], 'the hold is intact');
     assert.ok(heldBy(await client(x).update(intention([ordinary('h-after-tamper')]))), 'and allocation is still refused by code');
   } finally { await stopX(x); }
+});
+
+// ── r4: contract v3 A7 v2 with P1, P2, P3 v3 and P4 (refrozen at card v58) ──
+// P1: protection is by EFFECT on the recovery graph, on EVERY store; graph-wide and computed-target forms are caught by what they do
+const GRAPH_WIDE = [
+  ['DROP ALL', 'DROP ALL'],
+  ['CLEAR NAMED', 'CLEAR NAMED'],
+  ['MOVE the recovery graph elsewhere', `MOVE <${RG}> TO <urn:ex:elsewhere>`],
+  ['a computed-target DELETE', 'DELETE WHERE { GRAPH ?g { ?s ?p ?o } }'],
+];
+test('#1749 (B5m, r4, P1) on a HELD store, graph-wide and computed-target updates are refused 409 HOLD_PROTECTED; the recovery graph byte-unchanged', T, async () => {
+  const s = await scenario();
+  const x = await start(s.backup, ['--promote-epoch']);
+  try {
+    const g0 = await rg(x);
+    assert.ok(g0.length > 0, 'PRECONDITION: the recovery graph holds the hold');
+    for (const [what, body] of GRAPH_WIDE) {
+      const r = await post(x, body);
+      assert.equal(r.status, 409, `${what}: 409 (${r.status} ${r.text.slice(0, 160)})`);
+      assert.match(r.text, /HOLD_PROTECTED/, `${what}: named HOLD_PROTECTED`);
+      assert.deepEqual(await rg(x), g0, `${what}: the recovery graph is byte-unchanged`);
+    }
+  } finally { await stopX(x); }
+});
+test('#1749 (B5n, r4, A7 v2) on an UNHELD store (never promoted), an UNTYPED quad, a planted hold, or a planted record INTO the recovery graph is refused 409, nothing applied', T, async () => {
+  const dir = store('hold-unheld-');
+  const x = await start(dir, ['--create']);
+  try {
+    assert.deepEqual(await rg(x), [], 'PRECONDITION: the recovery graph is empty');
+    const h0 = await health(x);
+    for (const [what, body] of [
+      ['an untyped quad', `INSERT DATA { GRAPH <${RG}> { <urn:ex:anything> <urn:ex:p> "x" } }`],
+      ['a hold planted by /update', `INSERT DATA { GRAPH <${RG}> { <${HOLD.subject}> a <${HOLD.type}> ; <${HOLD.epoch}> "e" } }`],
+      ['a record planted by /update', `INSERT DATA { GRAPH <${RG}> { <urn:ex:postseq/reconciliation/forged> a <${RECONCILE.record}> } }`],
+    ]) {
+      for (const header of [{ 'x-manyhands-write-protocol': 'postseq-v1' }, {}]) {
+        const r = await post(x, body, header);
+        assert.equal(r.status, 409, `${what} (${Object.keys(header).length ? 'with' : 'without'} the header): 409 (${r.status} ${r.text.slice(0, 160)})`);
+        assert.match(r.text, /HOLD_PROTECTED/, `${what}: named HOLD_PROTECTED`);
+      }
+    }
+    assert.deepEqual(await rg(x), [], 'the recovery graph is still empty');
+    assert.deepEqual([(await health(x)).updates], [h0.updates], 'nothing was applied');
+  } finally { await stopX(x); }
+});
+test('#1749 (B5o, r4, P1 authoritative graph) a hold-SHAPED quad in ANOTHER graph is inert: it is admitted, and it neither holds allocation nor satisfies a reader', T, async () => {
+  const dir = store('hold-stray-');
+  const x = await start(dir, ['--create']);
+  try {
+    await raw(x, `INSERT DATA { GRAPH <${BK}> { ${allocatorTriples(100)} } }`);
+    const r = await post(x, `INSERT DATA { GRAPH <${BK}> { <${HOLD.subject}> a <${HOLD.type}> ; <${HOLD.epoch}> "${String((await health(x)).epoch)}" } }`);
+    assert.equal(r.status, 200, `a stray hold-shaped quad outside the recovery graph is admitted (${r.status} ${r.text.slice(0, 160)})`);
+    assert.deepEqual((await holdOf(x)).subjects, [], 'no hold is read (readers read only the recovery graph)');
+    assert.equal((await client(x).update(intention([ordinary('h-stray')]))).outcome, 'APPLIED', 'and allocation is NOT held by it');
+  } finally { await stopX(x); }
+});
+// P3 v3: every /update on every store runs body + "\n;\n" + guard ONCE, with no retry. Stated change: a body with no operation is a
+// parse error (500), nothing applied. A dangling-clause body is an honest 500 with nothing applied (never fused into the guard).
+test('#1749 (B5p, r4, P3 v3) on an UNHELD store: an ordinary body applies; comment-only and prologue-only bodies, and the three fusion shapes, are a 500 with NOTHING applied', T, async () => {
+  const dir = store('hold-p3-');
+  const x = await start(dir, ['--create']);
+  try {
+    const ok = await post(x, 'INSERT DATA { <urn:ex:p3/ok> <urn:ex:p> "x" }', {});
+    assert.equal(ok.status, 200, `CONTROL: an ordinary body applies (${ok.status} ${ok.text.slice(0, 160)})`);
+    await post(x, 'INSERT DATA { <urn:ex:p3/keep> <urn:ex:p> "x" }', {});
+    for (const [what, body, mark] of [
+      ['comment-only (the stated change)', '# nothing to do', null],
+      ['prologue-only (the stated change)', 'PREFIX ex: <urn:ex:>', null],
+      ['a DELETE template with no WHERE', 'DELETE { <urn:ex:p3/keep> <urn:ex:p> "x" }', null],
+      ['an INSERT, then a dangling DELETE', 'INSERT DATA { <urn:ex:p3/t9> <urn:ex:p> "x" } ; DELETE { <urn:ex:p3/keep> <urn:ex:p> "x" }', 'urn:ex:p3/t9'],
+      ['an INSERT, then a dangling WITH', 'INSERT DATA { <urn:ex:p3/t10> <urn:ex:p> "x" } ; WITH <urn:ex:g>', 'urn:ex:p3/t10'],
+    ]) {
+      const u0 = (await health(x)).updates;
+      const r = await post(x, body, {});
+      assert.equal(r.status, 500, `${what}: a 500, never a success (${r.status} ${r.text.slice(0, 160)})`);
+      assert.equal((await health(x)).updates, u0, `${what}: nothing applied`);
+      if (mark) assert.equal(await askQ(x, `ASK { <${mark}> ?p ?o }`), false, `${what}: its valid half was NOT applied`);
+    }
+    assert.equal(await askQ(x, 'ASK { <urn:ex:p3/keep> ?p ?o }'), true, 'and nothing was deleted');
+  } finally { await stopX(x); }
+});
+// P4: a 50,000-triple INSERT DATA on an UNHELD store, this build vs the base (8edd075), median of 5; within 10% or 50 ms, whichever is larger
+const BASE_REF = '8edd075';
+const startBase = (dir, extra) => new Promise((resolve, reject) => {
+  const src = spawnSync('git', ['show', `${BASE_REF}:graph-executor/executor.py`], { encoding: 'utf8', cwd: path.dirname(fileURLToPath(import.meta.url)) });
+  if (src.status !== 0) return reject(new Error(`PRECONDITION: git show ${BASE_REF} (${src.stderr})`));
+  const f = path.join(fs.mkdtempSync(path.join(path.dirname(dir), 'base-exec-')), 'executor.py'); owned.stores.add(path.dirname(f));
+  fs.writeFileSync(f, src.stdout);
+  const p = spawn(PY, [f, '--store', dir, '--port', '0', '--dataset-id', DSID, ...extra], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = '';
+  p.stdout.on('data', (d) => { out += d; if (out.includes('\n')) { try { const ready = JSON.parse(out.split('\n')[0]); const x = { proc: p, port: ready.port, baseUrl: `http://127.0.0.1:${ready.port}` }; owned.children.add(x); resolve(x); } catch (e) { reject(e); } } });
+  p.on('exit', (code) => reject(new Error(`the base executor exited ${code}`)));
+});
+const median = (xs) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
+async function time50k(x) {
+  const ms = [];
+  for (let k = 0; k < 5; k++) {
+    const body = `INSERT DATA { ${Array.from({ length: 50000 }, (_, i) => `<urn:ex:p4/${k}/${i}> <urn:ex:p> "${i}" .`).join(' ')} }`;
+    const t0 = performance.now();
+    const r = await post(x, body, {});
+    ms.push(performance.now() - t0);
+    assert.equal(r.status, 200, `PRECONDITION: the 50k insert applied (${r.status} ${r.text.slice(0, 120)})`);
+  }
+  return median(ms);
+}
+test('#1749 (P4, r4) a 50,000-triple INSERT DATA on an UNHELD store: this build is within 10% (or 50 ms) of the base 8edd075, median of 5; both printed', { ...T, timeout: 600000 }, async () => {
+  const base = await startBase(store('hold-p4-base-'), ['--create']);
+  let b; try { b = await time50k(base); } finally { await stopX(base); }
+  const x = await start(store('hold-p4-build-'), ['--create']);
+  let n; try { n = await time50k(x); } finally { await stopX(x); }
+  console.log(`# P4 median ms: base ${b.toFixed(1)}, build ${n.toFixed(1)}`);
+  assert.ok(n <= Math.max(b * 1.10, b + 50), `the build's median ${n.toFixed(1)} ms is within 10% or 50 ms of the base's ${b.toFixed(1)} ms`);
 });
