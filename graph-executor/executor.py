@@ -354,15 +354,22 @@ class Executor:
 
     def _floor_guarded(self, sparql):
         """#1748 `sparql` followed, in the SAME update, by operations that fail the whole update unless the floor is still
-        exactly the installed term afterwards. Store.update is all-or-nothing, so a delete, a rewrite (to another value, a
-        language tag or a datatype), a wipe, a second value, or an effect that depends on other data is never applied, and
-        nothing has to be restored. The check reads the store state the update produced; it never parses the body."""
+        exactly what it was: the installed term, or (on an unfloored store) absent, so the only way to install a floor is
+        --install-write-floor. Store.update is all-or-nothing, so a delete, a rewrite (to another value, a language tag or a
+        datatype), a wipe, a second value, an effect that depends on other data, or an /update that writes a floor into an
+        unfloored store is never applied, and nothing has to be restored. The check reads the store state the update
+        produced; it never parses the body. (A body holding no operation, e.g. only a comment, cannot be followed by `;`:
+        it fails as a syntax error with nothing applied, like any other malformed body.)"""
         floor = f'<{FLOOR_S.value}> <{FLOOR_P.value}>'
-        want = json.dumps(self.write_floor)
-        return (f'{sparql.rstrip().rstrip(";")}\n;\n'
-                f'INSERT {{ GRAPH <{FLOOR_VIOLATION}> {{ <{FLOOR_VIOLATION}> <{FLOOR_VIOLATION}> <{FLOOR_VIOLATION}> }} }} WHERE {{ '
-                f'{{ FILTER NOT EXISTS {{ GRAPH <{BK}> {{ {floor} ?v0 . FILTER(sameTerm(?v0, {want})) }} }} }} UNION '
-                f'{{ GRAPH <{BK}> {{ {floor} ?v1 . FILTER(!sameTerm(?v1, {want})) }} }} }} ;\n'
+        if self.write_floor is None:
+            violated = f'GRAPH <{BK}> {{ {floor} ?v0 }}'
+        else:
+            want = json.dumps(self.write_floor)
+            violated = (f'{{ FILTER NOT EXISTS {{ GRAPH <{BK}> {{ {floor} ?v0 . FILTER(sameTerm(?v0, {want})) }} }} }} UNION '
+                        f'{{ GRAPH <{BK}> {{ {floor} ?v1 . FILTER(!sameTerm(?v1, {want})) }} }}')
+        body = sparql.rstrip().rstrip(';')
+        return (f'{body}\n;\n' if body.strip() else '') + (
+                f'INSERT {{ GRAPH <{FLOOR_VIOLATION}> {{ <{FLOOR_VIOLATION}> <{FLOOR_VIOLATION}> <{FLOOR_VIOLATION}> }} }} WHERE {{ {violated} }} ;\n'
                 f'CREATE GRAPH <{FLOOR_VIOLATION}> ;\nDROP GRAPH <{FLOOR_VIOLATION}>')
 
     def _identity(self):
@@ -451,17 +458,14 @@ class Executor:
                 raise ReconcileRequired({'reason': 'caller epoch differs from the store epoch and this opId has no receipt here',
                                          'storeEpoch': store_epoch, 'callerEpoch': caller_epoch})
             try:
-                if self.write_floor is None:
-                    self.store.update(sparql)
-                else:
-                    try:
-                        self.store.update(self._floor_guarded(sparql))
-                    except OSError:
-                        raise
-                    except Exception as e:
-                        if FLOOR_VIOLATION in str(e):   # the guard failed the whole update: nothing was applied
-                            raise FloorProtected(self.write_floor)
-                        raise
+                try:
+                    self.store.update(self._floor_guarded(sparql))
+                except OSError:
+                    raise
+                except Exception as e:
+                    if FLOOR_VIOLATION in str(e):   # the guard failed the whole update: nothing was applied
+                        raise FloorProtected(self.write_floor)
+                    raise
                 self.updates += 1
                 self.store.flush()
                 self.flushes += 1
@@ -570,8 +574,9 @@ def make_handler(ex):
                                             'reason': f'this store accepts writes only from clients declaring {PROTOCOL_HEADER}: {f}'})
                 except FloorProtected as f:  # #1748 refused before update(): the floor is not writable through /update
                     ex.log(op, 'update', 'REFUSED-FLOOR-PROTECTED', (time.perf_counter() - t0) * 1000, sha)
-                    return self._send(409, {'error': 'WRITE_FLOOR_PROTECTED', 'applied': False, 'floor': str(f),
-                                            'reason': 'an /update may not delete, rewrite or contradict the installed write floor'})
+                    return self._send(409, {'error': 'WRITE_FLOOR_PROTECTED', 'applied': False, 'floor': f.args[0],
+                                            'reason': 'an /update may not delete, rewrite or contradict the installed write floor, '
+                                                      'nor write one: a floor is installed only by --install-write-floor'})
                 except ReconcileRequired as r:  # refused before update(): applied nothing
                     ex.log(op, 'update', 'RECONCILE-REQUIRED', (time.perf_counter() - t0) * 1000, sha)
                     return self._send(409, {'error': 'reconcile required', 'reconcileRequired': r.info})

@@ -2,11 +2,13 @@
  * #1748 — the BUILDER's tests for how the floor guard is built (the row author's tests/write-protocol-floor-1748.test.mjs holds the
  * contract rows, including M2e2's tamper shapes). The guard runs INSIDE the update it protects, so these pin what follows from that:
  * a refused tamper leaves a floor that a RESTART still reads; an engine error inside a floored update applies NOTHING (the guard
- * must not turn a half-applied update into a durable one); and a floor that is not a plain string is refused at start, never
- * compared by its lexical value.
+ * must not turn a half-applied update into a durable one); a floor that is not a plain string is refused at start, never
+ * compared by its lexical value; and an UNFLOORED store refuses an /update that writes a floor (the re-review's finding 2,
+ * 46388): installing is --install-write-floor's job alone.
  */
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -67,11 +69,41 @@ test('#1748 (guard) an ENGINE error inside a floored update applies nothing: no 
   await stop(x);
 });
 
+/** Writes straight into a STOPPED store with pyoxigraph: the only way to plant a floor now that /update refuses to. */
+const plant = (store, nquad) => {
+  const r = spawnSync(PY, ['-I', '-c', 'import sys, pyoxigraph as px; s = px.Store(sys.argv[1]); s.update(sys.argv[2]); s.flush()', store, `INSERT DATA { ${nquad} }`], { encoding: 'utf8' });
+  assert.equal(r.status, 0, `PRECONDITION: planted (${r.stderr})`);
+};
+
 test('#1748 (guard) a floor that is not a plain string (here language-tagged) is refused at start, not matched by its lexical value', T, async () => {
   const store = freshStore();
-  let x = await start(store, ['--create']);
-  const seed = await update(x, `INSERT DATA { GRAPH <${BK}> { ${F} "${WRITE_PROTOCOL}"@en } }`, { protocol: null });
-  assert.equal(seed.status, 200, `PRECONDITION: an unfloored store accepts the seed (${JSON.stringify(seed.body)})`);
-  await stop(x);
+  await stop(await start(store, ['--create']));
+  plant(store, `GRAPH <${BK}> { ${F} "${WRITE_PROTOCOL}"@en }`);
   await assert.rejects(start(store), (e) => /not a plain string literal/.test(e.stderr ?? e.message), 'the executor refuses to start');
+});
+
+test('#1748 (guard) an UNFLOORED store refuses an /update that writes a floor: 409, nothing applied, and a restart is still unfloored', T, async () => {
+  const store = freshStore();
+  let x = await start(store, ['--create']);
+  const h0 = await health(x);
+  assert.equal(h0.writeFloor, null, 'PRECONDITION: unfloored');
+  for (const [why, sparql] of Object.entries({
+    'a floor alone': `INSERT DATA { GRAPH <${BK}> { ${F} "${WRITE_PROTOCOL}" } }`,
+    'a floor beside ordinary data': `INSERT DATA { <urn:ex:card/9> <urn:ex:p> "x" . GRAPH <${BK}> { ${F} "postseq-typo" } }`,
+  })) {
+    const r = await update(x, sparql, { protocol: null });
+    assert.equal(r.status, 409, `${why}: refused (${JSON.stringify(r.body)})`);
+    assert.equal(r.body?.error, 'WRITE_FLOOR_PROTECTED');
+    assert.equal(r.body?.applied, false);
+  }
+  assert.equal(await ask(x, 'ASK { <urn:ex:card/9> ?p ?o }'), false, 'the ordinary half was not applied either');
+  assert.deepEqual(counters(await health(x)), counters(h0), 'nothing counted or flushed');
+  const ok = await update(x, 'INSERT DATA { <urn:ex:card/10> <urn:ex:p> "y" }', { protocol: null });
+  assert.equal(ok.status, 200, `CONTROL: an ordinary unfloored write still applies (${JSON.stringify(ok.body)})`);
+  const empty = await update(x, '   ', { protocol: null });
+  assert.equal(empty.status, 200, `an empty body is still a no-op 200 on an unfloored store (${JSON.stringify(empty.body)})`);
+  await stop(x);
+  x = await start(store);
+  assert.equal((await health(x)).writeFloor, null, 'and the restarted store is still unfloored');
+  await stop(x);
 });
