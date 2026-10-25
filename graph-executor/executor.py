@@ -781,6 +781,34 @@ class Executor:
                 raise unsound('has a payloadSha256 that is not 64 lowercase hex characters')
             if subj != ao_subject(vals['obligationId']):
                 raise unsound('sits at a subject that is not derived from its obligationId')
+            if vals['state'] == 'disposed':
+                self._check_disposed_consistent(subj, vals, iris[0].value, unsound)
+
+    def _check_disposed_consistent(self, subj, ao, ob_iri, unsound):
+        """#1749 A8 (review D11) a DISPOSED AmbiguousObligation is sound only beside a DispositionRecord that references it
+        and names the same obligationId, mutationId, slot and payloadSha256, AND an obligation that reads that disposition's
+        terminal status (published for settle-published, retired for retire-unsent-unknown). Otherwise HOLD_UNSOUND."""
+        recs = [r['r'].value for r in self.store.query(
+            f'SELECT DISTINCT ?r WHERE {{ GRAPH <{RG}> {{ ?r a <{DR_T}> ; <{PS}ambiguousRecord> <{subj}> }} }}')]
+        if not recs:
+            raise unsound('is disposed, but no DispositionRecord references it')
+        ob_rows = self._subject_rows(in_bk, ob_iri)
+        status = self._plain_one(ob_rows, OB['status'])
+        for rec in recs:
+            rows = self._subject_rows(in_rg, rec)
+            got = {k: self._plain_one(rows, PS + k) for k in ('obligationId', 'mutationId', 'slot', 'payloadSha256', 'decision',
+                                                              'obligationStatusAfter')}
+            if any(got[k] != ao[k] for k in ('obligationId', 'mutationId', 'slot', 'payloadSha256')):
+                continue
+            want = DISPOSE_DECISIONS.get(got['decision'])
+            if want is None or got['obligationStatusAfter'] != want:
+                continue
+            if status != want or len(ob_rows.get(OB['status'], [])) != 1:
+                raise unsound(f'is disposed by <{rec}> ({got["decision"]}), but its obligation <{ob_iri}> reads {status!r}, '
+                              f'not {want!r}')
+            return
+        raise unsound(f'is disposed, but no DispositionRecord that references it ({", ".join(recs)}) names the same '
+                      'obligation and payload')
 
     def _pending_unrecorded(self):
         """#1749 A8-1 every obligation whose status is pending now (any mode) and which has no AmbiguousObligation yet, with

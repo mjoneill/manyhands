@@ -17,6 +17,7 @@
  *
  * Isolated primitive only: no route wiring, no publisher, nothing live.
  */
+import { createHash } from 'node:crypto';
 import { ORIGIN_TERMS, EX, BK, POSTSEQ_TERMS } from './graph-vocab.mjs';
 import {
   originKeyOf as _originKeyOf, mutationIdOf as _mutationIdOf, canonOriginDescriptor, originDescriptorDigest, originPlanDigest,
@@ -227,6 +228,10 @@ export async function readCommittedOrigin(client, mutationId) {
       if (x.mode !== 'announcement' || x.index !== i || x.identity.mutationId !== mutationId || x.identity.slot !== s.slot) bad(`reservation ${postId} is not announcement slot ${i} of this origin`);
       if (JSON.stringify(x.draft) !== JSON.stringify(draft)) bad(`reservation ${postId}'s draft is not descriptor slot ${i} at the Prepared occurredAt`);
       if (x.reserveOpId !== op || x.reserveDigest !== expected) bad(`reservation ${postId}'s reserveOpId/reserveDigest are not the commit's`);
+      if (ob.status === 'retired') {
+        const why = await retiredByDisposition(client, ob.obligationId, x.draft);
+        if (why) bad(`${ow} reads retired, but ${why}`);
+      }
       reservations.push(x);
     }
     // §2a.6: one epoch, consecutive numbers in index order, created at the commit's NOW()
@@ -241,6 +246,22 @@ export async function readCommittedOrigin(client, mutationId) {
     if (e instanceof Bad || e instanceof ValidationError) return invalid(e.message);
     throw e;
   }
+}
+
+const canonJson = (v) => (Array.isArray(v) ? v.map(canonJson) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canonJson(v[k])])) : v);
+const RG = '<urn:ex:postseq/recovery>';
+const PSQ = (k) => `<urn:ex:postseq/${k}>`;
+/**
+ * #1749 A8 (ruling 46708) `retired` is written only by the executor's --dispose-obligation, so it is admitted ONLY beside a
+ * protected DispositionRecord in the recovery graph bound to this obligationId, the payloadSha256 of its ACTUAL stored payload
+ * (canonical JSON, P8-1), and the decision retire-unsent-unknown with status-after retired. Returns null when one exists, else
+ * the reason the status cannot be accepted. A read failure throws Unavailable.
+ */
+async function retiredByDisposition(client, obligationId, payload) {
+  const sha = createHash('sha256').update(JSON.stringify(canonJson(payload)), 'utf8').digest('hex');
+  const r = await client.query(`SELECT ?r WHERE { GRAPH ${RG} { ?r a ${PSQ('DispositionRecord')} ; ${PSQ('obligationId')} ?o ; ${PSQ('payloadSha256')} ?h ; ${PSQ('decision')} ?d ; ${PSQ('obligationStatusAfter')} ?a . FILTER(STR(?o) = ${JSON.stringify(obligationId)} && STR(?h) = ${JSON.stringify(sha)} && STR(?d) = "retire-unsent-unknown" && STR(?a) = "retired") } }`);
+  if (!r.ok) throw new Unavailable(r.reason);
+  return r.rows.length ? null : 'no DispositionRecord in the recovery graph binds this obligation, its payload and retire-unsent-unknown (#1749 A8)';
 }
 
 /** Every Obligation subject of this mutationId: typed ones naming it, plus any triple on a derived slot subject. */
