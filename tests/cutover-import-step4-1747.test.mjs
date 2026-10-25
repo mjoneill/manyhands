@@ -59,6 +59,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import http from 'node:http';
 import { HAVE_PY, PY, tmpStore, startExecutor, killExecutor } from './helpers/graph-executor-proc.mjs';
 import { createGraphClient } from '../core/graph-client.mjs';
 import { durableUpdate } from '../core/durable-update.mjs';
@@ -1032,7 +1033,7 @@ test(`#1747 (S5-3) a write BETWEEN verification and the mark → HOLD ${RC.MOVED
 // quad count; a raw swap that keeps the count (delete one quad, insert one) between verification and the mark is NOT detected. The
 // proposed fence is the #1748 write floor installed on the candidate before step 5 (post 46310), which refuses an undeclared raw write
 // outright. Until that contract change is ruled, this row is a TODO: it names the limit instead of hiding it.
-test(`#1747 (S5-3b) a COUNT-PRESERVING raw swap between verification and the mark → HOLD ${'MOVED'}, no marker`, { ...T, todo: 'stated limit 46309: undetected until the candidate carries the #1748 floor (46310)' }, async () => {
+test(`#1747 (S5-3b) a COUNT-PRESERVING raw swap between verification and the mark → HOLD ${'MOVED'}, no marker`, T   /* r10b: the todo is dropped; the write revision binds READY (be47047), so the swap is now detected and the row is REQUIRED */, async () => {
   await imported(async (w) => {
     const fifo = path.join(w.dir, 'ready-barrier-swap'); assert.equal(spawnSync('mkfifo', [fifo]).status, 0, 'PRECONDITION: mkfifo');
     const p = ready(w, { env: { SCRUM_CUTOVER_READY_BARRIER: fifo } });
@@ -1110,7 +1111,8 @@ test(`#1747 (S5-6) a READY marker of ANOTHER migration → --ready is REFUSED ${
 });
 
 // ── r7 (the fallback review of PR #122, 46472): its untested guards, its verified probes, and the new refusal names ──
-const REQUIRED_CAPTURE = ['sourceStore', 'files', 'documentSha256', 'outboxManifestSha256', 'datasetId', 'incarnation', 'capturedAt'];
+// r10 (#122 re-review finding 6): the three binding fields r9 made REQUIRED are in the closed-schema list too
+const REQUIRED_CAPTURE = ['sourceStore', 'files', 'documentSha256', 'outboxManifestSha256', 'datasetId', 'incarnation', 'capturedAt', 'epoch', 'commitSeq', 'contentSha256'];
 test(`#1747 (S4-B, r7) the capture schema is CLOSED and REQUIRED in BOTH tools: each missing field, an unknown field and a future capturedAt → REFUSED ${CODES.CAPTURE_MALFORMED}`, T, async () => {
   await world(async (w) => {
     const ok = await importer(w); assert.equal(ok.status, 0, `CONTROL: the well-formed capture passes (${ok.out.slice(-200)})`);
@@ -1382,7 +1384,9 @@ for (const [what, code, opts] of [
   });
 }
 // times (finding 4): every written time is a FULL ISO-8601 instant with a zone
-const BAD_TIMES = [['a date alone', '2026-10-06'], ['no zone', '2026-10-06T21:56:31.948'], ['space-separated', '2026-10-06 21:56:31Z']];
+// r10 (#122 re-review finding 1): the format alone is not enough; an IMPOSSIBLE calendar date that V8's Date.parse rolls over
+// (Feb 31 reads as Mar 3) or that 2026 does not have (Feb 29) must HOLD too
+const BAD_TIMES = [['a date alone', '2026-10-06'], ['no zone', '2026-10-06T21:56:31.948'], ['space-separated', '2026-10-06 21:56:31Z'], ['an impossible day (Feb 31)', '2026-02-31T00:00:00Z'], ['a non-leap Feb 29', '2026-02-29T00:00:00Z'], ['month 13', '2026-13-01T00:00:00Z']];
 const TIME_FIELDS = [
   ['a reservation createdAt', CODES.BAD_RESERVATION, (d, v) => { d['scrum:meta'].postReservations[U3[0].key].createdAt = v; }],
   ['an origin occurredAt', CODES.BAD_ORIGIN, (d, v) => { d['scrum:meta'].announcementOutbox.origins[LEGACY[0].origin.mutationId].occurredAt = v; }],
@@ -1478,6 +1482,96 @@ for (const [what, triples] of [
         assert.ok(!(pend.json?.entries || []).some((x) => x.mutationId === m), `${what}: not listed as an entry`);
       } finally { await s.stop(); }
     });
+  });
+}
+// ── r10 (#122 re-review at 548bbf0, 46812) ──
+// finding 1, the READER half: an imported time the store holds as an impossible date reads INVALID, never as a time
+test('#1747 (S4-T reader, r10, finding 1) an imported reservation whose stored createdAt is an IMPOSSIBLE date (Feb 31) reads INVALID through readPostSeqReservation', T, async () => {
+  await imported(async (w) => {
+    // BOTH the stored time AND its source-JSON mirror carry the impossible date, so the record is self-consistent and only the
+    // calendar check can refuse it (rewriting the stored time alone reads INVALID for the MIRROR mismatch: the wrong reason)
+    const subj = `<${RES(U3[0])}>`, srcP = `<${TERMS.sourceReservationJson}>`;
+    const [j] = await typed(w.cand, `SELECT ?v WHERE { GRAPH <${BK}> { ${subj} ${srcP} ?v } }`);
+    assert.ok(j?.value, 'PRECONDITION: the imported reservation carries its source JSON');
+    const src = JSON.parse(j.value); src[U3[0].key].createdAt = '2026-02-31T00:00:00Z';
+    await rawOn(w.cand, `DELETE { GRAPH <${BK}> { ${subj} ${POSTSEQ_TERMS.createdAt} ?v . ${subj} ${srcP} ?j } } INSERT { GRAPH <${BK}> { ${subj} ${POSTSEQ_TERMS.createdAt} "2026-02-31T00:00:00Z"^^<${XSD}dateTime> . ${subj} ${srcP} ${JSON.stringify(canon(src))} } } WHERE { GRAPH <${BK}> { ${subj} ${POSTSEQ_TERMS.createdAt} ?v . ${subj} ${srcP} ?j } }`, 'feb31');
+    const got = await readPostSeqReservation(clientFor(w.cand), U3[0].postId);
+    assert.ok(isInvalid(got), `INVALID (${JSON.stringify(got).slice(0, 240)})`);
+  });
+});
+// finding 2: a LONE UTF-16 SURROGATE in any string the importer emits is refused BEFORE batch 1 (a HOLD, nothing written), never
+// left to fail the SPARQL parse after batch 1 has landed (which burns the candidate: a corrected document is a new migration id,
+// and ALLOCATOR_PRESENT then refuses it). The HOLD's code is the builder's to name, so the row pins the class and the effect.
+const LONE = String.fromCharCode(0xd800);
+for (const [what, set] of [
+  ['a legacy origin\'s originActor (a batch-2 field)', (d) => { d['scrum:meta'].announcementOutbox.origins[LEGACY[0].origin.mutationId].originActor = `ada${LONE}`; }],
+  ['a reservation\'s key, the legacyKey (a batch-1 field)', (d) => { const res = d['scrum:meta'].postReservations; const v = res[U3[0].key]; delete res[U3[0].key]; res[`${U3[0].key}${LONE}`] = v; }],
+  ['the postSeqEpoch (a batch-1 field)', (d) => { d['scrum:meta'].postSeqEpoch = `${d['scrum:meta'].postSeqEpoch}${LONE}`; }],
+]) {
+  test(`#1747 (S4-U, r10, finding 2) a lone surrogate in ${what} → a HOLD BEFORE any batch: nothing written, no batch marker, never COMPLETE`, T, async () => {
+    await world(async (w) => {
+      const s0 = await S(w.cand);
+      const r = await importer(w, { applyIt: true });
+      expectCode(r, 'HOLD', 'BAD_STRING', what);   // the builder's code (46818)
+      assert.doesNotMatch(r.out, /WRITE_FAILED/, 'refused by a check, not by a failed write');
+      assert.equal(await S(w.cand), s0, 'nothing written: S byte-identical, no allocator, no batch marker');
+    }, { prepare: set });
+  });
+}
+// finding 3 (rulings 46815/46820): ANY write between step 3's digest and its mark refuses MOVED, a raw same-count swap included.
+// A test-only proxy in front of the candidate performs the write the moment step 3 asks for the digest's TOTAL count (its last
+// read before marking), so the write lands inside the digest→mark window. The control: the same proxy with no write marks.
+async function windowProxy(w, inject) {
+  let fired = false;
+  const target = w.cand.baseUrl;
+  const srv = http.createServer(async (req, res) => {
+    const chunks = []; for await (const c of req) chunks.push(c);
+    const op = String(req.headers['x-op-id'] || '');
+    const headers = { ...req.headers }; delete headers.host; delete headers['content-length'];
+    const r = await fetch(`${target}${req.url}`, { method: req.method, headers, body: req.method === 'GET' ? undefined : Buffer.concat(chunks) });
+    const out = Buffer.from(await r.arrayBuffer());
+    // the write lands AFTER the digest's total count is answered: the digest is complete and self-consistent, and the write
+    // sits in the window before step 3 re-reads the revision and marks (injected earlier, the digest's own coverage check
+    // refuses first, a correct refusal but not the one this row is about)
+    if (!fired && inject && req.url.startsWith('/query') && /\/count$/.test(op)) { fired = true; await inject(); }
+    res.writeHead(r.status, { 'content-type': r.headers.get('content-type') || 'application/json' }); res.end(out);
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  return { url: `http://127.0.0.1:${srv.address().port}`, fired: () => fired, close: () => new Promise((r) => srv.close(r)) };
+}
+for (const [what, inject] of [
+  ['no write (CONTROL)', null],
+  ['a COMPILED card write (it moves commitSeq)', async (w) => apply(w.cand, { kind: 'card.write', opId: `urn:ex:op/test/k-move-${process.pid}`, actor: 'https://scrumboard.local/person/ada', parts: [cpartX({ id: 'uuid-k', shortId: 9001, title: 'window write', description: 'x', column: 'backlog', createdAt: '2026-10-25T06:00:00.000Z', createdBy: 'ada', version: 1 }, null)] }, 'the window write')],
+  ['a RAW same-count SWAP (one triple replaced by another: commitSeq and the quad count both unmoved)', async (w) => rawOn(w.cand, `DELETE { ?s <https://schema.org/name> ?n } INSERT { ?s <https://schema.org/name> "Swapped in the window" } WHERE { ?s <https://schema.org/identifier> "done" ; <https://schema.org/name> ?n }`, 'k-swap')],
+]) {
+  test(`#1747 (K-MOVE, r10, finding 3) ${what} between step 3's digest and its mark → ${inject ? 'REFUSED MOVED, nothing marked' : 'MARKED'}`, T, async () => {
+    await world(async (w) => {
+      const px = await windowProxy(w, inject && (() => inject(w)));
+      let m;
+      try { m = await step3(w, w.captureManifest, px.url); } finally { await px.close(); }
+      assert.equal(px.fired(), Boolean(inject), 'PRECONDITION: the window write fired exactly when one was planned');
+      if (!inject) { assert.equal(m.status, 0, `CONTROL: MARKED through the proxy (${m.out.slice(-240)})`); return; }
+      expectStep3Refused(m, 'MOVED', what);
+      assert.deepEqual(await markersOn(w.cand), [], 'nothing marked');
+    }, { mark: false });
+  });
+}
+// finding 4 (ruling 46820): each promotion-excluded field must have exactly the value and cardinality a promotion of THIS capture
+// leaves; anything else is NOT_CANDIDATE, naming the field (the digest excludes these predicates, so only this check sees them)
+for (const [field, what, sparql] of [
+  ['incarnationFrom', 'a SECOND incarnationFrom value', `INSERT DATA { GRAPH <${BK}> { <urn:ex:dataset> <urn:ex:incarnationFrom> "a-second-lineage" } }`],
+  ['storeHomeInode', 'a SECOND storeHomeInode value', `INSERT DATA { GRAPH <${BK}> { <urn:ex:dataset> <urn:ex:storeHomeInode> "1" } }`],
+  ['storeHomeInode', 'a NON-NUMERIC storeHomeInode', `DELETE { GRAPH <${BK}> { <urn:ex:dataset> <urn:ex:storeHomeInode> ?i } } INSERT { GRAPH <${BK}> { <urn:ex:dataset> <urn:ex:storeHomeInode> "not-a-number" } } WHERE { GRAPH <${BK}> { <urn:ex:dataset> <urn:ex:storeHomeInode> ?i } }`],
+]) {
+  test(`#1747 (K-FIELD, r10, finding 4) ${what} on the candidate → step 3 REFUSES NOT_CANDIDATE naming ${field}; nothing marked`, T, async () => {
+    await world(async (w) => {
+      await rawOn(w.cand, sparql, `k-field-${field}`);
+      const m = await step3(w, w.captureManifest);
+      expectStep3Refused(m, CODES.NOT_CANDIDATE, what);
+      // the lineage field is named by the earlier lineage check as "promoted from … (2 values)"; the others by their own name
+      assert.match(m.out, field === 'incarnationFrom' ? /incarnationFrom|promoted from CONTRADICTORY/ : new RegExp(field), `naming ${field} (${m.out.slice(-240)})`);
+      assert.deepEqual(await markersOn(w.cand), [], 'nothing marked');
+    }, { mark: false });
   });
 }
 test('#1747 (S4-N) no importer run called the notify endpoint (and the importer really ran)', () => {

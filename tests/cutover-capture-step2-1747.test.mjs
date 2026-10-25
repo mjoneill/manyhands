@@ -15,11 +15,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { HAVE_PY, tmpStore, startExecutor, killExecutor } from './helpers/graph-executor-proc.mjs';
 import { captureProblem } from '../scripts/cutover-capture-schema-1629.mjs';
-import { contentDigest } from '../scripts/cutover-content-digest-1629.mjs';
+import { contentDigest, MAX_BUCKET_QUADS } from '../scripts/cutover-content-digest-1629.mjs';
+import http from 'node:http';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TOOL = path.join(REPO, 'scripts', 'cutover-capture-1629.mjs');
@@ -151,4 +152,82 @@ test('#1747 (C8, r9) the CONTENT PIN: two captures of an unchanged source record
   const out3 = path.join(s.dir, 'capture-3.json');
   assert.equal((await run(args(s, { out: out3 }))).status, 0, 'the changed source is CAPTURED');
   assert.notEqual(JSON.parse(fs.readFileSync(out3)).contentSha256, m1.contentSha256, 'the raw write changed the recorded digest');
+});
+
+// ── r10 (#122 re-review at 548bbf0, 46812): the three capture/digest guards no row killed (sabotages C, D, E) ──
+/** a test-only proxy in front of a real executor: it forwards everything, and `rewrite(opId, json)` may change a /query answer */
+async function digestProxy(target, rewrite) {
+  const seen = [];
+  const srv = http.createServer(async (req, res) => {
+    const chunks = []; for await (const c of req) chunks.push(c);
+    const op = String(req.headers['x-op-id'] || ''); seen.push(op);
+    const headers = { ...req.headers }; delete headers.host; delete headers['content-length'];
+    const r = await fetch(`${target}${req.url}`, { method: req.method, headers, body: req.method === 'GET' ? undefined : Buffer.concat(chunks) });
+    let out = Buffer.from(await r.arrayBuffer());
+    if (req.url.startsWith('/query') && r.ok) { const j = JSON.parse(out.toString('utf8')); const k = rewrite(op, j); if (k) out = Buffer.from(JSON.stringify(k)); }
+    res.writeHead(r.status, { 'content-type': r.headers.get('content-type') || 'application/json' }); res.end(out);
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  return { url: `http://127.0.0.1:${srv.address().port}`, seen, close: () => new Promise((r) => srv.close(r)) };
+}
+const withCount = (j, n) => ({ ...j, results: { bindings: [{ ...j.results.bindings[0], n: { ...(j.results.bindings[0]?.n || { type: 'literal', datatype: 'http://www.w3.org/2001/XMLSchema#integer' }), value: String(n) } }] } });
+async function served(fn) {
+  const s = await stopped();
+  const x = await startExecutor({ store: s.store, datasetId: DS });
+  try { return await fn(s, x); } finally { await killExecutor(x); }
+}
+test('#1747 (C10, r10, sabotage E) a BLANK-NODE bucket over the quad limit refuses DIGEST_TOO_LARGE before it is fetched (it cannot be split)', T, async () => {
+  await served(async (s, x) => {
+    const px = await digestProxy(x.baseUrl, (op, j) => (/\/count\/_\/\d+$/.test(op) ? withCount(j, MAX_BUCKET_QUADS + 1) : null));
+    let err = null;
+    try { await contentDigest(px.url); } catch (e) { err = e; } finally { await px.close(); }
+    assert.equal(err?.code, 'DIGEST_TOO_LARGE', `refused DIGEST_TOO_LARGE (${err?.message})`);
+    assert.match(String(err?.message), /blank-node/, 'naming the blank-node bucket');
+    assert.ok(!px.seen.some((o) => /\/bucket\//.test(o)), `no bucket was fetched (${px.seen.filter((o) => /\/bucket\//.test(o)).join(', ')})`);
+  });
+});
+test('#1747 (C10b, r10, sabotage E) a single subject prefix still over the limit at DEPTH 3 refuses DIGEST_TOO_LARGE before it is fetched; the shallower buckets were split, not fetched', T, async () => {
+  await served(async (s, x) => {
+    const px = await digestProxy(x.baseUrl, (op, j) => (/\/count\/(0|00|000)\/\d+$/.test(op) ? withCount(j, MAX_BUCKET_QUADS + 1) : null));
+    let err = null;
+    try { await contentDigest(px.url); } catch (e) { err = e; } finally { await px.close(); }
+    assert.equal(err?.code, 'DIGEST_TOO_LARGE', `refused DIGEST_TOO_LARGE (${err?.message})`);
+    assert.match(String(err?.message), /bucket 000 /, 'naming the depth-3 bucket');
+    assert.ok(!px.seen.some((o) => /\/bucket\/0/.test(o)), `none of 0, 00, 000 was fetched (${px.seen.filter((o) => /\/bucket\/0/.test(o)).join(', ')})`);
+    assert.ok(px.seen.some((o) => /\/count\/00\/\d+$/.test(o)) && px.seen.some((o) => /\/count\/000\/\d+$/.test(o)), 'CONTROL: the over-limit buckets were SPLIT (0 into 00, 00 into 000), not refused at depth 1');
+  });
+});
+test('#1747 (C11, r10, sabotage C) when the buckets do not cover every quad (the total count says one more), the digest REFUSES; it never returns a digest of a subset', T, async () => {
+  await served(async (s, x) => {
+    const ok = await contentDigest(x.baseUrl);
+    assert.match(ok.sha256, /^[0-9a-f]{64}$/, 'CONTROL: the same store digests directly');
+    const px = await digestProxy(x.baseUrl, (op, j) => (/\/count$/.test(op) ? withCount(j, Number(j.results.bindings[0].n.value) + 1) : null));
+    let err = null, got = null;
+    try { got = await contentDigest(px.url); } catch (e) { err = e; } finally { await px.close(); }
+    assert.equal(got, null, `no digest returned (${JSON.stringify(got)})`);
+    assert.match(String(err?.message), /buckets cover \d+ quads, the store holds \d+/, `refused by the coverage check (${err?.message})`);
+  });
+});
+test('#1747 (C9, r10, sabotage D) a process that opens a source store file DURING the capture (after the first open-file check) → REFUSED STORE_OPEN by the LATE check, naming it; nothing written', T, async () => {
+  const s = await stopped();
+  const fifo = path.join(s.dir, 'between.fifo');
+  assert.equal(spawnSync('mkfifo', [fifo]).status, 0, 'PRECONDITION: mkfifo');
+  const victim = path.join(s.store, fs.readdirSync(s.store).sort()[0]);
+  // the helper blocks on the FIFO until the capture reaches its between-passes seam, then opens a store file and holds it.
+  // The capture's seam write completes as soon as the helper opens the FIFO; the helper's file open takes well under a
+  // millisecond, while the capture's second pass plus an lsof launch take far longer: that ordering is the row's margin.
+  const helper = spawn(process.execPath, ['-e', `const fs=require('fs');const f=fs.openSync(process.argv[1],'r');const h=fs.openSync(process.argv[2],'r');process.stdout.write('held '+process.pid+'\\n');setInterval(()=>{},1000);`, fifo, victim], { stdio: ['ignore', 'pipe', 'ignore'] });
+  try {
+    const r = await run(args(s), { SCRUM_CUTOVER_CAPTURE_BETWEEN_PASSES: fifo });
+    expectRefused(r, 'STORE_OPEN', s, 'a file opened during the capture');
+    assert.match(r.out, /during the capture/, 'by the LATE check (the early one says nothing about "during")');
+    assert.match(r.out, new RegExp(`\\b${helper.pid}\\b`), 'naming the holder');
+  } finally { helper.kill('SIGKILL'); }
+});
+test('#1747 (C12, r10, finding 5) an identity file whose commitSeq is NOT the stopped store\'s (one higher) → REFUSED NOT_SOURCE naming commitSeq; nothing written', T, async () => {
+  const s = await stopped();
+  fs.writeFileSync(s.identity, JSON.stringify({ ...s.health, commitSeq: String(Number(s.health.commitSeq) + 1) }));
+  const r = await run(args(s));
+  expectRefused(r, 'NOT_SOURCE', s, 'an identity that names another position');
+  assert.match(r.out, /commitSeq/, `naming the field that differs (${r.out.slice(-240)})`);
 });
