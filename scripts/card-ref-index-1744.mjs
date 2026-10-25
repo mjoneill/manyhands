@@ -39,7 +39,7 @@ async function query(sparql) {
 }
 async function update(sparql, tag) {
   const ep = String((await health()).epoch);
-  const r = await fetch(`${base}/update`, { method: 'POST', body: sparql, headers: { 'x-op-id': `urn:ex:op/card-ref-index/${tag}/${Date.now()}-${process.pid}-${opN++}`, 'x-epoch': ep } });
+  const r = await fetch(`${base}/update`, { method: 'POST', body: sparql, headers: { 'x-op-id': `urn:ex:op/card-ref-index/${tag}/${Date.now()}-${process.pid}-${opN++}`, 'x-epoch': ep, 'x-manyhands-write-protocol': 'postseq-v1' } });   // the #1748 floor; ignored on a store without one
   if (!r.ok) refuse('WRITE_FAILED', `${tag}: ${r.status} ${(await r.text()).slice(0, 200)}`);
 }
 

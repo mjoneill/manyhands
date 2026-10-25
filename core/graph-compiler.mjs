@@ -1520,6 +1520,9 @@ function referenceResolveClauses(R) {
     // every triple the resolution must add is IN the part (none silently left unresolved)
     const have = new Set(P.quads.map((q) => q.join(' ')));
     for (const q of diff.add) if (!have.has(q.join(' '))) fail(`reference-resolve part ${P.iri} omits the resolved triple ${q.join(' ')}`);
+    // and every triple the resolution REMOVES is gone from the part: a stale edge to the unresolved #N may not ride beside
+    // its resolved twin (D6: the part IS the projection with #N resolved)
+    for (const q of diff.rem) if (have.has(q.join(' '))) fail(`reference-resolve part ${P.iri} keeps the stale unresolved triple ${q.join(' ')}`);
     out.push(
       `    GRAPH ${BK} { ${I} ${JSONP} ?rrj${k} . } FILTER(STR(?rrj${k}) = ${recLit(P.json)})`,
       `    GRAPH ${BK} { ${COV} ${IN} "${N}"^^${INT} . }`,
@@ -1563,7 +1566,9 @@ function doneMoveClauses(R) {
     out.push(`    GRAPH ${BK} { ${I} ${JSONP} ?wsj${k} . } FILTER(STR(?wsj${k}) IN (${[...new Set(candidates)].map(recLit).join(', ')}))`);
     // only its order triple changes
     out.push(`    FILTER NOT EXISTS { VALUES (?wqs${k} ?wqp${k} ?wqo${k}) { ${P.quads.map((q) => `(${q.join(' ')})`).join(' ')} } FILTER NOT EXISTS { ?wqs${k} ?wqp${k} ?wqo${k} } FILTER(!(sameTerm(?wqs${k}, ${I}) && sameTerm(?wqp${k}, ${ORDER_P}) && sameTerm(?wqo${k}, "${j.order}"^^${INT}))) }`);
-    out.push(`    FILTER NOT EXISTS { ${I} ?wep${k} ?weo${k} . FILTER NOT EXISTS { VALUES (?wvp${k} ?wvo${k}) { ${P.quads.filter((q) => q[0] === I).map((q) => `(${q[1]} ${q[2]})`).join(' ')} } FILTER(sameTerm(?wvp${k}, ?wep${k}) && sameTerm(?wvo${k}, ?weo${k})) } FILTER(!(sameTerm(?wep${k}, ${ORDER_P}) && sameTerm(?weo${k}, "${old}"^^${INT}))) }`);
+    // nothing else is dropped: every stored triple of the card's WHOLE replaced structure (own, children such as blockers and
+    // checks, back-links, list nodes) the part does not keep is its old order triple (V2-3: no other quad delta)
+    out.push(`    FILTER NOT EXISTS { { ${cardStructureBranches(P.iri, k, [`?wes${k}`, `?wep${k}`, `?weo${k}`], 'we').join(' UNION ')} } FILTER NOT EXISTS { VALUES (?wvs${k} ?wvp${k} ?wvo${k}) { ${P.quads.map((q) => `(${q.join(' ')})`).join(' ')} } FILTER(sameTerm(?wvs${k}, ?wes${k}) && sameTerm(?wvp${k}, ?wep${k}) && sameTerm(?wvo${k}, ?weo${k})) } FILTER(!(sameTerm(?wes${k}, ${I}) && sameTerm(?wep${k}, ${ORDER_P}) && sameTerm(?weo${k}, "${old}"^^${INT}))) }`);
   });
   // no card outside the plan sits where the walk would reach: order in [lower, at + m], lower by the anchor
   const top = at + sibs.length;
