@@ -102,6 +102,16 @@ async function world(mode, body, { allocator = mode === 'off' } = {}) {
     assert.deepEqual(await allocatorNext(), [], 'PRECONDITION: the fixture holds no allocator before the test seeds one');
     await seedAllocator((await maxSeq()) + 1);
   }
+  // #1744: in executor-owned mode (off) REST refuses to START unless the card reference index is exact under complete true, so
+  // the fixture initializes it EXPLICITLY, once, with the real tool, writers stopped by construction (no REST is running yet).
+  // Mode on keeps today's world: its guard is marker-keyed, and no marker means no index was required. A0 (no allocator) gets
+  // the index too, so the boot refusal it asserts can only be the allocator's.
+  if (mode === 'off') {
+    const tool = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'card-ref-index-1744.mjs');
+    const b = spawnSync(process.execPath, [tool, '--executor', w.exec.baseUrl, '--dataset', WB_DATASET, '--backfill'], { encoding: 'utf8', timeout: 180000 });
+    assert.equal(b.status, 0, `PRECONDITION: the card reference index was backfilled before REST started (exit ${b.status}: ${(b.stdout + b.stderr).slice(-300)})`);
+    assert.match(b.stdout, /^COMPLETE$/m, 'PRECONDITION: the backfill reports COMPLETE');
+  }
   const barrierDir = fs.mkdtempSync(path.join(os.tmpdir(), 'l1629-barrier-'));
   // a notify sink: every dispatch REST makes lands here, so a row can count them (the #1574 H5 pattern)
   const sink = { events: [] };
