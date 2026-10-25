@@ -34,6 +34,8 @@ import { readPostSeqReservation } from '../core/postseq-reserve.mjs';
 import { readCommittedOrigin } from '../core/origin-commit.mjs';
 
 const SCHEMA_VERSION = 'cutover-import-1629/v1';
+// contract v2 §6 F1: the write floor this tool declares; an executor with no floor installed ignores it
+const WRITE_PROTOCOL = 'postseq-v1';
 const CRASH_AFTER = Number(process.env.SCRUM_CUTOVER_CRASH_AFTER_APPLY || 0);   // test seam; 0 = off
 const READY_BARRIER = process.env.SCRUM_CUTOVER_READY_BARRIER || '';   // test seam; unset = off
 const BK = BOOKKEEPING_GRAPH;
@@ -112,7 +114,7 @@ function executor(base, label) {
   };
   const update = async (sparql, op) => {
     if (epoch == null) epoch = String((await health()).epoch);
-    const r = await fetch(`${base}/update`, { method: 'POST', body: sparql, headers: { 'x-op-id': op, 'x-epoch': epoch, 'content-type': 'application/sparql-update' } });
+    const r = await fetch(`${base}/update`, { method: 'POST', body: sparql, headers: { 'x-op-id': op, 'x-epoch': epoch, 'content-type': 'application/sparql-update', 'x-manyhands-write-protocol': WRITE_PROTOCOL } });
     if (!r.ok) refuse('WRITE_FAILED', `${op}: ${r.status} ${(await r.text()).slice(0, 200)}`);
   };
   return { health, query, ask, update };
