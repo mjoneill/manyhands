@@ -24,6 +24,8 @@
  * A rerun skips a batch whose marker exists with the same digest and refuses one with another digest. Batch 1 is the
  * allocator plus every reservation; batch 2 is every origin and obligation.
  * TEST SEAM: SCRUM_CUTOVER_CRASH_AFTER_APPLY=<n>, read once at startup, SIGKILLs this process right after batch n applies.
+ * TEST SEAM: SCRUM_CUTOVER_BATCH_BARRIER=<path> reads that path (a FIFO blocks) after a batch commits and before the next
+ * batch's source re-check, so a test can change the source between batches.
  */
 import fs from 'node:fs';
 import crypto from 'node:crypto';
@@ -39,6 +41,7 @@ const SCHEMA_VERSION = 'cutover-import-1629/v1';
 const WRITE_PROTOCOL = 'postseq-v1';
 const CRASH_AFTER = Number(process.env.SCRUM_CUTOVER_CRASH_AFTER_APPLY || 0);   // test seam; 0 = off
 const READY_BARRIER = process.env.SCRUM_CUTOVER_READY_BARRIER || '';   // test seam; unset = off
+const BATCH_BARRIER = process.env.SCRUM_CUTOVER_BATCH_BARRIER || '';   // test seam: read after a batch commits, before the next one's source re-check; unset = off
 const BK = BOOKKEEPING_GRAPH;
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
 const NS = 'https://scrumboard.local/ns#';
@@ -382,6 +385,7 @@ async function run({ id, base, dataset, docBytes, outboxBytes, captureBytes, cap
       await X.update(`INSERT { GRAPH <${BK}> { ${triples}\n<${BATCH(id, n)}> <${P_BATCH_DIGEST}> ${lit(digest)} . } } WHERE { FILTER NOT EXISTS { GRAPH <${BK}> { <${BATCH(id, n)}> <${P_BATCH_DIGEST}> ?any } } }`,
         `urn:ex:op/cutover/${id}/batch/${n}`);
       if (CRASH_AFTER === n) process.kill(process.pid, 'SIGKILL');
+      if (BATCH_BARRIER && n < batches.length) fs.readFileSync(BATCH_BARRIER);
     }
   }
 
