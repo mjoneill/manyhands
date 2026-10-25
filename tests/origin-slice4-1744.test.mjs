@@ -59,7 +59,7 @@ import { startRestServer } from './helpers/harness.mjs';
 import { createGraphClient } from '../core/graph-client.mjs';
 import { createCardsUnit } from '../core/cards-unit.mjs';
 import { durableUpdate } from '../core/durable-update.mjs';
-import { cardIriOf, SHORTID_COUNTER_IRI } from '../core/cards-graph.mjs';
+import { cardIriOf, SHORTID_COUNTER_IRI, cardQuads, priorQuads, shortIdMap } from '../core/cards-graph.mjs';
 import { parseCardRefs } from '../core/references.mjs';
 import { enumerateOriginRecords, readCommittedOrigin, readPreparedOrigin } from '../core/origin-commit.mjs';
 import { mutationIdOf, originPrepareOp, originCommitOp, ORIGIN_NAMESPACE } from '../core/graph-compiler.mjs';
@@ -538,6 +538,54 @@ for (const [what, prep, interleave] of [
   });
 }
 
+test('#1744 (W9, mode off) a card the NEW page names is deleted between prepare and commit → the create refuses, no dangling edge; a keyed retry → STALE_PREPARED', T, async () => {
+  await world('off', async (s) => {
+    await s.start();
+    await heldCreate(s, { title: 'Names #3', body: 'see #3', createdBy: 'ada', requestId: 'req-1744-w9' }, async () => {
+      const o = s.other(); await o.load();
+      const snap = o.snapshot();
+      const r = await o.commit(snap.cards.filter((c) => c.id !== 'uuid-3'), snap.nextShortId, { actor: 'ada' });
+      assert.equal(r.outcome, 'APPLIED', 'PRECONDITION: #3 was deleted beneath REST');
+    }, 'W9');
+  });
+});
+
+test('#1744 (W10, mode off) a page create reaches the CHANGES feed, as an ordinary card create does (the control)', T, async () => {
+  await world('off', async (s) => {
+    await s.start();
+    // a fresh world's event log begins at its first write, and a `since` before that is refused as partial: write once, then start the window
+    const c0 = (await s.call('GET', '/api/cards/uuid-1')).json;
+    assert.equal((await s.call('PATCH', '/api/cards/uuid-1', { title: 'card 1 (opens the log)', ifVersion: c0.version, by: 'ada' })).status, 200, 'PRECONDITION: a first write');
+    await sleep(50);
+    const t0 = new Date().toISOString();
+    await sleep(50);
+    const c = await s.call('POST', '/api/cards', { title: 'an ordinary card', createdBy: 'ada', requestId: `w10-ord-${process.pid}` });
+    assert.ok(ok2xx(c.status), `PRECONDITION: an ordinary create (${c.status})`);
+    const p = await createPage(s, { title: 'A fed page', createdBy: 'ada', requestId: 'req-1744-w10' });
+    assert.equal(p.status, 201, `PRECONDITION: the page create (${p.status} ${p.text.slice(0, 160)})`);
+    const pageId = mutationIdOf(`${mutationIdOf(keyOf('req-1744-w10'))}:card`);
+    const feed = await s.call('GET', `/api/changes?since=${encodeURIComponent(t0)}`);
+    assert.equal(feed.status, 200, `the feed answers (${feed.status} ${feed.text.slice(0, 240)})`);
+    assert.ok(feed.text.includes(c.json.id), 'CONTROL: the ordinary create is in the feed');
+    assert.ok(feed.text.includes(pageId), 'the page create is in the feed too (changes_since must see new pages)');
+  });
+});
+
+test(`#1744 (R3b, mode off) a names SWAP that keeps count and sum ({2,4} → {1,5}) → a page create refuses ${CODES.INDEX_INCOMPLETE}, no effect`, T, async () => {
+  await world('off', async (s) => {
+    await s.start();
+    const c1 = (await s.call('GET', '/api/cards/uuid-1')).json;
+    assert.equal((await s.call('PATCH', '/api/cards/uuid-1', { description: 'see #2 and #4', ifVersion: c1.version, by: 'ada' })).status, 200, 'PRECONDITION: #1 names #2 and #4');
+    assert.deepEqual((await coverageOf(s, 'uuid-1')).names, [INT(2), INT(4)], 'PRECONDITION: indexed as {2, 4}');
+    await s.xu(`DELETE DATA { GRAPH <${BK}> { ${COV('uuid-1')} <${IX.namesShortId}> "2"^^<${XSD}integer> . ${COV('uuid-1')} <${IX.namesShortId}> "4"^^<${XSD}integer> } } ; INSERT DATA { GRAPH <${BK}> { ${COV('uuid-1')} <${IX.namesShortId}> "1"^^<${XSD}integer> . ${COV('uuid-1')} <${IX.namesShortId}> "5"^^<${XSD}integer> } }`, 'swap');
+    const e0 = await effects(s);
+    const p = await createPage(s, { title: 'Refused page', createdBy: 'ada', requestId: 'req-1744-r3b' });
+    assert.ok(!ok2xx(p.status), `refused (${p.status} ${p.text.slice(0, 200)})`);
+    assert.equal(p.json?.code, CODES.INDEX_INCOMPLETE, 'with the named code');
+    assert.deepEqual(await effects(s), e0, 'no effect');
+  });
+});
+
 // ── R: reference re-projection on create ──
 for (const mode of ['on', 'off']) {
   test(`#1744 (R1, mode ${mode}) a PROSE-only #4 gets its edge in the SAME write that creates #4; before, no traversable edge exists; the referrer's JSON is unchanged`, T, async () => {
@@ -575,12 +623,15 @@ test('#1744 (R2, mode off) a STRUCTURED reference (blockedBy #4) moves from the 
 
 /** F2: each damaged index state planted beneath the compiler after a COMPLETE backfill. Control: IDX-0 and W1 (undamaged). */
 const COV = (id) => `<${IX.card(id)}>`;
+/** a quad in the plan's OWN term shape (cardQuads: three {type, value[, datatype]} terms) */
+const Q = (s_, p_, o_) => [{ type: 'uri', value: s_ }, { type: 'uri', value: p_ }, o_.startsWith('literal:') ? { type: 'literal', value: o_.slice(8) } : { type: 'uri', value: o_ }];
 const DAMAGE = [
   ['a live card with NO coverage node', async ({ xu }) => xu(`DELETE WHERE { GRAPH <${BK}> { ${COV('uuid-2')} ?p ?o } }`, 'no-coverage')],
   ['an INTACT watermark with one name removed', async ({ xu }) => xu(`DELETE DATA { GRAPH <${BK}> { ${COV('uuid-2')} <${IX.namesShortId}> "1"^^<${XSD}integer> } }`, 'name-removed')],
   ['an EXTRA name', async ({ xu }) => xu(`INSERT DATA { GRAPH <${BK}> { ${COV('uuid-1')} <${IX.namesShortId}> "9"^^<${XSD}integer> } }`, 'name-extra')],
   ['a MISTYPED name (a plain string)', async ({ xu }) => xu(`DELETE DATA { GRAPH <${BK}> { ${COV('uuid-2')} <${IX.namesShortId}> "1"^^<${XSD}integer> } } ; INSERT DATA { GRAPH <${BK}> { ${COV('uuid-2')} <${IX.namesShortId}> "1" } }`, 'name-mistyped')],
-  ['an ORPHAN coverage node (no such card)', async ({ xu }) => xu(`INSERT DATA { GRAPH <${BK}> { ${COV('uuid-ghost')} <${IX.indexedVersion}> "1"^^<${XSD}integer> ; <${IX.indexedJsonDigest}> "${'0'.repeat(64)}" } }`, 'orphan')],
+  // a WELL-FORMED orphan (every coverage field, zero names), so only the orphan clause (S13, review 46326) can refuse it
+  ['an ORPHAN coverage node (no such card)', async ({ xu }) => xu(`INSERT DATA { GRAPH <${BK}> { ${COV('uuid-ghost')} <${IX.indexedVersion}> "1"^^<${XSD}integer> ; <${IX.indexedJsonDigest}> "${'0'.repeat(64)}" ; <urn:ex:card-ref-index/namesCount> "0"^^<${XSD}integer> ; <urn:ex:card-ref-index/namesSum> "0"^^<${XSD}integer> } }`, 'orphan')],
   ['a DUPLICATE watermark', async ({ xu }) => xu(`INSERT DATA { GRAPH <${BK}> { ${COV('uuid-1')} <${IX.indexedVersion}> "99"^^<${XSD}integer> } }`, 'dup-version')],
   ['a MISMATCHED JSON digest', async ({ q, xu }) => { const ds = await q(`SELECT ?d WHERE { GRAPH <${BK}> { ${COV('uuid-1')} <${IX.indexedJsonDigest}> ?d } }`); assert.equal(ds.length, 1, 'PRECONDITION: the backfill wrote card 1\'s digest'); const d = ds[0].d.value; await xu(`DELETE DATA { GRAPH <${BK}> { ${COV('uuid-1')} <${IX.indexedJsonDigest}> "${d}" } } ; INSERT DATA { GRAPH <${BK}> { ${COV('uuid-1')} <${IX.indexedJsonDigest}> "${'f'.repeat(64)}" } }`, 'bad-digest'); }],
   ['NO completion marker (a partial backfill)', async ({ xu }) => xu(`DELETE WHERE { GRAPH <${BK}> { <${IX.marker}> ?p ?o } }`, 'no-marker')],
@@ -673,10 +724,11 @@ async function expectRefused(s, o, control, label) {
   const cp = await durableUpdate(s.gc, { kind: 'origin.prepare', opId: originPrepareOp(ctl.mid), actor: ctl.descriptor.originActor === 'board' ? BOARD : `https://scrumboard.local/person/${ctl.descriptor.originActor}`, origin: ctl.descriptor, plan: ctl.plan });
   assert.equal(cp.outcome, 'APPLIED', `${label}: CONTROL: the same shape UNFORGED is admitted at prepare (${JSON.stringify(cp).slice(0, 240)})`);
   const e0 = await effects(s);
+  // the client turns a ValidationError into REJECTED itself, so anything THROWN is a crash, never a refusal (review 46326 item 7)
   let r;
-  try { r = await submit(s, o); } catch (e) { r = { thrown: String(e?.message || e) }; }
-  const outcome = r.thrown ? 'THROWN' : (r.prep.outcome !== 'APPLIED' ? r.prep.outcome : r.commit.outcome);
-  assert.ok(r.thrown ? /Validation|must|refus|not/i.test(r.thrown) : REFUSAL.has(outcome), `${label}: refused by the compiler/executor (${outcome} ${r.thrown ?? JSON.stringify(r).slice(0, 240)})`);
+  try { r = await submit(s, o); } catch (e) { assert.fail(`${label}: the compiler CRASHED instead of refusing (${e?.name}: ${String(e?.message || e).slice(0, 200)})`); }
+  const outcome = r.prep.outcome !== 'APPLIED' ? r.prep.outcome : r.commit.outcome;
+  assert.ok(REFUSAL.has(outcome), `${label}: refused by the compiler/executor (${outcome} ${JSON.stringify(r).slice(0, 240)})`);
   assert.deepEqual(await effects(s), e0, `${label}: no effect`);
 }
 async function cWorld(body) {
@@ -709,8 +761,13 @@ const FORGE = [
   ['the reference-resolve part OMITTED', (o) => { o.plan.parts = o.plan.parts.filter((p) => p.reason !== 'reference-resolve'); }],
   ['a SURPLUS reference-resolve part (#3 names nothing)', null],
   ["a referrer's JSON CHANGED under reference-resolve", (o) => { const p = o.plan.parts.find((x) => x.reason === 'reference-resolve'); const j = JSON.parse(p.json); j.title = 'retitled under cover'; p.json = JSON.stringify(j); }],
-  ['an UNRELATED quad in a referrer part', (o) => { const p = o.plan.parts.find((x) => x.reason === 'reference-resolve'); p.quads = [...p.quads, [{ termType: 'NamedNode', value: p.iri }, { termType: 'NamedNode', value: `${RS}relatedTo` }, { termType: 'NamedNode', value: cardIriOf('uuid-3') }, { termType: 'DefaultGraph', value: '' }]]; }],
-  ['a CALLER-SUPPLIED index quad', (o) => { const p = o.plan.parts.find((x) => x.iri === cardIriOf(o.cardId)); p.quads = [...p.quads, [{ termType: 'NamedNode', value: IX.card(o.cardId) }, { termType: 'NamedNode', value: IX.namesShortId }, { termType: 'Literal', value: '1', datatype: { termType: 'NamedNode', value: `${XSD}integer` } }, { termType: 'DefaultGraph', value: '' }]]; }],
+  // S3: an ADDED triple that does not point at the new card
+  ['an UNRELATED quad ADDED to a referrer part', (o) => { const p = o.plan.parts.find((x) => x.reason === 'reference-resolve'); p.quads = [...p.quads, Q(p.iri, `${RS}relatedTo`, cardIriOf('uuid-3'))]; }],
+  // finding 2 (D6): an added edge that DOES point at the new card, but the referrer's JSON does not name it; quads must equal cardQuads(json)
+  ['an edge to the new card the referrer\'s JSON does not name', (o) => { const p = o.plan.parts.find((x) => x.reason === 'reference-resolve'); p.quads = [...p.quads, Q(p.iri, `${RS}relatedTo`, cardIriOf(o.cardId))]; }],
+  // S17: one of the referrer's OWN existing triples REMOVED (it never pointed at the unresolved node)
+  ['one of the referrer\'s own triples REMOVED', (o) => { const p = o.plan.parts.find((x) => x.reason === 'reference-resolve'); const k = p.quads.findIndex((q) => q[0].value === p.iri && q[2].value !== cardIriOf(o.cardId) && q[1].value !== `${RS}mentionsCard`); assert.ok(k >= 0, 'PRECONDITION: the referrer has a triple to remove'); p.quads = p.quads.filter((_, i) => i !== k); }],
+  ['a CALLER-SUPPLIED index quad', (o) => { const p = o.plan.parts.find((x) => x.iri === cardIriOf(o.cardId)); p.quads = [...p.quads, [{ type: 'uri', value: IX.card(o.cardId) }, { type: 'uri', value: IX.namesShortId }, { type: 'literal', value: '1', datatype: `${XSD}integer` }]]; }],
   ['a subject part that is NOT the derived card id', (o) => { const p = o.plan.parts.find((x) => x.iri === cardIriOf(o.cardId)); p.iri = cardIriOf('uuid-not-derived'); }],
   ['provenance.cardId that is NOT the derived card id', (o) => { o.descriptor.provenance.cardId = 'uuid-not-derived'; }],
   ['a DUPLICATE part', (o) => { const p = o.plan.parts.find((x) => x.reason === 'reference-resolve'); o.plan.parts = [...o.plan.parts, { ...p }].sort((a, b) => (a.iri < b.iri ? -1 : a.iri > b.iri ? 1 : 0)); }],
@@ -721,11 +778,14 @@ for (const [what, forge] of FORGE) {
     await cWorld(async (s) => {
       const o = await wikiCreateOrigin(s, `req-1744-c1-${FORGE.findIndex(([w]) => w === what)}`);
       if (forge) forge(o);
-      else {   // the surplus part: #3, unchanged, re-sent as if it resolved something
+      else {   // the surplus part: #3, its stored JSON and its exact current projection, re-sent as if it resolved something.
+        // Internally consistent, so ONLY "its coverage names #N" (S16, review 46326) can refuse it.
         const c3 = await cardRow(s, 'uuid-3');
         const u = createCardsUnit({ client: s.gc, mintId: () => crypto.randomUUID() }); await u.load();
-        const fake = u.plan(u.snapshot().cards.map((c) => (c.id === 'uuid-3' ? { ...c, title: `${c.title} ` } : c)), null).parts.find((x) => x.iri === cardIriOf('uuid-3'));
-        o.plan.parts = [...o.plan.parts, { ...fake, json: c3.json, reason: 'reference-resolve' }].sort((a, b) => (a.iri < b.iri ? -1 : a.iri > b.iri ? 1 : 0));
+        const cards = u.snapshot().cards;
+        const newCard = JSON.parse(o.plan.parts.find((x) => x.iri === cardIriOf(o.cardId)).json);
+        const after = shortIdMap([...cards, newCard]), before = shortIdMap(cards);
+        o.plan.parts = [...o.plan.parts, { iri: cardIriOf('uuid-3'), expectedVersion: String(c3.ver), version: String(c3.ver + 1), quads: cardQuads(c3.card, after), prior: priorQuads(c3.card, before), json: c3.json, reason: 'reference-resolve' }].sort((a, b) => (a.iri < b.iri ? -1 : a.iri > b.iri ? 1 : 0));
       }
       await expectRefused(s, o, () => wikiCreateOrigin(s, `req-1744-c1-ctl-${FORGE.findIndex(([w]) => w === what)}`), what);
     });
@@ -839,10 +899,10 @@ test('#1744 (E5, mode off) a sibling changed between prepare and commit → the 
 });
 
 /** a valid hand-built done-nudge origin for #1 moving to done at `at`, siblings from the existing plan */
-async function doneNudgeOrigin(s, at, requestKey) {
+async function doneNudgeOrigin(s, at, requestKey, { shift: forged = null, anchor = undefined } = {}) {
   const u = createCardsUnit({ client: s.gc, mintId: () => crypto.randomUUID() }); await u.load();
   const snap = u.snapshot();
-  const shift = new Map(expectedWalk(snap.cards, 'uuid-1', at, undefined).map((x) => [x.id, x.order]));
+  const shift = forged ? forged(snap.cards) : new Map(expectedWalk(snap.cards, 'uuid-1', at, anchor).map((x) => [x.id, x.order]));
   for (const c of snap.cards) {
     if (c.id === 'uuid-1') { c.column = 'done'; c.order = at; c.version = (Number.isInteger(c.version) && c.version >= 0 ? c.version : 0) + 1; }
     else if (shift.has(c.id)) { c.order = shift.get(c.id); c.version = (Number.isInteger(c.version) && c.version >= 0 ? c.version : 0) + 1; }
@@ -852,7 +912,7 @@ async function doneNudgeOrigin(s, at, requestKey) {
   const parts = p.parts.map((x) => (x.iri === subject ? x : { ...x, reason: 'sibling-order' })).sort((a, b) => (a.iri < b.iri ? -1 : a.iri > b.iri ? 1 : 0));
   const key = JSON.stringify(['origin-v1', 'done-nudge', 'uuid-1', requestKey, 'ada']); const mid = mutationIdOf(key);
   const sp = parts.find((x) => x.iri === subject);
-  return { mid, shifted: [...shift.keys()], descriptor: { route: 'done-nudge', subject: 'uuid-1', requestKey, originActor: 'ada', mutationId: mid, provenance: { cardId: 'uuid-1', version: Number(sp.version) }, slots: [{ slot: 'done-nudge', author: 'board', body: "✅ #1 done — what's the next pull? (every done has a next: claim it, or name its gate)", mentions: [], notify: true }] }, plan: { parts } };
+  return { mid, shifted: [...shift.keys()], ...(anchor !== undefined ? { walkAnchor: anchor } : {}), descriptor: { route: 'done-nudge', subject: 'uuid-1', requestKey, originActor: 'ada', mutationId: mid, provenance: { cardId: 'uuid-1', version: Number(sp.version) }, slots: [{ slot: 'done-nudge', author: 'board', body: "✅ #1 done — what's the next pull? (every done has a next: claim it, or name its gate)", mentions: [], notify: true }] }, plan: { parts, ...(anchor !== undefined ? { walk: { anchor: anchor === null ? null : cardIriOf(anchor) } } : {}) } };
 }
 test('#1744 (E6 CONTROL) a hand-built VALID done-nudge origin with its sibling parts is admitted', T, async () => {
   await world('off', async (s) => {
@@ -870,7 +930,10 @@ const SFORGE = [
   ['a FORGED order (+1 beyond the walk)', (o) => { const p = o.plan.parts.find((x) => x.reason === 'sibling-order'); const j = JSON.parse(p.json); j.order += 1; p.json = JSON.stringify(j); }],
   ['a sibling whose version was NOT bumped', (o) => { const p = o.plan.parts.find((x) => x.reason === 'sibling-order'); const j = JSON.parse(p.json); j.version -= 1; p.json = JSON.stringify(j); }],
   ['a DUPLICATE sibling part', (o) => { const p = o.plan.parts.find((x) => x.reason === 'sibling-order'); o.plan.parts = [...o.plan.parts, { ...p }].sort((a, b) => (a.iri < b.iri ? -1 : a.iri > b.iri ? 1 : 0)); }],
-  ['an UNRELATED quad in a sibling part', (o) => { const p = o.plan.parts.find((x) => x.reason === 'sibling-order'); p.quads = [...p.quads, [{ termType: 'NamedNode', value: p.iri }, { termType: 'NamedNode', value: `${RS}relatedTo` }, { termType: 'NamedNode', value: cardIriOf('uuid-2') }, { termType: 'DefaultGraph', value: '' }]]; }],
+  // S7: a sibling whose quads change more than its order
+  ['an UNRELATED quad in a sibling part', (o) => { const p = o.plan.parts.find((x) => x.reason === 'sibling-order'); p.quads = [...p.quads, Q(p.iri, `${RS}relatedTo`, cardIriOf('uuid-2'))]; }],
+  // finding 7: a single-part done-nudge whose SUBJECT carries the reason must be REJECTED, never crash the compiler
+  ['its SUBJECT part carrying reason sibling-order and no siblings', (o) => { o.plan.parts = o.plan.parts.filter((p) => p.iri === cardIriOf('uuid-1')).map((p) => ({ ...p, reason: 'sibling-order' })); }],
 ];
 for (const [what, forge] of SFORGE) {
   test(`#1744 (E7) a hand-built done-nudge with ${what} is REFUSED, no effect`, T, async () => {
@@ -882,6 +945,29 @@ for (const [what, forge] of SFORGE) {
     });
   });
 }
+for (const [what, orders, forge] of [
+  // S9: the order-9 card is past the gap; listed with a consistent JSON/version/quads as the next in the chain, only the gap check refuses it
+  ['a card PAST THE GAP listed as shifted (S9)', [4, 9], (cards, sibs) => new Map([['uuid-3', 4], [sibs[0], 5], [sibs[1], 6]])],
+  // finding 1: a card BELOW the slot (order 1) listed first, the chain renumbered after it: consistent, and not the walk
+  ['a card BELOW the slot listed as shifted (finding 1)', [1, 4], (cards, sibs) => new Map([[sibs[0], 4], ['uuid-3', 5], [sibs[1], 6]])],
+]) {
+  test(`#1744 (E8) a hand-built done-nudge with ${what} is REFUSED, beside its control, no effect`, T, async () => {
+    await world('off', async (s) => {
+      await s.start(); const sibs = await doneColumn(s, orders);
+      const o = await doneNudgeOrigin(s, 3, `req-1744-e8-${orders.join('-')}`, { shift: (cards) => forge(cards, sibs) });
+      await expectRefused(s, o, () => doneNudgeOrigin(s, 3, `req-1744-e8-ctl-${orders.join('-')}`), what);
+    });
+  });
+}
+// P1b (review 46326): an ANCHORED walk (#1 to order 5, after X of the tied pair X, Y at 4) shifts only Y; a plan that also shifts X,
+// the card BEFORE the anchor, with a consistent chain, must be refused. The control is the same anchored plan, unforged.
+test('#1744 (E8) a hand-built ANCHORED done-nudge that also shifts the card BEFORE its anchor is REFUSED, beside its control, no effect', T, async () => {
+  await world('off', async (s) => {
+    await s.start(); const sibs = await doneColumn(s, [4, 4]);
+    const o = await doneNudgeOrigin(s, 5, 'req-1744-e8-anchor', { anchor: sibs[0], shift: () => new Map([[sibs[0], 6], [sibs[1], 7]]) });
+    await expectRefused(s, o, () => doneNudgeOrigin(s, 5, 'req-1744-e8-anchor-ctl', { anchor: sibs[0] }), 'shifting the card before the anchor');
+  });
+});
 test('#1744 (E7) a hand-built done-nudge with a SURPLUS sibling (a done card past the gap, re-sent as shifted) is REFUSED, no effect', T, async () => {
   await world('off', async (s) => {
     await s.start(); const sibs = await doneColumn(s, [4, 9]);
