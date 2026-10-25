@@ -76,6 +76,7 @@ const SKIP = HAVE_PY ? false : 'UNAVAILABLE: no python with pyoxigraph (a skip i
 const T = { skip: SKIP, timeout: 600000 };
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PUBLISHER = path.join(HERE, '..', 'scripts', 'announce-publisher.mjs');
+const INDEX_TOOL = path.join(HERE, '..', 'scripts', 'card-ref-index-1744.mjs');
 const DSID = WB_DATASET;
 const BK = 'urn:scrum:bookkeeping:executor';
 const RG = 'urn:ex:postseq/recovery';
@@ -214,6 +215,12 @@ async function world(body) {
     const seqs = (await rows(cur, `SELECT ?n WHERE { { ?s ?p ?n } UNION { GRAPH ?g { ?s ?p ?n } } FILTER(STRENDS(STR(?p), "/postSeq") || STRENDS(STR(?p), "#postSeq")) }`)).map((b) => Number(b.n.value)).filter(Number.isSafeInteger);
     const epochName = (/"postSeqEpoch"\s*:\s*"([^"]+)"/.exec(kept.toString('utf8')) || [])[1] || 'e-a8-1749';
     await xu(`INSERT DATA { GRAPH <${BK}> { <urn:ex:postseq/allocator> a <urn:ex:postseq/Allocator> ; <urn:ex:postseq/postSeqEpoch> ${JSON.stringify(epochName)} ; <urn:ex:postseq/nextPostSeq> "${Math.max(0, ...seqs) + 1}"^^<${XSD}integer> ; <urn:ex:postseq/version> "1"^^<${XSD}integer> . } }`, 'allocator-seeded');
+    // #1744: mode off refuses to START unless the card reference index is exact under complete true, so the fixture initializes it
+    // EXPLICITLY, once, with the real tool, writers stopped by construction (no REST is running yet). Every backup below copies
+    // this store, so a restored and promoted store carries the same index; D1's refusal can then only be the allocator's hold.
+    const ix = spawnSync(process.execPath, [INDEX_TOOL, '--executor', cur.baseUrl, '--dataset', DSID, '--backfill'], { encoding: 'utf8', timeout: 180000 });
+    assert.equal(ix.status, 0, `PRECONDITION: the card reference index was backfilled before REST started (exit ${ix.status}: ${(ix.stdout + ix.stderr).slice(-300)})`);
+    assert.match(ix.stdout, /^COMPLETE$/m, 'PRECONDITION: the backfill reports COMPLETE');
     const liveHome = (await health(cur)).storeHome;
     assert.ok(typeof liveHome === 'string' && fs.existsSync(liveHome), `PRECONDITION: /health names the live store's home (${liveHome})`);
 
