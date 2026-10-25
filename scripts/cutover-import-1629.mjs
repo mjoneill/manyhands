@@ -184,13 +184,22 @@ async function run({ id, base, dataset, docBytes, outboxBytes, captureBytes, cap
     if (!r) refuse('MANIFEST_MISSING', `${e.obligationId} is pending and not in the manifest`);
     if (!r.class) refuse('PENDING_UNDISPOSED', `${e.obligationId} has no disposition`);
     if (!CLASSES.has(r.class)) refuse('PENDING_UNDISPOSED', `${e.obligationId}: unknown class ${r.class}`);
-    const postId = announcePostId(e.mutationId, e.slot);
-    if (e.mode === 'legacy' && e.legacyPostId !== postId) refuse('PROOF_MISMATCH', `${e.obligationId}: legacyPostId ${e.legacyPostId} is not its derived post ${postId}`);
+    // The proof post: a LEGACY entry names its own post (legacyPostId). Measured on a copy of prod: legacy posts were written by
+    // the document path under their own ids, NOT announcePostId(mutationId, slot). A publisher entry's post is the derived id.
+    // Either way the field join below must hold, so a pointer to another announcement fails on originMutation/slot.
+    if (e.mode === 'legacy' && (typeof e.legacyPostId !== 'string' || !e.legacyPostId)) refuse('PROOF_MISSING', `${e.obligationId}: a legacy entry with no legacyPostId`);
+    const postId = e.mode === 'legacy' ? e.legacyPostId : announcePostId(e.mutationId, e.slot);
+    if (r.matchedPostId && r.matchedPostId !== postId) refuse('PROOF_MISMATCH', `${e.obligationId}: the manifest's matchedPostId ${r.matchedPostId} is not the entry's post ${postId}`);
     const post = await readPost(X, postId);
     if (!post) refuse('PROOF_MISSING', `${e.obligationId}: post ${postId} is not in the candidate`);
     const p = e.payload || {};
-    const want = { body: p.body, author: `${PERSON}${p.author}`, originActor: `${PERSON}${p.originActor}`, occurredAt: p.occurredAt,
-      mentions: JSON.stringify([...(p.mentions || [])].sort()), originMutation: p.mutationId, originSlot: p.slot };
+    // The join is the board's OWN settlement rule (core/announce-outbox.mjs postMatchesEntry: author, body, origin mutation and
+    // slot against the ENTRY), plus mentions, plus the payload agreeing with its entry. A legacy post was written by the
+    // document path and carries no originActor or originOccurredAt (measured on a copy of prod: its dateCreated is not the
+    // payload's occurredAt), so those two are joined only for PUBLISHER posts, which the executor path writes with both.
+    if (p.mutationId !== e.mutationId || p.slot !== e.slot) refuse('PROOF_MISMATCH', `${e.obligationId}: the payload names ${p.mutationId}/${p.slot}, the entry ${e.mutationId}/${e.slot}`);
+    const want = { body: p.body, author: `${PERSON}${p.author}`, mentions: JSON.stringify([...(p.mentions || [])].sort()), originMutation: e.mutationId, originSlot: e.slot,
+      ...(e.mode === 'publisher' ? { originActor: `${PERSON}${p.originActor}`, occurredAt: p.occurredAt } : {}) };
     for (const [f, v] of Object.entries(want)) if (post[f] !== v) refuse('PROOF_MISMATCH', `${e.obligationId}: the post's ${f} is ${JSON.stringify(post[f])}, the entry says ${JSON.stringify(v)}`);
     if (e.mode === 'legacy') {
       if (r.class !== 'retire-with-proof') refuse('PENDING_UNDISPOSED', `${e.obligationId}: a legacy entry retires with proof, not ${r.class}`);
