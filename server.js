@@ -12693,9 +12693,8 @@ async function handleCreateNode(req, res) {
     if (!body.title || !body.title.trim()) return sendJSON(res, 400, { error: 'title is required' });
     const verr = validateCardFields({ type: body.type });
     if (verr) return sendJSON(res, 400, { error: verr });
-    // #1629 s3 D1 — executor-owned: a page create (wiki-create) is not migrated until slice 4. Refused HERE, before the
-    // lock and before any durable effect: no card, no counter, no origin, no reservation.
-    if (ORIGIN_EXECUTOR) return sendJSON(res, 503, { error: 'a page create is not available while the executor owns announcements (wiki-create is #1629 slice 4)', code: 'ORIGIN_SHAPE_NOT_MIGRATED' });
+    // #1744 (#1629 slice 4) — executor-owned: the page create is a `wiki-create` origin (createNodeAsOrigin, below)
+    if (ORIGIN_EXECUTOR) return await createNodeAsOrigin(res, body);
     let notice = null;
     const created = await withWriteLock(async () => {
       const data = readBoard();
@@ -12735,6 +12734,91 @@ async function handleCreateNode(req, res) {
     console.error('POST /api/nodes:', e.message);
     sendJSON(res, 500, { error: 'Failed to create node' });
   }
+}
+
+/**
+ * #1744 (#1629 slice 4) — a page create in executor-owned mode, as ONE `wiki-create` origin (contract v2 V2-1, F4):
+ *   identity  requestId (the caller's, or minted here and returned) → mutationId = UUIDv5(["origin-v1","wiki-create","wiki",
+ *             requestId,"board"]) and the card id DERIVED from it, so a retry can never mint a second card;
+ *   request   the canonical semantic request, frozen as requestDigest in the descriptor (and so in its digest);
+ *   plan      the new card at the counter's shortId, the counter advance, every card naming that shortId (reference-resolve),
+ *             and the version of every ancestor the plan read (parent and apex chain), all from the cards unit's own plan;
+ *   retry     same key + same digest after the commit → the ORIGINAL card, nothing written; before the commit → the frozen
+ *             plan's timestamps are reused, so an unchanged world replays the prepare and commits, and a changed one is
+ *             refused as STALE_PREPARED (never a silent replan); same key + another digest → REQUEST_CONFLICT.
+ * The notice is the obligation's slot `wiki` (author wiki, feed-only), published after the answer like any origin's.
+ */
+async function createNodeAsOrigin(res, body) {
+  const requestId = typeof body.requestId === 'string' && body.requestId ? body.requestId : crypto.randomUUID();
+  const originActor = 'board';   // F4: appendWikiNotice's actor policy in executor mode, never the declared createdBy
+  const { originKeyOf, mutationIdOf, WIKI_CREATE_ROUTE } = COMPILER_MOD;
+  const mutationId = mutationIdOf(originKeyOf(WIKI_CREATE_ROUTE, 'wiki', requestId, originActor));
+  const cardId = mutationIdOf(`${mutationId}:card`);
+  const conflict = (code, error) => sendJSON(res, 409, { error, code, requestId });
+  let handle = null, node = null, replayed = false;
+  try {
+    node = await withWriteLock(async () => {
+      if (CARDS_UNIT) await CARDS.ensureFresh();
+      const data = readBoard();   // executor-owned: built from the units, no document read (#1563)
+      const snap = CARDS.snapshot(data.nextShortId);
+      const card = createCardFromPayload({ id: cardId, title: body.title, description: body.body || '', type: body.type || 'reference', createdBy: body.createdBy }, snap.nextShortId);
+      if (typeof body.parent === 'string') card.parent = body.parent;
+      if (body.attachments !== undefined) card.attachments = sanitizeAttachments(body.attachments);
+      const canonical = JSON.stringify({ v: 1, title: card.title, description: card.description, type: card.type, parent: typeof body.parent === 'string' ? body.parent : null, attachments: body.attachments === undefined ? null : card.attachments, createdBy: card.createdBy ?? null });
+      const requestDigest = crypto.createHash('sha256').update(`wikiCreateRequestV 1\n${canonical}`).digest('hex');
+      const prior = await ORIGIN_MOD.readPreparedOrigin(ANNOUNCE_EXECUTOR, mutationId);
+      if (!prior.ok) throw Object.assign(new Error(`the prepared origin could not be read (${prior.reason})`), { code: 'CARDS_UNAVAILABLE' });
+      if (prior.prepared) {
+        const was = JSON.parse(prior.prepared.descriptorJson);
+        if (was.provenance?.requestDigest !== requestDigest) { replayed = 'conflict'; return null; }
+        if (prior.prepared.committedBy) {   // the same request, already committed: the ORIGINAL card, nothing written
+          replayed = 'committed';
+          const live = CARDS.snapshot(data.nextShortId).cards.find((c) => c.id === cardId);
+          return live ? cardToNode(live) : null;
+        }
+        // prepared, never committed: reuse the FROZEN plan's timestamps, so the identical world rebuilds the identical plan
+        const stored = JSON.parse(prior.prepared.planJson).parts.find((x) => x.iri === `https://scrumboard.local/entity/${cardId}`);
+        if (stored) { const j = JSON.parse(stored.json); card.createdAt = j.createdAt; card.updatedAt = j.updatedAt; }
+        replayed = 'prepared';
+      }
+      const cards = [...snap.cards, card];
+      if (card.parent != null) applyApexLabels(cards, card.id);   // #902 item 4 — born labelled
+      // every ancestor the plan READ, pinned at its graph version (F4: the whole parent/apex chain, not just the parent)
+      const reads = [];
+      for (let id = card.parent, seen = new Set(); id && !seen.has(id); id = cards.find((c) => c.id === id)?.parent) {
+        seen.add(id);
+        const v = CARDS.versionOf(id);
+        if (v != null) reads.push({ iri: `https://scrumboard.local/entity/${id}`, version: String(v) });
+      }
+      const subject = `https://scrumboard.local/entity/${cardId}`;
+      const noticeBody = `📄 page created: **${(card.title || 'untitled').trim()}** (#${card.shortId})`;
+      const r = await CARDS.commitOrigin(cards, snap.nextShortId + 1, {
+        create: true, reads,
+        decorate: (parts) => parts.map((x) => (x.iri === subject ? x : { ...x, reason: 'reference-resolve' })),
+        describe: () => ({ route: WIKI_CREATE_ROUTE, subject: 'wiki', requestKey: requestId, originActor, mutationId,
+          provenance: { cardId, version: 1, requestDigest },
+          slots: [{ slot: 'wiki', author: 'wiki', body: noticeBody, mentions: extractMentionsFromRoster(noticeBody, currentRoster(data)), notify: false }] }),
+        afterPrepare: () => testBarrier('after-origin-prepare'),
+      });
+      if (r.outcome === 'APPLIED') handle = { mode: 'publisher', executorOwned: true, slot: 'wiki', mutationId: r.mutationId, obligationId: `${r.mutationId}:wiki` };
+      return cardToNode(card);
+    });
+  } catch (e) {
+    if (e instanceof PostSeqStateCorrupt) return sendJSON(res, 500, e.body);
+    if (e && e.code === 'CARD_WRITE_CONFLICT') {
+      if (CARD_REF_INDEX_ENFORCE && (await cardRefIndexIncomplete()) === true) return sendJSON(res, 409, { error: 'the card reference index is incomplete or damaged; nothing was written (run scripts/card-ref-index-1744.mjs --backfill with writers stopped)', code: 'INDEX_INCOMPLETE', requestId });
+      // a keyed retry whose frozen plan no longer matches the world: the prepare under the same key refuses (intent collision)
+      if (replayed === 'prepared') return conflict('STALE_PREPARED', 'this request was prepared against a board that has since changed; it is not replanned under the same key (use a new requestId)');
+      return conflict('WRITE_CONFLICT', `the graph refused this page create; nothing was written: ${e.message}`);
+    }
+    if (e && (e.code === 'CARDS_UNAVAILABLE' || e.code === 'COLLECTIONS_UNAVAILABLE')) return sendJSON(res, 503, { error: `the graph executor is not answering; nothing is reported as written: ${e.message}`, code: 'GRAPH_UNAVAILABLE', requestId });
+    console.error('POST /api/nodes (wiki-create):', e.message);
+    return sendJSON(res, 500, { error: 'Failed to create node', requestId });
+  }
+  if (replayed === 'conflict') return conflict('REQUEST_CONFLICT', 'this requestId was already used for a different page request; nothing was written');
+  if (!node) return sendJSON(res, 503, { error: 'the committed page could not be read back', code: 'GRAPH_UNAVAILABLE', requestId });
+  sendJSON(res, replayed === 'committed' ? 200 : 201, { ...node, requestId });
+  if (handle) publishAnnouncements([handle]);
 }
 
 // #220 — would setting node `childId`'s parent to `newParentId` create a cycle?

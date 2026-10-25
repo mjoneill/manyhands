@@ -572,7 +572,7 @@ const RECORD_FIELDS = {
   'delivery.step': ['target', 'step'],      // #1582 — one step, guarded by the delivery's expected version (as memory.revise)
   'delivery.import': ['delivery'],          // #1582 migration — a document delivery and ALL its steps, fresh, in one update
   'modelcall.create': ['call'],             // #1582 — one ledger row, fresh at its derived IRI
-  'card.write': ['parts', 'counter', 'pending', 'collections', 'origin', 'indexGuard'],       // #1598 — one or more cards, each guarded on its version, in ONE update; #1629 s2 — `origin` makes it an origin commit
+  'card.write': ['parts', 'counter', 'pending', 'collections', 'origin', 'indexGuard', 'reads'],       // #1598 — one or more cards, each guarded on its version, in ONE update; #1629 s2 — `origin` makes it an origin commit
   'entity.put': ['entity'],                 // #1624 — one generic storage primitive; the `kind` field selects the projection
   'origin.prepare': ['origin', 'plan'],     // #1629 s2 — the Prepared record of one origin: its descriptor and its frozen business plan
 };
@@ -1278,11 +1278,13 @@ function cardQuadClass([s, p, o], iri, id, what) {
   fail(`${what}: ${S} is not owned by ${iri}`);
 }
 
-function canonCardWrite(i) {
+function canonCardWrite(i, { origin = i.origin != null } = {}) {
   if (!Array.isArray(i.parts) || (!i.parts.length && i.counter == null && !(Array.isArray(i.collections) && i.collections.length))) fail('card.write.parts is a non-empty array (or empty, with a counter or collections)');
   const parts = i.parts.map((x, k) => {
     const w = `parts[${k}]`;
-    obj(x, ['iri', 'expectedVersion', 'version', 'quads', 'prior', 'json', 'remove', 'importDigest'], w);
+    obj(x, ['iri', 'expectedVersion', 'version', 'quads', 'prior', 'json', 'remove', 'importDigest', ...(origin ? ['reason'] : [])], w);
+    // #1744 — a non-subject part of an origin plan says WHY it rides the write; bindOriginPlan checks it against the route
+    if (x.reason != null && !ORIGIN_PART_REASONS.includes(x.reason)) fail(`${w}.reason must be one of ${ORIGIN_PART_REASONS.join(', ')}`);
     // A REMOVE part (a card deleted): guarded on its version, every owned triple deleted, nothing inserted.
     if (x.remove === true) {
       const iri = checkIri(x.iri, `${w}.iri`);
@@ -1328,7 +1330,7 @@ function canonCardWrite(i) {
       if (typeof x.importDigest !== 'string' || !/^[0-9a-f]{64}$/.test(x.importDigest)) fail(`${w}.importDigest must be a sha-256 hex digest`);
       importDigest = x.importDigest;
     }
-    return { iri, expectedVersion, version, quads, prior, json: rStr(x.json, `${w}.json`), ...(importDigest ? { importDigest } : {}) };
+    return { iri, expectedVersion, version, quads, prior, json: rStr(x.json, `${w}.json`), ...(importDigest ? { importDigest } : {}), ...(x.reason != null ? { reason: x.reason } : {}) };
   }).sort((a, b) => (a.iri < b.iri ? -1 : 1));
   if (new Set(parts.map((p) => p.iri)).size !== parts.length) fail('card.write: a card appears in two parts');
   // #1598 K4 — an announcement committed with a card change rides the SAME update as a PendingAnnouncement node under the
@@ -1354,7 +1356,20 @@ function canonCardWrite(i) {
   // #1744 — `indexGuard: true` makes a write that adds or removes a shortId prove the reference index is complete and that it
   // re-projects EVERY card naming that shortId (contract v2 V2-2, F2). Absent = maintained but not enforced (F3 rollout).
   if (i.indexGuard != null && i.indexGuard !== true) fail('indexGuard must be true or absent');
-  return { parts, counter, ...(pending.length ? { pending } : {}), ...(collections.length ? { collections } : {}), ...(i.indexGuard === true ? { indexGuard: true } : {}) };
+  // #1744 — the entities a wiki-create plan READ (its parent and the apex chain), each pinned at the version it saw (F4)
+  let reads = [];
+  if (i.reads != null) {
+    if (!origin) fail('reads ride an origin plan only');
+    if (!Array.isArray(i.reads)) fail('reads must be an array');
+    reads = i.reads.map((r, k) => {
+      obj(r, ['iri', 'version'], `reads[${k}]`);
+      const iri = checkIri(r.iri, `reads[${k}].iri`);
+      if (!iri.startsWith(ENTITY_IRI)) fail(`reads[${k}].iri must be ${ENTITY_IRI}<card id>`);
+      return { iri, version: intLit(r.version, `reads[${k}].version`) };
+    }).sort((a, b) => (a.iri < b.iri ? -1 : 1));
+    if (new Set(reads.map((r) => r.iri)).size !== reads.length) fail('reads: an entity appears twice');
+  }
+  return { parts, counter, ...(pending.length ? { pending } : {}), ...(collections.length ? { collections } : {}), ...(i.indexGuard === true ? { indexGuard: true } : {}), ...(reads.length ? { reads } : {}) };
 }
 
 /**
@@ -1405,6 +1420,34 @@ function indexGuardClauses(R) {
       if (Number.isSafeInteger(sid)) S = `"${sid}"^^${INT}`;
     }
     if (S) out.push(`    FILTER NOT EXISTS { GRAPH ${BK} { ?ixr ${IN} ?ixrs . } FILTER(?ixrs = ${S})${notIn} }`);
+  });
+  return out;
+}
+
+/**
+ * #1744 — a wiki-create's `reference-resolve` parts (contract v1 D6, F4): each is an EXISTING card whose stored JSON is
+ * byte-identical to the part's (no semantic edit rides this reason), whose coverage names the new #N, whose every ADDED
+ * domain triple points at the new card, and whose every REMOVED own triple pointed at the unresolved #N node. Limitation,
+ * stated: the removed-triple check covers the card's own subject, not its child nodes (blockers, checks), whose IRIs would
+ * need a prefix scan of the store.
+ */
+function referenceResolveClauses(R) {
+  const JSONP = ref(`${CW.scrum}entityJson`), IN = ref(CRI.namesShortId), INT = `<http://www.w3.org/2001/XMLSchema#integer>`;
+  const NEW = ref(`${ENTITY_IRI}${R.origin.provenance.cardId}`);
+  const subject = R.parts.find((P) => P.iri === `${ENTITY_IRI}${R.origin.provenance.cardId}`);
+  const N = JSON.parse(subject.json).shortId;
+  const UNRES = ref(`https://scrumboard.local/unresolved/${N}`);
+  const out = [];
+  R.parts.forEach((P, k) => {
+    if (P.reason !== 'reference-resolve') return;
+    const I = ref(P.iri), COV = ref(CRI.card(P.iri.slice(ENTITY_IRI.length)));
+    const values = P.quads.map((q) => `(${q.join(' ')})`).join(' ');
+    out.push(
+      `    GRAPH ${BK} { ${I} ${JSONP} ?rrj${k} . } FILTER(STR(?rrj${k}) = ${recLit(P.json)})`,
+      `    GRAPH ${BK} { ${COV} ${IN} "${N}"^^${INT} . }`,
+      `    FILTER NOT EXISTS { VALUES (?rqs${k} ?rqp${k} ?rqo${k}) { ${values} } FILTER NOT EXISTS { ?rqs${k} ?rqp${k} ?rqo${k} } FILTER(?rqo${k} != ${NEW}) }`,
+      `    FILTER NOT EXISTS { ${I} ?rep${k} ?reo${k} . FILTER NOT EXISTS { VALUES (?rvp${k} ?rvo${k}) { ${P.quads.filter((q) => q[0] === I).map((q) => `(${q[1]} ${q[2]})`).join(' ')} } FILTER(sameTerm(?rvp${k}, ?rep${k}) && sameTerm(?rvo${k}, ?reo${k})) } FILTER(?reo${k} != ${UNRES}) }`,
+    );
   });
   return out;
 }
@@ -1477,7 +1520,13 @@ function compileCardWrite(c) {
     }
     bIns.push(`  ${v(CTR)} ${VER} ${v(R.counter.next)} .`);
   }
-  if (R.indexGuard) pre.push(...indexGuardClauses(R));   // #1744
+  // #1744 — a wiki-create commit is ALWAYS index-guarded (its parts must be exactly the cards naming the new #N), pins every
+  // entity its plan read (the parent and apex chain, F4), and proves each reference-resolve part changes nothing but the
+  // edge into the new card
+  const wikiCreate = R.origin?.route === WIKI_CREATE_ROUTE;
+  if (R.indexGuard || wikiCreate) pre.push(...indexGuardClauses(R));
+  (R.reads || []).forEach((r, k) => pre.push(`    GRAPH ${BK} { ${ref(r.iri)} ${VER} ?xrd${k} . }`, `    FILTER(?xrd${k} = ${r.version})`));
+  if (wikiCreate) pre.push(...referenceResolveClauses(R));
   if (R.origin) originCommitClauses(c, digest, { OP, v, pre, dBinds, bDel, bIns });   // #1629 s2 — absent, nothing here runs
   pre.push(`    BIND(true AS ?ok)`);
   where.push(`  OPTIONAL {`, ...pre, `  }`);
@@ -1516,9 +1565,12 @@ function compileCardWrite(c) {
 
 /** r3 §1: the permanent mutation namespace. Generated once (Python uuid4, 2026-10-20T03:46:33Z); never regenerated. */
 export const ORIGIN_NAMESPACE = 'cd807138-eefc-40d2-9a80-525e666e6269';
+export const ORIGIN_PART_REASONS = Object.freeze(['reference-resolve', 'sibling-order']);   // #1744 (v1 D6)
+/** #1744 — the page create: a NEW card, its counter advance and its reference re-projections, as one origin (slot `wiki`). */
+export const WIKI_CREATE_ROUTE = 'wiki-create';
 export const ORIGIN_CARD_ROUTES = Object.freeze(['claim', 'release', 'done-nudge', 'wiki']);
 export const ORIGIN_AGENT_ROUTES = Object.freeze(['agent-rest', 'agent-retire']);
-export const ORIGIN_ROUTES = Object.freeze([...ORIGIN_CARD_ROUTES, ...ORIGIN_AGENT_ROUTES]);
+export const ORIGIN_ROUTES = Object.freeze([...ORIGIN_CARD_ROUTES, ...ORIGIN_AGENT_ROUTES, WIKI_CREATE_ROUTE]);   // #1744
 const ORIGIN_SLOT_RE = /^[a-z][a-z0-9-]{0,31}$/;
 /** The agent entity IRI for a seat: the rule #1624's agent route uses (server.js:5003 at 429e487). */
 export const originAgentIri = (seat) => `https://scrumboard.local/agent/${encodeURIComponent(seat)}`;
@@ -1558,7 +1610,16 @@ export function canonOriginDescriptor(d, { commit = false } = {}) {
   const mutationId = mutationIdOf(key);
   if (d.mutationId !== mutationId) fail(`origin.mutationId ${JSON.stringify(d.mutationId)} is not the recomputed ${mutationId}`);
   let provenance;
-  if (ORIGIN_CARD_ROUTES.includes(d.route)) {
+  if (d.route === WIKI_CREATE_ROUTE) {
+    // #1744 D2/V2-1 — the subject is the route's slot, the card id is DERIVED from the mutation (so a retry can't mint a
+    // second card), the version is 1, and the frozen request digest is bound into the descriptor (and so its digest)
+    if (d.subject !== 'wiki') fail('a wiki-create origin has subject "wiki"');
+    const p = obj(d.provenance, ['cardId', 'version', 'requestDigest'], 'origin.provenance');
+    if (p.cardId !== mutationIdOf(`${mutationId}:card`)) fail(`origin.provenance.cardId must be the derived ${mutationIdOf(`${mutationId}:card`)}`);
+    if (p.version !== 1) fail('a wiki-create origin creates its card at version 1');
+    if (typeof p.requestDigest !== 'string' || !/^[0-9a-f]{64}$/.test(p.requestDigest)) fail('origin.provenance.requestDigest must be a sha-256 hex digest');
+    provenance = { cardId: p.cardId, version: 1, requestDigest: p.requestDigest };
+  } else if (ORIGIN_CARD_ROUTES.includes(d.route)) {
     const p = obj(d.provenance, ['cardId', 'version'], 'origin.provenance');
     if (p.cardId !== d.subject) fail('origin.provenance.cardId must equal origin.subject');
     if (!Number.isSafeInteger(p.version) || p.version < 1) fail('origin.provenance.version must be a positive safe integer');
@@ -1603,6 +1664,9 @@ function originCommon(descriptor, { actor, evidence, people }, opId, wantOp) {
  */
 function bindOriginPlan(descriptor, plan) {
   if (plan.pending) fail('an origin plan carries no K4 pending announcement');
+  if (descriptor.route === WIKI_CREATE_ROUTE) return bindWikiCreatePlan(descriptor, plan);
+  if (plan.reads?.length) fail('only a wiki-create origin plan carries reads');
+  if (plan.parts.some((p) => p.reason != null && p.reason !== 'sibling-order')) fail('a reference-resolve part rides a wiki-create origin only');
   if (plan.counter != null) fail('an origin plan carries no counter');
   const live = (p, w) => {
     if (p.remove) fail(`${w}: an origin plan removes nothing`);
@@ -1629,10 +1693,36 @@ function bindOriginPlan(descriptor, plan) {
   });
 }
 
+/**
+ * #1744 — a wiki-create plan (contract v1 D4–D6, v2 V2-1): exactly ONE create part, the derived card at version 1, whose JSON
+ * names that id and the frozen shortId N; the counter advances exactly N → N+1; every other part is an EXISTING card riding as
+ * `reference-resolve` (its JSON unchanged and its only edge changes into the new card: checked by the compiler against the
+ * stored state, at commit); nothing is removed; no collections. The index guard is forced for this route at commit.
+ */
+function bindWikiCreatePlan(descriptor, plan) {
+  if (plan.collections?.length) fail('a wiki-create plan holds no collections');
+  const subject = `${ENTITY_IRI}${descriptor.provenance.cardId}`;
+  const S = plan.parts.filter((p) => p.iri === subject);
+  if (S.length !== 1) fail(`a wiki-create plan holds exactly one part for the derived card ${subject}`);
+  const [P] = S;
+  if (P.remove || P.expectedVersion != null || P.version !== '1') fail('the wiki-create subject part is a create at version 1');
+  if (P.reason != null) fail('the wiki-create subject part carries no reason');
+  let card;
+  try { card = JSON.parse(P.json); } catch { fail('the wiki-create subject part carries card JSON'); }
+  if (card.id !== descriptor.provenance.cardId || card.version !== 1 || !Number.isSafeInteger(card.shortId) || card.shortId < 1) fail('the wiki-create card JSON must carry the derived id, version 1 and a shortId');
+  const N = String(card.shortId);
+  if (!plan.counter || plan.counter.expected !== N || plan.counter.next !== String(card.shortId + 1)) fail(`a wiki-create plan advances the counter exactly ${N} → ${card.shortId + 1}`);
+  for (const [k, p] of plan.parts.entries()) {
+    if (p.iri === subject) continue;
+    if (p.remove || p.expectedVersion == null) fail(`parts[${k}]: a wiki-create plan creates only its own card and removes nothing`);
+    if (p.reason !== 'reference-resolve') fail(`parts[${k}]: every other part of a wiki-create plan rides as reference-resolve`);
+  }
+}
+
 /** A plan canonicalized by canonCardWrite itself, with pending and origin refused (r3 §3). */
 function canonOriginPlan(plan) {
-  obj(plan, ['parts', 'counter', 'collections'], 'plan');
-  return canonCardWrite({ parts: plan.parts ?? [], counter: plan.counter, collections: plan.collections });
+  obj(plan, ['parts', 'counter', 'collections', 'reads'], 'plan');
+  return canonCardWrite({ parts: plan.parts ?? [], counter: plan.counter, collections: plan.collections, reads: plan.reads }, { origin: true });
 }
 
 /**
@@ -1672,16 +1762,21 @@ export function admitStoredOriginPlan(descriptor, plan) {
     });
   };
   const versions = (p, w) => {
-    int(p.expectedVersion, `${w}.expectedVersion`); int(p.version, `${w}.version`);
+    int(p.version, `${w}.version`);
+    if (p.expectedVersion === null && descriptor.route === WIKI_CREATE_ROUTE) { rStr(p.json, `${w}.json`); return; }   // #1744 — its create
+    int(p.expectedVersion, `${w}.expectedVersion`);
     if (BigInt(p.version) <= BigInt(p.expectedVersion)) fail(`${w}.version must be above expectedVersion`);
     rStr(p.json, `${w}.json`);
   };
   const ordered = (list, w) => list.forEach((p, k) => { if (k && !(list[k - 1].iri < p.iri)) fail(`${w}[${k}] is out of iri order`); });
-  keys(plan, ['parts', 'counter'], ['collections'], 'plan');
+  keys(plan, ['parts', 'counter'], ['collections', 'reads'], 'plan');
+  if (plan.counter != null) { keys(plan.counter, ['expected', 'next'], [], 'plan.counter'); int(plan.counter.expected, 'plan.counter.expected'); int(plan.counter.next, 'plan.counter.next'); }
+  if (plan.reads != null) { if (!Array.isArray(plan.reads) || !plan.reads.length) fail('plan.reads, when present, is a non-empty array'); plan.reads.forEach((r, k) => { keys(r, ['iri', 'version'], [], `plan.reads[${k}]`); checkIri(r.iri, `plan.reads[${k}].iri`); int(r.version, `plan.reads[${k}].version`); if (k && !(plan.reads[k - 1].iri < r.iri)) fail(`plan.reads[${k}] is out of iri order`); }); }
   if (!Array.isArray(plan.parts)) fail('plan.parts is an array');
   plan.parts.forEach((p, k) => {
     const w = `plan.parts[${k}]`;
-    keys(p, ['iri', 'expectedVersion', 'version', 'quads', 'prior', 'json'], [], w);
+    keys(p, ['iri', 'expectedVersion', 'version', 'quads', 'prior', 'json'], ['reason'], w);
+    if (p.reason != null && !ORIGIN_PART_REASONS.includes(p.reason)) fail(`${w}.reason is not a known part reason`);
     const iri = checkIri(p.iri, `${w}.iri`), id = iri.slice(ENTITY_IRI.length);
     if (!iri.startsWith(ENTITY_IRI) || !/^[A-Za-z0-9-]{1,64}$/.test(id)) fail(`${w}.iri must be ${ENTITY_IRI}<card id>`);
     versions(p, w);
@@ -1726,10 +1821,10 @@ export function admitStoredOriginPlan(descriptor, plan) {
   }
   bindOriginPlan(descriptor, plan);
   // rebuilt in canonCardWrite's own key order, so a caller comparing its JSON to the stored bytes refuses a reordering
-  const cardPart = (p) => ({ iri: p.iri, expectedVersion: p.expectedVersion, version: p.version, quads: p.quads, prior: p.prior, json: p.json });
+  const cardPart = (p) => ({ iri: p.iri, expectedVersion: p.expectedVersion, version: p.version, quads: p.quads, prior: p.prior, json: p.json, ...(p.reason != null ? { reason: p.reason } : {}) });
   const collPart = (p) => ({ collection: p.collection, iri: p.iri, expectedVersion: p.expectedVersion, version: p.version, quads: p.quads, prior: p.prior, json: p.json,
     ...(p.unique ? { unique: p.unique.map((u) => ({ all: u.all.map((a) => ({ predicate: a.predicate, value: a.value })) })) } : {}), ...(p.requires ? { requires: p.requires } : {}) });
-  return { parts: plan.parts.map(cardPart), counter: plan.counter, ...(plan.collections ? { collections: plan.collections.map(collPart) } : {}) };
+  return { parts: plan.parts.map(cardPart), counter: plan.counter, ...(plan.collections ? { collections: plan.collections.map(collPart) } : {}), ...(plan.reads ? { reads: plan.reads.map((r) => ({ iri: r.iri, version: r.version })) } : {}) };
 }
 
 function canonOriginPrepare(i, common) {
@@ -1748,9 +1843,9 @@ function canonOriginCommit(i, record, common) {
   return originCommitRecord(descriptor, record, occurredAt);
 }
 /** The canonical record of an origin commit: the plan's own fields, then the origin (descriptor + occurredAt). */
-const originCommitRecord = (descriptor, plan, occurredAt) => ({ parts: plan.parts, counter: plan.counter, ...(plan.collections?.length ? { collections: plan.collections } : {}), origin: { ...descriptor, occurredAt } });
+const originCommitRecord = (descriptor, plan, occurredAt) => ({ parts: plan.parts, counter: plan.counter, ...(plan.collections?.length ? { collections: plan.collections } : {}), ...(plan.reads?.length ? { reads: plan.reads } : {}), origin: { ...descriptor, occurredAt } });
 /** The plan half of an origin commit's record: what planDigest binds. */
-const originPlanOf = (record) => ({ parts: record.parts, counter: record.counter, ...(record.collections?.length ? { collections: record.collections } : {}) });
+const originPlanOf = (record) => ({ parts: record.parts, counter: record.counter, ...(record.collections?.length ? { collections: record.collections } : {}), ...(record.reads?.length ? { reads: record.reads } : {}) });
 
 /**
  * r3 §2a.5a: the digest of the origin commit RECONSTRUCTED from stored canonical parts — the descriptor, the plan and the

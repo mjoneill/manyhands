@@ -64,6 +64,12 @@ export function createCardsUnit({ client, actorIri = (who) => `https://scrumboar
     try { await load(); } catch (e) { uncertain = true; throw e instanceof CardsUnavailable ? e : new CardsUnavailable(e.message); }
   }
 
+  /** #1744 — a cached card's GRAPH version (urn:ex:ver), which a plan's reads pin; null when the card is not cached. */
+  function versionOf(id) {
+    if (!byId || uncertain) throw new CardsUnavailable('the card cache is not current');
+    return byId.get(id)?.ver ?? null;
+  }
+
   /** The cards as a fresh mutable array (a handler may edit it), and the next shortId the board should allocate. */
   function snapshot(fileNextShortId) {
     if (!byId || uncertain) throw new CardsUnavailable('the card cache is not current');
@@ -163,14 +169,16 @@ export function createCardsUnit({ client, actorIri = (who) => `https://scrumboar
    * reconciled by durableUpdate under the same opId, never re-prepared under a new key (r2 R-A2). Returns
    * {outcome:'APPLIED', mutationId}; PRECONDITION_FAILED/REJECTED throw CardWriteConflict; anything else CardsUnavailable.
    */
-  async function commitOrigin(cards, nextShortId, { describe, collections = [] } = {}) {
+  async function commitOrigin(cards, nextShortId, { describe, collections = [], create = false, decorate = (parts) => parts, reads = [], afterPrepare = null } = {}) {
     if (!byId || uncertain) throw new CardsUnavailable('the card cache is not current');
-    const p0 = plan(cards, nextShortId) ?? (collections.length ? { parts: [], counter: null } : null);
+    // #1744 — a `create` origin (wiki-create) carries its counter advance and EVERY card naming the new shortId (the
+    // compiler's index guard requires exactly that set); any other origin still advances no counter
+    const p0 = plan(cards, nextShortId, { allNamers: create }) ?? (collections.length ? { parts: [], counter: null } : null);
     if (!p0) return { outcome: 'NOOP' };
-    if (p0.counter) throw new CardWriteConflict('REJECTED: an origin write advances no shortId counter (#1629 s3)');
-    const parts = [...p0.parts].sort((a, b) => (a.iri < b.iri ? -1 : a.iri > b.iri ? 1 : 0));
+    if (p0.counter && !create) throw new CardWriteConflict('REJECTED: an origin write advances no shortId counter (#1629 s3)');
+    const parts = decorate([...p0.parts].sort((a, b) => (a.iri < b.iri ? -1 : a.iri > b.iri ? 1 : 0)));
     const descriptor = describe(parts);
-    const originPlan = { parts, ...(collections.length ? { collections } : {}) };
+    const originPlan = { parts, ...(p0.counter ? { counter: p0.counter } : {}), ...(collections.length ? { collections } : {}), ...(reads.length ? { reads } : {}) };
     const actor = actorIri(descriptor.originActor);
     const send = async (intent) => {
       let r;
@@ -186,9 +194,10 @@ export function createCardsUnit({ client, actorIri = (who) => `https://scrumboar
     if (prep.outcome !== 'APPLIED') fail(prep);
     const P = await readPreparedOrigin(client, descriptor.mutationId);
     if (!P.ok || !P.prepared) { uncertain = true; throw new CardsUnavailable(`the prepared origin could not be read back (${P.reason ?? 'absent'})`); }
+    if (afterPrepare) await afterPrepare(P.prepared);   // #1744 — a test-only barrier between the durable prepare and the commit
     const r = await send({ kind: 'card.write', opId: originCommitOp(descriptor.mutationId), actor, ...originPlan, origin: { ...descriptor, occurredAt: P.prepared.occurredAt } });
     if (r.outcome !== 'APPLIED') fail(r);
-    applied(cards, { parts, counter: null });
+    applied(cards, { parts, counter: p0.counter ?? null });
     return { outcome: 'APPLIED', mutationId: descriptor.mutationId, occurredAt: P.prepared.occurredAt };
   }
 
@@ -234,7 +243,7 @@ export function createCardsUnit({ client, actorIri = (who) => `https://scrumboar
   }
 
   return {
-    load, ensureFresh, snapshot, plan, commit, commitOrigin, reachable, receipt, pendingAnnouncements, postExists,
+    load, ensureFresh, snapshot, versionOf, plan, commit, commitOrigin, reachable, receipt, pendingAnnouncements, postExists,
     get generation() { return gen; }, get uncertain() { return uncertain; }, get loaded() { return byId != null; },
     markUncertain() { uncertain = true; },
   };
