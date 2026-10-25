@@ -417,6 +417,10 @@ def sparql_term(t):
     return None
 
 
+class RevisionMoved(Exception):
+    """#1747 an /update carried x-if-write-revision and the store has taken another write since that revision was read."""
+
+
 class ReconcileRequired(Exception):
     def __init__(self, info):
         super().__init__(info.get('reason'))
@@ -528,6 +532,11 @@ class Executor:
         # is a process restart. Until then writes are refused before update(); reads go on.
         self.degraded = None
         self.updates = 0
+        # #1747 the WRITE REVISION `<bootId>:<updates>`: every write this process applies while serving goes through update()
+        # under self.lock and bumps `updates`; a restart mints a new bootId. An /update carrying x-if-write-revision applies
+        # only if no other write landed since that revision was read (a compare-and-swap over EVERY update, whatever it
+        # changed, including a raw one that leaves every count the same).
+        self.boot_id = str(uuid.uuid4())
         self.log_file = open(log, 'a', buffering=1) if log else None
         marker = self._marker()
         if marker is None:
@@ -1315,7 +1324,10 @@ class Executor:
             out.setdefault(k, []).append(term_json(r['o']))
         return out
 
-    def update(self, sparql, op_iri, caller_epoch=None, protocol=None):
+    def write_revision(self):
+        return f'{self.boot_id}:{self.updates}'
+
+    def update(self, sparql, op_iri, caller_epoch=None, protocol=None, if_revision=None):
         """Returns the stored receipt. Raises Degraded before touching the store when
         latched; raises ReconcileRequired when the caller's epoch is not the store's and
         this opId has no receipt here; raises on engine or flush error (UNKNOWN).
@@ -1332,6 +1344,8 @@ class Executor:
                 if protocol != [self.write_floor]:
                     raise ProtocolRequired(self.write_floor)
             check_op_id(op_iri)   # #1622 after the protocol (M2l's 428), before the epoch fence, a replay or the store
+            if if_revision is not None and if_revision != self.write_revision():   # #1747 before a replay or the store
+                raise RevisionMoved(self.write_revision())
             store_epoch = self._epoch_or_none()
             # a store with no readable marker cannot be epoch-fenced (startup guarantees one;
             # raw fixtures that wipe the store must not crash every write)
@@ -1419,7 +1433,7 @@ class Executor:
         return {**m, **self._identity(), 'status': 'DEGRADED' if self.degraded else 'OK', 'degraded': self.degraded, 'promoted': self.promoted,
                 'readOnly': self.read_only, 'layout': 'bookkeeping-graph', 'writeFloor': self.write_floor,
                 'recoveryHold': self._hold_present_or_none(), 'reconciled': self.reconciled,
-                'flushes': self.flushes, 'updates': self.updates, 'syncMode': SYNC_MODE, 'listenBacklog': LISTEN_BACKLOG}
+                'flushes': self.flushes, 'updates': self.updates, 'writeRevision': self.write_revision(), 'syncMode': SYNC_MODE, 'listenBacklog': LISTEN_BACKLOG}
 
 
 def make_handler(ex):
@@ -1461,7 +1475,7 @@ def make_handler(ex):
                     return self._send(400, {'error': 'x-op-id header required'})
                 declared = self.headers.get_all(PROTOCOL_HEADER) or []
                 try:
-                    rec = ex.update(body, op, self.headers.get('x-epoch'), protocol=declared)
+                    rec = ex.update(body, op, self.headers.get('x-epoch'), protocol=declared, if_revision=self.headers.get('x-if-write-revision'))
                 except ProtocolRequired as f:  # #1748 refused before update(): applied nothing, flushed nothing
                     ex.log(op, 'update', 'REFUSED-WRITE-PROTOCOL', (time.perf_counter() - t0) * 1000, sha)
                     return self._send(428, {'error': 'WRITE_PROTOCOL_REQUIRED', 'applied': False, 'requiredProtocol': str(f),
@@ -1481,6 +1495,10 @@ def make_handler(ex):
                                             'reason': 'an /update may not delete, rewrite or add to the recovery hold or a '
                                                       'reconciliation record, whatever protocol it declares; only the '
                                                       'executor\'s --reconcile-postseq maintenance start clears the hold'})
+                except RevisionMoved as r:  # #1747 refused before update(): another write landed since the caller's revision
+                    ex.log(op, 'update', 'REFUSED-REVISION-MOVED', (time.perf_counter() - t0) * 1000, sha)
+                    return self._send(409, {'error': 'WRITE_REVISION_MOVED', 'applied': False, 'writeRevision': r.args[0],
+                                            'reason': 'the store took another write since the revision in x-if-write-revision'})
                 except ReconcileRequired as r:  # refused before update(): applied nothing
                     ex.log(op, 'update', 'RECONCILE-REQUIRED', (time.perf_counter() - t0) * 1000, sha)
                     return self._send(409, {'error': 'reconcile required', 'reconcileRequired': r.info})

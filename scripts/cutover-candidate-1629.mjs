@@ -70,21 +70,49 @@ if (have.length) refuse('MARKER_MISMATCH', `the candidate is already marked for 
 // for quad, apart from the six dataset-marker predicates a promotion rewrites. Anything else (a write the source took after
 // the copy, a rollback, a floor installed early, a recovery hold) refuses. After marking, the import adds content, so an
 // ALREADY above never re-digests.
+// the WRITE REVISION (#122 re-review finding 3, ruling 46815): read before the digest, read again after it, and the mark
+// below applies only at that same revision (x-if-write-revision, checked by the executor under its write lock). So NO write
+// of any kind, a raw one that leaves every count the same included, can land between the digest and the mark unseen.
+const revision = async () => {
+  let r;
+  try { r = await (await fetch(`${base}/health`)).json(); } catch (e) { refuse('UNAVAILABLE', `the candidate's /health could not be read: ${e.message}`); }
+  if (typeof r.writeRevision !== 'string' || !/^[0-9a-f-]{36}:\d+$/.test(r.writeRevision)) refuse('UNAVAILABLE', 'the candidate executor reports no write revision (an executor without #1747\'s writeRevision)');
+  return r.writeRevision;
+};
+const rev = await revision();
 let got;
 try { got = await contentDigest(base, { opId: `urn:ex:op/cutover/candidate-digest/${manifestSha}` }); } catch (e) { refuse(e.code === 'DIGEST_TOO_LARGE' ? 'DIGEST_TOO_LARGE' : 'UNAVAILABLE', `the candidate's content could not be digested: ${e.message}`); }
+// the six promotion fields the pin excludes (#122 re-review finding 4, 46820): each must hold EXACTLY the value a promotion
+// of THIS capture leaves, once, at its location; an extra, missing or contradictory value is refused, never skipped by the pin
+{
+  const P = got.promotion, why = [];
+  const one = (k, ok, want) => { if (P[k].length !== 1 || !ok(P[k][0])) why.push(`${k} ${JSON.stringify(P[k])}, expected ${want}`); };
+  one('epoch', (v) => v === String(BigInt(m.epoch) + 1n), `[${BigInt(m.epoch) + 1n}]`);
+  one('epochBase', (v) => v === m.commitSeq, `[${m.commitSeq}]`);
+  one('incarnation', (v) => v && v !== m.incarnation, 'one new incarnation');
+  one('incarnationFrom', (v) => v === m.incarnation, `[${m.incarnation}] (added by the promotion)`);
+  one('storeHome', (v) => v && realOr(v) !== realOr(m.sourceStore), 'one home that is not the source store');
+  one('storeHomeInode', (v) => /^\d+$/.test(v), 'one inode number');
+  if (why.length) refuse('NOT_CANDIDATE', `the promotion fields are not one promotion of this capture: ${why.join('; ')}`);
+}
 if (got.sha256 !== m.contentSha256) {
   refuse('NOT_COPY', `the candidate's content (${got.quads} quads${got.recoveryQuads ? `, ${got.recoveryQuads} in the recovery graph: a held promotion's exact delta is validated once restore safety lands` : ''}) is not the captured content`);
 }
 
-// guarded: it inserts only while no marker exists, so two racing runs cannot leave two markers; and only while the store
-// still holds what was digested (#122 re-review, finding 3): the captured commitSeq and the digest's exact total quad count,
-// as READY guards. A compiled write moves commitSeq; any write that adds or removes a quad moves the count. (A raw write that
-// swaps one quad for another moves neither; the import's read-back and READY's re-verification are the later checks.)
+if ((await revision()) !== rev) refuse('MOVED', `the candidate took a write while its content was being digested (revision ${rev}); nothing was marked`);
+// guarded: it inserts only while no marker exists, so two racing runs cannot leave two markers; the CONTENT is bound by the
+// write revision (x-if-write-revision below), not by these: the captured commitSeq and the digest's total quad count are
+// sanity checks on the same store, never a content proof
 const body = `INSERT { GRAPH <${BOOKKEEPING_GRAPH}> { <${CANDIDATE_MARKER}> <${P_MANIFEST_SHA}> "${manifestSha}" ; <${P_MARKED_AT}> "${new Date().toISOString()}"^^<http://www.w3.org/2001/XMLSchema#dateTime> } }
 WHERE { GRAPH <${BOOKKEEPING_GRAPH}> { <urn:ex:dataset> <urn:ex:commitSeq> ?cs . FILTER(STR(?cs) = "${m.commitSeq}") }
   FILTER NOT EXISTS { GRAPH <${BOOKKEEPING_GRAPH}> { <${CANDIDATE_MARKER}> <${P_MANIFEST_SHA}> ?any } }
   { SELECT (COUNT(*) AS ?qn) WHERE { { ?qs ?qp ?qo } UNION { GRAPH ?qg { ?qs ?qp ?qo } } } } FILTER(?qn = ${got.total}) }`;
-const u = await fetch(`${base}/update`, { method: 'POST', body, headers: { 'x-op-id': `urn:ex:op/cutover/candidate/${manifestSha}`, 'x-epoch': String(h.epoch), 'x-manyhands-write-protocol': 'postseq-v1' } });   // §6 F1 floor
+const u = await fetch(`${base}/update`, { method: 'POST', body, headers: { 'x-op-id': `urn:ex:op/cutover/candidate/${manifestSha}`, 'x-epoch': String(h.epoch), 'x-manyhands-write-protocol': 'postseq-v1', 'x-if-write-revision': rev } });   // §6 F1 floor
+if (u.status === 409) {
+  const t = await u.text();
+  if (t.includes('WRITE_REVISION_MOVED')) refuse('MOVED', `the candidate took a write after its content was digested (revision ${rev}); nothing was marked`);
+  refuse('WRITE_FAILED', `409 ${t.slice(0, 200)}`);
+}
 if (!u.ok) refuse('WRITE_FAILED', `${u.status} ${(await u.text()).slice(0, 200)}`);
 const after = (await query(`SELECT ?v WHERE { GRAPH <${BOOKKEEPING_GRAPH}> { <${CANDIDATE_MARKER}> <${P_MANIFEST_SHA}> ?v } }`)).map((b) => b.v.value);
 if (!after.length) refuse('MOVED', `the candidate changed after its content was digested (commitSeq ${m.commitSeq}, ${got.total} quads); nothing was marked`);

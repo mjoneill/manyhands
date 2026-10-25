@@ -67,7 +67,8 @@ async function boundedJson(r, what) {
 }
 
 /**
- * The content digest of the store behind `baseUrl`. Returns { sha256, quads, recoveryQuads, total } where `quads` is the number of
+ * The content digest of the store behind `baseUrl`. Returns { sha256, quads, recoveryQuads, total, promotion } where
+ * `promotion` holds every EXCLUDED value, by field (epoch → [values], …), so a caller can check each one's count and value; `quads` is the number of
  * digested lines and `recoveryQuads` the number in the recovery graph (a hold or record a caller may need to explain).
  *
  * The ORDER is defined by content alone, never by how the store was split to read it: every line is keyed by the first three
@@ -81,6 +82,7 @@ export const BUCKETS = Object.freeze(['_', ...'0123456789abcdef']);
 export async function contentDigest(baseUrl, { opId = `urn:ex:op/cutover/content-digest/${crypto.randomUUID()}` } = {}) {
   const h = crypto.createHash('sha256');
   let quads = 0, recoveryQuads = 0, excludedQuads = 0, q = 0;
+  const promotion = Object.fromEntries(PROMOTION_PREDICATES.map((p) => [p.slice('urn:ex:'.length), []]));   // the excluded values, by field
   const leaves = [];
   const plan = async (prefix) => {
     const c = await boundedJson(await post(baseUrl, `${opId}/count/${prefix}/${q++}`, `SELECT (COUNT(*) AS ?n) WHERE { ${ALL} ${bucketFilter(prefix)} }`), `the count of bucket ${prefix}`);
@@ -94,7 +96,7 @@ export async function contentDigest(baseUrl, { opId = `urn:ex:op/cutover/content
     const j = await boundedJson(await post(baseUrl, `${opId}/bucket/${prefix}/${q++}`, `SELECT ?g ?s ?p ?o WHERE { ${ALL} ${bucketFilter(prefix)} }`), `bucket ${prefix}`);
     const keyed = [];
     for (const b of j.results.bindings) {
-      if (excluded(b)) { excludedQuads++; continue; }
+      if (excluded(b)) { excludedQuads++; promotion[b.p.value.slice('urn:ex:'.length)].push(b.o.value); continue; }
       if (b.g?.value === RECOVERY_GRAPH) recoveryQuads++;
       keyed.push([subjectKey(b), `${termText(b.s)} ${termText(b.p)} ${termText(b.o)}${b.g ? ` ${termText(b.g)}` : ''} .`]);
     }
@@ -106,5 +108,5 @@ export async function contentDigest(baseUrl, { opId = `urn:ex:op/cutover/content
   const c = await boundedJson(await post(baseUrl, `${opId}/count`, `SELECT (COUNT(*) AS ?n) WHERE { ${ALL} }`), 'the total count');
   const total = Number(c.results.bindings[0]?.n?.value);
   if (total !== quads + excludedQuads) throw new Error(`content digest: the buckets cover ${quads + excludedQuads} quads, the store holds ${total}`);
-  return { sha256: h.digest('hex'), quads, recoveryQuads, total };
+  return { sha256: h.digest('hex'), quads, recoveryQuads, total, promotion };
 }
