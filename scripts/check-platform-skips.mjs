@@ -65,6 +65,15 @@ function main(argv) {
   if (failSummaries.length) problems.push(`the TAP reports failures: # fail ${Math.max(...failSummaries)}`);
   const failed = new Set(tests.filter((t) => !t.ok && t.directive !== 'TODO').map((t) => t.name));
   for (const name of failed) problems.push(`test failed: ${name}`);
+  // #1766 — a file the runner KILLED at its per-file bound never ran its remaining rows, and its rows that did run can
+  // all pass: "no test failed" is then not "every test ran". Each kill is a named problem, never a quiet pass. Its
+  // shadow, the temp leak a SIGKILL leaves (no finally, after() or exit handler runs), is named too.
+  for (const m of text.matchAll(/^# ⛔ HUNG: (\S+) exceeded (\d+)ms/gm)) {
+    problems.push(`HUNG: ${m[1]} was killed at ${m[2]} ms; its remaining tests never ran (a red, incomplete file)`);
+  }
+  for (const m of text.matchAll(/^# tmp: ⛔ (\S+) left (\d+) entries, (\d+) bytes: a NEW leak/gm)) {
+    problems.push(`temp leak: ${m[1]} left ${m[2]} entries (${m[3]} bytes), not on the baseline`);
+  }
 
   // ── the skips are exactly the manifest. The runner reprints failing rows in a FAILURES section, so a name can
   // appear twice; judge each name once, and a name that skipped as UNAVAILABLE anywhere counts as skipped.
