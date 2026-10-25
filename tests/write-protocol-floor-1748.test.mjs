@@ -446,3 +446,14 @@ test('#1748 M2p STRAY FLOOR: an unfloored store that gets a floor triple by /upd
   x = await start(store);
   try { assert.equal((await health(x)).writeFloor, PROTOCOL, 'a plain restart serves the recorded floor'); } finally { await stop(x); }
 });
+
+// ── r4 (the 8edd075 delta review, finding 4): an EMPTY sentinel graph on an already-floored store never serves ──
+test('#1748 M2q EMPTY SENTINEL on a floored store: a start refuses (an existing-but-empty sentinel graph would make every write 409)', T, async () => {
+  const store = freshStore('m2q');
+  const x = await start(store, ['--create', ...INSTALL]);
+  await stop(x);
+  // planted offline: on a running floored store the guard itself refuses to create it
+  const r = spawnSync(PY, ['-I', '-c', 'import sys, pyoxigraph as px; s = px.Store(sys.argv[1]); s.update(sys.argv[2]); s.flush()', store, 'CREATE GRAPH <urn:ex:write-floor/violation>'], { encoding: 'utf8' });
+  assert.equal(r.status, 0, `PRECONDITION: the empty sentinel graph was created offline (${r.stderr})`);
+  await assert.rejects(start(store), (e) => /sentinel|violation/i.test(e.stderr ?? e.message), 'a floored start refuses a store whose sentinel graph exists, even empty');
+});
