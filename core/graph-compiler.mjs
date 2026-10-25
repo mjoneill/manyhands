@@ -1354,8 +1354,10 @@ function canonCardWrite(i, { origin = i.origin != null } = {}) {
   const collections = i.collections == null ? [] : canonCollectionWrite({ kind: 'collection', parts: i.collections }).parts;
   if (!parts.length && !collections.length && i.counter == null) fail('card.write carries no part');
   // #1744 — `indexGuard: true` makes a write that adds or removes a shortId prove the reference index is complete and that it
-  // re-projects EVERY card naming that shortId (contract v2 V2-2, F2). Absent = maintained but not enforced (F3 rollout).
-  if (i.indexGuard != null && i.indexGuard !== true) fail('indexGuard must be true or absent');
+  // re-projects EVERY card naming that shortId (contract v2 V2-2, F2). `indexGuard: 'marker'` (mode on, finding 5) is the same
+  // proof, required only once the store holds the completion marker: before the backfill it admits the write, after it the
+  // index can no longer be bypassed by leaving an environment variable unset. Absent = maintained but not enforced.
+  if (i.indexGuard != null && i.indexGuard !== true && i.indexGuard !== 'marker') fail('indexGuard must be true, "marker" or absent');
   // #1744 — the entities a wiki-create plan READ (its parent and the apex chain), each pinned at the version it saw (F4)
   let reads = [];
   if (i.reads != null) {
@@ -1379,7 +1381,7 @@ function canonCardWrite(i, { origin = i.origin != null } = {}) {
     if (walk.anchor !== null && walk.anchor !== undefined && !walk.anchor.startsWith(ENTITY_IRI)) fail('walk.anchor must be a card iri');
     if (walk.anchor === undefined) walk = {};
   }
-  return { parts, counter, ...(pending.length ? { pending } : {}), ...(collections.length ? { collections } : {}), ...(i.indexGuard === true ? { indexGuard: true } : {}), ...(reads.length ? { reads } : {}), ...(walk ? { walk } : {}) };
+  return { parts, counter, ...(pending.length ? { pending } : {}), ...(collections.length ? { collections } : {}), ...(i.indexGuard != null ? { indexGuard: i.indexGuard } : {}), ...(reads.length ? { reads } : {}), ...(walk ? { walk } : {}) };
 }
 
 /**
@@ -1418,6 +1420,8 @@ function indexInvariantClauses() {
 }
 
 /** #1744 — the index's health alone, as a read: one row when the invariant holds, none when it does not (the server's diagnosis). */
+/** #1744 — whether the completion marker exists at all, in any state: one row when it does (the marker-keyed guard's key). */
+export const cardRefIndexMarkerSparql = () => `SELECT ?ixmk WHERE { GRAPH ${BK} { ${ref(CRI.marker)} ${ref(CRI.complete)} ?ixmk . } } LIMIT 1`;
 export const cardRefIndexHealthySparql = () => `SELECT ?ixok WHERE {\n${indexInvariantClauses().join('\n')}\n    BIND(true AS ?ixok)\n} LIMIT 1`;
 
 function indexGuardClauses(R) {
@@ -1647,7 +1651,12 @@ function compileCardWrite(c) {
   // entity its plan read (the parent and apex chain, F4), and proves each reference-resolve part changes nothing but the
   // edge into the new card
   const wikiCreate = R.origin?.route === WIKI_CREATE_ROUTE;
-  if (R.indexGuard || wikiCreate) pre.push(...indexGuardClauses(R));
+  if (R.indexGuard === 'marker' && !wikiCreate) {
+    // either no completion marker exists at all (the index is not yet backfilled), or the full proof holds; a marker in any
+    // other state than complete true keys the proof too, and the proof then refuses
+    const g = indexGuardClauses(R);
+    if (g.length) pre.push(`    { FILTER NOT EXISTS { GRAPH ${BK} { ${ref(CRI.marker)} ${ref(CRI.complete)} ?ixmk . } } }`, `    UNION`, `    {`, ...g, `    }`);
+  } else if (R.indexGuard || wikiCreate) pre.push(...indexGuardClauses(R));
   (R.reads || []).forEach((r, k) => pre.push(`    GRAPH ${BK} { ${ref(r.iri)} ${VER} ?xrd${k} . }`, `    FILTER(?xrd${k} = ${r.version})`));
   if (wikiCreate) pre.push(...referenceResolveClauses(R));
   if (R.origin?.route === 'done-nudge' && R.parts.some((P) => P.reason === 'sibling-order')) pre.push(...doneMoveClauses(R));   // #1744

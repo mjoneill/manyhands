@@ -160,11 +160,19 @@ const ORIGIN_EXECUTOR = BOARD_DOCUMENT !== 'on';
 // executor-owned mode, and in mode on once its backfill has run and SCRUM_CARD_REF_INDEX=enforce (F3: backfill BEFORE
 // enforcement, so no mode-on write is stranded on a missing index). Every card write maintains the index either way.
 const CARD_REF_INDEX_ENFORCE = ORIGIN_EXECUTOR || process.env.SCRUM_CARD_REF_INDEX === 'enforce';
+// Everywhere else (mode on, not enforced) the guard is MARKER-KEYED (finding 5): a create or delete proves the index once
+// the store holds the completion marker, so a backfilled store cannot be written around by an unset environment variable.
+const CARD_REF_INDEX_GUARD = CARD_REF_INDEX_ENFORCE ? true : 'marker';
 /** #1744 — after a guarded write is refused: is the INDEX the reason (true), or a stale version (false)? null = unknown. */
 async function cardRefIndexIncomplete() {
   try {
-    const { cardRefIndexHealthySparql } = await import('./core/graph-compiler.mjs');
+    const { cardRefIndexHealthySparql, cardRefIndexMarkerSparql } = await import('./core/graph-compiler.mjs');
     const c = createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: 15000, label: 'card-ref-index' });
+    if (!CARD_REF_INDEX_ENFORCE) {   // marker-keyed: with no marker at all the index held nothing back
+      const m = await c.query(cardRefIndexMarkerSparql());
+      if (!m.ok) return null;
+      if (!m.rows.length) return false;
+    }
     const r = await c.query(cardRefIndexHealthySparql());
     return r.ok ? r.rows.length === 0 : null;
   } catch { return null; }
@@ -7876,7 +7884,7 @@ async function lockedWithCards(fn) {
             const ob = outboxOf(data);
             const pending = Object.entries(ob.origins).filter(([mid, o]) => !data[FILE_ORIGINS]?.has(mid) && o?.origin?.cardId)
               .map(([mid, o]) => ({ cardId: o.origin.cardId, mutationId: mid, json: JSON.stringify({ origin: o, entries: Object.fromEntries(Object.entries(ob.entries).filter(([, e]) => e?.mutationId === mid)) }) }));
-            await CARDS.commit(data.cards, data.nextShortId, { actor, opId, pending, collections: [...collParts, ...colParts], indexGuard: CARD_REF_INDEX_ENFORCE });
+            await CARDS.commit(data.cards, data.nextShortId, { actor, opId, pending, collections: [...collParts, ...colParts], indexGuard: CARD_REF_INDEX_GUARD });
             if (collParts.length) COLLECTIONS.applied(data, collParts);
             if (colParts.length) COLUMNS.applied(data.columns, colParts);
           } else if (colParts.length) {
@@ -7902,7 +7910,7 @@ async function lockedWithCards(fn) {
         const ctx = requestContext.getStore();
         if (ctx) ctx.writeRefused = e.message;
         // #1744 — a refusal BECAUSE the reference index is incomplete is named as such, never a plain stale-write conflict
-        if (ctx && CARD_REF_INDEX_ENFORCE && (await cardRefIndexIncomplete()) === true) ctx.indexIncomplete = true;
+        if (ctx && (await cardRefIndexIncomplete()) === true) ctx.indexIncomplete = true;
       }
       markGraphUnavailable(e);   // an unresolved UNKNOWN (or an executor away): the response is 503, never a bare 500
       throw e;
@@ -13419,6 +13427,16 @@ if (CARDS_UNIT) {
   try { await CARDS.load(); } catch (e) {
     console.error(`#1598 cards unit: the cards could not be read from the graph — refusing to serve: ${e.message}`);
     process.exit(1);
+  }
+  // #1744 finding 6 — THE BOOT GATE. Where the index is required (executor-owned, or SCRUM_CARD_REF_INDEX=enforce), a board
+  // whose index is absent, unfinished or damaged would refuse every create and delete at runtime; boot is the cheapest place
+  // to say so, once, to the operator. A check that cannot run is a refusal too: an unproven index is not a healthy one.
+  if (CARD_REF_INDEX_ENFORCE) {
+    const incomplete = await cardRefIndexIncomplete();
+    if (incomplete !== false) {
+      console.error(`#1744 the card reference index is ${incomplete === null ? 'not checkable (the executor did not answer the health query)' : 'absent, unfinished or damaged (no completion marker, or the health query finds a violation)'} — refusing to start${ORIGIN_EXECUTOR ? ` in SCRUM_BOARD_DOCUMENT=${BOARD_DOCUMENT}` : ' with SCRUM_CARD_REF_INDEX=enforce'}. Run scripts/card-ref-index-1744.mjs --backfill with writers stopped, then --verify`);
+      process.exit(1);
+    }
   }
   // #1629 s3 — executor-owned: the origin readers, and NO K4 block. Boot enumerates nothing into the document and drains
   // nothing inline (contract v1 §5): a pending obligation waits for the supervised publisher (scripts/announce-publisher).
