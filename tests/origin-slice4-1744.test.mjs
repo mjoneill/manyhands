@@ -579,7 +579,7 @@ const DAMAGE = [
   ['a MISTYPED name (a plain string)', async ({ xu }) => xu(`DELETE DATA { GRAPH <${BK}> { ${COV('uuid-2')} <${IX.namesShortId}> "1"^^<${XSD}integer> } } ; INSERT DATA { GRAPH <${BK}> { ${COV('uuid-2')} <${IX.namesShortId}> "1" } }`, 'name-mistyped')],
   ['an ORPHAN coverage node (no such card)', async ({ xu }) => xu(`INSERT DATA { GRAPH <${BK}> { ${COV('uuid-ghost')} <${IX.indexedVersion}> "1"^^<${XSD}integer> ; <${IX.indexedJsonDigest}> "${'0'.repeat(64)}" } }`, 'orphan')],
   ['a DUPLICATE watermark', async ({ xu }) => xu(`INSERT DATA { GRAPH <${BK}> { ${COV('uuid-1')} <${IX.indexedVersion}> "99"^^<${XSD}integer> } }`, 'dup-version')],
-  ['a MISMATCHED JSON digest', async ({ q, xu }) => { const d = (await q(`SELECT ?d WHERE { GRAPH <${BK}> { ${COV('uuid-1')} <${IX.indexedJsonDigest}> ?d } }`))[0].d.value; await xu(`DELETE DATA { GRAPH <${BK}> { ${COV('uuid-1')} <${IX.indexedJsonDigest}> "${d}" } } ; INSERT DATA { GRAPH <${BK}> { ${COV('uuid-1')} <${IX.indexedJsonDigest}> "${'f'.repeat(64)}" } }`, 'bad-digest'); }],
+  ['a MISMATCHED JSON digest', async ({ q, xu }) => { const ds = await q(`SELECT ?d WHERE { GRAPH <${BK}> { ${COV('uuid-1')} <${IX.indexedJsonDigest}> ?d } }`); assert.equal(ds.length, 1, 'PRECONDITION: the backfill wrote card 1\'s digest'); const d = ds[0].d.value; await xu(`DELETE DATA { GRAPH <${BK}> { ${COV('uuid-1')} <${IX.indexedJsonDigest}> "${d}" } } ; INSERT DATA { GRAPH <${BK}> { ${COV('uuid-1')} <${IX.indexedJsonDigest}> "${'f'.repeat(64)}" } }`, 'bad-digest'); }],
   ['NO completion marker (a partial backfill)', async ({ xu }) => xu(`DELETE WHERE { GRAPH <${BK}> { <${IX.marker}> ?p ?o } }`, 'no-marker')],
 ];
 for (const [what, plant] of DAMAGE) {
@@ -782,7 +782,8 @@ async function doneMoveRow(s, { orders, at, after, label }) {
   }
   const moved = new Set([...want.map((x) => x.id), 'uuid-1']);
   for (const [id, c] of before) if (!moved.has(id) && now.has(id)) assert.equal(now.get(id).json, c.json, `${label}: #${c.card.shortId} is untouched`);
-  assert.equal((await committedOrigins(s)).length, o0 + 1, `${label}: ONE origin covers the whole move`);
+  // mode on writes no executor Origin (the document path announces): the one-origin claim is executor-owned mode's
+  if (s.mode === 'off') assert.equal((await committedOrigins(s)).length, o0 + 1, `${label}: ONE origin covers the whole move`);
   assert.equal((await cardRow(s, 'uuid-1')).card.column, 'done', `${label}: the subject is in done`);
   return { sibs, want };
 }
