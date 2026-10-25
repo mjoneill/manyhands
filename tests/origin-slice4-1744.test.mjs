@@ -403,6 +403,7 @@ test('#1744 (W2, mode off) the same request again (trim and type default equival
     await s.start();
     const a = await createPage(s, REQ_A);
     assert.equal(a.status, 201, `PRECONDITION: the first create (${a.status} ${a.text.slice(0, 200)})`);
+    assert.ok(await until(async () => (await notices(s, 4)).length === 1, 20000), 'PRECONDITION: the first notice is published (it follows the answer)');
     const e1 = await effects(s);
     const b = await createPage(s, { ...REQ_A, title: 'A page', body: 'text', type: 'reference' });
     assert.ok(ok2xx(b.status), `the replay is a success, not a conflict (${b.status} ${b.text.slice(0, 200)})`);
@@ -418,6 +419,7 @@ for (const [what, change] of [['a different title', { title: 'Another page' }], 
     await world('off', async (s) => {
       await s.start();
       assert.equal((await createPage(s, REQ_A)).status, 201, 'PRECONDITION: the first create');
+      assert.ok(await until(async () => (await notices(s, 4)).length === 1, 20000), 'PRECONDITION: the first notice is published (it follows the answer)');
       const e1 = await effects(s);
       const c = await createPage(s, { ...REQ_A, ...change });
       assert.equal(c.status, 409, `refused (${c.status} ${c.text.slice(0, 200)})`);
@@ -447,6 +449,7 @@ test('#1744 (W5, mode off) with NO requestId the server mints one and returns it
     assert.equal(a.status, 201, `created (${a.status} ${a.text.slice(0, 200)})`);
     const rid = a.json?.requestId;
     assert.ok(typeof rid === 'string' && rid.length > 0, `the response carries the minted requestId (${a.text.slice(0, 200)})`);
+    assert.ok(await until(async () => (await notices(s, 4)).length === 1, 20000), 'PRECONDITION: the first notice is published (it follows the answer)');
     const e1 = await effects(s);
     const b = await createPage(s, { title: 'Minted', createdBy: 'ada', requestId: rid });
     assert.ok(ok2xx(b.status), `the keyed retry succeeds (${b.status})`);
