@@ -147,5 +147,7 @@
   "tests/unbounded-budget-u1.test.mjs",
   "tests/vocabulary-shapes-executor-1645.test.mjs",
   "tests/wake-graph-w1.test.mjs",
-  "tests/wake-unknown-w2.test.mjs"
+  "tests/wake-unknown-w2.test.mjs",
+  "tests/write-protocol-client-1748.test.mjs",
+  "tests/write-protocol-floor-1748.test.mjs"
 ]
