@@ -234,8 +234,8 @@ async function run({ id, base, dataset, docBytes, outboxBytes, captureBytes, cap
     if (!STATUSES.has(e.status)) hold('BAD_ENTRY', `entry ${key}: status ${JSON.stringify(e.status)}`);
     if (e.mode === 'legacy' && !UUID.test(e.legacyPostId ?? '')) hold('BAD_ID', `entry ${key}: a legacy entry's legacyPostId is not a lowercase UUID`);
     if (e.postId !== undefined && e.postId !== announcePostId(e.mutationId, e.slot)) hold('BAD_ID', `entry ${key}: postId is not its announcement post`);
-    // mirror the reader (#122 review, finding 2): a published obligation must name its post, and a publisher's is its announcement post
-    if (e.status === 'published' && !(e.postId ?? e.legacyPostId)) hold('BAD_ENTRY', `entry ${key}: a published entry names no post`);
+    // mirror the reader (#122 review, finding 2): a published obligation must name its post. A legacy entry always does (its UUID
+    // legacyPostId is required above), so the one shape left is a publisher entry, whose post must be its announcement post
     if (e.status === 'published' && e.mode === 'publisher' && e.postId !== announcePostId(e.mutationId, e.slot)) hold('BAD_ENTRY', `entry ${key}: a published publisher entry must name its announcement post`);
     for (const f of ['publicationAt']) if (e[f] !== undefined && !instant(e[f])) hold('BAD_ENTRY', `entry ${key}: ${f} is not a full ISO-8601 instant with a zone`);
     if (e.mode === 'publisher' && (e.payload?.originActor !== origins[e.mutationId].originActor || e.payload?.occurredAt !== origins[e.mutationId].occurredAt)) hold('ENTRY_DISAGREES', `entry ${key}: the payload's originActor or occurredAt is not its origin's`);
