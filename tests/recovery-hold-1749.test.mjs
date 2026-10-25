@@ -45,7 +45,7 @@ const BK = 'urn:scrum:bookkeeping:executor';
 const P = (x) => `<urn:ex:postseq/${x}>`;
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
 const EPOCH = 'e-1749-hold';
-const HOLD = { subject: 'urn:ex:postseq/recovery-hold', type: 'urn:ex:postseq/RecoveryHold', epoch: 'urn:ex:postseq/epoch', incarnation: 'urn:ex:postseq/incarnation', restoredHighWater: 'urn:ex:postseq/restoredHighWater', restoredCommitSeq: 'urn:ex:postseq/restoredCommitSeq' };
+const HOLD = { subject: 'urn:ex:postseq/recovery-hold', type: 'urn:ex:postseq/RecoveryHold', epoch: 'urn:ex:postseq/epoch', incarnation: 'urn:ex:postseq/incarnation', restoredHighWater: 'urn:ex:postseq/restoredHighWater', restoredCommitSeq: 'urn:ex:postseq/restoredCommitSeq', priorHoldEpoch: 'urn:ex:postseq/priorHoldEpoch' };
 const CODE = 'RECOVERY_HOLD';
 
 const ordinary = (requestId) => ({ mode: 'ordinary', author: 'ada', requestId, draft: { body: `post ${requestId}`, attachedTo: null, mentions: [], attachments: [], conversation: null, onBehalfOf: null } });
@@ -177,6 +177,7 @@ test('#1749 (H7) the hold survives a plain restart AND a second backup + promoti
   const s = await scenario();
   let x = await start(s.backup, ['--promote-epoch']);
   assert.equal((await holdOf(x)).subjects.length, 1, 'PRECONDITION: held after the first promotion');
+  const firstEpoch = String((await health(x)).epoch);
   await stopX(x);
   x = await start(s.backup);
   try {
@@ -193,6 +194,8 @@ test('#1749 (H7) the hold survives a plain restart AND a second backup + promoti
     // would refuse WRONG_LINEAGE forever. These rows require it re-bound to the current epoch and incarnation, the restored high-water kept.
     assert.deepEqual([h2.get(HOLD.epoch).map((v) => v.value), h2.get(HOLD.incarnation).map((v) => v.value)], [[String(hh.epoch)], [String(hh.incarnation)]], 'the hold names the CURRENT epoch and incarnation');
     assert.deepEqual(h2.get(HOLD.restoredHighWater), [{ value: '101', datatype: `${XSD}integer` }], 'and keeps the restored high-water (the lost tail is still unknown)');
+    // draft v2 V2-1 as amended (post 46354): the replacing hold records the hold it replaced
+    assert.deepEqual(h2.get(HOLD.priorHoldEpoch).map((v) => v.value), [firstEpoch], 'priorHoldEpoch names the replaced hold\'s epoch, exactly once');
     assert.ok(heldBy(await client(x).update(intention([ordinary('h-r2')]))), 'and allocation is still refused by code');
   } finally { await stopX(x); }
 });
