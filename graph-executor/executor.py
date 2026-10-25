@@ -131,6 +131,18 @@ class FloorProtected(Exception):
     """#1748 — the update would delete, rewrite or contradict the installed floor: refused before anything is applied."""
 
 
+class InvalidOpId(Exception):
+    """#1622 — the op id is not an IRI the engine accepts: refused before the store is touched, never pasted into a query."""
+
+
+def check_op_id(op_iri):
+    """#1622 an op id is valid exactly when pyoxigraph parses it as a NamedNode: the rule the receipt query itself needs."""
+    try:
+        px.NamedNode(op_iri)
+    except (ValueError, TypeError):
+        raise InvalidOpId(op_iri)
+
+
 class ReconcileRequired(Exception):
     def __init__(self, info):
         super().__init__(info.get('reason'))
@@ -461,6 +473,7 @@ class Executor:
             self.log_file.write(f'{ts} {op_id or "-"} {kind} {status} {ms:.3f} {body_sha}\n')
 
     def receipt(self, op_iri):
+        check_op_id(op_iri)
         rows = list(self.store.query(f'SELECT ?p ?o WHERE {{ {in_bk(f"<{op_iri}> ?p ?o")} }}'))
         if not rows:
             return None
@@ -486,6 +499,7 @@ class Executor:
             if self.write_floor is not None:
                 if protocol != [self.write_floor]:
                     raise ProtocolRequired(self.write_floor)
+            check_op_id(op_iri)   # #1622 after the protocol (M2l's 428), before the epoch fence, a replay or the store
             store_epoch = self._epoch_or_none()
             # a store with no readable marker cannot be epoch-fenced (startup guarantees one;
             # raw fixtures that wipe the store must not crash every write)
@@ -596,7 +610,10 @@ def make_handler(ex):
                 return self._send(200, ex.health())
             if self.path.startswith('/receipt/'):
                 op = urllib.parse.unquote(self.path[len('/receipt/'):])
-                return self._send(200, {'opId': op, 'receipt': ex.receipt(op)})
+                try:
+                    return self._send(200, {'opId': op, 'receipt': ex.receipt(op)})
+                except InvalidOpId:   # #1622 never pasted into the query
+                    return self._send(400, {'error': 'INVALID_OP_ID', 'reason': 'the op id must be an absolute IRI the engine accepts'})
             self._send(404, {'error': 'not found'})
 
         def do_POST(self):
@@ -619,6 +636,10 @@ def make_handler(ex):
                     ex.log(op, 'update', 'REFUSED-WRITE-PROTOCOL', (time.perf_counter() - t0) * 1000, sha)
                     return self._send(428, {'error': 'WRITE_PROTOCOL_REQUIRED', 'applied': False, 'requiredProtocol': str(f),
                                             'reason': f'this store accepts writes only from clients declaring {PROTOCOL_HEADER}: {f}'})
+                except InvalidOpId:  # #1622 refused before update() touched the store
+                    ex.log(None, 'update', 'REFUSED-INVALID-OPID', (time.perf_counter() - t0) * 1000, sha)
+                    return self._send(400, {'error': 'INVALID_OP_ID', 'applied': False,
+                                            'reason': 'x-op-id must be an absolute IRI the engine accepts'})
                 except FloorProtected as f:  # #1748 refused before update(): the floor is not writable through /update
                     ex.log(op, 'update', 'REFUSED-FLOOR-PROTECTED', (time.perf_counter() - t0) * 1000, sha)
                     return self._send(409, {'error': 'WRITE_FLOOR_PROTECTED', 'applied': False, 'floor': f.args[0],
