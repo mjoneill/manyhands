@@ -52,6 +52,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
+import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { HAVE_PY } from './helpers/graph-executor-proc.mjs';
 import { wholeBoardWorld, WB_DATASET } from './helpers/whole-board-1645.mjs';
@@ -711,9 +712,8 @@ test(`#1744 (G4, r5, mode on) a marker PRESENT and the index damaged → an ordi
 // ── r7: THE LATCH (contract amendment, rulings 46773/46781; built at a1accb5). Pin 1: on a FALSE marker every layer refuses,
 // the mode-on marker-keyed guard included. The marker is planted `complete false` over an EXACT index, so the refusal can only be
 // the marker's (an index that is also damaged would refuse for its damage). The script's own latch path is the L-rows below it.
-// NOT COVERED, by name: exit 3 UNSTABLE (needs a writer moving commitSeq through all five consistent-read retries), and an exit-2
-// CLOSURE UNCONFIRMED whose cause is a FAILED LATCH WRITE (needs an executor that reads but refuses the write); only the
-// unreachable-executor cause of exit 2 is driven.
+// The exits: L0 (0), L1/L1b (1), L2 (2, unreadable executor) here; r8 below adds exit 3 UNSTABLE (L3) and exit 2 from a
+// FAILED or UNCONFIRMED latch write (L2b-deny, L2b-swallow), through a test-only proxy.
 /** the marker's values as plain strings (markerOf returns typed terms) */
 const markerValues = async (s) => (await markerOf(s)).map((v) => v?.value);
 const latchFalse = (s) => s.xu(`DELETE WHERE { GRAPH <${BK}> { <${IX.marker}> ?p ?o } } ; INSERT DATA { GRAPH <${BK}> { <${IX.marker}> <${IX.complete}> "false"^^<${XSD}boolean> } }`, 'latch-false');
@@ -809,6 +809,100 @@ test('#1744 (L2, r7) --verify-and-latch against an executor that cannot be read 
     assert.deepEqual(await markerValues(s), ['true'], 'and the real store is untouched');
   });
 });
+// ── r8 (46789): the two latch exits r7 named as not covered, made deterministic by a test-only PROXY in front of the real
+// executor. It forwards /health, /query and /update; `moving` reports a higher commitSeq on every /health (the store never holds
+// still), `deny` answers /update 500 (the latch write fails), `swallow` answers /update 200 WITHOUT forwarding it (the write is
+// "accepted" but the read-back still sees complete true). Each asserts the outcome is never LATCHED and the real marker untouched.
+async function latchProxy(target, mode) {
+  let seq = 1000;
+  const srv = http.createServer(async (req, res) => {
+    const chunks = []; for await (const c of req) chunks.push(c);
+    const body = Buffer.concat(chunks);
+    if (req.url.startsWith('/update') && mode === 'deny') { res.writeHead(500, { 'content-type': 'application/json' }); res.end('{"error":"refused by the test proxy"}'); return; }
+    if (req.url.startsWith('/update') && mode === 'swallow') { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"ok":true}'); return; }
+    const headers = { ...req.headers }; delete headers.host; delete headers['content-length'];
+    const r = await fetch(`${target}${req.url}`, { method: req.method, headers, body: req.method === 'GET' ? undefined : body });
+    let out = Buffer.from(await r.arrayBuffer());
+    if (req.url.startsWith('/health') && mode === 'moving') { const h = JSON.parse(out.toString('utf8')); h.commitSeq = String(seq++); out = Buffer.from(JSON.stringify(h)); }
+    if (req.url.startsWith('/health') && mode === 'nocommit') { const h = JSON.parse(out.toString('utf8')); delete h.commitSeq; out = Buffer.from(JSON.stringify(h)); }   // r9: a malformed position
+    if (req.url.startsWith('/health') && mode === 'flipepoch') { const h = JSON.parse(out.toString('utf8')); h.epoch = String(Number(h.epoch) + (seq++ % 2)); out = Buffer.from(JSON.stringify(h)); }   // r9: the identity moves, commitSeq does not
+    res.writeHead(r.status, { 'content-type': r.headers.get('content-type') || 'application/json' }); res.end(out);
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  return { url: `http://127.0.0.1:${srv.address().port}`, close: () => new Promise((r) => srv.close(r)) };
+}
+test('#1744 (L3, r8) --verify-and-latch when the store never holds still (commitSeq moves on every read) → exit 3 UNSTABLE, nothing judged, NOTHING latched', T, async () => {
+  await world('off', async (s) => {
+    await DAMAGE[0][1]({ q: s.q, xu: s.xu });   // a real violation, so a latch WOULD be written if the read were judged
+    const px = await latchProxy(s.w.exec.baseUrl, 'moving');
+    try {
+      const r = await indexTool(s, '--verify-and-latch', px.url);
+      assert.equal(r.status, 3, `exit 3 (${r.out.slice(-300)} ${r.err.slice(-200)})`);
+      assert.match(r.out, /^UNSTABLE /m, 'UNSTABLE');
+      assert.doesNotMatch(r.out, /^LATCHED|^CLOSURE UNCONFIRMED/m, 'neither LATCHED nor a closure claim');
+    } finally { await px.close(); }
+    assert.deepEqual(await markerValues(s), ['true'], 'the real marker is untouched');
+    const ctl = await indexTool(s, '--verify-and-latch');
+    assert.equal(ctl.status, 1, `CONTROL: the same store read directly is judged and LATCHED (${ctl.out.slice(-200)})`);
+  });
+});
+for (const [mode, what] of [['deny', 'the latch WRITE is refused (500)'], ['swallow', 'the latch write is "accepted" but never lands, so the READ-BACK still sees complete true']]) {
+  test(`#1744 (L2b-${mode}, r8) --verify-and-latch finds a violation but ${what} → exit 2 CLOSURE UNCONFIRMED, never LATCHED; the real marker untouched`, T, async () => {
+    await world('off', async (s) => {
+      await DAMAGE[0][1]({ q: s.q, xu: s.xu });
+      const px = await latchProxy(s.w.exec.baseUrl, mode);
+      try {
+        const r = await indexTool(s, '--verify-and-latch', px.url);
+        assert.equal(r.status, 2, `exit 2 (${r.out.slice(-300)} ${r.err.slice(-200)})`);
+        assert.match(r.out, /^CLOSURE UNCONFIRMED \d+ violation\(s\)/m, 'CLOSURE UNCONFIRMED, naming the violation it could not close');
+        assert.doesNotMatch(r.out, /^LATCHED/m, 'never LATCHED');
+      } finally { await px.close(); }
+      assert.deepEqual(await markerValues(s), ['true'], 'the real marker is untouched (the latch never landed)');
+    });
+  });
+}
+// ── r9 (46792, three READ findings at 638d526): each row is red if its finding holds.
+test('#1744 (M1, r9, finding 1) an EXACT index with NO completion marker: --verify-and-latch never reports LATCHED unless the marker then reads complete false; otherwise CLOSURE UNCONFIRMED (exit 2)', T, async () => {
+  await world('off', async (s) => {
+    await s.xu(`DELETE WHERE { GRAPH <${BK}> { <${IX.marker}> ?p ?o } }`, 'no-marker');
+    assert.deepEqual(await markerValues(s), [], 'PRECONDITION: no marker at all');
+    const r = await indexTool(s, '--verify-and-latch');
+    const m = await markerValues(s);
+    if (/^LATCHED/m.test(r.out)) {
+      assert.equal(r.status, 1, `LATCHED exits 1 (${r.out.slice(-200)})`);
+      assert.deepEqual(m, ['false'], `a LATCHED report must leave the marker reading complete false, not ${JSON.stringify(m)} (${r.out.slice(-200)})`);
+    } else {
+      assert.equal(r.status, 2, `otherwise exit 2 (${r.status}: ${r.out.slice(-200)})`);
+      assert.match(r.out, /^CLOSURE UNCONFIRMED /m, 'CLOSURE UNCONFIRMED');
+    }
+  });
+});
+for (const [what, pred] of [['its graph VERSION', '<urn:ex:ver>'], ['its stored entityJson', '<https://scrumboard.local/ns#entityJson>']]) {
+  test(`#1744 (M2, r9, finding 2) a LIVE card missing ${what}, with its coverage node also removed → --verify does NOT report COMPLETE: REFUSED, naming the card`, T, async () => {
+    await world('off', async (s) => {
+      const iri = cardIriOf('uuid-3');
+      assert.equal((await s.q(`SELECT ?t WHERE { <${iri}> a ?t }`)).length > 0, true, 'PRECONDITION: uuid-3 is a live card');
+      await s.xu(`DELETE WHERE { GRAPH <${BK}> { <${iri}> ${pred} ?v } } ; DELETE WHERE { GRAPH <${BK}> { <${IX.card('uuid-3')}> ?p ?o } }`, 'census-hole');
+      const r = await indexTool(s, '--verify');
+      assert.notEqual(r.status, 0, `--verify does not pass it (${r.out.slice(-300)})`);
+      assert.doesNotMatch(r.out, /^COMPLETE$/m, 'never COMPLETE');
+      assert.match(r.out, /uuid-3/, 'the refusal names the card');
+    });
+  });
+}
+for (const [mode, what] of [['nocommit', '/health carries NO commitSeq (two missing values must not compare equal)'], ['flipepoch', 'the EPOCH changes between the reads while commitSeq holds still']]) {
+  test(`#1744 (M3-${mode}, r9, finding 3) a malformed or moving position (${what}) → --verify-and-latch judges nothing: never COMPLETE, never LATCHED; the real marker untouched`, T, async () => {
+    await world('off', async (s) => {
+      const px = await latchProxy(s.w.exec.baseUrl, mode);
+      let r;
+      try { r = await indexTool(s, '--verify-and-latch', px.url); } finally { await px.close(); }
+      assert.notEqual(r.status, 0, `not exit 0 (${r.out.slice(-300)} ${r.err.slice(-200)})`);
+      assert.doesNotMatch(r.out, /^COMPLETE$/m, 'never COMPLETE: no consistent position was established');
+      assert.doesNotMatch(r.out, /^LATCHED/m, 'never LATCHED');
+      assert.deepEqual(await markerValues(s), ['true'], 'the real marker is untouched');
+    });
+  });
+}
 test(`#1744 (R3, mode off) a DELETE is index-dependent too: with a coverage node missing it refuses ${CODES.INDEX_INCOMPLETE}, no effect`, T, async () => {
   await world('off', async (s) => {
     await s.start();
