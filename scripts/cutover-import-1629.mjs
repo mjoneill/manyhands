@@ -36,6 +36,7 @@ import { announcePostId } from '../core/announce-outbox.mjs';
 import { columnIdOf } from '../core/jsonld.mjs';
 import { readPostSeqReservation } from '../core/postseq-reserve.mjs';
 import { readCommittedOrigin } from '../core/origin-commit.mjs';
+import { calendarInstant } from '../core/imported-records.mjs';
 import { captureProblem } from './cutover-capture-schema-1629.mjs';
 
 const SCHEMA_VERSION = 'cutover-import-1629/v1';
@@ -72,9 +73,9 @@ const CLASSES = new Set(['retire-with-proof', 'dispatch-evidenced', 'disposed-no
 // output is written SYNCHRONOUSLY: the crash seam SIGKILLs the process, and an async pipe write could be lost with it
 const say = (line) => fs.writeSync(1, `${line}\n`);
 // a FULL ISO-8601 instant with a zone (#122 review, finding 4): a date alone, a zone-less time (its instant depends on the
-// machine) and a space-separated form are refused before anything is written
-const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
-const instant = (v) => typeof v === 'string' && ISO_INSTANT.test(v) && Number.isFinite(Date.parse(v));
+// machine) and a space-separated form are refused before anything is written; and it names a REAL calendar time (re-review
+// finding 1: `2026-02-31` is not March 3), checked by the same function the imported-record reader uses
+const instant = calendarInstant;
 const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
 const arg = (name) => { const i = process.argv.indexOf(name); return i > 0 ? process.argv[i + 1] : undefined; };
 const APPLY = process.argv.includes('--apply');
@@ -85,7 +86,15 @@ const P_READY_MIGRATION = 'urn:ex:cutover/readyMigration', P_VERIFIED_SEQ = 'urn
 class Stop extends Error { constructor(kind, code, why) { super(`${kind} ${code} ${why}`); this.kind = kind; this.code = code; } }
 const hold = (code, why) => { throw new Stop('HOLD', code, why); };
 const refuse = (code, why) => { throw new Stop('REFUSED', code, why); };
-const lit = (s) => JSON.stringify(String(s));
+// every string literal must be well-formed UTF-16 (#122 re-review, finding 2): JSON.parse accepts a lone surrogate escape,
+// JSON.stringify writes it back as `\ud800`, and the store's SPARQL parser refuses that, so a lone surrogate in a batch-2
+// field would fail AFTER batch 1 landed and burn the candidate. Every batch is built before the first write, so this
+// HOLDs before anything is written.
+const lit = (s) => {
+  const t = String(s);
+  if (!t.isWellFormed()) hold('BAD_STRING', `a value is not well-formed UTF-16 (a lone surrogate): ${JSON.stringify(t.slice(0, 80))}`);
+  return JSON.stringify(t);
+};
 const typedLit = (v, dt) => `${lit(v)}^^<${XSD}${dt}>`;
 const iri = (s) => (s.startsWith('<') ? s : `<${s}>`);
 
@@ -173,7 +182,7 @@ async function run({ id, base, dataset, docBytes, outboxBytes, captureBytes, cap
   const seatStates = meta.seatStates === undefined ? [] : meta.seatStates;
   if (!Array.isArray(seatStates)) hold('SEATSTATES_UNPROVEN', 'scrum:meta.seatStates is not a list');
   for (const [i, x] of seatStates.entries()) {
-    const t = (k) => (typeof x?.[k] === 'string' ? Date.parse(x[k]) : NaN);
+    const t = (k) => (calendarInstant(x?.[k]) ? Date.parse(x[k]) : NaN);   // a real calendar time, never V8's rollover
     const ok = x && typeof x === 'object' && !Array.isArray(x) && x['@type'] === 'scrum:SeatDeclaration' && typeof x['scrum:seat'] === 'string' && x['scrum:seat']
       && Number.isFinite(t('scrum:declaredAt')) && Number.isFinite(t('scrum:expiresAt')) && t('scrum:declaredAt') <= t('scrum:expiresAt') && t('scrum:expiresAt') < capturedAt;
     if (!ok) hold('SEATSTATES_UNPROVEN', `seatStates item ${i} is not a well-formed SeatDeclaration that expired before the capture (${capture.capturedAt})`);

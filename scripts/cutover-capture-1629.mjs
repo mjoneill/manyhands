@@ -13,7 +13,8 @@
  * It refuses, before anything is written:
  *   · STORE_OPEN    a process holds a file in the source store open (lsof +D); a store that cannot be checked is refused too
  *   · NOT_STOPPED   the identity file is not a /health body naming datasetId, incarnation, epoch and commitSeq
- *   · NOT_SOURCE    the identity's storeHome is not the source store (the /health of some other executor)
+ *   · NOT_SOURCE    the identity's storeHome is not the source store (the /health of some other executor), or the store
+ *                   served read-only names another datasetId, incarnation, epoch or commitSeq than the identity
  *   · STORE_SHAPE   the source store holds a subdirectory or a non-regular file (the manifest lists flat files only)
  *   · UNSTABLE      two full passes over the store's files (name, size, sha256), and over the document's and the outbox
  *                   manifest's sha256, differ: something wrote during the capture
@@ -35,8 +36,8 @@ const REPO = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const PY = process.env.GRAPH_EXECUTOR_PYTHON || path.join(REPO, 'graph-executor', '.venv', 'bin', 'python');
 const EXECUTOR = path.join(REPO, 'graph-executor', 'executor.py');
 
-const BETWEEN_PASSES = process.env.SCRUM_CUTOVER_CAPTURE_BETWEEN_PASSES || '';
-const DIGEST_TIMEOUT_MS = Number(process.env.SCRUM_CUTOVER_DIGEST_TIMEOUT_MS || 2 * 60 * 60 * 1000);   // 2 h by default; the source is stopped, so time is the only cost   // test seam: a file appended to between the passes; unset = off
+const BETWEEN_PASSES = process.env.SCRUM_CUTOVER_CAPTURE_BETWEEN_PASSES || '';   // test seam: a file appended to between the passes; unset = off
+const DIGEST_TIMEOUT_MS = Number(process.env.SCRUM_CUTOVER_DIGEST_TIMEOUT_MS || 2 * 60 * 60 * 1000);   // 2 h by default; the source is stopped, so time is the only cost
 
 const arg = (name) => { const i = process.argv.indexOf(name); return i > 0 ? process.argv[i + 1] : undefined; };
 const refuse = (code, why) => { console.log(`REFUSED ${code} ${why}`); process.exit(1); };
@@ -89,7 +90,9 @@ const first = pass();
 // promotion, no backfill) and digested through the same code step 3 uses on the candidate. Pass 2 then proves the read-only
 // serve changed no byte.
 const content = await new Promise((resolve) => {
-  const p = spawn(PY, [EXECUTOR, '--store', store, '--port', '0', '--dataset-id', ident.datasetId, '--read-only'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  // --exit-on-stdin-eof (#122 re-review, finding 8): a capture killed mid-digest takes its read-only executor with it, so
+  // nothing is left holding the source store
+  const p = spawn(PY, [EXECUTOR, '--store', store, '--port', '0', '--dataset-id', ident.datasetId, '--read-only', '--exit-on-stdin-eof'], { stdio: ['pipe', 'pipe', 'pipe'] });
   let out = '', err = '', done = false;
   const finish = (v) => { if (done) return; done = true; clearTimeout(timer); p.once('exit', () => resolve(v)); if (p.exitCode !== null || p.signalCode !== null) resolve(v); else p.kill('SIGKILL'); };
   // two separate bounds (#1747 46635): the READY line within 30 s, then the digest within DIGEST_TIMEOUT_MS, each named honestly
@@ -99,15 +102,20 @@ const content = await new Promise((resolve) => {
   p.stdout.on('data', async (d) => {
     out += d;
     if (done || !out.includes('\n')) return;
-    let port;
-    try { port = JSON.parse(out.split('\n')[0]).port; } catch { return finish({ error: `the read-only executor's first line is not a ready line` }); }
+    let ready;
+    try { ready = JSON.parse(out.split('\n')[0]); } catch { return finish({ error: `the read-only executor's first line is not a ready line` }); }
+    const port = ready.port;
+    // the store it serves is the store the identity names (#122 re-review, finding 5): the ready line carries the /health
+    // identity, so a mismatched identity file is refused here, by name, not later as NOT_CANDIDATE
+    const differ = ['datasetId', 'incarnation', 'epoch', 'commitSeq'].filter((k) => String(ready[k]) !== ident[k]);
+    if (differ.length) return finish({ code: 'NOT_SOURCE', error: `the store serves ${differ.map((k) => `${k} ${JSON.stringify(ready[k] ?? null)}`).join(', ')}, not the identity's ${differ.map((k) => ident[k]).join(', ')}` });
     clearTimeout(timer);
     timer = setTimeout(() => finish({ error: `the content digest did not finish within ${DIGEST_TIMEOUT_MS} ms` }), DIGEST_TIMEOUT_MS);
     const t0 = Date.now();
     try { const d = await contentDigest(`http://127.0.0.1:${port}`); console.error(`content digest: ${d.quads} quads in ${Date.now() - t0} ms`); finish(d); } catch (e) { finish({ error: e.message, code: e.code }); }
   });
 });
-if (content.error) refuse(content.code === 'DIGEST_TOO_LARGE' ? 'DIGEST_TOO_LARGE' : 'STORE_SHAPE', `the source's content could not be digested: ${content.error}`);
+if (content.error) refuse(content.code === 'DIGEST_TOO_LARGE' || content.code === 'NOT_SOURCE' ? content.code : 'STORE_SHAPE', `the source's content could not be digested: ${content.error}`);
 if (BETWEEN_PASSES) fs.appendFileSync(BETWEEN_PASSES, 'x');
 const second = pass();
 // and again AFTER the passes (#122 review, LOW): a writer that opened the store mid-capture is refused even if its bytes

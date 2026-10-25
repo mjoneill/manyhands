@@ -67,7 +67,7 @@ async function boundedJson(r, what) {
 }
 
 /**
- * The content digest of the store behind `baseUrl`. Returns { sha256, quads, recoveryQuads } where `quads` is the number of
+ * The content digest of the store behind `baseUrl`. Returns { sha256, quads, recoveryQuads, total } where `quads` is the number of
  * digested lines and `recoveryQuads` the number in the recovery graph (a hold or record a caller may need to explain).
  *
  * The ORDER is defined by content alone, never by how the store was split to read it: every line is keyed by the first three
@@ -106,5 +106,5 @@ export async function contentDigest(baseUrl, { opId = `urn:ex:op/cutover/content
   const c = await boundedJson(await post(baseUrl, `${opId}/count`, `SELECT (COUNT(*) AS ?n) WHERE { ${ALL} }`), 'the total count');
   const total = Number(c.results.bindings[0]?.n?.value);
   if (total !== quads + excludedQuads) throw new Error(`content digest: the buckets cover ${quads + excludedQuads} quads, the store holds ${total}`);
-  return { sha256: h.digest('hex'), quads, recoveryQuads };
+  return { sha256: h.digest('hex'), quads, recoveryQuads, total };
 }

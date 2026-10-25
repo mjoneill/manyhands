@@ -43,7 +43,8 @@ try { m = JSON.parse(raw.toString('utf8')); } catch { refuse('CAPTURE_MALFORMED'
 const problem = captureProblem(m);
 if (problem) refuse('CAPTURE_MALFORMED', problem);
 
-const h = await (await fetch(`${base}/health`)).json();
+let h;
+try { h = await (await fetch(`${base}/health`)).json(); } catch (e) { refuse('UNAVAILABLE', `the candidate's /health could not be read: ${e.message}`); }   // #122 re-review, finding 8
 const realOr = (p) => { try { return fs.realpathSync(p); } catch { return p; } };
 if (h.datasetId !== m.datasetId) refuse('NOT_CANDIDATE', `dataset ${h.datasetId} is not the capture's ${m.datasetId}`);
 if (!h.incarnationFrom || !h.incarnation || h.incarnation === h.incarnationFrom) refuse('NOT_CANDIDATE', 'the target is not a promoted copy (no new incarnation)');
@@ -75,11 +76,17 @@ if (got.sha256 !== m.contentSha256) {
   refuse('NOT_COPY', `the candidate's content (${got.quads} quads${got.recoveryQuads ? `, ${got.recoveryQuads} in the recovery graph: a held promotion's exact delta is validated once restore safety lands` : ''}) is not the captured content`);
 }
 
-// guarded: it inserts only while no marker exists, so two racing runs cannot leave two markers
+// guarded: it inserts only while no marker exists, so two racing runs cannot leave two markers; and only while the store
+// still holds what was digested (#122 re-review, finding 3): the captured commitSeq and the digest's exact total quad count,
+// as READY guards. A compiled write moves commitSeq; any write that adds or removes a quad moves the count. (A raw write that
+// swaps one quad for another moves neither; the import's read-back and READY's re-verification are the later checks.)
 const body = `INSERT { GRAPH <${BOOKKEEPING_GRAPH}> { <${CANDIDATE_MARKER}> <${P_MANIFEST_SHA}> "${manifestSha}" ; <${P_MARKED_AT}> "${new Date().toISOString()}"^^<http://www.w3.org/2001/XMLSchema#dateTime> } }
-WHERE { FILTER NOT EXISTS { GRAPH <${BOOKKEEPING_GRAPH}> { <${CANDIDATE_MARKER}> <${P_MANIFEST_SHA}> ?any } } }`;
+WHERE { GRAPH <${BOOKKEEPING_GRAPH}> { <urn:ex:dataset> <urn:ex:commitSeq> ?cs . FILTER(STR(?cs) = "${m.commitSeq}") }
+  FILTER NOT EXISTS { GRAPH <${BOOKKEEPING_GRAPH}> { <${CANDIDATE_MARKER}> <${P_MANIFEST_SHA}> ?any } }
+  { SELECT (COUNT(*) AS ?qn) WHERE { { ?qs ?qp ?qo } UNION { GRAPH ?qg { ?qs ?qp ?qo } } } } FILTER(?qn = ${got.total}) }`;
 const u = await fetch(`${base}/update`, { method: 'POST', body, headers: { 'x-op-id': `urn:ex:op/cutover/candidate/${manifestSha}`, 'x-epoch': String(h.epoch), 'x-manyhands-write-protocol': 'postseq-v1' } });   // §6 F1 floor
 if (!u.ok) refuse('WRITE_FAILED', `${u.status} ${(await u.text()).slice(0, 200)}`);
 const after = (await query(`SELECT ?v WHERE { GRAPH <${BOOKKEEPING_GRAPH}> { <${CANDIDATE_MARKER}> <${P_MANIFEST_SHA}> ?v } }`)).map((b) => b.v.value);
+if (!after.length) refuse('MOVED', `the candidate changed after its content was digested (commitSeq ${m.commitSeq}, ${got.total} quads); nothing was marked`);
 if (after.length !== 1 || after[0] !== manifestSha) refuse('MARKER_MISMATCH', `read-back found ${JSON.stringify(after)}`);
 console.log(`MARKED ${manifestSha}`);

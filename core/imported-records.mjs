@@ -63,8 +63,25 @@ function integer(t, what) {
   if (!t || t.type !== 'literal' || t.datatype !== `${XSD}integer` || !/^-?\d+$/.test(t.value) || !Number.isSafeInteger(Number(t.value))) bad(`${what} is not an exact xsd:integer`);
   return Number(t.value);
 }
+/**
+ * A FULL ISO-8601 instant with a zone that names a REAL calendar time (#122 re-review, finding 1). Date.parse alone is
+ * lenient: V8 reads `2026-02-31T00:00:00Z` as March 3, and the store keeps the ill-typed literal (SPARQL comparisons on it
+ * come back unbound). So every field is range-checked: month 1-12, the day within its month (leap years included), hour
+ * 0-23, minute and second 0-59, a zone offset of at most 14:00. Shared by the importer (before any write) and this reader.
+ */
+const ISO_INSTANT = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d{1,9})?(Z|([+-])(\d{2}):(\d{2}))$/;
+export function calendarInstant(v) {
+  const m = typeof v === 'string' ? ISO_INSTANT.exec(v) : null;
+  if (!m) return false;
+  const [y, mo, d, h, mi, se] = m.slice(1, 7).map(Number);
+  const leap = (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][mo - 1];
+  if (!days || d < 1 || d > days || h > 23 || mi > 59 || se > 59) return false;
+  if (m[8] !== 'Z' && (Number(m[10]) > 14 || Number(m[11]) > 59 || (Number(m[10]) === 14 && Number(m[11]) !== 0))) return false;
+  return Number.isFinite(Date.parse(v));
+}
 function dateTime(t, what) {
-  if (!t || t.type !== 'literal' || t.datatype !== `${XSD}dateTime` || !Number.isFinite(Date.parse(t.value))) bad(`${what} is not an xsd:dateTime`);
+  if (!t || t.type !== 'literal' || t.datatype !== `${XSD}dateTime` || !calendarInstant(t.value)) bad(`${what} is not an xsd:dateTime`);
   return t.value;
 }
 function boolean(t, what) {
