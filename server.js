@@ -11286,8 +11286,11 @@ async function xoListOutbox({ status, mutationId } = {}) {
   if (!R.ok) throw new OutboxUnavailable(R.reason);
   // #1747 R1 — an imported origin is never pending (its reader refuses a pending one), so a pending-only scan skips it
   // unread; every other listing reads and validates it like any origin
+  // Only a GENUINE imported origin may be skipped: it carries a migrationId AND has no Prepared node. A native origin (it has a
+  // Prepared node) that also carries a migrationId is read, so its reader flags it INVALID into `integrity` (#122 review).
   const skipImported = status === 'pending';
-  const mids = [...new Set(R.records.filter((x) => x.type === 'Origin' && x.mutationId && (!mutationId || x.mutationId === mutationId) && !(skipImported && x.imported)).map((x) => x.mutationId))];
+  const prepared = new Set(R.records.filter((x) => x.type === 'Prepared' && x.mutationId).map((x) => x.mutationId));
+  const mids = [...new Set(R.records.filter((x) => x.type === 'Origin' && x.mutationId && (!mutationId || x.mutationId === mutationId) && !(skipImported && x.imported && !prepared.has(x.mutationId))).map((x) => x.mutationId))];
   const origins = [], entries = [], integrity = [];
   for (const mid of mids) {
     const o = await xoOrigin(mid);

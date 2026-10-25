@@ -32,6 +32,7 @@ import { announcePostId } from '../core/announce-outbox.mjs';
 import { columnIdOf } from '../core/jsonld.mjs';
 import { readPostSeqReservation } from '../core/postseq-reserve.mjs';
 import { readCommittedOrigin } from '../core/origin-commit.mjs';
+import { captureProblem } from './cutover-capture-schema-1629.mjs';
 
 const SCHEMA_VERSION = 'cutover-import-1629/v1';
 // contract v2 §6 F1: the write floor this tool declares; an executor with no floor installed ignores it
@@ -121,9 +122,12 @@ function executor(base, label) {
 }
 
 async function run({ id, base, dataset, docBytes, outboxBytes, captureBytes, captureSha }) {
-  const capture = JSON.parse(captureBytes.toString('utf8'));
+  let capture;
+  try { capture = JSON.parse(captureBytes.toString('utf8')); } catch { refuse('CAPTURE_MALFORMED', 'the capture manifest is not JSON'); }
+  // a CLOSED schema with every binding field required (#1747 review of PR #122): a missing field never skips its check
+  const problem = captureProblem(capture);
+  if (problem) refuse('CAPTURE_MALFORMED', problem);
   // the instant step 2 read the STOPPED source: what "expired before the capture" is measured against, never this run's clock
-  if (typeof capture.capturedAt !== 'string' || !Number.isFinite(Date.parse(capture.capturedAt))) refuse('CAPTURE_MALFORMED', 'the capture manifest has no valid capturedAt');
   const capturedAt = Date.parse(capture.capturedAt);
   const X = executor(base, id);
   const h = await X.health();
@@ -132,16 +136,16 @@ async function run({ id, base, dataset, docBytes, outboxBytes, captureBytes, cap
   // ── 1. binding (#1747 v1 + v26): the target is THE marked, promoted copy of THIS capture, and the source is unchanged ──
   if (h.datasetId !== dataset || h.datasetId !== capture.datasetId) refuse('NOT_CANDIDATE', `dataset ${h.datasetId}, expected ${dataset}`);
   if (!h.incarnationFrom || !h.incarnation || h.incarnation === h.incarnationFrom) refuse('NOT_CANDIDATE', 'the target is not a promoted copy (no new incarnation)');
-  if (capture.incarnation && h.incarnationFrom !== capture.incarnation) refuse('NOT_CANDIDATE', `promoted from ${h.incarnationFrom}, not the captured ${capture.incarnation}`);
+  if (h.incarnationFrom !== capture.incarnation) refuse('NOT_CANDIDATE', `promoted from ${h.incarnationFrom}, not the captured ${capture.incarnation}`);
   if (!h.storeHome || realOr(h.storeHome) === realOr(capture.sourceStore)) refuse('NOT_CANDIDATE', 'the target store IS the source store');
   const marks = (await X.query(`SELECT ?v WHERE { GRAPH <${BK}> { <${CANDIDATE_MARKER}> <${P_MANIFEST_SHA}> ?v } }`)).map((b) => b.v.value);
   if (!marks.length) refuse('MARKER_MISSING', 'the candidate carries no CandidateMarker (step 3 not run)');
   if (marks.length !== 1 || marks[0] !== captureSha) refuse('MARKER_MISMATCH', `the candidate is marked for ${marks.join(', ')}, not this capture ${captureSha}`);
   if (capture.documentSha256 !== sha(docBytes)) refuse('SOURCE_CHANGED', 'the document is not the one captured');
-  if (capture.outboxManifestSha256 && capture.outboxManifestSha256 !== sha(outboxBytes)) refuse('SOURCE_CHANGED', 'the outbox manifest is not the one captured');
+  if (capture.outboxManifestSha256 !== sha(outboxBytes)) refuse('SOURCE_CHANGED', 'the outbox manifest is not the one captured');
   const sourceChanged = () => {
     const now = fs.readdirSync(capture.sourceStore).sort().map((n) => { const b = fs.readFileSync(`${capture.sourceStore}/${n}`); return `${n} ${b.length} ${sha(b)}`; });
-    const then = (capture.files || []).map((f) => `${f.name} ${f.size} ${f.sha256}`).sort();
+    const then = capture.files.map((f) => `${f.name} ${f.size} ${f.sha256}`).sort();
     return JSON.stringify(now) !== JSON.stringify(then);
   };
   if (sourceChanged()) refuse('SOURCE_CHANGED', 'a source store file differs from the capture (a writer ran)');
@@ -186,6 +190,38 @@ async function run({ id, base, dataset, docBytes, outboxBytes, captureBytes, cap
   }
   for (const [mid, o] of Object.entries(origins)) for (const slot of o.slots || []) {
     if (!entries[`${mid}:${slot}`]) hold('ORIGIN_WITHOUT_ENTRY', `origin ${mid} slot ${slot} has no entry`);
+  }
+
+  // ── 2b. shapes (#1747 review of PR #122): every id that will be written into an IRI matches its grammar, and every record
+  // has a shape the runtime readers accept, BEFORE any batch is written (a bad shape must HOLD, not burn the candidate).
+  // Measured on a copy of prod (2026-10-25T03:17Z): every postId, mutationId and legacyPostId is a lowercase UUID, every
+  // slot is one of four names, and every check below holds for every record, so no real record is refused by it.
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  const SLOT = /^[a-z][a-z0-9-]{0,31}$/;
+  const RES_KEYS = new Set(['applied', 'createdAt', 'postId', 'postSeq']);
+  const ORIGIN_KEYS = ['committedAt', 'mode', 'mutationId', 'occurredAt', 'origin', 'originActor', 'slots'];
+  const STATUSES = new Set(['pending', 'published', 'blocked']);
+  const at = (v) => typeof v === 'string' && Number.isFinite(Date.parse(v));
+  for (const r of reservations) {
+    if (!UUID.test(r.postId)) hold('BAD_ID', `reservation ${r.key}: postId ${JSON.stringify(r.postId)} is not a lowercase UUID`);
+    for (const k of Object.keys(r.rec)) if (!RES_KEYS.has(k)) hold('BAD_RESERVATION', `reservation ${r.key} carries ${k}`);
+    if ('applied' in r.rec && typeof r.rec.applied !== 'boolean') hold('BAD_RESERVATION', `reservation ${r.key}: applied is not a boolean`);
+  }
+  for (const [mid, o] of Object.entries(origins)) {
+    if (!UUID.test(mid) || o?.mutationId !== mid) hold('BAD_ID', `origin ${JSON.stringify(mid)}: the key is not a lowercase UUID equal to its mutationId`);
+    const keys = Object.keys(o).sort();
+    if (keys.length !== ORIGIN_KEYS.length || keys.some((k, i) => k !== ORIGIN_KEYS[i])) hold('BAD_ORIGIN', `origin ${mid} has the keys ${keys.join(',')}`);
+    if (o.mode !== 'legacy' && o.mode !== 'publisher') hold('BAD_ORIGIN', `origin ${mid}: mode ${JSON.stringify(o.mode)}`);
+    if (!Array.isArray(o.slots) || !o.slots.length || o.slots.some((x) => typeof x !== 'string' || !SLOT.test(x)) || new Set(o.slots).size !== o.slots.length) hold('BAD_ID', `origin ${mid}: slots are not distinct slot names`);
+    if (typeof o.originActor !== 'string' || !o.originActor || !at(o.occurredAt) || !at(o.committedAt)) hold('BAD_ORIGIN', `origin ${mid}: originActor or a time is malformed`);
+  }
+  for (const [key, e] of Object.entries(entries)) {
+    if (!UUID.test(e?.mutationId) || !SLOT.test(e?.slot ?? '') || key !== `${e.mutationId}:${e.slot}` || e.obligationId !== key) hold('BAD_ID', `entry ${JSON.stringify(key)}: the key, obligationId, mutationId and slot do not agree`);
+    if (!origins[e.mutationId].slots.includes(e.slot)) hold('ENTRY_WITHOUT_SLOT', `entry ${key}: its origin has no slot ${e.slot}`);
+    if (!STATUSES.has(e.status)) hold('BAD_ENTRY', `entry ${key}: status ${JSON.stringify(e.status)}`);
+    if (e.mode === 'legacy' && !UUID.test(e.legacyPostId ?? '')) hold('BAD_ID', `entry ${key}: a legacy entry's legacyPostId is not a lowercase UUID`);
+    if (e.postId !== undefined && e.postId !== announcePostId(e.mutationId, e.slot)) hold('BAD_ID', `entry ${key}: postId is not its announcement post`);
+    if (e.mode === 'publisher' && (e.payload?.originActor !== origins[e.mutationId].originActor || e.payload?.occurredAt !== origins[e.mutationId].occurredAt)) hold('ENTRY_DISAGREES', `entry ${key}: the payload's originActor or occurredAt is not its origin's`);
   }
 
   // ── 3. columns: the executor owns them (#1639); any unexplained difference is two sources of truth ──
@@ -313,13 +349,24 @@ async function run({ id, base, dataset, docBytes, outboxBytes, captureBytes, cap
     for (const [p, w] of Object.entries(want)) if (JSON.stringify(of(p)) !== JSON.stringify(w)) refuse('ALLOCATOR_MISMATCH', `this migration's allocator holds ${p} ${JSON.stringify(of(p))}, the document says ${JSON.stringify(w)}`);
   }
 
+  // a subject this migration writes must hold NOTHING it did not write itself (#1747 review of PR #122): merging into an
+  // existing record would make the readers see a native-plus-imported mix (INVALID) after a COMPLETE import
+  const subjects = [...reservations.map((r) => POSTSEQ_TERMS.reservation(r.postId)), ...Object.keys(origins).map((m) => ORIGIN_TERMS.originSubject(m)),
+    ...Object.values(entries).map((e) => ORIGIN_TERMS.obligationSubject(e.mutationId, e.slot))];
+  for (let i = 0; i < subjects.length; i += 500) {
+    const occupied = await X.query(`SELECT DISTINCT ?s WHERE { VALUES ?s { ${subjects.slice(i, i + 500).join(' ')} } { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } FILTER NOT EXISTS { GRAPH <${BK}> { ?s <${T.migrationId}> ${lit(id)} } } } LIMIT 1`);
+    if (occupied.length) hold('SUBJECT_OCCUPIED', `${occupied[0].s.value} already holds triples this migration did not write`);
+  }
+
   // a READY candidate is FROZEN (§6 step 5): no import writes to it again, even a no-op replay; a dry run still plans
+  let alreadyReady = null;
   const ready = await X.query(`SELECT ?p ?o WHERE { GRAPH <${BK}> { <${READY_MARKER}> ?p ?o } }`);
   if (ready.length) {
     const val = (p) => ready.filter((b) => b.p.value === p).map((b) => b.o.value);
     const same = JSON.stringify(val(P_READY_MIGRATION)) === JSON.stringify([id]) && JSON.stringify(val(P_MANIFEST_SHA)) === JSON.stringify([captureSha]);
     if (APPLY) refuse('READY_FROZEN', `the candidate is READY${same ? '' : ' for another migration'}; an import may not write to it`);
-    if (READY) { if (!same) refuse('READY_CONFLICT', `the candidate is READY for ${val(P_READY_MIGRATION).join(', ')}`); return `ALREADY_READY id=${id} commitSeq=${val(P_VERIFIED_SEQ).join(',')}`; }
+    // a READY replay is re-VERIFIED before it answers (#1747 review of PR #122): ALREADY_READY claims the import still reads back
+    if (READY) { if (!same) refuse('READY_CONFLICT', `the candidate is READY for ${val(P_READY_MIGRATION).join(', ')}`); alreadyReady = `ALREADY_READY id=${id} commitSeq=${val(P_VERIFIED_SEQ).join(',')}`; }
   }
 
   if (!APPLY && !READY) return `PLAN reservations=${reservations.length} origins=${Object.keys(origins).length} entries=${Object.keys(entries).length} retire=${plan.length} next=${next}${retiredSeats.length ? ` seatStates retired=${retiredSeats.length}` : ''}`;
@@ -378,16 +425,18 @@ async function run({ id, base, dataset, docBytes, outboxBytes, captureBytes, cap
     await expect(`urn:ex:cutover/migration/${id}/seatState/${i}`, 'urn:ex:cutover/retiredSeatStateSha256', sha(j), null, `seatState/${i}`);
   }
   if (bad.length) return `INCOMPLETE ${bad.join(' ')}`;
+  // COMPLETE means the BOARD can read it: the runtime readers (R1) read every imported record back, not only the SELECTs above
+  await readersReadBack({ X, id, reservations, origins, entries, plan });
   if (!READY) return 'COMPLETE';
-  return markReady({ X, id, captureSha, reservations, origins, entries, plan });
+  if (alreadyReady) return alreadyReady;
+  return markReady({ X, id, captureSha });
 }
 
 /**
- * #1747 step 5 — the RUNTIME readers (R1) must read every imported record back as imported, its obligations with the
- * planned status, and nothing imported may exist beyond what this migration wrote. Then ONE guarded update marks the
- * candidate READY, tied to the capture and to the commitSeq verified here: any write in between fails the guard.
+ * #1747 — the RUNTIME readers (R1) read every imported record back as imported, its obligations with the planned status,
+ * and nothing imported exists beyond what this migration wrote. Run at COMPLETE and before READY.
  */
-async function markReady({ X, id, captureSha, reservations, origins, entries, plan }) {
+async function readersReadBack({ X, id, reservations, origins, entries, plan }) {
   const client = {
     query: async (q) => { try { return { ok: true, rows: await X.query(q) }; } catch (e) { return { ok: false, status: 'UNAVAILABLE', reason: e.message }; } },
     ask: async (q) => { try { return { ok: true, boolean: await X.ask(q) }; } catch (e) { return { ok: false, status: 'UNAVAILABLE', reason: e.message }; } },
@@ -415,6 +464,13 @@ async function markReady({ X, id, captureSha, reservations, origins, entries, pl
   const want = [[POSTSEQ_TERMS.Reservation, reservations.length], [ORIGIN_TERMS.Origin, Object.keys(origins).length], [ORIGIN_TERMS.Obligation, Object.keys(entries).length]];
   for (const [t, w] of want) if (n(t) !== w) hold('EXTRA_RECORD', `${n(t)} imported ${t} records, this migration wrote ${w}`);
 
+}
+
+/**
+ * #1747 step 5 — after the readers' read-back, ONE guarded update marks the candidate READY, tied to the capture and to the
+ * position verified here: any write in between fails the guard.
+ */
+async function markReady({ X, id, captureSha }) {
   // the verified position, and the mark guarded on it in the SAME update
   const seqRows = await X.query(`SELECT ?s WHERE { GRAPH <${BK}> { <urn:ex:dataset> <urn:ex:commitSeq> ?s } }`);
   if (seqRows.length !== 1) refuse('UNAVAILABLE', `the store marker carries ${seqRows.length} commitSeq values`);

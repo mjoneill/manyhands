@@ -18,6 +18,7 @@
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { BOOKKEEPING_GRAPH } from '../core/graph-vocab.mjs';
+import { captureProblem } from './cutover-capture-schema-1629.mjs';
 
 export const CANDIDATE_MARKER = 'urn:ex:cutover/candidate';
 export const P_MANIFEST_SHA = 'urn:ex:cutover/captureManifestSha256';
@@ -32,13 +33,17 @@ if (!manifestFile || !base) refuse('USAGE', 'node scripts/cutover-candidate-1629
 
 const raw = fs.readFileSync(manifestFile);
 const manifestSha = crypto.createHash('sha256').update(raw).digest('hex');
-const m = JSON.parse(raw.toString('utf8'));
+let m;
+try { m = JSON.parse(raw.toString('utf8')); } catch { refuse('CAPTURE_MALFORMED', 'the capture manifest is not JSON'); }
+// the same CLOSED schema the importer reads (#1747 review of PR #122): every binding field required
+const problem = captureProblem(m);
+if (problem) refuse('CAPTURE_MALFORMED', problem);
 
 const h = await (await fetch(`${base}/health`)).json();
 const realOr = (p) => { try { return fs.realpathSync(p); } catch { return p; } };
 if (h.datasetId !== m.datasetId) refuse('NOT_CANDIDATE', `dataset ${h.datasetId} is not the capture's ${m.datasetId}`);
 if (!h.incarnationFrom || !h.incarnation || h.incarnation === h.incarnationFrom) refuse('NOT_CANDIDATE', 'the target is not a promoted copy (no new incarnation)');
-if (m.incarnation && h.incarnationFrom !== m.incarnation) refuse('NOT_CANDIDATE', `it was promoted from ${h.incarnationFrom}, not the captured ${m.incarnation}`);
+if (h.incarnationFrom !== m.incarnation) refuse('NOT_CANDIDATE', `it was promoted from ${h.incarnationFrom}, not the captured ${m.incarnation}`);
 if (!h.storeHome || realOr(h.storeHome) === realOr(m.sourceStore)) refuse('NOT_CANDIDATE', 'its store home is the source store');
 
 const query = async (sparql) => {
