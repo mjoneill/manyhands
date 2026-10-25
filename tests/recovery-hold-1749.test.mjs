@@ -683,3 +683,85 @@ test('#1749 (P4c, v2) UNFLOORED: a 50,000-triple INSERT DATA, build vs the base 
   const { b, n } = await paired('c', [], async () => {}, insert50k({}));
   console.log(`# P4c RECORD: unfloored 50k INSERT DATA costs x${(n / b).toFixed(2)} the base (${b.toFixed(1)} -> ${n.toFixed(1)} ms)`);
 });
+
+// ── r6: rows for the independent review of PR #123 (46629), each red if its finding holds ──
+/** every quad of every graph of a STOPPED store, read offline (read-only: it writes nothing, 46606), canonical and sorted */
+const stateOffline = (dir) => {
+  const r = spawnSync(PY, ['-I', '-c', 'import sys, pyoxigraph as px\nfor q in sorted(str(x) for x in px.Store.read_only(sys.argv[1])): print(q)', dir], { encoding: 'utf8', maxBuffer: 1 << 28 });
+  assert.equal(r.status, 0, `PRECONDITION: read offline (${r.stderr})`);
+  return r.stdout;
+};
+const rgOffline = (dir) => stateOffline(dir).split('\n').filter((l) => l.endsWith(`<${RG}>`)).join('\n');
+const refusedAny = async (p, what) => {
+  let err = null; try { const x = await p; await stopX(x); } catch (e) { err = e; }
+  assert.ok(err, `${what}: the start is refused`);
+  assert.match(String(err?.stderr ?? '') + String(err?.message ?? ''), /\bBAD_FILE\b|REFUSED/, `${what}: refused by name (BAD_FILE, or a refusal of the flag combination) (${String(err?.stderr ?? err?.message).slice(0, 300)})`);
+};
+/** a promoted, held backup and a reconcile file the closed schema refuses (a declaredGap that is not an integer) */
+async function heldWithBadFile() {
+  const s = await scenario();
+  const x = await start(s.backup, ['--promote-epoch']);
+  const hb = await holdBlock(x);
+  await stopX(x);
+  return { s, bad: reconcileFile(s.backup, 112, 10.5, hb) };
+}
+test('#1749 (F1-control, r6) the offline state dump SEES a floor install (so F1a can fail)', T, async () => {
+  const { s } = await heldWithBadFile();
+  const before = stateOffline(s.backup);
+  const x = await start(s.backup, ['--install-write-floor', 'postseq-v1']);
+  await stopX(x);
+  assert.notEqual(stateOffline(s.backup), before, 'a floor install changes the dump');
+});
+test('#1749 (F1a, r6) a refused --reconcile-postseq start WITH --install-write-floor changes NOTHING: every quad of every graph equal before and after', T, async () => {
+  const { s, bad } = await heldWithBadFile();
+  const before = stateOffline(s.backup);
+  await refusedAny(start(s.backup, ['--reconcile-postseq', bad, '--install-write-floor', 'postseq-v1']), 'a bad file with a floor install');
+  assert.equal(stateOffline(s.backup), before, 'the store\'s logical state is unchanged: no floor, no install record, nothing else');
+});
+test('#1749 (F1b, r6) a refused --reconcile-postseq start WITH --adopt-home (the store MOVED) changes NOTHING: its recorded home is not rewritten', T, async () => {
+  const { s, bad } = await heldWithBadFile();
+  const moved = `${s.backup}-moved`; fs.renameSync(s.backup, moved); owned.stores.add(moved);
+  const before = stateOffline(moved);
+  await refusedAny(start(moved, ['--reconcile-postseq', bad, '--adopt-home']), 'a bad file with --adopt-home');
+  assert.equal(stateOffline(moved), before, 'the store\'s logical state is unchanged: storeHome and its inode as recorded before');
+});
+for (const [what, sparql] of [
+  ['its restoredHighWater', `DELETE WHERE { GRAPH <${RG}> { <${HOLD.subject}> <${HOLD.restoredHighWater}> ?v } }`],
+  ['its type', `DELETE WHERE { GRAPH <${RG}> { <${HOLD.subject}> a <${HOLD.type}> } }`],
+  ['its incarnation (lineage)', `DELETE WHERE { GRAPH <${RG}> { <${HOLD.subject}> <${HOLD.incarnation}> ?v } }`],
+]) {
+  test(`#1749 (F2, r6) a re-promotion over a prior hold missing ${what} → refuses HOLD_UNSOUND; the malformed hold is NOT replaced by a valid one`, T, async () => {
+    const s = await scenario();
+    const x = await start(s.backup, ['--promote-epoch']);
+    await stopX(x);
+    plantOffline(s.backup, sparql);
+    const second = store('hold-backup-unsound-');
+    fs.cpSync(s.backup, second, { recursive: true });
+    const rg0 = rgOffline(second);
+    assert.ok(rg0.length > 0, 'PRECONDITION: the rest of the hold is still there');
+    await assert.rejects(start(second, ['--promote-epoch']), (e) => /HOLD_UNSOUND/.test(String(e?.stderr ?? e?.message)), `${what} missing: HOLD_UNSOUND`);
+    assert.equal(rgOffline(second), rg0, 'the recovery graph is unchanged: the malformed hold was not repaired');
+  });
+}
+// F3, pinned to the contract author's choice (46632): ANY blank node in the recovery graph refuses the start, HOLD_UNSOUND,
+// naming the quad. The hold and the records use named subjects only, so a blank node there is planted or corrupt state.
+for (const [what, extra, copy] of [['a plain restart at its home', [], false], ['a promotion of a copy', ['--promote-epoch'], true]]) {
+  test(`#1749 (F3, r6) a BLANK-NODE quad in the recovery graph (planted offline) → ${what} refuses HOLD_UNSOUND, naming the quad; nothing changed`, T, async () => {
+    const s = await scenario();
+    const x = await start(s.backup, ['--promote-epoch']);
+    await stopX(x);
+    plantOffline(s.backup, `INSERT DATA { GRAPH <${RG}> { _:b <urn:ex:test/bp> "one" } }`);
+    let dir = s.backup;
+    if (copy) { dir = store('hold-backup-bnode-'); fs.cpSync(s.backup, dir, { recursive: true }); }
+    const before = stateOffline(dir);
+    await assert.rejects(start(dir, extra), (e) => /HOLD_UNSOUND/.test(String(e?.stderr ?? e?.message)) && /urn:ex:test\/bp/.test(String(e?.stderr ?? e?.message)), `${what}: HOLD_UNSOUND naming the blank-node quad`);
+    assert.equal(stateOffline(dir), before, `${what}: the store is unchanged`);
+  });
+}
+test('#1749 (F3-control, r6) the same store WITHOUT the blank-node quad starts (so F3 refuses for the blank node, not the scenario)', T, async () => {
+  const s = await scenario();
+  let x = await start(s.backup, ['--promote-epoch']);
+  await stopX(x);
+  x = await start(s.backup);
+  await stopX(x);
+});
