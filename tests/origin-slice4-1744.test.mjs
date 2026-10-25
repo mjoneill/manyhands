@@ -647,34 +647,77 @@ const DAMAGE = [
 for (const [what, plant] of DAMAGE) {
   test(`#1744 (R3, mode off) ${what} → a page create refuses ${CODES.INDEX_INCOMPLETE}, no effect`, T, async () => {
     await world('off', async (s) => {
+      // r5 (finding 6's boot gate): a mode-off server will not START on a damaged index, so the damage lands AFTER a healthy boot
       await s.start();
+      await plant({ q: s.q, xu: s.xu });
       const e0 = await effects(s);
       const p = await createPage(s, { title: 'Refused page', createdBy: 'ada', requestId: 'req-1744-r3' });
       assert.ok(!ok2xx(p.status), `refused (${p.status} ${p.text.slice(0, 200)})`);
       assert.equal(p.json?.code, CODES.INDEX_INCOMPLETE, `with the named code (${p.text.slice(0, 200)})`);
       assert.deepEqual(await effects(s), e0, 'no effect');
-    }, { plant });
+    });
   });
 }
-test(`#1744 (R3, mode off) no backfill at all → a page create refuses ${CODES.INDEX_INCOMPLETE}, no effect (an absent index never means "no references")`, T, async () => {
+// r5 (finding 6): THE BOOT GATE. Where the index is required (mode off), a server whose index is absent or damaged refuses to
+// START, naming the backfill; an absent index never means "no references". Control: every mode-off row above boots healthy.
+for (const [what, opts] of [['no backfill at all', { index: 'none' }], ['a damaged index (a live card with no coverage node)', { plant: DAMAGE[0][1] }], ['a damaged index (an intact watermark, one name removed)', { plant: DAMAGE[1][1] }], ['no completion marker (a partial backfill)', { plant: DAMAGE[DAMAGE.length - 1][1] }]]) {
+  test(`#1744 (G1, r5, mode off) ${what} → the server REFUSES TO START, naming the backfill; nothing served`, T, async () => {
+    await world('off', async (s) => {
+      await assert.rejects(s.start(), (e) => /card reference index/.test(String(e?.message)) && /refusing to start/.test(String(e?.message)) && /--backfill/.test(String(e?.message)), 'the boot gate refuses, by name, and names the fix');
+    }, opts);
+  });
+}
+// r5: REQUIRED AT RUNTIME in mode off. The marker removed AFTER a healthy boot still refuses every create (the server knows
+// its mode; the switch is never trusted where the mode says the index is required).
+test(`#1744 (G2, r5, mode off) the completion marker removed AFTER a healthy boot → a page create AND an ordinary create refuse ${CODES.INDEX_INCOMPLETE}, no effect`, T, async () => {
   await world('off', async (s) => {
     await s.start();
+    await DAMAGE[DAMAGE.length - 1][1]({ q: s.q, xu: s.xu });
+    assert.deepEqual(await markerOf(s), [], 'PRECONDITION: the marker is gone');
     const e0 = await effects(s);
-    const p = await createPage(s, { title: 'Refused page', createdBy: 'ada', requestId: 'req-1744-r3n' });
-    assert.ok(!ok2xx(p.status), `refused (${p.status} ${p.text.slice(0, 200)})`);
+    const p = await createPage(s, { title: 'Refused page', createdBy: 'ada', requestId: 'req-1744-g2' });
+    assert.ok(!ok2xx(p.status), `the page create is refused (${p.status} ${p.text.slice(0, 200)})`);
     assert.equal(p.json?.code, CODES.INDEX_INCOMPLETE, 'with the named code');
+    const c = await s.call('POST', '/api/cards', { title: 'Refused card', createdBy: 'ada', requestId: `req-1744-g2-card-${process.pid}` });
+    assert.ok(!ok2xx(c.status), `the ordinary create is refused (${c.status} ${c.text.slice(0, 200)})`);
+    assert.equal(c.json?.code, CODES.INDEX_INCOMPLETE, 'with the named code');
     assert.deepEqual(await effects(s), e0, 'no effect');
+  });
+});
+// r5 (finding 5): MARKER-KEYED in mode on. No marker at all → admitted as today; a marker present and the index broken → refused;
+// a healthy marker → admitted. One compiled shape for every caller.
+test('#1744 (G3, r5, mode on) with NO completion marker (never backfilled) an ordinary create is ADMITTED, as today', T, async () => {
+  await world('on', async (s) => {
+    await s.start();
+    const c = await s.call('POST', '/api/cards', { title: 'Admitted card', createdBy: 'ada', requestId: `req-1744-g3-${process.pid}` });
+    assert.ok(ok2xx(c.status), `admitted (${c.status} ${c.text.slice(0, 200)})`);
   }, { index: 'none' });
+});
+test(`#1744 (G4, r5, mode on) a marker PRESENT and the index damaged → an ordinary create AND a delete refuse ${CODES.INDEX_INCOMPLETE}, no effect; the healthy control is admitted`, T, async () => {
+  await world('on', async (s) => {
+    await s.start();
+    const ok = await s.call('POST', '/api/cards', { title: 'Admitted card', createdBy: 'ada', requestId: `req-1744-g4-ok-${process.pid}` });
+    assert.ok(ok2xx(ok.status), `CONTROL: a healthy marker admits the create (${ok.status} ${ok.text.slice(0, 200)})`);
+    await DAMAGE[0][1]({ q: s.q, xu: s.xu });
+    const e0 = await effects(s);
+    const c = await s.call('POST', '/api/cards', { title: 'Refused card', createdBy: 'ada', requestId: `req-1744-g4-${process.pid}` });
+    assert.ok(!ok2xx(c.status), `the create is refused (${c.status} ${c.text.slice(0, 200)})`);
+    assert.equal(c.json?.code, CODES.INDEX_INCOMPLETE, 'with the named code');
+    const d = await s.call('DELETE', '/api/cards/uuid-3?by=ada');
+    assert.ok(!ok2xx(d.status), `the delete is refused (${d.status} ${d.text.slice(0, 200)})`);
+    assert.deepEqual(await effects(s), e0, 'no effect');
+  });
 });
 test(`#1744 (R3, mode off) a DELETE is index-dependent too: with a coverage node missing it refuses ${CODES.INDEX_INCOMPLETE}, no effect`, T, async () => {
   await world('off', async (s) => {
     await s.start();
+    await DAMAGE[0][1]({ q: s.q, xu: s.xu });   // r5: after a healthy boot (the boot gate)
     const e0 = await effects(s);
     const d = await s.call('DELETE', '/api/cards/uuid-3?by=ada');
     assert.ok(!ok2xx(d.status), `refused (${d.status} ${d.text.slice(0, 200)})`);
     assert.equal(d.json?.code, CODES.INDEX_INCOMPLETE, 'with the named code');
     assert.deepEqual(await effects(s), e0, 'no effect: #3 is still live');
-  }, { plant: DAMAGE[0][1] });
+  });
 });
 
 for (const [what, pre, edit] of [
@@ -1155,12 +1198,13 @@ test('#1744 (R5, r4) a DELETE planned before a NEW namer appears (#3 starts nami
 test(`#1744 (R3, r4, NO ROW) an ORDINARY card create (POST /api/cards) under a damaged index refuses ${CODES.INDEX_INCOMPLETE}, no effect (V2-2: ordinary writes are in scope)`, T, async () => {
   await world('off', async (s) => {
     await s.start();
+    await DAMAGE[0][1]({ q: s.q, xu: s.xu });   // r5: after a healthy boot (the boot gate)
     const e0 = await effects(s);
     const c = await s.call('POST', '/api/cards', { title: 'Refused card', createdBy: 'ada', requestId: `req-1744-r3-card-${process.pid}` });
     assert.ok(!ok2xx(c.status), `refused (${c.status} ${c.text.slice(0, 200)})`);
     assert.equal(c.json?.code, CODES.INDEX_INCOMPLETE, `with the named code (${c.text.slice(0, 200)})`);
     assert.deepEqual(await effects(s), e0, 'no effect');
-  }, { plant: DAMAGE[0][1] });
+  });
 });
 
 // ── D8: mode on's only store delta is the receipt, the graph versions and the index subtree (F5: validated positively above) ──
