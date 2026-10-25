@@ -138,10 +138,12 @@ async function run({ id, base, dataset, docBytes, outboxBytes, captureBytes, cap
   if (typeof next !== 'number' || !Number.isSafeInteger(next) || next < 1) hold('BAD_ALLOCATOR', `nextPostSeq ${JSON.stringify(next)} is not a positive safe integer`);
   if (typeof epoch !== 'string' || !epoch) hold('BAD_ALLOCATOR', 'postSeqEpoch missing');
 
-  const reservations = Object.entries(meta.postReservations || {}).map(([key, r]) => ({ key, ...r }));
+  // R4: the ORIGINAL record is kept apart from its map key, so a record carrying its own `key` field can't overwrite it
+  const reservations = Object.entries(meta.postReservations || {}).map(([key, rec]) => ({ key, rec, postId: rec?.postId, postSeq: rec?.postSeq, createdAt: rec?.createdAt, applied: rec?.applied }));
   const bySeq = new Map(), byId = new Map();
   for (const r of reservations) {
-    if (!Number.isSafeInteger(r.postSeq) || typeof r.postId !== 'string' || typeof r.createdAt !== 'string') hold('BAD_RESERVATION', `reservation ${r.key} is malformed`);
+    if (!r.rec || typeof r.rec !== 'object' || !Number.isSafeInteger(r.postSeq) || r.postSeq < 1 || typeof r.postId !== 'string' || !r.postId
+      || typeof r.createdAt !== 'string' || Number.isNaN(Date.parse(r.createdAt))) hold('BAD_RESERVATION', `reservation ${r.key} is malformed (postSeq must be a positive safe integer, createdAt a valid time)`);
     if (bySeq.has(r.postSeq)) hold('DUPLICATE_SEQ', `postSeq ${r.postSeq} is held by ${bySeq.get(r.postSeq)} and ${r.key}`);
     if (byId.has(r.postId)) hold('DUPLICATE_ID', `postId ${r.postId} is reserved under ${byId.get(r.postId)} and ${r.key}`);
     bySeq.set(r.postSeq, r.key); byId.set(r.postId, r.key);
@@ -171,12 +173,38 @@ async function run({ id, base, dataset, docBytes, outboxBytes, captureBytes, cap
   // ── 4. the high-water: nextPostSeq must exceed every post, tombstone and reservation the candidate or document holds ──
   const graphSeqs = (await X.query(`SELECT ?n WHERE { { ?s <${NS}postSeq> ?n } UNION { GRAPH ?g { ?s ?p ?n . FILTER(?p = <${NS}postSeq> || ?p = ${POSTSEQ_TERMS.postSeq}) } } }`)).map((b) => Number(b.n.value));
   const high = Math.max(0, ...graphSeqs, ...reservations.map((r) => r.postSeq));
+  // R2: a number has at most ONE owner across graph posts and tombstones, the document's reservations and the publisher
+  // entries' assignments. The same identity may appear in several (its post and its reservation); two identities may not.
+  const owners = new Map();   // postSeq -> Set(postId)
+  const own = (n, id, where) => {
+    if (!Number.isSafeInteger(n) || n < 1) hold('BAD_POSTSEQ', `${where}: postSeq ${n} is not a positive safe integer`);
+    if (!owners.has(n)) owners.set(n, new Set());
+    owners.get(n).add(id);
+    if (owners.get(n).size > 1) hold('DUPLICATE_SEQ', `postSeq ${n} has two owners: ${[...owners.get(n)].join(', ')} (${where})`);
+  };
+  const seqOf = new Map();    // postId -> postSeq: one identity has ONE number
+  const pin = (id, n, where) => { if (seqOf.has(id) && seqOf.get(id) !== n) hold('ID_SEQ_MISMATCH', `${id} is ${seqOf.get(id)} in one place and ${n} in ${where}`); seqOf.set(id, n); };
+  for (const b of await X.query(`SELECT ?s ?n WHERE { ?s <${NS}postSeq> ?n }`)) {
+    const id = b.s.value.startsWith(ENTITY) ? b.s.value.slice(ENTITY.length) : b.s.value;
+    const n = Number(b.n.value);
+    own(n, id, 'graph'); pin(id, n, 'the graph');
+  }
+  for (const r of reservations) { own(r.postSeq, r.postId, `reservation ${r.key}`); pin(r.postId, r.postSeq, `reservation ${r.key}`); }
+  for (const e of Object.values(entries)) if (e.mode === 'publisher' && e.postSeq !== undefined) {
+    const id = announcePostId(e.mutationId, e.slot);
+    own(e.postSeq, id, `entry ${e.obligationId}`); pin(id, e.postSeq, `entry ${e.obligationId}`);
+  }
   if (high >= next) hold('HIGH_WATER', `nextPostSeq ${next} is not above the high-water ${high}`);
 
   // ── 5. the outbox manifest: every pending entry has exactly one disposition; every proof joins ──
   const rows = parseCsv(outboxBytes.toString('utf8'));
   const pending = Object.values(entries).filter((e) => e.status === 'pending');
-  const byOb = new Map(rows.map((r) => [r.obligationId, r]));
+  const byOb = new Map();
+  for (const r of rows) {
+    if (!r.obligationId) refuse('MANIFEST_MALFORMED', 'a row with no obligationId');
+    if (byOb.has(r.obligationId)) refuse('MANIFEST_DUPLICATE', `${r.obligationId} has more than one row: one obligation, one disposition`);
+    byOb.set(r.obligationId, r);
+  }
   for (const r of rows) if (!pending.some((e) => e.obligationId === r.obligationId)) refuse('MANIFEST_UNKNOWN', `${r.obligationId} names no pending entry`);
   const plan = [];
   for (const e of pending) {
@@ -189,6 +217,8 @@ async function run({ id, base, dataset, docBytes, outboxBytes, captureBytes, cap
     // Either way the field join below must hold, so a pointer to another announcement fails on originMutation/slot.
     if (e.mode === 'legacy' && (typeof e.legacyPostId !== 'string' || !e.legacyPostId)) refuse('PROOF_MISSING', `${e.obligationId}: a legacy entry with no legacyPostId`);
     const postId = e.mode === 'legacy' ? e.legacyPostId : announcePostId(e.mutationId, e.slot);
+    if (r.kind !== undefined && r.kind !== e.mode && r.kind !== `${e.mode}/${e.slot}`) refuse('PROOF_MISMATCH', `${e.obligationId}: the manifest says kind ${r.kind}, the entry is ${e.mode}/${e.slot}`);
+    if (r.createdAt !== undefined && r.createdAt !== (e.payload || {}).occurredAt) refuse('PROOF_MISMATCH', `${e.obligationId}: the manifest's createdAt ${r.createdAt} is not the entry's occurredAt`);
     if (r.matchedPostId && r.matchedPostId !== postId) refuse('PROOF_MISMATCH', `${e.obligationId}: the manifest's matchedPostId ${r.matchedPostId} is not the entry's post ${postId}`);
     const post = await readPost(X, postId);
     if (!post) refuse('PROOF_MISSING', `${e.obligationId}: post ${postId} is not in the candidate`);
@@ -218,7 +248,7 @@ async function run({ id, base, dataset, docBytes, outboxBytes, captureBytes, cap
     `${POSTSEQ_TERMS.allocator} a ${POSTSEQ_TERMS.Allocator} ; ${POSTSEQ_TERMS.postSeqEpoch} ${lit(epoch)} ; ${POSTSEQ_TERMS.nextPostSeq} ${typedLit(next, 'integer')} ; ${POSTSEQ_TERMS.version} ${typedLit(1, 'integer')} ; <${T.migrationId}> ${mig} .`,
     ...reservations.map((r) => {
       const s = POSTSEQ_TERMS.reservation(r.postId);
-      return `${s} a ${POSTSEQ_TERMS.Reservation} ; ${POSTSEQ_TERMS.postId} ${lit(r.postId)} ; ${POSTSEQ_TERMS.postSeq} ${typedLit(r.postSeq, 'integer')} ; ${POSTSEQ_TERMS.createdAt} ${typedLit(r.createdAt, 'dateTime')} ; <${T.legacyKey}> ${lit(r.key)} ; <${T.sourceReservationJson}> ${lit(canonicalJson({ [r.key]: Object.fromEntries(Object.entries(r).filter(([k]) => k !== 'key')) }))}${typeof r.applied === 'boolean' ? ` ; <${T.sourceApplied}> ${typedLit(r.applied, 'boolean')}` : ''} ; <${T.migrationId}> ${mig} .`;
+      return `${s} a ${POSTSEQ_TERMS.Reservation} ; ${POSTSEQ_TERMS.postId} ${lit(r.postId)} ; ${POSTSEQ_TERMS.postSeq} ${typedLit(r.postSeq, 'integer')} ; ${POSTSEQ_TERMS.createdAt} ${typedLit(r.createdAt, 'dateTime')} ; <${T.legacyKey}> ${lit(r.key)} ; <${T.sourceReservationJson}> ${lit(canonicalJson({ [r.key]: r.rec }))}${typeof r.applied === 'boolean' ? ` ; <${T.sourceApplied}> ${typedLit(r.applied, 'boolean')}` : ''} ; <${T.migrationId}> ${mig} .`;
     }),
   ];
   const b2 = [];
@@ -276,7 +306,7 @@ async function run({ id, base, dataset, docBytes, outboxBytes, captureBytes, cap
     await expect(s, POSTSEQ_TERMS.postSeq, String(r.postSeq), 'integer', r.postId);
     await expect(s, POSTSEQ_TERMS.createdAt, r.createdAt, 'dateTime', r.postId);
     await expect(s, T.legacyKey, r.key, null, r.postId);
-    await expect(s, T.sourceReservationJson, canonicalJson({ [r.key]: Object.fromEntries(Object.entries(r).filter(([k]) => k !== 'key')) }), null, r.postId);
+    await expect(s, T.sourceReservationJson, canonicalJson({ [r.key]: r.rec }), null, r.postId);
     await expect(s, T.sourceApplied, typeof r.applied === 'boolean' ? String(r.applied) : undefined, 'boolean', r.postId);
   }
   for (const [mid, o] of Object.entries(origins)) {
@@ -325,42 +355,50 @@ function canonicalJson(v) {
 }
 
 /**
- * #1745's manifest, read as STRICT RFC 4180: a field containing a comma or a quote must be "quoted" ("" escapes a quote), and
- * every row must have exactly the header's field count. Anything else is REFUSED MANIFEST_MALFORMED: a free-text note may hold
- * a comma, and guessing where an unquoted one ends would silently store a truncated or merged disposition.
+ * #1745's manifest, read as RFC 4180 RECORDS (not physical lines): CRLF or LF ends a record; a quoted field may hold commas,
+ * quotes ("" escapes) and line breaks. Every record must have exactly the header's field count. The header must name each
+ * column once, from a known set, with obligationId and class present. Anything else is REFUSED MANIFEST_MALFORMED: guessing
+ * where a field ends would silently store a truncated or merged disposition.
  */
+const MANIFEST_COLUMNS = new Set(['obligationId', 'kind', 'createdAt', 'matchedPostId', 'class', 'note']);
 function parseCsv(text) {
-  const [head, ...lines] = text.split('\n').filter((l) => l.length);
-  const cols = fields(head, 0);
-  return lines.map((l, n) => {
-    const v = fields(l, n + 2);
-    if (v.length !== cols.length) refuse('MANIFEST_MALFORMED', `line ${n + 2} has ${v.length} fields, the header has ${cols.length} (quote any field with a comma)`);
+  const records = csvRecords(text);
+  if (!records.length) refuse('MANIFEST_MALFORMED', 'the manifest is empty');
+  const cols = records[0];
+  const seen = new Set();
+  for (const c of cols) {
+    if (!MANIFEST_COLUMNS.has(c)) refuse('MANIFEST_MALFORMED', `unknown header column ${JSON.stringify(c)}`);
+    if (seen.has(c)) refuse('MANIFEST_MALFORMED', `header column ${c} appears twice`);
+    seen.add(c);
+  }
+  for (const c of ['obligationId', 'class']) if (!seen.has(c)) refuse('MANIFEST_MALFORMED', `the header has no ${c} column`);
+  return records.slice(1).map((v, n) => {
+    if (v.length !== cols.length) refuse('MANIFEST_MALFORMED', `record ${n + 2} has ${v.length} fields, the header has ${cols.length} (quote any field with a comma)`);
     return Object.fromEntries(cols.map((c, k) => [c, v[k]]));
   });
 }
-function fields(line, lineNo) {
-  const out = []; let i = 0;
-  for (;;) {
-    if (line[i] === '"') {
-      let v = ''; i++;
-      for (;;) {
-        if (i >= line.length) refuse('MANIFEST_MALFORMED', `line ${lineNo}: an unterminated quoted field`);
-        if (line[i] === '"') { if (line[i + 1] === '"') { v += '"'; i += 2; continue; } i++; break; }
-        v += line[i++];
-      }
-      out.push(v);
-      if (i === line.length) return out;
-      if (line[i] !== ',') refuse('MANIFEST_MALFORMED', `line ${lineNo}: text after a closing quote`);
-      i++;
-    } else {
-      const j = line.indexOf(',', i);
-      const v = j < 0 ? line.slice(i) : line.slice(i, j);
-      if (v.includes('"')) refuse('MANIFEST_MALFORMED', `line ${lineNo}: a quote inside an unquoted field`);
-      out.push(v);
-      if (j < 0) return out;
-      i = j + 1;
+function csvRecords(text) {
+  const out = []; let rec = [], field = '', i = 0, quoted = false, startedQuoted = false;
+  const endField = () => { rec.push(field); field = ''; startedQuoted = false; };
+  const endRecord = () => { endField(); if (!(rec.length === 1 && rec[0] === '' && !startedQuoted)) out.push(rec); rec = []; };
+  while (i < text.length) {
+    const ch = text[i];
+    if (quoted) {
+      if (ch === '"') { if (text[i + 1] === '"') { field += '"'; i += 2; continue; } quoted = false; i++;
+        const nx = text[i]; if (nx !== undefined && nx !== ',' && nx !== '\n' && !(nx === '\r' && text[i + 1] === '\n')) refuse('MANIFEST_MALFORMED', 'text after a closing quote');
+        continue; }
+      field += ch; i++; continue;
     }
+    if (ch === '"') { if (field.length) refuse('MANIFEST_MALFORMED', 'a quote inside an unquoted field'); quoted = true; startedQuoted = true; i++; continue; }
+    if (ch === ',') { endField(); i++; continue; }
+    if (ch === '\r' && text[i + 1] === '\n') { endRecord(); i += 2; continue; }
+    if (ch === '\n') { endRecord(); i++; continue; }
+    if (ch === '\r') refuse('MANIFEST_MALFORMED', 'a bare carriage return');
+    field += ch; i++;
   }
+  if (quoted) refuse('MANIFEST_MALFORMED', 'an unterminated quoted field');
+  if (field.length || rec.length || startedQuoted) endRecord();
+  return out;
 }
 
 process.exit(await main());
