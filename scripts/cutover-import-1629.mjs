@@ -30,6 +30,8 @@ import crypto from 'node:crypto';
 import { BOOKKEEPING_GRAPH, POSTSEQ_TERMS, ORIGIN_TERMS, POSTSEQ_NS, ORIGIN_NS } from '../core/graph-vocab.mjs';
 import { announcePostId } from '../core/announce-outbox.mjs';
 import { columnIdOf } from '../core/jsonld.mjs';
+import { readPostSeqReservation } from '../core/postseq-reserve.mjs';
+import { readCommittedOrigin } from '../core/origin-commit.mjs';
 
 const SCHEMA_VERSION = 'cutover-import-1629/v1';
 const CRASH_AFTER = Number(process.env.SCRUM_CUTOVER_CRASH_AFTER_APPLY || 0);   // test seam; 0 = off
@@ -62,6 +64,10 @@ const say = (line) => fs.writeSync(1, `${line}\n`);
 const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
 const arg = (name) => { const i = process.argv.indexOf(name); return i > 0 ? process.argv[i + 1] : undefined; };
 const APPLY = process.argv.includes('--apply');
+// #1747 step 5: verify a COMPLETE import read-only, then mark the candidate READY in one guarded update
+const READY = process.argv.includes('--ready');
+const READY_MARKER = 'urn:ex:cutover/ready';
+const P_READY_MIGRATION = 'urn:ex:cutover/readyMigration', P_VERIFIED_SEQ = 'urn:ex:cutover/verifiedCommitSeq', P_READY_AT = 'urn:ex:cutover/readyAt';
 class Stop extends Error { constructor(kind, code, why) { super(`${kind} ${code} ${why}`); this.kind = kind; this.code = code; } }
 const hold = (code, why) => { throw new Stop('HOLD', code, why); };
 const refuse = (code, why) => { throw new Stop('REFUSED', code, why); };
@@ -73,8 +79,9 @@ async function main() {
   const docFile = arg('--board-data'), base = String(arg('--executor') || '').replace(/\/+$/, ''), dataset = arg('--dataset');
   const outboxFile = arg('--outbox-manifest'), captureFile = arg('--capture-manifest');
   if (!docFile || !base || !dataset || !outboxFile || !captureFile) {
-    say('REFUSED USAGE --board-data --executor --dataset --outbox-manifest --capture-manifest [--apply]'); return 3;
+    say('REFUSED USAGE --board-data --executor --dataset --outbox-manifest --capture-manifest [--apply | --ready]'); return 3;
   }
+  if (APPLY && READY) { say('REFUSED USAGE --apply and --ready are separate steps'); return 3; }
   const docBytes = fs.readFileSync(docFile), outboxBytes = fs.readFileSync(outboxFile), captureBytes = fs.readFileSync(captureFile);
   const captureSha = sha(captureBytes);
   // deterministic: the same inputs give the same id (S4-0); any changed input gives another
@@ -82,7 +89,7 @@ async function main() {
   say(`MIGRATION ${id}`);
   try {
     const out = await run({ id, base, dataset, docBytes, outboxBytes, captureBytes, captureSha, docFile, outboxFile });
-    say(out); return out === 'COMPLETE' || out.startsWith('PLAN') ? 0 : 1;
+    say(out); return out === 'COMPLETE' || out.startsWith('PLAN') || out.startsWith('READY') || out.startsWith('ALREADY_READY') ? 0 : 1;
   } catch (e) {
     if (e instanceof Stop) { say(e.message); return e.kind === 'HOLD' ? 2 : 3; }
     say(`REFUSED ERROR ${String(e?.message || e).slice(0, 300)}`); return 3;
@@ -97,16 +104,24 @@ function executor(base, label) {
     if (!r.ok) refuse('UNAVAILABLE', `query ${r.status}: ${(await r.text()).slice(0, 160)}`);
     return (await r.json()).results.bindings;
   };
+  const ask = async (sparql) => {
+    const r = await fetch(`${base}/query`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/cutover/read/${label}` }, body: sparql });
+    if (!r.ok) refuse('UNAVAILABLE', `ask ${r.status}: ${(await r.text()).slice(0, 160)}`);
+    return (await r.json()).boolean === true;
+  };
   const update = async (sparql, op) => {
     if (epoch == null) epoch = String((await health()).epoch);
     const r = await fetch(`${base}/update`, { method: 'POST', body: sparql, headers: { 'x-op-id': op, 'x-epoch': epoch, 'content-type': 'application/sparql-update' } });
     if (!r.ok) refuse('WRITE_FAILED', `${op}: ${r.status} ${(await r.text()).slice(0, 200)}`);
   };
-  return { health, query, update };
+  return { health, query, ask, update };
 }
 
 async function run({ id, base, dataset, docBytes, outboxBytes, captureBytes, captureSha }) {
   const capture = JSON.parse(captureBytes.toString('utf8'));
+  // the instant step 2 read the STOPPED source: what "expired before the capture" is measured against, never this run's clock
+  if (typeof capture.capturedAt !== 'string' || !Number.isFinite(Date.parse(capture.capturedAt))) refuse('CAPTURE_MALFORMED', 'the capture manifest has no valid capturedAt');
+  const capturedAt = Date.parse(capture.capturedAt);
   const X = executor(base, id);
   const h = await X.health();
   const realOr = (p) => { try { return fs.realpathSync(p); } catch { return p; } };
@@ -133,7 +148,17 @@ async function run({ id, base, dataset, docBytes, outboxBytes, captureBytes, cap
   for (const k of Object.keys(doc)) if (!DOC_KEYS.has(k)) refuse('UNKNOWN_KEY', `document key ${k}`);
   const meta = doc['scrum:meta'] || {};
   for (const k of Object.keys(meta)) if (!META_KEYS.has(k)) refuse('UNKNOWN_KEY', `scrum:meta.${k}`);
-  if (Array.isArray(meta.seatStates) && meta.seatStates.length) hold('SEATSTATES_UNPROVEN', `${meta.seatStates.length} legacy seatStates item(s); obsolescence not proven (#1743)`);
+  // seatStates (#1747, 46279/46281): an item RETIRES only as a well-formed SeatDeclaration that expired strictly BEFORE the
+  // capture, so dropping it changes no current state; its canonical JSON is kept under this migration. All or nothing.
+  const seatStates = meta.seatStates === undefined ? [] : meta.seatStates;
+  if (!Array.isArray(seatStates)) hold('SEATSTATES_UNPROVEN', 'scrum:meta.seatStates is not a list');
+  for (const [i, x] of seatStates.entries()) {
+    const t = (k) => (typeof x?.[k] === 'string' ? Date.parse(x[k]) : NaN);
+    const ok = x && typeof x === 'object' && !Array.isArray(x) && x['@type'] === 'scrum:SeatDeclaration' && typeof x['scrum:seat'] === 'string' && x['scrum:seat']
+      && Number.isFinite(t('scrum:declaredAt')) && Number.isFinite(t('scrum:expiresAt')) && t('scrum:declaredAt') <= t('scrum:expiresAt') && t('scrum:expiresAt') < capturedAt;
+    if (!ok) hold('SEATSTATES_UNPROVEN', `seatStates item ${i} is not a well-formed SeatDeclaration that expired before the capture (${capture.capturedAt})`);
+  }
+  const retiredSeats = seatStates.map((x) => canonicalJson(x));
   const next = meta.nextPostSeq, epoch = meta.postSeqEpoch;
   if (typeof next !== 'number' || !Number.isSafeInteger(next) || next < 1) hold('BAD_ALLOCATOR', `nextPostSeq ${JSON.stringify(next)} is not a positive safe integer`);
   if (typeof epoch !== 'string' || !epoch) hold('BAD_ALLOCATOR', 'postSeqEpoch missing');
@@ -260,6 +285,8 @@ async function run({ id, base, dataset, docBytes, outboxBytes, captureBytes, cap
       return `${s} a ${POSTSEQ_TERMS.Reservation} ; ${POSTSEQ_TERMS.postId} ${lit(r.postId)} ; ${POSTSEQ_TERMS.postSeq} ${typedLit(r.postSeq, 'integer')} ; ${POSTSEQ_TERMS.createdAt} ${typedLit(r.createdAt, 'dateTime')} ; <${T.legacyKey}> ${lit(r.key)} ; <${T.sourceReservationJson}> ${lit(canonicalJson({ [r.key]: r.rec }))}${typeof r.applied === 'boolean' ? ` ; <${T.sourceApplied}> ${typedLit(r.applied, 'boolean')}` : ''} ; <${T.migrationId}> ${mig} .`;
     }),
   ];
+  // the retired seatStates, LOSSLESS: each item's canonical JSON and its sha256, under this migration
+  retiredSeats.forEach((j, i) => b1.push(`<urn:ex:cutover/migration/${id}/seatState/${i}> <urn:ex:cutover/retiredSeatStateJson> ${lit(j)} ; <urn:ex:cutover/retiredSeatStateSha256> ${lit(sha(j))} .`));
   const b2 = [];
   for (const [mid, o] of Object.entries(origins)) {
     b2.push(`${ORIGIN_TERMS.originSubject(mid)} a ${ORIGIN_TERMS.Origin} ; ${ORIGIN_TERMS.mutationId} ${lit(mid)} ; ${ORIGIN_TERMS.mode} ${lit(o.mode)} ; ${ORIGIN_TERMS.originActor} ${lit(o.originActor)} ; ${ORIGIN_TERMS.occurredAt} ${typedLit(o.occurredAt, 'dateTime')} ; ${ORIGIN_TERMS.committedAt} ${typedLit(o.committedAt, 'dateTime')} ; ${ORIGIN_TERMS.slotCount} ${typedLit((o.slots || []).length, 'integer')} ; <${T.sourceOriginJson}> ${lit(canonicalJson(o))} ; <${T.migrationId}> ${mig} .`);
@@ -283,13 +310,23 @@ async function run({ id, base, dataset, docBytes, outboxBytes, captureBytes, cap
     for (const [p, w] of Object.entries(want)) if (JSON.stringify(of(p)) !== JSON.stringify(w)) refuse('ALLOCATOR_MISMATCH', `this migration's allocator holds ${p} ${JSON.stringify(of(p))}, the document says ${JSON.stringify(w)}`);
   }
 
-  if (!APPLY) return `PLAN reservations=${reservations.length} origins=${Object.keys(origins).length} entries=${Object.keys(entries).length} retire=${plan.length} next=${next}`;
+  // a READY candidate is FROZEN (§6 step 5): no import writes to it again, even a no-op replay; a dry run still plans
+  const ready = await X.query(`SELECT ?p ?o WHERE { GRAPH <${BK}> { <${READY_MARKER}> ?p ?o } }`);
+  if (ready.length) {
+    const val = (p) => ready.filter((b) => b.p.value === p).map((b) => b.o.value);
+    const same = JSON.stringify(val(P_READY_MIGRATION)) === JSON.stringify([id]) && JSON.stringify(val(P_MANIFEST_SHA)) === JSON.stringify([captureSha]);
+    if (APPLY) refuse('READY_FROZEN', `the candidate is READY${same ? '' : ' for another migration'}; an import may not write to it`);
+    if (READY) { if (!same) refuse('READY_CONFLICT', `the candidate is READY for ${val(P_READY_MIGRATION).join(', ')}`); return `ALREADY_READY id=${id} commitSeq=${val(P_VERIFIED_SEQ).join(',')}`; }
+  }
+
+  if (!APPLY && !READY) return `PLAN reservations=${reservations.length} origins=${Object.keys(origins).length} entries=${Object.keys(entries).length} retire=${plan.length} next=${next}${retiredSeats.length ? ` seatStates retired=${retiredSeats.length}` : ''}`;
 
   for (let n = 1; n <= batches.length; n++) {
     const triples = batches[n - 1].join('\n');
     const digest = sha(triples);
     const have = (await X.query(`SELECT ?d WHERE { GRAPH <${BK}> { <${BATCH(id, n)}> <${P_BATCH_DIGEST}> ?d } }`)).map((b) => b.d.value);
     if (have.length && (have.length !== 1 || have[0] !== digest)) refuse('BATCH_MISMATCH', `batch ${n} was written with another digest`);
+    if (!have.length && READY) hold('INCOMPLETE', `batch ${n} of ${batches.length} is not written: run the import to COMPLETE first`);
     if (!have.length) {
       if (sourceChanged()) refuse('SOURCE_CHANGED', `a source store file changed before batch ${n}`);
       await X.update(`INSERT { GRAPH <${BK}> { ${triples}\n<${BATCH(id, n)}> <${P_BATCH_DIGEST}> ${lit(digest)} . } } WHERE { FILTER NOT EXISTS { GRAPH <${BK}> { <${BATCH(id, n)}> <${P_BATCH_DIGEST}> ?any } } }`,
@@ -333,7 +370,63 @@ async function run({ id, base, dataset, docBytes, outboxBytes, captureBytes, cap
     await expect(s, T.notifyDisposition, p?.disposition, null, e.obligationId);
     await expect(s, T.sourceEntryJson, canonicalJson(e), null, e.obligationId);
   }
-  return bad.length ? `INCOMPLETE ${bad.join(' ')}` : 'COMPLETE';
+  for (const [i, j] of retiredSeats.entries()) {
+    await expect(`urn:ex:cutover/migration/${id}/seatState/${i}`, 'urn:ex:cutover/retiredSeatStateJson', j, null, `seatState/${i}`);
+    await expect(`urn:ex:cutover/migration/${id}/seatState/${i}`, 'urn:ex:cutover/retiredSeatStateSha256', sha(j), null, `seatState/${i}`);
+  }
+  if (bad.length) return `INCOMPLETE ${bad.join(' ')}`;
+  if (!READY) return 'COMPLETE';
+  return markReady({ X, id, captureSha, reservations, origins, entries, plan });
+}
+
+/**
+ * #1747 step 5 — the RUNTIME readers (R1) must read every imported record back as imported, its obligations with the
+ * planned status, and nothing imported may exist beyond what this migration wrote. Then ONE guarded update marks the
+ * candidate READY, tied to the capture and to the commitSeq verified here: any write in between fails the guard.
+ */
+async function markReady({ X, id, captureSha, reservations, origins, entries, plan }) {
+  const client = {
+    query: async (q) => { try { return { ok: true, rows: await X.query(q) }; } catch (e) { return { ok: false, status: 'UNAVAILABLE', reason: e.message }; } },
+    ask: async (q) => { try { return { ok: true, boolean: await X.ask(q) }; } catch (e) { return { ok: false, status: 'UNAVAILABLE', reason: e.message }; } },
+  };
+  const fail = (r, what) => { if (r.status === 'UNAVAILABLE') refuse('UNAVAILABLE', `${what}: ${r.reason}`); hold('READBACK', `${what}: ${r.reason}`); };
+  for (const r of reservations) {
+    const got = await readPostSeqReservation(client, r.postId);
+    if (!got.ok) fail(got, `reservation ${r.postId}`);
+    if (got.reservation?.kind !== 'imported' || got.reservation.postSeq !== r.postSeq || got.reservation.legacyKey !== r.key) hold('READBACK', `reservation ${r.postId} does not read back as this import wrote it`);
+  }
+  for (const mid of Object.keys(origins)) {
+    const got = await readCommittedOrigin(client, mid);
+    if (!got.ok) fail(got, `origin ${mid}`);
+    if (got.committed?.kind !== 'imported') hold('READBACK', `origin ${mid} does not read back as imported`);
+    for (const ob of got.committed.obligations) {
+      const e = entries[ob.obligationId], p = plan.find((x) => x.e.obligationId === ob.obligationId);
+      if (!e || ob.status !== (p ? 'published' : e.status)) hold('READBACK', `obligation ${ob.obligationId} reads ${ob.status}, the plan says ${p ? 'published' : e?.status}`);
+    }
+  }
+  // nothing imported beyond this migration's own records (a stray or second migration's record is not this candidate)
+  const counts = await X.query(`SELECT ?t (COUNT(DISTINCT ?s) AS ?n) WHERE { GRAPH <${BK}> { ?s a ?t ; <${T.migrationId}> ?m . FILTER(STR(?m) = ${lit(id)}) } } GROUP BY ?t`);
+  const others = await X.query(`SELECT (COUNT(DISTINCT ?s) AS ?n) WHERE { GRAPH <${BK}> { ?s <${T.migrationId}> ?m . FILTER(STR(?m) != ${lit(id)}) } }`);
+  const n = (t) => Number(counts.find((b) => `<${b.t.value}>` === t)?.n.value ?? 0);
+  if (Number(others[0]?.n.value ?? 0) !== 0) hold('EXTRA_RECORD', 'records of another migration are in the candidate');
+  const want = [[POSTSEQ_TERMS.Reservation, reservations.length], [ORIGIN_TERMS.Origin, Object.keys(origins).length], [ORIGIN_TERMS.Obligation, Object.keys(entries).length]];
+  for (const [t, w] of want) if (n(t) !== w) hold('EXTRA_RECORD', `${n(t)} imported ${t} records, this migration wrote ${w}`);
+
+  // the verified position, and the mark guarded on it in the SAME update
+  const seqRows = await X.query(`SELECT ?s WHERE { GRAPH <${BK}> { <urn:ex:dataset> <urn:ex:commitSeq> ?s } }`);
+  if (seqRows.length !== 1) refuse('UNAVAILABLE', `the store marker carries ${seqRows.length} commitSeq values`);
+  const seq = seqRows[0].s.value;
+  await X.update(`INSERT { GRAPH <${BK}> { <${READY_MARKER}> <${P_READY_MIGRATION}> ${lit(id)} ; <${P_MANIFEST_SHA}> ${lit(captureSha)} ; <${P_VERIFIED_SEQ}> ${typedLit(seq, 'integer')} ; <${P_READY_AT}> ?now . } }
+WHERE { GRAPH <${BK}> { <urn:ex:dataset> <urn:ex:commitSeq> ?s . FILTER(STR(?s) = ${lit(seq)}) <${CANDIDATE_MARKER}> <${P_MANIFEST_SHA}> ${lit(captureSha)} . } FILTER NOT EXISTS { GRAPH <${BK}> { <${READY_MARKER}> ?rp ?ro } } BIND(NOW() AS ?now) }`,
+    `urn:ex:op/cutover/ready/${id}`);
+  // a 200 describes the request: read the marker back
+  const back = await X.query(`SELECT ?p ?o WHERE { GRAPH <${BK}> { <${READY_MARKER}> ?p ?o } }`);
+  const val = (p) => back.filter((b) => b.p.value === p).map((b) => b.o.value);
+  if (JSON.stringify(val(P_READY_MIGRATION)) !== JSON.stringify([id]) || JSON.stringify(val(P_MANIFEST_SHA)) !== JSON.stringify([captureSha])) {
+    if (!back.length) hold('MOVED', `the candidate changed after verification (commitSeq was ${seq}); nothing was marked`);
+    refuse('READY_CONFLICT', `the READY marker reads back for ${val(P_READY_MIGRATION).join(', ')}`);
+  }
+  return `READY id=${id} commitSeq=${seq}`;
 }
 
 /** The announcement post's fields as the proof join compares them; null if the post is absent or is a tombstone. */
