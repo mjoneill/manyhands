@@ -193,6 +193,12 @@ export const ORIGIN_TERMS = Object.freeze({
   COMMIT_OP_PREFIX: `${NS}op/origin/commit/`,
 });
 
+/**
+ * #1744 (#1629 slice 4) — the derived card reference index (core/card-ref-index.mjs). Every term is BOOKKEEPING: it lives in the
+ * bookkeeping graph, is never reachable through the public dataset, and is written only by the compiler and the backfill op.
+ */
+export const CARD_REF_INDEX_PREFIX = 'urn:ex:card-ref-index/';
+export const CARD_REF_INDEX_PREDICATES = Object.freeze(['indexedVersion', 'indexedJsonDigest', 'namesShortId', 'complete'].map((n) => `<${CARD_REF_INDEX_PREFIX}${n}>`));
 export const BOOKKEEPING_GRAPH = 'urn:scrum:bookkeeping:executor';
 export const BK = `<${BOOKKEEPING_GRAPH}>`;
 export const MARKER_PREDICATES_ALL = Object.freeze([
@@ -209,8 +215,9 @@ export const BOOKKEEPING_PREDICATES = Object.freeze([...new Set([
   POSTSEQ_TERMS.reserveDigest, POSTSEQ_TERMS.postSeq, POSTSEQ_TERMS.createdAt,
   POSTSEQ_TERMS.index, POSTSEQ_TERMS.identityJson, POSTSEQ_TERMS.draftJson,
   ...ORIGIN_PREDICATE_NAMES.map((n) => ORIGIN_TERMS[n]),
+  ...CARD_REF_INDEX_PREDICATES,
 ])]);
-export const BOOKKEEPING_SUBJECT_PREFIXES = Object.freeze([`${NS}op/`, `${NS}selfcheck/`, POSTSEQ_NS, ORIGIN_NS]);
+export const BOOKKEEPING_SUBJECT_PREFIXES = Object.freeze([`${NS}op/`, `${NS}selfcheck/`, POSTSEQ_NS, ORIGIN_NS, CARD_REF_INDEX_PREFIX]);
 export const BOOKKEEPING_SUBJECTS = Object.freeze([`${NS}dataset`]);
 const BK_PRED_SET = new Set(BOOKKEEPING_PREDICATES.map((p) => p.replace(/^<|>$/g, '')));
 /** Is this (subject IRI, predicate IRI) bookkeeping? Bare IRIs or <angle> form both accepted. */

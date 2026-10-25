@@ -31,6 +31,7 @@ import { createHash } from 'node:crypto';
 import { EX, NS, RECEIPT_PREDICATES, MARKER_SUBJECT, MARKER_PREDICATES, LG, LG_NS, lgMetaPredicate, BK, BOOKKEEPING_PREDICATES, isBookkeeping, POSTSEQ_TERMS, ORIGIN_TERMS } from './graph-vocab.mjs';
 import { reserveOpId as _reserveOpId, canonReservationBatch as _canonReservationBatch, reserveDigestBody as _reserveDigestBody, canonAnnouncementDraft } from './postseq-reserve.mjs';
 import { announcePostId, opIdFor as announceOpIdFor, postCreateIntention as announcePostCreateIntention } from './announce-outbox.mjs';
+import { CRI, cardNames, jsonDigest } from './card-ref-index.mjs';   // #1744 — the derived card reference index
 
 export const DIGEST_V = 1;
 /** The literal canonicalization policy (A5). Bound into every digest; bump it if a canonical form changes. */
@@ -1370,6 +1371,15 @@ function compileCardWrite(c) {
   const branches = [];
   R.parts.forEach((P, k) => {
     const I = ref(P.iri);
+    // #1744 — the card's reference-index coverage node is maintained by the COMPILER in this same update, for every part: the
+    // old node is deleted (a create clears any orphan; a remove leaves none) and, unless the card is removed, the new one is
+    // derived from the part's own version and stored JSON. Callers never send it (cardQuadClass refuses its predicates).
+    const COV = ref(CRI.card(P.iri.slice(ENTITY_IRI.length)));
+    branches.push(bkBranch(COV));
+    if (!P.remove) {
+      bIns.push(`  ${v(COV)} ${ref(CRI.indexedVersion)} ${v(P.version)} .`, `  ${v(COV)} ${ref(CRI.indexedJsonDigest)} ${v(recLit(jsonDigest(P.json)))} .`);
+      for (const n of cardNames(JSON.parse(P.json))) bIns.push(`  ${v(COV)} ${ref(CRI.namesShortId)} ${v(intLit(String(n), 'namesShortId'))} .`);
+    }
     if (P.expectedVersion == null) pre.push(...freshSubject(I));
     else {
       pre.push(`    GRAPH ${BK} { ${I} ${VER} ?xv${k} . }`, `    FILTER(?xv${k} = ${P.expectedVersion})`);   // #1638 — the version stamp is bookkeeping
