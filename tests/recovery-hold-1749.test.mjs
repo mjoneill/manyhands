@@ -45,7 +45,7 @@ const BK = 'urn:scrum:bookkeeping:executor';
 const P = (x) => `<urn:ex:postseq/${x}>`;
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
 const EPOCH = 'e-1749-hold';
-const HOLD = { subject: 'urn:ex:postseq/recovery-hold', type: 'urn:ex:postseq/RecoveryHold', epoch: 'urn:ex:postseq/epoch', restoredHighWater: 'urn:ex:postseq/restoredHighWater', restoredCommitSeq: 'urn:ex:postseq/restoredCommitSeq' };
+const HOLD = { subject: 'urn:ex:postseq/recovery-hold', type: 'urn:ex:postseq/RecoveryHold', epoch: 'urn:ex:postseq/epoch', incarnation: 'urn:ex:postseq/incarnation', restoredHighWater: 'urn:ex:postseq/restoredHighWater', restoredCommitSeq: 'urn:ex:postseq/restoredCommitSeq' };
 const CODE = 'RECOVERY_HOLD';
 
 const ordinary = (requestId) => ({ mode: 'ordinary', author: 'ada', requestId, draft: { body: `post ${requestId}`, attachedTo: null, mentions: [], attachments: [], conversation: null, onBehalfOf: null } });
@@ -123,6 +123,7 @@ test('#1749 (H1) promotion of a store WITH an allocator writes exactly one Recov
     const h = await holdOf(x);
     assert.deepEqual(h.subjects, [HOLD.subject], 'exactly one hold, at its named subject');
     assert.deepEqual(h.get(HOLD.epoch).map((v) => v.value), [ep], 'it names THIS promotion\'s epoch, exactly once');
+    assert.deepEqual(h.get(HOLD.incarnation).map((v) => v.value), [String((await health(x)).incarnation)], 'and THIS promotion\'s incarnation, exactly once (draft v2 V2-1)');
     assert.deepEqual(h.get(HOLD.restoredHighWater), [{ value: '101', datatype: `${XSD}integer` }], 'the restored high-water: A\'s 101 (B\'s 102 died with the live store), xsd:integer');
     assert.equal(h.get(HOLD.restoredCommitSeq).length, 1, 'one restoredCommitSeq');
   } finally { await stopX(x); }
@@ -186,7 +187,12 @@ test('#1749 (H7) the hold survives a plain restart AND a second backup + promoti
   fs.cpSync(s.backup, second, { recursive: true });
   x = await start(second, ['--promote-epoch']);
   try {
-    assert.deepEqual((await holdOf(x)).subjects, [HOLD.subject], 'still exactly one hold after a second backup and promotion');
+    const h2 = await holdOf(x); const hh = await health(x);
+    assert.deepEqual(h2.subjects, [HOLD.subject], 'still exactly one hold after a second backup and promotion');
+    // ⚠️ an open question in draft v2 (it does not say): if the hold kept the FIRST promotion's lineage, every restore of a held store
+    // would refuse WRONG_LINEAGE forever. These rows require it re-bound to the current epoch and incarnation, the restored high-water kept.
+    assert.deepEqual([h2.get(HOLD.epoch).map((v) => v.value), h2.get(HOLD.incarnation).map((v) => v.value)], [[String(hh.epoch)], [String(hh.incarnation)]], 'the hold names the CURRENT epoch and incarnation');
+    assert.deepEqual(h2.get(HOLD.restoredHighWater), [{ value: '101', datatype: `${XSD}integer` }], 'and keeps the restored high-water (the lost tail is still unknown)');
     assert.ok(heldBy(await client(x).update(intention([ordinary('h-r2')]))), 'and allocation is still refused by code');
   } finally { await stopX(x); }
 });
@@ -213,5 +219,81 @@ test(`#1749 (H9) a retry of a REFUSED attempt is refused again by code, and writ
     const again = await client(x).update(C);
     assert.ok(heldBy(again), `the retry answers the same refusal, by code (${JSON.stringify(again).slice(0, 200)})`);
     assert.deepEqual(await bk(x), before, 'the retry wrote nothing at all (its refusal was already recorded)');
+  } finally { await stopX(x); }
+});
+
+// ── draft v2 V2-3 (under decision 27ab297c): reconciliation is a DECLARED GAP approved by a person, never inferred. ASSUMED intention shape
+// (one table): kind postseq.reconcile with opId, actor, nextPostSeq, declaredGap, approvedBy, approvalRef, evidence[]. Draft v2 R1 is H3
+// (no allocator → no hold: the cutover candidate, promoted BEFORE the import writes its allocator) plus H1 (an allocator → a hold).
+// These rows are a PROPOSAL against an unfrozen draft, like H1–H9.
+const RECONCILE = { kind: 'postseq.reconcile', record: 'urn:ex:postseq/ReconciliationRecord', approvalRef: 'urn:ex:postseq/approvalRef' };
+const APPROVER = 'https://scrumboard.local/person/approver';
+const reconcile = (R, G, tag, extra = {}) => ({ kind: RECONCILE.kind, opId: `urn:ex:op/postseq/reconcile/test-${tag}-${process.pid}`, actor: APPROVER, nextPostSeq: R, declaredGap: G, approvedBy: APPROVER, approvalRef: 'decision:00000000-0000-4000-8000-0000000017a9', evidence: [], ...extra });
+const refusedBy = (r, code) => (r.outcome === 'PRECONDITION_FAILED' || r.outcome === 'REJECTED') && (r.reason === code || r.code === code);
+
+test('#1749 (B5a) reconcile with R = restoredHighWater + G + 1 clears the hold; the next allocation is EXACTLY R; the record reads back with its approval', T, async () => {
+  const s = await scenario();
+  const x = await start(s.backup, ['--promote-epoch']);
+  try {
+    const r = await client(x).update(reconcile(101 + 10 + 1, 10, 'a'));
+    assert.equal(r.outcome, 'APPLIED', `reconciled (${JSON.stringify(r).slice(0, 200)})`);
+    assert.deepEqual((await holdOf(x)).subjects, [], 'the hold is gone');
+    const C = intention([ordinary('h-after-reconcile')]);
+    assert.equal((await client(x).update(C)).outcome, 'APPLIED', 'allocation is open again');
+    assert.deepEqual(await seqsOf(client(x), C.reservations), [112], 'at EXACTLY R');
+    const rec = await fetch(`${x.baseUrl}/query`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/holdrec-${opN++}` }, body: `SELECT ?ref WHERE { GRAPH <${BK}> { ?r a <${RECONCILE.record}> ; <${RECONCILE.approvalRef}> ?ref } }` });
+    assert.deepEqual((await rec.json()).results.bindings.map((b) => b.ref.value), ['decision:00000000-0000-4000-8000-0000000017a9'], 'one ReconciliationRecord, carrying the approval it acted on');
+  } finally { await stopX(x); }
+});
+
+for (const [what, R] of [['one BELOW high-water + G + 1', 111], ['one ABOVE it', 113]]) {
+  test(`#1749 (B5b) a reconcile with R ${what} → BAD_GAP; the hold and the allocator are untouched`, T, async () => {
+    const s = await scenario();
+    const x = await start(s.backup, ['--promote-epoch']);
+    try {
+      const before = (await bk(x)).filter(isPostseq), hold0 = await holdOf(x);
+      const r = await client(x).update(reconcile(R, 10, `b${R}`));
+      assert.ok(refusedBy(r, 'BAD_GAP'), `refused BY CODE (${JSON.stringify(r).slice(0, 200)})`);
+      assert.deepEqual((await holdOf(x)).subjects, hold0.subjects, 'still held');
+      assert.deepEqual((await bk(x)).filter(isPostseq), before, 'nothing changed');
+    } finally { await stopX(x); }
+  });
+}
+
+test('#1749 (B5c) a hold naming ANOTHER incarnation (a copied lineage) → WRONG_LINEAGE; still held', T, async () => {
+  const s = await scenario();
+  const x = await start(s.backup, ['--promote-epoch']);
+  try {
+    // planted beneath the compiler: the hold's lineage rewritten, as a hold copied from another store's promotion would read
+    await raw(x, `DELETE { GRAPH <${BK}> { <${HOLD.subject}> <${HOLD.incarnation}> ?i } } INSERT { GRAPH <${BK}> { <${HOLD.subject}> <${HOLD.incarnation}> "another-incarnation" } } WHERE { GRAPH <${BK}> { <${HOLD.subject}> <${HOLD.incarnation}> ?i } }`);
+    const r = await client(x).update(reconcile(112, 10, 'c'));
+    assert.ok(refusedBy(r, 'WRONG_LINEAGE'), `refused BY CODE (${JSON.stringify(r).slice(0, 200)})`);
+    assert.deepEqual((await holdOf(x)).subjects, [HOLD.subject], 'still held');
+  } finally { await stopX(x); }
+});
+
+test('#1749 (B5d) the SAME reconcile op replayed returns its recorded result and writes nothing; a NEW reconcile op after success → NO_HOLD', T, async () => {
+  const s = await scenario();
+  const x = await start(s.backup, ['--promote-epoch']);
+  try {
+    const op = reconcile(112, 10, 'd');
+    assert.equal((await client(x).update(op)).outcome, 'APPLIED', 'PRECONDITION: reconciled');
+    const b1 = await bk(x);
+    assert.equal((await client(x).update(op)).outcome, 'APPLIED', 'the replay answers its recorded result');
+    assert.deepEqual(await bk(x), b1, 'and writes nothing');
+    const again = await client(x).update(reconcile(112, 10, 'd2'));
+    assert.ok(refusedBy(again, 'NO_HOLD'), `a new reconcile after success is refused BY CODE (${JSON.stringify(again).slice(0, 200)})`);
+  } finally { await stopX(x); }
+});
+
+test('#1749 (B5e) an ORDINARY update that deletes the hold is refused; the hold stays and allocation stays refused', T, async () => {
+  const s = await scenario();
+  const x = await start(s.backup, ['--promote-epoch']);
+  try {
+    const epoch = String((await health(x)).epoch);
+    const r = await fetch(`${x.baseUrl}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/hold-tamper-${opN++}`, 'x-epoch': epoch, 'x-manyhands-write-protocol': 'postseq-v1' }, body: `DELETE WHERE { GRAPH <${BK}> { <${HOLD.subject}> ?p ?o } }` });
+    assert.ok(r.status >= 400 && r.status < 500, `refused with a 4xx (${r.status} ${(await r.text()).slice(0, 160)})`);
+    assert.deepEqual((await holdOf(x)).subjects, [HOLD.subject], 'the hold is intact');
+    assert.ok(heldBy(await client(x).update(intention([ordinary('h-after-tamper')]))), 'and allocation is still refused by code');
   } finally { await stopX(x); }
 });
