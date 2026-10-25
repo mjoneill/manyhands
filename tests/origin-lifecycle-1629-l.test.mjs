@@ -464,13 +464,10 @@ test('#1629 L5 READ PURITY (mode off): three GET /api/outbox reads while an entr
   });
 });
 
-// ── D1 (#1629 r4/r5, accepted as scope in 45032): in executor-owned mode two shapes REFUSE before any durable effect, with no fallback ──
-// A page create (wiki-create) and a done-move that shifts a sibling (makeRoom in done) answer 503 ORIGIN_SHAPE_NOT_MIGRATED until slice 4.
-// Every refusal is read back: no card, no outbox entry, no post, no sibling moved. Mode ON is unchanged: the controls run today.
-const D1_CODE = 'ORIGIN_SHAPE_NOT_MIGRATED';   // the builder's name
+// ── D1 (#1629 r4/r5, accepted as scope in 45032): slice 3 REFUSED two shapes in executor-owned mode until slice 4; slice 4
+// (#1744) built them, so only the mode-on control remains here (the retired rows' note follows it).
 const cardsNow = async (s) => { const r = await s.call('GET', '/api/cards'); const xs = Array.isArray(r.json) ? r.json : (r.json?.cards || []); return xs; };
 const cardNow = async (s, id) => (await s.call('GET', `/api/cards/${id}`)).json;
-const outboxCount = async (s) => entriesOf((await s.call('GET', '/api/outbox')).json).length;
 
 test('#1629 D1 CONTROL (mode on, today): a page create answers 2xx and the page exists; a done-move with makeRoom shifts the sibling', T, async () => {
   await world('on', async (s) => {
@@ -487,43 +484,9 @@ test('#1629 D1 CONTROL (mode on, today): a page create answers 2xx and the page 
   });
 });
 
-test('#1629 D1a (mode off, file unreadable): a page create refuses 503 ORIGIN_SHAPE_NOT_MIGRATED before any effect', TB, async () => {
-  await world('off', async (s) => {
-    await s.start();
-    const n0 = (await cardsNow(s)).length, o0 = await outboxCount(s);
-    const p = await s.call('POST', '/api/nodes', { title: 'a D1 refused page', createdBy: 'ada' });
-    assert.equal(p.status, 503, `refused (${p.status} ${p.text.slice(0, 200)})`);
-    assert.equal(p.json?.code, D1_CODE, `with the named code (${p.text.slice(0, 200)})`);
-    assert.equal((await cardsNow(s)).length, n0, 'read-back: no card was created');
-    assert.ok(!(await cardsNow(s)).some((c) => c.title === 'a D1 refused page'), 'read-back: no page with that title');
-    assert.equal(await outboxCount(s), o0, 'read-back: no outbox entry');
-    const posts = await s.call('GET', '/api/conversations?limit=200');
-    assert.ok(!(Array.isArray(posts.json) ? posts.json : (posts.json?.conversations || [])).some((c) => String(c.body).includes('a D1 refused page')), 'read-back: no page notice was posted');
-    const n1 = await s.call('POST', '/api/conversations', { body: 'a D1a sequence probe', author: 'ada' });
-    assert.equal(n1.json?.postSeq, 3, `no sequence was consumed (${n1.json?.postSeq})`);
-    await documentUntouched(s, 'off', 'D1a');
-  });
-});
-
-test('#1629 D1b (mode off, file unreadable): a done-move that would shift a sibling refuses 503 before any effect; a done-move into a FREE slot is applied', TB, async () => {
-  await world('off', async (s) => {
-    await s.start();
-    const c1 = await cardNow(s, 'uuid-1'), c3 = await cardNow(s, 'uuid-3'), o0 = await outboxCount(s);
-    const m = await s.call('PATCH', '/api/cards/uuid-1', { column: 'done', order: c3.order, makeRoom: true, ifVersion: c1.version, by: 'ada' });
-    assert.equal(m.status, 503, `refused (${m.status} ${m.text.slice(0, 200)})`);
-    assert.equal(m.json?.code, D1_CODE, `with the named code (${m.text.slice(0, 200)})`);
-    const a1 = await cardNow(s, 'uuid-1'), a3 = await cardNow(s, 'uuid-3');
-    assert.deepEqual([a1.column, a1.version, a1.order], [c1.column, c1.version, c1.order], 'read-back: card 1 did not move');
-    assert.deepEqual([a3.order, a3.version], [c3.order, c3.version], 'read-back: the sibling did not shift');
-    assert.equal(await outboxCount(s), o0, 'read-back: no outbox entry');
-    // the allowed shape: no sibling shifted
-    const free = await s.call('PATCH', '/api/cards/uuid-1', { column: 'done', order: c3.order + 100, makeRoom: true, ifVersion: c1.version, by: 'ada' });
-    assert.equal(free.status, 200, `a done-move into a free slot is applied (${free.status} ${free.text.slice(0, 200)})`);
-    assert.equal((await cardNow(s, 'uuid-1')).column, 'done', 'read-back: card 1 is in done');
-    assert.deepEqual([(await cardNow(s, 'uuid-3')).order], [c3.order], 'read-back: the sibling was not touched');
-    await documentUntouched(s, 'off', 'D1b');
-  });
-});
+// D1a and D1b RETIRED (#1744 slice 4, PR #116): the two shapes slice 3 refused now WORK in executor-owned mode. Their
+// replacements are #1744's rows: a page create is tests/origin-slice4-1744.test.mjs W1 (and W2–W8), a sibling-shifting
+// done-move is E1 (and E2–E7). The mode-on CONTROL above stays: it is today's behaviour, unchanged.
 
 // ── G-D: dispatch only after the proof checks out against the executor (r5; 45046) ──
 // The INJECTED condition is deliberate store corruption: after the origin commit, raw triples put a post with OTHER content at the
