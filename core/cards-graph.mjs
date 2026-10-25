@@ -12,6 +12,7 @@ import oxigraph from 'oxigraph';
 import { cardToNode } from './mapping.mjs';
 import { cardNodeToFlat } from './jsonld.mjs';
 import { projectEntity, IRI } from './graph-replica.mjs';
+import { registerCardProjector } from './graph-compiler.mjs';
 
 export const CARD_PREFIX = IRI.entity;
 export const cardIriOf = (id) => `${IRI.entity}${id}`;
@@ -38,6 +39,8 @@ export function cardQuads(card, shortToId) {
   projectEntity(store, flat);
   return store.match(null, null, null).map((q) => [termOf(q.subject), termOf(q.predicate), termOf(q.object)]);
 }
+
+registerCardProjector(cardQuads);   // #1744 D6 — the compiler derives a referrer's resolution diff with it
 
 /** The board's shortId → id map, from a card list. */
 export const shortIdMap = (cards) => new Map(cards.filter(Boolean).map((c) => [c.shortId, c.id]));

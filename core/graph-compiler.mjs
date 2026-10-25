@@ -32,7 +32,6 @@ import { EX, NS, RECEIPT_PREDICATES, MARKER_SUBJECT, MARKER_PREDICATES, LG, LG_N
 import { reserveOpId as _reserveOpId, canonReservationBatch as _canonReservationBatch, reserveDigestBody as _reserveDigestBody, canonAnnouncementDraft } from './postseq-reserve.mjs';
 import { announcePostId, opIdFor as announceOpIdFor, postCreateIntention as announcePostCreateIntention } from './announce-outbox.mjs';
 import { CRI, cardNames, jsonDigest, namesListOf } from './card-ref-index.mjs';   // #1744 — the derived card reference index
-import { cardQuads } from './cards-graph.mjs';   // #1744 D6 — a referrer's resolution diff, from its own JSON
 
 export const DIGEST_V = 1;
 /** The literal canonicalization policy (A5). Bound into every digest; bump it if a canonical form changes. */
@@ -1471,8 +1470,14 @@ function cardStructureBranches(iri, k, [xs, xp, xo] = ['?xs', '?xp', '?xo'], x =
  * unresolved node itself, concepts, commits), which a card write never deletes. Other names resolve identically in both.
  */
 const SHARED_SUBJECT_PREFIXES = ['https://scrumboard.local/unresolved/', 'https://scrumboard.local/concept/', 'https://scrumboard.local/commit/'];
+// The card projector (cards-graph.mjs cardQuads) REGISTERS itself on load: importing it here would put the oxigraph package
+// in server.js's static import graph, which must boot with no npm dependencies (#868). A reference-resolve part compiled
+// with no projector loaded is refused, never admitted unproven.
+let projectCard = null;
+export function registerCardProjector(fn) { projectCard = fn; }
 function resolutionDiff(card, N, newId) {
-  const proj = (map) => cardQuads(card, map).map((q) => q.map((t, j) => cardTerm(t, `resolution[${j}]`)));
+  if (!projectCard) fail('a reference-resolve part needs the card projector (cards-graph.mjs), which is not loaded');
+  const proj = (map) => projectCard(card, map).map((q) => q.map((t, j) => cardTerm(t, `resolution[${j}]`)));
   const A = proj(new Map([[Number(N), newId]])), B = proj(new Map());
   const key = (q) => q.join(' ');
   const a = new Set(A.map(key)), b = new Set(B.map(key));
