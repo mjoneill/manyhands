@@ -189,12 +189,21 @@ async function run({ id, base, dataset, docBytes, outboxBytes, captureBytes, cap
     const n = Number(b.n.value);
     own(n, id, 'graph'); pin(id, n, 'the graph');
   }
+  // reservations ALREADY in the candidate's bookkeeping (not written by this migration: a replay of its own import is not a
+  // conflict) are owners too, before any write (r4b: another identity at a U3 number; a U3 identity at another number)
+  const candRes = (await X.query(`SELECT ?pid ?n ?m WHERE { GRAPH <${BK}> { ?r a ${POSTSEQ_TERMS.Reservation} ; ${POSTSEQ_TERMS.postId} ?pid ; ${POSTSEQ_TERMS.postSeq} ?n . OPTIONAL { ?r <${T.migrationId}> ?m } } }`))
+    .filter((b) => b.m?.value !== id).map((b) => ({ postId: b.pid.value, postSeq: Number(b.n.value) }));
+  for (const r of candRes) { own(r.postSeq, r.postId, 'a candidate reservation'); pin(r.postId, r.postSeq, 'a candidate reservation'); }
   for (const r of reservations) { own(r.postSeq, r.postId, `reservation ${r.key}`); pin(r.postId, r.postSeq, `reservation ${r.key}`); }
   for (const e of Object.values(entries)) if (e.mode === 'publisher' && e.postSeq !== undefined) {
     const id = announcePostId(e.mutationId, e.slot);
     own(e.postSeq, id, `entry ${e.obligationId}`); pin(id, e.postSeq, `entry ${e.obligationId}`);
   }
-  if (high >= next) hold('HIGH_WATER', `nextPostSeq ${next} is not above the high-water ${high}`);
+  // every assigned number counts toward the high-water, whatever its entry's status (r4b: a BLOCKED publisher assignment
+  // above nextPostSeq with no post is still a number handed out)
+  const assigned = Object.values(entries).map((e) => e.postSeq).filter((n) => Number.isSafeInteger(n));
+  const top = Math.max(high, ...candRes.map((r) => r.postSeq), ...assigned);
+  if (top >= next) hold('HIGH_WATER', `nextPostSeq ${next} is not above the high-water ${top}`);
 
   // ── 5. the outbox manifest: every pending entry has exactly one disposition; every proof joins ──
   const rows = parseCsv(outboxBytes.toString('utf8'));
