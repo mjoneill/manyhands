@@ -36,6 +36,8 @@ import { HAVE_PY, PY, tmpStore, spawnExecutor, killExecutor } from './helpers/gr
 import { spawn, spawnSync } from 'node:child_process';
 import { createGraphClient } from '../core/graph-client.mjs';
 import { postWriteId } from '../core/post-write.mjs';
+import { cardQuads, cardIriOf } from '../core/cards-graph.mjs';
+import { projectBatch } from '../core/activity-projector.mjs';
 
 const MOD = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'core', 'postseq-reserve.mjs');
 const M = await import(pathToFileURL(MOD).href);
@@ -584,8 +586,18 @@ test('#1749 (B5p, r4, P3 v3) on an UNHELD store: an ordinary body applies; comme
     assert.equal(await askQ(x, 'ASK { <urn:ex:p3/keep> ?p ?o }'), true, 'and nothing was deleted');
   } finally { await stopX(x); }
 });
-// P4: a 50,000-triple INSERT DATA on an UNHELD store, this build vs the base (8edd075), median of 5; within 10% or 50 ms, whichever is larger
+// P4 v2 (ruling 46591; the contract author's 46592; the projector premise corrected in 46590). Every case: this build vs the base
+// 8edd075 (its executor.py run from `git show`), BOTH executors up at once and their samples INTERLEAVED (base, build, base, …) so
+// machine drift lands on both; the SAME client code drives both, so only the executor differs. Median of 5 samples per side.
+// BOUNDED (a, b1, b2, b3): the build's median is within 10% or 50 ms of the base's, whichever is larger. A bounded failure is a
+// STOP-AND-REPORT, never a wider window. MEASURED (c): printed with its ratio, not bounded.
+//   a   FLOORED 50k-triple INSERT DATA (both stores --install-write-floor postseq-v1, the header declared)
+//   b1  UNFLOORED compiled card.write through graph-client: one sample = 20 single-card creates
+//   b2  UNFLOORED compiled postseq.reserve through graph-client: one sample = 20 ordinary reservations
+//   b3  UNFLOORED REAL projectBatch: one sample = ONE batch of 500 events plus a 50-row work-ledger slice (the live writer, #1641)
+//   c   UNFLOORED 50k-triple INSERT DATA, measured and printed
 const BASE_REF = '8edd075';
+const P4_FLOOR = 'postseq-v1';
 const startBase = (dir, extra) => new Promise((resolve, reject) => {
   const src = spawnSync('git', ['show', `${BASE_REF}:graph-executor/executor.py`], { encoding: 'utf8', cwd: path.dirname(fileURLToPath(import.meta.url)) });
   if (src.status !== 0) return reject(new Error(`PRECONDITION: git show ${BASE_REF} (${src.stderr})`));
@@ -597,22 +609,77 @@ const startBase = (dir, extra) => new Promise((resolve, reject) => {
   p.on('exit', (code) => reject(new Error(`the base executor exited ${code}`)));
 });
 const median = (xs) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
-async function time50k(x) {
-  const ms = [];
-  for (let k = 0; k < 5; k++) {
-    const body = `INSERT DATA { ${Array.from({ length: 50000 }, (_, i) => `<urn:ex:p4/${k}/${i}> <urn:ex:p> "${i}" .`).join(' ')} }`;
-    const t0 = performance.now();
-    const r = await post(x, body, {});
-    ms.push(performance.now() - t0);
-    assert.equal(r.status, 200, `PRECONDITION: the 50k insert applied (${r.status} ${r.text.slice(0, 120)})`);
-  }
-  return median(ms);
+const within = (n, b) => n <= Math.max(b * 1.10, b + 50);
+/** both executors up, `prep` once on each, then 5 interleaved samples; returns both medians and every sample */
+async function paired(tag, extra, prep, sample) {
+  const base = await startBase(store(`hold-p4${tag}-base-`), ['--create', ...extra]);
+  const x = await start(store(`hold-p4${tag}-build-`), ['--create', ...extra]);
+  try {
+    for (const e of [base, x]) assert.equal((await health(e)).writeFloor ?? null, extra.length ? P4_FLOOR : null, `PRECONDITION (${tag}): the floor is as named`);
+    await prep(base); await prep(x);
+    const ms = { base: [], build: [] };
+    for (let k = 0; k < 5; k++) {
+      for (const [side, e] of [['base', base], ['build', x]]) {
+        const t0 = performance.now();
+        await sample(e, k, side);
+        ms[side].push(performance.now() - t0);
+      }
+    }
+    const b = median(ms.base), n = median(ms.build);
+    console.log(`# P4 ${tag} median ms: base ${b.toFixed(1)}, build ${n.toFixed(1)} (x${(n / b).toFixed(2)}); samples base [${ms.base.map((v) => v.toFixed(0))}] build [${ms.build.map((v) => v.toFixed(0))}]`);
+    return { b, n };
+  } finally { await stopX(base); await stopX(x); }
 }
-test('#1749 (P4, r4) a 50,000-triple INSERT DATA on an UNHELD store: this build is within 10% (or 50 ms) of the base 8edd075, median of 5; both printed', { ...T, timeout: 600000 }, async () => {
-  const base = await startBase(store('hold-p4-base-'), ['--create']);
-  let b; try { b = await time50k(base); } finally { await stopX(base); }
-  const x = await start(store('hold-p4-build-'), ['--create']);
-  let n; try { n = await time50k(x); } finally { await stopX(x); }
-  console.log(`# P4 median ms: base ${b.toFixed(1)}, build ${n.toFixed(1)}`);
-  assert.ok(n <= Math.max(b * 1.10, b + 50), `the build's median ${n.toFixed(1)} ms is within 10% or 50 ms of the base's ${b.toFixed(1)} ms`);
+const insert50k = (header) => async (e, k) => {
+  const body = `INSERT DATA { ${Array.from({ length: 50000 }, (_, i) => `<urn:ex:p4/${k}/${i}> <urn:ex:p> "${i}" .`).join(' ')} }`;
+  const epoch = String((await health(e)).epoch);
+  const r = await fetch(`${e.baseUrl}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/hold-p4-${opN++}`, 'x-epoch': epoch, ...header }, body });
+  assert.equal(r.status, 200, `PRECONDITION: the 50k insert applied (${r.status} ${(await r.text()).slice(0, 120)})`);
+};
+const P4T = { ...T, timeout: 900000 };
+const bounded = (tag, { b, n }) => assert.ok(within(n, b), `P4 ${tag}: the build's median ${n.toFixed(1)} ms is within 10% or 50 ms of the base's ${b.toFixed(1)} ms — a failure here is STOP AND REPORT (ruling 46591)`);
+
+test('#1749 (P4a, v2) FLOORED: a 50,000-triple INSERT DATA, build within 10% (or 50 ms) of the floored base 8edd075, median of 5', P4T, async () => {
+  bounded('a', await paired('a', ['--install-write-floor', P4_FLOOR], async () => {}, insert50k({ 'x-manyhands-write-protocol': P4_FLOOR })));
+});
+test('#1749 (P4b1, v2) UNFLOORED: 20 compiled card.write creates through graph-client, build within 10% (or 50 ms) of the base 8edd075, median of 5', P4T, async () => {
+  const card = (id, shortId) => ({ id, shortId, title: `card ${shortId}`, description: 'a body of ordinary length for a card on the board', column: 'backlog', createdAt: '2026-10-25T06:00:00.000Z', createdBy: 'ada', version: 1, labels: ['p4'] });
+  bounded('b1', await paired('b1', [], async () => {}, async (e, k) => {
+    const g = client(e);
+    for (let i = 0; i < 20; i++) {
+      const c = card(`p4-${k}-${i}`, 1 + k * 20 + i);
+      const r = await g.update({ kind: 'card.write', opId: `urn:ex:op/card/p4-${process.pid}-${opN++}`, actor: 'https://scrumboard.local/person/ada', parts: [{ iri: cardIriOf(c.id), expectedVersion: null, version: c.version, quads: cardQuads(c, new Map()), json: JSON.stringify(c) }] });
+      assert.equal(r.outcome, 'APPLIED', `PRECONDITION: the card.write applied (${JSON.stringify(r).slice(0, 200)})`);
+    }
+  }));
+});
+test('#1749 (P4b2, v2) UNFLOORED: 20 compiled postseq.reserve intentions through graph-client, build within 10% (or 50 ms) of the base 8edd075, median of 5', P4T, async () => {
+  bounded('b2', await paired('b2', [], async (e) => { await raw(e, `INSERT DATA { GRAPH <${BK}> { ${allocatorTriples(100)} } }`); }, async (e, k) => {
+    const g = client(e);
+    for (let i = 0; i < 20; i++) {
+      const r = await g.update(intention([ordinary(`p4-${k}-${i}`)]));
+      assert.equal(r.outcome, 'APPLIED', `PRECONDITION: the reservation applied (${JSON.stringify(r).slice(0, 200)})`);
+    }
+  }));
+});
+test('#1749 (P4b3, v2) UNFLOORED: a REAL projectBatch of 500 events plus a 50-row ledger slice, build within 10% (or 50 ms) of the base 8edd075, median of 5', P4T, async () => {
+  const logDir = fs.mkdtempSync(path.join(path.dirname(store('hold-p4b3-anchor-')), 'p4-log-')); owned.stores.add(logDir);
+  const workDir = fs.mkdtempSync(path.join(path.dirname(logDir), 'p4-work-')); owned.stores.add(workDir);
+  const LOG = path.join(logDir, 'events-2026-10-25.jsonl'), WORK = path.join(workDir, 'work-objects.jsonl');
+  fs.writeFileSync(LOG, ''); fs.writeFileSync(WORK, '');
+  const OPS = ['card.update', 'card.create', 'card.move', 'conversation.post'];
+  let fed = -1;
+  bounded('b3', await paired('b3', [], async () => {}, async (e, k) => {
+    if (fed < k) {   // the base runs first in each round: append this round's input once, both executors then project the same slice
+      const ev = Array.from({ length: 500 }, (_, i) => { const seq = k * 500 + i + 1; return JSON.stringify({ seq, ts: '2026-10-25T09:00:00.000Z', op: OPS[seq % OPS.length], actor: 'ada', entity: { id: `uuid-p4-${seq}`, kind: 'card', shortId: seq } }); });
+      const wk = Array.from({ length: 50 }, (_, i) => JSON.stringify({ id: `w-p4-${k}-${i}`, seq: 1, declaredBy: 'ada', card: 9, required: ['bea'], transition: { type: 'declared', at: '2026-10-25T09:00:00.000Z', by: 'ada' } }));
+      fs.appendFileSync(LOG, `${ev.join('\n')}\n`); fs.appendFileSync(WORK, `${wk.join('\n')}\n`); fed = k;
+    }
+    const r = await projectBatch({ logDir, workDir, executorUrl: e.baseUrl });
+    assert.deepEqual([r.cursor.seq, r.cursor.workRows], [(k + 1) * 500, (k + 1) * 50], `PRECONDITION: the batch projected 500 events and 50 ledger rows (${JSON.stringify(r).slice(0, 200)})`);
+  }));
+});
+test('#1749 (P4c, v2) UNFLOORED: a 50,000-triple INSERT DATA, build vs the base 8edd075, MEASURED AND PRINTED (not bounded; the slowdown is the record)', P4T, async () => {
+  const { b, n } = await paired('c', [], async () => {}, insert50k({}));
+  console.log(`# P4c RECORD: unfloored 50k INSERT DATA costs x${(n / b).toFixed(2)} the base (${b.toFixed(1)} -> ${n.toFixed(1)} ms)`);
 });
