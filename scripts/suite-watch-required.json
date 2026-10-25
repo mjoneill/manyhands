@@ -113,6 +113,7 @@
   "tests/origin-commit-1629-s3-controls.test.mjs",
   "tests/origin-lifecycle-1629-l.test.mjs",
   "tests/origin-outcome-settle-1629-s3.test.mjs",
+  "tests/origin-slice4-1744.test.mjs",
   "tests/post-import-referenced-1626.test.mjs",
   "tests/post-redaction-r4a-addendum.test.mjs",
   "tests/post-redaction-r4a.test.mjs",

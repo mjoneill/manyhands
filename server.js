@@ -156,6 +156,27 @@ const BOARD_DOCUMENT = process.env.SCRUM_BOARD_DOCUMENT ?? 'on';
 // permission. Two origin shapes still refuse here until #1629 slice 4 — a page create (wiki-create) and a done-move that
 // shifts a sibling — and existing document outbox entries are not migrated (M1/M2 deferred).
 const ORIGIN_EXECUTOR = BOARD_DOCUMENT !== 'on';
+// #1744 — a card create or delete must prove the derived reference index complete (core/card-ref-index.mjs): always in
+// executor-owned mode, and in mode on once its backfill has run and SCRUM_CARD_REF_INDEX=enforce (F3: backfill BEFORE
+// enforcement, so no mode-on write is stranded on a missing index). Every card write maintains the index either way.
+const CARD_REF_INDEX_ENFORCE = ORIGIN_EXECUTOR || process.env.SCRUM_CARD_REF_INDEX === 'enforce';
+// Everywhere else (mode on, not enforced) the guard is MARKER-KEYED (finding 5): a create or delete proves the index once
+// the store holds the completion marker, so a backfilled store cannot be written around by an unset environment variable.
+const CARD_REF_INDEX_GUARD = CARD_REF_INDEX_ENFORCE ? true : 'marker';
+/** #1744 — after a guarded write is refused: is the INDEX the reason (true), or a stale version (false)? null = unknown. */
+async function cardRefIndexIncomplete() {
+  try {
+    const { cardRefIndexHealthySparql, cardRefIndexMarkerSparql } = await import('./core/graph-compiler.mjs');
+    const c = createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: 15000, label: 'card-ref-index' });
+    if (!CARD_REF_INDEX_ENFORCE) {   // marker-keyed: with no marker at all the index held nothing back
+      const m = await c.query(cardRefIndexMarkerSparql());
+      if (!m.ok) return null;
+      if (!m.rows.length) return false;
+    }
+    const r = await c.query(cardRefIndexHealthySparql());
+    return r.ok ? r.rows.length === 0 : null;
+  } catch { return null; }
+}
 // the fields no unit holds yet, each with the card that gives it an owner; `owned` flips when that card's build lands
 const DOCUMENT_ONLY_FIELDS = [
   { field: 'outbox (announcement origins and entries)', card: '#1629', owned: () => ORIGIN_EXECUTOR },
@@ -1032,7 +1053,9 @@ function sendJSON(res, statusCode, data) {
   const unitRefused = statusCode === 500 && data && typeof data.error === 'string' && /^(card|collection) write refused: /.test(data.error);
   if (statusCode === 500 && ((graphCtx && graphCtx.writeRefused) || unitRefused)) {
     statusCode = 409;
-    data = { error: `the graph refused this write as stale or conflicting; nothing was written: ${unitRefused ? data.error : graphCtx.writeRefused}`, code: 'WRITE_CONFLICT' };
+    data = graphCtx && graphCtx.indexIncomplete
+      ? { error: 'the card reference index is incomplete or damaged, so a card create or delete cannot prove which cards it must re-project; nothing was written (run scripts/card-ref-index-1744.mjs --backfill with writers stopped)', code: 'INDEX_INCOMPLETE' }
+      : { error: `the graph refused this write as stale or conflicting; nothing was written: ${unitRefused ? data.error : graphCtx.writeRefused}`, code: 'WRITE_CONFLICT' };
   }
   // #1629 s3 — an origin shape refused in executor-owned mode, BEFORE any durable effect: 503 with its code, never a 500
   if (statusCode === 500 && graphCtx && graphCtx.originRefused) {
@@ -7845,7 +7868,14 @@ async function lockedWithCards(fn) {
             if (cw) cw.cards = true;
             const o = staged.origin;
             if (colParts.length) throw new OriginShapeRefused('an origin write moves no columns (#1629 s3)');
-            const r = await CARDS.commitOrigin(data.cards, data.nextShortId, { collections: collParts, describe: (parts) => originDescriptor(o, parts, collParts) });
+            // #1744 — a done-move's shifted siblings are sibling-order parts, with the walk's anchor; every origin may pause at
+            // the test-only after-origin-prepare barrier (a no-op unless a test armed it)
+            const subjectIri = o.provenance?.cardId ? `https://scrumboard.local/entity/${o.provenance.cardId}` : null;
+            const siblingOrder = o.route === 'done-nudge' && staged.walk;
+            if (siblingOrder) staged.noReplan = true;   // #1744 D9 — a refused done-move with siblings is never silently replanned
+            const r = await CARDS.commitOrigin(data.cards, data.nextShortId, { collections: collParts, describe: (parts) => originDescriptor(o, parts, collParts),
+              ...(siblingOrder ? { decorate: (parts) => parts.map((x) => (x.iri === subjectIri ? x : { ...x, reason: 'sibling-order' })), walk: staged.walk } : {}),
+              afterPrepare: () => testBarrier('after-origin-prepare') });
             if (r.outcome === 'APPLIED') { o.handle.mutationId = r.mutationId; o.handle.obligationId = `${r.mutationId}:${o.slot}`; }
             o.done = true;
             if (collParts.length) COLLECTIONS.applied(data, collParts);
@@ -7854,7 +7884,7 @@ async function lockedWithCards(fn) {
             const ob = outboxOf(data);
             const pending = Object.entries(ob.origins).filter(([mid, o]) => !data[FILE_ORIGINS]?.has(mid) && o?.origin?.cardId)
               .map(([mid, o]) => ({ cardId: o.origin.cardId, mutationId: mid, json: JSON.stringify({ origin: o, entries: Object.fromEntries(Object.entries(ob.entries).filter(([, e]) => e?.mutationId === mid)) }) }));
-            await CARDS.commit(data.cards, data.nextShortId, { actor, opId, pending, collections: [...collParts, ...colParts] });
+            await CARDS.commit(data.cards, data.nextShortId, { actor, opId, pending, collections: [...collParts, ...colParts], indexGuard: CARD_REF_INDEX_GUARD });
             if (collParts.length) COLLECTIONS.applied(data, collParts);
             if (colParts.length) COLUMNS.applied(data.columns, colParts);
           } else if (colParts.length) {
@@ -7875,8 +7905,13 @@ async function lockedWithCards(fn) {
       }
       return result;
     } catch (e) {
-      if (e && e.code === 'CARD_WRITE_CONFLICT' && attempt === 1) continue;
-      if (e && e.code === 'CARD_WRITE_CONFLICT') { const ctx = requestContext.getStore(); if (ctx) ctx.writeRefused = e.message; }
+      if (e && e.code === 'CARD_WRITE_CONFLICT' && attempt === 1 && !staged.noReplan) continue;
+      if (e && e.code === 'CARD_WRITE_CONFLICT') {
+        const ctx = requestContext.getStore();
+        if (ctx) ctx.writeRefused = e.message;
+        // #1744 — a refusal BECAUSE the reference index is incomplete is named as such, never a plain stale-write conflict
+        if (ctx && (await cardRefIndexIncomplete()) === true) ctx.indexIncomplete = true;
+      }
       markGraphUnavailable(e);   // an unresolved UNKNOWN (or an executor away): the response is 503, never a bare 500
       throw e;
     }
@@ -10087,7 +10122,9 @@ function makeRoomInColumn(cardsArr, moved, anchor) {
     if (!c || c === moved || c.column !== moved.column) return;
     seq.push({ c, o: Number(c.order) || 0, i });
   });
-  seq.sort((a, b) => (a.o - b.o) || (a.i - b.i));
+  // #1744 (F1) — with the cards unit the tie-break is (order, shortId), the same rule the compiler checks the walk by; the
+  // document-only path keeps its array order
+  seq.sort((a, b) => (a.o - b.o) || (CARDS_UNIT ? (Number(a.c.shortId) || 0) - (Number(b.c.shortId) || 0) : 0) || (a.i - b.i));
   let walk;
   if (anchor === undefined) walk = seq.filter(({ o }) => o >= at);
   else if (anchor === null) walk = seq;
@@ -10565,10 +10602,10 @@ async function handleUpdateCard(req, res, idOrShortId) {
           }
         }
         shifted = makeRoomInColumn(data.cards, card, anchor);
-        // #1629 s3 D1 — executor-owned: a move INTO done that shifts a sibling would put sibling parts in the done-nudge's
-        // origin plan, which this slice does not admit (slice 4). Refused before anything is written (the edits above are
-        // in this request's copy only); the same move into a free slot shifts nothing and goes through.
-        if (ORIGIN_EXECUTOR && !wasDone && card.column === 'done' && shifted.length) throw new OriginShapeRefused('a move into done that shifts other cards is not available while the executor owns announcements (#1629 slice 4)');
+        // #1744 (#1629 slice 4) — executor-owned: the shifted siblings ride the done-nudge origin as sibling-order parts,
+        // and the walk's anchor rides with it so the compiler can prove the shifted set is exactly the walk
+        // (only when the walk shifted a sibling: a zero-shift move keeps its one retry, D9's scope is sibling-shifting moves)
+        if (shifted.length) { const st = cardWriteContext.getStore(); if (st) st.walk = { anchor: anchor === undefined ? undefined : anchor === null ? null : `https://scrumboard.local/entity/${anchor.id}` }; }
         // #1584 — the move's identity, on the stored card, so the fence can
         // tell a committed move from one that may still arrive (handleMoveFence).
         if (typeof patch.requestId === 'string') card.lastMoveRequestId = patch.requestId;
@@ -12714,9 +12751,8 @@ async function handleCreateNode(req, res) {
     if (!body.title || !body.title.trim()) return sendJSON(res, 400, { error: 'title is required' });
     const verr = validateCardFields({ type: body.type });
     if (verr) return sendJSON(res, 400, { error: verr });
-    // #1629 s3 D1 — executor-owned: a page create (wiki-create) is not migrated until slice 4. Refused HERE, before the
-    // lock and before any durable effect: no card, no counter, no origin, no reservation.
-    if (ORIGIN_EXECUTOR) return sendJSON(res, 503, { error: 'a page create is not available while the executor owns announcements (wiki-create is #1629 slice 4)', code: 'ORIGIN_SHAPE_NOT_MIGRATED' });
+    // #1744 (#1629 slice 4) — executor-owned: the page create is a `wiki-create` origin (createNodeAsOrigin, below)
+    if (ORIGIN_EXECUTOR) return await createNodeAsOrigin(res, body);
     let notice = null;
     const created = await withWriteLock(async () => {
       const data = readBoard();
@@ -12756,6 +12792,96 @@ async function handleCreateNode(req, res) {
     console.error('POST /api/nodes:', e.message);
     sendJSON(res, 500, { error: 'Failed to create node' });
   }
+}
+
+/**
+ * #1744 (#1629 slice 4) — a page create in executor-owned mode, as ONE `wiki-create` origin (contract v2 V2-1, F4):
+ *   identity  requestId (the caller's, or minted here and returned) → mutationId = UUIDv5(["origin-v1","wiki-create","wiki",
+ *             requestId,"board"]) and the card id DERIVED from it, so a retry can never mint a second card;
+ *   request   the canonical semantic request, frozen as requestDigest in the descriptor (and so in its digest);
+ *   plan      the new card at the counter's shortId, the counter advance, every card naming that shortId (reference-resolve),
+ *             and the version of every ancestor the plan read (parent and apex chain), all from the cards unit's own plan;
+ *   retry     same key + same digest after the commit → the ORIGINAL card, nothing written; before the commit → the frozen
+ *             plan's timestamps are reused, so an unchanged world replays the prepare and commits, and a changed one is
+ *             refused as STALE_PREPARED (never a silent replan); same key + another digest → REQUEST_CONFLICT.
+ * The notice is the obligation's slot `wiki` (author wiki, feed-only), published after the answer like any origin's.
+ */
+async function createNodeAsOrigin(res, body) {
+  const requestId = typeof body.requestId === 'string' && body.requestId ? body.requestId : crypto.randomUUID();
+  const originActor = 'board';   // F4: appendWikiNotice's actor policy in executor mode, never the declared createdBy
+  const { originKeyOf, mutationIdOf, WIKI_CREATE_ROUTE } = COMPILER_MOD;
+  const mutationId = mutationIdOf(originKeyOf(WIKI_CREATE_ROUTE, 'wiki', requestId, originActor));
+  const cardId = mutationIdOf(`${mutationId}:card`);
+  const conflict = (code, error) => sendJSON(res, 409, { error, code, requestId });
+  let handle = null, node = null, replayed = false;
+  try {
+    node = await withWriteLock(async () => {
+      if (CARDS_UNIT) await CARDS.ensureFresh();
+      const data = readBoard();   // executor-owned: built from the units, no document read (#1563)
+      const snap = CARDS.snapshot(data.nextShortId);
+      const card = createCardFromPayload({ id: cardId, title: body.title, description: body.body || '', type: body.type || 'reference', createdBy: body.createdBy }, snap.nextShortId);
+      if (typeof body.parent === 'string') card.parent = body.parent;
+      if (body.attachments !== undefined) card.attachments = sanitizeAttachments(body.attachments);
+      const canonical = JSON.stringify({ v: 1, title: card.title, description: card.description, type: card.type, parent: typeof body.parent === 'string' ? body.parent : null, attachments: body.attachments === undefined ? null : card.attachments, createdBy: card.createdBy ?? null });
+      const requestDigest = crypto.createHash('sha256').update(`wikiCreateRequestV 1\n${canonical}`).digest('hex');
+      const prior = await ORIGIN_MOD.readPreparedOrigin(ANNOUNCE_EXECUTOR, mutationId);
+      if (!prior.ok) throw Object.assign(new Error(`the prepared origin could not be read (${prior.reason})`), { code: 'CARDS_UNAVAILABLE' });
+      if (prior.prepared) {
+        const was = JSON.parse(prior.prepared.descriptorJson);
+        if (was.provenance?.requestDigest !== requestDigest) { replayed = 'conflict'; return null; }
+        if (prior.prepared.committedBy) {   // the same request, already committed: the ORIGINAL card, nothing written
+          replayed = 'committed';
+          const live = CARDS.snapshot(data.nextShortId).cards.find((c) => c.id === cardId);
+          return live ? cardToNode(live) : null;
+        }
+        // prepared, never committed: reuse the FROZEN plan's timestamps, so the identical world rebuilds the identical plan
+        const stored = JSON.parse(prior.prepared.planJson).parts.find((x) => x.iri === `https://scrumboard.local/entity/${cardId}`);
+        if (stored) { const j = JSON.parse(stored.json); card.createdAt = j.createdAt; card.updatedAt = j.updatedAt; }
+        replayed = 'prepared';
+      }
+      const cards = [...snap.cards, card];
+      if (card.parent != null) applyApexLabels(cards, card.id);   // #902 item 4 — born labelled
+      // every ancestor the plan READ, pinned at its graph version (F4: the whole parent/apex chain, not just the parent)
+      const reads = [];
+      for (let id = card.parent, seen = new Set(); id && !seen.has(id); id = cards.find((c) => c.id === id)?.parent) {
+        seen.add(id);
+        const v = CARDS.versionOf(id);
+        if (v != null) reads.push({ iri: `https://scrumboard.local/entity/${id}`, version: String(v) });
+      }
+      const subject = `https://scrumboard.local/entity/${cardId}`;
+      const noticeBody = `📄 page created: **${(card.title || 'untitled').trim()}** (#${card.shortId})`;
+      const r = await CARDS.commitOrigin(cards, snap.nextShortId + 1, {
+        create: true, reads,
+        decorate: (parts) => parts.map((x) => (x.iri === subject ? x : { ...x, reason: 'reference-resolve' })),
+        describe: () => ({ route: WIKI_CREATE_ROUTE, subject: 'wiki', requestKey: requestId, originActor, mutationId,
+          provenance: { cardId, version: 1, requestDigest },
+          slots: [{ slot: 'wiki', author: 'wiki', body: noticeBody, mentions: extractMentionsFromRoster(noticeBody, currentRoster(data)), notify: false }] }),
+        afterPrepare: () => testBarrier('after-origin-prepare'),
+      });
+      if (r.outcome === 'APPLIED') {
+        handle = { mode: 'publisher', executorOwned: true, slot: 'wiki', mutationId: r.mutationId, obligationId: `${r.mutationId}:wiki` };
+        // the same post-commit bookkeeping as every unit write: the create event (/api/changes), the replica marked dirty,
+        // the pending count, lastUpdated. The document keeps its own card list (FILE_CARDS), as for any unit write.
+        writeDocument(data, [cardEvent('create', card, card.createdBy)]);
+      }
+      return cardToNode(card);
+    });
+  } catch (e) {
+    if (e instanceof PostSeqStateCorrupt) return sendJSON(res, 500, e.body);
+    if (e && e.code === 'CARD_WRITE_CONFLICT') {
+      if (CARD_REF_INDEX_ENFORCE && (await cardRefIndexIncomplete()) === true) return sendJSON(res, 409, { error: 'the card reference index is incomplete or damaged; nothing was written (run scripts/card-ref-index-1744.mjs --backfill with writers stopped)', code: 'INDEX_INCOMPLETE', requestId });
+      // a keyed retry whose frozen plan no longer matches the world: the prepare under the same key refuses (intent collision)
+      if (replayed === 'prepared') return conflict('STALE_PREPARED', 'this request was prepared against a board that has since changed; it is not replanned under the same key (use a new requestId)');
+      return conflict('WRITE_CONFLICT', `the graph refused this page create; nothing was written: ${e.message}`);
+    }
+    if (e && (e.code === 'CARDS_UNAVAILABLE' || e.code === 'COLLECTIONS_UNAVAILABLE')) return sendJSON(res, 503, { error: `the graph executor is not answering; nothing is reported as written: ${e.message}`, code: 'GRAPH_UNAVAILABLE', requestId });
+    console.error('POST /api/nodes (wiki-create):', e.message);
+    return sendJSON(res, 500, { error: 'Failed to create node', requestId });
+  }
+  if (replayed === 'conflict') return conflict('REQUEST_CONFLICT', 'this requestId was already used for a different page request; nothing was written');
+  if (!node) return sendJSON(res, 503, { error: 'the committed page could not be read back', code: 'GRAPH_UNAVAILABLE', requestId });
+  sendJSON(res, replayed === 'committed' ? 200 : 201, { ...node, requestId });
+  if (handle) publishAnnouncements([handle]);
 }
 
 // #220 — would setting node `childId`'s parent to `newParentId` create a cycle?
@@ -13342,6 +13468,30 @@ if (CARDS_UNIT) {
   try { await CARDS.load(); } catch (e) {
     console.error(`#1598 cards unit: the cards could not be read from the graph — refusing to serve: ${e.message}`);
     process.exit(1);
+  }
+  // #1744 finding 6 — THE BOOT GATE. Where the index is required (executor-owned, or SCRUM_CARD_REF_INDEX=enforce), a board
+  // whose index is absent, unfinished or damaged would refuse every create and delete at runtime; boot is the cheapest place
+  // to say so, once, to the operator. A check that cannot run is a refusal too: an unproven index is not a healthy one.
+  if (CARD_REF_INDEX_ENFORCE) {
+    // the FULL JSON verification before every enforced start (contract amendment, rulings 46773/46781): the health query
+    // below proves the index internally consistent; this proves its name sets match the cards' stored JSON
+    const { verifyIndex } = await import('./core/card-ref-index-verify.mjs');
+    const vc = createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: 60000, label: 'card-ref-index-verify' });
+    let full;
+    try {
+      full = await verifyIndex({ query: async (q) => { const r = await vc.query(q); if (!r.ok) throw new Error(r.reason); return r.rows; },
+        health: async () => (await fetch(`${process.env.SCRUM_GRAPH_EXECUTOR_URL}/health`)).json(), dataset: process.env.SCRUM_GRAPH_DATASET_ID });
+    } catch (e) { full = { status: 'UNAVAILABLE', bad: [String(e?.message || e)] }; }
+    if (full.status !== 'EXACT' || full.marker.length !== 1 || full.marker[0] !== 'true') {
+      const why = full.status === 'EXACT' ? `the completion marker reads ${JSON.stringify(full.marker)}` : full.status === 'VIOLATED' ? `${full.bad.length} violation(s) of the full JSON check: ${full.bad.slice(0, 3).join('; ')}` : full.status === 'UNSTABLE' ? 'the store never held still for a consistent full check' : `the full check could not run: ${full.bad[0]}`;
+      console.error(`#1744 the card reference index failed its full verification (${why}) — refusing to start${ORIGIN_EXECUTOR ? ` in SCRUM_BOARD_DOCUMENT=${BOARD_DOCUMENT}` : ' with SCRUM_CARD_REF_INDEX=enforce'}. Run scripts/card-ref-index-1744.mjs --backfill with writers stopped, then --verify`);
+      process.exit(1);
+    }
+    const incomplete = await cardRefIndexIncomplete();
+    if (incomplete !== false) {
+      console.error(`#1744 the card reference index is ${incomplete === null ? 'not checkable (the executor did not answer the health query)' : 'absent, unfinished or damaged (no completion marker, or the health query finds a violation)'} — refusing to start${ORIGIN_EXECUTOR ? ` in SCRUM_BOARD_DOCUMENT=${BOARD_DOCUMENT}` : ' with SCRUM_CARD_REF_INDEX=enforce'}. Run scripts/card-ref-index-1744.mjs --backfill with writers stopped, then --verify`);
+      process.exit(1);
+    }
   }
   // #1629 s3 — executor-owned: the origin readers, and NO K4 block. Boot enumerates nothing into the document and drains
   // nothing inline (contract v1 §5): a pending obligation waits for the supervised publisher (scripts/announce-publisher).
