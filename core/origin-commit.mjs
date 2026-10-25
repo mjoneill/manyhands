@@ -143,7 +143,9 @@ function validatePrepared(rows, mutationId) {
 }
 
 const ORIGIN_FIELDS = ['mutationId', 'originKeyJson', 'descriptorDigest', 'planDigest', 'committedAt', 'commitOp', 'slotCount'];
-const OBLIGATION_STATUSES = Object.freeze(['pending', 'published', 'blocked']);
+// #1749 A8: `retired` is written only by the executor's --dispose-obligation (retire-unsent-unknown): terminal, never published,
+// never dispatched; it asserts nothing about whether the announcement was sent
+const OBLIGATION_STATUSES = Object.freeze(['pending', 'published', 'blocked', 'retired']);
 const OBLIGATION_FIELDS = ['obligationId', 'mutationId', 'slot', 'index', 'status', 'mode', 'provenanceJson', 'reservation'];
 
 /**

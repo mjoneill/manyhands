@@ -14,7 +14,7 @@ usage: python executor.py --store DIR --port N --dataset-id ID [--create] [--log
                            [--checkpoint-dir DIR] [--promote-epoch] [--adopt-home] [--read-only]
                            [--install-write-floor PROTOCOL] [--reconcile-postseq FILE]
 """
-import argparse, hashlib, json, os, sys, threading, time, urllib.parse, uuid
+import argparse, hashlib, json, os, re, sys, threading, time, urllib.parse, uuid
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import pyoxigraph as px
 
@@ -90,6 +90,57 @@ MAX_SAFE = 2 ** 53 - 1
 RECONCILE_KEYS = ('nextPostSeq', 'declaredGap', 'approvedBy', 'approvalRef', 'evidence', 'hold')
 RECONCILE_HOLD_KEYS = ('datasetId', 'epoch', 'incarnation', 'restoredCommitSeq', 'restoredHighWater')
 RECONCILE_EVIDENCE_KEYS = ('kind', 'location', 'sha256', 'maxPostSeqSeen')
+# #1749 A8 THE DISPATCH HOLD. A held promotion records every obligation pending at promotion as an AmbiguousObligation in the
+# recovery graph (it may already have been sent by the lost store; a restore cannot know). The compiled dispatch intentions
+# refuse DISPATCH_HELD while it is "held"; only --dispose-obligation <file> settles it (published or retired), never
+# releasing it to dispatch, and writes a DispositionRecord.
+AO_T = PS + 'AmbiguousObligation'
+AO_PREFIX = PS + 'ambiguous/'
+AO = {k: PS + k for k in ('obligationIri', 'obligationId', 'mutationId', 'slot', 'payloadSha256', 'holdEpoch',
+                          'holdIncarnation', 'state')}
+AO_STATES = ('held', 'disposed')
+DR_T = PS + 'DispositionRecord'
+DR_PREFIX = PS + 'disposition/'
+ORIGIN_NS = 'urn:ex:origin/'
+OB_T = ORIGIN_NS + 'Obligation'
+OB = {k: ORIGIN_NS + k for k in ('obligationId', 'mutationId', 'slot', 'status', 'reservation')}
+RES_DRAFT = PS + 'draftJson'
+ENTITY_IRI = 'https://scrumboard.local/entity/'
+ANNOUNCE_POST_NAMESPACE = uuid.UUID('bb9ac420-d837-46bc-984d-6c875b978aee')   # core/announce-outbox.mjs announcePostId
+SCHEMA = 'https://schema.org/'
+SB = 'https://scrumboard.local/ns#'
+POST_T = {'Comment': SCHEMA + 'Comment', 'RedactedPost': SB + 'RedactedPost'}
+POST_P = {'text': SCHEMA + 'text', 'author': SCHEMA + 'author', 'postSeq': SB + 'postSeq', 'originOccurredAt': SB + 'originOccurredAt',
+          'originMutation': SB + 'originMutation', 'originSlot': SB + 'originSlot', 'originActor': SB + 'originActor',
+          'mentionsName': SB + 'mentionsName'}
+XSD_BOOLEAN = 'http://www.w3.org/2001/XMLSchema#boolean'
+XSD_DATETIME = 'http://www.w3.org/2001/XMLSchema#dateTime'
+DISPOSE_KEYS = ('obligationId', 'mutationId', 'slot', 'payloadSha256', 'lineage', 'currentStore', 'decision', 'notification',
+                'notificationEvidence', 'approvedBy', 'approvalRef', 'note')
+DISPOSE_OPTIONAL = ('notificationEvidence',)
+DISPOSE_DECISIONS = {'settle-published': 'published', 'retire-unsent-unknown': 'retired'}
+DISPOSE_NOTIFICATIONS = ('delivered-evidenced', 'not-delivered-evidenced', 'unknown')
+DISPOSE_EVIDENCE_KINDS = ('notify-log', 'seat-cache', 'operator-statement')
+UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+INSTANT_RE = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$')
+
+
+def canonical_json(v):
+    """#1749 P8-1 the agreed canonical JSON: object keys sorted recursively, arrays and every scalar as stored, no whitespace,
+    UTF-8 (the JSON.stringify of the key-sorted value, which is what json.dumps with these options produces for JSON values)."""
+    return json.dumps(v, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+
+
+def sha256_hex(text):
+    return hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+
+def ao_subject(obligation_id):
+    return AO_PREFIX + sha256_hex(obligation_id)
+
+
+def announce_post_id(mutation_id, slot):
+    return str(uuid.uuid5(ANNOUNCE_POST_NAMESPACE, f'{mutation_id}:{slot}'))
 # The stdlib default listen backlog is 5. Measured in the D2 proofs (P5, 2026-10-04): with
 # 8 concurrent writers, 5 connected at once and 3 waited ~30 ms for the OS to retry the
 # connection. Correctness held, but concurrency was not exercised and latency carried a
@@ -133,6 +184,13 @@ def parse_args(argv):
                          'and writes a ReconciliationRecord, then serve. Any refusal (NO_HOLD, WRONG_LINEAGE, WRONG_HOLD, '
                          'BAD_GAP, BELOW_EVIDENCE, BELOW_NEXT, BAD_FILE) refuses to start with the store unchanged. Rerunning '
                          'the SAME file on the reconciled store writes nothing and serves (ALREADY reconciled).')
+    ap.add_argument('--dispose-obligation', default=None, metavar='FILE',
+                    help='#1749 A8: a MAINTENANCE START on a stopped store: settle ONE obligation a held promotion recorded as '
+                         'AMBIGUOUS, by the operator\'s closed-schema FILE: settle-published (only with its post verified in THIS '
+                         'store) or retire-unsent-unknown, in ONE transaction that also marks the AmbiguousObligation disposed '
+                         'and writes a DispositionRecord; nothing is ever dispatched. Any refusal (BAD_FILE, WRONG_OBLIGATION, '
+                         'POST_UNVERIFIED, NOT_AMBIGUOUS) refuses to start with the store unchanged; the SAME file again serves '
+                         '(ALREADY disposed).')
     ap.add_argument('--exit-on-stdin-eof', action='store_true',
                     help='exit when stdin closes: a parent that dies (even by SIGKILL) takes the executor with it')
     ap.add_argument('--checkpoint-dir', default=None,
@@ -249,6 +307,91 @@ def parse_reconcile_file(path):
     return doc, hashlib.sha256(canon).hexdigest()
 
 
+class DisposeRefused(SystemExit):
+    """#1749 A8 — a --dispose-obligation start that refuses: the store is unchanged and the process does not serve."""
+    def __init__(self, code, detail):
+        super().__init__(f'REFUSED: {code}: {detail} (--dispose-obligation; the store is unchanged)')
+        self.code = code
+
+
+def _hex64(v):
+    return isinstance(v, str) and len(v) == 64 and all(ch in '0123456789abcdef' for ch in v)
+
+
+def parse_dispose_file(path):
+    """#1749 A8 AUTHORITATIVE SCHEMA, the CLOSED --dispose-obligation file. Returns (doc, canonical sha256) or raises
+    DisposeRefused BAD_FILE. An obligationId that is not its own <mutationId>:<slot> is BAD_FILE (ruling 2)."""
+    bad = lambda why: DisposeRefused('BAD_FILE', why)
+    try:
+        with open(path, 'rb') as f:
+            raw = f.read()
+        doc = json.loads(raw.decode('utf-8'), parse_constant=lambda c: (_ for _ in ()).throw(ValueError(f'{c} is not JSON')))
+    except (OSError, UnicodeDecodeError, ValueError) as e:
+        raise bad(f'the file could not be read as JSON: {e}')
+    if not isinstance(doc, dict):
+        raise bad('the file is not a JSON object')
+    def closed(obj, keys, what, optional=()):
+        extra = sorted(set(obj) - set(keys))
+        missing = sorted(set(keys) - set(optional) - set(obj))
+        if extra or missing:
+            raise bad(f'{what}: ' + '; '.join(x for x in (f'unknown key(s) {extra}' if extra else '',
+                                                          f'missing key(s) {missing}' if missing else '') if x))
+    closed(doc, DISPOSE_KEYS, 'the dispose file', DISPOSE_OPTIONAL)
+    for key in ('obligationId', 'mutationId', 'slot', 'note'):
+        if not isinstance(doc[key], str) or not doc[key]:
+            raise bad(f'{key} must be a non-empty string')
+    if not UUID_RE.match(doc['mutationId']):
+        raise bad('mutationId must be a lowercase UUID')
+    if not _plain_str(doc['slot']):
+        raise bad('slot must be a non-empty string without control characters or surrounding space')
+    if doc['obligationId'] != f'{doc["mutationId"]}:{doc["slot"]}':
+        raise bad(f'obligationId {doc["obligationId"]!r} is not its own mutationId:slot ({doc["mutationId"]}:{doc["slot"]})')
+    if not _hex64(doc['payloadSha256']):
+        raise bad('payloadSha256 must be 64 lowercase hex characters')
+    lin = doc['lineage']
+    if not isinstance(lin, dict):
+        raise bad('lineage must be an object')
+    closed(lin, ('holdEpoch', 'holdIncarnation'), 'lineage')
+    if not all(_plain_str(lin[k]) for k in ('holdEpoch', 'holdIncarnation')):
+        raise bad('lineage.holdEpoch and lineage.holdIncarnation must be non-empty strings')
+    cs = doc['currentStore']
+    if not isinstance(cs, dict):
+        raise bad('currentStore must be an object')
+    closed(cs, ('datasetId', 'epoch', 'incarnation'), 'currentStore')
+    if not all(_plain_str(cs[k]) for k in ('datasetId', 'epoch', 'incarnation')):
+        raise bad('currentStore.datasetId, .epoch and .incarnation must be non-empty strings')
+    if doc['decision'] not in DISPOSE_DECISIONS:
+        raise bad(f'decision must be one of {sorted(DISPOSE_DECISIONS)}')
+    if doc['notification'] not in DISPOSE_NOTIFICATIONS:
+        raise bad(f'notification must be one of {list(DISPOSE_NOTIFICATIONS)}')
+    if doc['notification'] == 'unknown':
+        if 'notificationEvidence' in doc:
+            raise bad('notificationEvidence is FORBIDDEN when notification is "unknown"')
+    else:
+        ev = doc.get('notificationEvidence')
+        if not isinstance(ev, list) or not ev:
+            raise bad(f'notificationEvidence is REQUIRED and non-empty when notification is {doc["notification"]!r}')
+        for k, e in enumerate(ev):
+            if not isinstance(e, dict):
+                raise bad(f'notificationEvidence[{k}] must be an object')
+            closed(e, ('kind', 'location', 'sha256', 'observedAt'), f'notificationEvidence[{k}]')
+            if e['kind'] not in DISPOSE_EVIDENCE_KINDS:
+                raise bad(f'notificationEvidence[{k}].kind must be one of {list(DISPOSE_EVIDENCE_KINDS)}')
+            if not _plain_str(e['location']):
+                raise bad(f'notificationEvidence[{k}].location must be a non-empty string')
+            if not _hex64(e['sha256']):
+                raise bad(f'notificationEvidence[{k}].sha256 must be 64 lowercase hex characters')
+            if not isinstance(e['observedAt'], str) or not INSTANT_RE.match(e['observedAt']):
+                raise bad(f'notificationEvidence[{k}].observedAt must be an ISO-8601 instant with a zone')
+    ab = doc['approvedBy']
+    if not (_plain_str(ab) and ab.startswith(PERSON_IRI) and len(ab) > len(PERSON_IRI)
+            and not any(ch in ab[len(PERSON_IRI):] for ch in '/<>"{}|\\^` ')):
+        raise bad(f'approvedBy must be a person IRI ({PERSON_IRI}<seat>)')
+    if not _plain_str(doc['approvalRef']) or any(ch.isspace() for ch in doc['approvalRef']):
+        raise bad('approvalRef must be a non-empty string with no whitespace')
+    return doc, sha256_hex(canonical_json(doc))
+
+
 def sparql_term(t):
     """An N-Triples term for a stored IRI or literal (blank nodes are not expressible in a guard and are never written here)."""
     if isinstance(t, px.NamedNode):
@@ -317,9 +460,17 @@ def old_layout(store):
 
 class Executor:
     def __init__(self, store_dir, dataset_id, create=False, log=None, promote_epoch=False, checkpoint_dir=None,
-                 adopt_home=False, read_only=False, install_write_floor=None, reconcile_postseq=None):
+                 adopt_home=False, read_only=False, install_write_floor=None, reconcile_postseq=None,
+                 dispose_obligation=None):
         self.read_only = bool(read_only)
         self.reconciled = None
+        self.disposed = None
+        if dispose_obligation is not None and (self.read_only or create or promote_epoch or adopt_home
+                                               or install_write_floor is not None or reconcile_postseq is not None):
+            # #1749 A8, as --reconcile-postseq: refused before the store is opened, so a refusal changes nothing
+            raise SystemExit('REFUSED: --dispose-obligation is a maintenance start of an existing, already promoted store: it '
+                             'cannot be combined with --read-only, --create, --promote-epoch, --adopt-home, '
+                             '--install-write-floor or --reconcile-postseq (run those as their own start)')
         if reconcile_postseq is not None and (self.read_only or create or promote_epoch or adopt_home
                                               or install_write_floor is not None):
             # refused before the store is even opened: each of those writes something of its own, and a reconcile start that
@@ -403,9 +554,14 @@ class Executor:
         # #1749 everything that can refuse a start because of the RECOVERY GRAPH or the reconcile file is decided HERE, before
         # the first write of this start (the self-check below): a refusal leaves the store unchanged.
         self._check_recovery_graph_sound()
+        self._check_ambiguous_sound()   # #1749 A8: every AmbiguousObligation complete and well-formed, or HOLD_UNSOUND
         if promote_epoch and not self.read_only and self._hold_present():
             self._prior_hold()   # a re-promotion replaces only a COMPLETE, well-formed hold (review finding 2)
+        # #1749 A8-1 the obligations this promotion records as ambiguous, read (and their payloads hashed) before any write
+        self._promotion_aos = (self._pending_unrecorded() if promote_epoch and not self.read_only
+                               and (self._hold_present() or self._has_allocator()) else [])
         reconcile_plan = self._reconcile_check(reconcile_postseq) if reconcile_postseq is not None else None
+        dispose_plan = self._dispose_check(dispose_obligation) if dispose_obligation is not None else None
         self.promoted = None
         if self.read_only:
             self.write_floor = self._floor_value()
@@ -498,6 +654,8 @@ class Executor:
                              'be absent; remove it offline')
         if reconcile_postseq is not None:
             self.reconciled = self._reconcile_apply(reconcile_plan)
+        if dispose_obligation is not None:
+            self.disposed = self._dispose_apply(dispose_plan)
 
     # ── #1749 the recovery hold ──────────────────────────────────────────────────────────────────────────────────────
 
@@ -548,10 +706,249 @@ class Executor:
         if hw > MAX_SAFE:
             raise SystemExit(f'REFUSED: the restored high-water {hw} is not a safe integer')
         prior_t = f' ; <{HOLD_PRIOR_EPOCH}> {json.dumps(prior_epoch)}' if prior_epoch is not None else ''
+        # #1749 A8-1 in the SAME update: one AmbiguousObligation per obligation pending now that has none yet, bound to THIS
+        # hold's lineage; an existing AmbiguousObligation (held or disposed) is never touched (P8-5, P8-7)
+        aos = ''.join(
+            f' . <{a["subject"]}> a <{AO_T}> ; <{AO["obligationIri"]}> <{a["obligationIri"]}> ; '
+            f'<{AO["obligationId"]}> {json.dumps(a["obligationId"])} ; <{AO["mutationId"]}> {json.dumps(a["mutationId"])} ; '
+            f'<{AO["slot"]}> {json.dumps(a["slot"])} ; <{AO["payloadSha256"]}> {json.dumps(a["payloadSha256"])} ; '
+            f'<{AO["holdEpoch"]}> {json.dumps(new_epoch)} ; <{AO["holdIncarnation"]}> {json.dumps(new_inc)} ; '
+            f'<{AO["state"]}> "held"' for a in getattr(self, '_promotion_aos', []))
         return (f' ;\nDELETE WHERE {{ GRAPH <{RG}> {{ <{HOLD_S}> ?hp ?ho }} }} ;\n'
                 f'INSERT DATA {{ GRAPH <{RG}> {{ <{HOLD_S}> a <{HOLD_T}> ; <{HOLD_EPOCH}> {json.dumps(new_epoch)} ; '
                 f'<{HOLD_INCARNATION}> {json.dumps(new_inc)} ; <{HOLD_COMMIT_SEQ}> "{int(commit_seq)}"^^<{XSD_INTEGER}> ; '
-                f'<{HOLD_HIGH_WATER}> "{hw}"^^<{XSD_INTEGER}>{prior_t} }} }}')
+                f'<{HOLD_HIGH_WATER}> "{hw}"^^<{XSD_INTEGER}>{prior_t}{aos} }} }}')
+
+    # ── #1749 A8 the dispatch hold ───────────────────────────────────────────────────────────────────────────────────
+
+    def _subject_rows(self, graph_pattern_fn, subject):
+        out = {}
+        for r in self.store.query(f'SELECT ?p ?o WHERE {{ {graph_pattern_fn(f"<{subject}> ?p ?o")} }}'):
+            out.setdefault(r['p'].value, []).append(r['o'])
+        return out
+
+    @staticmethod
+    def _plain_one(rows, pred):
+        """the single plain-string value of pred, or None when it is not exactly one plain string"""
+        vs = rows.get(pred, [])
+        if len(vs) != 1 or not isinstance(vs[0], px.Literal) or vs[0].language or vs[0].datatype.value != XSD_STRING:
+            return None
+        return vs[0].value
+
+    def _payload_sha(self, reservation_iri):
+        """P8-1: sha256 of the obligation's stored payload (its reservation's frozen draft) as canonical JSON, or None"""
+        rows = self._subject_rows(in_bk, reservation_iri)
+        draft = self._plain_one(rows, RES_DRAFT)
+        if draft is None:
+            return None, None
+        try:
+            payload = json.loads(draft)
+        except ValueError:
+            return None, None
+        return sha256_hex(canonical_json(payload)), payload
+
+    def _check_ambiguous_sound(self):
+        """#1749 A8 every AmbiguousObligation (any subject typed so, or under its prefix) must be complete: typed once, each
+        field exactly once (obligationIri an IRI, the rest plain strings), state held|disposed, obligationId its own
+        mutationId:slot, payloadSha256 64 hex, and the subject derived from the obligationId. Anything else refuses the start
+        HOLD_UNSOUND before any write, naming the subject."""
+        subs = {r['s'].value for r in self.store.query(
+            f'SELECT DISTINCT ?s WHERE {{ GRAPH <{RG}> {{ {{ ?s a <{AO_T}> }} UNION {{ ?s ?p ?o FILTER(STRSTARTS(STR(?s), {json.dumps(AO_PREFIX)})) }} }} }}')}
+        for subj in sorted(subs):
+            rows = self._subject_rows(in_rg, subj)
+            def unsound(why):
+                return SystemExit(f'REFUSED: HOLD_UNSOUND: the AmbiguousObligation <{subj}> {why}. Inspect and repair it offline '
+                                  '(the store is unchanged)')
+            extra = sorted(set(rows) - {RDF_TYPE, *AO.values()})
+            if extra:
+                raise unsound(f'carries predicate(s) it never has: {extra}')
+            if rows.get(RDF_TYPE, []) != [px.NamedNode(AO_T)]:
+                raise unsound(f'is not typed <{AO_T}> exactly once')
+            iris = rows.get(AO['obligationIri'], [])
+            if len(iris) != 1 or not isinstance(iris[0], px.NamedNode):
+                raise unsound(f'has {len(iris)} obligationIri value(s); exactly one IRI is required')
+            vals = {}
+            for k in ('obligationId', 'mutationId', 'slot', 'payloadSha256', 'holdEpoch', 'holdIncarnation', 'state'):
+                v = self._plain_one(rows, AO[k])
+                if v is None or v == '':
+                    raise unsound(f'has no single non-empty plain-string {k}')
+                vals[k] = v
+            if vals['state'] not in AO_STATES:
+                raise unsound(f'has an unknown state {vals["state"]!r} (expected one of {list(AO_STATES)})')
+            if vals['obligationId'] != f'{vals["mutationId"]}:{vals["slot"]}':
+                raise unsound('names an obligationId that is not its own mutationId:slot')
+            if not _hex64(vals['payloadSha256']):
+                raise unsound('has a payloadSha256 that is not 64 lowercase hex characters')
+            if subj != ao_subject(vals['obligationId']):
+                raise unsound('sits at a subject that is not derived from its obligationId')
+
+    def _pending_unrecorded(self):
+        """#1749 A8-1 every obligation whose status is pending now (any mode) and which has no AmbiguousObligation yet, with
+        its payload hashed (P8-1). One that cannot be read completely refuses the promotion HOLD_UNSOUND, before any write:
+        an obligation is never silently left unrecorded."""
+        out = []
+        q = (f'SELECT DISTINCT ?ob WHERE {{ GRAPH <{BK}> {{ ?ob a <{OB_T}> ; <{OB["status"]}> ?st . '
+             f'FILTER(isLiteral(?st) && STR(?st) = "pending") }} }}')
+        for r in self.store.query(q):
+            ob = r['ob'].value
+            rows = self._subject_rows(in_bk, ob)
+            vals = {k: self._plain_one(rows, OB[k]) for k in ('obligationId', 'mutationId', 'slot')}
+            res = rows.get(OB['reservation'], [])
+            def unsound(why):
+                return SystemExit(f'REFUSED: HOLD_UNSOUND: the pending obligation <{ob}> {why}, so this promotion cannot record it '
+                                  'as ambiguous; repair it offline before promoting (the store is unchanged)')
+            if any(v is None for v in vals.values()) or vals['obligationId'] != f'{vals["mutationId"]}:{vals["slot"]}':
+                raise unsound('has no single, self-consistent obligationId/mutationId/slot')
+            if len(rows.get(OB['status'], [])) != 1:
+                raise unsound('has more than one status')
+            if len(res) != 1 or not isinstance(res[0], px.NamedNode):
+                raise unsound('names no single reservation')
+            sha, _ = self._payload_sha(res[0].value)
+            if sha is None:
+                raise unsound('has no readable stored payload (its reservation\'s draft)')
+            subj = ao_subject(vals['obligationId'])
+            if bool(self.store.query(f'ASK {{ {in_rg(f"<{subj}> ?p ?o")} }}')):
+                continue   # already recorded by an earlier promotion: never altered (P8-5)
+            out.append({'subject': subj, 'obligationIri': ob, 'payloadSha256': sha, **vals})
+        return out
+
+    def _dispose_check(self, path):
+        """#1749 A8 (AUTHORITATIVE SCHEMA) every check of --dispose-obligation, before this start's first write. Order:
+        BAD_FILE (the closed schema); the file's currentStore is THIS store (P8-5) and an AmbiguousObligation exists for its
+        obligationId, else WRONG_OBLIGATION; a disposed one answers ALREADY for the same file, NOT_AMBIGUOUS for any other;
+        the held record's binding (mutationId, slot, payloadSha256, lineage) and the actual pending obligation and its payload
+        sha in this store, else WRONG_OBLIGATION; for settle-published, the post verified in THIS store by its frozen fields,
+        else POST_UNVERIFIED."""
+        doc, digest = parse_dispose_file(path)
+        wrong = lambda why: DisposeRefused('WRONG_OBLIGATION', why)
+        ident, marker = self._identity(), self._marker()
+        here = {'datasetId': self.dataset_id, 'epoch': str(marker['epoch']), 'incarnation': ident.get('incarnation')}
+        for k in ('datasetId', 'epoch', 'incarnation'):
+            if doc['currentStore'][k] != here[k]:
+                raise wrong(f'the file\'s currentStore.{k} is {doc["currentStore"][k]!r}; this store\'s is {here[k]!r}')
+        oid = doc['obligationId']
+        subj = ao_subject(oid)
+        rows = self._subject_rows(in_rg, subj)
+        if not rows:
+            raise wrong(f'no AmbiguousObligation exists for {oid} (at <{subj}>)')
+        ao = {k: self._plain_one(rows, AO[k]) for k in ('obligationId', 'mutationId', 'slot', 'payloadSha256', 'holdEpoch',
+                                                        'holdIncarnation', 'state')}
+        record = DR_PREFIX + digest
+        if ao['state'] == 'disposed':
+            if bool(self.store.query(f'ASK {{ {in_rg(f"<{record}> a <{DR_T}> ; <{PS}fileSha256> {json.dumps(digest)}")} }}')):
+                return {'already': True, 'record': record}
+            raise DisposeRefused('NOT_AMBIGUOUS', f'{oid} was already disposed, by a different file')
+        if ao['state'] != 'held':
+            raise wrong(f'the AmbiguousObligation for {oid} is not held')
+        for k, want in (('obligationId', oid), ('mutationId', doc['mutationId']), ('slot', doc['slot']),
+                        ('payloadSha256', doc['payloadSha256']), ('holdEpoch', doc['lineage']['holdEpoch']),
+                        ('holdIncarnation', doc['lineage']['holdIncarnation'])):
+            if ao[k] != want:
+                raise wrong(f'the file\'s {k} is {want!r}; the AmbiguousObligation\'s is {ao[k]!r}')
+        ob_iri = rows[AO['obligationIri']][0].value
+        ob_rows = self._subject_rows(in_bk, ob_iri)
+        status_t = ob_rows.get(OB['status'], [])
+        if (ob_rows.get(RDF_TYPE, []) != [px.NamedNode(OB_T)] or self._plain_one(ob_rows, OB['obligationId']) != oid
+                or len(status_t) != 1 or self._plain_one(ob_rows, OB['status']) != 'pending'):
+            raise wrong(f'the obligation <{ob_iri}> in this store is not the pending obligation {oid}')
+        res = ob_rows.get(OB['reservation'], [])
+        if len(res) != 1 or not isinstance(res[0], px.NamedNode):
+            raise wrong(f'the obligation <{ob_iri}> names no single reservation')
+        sha, payload = self._payload_sha(res[0].value)
+        if sha != doc['payloadSha256']:
+            raise wrong(f'the obligation\'s stored payload in this store has sha256 {sha}, not the file\'s')
+        post = None
+        if doc['decision'] == 'settle-published':
+            post = self._verify_post(doc['mutationId'], doc['slot'], res[0].value, payload)
+        if bool(self.store.query(f'ASK {{ {in_rg(f"<{record}> ?p ?o")} }}')):
+            raise DisposeRefused('BAD_FILE', f'a record already sits at {record} while the obligation is held; repair it offline')
+        return {'already': False, 'record': record, 'digest': digest, 'doc': doc, 'ao_subject': subj, 'ao_state': rows[AO['state']][0],
+                'ob_iri': ob_iri, 'ob_status': status_t[0], 'post': post, 'here': here}
+
+    def _verify_post(self, mid, slot, reservation_iri, payload):
+        """#1749 A8 settle-published: the post announcePostId(mutationId, slot) exists in THIS store, live, and its FROZEN
+        fields equal the payload's (author, body, mentions, originActor, occurredAt, origin mutationId and slot) and the
+        obligation's reserved postSeq. Never a caller's claim, never a body hash alone."""
+        unv = lambda why: DisposeRefused('POST_UNVERIFIED', why)
+        post_id = announce_post_id(mid, slot)
+        post_iri = ENTITY_IRI + post_id
+        rows = {}
+        for r in self.store.query(f'SELECT ?p ?o WHERE {{ <{post_iri}> ?p ?o }}'):
+            rows.setdefault(r['p'].value, []).append(r['o'])
+        if not rows:
+            raise unv(f'the post {post_id} does not exist in this store')
+        types = {t.value for t in rows.get(RDF_TYPE, []) if isinstance(t, px.NamedNode)}
+        if POST_T['Comment'] not in types or POST_T['RedactedPost'] in types:
+            raise unv(f'the post {post_id} is not a live post')
+        if not isinstance(payload, dict):
+            raise unv('the stored payload is not an object')
+        def one(pred):
+            vs = rows.get(pred, [])
+            return vs[0] if len(vs) == 1 else None
+        res_rows = self._subject_rows(in_bk, reservation_iri)
+        ps = res_rows.get(RESERVATION_POSTSEQ, [])
+        checks = [
+            ('body', one(POST_P['text']), lambda t: isinstance(t, px.Literal) and t.value == payload.get('body')),
+            ('author', one(POST_P['author']), lambda t: isinstance(t, px.NamedNode) and t.value == PERSON_IRI + str(payload.get('author'))),
+            ('originActor', one(POST_P['originActor']), lambda t: isinstance(t, px.NamedNode) and t.value == PERSON_IRI + str(payload.get('originActor'))),
+            ('occurredAt', one(POST_P['originOccurredAt']), lambda t: isinstance(t, px.Literal) and t.value == payload.get('occurredAt')),
+            ('origin.mutationId', one(POST_P['originMutation']), lambda t: isinstance(t, px.Literal) and t.value == mid),
+            ('origin.slot', one(POST_P['originSlot']), lambda t: isinstance(t, px.Literal) and t.value == slot),
+            ('postSeq', one(POST_P['postSeq']), lambda t: isinstance(t, px.Literal) and t.datatype.value == XSD_INTEGER and len(ps) == 1
+                and isinstance(ps[0], px.Literal) and t.value == ps[0].value),
+        ]
+        for what, term, ok in checks:
+            if term is None or not ok(term):
+                raise unv(f'the post {post_id}\'s {what} is not the obligation\'s ({term})')
+        mentions = sorted(t.value for t in rows.get(POST_P['mentionsName'], []) if isinstance(t, px.Literal))
+        if mentions != sorted(payload.get('mentions') or []) or len(mentions) != len(rows.get(POST_P['mentionsName'], [])):
+            raise unv(f'the post {post_id}\'s mentions are not the obligation\'s')
+        return {'postId': post_id, 'postIri': post_iri, 'postSeq': int(ps[0].value), 'bodySha256': sha256_hex(payload.get('body') or ''),
+                'author': payload.get('author'), 'originActor': payload.get('originActor'), 'occurredAt': payload.get('occurredAt'),
+                'mentions': mentions}
+
+    def _dispose_apply(self, plan):
+        """#1749 A8 the write half of --dispose-obligation: ONE transaction — the obligation published or retired, the
+        AmbiguousObligation disposed, the DispositionRecord written. No dispatch receipt, announce receipt or delivery claim."""
+        if plan['already']:
+            return {'result': 'ALREADY', 'record': plan['record']}
+        doc, record, post, here = plan['doc'], plan['record'], plan['post'], plan['here']
+        after = DISPOSE_DECISIONS[doc['decision']]
+        S = json.dumps
+        I = lambda n: f'"{int(n)}"^^<{XSD_INTEGER}>'
+        B = lambda b: f'"{"true" if b else "false"}"^^<{XSD_BOOLEAN}>'
+        P = lambda k: f'<{PS}{k}>'
+        fields = [
+            (P('fileSha256'), S(plan['digest'])), (P('obligationIri'), f'<{plan["ob_iri"]}>'), (P('obligationId'), S(doc['obligationId'])),
+            (P('mutationId'), S(doc['mutationId'])), (P('slot'), S(doc['slot'])), (P('payloadSha256'), S(doc['payloadSha256'])),
+            (P('decision'), S(doc['decision'])), (P('obligationStatusAfter'), S(after)), (P('postVerified'), B(post is not None)),
+            (P('notification'), S(doc['notification'])), (P('ambiguousRecord'), f'<{plan["ao_subject"]}>'),
+            (P('holdEpoch'), S(doc['lineage']['holdEpoch'])), (P('holdIncarnation'), S(doc['lineage']['holdIncarnation'])),
+            (P('currentDatasetId'), S(here['datasetId'])), (P('currentEpoch'), S(here['epoch'])), (P('currentIncarnation'), S(here['incarnation'])),
+            (P('approvedBy'), f'<{doc["approvedBy"]}>'), (P('approvalRef'), S(doc['approvalRef'])), (P('note'), S(doc['note'])),
+            (P('evidenceAuthenticated'), B(False)),
+            (P('disposedAt'), f'"{time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}"^^<{XSD_DATETIME}>'),
+        ]
+        if 'notificationEvidence' in doc:
+            fields.append((P('notificationEvidenceJson'), S(canonical_json(doc['notificationEvidence']))))
+        if post is not None:
+            fields += [(P('verifiedPostId'), S(post['postId'])), (P('verifiedPost'), f'<{post["postIri"]}>'),
+                       (P('verifiedPostSeq'), I(post['postSeq'])), (P('verifiedBodySha256'), S(post['bodySha256'])),
+                       (P('verifiedAuthor'), S(post['author'])), (P('verifiedOriginActor'), S(post['originActor'])),
+                       (P('verifiedOccurredAt'), S(post['occurredAt'])), (P('verifiedMentionsJson'), S(canonical_json(post['mentions']))),
+                       (P('verifiedIn'), S('store'))]
+        rec = f'<{record}> a <{DR_T}> ; ' + ' ; '.join(f'{p} {o}' for p, o in fields)
+        try:
+            self.store.update(
+                f'DELETE DATA {{ GRAPH <{BK}> {{ <{plan["ob_iri"]}> <{OB["status"]}> {sparql_term(plan["ob_status"])} }} '
+                f'GRAPH <{RG}> {{ <{plan["ao_subject"]}> <{AO["state"]}> {sparql_term(plan["ao_state"])} }} }} ;\n'
+                f'INSERT DATA {{ GRAPH <{BK}> {{ <{plan["ob_iri"]}> <{OB["status"]}> {S(after)} }} '
+                f'GRAPH <{RG}> {{ <{plan["ao_subject"]}> <{AO["state"]}> "disposed" . {rec} }} }}')
+            self.store.flush()
+        except OSError as e:
+            raise SystemExit(f'REFUSED: the disposition write or its flush failed (durability fault; read the store before any '
+                             f'rerun): {e}')
+        return {'result': 'DISPOSED', 'record': record, 'status': after}
 
     def _check_recovery_graph_sound(self):
         """#1749 (review finding 3, the contract author's choice) the hold and the records use named terms only, so a blank
@@ -1076,7 +1473,12 @@ def main(argv):
     a = parse_args(argv)
     ex = Executor(a.store, a.dataset_id, create=a.create, log=a.log, promote_epoch=a.promote_epoch,
                   checkpoint_dir=a.checkpoint_dir, adopt_home=a.adopt_home, read_only=a.read_only,
-                  install_write_floor=a.install_write_floor, reconcile_postseq=a.reconcile_postseq)
+                  install_write_floor=a.install_write_floor, reconcile_postseq=a.reconcile_postseq,
+                  dispose_obligation=a.dispose_obligation)
+    if ex.disposed is not None:   # #1749 A8, to stderr like the reconcile result
+        r = ex.disposed
+        print(f'ALREADY disposed {r["record"]}' if r['result'] == 'ALREADY'
+              else f'DISPOSED {r["record"]}: the obligation is {r["status"]}; nothing was dispatched', file=sys.stderr, flush=True)
     if ex.reconciled is not None:   # stdout's first line is the ready line; the maintenance result goes to stderr
         r = ex.reconciled
         print(f'ALREADY reconciled {r["record"]}' if r['result'] == 'ALREADY'

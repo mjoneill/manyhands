@@ -898,6 +898,7 @@ function planRecord(c) {
   const condIns = [];      // #1582 [{s, p, o, unless:[node, type]}]: inserted only where `node` is NOT of `type` when the update runs
   let verGuard = null;
   let target;
+  let dispatchHold = null;   // #1749 A8: the obligationId a dispatch intention settles or publishes
   const add = (s, p, o) => { if (o != null) ins.push([s, p, o]); };
   const versionNodes = (M, versions) => {
     for (const v of versions) {
@@ -958,6 +959,7 @@ function planRecord(c) {
     for (const t of R.duplicateOf) add(R.target, TM.duplicateOf, I(t));
   } else if (c.kind === 'post.create') {
     const P = R.post; target = null;   // a create: the post IRI must be fresh
+    dispatchHold = `${P.mutationId}:${P.slot}`;   // #1749 A8: the announcement is a dispatch of this obligation
     fresh.push(P.iri);
     add(P.iri, TM.type, I(TM.Comment));
     add(P.iri, TM.text, L(P.body));
@@ -1133,7 +1135,7 @@ function planRecord(c) {
     for (const a of P.aliases) add(P.iri, TM.aliases, L(a));
     add(P.iri, TM.recordedBy, ref(c.opId));
   }
-  return { target, pre, fresh, freshSubject, ins, delAll, delAny, delOwned, delLinked, condIns, verGuard };
+  return { target, pre, fresh, freshSubject, ins, delAll, delAny, delOwned, delLinked, condIns, verGuard, dispatchHold };
 }
 
 function compileRecord(c) {
@@ -1162,6 +1164,7 @@ function compileRecord(c) {
 
   for (const iri of plan.fresh) pre.push(...fresh(ref(iri)));
   for (const iri of plan.freshSubject || []) pre.push(...freshSubject(ref(iri)));   // #1626
+  if (plan.dispatchHold) dispatchHoldClauses({ obligationId: plan.dispatchHold, OP, pre, dBinds, bIns });   // #1749 A8
   if (plan.verGuard) {
     dBinds.push(ok('?xv', 'xvOld'), ok('?xv + 1', 'xvNew'));
     bDel.push(`  ${v(ref(plan.verGuard))} ${EX.ver} ?d_xvOld .`);
@@ -2474,6 +2477,21 @@ function allocationClauses({ items, N, OP, digest, v, pre, dBinds, bDel, bIns, t
   });
 }
 
+/**
+ * #1749 A8-2 THE DISPATCH HOLD, inside a dispatch intention's own update: it does not bind while (a) a RecoveryHold exists, for
+ * ANY obligation, or (b) this obligation's AmbiguousObligation is "held" (both read from the recovery graph, never anywhere
+ * else); the receipt names the refusal DISPATCH_HELD. A hold present means ?ok is unbound, so the code is only on a refusal.
+ */
+function dispatchHoldClauses({ obligationId, OP, pre, dBinds, bIns }) {
+  const RG = POSTSEQ_TERMS.RECOVERY_GRAPH;
+  const AO = POSTSEQ_TERMS.ambiguousObligation(createHash('sha256').update(String(obligationId), 'utf8').digest('hex'));
+  const HOLD = `GRAPH ${RG} { ${POSTSEQ_TERMS.recoveryHold} ?xdh_p ?xdh_o }`;
+  const AMBIG = `GRAPH ${RG} { ${AO} ${POSTSEQ_TERMS.state} ?xda_s FILTER(STR(?xda_s) = "held") }`;
+  pre.push(`    FILTER NOT EXISTS { ${HOLD} }`, `    FILTER NOT EXISTS { ${AMBIG} }`);
+  dBinds.push(nb(`IF(EXISTS { ${HOLD} } || EXISTS { ${AMBIG} }, ${JSON.stringify(POSTSEQ_TERMS.DISPATCH_HELD_CODE)}, ?u)`, 'reason'));
+  bIns.push(`  ${OP} ${EX.reason} ?n_reason .`);
+}
+
 function compilePostseqReserve(c, digest) {
   const items = c.postseq.items;
   const N = items.length;
@@ -2646,6 +2664,7 @@ function compileSettle(c, digest) {
     pre.push(`    ${POST} ${ref(TM.type)} ${ref(TM.Comment)} .`, `    FILTER NOT EXISTS { ${POST} ${ref(TM.type)} ${ref(TM.RedactedPost)} }`);
     if (!S.origin.consistent) pre.push('    FILTER(false)');   // the payload is not this slot's frozen content
   }
+  dispatchHoldClauses({ obligationId: S.obligationId, OP, pre, dBinds, bIns });   // #1749 A8: either transition settles a dispatch
   const next = S.transition === 'publish' ? 'published' : 'blocked';
   bDel.push(`  ${v(OB)} ${T.status} ${v(strLit('pending'))} .`);
   bIns.push(`  ${v(OB)} ${T.status} ${v(strLit(next))} .`);

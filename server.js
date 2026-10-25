@@ -11308,6 +11308,15 @@ async function xoPublish(obligationId, { inline = false } = {}) {
   if (!entry) return { unknown: true };
   if (entry.status === 'published') return { status: 'published', postId: entry.postId };
   if (entry.status === 'blocked') return { status: 'blocked', reason: 'blocked' };
+  if (entry.status === 'retired') return { status: 'retired', reason: 'retired by a disposition (#1749 A8): never dispatched' };
+  // #1749 A8-2 — THE DISPATCH HOLD, checked first and logged by name (the compiled guard in post.create and obligation.settle is
+  // the authority): while a RecoveryHold exists, or this obligation's AmbiguousObligation is held, nothing is posted or sent
+  const held = await c.ask(`ASK { GRAPH <urn:ex:postseq/recovery> { { <urn:ex:postseq/recovery-hold> ?hp ?ho } UNION { <urn:ex:postseq/ambiguous/${crypto.createHash('sha256').update(obligationId, 'utf8').digest('hex')}> <urn:ex:postseq/state> ?st FILTER(STR(?st) = "held") } } }`);
+  if (!held.ok) return { status: 'pending', reason: `executor-unavailable: the dispatch hold could not be read (${held.reason})` };
+  if (held.boolean) {
+    console.error(`#1749 DISPATCH_HELD: announcement ${obligationId} is held (a restore left it ambiguous, or a recovery hold is in place) — not posted, not dispatched; only an operator's --dispose-obligation settles it`);
+    return { status: 'pending', code: 'DISPATCH_HELD', reason: 'DISPATCH_HELD: this obligation is held after a restore; only an executor --dispose-obligation settles it, and nothing re-dispatches it' };
+  }
   const intention = postCreateIntention(entry);
   const settle = async (transition, extra) => c.update({ kind: 'obligation.settle', opId: COMPILER_MOD.settleOpId(obligationId, transition), actor: BOARD_PERSON, obligationId, transition, ...extra });
   const r = await c.update(intention);

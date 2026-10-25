@@ -174,6 +174,13 @@ export const POSTSEQ_TERMS = Object.freeze({
   RECOVERY_GRAPH: psi('recovery'),
   RecoveryHold: psi('RecoveryHold'),
   RECOVERY_HOLD_CODE: 'RECOVERY_HOLD',
+  // #1749 A8 THE DISPATCH HOLD: one AmbiguousObligation per obligation pending at a held promotion, in the recovery graph,
+  // at ambiguous/<sha256(obligationId)>. While a RecoveryHold exists, or the obligation's record is "held", the compiled
+  // dispatch intentions (the announcement post.create and obligation.settle) refuse DISPATCH_HELD.
+  ambiguousObligation: (sha256OfObligationId) => psi(`ambiguous/${sha256OfObligationId}`),
+  AmbiguousObligation: psi('AmbiguousObligation'),
+  state: psi('state'),
+  DISPATCH_HELD_CODE: 'DISPATCH_HELD',
 });
 
 /**
