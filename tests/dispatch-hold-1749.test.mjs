@@ -43,11 +43,12 @@
  *     scalar field, its literal's lexical value as the value (evidenceAuthenticated reads "false").
  *   - "the obligation's stored payload" (P8-1) is the stored reservation's draft as the origin reader returns it.
  *   - the dispose start, like --reconcile-postseq, serves after success and REFUSES TO START with the code on stderr; a replay of
- *     the same file is ALREADY either as a refusal or as a serving start that logs ALREADY (the text allows both).
+ *     the same file is ALREADY as a SERVING start that logs ALREADY, A2's form (ruled by the contract author).
  *   - a retired obligation's status triple reads "retired" (the origin reader admits only pending|published|blocked today, so it is
  *     read directly).
- *   - REST in mode off refuses to BOOT while the allocator reads RECOVERY_HOLD (today's G1(a) boot check, unchanged by A8). D1
- *     accepts that refusal, by name, as "no REST dispatch path is open"; the REST paths are then driven after reconcile (D2, C1).
+ *   - REST in mode off refuses to BOOT while the allocator reads RECOVERY_HOLD (today's G1(a) boot check). RULED by the contract
+ *     author: that stays, fail closed until a human reconciles. D1 REQUIRES the refusal, by name; the REST paths are then driven
+ *     after reconcile (D2, C1), where the AmbiguousObligation gate is what must hold.
  *
  * NOT COVERED, by name: the cutover candidate (A8-6, out of scope); the authenticity of notificationEvidence (recorded, not
  * authenticated, by contract); a crash inside the dispose transaction; the publisher's long-running loop (only --once).
@@ -468,6 +469,9 @@ test('#1749 A8 (D1) restore-after-dispatch: an AmbiguousObligation is written; t
       assert.match(String(e?.message), /RECOVERY_HOLD/, `D1: a REST that does not boot on the held store refuses BY NAME (${String(e?.message).slice(-300)})`);
       console.log('# D1: REST refused to boot on the held store (allocator RECOVERY_HOLD); the REST legs are driven after reconcile in D2');
     }
+    // contract author's ruling: REST does NOT boot while a RecoveryHold exists (fail closed until a human reconciles), so no REST
+    // dispatch path is open during the hold; the publisher and after-write legs are driven after reconcile (D2, C1)
+    assert.equal(booted, false, 'D1: REST refuses to boot while the RecoveryHold exists');
     if (booted) {
       const run = await s.publishOnce();
       assert.equal(run.code, 0, `D1: --once completed (${run.code}) ${run.err.slice(0, 200)}`);
@@ -587,10 +591,12 @@ test('#1749 A8 (D5) every binding field off by one value → WRONG_OBLIGATION, t
     const lin = { holdEpoch: r.hold.epoch, holdIncarnation: r.hold.incarnation };
     const cs = { datasetId: DSID, epoch: r.store.epoch, incarnation: r.store.incarnation };
     const mid = r.snap.mutationId;
+    // the identity fields move TOGETHER (obligationId is "<mutationId>:<slot>"), so each names another, consistent obligation;
+    // a file that is internally inconsistent is a schema error (BAD_FILE), pinned separately below (contract author's ruling)
+    const slot = r.snap.slot;
     const variants = [
-      ['obligationId', { obligationId: `${mid}:claimx` }],
-      ['mutationId', { mutationId: lastHexOff(mid) }],
-      ['slot', { slot: 'claimx' }],
+      ['mutationId (with obligationId)', { mutationId: lastHexOff(mid), obligationId: `${lastHexOff(mid)}:${slot}` }],
+      ['slot (with obligationId)', { slot: 'claimx', obligationId: `${mid}:claimx` }],
       ['payloadSha256', { payloadSha256: lastHexOff(r.payloadSha256) }],
       ['lineage.holdEpoch', { lineage: { ...lin, holdEpoch: offByOne(lin.holdEpoch) } }],
       ['lineage.holdIncarnation', { lineage: { ...lin, holdIncarnation: offByOne(lin.holdIncarnation) } }],
@@ -599,6 +605,7 @@ test('#1749 A8 (D5) every binding field off by one value → WRONG_OBLIGATION, t
       ['currentStore.incarnation', { currentStore: { ...cs, incarnation: offByOne(cs.incarnation) } }],
     ];
     for (const [what, over] of variants) await s.refusedStart(r.backup, ['--dispose-obligation', disposeFile(s, r, over)], 'WRONG_OBLIGATION', `D5 ${what} off by one`);
+    await s.refusedStart(r.backup, ['--dispose-obligation', disposeFile(s, r, { obligationId: `${mid}:claimx` })], 'BAD_FILE', 'D5 an obligationId that is not its own mutationId:slot');
     const x = await s.startExec(r.backup, ['--dispose-obligation', disposeFile(s, r)]);
     assert.deepEqual(await obligationStatus(x, r.snap.obligationId), ['retired'], 'D5 CONTROL: the exact file is admitted');
   });
@@ -621,7 +628,9 @@ test('#1749 A8 (D6) the same file again → ALREADY, unchanged; a different file
     if (again) await sleep(500);
     const text = again ? again.stderr() : String(err?.stderr ?? err?.message);
     if (again) await s.stopExec();
-    assert.match(text, /\bALREADY\b/, `D6: the replay answers ALREADY (${again ? 'served' : 'refused'}: ${text.slice(-300)})`);
+    // ALREADY has A2's form (contract author's ruling): a SERVING start that logs ALREADY, never a refusal
+    assert.ok(again, `D6: the replay is a serving start (${text.slice(-300)})`);
+    assert.match(text, /\bALREADY\b/, `D6: the replay logs ALREADY (${text.slice(-300)})`);
     assert.equal(stateOffline(r.backup), s0, 'D6: the replay changed no quad');
     await s.refusedStart(r.backup, ['--dispose-obligation', disposeFile(s, r, { note: 'a second, different disposition' })], 'NOT_AMBIGUOUS', 'D6 a different file');
   });
