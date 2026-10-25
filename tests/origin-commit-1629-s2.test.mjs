@@ -547,13 +547,88 @@ test('#1629 s2 (O2) an agent rest releases two GENUINELY held cards with the age
   }, { cards: [held1, held2, free, held3, yanOnly] });
 });
 
-// ── B1 byte-identical controls (golden captured from main 429e487 by tools in this directory; see golden file header) ──
+// ── B1 compatibility controls (golden captured from main 429e487 by the test author; see the golden file's note) ──
+// postseq.reserve still compiles BYTE-IDENTICALLY. card.write does not, BY DESIGN: #1744's frozen contract maintains the card
+// reference index on EVERY card write, mode on included (its §0 decision (a), V2-4 D8), and its F5 admits excluding the exact
+// index subtree from an old-state comparison ONLY beside a positive check of that subtree. So card.write's control is a STORE
+// comparison, never a re-captured golden: 429e487's compiled SPARQL (the golden, sent unchanged) and the head's compile each run
+// on one of two IDENTICALLY seeded executors, and the stores must be equal on every quad outside urn:ex:card-ref-index/ —
+// receipts, counters, versions and domain triples INCLUDED — while the head's index for each written card validates exactly.
 const GOLDEN = path.join(HERE, 'fixtures-1629-s2', 'golden-429e487.json');
-test('#1629 s2 (B1) card.write WITHOUT origin, and postseq.reserve, compile byte-identically to main 429e487', () => {
+const CRI_NS = 'urn:ex:card-ref-index/';
+const STORE_OWN = new Set(['urn:ex:incarnation', 'urn:ex:storeHome', 'urn:ex:storeHomeInode']);
+test('#1629 s2 (B1) postseq.reserve compiles byte-identically to main 429e487', () => {
   const g = JSON.parse(fs.readFileSync(GOLDEN, 'utf8'));
-  assert.ok(g.cases.length >= 3, 'PRECONDITION: the golden file holds cases');
-  for (const k of g.cases) assert.equal(compile(k.intention).sparql, k.compiled, `${k.label}: compiles exactly as at 429e487`);
+  const ps = g.cases.filter((k) => k.intention.kind === 'postseq.reserve');
+  assert.equal(ps.length, 2, 'PRECONDITION: the golden file holds both postseq.reserve cases');
+  for (const k of ps) assert.equal(compile(k.intention).sparql, k.compiled, `${k.label}: compiles exactly as at 429e487`);
 });
+/** the seed cards the golden's priors were built from (each case's old leg must APPLY on them, which proves they match) */
+const B1_SEEDS = { ga: card('ga', 1, { labels: ['x'] }), gb: card('gb', 2, { blockers: [{ person: 'ada', status: 'open' }] }) };
+const b1Names = (c) => {   // the board's naming rule, computed here, not by the build
+  const n = new Set([...String(`${c.title ?? ''}\n${c.description ?? ''}`).matchAll(/#(\d+)/g)].map((m) => Number(m[1])));
+  for (const arr of Object.values(c.relationships || {})) for (const v of arr || []) n.add(Number(v));
+  for (const a of c.acceptance || []) for (const v of a?.blockedBy || []) n.add(Number(v));
+  return [...n].filter((x) => Number.isSafeInteger(x) && x > 0).sort((a, b) => a - b);
+};
+async function b1Quads(x) {
+  const r = await fetch(`${x.baseUrl}/query`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/b1q-${crypto.randomUUID()}` }, body: 'SELECT ?g ?s ?p ?o WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }' });
+  assert.equal(r.status, 200, 'the snapshot query answered');
+  const t = (b) => (b ? `${b.type}|${b.value}|${b.datatype ?? ''}|${b['xml:lang'] ?? ''}` : '-');
+  // NOT compiler output, so normalised (never dropped): each store's own identity, and a receipt's wall-clock time (its
+  // presence, predicate and datatype still compare; only the clock value is masked)
+  const own = (b) => (STORE_OWN.has(b.p.value) && b.s.value === 'urn:ex:dataset') || b.p.value === 'urn:ex:at';
+  return (await r.json()).results.bindings.map((b) => ({ line: [t(b.g), t(b.s), t(b.p), own(b) ? `${b.o.type}|<masked>|${b.o.datatype ?? ''}|` : t(b.o)].join(' '), index: [b.s, b.p, b.o].some((v) => v && v.value.startsWith(CRI_NS)) }));
+}
+for (const label of ['card.write create with counter', 'card.write update with prior', 'card.write two parts', 'card.write with K4 pending']) {
+  test(`#1629 s2 (B1) ${label}: 429e487's SPARQL and the head's leave equal stores outside the index subtree, and the head's index is exact`, T, async () => {
+    const k = JSON.parse(fs.readFileSync(GOLDEN, 'utf8')).cases.find((c) => c.label === label);
+    assert.ok(k, `PRECONDITION: the golden holds "${label}"`);
+    const xs = [];
+    try {
+      for (const tag of ['old', 'head']) {
+        const dir = tmpStore(`b1-${tag}-`); fs.rmSync(dir, { recursive: true });
+        xs.push({ dir, x: await startExecutor({ store: dir, datasetId: DSID, create: true }) });
+      }
+      const [A, B] = xs.map((e) => e.x);
+      // identical seeds, written through the HEAD compiler on BOTH stores (so the only differing input is the compiled update)
+      const seedIds = k.intention.parts.filter((p) => p.expectedVersion != null).map((p) => p.iri.split('/').pop());
+      if (seedIds.length) {
+        const seed = { kind: 'card.write', opId: `urn:ex:op/card/b1-seed-${seedIds.join('-')}`, actor: ACTOR, parts: seedIds.map((id) => cpart(B1_SEEDS[id], null)), counter: { expected: null, next: '3' } };
+        for (const x of [A, B]) assert.equal((await createGraphClient({ baseUrl: x.baseUrl, expectedDatasetId: DSID }).update(seed)).outcome, 'APPLIED', 'PRECONDITION: the seed applied');
+      }
+      const s0 = [await b1Quads(A), await b1Quads(B)].map((q) => q.map((r) => r.line).sort().join('\n'));
+      assert.equal(s0[0], s0[1], 'PRECONDITION: the two seeded stores are byte-identical');
+      // the OLD leg: 429e487's compiled SPARQL, unchanged, as the client sends it
+      const ep = String((await (await fetch(`${A.baseUrl}/health`)).json()).epoch);
+      const ra = await fetch(`${A.baseUrl}/update`, { method: 'POST', headers: { 'x-op-id': k.intention.opId, 'content-type': 'application/sparql-update', 'x-epoch': ep }, body: k.compiled });
+      const ja = await ra.json().catch(() => null);
+      assert.equal(ra.status, 200, `the old leg was accepted (${ra.status})`);
+      assert.ok(String(JSON.stringify(ja?.receipt ?? '')).includes('APPLIED'), `the old leg APPLIED on the seed, so the seed is the one its priors name (${JSON.stringify(ja).slice(0, 200)})`);
+      const rb = await createGraphClient({ baseUrl: B.baseUrl, expectedDatasetId: DSID }).update(k.intention);
+      assert.equal(rb.outcome, 'APPLIED', `the head leg APPLIED (${JSON.stringify(rb).slice(0, 200)})`);
+      const [qa, qb] = [await b1Quads(A), await b1Quads(B)];
+      const outside = (q) => q.filter((r) => !r.index).map((r) => r.line).sort();
+      assert.ok(outside(qa).length > 0, 'CONTROL: the compared population is not empty');
+      assert.deepEqual(outside(qb), outside(qa), 'every quad outside urn:ex:card-ref-index/ is identical: receipts, counters, versions and domain triples included');
+      // F5: the excluded subtree, validated positively on the head's store, for every card the write touched
+      const cq = createGraphClient({ baseUrl: B.baseUrl, expectedDatasetId: DSID });
+      for (const part of k.intention.parts) {
+        const id = part.iri.split('/').pop();
+        const row = await cq.query(`SELECT ?v ?j WHERE { GRAPH <${BK}> { <${part.iri}> <urn:ex:ver> ?v ; <https://scrumboard.local/ns#entityJson> ?j } }`);
+        assert.equal(row.rows.length, 1, `PRECONDITION: ${id} has one stored version and JSON`);
+        const { v, j } = row.rows[0];
+        const cov = await cq.query(`SELECT ?p ?o WHERE { GRAPH <${BK}> { <${CRI_NS}card/${id}> ?p ?o } }`);
+        const of = (pn) => cov.rows.filter((r) => r.p.value === `${CRI_NS}${pn}`).map((r) => r.o.value);
+        assert.deepEqual(of('indexedVersion'), [v.value], `${id}: exactly one indexedVersion, the card's graph version`);
+        assert.deepEqual(of('indexedJsonDigest'), [crypto.createHash('sha256').update(j.value).digest('hex')], `${id}: exactly one digest, of its stored JSON`);
+        assert.deepEqual(of('namesShortId').map(Number).sort((a, b) => a - b), b1Names(JSON.parse(j.value)), `${id}: exactly its names`);
+      }
+      const extra = qb.filter((r) => r.index && !r.line.includes(`${CRI_NS}card/`)).map((r) => r.line);
+      assert.deepEqual(extra, [], 'the head added no index triple except coverage nodes (no marker: a write never claims completeness)');
+    } finally { for (const e of xs) { await killExecutor(e.x); fs.rmSync(e.dir, { recursive: true, force: true }); fs.rmSync(`${e.dir}.checkpoints`, { recursive: true, force: true }); } }
+  });
+}
 
 // ── PR1 interruption after prepare ──
 test('#1629 s2 (PR1) prepare, kill the executor, restart on the same store: one Prepared record, allocator and card unchanged, same digests', T, async () => {
