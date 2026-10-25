@@ -731,3 +731,168 @@ test('#1749 A8 (D10) BAD_FILE: delivered-evidenced without evidence; unknown WIT
     ]) await s.refusedStart(r.backup, ['--dispose-obligation', disposeFile(s, r, over)], 'BAD_FILE', `D10 ${what}`);
   });
 });
+
+// ───────────────────────────── D11, D12 (the independent review of the A8 build) ─────────────────────────────
+// D11: a DISPOSED AmbiguousObligation must agree with a DispositionRecord and with its obligation's terminal status, or the start
+// refuses HOLD_UNSOUND. "Naming the subject" is read as: the refusal names the AmbiguousObligation's subject, its
+// DispositionRecord's subject, or the obligation's IRI (the ruling does not say which of the three it must be).
+// D12: the reader join. A native "retired" is valid ONLY with a matching protected DispositionRecord: bound to that obligationId,
+// its payloadSha256 and the decision "retire-unsent-unknown" (contract owner's ruling). Anything less is INVALID: the origin is
+// listed in GET /api/outbox's `integrity`, unfiltered AND under ?status=pending, never silently read as settled. Planted
+// DispositionRecords are copied from a GENUINE one (made by --dispose-obligation on the promoted copy) with one field changed, and
+// written OFFLINE into the unpromoted live store; its disposed AmbiguousObligation is NOT copied, so the case is a reader case, not
+// D11's start check.
+const term = (o) => (o.type === 'uri' ? `<${o.value}>` : o.datatype && o.datatype !== `${XSD}string` ? `${JSON.stringify(o.value)}^^<${o.datatype}>` : JSON.stringify(o.value));
+/** the obligation's subject, status predicate and status term in the bookkeeping graph */
+async function obligationTriple(x, obligationId) {
+  const bs = await rows(x, `SELECT ?s ?pst ?st WHERE { GRAPH <${BK}> { ?s a ?t ; ?pid ?id ; ?pst ?st . FILTER(STRENDS(STR(?t), "/Obligation") || STRENDS(STR(?t), "#Obligation")) FILTER(STR(?id) = ${JSON.stringify(obligationId)} && (STRENDS(STR(?pid), "/obligationId") || STRENDS(STR(?pid), "#obligationId"))) FILTER(STRENDS(STR(?pst), "/status") || STRENDS(STR(?pst), "#status")) } }`);
+  assert.equal(bs.length, 1, `PRECONDITION: exactly one status triple for ${obligationId} (${bs.length})`);
+  return { s: bs[0].s.value, p: bs[0].pst.value, o: bs[0].st };
+}
+const setStatus = (ob, to) => `DELETE DATA { GRAPH <${BK}> { <${ob.s}> <${ob.p}> ${term(ob.o)} } } ; INSERT DATA { GRAPH <${BK}> { <${ob.s}> <${ob.p}> ${JSON.stringify(to)} } }`;
+/** a plain restart that must REFUSE `code`, naming one of `names`, every quad of the stopped store unchanged */
+async function refusedNaming(s, dir, code, names, what) {
+  const before = stateOffline(dir);
+  let err = null;
+  try { await s.startExec(dir); } catch (e) { err = e; }
+  if (!err) await s.stopExec();
+  const text = String(err?.stderr ?? '') + String(err?.message ?? '');
+  assert.ok(err && new RegExp(`\\b${code}\\b`).test(text), `${what}: the start refuses ${code} (${err ? `refused: ${why(err)}` : 'it SERVED'})`);
+  assert.ok(names.some((n) => text.includes(n)), `${what}: the refusal names the subject (${names.join(' | ')}) (${why(err)})`);
+  assert.equal(stateOffline(dir), before, `${what}: every quad of the store is unchanged`);
+}
+
+test('#1749 A8 (D11 CONTROL) a genuine disposition made through --dispose-obligation serves, and a plain restart after it serves', T, async () => {
+  await world(async (s) => {
+    const r = await restore(s, 'pending');
+    await s.stopExec();
+    let err = null;
+    try { await s.startExec(r.backup, ['--dispose-obligation', disposeFile(s, r)]); } catch (e) { err = e; }
+    assert.equal(err, null, `D11 CONTROL: the disposition serves (${why(err)})`);
+    await s.stopExec();
+    err = null;
+    try { await s.startExec(r.backup); } catch (e) { err = e; }
+    assert.equal(err, null, `D11 CONTROL: a plain restart after a genuine disposition serves (${why(err)})`);
+  });
+});
+
+test('#1749 A8 (D11a) an AmbiguousObligation planted OFFLINE as "disposed" with NO DispositionRecord (its obligation still pending) → the start refuses HOLD_UNSOUND, naming it; unchanged', T, async () => {
+  await world(async (s) => {
+    const r = await restore(s, 'pending');
+    const S = aoSubject(r.snap.obligationId);
+    assert.deepEqual((await recordAt(s.cur, S)).get('state'), ['held'], 'PRECONDITION: the promotion wrote it held');
+    assert.deepEqual(await subjectsOfType(s.cur, 'DispositionRecord'), [], 'PRECONDITION: no DispositionRecord exists');
+    const ob = await obligationTriple(s.cur, r.snap.obligationId);
+    assert.equal(ob.o.value, 'pending', 'PRECONDITION: the obligation is pending');
+    await s.stopExec();
+    plantOffline(r.backup, `DELETE DATA { GRAPH <${RG}> { <${S}> <urn:ex:postseq/state> "held" } } ; INSERT DATA { GRAPH <${RG}> { <${S}> <urn:ex:postseq/state> "disposed" } }`);
+    await refusedNaming(s, r.backup, 'HOLD_UNSOUND', [S, ob.s], 'D11a disposed with no DispositionRecord');
+  });
+});
+
+const D11_OTHER = '0a1e1749-0000-5000-8000-0000000000d1';
+for (const [tag, what, corrupt] of [
+  ['b', 'WITH its DispositionRecord, whose obligation is planted OFFLINE back to "pending"', 'pending'],
+  ['c', 'whose DispositionRecord is rewritten OFFLINE to belong to ANOTHER obligationId', (b) => ({ obligationId: `${D11_OTHER}:claim`, mutationId: D11_OTHER, obligationIri: `urn:ex:origin/obligation/${D11_OTHER}/claim`, ambiguousRecord: aoSubject(`${D11_OTHER}:claim`) })[localName(b.p.value)]],
+  ['d', 'whose DispositionRecord\'s payloadSha256 is rewritten OFFLINE to differ from the ambiguous record\'s', (b) => (localName(b.p.value) === 'payloadSha256' ? lastHexOff(b.o.value) : undefined)],
+]) {
+  test(`#1749 A8 (D11${tag}) a disposed AmbiguousObligation ${what} → the start refuses HOLD_UNSOUND, naming it; unchanged`, T, async () => {
+    await world(async (s) => {
+      const r = await restore(s, 'pending');
+      await s.stopExec();
+      const x = await s.startExec(r.backup, ['--dispose-obligation', disposeFile(s, r)]);
+      const S = aoSubject(r.snap.obligationId);
+      assert.deepEqual((await recordAt(x, S)).get('state'), ['disposed'], 'PRECONDITION: genuinely disposed');
+      const drs = await subjectsOfType(x, 'DispositionRecord');
+      assert.equal(drs.length, 1, 'PRECONDITION: its DispositionRecord exists');
+      const ob = await obligationTriple(x, r.snap.obligationId);
+      assert.equal(ob.o.value, 'retired', 'PRECONDITION: the obligation reads retired');
+      const bs = await rows(x, `SELECT ?p ?o WHERE { GRAPH <${RG}> { <${drs[0]}> ?p ?o } }`);
+      await s.stopExec();
+      if (corrupt === 'pending') plantOffline(r.backup, setStatus(ob, 'pending'));
+      else {
+        const hit = bs.map((b) => [b, corrupt(b)]).filter(([, v]) => v !== undefined);
+        assert.ok(hit.length > 0, `PRECONDITION: D11${tag}: the record has the field(s) to rewrite`);
+        const t3 = (b, v) => `<${drs[0]}> <${b.p.value}> ${term(v === undefined ? b.o : { ...b.o, value: v })} .`;
+        plantOffline(r.backup, `DELETE DATA { GRAPH <${RG}> { ${hit.map(([b]) => t3(b)).join(' ')} } } ; INSERT DATA { GRAPH <${RG}> { ${hit.map(([b, v]) => t3(b, v)).join(' ')} } }`);
+      }
+      await refusedNaming(s, r.backup, 'HOLD_UNSOUND', [S, drs[0], ob.s], `D11${tag}`);
+    });
+  });
+}
+
+/** GET /api/outbox and ?status=pending, as the reader answers them for one origin */
+async function outboxFor(s, mid) {
+  const read = async (route) => {
+    const g = await s.call('GET', route);
+    assert.equal(g.status, 200, `PRECONDITION: GET ${route} answers (${g.status} ${g.text.slice(0, 200)})`);
+    const entries = (Array.isArray(g.json?.entries) ? g.json.entries : Object.values(g.json?.entries || {})).filter((e) => e.mutationId === mid || String(e.obligationId || '').startsWith(mid));
+    return { integrity: (g.json?.integrity || []).filter((x) => x.mutationId === mid), entries: entries.map((e) => [e.obligationId, e.status]), text: g.text };
+  };
+  return { all: await read('/api/outbox'), pending: await read('/api/outbox?status=pending') };
+}
+/** a promoted copy whose obligation was GENUINELY retired by --dispose-obligation: its DispositionRecord's triples (the template) */
+async function genuineRetire(s) {
+  const r = await restore(s, 'pending');
+  const hb = await holdBlock(s.cur);
+  await s.stopExec();
+  const x = await s.startExec(r.backup, ['--dispose-obligation', disposeFile(s, r)]);
+  const drs = await subjectsOfType(x, 'DispositionRecord');
+  assert.equal(drs.length, 1, 'PRECONDITION: the genuine disposition wrote one DispositionRecord');
+  const bs = await rows(x, `SELECT ?p ?o WHERE { GRAPH <${RG}> { <${drs[0]}> ?p ?o } }`);
+  return { r, hb, dr: { subject: drs[0], bs } };
+}
+
+test('#1749 A8 (D12 CONTROL) an obligation retired by a real --dispose-obligation reads retired, and is NOT listed in integrity', T, async () => {
+  await world(async (s) => {
+    const { r, hb } = await genuineRetire(s);
+    await s.stopExec();
+    await s.startExec(r.backup, ['--reconcile-postseq', reconcileFile(s, hb)]);
+    await s.startRest();
+    const o = await outboxFor(s, r.snap.mutationId);
+    assert.deepEqual(o.all.integrity, [], `D12 CONTROL: not in integrity (${o.all.text.slice(0, 300)})`);
+    assert.deepEqual(o.all.entries, [[r.snap.obligationId, 'retired']], 'D12 CONTROL: the unfiltered listing reads it retired');
+    assert.deepEqual([o.pending.integrity, o.pending.entries], [[], []], 'D12 CONTROL: ?status=pending neither lists it nor flags it');
+  });
+});
+
+const OTHER_MID = '0a1e1749-0000-5000-8000-0000000000e1';
+for (const [tag, what, plant] of [
+  ['a', 'a BARE "retired" (no DispositionRecord), planted by raw /update', null],
+  ['c', 'a DispositionRecord for it whose decision is settle-published', (bs) => bs.map((b) => (['decision'].includes(localName(b.p.value)) ? { ...b, o: { ...b.o, value: 'settle-published' } } : localName(b.p.value) === 'obligationStatusAfter' ? { ...b, o: { ...b.o, value: 'published' } } : b))],
+  ['d', 'a DispositionRecord for it whose payloadSha256 is not its payload\'s', (bs) => bs.map((b) => (localName(b.p.value) === 'payloadSha256' ? { ...b, o: { ...b.o, value: lastHexOff(b.o.value) } } : b))],
+  ['e', 'NO DispositionRecord of its own, but a valid-looking one for a DIFFERENT obligationId', 'other'],
+]) {
+  test(`#1749 A8 (D12${tag}) a native obligation reading "retired" with ${what} is INVALID: listed in integrity, unfiltered and under ?status=pending`, T, async () => {
+    await world(async (s) => {
+      const { r, dr } = await genuineRetire(s);
+      await s.stopExec();
+      await s.startExec(s.liveHome);   // the UNPROMOTED live store: its copy of the obligation is still pending
+      assert.deepEqual((await holdOf(s.cur)).subjects, [], 'PRECONDITION: the live store is not held');
+      const ob = await obligationTriple(s.cur, r.snap.obligationId);
+      assert.equal(ob.o.value, 'pending', 'PRECONDITION: pending on the live store');
+      const res = await fetch(`${s.cur.baseUrl}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/a8-d12-${process.pid}-${opN++}`, 'x-epoch': String((await health(s.cur)).epoch) }, body: setStatus(ob, 'retired') });
+      assert.equal(res.status, 200, `PRECONDITION: the raw /update set it retired (${await res.text()})`);
+      if (plant) {
+        let subject = dr.subject, bs = dr.bs;
+        if (plant === 'other') {
+          const oid = `${OTHER_MID}:claim`;
+          subject = `urn:ex:postseq/disposition/${sha256(`d12e-${oid}`)}`;
+          const swap = { obligationId: oid, mutationId: OTHER_MID, fileSha256: sha256(`d12e-${oid}`), obligationIri: `urn:ex:origin/obligation/${OTHER_MID}/claim`, ambiguousRecord: aoSubject(oid) };
+          bs = bs.map((b) => (localName(b.p.value) in swap ? { ...b, o: { ...b.o, value: swap[localName(b.p.value)] } } : b));
+        } else bs = plant(bs);
+        await s.stopExec();
+        plantOffline(s.liveHome, `INSERT DATA { GRAPH <${RG}> { ${bs.map((b) => `<${subject}> <${b.p.value}> ${term(b.o)} .`).join(' ')} } }`);
+        let err = null;
+        try { await s.startExec(s.liveHome); } catch (e) { err = e; }
+        assert.equal(err, null, `PRECONDITION: the live store starts with the planted record, so the READER is what is tested (${why(err)})`);
+      }
+      assert.equal((await obligationTriple(s.cur, r.snap.obligationId)).o.value, 'retired', 'PRECONDITION: the store reads retired');
+      await s.startRest();
+      const o = await outboxFor(s, r.snap.mutationId);
+      assert.equal(o.all.integrity.length, 1, `D12${tag}: GET /api/outbox lists the origin in integrity (entries ${JSON.stringify(o.all.entries)}; ${o.all.text.slice(0, 300)})`);
+      assert.deepEqual(o.all.entries, [], 'D12: and lists no entry for it as settled');
+      assert.equal(o.pending.integrity.length, 1, `D12${tag}: GET /api/outbox?status=pending lists it in integrity too (${o.pending.text.slice(0, 300)})`);
+    });
+  });
+}
