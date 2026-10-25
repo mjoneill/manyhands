@@ -8,8 +8,10 @@
  *
  * Returns null when the manifest is well-formed, or a sentence naming the first problem.
  */
-const REQUIRED = ['sourceStore', 'files', 'documentSha256', 'outboxManifestSha256', 'datasetId', 'incarnation', 'capturedAt'];
-const OPTIONAL = ['epoch', 'commitSeq', 'census'];   // recorded by step 2 for the record; nothing binds to them
+// epoch and commitSeq BIND (#122 review, finding 1): a candidate promoted from an OLDER copy of the source carries an older
+// epochBase, so steps 3 and 4 require epochBase = commitSeq and epoch = epoch + 1 (the promotion's own bump)
+const REQUIRED = ['sourceStore', 'files', 'documentSha256', 'outboxManifestSha256', 'datasetId', 'incarnation', 'capturedAt', 'epoch', 'commitSeq', 'contentSha256'];
+const OPTIONAL = ['census'];   // recorded by step 2 for the record; nothing binds to it
 const SHA = /^[0-9a-f]{64}$/;
 const CLOCK_SKEW_MS = 60_000;
 
@@ -19,7 +21,8 @@ export function captureProblem(capture, now = Date.now()) {
   for (const k of REQUIRED) if (!(k in capture)) return `the capture manifest has no ${k}`;
   const str = (k) => typeof capture[k] === 'string' && capture[k].length > 0;
   for (const k of ['sourceStore', 'datasetId', 'incarnation']) if (!str(k)) return `the capture manifest's ${k} is not a non-empty string`;
-  for (const k of ['documentSha256', 'outboxManifestSha256']) if (!str(k) || !SHA.test(capture[k])) return `the capture manifest's ${k} is not a sha256`;
+  for (const k of ['epoch', 'commitSeq']) if (typeof capture[k] !== 'string' || !/^(0|[1-9][0-9]{0,15})$/.test(capture[k])) return `the capture manifest's ${k} is not a non-negative integer string`;
+  for (const k of ['documentSha256', 'outboxManifestSha256', 'contentSha256']) if (!str(k) || !SHA.test(capture[k])) return `the capture manifest's ${k} is not a sha256`;
   if (!Array.isArray(capture.files) || !capture.files.length) return 'the capture manifest lists no source store files';
   for (const [i, f] of capture.files.entries()) {
     if (!f || typeof f !== 'object' || typeof f.name !== 'string' || !f.name || f.name.includes('/')

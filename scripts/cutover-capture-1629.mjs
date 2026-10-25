@@ -26,8 +26,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { captureProblem } from './cutover-capture-schema-1629.mjs';
+import { contentDigest } from './cutover-content-digest-1629.mjs';
+
+const REPO = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const PY = process.env.GRAPH_EXECUTOR_PYTHON || path.join(REPO, 'graph-executor', '.venv', 'bin', 'python');
+const EXECUTOR = path.join(REPO, 'graph-executor', 'executor.py');
 
 const BETWEEN_PASSES = process.env.SCRUM_CUTOVER_CAPTURE_BETWEEN_PASSES || '';   // test seam: a file appended to between the passes; unset = off
 
@@ -78,8 +84,33 @@ const pass = () => {
   return { files, documentSha256: sha(fs.readFileSync(docFile)), outboxManifestSha256: sha(fs.readFileSync(outboxFile)) };
 };
 const first = pass();
+// the CONTENT PIN (#1747, approved 46611): the stopped source served READ-ONLY (that mode writes nothing: no self-check, no
+// promotion, no backfill) and digested through the same code step 3 uses on the candidate. Pass 2 then proves the read-only
+// serve changed no byte.
+const content = await new Promise((resolve) => {
+  const p = spawn(PY, [EXECUTOR, '--store', store, '--port', '0', '--dataset-id', ident.datasetId, '--read-only'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = '', err = '', done = false;
+  const finish = (v) => { if (done) return; done = true; clearTimeout(timer); p.once('exit', () => resolve(v)); if (p.exitCode !== null || p.signalCode !== null) resolve(v); else p.kill('SIGKILL'); };
+  const timer = setTimeout(() => finish({ error: `the read-only executor printed no ready line: ${err.slice(-300)}` }), 30000);
+  p.on('error', (e) => finish({ error: `the read-only executor did not start: ${e.message}` }));
+  p.stderr.on('data', (d) => { err += d; });
+  p.stdout.on('data', async (d) => {
+    out += d;
+    if (done || !out.includes('\n')) return;
+    let port;
+    try { port = JSON.parse(out.split('\n')[0]).port; } catch { return finish({ error: `the read-only executor's first line is not a ready line` }); }
+    try { finish(await contentDigest(`http://127.0.0.1:${port}`)); } catch (e) { finish({ error: e.message }); }
+  });
+});
+if (content.error) refuse('STORE_SHAPE', `the source's content could not be digested: ${content.error}`);
 if (BETWEEN_PASSES) fs.appendFileSync(BETWEEN_PASSES, 'x');
 const second = pass();
+// and again AFTER the passes (#122 review, LOW): a writer that opened the store mid-capture is refused even if its bytes
+// happened not to differ between the passes
+try { held = execFileSync('lsof', ['-F', 'pn', '+D', store], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }); }
+catch (e) { held = String(e.stdout || ''); }
+const lateHolders = held.split('\n').filter((l) => l.startsWith('p')).map((l) => l.slice(1));
+if (lateHolders.length) refuse('STORE_OPEN', `pid ${[...new Set(lateHolders)].join(', ')} opened a file in ${store} during the capture`);
 if (JSON.stringify(first) !== JSON.stringify(second)) refuse('UNSTABLE', 'the two passes differ: something wrote during the capture');
 const capturedAt = new Date().toISOString();
 
@@ -108,7 +139,7 @@ const census = {
 };
 
 const manifest = {
-  capturedAt, census, commitSeq: ident.commitSeq, datasetId: ident.datasetId, documentSha256: second.documentSha256,
+  capturedAt, census, commitSeq: ident.commitSeq, contentSha256: content.sha256, datasetId: ident.datasetId, documentSha256: second.documentSha256,
   epoch: ident.epoch, files: second.files, incarnation: ident.incarnation, outboxManifestSha256: second.outboxManifestSha256,
   sourceStore: store,
 };

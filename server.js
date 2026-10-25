@@ -11290,6 +11290,19 @@ async function xoListOutbox({ status, mutationId } = {}) {
   // Prepared node) that also carries a migrationId is read, so its reader flags it INVALID into `integrity` (#122 review).
   const skipImported = status === 'pending';
   const prepared = new Set(R.records.filter((x) => x.type === 'Prepared' && x.mutationId).map((x) => x.mutationId));
+  // the readers count ANY triple at an origin's Prepared subject, typed or not (#122 review, finding 5), so a skip candidate
+  // whose Prepared subject holds anything at all is read and validated, never skipped
+  if (skipImported) {
+    const { ORIGIN_TERMS } = await import('./core/graph-vocab.mjs');
+    const cands = [...new Set(R.records.filter((x) => x.type === 'Origin' && x.imported && x.mutationId && !prepared.has(x.mutationId)).map((x) => x.mutationId))];
+    for (let i = 0; i < cands.length; i += 500) {
+      const slice = cands.slice(i, i + 500);
+      const r = await ANNOUNCE_EXECUTOR.query(`SELECT DISTINCT ?s WHERE { VALUES ?s { ${slice.map((m) => ORIGIN_TERMS.preparedSubject(m)).join(' ')} } { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }`);
+      if (!r.ok) throw new OutboxUnavailable(r.reason);
+      const held = new Set(r.rows.map((b) => b.s.value));
+      for (const m of slice) if (held.has(ORIGIN_TERMS.preparedSubject(m).replace(/^<|>$/g, ''))) prepared.add(m);
+    }
+  }
   const mids = [...new Set(R.records.filter((x) => x.type === 'Origin' && x.mutationId && (!mutationId || x.mutationId === mutationId) && !(skipImported && x.imported && !prepared.has(x.mutationId))).map((x) => x.mutationId))];
   const origins = [], entries = [], integrity = [];
   for (const mid of mids) {

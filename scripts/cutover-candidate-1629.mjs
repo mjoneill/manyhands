@@ -13,12 +13,16 @@
  *   · a storeHome whose realpath is not the source store's.
  * A marker already present for the same manifest is a no-op; one for another manifest is refused, never overwritten.
  *
+ *   · and its CONTENT equals the capture's contentSha256 (every quad of every graph, apart from the six dataset-marker
+ *     predicates promotion rewrites), so it is a copy of the captured bytes, not merely of the same source.
+ *
  * Output: `MARKED <sha256>` or `ALREADY <sha256>` and exit 0; `REFUSED <CODE> <why>` and exit 1.
  */
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { BOOKKEEPING_GRAPH } from '../core/graph-vocab.mjs';
 import { captureProblem } from './cutover-capture-schema-1629.mjs';
+import { contentDigest } from './cutover-content-digest-1629.mjs';
 
 export const CANDIDATE_MARKER = 'urn:ex:cutover/candidate';
 export const P_MANIFEST_SHA = 'urn:ex:cutover/captureManifestSha256';
@@ -45,6 +49,10 @@ if (h.datasetId !== m.datasetId) refuse('NOT_CANDIDATE', `dataset ${h.datasetId}
 if (!h.incarnationFrom || !h.incarnation || h.incarnation === h.incarnationFrom) refuse('NOT_CANDIDATE', 'the target is not a promoted copy (no new incarnation)');
 if (h.incarnationFrom !== m.incarnation) refuse('NOT_CANDIDATE', `it was promoted from ${h.incarnationFrom}, not the captured ${m.incarnation}`);
 if (!h.storeHome || realOr(h.storeHome) === realOr(m.sourceStore)) refuse('NOT_CANDIDATE', 'its store home is the source store');
+// a copy of the CAPTURED bytes (#122 review, finding 1): promotion records the commitSeq it was promoted at as epochBase and
+// bumps the epoch by one, so an older or newer copy of the same source is refused here
+if (String(h.epochBase) !== m.commitSeq) refuse('NOT_CANDIDATE', `it was promoted at commitSeq ${h.epochBase}, not the captured ${m.commitSeq}`);
+if (String(h.epoch) !== String(BigInt(m.epoch) + 1n)) refuse('NOT_CANDIDATE', `its epoch is ${h.epoch}, not the captured ${m.epoch} + 1`);
 
 const query = async (sparql) => {
   const r = await fetch(`${base}/query`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/cutover/candidate-read/${manifestSha}` }, body: sparql });
@@ -56,6 +64,16 @@ if ((await query(`SELECT ?p WHERE { GRAPH <${BOOKKEEPING_GRAPH}> { <urn:ex:cutov
 const have = (await query(`SELECT ?v WHERE { GRAPH <${BOOKKEEPING_GRAPH}> { <${CANDIDATE_MARKER}> <${P_MANIFEST_SHA}> ?v } }`)).map((b) => b.v.value);
 if (have.length === 1 && have[0] === manifestSha) { console.log(`ALREADY ${manifestSha}`); process.exit(0); }
 if (have.length) refuse('MARKER_MISMATCH', `the candidate is already marked for ${have.join(', ')}`);
+
+// the CONTENT PIN (#1747, approved 46611): before any marker exists, the candidate's content must equal the capture's, quad
+// for quad, apart from the six dataset-marker predicates a promotion rewrites. Anything else (a write the source took after
+// the copy, a rollback, a floor installed early, a recovery hold) refuses. After marking, the import adds content, so an
+// ALREADY above never re-digests.
+let got;
+try { got = await contentDigest(base, { opId: `urn:ex:op/cutover/candidate-digest/${manifestSha}` }); } catch (e) { refuse('UNAVAILABLE', `the candidate's content could not be digested: ${e.message}`); }
+if (got.sha256 !== m.contentSha256) {
+  refuse('NOT_COPY', `the candidate's content (${got.quads} quads${got.recoveryQuads ? `, ${got.recoveryQuads} in the recovery graph: a held promotion's exact delta is validated once restore safety lands` : ''}) is not the captured content`);
+}
 
 // guarded: it inserts only while no marker exists, so two racing runs cannot leave two markers
 const body = `INSERT { GRAPH <${BOOKKEEPING_GRAPH}> { <${CANDIDATE_MARKER}> <${P_MANIFEST_SHA}> "${manifestSha}" ; <${P_MARKED_AT}> "${new Date().toISOString()}"^^<http://www.w3.org/2001/XMLSchema#dateTime> } }

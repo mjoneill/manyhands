@@ -24,6 +24,8 @@
  * A rerun skips a batch whose marker exists with the same digest and refuses one with another digest. Batch 1 is the
  * allocator plus every reservation; batch 2 is every origin and obligation.
  * TEST SEAM: SCRUM_CUTOVER_CRASH_AFTER_APPLY=<n>, read once at startup, SIGKILLs this process right after batch n applies.
+ * TEST SEAM: SCRUM_CUTOVER_READER_FAIL=1 makes the first reservation's runtime reader answer INVALID at the read-back, so a
+ * row can prove a reader failure refuses COMPLETE (HOLD READBACK).
  * TEST SEAM: SCRUM_CUTOVER_BATCH_BARRIER=<path> reads that path (a FIFO blocks) after a batch commits and before the next
  * batch's source re-check, so a test can change the source between batches.
  */
@@ -41,6 +43,7 @@ const SCHEMA_VERSION = 'cutover-import-1629/v1';
 const WRITE_PROTOCOL = 'postseq-v1';
 const CRASH_AFTER = Number(process.env.SCRUM_CUTOVER_CRASH_AFTER_APPLY || 0);   // test seam; 0 = off
 const READY_BARRIER = process.env.SCRUM_CUTOVER_READY_BARRIER || '';   // test seam; unset = off
+const READER_FAIL = process.env.SCRUM_CUTOVER_READER_FAIL === '1';   // test seam: the first reservation's runtime reader answers INVALID; unset = off
 const BATCH_BARRIER = process.env.SCRUM_CUTOVER_BATCH_BARRIER || '';   // test seam: read after a batch commits, before the next one's source re-check; unset = off
 const BK = BOOKKEEPING_GRAPH;
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
@@ -68,6 +71,10 @@ const CLASSES = new Set(['retire-with-proof', 'dispatch-evidenced', 'disposed-no
 
 // output is written SYNCHRONOUSLY: the crash seam SIGKILLs the process, and an async pipe write could be lost with it
 const say = (line) => fs.writeSync(1, `${line}\n`);
+// a FULL ISO-8601 instant with a zone (#122 review, finding 4): a date alone, a zone-less time (its instant depends on the
+// machine) and a space-separated form are refused before anything is written
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
+const instant = (v) => typeof v === 'string' && ISO_INSTANT.test(v) && Number.isFinite(Date.parse(v));
 const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
 const arg = (name) => { const i = process.argv.indexOf(name); return i > 0 ? process.argv[i + 1] : undefined; };
 const APPLY = process.argv.includes('--apply');
@@ -141,6 +148,9 @@ async function run({ id, base, dataset, docBytes, outboxBytes, captureBytes, cap
   if (!h.incarnationFrom || !h.incarnation || h.incarnation === h.incarnationFrom) refuse('NOT_CANDIDATE', 'the target is not a promoted copy (no new incarnation)');
   if (h.incarnationFrom !== capture.incarnation) refuse('NOT_CANDIDATE', `promoted from ${h.incarnationFrom}, not the captured ${capture.incarnation}`);
   if (!h.storeHome || realOr(h.storeHome) === realOr(capture.sourceStore)) refuse('NOT_CANDIDATE', 'the target store IS the source store');
+  // a copy of the CAPTURED bytes, not an older or newer copy of the same source (#122 review, finding 1)
+  if (String(h.epochBase) !== capture.commitSeq) refuse('NOT_CANDIDATE', `promoted at commitSeq ${h.epochBase}, not the captured ${capture.commitSeq}`);
+  if (String(h.epoch) !== String(BigInt(capture.epoch) + 1n)) refuse('NOT_CANDIDATE', `epoch ${h.epoch}, not the captured ${capture.epoch} + 1`);
   const marks = (await X.query(`SELECT ?v WHERE { GRAPH <${BK}> { <${CANDIDATE_MARKER}> <${P_MANIFEST_SHA}> ?v } }`)).map((b) => b.v.value);
   if (!marks.length) refuse('MARKER_MISSING', 'the candidate carries no CandidateMarker (step 3 not run)');
   if (marks.length !== 1 || marks[0] !== captureSha) refuse('MARKER_MISMATCH', `the candidate is marked for ${marks.join(', ')}, not this capture ${captureSha}`);
@@ -178,7 +188,7 @@ async function run({ id, base, dataset, docBytes, outboxBytes, captureBytes, cap
   const bySeq = new Map(), byId = new Map();
   for (const r of reservations) {
     if (!r.rec || typeof r.rec !== 'object' || !Number.isSafeInteger(r.postSeq) || r.postSeq < 1 || typeof r.postId !== 'string' || !r.postId
-      || typeof r.createdAt !== 'string' || Number.isNaN(Date.parse(r.createdAt))) hold('BAD_RESERVATION', `reservation ${r.key} is malformed (postSeq must be a positive safe integer, createdAt a valid time)`);
+      || !instant(r.createdAt)) hold('BAD_RESERVATION', `reservation ${r.key} is malformed (postSeq must be a positive safe integer, createdAt a full ISO-8601 instant with a zone)`);
     if (bySeq.has(r.postSeq)) hold('DUPLICATE_SEQ', `postSeq ${r.postSeq} is held by ${bySeq.get(r.postSeq)} and ${r.key}`);
     if (byId.has(r.postId)) hold('DUPLICATE_ID', `postId ${r.postId} is reserved under ${byId.get(r.postId)} and ${r.key}`);
     bySeq.set(r.postSeq, r.key); byId.set(r.postId, r.key);
@@ -204,7 +214,7 @@ async function run({ id, base, dataset, docBytes, outboxBytes, captureBytes, cap
   const RES_KEYS = new Set(['applied', 'createdAt', 'postId', 'postSeq']);
   const ORIGIN_KEYS = ['committedAt', 'mode', 'mutationId', 'occurredAt', 'origin', 'originActor', 'slots'];
   const STATUSES = new Set(['pending', 'published', 'blocked']);
-  const at = (v) => typeof v === 'string' && Number.isFinite(Date.parse(v));
+  const at = instant;
   for (const r of reservations) {
     if (!UUID.test(r.postId)) hold('BAD_ID', `reservation ${r.key}: postId ${JSON.stringify(r.postId)} is not a lowercase UUID`);
     for (const k of Object.keys(r.rec)) if (!RES_KEYS.has(k)) hold('BAD_RESERVATION', `reservation ${r.key} carries ${k}`);
@@ -224,6 +234,10 @@ async function run({ id, base, dataset, docBytes, outboxBytes, captureBytes, cap
     if (!STATUSES.has(e.status)) hold('BAD_ENTRY', `entry ${key}: status ${JSON.stringify(e.status)}`);
     if (e.mode === 'legacy' && !UUID.test(e.legacyPostId ?? '')) hold('BAD_ID', `entry ${key}: a legacy entry's legacyPostId is not a lowercase UUID`);
     if (e.postId !== undefined && e.postId !== announcePostId(e.mutationId, e.slot)) hold('BAD_ID', `entry ${key}: postId is not its announcement post`);
+    // mirror the reader (#122 review, finding 2): a published obligation must name its post, and a publisher's is its announcement post
+    if (e.status === 'published' && !(e.postId ?? e.legacyPostId)) hold('BAD_ENTRY', `entry ${key}: a published entry names no post`);
+    if (e.status === 'published' && e.mode === 'publisher' && e.postId !== announcePostId(e.mutationId, e.slot)) hold('BAD_ENTRY', `entry ${key}: a published publisher entry must name its announcement post`);
+    for (const f of ['publicationAt']) if (e[f] !== undefined && !instant(e[f])) hold('BAD_ENTRY', `entry ${key}: ${f} is not a full ISO-8601 instant with a zone`);
     if (e.mode === 'publisher' && (e.payload?.originActor !== origins[e.mutationId].originActor || e.payload?.occurredAt !== origins[e.mutationId].occurredAt)) hold('ENTRY_DISAGREES', `entry ${key}: the payload's originActor or occurredAt is not its origin's`);
   }
 
@@ -235,6 +249,12 @@ async function run({ id, base, dataset, docBytes, outboxBytes, captureBytes, cap
     const got = Object.fromEntries(rows.map((b) => [b.p.value.replace(/^.*[#/]/, ''), b.o.value]));
     if (!rows.length) hold('COLUMN_DIFFERS', `column ${cid} is in the document but not in the candidate`);
     if (got.name !== c.name || String(got.order) !== String(c['scrum:order'] ?? c.order)) hold('COLUMN_DIFFERS', `column ${cid}: document ${c.name}/${c['scrum:order'] ?? c.order}, candidate ${got.name}/${got.order}`);
+  }
+
+  // and the other direction (#122 review, LOW): a column the candidate holds that the document does not is a second source of truth
+  const docColIds = new Set(docCols.map((c) => columnIdOf(c['@id'])));
+  for (const b of await X.query(`SELECT DISTINCT ?id WHERE { ?s <${SCHEMA}identifier> ?id ; a ?t . FILTER(STRENDS(STR(?t), "Column")) }`)) {
+    if (!docColIds.has(b.id.value)) hold('COLUMN_DIFFERS', `column ${b.id.value} is in the candidate but not in the document`);
   }
 
   // ── 4. the high-water: nextPostSeq must exceed every post, tombstone and reservation the candidate or document holds ──
@@ -355,7 +375,9 @@ async function run({ id, base, dataset, docBytes, outboxBytes, captureBytes, cap
   // a subject this migration writes must hold NOTHING it did not write itself (#1747 review of PR #122): merging into an
   // existing record would make the readers see a native-plus-imported mix (INVALID) after a COMPLETE import
   const subjects = [...reservations.map((r) => POSTSEQ_TERMS.reservation(r.postId)), ...Object.keys(origins).map((m) => ORIGIN_TERMS.originSubject(m)),
-    ...Object.values(entries).map((e) => ORIGIN_TERMS.obligationSubject(e.mutationId, e.slot))];
+    ...Object.values(entries).map((e) => ORIGIN_TERMS.obligationSubject(e.mutationId, e.slot)),
+    // a Prepared node at an imported mid makes the readers see a native origin (#122 review, finding 3)
+    ...Object.keys(origins).map((m) => ORIGIN_TERMS.preparedSubject(m))];
   for (let i = 0; i < subjects.length; i += 500) {
     const occupied = await X.query(`SELECT DISTINCT ?s WHERE { VALUES ?s { ${subjects.slice(i, i + 500).join(' ')} } { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } FILTER NOT EXISTS { GRAPH <${BK}> { ?s <${T.migrationId}> ${lit(id)} } } } LIMIT 1`);
     if (occupied.length) hold('SUBJECT_OCCUPIED', `${occupied[0].s.value} already holds triples this migration did not write`);
@@ -422,6 +444,7 @@ async function run({ id, base, dataset, docBytes, outboxBytes, captureBytes, cap
     await expect(s, ORIGIN_TERMS.status, p ? 'published' : e.status, null, e.obligationId);
     await expect(s, T.retirementProofPostId, p?.postId, null, e.obligationId);
     await expect(s, T.notifyDisposition, p?.disposition, null, e.obligationId);
+    await expect(s, T.notifyDispositionNote, p?.note, null, e.obligationId);   // the manifest's note, exactly (#122 review, finding 6)
     await expect(s, T.sourceEntryJson, canonicalJson(e), null, e.obligationId);
   }
   for (const [i, j] of retiredSeats.entries()) {
@@ -447,7 +470,7 @@ async function readersReadBack({ X, id, reservations, origins, entries, plan }) 
   };
   const fail = (r, what) => { if (r.status === 'UNAVAILABLE') refuse('UNAVAILABLE', `${what}: ${r.reason}`); hold('READBACK', `${what}: ${r.reason}`); };
   for (const r of reservations) {
-    const got = await readPostSeqReservation(client, r.postId);
+    const got = READER_FAIL && r === reservations[0] ? { ok: false, status: 'INVALID', reason: 'forced by SCRUM_CUTOVER_READER_FAIL' } : await readPostSeqReservation(client, r.postId);
     if (!got.ok) fail(got, `reservation ${r.postId}`);
     if (got.reservation?.kind !== 'imported' || got.reservation.postSeq !== r.postSeq || got.reservation.legacyKey !== r.key) hold('READBACK', `reservation ${r.postId} does not read back as this import wrote it`);
   }
