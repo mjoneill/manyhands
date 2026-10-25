@@ -708,6 +708,107 @@ test(`#1744 (G4, r5, mode on) a marker PRESENT and the index damaged → an ordi
     assert.deepEqual(await effects(s), e0, 'no effect');
   });
 });
+// ── r7: THE LATCH (contract amendment, rulings 46773/46781; built at a1accb5). Pin 1: on a FALSE marker every layer refuses,
+// the mode-on marker-keyed guard included. The marker is planted `complete false` over an EXACT index, so the refusal can only be
+// the marker's (an index that is also damaged would refuse for its damage). The script's own latch path is the L-rows below it.
+// NOT COVERED, by name: exit 3 UNSTABLE (needs a writer moving commitSeq through all five consistent-read retries), and an exit-2
+// CLOSURE UNCONFIRMED whose cause is a FAILED LATCH WRITE (needs an executor that reads but refuses the write); only the
+// unreachable-executor cause of exit 2 is driven.
+/** the marker's values as plain strings (markerOf returns typed terms) */
+const markerValues = async (s) => (await markerOf(s)).map((v) => v?.value);
+const latchFalse = (s) => s.xu(`DELETE WHERE { GRAPH <${BK}> { <${IX.marker}> ?p ?o } } ; INSERT DATA { GRAPH <${BK}> { <${IX.marker}> <${IX.complete}> "false"^^<${XSD}boolean> } }`, 'latch-false');
+const indexTool = (s, flag, executor = s.w.exec.baseUrl) => runNode([BACKFILL, '--executor', executor, '--dataset', WB_DATASET, flag]);
+test('#1744 (P1a, r7, mode off) a FALSE marker over an EXACT index → the server REFUSES TO START, naming the marker; the same index under complete true boots (control)', T, async () => {
+  await world('off', async (s) => {
+    const v = await indexTool(s, '--verify');
+    assert.equal(v.status, 0, `PRECONDITION: the index is exact under complete true (${v.out.slice(-200)})`);
+    await latchFalse(s);
+    assert.deepEqual(await markerValues(s), ['false'], 'PRECONDITION: the marker reads false');
+    await assert.rejects(s.start(), (e) => /card reference index/.test(String(e?.message)) && /refusing to start/.test(String(e?.message)) && /marker/.test(String(e?.message)), 'the boot gate refuses, naming the marker');
+  });
+});
+test(`#1744 (P1b, r7, mode off) the marker LATCHED false AFTER a healthy boot → a page create AND an ordinary create refuse ${CODES.INDEX_INCOMPLETE}, no effect`, T, async () => {
+  await world('off', async (s) => {
+    await s.start();
+    await latchFalse(s);
+    assert.deepEqual(await markerValues(s), ['false'], 'PRECONDITION: the marker reads false');
+    const e0 = await effects(s);
+    const p = await createPage(s, { title: 'Refused page', createdBy: 'ada', requestId: 'req-1744-p1b' });
+    assert.ok(!ok2xx(p.status), `the page create is refused (${p.status} ${p.text.slice(0, 200)})`);
+    assert.equal(p.json?.code, CODES.INDEX_INCOMPLETE, 'with the named code');
+    const c = await s.call('POST', '/api/cards', { title: 'Refused card', createdBy: 'ada', requestId: `req-1744-p1b-card-${process.pid}` });
+    assert.ok(!ok2xx(c.status), `the ordinary create is refused (${c.status} ${c.text.slice(0, 200)})`);
+    assert.equal(c.json?.code, CODES.INDEX_INCOMPLETE, 'with the named code');
+    assert.deepEqual(await effects(s), e0, 'no effect');
+  });
+});
+test(`#1744 (P1c, r7, mode on) MARKER-KEYED: a marker that reads FALSE is not "no marker" → an ordinary create AND a delete refuse ${CODES.INDEX_INCOMPLETE}, no effect; complete true admits first (control)`, T, async () => {
+  await world('on', async (s) => {
+    await s.start();
+    const ok = await s.call('POST', '/api/cards', { title: 'Admitted card', createdBy: 'ada', requestId: `req-1744-p1c-ok-${process.pid}` });
+    assert.ok(ok2xx(ok.status), `CONTROL: complete true admits the create (${ok.status} ${ok.text.slice(0, 200)})`);
+    await latchFalse(s);
+    const e0 = await effects(s);
+    const c = await s.call('POST', '/api/cards', { title: 'Refused card', createdBy: 'ada', requestId: `req-1744-p1c-${process.pid}` });
+    assert.ok(!ok2xx(c.status), `the create is refused (${c.status} ${c.text.slice(0, 200)})`);
+    assert.equal(c.json?.code, CODES.INDEX_INCOMPLETE, 'with the named code');
+    const d = await s.call('DELETE', '/api/cards/uuid-3?by=ada');
+    assert.ok(!ok2xx(d.status), `the delete is refused (${d.status} ${d.text.slice(0, 200)})`);
+    assert.deepEqual(await effects(s), e0, 'no effect');
+  });
+});
+// the scheduled --verify-and-latch, its exits as the script states them (exit 0 / 1 / 2), and --verify staying read-only
+test('#1744 (L0, r7) --verify-and-latch on an EXACT index under complete true → exit 0 COMPLETE; the marker still reads true', T, async () => {
+  await world('off', async (s) => {
+    const r = await indexTool(s, '--verify-and-latch');
+    assert.equal(r.status, 0, `exit 0 (${r.out.slice(-200)} ${r.err.slice(-200)})`);
+    assert.match(r.out, /^COMPLETE$/m, 'COMPLETE');
+    assert.deepEqual(await markerValues(s), ['true'], 'the marker is untouched');
+  });
+});
+test('#1744 (L1, r7) --verify-and-latch on a VIOLATED index → exit 1 LATCHED naming the violation; the marker reads back complete false with latchReason and latchedAt', T, async () => {
+  await world('off', async (s) => {
+    await DAMAGE[0][1]({ q: s.q, xu: s.xu });
+    const r = await indexTool(s, '--verify-and-latch');
+    assert.equal(r.status, 1, `exit 1 (${r.out.slice(-300)})`);
+    assert.match(r.out, /^LATCHED \d+ violation\(s\) at commitSeq \d+: /m, 'LATCHED, with the count and the position');
+    assert.deepEqual(await markerValues(s), ['false'], 'the marker reads back false');
+    const at = await s.q(`SELECT ?r ?t WHERE { GRAPH <${BK}> { <${IX.marker}> <${IX.ns}latchReason> ?r ; <${IX.ns}latchedAt> ?t } }`);
+    assert.equal(at.length, 1, 'one latchReason and one latchedAt');
+    assert.match(at[0].r.value, /violation/, 'the reason names the violation');
+    assert.ok(Number.isFinite(Date.parse(at[0].t.value)), `latchedAt is a time (${at[0].t.value})`);
+  });
+});
+test('#1744 (L1b, r7) a LATCHED marker over an EXACT index is never re-opened: --verify-and-latch → exit 1 LATCHED, the marker still false; only --backfill re-opens it (control)', T, async () => {
+  await world('off', async (s) => {
+    await latchFalse(s);
+    const r = await indexTool(s, '--verify-and-latch');
+    assert.equal(r.status, 1, `exit 1 (${r.out.slice(-200)})`);
+    assert.match(r.out, /^LATCHED the marker reads \["false"\]/m, 'LATCHED, naming the marker');
+    assert.deepEqual(await markerValues(s), ['false'], 'still false: not re-opened');
+    const b = await indexTool(s, '--backfill');
+    assert.equal(b.status, 0, `CONTROL: an explicit --backfill re-opens it (${b.out.slice(-200)})`);
+    assert.deepEqual(await markerValues(s), ['true'], 'CONTROL: complete true again');
+  });
+});
+test('#1744 (L1c, r7, pin 5) read-only --verify on a VIOLATED index → exit 1 REFUSED INDEX_INCOMPLETE and writes NOTHING: the marker still reads true', T, async () => {
+  await world('off', async (s) => {
+    await DAMAGE[0][1]({ q: s.q, xu: s.xu });
+    const r = await indexTool(s, '--verify');
+    assert.equal(r.status, 1, `exit 1 (${r.out.slice(-300)})`);
+    assert.match(r.out, /^REFUSED INDEX_INCOMPLETE /m, 'REFUSED INDEX_INCOMPLETE');
+    assert.deepEqual(await markerValues(s), ['true'], '--verify latched nothing');
+  });
+});
+test('#1744 (L2, r7) --verify-and-latch against an executor that cannot be read → exit 2 CLOSURE UNCONFIRMED, never reported as fail-closed (no LATCHED)', T, async () => {
+  await world('off', async (s) => {
+    const r = await indexTool(s, '--verify-and-latch', 'http://127.0.0.1:1');
+    assert.equal(r.status, 2, `exit 2 (${r.out.slice(-300)} ${r.err.slice(-200)})`);
+    assert.match(r.out, /^CLOSURE UNCONFIRMED /m, 'CLOSURE UNCONFIRMED');
+    assert.doesNotMatch(r.out, /^LATCHED/m, 'never LATCHED');
+    assert.deepEqual(await markerValues(s), ['true'], 'and the real store is untouched');
+  });
+});
 test(`#1744 (R3, mode off) a DELETE is index-dependent too: with a coverage node missing it refuses ${CODES.INDEX_INCOMPLETE}, no effect`, T, async () => {
   await world('off', async (s) => {
     await s.start();
@@ -1115,8 +1216,17 @@ test('#1744 (R5, r3, S16) a hand-built index-guarded DELETE of #1 that OMITS a c
     await assertIndexComplete(s, 'after the admitted delete');
   });
 });
-test('#1744 (R6, r3, finding 4) a coverage node TRIMMED CONSISTENTLY (a name, its count, sum and list removed; digest intact) lets no create omit that referrer: REFUSED, no effect', T, async () => {
+// R6 r6 (contract ruling 46773, recorded on #1744 v36): a CONSISTENTLY trimmed coverage node (a name, its count, sum and list
+// removed together; the digest intact) is internally consistent, so the RUNTIME guards cannot see it, and the contract states that
+// limit: consistent corruption evades runtime checks between verifications. The counterexample is kept unchanged below; its
+// expectation moves to where the contract now puts it: the JSON-derived `--verify`, which must DETECT this exact fixture by name.
+// (The verifier's fail-closed write, a marker set to complete "false", is proposed in 46779 and not yet accepted; no row here.)
+test('#1744 (R6, r6, ruling 46773) a coverage node TRIMMED CONSISTENTLY (a name, its count, sum and list removed; digest intact) is DETECTED by --verify, by card and by name; the untrimmed index verifies COMPLETE (control)', T, async () => {
   await cWorld(async (s) => {
+    const verify = () => runNode([BACKFILL, '--executor', s.w.exec.baseUrl, '--dataset', WB_DATASET, '--verify']);
+    const ctl = await verify();
+    assert.equal(ctl.status, 0, `CONTROL: the untrimmed index verifies (${ctl.out.slice(-240)} ${ctl.err.slice(-200)})`);
+    assert.match(ctl.out, /^COMPLETE$/m, 'CONTROL: COMPLETE');
     const o = await wikiCreateOrigin(s, 'req-1744-r6');
     const N = o.shortId, cov = `<${IX.card('uuid-1')}>`;
     const get = async (p) => (await s.q(`SELECT ?o WHERE { GRAPH <${BK}> { ${cov} <${p}> ?o } }`)).map((r) => r.o.value);
@@ -1130,8 +1240,11 @@ test('#1744 (R6, r3, finding 4) a coverage node TRIMMED CONSISTENTLY (a name, it
       INSERT DATA { GRAPH <${BK}> { ${cov} <${IX.ns}namesCount> ${I(kept.length)} ; <${IX.ns}namesSum> ${I(kept.reduce((a, b) => a + b, 0))} ; <${IX.ns}namesList> ${JSON.stringify(kept.join(','))} } }`, 'trim');
     const after = (await get(IX.namesShortId)).map(Number).sort((a, b) => a - b);
     assert.deepEqual(after, kept, 'PRECONDITION: the trim applied, and the node is internally consistent');
-    o.plan.parts = o.plan.parts.filter((x) => x.iri !== cardIriOf('uuid-1'));   // #1 still names #N in its JSON; only the index forgot
-    await expectRefused(s, o, () => wikiCreateOrigin(s, 'req-1744-r6-ctl'), 'a referrer omitted under a consistently trimmed index');
+    const v = await verify();
+    assert.equal(v.status, 1, `--verify refuses the trimmed index (${v.status}: ${v.out.slice(-300)})`);
+    assert.match(v.out, /^REFUSED INDEX_INCOMPLETE /m, 'named INDEX_INCOMPLETE');
+    assert.match(v.out, new RegExp(`card uuid-1: names \\{${kept.join(',')}\\}, it names \\{${names.join(',')}\\}`), 'naming the card and the name its JSON still carries');
+    assert.doesNotMatch(v.out, /^COMPLETE$/m, 'never COMPLETE');
   });
 });
 
