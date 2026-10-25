@@ -316,27 +316,42 @@ function canonicalJson(v) {
 }
 
 /**
- * #1745's manifest: a header line, then rows. A field may be "quoted" (with "" for a quote); an unquoted LAST column takes the
- * rest of the line, because the note is free text and may hold commas (measured: a note was cut at its comma).
+ * #1745's manifest, read as STRICT RFC 4180: a field containing a comma or a quote must be "quoted" ("" escapes a quote), and
+ * every row must have exactly the header's field count. Anything else is REFUSED MANIFEST_MALFORMED: a free-text note may hold
+ * a comma, and guessing where an unquoted one ends would silently store a truncated or merged disposition.
  */
 function parseCsv(text) {
   const [head, ...lines] = text.split('\n').filter((l) => l.length);
-  const cols = head.split(',');
-  const split = (line) => {
-    const out = []; let i = 0;
-    while (out.length < cols.length - 1 && i <= line.length) {
-      if (line[i] === '"') {
-        let v = ''; i++;
-        while (i < line.length && !(line[i] === '"' && line[i + 1] !== '"')) { v += line[i] === '"' ? (i++, '"') : line[i]; i++; }
-        out.push(v); i += 2;
-      } else { const j = line.indexOf(',', i); out.push(j < 0 ? line.slice(i) : line.slice(i, j)); i = j < 0 ? line.length + 1 : j + 1; }
+  const cols = fields(head, 0);
+  return lines.map((l, n) => {
+    const v = fields(l, n + 2);
+    if (v.length !== cols.length) refuse('MANIFEST_MALFORMED', `line ${n + 2} has ${v.length} fields, the header has ${cols.length} (quote any field with a comma)`);
+    return Object.fromEntries(cols.map((c, k) => [c, v[k]]));
+  });
+}
+function fields(line, lineNo) {
+  const out = []; let i = 0;
+  for (;;) {
+    if (line[i] === '"') {
+      let v = ''; i++;
+      for (;;) {
+        if (i >= line.length) refuse('MANIFEST_MALFORMED', `line ${lineNo}: an unterminated quoted field`);
+        if (line[i] === '"') { if (line[i + 1] === '"') { v += '"'; i += 2; continue; } i++; break; }
+        v += line[i++];
+      }
+      out.push(v);
+      if (i === line.length) return out;
+      if (line[i] !== ',') refuse('MANIFEST_MALFORMED', `line ${lineNo}: text after a closing quote`);
+      i++;
+    } else {
+      const j = line.indexOf(',', i);
+      const v = j < 0 ? line.slice(i) : line.slice(i, j);
+      if (v.includes('"')) refuse('MANIFEST_MALFORMED', `line ${lineNo}: a quote inside an unquoted field`);
+      out.push(v);
+      if (j < 0) return out;
+      i = j + 1;
     }
-    let last = i <= line.length ? line.slice(i) : '';
-    if (last.length > 1 && last.startsWith('"') && last.endsWith('"')) last = last.slice(1, -1).replaceAll('""', '"');
-    out.push(last);
-    return out;
-  };
-  return lines.map((l) => { const v = split(l); return Object.fromEntries(cols.map((c, k) => [c, v[k] ?? ''])); });
+  }
 }
 
 process.exit(await main());
