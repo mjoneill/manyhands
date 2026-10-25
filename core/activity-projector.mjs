@@ -27,6 +27,7 @@ import path from 'node:path';
 import oxigraph from 'oxigraph';
 import { SEGMENT_RE } from './event-log.mjs';
 import { projectActivityItem, isProjectableEvent, projectWorkLedger } from './graph-replica.mjs';
+import { WRITE_PROTOCOL, WRITE_PROTOCOL_HEADER } from './graph-client.mjs';
 
 export const BOOK_GRAPH = 'urn:scrum:bookkeeping:activity-projector';
 const CURSOR = 'urn:scrum:bookkeeping:activity-projector:cursor';
@@ -213,6 +214,8 @@ export async function projectBatch({ logDir, workDir, executorUrl, graph = BOOK_
   const opId = `urn:ex:op/activity-projector/${crypto.randomUUID()}`;
   const r = await post(executorUrl, '/update', sparql, {
     'content-type': 'application/sparql-update', 'x-op-id': opId, ...(epoch != null ? { 'x-epoch': epoch } : {}),
+    // #1748: the write floor admits only clients that declare the protocol; a store without a floor ignores it
+    [WRITE_PROTOCOL_HEADER]: WRITE_PROTOCOL,
   });
   if (r.status !== 200) throw new Error(`update refused: HTTP ${r.status} ${r.text.slice(0, 300)}`);
   const after = await readCursor(executorUrl);
