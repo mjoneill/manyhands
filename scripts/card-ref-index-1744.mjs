@@ -7,12 +7,16 @@
  *   node scripts/card-ref-index-1744.mjs --executor <url> --dataset <id> --verify-and-latch   the SCHEDULED check (below)
  *
  * Run with card WRITERS STOPPED (F3: "perform the guarded complete backfill with writers quiesced"). It:
- *   1. removes the completion marker, so the index is NOT USABLE while it runs (every index-dependent write refuses);
+ *   1. CLOSES the index: the completion marker is set `complete false` (a marker already latched false keeps its reason
+ *      and time), so every index-dependent write refuses while it runs in BOTH modes; an absent marker would be mode on's
+ *      pre-backfill ADMIT state (#116 review, finding 1), so the marker is never removed, and a failed run leaves it false;
  *   2. snapshots every live card (id, graph version, stored entityJson) and writes its coverage node in batches, each ONE
  *      update guarded on every card in it still being at its snapshot version (a card that changed makes the batch a no-op);
  *   3. removes coverage for any subject that is not a live card;
  *   4. verifies the WHOLE invariant (exactly one node per live card, version and JSON digest equal, the EXACT name set, no
- *      orphan, no duplicate watermark) and only then writes the marker `complete true`.
+ *      orphan, no duplicate watermark) and only then turns the marker from false to `complete true`, in ONE update guarded
+ *      on the marker still reading exactly false and on the executor's write revision read before that verification, so
+ *      a latch or any other write that lands in between refuses the mark (MOVED) and the index stays closed.
  * Output: `cards <n>` then `COMPLETE` and exit 0, or `REFUSED <CODE> <why>` and exit 1. The marker is never written over a
  * failed verification. A fresh empty board gets an explicit, verified empty index the same way (F3).
  *
@@ -52,11 +56,14 @@ async function query(sparql) {
   if (!r.ok) refuse('UNAVAILABLE', `query ${r.status}: ${(await r.text()).slice(0, 160)}`);
   return (await r.json()).results.bindings;
 }
-async function update(sparql, tag) {
+async function update(sparql, tag, { ifRevision } = {}) {
   const ep = String((await health()).epoch);
-  const r = await fetch(`${base}/update`, { method: 'POST', body: sparql, headers: { 'x-op-id': `urn:ex:op/card-ref-index/${tag}/${Date.now()}-${process.pid}-${opN++}`, 'x-epoch': ep, 'x-manyhands-write-protocol': 'postseq-v1' } });   // the #1748 floor; ignored on a store without one
+  const r = await fetch(`${base}/update`, { method: 'POST', body: sparql, headers: { 'x-op-id': `urn:ex:op/card-ref-index/${tag}/${Date.now()}-${process.pid}-${opN++}`, 'x-epoch': ep, 'x-manyhands-write-protocol': 'postseq-v1', ...(ifRevision ? { 'x-if-write-revision': ifRevision } : {}) } });   // the #1748 floor; ignored on a store without one
+  if (r.status === 409 && ifRevision) { const t = await r.text(); if (t.includes('WRITE_REVISION_MOVED')) refuse('MOVED', `${tag}: the store took another write since it was verified; the index stays closed (marker false): run --backfill again`); refuse('WRITE_FAILED', `${tag}: 409 ${t.slice(0, 200)}`); }
   if (!r.ok) refuse('WRITE_FAILED', `${tag}: ${r.status} ${(await r.text()).slice(0, 200)}`);
 }
+const XSD_BOOLEAN = 'http://www.w3.org/2001/XMLSchema#boolean', XSD_DATETIME = 'http://www.w3.org/2001/XMLSchema#dateTime';
+const markerNow = async () => (await query(`SELECT ?v WHERE { GRAPH <${BK}> { <${CRI.marker}> <${CRI.complete}> ?v } }`)).map((b) => (b.v.datatype === XSD_BOOLEAN ? b.v.value : `${b.v.value}^^${b.v.datatype || 'string'}`));
 
 const liveCards = async () => {
   const rows = await query(liveCardsSparql);
@@ -70,7 +77,13 @@ async function main() {
   const h = await health();
   if (h.datasetId !== dataset) refuse('WRONG_DATASET', `the executor serves ${h.datasetId}, not ${dataset}`);
   if (WRITE) {
-    await update(`DELETE WHERE { GRAPH <${BK}> { <${CRI.marker}> ?p ?o } }`, 'unmark');   // not usable while it runs
+    // 1. CLOSE, never remove (finding 1): a latched marker stays exactly as it is; anything else becomes false
+    const was = await markerNow();
+    if (!(was.length === 1 && was[0] === 'false')) {
+      await update(`DELETE { GRAPH <${BK}> { <${CRI.marker}> ?p ?o } } INSERT { GRAPH <${BK}> { <${CRI.marker}> <${CRI.complete}> "false"^^<${XSD_BOOLEAN}> ; <${CRI.latchReason}> "backfill in progress" ; <${CRI.latchedAt}> "${new Date().toISOString()}"^^<${XSD_DATETIME}> } } WHERE { OPTIONAL { GRAPH <${BK}> { <${CRI.marker}> ?p ?o } } }`, 'close');
+    }
+    const closed = await markerNow();
+    if (closed.length !== 1 || closed[0] !== 'false') refuse('MARKER', `the index could not be closed: the completion marker reads ${JSON.stringify(closed)}`);
     const snap = await liveCards();
     for (let i = 0; i < snap.length; i += BATCH) {
       const batch = snap.slice(i, i + BATCH);
@@ -85,17 +98,22 @@ WHERE {\n  ${guard}\n  OPTIONAL { VALUES ?s { ${subjects} } GRAPH <${BK}> { ?s ?
     for (const s of covSubjects) if (!live.has(s)) await update(`DELETE WHERE { GRAPH <${BK}> { <${s}> ?p ?o } }`, 'orphan');
     const after = await liveCards();
     if (after.length !== snap.length || after.some((c) => { const was = snap.find((x) => x.iri === c.iri); return !was || was.ver !== c.ver || was.json !== c.json; })) {
-      refuse('CARDS_CHANGED', 'a card changed during the backfill: stop the writers and run it again (the marker stays absent)');
+      refuse('CARDS_CHANGED', 'a card changed during the backfill: stop the writers and run it again (the index stays closed: marker false)');
     }
   }
+  // the write revision BEFORE the verification the mark rests on (finding 2): any write after it refuses the mark
+  const verifiedRevision = WRITE ? (await health()).writeRevision : null;
+  if (WRITE && (typeof verifiedRevision !== 'string' || !verifiedRevision)) refuse('UNAVAILABLE', 'the executor reports no write revision');
   const v = await verifyIndex({ query, health, dataset });
   if (LATCH) return latch(v);
   if (v.status === 'UNSTABLE') { console.log('UNSTABLE the store never held still for a consistent read; nothing judged'); process.exit(3); }
   const { bad, cards } = v;
   if (bad.length) refuse('INDEX_INCOMPLETE', `${bad.length} violation(s): ${bad.slice(0, 5).join('; ')}`);
-  if (WRITE) await update(`INSERT DATA { GRAPH <${BK}> { ${markerTripleText()} } }`, 'mark');
-  const marks = await query(`SELECT ?v WHERE { GRAPH <${BK}> { <${CRI.marker}> <${CRI.complete}> ?v } }`);
-  if (marks.length !== 1 || marks[0].v.value !== 'true') refuse('MARKER', `the completion marker reads ${JSON.stringify(marks.map((m) => m.v.value))}`);
+  // false → true in ONE update: only while the marker still reads exactly false, and only at the verified write revision
+  if (WRITE) await update(`DELETE { GRAPH <${BK}> { <${CRI.marker}> ?p ?o } } INSERT { GRAPH <${BK}> { ${markerTripleText()} } }
+WHERE { GRAPH <${BK}> { <${CRI.marker}> ?p ?o . <${CRI.marker}> <${CRI.complete}> "false"^^<${XSD_BOOLEAN}> . } FILTER NOT EXISTS { GRAPH <${BK}> { <${CRI.marker}> <${CRI.complete}> ?other . FILTER(!sameTerm(?other, "false"^^<${XSD_BOOLEAN}>)) } } }`, 'mark', { ifRevision: verifiedRevision });
+  const marks = await markerNow();
+  if (marks.length !== 1 || marks[0] !== 'true') refuse('MARKER', `the completion marker reads ${JSON.stringify(marks)}`);
   console.log(`cards ${cards.length}`);
   console.log('COMPLETE');
 }

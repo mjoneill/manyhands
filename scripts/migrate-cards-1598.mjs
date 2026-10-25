@@ -20,6 +20,7 @@ import { jsonLdToDomain, isJsonLdDocument } from '../core/jsonld.mjs';
 import { domainToBoard } from '../core/mapping.mjs';
 import { cardQuads, cardIriOf, shortIdMap, SHORTID_COUNTER_IRI } from '../core/cards-graph.mjs';
 import { BK } from '../core/graph-vocab.mjs';
+import { CRI } from '../core/card-ref-index.mjs';
 
 const args = process.argv.slice(2);
 const opt = (k) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : null; };
@@ -46,6 +47,14 @@ async function counter() {
   return q.rows.length ? Number(q.rows[0].n.value) : null;
 }
 
+// #1744 (#116 review, finding 5): these creates carry no index guard, so they may run only BEFORE the card reference index
+// exists. A store holding the index's completion marker in any state refuses, before anything is sent: migrate first, then
+// --backfill the index with writers stopped.
+{
+  const q = await g.query(`SELECT ?v WHERE { GRAPH ${BK} { <${CRI.marker}> <${CRI.complete}> ?v } } LIMIT 1`);
+  if (!q.ok) throw new Error(`the graph could not be read: ${q.reason}`);
+  if (q.rows.length && apply) { console.log('REFUSED INDEX_PRESENT the card reference index exists; migrate-cards writes unguarded creates and runs only before it is backfilled'); process.exit(1); }
+}
 const before = { cards: await count(), counter: await counter() };
 console.log(`document: ${cards.length} cards (${skipped.length} with an id that cannot be an IRI), nextShortId ${board.nextShortId} · graph before: ${JSON.stringify(before)} · ${apply ? 'APPLY' : 'DRY RUN (nothing sent)'}`);
 for (const s of skipped.slice(0, 20)) console.log(`  skipped: card id ${s}`);

@@ -1405,6 +1405,8 @@ function indexInvariantClauses() {
   const covOf = (cardVar, out) => `BIND(IRI(CONCAT(${JSON.stringify(CRI.card(''))}, STRAFTER(STR(${cardVar}), ${JSON.stringify(ENTITY_IRI)}))) AS ${out})`;
   const out = [
     `    GRAPH ${BK} { ${ref(CRI.marker)} ${ref(CRI.complete)} "true"^^<http://www.w3.org/2001/XMLSchema#boolean> . }`,
+    // and NOTHING else (#116 review, finding 2): a marker reading both true and false is not complete
+    `    FILTER NOT EXISTS { GRAPH ${BK} { ${ref(CRI.marker)} ${ref(CRI.complete)} ?ixmo . } FILTER(!sameTerm(?ixmo, "true"^^<http://www.w3.org/2001/XMLSchema#boolean>)) }`,
     `    FILTER NOT EXISTS { ?ixc ${TYPE} ${CARD} . GRAPH ${BK} { ?ixc ${VER} ?ixv ; ${JSONP} ?ixj . } ${covOf('?ixc', '?ixn')}`,
     `      FILTER NOT EXISTS { GRAPH ${BK} { ?ixn ${IV} ?ixv2 ; ${ID} ?ixd . } FILTER(?ixv2 = ?ixv && ?ixd = SHA256(STR(?ixj))) } }`,
     `    FILTER NOT EXISTS { GRAPH ${BK} { ?ixa ${IV} ?ixa1 , ?ixa2 . } FILTER(!sameTerm(?ixa1, ?ixa2)) }`,

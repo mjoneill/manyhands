@@ -6,9 +6,10 @@
  *
  * CONSISTENT POSITION (ruling 46781): the cards and the coverage are read at one store position. The executor's
  * commitSeq is read before and after the reads; if a compiled write moved it in between, the reads are retried, and a
- * store that never holds still for long enough answers UNSTABLE, never a corruption report. (A raw /update does not move
- * commitSeq; the index is maintained only by compiled card writes, so those are what can race it.) The position is the
- * whole identity, dataset · epoch · incarnation · commitSeq, and each part must be PRESENT and well-formed: a health body
+ * store that never holds still for long enough answers UNSTABLE, never a corruption report. commitSeq moves only for
+ * compiled writes; a raw /update (the backfill, the latch, a direct client) does not move it, so the position also carries
+ * the executor's WRITE REVISION, which every write moves (#116 review, finding 4). The position is the
+ * whole identity, dataset · epoch · incarnation · commitSeq · writeRevision, and each part must be PRESENT and well-formed: a health body
  * that lacks one cannot prove two reads were at one position (two missing values are not equal), so it throws.
  *
  * CENSUS: every live Card is enumerated first, and its version, its JSON and its coverage are then each required: a card
@@ -78,10 +79,15 @@ export function storePosition(h, dataset) {
   else if (dataset !== undefined && h.datasetId !== dataset) why.push(`datasetId ${h.datasetId}, not ${dataset}`);
   for (const k of ['epoch', 'commitSeq']) if (typeof h[k] !== 'string' || !DIGITS.test(h[k])) why.push(`${k} ${JSON.stringify(h[k] ?? null)} is not an integer`);
   if (typeof h.incarnation !== 'string' || !h.incarnation || h.incarnation.startsWith('CONTRADICTORY')) why.push(`incarnation ${JSON.stringify(h.incarnation ?? null)}`);
+  if (typeof h.writeRevision !== 'string' || !/^[0-9a-f-]{36}:\d+$/.test(h.writeRevision)) why.push(`writeRevision ${JSON.stringify(h.writeRevision ?? null)}`);
   if (why.length) throw new Error(`the executor health does not name one store position: ${why.join('; ')}`);
-  return { datasetId: h.datasetId, epoch: h.epoch, incarnation: h.incarnation, commitSeq: h.commitSeq };
+  return { datasetId: h.datasetId, epoch: h.epoch, incarnation: h.incarnation, commitSeq: h.commitSeq, writeRevision: h.writeRevision };
 }
-const samePosition = (a, b) => a.datasetId === b.datasetId && a.epoch === b.epoch && a.incarnation === b.incarnation && a.commitSeq === b.commitSeq;
+const samePosition = (a, b) => a.datasetId === b.datasetId && a.epoch === b.epoch && a.incarnation === b.incarnation && a.commitSeq === b.commitSeq && a.writeRevision === b.writeRevision;
+const XSD_BOOLEAN = 'http://www.w3.org/2001/XMLSchema#boolean';
+// a marker value as the runtime guard sees it: only an xsd:boolean is a boolean (#116 review, finding 7: a plain-string
+// "true" is refused by the guard, so the verifier must not report it as true)
+const markerValue = (b) => (b.v.datatype === XSD_BOOLEAN ? b.v.value : `${b.v.value}^^${b.v.datatype || 'string'}`);
 
 /**
  * Verify the index at one consistent position. `query(sparql)` returns bindings (it throws on failure); `health()` returns
@@ -94,7 +100,7 @@ export async function verifyIndex({ query, health, dataset, attempts = 5 }) {
     const before = storePosition(await health(), dataset);
     const cardRows = await query(liveCardsSparql);
     const cov = await query(coverageSparql);
-    const marker = (await query(markerSparql)).map((b) => b.v.value);
+    const marker = (await query(markerSparql)).map(markerValue);
     const after = storePosition(await health(), dataset);
     if (!samePosition(before, after)) continue;
     const { bad, cards } = judge(cardRows, cov);
