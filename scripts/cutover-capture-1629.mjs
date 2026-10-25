@@ -104,10 +104,10 @@ const content = await new Promise((resolve) => {
     clearTimeout(timer);
     timer = setTimeout(() => finish({ error: `the content digest did not finish within ${DIGEST_TIMEOUT_MS} ms` }), DIGEST_TIMEOUT_MS);
     const t0 = Date.now();
-    try { const d = await contentDigest(`http://127.0.0.1:${port}`); console.error(`content digest: ${d.quads} quads in ${Date.now() - t0} ms`); finish(d); } catch (e) { finish({ error: e.message }); }
+    try { const d = await contentDigest(`http://127.0.0.1:${port}`); console.error(`content digest: ${d.quads} quads in ${Date.now() - t0} ms`); finish(d); } catch (e) { finish({ error: e.message, code: e.code }); }
   });
 });
-if (content.error) refuse('STORE_SHAPE', `the source's content could not be digested: ${content.error}`);
+if (content.error) refuse(content.code === 'DIGEST_TOO_LARGE' ? 'DIGEST_TOO_LARGE' : 'STORE_SHAPE', `the source's content could not be digested: ${content.error}`);
 if (BETWEEN_PASSES) fs.appendFileSync(BETWEEN_PASSES, 'x');
 const second = pass();
 // and again AFTER the passes (#122 review, LOW): a writer that opened the store mid-capture is refused even if its bytes

@@ -70,7 +70,7 @@ if (have.length) refuse('MARKER_MISMATCH', `the candidate is already marked for 
 // the copy, a rollback, a floor installed early, a recovery hold) refuses. After marking, the import adds content, so an
 // ALREADY above never re-digests.
 let got;
-try { got = await contentDigest(base, { opId: `urn:ex:op/cutover/candidate-digest/${manifestSha}` }); } catch (e) { refuse('UNAVAILABLE', `the candidate's content could not be digested: ${e.message}`); }
+try { got = await contentDigest(base, { opId: `urn:ex:op/cutover/candidate-digest/${manifestSha}` }); } catch (e) { refuse(e.code === 'DIGEST_TOO_LARGE' ? 'DIGEST_TOO_LARGE' : 'UNAVAILABLE', `the candidate's content could not be digested: ${e.message}`); }
 if (got.sha256 !== m.contentSha256) {
   refuse('NOT_COPY', `the candidate's content (${got.quads} quads${got.recoveryQuads ? `, ${got.recoveryQuads} in the recovery graph: a held promotion's exact delta is validated once restore safety lands` : ''}) is not the captured content`);
 }

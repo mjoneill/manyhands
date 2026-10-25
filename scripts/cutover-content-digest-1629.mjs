@@ -36,35 +36,75 @@ export function termText(t) {
 
 const excluded = (b) => b.g?.value === BOOKKEEPING && b.s.type === 'uri' && b.s.value === DATASET_SUBJECT && PROMOTION_PREDICATES.includes(b.p.value);
 
+/** the size limits (measured 2026-10-25 on the 1.0 GB live backup: 2,467,536 quads, buckets 152k-156k quads, no blank-node
+ *  subjects, the largest subject 547 quads; digest 101.9 s, Node peak 1.02 GiB, executor peak 959 MiB) */
+export const MAX_BUCKET_QUADS = 400_000;
+export const MAX_BUCKET_BYTES = 256 * 1024 * 1024;
+const MAX_DEPTH = 3;
+
+export class DigestTooLarge extends Error { constructor(msg) { super(msg); this.code = 'DIGEST_TOO_LARGE'; } }
+
+const subjectKey = (b) => (b.s.type === 'bnode' ? '_' : crypto.createHash('sha256').update(b.s.value).digest('hex').slice(0, MAX_DEPTH));
+const bucketFilter = (prefix) => (prefix === '_' ? 'FILTER(isBlank(?s))' : `FILTER(!isBlank(?s) && SUBSTR(SHA256(STR(?s)), 1, ${prefix.length}) = "${prefix}")`);
+const ALL = '{ ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } }';
+
+async function post(baseUrl, opId, body) {
+  const r = await fetch(`${baseUrl.replace(/\/+$/, '')}/query`, { method: 'POST', headers: { 'x-op-id': opId }, body });
+  if (!r.ok) throw new Error(`content digest: a query answered ${r.status}`);
+  return r;
+}
+/** a bucket's answer, read through the stream with a byte counter: past the cap the read is aborted and the digest refuses */
+async function boundedJson(r, what) {
+  const reader = r.body.getReader(); const chunks = []; let n = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    n += value.length;
+    if (n > MAX_BUCKET_BYTES) { await reader.cancel(); throw new DigestTooLarge(`${what}'s answer exceeds ${MAX_BUCKET_BYTES} bytes`); }
+    chunks.push(value);
+  }
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+}
+
 /**
  * The content digest of the store behind `baseUrl`. Returns { sha256, quads, recoveryQuads } where `quads` is the number of
  * digested lines and `recoveryQuads` the number in the recovery graph (a hold or record a caller may need to explain).
+ *
+ * The ORDER is defined by content alone, never by how the store was split to read it: every line is keyed by the first three
+ * hex digits of sha256(its subject) ("_" for a blank-node subject, first), then by the line itself. A bucket over
+ * MAX_BUCKET_QUADS is read as its 16 sub-buckets, to depth 3; one still over it at depth 3, or a blank-node bucket over it,
+ * refuses DIGEST_TOO_LARGE before it is fetched. Each answer is also capped at MAX_BUCKET_BYTES as it streams.
+ * STATED LIMIT: the caps bound what this process reads; the executor still materialises one bucket's answer before sending
+ * it, so its memory is bounded only by the bucket split.
  */
 export const BUCKETS = Object.freeze(['_', ...'0123456789abcdef']);
 export async function contentDigest(baseUrl, { opId = `urn:ex:op/cutover/content-digest/${crypto.randomUUID()}` } = {}) {
   const h = crypto.createHash('sha256');
-  let quads = 0, recoveryQuads = 0, excludedQuads = 0;
-  for (const k of BUCKETS) {
-    const r = await fetch(`${baseUrl.replace(/\/+$/, '')}/query`, {
-      method: 'POST', headers: { 'x-op-id': `${opId}/${k}` },
-      body: `SELECT ?g ?s ?p ?o WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } FILTER(IF(isBlank(?s), "_", SUBSTR(SHA256(STR(?s)), 1, 1)) = "${k}") }`,
-    });
-    if (!r.ok) throw new Error(`content digest: the query for bucket ${k} answered ${r.status}`);
-    const lines = [];
-    for (const b of (await r.json()).results.bindings) {
+  let quads = 0, recoveryQuads = 0, excludedQuads = 0, q = 0;
+  const leaves = [];
+  const plan = async (prefix) => {
+    const c = await boundedJson(await post(baseUrl, `${opId}/count/${prefix}/${q++}`, `SELECT (COUNT(*) AS ?n) WHERE { ${ALL} ${bucketFilter(prefix)} }`), `the count of bucket ${prefix}`);
+    const n = Number(c.results.bindings[0]?.n?.value ?? 0);
+    if (n <= MAX_BUCKET_QUADS) { if (n) leaves.push(prefix); return; }
+    if (prefix === '_' || prefix.length >= MAX_DEPTH) throw new DigestTooLarge(`bucket ${prefix} holds ${n} quads, over ${MAX_BUCKET_QUADS}${prefix === '_' ? ' (blank-node subjects cannot be split)' : ` at depth ${MAX_DEPTH}`}`);
+    for (const d of '0123456789abcdef') await plan(prefix + d);
+  };
+  for (const k of BUCKETS) await plan(k);
+  for (const prefix of leaves) {
+    const j = await boundedJson(await post(baseUrl, `${opId}/bucket/${prefix}/${q++}`, `SELECT ?g ?s ?p ?o WHERE { ${ALL} ${bucketFilter(prefix)} }`), `bucket ${prefix}`);
+    const keyed = [];
+    for (const b of j.results.bindings) {
       if (excluded(b)) { excludedQuads++; continue; }
       if (b.g?.value === RECOVERY_GRAPH) recoveryQuads++;
-      lines.push(`${termText(b.s)} ${termText(b.p)} ${termText(b.o)}${b.g ? ` ${termText(b.g)}` : ''} .`);
+      keyed.push([subjectKey(b), `${termText(b.s)} ${termText(b.p)} ${termText(b.o)}${b.g ? ` ${termText(b.g)}` : ''} .`]);
     }
-    lines.sort();
-    for (const l of lines) h.update(`${l}\n`);
-    quads += lines.length;
+    keyed.sort((x, y) => (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : x[1] < y[1] ? -1 : x[1] > y[1] ? 1 : 0));
+    for (const [, l] of keyed) h.update(`${l}\n`);
+    quads += keyed.length;
   }
   // the buckets must cover every quad: a quad whose bucket expression came back unbound would be silently left out
-  const c = await fetch(`${baseUrl.replace(/\/+$/, '')}/query`, { method: 'POST', headers: { 'x-op-id': `${opId}/count` },
-    body: 'SELECT (COUNT(*) AS ?n) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }' });
-  if (!c.ok) throw new Error(`content digest: the count query answered ${c.status}`);
-  const total = Number((await c.json()).results.bindings[0]?.n?.value);
+  const c = await boundedJson(await post(baseUrl, `${opId}/count`, `SELECT (COUNT(*) AS ?n) WHERE { ${ALL} }`), 'the total count');
+  const total = Number(c.results.bindings[0]?.n?.value);
   if (total !== quads + excludedQuads) throw new Error(`content digest: the buckets cover ${quads + excludedQuads} quads, the store holds ${total}`);
   return { sha256: h.digest('hex'), quads, recoveryQuads };
 }
