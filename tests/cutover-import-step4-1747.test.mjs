@@ -59,7 +59,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { HAVE_PY, tmpStore, startExecutor, killExecutor } from './helpers/graph-executor-proc.mjs';
+import { HAVE_PY, PY, tmpStore, startExecutor, killExecutor } from './helpers/graph-executor-proc.mjs';
 import { createGraphClient } from '../core/graph-client.mjs';
 import { durableUpdate } from '../core/durable-update.mjs';
 import { announcePostId } from '../core/announce-outbox.mjs';
@@ -298,7 +298,7 @@ const run = (args, env) => new Promise((resolve) => {   // R6: async, so nothing
  * `plant(candidate)` adds candidate state; `extraSourcePosts` are seeded in the source. After sealing: `afterSeal(w)` (the
  * stale-capture row only). The valid world is every call with none of these.
  */
-async function world(body, { prepare = () => {}, manifest = (rows) => rows, manifestText = (t) => t, plant = async () => {}, extraSourcePosts = [], mark = true, afterSeal = null, capture = (c) => c } = {}) {
+async function world(body, { prepare = () => {}, manifest = (rows) => rows, manifestText = (t) => t, plant = async () => {}, extraSourcePosts = [], mark = true, afterSeal = null, capture = (c) => c, offline = null } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cut1747-'));
   const srcStore = tmpStore('cut1747-src-');
   let src = null, cand = null;
@@ -322,6 +322,12 @@ async function world(body, { prepare = () => {}, manifest = (rows) => rows, mani
     let content; try { content = await contentDigest(ro.baseUrl); } finally { await killExecutor(ro); }
     const candStore = path.join(dir, 'candidate-store');
     fs.cpSync(srcStore, candStore, { recursive: true });
+    // r9c: state an /update may not write on every head (the recovery graph is protected by #1749) is planted OFFLINE into the
+    // copy before its first start, as restore-time corruption would arrive
+    if (offline) {
+      const o = spawnSync(PY, ['-I', '-c', 'import sys, pyoxigraph as px; s = px.Store(sys.argv[1]); s.update(sys.argv[2]); s.flush()', candStore, offline], { encoding: 'utf8' });
+      assert.equal(o.status, 0, `CONTROL: the offline plant applied (${o.stderr})`);
+    }
     cand = await startExecutor({ store: candStore, datasetId: DS, extraArgs: ['--promote-epoch'] });
     const hs = await health(cand);
     assert.equal(hs.datasetId, DS, 'CONTROL: the promoted candidate keeps datasetId (the supported path)');
@@ -1325,21 +1331,23 @@ test('#1747 (C-PIN-2, r9) the source took a RAW write after the copy (a real pro
     assert.equal(await stepSnapshot(w.cand), s0, 'the candidate is unchanged');
   }, { mark: false });
 });
-for (const [what, sparql] of [
+for (const [what, sparql, how] of [
   ['the candidate\'s commitSeq changed (not one of the six)', `DELETE { GRAPH <${BK}> { <urn:ex:dataset> <urn:ex:commitSeq> ?s } } INSERT { GRAPH <${BK}> { <urn:ex:dataset> <urn:ex:commitSeq> 999 } } WHERE { GRAPH <${BK}> { <urn:ex:dataset> <urn:ex:commitSeq> ?s } }`],
   ['an extra predicate on the dataset marker', `INSERT DATA { GRAPH <${BK}> { <urn:ex:dataset> <urn:ex:somethingElse> "x" } }`],
   ['an excluded predicate at the WRONG location (the default graph)', 'INSERT DATA { <urn:ex:dataset> <urn:ex:epoch> "9" }'],
-  ['a quad in the recovery graph (no hold is a valid delta until restore safety lands)', 'INSERT DATA { GRAPH <urn:ex:postseq/recovery> { <urn:ex:postseq/recovery-hold> <urn:ex:p> "x" } }'],
+  // r9c: planted OFFLINE (46718): on a head carrying #1749 an /update into the recovery graph is refused HOLD_PROTECTED. A named
+  // subject that is not the hold's, so the start's own hold checks pass and only step 3 can refuse it
+  ['a quad in the recovery graph (the cutover delta is empty, 46687)', 'INSERT DATA { GRAPH <urn:ex:postseq/recovery> { <urn:ex:test/stray-recovery> <urn:ex:test/p> "x" } }', 'offline'],
   ['a floor-shaped install record (step 3 precedes any floor install)', `INSERT DATA { GRAPH <${BK}> { <urn:ex:write-floor/install> <urn:ex:installedBy> "install-write-floor" } }`],
 ]) {
   test(`#1747 (C-PIN-3, r9) ${what} on the candidate before step 3 → NOT_COPY; nothing marked`, T, async () => {
     await world(async (w) => {
-      await rawOn(w.cand, sparql, 'pin3');
+      if (how !== 'offline') await rawOn(w.cand, sparql, 'pin3');
       const s0 = await stepSnapshot(w.cand);
       expectStep3Refused(await step3(w, w.captureManifest), 'NOT_COPY', what);
       assert.deepEqual(await markersOn(w.cand), [], 'no marker');
       assert.equal(await stepSnapshot(w.cand), s0, 'the candidate is unchanged');
-    }, { mark: false });
+    }, { mark: false, offline: how === 'offline' ? sparql : null });
   });
 }
 // C-PIN-4 RETIRED (r9b, ruling 46687): a held-copy delta cannot reach step 3 in a valid cutover. A candidate's promotion writes a
