@@ -549,10 +549,31 @@ test('#1629 s2 (O2) an agent rest releases two GENUINELY held cards with the age
 
 // ── B1 byte-identical controls (golden captured from main 429e487 by tools in this directory; see golden file header) ──
 const GOLDEN = path.join(HERE, 'fixtures-1629-s2', 'golden-429e487.json');
-test('#1629 s2 (B1) card.write WITHOUT origin, and postseq.reserve, compile byte-identically to main 429e487', () => {
+test('#1629 s2 (B1) card.write WITHOUT origin compiles byte-identically to main 429e487; postseq.reserve differs ONLY by #1749\'s three recovery-hold lines', () => {
   const g = JSON.parse(fs.readFileSync(GOLDEN, 'utf8'));
   assert.ok(g.cases.length >= 3, 'PRECONDITION: the golden file holds cases');
-  for (const k of g.cases) assert.equal(compile(k.intention).sparql, k.compiled, `${k.label}: compiles exactly as at 429e487`);
+  // #1749 (contract v2 + v3, decision 27ab297c) puts the RecoveryHold refusal in the shared allocator guard, ON PURPOSE. The golden is
+  // NOT re-captured (that would defeat it): the reserve compile must be the golden with exactly these three lines inserted and nothing
+  // else changed, so any other drift in the reserve path still fails here.
+  // #1749 v3 A7 v2 (refrozen at card v58): the hold lives in the RECOVERY graph. The patterns name what matters (that graph, the hold
+  // subject, the RECOVERY_HOLD code, the receipt's reason) and leave variable names free, so a rename is not drift but anything else is.
+  const HOLD_LINES = [
+    /^\s*<urn:ex:op\/postseq\/reserve\/[0-9a-f]{64}> <urn:ex:reason> \?\w+ \.$/,
+    /^\s*FILTER NOT EXISTS \{ GRAPH <urn:ex:postseq\/recovery> \{ <urn:ex:postseq\/recovery-hold> \?\w+ \?\w+ \} \}$/,
+    /^\s*BIND\(IF\(EXISTS \{ GRAPH <urn:ex:postseq\/recovery> \{ <urn:ex:postseq\/recovery-hold> \?\w+ \?\w+ \} \}, "RECOVERY_HOLD", \?\w+\) AS \?\w+\)$/,
+  ];
+  let reserves = 0;
+  for (const k of g.cases) {
+    const now = compile(k.intention).sparql;
+    if (k.intention.kind !== 'postseq.reserve') { assert.equal(now, k.compiled, `${k.label}: compiles exactly as at 429e487`); continue; }
+    reserves++;
+    const lines = now.split('\n');
+    const hold = lines.filter((l) => HOLD_LINES.some((re) => re.test(l)));
+    assert.equal(hold.length, HOLD_LINES.length, `${k.label}: carries each of #1749's recovery-hold lines exactly once (${hold.length})`);
+    for (const re of HOLD_LINES) assert.equal(hold.filter((l) => re.test(l)).length, 1, `${k.label}: one line matching ${re}`);
+    assert.equal(lines.filter((l) => !HOLD_LINES.some((re) => re.test(l))).join('\n'), k.compiled, `${k.label}: with those three lines removed, byte-identical to 429e487`);
+  }
+  assert.equal(reserves, 2, 'PRECONDITION: both reserve cases were checked');
 });
 
 // ── PR1 interruption after prepare ──

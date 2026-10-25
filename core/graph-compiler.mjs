@@ -410,9 +410,12 @@ export function staticCheck(sparql, opId) {
   if (/;\s*(INSERT|DELETE)/i.test(sparql)) errors.push('multi-operation request');
   // one plain DELETE { } INSERT { } WHERE { } request: no WITH / USING / FROM redirecting the default graph
   if (!/^DELETE \{\n[\s\S]*?\n\}\nINSERT \{\n[\s\S]*?\n\}\nWHERE \{\n/.test(sparql)) errors.push('not a plain DELETE/INSERT/WHERE request (WITH, USING and FROM are not accepted)');
-  // the only named graph anywhere in the request is the bookkeeping graph
+  // the only named graph anywhere in the request is the bookkeeping graph; #1749 (A7 v2) the recovery graph may be READ in WHERE
+  // (the allocator guard asks whether a hold exists) and is never a template's target
   for (const m of sparql.matchAll(/\bGRAPH\s+(\S+)\s*\{/g)) {
-    if (m[1] !== BK) errors.push(`named graph ${m[1]} is not accepted: the only named graph is ${BK}`);
+    if (m[1] === BK) continue;
+    if (m[1] === POSTSEQ_TERMS.RECOVERY_GRAPH && where.includes(m[0]) && !block('DELETE').join('\n').includes(m[0]) && !block('INSERT').join('\n').includes(m[0])) continue;
+    errors.push(`named graph ${m[1]} is not accepted: the only named graph is ${BK}`);
   }
   // WHERE: a bookkeeping predicate is read only inside GRAPH <bk> { … } (strip those blocks, then look for it in triple position)
   {
@@ -895,6 +898,7 @@ function planRecord(c) {
   const condIns = [];      // #1582 [{s, p, o, unless:[node, type]}]: inserted only where `node` is NOT of `type` when the update runs
   let verGuard = null;
   let target;
+  let dispatchHold = null;   // #1749 A8: the obligationId a dispatch intention settles or publishes
   const add = (s, p, o) => { if (o != null) ins.push([s, p, o]); };
   const versionNodes = (M, versions) => {
     for (const v of versions) {
@@ -955,6 +959,7 @@ function planRecord(c) {
     for (const t of R.duplicateOf) add(R.target, TM.duplicateOf, I(t));
   } else if (c.kind === 'post.create') {
     const P = R.post; target = null;   // a create: the post IRI must be fresh
+    dispatchHold = `${P.mutationId}:${P.slot}`;   // #1749 A8: the announcement is a dispatch of this obligation
     fresh.push(P.iri);
     add(P.iri, TM.type, I(TM.Comment));
     add(P.iri, TM.text, L(P.body));
@@ -1130,7 +1135,7 @@ function planRecord(c) {
     for (const a of P.aliases) add(P.iri, TM.aliases, L(a));
     add(P.iri, TM.recordedBy, ref(c.opId));
   }
-  return { target, pre, fresh, freshSubject, ins, delAll, delAny, delOwned, delLinked, condIns, verGuard };
+  return { target, pre, fresh, freshSubject, ins, delAll, delAny, delOwned, delLinked, condIns, verGuard, dispatchHold };
 }
 
 function compileRecord(c) {
@@ -1159,6 +1164,7 @@ function compileRecord(c) {
 
   for (const iri of plan.fresh) pre.push(...fresh(ref(iri)));
   for (const iri of plan.freshSubject || []) pre.push(...freshSubject(ref(iri)));   // #1626
+  if (plan.dispatchHold) dispatchHoldClauses({ obligationId: plan.dispatchHold, OP, pre, dBinds, bIns });   // #1749 A8
   if (plan.verGuard) {
     dBinds.push(ok('?xv', 'xvOld'), ok('?xv + 1', 'xvNew'));
     bDel.push(`  ${v(ref(plan.verGuard))} ${EX.ver} ?d_xvOld .`);
@@ -1713,6 +1719,9 @@ function compileOriginPrepare(c) {
   };
   where.push(...dupGuard(OP));
   pre.push(`    FILTER NOT EXISTS { ${inEither(`${PREP} ?xq_p ?xq_o`)} }`);   // Prepared absent (one per mutationId)
+  // #1747 R1 — and no Origin: a native Origin follows its Prepared node, so one without it is an IMPORTED origin, which is
+  // settled history and is never prepared again
+  pre.push(`    FILTER NOT EXISTS { ${inEither(`${T.originSubject(D.mutationId)} ?xq_op ?xq_oo`)} }`);
   bIns.push(
     `  ${v(PREP)} a ${v(T.Prepared)} .`,
     `  ${v(PREP)} ${T.mutationId} ${v(strLit(D.mutationId))} .`,
@@ -2431,6 +2440,12 @@ function allocationClauses({ items, N, OP, digest, v, pre, dBinds, bDel, bIns, t
     const SUBJ = POSTSEQ_TERMS.reservation(it.postId);
     pre.push(`    FILTER NOT EXISTS { ${inEither(`${SUBJ} ?${t}xp ?${t}xo`)} }`);
   });
+  // #1749 the RECOVERY HOLD: while a promoted restore is unreconciled, the allocator does not bind (both paths share this),
+  // and the receipt names the refusal by code. A hold present means ?ok is unbound, so the code is only ever on a refusal.
+  const HOLD_HERE = `GRAPH ${POSTSEQ_TERMS.RECOVERY_GRAPH} { ${POSTSEQ_TERMS.recoveryHold} ?${t}xh_p ?${t}xh_o }`;
+  pre.push(`    FILTER NOT EXISTS { ${HOLD_HERE} }`);
+  dBinds.push(nb(`IF(EXISTS { ${HOLD_HERE} }, ${JSON.stringify(POSTSEQ_TERMS.RECOVERY_HOLD_CODE)}, ?u)`, 'reason'));
+  bIns.push(`  ${OP} ${EX.reason} ?n_reason .`);
 
   dBinds.push(ok(`?${t}x_next`, `${t}next`), ok(`?${t}x_version`, `${t}verOld`), ok(`?${t}x_version + 1`, `${t}verNew`));
   dBinds.push(ok(`?${t}x_next + ${psqSafeInt(N)}`, `${t}nextNew`));
@@ -2463,6 +2478,21 @@ function allocationClauses({ items, N, OP, digest, v, pre, dBinds, bDel, bIns, t
       `  ${v(SUBJ)} ${POSTSEQ_TERMS.draftJson} ${v(psqLit(draftJson))} .`,
     );
   });
+}
+
+/**
+ * #1749 A8-2 THE DISPATCH HOLD, inside a dispatch intention's own update: it does not bind while (a) a RecoveryHold exists, for
+ * ANY obligation, or (b) this obligation's AmbiguousObligation is "held" (both read from the recovery graph, never anywhere
+ * else); the receipt names the refusal DISPATCH_HELD. A hold present means ?ok is unbound, so the code is only on a refusal.
+ */
+function dispatchHoldClauses({ obligationId, OP, pre, dBinds, bIns }) {
+  const RG = POSTSEQ_TERMS.RECOVERY_GRAPH;
+  const AO = POSTSEQ_TERMS.ambiguousObligation(createHash('sha256').update(String(obligationId), 'utf8').digest('hex'));
+  const HOLD = `GRAPH ${RG} { ${POSTSEQ_TERMS.recoveryHold} ?xdh_p ?xdh_o }`;
+  const AMBIG = `GRAPH ${RG} { ${AO} ${POSTSEQ_TERMS.state} ?xda_s FILTER(STR(?xda_s) = "held") }`;
+  pre.push(`    FILTER NOT EXISTS { ${HOLD} }`, `    FILTER NOT EXISTS { ${AMBIG} }`);
+  dBinds.push(nb(`IF(EXISTS { ${HOLD} } || EXISTS { ${AMBIG} }, ${JSON.stringify(POSTSEQ_TERMS.DISPATCH_HELD_CODE)}, ?u)`, 'reason'));
+  bIns.push(`  ${OP} ${EX.reason} ?n_reason .`);
 }
 
 function compilePostseqReserve(c, digest) {
@@ -2637,6 +2667,7 @@ function compileSettle(c, digest) {
     pre.push(`    ${POST} ${ref(TM.type)} ${ref(TM.Comment)} .`, `    FILTER NOT EXISTS { ${POST} ${ref(TM.type)} ${ref(TM.RedactedPost)} }`);
     if (!S.origin.consistent) pre.push('    FILTER(false)');   // the payload is not this slot's frozen content
   }
+  dispatchHoldClauses({ obligationId: S.obligationId, OP, pre, dBinds, bIns });   // #1749 A8: either transition settles a dispatch
   const next = S.transition === 'publish' ? 'published' : 'blocked';
   bDel.push(`  ${v(OB)} ${T.status} ${v(strLit('pending'))} .`);
   bIns.push(`  ${v(OB)} ${T.status} ${v(strLit(next))} .`);
