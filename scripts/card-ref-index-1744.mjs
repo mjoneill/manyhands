@@ -4,6 +4,7 @@
  *
  *   node scripts/card-ref-index-1744.mjs --executor <url> --dataset <id> --backfill   write, then verify
  *   node scripts/card-ref-index-1744.mjs --executor <url> --dataset <id> --verify     verify only, write nothing
+ *   node scripts/card-ref-index-1744.mjs --executor <url> --dataset <id> --verify-and-latch   the SCHEDULED check (below)
  *
  * Run with card WRITERS STOPPED (F3: "perform the guarded complete backfill with writers quiesced"). It:
  *   1. removes the completion marker, so the index is NOT USABLE while it runs (every index-dependent write refuses);
@@ -14,9 +15,21 @@
  *      orphan, no duplicate watermark) and only then writes the marker `complete true`.
  * Output: `cards <n>` then `COMPLETE` and exit 0, or `REFUSED <CODE> <why>` and exit 1. The marker is never written over a
  * failed verification. A fresh empty board gets an explicit, verified empty index the same way (F3).
+ *
+ * --verify-and-latch (contract amendment, rulings 46773/46781; the daily and per-deploy schedule): the FULL JSON check at
+ * one consistent store position (core/card-ref-index-verify.mjs). A violation LATCHES the marker `complete "false"` with
+ * its reason and time, and every index layer then refuses as built (boot, required-at-runtime, the marker-keyed guard).
+ * It never repairs and never re-opens a latched marker: recovery is an explicit --backfill with writers stopped.
+ *   exit 0  COMPLETE                     the index is exact (a latched marker stays latched: exit 1, LATCHED)
+ *   exit 1  LATCHED <n> violation(s)     the latch is written AND read back as false
+ *   exit 2  CLOSURE UNCONFIRMED <why>    a violation was found but the latch could not be confirmed, or the executor could
+ *                                        not be read: NEVER reported as fail-closed
+ *   exit 3  UNSTABLE                     the store never held still for a consistent read; nothing judged, nothing written
+ * --verify stays strictly read-only: it reports the same statuses and writes nothing.
  */
 import { BOOKKEEPING_GRAPH } from '../core/graph-vocab.mjs';
-import { CRI, CARD_REF_INDEX_NS, cardNames, jsonDigest, coverageTriplesText, markerTripleText } from '../core/card-ref-index.mjs';
+import { CRI, CARD_REF_INDEX_NS, coverageTriplesText, markerTripleText } from '../core/card-ref-index.mjs';
+import { verifyIndex, liveCardsSparql } from '../core/card-ref-index-verify.mjs';
 
 const BK = BOOKKEEPING_GRAPH;
 const RS = 'https://scrumboard.local/ns#';
@@ -27,6 +40,7 @@ const arg = (n) => { const i = process.argv.indexOf(n); return i > 0 ? process.a
 const base = String(arg('--executor') || '').replace(/\/+$/, '');
 const dataset = arg('--dataset');
 const WRITE = process.argv.includes('--backfill');
+const LATCH = process.argv.includes('--verify-and-latch');
 class Refused extends Error { constructor(code, why) { super(`REFUSED ${code} ${why}`); } }
 const refuse = (code, why) => { throw new Refused(code, why); };
 
@@ -43,45 +57,11 @@ async function update(sparql, tag) {
   if (!r.ok) refuse('WRITE_FAILED', `${tag}: ${r.status} ${(await r.text()).slice(0, 200)}`);
 }
 
-const liveCards = async () => (await query(`SELECT ?c ?v ?j WHERE { ?c a <${RS}Card> . GRAPH <${BK}> { ?c <${VER}> ?v ; <${RS}entityJson> ?j } }`))
+const liveCards = async () => (await query(liveCardsSparql))
   .map((b) => ({ iri: b.c.value, id: b.c.value.slice(ENTITY.length), ver: Number(b.v.value), json: b.j.value }));
 
-/** Every invariant violation, by name; [] means the index is exact. */
-async function violations() {
-  const bad = [];
-  const cards = await liveCards();
-  const byIri = new Map();
-  for (const c of cards) { if (byIri.has(c.iri)) bad.push(`card ${c.id} has more than one version or JSON`); byIri.set(c.iri, c); }
-  const cov = await query(`SELECT ?s ?p ?o WHERE { GRAPH <${BK}> { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "${CARD_REF_INDEX_NS}card/")) } }`);
-  const nodes = new Map();
-  for (const b of cov) {
-    const n = nodes.get(b.s.value) || { versions: [], digests: [], names: [], counts: [], sums: [], lists: [], other: [] };
-    if (b.p.value === CRI.indexedVersion) n.versions.push(b.o); else if (b.p.value === CRI.indexedJsonDigest) n.digests.push(b.o);
-    else if (b.p.value === CRI.namesCount) n.counts.push(b.o); else if (b.p.value === CRI.namesSum) n.sums.push(b.o);
-    else if (b.p.value === CRI.namesShortId) n.names.push(b.o); else if (b.p.value === CRI.namesList) n.lists.push(b.o); else n.other.push(b.p.value);
-    nodes.set(b.s.value, n);
-  }
-  const XSD_INT = 'http://www.w3.org/2001/XMLSchema#integer';
-  for (const c of cards) {
-    const n = nodes.get(CRI.card(c.id));
-    if (!n) { bad.push(`card ${c.id} has no coverage node`); continue; }
-    if (n.versions.length !== 1 || n.versions[0].datatype !== XSD_INT || Number(n.versions[0].value) !== c.ver) bad.push(`card ${c.id}: indexedVersion is not exactly ${c.ver}`);
-    if (n.digests.length !== 1 || n.digests[0].datatype || n.digests[0].value !== jsonDigest(c.json)) bad.push(`card ${c.id}: indexedJsonDigest is not exactly the stored JSON's`);
-    const want = cardNames(JSON.parse(c.json)).join(',');
-    if (n.names.some((x) => x.datatype !== XSD_INT)) bad.push(`card ${c.id}: a namesShortId is not an xsd:integer`);
-    const got = n.names.map((x) => Number(x.value)).sort((a, b) => a - b).join(',');
-    if (got !== want) bad.push(`card ${c.id}: names {${got}}, it names {${want}}`);
-    const ws = cardNames(JSON.parse(c.json));
-    if (n.counts.length !== 1 || Number(n.counts[0].value) !== ws.length || n.sums.length !== 1 || Number(n.sums[0].value) !== ws.reduce((a, b) => a + b, 0)) bad.push(`card ${c.id}: the names' count/sum watermark is not exact`);
-    if (n.lists.length !== 1 || n.lists[0].datatype || n.lists[0].value !== want) bad.push(`card ${c.id}: namesList is not exactly "${want}"`);
-    if (n.other.length) bad.push(`card ${c.id}: unexpected predicates ${n.other.join(' ')}`);
-  }
-  for (const s of nodes.keys()) if (!byIri.has(`${ENTITY}${s.slice(`${CARD_REF_INDEX_NS}card/`.length)}`)) bad.push(`orphan coverage ${s}`);
-  return { bad, cards };
-}
-
 async function main() {
-  if (!base || !dataset) refuse('USAGE', 'node scripts/card-ref-index-1744.mjs --executor <url> --dataset <id> --backfill|--verify');
+  if (!base || !dataset) refuse('USAGE', 'node scripts/card-ref-index-1744.mjs --executor <url> --dataset <id> --backfill|--verify|--verify-and-latch');
   const h = await health();
   if (h.datasetId !== dataset) refuse('WRONG_DATASET', `the executor serves ${h.datasetId}, not ${dataset}`);
   if (WRITE) {
@@ -103,7 +83,10 @@ WHERE {\n  ${guard}\n  OPTIONAL { VALUES ?s { ${subjects} } GRAPH <${BK}> { ?s ?
       refuse('CARDS_CHANGED', 'a card changed during the backfill: stop the writers and run it again (the marker stays absent)');
     }
   }
-  const { bad, cards } = await violations();
+  const v = await verifyIndex({ query, health });
+  if (LATCH) return latch(v);
+  if (v.status === 'UNSTABLE') { console.log('UNSTABLE the store never held still for a consistent read; nothing judged'); process.exit(3); }
+  const { bad, cards } = v;
   if (bad.length) refuse('INDEX_INCOMPLETE', `${bad.length} violation(s): ${bad.slice(0, 5).join('; ')}`);
   if (WRITE) await update(`INSERT DATA { GRAPH <${BK}> { ${markerTripleText()} } }`, 'mark');
   const marks = await query(`SELECT ?v WHERE { GRAPH <${BK}> { <${CRI.marker}> <${CRI.complete}> ?v } }`);
@@ -112,4 +95,30 @@ WHERE {\n  ${guard}\n  OPTIONAL { VALUES ?s { ${subjects} } GRAPH <${BK}> { ?s ?
   console.log('COMPLETE');
 }
 
-main().then(() => process.exit(0), (e) => { console.log(e instanceof Refused ? e.message : `REFUSED ERROR ${String(e?.message || e).slice(0, 300)}`); process.exit(1); });
+/** --verify-and-latch: a violation latches the marker false and is confirmed by read-back, or reported UNCONFIRMED. */
+async function latch(v) {
+  if (v.status === 'UNSTABLE') { console.log('UNSTABLE the store never held still for a consistent read; nothing judged, nothing written'); process.exit(3); }
+  if (v.status === 'EXACT') {
+    if (v.marker.length === 1 && v.marker[0] === 'true') { console.log(`cards ${v.cards.length}`); console.log('COMPLETE'); process.exit(0); }
+    // an exact index under a latched (or absent) marker stays as it is: re-opening is --backfill's job, with writers stopped
+    console.log(`LATCHED the marker reads ${JSON.stringify(v.marker)}; it stays until an explicit --backfill`); process.exit(1);
+  }
+  const reason = `${v.bad.length} violation(s) at commitSeq ${v.commitSeq}: ${v.bad.slice(0, 5).join('; ')}`.slice(0, 900);
+  const at = new Date().toISOString();
+  try {
+    await update(`DELETE { GRAPH <${BK}> { <${CRI.marker}> ?p ?o } } INSERT { GRAPH <${BK}> { <${CRI.marker}> <${CRI.complete}> "false"^^<http://www.w3.org/2001/XMLSchema#boolean> ; <${CRI.latchReason}> ${JSON.stringify(reason)} ; <${CRI.latchedAt}> "${at}"^^<http://www.w3.org/2001/XMLSchema#dateTime> } } WHERE { OPTIONAL { GRAPH <${BK}> { <${CRI.marker}> ?p ?o } } }`, 'latch');
+    const back = (await query(`SELECT ?v WHERE { GRAPH <${BK}> { <${CRI.marker}> <${CRI.complete}> ?v } }`)).map((b) => b.v.value);
+    if (back.length !== 1 || back[0] !== 'false') throw new Error(`the marker reads ${JSON.stringify(back)} after the latch`);
+  } catch (e) {
+    console.log(`CLOSURE UNCONFIRMED ${reason} | the latch could not be confirmed: ${String(e?.message || e).slice(0, 200)}`);
+    process.exit(2);
+  }
+  console.log(`LATCHED ${reason}`);
+  process.exit(1);
+}
+
+main().then(() => process.exit(0), (e) => {
+  // with --verify-and-latch, a run that could not even read the executor has not failed closed: it is UNCONFIRMED
+  if (LATCH) { console.log(`CLOSURE UNCONFIRMED the verification did not complete: ${String(e?.message || e).slice(0, 300)}`); process.exit(2); }
+  console.log(e instanceof Refused ? e.message : `REFUSED ERROR ${String(e?.message || e).slice(0, 300)}`); process.exit(1);
+});

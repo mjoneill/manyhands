@@ -30,6 +30,9 @@ export const CRI = Object.freeze({
   namesList: `${CARD_REF_INDEX_NS}namesList`,
   marker: `${CARD_REF_INDEX_NS}coverage`,
   complete: `${CARD_REF_INDEX_NS}complete`,
+  // #1744 (ruling 46781) a scheduled verify that finds a violation LATCHES the marker false, with its reason and time
+  latchReason: `${CARD_REF_INDEX_NS}latchReason`,
+  latchedAt: `${CARD_REF_INDEX_NS}latchedAt`,
 });
 const XSD_INT = 'http://www.w3.org/2001/XMLSchema#integer';
 const XSD_BOOL = 'http://www.w3.org/2001/XMLSchema#boolean';

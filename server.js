@@ -13432,6 +13432,20 @@ if (CARDS_UNIT) {
   // whose index is absent, unfinished or damaged would refuse every create and delete at runtime; boot is the cheapest place
   // to say so, once, to the operator. A check that cannot run is a refusal too: an unproven index is not a healthy one.
   if (CARD_REF_INDEX_ENFORCE) {
+    // the FULL JSON verification before every enforced start (contract amendment, rulings 46773/46781): the health query
+    // below proves the index internally consistent; this proves its name sets match the cards' stored JSON
+    const { verifyIndex } = await import('./core/card-ref-index-verify.mjs');
+    const vc = createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: 60000, label: 'card-ref-index-verify' });
+    let full;
+    try {
+      full = await verifyIndex({ query: async (q) => { const r = await vc.query(q); if (!r.ok) throw new Error(r.reason); return r.rows; },
+        health: async () => (await fetch(`${process.env.SCRUM_GRAPH_EXECUTOR_URL}/health`)).json() });
+    } catch (e) { full = { status: 'UNAVAILABLE', bad: [String(e?.message || e)] }; }
+    if (full.status !== 'EXACT' || full.marker.length !== 1 || full.marker[0] !== 'true') {
+      const why = full.status === 'EXACT' ? `the completion marker reads ${JSON.stringify(full.marker)}` : full.status === 'VIOLATED' ? `${full.bad.length} violation(s) of the full JSON check: ${full.bad.slice(0, 3).join('; ')}` : full.status === 'UNSTABLE' ? 'the store never held still for a consistent full check' : `the full check could not run: ${full.bad[0]}`;
+      console.error(`#1744 the card reference index failed its full verification (${why}) — refusing to start${ORIGIN_EXECUTOR ? ` in SCRUM_BOARD_DOCUMENT=${BOARD_DOCUMENT}` : ' with SCRUM_CARD_REF_INDEX=enforce'}. Run scripts/card-ref-index-1744.mjs --backfill with writers stopped, then --verify`);
+      process.exit(1);
+    }
     const incomplete = await cardRefIndexIncomplete();
     if (incomplete !== false) {
       console.error(`#1744 the card reference index is ${incomplete === null ? 'not checkable (the executor did not answer the health query)' : 'absent, unfinished or damaged (no completion marker, or the health query finds a violation)'} — refusing to start${ORIGIN_EXECUTOR ? ` in SCRUM_BOARD_DOCUMENT=${BOARD_DOCUMENT}` : ' with SCRUM_CARD_REF_INDEX=enforce'}. Run scripts/card-ref-index-1744.mjs --backfill with writers stopped, then --verify`);
