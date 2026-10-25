@@ -13,7 +13,8 @@
  *
  * ROWS ONLY; the reconciliation step isn't built. Restore here is the supported path: copy the stopped store, start it with
  * --promote-epoch (#1559). The allocator is seeded by hand into the bookkeeping graph, as the slice-1 rows do.
- *   B0  CONTROL: the restored bookkeeping graph is byte-identical to the backup (allocator, reservations, receipts)
+ *   B0  CONTROL: the restored allocator and reservations are byte-identical to the backup's; the promotion adds its hold,
+ *       and the allocator reads RECOVERY_HOLD until reconciled (contract v2 V2-1/V2-2, as frozen)
  *   B1  an old-epoch replay of a reservation made BEFORE the backup answers with its ORIGINAL numbers (the receipt survived)
  *   B2  an old-epoch replay of the reservation LOST with the live store is RECONCILE_REQUIRED, never re-issued
  *   B3  RED today: a NEW reservation from a fresh client on the promoted restore is NOT allocated (it would reuse a lost number);
@@ -71,7 +72,9 @@ const bk = async (x) => {
   const t = (b) => `${b.type}:${b.value}:${b.datatype || ''}`;
   return (await r.json()).results.bindings.map((b) => [t(b.s), t(b.p), t(b.o)].join(' ')).sort();
 };
-const isPostseq = (line) => line.startsWith('uri:urn:ex:postseq/');
+// the RecoveryHold (contract v2 V2-1) lives under the same prefix but is written BY the promotion, so it is compared on its own
+const isHold = (line) => line.startsWith('uri:urn:ex:postseq/recovery-hold');
+const isPostseq = (line) => line.startsWith('uri:urn:ex:postseq/') && !isHold(line);
 const seqsOf = async (c, items) => {
   const out = [];
   for (const it of items) {
@@ -120,8 +123,9 @@ test('#1749 (B0) CONTROL: a promoted restore\'s allocator and reservations are b
     assert.ok(s.postseqAtBackup.length > 0, 'PRECONDITION: the comparison is not of two empty sets');
     // promotion rewrites the store's own epoch marker, so the comparison is of the postseq records, all of them, by content
     assert.deepEqual((await bk(x)).filter(isPostseq), s.postseqAtBackup, 'allocator and reservations restored exactly');
-    assert.deepEqual(await M.readPostSeqAllocator(client(x)), { ok: true, allocator: { postSeqEpoch: EPOCH, nextPostSeq: 102, version: 2 } },
-      'the allocator reads as it was at the backup (next 102: B\'s number is unknown to it)');
+    assert.ok((await bk(x)).some(isHold), 'the promotion wrote its RecoveryHold (V2-1), beside the restored records');
+    assert.deepEqual(await M.readPostSeqAllocator(client(x)), { ok: false, status: 'RECOVERY_HOLD' },
+      'the allocator does not read as usable until reconciled (H6, V2-2): its next, 102, may be the lost store\'s number');
   } finally { await stopX(x); }
 });
 
