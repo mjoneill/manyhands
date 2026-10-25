@@ -294,11 +294,18 @@ async function readPost(X, postId) {
   };
 }
 
-/** Sorted-key JSON: the canonical form of a captured source record, so sourceEntryJson/sourceOriginJson compare exactly. */
+/**
+ * The canonical form of a captured source record (#1747's settled rule): object keys sorted recursively in JS string order,
+ * array order and every scalar kept exactly (no trimming or normalisation), serialised once. An unsupported value (undefined,
+ * a function, a non-finite number, a bigint) is REFUSED, never coerced. Canonical JSON makes no claim of byte identity with
+ * the source file's whitespace; the file's own digest is in the capture manifest.
+ */
 function canonicalJson(v) {
+  if (v === null || typeof v === 'string' || typeof v === 'boolean') return JSON.stringify(v);
+  if (typeof v === 'number') { if (!Number.isFinite(v)) refuse('UNSUPPORTED_VALUE', 'a non-finite number in a source record'); return JSON.stringify(v); }
   if (Array.isArray(v)) return `[${v.map(canonicalJson).join(',')}]`;
-  if (v && typeof v === 'object') return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(v[k])}`).join(',')}}`;
-  return JSON.stringify(v);
+  if (typeof v === 'object' && Object.getPrototypeOf(v) === Object.prototype) return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(v[k])}`).join(',')}}`;
+  refuse('UNSUPPORTED_VALUE', `a ${typeof v} in a source record`);
 }
 
 /** #1745's manifest: a header line, then comma-separated rows. Fields hold no commas (ids, ISO times, classes, short notes). */
