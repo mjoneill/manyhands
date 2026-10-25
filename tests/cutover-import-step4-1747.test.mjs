@@ -74,6 +74,7 @@ import { POSTSEQ_TERMS, ORIGIN_TERMS, BOOKKEEPING_GRAPH, POSTSEQ_NS, ORIGIN_NS }
 const REPO = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const IMPORTER = path.join(REPO, 'scripts', 'cutover-import-1629.mjs');
 const CANDIDATE_TOOL = path.join(REPO, 'scripts', 'cutover-candidate-1629.mjs');
+const CAPTURE_TOOL = path.join(REPO, 'scripts', 'cutover-capture-1629.mjs');
 const MIGRATE_COLUMNS = path.join(REPO, 'scripts', 'migrate-columns-1639.mjs');
 const SKIP = HAVE_PY ? false : 'UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)';
 const T = { skip: SKIP, timeout: 300000 };
@@ -311,6 +312,7 @@ async function world(body, { prepare = () => {}, manifest = (rows) => rows, mani
     await seedAnnounce(src, PUB.post);
     for (const o of ORD) await seedOrdinary(src, o);
     for (const p of extraSourcePosts) await seedLegacy(src, p);
+    const srcHealth = await health(src);   // r8: the stopped source's LAST /health, as step 1 saves it for the capture tool
     await killExecutor(src); src = null;
     const candStore = path.join(dir, 'candidate-store');
     fs.cpSync(srcStore, candStore, { recursive: true });
@@ -329,7 +331,7 @@ async function world(body, { prepare = () => {}, manifest = (rows) => rows, mani
       const m = await run([CANDIDATE_TOOL, '--capture-manifest', captureManifest, '--executor', cand.baseUrl], {});
       assert.equal(m.status, 0, `the step-3 tool wrote the CandidateMarker (exit ${m.status}: ${(m.err || m.out).slice(-300)})`);
     }
-    const w = { dir, srcStore, cand, docFile, outboxManifest, captureManifest, doc };
+    const w = { dir, srcStore, cand, docFile, outboxManifest, captureManifest, doc, srcHealth };
     if (afterSeal) await afterSeal(w);
     return await body(w);
   } finally {
@@ -1224,6 +1226,24 @@ test('#1747 (S5-2, r7) a READY replay RE-VERIFIES: a reservation tampered after 
     assert.match(r2.out, new RegExp(`^(?:HOLD |REFUSED )?INCOMPLETE[^\n]*${U3[0].postId}[^\n]*postSeq`, 'm'), `a named INCOMPLETE for the tampered reservation's postSeq (${r2.out.slice(-200)})`);
     assert.deepEqual(await readyMarker(w.cand), m0, 'the READY marker is untouched');
   });
+});
+
+// ── r8: step 2's REAL output through steps 3, 4 and 5 on one fixture: the manifest the capture tool writes is one the others accept ──
+test('#1747 (S2-chain, r8) capture → step 3 marks → step 4 COMPLETE → --ready READY, all from the manifest the CAPTURE TOOL wrote', T, async () => {
+  await world(async (w) => {
+    const ident = path.join(w.dir, 'identity.json'); fs.writeFileSync(ident, JSON.stringify(w.srcHealth));
+    const cap = path.join(w.dir, 'captured.json');
+    const c = await run([CAPTURE_TOOL, '--source-store', w.srcStore, '--board-data', w.docFile, '--outbox-manifest', w.outboxManifest, '--identity', ident, '--out', cap], {});
+    assert.equal(c.status, 0, `step 2 CAPTURED (exit ${c.status}: ${c.out.slice(-200)} ${c.err.slice(-200)})`);
+    assert.equal(c.out.match(/^CAPTURED ([0-9a-f]{64})$/m)?.[1], shaFile(cap), 'the printed sha is the manifest\'s');
+    const m = await run([CANDIDATE_TOOL, '--capture-manifest', cap, '--executor', w.cand.baseUrl], {});
+    assert.equal(m.status, 0, `step 3 marks the candidate for THIS manifest (exit ${m.status}: ${m.out.slice(-200)})`);
+    const r = await importer(w, { applyIt: true, capture: cap });
+    assert.ok(r.complete, `step 4 COMPLETE (${r.out.slice(-240)})`);
+    const rd = await ready(w, { capture: cap });
+    assert.equal(rd.status, 0, `step 5 READY (exit ${rd.status}: ${rd.out.slice(-200)})`);
+    assert.match(rd.out, /^READY /m, 'READY, by name');
+  }, { mark: false });
 });
 
 test('#1747 (S4-N) no importer run called the notify endpoint (and the importer really ran)', () => {
