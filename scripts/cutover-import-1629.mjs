@@ -315,11 +315,28 @@ function canonicalJson(v) {
   refuse('UNSUPPORTED_VALUE', `a ${typeof v} in a source record`);
 }
 
-/** #1745's manifest: a header line, then comma-separated rows. Fields hold no commas (ids, ISO times, classes, short notes). */
+/**
+ * #1745's manifest: a header line, then rows. A field may be "quoted" (with "" for a quote); an unquoted LAST column takes the
+ * rest of the line, because the note is free text and may hold commas (measured: a note was cut at its comma).
+ */
 function parseCsv(text) {
   const [head, ...lines] = text.split('\n').filter((l) => l.length);
   const cols = head.split(',');
-  return lines.map((l) => { const v = l.split(','); return Object.fromEntries(cols.map((c, i) => [c, v[i] ?? ''])); });
+  const split = (line) => {
+    const out = []; let i = 0;
+    while (out.length < cols.length - 1 && i <= line.length) {
+      if (line[i] === '"') {
+        let v = ''; i++;
+        while (i < line.length && !(line[i] === '"' && line[i + 1] !== '"')) { v += line[i] === '"' ? (i++, '"') : line[i]; i++; }
+        out.push(v); i += 2;
+      } else { const j = line.indexOf(',', i); out.push(j < 0 ? line.slice(i) : line.slice(i, j)); i = j < 0 ? line.length + 1 : j + 1; }
+    }
+    let last = i <= line.length ? line.slice(i) : '';
+    if (last.length > 1 && last.startsWith('"') && last.endsWith('"')) last = last.slice(1, -1).replaceAll('""', '"');
+    out.push(last);
+    return out;
+  };
+  return lines.map((l) => { const v = split(l); return Object.fromEntries(cols.map((c, k) => [c, v[k] ?? ''])); });
 }
 
 process.exit(await main());
