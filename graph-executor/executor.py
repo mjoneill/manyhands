@@ -61,6 +61,12 @@ FLOOR_INSTALLER = 'install-write-floor'
 # the allocator guard refuses while it exists; only --reconcile-postseq <file>, a maintenance start on a stopped store,
 # clears it, writing a ReconciliationRecord. The hold and every record are PROTECTED from /update (HOLD_PROTECTED).
 PS = 'urn:ex:postseq/'
+# #1749 (A7 v2, P2) the RECOVERY GRAPH: the hold and every ReconciliationRecord live here and nowhere else. It is
+# AUTHORITATIVE: every reader reads only this graph, so a hold-shaped quad in any other graph is inert. Only
+# --promote-epoch and --reconcile-postseq write it, at start; every /update is refused if it would change it (P1).
+RG = PS + 'recovery'
+def in_rg(pattern):
+    return f'GRAPH <{RG}> {{ {pattern} }}'
 XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer'
 XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string'
 HOLD_S = PS + 'recovery-hold'
@@ -485,11 +491,14 @@ class Executor:
 
     # ── #1749 the recovery hold ──────────────────────────────────────────────────────────────────────────────────────
 
+    def _rg_values(self, subject, predicate):
+        return [r['v'] for r in self.store.query(f'SELECT ?v WHERE {{ {in_rg(f"<{subject}> <{predicate}> ?v")} }}')]
+
     def _bk_values(self, subject, predicate):
         return [r['v'] for r in self.store.query(f'SELECT ?v WHERE {{ {in_bk(f"<{subject}> <{predicate}> ?v")} }}')]
 
     def _hold_present(self):
-        return bool(self.store.query(f'ASK {{ {in_bk(f"<{HOLD_S}> ?p ?o")} }}'))
+        return bool(self.store.query(f'ASK {{ {in_rg(f"<{HOLD_S}> ?p ?o")} }}'))
 
     def _has_allocator(self):
         return bool(self.store.query(f'ASK {{ {in_bk(f"<{ALLOC_S}> a <{ALLOC_T}>")} }}'))
@@ -523,9 +532,9 @@ class Executor:
         hw = self._restored_high_water()
         prior_epoch = None
         if prior:
-            for t in self._bk_values(HOLD_S, HOLD_HIGH_WATER):
+            for t in self._rg_values(HOLD_S, HOLD_HIGH_WATER):
                 hw = max(hw, self._int_term(t, 'the prior hold\'s restoredHighWater'))
-            epochs = self._bk_values(HOLD_S, HOLD_EPOCH)
+            epochs = self._rg_values(HOLD_S, HOLD_EPOCH)
             if len(epochs) != 1 or not isinstance(epochs[0], px.Literal):
                 raise SystemExit(f'REFUSED: HOLD_UNSOUND: the recovery hold being replaced has {len(epochs)} epoch values '
                                  '(expected exactly one literal); repair it offline before promoting')
@@ -533,41 +542,32 @@ class Executor:
         if hw > MAX_SAFE:
             raise SystemExit(f'REFUSED: the restored high-water {hw} is not a safe integer')
         prior_t = f' ; <{HOLD_PRIOR_EPOCH}> {json.dumps(prior_epoch)}' if prior_epoch is not None else ''
-        return (f' ;\nDELETE WHERE {{ GRAPH <{BK}> {{ <{HOLD_S}> ?hp ?ho }} }} ;\n'
-                f'INSERT DATA {{ GRAPH <{BK}> {{ <{HOLD_S}> a <{HOLD_T}> ; <{HOLD_EPOCH}> {json.dumps(new_epoch)} ; '
+        return (f' ;\nDELETE WHERE {{ GRAPH <{RG}> {{ <{HOLD_S}> ?hp ?ho }} }} ;\n'
+                f'INSERT DATA {{ GRAPH <{RG}> {{ <{HOLD_S}> a <{HOLD_T}> ; <{HOLD_EPOCH}> {json.dumps(new_epoch)} ; '
                 f'<{HOLD_INCARNATION}> {json.dumps(new_inc)} ; <{HOLD_COMMIT_SEQ}> "{int(commit_seq)}"^^<{XSD_INTEGER}> ; '
                 f'<{HOLD_HIGH_WATER}> "{hw}"^^<{XSD_INTEGER}>{prior_t} }} }}')
 
-    def _protected_triples(self):
-        """#1749 every bookkeeping triple on a PROTECTED subject: the hold, and every typed ReconciliationRecord."""
-        q = (f'SELECT ?s ?p ?o WHERE {{ GRAPH <{BK}> {{ {{ <{HOLD_S}> ?p ?o BIND(<{HOLD_S}> AS ?s) }} UNION '
-             f'{{ ?s a <{REC_T}> . ?s ?p ?o }} }} }}')
-        return [(r['s'], r['p'], r['o']) for r in self.store.query(q)]
+    def _recovery_snapshot(self):
+        """#1749 (P1) every quad of the recovery graph, read under the update lock before an /update (empty when unheld)."""
+        return [(r['s'], r['p'], r['o']) for r in self.store.query(f'SELECT ?s ?p ?o WHERE {{ {in_rg("?s ?p ?o")} }}')]
 
-    def _hold_violated(self, snapshot):
-        """#1749 (A1) the pattern that matches when the protected subjects are not EXACTLY `snapshot` after an update: a
-        triple of it gone, a triple added on the hold or on a record, or a new subject typed ReconciliationRecord."""
-        rows = [(sparql_term(s), sparql_term(p), sparql_term(o)) for s, p, o in snapshot]
-        rows = [r for r in rows if None not in r]
-        branches = [f'{{ FILTER NOT EXISTS {{ GRAPH <{BK}> {{ {s} {p} {o} }} }} }}' for s, p, o in rows]
-        subjects = sorted({f'<{HOLD_S}>', *(s for s, _, _ in rows)})
-        for k, subj in enumerate(subjects):
-            known = [f'(sameTerm(?hp{k}, {p}) && sameTerm(?ho{k}, {o}))' for s, p, o in rows if s == subj]
-            keep = f' FILTER(!({" || ".join(known)}))' if known else ''
-            branches.append(f'{{ GRAPH <{BK}> {{ {subj} ?hp{k} ?ho{k} }}{keep} }}')
-        records = sorted({s for s, p, o in rows if p == f'<{RDF_TYPE}>' and o == f'<{REC_T}>'})
-        keep = f' FILTER(?hr NOT IN ({", ".join(records)}))' if records else ''
-        branches.append(f'{{ GRAPH <{BK}> {{ ?hr a <{REC_T}> }}{keep} }}')
+    def _recovery_changed(self, snapshot):
+        """#1749 (P1) the pattern that matches when the recovery graph is not EXACTLY `snapshot`: a different quad count, or
+        a snapshot quad gone. Protection by EFFECT: it reads the state the update produced, so every operation form is caught
+        by what it does (DATA, WHERE with a computed GRAPH ?g, CLEAR/DROP, MOVE/COPY/ADD, LOAD), never by the request text."""
+        terms = [(sparql_term(a), sparql_term(b), sparql_term(c)) for a, b, c in snapshot]
+        branches = [f'{{ {{ SELECT (COUNT(*) AS ?hn) WHERE {{ GRAPH <{RG}> {{ ?hs ?hp ?ho }} }} }} FILTER(?hn != {len(snapshot)}) }}']
+        branches += [f'{{ FILTER NOT EXISTS {{ GRAPH <{RG}> {{ {a} {b} {c} }} }} }}' for a, b, c in terms if None not in (a, b, c)]
         return ' UNION '.join(branches)
 
     def _guard_ops_hold(self, snapshot):
         return (f'INSERT {{ GRAPH <{HOLD_VIOLATION}> {{ <{HOLD_VIOLATION}> <{HOLD_VIOLATION}> <{HOLD_VIOLATION}> }} }} '
-                f'WHERE {{ {self._hold_violated(snapshot)} }} ;\n'
+                f'WHERE {{ {self._recovery_changed(snapshot)} }} ;\n'
                 f'CREATE GRAPH <{HOLD_VIOLATION}> ;\nDROP GRAPH <{HOLD_VIOLATION}>')
 
     def _hold_rows(self):
         """The stored hold as {predicate: [terms]}, or None when there is none."""
-        rows = list(self.store.query(f'SELECT ?p ?o WHERE {{ {in_bk(f"<{HOLD_S}> ?p ?o")} }}'))
+        rows = list(self.store.query(f'SELECT ?p ?o WHERE {{ {in_rg(f"<{HOLD_S}> ?p ?o")} }}'))
         if not rows:
             return None
         out = {}
@@ -585,7 +585,7 @@ class Executor:
         hold = self._hold_rows()
         # (1) no hold: the replay branch. A record is consulted ONLY here, so an old file can never clear a new hold.
         if hold is None:
-            if bool(self.store.query(f'ASK {{ {in_bk(f"<{record}> a <{REC_T}> ; <{REC["fileSha256"]}> {json.dumps(digest)}")} }}')):
+            if bool(self.store.query(f'ASK {{ {in_rg(f"<{record}> a <{REC_T}> ; <{REC["fileSha256"]}> {json.dumps(digest)}")} }}')):
                 return {'result': 'ALREADY', 'record': record}
             raise ReconcileRefused('NO_HOLD', 'this store holds no recovery hold, and no ReconciliationRecord for this file')
         def one(pred, kind):
@@ -645,13 +645,14 @@ class Executor:
                f'<{REC["clearedHoldEpoch"]}> {json.dumps(stored["epoch"])} ; <{REC["clearedHoldIncarnation"]}> {json.dumps(stored["incarnation"])} ; '
                f'<{REC["clearedHoldCommitSeq"]}> {I(stored["restoredCommitSeq"])} ; <{REC["clearedHoldHighWater"]}> {I(hw)} ; '
                f'<{REC["priorNextPostSeq"]}> {I(nxt)}')
-        if bool(self.store.query(f'ASK {{ {in_bk(f"<{record}> ?p ?o")} }}')):
+        if bool(self.store.query(f'ASK {{ {in_rg(f"<{record}> ?p ?o")} }}')):
             raise ReconcileRefused('BAD_FILE', f'a record already sits at {record} while a hold is present; repair it offline')
         try:
             self.store.update(
-                f'DELETE DATA {{ GRAPH <{BK}> {{ {hold_del} . <{ALLOC_S}> <{ALLOC_NEXT}> {sparql_term(nxt_t)} . '
+                f'DELETE DATA {{ GRAPH <{RG}> {{ {hold_del} }} GRAPH <{BK}> {{ <{ALLOC_S}> <{ALLOC_NEXT}> {sparql_term(nxt_t)} . '
                 f'<{ALLOC_S}> <{ALLOC_VERSION}> {sparql_term(ver_t)} }} }} ;\n'
-                f'INSERT DATA {{ GRAPH <{BK}> {{ <{ALLOC_S}> <{ALLOC_NEXT}> {I(R)} . <{ALLOC_S}> <{ALLOC_VERSION}> {I(ver + 1)} . {rec} }} }}')
+                f'INSERT DATA {{ GRAPH <{BK}> {{ <{ALLOC_S}> <{ALLOC_NEXT}> {I(R)} . <{ALLOC_S}> <{ALLOC_VERSION}> {I(ver + 1)} }} '
+                f'GRAPH <{RG}> {{ {rec} }} }}')
             self.store.flush()
         except OSError as e:
             raise SystemExit(f'REFUSED: the reconciliation write or its flush failed (durability fault; reconcile by reading the '
@@ -734,14 +735,16 @@ class Executor:
                 f'CREATE GRAPH <{FLOOR_VIOLATION}> ;\nDROP GRAPH <{FLOOR_VIOLATION}>')
 
     def _update_guarded(self, sparql):
-        """#1748 + #1749 one guarded, all-or-nothing update, never retried (a retry joined differently could fuse a body
-        that is invalid on its own with the guard into something valid, and report a false success). The recovery-hold
-        guard (A1) runs on EVERY update, floored or not: the body, then the floor's operations when a floor is installed,
-        then the hold's, joined exactly as _floor_guarded joins them."""
-        guarded = self._floor_guarded(sparql) if self.write_floor is not None else (
-            (lambda body: f'{body}\n;\n' if body.strip() else '')(sparql.rstrip().rstrip(';')))
+        """#1748 + #1749 (A7 v2 P1, P3 v3) one guarded, all-or-nothing update, run exactly ONCE and never retried (a retry
+        joined differently could fuse a body that is invalid on its own with the guard into something valid, and report a
+        false success). EVERY /update on EVERY store runs as the body, the `;` join of _floor_guarded, then the floor's
+        operations when a floor is installed, then the recovery graph's. Stated consequence (P3 v3): a body with no update
+        operation (comment-only, prologue-only) is the engine's parse error, a 500 with nothing applied, on every store.
+        The recovery snapshot is read here, inside the update lock (the executor's single-writer serialization)."""
+        body = sparql.rstrip().rstrip(';')
+        guarded = self._floor_guarded(sparql) if self.write_floor is not None else (f'{body}\n;\n' if body.strip() else '')
         sep = ' ;\n' if self.write_floor is not None else ''
-        guarded = f'{guarded}{sep}{self._guard_ops_hold(self._protected_triples())}'
+        guarded = f'{guarded}{sep}{self._guard_ops_hold(self._recovery_snapshot())}'
         try:
             self.store.update(guarded)
         except OSError:

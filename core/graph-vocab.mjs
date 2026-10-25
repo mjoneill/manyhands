@@ -169,6 +169,9 @@ export const POSTSEQ_TERMS = Object.freeze({
   // #1749 the RECOVERY HOLD: written by the executor's --promote-epoch on a store with an allocator, cleared only by its
   // --reconcile-postseq maintenance start. While it exists, the ONE allocator guard below does not bind (RECOVERY_HOLD).
   recoveryHold: psi('recovery-hold'),
+  // A7 v2 (P2): the hold and every ReconciliationRecord live in their OWN named graph, never in the bookkeeping graph.
+  // The compiler only READS it (in WHERE); only the executor's maintenance starts write it.
+  RECOVERY_GRAPH: psi('recovery'),
   RecoveryHold: psi('RecoveryHold'),
   RECOVERY_HOLD_CODE: 'RECOVERY_HOLD',
 });

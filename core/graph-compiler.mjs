@@ -410,9 +410,12 @@ export function staticCheck(sparql, opId) {
   if (/;\s*(INSERT|DELETE)/i.test(sparql)) errors.push('multi-operation request');
   // one plain DELETE { } INSERT { } WHERE { } request: no WITH / USING / FROM redirecting the default graph
   if (!/^DELETE \{\n[\s\S]*?\n\}\nINSERT \{\n[\s\S]*?\n\}\nWHERE \{\n/.test(sparql)) errors.push('not a plain DELETE/INSERT/WHERE request (WITH, USING and FROM are not accepted)');
-  // the only named graph anywhere in the request is the bookkeeping graph
+  // the only named graph anywhere in the request is the bookkeeping graph; #1749 (A7 v2) the recovery graph may be READ in WHERE
+  // (the allocator guard asks whether a hold exists) and is never a template's target
   for (const m of sparql.matchAll(/\bGRAPH\s+(\S+)\s*\{/g)) {
-    if (m[1] !== BK) errors.push(`named graph ${m[1]} is not accepted: the only named graph is ${BK}`);
+    if (m[1] === BK) continue;
+    if (m[1] === POSTSEQ_TERMS.RECOVERY_GRAPH && where.includes(m[0]) && !block('DELETE').join('\n').includes(m[0]) && !block('INSERT').join('\n').includes(m[0])) continue;
+    errors.push(`named graph ${m[1]} is not accepted: the only named graph is ${BK}`);
   }
   // WHERE: a bookkeeping predicate is read only inside GRAPH <bk> { … } (strip those blocks, then look for it in triple position)
   {
@@ -2433,7 +2436,7 @@ function allocationClauses({ items, N, OP, digest, v, pre, dBinds, bDel, bIns, t
   });
   // #1749 the RECOVERY HOLD: while a promoted restore is unreconciled, the allocator does not bind (both paths share this),
   // and the receipt names the refusal by code. A hold present means ?ok is unbound, so the code is only ever on a refusal.
-  const HOLD_HERE = `GRAPH ${[BK]} { ${POSTSEQ_TERMS.recoveryHold} ?${t}xh_p ?${t}xh_o }`;
+  const HOLD_HERE = `GRAPH ${POSTSEQ_TERMS.RECOVERY_GRAPH} { ${POSTSEQ_TERMS.recoveryHold} ?${t}xh_p ?${t}xh_o }`;
   pre.push(`    FILTER NOT EXISTS { ${HOLD_HERE} }`);
   dBinds.push(nb(`IF(EXISTS { ${HOLD_HERE} }, ${JSON.stringify(POSTSEQ_TERMS.RECOVERY_HOLD_CODE)}, ?u)`, 'reason'));
   bIns.push(`  ${OP} ${EX.reason} ?n_reason .`);

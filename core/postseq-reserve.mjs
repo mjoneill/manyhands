@@ -383,9 +383,11 @@ export async function readPostSeqReservation(client, postId) {
 export async function readPostSeqAllocator(client) {
   // #1749 a promoted restore that is not yet reconciled: the allocator is NOT usable, whatever it holds, so it is never
   // reported as if it were (the allocator guard refuses the same state with RECOVERY_HOLD)
-  const held = await client.ask(`ASK { GRAPH ${BK} { ${POSTSEQ_TERMS.recoveryHold} ?p ?o } }`);
+  // (read from the recovery graph only, A7 v2: a hold-shaped quad anywhere else is inert). The answer is exactly
+  // {ok:false, status:'RECOVERY_HOLD'}: the status names the state, and the remedy is executor --reconcile-postseq.
+  const held = await client.ask(`ASK { GRAPH ${POSTSEQ_TERMS.RECOVERY_GRAPH} { ${POSTSEQ_TERMS.recoveryHold} ?p ?o } }`);
   if (!held.ok) return { ok: false, status: 'UNAVAILABLE', reason: held.reason };
-  if (held.boolean) return { ok: false, status: POSTSEQ_TERMS.RECOVERY_HOLD_CODE, reason: 'a recovery hold is in place: this store was promoted from a restore and is not reconciled (executor --reconcile-postseq)' };
+  if (held.boolean) return { ok: false, status: POSTSEQ_TERMS.RECOVERY_HOLD_CODE };
   // multi-subject detection FIRST, before any single-tuple read, so a duplicate allocator subject is named even when
   // the canonical subject's predicate set is empty.
   const ms = await client.query(ALLOCATOR_SUBJECTS_SPARQL);
