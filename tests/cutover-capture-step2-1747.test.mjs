@@ -19,6 +19,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { HAVE_PY, tmpStore, startExecutor, killExecutor } from './helpers/graph-executor-proc.mjs';
 import { captureProblem } from '../scripts/cutover-capture-schema-1629.mjs';
+import { contentDigest } from '../scripts/cutover-content-digest-1629.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TOOL = path.join(REPO, 'scripts', 'cutover-capture-1629.mjs');
@@ -126,4 +127,28 @@ for (const [what, target] of [['the document', (s) => s.doc], ['a source store f
 test('#1747 (C7) the outbox manifest changed BETWEEN the passes → REFUSED UNSTABLE, nothing written', T, async () => {
   const s = await stopped();
   expectRefused(await run(args(s), { SCRUM_CUTOVER_CAPTURE_BETWEEN_PASSES: s.outbox }), 'UNSTABLE', s, 'the outbox manifest changed');
+});
+test('#1747 (C8, r9) the CONTENT PIN: two captures of an unchanged source record the same contentSha256, the shared digest of the store; a RAW write (commitSeq unmoved) changes it', T, async () => {
+  const s = await stopped();
+  const a = await run(args(s));
+  assert.equal(a.status, 0, `CAPTURED (${a.out} ${a.err.slice(-300)})`);
+  const m1 = JSON.parse(fs.readFileSync(s.out));
+  const out2 = path.join(s.dir, 'capture-2.json');
+  assert.equal((await run(args(s, { out: out2 }))).status, 0, 'CONTROL: a second capture of the unchanged source is CAPTURED');
+  assert.equal(JSON.parse(fs.readFileSync(out2)).contentSha256, m1.contentSha256, 'CONTROL: the same content, the same digest');
+  const ro = await startExecutor({ store: s.store, datasetId: DS, extraArgs: ['--read-only'] });
+  let d; try { d = await contentDigest(ro.baseUrl); } finally { await killExecutor(ro); }
+  assert.equal(m1.contentSha256, d.sha256, 'the recorded digest is the shared digest of THIS store');
+  const x = await startExecutor({ store: s.store, datasetId: DS });
+  let h;
+  try {
+    const r = await fetch(`${x.baseUrl}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/cap1747-c8-${process.pid}`, 'x-epoch': String((await (await fetch(`${x.baseUrl}/health`)).json()).epoch) }, body: 'INSERT DATA { <urn:ex:test/c8> <urn:ex:test/p> "raw" }' });
+    assert.equal(r.status, 200, 'PRECONDITION: the raw write applied');
+    h = await (await fetch(`${x.baseUrl}/health`)).json();
+  } finally { await killExecutor(x); }
+  assert.equal(String(h.commitSeq), String(s.health.commitSeq), 'PRECONDITION: a raw write does not move commitSeq');
+  fs.writeFileSync(s.identity, JSON.stringify(h));
+  const out3 = path.join(s.dir, 'capture-3.json');
+  assert.equal((await run(args(s, { out: out3 }))).status, 0, 'the changed source is CAPTURED');
+  assert.notEqual(JSON.parse(fs.readFileSync(out3)).contentSha256, m1.contentSha256, 'the raw write changed the recorded digest');
 });

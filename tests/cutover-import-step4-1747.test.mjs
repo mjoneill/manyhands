@@ -70,6 +70,8 @@ import { mutationIdOf, originPrepareOp, originCommitOp } from '../core/graph-com
 import { cardQuads, priorQuads, cardIriOf } from '../core/cards-graph.mjs';
 import { startRestServer, makeBoardFixture } from './helpers/harness.mjs';
 import { POSTSEQ_TERMS, ORIGIN_TERMS, BOOKKEEPING_GRAPH, POSTSEQ_NS, ORIGIN_NS } from '../core/graph-vocab.mjs';
+import { contentDigest } from '../scripts/cutover-content-digest-1629.mjs';
+import { projectBatch } from '../core/activity-projector.mjs';
 
 const REPO = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const IMPORTER = path.join(REPO, 'scripts', 'cutover-import-1629.mjs');
@@ -314,23 +316,29 @@ async function world(body, { prepare = () => {}, manifest = (rows) => rows, mani
     for (const p of extraSourcePosts) await seedLegacy(src, p);
     const srcHealth = await health(src);   // r8: the stopped source's LAST /health, as step 1 saves it for the capture tool
     await killExecutor(src); src = null;
+    // r9 (46601): the capture's identity AND content come from the SOURCE, never the candidate: epoch and commitSeq from its
+    // last /health, and the shared content digest over the stopped store served --read-only (measured to write nothing, 46606)
+    const ro = await startExecutor({ store: srcStore, datasetId: DS, extraArgs: ['--read-only'] });
+    let content; try { content = await contentDigest(ro.baseUrl); } finally { await killExecutor(ro); }
     const candStore = path.join(dir, 'candidate-store');
     fs.cpSync(srcStore, candStore, { recursive: true });
     cand = await startExecutor({ store: candStore, datasetId: DS, extraArgs: ['--promote-epoch'] });
     const hs = await health(cand);
     assert.equal(hs.datasetId, DS, 'CONTROL: the promoted candidate keeps datasetId (the supported path)');
     assert.ok(hs.incarnationFrom && hs.incarnation && hs.incarnation !== hs.incarnationFrom, 'CONTROL: a new incarnation, naming the one it came from');
-    await plant(cand);
+    assert.equal(hs.incarnationFrom, srcHealth.incarnation, 'CONTROL: promoted from the source\'s own incarnation');
     const doc = validDocument(); prepare(doc);
     const docFile = path.join(dir, 'board-data.json'); fs.writeFileSync(docFile, JSON.stringify(doc, null, 2));
     const outboxManifest = path.join(dir, 'entries.csv'); fs.writeFileSync(outboxManifest, manifestText(csv(manifest(validManifestRows(doc)))));
     const files = fs.readdirSync(srcStore).sort().map((n) => { const b = fs.readFileSync(path.join(srcStore, n)); return { name: n, size: b.length, sha256: sha(b) }; });
     const captureManifest = path.join(dir, 'capture.json');
-    fs.writeFileSync(captureManifest, JSON.stringify(capture({ sourceStore: fs.realpathSync(srcStore), files, documentSha256: shaFile(docFile), outboxManifestSha256: shaFile(outboxManifest), datasetId: DS, incarnation: hs.incarnationFrom, capturedAt: CAPTURED_AT }), null, 2));
+    fs.writeFileSync(captureManifest, JSON.stringify(capture({ sourceStore: fs.realpathSync(srcStore), files, documentSha256: shaFile(docFile), outboxManifestSha256: shaFile(outboxManifest), datasetId: DS, incarnation: srcHealth.incarnation, capturedAt: CAPTURED_AT, epoch: String(srcHealth.epoch), commitSeq: String(srcHealth.commitSeq), contentSha256: content.sha256 }), null, 2));
     if (mark) {
       const m = await run([CANDIDATE_TOOL, '--capture-manifest', captureManifest, '--executor', cand.baseUrl], {});
       assert.equal(m.status, 0, `the step-3 tool wrote the CandidateMarker (exit ${m.status}: ${(m.err || m.out).slice(-300)})`);
     }
+    // r9: candidate state is planted AFTER step 3, because the content pin refuses to mark a candidate that is not a copy
+    await plant(cand);
     const w = { dir, srcStore, cand, docFile, outboxManifest, captureManifest, doc, srcHealth };
     if (afterSeal) await afterSeal(w);
     return await body(w);
@@ -1246,6 +1254,222 @@ test('#1747 (S2-chain, r8) capture → step 3 marks → step 4 COMPLETE → --re
   }, { mark: false });
 });
 
+// ── r9: the CONTENT PIN (ruling 46611) and the rows the #122 fallback review found missing (46598; scope 46601) ──
+// world() now captures epoch, commitSeq and contentSha256 from the SOURCE and plants candidate state AFTER step 3 (see world()).
+const CMARK = 'urn:ex:cutover/candidate', CMARK_SHA = 'urn:ex:cutover/captureManifestSha256';
+async function digestOf(store) {
+  const ro = await startExecutor({ store, datasetId: DS, extraArgs: ['--read-only'] });
+  try { return await contentDigest(ro.baseUrl); } finally { await killExecutor(ro); }
+}
+/** a capture of the source AS IT IS NOW: every bound field read from the source itself (its /health, its files, its digest) */
+async function recapture(w, tag) {
+  const s = await startExecutor({ store: w.srcStore, datasetId: DS });
+  let h; try { h = await health(s); } finally { await killExecutor(s); }
+  const content = await digestOf(w.srcStore);
+  const files = fs.readdirSync(w.srcStore).sort().map((n) => { const b = fs.readFileSync(path.join(w.srcStore, n)); return { name: n, size: b.length, sha256: sha(b) }; });
+  const m = { ...JSON.parse(fs.readFileSync(w.captureManifest, 'utf8')), files, incarnation: h.incarnation, epoch: String(h.epoch), commitSeq: String(h.commitSeq), contentSha256: content.sha256 };
+  const f = path.join(w.dir, `capture-${tag}.json`); fs.writeFileSync(f, JSON.stringify(m, null, 2));
+  return { f, h, content };
+}
+const step3 = (w, f, executor = w.cand.baseUrl) => run([CANDIDATE_TOOL, '--capture-manifest', f, '--executor', executor], {});
+const markersOn = async (x) => (await typed(x, `SELECT ?v WHERE { GRAPH <${BK}> { <${CMARK}> <${CMARK_SHA}> ?v } }`)).map((v) => v.value);
+function expectStep3Refused(m, code, ctx) {
+  assert.equal(m.status, 1, `${ctx}: step 3 exits 1 (${m.status}: ${m.out.slice(-240)} ${m.err.slice(-200)})`);
+  assert.match(m.out, new RegExp(`^REFUSED ${code} `, 'm'), `${ctx}: REFUSED ${code} (${m.out.slice(-240)})`);
+  assert.ok(!/^MARKED /m.test(m.out), `${ctx}: never MARKED`);
+}
+const stepSnapshot = async (x) => (await S(x)).split('\n').filter((l) => !l.includes('urn:ex:op/')).join('\n');   // step 3's reads may leave no receipt; a refusal writes none
+
+test('#1747 (C-PIN-0, r9) CONTROL: a genuine promoted copy is MARKED, though the six promotion predicates differ from the source', T, async () => {
+  await world(async (w) => {
+    const hs = await health(w.cand);
+    assert.notEqual(String(hs.epoch), String(w.srcHealth.epoch), 'PRECONDITION: the epoch differs from the source\'s');
+    assert.notEqual(hs.incarnation, w.srcHealth.incarnation, 'PRECONDITION: the incarnation differs');
+    assert.notEqual(hs.storeHome, w.srcHealth.storeHome, 'PRECONDITION: the store home differs');
+    const cap = JSON.parse(fs.readFileSync(w.captureManifest, 'utf8'));
+    assert.equal(cap.contentSha256, (await digestOf(w.srcStore)).sha256, 'PRECONDITION: the capture\'s digest is the SOURCE\'s, recomputed');
+    const m = await step3(w, w.captureManifest);
+    assert.equal(m.status, 0, `MARKED (${m.out.slice(-240)} ${m.err.slice(-200)})`);
+    assert.match(m.out, new RegExp(`^MARKED ${sha(fs.readFileSync(w.captureManifest))}$`, 'm'), 'MARKED with this capture\'s sha');
+    assert.deepEqual(await markersOn(w.cand), [sha(fs.readFileSync(w.captureManifest))], 'one marker, for this capture');
+  }, { mark: false });
+});
+test('#1747 (C-PIN-1, r9) a STALE copy (the source took a COMPILED write after the copy) is refused NOT_CANDIDATE at step 3 AND at step 4; nothing marked', T, async () => {
+  await world(async (w) => {
+    const late = { author: 'ada', requestId: 'req-r9-late', postSeq: 38500, createdAt: iso(50) }; late.postId = postWriteId(late.author, late.requestId);
+    const s = await startExecutor({ store: w.srcStore, datasetId: DS });
+    try { await seedOrdinary(s, late); } finally { await killExecutor(s); }
+    const { f, h } = await recapture(w, 'late');
+    assert.notEqual(String(h.commitSeq), String(w.srcHealth.commitSeq), 'PRECONDITION: the compiled write moved the source\'s commitSeq');
+    const s0 = await stepSnapshot(w.cand);
+    expectStep3Refused(await step3(w, f), CODES.NOT_CANDIDATE, 'step 3, a stale copy');
+    assert.deepEqual(await markersOn(w.cand), [], 'no marker');
+    assert.equal(await stepSnapshot(w.cand), s0, 'the candidate is unchanged');
+    // step 4's own check, driven past step 3 by a hand-written marker for the stale capture
+    await rawInsert(w.cand, `<${CMARK}> <${CMARK_SHA}> "${sha(fs.readFileSync(f))}" .`, 'handmark');
+    expectCode(await importer(w, { applyIt: true, capture: f }), 'REFUSED', CODES.NOT_CANDIDATE, 'step 4, a stale copy');
+  }, { mark: false });
+});
+test('#1747 (C-PIN-2, r9) the source took a RAW write after the copy (a real projector batch; commitSeq does NOT move, so the epoch rule passes it) → step 3 refuses NOT_COPY', T, async () => {
+  await world(async (w) => {
+    const logDir = path.join(w.dir, 'proj-log'), workDir = path.join(w.dir, 'proj-work'); fs.mkdirSync(logDir); fs.mkdirSync(workDir);
+    fs.writeFileSync(path.join(logDir, 'events-2026-10-25.jsonl'), `${JSON.stringify({ seq: 1, ts: '2026-10-25T09:00:00.000Z', op: 'card.update', actor: 'ada', entity: { id: 'uuid-r9-proj', kind: 'card', shortId: 9 } })}\n`);
+    fs.writeFileSync(path.join(workDir, 'work-objects.jsonl'), '');
+    const s = await startExecutor({ store: w.srcStore, datasetId: DS });
+    try { const r = await projectBatch({ logDir, workDir, executorUrl: s.baseUrl }); assert.equal(r.cursor.seq, 1, 'PRECONDITION: the projector batch applied to the source'); } finally { await killExecutor(s); }
+    const { f, h } = await recapture(w, 'projected');
+    assert.deepEqual([String(h.commitSeq), String(h.epoch)], [String(w.srcHealth.commitSeq), String(w.srcHealth.epoch)], 'PRECONDITION: commitSeq and epoch did not move, so the epoch rule alone would pass this copy');
+    const s0 = await stepSnapshot(w.cand);
+    expectStep3Refused(await step3(w, f), 'NOT_COPY', 'a raw write after the copy');
+    assert.deepEqual(await markersOn(w.cand), [], 'no marker');
+    assert.equal(await stepSnapshot(w.cand), s0, 'the candidate is unchanged');
+  }, { mark: false });
+});
+for (const [what, sparql] of [
+  ['the candidate\'s commitSeq changed (not one of the six)', `DELETE { GRAPH <${BK}> { <urn:ex:dataset> <urn:ex:commitSeq> ?s } } INSERT { GRAPH <${BK}> { <urn:ex:dataset> <urn:ex:commitSeq> 999 } } WHERE { GRAPH <${BK}> { <urn:ex:dataset> <urn:ex:commitSeq> ?s } }`],
+  ['an extra predicate on the dataset marker', `INSERT DATA { GRAPH <${BK}> { <urn:ex:dataset> <urn:ex:somethingElse> "x" } }`],
+  ['an excluded predicate at the WRONG location (the default graph)', 'INSERT DATA { <urn:ex:dataset> <urn:ex:epoch> "9" }'],
+  ['a quad in the recovery graph (no hold is a valid delta until restore safety lands)', 'INSERT DATA { GRAPH <urn:ex:postseq/recovery> { <urn:ex:postseq/recovery-hold> <urn:ex:p> "x" } }'],
+  ['a floor-shaped install record (step 3 precedes any floor install)', `INSERT DATA { GRAPH <${BK}> { <urn:ex:write-floor/install> <urn:ex:installedBy> "install-write-floor" } }`],
+]) {
+  test(`#1747 (C-PIN-3, r9) ${what} on the candidate before step 3 → NOT_COPY; nothing marked`, T, async () => {
+    await world(async (w) => {
+      await rawOn(w.cand, sparql, 'pin3');
+      const s0 = await stepSnapshot(w.cand);
+      expectStep3Refused(await step3(w, w.captureManifest), 'NOT_COPY', what);
+      assert.deepEqual(await markersOn(w.cand), [], 'no marker');
+      assert.equal(await stepSnapshot(w.cand), s0, 'the candidate is unchanged');
+    }, { mark: false });
+  });
+}
+test('#1747 (C-PIN-4, r9) OWED at #1749 integration: a promoted copy WITH the promotion\'s exact RecoveryHold → MARKED; a hold that is not the exact delta, or a changed reconciliation record → NOT_COPY', { todo: 'needs restore safety (card/1749-build) on the same head as the importer' }, () => {});
+test('#1747 (S1, r9) step 3 against the SOURCE promoted IN PLACE (a new incarnation, the captured epoch and commitSeq, the same content) → NOT_CANDIDATE: its home is the source store', T, async () => {
+  await world(async (w) => {
+    const p = await startExecutor({ store: w.srcStore, datasetId: DS, extraArgs: ['--promote-epoch'] });
+    try {
+      const hp = await health(p);
+      assert.deepEqual([hp.incarnationFrom, String(hp.epochBase), String(hp.epoch)], [w.srcHealth.incarnation, String(w.srcHealth.commitSeq), String(BigInt(w.srcHealth.epoch) + 1n)], 'PRECONDITION: every OTHER binding check passes, so only the home check can refuse');
+      expectStep3Refused(await step3(w, w.captureManifest, p.baseUrl), CODES.NOT_CANDIDATE, 'the source promoted in place');
+      assert.deepEqual(await markersOn(p), [], 'the source carries no marker');
+    } finally { await killExecutor(p); }
+  }, { mark: false });
+});
+
+// burn shapes (findings 2, 3): each passes no pre-write check any more, so each is a HOLD BEFORE any batch, S byte-identical
+const P4X = publisher(4, 'claim');
+for (const [what, code, opts] of [
+  ['a PUBLISHED publisher entry that names no post', CODES.BAD_ENTRY, { prepare: (d) => { const ob = d['scrum:meta'].announcementOutbox; ob.origins[P4X.origin.mutationId] = structuredClone(P4X.origin); ob.entries[P4X.entry.obligationId] = { ...structuredClone(P4X.entry), status: 'published' }; } }],
+  ['a PUBLISHED publisher entry naming only a legacyPostId (not its announcement post)', CODES.BAD_ENTRY, { prepare: (d) => { const ob = d['scrum:meta'].announcementOutbox; ob.origins[P4X.origin.mutationId] = structuredClone(P4X.origin); ob.entries[P4X.entry.obligationId] = { ...structuredClone(P4X.entry), status: 'published', legacyPostId: U3[0].postId }; } }],
+  ['a TYPED Prepared node at a document origin\'s mutationId', CODES.SUBJECT_OCCUPIED, { plant: (c) => rawInsert(c, `${ORIGIN_TERMS.preparedSubject(LEGACY[0].origin.mutationId)} a ${ORIGIN_TERMS.Prepared} ; ${ORIGIN_TERMS.mutationId} "${LEGACY[0].origin.mutationId}" .`, 'prepared') }],
+  ['an UNTYPED triple at a document origin\'s Prepared subject', CODES.SUBJECT_OCCUPIED, { plant: (c) => rawInsert(c, `${ORIGIN_TERMS.preparedSubject(PUB.origin.mutationId)} <urn:ex:test/anything> "x" .`, 'prepared-untyped') }],
+]) {
+  test(`#1747 (S4-H, r9) ${what} → HOLD ${code} before any batch; nothing written`, T, async () => {
+    await world(async (w) => {
+      const s0 = await S(w.cand);
+      expectCode(await importer(w, { applyIt: true }), 'HOLD', code, what);
+      assert.equal(await S(w.cand), s0, 'nothing written: S byte-identical');
+    }, opts);
+  });
+}
+// times (finding 4): every written time is a FULL ISO-8601 instant with a zone
+const BAD_TIMES = [['a date alone', '2026-10-06'], ['no zone', '2026-10-06T21:56:31.948'], ['space-separated', '2026-10-06 21:56:31Z']];
+const TIME_FIELDS = [
+  ['a reservation createdAt', CODES.BAD_RESERVATION, (d, v) => { d['scrum:meta'].postReservations[U3[0].key].createdAt = v; }],
+  ['an origin occurredAt', CODES.BAD_ORIGIN, (d, v) => { d['scrum:meta'].announcementOutbox.origins[LEGACY[0].origin.mutationId].occurredAt = v; }],
+  ['an origin committedAt', CODES.BAD_ORIGIN, (d, v) => { d['scrum:meta'].announcementOutbox.origins[LEGACY[0].origin.mutationId].committedAt = v; }],
+  ['an entry publicationAt', CODES.BAD_ENTRY, (d, v) => { d['scrum:meta'].announcementOutbox.entries[PUB.entry.obligationId].publicationAt = v; }],
+];
+for (const [field, code, set] of TIME_FIELDS) {
+  for (const [form, v] of BAD_TIMES) {
+    test(`#1747 (S4-T, r9) ${field} as ${form} (${v}) → HOLD ${code} before any batch; nothing written`, T, async () => {
+      await world(async (w) => {
+        const s0 = await S(w.cand);
+        expectCode(await importer(w, { applyIt: true }), 'HOLD', code, `${field}, ${form}`);
+        assert.equal(await S(w.cand), s0, 'nothing written: S byte-identical');
+      }, { prepare: (d) => set(d, v) });
+    });
+  }
+}
+const offset = (z, h) => { const t = new Date(Date.parse(z) + h * 3600000).toISOString().replace('Z', ''); return `${t}${h >= 0 ? '+' : '-'}${String(Math.abs(h)).padStart(2, '0')}:00`; };
+for (const [form, f] of [['+00:00 for Z', (z) => z.replace('Z', '+00:00')], ['a +02:00 offset, the same instant', (z) => offset(z, 2)], ['no fraction', (z) => z.replace(/\.\d+Z$/, 'Z')]]) {
+  test(`#1747 (S4-T CONTROL, r9) a reservation createdAt as ${form} is a valid instant: the import is COMPLETE and the stored time is the instant it names`, T, async () => {
+    const v = f(U3[0].createdAt);
+    await world(async (w) => {
+      const r = await importer(w, { applyIt: true });
+      assert.ok(r.complete, `COMPLETE (${r.out.slice(-240)})`);
+      assert.deepEqual(await typed(w.cand, `SELECT ?v WHERE { GRAPH <${BK}> { <${RES(U3[0])}> ${POSTSEQ_TERMS.createdAt} ?v } }`), DT(v), `${v}: stored as the instant it names`);
+    }, { prepare: (d) => { d['scrum:meta'].postReservations[U3[0].key].createdAt = v; } });
+  });
+}
+test('#1747 (S3, r9) a runtime reader failure at the read-back (the builder\'s seam SCRUM_CUTOVER_READER_FAIL) refuses COMPLETE: HOLD READBACK, and a READY never follows', T, async () => {
+  await world(async (w) => {
+    const r = await importer(w, { applyIt: true, env: { SCRUM_CUTOVER_READER_FAIL: '1' } });
+    expectCode(r, 'HOLD', 'READBACK', 'a forced reader failure');
+    assert.match(r.out, /forced by SCRUM_CUTOVER_READER_FAIL/, 'the hold names the forced reader, not some other read-back');
+    const ok = await importer(w, { applyIt: true });
+    assert.ok(ok.complete, `CONTROL: the same candidate, seam off, is COMPLETE (${ok.out.slice(-240)})`);
+  });
+});
+// the readers' own checks (S4, S7): driven by tampering an imported record AFTER COMPLETE, read through the runtime reader
+test('#1747 (S4r, r9) an imported origin with an obligation that is NOT one of its slots reads INVALID (the reader, not the importer)', T, async () => {
+  await imported(async (w, mig) => {
+    const x = LEGACY[0], extra = ORIGIN_TERMS.obligationSubject(x.origin.mutationId, 'release');
+    assert.ok(!x.origin.slots.includes('release'), 'PRECONDITION: release is not one of its slots');
+    assert.equal((await readCommittedOrigin(clientFor(w.cand), x.origin.mutationId)).ok, true, 'CONTROL: it reads ok before');
+    // the reader finds an origin's obligations by type + an obligationId under its mutationId, so the extra one carries both
+    await rawInsert(w.cand, `${extra} a ${ORIGIN_TERMS.Obligation} ; ${ORIGIN_TERMS.obligationId} "${x.origin.mutationId}:release" ; <${TERMS.migrationId}> "${mig}" .`, 'extra-slot');
+    const got = await readCommittedOrigin(clientFor(w.cand), x.origin.mutationId);
+    assert.ok(isInvalid(got), `INVALID (${JSON.stringify(got).slice(0, 240)})`);
+    assert.match(String(got.reason), /not one of its slots/, 'named as an obligation outside its slots');
+  });
+});
+test('#1747 (S7r, r9) an imported legacy obligation whose retirement proof is NOT its legacyPostId reads INVALID (the reader, not the importer)', T, async () => {
+  await imported(async (w) => {
+    const x = LEGACY[0];
+    await rawOn(w.cand, `DELETE { GRAPH <${BK}> { ${OBL(x)} <${TERMS.retirementProofPostId}> ?v } } INSERT { GRAPH <${BK}> { ${OBL(x)} <${TERMS.retirementProofPostId}> "${LEGACY[1].post.id}" } } WHERE { GRAPH <${BK}> { ${OBL(x)} <${TERMS.retirementProofPostId}> ?v } }`, 'proof');
+    const got = await readCommittedOrigin(clientFor(w.cand), x.origin.mutationId);
+    assert.ok(isInvalid(got), `INVALID (${JSON.stringify(got).slice(0, 240)})`);
+    assert.match(String(got.reason), /legacy-post-verified needs/, 'named as a proof that is not its legacyPostId');
+  });
+});
+test('#1747 (F6, r9) a notifyDispositionNote changed after COMPLETE → --ready refuses (the note must equal the manifest\'s); no READY', T, async () => {
+  await imported(async (w) => {
+    await rawOn(w.cand, `DELETE { GRAPH <${BK}> { ${OBL(PUB)} <${TERMS.notifyDispositionNote}> ?v } } INSERT { GRAPH <${BK}> { ${OBL(PUB)} <${TERMS.notifyDispositionNote}> "not the manifest's note" } } WHERE { GRAPH <${BK}> { ${OBL(PUB)} <${TERMS.notifyDispositionNote}> ?v } }`, 'note');
+    const rd = await ready(w);
+    assert.doesNotMatch(rd.line, /^READY /, `not READY (${rd.line})`);
+    assert.match(rd.line, /^(HOLD|REFUSED|INCOMPLETE) .*notifyDispositionNote/, `refused, naming the note (${rd.line})`);
+    assert.deepEqual(await typed(w.cand, `SELECT ?v WHERE { GRAPH <${BK}> { <${RM.s}> <${RM.migration}> ?v } }`), [], 'no ready marker');
+  });
+});
+test('#1747 (COL, r9) a column the candidate holds that the document does not → HOLD COLUMN_DIFFERS before any batch', T, async () => {
+  await world(async (w) => {
+    const s0 = await S(w.cand);
+    expectCode(await importer(w, { applyIt: true }), 'HOLD', CODES.COLUMN_DIFFERS, 'a candidate-only column');
+    assert.equal(await S(w.cand), s0, 'nothing written: S byte-identical');
+  }, { prepare: (d) => { d['@graph'] = d['@graph'].filter((c) => c.identifier !== 'done'); } });
+});
+// gap 2 (finding 5, ruling 46599): an imported origin whose Prepared subject holds ANYTHING surfaces in the pending scan's integrity
+for (const [what, triples] of [
+  ['a TYPED Prepared node with its mutationId', (m) => `${ORIGIN_TERMS.preparedSubject(m)} a ${ORIGIN_TERMS.Prepared} ; ${ORIGIN_TERMS.mutationId} "${m}" .`],
+  ['an UNTYPED triple', (m) => `${ORIGIN_TERMS.preparedSubject(m)} <urn:ex:test/anything> "x" .`],
+]) {
+  test(`#1747 (GAP2, r9) after COMPLETE, ${what} at an imported origin's Prepared subject → GET /api/outbox?status=pending lists it in integrity, never as an entry`, T, async () => {
+    await imported(async (w) => {
+      const s = await restOn(w);
+      try {
+        const m = LEGACY[0].origin.mutationId;
+        const before = await s.call('GET', '/api/outbox?status=pending');
+        assert.equal(before.status, 200, `CONTROL: the scan answered (${before.status} ${before.text.slice(0, 300)})`);
+        assert.ok(!(before.json?.integrity || []).some((x) => x.mutationId === m), `CONTROL: not in integrity before (${String(JSON.stringify(before.json)).slice(0, 300)})`);
+        await rawInsert(w.cand, triples(m), 'gap2');
+        const pend = await s.call('GET', '/api/outbox?status=pending');
+        assert.equal(pend.status, 200, `the scan answered (${pend.status} ${pend.text.slice(0, 300)})`);
+        assert.ok((pend.json?.integrity || []).some((x) => x.mutationId === m), `${what}: in integrity (${String(JSON.stringify(pend.json)).slice(0, 300)})`);
+        assert.ok(!(pend.json?.entries || []).some((x) => x.mutationId === m), `${what}: not listed as an entry`);
+      } finally { await s.stop(); }
+    });
+  });
+}
 test('#1747 (S4-N) no importer run called the notify endpoint (and the importer really ran)', () => {
   assert.ok(importerRuns >= 10, `the importer really ran in this file (${importerRuns} runs): zero calls from zero runs proves nothing`);
   assert.equal(notifyCalls(), 1, `only the harness control's one deliberate call reached the stub (got ${notifyCalls()})`);
