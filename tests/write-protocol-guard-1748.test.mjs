@@ -116,25 +116,55 @@ test('#1748 (guard) a floored store refuses an /update that removes or rewrites 
   await stop(x);
 });
 
-test('#1748 (guard) a floored store still APPLIES a body whose text leaves `;` nothing to follow (trailing comment, comment-only, prologue-only, empty)', T, async () => {
+test('#1748 (guard) a floored store never reports a false success: a body that is invalid alone is a 500 with NOTHING applied, never fused with the guard into something valid', T, async () => {
   const x = await start(freshStore(), ['--create', '--install-write-floor', WRITE_PROTOCOL]);
-  const bodies = {
-    'a trailing comment after `;`': 'INSERT DATA { <urn:ex:t/1> <urn:ex:p> "x" } ; # trailing',
-    'a comment line after `;`': 'INSERT DATA { <urn:ex:t/2> <urn:ex:p> "x" } ;\n# done\n',
-    'a `#` inside an IRI on the last line': 'INSERT DATA { <urn:ex:t/3#frag> <urn:ex:p> "x" }',
-    'comment-only': '# nothing to do',
-    'prologue-only': 'PREFIX ex: <urn:ex:>',
+  const ok = {
+    'an ordinary body': 'INSERT DATA { <urn:ex:t/1> <urn:ex:p> "x" }',
+    'a `#` inside an IRI on the last line': 'INSERT DATA { <urn:ex:t/2#frag> <urn:ex:p> "x" }',
+    'a trailing `;`': 'INSERT DATA { <urn:ex:t/3> <urn:ex:p> "x" } ;',
     'empty': '   ',
   };
-  for (const [why, sparql] of Object.entries(bodies)) {
+  for (const [why, sparql] of Object.entries(ok)) assert.equal((await update(x, sparql)).status, 200, `${why}: applied`);
+  for (const s of ['urn:ex:t/1', 'urn:ex:t/2#frag', 'urn:ex:t/3']) assert.equal(await ask(x, `ASK { <${s}> ?p ?o }`), true, `${s} is stored`);
+  // the delta re-review's finding 3 (46427): each of these is invalid on its own; a join that let the guard complete it
+  // answered 200 having applied part or none of it
+  const refused = {
+    'a DELETE template with no WHERE': 'DELETE { GRAPH <urn:ex:g> { <urn:ex:a> <urn:ex:b> <urn:ex:c> } }',
+    'an INSERT, then a dangling DELETE template': 'INSERT DATA { <urn:ex:t/9> <urn:ex:p> "x" } ; DELETE { <urn:ex:t/1> <urn:ex:p> "x" }',
+    'an INSERT, then a dangling WITH': 'INSERT DATA { <urn:ex:t/10> <urn:ex:p> "x" } ; WITH <urn:ex:g>',
+    'a comment after the final `;`': 'INSERT DATA { <urn:ex:t/11> <urn:ex:p> "x" } ; # trailing',
+    'comment-only': '# nothing to do',
+    'prologue-only': 'PREFIX ex: <urn:ex:>',
+  };
+  for (const [why, sparql] of Object.entries(refused)) {
+    const h0 = await health(x);
     const r = await update(x, sparql);
-    assert.equal(r.status, 200, `${why}: applied (${JSON.stringify(r.body)})`);
+    assert.equal(r.status, 500, `${why}: an engine error, never a success (${r.status} ${JSON.stringify(r.body)})`);
+    assert.deepEqual(counters(await health(x)), counters(h0), `${why}: nothing applied`);
   }
-  for (const s of ['urn:ex:t/1', 'urn:ex:t/2', 'urn:ex:t/3#frag']) assert.equal(await ask(x, `ASK { <${s}> ?p ?o }`), true, `${s} is stored`);
-  const bad = await update(x, 'INSERT DATA { <urn:ex:t/4> <urn:ex:p> ');
-  assert.equal(bad.status, 500, 'CONTROL: a malformed body is still an engine error (both joins fail to parse)');
-  assert.equal(await ask(x, 'ASK { <urn:ex:t/4> ?p ?o }'), false, 'and applies nothing');
+  for (const s of ['urn:ex:t/9', 'urn:ex:t/10', 'urn:ex:t/11']) assert.equal(await ask(x, `ASK { <${s}> ?p ?o }`), false, `${s}: the valid half was NOT applied`);
+  assert.equal(await ask(x, 'ASK { <urn:ex:t/1> ?p ?o }'), true, 'and nothing was deleted');
   await stop(x);
+});
+
+test('#1748 (guard) an /update on an UNFLOORED store cannot set up a later brick: an EMPTY sentinel graph or a stray install record is refused at install; a stray SECOND record is refused at start', T, async () => {
+  const empty = freshStore();
+  let x = await start(empty, ['--create']);
+  assert.equal((await update(x, 'CREATE GRAPH <urn:ex:write-floor/violation>', { protocol: null })).status, 200, 'PRECONDITION: unguarded');
+  await stop(x);
+  await assert.rejects(start(empty, ['--install-write-floor', WRITE_PROTOCOL]), (e) => /write-floor\/violation/.test(e.stderr ?? e.message), 'an EMPTY sentinel graph refuses the install');
+  const stray = freshStore();
+  x = await start(stray, ['--create']);
+  assert.equal((await update(x, `INSERT DATA { GRAPH <${BK}> { <urn:ex:write-floor> <urn:ex:write-floor/installedBy> "something-else" } }`, { protocol: null })).status, 200, 'PRECONDITION: unguarded');
+  await stop(x);
+  await assert.rejects(start(stray, ['--install-write-floor', WRITE_PROTOCOL]), (e) => /install record for a floor it does not have/.test(e.stderr ?? e.message), 'a stray record refuses the install');
+  x = await start(stray);
+  assert.equal((await health(x)).writeFloor, null, 'BEFORE writing anything: the store is still unfloored');
+  await stop(x);
+  const second = freshStore();
+  await stop(await start(second, ['--create', '--install-write-floor', WRITE_PROTOCOL]));
+  plant(second, `GRAPH <${BK}> { <urn:ex:write-floor> <urn:ex:write-floor/installedBy> "install-write-floor"@en }`);
+  await assert.rejects(start(second), (e) => /not exactly as --install-write-floor wrote/.test(e.stderr ?? e.message), 'a second record value refuses the start, by the guard\'s own pattern');
 });
 
 test('#1748 (guard) a store holding the guard\'s sentinel graph is refused a floor at install, and refused at start if already floored', T, async () => {

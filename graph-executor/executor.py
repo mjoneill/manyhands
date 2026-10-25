@@ -330,6 +330,9 @@ class Executor:
             if self._sentinel_present():
                 raise SystemExit(f'REFUSED: the store holds the graph <{FLOOR_VIOLATION}>, which the floor guard needs to be '
                                  'absent; remove it offline before installing a floor')
+            if held is None and self._stray_record():
+                raise SystemExit('REFUSED: the store holds an install record for a floor it does not have, written some other '
+                                 'way than --install-write-floor; remove it offline before installing a floor')
             if held is None or (held == want and not self._floor_recorded()):
                 # the floor and its install record in ONE update: a floor never exists without the record, and the record
                 # is how a start tells this procedure from an /update that wrote a floor by accident
@@ -366,7 +369,21 @@ class Executor:
         return bool(self.store.query(f'ASK {{ {in_bk(f"<{FLOOR_S.value}> <{FLOOR_INSTALLED_BY.value}> {json.dumps(FLOOR_INSTALLER)}")} }}'))
 
     def _sentinel_present(self):
-        return bool(self.store.query(f'ASK {{ GRAPH <{FLOOR_VIOLATION}> {{ ?s ?p ?o }} }}'))
+        # the graph's EXISTENCE, not its triples: the guard's CREATE GRAPH fails on an empty named graph too
+        return self.store.contains_named_graph(px.NamedNode(FLOOR_VIOLATION))
+
+    def _stray_record(self):
+        return bool(self.store.query(f'ASK {{ {in_bk(f"<{FLOOR_S.value}> <{FLOOR_INSTALLED_BY.value}> ?v")} }}'))
+
+    def _violated(self, floor_value):
+        """#1748 the ONE pattern that says the floor or its install record is not exactly as installed. The write guard
+        and the start check both use it, so a state a start accepts is a state every write accepts."""
+        want, rec = json.dumps(floor_value), json.dumps(FLOOR_INSTALLER)
+        floor, by = f'<{FLOOR_S.value}> <{FLOOR_P.value}>', f'<{FLOOR_S.value}> <{FLOOR_INSTALLED_BY.value}>'
+        return (f'{{ FILTER NOT EXISTS {{ GRAPH <{BK}> {{ {floor} ?v0 . FILTER(sameTerm(?v0, {want})) }} }} }} UNION '
+                f'{{ GRAPH <{BK}> {{ {floor} ?v1 . FILTER(!sameTerm(?v1, {want})) }} }} UNION '
+                f'{{ FILTER NOT EXISTS {{ GRAPH <{BK}> {{ {by} ?v2 . FILTER(sameTerm(?v2, {rec})) }} }} }} UNION '
+                f'{{ GRAPH <{BK}> {{ {by} ?v3 . FILTER(!sameTerm(?v3, {rec})) }} }}')
 
     def _check_floor_provenance(self, held):
         """#1748 a floor is honoured only with the install record written beside it by --install-write-floor. A floor
@@ -379,48 +396,40 @@ class Executor:
             raise SystemExit(f'REFUSED: the store holds write floor {held!r} with no install record, so it was not installed by '
                              f'--install-write-floor. If it is intended, relaunch once with --install-write-floor {held} to '
                              'record it; if not, remove it offline')
+        if bool(self.store.query(f'ASK {{ {self._violated(held)} }}')):
+            raise SystemExit('REFUSED: the write floor or its install record is not exactly as --install-write-floor wrote '
+                             'it (a second or rewritten value), so the floor guard would refuse every write; remove the '
+                             'extra value offline')
         if self._sentinel_present():
             raise SystemExit(f'REFUSED: the store holds the graph <{FLOOR_VIOLATION}>, so the floor guard would refuse every '
                              'write; remove it offline')
 
-    def _floor_guarded(self, sparql, sep='\n;\n'):
+    def _floor_guarded(self, sparql):
         """#1748 `sparql` followed, in the SAME update, by operations that fail the whole update unless the floor and its
-        install record are still exactly the installed terms afterwards. Store.update is all-or-nothing, so a delete, a
-        rewrite (to another value, a language tag or a datatype), a wipe, a second value, or an effect that depends on other
-        data is never applied, and nothing has to be restored. The check reads the store state the update produced; it never
-        parses the body. Floored stores only: an unfloored store runs the body exactly as it is (see update()).
-        `sep` joins the two; update() retries with a bare newline when the body's own text leaves no operation for `;` to
-        follow (a trailing comment after a `;`, a comment-only or prologue-only body). The guard's WHERE has solutions only
-        in a violated state, so even a dangling final clause of the body that merges into it changes nothing it applies."""
-        want, rec = json.dumps(self.write_floor), json.dumps(FLOOR_INSTALLER)
-        floor, by = f'<{FLOOR_S.value}> <{FLOOR_P.value}>', f'<{FLOOR_S.value}> <{FLOOR_INSTALLED_BY.value}>'
-        violated = (f'{{ FILTER NOT EXISTS {{ GRAPH <{BK}> {{ {floor} ?v0 . FILTER(sameTerm(?v0, {want})) }} }} }} UNION '
-                    f'{{ GRAPH <{BK}> {{ {floor} ?v1 . FILTER(!sameTerm(?v1, {want})) }} }} UNION '
-                    f'{{ FILTER NOT EXISTS {{ GRAPH <{BK}> {{ {by} ?v2 . FILTER(sameTerm(?v2, {rec})) }} }} }} UNION '
-                    f'{{ GRAPH <{BK}> {{ {by} ?v3 . FILTER(!sameTerm(?v3, {rec})) }} }}')
-        body = sparql.rstrip()
-        if sep.startswith('\n;'):
-            body = body.rstrip(';')
-        return (f'{body}{sep}' if body.strip() else '') + (
-                f'INSERT {{ GRAPH <{FLOOR_VIOLATION}> {{ <{FLOOR_VIOLATION}> <{FLOOR_VIOLATION}> <{FLOOR_VIOLATION}> }} }} WHERE {{ {violated} }} ;\n'
+        install record are still exactly the installed terms afterwards (_violated). Store.update is all-or-nothing, so a
+        delete, a rewrite (to another value, a language tag or a datatype), a wipe, a second value, or an effect that
+        depends on other data is never applied, and nothing has to be restored. The check reads the store state the update
+        produced; it never parses the body. Floored stores only: an unfloored store runs the body exactly as it is.
+        The join is always `;`, which ends the body's last operation, so nothing of the guard can fuse into it. A body
+        whose own text leaves `;` nothing to follow (a comment after a final `;`, a comment-only or prologue-only body) is
+        therefore a syntax error with nothing applied, like any malformed body: an honest 500, never a false success."""
+        body = sparql.rstrip().rstrip(';')
+        return (f'{body}\n;\n' if body.strip() else '') + (
+                f'INSERT {{ GRAPH <{FLOOR_VIOLATION}> {{ <{FLOOR_VIOLATION}> <{FLOOR_VIOLATION}> <{FLOOR_VIOLATION}> }} }} '
+                f'WHERE {{ {self._violated(self.write_floor)} }} ;\n'
                 f'CREATE GRAPH <{FLOOR_VIOLATION}> ;\nDROP GRAPH <{FLOOR_VIOLATION}>')
 
     def _update_floored(self, sparql):
-        """#1748 one guarded, all-or-nothing update; a body whose text leaves `;` nothing to follow is retried joined by a
-        newline. A failed parse applies nothing, so the retry is safe; a refusal by the guard is never retried."""
-        for sep in ('\n;\n', '\n'):
-            try:
-                self.store.update(self._floor_guarded(sparql, sep))
-                return
-            except OSError:
-                raise
-            except Exception as e:
-                if FLOOR_VIOLATION in str(e):   # the guard failed the whole update: nothing was applied
-                    raise FloorProtected(self.write_floor)
-                if sep == '\n' or not isinstance(e, SyntaxError):
-                    raise
-                first = e
-        raise first
+        """#1748 one guarded, all-or-nothing update, never retried (a retry joined differently could fuse a body that is
+        invalid on its own with the guard into something valid, and report a false success)."""
+        try:
+            self.store.update(self._floor_guarded(sparql))
+        except OSError:
+            raise
+        except Exception as e:
+            if FLOOR_VIOLATION in str(e):   # the guard failed the whole update: nothing was applied
+                raise FloorProtected(self.write_floor)
+            raise
 
     def _identity(self):
         """#1577 incarnation / incarnationFrom / storeHome / epochBase, each None when absent. Never raises."""
