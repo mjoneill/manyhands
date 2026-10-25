@@ -70,6 +70,7 @@ import { durableUpdate } from '../core/durable-update.mjs';
 import { enumerateOriginRecords, readCommittedOrigin, readPreparedOrigin } from '../core/origin-commit.mjs';
 import { announcePostId, opIdFor, postCreateIntention } from '../core/announce-outbox.mjs';
 import { settleOpId } from '../core/graph-compiler.mjs';
+import { canonicalJson as coreCanonicalJson } from '../core/imported-records.mjs';   // D12 EDGE: the reader's OWN canonicaliser, not this file's
 
 const SKIP = HAVE_PY ? false : 'UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)';
 const T = { skip: SKIP, timeout: 600000 };
@@ -896,3 +897,38 @@ for (const [tag, what, plant] of [
     });
   });
 }
+
+// ── D12 EDGE (drafted by the hold-rows author on request, 46752; for the A8 row author's review): Python/JS byte agreement on a
+// HARD payload, end to end on the integrated head. The rows' own canonicalJson (above) is a THIRD implementation, so this row
+// computes every expected sha with core/imported-records.mjs's canonicalJson, the one the reader uses. The payload is a REAL
+// claim's stored draft: the claim announcement embeds the card title (server.js claimAnnouncement), so the title carries the
+// edge classes into the draft through the board's own write path. Three independent agreements, each a separate assertion:
+//   (0) the executor's AmbiguousObligation.payloadSha256 at promotion  ==  sha256(core canonicalJson(stored draft))
+//   (1) a dispose file bound with core canonicalJson's sha is ADMITTED by the executor (it recomputes from the stored payload)
+//   (2) the reader's retiredByDisposition join (core canonicalJson) accepts the executor's record: it reads retired
+const EDGE_TITLE = 'Zoë ☃ “curly” "straight" back\\slash  sep \u0007bell 𝄞clef';
+test('#1749 A8 (D12 EDGE) a genuine retire of a payload carrying non-ASCII, U+2028, quotes, a backslash, a control character and a non-BMP character: executor and core canonicalJson agree at promotion, at dispose and in the reader', T, async () => {
+  await world(async (s) => {
+    await s.startRest();
+    const c = (await s.call('GET', '/api/cards/uuid-1')).json;
+    const set = await s.call('PATCH', '/api/cards/uuid-1', { title: EDGE_TITLE, ifVersion: c?.version, by: 'ada' });
+    assert.equal(set.status, 200, `PRECONDITION: the edge title was accepted by a normal card write (${set.status} ${set.text.slice(0, 200)})`);
+    await s.stopRest();
+    const r = await restore(s, 'pending');
+    assert.ok(typeof r.snap.payload?.body === 'string' && r.snap.payload.body.includes(EDGE_TITLE), `PRECONDITION: the stored draft carries the edge title (${JSON.stringify(r.snap.payload?.body)})`);
+    const want = sha256(coreCanonicalJson(r.snap.payload));
+    assert.deepEqual((await recordAt(s.cur, aoSubject(r.snap.obligationId))).get('payloadSha256'), [want], '(0) the executor\'s payloadSha256 at promotion is core canonicalJson\'s');
+    const hb = await holdBlock(s.cur);
+    await s.stopExec();
+    let err = null;
+    try { await s.startExec(r.backup, ['--dispose-obligation', disposeFile(s, r, { payloadSha256: want })]); } catch (e) { err = e; }
+    assert.equal(err, null, `(1) a dispose file bound with core canonicalJson's sha is admitted (${why(err)})`);
+    assert.equal((await subjectsOfType(s.cur, 'DispositionRecord')).length, 1, '(1) and wrote its DispositionRecord');
+    await s.stopExec();
+    await s.startExec(r.backup, ['--reconcile-postseq', reconcileFile(s, hb)]);
+    await s.startRest();
+    const o = await outboxFor(s, r.snap.mutationId);
+    assert.deepEqual(o.all.integrity, [], `(2) the reader does not flag it (${o.all.text.slice(0, 300)})`);
+    assert.deepEqual(o.all.entries, [[r.snap.obligationId, 'retired']], '(2) the reader reads it retired');
+  });
+});
