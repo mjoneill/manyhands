@@ -159,15 +159,9 @@ test('#1748 C1 CONTROL: with NO floor, the pinned old wire applies a real intent
   } finally { await stop(x); }
 });
 
-test('#1748 C2 CONTROL (#1622): with NO floor, an op id that is not an IRI APPLIES the write before it fails — the path the floor must pre-empt', T, async () => {
-  const x = await start(freshStore('c2'), ['--create']);
-  try {
-    const r = await update(x, INSERT('c2'), { op: 'not an iri c2' });
-    assert.ok(r.status >= 400, `the request fails (${r.status})`);
-    assert.equal((await query(x, 'SELECT ?o WHERE { <urn:ex:floor/c2> ?p ?o }')).length, 1,
-      'and yet the data is stored: apply-then-fail. If this ever stops holding, M2l needs a new trigger, not a pass');
-  } finally { await stop(x); }
-});
+// C2 RETIRED with #1622: it asserted the apply-then-fail bug (a non-IRI op id APPLIED the write, then failed) as the control
+// that gave M2l a trigger. #1622 refuses such an op id before the store is touched (its rows R1–R4), so the control cannot
+// hold any more. M2l keeps its meaning: on a floored store the PROTOCOL check comes first and answers 428 either way.
 
 test('#1748 C3 CONTROL: an UNPROMOTED copy of a store refuses to serve (the supported restore path is promotion)', T, async () => {
   const live = freshStore('c3-live');
