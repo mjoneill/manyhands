@@ -47,10 +47,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { HAVE_PY, killExecutor } from './helpers/graph-executor-proc.mjs';
 import { wholeBoardWorld, WB_DATASET } from './helpers/whole-board-1645.mjs';
 import { startRestServer, freePort } from './helpers/harness.mjs';
+import { BOOKKEEPING_GRAPH } from '../core/graph-vocab.mjs';
 
 // ── the builder's names ──
 const MODE_ENV = 'SCRUM_BOARD_DOCUMENT';
@@ -60,14 +62,14 @@ const REPLICA_RETIRED = 'REPLICA_RETIRED';   // D6: the replica's cold build in 
 
 const SKIP = HAVE_PY ? false : 'UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)';
 const T = { skip: SKIP, timeout: 300000 };
-// Rows that need a REST BOOTED in mode off or read-off. The build's fail-closed boot refuses until every document-only field has an
-// owner, and one does not yet: the outbox (#1629; labelAliases got its owner in #1640's shared part). So these are TODO (reported
-// on every run, never failing CI) until it lands; then delete OWNERS_PENDING and every row must pass as a plain test. Measured
-// 2026-10-18 by the PO on the build with the outbox marked owned in a scratch copy: 10/10.
-const OWNERS_PENDING = { todo: 'mode off cannot boot until the outbox (#1629) has its owner: delete OWNERS_PENDING when it lands' };
-const TO = { ...T, ...OWNERS_PENDING };
+// Rows that need a REST BOOTED in mode off or read-off. They were TODO while the fail-closed boot refused for a missing owner (the
+// outbox, #1629). That refusal no longer fires: with the card reference index and the post-sequence allocator initialized
+// explicitly (rest() below, as an activation does) every row boots and passes, so they are plain tests. Measured 2026-10-25:
+// 10/10 with the 8 still marked TODO.
+const TO = T;
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const RECORDER = path.join(HERE, 'helpers', 'fs-store-recorder.mjs');
+const INDEX_TOOL = path.join(HERE, '..', 'scripts', 'card-ref-index-1744.mjs');
 const ROSTER = path.join(os.tmpdir(), `r1563-roster-${process.pid}.json`);
 fs.writeFileSync(ROSTER, JSON.stringify({ seats: { ada: { name: 'Ada', glyph: 'a', color: '#7cc4a0' }, grace: { name: 'Grace', glyph: 'g', color: '#c47ca0' }, board: { name: 'Board', glyph: 'o', color: '#8899aa', kind: 'system' } } }));
 process.once('exit', () => { try { fs.rmSync(ROSTER, { force: true }); } catch { /* best effort */ } });
@@ -96,7 +98,29 @@ async function world(body) {
   const kept = fs.readFileSync(w.boardFile);
   await w.rest.stop(); fs.writeFileSync(w.boardFile, kept);   // the harness unlinks the board file on stop
   const running = [];
+  let indexed = false;
   const rest = async ({ mode = null, file = 'present', env = {}, record = true, executorUrl = w.exec.baseUrl } = {}) => {
+    // #1744: where the card reference index is required (mode off or read-off), REST refuses to START unless the index is exact
+    // under complete true, so the first such start initializes it EXPLICITLY, once per world, with the real tool. Writers are
+    // stopped by construction: no REST is running. A start aimed at another executor (D7a, unreachable) gets none, so its
+    // refusal can only be the executor's; mode unset keeps today's world (no marker, the guard is marker-keyed).
+    if ((mode === MODE.off || mode === MODE.readOff) && !indexed && executorUrl === w.exec.baseUrl) {
+      assert.equal(running.length, 0, 'PRECONDITION: no REST is running while the reference index is backfilled (writers stopped)');
+      const b = spawnSync(process.execPath, [INDEX_TOOL, '--executor', w.exec.baseUrl, '--dataset', WB_DATASET, '--backfill'], { encoding: 'utf8', timeout: 180000 });
+      assert.equal(b.status, 0, `PRECONDITION: the card reference index was backfilled before REST started (exit ${b.status}: ${(b.stdout + b.stderr).slice(-300)})`);
+      assert.match(b.stdout, /^COMPLETE$/m, 'PRECONDITION: the backfill reports COMPLETE');
+      // #1629 s3: and the post-sequence allocator, seeded explicitly above every postSeq (it is never created at runtime), as
+      // the slice-3 and slice-4 rows do
+      const ep = String((await (await fetch(`${w.exec.baseUrl}/health`)).json()).epoch);
+      const qr = await fetch(`${w.exec.baseUrl}/query`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/r1563-seqscan-${process.pid}-${Date.now()}` }, body: 'SELECT ?n WHERE { { ?s ?p ?n } UNION { GRAPH ?g { ?s ?p ?n } } FILTER(STRENDS(STR(?p), "/postSeq") || STRENDS(STR(?p), "#postSeq")) }' });
+      assert.equal(qr.status, 200, 'PRECONDITION: the postSeq scan answered');
+      const seqs = (await qr.json()).results.bindings.map((x) => Number(x.n.value)).filter(Number.isSafeInteger);
+      const epoch = (/"postSeqEpoch"\s*:\s*"([^"]+)"/.exec(kept.toString('utf8')) || [])[1] || 'e-r1563';
+      const XI = 'http://www.w3.org/2001/XMLSchema#integer';
+      const ur = await fetch(`${w.exec.baseUrl}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/r1563-allocator-${process.pid}-${Date.now()}`, 'x-epoch': ep }, body: `INSERT DATA { GRAPH <${BOOKKEEPING_GRAPH}> { <urn:ex:postseq/allocator> a <urn:ex:postseq/Allocator> ; <urn:ex:postseq/postSeqEpoch> ${JSON.stringify(epoch)} ; <urn:ex:postseq/nextPostSeq> "${Math.max(0, ...seqs) + 1}"^^<${XI}> ; <urn:ex:postseq/version> "1"^^<${XI}> . } }` });
+      assert.equal(ur.status, 200, `PRECONDITION: the allocator was seeded (${await ur.text()})`);
+      indexed = true;
+    }
     if (file === 'present') fs.writeFileSync(w.boardFile, kept);   // 'as-is' leaves the file exactly as the last REST left it
     if (file === 'absent') fs.rmSync(w.boardFile, { force: true });
     if (file === 'unreadable') { fs.writeFileSync(w.boardFile, kept); fs.chmodSync(w.boardFile, 0o000); }
