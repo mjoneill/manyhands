@@ -37,6 +37,7 @@ import { columnIdOf } from '../core/jsonld.mjs';
 import { readPostSeqReservation } from '../core/postseq-reserve.mjs';
 import { readCommittedOrigin } from '../core/origin-commit.mjs';
 import { calendarInstant } from '../core/imported-records.mjs';
+import { verifyIndex } from '../core/card-ref-index-verify.mjs';
 import { captureProblem } from './cutover-capture-schema-1629.mjs';
 
 const SCHEMA_VERSION = 'cutover-import-1629/v1';
@@ -476,6 +477,11 @@ async function run({ id, base, dataset, docBytes, outboxBytes, captureBytes, cap
   // COMPLETE means the BOARD can read it: the runtime readers (R1) read every imported record back, not only the SELECTs above
   await readersReadBack({ X, id, reservations, origins, entries, plan });
   if (!READY) return 'COMPLETE';
+  // READY requires the card reference index (#1744, rulings 46773/46781, sequence 46830): the SAME full verifier the boot
+  // gate and the schedule run, an EXACT index under a completion marker reading exactly true. Its reads fall inside the
+  // write revision read before step 7, so the READY insert's x-if-write-revision binds this result too. The index is
+  // backfilled BEFORE --ready (writers stopped); READY never backfills. A READY replay re-verifies it the same way.
+  await readyIndex(X, dataset);
   if (alreadyReady) return alreadyReady;
   return markReady({ X, id, captureSha, verifiedRevision });
 }
@@ -543,6 +549,18 @@ WHERE { GRAPH <${BK}> { <urn:ex:dataset> <urn:ex:commitSeq> ?s . FILTER(STR(?s) 
     refuse('READY_CONFLICT', `the READY marker reads back for ${val(P_READY_MIGRATION).join(', ')}`);
   }
   return `READY id=${id} commitSeq=${seq}`;
+}
+
+/** #1744 READY's index step: the full verifier, EXACT under complete true, or a HOLD naming why. */
+async function readyIndex(X, dataset) {
+  let v;
+  try { v = await verifyIndex({ query: X.query, health: X.health, dataset }); } catch (e) {
+    if (e instanceof Stop) throw e;
+    refuse('UNAVAILABLE', `the card reference index could not be verified: ${String(e?.message || e).slice(0, 200)}`);
+  }
+  if (v.status === 'UNSTABLE') hold('MOVED', 'the store never held still for a consistent card reference index check; nothing was marked');
+  if (v.status === 'VIOLATED') hold('INDEX_INCOMPLETE', `the card reference index fails its full check (${v.bad.length} violation(s): ${v.bad.slice(0, 3).join('; ')}); run scripts/card-ref-index-1744.mjs --backfill with writers stopped, then --ready`);
+  if (v.marker.length !== 1 || v.marker[0] !== 'true') hold('INDEX_INCOMPLETE', `the card reference index is exact but its completion marker reads ${JSON.stringify(v.marker)}; run scripts/card-ref-index-1744.mjs --backfill with writers stopped, then --ready`);
 }
 
 /** The announcement post's fields as the proof join compares them; null if the post is absent or is a tombstone. */
