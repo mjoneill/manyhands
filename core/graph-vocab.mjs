@@ -198,7 +198,7 @@ export const ORIGIN_TERMS = Object.freeze({
  * bookkeeping graph, is never reachable through the public dataset, and is written only by the compiler and the backfill op.
  */
 export const CARD_REF_INDEX_PREFIX = 'urn:ex:card-ref-index/';
-export const CARD_REF_INDEX_PREDICATES = Object.freeze(['indexedVersion', 'indexedJsonDigest', 'namesShortId', 'namesCount', 'namesSum', 'complete'].map((n) => `<${CARD_REF_INDEX_PREFIX}${n}>`));
+export const CARD_REF_INDEX_PREDICATES = Object.freeze(['indexedVersion', 'indexedJsonDigest', 'namesShortId', 'namesCount', 'namesSum', 'namesList', 'complete'].map((n) => `<${CARD_REF_INDEX_PREFIX}${n}>`));
 export const BOOKKEEPING_GRAPH = 'urn:scrum:bookkeeping:executor';
 export const BK = `<${BOOKKEEPING_GRAPH}>`;
 export const MARKER_PREDICATES_ALL = Object.freeze([

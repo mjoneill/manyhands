@@ -31,7 +31,8 @@ import { createHash } from 'node:crypto';
 import { EX, NS, RECEIPT_PREDICATES, MARKER_SUBJECT, MARKER_PREDICATES, LG, LG_NS, lgMetaPredicate, BK, BOOKKEEPING_PREDICATES, isBookkeeping, POSTSEQ_TERMS, ORIGIN_TERMS } from './graph-vocab.mjs';
 import { reserveOpId as _reserveOpId, canonReservationBatch as _canonReservationBatch, reserveDigestBody as _reserveDigestBody, canonAnnouncementDraft } from './postseq-reserve.mjs';
 import { announcePostId, opIdFor as announceOpIdFor, postCreateIntention as announcePostCreateIntention } from './announce-outbox.mjs';
-import { CRI, cardNames, jsonDigest } from './card-ref-index.mjs';   // #1744 — the derived card reference index
+import { CRI, cardNames, jsonDigest, namesListOf } from './card-ref-index.mjs';   // #1744 — the derived card reference index
+import { cardQuads } from './cards-graph.mjs';   // #1744 D6 — a referrer's resolution diff, from its own JSON
 
 export const DIGEST_V = 1;
 /** The literal canonicalization policy (A5). Bound into every digest; bump it if a canonical form changes. */
@@ -1392,7 +1393,7 @@ function canonCardWrite(i, { origin = i.origin != null } = {}) {
  */
 function indexInvariantClauses() {
   const VER = ref(`${NS}ver`), JSONP = ref(`${CW.scrum}entityJson`), CARD = ref(`${CW.scrum}Card`), TYPE = ref(CW.rdfType);
-  const IV = ref(CRI.indexedVersion), ID = ref(CRI.indexedJsonDigest), IN = ref(CRI.namesShortId), IC = ref(CRI.namesCount), IS = ref(CRI.namesSum);
+  const IV = ref(CRI.indexedVersion), ID = ref(CRI.indexedJsonDigest), IN = ref(CRI.namesShortId), IC = ref(CRI.namesCount), IS = ref(CRI.namesSum), IL = ref(CRI.namesList);
   const INT = `<http://www.w3.org/2001/XMLSchema#integer>`;
   const covOf = (cardVar, out) => `BIND(IRI(CONCAT(${JSON.stringify(CRI.card(''))}, STRAFTER(STR(${cardVar}), ${JSON.stringify(ENTITY_IRI)}))) AS ${out})`;
   const out = [
@@ -1406,6 +1407,13 @@ function indexInvariantClauses() {
     `    FILTER NOT EXISTS { GRAPH ${BK} { ?ixm ${IV} ?ixmv . } FILTER NOT EXISTS { GRAPH ${BK} { ?ixm ${IC} ?ixmc ; ${IS} ?ixms . } } }`,
     `    FILTER NOT EXISTS { { SELECT ?ixg (COUNT(?ixgn) AS ?ixgk) (SUM(?ixgn) AS ?ixgs) WHERE { GRAPH ${BK} { ?ixg ${IV} ?ixgv . OPTIONAL { ?ixg ${IN} ?ixgn . } } } GROUP BY ?ixg }`,
     `      GRAPH ${BK} { ?ixg ${IC} ?ixgc ; ${IS} ?ixgt . } FILTER(?ixgk != ?ixgc || ?ixgs != ?ixgt) }`,
+    // (the parentheses matter: the engine reads `a - b + 1` as `a - (b + 1)`, measured)
+    // the EXACT name set (F2): one namesList per node; every name triple is IN it; its length is namesCount. With the name
+    // triples distinct and counted above, that makes the triples and the list the same set
+    `    FILTER NOT EXISTS { GRAPH ${BK} { ?ixh ${IV} ?ixhv . } FILTER NOT EXISTS { GRAPH ${BK} { ?ixh ${IL} ?ixhl . } } }`,
+    `    FILTER NOT EXISTS { GRAPH ${BK} { ?ixe ${IL} ?ixe1 , ?ixe2 . } FILTER(!sameTerm(?ixe1, ?ixe2)) }`,
+    `    FILTER NOT EXISTS { GRAPH ${BK} { ?ixl ${IN} ?ixln ; ${IL} ?ixll . } FILTER(!CONTAINS(CONCAT(",", STR(?ixll), ","), CONCAT(",", STR(?ixln), ","))) }`,
+    `    FILTER NOT EXISTS { GRAPH ${BK} { ?ixq ${IL} ?ixql ; ${IC} ?ixqc . } BIND(IF(STR(?ixql) = "", 0, (STRLEN(STR(?ixql)) - STRLEN(REPLACE(STR(?ixql), ",", ""))) + 1) AS ?ixqk) FILTER(?ixqk != ?ixqc) }`,
   ];
   return out;
 }
@@ -1426,8 +1434,13 @@ function indexGuardClauses(R) {
       out.push(`    ${ref(P.iri)} ${ref('https://schema.org/identifier')} ?ixrm${k} .`);
       S = `xsd:integer(?ixrm${k})`.replace('xsd:integer', INT);
     } else if (P.expectedVersion == null) {
+      // a create's shortId: a positive safe integer, and the SAME one its public identifier triple carries. Anything else
+      // refuses (fail closed): a guard that silently added no namer clause would admit the create unproven
       const sid = JSON.parse(P.json).shortId;
-      if (Number.isSafeInteger(sid)) S = `"${sid}"^^${INT}`;
+      if (!Number.isSafeInteger(sid) || sid < 1) fail(`an index-guarded create needs an integer shortId (${P.iri})`);
+      const idq = P.quads.filter((q) => q[0] === ref(P.iri) && q[1] === ref('https://schema.org/identifier'));
+      if (idq.length !== 1 || !new RegExp(`^"${sid}"(\\^\\^.*)?$`).test(idq[0][2])) fail(`an index-guarded create's identifier triple is not its JSON shortId ${sid} (${P.iri})`);
+      S = `"${sid}"^^${INT}`;
     }
     if (S) out.push(`    FILTER NOT EXISTS { GRAPH ${BK} { ?ixr ${IN} ?ixrs . } FILTER(?ixrs = ${S})${notIn} }`);
   });
@@ -1435,11 +1448,44 @@ function indexGuardClauses(R) {
 }
 
 /**
+ * The stored structure a card.write REPLACES for one existing card, as UNION branches binding (s p o): its own triples, its
+ * blocker and release-condition children, its checks, the dependsOn back-links, and its list nodes. One definition, used by
+ * the delete itself and by the reference-resolve proof (#1744), so what is proved is what is deleted.
+ */
+function cardStructureBranches(iri, k, [xs, xp, xo] = ['?xs', '?xp', '?xo'], x = 'x') {
+  const I = ref(iri);
+  const back = (pred, type) => `    { ${xs} ${ref(`${CW.scrum}${pred}`)} ${I} ; ${ref(CW.rdfType)} ${ref(`${CW.scrum}${type}`)} . FILTER(STRSTARTS(STR(${xs}), ${JSON.stringify(`${iri}/`)})) ${xs} ${xp} ${xo} }`;
+  return [
+    `    { ${I} ${xp} ${xo} BIND(${I} AS ${xs}) }`,
+    back('blocks', 'Blocker'),
+    back('ofCard', 'ReleaseCondition'),
+    `    { ${I} ${ref(`${CW.scrum}hasCheck`)} ${xs} . ${xs} ${xp} ${xo} }`,
+    `    { ${xs} ${ref(`${CW.scrum}dependsOn`)} ${I} BIND(${ref(`${CW.scrum}dependsOn`)} AS ${xp}) BIND(${I} AS ${xo}) }`,
+    `    { ${I} ?${x}l${k} ?${x}h${k} FILTER(isBlank(?${x}h${k})) ?${x}h${k} ${ref(CW.rdfRest)}* ${xs} . ${xs} ${xp} ${xo} }`,
+  ];
+}
+
+/**
+ * #1744 D6 — what resolving #N changes in ONE card's projection, from its JSON alone: `add` = the triples projecting it with
+ * #N → the new card gives and projecting it with #N unresolved does not; `rem` = the reverse, minus the shared nodes (the
+ * unresolved node itself, concepts, commits), which a card write never deletes. Other names resolve identically in both.
+ */
+const SHARED_SUBJECT_PREFIXES = ['https://scrumboard.local/unresolved/', 'https://scrumboard.local/concept/', 'https://scrumboard.local/commit/'];
+function resolutionDiff(card, N, newId) {
+  const proj = (map) => cardQuads(card, map).map((q) => q.map((t, j) => cardTerm(t, `resolution[${j}]`)));
+  const A = proj(new Map([[Number(N), newId]])), B = proj(new Map());
+  const key = (q) => q.join(' ');
+  const a = new Set(A.map(key)), b = new Set(B.map(key));
+  const shared = (q) => SHARED_SUBJECT_PREFIXES.some((x) => q[0].startsWith(`<${x}`));
+  return { add: A.filter((q) => !b.has(key(q))), rem: B.filter((q) => !a.has(key(q)) && !shared(q)) };
+}
+
+/**
  * #1744 — a wiki-create's `reference-resolve` parts (contract v1 D6, F4): each is an EXISTING card whose stored JSON is
- * byte-identical to the part's (no semantic edit rides this reason), whose coverage names the new #N, whose every ADDED
- * domain triple points at the new card, and whose every REMOVED own triple pointed at the unresolved #N node. Limitation,
- * stated: the removed-triple check covers the card's own subject, not its child nodes (blockers, checks), whose IRIs would
- * need a prefix scan of the store.
+ * byte-identical to the part's (no semantic edit rides this reason) and whose coverage names the new #N. Its triples are
+ * tied to that JSON by an exact diff against the structure the write replaces (D6): every ADDED triple re-points a stored
+ * (subject, predicate) edge from the unresolved #N to the new card, and every REMOVED triple, own or child, is such an edge
+ * with its resolved twin added. Nothing else may change under this reason (F4).
  */
 function referenceResolveClauses(R) {
   const JSONP = ref(`${CW.scrum}entityJson`), IN = ref(CRI.namesShortId), INT = `<http://www.w3.org/2001/XMLSchema#integer>`;
@@ -1448,15 +1494,35 @@ function referenceResolveClauses(R) {
   const N = JSON.parse(subject.json).shortId;
   const UNRES = ref(`https://scrumboard.local/unresolved/${N}`);
   const out = [];
+  // the NEW page's own resolver facts (F4, V2-1), still true at commit: every card it points at exists, and every #M it
+  // records as unresolved still has no card. A card deleted, or a #M created, between prepare and commit refuses the create.
+  const own = subject.iri, UNRES_NS = 'https://scrumboard.local/unresolved/';
+  const objs = [...new Set(subject.quads.map((q) => q[2]))];
+  for (const [i, o] of objs.entries()) {
+    const iri = o.startsWith('<') && o.endsWith('>') ? o.slice(1, -1) : null;
+    if (!iri) continue;
+    if (iri.startsWith(ENTITY_IRI) && iri !== own && !iri.startsWith(`${own}/`)) out.push(`    FILTER EXISTS { ${o} ${ref(CW.rdfType)} ?rft${i} }`);
+    const m = iri.startsWith(UNRES_NS) ? /^(\d+)$/.exec(iri.slice(UNRES_NS.length)) : null;
+    if (m) out.push(`    FILTER NOT EXISTS { ?rfu${i} ${ref(CW.rdfType)} ${ref(`${CW.scrum}Card`)} ; ${ref('https://schema.org/identifier')} ?rfi${i} . FILTER(STR(?rfi${i}) = "${m[1]}") }`);
+  }
+  const NONE = '(<urn:ex:none> <urn:ex:none> <urn:ex:none>)';
+  const tuples = (xs) => xs.map((q) => `(${q.join(' ')})`).join(' ') || NONE;
   R.parts.forEach((P, k) => {
     if (P.reason !== 'reference-resolve') return;
     const I = ref(P.iri), COV = ref(CRI.card(P.iri.slice(ENTITY_IRI.length)));
     const values = P.quads.map((q) => `(${q.join(' ')})`).join(' ');
+    const diff = resolutionDiff(JSON.parse(P.json), N, R.origin.provenance.cardId);
+    // every triple the resolution must add is IN the part (none silently left unresolved)
+    const have = new Set(P.quads.map((q) => q.join(' ')));
+    for (const q of diff.add) if (!have.has(q.join(' '))) fail(`reference-resolve part ${P.iri} omits the resolved triple ${q.join(' ')}`);
     out.push(
       `    GRAPH ${BK} { ${I} ${JSONP} ?rrj${k} . } FILTER(STR(?rrj${k}) = ${recLit(P.json)})`,
       `    GRAPH ${BK} { ${COV} ${IN} "${N}"^^${INT} . }`,
-      `    FILTER NOT EXISTS { VALUES (?rqs${k} ?rqp${k} ?rqo${k}) { ${values} } FILTER NOT EXISTS { ?rqs${k} ?rqp${k} ?rqo${k} } FILTER(?rqo${k} != ${NEW}) }`,
-      `    FILTER NOT EXISTS { ${I} ?rep${k} ?reo${k} . FILTER NOT EXISTS { VALUES (?rvp${k} ?rvo${k}) { ${P.quads.filter((q) => q[0] === I).map((q) => `(${q[1]} ${q[2]})`).join(' ')} } FILTER(sameTerm(?rvp${k}, ?rep${k}) && sameTerm(?rvo${k}, ?reo${k})) } FILTER(?reo${k} != ${UNRES}) }`,
+      // D6 — the part's triples are the projection of its UNCHANGED JSON with #N resolved: the only triples it may add are
+      // those that projecting the JSON with #N → the new card gives and projecting it with #N unresolved does not (A − B),
+      // and the only stored triples it may drop are the reverse (B − A). Both sets come from the JSON, never from the caller.
+      `    FILTER NOT EXISTS { VALUES (?rqs${k} ?rqp${k} ?rqo${k}) { ${values} } FILTER NOT EXISTS { ?rqs${k} ?rqp${k} ?rqo${k} } FILTER NOT EXISTS { VALUES (?ras${k} ?rap${k} ?rao${k}) { ${tuples(diff.add)} } FILTER(sameTerm(?ras${k}, ?rqs${k}) && sameTerm(?rap${k}, ?rqp${k}) && sameTerm(?rao${k}, ?rqo${k})) } }`,
+      `    FILTER NOT EXISTS { { ${cardStructureBranches(P.iri, k, [`?res${k}`, `?rep${k}`, `?reo${k}`], 're').join(' UNION ')} } FILTER NOT EXISTS { VALUES (?rvs${k} ?rvp${k} ?rvo${k}) { ${values} } FILTER(sameTerm(?rvs${k}, ?res${k}) && sameTerm(?rvp${k}, ?rep${k}) && sameTerm(?rvo${k}, ?reo${k})) } FILTER NOT EXISTS { VALUES (?rds${k} ?rdp${k} ?rdo${k}) { ${tuples(diff.rem)} } FILTER(sameTerm(?rds${k}, ?res${k}) && sameTerm(?rdp${k}, ?rep${k}) && sameTerm(?rdo${k}, ?reo${k})) } }`,
     );
   });
   return out;
@@ -1467,15 +1533,20 @@ function doneMoveClauses(R) {
   const JSONP = ref(`${CW.scrum}entityJson`), COLP = ref('https://scrumboard.local/ns#column'), IDP = ref('https://schema.org/identifier');
   const CARD = ref(`${CW.scrum}Card`), TYPE = ref(CW.rdfType), INT = `<http://www.w3.org/2001/XMLSchema#integer>`;
   const subject = R.parts.find((P) => P.reason == null);
+  if (!subject) fail('a done-move plan holds a subject part with no reason');
   const sj = JSON.parse(subject.json);
   const at = Number(sj.order);
   const COL = ref(`https://scrumboard.local/column/${encodeURIComponent(sj.column)}`);   // core/jsonld.mjs columnIri
   const sibs = R.parts.filter((P) => P.reason === 'sibling-order');
   const out = [];
+  const anchor = R.walk?.anchor;
+  if (anchor) out.push(`    ${ref(anchor)} ${ORDER_P} ?wao ; ${IDP} ?was .`);
   sibs.forEach((P, k) => {
     const I = ref(P.iri);
     const j = JSON.parse(P.json);
     const old = priorOrderOf(P);
+    // a listed sibling is IN the walk: after the anchor by (order, shortId), when there is one (V2-3: no surplus part)
+    if (anchor) out.push(`    FILTER(${old} > ?wao || (${old} = ?wao && ${j.shortId} > ${INT}(?was)))`);
     // the stored JSON is the new JSON with ONLY order and version reverted. bumpCardVersion maps an integer v ≥ 0 to v + 1 and
     // anything else to 1, so a new version of 1 may come from 0, null, or no version key at all (it was appended last): an
     // exact comparison against that closed set, never a looser one
@@ -1492,11 +1563,9 @@ function doneMoveClauses(R) {
   // no card outside the plan sits where the walk would reach: order in [lower, at + m], lower by the anchor
   const top = at + sibs.length;
   const listed = R.parts.map((P) => ref(P.iri)).join(', ');
-  const anchor = R.walk?.anchor;
   let range;
   if (anchor === null) range = `FILTER(?wyo <= ${top})`;
   else if (anchor) {
-    out.push(`    ${ref(anchor)} ${ORDER_P} ?wao ; ${IDP} ?was .`);
     range = `FILTER(?wyo <= ${top} && (?wyo > ?wao || (?wyo = ?wao && ${INT}(?wys) > ${INT}(?was))))`;
   } else range = `FILTER(?wyo >= ${at} && ?wyo <= ${top})`;
   out.push(`    FILTER NOT EXISTS { ?wy ${TYPE} ${CARD} ; ${COLP} ${COL} ; ${ORDER_P} ?wyo ; ${IDP} ?wys . FILTER(?wy NOT IN (${listed})) ${range} }`);
@@ -1528,7 +1597,8 @@ function compileCardWrite(c) {
     if (!P.remove) {
       const nms = cardNames(JSON.parse(P.json));
       bIns.push(`  ${v(COV)} ${ref(CRI.indexedVersion)} ${v(P.version)} .`, `  ${v(COV)} ${ref(CRI.indexedJsonDigest)} ${v(recLit(jsonDigest(P.json)))} .`,
-        `  ${v(COV)} ${ref(CRI.namesCount)} ${v(intLit(String(nms.length), 'namesCount'))} .`, `  ${v(COV)} ${ref(CRI.namesSum)} ${v(intLit(String(nms.reduce((a, b) => a + b, 0)), 'namesSum'))} .`);
+        `  ${v(COV)} ${ref(CRI.namesCount)} ${v(intLit(String(nms.length), 'namesCount'))} .`, `  ${v(COV)} ${ref(CRI.namesSum)} ${v(intLit(String(nms.reduce((a, b) => a + b, 0)), 'namesSum'))} .`,
+        `  ${v(COV)} ${ref(CRI.namesList)} ${v(recLit(namesListOf(nms)))} .`);
       for (const n of nms) bIns.push(`  ${v(COV)} ${ref(CRI.namesShortId)} ${v(intLit(String(n), 'namesShortId'))} .`);
     }
     if (P.expectedVersion == null) pre.push(...freshSubject(I));
@@ -1537,15 +1607,7 @@ function compileCardWrite(c) {
       // #1638 — the card's bookkeeping (ver, recordedBy, entityJson) goes with it: read inside the bk graph, deleted there.
       // #1666 — as one more UNION branch, so its rows ADD; a top-level OPTIONAL per card multiplied them (3^N × the rest).
       branches.push(bkBranch(I));
-      const back = (pred, type) => `    { ?xs ${ref(`${CW.scrum}${pred}`)} ${I} ; ${ref(CW.rdfType)} ${ref(`${CW.scrum}${type}`)} . FILTER(STRSTARTS(STR(?xs), ${JSON.stringify(`${P.iri}/`)})) ?xs ?xp ?xo }`;
-      branches.push(
-        `    { ${I} ?xp ?xo BIND(${I} AS ?xs) }`,
-        back('blocks', 'Blocker'),
-        back('ofCard', 'ReleaseCondition'),
-        `    { ${I} ${ref(`${CW.scrum}hasCheck`)} ?xs . ?xs ?xp ?xo }`,
-        `    { ?xs ${ref(`${CW.scrum}dependsOn`)} ${I} BIND(${ref(`${CW.scrum}dependsOn`)} AS ?xp) BIND(${I} AS ?xo) }`,
-        `    { ${I} ?xl${k} ?xh${k} FILTER(isBlank(?xh${k})) ?xh${k} ${ref(CW.rdfRest)}* ?xs . ?xs ?xp ?xo }`,
-      );
+      branches.push(...cardStructureBranches(P.iri, k));
       if (P.prior.length) branches.push(`    { VALUES (?xs ?xp ?xo) {\n${P.prior.map((q) => `      (${q.join(' ')})`).join('\n')}\n    } }`);
     }
     if (P.remove) return;
@@ -1811,7 +1873,11 @@ function bindDoneMovePlan(descriptor, plan) {
     if (!Number.isSafeInteger(j.order) || !Number.isSafeInteger(j.shortId)) fail(`sibling ${p.iri}: an integer order and shortId`);
     return { p, old, now: j.order, shortId: j.shortId };
   }).sort((a, b) => (a.old - b.old) || (a.shortId - b.shortId));
+  const unanchored = plan.walk == null || plan.walk.anchor === undefined;
   sibs.forEach((x, k) => {
+    // V2-3 — no surplus part: an unanchored walk starts at `at`, so a card below it is not in the walk (an anchored walk's
+    // lower bound is the anchor's stored position, checked at commit by doneMoveClauses)
+    if (unanchored && x.old < at) fail(`sibling ${x.p.iri} (order ${x.old}) is below the walk's start ${at}: it does not shift`);
     if (x.now !== at + k + 1) fail(`the walk gives sibling ${x.p.iri} order ${at + k + 1}, not ${x.now}`);
     if (x.old > x.now - 1) fail(`sibling ${x.p.iri} was past a gap (order ${x.old}): it does not shift`);
   });

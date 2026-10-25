@@ -7,6 +7,9 @@
  *                                          indexedJsonDigest              = sha256 of the card's stored entityJson
  *                                          namesShortId      xsd:integer  one per distinct #N the card names
  *                                          namesCount / namesSum         how many names, and their sum (the names' watermark)
+ *                                          namesList                     the same names as ONE literal, sorted, comma-joined:
+ *                                                                        the name triples must equal it exactly (a swap that
+ *                                                                        keeps count and sum is caught)
  * and, once a verified backfill has finished, the marker <urn:ex:card-ref-index/coverage> complete true.
  * An ABSENT node is a violation, never "no references". The index is bookkeeping: no public, traversable triple.
  *
@@ -24,6 +27,7 @@ export const CRI = Object.freeze({
   // the names' own watermark: a removed or extra name is seen even when version and JSON digest are intact (F2)
   namesCount: `${CARD_REF_INDEX_NS}namesCount`,
   namesSum: `${CARD_REF_INDEX_NS}namesSum`,
+  namesList: `${CARD_REF_INDEX_NS}namesList`,
   marker: `${CARD_REF_INDEX_NS}coverage`,
   complete: `${CARD_REF_INDEX_NS}complete`,
 });
@@ -42,6 +46,9 @@ export function cardNames(card) {
   return [...n].filter((x) => Number.isSafeInteger(x) && x > 0).sort((a, b) => a - b);
 }
 
+/** The names as one literal: sorted ascending, comma-joined, "" for none. */
+export const namesListOf = (names) => names.join(',');
+
 export const jsonDigest = (entityJson) => crypto.createHash('sha256').update(entityJson).digest('hex');
 
 /** The coverage node's triples as SPARQL text (inside a GRAPH block), for one card at one version and stored JSON. */
@@ -53,6 +60,7 @@ export function coverageTriplesText(cardId, version, entityJson, card = JSON.par
     `${s} <${CRI.indexedJsonDigest}> ${JSON.stringify(jsonDigest(entityJson))} .`,
     `${s} <${CRI.namesCount}> "${names.length}"^^<${XSD_INT}> .`,
     `${s} <${CRI.namesSum}> "${names.reduce((a, b) => a + b, 0)}"^^<${XSD_INT}> .`,
+    `${s} <${CRI.namesList}> ${JSON.stringify(namesListOf(names))} .`,
     ...names.map((n) => `${s} <${CRI.namesShortId}> "${n}"^^<${XSD_INT}> .`),
   ];
   return lines.join('\n');

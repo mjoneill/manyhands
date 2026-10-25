@@ -10596,7 +10596,8 @@ async function handleUpdateCard(req, res, idOrShortId) {
         shifted = makeRoomInColumn(data.cards, card, anchor);
         // #1744 (#1629 slice 4) — executor-owned: the shifted siblings ride the done-nudge origin as sibling-order parts,
         // and the walk's anchor rides with it so the compiler can prove the shifted set is exactly the walk
-        { const st = cardWriteContext.getStore(); if (st) st.walk = { anchor: anchor === undefined ? undefined : anchor === null ? null : `https://scrumboard.local/entity/${anchor.id}` }; }
+        // (only when the walk shifted a sibling: a zero-shift move keeps its one retry, D9's scope is sibling-shifting moves)
+        if (shifted.length) { const st = cardWriteContext.getStore(); if (st) st.walk = { anchor: anchor === undefined ? undefined : anchor === null ? null : `https://scrumboard.local/entity/${anchor.id}` }; }
         // #1584 — the move's identity, on the stored card, so the fence can
         // tell a committed move from one that may still arrive (handleMoveFence).
         if (typeof patch.requestId === 'string') card.lastMoveRequestId = patch.requestId;
@@ -12808,7 +12809,12 @@ async function createNodeAsOrigin(res, body) {
           slots: [{ slot: 'wiki', author: 'wiki', body: noticeBody, mentions: extractMentionsFromRoster(noticeBody, currentRoster(data)), notify: false }] }),
         afterPrepare: () => testBarrier('after-origin-prepare'),
       });
-      if (r.outcome === 'APPLIED') handle = { mode: 'publisher', executorOwned: true, slot: 'wiki', mutationId: r.mutationId, obligationId: `${r.mutationId}:wiki` };
+      if (r.outcome === 'APPLIED') {
+        handle = { mode: 'publisher', executorOwned: true, slot: 'wiki', mutationId: r.mutationId, obligationId: `${r.mutationId}:wiki` };
+        // the same post-commit bookkeeping as every unit write: the create event (/api/changes), the replica marked dirty,
+        // the pending count, lastUpdated. The document keeps its own card list (FILE_CARDS), as for any unit write.
+        writeDocument(data, [cardEvent('create', card, card.createdBy)]);
+      }
       return cardToNode(card);
     });
   } catch (e) {
