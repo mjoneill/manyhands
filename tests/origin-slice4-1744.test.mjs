@@ -1431,3 +1431,172 @@ test('#1744 (D8, mode on, a regression guard that passes today) an ordinary upda
     assert.ok(!Object.keys(api).some((k) => /index|namesShortId/i.test(k)), 'no index field on the API card');
   });
 });
+
+// ── r10 (#116 full review 46841, ruling 46843, fixes 20aafb5 / 46844). Each row is red if its guard is removed:
+//   V1 S2 the verifier's digest check · V2 S6 its unexpected-predicate check · V3 finding 7 a plain-string marker
+//   V4 finding 4 the write revision in the position · B1 S1 the boot gate's FULL verify · B2 S5 the backfill's CARDS_CHANGED
+//   F1a/F1b finding 1 a failed backfill leaves the index CLOSED in mode on · F2 finding 2 a contradictory marker refuses
+//   F2b finding 2 a latch landing between the final verify and the mark → MOVED, the latch stands.
+// The proxy rows put a test-only proxy in front of the real executor; it forwards everything and fires `act` ONCE, at the
+// first request `when` matches (before forwarding it), so the interleaving is deterministic.
+async function injectProxy(target, when, act) {
+  let fired = false;
+  const srv = http.createServer(async (req, res) => {
+    const chunks = []; for await (const c of req) chunks.push(c);
+    const body = Buffer.concat(chunks);
+    try {
+      if (!fired && when(req, body.toString('utf8'))) { fired = true; await act(); }
+      const headers = { ...req.headers }; delete headers.host; delete headers['content-length'];
+      const r = await fetch(`${target}${req.url}`, { method: req.method, headers, body: req.method === 'GET' ? undefined : body });
+      res.writeHead(r.status, { 'content-type': r.headers.get('content-type') || 'application/json' }); res.end(Buffer.from(await r.arrayBuffer()));
+    } catch (e) { res.writeHead(599, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: `test proxy: ${String(e?.message || e)}` })); }
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  return { url: `http://127.0.0.1:${srv.address().port}`, fired: () => fired, close: () => new Promise((r) => srv.close(r)) };
+}
+const opIdOf = (req) => String(req.headers['x-op-id'] || '');
+const latchRecord = async (s) => (await s.q(`SELECT ?r ?t WHERE { GRAPH <${BK}> { <${IX.marker}> <${IX.ns}latchReason> ?r ; <${IX.ns}latchedAt> ?t } }`)).map((b) => ({ reason: b.r.value, at: b.t.value }));
+const PLANTED_AT = '2026-10-25T00:00:00.000Z';
+const latchWith = (s, reason) => s.xu(`DELETE WHERE { GRAPH <${BK}> { <${IX.marker}> ?p ?o } } ; INSERT DATA { GRAPH <${BK}> { <${IX.marker}> <${IX.complete}> "false"^^<${XSD}boolean> ; <${IX.ns}latchReason> ${JSON.stringify(reason)} ; <${IX.ns}latchedAt> "${PLANTED_AT}"^^<${XSD}dateTime> } }`, 'latch-with');
+const GHOST = 'https://scrumboard.local/entity/ghost-1744-r10';
+const plantGhost = (s) => s.xu(`INSERT DATA { <${GHOST}> <${RDF_TYPE}> <${RS}Card> }`, 'ghost');   // a live card with no version or JSON
+const writeRevisionOf = async (s) => (await (await fetch(`${s.w.exec.baseUrl}/health`)).json()).writeRevision;
+
+test('#1744 (V1, r10, S2) --verify on a coverage node whose indexedJsonDigest is not its stored JSON\'s (everything else intact) → exit 1 REFUSED INDEX_INCOMPLETE, naming the digest', T, async () => {
+  await world('off', async (s) => {
+    await DAMAGE.find(([w]) => /MISMATCHED JSON digest/.test(w))[1]({ q: s.q, xu: s.xu });
+    const r = await indexTool(s, '--verify');
+    assert.equal(r.status, 1, `exit 1 (${r.out.slice(-300)})`);
+    assert.match(r.out, /^REFUSED INDEX_INCOMPLETE .*card uuid-1: indexedJsonDigest/m, 'the refusal names card 1\'s digest');
+  });
+});
+test('#1744 (V2, r10, S6) --verify on a coverage node carrying an UNEXPECTED predicate (everything else intact) → exit 1 REFUSED INDEX_INCOMPLETE, naming it', T, async () => {
+  await world('off', async (s) => {
+    await s.xu(`INSERT DATA { GRAPH <${BK}> { ${COV('uuid-1')} <${IX.ns}somethingElse> "x" } }`, 'extra-pred');
+    const r = await indexTool(s, '--verify');
+    assert.equal(r.status, 1, `exit 1 (${r.out.slice(-300)})`);
+    assert.match(r.out, /^REFUSED INDEX_INCOMPLETE .*card uuid-1: unexpected predicates urn:ex:card-ref-index\/somethingElse/m, 'the refusal names the predicate');
+  });
+});
+test('#1744 (V3, r10, finding 7) a PLAIN-STRING "true" marker over an exact index (the runtime guard refuses it) → --verify never reports COMPLETE', T, async () => {
+  await world('off', async (s) => {
+    await s.xu(`DELETE WHERE { GRAPH <${BK}> { <${IX.marker}> ?p ?o } } ; INSERT DATA { GRAPH <${BK}> { <${IX.marker}> <${IX.complete}> "true" } }`, 'string-true');
+    assert.deepEqual(await markerOf(s), [STR('true')], 'PRECONDITION: the marker is the plain string "true"');
+    const r = await indexTool(s, '--verify');
+    assert.notEqual(r.status, 0, `not exit 0 (${r.out.slice(-300)})`);
+    assert.doesNotMatch(r.out, /^COMPLETE$/m, 'never COMPLETE');
+  });
+});
+test('#1744 (V4, r10, finding 4) a RAW write between the verifier\'s reads, on every attempt (commitSeq still) → --verify-and-latch exit 3 UNSTABLE, nothing judged, nothing latched', T, async () => {
+  await world('off', async (s) => {
+    await DAMAGE[0][1]({ q: s.q, xu: s.xu });   // a real violation, so a judged read WOULD latch
+    let n = 0;
+    const noise = async () => { const r0 = await writeRevisionOf(s); await s.xu(`INSERT DATA { GRAPH <urn:ex:test/r10-noise> { <urn:ex:test/r10-noise> <urn:ex:test/n> ${n++} } }`, 'noise'); assert.notEqual(await writeRevisionOf(s), r0, 'PRECONDITION: a raw write moves the write revision'); };
+    // fire on EVERY coverage read (the proxy fires once, so it is re-armed per request here)
+    const srv = http.createServer(async (req, res) => {
+      const chunks = []; for await (const c of req) chunks.push(c);
+      const body = Buffer.concat(chunks);
+      if (req.url.startsWith('/query') && body.toString('utf8').includes('card-ref-index/card/")')) await noise();
+      const headers = { ...req.headers }; delete headers.host; delete headers['content-length'];
+      const r = await fetch(`${s.w.exec.baseUrl}${req.url}`, { method: req.method, headers, body: req.method === 'GET' ? undefined : body });
+      res.writeHead(r.status, { 'content-type': r.headers.get('content-type') || 'application/json' }); res.end(Buffer.from(await r.arrayBuffer()));
+    });
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+    let r;
+    try { r = await indexTool(s, '--verify-and-latch', `http://127.0.0.1:${srv.address().port}`); } finally { await new Promise((x) => srv.close(x)); }
+    assert.ok(n >= 1, `PRECONDITION: the noise fired between the reads (${n} time(s))`);
+    assert.equal(r.status, 3, `exit 3 (${r.out.slice(-300)} ${r.err.slice(-200)})`);
+    assert.match(r.out, /^UNSTABLE /m, 'UNSTABLE');
+    assert.deepEqual(await markerValues(s), ['true'], 'nothing latched');
+  });
+});
+test('#1744 (B1, r10, S1) a coverage node TRIMMED CONSISTENTLY before boot (the runtime consistency check passes) → the mode-off server REFUSES TO START: only the full verification can see it', T, async () => {
+  await world('off', async (s) => {
+    const cov = `<${IX.card('uuid-2')}>`;
+    const get = async (p) => (await s.q(`SELECT ?o WHERE { GRAPH <${BK}> { ${cov} <${p}> ?o } }`)).map((r) => r.o.value);
+    const [cnt] = await get(`${IX.ns}namesCount`), [sum] = await get(`${IX.ns}namesSum`), [list] = await get(`${IX.ns}namesList`);
+    assert.ok(Number(cnt) > 0, `PRECONDITION: card 2 names something (count ${cnt})`);
+    const I = (n) => `"${n}"^^<${XSD}integer>`;
+    await s.xu(`DELETE WHERE { GRAPH <${BK}> { ${cov} <${IX.namesShortId}> ?n } } ; DELETE DATA { GRAPH <${BK}> { ${cov} <${IX.ns}namesCount> ${I(cnt)} ; <${IX.ns}namesSum> ${I(sum)} ; <${IX.ns}namesList> ${JSON.stringify(list)} } } ; INSERT DATA { GRAPH <${BK}> { ${cov} <${IX.ns}namesCount> ${I(0)} ; <${IX.ns}namesSum> ${I(0)} ; <${IX.ns}namesList> "" } }`, 'trim');
+    const { cardRefIndexHealthySparql } = await import('../core/graph-compiler.mjs');
+    assert.equal((await s.q(cardRefIndexHealthySparql())).length, 1, 'PRECONDITION: the runtime consistency check still passes, so only the full verification can refuse');
+    await assert.rejects(s.start(), (e) => /card reference index/.test(String(e?.message)) && /refusing to start/.test(String(e?.message)) && /uuid-2/.test(String(e?.message)), 'the boot gate refuses, naming the card');
+  });
+});
+test('#1744 (B2, r10, S5) a card WRITTEN during the backfill (after its first batch) → exit 1 REFUSED CARDS_CHANGED; the index stays CLOSED (marker false)', T, async () => {
+  await world('off', async (s) => {
+    const iri = cardIriOf('uuid-3');
+    const bump = () => s.xu(`DELETE { GRAPH <${BK}> { <${iri}> <${VER}> ?v } } INSERT { GRAPH <${BK}> { <${iri}> <${VER}> ?v2 } } WHERE { GRAPH <${BK}> { <${iri}> <${VER}> ?v } BIND(?v + 1 AS ?v2) }`, 'concurrent-writer');
+    const px = await injectProxy(s.w.exec.baseUrl, (req) => req.url.startsWith('/update') && /\/card-ref-index\/batch-0\//.test(opIdOf(req)), bump);
+    let r;
+    try { r = await indexTool(s, '--backfill', px.url); } finally { await px.close(); }
+    assert.ok(px.fired(), 'PRECONDITION: the concurrent write fired at the first batch');
+    assert.equal(r.status, 1, `exit 1 (${r.out.slice(-300)})`);
+    assert.match(r.out, /^REFUSED CARDS_CHANGED /m, 'REFUSED CARDS_CHANGED, the after-check, not a later verification');
+    assert.deepEqual(await markerValues(s), ['false'], 'the index stays closed');
+  });
+});
+for (const [tag, what, setup, reason] of [
+  ['F1a', 'a LATCHED marker (its own reason and time)', (s) => latchWith(s, 'r10 planted latch'), 'r10 planted latch'],
+  ['F1b', 'a healthy complete-true marker', async () => {}, 'backfill in progress'],
+]) {
+  test(`#1744 (${tag}, r10, finding 1, mode on) a FAILED --backfill over ${what} leaves the index CLOSED: the marker reads false (${reason}), and an ordinary create AND a delete refuse ${CODES.INDEX_INCOMPLETE}, no effect; a clean backfill admits again (control)`, T, async () => {
+    await world('on', async (s) => {
+      await setup(s);
+      const before = await latchRecord(s);
+      await plantGhost(s);
+      const b = await indexTool(s, '--backfill');
+      assert.equal(b.status, 1, `the backfill fails (${b.out.slice(-300)})`);
+      assert.match(b.out, /^REFUSED CARD_INCOMPLETE /m, 'on the card with no stored JSON');
+      assert.deepEqual(await markerValues(s), ['false'], 'the marker is never removed: it reads false');
+      const rec = await latchRecord(s);
+      assert.equal(rec.length, 1, `one latchReason and one latchedAt (${JSON.stringify(rec)})`);
+      assert.equal(rec[0].reason, reason, 'the reason is the expected one');
+      if (tag === 'F1a') assert.deepEqual(rec, before, 'a latch keeps its own reason AND time');
+      await s.start();
+      const e0 = await effects(s);
+      const c = await s.call('POST', '/api/cards', { title: 'Refused card', createdBy: 'ada', requestId: `req-1744-${tag}-${process.pid}` });
+      assert.ok(!ok2xx(c.status), `the create is refused (${c.status} ${c.text.slice(0, 200)})`);
+      assert.equal(c.json?.code, CODES.INDEX_INCOMPLETE, 'with the named code');
+      const d = await s.call('DELETE', '/api/cards/uuid-3?by=ada');
+      assert.ok(!ok2xx(d.status), `the delete is refused (${d.status} ${d.text.slice(0, 200)})`);
+      assert.deepEqual(await effects(s), e0, 'no effect');
+      await s.xu(`DELETE WHERE { <${GHOST}> ?p ?o }`, 'unghost');
+      const ok = await indexTool(s, '--backfill');
+      assert.equal(ok.status, 0, `CONTROL: a clean backfill completes (${ok.out.slice(-200)})`);
+      const a = await s.call('POST', '/api/cards', { title: 'Admitted card', createdBy: 'ada', requestId: `req-1744-${tag}-ok-${process.pid}` });
+      assert.ok(ok2xx(a.status), `CONTROL: complete true admits the create (${a.status} ${a.text.slice(0, 200)})`);
+    });
+  });
+}
+for (const mode of ['off', 'on']) {
+  test(`#1744 (F2-${mode}, r10, finding 2, mode ${mode}) a marker reading BOTH true and false → an ordinary create AND a page create refuse ${CODES.INDEX_INCOMPLETE}, no effect; the healthy marker admits first (control)`, T, async () => {
+    await world(mode, async (s) => {
+      await s.start();
+      const ok = await s.call('POST', '/api/cards', { title: 'Admitted card', createdBy: 'ada', requestId: `req-1744-f2-${mode}-ok-${process.pid}` });
+      assert.ok(ok2xx(ok.status), `CONTROL: complete true admits the create (${ok.status} ${ok.text.slice(0, 200)})`);
+      await s.xu(`INSERT DATA { GRAPH <${BK}> { <${IX.marker}> <${IX.complete}> "false"^^<${XSD}boolean> } }`, 'both');
+      assert.deepEqual((await markerValues(s)).sort(), ['false', 'true'], 'PRECONDITION: the marker reads true AND false');
+      const e0 = await effects(s);
+      const c = await s.call('POST', '/api/cards', { title: 'Refused card', createdBy: 'ada', requestId: `req-1744-f2-${mode}-${process.pid}` });
+      assert.ok(!ok2xx(c.status), `the ordinary create is refused (${c.status} ${c.text.slice(0, 200)})`);
+      assert.equal(c.json?.code, CODES.INDEX_INCOMPLETE, 'with the named code');
+      const p = await createPage(s, { title: 'Refused page', createdBy: 'ada', requestId: `req-1744-f2-${mode}-page` });
+      assert.ok(!ok2xx(p.status), `the page create is refused (${p.status} ${p.text.slice(0, 200)})`);
+      assert.deepEqual(await effects(s), e0, 'no effect');
+    });
+  });
+}
+test('#1744 (F2b, r10, finding 2) a LATCH landing between the backfill\'s final verification and its mark → exit 1 REFUSED MOVED; the latch STANDS (false, its own reason)', T, async () => {
+  await world('off', async (s) => {
+    const act = async () => { const r0 = await writeRevisionOf(s); await latchWith(s, 'r10 concurrent latch'); assert.notEqual(await writeRevisionOf(s), r0, 'PRECONDITION: the latch moved the write revision'); };
+    const px = await injectProxy(s.w.exec.baseUrl, (req) => req.url.startsWith('/update') && /\/card-ref-index\/mark\//.test(opIdOf(req)), act);
+    let r;
+    try { r = await indexTool(s, '--backfill', px.url); } finally { await px.close(); }
+    assert.ok(px.fired(), 'PRECONDITION: the latch fired at the mark');
+    assert.equal(r.status, 1, `exit 1 (${r.out.slice(-300)})`);
+    assert.match(r.out, /^REFUSED MOVED /m, 'REFUSED MOVED');
+    assert.deepEqual(await markerValues(s), ['false'], 'the latch stands: the marker reads exactly false');
+    assert.deepEqual((await latchRecord(s)).map((x) => x.reason), ['r10 concurrent latch'], 'with the latch\'s own reason');
+  });
+});
