@@ -13,7 +13,7 @@ Contract (D2 v1 §3, #1565; evidence #1555 T10/T11/T13):
 usage: python executor.py --store DIR --port N --dataset-id ID [--create] [--log FILE] [--exit-on-stdin-eof]
                            [--checkpoint-dir DIR] [--promote-epoch] [--adopt-home] [--read-only]
 """
-import argparse, hashlib, json, os, sys, threading, time, urllib.parse, uuid
+import argparse, hashlib, json, os, re, sys, threading, time, urllib.parse, uuid
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import pyoxigraph as px
 
@@ -45,6 +45,13 @@ P_STORE_HOME = px.NamedNode(NS + 'storeHome')
 # device number can change across mounts/reboots, which would refuse a healthy live store.
 P_STORE_HOME_INODE = px.NamedNode(NS + 'storeHomeInode')
 SYNC_MODE = 'flush'  # the observed acknowledgement level; F_FULLFSYNC is D3's, not built here
+# #1748 (contract v2 F1, M2) — the WRITE PROTOCOL FLOOR. Once installed, every /update must declare exactly this protocol in
+# PROTOCOL_HEADER, checked under the update lock BEFORE anything is applied or flushed: an old binary or job may start, read
+# and learn the epoch, but cannot write. A compatibility fence against accidental old runtimes, not authentication.
+FLOOR_S = px.NamedNode('urn:ex:write-floor')
+FLOOR_P = px.NamedNode('urn:ex:write-floor/minProtocol')
+PROTOCOL_HEADER = 'x-manyhands-write-protocol'
+NETWORKED = re.compile(r'\b(LOAD|SERVICE)\b', re.IGNORECASE)   # an update that could reach the network is never probed
 # The stdlib default listen backlog is 5. Measured in the D2 proofs (P5, 2026-10-04): with
 # 8 concurrent writers, 5 connected at once and 3 waited ~30 ms for the OS to retry the
 # connection. Correctness held, but concurrency was not exercised and latency carried a
@@ -77,6 +84,11 @@ def parse_args(argv):
                          'the startup self-check, and refuses every /update with 503 READ-ONLY. A fence for a store '
                          'that must not change (a cutover, a rollback copy). Not combinable with --create, '
                          '--promote-epoch or --adopt-home.')
+    ap.add_argument('--install-write-floor', default=None, metavar='PROTOCOL',
+                    help='#1748: install the WRITE PROTOCOL FLOOR before serving (the maintenance-activation hook): from then '
+                         'on every /update must declare it in x-manyhands-write-protocol, or is refused 428 before anything is '
+                         'applied. Installing the SAME protocol again is a no-op; a different one on a floored store refuses '
+                         'to start. The floor survives restart, backup and promoted restore.')
     ap.add_argument('--exit-on-stdin-eof', action='store_true',
                     help='exit when stdin closes: a parent that dies (even by SIGKILL) takes the executor with it')
     ap.add_argument('--checkpoint-dir', default=None,
@@ -107,6 +119,14 @@ class Degraded(Exception):
 
 class MarkerUnsound(Exception):
     """The commit marker is contradictory: nothing that reports a commit position may proceed."""
+
+
+class ProtocolRequired(Exception):
+    """#1748 — the request did not declare the installed write protocol: refused before anything is applied."""
+
+
+class FloorProtected(Exception):
+    """#1748 — the update would delete, rewrite or contradict the installed floor: refused before anything is applied."""
 
 
 class ReconcileRequired(Exception):
@@ -166,10 +186,13 @@ def old_layout(store):
 
 class Executor:
     def __init__(self, store_dir, dataset_id, create=False, log=None, promote_epoch=False, checkpoint_dir=None,
-                 adopt_home=False, read_only=False):
+                 adopt_home=False, read_only=False, install_write_floor=None):
         self.read_only = bool(read_only)
         if self.read_only and (create or promote_epoch or adopt_home):
             raise SystemExit('REFUSED: --read-only cannot be combined with --create, --promote-epoch or --adopt-home')
+        if self.read_only and install_write_floor is not None:
+            raise SystemExit('REFUSED: --read-only cannot install a write floor (it writes nothing)')
+        self.write_floor = None
         # #1638 C7 — a migration builds its copy at <dest>.partial and renames it onto <dest> only once it is complete and
         # verified. A directory still named *.partial is an INTERRUPTED copy: never served, read-only or not.
         if os.path.basename(os.path.abspath(store_dir).rstrip('/')).endswith('.partial'):
@@ -240,6 +263,7 @@ class Executor:
         # flush. The store's logical content is unchanged.
         self.promoted = None
         if self.read_only:
+            self.write_floor = self._floor_value()
             return   # #1638 a read-only fence writes nothing: no self-check, no promotion, no identity backfill
         probe = f'<{NS}selfcheck/{int(time.time() * 1000)}>'
         try:
@@ -294,12 +318,49 @@ class Executor:
             self._set_identity(P_STORE_HOME, self.home)
             self._set_identity(P_STORE_HOME_INODE, self.home_inode)
             self.store.flush()
+        # #1748 the floor: read what the store holds; install it only when asked, and never over a DIFFERENT one
+        held = self._floor_value()
+        if install_write_floor is not None:
+            want = str(install_write_floor)
+            if not want or want != want.strip():
+                raise SystemExit(f'REFUSED: --install-write-floor needs a non-empty protocol name, got {want!r}')
+            if held is None:
+                self.store.update(f'INSERT DATA {{ GRAPH <{BK}> {{ <{FLOOR_S.value}> <{FLOOR_P.value}> {json.dumps(want)} }} }}')
+                self.store.flush()
+                held = self._floor_value()
+            elif held != want:
+                raise SystemExit(f'REFUSED: this store already has write floor {held!r}; --install-write-floor {want!r} '
+                                 'would change it (a floor is never replaced or downgraded by a relaunch)')
+        self.write_floor = held
 
     def _set_identity(self, pred, value):
         """Replace the single marker value of `pred` (or remove it when value is None)."""
         ins = f'INSERT {{ GRAPH <{BK}> {{ <{DATASET.value}> <{pred.value}> {json.dumps(value)} }} }} ' if value is not None else ''
         self.store.update(f'DELETE {{ GRAPH <{BK}> {{ <{DATASET.value}> <{pred.value}> ?v }} }} {ins}'
                           f'WHERE {{ OPTIONAL {{ GRAPH <{BK}> {{ <{DATASET.value}> <{pred.value}> ?v }} }} }}')
+
+    def _floor_value(self):
+        """#1748 the installed write protocol, or None. A store holding more than one value is contradictory: it refuses
+        to start rather than pick one."""
+        rows = list(self.store.query(f'SELECT ?v WHERE {{ {in_bk(f"<{FLOOR_S.value}> <{FLOOR_P.value}> ?v")} }}'))
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise SystemExit(f'REFUSED: the store holds {len(rows)} write floor values (expected at most 1)')
+        return rows[0]['v'].value
+
+    def _floor_survives(self, sparql):
+        """#1748 would `sparql` leave the floor exactly as installed? Decided BEFORE the real store is touched, by applying
+        the update to a throwaway in-memory store holding only the floor: a named delete, a rewrite, a wildcard wipe,
+        CLEAR, or a second value all show there. (An update whose effect on the floor depends on OTHER data cannot show
+        in this probe; update() re-checks the real store after applying and restores the floor, as a backstop.)"""
+        if NETWORKED.search(sparql):
+            return True   # never let the probe reach the network; the real store decides and the backstop below holds
+        probe = px.Store()
+        probe.update(f'INSERT DATA {{ GRAPH <{BK}> {{ <{FLOOR_S.value}> <{FLOOR_P.value}> {json.dumps(self.write_floor)} }} }}')
+        probe.update(sparql)
+        rows = list(probe.query(f'SELECT ?v WHERE {{ {in_bk(f"<{FLOOR_S.value}> <{FLOOR_P.value}> ?v")} }}'))
+        return [r['v'].value for r in rows] == [self.write_floor]
 
     def _identity(self):
         """#1577 incarnation / incarnationFrom / storeHome / epochBase, each None when absent. Never raises."""
@@ -350,13 +411,25 @@ class Executor:
             out.setdefault(k, []).append(term_json(r['o']))
         return out
 
-    def update(self, sparql, op_iri, caller_epoch=None):
+    def update(self, sparql, op_iri, caller_epoch=None, protocol=None):
         """Returns the stored receipt. Raises Degraded before touching the store when
         latched; raises ReconcileRequired when the caller's epoch is not the store's and
-        this opId has no receipt here; raises on engine or flush error (UNKNOWN)."""
+        this opId has no receipt here; raises on engine or flush error (UNKNOWN).
+        #1748: with a write floor installed, raises ProtocolRequired unless `protocol` (the request's declared
+        protocol, a list of every header value) is exactly [floor], and FloorProtected when the update would
+        change the floor; both BEFORE anything is applied or flushed, before even a receipt replay."""
         with self.lock:
             if self.degraded:
                 raise Degraded(self.degraded)
+            if self.write_floor is not None:
+                if protocol != [self.write_floor]:
+                    raise ProtocolRequired(self.write_floor)
+                try:
+                    survives = self._floor_survives(sparql)
+                except Exception:
+                    survives = True   # the probe could not run it: the real store decides, and the backstop below holds
+                if not survives:
+                    raise FloorProtected(self.write_floor)
             store_epoch = self._epoch_or_none()
             # a store with no readable marker cannot be epoch-fenced (startup guarantees one;
             # raw fixtures that wipe the store must not crash every write)
@@ -382,6 +455,12 @@ class Executor:
             try:
                 self.store.update(sparql)
                 self.updates += 1
+                if self.write_floor is not None and self._floor_value_safe() != self.write_floor:
+                    # #1748 BACKSTOP: an update whose effect on the floor depended on other data got past the probe.
+                    # Restore the floor before flushing, so it is never durably absent; the caller is told it applied.
+                    self.store.update(f'DELETE {{ GRAPH <{BK}> {{ <{FLOOR_S.value}> <{FLOOR_P.value}> ?v }} }} '
+                                      f'INSERT {{ GRAPH <{BK}> {{ <{FLOOR_S.value}> <{FLOOR_P.value}> {json.dumps(self.write_floor)} }} }} '
+                                      f'WHERE {{ OPTIONAL {{ GRAPH <{BK}> {{ <{FLOOR_S.value}> <{FLOOR_P.value}> ?v }} }} }}')
                 self.store.flush()
                 self.flushes += 1
             except OSError as e:
@@ -391,6 +470,13 @@ class Executor:
                                  'recovery': 'restart the executor; reconcile failedOpId by its receipt before any retry'}
                 raise
             return self.receipt(op_iri)
+
+    def _floor_value_safe(self):
+        try:
+            rows = list(self.store.query(f'SELECT ?v WHERE {{ {in_bk(f"<{FLOOR_S.value}> <{FLOOR_P.value}> ?v")} }}'))
+            return rows[0]['v'].value if len(rows) == 1 else None
+        except Exception:
+            return None
 
     def checkpoint(self):
         """#1559 a consistent snapshot for the backup script. Taken INSIDE the write lock, so no
@@ -442,7 +528,7 @@ class Executor:
         except SystemExit as e:
             m = {'markerError': str(e)}
         return {**m, **self._identity(), 'status': 'DEGRADED' if self.degraded else 'OK', 'degraded': self.degraded, 'promoted': self.promoted,
-                'readOnly': self.read_only, 'layout': 'bookkeeping-graph',
+                'readOnly': self.read_only, 'layout': 'bookkeeping-graph', 'writeFloor': self.write_floor,
                 'flushes': self.flushes, 'updates': self.updates, 'syncMode': SYNC_MODE, 'listenBacklog': LISTEN_BACKLOG}
 
 
@@ -480,8 +566,17 @@ def make_handler(ex):
                 if not op:
                     ex.log(None, 'update', 'REFUSED-NO-OPID', 0, sha)
                     return self._send(400, {'error': 'x-op-id header required'})
+                declared = self.headers.get_all(PROTOCOL_HEADER) or []
                 try:
-                    rec = ex.update(body, op, self.headers.get('x-epoch'))
+                    rec = ex.update(body, op, self.headers.get('x-epoch'), protocol=declared)
+                except ProtocolRequired as f:  # #1748 refused before update(): applied nothing, flushed nothing
+                    ex.log(op, 'update', 'REFUSED-WRITE-PROTOCOL', (time.perf_counter() - t0) * 1000, sha)
+                    return self._send(428, {'error': 'WRITE_PROTOCOL_REQUIRED', 'applied': False, 'requiredProtocol': str(f),
+                                            'reason': f'this store accepts writes only from clients declaring {PROTOCOL_HEADER}: {f}'})
+                except FloorProtected as f:  # #1748 refused before update(): the floor is not writable through /update
+                    ex.log(op, 'update', 'REFUSED-FLOOR-PROTECTED', (time.perf_counter() - t0) * 1000, sha)
+                    return self._send(409, {'error': 'WRITE_FLOOR_PROTECTED', 'applied': False, 'floor': str(f),
+                                            'reason': 'an /update may not delete, rewrite or contradict the installed write floor'})
                 except ReconcileRequired as r:  # refused before update(): applied nothing
                     ex.log(op, 'update', 'RECONCILE-REQUIRED', (time.perf_counter() - t0) * 1000, sha)
                     return self._send(409, {'error': 'reconcile required', 'reconcileRequired': r.info})
@@ -524,7 +619,8 @@ def make_handler(ex):
 def main(argv):
     a = parse_args(argv)
     ex = Executor(a.store, a.dataset_id, create=a.create, log=a.log, promote_epoch=a.promote_epoch,
-                  checkpoint_dir=a.checkpoint_dir, adopt_home=a.adopt_home, read_only=a.read_only)
+                  checkpoint_dir=a.checkpoint_dir, adopt_home=a.adopt_home, read_only=a.read_only,
+                  install_write_floor=a.install_write_floor)
     srv = Server(('127.0.0.1', a.port), make_handler(ex))
     if a.exit_on_stdin_eof:
         def watch():

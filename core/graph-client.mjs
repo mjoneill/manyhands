@@ -44,6 +44,11 @@ const refused = (e) => {
 let meter = null;
 export function setExecutorMeter(m) { meter = m || null; }
 
+/** #1748 — the WRITE PROTOCOL this client speaks, declared on every /update. A store with a write floor admits only the matching
+ *  declaration (anything else is 428 WRITE_PROTOCOL_REQUIRED, applied:false). Bump it only together with the floor. */
+export const WRITE_PROTOCOL = 'postseq-v1';
+export const WRITE_PROTOCOL_HEADER = 'x-manyhands-write-protocol';
+
 export function createGraphClient({ baseUrl, expectedDatasetId = null, timeoutMs = 5000, fetchImpl = fetch, label = 'unlabelled' } = {}) {
   if (!baseUrl) throw new Error('graph client: baseUrl required');
   const url = (p) => `${baseUrl.replace(/\/$/, '')}${p}`;
@@ -158,13 +163,20 @@ export function createGraphClient({ baseUrl, expectedDatasetId = null, timeoutMs
     let res;
     try {
       const ep = epoch != null ? String(epoch) : await currentEpoch();
-      res = await send('/update', sparql, { 'x-op-id': canonical.opId, 'content-type': 'application/sparql-update', ...(ep != null ? { 'x-epoch': ep } : {}) });
+      res = await send('/update', sparql, { 'x-op-id': canonical.opId, 'content-type': 'application/sparql-update', [WRITE_PROTOCOL_HEADER]: WRITE_PROTOCOL, ...(ep != null ? { 'x-epoch': ep } : {}) });
     } catch (e) {
       if (refused(e)) return { outcome: 'UNAVAILABLE', reason: 'connection refused before send', digest };
       return { outcome: 'UNKNOWN', reason: `transport after dispatch: ${e?.cause?.code || e?.name || e}`, digest };
     }
+    // #1748: the write floor refuses BEFORE applying anything (applied:false), so these are definitive refusals, never UNKNOWN:
+    // replaying the same intention cannot help, and nothing was written that a receipt could reconcile
+    if (res.status === 428) {
+      let j = null; try { j = JSON.parse(res.text); } catch { /* not the floor */ }
+      if (j?.error === 'WRITE_PROTOCOL_REQUIRED' && j.applied === false) return { outcome: 'REJECTED', reason: `WRITE_PROTOCOL_REQUIRED: this store needs ${j.requiredProtocol}, this client declares ${WRITE_PROTOCOL}; nothing was applied`, writeProtocolRequired: j.requiredProtocol, digest };
+    }
     if (res.status === 409) {
       let j = null; try { j = JSON.parse(res.text); } catch { /* not the fence */ }
+      if (j?.error === 'WRITE_FLOOR_PROTECTED' && j.applied === false) return { outcome: 'REJECTED', reason: 'WRITE_FLOOR_PROTECTED: an update may not change the write floor; nothing was applied', digest };
       if (j?.reconcileRequired) return { outcome: 'RECONCILE_REQUIRED', reason: `epoch changed (store ${j.reconcileRequired.storeEpoch}, this write ${j.reconcileRequired.callerEpoch}) and this opId has no receipt here: reconcile downstream, then refresh the epoch and use a fresh opId`, reconcileRequired: j.reconcileRequired, digest };
     }
     // #1559: a latched executor refuses BEFORE applying anything, so this is provably not applied
