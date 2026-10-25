@@ -64,7 +64,7 @@ import { createGraphClient } from '../core/graph-client.mjs';
 import { durableUpdate } from '../core/durable-update.mjs';
 import { announcePostId } from '../core/announce-outbox.mjs';
 import { postWriteId } from '../core/post-write.mjs';
-import { readPostSeqReservation } from '../core/postseq-reserve.mjs';
+import { readPostSeqReservation, reserveOpId } from '../core/postseq-reserve.mjs';
 import { readCommittedOrigin, readOriginOutcome, readPreparedOrigin } from '../core/origin-commit.mjs';
 import { mutationIdOf, originPrepareOp, originCommitOp } from '../core/graph-compiler.mjs';
 import { cardQuads, priorQuads, cardIriOf } from '../core/cards-graph.mjs';
@@ -95,6 +95,8 @@ const CODES = {
   HIGH_WATER: 'HIGH_WATER', DUPLICATE_SEQ: 'DUPLICATE_SEQ', DUPLICATE_ID: 'DUPLICATE_ID', BAD_ALLOCATOR: 'BAD_ALLOCATOR',
   ORPHAN_ENTRY: 'ORPHAN_ENTRY', ORIGIN_WITHOUT_ENTRY: 'ORIGIN_WITHOUT_ENTRY', MODE_DISAGREES: 'MODE_DISAGREES',
   COLUMN_DIFFERS: 'COLUMN_DIFFERS', SEATSTATES_UNPROVEN: 'SEATSTATES_UNPROVEN', CAPTURE_MALFORMED: 'CAPTURE_MALFORMED',
+  MANIFEST_DUPLICATE: 'MANIFEST_DUPLICATE', BAD_ID: 'BAD_ID', BAD_ORIGIN: 'BAD_ORIGIN', BAD_ENTRY: 'BAD_ENTRY', BAD_RESERVATION: 'BAD_RESERVATION',
+  ENTRY_WITHOUT_SLOT: 'ENTRY_WITHOUT_SLOT', ENTRY_DISAGREES: 'ENTRY_DISAGREES', SUBJECT_OCCUPIED: 'SUBJECT_OCCUPIED',
   ALLOCATOR_PRESENT: 'ALLOCATOR_PRESENT', ALLOCATOR_MISMATCH: 'ALLOCATOR_MISMATCH', MANIFEST_MALFORMED: 'MANIFEST_MALFORMED',
 };
 /** the batch progress marker: the BUILD's names at 613c8c6 (scripts/cutover-import-1629.mjs BATCH, P_BATCH_DIGEST). The interface
@@ -404,7 +406,9 @@ test('#1747 (S4-B) binding: no CandidateMarker → MARKER_MISSING', T, async () 
 test('#1747 (S4-B) binding: the marker names another capture manifest → MARKER_MISMATCH', T, async () => {
   await world(async (w) => {
     const other = path.join(w.dir, 'other-capture.json');
-    fs.writeFileSync(other, JSON.stringify({ ...JSON.parse(fs.readFileSync(w.captureManifest, 'utf8')), files: [] }));
+    // r7: a WELL-FORMED foreign manifest (the closed schema refuses `files: []` first): only its bytes differ, so only the marker can refuse it
+    const mine = JSON.parse(fs.readFileSync(w.captureManifest, 'utf8'));
+    fs.writeFileSync(other, JSON.stringify({ ...mine, capturedAt: new Date(Date.parse(mine.capturedAt) - 1000).toISOString() }));
     expectCode(await importer(w, { capture: other }), 'REFUSED', CODES.MARKER_MISMATCH, 'a foreign manifest');
   });
 });
@@ -513,11 +517,27 @@ const PROOF = {
   originMutation: (e) => { e.payload.mutationId = LEGACY[1].origin.mutationId; }, slot: (e) => { e.payload.slot = 'release'; },
   legacyPostId: (e) => { e.legacyPostId = LEGACY[1].post.id; },
 };
-const PUB_PROOF = { originActor: (e) => { e.payload.originActor = 'gizmo'; }, occurredAt: (e) => { e.payload.occurredAt = iso(77); }, body: (e) => { e.payload.body += ' (differs)'; } };
+// r7: the entry AND its origin change together, so the pre-write ENTRY_DISAGREES check passes and the POST is what disagrees
+const PUB_PROOF = {
+  originActor: (e, o) => { e.payload.originActor = 'gizmo'; o.originActor = 'gizmo'; },
+  occurredAt: (e, o) => { e.payload.occurredAt = iso(77); o.occurredAt = iso(77); },
+  body: (e) => { e.payload.body += ' (differs)'; },
+};
+const pubOf = (d) => [d['scrum:meta'].announcementOutbox.entries[PUB.entry.obligationId], d['scrum:meta'].announcementOutbox.origins[PUB.origin.mutationId]];
 for (const [field, mutate] of Object.entries(PUB_PROOF)) {
   test(`#1747 (S4-C1) the PUBLISHER entry whose post differs ONLY in ${field} → REFUSED ${CODES.PROOF_MISMATCH}`, T, async () => {
     await world(async (w) => expectCode(await importer(w, { applyIt: true }), 'REFUSED', CODES.PROOF_MISMATCH, `publisher ${field}`),
-      { prepare: (d) => mutate(d['scrum:meta'].announcementOutbox.entries[PUB.entry.obligationId]) });
+      { prepare: (d) => mutate(...pubOf(d)) });
+  });
+}
+// r7 (review of PR #122, finding 5): a publisher entry whose payload disagrees with its OWN origin is a HOLD before anything is written
+for (const [field, mutate] of Object.entries({ originActor: (e) => { e.payload.originActor = 'gizmo'; }, occurredAt: (e) => { e.payload.occurredAt = iso(77); } })) {
+  test(`#1747 (S4-H, r7) a publisher entry whose payload ${field} disagrees with its origin → HOLD ${CODES.ENTRY_DISAGREES}; nothing written`, T, async () => {
+    await world(async (w) => {
+      const s0 = await S(w.cand);
+      expectCode(await importer(w, { applyIt: true }), 'HOLD', CODES.ENTRY_DISAGREES, `payload ${field}`);
+      assert.equal(await S(w.cand), s0, 'nothing written: S byte-identical');
+    }, { prepare: (d) => mutate(pubOf(d)[0]) });
   });
 }
 test('#1747 (HARNESS) the seeded legacy posts have the LIVE shape: their own id, no originActor, no originOccurredAt', T, async () => {
@@ -620,7 +640,12 @@ for (const [what, items] of [
 }
 test(`#1747 (S4-G2) a capture manifest with NO capturedAt → REFUSED ${CODES.CAPTURE_MALFORMED}; and an unparseable one too`, T, async () => {
   for (const [what, cap] of [['absent', (c) => { const x = { ...c }; delete x.capturedAt; return x; }], ['unparseable', (c) => ({ ...c, capturedAt: 'not a time' })]]) {
-    await world(async (w) => expectCode(await importer(w, { applyIt: true }), 'REFUSED', CODES.CAPTURE_MALFORMED, `capturedAt ${what}`), { prepare: withSeats(SEAT()), capture: cap });
+    await world(async (w) => {
+      // r7: one closed schema for both tools, so step 3 refuses this capture as well and never marks the candidate
+      const m = await run([CANDIDATE_TOOL, '--capture-manifest', w.captureManifest, '--executor', w.cand.baseUrl], {});
+      assert.ok(m.status !== 0 && /^REFUSED CAPTURE_MALFORMED/m.test(m.out), `step 3 refuses capturedAt ${what} (exit ${m.status}: ${m.out.slice(-200)})`);
+      expectCode(await importer(w, { applyIt: true }), 'REFUSED', CODES.CAPTURE_MALFORMED, `capturedAt ${what}`);
+    }, { prepare: withSeats(SEAT()), capture: cap, mark: false });
   }
 });
 test('#1747 (S4-G6) the board does not READ a document seatStates row: changing it leaves GET /api/seats/state\'s seats identical (post 46076)', T, async () => {
@@ -852,7 +877,7 @@ test(`#1747 (R1-i) a prepare whose mutationId is an IMPORTED origin's is refused
   const addCollide = (d) => {   // an imported, settled publisher origin AT the mid a real claim key derives
     const ob = d['scrum:meta'].announcementOutbox;
     ob.origins[col.mid] = { committedAt: iso(60), mode: 'publisher', mutationId: col.mid, occurredAt: iso(60), origin: { cardId: CX.id, version: 2 }, originActor: 'ada', slots: ['claim'] };
-    ob.entries[`${col.mid}:claim`] = { mode: 'publisher', mutationId: col.mid, obligationId: `${col.mid}:claim`, payload: { author: 'board', body: 'ada claimed #9', mentions: [], mutationId: col.mid, notify: true, occurredAt: iso(60), origin: { cardId: CX.id, version: 2 }, originActor: 'ada', slot: 'claim' }, postSeq: 39504, publicationAt: iso(60), slot: 'claim', status: 'published' };
+    ob.entries[`${col.mid}:claim`] = { mode: 'publisher', mutationId: col.mid, obligationId: `${col.mid}:claim`, payload: { author: 'board', body: 'ada claimed #9', mentions: [], mutationId: col.mid, notify: true, occurredAt: iso(60), origin: { cardId: CX.id, version: 2 }, originActor: 'ada', slot: 'claim' }, postSeq: 39504, postId: announcePostId(col.mid, 'claim'), publicationAt: iso(60), slot: 'claim', status: 'published' };   // r7: every live published publisher entry names its post (1,123/1,123)
   };
   await imported(async (w) => {
     const c = clientFor(w.cand); await seedCardX(c);
@@ -1065,6 +1090,139 @@ test(`#1747 (S5-6) a READY marker of ANOTHER migration → --ready is REFUSED ${
     const r = await ready(w);
     assert.deepEqual([r.kind, r.code], ['REFUSED', RC.READY_CONFLICT], `refused (${r.line})`);
     assert.deepEqual(await readyMarker(w.cand), m0, 'the foreign marker is untouched, and no second one written');
+  });
+});
+
+// ── r7 (the fallback review of PR #122, 46472): its untested guards, its verified probes, and the new refusal names ──
+const REQUIRED_CAPTURE = ['sourceStore', 'files', 'documentSha256', 'outboxManifestSha256', 'datasetId', 'incarnation', 'capturedAt'];
+test(`#1747 (S4-B, r7) the capture schema is CLOSED and REQUIRED in BOTH tools: each missing field, an unknown field and a future capturedAt → REFUSED ${CODES.CAPTURE_MALFORMED}`, T, async () => {
+  await world(async (w) => {
+    const ok = await importer(w); assert.equal(ok.status, 0, `CONTROL: the well-formed capture passes (${ok.out.slice(-200)})`);
+    const mine = JSON.parse(fs.readFileSync(w.captureManifest, 'utf8'));
+    const cases = [
+      ...REQUIRED_CAPTURE.map((k) => [`no ${k}`, (() => { const x = { ...mine }; delete x[k]; return x; })()]),
+      ['an unknown field', { ...mine, incarnaton: mine.incarnation }],
+      ['capturedAt an hour in the future', { ...mine, capturedAt: new Date(Date.now() + 3600_000).toISOString() }],
+    ];
+    for (const [what, cap] of cases) {
+      const f = path.join(w.dir, `cap-${what.replace(/\W+/g, '-')}.json`); fs.writeFileSync(f, JSON.stringify(cap));
+      const m = await run([CANDIDATE_TOOL, '--capture-manifest', f, '--executor', w.cand.baseUrl], {});
+      assert.ok(m.status !== 0 && /^REFUSED CAPTURE_MALFORMED/m.test(m.out), `step 3, ${what}: REFUSED CAPTURE_MALFORMED (exit ${m.status}: ${m.out.slice(-200)})`);
+      expectCode(await importer(w, { applyIt: true, capture: f }), 'REFUSED', CODES.CAPTURE_MALFORMED, `step 4, ${what}`);
+    }
+  });
+});
+test('#1747 (S4-B, r7, finding 1) a store promoted from the CANDIDATE (not from the captured source), carrying the candidate\'s marker → NOT_CANDIDATE at step 3 and step 4', T, async () => {
+  await world(async (w) => {
+    await killExecutor(w.cand);
+    const other = path.join(w.dir, 'other-store'); fs.cpSync(path.join(w.dir, 'candidate-store'), other, { recursive: true });
+    w.cand = await startExecutor({ store: path.join(w.dir, 'candidate-store'), datasetId: DS });
+    const o = await startExecutor({ store: other, datasetId: DS, extraArgs: ['--promote-epoch'] });
+    try {
+      const ho = await health(o);
+      const cap = JSON.parse(fs.readFileSync(w.captureManifest, 'utf8'));
+      assert.ok(ho.incarnationFrom && ho.incarnationFrom !== cap.incarnation, `PRECONDITION: promoted from the candidate, not the captured source (${ho.incarnationFrom} vs ${cap.incarnation})`);
+      const marks = (await clientFor(o).query(`SELECT ?v WHERE { GRAPH <${BK}> { ?m ?p ?v } FILTER(CONTAINS(STR(?m), "candidate")) }`)).rows;
+      assert.ok(marks.length > 0, 'PRECONDITION: it carries the candidate\'s marker, so only the descent check can refuse it');
+      const m = await run([CANDIDATE_TOOL, '--capture-manifest', w.captureManifest, '--executor', o.baseUrl], {});
+      assert.ok(m.status !== 0 && /^REFUSED NOT_CANDIDATE/m.test(m.out), `step 3 refuses it (exit ${m.status}: ${m.out.slice(-200)})`);
+      const r = await importer(w, { applyIt: true, executor: o.baseUrl });
+      expectCode(r, 'REFUSED', CODES.NOT_CANDIDATE, 'promoted from the candidate');
+      assert.match(r.out, /promoted from/, 'by the descent check, by name');
+    } finally { await killExecutor(o); await killExecutor(w.cand); }   // world() kills only the candidate IT started
+  });
+});
+test('#1747 (S4-B, r7) the SOURCE store itself, promoted in place (a new incarnation FROM the captured one, at the source\'s own home) → NOT_CANDIDATE, by the home check', T, async () => {
+  await world(async (w) => {
+    const cap = JSON.parse(fs.readFileSync(w.captureManifest, 'utf8'));
+    const src = await startExecutor({ store: w.srcStore, datasetId: DS, extraArgs: ['--promote-epoch'] });
+    try {
+      const hs = await health(src);
+      assert.equal(hs.incarnationFrom, cap.incarnation, 'PRECONDITION: it descends from the captured incarnation, so only the home check can refuse it');
+      assert.equal(fs.realpathSync(hs.storeHome), fs.realpathSync(cap.sourceStore), 'PRECONDITION: its home IS the captured source store');
+      const r = await importer(w, { applyIt: true, executor: src.baseUrl });
+      expectCode(r, 'REFUSED', CODES.NOT_CANDIDATE, 'the source promoted in place');
+      assert.match(r.out, /IS the source store/, 'by the home check, by name');
+    } finally { await killExecutor(src); }
+  });
+});
+test(`#1747 (S4-B, r7) a source store file changed AFTER batch 1 and BEFORE batch 2 → REFUSED ${CODES.SOURCE_CHANGED}, batch 2 never written (needs the ASSUMED test-only pause SCRUM_CUTOVER_BATCH_BARRIER)`, T, async () => {
+  // ASSUMED seam, like S5-3's: with SCRUM_CUTOVER_BATCH_BARRIER set to a path, the importer READS it (blocking on a FIFO) after
+  // committing batch 1 and before batch 2's source re-check. Unset, it is off.
+  await world(async (w) => {
+    const fifo = path.join(w.dir, 'batch-barrier'); assert.equal(spawnSync('mkfifo', [fifo]).status, 0, 'PRECONDITION: mkfifo');
+    const p = importer(w, { applyIt: true, env: { SCRUM_CUTOVER_BATCH_BARRIER: fifo } });
+    const fh = await Promise.race([fs.promises.open(fifo, 'w'), new Promise((res) => setTimeout(() => res(null), 60000))]);
+    if (!fh) { try { fs.closeSync(fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK)); } catch { /* none */ } await p; }
+    assert.ok(fh, 'PRECONDITION: the importer reached its test-only pause between batches (SCRUM_CUTOVER_BATCH_BARRIER)');
+    const f = fs.readdirSync(w.srcStore).sort()[0]; fs.appendFileSync(path.join(w.srcStore, f), 'x');
+    await fh.close();
+    const r = await p;
+    expectCode(r, 'REFUSED', CODES.SOURCE_CHANGED, 'a source change between batches');
+    assert.match(r.out, /before batch 2/, 'by the pre-batch re-check, by name');
+    assert.deepEqual(await typed(w.cand, `SELECT ?v WHERE { GRAPH <${BK}> { <${MARKER.batch(r.id, 2)}> <${MARKER.digest}> ?v } }`), [], 'batch 2 has no marker');
+    for (const x of [...LEGACY, PUB]) assert.deepEqual(await typed(w.cand, `SELECT ?v WHERE { GRAPH <${BK}> { ${ORI(x)} ?p ?v } }`), [], `batch 2's origin ${x.origin.mutationId} is absent`);
+  });
+});
+test(`#1747 (S4-C3, r7) a manifest with the SAME obligation on two rows → REFUSED ${CODES.MANIFEST_DUPLICATE}; nothing written`, T, async () => {
+  await world(async (w) => {
+    const s0 = await S(w.cand);
+    expectCode(await importer(w, { applyIt: true }), 'REFUSED', CODES.MANIFEST_DUPLICATE, 'a duplicated manifest row');
+    assert.equal(await S(w.cand), s0, 'nothing written: S byte-identical');
+  }, { manifest: (rows) => [...rows, { ...rows[0] }] });
+});
+// the pre-write shape checks (46473 point 3): each a HOLD before any batch, nothing written; the valid world is the control (S4-M)
+const P2X = publisher(2, 'claim');
+const EVIL_POSTID = `inj1747> <urn:ex:test/injected> "bk" } <urn:ex:test/dflt> <urn:ex:test/p> "in-default-graph" . GRAPH <${BK}> { <urn:ex:test/inj-s`;
+for (const [what, code, opts] of [
+  ['a reservation postId carrying IRI syntax (the review\'s PROBE-E)', CODES.BAD_ID, { prepare: (d) => { d['scrum:meta'].postReservations['0b6f1e8a-3c2d-4e5f-8a9b-0c1d2e3f4a77'] = { createdAt: iso(7), postId: EVIL_POSTID, postSeq: 38020 }; } }],
+  ['a legacy entry\'s legacyPostId carrying SPARQL syntax (PROBE-G)', CODES.BAD_ID, { prepare: (d) => { d['scrum:meta'].announcementOutbox.entries[LEGACY[0].entry.obligationId].legacyPostId = `${LEGACY[0].post.id}> ?p ?o } #`; } }],
+  // with its own (non-pending) entry, so ORIGIN_WITHOUT_ENTRY cannot answer first
+  ['an origin whose key is not a lowercase UUID', CODES.BAD_ID, { prepare: (d) => { const ob = d['scrum:meta'].announcementOutbox; const o = structuredClone(P2X.origin); o.mutationId = 'NOT-A-UUID'; ob.origins['NOT-A-UUID'] = o; ob.entries['NOT-A-UUID:claim'] = { ...structuredClone(P2X.entry), mutationId: 'NOT-A-UUID', obligationId: 'NOT-A-UUID:claim', status: 'blocked', payload: { ...structuredClone(P2X.entry.payload), mutationId: 'NOT-A-UUID' } }; } }],
+  ['a published publisher entry whose postId is not its announcement post', CODES.BAD_ID, { prepare: (d) => { const ob = d['scrum:meta'].announcementOutbox; ob.origins[P2X.origin.mutationId] = structuredClone(P2X.origin); ob.entries[P2X.entry.obligationId] = { ...structuredClone(P2X.entry), status: 'published', postId: U3[0].postId }; } }],
+  ['an entry for a slot its origin lacks (PROBE-C)', CODES.ENTRY_WITHOUT_SLOT, { prepare: (d) => { const ob = d['scrum:meta'].announcementOutbox; const e = structuredClone(PUB.entry); e.slot = 'release'; e.obligationId = `${e.mutationId}:release`; e.status = 'published'; delete e.postSeq; ob.entries[e.obligationId] = e; } }],
+  ['an entry status outside pending/published/blocked (PROBE-B)', CODES.BAD_ENTRY, { prepare: (d) => { const ob = d['scrum:meta'].announcementOutbox; ob.origins[P2X.origin.mutationId] = structuredClone(P2X.origin); ob.entries[P2X.entry.obligationId] = { ...structuredClone(P2X.entry), status: 'dispatching', postSeq: 39502 }; } }],
+  // the entry agrees with it, so MODE_DISAGREES cannot answer first
+  ['an origin mode outside legacy/publisher', CODES.BAD_ORIGIN, { prepare: (d) => { const ob = d['scrum:meta'].announcementOutbox; ob.origins[LEGACY[0].origin.mutationId].mode = 'other'; ob.entries[LEGACY[0].entry.obligationId].mode = 'other'; } }],
+  ['an origin with a missing slots field', CODES.BAD_ORIGIN, { prepare: (d) => { delete d['scrum:meta'].announcementOutbox.origins[LEGACY[0].origin.mutationId].slots; } }],
+  ['a reservation with an EXTRA key', CODES.BAD_RESERVATION, { prepare: (d) => { d['scrum:meta'].postReservations[U3[0].key].extra = 1; } }],
+  ['a reservation whose applied is not a boolean', CODES.BAD_RESERVATION, { prepare: (d) => { d['scrum:meta'].postReservations[U3[0].key].applied = 'yes'; } }],
+  ['a reservation subject that already holds a triple in the candidate (PROBE-D)', CODES.SUBJECT_OCCUPIED, { plant: (c) => rawInsert(c, `${POSTSEQ_TERMS.reservation(U3[0].postId)} ${POSTSEQ_TERMS.mode} "ordinary" .`, 'occupied') }],
+]) {
+  test(`#1747 (S4-H, r7) ${what} → HOLD ${code}; nothing written`, T, async () => {
+    await world(async (w) => {
+      const s0 = await S(w.cand);
+      expectCode(await importer(w, { applyIt: true }), 'HOLD', code, what);
+      assert.equal(await S(w.cand), s0, 'nothing written: S byte-identical');
+      if (code === CODES.BAD_ID) {
+        for (const q of ['SELECT ?o WHERE { <urn:ex:test/dflt> ?p ?o }', `SELECT ?o WHERE { GRAPH <${BK}> { ?s <urn:ex:test/injected> ?o } }`]) assert.deepEqual((await clientFor(w.cand).query(q)).rows, [], `no injected quad (${q.slice(0, 60)})`);
+      }
+    }, opts);
+  });
+}
+test('#1747 (R1-e, r7) the overlap rule from the NATIVE side for a RESERVATION: a native reservation reads kind native; given a migrationId it is INVALID', T, async () => {
+  await imported(async (w) => {
+    const c = clientFor(w.cand);
+    const item = { mode: 'ordinary', author: 'ada', requestId: 'rk-1747-native-res', draft: { body: 'post rk-1747-native-res', attachedTo: null, mentions: [], attachments: [], conversation: null, onBehalfOf: null } };
+    const r = await durableUpdate(c, { kind: 'postseq.reserve', opId: reserveOpId([item]), actor: 'urn:ex:seat/ada', reservations: [item] });
+    assert.equal(r.outcome, 'APPLIED', `CONTROL: a native reservation is reserved on the imported candidate (${JSON.stringify(r).slice(0, 200)})`);
+    const pid = postWriteId(item.author, item.requestId);
+    const ok0 = await readPostSeqReservation(c, pid);
+    assert.equal(ok0.reservation?.kind, 'native', `CONTROL: it reads kind native (${JSON.stringify(ok0).slice(0, 160)})`);
+    await rawOn(w.cand, `INSERT DATA { GRAPH <${BK}> { ${POSTSEQ_TERMS.reservation(pid)} <${TERMS.migrationId}> "forged" } }`, 'r1e-res');
+    assert.ok(isInvalid(await readPostSeqReservation(c, pid)), 'a native reservation carrying migrationId is INVALID, never read as imported');
+  });
+});
+test('#1747 (S5-2, r7) a READY replay RE-VERIFIES: a reservation tampered after READY → never ALREADY_READY, a named refusal, and the marker untouched', T, async () => {
+  await imported(async (w) => {
+    const r1 = await ready(w); assert.equal(r1.status, 0, `CONTROL: the candidate is marked READY (${r1.out.slice(-200)})`);
+    const m0 = await readyMarker(w.cand);
+    await rawOn(w.cand, `DELETE { GRAPH <${BK}> { ${RS_(U3[0].postId)} ${POSTSEQ_TERMS.postSeq} ?v } } INSERT { GRAPH <${BK}> { ${RS_(U3[0].postId)} ${POSTSEQ_TERMS.postSeq} "${U3[0].postSeq + 1}"^^<${XSD}integer> } } WHERE { GRAPH <${BK}> { ${RS_(U3[0].postId)} ${POSTSEQ_TERMS.postSeq} ?v } }`, 's52');
+    const r2 = await ready(w);
+    assert.notEqual(r2.status, 0, `a tampered READY candidate is not answered ALREADY_READY (exit ${r2.status}: ${r2.out.slice(-200)})`);
+    assert.ok(!/^ALREADY_READY/m.test(r2.out), 'never ALREADY_READY');
+    assert.match(r2.out, new RegExp(`^(?:HOLD |REFUSED )?INCOMPLETE[^\n]*${U3[0].postId}[^\n]*postSeq`, 'm'), `a named INCOMPLETE for the tampered reservation's postSeq (${r2.out.slice(-200)})`);
+    assert.deepEqual(await readyMarker(w.cand), m0, 'the READY marker is untouched');
   });
 });
 
