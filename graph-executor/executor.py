@@ -52,6 +52,8 @@ FLOOR_S = px.NamedNode('urn:ex:write-floor')
 FLOOR_P = px.NamedNode('urn:ex:write-floor/minProtocol')
 PROTOCOL_HEADER = 'x-manyhands-write-protocol'
 FLOOR_VIOLATION = 'urn:ex:write-floor/violation'   # #1748 a sentinel graph: never exists outside a refused update
+FLOOR_INSTALLED_BY = px.NamedNode('urn:ex:write-floor/installedBy')   # #1748 written only by --install-write-floor
+FLOOR_INSTALLER = 'install-write-floor'
 # The stdlib default listen backlog is 5. Measured in the D2 proofs (P5, 2026-10-04): with
 # 8 concurrent writers, 5 connected at once and 3 waited ~30 ms for the OS to retry the
 # connection. Correctness held, but concurrency was not exercised and latency carried a
@@ -264,6 +266,7 @@ class Executor:
         self.promoted = None
         if self.read_only:
             self.write_floor = self._floor_value()
+            self._check_floor_provenance(self.write_floor)
             return   # #1638 a read-only fence writes nothing: no self-check, no promotion, no identity backfill
         probe = f'<{NS}selfcheck/{int(time.time() * 1000)}>'
         try:
@@ -324,13 +327,20 @@ class Executor:
             want = str(install_write_floor)
             if not want or want != want.strip():
                 raise SystemExit(f'REFUSED: --install-write-floor needs a non-empty protocol name, got {want!r}')
-            if held is None:
-                self.store.update(f'INSERT DATA {{ GRAPH <{BK}> {{ <{FLOOR_S.value}> <{FLOOR_P.value}> {json.dumps(want)} }} }}')
+            if self._sentinel_present():
+                raise SystemExit(f'REFUSED: the store holds the graph <{FLOOR_VIOLATION}>, which the floor guard needs to be '
+                                 'absent; remove it offline before installing a floor')
+            if held is None or (held == want and not self._floor_recorded()):
+                # the floor and its install record in ONE update: a floor never exists without the record, and the record
+                # is how a start tells this procedure from an /update that wrote a floor by accident
+                self.store.update(f'INSERT DATA {{ GRAPH <{BK}> {{ <{FLOOR_S.value}> <{FLOOR_P.value}> {json.dumps(want)} ; '
+                                  f'<{FLOOR_INSTALLED_BY.value}> {json.dumps(FLOOR_INSTALLER)} }} }}')
                 self.store.flush()
                 held = self._floor_value()
             elif held != want:
                 raise SystemExit(f'REFUSED: this store already has write floor {held!r}; --install-write-floor {want!r} '
                                  'would change it (a floor is never replaced or downgraded by a relaunch)')
+        self._check_floor_provenance(held)
         self.write_floor = held
 
     def _set_identity(self, pred, value):
@@ -352,25 +362,65 @@ class Executor:
             raise SystemExit(f'REFUSED: the write floor is not a plain string literal ({v})')
         return v.value
 
-    def _floor_guarded(self, sparql):
-        """#1748 `sparql` followed, in the SAME update, by operations that fail the whole update unless the floor is still
-        exactly what it was: the installed term, or (on an unfloored store) absent, so the only way to install a floor is
-        --install-write-floor. Store.update is all-or-nothing, so a delete, a rewrite (to another value, a language tag or a
-        datatype), a wipe, a second value, an effect that depends on other data, or an /update that writes a floor into an
-        unfloored store is never applied, and nothing has to be restored. The check reads the store state the update
-        produced; it never parses the body. (A body holding no operation, e.g. only a comment, cannot be followed by `;`:
-        it fails as a syntax error with nothing applied, like any other malformed body.)"""
-        floor = f'<{FLOOR_S.value}> <{FLOOR_P.value}>'
-        if self.write_floor is None:
-            violated = f'GRAPH <{BK}> {{ {floor} ?v0 }}'
-        else:
-            want = json.dumps(self.write_floor)
-            violated = (f'{{ FILTER NOT EXISTS {{ GRAPH <{BK}> {{ {floor} ?v0 . FILTER(sameTerm(?v0, {want})) }} }} }} UNION '
-                        f'{{ GRAPH <{BK}> {{ {floor} ?v1 . FILTER(!sameTerm(?v1, {want})) }} }}')
-        body = sparql.rstrip().rstrip(';')
-        return (f'{body}\n;\n' if body.strip() else '') + (
+    def _floor_recorded(self):
+        return bool(self.store.query(f'ASK {{ {in_bk(f"<{FLOOR_S.value}> <{FLOOR_INSTALLED_BY.value}> {json.dumps(FLOOR_INSTALLER)}")} }}'))
+
+    def _sentinel_present(self):
+        return bool(self.store.query(f'ASK {{ GRAPH <{FLOOR_VIOLATION}> {{ ?s ?p ?o }} }}'))
+
+    def _check_floor_provenance(self, held):
+        """#1748 a floor is honoured only with the install record written beside it by --install-write-floor. A floor
+        without one got there some other way (an /update on an unfloored store, which is not guarded): refuse to start and
+        name the fix, rather than serve 428 to every writer. Not a defence against a deliberate forger (the header never
+        was); it ends the silent brick. A floored store whose sentinel graph exists would refuse every write: refuse that too."""
+        if held is None:
+            return
+        if not self._floor_recorded():
+            raise SystemExit(f'REFUSED: the store holds write floor {held!r} with no install record, so it was not installed by '
+                             f'--install-write-floor. If it is intended, relaunch once with --install-write-floor {held} to '
+                             'record it; if not, remove it offline')
+        if self._sentinel_present():
+            raise SystemExit(f'REFUSED: the store holds the graph <{FLOOR_VIOLATION}>, so the floor guard would refuse every '
+                             'write; remove it offline')
+
+    def _floor_guarded(self, sparql, sep='\n;\n'):
+        """#1748 `sparql` followed, in the SAME update, by operations that fail the whole update unless the floor and its
+        install record are still exactly the installed terms afterwards. Store.update is all-or-nothing, so a delete, a
+        rewrite (to another value, a language tag or a datatype), a wipe, a second value, or an effect that depends on other
+        data is never applied, and nothing has to be restored. The check reads the store state the update produced; it never
+        parses the body. Floored stores only: an unfloored store runs the body exactly as it is (see update()).
+        `sep` joins the two; update() retries with a bare newline when the body's own text leaves no operation for `;` to
+        follow (a trailing comment after a `;`, a comment-only or prologue-only body). The guard's WHERE has solutions only
+        in a violated state, so even a dangling final clause of the body that merges into it changes nothing it applies."""
+        want, rec = json.dumps(self.write_floor), json.dumps(FLOOR_INSTALLER)
+        floor, by = f'<{FLOOR_S.value}> <{FLOOR_P.value}>', f'<{FLOOR_S.value}> <{FLOOR_INSTALLED_BY.value}>'
+        violated = (f'{{ FILTER NOT EXISTS {{ GRAPH <{BK}> {{ {floor} ?v0 . FILTER(sameTerm(?v0, {want})) }} }} }} UNION '
+                    f'{{ GRAPH <{BK}> {{ {floor} ?v1 . FILTER(!sameTerm(?v1, {want})) }} }} UNION '
+                    f'{{ FILTER NOT EXISTS {{ GRAPH <{BK}> {{ {by} ?v2 . FILTER(sameTerm(?v2, {rec})) }} }} }} UNION '
+                    f'{{ GRAPH <{BK}> {{ {by} ?v3 . FILTER(!sameTerm(?v3, {rec})) }} }}')
+        body = sparql.rstrip()
+        if sep.startswith('\n;'):
+            body = body.rstrip(';')
+        return (f'{body}{sep}' if body.strip() else '') + (
                 f'INSERT {{ GRAPH <{FLOOR_VIOLATION}> {{ <{FLOOR_VIOLATION}> <{FLOOR_VIOLATION}> <{FLOOR_VIOLATION}> }} }} WHERE {{ {violated} }} ;\n'
                 f'CREATE GRAPH <{FLOOR_VIOLATION}> ;\nDROP GRAPH <{FLOOR_VIOLATION}>')
+
+    def _update_floored(self, sparql):
+        """#1748 one guarded, all-or-nothing update; a body whose text leaves `;` nothing to follow is retried joined by a
+        newline. A failed parse applies nothing, so the retry is safe; a refusal by the guard is never retried."""
+        for sep in ('\n;\n', '\n'):
+            try:
+                self.store.update(self._floor_guarded(sparql, sep))
+                return
+            except OSError:
+                raise
+            except Exception as e:
+                if FLOOR_VIOLATION in str(e):   # the guard failed the whole update: nothing was applied
+                    raise FloorProtected(self.write_floor)
+                if sep == '\n' or not isinstance(e, SyntaxError):
+                    raise
+                first = e
+        raise first
 
     def _identity(self):
         """#1577 incarnation / incarnationFrom / storeHome / epochBase, each None when absent. Never raises."""
@@ -427,8 +477,9 @@ class Executor:
         this opId has no receipt here; raises on engine or flush error (UNKNOWN).
         #1748: with a write floor installed, raises ProtocolRequired unless `protocol` (the request's declared
         protocol, a list of every header value) is exactly [floor], before even a receipt replay; and FloorProtected
-        when the update would leave the floor anything but the installed term, decided inside the same all-or-nothing
-        update (_floor_guarded), so nothing of it is applied or flushed."""
+        when the update would leave the floor or its install record anything but the installed terms, decided inside the
+        same all-or-nothing update (_floor_guarded), so nothing of it is applied or flushed. An unfloored store runs the
+        body unguarded, byte for byte as before #1748."""
         with self.lock:
             if self.degraded:
                 raise Degraded(self.degraded)
@@ -458,14 +509,10 @@ class Executor:
                 raise ReconcileRequired({'reason': 'caller epoch differs from the store epoch and this opId has no receipt here',
                                          'storeEpoch': store_epoch, 'callerEpoch': caller_epoch})
             try:
-                try:
-                    self.store.update(self._floor_guarded(sparql))
-                except OSError:
-                    raise
-                except Exception as e:
-                    if FLOOR_VIOLATION in str(e):   # the guard failed the whole update: nothing was applied
-                        raise FloorProtected(self.write_floor)
-                    raise
+                if self.write_floor is None:
+                    self.store.update(sparql)   # unfloored: the body exactly as sent, unguarded (a stray floor is refused at START)
+                else:
+                    self._update_floored(sparql)
                 self.updates += 1
                 self.store.flush()
                 self.flushes += 1
@@ -575,8 +622,8 @@ def make_handler(ex):
                 except FloorProtected as f:  # #1748 refused before update(): the floor is not writable through /update
                     ex.log(op, 'update', 'REFUSED-FLOOR-PROTECTED', (time.perf_counter() - t0) * 1000, sha)
                     return self._send(409, {'error': 'WRITE_FLOOR_PROTECTED', 'applied': False, 'floor': f.args[0],
-                                            'reason': 'an /update may not delete, rewrite or contradict the installed write floor, '
-                                                      'nor write one: a floor is installed only by --install-write-floor'})
+                                            'reason': 'an /update may not delete, rewrite or contradict the installed write floor or its '
+                                                      'install record'})
                 except ReconcileRequired as r:  # refused before update(): applied nothing
                     ex.log(op, 'update', 'RECONCILE-REQUIRED', (time.perf_counter() - t0) * 1000, sha)
                     return self._send(409, {'error': 'reconcile required', 'reconcileRequired': r.info})
