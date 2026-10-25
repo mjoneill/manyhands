@@ -422,3 +422,27 @@ test('#1748 M2o CLIENT: 409 WRITE_FLOOR_PROTECTED maps to REJECTED, and durableU
     }
   } finally { await stop(x); }
 });
+
+// ── r3 (the delta review, 46404): a floor that did not come from the install flag never serves silently ──
+test('#1748 M2p STRAY FLOOR: an unfloored store that gets a floor triple by /update refuses to START, naming the fix; installing by the flag then serves', T, async () => {
+  const store = freshStore('m2p');
+  let x = await start(store, ['--create']);
+  try {
+    const w = await update(x, `INSERT DATA { GRAPH <${BK}> { <${FLOOR_S}> <${FLOOR_P}> "${PROTOCOL}" } }`);
+    assert.equal(w.status, 200, `PRECONDITION: an unfloored store runs the body as sent (${w.status} ${JSON.stringify(w.body)})`);
+    assert.equal((await health(x)).writeFloor ?? null, null, 'PRECONDITION: a floor written by /update is not live while this process runs');
+  } finally { await stop(x); }
+  // a plain restart finds a floor with no install record: it must refuse, and say how to fix it
+  await assert.rejects(start(store), (e) => /install/i.test(e.stderr ?? e.message) && /--install-write-floor/.test(e.stderr ?? e.message),
+    'a floor not installed by the flag refuses to start, and the message names --install-write-floor');
+  // the named fix works: one launch with the flag records it, then the store serves WITH the fence
+  x = await start(store, INSTALL);
+  try {
+    assert.equal((await health(x)).writeFloor, PROTOCOL, 'the flag records the install and the floor is live');
+    const before = await state(x);
+    await assertRefused(x, await update(x, INSERT('m2p-after')), before, 'no header, after the recorded install');
+  } finally { await stop(x); }
+  // and from then on a PLAIN restart serves (the record is there)
+  x = await start(store);
+  try { assert.equal((await health(x)).writeFloor, PROTOCOL, 'a plain restart serves the recorded floor'); } finally { await stop(x); }
+});
