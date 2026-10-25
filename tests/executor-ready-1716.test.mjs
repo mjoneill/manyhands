@@ -135,3 +135,15 @@ test('#1716 (R5) SYNTHETIC: counters reporting executorRunning true with ANOTHER
   await new Promise((r) => fake.listen(0, '127.0.0.1', r));
   try { await rejects(ready()(`http://127.0.0.1:${fake.address().port}`, FAST), /identity/i, 'R5'); } finally { await new Promise((r) => fake.close(r)); }
 });
+
+// R6 — SYNTHETIC CONTRACT COVERAGE: executorRunning is true (the child has printed its ready line — `child` is assigned
+// only then, commons 43918) but the REST's identity read has not succeeded (or failed). Only the helper's datasetId
+// match guards this; a running-only return would call it ready. Not timeable from a real backend, so synthetic, like R5.
+test('#1716 (R6) SYNTHETIC: counters reporting executorRunning true with the identity NOT yet readable are NOT ready', async () => {
+  const fake = http.createServer((req, res) => {
+    if (req.url === '/api/trial/counters') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ executor: { status: 'OK' }, identity: { ok: false, status: 'UNAVAILABLE', reason: 'connect ECONNREFUSED' }, trialControl: true, executorRunning: true })); return; }
+    res.writeHead(404); res.end();
+  });
+  await new Promise((r) => fake.listen(0, '127.0.0.1', r));
+  try { await rejects(ready()(`http://127.0.0.1:${fake.address().port}`, FAST), /identity/i, 'R6'); } finally { await new Promise((r) => fake.close(r)); }
+});
