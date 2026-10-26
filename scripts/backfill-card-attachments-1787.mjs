@@ -36,7 +36,10 @@ const cards = stored.map((r) => ({ iri: r.c.value, json: r.j.value, ver: Number(
 const map = shortIdMap(cards.map((x) => x.card));
 // the attachment triples the graph holds now, by card
 const held = new Map();
-for (const r of await rows(`SELECT ?c ?a ?p ?o WHERE { ?a <${RS}attachmentOf> ?c ; ?p ?o }`)) {
+// the SAME ownership the card write's cleanup uses (core/graph-compiler.mjs cardStructureBranches): linked by attachmentOf AND
+// under the card's /attachment/ prefix. A node linked from elsewhere is not the card's to repair, so counting it here would
+// make the card look different forever (the #138 re-review).
+for (const r of await rows(`SELECT ?c ?a ?p ?o WHERE { ?a <${RS}attachmentOf> ?c ; ?p ?o . FILTER(STRSTARTS(STR(?a), CONCAT(STR(?c), "/attachment/"))) }`)) {
   if (!held.has(r.c.value)) held.set(r.c.value, new Set());
   held.get(r.c.value).add(`<${r.a.value}> <${r.p.value}> ${key(r.o)}`);
 }

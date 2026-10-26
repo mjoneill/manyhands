@@ -35,8 +35,9 @@ test('#1787 C1 a stale attachment name and an extra attachment node are REPLACED
   const ep = (await (await fetch(`${x.baseUrl}/health`)).json()).epoch;
   const raw = async (opId, body) => { const r = await fetch(`${x.baseUrl}/update`, { method: 'POST', headers: { 'x-op-id': opId, 'x-epoch': String(ep) }, body }); assert.equal(r.status, 200, await r.text()); };
   await raw('urn:ex:op/test/c1-stale', `DELETE WHERE { <${iri}/attachment/0> <https://schema.org/name> ?n }`);
-  await raw('urn:ex:op/test/c1-stale2', `INSERT DATA { <${iri}/attachment/0> <https://schema.org/name> "stale.txt" . <${iri}/attachment/1> <https://scrumboard.local/ns#attachmentOf> <${iri}> ; <https://schema.org/name> "extra.txt" . }`);
-  const names = async () => (await g.query(`SELECT ?a ?n WHERE { ?a <https://scrumboard.local/ns#attachmentOf> <${iri}> . OPTIONAL { ?a <https://schema.org/name> ?n } }`)).rows.map((r) => `${r.a.value.slice(iri.length)}=${r.n?.value ?? '-'}`).sort();
+  await raw('urn:ex:op/test/c1-stale2', `INSERT DATA { <${iri}/attachment/0> <https://schema.org/name> "stale.txt" . <${iri}/attachment/1> <https://scrumboard.local/ns#attachmentOf> <${iri}> ; <https://schema.org/name> "extra.txt" . <https://scrumboard.local/elsewhere/n1> <https://scrumboard.local/ns#attachmentOf> <${iri}> ; <https://schema.org/name> "foreign.txt" . }`);
+  const names = async () => (await g.query(`SELECT ?a ?n WHERE { ?a <https://scrumboard.local/ns#attachmentOf> <${iri}> . OPTIONAL { ?a <https://schema.org/name> ?n } FILTER(STRSTARTS(STR(?a), "${iri}/attachment/")) }`)).rows.map((r) => `${r.a.value.slice(iri.length)}=${r.n?.value ?? '-'}`).sort();
+  const foreign = async () => (await g.query(`SELECT ?n WHERE { <https://scrumboard.local/elsewhere/n1> <https://schema.org/name> ?n }`)).rows.map((r) => r.n.value);
   assert.deepEqual(await names(), ['/attachment/0=stale.txt', '/attachment/1=extra.txt'], 'PRECONDITION: the stale and extra facts are in the graph');
 
   const dry = await run(['--executor', x.baseUrl, '--dataset', DS]);
@@ -47,4 +48,5 @@ test('#1787 C1 a stale attachment name and an extra attachment node are REPLACED
   assert.deepEqual(await names(), ['/attachment/0=expected.txt'], 'exactly the projected attachment: the stale name and the extra node are gone');
   const again = await run(['--executor', x.baseUrl, '--dataset', DS, '--apply']);
   assert.match(again.out, /reprojected 0, already current 1/, `a re-run writes nothing (${again.out})`);
+  assert.deepEqual(await foreign(), ['foreign.txt'], 'a node linked from OUTSIDE the card\'s prefix is not the card\'s: it survives, and does not make the card look different forever');
 });
