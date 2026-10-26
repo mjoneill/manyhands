@@ -205,6 +205,7 @@
   "tests/seat-self-1569.test.mjs",
   "tests/since-before-y1.test.mjs",
   "tests/since-exact-x1.test.mjs",
+  "tests/suite-watch-timeout-1778.test.mjs",
   "tests/system-posts-1b-s1.test.mjs",
   "tests/system-posts-1b-s2.test.mjs",
   "tests/targeted-reads-t1.test.mjs",

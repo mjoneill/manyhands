@@ -36,6 +36,7 @@ import { newRunId } from './verdict-ledger.mjs';
 import { rmTreeForce, withSystemBins } from './watch-env.mjs';   // #1417
 import { parseTap, classify, loadExclusions, loadRequired, verdictLine } from './suite-watch-verdict.mjs';   // #1637
 import { HOST_GUARD_EXIT } from './host-guard.mjs';   // #1799
+import { hungFilesIn, timeoutReading } from './suite-watch-timeout.mjs';   // #1778
 
 const REPO = process.env.SUITE_WATCH_REPO
   || path.join(path.dirname(new URL(import.meta.url).pathname), '..');
@@ -142,7 +143,10 @@ process.env.PATH = withSystemBins(process.env.PATH);
  * Output is accumulated as it streams (run-tests.sh now tees), so whatever the
  * run managed to say survives being killed.
  */
-const RUN_TIMEOUT_MS = Number(process.env.SUITE_WATCH_RUN_TIMEOUT_MS ?? 15 * 60 * 1000);
+// #1778 — a RUNAWAY backstop, not a hang detector: 60 min (was 15). On 10-26 the suite outgrew 15 min honestly (the cutover
+// train added about 1,117 s of row time; 682 of 684 files completed, none hung) and this cap killed it as a "HANG". A single
+// hung file is the runner's job (its per-file 300 s kill, which prints `HUNG: tests/<file>`); this cap only bounds the total.
+const RUN_TIMEOUT_MS = Number(process.env.SUITE_WATCH_RUN_TIMEOUT_MS ?? 60 * 60 * 1000);
 const ISOLATION_TIMEOUT_MS = Number(process.env.SUITE_WATCH_ISOLATION_TIMEOUT_MS ?? 10 * 60 * 1000);
 
 /**
@@ -217,6 +221,8 @@ const incompleteFiles = timedOut
     .filter((file) => !completedFiles.has(file))
     .sort()
   : [];
+// #1778 — the files the RUNNER killed as hung (its per-file bound): on a timeout this separates a detected hang from growth
+const hungFiles = timedOut ? hungFilesIn(out) : [];
 
 /**
  * FLAKE TRIAGE, mechanized. Three parallel-load flakes were hand-triaged the
@@ -356,7 +362,8 @@ if (red) {
     const todoSentence = verdict.todo ? `TODO rows (expected failures, NOT failures): ${verdict.todo} in ${verdict.todoFiles.length} file(s)${verdict.todoFiles.length ? `: ${verdict.todoFiles.join(', ')}` : ''}. ` : '';
     bodies.push(timedOut
       ? `🔴 suite watch: the FULL suite did not FINISH — killed after ${Math.round(RUN_TIMEOUT_MS / 1000)}s `
-        + `${full.terminationVerified ? 'and its process tree terminated' : 'but cleanup could not be verified'}. This is a HANG, not a failing assertion: `
+        + `${full.terminationVerified ? 'and its process tree terminated' : 'but cleanup could not be verified'}. `
+        + timeoutReading({ hungFiles, completedCount: completedFiles.size, incompleteFiles })
         + `Incomplete test file(s): ${incompleteFiles.join(', ') || 'none'}. `
         + `${summary || 'no summary — it never reached one'}. `
       : `🔴 suite watch: the FULL test suite is RED in ${treeIdentity(REPO)} `
