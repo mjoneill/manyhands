@@ -28,6 +28,7 @@
  * Take a backup first: cp board-data.json backups/board-data-backup-$(date +%Y%m%d-%H%M%S).json
  */
 import fs from 'node:fs';
+import { assertDocumentNotRetired } from '../core/document-retired.mjs';
 import crypto from 'node:crypto';
 import { postSeqState } from '../core/post-seq.mjs';
 
@@ -105,6 +106,7 @@ if (ROLLBACK) {
 if (!changed) process.exit(0);
 if (DRY) { console.log('--dry-run: nothing written'); process.exit(0); }
 const out = JSON.stringify(doc, null, 2) + (raw.endsWith('\n') ? '\n' : '');
+assertDocumentNotRetired(FILE);   // #1743
 const tmp = `${FILE}.tmp-1592`;
 fs.writeFileSync(tmp, out, 'utf8');
 fs.renameSync(tmp, FILE);

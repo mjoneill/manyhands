@@ -22,6 +22,7 @@
  * refuses to write if the arithmetic does not add up.
  */
 import fs from 'node:fs';
+import { assertDocumentNotRetired } from '../core/document-retired.mjs';
 import { createGraphClient } from '../core/graph-client.mjs';
 import { appendEvent } from '../core/event-log.mjs';
 import { jsonLdToDomain } from '../core/jsonld.mjs';
@@ -131,6 +132,7 @@ const now = new Date().toISOString();
 appendEvent(eventsDir, { op: 'update', actor: 'board', entity: { kind: 'board-meta', id: 'small-kind-collections' },
   state: { retired: counts, movedTo: 'graph executor', verifiedInGraph: true, reason: '#1624: these live in the graph' } }, { now });
 const out = { ...doc, '@graph': kept };
+assertDocumentNotRetired(file);   // #1743
 const tmp = `${file}.tmp`;
 fs.writeFileSync(tmp, JSON.stringify(out, null, 2), 'utf8');
 fs.renameSync(tmp, file);

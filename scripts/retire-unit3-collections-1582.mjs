@@ -14,6 +14,7 @@
  * it is the row-level record of what was removed.
  */
 import fs from 'node:fs';
+import { assertDocumentNotRetired } from '../core/document-retired.mjs';
 import { createHash } from 'node:crypto';
 import { createGraphClient } from '../core/graph-client.mjs';
 import { appendEvent } from '../core/event-log.mjs';
@@ -102,6 +103,7 @@ const now = new Date().toISOString();
 appendEvent(eventsDir, { op: 'update', actor: 'board', entity: { kind: 'board-meta', id: 'unit3-collections' },
   state: { retired: { deliveries: dels.length, modelCalls: calls.length, posts: posts.length, cards: cardNodes.length }, movedTo: 'graph executor', verifiedInGraph: true, reason: '#1582 / #1626 / #1598: these live in the graph' } }, { now });
 const out = { ...doc, '@graph': kept };
+assertDocumentNotRetired(file);   // #1743
 const tmp = `${file}.tmp`;
 fs.writeFileSync(tmp, JSON.stringify(out, null, 2), 'utf8');
 fs.renameSync(tmp, file);
