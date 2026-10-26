@@ -589,13 +589,14 @@ test('#1744 (W10, mode off) a page create reaches the CHANGES feed, as an ordina
   });
 });
 
-test(`#1744 (R3b, mode off) a names SWAP that keeps count and sum ({2,4} → {1,5}) → a page create refuses ${CODES.INDEX_INCOMPLETE}, no effect`, T, async () => {
+test(`#1744 (R3b, mode off) a names SWAP that keeps count and sum ({2,4} → {1,5}) → --verify-and-latch LATCHES it, then a page create refuses ${CODES.INDEX_INCOMPLETE}, no effect`, T, async () => {
   await world('off', async (s) => {
     await s.start();
     const c1 = (await s.call('GET', '/api/cards/uuid-1')).json;
     assert.equal((await s.call('PATCH', '/api/cards/uuid-1', { description: 'see #2 and #4', ifVersion: c1.version, by: 'ada' })).status, 200, 'PRECONDITION: #1 names #2 and #4');
     assert.deepEqual((await coverageOf(s, 'uuid-1')).names, [INT(2), INT(4)], 'PRECONDITION: indexed as {2, 4}');
     await s.xu(`DELETE DATA { GRAPH <${BK}> { ${COV('uuid-1')} <${IX.namesShortId}> "2"^^<${XSD}integer> . ${COV('uuid-1')} <${IX.namesShortId}> "4"^^<${XSD}integer> } } ; INSERT DATA { GRAPH <${BK}> { ${COV('uuid-1')} <${IX.namesShortId}> "1"^^<${XSD}integer> . ${COV('uuid-1')} <${IX.namesShortId}> "5"^^<${XSD}integer> } }`, 'swap');
+    await latchedByVerifier(s, 'the {2,4} → {1,5} swap');
     const e0 = await effects(s);
     const p = await createPage(s, { title: 'Refused page', createdBy: 'ada', requestId: 'req-1744-r3b' });
     assert.ok(!ok2xx(p.status), `refused (${p.status} ${p.text.slice(0, 200)})`);
@@ -654,12 +655,23 @@ const DAMAGE = [
   ['a MISMATCHED JSON digest', async ({ q, xu }) => { const ds = await q(`SELECT ?d WHERE { GRAPH <${BK}> { ${COV('uuid-1')} <${IX.indexedJsonDigest}> ?d } }`); assert.equal(ds.length, 1, 'PRECONDITION: the backfill wrote card 1\'s digest'); const d = ds[0].d.value; await xu(`DELETE DATA { GRAPH <${BK}> { ${COV('uuid-1')} <${IX.indexedJsonDigest}> "${d}" } } ; INSERT DATA { GRAPH <${BK}> { ${COV('uuid-1')} <${IX.indexedJsonDigest}> "${'f'.repeat(64)}" } }`, 'bad-digest'); }],
   ['NO completion marker (a partial backfill)', async ({ xu }) => xu(`DELETE WHERE { GRAPH <${BK}> { <${IX.marker}> ?p ?o } }`, 'no-marker')],
 ];
+// #1769 (proxy ruling 47034, amending 46773): under a TRUE marker the runtime guard no longer re-proves the whole index, so
+// coverage damage is not refused at write time; the verifier finds it and latches the marker false, and only THEN does the write
+// refuse. Each damage row proves that whole chain. The no-marker row is unchanged: a missing marker still refuses at write time.
+const NO_MARKER = /NO completion marker/;
+async function latchedByVerifier(s, what) {
+  const r = await indexTool(s, '--verify-and-latch');
+  assert.equal(r.status, 1, `${what}: --verify-and-latch exits 1 (${r.out.slice(-300)} ${r.err.slice(-200)})`);
+  assert.match(r.out, /^LATCHED \d+ violation\(s\)/m, `${what}: the verifier finds the damage and LATCHES it`);
+  assert.deepEqual(await markerValues(s), ['false'], `${what}: the marker reads back false`);
+}
 for (const [what, plant] of DAMAGE) {
-  test(`#1744 (R3, mode off) ${what} → a page create refuses ${CODES.INDEX_INCOMPLETE}, no effect`, T, async () => {
+  test(`#1744 (R3, mode off) ${what} → ${NO_MARKER.test(what) ? '' : '--verify-and-latch LATCHES it, then '}a page create refuses ${CODES.INDEX_INCOMPLETE}, no effect`, T, async () => {
     await world('off', async (s) => {
       // r5 (finding 6's boot gate): a mode-off server will not START on a damaged index, so the damage lands AFTER a healthy boot
       await s.start();
       await plant({ q: s.q, xu: s.xu });
+      if (!NO_MARKER.test(what)) await latchedByVerifier(s, what);   // a missing marker still refuses at write time
       const e0 = await effects(s);
       const p = await createPage(s, { title: 'Refused page', createdBy: 'ada', requestId: 'req-1744-r3' });
       assert.ok(!ok2xx(p.status), `refused (${p.status} ${p.text.slice(0, 200)})`);
@@ -703,12 +715,13 @@ test('#1744 (G3, r5, mode on) with NO completion marker (never backfilled) an or
     assert.ok(ok2xx(c.status), `admitted (${c.status} ${c.text.slice(0, 200)})`);
   }, { index: 'none' });
 });
-test(`#1744 (G4, r5, mode on) a marker PRESENT and the index damaged → an ordinary create AND a delete refuse ${CODES.INDEX_INCOMPLETE}, no effect; the healthy control is admitted`, T, async () => {
+test(`#1744 (G4, r5, mode on) a marker PRESENT and the index damaged → --verify-and-latch LATCHES it, then an ordinary create AND a delete refuse ${CODES.INDEX_INCOMPLETE}, no effect; the healthy control is admitted`, T, async () => {
   await world('on', async (s) => {
     await s.start();
     const ok = await s.call('POST', '/api/cards', { title: 'Admitted card', createdBy: 'ada', requestId: `req-1744-g4-ok-${process.pid}` });
     assert.ok(ok2xx(ok.status), `CONTROL: a healthy marker admits the create (${ok.status} ${ok.text.slice(0, 200)})`);
     await DAMAGE[0][1]({ q: s.q, xu: s.xu });
+    await latchedByVerifier(s, 'mode on, a live card with no coverage node');
     const e0 = await effects(s);
     const c = await s.call('POST', '/api/cards', { title: 'Refused card', createdBy: 'ada', requestId: `req-1744-g4-${process.pid}` });
     assert.ok(!ok2xx(c.status), `the create is refused (${c.status} ${c.text.slice(0, 200)})`);
@@ -912,10 +925,11 @@ for (const [mode, what] of [['nocommit', '/health carries NO commitSeq (two miss
     });
   });
 }
-test(`#1744 (R3, mode off) a DELETE is index-dependent too: with a coverage node missing it refuses ${CODES.INDEX_INCOMPLETE}, no effect`, T, async () => {
+test(`#1744 (R3, mode off) a DELETE is index-dependent too: with a coverage node missing, --verify-and-latch LATCHES it, then the delete refuses ${CODES.INDEX_INCOMPLETE}, no effect`, T, async () => {
   await world('off', async (s) => {
     await s.start();
     await DAMAGE[0][1]({ q: s.q, xu: s.xu });   // r5: after a healthy boot (the boot gate)
+    await latchedByVerifier(s, 'a coverage node missing, before a delete');
     const e0 = await effects(s);
     const d = await s.call('DELETE', '/api/cards/uuid-3?by=ada');
     assert.ok(!ok2xx(d.status), `refused (${d.status} ${d.text.slice(0, 200)})`);
@@ -1352,7 +1366,7 @@ test('#1744 (R6, r6, ruling 46773) a coverage node TRIMMED CONSISTENTLY (a name,
 });
 
 // ── r4 (the builder-launched row review, 46400): isolation and the NO ROW list ──
-test(`#1744 (R3b, r4, finding 8) a names SWAP among OTHER names ({2,6} → {3,5}; the new #4 untouched) → a page create refuses ${CODES.INDEX_INCOMPLETE}, no effect`, T, async () => {
+test(`#1744 (R3b, r4, finding 8) a names SWAP among OTHER names ({2,6} → {3,5}; the new #4 untouched) → --verify-and-latch LATCHES it, then a page create refuses ${CODES.INDEX_INCOMPLETE}, no effect`, T, async () => {
   await world('off', async (s) => {
     await s.start();
     const c1 = (await s.call('GET', '/api/cards/uuid-1')).json;
@@ -1360,6 +1374,7 @@ test(`#1744 (R3b, r4, finding 8) a names SWAP among OTHER names ({2,6} → {3,5}
     assert.deepEqual((await coverageOf(s, 'uuid-1')).names, [INT(2), INT(6)], 'PRECONDITION: indexed as {2, 6}');
     // count 2 and sum 8 kept, namesList "2,6" kept: only the list-membership (CONTAINS) clause can see it, and #4 is not involved
     await s.xu(`DELETE DATA { GRAPH <${BK}> { ${COV('uuid-1')} <${IX.namesShortId}> "2"^^<${XSD}integer> . ${COV('uuid-1')} <${IX.namesShortId}> "6"^^<${XSD}integer> } } ; INSERT DATA { GRAPH <${BK}> { ${COV('uuid-1')} <${IX.namesShortId}> "3"^^<${XSD}integer> . ${COV('uuid-1')} <${IX.namesShortId}> "5"^^<${XSD}integer> } }`, 'swap-other');
+    await latchedByVerifier(s, 'the {2,6} → {3,5} swap');
     const e0 = await effects(s);
     const p = await createPage(s, { title: 'Refused page', createdBy: 'ada', requestId: 'req-1744-r3b-other' });
     assert.equal(p.status, 409, `refused (${p.status} ${p.text.slice(0, 200)})`);
@@ -1411,10 +1426,11 @@ test('#1744 (R5, r4) a DELETE planned before a NEW namer appears (#3 starts nami
   });
 });
 
-test(`#1744 (R3, r4, NO ROW) an ORDINARY card create (POST /api/cards) under a damaged index refuses ${CODES.INDEX_INCOMPLETE}, no effect (V2-2: ordinary writes are in scope)`, T, async () => {
+test(`#1744 (R3, r4, NO ROW) an ORDINARY card create (POST /api/cards) under a damaged index, once --verify-and-latch LATCHES it, refuses ${CODES.INDEX_INCOMPLETE}, no effect (V2-2: ordinary writes are in scope)`, T, async () => {
   await world('off', async (s) => {
     await s.start();
     await DAMAGE[0][1]({ q: s.q, xu: s.xu });   // r5: after a healthy boot (the boot gate)
+    await latchedByVerifier(s, 'a coverage node missing, before an ordinary create');
     const e0 = await effects(s);
     const c = await s.call('POST', '/api/cards', { title: 'Refused card', createdBy: 'ada', requestId: `req-1744-r3-card-${process.pid}` });
     assert.ok(!ok2xx(c.status), `refused (${c.status} ${c.text.slice(0, 200)})`);
@@ -1608,4 +1624,52 @@ test('#1744 (F2b, r10, finding 2) a LATCH landing between the backfill\'s final 
     assert.deepEqual(await markerValues(s), ['false'], 'the latch stands: the marker reads exactly false');
     assert.deepEqual((await latchRecord(s)).map((x) => x.reason), ['r10 concurrent latch'], 'with the latch\'s own reason');
   });
+});
+
+// ── #1769 (proxy ruling 47034, item 5): THE SCALE ROW. A guarded create's cost must not grow with the board. The fix replaced a
+// whole-index invariant inside every create/delete (measured 34–47 s at the real board's 1,633 cards, past the cards client's 30 s)
+// with the marker plus the namer clause. This row plants 1,500 extra live cards, backfills them with the real tool, and compares
+// the guarded ordinary create (POST /api/cards, mode off) against the same create on the 3-card fixture.
+const SCALE_N = 1500;
+async function plantCards(s, n) {
+  const now = new Date().toISOString();
+  for (let i = 0; i < n; i += 250) {
+    const rows = [];
+    for (let k = i; k < Math.min(n, i + 250); k++) {
+      const id = `scale-${k}`, sid = 10000 + k;
+      const json = JSON.stringify({ id, shortId: sid, title: `scale card ${k}`, description: k % 3 === 0 ? `see #${10000 + ((k + 1) % n)}` : '', type: 'task', column: 'backlog', assignees: ['unassigned'], labels: [], priority: null, relationships: {}, createdAt: now, updatedAt: now, createdBy: 'board', version: 1 });
+      rows.push({ iri: cardIriOf(id), json });
+    }
+    await s.xu(`INSERT DATA { ${rows.map((r) => `<${r.iri}> <${RDF_TYPE}> <${RS}Card> .`).join(' ')} GRAPH <${BK}> { ${rows.map((r) => `<${r.iri}> <${VER}> "1"^^<${XSD}integer> ; <${RS}entityJson> ${JSON.stringify(r.json)} .`).join(' ')} } }`, `scale-plant-${i}`);
+  }
+}
+async function guardedCreateMs(s, tag) {
+  const ms = [];
+  for (let i = 0; i < 3; i++) {
+    const t0 = performance.now();
+    const c = await s.call('POST', '/api/cards', { title: `Scale probe ${tag} ${i}`, createdBy: 'ada', requestId: `req-1769-scale-${tag}-${i}-${process.pid}` });
+    ms.push(performance.now() - t0);
+    assert.ok(ok2xx(c.status), `PRECONDITION: the guarded create is admitted (${c.status} ${c.text.slice(0, 200)})`);
+  }
+  return ms.sort((a, b) => a - b)[1];   // the median of three
+}
+test(`#1769 (SCALE, r11) a guarded card create costs the SAME on a ${SCALE_N + 3}-card board as on the 3-card fixture (the write guard must not grow with the board)`, T, async () => {
+  let small, big;
+  await world('off', async (s) => {
+    await s.start();
+    small = await guardedCreateMs(s, 'small');
+  });
+  await world('off', async (s) => {
+    await plantCards(s, SCALE_N);
+    const n = Number((await s.q(`SELECT (COUNT(DISTINCT ?c) AS ?n) WHERE { ?c <${RDF_TYPE}> <${RS}Card> }`))[0].n.value);
+    assert.ok(n >= SCALE_N + 3, `PRECONDITION: the planted board has ${SCALE_N + 3}+ live cards (${n})`);
+    const b = await indexTool(s, '--backfill');
+    assert.equal(b.status, 0, `PRECONDITION: the real backfill indexes the planted board (${b.out.slice(-200)})`);
+    assert.deepEqual(await markerValues(s), ['true'], 'PRECONDITION: the marker is complete true, so the guard runs');
+    await s.start();
+    big = await guardedCreateMs(s, 'big');
+  }, { index: 'none' });
+  console.log(`# SCALE: median guarded create ${small.toFixed(1)} ms on 3 cards, ${big.toFixed(1)} ms on ${SCALE_N + 3}`);
+  assert.ok(big < Math.max(3 * small, small + 500), `the guarded create does not grow with the board: ${big.toFixed(0)} ms at ${SCALE_N + 3} cards vs ${small.toFixed(0)} ms at 3`);
+  assert.ok(big < 5000, `and stays far under the cards client's 30 s (${big.toFixed(0)} ms)`);
 });
