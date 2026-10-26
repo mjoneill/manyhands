@@ -160,6 +160,7 @@
   "tests/wake-graph-w1.test.mjs",
   "tests/wake-unknown-w2.test.mjs",
   "tests/whisper-guards-graph-1786.test.mjs",
+  "tests/whisper-guards-handoff-1786.test.mjs",
   "tests/whisper-guards-silence-1786.test.mjs",
   "tests/write-protocol-client-1748.test.mjs",
   "tests/write-protocol-floor-1748.test.mjs",

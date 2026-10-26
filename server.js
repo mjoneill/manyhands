@@ -64,7 +64,7 @@ import { KIND_DECLARATIONS, PROJECTED_TYPES, divergence } from './core/kind-regi
 import { SHAPE_QUERY, withObjectShapes } from './core/predicate-shapes.mjs';
 import { shortenTypeIri, PERSON_IRI_BASE } from './core/jsonld.mjs';
 // #805 — the boot migration's inputs (the live flat sources) and its builder.
-import { readPool, recentWhispers, DEFAULT_POOL, poolFilePath } from './whisper-store.mjs';
+import { readPool, recentWhispers, DEFAULT_POOL, poolFilePath, whisperStateFilePath } from './whisper-store.mjs';
 import { readTendingConfig, writeTendingConfig } from './tending-config.mjs';
 import { buildTendingEntities, person as personIri } from './core/tending-bootstrap.mjs';
 import { resolvePool as resolveWhisperPool, bagState } from './core/tending-pool.mjs';
@@ -14326,6 +14326,23 @@ migrateBoardIfNeeded();
 // throws (#1624), and an unmigrated graph with whisper-state.json or whisper-pool.json present refused to boot. The function's
 // own failure path (refuse to serve) is unchanged.
 await withWriteLock(async () => migrateTendingIfNeeded());
+// #1786 (#139 review) — the legacy file guard's LAST CONSUMED send window carries into the graph, once, as a reservation (no
+// TendingMint is invented: a burned window was never delivered). Before this guard, mintOnce consumed lastMintedWindow in
+// whisper-state.json BEFORE posting, so a window can be spent with no mint at all; without this the first boot of the new
+// MCP could send it again. Idempotent: the reservation's IRI is the window's. A malformed or absent file carries nothing.
+try {
+  await withWriteLock(async () => {
+    let st = null;
+    try { st = JSON.parse(fs.readFileSync(whisperStateFilePath(), 'utf8')); } catch { return; }
+    const w = typeof st?.lastMintedWindow === 'string' ? st.lastMintedWindow : null;
+    if (!w || windowReserved(tendingEntities(), w)) return;
+    writeTendingEntities([reservationEntity(w, typeof st.lastMintedAt === 'string' ? st.lastMintedAt : new Date().toISOString())], { actor: 'board', op: 'create' });
+    console.error(`${new Date().toISOString()} #1786 the legacy whisper-state.json's last consumed window ${w} is reserved in the graph`);
+  });
+} catch (e) {
+  console.error(`#1786 carrying the legacy send window FAILED — refusing to serve (the window could be sent twice): ${e.message}`);
+  process.exit(1);
+}
 
 // ── Start Server ──
 const server = http.createServer(handleRequest);

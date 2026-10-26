@@ -18,8 +18,14 @@ export const reservationIri = (window) => `https://scrumboard.local/tending/wind
 const PERSON = 'https://scrumboard.local/person/';
 const byId = (ents) => new Map((Array.isArray(ents) ? ents : []).map((e) => [e['@id'], e]));
 
-/** Is this window already reserved for a send? */
-export const windowReserved = (ents, window) => byId(ents).has(reservationIri(window));
+/**
+ * Is this window already CONSUMED for a send? A reservation, OR a delivered firing for it (a TendingMint carrying the window,
+ * live or legacy-imported). The mints matter twice (#139 review): a window sent before this guard existed has no
+ * reservation, and during a rollout an old MCP (the file guard) can still send and record a mint. Either way, no second send.
+ */
+export const windowReserved = (ents, window) => byId(ents).has(reservationIri(window))
+  || (Array.isArray(ents) ? ents : []).some((e) => e && e['@type'] === 'scrum:TendingMint'
+    && (e['scrum:clockWindow'] === window || e['scrum:legacyClockWindow'] === window));
 
 /** The reservation entity for `window` at `at`. */
 export const reservationEntity = (window, at) => ({ '@id': reservationIri(window), '@type': RESERVATION_TYPE, 'scrum:clockWindow': window, 'scrum:occurredAt': at });
