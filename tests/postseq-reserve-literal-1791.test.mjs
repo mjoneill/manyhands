@@ -23,8 +23,21 @@ test('#1791 R1 prose containing "; delete" / "; INSERT" compiles; a real second 
   assert.equal(staticCheck(`${sparql};\nDELETE WHERE { ?s ?p ?o }`, reserveOpId([item('plain', 'rk-1791-plain')])).ok, false, 'a genuine multi-operation request is refused');
   // the scans still see the request's OWN syntax: only the literals are blanked
   const op = reserveOpId([item('plain', 'rk-1791-plain')]);
-  assert.equal(staticCheck(sparql.replace('\nWHERE {\n', '\nWHERE {\n  GRAPH ?g { ?gs ?gp ?go }\n'), op).ok, false, 'a real named graph in the WHERE is still refused');
-  assert.equal(staticCheck(sparql.replace('\nWHERE {\n', '\nWHERE {\n  ?xop <urn:ex:commitSeq> ?xc .\n'), op).ok, false, 'a real bookkeeping predicate outside GRAPH <bk> is still refused');
+  // every injection lands AFTER the duplicate guard (which must be first), so each refusal below is for its stated reason;
+  // the CONTROL injects a harmless line at the same point and must pass
+  const inject = (line) => sparql.replace('  FILTER(!BOUND(?dup))\n', `  FILTER(!BOUND(?dup))\n  ${line}\n`);
+  assert.notEqual(inject('X'), sparql, 'PRECONDITION: the injection point exists');
+  assert.equal(staticCheck(inject('BIND(1 AS ?xharmless)'), op).ok, true, 'CONTROL: a harmless line at the injection point passes');
+  assert.equal(staticCheck(inject('GRAPH ?g { ?gs ?gp ?go }'), op).ok, false, 'a real named graph in the WHERE is still refused');
+  assert.equal(staticCheck(inject('?xop <urn:ex:commitSeq> ?xc .'), op).ok, false, 'a real bookkeeping predicate outside GRAPH <bk> is still refused');
+  // the blanking ends a literal at its real closing quote: a literal ending in an ESCAPED backslash ("x\\\\") is closed by
+  // the next quote, so syntax right after it stays visible (a regex that treated \\" as an escape would swallow it)
+  const after = (tail) => inject(`BIND("x\\\\" AS ?xlit)${tail}`);
+  // …with a LATER literal on the same line, which is what a wrong escape rule would run on to and swallow everything between
+  assert.equal(staticCheck(after(' GRAPH ?g { ?gs ?gp "y" }'), op).ok, false, 'a named graph right after "x\\\\" is still seen');
+  assert.equal(staticCheck(after(' ?xop <urn:ex:commitSeq> ?xc . BIND("y" AS ?xlit2)'), op).ok, false, 'a bookkeeping predicate right after "x\\\\" is still seen');
+  assert.equal(staticCheck(after(' BIND("y" AS ?xlit2)'), op).ok, true, 'CONTROL: the two literals alone pass');
+  assert.equal(staticCheck(after(''), op).ok, true, 'CONTROL: the literal alone passes');
 });
 
 test('#1791 R2 against a real executor the reserved draft reads back byte-identical, semicolons and all', { skip: !HAVE_PY && 'no executor python' }, async (t) => {
