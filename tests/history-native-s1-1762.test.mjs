@@ -28,6 +28,8 @@
  *   A7  REFUSED (stale ifVersion): 409, the card's version and state unchanged, and NO new activity anywhere
  *   A8  REPLAY (same requestId twice): one card, one activity
  *   A9  entity.put (a column rename): one activity, entityKind column
+ *   A10 REPROJECT: a card HELD by another seat names the next #N; creating #N re-writes it (its JSON unchanged), and its
+ *       part is op reproject, holderAtWrite = its holder, actor = the creator, columnAfter only, its REST version unchanged
  *   R4  commitSeq: every write above has an APPLIED receipt whose commitSeq is strictly above the previous one, and the
  *       marker's commitSeq is at or above the last; plus a STATIC partition of the compiler's exported RECORD_KINDS into
  *       S1 / S1b / not-history, so a kind added later without a home turns this file red
@@ -56,7 +58,7 @@ import { HAVE_PY } from './helpers/graph-executor-proc.mjs';
 import { wholeBoardWorld, WB_DATASET } from './helpers/whole-board-1645.mjs';
 import { startRestServer } from './helpers/harness.mjs';
 import { createGraphClient } from '../core/graph-client.mjs';
-import { cardIriOf } from '../core/cards-graph.mjs';
+import { cardIriOf, SHORTID_COUNTER_IRI } from '../core/cards-graph.mjs';
 import { RECORD_KINDS } from '../core/graph-compiler.mjs';
 import { BOOKKEEPING_GRAPH } from '../core/graph-vocab.mjs';
 
@@ -85,15 +87,16 @@ const C = {
   at: `${PROV}startedAtTime`, part: `${RS}part`, recordedBy: `${RS}recordedBy`, versionAfter: `${RS}versionAfter`,
   holderAtWrite: `${RS}holderAtWrite`, columnBefore: `${RS}columnBefore`, columnAfter: `${RS}columnAfter`,
 };
-const S1_OPS = ['create', 'update', 'delete', 'move', 'claim', 'release'];
+const S1_OPS = ['create', 'update', 'delete', 'move', 'claim', 'release', 'reproject'];   // reproject: a card re-written only because a #N it names appeared or disappeared (its JSON unchanged), never a mutation
 const activityIri = (opId, part) => `${ACT_NS}op-${crypto.createHash('sha256').update(opId).digest('hex').slice(0, 32)}-${part}`;
 // receipt predicates (executor bookkeeping, read in the bookkeeping graph)
 const RX = { outcome: 'urn:ex:outcome', commitSeq: 'urn:ex:commitSeq', at: 'urn:ex:at' };
 
 // R4's partition of the compiler's own kind list: every exported kind has exactly one home
-const S1_KINDS = ['card.write', 'entity.put', 'origin.prepare'];
+// by COMPILER kind: entity.put is S1's (columns, collections); a wake also rides entity.put, through its own branch, and its row lives in the S1b file
+const S1_KINDS = ['card.write', 'entity.put'];
 const S1B_KINDS = ['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'post.create', 'post.write', 'post.redact', 'delivery.create', 'delivery.step', 'modelcall.create'];
-const NOT_HISTORY = ['person.import', 'post.import', 'delivery.import'];   // migrations: the projected past, never a live write
+const NOT_HISTORY = ['person.import', 'post.import', 'delivery.import', 'origin.prepare'];   // migrations (the projected past), and the two-phase prepare (the origin COMMIT's activity is its card.write's)
 
 const UNITS = { SCRUM_GRAPH_UNIT_CARDS: '1', SCRUM_GRAPH_UNIT_COLUMNS: '1', SCRUM_GRAPH_UNIT_CONVERSATIONS: '1', SCRUM_GRAPH_UNIT_LOGBORN: '1', SCRUM_GRAPH_UNIT_SMALLKINDS: '1', SCRUM_GRAPH_UNIT_DELIVERIES: '1' };
 const SOURCES = { SCRUM_GRAPH_QUERY_SOURCE: 'executor', SCRUM_GRAPH_READY_SOURCE: 'executor', SCRUM_GRAPH_CHECKS_SOURCE: 'executor', SCRUM_GRAPH_NEIGHBORS_SOURCE: 'executor' };
@@ -309,6 +312,31 @@ test('#1762 A1–A9, R4, R5 — flag on: every REST card and column write commit
     const op9 = one(n9, C.recordedBy, 'A9').value;
     assert.equal(i9, activityIri(op9, Number(one(n9, C.part, 'A9').value)), 'A9: the IRI shape');
     seqs.push(['A9', (await receipt(q, op9)).commitSeq]);
+
+    // A10 REPROJECT: card #3 (held by bea) names the NEXT shortId; the create that mints it re-writes #3 with its JSON unchanged
+    const next = Number((await q(`SELECT ?n WHERE { GRAPH <${BK}> { <${SHORTID_COUNTER_IRI}> <${VER}> ?n } }`))[0]?.n.value);
+    assert.ok(Number.isSafeInteger(next), `PRECONDITION: the shortId counter reads (${next})`);
+    const named = await call('PATCH', '/api/cards/uuid-3', { description: `waits on #${next}`, by: 'bea' });
+    assert.equal(named.status, 200, `PRECONDITION: #3 names #${next} (${named.status} ${named.text.slice(0, 200)})`);
+    const held = await call('POST', '/api/cards/uuid-3/claim', { by: 'bea' });
+    assert.equal(held.status, 200, `PRECONDITION: bea holds #3 (${held.status} ${held.text.slice(0, 200)})`);
+    const v3rest = await restVersion(call, 'uuid-3');
+    const a10 = await step('A10', () => call('POST', '/api/cards', { title: 'hn named', description: 'the card #3 was waiting on', createdBy: 'ada' }));
+    assert.equal(a10.r.status, 201, `A10 create (${a10.r.status} ${a10.r.text.slice(0, 200)})`);
+    assert.equal(a10.r.json.shortId, next, `PRECONDITION: the create minted #${next}`);
+    const re = forEntity(a10.fresh, cardIriOf('uuid-3'));
+    assert.equal(re.length, 1, `A10: #3 has exactly one activity in the create's write (got ${re.length})`);
+    const [, rn] = re[0];
+    assert.equal(one(rn, C.op, 'A10').value, 'reproject', 'A10: a re-written namer is op reproject, never update');
+    assert.equal(one(rn, C.holderAtWrite, 'A10').value, `${PERSON}bea`, 'A10: holderAtWrite is the holder as it stood');
+    assert.equal(one(rn, C.actor, 'A10').value, `${PERSON}ada`, 'A10: the actor is the creator');
+    assert.equal(one(rn, C.columnAfter, 'A10').value, 'done', 'A10: columnAfter');
+    none(rn, C.columnBefore, 'A10');
+    assert.equal(Number(one(rn, C.versionAfter, 'A10').value), v3rest, 'A10: the REST version did not move');
+    assert.equal(await restVersion(call, 'uuid-3'), v3rest, 'A10: #3 really is unchanged for a reader');
+    const createOp = one(forEntity(a10.fresh, cardIriOf(a10.r.json.id))[0][1], C.recordedBy, 'A10 create').value;
+    assert.equal(one(rn, C.recordedBy, 'A10').value, createOp, 'A10: the reproject part rides the create\'s own op');
+    seqs.push(['A10', (await receipt(q, createOp)).commitSeq]);
 
     // A5 delete (last, so the card is not needed after)
     const vLast = await restVersion(call, card.id);   // the REST-visible version immediately BEFORE the delete
