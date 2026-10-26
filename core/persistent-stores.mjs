@@ -83,7 +83,7 @@ export const PERSISTENT_STORES = [
   { match: /^(tending-config|channel-config)\.json$/, kind: 'CONFIG', env: null,
     why: 'Operator configuration for the tending loop and the channels. Inputs, not content.' },
   { match: /^whisper-(state|pool)\.json$/, kind: 'CONFIG', env: null,
-    why: 'The whisper mechanism state and key pool (#613). Operator-facing coordination config.' },
+    why: 'RETIRED as a live store (#1786): the once-per-window send and claim guards are graph state decided by REST (/api/tending/windows, /api/tending/claims), and the pool is the graph\'s tending prompts. The MCP neither reads nor writes these files; the #805 boot migration imports them once, under the write lock, where they still exist.' },
   { match: /^(graph-query-log|search-log)\.jsonl$/, kind: 'LOG', env: null,
     why: 'Append-only query telemetry — the only unbiased evidence of what seats actually ask (#1037). Read by humans; nothing reads it back.' },
   { match: /-misses\.jsonl$/, kind: 'LOG', env: null,
