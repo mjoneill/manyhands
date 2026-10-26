@@ -16,8 +16,12 @@
  *   T3  the card deleted: no node attachmentOf it remains
  *   T4  SHAPE PARITY: a post's attachment node and a card's carry the same predicate set, with the same datatypes
  *
- * NOT COVERED, BY NAME: the backfill script (its name and flags are not in the contract yet; the row follows once they are,
- * asserting a pre-change card gains its nodes, its REST version does not move, and a second run writes nothing).
+ *   B1  the BACKFILL (scripts/backfill-card-attachments-1787.mjs --executor --dataset [--apply]) on a card whose attachment
+ *       nodes are absent (written as before the change: the nodes are removed with a raw update): the dry run reports it as
+ *       needing nodes and changes NOTHING; --apply gives it exactly its nodes, leaves its REST version unmoved and exits 0;
+ *       a second --apply reports reprojected 0 and moves no graph version stamp
+ *
+ * NOT COVERED, BY NAME: the backfill's exit 1 on a write that is not APPLIED (needs an injected refusal).
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -82,7 +86,7 @@ async function world(body) {
       const x = await fetch(`${rest.baseUrl}${route}`, { method, headers, ...(payload ? { body: JSON.stringify(payload) } : {}), signal: AbortSignal.timeout(60000) });
       const t = await x.text(); let j = null; try { j = JSON.parse(t); } catch { /* not json */ } return { status: x.status, text: t, json: j };
     };
-    await body({ q, call, gc });
+    await body({ q, call, gc, exec: w.exec.baseUrl });
   } finally {
     try { fs.chmodSync(w.boardFile, 0o644); } catch { /* absent */ }
     if (rest) await rest.stop().catch(() => {});
@@ -158,5 +162,48 @@ test('#1787 T1–T4 — a card\'s attachments are graph nodes of the post shape,
     assert.ok(d.status === 200 || d.status === 204, `PRECONDITION: the delete (${d.status} ${d.text.slice(0, 160)})`);
     assert.equal((await attachmentsOf(q, owner)).size, 0, 'T3: no node attachmentOf the deleted card remains');
     assert.equal((await q(`SELECT ?s WHERE { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "${owner}/attachment/")) }`)).length, 0, 'T3: and nothing under its attachment prefix');
+  });
+});
+
+const BACKFILL_1787 = path.join(HERE, '..', 'scripts', 'backfill-card-attachments-1787.mjs');
+const allVersions = async (q) => (await q(`SELECT ?s ?v WHERE { GRAPH <${BK}> { ?s <urn:ex:ver> ?v } }`)).map((r) => `${r.s.value}=${r.v.value}`).sort();
+
+test('#1787 B1 — the backfill gives a pre-change card its attachment nodes without moving its REST version, and a re-run writes nothing', T, async () => {
+  await world(async ({ q, call, exec }) => {
+    const a1 = await upload(call, 'old.txt', 'text/plain', 'written before the change');
+    const c = await call('POST', '/api/nodes', { title: 'old page', body: 'pre-change', attachments: [a1], createdBy: 'ada' });
+    assert.ok(c.status === 201 || c.status === 200, `PRECONDITION: the page (${c.status})`);
+    const id = c.json?.id ?? c.json?.['@id'];
+    const owner = `${ENTITY}${id}`;
+    // make it a PRE-CHANGE card: its attachment nodes removed, as a card written before #1787 has none
+    const ep = (await (await fetch(`${exec}/health`)).json()).epoch;
+    const raw = await fetch(`${exec}/update`, { method: 'POST', headers: { 'x-op-id': `urn:ex:op/test/att-1787-strip-${process.pid}-${Date.now()}`, 'x-epoch': String(ep) }, body: `DELETE WHERE { ?a <${A.of}> <${owner}> . ?a ?p ?o }` });
+    assert.equal(raw.status, 200, `PRECONDITION: the nodes are stripped (${await raw.text()})`);
+    assert.equal((await attachmentsOf(q, owner)).size, 0, 'PRECONDITION: the card has no attachment nodes');
+    const restV = (await call('GET', `/api/cards/${id}`)).json.version;
+    const v0 = await allVersions(q);
+
+    const dry = await runNode([BACKFILL_1787, '--executor', exec, '--dataset', WB_DATASET]);
+    assert.equal(dry.status, 0, `B1 dry run exits 0 (${(dry.err || dry.out).slice(-300)})`);
+    const dm = /#1787 backfill \(dry run\): scanned (\d+) cards, (\d+) need attachment nodes, (\d+) already current/.exec(dry.out);
+    assert.ok(dm, `B1: the dry run reports in the contract's words (${dry.out.slice(-300)})`);
+    assert.ok(Number(dm[2]) >= 1, `B1: the stripped card is counted as needing nodes (${dm[0]})`);
+    assert.equal((await attachmentsOf(q, owner)).size, 0, 'B1: the dry run wrote no node');
+    assert.deepEqual(await allVersions(q), v0, 'B1: the dry run moved no version stamp');
+
+    const app = await runNode([BACKFILL_1787, '--executor', exec, '--dataset', WB_DATASET, '--apply']);
+    assert.equal(app.status, 0, `B1 --apply exits 0 (${(app.err || app.out).slice(-300)})`);
+    const am = /#1787 backfill: scanned (\d+), reprojected (\d+), already current (\d+)/.exec(app.out);
+    assert.ok(am && Number(am[2]) === Number(dm[2]), `B1: --apply reprojected what the dry run said needed it (${am?.[0]} vs ${dm[0]})`);
+    const nodes = await attachmentsOf(q, owner);
+    assert.equal(nodes.size, 1, 'B1: the card now has exactly its one attachment node');
+    assertNode(nodes.get(`${owner}/attachment/0`), `${owner}/attachment/0`, owner, a1, 0, 'B1 backfilled node');
+    assert.equal((await call('GET', `/api/cards/${id}`)).json.version, restV, 'B1: the REST version did not move (a reproject, the JSON unchanged)');
+
+    const v1 = await allVersions(q);
+    const again = await runNode([BACKFILL_1787, '--executor', exec, '--dataset', WB_DATASET, '--apply']);
+    assert.equal(again.status, 0, 'B1: a re-run exits 0');
+    assert.match(again.out, /#1787 backfill: scanned \d+, reprojected 0, already current \d+/, `B1: a re-run reprojects nothing (${again.out.slice(-200)})`);
+    assert.deepEqual(await allVersions(q), v1, 'B1: a re-run moves no graph version stamp');
   });
 });
