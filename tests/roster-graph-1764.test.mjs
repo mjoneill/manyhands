@@ -33,6 +33,9 @@
  *       injection between steps: the builder's row.)
  *   R4  an invited agent whose seatKey collides with a configured seat loses: GET shows the configured seat
  *   R5  a boot with NO file, a POSTed roster, then a file that appears: a restart does NOT import it over the saved seats
+ *   R6  the state a crash between the graph commit and the narrowing write leaves (simulated: after a save that REMOVED a
+ *       seat, the file rewritten as the superset, with the removed seat back): the removed seat is not served (GET), and a
+ *       restart's boot re-export narrows the file to exactly the graph's roster before serving
  *   M1  MCP (its own roster file path never written) lists a POSTed seat in a NEW session's tool descriptions within 5 s
  *   U1  the board page's "Post as" picker lists the configured seats in rosterOrder, the first one first
  *
@@ -215,5 +218,20 @@ test('#1764 M1, U1 — MCP lists a POSTed seat in a new session within 5 s; the 
       assert.equal(opts[0], want[0], `U1: the picker's first option is the first configured seat (${opts})`);
       assert.deepEqual(opts.filter((o) => want.includes(o)), want, 'U1: the configured seats appear in rosterOrder');
     }, { server: { boardFile: rest().boardFile, env }, launch: { headless: 'new' } });
+  });
+});
+
+test('#1764 R6 — a crash-left superset (a removed seat still in the file) is not served, and the boot re-export narrows the file', T, async () => {
+  await world(FILE, async ({ start, call, file }) => {
+    await start();
+    const p = await call('POST', '/api/roster', POSTED);   // removes mo
+    assert.equal(p.status, 200, `PRECONDITION: the save that removes mo (${p.status})`);
+    // simulate a crash after the graph commit and before the narrowing write: the file is the superset, mo still listed
+    const exported = JSON.parse(fs.readFileSync(file, 'utf8'));
+    fs.writeFileSync(file, JSON.stringify({ ...exported, seats: { ...exported.seats, mo: FILE.seats.mo } }));
+    await start();
+    const g = await call('GET', '/api/roster');
+    assert.equal(g.json.seats.mo, undefined, 'R6: the removed seat is not served (the graph is the authority, the file is never read)');
+    assertExport(file, g.json, 'R6: the boot re-export narrowed the crash-left superset to exactly the graph\'s roster');
   });
 });
