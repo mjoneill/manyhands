@@ -2711,7 +2711,10 @@ const POSTSEQ_OP_PREFIX = POSTSEQ_TERMS.OP_PREFIX;
 const PERSON_IRI_PSQ = 'https://scrumboard.local/person/';
 const XSD_PSQ = 'http://www.w3.org/2001/XMLSchema#';
 
-const psqLit = (s) => `"${String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+// #1791 — ';' is spelled \u003B (the same escape recLit uses): the SAME string value, but a raw ';' in the SPARQL text let
+// staticCheck's multi-operation guard read prose such as "…; delete the card" as a second operation, and refuse the post.
+// Only ';' changes, so a literal without one keeps its exact text.
+const psqLit = (s) => `"${String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/;/g, '\\u003B')}"`;
 const psqInt = (n) => `"${n}"^^<${XSD_PSQ}integer>`;
 
 const psqSafeInt = (n) => (Number.isSafeInteger(n) ? String(n) : fail(`unsafe integer: ${n}`));
