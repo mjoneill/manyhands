@@ -77,6 +77,13 @@ export const PREDICATE_SOURCE = Object.freeze({
   'scrum:aliasLabel': 'scrum:aliasLabel',   // #1640 → the alias spelling (a literal)
   'scrum:canonicalLabel': 'scrum:canonicalLabel',   // #1640 → the label it means (a literal)
   'scrum:fencedMove': 'scrum:fencedMove',   // #1707 → the fenced move's requestId (a literal)
+  'scrum:RosterSeat': null, 'scrum:RosterRoles': null,   // #1764 — the types: a configured roster seat, the roster's roles
+  'scrum:rosterOrder': 'scrum:rosterOrder',   // #1764 → the seat's position in the roster (xsd:integer; the author picker's default is first)
+  'scrum:kind': 'scrum:kind',   // #1764 → the seat's `kind` (e.g. system: the history gate's only opt-out, #600)
+  'scrum:poSeat': 'scrum:poSeat',   // #1764 → roles.po, the seat holding the Product Owner grant (#1368)
+  'scrum:color': 'color',   // #1764 → a roster seat's hex colour (roster.json `color`)
+  'scrum:glyph': 'glyph',   // #1764 → a roster seat's glyph (roster.json `glyph`)
+  'scrum:aliases': 'aliases',   // #1764 → a roster seat's aliases, one literal each (roster.json `aliases`)
   'scrum:fencedAt': 'scrum:fencedAt',       // #1707 → when it was fenced (absent on an imported legacy fence)
   'scrum:with': 'scrum:with',               // → the seat a talk is with
   'scrum:conversation': 'scrum:conversation', // → the talk a post is tagged into (#1401)

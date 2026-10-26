@@ -91,7 +91,8 @@ import { cardOutline } from './core/card-outline.mjs';
 import { roleSectionFor, heldRoleKey } from './core/role-section.mjs';   // #1376
 import { validateDeclaration, seatState, tendingEligibility, declarationsFromRows, UNKNOWN as SEAT_UNKNOWN } from './core/seat-state.mjs';
 import { readConfig, writeConfig, LIMITS } from './channel-config.mjs';
-import { droppedAgentSeats, loadRoster, writeRoster, rosterFilePath, loadRosterRoles } from './core/roster-config.mjs';
+import { droppedAgentSeats, loadRoster, writeRoster, rosterFilePath, loadRosterRoles, validateRoster, validateRoles } from './core/roster-config.mjs';
+import { rosterEntities, seatsFrom, rolesFrom, rosterInGraph, supersetSeats } from './core/roster-graph.mjs';   // #1764
 import { extractMentions as extractMentionsFromRoster } from './core/people.mjs';
 // #868 — the graph modules are imported LAZILY, at the bottom of this file's
 // graph section, and deliberately NOT here. They reach `oxigraph`, an npm
@@ -353,21 +354,41 @@ function agentSeats(data) {
 let _rosterCache = { key: null, seats: null };
 let _rosterComputing = false;   // re-entrancy guard: readBoard → mentions → roster → readBoard
 function fileKey(file) { if (file === BOARD_DATA_FILE) countLegacy('boardStat'); try { const st = fs.statSync(file); return `${st.mtimeMs}:${st.size}`; } catch { return 'absent'; } }   // #1563 — a stat of the board file is a touch, counted
+// #1764 — with the collections unit holding `rosterSeats`, the CONFIGURED seats and roles are graph state; roster.json is a
+// one-time import and then an export for the pre-push history gate only (core/roster-graph.mjs). Unit off: the file, as before.
+const rosterHeld = () => !!(COLLECTIONS && COLLECTIONS.keys.includes('rosterSeats'));
+function configuredSeats(onWarn, ents = null) {
+  if (rosterHeld()) {
+    const e = ents ?? COLLECTIONS.snapshot().rosterSeats ?? [];
+    if (rosterInGraph(e)) return seatsFrom(e);
+  }
+  return loadRoster(undefined, onWarn) || {};   // unit off, or a graph with no roster yet: the file (or the shipped example)
+}
+function configuredRoles(ents = null) {
+  if (rosterHeld()) {
+    const e = ents ?? COLLECTIONS.snapshot().rosterSeats ?? [];
+    if (rosterInGraph(e)) return rolesFrom(e);
+  }
+  return loadRosterRoles();
+}
+/** #1764 — the history gate's copy (severance-check reads roster.json). Throws when it cannot be written. */
+const writeRosterExport = (seats, roles) => writeRoster({ seats, roles }, rosterFilePath());
+
 function currentRoster(data = null) {
   if (!data) {
     const key = `${DOCUMENT_READS ? fileKey(BOARD_DATA_FILE) : `collections-${COLLECTIONS?.generation ?? 0}`}|${fileKey(rosterFilePath())}`;   // #1563 — invalidated by the agents collection, not the file
     if (_rosterCache.key === key && _rosterCache.seats) return configureIdentities(_rosterCache.seats);
-    if (_rosterComputing) return configureIdentities(loadRoster(undefined, warnRosterOnce));   // never recurse into readBoard
+    if (_rosterComputing) return configureIdentities(configuredSeats(warnRosterOnce));   // never recurse into readBoard
     let board = null;
     _rosterComputing = true;
     try { board = readBoard(); } catch (e) { warnRosterOnce(`board unreadable for agent seats: ${e.message}`); } finally { _rosterComputing = false; }
-    const fileSeats = loadRoster(undefined, warnRosterOnce) || {};
+    const fileSeats = configuredSeats(warnRosterOnce, board?.rosterSeats ?? null);   // #1764
     const merged = mergeSeats(fileSeats, agentSeats(board));
     const seats = Object.keys(merged).length ? merged : null;
     _rosterCache = { key, seats };
     return configureIdentities(seats);
   }
-  const fileSeats = loadRoster(undefined, warnRosterOnce) || {};
+  const fileSeats = configuredSeats(warnRosterOnce, data.rosterSeats ?? null);   // #1764
   const merged = mergeSeats(fileSeats, agentSeats(data));
   return configureIdentities(Object.keys(merged).length ? merged : null);
 }
@@ -7191,7 +7212,7 @@ const STANDING_CHECKS = [
     claim: 'the roster\'s `board` and `wiki` seats carry `kind: system` — the mark the history gate exempts '
       + 'them by; without it their names become guarded words and every push is refused (#600, #1380)',
     run: () => {
-      const seats = loadRoster(undefined, () => {}) || {};
+      const seats = configuredSeats(() => {});   // #1764
       return ['board', 'wiki']
         .filter((k) => Object.prototype.hasOwnProperty.call(seats, k))
         .filter((k) => !(seats[k] && seats[k].kind === 'system'))
@@ -9500,7 +9521,7 @@ function handleGetBoard(req, res) {
 // matters when someone is trying to work out why their colours didn't take.
 function handleGetRoster(req, res) {
   const seats = currentRoster();
-  sendJSON(res, 200, { seats, roles: loadRosterRoles(), usingDefaults: usingDefaultRoster() });   // #1368 — roles.po: the PO seat, read not hardcoded
+  sendJSON(res, 200, { seats, roles: configuredRoles(), usingDefaults: rosterHeld() && rosterInGraph(COLLECTIONS.snapshot().rosterSeats ?? []) ? false : usingDefaultRoster() });   // #1764   // #1368 — roles.po: the PO seat, read not hardcoded
 }
 
 // ── POST /api/roster (#506) — a human edits their own room, no agent required.
@@ -9517,15 +9538,47 @@ async function handleSetRoster(req, res) {
   try {
     const body = JSON.parse(await readBody(req));
     let clean;
-    try {
-      clean = writeRoster(body);
-    } catch (ve) {
-      return sendJSON(res, 400, { error: ve.message });
+    let savedRoles = null;
+    if (rosterHeld()) {
+      // #1764 — the graph is the roster. Under the write lock: the export as a SUPERSET of the old and new seats, the graph
+      // commit, then (below, once the commit is in) the export as exactly the new seats. At every instant the file's seats
+      // ⊇ the graph's, so the history gate can over-guard after a crash but never miss a seat (#600's forbidden direction).
+      let rolesGiven;
+      try {
+        clean = validateRoster(body);
+        rolesGiven = body && typeof body === 'object' && Object.prototype.hasOwnProperty.call(body, 'roles');
+        if (rolesGiven) savedRoles = validateRoles(body.roles, clean);
+      } catch (ve) {
+        return sendJSON(res, 400, { error: ve.message });
+      }
+      await withWriteLock(async () => {
+        const data = readBoard();
+        const prevEnts = data.rosterSeats ?? [];
+        const prev = rosterInGraph(prevEnts) ? seatsFrom(prevEnts) : {};
+        if (!rolesGiven) { const r = rolesFrom(prevEnts); savedRoles = r.po && clean[r.po] ? r : {}; }   // a save that names no roles keeps them
+        writeRosterExport(supersetSeats(prev, clean), savedRoles);   // throws: nothing is committed
+        data.rosterSeats = rosterEntities(clean, savedRoles);
+        writeBoard(data, [{ op: 'update', actor: body.by || null, entity: { kind: 'board-meta', id: 'roster' }, state: { seats: Object.keys(clean), roles: savedRoles } }]);
+      });
+      try {
+        // TEST-ONLY seam (#1764 builder row): fail ONLY the narrowing write, after the graph commit. Unset, a no-op.
+        if (process.env.SCRUM_TEST_FAIL_ROSTER_EXPORT_NARROW === '1') throw new Error('injected: the narrowing export write failed');
+        writeRosterExport(clean, savedRoles);
+      } catch (e) {
+        console.error(`#1764 roster saved to the graph, but its export could not be narrowed to the new seats (it still lists a superset, which the history gate over-guards): ${e.message}`);
+        return sendJSON(res, 500, { error: `the roster was saved, but roster.json (the history gate's copy) could not be updated: ${e.message}` });
+      }
+    } else {
+      try {
+        clean = writeRoster(body);
+      } catch (ve) {
+        return sendJSON(res, 400, { error: ve.message });
+      }
     }
     // #1380 — a client that sends the merged read back gets told which seats
     // were agent records and were not written, rather than finding out later.
     const dropped = droppedAgentSeats(body);
-    sendJSON(res, 200, { seats: clean, roles: loadRosterRoles(), file: rosterFilePath(), appliesOnRestart: true, ...(dropped.length ? { dropped } : {}) });
+    sendJSON(res, 200, { seats: clean, roles: savedRoles ?? loadRosterRoles(), file: rosterFilePath(), appliesOnRestart: !rosterHeld(), ...(dropped.length ? { dropped } : {}) });
   } catch (e) {
     console.error('POST /api/roster:', e.message);
     sendJSON(res, 500, { error: 'Failed to save roster' });
@@ -14266,6 +14319,30 @@ function migrateTendingIfNeeded() {
 
 migrateBoardIfNeeded();
 migrateTendingIfNeeded();
+// #1764 — the roster, at boot, under the write lock and before listen(): the ONE-TIME import of roster.json when the graph
+// holds no configured roster (a roster saved from Settings is never overwritten by a file), then, ALWAYS, the export
+// rewritten from the graph. That rewrite is the recovery: a crash mid-save leaves the export a SUPERSET (safe for the
+// history gate), and this narrows it. A failure refuses to serve: a stale or missing export could stop guarding a seat.
+if (rosterHeld()) {
+  try {
+    await withWriteLock(async () => {
+      const data = readBoard();
+      if (!rosterInGraph(data.rosterSeats ?? []) && fs.existsSync(rosterFilePath())) {
+        const parsed = JSON.parse(fs.readFileSync(rosterFilePath(), 'utf8'));
+        const seats = validateRoster(parsed);
+        const roles = validateRoles(parsed.roles ?? null, seats);
+        data.rosterSeats = rosterEntities(seats, roles);
+        writeBoard(data, [{ op: 'create', actor: 'board', entity: { kind: 'board-meta', id: 'roster' }, state: { seats: Object.keys(seats), roles, importedFrom: path.basename(rosterFilePath()) } }]);
+        console.error(`${new Date().toISOString()} #1764 roster imported into the graph from ${path.basename(rosterFilePath())}: ${Object.keys(seats).length} seat(s), in order`);
+      }
+    });
+    const ents = COLLECTIONS.snapshot().rosterSeats ?? [];
+    if (rosterInGraph(ents)) writeRosterExport(seatsFrom(ents), rolesFrom(ents));
+  } catch (e) {
+    console.error(`#1764 roster import/export FAILED — refusing to serve (the history gate's roster.json must not fall behind the graph): ${e.message}`);
+    process.exit(1);
+  }
+}
 
 // ── Start Server ──
 const server = http.createServer(handleRequest);

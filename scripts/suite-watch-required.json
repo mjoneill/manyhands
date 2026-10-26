@@ -146,6 +146,8 @@
   "tests/roles-obligations-graph-r1.test.mjs",
   "tests/rollback-posts-r1-fidelity.test.mjs",
   "tests/rollback-posts-r1.test.mjs",
+  "tests/roster-export-narrow-1764.test.mjs",
+  "tests/roster-graph-1764.test.mjs",
   "tests/seat-refused-1568.test.mjs",
   "tests/seat-self-1569.test.mjs",
   "tests/since-before-y1.test.mjs",

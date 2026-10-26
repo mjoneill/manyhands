@@ -208,6 +208,7 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:markerLines',
   // #1199 — the agent persona and its versioned prompt
   'scrum:Agent', 'scrum:AgentPrompt', 'scrum:AgentPromptVersion', 'scrum:seatKey', 'scrum:emoji',
+  'scrum:RosterSeat', 'scrum:RosterRoles', 'scrum:rosterOrder', 'scrum:kind', 'scrum:poSeat', 'scrum:color',   // #1764 — the configured roster
   'scrum:contextPolicy', 'scrum:toolGrant', 'scrum:budgetPerDay', 'scrum:residency', 'scrum:state',
   'scrum:currentPrompt', 'scrum:ofAgent',
   // #1271 — whether this seat is told WHEN to speak. Policy, not mechanism.
@@ -1179,6 +1180,28 @@ function projectLabelAlias(store, e) {
   if (e['scrum:canonicalLabel']) add(nn(S + 'canonicalLabel'), lit(String(e['scrum:canonicalLabel'])));
 }
 
+// #1764 — a configured roster seat, and the roster's roles node. One explicit line per predicate (#875 reads this source).
+function projectRosterSeat(store, e) {
+  const S = IRI.scrum, SC = IRI.schema;
+  const s = nn(e['@id']);
+  const add = (p, o) => store.add(oxigraph.triple(s, p, o));
+  add(A, nn(S + 'RosterSeat'));
+  if (e['scrum:seatKey']) add(nn(S + 'seatKey'), lit(String(e['scrum:seatKey'])));
+  if (e.name) add(nn(SC + 'name'), lit(String(e.name)));
+  if (e['scrum:color']) add(nn(S + 'color'), lit(String(e['scrum:color'])));
+  if (e['scrum:rosterOrder'] != null) add(nn(S + 'rosterOrder'), intLit(e['scrum:rosterOrder']));
+  if (e['scrum:glyph']) add(nn(S + 'glyph'), lit(String(e['scrum:glyph'])));
+  for (const a of [].concat(e['scrum:aliases'] ?? [])) add(nn(S + 'aliases'), lit(String(a)));
+  if (e['scrum:kind']) add(nn(S + 'kind'), lit(String(e['scrum:kind'])));
+}
+function projectRosterRoles(store, e) {
+  const S = IRI.scrum;
+  const s = nn(e['@id']);
+  const add = (p, o) => store.add(oxigraph.triple(s, p, o));
+  add(A, nn(S + 'RosterRoles'));
+  if (e['scrum:poSeat']) add(nn(S + 'poSeat'), lit(String(e['scrum:poSeat'])));
+}
+
 function projectMoveFence(store, e) {
   const S = IRI.scrum;
   const s = nn(e['@id']);
@@ -1972,6 +1995,10 @@ export function projectEntity(store, e) {
       projectMoveFence(store, e);     // #1707
     } else if (t === 'scrum:LabelAlias') {
       projectLabelAlias(store, e);    // #1640
+    } else if (t === 'scrum:RosterSeat') {
+      projectRosterSeat(store, e);    // #1764
+    } else if (t === 'scrum:RosterRoles') {
+      projectRosterRoles(store, e);   // #1764
     } else if (t === 'scrum:RoleVersion') {
       projectRoleVersion(store, e);   // #1387
     } else if (t === 'scrum:Agent') {

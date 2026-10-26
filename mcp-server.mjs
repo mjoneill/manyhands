@@ -37,16 +37,36 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { loadRoster } from './core/roster-config.mjs';
 import { configureIdentities } from './core/identity.mjs';
 import { DEFAULT_HEARTBEAT_S } from './core/seat-binding.mjs';
 import { loadCredentials, resolveBearer, authDecision, readAuthMode } from './core/credentials.mjs';   // #1343 — succeeds #703's loader: hashes at rest, scope, expiry, mode
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { statSync as fsStatSync, readFileSync as fsReadFileSync } from 'node:fs';
 
-// The same roster the board serves — read once at boot from the optional,
-// gitignored roster.json. Falls back to the shipped example when absent.
-const ROSTER_SEATS = configureIdentities(loadRoster());
+// The same roster the board serves. #1764 — read from REST's GET /api/roster (the graph's configured seats, or the board's
+// roster.json where the collections unit is off), never from a file this process opens; the agents' invited seats are left
+// out, so this is still the CONFIGURED roster. Before the first good read it is the shipped example (what a missing file
+// gave); a failed read keeps the last good roster. Refreshed on a timer and once before listen() (below).
+let ROSTER_SEATS = configureIdentities(null);
+let _rosterRefresh = null;
+let _rosterFailing = null;
+const ROSTER_TIMEOUT_MS = Number(process.env.MCP_ROSTER_TIMEOUT_MS) || 5_000;
+const ROSTER_REFRESH_MS = Number(process.env.MCP_ROSTER_REFRESH_MS) || 5_000;
+function refreshRoster() {
+  _rosterRefresh ??= (async () => {
+    try {
+      const r = await apiCall('GET', '/api/roster', undefined, { signal: AbortSignal.timeout(ROSTER_TIMEOUT_MS) });
+      const seats = Object.fromEntries(Object.entries(r?.seats ?? {}).filter(([, v]) => v && v.agent !== true));
+      if (!Object.keys(seats).length) throw new Error('GET /api/roster answered no configured seats');
+      ROSTER_SEATS = configureIdentities(seats);
+      if (_rosterFailing) { _rosterFailing = null; console.error('#1764 roster: REST answers again'); }
+    } catch (e) {
+      if (!_rosterFailing) { _rosterFailing = e.message; console.error(`#1764 roster: GET /api/roster failed, keeping the last roster: ${e.message}`); }
+    } finally { _rosterRefresh = null; }
+    return ROSTER_SEATS;
+  })();
+  return _rosterRefresh;
+}
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createChannelScheduler } from './core/channel-scheduler.mjs';
@@ -258,7 +278,8 @@ function capConversations(list, limit) {
 // #119 — autonomous room. Sent as the MCP server's `instructions` so a
 // `claude --channels server:manyhands` session knows what a <channel>
 // block from this server means and how to respond to it.
-const CHANNEL_INSTRUCTIONS = `The manyhands commons is a shared, multi-agent channel (${Object.keys(ROSTER_SEATS).filter((k) => k !== 'wiki').join(', ')}).
+// #1764 — a function, so each new session names the roster as it is NOW (it refreshes from REST)
+const channelInstructions = () => `The manyhands commons is a shared, multi-agent channel (${Object.keys(ROSTER_SEATS).filter((k) => k !== 'wiki').join(', ')}).
 
 New commons posts arrive as <channel source="manyhands" chat_id="commons" message_id="..."> blocks — each is one message, formatted "author: body".
 
@@ -390,7 +411,7 @@ function buildMcpServer() {
     version: '0.1.0',
   }, {
     capabilities: { tools: {}, resources: {}, experimental: { 'claude/channel': {}, 'scrum/session': {} } },
-    instructions: CHANNEL_INSTRUCTIONS,
+    instructions: channelInstructions(),
   });
 
   // #823 — an unknown field must be REPORTED, never silently discarded.
@@ -4249,6 +4270,9 @@ process.on('unhandledRejection', (reason) => {
   console.error(`unhandledRejection — staying alive: ${reason}`);
 });
 
+// #1764 — the roster's first answer (or its deadline) before any session opens, then a refresh on a timer
+setInterval(() => { refreshRoster(); }, ROSTER_REFRESH_MS).unref();
+await refreshRoster();
 httpServer.listen(MCP_PORT, '127.0.0.1', () => {
   BOUND_PORT = httpServer.address().port;   // #1338
   console.log(`🤖 MCP server running at http://127.0.0.1:${MCP_PORT}/mcp`);

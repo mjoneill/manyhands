@@ -192,6 +192,17 @@ export const KIND_DECLARATIONS = Object.freeze([
       + 'holder is the OPEN interval, never the newest node by date.',
   },
   {
+    name: 'scrum:RosterSeat', eventKind: null, collection: null,
+    createdBy: 'POST /api/roster (Settings → people), and once at boot from roster.json (#1764)',
+    definition: 'A configured seat in the room, a person or a seat they set up, with its name, colour, glyph, aliases, kind and '
+      + 'position. With the agents\' invited seats it is the whole roster; roster.json is its export for the history gate.',
+  },
+  {
+    name: 'scrum:RosterRoles', eventKind: null, collection: null,
+    createdBy: 'POST /api/roster with roles (#1368, #1764)',
+    definition: 'The roster\'s role grants: which seat holds the Product Owner role (roles.po).',
+  },
+  {
     name: 'scrum:LabelAlias', eventKind: null, collection: null,
     createdBy: 'POST /api/labels/aliases (a seat declaring that one label spelling means another, #857/#1640)',
     definition: 'One label spelling declared to mean another: card creation stores an aliased label on its canonical, and '
