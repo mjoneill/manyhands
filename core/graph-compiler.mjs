@@ -1488,6 +1488,10 @@ function cardStructureBranches(iri, k, [xs, xp, xo] = ['?xs', '?xp', '?xo'], x =
     `    { ${I} ${ref(`${CW.scrum}hasCheck`)} ${xs} . ${xs} ${xp} ${xo} }`,
     `    { ${xs} ${ref(`${CW.scrum}dependsOn`)} ${I} BIND(${ref(`${CW.scrum}dependsOn`)} AS ${xp}) BIND(${I} AS ${xo}) }`,
     `    { ${I} ?${x}l${k} ?${x}h${k} FILTER(isBlank(?${x}h${k})) ?${x}h${k} ${ref(CW.rdfRest)}* ${xs} . ${xs} ${xp} ${xo} }`,
+    // #1787 — the card's attachment nodes, ALL of their triples, whatever they hold: proven owned twice (linked to this card
+    // by attachmentOf AND under its /attachment/ prefix, as the post path does). Without this a write deleted only the
+    // triples its prior projection named, so a stale or extra attachment fact survived every rewrite (#138 review).
+    `    { ${xs} ${ref(`${CW.scrum}attachmentOf`)} ${I} . FILTER(STRSTARTS(STR(${xs}), ${JSON.stringify(`${iri}/attachment/`)})) ${xs} ${xp} ${xo} }`,
   ];
 }
 

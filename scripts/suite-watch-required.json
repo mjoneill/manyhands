@@ -20,6 +20,7 @@
   "tests/board-without-document-1563.test.mjs",
   "tests/boot-trigger-1706.test.mjs",
   "tests/card-attachments-backfill-refusal-1787.test.mjs",
+  "tests/card-attachments-converge-1787.test.mjs",
   "tests/card-attachments-graph-1787.test.mjs",
   "tests/card-lost-ack-1628.test.mjs",
   "tests/card-write-1598.test.mjs",
