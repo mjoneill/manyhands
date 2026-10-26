@@ -48,6 +48,9 @@ export function cardHistoryFacts(was, card) {
   const holder = was ? (typeof was.claimedBy === 'string' && was.claimedBy ? was.claimedBy : null) : null;
   if (!card) return { op: 'delete', shortId: was?.shortId ?? null, holder, columnAfter: was?.column ?? HISTORY_UNKNOWN, versionAfter: vis(was) };
   if (!was) return { op: 'create', shortId: card.shortId ?? null, holder: null, columnBefore: null, columnAfter: card.column ?? HISTORY_UNKNOWN, versionAfter: vis(card) };
+  // a part whose stored JSON is unchanged rides the write only because a #N it names appeared or disappeared: the board
+  // re-derived its references, nobody edited it (review on #1762 S1: an `update` here would read as a non-holder mutation)
+  if (JSON.stringify(was) === JSON.stringify(card)) return { op: 'reproject', shortId: card.shortId ?? null, holder, columnAfter: card.column ?? HISTORY_UNKNOWN, versionAfter: vis(card) };
   const had = typeof was.claimedBy === 'string' && was.claimedBy, has = typeof card.claimedBy === 'string' && card.claimedBy;
   const moved = (was.column ?? null) !== (card.column ?? null);
   const op = !had && has ? 'claim' : had && !has ? 'release' : moved ? 'move' : 'update';

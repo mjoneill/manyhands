@@ -8,6 +8,7 @@ import { createGraphClient } from '../core/graph-client.mjs';
 import { compile, changeActivityIri } from '../core/graph-compiler.mjs';
 import { cardQuads, cardIriOf, shortIdMap } from '../core/cards-graph.mjs';
 import { cardHistoryFacts } from '../core/cards-unit.mjs';
+import { lacksRequiredHistory, durableUpdate } from '../core/durable-update.mjs';
 
 const DS = 's1-builder-1762';
 const ACTOR = 'https://scrumboard.local/person/test-actor';
@@ -81,4 +82,31 @@ test('#1762 B5 cardHistoryFacts names the kind of change and the EVENT-TIME fact
   assert.equal(cardHistoryFacts(was, null).op, 'delete');
   assert.equal(cardHistoryFacts(was, null).holder, 'ada', 'a delete names who held the card when it was deleted');
   assert.equal(cardHistoryFacts(null, card({ version: undefined })).versionAfter, 'unknown', 'no REST version is unknown, never guessed');
+});
+
+test('#1762 B6 a part re-derived only because a #N it names changed is a REPROJECT, never an update (no false non-holder mutation)', () => {
+  const was = card({ claimedBy: 'ada', description: 'see #2' });
+  const h = cardHistoryFacts(was, JSON.parse(JSON.stringify(was)));
+  assert.equal(h.op, 'reproject');
+  assert.equal(h.holder, 'ada');
+  assert.ok(!('columnBefore' in h));
+  const { sparql } = compile(intent('urn:ex:op/card/b6', [{ ...createPart(card({ id: 'c-n', shortId: 2 })) }]));
+  assert.ok(sparql.length > 0);
+});
+
+test('#1762 B7 with native history ON, a card or collection write carrying NO history is refused before it is sent; named migrations are exempt; OFF changes nothing', async () => {
+  const bare = intent('urn:ex:op/card/b7', [createPart(card(), null)]);
+  assert.equal(lacksRequiredHistory(bare, true), true);
+  assert.equal(lacksRequiredHistory(intent('urn:ex:op/card/b7', [createPart(card())]), true), false);
+  assert.equal(lacksRequiredHistory(bare, false), false, 'flag off: no guard');
+  for (const op of ['urn:ex:op/collection/import/k/abc', 'urn:ex:op/cutover/x', 'urn:ex:op/backfill/x', 'urn:ex:op/migrate-1561/x']) assert.equal(lacksRequiredHistory({ ...bare, opId: op }, true), false, op);
+  const coll = { kind: 'entity.put', opId: 'urn:ex:op/collections/b7', actor: ACTOR, entity: { kind: 'collection', parts: [{ collection: 'models', iri: 'https://scrumboard.local/entity/m1' }] } };
+  assert.equal(lacksRequiredHistory(coll, true), true);
+  // and the guard is in the shared send path: nothing reaches the client
+  const prev = process.env.SCRUM_HISTORY_NATIVE; process.env.SCRUM_HISTORY_NATIVE = '1';
+  try {
+    let sent = 0;
+    const r = await durableUpdate({ update: async () => { sent++; return { outcome: 'APPLIED' }; }, reconcile: async () => ({ outcome: 'ABSENT' }) }, bare);
+    assert.equal(r.outcome, 'REJECTED'); assert.match(r.reason, /HISTORY_REQUIRED/); assert.equal(sent, 0, 'nothing was sent');
+  } finally { if (prev === undefined) delete process.env.SCRUM_HISTORY_NATIVE; else process.env.SCRUM_HISTORY_NATIVE = prev; }
 });

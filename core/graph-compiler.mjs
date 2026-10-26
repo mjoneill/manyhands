@@ -1286,7 +1286,7 @@ function cardQuadClass([s, p, o], iri, id, what) {
 
 // #1762 S1 — one part's event-time facts (contract on #1762 "S1 CONTRACT"). Values are closed: op from a fixed list, ids
 // and columns as short safe strings, versions as integers or 'unknown'. Nothing free-text rides an activity.
-const HISTORY_OPS = Object.freeze(['create', 'update', 'delete', 'move', 'claim', 'release']);
+const HISTORY_OPS = Object.freeze(['create', 'update', 'delete', 'move', 'claim', 'release', 'reproject']);   // reproject: references re-derived, the card itself unchanged
 const SAFE_HISTORY_ID = /^[A-Za-z0-9._~-]{1,100}$/;
 function canonCardHistory(h, w, isRemove) {
   obj(h, ['op', 'shortId', 'holder', 'columnBefore', 'columnAfter', 'versionAfter'], w);
