@@ -13491,7 +13491,7 @@ if (CARDS_UNIT) {
     }
     const incomplete = await cardRefIndexIncomplete();
     if (incomplete !== false) {
-      console.error(`#1744 the card reference index is ${incomplete === null ? 'not checkable (the executor did not answer the health query)' : 'absent, unfinished or damaged (no completion marker, or the health query finds a violation)'} — refusing to start${ORIGIN_EXECUTOR ? ` in SCRUM_BOARD_DOCUMENT=${BOARD_DOCUMENT}` : ' with SCRUM_CARD_REF_INDEX=enforce'}. Run scripts/card-ref-index-1744.mjs --backfill with writers stopped, then --verify`);
+      console.error(`#1744 the card reference index is ${incomplete === null ? 'not checkable (the executor did not answer the completion-marker read)' : 'not complete (the completion marker is absent, or does not read exactly one xsd:boolean true)'} — refusing to start${ORIGIN_EXECUTOR ? ` in SCRUM_BOARD_DOCUMENT=${BOARD_DOCUMENT}` : ' with SCRUM_CARD_REF_INDEX=enforce'}. Run scripts/card-ref-index-1744.mjs --backfill with writers stopped, then --verify`);
       process.exit(1);
     }
   }
