@@ -1643,21 +1643,29 @@ async function plantCards(s, n) {
     await s.xu(`INSERT DATA { ${rows.map((r) => `<${r.iri}> <${RDF_TYPE}> <${RS}Card> .`).join(' ')} GRAPH <${BK}> { ${rows.map((r) => `<${r.iri}> <${VER}> "1"^^<${XSD}integer> ; <${RS}entityJson> ${JSON.stringify(r.json)} .`).join(' ')} } }`, `scale-plant-${i}`);
   }
 }
-async function guardedCreateMs(s, tag) {
-  const ms = [];
+async function guardedWritesMs(s, tag) {
+  const create = [], del = [], ids = [];
   for (let i = 0; i < 3; i++) {
     const t0 = performance.now();
     const c = await s.call('POST', '/api/cards', { title: `Scale probe ${tag} ${i}`, createdBy: 'ada', requestId: `req-1769-scale-${tag}-${i}-${process.pid}` });
-    ms.push(performance.now() - t0);
+    create.push(performance.now() - t0);
     assert.ok(ok2xx(c.status), `PRECONDITION: the guarded create is admitted (${c.status} ${c.text.slice(0, 200)})`);
+    ids.push(c.json?.id);
   }
-  return ms.sort((a, b) => a - b)[1];   // the median of three
+  for (const id of ids) {   // a delete REMOVES a shortId, so it is index-guarded too (the namer clause, under the marker)
+    const t0 = performance.now();
+    const d = await s.call('DELETE', `/api/cards/${id}?by=ada`);
+    del.push(performance.now() - t0);
+    assert.ok(ok2xx(d.status), `PRECONDITION: the guarded delete is admitted (${d.status} ${d.text.slice(0, 200)})`);
+  }
+  const median = (xs) => xs.sort((a, b) => a - b)[1];
+  return { create: median(create), del: median(del) };
 }
-test(`#1769 (SCALE, r11) a guarded card create costs the SAME on a ${SCALE_N + 3}-card board as on the 3-card fixture (the write guard must not grow with the board)`, T, async () => {
+test(`#1769 (SCALE, r11) a guarded card create AND delete cost the SAME on a ${SCALE_N + 3}-card board as on the 3-card fixture (the write guard must not grow with the board)`, T, async () => {
   let small, big;
   await world('off', async (s) => {
     await s.start();
-    small = await guardedCreateMs(s, 'small');
+    small = await guardedWritesMs(s, 'small');
   });
   await world('off', async (s) => {
     await plantCards(s, SCALE_N);
@@ -1667,9 +1675,14 @@ test(`#1769 (SCALE, r11) a guarded card create costs the SAME on a ${SCALE_N + 3
     assert.equal(b.status, 0, `PRECONDITION: the real backfill indexes the planted board (${b.out.slice(-200)})`);
     assert.deepEqual(await markerValues(s), ['true'], 'PRECONDITION: the marker is complete true, so the guard runs');
     await s.start();
-    big = await guardedCreateMs(s, 'big');
+    big = await guardedWritesMs(s, 'big');
   }, { index: 'none' });
-  console.log(`# SCALE: median guarded create ${small.toFixed(1)} ms on 3 cards, ${big.toFixed(1)} ms on ${SCALE_N + 3}`);
-  assert.ok(big < Math.max(3 * small, small + 500), `the guarded create does not grow with the board: ${big.toFixed(0)} ms at ${SCALE_N + 3} cards vs ${small.toFixed(0)} ms at 3`);
-  assert.ok(big < 5000, `and stays far under the cards client's 30 s (${big.toFixed(0)} ms)`);
+  const VERB = { create: 'create', del: 'delete' };
+  // both are reported before either is judged, so a red on one still shows the other's number
+  for (const k of ['create', 'del']) console.log(`# SCALE: median guarded ${VERB[k]} ${small[k].toFixed(1)} ms on 3 cards, ${big[k].toFixed(1)} ms on ${SCALE_N + 3}`);
+  for (const k of ['create', 'del']) {
+    const verb = VERB[k];
+    assert.ok(big[k] < Math.max(3 * small[k], small[k] + 500), `the guarded ${verb} does not grow with the board: ${big[k].toFixed(0)} ms at ${SCALE_N + 3} cards vs ${small[k].toFixed(0)} ms at 3`);
+    assert.ok(big[k] < 5000, `and the guarded ${verb} stays far under the cards client's 30 s (${big[k].toFixed(0)} ms)`);
+  }
 });
