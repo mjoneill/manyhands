@@ -312,7 +312,8 @@ test('#1762 A1–A9, R4, R5 — flag on: every REST card and column write commit
 
     // A5 delete (last, so the card is not needed after)
     const vLast = await restVersion(call, card.id);   // the REST-visible version immediately BEFORE the delete
-    const a5 = await step('A5', () => call('DELETE', `/api/cards/${card.id}`, { by: 'bea' }));
+    // the plain card DELETE takes its declared deleter from the QUERY string, not a body (#675: a DELETE has no body)
+    const a5 = await step('A5', () => call('DELETE', `/api/cards/${card.id}?by=bea`));
     assert.ok(a5.r.status === 200 || a5.r.status === 204, `A5 delete (${a5.r.status} ${a5.r.text.slice(0, 200)})`);
     assert.equal(await versionOf(q, card.id), null, 'PRECONDITION: the card is gone');
     const delActs = a5.fresh.filter(([, n]) => (n[C.used] || []).some((u) => u.value === cardIriOf(card.id)));
