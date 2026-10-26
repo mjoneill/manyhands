@@ -8,7 +8,10 @@
  * scrum:rosterOrder (xsd:integer) and the seat's name/glyph/color/kind; the roles as one node
  * https://scrumboard.local/config/roster-roles. GET /api/roster keeps its shape ({ seats, roles, usingDefaults }), seats in
  * rosterOrder then the invited agents (a configured seat wins a key collision). POST /api/roster validates as today and
- * writes the graph: named seats created or updated, omitted seats removed; the file is never written. Boot imports
+ * writes the graph: named seats created or updated, omitted seats removed. RULED 2026-10-26 21:51Z (option A, built as A+1): after
+ * every save, roster.json is rewritten UNDER THE SAME LOCK, LAST, as an exact export of the graph's roster (seats in rosterOrder,
+ * plus roles), and a failed export fails the save (not 200: the graph change stands, the export is named stale, the next
+ * successful save repairs it); the file is still never READ after the import. Boot imports
  * roster.json ONCE, only when NO seat node exists. MCP reads REST GET /api/roster on a timer.
  *
  * THE WORLD: a fresh executor with the conversations and small-kinds units on (the collections path, as the #1785 C1 row
@@ -16,10 +19,14 @@
  *
  * ROWS:
  *   R1  the import preserves the file's ORDER (deliberately not alphabetical) and its roles; one node per seat with
- *       rosterOrder 0..n-1; the file is never written
+ *       rosterOrder 0..n-1
  *   R2  a POST that renames one seat, removes one and adds one: GET answers exactly the POSTed set in the POSTed order, the
- *       removed seat's node is gone, the file is byte-identical, and a restart answers the same
- *   R3  the file edited after the import, then a restart: nothing changes
+ *       removed seat's node is gone, the file is an EXACT EXPORT of that roster (seats in order, kinds kept, roles), and a
+ *       restart answers the same
+ *   R3  the file edited after the import, then a restart: nothing changes (the file is never READ), and the next save
+ *       rewrites it as the export again
+ *   F1  the export made to FAIL (the file and its folder unwritable): the POST is not 200, the graph change stands (GET
+ *       shows it), the file still holds the previous export; once writable again, the next successful save repairs it
  *   R4  an invited agent whose seatKey collides with a configured seat loses: GET shows the configured seat
  *   R5  a boot with NO file, a POSTed roster, then a file that appears: a restart does NOT import it over the saved seats
  *   M1  MCP (its own roster file path never written) lists a POSTed seat in a NEW session's tool descriptions within 5 s
@@ -83,6 +90,14 @@ async function seatNodes(q) {
   return m;
 }
 const keysOf = (seats) => Object.keys(seats || {});
+/** the file is an EXACT export of the roster GET answers: the configured seats in order, every field, and the roles */
+function assertExport(file, roster, label) {
+  const exp = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const want = configured(roster.seats);
+  assert.deepEqual(Object.keys(exp.seats || {}), Object.keys(want), `${label}: the export lists the seats in rosterOrder`);
+  for (const [k, v] of Object.entries(want)) assert.deepEqual(exp.seats[k], v, `${label}: the export carries seat ${k} exactly (kind included)`);
+  assert.deepEqual(exp.roles, roster.roles, `${label}: the export carries the roles`);
+}
 const configured = (seats) => Object.fromEntries(Object.entries(seats || {}).filter(([, v]) => v?.kind !== 'agent'));
 
 test('#1764 R1–R4 — imported once in the file\'s ORDER with its roles; a POST is graph-only; a later file edit changes nothing; a configured seat wins a collision', T, async () => {
@@ -102,7 +117,6 @@ test('#1764 R1–R4 — imported once in the file\'s ORDER with its roles; a POS
     });
     assert.equal(n1.board.kind, 'system', 'R1: a system seat keeps its kind');
     assert.ok((await q(`SELECT ?p WHERE { <${ROLES_NODE}> ?p ?o }`)).length > 0, 'R1: the roles live on their own node');
-    const fileBytes = fs.readFileSync(file);
 
     // R2 a POST that renames, removes and adds
     const p2 = await call('POST', '/api/roster', POSTED);
@@ -114,7 +128,7 @@ test('#1764 R1–R4 — imported once in the file\'s ORDER with its roles; a POS
     const n2 = await seatNodes(q);
     assert.deepEqual(Object.keys(n2).sort(), keysOf(POSTED.seats).sort(), 'R2: the graph holds exactly the POSTed seats (the removed one\'s node is gone)');
     keysOf(POSTED.seats).forEach((k, i) => assert.equal(n2[k].order, i, `R2: ${k} has rosterOrder ${i}`));
-    assert.ok(fs.readFileSync(file).equals(fileBytes), 'R2: the file is byte-identical (never written)');
+    assertExport(file, g2.json, 'R2');
     await start();
     assert.deepEqual(keysOf(configured((await call('GET', '/api/roster')).json.seats)), keysOf(POSTED.seats), 'R2: a restart answers the same seats in the same order');
 
@@ -124,6 +138,23 @@ test('#1764 R1–R4 — imported once in the file\'s ORDER with its roles; a POS
     const g3 = await call('GET', '/api/roster');
     assert.deepEqual(keysOf(configured(g3.json.seats)), keysOf(POSTED.seats), 'R3: a later file edit changes nothing');
     assert.equal(g3.json.seats.intruder, undefined, 'R3: the file\'s new seat never appears');
+    const p3 = await call('POST', '/api/roster', POSTED);
+    assert.equal(p3.status, 200, `R3: a save (${p3.status})`);
+    assertExport(file, (await call('GET', '/api/roster')).json, 'R3: the next save rewrote the edited file as the export');
+
+    // F1 a failed export fails the save; the graph change stands; the next good save repairs the export
+    const before = fs.readFileSync(file);
+    const F1 = { ...POSTED, seats: { ...POSTED.seats, fay: { name: 'Fay', glyph: 'f', color: '#555555' } } };
+    fs.chmodSync(file, 0o444); fs.chmodSync(path.dirname(file), 0o555);
+    let pf;
+    try { pf = await call('POST', '/api/roster', F1); }
+    finally { fs.chmodSync(path.dirname(file), 0o755); fs.chmodSync(file, 0o644); }
+    assert.notEqual(pf.status, 200, `F1: a save whose export fails is NOT acknowledged (${pf.status} ${pf.text.slice(0, 200)})`);
+    assert.ok(fs.readFileSync(file).equals(before), 'F1: the file still holds the previous export');
+    assert.ok((await call('GET', '/api/roster')).json.seats.fay, 'F1: the graph change stands (GET shows the new seat)');
+    const pr = await call('POST', '/api/roster', F1);
+    assert.equal(pr.status, 200, `F1: once writable, the save succeeds (${pr.status})`);
+    assertExport(file, (await call('GET', '/api/roster')).json, 'F1: the next successful save repaired the export');
 
     // R4 an invited agent whose key collides with a configured seat loses
     const ag = await call('POST', '/api/agents', { seatKey: 'kip', by: 'amy', prompt: 'a colleague', model: { model: 'm-1764', protocol: 'openai' } });
