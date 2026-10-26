@@ -376,6 +376,10 @@ test('#735 timeout post names incomplete files, not completed markers', async ()
   assert.ok(alarm, `the timeout must issue one dry-run alarm:\n${stdout}`);
   assert.match(alarm, /Incomplete test file\(s\): zz-hang\.test\.mjs/,
     `the primary timeout diagnostic must be expected files minus completed markers:\n${stdout}`);
+  // #1778: the 4 s whole-run deadline fires long before zz-hang's 300 s per-file bound, so the runner records no HUNG kill; the
+  // alarm must say exactly that, not call it a hang it never detected
+  assert.match(alarm, /No per-file hang was detected/, `a timeout with no runner kill says so:\n${alarm}`);
+  assert.doesNotMatch(alarm, /This is a HANG/, `the 10-26 misreading must be gone:\n${alarm}`);
   assert.doesNotMatch(alarm, /Incomplete test file\(s\):[^\n]*green\.test\.mjs/,
     `a completed marker must not be reported as incomplete:\n${stdout}`);
   assert.doesNotMatch(alarm, /Last files seen: green\.test\.mjs/,
