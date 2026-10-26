@@ -25,8 +25,9 @@ async function startPair(config, extraEnv = {}) {
   const mcpPort = await freePort();
   const cfgFile = path.join(os.tmpdir(), `direct-1362-${process.pid}-${restPort}.json`);
   fs.writeFileSync(cfgFile, JSON.stringify(config));
-  const rest = await startRestServer({ port: restPort, mcpNotifyUrl: `http://127.0.0.1:${mcpPort}/internal/notify` });
-  const mcp = await startMcpServer({ port: mcpPort, restApiBase: rest.baseUrl, env: { SCRUM_CHANNEL_STAGGER: '', SCRUM_CHANNEL_CONFIG_FILE: cfgFile, MCP_DIRECT_TICK_MS: '250', ...extraEnv } });
+  // #1784 — the mode is REST's (GET /api/config), which MCP reads; MCP opens no config file of its own
+  const rest = await startRestServer({ port: restPort, mcpNotifyUrl: `http://127.0.0.1:${mcpPort}/internal/notify`, channelConfigFile: cfgFile });
+  const mcp = await startMcpServer({ port: mcpPort, restApiBase: rest.baseUrl, env: { SCRUM_CHANNEL_STAGGER: '', MCP_DIRECT_TICK_MS: '250', ...extraEnv } });
   return { rest, mcp, async stop() { await mcp.stop(); await rest.stop(); try { fs.unlinkSync(cfgFile); } catch { /* gone */ } } };
 }
 const api = async (base, method, p, body) => {

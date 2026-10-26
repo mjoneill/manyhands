@@ -90,7 +90,8 @@ import { commentMetadata } from './core/card-comments.mjs';
 import { cardOutline } from './core/card-outline.mjs';
 import { roleSectionFor, heldRoleKey } from './core/role-section.mjs';   // #1376
 import { validateDeclaration, seatState, tendingEligibility, declarationsFromRows, UNKNOWN as SEAT_UNKNOWN } from './core/seat-state.mjs';
-import { readConfig, writeConfig, LIMITS } from './channel-config.mjs';
+import { readConfig, writeConfig, validateConfig, configFilePath, LIMITS } from './channel-config.mjs';
+import { channelConfigEntity, channelConfigFrom, channelConfigInGraph, CHANNEL_CONFIG_IRI } from './core/channel-config-graph.mjs';   // #1784
 import { droppedAgentSeats, loadRoster, writeRoster, rosterFilePath, loadRosterRoles } from './core/roster-config.mjs';
 import { extractMentions as extractMentionsFromRoster } from './core/people.mjs';
 // #868 — the graph modules are imported LAZILY, at the bottom of this file's
@@ -9563,9 +9564,13 @@ function handleGetConfigLimits(req, res) {
   sendJSON(res, 200, LIMITS);
 }
 
+// #1784 — with the collections unit on, the config is the `channelConfig` family's one node and channel-config.json is a
+// one-time import (below, before listen); off, the file is read and written exactly as before.
+const channelConfigHeld = () => !!(COLLECTIONS && COLLECTIONS.keys.includes('channelConfig'));
+
 function handleGetConfig(req, res) {
   try {
-    sendJSON(res, 200, readConfig());
+    sendJSON(res, 200, channelConfigHeld() ? channelConfigFrom(readBoard().channelConfig) : readConfig());
   } catch (e) {
     console.error('GET /api/config:', e.message);
     sendJSON(res, 500, { error: 'Failed to read config' });
@@ -9577,9 +9582,19 @@ async function handleSetConfig(req, res) {
     const body = JSON.parse(await readBody(req));
     let clean;
     try {
-      clean = writeConfig(body); // validates; throws on out-of-bounds input
+      clean = channelConfigHeld() ? validateConfig(body) : writeConfig(body); // validates; throws on out-of-bounds input
     } catch (ve) {
       return sendJSON(res, 400, { error: ve.message });
+    }
+    if (channelConfigHeld()) {
+      // #1784 — the graph node, through the collections unit's guarded write; the file is never touched
+      await withWriteLock(async () => {
+        const data = readBoard();
+        const prior = (Array.isArray(data.channelConfig) ? data.channelConfig : []).find((e) => e && e['@id'] === CHANNEL_CONFIG_IRI) ?? null;
+        const entity = channelConfigEntity(clean, { prior });
+        data.channelConfig = [entity];
+        writeBoard(data, [{ op: prior ? 'update' : 'create', actor: body.by || null, entity: { kind: 'board-meta', id: CHANNEL_CONFIG_IRI }, state: entity }]);
+      });
     }
     sendJSON(res, 200, clean);
   } catch (e) {
@@ -14279,6 +14294,28 @@ function migrateTendingIfNeeded() {
 
 migrateBoardIfNeeded();
 migrateTendingIfNeeded();
+
+// #1784 — ONE-TIME import of channel-config.json onto the `channelConfig` node, stamped (scrum:configImportedFrom/At). Only when
+// NO node exists: a node saved from Settings is never overwritten by a file, and after the import the file is never read or
+// written again. Under the write lock and awaited before listen() (a collection write outside the lock cannot commit, #1624);
+// a failed import refuses to serve rather than run the scheduler on a mode nobody chose.
+if (channelConfigHeld()) {
+  try {
+    await withWriteLock(async () => {
+      const data = readBoard();
+      if (channelConfigInGraph(data.channelConfig) || !fs.existsSync(configFilePath())) return;
+      const fromFile = validateConfig(JSON.parse(fs.readFileSync(configFilePath(), 'utf8')));
+      const at = new Date().toISOString();
+      const entity = channelConfigEntity(fromFile, { imported: { from: path.basename(configFilePath()), at } });
+      data.channelConfig = [entity];
+      writeBoard(data, [{ op: 'create', actor: 'board', entity: { kind: 'board-meta', id: CHANNEL_CONFIG_IRI }, state: entity }]);
+      console.error(`${at} #1784 channel config imported onto ${CHANNEL_CONFIG_IRI} from ${path.basename(configFilePath())}: mode=${fromFile.mode}`);
+    });
+  } catch (e) {
+    console.error(`#1784 channel config import FAILED — refusing to serve (the scheduler would run on a mode nobody chose): ${e.message}`);
+    process.exit(1);
+  }
+}
 
 // ── Start Server ──
 const server = http.createServer(handleRequest);

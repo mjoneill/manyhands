@@ -72,7 +72,7 @@ import { workDeclare, workBid, workNobid, workContest, workGrant, workWithdraw, 
 import { workLedgerSummary } from './core/in-flight.mjs';
 // #755 BRANCH E — the claim throttle. Its own flag; see core/claim-throttle.mjs.
 import { decideThrottle, isThrottleArmed, COOLDOWN_MS } from './core/claim-throttle.mjs';
-import { readConfig } from './channel-config.mjs';
+import { validateConfig, DEFAULT_CONFIG } from './channel-config.mjs';
 import { createSeatRegistry } from './core/seat-registry.mjs';
 // #683 — only the KEY-BUILDING half is imported here. The cursor state lives
 // beside the event log, which REST owns; mcp-server owns identity and asks over
@@ -91,10 +91,34 @@ for (const level of ['log', 'error', 'warn']) {
   console[level] = (...args) => orig(new Date().toISOString(), ...args);
 }
 
-// #256–#266 — channel delivery is config-driven (settings page, #263). Mode +
-// timings come from channel-config.json, read LIVE per dispatch so a settings
-// change applies with NO restart. SCRUM_CHANNEL_STAGGER=off (harness) → immediate.
+// #256–#266 — channel delivery is config-driven (settings page, #263). SCRUM_CHANNEL_STAGGER=off (harness) → immediate.
+// #1784 — the mode and timings come from REST's GET /api/config (the graph's `channelConfig` node; channel-config.json only
+// where REST still holds the file), never from a file this process opens. A cache answers the scheduler's synchronous reads;
+// it is refreshed on a short timer (a saved change applies with no restart, within one refresh), single-flight with a
+// deadline (a hung REST must not stack one request per tick, #1388's shape). A failed or malformed read KEEPS THE LAST GOOD
+// config, so delivery never changes mode because REST blinked; before the first good read it is the default (soft), which is
+// what a missing file meant before.
 const CHANNEL_STAGGER_OFF = process.env.SCRUM_CHANNEL_STAGGER === 'off';
+let _channelConfig = validateConfig(DEFAULT_CONFIG);
+let _channelConfigRefresh = null;
+let _channelConfigFailing = null;
+const CHANNEL_CONFIG_TIMEOUT_MS = Number(process.env.MCP_CHANNEL_CONFIG_TIMEOUT_MS) || 5_000;
+const CHANNEL_CONFIG_REFRESH_MS = Number(process.env.MCP_CHANNEL_CONFIG_REFRESH_MS) || 5_000;
+function refreshChannelConfig() {
+  _channelConfigRefresh ??= (async () => {
+    try {
+      _channelConfig = validateConfig(await apiCall('GET', '/api/config', undefined, { signal: AbortSignal.timeout(CHANNEL_CONFIG_TIMEOUT_MS) }));
+      if (_channelConfigFailing) { _channelConfigFailing = null; console.error(`#1784 channel config: REST answers again (mode ${_channelConfig.mode})`); }
+    } catch (e) {
+      // keep the last good config; say so once when the reads start failing, not on every tick
+      if (!_channelConfigFailing) { _channelConfigFailing = e.message; console.error(`#1784 channel config: GET /api/config failed, keeping mode ${_channelConfig.mode}: ${e.message}`); }
+    }
+    finally { _channelConfigRefresh = null; }
+    return _channelConfig;
+  })();
+  return _channelConfigRefresh;
+}
+const readConfig = () => _channelConfig;   // #1784 — the six scheduler reads below, unchanged in shape
 
 // ── #495 — which board this adapter is FOR ───────────────────────────────
 //
@@ -4249,6 +4273,9 @@ process.on('unhandledRejection', (reason) => {
   console.error(`unhandledRejection — staying alive: ${reason}`);
 });
 
+// #1784 — the first channel-config answer (or its deadline) before any session opens, then a refresh on a timer
+setInterval(() => { refreshChannelConfig(); }, CHANNEL_CONFIG_REFRESH_MS).unref();
+await refreshChannelConfig();
 httpServer.listen(MCP_PORT, '127.0.0.1', () => {
   BOUND_PORT = httpServer.address().port;   // #1338
   console.log(`🤖 MCP server running at http://127.0.0.1:${MCP_PORT}/mcp`);
