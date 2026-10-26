@@ -24,6 +24,7 @@
  */
 import { boardFileProblem } from '../core/board-file-guard.mjs';
 import { loadDomain, saveDomain } from '../core/store.mjs';
+import { assertDocumentNotRetired } from '../core/document-retired.mjs';
 import { boardToDomain, domainToBoard } from '../core/mapping.mjs';
 import { createGraphClient } from '../core/graph-client.mjs';
 import { createColumnsUnit } from '../core/columns-unit.mjs';
@@ -42,6 +43,7 @@ const finish = (code, message) => {
   process.exit(code);
 };
 if (!FILE || !URL_ || !DATASET) finish(2, 'usage: node scripts/rollback-columns-1639.mjs --board-file <board.json> --executor-url <url> --dataset-id <id> [--dry-run]');
+assertDocumentNotRetired(FILE);   // #1743 — at ENTRY, before any read of the graph or any write to history or the document (review 129-8036650)
 
 // a missing, empty or non-board file is REFUSED, never read as an empty board
 const fileProblem = boardFileProblem(FILE);

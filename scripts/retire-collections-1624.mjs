@@ -39,6 +39,7 @@ if (!file || !executor || !dataset) {
   console.error('usage: node scripts/retire-collections-1624.mjs --board-data <path> --executor <url> --dataset <id> [--apply]');
   process.exit(2);
 }
+assertDocumentNotRetired(file);   // #1743 — at ENTRY, before any read of the graph or any write to history or the document (review 129-8036650)
 const eventsDir = process.env.SCRUM_EVENT_LOG_DIR || `${file.replace(/\.json$/, '')}-events`;
 const RS = 'https://scrumboard.local/ns#';
 const T = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
@@ -132,7 +133,6 @@ const now = new Date().toISOString();
 appendEvent(eventsDir, { op: 'update', actor: 'board', entity: { kind: 'board-meta', id: 'small-kind-collections' },
   state: { retired: counts, movedTo: 'graph executor', verifiedInGraph: true, reason: '#1624: these live in the graph' } }, { now });
 const out = { ...doc, '@graph': kept };
-assertDocumentNotRetired(file);   // #1743
 const tmp = `${file}.tmp`;
 fs.writeFileSync(tmp, JSON.stringify(out, null, 2), 'utf8');
 fs.renameSync(tmp, file);

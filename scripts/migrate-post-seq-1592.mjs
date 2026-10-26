@@ -38,6 +38,7 @@ const FILE = opt('--board-file');
 const DRY = args.includes('--dry-run');
 const ROLLBACK = args.includes('--rollback');
 if (!FILE) { console.error('usage: node scripts/migrate-post-seq-1592.mjs --board-file <path> [--dry-run] [--rollback]'); process.exit(2); }
+assertDocumentNotRetired(FILE);   // #1743 — at ENTRY, before any read of the graph or any write to history or the document (review 129-8036650)
 if (!fs.existsSync(FILE)) { console.error(`no such file: ${FILE}`); process.exit(2); }
 
 const raw = fs.readFileSync(FILE, 'utf8');
@@ -106,7 +107,6 @@ if (ROLLBACK) {
 if (!changed) process.exit(0);
 if (DRY) { console.log('--dry-run: nothing written'); process.exit(0); }
 const out = JSON.stringify(doc, null, 2) + (raw.endsWith('\n') ? '\n' : '');
-assertDocumentNotRetired(FILE);   // #1743
 const tmp = `${FILE}.tmp-1592`;
 fs.writeFileSync(tmp, out, 'utf8');
 fs.renameSync(tmp, FILE);
