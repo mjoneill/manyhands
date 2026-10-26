@@ -15,7 +15,8 @@ const SKIP = HAVE_PY ? false : 'UNAVAILABLE: no python with pyoxigraph (a skip i
 const DSID = 'tcc-1785';
 
 test('#1785 C1 with the collections unit ON, the first boot imports the file\'s switch AND threshold, and a restart keeps them', { skip: SKIP, timeout: 240000 }, async () => {
-  const exec = await startExecutor({ store: tmpStore('tcc-1785-'), datasetId: DSID, create: true });
+  const store = tmpStore('tcc-1785-');
+  const exec = await startExecutor({ store, datasetId: DSID, create: true });
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tcc-1785-'));
   const file = path.join(dir, 'tending-config.json');
   fs.writeFileSync(file, JSON.stringify({ enabled: true, quietAfterMinutes: 58 }));
@@ -31,5 +32,9 @@ test('#1785 C1 with the collections unit ON, the first boot imports the file\'s 
     again = await startRestServer({ boardFile: rest.boardFile, env });
     assert.deepEqual(await (await fetch(`${again.baseUrl}/api/tending-config`)).json(), { enabled: true, quietAfterMinutes: 58 },
       'a restart reads the graph, not the edited file');
-  } finally { await again?.stop(); await rest?.stop(); await killExecutor(exec); }
+  } finally {
+    await again?.stop(); await rest?.stop(); await killExecutor(exec);
+    // the suite's tmp check fails a run on any NEW leftover: the store and the config folder go with the test
+    for (const p of [store, dir]) { try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* best effort */ } }
+  }
 });
