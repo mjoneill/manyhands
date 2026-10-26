@@ -153,6 +153,8 @@
   "tests/system-posts-1b-s1.test.mjs",
   "tests/system-posts-1b-s2.test.mjs",
   "tests/targeted-reads-t1.test.mjs",
+  "tests/tending-config-collections-1785.test.mjs",
+  "tests/tending-config-post-collections-1785.test.mjs",
   "tests/tending-graph-g1.test.mjs",
   "tests/tmpstore-leak-1672.test.mjs",
   "tests/unbounded-budget-u1.test.mjs",
