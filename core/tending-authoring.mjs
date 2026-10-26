@@ -272,8 +272,16 @@ export function setTendingConfig(entities = [], { enabled, quietAfterMinutes, at
   if (!has) out.push({ '@id': STATE_ID, '@type': 'scrum:TendingState', 'scrum:shuffle': false, 'scrum:importedAt': at, ...fields });
   return out;
 }
-/** #1785 — true once the file's config was imported onto TendingState (the one-time boot import never runs twice). */
-export const tendingConfigImported = (entities = []) => Boolean(entities.find((e) => e['@id'] === STATE_ID)?.['scrum:configImportedAt']);
+/**
+ * #1785 — true once the graph HOLDS the tending settings, whether imported from the file or saved from Settings: the one-time
+ * boot import runs only when this is false, so a file that appears after a UI save can never overwrite it (the #133 review's
+ * finding; P2). `scrum:quietAfterMinutes` is the marker because every settings write (setTendingConfig) carries it and the
+ * legacy #805 migration never wrote it: a TendingState with only the legacy `enabled` still imports the file's threshold.
+ */
+export const tendingConfigImported = (entities = []) => {
+  const st = entities.find((e) => e['@id'] === STATE_ID);
+  return Boolean(st && (st['scrum:configImportedAt'] || st['scrum:quietAfterMinutes'] != null));
+};
 
 /** Shuffle is graph state and defaults OFF when the flag has never been set. */
 export function readShuffle(entities = []) {
