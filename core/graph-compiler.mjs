@@ -1284,11 +1284,39 @@ function cardQuadClass([s, p, o], iri, id, what) {
   fail(`${what}: ${S} is not owned by ${iri}`);
 }
 
+// #1762 S1 — one part's event-time facts (contract on #1762 "S1 CONTRACT"). Values are closed: op from a fixed list, ids
+// and columns as short safe strings, versions as integers or 'unknown'. Nothing free-text rides an activity.
+const HISTORY_OPS = Object.freeze(['create', 'update', 'delete', 'move', 'claim', 'release']);
+const SAFE_HISTORY_ID = /^[A-Za-z0-9._~-]{1,100}$/;
+function canonCardHistory(h, w, isRemove) {
+  obj(h, ['op', 'shortId', 'holder', 'columnBefore', 'columnAfter', 'versionAfter'], w);
+  if (!HISTORY_OPS.includes(h.op)) fail(`${w}.op must be one of ${HISTORY_OPS.join(', ')}`);
+  if ((h.op === 'delete') !== isRemove) fail(`${w}.op: a remove part is exactly a delete`);
+  const idOrNull = (x, f) => (x == null ? null : (typeof x === 'string' && SAFE_HISTORY_ID.test(x) ? x : fail(`${w}.${f} must be a short safe id or null`)));
+  const col = (x, f) => (x === 'unknown' ? 'unknown' : idOrNull(x, f));
+  const shortId = h.shortId == null ? null : intLit(h.shortId, `${w}.shortId`);
+  const versionAfter = h.versionAfter === 'unknown' ? 'unknown' : intLit(h.versionAfter, `${w}.versionAfter`);
+  if (h.columnAfter == null) fail(`${w}.columnAfter is required (a column id or 'unknown')`);
+  const out = { op: h.op, shortId, holder: idOrNull(h.holder, 'holder'), columnAfter: col(h.columnAfter, 'columnAfter'), versionAfter };
+  if ('columnBefore' in h) out.columnBefore = h.columnBefore === null ? null : col(h.columnBefore, 'columnBefore');
+  if ((h.op === 'create' || h.op === 'move') && !('columnBefore' in out)) fail(`${w}.columnBefore is required on a ${h.op}`);
+  return out;
+}
+
+function canonEntityHistory(h, w, isRemove) {
+  obj(h, ['op', 'entityKind', 'versionAfter'], w);
+  if (!['create', 'update', 'delete'].includes(h.op)) fail(`${w}.op must be create, update or delete`);
+  if ((h.op === 'delete') !== isRemove) fail(`${w}.op: a remove part is exactly a delete`);
+  if (typeof h.entityKind !== 'string' || !SAFE_HISTORY_ID.test(h.entityKind)) fail(`${w}.entityKind must be a short safe kind`);
+  return { op: h.op, entityKind: h.entityKind, versionAfter: h.versionAfter === 'unknown' ? 'unknown' : intLit(h.versionAfter, `${w}.versionAfter`) };
+}
+
 function canonCardWrite(i, { origin = i.origin != null } = {}) {
   if (!Array.isArray(i.parts) || (!i.parts.length && i.counter == null && !(Array.isArray(i.collections) && i.collections.length))) fail('card.write.parts is a non-empty array (or empty, with a counter or collections)');
   const parts = i.parts.map((x, k) => {
     const w = `parts[${k}]`;
-    obj(x, ['iri', 'expectedVersion', 'version', 'quads', 'prior', 'json', 'remove', 'importDigest', ...(origin ? ['reason'] : [])], w);
+    obj(x, ['iri', 'expectedVersion', 'version', 'quads', 'prior', 'json', 'remove', 'importDigest', 'history', ...(origin ? ['reason'] : [])], w);
+    const history = x.history == null ? null : canonCardHistory(x.history, `${w}.history`, x.remove === true);
     // #1744 — a non-subject part of an origin plan says WHY it rides the write; bindOriginPlan checks it against the route
     if (x.reason != null && !ORIGIN_PART_REASONS.includes(x.reason)) fail(`${w}.reason must be one of ${ORIGIN_PART_REASONS.join(', ')}`);
     // A REMOVE part (a card deleted): guarded on its version, every owned triple deleted, nothing inserted.
@@ -1305,7 +1333,7 @@ function canonCardWrite(i, { origin = i.origin != null } = {}) {
         if (cardQuadClass(t, iri, id, `${w}.prior[${n}]`) === 'shared') fail(`${w}.prior[${n}]: a shared node is never deleted by a card write`);
         return t;
       });
-      return { iri, remove: true, expectedVersion, prior: [...new Map(prior.map((t) => [t.join(' '), t])).values()].sort((a, b) => (a.join(' ') < b.join(' ') ? -1 : 1)) };
+      return { iri, remove: true, expectedVersion, prior: [...new Map(prior.map((t) => [t.join(' '), t])).values()].sort((a, b) => (a.join(' ') < b.join(' ') ? -1 : 1)), ...(history ? { history } : {}) };
     }
     if (x.remove != null && x.remove !== false) fail(`${w}.remove must be true or absent`);
     const iri = checkIri(x.iri, `${w}.iri`);
@@ -1336,9 +1364,12 @@ function canonCardWrite(i, { origin = i.origin != null } = {}) {
       if (typeof x.importDigest !== 'string' || !/^[0-9a-f]{64}$/.test(x.importDigest)) fail(`${w}.importDigest must be a sha-256 hex digest`);
       importDigest = x.importDigest;
     }
-    return { iri, expectedVersion, version, quads, prior, json: rStr(x.json, `${w}.json`), ...(importDigest ? { importDigest } : {}), ...(x.reason != null ? { reason: x.reason } : {}) };
+    return { iri, expectedVersion, version, quads, prior, json: rStr(x.json, `${w}.json`), ...(importDigest ? { importDigest } : {}), ...(x.reason != null ? { reason: x.reason } : {}), ...(history ? { history } : {}) };
   }).sort((a, b) => (a.iri < b.iri ? -1 : 1));
   if (new Set(parts.map((p) => p.iri)).size !== parts.length) fail('card.write: a card appears in two parts');
+  // #1762 S1 — FAIL CLOSED: history is all or nothing. A write where some parts carry their activity facts and some do not
+  // would commit a change with no record of it, so it is refused before it is compiled.
+  if (parts.some((p) => p.history) && !parts.every((p) => p.history)) fail('card.write: history must be on every part or on none');
   // #1598 K4 — an announcement committed with a card change rides the SAME update as a PendingAnnouncement node under the
   // card (`<card>/announce/<mutationId>`, never deleted by a card write), so a crash after this update cannot leave a
   // claim whose announcement was never queued: the boot re-queues any the document does not know.
@@ -1359,6 +1390,7 @@ function canonCardWrite(i, { origin = i.origin != null } = {}) {
   // #1624 — collection entities written in the SAME update as the cards (e.g. an agent's retire releases its cards).
   const collections = i.collections == null ? [] : canonCollectionWrite({ kind: 'collection', parts: i.collections }).parts;
   if (!parts.length && !collections.length && i.counter == null) fail('card.write carries no part');
+  { const all = [...parts, ...collections]; if (all.some((p) => p.history) && !all.every((p) => p.history)) fail('card.write: history must be on every part (cards and collections) or on none'); }   // #1762 S1
   // #1744 — `indexGuard: true` makes a write that adds or removes a shortId prove the reference index is complete and that it
   // re-projects EVERY card naming that shortId (contract v2 V2-2, F2). `indexGuard: 'marker'` (mode on, finding 5) is the same
   // proof, required only once the store holds the completion marker: before the backfill it admits the write, after it the
@@ -1609,6 +1641,30 @@ function doneMoveClauses(R) {
   return out;
 }
 
+// #1762 S1 — the activity node of part k of a card.write, as triples (contract on #1762 "S1 CONTRACT"). They ride the
+// write's own data INSERT, whose template binds only when the write's preconditions hold (?ok): APPLIED commits the change
+// and its activity together, and a refused write inserts neither. `?n_at` is the receipt's own NOW().
+const SCRUM_NS = 'https://scrumboard.local/ns#', PROV_NS = 'http://www.w3.org/ns/prov#', ACTIVITY_NS = 'https://scrumboard.local/activity/';
+const PERSON_NS = 'https://scrumboard.local/person/';
+export const changeActivityIri = (opId, k) => `${ACTIVITY_NS}op-${createHash('sha256').update(opId).digest('hex').slice(0, 32)}-${k}`;
+function historyActivityQuads(c, P, k) {
+  const H = P.history, A = ref(changeActivityIri(c.opId, k)), S = (n) => ref(SCRUM_NS + n), PR = (n) => ref(PROV_NS + n);
+  const term = (x) => (x === 'unknown' ? S('unknown') : x === null ? S('none') : null);
+  const out = [
+    [A, ref(CW.rdfType), PR('Activity')], [A, ref(CW.rdfType), S('ChangeActivity')],
+    [A, S('op'), recLit(H.op)], [A, S('entityKind'), recLit(H.entityKind ?? 'card')], [A, PR('used'), ref(P.iri)],
+    [A, PR('wasAssociatedWith'), ref(c.actor)], [A, PR('startedAtTime'), '?n_at'],
+    [A, S('part'), String(k)], [A, S('recordedBy'), ref(c.opId)],
+    [A, S('versionAfter'), H.versionAfter === 'unknown' ? S('unknown') : H.versionAfter],
+  ];
+  if (H.entityKind != null) return out;   // a collection entity: no card-only facts
+  out.push([A, S('holderAtWrite'), H.holder == null ? S('none') : ref(PERSON_NS + encodeURIComponent(H.holder))],
+    [A, S('columnAfter'), term(H.columnAfter) ?? recLit(H.columnAfter)]);
+  if (H.shortId != null) out.push([A, S('shortId'), recLit(String(H.shortId))]);
+  if ('columnBefore' in H) out.push([A, S('columnBefore'), term(H.columnBefore) ?? recLit(H.columnBefore)]);
+  return out;
+}
+
 function compileCardWrite(c) {
   const digest = recordDigest(c);
   const OP = ref(c.opId);
@@ -1647,6 +1703,7 @@ function compileCardWrite(c) {
       branches.push(...cardStructureBranches(P.iri, k));
       if (P.prior.length) branches.push(`    { VALUES (?xs ?xp ?xo) {\n${P.prior.map((q) => `      (${q.join(' ')})`).join('\n')}\n    } }`);
     }
+    if (P.history) historyActivityQuads(c, P, k).forEach((t) => dIns.push(`  ${v(t[0])} ${v(t[1])} ${t[2] === '?n_at' ? '?n_at' : v(t[2])} .`));   // #1762 S1
     if (P.remove) return;
     if (P.importDigest) {
       const IMP = ref(`${P.iri}/import`);
@@ -1655,7 +1712,7 @@ function compileCardWrite(c) {
     for (const [s, p, o] of P.quads) dIns.push(`  ${v(s)} ${v(p)} ${v(o)} .`);
     bIns.push(`  ${v(I)} ${VER} ${v(P.version)} .`, `  ${v(I)} ${REC} ${v(OP)} .`, `  ${v(I)} ${JSONP} ${v(recLit(P.json))} .`);
   });
-  collectionClauses(R.collections || [], { OP, v, pre, top, branches, dIns, bIns, bDel, dBinds, tag: 'c' });
+  collectionClauses(R.collections || [], { OP, v, pre, top, branches, dIns, bIns, bDel, dBinds, tag: 'c', history: { c, offset: R.parts.length } });
   for (const A of R.pending || []) {
     pre.push(...freshSubject(ref(A.iri)));
     dIns.push(`  ${v(ref(A.iri))} ${ref(CW.rdfType)} ${v(ref(`${CW.scrum}PendingAnnouncement`))} .`);
@@ -1982,8 +2039,10 @@ export function admitStoredOriginPlan(descriptor, plan) {
   if (!Array.isArray(plan.parts)) fail('plan.parts is an array');
   plan.parts.forEach((p, k) => {
     const w = `plan.parts[${k}]`;
-    keys(p, ['iri', 'expectedVersion', 'version', 'quads', 'prior', 'json'], ['reason'], w);
+    keys(p, ['iri', 'expectedVersion', 'version', 'quads', 'prior', 'json'], ['reason', 'history'], w);
     if (p.reason != null && !ORIGIN_PART_REASONS.includes(p.reason)) fail(`${w}.reason is not a known part reason`);
+    // #1762 S1 — a stored part's activity facts are admitted only in their own canonical form (as every other field is)
+    if (p.history != null && JSON.stringify(canonCardHistory(p.history, `${w}.history`, false)) !== JSON.stringify(p.history)) fail(`${w}.history is not its own canonical form`);
     const iri = checkIri(p.iri, `${w}.iri`), id = iri.slice(ENTITY_IRI.length);
     if (!iri.startsWith(ENTITY_IRI) || !/^[A-Za-z0-9-]{1,64}$/.test(id)) fail(`${w}.iri must be ${ENTITY_IRI}<card id>`);
     versions(p, w);
@@ -2028,7 +2087,7 @@ export function admitStoredOriginPlan(descriptor, plan) {
   }
   bindOriginPlan(descriptor, plan);
   // rebuilt in canonCardWrite's own key order, so a caller comparing its JSON to the stored bytes refuses a reordering
-  const cardPart = (p) => ({ iri: p.iri, expectedVersion: p.expectedVersion, version: p.version, quads: p.quads, prior: p.prior, json: p.json, ...(p.reason != null ? { reason: p.reason } : {}) });
+  const cardPart = (p) => ({ iri: p.iri, expectedVersion: p.expectedVersion, version: p.version, quads: p.quads, prior: p.prior, json: p.json, ...(p.reason != null ? { reason: p.reason } : {}), ...(p.history != null ? { history: p.history } : {}) });   // #1762 S1
   const collPart = (p) => ({ collection: p.collection, iri: p.iri, expectedVersion: p.expectedVersion, version: p.version, quads: p.quads, prior: p.prior, json: p.json,
     ...(p.unique ? { unique: p.unique.map((u) => ({ all: u.all.map((a) => ({ predicate: a.predicate, value: a.value })) })) } : {}), ...(p.requires ? { requires: p.requires } : {}) });
   return { parts: plan.parts.map(cardPart), counter: plan.counter, ...(plan.collections ? { collections: plan.collections.map(collPart) } : {}), ...(plan.reads ? { reads: plan.reads.map((r) => ({ iri: r.iri, version: r.version })) } : {}), ...(plan.walk ? { walk: { ...plan.walk } } : {}) };
@@ -2214,8 +2273,9 @@ function canonCollectionWrite(e) {
   if (!Array.isArray(e.parts) || !e.parts.length) fail('entity.parts is a non-empty array');
   const parts = e.parts.map((x, k) => {
     const w = `entity.parts[${k}]`;
-    obj(x, ['collection', 'iri', 'expectedVersion', 'version', 'quads', 'prior', 'json', 'remove', 'unique', 'requires'], w);
+    obj(x, ['collection', 'iri', 'expectedVersion', 'version', 'quads', 'prior', 'json', 'remove', 'unique', 'requires', 'history'], w);
     if (typeof x.collection !== 'string' || !COLL_KEY_RE.test(x.collection)) fail(`${w}.collection must name a collection`);
+    const history = x.history == null ? null : canonEntityHistory(x.history, `${w}.history`, x.remove === true);   // #1762 S1
     const iri = checkIri(x.iri, `${w}.iri`);
     const own = (list, label) => {
       if (!Array.isArray(list)) fail(`${w}.${label} must be an array`);
@@ -2231,7 +2291,7 @@ function canonCollectionWrite(e) {
     };
     if (x.remove === true) {
       if (x.quads != null || x.json != null || x.version != null || x.unique != null || x.requires != null) fail(`${w}: a remove part carries no quads, json, version, unique or requires`);
-      return { collection: x.collection, iri, remove: true, expectedVersion: intLit(x.expectedVersion, `${w}.expectedVersion`), prior: own(x.prior ?? [], 'prior') };
+      return { collection: x.collection, iri, remove: true, expectedVersion: intLit(x.expectedVersion, `${w}.expectedVersion`), prior: own(x.prior ?? [], 'prior'), ...(history ? { history } : {}) };
     }
     if (x.remove != null && x.remove !== false) fail(`${w}.remove must be true or absent`);
     const expectedVersion = x.expectedVersion == null ? null : intLit(x.expectedVersion, `${w}.expectedVersion`);
@@ -2255,9 +2315,10 @@ function canonCollectionWrite(e) {
     const requires = [...new Set((x.requires ?? []).map((r, n) => ref(checkIri(r, `${w}.requires[${n}]`))))].sort();
     return { collection: x.collection, iri, expectedVersion, version, quads: own(x.quads, 'quads'),
       prior: expectedVersion == null ? (x.prior == null || (Array.isArray(x.prior) && !x.prior.length) ? [] : fail(`${w}.prior: a create has no prior state`)) : own(x.prior ?? [], 'prior'),
-      json: rStr(x.json, `${w}.json`), ...(unique.length ? { unique } : {}), ...(requires.length ? { requires } : {}) };
+      json: rStr(x.json, `${w}.json`), ...(unique.length ? { unique } : {}), ...(requires.length ? { requires } : {}), ...(history ? { history } : {}) };
   }).sort((a, b) => (a.iri < b.iri ? -1 : 1));
   if (new Set(parts.map((p) => p.iri)).size !== parts.length) fail('entity.parts: an entity appears in two parts');
+  if (parts.some((p) => p.history) && !parts.every((p) => p.history)) fail('entity.parts: history must be on every part or on none');   // #1762 S1 — fail closed
   return { kind: 'collection', parts };
 }
 
@@ -2270,7 +2331,7 @@ const isBkBranch = (b) => b.endsWith(' AS ?xbs) }');
  * `branches`, inserts into `dIns` (through `v`, the update's ?d_ binder). Shared by entity.put kind 'collection' and by
  * card.write's `collections` (a write that touches cards AND a collection entity is still ONE guarded update).
  */
-function collectionClauses(parts, { OP, v, pre, top, branches, dIns, bIns, bDel, dBinds, tag }) {
+function collectionClauses(parts, { OP, v, pre, top, branches, dIns, bIns, bDel, dBinds, tag, history = null }) {
   const VER = ref(`${NS}ver`), REC = ref(`${NS}recordedBy`), JSONP = ref(`${CW.scrum}entityJson`), INC = ref(`${CW.scrum}inCollection`);
   parts.forEach((P, k) => {
     const I = ref(P.iri), KEY = recLit(P.collection);
@@ -2284,6 +2345,7 @@ function collectionClauses(parts, { OP, v, pre, top, branches, dIns, bIns, bDel,
     }
     for (const U of P.unique || []) pre.push(`    FILTER NOT EXISTS { ?xu ${INC} ${KEY} ; ${U.all.map((a) => `${a.predicate} ${a.value}`).join(' ; ')} . FILTER(?xu != ${I}) }`);
     (P.requires || []).forEach((T, j) => pre.push(`    FILTER EXISTS { ${T} ?xrp${tag}${k}_${j} ?xro${tag}${k}_${j} }`));
+    if (P.history && history) historyActivityQuads(history.c, P, history.offset + k).forEach((t) => dIns.push(`  ${v(t[0])} ${v(t[1])} ${t[2] === '?n_at' ? '?n_at' : v(t[2])} .`));   // #1762 S1
     if (P.remove) return;
     for (const [s, p, o] of P.quads) dIns.push(`  ${v(s)} ${v(p)} ${v(o)} .`);
     dIns.push(`  ${v(I)} ${INC} ${v(KEY)} .`);
@@ -2303,7 +2365,7 @@ function compileCollectionWrite(c) {
     return `?d_${n}`;
   };
   where.push(...dupGuard(OP));
-  collectionClauses(R.parts, { OP, v, pre, top, branches, dIns, bIns, bDel, dBinds, tag: 'c' });
+  collectionClauses(R.parts, { OP, v, pre, top, branches, dIns, bIns, bDel, dBinds, tag: 'c', history: { c, offset: 0 } });
   pre.push(`    BIND(true AS ?ok)`);
   where.push(`  OPTIONAL {`, ...pre, `  }`);
   where.push(...top);

@@ -30,8 +30,8 @@ export const nodeToColumn = ({ '@type': _t, '@id': _i, identifier, name, 'scrum:
 /** The stored order, then the id: the order a board shows and the order "the first remaining column" is taken from. */
 const byOrder = (a, b) => (Number(a.order) - Number(b.order)) || String(a.id).localeCompare(String(b.id));
 
-export function createColumnsUnit({ client, mintId, actorIri = (who) => `https://scrumboard.local/person/${encodeURIComponent(who || 'board')}` }) {
-  const inner = createCollectionsUnit({ client, families: [COLUMNS_FAMILY], mintId, actorIri });
+export function createColumnsUnit({ client, mintId, actorIri = (who) => `https://scrumboard.local/person/${encodeURIComponent(who || 'board')}`, historyNative = false }) {
+  const inner = createCollectionsUnit({ client, families: [COLUMNS_FAMILY], mintId, actorIri, historyNative });   // #1762 S1
   const asData = (columns) => ({ [COLUMNS_KEY]: (Array.isArray(columns) ? columns : []).filter((c) => c && typeof c.id === 'string' && c.id).map(columnToNode) });
 
   /** A fresh mutable array of the graph's columns, in their stored order. Throws CollectionsUnavailable when not current. */

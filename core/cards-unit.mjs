@@ -39,7 +39,22 @@ export class CardWriteConflict extends Error {
   constructor(reason) { super(`card write refused: ${reason}`); this.code = 'CARD_WRITE_CONFLICT'; }
 }
 
-export function createCardsUnit({ client, actorIri = (who) => `https://scrumboard.local/person/${encodeURIComponent(who || 'board')}`, mintId }) {
+// #1762 S1 — the EVENT-TIME facts of one card part, as the activity record carries them (contract on #1762, "S1 CONTRACT"):
+// what kind of change, the claim holder as it stood BEFORE the write, the columns, and the REST-visible version after it
+// (a delete: the last one). A fact that applies but is unknowable is UNKNOWN, never omitted.
+export const HISTORY_UNKNOWN = 'unknown';
+export function cardHistoryFacts(was, card) {
+  const vis = (c) => (c && Number.isSafeInteger(c.version) && c.version >= 0 ? String(c.version) : HISTORY_UNKNOWN);
+  const holder = was ? (typeof was.claimedBy === 'string' && was.claimedBy ? was.claimedBy : null) : null;
+  if (!card) return { op: 'delete', shortId: was?.shortId ?? null, holder, columnAfter: was?.column ?? HISTORY_UNKNOWN, versionAfter: vis(was) };
+  if (!was) return { op: 'create', shortId: card.shortId ?? null, holder: null, columnBefore: null, columnAfter: card.column ?? HISTORY_UNKNOWN, versionAfter: vis(card) };
+  const had = typeof was.claimedBy === 'string' && was.claimedBy, has = typeof card.claimedBy === 'string' && card.claimedBy;
+  const moved = (was.column ?? null) !== (card.column ?? null);
+  const op = !had && has ? 'claim' : had && !has ? 'release' : moved ? 'move' : 'update';
+  return { op, shortId: card.shortId ?? null, holder, ...(moved ? { columnBefore: was.column ?? HISTORY_UNKNOWN } : {}), columnAfter: card.column ?? HISTORY_UNKNOWN, versionAfter: vis(card) };
+}
+
+export function createCardsUnit({ client, actorIri = (who) => `https://scrumboard.local/person/${encodeURIComponent(who || 'board')}`, mintId, historyNative = false }) {
   /** id → { card (as stored), json (its JSON text), ver } in insertion order; null until loaded. */
   let byId = null;
   let counter = null;        // the graph's nextShortId (null: no counter node yet)
@@ -89,11 +104,11 @@ export function createCardsUnit({ client, actorIri = (who) => `https://scrumboar
       const was = byId.get(card.id);
       if (was && was.json === json) continue;
       parts.push(was
-        ? { iri: cardIriOf(card.id), expectedVersion: String(was.ver), version: String(was.ver + 1), quads: cardQuads(card, after), prior: priorQuads(was.card, before), json }
-        : { iri: cardIriOf(card.id), expectedVersion: null, version: '1', quads: cardQuads(card, after), json });
+        ? { iri: cardIriOf(card.id), expectedVersion: String(was.ver), version: String(was.ver + 1), quads: cardQuads(card, after), prior: priorQuads(was.card, before), json, ...(historyNative ? { history: cardHistoryFacts(was.card, card) } : {}) }
+        : { iri: cardIriOf(card.id), expectedVersion: null, version: '1', quads: cardQuads(card, after), json, ...(historyNative ? { history: cardHistoryFacts(null, card) } : {}) });
     }
     for (const [id, was] of byId) {
-      if (!seen.has(id)) parts.push({ iri: cardIriOf(id), remove: true, expectedVersion: String(was.ver), prior: priorQuads(was.card, before) });
+      if (!seen.has(id)) parts.push({ iri: cardIriOf(id), remove: true, expectedVersion: String(was.ver), prior: priorQuads(was.card, before), ...(historyNative ? { history: cardHistoryFacts(was.card, null) } : {}) });
     }
     // #1598 C12 — a create or a remove changes which #N resolve. Every UNCHANGED card that names a shortId that appeared or
     // disappeared is re-projected in the SAME write when its projection differs (the document model got this for free:
@@ -108,7 +123,7 @@ export function createCardsUnit({ client, actorIri = (who) => `https://scrumboar
         // #1744 — under the index guard EVERY card naming the shortId rides the write (the guard requires exactly that set);
         // its JSON is unchanged and only its graph version moves. Without the guard: today's projection-diff rule.
         if (!allNamers && JSON.stringify(q0) === JSON.stringify(q1)) continue;
-        parts.push({ iri: cardIriOf(card.id), expectedVersion: String(was.ver), version: String(was.ver + 1), quads: q1, prior: priorQuads(was.card, before), json: was.json });
+        parts.push({ iri: cardIriOf(card.id), expectedVersion: String(was.ver), version: String(was.ver + 1), quads: q1, prior: priorQuads(was.card, before), json: was.json, ...(historyNative ? { history: cardHistoryFacts(was.card, was.card) } : {}) });
       }
     }
     const counterPart = nextShortId != null && Number(nextShortId) !== (counter ?? null) && (parts.length || counter == null)
