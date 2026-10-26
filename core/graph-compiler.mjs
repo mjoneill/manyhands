@@ -1392,21 +1392,28 @@ function canonCardWrite(i, { origin = i.origin != null } = {}) {
 
 /**
  * #1744 — the reference-index completeness guard, as WHERE clauses inside the write's one ?ok OPTIONAL (contract v2 V2-2, F2).
- * It binds ?ok only if: the completion marker is true; every live card has exactly one coverage node whose version and JSON
- * digest equal its current ones (the digest recomputed here from the stored JSON); no coverage node is an orphan or carries
- * a duplicate watermark; every name is an xsd:integer and each node's names re-aggregate to its stored count and sum (so a
- * removed or extra name is seen even under an intact watermark); and, for every shortId this write adds or removes, every
+ * It binds ?ok only if: the completion marker is exactly true; and, for every shortId this write adds or removes, every
  * card whose coverage names it is a part of this write (so a new, changed or deleted referrer since prepare refuses).
+ * #1769: it no longer re-proves the whole index's internal consistency (indexInvariantClauses) inside every write — that
+ * proof is the verifier's; see the comment in the body.
  */
+/** #1769 — the completion marker reads exactly `true` (an xsd:boolean) and nothing else: the part of the index's health a
+ * WRITE depends on. O(1): two triple patterns on one subject. */
+function indexMarkerClauses() {
+  return [
+    `    GRAPH ${BK} { ${ref(CRI.marker)} ${ref(CRI.complete)} "true"^^<http://www.w3.org/2001/XMLSchema#boolean> . }`,
+    // and NOTHING else (#116 review, finding 2): a marker reading both true and false is not complete
+    `    FILTER NOT EXISTS { GRAPH ${BK} { ${ref(CRI.marker)} ${ref(CRI.complete)} ?ixmo . } FILTER(!sameTerm(?ixmo, "true"^^<http://www.w3.org/2001/XMLSchema#boolean>)) }`,
+  ];
+}
+
 function indexInvariantClauses() {
   const VER = ref(`${NS}ver`), JSONP = ref(`${CW.scrum}entityJson`), CARD = ref(`${CW.scrum}Card`), TYPE = ref(CW.rdfType);
   const IV = ref(CRI.indexedVersion), ID = ref(CRI.indexedJsonDigest), IN = ref(CRI.namesShortId), IC = ref(CRI.namesCount), IS = ref(CRI.namesSum), IL = ref(CRI.namesList);
   const INT = `<http://www.w3.org/2001/XMLSchema#integer>`;
   const covOf = (cardVar, out) => `BIND(IRI(CONCAT(${JSON.stringify(CRI.card(''))}, STRAFTER(STR(${cardVar}), ${JSON.stringify(ENTITY_IRI)}))) AS ${out})`;
   const out = [
-    `    GRAPH ${BK} { ${ref(CRI.marker)} ${ref(CRI.complete)} "true"^^<http://www.w3.org/2001/XMLSchema#boolean> . }`,
-    // and NOTHING else (#116 review, finding 2): a marker reading both true and false is not complete
-    `    FILTER NOT EXISTS { GRAPH ${BK} { ${ref(CRI.marker)} ${ref(CRI.complete)} ?ixmo . } FILTER(!sameTerm(?ixmo, "true"^^<http://www.w3.org/2001/XMLSchema#boolean>)) }`,
+    ...indexMarkerClauses(),
     `    FILTER NOT EXISTS { ?ixc ${TYPE} ${CARD} . GRAPH ${BK} { ?ixc ${VER} ?ixv ; ${JSONP} ?ixj . } ${covOf('?ixc', '?ixn')}`,
     `      FILTER NOT EXISTS { GRAPH ${BK} { ?ixn ${IV} ?ixv2 ; ${ID} ?ixd . } FILTER(?ixv2 = ?ixv && ?ixd = SHA256(STR(?ixj))) } }`,
     `    FILTER NOT EXISTS { GRAPH ${BK} { ?ixa ${IV} ?ixa1 , ?ixa2 . } FILTER(!sameTerm(?ixa1, ?ixa2)) }`,
@@ -1430,13 +1437,21 @@ function indexInvariantClauses() {
 /** #1744 — the index's health alone, as a read: one row when the invariant holds, none when it does not (the server's diagnosis). */
 /** #1744 — whether the completion marker exists at all, in any state: one row when it does (the marker-keyed guard's key). */
 export const cardRefIndexMarkerSparql = () => `SELECT ?ixmk WHERE { GRAPH ${BK} { ${ref(CRI.marker)} ${ref(CRI.complete)} ?ixmk . } } LIMIT 1`;
+/** #1769 — every value the completion marker holds (no LIMIT): complete is exactly one xsd:boolean `true`. */
+export const cardRefIndexMarkerValuesSparql = () => `SELECT ?ixmk WHERE { GRAPH ${BK} { ${ref(CRI.marker)} ${ref(CRI.complete)} ?ixmk . } }`;
 export const cardRefIndexHealthySparql = () => `SELECT ?ixok WHERE {\n${indexInvariantClauses().join('\n')}\n    BIND(true AS ?ixok)\n} LIMIT 1`;
 
 function indexGuardClauses(R) {
   // only a write that ADDS or REMOVES a shortId depends on the index; a plain update maintains it but is not held by it
   if (!R.parts.some((P) => P.remove || P.expectedVersion == null)) return [];
   const IN = ref(CRI.namesShortId), INT = `<http://www.w3.org/2001/XMLSchema#integer>`;
-  const out = indexInvariantClauses();
+  // #1769 — the MARKER only, never the whole-index invariant: that is a scan of every card (a SHA256 of each stored JSON,
+  // the re-aggregation of every coverage node), measured at 31–34 s on the real board's 1,633 cards, inside every create
+  // and delete. The whole-index proof is the JS verifier's (core/card-ref-index-verify.mjs), which is strictly stronger
+  // and runs before every enforced start, at READY and on its schedule, latching the marker false on a violation — and a
+  // false marker refuses here. What this guard alone cannot see between verifications is a coverage node made wrong by a
+  // writer that bypassed the compiler; the #1748 write floor refuses such writers at the executor.
+  const out = indexMarkerClauses();
   const covs = R.parts.map((P) => ref(CRI.card(P.iri.slice(ENTITY_IRI.length))));
   const notIn = covs.length ? ` FILTER(?ixr NOT IN (${covs.join(', ')}))` : '';
   R.parts.forEach((P, k) => {

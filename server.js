@@ -164,17 +164,19 @@ const CARD_REF_INDEX_ENFORCE = ORIGIN_EXECUTOR || process.env.SCRUM_CARD_REF_IND
 // the store holds the completion marker, so a backfilled store cannot be written around by an unset environment variable.
 const CARD_REF_INDEX_GUARD = CARD_REF_INDEX_ENFORCE ? true : 'marker';
 /** #1744 — after a guarded write is refused: is the INDEX the reason (true), or a stale version (false)? null = unknown. */
+// #1769 — "incomplete" is what the write guard refuses on: the completion marker is not exactly one xsd:boolean `true`. It
+// used to run the whole-index invariant query (31–34 s on the real board, past this 15 s bound, so a mode-off boot refused
+// with "not checkable"). The whole-index proof is verifyIndex's (core/card-ref-index-verify.mjs), which the boot gate runs
+// first and which is strictly stronger.
 async function cardRefIndexIncomplete() {
   try {
-    const { cardRefIndexHealthySparql, cardRefIndexMarkerSparql } = await import('./core/graph-compiler.mjs');
+    const { cardRefIndexMarkerValuesSparql } = await import('./core/graph-compiler.mjs');
     const c = createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: 15000, label: 'card-ref-index' });
-    if (!CARD_REF_INDEX_ENFORCE) {   // marker-keyed: with no marker at all the index held nothing back
-      const m = await c.query(cardRefIndexMarkerSparql());
-      if (!m.ok) return null;
-      if (!m.rows.length) return false;
-    }
-    const r = await c.query(cardRefIndexHealthySparql());
-    return r.ok ? r.rows.length === 0 : null;
+    const m = await c.query(cardRefIndexMarkerValuesSparql());
+    if (!m.ok) return null;
+    if (!m.rows.length) return CARD_REF_INDEX_ENFORCE;   // marker-keyed: with no marker at all the index held nothing back
+    const v = m.rows.map((b) => b.ixmk);
+    return !(v.length === 1 && v[0].value === 'true' && v[0].datatype === 'http://www.w3.org/2001/XMLSchema#boolean');
   } catch { return null; }
 }
 // the fields no unit holds yet, each with the card that gives it an owner; `owned` flips when that card's build lands
