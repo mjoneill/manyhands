@@ -32,7 +32,7 @@ import assert from 'node:assert/strict';
 import { writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { startMcpServer, mcpSession } from './helpers/harness.mjs';
+import { startMcpServer, startRestServer, mcpSession } from './helpers/harness.mjs';
 
 /** Seats no shipped example would ever contain. */
 const UNMISTAKABLE = {
@@ -63,7 +63,10 @@ test('#483 a configured roster reaches every seat list an agent reads', async ()
   const rosterFile = join(dir, 'roster.json');
   writeFileSync(rosterFile, JSON.stringify({ seats: UNMISTAKABLE }));
 
-  const mcp = await startMcpServer({ env: { SCRUM_ROSTER_FILE: rosterFile } });
+  // #1764 — the configured roster reaches MCP THROUGH REST (GET /api/roster), never a file of MCP's own: REST is given the
+  // file, and MCP is pointed at a path that is never written, so the seats can only arrive the one way.
+  const rest = await startRestServer({ env: { SCRUM_ROSTER_FILE: rosterFile } });
+  const mcp = await startMcpServer({ restApiBase: rest.baseUrl, env: { SCRUM_ROSTER_FILE: join(dir, 'mcp-must-not-read.json') } });
   try {
     const session = await mcpSession(mcp.mcpUrl);
     const listed = await session.listTools();
@@ -95,6 +98,7 @@ test('#483 a configured roster reaches every seat list an agent reads', async ()
 
   } finally {
     await mcp.stop();
+    await rest.stop();
     rmSync(dir, { recursive: true, force: true });
   }
 });
