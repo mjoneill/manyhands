@@ -16,6 +16,7 @@
  *
  * ROWS:
  *   G0  no file, no node: GET is the default (mode soft); a POST creates the node, WITHOUT import facts, and writes no file
+ *   G6  then a file appears and REST restarts: the UI-saved node is NOT overwritten (import only when there is no node at all)
  *   G1  a file at first boot is IMPORTED once: GET answers its values; the node carries them and the import facts
  *   G2  a valid POST: 200 with the clean config, GET agrees, the node agrees, and the file is byte-identical (never written)
  *   G3  an invalid POST: 400, and nothing changes (GET, the node's values and its graph version)
@@ -24,8 +25,11 @@
  *   M1  MCP (stagger on, refresh 500 ms) reports the graph's mode on /channel/status, and a POSTed mode within 5 s
  *   M2  REST down: MCP keeps the LAST GOOD mode for several refresh periods, never falling back to the default
  *
- * NOT COVERED, BY NAME: the first boot with BOTH a non-imported node and a file present (the contract says "no imported node";
- * whether a POSTed node blocks the import is asked of the builder, not assumed); MCP's mode before its first good read; the
+ * The world runs with the collections unit ON (SCRUM_GRAPH_UNIT_SMALLKINDS=1, a real executor), so a boot import that writes
+ * outside the write lock (refused in production, "#1624: a collection write outside withWriteLock") cannot pass G1 by being
+ * swallowed.
+ *
+ * NOT COVERED, BY NAME: MCP's mode before its first good read; the
  * bearer-seat and resident-wake facts (their fields are passed through and compared via GET only).
  */
 import { test } from 'node:test';
@@ -138,7 +142,7 @@ const factsAre = (f, want, label) => {
   assert.deepEqual((f[P.hard] || []).map(Number), [want.hard.timeoutMs], `${label}: scrum:hardTimeoutMs`);
 };
 
-test('#1784 G0 — no file and no node: GET is the default; a POST creates the node without import facts and writes no file', T, async () => {
+test('#1784 G0, G6 — no file and no node: GET is the default; a POST creates the node without import facts, writes no file, and a later file never overwrites it', T, async () => {
   const cfgFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cc-1784-g0-')), 'channel-config.json');
   try {
     await world(cfgFile, async ({ q, start, call }) => {
@@ -153,6 +157,14 @@ test('#1784 G0 — no file and no node: GET is the default; a POST creates the n
       factsAre(f, OFFCFG, 'G0');
       assert.equal((f[P.importedFrom] || []).length + (f[P.importedAt] || []).length, 0, 'G0: a POSTed node carries no import facts');
       assert.equal(fs.existsSync(cfgFile), false, 'G0: the POST wrote no file');
+
+      // G6 a file appearing AFTER a node exists is never imported: import happens only when there is no node at all
+      fs.writeFileSync(cfgFile, JSON.stringify(HARD));
+      await start();
+      pinned((await call('GET', '/api/config')).json, OFFCFG, 'G6: the UI-saved value survives a boot with a file present');
+      const f6 = await nodeFacts(q);
+      factsAre(f6, OFFCFG, 'G6 node');
+      assert.equal((f6[P.importedFrom] || []).length + (f6[P.importedAt] || []).length, 0, 'G6: no import happened');
     });
   } finally { fs.rmSync(path.dirname(cfgFile), { recursive: true, force: true }); }
 });
