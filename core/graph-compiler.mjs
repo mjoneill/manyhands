@@ -402,9 +402,11 @@ export function staticCheck(sparql, opId) {
   const where = block('WHERE').join('\n');
   // every ?d_ variable must be defined only as IF(BOUND(?ok), x, ?u)
   const dDefs = {};
-  for (const m of where.matchAll(/BIND\((.*) AS \?(d_\w+)\)/g)) dDefs[m[2]] = m[1];
+  // [^\n], never `.`: a JS `.` stops at U+2028/U+2029, which a JSON literal carries raw, so `.*` silently missed such a BIND
+  // (the ok-guard check then never saw it, and the unbound-use check below refused a valid write: #1749 A8's payload)
+  for (const m of where.matchAll(/BIND\(([^\n]*) AS \?(d_\w+)\)/g)) dDefs[m[2]] = m[1];
   for (const [v, expr] of Object.entries(dDefs)) {
-    if (!/^IF\(BOUND\(\?ok\), .+, \?u\)$/.test(expr)) errors.push(`?${v} is not ok-guarded`);
+    if (!/^IF\(BOUND\(\?ok\), [^\n]+, \?u\)$/.test(expr)) errors.push(`?${v} is not ok-guarded`);   // [^\n]: see dDefs above
   }
   // #1762 S1 (review 131) — every ?d_ variable a template USES must be DEFINED: a template variable with no binding is not an
   // error in SPARQL, it is a triple silently skipped, so a missing definition would commit the rest of the write without it

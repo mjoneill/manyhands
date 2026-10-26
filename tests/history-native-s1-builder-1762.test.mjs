@@ -3,6 +3,7 @@
 // commits its activity exactly once. Against a real temp executor.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { HAVE_PY, tmpStore, startExecutor, killExecutor } from './helpers/graph-executor-proc.mjs';
 import { createGraphClient } from '../core/graph-client.mjs';
 import { compile, changeActivityIri, staticCheck, originKeyOf, mutationIdOf, originPrepareOp, admitStoredOriginPlan } from '../core/graph-compiler.mjs';
@@ -44,7 +45,7 @@ test('#1762 B3 CONTROL: a well-formed history compiles, and the activity terms r
 test('#1762 B4 against a real executor: APPLIED commits exactly one activity per part; a replay of the same op (lost ack) adds none; a refused write (stale version) adds none and changes nothing', { skip: !HAVE_PY && 'no executor python' }, async (t) => {
   const store = tmpStore('s1b-1762-');
   const x = await startExecutor({ store, datasetId: DS, create: true });
-  t.after(() => killExecutor(x));
+  t.after(async () => { await killExecutor(x); fs.rmSync(store, { recursive: true, force: true }); });   // no tmp leftover
   const client = createGraphClient({ baseUrl: x.baseUrl, expectedDatasetId: DS, timeoutMs: 30000, label: 's1-builder' });
   const count = async (opId) => {
     const q = await client.query(`SELECT (COUNT(?a) AS ?n) WHERE { ?a a <https://scrumboard.local/ns#ChangeActivity> ; <https://scrumboard.local/ns#recordedBy> <${opId}> }`);
@@ -140,4 +141,18 @@ test('#1762 B9 (review 131) a prepared origin plan carrying COLLECTION history i
   assert.deepEqual(JSON.parse(JSON.stringify(admitted)).collections?.[0]?.history ?? JSON.parse(JSON.stringify(admitted)).plan?.collections?.[0]?.history, stored.collections[0].history, 'and read-back keeps it');
   const bad = JSON.parse(JSON.stringify(stored)); bad.collections[0].history = { ...bad.collections[0].history, op: 'rewrite' };
   assert.throws(() => admitStoredOriginPlan(descriptor, bad));
+});
+
+test('#1762 B10 (CI, #1749 A8) a literal holding a raw U+2028 / U+2029 is still SEEN by staticCheck: it compiles, and a removed binding on it is still refused', async () => {
+  // psqLit (the post-seq reservation's literals) leaves U+2028 raw; a JS `.` stops at it, so staticCheck's BIND parse missed
+  // the binding and the unbound-use check refused a valid reservation
+  const { reserveOpId } = await import('../core/postseq-reserve.mjs');
+  const it = { mode: 'ordinary', author: 'ada', requestId: 'rk-b10', draft: { body: 'line\u2028sep and para\u2029sep', attachedTo: null, mentions: [], attachments: [], conversation: null, onBehalfOf: null } };
+  const opId = reserveOpId([it]);
+  const { sparql } = compile({ kind: 'postseq.reserve', opId, actor: 'urn:ex:seat/ada', reservations: [it] });   // compile runs staticCheck
+  assert.equal(staticCheck(sparql, opId).ok, true);
+  const lines = sparql.split('\n');
+  const at = lines.findIndex((l) => l.includes('\u2028') && /AS \?d_\w+\)$/.test(l));
+  assert.ok(at >= 0, 'the binding that carries the raw separator');
+  assert.equal(staticCheck(lines.filter((_, k) => k !== at).join('\n'), opId).ok, false, 'its removal is still refused');
 });
