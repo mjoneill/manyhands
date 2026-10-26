@@ -83,6 +83,8 @@
   "tests/health-readiness-1645.test.mjs",
   "tests/history-native-s1-1762.test.mjs",
   "tests/history-native-s1-builder-1762.test.mjs",
+  "tests/history-native-s1b-1762.test.mjs",
+  "tests/history-native-s1b-builder-1762.test.mjs",
   "tests/incarnation-1577.test.mjs",
   "tests/inline-spawners-startup-1671.test.mjs",
   "tests/label-aliases-executor-1640.test.mjs",
