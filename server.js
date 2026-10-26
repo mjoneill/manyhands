@@ -1978,10 +1978,13 @@ function readSnapshotMeta() {
 // #1386 — the meter as one object: readings + crossed ceilings. Throws when the
 // replica is not built (a boot that has not built it yet is an error, not zero rows).
 function graphStoreMeter() {
+  // #1789 — with the in-process copy retired (mode off/read-off) there is no store to meter, and the snapshot it would
+  // describe was last written before the cutover: refuse BEFORE reading graph-snapshot.json, so nothing touches it.
+  if (!DOCUMENT_READS) throw Object.assign(new Error(`the in-process copy is retired under SCRUM_BOARD_DOCUMENT=${BOARD_DOCUMENT}: no store to meter`), { code: 'REPLICA_RETIRED' });
   return readStoreMeter({ store: _graphStore, memory: process.memoryUsage(), boot: _graphBoot, replayTailMs: _graphReplayTailMs, snapshot: readSnapshotMeta(), ceilings: meterCeilings() });
 }
-// One line an hour so the trend is in the log without anyone polling /api/checks.
-setInterval(() => {
+// One line an hour so the trend is in the log without anyone polling /api/checks. #1789 — only while the copy exists.
+if (DOCUMENT_READS) setInterval(() => {
   try { const m = graphStoreMeter(); console.error(`${new Date().toISOString()} ${meterLine(m.readings, m.crossed)}`); } catch { /* not built yet — the boot line covers it */ }
 }, Number(process.env.SCRUM_METER_LOG_MS ?? 3_600_000)).unref();
 
