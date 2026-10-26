@@ -3,6 +3,7 @@
 // commits its activity exactly once. Against a real temp executor.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { HAVE_PY, tmpStore, startExecutor, killExecutor } from './helpers/graph-executor-proc.mjs';
 import { createGraphClient } from '../core/graph-client.mjs';
 import { compile, changeActivityIri, staticCheck, originKeyOf, mutationIdOf, originPrepareOp, admitStoredOriginPlan } from '../core/graph-compiler.mjs';
@@ -44,7 +45,7 @@ test('#1762 B3 CONTROL: a well-formed history compiles, and the activity terms r
 test('#1762 B4 against a real executor: APPLIED commits exactly one activity per part; a replay of the same op (lost ack) adds none; a refused write (stale version) adds none and changes nothing', { skip: !HAVE_PY && 'no executor python' }, async (t) => {
   const store = tmpStore('s1b-1762-');
   const x = await startExecutor({ store, datasetId: DS, create: true });
-  t.after(() => killExecutor(x));
+  t.after(async () => { await killExecutor(x); fs.rmSync(store, { recursive: true, force: true }); });   // no tmp leftover
   const client = createGraphClient({ baseUrl: x.baseUrl, expectedDatasetId: DS, timeoutMs: 30000, label: 's1-builder' });
   const count = async (opId) => {
     const q = await client.query(`SELECT (COUNT(?a) AS ?n) WHERE { ?a a <https://scrumboard.local/ns#ChangeActivity> ; <https://scrumboard.local/ns#recordedBy> <${opId}> }`);
