@@ -11,7 +11,9 @@ import { HAVE_PY, tmpStore, startExecutor, killExecutor } from './helpers/graph-
 import { createGraphClient } from '../core/graph-client.mjs';
 import { POSTSEQ_TERMS } from '../core/graph-vocab.mjs';
 
-const PROSE = ['its node is gone; delete the card', 'a; INSERT b', 'x;\tDELETE { } WHERE { }', 'semi; colon; plain'];
+const PROSE = ['its node is gone; delete the card', 'a; INSERT b', 'x;\tDELETE { } WHERE { }', 'semi; colon; plain',
+  // #1781's probe bodies: SPARQL quoted in a post
+  'GRAPH ?g { ?d <urn:ex:commitSeq> ?s }', '?op <urn:ex:commitSeq> ?c', 'a version stamp ?x <urn:ex:ver> 3'];
 const item = (body, requestId) => ({ mode: 'ordinary', author: 'ada', requestId, draft: { body, attachedTo: null, mentions: [], attachments: [], conversation: null, onBehalfOf: null } });
 const intent = (it) => ({ kind: 'postseq.reserve', opId: reserveOpId([it]), actor: 'urn:ex:seat/ada', reservations: [it] });
 
@@ -19,6 +21,10 @@ test('#1791 R1 prose containing "; delete" / "; INSERT" compiles; a real second 
   PROSE.forEach((body, k) => assert.doesNotThrow(() => compile(intent(item(body, `rk-1791-${k}`))), body));
   const { sparql } = compile(intent(item('plain', 'rk-1791-plain')));
   assert.equal(staticCheck(`${sparql};\nDELETE WHERE { ?s ?p ?o }`, reserveOpId([item('plain', 'rk-1791-plain')])).ok, false, 'a genuine multi-operation request is refused');
+  // the scans still see the request's OWN syntax: only the literals are blanked
+  const op = reserveOpId([item('plain', 'rk-1791-plain')]);
+  assert.equal(staticCheck(sparql.replace('\nWHERE {\n', '\nWHERE {\n  GRAPH ?g { ?gs ?gp ?go }\n'), op).ok, false, 'a real named graph in the WHERE is still refused');
+  assert.equal(staticCheck(sparql.replace('\nWHERE {\n', '\nWHERE {\n  ?xop <urn:ex:commitSeq> ?xc .\n'), op).ok, false, 'a real bookkeeping predicate outside GRAPH <bk> is still refused');
 });
 
 test('#1791 R2 against a real executor the reserved draft reads back byte-identical, semicolons and all', { skip: !HAVE_PY && 'no executor python' }, async (t) => {
@@ -36,5 +42,5 @@ test('#1791 R2 against a real executor the reserved draft reads back byte-identi
   assert.ok(q.ok, q.reason);
   assert.equal(q.rows.length, 1);
   assert.equal(JSON.parse(q.rows[0].dj.value).body, PROSE[0], 'the stored draft carries the text exactly');
-  assert.ok(!q.rows[0].dj.value.includes('\\u003B'), 'the escape is SPARQL spelling only: the stored string holds a real semicolon');
+  assert.ok(!/\\u00(3B|3F|7B|7D|3C|3E)/.test(q.rows[0].dj.value), 'the escapes are SPARQL spelling only: the stored string holds the real characters');
 });
