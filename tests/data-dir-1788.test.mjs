@@ -14,7 +14,8 @@
  *   D2  CONTROL, SCRUM_DATA_DIR unset: the same stores land beside the board file (today's paths, unchanged)
  *   D3  an explicit SCRUM_EVENT_LOG_DIR still wins over DATA_DIR
  *   D4  two boards sharing one DATA_DIR never share an event log or a misses log, including two boards whose files have
- *       the SAME name in different folders (the harness's normal case)
+ *       the SAME name in different folders (the harness's normal case). A board OUTSIDE its DATA_DIR logs under its stem plus
+ *       the first 8 hex of sha256(its absolute path); a board INSIDE it keeps the bare stem (D5, production)
  *   D5  a mode-off boot with SCRUM_BOARD_FILE UNSET and only SCRUM_DATA_DIR set serves, writes its event log into DATA_DIR,
  *       and creates nothing in the project folder
  *
@@ -27,6 +28,7 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { startRestServer, makeBoardFixture, freePort, PROJECT_DIR } from './helpers/harness.mjs';
 import { HAVE_PY } from './helpers/graph-executor-proc.mjs';
@@ -60,6 +62,12 @@ async function exercise(baseUrl) {
 }
 const exists = (p) => fs.existsSync(p);
 const stem = (boardFile) => path.basename(boardFile).replace(/\.json$/, '');
+/** the board's log name IN a DATA_DIR: the bare stem when the board file lives there, else the stem plus the first 8 hex of
+ *  sha256(its absolute path), so two boards with the same file name from different folders never share a log (settled with
+ *  the builder: production's board lives in its DATA_DIR, so its log keeps its name) */
+const logStem = (boardFile, dataDir) => (path.resolve(path.dirname(boardFile)) === path.resolve(dataDir)
+  ? stem(boardFile)
+  : `${stem(boardFile)}-${crypto.createHash('sha256').update(path.resolve(boardFile)).digest('hex').slice(0, 8)}`);
 
 test('#1788 D1 — SCRUM_DATA_DIR set and the board elsewhere: every derived store lands in DATA_DIR, and seat tokens are read from it', async () => {
   const data = tmp('dd-1788-data-');
@@ -73,8 +81,10 @@ test('#1788 D1 — SCRUM_DATA_DIR set and the board elsewhere: every derived sto
     const anon = await fetch(`${srv.baseUrl}/api/cards`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'no token', createdBy: 'ada' }) });
     assert.equal(anon.status, 401, `D1: required mode refuses a write without a token (${anon.status})`);
     await exercise(srv.baseUrl);   // its first assertion: the token ONLY DATA_DIR's seat-tokens.json holds is accepted
+    for (const name of ['graph-query-log.jsonl', 'search-index.jsonl', 'search-log.jsonl', `${logStem(srv.boardFile, data)}-misses.jsonl`, `${logStem(srv.boardFile, data)}-events`]) {
+      assert.ok(exists(path.join(data, name)), `D1: ${name} is in DATA_DIR (it holds: ${fs.readdirSync(data).join(', ')})`);
+    }
     for (const name of ['graph-query-log.jsonl', 'search-index.jsonl', 'search-log.jsonl', `${stem(srv.boardFile)}-misses.jsonl`, `${stem(srv.boardFile)}-events`]) {
-      assert.ok(exists(path.join(data, name)), `D1: ${name} is in DATA_DIR`);
       assert.ok(!exists(path.join(beside, name)), `D1: ${name} is NOT beside the board file`);
     }
   } finally { await srv?.stop(); await emb.stop(); fs.rmSync(data, { recursive: true, force: true }); }
@@ -102,7 +112,7 @@ test('#1788 D3 — an explicit SCRUM_EVENT_LOG_DIR still wins over SCRUM_DATA_DI
     const r = await fetch(`${srv.baseUrl}/api/cards`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'ev', createdBy: 'ada' }) });
     assert.equal(r.status, 201, `PRECONDITION: a write (${r.status})`);
     assert.ok(fs.readdirSync(events).length > 0, 'D3: the event log is in the explicit SCRUM_EVENT_LOG_DIR');
-    assert.ok(!exists(path.join(data, `${stem(srv.boardFile)}-events`)), 'D3: and not in DATA_DIR');
+    assert.ok(!exists(path.join(data, `${logStem(srv.boardFile, data)}-events`)) && !exists(path.join(data, `${stem(srv.boardFile)}-events`)), 'D3: and not in DATA_DIR');
   } finally { await srv?.stop(); fs.rmSync(data, { recursive: true, force: true }); fs.rmSync(events, { recursive: true, force: true }); }
 });
 
