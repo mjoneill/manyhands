@@ -4,6 +4,7 @@
 // still refused. Against a real executor, the stored draft reads back byte-identical.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { compile, staticCheck } from '../core/graph-compiler.mjs';
 import { reserveOpId } from '../core/postseq-reserve.mjs';
 import { postWriteId } from '../core/post-write.mjs';
@@ -41,8 +42,9 @@ test('#1791 R1 prose containing "; delete" / "; INSERT" compiles; a real second 
 });
 
 test('#1791 R2 against a real executor the reserved draft reads back byte-identical, semicolons and all', { skip: !HAVE_PY && 'no executor python' }, async (t) => {
-  const x = await startExecutor({ store: tmpStore('r1791-'), datasetId: 'r1791', create: true });
-  t.after(() => killExecutor(x));
+  const store = tmpStore('r1791-');
+  const x = await startExecutor({ store, datasetId: 'r1791', create: true });
+  t.after(async () => { await killExecutor(x); fs.rmSync(store, { recursive: true, force: true }); });   // no tmp leftover
   const c = createGraphClient({ baseUrl: x.baseUrl, expectedDatasetId: 'r1791', timeoutMs: 30000, label: 'r1791' });
   const seed = await fetch(`${x.baseUrl}/update`, { method: 'POST', headers: { 'x-op-id': 'urn:ex:op/test/r1791-seed', 'x-epoch': String((await (await fetch(`${x.baseUrl}/health`)).json()).epoch) },
     body: `INSERT DATA { GRAPH <urn:scrum:bookkeeping:executor> { <urn:ex:postseq/allocator> a <urn:ex:postseq/Allocator> ; <urn:ex:postseq/postSeqEpoch> "e-1791" ; <urn:ex:postseq/nextPostSeq> "1"^^<http://www.w3.org/2001/XMLSchema#integer> ; <urn:ex:postseq/version> "1"^^<http://www.w3.org/2001/XMLSchema#integer> . } }` });
