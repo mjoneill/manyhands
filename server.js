@@ -372,7 +372,8 @@ function configuredRoles(ents = null) {
   return loadRosterRoles();
 }
 /** #1764 — the history gate's copy (severance-check reads roster.json). Throws when it cannot be written. */
-const writeRosterExport = (seats, roles) => writeRoster({ seats, roles }, rosterFilePath());
+// The export may hold up to twice the save limit: mid-save it is the superset of the old and new rosters (#1764 C1).
+const writeRosterExport = (seats, roles) => writeRoster({ seats, roles }, rosterFilePath(), { maxSeats: 128 });
 
 function currentRoster(data = null) {
   if (!data) {
