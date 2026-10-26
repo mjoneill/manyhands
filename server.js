@@ -14270,16 +14270,22 @@ function migrateTendingIfNeeded() {
 migrateBoardIfNeeded();
 migrateTendingIfNeeded();
 // #1785 — ONE-TIME import of the file's switch and threshold onto TendingState, stamped (scrum:configImportedAt) so it never
-// runs twice and a later file edit can never override the graph. Fails closed: a missing or malformed file imports OFF.
+// runs twice and a later file edit can never override the graph. A malformed file imports OFF (readTendingConfig fails closed).
+// UNDER THE WRITE LOCK and awaited before listen(): with the collections unit on, a collection write outside the lock THROWS
+// (#1624), and an import that swallowed it would silently drop the file's values. So a failed import refuses to serve.
 try {
-  // a fresh clone has no file and no state: it imports nothing and writes nothing (tending-boot-migration's fresh-clone row)
-  if (!tendingConfigImported(tendingEntities()) && fs.existsSync(tendingConfigFilePath())) {
+  await withWriteLock(async () => {
+    // a fresh clone has no file and no state: it imports nothing and writes nothing (tending-boot-migration's fresh-clone row)
+    if (tendingConfigImported(tendingEntities()) || !fs.existsSync(tendingConfigFilePath())) return;
     const fromFile = readTendingConfig();
     const at = new Date().toISOString();
     writeTendingEntities(setTendingConfig(tendingEntities(), { ...fromFile, at, importedFrom: 'tending-config.json' }), { actor: 'board', op: 'update' });
     console.error(`${at} #1785 tending config imported onto TendingState from tending-config.json: enabled=${fromFile.enabled} quietAfterMinutes=${fromFile.quietAfterMinutes}`);
-  }
-} catch (e) { console.error(`#1785 tending config import failed (tending reads as its graph state, or OFF): ${e.message}`); }
+  });
+} catch (e) {
+  console.error(`#1785 tending config import FAILED — refusing to serve (the file's values would be silently lost): ${e.message}`);
+  process.exit(1);
+}
 
 // ── Start Server ──
 const server = http.createServer(handleRequest);
