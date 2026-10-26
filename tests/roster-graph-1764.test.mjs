@@ -10,8 +10,10 @@
  * rosterOrder then the invited agents (a configured seat wins a key collision). POST /api/roster validates as today and
  * writes the graph: named seats created or updated, omitted seats removed. RULED 2026-10-26 21:51Z (option A, built as A+1): after
  * every save, roster.json is rewritten UNDER THE SAME LOCK, LAST, as an exact export of the graph's roster (seats in rosterOrder,
- * plus roles), and a failed export fails the save (not 200: the graph change stands, the export is named stale, the next
- * successful save repairs it); the file is still never READ after the import. Boot imports
+ * plus roles), written as a SUPERSET first (builder's design, #1764 comment 21:54Z): under the lock, (1) the file as old ∪ new,
+ * (2) the graph commit, (3) the file as exactly the new set, so the file's seats always ⊇ the graph's (the gate may over-guard,
+ * never under-guard). A save whose step 1 fails is refused BEFORE the graph is touched. The file is never READ after the
+ * import. Boot imports
  * roster.json ONCE, only when NO seat node exists. MCP reads REST GET /api/roster on a timer.
  *
  * THE WORLD: a fresh executor with the conversations and small-kinds units on (the collections path, as the #1785 C1 row
@@ -25,8 +27,10 @@
  *       restart answers the same
  *   R3  the file edited after the import, then a restart: nothing changes (the file is never READ), and the next save
  *       rewrites it as the export again
- *   F1  the export made to FAIL (the file and its folder unwritable): the POST is not 200, the graph change stands (GET
- *       shows it), the file still holds the previous export; once writable again, the next successful save repairs it
+ *   F1  the export made to FAIL at step 1 (the file and its folder unwritable): the POST is not 200, the file is
+ *       byte-identical, the graph is UNCHANGED (GET does not show the extra seat), and the file's seats ⊇ the graph's;
+ *       once writable again, the next successful save lands in both. (A failure at step 3 alone, after the commit, needs an
+ *       injection between steps: the builder's row.)
  *   R4  an invited agent whose seatKey collides with a configured seat loses: GET shows the configured seat
  *   R5  a boot with NO file, a POSTed roster, then a file that appears: a restart does NOT import it over the saved seats
  *   M1  MCP (its own roster file path never written) lists a POSTed seat in a NEW session's tool descriptions within 5 s
@@ -151,7 +155,10 @@ test('#1764 R1–R4 — imported once in the file\'s ORDER with its roles; a POS
     finally { fs.chmodSync(path.dirname(file), 0o755); fs.chmodSync(file, 0o644); }
     assert.notEqual(pf.status, 200, `F1: a save whose export fails is NOT acknowledged (${pf.status} ${pf.text.slice(0, 200)})`);
     assert.ok(fs.readFileSync(file).equals(before), 'F1: the file still holds the previous export');
-    assert.ok((await call('GET', '/api/roster')).json.seats.fay, 'F1: the graph change stands (GET shows the new seat)');
+    const gf = (await call('GET', '/api/roster')).json;
+    assert.equal(gf.seats.fay, undefined, 'F1: a refused save leaves the graph UNCHANGED (GET does not show the extra seat)');
+    const fileSeats = Object.keys(JSON.parse(fs.readFileSync(file, 'utf8')).seats || {});
+    for (const k of Object.keys(configured(gf.seats))) assert.ok(fileSeats.includes(k), `F1: the file's seats ⊇ the graph's (${k} is in both)`);
     const pr = await call('POST', '/api/roster', F1);
     assert.equal(pr.status, 200, `F1: once writable, the save succeeds (${pr.status})`);
     assertExport(file, (await call('GET', '/api/roster')).json, 'F1: the next successful save repaired the export');
