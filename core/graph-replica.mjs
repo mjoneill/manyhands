@@ -1188,9 +1188,12 @@ function projectChannelConfig(store, e) {
   const add = (p, o) => store.add(oxigraph.triple(s, p, o));
   add(A, nn(S + 'ChannelConfig'));
   if (e['scrum:channelMode']) add(nn(S + 'channelMode'), lit(String(e['scrum:channelMode'])));
-  for (const k of ['softMinMs', 'softMaxMs', 'hardTimeoutMs', 'tokenRingTimeoutMs', 'residentReplyWakesPerPairPerHour']) {
-    if (e[`scrum:${k}`] != null) add(nn(S + k), intLit(e[`scrum:${k}`]));
-  }
+  // one explicit line per predicate (not a loop over names): #875's declaration check reads the emitted names from this source
+  if (e['scrum:softMinMs'] != null) add(nn(S + 'softMinMs'), intLit(e['scrum:softMinMs']));
+  if (e['scrum:softMaxMs'] != null) add(nn(S + 'softMaxMs'), intLit(e['scrum:softMaxMs']));
+  if (e['scrum:hardTimeoutMs'] != null) add(nn(S + 'hardTimeoutMs'), intLit(e['scrum:hardTimeoutMs']));
+  if (e['scrum:tokenRingTimeoutMs'] != null) add(nn(S + 'tokenRingTimeoutMs'), intLit(e['scrum:tokenRingTimeoutMs']));
+  if (e['scrum:residentReplyWakesPerPairPerHour'] != null) add(nn(S + 'residentReplyWakesPerPairPerHour'), intLit(e['scrum:residentReplyWakesPerPairPerHour']));
   for (const seat of [].concat(e['scrum:bearerSeat'] ?? [])) add(nn(S + 'bearerSeat'), lit(String(seat)));
   if (e['scrum:configImportedFrom']) add(nn(S + 'configImportedFrom'), lit(String(e['scrum:configImportedFrom'])));
   if (e['scrum:configImportedAt']) add(nn(S + 'configImportedAt'), lit(String(e['scrum:configImportedAt'])));
