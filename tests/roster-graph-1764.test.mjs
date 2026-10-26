@@ -36,8 +36,17 @@
  *   R6  the state a crash between the graph commit and the narrowing write leaves (simulated: after a save that REMOVED a
  *       seat, the file rewritten as the superset, with the removed seat back): the removed seat is not served (GET), and a
  *       restart's boot re-export narrows the file to exactly the graph's roster before serving
+ *   B1  a SAME-KEY RENAME whose graph commit is refused (the executor down at the save): whatever the file holds afterwards
+ *       still GUARDS the old display name. The gate guards a non-system seat's KEY and its NAME, so a superset that keeps the
+ *       key but takes the new name drops the old name before the graph has changed (PR #140 review, 11a3513)
+ *   B2  a person→system change whose graph commit is refused: the file still lists the seat as a PERSON (the gate opts only
+ *       kind:system out), so its key and name stay guarded while the graph still holds it as one
+ *   B3  B1 and B2 against the REAL severance gate, when it is on this machine (it is private; a skip names that)
  *   M1  MCP (its own roster file path never written) lists a POSTed seat in a NEW session's tool descriptions within 5 s
  *   U1  the board page's "Post as" picker lists the configured seats in rosterOrder, the first one first
+ *
+ * B-ROWS: "guarded" is the gate's own definition (scripts/severance-check.mjs in the private tree): the lowercased key and name of
+ * every seat whose kind is not `system`, where the string is longer than 2 characters. The rows never call the gate except in B3.
  *
  * NOT COVERED, BY NAME: MCP's roster before its first good read; MCP keeping the last good roster with REST down (the
  * #1784 rows hold that shape for the channel config); seat tokens of a removed seat (a separate auth question).
@@ -49,6 +58,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { makeBoardFixture, startRestServer, startMcpServer, mcpSession, withBrowserServer } from './helpers/harness.mjs';
 import { HAVE_PY, tmpStore, startExecutor, killExecutor } from './helpers/graph-executor-proc.mjs';
+import { spawnSync } from 'node:child_process';
 import { createGraphClient } from '../core/graph-client.mjs';
 
 const SKIP = HAVE_PY ? false : 'UNAVAILABLE: no python with pyoxigraph (a skip is not a pass)';
@@ -85,7 +95,7 @@ async function world(fileContent, body) {
     const x = await fetch(`${rest.baseUrl}${route}`, { method, ...(payload ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) } : {}), signal: AbortSignal.timeout(30000) });
     const t = await x.text(); let j = null; try { j = JSON.parse(t); } catch { /* not json */ } return { status: x.status, text: t, json: j };
   };
-  try { await body({ q, start, call, file, dir, rest: () => rest, env }); }
+  try { await body({ q, start, call, file, dir, rest: () => rest, env, exec }); }
   finally { for (const r of servers.reverse()) await r.stop().catch(() => {}); await killExecutor(exec); fs.rmSync(dir, { recursive: true, force: true }); fs.rmSync(store, { recursive: true, force: true }); }
 }
 
@@ -234,4 +244,71 @@ test('#1764 R6 — a crash-left superset (a removed seat still in the file) is n
     assert.equal(g.json.seats.mo, undefined, 'R6: the removed seat is not served (the graph is the authority, the file is never read)');
     assertExport(file, g.json, 'R6: the boot re-export narrowed the crash-left superset to exactly the graph\'s roster');
   });
+});
+
+
+// ── B1–B3 (the BOUNDARY rows) — the superset must keep every GUARDED IDENTITY of the roster the graph still holds, not only every seat key ──────────────────
+// A key and a display name are both guarded (kind:system opts a seat out). These rows use names that DIFFER from their keys,
+// so the key surviving cannot hide the name going.
+const GFILE = { seats: { kay: { name: 'Katherine', glyph: 'k', color: '#111111' }, amy: { name: 'Amanda', glyph: 'a', color: '#222222' }, mel: { name: 'Melanie', glyph: 'm', color: '#333333' }, board: { name: 'Board', glyph: 'o', color: '#8899aa', kind: 'system' } } };
+/** the gate's guarded strings for a roster file's seats: lowercased key and name of every non-system seat, longer than 2 chars */
+const guardedOf = (seats) => new Set(Object.entries(seats || {}).filter(([, v]) => String(v?.kind ?? '').toLowerCase() !== 'system')
+  .flatMap(([k, v]) => [k, v?.name]).filter((x) => typeof x === 'string' && x.length > 2).map((x) => x.toLowerCase()));
+const fileSeatsOf = (file) => JSON.parse(fs.readFileSync(file, 'utf8')).seats || {};
+
+/** import GFILE, take the executor away, POST `next`, and hand back the refused save and what the file holds afterwards */
+async function refusedSave(next, body) {
+  await world(GFILE, async ({ start, call, file, exec, q }) => {
+    await start();
+    const g0 = await call('GET', '/api/roster');
+    assert.equal(g0.status, 200, `PRECONDITION: the import (${g0.status})`);
+    const before = guardedOf(fileSeatsOf(file));
+    for (const k of ['kay', 'katherine', 'amy', 'amanda', 'mel', 'melanie']) assert.ok(before.has(k), `PRECONDITION: the imported file guards ${k}`);
+    await killExecutor(exec);
+    const post = await call('POST', '/api/roster', { ...GFILE, seats: { ...GFILE.seats, ...next }, roles: g0.json.roles });
+    assert.notEqual(post.status, 200, `PRECONDITION: a save whose graph commit cannot land is not acknowledged (${post.status} ${post.text.slice(0, 160)})`);
+    await body({ file, before, after: guardedOf(fileSeatsOf(file)), seats: fileSeatsOf(file), post });
+  });
+}
+
+test('#1764 B1 — a same-key rename whose graph commit is refused leaves the OLD display name guarded in the file', T, async () => {
+  await refusedSave({ amy: { name: 'Amelia', glyph: 'a', color: '#222222' } }, async ({ before, after, seats }) => {
+    for (const g of before) assert.ok(after.has(g), `B1: "${g}" was guarded before the save and the graph still holds it, so the file must still guard it (the file guards: ${[...after].join(', ')})`);
+    assert.ok(after.has('amanda'), 'B1: the OLD name (amanda) stays guarded until the graph holds the new one');
+    assert.ok(after.has('amy'), 'B1: the key stays guarded');
+    // the new name may be guarded too (the superset), or the file may be untouched (a rollback); either is safe, a hole is not
+    assert.ok(after.has('amelia') || seats.amy.name === 'Amanda', 'B1: the new name is guarded, or the file was left as it was');
+  });
+});
+
+test('#1764 B2 — a person→system change whose graph commit is refused leaves the seat guarded as a person', T, async () => {
+  await refusedSave({ mel: { name: 'Melanie', glyph: 'm', color: '#333333', kind: 'system' } }, async ({ before, after, seats }) => {
+    assert.notEqual(String(seats.mel?.kind ?? '').toLowerCase(), 'system', 'B2: the file does not opt the seat out of the gate while the graph still holds it as a person');
+    for (const g of before) assert.ok(after.has(g), `B2: "${g}" was guarded before the save and must still be (the file guards: ${[...after].join(', ')})`);
+  });
+});
+
+// B3 — the same two saves read by the REAL gate. The gate is in the private tree (its term list is the room, so it cannot ship here);
+// SEVERANCE_CHECK names it (unset, there is no default path). Unset, B3 is SKIPPED loudly and B1/B2 above are what holds in CI.
+const GATE = process.env.SEVERANCE_CHECK || '';
+test('#1764 B3 — the real severance gate still REFUSES the old name after a refused same-key rename and a refused person→system change', { skip: SKIP || (GATE && fs.existsSync(GATE) ? false : 'UNAVAILABLE: SEVERANCE_CHECK is not set to a severance-check script (the gate is private; a skip is not a pass)'), timeout: 300000 }, async () => {
+  const scan = fs.mkdtempSync(path.join(os.tmpdir(), 'ros-1764-scan-'));
+  const rules = path.join(scan, 'rules.json');
+  fs.writeFileSync(rules, JSON.stringify({ forbidden: Array.from({ length: 30 }, (_, i) => ({ pattern: `not-present-fixture-sentinel-${i}`, flags: 'gi' })) }));
+  fs.mkdirSync(path.join(scan, 'tree'));
+  const gate = (file, text) => {
+    fs.writeFileSync(path.join(scan, 'tree', 'sample.mjs'), `export const author = ${JSON.stringify(text)};\n`);
+    const r = spawnSync(process.execPath, [GATE, path.join(scan, 'tree'), '--json'], { encoding: 'utf8', env: { ...process.env, SCRUM_ROSTER_FILE: file, SCRUM_EXPORT_TRANSFORMS: rules } });
+    assert.ok(r.status === 0 || r.status === 1, `the gate ran (exit ${r.status}: ${r.stderr.slice(0, 200)})`);
+    return r.status;
+  };
+  try {
+    await refusedSave({ amy: { name: 'Amelia', glyph: 'a', color: '#222222' } }, async ({ file }) => {
+      assert.equal(gate(file, 'Amanda'), 1, 'B3: after the refused rename, the gate REFUSES a tree that names the old name (amanda)');
+      assert.equal(gate(file, 'Unrelated Text'), 0, 'B3: the control: the same gate on the same file passes a tree that names nobody on the roster (it is not refusing everything)');
+    });
+    await refusedSave({ mel: { name: 'Melanie', glyph: 'm', color: '#333333', kind: 'system' } }, async ({ file }) => {
+      assert.equal(gate(file, 'Melanie'), 1, 'B3: after the refused person→system change, the gate REFUSES a tree that names melanie');
+    });
+  } finally { fs.rmSync(scan, { recursive: true, force: true }); }
 });
