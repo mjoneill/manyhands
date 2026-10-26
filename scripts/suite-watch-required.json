@@ -47,6 +47,7 @@
   "tests/cutover-capture-step2-1747.test.mjs",
   "tests/cutover-import-step4-1747-part2.test.mjs",
   "tests/cutover-import-step4-1747.test.mjs",
+  "tests/data-dir-1788.test.mjs",
   "tests/decision-makers-disabled-r1.test.mjs",
   "tests/definitions-graph-d1.test.mjs",
   "tests/delivery-graph-post-d1.test.mjs",
