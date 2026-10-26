@@ -27,6 +27,9 @@
  *       activity contains the post's text, before or after
  *   K13 a REPLAYED model call (same requestId) adds no activity
  *   K14 a REFUSED decision (a same-person twin within ten minutes, 409) adds no activity
+ *   K15 post.create: a claim's board announcement, published asynchronously from the outbox, records op post, kind
+ *       conversation, actor person/board, recordedBy urn:ex:op/announce/<id>/claim, prov:used the announced post (the row
+ *       waits for THAT op's activity, never a time window)
  *
  * ASSUMPTIONS beyond the contract text, each named:
  *   - prov:used is the record's own subject IRI. For a memory, decision, post, delivery, model call and wake it is located
@@ -36,9 +39,7 @@
  *   - a wake's entityKind is the projector's family string; the rows assert only that it is a non-empty literal and that
  *     the op is create (the collection path's create).
  *
- * NOT COVERED, BY NAME: post.create (a board announcement published from the outbox: in this world no claim announcement was
- * published within the run, measured 2026-10-26 ~19:04Z, so it cannot be driven black-box here; the builder's rows hold it,
- * with prov:wasAssociatedWith person/board); a REFUSED record write (each REST refusal tried here is a validation 400 that
+ * NOT COVERED, BY NAME: a REFUSED record write (each REST refusal tried here is a validation 400 that
  * and K14's twin may be refused before the compiler, so "refused ⇒ no activity" at the executor is the builder's row); the emitter sabotages
  * and the durableUpdate forgotten-path refusal (the builder's rows).
  */
@@ -264,6 +265,30 @@ test('#1762 K1–K13 — flag on: every record write commits ONE activity with t
     // K11 a wake (S1's collection path)
     await recordWrite(s, 'K11 wake', () => call('POST', '/api/wakes', { by: 'ada', note: 'hn1b wake' }),
       { op: 'create', kind: null, used: async (r) => idOf(r), versionAfter: 'unknown' });
+
+    // K15 post.create: a claim's announcement is published asynchronously; wait for ITS activity (an announce op ending /claim)
+    const seen15 = new Set((await activities(q)).keys());
+    const cl = await call('POST', '/api/cards/uuid-1/claim', { by: 'ada' });
+    assert.equal(cl.status, 200, `PRECONDITION: ada claims #1 (${cl.status} ${cl.text.slice(0, 160)})`);
+    let ann = null;
+    for (let t0 = Date.now(); !ann && Date.now() - t0 < 30_000; await new Promise((r) => setTimeout(r, 250))) {
+      ann = [...(await activities(q)).entries()].find(([a, n]) => !seen15.has(a) && (n[C.recordedBy] || []).some((x) => /^urn:ex:op\/announce\/[^/]+\/claim$/.test(x.value)));
+    }
+    assert.ok(ann, 'K15: the claim announcement recorded its activity within 30 s');
+    const [i15, n15] = ann;
+    const op15 = one(n15, C.recordedBy, 'K15').value;
+    assert.equal(one(n15, C.op, 'K15').value, 'post', 'K15: op post');
+    assert.equal(one(n15, C.entityKind, 'K15').value, 'conversation', 'K15: entityKind conversation');
+    assert.equal(one(n15, C.actor, 'K15').value, `${PERSON}board`, 'K15: the publishing actor is the board');
+    assert.equal(one(n15, C.part, 'K15').value, '0', 'K15: part 0');
+    assert.equal(i15, activityIri(op15, 0), 'K15: the IRI shape');
+    assert.equal(one(n15, C.versionAfter, 'K15').value, UNKNOWN, 'K15: versionAfter unknown');
+    for (const p of CARD_ONLY) assert.equal((n15[p] || []).length, 0, `K15: no card-only fact ${p}`);
+    const used15 = one(n15, C.used, 'K15').value;
+    const post15 = await q(`SELECT ?a WHERE { <${used15}> <${RDF_TYPE}> <https://schema.org/Comment> ; <https://schema.org/author> ?a }`);
+    assert.equal(post15.length, 1, `K15: prov:used is an announced post that exists (${used15})`);
+    assert.match(post15[0].a.value, /board$/, 'K15: the announced post is the board\'s');
+    assert.match((await receipt(q, op15)).outcome, /APPLIED$/, 'K15: the announce op\'s receipt is APPLIED');
 
     // K12 R7: a redaction records facts only
     const before12 = await activities(q);
