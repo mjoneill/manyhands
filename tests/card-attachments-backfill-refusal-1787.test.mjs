@@ -3,6 +3,7 @@
 // every /update with a 500 (the executor away mid-backfill). Without a python with pyoxigraph it is SKIPPED, not passed.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -21,8 +22,9 @@ const run = (args) => new Promise((resolve) => {
 });
 
 test('#1787 BR1 a backfill write that is not APPLIED exits 1, names the card, and never prints the success line', { skip: !HAVE_PY && 'no executor python', timeout: 180000 }, async (t) => {
-  const x = await startExecutor({ store: tmpStore('bf-1787-'), datasetId: DS, create: true });
-  t.after(() => killExecutor(x));
+  const store = tmpStore('bf-1787-');
+  const x = await startExecutor({ store, datasetId: DS, create: true });
+  t.after(async () => { await killExecutor(x); fs.rmSync(store, { recursive: true, force: true }); });   // no tmp leftover
   const g = createGraphClient({ baseUrl: x.baseUrl, expectedDatasetId: DS, timeoutMs: 30000, label: 'br1' });
   const card = { id: 'c-br1', shortId: 7, title: 'with an attachment', column: 'backlog', version: 1, attachments: [{ id: 'att-1', name: 'a.png', mime: 'image/png', size: 3 }] };
   const w = await g.update({ kind: 'card.write', opId: 'urn:ex:op/card/br1', actor: 'https://scrumboard.local/person/ada', parts: [{ iri: cardIriOf(card.id), expectedVersion: null, version: '1', quads: cardQuads(card, shortIdMap([card])), json: JSON.stringify(card) }] });
