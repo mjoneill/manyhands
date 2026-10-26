@@ -42,6 +42,9 @@
  *   B2  a person→system change whose graph commit is refused: the file still lists the seat as a PERSON (the gate opts only
  *       kind:system out), so its key and name stay guarded while the graph still holds it as one
  *   B3  B1 and B2 against the REAL severance gate, when it is on this machine (it is private; a skip names that)
+ *   C1  CAPACITY: a roster at the public limit (64 seats) saved with one seat renamed is ACCEPTED, the file is the exact
+ *       64-seat export afterwards, and the limit itself still holds (65 seats is refused). The transitional export may carry
+ *       a derived key for the old identity, but it must not be what trips the limit (PR #140 review, 22:59Z)
  *   M1  MCP (its own roster file path never written) lists a POSTed seat in a NEW session's tool descriptions within 5 s
  *   U1  the board page's "Post as" picker lists the configured seats in rosterOrder, the first one first
  *
@@ -311,4 +314,30 @@ test('#1764 B3 — the real severance gate still REFUSES the old name after a re
       assert.equal(gate(file, 'Melanie'), 1, 'B3: after the refused person→system change, the gate REFUSES a tree that names melanie');
     });
   } finally { fs.rmSync(scan, { recursive: true, force: true }); }
+});
+
+
+test('#1764 C1 — a roster at the 64-seat limit can have one seat renamed; the limit itself still holds', T, async () => {
+  const seats64 = Object.fromEntries(Array.from({ length: 64 }, (_, i) => [`seat${String(i).padStart(2, '0')}`, { name: `Person Number ${i}`, glyph: 'p', color: '#abcdef' }]));
+  await world({ seats: seats64, roles: { po: 'seat00' } }, async ({ start, call, file, q }) => {
+    await start();
+    const g0 = await call('GET', '/api/roster');
+    assert.equal(g0.status, 200, `PRECONDITION: the import (${g0.status})`);
+    assert.equal(keysOf(configured(g0.json.seats)).length, 64, 'PRECONDITION: all 64 seats imported');
+    // rename one seat under the same key: the old display name is retired
+    const next = { seats: { ...seats64, seat07: { ...seats64.seat07, name: 'Renamed Person' } }, roles: g0.json.roles };
+    const p = await call('POST', '/api/roster', next);
+    assert.equal(p.status, 200, `C1: a valid 64-seat roster with one rename is accepted (${p.status} ${p.text.slice(0, 200)})`);
+    const g1 = await call('GET', '/api/roster');
+    assert.equal(keysOf(configured(g1.json.seats)).length, 64, 'C1: GET still lists exactly 64 seats');
+    assert.equal(g1.json.seats.seat07.name, 'Renamed Person', 'C1: the rename landed');
+    assert.equal(Object.keys(await seatNodes(q)).length, 64, 'C1: the graph holds exactly 64 seat nodes');
+    assertExport(file, g1.json, 'C1: after the save the file is the exact 64-seat export');
+    // the public limit is unchanged: 65 seats is still refused, and nothing changes
+    const over = { seats: { ...seats64, seat64: { name: 'One Too Many', glyph: 'p', color: '#abcdef' } }, roles: g0.json.roles };
+    const before = fs.readFileSync(file);
+    const po = await call('POST', '/api/roster', over);
+    assert.equal(po.status, 400, `C1: 65 seats is still refused as invalid (${po.status} ${po.text.slice(0, 160)})`);
+    assert.ok(fs.readFileSync(file).equals(before), 'C1: a refused over-limit save leaves the file as it was');
+  });
 });
