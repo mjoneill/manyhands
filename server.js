@@ -69,6 +69,8 @@ import { readTendingConfig, writeTendingConfig } from './tending-config.mjs';
 import { buildTendingEntities, person as personIri } from './core/tending-bootstrap.mjs';
 import { resolvePool as resolveWhisperPool, bagState } from './core/tending-pool.mjs';
 import { mintId } from './core/tending-ids.mjs';
+import { windowReserved, reservationEntity, claimStateFor, grantEntity, claimHistory } from './core/whisper-graph.mjs';   // #1786
+import { claimWhisper, HOUR_MS } from './core/whisper-window.mjs';   // #1786 — the claim decision, unchanged, over graph state
 import { createPrompt, editPrompt, setEnabled, reorderPlaylist, removePrompt, setShuffle, readShuffle, assertSlug } from './core/tending-authoring.mjs';
 import { resolveProvenance } from './core/tending-provenance.mjs';
 import { boardToDomain, domainToBoard, cardToNode } from './core/mapping.mjs';
@@ -9764,6 +9766,58 @@ async function handleCreateMint(req, res) {
   }
 }
 
+// ── #1786 — the whisper's two once-per-window guards, as graph state decided under the write lock (core/whisper-graph.mjs).
+// REST is the one writer, so the check and the write cannot interleave: two MCP processes or ticks racing one window get
+// one 201 and one 409 (a send), or one grant and one refusal (a whisper). The MCP no longer keeps whisper-state.json.
+const periodOf = (v) => (Number.isSafeInteger(v) && v > 0 ? v : HOUR_MS);
+async function handleReserveWindow(req, res) {
+  try {
+    const raw = await readBody(req);
+    const { window, by } = raw ? JSON.parse(raw) : {};
+    if (!window || typeof window !== 'string') return sendJSON(res, 400, { error: 'window is required' });
+    const out = await withWriteLock(async () => {
+      if (windowReserved(tendingEntities(), window)) return { already: true };
+      writeTendingEntities([reservationEntity(window, new Date().toISOString())], { actor: by || 'board', op: 'create' });
+      return { reserved: true };
+    });
+    return out.already ? sendJSON(res, 409, { already: true, window }) : sendJSON(res, 201, { reserved: true, window });
+  } catch (e) {
+    console.error('POST /api/tending/windows:', e.message);
+    sendJSON(res, 500, { error: 'Failed to reserve the window' });
+  }
+}
+async function handleClaimWhisper(req, res) {
+  try {
+    const raw = await readBody(req);
+    const body = raw ? JSON.parse(raw) : {};
+    const { window, seat } = body;
+    if (!window || !seat) return sendJSON(res, 400, { error: 'window and seat are required' });
+    const receivedAt = typeof body.receivedAt === 'string' ? body.receivedAt : new Date().toISOString();
+    let r;
+    try {
+      r = await withWriteLock(async () => {
+        const ents = tendingEntities();
+        const now = new Date().toISOString();
+        const d = claimWhisper({ state: claimStateFor(ents, window), prompt: { window }, seat, now, periodMs: periodOf(body.periodMs) });
+        if (d.granted) writeTendingEntities([grantEntity({ ents, window, seat, receivedAt, completedAt: now, reached: body.reached })], { actor: seat, op: 'create' });
+        return d;
+      });
+    } catch (e) {
+      if (/claimWhisper:/.test(e.message)) return sendJSON(res, 400, { granted: false, reason: 'invalid', error: e.message });
+      throw e;
+    }
+    const { state: _state, ...answer } = r;   // the settlement state is the graph's, not the caller's
+    sendJSON(res, 200, answer);
+  } catch (e) {
+    console.error('POST /api/tending/claims:', e.message);
+    sendJSON(res, 500, { error: 'Failed to settle the claim' });
+  }
+}
+function handleGetClaims(req, res) {
+  const limit = Math.min(200, Math.max(1, Number(new URL(req.url, 'http://x').searchParams.get('limit')) || 24));
+  sendJSON(res, 200, { history: claimHistory(tendingEntities(), limit) });
+}
+
 function handleGetWhispers(req, res) {
   try { sendWhispers(res); } catch (e) {
     console.error('GET /api/tending/whispers:', e.message);
@@ -13362,6 +13416,9 @@ const API_ROUTES = [
   { method: 'POST',   re: /^\/api\/tending\/order$/,        fn: (req, res) => applyTendingOp(req, res, (e, b, at) => reorderPlaylist(e, { slugs: b.slugs, at })) },
   { method: 'POST',   re: /^\/api\/tending\/shuffle$/,      fn: (req, res) => applyTendingOp(req, res, (e, b, at) => setShuffle(e, { shuffle: b.shuffle === true, at })) },
   { method: 'POST',   re: /^\/api\/tending\/mints$/,        fn: (req, res) => handleCreateMint(req, res) },
+  { method: 'POST',   re: /^\/api\/tending\/windows$/,      fn: (req, res) => handleReserveWindow(req, res) },   // #1786
+  { method: 'POST',   re: /^\/api\/tending\/claims$/,       fn: (req, res) => handleClaimWhisper(req, res) },    // #1786
+  { method: 'GET',    re: /^\/api\/tending\/claims$/,       fn: (req, res) => handleGetClaims(req, res) },       // #1786
   { method: 'POST',   re: /^\/api\/tending-config$/,       fn: (req, res) => handleSetTendingConfig(req, res) },
   { method: 'POST',   re: /^\/api\/roster$/,               fn: (req, res) => handleSetRoster(req, res) },   // #506
   { method: 'GET',    re: /^\/api\/people$/,               fn: (req, res) => handleListPeople(req, res) },       // #619
@@ -14265,7 +14322,10 @@ function migrateTendingIfNeeded() {
 }
 
 migrateBoardIfNeeded();
-migrateTendingIfNeeded();
+// #1786 — UNDER THE WRITE LOCK, awaited before listen(): with the collections unit on, a collection write outside the lock
+// throws (#1624), and an unmigrated graph with whisper-state.json or whisper-pool.json present refused to boot. The function's
+// own failure path (refuse to serve) is unchanged.
+await withWriteLock(async () => migrateTendingIfNeeded());
 
 // ── Start Server ──
 const server = http.createServer(handleRequest);

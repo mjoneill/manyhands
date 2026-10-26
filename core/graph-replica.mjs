@@ -152,7 +152,7 @@ export const GRAPH_VOCABULARY = new Set([
   // reconciliation below fails on anything emitted but not declared.
   'scrum:Card',
   'scrum:ReleaseCondition', 'scrum:Decision', 'scrum:MemoryVersion',
-  'scrum:Memory', 'scrum:TendingClaimAttempt', 'scrum:TendingMint',
+  'scrum:Memory', 'scrum:TendingClaimAttempt', 'scrum:TendingMint', 'scrum:TendingWindowReservation',
   'scrum:TendingState', 'scrum:TendingPlaylistVersion', 'scrum:TendingPlaylist',
   'scrum:TendingPromptVersion', 'scrum:TendingPrompt', 'scrum:Column',
   'scrum:Blocker', 'scrum:Commit', 'scrum:UnresolvedReference', 'scrum:Check',
