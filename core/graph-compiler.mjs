@@ -406,6 +406,12 @@ export function staticCheck(sparql, opId) {
   for (const [v, expr] of Object.entries(dDefs)) {
     if (!/^IF\(BOUND\(\?ok\), .+, \?u\)$/.test(expr)) errors.push(`?${v} is not ok-guarded`);
   }
+  // #1762 S1 (review 131) — every ?d_ variable a template USES must be DEFINED: a template variable with no binding is not an
+  // error in SPARQL, it is a triple silently skipped, so a missing definition would commit the rest of the write without it
+  // (the removed-binding sabotage: APPLIED, the card written, zero activities). Refused here, for every write kind.
+  for (const name of ['DELETE', 'INSERT']) {
+    for (const m of block(name).join('\n').matchAll(/\?(d_\w+)/g)) if (!(m[1] in dDefs)) errors.push(`?${m[1]} is used in the ${name} template but never bound (a triple would be silently skipped)`);
+  }
   if ((where.match(/BIND\(true AS \?ok\)/g) || []).length !== 1) errors.push('?ok must be bound exactly once');
   if (!new RegExp(`^\\s*OPTIONAL \\{ GRAPH ${escRe(BK)} \\{ <[^>]+> <urn:ex:digest> \\?dup \\} \\}\\n\\s*FILTER\\(!BOUND\\(\\?dup\\)\\)`).test(where)) errors.push(`duplicate guard missing, not first, or not read from GRAPH ${BK}`);
   if (/;\s*(INSERT|DELETE)/i.test(sparql)) errors.push('multi-operation request');
@@ -2055,7 +2061,9 @@ export function admitStoredOriginPlan(descriptor, plan) {
     if (!Array.isArray(plan.collections) || !plan.collections.length) fail('plan.collections, when present, is a non-empty array');
     plan.collections.forEach((p, k) => {
       const w = `plan.collections[${k}]`;
-      keys(p, ['collection', 'iri', 'expectedVersion', 'version', 'quads', 'prior', 'json'], ['unique', 'requires'], w);
+      keys(p, ['collection', 'iri', 'expectedVersion', 'version', 'quads', 'prior', 'json'], ['unique', 'requires', 'history'], w);
+      // #1762 S1 (review 131) — a stored collection part's activity facts are admitted only in their own canonical form
+      if (p.history != null && JSON.stringify(canonEntityHistory(p.history, `${w}.history`, false)) !== JSON.stringify(p.history)) fail(`${w}.history is not its own canonical form`);
       if (typeof p.collection !== 'string' || !COLL_KEY_RE.test(p.collection)) fail(`${w}.collection must name a collection`);
       const iri = checkIri(p.iri, `${w}.iri`);
       versions(p, w);
@@ -2089,7 +2097,7 @@ export function admitStoredOriginPlan(descriptor, plan) {
   // rebuilt in canonCardWrite's own key order, so a caller comparing its JSON to the stored bytes refuses a reordering
   const cardPart = (p) => ({ iri: p.iri, expectedVersion: p.expectedVersion, version: p.version, quads: p.quads, prior: p.prior, json: p.json, ...(p.reason != null ? { reason: p.reason } : {}), ...(p.history != null ? { history: p.history } : {}) });   // #1762 S1
   const collPart = (p) => ({ collection: p.collection, iri: p.iri, expectedVersion: p.expectedVersion, version: p.version, quads: p.quads, prior: p.prior, json: p.json,
-    ...(p.unique ? { unique: p.unique.map((u) => ({ all: u.all.map((a) => ({ predicate: a.predicate, value: a.value })) })) } : {}), ...(p.requires ? { requires: p.requires } : {}) });
+    ...(p.unique ? { unique: p.unique.map((u) => ({ all: u.all.map((a) => ({ predicate: a.predicate, value: a.value })) })) } : {}), ...(p.requires ? { requires: p.requires } : {}), ...(p.history != null ? { history: p.history } : {}) });   // #1762 S1
   return { parts: plan.parts.map(cardPart), counter: plan.counter, ...(plan.collections ? { collections: plan.collections.map(collPart) } : {}), ...(plan.reads ? { reads: plan.reads.map((r) => ({ iri: r.iri, version: r.version })) } : {}), ...(plan.walk ? { walk: { ...plan.walk } } : {}) };
 }
 

@@ -5,7 +5,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { HAVE_PY, tmpStore, startExecutor, killExecutor } from './helpers/graph-executor-proc.mjs';
 import { createGraphClient } from '../core/graph-client.mjs';
-import { compile, changeActivityIri } from '../core/graph-compiler.mjs';
+import { compile, changeActivityIri, staticCheck, originKeyOf, mutationIdOf, originPrepareOp, admitStoredOriginPlan } from '../core/graph-compiler.mjs';
+import { entityQuads } from '../core/collections-unit.mjs';
 import { cardQuads, cardIriOf, shortIdMap } from '../core/cards-graph.mjs';
 import { cardHistoryFacts } from '../core/cards-unit.mjs';
 import { lacksRequiredHistory, durableUpdate } from '../core/durable-update.mjs';
@@ -109,4 +110,34 @@ test('#1762 B7 with native history ON, a card or collection write carrying NO hi
     const r = await durableUpdate({ update: async () => { sent++; return { outcome: 'APPLIED' }; }, reconcile: async () => ({ outcome: 'ABSENT' }) }, bare);
     assert.equal(r.outcome, 'REJECTED'); assert.match(r.reason, /HISTORY_REQUIRED/); assert.equal(sent, 0, 'nothing was sent');
   } finally { if (prev === undefined) delete process.env.SCRUM_HISTORY_NATIVE; else process.env.SCRUM_HISTORY_NATIVE = prev; }
+});
+
+test('#1762 B8 (review 131) a template variable with its binding REMOVED is refused by staticCheck: never APPLIED with the activity silently skipped', () => {
+  const c = card({ id: 'review-card' });
+  const opId = 'urn:ex:op/card/b8';
+  const { sparql } = compile(intent(opId, [createPart(c)]));
+  assert.equal(staticCheck(sparql, opId).ok, true, 'control: the compiled update passes');
+  const lines = sparql.split('\n');
+  const at = lines.findIndex((l) => l.includes(`BIND(IF(BOUND(?ok), <${changeActivityIri(opId, 0)}>,`));
+  assert.ok(at >= 0, 'the activity subject binding is in the update');
+  const mutant = lines.filter((_, i) => i !== at).join('\n');
+  const r = staticCheck(mutant, opId);
+  assert.equal(r.ok, false, 'the removed-binding mutant is refused');
+  assert.ok(r.errors.some((e) => /never bound/.test(e)), JSON.stringify(r.errors));
+});
+
+test('#1762 B9 (review 131) a prepared origin plan carrying COLLECTION history is admitted on read-back, and a non-canonical one is refused', () => {
+  const actor = 'https://scrumboard.local/person/ada', agent = 'https://scrumboard.local/agent/zoe';
+  const mid = mutationIdOf(originKeyOf('agent-rest', 'zoe', 'review-history', 'ada'));
+  const descriptor = { route: 'agent-rest', subject: 'zoe', requestKey: 'review-history', originActor: 'ada', mutationId: mid, provenance: { agent: 'zoe', releasedCards: ['released-card'] }, slots: [{ slot: 'agent-rest', author: 'board', body: 'fixture', mentions: [], notify: false }] };
+  const entity = { '@id': agent, '@type': 'scrum:Agent', 'scrum:seatKey': 'zoe', 'scrum:state': 'resting', name: 'zoe' };
+  const coll = { collection: 'agents', iri: agent, expectedVersion: '1', version: '2', quads: entityQuads(entity), json: JSON.stringify(entity), history: { op: 'update', entityKind: 'agent', versionAfter: 'unknown' } };
+  const released = card({ id: 'released-card', shortId: 2, version: 2 });
+  const part = { iri: cardIriOf(released.id), expectedVersion: '1', version: '2', quads: cardQuads(released, shortIdMap([released])), json: JSON.stringify(released), history: cardHistoryFacts({ ...released, version: 1, claimedBy: 'zoe' }, released) };
+  const stored = compile({ kind: 'origin.prepare', opId: originPrepareOp(mid), actor, origin: descriptor, plan: { parts: [part], collections: [coll] } }).canonical.record.plan;
+  assert.ok(stored.collections[0].history, 'the compiler stores the collection history');
+  const admitted = admitStoredOriginPlan(descriptor, stored);
+  assert.deepEqual(JSON.parse(JSON.stringify(admitted)).collections?.[0]?.history ?? JSON.parse(JSON.stringify(admitted)).plan?.collections?.[0]?.history, stored.collections[0].history, 'and read-back keeps it');
+  const bad = JSON.parse(JSON.stringify(stored)); bad.collections[0].history = { ...bad.collections[0].history, op: 'rewrite' };
+  assert.throws(() => admitStoredOriginPlan(descriptor, bad));
 });
