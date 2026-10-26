@@ -145,10 +145,21 @@ async function opBatch(client, { prefixes, where, order, limit }) {
 // #1596 — the bootstrap snapshot cache: one ordered list per (incarnation, epoch, baseline), a few entries kept.
 const SNAP_MAX = 8;
 const snapCache = new Map();
+// #1779 — SINGLE-FLIGHT: concurrent bootstraps of one (store, baseline) share ONE read. Without it, every browser panel
+// walking from `start` after a new store ran its own copy of this whole-history scan at the same time; the copies starved
+// each other past the read budget, none was cached, and every retry scanned again (10-26 11:40Z: 135 × ~47 s).
+const snapInflight = new Map();
 async function snapshotList(client, m, base) {
   const key = `${m.inc}|${m.epoch}|${base}`;
   const hit = snapCache.get(key);
   if (hit) { snapCache.delete(key); snapCache.set(key, hit); return hit; }
+  const pending = snapInflight.get(key);
+  if (pending) return pending;
+  const p = snapshotRead(client, key, base).finally(() => snapInflight.delete(key));
+  snapInflight.set(key, p);
+  return p;
+}
+async function snapshotRead(client, key, base) {
   // one ordered read of the whole snapshot; every row is validated by opBatch (a missing node or an invalid postSeq
   // refuses the page, exactly as before), so a cached list holds only valid, ordered entries
   const list = await opBatch(client, { prefixes: [...LIVE_POST_OPS, ...IMPORT_POST_OPS], where: `?c <= ${base}`, order: '?ps', limit: 100000000 });
@@ -181,7 +192,7 @@ export async function postFeed(client, args) {
   return page;
 }
 
-async function pageOf(client, tok, scope, m, { limit, filters = {} }) {
+async function pageOf(client, tok, scope, m, { limit, filters = {}, snapshotClient = null }) {
   // #1607 — TIP: the head as a live cursor, from the marker read alone. No post is matched or scanned, so an idle page
   // can join the feed without replaying history (`start` replays every post). Posts committed before the tip are the
   // caller's to load another way (the page's own list, fetched AFTER the tip so the gap between them is covered).
@@ -222,7 +233,7 @@ async function pageOf(client, tok, scope, m, { limit, filters = {} }) {
   // every op on every page. Node fields are still read fresh per page, so a redaction made mid-bootstrap still shows.
   const base = tok.kind === 'start' ? m.commit : tok.base;
   let lastPs = tok.kind === 'start' ? 0 : tok.lastPostSeq;
-  const list = await snapshotList(client, m, base);
+  const list = await snapshotList(snapshotClient || client, m, base);   // #1779 — the long-budget reader when given
   let i = lowerBound(list, lastPs);   // the first entry with postSeq > lastPs
   const out = [];
   while (out.length < want && i < list.length) {

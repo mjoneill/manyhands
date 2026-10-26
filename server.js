@@ -11049,6 +11049,10 @@ let POSTS_BULK_READER = null;
 let READ_GATE = null;
 let LOGBORN_FEED_READER = null;
 const POSTS_BULK_READ_TIMEOUT_MS = 10000;
+// #1779 — the feed bootstrap's ONE whole-history snapshot read (single-flight, then cached per store and baseline): measured
+// ~47 s on the real board under load, so it gets its own long budget instead of the bulk reader's 10 s, which it never met.
+const POSTS_SNAPSHOT_READ_TIMEOUT_MS = 180000;
+let POSTS_SNAPSHOT_READER = null;
 const DOC_POST_CHECK_DISABLED = 'disabled under the graph conversations unit (#1574): it reads document posts and would misread a seat that posts only to the graph';
 const REPLICA_NOT_MEASURED = 'not measured on the executor pass (#1645 2d): it measures the in-process copy, which checks no longer build or read';
 
@@ -11883,7 +11887,7 @@ async function listByCommit(q, res) {
     conversation: typeof q.conversation === 'string' && q.conversation ? q.conversation : null,
   };
   try {
-    return sendJSON(res, 200, await postFeed(POSTS_BULK_READER || ANNOUNCE_EXECUTOR, { after: q.afterCommit, limit, filters }));   // #1574 attempt 2 — through the gate
+    return sendJSON(res, 200, await postFeed(POSTS_BULK_READER || ANNOUNCE_EXECUTOR, { after: q.afterCommit, limit, filters, snapshotClient: POSTS_SNAPSHOT_READER }));   // #1574 attempt 2 — through the gate
   } catch (e) {
     if (e instanceof DiscoveryError) return sendJSON(res, e.status, e.body);
     throw e;
@@ -13448,6 +13452,7 @@ if (process.env.SCRUM_GRAPH_UNIT_CONVERSATIONS === '1') {
   const raw = createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: gate.hardTimeoutMs, label: 'posts' });
   POSTS_READER = gate.reader(raw, POSTS_READ_TIMEOUT_MS);
   POSTS_BULK_READER = gate.reader(raw, POSTS_BULK_READ_TIMEOUT_MS);
+  POSTS_SNAPSHOT_READER = gate.reader(raw, POSTS_SNAPSHOT_READ_TIMEOUT_MS);   // #1779
   console.error(`${new Date().toISOString()} #1574 conversations unit ON: publisher-mode announcements go through the graph executor (lock released during the call)`);
   console.error(`${new Date().toISOString()} #1574 conversations unit ON: standing checks stale-claims and role-expiry are DISABLED (${DOC_POST_CHECK_DISABLED})`);
 }
