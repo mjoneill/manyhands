@@ -267,7 +267,11 @@ test('#1762 A1–A9, R4, R5 — flag on: every REST card and column write commit
     const a7 = await step('A7', () => call('PATCH', '/api/cards/uuid-3', { title: 'should not land', ifVersion: seen + 7, by: 'bea' }));
     assert.equal(a7.r.status, 409, `A7: a stale ifVersion is refused (${a7.r.status} ${a7.r.text.slice(0, 200)})`);
     assert.equal(await versionOf(q, 'uuid-3'), v3before, 'A7: the card version did not move');
-    assert.equal(a7.fresh.length, 0, `A7: NO new activity anywhere (got ${a7.fresh.length})`);
+    // a board announcement (a claim's, published from the outbox) may land in this window as its own post activity (S1b);
+    // the refusal must add NO card or column activity, and none for the refused card
+    const a7cards = a7.fresh.filter(([, n]) => (n[C.entityKind] || []).some((k) => k.value === 'card' || k.value === 'column'));
+    assert.equal(a7cards.length, 0, `A7: NO new card or column activity (got ${a7cards.length}; all new: ${a7.fresh.map(([, n]) => `${(n[C.op] || [])[0]?.value}/${(n[C.entityKind] || [])[0]?.value}`).join(', ')})`);
+    assert.equal(forEntity(a7.fresh, cardIriOf('uuid-3')).length, 0, 'A7: no activity for the refused card');
 
     // A8 REPLAY: the same requestId twice is one card and one activity
     const req = `hn-1762-replay-${process.pid}`;
@@ -352,10 +356,16 @@ test('#1762 A1–A9, R4, R5 — flag on: every REST card and column write commit
     for (let i = 1; i < seqs.length; i++) assert.ok(seqs[i][1] > seqs[i - 1][1], `R4: ${seqs[i][0]}'s commitSeq ${seqs[i][1]} is above ${seqs[i - 1][0]}'s ${seqs[i - 1][1]}`);
     assert.ok(await markerCommit(q) >= seqs.at(-1)[1], 'R4: the marker\'s commitSeq is at or past the last write');
 
-    // R5: every ChangeActivity is also a prov:Activity, with an S1 op
+    // R5: every ChangeActivity is also a prov:Activity; every CARD or COLUMN activity (S1's emit) has an S1 op. Record
+    // activities (S1b's kinds, e.g. a board announcement's post) are held to their own ops by the S1b rows.
+    let s1acts = 0;
     for (const [iri, n] of await activities(q)) {
       assert.ok((n[RDF_TYPE] || []).some((t) => t.value === C.Activity), `R5: ${iri} is also a prov:Activity`);
-      assert.ok(S1_OPS.includes(one(n, C.op, `R5 ${iri}`).value), `R5: ${iri}'s op is an S1 op`);
+      const kind = one(n, C.entityKind, `R5 ${iri}`).value;
+      if (kind !== 'card' && kind !== 'column') continue;
+      s1acts += 1;
+      assert.ok(S1_OPS.includes(one(n, C.op, `R5 ${iri}`).value), `R5: ${iri}'s op is an S1 op (${one(n, C.op, 'R5').value}/${kind})`);
     }
+    assert.ok(s1acts >= 10, `R5 CONTROL: the scope still covers this file's card and column activities (${s1acts})`);
   });
 });
