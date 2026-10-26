@@ -29,6 +29,8 @@
  * outside the write lock (refused in production, "#1624: a collection write outside withWriteLock") cannot pass G1 by being
  * swallowed.
  *
+ * MCP's background refresh reads REST with its service token (SCRUM_SEAT_TOKEN_FILE, #1343), because this world's REST requires one.
+ *
  * NOT COVERED, BY NAME: MCP's mode before its first good read; the
  * bearer-seat and resident-wake facts (their fields are passed through and compared via GET only).
  */
@@ -217,7 +219,10 @@ test('#1784 G1–G5, M1–M2 — imported once, then graph-only; MCP reads REST 
       factsAre(await nodeFacts(q), OFFCFG, 'G5 node');
 
       // M1 MCP reports the graph's mode, and a POSTed mode within 5 s
-      mcp = await startMcpServer({ restApiBase: rest().baseUrl, env: { SCRUM_CHANNEL_STAGGER: 'on', MCP_CHANNEL_CONFIG_REFRESH_MS: '500', SCRUM_CHANNEL_CONFIG_FILE: mcpCfg, SCRUM_SEAT_TOKENS: TOKENS } });
+      // the refresh runs outside any session, so MCP authenticates with its SERVICE token (#1343), as required mode does in production
+      const svcToken = path.join(path.dirname(cfgFile), 'mcp-service-token');
+      fs.writeFileSync(svcToken, TOK, { mode: 0o600 });
+      mcp = await startMcpServer({ restApiBase: rest().baseUrl, env: { SCRUM_CHANNEL_STAGGER: 'on', MCP_CHANNEL_CONFIG_REFRESH_MS: '500', SCRUM_CHANNEL_CONFIG_FILE: mcpCfg, SCRUM_SEAT_TOKEN_FILE: svcToken } });
       const status = async () => { try { const r = await fetch(`${mcp.baseUrl}/channel/status`, { signal: AbortSignal.timeout(5000) }); return (await r.json()).mode; } catch (e) { return `ERR ${e.message}`; } };
       const waitMode = async (want, ms) => { let m; for (const t0 = Date.now(); Date.now() - t0 < ms; await sleep(200)) { m = await status(); if (m === want) return m; } return m; };
       assert.equal(await waitMode('off', 5000), 'off', 'M1: MCP reports the graph\'s mode (off), not its own file\'s default');
