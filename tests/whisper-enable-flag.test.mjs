@@ -22,6 +22,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -48,16 +49,25 @@ function nextPort() {
 async function toolNamesWithEnv(extraEnv, configContents = undefined, attempt = 0) {
   const port = nextPort();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'flag-'));
-  if (configContents !== undefined) fs.writeFileSync(path.join(dir, 'tending.json'), configContents);
+  // #1785 — the switch is graph state the adapter reads from REST's /api/tending-config, no longer a file. With no
+  // contents, REST is deliberately dead (as before); with contents, a stub REST answers that route with them VERBATIM,
+  // so a malformed body reaches the adapter exactly as a malformed file once did.
+  let rest = null;
+  if (configContents !== undefined) {
+    rest = http.createServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(req.url.startsWith('/api/tending-config') ? configContents : req.url.startsWith('/api/conversations') ? '[]' : '{}');
+    });
+    await new Promise((r) => rest.listen(0, '127.0.0.1', r));
+  }
   const child = spawn(process.execPath, [path.join(ROOT, 'mcp-server.mjs')], {
     cwd: ROOT,
     env: {
       ...process.env,
       MCP_PORT: String(port),
-      SCRUM_BOARD_API: `http://127.0.0.1:${port + 500}`, // deliberately dead; we never post
+      SCRUM_BOARD_API: rest ? `http://127.0.0.1:${rest.address().port}` : `http://127.0.0.1:${port + 500}`, // dead unless stubbed
       SCRUM_WHISPER_POOL_FILE: path.join(dir, 'pool.json'),
       SCRUM_WHISPER_STATE_FILE: path.join(dir, 'state.json'),
-      SCRUM_TENDING_CONFIG_FILE: path.join(dir, 'tending.json'),
       ...extraEnv,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -92,6 +102,7 @@ async function toolNamesWithEnv(extraEnv, configContents = undefined, attempt = 
     throw e;
   } finally {
     child.kill('SIGKILL');
+    if (rest) { rest.closeAllConnections?.(); await new Promise((r) => rest.close(r)); }
   }
 }
 
