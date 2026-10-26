@@ -248,14 +248,24 @@ const ALLOWED_HOSTS = parseAllowedHosts(process.env.SCRUM_ALLOWED_HOSTS);
 // loopback client that names its port. Set in the listen callback.
 let BOUND_PORT = PORT;
 const PROJECT_DIR = path.dirname(fileURLToPath(import.meta.url));
-const BOARD_DATA_FILE = process.env.SCRUM_BOARD_FILE || path.join(PROJECT_DIR, 'board-data.json');
+// #1788 — ONE data folder. SCRUM_DATA_DIR names it, and the board file defaults into it; unset, the folder is the board file's
+// own (every path below is then exactly what it was before). Every explicit per-file variable still wins.
+const BOARD_DATA_FILE = process.env.SCRUM_BOARD_FILE || path.join(process.env.SCRUM_DATA_DIR || PROJECT_DIR, 'board-data.json');
+const DATA_DIR = process.env.SCRUM_DATA_DIR || path.dirname(BOARD_DATA_FILE);
+// the event log and the misses log are named for the board file's IDENTITY (#669: two boards never share a log). Its basename
+// suffices only when the board lives IN the data folder (two files in one folder cannot share a name); a board kept elsewhere
+// adds a short hash of its absolute path, so two `board.json` files from different folders cannot collide in one DATA_DIR.
+// Production (board inside its folder) keeps exactly its existing names.
+const BOARD_STEM = path.basename(BOARD_DATA_FILE).replace(/\.json$/, '')
+  + (path.resolve(path.dirname(BOARD_DATA_FILE)) === path.resolve(DATA_DIR) ? ''
+    : `-${crypto.createHash('sha256').update(path.resolve(BOARD_DATA_FILE)).digest('hex').slice(0, 8)}`);
 
 // #1343 — seat credentials. Env-var-else-BESIDE-THE-BOARD: the file the MCP
 // adapter reads (SCRUM_SEAT_TOKENS) is this one; with no env it is the board
 // file's sibling, which is where the deployment keeps it. Absent = DORMANT.
 // The mode is per PROCESS, read once at boot, and a misspelling THROWS here
 // rather than running open (core/credentials.mjs readAuthMode).
-const SEAT_TOKENS_PATH = process.env.SCRUM_SEAT_TOKENS || path.join(path.dirname(BOARD_DATA_FILE), 'seat-tokens.json');
+const SEAT_TOKENS_PATH = process.env.SCRUM_SEAT_TOKENS || path.join(DATA_DIR, 'seat-tokens.json');   // #1788
 const AUTH_MODE = readAuthMode(process.env.SCRUM_AUTH);
 const authStats = { refused: 0, unknownBearers: 0, expiredBearers: 0, mismatched: 0 };
 let _creds = null, _credsMtime = -1, _credsCheckedAt = 0;
@@ -294,7 +304,7 @@ const INSTANCE_ID = process.env.SCRUM_INSTANCE_ID || '';
 // two stores in one directory silently share a log, which is the worst possible
 // failure for an append-only record. Day-segmented files land inside.
 const EVENT_LOG_DIR = process.env.SCRUM_EVENT_LOG_DIR
-  || `${BOARD_DATA_FILE.replace(/\.json$/, '')}-events`;
+  || path.join(DATA_DIR, `${BOARD_STEM}-events`);   // #1788 — in the data folder; unset, that is the board file's folder
 // Root directory for static file serving. Defaults to the project dir;
 // overridable so tests can exercise the traversal guard in isolation.
 const STATIC_DIR = process.env.SCRUM_STATIC_DIR || PROJECT_DIR;
@@ -1467,7 +1477,7 @@ let _graphProjectedThrough = null;
 // events may pass before the next one. 0 = no snapshot written by this
 // process yet (a warm boot sets it to the loaded snapshot's seq).
 const GRAPH_SNAPSHOT_EVERY = Number(process.env.SCRUM_GRAPH_SNAPSHOT_EVERY || 500);
-const GRAPH_SNAPSHOT_DIR = path.dirname(BOARD_DATA_FILE);
+const GRAPH_SNAPSHOT_DIR = DATA_DIR;   // #1788
 let _graphSnapshotSeq = 0;
 // #1386 — what the store meter reads about the boot that built this replica:
 // which path (warm|cold), how long, and the first sync after it (the replay
@@ -1535,7 +1545,7 @@ function writeWatermark() {
 }
 // #1112 item 3 — one warning per boot when the ledger cannot be projected here.
 let _workStoreWarned = false;
-const GRAPH_QUERY_LOG = path.join(path.dirname(BOARD_DATA_FILE), 'graph-query-log.jsonl');
+const GRAPH_QUERY_LOG = path.join(DATA_DIR, 'graph-query-log.jsonl');   // #1788
 // ── #1086 item 13 — QUERY → CARD retrieval, as a feature ──────────────────────
 // The embedder is CONFIGURED, never assumed: an unset URL/model answers
 // {available:false, reason} — this week's silent-zero theme must not arrive in
@@ -1544,8 +1554,8 @@ const GRAPH_QUERY_LOG = path.join(path.dirname(BOARD_DATA_FILE), 'graph-query-lo
 // board content — .gitignored in the same commit that creates them).
 const SEARCH_EMBED_URL = process.env.SEARCH_EMBED_URL || '';
 const SEARCH_EMBED_MODEL = process.env.SEARCH_EMBED_MODEL || '';
-const SEARCH_INDEX_FILE = path.join(path.dirname(BOARD_DATA_FILE), 'search-index.jsonl');
-const SEARCH_LOG_FILE = path.join(path.dirname(BOARD_DATA_FILE), 'search-log.jsonl');
+const SEARCH_INDEX_FILE = path.join(DATA_DIR, 'search-index.jsonl');   // #1788
+const SEARCH_LOG_FILE = path.join(DATA_DIR, 'search-log.jsonl');   // #1788
 const numEnv = (name, dflt) => { const v = Number(process.env[name]); return Number.isFinite(v) ? v : dflt; };
 const SEARCH_ABSTAIN_BELOW = numEnv('SEARCH_ABSTAIN_BELOW', 0.5);
 const SEARCH_ASK_WITHIN = numEnv('SEARCH_ASK_WITHIN', 0.03);
@@ -6972,7 +6982,7 @@ async function handleListDecisions(req, res) {
 //
 // ⭐ And the automatic capture it said was unavailable had already shipped one
 // endpoint over. This makes it durable and queryable instead of stderr-only.
-const MISS_LOG_FILE = BOARD_DATA_FILE.replace(/\.json$/, '') + '-misses.jsonl';
+const MISS_LOG_FILE = path.join(DATA_DIR, `${BOARD_STEM}-misses.jsonl`);   // #1788
 
 function recordMisses(params, seat, url) {
   const at = new Date().toISOString();
