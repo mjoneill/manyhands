@@ -194,6 +194,8 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:Talk', 'scrum:with', 'scrum:conversation', 'scrum:closedAt',   // #1401 — a 1:1 conversation tag and the posts that carry it
   'scrum:MoveFence', 'scrum:fencedMove', 'scrum:fencedAt',   // #1707 — a settled move id that can never land
   'scrum:LabelAlias', 'scrum:aliasLabel', 'scrum:canonicalLabel',   // #1640 — an alias record (no sameAs)
+  'scrum:ChannelConfig', 'scrum:channelMode', 'scrum:softMinMs', 'scrum:softMaxMs', 'scrum:hardTimeoutMs', 'scrum:tokenRingTimeoutMs',
+  'scrum:bearerSeat', 'scrum:residentReplyWakesPerPairPerHour', 'scrum:configImportedFrom', 'scrum:configImportedAt',   // #1784
   // #1202 — the provenance ledger row
   'scrum:ModelCall', 'scrum:agent', 'scrum:model', 'scrum:provider', 'scrum:protocol',
   'scrum:promptVersion', 'scrum:tokensIn', 'scrum:tokensOut', 'scrum:reasoningTokens', 'scrum:cachedPromptTokens', 'scrum:cost', 'scrum:costMeasured', 'scrum:costCategories', 'scrum:stopReason',
@@ -1179,6 +1181,21 @@ function projectLabelAlias(store, e) {
   if (e['scrum:canonicalLabel']) add(nn(S + 'canonicalLabel'), lit(String(e['scrum:canonicalLabel'])));
 }
 
+// #1784 — the channel delivery config: one node, its timings as xsd:integer, a bearer seat per literal, the import stamp.
+function projectChannelConfig(store, e) {
+  const S = IRI.scrum;
+  const s = nn(e['@id']);
+  const add = (p, o) => store.add(oxigraph.triple(s, p, o));
+  add(A, nn(S + 'ChannelConfig'));
+  if (e['scrum:channelMode']) add(nn(S + 'channelMode'), lit(String(e['scrum:channelMode'])));
+  for (const k of ['softMinMs', 'softMaxMs', 'hardTimeoutMs', 'tokenRingTimeoutMs', 'residentReplyWakesPerPairPerHour']) {
+    if (e[`scrum:${k}`] != null) add(nn(S + k), intLit(e[`scrum:${k}`]));
+  }
+  for (const seat of [].concat(e['scrum:bearerSeat'] ?? [])) add(nn(S + 'bearerSeat'), lit(String(seat)));
+  if (e['scrum:configImportedFrom']) add(nn(S + 'configImportedFrom'), lit(String(e['scrum:configImportedFrom'])));
+  if (e['scrum:configImportedAt']) add(nn(S + 'configImportedAt'), lit(String(e['scrum:configImportedAt'])));
+}
+
 function projectMoveFence(store, e) {
   const S = IRI.scrum;
   const s = nn(e['@id']);
@@ -1972,6 +1989,8 @@ export function projectEntity(store, e) {
       projectMoveFence(store, e);     // #1707
     } else if (t === 'scrum:LabelAlias') {
       projectLabelAlias(store, e);    // #1640
+    } else if (t === 'scrum:ChannelConfig') {
+      projectChannelConfig(store, e); // #1784
     } else if (t === 'scrum:RoleVersion') {
       projectRoleVersion(store, e);   // #1387
     } else if (t === 'scrum:Agent') {
