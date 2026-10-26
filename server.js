@@ -65,11 +65,11 @@ import { SHAPE_QUERY, withObjectShapes } from './core/predicate-shapes.mjs';
 import { shortenTypeIri, PERSON_IRI_BASE } from './core/jsonld.mjs';
 // #805 — the boot migration's inputs (the live flat sources) and its builder.
 import { readPool, recentWhispers, DEFAULT_POOL, poolFilePath } from './whisper-store.mjs';
-import { readTendingConfig, writeTendingConfig } from './tending-config.mjs';
+import { readTendingConfig, validateTendingConfig, tendingConfigFilePath } from './tending-config.mjs';   // #1785 — the file is read ONCE, by the boot import
 import { buildTendingEntities, person as personIri } from './core/tending-bootstrap.mjs';
 import { resolvePool as resolveWhisperPool, bagState } from './core/tending-pool.mjs';
 import { mintId } from './core/tending-ids.mjs';
-import { createPrompt, editPrompt, setEnabled, reorderPlaylist, removePrompt, setShuffle, readShuffle, assertSlug } from './core/tending-authoring.mjs';
+import { createPrompt, editPrompt, setEnabled, reorderPlaylist, removePrompt, setShuffle, readShuffle, assertSlug, readTendingConfigFrom, setTendingConfig, tendingConfigImported } from './core/tending-authoring.mjs';
 import { resolveProvenance } from './core/tending-provenance.mjs';
 import { boardToDomain, domainToBoard, cardToNode } from './core/mapping.mjs';
 import { moveFenceIds, moveFenceEntity } from './core/move-fences.mjs';   // #1707
@@ -9591,9 +9591,10 @@ async function handleSetConfig(req, res) {
 // Deliberately mirrors /api/config (#263) rather than inventing a shape: same
 // loopback trust model, same validate-then-persist, same 400-with-the-
 // validator's-own-message. One pattern on one page beats two.
+// #1785 — the switch and the threshold are graph state (TendingState); the file is no longer read or written by a route.
 function handleGetTendingConfig(req, res) {
   try {
-    sendJSON(res, 200, readTendingConfig());
+    sendJSON(res, 200, readTendingConfigFrom(tendingEntities()));
   } catch (e) {
     console.error('GET /api/tending-config:', e.message);
     sendJSON(res, 500, { error: 'Failed to read tending config' });
@@ -9605,13 +9606,15 @@ async function handleSetTendingConfig(req, res) {
     const body = JSON.parse(await readBody(req));
     let clean;
     try {
-      // Validates and refuses; a rejected write leaves the previous file
+      // Validates and refuses; a rejected write leaves the previous state
       // untouched, so a typo cannot silently become the room's threshold.
-      clean = writeTendingConfig(body);
+      clean = validateTendingConfig(body);
     } catch (ve) {
       return sendJSON(res, 400, { error: ve.message });
     }
-    sendJSON(res, 200, clean);
+    const at = new Date().toISOString();
+    await withWriteLock(async () => { writeTendingEntities(setTendingConfig(tendingEntities(), { ...clean, at }), { actor: typeof body.by === 'string' ? body.by : null, op: 'update' }); });
+    sendJSON(res, 200, readTendingConfigFrom(tendingEntities()));
   } catch (e) {
     console.error('POST /api/tending-config:', e.message);
     sendJSON(res, 500, { error: 'Failed to save tending config' });
@@ -14266,6 +14269,17 @@ function migrateTendingIfNeeded() {
 
 migrateBoardIfNeeded();
 migrateTendingIfNeeded();
+// #1785 — ONE-TIME import of the file's switch and threshold onto TendingState, stamped (scrum:configImportedAt) so it never
+// runs twice and a later file edit can never override the graph. Fails closed: a missing or malformed file imports OFF.
+try {
+  // a fresh clone has no file and no state: it imports nothing and writes nothing (tending-boot-migration's fresh-clone row)
+  if (!tendingConfigImported(tendingEntities()) && fs.existsSync(tendingConfigFilePath())) {
+    const fromFile = readTendingConfig();
+    const at = new Date().toISOString();
+    writeTendingEntities(setTendingConfig(tendingEntities(), { ...fromFile, at, importedFrom: 'tending-config.json' }), { actor: 'board', op: 'update' });
+    console.error(`${at} #1785 tending config imported onto TendingState from tending-config.json: enabled=${fromFile.enabled} quietAfterMinutes=${fromFile.quietAfterMinutes}`);
+  }
+} catch (e) { console.error(`#1785 tending config import failed (tending reads as its graph state, or OFF): ${e.message}`); }
 
 // ── Start Server ──
 const server = http.createServer(handleRequest);
