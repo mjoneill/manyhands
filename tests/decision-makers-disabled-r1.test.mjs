@@ -74,7 +74,6 @@ async function scenario(body, { unit }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dm-'));
   const stateFile = path.join(dir, 'stale-claim-state.json');
   fs.writeFileSync(stateFile, JSON.stringify({ asked: { [GHOST]: '2026-09-01T00:10:00.000Z' } }, null, 2));
-  const tendingFile = path.join(dir, 'tending.json'); fs.writeFileSync(tendingFile, JSON.stringify({ enabled: true, quietAfterMinutes: 69 }));
   let exec = null;
   if (unit) exec = await startExecutor({ store: tmpStore('dm-store-'), datasetId: DSID, create: true });
   const rest = await startRestServer({ board: fixture(), env: { SCRUM_ROSTER_FILE: ROSTER_FILE, ...(unit ? { SCRUM_GRAPH_DATASET_ID: DSID, SCRUM_GRAPH_EXECUTOR_URL: exec.baseUrl, SCRUM_GRAPH_UNIT_CONVERSATIONS: '1' } : {}) } });
@@ -87,7 +86,10 @@ async function scenario(body, { unit }) {
     assert.ok(minted.status === 200 || minted.status === 201, `the role is minted first: ${minted.status} ${minted.text}`);
     const declared = await api(rest.baseUrl, 'PUT', '/api/seats/ada/state', { mode: 'available', acceptsRoutineWork: true, role: 'scrum-master', expiresAt: new Date(Date.now() + 2 * H).toISOString() });
     assert.equal(declared.status, 200, `the role declaration: ${declared.text}`);
-    mcp = await startMcpServer({ restApiBase: rest.baseUrl, env: { SCRUM_TENDING_CONFIG_FILE: tendingFile, SCRUM_STALE_CLAIM_STATE_FILE: stateFile, MCP_WHISPER_TICK_MS: '400' } });
+    // #1785 — tending is switched on through the surface the owner uses; the adapter reads it from REST, never from a file
+    const tending = await api(rest.baseUrl, 'POST', '/api/tending-config', { enabled: true, quietAfterMinutes: 69 });
+    assert.equal(tending.status, 200, `tending on: ${tending.text}`);
+    mcp = await startMcpServer({ restApiBase: rest.baseUrl, env: { SCRUM_STALE_CLAIM_STATE_FILE: stateFile, MCP_WHISPER_TICK_MS: '400' } });
     const ctx = {
       rest, mcp, stateFile, base: rest.baseUrl,
       checks: async () => (await api(rest.baseUrl, 'GET', '/api/checks?fresh=1')).body,
