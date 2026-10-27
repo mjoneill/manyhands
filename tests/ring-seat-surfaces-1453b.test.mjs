@@ -80,8 +80,9 @@ async function pair() {
   const restPort = await freePort(); const mcpPort = await freePort();
   const cfgFile = path.join(os.tmpdir(), `ring-1453b-${process.pid}-${restPort}.json`);
   fs.writeFileSync(cfgFile, JSON.stringify(RING));
-  const rest = await startRestServer({ port: restPort, mcpNotifyUrl: `http://127.0.0.1:${mcpPort}/internal/notify` });
-  const mcp = await startMcpServer({ port: mcpPort, restApiBase: rest.baseUrl, env: { SCRUM_CHANNEL_STAGGER: '', SCRUM_CHANNEL_CONFIG_FILE: cfgFile } });
+  // #1784 — the mode is REST's (GET /api/config), which MCP reads; MCP opens no config file of its own
+  const rest = await startRestServer({ port: restPort, mcpNotifyUrl: `http://127.0.0.1:${mcpPort}/internal/notify`, channelConfigFile: cfgFile });
+  const mcp = await startMcpServer({ port: mcpPort, restApiBase: rest.baseUrl, env: { SCRUM_CHANNEL_STAGGER: '' } });
   return { rest, mcp, async stop() { await mcp.stop(); await rest.stop(); try { fs.unlinkSync(cfgFile); } catch { /* */ } } };
 }
 const envelope = (st) => st.messages.find((m) => m.method === 'notifications/claude/channel' && m.params?.meta?.token_ring_lease_id);
