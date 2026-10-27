@@ -521,7 +521,7 @@ export function staticCheck(sparql, opId) {
 // =====================================================================================
 
 export const RECORD_V = 2;   // 2: memory.revise records the identity it replaces (a MemoryRevision node)
-export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create', 'post.import', 'post.write', 'post.redact', 'delivery.create', 'delivery.step', 'delivery.import', 'modelcall.create', 'card.write', 'entity.put', 'origin.prepare']);
+export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create', 'post.import', 'post.write', 'post.redact', 'delivery.create', 'delivery.step', 'delivery.import', 'modelcall.create', 'card.write', 'entity.put', 'origin.prepare', 'refusal.record']);
 
 const RS = 'https://scrumboard.local/ns#';
 const RSC = 'https://schema.org/';
@@ -564,6 +564,10 @@ export const LOGBORN_TERMS = Object.freeze({
   // mirror the replica's existing projectWake (graph-replica.mjs), so a reader of either store
   // sees the same triples.
   Wake: `${RS}Wake`, wokeSeat: `${RS}wokeSeat`, wokeAt: `${RS}wokeAt`,
+  // #1762 S2 — a refusal, content-free (core/refusal-record.mjs): identifiers and outcomes, never what was said
+  RefusalRecord: `${RS}RefusalRecord`, route: `${RS}route`, status: `${RS}status`, code: `${RS}code`, rule: `${RS}rule`,
+  entityKind: `${RS}entityKind`, entityId: `${RS}entityId`,
+  wasAssociatedWith: 'http://www.w3.org/ns/prov#wasAssociatedWith', startedAtTime: 'http://www.w3.org/ns/prov#startedAtTime',
 });
 const TM = LOGBORN_TERMS;
 
@@ -586,6 +590,7 @@ const RECORD_FIELDS = {
   'card.write': ['parts', 'counter', 'pending', 'collections', 'origin', 'indexGuard', 'reads', 'walk'],       // #1598 — one or more cards, each guarded on its version, in ONE update; #1629 s2 — `origin` makes it an origin commit
   'entity.put': ['entity'],                 // #1624 — one generic storage primitive; the `kind` field selects the projection
   'origin.prepare': ['origin', 'plan'],     // #1629 s2 — the Prepared record of one origin: its descriptor and its frozen business plan
+  'refusal.record': ['refusal'],            // #1762 S2 — one content-free refusal, fresh at the IRI its opId derives; never history
 };
 
 // #1762 S1b — the record kinds whose write records ONE ChangeActivity (part 0) when the intention carries `history`. The
@@ -689,6 +694,40 @@ function canonStep(s, what) {
     at: rStr(s.at, `${what}.at`), source: rStr(s.source, `${what}.source`), creator: rOpt(s.creator, `${what}.creator`),
     attempt: rCount(s.attempt, `${what}.attempt`), reason: rOpt(s.reason, `${what}.reason`), text: rOpt(s.text, `${what}.text`),
     traceId: rOpt(s.traceId, `${what}.traceId`), ofModelCall: rOptIri(s.ofModelCall, `${what}.ofModelCall`),
+  };
+}
+
+// #1762 S2 — every field of a refusal has a SHAPE that cannot carry prose: a template, an integer, a registered token or
+// `unlisted`, a safe id. The node's IRI is derived from the opId, so a retried refusal (same requestId, same opId) cannot
+// land a second record. Shapes mirror core/refusal-record.mjs; this is the check a caller cannot skip.
+const REFUSAL_SHAPES = Object.freeze({
+  route: /^(?:(?:POST|PATCH|PUT|DELETE) \/api(?:\/(?:[a-z0-9][a-z0-9-]*|:p))*|mcp [a-z][a-z_]{0,39}|unmatched)$/,
+  code: /^(?:[A-Z][A-Z0-9_]{1,63}|unlisted)$/,
+  rule: /^(?:#[0-9]{1,5} [a-z][a-z ]{0,39}|unlisted)$/,
+  entityKind: /^[a-z][a-z-]{0,31}$/,
+  entityId: /^[A-Za-z0-9_-]{1,64}$/,
+  requestId: /^[A-Za-z0-9-]{8,64}$/,
+});
+export const refusalIri = (opId) => `https://scrumboard.local/refusal/${createHash('sha256').update(opId).digest('hex').slice(0, 32)}`;
+function canonRefusal(r, opId) {
+  obj(r, ['iri', 'route', 'status', 'code', 'rule', 'entityKind', 'entityId', 'requestId', 'associatedWith'], 'refusal');
+  if (!opId.startsWith(`${NS}op/refused/`)) fail(`a refusal.record's opId is under ${NS}op/refused/`);
+  const iri = checkIri(r.iri, 'refusal.iri');
+  if (iri !== refusalIri(opId)) fail('refusal.iri must be the IRI its opId derives (refusalIri)');
+  const shaped = (v, k, optional = false) => {
+    if (optional && (v === undefined || v === null)) return null;
+    if (typeof v !== 'string' || !REFUSAL_SHAPES[k].test(v)) fail(`refusal.${k}: not an allowlisted shape (a refusal stores no text)`);
+    return v;
+  };
+  const status = intLit(r.status, 'refusal.status');
+  if (BigInt(status) < 400n || BigInt(status) > 599n) fail('refusal.status must be 400-599');
+  const associatedWith = checkIri(r.associatedWith, 'refusal.associatedWith');
+  if (!/^https:\/\/scrumboard\.local\/person\/[a-z0-9][a-z0-9_-]{0,63}$/.test(associatedWith) && associatedWith !== `${RS}unknown`) fail('refusal.associatedWith must be a seat Person IRI or scrum:unknown');
+  const requestId = shaped(r.requestId, 'requestId', true);
+  if (requestId != null && opId !== `${NS}op/refused/${requestId}`) fail('a refusal with a requestId has the opId urn:ex:op/refused/<requestId>');
+  return {
+    iri, route: shaped(r.route, 'route'), status, code: shaped(r.code, 'code'), rule: shaped(r.rule, 'rule', true),
+    entityKind: shaped(r.entityKind, 'entityKind'), entityId: shaped(r.entityId, 'entityId', true), requestId, associatedWith,
   };
 }
 
@@ -813,6 +852,8 @@ function canonicalizeRecord(i) {
       producedPost: rOptIri(m.producedPost, 'call.producedPost'), postedText: rOpt(m.postedText, 'call.postedText'),
       requestId: rStr(m.requestId, 'call.requestId'), entityJson: rStr(m.entityJson, 'call.entityJson'),
     } };
+  } else if (i.kind === 'refusal.record') {
+    record = { refusal: canonRefusal(i.refusal, opId) };
   } else if (i.kind === 'card.write') {
     record = canonCardWrite(i);
     if (i.origin != null) record = canonOriginCommit(i, record, { opId, actor, evidence, people });   // #1629 s2
@@ -949,6 +990,7 @@ function planRecord(c) {
   const delOwned = [];     // #1574 R4a [{owner, prefix}]: every triple of every node that is attachmentOf owner AND under prefix is removed
   const delLinked = [];    // #1582 [{link, owner, type, pred}]: every `pred` value on every node of `type` that `link`s to owner is removed
   const condIns = [];      // #1582 [{s, p, o, unless:[node, type]}]: inserted only where `node` is NOT of `type` when the update runs
+  const insAt = [];        // #1762 S2 [[s, p]]: s p ?n_at, the receipt's own NOW(), ok-guarded through its subject
   let verGuard = null;
   let target;
   let dispatchHold = null;   // #1749 A8: the obligationId a dispatch intention settles or publishes
@@ -1096,6 +1138,16 @@ function planRecord(c) {
     add(S.iri, TM.reason, S.reason == null ? null : L(S.reason)); add(S.iri, TM.text, S.text == null ? null : L(S.text));
     add(S.iri, TM.traceId, S.traceId == null ? null : L(S.traceId)); add(S.iri, TM.ofModelCall, S.ofModelCall && I(S.ofModelCall));
     add(S.iri, TM.recordedBy, ref(c.opId));
+  } else if (c.kind === 'refusal.record') {
+    // #1762 S2 — one fresh node; its time is the receipt's own NOW() (insAt), so the record and its receipt agree
+    const F = R.refusal; target = null;
+    fresh.push(F.iri);
+    add(F.iri, TM.type, I(TM.RefusalRecord)); add(F.iri, TM.route, L(F.route)); add(F.iri, TM.status, F.status);
+    add(F.iri, TM.code, L(F.code)); add(F.iri, TM.rule, F.rule == null ? null : L(F.rule));
+    add(F.iri, TM.entityKind, L(F.entityKind)); add(F.iri, TM.entityId, F.entityId == null ? null : L(F.entityId));
+    add(F.iri, TM.requestId, F.requestId == null ? null : L(F.requestId)); add(F.iri, TM.wasAssociatedWith, I(F.associatedWith));
+    add(F.iri, TM.recordedBy, ref(c.opId));
+    insAt.push([F.iri, TM.startedAtTime]);
   } else if (c.kind === 'modelcall.create') {
     const M = R.call; target = null;
     fresh.push(M.iri);
@@ -1188,7 +1240,7 @@ function planRecord(c) {
     for (const a of P.aliases) add(P.iri, TM.aliases, L(a));
     add(P.iri, TM.recordedBy, ref(c.opId));
   }
-  return { target, pre, fresh, freshSubject, ins, delAll, delAny, delOwned, delLinked, condIns, verGuard, dispatchHold };
+  return { target, pre, fresh, freshSubject, ins, delAll, delAny, delOwned, delLinked, condIns, insAt, verGuard, dispatchHold };
 }
 
 function compileRecord(c) {
@@ -1255,6 +1307,7 @@ function compileRecord(c) {
   });
   // #1638 — route each planned triple by the one definition of bookkeeping (ver, recordedBy, entityJson… go to the bk graph)
   for (const [s, p, o] of plan.ins) (isBookkeeping(s, p) ? bIns : dIns).push(`  ${v(ref(s))} ${ref(p)} ${v(o)} .`);
+  for (const [s, p] of plan.insAt || []) dIns.push(`  ${v(ref(s))} ${ref(p)} ?n_at .`);   // #1762 S2
   // #1762 S1b — the record's ONE activity (part 0), in the same ok-guarded data INSERT as the record: APPLIED commits both,
   // a refused or replayed write inserts neither. No card-only facts: entityKind is set.
   if (c.record.history) {
