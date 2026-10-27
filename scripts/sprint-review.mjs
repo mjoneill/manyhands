@@ -21,8 +21,7 @@
  *
  * Usage:
  *   node scripts/sprint-review.mjs --since <iso> --events <dir> --seats <a,b,c>
- *   ... --work-store <dir>          (without it, signal 2's numerator is a
- *                                   structural zero and the report says so)
+ *   ... --work-store <dir>          (#1763: accepted and IGNORED — signal 2 is retired with the ledger)
  *   ... --human-races <n>          (the count only a human can supply)
  *
  * --events and --seats may also come from SCRUM_EVENTS_DIR / SCRUM_REVIEW_SEATS.
@@ -36,7 +35,6 @@
 
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { readWorkObjects } from '../core/work-store.mjs';
 import {
   signalOneContestedBids,
   signalTwoUngrantedActions,
@@ -98,13 +96,8 @@ for (const f of readdirSync(eventsDir).filter((n) => n.endsWith('.jsonl')).sort(
   }
 }
 
-// #755 slice 2d — the store exists now, so read it. Optional on purpose: with
-// no --work-store the numerator stays a STRUCTURAL ZERO and the report SAYS
-// so, which is the honest reading when the store isn't wired for this run.
-const workStore = arg('work-store');
-// null, NOT [] — "no store configured" and "store is empty" are different
-// facts and the signal reports them differently.
-const workObjects = workStore ? readWorkObjects(workStore) : null;
+// #1763 — the work ledger is retired: signal 2 needs no store. --work-store is accepted (old invocations) and ignored.
+if (arg('work-store')) console.error('work ledger retired (#1763): --work-store ignored');
 
 const humanRaces = arg('human-races');
 
@@ -113,22 +106,19 @@ const signals = [
   // exists, this is where it gets wired — and until then the instrument says
   // UNMEASURABLE rather than inventing a zero.
   ['SIGNAL 1  window bought nothing ', signalOneContestedBids({ bidRecords: null })],
-  // Work objects likewise: no store yet, so the numerator is a STRUCTURAL zero
-  // and says so in its own output.
-  ['SIGNAL 2  ungranted covered acts', signalTwoUngrantedActions({ events, workObjects, seats: SEATS })],
+  ['SIGNAL 2  ungranted covered acts', signalTwoUngrantedActions()],   // #1763 — retired with the ledger
   ['SIGNAL 3  unkeyed races recur   ', signalThreeOutOfBand({ humanSuppliedCount: humanRaces === null ? null : Number(humanRaces) })],
 ];
 
 console.log(`SPRINT REVIEW — events since ${since}: ${events.length}`);
 console.log(`events dir: ${eventsDir}`);
 console.log(`seats counted: ${SEATS.join(', ')}`);
-console.log(`work objects: ${workStore ? `${workObjects.length} from ${workStore}` : 'NO STORE CONFIGURED — pass --work-store; signal 2 numerator is structurally 0'}`);
 if (malformed) console.log(`⚠️ ${malformed} unparseable line(s) skipped`);
 console.log('');
 
 for (const [label, s] of signals) console.log(renderSignal(label, s));
 
-const measurable = signals.filter(([, s]) => s.status !== 'unmeasurable').length;
+const measurable = signals.filter(([, s]) => s.status === 'zero' || s.status === 'measured').length;   // #1763 — retired is not measured
 const firing = signals.filter(([, s]) => s.fires).map(([l]) => l.trim().split(/\s{2,}/)[0]);
 
 console.log('');

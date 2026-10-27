@@ -26,7 +26,6 @@
  * staleness, so the reader supplies the clock the verdict is relative to.
  */
 
-import { readWorkObjects, openWorkObjectsAt } from './work-store.mjs';
 
 /** A claim older than this is flagged. Six-day leases were the finding; two days is a long session. */
 export const STALE_AFTER_HOURS = 48;
@@ -88,32 +87,19 @@ export function inFlight(cards, { now, staleAfterHours = STALE_AFTER_HOURS, inPr
 }
 
 /**
- * The work-bid ledger, summarised from the same store work_list reads. Says
- * `available:false` with the reason when no store is configured — a missing
- * instrument must not read as an empty protocol.
+ * #1763 — the work-bid ledger is RETIRED (owner, 2026-10-27). Its 53 transitions and 17 work objects stay in the graph as
+ * history, and this is the whole summary: counts from ONE graph query, never a file read. A graph that cannot be read says
+ * `unavailable` with its reason and null counts — never a fabricated 0 — and never takes board_status down with it.
  */
-export function workLedgerSummary(dir, now, { dormantAfterDays = DORMANT_AFTER_DAYS } = {}) {
-  assertNow(now, 'workLedgerSummary');
-  if (typeof dir !== 'string' || dir.length === 0) {
-    return { available: false, reason: 'SCRUM_WORK_STORE is not set on this server, so the ledger cannot be read here — work_list has the same limit' };
+export const WORK_LEDGER_COUNT_QUERY = 'SELECT (COUNT(DISTINCT ?a) AS ?actions) (COUNT(DISTINCT ?w) AS ?workObjects) WHERE { { ?a a schema:Action } UNION { ?w a scrum:WorkObject } }';
+export const WORK_LEDGER_RETIRED_SINCE = '2026-08-18';   // the last transition the ledger ever recorded
+export function retiredWorkLedger(result) {
+  // Only an answer from the EXECUTOR counts: an in-process replica's empty store would read as a confident 0.
+  const row = result && result.source === 'executor' && Array.isArray(result.rows) ? result.rows[0] : null;
+  const num = (v) => { const x = v && typeof v === 'object' ? v.value : v; return typeof x === 'string' && /^\d+$/.test(x) ? Number(x) : (Number.isSafeInteger(x) ? x : null); };
+  const actions = row ? num(row.actions) : null, workObjects = row ? num(row.workObjects) : null;
+  if (actions == null || workObjects == null) {
+    return { retired: true, since: WORK_LEDGER_RETIRED_SINCE, actions: null, workObjects: null, unavailable: (result && (result.error || result.unavailable)) || (result && Array.isArray(result.rows) && result.source !== 'executor' ? 'the answer did not come from the executor' : 'the graph count could not be read') };
   }
-  const all = readWorkObjects(dir);
-  const open = openWorkObjectsAt(dir, now).length;
-  let last = null;
-  for (const wo of all) {
-    for (const t of wo.transitions || []) {
-      if (typeof t.at === 'string' && (last == null || t.at > last)) last = t.at;
-    }
-  }
-  const dormant = last != null && (Date.parse(now) - Date.parse(last)) >= dormantAfterDays * 24 * HOUR;
-  return {
-    available: true,
-    reconciled: false,
-    open,
-    settled: all.length - open,
-    lastTransitionAt: last,
-    dormant,
-    dormantAfterDays,
-    note: 'derived from the transition log, not from claims — a declared window is not a claim and a claim is not a window',
-  };
+  return { retired: true, since: WORK_LEDGER_RETIRED_SINCE, actions, workObjects };
 }

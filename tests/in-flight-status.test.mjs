@@ -46,7 +46,7 @@ test('GET /api/board/status carries inFlight — claim-authoritative, disagreeme
   }
 });
 
-test('MCP board_status carries inFlight and a workLedger read from the same store work_list reads', async () => {
+test('#1763 MCP board_status carries inFlight and a RETIRED workLedger — with an old work store set, nothing is read from it', async () => {
   const store = mkdtempSync(join(tmpdir(), 'inflight-mcp-'));
   writeFileSync(join(store, 'work-objects.jsonl'), JSON.stringify({
     id: 'w1', seq: 0, card: 4, declaredBy: 'ada', replyBy: '2026-08-10T00:20:00.000Z', required: ['bo'],
@@ -59,25 +59,11 @@ test('MCP board_status carries inFlight and a workLedger read from the same stor
     const result = await session.callTool('board_status', {});
     const s = JSON.parse((result.result?.content ?? []).map((c) => c.text ?? '').join('\n'));
     assert.equal(s.inFlight.authority, 'claim');
-    assert.equal(s.workLedger.available, true);
-    assert.equal(s.workLedger.lastTransitionAt, '2026-08-10T00:00:00.000Z');
-    assert.equal(s.workLedger.dormant, true);
-    assert.equal(s.workLedger.reconciled, false);
-  } finally {
-    await mcp.stop();
-    await rest.stop();
-  }
-});
-
-test('MCP board_status without a work store says so — available:false, not a zero', async () => {
-  const rest = await startRestServer({ board: fixture() });
-  const mcp = await startMcpServer({ restApiBase: rest.baseUrl });
-  try {
-    const session = await mcpSession(mcp.mcpUrl);
-    const result = await session.callTool('board_status', {});
-    const s = JSON.parse((result.result?.content ?? []).map((c) => c.text ?? '').join('\n'));
-    assert.equal(s.workLedger.available, false);
-    assert.match(s.workLedger.reason, /SCRUM_WORK_STORE/);
+    assert.equal(s.workLedger.retired, true);
+    for (const k of ['open', 'settled', 'lastTransitionAt', 'dormant', 'available']) assert.equal(k in s.workLedger, false, `no file-derived ${k}`);
+    // this REST has no executor: the counts are unknown, said so, never a fabricated 0
+    assert.equal(s.workLedger.actions, null); assert.equal(s.workLedger.workObjects, null);
+    assert.equal(typeof s.workLedger.unavailable, 'string');
   } finally {
     await mcp.stop();
     await rest.stop();
