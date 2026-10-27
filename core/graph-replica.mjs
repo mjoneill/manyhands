@@ -1579,6 +1579,21 @@ export function projectEntity(store, e) {
       if (e.dateModified) add(s, nn(SC + 'dateModified'), lit(e.dateModified));
       if (e.creator) add(s, nn(SC + 'creator'), personRef(e.creator));
       if (e.column) add(s, nn(S + 'column'), nn(columnIri(e.column)));   // #1639 — the column node's own rule, so they join
+      // #1787 — the card's attachment METADATA, in exactly a post's shape (post.write, core/graph-compiler.mjs): one node per
+      // attachment at <card>/attachment/<index>. These triples ride every card write (this projection IS the card's quads), so
+      // an upload or a removal lands in the card's own guarded update, and a removed one goes with the card's prior quads.
+      // The bytes stay on disk.
+      (Array.isArray(e.attachments) ? e.attachments : []).forEach((a, k) => {
+        if (!a || typeof a !== 'object') return;
+        const n = oxigraph.namedNode(`${s.value}/attachment/${k}`);   // the card's own IRI, never re-encoded as an id
+        const at = (p, o) => store.add(oxigraph.triple(n, p, o));
+        at(nn(S + 'attachmentOf'), s);
+        at(nn(S + 'attachmentIndex'), intLit(k));
+        if (a.id != null) at(nn(SC + 'identifier'), lit(String(a.id)));
+        if (a.name != null) at(nn(SC + 'name'), lit(String(a.name)));
+        if (a.mime != null) at(nn(SC + 'encodingFormat'), lit(String(a.mime)));
+        if (a.size != null) at(nn(SC + 'contentSize'), intLit(a.size));
+      });
       if (e['scrum:priority']) add(s, nn(S + 'priority'), lit(e['scrum:priority']));
       if (e['scrum:order'] != null) add(s, nn(S + 'order'), intLit(e['scrum:order']));
       if (e.claimedBy) add(s, nn(S + 'claimedBy'), personRef(e.claimedBy));
