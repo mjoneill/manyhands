@@ -56,7 +56,7 @@ export const ROUTE_TEMPLATES = Object.freeze(new Set([
   'POST /api/procedure-versions', 'POST /api/procedures', 'POST /api/refusals', 'POST /api/roles', 'POST /api/roster',
   'POST /api/runs', 'POST /api/runs/generated', 'POST /api/search', 'POST /api/search/all', 'POST /api/talks',
   'POST /api/tending-config', 'POST /api/tending/mints', 'POST /api/tending/order', 'POST /api/tending/shuffle',
-  'POST /api/tending/whispers', 'POST /api/wakes', 'PUT /api/seats/:p/state'
+  'POST /api/tending/claims', 'POST /api/tending/whispers', 'POST /api/tending/windows', 'POST /api/wakes', 'PUT /api/seats/:p/state'
 ]));
 
 /** `METHOD <regex source>` (the router's meter label) → `METHOD /api/cards/:p/claim`; anything unlisted is `unlisted`. */
