@@ -30,7 +30,7 @@
  *   CH17 a KNOWN lane keeps its cursor when F appears, and /api/changes reads with F present never move it (a control: S3 changes no lane)
  *   CH18 a write that lands between the page's reads never yields a MIXED answer (one snapshot, or a 503); CH19 a post-F S2 refusal record is served, two of one
  *         entity are two rows; CH20 a receipt and its native activity are ONE row; CH21 the `since` cutoff compares the full instant; CH22 a frontierLogSeq past the
- *         safe integers, and a marker with no commitSeq or two, are refused 503 (a marker fault: HISTORY_FRONTIER_INVALID or GRAPH_EXECUTOR_UNAVAILABLE, not pinned); CH25 a post keeps its payload and redaction with F on; CH27 and its backward paging; CH26 no F and a malformed marker term (type, datatype, range, incarnation syntax) is refused like CH24; CH24 no F and an unreadable or malformed store marker is a 503 GRAPH_EXECUTOR_UNAVAILABLE, never a log-only answer; CH23 the F read failing after the cards guard passed is
+ *         safe integers, and a marker with no commitSeq or two, are refused 503 (a marker fault: HISTORY_FRONTIER_INVALID or GRAPH_EXECUTOR_UNAVAILABLE, not pinned); CH25 a post keeps its payload and redaction with F on; CH27 and its backward paging; CH26 no F and a malformed marker term (type, datatype, range, incarnation syntax) is refused like CH24; CH28 F has ONE shape: the five history fields are required here too (missing or malformed: 503 HISTORY_FRONTIER_INVALID), and the reader does not walk the tree; CH24 no F and an unreadable or malformed store marker is a 503 GRAPH_EXECUTOR_UNAVAILABLE, never a log-only answer; CH23 the F read failing after the cards guard passed is
  *         503 GRAPH_EXECUTOR_UNAVAILABLE (CH18-CH22 are the integration review's reproductions at e32b0c2; CH9 now runs LAST because it kills the executor)
  *   CH16 reproject: derived, history-only (never latest, not counted by default; op update / nativeOp reproject with history:true, counted)
  *   CH15 walking backward: every native row exactly once, no commit split across pages
@@ -61,6 +61,7 @@ import { fileURLToPath } from 'node:url';
 import { HAVE_PY, PY, killExecutor } from './helpers/graph-executor-proc.mjs';
 import { wholeBoardWorld, WB_DATASET } from './helpers/whole-board-1645.mjs';
 import { startRestServer } from './helpers/harness.mjs';
+import { certifier } from './helpers/history-certify-1762.mjs';
 import { mintToken, hashToken } from '../core/credentials.mjs';
 import { WRITE_PROTOCOL, WRITE_PROTOCOL_HEADER, createGraphClient } from '../core/graph-client.mjs';
 
@@ -181,7 +182,13 @@ async function build() {
   const hex = (incarnation) => String(incarnation).replace(/-/g, '').toLowerCase();
   const clearFrontier = async () => update(`DELETE WHERE { GRAPH <${BK}> { <${FR}> ?p ?o } } ; DELETE WHERE { <${FR}> ?p ?o }`);
   /** plant F: `over` replaces a field's literal text (null = omit it, an array = several values); `extra` adds raw triples (e.g. into the default graph) */
-  const plantFrontier = async (over = {}, { extra = '' } = {}) => {
+  const C = certifier({ q, update, BK, FR, XSD, PROV, RS, ACT });
+  const intOf = (t) => { const m = /^"(-?\d+)"\^\^<[^>]*integer>$/.exec(String(t)); return m ? Number(m[1]) : null; };
+  /** plant F: `over` replaces a field's literal text (null = omit it, an array = several values); `extra` adds raw triples (e.g. into the default graph).
+   *  S4 v1.6.2 + the contract author's ruling: F has ONE shape everywhere, so by default the five HISTORY fields are planted too (a tree over the live nodes at or below the planted
+   *  logSeq, committed to the planted values). `omitHistory` leaves some out; `historyFields` overrides a history field's term; `certified: false` plants none. When a planted value
+   *  cannot be parsed (a missing or mistyped S3 field) the F is invalid anyway and no history fields are added. */
+  const plantFrontier = async (over = {}, { extra = '', certified = true, omitHistory = [], historyFields = {} } = {}) => {
     await clearFrontier();
     const h = await health();
     const d = { logSeq: `"${W.K}"^^<${XSD}integer>`, commitSeq: `"${h.commitSeq}"^^<${XSD}integer>`, recordedAt: `"2026-10-27T06:00:00Z"^^<${XSD}dateTime>`, epoch: `"${h.epoch}"^^<${XSD}integer>`, incarnation: `"${hex(h.incarnation)}"`, ...over };
@@ -191,6 +198,15 @@ async function build() {
       for (const lit of Array.isArray(v) ? v : [v]) triples.push(`<${FR}> <${p}> ${lit} .`);
     }
     await update(`INSERT DATA { GRAPH <${BK}> { ${triples.join('\n')} } ${extra} }`);
+    if (certified) {
+      const scalar = (v) => (Array.isArray(v) || v == null ? null : v);
+      const ls = intOf(scalar(d.logSeq)), ep = intOf(scalar(d.epoch)), cs = intOf(scalar(d.commitSeq));
+      const inc = /^"([0-9a-f]{32})"$/.exec(String(scalar(d.incarnation)))?.[1];
+      if (Number.isSafeInteger(ls) && ls >= 1 && Number.isSafeInteger(ep) && Number.isSafeInteger(cs) && inc) {
+        const entries = await C.liveEntries(ls);
+        if (entries.length) { const t = await C.writeTree(entries); await C.writeFrontierHistory({ epoch: ep, incarnationHex: inc, logSeq: ls, commitSeq: cs, t, fields: historyFields, omit: omitHistory }); }
+      }
+    }
     return { h };
   };
   W = { w, rest, get, send, startRest, q, update, health, hex, plantFrontier, clearFrontier, evdir, TOK, exec: w.exec, events: logEvents, K: logEvents.at(-1).seq };
@@ -904,6 +920,40 @@ for (const [label, pred, term] of MARKER_FAULTS) {
     } finally { if (server) await server.stop(); await proxy.close(); }
   });
 }
+
+// ── CH28 F has ONE shape: the five history fields are required for /api/changes too ──
+for (const field of ['Root', 'LeafCount', 'Tree', 'Format', 'Commitment']) {
+  test(`#1762 S3 CH28 — an F WITHOUT frontierHistory${field} is invalid in the reader too (the contract author's ruling: one F shape, S6 only writes a complete certified F): 503 HISTORY_FRONTIER_INVALID, no rows`, T, async () => {
+    await W.plantFrontier({}, { omitHistory: [field] });
+    const r = await W.get(`/api/changes?since=${SINCE_ALL}&history=true`);
+    assert.equal(r.status, 503, `(got ${r.status}: ${r.text.slice(0, 200)})`);
+    assert.equal(r.json?.code, 'HISTORY_FRONTIER_INVALID');
+    assert.equal(r.json?.changes, undefined);
+  });
+}
+for (const [label, field, term] of [
+  ['the leaf count is a string', 'LeafCount', '"13"'],
+  ['the leaf count is zero (L = 0 is never published)', 'LeafCount', `"0"^^<${XSD}integer>`],
+  ['the tree is a literal, not an IRI', 'Tree', '"urn:scrum:history-tree:not-an-iri"'],
+  ['the root is not 64 lowercase hex (63 characters)', 'Root', `"${'a'.repeat(63)}"`],
+  ['the root is uppercase hex', 'Root', `"${'A'.repeat(64)}"`],
+  ['the format is not hist-v1', 'Format', '"hist-v0"'],
+]) {
+  test(`#1762 S3 CH28 — a history field of the wrong type or range (${label}): 503 HISTORY_FRONTIER_INVALID, no rows`, T, async () => {
+    await W.plantFrontier({}, { historyFields: { [field]: term } });
+    const r = await W.get(`/api/changes?since=${SINCE_ALL}&history=true`);
+    assert.equal(r.status, 503, `(got ${r.status}: ${r.text.slice(0, 200)})`);
+    assert.equal(r.json?.code, 'HISTORY_FRONTIER_INVALID');
+    assert.equal(r.json?.changes, undefined);
+  });
+}
+test('#1762 S3 CH28 — the reader recomputes the COMMITMENT but does not walk the tree: with F\'s fields consistent and the tree graph it names ABSENT, /api/changes still serves (the tree is the lane\'s proof, not the reader\'s)', T, async () => {
+  const { h } = await W.plantFrontier();
+  const tree = (await W.q(`SELECT ?t WHERE { GRAPH <${BK}> { <${FR}> <urn:ex:frontierHistoryTree> ?t } }`))[0].t.value;
+  await W.update(`DELETE WHERE { GRAPH <${tree}> { ?s ?p ?o } }`);
+  const r = await W.get(`/api/changes?since=${SINCE_ALL}&history=true`);
+  assert.equal(r.status, 200, `S3 serves no coverage-dependent advance, so it does not read the tree (got ${r.status}: ${r.text.slice(0, 200)}; marker commitSeq ${h.commitSeq})`);
+});
 
 // CH9 runs LAST: it kills the shared executor, so every row after it would fail for that reason alone
 // ── CH9 ──
