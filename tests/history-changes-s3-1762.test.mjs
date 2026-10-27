@@ -30,7 +30,7 @@
  *   CH17 a KNOWN lane keeps its cursor when F appears, and /api/changes reads with F present never move it (a control: S3 changes no lane)
  *   CH18 a write that lands between the page's reads never yields a MIXED answer (one snapshot, or a 503); CH19 a post-F S2 refusal record is served, two of one
  *         entity are two rows; CH20 a receipt and its native activity are ONE row; CH21 the `since` cutoff compares the full instant; CH22 a frontierLogSeq past the
- *         safe integers, and a marker with no commitSeq or two, are refused 503 (a marker fault: HISTORY_FRONTIER_INVALID or GRAPH_EXECUTOR_UNAVAILABLE, not pinned); CH25 a post keeps its payload, redaction and paging with F on; CH26 no F and a malformed marker term (type, datatype, range, incarnation syntax) is refused like CH24; CH24 no F and an unreadable or malformed store marker is a 503 GRAPH_EXECUTOR_UNAVAILABLE, never a log-only answer; CH23 the F read failing after the cards guard passed is
+ *         safe integers, and a marker with no commitSeq or two, are refused 503 (a marker fault: HISTORY_FRONTIER_INVALID or GRAPH_EXECUTOR_UNAVAILABLE, not pinned); CH25 a post keeps its payload and redaction with F on; CH27 and its backward paging; CH26 no F and a malformed marker term (type, datatype, range, incarnation syntax) is refused like CH24; CH24 no F and an unreadable or malformed store marker is a 503 GRAPH_EXECUTOR_UNAVAILABLE, never a log-only answer; CH23 the F read failing after the cards guard passed is
  *         503 GRAPH_EXECUTOR_UNAVAILABLE (CH18-CH22 are the integration review's reproductions at e32b0c2; CH9 now runs LAST because it kills the executor)
  *   CH16 reproject: derived, history-only (never latest, not counted by default; op update / nativeOp reproject with history:true, counted)
  *   CH15 walking backward: every native row exactly once, no commit split across pages
@@ -802,8 +802,9 @@ async function postViews(id) {
   }
   return out;
 }
+// `history: true` is what the runtime's own client attaches to every write after F (core/graph-client.mjs): without it the redaction records no activity, which is not a write the board makes
 const redactPost = async (id) => {
-  const r = await createGraphClient({ baseUrl: W.exec.baseUrl, expectedDatasetId: WB_DATASET }).update({ kind: 'post.redact', opId: `urn:ex:op/redact/${id}`, actor: `${PERSON}ada`, post: { id }, authorityRef: 'test-authority-ref', occurredAt: new Date().toISOString() });
+  const r = await createGraphClient({ baseUrl: W.exec.baseUrl, expectedDatasetId: WB_DATASET }).update({ kind: 'post.redact', history: true, opId: `urn:ex:op/redact/${id}`, actor: `${PERSON}ada`, post: { id }, authorityRef: 'test-authority-ref', occurredAt: new Date().toISOString() });
   assert.equal(r.outcome, 'APPLIED', `PRECONDITION: the post is redacted (${JSON.stringify(r)})`);
 };
 test('#1762 S3 CH25a — a VISIBLE post written AFTER F reads as it does with F absent: op post, its text as the title, in the default AND the history view (the conversations unit stays authoritative for payload)', T, async () => {
@@ -836,6 +837,42 @@ test('#1762 S3 CH25b — a post REDACTED after F carries NONE of its text in the
   assert.ok(without.history.length >= 1 && without.history.every((x) => x.endsWith(':null') || x.startsWith('redact:')), `CONTROL: with no F every row naming the redacted post has a null title (got ${JSON.stringify(without)})`);
   assert.deepEqual(withF, without, 'with F present the redacted post reads exactly as with F absent');
   assert.deepEqual(visibleWithF, await postViews(b.json.id), 'and the visible post is unchanged by F');
+});
+
+test('#1762 S3 CH27 — walking BACKWARD one post per page over visible and redacted posts written after F: each post is served once with its text (the redacted one never), no (opId, part) twice, native provenance present, and the walk equals the no-F walk in both views', T, async () => {
+  await W.plantFrontier();
+  const secret = `PAGING SECRET ${crypto.randomUUID().slice(0, 8)}`;
+  const ids = [];
+  for (const body of ['PAGING VISIBLE A', secret, 'PAGING VISIBLE C']) {
+    const r = await W.send('POST', '/api/conversations', { author: 'ada', body });
+    assert.equal(r.status, 201, `PRECONDITION: the post is written (${r.status} ${r.text.slice(0, 200)})`); ids.push(r.json.id);
+  }
+  await redactPost(ids[1]);
+  const walk = async (history) => {
+    let before = null; const rows = [];
+    for (let pages = 0; pages < 20; pages++) {
+      const r = await W.get(`/api/changes?since=${SINCE_ALL}&limitPosts=1&limitCards=500${history ? '&history=true' : ''}${before ? `&before=${encodeURIComponent(before)}` : ''}`);
+      assert.equal(r.status, 200, `a page answers (got ${r.status}: ${r.text.slice(0, 200)})`);
+      assert.ok(!r.text.includes(secret), 'the redacted text is absent from every page');
+      rows.push(...r.json.changes.filter((x) => x.kind === 'conversation' && ids.includes(x.id)));
+      if (!r.json.nextBefore) return rows;
+      assert.notEqual(before, r.json.nextBefore, 'the walk moves');
+      before = r.json.nextBefore;
+    }
+    assert.fail('the backward walk did not end in 20 pages');
+  };
+  const withF = { latest: await walk(false), history: await walk(true) };
+  for (const [view, rows] of Object.entries(withF)) {
+    assert.ok(rows.some((x) => x.id === ids[0] && x.title === 'PAGING VISIBLE A'), `${view}: the first visible post is served with its text`);
+    assert.ok(rows.some((x) => x.id === ids[2] && x.title === 'PAGING VISIBLE C'), `${view}: and the second`);
+    const keys = rows.map((x) => `${x.graph?.opId}/${x.graph?.part}`);
+    assert.equal(new Set(keys).size, keys.length, `${view}: no (opId, part) twice across the walk`);
+    for (const row of rows) assert.ok(Number.isInteger(row.graph?.part) && typeof row.graph?.nativeOp === 'string', `${view}: native provenance present (got ${JSON.stringify(row)})`);
+  }
+  await W.clearFrontier();
+  const normal = (rows) => rows.map((x) => JSON.stringify([x.id, x.op, x.title])).sort();
+  assert.deepEqual(normal(withF.latest), normal(await walk(false)), 'the latest-view walk equals the no-F walk');
+  assert.deepEqual(normal(withF.history), normal(await walk(true)), 'and so does the history-view walk');
 });
 
 // ── CH26 no F, a store marker whose terms are malformed ──
