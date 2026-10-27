@@ -647,18 +647,22 @@
       catch { return null; }
     }
     /** Every row past the cursor, following pages until the feed is live and empty; null on a 409 (re-boot), throws otherwise. */
+    // #1795 (#144 review) — pages on a LOCAL cursor and returns it with the rows; the caller commits both together, and only
+    // once the paired card read has also succeeded. Advancing blocked.convoCursor here, page by page, meant a card failure
+    // discarded fetched rows AFTER the cursor had moved past them, so the retry skipped those raises for good.
     async function feedSince() {
       const out = [];
+      let cursor = blocked.convoCursor;
       for (let guard = 0; guard < 20; guard++) {
-        const r = await fetch('/api/conversations?afterCommit=' + encodeURIComponent(blocked.convoCursor) + '&limit=200');
+        const r = await fetch('/api/conversations?afterCommit=' + encodeURIComponent(cursor) + '&limit=200');
         if (r.status === 409) return null;
         const page = await r.json();
         if (!r.ok || !page || !Array.isArray(page.conversations) || typeof page.nextAfterCommit !== 'string') throw new Error('feed unavailable');
         for (const c of page.conversations) if (c && !c.redacted && c.op !== 'redact') out.push(c);
-        blocked.convoCursor = page.nextAfterCommit;
+        cursor = page.nextAfterCommit;
         if (page.phase === 'live' && page.conversations.length === 0) break;
       }
-      return out;
+      return { rows: out, cursor };
     }
     const maxStamp = (cur, rows, key) => rows.reduce((m, r) => (typeof r[key] === 'string' && (!m || r[key] > m) ? r[key] : m), cur);
     const raiseRow = (m) => m && typeof m.attachedTo === 'string' && m.attachedTo
@@ -705,9 +709,12 @@
             fetch('/api/cards?limit=500&updatedSince=' + encodeURIComponent(blocked.cardSince)).then(okJson),
           ]);
           if (convosR.status === 'rejected') throw convosR.reason;
-          if (resR.status === 'rejected') throw resR.reason;
-          const convos = convosR.value, res = resR.value;
-          if (convos === null) { blocked.loaded = false; return; }   // 409: another store; re-boot on the next tick
+          if (resR.status === 'rejected') throw resR.reason;   // the feed cursor has NOT moved: the rows will be read again
+          const fed = convosR.value, res = resR.value;
+          if (fed === null) { blocked.loaded = false; return; }   // 409: another store; re-boot on the next tick
+          // both reads succeeded: commit the feed's rows and its cursor together
+          const convos = blocked.convoCursor && fed && !Array.isArray(fed) ? fed.rows : fed;
+          if (blocked.convoCursor && fed && !Array.isArray(fed)) blocked.convoCursor = fed.cursor;
           const cards = res && Array.isArray(res.cards) ? res.cards : [];
           for (const m of (Array.isArray(convos) ? convos : [])) {
             if (!raiseRow(m) || blocked.convos.has(m.id)) continue;

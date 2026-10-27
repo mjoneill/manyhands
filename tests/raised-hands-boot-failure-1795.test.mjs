@@ -113,3 +113,49 @@ test('#1795 F4 a card read answered 503 is a FAILURE, never "no cards": the pane
     assert.equal(full.length, 2, `a failed card read is retried exactly once after its backoff, then deltas: saw ${full.length} corpus read(s)`);
   }, { server: { board }, launch: { headless: 'new' } });
 });
+
+// ── #144 review 2: the commit-feed cursor must not move past rows a failed tick threw away ───────────────────────────
+const ts2 = (n) => new Date(Date.now() - n * 60_000).toISOString();
+const boardWithCards = {
+  cards: [
+    { id: 'quiet', shortId: 10, title: 'nothing waiting here', description: '', type: 'task', assignees: [], labels: [], for: '', priority: null, column: 'backlog', order: 0, createdAt: ts2(30), updatedAt: ts2(30), version: 1, relationships: { relatedTo: [], blockedBy: [] } },
+    { id: 'later', shortId: 20, title: 'a hand goes up on this one', description: '', type: 'task', assignees: [], labels: [], for: '', priority: null, column: 'backlog', order: 0, createdAt: ts2(30), updatedAt: ts2(30), version: 1, relationships: { relatedTo: [], blockedBy: [] } },
+  ],
+  columns: [{ id: 'backlog', name: 'Backlog', order: 0 }],
+  conversations: [{ id: 'm1', author: 'bo', body: 'hello room', createdAt: ts2(20), attachedTo: null }],
+  nextShortId: 30,
+};
+
+test('#1795 F5 FEED MODE: a raise fetched on a tick whose card read FAILS is not skipped — the feed cursor moves only with a successful tick', { timeout: 120000 }, async () => {
+  await withBrowserServer(async ({ server, browser }) => {
+    const page = await browser.newPage();
+    // the page believes the commit feed is on (the server's own script cannot turn it back off)
+    await page.evaluateOnNewDocument(() => { Object.defineProperty(window, '__SCRUM_COMMIT_FEED__', { value: true, writable: false }); });
+    let raised = false; let cardDeltaFailures = 0; const feedCalls = [];
+    const raise = { id: 'r1', author: 'bo', body: '🚧 need a decision on the colour', attachedTo: 'later', createdAt: new Date().toISOString() };
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      const u = new URL(req.url());
+      const json = (body, status = 200) => req.respond({ status, contentType: 'application/json', body: JSON.stringify(body) });
+      if (u.pathname === '/api/conversations' && u.searchParams.has('afterCommit')) {
+        const at = u.searchParams.get('afterCommit'); feedCalls.push(at);
+        if (at === 'tip') return json({ nextAfterCommit: 'c1', conversations: [], phase: 'live' });
+        if (at === 'c1' && raised) return json({ nextAfterCommit: 'c2', conversations: [raise], phase: 'catchup' });
+        return json({ nextAfterCommit: at, conversations: [], phase: 'live' });
+      }
+      if (u.pathname === '/api/cards' && u.searchParams.has('updatedSince') && raised && cardDeltaFailures < 1) {
+        cardDeltaFailures++; return json({ error: 'cards are unavailable', code: 'CARDS_UNAVAILABLE' }, 503);
+      }
+      req.continue();
+    });
+    await page.goto(`${server.baseUrl}/commons.html`, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#blocked-toggle', { timeout: 10000 });
+    await sleep(10_000);                       // booted, on the feed
+    assert.ok(feedCalls.includes('tip'), `PRECONDITION: the page follows the commit feed (feed calls: ${feedCalls.join(',')})`);
+    raised = true;                             // the next tick fetches the raise — and its card read fails once
+    await sleep(40_000);                       // the failed tick, its 16 s backoff, and the retry
+    assert.equal(cardDeltaFailures, 1, 'PRECONDITION: exactly one tick saw the card read fail');
+    const shown = await page.$eval('#blocked-toggle', (el) => el.textContent.trim());
+    assert.match(shown, /· 1$/, `the raise fetched on the failed tick is read again and shown — not skipped by a cursor that moved without it: "${shown}"`);
+  }, { server: { board: boardWithCards }, launch: { headless: 'new' } });
+});
