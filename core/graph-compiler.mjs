@@ -28,6 +28,7 @@
  * anything else is a pre-dispatch REJECTED.
  */
 import { createHash } from 'node:crypto';
+import * as RF from './refusal-record.mjs';   // #1762 S2 — the refusal registries, shared with the builder
 import { EX, NS, RECEIPT_PREDICATES, MARKER_SUBJECT, MARKER_PREDICATES, LG, LG_NS, lgMetaPredicate, BK, BOOKKEEPING_PREDICATES, isBookkeeping, POSTSEQ_TERMS, ORIGIN_TERMS } from './graph-vocab.mjs';
 import { reserveOpId as _reserveOpId, canonReservationBatch as _canonReservationBatch, reserveDigestBody as _reserveDigestBody, canonAnnouncementDraft } from './postseq-reserve.mjs';
 import { announcePostId, opIdFor as announceOpIdFor, postCreateIntention as announcePostCreateIntention } from './announce-outbox.mjs';
@@ -565,7 +566,7 @@ export const LOGBORN_TERMS = Object.freeze({
   // sees the same triples.
   Wake: `${RS}Wake`, wokeSeat: `${RS}wokeSeat`, wokeAt: `${RS}wokeAt`,
   // #1762 S2 — a refusal, content-free (core/refusal-record.mjs): identifiers and outcomes, never what was said
-  RefusalRecord: `${RS}RefusalRecord`, route: `${RS}route`, status: `${RS}status`, code: `${RS}code`, rule: `${RS}rule`,
+  RefusalRecord: `${RS}RefusalRecord`, refusedAction: `${RS}refusedAction`, route: `${RS}route`, status: `${RS}status`, code: `${RS}code`, rule: `${RS}rule`,
   entityKind: `${RS}entityKind`, entityId: `${RS}entityId`,
   wasAssociatedWith: 'http://www.w3.org/ns/prov#wasAssociatedWith', startedAtTime: 'http://www.w3.org/ns/prov#startedAtTime',
 });
@@ -697,38 +698,36 @@ function canonStep(s, what) {
   };
 }
 
-// #1762 S2 — every field of a refusal has a SHAPE that cannot carry prose: a template, an integer, a registered token or
-// `unlisted`, a safe id. The node's IRI is derived from the opId, so a retried refusal (same requestId, same opId) cannot
-// land a second record. Shapes mirror core/refusal-record.mjs; this is the check a caller cannot skip.
-const REFUSAL_SHAPES = Object.freeze({
-  route: /^(?:(?:POST|PATCH|PUT|DELETE) \/api(?:\/(?:[a-z0-9][a-z0-9-]*|:p))*|mcp [a-z][a-z_]{0,39}|unmatched)$/,
-  code: /^(?:[A-Z][A-Z0-9_]{1,63}|unlisted)$/,
-  rule: /^(?:#[0-9]{1,5} [a-z][a-z ]{0,39}|unlisted)$/,
-  entityKind: /^[a-z][a-z-]{0,31}$/,
-  entityId: /^[A-Za-z0-9_-]{1,64}$/,
-  requestId: /^[A-Za-z0-9-]{8,64}$/,
-});
-export const refusalIri = (opId) => `https://scrumboard.local/refusal/${createHash('sha256').update(opId).digest('hex').slice(0, 32)}`;
+// #1762 S2 (contract v2.2) — every field of a refusal is checked against the SAME closed registries the builder uses
+// (core/refusal-record.mjs), so a direct `refusal.record` that skips the builder still cannot store an unregistered code,
+// rule, route or action. The identity is re-derived here: a requestId-scoped opId must be the hash of (seat, route,
+// requestId), and a node IRI must be its opId's, so a retried refusal cannot land a second record and two scopes never share.
 function canonRefusal(r, opId) {
-  obj(r, ['iri', 'route', 'status', 'code', 'rule', 'entityKind', 'entityId', 'requestId', 'associatedWith'], 'refusal');
-  if (!opId.startsWith(`${NS}op/refused/`)) fail(`a refusal.record's opId is under ${NS}op/refused/`);
+  obj(r, ['iri', 'route', 'refusedAction', 'status', 'code', 'rule', 'entityKind', 'entityId', 'requestId', 'associatedWith'], 'refusal');
   const iri = checkIri(r.iri, 'refusal.iri');
-  if (iri !== refusalIri(opId)) fail('refusal.iri must be the IRI its opId derives (refusalIri)');
-  const shaped = (v, k, optional = false) => {
-    if (optional && (v === undefined || v === null)) return null;
-    if (typeof v !== 'string' || !REFUSAL_SHAPES[k].test(v)) fail(`refusal.${k}: not an allowlisted shape (a refusal stores no text)`);
+  if (iri !== RF.refusalIriOf(opId)) fail('refusal.iri must be the IRI its opId derives (refusalIriOf)');
+  const listed = (v, k, ok, optional) => {
+    if (optional && v === null) return null;
+    if (v !== RF.UNLISTED && !(typeof v === 'string' && ok(v))) fail(`refusal.${k}: not in its registry (a refusal stores only registered values, else unlisted)`);
     return v;
   };
+  const route = listed(r.route, 'route', (v) => RF.ROUTE_TEMPLATES.has(v) || Object.hasOwn(RF.ADAPTER_ROUTES, v));
+  const refusedAction = r.refusedAction;
+  if (refusedAction !== RF.refusedActionOf(route)) fail('refusal.refusedAction must be the action its route names');
+  const code = listed(r.code ?? null, 'code', (v) => RF.REFUSAL_CODES.has(v), true);
+  const rule = listed(r.rule ?? null, 'rule', (v) => RF.REFUSAL_RULES.has(v), true);
+  const shaped = (v, k, re) => { if (v == null) return null; if (typeof v !== 'string' || !re.test(v)) fail(`refusal.${k}: not its id shape`); return v; };
+  const entityKind = shaped(r.entityKind, 'entityKind', RF.ENTITY_KIND_RE);
+  if (entityKind == null) fail('refusal.entityKind is required');
   const status = intLit(r.status, 'refusal.status');
   if (BigInt(status) < 400n || BigInt(status) > 599n) fail('refusal.status must be 400-599');
   const associatedWith = checkIri(r.associatedWith, 'refusal.associatedWith');
-  if (!/^https:\/\/scrumboard\.local\/person\/[a-z0-9][a-z0-9_-]{0,63}$/.test(associatedWith) && associatedWith !== `${RS}unknown`) fail('refusal.associatedWith must be a seat Person IRI or scrum:unknown');
-  const requestId = shaped(r.requestId, 'requestId', true);
-  if (requestId != null && opId !== `${NS}op/refused/${requestId}`) fail('a refusal with a requestId has the opId urn:ex:op/refused/<requestId>');
-  return {
-    iri, route: shaped(r.route, 'route'), status, code: shaped(r.code, 'code'), rule: shaped(r.rule, 'rule', true),
-    entityKind: shaped(r.entityKind, 'entityKind'), entityId: shaped(r.entityId, 'entityId', true), requestId, associatedWith,
-  };
+  if (!/^https:\/\/scrumboard\.local\/person\/[a-z0-9][a-z0-9_-]{0,63}$/.test(associatedWith) && associatedWith !== RF.REFUSAL_UNKNOWN) fail('refusal.associatedWith must be a seat Person IRI or scrum:unknown');
+  const requestId = shaped(r.requestId, 'requestId', RF.REQUEST_ID_RE);
+  if (requestId != null ? opId !== RF.refusalOpId(associatedWith, route, requestId) : !/^urn:ex:op\/refused\/fresh-[0-9a-f-]{36}$/.test(opId)) {
+    fail('a refusal\'s opId is urn:ex:op/refused/<sha256(seat, route, requestId)> with a requestId, else refused/fresh-<uuid>');
+  }
+  return { iri, route, refusedAction, status, code, rule, entityKind, entityId: shaped(r.entityId, 'entityId', RF.ENTITY_ID_RE), requestId, associatedWith };
 }
 
 function canonicalizeRecord(i) {
@@ -1139,11 +1138,12 @@ function planRecord(c) {
     add(S.iri, TM.traceId, S.traceId == null ? null : L(S.traceId)); add(S.iri, TM.ofModelCall, S.ofModelCall && I(S.ofModelCall));
     add(S.iri, TM.recordedBy, ref(c.opId));
   } else if (c.kind === 'refusal.record') {
-    // #1762 S2 — one fresh node; its time is the receipt's own NOW() (insAt), so the record and its receipt agree
+    // #1762 S2 — one fresh node; `unlisted` is the IRI scrum:unlisted; its time is the receipt's own NOW() (insAt)
     const F = R.refusal; target = null;
+    const tok = (v) => (v === RF.UNLISTED ? I(`${RS}unlisted`) : L(v));
     fresh.push(F.iri);
-    add(F.iri, TM.type, I(TM.RefusalRecord)); add(F.iri, TM.route, L(F.route)); add(F.iri, TM.status, F.status);
-    add(F.iri, TM.code, L(F.code)); add(F.iri, TM.rule, F.rule == null ? null : L(F.rule));
+    add(F.iri, TM.type, I(TM.RefusalRecord)); add(F.iri, TM.route, tok(F.route)); add(F.iri, TM.refusedAction, tok(F.refusedAction));
+    add(F.iri, TM.status, F.status); add(F.iri, TM.code, F.code == null ? null : tok(F.code)); add(F.iri, TM.rule, F.rule == null ? null : tok(F.rule));
     add(F.iri, TM.entityKind, L(F.entityKind)); add(F.iri, TM.entityId, F.entityId == null ? null : L(F.entityId));
     add(F.iri, TM.requestId, F.requestId == null ? null : L(F.requestId)); add(F.iri, TM.wasAssociatedWith, I(F.associatedWith));
     add(F.iri, TM.recordedBy, ref(c.opId));

@@ -43,7 +43,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { countLegacy, setLegacyContext, installStructuredCloneCounter, legacyCounters } from './core/legacy-counters.mjs';
 import { createGraphSlice } from './core/graph-slice-routes.mjs';
 import { historyNativeOn } from './core/durable-update.mjs';   // #1762 S1b
-import { refusalIntention, refusalSeat, routeTemplate, adapterRoute, createRefusalAuditMeter } from './core/refusal-record.mjs';   // #1762 S2
+import { refusalIntention, refusalSeat, routeTemplate, adapterRoute, createRefusalAuditMeter, UNLISTED as REFUSAL_UNLISTED } from './core/refusal-record.mjs';   // #1762 S2
 // #1561 — the log-born unit (memory, decision, seat-state) on the graph executor, behind
 // SCRUM_GRAPH_UNIT_LOGBORN=1. The folds live there now; with the flag OFF they are the only part used.
 import {
@@ -969,11 +969,12 @@ function logRefused(req, statusCode, data) {
     if (historyNativeOn()) {
       if (req._noRefusalAudit) return;   // the audit write of a refusal report failed: that failure is counted, not recorded
       const mr = meterRoute.getStore();
-      recordRefusal({
-        route: mr && mr.path === url ? routeTemplate(req.method, mr.route) : 'unmatched', status: statusCode,
+      const facts = {
+        route: mr && mr.path === url ? routeTemplate(req.method, mr.route) : REFUSAL_UNLISTED, status: statusCode,
         code: data && data.code, rule: null, entityKind: kindEntry ? kindEntry[1] : 'request', entityId: tail || null,
         requestId: request && request.requestId, authSeat: req.auth && req.auth.seat, declared: actor,
-      });
+      };
+      setImmediate(() => { recordRefusal(facts); });   // v2.2 §3: after the response is handed on, never on its path
       return;
     }
     // #1574 W39/W40 — A REFUSED POST LEAVES NO COPY OF WHAT IT SAID. This log is append-only and redaction never reaches
@@ -1014,16 +1015,19 @@ function logRefused(req, statusCode, data) {
 // out unchanged whatever happens here); awaited by POST /api/refusals, which answers with what the graph holds.
 const REFUSAL_AUDIT = createRefusalAuditMeter();
 const rosterKeysOrEmpty = () => { try { return new Set(Object.keys(currentRoster() || {})); } catch { return new Set(); } };
+// v2.2 §2/§6: only APPLIED is "recorded" (an identical retry replays its APPLIED receipt). An intent-collision (the same
+// scope and id with CHANGED facts), a failed precondition, UNKNOWN or REJECTED is an audit failure: counted, never assumed.
 async function recordRefusal({ authSeat, declared, ...facts }) {
-  try {
-    if (!ANNOUNCE_EXECUTOR) { REFUSAL_AUDIT.unavailable('no graph executor is configured'); return false; }
-    const i = refusalIntention({ actor: graphActor('board'), ...facts, seat: refusalSeat({ authSeat, declared, rosterKeys: rosterKeysOrEmpty() }) });
-    const r = await ANNOUNCE_EXECUTOR.update(i);
-    // A retried refusal (same requestId) is the SAME record: its opId has a receipt already, so the graph refuses a second.
-    if (r.outcome === 'APPLIED' || r.outcome === 'PRECONDITION_FAILED' || r.reason === 'intent-collision') return true;
-    REFUSAL_AUDIT.unavailable(`${r.outcome}${r.reason ? `: ${r.reason}` : ''}`);
-    return false;
-  } catch (e) { REFUSAL_AUDIT.unavailable(e?.message || 'error'); return false; }
+  return REFUSAL_AUDIT.run(async () => {
+    try {
+      if (!ANNOUNCE_EXECUTOR) { REFUSAL_AUDIT.unavailable('no graph executor is configured'); return false; }
+      const i = refusalIntention({ actor: graphActor('board'), ...facts, seat: refusalSeat({ authSeat, declared, rosterKeys: rosterKeysOrEmpty() }) });
+      const r = await ANNOUNCE_EXECUTOR.update(i);
+      if (r.outcome === 'APPLIED') return true;
+      REFUSAL_AUDIT.unavailable(`${r.outcome}${r.reason ? `: ${r.reason}` : ''}`);
+      return false;
+    } catch (e) { REFUSAL_AUDIT.unavailable(e?.message || 'error'); return false; }
+  });
 }
 
 /**
