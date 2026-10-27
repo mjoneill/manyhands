@@ -18,6 +18,8 @@
  *   LP4b (placed with the proof rows below, after the proof design was ruled): a COVERED TAIL, F.logSeq beyond the last committed node and the lane acked at it, is an empty page whose token has log = F.logSeq; the lane
  *        moves only when it is acked, then the log half is drained
  *   PR00/PR0/PA1-PA17/LP4b  the PROOF rows (S4 v1.6, v1.6.1, v1.6.2): a lane's log-half advance is verified against F's committed Merkle root; the rows build the certified world themselves (helpers/history-merkle-1762.mjs)
+ *   LR1/LR1b/LR2/LR3a-c  the review of 60a02f8: a graph-born post receipt owed before F stays owed (and survives a restart, gone only after its ack); a redacted one is still an event; non-post legacy history keeps its
+ *        bounded facts (lenient wire); REGISTER, PULL, ACK and the lane LISTING make no access to the retired event-log directory; implicit adoption past F is F.logSeq, from a log with a junk tail and from none
  *   LG1  GRAPH half, whole-commit pages: a multi-part native commit larger than `limit` is served WHOLE in one page (every part of it, nothing of any other commit), and the token's graph half is
  *        that commit's commitSeq (a page never ends inside a commit)
  *   LG2  repeat-before-ACK: the same pull again returns the same parts and the same token, and the lane's graph half has not moved
@@ -131,7 +133,8 @@ async function build() {
   for (const [seq, [col, holder]] of Object.entries(FACTS)) {
     lines.push(`<${node(seq)}> <${COLUMN_AFTER}> ${JSON.stringify(col)} .`, `<${node(seq)}> <${HOLDER}> <${holder}> .`);
   }
-  for (const e of EVENTS) lines.push(`<${node(e.seq)}> <${LOGAT}> "${e.recorded_at}"^^<${XSD}dateTime> .`);
+  // the accepted backfill writes NOTHING for conversation nodes (scripts/history-backfill-1762.mjs): the world must not hand the lane a timestamp the real migration does not add
+  for (const e of EVENTS.filter((x) => x.entity?.kind !== 'conversation')) lines.push(`<${node(e.seq)}> <${LOGAT}> "${e.recorded_at}"^^<${XSD}dateTime> .`);
   await update(`INSERT DATA { ${lines.join('\n')} }`);
   // the REST preconditions the whole-board world needs when the document is unreadable (the S2 world's steps)
   const ep = health0.epoch;
@@ -229,7 +232,7 @@ async function settle() {
   assert.equal(p.status, 0, `PRECONDITION: the projector caught up (exit ${p.status}: ${(p.err || p.out).slice(-300)})`);
   const evs = readLog();
   if (projectedThrough == null) projectedThrough = W.K;
-  const fresh = evs.filter((e) => e.seq > projectedThrough);
+  const fresh = evs.filter((e) => e.seq > projectedThrough && e.entity?.kind !== 'conversation');
   if (fresh.length) await W.update(`INSERT DATA { ${fresh.map((e) => `<${node(e.seq)}> <${LOGAT}> "${e.recorded_at}"^^<${XSD}dateTime> .`).join('\n')} }`);
   projectedThrough = evs.at(-1).seq;
   return projectedThrough;
@@ -300,6 +303,7 @@ test('#1762 S4 LP3 — a legacy CONVERSATION owed to a lane is served by its seq
   const bySeq = (s) => r.json.events.filter((e) => e.seq === s);
   assert.equal(bySeq(visible.seq).length, 1, 'the visible legacy post is one event');
   assert.ok(JSON.stringify(bySeq(visible.seq)).includes(visible.body), 'carrying its text, from the conversations unit');
+  assert.ok(JSON.stringify(bySeq(visible.seq)).includes(T0(14)), 'and its own time, from the conversations unit (the backfill adds no logRecordedAt to a conversation node, so the time cannot come from there)');
   assert.equal(bySeq(redacted.seq).length, 1, 'the redacted post is STILL an event: dropping it would let the lane ack past it');
   assert.ok(!r.text.includes(redacted.body), 'and none of its text is in the answer');
   assert.ok(redacted.seq <= n, 'PRECONDITION: it is legacy (at or below F.logSeq)');
@@ -494,6 +498,10 @@ async function expectCoverageRefused(name, label, limit = 500) {
   assert.equal(r.json?.ack_token, undefined, `${label}: no ack_token`);
   assert.equal(JSON.stringify(laneState(name)), before, `${label}: the lane is byte-identical`);
 }
+const redactLegacy = async (id) => {
+  const r = await createGraphClient({ baseUrl: W.exec.baseUrl, expectedDatasetId: WB_DATASET }).update({ kind: 'post.redact', history: true, opId: `urn:ex:op/redact/${id}`, actor: `${PERSON}ada`, post: { id }, authorityRef: 'test-authority-ref', occurredAt: new Date().toISOString() });
+  assert.equal(r.outcome, 'APPLIED', `PRECONDITION: the post is redacted (${JSON.stringify(r)})`);
+};
 const ownSeqs = (r, n) => seqsOf(r).filter((x) => x <= n);
 
 test('#1762 S4 PR00 CONTROL — the certified world is what v1.6.2 says (read back from the executor, checked with the reference only): F carries each history field once, the stored entries and subtrees recompute to F\'s root, every audit path verifies, and the commitment recomputes (no product code is involved: this holds on main by design)', T, async () => {
@@ -790,6 +798,116 @@ test('#1762 S4 PA17 — the empty tail is NOT issued over a rewritten last leaf:
   await seedLane('pa17', cert.entries.at(-1).N);
   await setObj(cert.tree, leafIri(cert.tree, rank), `${NS}htLeaf`, lit(flip(HEX(cert.built.leaves[rank]))));
   await expectCoverageRefused('pa17', 'tail with the last leaf rewritten');
+});
+
+
+// ══ the review of 60a02f8: what a lane owed before F must still be owed, the legacy facts, and a retired log ══
+test('#1762 S4 LR1 — a graph-born POST RECEIPT committed before F and not yet acked stays owed to a known lane: F does not erase graph-domain events (it has no legacy seq-node to be rescued by); it survives a repeat, a restart before the ack, and is gone only after the ack', T, async () => {
+  await W.clearFrontier();
+  await seedLane('lr1', 0);
+  const before = laneState('lr1').graph_acked;
+  const created = await W.send('POST', '/api/conversations', { author: 'ada', body: `OWED PRE FRONTIER ${crypto.randomUUID().slice(0, 8)}` });
+  assert.equal(created.status, 201, `PRECONDITION: the post is written (${created.status} ${created.text.slice(0, 200)})`);
+  const opId = `urn:ex:op/post/${created.json.id}`;
+  const receipt = await W.q(`SELECT ?seq WHERE { GRAPH <${BK}> { <${opId}> <urn:ex:commitSeq> ?seq } }`);
+  assert.equal(receipt.length, 1, 'PRECONDITION: the post has one applied receipt');
+  assert.ok(Number(receipt[0].seq.value) > before, `PRECONDITION: the receipt (commit ${receipt[0].seq.value}) is above the lane\'s graph half (${before})`);
+  const { n } = await plantAtHead();                                                          // F is certified AFTER the post: the receipt is at or below F.commitSeq
+  const st = JSON.parse(fs.readFileSync(lanePath(), 'utf8')); st.seats['registry:lr1'].acked = n; fs.writeFileSync(lanePath(), `${JSON.stringify(st, null, 2)}\n`);     // the log half is drained; the graph half keeps where it was
+  const mine = (r) => r.json.events.filter((e) => e.graph?.opId === opId);
+  const first = await pull('lr1', 500);
+  assert.equal(first.status, 200, `(${first.status}: ${first.text.slice(0, 200)})`);
+  assert.equal(mine(first).length, 1, 'the owed pre-F post receipt is served, once');
+  assert.equal(mine(await pull('lr1', 500)).length, 1, 'and again on a repeat before the ack');
+  await viaRestart(async (srv) => assert.equal(mine(await srv.pull('lr1', 500)).length, 1, 'and across a restart before the ack'));
+  assert.equal((await ack('lr1', first.json.ack_token)).status, 200, 'the ack is accepted');
+  assert.equal(mine(await pull('lr1', 500)).length, 0, 'and after the ack it is not served again');
+});
+
+test('#1762 S4 LR1b — a pre-F graph-born post REDACTED before the pull is still an owed event (never dropped, or the lane could ack past it) and carries none of its text', T, async () => {
+  await W.clearFrontier();
+  await seedLane('lr1b', 0);
+  const secret = `OWED REDACTED ${crypto.randomUUID().slice(0, 8)}`;
+  const created = await W.send('POST', '/api/conversations', { author: 'ada', body: secret });
+  assert.equal(created.status, 201);
+  await redactLegacy(created.json.id);
+  const { n } = await plantAtHead();
+  const st = JSON.parse(fs.readFileSync(lanePath(), 'utf8')); st.seats['registry:lr1b'].acked = n; fs.writeFileSync(lanePath(), `${JSON.stringify(st, null, 2)}\n`);
+  const r = await pull('lr1b', 500);
+  assert.equal(r.status, 200, `(${r.status}: ${r.text.slice(0, 200)})`);
+  assert.ok(r.json.events.some((e) => JSON.stringify(e).includes(created.json.id)), 'the redacted post is still an event for the lane');
+  assert.ok(!r.text.includes(secret), 'and none of its text is in the answer');
+});
+
+test('#1762 S4 LR2 — non-post legacy history keeps its bounded S3 facts: a card update\'s column after the write and a refusal\'s reason and status are SERVED, not reduced to an identity-only event (the wire shape is lenient here until it is pinned: the value may sit in `state` or beside it)', T, async () => {
+  await plantAtHead();
+  await seedLane('lr2', 0);
+  const r = await pull('lr2', 500);
+  assert.equal(r.status, 200, `(${r.status}: ${r.text.slice(0, 200)})`);
+  const card = r.json.events.find((x) => x.seq === 2), refusal = r.json.events.find((x) => x.seq === SKIP(6));
+  assert.ok(card && refusal, 'PRECONDITION: both events are served');
+  assert.equal(card.state?.column ?? card.column, 'in-progress', `seq 2\'s column after the write is retained, not recovered from the current card (got ${JSON.stringify(card)})`);
+  assert.equal(refusal.reason ?? refusal.state?.reason, 'REFUSED-REASON-FIXTURE', `a refusal\'s reason is retained (got ${JSON.stringify(refusal)})`);
+  assert.equal(Number(refusal.status ?? refusal.state?.status), 409, 'and its status');
+});
+
+// ── retired log: every F-present cursor entrypoint must be independent of the event-log directory ──
+/** a REST over a COPY of the event-log directory with a junk tail past F appended to its latest file, the lane state in an owner file OUTSIDE it, and the fs recorder on every access */
+async function retiredLogWorld({ junkTail = true, absentLog = false } = {}) {
+  const { n } = await plantAtHead();
+  const evdir = fs.mkdtempSync(path.join(os.tmpdir(), 'lr-retired-log-')); owned.dirs.push(evdir);
+  if (!absentLog) {
+    for (const f of fs.readdirSync(W.evdir)) fs.copyFileSync(path.join(W.evdir, f), path.join(evdir, f));
+    if (junkTail) fs.appendFileSync(path.join(evdir, fs.readdirSync(evdir).filter((x) => /^events-.*\.jsonl$/.test(x)).sort().at(-1)), `${JSON.stringify({ seq: n + 10, op: 'update', actor: 'ada', recorded_at: T0(20), entity: { kind: 'card', id: 'junk-after-F' }, state: null })}\n`);
+  }
+  const owner = path.join(os.tmpdir(), `lr-owner-${process.pid}-${crypto.randomUUID().slice(0, 6)}.json`); owned.files.push(owner);
+  fs.copyFileSync(lanePath(), owner);
+  const record = path.join(os.tmpdir(), `lr-log-access-${process.pid}-${crypto.randomUUID().slice(0, 6)}.log`); owned.files.push(record);
+  const recorder = path.join(ROOT, 'tests/helpers/fs-store-recorder.mjs');
+  const server = await W.startRest({ SCRUM_EVENT_LOG_DIR: evdir, SCRUM_CURSORS_FILE: owner, SCRUM_FS_RECORD: record, SCRUM_FS_RECORD_ALL: '1', NODE_OPTIONS: `--import ${recorder}` });
+  const post = async (route, body) => { const r = await fetch(server.rest.baseUrl + route, { method: 'POST', headers: { authorization: `Bearer ${W.TOK}`, 'content-type': 'application/json' }, body: JSON.stringify(body) }); return { status: r.status, json: await r.json().catch(() => null) }; };
+  const logReads = () => (fs.existsSync(record) ? fs.readFileSync(record, 'utf8').split('\n').filter((l) => l.startsWith(evdir)) : []);
+  const reset = () => fs.writeFileSync(record, '');
+  return { n, evdir, owner, server, post, logReads, reset, record };
+}
+
+test('#1762 S4 LR3a — with a valid certified F, REGISTER, PULL, ACK and the lane LISTING make no access to the event-log directory (the state owner is outside it): the recorder sees them with no F, and sees none with F', T, async () => {
+  await seedLane('lr3a', 0);
+  const w = await retiredLogWorld();
+  try {
+    w.reset();
+    const reg = await w.post('/api/cursors/register', { registrySeatId: 'lr3a' }); const regReads = w.logReads(); w.reset();
+    assert.equal(reg.status, 200, `register (${reg.status})`);
+    const pullR = await w.server.get(`/api/cursors/pull?identity=${encodeURIComponent('registry:lr3a')}&limit=500`); const pullReads = w.logReads(); w.reset();
+    assert.equal(pullR.status, 200, `pull (${pullR.status}: ${pullR.text.slice(0, 160)})`);
+    const ackR = await w.post('/api/cursors/ack', { identity: 'registry:lr3a', token: pullR.json.ack_token }); const ackReads = w.logReads(); w.reset();
+    assert.equal(ackR.status, 200, `ack (${ackR.status})`);
+    const list = await w.server.get('/api/cursors'); const listReads = w.logReads(); w.reset();
+    assert.equal(list.status, 200, `listing (${list.status}: ${list.text.slice(0, 160)})`);
+    assert.deepEqual({ register: regReads.length, pull: pullReads.length, ack: ackReads.length, listing: listReads.length }, { register: 0, pull: 0, ack: 0, listing: 0 }, `none of them consults the retired log (reads: ${JSON.stringify({ regReads, pullReads, ackReads, listReads })})`);
+    await W.clearFrontier(); w.reset();
+    const control = await w.post('/api/cursors/register', { registrySeatId: 'lr3a' });
+    assert.equal(control.status, 200); assert.ok(w.logReads().length > 0, 'CONTROL (essential): with NO F the same registration does read the log, so the recorder can see these accesses');
+  } finally { await w.server.stop(); }
+});
+
+test('#1762 S4 LR3b — IMPLICIT adoption of a fresh lane past F takes its baseline from F.logSeq, never from the log\'s head: with F.logSeq = n and a junk tail at n+10 in the (retired) log, a fresh bearer adopts acked = n and reads no log', T, async () => {
+  const w = await retiredLogWorld();
+  try {
+    w.reset();
+    const inbound = await w.post('/api/cursors/inbound', { bearerSeat: 'lr3b-fresh' });
+    assert.equal(inbound.status, 200, `(${inbound.status})`);
+    assert.deepEqual({ acked: inbound.json.envelope?.last_acked_seq, logReads: w.logReads().length }, { acked: w.n, logReads: 0 }, `adopted at F.logSeq (${w.n}), not the log head (${w.n + 10}), without reading the log`);
+  } finally { await w.server.stop(); }
+});
+
+test('#1762 S4 LR3c — with the event-log directory ABSENT or emptied (retired and replaced), implicit adoption past F is still F.logSeq, not zero: no replay of pre-registration history', T, async () => {
+  const w = await retiredLogWorld({ absentLog: true });
+  try {
+    const inbound = await w.post('/api/cursors/inbound', { bearerSeat: 'lr3c-fresh' });
+    assert.equal(inbound.status, 200, `(${inbound.status})`);
+    assert.equal(inbound.json.envelope?.last_acked_seq, w.n, `adopted at F.logSeq (${w.n}), not 0 (the log is gone)`);
+  } finally { await w.server.stop(); }
 });
 
 test('#1762 S4 LP8 — a conversation node whose post node is ABSENT refuses the pull 503 HISTORY_LEGACY_POST_MISSING {seq, entity}: nothing served, the lane unchanged', T, async () => {
