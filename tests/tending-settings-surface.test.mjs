@@ -64,18 +64,23 @@ test('#953 GET /api/tending-config exposes the setting to the page', async () =>
 test('#953 POST /api/tending-config changes the value AND persists it', async () => {
   const file = withConfigFile();
   const s = await startRestServer({ board: makeBoardFixture(), env: { SCRUM_TENDING_CONFIG_FILE: file } });
+  let again = null;
   try {
     const w = await api(s.baseUrl, 'POST', '/api/tending-config', { enabled: true, quietAfterMinutes: 45 });
     assert.equal(w.status, 200, JSON.stringify(w.body));
     assert.equal(w.body.quietAfterMinutes, 45);
 
-    // On disk — acceptance 5. A restart reads this file and nothing else.
-    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).quietAfterMinutes, 45,
-      'the setting must survive the process, or "restart preserves it" is untrue');
-
     // And readable back through the surface he used.
     assert.equal((await api(s.baseUrl, 'GET', '/api/tending-config')).body.quietAfterMinutes, 45);
-  } finally { await s.stop(); }
+
+    // #1785 — acceptance 5 is now a RESTART, not a file read. The setting is graph state; the old file was imported once
+    // and is never written again, so it still says 20. A restart that answers 45 therefore read the graph, not the file.
+    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).quietAfterMinutes, 20, 'the retired file is not written');
+    s.kill();
+    again = await startRestServer({ boardFile: s.boardFile, env: { SCRUM_TENDING_CONFIG_FILE: file } });
+    assert.equal((await api(again.baseUrl, 'GET', '/api/tending-config')).body.quietAfterMinutes, 45,
+      'the setting must survive the process, or "restart preserves it" is untrue');
+  } finally { await again?.stop(); await s.stop(); }
 });
 
 /**
@@ -94,8 +99,8 @@ test('#953 an invalid value is REFUSED with a readable reason, not coerced', asy
       assert.match(r.body.error, /quietAfterMinutes/,
         'the refusal must name the field, or the page cannot tell him what to fix');
     }
-    // ⭐ CONTROL: the refusals did not corrupt the stored value.
-    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).quietAfterMinutes, 20,
+    // ⭐ CONTROL: the refusals did not corrupt the stored value. #1785 — the stored value is graph state, read back through REST.
+    assert.equal((await api(s.baseUrl, 'GET', '/api/tending-config')).body.quietAfterMinutes, 20,
       'a rejected write must leave the previous setting intact');
   } finally { await s.stop(); }
 });

@@ -700,6 +700,11 @@ export const TENDING_PREDICATES = Object.freeze({
   'scrum:shuffle': 'literal',
   'scrum:paused': 'literal',
   'scrum:pausedAt': 'literal',
+  // #1785 — the tending config moved off tending-config.json onto TendingState: the
+  // quiet threshold, and a one-time stamp naming the file it was imported from.
+  'scrum:quietAfterMinutes': 'literal',
+  'scrum:configImportedFrom': 'literal',
+  'scrum:configImportedAt': 'literal',
   'scrum:actor': 'person',
   'scrum:occurredAt': 'literal',
   // mint / settlement

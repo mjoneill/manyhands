@@ -245,10 +245,43 @@ export function setShuffle(entities = [], { shuffle, at } = {}) {
   const has = entities.some((e) => e['@id'] === STATE_ID);
   const out = entities.map((e) => (e['@id'] === STATE_ID ? { ...e, 'scrum:shuffle': shuffle === true } : { ...e }));
   if (!has) {
-    out.push({ '@id': STATE_ID, '@type': 'scrum:TendingState', 'scrum:enabled': true, 'scrum:shuffle': shuffle === true, 'scrum:importedAt': at });
+    // #1785 — creating the state for a shuffle flag says NOTHING about whether tending is on: fail closed (it was hard-coded
+    // `true`, which could switch tending on behind the operator's back once the switch is read from here)
+    out.push({ '@id': STATE_ID, '@type': 'scrum:TendingState', 'scrum:enabled': false, 'scrum:shuffle': shuffle === true, 'scrum:importedAt': at });
   }
   return out;
 }
+
+// #1785 — THE TENDING SWITCH AND THE QUIET THRESHOLD ARE GRAPH STATE, on TendingState: one reader (REST, and the MCP through
+// REST), so the graph and a file can no longer disagree. Fail closed: no state, or a malformed value, reads as OFF and the
+// default threshold.
+export const TENDING_DEFAULTS = Object.freeze({ enabled: false, quietAfterMinutes: 20 });
+export function readTendingConfigFrom(entities = []) {
+  const s = entities.find((e) => e['@id'] === STATE_ID);
+  if (!s) return { ...TENDING_DEFAULTS };
+  const q = Number(s['scrum:quietAfterMinutes']);
+  return { enabled: s['scrum:enabled'] === true, quietAfterMinutes: Number.isFinite(q) && q > 0 ? q : TENDING_DEFAULTS.quietAfterMinutes };
+}
+/** A validated {enabled, quietAfterMinutes} written onto TendingState (created, failing closed on shuffle, if absent). */
+export function setTendingConfig(entities = [], { enabled, quietAfterMinutes, at, importedFrom = null } = {}) {
+  if (typeof enabled !== 'boolean') throw new Error('tending config: `enabled` must be a boolean');
+  if (typeof quietAfterMinutes !== 'number' || !Number.isFinite(quietAfterMinutes) || quietAfterMinutes <= 0) throw new Error('tending config: `quietAfterMinutes` must be a positive finite number of minutes');
+  const fields = { 'scrum:enabled': enabled, 'scrum:quietAfterMinutes': quietAfterMinutes, ...(importedFrom ? { 'scrum:configImportedFrom': importedFrom, 'scrum:configImportedAt': at } : {}) };
+  const has = entities.some((e) => e['@id'] === STATE_ID);
+  const out = entities.map((e) => (e['@id'] === STATE_ID ? { ...e, ...fields } : { ...e }));
+  if (!has) out.push({ '@id': STATE_ID, '@type': 'scrum:TendingState', 'scrum:shuffle': false, 'scrum:importedAt': at, ...fields });
+  return out;
+}
+/**
+ * #1785 — true once the graph HOLDS the tending settings, whether imported from the file or saved from Settings: the one-time
+ * boot import runs only when this is false, so a file that appears after a UI save can never overwrite it (the #133 review's
+ * finding; P2). `scrum:quietAfterMinutes` is the marker because every settings write (setTendingConfig) carries it and the
+ * legacy #805 migration never wrote it: a TendingState with only the legacy `enabled` still imports the file's threshold.
+ */
+export const tendingConfigImported = (entities = []) => {
+  const st = entities.find((e) => e['@id'] === STATE_ID);
+  return Boolean(st && (st['scrum:configImportedAt'] || st['scrum:quietAfterMinutes'] != null));
+};
 
 /** Shuffle is graph state and defaults OFF when the flag has never been set. */
 export function readShuffle(entities = []) {
