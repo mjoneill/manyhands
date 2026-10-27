@@ -29,6 +29,8 @@
  *   RC13  with the owner configured and valid, it is the ONLY state: a lane that exists only in the old file is not registered, a lane in the owner is served from it
  *         (cursor_file names it), an ack advances it, and the old file's bytes are untouched
  *   RC14  with the owner configured but MISSING (nothing relocated yet), a valid old file is not a fallback: refuse 503 CURSOR_STATE_INVALID, and no file is created
+ *   RC15  with the owner CONFIGURED and missing or corrupt, the lane LISTING (GET /api/cursors) refuses the same way: 503 CURSOR_STATE_INVALID naming the owner file, never a
+ *         generic 500 and never an empty list (found by the builder's boot probe at 76be365)
  *   RC11  ownership survives the event-log directory's retirement: relocate, archive the old directory (S6's action) and leave a fresh empty one at its path, and
  *         with the post-migration owner CONFIGURED (SCRUM_CURSORS_FILE = the destination file), losing that file makes pull, ack and register refuse 503
  *         CURSOR_STATE_INVALID and nothing starts fresh at head. Control: with the file present the same restart serves the lane. The v1.1 A3 check read `.migrated`
@@ -377,5 +379,23 @@ test('#1762 S4 RC14 — with the owner CONFIGURED but MISSING, a valid old file 
     await srv.stop(); owned.servers = owned.servers.filter((x) => x !== srv);
     assert.deepEqual(fs.readdirSync(ownerDir), [], 'no owner file was created');
     assert.equal(sha(fs.readFileSync(w.oldFile)), before['cursors.json'], 'and the old file is exactly as it was');
+  });
+});
+
+test('#1762 S4 RC15 — with the owner CONFIGURED and missing, then corrupt, GET /api/cursors (the lane listing) refuses 503 CURSOR_STATE_INVALID naming the owner file: never a generic 500, never an empty list', async () => {
+  await world(async (w) => {
+    const ownerDir = tmp('cr1762-owner-'); const owner = path.join(ownerDir, 'lanes.json');
+    w.env.SCRUM_CURSORS_FILE = owner;
+    const want = path.join(real(ownerDir), 'lanes.json');
+    for (const [label, plant] of [['missing', () => {}], ['corrupt', () => fs.writeFileSync(owner, '{ this is not json')]]) {
+      plant();
+      const srv = await w.startRest(); owned.servers.push(srv); const call = w.mk(srv);
+      const list = await call('GET', '/api/cursors');
+      assert.equal(list.status, 503, `${label} owner: the listing refuses (got ${list.status}: ${list.text.slice(0, 200)})`);
+      assert.equal(list.json?.code, 'CURSOR_STATE_INVALID', `${label} owner: named, not a generic 500 (got ${list.text.slice(0, 200)})`);
+      assert.equal(path.join(real(path.dirname(list.json.file)), path.basename(list.json.file)), want, `${label} owner: naming the configured file`);
+      await srv.stop(); owned.servers = owned.servers.filter((x) => x !== srv);
+    }
+    assert.equal(fs.readFileSync(owner, 'utf8'), '{ this is not json', 'the corrupt file was not rewritten');
   });
 });
