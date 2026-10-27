@@ -42,8 +42,8 @@
  *   BF16  term KIND is validated, not text: prov:used / prov:wasAssociatedWith as a plain literal with the IRI's text, a holder as a literal, a
  *         logRecordedAt as an xsd:string, are mismatches, never accepted by lexical equality
  *   BF17  timestamps compare at FULL precision: a microsecond difference is a mismatch (logRecordedAt and startedAtTime), never rounded away
- *   BF18  a NONCANONICAL alias (activity/seq-04 beside seq-4) is reported by its IRI, never collapsed into the canonical node (whether it counts in
- *         scanned.nodes is a definition left open: both are accepted), and the canonical node is still completed
+ *   BF18  a NONCANONICAL alias (activity/seq-04 beside seq-4) is reported by its IRI in badIri, never collapsed into the canonical node and never counted in
+ *         scanned.nodes (canonical seq-nodes only; the contract author's pin); scanned.nodes + |badIri| + |skippedNonSeq| is every activity subject; the canonical node is still completed
  *   BF19  the readback does NOT scale with the node count: the number of whole-population activity enumerations during an apply is the same for a 14-node
  *         world and a larger one
  *   BF12  the apply-time FENCE: a fact that appears on a node between plan and write, OR a validated identity term that changes (prov:used,
@@ -864,11 +864,11 @@ test('#1762 S3 BF18 — a NONCANONICAL alias (activity/seq-04 beside seq-4) is r
     const r = await cli([...base, '--apply']);
     assert.equal(r.status, 3, `an alias is a refusal: coverage is not bijective (got ${r.status}: ${(r.err || r.out).slice(-300)})`);
     const j = report(r, 'alias');
-    // WHETHER a refused alias counts in scanned.nodes is a definition the contract does not settle (a node scanned and refused, or refused before it is scanned), so both are accepted;
-    // what is NOT accepted is the original defect: the two IRIs collapsed into one, with the alias neither counted nor named. Every seq subject is accounted for.
-    assert.ok([subjects - 1, subjects].includes(j.scanned.nodes), `scanned.nodes is the canonical nodes (${subjects - 1}) or every seq subject (${subjects}), never a collapse (got ${j.scanned.nodes})`);
-    const flatAlias = [...j.refused.badIri, ...j.refused.duplicate.map((d) => d.iri).filter(Boolean)];
-    assert.ok(flatAlias.includes(alias), `the alias is named by its IRI in an explicit bucket (got ${JSON.stringify(j.refused)})`);
+    // PINNED (the contract author): scanned.nodes counts canonical seq-nodes only; every other IRI under the activity namespace is in exactly one of badIri / skippedNonSeq.
+    assert.equal(j.scanned.nodes, subjects - 1, `scanned.nodes is the canonical seq-nodes only (${subjects - 1}); the alias is never counted, and the two IRIs are never collapsed (got ${j.scanned.nodes})`);
+    assert.ok(j.refused.badIri.includes(alias), `the alias is named by its IRI in badIri (got ${JSON.stringify(j.refused)})`);
+    const allActivity = Number((await q(`SELECT (COUNT(DISTINCT ?a) AS ?n) WHERE { ?a a <${PROV}Activity> . FILTER(STRSTARTS(STR(?a), "${ACT}")) }`))[0].n.value);
+    assert.equal(j.scanned.nodes + j.refused.badIri.length + j.skippedNonSeq.length, allActivity, `scanned.nodes + |badIri| + |skippedNonSeq| accounts for every activity subject (${allActivity})`);
     const canonical = await factsOf(node(4));
     for (const p of [COLUMN_AFTER, HOLDER, LOGAT]) one(canonical, p, 'the CANONICAL seq 4');
     for (const p of [COLUMN_AFTER, HOLDER, LOGAT]) assert.equal((await factsOf(alias))[p], undefined, `the alias gets no ${p.replace(RS, 'scrum:')}`);
