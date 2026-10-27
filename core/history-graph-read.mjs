@@ -15,12 +15,14 @@
  * (scrum:logRecordedAt) for a legacy row and the write's own time for a native one, both in the log's ISO form.
  */
 import { NS, BK } from './graph-vocab.mjs';
-import { IRI } from './graph-replica.mjs';
 import { isoAt } from './logborn-feed.mjs';
 
+// The namespaces as graph-replica.mjs IRI spells them. Not imported from there: graph-replica pulls in `oxigraph`, and
+// server.js must boot with no npm dependency in its static import graph (#868).
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
 const PROV = 'http://www.w3.org/ns/prov#';
-const RS = IRI.scrum, ACT = IRI.activity, ENT = IRI.entity, PERSON = IRI.person;
+const BASE = 'https://scrumboard.local/';
+const RS = `${BASE}ns#`, ACT = `${BASE}activity/`, ENT = `${BASE}entity/`, PERSON = `${BASE}person/`;
 const NONE = `${RS}none`, UNKNOWN = `${RS}unknown`;
 const P = {
   op: `${RS}op`, entityKind: `${RS}entityKind`, used: `${PROV}used`, actor: `${PROV}wasAssociatedWith`, startedAt: `${PROV}startedAtTime`,
