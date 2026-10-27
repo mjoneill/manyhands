@@ -73,6 +73,7 @@ import { mergeSources, epochChangedError, storeIdentityMismatch, incarnationTag,
 import {
   loadCursors, saveCursors, registerSeat, recordServed, recordInbound,
   reachability, REACHABLE,
+  relocatedCursorFile,
 } from './cursors.mjs';
 
 /** How many events one pull may carry. Bounded: a replay is not a history dump. */
@@ -118,8 +119,10 @@ export function envelopeFor(eventDir, key, { state = null, head = null, graph = 
   const st = state || loadCursors(eventDir);
   const h = head == null ? headSeq(eventDir) : head;
   const s = st.seats[key];
+  const relocated = relocatedCursorFile(eventDir);   // #1762 S4 — named only when the relocated state is the one in use
   const base = {
     delivery_identity: key,
+    ...(relocated ? { cursor_file: relocated } : {}),
     head_seq: h,
     dedup: graph
       ? 'by seq for log events, by graph.opId for executor rows (seq null) — delivery is at-least-once; '

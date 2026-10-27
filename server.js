@@ -127,6 +127,7 @@ import {
   discardPendingServes, headSeq, PULL_LIMIT, graphAckedOf, ackFor, parseAckToken,   // #1576
   ACK_TOKEN_INVALID, ACK_UNKNOWN_LANE, ACK_FENCED, CURSOR_ROLLED_BACK,   // #1561 rollback
 } from './core/cursor-service.mjs';
+import { setCursorsDataDir, cursorsPath, CURSOR_STATE_INVALID } from './core/cursors.mjs';   // #1762 S4 — the relocated lane state
 import { configureIdentities, usingDefaultRoster } from './core/identity.mjs';
 import { hostAllowed, parseAllowedHosts, refuseHost } from './core/host-guard.mjs';
 import { agentConstraints, unseenLayers } from './core/agent-constraints.mjs';   // #1350
@@ -258,6 +259,7 @@ const PROJECT_DIR = path.dirname(fileURLToPath(import.meta.url));
 // own (every path below is then exactly what it was before). Every explicit per-file variable still wins.
 const BOARD_DATA_FILE = process.env.SCRUM_BOARD_FILE || path.join(process.env.SCRUM_DATA_DIR || PROJECT_DIR, 'board-data.json');
 const DATA_DIR = process.env.SCRUM_DATA_DIR || path.dirname(BOARD_DATA_FILE);
+setCursorsDataDir(DATA_DIR);   // #1762 S4 — a relocated cursors.json in the data folder is THE lane state once it exists
 // the event log and the misses log are named for the board file's IDENTITY (#669: two boards never share a log). Its basename
 // suffices only when the board lives IN the data folder (two files in one folder cannot share a name); a board kept elsewhere
 // adds a short hash of its absolute path, so two `board.json` files from different folders cannot collide in one DATA_DIR.
@@ -13228,6 +13230,7 @@ async function graphHeadOrNull() {
 /** POST /api/cursors/register — a lane announces itself. Known lanes KEEP their cursor. */
 async function handleCursorRegister(req, res) {
   try {
+    cursorsPath(EVENT_LOG_DIR);   // #1762 S4 — an unusable relocated state refuses BEFORE anything else is read or written
     const body = JSON.parse((await readBody(req)) || '{}');
     const id = deliveryIdentity(body || {});
     if (!id) {
@@ -13248,6 +13251,7 @@ async function handleCursorRegister(req, res) {
     });
     sendJSON(res, 200, { identity: id, ...out });
   } catch (e) {
+    if (e?.code === CURSOR_STATE_INVALID) return sendJSON(res, 503, { error: e.message, code: e.code, file: e.file });   // #1762 S4
     console.error('POST /api/cursors/register:', e.message);
     sendJSON(res, 500, { error: 'Failed to register cursor' });
   }
@@ -13274,6 +13278,7 @@ async function handleCursorPull(req, res) {
     return sendJSON(res, 400, { error: 'identity is required (e.g. registry:<seat>.<client>)' });
   }
   try {
+    cursorsPath(EVENT_LOG_DIR);   // #1762 S4 — an unusable relocated state refuses BEFORE anything else is read or written
     const limit = q.limit ? Math.min(Number(q.limit) || PULL_LIMIT, PULL_LIMIT) : PULL_LIMIT;
     // #1571 — with the log-born unit ON, memory / decision / seat-state writes are in
     // the executor, not the log: the lane is also owed the feed rows past its executor
@@ -13338,6 +13343,7 @@ async function handleCursorPull(req, res) {
     pull.commit();
     sendJSON(res, 200, { events: pull.events, envelope: pull.envelope, ack_token: pull.ack_token });
   } catch (e) {
+    if (e?.code === CURSOR_STATE_INVALID) return sendJSON(res, 503, { error: e.message, code: e.code, file: e.file });   // #1762 S4
     console.error('GET /api/cursors/pull:', e.message);
     sendJSON(res, 500, { error: 'Failed to serve replay' });
   }
@@ -13355,6 +13361,7 @@ async function handleCursorPull(req, res) {
  */
 async function handleCursorAck(req, res) {
   try {
+    cursorsPath(EVENT_LOG_DIR);   // #1762 S4 — an unusable relocated state refuses BEFORE anything else is read or written
     const body = JSON.parse((await readBody(req)) || '{}');
     const key = body.identity || deliveryIdentity(body)?.key;
     if (!key) return sendJSON(res, 400, { error: 'identity is required', code: 'NO_DELIVERY_IDENTITY' });
@@ -13374,6 +13381,7 @@ async function handleCursorAck(req, res) {
     }
     sendJSON(res, out.code === ACK_TOKEN_INVALID ? 400 : out.code === ACK_UNKNOWN_LANE ? 404 : 409, out);
   } catch (e) {
+    if (e?.code === CURSOR_STATE_INVALID) return sendJSON(res, 503, { error: e.message, code: e.code, file: e.file });   // #1762 S4
     console.error('POST /api/cursors/ack:', e.message);
     sendJSON(res, 500, { error: 'Failed to record ack' });
   }
@@ -13393,6 +13401,7 @@ async function handleCursorInbound(req, res) {
     const out = noteInbound(EVENT_LOG_DIR, key, { via: body.via ?? null, graphHead: head?.through ?? null, graphEpoch: head?.epoch ?? null, graphIncarnation: head?.incarnation ?? null });
     sendJSON(res, 200, out);
   } catch (e) {
+    if (e?.code === CURSOR_STATE_INVALID) return sendJSON(res, 503, { error: e.message, code: e.code, file: e.file });   // #1762 S4
     console.error('POST /api/cursors/inbound:', e.message);
     sendJSON(res, 500, { error: 'Failed to record inbound' });
   }
