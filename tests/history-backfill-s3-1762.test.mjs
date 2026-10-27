@@ -568,7 +568,8 @@ async function lossyProxy(executorUrl, { mode = null, nth = 1, beforeForward = n
     if (isUpdate) { state.updates++; state.bodies.push(body.toString('utf8')); faulted = state.updates === nth; }
     if (req.method === 'POST' && req.url.startsWith('/query')) state.queries.push(body.toString('utf8'));
     if (faulted && mode === 'request-lost') { req.socket.destroy(); return; }
-    if (faulted && mode === 'refuse-409') { res.writeHead(409, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'refused by the test proxy', code: 'TEST_REFUSED' })); return; }   // never forwarded: proven not applied
+    const refuseWith = /^refuse-(\d{3})$/.exec(mode || '');
+    if (faulted && refuseWith) { res.writeHead(Number(refuseWith[1]), { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'refused by the test proxy', code: 'TEST_REFUSED' })); return; }   // never forwarded: proven not applied
     if (isUpdate && beforeForward && when(body.toString('utf8'), state.updates)) await beforeForward(body.toString('utf8'));
     const up = await fetch(`${executorUrl}${req.url}`, { method: req.method, headers: Object.fromEntries(Object.entries(req.headers).filter(([k]) => !['host', 'connection', 'content-length'].includes(k))), body: body.length ? body : undefined });
     const text = Buffer.from(await up.arrayBuffer());
@@ -701,6 +702,26 @@ for (const [label, field, predicate, change] of FENCE_TERMS) {
     });
   });
 }
+test('#1762 S3 BF12b — a SECOND scrum:shortId value of another datatype added between plan and write fences the node: nothing is added to it, it is refused as mismatch, never retried', T, async () => {
+  await world(async ({ cliVia, x, base, report, upd, factsOf }) => {
+    const sid = EVENTS.find((e) => e.seq === 4).entity.shortId;
+    const proxy = await lossyProxy(x.baseUrl, { beforeForward: () => upd(`INSERT DATA { <${node(4)}> <${SHORT}> "${sid}"^^<${XSD}integer> . }`), when: (body) => body.includes(node(4)) });
+    let after = null;
+    try {
+      const r = await cliVia(proxy.url, [...base, '--apply']);
+      assert.equal(r.status, 3, `a node that gained a second identity term is a refusal, exit 3 (got ${r.status}: ${(r.err || r.out).slice(-300)})`);
+      const got = flat(report(r, 'second shortId'), 'second shortId');
+      assert.deepEqual(got.mismatch, [4], 'node 4 is listed as mismatch');
+      assert.ok(got.mismatchFields[4].includes(LOCAL.shortId), `naming the term that gained a value (${LOCAL.shortId}); got ${JSON.stringify(got.mismatchFields[4])}`);
+      after = await factsOf(node(4));
+      assert.equal(proxy.state.updates, SERVED_SEQS.length, 'and it was not retried blind');
+    } finally { await proxy.close(); }
+    assert.equal((after[SHORT] || []).length, 2, 'PRECONDITION: the second term really is a second term (the same lexical value in another datatype), and it was not removed');
+    assert.equal(after[COLUMN_AFTER], undefined, 'the guarded update changed NOTHING: no column');
+    assert.equal(after[HOLDER], undefined, '(nor a holder)');
+    assert.equal(after[LOGAT], undefined, '(nor a logRecordedAt)');
+  });
+});
 test('#1762 S3 BF12b — a term preflight saw ABSENT (an event with no actor has no prov:wasAssociatedWith) and then newly present fences the node, never written through', T, async () => {
   const noActor = EVENTS.map((e) => (e.seq === 4 ? { ...e, actor: null } : e));       // the projector omits wasAssociatedWith for an event with no actor: preflight legitimately sees none
   await world(async ({ cliVia, x, base, report, upd, factsOf }) => {
@@ -775,16 +796,16 @@ for (const [field, pred, newLit] of MARKER_CHANGES) {
 }
 
 // ── BF14 UPDATE_REFUSED ──
-for (const nth of [1, 3]) {
-  test(`#1762 S3 BF14a — a COMPLETE refusal on a stable store, proven not applied (${nth === 1 ? 'the first update' : 'after two confirmed nodes'}): exit 4, apply.stopped UPDATE_REFUSED with its status, later writes stopped, confirmed kept, uncertain EMPTY`, T, async () => {
+for (const [status, nth] of [[409, 1], [409, 3], [403, 1], [403, 3]]) {
+  test(`#1762 S3 BF14a — a COMPLETE ${status} refusal on a stable store, proven not applied (${nth === 1 ? 'the first update' : 'after two confirmed nodes'}): exit 4, apply.stopped UPDATE_REFUSED with its status, later writes stopped, confirmed kept, uncertain EMPTY`, T, async () => {
     await world(async ({ cliVia, x, base, report, q, factsOf }) => {
-      const proxy = await lossyProxy(x.baseUrl, { mode: 'refuse-409', nth });
+      const proxy = await lossyProxy(x.baseUrl, { mode: `refuse-${status}`, nth });
       try {
         const r = await cliVia(proxy.url, [...base, '--apply']);
         assert.equal(r.status, 4, `an interrupted apply is exit 4 (got ${r.status}: ${(r.err || r.out).slice(-300)})`);
         const j = report(r, 'update refused');
         assert.equal(j.apply?.stopped?.code, 'UPDATE_REFUSED', `apply.stopped names the code (got ${JSON.stringify(j.apply)})`);
-        assert.equal(j.apply.stopped.status, 409, 'and the status the executor answered');
+        assert.equal(j.apply.stopped.status, status, 'and the status the executor answered (not a constant)');
         assert.equal(j.apply.confirmed.length, nth - 1, 'confirmed keeps exactly the nodes confirmed before it');
         assert.deepEqual(j.apply.uncertain, [], 'uncertain is EMPTY: the store is stable and the update is proven not applied');
         assert.equal(proxy.state.updates, nth, 'nothing after the refused update was dispatched');
