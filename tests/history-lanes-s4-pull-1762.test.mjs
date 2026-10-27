@@ -12,8 +12,10 @@
  *   LP2  the ack token's `log` is the highest N served (<= F.logSeq); acking it moves the lane there; the next pull reports logDrained TRUE and serves nothing from the log half
  *   LP3  A1: a legacy CONVERSATION owed to a lane is served by its seq, from the conversations unit (its text present); a REDACTED one is still served (never dropped, or the
  *        lane could ack past it) with its text absent
- *   LP4  A2: a range read with no servable row (a gap in N) returns an EMPTY page with an ack_token whose `log` is the range's high-water; nothing advances until it is acked;
- *        the same pull again returns the same token; acking it and pulling on reaches the rest
+ *   LP4a a gap INSIDE the range (no node at N = 3, 4) is skipped by existing-node paging: a page is the next `limit` EXISTING nodes after `acked` (A-LP2, settled by the
+ *        contract author), nothing is re-served or lost across a whole walk, and the token's `log` is the highest N served
+ *   LP4b A2: a COVERED TAIL, no node left in (acked, F.logSeq] while acked < F.logSeq, is an EMPTY page whose ack_token has `log` = F.logSeq; the lane moves only when that token is
+ *        acked (not on the serve, not on a repeat), and then the log half is drained
  *   LP5  a lane registered AFTER F starts with its log half at F.logSeq (not the log's head)
  *   LP6  an INVALID F refuses the pull (503 HISTORY_FRONTIER_INVALID / HISTORY_FRONTIER_STORE_MISMATCH) and the lane is exactly as it was
  *   LP7  a token whose log half is beyond F.logSeq cannot have been served: 409 ACK_BEYOND_SERVED, the lane unchanged (a CONTROL: green on main by design)
@@ -22,8 +24,7 @@
  * ── Assumptions, each one line to correct ─────────────────────────────────────────────────────────────────────────────────────
  *   A-LP1  a served event carries `seq` (the node's N). Its other fields are today's lane event shape and are NOT asserted, except that a conversation event's text is
  *          present for a visible post and absent for a redacted one (searched in the whole serialized event).
- *   A-LP2  the log half's page is a RANGE of `limit` consecutive N after `acked` (the contract's "log range read"): with `limit` = 2 and no node at N = 3 and 4, the first page is
- *          empty and its token's `log` is 4. If the page is instead the next `limit` EXISTING nodes, LP4's first assertion is the one to overrule.
+ *   A-LP2  SETTLED (the contract author, 2026-10-27; the reviewer may overrule): a page is the next `limit` EXISTING seq-nodes after `acked`, up to F.logSeq (today's serveFor counts events, not N).
  *   A-LP3  `envelope.history` exists only with a valid F; `logDrained` is `acked >= frontierLogSeq` as the lane's state stands when the page is built.
  *   NOT PINNED, so not written: the graph half's interleaving with the log half in one page; the whole-commit page rule for the graph half (rows for it wait on a lane pull to
  *   observe); the push stream; the order of events within a page beyond ascending seq.
@@ -284,23 +285,43 @@ test('#1762 S4 LP3 — a legacy CONVERSATION owed to a lane is served by its seq
   assert.ok(redacted.seq <= n, 'PRECONDITION: it is legacy (at or below F.logSeq)');
 });
 
-test('#1762 S4 LP4 — a range with no servable row (a gap in N) is an EMPTY page with an ack_token for the range\'s high-water; nothing advances until it is acked; the same pull returns the same token; acking it reaches the rest (A2)', T, async () => {
+test('#1762 S4 LP4a — a gap INSIDE the range (no node at 3 or 4) is skipped by existing-node paging: the page is the next `limit` existing nodes, nothing is re-served or lost across the walk, and the token\'s log half is the highest N served', T, async () => {
   const { n } = await plantAtHead();
   await W.update(`DELETE WHERE { <${node(3)}> ?p ?o } ; DELETE WHERE { <${node(4)}> ?p ?o }`);          // a gap in N: no node at 3 or 4
-  await seedLane('lp4', 2);
-  const first = await pull('lp4', 2);
+  await seedLane('lp4a', 2);
+  const first = await pull('lp4a', 2);
   assert.equal(first.status, 200, `(${first.status}: ${first.text.slice(0, 200)})`);
-  assert.deepEqual(first.json.events.filter((e) => Number.isInteger(e.seq) && e.seq <= n), [], 'the range (2, 4] holds no node: the page is empty (A-LP2)');
+  assert.deepEqual(seqsOf(first), [5, 6], 'the page is the next TWO existing nodes: the gap is skipped (A-LP2)');
+  assert.equal(tokenOf(first).log, 6, 'and its token\'s log half is the highest N served');
+  assert.equal(laneState('lp4a').acked, 2, 'nothing advanced: not on the serve');
+  assert.deepEqual(seqsOf(await pull('lp4a', 2)), [5, 6], 'the same page is served again until it is acked');
+  const seen = [];
+  let r = first;
+  for (let i = 0; i < 40; i++) {                                                                     // walk the whole range, acking each page
+    seen.push(...seqsOf(r).filter((s) => s <= n));
+    assert.equal((await ack('lp4a', r.json.ack_token)).status, 200, `page ${i} acks`);
+    r = await pull('lp4a', 2);
+    if (!seqsOf(r).some((s) => s <= n)) break;
+  }
+  assert.deepEqual(seen, range(5, n), `every existing node in (2, ${n}] exactly once: none lost across the gap, none served twice`);
+});
+
+test('#1762 S4 LP4b — a COVERED TAIL (no node left in (acked, F.logSeq] while acked < F.logSeq) is an EMPTY page whose ack_token has log = F.logSeq; the lane moves only when it is acked, and then the log half is drained (A2)', T, async () => {
+  const { n } = await plantAtHead();
+  await W.update(`DELETE WHERE { <${node(n)}> ?p ?o }`);                                              // the last node is gone: nothing remains above n-1
+  await seedLane('lp4b', n - 1);
+  const first = await pull('lp4b', 50);
+  assert.equal(first.status, 200, `(${first.status}: ${first.text.slice(0, 200)})`);
+  assert.deepEqual(seqsOf(first).filter((s) => s <= n), [], 'no node remains in (acked, F.logSeq]: the page is empty');
   assert.ok(first.json.ack_token, 'but it still returns an ack_token, or the lane is served the same empty page forever');
-  assert.equal(tokenOf(first).log, 4, 'whose log half is the range\'s high-water');
-  assert.equal(laneState('lp4').acked, 2, 'and nothing advanced: not on the serve');
-  const replay = await pull('lp4', 2);
-  assert.equal(tokenOf(replay).log, 4, 'the same pull again returns the same token');
-  assert.equal(laneState('lp4').acked, 2, 'and still nothing advanced: not on a read, not on a repeat');
-  assert.equal((await ack('lp4', first.json.ack_token)).status, 200, 'acking the empty page is accepted');
-  assert.equal(laneState('lp4').acked, 4, 'and now the lane has moved');
-  const next = await pull('lp4', 2);
-  assert.deepEqual(seqsOf(next).filter((s) => s <= n), [5, 6], 'the next page serves what follows the gap');
+  assert.equal(tokenOf(first).log, n, 'whose log half is F.logSeq');
+  assert.equal(laneState('lp4b').acked, n - 1, 'and nothing advanced: not on the serve');
+  assert.equal(tokenOf(await pull('lp4b', 50)).log, n, 'the same pull again returns a token at F.logSeq');
+  assert.equal(laneState('lp4b').acked, n - 1, 'and still nothing advanced: not on a read, not on a repeat');
+  assert.equal(first.json.envelope.history?.logDrained, false, 'the log half is not drained before the ack');
+  assert.equal((await ack('lp4b', first.json.ack_token)).status, 200, 'acking the empty page is accepted');
+  assert.equal(laneState('lp4b').acked, n, 'and now the lane has moved to F.logSeq');
+  assert.equal((await pull('lp4b', 50)).json.envelope.history?.logDrained, true, 'and the log half is drained');
 });
 
 test('#1762 S4 LP5 — a lane registered AFTER F starts with its log half at F.logSeq, not at the log\'s head', T, async () => {
