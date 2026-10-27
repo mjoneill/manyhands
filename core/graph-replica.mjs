@@ -152,7 +152,7 @@ export const GRAPH_VOCABULARY = new Set([
   // reconciliation below fails on anything emitted but not declared.
   'scrum:Card',
   'scrum:ReleaseCondition', 'scrum:Decision', 'scrum:MemoryVersion',
-  'scrum:Memory', 'scrum:TendingClaimAttempt', 'scrum:TendingMint',
+  'scrum:Memory', 'scrum:TendingClaimAttempt', 'scrum:TendingMint', 'scrum:TendingWindowReservation',
   'scrum:TendingState', 'scrum:TendingPlaylistVersion', 'scrum:TendingPlaylist',
   'scrum:TendingPromptVersion', 'scrum:TendingPrompt', 'scrum:Column',
   'scrum:Blocker', 'scrum:Commit', 'scrum:UnresolvedReference', 'scrum:Check',
@@ -210,6 +210,7 @@ export const GRAPH_VOCABULARY = new Set([
   'scrum:markerLines',
   // #1199 — the agent persona and its versioned prompt
   'scrum:Agent', 'scrum:AgentPrompt', 'scrum:AgentPromptVersion', 'scrum:seatKey', 'scrum:emoji',
+  'scrum:RosterSeat', 'scrum:RosterRoles', 'scrum:rosterOrder', 'scrum:kind', 'scrum:poSeat', 'scrum:color',   // #1764 — the configured roster
   'scrum:contextPolicy', 'scrum:toolGrant', 'scrum:budgetPerDay', 'scrum:residency', 'scrum:state',
   'scrum:currentPrompt', 'scrum:ofAgent',
   // #1271 — whether this seat is told WHEN to speak. Policy, not mechanism.
@@ -1186,6 +1187,27 @@ function projectLabelAlias(store, e) {
   if (e['scrum:canonicalLabel']) add(nn(S + 'canonicalLabel'), lit(String(e['scrum:canonicalLabel'])));
 }
 
+// #1764 — a configured roster seat, and the roster's roles node. One explicit line per predicate (#875 reads this source).
+function projectRosterSeat(store, e) {
+  const S = IRI.scrum, SC = IRI.schema;
+  const s = nn(e['@id']);
+  const add = (p, o) => store.add(oxigraph.triple(s, p, o));
+  add(A, nn(S + 'RosterSeat'));
+  if (e['scrum:seatKey']) add(nn(S + 'seatKey'), lit(String(e['scrum:seatKey'])));
+  if (e.name) add(nn(SC + 'name'), lit(String(e.name)));
+  if (e['scrum:color']) add(nn(S + 'color'), lit(String(e['scrum:color'])));
+  if (e['scrum:rosterOrder'] != null) add(nn(S + 'rosterOrder'), intLit(e['scrum:rosterOrder']));
+  if (e['scrum:glyph']) add(nn(S + 'glyph'), lit(String(e['scrum:glyph'])));
+  for (const a of [].concat(e['scrum:aliases'] ?? [])) add(nn(S + 'aliases'), lit(String(a)));
+  if (e['scrum:kind']) add(nn(S + 'kind'), lit(String(e['scrum:kind'])));
+}
+function projectRosterRoles(store, e) {
+  const S = IRI.scrum;
+  const s = nn(e['@id']);
+  const add = (p, o) => store.add(oxigraph.triple(s, p, o));
+  add(A, nn(S + 'RosterRoles'));
+  if (e['scrum:poSeat']) add(nn(S + 'poSeat'), lit(String(e['scrum:poSeat'])));
+}
 // #1784 — the channel delivery config: one node, its timings as xsd:integer, a bearer seat per literal, the import stamp.
 function projectChannelConfig(store, e) {
   const S = IRI.scrum;
@@ -1579,6 +1601,21 @@ export function projectEntity(store, e) {
       if (e.dateModified) add(s, nn(SC + 'dateModified'), lit(e.dateModified));
       if (e.creator) add(s, nn(SC + 'creator'), personRef(e.creator));
       if (e.column) add(s, nn(S + 'column'), nn(columnIri(e.column)));   // #1639 — the column node's own rule, so they join
+      // #1787 — the card's attachment METADATA, in exactly a post's shape (post.write, core/graph-compiler.mjs): one node per
+      // attachment at <card>/attachment/<index>. These triples ride every card write (this projection IS the card's quads), so
+      // an upload or a removal lands in the card's own guarded update, and a removed one goes with the card's prior quads.
+      // The bytes stay on disk.
+      (Array.isArray(e.attachments) ? e.attachments : []).forEach((a, k) => {
+        if (!a || typeof a !== 'object') return;
+        const n = oxigraph.namedNode(`${s.value}/attachment/${k}`);   // the card's own IRI, never re-encoded as an id
+        const at = (p, o) => store.add(oxigraph.triple(n, p, o));
+        at(nn(S + 'attachmentOf'), s);
+        at(nn(S + 'attachmentIndex'), intLit(k));
+        if (a.id != null) at(nn(SC + 'identifier'), lit(String(a.id)));
+        if (a.name != null) at(nn(SC + 'name'), lit(String(a.name)));
+        if (a.mime != null) at(nn(SC + 'encodingFormat'), lit(String(a.mime)));
+        if (a.size != null) at(nn(SC + 'contentSize'), intLit(a.size));
+      });
       if (e['scrum:priority']) add(s, nn(S + 'priority'), lit(e['scrum:priority']));
       if (e['scrum:order'] != null) add(s, nn(S + 'order'), intLit(e['scrum:order']));
       if (e.claimedBy) add(s, nn(S + 'claimedBy'), personRef(e.claimedBy));
@@ -1997,6 +2034,10 @@ export function projectEntity(store, e) {
       projectMoveFence(store, e);     // #1707
     } else if (t === 'scrum:LabelAlias') {
       projectLabelAlias(store, e);    // #1640
+    } else if (t === 'scrum:RosterSeat') {
+      projectRosterSeat(store, e);    // #1764
+    } else if (t === 'scrum:RosterRoles') {
+      projectRosterRoles(store, e);   // #1764
     } else if (t === 'scrum:ChannelConfig') {
       projectChannelConfig(store, e); // #1784
     } else if (t === 'scrum:RoleVersion') {

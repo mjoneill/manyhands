@@ -28,6 +28,7 @@
  * anything else is a pre-dispatch REJECTED.
  */
 import { createHash } from 'node:crypto';
+import * as RF from './refusal-record.mjs';   // #1762 S2 — the refusal registries, shared with the builder
 import { EX, NS, RECEIPT_PREDICATES, MARKER_SUBJECT, MARKER_PREDICATES, LG, LG_NS, lgMetaPredicate, BK, BOOKKEEPING_PREDICATES, isBookkeeping, POSTSEQ_TERMS, ORIGIN_TERMS } from './graph-vocab.mjs';
 import { reserveOpId as _reserveOpId, canonReservationBatch as _canonReservationBatch, reserveDigestBody as _reserveDigestBody, canonAnnouncementDraft } from './postseq-reserve.mjs';
 import { announcePostId, opIdFor as announceOpIdFor, postCreateIntention as announcePostCreateIntention } from './announce-outbox.mjs';
@@ -408,9 +409,17 @@ export function staticCheck(sparql, opId) {
   const bareSparql = unquote(sparql), bareWhere = unquote(where);
   // every ?d_ variable must be defined only as IF(BOUND(?ok), x, ?u)
   const dDefs = {};
-  for (const m of where.matchAll(/BIND\((.*) AS \?(d_\w+)\)/g)) dDefs[m[2]] = m[1];
+  // [^\n], never `.`: a JS `.` stops at U+2028/U+2029, which a JSON literal carries raw, so `.*` silently missed such a BIND
+  // (the ok-guard check then never saw it, and the unbound-use check below refused a valid write: #1749 A8's payload)
+  for (const m of where.matchAll(/BIND\(([^\n]*) AS \?(d_\w+)\)/g)) dDefs[m[2]] = m[1];
   for (const [v, expr] of Object.entries(dDefs)) {
-    if (!/^IF\(BOUND\(\?ok\), .+, \?u\)$/.test(expr)) errors.push(`?${v} is not ok-guarded`);
+    if (!/^IF\(BOUND\(\?ok\), [^\n]+, \?u\)$/.test(expr)) errors.push(`?${v} is not ok-guarded`);   // [^\n]: see dDefs above
+  }
+  // #1762 S1 (review 131) — every ?d_ variable a template USES must be DEFINED: a template variable with no binding is not an
+  // error in SPARQL, it is a triple silently skipped, so a missing definition would commit the rest of the write without it
+  // (the removed-binding sabotage: APPLIED, the card written, zero activities). Refused here, for every write kind.
+  for (const name of ['DELETE', 'INSERT']) {
+    for (const m of block(name).join('\n').matchAll(/\?(d_\w+)/g)) if (!(m[1] in dDefs)) errors.push(`?${m[1]} is used in the ${name} template but never bound (a triple would be silently skipped)`);
   }
   if ((where.match(/BIND\(true AS \?ok\)/g) || []).length !== 1) errors.push('?ok must be bound exactly once');
   if (!new RegExp(`^\\s*OPTIONAL \\{ GRAPH ${escRe(BK)} \\{ <[^>]+> <urn:ex:digest> \\?dup \\} \\}\\n\\s*FILTER\\(!BOUND\\(\\?dup\\)\\)`).test(where)) errors.push(`duplicate guard missing, not first, or not read from GRAPH ${BK}`);
@@ -519,7 +528,7 @@ export function staticCheck(sparql, opId) {
 // =====================================================================================
 
 export const RECORD_V = 2;   // 2: memory.revise records the identity it replaces (a MemoryRevision node)
-export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create', 'post.import', 'post.write', 'post.redact', 'delivery.create', 'delivery.step', 'delivery.import', 'modelcall.create', 'card.write', 'entity.put', 'origin.prepare']);
+export const RECORD_KINDS = Object.freeze(['memory.create', 'memory.revise', 'decision.create', 'decision.relate', 'seat.declare', 'seat.clear', 'person.import', 'post.create', 'post.import', 'post.write', 'post.redact', 'delivery.create', 'delivery.step', 'delivery.import', 'modelcall.create', 'card.write', 'entity.put', 'origin.prepare', 'refusal.record']);
 
 const RS = 'https://scrumboard.local/ns#';
 const RSC = 'https://schema.org/';
@@ -562,6 +571,10 @@ export const LOGBORN_TERMS = Object.freeze({
   // mirror the replica's existing projectWake (graph-replica.mjs), so a reader of either store
   // sees the same triples.
   Wake: `${RS}Wake`, wokeSeat: `${RS}wokeSeat`, wokeAt: `${RS}wokeAt`,
+  // #1762 S2 — a refusal, content-free (core/refusal-record.mjs): identifiers and outcomes, never what was said
+  RefusalRecord: `${RS}RefusalRecord`, refusedAction: `${RS}refusedAction`, route: `${RS}route`, status: `${RS}status`, code: `${RS}code`, rule: `${RS}rule`,
+  entityKind: `${RS}entityKind`, entityId: `${RS}entityId`,
+  wasAssociatedWith: 'http://www.w3.org/ns/prov#wasAssociatedWith', startedAtTime: 'http://www.w3.org/ns/prov#startedAtTime',
 });
 const TM = LOGBORN_TERMS;
 
@@ -584,7 +597,47 @@ const RECORD_FIELDS = {
   'card.write': ['parts', 'counter', 'pending', 'collections', 'origin', 'indexGuard', 'reads', 'walk'],       // #1598 — one or more cards, each guarded on its version, in ONE update; #1629 s2 — `origin` makes it an origin commit
   'entity.put': ['entity'],                 // #1624 — one generic storage primitive; the `kind` field selects the projection
   'origin.prepare': ['origin', 'plan'],     // #1629 s2 — the Prepared record of one origin: its descriptor and its frozen business plan
+  'refusal.record': ['refusal'],            // #1762 S2 — one content-free refusal, fresh at the IRI its opId derives; never history
 };
+
+// #1762 S1b — the record kinds whose write records ONE ChangeActivity (part 0) when the intention carries `history`. The
+// compiler DERIVES op, entityKind and prov:used from the record itself, so a caller cannot misname what it wrote; a caller
+// supplies only `versionAfter`, and only where REST shows a version the record does not carry (a memory revise that adds
+// no version). Imports are migrations, never history; a collection entity.put carries its history per part (S1).
+const maxVersion = (versions) => {
+  const ns = (versions || []).map((x) => x.version).filter((x) => x != null).map(BigInt);
+  return ns.length ? String(ns.reduce((a, b) => (b > a ? b : a))) : 'unknown';
+};
+const RECORD_HISTORY = Object.freeze({
+  'memory.create': (R) => ({ op: 'create', entityKind: 'memory', used: R.memory.iri, versionAfter: maxVersion(R.versions) }),
+  'memory.revise': (R) => ({ op: 'update', entityKind: 'memory', used: R.target.iri, versionAfter: maxVersion(R.versions) }),
+  'decision.create': (R) => ({ op: 'create', entityKind: 'decision', used: R.decision.iri }),
+  'decision.relate': (R) => ({ op: 'update', entityKind: 'decision', used: R.target }),
+  'seat.declare': (R) => ({ op: 'update', entityKind: 'seat-state', used: R.declaration.iri }),
+  'seat.clear': (R) => ({ op: 'delete', entityKind: 'seat-state', used: R.ends }),
+  'post.create': (R) => ({ op: 'post', entityKind: 'conversation', used: R.post.iri }),
+  'post.write': (R) => ({ op: 'post', entityKind: 'conversation', used: R.post.iri }),
+  'post.redact': (R) => ({ op: 'redact', entityKind: 'conversation', used: R.post.iri }),
+  'delivery.create': (R) => ({ op: 'create', entityKind: 'delivery', used: R.delivery.iri }),
+  'delivery.step': (R) => ({ op: 'update', entityKind: 'delivery', used: R.target.iri }),
+  'modelcall.create': (R) => ({ op: 'create', entityKind: 'model-call', used: R.call.iri }),
+  'entity.put': (R) => (R.entity.kind === 'wake' ? { op: 'create', entityKind: 'wake', used: R.entity.iri } : null),
+});
+export const RECORD_HISTORY_KINDS = Object.freeze(Object.keys(RECORD_HISTORY));
+/** `history: true`, or `{ versionAfter }`, in canonical form: the derived facts, or null when the intention carries none. */
+function canonRecordHistory(i, record) {
+  if (i.history === undefined) return null;
+  const h = RECORD_HISTORY[i.kind]?.(record);
+  if (!h) fail(`history is not recorded for ${i.kind}${i.kind === 'entity.put' ? ` (${record.entity?.kind})` : ''}`);
+  let versionAfter = h.versionAfter ?? 'unknown';
+  if (i.history !== true) {
+    obj(i.history, ['versionAfter'], 'history');
+    const given = i.history.versionAfter === 'unknown' ? 'unknown' : intLit(i.history.versionAfter, 'history.versionAfter');
+    if (versionAfter !== 'unknown' && given !== versionAfter) fail(`history.versionAfter ${given} contradicts the record's own version ${versionAfter}`);
+    versionAfter = given;
+  }
+  return { op: h.op, entityKind: h.entityKind, used: checkIri(h.used, 'history.used'), versionAfter };
+}
 
 const SAFE_CH = /^[A-Za-z0-9 _.,:/@#+=*!~%&$-]$/;
 /** A plain string literal in the record kinds' canonical form (see the header). */
@@ -651,8 +704,40 @@ function canonStep(s, what) {
   };
 }
 
+// #1762 S2 (contract v2.2) — every field of a refusal is checked against the SAME closed registries the builder uses
+// (core/refusal-record.mjs), so a direct `refusal.record` that skips the builder still cannot store an unregistered code,
+// rule, route or action. The identity is re-derived here: a requestId-scoped opId must be the hash of (seat, route,
+// requestId), and a node IRI must be its opId's, so a retried refusal cannot land a second record and two scopes never share.
+function canonRefusal(r, opId) {
+  obj(r, ['iri', 'route', 'refusedAction', 'status', 'code', 'rule', 'entityKind', 'entityId', 'requestId', 'associatedWith'], 'refusal');
+  const iri = checkIri(r.iri, 'refusal.iri');
+  if (iri !== RF.refusalIriOf(opId)) fail('refusal.iri must be the IRI its opId derives (refusalIriOf)');
+  const listed = (v, k, ok, optional) => {
+    if (optional && v === null) return null;
+    if (v !== RF.UNLISTED && !(typeof v === 'string' && ok(v))) fail(`refusal.${k}: not in its registry (a refusal stores only registered values, else unlisted)`);
+    return v;
+  };
+  const route = listed(r.route, 'route', (v) => RF.ROUTE_TEMPLATES.has(v) || Object.hasOwn(RF.ADAPTER_ROUTES, v));
+  const refusedAction = r.refusedAction;
+  if (refusedAction !== RF.refusedActionOf(route)) fail('refusal.refusedAction must be the action its route names');
+  const code = listed(r.code ?? null, 'code', (v) => RF.REFUSAL_CODES.has(v), true);
+  const rule = listed(r.rule ?? null, 'rule', (v) => RF.REFUSAL_RULES.has(v), true);
+  const shaped = (v, k, re) => { if (v == null) return null; if (typeof v !== 'string' || !re.test(v)) fail(`refusal.${k}: not its id shape`); return v; };
+  const entityKind = shaped(r.entityKind, 'entityKind', RF.ENTITY_KIND_RE);
+  if (entityKind == null) fail('refusal.entityKind is required');
+  const status = intLit(r.status, 'refusal.status');
+  if (BigInt(status) < 400n || BigInt(status) > 599n) fail('refusal.status must be 400-599');
+  const associatedWith = checkIri(r.associatedWith, 'refusal.associatedWith');
+  if (!/^https:\/\/scrumboard\.local\/person\/[a-z0-9][a-z0-9_-]{0,63}$/.test(associatedWith) && associatedWith !== RF.REFUSAL_UNKNOWN) fail('refusal.associatedWith must be a seat Person IRI or scrum:unknown');
+  const requestId = shaped(r.requestId, 'requestId', RF.REQUEST_ID_RE);
+  if (requestId != null ? opId !== RF.refusalOpId(associatedWith, route, requestId) : !/^urn:ex:op\/refused\/fresh-[0-9a-f-]{36}$/.test(opId)) {
+    fail('a refusal\'s opId is urn:ex:op/refused/<sha256(seat, route, requestId)> with a requestId, else refused/fresh-<uuid>');
+  }
+  return { iri, route, refusedAction, status, code, rule, entityKind, entityId: shaped(r.entityId, 'entityId', RF.ENTITY_ID_RE), requestId, associatedWith };
+}
+
 function canonicalizeRecord(i) {
-  const allowed = ['kind', 'opId', 'actor', 'evidence', 'people', ...RECORD_FIELDS[i.kind]];
+  const allowed = ['kind', 'opId', 'actor', 'evidence', 'people', ...RECORD_FIELDS[i.kind], ...(RECORD_HISTORY[i.kind] ? ['history'] : [])];   // #1762 S1b
   for (const k of Object.keys(i)) if (!allowed.includes(k)) fail(`unknown field ${k} for kind ${i.kind}`);
   const opId = checkIri(i.opId, 'opId');
   if (!opId.startsWith(`${NS}op/`)) fail(`opId must be under ${NS}op/`);
@@ -772,6 +857,8 @@ function canonicalizeRecord(i) {
       producedPost: rOptIri(m.producedPost, 'call.producedPost'), postedText: rOpt(m.postedText, 'call.postedText'),
       requestId: rStr(m.requestId, 'call.requestId'), entityJson: rStr(m.entityJson, 'call.entityJson'),
     } };
+  } else if (i.kind === 'refusal.record') {
+    record = { refusal: canonRefusal(i.refusal, opId) };
   } else if (i.kind === 'card.write') {
     record = canonCardWrite(i);
     if (i.origin != null) record = canonOriginCommit(i, record, { opId, actor, evidence, people });   // #1629 s2
@@ -787,6 +874,7 @@ function canonicalizeRecord(i) {
     if (i.entity && i.entity.kind === 'collection') {
       // #1624 — the MUTABLE families (review 08:37Z): one or more collection entities in ONE guarded update, through the
       // same allowlisted entity.put (no second generic write API). See canonCollectionWrite.
+      if (i.history !== undefined) fail('a collection entity.put carries its history on each part, not on the intention');   // #1762 S1b
       record = { entity: canonCollectionWrite(i.entity) };
       if (people.length) record.people = people;
       return { kind: i.kind, opId, actor, evidence, record, targets: [], newAssertion: null, authority: null, grant: null, rule: null };
@@ -837,6 +925,10 @@ function canonicalizeRecord(i) {
   // them: a replay under the same opId with different Person effects is an
   // intent-collision. Absent when empty, so a Person-less intention's digest is unchanged.
   if (people.length) record.people = people;
+  // #1762 S1b — the activity facts ride the record, so the digest binds them; absent when the intention carries none, so a
+  // history-less intention's digest is unchanged.
+  const history = canonRecordHistory(i, record);
+  if (history) record.history = history;
   return { kind: i.kind, opId, actor, evidence, record, targets: [], newAssertion: null, authority: null, grant: null, rule: null };
 }
 
@@ -903,6 +995,7 @@ function planRecord(c) {
   const delOwned = [];     // #1574 R4a [{owner, prefix}]: every triple of every node that is attachmentOf owner AND under prefix is removed
   const delLinked = [];    // #1582 [{link, owner, type, pred}]: every `pred` value on every node of `type` that `link`s to owner is removed
   const condIns = [];      // #1582 [{s, p, o, unless:[node, type]}]: inserted only where `node` is NOT of `type` when the update runs
+  const insAt = [];        // #1762 S2 [[s, p]]: s p ?n_at, the receipt's own NOW(), ok-guarded through its subject
   let verGuard = null;
   let target;
   let dispatchHold = null;   // #1749 A8: the obligationId a dispatch intention settles or publishes
@@ -1050,6 +1143,17 @@ function planRecord(c) {
     add(S.iri, TM.reason, S.reason == null ? null : L(S.reason)); add(S.iri, TM.text, S.text == null ? null : L(S.text));
     add(S.iri, TM.traceId, S.traceId == null ? null : L(S.traceId)); add(S.iri, TM.ofModelCall, S.ofModelCall && I(S.ofModelCall));
     add(S.iri, TM.recordedBy, ref(c.opId));
+  } else if (c.kind === 'refusal.record') {
+    // #1762 S2 — one fresh node; `unlisted` is the IRI scrum:unlisted; its time is the receipt's own NOW() (insAt)
+    const F = R.refusal; target = null;
+    const tok = (v) => (v === RF.UNLISTED ? I(`${RS}unlisted`) : L(v));
+    fresh.push(F.iri);
+    add(F.iri, TM.type, I(TM.RefusalRecord)); add(F.iri, TM.route, tok(F.route)); add(F.iri, TM.refusedAction, tok(F.refusedAction));
+    add(F.iri, TM.status, F.status); add(F.iri, TM.code, F.code == null ? null : tok(F.code)); add(F.iri, TM.rule, F.rule == null ? null : tok(F.rule));
+    add(F.iri, TM.entityKind, L(F.entityKind)); add(F.iri, TM.entityId, F.entityId == null ? null : L(F.entityId));
+    add(F.iri, TM.requestId, F.requestId == null ? null : L(F.requestId)); add(F.iri, TM.wasAssociatedWith, I(F.associatedWith));
+    add(F.iri, TM.recordedBy, ref(c.opId));
+    insAt.push([F.iri, TM.startedAtTime]);
   } else if (c.kind === 'modelcall.create') {
     const M = R.call; target = null;
     fresh.push(M.iri);
@@ -1142,7 +1246,7 @@ function planRecord(c) {
     for (const a of P.aliases) add(P.iri, TM.aliases, L(a));
     add(P.iri, TM.recordedBy, ref(c.opId));
   }
-  return { target, pre, fresh, freshSubject, ins, delAll, delAny, delOwned, delLinked, condIns, verGuard, dispatchHold };
+  return { target, pre, fresh, freshSubject, ins, delAll, delAny, delOwned, delLinked, condIns, insAt, verGuard, dispatchHold };
 }
 
 function compileRecord(c) {
@@ -1209,6 +1313,13 @@ function compileRecord(c) {
   });
   // #1638 — route each planned triple by the one definition of bookkeeping (ver, recordedBy, entityJson… go to the bk graph)
   for (const [s, p, o] of plan.ins) (isBookkeeping(s, p) ? bIns : dIns).push(`  ${v(ref(s))} ${ref(p)} ${v(o)} .`);
+  for (const [s, p] of plan.insAt || []) dIns.push(`  ${v(ref(s))} ${ref(p)} ?n_at .`);   // #1762 S2
+  // #1762 S1b — the record's ONE activity (part 0), in the same ok-guarded data INSERT as the record: APPLIED commits both,
+  // a refused or replayed write inserts neither. No card-only facts: entityKind is set.
+  if (c.record.history) {
+    const { used, ...H } = c.record.history;
+    historyActivityQuads(c, { iri: used, history: H }, 0).forEach((t) => dIns.push(`  ${v(t[0])} ${v(t[1])} ${t[2] === '?n_at' ? '?n_at' : v(t[2])} .`));
+  }
 
   pre.push(`    BIND(true AS ?ok)`);
   where.push(`  OPTIONAL {`, ...pre, `  }`);
@@ -1290,11 +1401,39 @@ function cardQuadClass([s, p, o], iri, id, what) {
   fail(`${what}: ${S} is not owned by ${iri}`);
 }
 
+// #1762 S1 — one part's event-time facts (contract on #1762 "S1 CONTRACT"). Values are closed: op from a fixed list, ids
+// and columns as short safe strings, versions as integers or 'unknown'. Nothing free-text rides an activity.
+const HISTORY_OPS = Object.freeze(['create', 'update', 'delete', 'move', 'claim', 'release', 'reproject']);   // reproject: references re-derived, the card itself unchanged
+const SAFE_HISTORY_ID = /^[A-Za-z0-9._~-]{1,100}$/;
+function canonCardHistory(h, w, isRemove) {
+  obj(h, ['op', 'shortId', 'holder', 'columnBefore', 'columnAfter', 'versionAfter'], w);
+  if (!HISTORY_OPS.includes(h.op)) fail(`${w}.op must be one of ${HISTORY_OPS.join(', ')}`);
+  if ((h.op === 'delete') !== isRemove) fail(`${w}.op: a remove part is exactly a delete`);
+  const idOrNull = (x, f) => (x == null ? null : (typeof x === 'string' && SAFE_HISTORY_ID.test(x) ? x : fail(`${w}.${f} must be a short safe id or null`)));
+  const col = (x, f) => (x === 'unknown' ? 'unknown' : idOrNull(x, f));
+  const shortId = h.shortId == null ? null : intLit(h.shortId, `${w}.shortId`);
+  const versionAfter = h.versionAfter === 'unknown' ? 'unknown' : intLit(h.versionAfter, `${w}.versionAfter`);
+  if (h.columnAfter == null) fail(`${w}.columnAfter is required (a column id or 'unknown')`);
+  const out = { op: h.op, shortId, holder: idOrNull(h.holder, 'holder'), columnAfter: col(h.columnAfter, 'columnAfter'), versionAfter };
+  if ('columnBefore' in h) out.columnBefore = h.columnBefore === null ? null : col(h.columnBefore, 'columnBefore');
+  if ((h.op === 'create' || h.op === 'move') && !('columnBefore' in out)) fail(`${w}.columnBefore is required on a ${h.op}`);
+  return out;
+}
+
+function canonEntityHistory(h, w, isRemove) {
+  obj(h, ['op', 'entityKind', 'versionAfter'], w);
+  if (!['create', 'update', 'delete'].includes(h.op)) fail(`${w}.op must be create, update or delete`);
+  if ((h.op === 'delete') !== isRemove) fail(`${w}.op: a remove part is exactly a delete`);
+  if (typeof h.entityKind !== 'string' || !SAFE_HISTORY_ID.test(h.entityKind)) fail(`${w}.entityKind must be a short safe kind`);
+  return { op: h.op, entityKind: h.entityKind, versionAfter: h.versionAfter === 'unknown' ? 'unknown' : intLit(h.versionAfter, `${w}.versionAfter`) };
+}
+
 function canonCardWrite(i, { origin = i.origin != null } = {}) {
   if (!Array.isArray(i.parts) || (!i.parts.length && i.counter == null && !(Array.isArray(i.collections) && i.collections.length))) fail('card.write.parts is a non-empty array (or empty, with a counter or collections)');
   const parts = i.parts.map((x, k) => {
     const w = `parts[${k}]`;
-    obj(x, ['iri', 'expectedVersion', 'version', 'quads', 'prior', 'json', 'remove', 'importDigest', ...(origin ? ['reason'] : [])], w);
+    obj(x, ['iri', 'expectedVersion', 'version', 'quads', 'prior', 'json', 'remove', 'importDigest', 'history', ...(origin ? ['reason'] : [])], w);
+    const history = x.history == null ? null : canonCardHistory(x.history, `${w}.history`, x.remove === true);
     // #1744 — a non-subject part of an origin plan says WHY it rides the write; bindOriginPlan checks it against the route
     if (x.reason != null && !ORIGIN_PART_REASONS.includes(x.reason)) fail(`${w}.reason must be one of ${ORIGIN_PART_REASONS.join(', ')}`);
     // A REMOVE part (a card deleted): guarded on its version, every owned triple deleted, nothing inserted.
@@ -1311,7 +1450,7 @@ function canonCardWrite(i, { origin = i.origin != null } = {}) {
         if (cardQuadClass(t, iri, id, `${w}.prior[${n}]`) === 'shared') fail(`${w}.prior[${n}]: a shared node is never deleted by a card write`);
         return t;
       });
-      return { iri, remove: true, expectedVersion, prior: [...new Map(prior.map((t) => [t.join(' '), t])).values()].sort((a, b) => (a.join(' ') < b.join(' ') ? -1 : 1)) };
+      return { iri, remove: true, expectedVersion, prior: [...new Map(prior.map((t) => [t.join(' '), t])).values()].sort((a, b) => (a.join(' ') < b.join(' ') ? -1 : 1)), ...(history ? { history } : {}) };
     }
     if (x.remove != null && x.remove !== false) fail(`${w}.remove must be true or absent`);
     const iri = checkIri(x.iri, `${w}.iri`);
@@ -1342,9 +1481,12 @@ function canonCardWrite(i, { origin = i.origin != null } = {}) {
       if (typeof x.importDigest !== 'string' || !/^[0-9a-f]{64}$/.test(x.importDigest)) fail(`${w}.importDigest must be a sha-256 hex digest`);
       importDigest = x.importDigest;
     }
-    return { iri, expectedVersion, version, quads, prior, json: rStr(x.json, `${w}.json`), ...(importDigest ? { importDigest } : {}), ...(x.reason != null ? { reason: x.reason } : {}) };
+    return { iri, expectedVersion, version, quads, prior, json: rStr(x.json, `${w}.json`), ...(importDigest ? { importDigest } : {}), ...(x.reason != null ? { reason: x.reason } : {}), ...(history ? { history } : {}) };
   }).sort((a, b) => (a.iri < b.iri ? -1 : 1));
   if (new Set(parts.map((p) => p.iri)).size !== parts.length) fail('card.write: a card appears in two parts');
+  // #1762 S1 — FAIL CLOSED: history is all or nothing. A write where some parts carry their activity facts and some do not
+  // would commit a change with no record of it, so it is refused before it is compiled.
+  if (parts.some((p) => p.history) && !parts.every((p) => p.history)) fail('card.write: history must be on every part or on none');
   // #1598 K4 — an announcement committed with a card change rides the SAME update as a PendingAnnouncement node under the
   // card (`<card>/announce/<mutationId>`, never deleted by a card write), so a crash after this update cannot leave a
   // claim whose announcement was never queued: the boot re-queues any the document does not know.
@@ -1365,6 +1507,7 @@ function canonCardWrite(i, { origin = i.origin != null } = {}) {
   // #1624 — collection entities written in the SAME update as the cards (e.g. an agent's retire releases its cards).
   const collections = i.collections == null ? [] : canonCollectionWrite({ kind: 'collection', parts: i.collections }).parts;
   if (!parts.length && !collections.length && i.counter == null) fail('card.write carries no part');
+  { const all = [...parts, ...collections]; if (all.some((p) => p.history) && !all.every((p) => p.history)) fail('card.write: history must be on every part (cards and collections) or on none'); }   // #1762 S1
   // #1744 — `indexGuard: true` makes a write that adds or removes a shortId prove the reference index is complete and that it
   // re-projects EVERY card naming that shortId (contract v2 V2-2, F2). `indexGuard: 'marker'` (mode on, finding 5) is the same
   // proof, required only once the store holds the completion marker: before the backfill it admits the write, after it the
@@ -1494,6 +1637,10 @@ function cardStructureBranches(iri, k, [xs, xp, xo] = ['?xs', '?xp', '?xo'], x =
     `    { ${I} ${ref(`${CW.scrum}hasCheck`)} ${xs} . ${xs} ${xp} ${xo} }`,
     `    { ${xs} ${ref(`${CW.scrum}dependsOn`)} ${I} BIND(${ref(`${CW.scrum}dependsOn`)} AS ${xp}) BIND(${I} AS ${xo}) }`,
     `    { ${I} ?${x}l${k} ?${x}h${k} FILTER(isBlank(?${x}h${k})) ?${x}h${k} ${ref(CW.rdfRest)}* ${xs} . ${xs} ${xp} ${xo} }`,
+    // #1787 — the card's attachment nodes, ALL of their triples, whatever they hold: proven owned twice (linked to this card
+    // by attachmentOf AND under its /attachment/ prefix, as the post path does). Without this a write deleted only the
+    // triples its prior projection named, so a stale or extra attachment fact survived every rewrite (#138 review).
+    `    { ${xs} ${ref(`${CW.scrum}attachmentOf`)} ${I} . FILTER(STRSTARTS(STR(${xs}), ${JSON.stringify(`${iri}/attachment/`)})) ${xs} ${xp} ${xo} }`,
   ];
 }
 
@@ -1615,6 +1762,33 @@ function doneMoveClauses(R) {
   return out;
 }
 
+// #1762 S1 — the activity node of part k of a card.write, as triples (contract on #1762 "S1 CONTRACT"). They ride the
+// write's own data INSERT, whose template binds only when the write's preconditions hold (?ok): APPLIED commits the change
+// and its activity together, and a refused write inserts neither. `?n_at` is the receipt's own NOW().
+const SCRUM_NS = 'https://scrumboard.local/ns#', PROV_NS = 'http://www.w3.org/ns/prov#', ACTIVITY_NS = 'https://scrumboard.local/activity/';
+const PERSON_NS = 'https://scrumboard.local/person/';
+export const changeActivityIri = (opId, k) => `${ACTIVITY_NS}op-${createHash('sha256').update(opId).digest('hex').slice(0, 32)}-${k}`;
+// #1762 S1b — the activity names a PERSON: the log-born kinds' actor is the slice's authenticated seat IRI (urn:ex:seat/<key>),
+// the same seat as person/<key>; every other actor already is a person IRI.
+const activityAgent = (actor) => (actor.startsWith('urn:ex:seat/') ? `${PERSON_NS}${actor.slice('urn:ex:seat/'.length)}` : actor);
+function historyActivityQuads(c, P, k) {
+  const H = P.history, A = ref(changeActivityIri(c.opId, k)), S = (n) => ref(SCRUM_NS + n), PR = (n) => ref(PROV_NS + n);
+  const term = (x) => (x === 'unknown' ? S('unknown') : x === null ? S('none') : null);
+  const out = [
+    [A, ref(CW.rdfType), PR('Activity')], [A, ref(CW.rdfType), S('ChangeActivity')],
+    [A, S('op'), recLit(H.op)], [A, S('entityKind'), recLit(H.entityKind ?? 'card')], [A, PR('used'), ref(P.iri)],
+    [A, PR('wasAssociatedWith'), ref(activityAgent(c.actor))], [A, PR('startedAtTime'), '?n_at'],
+    [A, S('part'), String(k)], [A, S('recordedBy'), ref(c.opId)],
+    [A, S('versionAfter'), H.versionAfter === 'unknown' ? S('unknown') : H.versionAfter],
+  ];
+  if (H.entityKind != null) return out;   // a collection entity: no card-only facts
+  out.push([A, S('holderAtWrite'), H.holder == null ? S('none') : ref(PERSON_NS + encodeURIComponent(H.holder))],
+    [A, S('columnAfter'), term(H.columnAfter) ?? recLit(H.columnAfter)]);
+  if (H.shortId != null) out.push([A, S('shortId'), recLit(String(H.shortId))]);
+  if ('columnBefore' in H) out.push([A, S('columnBefore'), term(H.columnBefore) ?? recLit(H.columnBefore)]);
+  return out;
+}
+
 function compileCardWrite(c) {
   const digest = recordDigest(c);
   const OP = ref(c.opId);
@@ -1653,6 +1827,7 @@ function compileCardWrite(c) {
       branches.push(...cardStructureBranches(P.iri, k));
       if (P.prior.length) branches.push(`    { VALUES (?xs ?xp ?xo) {\n${P.prior.map((q) => `      (${q.join(' ')})`).join('\n')}\n    } }`);
     }
+    if (P.history) historyActivityQuads(c, P, k).forEach((t) => dIns.push(`  ${v(t[0])} ${v(t[1])} ${t[2] === '?n_at' ? '?n_at' : v(t[2])} .`));   // #1762 S1
     if (P.remove) return;
     if (P.importDigest) {
       const IMP = ref(`${P.iri}/import`);
@@ -1661,7 +1836,7 @@ function compileCardWrite(c) {
     for (const [s, p, o] of P.quads) dIns.push(`  ${v(s)} ${v(p)} ${v(o)} .`);
     bIns.push(`  ${v(I)} ${VER} ${v(P.version)} .`, `  ${v(I)} ${REC} ${v(OP)} .`, `  ${v(I)} ${JSONP} ${v(recLit(P.json))} .`);
   });
-  collectionClauses(R.collections || [], { OP, v, pre, top, branches, dIns, bIns, bDel, dBinds, tag: 'c' });
+  collectionClauses(R.collections || [], { OP, v, pre, top, branches, dIns, bIns, bDel, dBinds, tag: 'c', history: { c, offset: R.parts.length } });
   for (const A of R.pending || []) {
     pre.push(...freshSubject(ref(A.iri)));
     dIns.push(`  ${v(ref(A.iri))} ${ref(CW.rdfType)} ${v(ref(`${CW.scrum}PendingAnnouncement`))} .`);
@@ -1988,8 +2163,10 @@ export function admitStoredOriginPlan(descriptor, plan) {
   if (!Array.isArray(plan.parts)) fail('plan.parts is an array');
   plan.parts.forEach((p, k) => {
     const w = `plan.parts[${k}]`;
-    keys(p, ['iri', 'expectedVersion', 'version', 'quads', 'prior', 'json'], ['reason'], w);
+    keys(p, ['iri', 'expectedVersion', 'version', 'quads', 'prior', 'json'], ['reason', 'history'], w);
     if (p.reason != null && !ORIGIN_PART_REASONS.includes(p.reason)) fail(`${w}.reason is not a known part reason`);
+    // #1762 S1 — a stored part's activity facts are admitted only in their own canonical form (as every other field is)
+    if (p.history != null && JSON.stringify(canonCardHistory(p.history, `${w}.history`, false)) !== JSON.stringify(p.history)) fail(`${w}.history is not its own canonical form`);
     const iri = checkIri(p.iri, `${w}.iri`), id = iri.slice(ENTITY_IRI.length);
     if (!iri.startsWith(ENTITY_IRI) || !/^[A-Za-z0-9-]{1,64}$/.test(id)) fail(`${w}.iri must be ${ENTITY_IRI}<card id>`);
     versions(p, w);
@@ -2002,7 +2179,9 @@ export function admitStoredOriginPlan(descriptor, plan) {
     if (!Array.isArray(plan.collections) || !plan.collections.length) fail('plan.collections, when present, is a non-empty array');
     plan.collections.forEach((p, k) => {
       const w = `plan.collections[${k}]`;
-      keys(p, ['collection', 'iri', 'expectedVersion', 'version', 'quads', 'prior', 'json'], ['unique', 'requires'], w);
+      keys(p, ['collection', 'iri', 'expectedVersion', 'version', 'quads', 'prior', 'json'], ['unique', 'requires', 'history'], w);
+      // #1762 S1 (review 131) — a stored collection part's activity facts are admitted only in their own canonical form
+      if (p.history != null && JSON.stringify(canonEntityHistory(p.history, `${w}.history`, false)) !== JSON.stringify(p.history)) fail(`${w}.history is not its own canonical form`);
       if (typeof p.collection !== 'string' || !COLL_KEY_RE.test(p.collection)) fail(`${w}.collection must name a collection`);
       const iri = checkIri(p.iri, `${w}.iri`);
       versions(p, w);
@@ -2034,9 +2213,9 @@ export function admitStoredOriginPlan(descriptor, plan) {
   }
   bindOriginPlan(descriptor, plan);
   // rebuilt in canonCardWrite's own key order, so a caller comparing its JSON to the stored bytes refuses a reordering
-  const cardPart = (p) => ({ iri: p.iri, expectedVersion: p.expectedVersion, version: p.version, quads: p.quads, prior: p.prior, json: p.json, ...(p.reason != null ? { reason: p.reason } : {}) });
+  const cardPart = (p) => ({ iri: p.iri, expectedVersion: p.expectedVersion, version: p.version, quads: p.quads, prior: p.prior, json: p.json, ...(p.reason != null ? { reason: p.reason } : {}), ...(p.history != null ? { history: p.history } : {}) });   // #1762 S1
   const collPart = (p) => ({ collection: p.collection, iri: p.iri, expectedVersion: p.expectedVersion, version: p.version, quads: p.quads, prior: p.prior, json: p.json,
-    ...(p.unique ? { unique: p.unique.map((u) => ({ all: u.all.map((a) => ({ predicate: a.predicate, value: a.value })) })) } : {}), ...(p.requires ? { requires: p.requires } : {}) });
+    ...(p.unique ? { unique: p.unique.map((u) => ({ all: u.all.map((a) => ({ predicate: a.predicate, value: a.value })) })) } : {}), ...(p.requires ? { requires: p.requires } : {}), ...(p.history != null ? { history: p.history } : {}) });   // #1762 S1
   return { parts: plan.parts.map(cardPart), counter: plan.counter, ...(plan.collections ? { collections: plan.collections.map(collPart) } : {}), ...(plan.reads ? { reads: plan.reads.map((r) => ({ iri: r.iri, version: r.version })) } : {}), ...(plan.walk ? { walk: { ...plan.walk } } : {}) };
 }
 
@@ -2220,8 +2399,9 @@ function canonCollectionWrite(e) {
   if (!Array.isArray(e.parts) || !e.parts.length) fail('entity.parts is a non-empty array');
   const parts = e.parts.map((x, k) => {
     const w = `entity.parts[${k}]`;
-    obj(x, ['collection', 'iri', 'expectedVersion', 'version', 'quads', 'prior', 'json', 'remove', 'unique', 'requires'], w);
+    obj(x, ['collection', 'iri', 'expectedVersion', 'version', 'quads', 'prior', 'json', 'remove', 'unique', 'requires', 'history'], w);
     if (typeof x.collection !== 'string' || !COLL_KEY_RE.test(x.collection)) fail(`${w}.collection must name a collection`);
+    const history = x.history == null ? null : canonEntityHistory(x.history, `${w}.history`, x.remove === true);   // #1762 S1
     const iri = checkIri(x.iri, `${w}.iri`);
     const own = (list, label) => {
       if (!Array.isArray(list)) fail(`${w}.${label} must be an array`);
@@ -2237,7 +2417,7 @@ function canonCollectionWrite(e) {
     };
     if (x.remove === true) {
       if (x.quads != null || x.json != null || x.version != null || x.unique != null || x.requires != null) fail(`${w}: a remove part carries no quads, json, version, unique or requires`);
-      return { collection: x.collection, iri, remove: true, expectedVersion: intLit(x.expectedVersion, `${w}.expectedVersion`), prior: own(x.prior ?? [], 'prior') };
+      return { collection: x.collection, iri, remove: true, expectedVersion: intLit(x.expectedVersion, `${w}.expectedVersion`), prior: own(x.prior ?? [], 'prior'), ...(history ? { history } : {}) };
     }
     if (x.remove != null && x.remove !== false) fail(`${w}.remove must be true or absent`);
     const expectedVersion = x.expectedVersion == null ? null : intLit(x.expectedVersion, `${w}.expectedVersion`);
@@ -2261,9 +2441,10 @@ function canonCollectionWrite(e) {
     const requires = [...new Set((x.requires ?? []).map((r, n) => ref(checkIri(r, `${w}.requires[${n}]`))))].sort();
     return { collection: x.collection, iri, expectedVersion, version, quads: own(x.quads, 'quads'),
       prior: expectedVersion == null ? (x.prior == null || (Array.isArray(x.prior) && !x.prior.length) ? [] : fail(`${w}.prior: a create has no prior state`)) : own(x.prior ?? [], 'prior'),
-      json: rStr(x.json, `${w}.json`), ...(unique.length ? { unique } : {}), ...(requires.length ? { requires } : {}) };
+      json: rStr(x.json, `${w}.json`), ...(unique.length ? { unique } : {}), ...(requires.length ? { requires } : {}), ...(history ? { history } : {}) };
   }).sort((a, b) => (a.iri < b.iri ? -1 : 1));
   if (new Set(parts.map((p) => p.iri)).size !== parts.length) fail('entity.parts: an entity appears in two parts');
+  if (parts.some((p) => p.history) && !parts.every((p) => p.history)) fail('entity.parts: history must be on every part or on none');   // #1762 S1 — fail closed
   return { kind: 'collection', parts };
 }
 
@@ -2276,7 +2457,7 @@ const isBkBranch = (b) => b.endsWith(' AS ?xbs) }');
  * `branches`, inserts into `dIns` (through `v`, the update's ?d_ binder). Shared by entity.put kind 'collection' and by
  * card.write's `collections` (a write that touches cards AND a collection entity is still ONE guarded update).
  */
-function collectionClauses(parts, { OP, v, pre, top, branches, dIns, bIns, bDel, dBinds, tag }) {
+function collectionClauses(parts, { OP, v, pre, top, branches, dIns, bIns, bDel, dBinds, tag, history = null }) {
   const VER = ref(`${NS}ver`), REC = ref(`${NS}recordedBy`), JSONP = ref(`${CW.scrum}entityJson`), INC = ref(`${CW.scrum}inCollection`);
   parts.forEach((P, k) => {
     const I = ref(P.iri), KEY = recLit(P.collection);
@@ -2290,6 +2471,7 @@ function collectionClauses(parts, { OP, v, pre, top, branches, dIns, bIns, bDel,
     }
     for (const U of P.unique || []) pre.push(`    FILTER NOT EXISTS { ?xu ${INC} ${KEY} ; ${U.all.map((a) => `${a.predicate} ${a.value}`).join(' ; ')} . FILTER(?xu != ${I}) }`);
     (P.requires || []).forEach((T, j) => pre.push(`    FILTER EXISTS { ${T} ?xrp${tag}${k}_${j} ?xro${tag}${k}_${j} }`));
+    if (P.history && history) historyActivityQuads(history.c, P, history.offset + k).forEach((t) => dIns.push(`  ${v(t[0])} ${v(t[1])} ${t[2] === '?n_at' ? '?n_at' : v(t[2])} .`));   // #1762 S1
     if (P.remove) return;
     for (const [s, p, o] of P.quads) dIns.push(`  ${v(s)} ${v(p)} ${v(o)} .`);
     dIns.push(`  ${v(I)} ${INC} ${v(KEY)} .`);
@@ -2309,7 +2491,7 @@ function compileCollectionWrite(c) {
     return `?d_${n}`;
   };
   where.push(...dupGuard(OP));
-  collectionClauses(R.parts, { OP, v, pre, top, branches, dIns, bIns, bDel, dBinds, tag: 'c' });
+  collectionClauses(R.parts, { OP, v, pre, top, branches, dIns, bIns, bDel, dBinds, tag: 'c', history: { c, offset: 0 } });
   pre.push(`    BIND(true AS ?ok)`);
   where.push(`  OPTIONAL {`, ...pre, `  }`);
   where.push(...top);

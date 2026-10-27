@@ -282,9 +282,12 @@ test('#1563 (D7b) owner unavailable at runtime: booted in mode off, then the exe
 test('#1563 (D8) read-off: reads open nothing; a write still updates the mirror; mode unset afterwards serves that write', TO, async () => {
   await world(async ({ w, rest }) => {
     const s = await rest({ mode: MODE.readOff, file: 'present' });
+    // The claim is about READS, so the count starts after boot. A boot import is a WRITE (#1764's roster.json import on a graph
+    // with no roster), and in read-off a write updates the mirror by design (asserted below); counting it here mistook it for a read.
+    const atBoot = s.boardOpens();
     for (const r of ['/api/cards', '/api/cards/1', '/api/board/status', '/api/conversations?limit=3']) assert.equal((await s.call('GET', r)).status, 200, r);
     assert.ok(s.recorded() > 0, 'PRECONDITION: the recorder is live');
-    assert.equal(s.boardOpens(), 0, 'reads attempted no open of the board file');
+    assert.equal(s.boardOpens() - atBoot, 0, 'reads attempted no open of the board file');
     const before = fs.readFileSync(w.boardFile, 'utf8');
     const made = await s.call('POST', '/api/cards', { title: 'a #1563 D8 card', createdBy: 'ada' });
     assert.equal(made.status, 201);

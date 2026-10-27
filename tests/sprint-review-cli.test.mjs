@@ -67,24 +67,15 @@ test('#755-cli the run is REPRODUCIBLE — same inputs, byte-identical report', 
   assert.equal(run(args), run(args));
 });
 
-test('#755-cli it reports the DENOMINATOR and the exclusions, so the filter is auditable', () => {
-  // ⚠️ `stranger` was doing an `update` here. Once the denominator was bound to
-  // what the gate actually ENFORCES, `update` stopped counting at all — so the
-  // exclusion count changed for a reason that had nothing to do with the filter
-  // this test is about. Both non-seat actors now do the enforced op.
+test('#1763 the CLI reports signal 2 as RETIRED — no ratio, no exclusions, no caveat, whatever the events say', () => {
+  // Signal 2 measured obedience to the #755 work gate's windows; the gate and ledger are retired (#1763), so the line it
+  // prints is the retirement, and a score would be a number over nothing. Same three-revisions discipline as below: the
+  // line is the truth for THIS build.
   const dir = fixtureDir([ev('ada', 'update'), ev(null, 'update'), ev('stranger', 'update')]);
   const out = run(['--since', '2026-08-10T02:00:00Z', '--events', dir, ...SEATS_ARG]);
-
-  // ⭐ #889 — THE RATIO IS BACK, AND IT MEANS SOMETHING NOW.
-  //
-  // Two revisions of this assertion in one evening, and the sequence is the
-  // point: it began as a ratio over `create`, became UNMEASURABLE when #890
-  // showed that no create could ever be a violation, and is a ratio again now
-  // that the enforced op is one the gate can actually scope. Same three lines
-  // of output, three different truth values, each correct for its own build.
-  assert.match(out, /1 \/ 1|0 \/ 1/);
-  assert.match(out, /2 non-seat action\(s\) excluded/);
-  assert.match(out, /enforced ops counted: update/);
+  assert.match(out, /SIGNAL 2[^\n]*RETIRED since 2026-08-18 \(#1763\)/);
+  const line2 = out.split('\n').find((l) => l.startsWith('SIGNAL 2')) || '';
+  assert.doesNotMatch(line2, /\d+ \/ \d+|excluded|STRUCTURAL ZERO/, `signal 2 carries no score: ${line2}`);
 });
 
 test('#755-cli ⚠️ it says an UNMEASURABLE signal is not a passing signal — every run, not just bad ones', () => {
@@ -94,24 +85,6 @@ test('#755-cli ⚠️ it says an UNMEASURABLE signal is not a passing signal —
   assert.match(out, /AN UNMEASURABLE SIGNAL IS NOT A PASSING SIGNAL/);
   assert.match(out, /of 3 signals measurable/);
 });
-
-test('#755-cli the structural-zero caveat reaches the OUTPUT, not just the return value', () => {
-  // ⚠️ RESTORED, and the history is worth keeping. This asserted STRUCTURAL
-  // ZERO originally; #890 replaced it with an R4 assertion because `create`
-  // could never be scoped, so the stronger statement ("this population can
-  // never produce evidence") superseded the weaker one ("we have no evidence
-  // yet"). #889 moved the enforced op to `update`, which the gate CAN scope —
-  // so R4 no longer fires here and the original caveat is the true one again.
-  //
-  // ⇒ Both were correct for their own build. The discipline that survives all
-  //   three revisions: a zero that means "no instrument" must never print as a
-  //   zero, whichever reason makes it so.
-  const dir = fixtureDir([ev('ada', 'update'), ev('bo', 'update')]);
-  const out = run(['--since', '2026-08-10T02:00:00Z', '--events', dir, ...SEATS_ARG]);
-  assert.match(out, /STRUCTURAL ZERO/);
-  assert.match(out, /not evidence of compliance/i);
-});
-
 
 test('#755-cli ⛔ it REFUSES without --since rather than reviewing everything', () => {
   const out = run([], { expectFail: true });
