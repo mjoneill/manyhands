@@ -223,6 +223,8 @@ export async function spawnBoardServer({ env = {}, args = ['server.js'], cwd = P
  */
 export const PORT_CONTENDED = /lost the allocation race/;
 export async function retryOnPortContention(attemptFn, { attempts = START_ATTEMPTS } = {}) {
+  // a bound below one would run nothing and leave no failure to report: refuse it rather than throw on a null below
+  if (!Number.isInteger(attempts) || attempts < 1) throw new RangeError(`retryOnPortContention: attempts must be an integer of at least 1, got ${attempts}`);
   let last = null;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try { return await attemptFn(attempt); } catch (e) {
