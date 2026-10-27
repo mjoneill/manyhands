@@ -12,9 +12,9 @@
  * Without --apply it is a DRY RUN and sends no update. It never writes the log, never removes a triple, and never
  * stores a title, description, body or reason: the backfill carries facts, not content.
  *
- * stdout: ONE JSON object (the report). Exit 0 clean · 3 some pair refused (every verified pair still written) ·
- * 4 an apply whose outcome is uncertain (a lost ACK; uncertainty wins over refusals) · 2 usage or preflight (nothing
- * sent). Establishing the frontier F needs an exit-0 APPLY plus verified coverage; a clean dry run is not that.
+ * stdout: ONE JSON object (the report). Exit 0 clean · 3 some pair refused on a stable store (every verified pair still
+ * written) · 4 an interrupted, incomplete apply: a lost ACK, or the store's identity changed mid-run (`apply.stopped`); it
+ * wins over refusals · 2 usage or preflight (nothing sent). Establishing the frontier F needs an exit-0 APPLY plus verified coverage; a clean dry run is not that.
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -233,6 +233,7 @@ const fence = [
   ' }',
 ].join('');
 const confirmed = [...alreadyCurrentSeqs], uncertain = [];
+let stopped = null;
 for (const item of plan) {
   const sparql = [
     `INSERT { ${item.insert.map(([p, t]) => `<${item.iri}> <${p}> ${termSparql(t)} .`).join(' ')} }`,
@@ -243,16 +244,26 @@ for (const item of plan) {
     ...item.absent.map((p, i) => ` FILTER NOT EXISTS { <${item.iri}> <${p}> ?ab${i} }`),
     ` ${item.insert.map(([p], i) => `FILTER NOT EXISTS { <${item.iri}> <${p}> ?x${i} }`).join(' ')} }`,
   ].join('\n');
-  let ok = false;
+  let status = null;   // null = no complete answer (transport error, lost ACK): the outcome is NOT known
   try {
     const r = await fetch(`${executor}/update`, {
       method: 'POST', body: sparql, signal: AbortSignal.timeout(60_000),
       headers: { 'content-type': 'application/sparql-update', 'x-op-id': `urn:ex:op/history-backfill-1762/${crypto.randomUUID()}`, ...(marker.epoch != null ? { 'x-epoch': String(marker.epoch) } : {}), [WRITE_PROTOCOL_HEADER]: WRITE_PROTOCOL },
     });
     await r.text();
-    ok = r.status === 200;
-  } catch { ok = false; }
-  if (!ok) { uncertain.push(item.seq); break; }      // the outcome is not known: stop; the re-run reconciles
+    status = r.status;
+  } catch { status = null; }
+  if (status === null) { uncertain.push(item.seq); break; }      // the outcome is not known: stop; the re-run reconciles
+  if (status !== 200) {
+    // A COMPLETE refusal (the executor's own epoch fence answers 409). Prove it did not apply rather than call it uncertain,
+    // then say why it stopped: a moved store identity, or a refusal on a stable store. Either way nothing later is sent.
+    let node, now;
+    try { node = (await readActivityNodes(executor)).get(item.iri) ?? {}; now = await readMarker(executor); } catch { uncertain.push(item.seq); break; }
+    if (item.insert.some(([p]) => node[p]?.length)) { uncertain.push(item.seq); break; }   // a refused update whose facts are present: not provable
+    const moved = ['dataset', 'epoch', 'incarnation'].filter((k) => String(now[k]) !== String(marker[k]));
+    stopped = moved.length ? { code: 'STORE_IDENTITY_CHANGED', fields: moved } : { code: 'UPDATE_REFUSED', status };
+    break;
+  }
   // an accepted write is not a stored write: read the node back
   let after;
   try { after = (await readActivityNodes(executor)).get(item.iri) ?? {}; } catch { uncertain.push(item.seq); break; }
@@ -261,10 +272,19 @@ for (const item of plan) {
     ...item.absent.filter((p) => after[p]?.length).map(nameOf),
     ...item.want.filter(([p, t]) => (after[p]?.length ?? 0) !== 1 || !termEq(after[p][0], t)).map(([p]) => nameOf(p)),
   ];
-  if (bad.length) { refused.mismatch.push({ seq: item.seq, fields: bad }); continue; }   // the fence held something back: never retried blind
+  if (bad.length) {
+    // The fence held the update back. A store whose identity moved is a restore-class event, not a contradiction on this
+    // node (the reviewer's store-identity ruling): stop the WHOLE run, exit 4, nothing later sent. Re-read the marker to tell.
+    let now;
+    try { now = await readMarker(executor); } catch { uncertain.push(item.seq); break; }   // identity not revalidated: incomplete, never success
+    const moved = ['dataset', 'epoch', 'incarnation'].filter((k) => String(now[k]) !== String(marker[k]));
+    if (moved.length) { stopped = { code: 'STORE_IDENTITY_CHANGED', fields: moved }; break; }   // proven not applied: uncertain stays empty
+    refused.mismatch.push({ seq: item.seq, fields: bad });   // a stable store and a changed node: refused, never retried blind
+    continue;
+  }
   confirmed.push(item.seq); report.written++;
 }
 report.refused = { ...refused, badIri: refused.badIri.sort() };
-report.apply = { confirmed: confirmed.sort((a, b) => a - b), uncertain };
+report.apply = { confirmed: confirmed.sort((a, b) => a - b), uncertain, ...(stopped ? { stopped } : {}) };
 console.log(JSON.stringify(report));
-process.exit(uncertain.length ? 4 : Object.values(refused).some((b) => b.length) ? 3 : 0);
+process.exit(uncertain.length || stopped ? 4 : Object.values(refused).some((b) => b.length) ? 3 : 0);
