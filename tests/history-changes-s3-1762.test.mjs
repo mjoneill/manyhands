@@ -26,6 +26,8 @@
  *        sentinel cardsLog = F.logSeq + 1 is LEGAL (the forward rule must not reject it)
  *   CH11 after F, each card write (create, move, claim, edit, release, delete) is a NATIVE graph row: seq null, graph {opId,commitSeq,version,part,nativeOp},
  *        op mapped, holder before the write, title null, each exactly once; a delete needs no live entity; default latest-per-entity vs history:true
+ *   CH12 the no-log-access recorder: an F-present request opens nothing under the event-log dir; positive control: the no-F request does, and nothing reads it in the background
+ *   CH13 F + the conversations unit OFF is 503 HISTORY_CONFIG_UNSUPPORTED (and no F + OFF is today's behaviour)
  *   CH9  the executor unreachable is a 503 (CARDS_UNAVAILABLE today, GRAPH_EXECUTOR_UNAVAILABLE in the contract), never a log-only answer
  *
  * ── NOT IN THIS FILE (part 2, and why) ─────────────────────────────────────────────────────────────────────────────────────────
@@ -139,7 +141,17 @@ async function build() {
   fs.writeFileSync(tokens, JSON.stringify({ seats: { ada: { credentials: [{ tokenHash: hashToken(TOK), scope: 'admin', issuedAt: at(-1), expiresAt: at(24) }] } } }));
   const roster = path.join(os.tmpdir(), `ch1762-roster-${process.pid}.json`); owned.files.push(roster);
   fs.writeFileSync(roster, JSON.stringify({ seats: { ada: { name: 'Ada', glyph: 'a', color: '#7cc4a0' }, bob: { name: 'Bob', glyph: 'b', color: '#a07cc4' } } }));
-  const rest = await startRestServer({ boardFile: w.boardFile, env: { SCRUM_GRAPH_DATASET_ID: WB_DATASET, SCRUM_GRAPH_EXECUTOR_URL: w.exec.baseUrl, SCRUM_ROSTER_FILE: roster, ...UNITS, ...SOURCES, SCRUM_BOARD_DOCUMENT: 'off', SCRUM_SEAT_TOKENS: tokens, SCRUM_AUTH: 'required', SCRUM_EVENT_LOG_DIR: evdir, SCRUM_HISTORY_NATIVE: '1' } });
+  const baseEnv = { SCRUM_GRAPH_DATASET_ID: WB_DATASET, SCRUM_GRAPH_EXECUTOR_URL: w.exec.baseUrl, SCRUM_ROSTER_FILE: roster, ...UNITS, ...SOURCES, SCRUM_BOARD_DOCUMENT: 'off', SCRUM_SEAT_TOKENS: tokens, SCRUM_AUTH: 'required', SCRUM_EVENT_LOG_DIR: evdir, SCRUM_HISTORY_NATIVE: '1' };
+  const rest = await startRestServer({ boardFile: w.boardFile, env: baseEnv });
+  /** a SECOND REST over the same executor (own log-dir copy, a recorder, a unit switched off...): `over` replaces env entries */
+  // the harness's stop() UNLINKS the board file it was given (found by #1710's probe), so a second REST must put it back, in the mode the main one needs
+  const boardAs = (mode) => { try { fs.chmodSync(w.boardFile, 0o644); } catch { /* gone */ } fs.writeFileSync(w.boardFile, kept); fs.chmodSync(w.boardFile, mode); };
+  const startRest = async (over = {}, { readableDocument = false } = {}) => {
+    if (readableDocument) boardAs(0o644);
+    const r2 = await startRestServer({ boardFile: w.boardFile, env: { ...baseEnv, ...over } }).catch((e) => { boardAs(0o000); throw e; });
+    const g = async (u) => { const r = await fetch(`${r2.baseUrl}${u}`, { headers: { authorization: `Bearer ${TOK}` }, signal: AbortSignal.timeout(60000) }); const text = await r.text(); let json = null; try { json = JSON.parse(text); } catch { /* not json */ } return { status: r.status, text, json }; };
+    return { rest: r2, get: g, stop: async () => { await r2.stop(); boardAs(0o000); } };
+  };
   // REST appended its own events at boot (a board-meta roster event, stamped now): the log is what it is, so read it back, project what the
   // projector has not seen, and give those nodes their logRecordedAt. Every assertion below is made against THIS log, not against a hand count.
   const logEvents = fs.readdirSync(evdir).filter((f) => /^events-.*\.jsonl$/.test(f)).sort().flatMap((f) => fs.readFileSync(path.join(evdir, f), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))).sort((a, b) => a.seq - b.seq);
@@ -173,7 +185,7 @@ async function build() {
     await update(`INSERT DATA { GRAPH <${BK}> { ${triples.join('\n')} } ${extra} }`);
     return { h };
   };
-  W = { w, rest, get, send, q, update, health, hex, plantFrontier, clearFrontier, evdir, TOK, exec: w.exec, events: logEvents, K: logEvents.at(-1).seq };
+  W = { w, rest, get, send, startRest, q, update, health, hex, plantFrontier, clearFrontier, evdir, TOK, exec: w.exec, events: logEvents, K: logEvents.at(-1).seq };
 }
 
 before(async () => { if (HAVE_PY) await build(); }, { timeout: 240000 });
@@ -439,6 +451,46 @@ test('#1762 S3 CH11c — default latest-per-entity: after several native writes 
   assert.equal(latest[0].op, 'delete', 'and it is the LAST write');
   const all = (await changesOf(`since=${encodeURIComponent(t0)}&history=true`)).changes.filter((r) => r.id === card.id);
   assert.equal(all.length, NATIVE_EXPECT.length, 'history:true serves every write');
+});
+
+// ── CH12 the no-log-access recorder, with its positive control ──
+const RECORDER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'helpers', 'fs-store-recorder.mjs');
+test('#1762 S3 CH12 — with F present the request opens NOTHING under the event-log directory (a recorder counts every fs attempt); the same recorder DOES see the reads of a no-F request, and nothing reads the log in the background', T, async () => {
+  const evdir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'ch1762-events2-')); owned.dirs.push(evdir2);
+  for (const f of fs.readdirSync(W.evdir)) fs.copyFileSync(path.join(W.evdir, f), path.join(evdir2, f));
+  const recFile = path.join(os.tmpdir(), `ch1762-fsrec-${process.pid}.log`); owned.files.push(recFile);
+  const r2 = await W.startRest({ SCRUM_EVENT_LOG_DIR: evdir2, SCRUM_FS_RECORD: recFile, SCRUM_FS_RECORD_ALL: '1', NODE_OPTIONS: `--import ${RECORDER}` });
+  try {
+    const under = () => (fs.existsSync(recFile) ? fs.readFileSync(recFile, 'utf8').split('\n').filter((l) => l.startsWith(evdir2)).length : 0);
+    const q = `since=${SINCE_ALL}&history=true`;
+    const i0 = under(); await new Promise((r) => setTimeout(r, 1500)); const idle = under() - i0;
+    assert.equal(idle, 0, `PRECONDITION: nothing reads the event-log directory in the background (${idle} attempts in 1.5 s), so a count around a request is that request's own`);
+    await W.clearFrontier();
+    const a0 = under(); const noF = await r2.get(`/api/changes?${q}`); const noFReads = under() - a0;
+    assert.equal(noF.status, 200, `PRECONDITION: the no-F request answers (${noF.status})`);
+    assert.ok(noFReads >= 1, `POSITIVE CONTROL: the recorder sees the log reads of a no-F request (saw ${noFReads}); without this, "zero" below would mean nothing`);
+    await W.plantFrontier();
+    const b0 = under(); const withF = await r2.get(`/api/changes?${q}`); const withFReads = under() - b0;
+    assert.equal(withF.status, 200, `the F-present request answers (${withF.status}: ${withF.text.slice(0, 200)})`);
+    assert.equal(withFReads, 0, `an F-present request touches the event-log directory ${withFReads} time(s): a graph-only read opens NOTHING there — a renamed-folder parity row alone cannot show that, because a missing-directory reader silently returns empty`);
+  } finally { await r2.stop(); }
+});
+
+// ── CH13 target configuration ──
+// The conversations-OFF configuration this builds is the log-born unit ONLY: the cards, columns, deliveries and small-kinds units each refuse to start without the
+// conversations unit (measured: #1598 and #1582), so that is the one shape in which the conversations unit is off and the executor is still read.
+test('#1762 S3 CH13 — with F present and the conversations unit OFF the request is refused 503 HISTORY_CONFIG_UNSUPPORTED (it never claims a graph-only read while reading the log for posts); the same config with NO F is today\'s behaviour', T, async () => {
+  const r3 = await W.startRest({ ...Object.fromEntries(Object.keys(UNITS).map((k) => [k, ''])), ...Object.fromEntries(Object.keys(SOURCES).map((k) => [k, ''])), SCRUM_GRAPH_UNIT_LOGBORN: '1', SCRUM_BOARD_DOCUMENT: 'on' }, { readableDocument: true });   // a conversations-off REST reads posts from the document
+  try {
+    await W.clearFrontier();
+    const noF = await r3.get(`/api/changes?since=${SINCE_ALL}&history=true`);
+    assert.equal(noF.status, 200, `CONTROL: conversations OFF and no F is today's behaviour (${noF.status}: ${noF.text.slice(0, 200)})`);
+    await W.plantFrontier();
+    const withF = await r3.get(`/api/changes?since=${SINCE_ALL}&history=true`);
+    assert.equal(withF.status, 503, `F present + conversations OFF is an unsupported configuration, refused (got ${withF.status}: ${withF.text.slice(0, 200)})`);
+    assert.equal(withF.json?.code, 'HISTORY_CONFIG_UNSUPPORTED');
+    assert.equal(withF.json?.changes, undefined, 'with no rows and no cursor');
+  } finally { await r3.stop(); }
 });
 
 // ── CH9 ──
