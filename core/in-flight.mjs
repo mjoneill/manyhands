@@ -5,6 +5,7 @@
  *   column `in-progress`   0 cards        → an idle room
  *   live claims            4 cards        → a busy one, two leases six days old
  *   work_list.open         []             → a protocol silent for 11 days
+ *   (#1763, 2026-10-27: that ledger and work_list are now RETIRED; workLedger reports its history.)
  * None was wrong on its own terms; nothing reconciled them, so each was
  * silently authoritative to whoever opened it first. Three stale leases
  * (#367 #437 #962) were held out of the pool and visible on NONE of the

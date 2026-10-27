@@ -1860,10 +1860,11 @@ function buildMcpServer() {
       + 'of work via an `apex:<label>` label, with their containment counts — "what lives here", no '
       + 'seat and no SPARQL needed). Bounded — safe as a first call. For full data use card_list / '
       + 'conversation_list, or the board-state resource. #1078: `inFlight` is THE answer to "what '
-      + 'is the room working on" — the claim is authoritative; the in-progress column and the '
-      + 'work-bid ledger are derived, and `inFlight.disagreements` names every card on which they '
-      + 'differ (stale leases, claimed-and-parked, in-progress-but-unclaimed). `workLedger` '
-      + 'summarises the bid/grant store work_list reads, with `dormant` computed rather than inferred.',
+      + 'is the room working on" — the claim is authoritative; the in-progress column is derived, and '
+      + '`inFlight.disagreements` names every card on which they differ (stale leases, claimed-and-parked, '
+      + 'in-progress-but-unclaimed). `workLedger` is `{retired: true, since, actions, workObjects}`: the #755 '
+      + 'work-bid ledger is RETIRED (#1763) and its tools no longer exist; the counts are its history in the '
+      + 'graph, or null with `unavailable` when the graph cannot be read.',
     inputSchema: {},
   }, async () => {
     const status = await apiCall('GET', '/api/board/status');
