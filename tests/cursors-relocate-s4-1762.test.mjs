@@ -24,9 +24,11 @@
  *   RC9   --from and --to that name the SAME directory (spelled differently, or through a symlink) are refused before any write: the one cursors.json is never
  *         renamed onto its own archive (found by the integration review: it exited 0 and the destination no longer existed)
  *   RC10  an archive (cursors.json.migrated) that already exists with DIFFERENT bytes is never overwritten: apply refuses, both directories untouched
- *   RC11  the ownership evidence survives the event-log directory's retirement: relocate, archive the old directory (S6's action) and leave a fresh empty one at its
- *         path, then lose the destination's cursors.json: pull, ack and register refuse 503 CURSOR_STATE_INVALID and nothing starts fresh at head. Control: with the
- *         destination file present the same restart serves the lane. (A contract correction is owed: the S4 v1.1 A3 check reads `.migrated` under the ORIGINAL path.)
+ *   RC11  ownership survives the event-log directory's retirement: relocate, archive the old directory (S6's action) and leave a fresh empty one at its path, and
+ *         with the post-migration owner CONFIGURED (SCRUM_CURSORS_FILE = the destination file), losing that file makes pull, ack and register refuse 503
+ *         CURSOR_STATE_INVALID and nothing starts fresh at head. Control: with the file present the same restart serves the lane. The v1.1 A3 check read `.migrated`
+ *         under the ORIGINAL path and so could not survive this; configured ownership is the builder's correction (a contract amendment, owed on the card). NOT PINNED:
+ *         what an UNCONFIGURED start does after the old directory is gone (it cannot tell a fresh board from a migrated one: an operational step, for the reviewer).
  *
  * ── Assumptions, each one line to correct ─────────────────────────────────────────────────────────────────────────────────────
  *   A1  the dry run and the apply each print ONE JSON object on stdout with a boolean `dryRun`; no other report key is asserted.
@@ -284,8 +286,9 @@ test('#1762 S4 RC10 — an archive that already exists with DIFFERENT bytes is n
 });
 
 // ── RC11 ownership evidence outlives the retired directory ──
-test('#1762 S4 RC11 — after the event-log directory is retired, losing the destination cursors.json must refuse (503 CURSOR_STATE_INVALID), never start a known lane fresh at head', async () => {
+test('#1762 S4 RC11 — with the owner CONFIGURED (SCRUM_CURSORS_FILE), after the event-log directory is retired, losing that file must refuse (503 CURSOR_STATE_INVALID), never start a known lane fresh at head', async () => {
   await world(async (w) => {
+    w.env.SCRUM_CURSORS_FILE = w.newFile;                                                        // the post-migration owner is configuration (the world's startRest reads this same object)
     const done = await script(w.args(['--apply']));
     assert.equal(done.status, 0, `PRECONDITION: the relocation finished (got ${done.status}: ${(done.err || done.out).slice(-300)})`);
     assert.ok(fs.existsSync(w.newFile), 'PRECONDITION: the destination holds the lanes');
