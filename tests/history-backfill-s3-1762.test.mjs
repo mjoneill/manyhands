@@ -1,18 +1,18 @@
 /**
  * #1762 S3 — the facts-only BACKFILL (`scripts/history-backfill-1762.mjs`), black-box, rows first.
  *
- * ROW AUTHOR's rows for the builder's script, written to the "S3 CONTRACT v2" and its v2.1 corrections on #1762 (section 4, and the four
- * v2.1 points) before the script exists. Every row is a REAL executor, the REAL projector (`scripts/activity-projector.mjs --once`) over a
+ * ROW AUTHOR's rows for the builder's script, written to the "S3 CONTRACT v2", its v2.1 corrections and the v2.2 pins on #1762 (section 4, the
+ * v2.1 points, the four v2.2 pins) before the script exists. Every row is a REAL executor, the REAL projector (`scripts/activity-projector.mjs --once`) over a
  * hand-built log, and the script as a child process. Nothing here imports the builder's code.
  *
  *   BF-P  the script exists                        (until it does, every row says so, not "exit 1")
  *   BF0   CONTROL: the projected nodes carry NO column, holder or logRecordedAt — the gap the backfill closes
  *   BF1   dry run (the default) writes NOTHING, to any graph, `written` stays 0, `wouldWrite` is what --apply will do, and the report
  *         echoes the dataset, epoch and incarnation it read from the MARKER
- *   BF2   --apply: every non-refused CARD node gets the four facts, judged per node against the log, not by count:
- *           columnAfter = the event's column · holderAtWrite = the holder BEFORE the write (replaying only SUCCESSFUL state-bearing
- *           events) · shortId where missing · logRecordedAt = the event's recorded_at (xsd:dateTime), not occurred_at
- *         columns, conversations and refusals get none of them
+ *   BF2   --apply: judged per node against the log, not by count. EVERY served legacy seq-node (card, refused card, column) gets
+ *         logRecordedAt = the event's recorded_at as an xsd:dateTime (not occurred_at) and shortId where missing; only a SUCCESSFUL card
+ *         event also gets columnAfter = the event's column and holderAtWrite = the holder BEFORE the write (replaying only successful
+ *         state-bearing events). A refusal changed no state, so it gets no column or holder. A conversation gets nothing.
  *   BF3   it writes nothing else: only those four predicates, only on seq-nodes, nothing removed, no title/description/body stored
  *   BF4   a second --apply writes nothing (every graph byte-identical) and reports the nodes alreadyCurrent
  *   BF5   a node the projection left without a shortId gets it from the log; a refusal the log gives none stays without one
@@ -26,20 +26,22 @@
  *         is not the MARKER's
  *   BF9   the event log is read, never written
  *   BF10  the dry run and --apply classify identically, and a dry run that found refusals still writes nothing
- *   BF11  exit 4: a lost ACK on the FIRST write is exit 4 with `apply.uncertain`, never exit 2 and never "0 written"; uncertainty wins
- *         over the refusal buckets, which are still reported; and the re-run reconciles (insert-where-absent: no fact twice)
+ *   BF11  exit 4: a lost ACK on the FIRST write is exit 4 with `apply.uncertain` (exactly the one node in flight: one update per node),
+ *         never exit 2 and never "0 written"; uncertainty wins over the refusal buckets; the re-run reconciles (no fact twice). A failure
+ *         AFTER some writes landed: `confirmed` = the nodes before it, `uncertain` = the one in flight, the rest unattempted
+ *   BF12  the apply-time FENCE: a fact that appears on a node between plan and write makes that node's guarded update change nothing;
+ *         the node is refused as `mismatch` (fields named), never retried blind and never overwritten, the others are written
  *
- * ── NOT YET PINNED, so not written (each is a line in the contract away) ───────────────────────────────────────────────────────
- *   · apply-time fencing (a node changed, or a store restored, between plan and write): there is no seam to change a node at that instant
- *   · a failure AFTER some writes landed (needs the script's batch size, which the contract does not give)
- *   · what `mismatch[].fields` names (these rows assert it is a non-empty list of strings, one per planted contradiction)
- *   · whether a refused CARD node gets logRecordedAt (v2.1 says "card seq-nodes"; a refusal is a card-kind node): not asserted either way
+ * ── NOT PINNED / NOT WRITTEN ───────────────────────────────────────────────────────────────────────────────────────────────────
+ *   · the fence's dataset / epoch / incarnation half (a store restored between plan and write): no seam changes the marker at that instant
+ *   · the order in which nodes are written (the rows never assume one: they pick the in-flight node from what the script reports)
  *
  * ── Assumptions, each one line to correct ─────────────────────────────────────────────────────────────────────────────────────
  *   A1  `written`, `alreadyCurrent`, `wouldWrite` count NODES; `scanned` is {events, nodes} (contract v2: confirmed).
  *   A2  encodings are the native S1 nodes': holder = IRI person/<encodeURIComponent seat> or scrum:none; backfill-only scrum:unknown.
  *   A3  `apply.confirmed` lists the N of every node that was written or verified already current.
  *   A4  the report echoes the marker as {dataset, epoch, incarnation}; epoch compared as text, incarnation without dashes.
+ *   A6  the script sends ONE guarded /update per node and identifies a node's update by its seq-node IRI appearing in the request body (v2.2 pin 2).
  *   A5  an xsd:dateTime fact is compared as an INSTANT, never as text: the executor canonicalizes the lexical form ('...:00.000Z' reads back
  *       as '...:00Z'), so a text compare reports a false mismatch on the script's own re-run (BF4 catches that; BF6o pins it).
  */
@@ -118,8 +120,12 @@ const EXPECT = {
   15: { column: 'in-progress', holder: `${PERSON}ada`, why: 'a RELEASE after a REFUSED write: the refusal (state null) must not touch the replayed holder, so before the release ada still held it (not unknown, not mallory)' },
 };
 const CARD_SEQS = Object.keys(EXPECT).map(Number);
-const NON_CARD_SEQS = [6, 7];          // a column and a conversation: scanned for coverage, never written
-const REFUSAL_SEQS = [8, 14];          // card-kind refusals: no column, no holder
+const COLUMN_SEQS = [6];               // a column event: served from the graph, so it gets logRecordedAt, but no column or holder
+const CONVERSATION_SEQS = [7];         // a conversation: not history S3 serves, so it gets NOTHING
+const REFUSAL_SEQS = [8, 14];          // card-kind refusals: logRecordedAt (+ shortId where missing) only
+/** every served legacy seq-node: what `written` counts (v2.2 pin 4, and the reviewer's correction: logRecordedAt covers every served legacy row) */
+const SERVED_SEQS = [...CARD_SEQS, ...REFUSAL_SEQS, ...COLUMN_SEQS].sort((a, b) => a - b);
+const LOCAL = { used: 'used', op: 'op', entityKind: 'entityKind', time: 'startedAtTime', actor: 'wasAssociatedWith', shortId: 'shortId', column: 'columnAfter', holder: 'holderAtWrite', logAt: 'logRecordedAt' };   // v2.2 pin 3
 const recordedAtOf = (s) => EVENTS[s - 1].recorded_at;
 
 // ── the world ──
@@ -178,13 +184,14 @@ const sorted = (a) => [...a].sort();
 function flat(j, label) {
   assert.ok(j.refused && typeof j.refused === 'object', `${label}: the report has a refused object`);
   for (const b of BUCKETS) assert.ok(Array.isArray(j.refused[b]), `${label}: refused.${b} is a list (contract v2), got ${JSON.stringify(j.refused[b])}`);
+  const ALLOWED = new Set(Object.values(LOCAL));
   for (const m of j.refused.mismatch) {
     assert.ok(Number.isInteger(m.seq), `${label}: a mismatch entry names its seq (got ${JSON.stringify(m)})`);
-    assert.ok(Array.isArray(m.fields) && m.fields.length >= 1 && m.fields.every((f) => typeof f === 'string' && f), `${label}: and the fields that differ (got ${JSON.stringify(m)})`);
+    assert.ok(Array.isArray(m.fields) && m.fields.length >= 1 && m.fields.every((f) => ALLOWED.has(f)), `${label}: and the fields that differ, by the predicate's LOCAL name (v2.2 pin 3: ${[...ALLOWED].join(', ')}); got ${JSON.stringify(m)}`);
   }
-  return { mismatch: j.refused.mismatch.map((m) => m.seq).sort((a, b) => a - b), missingNode: [...j.refused.missingNode].sort((a, b) => a - b), missingEvent: [...j.refused.missingEvent].sort((a, b) => a - b), duplicate: j.refused.duplicate, badIri: sorted(j.refused.badIri) };
+  return { mismatchFields: Object.fromEntries(j.refused.mismatch.map((m) => [m.seq, [...m.fields].sort()])), mismatch: j.refused.mismatch.map((m) => m.seq).sort((a, b) => a - b), missingNode: [...j.refused.missingNode].sort((a, b) => a - b), missingEvent: [...j.refused.missingEvent].sort((a, b) => a - b), duplicate: j.refused.duplicate, badIri: sorted(j.refused.badIri) };
 }
-const emptyBuckets = { mismatch: [], missingNode: [], missingEvent: [], duplicate: [], badIri: [] };
+const emptyBuckets = { mismatch: [], missingNode: [], missingEvent: [], duplicate: [], badIri: [], mismatchFields: {} };
 function evState(dir) {
   const h = crypto.createHash('sha256'); let bytes = 0;
   for (const f of fs.readdirSync(dir).sort()) { const b = fs.readFileSync(path.join(dir, f)); h.update(f); h.update(b); bytes += b.length; }
@@ -222,7 +229,7 @@ test('#1762 S3 BF1 — the default is a DRY RUN: exit 0, `written` 0, `wouldWrit
     const j = report(r, 'dry run');
     assert.equal(j.dryRun, true, 'the report says it was a dry run');
     assert.equal(j.written, 0, 'a dry run writes nothing, so `written` is 0 always');
-    assert.equal(j.wouldWrite, CARD_SEQS.length, 'and `wouldWrite` is the nodes --apply would write (A1)');
+    assert.equal(j.wouldWrite, SERVED_SEQS.length, 'and `wouldWrite` is the nodes --apply would write: every served legacy node (A1)');
     assert.equal(j.dataset, DATASET, 'it echoes the dataset it read from the marker');
     assert.equal(String(j.epoch), String(health.epoch), 'and the epoch');
     assert.equal(String(j.incarnation).replace(/-/g, '').toLowerCase(), String(health.incarnation).replace(/-/g, '').toLowerCase(), 'and the incarnation');
@@ -231,7 +238,7 @@ test('#1762 S3 BF1 — the default is a DRY RUN: exit 0, `written` 0, `wouldWrit
 });
 
 // ── BF2 ──
-test('#1762 S3 BF2 — --apply: every non-refused CARD node carries its four facts, per node against the log; columns, conversations and refusals get none of them', T, async () => {
+test('#1762 S3 BF2 — --apply: every served legacy node gets logRecordedAt; only a SUCCESSFUL card event also gets its column and the holder BEFORE the write; a refusal, a column and a conversation do not', T, async () => {
   await world(async ({ cli, base, report, factsOf, q }) => {
     const r = await cli([...base, '--apply']);
     assert.equal(r.status, 0, `a clean --apply exits 0 (got ${r.status}: ${(r.err || r.out).slice(-300)})`);
@@ -239,23 +246,48 @@ test('#1762 S3 BF2 — --apply: every non-refused CARD node carries its four fac
     assert.equal(j.dryRun, false, 'the report says it applied');
     const total = Number((await q(`SELECT (COUNT(DISTINCT ?a) AS ?n) WHERE { ?a a <${PROV}Activity> . FILTER(STRSTARTS(STR(?a), "${ACT}seq-")) }`))[0].n.value);
     assert.deepEqual(j.scanned, { events: EVENTS.length, nodes: total }, 'scanned counts both directions: the log\'s eligible events and the graph\'s seq-nodes (A1)');
-    assert.equal(j.written, CARD_SEQS.length, `written = the card nodes it completed (A1), ${CARD_SEQS.length} of the log's ${EVENTS.length} events — judged against the log, per node, below`);
+    assert.equal(j.written, SERVED_SEQS.length, `written = the nodes it completed (A1): ${CARD_SEQS.length} cards + ${REFUSAL_SEQS.length} refusals + ${COLUMN_SEQS.length} column = ${SERVED_SEQS.length} of the log's ${EVENTS.length} events; the conversation is not served history`);
     assert.equal(j.alreadyCurrent, 0, 'nothing was current before the first run');
     assert.deepEqual(flat(j, '--apply'), emptyBuckets, 'nothing is refused when every node verifies');
     assert.deepEqual(j.skippedNonSeq, [], 'and nothing was skipped');
-    assert.deepEqual(sorted((j.apply?.confirmed ?? []).map(Number)), sorted(CARD_SEQS.map(Number)), 'every written node is ACK-confirmed (A3)');
+    assert.deepEqual(sorted((j.apply?.confirmed ?? []).map(Number)), sorted(SERVED_SEQS.map(Number)), 'every written node is ACK-confirmed (A3)');
     assert.deepEqual(j.apply?.uncertain, [], 'and none is uncertain');
+    const checkAt = (m, s, label) => {
+      const at = one(m, LOGAT, `${label} seq ${s}`);
+      assert.equal(Date.parse(at.value), Date.parse(recordedAtOf(s)), `${label} seq ${s}: logRecordedAt is the event's recorded_at, as an INSTANT (the store canonicalizes an xsd:dateTime's text, so '...:00.000Z' reads back as '...:00Z'); not occurred_at`);
+      assert.equal(at.datatype, `${XSD}dateTime`, `${label} seq ${s}: and an xsd:dateTime`);
+    };
     for (const s of CARD_SEQS) {
       const m = await factsOf(node(s));
       assert.equal(one(m, COLUMN_AFTER, `seq ${s}`).value, EXPECT[s].column, `seq ${s}: column equals the log's state.column`);
       assert.equal(one(m, HOLDER, `seq ${s}`).value, EXPECT[s].holder, `seq ${s}: holder is the holder BEFORE the write — ${EXPECT[s].why} (A2)`);
-      const at = one(m, LOGAT, `seq ${s}`);
-      assert.equal(Date.parse(at.value), Date.parse(recordedAtOf(s)), `seq ${s}: logRecordedAt is the event's recorded_at, as an INSTANT (the store canonicalizes an xsd:dateTime's text, so '...:00.000Z' reads back as '...:00Z'); not occurred_at`);
-      assert.equal(at.datatype, `${XSD}dateTime`, `seq ${s}: and an xsd:dateTime`);
+      checkAt(m, s, 'card');
     }
-    for (const s of NON_CARD_SEQS) noFacts(await factsOf(node(s)), `seq ${s} (not card history: scanned, never written)`);
-    for (const s of REFUSAL_SEQS) noFacts(await factsOf(node(s)), `seq ${s} (a refusal)`, [COLUMN_AFTER, HOLDER]);
+    for (const s of REFUSAL_SEQS) { const m = await factsOf(node(s)); checkAt(m, s, 'refusal'); noFacts(m, `seq ${s} (a refusal changed no state)`, [COLUMN_AFTER, HOLDER]); }
+    for (const s of COLUMN_SEQS) { const m = await factsOf(node(s)); checkAt(m, s, 'column'); noFacts(m, `seq ${s} (a column event)`, [COLUMN_AFTER, HOLDER]); }
+    for (const s of CONVERSATION_SEQS) noFacts(await factsOf(node(s)), `seq ${s} (a conversation: not served history, scanned and never written)`);
   });
+});
+
+// ── BF2c (v2.3, pending review): the WHOLE non-post bucket is served, so every non-conversation kind gets logRecordedAt ──
+test('#1762 S3 BF2c — every NON-CONVERSATION kind the log path serves gets logRecordedAt and no column or holder; a conversation still gets nothing', { ...T, todo: 'pending contract v2.3 review: S3 serves the whole non-post bucket, not just card/column/collection' }, async () => {
+  const kinds = ['delivery', 'board-meta', 'model-call', 'memory', 'seat-state'];
+  const evs = [
+    ...kinds.map((k, i) => ({ seq: i + 1, op: 'create', actor: 'ada', recorded_at: AT(i + 1), occurred_at: '2026-10-20T08:00:00.000Z', entity: { kind: k, id: `${k}-1` }, state: { id: `${k}-1`, column: 'SHOULD-NOT-BE-COPIED' } })),
+    { seq: 6, op: 'create', actor: 'ada', recorded_at: AT(6), entity: { kind: 'conversation', id: 'conv-9' }, state: { id: 'conv-9', body: 'SECRET-POST-BODY' } },
+  ];
+  await world(async ({ cli, base, report, factsOf }) => {
+    const r = await cli([...base, '--apply']);
+    assert.equal(r.status, 0, `(got ${r.status}: ${(r.err || r.out).slice(-300)})`);
+    const j = report(r, 'non-card kinds');
+    assert.equal(j.written, kinds.length, 'one node per non-conversation event');
+    for (let i = 1; i <= kinds.length; i++) {
+      const m = await factsOf(node(i));
+      assert.equal(Date.parse(one(m, LOGAT, `${kinds[i - 1]} seq ${i}`).value), Date.parse(AT(i)), `${kinds[i - 1]}: logRecordedAt is the recorded time, not the occurrence time`);
+      noFacts(m, `${kinds[i - 1]} seq ${i}`, [COLUMN_AFTER, HOLDER]);
+    }
+    noFacts(await factsOf(node(6)), 'the conversation');
+  }, { events: evs });
 });
 
 // ── BF3 ──
@@ -272,7 +304,7 @@ test('#1762 S3 BF3 — it writes NOTHING else: only the four facts on seq-nodes,
       assert.ok(FACTS.has(p), `the default graph gains only the four facts, not ${p}`);
       assert.ok(s.startsWith(`${ACT}seq-`), `and only on seq-nodes, not ${s}`);
     }
-    assert.ok(dflt.length >= CARD_SEQS.length * 3, 'PRECONDITION: it did write (a vacuous "added nothing" would pass the checks above)');
+    assert.ok(dflt.length >= CARD_SEQS.length * 3 + (REFUSAL_SEQS.length + COLUMN_SEQS.length), 'PRECONDITION: it did write (a vacuous "added nothing" would pass the checks above)');
     const dump = (await q('SELECT ?g ?s ?p ?o WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }')).map((b) => b.o.value).join('\n');
     for (const s of SECRETS) assert.ok(!dump.includes(s), `no stored value contains "${s}": the backfill carries facts, never content`);
   });
@@ -287,7 +319,7 @@ test('#1762 S3 BF4 — a SECOND --apply writes nothing (every graph byte-identic
     assert.equal(r.status, 0, `the re-run exits 0 (got ${r.status}: ${(r.err || r.out).slice(-300)})`);
     const j = report(r, 're-run');
     assert.equal(j.written, 0, 'the re-run writes nothing');
-    assert.equal(j.alreadyCurrent, CARD_SEQS.length, `and counts the ${CARD_SEQS.length} nodes that are already current (A1)`);
+    assert.equal(j.alreadyCurrent, SERVED_SEQS.length, `and counts the ${SERVED_SEQS.length} nodes that are already current (A1)`);
     assert.deepEqual(await quads(), before, 'no graph moved — not even a receipt for a run that did nothing');
   });
 });
@@ -302,9 +334,19 @@ test('#1762 S3 BF5 — a node the projection left without a shortId gets it from
     assert.equal((await factsOf(node(8)))[SHORT], undefined, 'seq 8 (a refusal the log gives no shortId) stays without one: nothing is invented');
   });
 });
+test('#1762 S3 BF5b — a REFUSED node the projection left without a shortId gets it from the log too (v2.2 pin 4: logRecordedAt and shortId, nothing else)', T, async () => {
+  await world(async ({ cli, base, upd, factsOf }) => {
+    await upd(`DELETE WHERE { <${node(14)}> <${SHORT}> ?o }`);
+    assert.equal((await factsOf(node(14)))[SHORT], undefined, 'PRECONDITION: the planted refusal lacks its shortId');
+    assert.equal((await cli([...base, '--apply'])).status, 0);
+    const m = await factsOf(node(14));
+    assert.equal(one(m, SHORT, 'seq 14').value, '107', 'seq 14 has the log\'s shortId');
+    noFacts(m, 'seq 14 (a refusal)', [COLUMN_AFTER, HOLDER]);
+  });
+});
 
 // ── BF6 the refused buckets ──
-async function refusedCase(label, plant, expected, { survivors = CARD_SEQS, held = [], events } = {}) {
+async function refusedCase(label, plant, expected, { survivors = CARD_SEQS, held = [], gone = [], events } = {}) {
   await world(async ({ cli, base, upd, factsOf, report, logDir }) => {
     await plant(upd, { logDir });
     const r = await cli([...base, '--apply']);
@@ -312,6 +354,7 @@ async function refusedCase(label, plant, expected, { survivors = CARD_SEQS, held
     const j = report(r, label);
     const got = flat(j, label);
     assert.deepEqual(got.mismatch, expected.mismatch ?? [], `${label}: mismatch bucket`);
+    for (const [seq, f] of Object.entries(expected.mismatchFields ?? {})) assert.deepEqual(got.mismatchFields[seq], f, `${label}: seq ${seq} names the field(s) that differ, by local name (v2.2 pin 3)`);
     assert.deepEqual(got.missingNode, expected.missingNode ?? [], `${label}: missingNode bucket`);
     assert.deepEqual(got.missingEvent, expected.missingEvent ?? [], `${label}: missingEvent bucket`);
     assert.deepEqual(got.badIri, expected.badIri ?? [], `${label}: badIri bucket`);
@@ -321,15 +364,15 @@ async function refusedCase(label, plant, expected, { survivors = CARD_SEQS, held
       assert.equal(one(m, COLUMN_AFTER, `${label}: seq ${s}`).value, EXPECT[s].column, `${label}: seq ${s} verified, so it WAS written`);
     }
     for (const s of held) noFacts(await factsOf(node(s)), `${label}: seq ${s}`);
-    assert.equal(j.written, survivors.length, `${label}: written counts only the nodes that verified (A1)`);
+    assert.equal(j.written, SERVED_SEQS.filter((s) => !held.includes(s) && !gone.includes(s)).length, `${label}: written counts only the served nodes that verified (A1)`);
     return j;
   }, { events });
 }
 test('#1762 S3 BF6a — a node whose prov:used is NOT its event\'s entity is refused as `mismatch`, listed, untouched; the others are written', T, async () => {
-  await refusedCase('mismatch (used)', (upd) => upd(swap(3, `${PROV}used`, `<${ENT}uuid-zzz>`)), { mismatch: [3] }, { survivors: CARD_SEQS.filter((s) => s !== 3), held: [3] });
+  await refusedCase('mismatch (used)', (upd) => upd(swap(3, `${PROV}used`, `<${ENT}uuid-zzz>`)), { mismatch: [3], mismatchFields: { 3: ['used'] } }, { survivors: CARD_SEQS.filter((s) => s !== 3), held: [3] });
 });
 test('#1762 S3 BF6b — a node whose scrum:op is NOT its event\'s op is refused as `mismatch`, listed, untouched; the others are written', T, async () => {
-  await refusedCase('mismatch (op)', (upd) => upd(swap(2, `${RS}op`, '"delete"')), { mismatch: [2] }, { survivors: CARD_SEQS.filter((s) => s !== 2), held: [2] });
+  await refusedCase('mismatch (op)', (upd) => upd(swap(2, `${RS}op`, '"delete"')), { mismatch: [2], mismatchFields: { 2: ['op'] } }, { survivors: CARD_SEQS.filter((s) => s !== 2), held: [2] });
 });
 test('#1762 S3 BF6c — a seq-node the log has NO event for is refused as `missingEvent`, listed by its N, untouched; the others are written', T, async () => {
   await refusedCase('missingEvent', (upd) => upd(planted(node(999))), { missingEvent: [999] }, { held: [999] });
@@ -340,27 +383,29 @@ test('#1762 S3 BF6d — an activity IRI that is not seq-<digits> is refused as `
 });
 
 // BF6e..k: what a pair is validated AGAINST, and the pre-existing facts that must agree. A contradiction is a `mismatch`, listed and NEVER overwritten.
-const mismatchCase = (name, seq, plant) => test(`#1762 S3 BF6${name}`, T, async () => {
+const mismatchCase = (name, seq, field, plant) => test(`#1762 S3 BF6${name}`, T, async () => {
   await world(async ({ cli, base, upd, factsOf, report }) => {
     await plant(upd);
     const before = await factsOf(node(seq));
     const r = await cli([...base, '--apply']);
     assert.equal(r.status, 3, `a contradicted node exits 3 (got ${r.status}: ${(r.err || r.out).slice(-300)})`);
     const j = report(r, name);
-    assert.deepEqual(flat(j, name), { ...emptyBuckets, mismatch: [seq] }, `seq ${seq} is listed as mismatch, alone`);
+    const got = flat(j, name);
+    assert.deepEqual({ ...got, mismatchFields: undefined }, { ...emptyBuckets, mismatch: [seq], mismatchFields: undefined }, `seq ${seq} is listed as mismatch, alone`);
+    assert.deepEqual(got.mismatchFields[seq], [field], `and names the predicate that differs, by its local name (v2.2 pin 3)`);
     assert.deepEqual(await factsOf(node(seq)), before, `seq ${seq}: NOTHING about it changed — a contradiction is refused, never overwritten`);
     for (const s of CARD_SEQS.filter((x) => x !== seq)) assert.equal(one(await factsOf(node(s)), COLUMN_AFTER, `seq ${s}`).value, EXPECT[s].column, `seq ${s} verified, so it WAS written`);
   });
 });
-mismatchCase('e — a node whose entityKind is not its event\'s kind is refused as mismatch, untouched', 4, (upd) => upd(swap(4, `${RS}entityKind`, '"column"')));
-mismatchCase('f — a node whose startedAtTime is not its event\'s time is refused as mismatch, untouched', 4, (upd) => upd(swap(4, `${PROV}startedAtTime`, '"2001-01-01T00:00:00.000Z"')));
-mismatchCase('g — a node whose actor is not its event\'s actor is refused as mismatch, untouched', 4, (upd) => upd(swap(4, `${PROV}wasAssociatedWith`, `<${PERSON}mallory>`)));
-mismatchCase('h — a node whose shortId is not its event\'s shortId is refused as mismatch, untouched', 4, (upd) => upd(swap(4, SHORT, '"999"')));
-mismatchCase('i — a node that ALREADY carries a column the log contradicts is refused as mismatch; the wrong value is not overwritten', 4,
+mismatchCase('e — a node whose entityKind is not its event\'s kind is refused as mismatch, untouched', 4, LOCAL.entityKind, (upd) => upd(swap(4, `${RS}entityKind`, '"column"')));
+mismatchCase('f — a node whose startedAtTime is not its event\'s time is refused as mismatch, untouched', 4, LOCAL.time, (upd) => upd(swap(4, `${PROV}startedAtTime`, '"2001-01-01T00:00:00.000Z"')));
+mismatchCase('g — a node whose actor is not its event\'s actor is refused as mismatch, untouched', 4, LOCAL.actor, (upd) => upd(swap(4, `${PROV}wasAssociatedWith`, `<${PERSON}mallory>`)));
+mismatchCase('h — a node whose shortId is not its event\'s shortId is refused as mismatch, untouched', 4, LOCAL.shortId, (upd) => upd(swap(4, SHORT, '"999"')));
+mismatchCase('i — a node that ALREADY carries a column the log contradicts is refused as mismatch; the wrong value is not overwritten', 4, LOCAL.column,
   (upd) => upd(`INSERT DATA { <${node(4)}> <${COLUMN_AFTER}> "not-the-logs-column" . }`));
-mismatchCase('j — a node that ALREADY carries a holder the log contradicts is refused as mismatch; the wrong value is not overwritten', 4,
+mismatchCase('j — a node that ALREADY carries a holder the log contradicts is refused as mismatch; the wrong value is not overwritten', 4, LOCAL.holder,
   (upd) => upd(`INSERT DATA { <${node(4)}> <${HOLDER}> <${PERSON}mallory> . }`));
-mismatchCase('k — a node that ALREADY carries a logRecordedAt the log contradicts is refused as mismatch; the wrong value is not overwritten', 4,
+mismatchCase('k — a node that ALREADY carries a logRecordedAt the log contradicts is refused as mismatch; the wrong value is not overwritten', 4, LOCAL.logAt,
   (upd) => upd(`INSERT DATA { <${node(4)}> <${LOGAT}> "2001-01-01T00:00:00.000Z"^^<${XSD}dateTime> . }`));
 
 test('#1762 S3 BF6o — a node whose logRecordedAt is the SAME INSTANT as the event\'s in another lexical form is current, not a mismatch', T, async () => {
@@ -374,8 +419,22 @@ test('#1762 S3 BF6o — a node whose logRecordedAt is the SAME INSTANT as the ev
   });
 });
 
+mismatchCase('p — a REFUSAL node that already carries a logRecordedAt the log contradicts is refused as mismatch, untouched (a refusal is served history too)', 8, LOCAL.logAt,
+  (upd) => upd(`INSERT DATA { <${node(8)}> <${LOGAT}> "2001-01-01T00:00:00.000Z"^^<${XSD}dateTime> . }`));
+mismatchCase('q — a COLUMN node that already carries a logRecordedAt the log contradicts is refused as mismatch, untouched', 6, LOCAL.logAt,
+  (upd) => upd(`INSERT DATA { <${node(6)}> <${LOGAT}> "2001-01-01T00:00:00.000Z"^^<${XSD}dateTime> . }`));
+test('#1762 S3 BF6r — a startedAtTime that is the SAME INSTANT as the event\'s time in another lexical form is not a mismatch: times compare as instants, never as text', T, async () => {
+  await world(async ({ cli, base, upd, report, factsOf }) => {
+    await upd(swap(4, `${PROV}startedAtTime`, '"2026-10-20T10:59:00+01:00"'));   // seq 4 occurred at 09:59:00.000Z
+    const r = await cli([...base, '--apply']);
+    assert.equal(r.status, 0, `an equal instant is not a contradiction (got ${r.status}: ${(r.err || r.out).slice(-300)})`);
+    assert.deepEqual(flat(report(r, 'same instant'), 'same instant'), emptyBuckets, 'nothing is refused');
+    assert.equal(one(await factsOf(node(4)), COLUMN_AFTER, 'seq 4').value, EXPECT[4].column, 'and the node was completed like any other');
+  });
+});
+
 test('#1762 S3 BF6l — an eligible log event whose seq-node is ABSENT is refused as `missingNode`, listed by its N: the direction a node-to-event pass alone cannot see', T, async () => {
-  await refusedCase('missingNode', (upd) => upd(`DELETE WHERE { <${node(5)}> ?p ?o }`), { missingNode: [5] }, { survivors: CARD_SEQS.filter((s) => s !== 5) });
+  await refusedCase('missingNode', (upd) => upd(`DELETE WHERE { <${node(5)}> ?p ?o }`), { missingNode: [5] }, { survivors: CARD_SEQS.filter((s) => s !== 5), gone: [5] });
 });
 
 test('#1762 S3 BF6m — a seq that appears TWICE in the log is refused as `duplicate`, listed, its node untouched; the others are written', T, async () => {
@@ -469,63 +528,121 @@ test('#1762 S3 BF10 — the dry run and --apply classify identically, and a dry 
     assert.equal(applied.status, 3);
     const a = flat(report(dry, 'dry'), 'dry'), b = flat(report(applied, 'apply'), 'apply');
     assert.deepEqual(a, b, 'identical buckets');
-    assert.deepEqual(b, { ...emptyBuckets, mismatch: [3], missingEvent: [999], badIri: [`${ACT}seq-abc`] });
+    assert.deepEqual(b, { ...emptyBuckets, mismatch: [3], mismatchFields: { 3: ['used'] }, missingEvent: [999], badIri: [`${ACT}seq-abc`] });
   });
 });
 
-// ── BF11 exit 4: a lost ACK ──
-/** A proxy to the executor that, on the FIRST /update, either forwards it and then cuts the connection WITHOUT answering (ack lost), or cuts it before forwarding (request lost). */
-async function lossyProxy(executorUrl, mode) {
-  const state = { updates: 0, forwarded: 0 };
+// ── BF11 exit 4, and BF12 the fence: a proxy in front of the executor that faults ONE update ──
+/**
+ * Counts the script's /update requests and, on the `nth`, either forwards it and then cuts the connection WITHOUT answering (`ack-lost`: the
+ * executor applied it, the script cannot know), or cuts it before forwarding (`request-lost`: it never arrived). `beforeForward(bodyText)` runs
+ * before the nth is forwarded (the fence rows change a node there). The script sends ONE guarded update per node (v2.2 pin 2, A6).
+ */
+async function lossyProxy(executorUrl, { mode = null, nth = 1, beforeForward = null, when = (b) => true } = {}) {
+  const state = { updates: 0, forwarded: 0, bodies: [] };
   const srv = http.createServer(async (req, res) => {
     const chunks = []; for await (const c of req) chunks.push(c);
     const body = Buffer.concat(chunks);
     const isUpdate = req.method === 'POST' && req.url.startsWith('/update');
-    if (isUpdate) state.updates++;
-    if (isUpdate && state.updates === 1 && mode === 'request-lost') { req.socket.destroy(); return; }
+    let faulted = false;
+    if (isUpdate) { state.updates++; state.bodies.push(body.toString('utf8')); faulted = state.updates === nth; }
+    if (faulted && mode === 'request-lost') { req.socket.destroy(); return; }
+    if (isUpdate && beforeForward && when(body.toString('utf8'))) await beforeForward(body.toString('utf8'));
     const up = await fetch(`${executorUrl}${req.url}`, { method: req.method, headers: Object.fromEntries(Object.entries(req.headers).filter(([k]) => !['host', 'connection', 'content-length'].includes(k))), body: body.length ? body : undefined });
     const text = Buffer.from(await up.arrayBuffer());
     if (isUpdate) state.forwarded++;
-    if (isUpdate && state.updates === 1 && mode === 'ack-lost') { req.socket.destroy(); return; }
+    if (faulted && mode === 'ack-lost') { req.socket.destroy(); return; }
     res.writeHead(up.status, { 'content-type': up.headers.get('content-type') ?? 'application/json' }); res.end(text);
   });
   await new Promise((r) => srv.listen(0, '127.0.0.1', r)); owned.servers.add(srv);
   return { url: `http://127.0.0.1:${srv.address().port}`, state, close: () => new Promise((r) => { srv.close(r); owned.servers.delete(srv); }) };
 }
+const servedWithLogAt = async (q) => (await q(`SELECT DISTINCT ?a WHERE { ?a <${LOGAT}> ?o . FILTER(STRSTARTS(STR(?a), "${ACT}seq-")) }`)).map((b) => Number(b.a.value.slice(ACT.length + 4))).sort((a, b) => a - b);
+async function reconciled({ cli, base, report, factsOf }, expectedCurrent, label) {
+  const again = await cli([...base, '--apply']);
+  assert.equal(again.status, 0, `${label}: the re-run is the reconciliation and ends clean (got ${again.status}: ${(again.err || again.out).slice(-300)})`);
+  const j2 = report(again, `${label} reconcile`);
+  assert.equal(j2.written + j2.alreadyCurrent, SERVED_SEQS.length, `${label}: every planned node is accounted for, written now or already current`);
+  assert.equal(j2.alreadyCurrent, expectedCurrent, `${label}: exactly the nodes that had landed are recognised as current, not written again`);
+  for (const s of CARD_SEQS) {
+    const m = await factsOf(node(s));
+    for (const p of [COLUMN_AFTER, HOLDER, LOGAT]) one(m, p, `${label}: seq ${s} after the reconcile`);
+    assert.equal(one(m, COLUMN_AFTER, `seq ${s}`).value, EXPECT[s].column, `${label}: seq ${s} correct`);
+  }
+  for (const s of [...REFUSAL_SEQS, ...COLUMN_SEQS]) one(await factsOf(node(s)), LOGAT, `${label}: seq ${s} after the reconcile`);
+}
 for (const mode of ['ack-lost', 'request-lost']) {
-  test(`#1762 S3 BF11 (${mode}) — the FIRST write's ${mode === 'ack-lost' ? 'ACK is lost after the executor applied it' : 'request is cut before the executor saw it'}: exit 4 with \`apply.uncertain\`, never exit 2, and the re-run reconciles with no fact written twice`, T, async () => {
-    await world(async ({ cliVia, x, base, report, factsOf, cli }) => {
-      const proxy = await lossyProxy(x.baseUrl, mode);
+  test(`#1762 S3 BF11 (${mode}) — the FIRST write's ${mode === 'ack-lost' ? 'ACK is lost after the executor applied it' : 'request is cut before the executor saw it'}: exit 4 with exactly the node in flight in \`apply.uncertain\`, never exit 2, and the re-run reconciles with no fact written twice`, T, async () => {
+    await world(async (w) => {
+      const { cliVia, x, base, report, q } = w;
+      const proxy = await lossyProxy(x.baseUrl, { mode, nth: 1 });
       try {
         const r = await cliVia(proxy.url, [...base, '--apply']);
         assert.ok(proxy.state.updates >= 1, 'PRECONDITION: the script sent an update through the proxy');
         assert.equal(r.status, 4, `a lost ACK on the first write is exit 4, not 2 and not 0 (got ${r.status}: ${(r.err || r.out).slice(-300)})`);
         const j = report(r, mode);
         assert.deepEqual(j.apply?.confirmed, [], 'nothing was ACKed, so nothing is confirmed');
-        assert.ok(Array.isArray(j.apply?.uncertain) && j.apply.uncertain.length >= 1, `the nodes whose ACK was lost are LISTED, never counted as zero (got ${JSON.stringify(j.apply)})`);
-        assert.ok(j.apply.uncertain.every((n) => CARD_SEQS.includes(Number(n))), 'and they are planned nodes');
+        assert.ok(Array.isArray(j.apply?.uncertain) && j.apply.uncertain.length === 1, `exactly the ONE node in flight is uncertain (one update per node), never counted as zero (got ${JSON.stringify(j.apply)})`);
+        assert.ok(SERVED_SEQS.includes(Number(j.apply.uncertain[0])), 'and it is a planned node');
+        assert.equal(proxy.state.updates, 1, 'and the script STOPPED at the first uncertainty: nothing after it was attempted');
+        assert.equal((await servedWithLogAt(q)).length, mode === 'ack-lost' ? 1 : 0, `the store holds ${mode === 'ack-lost' ? 'the one write the executor applied' : 'nothing: the request never arrived'}`);
       } finally { await proxy.close(); }
-      const again = await cli([...base, '--apply']);
-      assert.equal(again.status, 0, `the re-run is the reconciliation and ends clean (got ${again.status}: ${(again.err || again.out).slice(-300)})`);
-      const j2 = report(again, 'reconcile');
-      assert.equal(j2.written + j2.alreadyCurrent, CARD_SEQS.length, 'every planned node is accounted for, written now or already current');
-      if (mode === 'ack-lost') assert.ok(j2.alreadyCurrent >= 1, 'a write the executor DID apply is recognised as current, not written again');
-      for (const s of CARD_SEQS) {
-        const m = await factsOf(node(s));
-        for (const p of [COLUMN_AFTER, HOLDER, LOGAT]) one(m, p, `seq ${s} after the reconcile`);
-        assert.equal(one(m, COLUMN_AFTER, `seq ${s}`).value, EXPECT[s].column, `seq ${s}: and correct`);
-      }
+      await reconciled(w, mode === 'ack-lost' ? 1 : 0, mode);
+    });
+  });
+  test(`#1762 S3 BF11d (${mode}) — a failure AFTER some writes landed (the 3rd node): \`confirmed\` is the nodes before it, \`uncertain\` the one in flight, the rest are unattempted, exit 4; the re-run finishes the job`, T, async () => {
+    await world(async (w) => {
+      const { cliVia, x, base, report, q } = w;
+      const proxy = await lossyProxy(x.baseUrl, { mode, nth: 3 });
+      try {
+        const r = await cliVia(proxy.url, [...base, '--apply']);
+        assert.equal(r.status, 4, `a transport failure after some writes is exit 4 (got ${r.status}: ${(r.err || r.out).slice(-300)})`);
+        const j = report(r, mode);
+        const conf = (j.apply?.confirmed ?? []).map(Number), unc = (j.apply?.uncertain ?? []).map(Number);
+        assert.equal(conf.length, 2, `the two nodes written and ACKed before the failure are confirmed (got ${JSON.stringify(j.apply)})`);
+        assert.equal(unc.length, 1, 'and exactly the one in flight is uncertain');
+        assert.ok(!conf.includes(unc[0]), 'a node is never both');
+        assert.equal(proxy.state.updates, 3, 'the script stopped at the failure: the other nodes were never attempted');
+        assert.equal((await servedWithLogAt(q)).length, mode === 'ack-lost' ? 3 : 2, `the store holds the two confirmed${mode === 'ack-lost' ? ' and the one the executor applied before its ACK was lost' : ''}, and none of the rest`);
+        for (const n of conf) assert.ok((await servedWithLogAt(q)).includes(n), `confirmed node ${n} really is in the store`);
+      } finally { await proxy.close(); }
+      await reconciled(w, mode === 'ack-lost' ? 3 : 2, `${mode} @3`);
     });
   });
 }
 test('#1762 S3 BF11c — uncertainty WINS over refusal: a lost ACK with a bad IRI planted is exit 4, and the refused bucket is still reported', T, async () => {
   await world(async ({ cliVia, x, base, report, upd }) => {
     await upd(planted(`${ACT}seq-abc`));
-    const proxy = await lossyProxy(x.baseUrl, 'ack-lost');
+    const proxy = await lossyProxy(x.baseUrl, { mode: 'ack-lost', nth: 1 });
     try {
       const r = await cliVia(proxy.url, [...base, '--apply']);
       assert.equal(r.status, 4, `exit 4 beats exit 3 (got ${r.status}: ${(r.err || r.out).slice(-300)})`);
       assert.deepEqual(report(r, 'precedence').refused.badIri, [`${ACT}seq-abc`], 'and the refusal is still reported');
+    } finally { await proxy.close(); }
+  });
+});
+
+// ── BF12 the apply-time fence ──
+test('#1762 S3 BF12 — a fact that appears on a node BETWEEN plan and write fences that node: its guarded update changes nothing, it is refused as `mismatch` naming the field, never overwritten and never retried blind; the others are written', T, async () => {
+  await world(async ({ cliVia, x, base, report, upd, factsOf }) => {
+    const proxy = await lossyProxy(x.baseUrl, {
+      beforeForward: () => upd(`INSERT DATA { <${node(4)}> <${COLUMN_AFTER}> "written-by-someone-else" . }`),   // after the plan, just before node 4's update is applied
+      when: (body) => body.includes(node(4)),
+    });
+    try {
+      const r = await cliVia(proxy.url, [...base, '--apply']);
+      assert.equal(r.status, 3, `a fenced node is a refusal, exit 3 (got ${r.status}: ${(r.err || r.out).slice(-300)})`);
+      const j = report(r, 'fence');
+      const got = flat(j, 'fence');
+      assert.deepEqual(got.mismatch, [4], 'node 4 is listed as mismatch');
+      assert.ok(got.mismatchFields[4].includes(LOCAL.column), `naming the fact that changed under it (got ${JSON.stringify(got.mismatchFields[4])})`);
+      const m = await factsOf(node(4));
+      assert.deepEqual((m[COLUMN_AFTER] || []).map((t) => t.value), ['written-by-someone-else'], 'the value that appeared is NOT overwritten');
+      assert.equal(m[HOLDER], undefined, 'and the guarded update was all-or-nothing: none of the node\'s other facts were written either');
+      assert.equal(m[LOGAT], undefined);
+      assert.equal(proxy.state.updates, SERVED_SEQS.length, 'it was never retried blind: one update per node, once each');
+      for (const s of CARD_SEQS.filter((n) => n !== 4)) assert.equal(one(await factsOf(node(s)), COLUMN_AFTER, `seq ${s}`).value, EXPECT[s].column, `seq ${s}: the other nodes were written`);
+      assert.ok(!(j.apply?.confirmed ?? []).map(Number).includes(4), 'and node 4 is not confirmed');
     } finally { await proxy.close(); }
   });
 });
