@@ -1322,6 +1322,9 @@ const convEvent = (conv, actor = null) => ({
 const memoryEvent = (op, identity, actor = null) => ({
   op, actor, entity: { kind: 'memory', id: identity['@id'] }, state: identity,
 });
+// #1762 S1 — a column write's declared actor (#675 `by`, as card edits take it): recorded on the event and the activity, never
+// stored on the column. A value that is not a plain seat key is dropped (the write is then attributed to the board).
+const columnActor = (body) => (body && typeof body.by === 'string' && /^[A-Za-z0-9._~-]{1,100}$/.test(body.by) ? body.by : null);
 const columnEvent = (op, col, actor = null) => ({
   op, actor, entity: { kind: 'column', id: col.id }, state: col,
 });
@@ -11549,7 +11552,7 @@ async function handleCreateColumn(req, res) {
       const order = typeof body.order === 'number' ? body.order : data.columns.length;
       const col = { id, name: body.name.trim(), order };
       data.columns.push(col);
-      writeBoard(data, [columnEvent('create', col)]);
+      writeBoard(data, [columnEvent('create', col, columnActor(body))]);
       return col;
     });
     sendJSON(res, 201, created);
@@ -11597,11 +11600,12 @@ async function handleUpdateColumn(req, res, columnId) {
       const col = data.columns[idx];
       for (const [k, v] of Object.entries(patch)) {
         if (isEchoOfStored(v, col[k])) continue;        // #844 — nothing was attempted
+        if (k === 'by') continue;                       // #1762 S1 — the declared actor (#675), not a column field
         if (k === 'id') { refusedFields.push(k); continue; } // immutable, and now said so
         if (!PATCHABLE_COLUMN_FIELDS.has(k)) { ignoredFields.push(k); continue; } // #299
         col[k] = v;
       }
-      writeBoard(data, [columnEvent('update', col)]);
+      writeBoard(data, [columnEvent('update', col, columnActor(patch))]);
       return col;
     });
     if (!updated) return sendJSON(res, 404, { error: 'Column not found' });
@@ -13502,6 +13506,7 @@ if (CARDS_UNIT) {
   CARDS = createCardsUnit({
     client: createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: 30000, label: 'cards' }),
     mintId: () => crypto.randomUUID(),
+    historyNative: process.env.SCRUM_HISTORY_NATIVE === '1',   // #1762 S1 — each card write commits its activity record; OFF until the S6 switch
   });
   try { await CARDS.load(); } catch (e) {
     console.error(`#1598 cards unit: the cards could not be read from the graph — refusing to serve: ${e.message}`);
@@ -13590,6 +13595,7 @@ if (SMALLKINDS_UNIT) {
     COLLECTIONS = createCollectionsUnit({
       client: createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: 30000, label: 'collections' }),
       families: COLLECTION_FAMILIES, mintId: () => crypto.randomUUID(),
+      historyNative: process.env.SCRUM_HISTORY_NATIVE === '1',   // #1762 S1
     });
     try { await COLLECTIONS.load(); } catch (e) {
       console.error(`#1624 small-kinds unit: the collections could not be read from the graph — refusing to serve: ${e.message}`);
@@ -13633,6 +13639,7 @@ if (COLUMNS_UNIT) {
   COLUMNS = createColumnsUnit({
     client: createGraphClient({ baseUrl: process.env.SCRUM_GRAPH_EXECUTOR_URL, expectedDatasetId: process.env.SCRUM_GRAPH_DATASET_ID, timeoutMs: 30000, label: 'columns' }),
     mintId: () => crypto.randomUUID(),
+    historyNative: process.env.SCRUM_HISTORY_NATIVE === '1',   // #1762 S1
   });
   try { await COLUMNS.load(); } catch (e) {
     console.error(`#1639 columns unit: the columns could not be read from the graph — refusing to serve: ${e.message}`);

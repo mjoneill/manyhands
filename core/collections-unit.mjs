@@ -83,7 +83,12 @@ export class CollectionsUnavailable extends Error {
  * `client` is a graph client. `requires` names the subjects the entity references; a write that sets one guards that it
  * exists. `inherits` names the cached entity whose references this one copies (they count as already held).
  */
-export function createCollectionsUnit({ client, families, mintId, actorIri = (who) => `https://scrumboard.local/person/${encodeURIComponent(who || 'board')}` }) {
+// #1762 S1 — the entityKind an activity record names for a collection family: the projector's (event log's) kind strings,
+// so one query reads projected and native history alike. A family not listed names itself.
+export const FAMILY_ENTITY_KIND = Object.freeze({ columns: 'column', predicates: 'predicate', kinds: 'kind', models: 'model', procedures: 'procedure', runs: 'run', agents: 'agent', agentPrompts: 'agent-prompt', artifacts: 'artifact', tending: 'tending', talks: 'talk', roles: 'role', roleVersions: 'roleVersion', obligations: 'obligation', moveFences: 'moveFence', labelAliases: 'label' });
+const entityHistory = (key, op, entity) => ({ op, entityKind: FAMILY_ENTITY_KIND[key] ?? key, versionAfter: entity && Number.isSafeInteger(entity.version) && entity.version >= 0 ? String(entity.version) : 'unknown' });
+
+export function createCollectionsUnit({ client, families, mintId, actorIri = (who) => `https://scrumboard.local/person/${encodeURIComponent(who || 'board')}`, historyNative = false }) {
   const byKey = new Map(families.map((f) => [f.key, f]));
   /** key → Map(id → { entity, json, ver }) */
   let cache = null;
@@ -136,10 +141,10 @@ export function createCollectionsUnit({ client, families, mintId, actorIri = (wh
         const requires = (fam.requires ? fam.requires(e) : []).filter((r) => !held.has(r));
         const extra = { ...(unique.length ? { unique } : {}), ...(requires.length ? { requires } : {}) };
         parts.push(prev
-          ? { collection: key, iri: id, expectedVersion: String(prev.ver), version: String(prev.ver + 1), quads: entityQuads(e), prior: entityQuads(prev.entity), json, ...extra }
-          : { collection: key, iri: id, expectedVersion: null, version: '1', quads: entityQuads(e), json, ...extra });
+          ? { collection: key, iri: id, expectedVersion: String(prev.ver), version: String(prev.ver + 1), quads: entityQuads(e), prior: entityQuads(prev.entity), json, ...extra, ...(historyNative ? { history: entityHistory(key, 'update', e) } : {}) }
+          : { collection: key, iri: id, expectedVersion: null, version: '1', quads: entityQuads(e), json, ...extra, ...(historyNative ? { history: entityHistory(key, 'create', e) } : {}) });
       }
-      for (const [id, prev] of was) if (!seen.has(id)) parts.push({ collection: key, iri: id, remove: true, expectedVersion: String(prev.ver), prior: entityQuads(prev.entity) });
+      for (const [id, prev] of was) if (!seen.has(id)) parts.push({ collection: key, iri: id, remove: true, expectedVersion: String(prev.ver), prior: entityQuads(prev.entity), ...(historyNative ? { history: entityHistory(key, 'delete', prev.entity) } : {}) });
     }
     return parts;
   }
