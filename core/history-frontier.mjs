@@ -45,10 +45,18 @@ export function classifyFrontier(bindings) {
     elsewhere++;   // F in the default graph or another named graph
   }
   // the marker is read in every outcome, "absent" included: a store whose identity cannot be read cannot confirm anything
-  const mOne = (p) => { const v = marker[p] || []; if (v.length !== 1) throw unavailable(`${p} has ${v.length} values`); return v[0].value; };
-  const mk = { epoch: mOne('urn:ex:epoch'), incarnation: mOne('urn:ex:incarnation'), commitSeq: mOne('urn:ex:commitSeq') };
-  if (!safeInt(mk.epoch) || !safeInt(mk.commitSeq)) throw unavailable(`epoch ${mk.epoch} / commitSeq ${mk.commitSeq} are not safe integers`);
-  mk.commitSeq = Number(mk.commitSeq);
+  // every marker field: exactly ONE term, of the right KIND and datatype, in range — read before any outcome, absent F included
+  const mOne = (p) => { const v = marker[p] || []; if (v.length !== 1) throw unavailable(`${p} has ${v.length} values`); return v[0]; };
+  const intField = (p, min) => {
+    const t = mOne(p);
+    if (!isInt(t) || Number(t.value) < min) throw unavailable(`${p} must be one xsd:integer of at least ${min} (got ${t.type === 'uri' ? 'an IRI' : JSON.stringify(t.value)})`);
+    return Number(t.value);
+  };
+  const incT = mOne('urn:ex:incarnation');
+  if (incT.type === 'uri' || !/^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{32})$/i.test(incT.value)) {
+    throw unavailable(`urn:ex:incarnation must be one literal in UUID or 32-hex form (got ${incT.type === 'uri' ? 'an IRI' : JSON.stringify(incT.value)})`);
+  }
+  const mk = { epoch: intField('urn:ex:epoch', 1), incarnation: incT.value, commitSeq: intField('urn:ex:commitSeq', 0) };
   const fTriples = Object.values(f).reduce((n, v) => n + v.length, 0);
   if (!fTriples && !elsewhere) return { state: 'absent', marker: mk };
   if (elsewhere) return { state: 'invalid', reason: 'the frontier also appears outside the bookkeeping graph (two frontiers)' };

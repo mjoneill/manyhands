@@ -9340,9 +9340,22 @@ async function handleChangesFromGraph(res, { q, from, F, marker, histQuery, conv
   if (!history) native = native.filter((r) => r.graph.nativeOp !== 'reproject');
   // ONE ROW PER (opId, part): a log-born write records both a receipt (the feed row) and its native activity; the native part
   // carries the provenance, so the receipt row for an opId that has native parts is not served again. Different parts stay.
-  const nativeOps = new Set(native.map((r) => r.graph.opId));
-  const feed = page.graph.rows.filter((r) => !(r.graph && nativeOps.has(r.graph.opId)));
-  const graphRows = [...feed, ...native, ...page.refusals].filter((r) => inWindow(r.at));
+  // A POST keeps its feed row: the conversations unit's row is the authoritative one, carrying the payload and the redaction
+  // semantics, so the native provenance is folded INTO it (part, nativeOp) and the content-free native duplicate is dropped.
+  // Every other kind keeps the native row, and its receipt row is not served again.
+  const nativeByOp = new Map();
+  for (const r of native) (nativeByOp.get(r.graph.opId) || nativeByOp.set(r.graph.opId, []).get(r.graph.opId)).push(r);
+  const foldedNative = new Set();
+  const feed = [];
+  for (const r of page.graph.rows) {
+    const twins = r.graph ? nativeByOp.get(r.graph.opId) : null;
+    if (!twins) { feed.push(r); continue; }
+    if (r.kind !== 'conversation') continue;                                   // the native row stands in for a non-post receipt
+    const twin = twins.find((t) => t.kind === 'conversation' && t.id === r.id) ?? twins[0];
+    foldedNative.add(twin);
+    feed.push({ ...r, graph: { ...r.graph, part: twin.graph.part, nativeOp: twin.graph.nativeOp } });
+  }
+  const graphRows = [...feed, ...native.filter((r) => !foldedNative.has(r)), ...page.refusals].filter((r) => inWindow(r.at));
   const legacy = page.legacy.filter((ev) => inWindow(ev.recorded_at));
   const result = queryChangesFromLog(legacy, {
     redactedPostIds: page.redactedPostIds,
