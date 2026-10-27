@@ -54,6 +54,7 @@ const EXTRA_PREDICATES = ['scrum:sourceDigest', 'scrum:postSeq', 'scrum:inCollec
 const DECLARED_SINCE_GOLDEN = [
   'scrum:MoveFence', 'scrum:fencedMove', 'scrum:fencedAt',   // #1707 — the move fences
   'scrum:LabelAlias', 'scrum:aliasLabel', 'scrum:canonicalLabel',   // #1640 — label aliases as records
+  'scrum:TendingWindowReservation',   // #1786 — the whisper send guard's per-window reservation
   'scrum:ChannelConfig', 'scrum:channelMode', 'scrum:softMinMs', 'scrum:softMaxMs', 'scrum:hardTimeoutMs', 'scrum:tokenRingTimeoutMs',
   'scrum:bearerSeat', 'scrum:residentReplyWakesPerPairPerHour', 'scrum:configImportedFrom', 'scrum:configImportedAt',   // #1784 — the channel config node
 ];

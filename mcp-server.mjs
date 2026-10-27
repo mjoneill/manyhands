@@ -51,7 +51,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createChannelScheduler } from './core/channel-scheduler.mjs';
 import { deliveryStaleMs, classifyDeliveries, boundedResidentReader } from './core/delivery.mjs';   // #1346
-import { mintOnce, claimWindow, readPool, writePool, recentWhispers } from './whisper-store.mjs';
+// #1786 — the whisper guards are GRAPH state (REST: /api/tending/windows, /api/tending/claims); this process keeps no
+// whisper-state.json and reads no whisper-pool.json. Only the pure prompt pick is local.
+import { mintFromPool } from './whisper-store.mjs';
 import { tendingTick, lastQualifyingActivity } from './core/tending-tick.mjs';
 import { validateTendingConfig, DEFAULT_TENDING_CONFIG } from './tending-config.mjs';
 // #1785 — the tending switch and quiet threshold are GRAPH state (TendingState), read through REST, never from a file. A cached
@@ -1306,25 +1308,22 @@ function buildMcpServer() {
     // that ARRIVED on time but settled slowly read as late.
     const receivedAt = new Date().toISOString();
     try {
-      return jsonResult(claimWindow({
-        seat,
-        prompt: { window },
-        now: receivedAt,
-        receivedAt,
-        reached: liveSeats(),
-        // #804 — one structured line per attempt, refusals included, stamped by
-        // the SERVER's clock. This is the only clock in the room no seat can be
-        // wrong about, and the ≤10s contention criterion is computed from these
-        // and nothing else. Deliberately carries no prompt content and no
-        // session id.
-        onAttempt: (a) => console.log(
-          `[#804] event=tending.claim_attempt receivedAt=${a.receivedAt}`
-          + ` completedAt=${a.completedAt}`
-          + ` demoAttemptId=${process.env.MCP_DEMO_ATTEMPT_ID ?? 'none'}`
-          + ` seat=${a.seat} key=${a.key} outcome=${a.outcome}`
-          + ` reason=${a.reason} heldBy=${a.heldBy ?? 'null'}`,
-        ),
-      }));
+      // #1786 — settled by REST under its write lock (one grant per window across every process), not in this process
+      const r = await claimApiCall('POST', '/api/tending/claims', { seat, window, receivedAt, reached: liveSeats() });
+      // #804 — one structured line per attempt, refusals included, stamped by
+      // the SERVER's clock. This is the only clock in the room no seat can be
+      // wrong about, and the ≤10s contention criterion is computed from these
+      // and nothing else. Deliberately carries no prompt content and no
+      // session id.
+      console.log(
+        `[#804] event=tending.claim_attempt receivedAt=${receivedAt}`
+        + ` completedAt=${new Date().toISOString()}`
+        + ` demoAttemptId=${process.env.MCP_DEMO_ATTEMPT_ID ?? 'none'}`
+        + ` seat=${seat} key=${window} outcome=${r.granted ? 'granted' : 'refused'}`
+        + ` reason=${r.reason} heldBy=${r.granted ? 'null' : (r.heldBy ?? 'null')}`,
+      );
+      if (r.status === 400) return jsonResult({ granted: false, reason: 'invalid', error: r.error });
+      return jsonResult(r);
     } catch (e) {
       return jsonResult({ granted: false, reason: 'invalid', error: String(e?.message ?? e) });
     }
@@ -1340,8 +1339,13 @@ function buildMcpServer() {
     },
   }, async ({ prompts } = {}) => {
     try {
-      const pool = prompts ? writePool(prompts) : readPool();
-      return jsonResult({ pool, history: recentWhispers().slice(-24) });
+      // #1786 — the pool is the graph's tending prompts and the history is the graph's grants, both read through REST.
+      // A rewrite here used to write whisper-pool.json, which nothing has read since the pool moved to the graph (#1189):
+      // a seat's edit would have silently changed nothing. So it refuses and names the route that does edit the pool.
+      if (prompts) return jsonResult({ error: 'whisper_pool no longer rewrites the pool: edit the prompts in Settings, or through POST /api/tending/whispers (create), PATCH /api/tending/whispers/<slug> (edit) and POST /api/tending/order (order)' });
+      const graph = await apiCall('GET', '/api/tending/whispers');
+      const { history } = await apiCall('GET', '/api/tending/claims?limit=24');
+      return jsonResult({ pool: (graph?.whispers ?? []).filter((w) => w.enabled !== false).map((w) => w.body), history });
     } catch (e) {
       return jsonResult({ error: String(e?.message ?? e) });
     }
@@ -2734,14 +2738,23 @@ const whisperTick = async () => {
     },
     // The pool and the shuffle flag both come from the graph, per firing, so a
     // change made in Settings applies to the very next tick.
-    mint: ({ now: n }) => mintOnce({
-      now: n, pool: poolEntries, shuffle: graphPool?.shuffle === true,
-      // The running position, derived from the last mint — so "in the order
-      // below" resumes after the whisper that actually went out last.
-      lastVersionId: graphPool?.lastVersionId ?? null,
-      // #1384 — where the shuffle-bag stands, so shuffle deals instead of draws.
-      bag: graphPool?.bag ?? null,
-    }),
+    // #1786 — PICK (pure), then RESERVE the window in the graph: REST answers 201 to the first reservation of a window
+    // and 409 to every later one, from any process, so a window is sent at most once. Not the mint: the TendingMint is
+    // recorded after delivery (onMinted), so a reservation whose post fails burns the window without claiming a firing.
+    mint: async ({ now: n }) => {
+      const prompt = mintFromPool({
+        now: n, pool: poolEntries, shuffle: graphPool?.shuffle === true,
+        // The running position, derived from the last mint — so "in the order
+        // below" resumes after the whisper that actually went out last.
+        lastVersionId: graphPool?.lastVersionId ?? null,
+        // #1384 — where the shuffle-bag stands, so shuffle deals instead of draws.
+        bag: graphPool?.bag ?? null,
+      });
+      if (!prompt) return null;
+      try { await apiCall('POST', '/api/tending/windows', { window: prompt.window, by: 'board' }); }
+      catch (e) { if (/HTTP 409\b/.test(String(e?.message))) return null; throw e; }   // 409: already sent this window
+      return prompt;
+    },
     post: (body) => apiCall('POST', '/api/conversations', body),
     // #1189 — every firing becomes a graph fact. Best-effort and AFTER the
     // post: the whisper reaching the room is the deliverable, and a mint that

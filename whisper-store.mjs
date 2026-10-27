@@ -204,7 +204,8 @@ export function recentWhispers(file = whisperStateFilePath()) {
  * whisper can be drawn and rejected afterwards — that failure would be
  * intermittent and read as a ghost.
  */
-function mintFromPool({ pool, now, periodMs, shuffle, rand, lastVersionId, bag = null }) {
+// #1786 — exported as the PURE pick: the MCP picks here, then reserves the window in the graph (POST /api/tending/windows)
+export function mintFromPool({ pool, now, periodMs = HOUR_MS, shuffle = false, rand = Math.random, lastVersionId = null, bag = null }) {
   const window = windowAt(now, periodMs);
   const items = (Array.isArray(pool) ? pool : [])
     .map((p) => (typeof p === 'string'
