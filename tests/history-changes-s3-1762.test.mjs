@@ -383,7 +383,7 @@ test('#1762 S3 CH8 — a chg3 minted BEFORE F is answered across F; a forward lo
   const parts = first.nextBefore.split('.');                         // chgb4.<cardsLog>.<postsLog>.<inc>.<epoch>.<graph>.<graphPosts>  (or chgb3 without graphPosts)
   assert.match(parts[0], /^chgb[34]$/, `PRECONDITION: a backward token (got ${first.nextBefore})`);
   parts[1] = String(W.K + 1);
-  const sentinel = await W.get(`/api/changes?before=${encodeURIComponent(parts.join('.'))}&history=true`);
+  const sentinel = await W.get(`/api/changes?since=${SINCE_ALL}&before=${encodeURIComponent(parts.join('.'))}&history=true`);   // `before` alone is refused today ("an unbounded read"): the window is still named
   assert.notEqual(sentinel.status, 409, 'the FORWARD rule must not reject the backward sentinel F.logSeq + 1');
   assert.equal(sentinel.status, 200, `it is a legal exclusive bound meaning "every pre-F row" (got ${sentinel.status}: ${sentinel.text.slice(0, 200)})`);
 });
@@ -423,12 +423,13 @@ test('#1762 S3 CH11 — after F, each card write is served from the graph as a N
     assert.equal(r.op, op, `${nativeOp}: op is the MAPPED value (create→create, update/move/claim/release→update, delete→delete)`);
     assert.equal(typeof r.graph.opId, 'string'); assert.ok(r.graph.opId.length > 0);
     assert.ok(Number.isInteger(r.graph.commitSeq) && r.graph.commitSeq > lastCommit, `${nativeOp}: commitSeq is an integer past F.commitSeq and past the previous write (${r.graph.commitSeq} > ${lastCommit})`);
-    assert.ok(Number.isInteger(r.graph.version) && r.graph.version > lastVersion, `${nativeOp}: version is an integer that only grows`);
+    if (nativeOp === 'delete') assert.equal(r.graph.version, lastVersion, 'delete: the version is the card\'s LAST version (contract: a delete\'s versionAfter is the last version, there is no next one)');
+    else assert.ok(Number.isInteger(r.graph.version) && r.graph.version > lastVersion, `${nativeOp}: version is an integer that grows with each authored write`);
     assert.equal(r.graph.part, 0, `${nativeOp}: a single-entity write is part 0`);
     assert.equal(r.title, null, `${nativeOp}: title is null on a graph row`);
     assert.equal(r.by, 'ada'); assert.equal(r.kind, 'card'); assert.equal(r.id, card.id); assert.equal(r.shortId, card.shortId, `${nativeOp}: shortId is a number`);
     assert.equal(r.holder, holder, `${nativeOp}: holder is the holder BEFORE the write`);
-    assert.equal(r.column, steps[i][1], `${nativeOp}: column is what the board reported after the write (null once deleted)`);
+    assert.equal(r.column, nativeOp === 'delete' ? steps[i - 1][1] : steps[i][1], `${nativeOp}: column is what the board reported after the write${nativeOp === 'delete' ? ' (a tombstone keeps the card\'s last column, as the log path always did)' : ''}`);
     assert.ok(Date.parse(r.at) >= Date.parse(t0) - 1000, `${nativeOp}: at is the write's own time`);
     lastCommit = r.graph.commitSeq; lastVersion = r.graph.version;
   });
@@ -496,7 +497,7 @@ test('#1762 S3 CH15 — walking BACKWARD page by page, every native row is serve
   for (let guard = 0; guard < 60; guard++) {
     pages.push(page.changes.filter((r) => r.graph));
     if (!page.nextBefore) break;
-    const r = await W.get(`/api/changes?before=${encodeURIComponent(page.nextBefore)}&history=true&limitCards=2`);
+    const r = await W.get(`/api/changes?since=${encodeURIComponent(t0)}&before=${encodeURIComponent(page.nextBefore)}&history=true&limitCards=2`);
     assert.equal(r.status, 200, `walking back answers (${r.status}: ${r.text.slice(0, 200)})`); page = r.json;
   }
   assert.ok(pages.length >= 3, `PRECONDITION: the history needed several pages (got ${pages.length})`);
@@ -535,11 +536,12 @@ test('#1762 S3 CH16 — a `reproject` part (a card re-written only because a #N 
   const createRow = history.changes.find((r) => r.id === created.json.id && r.graph?.nativeOp === 'create');
   assert.equal(rp.graph.commitSeq, createRow?.graph?.commitSeq, 'and it rides the create\'s own commit');
   assert.notEqual(rp.graph.part, createRow?.graph?.part, 'as a different part');
-  assert.equal(history.totals.cards, history.changes.length, 'with history:true the derived part is counted');
+  const bucket = (rows) => rows.filter((r) => r.kind !== 'conversation' && r.kind !== 'post' && r.op !== 'post');   // post rows are counted in totals.posts, not totals.cards
+  assert.equal(history.totals.cards, bucket(history.changes).length, 'with history:true the derived part is counted');
   assert.ok(!defaultMode.changes.some((r) => r.graph?.nativeOp === 'reproject'), 'by default a reproject part is not served ...');
   const latest3 = defaultMode.changes.find((r) => r.id === holder);
   assert.equal(latest3?.graph?.nativeOp, 'update', '... it is never #3\'s latest row: that is its own last authored write, the edit');
-  assert.equal(defaultMode.totals.cards, defaultMode.changes.length, 'and is not counted in totals');
+  assert.equal(defaultMode.totals.cards, bucket(defaultMode.changes).length, 'and is not counted in totals');
   assert.equal(mine(defaultMode.changes).length, 2, 'the entities #3 and the new card, once each');
 });
 
