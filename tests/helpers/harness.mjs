@@ -210,6 +210,30 @@ export async function spawnBoardServer({ env = {}, args = ['server.js'], cwd = P
 }
 
 /**
+ * #1796 — retry a test's WHOLE start when a port it chose UP FRONT was taken before its server bound it.
+ *
+ * The harness retries an unspecified port (#1140) and a REST+MCP pair (#1377), and deliberately never retries an EXPLICIT port inside
+ * one start: the caller chose it. A test that must choose a port first (REST needs the MCP's notify URL before the MCP exists) owns
+ * the whole sequence, so the only honest retry is the sequence: stop what the attempt started, choose fresh ports, go again. That is
+ * `startPair`'s rule, made available to a caller that is not a pair (`#1396 s2` died on CI with no retry, 2026-10-27).
+ *
+ * `attemptFn(attempt)` must clean up after ITSELF when it throws (try/finally, or a helper that does, like `withBrowserServer`): this
+ * only decides whether to run it again. It retries ONLY the harness's own contention error (PORT_CONTENDED, the text `startOnPort`
+ * emits); any other failure, an assertion above all, is rethrown at once and unchanged. Bounded by START_ATTEMPTS.
+ */
+export const PORT_CONTENDED = /lost the allocation race/;
+export async function retryOnPortContention(attemptFn, { attempts = START_ATTEMPTS } = {}) {
+  let last = null;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try { return await attemptFn(attempt); } catch (e) {
+      if (!PORT_CONTENDED.test(String(e && e.message))) throw e;
+      last = e;
+    }
+  }
+  throw new Error(`${last.message}\n— attempt ${attempts}/${attempts}: a port chosen up front was taken before its server bound it (#1796)`);
+}
+
+/**
  * Start an isolated REST server (server.js) on a free port with a temp board
  * file. Returns { baseUrl, boardFile, readBoardFile, stop }.
  */
