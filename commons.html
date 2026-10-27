@@ -658,13 +658,20 @@
     const maxStamp = (cur, rows, key) => rows.reduce((m, r) => (typeof r[key] === 'string' && (!m || r[key] > m) ? r[key] : m), cur);
     const raiseRow = (m) => m && typeof m.attachedTo === 'string' && m.attachedTo
       && (RAISE_RE.test(m.body || '') || RESOLVE_RE.test(m.body || ''));
+    // #1795 — the FAILURE path of the boot read. A full read that failed (a 503 under load) left convoSince unset, so every
+    // 8 s tick started ANOTHER whole-corpus read; each outlasted the interval, they piled up, the executor saturated, and the
+    // reads kept failing (measured 2026-10-27 01:20–01:38Z: one tab, 64 full reads at 30–90 s each). So: one refresh at a
+    // time, an error reply is an error (never "zero posts"), and a failed boot read backs off (16 s, doubling, ≤ 5 min).
+    let blockedBusy = false, blockedBackoffMs = 0, blockedRetryAt = 0;
     async function refreshBlocked() {
+      if (blockedBusy || Date.now() < blockedRetryAt) return;
+      blockedBusy = true;
       try {
         let changed = false;
         if (!blocked.loaded || !blocked.convoSince || !blocked.cardSince) {
           if (useFeed) blocked.convoCursor = await feedTip();   // the tip FIRST, then the full read
           const [convos, cards] = await Promise.all([
-            fetch('/api/conversations').then((r) => r.json()),
+            fetch('/api/conversations').then((r) => { if (!r.ok) throw new Error(`conversations ${r.status}`); return r.json(); }),
             fetchCardSummaries(),
           ]);
           const rows = Array.isArray(convos) ? convos : [];
@@ -697,13 +704,18 @@
           blocked.convoSince = maxStamp(blocked.convoSince, Array.isArray(convos) ? convos : [], 'createdAt');
           blocked.cardSince = maxStamp(blocked.cardSince, cards, 'updatedAt');
         }
+        blockedBackoffMs = 0;   // the reads answered: a later failure starts its backoff from 16 s again
         if (!changed) return;
         const cardById = blocked.cards;
         const raises = openRaises([...blocked.convos.values()], cardById);
         blockedToggle.textContent = `🚧 Raised hands · ${raises.length}`;
         blockedToggle.classList.toggle('has-items', raises.length > 0);
         renderBlocked(raises, cardById);
-      } catch (_) { /* offline — leave last state */ }
+      } catch (_) {
+        // offline or refused — leave last state, and wait longer before trying again (never a retry every tick)
+        blockedBackoffMs = Math.min(blockedBackoffMs ? blockedBackoffMs * 2 : 16000, 300000);
+        blockedRetryAt = Date.now() + blockedBackoffMs;
+      } finally { blockedBusy = false; }
     }
     refreshBlocked();
     setInterval(refreshBlocked, 8000);
