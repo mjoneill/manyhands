@@ -24,6 +24,8 @@
  *   CH7  an invalid F is refused even when the window holds no rows (a store with literally no activity rows is not built here)
  *   CH8  tokens: a chg3 minted BEFORE F is answered across F; a forward log half beyond F.logSeq is 409 CURSOR_BEYOND_FRONTIER; the backward
  *        sentinel cardsLog = F.logSeq + 1 is LEGAL (the forward rule must not reject it)
+ *   CH11 after F, each card write (create, move, claim, edit, release, delete) is a NATIVE graph row: seq null, graph {opId,commitSeq,version,part,nativeOp},
+ *        op mapped, holder before the write, title null, each exactly once; a delete needs no live entity; default latest-per-entity vs history:true
  *   CH9  the executor unreachable is a 503 (CARDS_UNAVAILABLE today, GRAPH_EXECUTOR_UNAVAILABLE in the contract), never a log-only answer
  *
  * ── NOT IN THIS FILE (part 2, and why) ─────────────────────────────────────────────────────────────────────────────────────────
@@ -150,6 +152,11 @@ async function build() {
     const text = await r.text(); let json = null; try { json = JSON.parse(text); } catch { /* not json */ }
     return { status: r.status, text, json };
   };
+  const send = async (method, route, payload) => {
+    const r = await fetch(`${rest.baseUrl}${route}`, { method, headers: { authorization: `Bearer ${TOK}`, ...(payload ? { 'content-type': 'application/json' } : {}) }, ...(payload ? { body: JSON.stringify(payload) } : {}), signal: AbortSignal.timeout(60000) });
+    const text = await r.text(); let json = null; try { json = JSON.parse(text); } catch { /* not json */ }
+    return { status: r.status, text, json };
+  };
   const health = async () => (await fetch(`${w.exec.baseUrl}/health`)).json();
   const hex = (incarnation) => String(incarnation).replace(/-/g, '').toLowerCase();
   const clearFrontier = async () => update(`DELETE WHERE { GRAPH <${BK}> { <${FR}> ?p ?o } } ; DELETE WHERE { <${FR}> ?p ?o }`);
@@ -166,7 +173,7 @@ async function build() {
     await update(`INSERT DATA { GRAPH <${BK}> { ${triples.join('\n')} } ${extra} }`);
     return { h };
   };
-  W = { w, rest, get, q, update, health, hex, plantFrontier, clearFrontier, evdir, TOK, exec: w.exec, events: logEvents, K: logEvents.at(-1).seq };
+  W = { w, rest, get, send, q, update, health, hex, plantFrontier, clearFrontier, evdir, TOK, exec: w.exec, events: logEvents, K: logEvents.at(-1).seq };
 }
 
 before(async () => { if (HAVE_PY) await build(); }, { timeout: 240000 });
@@ -363,6 +370,75 @@ test('#1762 S3 CH8 — a chg3 minted BEFORE F is answered across F; a forward lo
   const sentinel = await W.get(`/api/changes?before=${encodeURIComponent(parts.join('.'))}&history=true`);
   assert.notEqual(sentinel.status, 409, 'the FORWARD rule must not reject the backward sentinel F.logSeq + 1');
   assert.equal(sentinel.status, 200, `it is a legal exclusive bound meaning "every pre-F row" (got ${sentinel.status}: ${sentinel.text.slice(0, 200)})`);
+});
+
+// ── CH11 native post-F rows ──
+/** the writes a user makes AFTER F: create, move, claim, an edit while held, release, delete. Returns the card and the column the board reported after each. */
+async function nativeLifecycle(label) {
+  const created = await W.send('POST', '/api/cards', { title: `native ${label}`, description: 'first', createdBy: 'ada' });
+  assert.equal(created.status, 201, `PRECONDITION: create (${created.status} ${created.text.slice(0, 200)})`);
+  const card = created.json;
+  const colOf = async () => (await W.send('GET', `/api/cards/${card.id}`)).json?.column;
+  const steps = [['create', await colOf()]];
+  const ok = (r, what) => assert.ok(r.status >= 200 && r.status < 300, `PRECONDITION: ${what} (${r.status} ${r.text.slice(0, 200)})`);
+  ok(await W.send('PATCH', `/api/cards/${card.id}`, { column: 'in-progress', by: 'ada' }), 'move'); steps.push(['move', await colOf()]);
+  ok(await W.send('POST', `/api/cards/${card.id}/claim`, { by: 'ada' }), 'claim'); steps.push(['claim', await colOf()]);
+  ok(await W.send('PATCH', `/api/cards/${card.id}`, { description: 'second', by: 'ada' }), 'edit'); steps.push(['update', await colOf()]);
+  ok(await W.send('DELETE', `/api/cards/${card.id}/claim`, { by: 'ada' }), 'release'); steps.push(['release', await colOf()]);
+  ok(await W.send('DELETE', `/api/cards/${card.id}?by=ada`), 'delete'); steps.push(['delete', null]);
+  return { card, steps };
+}
+const NATIVE_EXPECT = [   // nativeOp, mapped op, the holder BEFORE the write
+  ['create', 'create', null], ['move', 'update', null], ['claim', 'update', null], ['update', 'update', 'ada'], ['release', 'update', 'ada'], ['delete', 'delete', null],
+];
+test('#1762 S3 CH11 — after F, each card write is served from the graph as a NATIVE row: seq null, graph {opId, commitSeq, version, part, nativeOp}, op mapped, holder before the write, title null; none twice', T, async () => {
+  const { h } = await W.plantFrontier();
+  const t0 = new Date(Date.now() - 2000).toISOString();
+  const { card, steps } = await nativeLifecycle('lifecycle');
+  const rows = (await changesOf(`since=${encodeURIComponent(t0)}&history=true`)).changes.filter((r) => r.id === card.id);
+  assert.equal(rows.length, NATIVE_EXPECT.length, `one row per write, exactly once each (the event log may also hold a line per write; a graph read must not serve both): got ${JSON.stringify(rows.map((r) => r.graph?.nativeOp))}`);
+  let lastCommit = Number(h.commitSeq), lastVersion = 0;
+  rows.forEach((r, i) => {
+    const [nativeOp, op, holder] = NATIVE_EXPECT[i];
+    assert.deepEqual(sorted(Object.keys(r).filter((k) => k !== 'unknown')), ROW_KEYS, `${nativeOp}: the keys`);
+    assert.equal(r.seq, null, `${nativeOp}: a native row has no log seq`);
+    assert.deepEqual(sorted(Object.keys(r.graph || {})), ['commitSeq', 'nativeOp', 'opId', 'part', 'version'], `${nativeOp}: graph carries exactly its provenance`);
+    assert.equal(r.graph.nativeOp, nativeOp, `${nativeOp}: the unmapped op is kept so the distinction is not lost`);
+    assert.equal(r.op, op, `${nativeOp}: op is the MAPPED value (create→create, update/move/claim/release→update, delete→delete)`);
+    assert.equal(typeof r.graph.opId, 'string'); assert.ok(r.graph.opId.length > 0);
+    assert.ok(Number.isInteger(r.graph.commitSeq) && r.graph.commitSeq > lastCommit, `${nativeOp}: commitSeq is an integer past F.commitSeq and past the previous write (${r.graph.commitSeq} > ${lastCommit})`);
+    assert.ok(Number.isInteger(r.graph.version) && r.graph.version > lastVersion, `${nativeOp}: version is an integer that only grows`);
+    assert.equal(r.graph.part, 0, `${nativeOp}: a single-entity write is part 0`);
+    assert.equal(r.title, null, `${nativeOp}: title is null on a graph row`);
+    assert.equal(r.by, 'ada'); assert.equal(r.kind, 'card'); assert.equal(r.id, card.id); assert.equal(r.shortId, card.shortId, `${nativeOp}: shortId is a number`);
+    assert.equal(r.holder, holder, `${nativeOp}: holder is the holder BEFORE the write`);
+    assert.equal(r.column, steps[i][1], `${nativeOp}: column is what the board reported after the write (null once deleted)`);
+    assert.ok(Date.parse(r.at) >= Date.parse(t0) - 1000, `${nativeOp}: at is the write's own time`);
+    lastCommit = r.graph.commitSeq; lastVersion = r.graph.version;
+  });
+  assert.equal(new Set(rows.map((r) => `${r.graph.opId}/${r.graph.part}`)).size, rows.length, 'no (opId, part) is served twice');
+});
+
+test('#1762 S3 CH11b — a delete AFTER F answers with no live entity: op delete, the id and shortId from the activity alone, title null', T, async () => {
+  await W.plantFrontier();
+  const t0 = new Date(Date.now() - 2000).toISOString();
+  const created = (await W.send('POST', '/api/cards', { title: 'native to be deleted', description: 'x', createdBy: 'ada' })).json;
+  assert.equal((await W.send('DELETE', `/api/cards/${created.id}?by=ada`)).status < 300, true, 'PRECONDITION: the delete applied');
+  assert.equal((await W.send('GET', `/api/cards/${created.id}`)).status, 404, 'PRECONDITION: the card no longer exists, so nothing can be joined to it');
+  const del = (await changesOf(`since=${encodeURIComponent(t0)}&history=true`)).changes.find((r) => r.id === created.id && r.op === 'delete');
+  assert.ok(del, 'the delete is a row with no live entity to join to');
+  assert.equal(del.shortId, created.shortId); assert.equal(del.title, null); assert.equal(del.graph?.nativeOp, 'delete');
+});
+
+test('#1762 S3 CH11c — default latest-per-entity: after several native writes the entity appears ONCE with its last op; history:true serves them all', T, async () => {
+  await W.plantFrontier();
+  const t0 = new Date(Date.now() - 2000).toISOString();
+  const { card } = await nativeLifecycle('latest');
+  const latest = (await changesOf(`since=${encodeURIComponent(t0)}`)).changes.filter((r) => r.id === card.id);
+  assert.equal(latest.length, 1, `latest-per-entity: one row for the entity (got ${latest.length})`);
+  assert.equal(latest[0].op, 'delete', 'and it is the LAST write');
+  const all = (await changesOf(`since=${encodeURIComponent(t0)}&history=true`)).changes.filter((r) => r.id === card.id);
+  assert.equal(all.length, NATIVE_EXPECT.length, 'history:true serves every write');
 });
 
 // ── CH9 ──
